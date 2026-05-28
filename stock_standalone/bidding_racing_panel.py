@@ -1448,6 +1448,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
         # 如果处于启动保护期，不保存 (防止覆盖已恢复的值)
         if hasattr(self, '_boot_lock') and self._boot_lock:
             return 
+        # 如果主面板正在关闭，避免重复写入磁盘引起卡顿
+        if getattr(self, '_is_main_closing', False):
+            return
             
         try:
             widths = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
@@ -2060,6 +2063,9 @@ class CategoryDetailDialog(QDialog, WindowMixin):
     def _save_header_state(self):
         if hasattr(self, '_boot_lock') and self._boot_lock:
             return 
+        # 如果主面板正在关闭，避免重复写入磁盘引起卡顿
+        if getattr(self, '_is_main_closing', False):
+            return
         try:
             widths = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
             if sum(widths) < 100: return
@@ -4348,8 +4354,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if hasattr(self.pie_widget, '_timer') and self.pie_widget._timer:
                 try:
                     self.pie_widget._timer.stop()
-                    self.pie_widget._timer.deleteLater()
-                    self.pie_widget._timer = None
                 except: pass
             
         # 1. 强制执行一次安全的原子持久化
@@ -4357,16 +4361,19 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._save_ui_state(force=True)
         except: pass
         
-        # 2. 批量静默关闭子窗
-        for child in list(self._detail_dialogs.values()):
+        # 2. 批量静默关闭子窗，并断开连接，清空强引用，防止悬空槽函数回调
+        for k, child in list(self._detail_dialogs.items()):
             try:
+                try:
+                    self.data_updated.disconnect(child.refresh_data)
+                except: pass
+                # 设置主面板关闭标志，避免子窗 close 时重复且冗余地执行物理磁盘存盘
+                child._is_main_closing = True
                 if not child.isHidden():
                     child.close()
+                child.deleteLater()
             except: pass
-        # 2️⃣ 强制处理一次事件队列（关键）
-        from PyQt6.QtWidgets import QApplication
-        QApplication.processEvents()
-
+        self._detail_dialogs.clear()
 
         self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
         
@@ -4386,15 +4393,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"❌ Process close error: {e}")
 
-        # ✅ 发射关闭信号
-        self.closed.emit()
-        
         # [⭐ 权限回收] 彻底关闭后台自动联动，防止灵异切换
         if hasattr(self, 'detector') and self.detector:
             self.detector.enable_background_linkage = False
             logger.info("📡 Racing Panel: Background Linkage REVOKED.")
             
         super().closeEvent(event)
+
+        # ✅ 发射关闭信号 (在 super().closeEvent 执行完毕之后，确保状态完全物理切断后再做通知)
+        self.closed.emit()
         
         # ✅ 关键：允许 Qt 删除对象
         self.deleteLater()
@@ -4463,6 +4470,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 4️⃣ 采集详情窗口状态
             # ==============================
             open_windows = []
+            sub_configs = {}
             for key, dlg in list(self._detail_dialogs.items()):
                 try:
                     # [🚀 增强防丢] 严禁在此处依赖 isHidden() 判定。在退出生命周期中，Qt 极可能已经隐式地将所有子窗体隐藏，
@@ -4479,6 +4487,21 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
                             state.update({"type": type_str, "name": name})
                             open_windows.append(state)
+
+                    # [🚀 核心加固] 主动帮子窗口收集并写入它们各自在根节点下的全局位置与列宽键，
+                    # 这样在子窗退出被抑制写盘时，它们的位置列宽最新数据依然能通过主面板的一次性原子存盘安全落盘！
+                    if isinstance(dlg, SectorDetailDialog):
+                        if hasattr(dlg, 'table') and dlg.table:
+                            widths = [dlg.table.columnWidth(i) for i in range(dlg.table.columnCount())]
+                            if sum(widths) >= 100:
+                                sub_configs["detail_column_widths"] = widths
+                                sub_configs["detail_geometry"] = dlg.saveGeometry().toHex().data().decode()
+                    elif isinstance(dlg, CategoryDetailDialog):
+                        if hasattr(dlg, 'table') and dlg.table:
+                            widths = [dlg.table.columnWidth(i) for i in range(dlg.table.columnCount())]
+                            if sum(widths) >= 100:
+                                sub_configs[f"cat_detail_widths_{dlg.category_name}"] = widths
+                                sub_configs[f"cat_detail_geometry_{dlg.category_name}"] = dlg.saveGeometry().toHex().data().decode()
                 except Exception as e:
                     logger.debug(f"[UIState] detail save failed: {e}")
 
@@ -4501,6 +4524,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "last_query": self.query_input.currentText() if hasattr(self, 'query_input') else "",
                 "history_selector_index": self.history_selector.currentIndex() if hasattr(self, 'history_selector') else 4
             }
+            conf.update(sub_configs)
 
             # ==============================
             # 6️⃣ hash 去重（关键优化）

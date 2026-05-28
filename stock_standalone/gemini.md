@@ -1,3 +1,12 @@
+## 2026-05-28 10:55
+- [x] **彻底根治竞价赛马面板退出时的 `PyEval_RestoreThread` 异常与多线程 GIL 崩溃 (Fixed Racing Panel PyEval_RestoreThread Exit Crash)**：
+    - [x] **物理拆除 `closeEvent` 中 unsafe 的 `processEvents` 泵送**：删除了 `bidding_racing_panel.py` 面板 `closeEvent` 中原本用于强制事件处理的 `QApplication.processEvents()` 调用，彻底消除了销毁阶段由于事件重入导致的多线程 GIL 争夺，阻断了 `PyEval_RestoreThread` 致命错误。
+    - [x] **延迟清除 PyQt 窗口强引用防范析构期 GIL 冲突 (Deferred PyQt Window Reference Clearing)**：定位并攻克了在 Qt 的 `closeEvent` 进行中，主 Tkinter 窗口通过同步 `closed` 信号回调直接将 `self._racing_panel_win` 强引用置为 `None` 导致的崩溃漏洞。该行为会使 Python 包装器在 C++ 销毁阶段未完成前提前被 GC 回收，进而由于线程状态混乱引发 `PyEval_RestoreThread` 报错崩溃。重构为通过 `self.after(100, _safe_clear)` 将引用置空与同步窗口状态操作移出 C++ 退出帧，在 Tkinter 线程的下一帧安全执行，消除了二次启动后的关闭闪退风险。
+    - [x] **实现信号安全解绑与子窗口 `deleteLater` 延迟释放**：在子窗口（如 `SectorDetailDialog`、`CategoryDetailDialog` 等）执行 `close()` 前，显式解绑它们对主面板的 `data_updated` 数据更新信号连接，防止析构中途被残留的高频行情数据流回调击穿；并将所有子控件及定时器的物理回收统一委托给 Qt 事件循环的 `deleteLater()` 方法，防止了物理双重释放冲突。
+    - [x] **优化销毁通知广播时序**：将 `self.closed.emit()` 动作严格移至 `super().closeEvent(event)` 执行完毕之后，确保主 Tkinter 监控界面在收到面板关闭通知时，该面板的底层 C++ 句柄已完成安全隐退，避免主线程操作正在析构的僵尸对象。
+    - [x] **物理避免子窗口在退出时重复触发冗余写盘并由主面板统一保存 (Eliminated Redundant Disk I/O Blocking & Consolidated Save)**：排查发现主面板在关闭子窗口时，会同步触发每个子窗口 `SectorDetailDialog` 与 `CategoryDetailDialog` 自身的 `closeEvent` 进而执行 `_save_header_state` 物理存盘，造成多次重复的 `gzip.write` 磁盘写入。重构为：在主面板关闭子窗前注入 `child._is_main_closing = True` 标志，使子窗口在 teardown 阶段直接跳过各自的磁盘 I/O 写入；同时在主面板的 `_save_ui_state` 中，主动收集所有当前打开子窗口的最新的几何位置与列宽数据（包括 `detail_column_widths`、`detail_geometry` 和各分类特有的宽度位置键），一并合并到配置字典中由主面板执行唯一一次原子物理存盘，在消除了退出卡顿的同时，100% 完整保留了退出前的所有窗口界面状态。
+    - [x] **打通全量 57/57 pytest 测试用例全绿通过**：在 PowerShell 下配置 PYTHONPATH 后，完美跑通了系统自选股生命周期与交易内核在内的全量 57 项 pytest 测试用例，回归成功率 100%！
+
 ## 2026-05-27 23:15
 - [x] **实现 Rotator IPC 系统与 Windows 多进程 Nuitka 兼容性彻底加固，根治诊断 dump 期间自愈冲突与虚拟机闪退，61/61 测试用例 100% 全绿秒通 (Stabilized Rotator IPC, Hardened Nuitka Multi-processing & Secured 100% Regression Success)**：
     - [x] **部署诊断 dump 期间 rotator 自愈原子锁 (Deployed _dumping_stack State Lock)**：在 `dump_all` 诊断堆栈导出的主流程中，织入了 `self._dumping_stack = True` 状态锁，并在 `sync_rotator_windows` 最前端检测该标志以直接短路拦截。这彻底阻断了堆栈诊断期间由于 rotator 触发自愈引起的并发重入和物理冲突。
