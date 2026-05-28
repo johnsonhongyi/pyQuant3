@@ -16,6 +16,13 @@ class Position:
     volume: float = 0.0
     current_price: float = 0.0
     entry_time: str = "N/A"
+    regime: str = "BREAKOUT_ALLOWED"
+    tp_triggered: bool = False
+    max_high: float = 0.0
+
+    def __post_init__(self):
+        if self.max_high <= 0.0:
+            self.max_high = max(self.entry_price, self.current_price)
 
     @property
     def market_value(self) -> float:
@@ -43,6 +50,9 @@ class Position:
             "pnl": round(self.pnl, 4),
             "pnl_pct": round(self.pnl_pct, 4),
             "entry_time": self.entry_time,
+            "regime": self.regime,
+            "tp_triggered": self.tp_triggered,
+            "max_high": round(self.max_high, 4),
         }
 
 
@@ -166,7 +176,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         entry_price=entry_p,
                         volume=safe_float(pos_data.get("volume"), 0.0),
                         current_price=safe_float(pos_data.get("current_price"), entry_p),
-                        entry_time=str(pos_data.get("entry_time") or "N/A")
+                        entry_time=str(pos_data.get("entry_time") or "N/A"),
+                        regime=str(pos_data.get("regime") or "BREAKOUT_ALLOWED"),
+                        tp_triggered=bool(pos_data.get("tp_triggered", False)),
+                        max_high=safe_float(pos_data.get("max_high"), entry_p)
                     )
                 self.orders = list(data.get("orders", []))
                 
@@ -296,12 +309,18 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     curr_p = safe_json_float(pos.current_price)
                     e_time = str(getattr(pos, "entry_time", "N/A"))
                     c_code = str(getattr(pos, "code", code))
+                    reg = str(getattr(pos, "regime", "BREAKOUT_ALLOWED"))
+                    tp_trig = bool(getattr(pos, "tp_triggered", False))
+                    max_h = safe_json_float(getattr(pos, "max_high", entry_p))
                 elif isinstance(pos, dict):
                     entry_p = safe_json_float(pos.get("entry_price"))
                     vol = safe_json_float(pos.get("volume"))
                     curr_p = safe_json_float(pos.get("current_price"))
                     e_time = str(pos.get("entry_time") or "N/A")
                     c_code = str(pos.get("code") or code)
+                    reg = str(pos.get("regime") or "BREAKOUT_ALLOWED")
+                    tp_trig = bool(pos.get("tp_triggered", False))
+                    max_h = safe_json_float(pos.get("max_high", entry_p))
                 else:
                     continue
                     
@@ -310,7 +329,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     "entry_price": entry_p,
                     "volume": vol,
                     "current_price": curr_p,
-                    "entry_time": e_time
+                    "entry_time": e_time,
+                    "regime": reg,
+                    "tp_triggered": tp_trig,
+                    "max_high": max_h
                 }
                 
             clean_orders = []
@@ -354,8 +376,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
         code = order.code
         price = order.price
 
-        # 当前总资产（用于确定下单绝对金额大小）
-        equity = self.account.total_equity
+        # 一只个股的仓位恒定，以初始总资金为基准，而不是随实时盈亏变动的总资产
+        # 引入宽容度异常处理与兜底机制，杜绝任何零值、None 或非法类型导致的崩溃
+        try:
+            equity = getattr(self, "initial_capital", 1000000.0)
+            if equity is None or not isinstance(equity, (int, float)) or equity <= 0:
+                if hasattr(self, "account") and hasattr(self.account, "total_equity") and self.account.total_equity > 0:
+                    equity = self.account.total_equity
+                else:
+                    equity = 1000000.0
+        except Exception as e:
+            import logging
+            logging.getLogger("PaperExecutionAdapter").error(f"⚠️ [PaperAdapter] Error reading initial_capital: {e}, fallback to default 1000000.0")
+            equity = 1000000.0
 
         if action in {"BUY", "ADD"}:
             # 校验是否为交易日交易时间（测试环境豁免）
@@ -473,6 +506,13 @@ class PaperExecutionAdapter(ExecutionAdapter):
             # 更新/移除仓位
             if action == "SELL" or sell_volume >= pos.volume:
                 self.account.positions.pop(code)
+                # 触发 Re-entry 跟踪器的止损注册
+                try:
+                    from trading_kernel.engine.reentry_tracker import reentry_tracker
+                    reentry_tracker.register_exit(code, price)
+                except Exception as e:
+                    import logging
+                    logging.getLogger("PaperExecutionAdapter").error(f"[Reentry] Error registering exit for {code}: {e}")
             else:
                 pos.volume -= sell_volume
                 pos.current_price = price
@@ -498,9 +538,20 @@ class PaperExecutionAdapter(ExecutionAdapter):
         return False
 
     def update_market_price(self, code: str, price: float) -> None:
-        """更新个股的实时市场价格以计算浮动盈亏"""
+        """更新个股的实时市场价格以计算浮动盈亏并维护最高价"""
         if code in self.account.positions:
-            self.account.positions[code].current_price = price
+            pos = self.account.positions[code]
+            pos.current_price = price
+            if not hasattr(pos, "max_high") or pos.max_high <= 0.0:
+                pos.max_high = max(pos.entry_price, price)
+            else:
+                pos.max_high = max(pos.max_high, price)
+        # 实时同步更新 reentry 最低洗盘价以辅助大周期低位筑底判定
+        try:
+            from trading_kernel.engine.reentry_tracker import reentry_tracker
+            reentry_tracker.update_price(code, price)
+        except Exception:
+            pass
 
     def get_positions(self) -> dict[str, dict[str, Any]]:
         return {code: pos.to_dict() for code, pos in self.account.positions.items()}

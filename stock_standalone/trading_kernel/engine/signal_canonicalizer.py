@@ -36,6 +36,26 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         "status": str(item.get("status", "") or ""),
         "hits": _float(item.get("hits", 1), 1.0),
         "volume": _float(item.get("volume"), 1.0),
+        
+        # 物理丰富底层多周期高维特征与黄金龙头低吸判定参数
+        "low": _float(item.get("low")),
+        "high4": _float(item.get("high4")),
+        "hmax": _float(item.get("hmax")),
+        "low60": _float(item.get("low60")),
+        "pbreak": int(_float(item.get("pbreak"), 0.0)),
+        "ptop": _float(item.get("ptop")),
+        "sws": _float(item.get("sws")),
+        "swl": _float(item.get("swl")),
+        "vol_ma5": _float(item.get("vol_ma5")),
+        "days_held": int(_float(item.get("days_held"), 0.0)),
+        "pnl_pct": _float(item.get("pnl_pct")),
+        "vol_shrink_3d": bool(item.get("vol_shrink_3d", False)),
+        "is_pullback_support": bool(item.get("is_pullback_support", False)),
+        "is_collecting_stage": bool(item.get("is_collecting_stage", False)),
+        "is_consolidation_stage": bool(item.get("is_consolidation_stage", False)),
+        "is_doji": bool(item.get("is_doji", False)),
+        "upper": _float(item.get("upper")),
+        "max_pnl_since_entry": _float(item.get("max_pnl_since_entry", 0.0)),
     }
     return StrategySignal(
         code=str(item.get("code", "") or ""),

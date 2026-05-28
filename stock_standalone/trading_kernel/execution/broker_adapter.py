@@ -165,6 +165,7 @@ class BrokerExecutionAdapter(ExecutionAdapter):
         journal: JsonlJournal | None = None,
         kill_switch: KillSwitch | None = None,
         idempotency_manager: OrderIdempotencyManager | None = None,
+        initial_capital: float = 1000000.0,
     ) -> None:
         self.journal = journal
         self.kill_switch = kill_switch or KillSwitch()
@@ -176,7 +177,8 @@ class BrokerExecutionAdapter(ExecutionAdapter):
         # 增加在内存中模拟订单与持仓，以保证在 LIVE_AUTO 模式下能正常查阅持仓
         self.orders: list[dict[str, Any]] = []
         self._positions: dict[str, dict[str, Any]] = {}
-        self._cash = 1000000.0
+        self.initial_capital = initial_capital
+        self._cash = initial_capital
 
     def set_connected(self, status: bool) -> None:
         """外部模拟心跳或者真实 API 回调断开设置"""
@@ -276,7 +278,16 @@ class BrokerExecutionAdapter(ExecutionAdapter):
         execute_vol = 0.0
         
         if action in {"BUY", "ADD"}:
-            target_value = equity * size_pct
+            # 一只个股的仓位恒定，以初始总资金为基准，而不是随实时盈亏变动的总资产
+            # 引入宽容度异常处理与兜底机制
+            try:
+                base_capital = getattr(self, "initial_capital", 1000000.0)
+                if base_capital is None or not isinstance(base_capital, (int, float)) or base_capital <= 0:
+                    base_capital = 1000000.0
+                target_value = base_capital * size_pct
+            except Exception as e:
+                logger.error(f"⚠️ [BrokerAdapter] Calculate target_value error: {e}, fallback to 1000000.0")
+                target_value = 1000000.0 * size_pct
             if target_value > self._cash:
                 target_value = self._cash
             if target_value > 0:
