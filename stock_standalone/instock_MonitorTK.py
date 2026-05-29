@@ -1446,6 +1446,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def bg_kernel_auto_execute_once(self, auto_mode=True):
         """Execute approved kernel BUY/SELL decisions once through the existing mock gateway in background."""
+        # 处于回测模拟模式下，直接短路，无需响应策略交易流以避免资源浪费和数据污染
+        from signal_grading_hub import get_signal_grading_hub
+        if get_signal_grading_hub()._simulation_mode:
+            return
+
         if getattr(self, '_bg_kernel_executing', False):
             return
         self._bg_kernel_executing = True
@@ -5034,16 +5039,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 2. 发布到行情总线
                     full_df = None
                     df_filtered = None
+                    full_df_res = None
+                    df_filtered_res = None
                     if isinstance(latest_p, dict):
                         full_df = latest_p.get('full_snapshot')
                         df_filtered = latest_p.get('filtered_ui_data')
+                        full_df_res = latest_p.get('full_snapshot_res')
+                        df_filtered_res = latest_p.get('filtered_ui_data_res')
                     else:
                         full_df = latest_p
                     
                     if full_df is not None:
-                        self.market_bus.publish(full_df, df_filtered)
+                        self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
                         self._last_snapshot_recv_time = time.time()  # 🌟 成功收到并发布快照，更新时间戳
-                        # logger.debug("📡 [Bus] Published latest snapshot.")
+                        # logger.debug("📡 [Bus] Published latest snapshot with resampled track.")
                 
                 time.sleep(0.05) # 20Hz 刷新率足够
             except Exception as e:
@@ -5166,14 +5175,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 🔄 [PERF] 架构重构：改为从 MarketStateBus "拉取" 最新快照 (Snapshot Pull)
                 # 优点：不阻塞 Queue，不处理中间积压包，永远只处理当前最新帧
-                bus_data = self.market_bus.get_latest(since_version=getattr(self, '_last_ui_bus_version', 0))
+                bus_data = self.market_bus.get_latest_dual(since_version=getattr(self, '_last_ui_bus_version', 0))
                 
                 if bus_data:
-                    version, full_df, df_filtered, snap_time = bus_data
+                    version, full_df, df_filtered, snap_time, full_df_res, df_filtered_res = bus_data
                     self._last_ui_bus_version = version
                     latest_p = {
                         'full_snapshot': full_df,
                         'filtered_ui_data': df_filtered,
+                        'full_snapshot_res': full_df_res,
+                        'filtered_ui_data_res': df_filtered_res,
                         'timestamp': snap_time
                     }
 
@@ -5245,13 +5256,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # 1. 解包
             if isinstance(data_packet, dict):
-                full_df   = data_packet.get('full_snapshot')
-                df_raw    = data_packet.get('filtered_ui_data')
-                snap_time = data_packet.get('timestamp', t_pump_start)
+                full_df       = data_packet.get('full_snapshot')
+                df_raw        = data_packet.get('filtered_ui_data')
+                full_df_res   = data_packet.get('full_snapshot_res', full_df)
+                df_raw_res    = data_packet.get('filtered_ui_data_res', df_raw)
+                snap_time     = data_packet.get('timestamp', t_pump_start)
             else:
-                full_df   = data_packet
-                df_raw    = data_packet
-                snap_time = t_pump_start
+                full_df       = data_packet
+                df_raw        = data_packet
+                full_df_res   = data_packet
+                df_raw_res    = data_packet
+                snap_time     = t_pump_start
 
             t_unpack = time.time()
 
@@ -5291,6 +5306,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return d
 
             full_df = _sanitize(full_df)
+            if full_df_res is not None and not full_df_res.empty:
+                full_df_res = _sanitize(full_df_res)
             t_sanitize1 = time.time()
 
             if full_df is None or full_df.empty:
@@ -5310,14 +5327,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             t_hash = time.time()
 
             # 4. 过滤/查询 (轻量)
+            target_full_df = full_df_res if (full_df_res is not None and not full_df_res.empty) else full_df
+            target_df_raw = df_raw_res if df_raw_res is not None else df_raw
             if query:
                 from query_engine_util import query_engine
                 try:
-                    df = query_engine.execute(full_df, query)
+                    df = query_engine.execute(target_full_df, query)
                 except Exception:
-                    df = full_df
+                    df = target_full_df
             else:
-                df = _sanitize(df_raw) if df_raw is not None else full_df.copy()
+                df = _sanitize(target_df_raw) if target_df_raw is not None else target_full_df.copy()
                 
             t_filter = time.time()
 
@@ -5363,7 +5382,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 sync_ui, cur_res, version, force,
                 getattr(self, 'sortby_col', None),
                 getattr(self, 'sortby_col_ascend', False),
-                getattr(self, 'feature_marker', None)
+                getattr(self, 'feature_marker', None),
+                full_df_res
             )
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
             fut.add_done_callback(lambda f, v=version, frc=force: self._on_compute_done(f, v, frc))
@@ -5374,7 +5394,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
 
-    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None):
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None, full_df_res=None):
         """
         [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
         结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
@@ -5398,16 +5418,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"[Compute] detect_signals failed: {e}")
 
+            # 在所有 df_all（即 full_df）计算完成后，将计算列同步到展示轨 full_df_res 上，避免计算两次
+            if full_df_res is not None and not full_df_res.empty:
+                try:
+                    cols_to_sync = ['emotion_status', 'signal_strength', 'signal', 'emotion']
+                    # 确保 code 列在两轨数据中都存在（防止未 sanitize 或 DataFrame 重构产生缺失）
+                    if 'code' not in full_df.columns:
+                        full_df = full_df.copy()
+                        full_df['code'] = full_df.index.astype(str)
+                    if 'code' not in full_df_res.columns:
+                        full_df_res = full_df_res.copy()
+                        full_df_res['code'] = full_df_res.index.astype(str)
+
+                    mapping_df = full_df.drop_duplicates(subset=['code']).set_index('code')
+                    for col in cols_to_sync:
+                        if col in mapping_df.columns:
+                            mapped_series = full_df_res['code'].map(mapping_df[col])
+                            if col == 'emotion_status':
+                                full_df_res[col] = mapped_series.fillna(50).astype(int)
+                            elif col == 'signal':
+                                full_df_res[col] = mapped_series.fillna('')
+                            elif col == 'emotion':
+                                full_df_res[col] = mapped_series.fillna('中性')
+                            elif col == 'signal_strength':
+                                full_df_res[col] = mapped_series.fillna(0)
+                            else:
+                                full_df_res[col] = mapped_series
+                except Exception as e:
+                    logger.error(f"[Compute] Syncing computed columns to full_df_res failed: {e}")
+
             time.sleep(0.005) # ⭐ [GIL-YIELD] 再次主动释放 GIL 锁
 
-            # 3. 将 full_df 增强列同步到 df 视图
+            # 3. 将 target_source (full_df_res 或 full_df) 增强列同步到 df 视图
+            target_source = full_df_res if (full_df_res is not None and not full_df_res.empty) else full_df
             if df is not None and not df.empty:
                 try:
-                    df = full_df.loc[df.index.intersection(full_df.index)].copy()
+                    df = target_source.loc[df.index.intersection(target_source.index)].copy()
                 except Exception:
-                    if 'emotion_status' in full_df.columns:
+                    if 'emotion_status' in target_source.columns:
                         df['emotion_status'] = df['code'].map(
-                            full_df.set_index('code')['emotion_status']
+                            target_source.set_index('code')['emotion_status']
                         ).fillna(50)
 
                 # 4. [PERF] CPU预计算：在后台线程完成 Treeview 的排序运算，彻底解放 UI 线程
@@ -5442,7 +5492,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not full_df.empty:
                 self._run_live_strategy_process(full_df)
 
-            return (full_df, df, sync_ui, cur_res, force)
+            return (full_df, df, sync_ui, cur_res, force, full_df_res)
 
         except Exception as e:
             logger.exception(f"[Compute] v{version} error: {e}")
@@ -5482,7 +5532,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         try:
-            full_df, df, sync_ui, cur_res, force_res = result
+            full_df, df, sync_ui, cur_res, force_res, *extra = result
+            full_df_res = extra[0] if extra else None
             # 这里的 force_res 优先级更高
             final_force = force or force_res
 
@@ -5516,19 +5567,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # [VERSION] UI 层: 再次校验 (第二层防护)
                 if version < getattr(self, '_snapshot_version', 0):
                     return
-                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res, final_force)
+                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res, final_force, full_df_res)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_sync)
         elif full_df is not None and not full_df.empty:
             def _do_mem_sync():
                 if version < getattr(self, '_snapshot_version', 0):
                     return
-                self._apply_tree_data_sync(full_df, None, cur_res, final_force)
+                self._apply_tree_data_sync(full_df, None, cur_res, final_force, full_df_res)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_mem_sync)
 
 
-    def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d', force=False):
+    def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d', force=False, full_df_res=None):
         """
         Sync step: update internal state and Tkinter UI on the main thread.
         - full_df: 全量市场行情 (用于 Top10/策略/信号追踪)
@@ -5538,6 +5589,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         has_update = False
         with timed_ctx("apply_tree_data_sync_timed", warn_ms=10000):
             try:
+                # 无论是否有行情更新，只要 UI 选择 of resample 周期与缓存不一致，就说明触发了手动切换周期，必须强制刷新
+                current_resample = self.global_values.getkey("resample")
+                if getattr(self, '_last_resample', None) != current_resample:
+                    force = True
+                    has_update = True
+
                 # 1. [CORE] 更新主内存及其版本 (必须每轮执行)
                 # 计算快照 Hash 用于版本校验，若数据完全无变动则跳过后续昂贵的 UI 渲染
                 df_hash = 0
@@ -5564,6 +5621,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 with self._df_lock:
                     self.df_all = full_df
+                    self.df_all_res = full_df_res if full_df_res is not None else full_df
                 
                 # ⚡ [NEW] 主动强力注入交易内核特征预加载温热
                 try:
@@ -5594,20 +5652,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._last_render_query = current_query
                 
                 # ⭐ [RESTORE] 激活数据更新标志位 (确保下一步联动恢复能触发)
-                if df_hash != last_hash:
+                if df_hash != last_hash or force:
                     has_update = True
                 
                 self._last_apply_df_hash = df_hash
 
                 if hasattr(self, 'selector') and self.selector:
-                    self.selector.df_all_realtime = self.df_all
+                    self.selector.df_all_realtime = self.df_all_res
                     self.selector.resample = cur_res
 
                 # 2. [CORE-UI] 刷新主表格 (独立限流 + 忙碌守卫 + 存在校验)
                 # ⭐ [OPTIMIZE] 如果 ui_df 为 None (主要见于中间包)，直接跳过耗时 3s 的 Treeview 刷新
                 # 如果 ui_df 为空 DataFrame，则执行刷新以清空界面 (解决过滤为空不刷新问题)
                 if ui_df is not None:
-                    if (now - getattr(self, '_last_tree_render_ts', 0) > 0.5) and not getattr(self, '_is_gui_rendering', False):
+                    if (force or (now - getattr(self, '_last_tree_render_ts', 0) > 0.5)) and not getattr(self, '_is_gui_rendering', False):
                         self._is_gui_rendering = True
                         try:
                             # 1. 刷新主 Treeview (核心任务)
@@ -7017,8 +7075,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     time.sleep(10)
                     continue
 
-                if not hasattr(self, 'df_all') or self.df_all.empty:
-                    logger.debug("[send_df] df_all is empty or missing, waiting...")
+                cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+                df_to_check = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res')) else getattr(self, 'df_all', None)
+                if df_to_check is None or df_to_check.empty:
+                    logger.debug(f"[send_df] display track (resample={cur_resample}) is empty or missing, waiting...")
                     if count < 3:
                         count +=1
                         time.sleep(2)
@@ -7028,11 +7088,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     now = time.time()
                     
                     # 动态调整发送频率：数据量越大，发送越稀疏，防止 GIL 挤占
-                    if not hasattr(self, 'df_all'): 
+                    cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+                    df_to_check = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res')) else getattr(self, 'df_all', None)
+                    if df_to_check is None: 
                         time.sleep(2)
                         continue
                     
-                    n_rows = len(self.df_all) if hasattr(self, 'df_all') else 0
+                    n_rows = len(df_to_check)
                     dynamic_interval = min_interval
                     if n_rows > 3000: dynamic_interval = 2.5
                     if n_rows > 5000: dynamic_interval = 5.0
@@ -7044,9 +7106,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     last_send_time = time.time()
 
-                    # 🔄 [PERF] 架构重构：send_df 改为从 MarketStateBus 拉取最新全量快照
+                    # 🔄 [PERF] 架构重构：send_df 改为从 MarketStateBus 拉取最新全量快照 (支持显示轨对齐)
                     # 彻底消除 send_df 线程在 Queue 上的竞争与主线程锁 (_df_lock) 竞争
-                    bus_data = self.market_bus.get_latest(since_version=getattr(self, '_last_vis_bus_version', 0))
+                    bus_data = self.market_bus.get_latest_dual(since_version=getattr(self, '_last_vis_bus_version', 0))
                     
                     if bus_data is None:
                         # 检查是否有强制同步请求，如果没有则继续休眠
@@ -7054,17 +7116,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             time.sleep(0.5)
                             continue
                         # 如果有强制同步请求，拉取当前总线最新数据（无论版本）
-                        bus_data = (self.market_bus._version, self.market_bus._df_all, self.market_bus._df_filtered, self.market_bus._timestamp)
+                        bus_data = (self.market_bus._version, self.market_bus._df_all, self.market_bus._df_filtered, self.market_bus._timestamp, self.market_bus._df_all_res, self.market_bus._df_filtered_res)
 
-                    version, df_bus_all, _, snap_time = bus_data
+                    version, df_bus_all, _, snap_time, df_bus_all_res, _ = bus_data
                     self._last_vis_bus_version = version
                     
                     if df_bus_all is None or df_bus_all.empty:
                         time.sleep(0.5)
                         continue
 
-                    # ⚡ [CORE] 采用总线快照进行可视化分发
-                    df_ui = df_bus_all
+                    # ⚡ [CORE] 采用总线快照进行可视化分发 (判断并同步跟界面显示轨 df_all_res 数据对齐)
+                    if cur_resample != 'd' and df_bus_all_res is not None and not df_bus_all_res.empty:
+                        df_ui = df_bus_all_res
+                    else:
+                        df_ui = df_bus_all
                     df_hash = hash(version) # 使用总线版本作为哈希
 
                     
@@ -17521,8 +17586,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as ex:
             logger.exception("更新搜索历史时出错: %s", ex)
 
+        # 获取当前周期对应的数据集 (对齐多周期/重采样界面展示轨)
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        if cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None:
+            df_all = self.df_all_res
+        else:
+            df_all = self.df_all
+
         # 2. 数据有效性检查
-        if self.df_all.empty:
+        if df_all.empty:
             self.status_var.set("当前数据为空")
             return
 
@@ -17530,21 +17602,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not query_engine:
             logger.error("PandasQueryEngine not found! Using legacy fallback.")
             try:
-                df_filtered = self.df_all.query(combined_query, engine='python')
+                df_filtered = df_all.query(combined_query, engine='python')
             except Exception as e:
                 self.status_var.set(f"查询失败: {e}")
                 return
         else:
             # 执行强大且具备 SQL 映射、向量化降级的查询
             try:
-                df_filtered = query_engine.execute(self.df_all, combined_query)
+                df_filtered = query_engine.execute(df_all, combined_query)
             except Exception as e:
                 logger.exception(f"Query Engine Critical Crash: {e} | Query: {combined_query}")
                 self.status_var.set(f"❌ 引擎故障: {str(e)[:15]}")
                 return
 
         # 4. 结果处理与 UI 更新
-        if df_filtered.empty or (len(df_filtered) == len(self.df_all) and combined_query):
+        if df_filtered.empty or (len(df_filtered) == len(df_all) and combined_query):
             if df_filtered.empty:
                 self.status_var.set("❌ 无匹配结果")
                 return
@@ -17559,7 +17631,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
         
         # 优化状态栏显示：匹配数/总数 | 查询缩略
-        rows_all = len(self.df_all)
+        rows_all = len(df_all)
         rows_hit = len(df_filtered)
         # disp_query = combined_query[:30].replace('\n', ' ')
         # self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
@@ -17589,12 +17661,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 判断是否为 6 位数字
         # if not (code.isdigit() and len(code) == 6):
 
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        if cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None:
+            df_all = self.df_all_res
+        else:
+            df_all = self.df_all
+
         if code and code == result:
-            df_code = self.df_all
+            df_code = df_all
         elif code and not (code.isdigit() and len(code) == 6):
             # toast_message(self, "请输入6位数字股票代码")
             # return
-            df_code = self.df_all
+            df_code = df_all
         elif code and code.isdigit() and len(code) == 6:
             # 初始化上次选中的 code
             if not hasattr(self, "_select_on_test_code"):
@@ -17604,21 +17682,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self._select_on_test_code != code:
                 # 更新缓存，并筛选对应行
                 self._select_on_test_code = code
-                df_code = self.df_all.loc[self.df_all.index == code]
-                results = check_code(self.df_all,code,self.search_var1.get())
+                df_code = df_all.loc[df_all.index == code]
+                results = check_code(df_all,code,self.search_var1.get())
             else:
                 if onclick:
-                    df_code = self.df_all.loc[self.df_all.index == code]
-                    results = check_code(self.df_all,code,self.search_var1.get())
+                    df_code = df_all.loc[df_all.index == code]
+                    results = check_code(df_all,code,self.search_var1.get())
                     # logger.info(f'check_code: {results}')
                     self.tree_scroll_to_code(code)
                     if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
                         self.kline_monitor.tree_scroll_to_code_kline(code)
                 # 连续选择相同 code，则显示全部
                 else:
-                    df_code = self.df_all
+                    df_code = df_all
         else:
-            df_code = self.df_all
+            df_code = df_all
 
         results = self.query_manager.test_code(df_code)
 

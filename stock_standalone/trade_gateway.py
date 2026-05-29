@@ -216,6 +216,28 @@ class RiskManager:
 
     def record_realized_loss(self, loss_amount: float):
         """卖出后记录实现的亏损（正数为亏损金额）"""
+        # 在非交易时间，如果既不是单元测试，也不是回测模拟，则不记录亏损与锁仓，防止冷启动或晚上打开时发生状态污染
+        import sys
+        try:
+            from signal_grading_hub import get_signal_grading_hub
+            is_simulation = get_signal_grading_hub()._simulation_mode
+        except Exception:
+            is_simulation = False
+
+        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+
+        if not (is_test or is_simulation):
+            try:
+                import JohnsonUtil.commonTips as cct
+                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
+                now_t = cct.get_now_time_int()
+                if 915 <= now_t < 925:
+                    is_trading_hour = False
+                if not is_trading_hour:
+                    return
+            except Exception as e:
+                logger.warning(f"[RiskManager] Error checking trading time: {e}")
+
         with self._lock:
             if loss_amount > 0:
                 self._daily_realized_loss += loss_amount
@@ -267,6 +289,7 @@ class MockTradeGateway:
         self.risk_manager = RiskManager(total_capital=total_capital)
         self._positions: Dict[str, Position] = {}   # {code: Position}
         self._trade_log: List[TradeRecord] = []      # 今日流水（内存）
+        self._non_trade_notified_stop_loss = set()   # 非交易时段已提示止损标的（防高频刷屏）
         self._lock = threading.Lock()
         self._init_db()
 
@@ -446,13 +469,59 @@ class MockTradeGateway:
 
     def check_stop_loss(self):
         """检查是否触发止损，触发则自动平仓"""
+        import sys
+        try:
+            from signal_grading_hub import get_signal_grading_hub
+            is_simulation = get_signal_grading_hub()._simulation_mode
+        except Exception:
+            is_simulation = False
+
+        if is_simulation:
+            # 赛马回测模拟模式不用走这个流程，直接短路返回
+            return
+
+        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+
+        # 判断当前是否在交易时间内
+        is_trading_hour = True
+        try:
+            import JohnsonUtil.commonTips as cct
+            is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
+            now_t = cct.get_now_time_int()
+            if 915 <= now_t < 925:
+                is_trading_hour = False
+        except Exception as e:
+            logger.warning(f"[TradeGateway] Error checking trading time: {e}")
+
         to_sell = []
         with self._lock:
             for code, pos in self._positions.items():
                 if pos.current_price > 0 and pos.current_price <= pos.stop_loss:
-                    to_sell.append((code, pos.current_price, "触发止损线", pos.name, pos.sector, pos.strategy_tag))
+                    # 如果是非交易时间，且非测试、非回测模拟，则仅提示/执行流程一次，防高频刷屏
+                    if not is_trading_hour and not is_test and not is_simulation:
+                        if code not in self._non_trade_notified_stop_loss:
+                            self._non_trade_notified_stop_loss.add(code)
+                            to_sell.append((code, pos.current_price, "触发止损线", pos.name, pos.sector, pos.strategy_tag))
+                    else:
+                        to_sell.append((code, pos.current_price, "触发止损线", pos.name, pos.sector, pos.strategy_tag))
 
         for code, price, reason, name, sector, strategy_tag in to_sell:
+            # 如果是非交易时间，直接进入拦截提示与流程展示逻辑，不真正提交订单，也不写入决策大表
+            if not is_trading_hour and not is_test and not is_simulation:
+                pnl_pct = 0.0
+                pnl_val = 0.0
+                with self._lock:
+                    pos = self._positions.get(code)
+                    if pos:
+                        pnl_pct = pos.pnl_pct
+                        pnl_val = pos.pnl_value
+                logger.info(
+                    f"📉 [模拟卖出] {code}({name}) 价={price:.3f} 盈亏={pnl_pct:+.2f}% ({pnl_val:+.2f}元) | {reason}(非交易时段拦截)"
+                )
+                logger.warning(f"[Trade Gate] Rejected SELL order for {code} because current time is not within trading hours.")
+                continue
+
+            # 正常交易时间或回测模拟时，提交物理订单
             ok, msg = self.submit_sell(code, price, reason)
             if ok:
                 # 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
@@ -551,6 +620,7 @@ class MockTradeGateway:
         """每日重置（保留持仓，重置日内流水和风控计数器）"""
         with self._lock:
             self._trade_log.clear()
+            self._non_trade_notified_stop_loss.clear()
         self.risk_manager.reset_day()
         logger.info("[TradeGateway] 每日重置完成")
 

@@ -1071,7 +1071,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     return
                 self._last_linked_code = code
                 name = name_item.text().strip() if name_item else ""
-                logger.info(f"Navigation cell changed linkage on DecisionFlowTable: {code} ({name})")
+                # logger.info(f"Navigation cell changed linkage on DecisionFlowTable: {code} ({name})")
                 self.code_clicked.emit(code, name)
 
     def _show_system_workflow_dialog(self):

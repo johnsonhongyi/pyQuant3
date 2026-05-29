@@ -98,6 +98,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
         self._last_saved_fingerprint = ""
+        self._is_simulation = False  # 是否为模拟/回测模式
         
         # 探测测试环境与物理持久化路径
         import os
@@ -369,6 +370,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
         if order.size_pct <= 0 or order.price <= 0:
             return False
 
+        # 如果开启了模拟模式，直接短路返回 True 绕过所有账户状态修改及风控校验
+        if self._is_simulation:
+            return True
+
         action = order.action.upper()
         code = order.code
         price = order.price
@@ -387,8 +392,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             equity = 1000000.0
 
         if action in {"BUY", "ADD"}:
-            # 校验是否为交易日交易时间（测试环境豁免）
-            if not self._is_test:
+            # 校验是否为交易日交易时间（测试环境/模拟模式豁免）
+            if not (self._is_test or self._is_simulation):
                 import JohnsonUtil.commonTips as cct
                 is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
                 now_t = cct.get_now_time_int()
@@ -441,7 +446,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 )
 
         elif action in {"SELL", "REDUCE"}:
-            if not self._is_test:
+            if not (self._is_test or self._is_simulation):
                 import JohnsonUtil.commonTips as cct
                 is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
                 now_t = cct.get_now_time_int()
@@ -469,8 +474,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if sell_volume <= 0:
                 return False
 
-            # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境豁免）
-            if not self._is_test:
+            # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境/模拟模式豁免）
+            if not (self._is_test or self._is_simulation):
                 is_today_bought = False
                 if pos.entry_time and pos.entry_time != "N/A":
                     try:

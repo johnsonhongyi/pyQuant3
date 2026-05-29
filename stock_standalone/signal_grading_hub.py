@@ -186,6 +186,16 @@ class SignalGradingHub:
             self._sim_time = None
             logger.info("📡 [HUB] 预警中枢回归【实盘模式】。")
             
+        # 同步更新 trading_kernel 的 paper_adapter 模拟模式
+        try:
+            from trading_kernel.kernel_service import get_kernel_service
+            service = get_kernel_service()
+            if service and hasattr(service, "paper_adapter") and service.paper_adapter:
+                service.paper_adapter._is_simulation = mode
+                logger.info(f"🔮 [SIM] Sync trading kernel paper_adapter simulation mode to {mode}")
+        except Exception as e:
+            logger.warning(f"Failed to sync simulation mode to trading kernel: {e}")
+
         # 联动禁用/启用警报器，避免回测时语音播报堆积
         try:
             from alert_manager import get_alert_manager

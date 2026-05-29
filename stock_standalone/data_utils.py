@@ -2553,6 +2553,9 @@ def fetch_and_process(
     st_key_sort = g_values.getkey("st_key_sort", "3 0")
     logger.info(f"当前选择市场: {market}, blkname={blkname} st_key_sort:{st_key_sort}")
     
+    df_allDF = {}
+    lastpTDX_DF_Dict = {}
+    last_resample_ui = g_values.getkey("resample") or "d"
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
     detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
     
@@ -2604,16 +2607,22 @@ def fetch_and_process(
                     if flag.value: break
                     time.sleep(1)
                 continue
-            elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
+            elif g_values.getkey("resample") and  g_values.getkey("resample") !=  last_resample_ui:
+                last_resample_ui = g_values.getkey("resample")
                 top_now = pd.DataFrame()
-                top_all = pd.DataFrame()
+                if last_resample_ui not in df_allDF:
+                    df_allDF[last_resample_ui] = pd.DataFrame()
+                top_all = df_allDF[last_resample_ui]
                 lastpTDX_DF = pd.DataFrame()
-                logger.info(f'resample : new resample : {g_values.getkey("resample")} last resample : {resample} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
+                lastpTDX_DF_Dict[last_resample_ui] = pd.DataFrame()
+                logger.info(f'resample : new resample : {last_resample_ui} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
             elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
                 # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
                 top_now = pd.DataFrame()
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
+                df_allDF.clear() # 市场改变时清空缓存字典
+                lastpTDX_DF_Dict.clear() # 市场改变时清空 lastpTDX_DF 缓存字典
                 logger.info(f'market : new resample: {g_values.getkey("market")} last resample: {resample} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
@@ -2705,6 +2714,8 @@ def fetch_and_process(
                 force_init_latch = False  # ⭐ [Cut 6] 初始化完成，释放锁存器
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
+                df_allDF.clear()
+                lastpTDX_DF_Dict.clear()
                 logger.info(
                     f"init_tdx 总用时: {time.time() - time_init:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
                 )
@@ -2726,11 +2737,12 @@ def fetch_and_process(
             else:
                 logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
 
-            resample = g_values.getkey("resample") or "d"
+            resample_ui = g_values.getkey("resample") or "d"
+            resample = 'd'
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
             st_key_sort = g_values.getkey("st_key_sort", st_key_sort)  # 对应的 blk 文件
-            logger.info(f"resample Main  market : {market} resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            logger.info(f"\n resample Main  market : {market} resample_ui: {resample_ui} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             if market == 'indb':
                 with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
                     indf = get_indb_df()
@@ -2749,7 +2761,11 @@ def fetch_and_process(
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
 
-            if top_all.empty:
+            # 用 resample 作为 key 读取 top_all
+            top_all = df_allDF.get(resample, pd.DataFrame())
+            lastpTDX_DF = lastpTDX_DF_Dict.get(resample, pd.DataFrame())
+
+            if resample not in df_allDF or df_allDF[resample].empty:
                 if lastpTDX_DF.empty:
                     with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
                         top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
@@ -2757,9 +2773,13 @@ def fetch_and_process(
                 else:
                     with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
                         top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF, detect_calc_support=detect_val)
+                df_allDF[resample] = top_all
+                lastpTDX_DF_Dict[resample] = lastpTDX_DF
             else:
                 with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
                     top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
+                    df_allDF[resample] = top_all
+
 
             time_sum = time.time()
             with timed_ctx("calc_indicators", warn_ms=1000):
@@ -2849,18 +2869,113 @@ def fetch_and_process(
             else:
                 logger.debug("Dynamic Trimming: 'keep_all_columns' active, skipping trim.")
 
-            # 🔌 RealtimeDataService updates are now handled by the Main process
-            # inside update_tree() to eliminate cross-process proxy overhead.
-            # 🔌 [DEACTIVATED] 全量格式化已移至 UI 渲染层 (Lazy-Formatting)
-            # 以彻底消除 800ms 的主线程阻塞，将延迟降至 < 100ms。
-            # with timed_ctx("format_floats", warn_ms=800):
-            #     df_all = format_floats(df_all)
-            # 🔌 [REFINED] Send dual snapshots (Full for Cache, Filtered for UI)
-            # This ensures MinuteKlineCache stays up-to-date for ALL stocks
-            # while the UI remains responsive and filtered.
+            # --- Now process UI display resampled track if resample_ui != 'd' ---
+            if resample_ui != 'd':
+                resample_res = resample_ui
+                
+                # 从缓存获取大周期的 top_all 和 lastpTDX_DF
+                top_all_res = df_allDF.get(resample_res, pd.DataFrame())
+                lastpTDX_DF_res = lastpTDX_DF_Dict.get(resample_res, pd.DataFrame())
+                
+                if resample_res not in df_allDF or df_allDF[resample_res].empty:
+                    if lastpTDX_DF_res.empty:
+                        with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
+                            top_all_res, lastpTDX_DF_res = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample_res], 
+                                                                    resample=resample_res, detect_calc_support=detect_val)
+                    else:
+                        with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                            top_all_res = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_res, detect_calc_support=detect_val)
+                    df_allDF[resample_res] = top_all_res
+                    lastpTDX_DF_Dict[resample_res] = lastpTDX_DF_res
+                else:
+                    with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                        top_all_res = cct.combine_dataFrame(top_all_res, top_now, col="couts", compare="dff")
+                        df_allDF[resample_res] = top_all_res
+
+                # Save raw combined snapshot for resampled UI display calculations
+                # top_all_res_raw = top_all_res_raw.copy() if not top_all_res.empty else pd.DataFrame()
+
+                time_sum = time.time()
+                with timed_ctx("calc_indicators", warn_ms=1000):
+                    top_all_res = calc_indicators(top_all_res, logger, resample_res)
+                #step volume
+                with timed_ctx("sina_with_history", warn_ms=1000):
+                    top_all_res = process_merged_sina_with_history(top_all_res)
+                logger.info(f"resample_res UI  top_all_res:{len(top_all_res)} market : {market}  resample: {resample_res}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+
+                if top_all_res is not None and not top_all_res.empty:
+                    # --- [新增] 注入 0d 数据列，使 consecutive_above 生效 ---
+                    if 'now' in top_all_res.columns:
+                        top_all_res['lastp0d'] = top_all_res['now']
+                        top_all_res['lasth0d'] = top_all_res['high']
+                        top_all_res['lastl0d'] = top_all_res['low']
+                        top_all_res['lasto0d'] = top_all_res['open']
+                        top_all_res['lastv0d'] = top_all_res['vol'] if 'vol' in top_all_res.columns else top_all_res['volume']
+                        # 为压力位注入 0d (复用昨日压力位作为今日参考线)
+                        if 'upper1' in top_all_res.columns: top_all_res['upper0'] = top_all_res['upper1']
+                        if 'ma51d' in top_all_res.columns: top_all_res['ma50d'] = top_all_res['ma51d']
+                        if 'high41' in top_all_res.columns: top_all_res['high40'] = top_all_res['high41']
+
+                    sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort, top_all_res)
+                else:
+                    sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort)
+                
+                with timed_ctx("plus_history_sum_opt", warn_ms=1000):
+                    
+                    result_opt = strong_momentum_large_cycle_vect_new(top_all_res, max_days=cct.compute_lastdays, winlimit=1)
+                with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+                    clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
+                    top_all_res = align_sum_percent(top_all_res, clean_sum)
+
+                with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
+                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+                
+                with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
+                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above_single(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+                with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
+                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+                with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
+                    top_all_res = scoring_momentum_pullback_system_base(top_all_res, max_days=cct.compute_lastdays)
+                with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
+                    top_all_res = scoring_momentum_pullback_system_top(top_all_res, max_days=cct.compute_lastdays)
+                with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
+                    top_all_res = buy_sell_score_momentum_vect(top_all_res, max_days=cct.compute_lastdays)
+            
+                logger.debug(f'clean_sum: {time.time() - time_sum:.2f}')
+                with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+                    top_all_res = build_hma_and_trendscore(top_all_res, status_callback=status_callback)
+
+                top_temp_res = top_all_res.copy()
+                with timed_ctx("getBollFilter", warn_ms=800):
+                    top_temp_res = stf.getBollFilter(df=top_temp_res, resample=resample_res, down=False)
+                top_temp_res = top_temp_res.sort_values(by=sort_cols_res, ascending=sort_keys_res)
+                
+                df_all_res = clean_bad_columns(top_temp_res)
+                df_all_res = sanitize(df_all_res)
+                
+                # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
+                keep_all = g_values.getkey('keep_all_columns', True)
+                if not keep_all:
+                    required_cols = g_values.getkey('required_cols', [])
+                    if required_cols:
+                        actual_keep = [c for c in required_cols if c in df_all_res.columns]
+                        if 'name' in actual_keep or 'code' in actual_keep:
+                            df_all_res = df_all_res[actual_keep]
+                        else:
+                            logger.debug("Dynamic Trimming: required_cols missing core columns, skipping trim.")
+                # else:
+                #     logger.debug("Dynamic Trimming: 'keep_all_columns' active, skipping trim.")
+            else:
+                top_all_res = top_all
+                df_all_res = df_all
+
+            # Send dual snapshots (Full & Filtered for both daily decision track and resampled display track)
             data_packet = {
                 'full_snapshot': top_all,
-                'filtered_ui_data': df_all
+                'filtered_ui_data': df_all,
+                'full_snapshot_res': top_all_res,
+                'filtered_ui_data_res': df_all_res,
+                'resample_ui': resample_ui
             }
             try:
                 queue.put(data_packet, block=True, timeout=10)
@@ -2923,7 +3038,7 @@ def fetch_and_process(
             if logger.level <= LoggerFactory.INFO:
                 logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
-                logger.info(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+                logger.info(f'process now: {cct.get_now_time_int()} resample_ui:{resample_ui} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
                 print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
                 print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
@@ -2935,7 +3050,7 @@ def fetch_and_process(
                     f"shape: {top_temp.shape}\n"
                     f"detect_calc_support: {detect_val}"
                 )
-                print(f'process now: {cct.get_now_time_int()} resample:{resample} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+                print(f'process now: {cct.get_now_time_int()} resample_ui:{resample_ui} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
 
             if single:
                 cct.print_timing_summary()
