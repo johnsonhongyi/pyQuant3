@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 sbc_core.py — SBC 核心逻辑提取（策略与数据对齐统一）
 旨在解决回测/回放与实时监控逻辑不一致的问题，确保两端共用同一套数据处理与信号触发链条。
@@ -32,7 +33,7 @@ try:
 except ImportError:
     from stock_standalone.signal_types import SignalPoint, SignalType, SignalSource
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 # 配置常量
 MAX_BUY_PER_DAY = 2    # 回放中每日允许的最大买点数

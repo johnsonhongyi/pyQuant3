@@ -1,22 +1,17 @@
 #!/usr/bin/env python
+from logger_utils import LoggerFactory
 # -*- coding: utf-8 -*-
 """
 非交易时段信号清理工具
 用于清理数据库中所有非交易时段(9:30-11:30, 13:00-15:00)的信号记录
 """
 import sqlite3
-import logging
 import argparse
 import os
 from datetime import datetime
 from typing import Tuple, List
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 
 def is_trading_time(timestamp_str: str) -> bool:

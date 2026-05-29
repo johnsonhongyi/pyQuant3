@@ -1,11 +1,9 @@
+from logger_utils import LoggerFactory
 import sqlite3
 import pandas as pd
-import logging
 import os
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 DB_PATH = "trading_signals.db"
 

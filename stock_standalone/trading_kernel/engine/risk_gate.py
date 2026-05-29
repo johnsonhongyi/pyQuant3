@@ -88,7 +88,7 @@ def evaluate(
     except Exception:
         hhmm = 930
     
-    is_trading_hour = (915 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)
+    is_trading_hour = (925 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)
     
     if action in {"BUY", "ADD"}:
         if not is_trading_hour:
@@ -163,7 +163,9 @@ def evaluate(
             elif signal.code in held_codes or state == "IN_TRADE":
                 reject = {"code": "ALREADY_IN_TRADE", "severity": "HARD_BLOCK"}
         elif action in {"SELL", "REDUCE"}:
-            if not limits.allow_sell:
+            if not is_trading_hour:
+                reject = {"code": "NON_TRADING_SESSION", "time": signal.ts, "severity": "HARD_BLOCK"}
+            elif not limits.allow_sell:
                 reject = {"code": "SELL_DISABLED", "severity": "HARD_BLOCK"}
         elif action == "ADD" and state != "IN_TRADE":
             reject = {"code": "ADD_REQUIRES_POSITION", "severity": "HARD_BLOCK"}

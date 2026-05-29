@@ -1445,9 +1445,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             try:
                 idx = sys.argv.index("-log")
                 if idx + 1 < len(sys.argv) and sys.argv[idx + 1].lower() == "debug":
-                    import logging
                     logger.warning("⚙️ [SectorPanel] CMD line '-log debug' detected. Forcing logger to DEBUG level.")
-                    logger.setLevel(logging.DEBUG)
+                    logger.setLevel("DEBUG")
                     self._log_level_debug = True
             except Exception as e:
                 logger.warning(f"Failed to set log level dynamically: {e}")
@@ -1463,9 +1462,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         if getattr(self, '_log_level_debug', False):
             try:
-                import logging
                 if hasattr(self.detector, 'logger'):
-                    self.detector.logger.setLevel(logging.DEBUG)
+                    self.detector.logger.setLevel("DEBUG")
             except:
                 pass
         # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程的事件泵盲区！

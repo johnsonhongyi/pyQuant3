@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 风险引擎 - 增强版
 支持持续风险监控、信号聚合、交易冷却控制、报警消息生成
@@ -7,7 +8,7 @@ import time
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 
 class RiskEngine:

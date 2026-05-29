@@ -6,6 +6,9 @@ import threading
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Any
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger("JsonlJournal")
 
 
 def _safe_get(obj: Any, key: str, default: Any = None) -> Any:
@@ -101,8 +104,7 @@ class JsonlJournal:
                         fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
             except Exception as e:
                 try:
-                    import logging
-                    logging.getLogger().error(f"❌ [JsonlJournal] Failed to append AUDIT record: {e}")
+                    logger.error(f"❌ [JsonlJournal] Failed to append AUDIT record: {e}")
                 except Exception:
                     pass
             return
@@ -172,8 +174,7 @@ class JsonlJournal:
                 self._check_and_compress_journal()
         except Exception as e:
             try:
-                import logging
-                logging.getLogger().error(f"❌ [JsonlJournal] Failed to append record: {e}")
+                logger.error(f"❌ [JsonlJournal] Failed to append record: {e}")
             except Exception:
                 pass
 
@@ -236,14 +237,12 @@ class JsonlJournal:
                         pass
             
             try:
-                import logging
-                logging.getLogger().info(f"⚡ [JsonlJournal] Compression and cleanup success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines, total archives capped at {max_archives}.")
+                logger.info(f"⚡ [JsonlJournal] Compression and cleanup success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines, total archives capped at {max_archives}.")
             except Exception:
                 pass
         except Exception as e_comp:
             try:
-                import logging
-                logging.getLogger().warning(f"⚠️ [JsonlJournal] Failed to compress journal file: {e_comp}")
+                logger.warning(f"⚠️ [JsonlJournal] Failed to compress journal file: {e_comp}")
             except Exception:
                 pass
 

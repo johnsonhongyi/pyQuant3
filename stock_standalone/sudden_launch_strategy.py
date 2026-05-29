@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 
 import logging
 from typing import List, Dict, Any, Optional
@@ -9,7 +10,7 @@ from strategy_interface import IStrategy, StrategyConfig
 from signal_types import SignalPoint, SignalType, SignalSource
 from signal_message_queue import SignalMessage, SignalMessageQueue
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 class SuddenLaunchStrategy(IStrategy):
     """

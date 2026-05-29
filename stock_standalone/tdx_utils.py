@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 import os
 import sys
 import time
@@ -20,7 +21,7 @@ except ImportError:
 from JohnsonUtil import commonTips as cct
 import re
 
-logger = logging.getLogger()
+logger = LoggerFactory.getLogger()
 
 def clean_bad_columns(df: pd.DataFrame) -> pd.DataFrame:
     """清理异常列名"""

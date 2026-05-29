@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 import os
 import json
 import logging
@@ -16,7 +17,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QSize
 from PyQt6.QtGui import QColor, QFont, QAction, QBrush, QPainter, QPen
 import pyqtgraph as pg
 
-logger = logging.getLogger("qt_table_utils")
+logger = LoggerFactory.getLogger("qt_table_utils")
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """支持数值排序的表格项"""

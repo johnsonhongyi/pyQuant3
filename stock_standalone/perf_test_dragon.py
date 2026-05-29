@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 import time
 import logging
 import pandas as pd
@@ -17,7 +18,7 @@ except ImportError as e:
     sys.exit(1)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("PerfTest")
+logger = LoggerFactory.getLogger("PerfTest")
 
 def normalize_code(code):
     """代码规范化"""

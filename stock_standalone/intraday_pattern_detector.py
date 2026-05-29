@@ -19,6 +19,7 @@ IntradayPatternDetector - 日内分时形态检测器
     detector.update(code, name, tick_df, day_row, prev_close)
 """
 from __future__ import annotations
+from logger_utils import LoggerFactory
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Callable, Any
 from datetime import datetime, time as dt_time
@@ -27,7 +28,7 @@ import logging
 import json
 import os
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 # 尝试导入信号总线与标准化信号
 try:

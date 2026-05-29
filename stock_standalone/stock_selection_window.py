@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -14,7 +15,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 import logging
 from JohnsonUtil import commonTips as cct
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 # ✅ 盘中交易引擎（懒加载，避免启动依赖）
 try:
@@ -4379,8 +4380,16 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         
         self._apply_highlights()
         
-        # 👑 [NEW] 初始化完成后自动将文本滚动到最底部，便于第一时间查看最新的交易决策与策略总结
-        self.text_area.after(100, lambda: self.text_area.yview_moveto(1.0))
+        # 👑 [NEW] 初始化完成后自动将文本滚动到最底部，便于第一时间查看最新的交易决策与策略总结，并双重延时强力激活焦点
+        def focus_and_scroll():
+            if self.winfo_exists():
+                self.text_area.yview_moveto(1.0)
+                self.lift()
+                self.focus_force()
+                if hasattr(self, 'text_area'):
+                    self.text_area.focus_set()
+        self.text_area.after(100, focus_and_scroll)
+        self.text_area.after(300, focus_and_scroll)
 
     def _apply_highlights(self):
         def highlight_pattern(pattern, tag):
@@ -4445,8 +4454,16 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         
         self._apply_highlights()
         
-        # 👑 [NEW] 更新报告后自动滚动到最底部，便于第一时间查看最新的交易决策与策略总结
-        self.text_area.after(100, lambda: self.text_area.yview_moveto(1.0))
+        # 👑 [NEW] 更新报告后自动滚动到最底部，便于第一时间查看最新的交易决策与策略总结，并双重延时强力激活焦点
+        def focus_and_scroll():
+            if self.winfo_exists():
+                self.text_area.yview_moveto(1.0)
+                self.lift()
+                self.focus_force()
+                if hasattr(self, 'text_area'):
+                    self.text_area.focus_set()
+        self.text_area.after(100, focus_and_scroll)
+        self.text_area.after(300, focus_and_scroll)
 
     def _on_close(self):
         # 关闭时保存窗口位置大小
@@ -4518,14 +4535,30 @@ def _show_backtest_report_window(self, code: str, name: str, report: str):
             self._backtest_dialog.deiconify()
             self._backtest_dialog.lift()
             self._backtest_dialog.focus_force()
+            self._backtest_dialog.update_idletasks()
+            
+            # 双重保险延时焦点钉死，对抗 Windows 平台下主窗口后台回调抢焦
             if hasattr(self._backtest_dialog, 'text_area'):
                 self._backtest_dialog.text_area.focus_set()
+                self._backtest_dialog.after(100, lambda: [
+                    self._backtest_dialog.lift() if self._backtest_dialog.winfo_exists() else None,
+                    self._backtest_dialog.focus_force() if self._backtest_dialog.winfo_exists() else None,
+                    self._backtest_dialog.text_area.focus_set() if (self._backtest_dialog.winfo_exists() and hasattr(self._backtest_dialog, 'text_area')) else None
+                ])
         else:
             self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+            self._backtest_dialog.update_idletasks()
             self._backtest_dialog.lift()
             self._backtest_dialog.focus_force()
+            
+            # 初始化双重保险对焦
             if hasattr(self._backtest_dialog, 'text_area'):
                 self._backtest_dialog.text_area.focus_set()
+                self._backtest_dialog.after(100, lambda: [
+                    self._backtest_dialog.lift() if self._backtest_dialog.winfo_exists() else None,
+                    self._backtest_dialog.focus_force() if self._backtest_dialog.winfo_exists() else None,
+                    self._backtest_dialog.text_area.focus_set() if (self._backtest_dialog.winfo_exists() and hasattr(self._backtest_dialog, 'text_area')) else None
+                ])
     except Exception as e:
         logger.error(f"Error showing backtest report window: {e}")
 

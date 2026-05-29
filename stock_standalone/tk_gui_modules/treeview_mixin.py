@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+from logger_utils import LoggerFactory
 import logging
 import traceback
 import tkinter as tk
@@ -6,7 +7,7 @@ from tkinter import ttk
 import pandas as pd
 from typing import Any, Optional, Protocol, Union, runtime_checkable, TYPE_CHECKING
 
-logger = logging.getLogger("instock_TK.Treeview")
+logger = LoggerFactory.getLogger("instock_TK.Treeview")
 
 @runtime_checkable
 class TreeviewAppProtocol(Protocol):

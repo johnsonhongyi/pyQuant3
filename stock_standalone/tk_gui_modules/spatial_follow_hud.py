@@ -275,7 +275,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         """切换自动追踪模式时的响应"""
         is_checked = self.chk_auto_track.isChecked()
         self._save_auto_track(is_checked)
-        logger.info(f"🏇 [HUD Racing Mode] Auto-tracking toggled to: {is_checked}")
+        logger.debug(f"🏇 [HUD Racing Mode] Auto-tracking toggled to: {is_checked}")
         if is_checked:
             # 立即触发一次自动拉取
             self.update_hud_data(self.sector_name)
@@ -300,7 +300,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             # 🚀 [NEW] 延时 250ms 异步应用透明度状态，给 OS Win32 句柄与 High-DPI 重建留出稳定时间，根除 UpdateLayeredWindow 警告
             QtCore.QTimer.singleShot(250, self._apply_opacity_ui_state)
             
-            logger.info(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
+            logger.debug(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
         finally:
             self._switching_flags = False  # ⭐ [SILENT-LOCK] 确保置顶修改后解除静默锁
 
@@ -501,7 +501,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                         self.selected_index = idx
                         self._update_highlight_border()
                         self._trigger_linkage(cand["code"])
-                        logger.info(f"👑 [HUD Leader Label] Clicked and triggered linkage: {cand['name']}({cand['code']})")
+                        logger.debug(f"👑 [HUD Leader Label] Clicked and triggered linkage: {cand['name']}({cand['code']})")
                         break
             event.accept()
 
@@ -1028,7 +1028,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self.timer.setInterval(interval_ms)
         self.timer.timeout.connect(self._on_timer_refresh)
         self.timer.start()
-        logger.info(f"🛸 [HUD] 脏刷新定时器高频启动: {interval_ms} ms (对齐 CFG/Capped at 1.0s)")
+        logger.debug(f"🛸 [HUD] 脏刷新定时器高频启动: {interval_ms} ms (对齐 CFG/Capped at 1.0s)")
 
     def _on_slider_changed(self, val: int) -> None:
         self.lbl_size_val.setText(f"跟单仓位: <b>{val}%</b>")
@@ -1123,7 +1123,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         # 🚀 [NEW] 板块切换状态感知与竞技追踪自动降级自愈 (防止手动/外部切换板块时自动追踪强行拉回覆盖)
         if sector_name and self.sector_name and sector_name != self.sector_name:
             if hasattr(self, 'chk_auto_track') and self.chk_auto_track.isChecked():
-                logger.info(f"🔄 [HUD State Align] 外部/手动主动切换板块 {self.sector_name} -> {sector_name}，自动暂停 🏇 竞技追踪状态")
+                logger.debug(f"🔄 [HUD State Align] 外部/手动主动切换板块 {self.sector_name} -> {sector_name}，自动暂停 🏇 竞技追踪状态")
                 self.chk_auto_track.setChecked(False)
 
         # 1. [SSOT] 获取主窗口当前活跃运行的 BiddingMomentumDetector 实例
@@ -1143,7 +1143,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                     if active_list:
                         old_name = sector_name
                         sector_name = active_list[0].get('sector', '')
-                        logger.info(f"🔮 [HUD Self-Healing] Sector '{old_name}' not active in Bidding Detector. Auto self-healed and locked to strongest active wind: '{sector_name}'")
+                        logger.debug(f"🔮 [HUD Self-Healing] Sector '{old_name}' not active in Bidding Detector. Auto self-healed and locked to strongest active wind: '{sector_name}'")
             except Exception as e:
                 logger.warning(f"⚠️ [HUD Self-Healing] Failed to perform sector self-healing: {e}")
 
@@ -1225,7 +1225,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                         ldr_code = hot_sectors[0].leader_code
                         if ldr_code:
                             self._trigger_linkage(ldr_code)
-                            logger.info(f"⚡ [HUD Racing Drift] 风口轮动至: {new_sec}，自动切换至新龙头: {hot_sectors[0].leader_name}({ldr_code})")
+                            logger.debug(f"⚡ [HUD Racing Drift] 风口轮动至: {new_sec}，自动切换至新龙头: {hot_sectors[0].leader_name}({ldr_code})")
                     sector_name = new_sec
             else:
                 # 🔒 手动锁定模式：根据所选名称同步高亮候选按钮
@@ -1270,7 +1270,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
         # 🚀 [NEW] 终极冷启动与非活跃板块自愈实体构建器
         if not sh:
-            logger.info(f"🔮 [HUD Self-Healing] Sector '{sector_name}' has no active heatmap data. Generating zero-lock self-healing wrapper...")
+            logger.debug(f"🔮 [HUD Self-Healing] Sector '{sector_name}' has no active heatmap data. Generating zero-lock self-healing wrapper...")
             dummy_data = {
                 'sector': sector_name if sector_name else "板块观察",
                 'score': 0.0,
@@ -1930,7 +1930,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             if new_idx != curr_idx and new_idx < len(self.hot_btns):
                 btn = self.hot_btns[new_idx]
                 if btn.isVisible():
-                    logger.info(f"⌨️ [HUD Keyboard Select] Key {key} pressed -> Waterfall Cycle Select Sector Hot {new_idx+1} ({self._nav_direction})")
+                    # logger.info(f"⌨️ [HUD Keyboard Select] Key {key} pressed -> Waterfall Cycle Select Sector Hot {new_idx+1} ({self._nav_direction})")
                     btn.click()
             event.accept()
             return
@@ -2011,18 +2011,18 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
     def _on_sync_clicked(self) -> None:
         """物理强制同步与深度自愈诊断入口"""
-        logger.info("🔄 [HUD Sync] User physically triggered custom sync button.")
+        logger.debug("🔄 [HUD Sync] User physically triggered custom sync button.")
         
         # 1. 物理诊断探测器链
         detector = self._get_active_detector()
         panel = getattr(self.main_app, 'sector_bidding_panel', None)
         main_det = getattr(self.main_app, 'racing_detector', None)
         
-        logger.info(f"🔍 [HUD Diagnostics] MainApp: {type(self.main_app)}")
-        logger.info(f"🔍 [HUD Diagnostics] MainApp.racing_detector: {main_det} (active_sectors len: {len(main_det.active_sectors) if main_det and hasattr(main_det, 'active_sectors') else 'N/A'})")
-        logger.info(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel: {panel}")
-        logger.info(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel.detector: {panel.detector if panel and hasattr(panel, 'detector') else None} (active_sectors len: {len(panel.detector.active_sectors) if panel and hasattr(panel, 'detector') and panel.detector and hasattr(panel.detector, 'active_sectors') else 'N/A'})")
-        logger.info(f"🔍 [HUD Diagnostics] SSOT Resolved Detector: {detector}")
+        logger.debug(f"🔍 [HUD Diagnostics] MainApp: {type(self.main_app)}")
+        logger.debug(f"🔍 [HUD Diagnostics] MainApp.racing_detector: {main_det} (active_sectors len: {len(main_det.active_sectors) if main_det and hasattr(main_det, 'active_sectors') else 'N/A'})")
+        logger.debug(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel: {panel}")
+        logger.debug(f"🔍 [HUD Diagnostics] MainApp.sector_bidding_panel.detector: {panel.detector if panel and hasattr(panel, 'detector') else None} (active_sectors len: {len(panel.detector.active_sectors) if panel and hasattr(panel, 'detector') and panel.detector and hasattr(panel.detector, 'active_sectors') else 'N/A'})")
+        logger.debug(f"🔍 [HUD Diagnostics] SSOT Resolved Detector: {detector}")
         
         # 2. 强力刷新数据
         self.update_hud_data(self.sector_name, force_render_sector=self.sector_name if self.sector_name else None)
@@ -2040,7 +2040,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         """重写开启显示事件：每次打开 HUD 时自动执行深度物理数据同步与自愈"""
         super().showEvent(event)
-        logger.info("🛸 [HUD ShowEvent] HUD window opened, forcing active sector data synchronization...")
+        logger.debug("🛸 [HUD ShowEvent] HUD window opened, forcing active sector data synchronization...")
         self.update_hud_data(self.sector_name)
         
         # 🚀 [ROOT-FIX] 强力恢复并应用置顶配置，采用防递归安全标记，彻底抵御任何外来重置干扰
@@ -2104,7 +2104,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             os.makedirs("logs", exist_ok=True)
             with open("logs/hud_column_widths.json", "w", encoding="utf-8") as f:
                 json.dump({"widths": widths}, f, indent=4)
-            logger.info(f"💾 [HUD Column Persistence] Saved column widths: {widths}")
+            logger.debug(f"💾 [HUD Column Persistence] Saved column widths: {widths}")
         except Exception as e:
             logger.warning(f"⚠️ [HUD Column Persistence] Failed to save column widths: {e}")
 
@@ -2133,7 +2133,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                         # ⚡ [QUIET-GATE] 上限门槛保护：确保还原列宽时自发对齐至超紧凑黄金上限，防止撑破 UI 挤出滚动条
                         target_w = min(int(widths[i]), max_bounds[i])
                         self.table.setColumnWidth(i, target_w)
-                    logger.info(f"💾 [HUD Column Persistence] Successfully restored column widths with compact guard up to {limit_len} columns: {widths[:limit_len]}")
+                    # logger.info(f"💾 [HUD Column Persistence] Successfully restored column widths with compact guard up to {limit_len} columns: {widths[:limit_len]}")
                     return
         except Exception as e:
             logger.warning(f"⚠️ [HUD Column Persistence] Failed to load column widths: {e}")

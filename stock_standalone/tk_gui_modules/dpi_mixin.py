@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+from logger_utils import LoggerFactory
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -20,7 +21,7 @@ except ImportError:
         QtGui = Any # type: ignore
         PYQT6_AVAILABLE = False
 
-logger = logging.getLogger("instock_TK.DPI")
+logger = LoggerFactory.getLogger("instock_TK.DPI")
 
 @runtime_checkable
 class DPIAppProtocol(Protocol):

@@ -1,10 +1,11 @@
+from logger_utils import LoggerFactory
 import json
 import os
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Tuple
 
-logger = logging.getLogger("ReentryTracker")
+logger = LoggerFactory.getLogger("ReentryTracker")
 
 # 观察期默认 5 天
 OBSERVATION_DAYS = 5
