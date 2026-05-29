@@ -134,8 +134,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # 绑定关闭事件以保存位置
         self.protocol("WM_DELETE_WINDOW", lambda: self._on_close(window_id))
         
-        # 🚀 [NEW] 延时 250ms 等待 UI 充分绘制渲染完毕后，高保真恢复板块聚焦与决策队列 sash 窗格分割高度
-        self.after(250, self._restore_sash_positions)
+        # 🚀 [NEW] 延时 250ms 等待 UI 充分绘制渲染完毕后，高保真恢复板块聚焦与决策队列 sash 窗格分割高度及每日操作指南列宽
+        self.after(250, lambda: [self._restore_sash_positions(), self._restore_guidance_column_widths()])
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
@@ -149,11 +149,15 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         except Exception:
             pass
 
-        # 🚀 [NEW] 保存板块聚焦和实时决策的 sash 窗格分割高度位置
+        # 🚀 [NEW] 保存板块聚焦和实时决策的 sash 窗格分割高度位置以及每日操作指南列宽
         try:
             self._save_sash_positions()
         except Exception as e:
             logger.error(f"[sash_positions] Save failed: {e}")
+        try:
+            self._save_guidance_column_widths()
+        except Exception as e:
+            logger.error(f"[guidance_column_widths] Save failed: {e}")
         # [NEW] 关闭并保存浮动交易看板
         try:
             win = getattr(self, "_kernel_toast_win", None)
@@ -488,6 +492,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self._notebook.add(tab_decision, text="🎯 实时决策")
         self._init_decision_tab(tab_decision)
 
+        # ── Tab 4: 📋 每日操作指南 ─────────────────────────────────────────────
+        tab_guidance = tk.Frame(self._notebook)
+        self._notebook.add(tab_guidance, text="📋 每日操作指南")
+        self._init_guidance_tab(tab_guidance)
+
         # 定时刷新（切换到交易相关Tab时才真正更新）
         self._focus_refresh_id: Optional[str] = None
         self._schedule_focus_refresh()
@@ -695,6 +704,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # ✅ [OPTIMIZE] 采用“批量冻结 UI”渲染模式
             self._render_token += 1
             self._do_bulk_render(self._render_token)
+            
+            # ✅ [NEW] 联动刷新每日操作指南 Tab
+            if hasattr(self, '_refresh_guidance_tab'):
+                self._refresh_guidance_tab()
             
         except Exception as e:
             logger.error(f"错误 加载数据失败: {e}")
@@ -2819,6 +2832,8 @@ def _refresh_focus_tabs(self):
         logger.debug(f"[refresh_focus_tabs] auto execute once error: {e}")
     self._refresh_sector_tab()
     self._refresh_decision_tab()
+    if hasattr(self, '_refresh_guidance_tab'):
+        self._refresh_guidance_tab()
 
 
 def _refresh_sector_tab(self):
@@ -4793,5 +4808,718 @@ def _show_kernel_confirm_dialog(self, sig, action, price):
 
 
 StockSelectionWindow._show_kernel_confirm_dialog = _show_kernel_confirm_dialog
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 📋 每日操作指南 (Daily Operating Guidance) - TK 统一视图实现与联动
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _init_guidance_tab(self, parent: tk.Frame):
+    """
+    每日操作指南与挂单价格直接查阅 Tab
+    """
+    parent.config(bg="#0c101b")
+    
+    # 顶部控制面板（手动触发重算与刷新按钮）
+    ctrl_bar = tk.Frame(parent, bg="#0c101b", pady=5)
+    ctrl_bar.pack(fill="x")
+    
+    self._guidance_status_lbl = tk.Label(
+        ctrl_bar, text="📋 每日盘前诊断建议与挂单执行参考价格表",
+        bg="#0c101b", fg="#55ffff", font=("Arial", 10, "bold")
+    )
+    self._guidance_status_lbl.pack(side="left", padx=10)
+    
+    # 状态提示
+    self._guidance_tips_lbl = tk.Label(
+        ctrl_bar, text="",
+        bg="#0c101b", fg="#888888", font=("Arial", 9)
+    )
+    self._guidance_tips_lbl.pack(side="left", padx=15)
+
+    btn_frame = tk.Frame(ctrl_bar, bg="#0c101b")
+    btn_frame.pack(side="right", padx=10)
+    
+    # 手动触发重算诊断按钮
+    def on_manual_recalc():
+        self._guidance_tips_lbl.config(text="⚡ 正在后台重算每日诊断，请稍候...", fg="#ffcc66")
+        recalc_btn.config(state="disabled")
+        
+        def _bg_calc():
+            try:
+                from premarket_analyzer import run_premarket_diagnose
+                run_premarket_diagnose()
+                logger.info("📡 [TK] Premarket diagnose manually calculated successfully.")
+                self.after(0, lambda: [
+                    self._refresh_guidance_tab(),
+                    self._guidance_tips_lbl.config(text="✅ 重算并落盘成功！数据已实时更新。", fg="#66ffcc"),
+                    recalc_btn.config(state="normal")
+                ])
+            except Exception as ex:
+                logger.error(f"[TK] Premarket diagnose recalc failed: {ex}")
+                self.after(0, lambda: [
+                    self._guidance_tips_lbl.config(text=f"❌ 计算失败: {ex}", fg="#ff7777"),
+                    recalc_btn.config(state="normal")
+                ])
+                
+        import threading
+        threading.Thread(target=_bg_calc, daemon=True).start()
+        
+    recalc_btn = tk.Button(
+        btn_frame, text="⚡ 盘前重算", bg="#1a3c40", fg="#66ffcc",
+        font=("Arial", 9, "bold"), relief="flat", padx=8, pady=2,
+        command=on_manual_recalc
+    )
+    recalc_btn.pack(side="left", padx=5)
+    
+    tk.Button(
+        btn_frame, text="🔄 刷新表格", bg="#111726", fg="#ffffff",
+        font=("Arial", 9), relief="flat", padx=8, pady=2,
+        command=self._refresh_guidance_tab
+    ).pack(side="left", padx=5)
+
+    # 表格区域
+    tree_frame = tk.Frame(parent, bg="#0c101b")
+    tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    cols = ("code", "name", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason")
+    self._guidance_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", style="Dark.Treeview")
+    
+    # Scrollbars
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._guidance_tree.yview, style="Small.Vertical.TScrollbar")
+    hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._guidance_tree.xview, style="Small.Horizontal.TScrollbar")
+    self._guidance_tree.configure(yscroll=vsb.set, xscroll=hsb.set)
+    
+    self._guidance_tree.grid(row=0, column=0, sticky="nsew")
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
+    
+    tree_frame.grid_rowconfigure(0, weight=1)
+    tree_frame.grid_columnconfigure(0, weight=1)
+    
+    headers = {
+        "code": "代码", "name": "名称", "sector": "核心板块", "action": "操作建议", 
+        "order_price": "挂单参考", "support_price": "战术支撑", 
+        "stop_price": "止损防守", "branch": "活跃分支", "reason": "决策理由"
+    }
+    
+    for c, text in headers.items():
+        self._guidance_tree.heading(c, text=text, command=lambda col_name=c: self._sort_guidance_tree(col_name))
+        self._guidance_tree.column(c, anchor="center")
+        
+    self._guidance_tree.column("#0", width=0, minwidth=0, stretch=False)
+    self._guidance_tree.column("code", width=70, stretch=False)
+    self._guidance_tree.column("name", width=90, stretch=False)
+    self._guidance_tree.column("sector", width=105, stretch=False)
+    self._guidance_tree.column("action", width=75, stretch=False)
+    self._guidance_tree.column("order_price", width=75, stretch=False)
+    self._guidance_tree.column("support_price", width=75, stretch=False)
+    self._guidance_tree.column("stop_price", width=75, stretch=False)
+    self._guidance_tree.column("branch", width=120, stretch=False)
+    self._guidance_tree.column("reason", width=250, stretch=True)
+    
+    # 颜色配置高亮 tag
+    self._guidance_tree.tag_configure("buy", background="#3a1b1b", foreground="#ff6666")
+    self._guidance_tree.tag_configure("add", background="#2a2a00", foreground="#ffff55")
+    self._guidance_tree.tag_configure("tp", background="#1b3a24", foreground="#66ffcc")
+    self._guidance_tree.tag_configure("stop", background="#3a1122", foreground="#ff55bb")
+    self._guidance_tree.tag_configure("normal", background="#0c101b", foreground="#eeeeee")
+    
+    # 策略分支高保真高对比色调 tag (强视觉区分，彻底根治“破位高位防震”等无色调或黑白混杂痛点)
+    self._guidance_tree.tag_configure("warning_red", background="#2b1414", foreground="#ff4444")      # 破位高位防震 -> 醒目高对比红
+    self._guidance_tree.tag_configure("super_cyan", background="#0c222b", foreground="#00ffff")       # 5日线主升浪/极速支撑 -> 电竞极速青
+    self._guidance_tree.tag_configure("trend_green", background="#0d2215", foreground="#00ff88")      # 10日线反转/趋势 -> 盎然反弹绿
+    self._guidance_tree.tag_configure("pullback_yellow", background="#24220d", foreground="#ffd700")  # SWS盈利线低吸/防守支撑 -> 黄金沙漏黄
+    self._guidance_tree.tag_configure("defense_blue", background="#161626", foreground="#d670ff")     # 60日线生死防守 -> 战术防守紫/蓝
+
+
+    # 事件绑定 (单击联动主图，双击弹出决策窗口)
+    def _on_guidance_selected(event=None):
+        sel = self._guidance_tree.selection()
+        if not sel: return
+        code = sel[0]
+        if hasattr(self, 'sender') and self.sender:
+            try:
+                self.sender.send(code)
+            except Exception:
+                pass
+        if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+            if hasattr(self.master, 'open_visualizer'):
+                self.master.open_visualizer(code)
+                
+    def _on_guidance_double_click(event=None):
+        sel = self._guidance_tree.selection()
+        if not sel: return
+        code = sel[0]
+        item = self._guidance_tree.item(code)
+        vals = item.get("values", [])
+        if len(vals) > 8:
+            # 弹窗显示详细理由
+            msg = (
+                f"🏷 股票：{vals[1]} ({vals[0]})\n"
+                f"📊 核心板块：{vals[2]}\n"
+                f"🎯 战术建议：{vals[3]}\n"
+                f"💵 挂单执行价：¥ {vals[4]}\n"
+                f"🧱 辅助支撑：¥ {vals[5]}\n"
+                f"🛡 战术防守价：¥ {vals[6]}\n"
+                f"👑 策略活跃分支：{vals[7]}\n\n"
+                f"🔍 决策分析归因理由：\n{vals[8]}"
+            )
+            messagebox.showinfo("每日盘前操作指南详情", msg, parent=self)
+
+    def _show_guidance_context_menu(event):
+        item_id = self._guidance_tree.identify_row(event.y)
+        if not item_id:
+            return
+        self._guidance_tree.selection_set(item_id)
+        
+        # 针对 Treeview 的专业右键菜单，带有背景色以符合系统暗色主调
+        menu = tk.Menu(self._guidance_tree, tearoff=0, bg="#0c101b", fg="#ffffff", activebackground="#1e293b", activeforeground="#ffffff")
+        
+        def _delete_selected_guidance():
+            code = item_id
+            if not messagebox.askyesno("确认删除", f"是否确定从每日操作指南中删除股票 {code} 的记录？", parent=self):
+                return
+            import os
+            import json
+            try:
+                from sys_utils import get_base_path
+                base_dir = get_base_path()
+            except Exception:
+                base_dir = os.path.abspath(".")
+            filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+            if not os.path.exists(filepath):
+                return
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    new_data = [d for d in data if d.get('code') != code]
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(new_data, f, ensure_ascii=False, indent=2)
+                # 重新刷新当前视图
+                self._refresh_guidance_tab()
+                # 提示成功
+                self._guidance_tips_lbl.config(text=f"🗑 已成功删除股票 {code} 的操作指南", fg="#ff55bb")
+            except Exception as ex:
+                messagebox.showerror("错误", f"删除失败: {ex}", parent=self)
+                
+        menu.add_command(label="🗑 删除此操作指南", command=_delete_selected_guidance)
+        menu.post(event.x_root, event.y_root)
+
+    self._guidance_tree.bind("<<TreeviewSelect>>", _on_guidance_selected)
+    self._guidance_tree.bind("<Double-1>", _on_guidance_double_click)
+    self._guidance_tree.bind("<Button-3>", _show_guidance_context_menu)
+
+
+def _refresh_guidance_tab(self):
+    """
+    从 logs/premarket_diagnose.json 载入数据并填充 每日操作指南 Treeview
+    """
+    if not hasattr(self, '_guidance_tree') or not self._guidance_tree.winfo_exists():
+        return
+        
+    # 清空
+    self._guidance_tree.delete(*self._guidance_tree.get_children())
+    
+    import os
+    import json
+    try:
+        from sys_utils import get_base_path
+        base_dir = get_base_path()
+    except Exception:
+        base_dir = os.path.abspath(".")
+    filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+    if not os.path.exists(filepath):
+        self._guidance_tips_lbl.config(text="⚠️ 未找到盘前诊断文件，请点击盘前重算", fg="#ff7777")
+        return
+        
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        if not isinstance(data, list):
+            self._guidance_tips_lbl.config(text="❌ 数据格式错误", fg="#ff7777")
+            return
+            
+        # 预先加载全量个股的代码->题材板块的映射关系，实现高精度的 O(1) 联查
+        code_to_sector = {}
+        # 预先加载全量个股的代码->名称的映射关系，实现高精度的 O(1) 真名自愈
+        code_to_name = {}
+        
+        # 1. 优先从 selector 实时数据表加载
+        if hasattr(self, 'selector') and self.selector is not None and hasattr(self.selector, 'df_all_realtime'):
+            rt = self.selector.df_all_realtime
+            if rt is not None and not rt.empty:
+                if 'category' in rt.columns:
+                    if rt.index.name == 'code':
+                        code_to_sector.update(rt['category'].fillna('').astype(str).to_dict())
+                    else:
+                        for idx, row in rt.iterrows():
+                            c = str(row.get('code', idx)).zfill(6)
+                            code_to_sector[c] = str(row.get('category', ''))
+                if 'name' in rt.columns:
+                    if rt.index.name == 'code':
+                        for k, v in rt['name'].fillna('').astype(str).to_dict().items():
+                            c = str(k).zfill(6)
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                code_to_name[c] = v
+                    else:
+                        for idx, row in rt.iterrows():
+                            c = str(row.get('code', idx)).zfill(6)
+                            v = str(row.get('name', ''))
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                code_to_name[c] = v
+                        
+        # 2. 从 df_full_candidates 加载
+        if hasattr(self, 'df_full_candidates') and self.df_full_candidates is not None and not self.df_full_candidates.empty:
+            df_fc = self.df_full_candidates
+            if 'category' in df_fc.columns:
+                if df_fc.index.name == 'code':
+                    code_to_sector.update(df_fc['category'].fillna('').astype(str).to_dict())
+                else:
+                    for idx, row in df_fc.iterrows():
+                        c = str(row.get('code', idx)).zfill(6)
+                        code_to_sector[c] = str(row.get('category', ''))
+            if 'name' in df_fc.columns:
+                if df_fc.index.name == 'code':
+                    for k, v in df_fc['name'].fillna('').astype(str).to_dict().items():
+                        c = str(k).zfill(6)
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            code_to_name[c] = v
+                else:
+                    for idx, row in df_fc.iterrows():
+                        c = str(row.get('code', idx)).zfill(6)
+                        v = str(row.get('name', ''))
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            code_to_name[c] = v
+                        
+        # 3. 从 df_candidates 加载
+        if hasattr(self, 'df_candidates') and self.df_candidates is not None and not self.df_candidates.empty:
+            df_c = self.df_candidates
+            if 'category' in df_c.columns:
+                if df_c.index.name == 'code':
+                    code_to_sector.update(df_c['category'].fillna('').astype(str).to_dict())
+                else:
+                    for idx, row in df_c.iterrows():
+                        c = str(row.get('code', idx)).zfill(6)
+                        code_to_sector[c] = str(row.get('category', ''))
+            if 'name' in df_c.columns:
+                if df_c.index.name == 'code':
+                    for k, v in df_c['name'].fillna('').astype(str).to_dict().items():
+                        c = str(k).zfill(6)
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            code_to_name[c] = v
+                else:
+                    for idx, row in df_c.iterrows():
+                        c = str(row.get('code', idx)).zfill(6)
+                        v = str(row.get('name', ''))
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            code_to_name[c] = v
+                        
+        # 4. 从 master.df_all 加载
+        if hasattr(self, 'master') and self.master is not None and hasattr(self.master, 'df_all'):
+            m_all = self.master.df_all
+            if m_all is not None and not m_all.empty:
+                if 'category' in m_all.columns:
+                    if m_all.index.name == 'code':
+                        code_to_sector.update(m_all['category'].fillna('').astype(str).to_dict())
+                    else:
+                        for idx, row in m_all.iterrows():
+                            c = str(row.get('code', idx)).zfill(6)
+                            code_to_sector[c] = str(row.get('category', ''))
+                if 'name' in m_all.columns:
+                    if m_all.index.name == 'code':
+                        for k, v in m_all['name'].fillna('').astype(str).to_dict().items():
+                            c = str(k).zfill(6)
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                code_to_name[c] = v
+                    else:
+                        for idx, row in m_all.iterrows():
+                            c = str(row.get('code', idx)).zfill(6)
+                            v = str(row.get('name', ''))
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                code_to_name[c] = v
+                        
+        # 5. Fallback 降级从 top_all.h5 中检索
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                if os.path.exists(path):
+                    import pandas as pd
+                    df_top = pd.read_hdf(path, 'top_all')
+                    if not df_top.empty:
+                        col_to_check = 'category' if 'category' in df_top.columns else ('industry' if 'industry' in df_top.columns else None)
+                        if col_to_check:
+                            if df_top.index.name == 'code':
+                                for k, v in df_top[col_to_check].fillna('').astype(str).to_dict().items():
+                                    kc = str(k).zfill(6)
+                                    if kc not in code_to_sector or not code_to_sector[kc]:
+                                        code_to_sector[kc] = v
+                            else:
+                                for idx, row in df_top.iterrows():
+                                    c = str(row.get('code', idx)).zfill(6)
+                                    if c not in code_to_sector or not code_to_sector[c]:
+                                        code_to_sector[c] = str(row.get(col_to_check, ''))
+                        if 'name' in df_top.columns:
+                            if df_top.index.name == 'code':
+                                for k, v in df_top['name'].fillna('').astype(str).to_dict().items():
+                                    kc = str(k).zfill(6)
+                                    v_str = str(v)
+                                    if v_str and not v_str.startswith("个股_") and not v_str.isdigit():
+                                        if kc not in code_to_name:
+                                            code_to_name[kc] = v_str
+                            else:
+                                for idx, row in df_top.iterrows():
+                                    c = str(row.get('code', idx)).zfill(6)
+                                    v_str = str(row.get('name', ''))
+                                    if v_str and not v_str.startswith("个股_") and not v_str.isdigit():
+                                        if c not in code_to_name:
+                                            code_to_name[c] = v_str
+                    break
+        except Exception:
+            pass
+
+        # 排序处理
+        sort_col = getattr(self, '_guid_sort_col', "code")
+        sort_desc = getattr(self, '_guid_sort_desc', False)
+        
+        # 实时更新表头排序三角指示器 (🔼 / 🔽)
+        headers = {
+            "code": "代码", "name": "名称", "sector": "核心板块", "action": "操作建议", 
+            "order_price": "挂单参考", "support_price": "战术支撑", 
+            "stop_price": "止损防守", "branch": "活跃分支", "reason": "决策理由"
+        }
+        arrow = " 🔽" if sort_desc else " 🔼"
+        for c, text in headers.items():
+            header_text = text + arrow if c == sort_col else text
+            self._guidance_tree.heading(c, text=header_text)
+            
+        def _get_sort_key(d):
+            if sort_col in ("order_price", "predicted_ma5"):
+                return float(d.get('predicted_ma5') or d.get('order_price') or 0.0)
+            if sort_col in ("support_price", "sws_support"):
+                return float(d.get('sws_support') or d.get('support_price') or 0.0)
+            if sort_col in ("stop_price", "hard_stop"):
+                return float(d.get('hard_stop') or d.get('stop_price') or 0.0)
+            if sort_col == "code":
+                c_clean = str(d.get('code') or '').strip()
+                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                    c_clean = c_clean.replace(icon, '').strip()
+                return c_clean.zfill(6)
+            if sort_col == "name":
+                code = d.get('code') or ''
+                code_clean = str(code).strip()
+                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                    code_clean = code_clean.replace(icon, '').strip()
+                code_clean = code_clean.zfill(6)
+                
+                name = d.get('name') or ''
+                name_clean = str(name).strip()
+                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                    name_clean = name_clean.replace(icon, '').strip()
+                    
+                if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+                    healed_name = code_to_name.get(code_clean)
+                    if healed_name:
+                        return healed_name
+                return name_clean
+            if sort_col == "sector":
+                c_clean = str(d.get('code') or '').strip()
+                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                    c_clean = c_clean.replace(icon, '').strip()
+                c_clean = c_clean.zfill(6)
+                return str(code_to_sector.get(c_clean, ''))
+            if sort_col == "action":
+                act = str(d.get('action_cn') or d.get('suggest_action') or '保持观察')
+                priority_map = {
+                    "买入建仓": 1,
+                    "建仓": 1,
+                    "做T回补": 2,
+                    "回补": 2,
+                    "分批大止盈": 3,
+                    "大止盈": 3,
+                    "止损": 4,
+                    "保持观察": 5,
+                    "观察": 5
+                }
+                return priority_map.get(act, 99)
+            if sort_col == "branch":
+                branch_name = str(d.get('branch_cn') or d.get('active_branch') or '')
+                priority_map = {
+                    "5日线主升浪": 1,
+                    "5日线极速支撑": 1,
+                    "10日线反转": 2,
+                    "10日线趋势": 2,
+                    "SWS盈利线低吸": 3,
+                    "SWS防守支撑": 3,
+                    "60日线生死防守": 4,
+                    "破位高位防震": 5
+                }
+                return priority_map.get(branch_name, 99)
+            
+            # 兜底通用提取
+            val = d.get(sort_col) or ''
+            try:
+                return float(val)
+            except Exception:
+                return str(val)
+                
+        data_sorted = sorted(data, key=_get_sort_key, reverse=sort_desc)
+        
+        any_healed = False
+        for d in data_sorted:
+            code = d.get('code') or ''
+            name = d.get('name') or ''
+            
+            # Clean emojis from code for sector matching
+            code_clean = str(code).strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                code_clean = code_clean.replace(icon, '').strip()
+            code_clean = code_clean.zfill(6)
+            
+            # Auto-heal stock names if they are empty, digit, or start with "个股_"
+            name_clean = str(name).strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                name_clean = name_clean.replace(icon, '').strip()
+                
+            if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+                healed_name = code_to_name.get(code_clean)
+                if healed_name:
+                    name = healed_name
+                    d['name'] = healed_name
+                    any_healed = True
+            
+            raw_sec = code_to_sector.get(code_clean, '')
+            sector_str = self._get_short_category(raw_sec)
+            
+            action = d.get('action_cn') or d.get('suggest_action') or '保持观察'
+            order_p = float(d.get('predicted_ma5') or d.get('order_price') or 0.0)
+            supp_p = float(d.get('sws_support') or d.get('support_price') or 0.0)
+            stop_p = float(d.get('hard_stop') or d.get('stop_price') or 0.0)
+            branch_raw = d.get('branch_cn') or d.get('active_branch') or ''
+            
+            # Emojis 映射：彻底物理剥离 \uFE0F 并换成兼容的 🛡 和 🚨 消除 Windows 平台多余空格与空白
+            branch_emoji_map = {
+                "5日线主升浪": "🚀 5日线主升浪",
+                "5日线极速支撑": "🚀 5日线极速支撑",
+                "10日线反转": "🟢 10日线反转",
+                "10日线趋势": "🟢 10日线趋势",
+                "SWS盈利线低吸": "🟡 SWS盈利线低吸",
+                "SWS防守支撑": "🟡 SWS防守支撑",
+                "60日线生死防守": "🛡 60日线生死防守",
+                "破位高位防震": "🚨 破位高位防震"
+            }
+            branch = branch_emoji_map.get(branch_raw, branch_raw)
+            reason = d.get('reason') or ''
+            
+            # 格式化价格
+            order_p_str = f"{order_p:.2f}" if order_p > 0 else "--"
+            supp_p_str = f"{supp_p:.2f}" if supp_p > 0 else "--"
+            stop_p_str = f"{stop_p:.2f}" if stop_p > 0 else "--"
+            
+            # 策略分支高保真高对比配色优先 (彻底根治“破位高位防震没有用不同颜色区分出来”的痛点)
+            tag = "normal"
+            if "破位高位防震" in branch_raw:
+                tag = "warning_red"
+            elif "5日线" in branch_raw:
+                tag = "super_cyan"
+            elif "10日线" in branch_raw:
+                tag = "trend_green"
+            elif "SWS" in branch_raw:
+                tag = "pullback_yellow"
+            elif "60日线" in branch_raw:
+                tag = "defense_blue"
+            else:
+                # 兜底根据 action 回退状态着色
+                if action in ("买入", "建仓", "买入建仓"):
+                    tag = "buy"
+                elif action in ("补仓", "回补", "做T回补"):
+                    tag = "add"
+                elif action in ("大止盈", "分批大止盈", "减仓"):
+                    tag = "tp"
+                elif action in ("止损", "止损平仓", "清仓平仓"):
+                    tag = "stop"
+                
+            self._guidance_tree.insert(
+                "", "end", iid=code,
+                values=(code, name, sector_str, action, order_p_str, supp_p_str, stop_p_str, branch, reason),
+                tags=(tag,)
+            )
+            
+        if any_healed:
+            try:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                logger.info("✨ [GUIDANCE-HEAL] Successfully persisted healed stock names back to logs/premarket_diagnose.json")
+            except Exception as write_err:
+                logger.error(f"❌ [GUIDANCE-HEAL] Failed to write back healed names: {write_err}")
+                
+        self._guidance_tips_lbl.config(text=f"📊 已成功拉取并呈现 {len(data_sorted)} 条作战指导", fg="#888888")
+        
+        # 仅在打开/首次载入时执行一次自动恢复或自动测量，后续刷新时保持用户手动调整的列宽不被强行覆盖
+        if not getattr(self, '_guidance_cols_initialized', False):
+            self._guidance_cols_initialized = True
+            has_custom = False
+            try:
+                scale = self._get_dpi_scale_factor()
+                config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+                if os.path.exists(config_file_path):
+                    with open(config_file_path, "r", encoding="utf-8") as f:
+                        cf_data = json.load(f)
+                    if 'guidance_column_widths' in cf_data:
+                        has_custom = True
+            except Exception:
+                pass
+                
+            if has_custom:
+                self._restore_guidance_column_widths()
+            else:
+                self._auto_fit_guidance_columns()
+    except Exception as e:
+        logger.error(f"Error refreshing guidance tab in TK: {e}")
+        self._guidance_tips_lbl.config(text=f"❌ 载入出错: {e}", fg="#ff7777")
+
+
+def _sort_guidance_tree(self, col: str):
+    """每日操作指南列表点击表头排序"""
+    current_col = getattr(self, '_guid_sort_col', "code")
+    current_desc = getattr(self, '_guid_sort_desc', False)
+    
+    if current_col == col:
+        self._guid_sort_desc = not current_desc
+    else:
+        self._guid_sort_col = col
+        self._guid_sort_desc = False
+        
+    self._refresh_guidance_tab()
+
+
+def show_guidance_tab(self):
+    """切换当前 Notebook 到 📋 每日操作指南 选项卡"""
+    try:
+        if hasattr(self, '_notebook'):
+            for tab_id in self._notebook.tabs():
+                tab_text = self._notebook.tab(tab_id, "text")
+                if "每日操作指南" in tab_text:
+                    self._notebook.select(tab_id)
+                    logger.info("📡 选股窗口已自动切换到 📋 每日操作指南 选项卡")
+                    break
+    except Exception as e:
+        logger.warning(f"切换到每日操作指南选项卡失败: {e}")
+
+
+def _save_guidance_column_widths(self):
+    """保存每日操作指南 Treeview 的列宽"""
+    if not hasattr(self, "_guidance_tree") or not self._guidance_tree.winfo_exists():
+        return
+    try:
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+        
+        widths = {}
+        for col in ["code", "name", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason"]:
+            try:
+                widths[col] = int(self._guidance_tree.column(col, "width") / scale)
+            except Exception:
+                pass
+        
+        data = {}
+        if os.path.exists(config_file_path):
+            with open(config_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        
+        data['guidance_column_widths'] = widths
+        
+        tmp_file = config_file_path + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        os.replace(tmp_file, config_file_path)
+        logger.debug(f"[guidance_column_widths] Saved: {widths}")
+    except Exception as e:
+        logger.error(f"[guidance_column_widths] Save failed: {e}")
+
+
+def _restore_guidance_column_widths(self):
+    """恢复每日操作指南 Treeview 的列宽"""
+    if not hasattr(self, "_guidance_tree") or not self._guidance_tree.winfo_exists():
+        return
+    try:
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+        
+        if os.path.exists(config_file_path):
+            with open(config_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            widths = data.get('guidance_column_widths', {})
+            if widths:
+                for col, w in widths.items():
+                    try:
+                        self._guidance_tree.column(col, width=int(w * scale))
+                    except Exception:
+                        pass
+                logger.debug(f"[guidance_column_widths] Restored: {widths}")
+    except Exception as e:
+        logger.error(f"[guidance_column_widths] Restore failed: {e}")
+
+
+def _auto_fit_guidance_columns(self):
+    """
+    根据操作指南实际内容自动调整列宽，防止文字剪切/重叠
+    """
+    if not hasattr(self, "_guidance_tree") or not self._guidance_tree.winfo_exists():
+        return
+    import tkinter.font as tkfont
+    try:
+        f = tkfont.Font(font='Arial 9')
+    except Exception:
+        f = tkfont.Font(font=self._guidance_tree.cget("font"))
+        
+    cols = self._guidance_tree["columns"]
+    all_items = self._guidance_tree.get_children()
+    scale = self._get_dpi_scale_factor()
+    
+    for col in cols:
+        header_text = self._guidance_tree.heading(col)["text"]
+        max_w = f.measure(header_text) + int(25 * scale) # padding
+        
+        for item in all_items:
+            cell_val = str(self._guidance_tree.set(item, col))
+            if len(cell_val) > 100:
+                max_w = max(max_w, int(350 * scale))
+                continue
+            max_w = max(max_w, f.measure(cell_val) + int(25 * scale))
+        
+        # 限制合理范围并应用
+        if col == "reason":
+            max_w = min(max_w, int(350 * scale))
+        else:
+            max_w = min(max_w, int(150 * scale))
+        
+        # 保证每列都有适当的预设最小宽度，防挤压
+        min_w_map = {
+            "code": 70,
+            "name": 90,
+            "sector": 105,
+            "action": 75,
+            "order_price": 75,
+            "support_price": 75,
+            "stop_price": 75,
+            "branch": 120
+        }
+        if col in min_w_map:
+            max_w = max(max_w, int(min_w_map[col] * scale))
+            
+        self._guidance_tree.column(col, width=max_w)
+
+
+StockSelectionWindow._init_guidance_tab = _init_guidance_tab
+StockSelectionWindow._refresh_guidance_tab = _refresh_guidance_tab
+StockSelectionWindow._sort_guidance_tree = _sort_guidance_tree
+StockSelectionWindow.show_guidance_tab = show_guidance_tab
+StockSelectionWindow._save_guidance_column_widths = _save_guidance_column_widths
+StockSelectionWindow._restore_guidance_column_widths = _restore_guidance_column_widths
+StockSelectionWindow._auto_fit_guidance_columns = _auto_fit_guidance_columns
 
 

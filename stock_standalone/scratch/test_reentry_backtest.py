@@ -45,6 +45,100 @@ def get_branch_cn(branch_name: str) -> str:
     }
     return name_map.get(branch_name, branch_name)
 
+
+def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float, predicted_ma5: float, upper_val: float, sws_support: float, stop_price: float, action: str, action_cn: str, branch: str, branch_cn: str, reason: str, has_position: bool, entry_price: float = 0.0):
+    """
+    将手动回测个股当前的的操作机会与战术交易计划更新或追加到 logs/premarket_diagnose.json 中。
+    """
+    import os
+    import json
+    try:
+        from sys_utils import get_base_path
+        base_dir = get_base_path()
+    except Exception:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+    if not name or str(name).startswith("个股_"):
+        # Look up from top_all.h5 to get the real stock name
+        try:
+            import pandas as pd
+            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                if os.path.exists(path):
+                    df_top = pd.read_hdf(path, 'top_all')
+                    if not df_top.empty:
+                        code_zfill = code_clean.zfill(6)
+                        if df_top.index.name == 'code' and code_zfill in df_top.index:
+                            name = df_top.loc[code_zfill, 'name']
+                            break
+                        elif 'code' in df_top.columns:
+                            matched = df_top[df_top['code'].astype(str).str.zfill(6) == code_zfill]
+                            if not matched.empty:
+                                name = matched.iloc[0]['name']
+                                break
+                        else:
+                            idx_str = df_top.index.astype(str).str.zfill(6)
+                            if code_zfill in idx_str.values:
+                                name = df_top.loc[df_top.index.astype(str).str.zfill(6) == code_zfill, 'name'].iloc[0]
+                                break
+        except Exception:
+            pass
+
+    filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    diagnostics = []
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                diagnostics = json.load(f)
+                if not isinstance(diagnostics, list):
+                    diagnostics = []
+        except Exception as e:
+            print(f"📡 Error loading premarket_diagnose.json: {e}")
+            diagnostics = []
+            
+    # 构建新的战术作战计划
+    advice = {
+        "code": code_clean,
+        "name": name,
+        "entry_price": round(entry_price, 2),
+        "volume": 0.0,
+        "close": round(close_val, 2),
+        "predicted_ma5": round(predicted_ma5, 2),
+        "upper_boll": round(upper_val, 2),
+        "sws_support": round(sws_support, 2),
+        "hard_stop": round(stop_price, 2),
+        "suggest_action": action,
+        "action_cn": action_cn,
+        "size_pct": 0.70 if action in ["BUY", "ADD"] else 0.0,
+        "active_branch": branch,
+        "branch_cn": branch_cn,
+        "reason": reason
+    }
+    
+    # 查找并更新
+    updated = False
+    for idx, d in enumerate(diagnostics):
+        d_code = d.get("code", "")
+        # Clean emoji just in case
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            d_code = d_code.replace(icon, '').strip()
+        if d_code == code_clean:
+            diagnostics[idx] = advice
+            updated = True
+            break
+            
+    if not updated:
+        diagnostics.append(advice)
+        
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(diagnostics, f, indent=4, ensure_ascii=False)
+        print(f"📡 [BACKTEST-GUIDANCE] Successfully added/updated {name} ({code_clean}) plan in {filepath}")
+    except Exception as e:
+        print(f"📡 [BACKTEST-GUIDANCE] Failed to save premarket_diagnose.json: {e}")
+
+
 _is_router_loaded = False
 
 def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) -> str:
@@ -565,6 +659,56 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) 
         log(f"▶ 战术状态: 📊 保持空仓观察 (KEEP OBSERVING)", is_detail=False)
         log(f"▶ 观察队列: ⏳ 正在对齐主力 12日防踏空右侧抢回防线", is_detail=False)
     log("=" * 80 + "\n", is_detail=False)
+
+    # 👑 联动添加/更新到每日操作指南 (open_guidance_window) 中
+    try:
+        latest_action = intent.action if intent else "KEEP_OBSERVING"
+        # 只要当前模拟持仓中，或者有买入、回补、持股决策（即有参与价值），则追加到每日指南中
+        has_value = has_position or (latest_action in ["BUY", "ADD", "HOLD"])
+        if has_value:
+            latest_close = float(close)
+            latest_predicted_ma5 = float(prev_predict_ma5) if prev_predict_ma5 else latest_close
+            latest_upper = float(upper)
+            latest_sws = float(sws)
+            latest_stop = float(current_stop if current_stop > 0 else (sws * 0.985))
+            
+            action_map = {
+                "BUY": "买入建仓",
+                "SELL": "分批大止盈" if (tp_triggered or (intent and intent.size_pct == 0.70)) else "清仓平仓",
+                "ADD": "做T回补",
+                "HOLD": "持股滚动"
+            }
+            action_cn = action_map.get(latest_action, "保持观察")
+            if latest_action == "SELL" and intent and intent.size_pct == 1.00:
+                action_cn = "清仓平仓"
+                
+            latest_branch = _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
+            branch_cn = get_branch_cn(latest_branch)
+            
+            latest_reason = getattr(intent.reason, "raw_reason", "手动回测智能战术决策计划") if intent and intent.reason else "手动回测智能战术决策计划"
+            if has_position:
+                latest_reason = f"💼 正在模拟持仓中(滚动做T)。{latest_reason}"
+            else:
+                latest_reason = f"📊 回测最新决策: {action_cn}。{latest_reason}"
+                
+            update_premarket_diagnose_json(
+                code_clean=code_clean,
+                name=name,
+                close_val=latest_close,
+                predicted_ma5=latest_predicted_ma5,
+                upper_val=latest_upper,
+                sws_support=latest_sws,
+                stop_price=latest_stop,
+                action=latest_action,
+                action_cn=action_cn,
+                branch=latest_branch,
+                branch_cn=branch_cn,
+                reason=latest_reason,
+                has_position=has_position,
+                entry_price=float(entry_price)
+            )
+    except Exception as ex:
+        log(f"⚠️ [GUIDANCE-INTEGRATION] Failed to export trading plan to guidance list: {ex}", is_detail=False)
 
     return output.getvalue()
 

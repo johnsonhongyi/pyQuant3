@@ -967,7 +967,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.bind("<Alt-d>", lambda event: self.open_handbook_overview())
         self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
-        self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
+        # self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
         self.bind("<Alt-b>", lambda event: self.close_all_alerts())
         self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
         self.bind("<Alt-k>", lambda event: self.open_market_pulse())
@@ -1788,6 +1788,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.debug(f"[BgKernel] heartbeat submit failed: {e}")
         self._schedule_after(15000, self._bg_kernel_heartbeat)
+
+    def _bg_premarket_diagnose_heartbeat(self):
+        """今日盘前诊断心跳检测：交易日 08:50 - 09:10 之间自动触发盘前诊断计算"""
+        if getattr(self, '_is_closing', False):
+            return
+
+        try:
+            # 1. 检查今日是否为交易日
+            is_trade_day = cct.get_trade_date_status()
+            if is_trade_day:
+                from datetime import datetime
+                now = datetime.now()
+                now_hm = now.hour * 100 + now.minute
+                
+                # 2. 是否在 08:50 到 09:10 之间
+                if 850 <= now_hm <= 910:
+                    today_str = now.strftime("%Y-%m-%d")
+                    last_diag = getattr(self, '_last_diagnosed_date', None)
+                    
+                    if last_diag != today_str:
+                        # 防止并发冲突，使用标记位
+                        if not getattr(self, '_diagnosing_premarket', False):
+                            self._diagnosing_premarket = True
+                            
+                            def _run_diag():
+                                try:
+                                    logger.info(f"🛸 [BG-DIAGNOSE] 开始执行交易日 {today_str} 盘前个股体检与操作指南重算...")
+                                    from premarket_analyzer import run_premarket_diagnose
+                                    run_premarket_diagnose()
+                                    self._last_diagnosed_date = today_str
+                                    logger.info(f"🛸 [BG-DIAGNOSE] 交易日 {today_str} 盘前个股体检顺利完成！")
+                                except Exception as err:
+                                    logger.error(f"[BG-DIAGNOSE] 盘前诊断执行失败: {err}", exc_info=True)
+                                finally:
+                                    self._diagnosing_premarket = False
+                                    
+                            self.executor.submit(_run_diag)
+        except Exception as e:
+            logger.error(f"[BG-DIAGNOSE] 心跳检查异常: {e}", exc_info=True)
+            
+        # 每 60 秒轮询一次，极其节省 CPU 资源
+        self._schedule_after(60000, self._bg_premarket_diagnose_heartbeat)
 
 
     def _put_deduped_task(self, key, task_fn):
@@ -4308,7 +4350,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 绑定选股窗口打开/复用快捷键 Alt+t (支持大小写)
         self.bind_all("<Alt-t>", lambda e: self.open_stock_selection_window())
-        # self.bind_all("<Alt-T>", lambda e: self.open_stock_selection_window())
+        self.bind_all("<Alt-g>", lambda e: self.open_guidance_window())
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -5432,6 +5474,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 with self._df_lock:
                     self.df_all = full_df
                 
+                # ⚡ [NEW] 主动强力注入交易内核特征预加载温热
+                try:
+                    from trading_kernel.kernel_service import get_kernel_service
+                    kernel_srv = get_kernel_service()
+                    if not kernel_srv._indicator_cache:
+                        logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache...")
+                        kernel_srv.update_df_all(full_df)
+                except Exception as ex:
+                    logger.error(f"[Sync] Failed to proactively update df_all to kernel: {ex}")
+                
                 # [NEW] ⚡ 同步更新赛马面板缓存的 df_all，确保数据 100% 同步
                 if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
                     self._racing_panel_win.df_all = full_df
@@ -5581,6 +5633,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """[OPTIMIZE] 集中处理后台常驻任务的初始化，减少主线程计时器碎片"""
         self.restore_all_monitor_windows()
         self._schedule_after(3000, self._start_feedback_listener)
+        self._schedule_after(4000, self._bg_premarket_diagnose_heartbeat)
         self._schedule_after(5000, self._bg_kernel_heartbeat)
         self._schedule_after(8000, self._check_ext_data_update)
         self._schedule_after(28000, self.KLineMonitor_init)
@@ -8713,7 +8766,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             code_clean = code.strip()
             for icon in ['🔴', '🟢', '📊', '⚠️']:
                 code_clean = code_clean.replace(icon, '').strip()
+            code_clean = code_clean.zfill(6)
+            
+            # 根据干净的代码重新获取准确的名字，若名字缺失、为纯代码或包含占位符，自动通过 df_all 获取真名
+            name_clean = str(name).strip() if name else ""
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                name_clean = name_clean.replace(icon, '').strip()
                 
+            if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+                name = code_clean
+                if hasattr(self, 'df_all') and self.df_all is not None and not self.df_all.empty:
+                    if code_clean in self.df_all.index:
+                        name = self.df_all.loc[code_clean].get('name', code_clean)
+                    elif code in self.df_all.index:
+                        name = self.df_all.loc[code].get('name', code_clean)
+                        
             logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测...")
             
             def run_task():
@@ -11486,10 +11553,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not code:
             if hasattr(self, 'select_code') and self.select_code:
                 code = self.select_code
-                name = code
-                if hasattr(self, 'df_all') and self.df_all is not None and not self.df_all.empty:
-                    if code in self.df_all.index:
-                        name = self.df_all.loc[code].get('name', code)
             else:
                 logger.info("⚠️ 未选择股票，无法执行回测")
                 return
@@ -11498,7 +11561,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         code_clean = code.strip()
         for icon in ['🔴', '🟢', '📊', '⚠️']:
             code_clean = code_clean.replace(icon, '').strip()
+        code_clean = code_clean.zfill(6)
             
+        # 4. 根据干净的代码重新获取准确的名字，若名字缺失、为纯代码或包含占位符，自动通过 df_all 获取真名
+        name_clean = str(name).strip() if name else ""
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            name_clean = name_clean.replace(icon, '').strip()
+            
+        if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+            name = code_clean
+            if hasattr(self, 'df_all') and self.df_all is not None and not self.df_all.empty:
+                if code_clean in self.df_all.index:
+                    name = self.df_all.loc[code_clean].get('name', code_clean)
+                elif code in self.df_all.index:
+                    name = self.df_all.loc[code].get('name', code_clean)
+                    
         logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测...")
         
         # 4. 后台守护线程异步运行，保证主线程绝对不假死
@@ -11507,14 +11584,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 from scratch.test_reentry_backtest import run_backtest_and_get_report
                 # [UX] 1. 采用 only_report=True 提炼精简报告模式
                 report = run_backtest_and_get_report(code_clean, name, only_report=True)
-                # [UX] 2. 使用 after 回流主线程，并调用统一精美的独立弹窗非阻塞展示结论
-                self.after(0, lambda: self._show_backtest_report_window(code_clean, name, report))
+                # [UX] 2. 使用 after 回流主线程，并调用统一精美的独立弹窗非阻塞展示结论，且实时自适应刷新操作指南
+                self.after(0, lambda: [
+                    self._show_backtest_report_window(code_clean, name, report),
+                    self._refresh_guidance_if_open()
+                ])
             except Exception as e:
                 import traceback
                 err_msg = f"Re-entry 回测执行失败: {e}\n{traceback.format_exc()}"
                 self.after(0, lambda: self._show_backtest_report_window(code_clean, name, err_msg))
                 
         threading.Thread(target=run_thread, daemon=True).start()
+
+    def _refresh_guidance_if_open(self):
+        """如果策略选股窗口已打开，联动刷新其每日操作指南 Tab"""
+        if hasattr(self, '_stock_selection_win') and self._stock_selection_win and self._stock_selection_win.winfo_exists():
+            if hasattr(self._stock_selection_win, '_refresh_guidance_tab'):
+                try:
+                    self._stock_selection_win._refresh_guidance_tab()
+                    logger.info("📡 [TK] Instantly refreshed StockSelectionWindow's Guidance Tab upon backtest completion.")
+                except Exception as e:
+                    logger.warning(f"Failed to refresh guidance tab on backtest finish: {e}")
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口 (支持窗口复用)"""
@@ -13278,6 +13368,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"打开选股窗口失败: {e}")
             messagebox.showerror("错误", f"打开选股窗口失败: {e}")
             
+    def open_guidance_window(self):
+        """直接打开每日操作指南选项卡"""
+        self.open_stock_selection_window()
+        if self._stock_selection_win and self._stock_selection_win.winfo_exists():
+            try:
+                self._stock_selection_win.show_guidance_tab()
+            except Exception as e:
+                logger.error(f"Switch to guidance tab failed: {e}")
     def copy_code(self,event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "cell":

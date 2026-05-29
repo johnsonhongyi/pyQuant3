@@ -15,6 +15,7 @@ from trading_kernel.observability.journal import JsonlJournal
 from trading_kernel.observability.trace_hasher import stable_hash
 
 logger = LoggerFactory.getLogger("instock_TK.KernelService")
+import pandas as pd
 
 
 def load_risk_limits_from_config() -> RiskLimits:
@@ -144,6 +145,414 @@ class TradingKernelService:
         saved_mode = load_trading_mode_from_config()
         self._mode = "OBSERVE"
         self.set_trading_mode(saved_mode)
+        
+        # 高性能个股指标特征富化内存缓存 (Phase 9: High Performance Cache)
+        self._indicator_cache = {}
+        self._df_all = None
+        self._auto_warm_up_from_preprocessed_hdf5()
+
+    def update_df_all(self, df_all):
+        """
+        供外部实时/准实时将最新的 df_all 注入到内核单例中，供 O(1) 内存指标极速反查与缓存热身使用。
+        """
+        self._df_all = df_all
+        # 顺便用 df_all 的特征为内存缓存做一次热身，实现双重极速保障！
+        self.warm_up_indicator_cache(df_all)
+
+    def _get_df_all(self):
+        """
+        [Dynamic Auto-Detection] 动态安全探测主窗口或其它模块中持有的内存大表 df_all 属性
+        """
+        # 1. 优先使用外部显式注入的 df_all
+        if hasattr(self, '_df_all') and self._df_all is not None and not self._df_all.empty:
+            return self._df_all
+            
+        # 2. 动态自愈探测：扫描 sys.modules 并寻找拥有非空 df_all 属性的 MainWindow 实例或全局对象
+        try:
+            import sys
+            # 扫描已经载入的模块
+            for mod_name in list(sys.modules.keys()):
+                # 针对核心监控模块做定向排查
+                if 'instock_Monitor' in mod_name or 'MonitorTK' in mod_name or 'visualizer' in mod_name:
+                    mod = sys.modules[mod_name]
+                    # 探测 MainWindow.instance 或者是 MainWindow 全局变量
+                    for attr_name in ['MainWindow', 'app', 'main_win', 'main_window']:
+                        if hasattr(mod, attr_name):
+                            obj = getattr(mod, attr_name)
+                            # 如果是类，且有单例属性 instance
+                            if hasattr(obj, 'instance') and obj.instance:
+                                obj = obj.instance
+                            if hasattr(obj, 'df_all') and obj.df_all is not None and not obj.df_all.empty:
+                                return obj.df_all
+                            if hasattr(obj, 'main_win') and hasattr(obj.main_win, 'df_all') and obj.main_win.df_all is not None:
+                                return obj.main_win.df_all
+        except Exception:
+            pass
+            
+        # 3. [降维打击级自愈兜底] 物理扫描全局已加载模块，搜寻任何拥有行数 > 1000 且非空 df_all 属性的对象
+        try:
+            import sys
+            import pandas as pd
+            for mod_name, mod in list(sys.modules.items()):
+                if not mod or any(x in mod_name for x in ['pandas', 'numpy', 'matplotlib', 'tables']):
+                    continue
+                try:
+                    for attr_name in list(dir(mod)):
+                        # 排除系统内置的双下划线属性以提高效率
+                        if attr_name.startswith('__'):
+                            continue
+                        try:
+                            obj = getattr(mod, attr_name)
+                            if obj is not None:
+                                # 探测对象自身是否含有 df_all
+                                if hasattr(obj, 'df_all'):
+                                    df_val = getattr(obj, 'df_all')
+                                    if isinstance(df_val, pd.DataFrame) and not df_val.empty and len(df_val) > 1000:
+                                        return df_val
+                                # 探测对象是 MainWindow 且 MainWindow.instance 含有 df_all
+                                if hasattr(obj, 'instance') and obj.instance and hasattr(obj.instance, 'df_all'):
+                                    df_val = getattr(obj.instance, 'df_all')
+                                    if isinstance(df_val, pd.DataFrame) and not df_val.empty and len(df_val) > 1000:
+                                        return df_val
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+            
+        return None
+
+    def _auto_warm_up_from_preprocessed_hdf5(self):
+        """
+        [Ultra Performance] 自动从早盘已经预处理好的极速 HDF5 数据库 (top_all.h5 或 共享的 shared_df_all) 中,
+        一次性将全市场股票的多周期历史静态技术指标加载进 _indicator_cache 内存。
+        """
+        import os
+        import pandas as pd
+        from sys_utils import get_base_path
+        
+        base_dir = get_base_path()
+        today_date_str = datetime.now().strftime("%Y%m%d")
+        h5_paths = [
+            fr'G:\shared_df_all-{today_date_str}.h5',
+            r'G:\shared_df_all.h5',
+            r'g:\top_all.h5',
+            os.path.join(base_dir, 'top_all.h5'),
+            os.path.join(os.getcwd(), 'top_all.h5'),
+            'top_all.h5'
+        ]
+        
+        loaded = False
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        for path in h5_paths:
+            if os.path.exists(path):
+                try:
+                    # 智能探测 HDF5 key，自适应 'df_all' 还是 'top_all'
+                    key_to_read = None
+                    try:
+                        with pd.HDFStore(path, mode='r') as store:
+                            keys = store.keys()
+                            if keys:
+                                key_to_read = keys[0].lstrip('/')
+                    except Exception:
+                        pass
+                    
+                    if not key_to_read:
+                        key_to_read = 'top_all'
+                        
+                    try:
+                        df_top = pd.read_hdf(path, key_to_read)
+                    except Exception:
+                        try:
+                            df_top = pd.read_hdf(path, 'df_all')
+                        except Exception:
+                            df_top = pd.read_hdf(path, 'top_all')
+                    
+                    if df_top is not None and not df_top.empty:
+                        # 字段映射
+                        import re
+                        for idx, row in df_top.iterrows():
+                            # 极其强壮地使用正则，剔除任何后缀如 .SH / .SZ 等，只获取 6 位数字代码
+                            code_val = idx[0] if isinstance(idx, tuple) else idx
+                            raw_code_str = str(code_val).strip()
+                            if not raw_code_str or raw_code_str == 'nan':
+                                raw_code_str = str(row.get('code', '')).strip()
+                                
+                            digits = re.findall(r'\d+', raw_code_str)
+                            if digits:
+                                code = digits[0].zfill(6)
+                            else:
+                                continue
+                                
+                            cache_key = (code, today_str)
+                            
+                            # 建立列名的大小写自适应映射
+                            row_cols_lower = {str(k).lower(): k for k in row.keys()} if hasattr(row, 'keys') else {}
+                            
+                            feat = {}
+                            for col in ['sws', 'sws_prev5', 'swl', 'ma10d', 'ma10d_prev5', 'ma5d', 'ma5d_prev5', 'swl_prev5',
+                                        'ma60d', 'ma60d_prev5', 'high4', 'hmax', 'low60', 'pbreak', 'ptop', 'vol_ma5', 'open',
+                                        'high_prev1', 'high_prev2', 'high_prev3', 'open_prev1', 'open_prev2', 'open_prev3',
+                                        'close_prev1', 'close_prev2', 'close_prev3', 'low_prev1']:
+                                matched_key = None
+                                if col in row:
+                                    matched_key = col
+                                elif col.lower() in row_cols_lower:
+                                    matched_key = row_cols_lower[col.lower()]
+                                elif col.upper() in row:
+                                    matched_key = col.upper()
+                                    
+                                if matched_key is not None:
+                                    val = row[matched_key]
+                                    if pd.notna(val):
+                                        feat[col] = int(val) if col == 'pbreak' else float(val)
+                            
+                            if feat:
+                                # 补充一些 fallback 值
+                                close_val = float(row.get('close', 0.0)) if pd.notna(row.get('close')) else 0.0
+                                if feat.get('ma5d', 0.0) <= 0.0: feat['ma5d'] = close_val
+                                if feat.get('ma10d', 0.0) <= 0.0: feat['ma10d'] = close_val
+                                if feat.get('ma60d', 0.0) <= 0.0: feat['ma60d'] = close_val
+                                if feat.get('sws', 0.0) <= 0.0: feat['sws'] = feat['ma10d']
+                                if feat.get('swl', 0.0) <= 0.0: feat['swl'] = feat['ma5d']
+                                
+                                self._indicator_cache[cache_key] = feat
+                                    
+                            logger.info(f"🚀 [BgKernel] Successfully warm-up {len(self._indicator_cache)} stock indicators from preprocessed {path}!")
+                            loaded = True
+                            break
+                except Exception as e:
+                    logger.error(f"[BgKernel] Failed to auto warm-up from {path}: {e}")
+
+    def warm_up_indicator_cache(self, df_all: pd.DataFrame):
+        """
+        早盘或初始化时，批量传入已经计算好特征的多股票 DataFrame (支持 MultiIndex 或单 index)，
+        一次性预热拼装入 _indicator_cache 内存，彻底消除盘中高频行情时的单股文件 I/O 重新计算。
+        """
+        if df_all is None or df_all.empty:
+            return
+            
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        count = 0
+        import re
+        
+        try:
+            # 深度解耦 index 和 columns 同名引发的 Pandas 冲突
+            df_all_temp = df_all.copy()
+            if 'code' in df_all_temp.columns:
+                if df_all_temp.index.name == 'code' or 'code' in df_all_temp.index.names:
+                    df_all_temp.index.name = '_index_code'
+                    
+            # 兼容 MultiIndex 和单 index
+            if isinstance(df_all_temp.index, pd.MultiIndex):
+                # 遍历第一层 index (code)
+                for code, df_stock in df_all_temp.groupby(level=0):
+                    digits = re.findall(r'\d+', str(code))
+                    code_clean = digits[0].zfill(6) if digits else str(code).strip().zfill(6)
+                    feat = self._extract_indicators_from_df(df_stock)
+                    if feat:
+                        self._indicator_cache[(code_clean, today_str)] = feat
+                        count += 1
+            elif 'code' in df_all_temp.columns:
+                # 包含 code 列
+                for code, df_stock in df_all_temp.groupby('code'):
+                    digits = re.findall(r'\d+', str(code))
+                    code_clean = digits[0].zfill(6) if digits else str(code).strip().zfill(6)
+                    feat = self._extract_indicators_from_df(df_stock)
+                    if feat:
+                        self._indicator_cache[(code_clean, today_str)] = feat
+                        count += 1
+            else:
+                # 尝试普通 index
+                df_all_clean = df_all_temp.reset_index()
+                if 'code' in df_all_clean.columns:
+                    for code, df_stock in df_all_clean.groupby('code'):
+                        digits = re.findall(r'\d+', str(code))
+                        code_clean = digits[0].zfill(6) if digits else str(code).strip().zfill(6)
+                        feat = self._extract_indicators_from_df(df_stock)
+                        if feat:
+                            self._indicator_cache[(code_clean, today_str)] = feat
+                            count += 1
+                            
+            logger.info(f"🚀 [BgKernel] Manually warm-up {count} stock indicators into memory cache!")
+        except Exception as e:
+            logger.error(f"[BgKernel] Failed to manually warm-up indicators: {e}")
+
+    def _extract_indicators_from_df(self, df_hist: pd.DataFrame) -> dict:
+        """
+        从单只股票的历史 DataFrame (df_hist) 中提取并计算 evaluate_decision_item 依赖的全部日线特征字典。
+        """
+        if df_hist is None or df_hist.empty:
+            return {}
+        
+        try:
+            df_hist = df_hist.sort_index()
+            
+            # [DECOUPLE-LIVE] 检测并剔除属于今天（未收盘）的日线，只用纯历史数据计算静态昨日指标
+            if not df_hist.empty:
+                import datetime
+                today_dt = datetime.datetime.now()
+                today_str1 = today_dt.strftime("%Y-%m-%d")
+                today_str2 = today_dt.strftime("%Y%m%d")
+                
+                last_idx = df_hist.index[-1]
+                last_idx_str = str(last_idx).strip()
+                
+                is_today = False
+                if today_str1 in last_idx_str or today_str2 in last_idx_str:
+                    is_today = True
+                elif isinstance(last_idx, (datetime.date, datetime.datetime)):
+                    if last_idx.year == today_dt.year and last_idx.month == today_dt.month and last_idx.day == today_dt.day:
+                        is_today = True
+                        
+                if is_today:
+                    df_hist = df_hist.iloc[:-1]
+                    
+            if df_hist.empty:
+                return {}
+                
+            row_last = df_hist.iloc[-1]
+            close_series = df_hist['close']
+            
+            # 滚动计算均线
+            ma10_series = close_series.rolling(10).mean()
+            ma5_series = close_series.rolling(5).mean()
+            
+            # 优先从行中提取 ma10d，否则 fallback 到 rolling 计算值
+            ma10_val = float(row_last.get("ma10d", 0.0))
+            if ma10_val <= 0.0:
+                ma10_val = float(ma10_series.iloc[-1]) if len(ma10_series) >= 10 else float(row_last.get("close", 0))
+                
+            # 优先从行中提取 ma5d
+            ma5_val = float(row_last.get("ma5d", 0.0))
+            if ma5_val <= 0.0:
+                ma5_val = float(ma5_series.iloc[-1]) if len(ma5_series) >= 5 else float(row_last.get("close", 0))
+            
+            swl_val = float(row_last.get("SWL", 0.0))
+            close_val = float(row_last.get("close", 0.0))
+            if swl_val <= 0 or swl_val < close_val * 0.85 or swl_val > close_val * 1.15:
+                swl_val = ma5_val
+            
+            # 匹配 SWS 支撑工作线
+            sws_val = float(row_last.get("SWS", 0.0))
+            if sws_val <= 0 or sws_val < close_val * 0.85 or sws_val > close_val * 1.15:
+                sws_val = ma10_val
+            
+            # 获取 5 天前的 SWS 用于 SWS 趋势爬升
+            if len(df_hist) >= 6:
+                row_prev5 = df_hist.iloc[-6]
+                close_prev5 = float(row_prev5.get("close", 0.0))
+                sws_prev5_val = float(row_prev5.get("SWS", 0.0))
+                if sws_prev5_val <= 0 or sws_prev5_val < close_prev5 * 0.85 or sws_prev5_val > close_prev5 * 1.15:
+                    sws_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else sws_val
+                
+                ma10_prev5_val = float(row_prev5.get("ma10d", 0.0))
+                if ma10_prev5_val <= 0.0:
+                    ma10_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else ma10_val
+            else:
+                sws_prev5_val = sws_val
+                ma10_prev5_val = ma10_val
+
+            feat = {
+                "sws": sws_val,
+                "sws_prev5": sws_prev5_val,
+                "swl": swl_val,
+                "ma10d": ma10_val,
+                "ma10d_prev5": ma10_prev5_val,
+                "ma5d": ma5_val,
+            }
+            
+            # 获取 5 天前以及当前的 ma5d
+            if len(df_hist) >= 6:
+                row_prev5_ma5 = df_hist.iloc[-6]
+                ma5d_prev5_val = float(row_prev5_ma5.get("ma5d", 0.0))
+                if ma5d_prev5_val <= 0.0:
+                    ma5d_prev5_val = float(ma5_series.iloc[-6]) if len(ma5_series) >= 6 else ma5_val
+                
+                swl_prev5_val = float(row_prev5_ma5.get("SWL", 0.0))
+                if swl_prev5_val <= 0:
+                    swl_prev5_val = ma5d_prev5_val
+            else:
+                ma5d_prev5_val = ma5_val
+                swl_prev5_val = swl_val
+                
+            feat["ma5d_prev5"] = ma5d_prev5_val
+            feat["swl_prev5"] = swl_prev5_val
+            
+            # 补充 60 日均线 (ma60d & ma60d_prev5)
+            ma60_val = float(row_last.get("ma60d", 0.0))
+            if ma60_val <= 0.0:
+                if len(df_hist) >= 60:
+                    ma60_series = close_series.rolling(60).mean()
+                    ma60_val = float(ma60_series.iloc[-1])
+                else:
+                    ma60_val = close_val
+            feat["ma60d"] = ma60_val
+            
+            # 获取 5 天前的 ma60d
+            if len(df_hist) >= 6:
+                row_prev5_ma60 = df_hist.iloc[-6]
+                ma60d_prev5_val = float(row_prev5_ma60.get("ma60d", 0.0))
+                if ma60d_prev5_val <= 0.0:
+                    if len(df_hist) >= 65:
+                        ma60_series = close_series.rolling(60).mean()
+                        ma60d_prev5_val = float(ma60_series.iloc[-6])
+                    else:
+                        ma60d_prev5_val = ma60_val
+            else:
+                ma60d_prev5_val = ma60_val
+            feat["ma60d_prev5"] = ma60d_prev5_val
+            
+            # 补充高维的 high4, hmax, low60, pbreak, ptop 等
+            feat["high4"] = float(row_last.get("high4", 0.0))
+            feat["hmax"] = float(row_last.get("hmax", 0.0))
+            feat["low60"] = float(row_last.get("low60", 0.0))
+            feat["pbreak"] = int(row_last.get("pbreak", 0.0))
+            feat["ptop"] = float(row_last.get("ptop", 0.0))
+            
+            vol_col = 'volume' if 'volume' in df_hist.columns else ('vol' if 'vol' in df_hist.columns else '')
+            if vol_col:
+                vol_ma5_series = df_hist[vol_col].rolling(5).mean()
+                feat["vol_ma5"] = float(vol_ma5_series.iloc[-1]) if len(vol_ma5_series) >= 5 else float(row_last.get(vol_col, 0))
+            
+            # 补充昨日、前日、大前日的高/开/收价格，以及今日开盘价
+            feat["open"] = float(row_last.get("open", 0.0))
+            
+            if len(df_hist) >= 4:
+                feat["high_prev1"] = float(df_hist.iloc[-2].get("high", 0.0))
+                feat["high_prev2"] = float(df_hist.iloc[-3].get("high", 0.0))
+                feat["high_prev3"] = float(df_hist.iloc[-4].get("high", 0.0))
+                
+                feat["open_prev1"] = float(df_hist.iloc[-2].get("open", 0.0))
+                feat["open_prev2"] = float(df_hist.iloc[-3].get("open", 0.0))
+                feat["open_prev3"] = float(df_hist.iloc[-4].get("open", 0.0))
+                
+                feat["close_prev1"] = float(df_hist.iloc[-2].get("close", 0.0))
+                feat["close_prev2"] = float(df_hist.iloc[-3].get("close", 0.0))
+                feat["close_prev3"] = float(df_hist.iloc[-4].get("close", 0.0))
+                
+                feat["low_prev1"] = float(df_hist.iloc[-2].get("low", 0.0))
+            else:
+                feat["high_prev1"] = close_val
+                feat["high_prev2"] = close_val
+                feat["high_prev3"] = close_val
+                
+                feat["open_prev1"] = close_val
+                feat["open_prev2"] = close_val
+                feat["open_prev3"] = close_val
+                
+                feat["close_prev1"] = close_val
+                feat["close_prev2"] = close_val
+                feat["close_prev3"] = close_val
+                
+                feat["low_prev1"] = close_val
+                
+            return feat
+        except Exception as e:
+            logger.error(f"[BgKernel] Failed to extract technical indicators from DataFrame: {e}")
+            return {}
 
     @property
     def mode(self) -> str:
@@ -214,112 +623,176 @@ class TradingKernelService:
 
         # 实盘/模拟盘下，为防止 UI 传来的 sig 缺少多周期核心技术指标，我们在此处自动抓取本地数据进行补全！
         if code and (item_dict.get("sws") is None or item_dict.get("ma10d") is None):
-            try:
-                from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
-                from trading_kernel.core.perf_monitor import timed_ctx
-                with timed_ctx(f"LiveIndicatorEnrich_{code}", warn_ms=100):
-                    df_hist = get_tdx_Exp_day_to_df(code, dl=120)
-                    if df_hist is not None and not df_hist.empty:
-                        df_hist = df_hist.sort_index()
-                        row_last = df_hist.iloc[-1]
-                        close_series = df_hist['close']
-                        ma10_series = close_series.rolling(10).mean()
-                        ma5_series = close_series.rolling(5).mean()
-                        
-                        # 优先从行中提取 ma10d，否则 fallback 到 rolling 计算值
-                        ma10_val = float(row_last.get("ma10d", 0.0))
-                        if ma10_val <= 0.0:
-                            ma10_val = float(ma10_series.iloc[-1]) if len(ma10_series) >= 10 else float(row_last.get("close", 0))
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            cache_key = (code, today_str)
+            
+            def safe_update_indicators(target_dict: dict, source_feat: dict):
+                """
+                安全合入静态特征指标，绝对不让老/昨日特征覆盖当前实盘实时的 OHLC 价格与成交量、涨幅！
+                """
+                for k, v in source_feat.items():
+                    if k in ['open', 'high', 'low', 'close', 'volume', 'amount', 'trade', 'price', 'percent', 'pct']:
+                        if k in target_dict and target_dict[k] is not None and float(target_dict[k]) > 0.0:
+                            continue
+                    target_dict[k] = v
+            
+            # 如果缓存命中，则在亚毫秒级内实现 O(1) 直接拼装返回！
+            if cache_key in self._indicator_cache:
+                safe_update_indicators(item_dict, self._indicator_cache[cache_key])
+                # 特别单独提取 setup，防止由于 state_manager 变动而导致状态不同步
+                curr_state = self.state_manager.get(code) if hasattr(self, "state_manager") else None
+                item_dict["setup"] = getattr(curr_state, "setup", "") if curr_state else ""
+            else:
+                loaded_from_df_all = False
+                df_all = self._get_df_all()
+                if df_all is not None and not df_all.empty:
+                    # 早盘冷启动自愈：一旦探测到 df_all 且缓存为空，瞬间批量预热全市场 5484 只股票到内存
+                    if not self._indicator_cache:
+                        try:
+                            logger.info(f"[BgKernel] Auto-detecting in-memory df_all. Triggering premarket cache warming...")
+                            self.warm_up_indicator_cache(df_all)
+                        except Exception as ex:
+                            logger.error(f"[BgKernel] Premarket self-healing warming from df_all failed: {ex}")
                             
-                        # 优先从行中提取 ma5d
-                        ma5_val = float(row_last.get("ma5d", 0.0))
-                        if ma5_val <= 0.0:
-                            ma5_val = float(ma5_series.iloc[-1]) if len(ma5_series) >= 5 else float(row_last.get("close", 0))
+                    # 温热完成后，再次检查是否在内存中直接命中
+                    if cache_key in self._indicator_cache:
+                        safe_update_indicators(item_dict, self._indicator_cache[cache_key])
+                        loaded_from_df_all = True
                         
-                        swl_val = float(row_last.get("SWL", 0.0))
-                        close_val = float(row_last.get("close", 0.0))
-                        if swl_val <= 0 or swl_val < close_val * 0.85 or swl_val > close_val * 1.15:
-                            swl_val = ma5_val
-                        
-                        # 匹配 SWS 支撑工作线
-                        sws_val = float(row_last.get("SWS", 0.0))
-                        if sws_val <= 0 or sws_val < close_val * 0.85 or sws_val > close_val * 1.15:
-                            sws_val = ma10_val
-                        
-                        # 获取 5 天前的 SWS 用于 SWS 趋势爬升
-                        if len(df_hist) >= 6:
-                            row_prev5 = df_hist.iloc[-6]
-                            close_prev5 = float(row_prev5.get("close", 0.0))
-                            sws_prev5_val = float(row_prev5.get("SWS", 0.0))
-                            if sws_prev5_val <= 0 or sws_prev5_val < close_prev5 * 0.85 or sws_prev5_val > close_prev5 * 1.15:
-                                sws_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else sws_val
-                            
-                            ma10_prev5_val = float(row_prev5.get("ma10d", 0.0))
-                            if ma10_prev5_val <= 0.0:
-                                ma10_prev5_val = float(ma10_series.iloc[-6]) if len(ma10_series) >= 15 else ma10_val
-                        else:
-                            sws_prev5_val = sws_val
-                            ma10_prev5_val = ma10_val
+                    if not loaded_from_df_all:
+                        try:
+                            import pandas as pd
+                            if code in df_all.index:
+                                row_stock = df_all.loc[code]
+                                feat = {}
+                                for col in ['sws', 'sws_prev5', 'swl', 'ma10d', 'ma10d_prev5', 'ma5d', 'ma5d_prev5', 'swl_prev5',
+                                            'ma60d', 'ma60d_prev5', 'high4', 'hmax', 'low60', 'pbreak', 'ptop', 'vol_ma5', 'open',
+                                            'high_prev1', 'high_prev2', 'high_prev3', 'open_prev1', 'open_prev2', 'open_prev3',
+                                            'close_prev1', 'close_prev2', 'close_prev3', 'low_prev1']:
+                                    if col in row_stock and pd.notna(row_stock[col]):
+                                        feat[col] = int(row_stock[col]) if col == 'pbreak' else float(row_stock[col])
+                                
+                                if feat:
+                                    close_val = float(row_stock.get('close', 0.0)) if pd.notna(row_stock.get('close')) else 0.0
+                                    if feat.get('ma5d', 0.0) <= 0.0: feat['ma5d'] = close_val
+                                    if feat.get('ma10d', 0.0) <= 0.0: feat['ma10d'] = close_val
+                                    if feat.get('ma60d', 0.0) <= 0.0: feat['ma60d'] = close_val
+                                    if feat.get('sws', 0.0) <= 0.0: feat['sws'] = feat['ma10d']
+                                    if feat.get('swl', 0.0) <= 0.0: feat['swl'] = feat['ma5d']
+                                    
+                                    self._indicator_cache[cache_key] = feat
+                                    safe_update_indicators(item_dict, feat)
+                                    loaded_from_df_all = True
+                        except Exception as e:
+                            logger.debug(f"[BgKernel] Extract from df_all failed for {code}: {e}")
 
-                        item_dict["sws"] = sws_val
-                        item_dict["sws_prev5"] = sws_prev5_val
-                        item_dict["swl"] = swl_val
-                        item_dict["ma10d"] = ma10_val
-                        item_dict["ma10d_prev5"] = ma10_prev5_val
-                        item_dict["ma5d"] = ma5_val
-                        
-                        # 获取 5 天前以及当前的 ma5d
-                        if len(df_hist) >= 6:
-                            row_prev5_ma5 = df_hist.iloc[-6]
-                            ma5d_prev5_val = float(row_prev5_ma5.get("ma5d", 0.0))
-                            if ma5d_prev5_val <= 0.0:
-                                ma5d_prev5_val = float(ma5_series.iloc[-6]) if len(ma5_series) >= 6 else ma5_val
-                            
-                            swl_prev5_val = float(row_prev5_ma5.get("SWL", 0.0))
-                            if swl_prev5_val <= 0:
-                                swl_prev5_val = ma5d_prev5_val
-                        else:
-                            ma5d_prev5_val = ma5_val
-                            swl_prev5_val = swl_val
-                            
-                        item_dict["ma5d_prev5"] = ma5d_prev5_val
-                        item_dict["swl_prev5"] = swl_prev5_val
-                        
-                        # 补充 60 日均线 (ma60d & ma60d_prev5)
-                        if len(df_hist) >= 65:
-                            ma60_series = close_series.rolling(60).mean()
-                            item_dict["ma60d"] = float(ma60_series.iloc[-1])
-                            item_dict["ma60d_prev5"] = float(ma60_series.iloc[-6])
-                        else:
-                            item_dict["ma60d"] = close_val
-                            item_dict["ma60d_prev5"] = close_val
-                        
-                        # 补充高维的 high4, hmax, low60, pbreak, ptop 等
-                        item_dict["high4"] = float(row_last.get("high4", 0.0))
-                        item_dict["hmax"] = float(row_last.get("hmax", 0.0))
-                        item_dict["low60"] = float(row_last.get("low60", 0.0))
-                        item_dict["pbreak"] = int(row_last.get("pbreak", 0.0))
-                        item_dict["ptop"] = float(row_last.get("ptop", 0.0))
-                        
-                        vol_col = 'volume' if 'volume' in df_hist.columns else ('vol' if 'vol' in df_hist.columns else '')
-                        if vol_col:
-                            vol_ma5_series = df_hist[vol_col].rolling(5).mean()
-                            item_dict["vol_ma5"] = float(vol_ma5_series.iloc[-1]) if len(vol_ma5_series) >= 5 else float(row_last.get(vol_col, 0))
-                        
-                        # 补充昨日、前日、大前日的高/开/收价格，以及今日开盘价，用于检测高点逐步降低或低开高走未过前高的结构
-                        item_dict["open"] = float(row_last.get("open", 0.0))
-                        curr_state = self.state_manager.get(code) if hasattr(self, "state_manager") else None
-                        item_dict["setup"] = curr_state.setup if curr_state else ""
-                        
-                        if len(df_hist) >= 4:
-                            item_dict["high_prev1"] = float(df_hist.iloc[-2].get("high", 0.0))
-                            item_dict["high_prev2"] = float(df_hist.iloc[-3].get("high", 0.0))
-                            item_dict["high_prev3"] = float(df_hist.iloc[-4].get("high", 0.0))
-                            item_dict["close_prev1"] = float(df_hist.iloc[-2].get("close", 0.0))
-                            item_dict["open_prev1"] = float(df_hist.iloc[-2].get("open", 0.0))
-                            item_dict["low_prev1"] = float(df_hist.iloc[-2].get("low", 0.0))
-            except Exception as e:
-                logger.error(f"[BgKernel] Failed to auto-enrich live indicators for {code}: {e}")
+                loaded_from_h5 = False
+                if not loaded_from_df_all:
+                    try:
+                        import os
+                        import pandas as pd
+                        from sys_utils import get_base_path
+                        base_dir = get_base_path()
+                        today_date_str = datetime.now().strftime("%Y%m%d")
+                        for path in [fr'G:\shared_df_all-{today_date_str}.h5', r'G:\shared_df_all.h5', r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5'), 'top_all.h5']:
+                            if os.path.exists(path):
+                                # 智能探测 HDF5 key，自适应 'df_all' 还是 'top_all'
+                                key_to_read = None
+                                try:
+                                    with pd.HDFStore(path, mode='r') as store:
+                                        keys = store.keys()
+                                        if keys:
+                                            key_to_read = keys[0].lstrip('/')
+                                except Exception:
+                                    pass
+                                if not key_to_read:
+                                    key_to_read = 'top_all'
+                                
+                                try:
+                                    df_top = pd.read_hdf(path, key_to_read)
+                                except Exception:
+                                    try:
+                                        df_top = pd.read_hdf(path, 'df_all')
+                                    except Exception:
+                                        df_top = pd.read_hdf(path, 'top_all')
+                                
+                                if df_top is not None and not df_top.empty:
+                                    import re
+                                    # 建立 code 到 row 的映射，只保留 6 位纯数字以消除后缀歧义
+                                    code_to_row = {}
+                                    for idx_s, row_s in df_top.iterrows():
+                                        c_val = idx_s[0] if isinstance(idx_s, tuple) else idx_s
+                                        raw_c_str = str(c_val).strip()
+                                        if not raw_c_str or raw_c_str == 'nan':
+                                            raw_c_str = str(row_s.get('code', '')).strip()
+                                            
+                                        digits_s = re.findall(r'\d+', raw_c_str)
+                                        if digits_s:
+                                            code_to_row[digits_s[0].zfill(6)] = row_s
+                                            
+                                    row_stock = code_to_row.get(code)
+                                    
+                                    if row_stock is not None:
+                                        row_cols_lower = {str(k).lower(): k for k in row_stock.keys()} if hasattr(row_stock, 'keys') else {}
+                                        feat = {}
+                                        for col in ['sws', 'sws_prev5', 'swl', 'ma10d', 'ma10d_prev5', 'ma5d', 'ma5d_prev5', 'swl_prev5',
+                                                    'ma60d', 'ma60d_prev5', 'high4', 'hmax', 'low60', 'pbreak', 'ptop', 'vol_ma5', 'open',
+                                                    'high_prev1', 'high_prev2', 'high_prev3', 'open_prev1', 'open_prev2', 'open_prev3',
+                                                    'close_prev1', 'close_prev2', 'close_prev3', 'low_prev1']:
+                                            matched_key = None
+                                            if col in row_stock:
+                                                matched_key = col
+                                            elif col.lower() in row_cols_lower:
+                                                matched_key = row_cols_lower[col.lower()]
+                                            elif col.upper() in row_stock:
+                                                matched_key = col.upper()
+                                                
+                                            if matched_key is not None:
+                                                val = row_stock[matched_key]
+                                                if pd.notna(val):
+                                                    feat[col] = int(val) if col == 'pbreak' else float(val)
+                                        
+                                        if feat:
+                                            # 支持大写 CLOSE 获取
+                                            close_key = 'close'
+                                            if 'close' not in row_stock:
+                                                if 'CLOSE' in row_stock:
+                                                    close_key = 'CLOSE'
+                                                elif 'close'.lower() in row_cols_lower:
+                                                    close_key = row_cols_lower['close'.lower()]
+                                                    
+                                            close_val = float(row_stock.get(close_key, 0.0)) if pd.notna(row_stock.get(close_key)) else 0.0
+                                            if feat.get('ma5d', 0.0) <= 0.0: feat['ma5d'] = close_val
+                                            if feat.get('ma10d', 0.0) <= 0.0: feat['ma10d'] = close_val
+                                            if feat.get('ma60d', 0.0) <= 0.0: feat['ma60d'] = close_val
+                                            if feat.get('sws', 0.0) <= 0.0: feat['sws'] = feat['ma10d']
+                                            if feat.get('swl', 0.0) <= 0.0: feat['swl'] = feat['ma5d']
+                                            
+                                            self._indicator_cache[cache_key] = feat
+                                            safe_update_indicators(item_dict, feat)
+                                            loaded_from_h5 = True
+                                            break
+                    except Exception as e:
+                        logger.debug(f"[BgKernel] Re-try load from HDF5 failed for {code}: {e}")
+                
+                if not loaded_from_df_all and not loaded_from_h5:
+                    try:
+                        from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
+                        from JohnsonUtil import commonTips as cct
+                        from JohnsonUtil.commonTips import timed_ctx
+                        with timed_ctx(f"LiveIndicatorEnrich_{code}", warn_ms=100):
+                            limit_days = getattr(cct, 'compute_lastdays', 120)
+                            df_hist = get_tdx_Exp_day_to_df(code, dl=limit_days)
+                            if df_hist is not None and not df_hist.empty:
+                                feat = self._extract_indicators_from_df(df_hist)
+                                if feat:
+                                    self._indicator_cache[cache_key] = feat
+                                    safe_update_indicators(item_dict, feat)
+                    except Exception as e:
+                        logger.error(f"[BgKernel] Failed to auto-enrich live indicators for {code}: {e}")
+                
+                curr_state = self.state_manager.get(code) if hasattr(self, "state_manager") else None
+                item_dict["setup"] = getattr(curr_state, "setup", "") if curr_state else ""
 
         signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)

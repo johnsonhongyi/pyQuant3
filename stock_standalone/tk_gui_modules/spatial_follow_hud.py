@@ -340,6 +340,111 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 }
             """)
 
+    def _get_stock_name(self, code: str, default_name: str = "") -> str:
+        """
+        高保真个股真名自愈解析器，通过多源(实时、候选、主表及HDF5本地库) O(1) 物理查表，
+        物理根治 "个股_代码" placeholder 乱象。
+        """
+        if not code:
+            return default_name
+            
+        code_clean = str(code).strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            code_clean = code_clean.replace(icon, '').strip()
+        code_clean = code_clean.zfill(6)
+        
+        # 0. 检查 default_name 是否已经是真实汉字名称
+        df_name = str(default_name).strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            df_name = df_name.replace(icon, '').strip()
+        if df_name and not df_name.startswith("个股_") and not df_name.isdigit() and df_name != code_clean:
+            return df_name
+            
+        # 1. 优先从主程序的 selector 实时数据表加载
+        if self.main_app:
+            selector = getattr(self.main_app, 'selector', None)
+            if selector and hasattr(selector, 'df_all_realtime'):
+                rt = selector.df_all_realtime
+                if rt is not None and not rt.empty and 'name' in rt.columns:
+                    if rt.index.name == 'code' and code_clean in rt.index:
+                        v = str(rt.loc[code_clean, 'name'])
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            return v
+                    elif 'code' in rt.columns:
+                        matched = rt[rt['code'].astype(str).str.zfill(6) == code_clean]
+                        if not matched.empty:
+                            v = str(matched.iloc[0]['name'])
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                return v
+                                
+            # 2. 从 df_full_candidates 加载
+            df_fc = getattr(self.main_app, 'df_full_candidates', None)
+            if df_fc is not None and not df_fc.empty and 'name' in df_fc.columns:
+                if df_fc.index.name == 'code' and code_clean in df_fc.index:
+                    v = str(df_fc.loc[code_clean, 'name'])
+                    if v and not v.startswith("个股_") and not v.isdigit():
+                        return v
+                elif 'code' in df_fc.columns:
+                    matched = df_fc[df_fc['code'].astype(str).str.zfill(6) == code_clean]
+                    if not matched.empty:
+                        v = str(matched.iloc[0]['name'])
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            return v
+                            
+            # 3. 从 df_candidates 加载
+            df_c = getattr(self.main_app, 'df_candidates', None)
+            if df_c is not None and not df_c.empty and 'name' in df_c.columns:
+                if df_c.index.name == 'code' and code_clean in df_c.index:
+                    v = str(df_c.loc[code_clean, 'name'])
+                    if v and not v.startswith("个股_") and not v.isdigit():
+                        return v
+                elif 'code' in df_c.columns:
+                    matched = df_c[df_c['code'].astype(str).str.zfill(6) == code_clean]
+                    if not matched.empty:
+                        v = str(matched.iloc[0]['name'])
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            return v
+                            
+            # 4. 从 master.df_all 加载
+            master = getattr(self.main_app, 'master', None)
+            if master and hasattr(master, 'df_all'):
+                m_all = master.df_all
+                if m_all is not None and not m_all.empty and 'name' in m_all.columns:
+                    if m_all.index.name == 'code' and code_clean in m_all.index:
+                        v = str(m_all.loc[code_clean, 'name'])
+                        if v and not v.startswith("个股_") and not v.isdigit():
+                            return v
+                    elif 'code' in m_all.columns:
+                        matched = m_all[m_all['code'].astype(str).str.zfill(6) == code_clean]
+                        if not matched.empty:
+                            v = str(matched.iloc[0]['name'])
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                return v
+                                
+        # 5. Fallback 物理降级从 top_all.h5 检索
+        try:
+            import pandas as pd
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                if os.path.exists(path):
+                    df_top = pd.read_hdf(path, 'top_all')
+                    if not df_top.empty and 'name' in df_top.columns:
+                        if df_top.index.name == 'code' and code_clean in df_top.index:
+                            v = str(df_top.loc[code_clean, 'name'])
+                            if v and not v.startswith("个股_") and not v.isdigit():
+                                return v
+                        elif 'code' in df_top.columns:
+                            matched = df_top[df_top['code'].astype(str).str.zfill(6) == code_clean]
+                            if not matched.empty:
+                                v = str(matched.iloc[0]['name'])
+                                if v and not v.startswith("个股_") and not v.isdigit():
+                                    return v
+                    break
+        except Exception:
+            pass
+            
+        return default_name
+
     def _trigger_linkage(self, code: str) -> None:
         """向主窗口 / 可视化终端投递联动信号 (使用官方最规范现成联动通道与 tk_dispatch_queue 派发)"""
         if not code:
@@ -1225,7 +1330,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
         # ── 维度 2: 龙头表现 ──
         leader_code = sh.leader_code
-        leader_name = sh.leader_name
+        leader_name = self._get_stock_name(leader_code, sh.leader_name)
         leader_change_pct = float(sh.leader_change_pct or 0.0)
         leader_pct_diff = float(sh.leader_pct_diff or 0.0)
         leader_dff = float(sh.leader_dff or 0.0)
@@ -1394,7 +1499,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         for f in selected_followers:
             code = f.get('code', '')
-            name = f.get('name', '跟风兵')
+            name = self._get_stock_name(code, f.get('name', '跟风兵'))
             price = f.get('price', 0.0)
             pct = f.get('pct', 0.0)
             pct_diff = f.get('pct_diff', 0.0)
@@ -1533,10 +1638,62 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         name = selected["name"]
         is_ldr = selected["is_leader"]
         
-        role = "🐉 最强领涨龙头" if is_ldr else f"🥈 爆发跟风排头兵 #{self.selected_index}"
+        role = "🐉 最强领领涨龙头" if is_ldr else f"🥈 爆发跟风排头兵 #{self.selected_index}"
         
         self.lbl_follow_target.setText(f"🎯 锁定跟单: {name} ({code}) [{role}]")
-        self.lbl_follow_reason.setText(f"考量逻辑: {selected['reason']} | 量价背离DFF={selected['dff']:.2f}")
+        
+        # ── 💡 盘前诊断计划注入 (Daily Trade Plan Overlay) ──
+        diagnose_data = {}
+        try:
+            import os
+            import json
+            try:
+                from sys_utils import get_base_path
+                base_dir = get_base_path()
+            except Exception:
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            diagnose_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+            if os.path.exists(diagnose_file):
+                with open(diagnose_file, "r", encoding="utf-8") as f:
+                    raw_data = json.load(f)
+                    diagnose_data = {item["code"]: item for item in raw_data if "code" in item}
+        except Exception as e:
+            logger.error(f"HUD failed to load pre-market diagnose: {e}")
+
+        # 清理代码中的修饰符，确保精确匹配
+        code_clean = code.strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            code_clean = code_clean.replace(icon, '').strip()
+
+        plan_desc = ""
+        if code_clean in diagnose_data:
+            plan = diagnose_data[code_clean]
+            suggest_action = plan.get("action_cn", plan.get("suggest_action", "保持观察"))
+            hard_stop = plan.get("hard_stop", 0.0)
+            reason = plan.get("reason", "")
+            branch_cn = plan.get("branch_cn", plan.get("active_branch", "常规趋势"))
+            
+            # 使用醒目的颜色高亮操作建议
+            color_map = {
+                "买入建仓": "#FF3333",
+                "建仓": "#FF3333",
+                "补仓": "#FFFF33",
+                "做T回补": "#FFFF33",
+                "回补": "#FFFF33",
+                "分批大止盈": "#33FF33",
+                "大止盈": "#33FF33",
+                "止损": "#FF3399",
+                "保持观察": "#A0A5B0",
+                "观察": "#A0A5B0"
+            }
+            act_color = color_map.get(suggest_action, "#00f0ff")
+            
+            stop_str = f"防守:{hard_stop:.2f}" if hard_stop > 0 else "防守:无"
+            plan_desc = f"【今日计划】<font color='{act_color}'><b>{suggest_action}</b></font> ({stop_str}) | 分支: {branch_cn} | {reason}"
+        else:
+            plan_desc = f"考量逻辑: {selected['reason']} | 量价背离DFF={selected['dff']:.2f}"
+            
+        self.lbl_follow_reason.setText(plan_desc)
         
         # 板块锁定视觉框动态着色 (龙头用绿色，跟风用亮粉)
         accent_color = "#39ff14" if is_ldr else "#ff007f"

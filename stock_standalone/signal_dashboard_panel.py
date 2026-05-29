@@ -1181,9 +1181,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         for name, table in self.tables.items():
             try:
                 clean_name = (
-                    name.replace("🌟 ", "")
+                    name.replace("📋 ", "")
+                        .replace("🌟 ", "")
                         .replace("🐉 ", "")
                         .replace("🔥 ", "")
+                        .replace("🌐 ", "")
+                        .replace("📡 ", "")
                 )
 
                 data[f'table_state_{clean_name}'] = (
@@ -1277,7 +1280,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if not ui_state: return
             
             for name, table in self.tables.items():
-                clean_name = name.replace("🌟 ", "").replace("🐉 ", "").replace("🔥 ", "")
+                clean_name = (
+                    name.replace("📋 ", "")
+                        .replace("🌟 ", "")
+                        .replace("🐉 ", "")
+                        .replace("🔥 ", "")
+                        .replace("🌐 ", "")
+                        .replace("📡 ", "")
+                )
                 state_key = f'table_state_{clean_name}'
                 if state_key in ui_state:
                     ok = table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
@@ -1338,12 +1348,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 rec_w = 95
             elif h_text in ["所属板块", "板块名称"]:
                 rec_w = 135
-            elif h_text in ["详情", "捕捉理由", "跟风明细", "理由", "核心理由", "形态详情", "形态/信号", "标签"]:
+            elif h_text in ["详情", "捕捉理由", "跟风明细", "理由", "核心理由", "形态详情", "形态/信号", "标签", "决策理由"]:
                 rec_w = 280  # 默认加宽，让最关键的信息一览无余
             elif h_text in ["名称", "龙头名称"]:
                 rec_w = 85
             elif h_text in ["代码", "状态", "风控", "评级", "阶段", "现价", "建议价"]:
                 rec_w = 75
+            elif h_text in ["持仓成本", "昨日收盘", "5日线预测", "布林上轨", "SWS支撑", "策略防守价", "当前分支", "操作建议", "仓位比例"]:
+                rec_w = 90
             
             # 设置为可自由交互，并赋予极佳的初始推荐宽度
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
@@ -1618,10 +1630,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tables: Dict[str, QTableWidget] = {}
 
         # [MOD] 恢复页签：保留基础页签，并将预警中枢置后以供查看效果
-        all_tabs = ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号", "📡 市场预警"]
+        all_tabs = ["📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号", "📡 市场预警"]
         for tab_name in all_tabs:
             if tab_name == "📡 市场预警":
                 table = self._create_alert_hub_table()
+            elif tab_name == "📋 每日操作指南":
+                table = self._create_guidance_table()
             elif tab_name == "🌟 决策队列":
                 table = self._create_decision_table()
             elif tab_name == "🐉 龙头追踪":
@@ -1635,10 +1649,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             self.tables[tab_name] = table
             # [INTERACTIVE-FIX] 为引擎表注入初始排序锚点，消除“冷启动点击无反应”的痛点
-            if tab_name in ["🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "📡 市场预警"]:
+            if tab_name in ["📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "📡 市场预警"]:
                 table._sort_col = 0
-                table._sort_order = Qt.SortOrder.DescendingOrder
-                table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+                table._sort_order = Qt.SortOrder.AscendingOrder if tab_name == "📋 每日操作指南" else Qt.SortOrder.DescendingOrder
+                table.horizontalHeader().setSortIndicator(0, table._sort_order)
             self.tabs.addTab(table, tab_name)
         
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1811,6 +1825,46 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.customContextMenuRequested.connect(self._show_context_menu)
         
         # [NEW] A3: 列映射缓存
+        table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
+        return table
+
+    def _create_guidance_table(self) -> QTableWidget:
+        """创建每日操作指南表"""
+        columns = [
+            "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
+            "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
+            "当前分支", "操作建议", "仓位比例", "决策理由"
+        ]
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSortingEnabled(False)  # 默认关闭 Qt 排序，由 Python 侧排序接管
+        table.horizontalHeader().setSectionsClickable(True)
+        table.horizontalHeader().sectionClicked.connect(lambda idx: self._on_engine_header_clicked(table, idx))
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        
+        # 预设极致紧凑的默认列宽，与 Tkinter 作战看板高度对齐，消除首屏过宽或不紧凑痛点
+        default_widths = {
+            "代码": 70, "名称": 90, "持仓成本": 75, "持仓数量": 75, "昨日收盘": 75,
+            "5日线预测": 75, "布林上轨": 75, "SWS支撑": 75, "策略防守价": 75,
+            "当前分支": 120, "操作建议": 75, "仓位比例": 70, "决策理由": 250
+        }
+        for i, col_name in enumerate(columns):
+            w = default_widths.get(col_name, 80)
+            table.setColumnWidth(i, w)
+        
+        # 统一单击与双击联动处理器
+        table.cellClicked.connect(self._on_cell_clicked)
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        # 防抖持久化列宽
+        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._show_context_menu)
+        
         table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
@@ -2108,7 +2162,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _trigger_sorted_refresh(self):
         """[ASYNC] 排序意图落地：决策引擎表直接物理排序；信号表延迟异步排序"""
-        _ENGINE_TABS = {"🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"}
+        _ENGINE_TABS = {"📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"}
         current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
         table = self.tables.get(current_tab_text)
         if not table: return
@@ -2254,7 +2308,70 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if thread_engine is None:
                     return
                     
-                if tab_name == "🌟 决策队列":
+                if tab_name == "📋 每日操作指南":
+                    data = []
+                    try:
+                        try:
+                            from sys_utils import get_base_path
+                            base_dir = get_base_path()
+                        except Exception:
+                            base_dir = os.path.dirname(os.path.abspath(__file__))
+                        diagnose_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+                        if os.path.exists(diagnose_file):
+                            with open(diagnose_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            
+                            # ── 盘前操作指南真名自愈并回写持久化 ──
+                            any_healed = False
+                            name_map = {}
+                            # 加载 top_all.h5 建立代码到名字映射
+                            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                                if os.path.exists(path):
+                                    try:
+                                        import pandas as pd
+                                        df_top = pd.read_hdf(path, 'top_all')
+                                        if not df_top.empty:
+                                            if 'name' in df_top.columns:
+                                                if df_top.index.name == 'code':
+                                                    name_map = df_top['name'].to_dict()
+                                                elif 'code' in df_top.columns:
+                                                    name_map = dict(zip(df_top['code'].astype(str).str.zfill(6), df_top['name']))
+                                                else:
+                                                    name_map = dict(zip(df_top.index.astype(str).str.zfill(6), df_top['name']))
+                                            break
+                                    except Exception as e:
+                                        logger.error(f"Failed to load name map in dashboard thread: {e}")
+                                        
+                            for d in data:
+                                code = d.get('code') or ''
+                                name = d.get('name') or ''
+                                code_clean = str(code).strip()
+                                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                                    code_clean = code_clean.replace(icon, '').strip()
+                                code_clean = code_clean.zfill(6)
+                                
+                                name_clean = str(name).strip()
+                                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                                    name_clean = name_clean.replace(icon, '').strip()
+                                    
+                                if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+                                    healed_name = name_map.get(code_clean)
+                                    if healed_name:
+                                        d['name'] = healed_name
+                                        any_healed = True
+                                        
+                            if any_healed:
+                                try:
+                                    with open(diagnose_file, "w", encoding="utf-8") as f:
+                                        json.dump(data, f, indent=4, ensure_ascii=False)
+                                    logger.info("✨ [DASHBOARD-HEAL] Successfully persisted healed stock names back to premarket_diagnose.json")
+                                except Exception as write_err:
+                                    logger.error(f"❌ [DASHBOARD-HEAL] Failed to write back healed names: {write_err}")
+                    except Exception as json_err:
+                        logger.error(f"Failed to load/heal pre-market diagnose file: {json_err}")
+                    self.sig_engine_data_fetched.emit(tab_name, data)
+
+                elif tab_name == "🌟 决策队列":
                     data = thread_engine.get_decision_queue()
                     self.sig_engine_data_fetched.emit(tab_name, data)
                     
@@ -3989,6 +4106,44 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             except Exception as e:
                 logger.error(f"❌ [Dashboard] Menu logic failed: {e}")
 
+        current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+        if current_tab_text == "📋 每日操作指南":
+            menu.addSeparator()
+            delete_action = menu.addAction(f"🗑 删除此操作指南: {code}")
+            
+            def _delete_gui_guidance():
+                from PyQt6.QtWidgets import QMessageBox
+                res = QMessageBox.question(
+                    self, "确认删除", f"是否确定从每日操作指南中删除股票 {code} 的记录？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if res != QMessageBox.StandardButton.Yes:
+                    return
+                import os
+                import json
+                try:
+                    from sys_utils import get_base_path
+                    base_dir = get_base_path()
+                except Exception:
+                    base_dir = os.path.abspath(".")
+                filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+                if not os.path.exists(filepath):
+                    return
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        new_data = [d for d in data if d.get('code') != code]
+                        with open(filepath, "w", encoding="utf-8") as f:
+                            json.dump(new_data, f, ensure_ascii=False, indent=2)
+                    self._refresh_guidance_table(new_data)
+                    self.status_label.setText(f"🗑 已从操作指南中成功删除 {code}")
+                except Exception as ex:
+                    QMessageBox.critical(self, "错误", f"删除失败: {ex}")
+            
+            delete_action.triggered.connect(_delete_gui_guidance)
+
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def _run_dna_audit_selected(self, source_table=None):
@@ -4277,6 +4432,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 hub = get_signal_grading_hub()
                 hub.force_report()
                 
+                # 3. 触发盘前诊断计算，更新每日操作计划
+                try:
+                    from premarket_analyzer import run_premarket_diagnose
+                    run_premarket_diagnose()
+                    logger.info("📡 [UI] 盘前个股诊断手动重算成功！")
+                except Exception as diag_err:
+                    logger.error(f"Failed to manually run premarket diagnose: {diag_err}")
+                
                 # 3. [EFFECT] 发射一条强视觉反馈信号，展示中枢效果
                 from signal_bus import get_signal_bus, SignalBus
                 bus = get_signal_bus()
@@ -4320,7 +4483,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_engine_data_fetched(self, tab_name: str, data: list):
         """[GUI THREAD] 异步拉取引擎数据成功后的主线程回调渲染逻辑，确保线程安全"""
-        if tab_name == "🌟 决策队列":
+        if tab_name == "📋 每日操作指南":
+            self._refresh_guidance_table(data)
+        elif tab_name == "🌟 决策队列":
             self._refresh_decision_table(data)
         elif tab_name == "🐉 龙头追踪":
             self._refresh_dragon_table(data)
@@ -4328,6 +4493,138 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._refresh_strategic_table(data)
         elif tab_name == "🔥 板块热力":
             self._refresh_sector_table(data)
+
+    def _refresh_guidance_table(self, data: list):
+        """[PERF] 渲染每日操作指南表，采用 _fast_update_cell 进行极致性能渲染"""
+        table = self.tables.get("📋 每日操作指南")
+        if not table: return
+
+        # 备份当前选中状态与滚动位置
+        selected_code = None
+        sel_ranges = table.selectedRanges()
+        if sel_ranges and table.rowCount() > 0:
+            it = table.item(sel_ranges[0].topRow(), 0)
+            if it: selected_code = it.text()
+
+        # 排序处理
+        sort_col = getattr(table, '_sort_col', 0)
+        sort_order = getattr(table, '_sort_order', Qt.SortOrder.AscendingOrder)
+
+        def _get_sort_key(d):
+            cols = [
+                "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
+                "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
+                "当前分支", "操作建议", "仓位比例", "决策理由"
+            ]
+            col_name = cols[sort_col] if sort_col < len(cols) else "代码"
+            
+            if col_name == "代码": return d.get('code', '')
+            if col_name == "名称": return d.get('name', '')
+            if col_name == "持仓成本": return float(d.get('entry_price', 0.0) or 0.0)
+            if col_name == "持仓数量": return float(d.get('volume', 0.0) or 0.0)
+            if col_name == "昨日收盘": return float(d.get('close', 0.0) or 0.0)
+            if col_name == "5日线预测": return float(d.get('predicted_ma5', 0.0) or 0.0)
+            if col_name == "布林上轨": return float(d.get('upper_boll', 0.0) or 0.0)
+            if col_name == "SWS支撑": return float(d.get('sws_support', 0.0) or 0.0)
+            if col_name == "策略防守价": return float(d.get('hard_stop', 0.0) or 0.0)
+            if col_name == "当前分支":
+                branch_name = d.get('branch_cn', d.get('active_branch', ''))
+                priority_map = {
+                    "5日线主升浪": 1,
+                    "5日线极速支撑": 1,
+                    "10日线反转": 2,
+                    "10日线趋势": 2,
+                    "SWS盈利线低吸": 3,
+                    "SWS防守支撑": 3,
+                    "60日线生死防守": 4,
+                    "破位高位防震": 5
+                }
+                return priority_map.get(branch_name, 99)
+            if col_name == "操作建议": return d.get('action_cn', d.get('suggest_action', ''))
+            if col_name == "仓位比例": return float(d.get('size_pct', 0.0) or 0.0)
+            if col_name == "决策理由": return d.get('reason', '')
+            return ''
+
+        data_sorted = sorted(data, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+
+        try:
+            table.setRowCount(len(data_sorted))
+            color_map = {
+                "建仓": "#FF3333",
+                "补仓": "#FFFF33",
+                "回补": "#FFFF33",
+                "分批大止盈": "#33FF33",
+                "大止盈": "#33FF33",
+                "止损": "#FF3399",
+                "保持观察": "#A0A5B0",
+                "观察": "#A0A5B0"
+            }
+            
+            for i, d in enumerate(data_sorted):
+                suggest_action = d.get('action_cn', d.get('suggest_action', '保持观察'))
+                act_color = color_map.get(suggest_action, "#ffffff")
+                
+                # 填充各单元格
+                self._fast_update_cell(table, i, 0, d.get('code', ''), data=d)
+                self._fast_update_cell(table, i, 1, d.get('name', ''), data=d)
+                self._fast_update_cell(table, i, 2, f"{d.get('entry_price', 0.0):.2f}", numeric_val=d.get('entry_price', 0.0), data=d)
+                self._fast_update_cell(table, i, 3, f"{int(d.get('volume', 0)):,}", numeric_val=d.get('volume', 0), data=d)
+                self._fast_update_cell(table, i, 4, f"{d.get('close', 0.0):.2f}", numeric_val=d.get('close', 0.0), data=d)
+                self._fast_update_cell(table, i, 5, f"{d.get('predicted_ma5', 0.0):.2f}", numeric_val=d.get('predicted_ma5', 0.0), data=d)
+                self._fast_update_cell(table, i, 6, f"{d.get('upper_boll', 0.0):.2f}", numeric_val=d.get('upper_boll', 0.0), data=d)
+                self._fast_update_cell(table, i, 7, f"{d.get('sws_support', 0.0):.2f}", numeric_val=d.get('sws_support', 0.0), data=d)
+                self._fast_update_cell(table, i, 8, f"{d.get('hard_stop', 0.0):.2f}", numeric_val=d.get('hard_stop', 0.0), data=d)
+                
+                branch_raw = d.get('branch_cn', d.get('active_branch', ''))
+                branch_color_map = {
+                    "5日线主升浪": "#00ffff",
+                    "5日线极速支撑": "#00ffff",
+                    "10日线反转": "#00ff88",
+                    "10日线趋势": "#00ff88",
+                    "SWS盈利线低吸": "#FFD700",
+                    "SWS防守支撑": "#FFD700",
+                    "60日线生死防守": "#ff00ff",
+                    "破位高位防震": "#ff4444"
+                }
+                # Emojis 映射：彻底物理剥离 \uFE0F 并换成兼容的 🛡 和 🚨 消除 Windows 平台多余空格与空白
+                branch_emoji_map = {
+                    "5日name": "🚀 5日线主升浪",  # Keep map clean
+                    "5日线主升浪": "🚀 5日线主升浪",
+                    "5日线极速支撑": "🚀 5日线极速支撑",
+                    "10日线反转": "🟢 10日线反转",
+                    "10日线趋势": "🟢 10日线趋势",
+                    "SWS盈利线低吸": "🟡 SWS盈利线低吸",
+                    "SWS防守支撑": "🟡 SWS防守支撑",
+                    "60日线生死防守": "🛡 60日线生死防守",
+                    "破位高位防震": "🚨 破位高位防震"
+                }
+                branch_cn = branch_emoji_map.get(branch_raw, branch_raw)
+                branch_color = branch_color_map.get(branch_raw, "#ffffff")
+                self._fast_update_cell(table, i, 9, branch_cn, color_key=branch_color, bold=True, data=d)
+                self._fast_update_cell(table, i, 10, suggest_action, color_key=act_color, bold=True, data=d)
+                
+                size_pct = d.get('size_pct', 0.0)
+                self._fast_update_cell(table, i, 11, f"{size_pct*100:.1f}%", numeric_val=size_pct, data=d)
+                self._fast_update_cell(table, i, 12, d.get('reason', ''), data=d)
+
+            # 恢复选中状态
+            if selected_code is not None:
+                for row in range(table.rowCount()):
+                    it = table.item(row, 0)
+                    if it and it.text() == selected_code:
+                        table.selectRow(row)
+                        break
+        finally:
+            table.setSortingEnabled(was_sorting)
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            self._limit_table_column_widths(table)
+            table.viewport().update()
 
 
     def _get_next_scan_time(self):
