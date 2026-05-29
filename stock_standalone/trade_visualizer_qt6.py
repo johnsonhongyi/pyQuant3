@@ -1315,8 +1315,20 @@ class ReentryBacktestThread(QThread):
         try:
             # 引入我们的历史回测主入口
             from scratch.test_reentry_backtest import run_backtest_and_get_report
-            report = run_backtest_and_get_report(self.code, self.name)
-            self.finished_sig.emit(self.code, report)
+            
+            # Clean emojis from code
+            code_clean = self.code.strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                code_clean = code_clean.replace(icon, '').strip()
+            code_clean = code_clean.zfill(6)
+            
+            # Clean emojis from name
+            name_clean = str(self.name).strip() if self.name else ""
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                name_clean = name_clean.replace(icon, '').strip()
+                
+            report = run_backtest_and_get_report(code_clean, name_clean)
+            self.finished_sig.emit(code_clean, report)
         except Exception as e:
             import traceback
             err_msg = f"Re-entry 回测执行失败: {e}\n{traceback.format_exc()}"
