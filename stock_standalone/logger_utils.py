@@ -55,14 +55,14 @@ class LoggerWriter:
             self.log_func(self._buffer.strip())
             self._buffer = ""
 
-def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
+def init_logging(log_file="appTk.log", level=None, redirect_print=False, show_detail=True):
     """初始化全局日志"""
     logger = LoggerFactory.getLogger(
         name="instock_TK",
         logpath=log_file,
-        show_detail=show_detail
+        show_detail=show_detail,
+        level=level
     )
-    logger.setLevel(level)
 
     if redirect_print:
         sys.stdout = LoggerWriter(LoggerFactory.INFO)
@@ -71,10 +71,9 @@ def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print
     logger.info("日志初始化完成")
     return logger
 
-def init_logging_noprint(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
+def init_logging_noprint(log_file="appTk.log", level=None, redirect_print=False, show_detail=True):
     """初始化全局日志 (简易版)"""
-    logger = LoggerFactory.getLogger("instock_TK", logpath=log_file, show_detail=show_detail)
-    logger.setLevel(level)
+    logger = LoggerFactory.getLogger("instock_TK", logpath=log_file, show_detail=show_detail, level=level)
 
     if redirect_print:
         class SimpleLoggerWriter:
@@ -86,7 +85,7 @@ def init_logging_noprint(log_file="appTk.log", level=LoggerFactory.ERROR, redire
                     self.level_func(msg)
             def flush(self):
                 pass
-        sys.stdout = SimpleLoggerWriter(level)
+        sys.stdout = SimpleLoggerWriter(level if level is not None else LoggerFactory.INFO)
         sys.stderr = SimpleLoggerWriter(logger.error)
 
     logger.info("日志初始化完成")

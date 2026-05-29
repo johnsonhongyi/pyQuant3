@@ -245,6 +245,7 @@ class GlobalConfig:
         self.clean_terminal = self._split(
             self.cfg.get("terminal", "clean_terminal", fallback="")
         )
+        self.loglevel = self.cfg.get("general", "loglevel", fallback="INFO").upper()
 
         self.expressions = dict(self.cfg.items("expressions"))
         self.paths = dict(self.cfg.items("path"))
@@ -318,6 +319,36 @@ WARN = WARNING
 INFO = 20
 DEBUG = 10
 NOTSET = 0
+
+# 获取全局配置中的 loglevel，并映射为 logging 的级别常数
+_LOG_LEVEL_MAP = {
+    "DEBUG": 10,
+    "INFO": 20,
+    "WARNING": 30,
+    "WARN": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+    "FATAL": 50,
+    "NOTSET": 0,
+}
+
+def _detect_cmd_log_level():
+    import sys
+    try:
+        args = sys.argv
+        for i in range(len(args) - 1):
+            if args[i] in ("-log", "--log", "--loglevel", "-log-level"):
+                val = args[i+1].upper()
+                if val in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", "FATAL"):
+                    return val
+    except Exception:
+        pass
+    return None
+
+_CMD_LOGLEVEL = _detect_cmd_log_level()
+_CFG_LOGLEVEL = getattr(CFG, 'loglevel', 'INFO').upper()
+_FINAL_LOGLEVEL_STR = _CMD_LOGLEVEL if _CMD_LOGLEVEL else _CFG_LOGLEVEL
+DEFAULT_LOG_LEVEL = _LOG_LEVEL_MAP.get(_FINAL_LOGLEVEL_STR, 20)
 
 
 # http://blog.sina.com.cn/s/blog_411fed0c0100wkvj.html
@@ -547,7 +578,7 @@ def _ensure_listener_started(log_f, show_detail=True):
 # 全局保存上一次 log_f
 _GLOBAL_LAST_LOG_F = None
 
-def getLogger(name=None, logpath='instock_tk.log', show_detail=True,level=logging.ERROR):
+def getLogger(name=None, logpath='instock_tk.log', show_detail=True, level=None):
     """
     获取全局 logger，支持多进程/多线程
     """
@@ -555,7 +586,16 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True,level=loggin
 
     # 已初始化，直接返回
     if _GLOBAL_LOGGER is not None:
+        cmd_level_str = _detect_cmd_log_level()
+        if cmd_level_str:
+            _GLOBAL_LOGGER.setLevel(_LOG_LEVEL_MAP.get(cmd_level_str, 20))
         return _GLOBAL_LOGGER
+
+    cmd_level_str = _detect_cmd_log_level()
+    if cmd_level_str:
+        level = _LOG_LEVEL_MAP.get(cmd_level_str, 20)
+    elif level is None:
+        level = DEFAULT_LOG_LEVEL
 
     # 设置全局 logger 名称
     if name:

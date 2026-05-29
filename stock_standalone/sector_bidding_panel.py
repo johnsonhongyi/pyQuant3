@@ -1438,18 +1438,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         super().__init__(None)         # 独立窗口
         self.main_window = main_window
         
-        # [NEW] 动态对齐命令行日志级别，确保在启用 -log debug 时能显示详细调试输出
-        import sys
-        self._log_level_debug = False
-        if "-log" in sys.argv:
-            try:
-                idx = sys.argv.index("-log")
-                if idx + 1 < len(sys.argv) and sys.argv[idx + 1].lower() == "debug":
-                    logger.warning("⚙️ [SectorPanel] CMD line '-log debug' detected. Forcing logger to DEBUG level.")
-                    logger.setLevel("DEBUG")
-                    self._log_level_debug = True
-            except Exception as e:
-                logger.warning(f"Failed to set log level dynamically: {e}")
         rs = getattr(main_window, 'realtime_service', None)
         # [ROOT-FIX] 优先使用主窗口已经构建的全局统一 racing_detector，确保全系统数据一致性
         main_detector = getattr(main_window, 'racing_detector', None)
@@ -1460,13 +1448,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             logger.warning("📡 [SectorPanel] No global racing_detector found on main_window. Instantiating local fallback.")
             self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
 
-        if getattr(self, '_log_level_debug', False):
-            try:
-                if hasattr(self.detector, 'logger'):
-                    self.detector.logger.setLevel("DEBUG")
-            except:
-                pass
-        # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程的事件泵盲区！
+        # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程 of the event pump blind spot!
         self.detector.on_score_finished = self._on_score_finished_callback
         self.detector.ensure_data_ready_async(on_ready_callback=self._on_detector_ready)
 
