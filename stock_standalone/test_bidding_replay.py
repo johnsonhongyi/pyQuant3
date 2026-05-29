@@ -1038,6 +1038,16 @@ def main(args=None, df_all_target=None, quit_event=None, bus_queue=None):
         get_signal_bus().set_external_queue(bus_queue)
         logger.info("📡 [Replay][IPC] Cross-process SignalBus bridge established.")
 
+    # [🚀 HUB-GUARD] 强力将子进程的信号预警中枢切换至回测模拟模式，避免高频回放计算时狂喷警告日志
+    try:
+        from signal_grading_hub import get_signal_grading_hub
+        hub = get_signal_grading_hub()
+        if hub:
+            hub.set_simulation_mode(True)
+            logger.info("📡 [Replay][Subprocess] SignalGradingHub simulation mode set to True.")
+    except Exception as e:
+        pass
+
     if args is None:
         import argparse
         from datetime import datetime
