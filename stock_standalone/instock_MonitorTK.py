@@ -8807,9 +8807,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, '_backtest_dialog') and self._backtest_dialog and self._backtest_dialog.winfo_exists():
                 self._backtest_dialog.update_report(code, name, report)
                 self._backtest_dialog.deiconify()
+                self._backtest_dialog.lift()
                 self._backtest_dialog.focus_force()
+                if hasattr(self._backtest_dialog, 'text_area'):
+                    self._backtest_dialog.text_area.focus_set()
             else:
                 self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+                self._backtest_dialog.lift()
+                self._backtest_dialog.focus_force()
+                if hasattr(self._backtest_dialog, 'text_area'):
+                    self._backtest_dialog.text_area.focus_set()
         except Exception as e:
             logger.error(f"Error showing backtest report window: {e}")
 

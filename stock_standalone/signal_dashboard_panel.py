@@ -1028,7 +1028,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] 列宽持久化防抖 Timer：避免 sectionResized 每次触发磁盘 IO
         self._save_ui_timer = QTimer(self)
         self._save_ui_timer.setSingleShot(True)
-        self._save_ui_timer.setInterval(5000)  # 5s 防抖，合并连续列宽调整为单次写入
+        self._save_ui_timer.setInterval(500)  # 500ms 极速防抖，拖拽完成后瞬间安全写盘
         self._save_ui_timer.timeout.connect(self._save_ui_state)
 
         # --- 3. UI 渲染 (依赖上述数据结构) ---
@@ -1166,6 +1166,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._table_update_buffer.clear()
         
     def closeEvent(self, event):
+        # 退出前显式停止 pending 延迟保存定时器，防止冲突与重复写盘
+        if hasattr(self, '_save_ui_timer') and self._save_ui_timer:
+            self._save_ui_timer.stop()
         self.save_window_position_qt_visual(self, "signal_dashboard_panel")
         self._save_ui_state()
         self.stop()
@@ -1832,6 +1835,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """创建每日操作指南表"""
         columns = [
             "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
+            "当日涨幅", "资金DFF", 
             "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
             "当前分支", "操作建议", "仓位比例", "决策理由"
         ]
@@ -1848,6 +1852,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 预设极致紧凑的默认列宽，与 Tkinter 作战看板高度对齐，消除首屏过宽或不紧凑痛点
         default_widths = {
             "代码": 70, "名称": 90, "持仓成本": 75, "持仓数量": 75, "昨日收盘": 75,
+            "当日涨幅": 75, "资金DFF": 75,
             "5日线预测": 75, "布林上轨": 75, "SWS支撑": 75, "策略防守价": 75,
             "当前分支": 120, "操作建议": 75, "仓位比例": 70, "决策理由": 250
         }
@@ -4494,6 +4499,28 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         elif tab_name == "🔥 板块热力":
             self._refresh_sector_table(data)
 
+    def _get_df_all_realtime(self):
+        """[DATA] 尝试从 selector 或父应用获取最新的实时行情表 (df_all_realtime)"""
+        # 1. 尝试从 parent_app.selector 获取
+        if hasattr(self, 'parent_app') and self.parent_app:
+            if hasattr(self.parent_app, 'selector') and self.parent_app.selector is not None:
+                if hasattr(self.parent_app.selector, 'df_all_realtime'):
+                    return self.parent_app.selector.df_all_realtime
+            if hasattr(self.parent_app, 'df_all_realtime'):
+                return self.parent_app.df_all_realtime
+            if hasattr(self.parent_app, 'df_all'):
+                return self.parent_app.df_all
+
+        # 2. 尝试从 MainWindow 获取
+        main_win = self.window()
+        if hasattr(main_win, 'selector') and main_win.selector is not None:
+            if hasattr(main_win.selector, 'df_all_realtime'):
+                return main_win.selector.df_all_realtime
+        if hasattr(main_win, 'df_all'):
+            return main_win.df_all
+            
+        return None
+
     def _refresh_guidance_table(self, data: list):
         """[PERF] 渲染每日操作指南表，采用 _fast_update_cell 进行极致性能渲染"""
         table = self.tables.get("📋 每日操作指南")
@@ -4506,6 +4533,35 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             it = table.item(sel_ranges[0].topRow(), 0)
             if it: selected_code = it.text()
 
+        # 👑 在排序之前，利用实时内存大表，富化并合入每只个股的当日涨幅 (percent) 和资金 dff，确保支持按新列高保真数值排序！
+        rt = self._get_df_all_realtime()
+        import pandas as pd
+        for d in data:
+            code = d.get('code') or ''
+            code_clean = str(code).strip()
+            # 物理剥离表情符号
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                code_clean = code_clean.replace(icon, '').strip()
+            code_clean = code_clean.zfill(6)
+            
+            pct = 0.0
+            dff_val = 0.0
+            has_rt = False
+            if rt is not None and not rt.empty:
+                if code_clean in rt.index:
+                    row = rt.loc[code_clean]
+                    if isinstance(row, pd.Series):
+                        pct = row.get('percent', row.get('pct', row.get('pct_diff', 0.0)))
+                        dff_val = row.get('dff', 0.0)
+                        has_rt = True
+            
+            if not has_rt:
+                pct = d.get('percent', d.get('pct', d.get('pct_diff', 0.0)))
+                dff_val = d.get('dff', 0.0)
+                
+            d['percent'] = float(pct or 0.0)
+            d['dff'] = float(dff_val or 0.0)
+
         # 排序处理
         sort_col = getattr(table, '_sort_col', 0)
         sort_order = getattr(table, '_sort_order', Qt.SortOrder.AscendingOrder)
@@ -4513,6 +4569,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         def _get_sort_key(d):
             cols = [
                 "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
+                "当日涨幅", "资金DFF", 
                 "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
                 "当前分支", "操作建议", "仓位比例", "决策理由"
             ]
@@ -4523,6 +4580,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if col_name == "持仓成本": return float(d.get('entry_price', 0.0) or 0.0)
             if col_name == "持仓数量": return float(d.get('volume', 0.0) or 0.0)
             if col_name == "昨日收盘": return float(d.get('close', 0.0) or 0.0)
+            if col_name == "当日涨幅": return float(d.get('percent', 0.0) or 0.0)
+            if col_name == "资金DFF": return float(d.get('dff', 0.0) or 0.0)
             if col_name == "5日线预测": return float(d.get('predicted_ma5', 0.0) or 0.0)
             if col_name == "布林上轨": return float(d.get('upper_boll', 0.0) or 0.0)
             if col_name == "SWS支撑": return float(d.get('sws_support', 0.0) or 0.0)
@@ -4575,10 +4634,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._fast_update_cell(table, i, 2, f"{d.get('entry_price', 0.0):.2f}", numeric_val=d.get('entry_price', 0.0), data=d)
                 self._fast_update_cell(table, i, 3, f"{int(d.get('volume', 0)):,}", numeric_val=d.get('volume', 0), data=d)
                 self._fast_update_cell(table, i, 4, f"{d.get('close', 0.0):.2f}", numeric_val=d.get('close', 0.0), data=d)
-                self._fast_update_cell(table, i, 5, f"{d.get('predicted_ma5', 0.0):.2f}", numeric_val=d.get('predicted_ma5', 0.0), data=d)
-                self._fast_update_cell(table, i, 6, f"{d.get('upper_boll', 0.0):.2f}", numeric_val=d.get('upper_boll', 0.0), data=d)
-                self._fast_update_cell(table, i, 7, f"{d.get('sws_support', 0.0):.2f}", numeric_val=d.get('sws_support', 0.0), data=d)
-                self._fast_update_cell(table, i, 8, f"{d.get('hard_stop', 0.0):.2f}", numeric_val=d.get('hard_stop', 0.0), data=d)
+                
+                # 当日涨幅与资金 DFF
+                pct_val = d.get('percent', 0.0)
+                pct_str = f"{pct_val:+.2f}%" if pct_val != 0.0 else "0.00%"
+                pct_color = "#ff4444" if pct_val > 0 else ("#00ff88" if pct_val < 0 else "#ffffff")
+                self._fast_update_cell(table, i, 5, pct_str, color_key=pct_color, numeric_val=pct_val, data=d)
+
+                dff_val = d.get('dff', 0.0)
+                dff_str = f"{dff_val:+.2f}" if dff_val != 0.0 else "0.00"
+                dff_color = "#ffaa00" if dff_val > 0.5 else ("#ff4444" if dff_val > 0 else ("#00ff88" if dff_val < 0 else "#ffffff"))
+                self._fast_update_cell(table, i, 6, dff_str, color_key=dff_color, numeric_val=dff_val, data=d)
+                
+                # 其他指标顺延
+                self._fast_update_cell(table, i, 7, f"{d.get('predicted_ma5', 0.0):.2f}", numeric_val=d.get('predicted_ma5', 0.0), data=d)
+                self._fast_update_cell(table, i, 8, f"{d.get('upper_boll', 0.0):.2f}", numeric_val=d.get('upper_boll', 0.0), data=d)
+                self._fast_update_cell(table, i, 9, f"{d.get('sws_support', 0.0):.2f}", numeric_val=d.get('sws_support', 0.0), data=d)
+                self._fast_update_cell(table, i, 10, f"{d.get('hard_stop', 0.0):.2f}", numeric_val=d.get('hard_stop', 0.0), data=d)
                 
                 branch_raw = d.get('branch_cn', d.get('active_branch', ''))
                 branch_color_map = {
@@ -4591,9 +4663,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     "60日线生死防守": "#ff00ff",
                     "破位高位防震": "#ff4444"
                 }
-                # Emojis 映射：彻底物理剥离 \uFE0F 并换成兼容的 🛡 和 🚨 消除 Windows 平台多余空格与空白
                 branch_emoji_map = {
-                    "5日name": "🚀 5日线主升浪",  # Keep map clean
                     "5日线主升浪": "🚀 5日线主升浪",
                     "5日线极速支撑": "🚀 5日线极速支撑",
                     "10日线反转": "🟢 10日线反转",
@@ -4605,12 +4675,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 }
                 branch_cn = branch_emoji_map.get(branch_raw, branch_raw)
                 branch_color = branch_color_map.get(branch_raw, "#ffffff")
-                self._fast_update_cell(table, i, 9, branch_cn, color_key=branch_color, bold=True, data=d)
-                self._fast_update_cell(table, i, 10, suggest_action, color_key=act_color, bold=True, data=d)
+                self._fast_update_cell(table, i, 11, branch_cn, color_key=branch_color, bold=True, data=d)
+                self._fast_update_cell(table, i, 12, suggest_action, color_key=act_color, bold=True, data=d)
                 
                 size_pct = d.get('size_pct', 0.0)
-                self._fast_update_cell(table, i, 11, f"{size_pct*100:.1f}%", numeric_val=size_pct, data=d)
-                self._fast_update_cell(table, i, 12, d.get('reason', ''), data=d)
+                self._fast_update_cell(table, i, 13, f"{size_pct*100:.1f}%", numeric_val=size_pct, data=d)
+                self._fast_update_cell(table, i, 14, d.get('reason', ''), data=d)
 
             # 恢复选中状态
             if selected_code is not None:
