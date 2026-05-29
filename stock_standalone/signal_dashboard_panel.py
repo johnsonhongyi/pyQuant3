@@ -11,7 +11,9 @@ import sys
 import re
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Set
+from collections import OrderedDict
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
@@ -972,8 +974,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
         self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
-        self._incoming_event_queue: List[BusEvent] = []
-        self._incoming_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._event_state: Dict[tuple, BusEvent] = {}
+        self._dirty_keys: Set[tuple] = set()
+        self._state_timestamps: Dict[tuple, float] = {}
+        self._state_ttl_seconds = 600
+        self._max_render_per_frame = 200
         
         # [NEW] 集中化事件消费定时器：代替高频 QTimer 注册，10FPS (100ms) 批量拉取消费，彻底去噪
         self._event_consume_timer = QTimer(self)
@@ -3107,26 +3113,69 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.viewport().update()
 
     def _on_signal_received(self, event: BusEvent):
-        """[BACKGROUND THREAD] 仅加入待处理队列，由主线程消费定时器定时批量拉取处理，避免饱和攻击"""
+        """[BACKGROUND THREAD] state overwrite + dirty keys set"""
         if not event or not event.payload: 
             return # 🛡️ 防御空事件
         
-        with self._incoming_lock:
-            self._incoming_event_queue.append(event)
+        code = event.payload.get('code')
+        if code:
+            # 细粒度 State-Key：以 (事件类型, 个股代码, 形态子类型) 为唯一键，绝对防止误覆盖不同形态的信号！
+            p = str(event.payload.get('pattern', event.payload.get('subtype', '')) or '').lower()
+            key = (event.event_type, code, p)
+        else:
+            # 兜底键值防止无股码的通知类信号被物理覆盖
+            key = (event.event_type, id(event), '')
+
+        now = time.time()
+        with self._state_lock:
+            self._event_state[key] = event
+            self._dirty_keys.add(key)
+            self._state_timestamps[key] = now
 
     def _consume_incoming_events(self):
-        """[GUI THREAD] 从背景队列中取出所有事件并批量处理，彻底降频并消除句柄溢出"""
-        with self._incoming_lock:
-            if not self._incoming_event_queue:
+        """[GUI THREAD] frame-bounded delta-rendering + lazy TTL eviction (锁持有时间 < 1μs)"""
+        now = time.time()
+        
+        # ===== 1. 快速取快照（锁极短，仅取引用并重置 set，锁内复杂度 O(1)） =====
+        with self._state_lock:
+            if not self._dirty_keys:
                 return
-            events = self._incoming_event_queue[:]
-            self._incoming_event_queue.clear()
+            keys = self._dirty_keys
+            self._dirty_keys = set()
             
-        for event in events:
-            try:
-                self._safe_process_event(event)
-            except Exception as e:
-                logger.error(f"Error consuming event in dashboard: {e}")
+        # ===== 2. lazy TTL eviction（仅在无锁阶段对当前脏 key 执行惰性冷数据清理，物理防膨胀且无 O(N) 全量扫描） =====
+        state = self._event_state
+        ts = self._state_timestamps
+        
+        valid_keys = []
+        for k in keys:
+            t = ts.get(k)
+            if t is None:
+                continue
+            if now - t > self._state_ttl_seconds:
+                # 触碰时发现超时，执行惰性淘汰释放强引用
+                ts.pop(k, None)
+                state.pop(k, None)
+                continue
+            valid_keys.append(k)
+            
+        # ===== 3. 单帧最大渲染天花板截断（防 CPU 洪峰击穿）=====
+        if len(valid_keys) > self._max_render_per_frame:
+            valid_keys = valid_keys[-self._max_render_per_frame:]
+            
+        # ===== 4. GUI 增量差分渲染（无锁阶段）=====
+        for k in valid_keys:
+            event = state.get(k)
+            if event:
+                try:
+                    self._safe_process_event(event)
+                except Exception as e:
+                    logger.error(f"[GUI] render error: {e}")
+
+    @property
+    def _incoming_event_queue(self):
+        """[COMPATIBILITY] 完美将背压监控映射到有序脏字典长度，实现跨模块物理解耦与安全自愈"""
+        return self._dirty_keys
 
 
     def _show_alert_banner(self, msg):

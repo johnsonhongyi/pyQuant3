@@ -1,3 +1,8 @@
+## 2026-05-30 06:30
+- [x] **根治 Nuitka 编译环境下赛马回测高频运行 GIL 崩溃与 GC 冲突 (Fixed Nuitka-compiled GIL Replay Crash & GC Conflicts)**：
+    - [x] **实现高频回测期间自动垃圾回收 (GC) 主动挂起与集中回收**：首次在主进程 `instock_MonitorTK.py` 中引入 `gc.disable()` 防护逻辑。在回测启动时强行关闭主进程的 CPython 自动垃圾回收机制，防止 Nuitka 编译的高频 C 代码在多线程高频读写积压队列时，由于 GC 遍历和注销 `PyThreadState` 线程状态产生的临界区 Race Condition 冲突。在回测物理退出后，调用 `gc.enable()` 恢复自动回收，并手动触发一次 `gc.collect()` 集中清理所有残留对象，实现了运行时“绝对防爆”与退出后“无损自愈”。
+    - [x] **实现 Nuitka C 级高频循环主动微休眠与 CPU/GIL 让渡机制 (Nuitka GIL Decoupling via Micro-sleep)**：在主进程总线监听桥 `monitor_bus_bridge` 反序列化及转发每帧事件后，强力注入了 `time.sleep(0.0001)`（100 微秒）的极轻量主动休眠。这强制迫使 Nuitka 编译生成的超高效 C 循环主动释放并让渡 GIL 锁与 CPU 时间片，给予主线程 Qt 界面渲染及底层 DLL 极度充裕的呼吸调度空间，从根本上消除了高频 IPC 积压时 Nuitka 对 GIL 的极限抢占死锁。
+
 ## 2026-05-30 06:00
 - [x] **根治赛马回测高频运行 GIL 致命崩溃与数据污染 (Fixed Replay GIL Crash & Replay Data Pollution)**：
     - [x] **实现高频回测期间 GIL 监测器安全挂起与自愈**：在 `instock_MonitorTK.py` 启动回测子进程（`_launch_task`）时，主动暂停并关闭主进程后台的 `tk_gil_monitor` 监测器。在回测子进程物理退出（`monitor_backtest_exit`）后，自动重新拉起并安装 GIL 呼吸监测器。这彻底隔绝了超高频 IPC 反序列化（Pickle）与后台 `sys._current_frames()` 物理遍历线程状态（PyThreadState）的并发冲突，从源头彻底根治了 `PyEval_RestoreThread` 致命闪退。
