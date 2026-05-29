@@ -1178,165 +1178,460 @@ class SnapshotCalendarDialog(QDialog):
 
 from queue import Queue, Empty
 import time
+import threading
+import traceback
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import (
+    QThread,
+    pyqtSignal,
+    Qt,
+)
+
+# =============================================================================
+# 🚀 Production Grade DataProcessWorker
+# -----------------------------------------------------------------------------
+# 特性：
+# 1. 使用 QThread（兼容 PyQt6 / Nuitka Onefile）
+# 2. 分片计算（防止长时间霸占 GIL）
+# 3. 动态 Yield（避免 UI 假死）
+# 4. Queue 防堆积
+# 5. Emit 节流
+# 6. Logging 节流
+# 7. 安全退出
+# 8. 极端异常保护
+# =============================================================================
 
 class DataProcessWorker(QThread):
-    """[🚀 极致安全与稳定性] 使用 QThread 接管后台数据处理，天然兼容 Qt 事件循环，彻底根治原生 Python 线程下的 GIL 状态破坏与 NULL 崩溃"""
+
+    # UI 更新信号
     data_updated = pyqtSignal(object)
+
+    # Worker 停止信号
     stopped = pyqtSignal()
 
     def __init__(self, detector):
         super().__init__()
+
         self.setObjectName("DataProcessWorker")
+
         self.detector = detector
-        # 线程安全队列
-        self.df_queue = Queue()
-        self.force_queue = Queue()
+
+        # =========================================================================
+        # Queue
+        # =========================================================================
+        self.df_queue = Queue(maxsize=3)
+        self.force_queue = Queue(maxsize=1)
+
+        # =========================================================================
+        # Runtime Flags
+        # =========================================================================
         self._is_running = True
-        self._last_slow_log_ts = 0  # [NEW] 用于节流告警输出
 
-    def add_data(self, df):
-        """外部线程安全调用"""
-        self.df_queue.put(df)
+        # =========================================================================
+        # 节流控制
+        # =========================================================================
+        self._last_emit_ts = 0.0
+        self._last_slow_log_ts = 0.0
+        self._last_error_log_ts = 0.0
 
-    def trigger_recalc(self):
-        """线程安全强制刷新"""
-        # 防止重复堆积刷新信号，先清空再放最新的
-        while not self.force_queue.empty():
-            try: self.force_queue.get_nowait()
-            except Empty: break
-        self.force_queue.put(True)
+        # =========================================================================
+        # Emit 最小间隔（秒）
+        # 避免 Qt Event Queue 爆炸
+        # =========================================================================
+        self.emit_interval = 0.15
+
+        # =========================================================================
+        # 分片大小
+        # 建议：
+        # 50~150 最稳定
+        # =========================================================================
+        self.chunk_size = 100
+
+        # =========================================================================
+        # 单批次处理后 Yield 时间
+        # =========================================================================
+        self.chunk_sleep = 0.001
+
+        # =========================================================================
+        # Worker 空闲 Sleep
+        # =========================================================================
+        self.idle_sleep = 0.05
+
+        # =========================================================================
+        # 高负载 Sleep
+        # =========================================================================
+        self.busy_sleep = 0.02
+
+    # =========================================================================
+    # Public APIs
+    # =========================================================================
 
     def stop(self):
         self._is_running = False
 
-    def run(self):
-        # 线程的入口方法，百分之百在子线程中运行
-        self.process_data()
+    def add_data(self, df):
 
-    def process_data(self):
-        # ⭐ [GIL_MONITOR] 埋点：标记最后活跃函数
-        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'DataProcessWorker.process_data', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
-        except Exception: pass
-        """子线程主循环（生产稳定版）"""
-        # [NEW] 1. 延迟初始化：将耗时的种子加载与持久化恢复移至后台线程执行，解决启动阻塞（491ms问题）
+        # 防止 Queue 无限堆积
+        while self.df_queue.qsize() >= 2:
+            try:
+                self.df_queue.get_nowait()
+            except Exception:
+                break
+
         try:
-            if hasattr(self.detector, '_load_stock_selector_data'):
-                logger.info("📡 [Worker] Background initial loading for BiddingMomentumDetector...")
-                self.detector._load_stock_selector_data()
-                logger.info("📡 [Worker] Background loading completed.")
-        except Exception as e:
-            logger.error(f"❌ [Worker] Failed to load detector persistent data: {e}")
+            self.df_queue.put_nowait(df)
+        except Exception:
+            pass
 
-        logger.info("🚀 [Worker] Data processing loop started.")
+    def trigger_recalc(self):
 
-        while self._is_running:
-            df = None
-            has_done_work = False
+        # 保证只保留一个 force 信号
+        while not self.force_queue.empty():
+            try:
+                self.force_queue.get_nowait()
+            except Exception:
+                break
+
+        try:
+            self.force_queue.put_nowait(True)
+        except Exception:
+            pass
+
+    # =========================================================================
+    # Thread Entry
+    # =========================================================================
+
+    def run(self):
+
+        try:
+
+            self._safe_log_info(
+                "🚀 [Worker] QThread started."
+            )
+
+            # 延迟初始化
+            self._background_init()
+
+            # 主循环
+            self._main_loop()
+
+        except Exception:
+
+            self._safe_log_error(
+                "[Worker] Fatal thread crash:\n"
+                + traceback.format_exc()
+            )
+
+        finally:
+
+            self._safe_log_info(
+                "🏁 [Worker] Thread exited safely."
+            )
 
             try:
-                # ⚡ 快速响应（超时时间设为 0.05s）
-                # 这一步会自动让出 GIL，对系统非常友好
+                self.stopped.emit()
+            except Exception:
+                pass
+
+    # =========================================================================
+    # Background Init
+    # =========================================================================
+
+    def _background_init(self):
+
+        try:
+
+            if hasattr(self.detector, "_load_stock_selector_data"):
+
+                self._safe_log_info(
+                    "📡 [Worker] Background loading..."
+                )
+
+                self.detector._load_stock_selector_data()
+
+                self._safe_log_info(
+                    "✅ [Worker] Background loading completed."
+                )
+
+        except Exception:
+
+            self._safe_log_error(
+                "[Worker] Background init failed:\n"
+                + traceback.format_exc()
+            )
+
+    # =========================================================================
+    # Main Loop
+    # =========================================================================
+
+    def _main_loop(self):
+
+        while self._is_running:
+
+            has_work = False
+
+            work_start_t = time.perf_counter()
+
+            try:
+
+                # ================================================================
+                # 获取最新 DF
+                # Queue.get(timeout)
+                # 内部会释放 GIL
+                # ================================================================
+
+                df = None
+
                 try:
                     df = self.df_queue.get(timeout=0.05)
-                    logger.debug("⏱️ [Worker][DEBUG] Got data from df_queue.")
                 except Empty:
                     pass
 
-                start_work_t = time.perf_counter()
+                # ================================================================
+                # 丢弃旧数据
+                # 只保留最新帧
+                # ================================================================
 
-                # 1. 处理数据（关键优化：丢弃旧包，防堆积）
                 if df is not None:
-                    # 🔥 丢弃逻辑：如果有更新的数据在排队，直接取最新的，防堆积
-                    count = 0
+
+                    dropped = 0
+
                     while True:
+
                         try:
                             newer_df = self.df_queue.get_nowait()
                             df = newer_df
-                            count += 1
+                            dropped += 1
+
                         except Empty:
                             break
-                    
-                    if count > 0 and self.detector.enable_log:
-                        logger.warning(f"⏩ [Worker] Queue backlogged. Skipped {count} stale frames.")
 
-                    # 执行核心计算 (⚡ 极致性能版：职责分离)
-                    # [🚀 PERFORMANCE] 评分评估由 update_scores 的内部过滤机制接管
-                    # 必选股与异动股实时评估，冷门股降频评估，从而根治全量 5000+ 带来的 GIL 阻塞
-                    active_codes = df.index.tolist() if hasattr(df, 'index') else None
-                    is_full = len(df) > 3000
-                    start_time = time.perf_counter()
-                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.register_codes...")
-                    _gil_mark("register_codes:start")
-                    self.detector.register_codes(df)
-                    _gil_mark("register_codes:end")
-                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.update_scores...")
-                    _gil_mark("update_scores:start")
-                    self.detector.update_scores(active_codes=active_codes)
-                    _gil_mark("update_scores:end")
-                    time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
-                    import sys; sys._getframe()  # 强制调度器切换
-                    
-                    dur = time.perf_counter() - start_time
-                    if dur > 0.3:
-                        logger.warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) counts: {len(active_codes)} slow: {dur:.3f}s")
-                    # [FIX] data_version 已由 update_scores 内部统一管理，无需 Worker 层再次递增
-                    # 避免双重递增导致版本膨胀，使 _update_daily_dragon_top2 的版本防重机制失效
+                    if dropped > 0:
+                        self._safe_log_warning(
+                            f"⏩ [Worker] Dropped stale frames: {dropped}"
+                        )
 
-                    self.latest_df = df
-                    # [🚀 PERF] 异步分片模式下，此处立即 emit 会导致空刷新抢占 _last_refresh_ts，
-                    # 从而使真正的打分完毕回调因 5s 节流被丢弃。一切刷新统一由 on_score_finished 回调触发。
-                    logger.debug("⏱️ [Worker][DEBUG] Async scoring started. Skipping sync emit.")
-                    has_done_work = True
+                    self._process_df_chunked(df)
 
-                # 2. 强制刷新判定
+                    has_work = True
+
+                # ================================================================
+                # Force Recalc
+                # ================================================================
+
                 force = False
+
                 try:
                     force = self.force_queue.get_nowait()
                 except Empty:
-                    force = False
+                    pass
 
                 if force:
-                    start_time = time.perf_counter()
-                    logger.debug("⏱️ [Worker][DEBUG] Calling detector.update_scores(force=True)...")
-                    self.detector.update_scores(force=True)
-                    time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
-                    
-                    dur = time.perf_counter() - start_time
-                    if dur > 0.3:
-                        logger.warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
-                    # [FIX] data_version 由 update_scores 内部统一管理
-                    self.latest_df = None
-                    logger.debug("⏱️ [Worker][DEBUG] Async force scoring started. Skipping sync emit.")
-                    has_done_work = True
 
-                # [PERF] 计算本次工作耗时，用于动态调整休眠
-                work_dur = time.perf_counter() - start_work_t
-                if work_dur > 0.5: # 如果单次处理超过 0.5s，说明负载极高
-                    now_ts = time.time()
-                    if now_ts - self._last_slow_log_ts > 30: # 30秒节流
-                        self._last_slow_log_ts = now_ts
-                        processed_count = getattr(self.detector, 'last_processed_count', 0)
-                        total_count = len(self.detector._tick_series) if hasattr(self.detector, '_tick_series') else 0
-                        logger.warning(f"⚠️ [Worker] Slow detection cycle: {work_dur:.2f}s (processed {processed_count}/{total_count} codes) (GIL bottleneck risk)")
+                    self._safe_log_info(
+                        "⚡ [Worker] Force recalc triggered."
+                    )
 
-            except Exception as e:
-                logger.error(f"[Worker] Runtime Error: {e}", exc_info=True)
+                    self._process_force_recalc()
 
-            # 3. 最后的保险：防止在数据极高频时榨干 CPU
-            # [DYNAMIC YIELD] 动态睡眠，根据单次负载动态增加睡眠时间，给 Tk 足够调度窗口
-            # 负载越大，休眠越长 (下限 10ms，上限提升至 200ms)
-            if has_done_work:
-                dynamic_sleep = min(0.2, max(0.01, work_dur * 0.1 if 'work_dur' in locals() else 0.01))
-                time.sleep(dynamic_sleep) 
-            elif not self.detector.is_active_session():
-                time.sleep(0.5)
+                    has_work = True
+
+            except Exception:
+
+                self._safe_log_error(
+                    "[Worker] Runtime error:\n"
+                    + traceback.format_exc()
+                )
+
+            # ================================================================
+            # 动态 Sleep
+            # ================================================================
+
+            work_dur = time.perf_counter() - work_start_t
+
+            if work_dur > 0.5:
+
+                now = time.time()
+
+                if now - self._last_slow_log_ts > 30:
+
+                    self._last_slow_log_ts = now
+
+                    self._safe_log_warning(
+                        f"⚠️ [Worker] Slow cycle: {work_dur:.2f}s"
+                    )
+
+            if has_work:
+                time.sleep(self.busy_sleep)
             else:
-                time.sleep(0.05)  # [PERF] 从 0.01 提升到 0.05，降低闲置时的 GIL 唤醒开销
 
-        logger.info("🏁 [Worker] Loop exited safely.")
-        self.stopped.emit()
+                if hasattr(self.detector, "is_active_session"):
+
+                    if not self.detector.is_active_session():
+                        time.sleep(0.5)
+                    else:
+                        time.sleep(self.idle_sleep)
+
+                else:
+                    time.sleep(self.idle_sleep)
+
+    # =========================================================================
+    # Chunked Processing
+    # =========================================================================
+
+    def _process_df_chunked(self, df):
+
+        try:
+
+            if df is None:
+                return
+
+            # ================================================================
+            # 注册代码
+            # ================================================================
+
+            if hasattr(self.detector, "register_codes"):
+
+                self.detector.register_codes(df)
+
+            # ================================================================
+            # 获取 active codes
+            # ================================================================
+
+            if hasattr(df, "index"):
+                active_codes = list(df.index)
+            else:
+                active_codes = []
+
+            total = len(active_codes)
+
+            if total <= 0:
+                return
+
+            # ================================================================
+            # 分片处理
+            # ================================================================
+
+            for start in range(0, total, self.chunk_size):
+
+                if not self._is_running:
+                    return
+
+                end = start + self.chunk_size
+
+                batch_codes = active_codes[start:end]
+
+                try:
+
+                    self.detector.update_scores(
+                        active_codes=batch_codes
+                    )
+
+                except Exception:
+
+                    self._safe_log_error(
+                        "[Worker] update_scores chunk failed:\n"
+                        + traceback.format_exc()
+                    )
+
+                # ============================================================
+                # 主动 Yield GIL
+                # ============================================================
+
+                time.sleep(self.chunk_sleep)
+
+            # ================================================================
+            # 保存最新 DF
+            # ================================================================
+
+            self.latest_df = df
+
+            # ================================================================
+            # 节流 Emit
+            # ================================================================
+
+            now = time.time()
+
+            if now - self._last_emit_ts >= self.emit_interval:
+
+                self._last_emit_ts = now
+
+                try:
+                    self.data_updated.emit(df)
+                except Exception:
+                    pass
+
+        except Exception:
+
+            self._safe_log_error(
+                "[Worker] Chunk processing failed:\n"
+                + traceback.format_exc()
+            )
+
+    # =========================================================================
+    # Force Recalc
+    # =========================================================================
+
+    def _process_force_recalc(self):
+
+        try:
+
+            self.detector.update_scores(force=True)
+
+            time.sleep(0.01)
+
+            now = time.time()
+
+            if now - self._last_emit_ts >= self.emit_interval:
+
+                self._last_emit_ts = now
+
+                try:
+                    self.data_updated.emit(None)
+                except Exception:
+                    pass
+
+        except Exception:
+
+            self._safe_log_error(
+                "[Worker] Force recalc failed:\n"
+                + traceback.format_exc()
+            )
+
+    # =========================================================================
+    # Safe Logging
+    # =========================================================================
+
+    def _safe_log_info(self, msg):
+
+        try:
+            logger.info(msg)
+        except Exception:
+            pass
+
+    def _safe_log_warning(self, msg):
+
+        try:
+            logger.warning(msg)
+        except Exception:
+            pass
+
+    def _safe_log_error(self, msg):
+
+        try:
+
+            now = time.time()
+
+            # 防止错误日志风暴
+            if now - self._last_error_log_ts < 2:
+                return
+
+            self._last_error_log_ts = now
+
+            logger.error(msg)
+
+        except Exception:
+            pass
 
 
 class DataLoaderThread(QThread):
