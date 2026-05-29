@@ -594,6 +594,22 @@ class TradingKernelService:
         return True
 
     def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True) -> dict[str, Any]:
+        # 处于回测模拟模式下，直接短路返回，无需响应策略交易流以避免资源浪费
+        if hasattr(self, "paper_adapter") and self.paper_adapter and getattr(self.paper_adapter, "_is_simulation", False):
+            return {
+                "kernel_state": "",
+                "kernel_action": "HOLD",
+                "kernel_size_pct": 0.0,
+                "kernel_confidence": 0.0,
+                "kernel_allowed": False,
+                "kernel_reject_code": "SIMULATION_BYPASS",
+                "kernel_stop_price": None,
+                "kernel_trace_id": "",
+                "kernel_reason": {},
+                "kernel_order_id": "",
+                "kernel_executed": False,
+            }
+
         raw_hash = stable_hash(dict(item))
         
         # 提取内存中该个股持仓的状态并注入特征，以实现实盘/模拟盘 100% 对齐回测

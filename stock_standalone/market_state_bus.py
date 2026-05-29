@@ -33,6 +33,8 @@ class MarketStateBus:
         self._data_lock = threading.Lock()
         self._df_all = pd.DataFrame()          # 完整行情 DataFrame
         self._df_filtered = pd.DataFrame()     # 过滤后的 UI DataFrame (用于展示)
+        self._df_all_res = pd.DataFrame()      # 完整行情 DataFrame (Resampled)
+        self._df_filtered_res = pd.DataFrame() # 过滤后的 UI DataFrame (Resampled, 用于展示)
         self._version = 0
         self._timestamp = 0
         self._observers = []
@@ -44,7 +46,7 @@ class MarketStateBus:
                 self._observers.append(callback)
         self._initialized = True
     
-    def publish(self, df_all, df_filtered=None):
+    def publish(self, df_all, df_filtered=None, df_all_res=None, df_filtered_res=None):
         """
         生产者调用（通常在 update_tree 或 fetch_and_process 线程中）
         O(1) 覆盖写入。
@@ -60,6 +62,17 @@ class MarketStateBus:
                 self._df_filtered = df_filtered.copy()
             else:
                 self._df_filtered = self._df_all
+                
+            if df_all_res is not None:
+                self._df_all_res = df_all_res.copy()
+            else:
+                self._df_all_res = self._df_all
+                
+            if df_filtered_res is not None:
+                self._df_filtered_res = df_filtered_res.copy()
+            else:
+                self._df_filtered_res = self._df_filtered
+                
             self._version += 1
             self._timestamp = time.time()
             current_version = self._version
@@ -84,6 +97,16 @@ class MarketStateBus:
             if self._version <= since_version:
                 return None
             return (self._version, self._df_all, self._df_filtered, self._timestamp)
+
+    def get_latest_dual(self, since_version=0):
+        """
+        消费者调用 - 返回包含 resampled 双轨的只读快照 (version, df_all, df_filtered, timestamp, df_all_res, df_filtered_res)
+        如果 since_version 等于当前版本，返回 None (避免重复处理)
+        """
+        with self._data_lock:
+            if self._version <= since_version:
+                return None
+            return (self._version, self._df_all, self._df_filtered, self._timestamp, self._df_all_res, self._df_filtered_res)
 
     def get_latest_version(self):
         with self._data_lock:
