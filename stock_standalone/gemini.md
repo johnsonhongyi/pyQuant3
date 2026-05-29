@@ -1,3 +1,9 @@
+## 2026-05-30 06:00
+- [x] **根治赛马回测高频运行 GIL 致命崩溃与数据污染 (Fixed Replay GIL Crash & Replay Data Pollution)**：
+    - [x] **实现高频回测期间 GIL 监测器安全挂起与自愈**：在 `instock_MonitorTK.py` 启动回测子进程（`_launch_task`）时，主动暂停并关闭主进程后台的 `tk_gil_monitor` 监测器。在回测子进程物理退出（`monitor_backtest_exit`）后，自动重新拉起并安装 GIL 呼吸监测器。这彻底隔绝了超高频 IPC 反序列化（Pickle）与后台 `sys._current_frames()` 物理遍历线程状态（PyThreadState）的并发冲突，从源头彻底根治了 `PyEval_RestoreThread` 致命闪退。
+    - [x] **引入信号预警中枢回测隔离与去污染机制**：在回测进程启动前，强行将主进程中的 `SignalGradingHub` 预警中枢切换为 `_simulation_mode = True`（模拟回测模式），屏蔽掉回测期间高频形态事件的总线转发与 Alert 警报发布，保护了主进程的 CPU 和消息泵队列；回测退出后自动恢复为实盘模式。这不仅消除了高负载下的多余运算，更百分之百防止了实盘板块与破位信号池被回测历史数据污染。
+    - [x] **实现回测子进程静默状态保护**：在 `test_bidding_replay.py` 的子进程 `main()` 入口中，显式将子进程 of `SignalGradingHub` 设为回测模拟模式。使子进程在极速回放计算时，将高频的 SBC 触发日志自动降级为 `logger.info` 静默输出，彻底杜绝了控制台高频警告日志的洪泛，大幅减轻了子进程的终端 I/O 耗时与 GIL 争用压力。
+
 ## 2026-05-30 04:00
 - [x] **修复并优化 PyQt6 信号面板“每日操作指南”列宽持久化与极限紧凑布局 (Fixed Column Width Persistence & Ultra-Compact Layout for Operating Guidance in PyQt6 Signal Dashboard)**：
     - [x] **无条件信任历史列宽状态 (Unconditional Persistence Load Protection)**：重构了 `signal_dashboard_panel.py` 中的 `_restore_ui_state` 方法。只要本地 `window_config.json` 配置文件中存有对应表格的布局状态（`state_key` 存在），就强行将 `table._has_restored_state` 标为 `True`。这彻底根治了在 Windows/PyQt6 平台下，因表格初始化尚未完成渲染导致 `restoreState()` 返回 False，进而未设置 `_has_restored_state` 标记，导致后续刷新被默认宽度暴力覆盖的顽疾，实现了真正的“无损退出与完美继承”。

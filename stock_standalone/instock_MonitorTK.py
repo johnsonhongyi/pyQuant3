@@ -4586,6 +4586,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         def _launch_task():
             try:
+                # [🚀 GIL-GUARD] 在超高频回测期间，主动停掉 GIL 监测器，防止高频 Queue 反序列化与 sys._current_frames() 采样冲突导致 PyEval_RestoreThread 致命崩溃
+                if hasattr(self, '_gil_monitor') and self._gil_monitor is not None:
+                    try:
+                        self._gil_monitor.stop()
+                        self._gil_monitor = None
+                        logger.info("🛡️ [GilMonitor] 回测期间已主动关闭并注销 GIL 呼吸监测器，防止反序列化冲突。")
+                    except Exception as e:
+                        logger.warning(f"Failed to stop gil_monitor: {e}")
+
+                # [🚀 HUB-GUARD] 强力将主进程的信号预警中枢切换至回测模式，清空历史并防止回测数据污染实盘数据，同时高频下挂起不必要的 Alert 发布
+                try:
+                    from signal_grading_hub import get_signal_grading_hub
+                    hub = get_signal_grading_hub()
+                    if hub:
+                        hub.set_simulation_mode(True, sim_time=start_time)
+                        logger.info("📡 [HUB] 已将主进程信号中枢安全切换至回测模拟模式。")
+                except Exception as e:
+                    logger.warning(f"Failed to set HUB simulation mode: {e}")
+
                 # [NEW] 注入退出同步事件与跨进程总线桥接队列 (限制队列大小为 2000 以配合背压机制)
                 self._backtest_quit_event = mp.Event()
                 self._bus_bridge_queue = mp.Queue(maxsize=2000)
@@ -4673,6 +4692,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if not getattr(self, '_is_closing', False):
                             self._last_racing_backtest_unified_t = time.time()
                             logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
+                            
+                            # [🚀 GIL-RESTORE] 恢复 GIL 监控
+                            if getattr(cct, 'CFG', None) and getattr(cct.CFG, 'gil_monitor', 0) > 0:
+                                try:
+                                    from tk_gil_monitor import install as _install_gil_monitor
+                                    self._gil_monitor = _install_gil_monitor(
+                                        root=self,
+                                        app=self,
+                                        freeze_threshold=3.0,
+                                        enabled=True,
+                                    )
+                                    logger.info("🛡️ [GilMonitor] 回测已结束，GIL 呼吸监测器已重新加载恢复。")
+                                except Exception as _e:
+                                    logger.warning(f"[GilMonitor] 重新安装失败: {_e}")
+
+                            # [🚀 HUB-RESTORE] 恢复信号中枢为实盘模式
+                            try:
+                                from signal_grading_hub import get_signal_grading_hub
+                                hub = get_signal_grading_hub()
+                                if hub:
+                                    hub.set_simulation_mode(False)
+                                    logger.info("📡 [HUB] 已将主进程信号中枢安全恢复至实盘模式。")
+                            except Exception as e:
+                                logger.warning(f"Failed to reset HUB simulation mode: {e}")
                     except: pass
                 
                 threading.Thread(target=monitor_backtest_exit, args=(self.backtest_process,), daemon=True).start()
