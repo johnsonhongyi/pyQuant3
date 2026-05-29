@@ -4605,6 +4605,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.warning(f"Failed to set HUB simulation mode: {e}")
 
+                # [🚀 NUITKA-GC-GUARD] 升级为工业级大阈值调优与自动 GC 节流，既将 stop-the-world 频率降到极低，又完美保留 C 扩展和循环引用的底层自动释放能力
+                try:
+                    import gc
+                    # 备份原始 GC 阈值
+                    self._orig_gc_threshold = gc.get_threshold()
+                    # 强力调大 GC 自动触发阈值，将 Jitter 和 stop-the-world 频率降低 100 倍，彻底隔绝高频反序列化临界时序 Race
+                    gc.set_threshold(100000, 50, 50)
+                    logger.info(f"🛡️ [GC] 高频回测启动，GC 阈值已安全调整为大门槛调优 (100000, 50, 50)，实现高并发低延迟。")
+                except Exception as e:
+                    logger.warning(f"Failed to set high GC threshold: {e}")
+
                 # [NEW] 注入退出同步事件与跨进程总线桥接队列 (限制队列大小为 2000 以配合背压机制)
                 self._backtest_quit_event = mp.Event()
                 self._bus_bridge_queue = mp.Queue(maxsize=2000)
@@ -4647,6 +4658,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     bus.publish(data['event_type'], data.get('source', 'Bridge'), data.get('payload', {}))
                                 else:
                                     logger.warning(f"📡 [Backtest][IPC] Unrecognized format from bus queue: {type(data)} - {data}")
+
+                                # [🚀 NUITKA-DECOUPLING] 在 Nuitka 编译的高频 C 循环中，主动执行微秒级休眠让渡 GIL 和 CPU 时间片，确保 PyQt6 主线程和 GC 有充足时间片呼吸，彻底打碎 GIL 争用死锁
+                                time.sleep(0.0001)
                         except mp.queues.Empty:
                             continue
                         except Exception as e:
@@ -4679,6 +4693,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     return
 
                 self.backtest_process.start()
+
+                # [🚀 NUITKA-GC-THROTTLE] 针对长达 30m - 1h 的长期回测，周期性在主事件循环（持 GIL 且非反序列化热点）安全触发手动 GC，防内存爆膨胀 (OOM)
+                def controlled_gc_loop():
+                    if getattr(self, '_backtest_quit_event', None) and not self._backtest_quit_event.is_set():
+                        if not getattr(self, '_is_closing', False):
+                            try:
+                                import gc
+                                cleaned = gc.collect()
+                                logger.info(f"🛡️ [GC] 主线程安全垃圾回收执行完成，集中清理了 {cleaned} 个残留对象。")
+                            except Exception as e:
+                                logger.warning(f"Controlled GC error: {e}")
+                            
+                            # 每 15 秒周期性呼唤下一次安全回收
+                            self.after(15000, controlled_gc_loop)
+                
+                # 15 秒后触发第一轮安全回收气孔
+                self.after(15000, controlled_gc_loop)
                 
                 # [🚀 NEW] 启动存活监视，确保回测进程退出后也能触发统一防抖
                 def monitor_backtest_exit(proc):
@@ -4692,6 +4723,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if not getattr(self, '_is_closing', False):
                             self._last_racing_backtest_unified_t = time.time()
                             logger.info("🏁 [Backtest] 进程已物理退出，防抖保护已激活 (10s)")
+                            
+                            # 主动设置退出事件，确保主线程受控 GC 循环立刻安全注销，不再触发下一次 after
+                            if hasattr(self, '_backtest_quit_event') and self._backtest_quit_event is not None:
+                                try:
+                                    self._backtest_quit_event.set()
+                                except: pass
                             
                             # [🚀 GIL-RESTORE] 恢复 GIL 监控
                             if getattr(cct, 'CFG', None) and getattr(cct.CFG, 'gil_monitor', 0) > 0:
@@ -4716,6 +4753,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.info("📡 [HUB] 已将主进程信号中枢安全恢复至实盘模式。")
                             except Exception as e:
                                 logger.warning(f"Failed to reset HUB simulation mode: {e}")
+
+                            # [🚀 NUITKA-GC-RESTORE] 恢复 CPython 原始 GC 阈值，并安全执行一次手动垃圾集中物理收拢与物理自愈
+                            try:
+                                import gc
+                                orig_th = getattr(self, '_orig_gc_threshold', (700, 10, 10))
+                                gc.set_threshold(*orig_th)
+                                cleaned = gc.collect()
+                                logger.info(f"🛡️ [GC] 回测已结束，GC 自动触发门槛已恢复为 {orig_th}，并安全集中物理清理了 {cleaned} 个残留垃圾对象。")
+                            except Exception as e:
+                                logger.warning(f"Failed to restore GC threshold: {e}")
                     except: pass
                 
                 threading.Thread(target=monitor_backtest_exit, args=(self.backtest_process,), daemon=True).start()
