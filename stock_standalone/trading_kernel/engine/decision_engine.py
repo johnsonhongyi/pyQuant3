@@ -782,13 +782,13 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     
     # 👑 全生命周期自适应防守止损线引擎：不管是买入还是持仓日常(HOLD)，都为柜台提供当下最科学的动态生命防线
     if state == "IN_TRADE" or (action in {"BUY", "ADD"} and suggest_price > 0):
-        # A. 如果当前被路由为超级强势主升浪分支，防守线紧咬 5日线下方 2.5%
+        # A. 如果当前被路由为超级强势主升浪分支，防守线紧咬 5日线下方 1.5% (方案B：强势股挂单收窄至1.5%，防回踩极浅踏空)
         if active_branch == SuperTrendMA5Branch:
             ma5_val = float(_num(signal, "ma5d", swl))
             if ma5_val > 0:
-                stop_price = round(ma5_val * 0.975, 3)
+                stop_price = round(ma5_val * 0.985, 3)
             else:
-                stop_price = round(suggest_price * 0.975, 3)
+                stop_price = round(suggest_price * 0.985, 3)
         # B. 如果当前被路由为主力 10日线反转支撑分支，防守线坚守 10日线下方 1.5%
         elif active_branch == SuperTrendMA10Branch:
             ma10_val = float(_num(signal, "ma10d", sws))

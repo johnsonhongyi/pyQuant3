@@ -48,6 +48,23 @@ class TradingLogger:
         # Unified DB Manager
         self.db_manager = SQLiteConnectionManager.get_instance(db_path)
         self._init_db()
+        # 👑 [PERF] 极速持仓内存缓存：彻底免除无持仓个股高频触发形态卖出时对 SQLite 的高频同步查询和 IO 假死
+        self._open_positions_cache = set()
+        self._load_open_positions_cache()
+
+    def _load_open_positions_cache(self) -> None:
+        """从数据库一次性预加载所有 OPEN 状态的持仓到内存缓存中"""
+        try:
+            conn = self.db_manager.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT code, resample FROM trade_records WHERE status='OPEN'")
+            rows = cur.fetchall()
+            self._open_positions_cache = {(str(r[0]), str(r[1])) for r in rows}
+            cur.close()
+            logger.info(f"TradeLogger: Loaded {len(self._open_positions_cache)} OPEN positions into memory cache.")
+        except Exception as e:
+            logger.error(f"TradeLogger: Failed to load open positions cache: {e}")
+            self._open_positions_cache = set()
 
     def _init_db(self) -> None:
         """初始化数据库表结构"""
@@ -541,6 +558,13 @@ class TradingLogger:
         resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
+            # 👑 [PERF] 极速持仓内存缓存短路拦截：如果动作为卖出且当前不在持仓缓存中，直接降级为 debug 并瞬间秒回！
+            # 彻底免除无持仓个股高频触发诱多跑路、爆破退出等信号时触发同步 SQLite 物理文件查询及卡死
+            if (action == "卖出" or "止" in action) and hasattr(self, "_open_positions_cache"):
+                if (str(code), str(resample)) not in self._open_positions_cache:
+                    logger.debug(f"TradeLogger: Fast bypass signal '{action}' for {code} ({name}) - No OPEN position cache.")
+                    return
+
             conn = self.db_manager.get_connection()
             cur = conn.cursor()
             
@@ -562,7 +586,6 @@ class TradingLogger:
             if action == "买入":
                 if existing_trade:
                     logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
-                    logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
                     cur.close()
                     return
                 if amount <= 0:
@@ -577,6 +600,10 @@ class TradingLogger:
                     INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample, action)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
                 """, (code, name, now_str, price, amount, reason, fee, resample, action))
+                
+                # 👑 同步记录至内存持仓缓存中
+                if hasattr(self, "_open_positions_cache"):
+                    self._open_positions_cache.add((str(code), str(resample)))
             
             elif action == "ADD":
                 if not existing_trade:
@@ -587,6 +614,10 @@ class TradingLogger:
                         INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample, action)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
                     """, (code, name, now_str, price, amount, reason, fee, resample, action))
+                    
+                    # 👑 同步记录至内存持仓缓存中
+                    if hasattr(self, "_open_positions_cache"):
+                        self._open_positions_cache.add((str(code), str(resample)))
                 else:
                     # 加仓：更新均价和股数，并追加理由
                     t_id, old_price, old_amount, old_fee, last_action = existing_trade
@@ -626,8 +657,15 @@ class TradingLogger:
                         WHERE id=?
                     """, (now_str, price, reason, total_fee, net_profit, pnl_pct, action, t_id))
                     logger.warning(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
+                    
+                    # 👑 从内存持仓缓存中移除
+                    if hasattr(self, "_open_positions_cache"):
+                        self._open_positions_cache.discard((str(code), str(resample)))
                 else:
-                    logger.warning(f"TradeLogger: {code} ({name}) Signal '{action}' ignored (No OPEN position).")
+                    logger.debug(f"TradeLogger: {code} ({name}) Signal '{action}' ignored (No OPEN position).")
+                    # 👑 双重保险移除
+                    if hasattr(self, "_open_positions_cache"):
+                        self._open_positions_cache.discard((str(code), str(resample)))
             
             
             conn.commit()
@@ -685,6 +723,11 @@ class TradingLogger:
             conn.commit()
             cur.close()
             logger.info(f"DB: Closed trade {code}. Reason: {sell_reason}")
+            
+            # 👑 同步移出内存持仓缓存
+            if hasattr(self, "_open_positions_cache"):
+                self._open_positions_cache.discard((str(code), str(resample)))
+                
             return True
         except Exception as e:
             logger.error(f"Error closing trade {code}: {e}")
@@ -848,6 +891,8 @@ class TradingLogger:
         """删除交易记录"""
         try:
             self.db_manager.execute_update("DELETE FROM trade_records WHERE id=?", (trade_id,))
+            # 👑 删除交易后同步更新内存缓存
+            self._load_open_positions_cache()
             return True
         except Exception as e:
             logger.error(f"delete_trade error: {e}")
@@ -893,6 +938,8 @@ class TradingLogger:
             
             conn.commit()
             cur.close()
+            # 👑 手动更新持仓后同步更新内存缓存
+            self._load_open_positions_cache()
             return True
         except Exception as e:
             logger.error(f"manual_update_trade error: {e}")

@@ -4516,9 +4516,16 @@ def _show_backtest_report_window(self, code: str, name: str, report: str):
         if hasattr(self, '_backtest_dialog') and self._backtest_dialog and self._backtest_dialog.winfo_exists():
             self._backtest_dialog.update_report(code, name, report)
             self._backtest_dialog.deiconify()
+            self._backtest_dialog.lift()
             self._backtest_dialog.focus_force()
+            if hasattr(self._backtest_dialog, 'text_area'):
+                self._backtest_dialog.text_area.focus_set()
         else:
             self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+            self._backtest_dialog.lift()
+            self._backtest_dialog.focus_force()
+            if hasattr(self._backtest_dialog, 'text_area'):
+                self._backtest_dialog.text_area.focus_set()
     except Exception as e:
         logger.error(f"Error showing backtest report window: {e}")
 
@@ -4882,7 +4889,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     tree_frame = tk.Frame(parent, bg="#0c101b")
     tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
     
-    cols = ("code", "name", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason")
+    cols = ("code", "name", "percent", "dff", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason")
     self._guidance_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", style="Dark.Treeview")
     
     # Scrollbars
@@ -4898,7 +4905,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     tree_frame.grid_columnconfigure(0, weight=1)
     
     headers = {
-        "code": "代码", "name": "名称", "sector": "核心板块", "action": "操作建议", 
+        "code": "代码", "name": "名称", "percent": "当日涨幅", "dff": "资金DFF", "sector": "核心板块", "action": "操作建议", 
         "order_price": "挂单参考", "support_price": "战术支撑", 
         "stop_price": "止损防守", "branch": "活跃分支", "reason": "决策理由"
     }
@@ -4910,6 +4917,8 @@ def _init_guidance_tab(self, parent: tk.Frame):
     self._guidance_tree.column("#0", width=0, minwidth=0, stretch=False)
     self._guidance_tree.column("code", width=70, stretch=False)
     self._guidance_tree.column("name", width=90, stretch=False)
+    self._guidance_tree.column("percent", width=75, stretch=False)
+    self._guidance_tree.column("dff", width=75, stretch=False)
     self._guidance_tree.column("sector", width=105, stretch=False)
     self._guidance_tree.column("action", width=75, stretch=False)
     self._guidance_tree.column("order_price", width=75, stretch=False)
@@ -4953,17 +4962,18 @@ def _init_guidance_tab(self, parent: tk.Frame):
         code = sel[0]
         item = self._guidance_tree.item(code)
         vals = item.get("values", [])
-        if len(vals) > 8:
+        if len(vals) > 10:
             # 弹窗显示详细理由
             msg = (
                 f"🏷 股票：{vals[1]} ({vals[0]})\n"
-                f"📊 核心板块：{vals[2]}\n"
-                f"🎯 战术建议：{vals[3]}\n"
-                f"💵 挂单执行价：¥ {vals[4]}\n"
-                f"🧱 辅助支撑：¥ {vals[5]}\n"
-                f"🛡 战术防守价：¥ {vals[6]}\n"
-                f"👑 策略活跃分支：{vals[7]}\n\n"
-                f"🔍 决策分析归因理由：\n{vals[8]}"
+                f"📈 当日涨幅：{vals[2]} | 资金DFF：{vals[3]}\n"
+                f"📊 核心板块：{vals[4]}\n"
+                f"🎯 战术建议：{vals[5]}\n"
+                f"💵 挂单执行价：¥ {vals[6]}\n"
+                f"🧱 辅助支撑：¥ {vals[7]}\n"
+                f"🛡 战术防守价：¥ {vals[8]}\n"
+                f"👑 策略活跃分支：{vals[9]}\n\n"
+                f"🔍 决策分析归因理由：\n{vals[10]}"
             )
             messagebox.showinfo("每日盘前操作指南详情", msg, parent=self)
 
@@ -5010,6 +5020,27 @@ def _init_guidance_tab(self, parent: tk.Frame):
     self._guidance_tree.bind("<<TreeviewSelect>>", _on_guidance_selected)
     self._guidance_tree.bind("<Double-1>", _on_guidance_double_click)
     self._guidance_tree.bind("<Button-3>", _show_guidance_context_menu)
+    
+    # 👑 绑定鼠标释放事件，当用户手动调整完 Treeview 列宽后，配合30秒防抖延迟，瞬间且原子地保存列宽到持久化配置中，防范高频写盘！
+    def _on_guidance_column_resize(event):
+        try:
+            # 如果已有延迟保存计时器，先取消它
+            if hasattr(self, "_guidance_resize_timer") and self._guidance_resize_timer:
+                self.after_cancel(self._guidance_resize_timer)
+            
+            # 定义延迟执行的实际保存函数
+            def _delayed_save():
+                try:
+                    self._save_guidance_column_widths()
+                except Exception:
+                    pass
+                self._guidance_resize_timer = None
+
+            # 设定30秒（30000毫秒）防抖延迟保存
+            self._guidance_resize_timer = self.after(30000, _delayed_save)
+        except Exception:
+            pass
+    self._guidance_tree.bind("<ButtonRelease-1>", _on_guidance_column_resize)
 
 
 def _refresh_guidance_tab(self):
@@ -5186,7 +5217,7 @@ def _refresh_guidance_tab(self):
         
         # 实时更新表头排序三角指示器 (🔼 / 🔽)
         headers = {
-            "code": "代码", "name": "名称", "sector": "核心板块", "action": "操作建议", 
+            "code": "代码", "name": "名称", "percent": "当日涨幅", "dff": "资金DFF", "sector": "核心板块", "action": "操作建议", 
             "order_price": "挂单参考", "support_price": "战术支撑", 
             "stop_price": "止损防守", "branch": "活跃分支", "reason": "决策理由"
         }
@@ -5195,7 +5226,43 @@ def _refresh_guidance_tab(self):
             header_text = text + arrow if c == sort_col else text
             self._guidance_tree.heading(c, text=header_text)
             
+        # 👑 在排序之前，利用实时内存大表，富化并合入每只个股的当日涨幅 (percent) 和资金 dff，确保支持按新列高保真数值排序！
+        for d in data:
+            code = d.get('code') or ''
+            code_clean = str(code).strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+                code_clean = code_clean.replace(icon, '').strip()
+            code_clean = code_clean.zfill(6)
+            
+            pct = 0.0
+            dff_val = 0.0
+            has_rt = False
+            if hasattr(self, 'selector') and self.selector is not None and hasattr(self.selector, 'df_all_realtime') and self.selector.df_all_realtime is not None:
+                rt = self.selector.df_all_realtime
+                if code_clean in rt.index:
+                    row = rt.loc[code_clean]
+                    pct = row.get('percent', row.get('pct', row.get('pct_diff', 0.0)))
+                    dff_val = row.get('dff', 0.0)
+                    has_rt = True
+            if not has_rt and hasattr(self, 'master') and self.master is not None and hasattr(self.master, 'df_all') and self.master.df_all is not None:
+                m_all = self.master.df_all
+                if code_clean in m_all.index:
+                    row = m_all.loc[code_clean]
+                    pct = row.get('percent', row.get('pct', row.get('pct_diff', 0.0)))
+                    dff_val = row.get('dff', 0.0)
+                    has_rt = True
+            if not has_rt:
+                pct = d.get('percent', d.get('pct', d.get('pct_diff', 0.0)))
+                dff_val = d.get('dff', 0.0)
+                
+            d['percent'] = float(pct or 0.0)
+            d['dff'] = float(dff_val or 0.0)
+
         def _get_sort_key(d):
+            if sort_col == "percent":
+                return float(d.get('percent') or 0.0)
+            if sort_col == "dff":
+                return float(d.get('dff') or 0.0)
             if sort_col in ("order_price", "predicted_ma5"):
                 return float(d.get('predicted_ma5') or d.get('order_price') or 0.0)
             if sort_col in ("support_price", "sws_support"):
@@ -5313,6 +5380,12 @@ def _refresh_guidance_tab(self):
             branch = branch_emoji_map.get(branch_raw, branch_raw)
             reason = d.get('reason') or ''
             
+            # 格式化实时涨幅与 dff，加上正负方向指示器
+            pct_val = d.get('percent', 0.0)
+            dff_val = d.get('dff', 0.0)
+            pct_str = f"{pct_val:+.2f}%" if pct_val != 0.0 else "0.00%"
+            dff_str = f"{dff_val:+.2f}" if dff_val != 0.0 else "0.00"
+
             # 格式化价格
             order_p_str = f"{order_p:.2f}" if order_p > 0 else "--"
             supp_p_str = f"{supp_p:.2f}" if supp_p > 0 else "--"
@@ -5343,7 +5416,7 @@ def _refresh_guidance_tab(self):
                 
             self._guidance_tree.insert(
                 "", "end", iid=code,
-                values=(code, name, sector_str, action, order_p_str, supp_p_str, stop_p_str, branch, reason),
+                values=(code, name, pct_str, dff_str, sector_str, action, order_p_str, supp_p_str, stop_p_str, branch, reason),
                 tags=(tag,)
             )
             
@@ -5418,7 +5491,8 @@ def _save_guidance_column_widths(self):
         config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
         
         widths = {}
-        for col in ["code", "name", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason"]:
+        # 👑 动态使用 self._guidance_tree["columns"] 遍历所有列，完美解决新列 percent 和 dff 被遗漏的问题！
+        for col in self._guidance_tree["columns"]:
             try:
                 widths[col] = int(self._guidance_tree.column(col, "width") / scale)
             except Exception:
@@ -5480,6 +5554,20 @@ def _auto_fit_guidance_columns(self):
     all_items = self._guidance_tree.get_children()
     scale = self._get_dpi_scale_factor()
     
+    # 👑 引入精细的 max_w_map 限制最大列宽，从源头上彻底根治默认宽度太宽的痛点！
+    max_w_map = {
+        "code": 80,
+        "name": 110,
+        "percent": 85,
+        "dff": 85,
+        "action": 90,
+        "order_price": 90,
+        "support_price": 90,
+        "stop_price": 90,
+        "sector": 140,
+        "branch": 160
+    }
+    
     for col in cols:
         header_text = self._guidance_tree.heading(col)["text"]
         max_w = f.measure(header_text) + int(25 * scale) # padding
@@ -5494,6 +5582,8 @@ def _auto_fit_guidance_columns(self):
         # 限制合理范围并应用
         if col == "reason":
             max_w = min(max_w, int(350 * scale))
+        elif col in max_w_map:
+            max_w = min(max_w, int(max_w_map[col] * scale))
         else:
             max_w = min(max_w, int(150 * scale))
         
@@ -5501,6 +5591,8 @@ def _auto_fit_guidance_columns(self):
         min_w_map = {
             "code": 70,
             "name": 90,
+            "percent": 75,
+            "dff": 75,
             "sector": 105,
             "action": 75,
             "order_price": 75,
