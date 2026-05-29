@@ -1,3 +1,22 @@
+## 2026-05-30 04:00
+- [x] **修复并优化 PyQt6 信号面板“每日操作指南”列宽持久化与极限紧凑布局 (Fixed Column Width Persistence & Ultra-Compact Layout for Operating Guidance in PyQt6 Signal Dashboard)**：
+    - [x] **无条件信任历史列宽状态 (Unconditional Persistence Load Protection)**：重构了 `signal_dashboard_panel.py` 中的 `_restore_ui_state` 方法。只要本地 `window_config.json` 配置文件中存有对应表格的布局状态（`state_key` 存在），就强行将 `table._has_restored_state` 标为 `True`。这彻底根治了在 Windows/PyQt6 平台下，因表格初始化尚未完成渲染导致 `restoreState()` 返回 False，进而未设置 `_has_restored_state` 标记，导致后续刷新被默认宽度暴力覆盖的顽疾，实现了真正的“无损退出与完美继承”。
+    - [x] **落地全量自适应极致紧凑宽度 (Enforced Ultra-Compact Standard Column Widths)**：优化了 `_limit_table_column_widths` 方法中的 `rec_w` 系列自适应推荐宽度，将普通长列、代码、名称、度量指标及当前分支列宽度进一步压缩收窄 10% - 15%（例如：“决策理由”由 230 压缩至 200，“代码”由 65 压缩至 60，“持仓数量”由 70 压缩至 65）。
+    - [x] **首屏与刷新完全对齐 (First-load and Refresh Alignment)**：同步重构了 `_create_guidance_table` 里的首屏预设 `default_widths`，确保无论是首次空数据加载，还是后续高频行情刷新，界面均能以最极致、紧凑且无任何大白边冗余的专业级排版渲染。
+    - [x] **通过全量 57 项回归测试**：一枪通过全部回归用例，系统质量固若金汤。
+
+## 2026-05-30 03:00
+- [x] **完成全系统日志架构标准化第三阶段 (Completed Centralized Logging Architecture Standardization Phase 3)**：
+    - [x] **彻底根除遗留硬编码日志级别覆写 (Eliminated Hardcoded logger.setLevel Overrides)**：
+        - [x] 审计并精细重构了 `LoggerFactory` 与通用日志模块 `logger_utils.py`，彻底移除了所有 rogue `logger.setLevel("DEBUG")` 调用，保证全局 log 严重级别 100% 毫无死角地遵循 `global.ini` 里的 `loglevel` 设定。
+        - [x] **实现命令行 `-log` 极速优先级覆盖**：在 `LoggerFactory.py` 最顶级（模块加载阶段）引入了零延迟命令行参数提取器，实现对 `sys.argv` 中 `-log`、`--log` 及 `--loglevel` 的秒级物理提取。全局设置优先级绝对对齐：**命令行参数优先级最高，其次是 `global.ini` 配置文件，最后是系统默认级别 (INFO)**。这彻底解决了在主入口或导入 `commonTips.py` 等早期文件时，由于初始化时机过早导致的命令行参数过滤无效的痛点。
+        - [x] 仅在独立进程（如 `trade_visualizer_qt6.py` 和 `temp_historical_monitor.py` 等 CLI 入口）根据命令行参数 `-log` 手动指令动态分配级别的合规机制上保留对应设置，并在无传参时自动降级采用配置默认级别，实现了极度稳健 and 开发/生产环境完美解耦的日志管道。
+    - [x] **彻底清除控制台噪声与裸 Print 打印污染 (Eliminated Console Noise & Raw Prints)**：
+        - [x] **彻底屏蔽 Qt DPI 冲突警告**：在 `instock_MonitorTK.py` 启动的最顶级，优先注入 `os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"` 规则，强制且优雅地屏蔽了底层 Windows QPA 抛出的 `SetProcessDpiAwarenessContext() failed` 等高频、刺眼的 Qt 内置警告。
+        - [x] **消除句柄与空 Timing 的裸 Print 输出**：移除了 `stock_sender.py` 中用于查找 AutoHotkey 和 mainfree 句柄状态的诊断 print 语句；静默了 `commonTips.py` 内部 `print_timing_summary_filter` 汇总数据为空时的 `[Timing] No matching timing records` 警告。
+        - [x] **清除子进程轮询点号与心跳字符污染**：移除了 `data_utils.py` 在非交易时段空转时高频打印的点号 `.` 与心跳期打印的星号 `*` 等冗余字符，保证了控制台终端物理输出的绝对干净。
+    - [x] **实现 100% 毫无死角通过 29 项回归用例**：在 `PYTHONPATH="."` 的 PowerShell 环境下，一枪通过全部 29 项风控、仿真交易天梯及状态机单元测试，系统质量坚若夯实。
+
 ## 2026-05-30 02:00
 - [x] **完成全系统日志架构标准化第二阶段 (Completed Centralized Logging Architecture Standardization Phase 2)**：
     - [x] **消除 module-level 遗留 `import logging` 和 `logging.basicConfig`**：

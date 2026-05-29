@@ -1179,34 +1179,22 @@ class SnapshotCalendarDialog(QDialog):
 from queue import Queue, Empty
 import time
 
-import threading
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 
-class SignalBridge(QObject):
+class DataProcessWorker(QThread):
+    """[🚀 极致安全与稳定性] 使用 QThread 接管后台数据处理，天然兼容 Qt 事件循环，彻底根治原生 Python 线程下的 GIL 状态破坏与 NULL 崩溃"""
     data_updated = pyqtSignal(object)
     stopped = pyqtSignal()
 
-class DataProcessWorker(threading.Thread):
-    """Worker thread to process realtime data in a separate native Python Thread."""
-
     def __init__(self, detector):
-        super().__init__(name="DataProcessWorker", daemon=True)
+        super().__init__()
+        self.setObjectName("DataProcessWorker")
         self.detector = detector
-        # 信号桥梁
-        self.bridge = SignalBridge()
         # 线程安全队列
         self.df_queue = Queue()
         self.force_queue = Queue()
         self._is_running = True
         self._last_slow_log_ts = 0  # [NEW] 用于节流告警输出
-
-    @property
-    def data_updated(self):
-        return self.bridge.data_updated
-
-    @property
-    def stopped(self):
-        return self.bridge.stopped
 
     def add_data(self, df):
         """外部线程安全调用"""
@@ -1222,22 +1210,6 @@ class DataProcessWorker(threading.Thread):
 
     def stop(self):
         self._is_running = False
-
-    def isRunning(self):
-        return self.is_alive()
-
-    def quit(self):
-        pass
-
-    def wait(self, timeout_ms=3000):
-        self.join(timeout=timeout_ms / 1000.0)
-        return not self.is_alive()
-
-    def terminate(self):
-        logger.warning("[DataProcessWorker] terminate() called on native thread (ignored, daemon thread will auto-exit)")
-
-    def deleteLater(self):
-        pass
 
     def run(self):
         # 线程的入口方法，百分之百在子线程中运行

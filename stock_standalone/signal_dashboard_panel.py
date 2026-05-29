@@ -1028,8 +1028,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] 列宽持久化防抖 Timer：避免 sectionResized 每次触发磁盘 IO
         self._save_ui_timer = QTimer(self)
         self._save_ui_timer.setSingleShot(True)
-        self._save_ui_timer.setInterval(500)  # 500ms 极速防抖，拖拽完成后瞬间安全写盘
+        self._save_ui_timer.setInterval(800)  # 800ms 防抖，拖拽完成后安全写盘
         self._save_ui_timer.timeout.connect(self._save_ui_state)
+        # ⭐ [KEY FIX] 初始化期间屏蔽所有 sectionResized 触发的保存，防止默认列宽覆写持久化配置
+        self._is_initializing = True
+        # ⭐ [KEY FIX] 标记列宽是否已完成首次恢复，防止 showEvent 二次恢复
+        self._columns_restored = False
 
         # --- 3. UI 渲染 (依赖上述数据结构) ---
         self._init_ui()
@@ -1038,7 +1042,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [NEW] 恢复历史预警信息
         self._load_alert_history()
         
-        self._restore_ui_state()
+        # ⭐ [KEY FIX] 不在 __init__ 中恢复列宽！
+        # restoreState 在窗口 show() 之前调用时，Qt 窗口尺寸为 0，导致恢复失败
+        # 改为在 showEvent 中延迟恢复（见 showEvent 方法）
         
         # --- 4. 总线连接 ---
         self._setup_bus_connection()
@@ -1165,6 +1171,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if hasattr(self, '_table_update_buffer'):
             self._table_update_buffer.clear()
         
+    def showEvent(self, event):
+        """⭐ [KEY FIX] 窗口首次显示后恢复列宽，确保 Qt 窗口有实际尺寸，restoreState 才能生效"""
+        super().showEvent(event)
+        if not self._columns_restored:
+            self._columns_restored = True
+            # 延迟一个事件循环，确保布局已完成
+            QTimer.singleShot(50, self._restore_ui_state)
+
     def closeEvent(self, event):
         # 退出前显式停止 pending 延迟保存定时器，防止冲突与重复写盘
         if hasattr(self, '_save_ui_timer') and self._save_ui_timer:
@@ -1173,6 +1187,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._save_ui_state()
         self.stop()
         event.accept()
+
+    @staticmethod
+    def _clean_tab_name(name: str) -> str:
+        """⭐ [KEY FIX] 用正则统一清除所有 emoji 和特殊前缀，确保 key 匹配一致"""
+        import re
+        # 清除 emoji（Unicode 扩展字符）及其后的空格
+        cleaned = re.sub(r'[\U00010000-\U0010ffff\U00002600-\U000027BF\U0001F300-\U0001FAFF]\s*', '', name)
+        return cleaned.strip()
 
     def _collect_ui_state(self) -> dict:
         """收集当前 UI 布局状态（纯内存，无副作用）"""
@@ -1183,15 +1205,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         for name, table in self.tables.items():
             try:
-                clean_name = (
-                    name.replace("📋 ", "")
-                        .replace("🌟 ", "")
-                        .replace("🐉 ", "")
-                        .replace("🔥 ", "")
-                        .replace("🌐 ", "")
-                        .replace("📡 ", "")
-                )
-
+                clean_name = self._clean_tab_name(name)
                 data[f'table_state_{clean_name}'] = (
                     table.horizontalHeader()
                         .saveState()
@@ -1199,13 +1213,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         .data()
                         .decode()
                 )
-
             except Exception:
                 continue
 
         return data
-
-
     def _save_ui_state(self):
         """高性能保存表格布局状态（Dirty Check + 防重复写盘）"""
         if not hasattr(self, 'tables') or not self.tables:
@@ -1270,7 +1281,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             logger.error(f"Failed to save UI state: {e}")
 
     def _restore_ui_state(self):
-        """恢复表格布局设置"""
+        """⭐ [KEY FIX] 恢复表格布局设置 — 必须在 showEvent 后调用，确保 Qt 窗口有实际尺寸"""
         try:
             config_file = WINDOW_CONFIG_FILE
             if not os.path.exists(config_file): return
@@ -1280,27 +1291,58 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     full_data = json.load(f)
             
             ui_state = full_data.get(SETTINGS_SECTION)
-            if not ui_state: return
+            if not ui_state:
+                # 无持久化配置时，直接放开初始化保护，让 sectionResized 可以正常保存
+                self._is_initializing = False
+                return
             
+            restored_count = 0
             for name, table in self.tables.items():
-                clean_name = (
-                    name.replace("📋 ", "")
-                        .replace("🌟 ", "")
-                        .replace("🐉 ", "")
-                        .replace("🔥 ", "")
-                        .replace("🌐 ", "")
-                        .replace("📡 ", "")
-                )
+                clean_name = self._clean_tab_name(name)
                 state_key = f'table_state_{clean_name}'
                 if state_key in ui_state:
-                    ok = table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state[state_key].encode()))
-                    if ok:
-                        table._has_restored_state = True  # 标记已成功恢复自定义列宽，后续刷新不得擅自破坏与覆盖它
-            # [PERF] 最稳方案：延迟一个 event-loop 再采集快照
-            # 确保 restoreState() 引引发的异步布局事件全部稳定后再建立基准，防止启动即触发 save_ui
-            QTimer.singleShot(0, lambda: setattr(self, '_last_saved_ui_state', self._collect_ui_state()))
+                    state_hex = ui_state[state_key]
+                    ok = table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
+                    logger.debug(f"  [Restore] {clean_name}: {'✅ ok' if ok else '⚠️ failed'}")
+                    restored_count += 1
+                # ⭐ [KEY FIX] restoreState 会把 Stretch 模式覆盖为 Interactive，必须在 restore 后重新应用
+                self._reapply_table_stretch_mode(name, table)
+            
+            logger.debug(f"✅ [Dashboard] UI state restored for {restored_count} tables.")
+            
+            # 恢复完成后，采集当前快照作为 dirty-check 基准
+            QTimer.singleShot(200, self._finalize_restore)
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
+            self._is_initializing = False
+
+    def _reapply_table_stretch_mode(self, tab_name: str, table: QTableWidget):
+        """
+        ⭐ [KEY FIX] restoreState() 会将 Stretch 模式覆盖为 Interactive，
+        导致列无法铺满表格，右侧出现白色空白。
+        必须在每次 restoreState 之后重新应用 Stretch 模式。
+        """
+        header = table.horizontalHeader()
+        ncols = table.columnCount()
+        if ncols == 0:
+            return
+        # 信号分类 Tab（8列）：col5「详情」拉伸
+        _SIGNAL_TABS = {"全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"}
+        if any(t in tab_name for t in _SIGNAL_TABS):
+            if ncols > 5:
+                header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            return
+        # 其余所有 Tab：最后一列拉伸填充整个表格宽度
+        header.setSectionResizeMode(ncols - 1, QHeaderView.ResizeMode.Stretch)
+
+    def _finalize_restore(self):
+        """恢复完成后的收尾：采集快照 + 解除初始化锁"""
+        try:
+            self._last_saved_ui_state = self._collect_ui_state()
+        except Exception:
+            pass
+        # ⭐ 解除初始化保护，之后 sectionResized 才能触发持久化
+        self._is_initializing = False
 
     def _compute_data_signature(self, data_list) -> str:
         """[PERF] 极速数据指纹：微秒级提取长度与核心内容特征，阻断一切冗余表格重绘与假死"""
@@ -1325,44 +1367,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _limit_table_column_widths(self, table: QTableWidget):
         """
-        [🚀 极致性能与极度尊重布局] 节流且智能的列宽限制/首屏精致自适应。
-        1. 若用户已经手动拉伸并成功加载了自定义持久化状态，100% 绝对不去干扰裁剪它。
-        2. 若为首次加载或无配置，则自动施加精致大气的默认推荐列宽，让界面高端通透。
+        [已简化] 不再自动调整列宽。
+        列宽由 _restore_ui_state (showEvent 后) 负责恢复，此处保留空壳避免调用方报错。
         """
-        if getattr(table, '_has_restored_state', False):
-            # 100% 绝对尊重专业交易员的手动自定义宽度，绝不粗暴裁剪覆盖
-            return
-
-        # [NEW] 节流保护：如果 2 秒内刚限制过，则跳过，减少高频刷新时的布局重算
-        last_limit = getattr(table, '_last_limit_ts', 0)
-        curr_ts = time.time()
-        if curr_ts - last_limit < 2.0:
-             return
-        table._last_limit_ts = curr_ts
-
-        header = table.horizontalHeader()
-        column_count = table.columnCount()
-        for i in range(column_count):
-            h_text = table.horizontalHeaderItem(i).text() if table.horizontalHeaderItem(i) else ""
-            
-            # 首屏/无配置时的精致推荐宽度设计
-            rec_w = 120 # 默认适中宽度
-            if h_text in ["时间", "更新时间"]:
-                rec_w = 95
-            elif h_text in ["所属板块", "板块名称"]:
-                rec_w = 135
-            elif h_text in ["详情", "捕捉理由", "跟风明细", "理由", "核心理由", "形态详情", "形态/信号", "标签", "决策理由"]:
-                rec_w = 280  # 默认加宽，让最关键的信息一览无余
-            elif h_text in ["名称", "龙头名称"]:
-                rec_w = 85
-            elif h_text in ["代码", "状态", "风控", "评级", "阶段", "现价", "建议价"]:
-                rec_w = 75
-            elif h_text in ["持仓成本", "昨日收盘", "5日线预测", "布林上轨", "SWS支撑", "策略防守价", "当前分支", "操作建议", "仓位比例"]:
-                rec_w = 90
-            
-            # 设置为可自由交互，并赋予极佳的初始推荐宽度
-            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-            table.setColumnWidth(i, rec_w)
+        pass  # ⭐ 已由 showEvent → _restore_ui_state 统一接管
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1471,7 +1479,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         temp_frame.mousePressEvent = self._on_market_temp_clicked
 
         header_layout.addSpacing(20)
-        
+
         # [NEW] 指数网格显示
         self.index_frame = QFrame()
         self.index_frame.setMinimumWidth(150)
@@ -1479,7 +1487,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         idx_grid = QGridLayout(self.index_frame)
         idx_grid.setContentsMargins(5, 5, 5, 5)
         idx_grid.setSpacing(5)
-        
+
         self.idx_labels = {}
         indices_list = [("sh000001", "上证"), ("sz399001", "深证"), ("sz399006", "创业"), ("sh000688", "科创")]
         for i, (code, name) in enumerate(indices_list):
@@ -1490,20 +1498,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             idx_grid.addWidget(nl, i, 0)
             idx_grid.addWidget(vl, i, 1)
             self.idx_labels[name] = vl
-            
+
         header_layout.addWidget(self.index_frame)
-        
+
         header_layout.addSpacing(30)
         self.cards = {}
         # [MOD] 增加 "alert_hub" 预警卡片，放在第一位
         card_configs = [
-            ("alert_hub", "📡 预警", "#FF4444"), # [NEW] 聚合预警卡片
+            ("alert_hub", "📡 预警", "#FF4444"),
             ("dragon", "🐉 龙头池", "#FFD700"),
-            ("follow", "跟单信号", "#FFD700"), 
-            ("breakout", "突破加速", "#FF4500"), 
+            ("follow", "跟单信号", "#FFD700"),
+            ("breakout", "突破加速", "#FF4500"),
             ("trap", "尾盘诱多", "#1E90FF"),
-            ("risk", "风险卖出", "#00FA9A"), 
-            ("breakdown", "结构破位", "#87CEFA"), 
+            ("risk", "风险卖出", "#00FA9A"),
+            ("breakdown", "结构破位", "#87CEFA"),
             ("other", "其它信号", "#A9A9A9"),
         ]
         for key, name, color in card_configs:
@@ -1656,6 +1664,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table._sort_col = 0
                 table._sort_order = Qt.SortOrder.AscendingOrder if tab_name == "📋 每日操作指南" else Qt.SortOrder.DescendingOrder
                 table.horizontalHeader().setSortIndicator(0, table._sort_order)
+            # ⭐ [KEY FIX] 首次启动时确保所有 tab 列铺满整个表格宽度
+            self._reapply_table_stretch_mode(tab_name, table)
             self.tabs.addTab(table, tab_name)
         
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1731,14 +1741,19 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         cols = ["时间", "级别", "类型", "板块/内容", "活跃度", "详情"]
         table.setColumnCount(len(cols))
         table.setHorizontalHeaderLabels(cols)
-        # 预设列宽
+        self._align_table_headers_left(table)
+        
+        h = table.horizontalHeader()
+        # ⭐ [KEY FIX] Interactive 模式 + 最后一列拉伸，确保铺满整个表格宽度
+        h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        h.setSectionResizeMode(len(cols) - 1, QHeaderView.ResizeMode.Stretch)  # 「详情」自动拉伸
+        # 预设列宽（详情列为 Stretch 无需设置宽度）
         table.setColumnWidth(0, 80)
         table.setColumnWidth(1, 60)
         table.setColumnWidth(2, 100)
         table.setColumnWidth(3, 150)
         table.setColumnWidth(4, 100)
         
-        h = table.horizontalHeader()
         h.setSectionsClickable(True)
         # [NEW] 绑定表头点击，实现手动排序联动
         h.sectionClicked.connect(lambda idx: self._on_engine_header_clicked(table, idx))
@@ -1764,6 +1779,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _create_signal_table(self) -> QTableWidget:
         table = QTableWidget(0, 8)
         table.setHorizontalHeaderLabels(["时间", "评级", "代码", "名称", "形态/信号", "详情", "次数", "得分"])
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1775,20 +1791,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
         table.horizontalHeader().sectionClicked.connect(lambda idx: self._on_engine_header_clicked(table, idx))
         
-        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
+        table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; alternate-background-color: #161b29; }")
+        table.setAlternatingRowColors(True)
         header = table.horizontalHeader()
-        # [PERF] Interactive 模式：不再随每次 setText 触发全列像素重测量（原 ResizeToContents 杀手）
+        # ⭐ Interactive 模式 + col5「详情」拉伸，填满整个表格宽度
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch) # 详情自动拉伸
-        # 首次数据就位后执行一次自适应
-        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)  # 详情自动拉伸
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [PERF] 防抖持久化：sectionResized 不再直接写磁盘，合并为 2s 后单次写入
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化 — 加初始化保护
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -1801,6 +1818,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         columns = ["时间", "优先级", "Kernel", "仓位", "置信", "风控", "状态", "代码", "名称", "形态类别", "所属板块", "现价", "建议价", "周期涨变", "DFF动量", "捕捉理由"]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1815,15 +1833,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] Interactive 模式
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
-        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [PERF] 防抖持久化
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化 — 加初始化保护
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -1831,16 +1850,47 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table._col_map = {table.horizontalHeaderItem(i).text(): i for i in range(table.columnCount())}
         return table
 
+    def _align_table_headers_left(self, table: QTableWidget):
+        """双重强力保障表头 100% 绝对靠左对齐，强制禁用 Windows Native 引擎，使用扁平暗黑风格自绘"""
+        if not table:
+            return
+        header = table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # 物理阻断 Windows Native 渲染引擎，强制以扁平暗黑网格样式自绘，实现 100% 表头文字靠左贴齐
+        header.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #0d121f;
+                color: #ffffff;
+                border: none;
+                border-bottom: 1px solid #1a2233;
+                border-right: 1px solid #1a2233;
+                padding-left: 4px;
+                text-align: left;
+                font-weight: bold;
+                height: 25px;
+            }
+        """)
+        for i in range(table.columnCount()):
+            item = table.horizontalHeaderItem(i)
+            if item:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            else:
+                col_text = table.model().headerData(i, Qt.Orientation.Horizontal) or ""
+                new_item = QTableWidgetItem(str(col_text))
+                new_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setHorizontalHeaderItem(i, new_item)
+
     def _create_guidance_table(self) -> QTableWidget:
         """创建每日操作指南表"""
         columns = [
-            "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
-            "当日涨幅", "资金DFF", 
-            "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
-            "当前分支", "操作建议", "仓位比例", "决策理由"
+            "代码", "名称", "成本", "数量", "昨收", 
+            "涨幅", "DFF", 
+            "5日线", "上轨", "SWS线", "防守价", 
+            "分支", "建议", "仓位", "理由"
         ]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1849,24 +1899,33 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.horizontalHeader().sectionClicked.connect(lambda idx: self._on_engine_header_clicked(table, idx))
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
-        # 预设极致紧凑的默认列宽，与 Tkinter 作战看板高度对齐，消除首屏过宽或不紧凑痛点
+        # ⭐ [KEY FIX] 必须设置 Interactive 模式，防止数据刷新时 Qt 自动 ResizeToContents 覆盖持久化列宽
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # 最后一列「理由」自动拉伸
+        header.setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.Stretch)
+        
+        # ⭐ [KEY FIX] 预设紧凑默认列宽（仅在无持久化配置时生效，有配置时由 showEvent 覆盖）
         default_widths = {
-            "代码": 70, "名称": 90, "持仓成本": 75, "持仓数量": 75, "昨日收盘": 75,
-            "当日涨幅": 75, "资金DFF": 75,
-            "5日线预测": 75, "布林上轨": 75, "SWS支撑": 75, "策略防守价": 75,
-            "当前分支": 120, "操作建议": 75, "仓位比例": 70, "决策理由": 250
+            "代码": 55, "名称": 65, "成本": 50, "数量": 50, "昨收": 50,
+            "涨幅": 55, "DFF": 50,
+            "5日线": 55, "上轨": 50, "SWS线": 55, "防守价": 55,
+            "分支": 75, "建议": 50, "仓位": 50, "理由": 200
         }
         for i, col_name in enumerate(columns):
-            w = default_widths.get(col_name, 80)
-            table.setColumnWidth(i, w)
+            if col_name != "理由":  # 理由列已设为 Stretch，跳过手动设宽
+                w = default_widths.get(col_name, 60)
+                table.setColumnWidth(i, w)
         
         # 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # 防抖持久化列宽
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化列宽 — 加初始化保护，防止启动期间触发覆写
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -1878,6 +1937,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         columns = ["板块名称", "热度", "竞分", "类型", "龙头", "龙头名称", "龙头涨幅", "跟涨%", "跟风明细", "更新时间"]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1890,15 +1950,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] Interactive 模式
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 跟风明细拉伸
-        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_sector_table_clicked)
         table.cellDoubleClicked.connect(self._on_sector_table_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [PERF] 防抖持久化
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化 — 加初始化保护
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -1911,6 +1972,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         columns = ["状态", "代码", "名称", "所属板块", "现点%", "累计涨%", "追踪天", "新高天", "DFF动量", "VWAP", "更新时间", "标签"]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1925,14 +1987,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] Interactive 模式
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 标签拉伸
-        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [PERF] 防抖持久化
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化 — 加初始化保护
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -1945,6 +2008,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         columns = ["趋势类型", "代码", "名称", "阶段", "所属板块", "战略分", "结构分", "共振分", "更新时间", "核心理由"]
         table = QTableWidget(0, len(columns))
         table.setHorizontalHeaderLabels(columns)
+        self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1959,14 +2023,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] Interactive 模式
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
-        QTimer.singleShot(800, lambda: table.resizeColumnsToContents() if table.rowCount() > 0 else None)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # [PERF] 防抖持久化
-        table.horizontalHeader().sectionResized.connect(lambda: self._save_ui_timer.start())
+        # ⭐ [KEY FIX] 防抖持久化 — 加初始化保护
+        table.horizontalHeader().sectionResized.connect(
+            lambda: None if getattr(self, '_is_initializing', True) else self._save_ui_timer.start()
+        )
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         return table
@@ -4385,6 +4450,70 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if self.type_filter.count() > 0:
             self.type_filter.setCurrentIndex(0)
 
+    def _on_auto_fit_columns(self):
+        """
+        [GUI] 手动触发：对当前 Tab 自动根据内容测量并调整列宽。
+        执行步骤：
+          1. resizeColumnsToContents() — 按内容测量最优宽度
+          2. 对过宽列施加上限保护（Stretch 列除外）
+          3. 重新应用 Stretch 模式，确保末列铺满整个表格宽度
+          4. 触发持久化写盘，保存本次调整结果
+        """
+        tab_name = self.tabs.tabText(self.tabs.currentIndex())
+        table = self.tables.get(tab_name)
+        if not table:
+            return
+
+        header = table.horizontalHeader()
+        ncols = table.columnCount()
+
+        # 1. 确定哪一列是 Stretch（不参与 resizeToContents 测量上限）
+        _SIGNAL_TABS = {"全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"}
+        stretch_col = 5 if any(t in tab_name for t in _SIGNAL_TABS) else (ncols - 1)
+
+        # 2. 暂时把 Stretch 列改回 Interactive，让 resizeColumnsToContents 能测量它
+        header.setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Interactive)
+
+        # 3. 执行内容自动测量
+        table.resizeColumnsToContents()
+
+        # 4. 对非 Stretch 列施加合理上限（防止长文本列撑得过宽）
+        MAX_COL_WIDTHS = {
+            "代码": 70, "名称": 80, "成本": 65, "数量": 65,
+            "时间": 75, "评级": 50, "次数": 55, "得分": 55,
+            "级别": 60, "类型": 110, "活跃度": 90,
+            "状态": 70, "Kernel": 80, "仓位": 60, "置信": 60, "风控": 60,
+            "优先级": 65, "现价": 65, "建议价": 70, "周期涨变": 75, "DFF动量": 75,
+            "形态/信号": 120, "形态类别": 120,
+            "所属板块": 130, "板块名称": 130, "板块/内容": 160,
+            "5日线": 65, "上轨": 60, "SWS线": 65, "防守价": 65,
+            "涨幅": 60, "DFF": 55, "分支": 85, "建议": 60,
+            "现点%": 65, "累计涨%": 75, "追踪天": 65, "新高天": 65,
+            "VWAP": 65, "更新时间": 80, "标签": 120,
+            "趋势类型": 90, "阶段": 70, "战略分": 65, "结构分": 65, "共振分": 65,
+            "热度": 60, "竞分": 60, "龙头": 70, "龙头名称": 80,
+            "龙头涨幅": 75, "跟涨%": 65,
+        }
+        DEFAULT_MAX = 200
+        for col in range(ncols):
+            if col == stretch_col:
+                continue
+            h_item = table.horizontalHeaderItem(col)
+            col_name = h_item.text() if h_item else ""
+            max_w = MAX_COL_WIDTHS.get(col_name, DEFAULT_MAX)
+            cur_w = table.columnWidth(col)
+            if cur_w > max_w:
+                table.setColumnWidth(col, max_w)
+
+        # 5. 重新应用 Stretch，确保末列铺满窗口
+        self._reapply_table_stretch_mode(tab_name, table)
+
+        # 6. 触发持久化写盘
+        if not getattr(self, '_is_initializing', True):
+            self._save_ui_timer.start()
+
+        logger.debug(f"[AutoFit] '{tab_name}' columns auto-fitted and saved.")
+
     def _reset_signals(self):
         """重置所有信号数据与统计，开始新监控周期"""
         # 1. 清空基础数据结构
@@ -4568,25 +4697,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _get_sort_key(d):
             cols = [
-                "代码", "名称", "持仓成本", "持仓数量", "昨日收盘", 
-                "当日涨幅", "资金DFF", 
-                "5日线预测", "布林上轨", "SWS支撑", "策略防守价", 
-                "当前分支", "操作建议", "仓位比例", "决策理由"
+                "代码", "名称", "成本", "数量", "昨收", 
+                "涨幅", "DFF", 
+                "5日线", "上轨", "SWS线", "防守价", 
+                "分支", "建议", "仓位", "理由"
             ]
             col_name = cols[sort_col] if sort_col < len(cols) else "代码"
             
             if col_name == "代码": return d.get('code', '')
             if col_name == "名称": return d.get('name', '')
-            if col_name == "持仓成本": return float(d.get('entry_price', 0.0) or 0.0)
-            if col_name == "持仓数量": return float(d.get('volume', 0.0) or 0.0)
-            if col_name == "昨日收盘": return float(d.get('close', 0.0) or 0.0)
-            if col_name == "当日涨幅": return float(d.get('percent', 0.0) or 0.0)
-            if col_name == "资金DFF": return float(d.get('dff', 0.0) or 0.0)
-            if col_name == "5日线预测": return float(d.get('predicted_ma5', 0.0) or 0.0)
-            if col_name == "布林上轨": return float(d.get('upper_boll', 0.0) or 0.0)
-            if col_name == "SWS支撑": return float(d.get('sws_support', 0.0) or 0.0)
-            if col_name == "策略防守价": return float(d.get('hard_stop', 0.0) or 0.0)
-            if col_name == "当前分支":
+            if col_name == "成本": return float(d.get('entry_price', 0.0) or 0.0)
+            if col_name == "数量": return float(d.get('volume', 0.0) or 0.0)
+            if col_name == "昨收": return float(d.get('close', 0.0) or 0.0)
+            if col_name == "涨幅": return float(d.get('percent', 0.0) or 0.0)
+            if col_name == "DFF": return float(d.get('dff', 0.0) or 0.0)
+            if col_name == "5日线": return float(d.get('predicted_ma5', 0.0) or 0.0)
+            if col_name == "上轨": return float(d.get('upper_boll', 0.0) or 0.0)
+            if col_name == "SWS线": return float(d.get('sws_support', 0.0) or 0.0)
+            if col_name == "防守价": return float(d.get('hard_stop', 0.0) or 0.0)
+            if col_name == "分支":
                 branch_name = d.get('branch_cn', d.get('active_branch', ''))
                 priority_map = {
                     "5日线主升浪": 1,
@@ -4599,9 +4728,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     "破位高位防震": 5
                 }
                 return priority_map.get(branch_name, 99)
-            if col_name == "操作建议": return d.get('action_cn', d.get('suggest_action', ''))
-            if col_name == "仓位比例": return float(d.get('size_pct', 0.0) or 0.0)
-            if col_name == "决策理由": return d.get('reason', '')
+            if col_name == "建议": return d.get('action_cn', d.get('suggest_action', ''))
+            if col_name == "仓位": return float(d.get('size_pct', 0.0) or 0.0)
+            if col_name == "理由": return d.get('reason', '')
             return ''
 
         data_sorted = sorted(data, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
