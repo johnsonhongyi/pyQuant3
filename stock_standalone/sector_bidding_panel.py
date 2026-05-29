@@ -1486,83 +1486,68 @@ class DataProcessWorker(QThread):
             if df is None:
                 return
 
+            active_codes = df.index.tolist() if hasattr(df, 'index') else []
+            is_full = len(df) > 3000
+            start_time = time.perf_counter()
+
             # ================================================================
-            # 注册代码
+            # 注册代码 + GIL 埋点
             # ================================================================
+            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.register_codes...")
+            try: _gil_mark("register_codes:start")
+            except Exception: pass
 
             if hasattr(self.detector, "register_codes"):
-
                 self.detector.register_codes(df)
 
-            # ================================================================
-            # 获取 active codes
-            # ================================================================
+            try: _gil_mark("register_codes:end")
+            except Exception: pass
 
-            if hasattr(df, "index"):
-                active_codes = list(df.index)
-            else:
-                active_codes = []
+            # ================================================================
+            # 分片处理 + GIL 埋点
+            # ================================================================
+            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.update_scores...")
+            try: _gil_mark("update_scores:start")
+            except Exception: pass
 
             total = len(active_codes)
+            if total > 0:
+                for start in range(0, total, self.chunk_size):
+                    if not self._is_running:
+                        return
+                    end = start + self.chunk_size
+                    batch_codes = active_codes[start:end]
+                    try:
+                        self.detector.update_scores(active_codes=batch_codes)
+                    except Exception:
+                        self._safe_log_error(
+                            "[Worker] update_scores chunk failed:\n"
+                            + traceback.format_exc()
+                        )
+                    # 主动 Yield GIL
+                    time.sleep(self.chunk_sleep)
 
-            if total <= 0:
-                return
+            try: _gil_mark("update_scores:end")
+            except Exception: pass
 
-            # ================================================================
-            # 分片处理
-            # ================================================================
-
-            for start in range(0, total, self.chunk_size):
-
-                if not self._is_running:
-                    return
-
-                end = start + self.chunk_size
-
-                batch_codes = active_codes[start:end]
-
-                try:
-
-                    self.detector.update_scores(
-                        active_codes=batch_codes
-                    )
-
-                except Exception:
-
-                    self._safe_log_error(
-                        "[Worker] update_scores chunk failed:\n"
-                        + traceback.format_exc()
-                    )
-
-                # ============================================================
-                # 主动 Yield GIL
-                # ============================================================
-
-                time.sleep(self.chunk_sleep)
+            time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
+            try: import sys; sys._getframe()  # 强制调度器切换
+            except Exception: pass
 
             # ================================================================
-            # 保存最新 DF
+            # 超时告警与状态保存
             # ================================================================
+            dur = time.perf_counter() - start_time
+            if dur > 0.3:
+                self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) counts: {total} slow: {dur:.3f}s")
 
             self.latest_df = df
 
-            # ================================================================
-            # 节流 Emit
-            # ================================================================
-
-            now = time.time()
-
-            if now - self._last_emit_ts >= self.emit_interval:
-
-                self._last_emit_ts = now
-
-                try:
-                    self.data_updated.emit(df)
-                except Exception:
-                    pass
+            # [🚀 PERF] 异步分片模式下，此处立即 emit 会导致空刷新抢占 _last_refresh_ts，
+            # 从而使真正的打分完毕回调因 5s 节流被丢弃。一切刷新统一由 on_score_finished 回调触发。
+            self._safe_log_debug("⏱️ [Worker][DEBUG] Async scoring started. Skipping sync emit.")
 
         except Exception:
-
             self._safe_log_error(
                 "[Worker] Chunk processing failed:\n"
                 + traceback.format_exc()
@@ -1575,24 +1560,22 @@ class DataProcessWorker(QThread):
     def _process_force_recalc(self):
 
         try:
+            start_time = time.perf_counter()
+            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.update_scores(force=True)...")
 
             self.detector.update_scores(force=True)
 
-            time.sleep(0.01)
+            time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
 
-            now = time.time()
+            dur = time.perf_counter() - start_time
+            if dur > 0.3:
+                self._safe_log_warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
 
-            if now - self._last_emit_ts >= self.emit_interval:
-
-                self._last_emit_ts = now
-
-                try:
-                    self.data_updated.emit(None)
-                except Exception:
-                    pass
+            # [FIX] data_version 由 update_scores 内部统一管理
+            self.latest_df = None
+            self._safe_log_debug("⏱️ [Worker][DEBUG] Async force scoring started. Skipping sync emit.")
 
         except Exception:
-
             self._safe_log_error(
                 "[Worker] Force recalc failed:\n"
                 + traceback.format_exc()
@@ -1601,6 +1584,12 @@ class DataProcessWorker(QThread):
     # =========================================================================
     # Safe Logging
     # =========================================================================
+
+    def _safe_log_debug(self, msg):
+        try:
+            logger.debug(msg)
+        except Exception:
+            pass
 
     def _safe_log_info(self, msg):
 
