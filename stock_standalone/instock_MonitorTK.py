@@ -1,5 +1,6 @@
 import os
 import sys
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
 import subprocess
 import socket
 import pickle

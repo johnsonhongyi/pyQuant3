@@ -231,7 +231,6 @@ def print_timing_summary_filter(
         })
 
     if not summary:
-        print("\n[Timing] No matching timing records.")
         return
 
     # 按平均耗时排序

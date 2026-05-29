@@ -56,8 +56,10 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     )
     handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker-%(process)d] %(message)s', '%Y-%m-%d %H:%M:%S'))
     
-    w_logger = LoggerFactory.getLogger("VoiceWorkerThread")
-    w_logger.setLevel("DEBUG")
+    # --- [FIX] 使用独立的本地 logger，不污染全局 LoggerFactory 单例的 level ---
+    w_logger = logging.getLogger("VoiceWorkerThread")
+    w_logger.setLevel(logging.DEBUG)
+    w_logger.propagate = False
     if not w_logger.handlers:
         w_logger.addHandler(handler)
 

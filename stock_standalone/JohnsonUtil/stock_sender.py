@@ -385,7 +385,6 @@ class StockSender:
     def find_dfcf_handle(self):
         self.dfcf_process_hwnd = self.get_handle_by_name("mainfree.exe")
         self.ahk_process_hwnd = self.get_pids("AutoHotkey")
-        print(f'dfcf_process_hwnd : {self.dfcf_process_hwnd}  ahk_process_hwnd :{self.ahk_process_hwnd }' )
 
     # ----------------- 代码转换 ----------------- #
     def bytes_16(self, dec_num, code):
