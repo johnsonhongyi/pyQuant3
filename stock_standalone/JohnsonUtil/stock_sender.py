@@ -145,6 +145,11 @@ class StockSender:
         """
         if not stock_code: return
 
+        # 🚀 [CORE LOCK] tk联动总开关去重，确认当前代码与上一次发送的代码不同才进行联动，重复的代码不触发联动
+        if stock_code == getattr(StockSender, '_last_send_code_tk', None):
+            return
+        StockSender._last_send_code_tk = stock_code
+
         # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (Proxy)
         if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
             try:
