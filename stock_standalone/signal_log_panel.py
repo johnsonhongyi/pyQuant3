@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 SignalLogPanel - 实时信号日志面板 (强化版)
 显示形态检测、策略信号的实时数据流
@@ -27,7 +28,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl, QPoint
 from PyQt6.QtGui import QResizeEvent, QMouseEvent, QColor
 from tk_gui_modules.window_mixin import WindowMixin
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 
 class SignalLogPanel(QWidget, WindowMixin):

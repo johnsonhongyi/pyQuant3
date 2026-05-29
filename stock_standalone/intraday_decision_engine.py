@@ -4,13 +4,14 @@
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
 from __future__ import annotations
+from logger_utils import LoggerFactory
 import logging
 import datetime as dt
 from typing import Any
 from daily_top_detector import detect_top_signals
 import pandas as pd
 # from JohnsonUtil.commonTips import timed_ctx
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 
 class IntradayDecisionEngine:

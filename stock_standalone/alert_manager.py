@@ -9,7 +9,6 @@ import threading
 import queue
 from queue import Queue, Empty, Full
 import time
-import logging
 from datetime import datetime
 from typing import Optional, Any, Dict, List
 import re
@@ -46,6 +45,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     import time
     
     # --- [FIX] 使用普通 FileHandler 避免多进程下的轮转冲突 (Windows WinError 32) ---
+    import logging
     import logging.handlers
     log_file = "voice_worker_debug.log"
     handler = logging.FileHandler(
@@ -56,8 +56,8 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     )
     handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker-%(process)d] %(message)s', '%Y-%m-%d %H:%M:%S'))
     
-    w_logger = logging.getLogger("VoiceWorkerThread")
-    w_logger.setLevel(logging.DEBUG)
+    w_logger = LoggerFactory.getLogger("VoiceWorkerThread")
+    w_logger.setLevel("DEBUG")
     if not w_logger.handlers:
         w_logger.addHandler(handler)
 
@@ -359,7 +359,7 @@ class AlertManager:
                 daemon=True,
                 name="AlertVoiceWorkerThread"
             )
-            logger.info("Alert voice worker (Enhanced Linkage) started as THREAD.")
+            logger.debug("Alert voice worker (Enhanced Linkage) started as THREAD.")
             self.process.start()
 
     def _start_feedback_listener(self):
@@ -369,7 +369,7 @@ class AlertManager:
 
     def _feedback_loop(self):
         """监听 worker 状态反馈"""
-        logger.info("Feedback loop started.")
+        logger.debug("Feedback loop started.")
         while not self.stop_event.is_set():
             try:
                 msg = self.feedback_queue.get(timeout=1.0)
@@ -431,7 +431,7 @@ class AlertManager:
                 self.session_alerted_codes.clear()
             if hasattr(self, 'cooldowns'):
                 self.cooldowns.clear() # [FIX] 同时也清空冷却记录，允许复位后立即重报
-            logger.info("✅ AlertManager: 全局报警历史及冷却记录已清空")
+            logger.debug("✅ AlertManager: 全局报警历史及冷却记录已清空")
 
     def speak(self, message: str, priority: int = 0, interrupt: bool = False):
         """
@@ -465,7 +465,7 @@ class AlertManager:
                 try: self.voice_queue.get_nowait()
                 except: break
             self.cancel_queue.put("__CLEAR__")
-            logger.info("AlertManager: Voice resumed and queue flushed.")
+            logger.debug("AlertManager: Voice resumed and queue flushed.")
         except:
             pass
 
@@ -481,16 +481,16 @@ class AlertManager:
                 self.cancel_queue.put("__CLEAR__")
             except:
                 pass
-            logger.info("⚠️ AlertManager: 已进入模拟/回测模式，警报静默且已清理语音队列")
+            logger.debug("⚠️ AlertManager: 已进入模拟/回测模式，警报静默且已清理语音队列")
         else:
-            logger.info("📡 AlertManager: 已返回实盘模式")
+            logger.debug("📡 AlertManager: 已返回实盘模式")
 
     def stop(self):
         """系统完全退出"""
         self.stop_event.set()
         if self.process and self.process.is_alive():
             self.process.join(timeout=0.5)
-        logger.info("Alert system stopped.")
+        logger.debug("Alert system stopped.")
 
     def _flush_batch_alerts(self):
         """[CORE] 聚合报警刷新逻辑：将同一周期的多条报警合并为一条"""

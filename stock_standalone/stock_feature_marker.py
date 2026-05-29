@@ -4,7 +4,7 @@
 提供行颜色高亮、图标标记等功能
 """
 # import logging
-# logger = logging.getLogger(__name__)
+# logger = LoggerFactory.getLogger(__name__)
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger()
 import pandas as pd

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 MarketStateBus - 全局行情状态总线 (P0-3)
 用于取代多进程/多线程之间的 Queue 传递，实现“覆盖式”发布与“拉取式”订阅。
@@ -10,7 +11,7 @@ import time
 import pandas as pd
 import logging
 
-logger = logging.getLogger("MarketStateBus")
+logger = LoggerFactory.getLogger("MarketStateBus")
 
 class MarketStateBus:
     """

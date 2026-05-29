@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 板块系统性风险监控器
 """
@@ -6,7 +7,7 @@ import logging
 import pandas as pd
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 class SectorRiskMonitor:
     """

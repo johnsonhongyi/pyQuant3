@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 概念分析查看器 IPC 管理器
 
@@ -17,7 +18,7 @@ from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 import logging
 
-logger = logging.getLogger("instock_TK.ConceptIPC")
+logger = LoggerFactory.getLogger("instock_TK.ConceptIPC")
 
 # IPC 端口配置
 IPC_SEND_PORT = 26670      # 发送数据到查看器

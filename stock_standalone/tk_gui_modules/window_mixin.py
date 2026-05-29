@@ -17,7 +17,7 @@ from gui_utils import clamp_window_to_screens
 from dpi_utils import get_windows_dpi_scale_factor
 from .gui_config import WINDOW_CONFIG_FILE, MONITOR_LIST_FILE
 from JohnsonUtil import LoggerFactory
-# logger = logging.getLogger("instock_TK.Window")
+# logger = LoggerFactory.getLogger("instock_TK.Window")
 logger = LoggerFactory.getLogger("instock_TK.Window")
 
 @runtime_checkable

@@ -1,7 +1,7 @@
 import re
 import pandas as pd
 import numpy as np
-import logging
+from logger_utils import LoggerFactory
 from typing import Optional, Any, Dict, Union
 
 class PandasQueryEngine:
@@ -14,11 +14,11 @@ class PandasQueryEngine:
     - 备注裁剪：自动抑制中文标签/备注
     """
     
-    def __init__(self, logger: Optional[logging.Logger] = None):
-        self.logger = logger or logging.getLogger(__name__)
+    def __init__(self, logger=None):
+        self.logger = logger or LoggerFactory.getLogger("PandasQueryEngine")
         self.last_error = ""
 
-    def set_logger(self, logger: logging.Logger):
+    def set_logger(self, logger):
         self.logger = logger
 
     @staticmethod

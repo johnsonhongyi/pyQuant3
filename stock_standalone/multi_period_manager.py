@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import logging
+from logger_utils import LoggerFactory
 from typing import Dict, List, Optional
 
 class MultiPeriodManager:
@@ -9,8 +9,8 @@ class MultiPeriodManager:
     支持将不同周期 (D, W, M, 5m等) 的 DataFrame 合并为 MultiIndex 结构，并进行内存优化。
     """
     
-    def __init__(self, logger: Optional[logging.Logger] = None):
-        self.logger = logger or logging.getLogger(__name__)
+    def __init__(self, logger=None):
+        self.logger = logger or LoggerFactory.getLogger("MultiPeriodManager")
 
     def optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
         """

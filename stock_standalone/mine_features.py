@@ -1,9 +1,8 @@
+from logger_utils import LoggerFactory
 import pandas as pd
-import logging
 import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("FeatureMiner")
+logger = LoggerFactory.getLogger("FeatureMiner")
 
 def mine_features():
     path_0309 = r"D:\Ramdisk\shared_df_all-2026-0309.h5"

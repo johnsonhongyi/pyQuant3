@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 import sqlite3
 import json
 import logging
@@ -10,7 +11,7 @@ import os
 from trading_logger import TradingLogger
 from db_utils import SQLiteConnectionManager
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 DB_FILE = "signal_strategy.db"
 

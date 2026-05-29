@@ -1,4 +1,7 @@
 from __future__ import annotations
+from logger_utils import LoggerFactory
+logger = LoggerFactory.getLogger("PaperExecutionAdapter")
+
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -259,8 +262,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
                                 mismatch = True
                                 break
                     if mismatch:
-                        import logging
-                        logger = logging.getLogger("PaperExecutionAdapter")
                         logger.warning(
                             f"[State-Check] Loaded positions ({len(positions)} holdings) differ from order ledger derivation ({len(recon_positions)} holdings). "
                             f"Preserving persistent snapshot to prevent accidental reset. Use manual self-heal if necessary."
@@ -268,8 +269,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 
                 self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
             except Exception as e:
-                import logging
-                logger = logging.getLogger("PaperExecutionAdapter")
                 logger.error(f"[State-Loading] Critical error loading state: {e}. Fallback to default state.")
                 if 'positions' not in locals():
                     positions = {}
@@ -364,8 +363,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 os.replace(tmp_file, self._state_file)
                 self._last_saved_fingerprint = current_fp
         except Exception as e:
-            import logging
-            logger = logging.getLogger("PaperExecutionAdapter")
             logger.error(f"[State-Saving] Critical error saving state: {e}")
 
     def submit_order(self, order: ApprovedOrder) -> bool:
@@ -386,8 +383,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 else:
                     equity = 1000000.0
         except Exception as e:
-            import logging
-            logging.getLogger("PaperExecutionAdapter").error(f"⚠️ [PaperAdapter] Error reading initial_capital: {e}, fallback to default 1000000.0")
+            logger.error(f"⚠️ [PaperAdapter] Error reading initial_capital: {e}, fallback to default 1000000.0")
             equity = 1000000.0
 
         if action in {"BUY", "ADD"}:
@@ -395,10 +391,11 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if not self._is_test:
                 import JohnsonUtil.commonTips as cct
                 is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
+                now_t = cct.get_now_time_int()
+                if 915 <= now_t < 925:
+                    is_trading_hour = False
                 if not is_trading_hour:
-                    import logging
-                    logger = logging.getLogger("PaperExecutionAdapter")
-                    logger.warning(f"[Trade Gate] Rejected BUY/ADD order for {code} because current time is not within standard trading hours.")
+                    logger.warning(f"[Trade Gate] Rejected BUY/ADD order for {code} because current time is before 09:25:00 or not within trading hours.")
                     return False
 
             # 计算开仓金额
@@ -416,8 +413,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if not self._is_test:
                 volume = (int(volume) // 100) * 100
                 if volume < 100:
-                    import logging
-                    logger = logging.getLogger("PaperExecutionAdapter")
                     logger.warning(
                         f"[Trade Gate] Rejected BUY/ADD order for {code} because calculated volume ({volume}) "
                         f"is less than 100 shares minimum (available cash: {self.account.cash:.2f})."
@@ -446,6 +441,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 )
 
         elif action in {"SELL", "REDUCE"}:
+            if not self._is_test:
+                import JohnsonUtil.commonTips as cct
+                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
+                now_t = cct.get_now_time_int()
+                if 915 <= now_t < 925:
+                    is_trading_hour = False
+                if not is_trading_hour:
+                    logger.warning(f"[Trade Gate] Rejected {action} order for {code} because current time is before 09:25:00 or not within trading hours.")
+                    return False
+
             if code not in self.account.positions:
                 return False
 
@@ -491,8 +496,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     available_vol = max(0.0, pos.volume - bought_today_vol)
 
                 if sell_volume > available_vol:
-                    import logging
-                    logger = logging.getLogger("PaperExecutionAdapter")
                     logger.warning(
                         f"[T+1 Rule Gate] Rejected {action} order for {code}. "
                         f"Entry time: {pos.entry_time}, total volume: {pos.volume:.4f}, "
@@ -511,8 +514,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     from trading_kernel.engine.reentry_tracker import reentry_tracker
                     reentry_tracker.register_exit(code, price)
                 except Exception as e:
-                    import logging
-                    logging.getLogger("PaperExecutionAdapter").error(f"[Reentry] Error registering exit for {code}: {e}")
+                    logger.error(f"[Reentry] Error registering exit for {code}: {e}")
             else:
                 pos.volume -= sell_volume
                 pos.current_price = price

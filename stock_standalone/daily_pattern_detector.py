@@ -17,12 +17,12 @@ DailyPatternDetector - 日K线形态检测器
     events = detector.scan(df)
 """
 from __future__ import annotations
+from logger_utils import LoggerFactory
 import pandas as pd
 from typing import List, Optional, Any, Callable
 from dataclasses import dataclass
-import logging
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 
 import pandas as pd

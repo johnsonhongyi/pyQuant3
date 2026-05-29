@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 import sys
 import os
 import time
@@ -31,7 +32,7 @@ import logging
 import collections
 import time
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 class IPCSocketClient:
     """

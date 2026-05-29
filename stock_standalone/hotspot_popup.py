@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from logger_utils import LoggerFactory
 """
 HotSpotPopup - 热点详情弹窗
 双击热点列表时显示详细信息和快速操作
@@ -30,7 +31,7 @@ import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 DB_FILE = "signal_strategy.db"
 

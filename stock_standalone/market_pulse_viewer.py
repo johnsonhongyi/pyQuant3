@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+from logger_utils import LoggerFactory
 """
 Market Pulse Viewer (UI)
 The "Battle Dashboard" for T+1 Strategy execution.
@@ -114,7 +115,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         if getattr(monitor_app, 'selector', None) is None:
             self.monitor_app.open_stock_selection_window()
         self.engine = DailyPulseEngine(getattr(monitor_app, 'selector', None))
-        self.logger = logging.getLogger("MarketPulseViewer")
+        self.logger = LoggerFactory.getLogger("MarketPulseViewer")
         
         # Data
         # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日

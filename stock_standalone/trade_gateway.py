@@ -21,6 +21,7 @@ TradeGateway — 模拟交易网关 + 风控管理
 """
 
 from __future__ import annotations
+from logger_utils import LoggerFactory
 
 import logging
 import sqlite3
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 # DB 文件复用 hotlist_panel 中同一个库
 DB_FILE = "signal_strategy.db"
@@ -220,11 +221,17 @@ class RiskManager:
                 self._daily_realized_loss += loss_amount
                 loss_pct = self._daily_realized_loss / self.total_capital
                 if loss_pct >= self.MAX_DAILY_LOSS:
-                    self._locked = True
-                    logger.warning(
-                        f"⚠️ [RiskManager] 日亏损已达 {loss_pct*100:.2f}%，"
-                        f"触发全场锁仓（上限{self.MAX_DAILY_LOSS*100:.0f}%）"
-                    )
+                    if not self._locked:
+                        self._locked = True
+                        logger.warning(
+                            f"⚠️ [RiskManager] 日亏损已达 {loss_pct*100:.2f}%，"
+                            f"触发全场锁仓（上限{self.MAX_DAILY_LOSS*100:.0f}%）"
+                        )
+                    else:
+                        logger.debug(
+                            f"[RiskManager] 日亏损已达 {loss_pct*100:.2f}%，"
+                            f"已处于锁仓状态"
+                        )
 
     def reset_day(self):
         """每日开盘前重置"""
@@ -312,6 +319,14 @@ class MockTradeGateway:
         Returns:
             (success, message)
         """
+        # 加上交易时间校验：触发实际成交价格需要使用09:25以后数据真实成交价格
+        from JohnsonUtil import commonTips as cct
+        now_t = cct.get_now_time_int()
+        if 915 <= now_t < 925:
+            msg = "集合竞价时段（09:25前）禁止买入交易，需使用09:25以后真实成交价格"
+            logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+            return False, msg
+
         # 风控检查
         with self._lock:
             pos_count_in_sector = sum(
@@ -376,6 +391,14 @@ class MockTradeGateway:
         reason: str = "",
     ) -> tuple[bool, str]:
         """提交模拟卖出委托"""
+        # 加上交易时间校验：触发实际成交价格需要使用09:25以后数据真实成交价格
+        from JohnsonUtil import commonTips as cct
+        now_t = cct.get_now_time_int()
+        if 915 <= now_t < 925:
+            msg = "集合竞价时段（09:25前）禁止卖出交易，需使用09:25以后真实成交价格"
+            logger.warning(f"[TradeGateway] 卖出拒绝 {code}: {msg}")
+            return False, msg
+
         with self._lock:
             pos = self._positions.get(code)
             if pos is None:

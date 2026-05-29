@@ -1,13 +1,8 @@
 import os
 import sys
 import json
-import logging
 import pandas as pd
 from datetime import datetime
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("PremarketAnalyzer")
 
 # Add base path to import project modules
 try:
@@ -23,6 +18,9 @@ except Exception:
     base_dir = os.path.dirname(os.path.abspath(__file__))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
+
+from logger_utils import LoggerFactory
+logger = LoggerFactory.getLogger("PremarketAnalyzer")
 
 from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
 from trading_kernel.engine.decision_engine import decide
@@ -114,7 +112,7 @@ def run_premarket_diagnose() -> list:
         if not name or str(name).startswith("个股_"):
             name = name_map.get(code_clean, name or f"个股_{code_clean}")
 
-        logger.info(f"Analyzing {name} ({code_clean})...")
+        logger.debug(f"Analyzing {name} ({code_clean})...")
         
         df = get_tdx_Exp_day_to_df(code_clean)
         if df is None or df.empty:

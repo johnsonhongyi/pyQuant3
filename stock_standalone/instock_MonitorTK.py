@@ -8809,14 +8809,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._backtest_dialog.deiconify()
                 self._backtest_dialog.lift()
                 self._backtest_dialog.focus_force()
+                self._backtest_dialog.update_idletasks()
+                
+                # 双重保险延时焦点钉死，对抗 Windows 平台下主窗口后台回调抢焦
                 if hasattr(self._backtest_dialog, 'text_area'):
                     self._backtest_dialog.text_area.focus_set()
+                    self._backtest_dialog.after(100, lambda: [
+                        self._backtest_dialog.lift() if self._backtest_dialog.winfo_exists() else None,
+                        self._backtest_dialog.focus_force() if self._backtest_dialog.winfo_exists() else None,
+                        self._backtest_dialog.text_area.focus_set() if (self._backtest_dialog.winfo_exists() and hasattr(self._backtest_dialog, 'text_area')) else None
+                    ])
             else:
                 self._backtest_dialog = BacktestReportDialog(self, code, name, report)
+                self._backtest_dialog.update_idletasks()
                 self._backtest_dialog.lift()
                 self._backtest_dialog.focus_force()
+                
+                # 初始化双重保险对焦
                 if hasattr(self._backtest_dialog, 'text_area'):
                     self._backtest_dialog.text_area.focus_set()
+                    self._backtest_dialog.after(100, lambda: [
+                        self._backtest_dialog.lift() if self._backtest_dialog.winfo_exists() else None,
+                        self._backtest_dialog.focus_force() if self._backtest_dialog.winfo_exists() else None,
+                        self._backtest_dialog.text_area.focus_set() if (self._backtest_dialog.winfo_exists() and hasattr(self._backtest_dialog, 'text_area')) else None
+                    ])
         except Exception as e:
             logger.error(f"Error showing backtest report window: {e}")
 

@@ -6,7 +6,6 @@ T+1 (T+0 滚动) 交易策略计算引擎
 
 import pandas as pd
 from datetime import datetime
-import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 from enum import Enum
 
@@ -233,9 +232,6 @@ class T1StrategyEngine:
         return 'HOLD', "", 0.0
 
 if __name__ == '__main__':
-    # 配置基础日志以查看打印
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
     print("--- 测试 T1StrategyEngine ---")
     engine = T1StrategyEngine()
     test_code = '000001' #平安银行

@@ -1,3 +1,4 @@
+from logger_utils import LoggerFactory
 import pandas as pd
 import numpy as np
 import logging
@@ -12,7 +13,7 @@ from multi_period_manager import multi_period_mgr
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("BacktestMiner")
+logger = LoggerFactory.getLogger("BacktestMiner")
 
 def load_h5_data(file_path):
     """
