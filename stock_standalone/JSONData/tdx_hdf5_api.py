@@ -18,11 +18,11 @@ import random
 import numpy as np
 import subprocess
 log = LoggerFactory.log
-# # [FIX] 完美跟随全局配置的 loglevel，忽略低于设定级别的警告输出
-config_level_name = str(getattr(cct, 'loglevel', 'INFO')).upper()
-config_level_num = getattr(LoggerFactory, config_level_name, LoggerFactory.INFO)
-if log.level != config_level_num:
-    log.setLevel(config_level_num)
+# # [FIX] Follow the global logger configuration without overriding it
+# config_level_name = str(getattr(cct, 'loglevel', 'INFO')).upper()
+# config_level_num = getattr(LoggerFactory, config_level_name, LoggerFactory.INFO)
+# if log.level != config_level_num:
+#     log.setLevel(config_level_num)
 
 import gc
 global RAMDISK_KEY, INIT_LOG_Error, Debug_is_not_find
