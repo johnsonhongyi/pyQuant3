@@ -53,7 +53,8 @@ class ReentryTracker:
         # 定位持久化路径
         if state_file is None:
             # 仿照 stock_standalone 的通用配置路径
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from sys_utils import get_app_root
+            base_dir = get_app_root()
             self.state_file = os.path.join(base_dir, "logs", "reentry_states.json")
         else:
             self.state_file = state_file

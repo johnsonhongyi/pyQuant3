@@ -2102,8 +2102,11 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 return
                 
             # 确保 logs 目录存在
-            os.makedirs("logs", exist_ok=True)
-            with open("logs/hud_column_widths.json", "w", encoding="utf-8") as f:
+            from sys_utils import get_app_root
+            log_dir = os.path.join(get_app_root(), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            widths_file = os.path.join(log_dir, "hud_column_widths.json")
+            with open(widths_file, "w", encoding="utf-8") as f:
                 json.dump({"widths": widths}, f, indent=4)
             logger.debug(f"💾 [HUD Column Persistence] Saved column widths: {widths}")
         except Exception as e:
@@ -2113,14 +2116,15 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         """从物理持久化文件中自动加载并还原表格列宽，支持新旧版本长度自愈兼容与超紧凑保护"""
         self._loading_widths = True  # ⭐ [SILENT-LOCK] 开启加载静默锁，阻断反向触发 resized 的自动存盘覆盖！
         
-        # 🚀 [Tactical Layout] 预设超紧凑、无滚动条的黄金比例默认与上限边界
+        # 🚀 [Tactical Layout] 预设超紧凑、无滚动条 of 黄金比例默认与上限边界
         default_compact = [86, 53, 64, 60, 46, 57]
         max_bounds = [90, 60, 70, 70, 60, 65]
         
         try:
             import json
             import os
-            path = "logs/hud_column_widths.json"
+            from sys_utils import get_app_root
+            path = os.path.join(get_app_root(), "logs", "hud_column_widths.json")
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)

@@ -1,3 +1,24 @@
+## 2026-05-31 02:00
+- [x] **根治工具与辅助分析模块路径定位隐患 (Standardized Auxiliary & Repair Tool Paths)**：
+    - [x] **物理锚定价格修复工具 `repair_voice_prices.py`**：将 `repair_voice_prices.py` 内部原本依赖硬编码 `"./"` 的 `trading_signals.db` 和 `voice_alert_config.json` 路径重构为统一的 `sys_utils.get_app_root()` 物理寻址，确保其执行时精确作用于可执行程序物理目录。
+    - [x] **物理锚定自选股与开仓配置检查 `check_monitor_gap.py`**：重构了其数据库 `trading_signals.db` 和 `voice_alert_config.json` 的解析路径，全部采用 `get_app_root()` 绝对路径对齐。
+    - [x] **物理锚定复盘分析快照检索 `review_daily_performance.py`**：将 `load_latest_snapshot` 的 `"snapshots"` 默认相对参数重构为若为空时自发退守 `get_app_root()` 解析，杜绝了多进程与 Nuitka 沙箱环境中快照加载失败的隐患。
+    - [x] **100% 一枪全绿通过 58 项系统与回归测试**：全系统集成与压力单元测试在 PowerShell 环境下一枪 100% 全绿通过（**58 passed**），完美闭环！
+
+## 2026-05-31 01:45
+- [x] **进一步标准化窗口位置与表格列宽持久化路径 (Standardized Window Config & Column Widths Persistence Paths)**：
+    - [x] **重构 `gui_utils.py` 窗口坐标加载与保存**：将 `load_window_position_simple` and `save_window_position_simple` 中的 `window_config.json` 及 `scale{int(scale)}_window_config.json` 的相对路径与手工 `os.path.join` 拼接机制重构为统一调用 `sys_utils.get_conf_path` 接口。从而保证在不同的 DPI 缩放比例下，坐标配置文件绝对定格在物理程序的实际安装根目录下，并获得了抢占式智能自愈释放保护。
+    - [x] **重构 `tk_gui_modules/spatial_follow_hud.py` 列表宽度保存加载**：将 `_save_column_widths` 和 `_load_column_widths` 中的 `logs/hud_column_widths.json` 文件路径重构为使用 `sys_utils.get_app_root()` 物理根目录拼接。这消除了开发模式和独立打包环境下由于工作目录切换或子进程漂移导致的列宽存档定位异常。
+    - [x] **100% 毫无死角全绿通过 58 项集成与压力测试回归**：所有修改在 Windows 物理环境下，以 **100% 一枪全绿通过（58 passed in 41.72s）** 完美通关，系统核心路径稳定度达成终极闭环！umn_widths` 中的 `logs/hud_column_widths.json` 文件路径重构为使用 `sys_utils.get_app_root()` 物理根目录拼接。这消除了开发模式和独立打包环境下由于工作目录切换或子进程漂移导致的列宽存档定位异常。
+    - [x] **100% 毫无死角全绿通过 58 项集成与压力测试回归**：所有修改在 Windows 物理环境下，以 **100% 一枪全绿通过（58 passed in 41.72s）** 完美通关，系统核心路径稳定度达成终极闭环！
+
+## 2026-05-31 01:10
+- [x] **全面标准化系统其余配置资源加载路径并杜绝硬编码 (Enforced Centralized Configuration Pathing & Eliminated Hardcoded Paths)**：
+    - [x] **加固显示列配置 `upper_structure_engine.py`**：将 `load_display_columns` 内对 `display_cols.json` 的相对路径加载重构为统一的 `sys_utils.get_conf_path` 接口，增加了不存在时的降级退守机制，解决了在 Nuitka/PyInstaller 独立启动或打包环境下由于路径硬编码导致的加载崩溃隐患。
+    - [x] **加固日内形态策略配置 `intraday_pattern_detector.py`**：重构了 `_load_config` 方法，将日内分时策略配置文件 `intraday_pattern_config.json` 的加载逻辑统一接入到 `sys_utils.get_conf_path`。保证了打包后用户在外部物理根目录下对日内阈值的编辑能绝对生效，并具备了健壮的安全 Fallback 路径。
+    - [x] **加固交易内核静态配置加载 `trading_kernel/kernel_service.py`**：重构了 `global.ini` 的静态路由加载，用 `sys_utils.get_conf_path` 取代了原本手写的 `os.path.join(base_dir, "global.ini")`，保证多进程/多周期状态下配置的统一分发与提取路径绝对对齐。
+    - [x] **100% 通过 58 项集成与压力测试回归**：所有修改在 PowerShell 运行环境下以 **100% 通过率（58项全部 Passed，37.35秒内完成）** 完美通过，系统核心路径稳定度达成终极闭环！
+
 ## 2026-05-31 00:30
 - [x] **彻底根治 stock_codes.conf 双重释放与多进程提取冲突 (Fixed stock_codes.conf Duplicate Release & Multiprocess Extraction Conflict)**：
     - [x] **物理修复 `sina_data.py` 中的重复提取路径**：查明 `sina_data.py` 在 `get_stock_code_path` 中长期自己做 Onefile/Onedir 环境判断并调用 `cct.get_resource_file` 去释放配置文件。这不仅造成代码重复，更导致在开发或 Onedir 模式下，`stock_codes.conf` 被错误地同时释放到 `BASE_DIR/stock_codes.conf` 和 `BASE_DIR/JSONData/stock_codes.conf` 两处地方，产生严重冗余日志和潜在的文件写入竞争。

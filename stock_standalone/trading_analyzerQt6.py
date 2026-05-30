@@ -1214,8 +1214,11 @@ class TradingGUI(QWidget, WindowMixin):
         """生成并显示文本分析报告"""
         from generate_analysis_report import generate_report
         generate_report()
+        from sys_utils import get_app_root
+        import os
+        report_file = os.path.join(get_app_root(), "analysis_report_output.txt")
         try:
-            with open("analysis_report_output.txt", "r", encoding="utf-8") as f:
+            with open(report_file, "r", encoding="utf-8") as f:
                 report_text = f.read()
             self.report_area.setPlainText(report_text)
             self.report_area.setVisible(True)

@@ -275,9 +275,11 @@ def load_window_position_simple(window_name: str, default_width: int, default_he
         scale = get_windows_dpi_scale_factor()
         
         base_dir = get_app_root()
-        config_file = os.path.join(base_dir, "window_config.json")
+        from sys_utils import get_conf_path
+        filename = "window_config.json"
         if scale > 1.5:
-            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
+            filename = f"scale{int(scale)}_window_config.json"
+        config_file = get_conf_path(filename, base_dir)
         
         if os.path.exists(config_file):
             if os.path.getsize(config_file) == 0:
@@ -311,9 +313,11 @@ def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str
         scale = get_windows_dpi_scale_factor()
 
         base_dir = get_app_root()
-        config_file = os.path.join(base_dir, "window_config.json")
+        from sys_utils import get_conf_path
+        filename = "window_config.json"
         if scale > 1.5:
-            config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
+            filename = f"scale{int(scale)}_window_config.json"
+        config_file = get_conf_path(filename, base_dir)
         
         win.update_idletasks()
         geom = win.geometry().split('+')
