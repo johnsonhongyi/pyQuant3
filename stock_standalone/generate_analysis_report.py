@@ -5,7 +5,11 @@ from datetime import datetime
 from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
 
-def generate_report(db_path="./trading_signals.db"):
+def generate_report(db_path=None):
+    from sys_utils import get_app_root
+    import os
+    if db_path is None:
+        db_path = os.path.join(get_app_root(), "trading_signals.db")
     logger = TradingLogger(db_path)
     analyzer = TradingAnalyzer(logger)
     
@@ -106,7 +110,8 @@ def generate_report(db_path="./trading_signals.db"):
     report_text = "\n".join(report)
     print(report_text)
     
-    with open("analysis_report_output.txt", "w", encoding="utf-8") as f:
+    report_file = os.path.join(get_app_root(), "analysis_report_output.txt")
+    with open(report_file, "w", encoding="utf-8") as f:
         f.write(report_text)
 
 if __name__ == "__main__":

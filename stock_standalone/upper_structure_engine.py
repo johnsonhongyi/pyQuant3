@@ -11,10 +11,14 @@ from tkinter import ttk
 import json
 import os
 def load_display_columns(cfg_path='display_cols.json', key='current'):
-    if not os.path.exists(cfg_path):
-        raise FileNotFoundError(f'display cols config not found: {cfg_path}')
+    from sys_utils import get_conf_path
+    actual_path = get_conf_path(cfg_path)
+    if not actual_path or not os.path.exists(actual_path):
+        actual_path = cfg_path
+        if not os.path.exists(actual_path):
+            raise FileNotFoundError(f'display cols config not found: {actual_path}')
 
-    with open(cfg_path, 'r', encoding='utf-8') as f:
+    with open(actual_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     cols = data.get(key, [])

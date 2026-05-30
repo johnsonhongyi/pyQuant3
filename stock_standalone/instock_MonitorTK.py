@@ -1479,9 +1479,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._bg_kernel_today_confirmed = set()
                 self._bg_kernel_today_ignored = set()
                 # 从历史日志中恢复跨会话去重标记
-                if os.path.exists("logs/trading_kernel_trace.jsonl"):
+                from sys_utils import get_app_root
+                trace_path = os.path.join(get_app_root(), "logs", "trading_kernel_trace.jsonl")
+                if os.path.exists(trace_path):
                     try:
-                        with open("logs/trading_kernel_trace.jsonl", "r", encoding="utf-8") as f:
+                        with open(trace_path, "r", encoding="utf-8") as f:
                             lines = f.readlines()[-2000:]
                             for line in lines:
                                 line = line.strip()

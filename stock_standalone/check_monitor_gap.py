@@ -2,13 +2,20 @@ import sqlite3
 import json
 import pandas as pd
 
+import os
+from sys_utils import get_app_root
+
+base_dir = get_app_root()
+db_path = os.path.join(base_dir, "trading_signals.db")
+config_path = os.path.join(base_dir, "voice_alert_config.json")
+
 # Load open trades from DB
-conn = sqlite3.connect("trading_signals.db")
+conn = sqlite3.connect(db_path)
 open_trades = pd.read_sql_query("SELECT code, name, buy_date FROM trade_records WHERE status='OPEN'", conn)
 conn.close()
 
 # Load monitored stocks from config
-with open("voice_alert_config.json", "r", encoding="utf-8") as f:
+with open(config_path, "r", encoding="utf-8") as f:
     monitored_stocks = json.load(f)
 
 monitored_codes = set(monitored_stocks.keys())

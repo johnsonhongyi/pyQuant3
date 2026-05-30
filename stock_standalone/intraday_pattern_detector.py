@@ -174,7 +174,8 @@ class IntradayPatternDetector:
 
     def _load_config(self) -> Dict[str, Any]:
         """从 JSON 文件加载策略阈值配置"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
+        from sys_utils import get_conf_path
+        config_path = get_conf_path("intraday_pattern_config.json") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "intraday_pattern_config.json")
         default_config = {
             "low_open_high_walk": {
                 "gain_threshold": 3.0,

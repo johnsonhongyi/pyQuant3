@@ -17,8 +17,11 @@ from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import commonTips as cct
 from trading_logger import TradingLogger
 
-def load_latest_snapshot(snapshot_dir: str = "snapshots"):
+def load_latest_snapshot(snapshot_dir: str = None):
     """加载最新的实时快照数据"""
+    from sys_utils import get_app_root
+    if snapshot_dir is None:
+        snapshot_dir = os.path.join(get_app_root(), "snapshots")
     files = glob.glob(os.path.join(snapshot_dir, "bidding_*.json.gz"))
     if not files:
         return {}

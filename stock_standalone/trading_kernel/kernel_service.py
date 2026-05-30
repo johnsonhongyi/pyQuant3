@@ -87,8 +87,9 @@ class TradingKernelService:
             import configparser
             import os
             base_dir = get_app_root()
-            ini_path = os.path.join(base_dir, "global.ini")
-            if os.path.exists(ini_path):
+            from sys_utils import get_conf_path
+            ini_path = get_conf_path("global.ini", base_dir=base_dir)
+            if ini_path and os.path.exists(ini_path):
                 config = configparser.ConfigParser()
                 config.read(ini_path, encoding="utf-8")
                 if "strategy_routing" in config.sections():

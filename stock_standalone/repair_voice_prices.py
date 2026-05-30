@@ -27,8 +27,10 @@ from trading_logger import TradingLogger
 logger = LoggerFactory.getLogger(name="repair_prices")
 
 def repair():
-    db_path = "./trading_signals.db"
-    config_file = "./voice_alert_config.json"
+    from sys_utils import get_app_root
+    base_dir = get_app_root()
+    db_path = os.path.join(base_dir, "trading_signals.db")
+    config_file = os.path.join(base_dir, "voice_alert_config.json")
     
     tl = TradingLogger(db_path)
     logger.info("Starting price repair process...")

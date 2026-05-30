@@ -25,6 +25,10 @@ class StateManager:
         self._throttle_interval = 0.05  # 50ms 节流读取，降低 I/O 开销
         
         # 跨进程物理共享状态与文件自愈锁
+        # from sys_utils import get_app_root
+        # temp_dir = os.path.join(get_app_root(), "logs")
+        # os.makedirs(temp_dir, exist_ok=True)
+        # 使用系统临时目录（Windows 下是 C:\Users\Username\AppData\Local\Temp）
         temp_dir = tempfile.gettempdir()
         self._filepath = os.path.join(temp_dir, "trading_kernel_shared_state.json")
         self._lockpath = os.path.join(temp_dir, "trading_kernel_shared_state.lock")
