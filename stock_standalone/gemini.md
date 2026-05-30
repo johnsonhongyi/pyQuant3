@@ -1,3 +1,8 @@
+## 2026-05-30 20:50
+- [x] **批处理脚本同步支持3种打包模式选择机制 (Implemented Synchronized 3-Option Build Selector for Nuitka batch scripts)**：
+    - [x] **统一扩展选择器为3个选项**：在 `nuitka_build_console.bat` 与 `nuitka_build_console_onlyClang.bat` 中，同步将选择器升级为 3 个选项：`[1] Standalone Folder`、`[2] Onefile with fixed Tempdir`（使用 `--onefile-tempdir-spec="{TEMP}\instock_Nuitka"` 选项）与 `[3] Standard Onefile`（仅使用 `--onefile`）。
+    - [x] **加固验证与条件分支逻辑**：将最后的验证环节从单一的 `if "%BUILD_MODE%"=="onefile"` 修正为 `if "%BUILD_MODE%"=="standalone"` 的对立逻辑判定。确保无论是模式 2（`onefile_spec`）还是模式 3（`onefile`）都能完美命中 Onefile 的存在性验证与报告输出，杜绝在不同模式下因为验证失败导致控制台报错的隐患。
+
 ## 2026-05-30 20:40
 - [x] **优化 Nuitka Onefile 打包临时解压路径机制 (Optimized Nuitka Onefile Unpack Path)**：
     - [x] **引入固定解压目录参数**：在 `nuitka_build_console_onlyClang.bat`、`nuitka_build_console.bat` 与 `nuitka_instockMonitor.bat` 的 Nuitka 编译参数中，针对 `--onefile` 打包模式引入了 `--onefile-tempdir-spec="{TEMP}\instock_Nuitka"` 选项。
