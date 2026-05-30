@@ -732,7 +732,7 @@ class GlobalConfig:
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
         self.loglevel = self.get_with_writeback("general", "loglevel", fallback='INFO', value_type="str")
-        self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='True', value_type="str")
+        self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='False', value_type="str")
         self.sina_dd_limit_day = self.get_with_writeback("general", "sina_dd_limit_day", fallback='0', value_type="str")
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback=10, value_type="int")
         self.limit_alert_monitor = self.get_with_writeback("general", "limit_alert_monitor", fallback=30, value_type="int")
@@ -8540,6 +8540,9 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
     log.debug("combine df :%0.2f" % (time.time() - times))
     if append:
         dif_co = list(set(maindf_co) - set(subdf_co))
+    # if maindf is not None and not maindf.empty:
+    #     if 'code' not in maindf.columns and maindf.index.name != 'code':
+    #         maindf = maindf.rename_axis('code')
     return maindf
 
 get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')

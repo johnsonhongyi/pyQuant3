@@ -156,12 +156,23 @@ def getBollFilter_vect(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl,
 
         # ===== 初始化 percdf =====
         if gv.getkey('percdf') is None:
-            percdf = cct.get_col_market_value_df(df, 'lasto', '6')
-            percdf = cct.combine_dataFrame(percdf, cct.get_col_market_value_df(df, 'lasth', '6'))
-            percdf = cct.combine_dataFrame(percdf, cct.get_col_market_value_df(df, 'lastl', '6'))
-            percdf = cct.combine_dataFrame(percdf, cct.get_col_market_value_df(df, 'lastp', '15'))
-            percdf = cct.combine_dataFrame(percdf, cct.get_col_market_value_df(df, 'ma5', '15'))
-            percdf = cct.combine_dataFrame(percdf, cct.get_col_market_value_df(df, 'ma20', '15'))
+            # 动态对齐 Legacy 的回溯天数计算逻辑，保证所有环境下数据 100% 同构一致
+            limit_days = getattr(cct, 'compute_lastdays', 9)
+            remainder = 15 % 10 if 15 <= limit_days else int(limit_days) % 10
+            p_days = 10 + remainder  # 例如：当 limit_days=6 ➔ 16d; 当 limit_days=9 ➔ 19d; 当 limit_days=120 ➔ 15d
+            
+            # 一次性提取所有符合规则且真实存在的列名，彻底避免 5 次大合并与正则扫描
+            cols_to_keep = []
+            for col in ['lasto', 'lasth', 'lastl']:
+                cols_to_keep.extend([f"{col}{i}d" for i in range(1, 7)])
+            for col in ['lastp', 'ma5', 'ma20']:
+                cols_to_keep.extend([f"{col}{i}d" for i in range(1, p_days + 1)])
+            
+            # 只保留 df 中实际存在的列进行单步切片
+            valid_cols = [c for c in cols_to_keep if c in df.columns]
+            percdf = df[valid_cols].copy()
+            if percdf.index.name != 'code':
+                percdf = percdf.rename_axis('code')
             percdf = percdf.reset_index().drop_duplicates('code').set_index('code')
             gv.setkey('percdf', percdf)
 
@@ -309,6 +320,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'lastp','15'))
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma5','15'))
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma20','15'))
+                if percdf.index.name != 'code':
+                    percdf = percdf.rename_axis('code')
                 percdf = percdf.reset_index().drop_duplicates('code').set_index('code')
                 cct.GlobalValues().setkey('percdf',percdf)
                 print("timecol:%s"%(round(time.time()-time_df,2)),end=' ')
