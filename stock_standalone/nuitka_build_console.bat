@@ -19,10 +19,14 @@ echo.
 :: =========================================
 :: STANDALONE OR ONEFILE SELECTOR
 :: =========================================
-set "BUILD_MODE=onefile"
+set "BUILD_MODE=onefile_spec"
 set "BUILD_MODE_ARG=%~1"
 
-if /I "%BUILD_MODE_ARG%"=="onefile" (
+if /I "%BUILD_MODE_ARG%"=="onefile_spec" (
+    set "BUILD_MODE=onefile_spec"
+    echo [INFO] Detected command-line argument: FORCE ONEFILE WITH SPEC BUILD.
+    echo.
+) else if /I "%BUILD_MODE_ARG%"=="onefile" (
     set "BUILD_MODE=onefile"
     echo [INFO] Detected command-line argument: FORCE ONEFILE BUILD.
     echo.
@@ -33,21 +37,27 @@ if /I "%BUILD_MODE_ARG%"=="onefile" (
 ) else (
     echo Choose Build Target:
     echo [1] Standalone Folder (highly recommended for debugging/development)
-    echo [2] Onefile Executable (Default, Single file distribution, packaging all assets)
+    echo [2] Onefile Executable with fixed Temp Dir (Default, Single file distribution, custom unpack path)
+    echo [3] Onefile Executable (Standard, Single file distribution, standard unpack path)
     echo.
     
-    choice /C 12 /T 5 /D 2 /M "Enter your choice (auto-select [2] in 5 seconds): "
-    if errorlevel 2 (
+    choice /C 123 /T 5 /D 2 /M "Enter your choice (auto-select [2] in 5 seconds): "
+    if errorlevel 3 (
         set "BUILD_MODE=onefile"
+    ) else if errorlevel 2 (
+        set "BUILD_MODE=onefile_spec"
     ) else (
         set "BUILD_MODE=standalone"
     )
     echo.
 )
 
-if "%BUILD_MODE%"=="onefile" (
-    echo [MODE] Building ONEFILE executable...
+if "%BUILD_MODE%"=="onefile_spec" (
+    echo [MODE] Building ONEFILE executable with fixed unpack tempdir...
     set "NUITKA_MODE_OPT=--onefile --onefile-tempdir-spec="{TEMP}\instock_Nuitka""
+) else if "%BUILD_MODE%"=="onefile" (
+    echo [MODE] Building ONEFILE executable...
+    set "NUITKA_MODE_OPT=--onefile"
 ) else (
     echo [MODE] Building STANDALONE folder...
     set "NUITKA_MODE_OPT=--standalone"
@@ -289,21 +299,21 @@ echo.
 !CMD!
 
 :: ===== Verification =====
-if "%BUILD_MODE%"=="onefile" (
-    if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
-        echo.
-        echo [SUCCESS] Onefile compilation completed successfully!
-        echo [SUCCESS] Output executable: %OUTPUT_DIR%\%OUTPUT_NAME%
-    ) else (
-        echo [ERROR] Onefile compilation failed. Please check the error logs.
-    )
-) else (
+if "%BUILD_MODE%"=="standalone" (
     if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\%OUTPUT_NAME%" (
         echo.
         echo [SUCCESS] Standalone compilation completed successfully!
         echo [SUCCESS] Output directory: %OUTPUT_DIR%\instock_MonitorTK.dist
     ) else (
         echo [ERROR] Standalone compilation failed. Please check the error logs.
+    )
+) else (
+    if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
+        echo.
+        echo [SUCCESS] Onefile compilation completed successfully!
+        echo [SUCCESS] Output executable: %OUTPUT_DIR%\%OUTPUT_NAME%
+    ) else (
+        echo [ERROR] Onefile compilation failed. Please check the error logs.
     )
 )
 
