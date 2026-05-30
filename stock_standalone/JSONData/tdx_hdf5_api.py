@@ -29,6 +29,14 @@ global RAMDISK_KEY, INIT_LOG_Error, Debug_is_not_find
 RAMDISK_KEY = 0
 INIT_LOG_Error = 0
 Debug_is_not_find = 0
+_LAST_TEMP_CLEANUP_TIME = 0.0
+
+# ⚡ 模块首次加载时一次性检测并解析转换 cleanRAMdiskTemp 开关（后续 SafeHDFStore 实例化直接复用）
+_cfg_flag = cct.cleanRAMdiskTemp
+if isinstance(_cfg_flag, str):
+    _CLEAN_RAMDISK_TEMP = _cfg_flag.strip().lower() in ("1", "true", "yes", "on")
+else:
+    _CLEAN_RAMDISK_TEMP = bool(_cfg_flag)
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
 import tables
@@ -324,8 +332,13 @@ class SafeHDFStore(pd.HDFStore):
         self.log = log
         self.basedir = BaseDir
         # 启动即清理（一次即可）
-        if cct.cleanRAMdiskTemp:
-            cleanup_temp_dir(self.basedir)
+        # ⚡ 伴随 HDF 访问的定期清理机制（复用预先转换好的 _CLEAN_RAMDISK_TEMP，并带 300 秒冷却防抖）
+        if _CLEAN_RAMDISK_TEMP:
+            global _LAST_TEMP_CLEANUP_TIME
+            _now = time.time()
+            if _now - _LAST_TEMP_CLEANUP_TIME > 300:
+                cleanup_temp_dir(self.basedir)
+                _LAST_TEMP_CLEANUP_TIME = _now
 
         self.log.debug(f'{self.fname_o.lower()} {self.basedir.lower()}')
         self.start_time = time.time()

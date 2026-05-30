@@ -732,7 +732,7 @@ class GlobalConfig:
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
         self.loglevel = self.get_with_writeback("general", "loglevel", fallback='INFO', value_type="str")
-        self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='False', value_type="str")
+        self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback=False, value_type="bool")
         self.sina_dd_limit_day = self.get_with_writeback("general", "sina_dd_limit_day", fallback='0', value_type="str")
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback=10, value_type="int")
         self.limit_alert_monitor = self.get_with_writeback("general", "limit_alert_monitor", fallback=30, value_type="int")
@@ -1038,7 +1038,7 @@ risk_duration_threshold: int = CFG.risk_duration_threshold
 code_startswith: str = CFG.code_startswith
 winlimit: int = CFG.winlimit
 loglevel: str = CFG.loglevel
-cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
+cleanRAMdiskTemp: bool = CFG.cleanRAMdiskTemp
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
 limit_alert_monitor: int = CFG.limit_alert_monitor
 loop_counter_limit: int = CFG.loop_counter_limit
