@@ -1,3 +1,8 @@
+## 2026-05-30 20:40
+- [x] **优化 Nuitka Onefile 打包临时解压路径机制 (Optimized Nuitka Onefile Unpack Path)**：
+    - [x] **引入固定解压目录参数**：在 `nuitka_build_console_onlyClang.bat`、`nuitka_build_console.bat` 与 `nuitka_instockMonitor.bat` 的 Nuitka 编译参数中，针对 `--onefile` 打包模式引入了 `--onefile-tempdir-spec="{TEMP}\instock_Nuitka"` 选项。
+    - [x] **解决随机临时文件夹残留与路径漂移问题**：该参数让生成的单文件可执行程序在运行启动时，固定解压到系统临时目录的统一路径 `%TEMP%\instock_Nuitka`。这有效避免了 Nuitka 默认因随机解压生成形如 `onefile_{PID}_{TIME}` 的垃圾文件夹导致的系统临时目录臃肿，并增强了程序对于解压路径下依赖资产的相对定位稳定性。
+
 ## 2026-05-30 20:20
 - [x] **实现 HDF5 读写 RAMDISK 临时目录 300 秒防抖冷却定期清理机制与配置解析一次性加载极致优化 (Implemented Throttled 300s Cooldown Cleanup & Module-Load Config Parsing)**：
     - [x] **查明实盘后台高频垃圾文件堆积机制**：在程序运行期间，后台常驻服务与多进程任务会高频不断地在 RAMDISK (G:\) 下自动创建缓存 `Temp` 文件。如果仅在启动时清理一次，这些零碎的缓存垃圾会在几小时内堆满 RAMDISK 物理内存空间，因此必须在 HDFStore 读写中进行伴随式持续清理。

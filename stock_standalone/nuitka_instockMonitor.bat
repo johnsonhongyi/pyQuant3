@@ -112,7 +112,7 @@ rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone --onefile "%MAIN_SCRIPT%" ^
 rem --plugin-enable=upx ^
 rem --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^   
 
-set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
+set CMD="%PYTHON_EXEC%" -m nuitka --onefile --onefile-tempdir-spec="{TEMP}\instock_Nuitka" "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --enable-plugin=tk-inter ^
