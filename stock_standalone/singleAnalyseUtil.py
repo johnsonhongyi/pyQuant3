@@ -88,7 +88,9 @@ def _write_to_csv(df, filename, indexCode='code'):
     #     sys.setdefaultencoding( "gbk" )
     df = df.drop_duplicates(indexCode)
     df = df.set_index(indexCode)
-    df.to_csv(CURRENTDAY + '-' + filename + '.csv',
+    from sys_utils import get_app_root
+    output_path = os.path.join(get_app_root(), CURRENTDAY + '-' + filename + '.csv')
+    df.to_csv(output_path,
               encoding='gbk', index=False)  # 选择保存
     print("write csv")
 

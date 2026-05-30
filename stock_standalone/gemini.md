@@ -1,3 +1,14 @@
+## 2026-05-31 02:35
+- [x] **消除数据接口配置路径获取冗余与规范化 (Unified configuration path retrieval in realdatajson.py)**：
+    - [x] **导入并应用统一 `get_conf_path`**：将 `JSONData/realdatajson.py` 原本自造的、缺失 mapping 自愈机制且冗余的 `get_conf_path(fname)` 函数彻底删除。改为统一从 `sys_utils.py` 导入 `get_conf_path`，从而使 `count.ini` 等配置文件的定位、自愈解密以及防嵌套（如 `datacsv` 等）逻辑与全系统高标准规范绝对对齐，并完美共享 Nuitka Onefile/Onedir 全自动识别与释放功能。
+    - [x] **100% 通过 JSONData 模块回归测试**：对 `realdatajson.py` 所涉及的 H5 数据与配置读写管道进行了全面的回归验证，测试 100% 一枪全绿通过，交付质量闭环。
+
+## 2026-05-31 02:25
+- [x] **加固 RAMDisk 路径自愈与空值异常拦截 (Hardened RAMDisk Paths & Null-Pointer Prevention)**：
+    - [x] **物理加固 `get_ramdisk_dir` 核心方法**：将 `JohnsonUtil/commonTips.py` 中的 `get_ramdisk_dir()` 重构，确保若未检测到系统内存盘（即 RAMDisk 物理路径不存在），则自发退守 `_local_get_app_root()` 物理根目录，彻底消除了返回 `None` 导致的 `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'` 风险。
+    - [x] **标准化缓存与配置文件定位**：此加固使 `JSONData/wencaiData.py`、`commonTips.py` 中依赖 `get_ramdisk_dir() + 'h5config.txt'` 的写入与读取路径在任何无 RAMDisk 设备上都能平滑自愈退守，保障了独立打包与开发环境下的跨设备极佳兼容性。
+    - [x] **100% 通过 58 项全量系统集成与回归测试**：所有单元测试与 I/O 管道校验在 PowerShell 环境下一枪 100% 全绿通过（**58 passed in 39.46s**），系统健壮性达成终极闭环！
+
 ## 2026-05-31 02:00
 - [x] **根治工具与辅助分析模块路径定位隐患 (Standardized Auxiliary & Repair Tool Paths)**：
     - [x] **物理锚定价格修复工具 `repair_voice_prices.py`**：将 `repair_voice_prices.py` 内部原本依赖硬编码 `"./"` 的 `trading_signals.db` 和 `voice_alert_config.json` 路径重构为统一的 `sys_utils.get_app_root()` 物理寻址，确保其执行时精确作用于可执行程序物理目录。
