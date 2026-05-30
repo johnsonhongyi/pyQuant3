@@ -2389,8 +2389,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     data = []
                     try:
                         try:
-                            from sys_utils import get_base_path
-                            base_dir = get_base_path()
+                            base_dir = get_app_root()
                         except Exception:
                             base_dir = os.path.dirname(os.path.abspath(__file__))
                         diagnose_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
@@ -4242,12 +4241,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     return
                 import os
                 import json
-                try:
-                    from sys_utils import get_base_path
-                    base_dir = get_base_path()
-                except Exception:
-                    base_dir = os.path.abspath(".")
-                filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+                filepath = os.path.join(get_app_root(), "logs", "premarket_diagnose.json")
                 if not os.path.exists(filepath):
                     return
                 try:

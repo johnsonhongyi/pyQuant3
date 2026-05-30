@@ -1,8 +1,8 @@
 import os
 from typing import Optional
-from sys_utils import get_base_path, get_conf_path
+from sys_utils import get_base_path, get_conf_path, get_app_root
 
-_base_dir: str = get_base_path()
+_base_dir: str = get_app_root()
 _datacsv_dir: str = os.path.join(_base_dir, "datacsv")
 
 # Ensure directories exist

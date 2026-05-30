@@ -6,6 +6,7 @@ from datetime import datetime
 # Import custom time filter
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from JohnsonUtil import commonTips as cct
+from sys_utils import get_app_root
 
 # Mapping of databases to tables and their respective time/date columns
 DB_CONFIGS = {
@@ -129,7 +130,7 @@ def clean_non_trading_days():
     
     total_deleted = 0
     for db_name, tables in DB_CONFIGS.items():
-        db_path = os.path.join(cct.get_base_path(), db_name)
+        db_path = os.path.join(get_app_root(), db_name)
         if not os.path.exists(db_path):
             print(f"Database {db_path} not found, skipping.")
             continue

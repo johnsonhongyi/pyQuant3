@@ -1001,7 +1001,7 @@ class SnapshotCalendarDialog(QDialog):
         
         self.selected_file = None
         # 统一路径获取方式
-        self.snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
+        self.snapshots_dir = os.path.join(cct.get_app_root(), "snapshots")
         
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
@@ -5188,7 +5188,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_history_track_clicked(self):
         """[NEW] 自动选择最近几日的快照进行强势股追踪分析"""
-        snapshots_dir = os.path.join(cct.get_base_path(), "snapshots")
+        snapshots_dir = os.path.join(cct.get_app_root(), "snapshots")
         if not os.path.exists(snapshots_dir):
             os.makedirs(snapshots_dir, exist_ok=True)
             

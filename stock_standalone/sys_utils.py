@@ -24,61 +24,105 @@ def assert_main_thread(tag=""):
 
 def get_app_root() -> str:
     """Nuitka / PyInstaller / dev 统一兼容的物理可执行程序所在绝对根目录 (直接返回 str 格式)"""
-    from pathlib import Path
+    # 优先从环境变量获取，确保子进程完美继承父进程定位的物理路径
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root and os.path.exists(env_root):
+        return env_root
+
     import sys
-    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
-    if getattr(sys, "frozen", False) or is_nuitka:
-        return str(Path(sys.executable).parent)
-    return str(Path(__file__).resolve().parent)
-
-def get_app_root_two() -> str:
-    """返回 EXE 或脚本所在目录（不依赖 CWD）"""
-    from pathlib import Path
-    import sys
-    import os
-
-    # Nuitka / PyInstaller 判断
-    is_frozen = getattr(sys, "frozen", False)
-    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
-
-    if is_frozen or is_nuitka:
-        # PyInstaller / Nuitka onefile
-        return str(Path(sys.executable).resolve().parent)
-
-    # dev 模式
-    return str(Path(__file__).resolve().parent)
-
-def get_base_path():
-    """获取程序基准路径，支持脚本和打包模式 (Nuitka/PyInstaller)"""
-    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
     
-    # 🚀 Nuitka 专属定制局部修复：如果是由 Nuitka 打包编译，强行将 is_interpreter 设为 False，避免误入脚本模式
-    if "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-        is_interpreter = False
+    def _is_inside_temp_dir(path: str) -> bool:
+        if not path:
+            return False
+        # 统一规范化为小写和标准斜杠
+        path_norm = os.path.normpath(os.path.normcase(os.path.abspath(path)))
+        
+        # 1. 检查环境变量指向的所有可能临时目录，包含 realpath 解析以应对 C: 与 G: (RAMDISK) 映射
+        for env_name in ("NUITKA_ONEFILE_DIRECTORY", "TEMP", "TMP", "SystemRoot"):
+            env_val = os.environ.get(env_name)
+            if env_val:
+                try:
+                    env_norm = os.path.normpath(os.path.normcase(os.path.abspath(env_val)))
+                    if env_norm in path_norm:
+                        return True
+                except:
+                    pass
+                try:
+                    env_real = os.path.normpath(os.path.normcase(os.path.realpath(env_val)))
+                    if env_real in path_norm:
+                        return True
+                except:
+                    pass
+                    
+        # 2. 物理规则模糊判定 (instock_Nuitka, onefile_, _meipass, \temp\)
+        for pattern in ("instock_nuitka", "onefile_", "_meipass", "\\temp\\", "/temp/"):
+            if pattern in path_norm:
+                return True
+                
+        return False
+
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+    calculated_root = None
     
-    if is_interpreter and not getattr(sys, "frozen", False):
+    # 1. Nuitka Onefile 模式下，从 sys.argv[0] 获取真实物理 launcher 路径，排除解释器与临时目录
+    if is_nuitka:
+        if sys.argv and sys.argv[0]:
+            argv0_abspath = os.path.abspath(sys.argv[0])
+            if os.path.basename(argv0_abspath).lower() not in ('python.exe', 'pythonw.exe', 'python', 'pythonw'):
+                if not _is_inside_temp_dir(argv0_abspath):
+                    calculated_root = os.path.dirname(argv0_abspath)
+
+    # 2. PyInstaller 或 Nuitka Standalone 模式，使用 sys.executable 的父目录，排除临时目录
+    if not calculated_root:
+        if getattr(sys, "frozen", False) or is_nuitka:
+            exe_abspath = os.path.abspath(sys.executable)
+            if not _is_inside_temp_dir(exe_abspath):
+                calculated_root = os.path.dirname(exe_abspath)
+
+    # 3. 源码开发环境 fallback
+    if not calculated_root:
         try:
             path = os.path.dirname(os.path.abspath(__file__))
             if os.path.basename(path) == 'JohnsonUtil':
                 path = os.path.dirname(path)
-            return path
-        except NameError:
-            pass
-            
-    if sys.platform.startswith('win'):
-        try:
-            real_path = cct._get_win32_exe_path()
-            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
-                 return real_path
-            if not is_interpreter:
-                 return real_path
-        except:
-            pass 
+            # 如果 fallback 获取的 __file__ 路径依然被判定为临时目录，则绝不能采用它，改用 os.getcwd() 或 sys.path
+            if _is_inside_temp_dir(path):
+                # 尝试寻找非 temp_dir 的 sys.path 路径
+                for sp in sys.path:
+                    if sp and not _is_inside_temp_dir(sp):
+                        calculated_root = os.path.abspath(sp)
+                        break
+                if not calculated_root:
+                    calculated_root = os.getcwd()
+            else:
+                calculated_root = path
+        except Exception:
+            calculated_root = os.getcwd()
 
-    if getattr(sys, "frozen", False) or not is_interpreter:
-        return os.path.dirname(os.path.abspath(sys.executable))
+    # 物理锁定并写入环境变量，保障多进程完美一致
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    logger.warning(f"sys.executable={sys.executable}")
+    logger.warning(f"sys.argv[0]={sys.argv[0] if sys.argv else None}")
+    logger.warning(f"cwd={os.getcwd()}")
+    logger.warning(f"get_app_root={calculated_root}")
+    logger.warning(f"get_base_path={get_base_path()}")
+    return calculated_root
 
-    return os.path.dirname(os.path.abspath(sys.argv[0]))
+def get_app_root_two() -> str:
+    """返回 EXE 或脚本所在目录（不依赖 CWD）"""
+    return get_app_root()
+
+def get_base_path() -> str:
+    """获取包内静态只读资源解压目录 (PACKAGE_DIR)，用于读取内置资源。
+    In Onefile mode, it is the Nuitka/PyInstaller temp directory; in source/dev mode, it fallback to the app root directory.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+        return os.environ["NUITKA_ONEFILE_DIRECTORY"]
+    else:
+        return get_app_root()
+
     
 RESOURCE_MAP = {
     "MonitorTK.ico": {
@@ -150,7 +194,7 @@ RESOURCE_MAP = {
 def get_conf_path(fname, base_dir=None):
     """获取并验证配置文件路径，如果物理磁盘不存在，自动创建层级目录并从内置资源包中智能解压自愈"""
     if base_dir is None:
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         
     key = os.path.basename(fname)
     

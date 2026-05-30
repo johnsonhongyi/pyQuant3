@@ -28,6 +28,7 @@ import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import LoggerFactory
 # from JSONData.prettytable import *
 from JohnsonUtil import commonTips as cct
+from sys_utils import get_app_root
 # from JSONData import tdx_hdf5_api as h5a
 
 try:
@@ -320,7 +321,7 @@ def get_base_path():
     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
-BASE_DIR = get_base_path()
+BASE_DIR = get_app_root()
 
 # --------------------------------------
 # STOCK_CODE_PATH 专用逻辑

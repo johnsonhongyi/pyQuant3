@@ -13,6 +13,7 @@ from JohnsonUtil import LoggerFactory
 from stock_logic_utils import toast_message
 
 logger = LoggerFactory.getLogger("instock_TK.DecisionFlowPanel")
+from sys_utils import get_app_root
 
 class SortableTableWidgetItem(QtWidgets.QTableWidgetItem):
     def __init__(self, text: str, value: Any = None):
@@ -420,9 +421,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         
         # 🛡️ 强制在最早对齐并标准化为物理绝对路径，扼杀多进程/打包环境下的工作目录飘移硬伤
         import os
-        from sys_utils import get_base_path
         if not os.path.isabs(journal_path):
-            journal_path = os.path.join(get_base_path(), journal_path)
+            journal_path = os.path.join(get_app_root(), journal_path)
         self.journal_path = journal_path
         
         self._last_file_size = 0

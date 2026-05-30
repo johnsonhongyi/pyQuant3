@@ -311,6 +311,100 @@ def _get_win32_exe_path() -> str:
     return os.path.dirname(os.path.abspath(buffer.value))
 
 
+def _local_get_app_root() -> str:
+    # 优先从环境变量获取，确保子进程完美继承父进程定位的物理路径
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root and os.path.exists(env_root):
+        print(f"[DEBUG] _local_get_app_root: Found INSTOCK_APP_ROOT in env={env_root}")
+        return env_root
+
+    import sys
+    print(f"[DEBUG] _local_get_app_root: Start resolving. sys.executable={sys.executable}, argv[0]={sys.argv[0] if sys.argv else None}, cwd={os.getcwd()}")
+    
+    def _is_inside_temp_dir(path: str) -> bool:
+        if not path:
+            return False
+        # 统一规范化为小写 and 标准斜杠
+        path_norm = os.path.normpath(os.path.normcase(os.path.abspath(path)))
+        
+        # 1. 检查环境变量指向的所有可能临时目录，包含 realpath 解析以应对 C: 与 G: (RAMDISK) 映射
+        for env_name in ("NUITKA_ONEFILE_DIRECTORY", "TEMP", "TMP", "SystemRoot"):
+            env_val = os.environ.get(env_name)
+            if env_val:
+                try:
+                    env_norm = os.path.normpath(os.path.normcase(os.path.abspath(env_val)))
+                    if env_norm in path_norm:
+                        return True
+                except:
+                    pass
+                try:
+                    env_real = os.path.normpath(os.path.normcase(os.path.realpath(env_val)))
+                    if env_real in path_norm:
+                        return True
+                except:
+                    pass
+                    
+        # 2. 物理规则模糊判定 (instock_Nuitka, onefile_, _meipass, \temp\)
+        for pattern in ("instock_nuitka", "onefile_", "_meipass", "\\temp\\", "/temp/"):
+            if pattern in path_norm:
+                return True
+                
+        return False
+
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+    calculated_root = None
+    
+    # 1. Nuitka Onefile 模式下，从 sys.argv[0] 获取真实物理 launcher 路径，排除解释器与临时目录
+    if is_nuitka:
+        if sys.argv and sys.argv[0]:
+            argv0_abspath = os.path.abspath(sys.argv[0])
+            print(f"[DEBUG] _local_get_app_root: Nuitka active. argv[0] abspath={argv0_abspath}")
+            if os.path.basename(argv0_abspath).lower() not in ('python.exe', 'pythonw.exe', 'python', 'pythonw'):
+                if not _is_inside_temp_dir(argv0_abspath):
+                    calculated_root = os.path.dirname(argv0_abspath)
+                    print(f"[DEBUG] _local_get_app_root: Resolved via Nuitka argv[0]={calculated_root}")
+
+    # 2. PyInstaller 或 Nuitka Standalone 模式，使用 sys.executable 的父目录，排除临时目录
+    if not calculated_root:
+        if getattr(sys, "frozen", False) or is_nuitka:
+            exe_abspath = os.path.abspath(sys.executable)
+            print(f"[DEBUG] _local_get_app_root: Frozen or Nuitka. exe abspath={exe_abspath}")
+            if not _is_inside_temp_dir(exe_abspath):
+                calculated_root = os.path.dirname(exe_abspath)
+                print(f"[DEBUG] _local_get_app_root: Resolved via exe_abspath={calculated_root}")
+
+    # 3. 源码开发环境 fallback (在 commonTips.py 中，__file__ 是 JohnsonUtil/commonTips.py，所以需要往上退一级)
+    if not calculated_root:
+        try:
+            path = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(path) == 'JohnsonUtil':
+                path = os.path.dirname(path)
+            print(f"[DEBUG] _local_get_app_root: Fallback to __file__={path}")
+            # 如果 fallback 获取的 __file__ 路径依然被判定为临时目录，则绝不能采用它，改用 os.getcwd() 或 sys.path
+            if _is_inside_temp_dir(path):
+                print(f"[DEBUG] _local_get_app_root: __file__ is inside temp dir!")
+                # 尝试寻找非 temp_dir 的 sys.path 路径
+                for sp in sys.path:
+                    if sp and not _is_inside_temp_dir(sp):
+                        calculated_root = os.path.abspath(sp)
+                        print(f"[DEBUG] _local_get_app_root: Resolved via sys.path={calculated_root}")
+                        break
+                if not calculated_root:
+                    calculated_root = os.getcwd()
+                    print(f"[DEBUG] _local_get_app_root: Resolved via os.getcwd()={calculated_root}")
+            else:
+                calculated_root = path
+                print(f"[DEBUG] _local_get_app_root: Resolved via __file__={calculated_root}")
+        except Exception as e:
+            calculated_root = os.getcwd()
+            print(f"[DEBUG] _local_get_app_root: Error in fallback, using os.getcwd()={calculated_root}. Error: {e}")
+
+    # 物理锁定并写入环境变量，保障多进程完美一致
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    print(f"[DEBUG] _local_get_app_root: Final locked root={calculated_root}")
+    return calculated_root
+
+
 def get_base_path() -> str:
     """
     获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
@@ -369,6 +463,11 @@ def get_base_path() -> str:
     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
+
+def get_app_root() -> str:
+    """获取物理可执行程序/脚本所在的绝对根目录 (APP_DATA_DIR)"""
+    return _local_get_app_root()
+
 # def get_base_path_simple() -> str:
 #     """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本 (简化版)"""
 #     if getattr(sys, "frozen", False):
@@ -407,160 +506,6 @@ def timed_block(name=None, warn_ms=500, log_level=LoggerFactory.INFO,logger=log)
         return wrapper
     return decorator
 
-#使用方式:
-# @timed_block("fetch_and_process", warn_ms=1000)
-# def fetch_and_process(...):
-
-#mode 2 统一是否 py and nui
-# ----------------------------
-# 基础路径获取
-# ----------------------------
-# def get_base_path():
-#     """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本"""
-#     if getattr(sys, "frozen", False):
-#         return os.path.dirname(sys.executable)
-#     else:
-#         return os.path.dirname(os.path.abspath(__file__))
-
-
-# # ----------------------------
-# # 全局资源释放函数
-# # ----------------------------
-# def release_resource(rel_path, out_dir=None):
-#     """
-#     将内置资源释放到运行目录指定文件夹
-#     rel_path: 内置资源相对路径（如 'JohnsonUtil/global.ini'）
-#     out_dir: 释放目标目录，默认 EXE 所在目录
-#     """
-#     if out_dir is None:
-#         out_dir = get_base_path()
-
-#     target_path = os.path.join(out_dir, os.path.basename(rel_path))
-
-#     # 文件已存在直接返回
-#     if os.path.exists(target_path):
-#         return target_path
-
-#     # 获取源文件路径
-#     if getattr(sys, "frozen", False):
-#         src_base = getattr(sys, "_MEIPASS", None)
-#         if src_base:
-#             src_path = os.path.join(src_base, rel_path)
-#         else:
-#             src_path = os.path.join(out_dir, rel_path)
-#     else:
-#         src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
-
-#     if not os.path.exists(src_path):
-#         log.error(f"资源缺失: {src_path}")
-#         return None
-
-#     try:
-#         shutil.copy(src_path, target_path)
-#         log.info(f"资源释放成功: {target_path}")
-#         return target_path
-#     except Exception as e:
-#         log.exception(f"资源释放失败: {e}")
-#         return None
-
-
-# # ----------------------------
-# # 统一配置资源管理
-# # ----------------------------
-# RESOURCE_REGISTRY = {
-#     # '资源名': '相对路径'
-#     'global_ini': 'JohnsonUtil/global.ini',
-#     'stock_codes': 'JohnsonUtil/JSONData/stock_codes.conf',
-#     'count_ini': 'JohnsonUtil/JSONData/count.ini',
-#     'wencai_excel': 'JohnsonUtil/wencai/同花顺板块行业.xlsx',
-#     # 可继续添加新资源
-# }
-
-# def get_resource(name):
-#     """
-#     获取资源文件路径，自动释放到运行目录
-#     """
-#     rel_path = RESOURCE_REGISTRY.get(name)
-#     if not rel_path:
-#         log.error(f"资源未注册: {name}")
-#         return None
-#     return release_resource(rel_path)
-# global_ini_path = get_resource('global_ini')
-# stock_codes_path = get_resource('stock_codes')
-# wencai_path = get_resource('wencai_excel')
-
-
-#mode 1 no test py and nui
-# def get_resource_file(rel_path, out_name=None, base_dir=None):
-#     """
-#     从内置资源释放文件到 EXE 同目录或 base_dir
-
-#     rel_path:   内置资源相对路径
-#     out_name:   释放目标文件名
-#     base_dir:   释放目录，默认 EXE 所在目录
-#     """
-#     if base_dir is None:
-#         base_dir = get_base_path()
-
-#     if out_name is None:
-#         out_name = os.path.basename(rel_path)
-
-#     target_path = os.path.join(base_dir, out_name)
-
-#     # 文件已存在
-#     if os.path.exists(target_path):
-#         return target_path
-
-#     # 确定源文件路径
-#     if getattr(sys, "frozen", False):
-#         # PyInstaller MEIPASS
-#         src = getattr(sys, "_MEIPASS", None)
-#         if src:
-#             src = os.path.join(src, rel_path)
-#         else:
-#             # Nuitka: 直接从相对目录获取
-#             src = os.path.join(base_dir, rel_path)
-#     else:
-#         # 普通脚本
-#         src = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
-
-#     if not os.path.exists(src):
-#         log.error(f"内置资源缺失: {src}")
-#         return None
-
-#     try:
-#         shutil.copy(src, target_path)
-#         log.info(f"释放资源: {target_path}")
-#         return target_path
-#     except Exception as e:
-#         log.exception(f"释放资源失败: {e}")
-#         return None
-
-
-# def get_conf_path(fname, rel_path=None, base_dir=None):
-#     """
-#     获取配置文件路径，优先使用运行目录已有文件，否则释放内置资源
-#     """
-#     if base_dir is None:
-#         base_dir = get_base_path()
-
-#     target_path = os.path.join(base_dir, fname)
-
-#     if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
-#         log.info(f"使用本地配置: {target_path}")
-#         return target_path
-
-#     if rel_path is None:
-#         rel_path = os.path.join("JohnsonUtil", fname)
-
-#     cfg_file = get_resource_file(rel_path=rel_path, out_name=fname, base_dir=base_dir)
-
-#     if cfg_file and os.path.exists(cfg_file) and os.path.getsize(cfg_file) > 0:
-#         log.info(f"使用内置释放配置: {cfg_file}")
-#         return cfg_file
-
-#     log.error(f"获取配置文件失败: {fname}")
-#     return None
 
 def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: Optional[str] = None, spec: Any = None) -> Optional[str]:
     """
@@ -571,7 +516,7 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
     """
 
     if BASE_DIR is None:
-        BASE_DIR = get_base_path()
+        BASE_DIR = get_app_root()
 
     if out_name is None:
         out_name = os.path.basename(rel_path)
@@ -644,7 +589,7 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
 # --------------------------------------
 # STOCK_CODE_PATH 专用逻辑
 # --------------------------------------
-BASE_DIR = get_base_path()
+BASE_DIR = get_app_root()
 
 get_conf_path = LoggerFactory.get_conf_path
 

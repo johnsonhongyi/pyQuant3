@@ -533,7 +533,7 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
 def _get_racing_config_path():
     """获取标准化的绝对路径，确保集成与独立模式路径对齐"""
     try:
-        base_dir = cct.get_base_path()
+        base_dir = cct.get_app_root()
         path = os.path.join(base_dir, "snapshots", "bidding_racing_ui_state_v3.json.gz")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
@@ -4195,7 +4195,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def _import_merge_anchors(self):
         """[🚀 跨会话统筹] 导入并合并历史配置文件中的起点快照"""
         try:
-            default_path = os.path.join(cct.get_base_path(), "snapshots")
+            default_path = os.path.join(cct.get_app_root(), "snapshots")
             file_path, _ = QFileDialog.getOpenFileName(
                 self, "选择历史配置文件", default_path, "Config Files (*.json.gz);;All Files (*)"
             )

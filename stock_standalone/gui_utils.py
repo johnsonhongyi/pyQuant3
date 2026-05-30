@@ -15,6 +15,9 @@ except ImportError:
 from JohnsonUtil import LoggerFactory
 import json
 from typing import Any, Optional, Union, List, Tuple
+from sys_utils import get_app_root
+from dpi_utils import get_windows_dpi_scale_factor
+import tempfile
 
 # 获取或创建日志记录器
 logger = LoggerFactory.getLogger("instock_TK.GUI")
@@ -269,11 +272,9 @@ def get_centered_window_position_single(parent, win_width, win_height, margin=10
 def load_window_position_simple(window_name: str, default_width: int, default_height: int) -> tuple[int, int, Optional[int], Optional[int]]:
     """从统一配置文件加载窗口位置（简化版，支持 DPI 缩放）"""
     try:
-        from sys_utils import get_base_path
-        from dpi_utils import get_windows_dpi_scale_factor
         scale = get_windows_dpi_scale_factor()
         
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         config_file = os.path.join(base_dir, "window_config.json")
         if scale > 1.5:
             config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
@@ -307,11 +308,9 @@ def load_window_position_simple(window_name: str, default_width: int, default_he
 def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str):
     """保存窗口位置到统一配置文件（简化版，支持 DPI 缩放）"""
     try:
-        from sys_utils import get_base_path
-        from dpi_utils import get_windows_dpi_scale_factor
         scale = get_windows_dpi_scale_factor()
 
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         config_file = os.path.join(base_dir, "window_config.json")
         if scale > 1.5:
             config_file = os.path.join(base_dir, f"scale{int(scale)}_window_config.json")
@@ -340,7 +339,6 @@ def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str
         data[window_name] = pos
         
         # 🚀 [原子化写入] 使用临时文件 + os.replace 确保写入完整，防止 Windows 下并发导致的 0 字节
-        import tempfile
         fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(config_file), text=True)
         try:
             with os.fdopen(fd, 'w', encoding="utf-8") as f:
