@@ -34,6 +34,7 @@ except ImportError:
     from stock_standalone.signal_types import SignalPoint, SignalType, SignalSource
 
 logger = LoggerFactory.getLogger(__name__)
+from sys_utils import get_app_root
 
 # 配置常量
 MAX_BUY_PER_DAY = 2    # 回放中每日允许的最大买点数
@@ -243,7 +244,7 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
         # [HEALING] 自动探测缓存路径，优先当前目录，其次 G: 盘
         target_path = cache_path
         if not os.path.exists(target_path):
-            local_alt = os.path.join(os.getcwd(), os.path.basename(cache_path))
+            local_alt = os.path.join(get_app_root(), os.path.basename(cache_path))
             if os.path.exists(local_alt):
                 target_path = local_alt
             else:

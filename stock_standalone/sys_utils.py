@@ -22,6 +22,32 @@ def assert_main_thread(tag=""):
         # 如果是生产环境，可以只打日志不抛异常
         raise RuntimeError(msg)
 
+def get_app_root() -> str:
+    """Nuitka / PyInstaller / dev 统一兼容的物理可执行程序所在绝对根目录 (直接返回 str 格式)"""
+    from pathlib import Path
+    import sys
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+    if getattr(sys, "frozen", False) or is_nuitka:
+        return str(Path(sys.executable).parent)
+    return str(Path(__file__).resolve().parent)
+
+def get_app_root_two() -> str:
+    """返回 EXE 或脚本所在目录（不依赖 CWD）"""
+    from pathlib import Path
+    import sys
+    import os
+
+    # Nuitka / PyInstaller 判断
+    is_frozen = getattr(sys, "frozen", False)
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+
+    if is_frozen or is_nuitka:
+        # PyInstaller / Nuitka onefile
+        return str(Path(sys.executable).resolve().parent)
+
+    # dev 模式
+    return str(Path(__file__).resolve().parent)
+
 def get_base_path():
     """获取程序基准路径，支持脚本和打包模式 (Nuitka/PyInstaller)"""
     is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')

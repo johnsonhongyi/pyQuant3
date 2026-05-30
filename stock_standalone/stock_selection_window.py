@@ -16,6 +16,7 @@ from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 import logging
 from JohnsonUtil import commonTips as cct
 logger = LoggerFactory.getLogger(__name__)
+from sys_utils import get_app_root
 
 # ✅ 盘中交易引擎（懒加载，避免启动依赖）
 try:
@@ -5208,7 +5209,7 @@ def _refresh_guidance_tab(self):
         # 5. Fallback 降级从 top_all.h5 中检索
         try:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
                 if os.path.exists(path):
                     import pandas as pd
                     df_top = pd.read_hdf(path, 'top_all')

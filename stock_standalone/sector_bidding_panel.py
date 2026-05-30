@@ -6,6 +6,7 @@ Sector Bidding Panel v3 - 竞价及尾盘板块联动监控面板
 from datetime import datetime
 from typing import Any, List, Optional
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QDoubleSpinBox, QSpinBox, QSplitter, QListWidget, QListWidgetItem,
@@ -1166,7 +1167,7 @@ class SnapshotCalendarDialog(QDialog):
             try:
                 os.makedirs(start_dir, exist_ok=True)
             except:
-                start_dir = os.getcwd()
+                start_dir = get_app_root()
             
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择历史快照文件", start_dir, "快照文件 (*.json.gz);;所有文件 (*.*)"

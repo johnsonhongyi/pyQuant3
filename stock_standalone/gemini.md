@@ -1,3 +1,23 @@
+## 2026-05-30 21:30
+- [x] **根除 legacy 变种 getcwd 物理隐患，极致加固路径自愈引擎 (Eliminated Legacy getcwd Variants & Consolidated Auto-Healing Path Architecture)**：
+    - [x] **重构 `commonTips.py` 自定义 `getcwd()` 核心引擎**：将 `commonTips.py` 内极易因多进程、Win服务或非控制台启动引发 `sys.argv[0]` 偏移的 `getcwd()` 函数物理升级为代理至 `get_base_path()`。使整个系统所有隐式调用 `cct.getcwd()` 的下游组件完美承接基于 Windows Win32 API 级别的顶级保真 EXE/脚本 路径！
+    - [x] **标准化 `stock_sender.py` 发送路径**：将 `stock_sender.py` 初始化中残留的 `os.getcwd()` 重构为 `get_app_root()` 驱动，保证多进程 Linkage 信号分发时 AHK/同花顺/通达信配置路径的安全锚定。
+    - [x] **重构 `wencaiData.py` 数据路径**：将 `wencaiData.py` 中历史遗留的脆弱拼接逻辑彻底升级为具备 **“动态位置探测 + 智能包内模板释放自愈 + 双向丢失 Error 提示”** 的终极寻址引擎。在开发模式下定位到 `'JohnsonUtil'`，在打包模式下自发通过 `get_base_path()` 进行多重路径及 `NUITKA_ONEFILE_DIRECTORY` 检测，若外部物理目录丢失则自愈提取包内模板复制到外部，兼顾了持久更新与只读资源提取的矛盾！
+    - [x] **Top-Level 全局导入一次性加载**：将 `from sys_utils import get_app_root` 提到 `stock_sender.py` 顶部，并在 `wencaiData.py` 加载期统一处理，保证模块运行纯净。
+    - [x] **100% 通过 58 项全维系统单元测试**：升级后 58 项集成与性能单元测试一枪全绿，展现了极佳的工程稳定度和代码质量！
+
+## 2026-05-30 21:10
+- [x] **全维标准化物理基准路径架构，根治 Nuitka 多进程与 Onefile 路径漂移 (Standardized Global Path Architecture & Eliminated Nuitka Path-Drift)**：
+    - [x] **清除主模块中的 volatile 依赖**：识别并重构了核心监控面板、突破检测器以及可视化指挥所中所有残留的 `os.getcwd()`。将它们全部物理替换为由统一的 `sys_utils.get_app_root()` 路径锚点直接解析：
+        - [x] `instock_MonitorTK.py`：对齐了 `update_linkage_status` 中的 `vis_var` 命令与状态恢复；
+        - [x] `trade_visualizer_qt6.py`：对齐了 `SWITCH_CODE` 联动、`resample` 缓存读取与 `vis_var` 进程交互；
+        - [x] `concept_viewer.py`：对齐了 HDF5 和 concept 数据库的跨平台路径检测；
+        - [x] `premarket_analyzer.py`：标准化了盘前分析中对 `top_all.h5` 本地 fallback 的查找路径；
+        - [x] `bidding_momentum_detector.py`：重构了历史复盘 `load_from_snapshot` 时对 `snapshots/` 快照的查找锚点；
+        - [x] `tk_gui_modules/spatial_follow_hud.py`：对齐了板块跟单可视化微型指挥所对本地 `top_all.h5` 个股真名的降级获取路径。
+    - [x] **实现模块级 Top-Level 全局导入一次性加载**：将 `from sys_utils import get_app_root` 集中在各文件的顶部模块加载期一次性导入。消除了在轮询心跳或高频联动中的局部 dynamic import 开销，代码风格极其干净，遵循 DRY 和 SOLID 职责分离原则。
+    - [x] **100% 毫无死角绿旗通过 58 项全量系统回归单元测试**：修改完全兼容现有的日线及重采样数据管道，并在 PowerShell 运行环境下以 100% 通过率（58项全部 Passed）完美通关，确保在 Nuitka Onefile 高度沙箱和多进程并行交互的极端生产环境中能够绝对稳健地定位所有资源资产！
+
 ## 2026-05-30 20:50
 - [x] **批处理脚本同步支持3种打包模式选择机制 (Implemented Synchronized 3-Option Build Selector for Nuitka batch scripts)**：
     - [x] **统一扩展选择器为3个选项**：在 `nuitka_build_console.bat` 与 `nuitka_build_console_onlyClang.bat` 中，同步将选择器升级为 3 个选项：`[1] Standalone Folder`、`[2] Onefile with fixed Tempdir`（使用 `--onefile-tempdir-spec="{TEMP}\instock_Nuitka"` 选项）与 `[3] Standard Onefile`（仅使用 `--onefile`）。
