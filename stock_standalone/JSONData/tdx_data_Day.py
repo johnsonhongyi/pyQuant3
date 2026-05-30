@@ -7246,6 +7246,8 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
         if col in tdxdata.columns:
             tdxdata[col] = tdxdata[col].astype(int)
     # top_all = cct.reduce_memory_usage(top_all)       
+    if top_all.index.name != 'code':
+        top_all = top_all.rename_axis('code')
     if lastpTDX_DF is None:
         tdx_code = [co for co in codelist if co in tdxdata.index]
         tdxdata = tdxdata.loc[tdx_code]

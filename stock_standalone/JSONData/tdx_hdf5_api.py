@@ -2776,7 +2776,17 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 else:
                     df = dd
             else:
-                log.error("%s is not find %s", fname, table)
+                # 🛡️ 错误日志频次限制：相同 (fname, table) 的未找到错误最多只输出 3 次 ERROR 提示，后续降级为 DEBUG
+                err_key = (fname, table)
+                if '_missing_table_counts' not in globals():
+                    globals()['_missing_table_counts'] = {}
+                counts_dict = globals()['_missing_table_counts']
+                
+                counts_dict[err_key] = counts_dict.get(err_key, 0) + 1
+                if counts_dict[err_key] <= 3:
+                    log.error("%s is not find %s (Occurrence: %d/3)", fname, table, counts_dict[err_key])
+                else:
+                    log.debug("%s is not find %s (Occurrence: %d, throttled)", fname, table, counts_dict[err_key])
         else:
             log.error("%s / table is Init None:%s", fname, table)
 
