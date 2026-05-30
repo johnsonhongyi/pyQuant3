@@ -311,16 +311,39 @@ def _get_win32_exe_path() -> str:
     return os.path.dirname(os.path.abspath(buffer.value))
 
 
+_APP_ROOT_LOGGED = False
+_TDX_DIR_LOGGED = False
+_RAMDISK_LOGGED = False
+_is_main_process = None
+
+def is_main_process() -> bool:
+    global _is_main_process
+    if _is_main_process is None:
+        import multiprocessing
+        import sys
+        process_name = multiprocessing.current_process().name
+        _is_main_process = (
+            process_name == 'MainProcess'
+            and multiprocessing.parent_process() is None
+            and not any(arg.startswith('--multiprocessing-fork') for arg in sys.argv)
+            and not any('spawn_main' in arg for arg in sys.argv)
+        )
+    return _is_main_process
+
+
 def _local_get_app_root() -> str:
+    global _APP_ROOT_LOGGED
+    
+    is_main = is_main_process()
+
     # 优先从环境变量获取，确保子进程完美继承父进程定位的物理路径
     env_root = os.environ.get("INSTOCK_APP_ROOT")
     if env_root and os.path.exists(env_root):
-        print(f"[DEBUG] _local_get_app_root: Found INSTOCK_APP_ROOT in env={env_root}")
+        if is_main and not _APP_ROOT_LOGGED and log.isEnabledFor(10):
+            log.debug("APP_ROOT LOCKED => %s", env_root)
+            _APP_ROOT_LOGGED = True
         return env_root
 
-    import sys
-    print(f"[DEBUG] _local_get_app_root: Start resolving. sys.executable={sys.executable}, argv[0]={sys.argv[0] if sys.argv else None}, cwd={os.getcwd()}")
-    
     def _is_inside_temp_dir(path: str) -> bool:
         if not path:
             return False
@@ -358,20 +381,16 @@ def _local_get_app_root() -> str:
     if is_nuitka:
         if sys.argv and sys.argv[0]:
             argv0_abspath = os.path.abspath(sys.argv[0])
-            print(f"[DEBUG] _local_get_app_root: Nuitka active. argv[0] abspath={argv0_abspath}")
             if os.path.basename(argv0_abspath).lower() not in ('python.exe', 'pythonw.exe', 'python', 'pythonw'):
                 if not _is_inside_temp_dir(argv0_abspath):
                     calculated_root = os.path.dirname(argv0_abspath)
-                    print(f"[DEBUG] _local_get_app_root: Resolved via Nuitka argv[0]={calculated_root}")
 
     # 2. PyInstaller 或 Nuitka Standalone 模式，使用 sys.executable 的父目录，排除临时目录
     if not calculated_root:
         if getattr(sys, "frozen", False) or is_nuitka:
             exe_abspath = os.path.abspath(sys.executable)
-            print(f"[DEBUG] _local_get_app_root: Frozen or Nuitka. exe abspath={exe_abspath}")
             if not _is_inside_temp_dir(exe_abspath):
                 calculated_root = os.path.dirname(exe_abspath)
-                print(f"[DEBUG] _local_get_app_root: Resolved via exe_abspath={calculated_root}")
 
     # 3. 源码开发环境 fallback (在 commonTips.py 中，__file__ 是 JohnsonUtil/commonTips.py，所以需要往上退一级)
     if not calculated_root:
@@ -379,29 +398,25 @@ def _local_get_app_root() -> str:
             path = os.path.dirname(os.path.abspath(__file__))
             if os.path.basename(path) == 'JohnsonUtil':
                 path = os.path.dirname(path)
-            print(f"[DEBUG] _local_get_app_root: Fallback to __file__={path}")
-            # 如果 fallback 获取的 __file__ 路径依然被判定为临时目录，则绝不能采用它，改用 os.getcwd() 或 sys.path
+            # 如果 fallback 获取 of __file__ 路径依然被判定为临时目录，则绝不能采用它，改用 os.getcwd() 或 sys.path
             if _is_inside_temp_dir(path):
-                print(f"[DEBUG] _local_get_app_root: __file__ is inside temp dir!")
                 # 尝试寻找非 temp_dir 的 sys.path 路径
                 for sp in sys.path:
                     if sp and not _is_inside_temp_dir(sp):
                         calculated_root = os.path.abspath(sp)
-                        print(f"[DEBUG] _local_get_app_root: Resolved via sys.path={calculated_root}")
                         break
                 if not calculated_root:
                     calculated_root = os.getcwd()
-                    print(f"[DEBUG] _local_get_app_root: Resolved via os.getcwd()={calculated_root}")
             else:
                 calculated_root = path
-                print(f"[DEBUG] _local_get_app_root: Resolved via __file__={calculated_root}")
         except Exception as e:
             calculated_root = os.getcwd()
-            print(f"[DEBUG] _local_get_app_root: Error in fallback, using os.getcwd()={calculated_root}. Error: {e}")
 
     # 物理锁定并写入环境变量，保障多进程完美一致
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
-    print(f"[DEBUG] _local_get_app_root: Final locked root={calculated_root}")
+    if is_main and not _APP_ROOT_LOGGED and log.isEnabledFor(10):
+        log.debug("APP_ROOT LOCKED => %s", calculated_root)
+        _APP_ROOT_LOGGED = True
     return calculated_root
 
 
@@ -2087,28 +2102,34 @@ def get_now_basedir(root_list=[macroot,macroot_vm]):
 
 
 def get_tdx_dir():
+    global _TDX_DIR_LOGGED
     os_sys = get_sys_system()
     os_platform = get_sys_platform()
+    basedir = ''
     if os_sys.find('Darwin') == 0:
-        log.info("DarwinFind:%s" % os_sys)
         macbase=get_now_basedir()
         basedir = macbase.replace('/', path_sep).replace('\\', path_sep)
-        log.info("Mac:%s" % os_platform)
+        if is_main_process() and not _TDX_DIR_LOGGED and log.isEnabledFor(10):
+            log.debug("%s : path:%s", os_platform, basedir)
+            _TDX_DIR_LOGGED = True
 
     elif os_sys.find('Win') == 0:
-        log.info("Windows:%s" % os_sys)
         if os_platform.find('XP') == 0:
-            log.info("XP:%s" % os_platform)
             basedir = xproot.replace('/', path_sep).replace('\\', path_sep)  # 如果你的安装路径不同,请改这里
+            if is_main_process() and not _TDX_DIR_LOGGED and log.isEnabledFor(10):
+                log.debug("%s : path:%s", os_platform, basedir)
+                _TDX_DIR_LOGGED = True
         else:
-            log.info("Win7O:%s" % os_platform)
             for root in win7rootList:
                 basedir = root.replace('/', path_sep).replace('\\', path_sep)  # 如果你的安装路径不同,请改这里
                 if os.path.exists(basedir):
-                    log.info("%s : path:%s" % (os_platform, basedir))
+                    if is_main_process() and not _TDX_DIR_LOGGED and log.isEnabledFor(10):
+                        log.debug("%s : path:%s", os_platform, basedir)
+                        _TDX_DIR_LOGGED = True
                     break
     if not os.path.exists(basedir):
-        log.error("basedir not exists")
+        if is_main_process():
+            log.error("basedir not exists")
     return basedir
 
 
@@ -2169,12 +2190,15 @@ def isDigit(x):
         return False
 
 def get_ramdisk_dir() -> str:
+    global _RAMDISK_LOGGED
     os_platform: str = get_sys_platform()
     basedir: Optional[str] = None
     for root in ramdisk_rootList:
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
-            log.info("%s : path:%s" % (os_platform, basedir))
+            if is_main_process() and not _RAMDISK_LOGGED and log.isEnabledFor(10):
+                log.debug("%s : path:%s", os_platform, basedir)
+                _RAMDISK_LOGGED = True
             return basedir
     return _local_get_app_root()
 
@@ -2649,7 +2673,6 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
 
 # get_terminal_Position(cmd=scriptquit, position=None, close=False)
 # get_terminal_Position('Johnson — -bash', close=True)
-log.info("close Python Launcher")
 
 
 # from numba.decorators import autojit
