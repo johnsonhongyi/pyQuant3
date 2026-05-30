@@ -47,7 +47,7 @@ if /I "%BUILD_MODE_ARG%"=="onefile" (
 
 if "%BUILD_MODE%"=="onefile" (
     echo [MODE] Building ONEFILE executable...
-    set "NUITKA_MODE_OPT=--onefile"
+    set "NUITKA_MODE_OPT=--onefile --onefile-tempdir-spec="{TEMP}\instock_Nuitka""
 ) else (
     echo [MODE] Building STANDALONE folder...
     set "NUITKA_MODE_OPT=--standalone"
