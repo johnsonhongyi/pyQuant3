@@ -14,6 +14,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("instock_TK.SpatialFollowHUD")
+from sys_utils import get_app_root
 
 class DictWrapper:
     """
@@ -425,7 +426,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         try:
             import pandas as pd
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
                 if os.path.exists(path):
                     df_top = pd.read_hdf(path, 'top_all')
                     if not df_top.empty and 'name' in df_top.columns:

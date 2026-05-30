@@ -2059,8 +2059,7 @@ def check_file_exist(filepath):
 
 
 def getcwd() -> str:
-    dirname, filename = os.path.split(os.path.abspath(sys.argv[0]))
-    return dirname
+    return get_base_path()
 
 def get_sys_system() -> str:
     return platform.system()
@@ -2735,18 +2734,12 @@ def run_numba(func):
 
 
 def get_work_path(base, dpath, fname):
-
-    # baser = os.getcwd().split(base)[0]
-    baser = getcwd().split(base)[0]
-    base = baser + base + path_sep + dpath + path_sep
-    filepath = base + fname
+    filepath = os.path.join(get_base_path(), dpath, fname)
     return filepath
 
 
 def get_rzrq_code(market='all'):
-
-    baser = getcwd().split('stock')[0]
-    base = baser + 'stock' + path_sep + 'JohnsonUtil' + path_sep
+    base = os.path.join(get_base_path(), 'JohnsonUtil') + path_sep
     szrz = base + 'szrzrq.csv'
     shrz = base + 'shrzrq.csv'
     if market in ['all', 'sz', 'sh']:

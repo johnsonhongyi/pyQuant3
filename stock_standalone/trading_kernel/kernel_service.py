@@ -16,6 +16,7 @@ from trading_kernel.observability.trace_hasher import stable_hash
 
 logger = LoggerFactory.getLogger("instock_TK.KernelService")
 import pandas as pd
+from sys_utils import get_base_path, get_app_root
 
 
 def load_risk_limits_from_config() -> RiskLimits:
@@ -25,7 +26,6 @@ def load_risk_limits_from_config() -> RiskLimits:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return RiskLimits()
         import json
-        from sys_utils import get_base_path
         base_dir = get_base_path()
         # 尝试两个 DPI 主配置文件
         for filename in ("window_config.json", "scale2_window_config.json"):
@@ -58,7 +58,6 @@ def load_trading_mode_from_config() -> str:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return "OBSERVE"
         import json
-        from sys_utils import get_base_path
         base_dir = get_base_path()
         for filename in ("window_config.json", "scale2_window_config.json"):
             config_file = os.path.join(base_dir, filename)
@@ -75,7 +74,7 @@ def load_trading_mode_from_config() -> str:
 
 
 class TradingKernelService:
-    # 算法内核版本锁死指纹 (Phase 9: Precondition)
+    # 算法内核 version 锁死指纹 (Phase 9: Precondition)
     KERNEL_VERSION = "2026.05.23.01"
 
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl"):
@@ -87,7 +86,6 @@ class TradingKernelService:
         try:
             import configparser
             import os
-            from sys_utils import get_base_path
             base_dir = get_base_path()
             ini_path = os.path.join(base_dir, "global.ini")
             if os.path.exists(ini_path):
@@ -194,7 +192,7 @@ class TradingKernelService:
             import sys
             import pandas as pd
             for mod_name, mod in list(sys.modules.items()):
-                if not mod or any(x in mod_name for x in ['pandas', 'numpy', 'matplotlib', 'tables']):
+                if not mod or any(x in mod_name.lower() for x in ['pandas', 'numpy', 'matplotlib', 'tables', 'pytest', '_pytest', 'pluggy', 'py.', 'distutils', 'importlib']):
                     continue
                 try:
                     for attr_name in list(dir(mod)):
@@ -204,6 +202,9 @@ class TradingKernelService:
                         try:
                             obj = getattr(mod, attr_name)
                             if obj is not None:
+                                obj_type_module = getattr(type(obj), '__module__', '')
+                                if any(x in str(obj_type_module).lower() for x in ['pytest', '_pytest', 'pluggy', 'py.']):
+                                    continue
                                 # 探测对象自身是否含有 df_all
                                 if hasattr(obj, 'df_all'):
                                     df_val = getattr(obj, 'df_all')
@@ -230,8 +231,6 @@ class TradingKernelService:
         """
         import os
         import pandas as pd
-        from sys_utils import get_base_path
-        
         base_dir = get_base_path()
         today_date_str = datetime.now().strftime("%Y%m%d")
         h5_paths = [
@@ -239,7 +238,7 @@ class TradingKernelService:
             r'G:\shared_df_all.h5',
             r'g:\top_all.h5',
             os.path.join(base_dir, 'top_all.h5'),
-            os.path.join(os.getcwd(), 'top_all.h5'),
+            os.path.join(get_app_root(), 'top_all.h5'),
             'top_all.h5'
         ]
         
@@ -707,10 +706,9 @@ class TradingKernelService:
                     try:
                         import os
                         import pandas as pd
-                        from sys_utils import get_base_path
                         base_dir = get_base_path()
                         today_date_str = datetime.now().strftime("%Y%m%d")
-                        for path in [fr'G:\shared_df_all-{today_date_str}.h5', r'G:\shared_df_all.h5', r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5'), 'top_all.h5']:
+                        for path in [fr'G:\shared_df_all-{today_date_str}.h5', r'G:\shared_df_all.h5', r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5'), 'top_all.h5']:
                             if os.path.exists(path):
                                 # 智能探测 HDF5 key，自适应 'df_all' 还是 'top_all'
                                 key_to_read = None

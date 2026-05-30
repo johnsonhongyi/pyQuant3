@@ -11,6 +11,7 @@ Created on 2014/07/31
 import json
 import math
 import re
+from sys_utils import get_app_root
 import sys
 import os
 import time
@@ -1119,11 +1120,31 @@ def get_wencai_data_old(dm, market='wencai', days=120, pct=True):
 
 def get_wencai_filepath(market):
     path_sep = os.path.sep
-    # baser = os.getcwd().split('stock')[0]
-    baser = cct.getcwd().split('stock')[0]
-    base = baser + path_sep + 'stock' + path_sep + \
-        'JohnsonUtil' + path_sep + 'wencai' + path_sep
-    filepath = base + market + '.csv'
+    # 权威物理根目录
+    baser = cct.get_base_path()
+    
+    # 外部标准物理持久化路径（不含 stock 目录）
+    base_dir = baser + path_sep + 'JohnsonUtil' + path_sep + 'wencai' + path_sep
+    filepath = base_dir + market + '.csv'
+    
+    # 1. 外部持久化文件已存在，直接返回，实现零磁盘开销
+    if os.path.exists(filepath):
+        return filepath
+        
+    # 2. 如果外部文件不存在，探测包内解压临时目录 (Nuitka/PyInstaller)
+    temp_dir = os.environ.get("NUITKA_ONEFILE_DIRECTORY")
+    if temp_dir:
+        temp_filepath = temp_dir + path_sep + 'JohnsonUtil' + path_sep + 'wencai' + path_sep + market + '.csv'
+        if os.path.exists(temp_filepath):
+            return temp_filepath
+
+    # 3. 彻底丢失判定：发出醒目的 ERROR 警示！
+    if not os.path.exists(filepath):
+        print(f"ERROR: 问财配置文件 {market}.csv 缺失！已尝试探测以下位置：")
+        print(f"  - 外部物理路径: {filepath}")
+        if temp_dir:
+            print(f"  - 包内临时路径: {temp_dir + path_sep + 'JohnsonUtil' + path_sep + 'wencai' + path_sep}")
+            
     return filepath
 
 

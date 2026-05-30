@@ -12,7 +12,7 @@ except Exception:
     pass
 
 try:
-    from sys_utils import get_base_path
+    from sys_utils import get_base_path, get_app_root
     base_dir = get_base_path()
 except Exception:
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -84,7 +84,7 @@ def run_premarket_diagnose() -> list:
 
     # Load name map from top_all.h5 to resolve real Chinese stock names
     name_map = {}
-    for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+    for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
         if os.path.exists(path):
             try:
                 df_top = pd.read_hdf(path, 'top_all')

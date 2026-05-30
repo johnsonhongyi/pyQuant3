@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 # 尝试复用决策引擎中的部分逻辑（如果适用）
 try:
     from intraday_decision_engine import IntradayDecisionEngine
@@ -56,8 +57,8 @@ class StockSelector:
              if os.path.exists(local_path):
                  self.data_path = local_path
              else:
-                 # 尝试在 CWD 寻找
-                 cwd_path = os.path.join(os.getcwd(), 'top_all.h5')
+                 # 尝试在 app root 寻找
+                 cwd_path = os.path.join(get_app_root(), 'top_all.h5')
                  if os.path.exists(cwd_path):
                      self.data_path = cwd_path
         

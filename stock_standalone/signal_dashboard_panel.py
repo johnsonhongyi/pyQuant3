@@ -7,6 +7,7 @@ SignalDashboardPanel - 策略信号分类仪表盘
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger(__name__)
+from sys_utils import get_app_root
 import sys
 import re
 import pandas as pd
@@ -2401,7 +2402,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             any_healed = False
                             name_map = {}
                             # 加载 top_all.h5 建立代码到名字映射
-                            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
                                 if os.path.exists(path):
                                     try:
                                         import pandas as pd

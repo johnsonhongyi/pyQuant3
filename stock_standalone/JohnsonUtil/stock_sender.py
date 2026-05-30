@@ -1,5 +1,6 @@
 # stock_sender.py
 import threading
+from sys_utils import get_app_root
 import ctypes
 from ctypes import wintypes
 import win32gui
@@ -55,7 +56,7 @@ class StockSender:
         self.dfcf_status = ""
 
         # 股票代码列表
-        self.base_dir = base_dir or os.getcwd()
+        self.base_dir = base_dir or get_app_root()
         self.code_file_name = os.path.join(self.base_dir, "code_ths_other.json")
         self.ths_code = []
         self.load_ths_code()

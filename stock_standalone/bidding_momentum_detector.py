@@ -11,6 +11,7 @@ Bidding Momentum Detector v2 - 竞价及尾盘板块联动异动检测器
 """
 
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 import time
 import threading
 from queue import Queue
@@ -2588,7 +2589,7 @@ class BiddingMomentumDetector:
         
         try:
             # 1. 获取所有存量快照并按日期排序
-            snapshot_dir = os.path.join(os.getcwd(), 'snapshots')
+            snapshot_dir = os.path.join(get_app_root(), 'snapshots')
             if not os.path.exists(snapshot_dir): return
             
             files = [f for f in os.listdir(snapshot_dir) if f.startswith('bidding_') and f.endswith('.json.gz')]
