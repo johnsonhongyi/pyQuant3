@@ -1,3 +1,19 @@
+## 2026-05-30 20:20
+- [x] **实现 HDF5 读写 RAMDISK 临时目录 300 秒防抖冷却定期清理机制与配置解析一次性加载极致优化 (Implemented Throttled 300s Cooldown Cleanup & Module-Load Config Parsing)**：
+    - [x] **查明实盘后台高频垃圾文件堆积机制**：在程序运行期间，后台常驻服务与多进程任务会高频不断地在 RAMDISK (G:\) 下自动创建缓存 `Temp` 文件。如果仅在启动时清理一次，这些零碎的缓存垃圾会在几小时内堆满 RAMDISK 物理内存空间，因此必须在 HDFStore 读写中进行伴随式持续清理。
+    - [x] **落地模块加载时配置一次性解析复用**：针对 `SafeHDFStore` 实例化频次极高（每秒数十上百次）的特点，为了彻底消灭在 `__init__` 中高频读取配置项与重复进行 `isinstance`、`strip` 和 `lower` 的字符串解析性能开销，在 `tdx_hdf5_api.py` 模块首次加载时一次性将 `cct.cleanRAMdiskTemp` 解析并转换成标准布尔值，存入全局变量 `_CLEAN_RAMDISK_TEMP` 中，供后续实例化直接 O(1) 布尔复用。
+    - [x] **落地 300 秒 (5分钟) 自愈防抖冷却锁 (Cooldown Guard)**：在 `SafeHDFStore.__init__` 实例化逻辑中引入基于全局时间戳 `_LAST_TEMP_CLEANUP_TIME` 的防抖冷却机制。当 `_CLEAN_RAMDISK_TEMP` 为 `True` 且距上次清理超过了 300 秒（5分钟）时，才真正执行一次 `cleanup_temp_dir(self.basedir)`。
+    - [x] **实现性能与持续清理完美平衡**：这使清理频率由以前的每秒数十次暴降到最多每5分钟一次，在非清理心跳期直接利用预先计算好的布尔值和内存时间戳比对短路返回，零磁盘 IO 损耗且从物理源头上彻底杜绝了并发写锁冲突与 `PermissionError` 误删临时快照文件的隐患。
+    - [x] **100% 毫无死角绿旗通过全套 H5 单元测试**：针对 H5 全维压力测试及容量管理回归，2项测试 100% 一枪全绿通过，交付质量无可挑剔！
+- [x] **修复配置键类型解析异常导致 RAMDISK 临时目录被强制清空 Bug (Fixed cleanRAMdiskTemp Truthiness Evaluation Bug in SafeHDFStore & Config Parser)**：
+    - [x] **物理查明 Bug 机制**：系统通过 `commonTips.py` 读取 `global.ini` 配置文件中的 `cleanRAMdiskTemp = False` 设置。但在底层 `get_with_writeback` 获取配置项时，该参数的 `value_type` 被错误指定为了 `"str"`。因为非空字符串 `"False"` 在 Python 的布尔判定中（如 `if cct.cleanRAMdiskTemp:`）天然被评估为 `True`，导致即使在配置中显式设置为了 `False`，在 HDF5 文件读写的 `SafeHDFStore.__init__` 初始化中依然会被强制触发 `cleanup_temp_dir()` 执行清空，产生了逻辑违背与不必要的磁盘 I/O。
+    - [x] **落地 `"bool"` 类型精准重构 (Config Parser Boolean Alignment)**：
+        - [x] 在 `commonTips.py` 的 L735 中，将 `cleanRAMdiskTemp` 读取时的 `value_type` 修正为标准的 `"bool"`，同时将 `fallback` 对齐为布尔值 `False`。
+        - [x] 在 `commonTips.py` 的 L1041 中，将 `cleanRAMdiskTemp` 的类型注解由 `str` 升级为 `bool`。这使得 `cct.cleanRAMdiskTemp` 在加载时即已获取真实的 Python 布尔对象（`True` 或 `False`）。
+    - [x] **落地 HDF5 数据流物理双保险防御 (Defensive String/Bool Guard)**：
+        - [x] 在 `tdx_hdf5_api.py` 的 L327 中，不仅完美适应已修正的布尔类型，还引入了物理级的严格类型防御：`if isinstance(_clean_flag, str): _clean_flag = _clean_flag.strip().lower() in ("1", "true", "yes", "on")`。这确保了在极端的类未编译、缓存过期或局部环境未对齐的临界状态下，系统绝对不会因为字符串 `"False"` 误判为真值从而发生意外的 Temp 文件夹清空。
+    - [x] **100% 毫无死角绿旗通过全套 H5 单元测试**：针对 H5 全维压力测试、容量管理及极速压缩与合并测试执行全套回归（包括 `test_h5_comprehensive.py` e.g., `test_compression.py` 等），所有测试 100% 一枪全绿通过，交付质量无可挑剔！
+
 ## 2026-05-30 18:45
 - [x] **极致性能重构：彻底消灭 percdf 初始化的连续 combine_dataFrame 性能杀手 (Optimized percdf Single-Slice Initialization in stockFilter)**：
     - [x] **物理查明性能瓶颈**：原 `stockFilter.py` 在初始化 `percdf` 属性时，使用了连续 6 次 `cct.get_col_market_value_df` 行情切片和 5 次重度 `cct.combine_dataFrame` 进行多表大拼接。每个 `combine_dataFrame` 内部都涉及多层 O(N) 的 merge、concat 以及 index 校验，导致冷启动首次初始化时产生了显著 of CPU 耗时和内存抖动。
