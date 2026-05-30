@@ -1727,9 +1727,8 @@ function d(t) {
 #         return trade_status
 def read_ini(inifile: str = 'filter.ini', setrule: Optional[str] = None, category: str = 'General', filterkey: str = 'filter_rule') -> Optional[str]:
     # from configobj import ConfigObj
-    baser: str = getcwd().split('stock')[0]
-    base: str = baser + 'stock' + path_sep
-    config_file_path: str = base + inifile
+    from sys_utils import get_app_root
+    config_file_path: str = os.path.join(get_app_root(), inifile)
     setrule = setrule.strip() if setrule is not None else None
     rule: Optional[str] = None
     if not os.path.exists(config_file_path):
@@ -2016,27 +2015,10 @@ def isMac() -> bool:
         return False
 
 def get_run_path_stock(fp=None):
-    # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
-    # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
-    path = getcwd()
-    alist = path.split('stock')
-    # if len(alist) > 0:
-    if len(alist) > 0 and path.find('stock') >=0:
-        path = alist[0]
-        # os_sep=get_os_path_sep()
-        if fp is not None:
-            path = path + fp
-        log.debug("info:%s getcwd:%s"%(alist[0],path))
-    else:
-        if isMac():
-            path  = root_path[1].split('stock')[0]
-            if not check_file_exist(path):
-                log.error(f'path not find : {path}')
-        else:
-            path  = root_path[0].split('stock')[0]
-            if not check_file_exist(path):
-                log.error(f'path not find : {path}')
-        log.debug("error:%s cwd:%s"%(alist[0],path))
+    from sys_utils import get_app_root
+    path = get_app_root()
+    if fp is not None:
+        path = os.path.join(path, fp)
     return path
 
 
@@ -2186,15 +2168,15 @@ def isDigit(x):
     except ValueError:
         return False
 
-def get_ramdisk_dir() -> Optional[str]:
+def get_ramdisk_dir() -> str:
     os_platform: str = get_sys_platform()
     basedir: Optional[str] = None
     for root in ramdisk_rootList:
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
             log.info("%s : path:%s" % (os_platform, basedir))
-            break
-    return basedir
+            return basedir
+    return _local_get_app_root()
 
 RamBaseDir = get_ramdisk_dir()
 
@@ -2732,9 +2714,10 @@ def get_tushare_market(market='zxb', renew=False, days=5):
         df.reset_index(inplace=True)
         return df
 
-    baser = getcwd().split('stock')[0]
-    base = baser + 'stock' + path_sep + 'JohnsonUtil' + path_sep
-    filepath = base + market + '.csv'
+    from sys_utils import get_app_root
+    base = os.path.join(get_app_root(), 'JohnsonUtil')
+    os.makedirs(base, exist_ok=True)
+    filepath = os.path.join(base, market + '.csv')
     if os.path.exists(filepath):
         if renew and creation_date_duration(filepath) > 0:
             df = tusharewrite_to_csv(market, filepath, days)

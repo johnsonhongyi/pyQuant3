@@ -120,9 +120,10 @@ def run_backtest_mining():
         avg_vol_0309 = strong_features_0309['volume'].mean() if 'volume' in df_0309.columns else 0
         logger.info(f"这些‘出位’股在启动前(0309)的平均量能: {avg_vol_0309:.2f}")
         
-        # 导出差异分析
-        track_df.to_csv("backtest_0309_to_0314.csv", index=False)
-        logger.info("回测明细已保存至 backtest_0309_to_0314.csv")
+        from sys_utils import get_app_root
+        output_path = os.path.join(get_app_root(), "backtest_0309_to_0314.csv")
+        track_df.to_csv(output_path, index=False)
+        logger.info(f"回测明细已保存至 {output_path}")
 
 if __name__ == "__main__":
     run_backtest_mining()

@@ -364,7 +364,7 @@ def get_log_file(log_n='stock.log'):
         #     print("error")
         #     raise TypeError('log path error.')
         # path = get_base_path()
-        path = ''
+        path = get_app_root() + os.path.sep
     path = path + log_n
     return path
 

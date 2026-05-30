@@ -1601,7 +1601,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if not data: return
         try:
             df = pd.DataFrame(data)
-            file_path = "stock_selection_feedback.csv"
+            from sys_utils import get_app_root
+            file_path = os.path.join(get_app_root(), "stock_selection_feedback.csv")
             header = not os.path.exists(file_path)
             df.to_csv(file_path, mode='a', header=header, index=False, encoding='utf-8')
             print(f"反馈日志已保存: {file_path}")
