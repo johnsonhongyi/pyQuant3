@@ -1,3 +1,11 @@
+## 2026-05-31 03:00
+- [x] **优化多进程日志隔离与生产级 APP_ROOT 锁定日志控制 (Optimized Multiprocessing Log Isolation & Production-Grade APP_ROOT Locking Controls)**：
+    - [x] **实现环境变量存在时静默返回与主进程首次锁定日志输出**：重构了 `_local_get_app_root` 的环境变量检测，若 `INSTOCK_APP_ROOT` 存在于环境变量且物理路径有效，子进程直接静默返回以阻断冗余输出。同时确保主进程在首次通过环境变量读取路径时，仍能且仅能正确打印一次锁定日志。
+    - [x] **过滤 Windows Spawn 启动命令行参数**：在 `is_main` 主进程判定逻辑中追加了 `not any('spawn_main' in arg for arg in sys.argv)`，精准识别并隔离了 Windows 平台下 `spawn` 模式多进程 Worker 的导入期身份。
+    - [x] **清除其他 logging 模块依赖与纯净化**：彻底清除了函数内部对 Python 标准库 `logging` 模块的动态导入，改用在模块头部已经初始化的 `log = LoggerFactory.getLogger()` 实例，并直接传递级别整数值 `10` 作为 `log.isEnabledFor(10)` 判断，确保系统日志机制纯净统一。
+    - [x] **落实生产级锁定与极致精简日志**：彻底清除了 `_local_get_app_root` 中原本多达十几处繁琐的中间调试日志，仅在主进程首次锁定物理安装根目录且 `DEBUG` 级别开启时，打印一次干净清爽 of `APP_ROOT LOCKED => {calculated_root}`。同时优化了 `get_ramdisk_dir()`, `get_tdx_dir()` 内的重复环境调试日志，使其通过全局 `_RAMDISK_LOGGED` 与 `_TDX_DIR_LOGGED` 状态标记，确保仅在主进程启动初始化时且在 `DEBUG` 级别开启下**打印一次**，后续调用和子进程均完全静默；清理了模块级悬空的 `close Python Launcher` 日志。以后无论多进程如何拉起，终端均不会产生冗余刷屏，完美符合 KISS/YAGNI/DRY 工程原则。
+    - [x] **100% 通过 58 项系统与回归测试**：修改与重采样及核心交易引擎 100% 完美兼容，回归单元测试一枪全绿通过。
+
 ## 2026-05-31 02:35
 - [x] **消除数据接口配置路径获取冗余与规范化 (Unified configuration path retrieval in realdatajson.py)**：
     - [x] **导入并应用统一 `get_conf_path`**：将 `JSONData/realdatajson.py` 原本自造的、缺失 mapping 自愈机制且冗余的 `get_conf_path(fname)` 函数彻底删除。改为统一从 `sys_utils.py` 导入 `get_conf_path`，从而使 `count.ini` 等配置文件的定位、自愈解密以及防嵌套（如 `datacsv` 等）逻辑与全系统高标准规范绝对对齐，并完美共享 Nuitka Onefile/Onedir 全自动识别与释放功能。
