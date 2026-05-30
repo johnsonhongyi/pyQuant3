@@ -82,8 +82,8 @@ from trading_hub import get_trading_hub, TrackedSignal
 from realtime_data_service import IntradayEmotionTracker, DailyEmotionBaseline
 import sbc_core
 from stock_visual_utils import PercentAxisItem
-from sys_utils import get_base_path, get_conf_path
-BASE_DIR = get_base_path()
+from sys_utils import get_base_path, get_conf_path, get_app_root
+BASE_DIR = get_app_root()
 visualizer_config = get_conf_path("visualizer_layout.json", base_dir=BASE_DIR)
 intraday_pattern_config = get_conf_path("intraday_pattern_config.json", base_dir=BASE_DIR)
 from data_utils import (

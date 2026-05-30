@@ -23,6 +23,7 @@ np = cct.LazyModule('numpy')
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 log = LoggerFactory.getLogger("sina_data")
 # import trollius as asyncio
 # from trollius.coroutines import From
@@ -96,7 +97,7 @@ def get_base_path() -> str:
     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
-BASE_DIR = get_base_path()
+BASE_DIR = get_app_root()
 
 # --------------------------------------
 # STOCK_CODE_PATH 专用逻辑
@@ -106,55 +107,12 @@ def get_stock_code_path() -> Optional[str]:
     """
     获取并验证 stock_codes.conf
     """
-    # 1. 判定是否为 Onefile 物理独立打包模式
-    is_onefile = False
-    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-        is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != BASE_DIR)
-    elif getattr(sys, "frozen", False):
-        if hasattr(sys, "_MEIPASS"):
-            is_onefile = (sys._MEIPASS != BASE_DIR)
-
-    # 2. 根据 Onefile 还是 Onedir/开发环境，动态拼接对应的物理磁盘相对路径
-    if is_onefile:
-        default_path = os.path.join(BASE_DIR, "stock_codes.conf")
-    else:
-        default_path = os.path.join(BASE_DIR, "JSONData", "stock_codes.conf")
-
-    # 自动确保物理目标根目录存在
-    target_dir = os.path.dirname(default_path)
-    if not os.path.exists(target_dir):
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-        except:
-            pass
-
-    # --- 1. 直接存在 ---
-    if os.path.exists(default_path):
-        if os.path.getsize(default_path) >= 0:
-            log.info(f"使用本地配置: {default_path}")
-            return default_path
-        else:
-            log.warning("配置文件存在但为空，将尝试重新释放")
-
-    # --- 2. 释放默认资源 ---
-    cfg_file = cct.get_resource_file(
-        rel_path="JSONData/stock_codes.conf",
-        out_name="stock_codes.conf",
-        BASE_DIR=BASE_DIR
-    )
-
-    # 🚀 物理磁盘目标与释放出来的 cfg_file 重合，无需任何额外复制归位
-    if cfg_file and os.path.exists(cfg_file) and cfg_file != default_path:
-        try:
-            import shutil
-            shutil.copy(cfg_file, default_path)
-            cfg_file = default_path
-        except:
-            pass
-
-    # --- 3. 校验释放结果 ---
+    from sys_utils import get_conf_path
+    
+    cfg_file = get_conf_path("stock_codes.conf", base_dir=BASE_DIR)
+    
     if not cfg_file:
-        log.error("获取 stock_codes.conf 失败（释放阶段）")
+        log.error("获取 stock_codes.conf 失败")
         return None
 
     if not os.path.exists(cfg_file):
@@ -165,7 +123,7 @@ def get_stock_code_path() -> Optional[str]:
         log.error(f"配置文件为空: {cfg_file}")
         return None
 
-    log.info(f"使用内置释放配置: {cfg_file}")
+    log.info(f"使用 stock_codes.conf 配置: {cfg_file}")
     return cfg_file
 
 class StockCode:

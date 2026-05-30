@@ -30,6 +30,7 @@ from signal_bus import SignalBus, get_signal_bus, BusEvent
 from market_pulse_engine import DailyPulseEngine
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 from logger_utils import  with_log_level
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
@@ -320,7 +321,7 @@ class StrategySupervisor:
     def _load_dynamic_constraints(self):
         """从外部 JSON 加载由 TradingAnalyzer 生成的优化参数"""
         try:
-            config_path = os.path.join(cct.get_base_path(), "config", "supervisor_constraints.json")
+            config_path = os.path.join(get_app_root(), "config", "supervisor_constraints.json")
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     dynamic_data: dict[str, Any] = json.load(f)

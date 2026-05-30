@@ -26,7 +26,7 @@ def load_risk_limits_from_config() -> RiskLimits:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return RiskLimits()
         import json
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         # 尝试两个 DPI 主配置文件
         for filename in ("window_config.json", "scale2_window_config.json"):
             config_file = os.path.join(base_dir, filename)
@@ -58,7 +58,7 @@ def load_trading_mode_from_config() -> str:
         if "PYTEST_CURRENT_TEST" in os.environ:
             return "OBSERVE"
         import json
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         for filename in ("window_config.json", "scale2_window_config.json"):
             config_file = os.path.join(base_dir, filename)
             if os.path.exists(config_file):
@@ -86,7 +86,7 @@ class TradingKernelService:
         try:
             import configparser
             import os
-            base_dir = get_base_path()
+            base_dir = get_app_root()
             ini_path = os.path.join(base_dir, "global.ini")
             if os.path.exists(ini_path):
                 config = configparser.ConfigParser()
@@ -231,7 +231,7 @@ class TradingKernelService:
         """
         import os
         import pandas as pd
-        base_dir = get_base_path()
+        base_dir = get_app_root()
         today_date_str = datetime.now().strftime("%Y%m%d")
         h5_paths = [
             fr'G:\shared_df_all-{today_date_str}.h5',
@@ -706,7 +706,7 @@ class TradingKernelService:
                     try:
                         import os
                         import pandas as pd
-                        base_dir = get_base_path()
+                        base_dir = get_app_root()
                         today_date_str = datetime.now().strftime("%Y%m%d")
                         for path in [fr'G:\shared_df_all-{today_date_str}.h5', r'G:\shared_df_all.h5', r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5'), 'top_all.h5']:
                             if os.path.exists(path):

@@ -41,8 +41,8 @@ class TradingLogger:
     """
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            from JohnsonUtil import commonTips as cct
-            db_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+            from sys_utils import get_app_root
+            db_path = os.path.join(get_app_root(), "trading_signals.db")
         self.db_path = db_path
         self._signal_cache = {} # (code, action) -> timestamp
         # Unified DB Manager

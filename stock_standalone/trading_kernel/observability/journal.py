@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Any
 from logger_utils import LoggerFactory
+from sys_utils import get_app_root
 
 logger = LoggerFactory.getLogger("JsonlJournal")
 
@@ -30,9 +31,8 @@ class JsonlJournal:
     def __init__(self, path: str = "logs/trading_kernel_trace.jsonl"):
         # 🛡️ 强制绝对路径化，保证多进程/打包环境下所有账簿消费者与生产者物理定位完全对齐
         import os
-        from sys_utils import get_base_path
         if not os.path.isabs(path):
-            path = os.path.join(get_base_path(), path)
+            path = os.path.join(get_app_root(), path)
         self.path = path
         self._lock = threading.Lock()
         directory = os.path.dirname(path)

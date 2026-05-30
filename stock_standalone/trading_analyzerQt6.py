@@ -8,6 +8,7 @@ from PyQt6.QtGui import QAction
 import sys
 import os
 import pandas as pd
+from sys_utils import get_app_root
 import numpy as np
 from tk_gui_modules.window_mixin import WindowMixin
 from dpi_utils import get_windows_dpi_scale_factor
@@ -83,8 +84,7 @@ class DetailTreeWindow(QDialog, WindowMixin):
         # 抓取交易数据库
         # 注意：这里如果已经处于 TradingGUI 内部环境，可以考虑复用连接，或在此直接简单查询。
         try:
-            from JohnsonUtil import commonTips as cct
-            db_file_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+            db_file_path = os.path.join(get_app_root(), "trading_signals.db")
             with sqlite3.connect(db_file_path) as conn:
                 # trade_records holds pairs of buy and sell. We split them into rows for display.
                 query = """
@@ -120,8 +120,7 @@ class DetailTreeWindow(QDialog, WindowMixin):
         # 抓取信号数据库
         try:
             # Note: live_signal_history is in trading_signals.db instead of signal_strategy.db
-            from JohnsonUtil import commonTips as cct
-            db_file_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+            db_file_path = os.path.join(get_app_root(), "trading_signals.db")
             # db_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "trading_signals.db"))
             with sqlite3.connect(db_file_path) as conn:
                 query = "SELECT timestamp, action as strategy_name, action as signal_type, price, reason as message FROM live_signal_history WHERE code=? ORDER BY timestamp DESC LIMIT 100"
@@ -755,9 +754,8 @@ class TradingGUI(QWidget, WindowMixin):
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
     def __init__(self, logger_path: Optional[str] = None, on_code_callback=None, main_app=None, on_open_visualizer=None, selector=None, live_strategy=None, df_all=None):
         super().__init__()
-        from JohnsonUtil import commonTips as cct
         if logger_path is None:
-            logger_path = os.path.join(cct.get_base_path(), "trading_signals.db")
+            logger_path = os.path.join(get_app_root(), "trading_signals.db")
         
         self.scale_factor = get_windows_dpi_scale_factor()
         self.setWindowTitle("策略交易分析工具")

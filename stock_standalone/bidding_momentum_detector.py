@@ -999,7 +999,7 @@ class BiddingMomentumDetector:
                 future = executor.submit(
                     _build_detector_state_process,
                     self.simulation_mode,
-                    cct.get_base_path()
+                    get_app_root()
                 )
 
                 def _done(fut):
@@ -1754,7 +1754,7 @@ class BiddingMomentumDetector:
     # ------------------------------------------------------------------ 持久化
     def _get_persistence_path(self, snapshot_date: str = None) -> str:
         # 使用 JohnsonUtil 中的 ramdisk 路径获取方法，统一管理
-        base = cct.get_base_path()
+        base = get_app_root()
         if snapshot_date:
             path = os.path.join(base, "snapshots")
             if not os.path.exists(path):
@@ -1773,7 +1773,7 @@ class BiddingMomentumDetector:
         if not os.path.exists(file_path):
             return
         try:
-            base = cct.get_base_path()
+            base = get_app_root()
             bak_dir = os.path.join(base, "snapshots", "backup")
             if not os.path.exists(bak_dir):
                 os.makedirs(bak_dir, exist_ok=True)

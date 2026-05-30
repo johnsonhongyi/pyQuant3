@@ -101,7 +101,7 @@ from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
 import hotkey_rotator
 from ext_data_viewer import ExtDataViewer
-from sys_utils import get_base_path
+from sys_utils import get_app_root
 from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
 import stock_indicator_help
@@ -325,7 +325,7 @@ sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS: list[str] = ct.get_Duration_format_Values(
     ct.Monitor_format_trade,sort_cols[:2])
 
-BASE_DIR = get_base_path()
+BASE_DIR = get_app_root()
 
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")

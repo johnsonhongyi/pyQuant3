@@ -5027,8 +5027,8 @@ def _init_guidance_tab(self, parent: tk.Frame):
             import os
             import json
             try:
-                from sys_utils import get_base_path
-                base_dir = get_base_path()
+                from sys_utils import get_app_root
+                base_dir = get_app_root()
             except Exception:
                 base_dir = os.path.abspath(".")
             filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
@@ -5090,8 +5090,8 @@ def _refresh_guidance_tab(self):
     import os
     import json
     try:
-        from sys_utils import get_base_path
-        base_dir = get_base_path()
+        from sys_utils import get_app_root
+        base_dir = get_app_root()
     except Exception:
         base_dir = os.path.abspath(".")
     filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")

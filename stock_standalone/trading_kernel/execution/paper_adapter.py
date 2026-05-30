@@ -1,5 +1,6 @@
 from __future__ import annotations
 from logger_utils import LoggerFactory
+from sys_utils import get_app_root
 logger = LoggerFactory.getLogger("PaperExecutionAdapter")
 
 
@@ -103,12 +104,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         # 探测测试环境与物理持久化路径
         import os
         self._is_test = "PYTEST_CURRENT_TEST" in os.environ
-        try:
-            from sys_utils import get_base_path
-            base_dir = get_base_path()
-        except ImportError:
-            base_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        self._state_file = os.path.join(base_dir, "logs", "paper_account_state.json")
+        self._state_file = os.path.join(get_app_root(), "logs", "paper_account_state.json")
         
         self._load_state()
         self._last_saved_fingerprint = self._get_trade_fingerprint()

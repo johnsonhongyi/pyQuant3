@@ -16,7 +16,7 @@ import shutil
 import os
 import sys
 from datetime import datetime
-from sys_utils import get_base_path
+from sys_utils import get_app_root
 
 class DatabaseRepairTool:
     """SQLite 数据库修复工具"""
@@ -278,7 +278,7 @@ def main():
     
     # 如果是相对路径，转换为绝对路径
     if not os.path.isabs(target_db):
-        target_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), target_db)
+        target_db = os.path.join(get_app_root(), target_db)
     
     tool = DatabaseRepairTool(target_db)
     success = tool.run()

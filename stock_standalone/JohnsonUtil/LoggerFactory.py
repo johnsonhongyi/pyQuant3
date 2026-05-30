@@ -41,6 +41,70 @@ def _get_win32_exe_path():
     return os.path.dirname(os.path.abspath(buffer.value))
 
 
+def get_app_root() -> str:
+    """Nuitka / PyInstaller / dev 统一兼容的物理可执行程序所在绝对根目录"""
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root and os.path.exists(env_root):
+        return env_root
+
+    def _is_inside_temp_dir(path: str) -> bool:
+        if not path:
+            return False
+        path_norm = os.path.normpath(os.path.normcase(os.path.abspath(path)))
+        for env_name in ("NUITKA_ONEFILE_DIRECTORY", "TEMP", "TMP", "SystemRoot"):
+            env_val = os.environ.get(env_name)
+            if env_val:
+                try:
+                    env_norm = os.path.normpath(os.path.normcase(os.path.abspath(env_val)))
+                    if env_norm in path_norm:
+                        return True
+                except:
+                    pass
+                try:
+                    env_real = os.path.normpath(os.path.normcase(os.path.realpath(env_val)))
+                    if env_real in path_norm:
+                        return True
+                except:
+                    pass
+        for pattern in ("instock_nuitka", "onefile_", "_meipass", "\\temp\\", "/temp/"):
+            if pattern in path_norm:
+                return True
+        return False
+
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+    calculated_root = None
+    if is_nuitka:
+        if sys.argv and sys.argv[0]:
+            argv0_abspath = os.path.abspath(sys.argv[0])
+            if os.path.basename(argv0_abspath).lower() not in ('python.exe', 'pythonw.exe', 'python', 'pythonw'):
+                if not _is_inside_temp_dir(argv0_abspath):
+                    calculated_root = os.path.dirname(argv0_abspath)
+    if not calculated_root:
+        if getattr(sys, "frozen", False) or is_nuitka:
+            exe_abspath = os.path.abspath(sys.executable)
+            if not _is_inside_temp_dir(exe_abspath):
+                calculated_root = os.path.dirname(exe_abspath)
+    if not calculated_root:
+        try:
+            path = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(path) == 'JohnsonUtil':
+                path = os.path.dirname(path)
+            if _is_inside_temp_dir(path):
+                for sp in sys.path:
+                    if sp and not _is_inside_temp_dir(sp):
+                        calculated_root = os.path.abspath(sp)
+                        break
+                if not calculated_root:
+                    calculated_root = os.getcwd()
+            else:
+                calculated_root = path
+        except Exception:
+            calculated_root = os.getcwd()
+
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    return calculated_root
+
+
 def get_base_path():
     """
     获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
@@ -112,7 +176,7 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
     out_name:   释放目标文件名
     """
     if BASE_DIR is None:
-        BASE_DIR = get_base_path()
+        BASE_DIR = get_app_root()
         # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
 
     if out_name is None:
@@ -183,7 +247,7 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
 # --------------------------------------
 # STOCK_CODE_PATH 专用逻辑
 # --------------------------------------
-BASE_DIR = get_base_path()
+BASE_DIR = get_app_root()
 
 def get_conf_path(fname):
     """

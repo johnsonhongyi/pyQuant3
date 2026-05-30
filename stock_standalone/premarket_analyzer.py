@@ -13,11 +13,11 @@ except Exception:
 
 try:
     from sys_utils import get_base_path, get_app_root
-    base_dir = get_base_path()
+    pkg_dir = get_base_path()
 except Exception:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-if base_dir not in sys.path:
-    sys.path.append(base_dir)
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+if pkg_dir not in sys.path:
+    sys.path.append(pkg_dir)
 
 from logger_utils import LoggerFactory
 logger = LoggerFactory.getLogger("PremarketAnalyzer")
@@ -46,7 +46,7 @@ def run_premarket_diagnose() -> list:
     logger.info("Starting pre-market diagnostics...")
     
     # 1. Load holdings from paper_account_state.json
-    state_file = os.path.join(base_dir, "logs", "paper_account_state.json")
+    state_file = os.path.join(get_app_root(), "logs", "paper_account_state.json")
     if not os.path.exists(state_file):
         logger.warning(f"Account state file not found: {state_file}. Generating mock diagnostics...")
         # fallback to an empty or default structure
@@ -84,7 +84,7 @@ def run_premarket_diagnose() -> list:
 
     # Load name map from top_all.h5 to resolve real Chinese stock names
     name_map = {}
-    for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
+    for path in [r'g:\top_all.h5', os.path.join(get_app_root(), 'top_all.h5')]:
         if os.path.exists(path):
             try:
                 df_top = pd.read_hdf(path, 'top_all')
@@ -277,7 +277,7 @@ def run_premarket_diagnose() -> list:
         diagnostics.append(advice)
 
     # 3. Persistent save
-    output_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+    output_file = os.path.join(get_app_root(), "logs", "premarket_diagnose.json")
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     try:
         with open(output_file, "w", encoding="utf-8") as f:
