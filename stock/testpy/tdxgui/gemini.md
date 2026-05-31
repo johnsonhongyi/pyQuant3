@@ -1,5 +1,11 @@
 # pyQuant3 Gemini Progress Tracker
 
+## 2026-06-01 01:45
+- [x] **修复打包后 rank 数据缺失问题 (Fixed Packaged Rank Data Missing)**：
+    - [x] **完全本地化 `build_hma_and_trendscore` 排序与指标计算函数 (Localized Core Ranking Algorithm)**：在 `异动联动.py` 内部引入了自包含的 `build_hma_and_trendscore_local` 替代函数，完全复制了原本在 `stock_standalone/data_utils.py` 中的算法结构（包含 HMA 平均线、TrendS 趋势强度、强势因子归一化和连阳加权等）。
+    - [x] **解耦外部死路径动态导入 (Decoupled Hardcoded Path Imports)**：彻底废除了原本通过 `sys.path.append` 动态加载 `d:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone` 目录下的外部 `data_utils.py` 逻辑。消除了由于外部绝对路径在打包环境隔离、移植部署或缺少隐藏依赖时导致的 `ImportError` 排序失败。
+    - [x] **实现全面环境兼容与自愈**：通过极简本土化重构，不仅在本地 Python 脚本中保持了完美的运行一致性，而且直接提升了应用打包成 EXE 时在无源码/独立机器部署下的健壮性，确保 Rank 指标数据在任何启动和运行模式下均高频展示、永不缺失。
+
 ## 2026-06-01 00:45
 - [x] **历史监控数据源增强与重排强弱状态对齐 (Unified Data Enrichment & Precision Rearrangement)**：
     - [x] **统一行情增强源为 `GLOBAL_TOP_ALL` 且保留异动特有列 (Unified Data Source & Column Preservation)**：

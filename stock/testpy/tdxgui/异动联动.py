@@ -5085,7 +5085,7 @@ class GlobalConfig:
         self.filterclose  = self.get_with_writeback("general", "filterclose", fallback='close', value_type="str")
         self.filterhigh4  = self.get_with_writeback("general", "filterhigh4", fallback='high4', value_type="str")
         self.duration_date_day  = self.get_with_writeback("general", "duration_date_day", fallback='120', value_type="int")
-        self.custom_columns = self.get_with_writeback("general", "custom_columns", fallback="'时间', '代码', '名称','count','dff', 'dff2', 'rank','异动类型', '涨幅', '价格', '量'", value_type="str")
+        self.custom_columns = self.get_with_writeback("general", "custom_columns", fallback="'时间', '代码', '名称','count','dff', 'dff2', 'rank','dff3','异动类型', '涨幅', '价格', '量'", value_type="str")
         self.loglevel = self.get_with_writeback("general", "loglevel", fallback='WARN', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
@@ -5648,6 +5648,119 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
        
     
 
+def build_hma_and_trendscore_local(
+    df,
+    close_col='close',
+    ma_map=None,
+    strong_cols=None,
+    win_col='win',
+    max_days=9,
+    lastv_prefix='lastv',
+    invalid_val=-101.0,
+    status_callback=None
+):
+    """
+    本地实现的 build_hma_and_trendscore，解耦外部 data_utils 依赖，确保打包后 rank 计算正常。
+    """
+    n = len(df)
+    if n == 0:
+        df['Rank'] = pd.Series(dtype=int)
+        return df
+
+    if ma_map is None:
+        ma_map = {5: 'ma5d', 10: 'ma10d', 20: 'ma20d', 60: 'ma60d'}
+    if strong_cols is None:
+        strong_cols = ['sum_perc', 'slope', 'vol_ratio', 'power_idx']
+
+    # ---------- 1️⃣ HMA & TrendS ----------
+    close = df[close_col].values.astype('float32')
+    score = np.zeros(n, dtype='float32')
+    weight_sum = 0.0
+    weights = {5: 0.35, 10: 0.30, 20: 0.20, 60: 0.15}
+
+    for period, ma_col in ma_map.items():
+        hma_col = f'Hma{period}d'
+        if ma_col not in df.columns:
+            df[hma_col] = invalid_val
+            continue
+
+        ma = df[ma_col].values.astype('float32')
+        valid = ma > 0
+        hma = np.full(n, invalid_val, dtype='float32')
+        hma[valid] = (close[valid] - ma[valid]) / (ma[valid] + 0.01) * 100
+        df[hma_col] = np.round(hma, 1)
+
+        w = weights.get(period, 0)
+        if w > 0:
+            score[valid] += np.clip(hma[valid], -10, 10) * w
+            weight_sum += w
+
+    if weight_sum > 0:
+        trend = (score / weight_sum + 10) * 5
+        df['TrendS'] = np.clip(trend, 0, 100).round(1)
+    else:
+        df['TrendS'] = 0.0
+
+    # ---------- 2️⃣ 强势因子 ----------
+    strong_score = np.zeros(n, dtype='float32')
+    for col in strong_cols:
+        if col in df.columns:
+            arr = df[col].fillna(0).values.astype('float32')
+            arr_ptp = arr.ptp()
+            if arr_ptp > 0:
+                arr = (arr - arr.min()) / arr_ptp
+            else:
+                arr = np.zeros(n, dtype='float32')
+            strong_score += arr
+    strong_score /= max(1, len([c for c in strong_cols if c in df.columns]))
+
+    # ---------- 3️⃣ 连阳加权 ----------
+    if win_col in df.columns:
+        win_vals = df[win_col].fillna(0).astype('float32')
+    else:
+        win_vals = np.zeros(n, dtype='float32')
+
+    # ---------- 4️⃣ 最近 N 天成交量因子 ----------
+    # 模拟 get_status 逻辑
+    has_status = False
+    if status_callback is not None:
+        if hasattr(status_callback, "value"):
+            has_status = int(status_callback.value) > 0
+        elif callable(status_callback):
+            try:
+                has_status = int(status_callback()) > 0
+            except Exception:
+                has_status = False
+        else:
+            has_status = bool(status_callback)
+
+    if has_status:
+        vol_cols = [f'{lastv_prefix}{i}d' for i in range(1, max_days + 1)]
+        vol_cols = [c for c in vol_cols if c in df.columns]
+
+        if vol_cols:
+            vol_arr = df[vol_cols].fillna(0).values.astype('float32')
+            vol_max = np.log1p(vol_arr.max(axis=1))
+            vol_mean = vol_arr.mean(axis=1)
+            vol_ratio = np.clip(vol_arr[:, 0] / (vol_mean + 1e-6), 0.5, 5.0)
+            vol_continuity = (vol_arr > vol_mean[:, None]).sum(axis=1) / vol_arr.shape[1]
+            volume_factor = vol_max * vol_ratio * (1 + vol_continuity)
+        else:
+            volume_factor = np.zeros(n, dtype='float32')
+        sort_score = df['TrendS'].values * 1000 + strong_score * 10 + win_vals * 1.0 + volume_factor * 50
+    else:
+        sort_score = df['TrendS'].values * 1000 + strong_score * 10 + win_vals * 1.0
+
+    df['Rank'] = (-sort_score).argsort().argsort() + 1
+
+    # ---------- 5️⃣ 最后统一格式化 .1f ----------
+    for col in ['Hma5d', 'Hma10d', 'Hma20d', 'Hma60d', 'TrendS']:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+
+    return df
+
+
 def fast_insert(tree, dataframe):
     if dataframe is not None and not dataframe.empty:
         # 批量插入
@@ -5754,12 +5867,9 @@ def fast_insert(tree, dataframe):
                     
                     # ----------------- 计算 Rank -----------------
                     try:
-                        import sys
-                        sys.path.append(r'd:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone')
-                        from data_utils import build_hma_and_trendscore
-                        top_all = build_hma_and_trendscore(top_all)
+                        top_all = build_hma_and_trendscore_local(top_all)
                     except Exception as e:
-                        logger.error(f"调用 build_hma_and_trendscore 排序失败: {e}")
+                        logger.error(f"调用 build_hma_and_trendscore_local 排序失败: {e}")
                         
                     tdx_df = top_all
                     global GLOBAL_TOP_ALL
