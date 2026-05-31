@@ -109,6 +109,9 @@ BASE_DIR = get_base_path()
 monitor_windows = {}  # 存储监控窗口实例
 
 WINDOW_GEOMETRIES = {}
+COLUMN_WIDTHS = {}
+rules_tree = None
+GLOBAL_TOP_ALL = None
 WINDOWS_BY_ID = {}
 save_timer = None
 
@@ -1932,8 +1935,10 @@ def process_full_dataframe(df):
     # 3. 計算每個“代码”出現的次數
     df.loc[:, 'count'] = df.groupby('代码')['代码'].transform('count')
     
-    # 4. 排序字段输出
-    df = df[['时间', '代码', '名称', 'count', '板块', '相关信息', '涨幅', '价格', '量']]
+    # 4. 排序字段输出 (保留所有自定义扩展列)
+    base_cols = ['时间', '代码', '名称', 'count', '板块', '相关信息', '涨幅', '价格', '量']
+    extra_cols = [c for c in df.columns if c not in base_cols]
+    df = df[base_cols + extra_cols]
     return df
 
 
@@ -2651,116 +2656,6 @@ def daily_task():
     # start_async_save_dataframe()
     # 在这里添加你的具体任务，例如：
 
-# ui_queue = queue.Queue()      # UI 更新队列
-# data_queue = queue.Queue()    # 后台线程数据队列
-
-# def process_ui_queue():
-#     while not ui_queue.empty():
-#         func = ui_queue.get()
-#         func()
-#     root.after(100, process_ui_queue)  # 每 100ms 处理一次
-
-# def process_data_queue():
-#     while not data_queue.empty():
-#         df = data_queue.get()
-#         # df 就是后台线程生成的 realdatadf，可以安全存档
-#         date_str = date_entry.get_date()
-#         filename = f"datacsv/dfcf_{date_str}.csv.bz2"
-#         logger.info(f'start save date: {df.shape} filename : {filename}')
-#         df.to_csv(filename, index=False, encoding='utf-8-sig', compression='bz2')
-#         toast_message(None, f"文件已存儲: {filename}")
-#         logger.info( f"文件已存儲: {filename}")
-#     # 继续轮询
-#     root.after(500, process_data_queue)
-
-# def start_async_save_dataframe():
-#     """后台线程安全保存 DataFrame，UI 不阻塞"""
-#     def worker():
-#         global date_write_is_processed, loaded_df, start_init
-
-#         # 获取今天/最后交易日日期
-#         if not get_day_is_trade_day():
-#             date_str = get_last_weekday_before()
-#         else:
-#             date_str = get_today()
-#         filename = os.path.join(BASE_DIR, "datacsv", f"dfcf_{date_str}.csv.bz2")
-
-#         # 核心检查逻辑
-#         if get_now_time_int() > 1505 and os.path.exists(filename):
-#             logger.info(f'workday:{date_str} {filename} exists, return')
-#             return
-
-#         init_start_time = time.time()
-#         while not start_init:
-#             now_time = get_now_time_int()
-#             is_trade_day = get_day_is_trade_day()
-#             work_time = get_work_time()
-#             in_trade_session = is_trade_day and 930 < now_time < 1505
-#             is_non_trade_day_with_file = (not is_trade_day) and os.path.exists(filename)
-
-#             if work_time or in_trade_session or is_non_trade_day_with_file:
-#                 logger.info("条件满足，不执行 save_dataframe...")
-#                 return
-
-#             count_time = int(time.time() - init_start_time)
-#             if is_trade_day and count_time < 90:
-#                 logger.info(f'count_time : {count_time}，等待初始化完成...')
-#                 time.sleep(5)
-#             else:
-#                 break
-
-#         logger.info(f'start_init:{start_init} will to save')
-#         # root.after(0, lambda: toast_message(None, f'start_init:{start_init} will to save'))
-#         ui_queue.put(lambda: toast_message(None, f'start_init:{start_init} will to save'))
-
-
-#         try:
-#             # ✅ UI 访问部分，先在主线程安全获取
-#             # selected_date_obj = date_entry.get_date()
-#             # selected_type_val = type_var.get()
-#             # date_str = selected_date_obj.strftime("%Y-%m-%d")
-
-#             date_str = get_last_weekday_before()
-#             filename = os.path.join(BASE_DIR, "datacsv", f"dfcf_{date_str}.csv.bz2")
-#             date_write_is_processed = True
-
-#             # 后台耗时任务
-#             if os.path.exists(filename):
-#                 logger.info(f"文件 '{filename}' 已存在，加载...")
-#                 loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
-#             else:
-#                 # 模拟耗时等待
-#                 time.sleep(6)
-#                 logger.info(f"文件 '{filename}' 不存在，init to save...")
-#                 all_df = get_stock_changes_background()
-#                 all_df['代码'] = all_df["代码"].astype(str).str.zfill(6)
-#                 # 保存 CSV
-#                 if all_df and not all_df.empty:
-#                     logger.info(' data_queue.put(all_df) : {all_df.shape}')
-#                     data_queue.put(all_df)
-#                 else:
-#                     ui_queue.put(lambda: toast_message(None, f'df is None'))
-
-#                 # all_df.to_csv(filename, index=False, encoding='utf-8-sig', compression="bz2")
-#                 loaded_df = all_df
-#                 # UI 提示
-#                 msg = f"文件已儲存為: {filename}"
-#                 ui_queue.put(lambda: toast_message(None, msg))
-#                 logger.info(f"文件已儲存為: {filename}")
-
-#             loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
-
-#         except Exception as e:
-#             # 异常 UI 提示必须在主线程
-#             # root.after(0, lambda: messagebox.showerror("錯誤", f"save_data儲存文件時發生錯誤: {e}"))
-#             msg = f"save_data儲存文件時發生錯誤: {e}"
-#             ui_queue.put(lambda: toast_message(None, msg))
-#             # ui_queue.put(lambda: toast_message(None, f"save_data儲存文件時發生錯誤: {e}"))
-
-#             logger.info(f"save_data儲存文件時發生錯誤: {e}")
-
-#     # 启动后台线程
-#     threading.Thread(target=worker, daemon=True).start()
 
 
 def get_next_weekday_time(target_hour, target_minute):
@@ -5104,6 +4999,8 @@ class GlobalConfig:
         self.filterclose  = self.get_with_writeback("general", "filterclose", fallback='close', value_type="str")
         self.filterhigh4  = self.get_with_writeback("general", "filterhigh4", fallback='high4', value_type="str")
         self.duration_date_day  = self.get_with_writeback("general", "duration_date_day", fallback='120', value_type="int")
+        self.custom_columns = self.get_with_writeback("general", "custom_columns", fallback="'时间', '代码', '名称','count','dff', 'dff2', 'rank','异动类型', '涨幅', '价格', '量'", value_type="str")
+        self.loglevel = self.get_with_writeback("general", "loglevel", fallback='WARN', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
@@ -5199,6 +5096,22 @@ if not conf_ini:
 
 CFG = GlobalConfig(conf_ini)
 
+# 自动应用 loglevel 到全局 logger
+if hasattr(CFG, 'loglevel') and CFG.loglevel:
+    level_name = CFG.loglevel.upper()
+    # 建立常见缩写与标准级别的映射关系
+    level_map = {
+        'D': 'DEBUG', 'DEBUG': 'DEBUG',
+        'I': 'INFO', 'INFO': 'INFO',
+        'W': 'WARNING', 'WARN': 'WARNING', 'WARNING': 'WARNING',
+        'E': 'ERROR', 'ERROR': 'ERROR',
+        'C': 'CRITICAL', 'CRITICAL': 'CRITICAL'
+    }
+    mapped_level = level_map.get(level_name, level_name)
+    numeric_level = getattr(logging, mapped_level, None)
+    if isinstance(numeric_level, int):
+        logger.setLevel(numeric_level)
+
 initGlobalValue = CFG.init_value
 clean_terminal = CFG.clean_terminal
 win10_ramdisk = CFG.win10_ramdisk
@@ -5212,9 +5125,12 @@ duration_date_day = CFG.duration_date_day
 #     CFG.get_path("root_path_mac"),
 # ]
 
+today_tdx_df_last_read_date = None
+
 def _get_tdx_data_df(stock_code=None):
     global sina_data_last_updated_time, sina_data_df
     global pytables_status, today_tdx_df
+    global today_tdx_df_last_read_date
 
     basedir = win10_ramdisk + os.sep
     ptype = 'low'
@@ -5224,6 +5140,14 @@ def _get_tdx_data_df(stock_code=None):
 
     fname = os.path.join(basedir, "tdx_last_df.h5")
     table = f"{ptype}_{resample}_{dl}_{filter}_all"
+
+    # 强制每天盘前或首次初始化时重新读取一次新数据，确认逻辑功能正常
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    if today_tdx_df_last_read_date != current_date:
+        logger.info(f"📅 检测到日期变更或首次初始化，重置并重新读取 TDX 数据：{today_tdx_df_last_read_date} -> {current_date}")
+        today_tdx_df = None
+        today_tdx_df_last_read_date = current_date
+
     logger.info(f"🔄fname:{fname} table:{table} ")
     # ① 读取 TDX 数据（只读一次）
     if pytables_status and (today_tdx_df is None or today_tdx_df.empty):
@@ -5231,24 +5155,6 @@ def _get_tdx_data_df(stock_code=None):
     
     if today_tdx_df is None or today_tdx_df.empty:
         return today_tdx_df
-
-    # # ② 只取 high4 列
-    # if 'high4' not in today_tdx_df.columns:
-    #     return today_tdx_df
-
-    # high4_df = today_tdx_df[['high4']]
-
-    # # ③ 合并到 sina_data_df
-    # if sina_data_df is not None and not sina_data_df.empty:
-    #     sina_data_df = sina_data_df.join(high4_df, how='left')
-    # else:
-    #     sina_data_df = high4_df.copy()
-
-    # # ④ 可选：只返回指定股票
-    # if stock_code:
-    #     stock_code = stock_code.zfill(6)
-    #     if stock_code in today_tdx_df.index:
-    #         return today_tdx_df.loc[[stock_code]]
 
     return today_tdx_df
 
@@ -5692,10 +5598,168 @@ def fast_insert(tree, dataframe):
             logger.info(f'fast_insert:count retry process_full_dataframe:{dataframe[:1]}')
             dataframe = process_full_dataframe(dataframe) 
 
-        dataframe = dataframe[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
-        for row in dataframe.itertuples(index=False, name=None):
-            values = list(row)
-            tree.tk.call(tree, "insert", "", "end", "-values", values)
+        # 1. 确定当前 Tree 实例所使用的 columns
+        try:
+            tree_cols = tree["columns"]
+        except Exception:
+            tree_cols = ('时间', '代码', '名称', 'count', '异动类型', '涨幅', '价格', '量')
+
+        # 2. 识别需要从 tdx_df 提取的定制列 (不在 dataframe 中且不是 '异动类型')
+        tdx_cols_to_fetch = []
+        for col in tree_cols:
+            if col not in dataframe.columns and col != '异动类型':
+                tdx_cols_to_fetch.append(col)
+
+        # 3. 预先获取 tdx_df 并合并实时行情计算 dff, dff2, rank
+        tdx_df = None
+        tdx_col_mappings = {}
+        if tdx_cols_to_fetch:
+            try:
+                base_tdx = _get_tdx_data_df()
+                # 动态获取全量实时数据 DataFrame
+                sina_df = _get_sina_data_realtime(None)
+                
+                if base_tdx is not None and not base_tdx.empty and sina_df is not None and not sina_df.empty:
+                    # 确保索引唯一并转换为字符串
+                    base_tdx.index = base_tdx.index.astype(str)
+                    base_tdx = base_tdx[~base_tdx.index.duplicated(keep='first')]
+                    
+                    sina_df.index = sina_df.index.astype(str)
+                    sina_df = sina_df[~sina_df.index.duplicated(keep='first')]
+                    
+                    # 展平 MultiIndex 列
+                    top_all = base_tdx.copy()
+                    if isinstance(top_all.columns, pd.MultiIndex):
+                        new_cols = []
+                        for col in top_all.columns:
+                            if col[1]:
+                                new_cols.append(col[1])
+                            else:
+                                new_cols.append(col[0])
+                        top_all.columns = new_cols
+                    
+                    # 用 SINA 实时的列覆盖静态的列
+                    conflict_cols = [c for c in sina_df.columns if c in top_all.columns]
+                    if conflict_cols:
+                        top_all = top_all.drop(columns=conflict_cols, errors='ignore')
+                    
+                    # 合并成 top_all
+                    top_all = top_all.join(sina_df, how='inner')
+                    
+                    # ----------------- 计算 dff, dff2, dff3 -----------------
+                    now_time = get_now_time_int()
+                    
+                    if 'lastbuy' in top_all.columns and 'llastp' in top_all.columns:
+                        lastbuy_safe = top_all['lastbuy'].mask(top_all['lastbuy'] == 0, top_all['llastp'])
+                    elif 'llastp' in top_all.columns:
+                        lastbuy_safe = top_all['llastp']
+                    else:
+                        lastbuy_safe = 0
+                        
+                    if 'buy' not in top_all.columns and 'close' in top_all.columns:
+                        top_all['buy'] = top_all['close']
+                    elif 'buy' not in top_all.columns:
+                        top_all['buy'] = 0
+                        
+                    if 'llastp' in top_all.columns:
+                        llastp_val = top_all['llastp']
+                    else:
+                        llastp_val = 1.0
+                        
+                    llow_val = top_all['llow'] if 'llow' in top_all.columns else llastp_val
+                    minclose_val = top_all['minclose'] if 'minclose' in top_all.columns else llastp_val
+                    
+                    if get_trade_date_status():
+                        if 'lastbuy' in top_all.columns:
+                            if 915 < now_time < 930:
+                                top_all['dff'] = ((top_all['buy'] - llastp_val) / llastp_val * 100).round(1)
+                                top_all['dff3'] = ((top_all['buy'] - minclose_val) / minclose_val * 100).round(1)
+                                top_all['dff2'] = ((top_all['buy'] - llow_val) / llow_val * 100).round(1)
+                            elif 926 < now_time < 1455:
+                                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
+                                top_all['dff3'] = ((top_all['buy'] - minclose_val) / minclose_val * 100).round(1)
+                                top_all['dff2'] = ((top_all['buy'] - llow_val) / llow_val * 100).round(1)
+                            else:
+                                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
+                                top_all['dff3'] = ((top_all['buy'] - minclose_val) / minclose_val * 100).round(1)
+                                top_all['dff2'] = ((top_all['buy'] - llow_val) / llow_val * 100).round(1)
+                        else:
+                            top_all['dff'] = ((top_all['buy'] - llastp_val) / llastp_val * 100).round(1)
+                            top_all['dff3'] = ((top_all['buy'] - minclose_val) / minclose_val * 100).round(1)
+                            top_all['dff2'] = ((top_all['buy'] - llow_val) / llow_val * 100).round(1)
+                    else:
+                        top_all['dff'] = ((top_all['buy'] - llastp_val) / llastp_val * 100).round(1)
+                        top_all['dff3'] = ((top_all['buy'] - minclose_val) / minclose_val * 100).round(1)
+                        top_all['dff2'] = ((top_all['buy'] - llow_val) / llow_val * 100).round(1)
+                        
+                    top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
+                    top_all['dff'].fillna(0, inplace=True)
+                    
+                    # ----------------- 计算 Rank -----------------
+                    try:
+                        import sys
+                        sys.path.append(r'd:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone')
+                        from data_utils import build_hma_and_trendscore
+                        top_all = build_hma_and_trendscore(top_all)
+                    except Exception as e:
+                        logger.error(f"调用 build_hma_and_trendscore 排序失败: {e}")
+                        
+                    tdx_df = top_all
+                    global GLOBAL_TOP_ALL
+                    GLOBAL_TOP_ALL = top_all.copy() if top_all is not None else None
+                else:
+                    tdx_df = base_tdx
+                    
+                if tdx_df is not None and not tdx_df.empty:
+                    # 建立不区分大小写的列名映射
+                    for target_col in tdx_cols_to_fetch:
+                        target_lower = target_col.lower()
+                        for c in tdx_df.columns:
+                            if str(c).lower() == target_lower:
+                                tdx_col_mappings[target_col] = c
+                                break
+            except Exception as e:
+                logger.error(f"加载定制化 TDX 数据失败: {e}")
+
+        # 3.5 将计算得到的自定义指标写回原 dataframe 容器中（用于界面点击表头排序防 KeyError）
+        if tdx_df is not None and not tdx_df.empty and '代码' in dataframe.columns:
+            codes_str = dataframe['代码'].astype(str).str.zfill(6)
+            for target_col in tdx_cols_to_fetch:
+                tdx_real_col = tdx_col_mappings.get(target_col)
+                if tdx_real_col and tdx_real_col in tdx_df.columns:
+                    dataframe[target_col] = codes_str.map(tdx_df[tdx_real_col]).fillna("")
+
+        # 4. 转换并批量插入数据
+        df_cols_avail = dataframe.columns.tolist()
+        for row in dataframe.itertuples(index=False):
+            row_dict = dict(zip(df_cols_avail, row))
+            row_values = []
+            code = row_dict.get('代码', '')
+
+            for col in tree_cols:
+                if col in row_dict:
+                    row_values.append(str(row_dict[col]))
+                elif col == '异动类型':
+                    val = row_dict.get('板块', row_dict.get('异动类型', ''))
+                    row_values.append(str(val))
+                elif col in tdx_col_mappings:
+                    tdx_real_col = tdx_col_mappings[col]
+                    val = ""
+                    if tdx_df is not None and not tdx_df.empty:
+                        cleaned_code = str(code).zfill(6)
+                        if cleaned_code in tdx_df.index:
+                            try:
+                                tdx_row = tdx_df.loc[cleaned_code]
+                                if isinstance(tdx_row, pd.DataFrame):
+                                    tdx_row = tdx_row.iloc[0]
+                                val = str(tdx_row[tdx_real_col])
+                            except Exception:
+                                pass
+                    row_values.append(val)
+                else:
+                    row_values.append("")
+
+            tree.tk.call(tree, "insert", "", "end", "-values", row_values)
 
         if dataframe is not None:
             status_var.set(f"已加载 {len(dataframe)} 条记录 | 更新于: {time.strftime('%H:%M:%S')}")
@@ -5704,7 +5768,78 @@ def fast_insert(tree, dataframe):
             tree.insert("", "end", values=("无数据", "", "", "", ""))
         # 强制刷新一次
         tree.update_idletasks()
+        
+        # 无论是否进行了提取合并，均在 fast_insert 退出前强行将最新的 dataframe 写回全局 viewdf
+        if dataframe is not None:
+            global viewdf
+            viewdf = dataframe.copy()
 
+
+
+def get_monitor_next_delay_ms():
+    """根据当前时间计算监控窗口的下一次刷新延时（毫秒）"""
+    now = datetime.now()
+    next_execution_time = get_next_weekday_time(9, 25)
+    delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+
+    if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
+        if not 1130 < get_now_time_int() < 1300:
+            delay_ms = 30000
+        else:
+            delay_ms = int(minutes_to_time(1300)) * 60 * 1000
+    
+    return delay_ms
+
+
+def schedule_monitor_next_refresh(delay_ms, tree, window_info, item_id):
+    """在全局注册并安排下一次监控刷新任务"""
+    global refresh_registry
+    key = (id(tree), id(window_info), item_id)
+    now = time.time()
+    reg = refresh_registry.setdefault(key, {"after_id": None, "execute_at": 0})
+
+    # 如果已有任务且还没到期，直接返回
+    if reg["execute_at"] > now:
+        return
+
+    execute_at = now + delay_ms / 1000
+    reg["execute_at"] = execute_at
+
+    # 取消旧任务
+    if reg["after_id"]:
+        try:
+            tree.after_cancel(reg["after_id"])
+        except Exception:
+            pass
+
+    # 安排下一次刷新
+    def task():
+        try:
+            refresh_stock_data(window_info, tree, item_id)
+        finally:
+            reg["after_id"] = None
+            reg["execute_at"] = 0
+
+    reg["after_id"] = tree.after(delay_ms, task)
+
+    # 打印日志并尝试更新状态栏
+    try:
+        stock_info = window_info['stock_info']
+        stock_code = stock_info[0]
+        stock_name = stock_info[1]
+        
+        if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
+            if not 1130 < get_now_time_int() < 1300:
+                logger.debug(f'update_monitor_tree 交易时段刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
+            else:
+                logger.info(f'update_monitor_tree 非交易刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
+        else:
+            logger.info(f'update_monitor_tree 次日刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
+            
+        if 'status_label2' in globals() and status_label2.winfo_exists():
+            status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
+    except Exception:
+        pass
 
 
 def refresh_stock_data(window_info, tree, item_id,debug=False):
@@ -5734,34 +5869,34 @@ def refresh_stock_data(window_info, tree, item_id,debug=False):
 
 def handle_error(payload, tree, window_info, item_id):
     """处理后台线程或消息队列中的错误（更强壮版本）"""
-
     logger.info(f"⚠️ 异步任务出错: {payload!r}")
 
     # ===== ① payload 是真正的异常对象 =====
     if isinstance(payload, BaseException):
         logger.error("异常类型: %s", type(payload).__name__)
         traceback.print_exception(type(payload), payload, payload.__traceback__)
-        return
-
     # ===== ② payload 不是异常对象 =====
-    logger.error("⚠️ payload 不是异常对象，类型: %s", type(payload))
-    logger.error("⚠️ payload 内容: %r", payload)
+    else:
+        logger.error("⚠️ payload 不是异常对象，类型: %s", type(payload))
+        logger.error("⚠️ payload 内容: %r", payload)
 
-    # ===== ③ payload 是 dict → 尝试提取内部错误 =====
-    if isinstance(payload, dict):
-        error_fields = ["error", "exception", "exc", "msg", "message", "detail"]
-        for key in error_fields:
-            if key in payload:
-                logger.error("⚠️ payload[%s] = %r", key, payload[key])
+        # ===== ③ payload 是 dict → 尝试提取内部错误 =====
+        if isinstance(payload, dict):
+            error_fields = ["error", "exception", "exc", "msg", "message", "detail"]
+            for key in error_fields:
+                if key in payload:
+                    logger.error("⚠️ payload[%s] = %r", key, payload[key])
+                    inner = payload[key]
+                    if isinstance(inner, BaseException):
+                        traceback.print_exception(type(inner), inner, inner.__traceback__)
 
-                # 如果内部字段本身是异常 → 打印 traceback
-                inner = payload[key]
-                if isinstance(inner, BaseException):
-                    logger.error("⚠️ payload[%s] 是异常对象 → 打印详细 traceback", key)
-                    traceback.print_exception(type(inner), inner, inner.__traceback__)
-                return
-
-
+    # === [🚀 修复] 无论成功还是失败，都必须继续调度下一次刷新，确保刷新链不断 ===
+    key = (id(tree), id(window_info), item_id)
+    if key not in refresh_registry:
+        refresh_registry[key] = {"after_id": None, "execute_at": 0}
+    
+    delay_ms = get_monitor_next_delay_ms()
+    schedule_monitor_next_refresh(delay_ms, tree, window_info, item_id)
 
 
 def process_queue(window):
@@ -5777,7 +5912,29 @@ def process_queue(window):
 
     now = time.time()
     # 2. 如果达到更新间隔，批量处理缓存
-    if message_cache and (now - last_update_time >= UPDATE_INTERVAL):
+    should_process = (now - last_update_time >= UPDATE_INTERVAL)
+    
+    # [🚀 增强] 若有监控窗口正处于加载中(loading)或数据为空，为了避免用户长时间等待，应当即时刷新，不受 UPDATE_INTERVAL 限制
+    if message_cache and not should_process:
+        has_loading_or_empty = False
+        for msg_type, payload, tree, window_info, item_id in message_cache:
+            try:
+                if tree and tree.winfo_exists():
+                    children = tree.get_children()
+                    if not children:
+                        has_loading_or_empty = True
+                        break
+                    else:
+                        first_val = tree.item(children[0], "values")
+                        if first_val and first_val[0] in ("加载ing...", "loading"):
+                            has_loading_or_empty = True
+                            break
+            except Exception:
+                pass
+        if has_loading_or_empty:
+            should_process = True
+
+    if message_cache and should_process:
         for msg_type, payload, tree, window_info, item_id in message_cache:
             if msg_type == "data":
                 update_monitor_tree(payload, tree, window_info, item_id)
@@ -5788,7 +5945,6 @@ def process_queue(window):
         last_update_time = now
 
     # 3. 定时再次轮询
-    # logger.info(f'process_queue:0.5S')
     window.after(500, lambda: process_queue(window))  # 0.5秒轮询一次队列
 
 
@@ -5875,47 +6031,15 @@ def update_monitor_tree(data, tree, window_info, item_id):
                 return  # 重复则不插入
         tree.insert("", 0, values=new_row)
 
-    def schedule_next(delay_ms, key, tree, window_info, item_id):
-        now = time.time()
-        reg = refresh_registry.setdefault(key, {"after_id": None, "execute_at": 0})
-
-        # 如果已有任务且还没到期，直接返回
-        if reg["execute_at"] > now:
-            return
-
-        execute_at = now + delay_ms / 1000
-        reg["execute_at"] = execute_at
-
-        # 取消旧任务
-        if reg["after_id"]:
-            try:
-                tree.after_cancel(reg["after_id"])
-            except Exception:
-                pass
-
-        # 安排下一次刷新
-        def task():
-            try:
-                refresh_stock_data(window_info, tree, item_id)
-            finally:
-                reg["after_id"] = None
-                reg["execute_at"] = 0
-
-        reg["after_id"] = tree.after(delay_ms, task)
-
 
     if not window or not window.winfo_exists():
         return  # 窗口已关闭
 
     key = (id(tree), id(window_info), item_id)
-     # 如果已经有刷新任务在调度中，就不再创建新的
+    # 如果已经有刷新任务在调度中，就不再创建新的
     if key not in refresh_registry:
         refresh_registry[key] = {"after_id": None , "execute_at": 0 }
-        schedule_next(1000,key, tree, window_info, item_id)
 
-    now = datetime.now()
-    next_execution_time = get_next_weekday_time(9, 25)
-    delay_ms = int((next_execution_time - now).total_seconds() * 1000)
     dd  = _get_sina_data_realtime(stock_code)
     price,percent,amount = 0,0,0
     if dd is not None:
@@ -5929,12 +6053,10 @@ def update_monitor_tree(data, tree, window_info, item_id):
             
         turnover = getattr(dd, 'turnover', 0)
         amount = round(turnover/100/10000/100, 1) if pd.notna(turnover) else 0
-        # logger.info(f'line 2910 sina_data:{stock_code}, {price},{percent},{amount}')
 
 
     if data is not None and not data.empty:
         # 只保留当前股票
-
         data = data[data['代码'] == stock_code].set_index('时间').reset_index()
         if '涨幅' not in data.columns:
             data = process_full_dataframe(data)
@@ -5959,49 +6081,16 @@ def update_monitor_tree(data, tree, window_info, item_id):
             tree.insert("", "end", values=list(row))
 
         if dd is not None:
-            # stime = str(dd.ticktime)
-            # dt = datetime.strptime(stime, "%Y-%m-%d %H:%M:%S")
-            # time_str = dt.strftime("%H:%M:%S")
             time_str = format_time(dd.ticktime)
             row = [time_str,"新浪" , percent ,price,amount]
             update_latest_row(row)
-        # 随机间隔再次刷新
-        # wait_time = int(random.uniform(30000, 60000))
-        # window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
 
     else:
-        # pass
-        # 如果没有数据，清空并短间隔重试
-        # tree.delete(*tree.get_children())
-        # # 添加占位行，保证双击逻辑可以找到 item
-        # tree.insert(
-        #     "", "end",
-        #     values=("加载中...", "", "", "", "")
-        # )
         insert_placeholder(tree)
 
-    
-    if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
-        # logger.info(f'start flush_alerts')
-        if  not 1130 < get_now_time_int() < 1300:
-            delay_ms = 30000
-            schedule_next(delay_ms,key, tree, window_info, item_id)
-            logger.debug(f'update_monitor_tree 交易时段刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
-            status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-            # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-        else:
-            delay_ms =  int(minutes_to_time(1300)) * 60 * 1000
-            # logger.info(f'update_monitor_tree next_update:{next_time} Min')
-            schedule_next(delay_ms,key, tree, window_info, item_id)
-            logger.info(f'update_monitor_tree 非交易刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
-            status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-            # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-    else:
-        logger.info(f'update_monitor_tree 次日刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
-        schedule_next(delay_ms,key, tree, window_info, item_id)
-        status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-        # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
-            # window.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
+    # 统一调度下一次刷新任务
+    delay_ms = get_monitor_next_delay_ms()
+    schedule_monitor_next_refresh(delay_ms, tree, window_info, item_id)
 
 # --- 主窗口逻辑 ---  (lag)
 def add_selected_stock():
@@ -6654,6 +6743,8 @@ def sort_treeview(tree, col, reverse):
         sort_directions[col] = not reverse_sort
     else:
         # 其他列正常切换排序方向
+        if col not in data.columns:
+            data[col] = ""
         data.sort_values(by=[col,'时间'], ascending=[not reverse_sort,True], inplace=True)
         # 更新排序方向
         sort_directions[col] = not reverse_sort
@@ -6668,13 +6759,74 @@ def sort_treeview(tree, col, reverse):
     # populate_treeview(data)
 
 
+def get_column_width(tree_name, col, default_w):
+    """从全局 COLUMN_WIDTHS 读取已保存的列宽，否则返回默认值"""
+    global COLUMN_WIDTHS
+    if 'COLUMN_WIDTHS' in globals() and isinstance(COLUMN_WIDTHS, dict):
+        if tree_name in COLUMN_WIDTHS and col in COLUMN_WIDTHS[tree_name]:
+            try:
+                saved_w = int(COLUMN_WIDTHS[tree_name][col])
+                if saved_w > 0:
+                    return saved_w
+            except Exception:
+                pass
+    return default_w
+
+def save_column_widths():
+    """读取所有当前活动 Treeview 控件的列宽并保存到全局 COLUMN_WIDTHS"""
+    global COLUMN_WIDTHS, tree, alert_tree, rules_tree, monitor_windows
+    if not isinstance(COLUMN_WIDTHS, dict):
+        COLUMN_WIDTHS = {}
+
+    # 1. 保存主窗口 tree
+    if 'tree' in globals() and tree and tree.winfo_exists():
+        COLUMN_WIDTHS["main_tree"] = {}
+        for col in tree["columns"]:
+            w = tree.column(col, "width")
+            COLUMN_WIDTHS["main_tree"][col] = w
+
+    # 2. 保存预警中心 alert_tree
+    if 'alert_tree' in globals() and alert_tree and alert_tree.winfo_exists():
+        COLUMN_WIDTHS["alert_tree"] = {}
+        for col in alert_tree["columns"]:
+            w = alert_tree.column(col, "width")
+            COLUMN_WIDTHS["alert_tree"][col] = w
+
+    # 3. 保存规则概览 rules_tree
+    if 'rules_tree' in globals() and rules_tree and rules_tree.winfo_exists():
+        COLUMN_WIDTHS["rules_tree"] = {}
+        for col in rules_tree["columns"]:
+            w = rules_tree.column(col, "width")
+            COLUMN_WIDTHS["rules_tree"][col] = w
+
+    # 4. 保存监控子窗口 monitor_tree
+    if 'monitor_windows' in globals() and monitor_windows:
+        for m_win in monitor_windows.values():
+            m_tree = m_win.get("monitor_tree")
+            if m_tree and m_tree.winfo_exists():
+                COLUMN_WIDTHS["monitor_tree"] = {}
+                for col in m_tree["columns"]:
+                    w = m_tree.column(col, "width")
+                    COLUMN_WIDTHS["monitor_tree"][col] = w
+                break # 只要存其中一个即可，因为它们具有完全相同的列名和用途
+
 def load_window_positions():
-    """从配置文件加载所有窗口的位置。"""
-    global WINDOW_GEOMETRIES
+    """从配置文件加载所有窗口的位置和列宽。"""
+    global WINDOW_GEOMETRIES, COLUMN_WIDTHS
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             try:
-                WINDOW_GEOMETRIES = json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "window_geometries" in data or "column_widths" in data:
+                        WINDOW_GEOMETRIES = data.get("window_geometries", {})
+                        COLUMN_WIDTHS = data.get("column_widths", {})
+                    else:
+                        WINDOW_GEOMETRIES = data
+                        COLUMN_WIDTHS = {}
+                else:
+                    WINDOW_GEOMETRIES = {}
+                    COLUMN_WIDTHS = {}
                 logger.info("所有窗口配置已加载。")
             except (json.JSONDecodeError, FileNotFoundError):
                 logger.info("配置文件损坏或不存在，使用默认窗口位置。")
@@ -6682,17 +6834,25 @@ def load_window_positions():
         logger.info("未找到配置文件，使用默认位置。")
 
 def save_window_positions():
-    """将所有窗口的位置和大小保存到配置文件。"""
-    global WINDOW_GEOMETRIES, save_timer
+    """将所有窗口的位置和列宽保存到配置文件。"""
+    global WINDOW_GEOMETRIES, COLUMN_WIDTHS, save_timer
     if save_timer:
         save_timer.cancel()
-    # 确保文件写入在程序退出前完成
-    # save_monitor_list()
+    
+    try:
+        save_column_widths()
+    except Exception as e:
+        logger.info(f"保存列宽时出错: {e}")
+
     logger.info(f'save:{WINDOW_GEOMETRIES}')
     try:
+        config_data = {
+            "window_geometries": WINDOW_GEOMETRIES,
+            "column_widths": COLUMN_WIDTHS
+        }
         with open(CONFIG_FILE, "w") as f:
-            json.dump(WINDOW_GEOMETRIES, f)
-        logger.info("所有窗口配置已保存。")
+            json.dump(config_data, f)
+        logger.info("所有窗口和列宽配置已保存。")
     except IOError as e:
         logger.info(f"写入配置文件时出错: {e}")
 
@@ -6721,6 +6881,10 @@ def on_close_alert_monitor(window):
     alert_moniter_bring_front = False
     if alert_window and alert_window.winfo_exists():
         update_window_position("alert_center")  # 保存位置
+        try:
+            save_window_positions()  # 物理持久化位置与列宽
+        except Exception as e:
+            logger.info(f"保存报警窗口配置出错: {e}")
 
     try:
         if window and window.winfo_exists():
@@ -7485,11 +7649,14 @@ def create_monitor_window(stock_info):
     for col in columns:
         monitor_tree.heading(col, text=col)
         if col in ['涨幅', '量']:
-            monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+            w = get_column_width("monitor_tree", col, 30)
+            monitor_tree.column(col, width=w, anchor=tk.CENTER, minwidth=20)
         elif col in ['异动类型']:
-            monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
+            w = get_column_width("monitor_tree", col, 60)
+            monitor_tree.column(col, width=w, anchor=tk.CENTER, minwidth=40)
         else:
-            monitor_tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
+            w = get_column_width("monitor_tree", col, 40)
+            monitor_tree.column(col, width=w, anchor=tk.CENTER, minwidth=30)
 
     monitor_tree.tag_configure("alert", background="yellow", foreground="red")
     item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", ""))
@@ -8362,20 +8529,24 @@ def open_rules_overview(parent_win=None):
     tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
     scrollbar.config(command=tree.yview)
 
+    global rules_tree
+    rules_tree = tree
+
     for c in cols:
         if c in ( "创建时间", "更新时间"):
-            width = 100 if c in ("条件", "规则名") else 100
+            w = get_column_width("rules_tree", c, 100)
             # tree.heading(c, text=c)
             tree.heading(c, text=c, anchor="center", 
                              command=lambda _c=c: open_rules_overview_sort_column(tree, _c, False))
-            tree.column(c, width=width, anchor="w" if c in ("条件", "规则名") else "center")
+            tree.column(c, width=w, anchor="w" if c in ("条件", "规则名") else "center")
         else:
             # width = 220 if c in ("条件", "规则名") else 800
             # tree.heading(c, text=c)
             tree.heading(c, text=c, anchor="center", 
                              command=lambda _c=c: open_rules_overview_sort_column(tree, _c, False))
             # tree.column(c, width=width, anchor="w" if c in ("条件", "规则名") else "center")
-            tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
+            w = get_column_width("rules_tree", c, 220 if c == "条件" else 60)
+            tree.column(c, width=w, anchor="w" if c == "条件" else "center")
     tree.pack(expand=True, fill="both")
     scrollbar.config(command=tree.yview)
 
@@ -8571,7 +8742,26 @@ def alert_treeview_sort_column(col, reverse=False):
 
         # 数字优先排序
         try:
-            data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
+            if col in ('dff', 'dff2'):
+                def extract_dff_val(v_str):
+                    if not v_str or v_str == "-":
+                        return -999.0
+                    try:
+                        return float(v_str.replace('%', ''))
+                    except Exception:
+                        pass
+                    return -999.0
+                data_list.sort(key=lambda t: extract_dff_val(t[0]), reverse=reverse)
+            elif col == 'Rank':
+                def extract_rank_val(v_str):
+                    try:
+                        return int(v_str)
+                    except Exception:
+                        pass
+                    return 999999
+                data_list.sort(key=lambda t: extract_rank_val(t[0]), reverse=reverse)
+            else:
+                data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
         except ValueError:
             data_list.sort(key=lambda t: t[0], reverse=reverse)
 
@@ -8707,18 +8897,26 @@ def open_alert_center(is_auto=True):
     frame.pack(expand=True, fill="both")
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
-    # cols = ("时间", "代码", "名称", "触发值", "规则", "变化量")
-    cols = ("时间", "代码", "名称","次数",  "触发值", "规则", "变化量")
+    cols = ("时间", "代码", "名称", "次数", "规则(阈值)", "触发值", "dff", "dff2", "Rank", "状态")
     alert_tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
     scrollbar.config(command=alert_tree.yview)
     for c in cols:
         alert_tree.heading(c, text=c, command=lambda col=c: alert_treeview_sort_column(col, False))
-        if c == '触发值':
-            alert_tree.column(c, width=160, anchor="center")
-        elif c == '规则':
-            alert_tree.column(c, width=100, anchor="center")
+        if c in ('触发值', '规则(阈值)'):
+            w = get_column_width("alert_tree", c, 120)
+            alert_tree.column(c, width=w, anchor="center")
+        elif c in ('dff', 'dff2'):
+            w = get_column_width("alert_tree", c, 65)
+            alert_tree.column(c, width=w, anchor="center")
+        elif c == 'Rank':
+            w = get_column_width("alert_tree", c, 50)
+            alert_tree.column(c, width=w, anchor="center")
+        elif c in ('名称', '状态'):
+            w = get_column_width("alert_tree", c, 60)
+            alert_tree.column(c, width=w, anchor="center")
         else:
-            alert_tree.column(c, width=30, anchor="center")
+            w = get_column_width("alert_tree", c, 45)
+            alert_tree.column(c, width=w, anchor="center")
     alert_tree.pack(expand=True, fill="both")
     global after_id
 
@@ -8743,16 +8941,17 @@ def open_alert_center(is_auto=True):
         selected_item = tree.selection()
         if selected_item:
             stock_info = tree.item(selected_item, 'values')
-            timestamp = stock_info[0]  #提取时间戳
-            stock_code = stock_info[1]
-            stock_code = stock_code.zfill(6)
-            # 🚀 [IPC UPGRADE] 联动转发时带上时间信息
-            _updated_time = stock_info[-1][:10]
-            if len(_updated_time) == 10:
-                timestamp = _updated_time
-            else:
-                timestamp = None
-            send_to_tdx(stock_code,timestamp)
+            if stock_info and len(stock_info) > 1:
+                timestamp = stock_info[0]  #提取时间戳
+                stock_code = stock_info[1]
+                stock_code = stock_code.zfill(6)
+                # 🚀 [IPC UPGRADE] 联动转发时带上时间信息
+                _updated_time = stock_info[0] if stock_info[0] else ""
+                if isinstance(_updated_time, str) and len(_updated_time) >= 8:
+                    timestamp = _updated_time
+                else:
+                    timestamp = None
+                send_to_tdx(stock_code,timestamp)
 
             # 1. 推送代码到输入框
             # code_entry.delete(0, tk.END)
@@ -8770,12 +8969,14 @@ def open_alert_center(is_auto=True):
         if not row_id:
             return
         vals = alert_tree.item(row_id, "values")
+        if not vals or len(vals) < 3:
+            return
         timestamp = vals[0]
         code = vals[1]
         name = vals[2]
-        # logger.info(f'on_single_click sel : {row_id} vals : {vals}')
-        _updated_time = stock_info[-1][:10]
-        if len(_updated_time) == 10:
+        # 增加安全防护，防止使用未定义变量 stock_info 并处理时间
+        _updated_time = vals[0] if vals[0] else ""
+        if isinstance(_updated_time, str) and len(_updated_time) >= 8:
             timestamp = _updated_time
         else:
             timestamp = None
@@ -8844,6 +9045,7 @@ def open_alert_center(is_auto=True):
     alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
     alert_tree.bind("<Button-1>", on_single_click_alert_center)
+    alert_tree.bind("<ButtonRelease-1>", lambda event: save_window_positions())
 
     # [AL-LINK] 如果是手动打开窗口，设置抑制标志，防止第一次刷新自动选中导致联动；
     # 如果是自动弹出（is_auto=True），则不设置抑制，以便在开启自动联动时能立即跳转。
@@ -9541,6 +9743,8 @@ def refresh_alert_center():
 
     # 清空并设置 tag
     alert_tree.delete(*alert_tree.get_children())
+    alert_tree.tag_configure("strong_up", background="#FFE4E1", foreground="red")      # 强势拉升，淡粉色背景，红字
+    alert_tree.tag_configure("strong_down", background="#E0EEE0", foreground="green")  # 破位下杀，淡绿色背景，绿字
     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
 
@@ -9554,13 +9758,40 @@ def refresh_alert_center():
             continue
         grouped.setdefault(code, []).append(alert)
 
-    # ---- 按报警次数排序（次数多的排前） ----
-    sorted_items = sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True)
+    # ---- 结合全局数据强弱计算优先级排序得分 (KISS/SOLID) ----
+    # 评分公式 = 报警次数 * 5.0 + 实时偏离度 dff * 2.0 + Rank强度 * 0.05
+    def calc_priority_score(item):
+        code, alerts_list = item
+        dff_val = 0.0
+        rank_val = 0.0
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            idx_match = code
+            if idx_match not in GLOBAL_TOP_ALL.index:
+                try:
+                    idx_match = int(code)
+                except ValueError:
+                    pass
+            if idx_match in GLOBAL_TOP_ALL.index:
+                row = GLOBAL_TOP_ALL.loc[idx_match]
+                if isinstance(row, pd.Series):
+                    dff_val = float(row.get('dff', 0.0))
+                    rank_val = float(row.get('Rank', row.get('rank', 0.0)))
+                elif isinstance(row, pd.DataFrame) and not row.empty:
+                    dff_val = float(row.iloc[0].get('dff', 0.0))
+                    rank_val = float(row.iloc[0].get('Rank', row.iloc[0].get('rank', 0.0)))
+        return (len(alerts_list) * 5.0) + (dff_val * 2.0) + (rank_val * 0.05)
+
+    sorted_items = sorted(grouped.items(), key=calc_priority_score, reverse=True)
 
     for code, alerts in sorted_items:
-        # 股票名称（优先用 sina_data_df）
+        # 股票名称（优先用 sina_data_df）和实时涨幅
+        pct_val = 0.0
         if sina_data_df is not None and not sina_data_df.empty:
             name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+            try:
+                pct_val = float(sina_data_df.get("percent", pd.Series(dtype=float)).get(code, 0.0))
+            except Exception:
+                pass
         else:
             name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
 
@@ -9638,19 +9869,58 @@ def refresh_alert_center():
         # 使用该股票最近一条记录的时间作为时间列（若没有可为空）
         time_txt = alerts[0].get("time", "")
 
-        # 插入一行：时间, 代码, 名称, 规则(三合一), 触发值(三合一精简), 启用状态
+        # --- 获取全局强度数据 ---
+        dff_val = 0.0
+        dff2_val = 0.0
+        rank_val = 0.0
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            idx_match = code
+            if idx_match not in GLOBAL_TOP_ALL.index:
+                try:
+                    idx_match = int(code)
+                except ValueError:
+                    pass
+            if idx_match in GLOBAL_TOP_ALL.index:
+                row = GLOBAL_TOP_ALL.loc[idx_match]
+                if isinstance(row, pd.Series):
+                    dff_val = float(row.get('dff', 0.0))
+                    dff2_val = float(row.get('dff2', 0.0))
+                    rank_val = float(row.get('Rank', row.get('rank', 0.0)))
+                elif isinstance(row, pd.DataFrame) and not row.empty:
+                    dff_val = float(row.iloc[0].get('dff', 0.0))
+                    dff2_val = float(row.iloc[0].get('dff2', 0.0))
+                    rank_val = float(row.iloc[0].get('Rank', row.iloc[0].get('rank', 0.0)))
+        
+        # dff/dff2 带正负号和百分比显示，Rank 显示名次整数
+        dff_str = f"{dff_val:+.1f}%" if dff_val != 0 else "0.0%"
+        dff2_str = f"{dff2_val:+.1f}%" if dff2_val != 0 else "0.0%"
+        rank_str = str(int(rank_val))
+
+        # 插入新列：时间, 代码, 名称, 次数, 规则(阈值), 触发值, dff, dff2, Rank, 状态
         alert_count = len(alerts)
-        # logger.info(f'alerts:{alerts}')
         vals = (
-            time_txt,
-            code,
-            name,
-            alert_count,   # 新列
-            rule_str,
-            val_str,
-            enabled_state
+            time_txt,       # 时间
+            code,           # 代码
+            name,           # 名称
+            alert_count,    # 次数
+            rule_str,       # 规则(阈值)
+            val_str,        # 触发值
+            dff_str,        # dff
+            dff2_str,       # dff2
+            rank_str,       # Rank
+            enabled_state   # 状态
         )
-        tag = "triggered" if triggered else "not_triggered"
+        
+        # 分配加强标识度的 Tag
+        if triggered:
+            tag = "triggered"
+        elif dff_val >= 3.0:
+            tag = "strong_up"
+        elif dff_val <= -3.0:
+            tag = "strong_down"
+        else:
+            tag = "not_triggered"
+            
         alert_tree.insert("", "end", values=vals, tags=(tag,))
 
     # 选中第一行以便展示
@@ -9759,24 +10029,18 @@ def flush_alerts():
             batch_seen = set()
             unique_alerts = []
             for alert in alerts_buffer:
-                # 使用和 check_alert 保持一致的唯一键（time-stock-status 或 stock-status）
-                # 用 alert['time']（报警时间字符串）更稳；如果你想按同一分钟合并，也可改为只用 stock+status
                 unique_key = f"{alert.get('time','')}-{alert.get('stock_code','')}-{alert.get('status','')}"
                 if unique_key in batch_seen:
                     continue
                 batch_seen.add(unique_key)
 
-                # 若你还想避免跨批次重复（长期重复），可以检查 inserted_alert_keys
                 if unique_key in inserted_alert_keys:
-                    # 已插入过（历史中），跳过
                     continue
 
-                # 标记为已见（长期去重集合）
                 inserted_alert_keys.add(unique_key)
-
                 unique_alerts.append(alert)
 
-            # ---- 将去重后的 alerts 写入历史（不直接插入 Treeview）----
+            # ---- 将去重后的 alerts 写入历史 ----
             for alert in unique_alerts:
                 alerts_history.append(alert)
 
@@ -9788,6 +10052,13 @@ def flush_alerts():
                 refresh_alert_center()
             except Exception as e:
                 logger.exception(f"刷新报警中心失败: {e}")
+        else:
+            # 若没有新报警，但报警中心开着，同样刷新以保证 dff / dff2 / rank 实时自动刷新变动
+            if alert_window and alert_window.winfo_exists() and alert_tree is not None:
+                try:
+                    refresh_alert_center()
+                except Exception:
+                    pass
 
         # 安排下次执行
         if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
@@ -10447,7 +10718,7 @@ def parse_args():
     parser.add_argument(
         "--log",
         type=str,
-        default="INFO",
+        default=None,
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
     return parser.parse_args()
@@ -10525,14 +10796,24 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     
     args = parse_args()  # 解析命令行参数
-    level = getattr(logging, args.log.upper(), logging.INFO)
-
-    # 直接用自定义的 init_logging，传入日志等级
-    # logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
-    logger.setLevel(level)
+    
+    # 命令行参数优先级最高，只有在用户显式传入时才覆盖配置文件的配置
+    if args.log is not None:
+        level_name = args.log.upper()
+        level_map = {
+            'D': 'DEBUG', 'DEBUG': 'DEBUG',
+            'I': 'INFO', 'INFO': 'INFO',
+            'W': 'WARNING', 'WARN': 'WARNING', 'WARNING': 'WARNING',
+            'E': 'ERROR', 'ERROR': 'ERROR',
+            'C': 'CRITICAL', 'CRITICAL': 'CRITICAL'
+        }
+        mapped_level = level_map.get(level_name, level_name)
+        level = getattr(logging, mapped_level, logging.INFO)
+        logger.setLevel(level)
     
 
     logger.info("程序启动…")
+    load_window_positions()  # 优先加载所有窗口位置和列宽配置，确保后续控件创建时能直接获取已保存的列宽
     safe_startup_self_check()  # 执行自检
     check_hdf5()
     init_monitors()
@@ -11089,7 +11370,12 @@ if __name__ == "__main__":
 
 
     # 创建Treeview组件和滚动条
-    columns = ('时间', '代码', '名称','count', '异动类型', '涨幅', '价格', '量')
+    default_columns = ('时间', '代码', '名称','count', '异动类型', '涨幅', '价格', '量')
+    custom_cols_str = getattr(CFG, 'custom_columns', "")
+    if custom_cols_str and custom_cols_str.strip():
+        columns = tuple([x.strip().strip("'").strip('"') for x in custom_cols_str.split(",") if x.strip()])
+    else:
+        columns = default_columns
     tree_frame = tk.Frame(root)
     tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
@@ -11102,13 +11388,20 @@ if __name__ == "__main__":
         tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False))
         # if col in ['涨幅', '价格', '量','count']:
         if col in ['涨幅', '量','count']:
-            tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+            w = get_column_width("main_tree", col, 30)
+            tree.column(col, width=w, anchor=tk.CENTER, minwidth=20)
         elif col in ['价格']:
-            tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
-        elif col in ['异动类型']:
-            tree.column(col, width=100, anchor=tk.CENTER, minwidth=60)
+            w = get_column_width("main_tree", col, 40)
+            tree.column(col, width=w, anchor=tk.CENTER, minwidth=30)
+        elif col in ['异动类型', '板块']:
+            w = get_column_width("main_tree", col, 100)
+            tree.column(col, width=w, anchor=tk.CENTER, minwidth=60)
+        elif col in ['dff', 'dff2', 'rank']:
+            w = get_column_width("main_tree", col, 50)
+            tree.column(col, width=w, anchor=tk.CENTER, minwidth=30)
         else:
-            tree.column(col, width=60, anchor=tk.CENTER, minwidth=30)
+            w = get_column_width("main_tree", col, 60)
+            tree.column(col, width=w, anchor=tk.CENTER, minwidth=30)
         # tree.column(col, width=120, anchor=tk.CENTER)
 
 
@@ -11131,6 +11424,7 @@ if __name__ == "__main__":
             send_to_tdx(code, timestamp)
     
     tree.bind("<<TreeviewSelect>>", on_main_tree_select)
+    tree.bind("<ButtonRelease-1>", lambda event: save_window_positions())
 
 
 
@@ -11301,7 +11595,6 @@ if __name__ == "__main__":
 
 
     #初始化窗口位置
-    load_window_positions()
     root.after(2*1000, lambda: update_position_window(root, "main"))
 
     process_queue(root)
