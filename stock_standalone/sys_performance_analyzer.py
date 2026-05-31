@@ -52,6 +52,10 @@ COLOR_BORDER = "#333A40"      # 极淡雅的边框分割线
 # 性能核心监控与分析引擎
 # ==============================================================================
 class PerformanceEngine:
+    # 物理缓存以支持极限性能优化
+    _STATIC_INFO_CACHE = {}  # pid -> (name, exe_path, p_obj)
+    _BLOCKED_PIDS = set()    # 缓存已判定无权限访问的系统/保护级 PID，彻底消除 AccessDenied 异常开销
+
     @staticmethod
     def get_system_ram_info() -> Dict[str, Any]:
         """获取系统物理内存使用指标"""
@@ -71,26 +75,65 @@ class PerformanceEngine:
     @staticmethod
     def scan_and_group_processes() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        扫描系统所有活动进程，并生成：
-        1. 分组统计列表 (按内存总量降序排列)
-        2. 明细进程列表 (按单体内存降序排列)
+        [极限性能优化版] 扫描系统所有活动进程，并生成：
+        - 物理级 PID 缓存自愈，仅抓取新进程的静态属性，消除重复 Windows API 调用
+        - 无权限/系统进程静默拦截，彻底根除高频 AccessDenied 异常的上下文卡顿
+        - 复用 Process 实体，实现亚毫秒级高精度 CPU 占比提取
         """
         raw_list = []
         grouped_dict = {}
 
-        # 遍历所有活动进程
-        for p in psutil.process_iter(['pid', 'name', 'memory_info', 'cpu_percent', 'status', 'exe']):
+        try:
+            # 1. 抓取当前系统中所有活动 PID 集合
+            active_pids = set(psutil.pids())
+        except Exception:
+            active_pids = set()
+
+        # 2. 自愈：清理已退出的无效 PID 缓存与屏蔽集
+        cached_pids = list(PerformanceEngine._STATIC_INFO_CACHE.keys())
+        for pid in cached_pids:
+            if pid not in active_pids:
+                PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
+
+        blocked_pids_to_remove = [pid for pid in PerformanceEngine._BLOCKED_PIDS if pid not in active_pids]
+        for pid in blocked_pids_to_remove:
+            PerformanceEngine._BLOCKED_PIDS.discard(pid)
+
+        # 3. 遍历活动 PID 集合进行数据精细化提取
+        for pid in active_pids:
+            # 3.1 极速屏蔽：对于之前已确认无权限读取的系统进程，直接跳过，彻底切断 AccessDenied 异常开销
+            if pid in PerformanceEngine._BLOCKED_PIDS:
+                continue
+
             try:
-                info = p.info
-                if not info['memory_info']:
+                # 3.2 优先命中静态缓存
+                if pid in PerformanceEngine._STATIC_INFO_CACHE:
+                    name, exe_path, p_obj = PerformanceEngine._STATIC_INFO_CACHE[pid]
+                else:
+                    # 缓存未命中：仅在此处初始化 Process 实体并一次性提取静态属性
+                    p_obj = psutil.Process(pid)
+                    name = p_obj.name() or "Unknown"
+                    try:
+                        exe_path = p_obj.exe() or "N/A"
+                    except psutil.AccessDenied:
+                        exe_path = "Access Denied"
+                    
+                    PerformanceEngine._STATIC_INFO_CACHE[pid] = (name, exe_path, p_obj)
+
+                # 3.3 提取动态属性：rss 相比 uss 非常轻量，几乎不消耗 I/O 开销
+                try:
+                    mem_info = p_obj.memory_info()
+                    rss_mb = mem_info.rss / (1024 ** 2)
+                    status = p_obj.status() or "unknown"
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    # 动态属性提取失败也可能是进程死亡或被保护
                     continue
-                
-                pid = info['pid']
-                name = info['name'] or "Unknown"
-                rss_mb = info['memory_info'].rss / (1024 ** 2)
-                cpu_pct = info['cpu_percent'] or 0.0
-                status = info['status'] or "unknown"
-                exe_path = info['exe'] or "N/A"
+
+                # 3.4 亚毫秒级复用 CPU 提取
+                try:
+                    cpu_pct = p_obj.cpu_percent(interval=None) or 0.0
+                except Exception:
+                    cpu_pct = 0.0
 
                 # 记录明细数据
                 raw_list.append({
@@ -117,6 +160,9 @@ class PerformanceEngine:
                 grouped_dict[name]["pids"].append(pid)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                # 凡是初始化或读取静态属性遭遇 AccessDenied / 找不到的进程，均物理标记为屏蔽，未来彻底不碰
+                PerformanceEngine._BLOCKED_PIDS.add(pid)
+                PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
                 continue
 
         # 明细排序 (按内存降序)
@@ -359,8 +405,11 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                   background=[("selected", COLOR_CARD)], 
                   foreground=[("selected", COLOR_HIGHLIGHT)])
 
-        # 现代表格 (Treeview) - 紧凑行高 (25px) 匹配小一号字体，完美高密度布局
-        row_height = 25
+        # 现代表格 (Treeview) - 动态调整行高以完美匹配 DPI 和字体，避免高分辨率下文字被截断/不匹配
+        from dpi_utils import get_windows_dpi_scale_factor
+        scale = get_windows_dpi_scale_factor()
+        # 根据缩放因子动态计算行高，基准为 28 像素 (适应 Microsoft YaHei 9号字，提供舒适的上下边距)
+        row_height = int(28 * scale)
         style.configure("Treeview", 
                         background=COLOR_CARD, 
                         fieldbackground=COLOR_CARD, 
@@ -971,6 +1020,25 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
 # ==============================================================================
 # 应用程序物理入口点 (App Main Entry)
 # ==============================================================================
+def launch_analyzer():
+    """独立的子进程性能分析器启动入口 (支持多进程反序列化)"""
+    import platform
+    import ctypes
+    # 开启高 DPI 线程感知，防止高分屏下窗体及文字模糊
+    try:
+        if platform.system() == "Windows":
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+        
+    try:
+        app = SystemPerformanceAnalyzerGUI()
+        app.mainloop()
+    except Exception as ex:
+        import sys
+        print(f"❌ Subprocess SystemPerformanceAnalyzer crashed: {ex}", file=sys.stderr)
+
+
 if __name__ == "__main__":
-    app = SystemPerformanceAnalyzerGUI()
-    app.mainloop()
+    launch_analyzer()
+
