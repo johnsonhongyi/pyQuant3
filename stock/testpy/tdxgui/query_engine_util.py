@@ -17,6 +17,7 @@ class PandasQueryEngine:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self.last_error = ""
+        self.warned_vars = set()
 
     def set_logger(self, logger: logging.Logger):
         self.logger = logger
@@ -190,14 +191,37 @@ class PandasQueryEngine:
         if df is None or df.empty or not query_str.strip(): return df
         cleaned_expr = self._preprocess_query(query_str)
         if not cleaned_expr: return df
-        context = self._prepare_context(df)
         
+        # 复制 df 并防御性补齐所有可能未在 DataFrame 中定义的列为 NaN，防止任何 query/eval/exec 异常
+        df = df.copy()
+        py_keywords = {'and', 'or', 'not', 'True', 'False', 'None', 'in', 'is', 'for', 'if', 'else', 'elif', 'df', 'pd', 'np', 'abs', 'max', 'min', 'sum'}
+        mentioned_vars = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned_expr))
+        for var in mentioned_vars:
+            if var not in df.columns and var not in py_keywords:
+                df[var] = np.nan
+                if var not in self.warned_vars:
+                    self.warned_vars.add(var)
+                    self.logger.warning(
+                        f"⚠️ [PandasQueryEngine] 表达式中引用了未定义变量 '{var}'，已自动将其补全为 NaN 列以防崩溃。 "
+                        f"表达式: '{cleaned_expr}'"
+                    )
+
+        context = self._prepare_context(df)
         is_explicit = any(l.strip().startswith(('result =', 'signal =', 'import ', 'from ')) for l in query_str.splitlines())
         has_sql = bool(re.search(r'\b(GREATEST|LEAST|ABS|MAX|MIN)\b', cleaned_expr, re.IGNORECASE))
         
         try:
             if is_explicit:
-                exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
+                # 对 context 进行防御性补齐以防 exec 时 NameError
+                exec_expr = re.sub(r'\bdf_all\b', 'df', query_str)
+                exec_mentioned = set(re.findall(r'\b[a-zA-Z_]\w*\b', exec_expr))
+                for var in exec_mentioned:
+                    if var not in context and var not in py_keywords and var != 'result':
+                        context[var] = pd.Series(np.nan, index=df.index)
+                        if var not in self.warned_vars:
+                            self.warned_vars.add(var)
+                            self.logger.warning(f"⚠️ [PandasQueryEngine] context 未定义变量 '{var}'，已自动补全为 NaN 以防 exec 崩溃")
+                exec(exec_expr, context)
                 return self._extract_result(df, context)
 
             local_scope = context.copy()
@@ -226,11 +250,22 @@ class PandasQueryEngine:
                 return self._wrap_result(df, res)
         except Exception as e:
             self.last_error = str(e)
-            self.logger.warning(f"Query Error: {e}")
+            import traceback
+            self.logger.warning(f"Query Error: {e}\n{traceback.format_exc()}")
             try:
-                exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
+                exec_expr = re.sub(r'\bdf_all\b', 'df', query_str)
+                exec_mentioned = set(re.findall(r'\b[a-zA-Z_]\w*\b', exec_expr))
+                for var in exec_mentioned:
+                    if var not in context and var not in py_keywords and var != 'result':
+                        context[var] = pd.Series(np.nan, index=df.index)
+                        if var not in self.warned_vars:
+                            self.warned_vars.add(var)
+                            self.logger.warning(f"⚠️ [PandasQueryEngine Fallback] context 未定义变量 '{var}'，已自动补全为 NaN 以防 exec 崩溃")
+                exec(exec_expr, context)
                 return self._extract_result(df, context)
-            except: return df
+            except Exception as inner_e:
+                self.logger.warning(f"Fallback Exec Error: {inner_e}\n{traceback.format_exc()}")
+                return df
 
     def _wrap_result(self, df: pd.DataFrame, res: Any) -> pd.DataFrame:
         if res is None: return df
