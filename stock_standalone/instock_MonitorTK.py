@@ -18011,6 +18011,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 默认按时间倒序
         win.after(10, lambda: self.sort_column_archive_view(tree, "time", True))
 
+    def open_detailed_analysis_subprocess(self):
+        """用多进程形式拉起独立的系统性能与内存诊断分析器GUI (支持 Nuitka/PyInstaller 打包)"""
+        # 1. 检测是否已有活跃的分析器子进程在运行
+        if hasattr(self, '_detailed_analysis_process') and self._detailed_analysis_process and self._detailed_analysis_process.is_alive():
+            try:
+                logger.info("ℹ️ 系统性能分析器已在后台运行中，请检查任务栏。")
+                return
+            except Exception:
+                pass
+
+        # 2. 使用已有的 mp (multiprocessing) 引擎安全拉起
+        try:
+            import multiprocessing as mp
+            # 确保在打包环境下的多进程初始化安全
+            mp.freeze_support()
+            
+            # 从独立模块导入可序列化的全局入口函数，彻底解决 Can't pickle local object 错误
+            from sys_performance_analyzer import launch_analyzer
+            
+            proc = mp.Process(
+                target=launch_analyzer,
+                name="SystemPerformanceAnalyzer",
+                daemon=True
+            )
+            proc.start()
+            self._detailed_analysis_process = proc
+            logger.info(f"🚀 系统性能分析诊断器子进程成功拉起 (PID: {proc.pid})")
+        except Exception as e:
+            logger.error(f"❌ 无法以多进程形式启动系统性能分析器: {e}")
+            from tkinter import messagebox
+            messagebox.showerror("❌ 启动失败", f"无法以独立多进程形式启动系统性能分析器:\n{e}")
+
     def open_detailed_analysis(self):
         """打开详细系统分析窗口 (支持窗口复用与自动恢复位置)
         
@@ -18298,6 +18330,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             reset_btn = tk.Button(btn_frame, text="↺ Reset State", command=manual_reset, font=("Microsoft YaHei", 9), bg="#eeeeee")
             reset_btn.pack(side="left", padx=5)
+
+            pro_analysis_btn = tk.Button(btn_frame, text="🚀 Pro-Analyzer", command=self.open_detailed_analysis_subprocess, font=("Microsoft YaHei", 9, "bold"), fg="#8e44ad", bg="#f4ecf7")
+            pro_analysis_btn.pack(side="left", padx=5)
 
             analysis_btn = tk.Button(btn_frame, text="📊 Detailed Analysis", command=self.open_detailed_analysis, font=("Microsoft YaHei", 9, "bold"), fg="blue")
             analysis_btn.pack(side="left", padx=5)
