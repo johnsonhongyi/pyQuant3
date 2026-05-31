@@ -1679,7 +1679,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 3. 强制触发 UI 刷新并置脏，确保新数据立即可见
             self.refresh_data(force=True)
             self.status_lbl.setText(f"✅ 历史数据加载成功: {os.path.basename(file_path)}")
-            logger.info(f"✅ [HistoryMode] 已成功切入历史复盘状态: {file_path}")
+            logger.debug(f"✅ [HistoryMode] 已成功切入历史复盘状态: {file_path}")
         else:
             self.status_lbl.setText("❌ 历史数据加载失败，请检查文件格式")
             QMessageBox.warning(self, "加载失败", "无法读取该快照文件，可能已损坏。")
@@ -1699,7 +1699,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [ROOT-FIX] 优先使用主窗口已经构建的全局统一 racing_detector，确保全系统数据一致性
         main_detector = getattr(main_window, 'racing_detector', None)
         if main_detector:
-            logger.info("📡 [SectorPanel] Using unified global BiddingMomentumDetector from main_window.")
+            logger.debug("📡 [SectorPanel] Using unified global BiddingMomentumDetector from main_window.")
             self.detector = main_detector
         else:
             logger.warning("📡 [SectorPanel] No global racing_detector found on main_window. Instantiating local fallback.")
@@ -1812,7 +1812,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None and not self.main_window.df_all.empty:
              # 🚀 [GIL-FIX] 不要在构造函数返回前急着向后台线程喂数，防止高负载全量计算霸占 GIL 饿死正准备返回的主线程！
              # 改为由 showEvent 里面的 singleShot 在 500ms 后安全触发首次喂数与评分，保障主线程瞬间初始化完成并返回。
-             logger.info("📡 [SectorPanel] Cold start scheduled with main window's df_all")
+             logger.debug("📡 [SectorPanel] Cold start scheduled with main window's df_all")
         else:
              if hasattr(self, 'status_lbl'):
                  self.status_lbl.setText("⏳ 等待主窗口数据或手动刷新...")
@@ -1834,7 +1834,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_dragon_race_toggled(self, checked):
         """切换龙头竞赛模式"""
         self.detector.use_dragon_race = checked
-        logger.info(f"🔄 [SectorPanel] Dragon Race Mode: {'ENABLED (追涨模式)' if checked else 'DISABLED (挖掘模式)'}")
+        logger.debug(f"🔄 [SectorPanel] Dragon Race Mode: {'ENABLED (追涨模式)' if checked else 'DISABLED (挖掘模式)'}")
         
         # [NEW] 同步到追踪 Dialog 的状态 (双向同步)
         if hasattr(self, '_hist_tracker_dialog'):
@@ -2693,7 +2693,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后通过 SignalBridge 触发首次刷新，绝对防范跨线程 Timer 崩溃"""
-        logger.info("📡 [SectorPanel] Detector data ready, triggering initial refresh via SignalBridge.")
+        logger.debug("📡 [SectorPanel] Detector data ready, triggering initial refresh via SignalBridge.")
         with self._update_lock:
             self._force_update_requested = True
         
@@ -2733,7 +2733,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             if win and win not in self._sbc_test_windows:
                 self._sbc_test_windows.append(win)
-                logger.info(f"✅ SBC 可视化窗口已创建: {data['title']}")
+                logger.debug(f"✅ SBC 可视化窗口已创建: {data['title']}")
             
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText(f"✅ SBC 测试完成: {data['title']}")
@@ -4779,7 +4779,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 if target_date and target_date != today_str:
                     if hasattr(host, 'link_to_visualizer'):
                          host.link_to_visualizer(code, target_date)
-                         logger.info(f"[SectorPanel] Linked {code} at {target_date} (Specific/History Linkage Mode)")
+                         # logger.info(f"[SectorPanel] Linked {code} at {target_date} (Specific/History Linkage Mode)")
                          return
 
                 # 2. 正常实盘模式或无历史日期时
@@ -5067,7 +5067,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             except Exception as e:
                 logger.warning(f"Error restoring business settings: {e}")
                 
-            logger.info(f"♻️ [UI] 布局已从 {os.path.basename(WINDOW_CONFIG_FILE)} 恢复")
+            logger.debug(f"♻️ [UI] 布局已从 {os.path.basename(WINDOW_CONFIG_FILE)} 恢复")
         except Exception as e:
             logger.warning(f"⚠️ [UI] 恢复布局失败: {e}")
 
@@ -5144,7 +5144,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 with open(tmp_file, 'w', encoding='utf-8') as f:
                     json.dump(config, f, ensure_ascii=False, indent=4)
                 os.replace(tmp_file, config_file_path)
-                logger.info(f"💾 [UI] 布局参数由于检测到变化已同步至 {os.path.basename(config_file_path)}")
+                logger.debug(f"💾 [UI] 布局参数由于检测到变化已同步至 {os.path.basename(config_file_path)}")
             except Exception as e:
                 logger.error(f"❌ [UI] 原子存盘物理 IOError: {e}")
                 if os.path.exists(tmp_file): os.remove(tmp_file)
@@ -5283,7 +5283,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("🔄 已重置！正在重新采集今日数据...")
                 self.status_lbl.setStyleSheet("color: #ff9900; font-weight: bold;")
-            logger.info("[Panel] 用户手动触发今日数据重置，所有历史缓存已清除。")
+            logger.debug("[Panel] 用户手动触发今日数据重置，所有历史缓存已清除。")
         except Exception as e:
             logger.error(f"[Panel] 重置今日数据失败: {e}")
             QMessageBox.critical(self, "重置失败", f"操作出错：{e}")
