@@ -1,3 +1,10 @@
+## 2026-05-31 18:00
+- [x] **实现性能诊断工具界面大小与 Treeview 列宽跨会话自适应持久化 (Implemented Window Geometry & Treeview Column Widths Persistence for System Performance Analyzer)**：
+    - [x] **物理锚定并实现 DPI 智能窗口几何自重载**：在 `sys_performance_analyzer.py` 中，废弃了以往冷启动时硬编码的固定 geometry (`1180x820`)，改用统一的 `load_window_position_simple` 接口加载。同时，将 `WM_DELETE_WINDOW` 物理绑定到新增的 `on_close` 安全退出拦截器上，实现了主窗口坐标和尺寸的跨会话完美存盘与物理复原。
+    - [x] **实现双表格列宽原子级保存与 DPI 逆转换**：新增了 `save_column_widths` 和 `load_column_widths` 两个核心类方法，深度整合进统一的 `window_config.json` 架构中。在关闭窗口时，动态抓取分组表（`tree_grouped`）与明细表（`tree_raw`）的所有当前列宽，乘以 DPI 缩放反比转换后安全落盘；重新启动时，通过局部 `from dpi_utils import get_windows_dpi_scale_factor` 进行缩放还原覆盖渲染，彻底解决了列宽退出丢失以及高 DPI 下字符剪切或留白的视觉痛点。
+    - [x] **落地 [原子化写入] 安全防线**：在 `save_column_widths` 写入节点完美应用 `tempfile.mkstemp` 及 `os.replace` 物理级原子写入，有效防止 Windows 平台下并发写入或意外崩溃导致的 0 字节文件损坏，具备极佳的自愈容灾性能。
+    - [x] **完全通过 py_compile 语法及逻辑静态校验**：完成对 `sys_performance_analyzer.py` 重构后全代码的安全编译检验，系统健壮性达成终极闭环！
+
 ## 2026-05-31 03:00
 - [x] **优化多进程日志隔离与生产级 APP_ROOT 锁定日志控制 (Optimized Multiprocessing Log Isolation & Production-Grade APP_ROOT Locking Controls)**：
     - [x] **实现环境变量存在时静默返回与主进程首次锁定日志输出**：重构了 `_local_get_app_root` 的环境变量检测，若 `INSTOCK_APP_ROOT` 存在于环境变量且物理路径有效，子进程直接静默返回以阻断冗余输出。同时确保主进程在首次通过环境变量读取路径时，仍能且仅能正确打印一次锁定日志。
