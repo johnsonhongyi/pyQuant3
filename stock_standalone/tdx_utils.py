@@ -123,7 +123,7 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
 
     # ⑤ 文件不存在 → 直接视为完成
     if not os.path.exists(fname):
-        logger.info(f"[CLEAN_DONE] {today} 文件不存在，直接标记完成")
+        logger.warning(f"[CLEAN_DONE] {today} 文件不存在，直接标记完成")
         try:
             open(flag_path, "w").close()
         except Exception as e:
@@ -268,7 +268,7 @@ async def mouse_hook_loop(click_timeout=0.25, double_min=0.05, right_timeout=1.5
                 if b >= 0: # Right UP
                     now = time.perf_counter()
                     if state.double_flag and (now - state.last_click < right_timeout):
-                        logger.info(f"🐭 [MouseHook] Double-Left + Right triggered! Executing Copy...")
+                        logger.debug(f"🐭 [MouseHook] Double-Left + Right triggered! Executing Copy...")
                         # 使用 to_thread 执行同步按键模拟，防止阻塞事件循环
                         await asyncio.to_thread(trigger_key_copy)
                     # 无论是否触发，右键抬起均重置双击标志
@@ -351,11 +351,11 @@ def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswit
                         continue
                         
                     if hasattr(sender, 'send'):
-                        logger.info(f"📋 Clipboard Monitoring: Sending detected code {code}")
+                        logger.debug(f"📋 Clipboard Monitoring: Sending detected code {code}")
                         sender.send(code)
                     # 新增 UI callback
                     if on_new_code:
-                        logger.info(f"📋 Clipboard Monitoring: Sending open_visualizer code {code}")
+                        logger.debug(f"📋 Clipboard Monitoring: Sending open_visualizer code {code}")
                         on_new_code(code)
                 except Exception as e:
                     # Assuming 'logger' is available in this scope (e.g., imported globally)

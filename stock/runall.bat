@@ -12,14 +12,17 @@ D:
 
 
 
-cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist"
+REM cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist"
+cd  "D:\JohnsonProgram\instockMonitorTK"
 set WORKDIRTK=%CD%
 echo 当前目录: %WORKDIRTK%
 
-if exist "%WORKDIRTK%\instock_MonitorTK.exe" (
-    echo 启动 EXE: instock_MonitorTK.exe
-    rem start cmd /k  "%WORKDIRTK%\instock_MonitorTK.exe"
-    start "" wt new-tab cmd /k "cd /d D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist && instock_MonitorTK.exe"
+if exist "%WORKDIRTK%\instock_MonitorTK_Nuita.exe" (
+    echo 启动 EXE: instock_MonitorTK_Nuita.exe
+    rem start cmd /k  "%WORKDIRTK%\instock_MonitorTK_Nuita.exe"
+    rem start "" wt new-tab cmd /k "cd /d D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist && instock_MonitorTK_Nuita.exe"
+    start "" wt new-tab cmd /k "cd /d \"%WORKDIRTK%\" && instock_MonitorTK_Nuita.exe"    
+    rem start "" wt new-tab cmd /k "pushd \"%WORKDIRTK%\" && instock_MonitorTK_Nuita.exe"
 ) else if exist "%WORKDIRTK%\instock_MonitorTK.py" (
     echo 启动 Python: instock_MonitorTK
     start cmd /k  python "%WORKDIRTK%\instock_MonitorTK.py"
