@@ -3495,6 +3495,24 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
         if "toplevel" in info
     ]
 
+    # 自动根据最新的全局数据刷新所有窗口的 _alter_tdx 属性，避免由于窗口刚新建未打上标记导致重排失效
+    global GLOBAL_TOP_ALL, filterclose, filterhigh4
+    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+        for info in windows:
+            win = info["toplevel"]
+            if "stock_info" in info and info["stock_info"]:
+                stock_code = info["stock_info"][0].zfill(6)
+                if stock_code in GLOBAL_TOP_ALL.index:
+                    row = GLOBAL_TOP_ALL.loc[stock_code]
+                    close_val = row.get(filterclose)
+                    high4_val = row.get(filterhigh4)
+                    if close_val is not None and high4_val is not None:
+                        try:
+                            if float(close_val) > float(high4_val):
+                                win._alter_tdx = True
+                        except Exception:
+                            pass
+
     # 分组
     group_alter = []
     group_normal = []
@@ -3523,11 +3541,15 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
             win.update_idletasks()
             x, y = win.winfo_x(), win.winfo_y()
 
+            assigned = False
             for idx, m in enumerate(MONITORS):
                 l, t, r, b = _get_monitor_rect(m)
                 if l <= x < r and t <= y < b:
                     screen_groups[idx].append(win_info)
+                    assigned = True
                     break
+            if not assigned:
+                screen_groups[0].append(win_info)
 
         except Exception as e:
             logger.info(f"⚠ 获取窗口位置失败: {e}")
@@ -3563,6 +3585,8 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
             try:
                 win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
 
                 if layout == "horizontal" and current_x + w + margin_x > work_r:
                     current_x = work_l + margin_x
@@ -3589,6 +3613,8 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
             try:
                 win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
 
                 # 横向优先，向左排列
                 if current_x - w - margin_x < work_l:
@@ -3624,6 +3650,24 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
     # 取监控窗口列表
     windows = [info for info in monitor_windows.values() if "toplevel" in info]
 
+    # 自动根据最新的全局数据刷新所有窗口的 _alter_tdx 属性，避免由于窗口刚新建未打上标记导致重排失效
+    global GLOBAL_TOP_ALL, filterclose, filterhigh4
+    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+        for info in windows:
+            win = info["toplevel"]
+            if "stock_info" in info and info["stock_info"]:
+                stock_code = info["stock_info"][0].zfill(6)
+                if stock_code in GLOBAL_TOP_ALL.index:
+                    row = GLOBAL_TOP_ALL.loc[stock_code]
+                    close_val = row.get(filterclose)
+                    high4_val = row.get(filterhigh4)
+                    if close_val is not None and high4_val is not None:
+                        try:
+                            if float(close_val) > float(high4_val):
+                                win._alter_tdx = True
+                        except Exception:
+                            pass
+
     # 分组：有 _alter_tdx / 无 _alter_tdx
     group_alter = []
     group_normal = []
@@ -3645,10 +3689,14 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
         win = win_info["toplevel"]
         try:
             x, y = win.winfo_x(), win.winfo_y()
+            assigned = False
             for idx, (l, t, r, b) in enumerate(MONITORS):
                 if l <= x < r and t <= y < b:
                     screen_groups[idx].append(win_info)
+                    assigned = True
                     break
+            if not assigned:
+                screen_groups[0].append(win_info)
         except Exception as e:
             logger.info(f"⚠ 获取窗口位置失败: {e}")
 
@@ -3673,7 +3721,10 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
         for win_info in normal_group:
             win = win_info["toplevel"]
             try:
+                win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
                 # 换行逻辑
                 if layout == "horizontal" and current_x + w + margin_x > r:
                     current_x = l + margin_x
@@ -3695,7 +3746,10 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
         for win_info in alter_group:
             win = win_info["toplevel"]
             try:
+                win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
 
                 # 横向优先排列：右向左
                 if current_x - w - margin_x < l:
@@ -3747,10 +3801,14 @@ def rearrange_monitors_per_screen_noaltertdx(align="left", sort_by="create_time"
         win = win_info["toplevel"]
         try:
             x, y = win.winfo_x(), win.winfo_y()
+            assigned = False
             for idx, (l, t, r, b) in enumerate(MONITORS):
                 if l <= x < r and t <= y < b:
                     screen_groups[idx].append(win_info)
+                    assigned = True
                     break
+            if not assigned:
+                screen_groups[0].append(win_info)
         except Exception as e:
             logger.info(f"⚠ 获取窗口位置失败: {e}")
 
@@ -3790,8 +3848,11 @@ def rearrange_monitors_per_screen_noaltertdx(align="left", sort_by="create_time"
         for win_info in group:
             win = win_info["toplevel"]
             try:
+                win.update_idletasks()
                 w = win.winfo_width()
                 h = win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
                 win_state = win_var.get()
                 if layout == "vertical" or  win_state:
                     # -------- 竖排逻辑 --------
@@ -3874,10 +3935,14 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
         win = win_info["toplevel"]
         try:
             x, y = win.winfo_x(), win.winfo_y()
+            assigned = False
             for idx, (l, t, r, b) in enumerate(MONITORS):
                 if l <= x < r and t <= y < b:
                     screen_groups[idx].append(win_info)
+                    assigned = True
                     break
+            if not assigned:
+                screen_groups[0].append(win_info)
         except Exception as e:
             logger.info(f"⚠ 获取窗口位置失败: {e}")
 
@@ -3915,8 +3980,11 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
         for win_info in group:
             win = win_info["toplevel"]
             try:
+                win.update_idletasks()
                 w = win.winfo_width()
                 h = win.winfo_height()
+                if w < 50 or h < 50:
+                    w, h = 300, 160
 
                 if align == "right" and max_col_width == 0:
                     current_x -= w
@@ -4240,6 +4308,24 @@ def load_archive(selected_file,readfile=False):
         initial_monitor_list = load_monitor_list(MONITOR_LIST_FILE=archive_file)
         logger.info(f'readfile:{archive_file}')
         return initial_monitor_list
+
+    # 尝试从文件名解析历史日期，同步更新全局 selected_date 参数以支持历史行情过滤绕过
+    import re
+    date_match = re.search(r'\d{4}-\d{2}-\d{2}', selected_file)
+    if not date_match:
+        date_match = re.search(r'\d{8}', selected_file)
+    
+    global selected_date
+    if date_match:
+        raw_date = date_match.group(0)
+        if '-' not in raw_date and len(raw_date) == 8:
+            selected_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        else:
+            selected_date = raw_date
+        logger.info(f"📁 从历史监控存档中成功同步解析出全局 selected_date: {selected_date}")
+    else:
+        selected_date = None
+
     # 关闭所有已有监控窗口
     for code, info in list(monitor_windows.items()):
         try:
@@ -5377,19 +5463,43 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
             for cn, en in mapping.items():
                 if cn in temp_df.columns and en not in temp_df.columns:
                     temp_df[en] = temp_df[cn]
+            # 进一步补齐缺少的核心字段，以防止 QueryEngine 条件过滤因字段缺失崩溃
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col not in temp_df.columns:
+                    if col == 'close' and '价格' in temp_df.columns:
+                        temp_df['close'] = temp_df['价格']
+                    elif col in ['open', 'high', 'low'] and 'close' in temp_df.columns:
+                        temp_df[col] = temp_df['close']
+                    elif col == 'volume' and '量' in temp_df.columns:
+                        temp_df['volume'] = temp_df['量']
+                    else:
+                        import numpy as np
+                        temp_df[col] = np.nan
     else:
         global _global_enriched_cache, _last_cache_realdatadf_id, _last_cache_sina_ts
-        global realdatadf, sina_data_df, sina_data_last_updated_time
+        global realdatadf, sina_data_df, sina_data_last_updated_time, GLOBAL_TOP_ALL
         
-        # 判定是否需要更新缓存
-        current_realdatadf_id = id(realdatadf)
-        current_sina_ts = sina_data_last_updated_time
-        
-        need_refresh_cache = (
-            _global_enriched_cache is None or 
-            current_realdatadf_id != _last_cache_realdatadf_id or 
-            current_sina_ts != _last_cache_sina_ts
-        )
+        use_fallback = True
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            enriched = GLOBAL_TOP_ALL.copy()
+            if '代码' not in enriched.columns:
+                enriched['代码'] = enriched.index.astype(str).str.zfill(6)
+            _global_enriched_cache = enriched
+            _last_cache_realdatadf_id = id(realdatadf)
+            _last_cache_sina_ts = sina_data_last_updated_time
+            use_fallback = False
+
+        if use_fallback:
+            # 判定是否需要更新缓存
+            current_realdatadf_id = id(realdatadf)
+            current_sina_ts = sina_data_last_updated_time
+            need_refresh_cache = (
+                _global_enriched_cache is None or 
+                current_realdatadf_id != _last_cache_realdatadf_id or 
+                current_sina_ts != _last_cache_sina_ts
+            )
+        else:
+            need_refresh_cache = False
         
         if need_refresh_cache:
             # 1. 基础框架 (从 realdatadf 克隆)
@@ -5430,93 +5540,40 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
 
         # 从缓存中提取并合并行情列
         if temp_df is not None and _global_enriched_cache is not None and not _global_enriched_cache.empty:
-            current_codes = temp_df['代码'].tolist()
             if '代码' in _global_enriched_cache.columns:
-                temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
+                # 剔除 _global_enriched_cache 中与 temp_df 重名且不需要保留的重复列（代码除外），防止合并冲突
+                cols_to_use = _global_enriched_cache.columns.difference(
+                    temp_df.columns.difference(['代码'])
+                )
+                right_df = _global_enriched_cache[cols_to_use]
+                # 合并最新的行情列到异动列表中，保留 temp_df 所有的异动事件列（时间、事件、相关信息等）
+                temp_df = temp_df.merge(right_df, on='代码', how='left')
             else:
                 logger.warning("_get_stock_changes: 缓存中缺少 '代码' 列")
     
-    # 判定是否需要更新缓存
-    current_realdatadf_id = id(realdatadf)
-    current_sina_ts = sina_data_last_updated_time
-    
-    need_refresh_cache = (
-        _global_enriched_cache is None or 
-        current_realdatadf_id != _last_cache_realdatadf_id or 
-        current_sina_ts != _last_cache_sina_ts
-    )
-    
-    if need_refresh_cache:
-        # logger.debug("🔄 [Cache Miss] Recalculating Enriched Dataset...")
-        # 1. 基础框架 (从 realdatadf 克隆)
-        enriched = realdatadf.copy()
-        
-        # [🚀 修复] 确保 '代码' 存在，否则 merge 会 KeyError: '代码'
-        if not enriched.empty and '代码' in enriched.columns:
-            # 2. TDX Data (Historical Daily OHLC)
-            tdx_df = _get_tdx_data_df()
-            if tdx_df is not None and not tdx_df.empty:
-                enriched = enriched.merge(tdx_df, left_on='代码', right_index=True, how='left')
-                
-            # 3. Sina Data (Real-time OHLC)
-            sina_df = _get_sina_data_realtime()
-            if sina_df is not None and not sina_df.empty:
-                mapping = {'现价': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'turnover'}
-                for cn, en in mapping.items():
-                    if cn in sina_df.columns and en not in sina_df.columns:
-                        sina_df[en] = sina_df[cn]
-                enriched = enriched.merge(sina_df, left_on='代码', right_index=True, how='left', suffixes=('', '_sina'))
-        else:
-            if not enriched.empty:
-                logger.warning(f"⚠️ _get_stock_changes: realdatadf 缺少 '代码' 列 (cols: {enriched.columns.tolist()})")
-            else:
-                logger.debug("ℹ️ _get_stock_changes: realdatadf 为空，跳过行情增强缓存")
-            # 标记缓存失效，强制下一轮尝试
-            _global_enriched_cache = None 
-            _last_cache_realdatadf_id = None
-            return temp_df # 提前返回，避免后续 loc 崩溃
-        
-        # 4. 补齐核心列（用于 QueryEngine 兜底）
-        for c in ['open', 'high', 'low', 'close', 'volume']:
-            if c in enriched.columns:
-                s_col = f"{c}_sina"
-                if s_col in enriched.columns:
-                    enriched[c] = enriched[s_col].fillna(enriched[c] if c in enriched.columns else np.nan)
-
-        # 更新缓存索引
-        _global_enriched_cache = enriched
-        _last_cache_realdatadf_id = current_realdatadf_id
-        _last_cache_sina_ts = current_sina_ts
-    # else:
-    #     logger.debug("⚡ [Cache Hit] Using cached Enriched Dataset.")
-
-    # 从缓存中提取当前过滤后的结果
-    # 注意：temp_df 是经过 filter_stocks 过滤后的基础列表
-    # 我们需要将缓存中的行情列同步到当前结果集
-    if temp_df is not None and _global_enriched_cache is not None and not _global_enriched_cache.empty:
-        # 获取当前结果集的索引（代码）
-        current_codes = temp_df['代码'].tolist()
-        # 从全量缓存中提取这些代码的完整列
-        # [🚀 修复] 确保缓存中包含 '代码' 列，防止 KeyError
-        if '代码' in _global_enriched_cache.columns:
-            temp_df = _global_enriched_cache.loc[_global_enriched_cache['代码'].isin(current_codes)].copy()
-        else:
-            # 如果缓存中没有代码列（异常情况），回退到原始 temp_df
-            logger.warning("_get_stock_changes: 缓存中缺少 '代码' 列，无法按代码提取")
-        # 恢复由于 merge 可能改变的行顺序（对齐原始 temp_df）
-        # 这里简单处理：如果 temp_df 和 enriched 结构一致，直接使用 loc
-
-    # [🚀 DEBUG] 检查整合后的数据列，排查 Query NameError
-    if logger.isEnabledFor(logging.DEBUG) or True: # 临时强制开启或由全局级别控制
-        logger.debug(f"🧪 [Enrich Debug] temp_df columns: {temp_df.columns.tolist()}")
-        if not temp_df.empty:
-            # 只展示关键列的快照
-            cols_to_show = [c for c in ['代码', '名称', 'open', 'high', 'low', 'close', 'lastp1d'] if c in temp_df.columns]
-            if not cols_to_show: # 如果都没有，展示前10列
-                cols_to_show = temp_df.columns[:10].tolist()
-            logger.info(f"🧪 [Enrich Debug] Data Preview (Top 3):\n{temp_df[cols_to_show].head(3)}")
-        else:
-            logger.info("🧪 [Enrich Debug] temp_df is EMPTY")
+    # 彻底确保所有策略常用指标列都存在于 DataFrame 中以防御 PandasQueryEngine 的未定义报错
+    if temp_df is not None and not temp_df.empty:
+        import numpy as np
+        # 如果有些列如 close、pct 不存在，先尝试映射或补充默认值
+        if 'close' not in temp_df.columns:
+            if '价格' in temp_df.columns: temp_df['close'] = temp_df['价格']
+            elif '现价' in temp_df.columns: temp_df['close'] = temp_df['现价']
+            else: temp_df['close'] = np.nan
+        if 'pct' not in temp_df.columns:
+            if '涨幅' in temp_df.columns: temp_df['pct'] = temp_df['涨幅']
+            else: temp_df['pct'] = np.nan
+            
+        required_cols = ['high4', 'dff', 'dff2', 'dff3', 'Rank', 'open', 'high', 'low', 'volume']
+        for col in required_cols:
+            if col not in temp_df.columns:
+                if col == 'Rank':
+                    temp_df[col] = 999  # Rank 默认大值，代表靠后
+                elif col in ['dff', 'dff2', 'dff3']:
+                    temp_df[col] = 0.0  # dff 默认 0.0
+                elif col in ['open', 'high', 'low'] and 'close' in temp_df.columns:
+                    temp_df[col] = temp_df['close'] # 用 close 填充 OHLC
+                else:
+                    temp_df[col] = np.nan
 
     # === 7) History Strategy Filter ===
     # 注意：在子线程中调用 tk.Variable.get() 会触发 RuntimeError
@@ -6086,7 +6143,19 @@ def update_monitor_tree(data, tree, window_info, item_id):
             update_latest_row(row)
 
     else:
-        insert_placeholder(tree)
+        if dd is not None:
+            # 虽然没有历史/今日异动数据，但有新浪实时数据，清空 loading 占位符并填入新浪数据
+            tree.delete(*tree.get_children())
+            time_str = format_time(getattr(dd, 'ticktime', ''))
+            row = [time_str, "新浪", percent, price, amount]
+            tree.insert("", "end", values=row)
+            
+            # 同时触发报警规则校验
+            if not get_work_time():
+                logger.info(f'update_monitor_tree (no changes) sina_data:{stock_code}, {price},{percent},{amount}')
+            check_alert(stock_code, price, percent, amount)
+        else:
+            insert_placeholder(tree)
 
     # 统一调度下一次刷新任务
     delay_ms = get_monitor_next_delay_ms()
