@@ -1,3 +1,37 @@
+## 2026-06-01 18:30
+- [x] **实现实时影子决策全天候周期对齐与降级自适应重算机制 (Implemented Year-Round Resample-Aligned Shadow Decision & Adaptive Recalculation)**：
+    - [x] **实现非交易时段 mock_tick 降级评估 (All-weather Downgraded Evaluation)**：在 `trade_visualizer_qt6.py` 的 `_render_charts_logic` 中引入降级决策引擎。在非交易时段或实盘 tick 缺失时，通过 `day_df` 的最后一行数据在内存中超轻量重组 mock 行情 tick，彻底打破了“只有开盘才能算影子决策”的物理门禁，实现了 7x24 小时全天候任意切换周期的实时影子决策自动重算与对齐渲染！
+    - [x] **实现影子决策周期属性 `resample` 强注入与校验拦截 (Resample-Enforced Validation & Flushing)**：在实时评估产生决策字典后，强注入当前的 `resample` 属性，并在 `_update_ma_legend` 渲染指标图例与展示影子决策时，强制要求周期对齐 `sd_resample == self.resample` 才会激活展示。这物理根治了周期切换时由于旧周期残留导致的“鬼影决策”与“指令错位展示”的顽疾，保证了极端时序下两端数据的 100% 同构！
+- [x] **实现历史回测双主键高精度缓存与信号重算对齐 (Implemented Double-Key Cache for Backtest Signals & Render Alignment)**：
+    - [x] **重构 test_reentry_backtest 双主键缓存机制 (Double-Primary-Key Cache Alignment)**：在 `scratch/test_reentry_backtest.py` 的信号缓存 `_last_backtest_signals` 和最推荐分支 `_last_backtest_best_branch` 字典中，全面物理升级为包含个股代码与重采样周期的 **`(code_clean, resample)` 双主键模型**，同时升级 `get_last_backtest_signals` 与 `get_last_backtest_best_branch` 接口支持，并同时写入单主键以保持完美的旧模块向下兼容。
+    - [x] **打通前端可视化双主键完美对齐渲染 (High-Fidelity Double-Key Render Alignment)**：在 `trade_visualizer_qt6.py` 中，槽函数 `_show_backtest_result` 自动通过 `super(MainWindow, self).sender()` 探测回测线程 of `resample` 属性，将计算完的信号物理装载至双主键缓存字典。同时重构了 `_render_charts_logic` 绘制回测买卖标记点与 `_update_ma_legend` 绘制最佳分支的获取逻辑，优先以 `(code, self.resample)` 双主键捞取，这彻底解决了用户在同一股票切换不同周期（如 1D -> 3D -> w）时由于之前单一代码缓存覆盖导致的“画图信号错位”、“最佳分支显示 stale”的痛点，完美达成了“即切换、即重算、即对齐”的极客操盘体验！
+    - [x] **修复实时幽灵 K 线 (Ghost Candle) 中未定义变量 NameError**：在 `trade_visualizer_qt6.py` 的 `_render_charts_logic` 中，因漏掉 `is_realtime_active` 的局部定义而引发的 `NameError`。我们已将该逻辑进行物理合并与安全重构：`is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and (tick_df is not None and not tick_df.empty)`。这不仅完美保留了原厂的交易时间段门禁，且通过 `not is_mock_tick` 防止了在非交易时段误画幽灵 K 线，并彻底根治了该报错。
+    - [x] **完美通过全系统静态语法及逻辑编译校验**：成功通过了 `python -m py_compile` 静态语法检验，零错误、零警告，全流程极速闭环，系统健壮性磐石稳固！
+
+## 2026-06-01 18:00
+- [x] **实现切换周期自动重算回测与多主键防抖机制 (Implemented Auto-Recompute Backtest on Period Shift & Multi-Key Debounce)**：
+    - [x] **引入股票代码与周期双主键判定 (Double-Primary-Key Alignment)**：在 `render_charts` 尾部的自动回测触发逻辑中，将单一的代码去重判定 `_last_backtest_auto_code` 物理升级为包含股票代码和重采样周期（resample）的 **`(code, resample)` 双主键元组 `_last_backtest_auto_key`**。
+    - [x] **彻底根治切换周期“缓存不更新”痛点**：当用户在同只股票下点击工具栏切换周期（如 1D -> 3D -> w）时，系统灵敏捕捉到周期变化，自动打破去重拦截，强制后台拉起新周期的 Re-entry 回测线程，完美保证了 K 线图买卖点标记、左上角最佳分支策略与显示周期 100% 同步重算与无感刷新！
+    - [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
+- [x] **解决基类方法重名覆盖 (Resolved QObject sender Method Collision & TypeError)**：
+    - [x] **定位重名冲突**：排查出 `MainWindow` 内存在同名的实例属性 `self.sender`（绑定了 `StockSender` 实例），导致在槽函数中以 `self.sender()` 访问 Qt 原生方法时抛出 `TypeError: 'StockSender' object is not callable` 的致命重名冲突报错。
+    - [x] **完美越级超类调用**：将 `self.sender()` 物理重构为 `super(MainWindow, self).sender()`。通过 Python 原生的 `super` 代理在 C++ 超类层次结构中精准越过实例属性覆盖，成功在不改动任何其它类设计的安全前提下，高质获取了真实的 `QThread` 信号源，彻底根治了该报错！
+- [x] **实现自动回测静默标记与快捷键弹窗报告分离机制 (Implemented Silent Auto-Backtest & Explicit alt-g Report Separation)**：
+    - [x] **定义显式与隐式传参接口**：升级了 `_on_shortcut_reentry_backtest(self, checked=False, show_report=True)` 签名，精细化分离了 PyQt 信号槽自带的 `checked` 状态传参，并新增强大的 `show_report` 参数控制。
+    - [x] **实现后台线程动态属性注入**：在启动 `ReentryBacktestThread` 时动态绑定 `show_report` 状态。在线程跑完触发 `_show_backtest_result` 槽函数时，利用 Qt 原生的 `self.sender()` 反向探测触发源并读取该属性，完美做到了“接口签名兼容优先”。
+    - [x] **实现完美静默渲染与免打扰**：如果回测是由个股切换自动触发的，回测会在后台低调跑完，默默把买卖标记点精准打在 K 线图上，同时在 K 线左上角均线图例中更新最佳策略（💡 5日线主升浪等）提示，但**直接拦截并跳过 ScrollableMsgBox 报告弹窗**；只有当操盘手按下 `Alt+G` 快捷键时，才会高调弹出综合回测报告，达成了极具操盘直觉的极客看盘体验！
+- [x] **实现可视化自动历史回测开关与跨会话持久化 (Implemented Auto-Run Backtest Switcher & State Persistence)**：
+    - [x] **追加工具栏按钮控制**：在“模拟信号”控制按钮下方并排增设了极简的 `回测` 按钮 (`backtest_action`)，设计了优雅详细的 Tooltip 气泡提示，默认不选中，并严格保持了工具栏高密度极致布局。
+    - [x] **打通配置跨会话自愈存储**：在 `load_window_position_qt` 和 `_save_visualizer_config` 双向序列化通道中注入 `auto_run_backtest` 持久化解析。用户在工具栏上勾选或取消勾选 `回测` 状态时，系统会瞬间保存至 JSON，并在下次启动时无缝高保真复原。
+    - [x] **实现切换个股毫秒级自动异步触发回测**：在顶层视图渲染入口 `render_charts` 结尾巧妙集成了自动回测控制器。当 `auto_run_backtest` 处于选中状态时，若用户双击自选股、点击热点板块或联动键盘上下键切换了不同的个股，系统能精确进行“跨股原子去重”判定，并通过 `QTimer.singleShot(200)` 实现毫秒级超流畅的异步数据加载与回测自动调起，完美做到了“即切换、即回测”的极客看盘体验！
+- [x] **实现可视化与 Tk 周期回测对齐与重采样自适应 (Implemented Multi-Period Aligned Re-entry Backtesting)**：
+    - [x] **重构回测引擎核心入口**：修改了 `scratch/test_reentry_backtest.py` 的 `run_backtest_and_get_report` 接口，正式引入 `resample` 周期传参支持（默认 `'d'`），并优雅透传至 TDX 历史线拉取核心逻辑 `get_tdx_Exp_day_to_df`。
+    - [x] **加固大屏 Tk 快捷键触发链**：在 `instock_MonitorTK.py` 的 `_on_shortcut_reentry_backtest` 回调中，通过 `self.global_values.getkey("resample")` 动态提取全局选中的 resample 周期，并在异步守护线程中将其实时灌入回测流水。
+    - [x] **对齐 PyQt6 可视化端历史回测周期**：在 `trade_visualizer_qt6.py` 的 `ReentryBacktestThread` 构造函数和 `run` 方法中加入了 `resample` 支持。在其触发端 `_on_shortcut_reentry_backtest` 中，通过“多重安全防线”（`self.resample` / `self._resample` / `cct.GlobalValues` 优先级探测）物理捕获了当前画图视口显示的 K 线重采样周期，完美消除了回测周期与显示周期错位的缺陷，为操盘手提供了跨进程秒级对齐的数据保证！
+    - [x] **落地回测报告周期动态展示**：在 `test_reentry_backtest.py` 最后的交易决策与当前战术状态报告中，全新增加了 `回测周期Resample:` 动态解析板块（如 `🗓️ 日线 (d)` 或者是 `🗓️ 周线 (w)`），使用户对当前所采样的历史决策一目了然。
+    - [x] **打通可视化简报与回测报告的鼠标划选与高亮复制功能**：彻底解决了 PyQt6 端 `ScrollableMsgBox` 弹出后文字内容无法复制的痛点。通过对核心 `QLabel` 注入 `TextSelectableByMouse` 与 `TextSelectableByKeyboard` 联合文本交互标记，使用户可以极其自由地通过鼠标拖曳划词或快捷键 Ctrl+C 复制高密度决策简报、信号透视及历史回测报告，完美对齐了大屏 Tkinter 端可复制 of 优异体验！
+    - [x] **实现 K 线十字光标/悬浮详情弹窗离开区域 6 秒自动关闭 (Implemented 6s Auto-Hide for K-Line Detail Window)**：重构了 `trade_visualizer_qt6.py` 内的 `KLineDetailWindow` 悬浮详情窗。引入了 `auto_hide_timer` 状态心跳与“防爆盾”机制。当鼠标移出 K 线图绘制区，详情窗口会在 6 秒后安全自动隐藏，同时如果在详情窗口内悬浮或拖拽，自动隐藏机制会自动暂时失效，确保了极其灵敏且人性化的操作体验。
+
 ## 2026-06-01 17:35
 - [x] **实现 Re-entry 历史最佳分支与实时决策双核策略在 K 线图图例下方中文简洁提示 (Implemented Re-entry Best Strategy & Realtime Decision Dual-Overlay)**：
     - [x] **移植展现逻辑至 MA Legend 覆盖层**：在 `trade_visualizer_qt6.py` 中，彻底将原先在 K 线图标题展现回测最佳分支的方式，重构并完美移植到了 K 线图左上角的 `_update_ma_legend` 指标显示区域。

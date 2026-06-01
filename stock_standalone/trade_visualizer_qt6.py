@@ -7277,7 +7277,9 @@ class MainWindow(QMainWindow, WindowMixin):
             for icon in ['🔴', '🟢', '📊', '⚠️']:
                 code_clean_t = code_clean_t.replace(icon, '').strip()
                 
-            best_branch = getattr(self, 'reentry_backtest_best_branch', {}).get(code_clean_t)
+            # 优先使用 (code, resample) 双主键获取回测最佳分支，防止周期缓存错位
+            best_branch_dict = getattr(self, 'reentry_backtest_best_branch', {})
+            best_branch = best_branch_dict.get((code_clean_t, self.resample), best_branch_dict.get(code_clean_t))
             
             # 提取实时影子决策
             sd_action = None
@@ -7286,19 +7288,22 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if hasattr(self, 'last_shadow_decision') and self.last_shadow_decision:
                 sd = self.last_shadow_decision
-                # 获取决策动作和理由
-                sd_action = sd.get('action', '无')
-                sd_reason = sd.get('reason', '')
+                sd_resample = sd.get('resample', 'd')
                 
-                # 校验是否为当前个股的实时决策
-                sd_code = sd.get('code', '')
-                sd_code_clean = sd_code.strip()
-                for icon in ['🔴', '🟢', '📊', '⚠️']:
-                    sd_code_clean = sd_code_clean.replace(icon, '').strip()
-                
-                # 如果没有 code，或者 code 匹配，则提取并展示
-                if not sd_code_clean or sd_code_clean in code_clean_t or code_clean_t in sd_code_clean:
-                    if sd_action and sd_action != "无":
+                # 仅当周期 resample 完全对齐时才提取展示，防止残留周期缓存
+                if sd_resample == self.resample:
+                    # 获取决策动作和理由
+                    sd_action = sd.get('action', '无')
+                    sd_reason = sd.get('reason', '')
+                    
+                    # 校验是否为当前个股的实时决策
+                    sd_code = sd.get('code', '')
+                    sd_code_clean = sd_code.strip()
+                    for icon in ['🔴', '🟢', '📊', '⚠️']:
+                        sd_code_clean = sd_code_clean.replace(icon, '').strip()
+                    
+                    # 如果没有 code，或者 code 匹配，且 sd_action 不为无，则提取并展示
+                    if (not sd_code_clean or sd_code_clean in code_clean_t or code_clean_t in sd_code_clean) and (sd_action and sd_action != "无"):
                         # 对理由和动作做精美中文转译
                         sd_reason_zh = str(sd_reason)
                         rt_abbrev_map = {
@@ -9306,7 +9311,6 @@ class MainWindow(QMainWindow, WindowMixin):
             
         code = self.current_code
         name = self.code_name_map.get(code, code)
-        self._last_backtest_auto_code = code  # 同步更新，防止重复
         
         # 提取当前的 resample 周期，多重防线兜底
         resample = "d"
@@ -9321,6 +9325,8 @@ class MainWindow(QMainWindow, WindowMixin):
             except:
                 pass
                 
+        self._last_backtest_auto_key = (code, resample)  # 同步更新包含周期的双主键，防止重复并对齐周期切换
+        
         if show_report:
             self.show_status_message(f"🚀 正在后台执行 {name} ({code}) 的 Re-entry 历史回测... [周期: {resample}]", 3000)
         else:
@@ -9338,36 +9344,44 @@ class MainWindow(QMainWindow, WindowMixin):
         # [UX] 显式命名为“综合简报”，使 ScrollableMsgBox 自动识别并完美复用“综合简报”的位置与大小设置
         title = f"👑 Re-entry 历史回测综合简报 - {name} ({code})"
         
-        # 1. 物理捕获回测的结构化信号和最佳策略分支
+        # 1. 物理捕获回测的结构化信号 and 最佳策略分支
+        sender_thread = super(MainWindow, self).sender()
+        resample = "d"
+        show_report = True
+        if sender_thread:
+            if hasattr(sender_thread, 'resample') and sender_thread.resample:
+                resample = sender_thread.resample
+            if hasattr(sender_thread, 'show_report'):
+                show_report = sender_thread.show_report
+
         try:
             from scratch.test_reentry_backtest import get_last_backtest_signals, get_last_backtest_best_branch
             code_clean = code.strip()
             for icon in ['🔴', '🟢', '📊', '⚠️']:
                 code_clean = code_clean.replace(icon, '').strip()
                 
-            signals_list = get_last_backtest_signals(code_clean)
-            best_branch = get_last_backtest_best_branch(code_clean)
+            signals_list = get_last_backtest_signals(code_clean, resample=resample)
+            best_branch = get_last_backtest_best_branch(code_clean, resample=resample)
             
             if not hasattr(self, 'reentry_backtest_signals'):
                 self.reentry_backtest_signals = {}
             if not hasattr(self, 'reentry_backtest_best_branch'):
                 self.reentry_backtest_best_branch = {}
                 
+            # 强力双主键缓存记录，彻底根治周期缓存冲突
+            self.reentry_backtest_signals[(code_clean, resample)] = signals_list
+            self.reentry_backtest_best_branch[(code_clean, resample)] = best_branch
+            
+            # 同时保留单主键以向下兼容
             self.reentry_backtest_signals[code_clean] = signals_list
             self.reentry_backtest_best_branch[code_clean] = best_branch
-            logger.debug(f"✅ 成功加载 {code_clean} 的 {len(signals_list)} 个 Re-entry 回测信号，最佳/适合分支策略: {best_branch}")
+            logger.debug(f"✅ 成功加载 {code_clean} ({resample}) 的 {len(signals_list)} 个 Re-entry 回测信号，最佳/适合分支策略: {best_branch}")
             
             # 2. 物理强制触发重绘，使新标记瞬间在 K 线图上浮现！
             self.render_charts(code_clean, self.day_df, self.tick_df, force=True)
             self.show_status_message(f"✅ 回测完成！已将 {len(signals_list)} 个买卖点物理标记在 K 线图上，并识别出适合策略: {best_branch}", 4000)
         except Exception as e:
             logger.error(f"❌ 提取回测信号并重绘图表失败: {e}")
-            
-        # 如果指定不显示报告，直接在此返回，只默默在 K 线图上浮现买卖点和图例！
-        sender_thread = super(MainWindow, self).sender()
-        show_report = True
-        if sender_thread and hasattr(sender_thread, 'show_report'):
-            show_report = sender_thread.show_report
             
         if not show_report:
             return
@@ -11327,8 +11341,22 @@ class MainWindow(QMainWindow, WindowMixin):
                 
         # [NEW] 当回测选中后，k线视图自动执行历史回测
         if getattr(self, 'auto_run_backtest', False) and code:
-            if not hasattr(self, '_last_backtest_auto_code') or self._last_backtest_auto_code != code:
-                self._last_backtest_auto_code = code
+            # 提取当前的 resample 周期，多重防线兜底
+            resample = "d"
+            if hasattr(self, 'resample') and self.resample:
+                resample = self.resample
+            elif hasattr(self, '_resample') and self._resample:
+                resample = self._resample
+            else:
+                try:
+                    import cct
+                    resample = cct.GlobalValues().getkey("resample") or "d"
+                except:
+                    pass
+            
+            current_key = (code, resample)
+            if not hasattr(self, '_last_backtest_auto_key') or self._last_backtest_auto_key != current_key:
+                self._last_backtest_auto_key = current_key
                 QtCore.QTimer.singleShot(200, lambda: self._on_shortcut_reentry_backtest(show_report=False))
 
     def _render_charts_impl(self, code, day_df, tick_df, force=False):
@@ -12154,26 +12182,44 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.debug(f"[IPC] Linkage rendering error: {e}")
 
         # 3. 实时影子信号 (K线占位图标)
-        # [FIX] 无论什么条件，必须有实时数据才能激活实时模式，否则无法获取最新价格导致 Crash
-        is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and tick_df is not None and not tick_df.empty
-        
-        if is_realtime_active:
+        # [UPGRADE] 允许在非交易时段或者 tick_df 为空时，通过当前 day_df 的最后一根 K 线进行降级评估，实现全天候周期对齐与即切换即重算
+        effective_tick = tick_df
+        is_mock_tick = False
+        if (effective_tick is None or effective_tick.empty) and day_df is not None and not day_df.empty:
+            last_row = day_df.iloc[-1]
+            effective_tick = pd.DataFrame([{
+                'close': float(last_row.get('close', 0)),
+                'high': float(last_row.get('high', 0)),
+                'low': float(last_row.get('low', 0)),
+                'open': float(last_row.get('open', 0)),
+                'vol': float(last_row.get('vol', last_row.get('volume', 0))),
+                'volume': float(last_row.get('volume', last_row.get('vol', 0))),
+                'amount': float(last_row.get('amount', 0)),
+                'ratio': 1.0
+            }])
+            is_mock_tick = True
+
+        # 只要有 day_df 且有有效的 tick，我们就运行实时影子决策
+        if day_df is not None and not day_df.empty and effective_tick is not None and not effective_tick.empty:
             with timed_ctx("_run_realtime_strategy", warn_ms=300):
-                shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
+                shadow_decision = self._run_realtime_strategy(code, day_df, effective_tick)
                 if shadow_decision:
+                    # 强注入当前重采样周期信息，防止切换周期时产生缓存错位
+                    shadow_decision['resample'] = self.resample
                     self.last_shadow_decision = shadow_decision  # 无论什么动作都存储供简报使用，保证两端绝对对齐
-                    if shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-                        # 优先使用 close, 其次 trade, 最后 price
-                        price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
-                        y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
-                        # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
-                        kline_signals.append(SignalPoint(
-                            code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
-                            signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
-                            source=SignalSource.SHADOW_ENGINE,
-                            reason=shadow_decision['reason'],
-                            debug_info=shadow_decision.get('debug', {})
-                        ))
+                    
+                    # 仅在真实实时数据模式下，且满足动作条件，才画占位图标
+                    if not is_mock_tick and (self.realtime or cct.get_work_time_duration() or self._debug_realtime):
+                        if shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                            price_col = 'close' if 'close' in effective_tick.columns else ('trade' if 'trade' in effective_tick.columns else 'price')
+                            y_p = float(effective_tick[price_col].iloc[-1]) if price_col in effective_tick.columns else 0
+                            kline_signals.append(SignalPoint(
+                                code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
+                                signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
+                                source=SignalSource.SHADOW_ENGINE,
+                                reason=shadow_decision['reason'],
+                                debug_info=shadow_decision.get('debug', {})
+                            ))
 
         # 4. Follow Queue Signals (Integrated)
         follow_signals = self._get_follow_signals(code, day_df)
@@ -12190,7 +12236,9 @@ class MainWindow(QMainWindow, WindowMixin):
         for icon in ['🔴', '🟢', '📊', '⚠️']:
             code_clean_re = code_clean_re.replace(icon, '').strip()
             
-        reentry_backtest_list = getattr(self, 'reentry_backtest_signals', {}).get(code_clean_re, [])
+        # 优先使用 (code, resample) 双主键获取回测信号，防止周期缓存错位
+        backtest_signals_dict = getattr(self, 'reentry_backtest_signals', {})
+        reentry_backtest_list = backtest_signals_dict.get((code_clean_re, self.resample), backtest_signals_dict.get(code_clean_re, []))
         for sig_item in reentry_backtest_list:
             s_date = sig_item.get("date")
             s_action = sig_item.get("action")
@@ -12336,8 +12384,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # -------------------------
         # 移除此处的 sensing_bar 设置，改到 intraday 内容设置之后
         # -------------------------
-
         # --- Ghost Candle (实时占位) ---
+        is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and tick_df is not None and not tick_df.empty
         logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys()[:10] if tick_df is not None and not tick_df.empty else "None"}')
         if is_realtime_active:
             # [FIX] Safe column choice
