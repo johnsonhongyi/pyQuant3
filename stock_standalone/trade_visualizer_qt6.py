@@ -1306,10 +1306,11 @@ class ReentryBacktestThread(QThread):
     """Re-entry 历史回测后台异步线程，防止主线程假死"""
     finished_sig = pyqtSignal(str, str) # code, report_text
     
-    def __init__(self, code: str, name: str, parent=None):
+    def __init__(self, code: str, name: str, resample: str = "d", parent=None):
         super().__init__(parent)
         self.code = code
         self.name = name
+        self.resample = resample
         
     def run(self):
         try:
@@ -1327,7 +1328,7 @@ class ReentryBacktestThread(QThread):
             for icon in ['🔴', '🟢', '📊', '⚠️']:
                 name_clean = name_clean.replace(icon, '').strip()
                 
-            report = run_backtest_and_get_report(code_clean, name_clean)
+            report = run_backtest_and_get_report(code_clean, name_clean, only_report=True, resample=self.resample)
             self.finished_sig.emit(code_clean, report)
         except Exception as e:
             import traceback
@@ -2395,6 +2396,10 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         self.label.setWordWrap(True)
         self.label.setTextFormat(Qt.TextFormat.RichText)  # [FIX] 修改为 RichText 以正确渲染 HTML 信号透视信息
         self.label.setOpenExternalLinks(True)
+        self.label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | 
+            Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
         content_layout.addWidget(self.label)
         self.scroll_area.setWidget(content_widget)
@@ -2851,6 +2856,12 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.hover_timer.setSingleShot(True)
         self.hover_timer.timeout.connect(self._on_hover_timeout)
         
+        # 6秒无操作自动隐藏定时器
+        self.auto_hide_timer = QtCore.QTimer(self)
+        self.auto_hide_timer.setSingleShot(True)
+        self.auto_hide_timer.setInterval(6000)
+        self.auto_hide_timer.timeout.connect(self._on_auto_hide_timeout)
+        
         # 限制 KLineDetailWindow 自身最大宽度为 300，配合 label.setMaximumWidth(280)，实现彻底自动折行
         self.setMinimumWidth(220)
         self.setMinimumHeight(150)
@@ -2921,10 +2932,32 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self._update_stylesheets()
         self.adjustSize()
 
+    def _on_auto_hide_timeout(self):
+        """6秒无操作超时，自动隐藏详情窗口"""
+        if not self.is_hovered and not self.is_dragging:
+            self.hide()
+
+    def setVisible(self, visible):
+        super().setVisible(visible)
+        if visible:
+            # 只要详情窗口被显示，就开始 6 秒倒计时自动隐藏
+            self.auto_hide_timer.start(6000)
+        else:
+            # 窗口隐藏时，立即停止计时
+            self.auto_hide_timer.stop()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # 只要窗口发生移动（跟随鼠标十字光标移动），在非悬停/非拖拽状态下重置 6 秒自动隐藏
+        if self.isVisible() and not self.is_hovered and not self.is_dragging:
+            self.auto_hide_timer.start(6000)
+
     def enterEvent(self, event):
         # 鼠标进入时，启动 2 秒静止停留计时器，不立即激活 hover 状态
         if not self.is_hovered:
             self.hover_timer.start(self.hover_activation_delay)
+        # 鼠标进入详情窗口本身，停止 6 秒自动隐藏计时
+        self.auto_hide_timer.stop()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -2936,6 +2969,9 @@ class KLineDetailWindow(QtWidgets.QFrame):
             self.unsetCursor()
             self._update_stylesheets()
             self.adjustSize()
+        # 鼠标离开详情窗口本身，如果当前处于显示状态，重新启动 6 秒自动隐藏计时
+        if self.isVisible():
+            self.auto_hide_timer.start(6000)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -2949,6 +2985,8 @@ class KLineDetailWindow(QtWidgets.QFrame):
         # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 2 秒计时
         if not self.is_hovered:
             self.hover_timer.start(self.hover_activation_delay)
+            # 每次鼠标在其上划过且未激活 hover 时，也属于用户活跃操作，重置 6 秒自动隐藏
+            self.auto_hide_timer.start(6000)
             
             # === 🚀 核心事件穿透：将未激活状态下的鼠标移动事件转发给底层 K 线图 ===
             if self.main_window and hasattr(self.main_window, 'kline_plot'):
@@ -3199,6 +3237,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 策略模拟开关
         self.show_strategy_simulation = True
+        
+        # 自动历史回测开关，默认不选中
+        self.auto_run_backtest = False
         
         # ⭐ 性能优化缓存
         self._hist_df_cache = pd.DataFrame()
@@ -4828,6 +4869,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.sim_action.triggered.connect(self.on_toggle_simulation)
         self.toolbar.addAction(self.sim_action)
 
+        # 自动历史回测 Action
+        self.backtest_action = QAction("回测", self)
+        self.backtest_action.setCheckable(True)
+        self.backtest_action.setChecked(self.auto_run_backtest)
+        self.backtest_action.setToolTip("选中后：切换股票或数据刷新时，K线视图将自动执行并弹出 Re-entry 历史回测")
+        self.backtest_action.triggered.connect(self.on_toggle_auto_backtest)
+        self.toolbar.addAction(self.backtest_action)
+
         # 神奇九转 Action
         self.td_action = QAction("九转", self)
         self.td_action.setCheckable(True)
@@ -4950,6 +4999,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_strategy_simulation = checked
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def on_toggle_auto_backtest(self, checked):
+        """自动历史回测开关触发"""
+        self.auto_run_backtest = checked
+        if self.current_code and checked:
+            self._on_shortcut_reentry_backtest()
+        self._save_visualizer_config()
 
     def on_toggle_linkage(self, checked):
         """切换联动不自动显示开关 (同步全系统状态)"""
@@ -9242,7 +9298,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self._resize_columns_tightly(target)
             self.show_status_message(f"Layout Optimized: {target.objectName() or 'Table'}", 2000)
 
-    def _on_shortcut_reentry_backtest(self):
+    def _on_shortcut_reentry_backtest(self, checked=False, show_report=True):
         """Alt+X 一键触发 Re-entry 历史回测"""
         if not hasattr(self, 'current_code') or not self.current_code:
             self.show_status_message("⚠️ 未选择股票，无法执行回测", 2000)
@@ -9250,10 +9306,29 @@ class MainWindow(QMainWindow, WindowMixin):
             
         code = self.current_code
         name = self.code_name_map.get(code, code)
-        self.show_status_message(f"🚀 正在后台执行 {name} ({code}) 的 Re-entry 历史回测...", 3000)
+        self._last_backtest_auto_code = code  # 同步更新，防止重复
+        
+        # 提取当前的 resample 周期，多重防线兜底
+        resample = "d"
+        if hasattr(self, 'resample') and self.resample:
+            resample = self.resample
+        elif hasattr(self, '_resample') and self._resample:
+            resample = self._resample
+        else:
+            try:
+                import cct
+                resample = cct.GlobalValues().getkey("resample") or "d"
+            except:
+                pass
+                
+        if show_report:
+            self.show_status_message(f"🚀 正在后台执行 {name} ({code}) 的 Re-entry 历史回测... [周期: {resample}]", 3000)
+        else:
+            logger.info(f"⏳ [Auto-Backtest] Running silent backtest for {name} ({code}) with period {resample}...")
         
         # 启动后台线程执行回测
-        self._backtest_thread = ReentryBacktestThread(code, name, self)
+        self._backtest_thread = ReentryBacktestThread(code, name, resample=resample, parent=self)
+        self._backtest_thread.show_report = show_report  # 动态注入显示开关
         self._backtest_thread.finished_sig.connect(self._show_backtest_result)
         self._backtest_thread.start()
         
@@ -9287,6 +9362,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self.show_status_message(f"✅ 回测完成！已将 {len(signals_list)} 个买卖点物理标记在 K 线图上，并识别出适合策略: {best_branch}", 4000)
         except Exception as e:
             logger.error(f"❌ 提取回测信号并重绘图表失败: {e}")
+            
+        # 如果指定不显示报告，直接在此返回，只默默在 K 线图上浮现买卖点和图例！
+        sender_thread = super(MainWindow, self).sender()
+        show_report = True
+        if sender_thread and hasattr(sender_thread, 'show_report'):
+            show_report = sender_thread.show_report
+            
+        if not show_report:
+            return
             
         # [UX] 复用窗口：若窗口实例已存在，则直接更新其标题与内容并展现，实现多窗口分开与零新建
         if hasattr(self, '_backtest_report_dlg') and self._backtest_report_dlg is not None:
@@ -11240,6 +11324,12 @@ class MainWindow(QMainWindow, WindowMixin):
         finally:
             if was_enabled:
                 self.setUpdatesEnabled(True)
+                
+        # [NEW] 当回测选中后，k线视图自动执行历史回测
+        if getattr(self, 'auto_run_backtest', False) and code:
+            if not hasattr(self, '_last_backtest_auto_code') or self._last_backtest_auto_code != code:
+                self._last_backtest_auto_code = code
+                QtCore.QTimer.singleShot(200, lambda: self._on_shortcut_reentry_backtest(show_report=False))
 
     def _render_charts_impl(self, code, day_df, tick_df, force=False):
         # 🚀 [ATOMIC RENDER] 锁定 UI 更新，确保 K线->均线->信号 一体化计算与呈现
@@ -13981,6 +14071,16 @@ class MainWindow(QMainWindow, WindowMixin):
                     # ❗ 调用正确的 slot
                     self.on_toggle_simulation(enabled)
 
+            # 3.3.2 自动历史回测开关
+            if 'auto_run_backtest' in window_config:
+                enabled = bool(window_config.get('auto_run_backtest', False))
+                self.auto_run_backtest = enabled
+
+                if hasattr(self, 'backtest_action'):
+                    self.backtest_action.blockSignals(True)
+                    self.backtest_action.setChecked(enabled)
+                    self.backtest_action.blockSignals(False)
+
             # 3.4 TDX 联动开关
             if 'tdx_enabled' in window_config:
                 enabled = bool(window_config.get('tdx_enabled', True))
@@ -14131,6 +14231,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.3 模拟信号开关
             if hasattr(self, 'show_strategy_simulation'):
                 window_config['show_strategy_simulation'] = self.show_strategy_simulation
+            
+            # 3.3.2 自动历史回测开关
+            if hasattr(self, 'auto_run_backtest'):
+                window_config['auto_run_backtest'] = self.auto_run_backtest
             
             # 3.4 TDX 联动开关
             if hasattr(self, 'tdx_enabled'):
