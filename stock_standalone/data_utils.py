@@ -3025,7 +3025,7 @@ def fetch_and_process(
                 lambda: not flag.value,
                 lambda: not cct.get_work_time(),
                 lambda: get_status(status_callback) != last_status,
-                lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample,
+                lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample_ui,
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,
                 lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
             ]

@@ -1,3 +1,10 @@
+## 2026-06-01 10:40
+- [x] **修复实时行情多周期高频重刷环路 (Fixed Infinite Background Refresh Loop for Multi-Periods)**：
+    - [x] **根治多周期 sleep 锁击穿 (Resolved sleep Bypass in data_utils.py)**：在 `data_utils.py` 中，将 `stop_conditions` 对 `resample` 状态的比对源从硬编码的局部 `resample` (日线 `'d'`) 升级为实际界面处于活跃状态下的 `resample_ui`。这彻底解决了当用户切换至非日线周期（如 `'3d'` / `'w'`）时，由于 `'3d' != 'd'` 恒成立导致 background 轮询主循环的 `sleep` 锁在亚毫秒级内被不间断击穿的严重缺陷，将轮询主循环带回了正常的 180s 或 120s 节律等待中。
+    - [x] **消解 UI 行情刷新风暴 (Resolved UI TableUpdate V4 Refresh Storm)**：阻断了由于 background 无延迟高速 polling 行情包投递给共享 Queue 引起的主线程 Pump / Compute 线程池的无限高频链式重计算，恢复了极佳的 CPU 占用表现，消除了 `TableUpdate` V4 的极高频警告及 UI 黏滞感。
+- [x] **修复策略任务轮换分发个股去重逻辑 (Fixed Round-Robin Duplication in stock_live_strategy.py)**：
+    - [x] **根治小池子回绕去重 (Resolved Small Pool Wrapping Duplications)**：在 `stock_live_strategy.py` 的 `_check_strategies` 中引入了 `pool_size <= max_fetch` 的原子分支判定。当当前周期的受控池子较小时，一次性同步加载全量个股并直接重置游标游走为 `0`，彻底阻断了切片算法在大周期或微型选股池中因为物理回绕带来的元素自重复和冗余的扫描任务提交。
+
 ## 2026-06-01 02:10
 - [x] **优化系统性能分析器 Treeview 字体与行高 DPI 动态匹配 (Optimized Treeview Font & Rowheight DPI Matching for System Performance Analyzer)**：
     - [x] **根治行高硬编码与 DPI 截断 (Resolved Rowheight Hardcoding & DPI Truncation)**：将 `sys_performance_analyzer.py` 中 Treeview 原先硬编码的 `row_height = 25` 修改为基于 Windows 系统实际 DPI 缩放因子的动态计算公式 `row_height = int(28 * scale)`。
