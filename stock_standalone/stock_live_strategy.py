@@ -2532,11 +2532,14 @@ class StockLiveStrategy:
             if pool_size > 0:
                 start = res_cursor
                 max_fetch = getattr(self, 'max_fetch_kline', 30)
-                end = start + max_fetch
-                fetch_list = (pool[start:end] if end <= pool_size else pool[start:] + pool[:(end - pool_size)])
-                
-                # 存回当前周期的独立游标
-                StockLiveStrategy._kline_rr_cursors_static[resample] = end % pool_size
+                if pool_size <= max_fetch:
+                    fetch_list = list(pool)
+                    StockLiveStrategy._kline_rr_cursors_static[resample] = 0
+                else:
+                    end = start + max_fetch
+                    fetch_list = (pool[start:end] if end <= pool_size else pool[start:] + pool[:(end - pool_size)])
+                    # 存回当前周期的独立游标
+                    StockLiveStrategy._kline_rr_cursors_static[resample] = end % pool_size
                 logger.info(f"🔍 [RR_STATUS] PoolSize({resample})={pool_size} Cursor={start} FetchCount={len(fetch_list)}")
             else:
                 fetch_list = []

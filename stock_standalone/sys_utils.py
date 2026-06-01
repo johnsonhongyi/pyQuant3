@@ -208,14 +208,9 @@ def get_conf_path(fname, base_dir=None):
         if hasattr(sys, "_MEIPASS"):
             is_onefile = (sys._MEIPASS != base_dir)
             
-    # 2. 查找映射字典
+    # 2. 查找映射字典与路径防嵌套预处理
     mapping = RESOURCE_MAP.get(key)
     if mapping:
-        # 🛡️ 优先探测物理根目录（dst）下的现有配置文件，避免在已有用户配置时通过备份文件（src）进行不必要的自愈/恢复或路径分流
-        root_path = os.path.join(base_dir, mapping["dst"])
-        if os.path.exists(root_path) and os.path.getsize(root_path) > 0:
-            return root_path
-            
         src_rel = mapping["src"]
         # Onefile 模式下平铺在根目录（dst）；Onedir 或开发环境下维持在默认子目录（src）
         if is_onefile:
@@ -226,14 +221,26 @@ def get_conf_path(fname, base_dir=None):
         src_rel = fname
         dst_rel = fname
 
-    # 💥 彻底防范并消除 `datacsv/datacsv` 重复嵌套：
-    # 如果 `dst_rel` 已经包含了 `datacsv/` 或者是 `wencai/` 或者是 `JSONData/`，
-    # 而传入的 `base_dir` 刚好是其对应的子目录（例如 base_dir 结尾是 `datacsv` ），
-    # 我们应该自动将 `base_dir` 提升回退回根目录 `BASE_DIR`
-    for folder_name in ["datacsv", "wencai", "JSONData", "JohnsonUtil"]:
-        if dst_rel.startswith(f"{folder_name}/") and base_dir.replace("\\", "/").rstrip("/").endswith(folder_name):
-            # 将 base_dir 回退到它的父目录
-            base_dir = os.path.dirname(os.path.abspath(base_dir))
+    # 💥 彻底防范并消除 `datacsv/datacsv` 等重复嵌套：
+    # 如果传入的 `base_dir` 刚好是其对应的子目录（例如 base_dir 结尾是 `datacsv` ），
+    # 且映射 dst 路径也以该子目录开头，说明发生了重复嵌套。
+    # 我们应该自动将 `base_dir` 提升回退回根目录 `BASE_DIR`，并强制将 `dst_rel` 设为 `mapping["dst"]` 以保证能够正确拼出完整路径
+    if mapping:
+        for folder_name in ["datacsv", "wencai", "JSONData", "JohnsonUtil"]:
+            dst_path_norm = mapping["dst"].replace("\\", "/")
+            if dst_path_norm.startswith(f"{folder_name}/") and base_dir.replace("\\", "/").rstrip("/").endswith(folder_name):
+                # 将 base_dir 回退到它的父目录
+                base_dir = os.path.dirname(os.path.abspath(base_dir))
+                # 既然 base_dir 已经提升，dst_rel 必须包含完整的相对路径以保证能够定位到子目录中
+                dst_rel = mapping["dst"]
+                break
+
+    # 3. 🛡️ 优先探测物理根目录（dst）下的现有配置文件，避免在已有用户配置时通过备份文件（src）进行不必要的自愈/恢复或路径分流
+    # 💥 这里必须使用已经经过防嵌套安全纠正后的 base_dir 重新计算 root_path，从源头上根除 Double Nesting
+    if mapping:
+        root_path = os.path.join(base_dir, mapping["dst"])
+        if os.path.exists(root_path) and os.path.getsize(root_path) > 0:
+            return root_path
 
     # 我们最终期待的物理磁盘目标路径
     default_path = os.path.join(base_dir, dst_rel)
@@ -388,6 +395,41 @@ def save_display_config(config_file, config):
 
 def ensure_all_configs_released():
     """在主程序最早期抢占式预加载并释放所有注册的核心配置文件，建立全物理自愈安全屏障"""
+    # 💥 彻底根治并自动清理历史遗留的 `datacsv/datacsv` 重复嵌套目录，迁移旧数据
+    try:
+        app_root = get_app_root()
+        nested_dir = os.path.join(app_root, "datacsv", "datacsv")
+        correct_dir = os.path.join(app_root, "datacsv")
+        if os.path.exists(nested_dir) and os.path.isdir(nested_dir):
+            logger.warning(f"发现历史遗留双层嵌套目录: {nested_dir}，正在启动自动数据合并与物理自愈...")
+            for item in os.listdir(nested_dir):
+                src_file = os.path.join(nested_dir, item)
+                dst_file = os.path.join(correct_dir, item)
+                if os.path.isfile(src_file):
+                    # 如果目标文件不存在，或者源文件更大/更新，执行覆盖式物理迁移
+                    should_move = True
+                    if os.path.exists(dst_file):
+                        if os.path.getsize(dst_file) >= os.path.getsize(src_file):
+                            should_move = False
+                    
+                    if should_move:
+                        import shutil
+                        shutil.copy2(src_file, dst_file)
+                        logger.info(f"[自愈迁移] 成功将数据由 {src_file} 迁移至 {dst_file}")
+                    
+                    try:
+                        os.remove(src_file)
+                    except Exception as ex:
+                        logger.error(f"删除冗余源文件 {src_file} 失败: {ex}")
+            
+            try:
+                os.rmdir(nested_dir)
+                logger.info(f"✅ 成功物理清除冗余的双层嵌套目录: {nested_dir}")
+            except Exception as ex:
+                logger.error(f"清理双层嵌套目录 {nested_dir} 失败: {ex}")
+    except Exception as e:
+        logger.error(f"自愈合并双层嵌套目录异常: {e}")
+
     logger.info("📡 正在启动核心配置文件抢占式预加载自愈释放...")
     for fname in RESOURCE_MAP:
         try:
