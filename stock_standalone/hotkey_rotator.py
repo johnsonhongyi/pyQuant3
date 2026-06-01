@@ -15,6 +15,9 @@ import win32con
 import win32file
 import traceback
 
+from JohnsonUtil import LoggerFactory
+logger = LoggerFactory.getLogger(name="hotkey_rotator")
+
 try:
     from PyQt6 import QtWidgets, QtCore, QtGui, sip
     from PyQt6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QFrame, QWidget, QGridLayout, QPushButton, QApplication
@@ -27,7 +30,7 @@ except ImportError as e:
 # 全局异常处理器，防御 unhandled exception 导致 PyQt 闪退
 def global_excepthook(exctype, value, tb):
     err_msg = "".join(traceback.format_exception(exctype, value, tb))
-    print(f"🚨 [Rotator Unhandled Exception]: {err_msg}")
+    logger.error(f"🚨 [Rotator Unhandled Exception]: {err_msg}")
     try:
         send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": f"🚨 快捷键进程发生异常: {str(value)[:60]}"})
     except:
@@ -498,7 +501,7 @@ class WindowSyncServer(threading.Thread):
             except OSError as e:
                 if attempt == 4:
                     err_msg = f"⚠️ 轮转同步端口26669被占用 ({e})，热键进程启动受限，请重启系统！"
-                    print(f"[SyncServer] Bind failed after 5 attempts: {err_msg}")
+                    logger.error(f"[SyncServer] Bind failed after 5 attempts: {err_msg}")
                     send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": err_msg})
                     s.close()
                     return
@@ -506,7 +509,7 @@ class WindowSyncServer(threading.Thread):
             
         try:
             s.listen(5)
-            print("[SyncServer] Listening on 127.0.0.1:26669")
+            logger.warning("[SyncServer] Listening on 127.0.0.1:26669")
             while True:
                 conn, addr = s.accept()
                 try:
@@ -521,13 +524,13 @@ class WindowSyncServer(threading.Thread):
                         obj = json.loads(payload)
                         self.data_signal.emit(obj)
                 except json.JSONDecodeError as je:
-                    print(f"[SyncServer] JSON Decode Error: {je}")
+                    logger.error(f"[SyncServer] JSON Decode Error: {je}")
                 except Exception as e:
-                    print(f"[SyncServer] Connection handler error: {e}")
+                    logger.error(f"[SyncServer] Connection handler error: {e}")
                 finally:
                     conn.close()
         except Exception as e:
-            print(f"[SyncServer] Server crashed: {e}")
+            logger.error(f"[SyncServer] Server crashed: {e}")
         finally:
             s.close()
 
@@ -542,20 +545,20 @@ class HotkeyListener(threading.Thread):
         self.hotkey_id_base = 0xBF00
         self.fallback_active = False
         
-        # 完美对齐 instock_MonitorTK 中的映射表
+        # 完美对齐 instock_MonitorTK 中的映射表并附带功能简介
         self.hotkey_map = {
-            0: (win32con.MOD_ALT, 0x42, "Alt+B"),  # B
-            1: (win32con.MOD_ALT, 0x45, "Alt+E"),  # E
-            2: (win32con.MOD_ALT, 0x53, "Alt+S"),  # S
-            3: (win32con.MOD_ALT, 0x4B, "Alt+K"),  # K
-            4: (win32con.MOD_ALT, 0x4C, "Alt+L"),  # L
-            5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H
-            6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V
-            7: (win32con.MOD_ALT, 0x4D, "Alt+M"),  # M
-            8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T
-            9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R
-            10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R
-            11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J
+            0: (win32con.MOD_ALT, 0x42, "Alt+B [一键静音 (关闭所有语音报警)]"),  # B
+            1: (win32con.MOD_ALT, 0x45, "Alt+E [语音监控 (报警监理配置)]"),  # E
+            2: (win32con.MOD_ALT, 0x53, "Alt+S [策略管理 (筛选与策略管理器)]"),  # S
+            3: (win32con.MOD_ALT, 0x4B, "Alt+K [大盘风口 (温度与风口看板)]"),  # K
+            4: (win32con.MOD_ALT, 0x4C, "Alt+L [实时信号 (开仓预警面板)]"),  # L
+            5: (win32con.MOD_ALT, 0x48, "Alt+H [可视化自选表 (隐藏/显示热表)]"),  # H
+            6: (win32con.MOD_ALT, 0x56, "Alt+V [极速行情 (实时行情计算引擎)]"),  # V
+            7: (win32con.MOD_ALT, 0x4D, "Alt+M [竞价赛马 (竞价强度看板)]"),  # M
+            8: (win32con.MOD_ALT, 0x54, "Alt+T [操作说明 (软件使用指南窗口)]"),  # T
+            9: (win32con.MOD_ALT, 0x52, "Alt+R [视窗轮换 (向下轮转多屏窗口)]"),  # R
+            10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R [视窗轮换 (向上轮转多屏窗口)]"),  # Shift+R
+            11: (win32con.MOD_ALT, 0x4A, "Alt+J [决策流水 (成交与决策分析看板)]"),  # J
         }
         self.registered_ids = []
 
@@ -567,16 +570,22 @@ class HotkeyListener(threading.Thread):
             hk_id = self.hotkey_id_base + offset
             if user32.RegisterHotKey(None, hk_id, mod, vk):
                 self.registered_ids.append(hk_id)
+                logger.warning(f"✅ [Hotkey] 全局独立进程热键激活: {desc}")
             else:
                 # 针对 Alt+R / Alt+Shift+R 触发降级保护自愈
                 if offset in [9, 10]:
                     fallback_vk = 0x51  # Q 键码
-                    new_desc = "Alt+Q (已降级)" if offset == 9 else "Alt+Shift+Q (已降级)"
+                    new_desc = "Alt+Q [视窗轮换 (已降级自愈)]" if offset == 9 else "Alt+Shift+Q [视窗轮换 (已降级自愈)]"
                     self.hotkey_map[offset] = (mod, fallback_vk, new_desc)
                     if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
                         self.registered_ids.append(hk_id)
                         self.fallback_active = True
+                        logger.warning(f"✅ [Hotkey] 全局独立进程热键激活: {new_desc} (由于 Alt+R 被抢占已自动降级自愈)")
                         send_to_tk_pipe({"cmd": "STATUS_MSG", "msg": "⚠️ Alt+R被占用，已降级为 Alt+Q 轮转窗口！"})
+                    else:
+                        logger.warning(f"⚠️ [Hotkey] 全局独立进程热键注册失败: {desc} (降级 Alt+Q 也失败)")
+                else:
+                    logger.warning(f"⚠️ [Hotkey] 全局独立进程热键注册失败: {desc}")
                     
         # 2. PeekMessage 消息循环
         msg = wintypes.MSG()
@@ -592,7 +601,7 @@ class HotkeyListener(threading.Thread):
                 else:
                     time.sleep(0.02)
         except Exception as e:
-            print(f"[HotkeyListener] Thread Error: {e}")
+            logger.error(f"[HotkeyListener] Thread Error: {e}")
         finally:
             for hk_id in self.registered_ids:
                 user32.UnregisterHotKey(None, hk_id)
@@ -718,6 +727,13 @@ class HotkeyRotatorApp(QtCore.QObject):
 
 def main(log_level="DEBUG"):
     try:
+        # 统一设置子进程 logger 等级，使其与主进程完全同步
+        try:
+            level_val = getattr(LoggerFactory, log_level.upper(), LoggerFactory.WARN)
+            logger.setLevel(level_val)
+        except Exception:
+            pass
+
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)  # 物理根治：关闭轮选 Dialog 时防止整个 QApplication 事件循环退出闪退
         

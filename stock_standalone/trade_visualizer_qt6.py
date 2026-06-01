@@ -3847,7 +3847,7 @@ class MainWindow(QMainWindow, WindowMixin):
             ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
             ("Alt+O", "开启/关闭热点语音播报 (Voice)", self._toggle_hotlist_voice),
             ("Alt+W", "紧凑自适应列宽 (当前焦点表格)", self._on_shortcut_autofit),
-            ("Alt+X", "一键执行 Re-entry 历史回测", self._on_shortcut_reentry_backtest),
+            ("Alt+G", "一键执行 Re-entry 历史回测", self._on_shortcut_reentry_backtest),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
             # [NEW] 转发到 MonitorTK 的宏命令快捷键 (Local QShortcut)
@@ -7214,6 +7214,97 @@ class MainWindow(QMainWindow, WindowMixin):
             rev_str = format_indicator_with_icon(rev_v)
             html_text += f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 翻转线: </span>" \
                          f"<span style='color:#FFFF00; font-weight:bold;'>REV:{rev_str}</span>"
+
+        # 👑 [NEW] 如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在均线下方新起一行展示
+        if hasattr(self, 'current_code') and self.current_code:
+            code_clean_t = self.current_code.strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️']:
+                code_clean_t = code_clean_t.replace(icon, '').strip()
+                
+            best_branch = getattr(self, 'reentry_backtest_best_branch', {}).get(code_clean_t)
+            
+            # 提取实时影子决策
+            sd_action = None
+            sd_reason_zh = None
+            rt_color = "#FFD700"
+            
+            if hasattr(self, 'last_shadow_decision') and self.last_shadow_decision:
+                sd = self.last_shadow_decision
+                # 获取决策动作和理由
+                sd_action = sd.get('action', '无')
+                sd_reason = sd.get('reason', '')
+                
+                # 校验是否为当前个股的实时决策
+                sd_code = sd.get('code', '')
+                sd_code_clean = sd_code.strip()
+                for icon in ['🔴', '🟢', '📊', '⚠️']:
+                    sd_code_clean = sd_code_clean.replace(icon, '').strip()
+                
+                # 如果没有 code，或者 code 匹配，则提取并展示
+                if not sd_code_clean or sd_code_clean in code_clean_t or code_clean_t in sd_code_clean:
+                    if sd_action and sd_action != "无":
+                        # 对理由和动作做精美中文转译
+                        sd_reason_zh = str(sd_reason)
+                        rt_abbrev_map = {
+                            "SuperTrendMA5Branch": "5日线主升浪",
+                            "SuperTrendMA10Branch": "10日线趋势",
+                            "SwsPullbackBranch": "SWS盈利线低吸",
+                            "TrendMA60Branch": "60日线生死防守",
+                            "OscillatingBreakdownBranch": "破位高位防震",
+                            "pullback_ma5": "强势回调MA5",
+                            "SuddenLaunchStrategy": "突发启动",
+                            "StrongConsolidationStrategy": "强势整理",
+                            "strong_consolidation_strategy": "强势整理",
+                        }
+                        for eng, cn in rt_abbrev_map.items():
+                            sd_reason_zh = sd_reason_zh.replace(eng, cn)
+                        
+                        if "买" in sd_action or "ADD" in sd_action:
+                            rt_color = "#00FF00"  # 绿色
+                        elif "卖" in sd_action or "止" in sd_action or "损" in sd_action:
+                            rt_color = "#FF4444"  # 红色
+            
+            # 拼装渲染文本
+            line_parts = []
+            has_realtime = False
+            
+            if sd_action and sd_action != "无":
+                has_realtime = True
+                sd_reason_part = f" <span style='color:#FF9900; font-size:10pt;'>(理由: {sd_reason_zh})</span>" if sd_reason_zh else ""
+                line_parts.append(
+                    f"<span style='color:#FFFFFF; font-weight:bold;'>💡 实时决策: </span>"
+                    f"<span style='color:{rt_color}; font-weight:bold;'>{sd_action}</span>"
+                    f"{sd_reason_part}"
+                )
+                
+            if best_branch:
+                BRANCH_CHINESE_MAP = {
+                    "SuperTrendMA5Branch": "5日线主升浪",
+                    "SuperTrendMA10Branch": "10日线趋势",
+                    "SwsPullbackBranch": "SWS盈利线低吸",
+                    "TrendMA60Branch": "60日线生死防守",
+                    "OscillatingBreakdownBranch": "破位高位防震",
+                    
+                    # 扩展回测兼容分支
+                    "break_low": "破底捞反弹策略",
+                    "ma20_reentry": "MA20线回踩二开策略",
+                    "boll_low": "布林下轨超跌重入策略",
+                    "volume_up": "缩量企稳重入策略",
+                    "hma_cross": "HMA趋势金叉策略",
+                    "hma_up": "HMA多头强攻重入策略",
+                    "k_reentry": "K线形态重入策略",
+                    "boll_mid": "布林中轨支撑重入策略",
+                    "red_three": "红三兵强势启动策略",
+                }
+                branch_zh = BRANCH_CHINESE_MAP.get(best_branch, best_branch)
+                prefix = " | 回测策略: " if has_realtime else "💡 回测策略: "
+                line_parts.append(
+                    f"<span style='color:#FFFFFF; font-weight:bold;'>{prefix}</span>"
+                    f"<span style='color:#00FFCC; font-weight:bold;'>{branch_zh} [{best_branch}]</span>"
+                )
+            
+            if line_parts:
+                html_text += "<br/>" + "".join(line_parts)
 
         html_text += "</div>"
 

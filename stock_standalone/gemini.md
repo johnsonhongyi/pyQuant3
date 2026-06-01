@@ -1,3 +1,34 @@
+## 2026-06-01 17:35
+- [x] **实现 Re-entry 历史最佳分支与实时决策双核策略在 K 线图图例下方中文简洁提示 (Implemented Re-entry Best Strategy & Realtime Decision Dual-Overlay)**：
+    - [x] **移植展现逻辑至 MA Legend 覆盖层**：在 `trade_visualizer_qt6.py` 中，彻底将原先在 K 线图标题展现回测最佳分支的方式，重构并完美移植到了 K 线图左上角的 `_update_ma_legend` 指标显示区域。
+    - [x] **实现最佳策略换行美观渲染 (Beautiful Legend Wrapping)**：如果股票在 Re-entry 历史回测中检测到了最佳/适合的分支策略，均线信息浮窗底部会自动换行（使用 `<br/>`）并新起一行，以高辨识度的青绿色（`#00FFCC`）和灯泡图标 `💡` 醒目展示该策略。
+    - [x] **深度对齐决策引擎与盘前分析器策略命名标准 (Aligned Strategy Mapping with Decision Engine & Premarket Analyzer)**：将 `BRANCH_CHINESE_MAP` 的策略映射字典更新并完美对齐了 `premarket_analyzer.py` 的中文直观名称，涵盖 `SuperTrendMA5Branch`（5日线主升浪）、`SuperTrendMA10Branch`（10日线趋势）、`SwsPullbackBranch`（SWS盈利线低吸）、`TrendMA60Branch`（60日线生死防守）与 `OscillatingBreakdownBranch`（破位高位防震）等系统原生策略，实现跨模块极佳命名规范！
+    - [x] **实现实时与回测策略自适应并排展示 (Inline Realtime & Backtest Display)**：在指标浮窗底部引入了双核联动展示。并且**根据操盘手视觉第一优先级**，将最紧迫的**实时影子决策排在最前面展示**，回测最佳策略自动拼接在后面。触发动作时以亮绿（买入）/亮红（卖出/止损）等高对比度色彩渲染，完美解决回测与实盘信号一秒印证的痛点！
+
+## 2026-06-01 17:15
+- [x] **实现概念前10强股与多选批量历史回测调度引擎 (Implemented Concept Top-10 & Multi-Select Batch Backtest Scheduler)**：
+    - [x] **实现动态焦点 Treeview 路由机制**：重构了一键触发回测的回调 `_on_shortcut_reentry_backtest`，彻底移除对单一表格的硬编码。现在系统可以通过 `event.widget` 在运行时智能探查处于焦点状态或触发事件的具体 Treeview 控件，使得一键回测能够极其顺畅地支持大屏主表以及任意子 Toplevel 窗口（如概念前10放量上涨股窗口）。
+    - [x] **实现多选秒级批量回测 (Multi-Select Non-blocking Batching)**：当检测到在任意支持 Treeview 中选中了多只股票时，系统将不再弹出选择框，而是直接将选中的全部个股加入任务流中，高亮提示并一键启动非阻塞批量回测。
+    - [x] **实现概念前10强股自动组合推荐 (Concept Top-10 Curated Grouping)**：当在单选个股模式下触发 `Alt-G` 时，调度引擎自动通过 `df_all` 模糊索引该股所属板块概念，捞出同一行业/概念排名前 10 的高强度股票作为对比测试组合，供用户一键比对。
+    - [x] **引入模态选项管理器 (BacktestOptionsDialog)**：打造了极具现代感的模态对话框，清晰展示个股及概念归属，并为用户提供“仅测试当前股”、“概念组合前10测试”以及“自定义多代码文本测试”等高效选项，极大降低了用户的手工操作频次。
+    - [x] **加固 Toplevel 子窗口的快捷键全面联动**：完美在 `show_concept_top10_window_simple` 和 `show_concept_top10_window` 两个关键个股看板创建逻辑中，为 `win` 以及核心 `tree` 列表追加绑定了 `<Alt-g>` 和 `<Alt-G>`，彻底消除了焦点丢失时按键失效的问题。
+
+## 2026-06-01 16:25
+- [x] **优化热键初始化与状态切换日志可见度 (Optimized Hotkey Setup & Binding Log Visibility)**：
+    - [x] **根治默认日志级别下的全局热键启动不可见问题 (Resolved Hidden Global Hotkey Launch Log)**：将 `setup_global_hotkey` 和 `_launch_legacy_hotkey_thread` 内的 `logger.info` 和 `logger.debug` 全部重构为 `logger.warning`。这确保在默认的警告级别（WARNING）下，无论是全局独立热键进程启动成功、本地窗口快捷键绑定关系、还是备用热键线程的激活与注销，均能产生清晰、一致的系统 warning 级日志，从而极大提升了系统的运行透明度。
+    - [x] **清除 setup_global_hotkey 中局部导入 logging 的冗余依赖 (Eradicated Local 'import logging' in setup_global_hotkey)**：彻底清除了该函数局部动态对 `logging` 标准库模块的引用，改由统一的全局 `logger` 实例及其 `getEffectiveLevel` / `level` 属性与高精度自愈级字典映射完成整型日志级别向 Rotator 子进程字符串参数的 O(1) 转换，完全对齐系统级统一的 LoggerFactory 日体系规范。
+    - [x] **修复本地 Alt-X 快捷键失效问题 (Fixed Local Alt-X Shortcut Focus Block)**：由于 `Alt-X` 快捷键是回测分析的核心抓手且未注册入全局独立热键字典，主窗口在初始化绑定时错误地使用了受焦局限的 `self.bind`。当用户的焦点处于个股数据表格 (`Treeview`) 或搜索输入框 (`Entry`) 内时，事件被子控件直接吞没导致无法响应。现将其物理升级为全局强响应绑定的 `self.bind_all`，彻底打通了任意窗口焦点下的亚毫秒级一键回测调用通道。
+    - [x] **补全多进程启动与自愈参数诊断日志 (Added Multiprocess Spawn Parameter Logging)**：在主线程冷启动以及后台守护自愈线程启动 `HotkeyRotatorProcess` 的 `.start()` 操作前，精准插入了 warning 级别的启动参数诊断日志，透明化打印 `level_val` 与 `daemon` 挂载属性。同时，彻底清除了自愈线程内残留的局部 `import logging` 冗余依赖，实现了全生命周期的日志无缝闭环。
+    - [x] **实现启动与重置的生命周期入口日志记录 (Implemented Startup & Reset Entry Logging)**：在 `setup_global_hotkey` 的第一行逻辑前引入了 warning 级别的全局入口日志打印。不管是冷启动、热重置、还是手动切换，系统皆能高亮输出当前的 `mode` 与 `show_toast` 设定状态，配合后续的独立进程启动日志，让整体热键生命周期完全自解释、可回溯。
+    - [x] **根治独立全局热键子进程绑定细节缺失与日志格式对齐 (Resolved Missing Hotkey Binding Details inside Subprocess & Aligned Formats)**：将 `hotkey_rotator.py` 的所有裸 `print` 和异常捕获输出彻底重构并物理接入系统统一的 `LoggerFactory` 中央日志架构。现在不管是同步服务绑定、全局热键物理激活还是运行异常，子进程均能输出和主程序绝对一致、格式工整且包含时间戳 and 文件行号的系统级 warning / error 日志。
+    - [x] **添加全局独立进程注册激活成功高亮确认日志**：在 `setup_global_hotkey` 的 `mode == "GLOBAL"` 分支末尾追加了极高辨识度的 warning 级别确认日志，明确表明全局快捷键已被成功激活并托管于独立守护进程中开始监控，实现人机确认感大满贯。
+    - [x] **实现全局与本地热点绑定功能简介高亮显示与对齐 (Achieved Global & Local Hotkey Feature Summary Alignment)**：不仅在独立子进程 `hotkey_rotator.py` 的 `self.hotkey_map` 中，也在主进程的类静态说明字典 `_HOTKEY_INFO_MAP` 深度封装了 12 个快捷键的中文功能简介（如 `一键静音`、`决策流水` 等）。使得不管是全局独立进程模式、本地窗口绑定模式还是备用线程降级分支，系统日志在热键绑定激活时均能输出高度一致且完全自解释的功能简介，界面与日志设计体验完美大圆满！
+    - [x] **完成核心热键映射物理重构 (Completed Core Hotkey Remapping & Reorganization)**：
+        - [x] **一键回测替换为 Alt-G**：将原先在焦点切换时易失效的本地回测快捷键 `Alt+X`/`Alt-X` 彻底重构替换为全局强绑定的 `Alt+G`/`Alt-G`，完美消除了按键冲突并提升了在表格和搜索框中的焦点响应度。
+        - [x] **操作说明替换为 Alt-T**：将原先占用 `Alt+G` 的“软件使用指南说明”功能迁移至快捷键 `Alt+T`，并在主类静态字典、回调映射列表及子进程映射表中同步刷新对齐。
+        - [x] **彻底禁用/注释旧选股 Alt-T 键**：将旧版已低频失效的“盘中个股多维筛选器”快捷键 `Alt+T` 进行物理性注释和逻辑封禁，清除了系统无用冗余，全面净化了快捷键定义池。
+
+
 ## 2026-06-01 10:40
 - [x] **修复实时行情多周期高频重刷环路 (Fixed Infinite Background Refresh Loop for Multi-Periods)**：
     - [x] **根治多周期 sleep 锁击穿 (Resolved sleep Bypass in data_utils.py)**：在 `data_utils.py` 中，将 `stop_conditions` 对 `resample` 状态的比对源从硬编码的局部 `resample` (日线 `'d'`) 升级为实际界面处于活跃状态下的 `resample_ui`。这彻底解决了当用户切换至非日线周期（如 `'3d'` / `'w'`）时，由于 `'3d' != 'd'` 恒成立导致 background 轮询主循环的 `sleep` 锁在亚毫秒级内被不间断击穿的严重缺陷，将轮询主循环带回了正常的 180s 或 120s 节律等待中。
