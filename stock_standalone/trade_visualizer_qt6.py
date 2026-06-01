@@ -2440,6 +2440,21 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
             self.theme_combo.setCurrentText(combo_text)
             self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
             btn_box.addWidget(self.theme_combo)
+
+            # 📌 手动导出按钮
+            import re
+            m = re.search(r'-\s*(.*?)\s*\(([0-9]{6})\)', title)
+            if m:
+                self.backtest_name = m.group(1).strip()
+                self.backtest_code = m.group(2).strip()
+            else:
+                self.backtest_name = ""
+                self.backtest_code = ""
+
+            self.export_btn = QtWidgets.QPushButton("📌 导出至操作指南")
+            self.export_btn.setToolTip("手动将当前个股的回测战术计划保存至每日操作指南中")
+            self.export_btn.clicked.connect(self.on_export_clicked)
+            btn_box.addWidget(self.export_btn)
         
         btn_box.addStretch()
         close_btn = QtWidgets.QPushButton("关闭")
@@ -2479,6 +2494,61 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
             if hasattr(self.parent(), '_save_visualizer_config'):
                 self.parent()._save_visualizer_config()
 
+    def on_export_clicked(self):
+        """手动将回测的战术决策计划写入 premarket_diagnose.json"""
+        if not hasattr(self, 'backtest_code') or not self.backtest_code:
+            import re
+            m = re.search(r'-\s*(.*?)\s*\(([0-9]{6})\)', self.windowTitle())
+            if m:
+                self.backtest_name = m.group(1).strip()
+                self.backtest_code = m.group(2).strip()
+                
+        parent = self.parent()
+        if not self.backtest_code:
+            if parent and hasattr(parent, 'show_status_message'):
+                parent.show_status_message("❌ 导出失败: 未能从标题解析出有效的个股代码", 4000)
+            return
+            
+        resample = "d"
+        if parent:
+            if hasattr(parent, 'resample') and parent.resample:
+                resample = parent.resample
+            elif hasattr(parent, '_resample') and parent._resample:
+                resample = parent._resample
+                
+        try:
+            from scratch.test_reentry_backtest import run_backtest_and_get_report
+            self.export_btn.setEnabled(False)
+            self.export_btn.setText("正在导出...")
+            
+            def _execute_export():
+                try:
+                    run_backtest_and_get_report(
+                        code=self.backtest_code,
+                        name=self.backtest_name,
+                        only_report=True,
+                        resample=resample,
+                        force_save=True
+                    )
+                    if parent and hasattr(parent, 'show_status_message'):
+                        parent.show_status_message(f"📡 [手动导出] 成功将 {self.backtest_name} ({self.backtest_code}) 战术计划写入每日指南！", 4000)
+                    self.export_btn.setText("已成功导出 ✔")
+                    QtCore.QTimer.singleShot(3000, lambda: self.export_btn.setText("📌 导出至操作指南"))
+                except Exception as e:
+                    self.export_btn.setText("❌ 导出失败")
+                    QtCore.QTimer.singleShot(3000, lambda: self.export_btn.setText("📌 导出至操作指南"))
+                    if parent and hasattr(parent, 'show_status_message'):
+                        parent.show_status_message(f"❌ 导出失败: {e}", 5000)
+                finally:
+                    self.export_btn.setEnabled(True)
+                    
+            QtCore.QTimer.singleShot(100, _execute_export)
+        except Exception as e:
+            self.export_btn.setText("❌ 加载模块失败")
+            QtCore.QTimer.singleShot(3000, lambda: self.export_btn.setText("📌 导出至操作指南"))
+            if parent and hasattr(parent, 'show_status_message'):
+                parent.show_status_message(f"❌ 导出失败: {e}", 5000)
+
     def refresh_display(self):
         """根据当前配色渲染富文本内容"""
         if not self.is_backtest:
@@ -2493,7 +2563,7 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         }
         color = hex_colors.get(self.theme_color, "#B8B8B8")
         
-        # 将原始报告包裹在 pre 标签内，应用自适应折行和选定前景色
+        # 将原始报告包裹在 pre 标签内，应用自适应折行 and 选定前景色
         formatted = f"<pre style='font-family: Consolas, \"Microsoft YaHei UI\", monospace; color: {color}; line-height: 1.4; font-size: 14px; white-space: pre-wrap; word-wrap: break-word;'>{self.raw_content}</pre>"
         self.label.setText(formatted)
 
@@ -2502,6 +2572,18 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
         self.setWindowTitle(title)
         self.raw_content = content
         self.refresh_display()
+        
+        # 📌 复用窗口时同步更新解析的代码和名称
+        if self.is_backtest:
+            import re
+            m = re.search(r'-\s*(.*?)\s*\(([0-9]{6})\)', title)
+            if m:
+                self.backtest_name = m.group(1).strip()
+                self.backtest_code = m.group(2).strip()
+            else:
+                self.backtest_name = ""
+                self.backtest_code = ""
+
         if self.is_backtest:
             QtCore.QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
 
