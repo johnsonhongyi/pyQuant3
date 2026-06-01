@@ -22,16 +22,20 @@ from trading_kernel.core.signal import StrategySignal
 _last_backtest_signals = {}
 _last_backtest_best_branch = {}
 
-def get_last_backtest_signals(code: str) -> list:
+def get_last_backtest_signals(code: str, resample: str = "d") -> list:
     code_clean = code.strip()
     for icon in ['🔴', '🟢', '📊', '⚠️']:
         code_clean = code_clean.replace(icon, '').strip()
+    if (code_clean, resample) in _last_backtest_signals:
+        return _last_backtest_signals[(code_clean, resample)]
     return _last_backtest_signals.get(code_clean, [])
 
-def get_last_backtest_best_branch(code: str) -> str:
+def get_last_backtest_best_branch(code: str, resample: str = "d") -> str:
     code_clean = code.strip()
     for icon in ['🔴', '🟢', '📊', '⚠️']:
         code_clean = code_clean.replace(icon, '').strip()
+    if (code_clean, resample) in _last_backtest_best_branch:
+        return _last_backtest_best_branch[(code_clean, resample)]
     return _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
 
 def get_branch_cn(branch_name: str) -> str:
@@ -147,8 +151,14 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
     code_clean = code.strip()
     for icon in ['🔴', '🟢', '📊', '⚠️']:
         code_clean = code_clean.replace(icon, '').strip()
-    _last_backtest_signals[code_clean] = []
-    _last_backtest_best_branch[code_clean] = "SuperTrendMA5Branch"
+    
+    # 强力双主键缓存初始化，彻底根治周期缓存冲突
+    _last_backtest_signals[(code_clean, resample)] = []
+    _last_backtest_best_branch[(code_clean, resample)] = "SuperTrendMA5Branch"
+    
+    # 保留单主键以向下兼容
+    _last_backtest_signals[code_clean] = _last_backtest_signals[(code_clean, resample)]
+    _last_backtest_best_branch[code_clean] = _last_backtest_best_branch[(code_clean, resample)]
     
     # ── 从 global.ini 动态灌入 StrategyRouter 静态路由表 (全局仅载入一次) ──
     if not _is_router_loaded:
@@ -364,6 +374,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
             # 👑 策略分支自适应动态路由流转检测
             active_branch_name = getattr(intent.reason, "routed_branch", "UnknownBranch")
             _last_backtest_best_branch[code_clean] = active_branch_name
+            _last_backtest_best_branch[(code_clean, resample)] = active_branch_name
             if last_branch_name is None:
                 last_branch_name = active_branch_name
             
@@ -556,6 +567,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
         intent = decide(sig, "FLAT")
         active_branch_name = getattr(intent.reason, "routed_branch", "UnknownBranch")
         _last_backtest_best_branch[code_clean] = active_branch_name
+        _last_backtest_best_branch[(code_clean, resample)] = active_branch_name
 
         is_reentry_triggered = getattr(intent, "is_reentry_signal", False)
         reentry_reason_str = getattr(intent.reason, "reentry_reason", "")
@@ -621,6 +633,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
     # 动态记录当前最推荐的超级策略分支
     if 'active_branch_name' in locals() and active_branch_name and active_branch_name != "UnknownBranch":
         _last_backtest_best_branch[code_clean] = active_branch_name
+        _last_backtest_best_branch[(code_clean, resample)] = active_branch_name
 
     # 识别倒数第一个确实属于买卖交易动作的行，进行高亮度加持标示
     last_trade_idx = -1
@@ -649,7 +662,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
     log("=" * 80, is_detail=False)
 
     # 动态增加当前战术状态与活跃分支策略的独立展示区块
-    current_branch = _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
+    current_branch = _last_backtest_best_branch.get((code_clean, resample), _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch"))
     log("👑 【当前战术状态与活跃分支策略】", is_detail=False)
     log("-" * 80, is_detail=False)
     if has_position:
@@ -687,7 +700,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
             if latest_action == "SELL" and intent and intent.size_pct == 1.00:
                 action_cn = "清仓平仓"
                 
-            latest_branch = _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch")
+            latest_branch = _last_backtest_best_branch.get((code_clean, resample), _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch"))
             branch_cn = get_branch_cn(latest_branch)
             
             latest_reason = getattr(intent.reason, "raw_reason", "手动回测智能战术决策计划") if intent and intent.reason else "手动回测智能战术决策计划"
