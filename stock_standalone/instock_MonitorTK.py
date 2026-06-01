@@ -11777,14 +11777,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 elif code in self.df_all.index:
                     name = self.df_all.loc[code].get('name', code_clean)
                     
-        logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测...")
+        resample = self.global_values.getkey("resample") or "d"
+        logger.info(f"🚀 正在后台执行 {name} ({code_clean}) 的 Re-entry 历史回测... [周期: {resample}]")
         
         # 4. 后台守护线程异步运行，保证主线程绝对不假死
         def run_thread():
             try:
                 from scratch.test_reentry_backtest import run_backtest_and_get_report
                 # [UX] 1. 采用 only_report=True 提炼精简报告模式
-                report = run_backtest_and_get_report(code_clean, name, only_report=True)
+                report = run_backtest_and_get_report(code_clean, name, only_report=True, resample=resample)
                 # [UX] 2. 使用 after 回流主线程，并调用统一精美的独立弹窗非阻塞展示结论，且实时自适应刷新操作指南
                 self.after(0, lambda: [
                     self._show_backtest_report_window(code_clean, name, report),

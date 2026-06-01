@@ -141,7 +141,7 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
 
 _is_router_loaded = False
 
-def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) -> str:
+def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, resample: str = "d") -> str:
     """运行指定个股 of Re-entry 历史回测，并以字符串形式返回完整的日志及整体总结报告。"""
     global _is_router_loaded
     code_clean = code.strip()
@@ -163,8 +163,8 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) 
                 if "strategy_routing" in config.sections():
                     rmap = {}
                     for key in config["strategy_routing"]:
-                        val = config["strategy_routing"][key]
-                        rmap[key] = [c.strip() for c in val.split(",") if c.strip()]
+                         val = config["strategy_routing"][key]
+                         rmap[key] = [c.strip() for c in val.split(",") if c.strip()]
                     StrategyRouter.register_static_routes(rmap)
             _is_router_loaded = True
         except Exception:
@@ -177,11 +177,11 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) 
         output.write(str(msg) + "\n")
         
     log("=" * 80)
-    log(f"Re-entry 策略历史回溯模拟盘开始：个股 {name} ({code})")
+    log(f"Re-entry 策略历史回溯模拟盘开始：个股 {name} ({code}) | 周期: {resample}")
     log("=" * 80)
 
     # 1. 物理加载 TDX 历史日线数据
-    df = get_tdx_Exp_day_to_df(code_clean)
+    df = get_tdx_Exp_day_to_df(code_clean, resample=resample)
     if df is None or df.empty:
         log("【ERROR】未能在系统数据库或 TDX 本地缓存中检索到该个股的历史日线数据。")
         return output.getvalue()
@@ -658,6 +658,11 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True) 
     else:
         log(f"▶ 战术状态: 📊 保持空仓观察 (KEEP OBSERVING)", is_detail=False)
         log(f"▶ 观察队列: ⏳ 正在对齐主力 12日防踏空右侧抢回防线", is_detail=False)
+    
+    # 动态追加展示回测的重采样周期
+    resample_labels = {'d': '日线','2d': '2日线', '3d': '3日线', 'w': '周线', 'm': '月线'}
+    resample_cn = resample_labels.get(resample, resample)
+    log(f"▶ 回测周期Resample: 🗓️ {resample_cn} ({resample})", is_detail=False)
     log("=" * 80 + "\n", is_detail=False)
 
     # 👑 联动添加/更新到每日操作指南 (open_guidance_window) 中
