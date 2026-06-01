@@ -1066,7 +1066,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._render_scheduler.setInterval(500) # 500ms 刷新率
         self._render_scheduler.timeout.connect(self._on_render_timer_timeout)
         self._render_scheduler.start()
-        self._engine_dirty = False 
+        self._engine_dirty = False
+
 
         self._stats_timer = QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats_display)
@@ -1890,7 +1891,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _create_guidance_table(self) -> QTableWidget:
         """创建每日操作指南表"""
         columns = [
-            "代码", "名称", "成本", "数量", "昨收", 
+            "代码", "名称", "时间", "成本", "数量", "昨收", 
             "涨幅", "DFF", 
             "5日线", "上轨", "SWS线", "防守价", 
             "分支", "建议", "仓位", "理由"
@@ -1914,7 +1915,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         # ⭐ [KEY FIX] 预设紧凑默认列宽（仅在无持久化配置时生效，有配置时由 showEvent 覆盖）
         default_widths = {
-            "代码": 55, "名称": 65, "成本": 50, "数量": 50, "昨收": 50,
+            "代码": 55, "名称": 65, "时间": 75, "成本": 50, "数量": 50, "昨收": 50,
             "涨幅": 55, "DFF": 50,
             "5日线": 55, "上轨": 50, "SWS线": 55, "防守价": 55,
             "分支": 75, "建议": 50, "仓位": 50, "理由": 200
@@ -2130,20 +2131,21 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _update_last_sync_time(self):
         self.last_update_label.setText(f"{datetime.now().strftime('%H:%M:%S')} (实时)")
 
+
     # --- [NEW] 决策引擎同步渲染逻辑 ---
     def _on_engine_header_clicked(self, table, col_idx):
-        """表头点击：极致简化交互，确保点击后数据立即产生物理位移"""
+        """表头点击：使用完全由我们托管的 _sort_col 与 _sort_order 状态机，不受 Qt 内部重置的影响"""
         cur_col = getattr(table, "_sort_col", -1)
         cur_order = getattr(table, "_sort_order", Qt.SortOrder.DescendingOrder)
 
-        # 核心逻辑：如果是当前列，则翻转；如果是新列，则强制切换为升序
-        # 理由：引擎默认都是降序排好的，点新列变升序能保证 100% 看到数据变化
         if col_idx == cur_col:
+            # 点击同一列，强制交替翻转
             new_order = (Qt.SortOrder.AscendingOrder 
                          if cur_order == Qt.SortOrder.DescendingOrder 
                          else Qt.SortOrder.DescendingOrder)
         else:
-            new_order = Qt.SortOrder.AscendingOrder
+            # 点击新列，代码/名称/时间默认升序，其它列默认降序比较符合数据看盘习惯
+            new_order = Qt.SortOrder.AscendingOrder if col_idx in [0, 1, 2] else Qt.SortOrder.DescendingOrder
 
         table._sort_col = col_idx
         table._sort_order = new_order
@@ -2198,9 +2200,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         it_sort = table.item(r, col_idx)
                         sort_val = it_sort.data(self._ROLE_NUMERIC) if it_sort else None
                         if sort_val is None and it_sort: sort_val = it_sort.text()
+                        
+                        # ⭐ 提取代码 (第 0 列) 作为辅助排序键，保证主排序值相同时排序有明显的交替变化反应
+                        it_code = table.item(r, 0)
+                        code_val = it_code.text() if it_code else ""
+                        
                         is_selected = sel_model.isRowSelected(r, idx0) if sel_model else False
                         row_items = [table.takeItem(r, c) for c in range(col_count)]
-                        rows_data.append({'sort_val': sort_val if sort_val is not None else "", 'items': row_items, 'hidden': table.isRowHidden(r), 'selected': is_selected})
+                        rows_data.append({
+                            'sort_val': sort_val if sort_val is not None else "", 
+                            'code_val': code_val,
+                            'items': row_items, 
+                            'hidden': table.isRowHidden(r), 
+                            'selected': is_selected
+                        })
 
                 # Phase 2: Sort
                 with timed_ctx("  [Phase 2] Python Sort", warn_ms=50):
@@ -2213,7 +2226,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             return (0, float(val_str))
                         except: 
                             return (1, str(v)) # 非数字作为字符串排在后面
-                    rows_data.sort(key=lambda x: safe_key(x["sort_val"]), reverse=reverse)
+                    rows_data.sort(key=lambda x: (safe_key(x["sort_val"]), x["code_val"]), reverse=reverse)
 
                 # Phase 3: Write-back
                 with timed_ctx("  [Phase 3] Write-back", warn_ms=100):
@@ -2228,6 +2241,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if model: model.endResetModel()
             for j, m in enumerate(orig_modes): hh.setSectionResizeMode(j, m)
             table.setSortingEnabled(was_sorting)
+            # ⭐ [NEW] 排序写回后强制重置 Qt 标头小三角指示器，防止 takeItem/setItem 后指示状态被 Qt 重置丢失
+            table.horizontalHeader().setSortIndicator(col_idx, sort_order)
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
             table.viewport().setUpdatesEnabled(True)
@@ -2418,7 +2433,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                                     except Exception as e:
                                         logger.error(f"Failed to load name map in dashboard thread: {e}")
                                         
+                            from datetime import datetime
+                            try:
+                                mtime = os.path.getmtime(diagnose_file)
+                                file_modified_time = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                            except Exception:
+                                file_modified_time = datetime.now().strftime("%Y-%m-%d")
+
                             for d in data:
+                                # 自动修复/格式化时间戳为 YYYY-MM-DD 格式
+                                ts = d.get('timestamp')
+                                if not ts:
+                                    d['timestamp'] = file_modified_time
+                                    any_healed = True
+                                elif len(ts) > 10:  # 自动裁切为 YYYY-MM-DD
+                                    d['timestamp'] = ts[:10]
+                                    any_healed = True
+
                                 code = d.get('code') or ''
                                 name = d.get('name') or ''
                                 code_clean = str(code).strip()
@@ -4741,25 +4772,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         def _get_sort_key(d):
             cols = [
-                "代码", "名称", "成本", "数量", "昨收", 
+                "代码", "名称", "时间", "成本", "数量", "昨收", 
                 "涨幅", "DFF", 
                 "5日线", "上轨", "SWS线", "防守价", 
                 "分支", "建议", "仓位", "理由"
             ]
             col_name = cols[sort_col] if sort_col < len(cols) else "代码"
             
-            if col_name == "代码": return d.get('code', '')
-            if col_name == "名称": return d.get('name', '')
-            if col_name == "成本": return float(d.get('entry_price', 0.0) or 0.0)
-            if col_name == "数量": return float(d.get('volume', 0.0) or 0.0)
-            if col_name == "昨收": return float(d.get('close', 0.0) or 0.0)
-            if col_name == "涨幅": return float(d.get('percent', 0.0) or 0.0)
-            if col_name == "DFF": return float(d.get('dff', 0.0) or 0.0)
-            if col_name == "5日线": return float(d.get('predicted_ma5', 0.0) or 0.0)
-            if col_name == "上轨": return float(d.get('upper_boll', 0.0) or 0.0)
-            if col_name == "SWS线": return float(d.get('sws_support', 0.0) or 0.0)
-            if col_name == "防守价": return float(d.get('hard_stop', 0.0) or 0.0)
-            if col_name == "分支":
+            main_key = ""
+            if col_name == "代码": main_key = d.get('code', '')
+            elif col_name == "名称": main_key = d.get('name', '')
+            elif col_name == "时间": main_key = d.get('timestamp', '')
+            elif col_name == "成本": main_key = float(d.get('entry_price', 0.0) or 0.0)
+            elif col_name == "数量": main_key = float(d.get('volume', 0.0) or 0.0)
+            elif col_name == "昨收": main_key = float(d.get('close', 0.0) or 0.0)
+            elif col_name == "涨幅": main_key = float(d.get('percent', 0.0) or 0.0)
+            elif col_name == "DFF": main_key = float(d.get('dff', 0.0) or 0.0)
+            elif col_name == "5日线": main_key = float(d.get('predicted_ma5', 0.0) or 0.0)
+            elif col_name == "上轨": main_key = float(d.get('upper_boll', 0.0) or 0.0)
+            elif col_name == "SWS线": main_key = float(d.get('sws_support', 0.0) or 0.0)
+            elif col_name == "防守价": main_key = float(d.get('hard_stop', 0.0) or 0.0)
+            elif col_name == "分支":
                 branch_name = d.get('branch_cn', d.get('active_branch', ''))
                 priority_map = {
                     "5日线主升浪": 1,
@@ -4771,11 +4804,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     "60日线生死防守": 4,
                     "破位高位防震": 5
                 }
-                return priority_map.get(branch_name, 99)
-            if col_name == "建议": return d.get('action_cn', d.get('suggest_action', ''))
-            if col_name == "仓位": return float(d.get('size_pct', 0.0) or 0.0)
-            if col_name == "理由": return d.get('reason', '')
-            return ''
+                main_key = priority_map.get(branch_name, 99)
+            elif col_name == "建议": main_key = d.get('action_cn', d.get('suggest_action', ''))
+            elif col_name == "仓位": main_key = float(d.get('size_pct', 0.0) or 0.0)
+            elif col_name == "理由": main_key = d.get('reason', '')
+            
+            # 使用元组隔离，主键相同时用代码排序
+            # 主键为数值返回 0，主键为字符串返回 1，防止不同数据类型之间发生 Python 排序报错 (TypeError)
+            is_num = 0 if isinstance(main_key, (int, float)) else 1
+            return (is_num, main_key, d.get('code', ''))
 
         data_sorted = sorted(data, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
 
@@ -4804,26 +4841,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 # 填充各单元格
                 self._fast_update_cell(table, i, 0, d.get('code', ''), data=d)
                 self._fast_update_cell(table, i, 1, d.get('name', ''), data=d)
-                self._fast_update_cell(table, i, 2, f"{d.get('entry_price', 0.0):.2f}", numeric_val=d.get('entry_price', 0.0), data=d)
-                self._fast_update_cell(table, i, 3, f"{int(d.get('volume', 0)):,}", numeric_val=d.get('volume', 0), data=d)
-                self._fast_update_cell(table, i, 4, f"{d.get('close', 0.0):.2f}", numeric_val=d.get('close', 0.0), data=d)
+                self._fast_update_cell(table, i, 2, d.get('timestamp', '--'), data=d)
+                self._fast_update_cell(table, i, 3, f"{d.get('entry_price', 0.0):.2f}", numeric_val=d.get('entry_price', 0.0), data=d)
+                self._fast_update_cell(table, i, 4, f"{int(d.get('volume', 0)):,}", numeric_val=d.get('volume', 0), data=d)
+                self._fast_update_cell(table, i, 5, f"{d.get('close', 0.0):.2f}", numeric_val=d.get('close', 0.0), data=d)
                 
                 # 当日涨幅与资金 DFF
                 pct_val = d.get('percent', 0.0)
                 pct_str = f"{pct_val:+.2f}%" if pct_val != 0.0 else "0.00%"
                 pct_color = "#ff4444" if pct_val > 0 else ("#00ff88" if pct_val < 0 else "#ffffff")
-                self._fast_update_cell(table, i, 5, pct_str, color_key=pct_color, numeric_val=pct_val, data=d)
+                self._fast_update_cell(table, i, 6, pct_str, color_key=pct_color, numeric_val=pct_val, data=d)
 
                 dff_val = d.get('dff', 0.0)
                 dff_str = f"{dff_val:+.2f}" if dff_val != 0.0 else "0.00"
                 dff_color = "#ffaa00" if dff_val > 0.5 else ("#ff4444" if dff_val > 0 else ("#00ff88" if dff_val < 0 else "#ffffff"))
-                self._fast_update_cell(table, i, 6, dff_str, color_key=dff_color, numeric_val=dff_val, data=d)
+                self._fast_update_cell(table, i, 7, dff_str, color_key=dff_color, numeric_val=dff_val, data=d)
                 
                 # 其他指标顺延
-                self._fast_update_cell(table, i, 7, f"{d.get('predicted_ma5', 0.0):.2f}", numeric_val=d.get('predicted_ma5', 0.0), data=d)
-                self._fast_update_cell(table, i, 8, f"{d.get('upper_boll', 0.0):.2f}", numeric_val=d.get('upper_boll', 0.0), data=d)
-                self._fast_update_cell(table, i, 9, f"{d.get('sws_support', 0.0):.2f}", numeric_val=d.get('sws_support', 0.0), data=d)
-                self._fast_update_cell(table, i, 10, f"{d.get('hard_stop', 0.0):.2f}", numeric_val=d.get('hard_stop', 0.0), data=d)
+                self._fast_update_cell(table, i, 8, f"{d.get('predicted_ma5', 0.0):.2f}", numeric_val=d.get('predicted_ma5', 0.0), data=d)
+                self._fast_update_cell(table, i, 9, f"{d.get('upper_boll', 0.0):.2f}", numeric_val=d.get('upper_boll', 0.0), data=d)
+                self._fast_update_cell(table, i, 10, f"{d.get('sws_support', 0.0):.2f}", numeric_val=d.get('sws_support', 0.0), data=d)
+                self._fast_update_cell(table, i, 11, f"{d.get('hard_stop', 0.0):.2f}", numeric_val=d.get('hard_stop', 0.0), data=d)
                 
                 branch_raw = d.get('branch_cn', d.get('active_branch', ''))
                 branch_color_map = {
@@ -4848,12 +4886,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 }
                 branch_cn = branch_emoji_map.get(branch_raw, branch_raw)
                 branch_color = branch_color_map.get(branch_raw, "#ffffff")
-                self._fast_update_cell(table, i, 11, branch_cn, color_key=branch_color, bold=True, data=d)
-                self._fast_update_cell(table, i, 12, suggest_action, color_key=act_color, bold=True, data=d)
+                self._fast_update_cell(table, i, 12, branch_cn, color_key=branch_color, bold=True, data=d)
+                self._fast_update_cell(table, i, 13, suggest_action, color_key=act_color, bold=True, data=d)
                 
                 size_pct = d.get('size_pct', 0.0)
-                self._fast_update_cell(table, i, 13, f"{size_pct*100:.1f}%", numeric_val=size_pct, data=d)
-                self._fast_update_cell(table, i, 14, d.get('reason', ''), data=d)
+                self._fast_update_cell(table, i, 14, f"{size_pct*100:.1f}%", numeric_val=size_pct, data=d)
+                self._fast_update_cell(table, i, 15, d.get('reason', ''), data=d)
 
             # 恢复选中状态
             if selected_code is not None:
@@ -4864,6 +4902,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         break
         finally:
             table.setSortingEnabled(was_sorting)
+            # ⭐ [NEW] 每次重载数据重写单元格后，必须强制同步 Qt 标头小三角指示器的朝向，彻底消除指示状态丢失的 Bug
+            table.horizontalHeader().setSortIndicator(sort_col, sort_order)
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
             self._limit_table_column_widths(table)

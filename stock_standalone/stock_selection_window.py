@@ -4982,7 +4982,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     tree_frame = tk.Frame(parent, bg="#0c101b")
     tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
     
-    cols = ("code", "name", "percent", "dff", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason")
+    cols = ("code", "name", "time", "percent", "dff", "sector", "action", "order_price", "support_price", "stop_price", "branch", "reason")
     self._guidance_tree = ttk.Treeview(tree_frame, columns=cols, show="headings", style="Dark.Treeview")
     
     # Scrollbars
@@ -4998,7 +4998,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     tree_frame.grid_columnconfigure(0, weight=1)
     
     headers = {
-        "code": "代码", "name": "名称", "percent": "当日涨幅", "dff": "资金DFF", "sector": "核心板块", "action": "操作建议", 
+        "code": "代码", "name": "名称", "time": "时间", "percent": "当日涨幅", "dff": "资金DFF", "sector": "核心板块", "action": "操作建议", 
         "order_price": "挂单参考", "support_price": "战术支撑", 
         "stop_price": "止损防守", "branch": "活跃分支", "reason": "决策理由"
     }
@@ -5010,6 +5010,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     self._guidance_tree.column("#0", width=0, minwidth=0, stretch=False)
     self._guidance_tree.column("code", width=70, stretch=False)
     self._guidance_tree.column("name", width=90, stretch=False)
+    self._guidance_tree.column("time", width=75, stretch=False)
     self._guidance_tree.column("percent", width=75, stretch=False)
     self._guidance_tree.column("dff", width=75, stretch=False)
     self._guidance_tree.column("sector", width=105, stretch=False)
@@ -5055,18 +5056,19 @@ def _init_guidance_tab(self, parent: tk.Frame):
         code = sel[0]
         item = self._guidance_tree.item(code)
         vals = item.get("values", [])
-        if len(vals) > 10:
+        if len(vals) > 11:
             # 弹窗显示详细理由
             msg = (
                 f"🏷 股票：{vals[1]} ({vals[0]})\n"
-                f"📈 当日涨幅：{vals[2]} | 资金DFF：{vals[3]}\n"
-                f"📊 核心板块：{vals[4]}\n"
-                f"🎯 战术建议：{vals[5]}\n"
-                f"💵 挂单执行价：¥ {vals[6]}\n"
-                f"🧱 辅助支撑：¥ {vals[7]}\n"
-                f"🛡 战术防守价：¥ {vals[8]}\n"
-                f"👑 策略活跃分支：{vals[9]}\n\n"
-                f"🔍 决策分析归因理由：\n{vals[10]}"
+                f"📅 生成时间：{vals[2]}\n"
+                f"📈 当日涨幅：{vals[3]} | 资金DFF：{vals[4]}\n"
+                f"📊 核心板块：{vals[5]}\n"
+                f"🎯 战术建议：{vals[6]}\n"
+                f"💵 挂单执行价：¥ {vals[7]}\n"
+                f"🧱 辅助支撑：¥ {vals[8]}\n"
+                f"🛡 战术防守价：¥ {vals[9]}\n"
+                f"👑 策略活跃分支：{vals[10]}\n\n"
+                f"🔍 决策分析归因理由：\n{vals[11]}"
             )
             messagebox.showinfo("每日盘前操作指南详情", msg, parent=self)
 
@@ -5352,6 +5354,8 @@ def _refresh_guidance_tab(self):
             d['dff'] = float(dff_val or 0.0)
 
         def _get_sort_key(d):
+            if sort_col == "time":
+                return str(d.get('timestamp') or '')
             if sort_col == "percent":
                 return float(d.get('percent') or 0.0)
             if sort_col == "dff":
@@ -5507,9 +5511,10 @@ def _refresh_guidance_tab(self):
                 elif action in ("止损", "止损平仓", "清仓平仓"):
                     tag = "stop"
                 
+            time_str = d.get('timestamp', '--')
             self._guidance_tree.insert(
                 "", "end", iid=code,
-                values=(code, name, pct_str, dff_str, sector_str, action, order_p_str, supp_p_str, stop_p_str, branch, reason),
+                values=(code, name, time_str, pct_str, dff_str, sector_str, action, order_p_str, supp_p_str, stop_p_str, branch, reason),
                 tags=(tag,)
             )
             

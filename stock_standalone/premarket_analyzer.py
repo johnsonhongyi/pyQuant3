@@ -260,6 +260,7 @@ def run_premarket_diagnose() -> list:
         advice = {
             "code": code_clean,
             "name": name,
+            "timestamp": datetime.now().strftime("%Y-%m-%d"),
             "entry_price": round(entry_price, 2),
             "volume": round(volume, 0),
             "close": round(close, 2),

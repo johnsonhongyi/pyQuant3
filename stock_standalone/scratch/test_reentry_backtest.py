@@ -97,15 +97,15 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
         except Exception:
             pass
 
-    # 统一追加 "_回测" 后缀，保持与盘前正常计划的区分
+    # 统一追加 "回测_" 前缀，保持与盘前正常计划的区分，便于排序找到回测添加的code
     if name:
         name = str(name).strip()
         for icon in ['🔴', '🟢', '📊', '⚠️', '👑']:
             name = name.replace(icon, '').strip()
-        if not name.endswith("_回测"):
-            name = f"{name}_回测"
+        if not name.startswith("回测_"):
+            name = f"回测_{name}"
     else:
-        name = f"{code_clean}_回测"
+        name = f"回测_{code_clean}"
 
     filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -121,10 +121,26 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
             print(f"📡 Error loading premarket_diagnose.json: {e}")
             diagnostics = []
             
+    from datetime import datetime
+    # 自动修复历史数据中缺失或格式不正确的时间戳为 YYYY-MM-DD 格式
+    modified_time = None
+    if os.path.exists(filepath):
+        mtime = os.path.getmtime(filepath)
+        modified_time = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    else:
+        modified_time = datetime.now().strftime("%Y-%m-%d")
+
+    for d in diagnostics:
+        ts = d.get("timestamp")
+        if not ts:
+            d["timestamp"] = modified_time
+        elif len(ts) > 10:  # 自动裁切为 YYYY-MM-DD
+            d["timestamp"] = ts[:10]
     # 构建新的战术作战计划
     advice = {
         "code": code_clean,
         "name": name,
+        "timestamp": datetime.now().strftime("%Y-%m-%d"),
         "entry_price": round(entry_price, 2),
         "volume": 0.0,
         "close": round(close_val, 2),
@@ -159,6 +175,13 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(diagnostics, f, indent=4, ensure_ascii=False)
         print(f"📡 [BACKTEST-GUIDANCE] Successfully added/updated {name} ({code_clean}) plan in {filepath}")
+        
+        # ⭐ [NEW] 发送全局心跳事件通知仪表盘界面重载，实现零背景文件监听开销的极速主动同步
+        try:
+            from signal_bus import get_signal_bus, SignalBus
+            get_signal_bus().publish(SignalBus.EVENT_HEARTBEAT, "backtest_exporter", {"action": "reload"})
+        except Exception as bus_err:
+            print(f"📡 [BACKTEST-GUIDANCE] Failed to dispatch reload signal: {bus_err}")
     except Exception as e:
         print(f"📡 [BACKTEST-GUIDANCE] Failed to save premarket_diagnose.json: {e}")
 
