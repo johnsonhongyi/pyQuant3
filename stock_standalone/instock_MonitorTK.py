@@ -976,8 +976,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-j>", lambda event: self.open_decision_flow_panel())
         self.bind("<Alt-h>", lambda event: self.send_command_to_visualizer("TOGGLE_HOTLIST"))
         self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
-        self.bind("<Alt-x>", self._on_shortcut_reentry_backtest)
-        self.bind("<Alt-X>", self._on_shortcut_reentry_backtest)
+        self.bind("<Alt-g>", self._on_shortcut_reentry_backtest)
+        self.bind("<Alt-G>", self._on_shortcut_reentry_backtest)
         self.bind("<space>", lambda event: self.toggle_spatial_follow_hud())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
@@ -2332,10 +2332,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         5: (win32con.MOD_ALT, 0x48, "Alt+H"),  # H - 切换Hotlist
         6: (win32con.MOD_ALT, 0x56, "Alt+V"),  # V - 信号扫描 (Scan)批次轮转
         7: (win32con.MOD_ALT, 0x4D, "Alt+M"),  # M - 竞价赛马监控
-        8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T - 策略选股与人工复核
+        8: (win32con.MOD_ALT, 0x54, "Alt+T"),  # T - 操作使用指南说明
         9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R - 切换下一个窗口
         10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R - 切换上一个窗口
         11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J - 交易内核决策流水分析
+    }
+    _HOTKEY_INFO_MAP = {
+        0: "一键静音 (关闭所有语音报警)",
+        1: "语音监控 (报警监理配置)",
+        2: "策略管理 (筛选与策略管理器)",
+        3: "大盘风口 (温度与风口看板)",
+        4: "实时信号 (开仓预警面板)",
+        5: "可视化自选表 (隐藏/显示热表)",
+        6: "极速行情 (实时行情计算引擎)",
+        7: "竞价赛马 (竞价强度看板)",
+        8: "操作说明 (软件使用指南窗口)",
+        9: "视窗轮换 (向下轮转多屏窗口)",
+        10: "视窗轮换 (向上轮转多屏窗口)",
+        11: "决策流水 (成交与决策分析看板)",
     }
     def _diagnose_hotkey_conflict(self, desc):
         """当热键注册失败时，自动通过系统进程快照扫描潜在的冲突来源进程"""
@@ -2378,6 +2392,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         注册快捷键。
         mode: "GLOBAL" (Win32 系统级) 或 "LOCAL" (仅本窗口有效)
         """
+        logger.warning(f"⚡ [Hotkey] Initializing hotkey configuration... (mode={mode}, show_toast={show_toast})")
         # 1. 彻底清理旧钩子/线程/子进程
         self._shutdown_global_hotkeys()
         
@@ -2393,7 +2408,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             5: lambda: self._schedule_after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")),
             6: lambda: self._schedule_after(0, self._run_live_strategy_process),
             7: lambda: self._schedule_after(0, self.open_racing_panel),
-            8: lambda: self._schedule_after(0, self.open_stock_selection_window),
+            8: lambda: self._schedule_after(0, self.open_guidance_window),
             9: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(1)),
             10: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(-1)),
             11: lambda: self._schedule_after(0, self.open_decision_flow_panel),
@@ -2407,20 +2422,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 启动独立热键进程
                 # 尽量获取最准确的 log_level 字符串，默认 "INFO"
-                import logging
-                level_val = "INFO"
+                level_val = "WARN"
                 if hasattr(self, 'log_level') and self.log_level is not None:
                     try:
                         val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
                         if isinstance(val, int):
-                            level_val = logging.getLevelName(val)
+                            level_val = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "CRITICAL"}.get(val, "WARN")
                         elif isinstance(val, str):
                             level_val = val
                     except Exception:
                         pass
                 else:
                     try:
-                        level_val = logging.getLevelName(logger.level)
+                        curr_lvl = logger.getEffectiveLevel() if hasattr(logger, 'getEffectiveLevel') else getattr(logger, 'level', 30)
+                        level_val = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "CRITICAL"}.get(curr_lvl, "WARN")
                     except Exception:
                         pass
                 if not isinstance(level_val, str):
@@ -2432,12 +2447,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     name="HotkeyRotatorProcess",
                     daemon=True
                 )
+                logger.warning(f"⚡ [Rotator] Spawning HotkeyRotatorProcess with args: level_val={level_val} (daemon=True)")
                 self._hotkey_process.start()
                 self._hotkey_process_started = True
                 self._last_rotator_spawn_t = time.time()
                 self._rotator_fail_count = 0
                 self._rotator_restarting_flag = False
-                logger.info("🚀 [Rotator] Independent HotkeyRotatorProcess launched successfully.")
+                logger.warning("✅ [Hotkey] 全局快捷键已成功激活并托管于独立热键守护进程中监视 (Zero GIL lag)")
                 
                 # 延迟一下立即同步一次窗口数据
                 self.after(500, self.sync_rotator_windows)
@@ -2450,8 +2466,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if show_toast:
                 toast_message(self, "✅ 全局快捷键已重置为独立进程模式 (Zero GIL lag)")
         else:
-            # --- Tkinter 本地窗口快捷键模式 (降级模式) ---
-            logger.info("⚡ [Hotkey] 切换到本地窗口快捷键模式...")
+            logger.warning("⚡ [Hotkey] 切换到本地窗口快捷键模式...")
             for offset, (_, _, desc) in self._HOTKEY_MAP.items():
                 cb = hotkey_callbacks.get(offset)
                 if not cb: continue
@@ -2460,7 +2475,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tk_key = f"<Alt-{key_part}>"
                 try:
                     self.bind_all(tk_key, lambda e, func=cb: func())
-                    logger.debug(f"✅ [Hotkey] 本地快捷键已绑定: {tk_key}")
+                    info_desc = self._HOTKEY_INFO_MAP.get(offset, "")
+                    logger.warning(f"✅ [Hotkey] 本地快捷键已绑定: {tk_key} [{info_desc}]")
                 except Exception as ex:
                     logger.error(f"❌ [Hotkey] 本地绑定 {tk_key} 失败: {ex}")
             
@@ -2473,7 +2489,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _launch_legacy_hotkey_thread(self):
         """[降级垫] 启动原先的全局快捷键监听线程"""
-        logger.info("⚠️ [Hotkey] 启动备用全局快捷键监听线程...")
+        logger.warning("⚠️ [Hotkey] 启动备用全局快捷键监听线程...")
         def _hotkey_thread_func():
             import ctypes
             from ctypes import wintypes
@@ -2484,22 +2500,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 hk_id = self._HOTKEY_ID_BASE + offset
                 if user32.RegisterHotKey(None, hk_id, mod, vk):
                     registered_ids.append(hk_id)
-                    logger.info(f"✅ [Hotkey] 备用全局热键激活: {desc}")
+                    info_desc = self._HOTKEY_INFO_MAP.get(offset, "")
+                    logger.warning(f"✅ [Hotkey] 备用全局热键激活: {desc} [{info_desc}]")
                 else:
-                    logger.warning(f"⚠️ [Hotkey] 备用注册 {desc} 失败")
+                    info_desc = self._HOTKEY_INFO_MAP.get(offset, "")
+                    logger.warning(f"⚠️ [Hotkey] 备用注册 {desc} 失败 [{info_desc}]")
                     if offset in [9, 10]:
                         fallback_vk = 0x51
                         if offset == 9:
-                            new_desc = "Alt+Q (已降级)"
+                            new_desc = "Alt+Q [视窗轮换 (已降级自愈)]"
                             self._HOTKEY_MAP[9] = (mod, fallback_vk, new_desc)
                             if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
                                 registered_ids.append(hk_id)
+                                logger.warning(f"✅ [Hotkey] 备用全局热键激活: {new_desc}")
                                 self._schedule_after(1000, lambda: self.status_var.set(f"⚠️ Alt+R被占用，已降级为 Alt+Q 轮转窗口！"))
                         elif offset == 10:
-                            new_desc = "Alt+Shift+Q (已降级)"
+                            new_desc = "Alt+Shift+Q [视窗轮换 (已降级自愈)]"
                             self._HOTKEY_MAP[10] = (mod, fallback_vk, new_desc)
                             if user32.RegisterHotKey(None, hk_id, mod, fallback_vk):
                                 registered_ids.append(hk_id)
+                                logger.warning(f"✅ [Hotkey] 备用全局热键激活: {new_desc}")
 
             try:
                 msg = wintypes.MSG()
@@ -2521,7 +2541,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             finally:
                 for hk_id in registered_ids:
                     user32.UnregisterHotKey(None, hk_id)
-                logger.info("[Hotkey] 备用热键已注销")
+                logger.warning("[Hotkey] 备用热键已注销")
 
         self._hotkey_thread = threading.Thread(
             target=_hotkey_thread_func,
@@ -2540,7 +2560,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._hotkey_process.join(timeout=1.0)
                     if self._hotkey_process.is_alive():
                         self._hotkey_process.kill()
-                    logger.info("[Hotkey] Independent HotkeyRotatorProcess terminated.")
+                    logger.warning("[Hotkey] Independent HotkeyRotatorProcess terminated.")
             except Exception as e:
                 logger.error(f"[Hotkey] Error terminating hotkey process: {e}")
             self._hotkey_process = None
@@ -4356,9 +4376,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
 
-        # 绑定选股窗口打开/复用快捷键 Alt+t (支持大小写)
-        self.bind_all("<Alt-t>", lambda e: self.open_stock_selection_window())
-        self.bind_all("<Alt-g>", lambda e: self.open_guidance_window())
+        # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
+        self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())
+        # self.bind_all("<Alt-g>", lambda e: self.open_guidance_window())
 
         if len(self.search_history1) > 0:
             # [MODIFIED] Use the first item, resolving it via map if needed
@@ -6249,19 +6269,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         
                         # B. 灌入日志级别
                         import hotkey_rotator
-                        import logging
-                        level_val = "INFO"
+                        level_val = "WARN"
                         if hasattr(self, 'log_level') and self.log_level is not None:
                             try:
                                 val = self.log_level.value if hasattr(self.log_level, 'value') else self.log_level
                                 if isinstance(val, int):
-                                    level_val = logging.getLevelName(val)
+                                    level_val = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "CRITICAL"}.get(val, "WARN")
                                 elif isinstance(val, str):
                                     level_val = val
                             except Exception: pass
                         else:
                             try:
-                                level_val = logging.getLevelName(logger.level)
+                                curr_lvl = logger.getEffectiveLevel() if hasattr(logger, 'getEffectiveLevel') else getattr(logger, 'level', 30)
+                                level_val = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "CRITICAL"}.get(curr_lvl, "WARN")
                             except Exception: pass
                         if not isinstance(level_val, str):
                             level_val = "INFO"
