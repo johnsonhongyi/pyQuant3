@@ -4342,6 +4342,15 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
             font=("Arial", 9, "bold"), relief="flat", padx=10,
             command=self._on_close
         ).pack(side="right", padx=15)
+
+        # 📌 手动导出至操作指南按钮
+        self.export_btn = tk.Button(
+            self.top_frame, text="📌 导出至操作指南", bg="#1a3a2a", fg="#66ffcc",
+            activebackground="#2a5a3a", activeforeground="#aaffdd",
+            font=("Arial", 9, "bold"), relief="flat", padx=10,
+            command=self.on_export_clicked
+        )
+        self.export_btn.pack(side="right", padx=10)
         
         text_frame = tk.Frame(self, bg="#0c101b")
         text_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -4473,6 +4482,53 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         # 关闭时保存窗口位置大小
         self.save_window_position(self, "Reentry回测报告详情")
         self.destroy()
+
+    def on_export_clicked(self):
+        """手动将回测的战术决策计划写入 premarket_diagnose.json (大屏 Tkinter 端)"""
+        parent = self.parent_win
+        if not self.code:
+            self.export_btn.config(text="❌ 个股代码无效")
+            self.after(3000, lambda: self.export_btn.config(text="📌 导出至操作指南") if self.winfo_exists() else None)
+            return
+            
+        resample = "d"
+        if parent:
+            if hasattr(parent, 'global_values'):
+                resample = parent.global_values.getkey("resample") or "d"
+            elif hasattr(parent, 'resample') and parent.resample:
+                resample = parent.resample
+                
+        try:
+            from scratch.test_reentry_backtest import run_backtest_and_get_report
+            self.export_btn.config(state="disabled", text="正在导出...")
+            
+            def _execute_export():
+                try:
+                    run_backtest_and_get_report(
+                        code=self.code,
+                        name=self.name,
+                        only_report=True,
+                        resample=resample,
+                        force_save=True
+                    )
+                    # 联动刷新策略选民的每日操作指南 (如果有的话)
+                    if hasattr(parent, '_refresh_guidance_if_open'):
+                        parent._refresh_guidance_if_open()
+                    
+                    self.export_btn.config(text="已成功导出 ✔")
+                    self.after(3000, lambda: self.export_btn.config(text="📌 导出至操作指南") if self.winfo_exists() else None)
+                except Exception as e:
+                    self.export_btn.config(text="❌ 导出失败")
+                    self.after(3000, lambda: self.export_btn.config(text="📌 导出至操作指南") if self.winfo_exists() else None)
+                finally:
+                    if self.winfo_exists():
+                        self.export_btn.config(state="normal")
+                        
+            # 使用 after 避免阻塞 UI 线程
+            self.after(100, _execute_export)
+        except Exception as e:
+            self.export_btn.config(text="❌ 加载模块失败")
+            self.after(3000, lambda: self.export_btn.config(text="📌 导出至操作指南") if self.winfo_exists() else None)
 
 def _on_run_reentry_backtest_menu(self, code: str):
     """[新增] 右键菜单触发 Re-entry 模拟交易回测，并使用精美独立弹窗非阻塞展示结论"""

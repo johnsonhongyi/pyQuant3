@@ -62,6 +62,16 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
     except Exception:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
+    # 👑 清洗 name 变量：移除 "entry 历史回测综合简报 - " 等前缀，转换成更干净的形式
+    name_str = str(name).strip()
+    for icon in ['🔴', '🟢', '📊', '⚠️', '👑']:
+        name_str = name_str.replace(icon, '').strip()
+    for prefix in ["Re-entry 历史回测综合简报 -", "entry 历史回测综合简报 -", "历史回测综合简报 -", "Re-entry 历史回测综合简报", "entry 历史回测综合简报", "历史回测综合简报"]:
+        name_str = name_str.replace(prefix, "").strip()
+    if "-" in name_str:
+        name_str = name_str.split("-")[-1].strip()
+    name = name_str
+
     if not name or str(name).startswith("个股_"):
         # Look up from top_all.h5 to get the real stock name
         try:
@@ -86,6 +96,16 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
                                 break
         except Exception:
             pass
+
+    # 统一追加 "_回测" 后缀，保持与盘前正常计划的区分
+    if name:
+        name = str(name).strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️', '👑']:
+            name = name.replace(icon, '').strip()
+        if not name.endswith("_回测"):
+            name = f"{name}_回测"
+    else:
+        name = f"{code_clean}_回测"
 
     filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -145,7 +165,7 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
 
 _is_router_loaded = False
 
-def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, resample: str = "d") -> str:
+def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, resample: str = "d", force_save: bool = False) -> str:
     """运行指定个股 of Re-entry 历史回测，并以字符串形式返回完整的日志及整体总结报告。"""
     global _is_router_loaded
     code_clean = code.strip()
@@ -678,55 +698,56 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
     log(f"▶ 回测周期Resample: 🗓️ {resample_cn} ({resample})", is_detail=False)
     log("=" * 80 + "\n", is_detail=False)
 
-    # 👑 联动添加/更新到每日操作指南 (open_guidance_window) 中
-    try:
-        latest_action = intent.action if intent else "KEEP_OBSERVING"
-        # 只要当前模拟持仓中，或者有买入、回补、持股决策（即有参与价值），则追加到每日指南中
-        has_value = has_position or (latest_action in ["BUY", "ADD", "HOLD"])
-        if has_value:
-            latest_close = float(close)
-            latest_predicted_ma5 = float(prev_predict_ma5) if prev_predict_ma5 else latest_close
-            latest_upper = float(upper)
-            latest_sws = float(sws)
-            latest_stop = float(current_stop if current_stop > 0 else (sws * 0.985))
-            
-            action_map = {
-                "BUY": "买入建仓",
-                "SELL": "分批大止盈" if (tp_triggered or (intent and intent.size_pct == 0.70)) else "清仓平仓",
-                "ADD": "做T回补",
-                "HOLD": "持股滚动"
-            }
-            action_cn = action_map.get(latest_action, "保持观察")
-            if latest_action == "SELL" and intent and intent.size_pct == 1.00:
-                action_cn = "清仓平仓"
+    # 👑 联动添加/更新到每日操作指南 (open_guidance_window) 中 (仅当 force_save=True 时手动触发保存)
+    if force_save:
+        try:
+            latest_action = intent.action if intent else "KEEP_OBSERVING"
+            # 只要当前模拟持仓中，或者有买入、回补、持股决策（即有参与价值），则追加到每日指南中
+            has_value = has_position or (latest_action in ["BUY", "ADD", "HOLD"])
+            if has_value:
+                latest_close = float(close)
+                latest_predicted_ma5 = float(prev_predict_ma5) if prev_predict_ma5 else latest_close
+                latest_upper = float(upper)
+                latest_sws = float(sws)
+                latest_stop = float(current_stop if current_stop > 0 else (sws * 0.985))
                 
-            latest_branch = _last_backtest_best_branch.get((code_clean, resample), _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch"))
-            branch_cn = get_branch_cn(latest_branch)
-            
-            latest_reason = getattr(intent.reason, "raw_reason", "手动回测智能战术决策计划") if intent and intent.reason else "手动回测智能战术决策计划"
-            if has_position:
-                latest_reason = f"💼 正在模拟持仓中(滚动做T)。{latest_reason}"
-            else:
-                latest_reason = f"📊 回测最新决策: {action_cn}。{latest_reason}"
+                action_map = {
+                    "BUY": "买入建仓",
+                    "SELL": "分批大止盈" if (tp_triggered or (intent and intent.size_pct == 0.70)) else "清仓平仓",
+                    "ADD": "做T回补",
+                    "HOLD": "持股滚动"
+                }
+                action_cn = action_map.get(latest_action, "保持观察")
+                if latest_action == "SELL" and intent and intent.size_pct == 1.00:
+                    action_cn = "清仓平仓"
+                    
+                latest_branch = _last_backtest_best_branch.get((code_clean, resample), _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch"))
+                branch_cn = get_branch_cn(latest_branch)
                 
-            update_premarket_diagnose_json(
-                code_clean=code_clean,
-                name=name,
-                close_val=latest_close,
-                predicted_ma5=latest_predicted_ma5,
-                upper_val=latest_upper,
-                sws_support=latest_sws,
-                stop_price=latest_stop,
-                action=latest_action,
-                action_cn=action_cn,
-                branch=latest_branch,
-                branch_cn=branch_cn,
-                reason=latest_reason,
-                has_position=has_position,
-                entry_price=float(entry_price)
-            )
-    except Exception as ex:
-        log(f"⚠️ [GUIDANCE-INTEGRATION] Failed to export trading plan to guidance list: {ex}", is_detail=False)
+                latest_reason = getattr(intent.reason, "raw_reason", "手动回测智能战术决策计划") if intent and intent.reason else "手动回测智能战术决策计划"
+                if has_position:
+                    latest_reason = f"💼 正在模拟持仓中(滚动做T)。{latest_reason}"
+                else:
+                    latest_reason = f"📊 回测最新决策: {action_cn}。{latest_reason}"
+                    
+                update_premarket_diagnose_json(
+                    code_clean=code_clean,
+                    name=name,
+                    close_val=latest_close,
+                    predicted_ma5=latest_predicted_ma5,
+                    upper_val=latest_upper,
+                    sws_support=latest_sws,
+                    stop_price=latest_stop,
+                    action=latest_action,
+                    action_cn=action_cn,
+                    branch=latest_branch,
+                    branch_cn=branch_cn,
+                    reason=latest_reason,
+                    has_position=has_position,
+                    entry_price=float(entry_price)
+                )
+        except Exception as ex:
+            log(f"⚠️ [GUIDANCE-INTEGRATION] Failed to export trading plan to guidance list: {ex}", is_detail=False)
 
     return output.getvalue()
 

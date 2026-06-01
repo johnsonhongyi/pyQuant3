@@ -25,6 +25,8 @@ class SortableTableWidgetItem(QtWidgets.QTableWidgetItem):
             return super().__lt__(other)
         v1 = self.value
         v2 = other.value
+        if v1 is None and v2 is None:
+            return self.text() < other.text()
         if v1 is None:
             return True
         if v2 is None:
@@ -627,7 +629,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # 基础行为配置
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(18)
@@ -1510,9 +1512,12 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
             # 仅截取最后 200 条进行表格渲染
             records = records[-200:]
+            self.table.setSortingEnabled(False)
             self.table.setRowCount(0)
             for rec in records:
                 self._append_record_to_table(rec)
+            self.table.setSortingEnabled(True)
+            self.table.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
 
             self.status_label.setText(f"✅ 成功载入历史 {len(records)} 条决策，实时监听中...")
             # 自动滚动到最新一行
@@ -1566,6 +1571,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 for rec in new_records:
                     self._append_record_to_table(rec)
                 self.table.setSortingEnabled(True)
+                self.table.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
                 self.status_label.setText(f"⚡ 增量更新完成，新捕获 {len(new_records)} 条决策信号 (最新更新: {time.strftime('%H:%M:%S')})")
                 self.table.scrollToBottom()
                 # 重新应用过滤
@@ -1901,9 +1907,34 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         if reason:
             action_copy_reason = menu.addAction("📋 复制决策理由")
             action_copy_reason.triggered.connect(lambda: self._copy_to_clipboard(reason, "决策理由"))
+
+        # 动作四：多选清理/直接删除选中数据 (清除显示垃圾)
+        selected_indexes = self.table.selectionModel().selectedRows()
+        selected_rows = [idx.row() for idx in selected_indexes]
+        if row not in selected_rows:
+            selected_rows.append(row)
+
+        menu.addSeparator()
+        action_delete = menu.addAction(f"❌ 清理选中记录 ({len(selected_rows)}条)")
+        action_delete.triggered.connect(lambda: self._delete_selected_rows(selected_rows))
             
         menu.exec(self.table.viewport().mapToGlobal(pos))
         
+    def _delete_selected_rows(self, rows_to_delete):
+        """支持多选直接右键删除/清理数据（仅清理UI显示，不篡改物理流水日志，安全平滑）"""
+        if not rows_to_delete:
+            return
+        
+        # 降序排序，防止先删除前面的行导致后面行的 row_idx 偏移
+        rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
+        
+        self.table.setSortingEnabled(False)
+        for r in rows_to_delete:
+            self.table.removeRow(r)
+        self.table.setSortingEnabled(True)
+        
+        toast_message(self.parent_app, f"已从显示中清理 {len(rows_to_delete)} 条决策记录")
+
     def _copy_to_clipboard(self, text: str, label: str):
         """将文本安全复制到剪贴板，并弹出 Toast 提示"""
         clipboard = QtWidgets.QApplication.clipboard()

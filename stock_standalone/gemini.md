@@ -1,3 +1,29 @@
+## 2026-06-01 20:30
+- [x] **实现手动将回测计划写入盘前操作指南 (Implemented Manual Saving of Backtest Plans to Guidance)**：
+    - [x] **PyQt6 端集成导出按钮**：在 `trade_visualizer_qt6.py` 的 `ScrollableMsgBox` (回测简报弹窗) 底部的配色栏旁边新增了一个 “📌 导出至操作指南” 按钮，点击时会触发后台线程调用 `run_backtest_and_get_report` 并显式设置 `force_save=True`。
+    - [x] **Tkinter 客户端同步对齐**：在大屏 Tk 端的 `stock_selection_window.py` 中的 `BacktestReportDialog` 顶部控制条内，同样新增了 “📌 导出至操作指南” 按钮和 `on_export_clicked` 异步事件派发，保证了跨端操作体验的一致性。
+    - [x] **支持窗口复用联动**：更新了 `update_content` 等方法，确保无论是在双击换股还是手动按快捷键调起回测，均能准确解析并同步更新当前窗口所对应的个股代码和名字，避免写入脏数据，同时实现了成功导出后一键状态提示和操作指南自动刷新。
+    - [x] **实现导出不用弹窗的静默通知机制 (Popup-free Silent Notice for Exporting)**：
+        - [x] **移除 PyQt6 与 Tkinter 强阻断弹窗**：移除了导出动作完成时弹出的 `QMessageBox.information/critical` 与 `messagebox.showinfo/showerror`。
+        - [x] **升级为按钮文本改写与状态栏状态联动**：点击后，按钮文本会暂时修改为“正在导出...”，完成或失败后按钮会变为“已成功导出 ✔”或“❌ 导出失败”，并在 3 秒后通过定时器（`QTimer` / `after`）平滑复原为“📌 导出至操作指南”；同时主状态栏依然支持毫秒级静默日志状态投递，完全保护操盘手看盘心流。
+    - [x] **规范化写入操作指南时的个股名称格式 (Standardized Stock Name Format in Premarket Guidance)**：
+        - [x] **自动清理前缀**：在战术计划回写函数 `update_premarket_diagnose_json` 开头，智能识别并彻底清除 `entry 历史回测综合简报 - ` 或 `Re-entry 历史回测综合简报 - ` 等前缀字眼，防止导出脏前缀.
+        - [x] **统一格式化为 `股票名_回测`**：即使因参数传递或标题格式原因包含前缀，系统也能自动提取最干净的个股名称，并在末尾追加统一的 `_回测` 后缀，使得历史战术计划在大盘盘前诊断列表 and 看板中具备清晰、显眼的专属标示。
+    - [x] **修复决策流水监控页签最新数据未显示在最下方的排序与滚动 Bug (Fixed Decision Flow Sorting & Scroll Sync Bug)**：
+        - [x] **加固 SortableTableWidgetItem 严格弱序规则**：修正了 `__lt__` 的比对逻辑，在两个 `value` 同为 `None` 时通过 `text` 安全回退比较，消除了可能引起的局部重排混乱。
+        - [x] **实施批量与增量排序阻断重刷**：在 `_load_initial_records` 与 `_check_and_update_records` 的表格数据渲染过程中，在循环追加数据行前安全关闭 `setSortingEnabled(False)`，规避高频实时排序对插入顺序的干扰和 CPU 损耗，并于渲染完成后统一恢复 `setSortingEnabled(True)`。
+        - [x] **强制日期时间列升序排序**：恢复排序状态后，强制显式调用 `self.table.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)`。这保证了无论用户如何操作，系统底层的流水数据始终将最早时间排在最上、最新时间（大时间戳）稳稳排在表格最下面，配合 `scrollToBottom()` 完美达成了最新数据在底部的流水账看盘直觉。
+    - [x] **实现决策流水监控多选右键清理数据功能 (Implemented Multi-Select Context Menu Data Clearing)**：
+        - [x] **开启 ExtendedSelection 选择行为**：在表格 `self.table` 初始化时，将 `setSelectionMode` 物理升级为 `ExtendedSelection`，使用户可以使用鼠标或键盘（Ctrl/Shift）多选任意行。
+        - [x] **集成右键菜单批量清理选项**：在右键上下文菜单 `_show_context_menu` 的底部追加了分割线和 `❌ 清理选中记录 ({len(selected_rows)}条)` 动态子项，能够精准感应当前被右键点击的行以及已经处于选中状态的多行。
+        - [x] **设计安全的降序物理删除引擎**：新实现了 `_delete_selected_rows` 方法，在批量删除时临时关闭排序（`setSortingEnabled(False)`），并通过 `sorted(..., reverse=True)` 从后向前按降序依次删除选中的行，消除了删除前面行导致后续行索引错位的问题，最后在主窗口输出静默 Toast 提示，为操盘手提供了一个零崩溃的无损交互方式。
+
+## 2026-06-01 19:48
+- [x] **取消历史回测自动添加盘前操作指南 (Canceled Auto-Adding Backtest to Premarket Guidance)**：
+    - [x] **注释回测自动添加/更新逻辑**：在 `scratch/test_reentry_backtest.py` 的 `run_backtest_and_get_report` 尾部，将原本用于自动将个股回测计划写入 `logs/premarket_diagnose.json` 的 `update_premarket_diagnose_json(...)` 调用及其包裹的 try-except 联动块进行物理注释，从而取消了手动/自动回测时强制写入操作指南的行为。
+    - [x] **保留底层写入接口**：为了维持向下兼容性和其他潜在的独立写入动作，完整保留了 `update_premarket_diagnose_json` 的函数声明及实现本身，符合 SOLID 开放/封闭原则。
+    - [x] **通过系统编译和语法测试**：无修改后产生的未定义变量、未对齐或者语法错误，保持回测流的高可用性与数据纯净度。
+
 ## 2026-06-01 18:30
 - [x] **实现实时影子决策全天候周期对齐与降级自适应重算机制 (Implemented Year-Round Resample-Aligned Shadow Decision & Adaptive Recalculation)**：
     - [x] **实现非交易时段 mock_tick 降级评估 (All-weather Downgraded Evaluation)**：在 `trade_visualizer_qt6.py` 的 `_render_charts_logic` 中引入降级决策引擎。在非交易时段或实盘 tick 缺失时，通过 `day_df` 的最后一行数据在内存中超轻量重组 mock 行情 tick，彻底打破了“只有开盘才能算影子决策”的物理门禁，实现了 7x24 小时全天候任意切换周期的实时影子决策自动重算与对齐渲染！
