@@ -444,9 +444,9 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
 
             if not df.empty:
                 mask = (
-                    df['theme_name'].astype(str).str.contains(sector_name, na=False) |
-                    df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
-                    df['sector'].astype(str).str.contains(sector_name, na=False)
+                    df['theme_name'].astype(str).str.contains(sector_name, regex=False, na=False) |
+                    df['hot_tag'].astype(str).str.contains(sector_name, regex=False, na=False) |
+                    df['sector'].astype(str).str.contains(sector_name, regex=False, na=False)
                 )
 
                 scraper_list = df[mask].copy()
@@ -473,8 +473,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
 
             if not candidates.empty:
                 c_mask = (
-                    candidates['category'].astype(str).str.contains(sector_name, na=False) |
-                    candidates['name'].astype(str).str.contains(sector_name, na=False)
+                    candidates['category'].astype(str).str.contains(sector_name, regex=False, na=False) |
+                    candidates['name'].astype(str).str.contains(sector_name, regex=False, na=False)
                 )
 
                 selector_list = candidates[c_mask].copy()
@@ -582,9 +582,9 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             if not df.empty:
                 # 模糊匹配板块名称
                 mask = (
-                    df['theme_name'].astype(str).str.contains(sector_name, na=False) | 
-                    df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
-                    df['sector'].astype(str).str.contains(sector_name, na=False)
+                    df['theme_name'].astype(str).str.contains(sector_name, regex=False, na=False) | 
+                    df['hot_tag'].astype(str).str.contains(sector_name, regex=False, na=False) |
+                    df['sector'].astype(str).str.contains(sector_name, regex=False, na=False)
                 )
                 scraper_list = df[mask].copy()
                 if not scraper_list.empty:
@@ -605,8 +605,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                     if candidates is not None and not candidates.empty:
                         # 在候选池中查找关联板块的股票
                         # 优先查找 category 匹配的
-                        c_mask = candidates['category'].astype(str).str.contains(sector_name, na=False) | \
-                                 candidates['name'].astype(str).str.contains(sector_name, na=False)
+                        c_mask = candidates['category'].astype(str).str.contains(sector_name, regex=False, na=False) | \
+                                 candidates['name'].astype(str).str.contains(sector_name, regex=False, na=False)
                         selector_list = candidates[c_mask].copy()
                         
                         if not selector_list.empty:

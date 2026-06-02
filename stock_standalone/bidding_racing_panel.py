@@ -16,7 +16,7 @@ from typing import Dict, List, Any, Optional
 
 # [🚀 预编译正则] 提升高频调用性能
 _RE_NON_DIGIT = re.compile(r'[^\d]')
-_RE_CAT_SPLIT = re.compile(r'[;；,，/\- ]')
+_RE_CAT_SPLIT = re.compile(r'[;；,，/|]')
 _RE_BRACKET_CODE = re.compile(r'\((\d{6})\)')
 _RE_QUERY_BRACKET = re.compile(r'^(.*?)\s*\((.*)\)$')
 _RE_CHINESE_COND = re.compile(r'[\u4e00-\u9fa5\-]')
@@ -3139,13 +3139,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     query_clean = query.strip()
                     if query_clean:
                         # 避免正则表达式特殊字符引发崩溃
-                        query_esc = re.escape(query_clean)
-                        # 构建模糊匹配逻辑：代码前缀、名称包含、板块包含
-                        mask = (df.index.astype(str).str.contains(query_esc, case=False, na=False)) | \
-                               (df['name'].astype(str).str.contains(query_esc, case=False, na=False))
+                        # 构建模糊匹配逻辑：代码前缀、名称包含、板块包含 (使用 regex=False，免除特殊字符/括号过滤失败问题)
+                        mask = (df.index.astype(str).str.contains(query_clean, case=False, regex=False, na=False)) | \
+                               (df['name'].astype(str).str.contains(query_clean, case=False, regex=False, na=False))
                         
                         if 'category' in df.columns:
-                            mask |= df['category'].astype(str).str.contains(query_esc, case=False, na=False)
+                            mask |= df['category'].astype(str).str.contains(query_clean, case=False, regex=False, na=False)
                             
                         res = df[mask]
                         if not is_auto_refresh:
