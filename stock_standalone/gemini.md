@@ -1,3 +1,9 @@
+## 2026-06-02 23:55
+- [x] **深度加固信号控制面板全局重点关注与二次稳定排序 (Hardened Global Favorites & Stable Secondary Sorting in Signal Dashboard)**：
+    - [x] **完美解决大板块热力表下索引混淆覆盖漏洞 (Fixed Multi-column Index Overlapping in Sector Heat Table)**：重构并解耦了 `signal_dashboard_panel.py` 中 `_sort_table_python` 的列索引查找与排序优先级判定逻辑。将“代码”、“个股名称”和“板块名称”三个维度的列索引判断进行物理分流，彻底解决了板块热力表中因“龙头名称”与“板块名称”共存引发的列索引覆盖 Bug。即使在用户高频手动点击列头进行各种复杂指标排序时，也能确保已关注的重点板块始终强置顶，且板块内部及普通板块仍保留完全正确的相对指标降序排序（对齐 SOLID 原则）。
+    - [x] **根治右键设为重点个股时的运行时 TypeError 崩溃 Bug (Fixed Single-Parameter add_favorite_stock Invocation in Context Menu)**：排查并修复了 `_show_context_menu` 右键上下文菜单里“⭐ 设为重点个股”动作中的参数调用不匹配缺陷。将原先错误的 `fav_mgr.add_favorite_stock(code, name)` 物理重构为 `fav_mgr.add_favorite_stock(code)`，完美对齐了 `GlobalFavoriteManager` 底部单参数原子 API 设计，根治了实盘操盘时由于参数数量不匹配引发的运行时 TypeError 崩溃与 UI 假死隐患。
+    - [x] **一枪通过全量编译与回归测试验证 (Passed All Compilation and Regressions)**：执行了 `py_compile` 对所有修改后的代码进行了语法验证，并成功 100% 一枪通过了 `test_watchlist_lifecycle.py` 全量单元回归测试，系统极度纯净，稳定性达到工业级指标。
+
 ## 2026-06-02 20:45
 - [x] **实现全局重点关注板块及个股的多端共享与订阅机制 (Implemented Global Favorite Stocks and Sectors Sync Architecture)**：
     - [x] **解耦 SectorBiddingPanel 的本地状态管理 (Decoupled Bidding Panel Local State)**：将 `sector_bidding_panel.py` 内的 `favorite_sectors` 和 `favorite_stocks` 的内部存储和读写逻辑重构为基于 `GlobalFavoriteManager` 单例的 `@property` 属性。对于收藏和取消收藏操作（`_add_favorite_stock` / `_remove_favorite_stock` / `_add_favorite_sector` / `_remove_favorite_sector`），全部重定向至 `GlobalFavoriteManager` 的原子修改 API。
