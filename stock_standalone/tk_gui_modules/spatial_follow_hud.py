@@ -147,6 +147,14 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 return panel.favorite_sectors
         return set()
 
+    def _get_favorite_stocks(self) -> set:
+        """获取重点关注个股的集合"""
+        if self.main_app:
+            panel = getattr(self.main_app, 'sector_bidding_panel', None)
+            if panel and hasattr(panel, 'favorite_stocks'):
+                return panel.favorite_stocks
+        return set()
+
     def _get_prioritized_active_sectors(self, detector) -> list:
         """获取重排后的活跃板块列表，重点关注板块优先"""
         if not detector:
@@ -1404,19 +1412,72 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self.lbl_follow.setText(f"👥 跟涨比例: <b>{sh.follow_ratio * 100:.0f}%</b>")
 
         # ── 维度 2: 龙头表现 ──
+        fav_stocks = self._get_favorite_stocks()
         leader_code = sh.leader_code
         leader_name = self._get_stock_name(leader_code, sh.leader_name)
+        disp_leader_name = f"⭐ {leader_name}" if (leader_code and leader_code in fav_stocks) else leader_name
         leader_change_pct = float(sh.leader_change_pct or 0.0)
         leader_pct_diff = float(sh.leader_pct_diff or 0.0)
         leader_dff = float(sh.leader_dff or 0.0)
         leader_vwap = float(sh.leader_vwap or 0.0)
         leader_now_price = 0.0
         
+        # 📡 [SSOT] 获取当前权威活体打分器以拉取每个跟风股最新的 Tick 级量能与资金异动指标
+        detector = self._get_active_detector()
+
         # 1-3号位跟风股 -> 升级为基于阿尔法爆发因子的多维智能优选筛选器！
         raw_followers = sh.follower_detail if hasattr(sh, 'follower_detail') and sh.follower_detail else []
         
         # 过滤掉和龙头相同的股票，避免重复
         valid_followers = [f for f in raw_followers if f.get('code') != sh.leader_code]
+
+        # 🚀 [NEW] 补充属于当前板块但在 raw_followers 中缺失的重点关注个股 (Favorite Stocks Supplemental)
+        merged_followers = list(valid_followers)
+        existing_codes = {f.get('code') for f in merged_followers if f.get('code')}
+        
+        if detector and hasattr(detector, 'tick_series'):
+            try:
+                with detector._lock:
+                    for fav_code in fav_stocks:
+                        if fav_code == sh.leader_code:
+                            continue
+                        if fav_code in existing_codes:
+                            continue
+                        ts = detector.tick_series.get(fav_code)
+                        if ts:
+                            is_member = False
+                            # 1. 优先通过最权威的全局 detector.sector_map 判定，杜绝由于 ts.category 未装载导致的遗漏
+                            if hasattr(detector, 'sector_map') and detector.sector_map:
+                                if fav_code in detector.sector_map.get(self.sector_name, set()):
+                                    is_member = True
+                            
+                            # 2. 备用 fallback 到 ts.category 文本匹配
+                            if not is_member:
+                                try:
+                                    cats = ts.get_splitted_cats()
+                                    if self.sector_name in cats:
+                                        is_member = True
+                                except Exception:
+                                    pass
+                            if not is_member and ts.category:
+                                if self.sector_name in ts.category:
+                                    is_member = True
+                                    
+                            if is_member:
+                                f_dummy = {
+                                    'code': fav_code,
+                                    'name': ts.name or fav_code,
+                                    'price': ts.current_price,
+                                    'pct': ts.current_pct,
+                                    'pct_diff': ts.pct_diff,
+                                    'dff': ts.dff,
+                                    't_factor': getattr(ts, 'ral', 0.0),
+                                    'pattern_hint': ts.pattern_hint or '重点监控',
+                                }
+                                merged_followers.append(f_dummy)
+                                existing_codes.add(fav_code)
+            except Exception as e:
+                logger.error(f"[HUD] Supplemental check for favorites failed: {e}")
 
         # [🚀 OPTIMIZE] 完美消灭 GUI 线程锁等待！在排序前仅一次性进锁，把龙头和所有跟风个股需要的 Tick 快照批量提取出来
         tick_snaps = {}
@@ -1424,7 +1485,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         if detector and hasattr(detector, 'tick_series'):
             try:
                 # 收集所有需要提取的跟风股代码
-                extract_codes = [f.get('code', '') for f in valid_followers if f.get('code')]
+                extract_codes = [f.get('code', '') for f in merged_followers if f.get('code')]
                 with detector._lock:
                     # 1. 批量提取跟风股数据
                     for ec in extract_codes:
@@ -1462,7 +1523,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
         # 动态对齐百分比颜色
         leader_pct_color = "#39ff14" if leader_change_pct >= 0 else "#ff073a"
-        self.lbl_leader_name.setText(f"🐉 {leader_name} ({leader_code})")
+        self.lbl_leader_name.setText(f"🐉 {disp_leader_name} ({leader_code})")
         self.lbl_leader_pct.setText(f"{leader_change_pct:+.2f}%")
         self.lbl_leader_pct_diff.setText(f"变动: <span style='color:{leader_pct_color};'>{leader_pct_diff:+.2f}%</span>")
         self.lbl_leader_dff.setText(f"背离: <b>{leader_dff:+.2f}</b>")
@@ -1474,7 +1535,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         # 0号位永远预留给最强统治龙头
         self.candidate_stocks.append({
             "code": leader_code,
-            "name": leader_name,
+            "name": disp_leader_name,
             "price": leader_now_price if leader_now_price > 0 else leader_vwap, # 优先使用最新的 Tick 现价
             "pct": leader_change_pct,
             "pct_diff": leader_pct_diff,
@@ -1483,15 +1544,6 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             "reason": "🚀 最强统治龙头股 (AES 99分)",
             "is_leader": True
         })
-        
-        # 1-3号位跟风股 -> 升级为基于阿尔法爆发因子的多维智能优选筛选器！
-        raw_followers = sh.follower_detail if hasattr(sh, 'follower_detail') and sh.follower_detail else []
-        
-        # 过滤掉和龙头相同的股票，避免重复
-        valid_followers = [f for f in raw_followers if f.get('code') != sh.leader_code]
-        
-        # 📡 [SSOT] 获取当前权威活体打分器以拉取每个跟风股最新的 Tick 级量能与资金异动指标
-        detector = self._get_active_detector()
 
         # 结合实盘物理打分器的高维度有价值强势股智能评估筛选器 (AES)
         def compute_alpha_explosion_score(f):
@@ -1567,14 +1619,34 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             f['_zhuli'] = zhuli
             
             return aes
-            
-        # 根据科学量化的 AES 爆发强度进行降序排列并筛选出前 4 只最具确定性的优质排头兵个股
-        valid_followers.sort(key=compute_alpha_explosion_score, reverse=True)
-        selected_followers = valid_followers[:4]
+
+        # 计算每个个股的 AES 得分
+        for f in merged_followers:
+            compute_alpha_explosion_score(f)
+
+        # 区分重点关注股和普通跟风股
+        fav_followers = []
+        normal_followers = []
+        for f in merged_followers:
+            code = f.get('code', '')
+            if code in fav_stocks:
+                fav_followers.append(f)
+            else:
+                normal_followers.append(f)
+
+        # 重点关注股按 AES 降序排序，全部保留
+        fav_followers.sort(key=lambda x: x.get('_aes', 0.0), reverse=True)
+        # 普通个股按 AES 降序排序，仅保留前 4 名
+        normal_followers.sort(key=lambda x: x.get('_aes', 0.0), reverse=True)
+        selected_normal = normal_followers[:4]
+
+        # 🚀 [NEW] 合并重点关注股与筛选后的普通股，重点关注股完美置顶，且不占用普通股名额
+        selected_followers = fav_followers + selected_normal
         
         for f in selected_followers:
             code = f.get('code', '')
-            name = self._get_stock_name(code, f.get('name', '跟风兵'))
+            raw_name = self._get_stock_name(code, f.get('name', '跟风兵'))
+            name = f"⭐ {raw_name}" if code in fav_stocks else raw_name
             price = f.get('price', 0.0)
             pct = f.get('pct', 0.0)
             pct_diff = f.get('pct_diff', 0.0)
@@ -1633,6 +1705,11 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 followers = self.candidate_stocks[1:]
                 is_reverse = (getattr(self, '_sort_order', 'desc') == 'desc')
                 followers.sort(key=sort_key, reverse=is_reverse)
+                
+                # 🚀 [NEW] 仅在没有手动排序(sort_col == -1)或手动点击代码/名称列(sort_col == 0)时，才强置顶重点个股；其他列完全遵循自然属性排序
+                if sort_col == 0:
+                    followers.sort(key=lambda x: 1 if x["code"] in fav_stocks else 0, reverse=True)
+                
                 self.candidate_stocks = [leader] + followers
 
         # 物理局部渲染表格内容 (现价与涨幅拆分为 2 列)
@@ -1842,7 +1919,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             
         selected = self.candidate_stocks[self.selected_index]
         code = selected["code"]
-        name = selected["name"]
+        name = selected["name"].replace("⭐ ", "")
         size_pct = self.slider_size.value() / 100.0
         price = selected.get("price", 0.0)
         if price <= 0.0:
@@ -2351,6 +2428,11 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         is_reverse = (self._sort_order == 'desc')
         followers.sort(key=sort_key, reverse=is_reverse)
+
+        # 🚀 [NEW] 仅在手动点击代码/名称列(logical_index == 0)时，重点关注个股的优先级排高，进行置顶微调；其他列正常排序
+        if logical_index == 0:
+            fav_stocks = self._get_favorite_stocks()
+            followers.sort(key=lambda x: 1 if x["code"] in fav_stocks else 0, reverse=True)
         
         # 重新拼接并刷新渲染表格
         self.candidate_stocks = [leader] + followers
