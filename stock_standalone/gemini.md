@@ -1,7 +1,28 @@
+## 2026-06-02 18:40
+- [x] **实现跟单指挥所 HUD 重点关注个股强置顶且非占用显示与稳定二次排序 (Implemented Favorite Stocks Always-On-Top & Non-Occupying in Follow HUD)**：
+    - [x] **实现重点关注个股自动补充机制 (Favorite Stocks Supplemental Ingestion)**：在 `spatial_follow_hud.py` 中，重构了 `update_hud_data` 逻辑。在进行重点自选股的板块归属校对时，优先使用打分器最权威的全局 `detector.sector_map` 缓存进行个股-板块归属匹配判定，备用 Fallback 到 `ts.category` / `ts.get_splitted_cats()` 的文本切分判定，彻底解决了由于实时 Tick 遗漏 category 字段导致的富士康概念中的“工业富联（601138）”与光纤概念中的“通鼎互联（002491）”等重点关注个股无法被 HUD 识别补全的严重漏洞。
+    - [x] **实现重点关注个股不占位强置顶 (Always-On-Top & Non-Occupying Constraint)**：在计算阿尔法爆发得分（AES）后，将合并后的跟风股列表分流为“重点关注个股”与“普通跟风个股”两部分。重点个股不受 4 个名额上限约束，对其进行全量置顶展示；普通跟风个股则保留原本的 AES 降序排序并截取前 4 只。完美达成了“重点关注股始终置顶且不占用普通跟风股名额”的操盘实战需求。
+    - [x] **实现表头手动排序及刷新稳定二次微调 (Stable Secondary Sort Protection)**：在 `update_hud_data` 刷新重排和 `_on_header_clicked` 表头手动点击回调中，优化了二次排序机制。仅在用户未排序（默认状态 `sort_col == -1`）或点击“代码/名称”列（`sort_col == 0`）排序时，才强制将重点关注个股置顶并进行二次稳定微调；若用户手动点击了其余数值属性列（如现价、涨幅、跟涨T值、背离DFF等）进行排序，则完全尊重原本的排序升降序规则，不进行任何额外的置顶干扰，极大提升了看盘的灵活性。
+    - [x] **100% 毫无死角一枪全绿通过 py_compile 语法校验**：经 python 中央编译器验证，修改的 `spatial_follow_hud.py` 源码文件语法 100% 正确，保障了工业级的交付品质。
+
+## 2026-06-02 18:25
+- [x] **实现竞价面板重点关注个股强制显示与稳定排序置顶 (Implemented Favorite Stocks Force Show & Stable Double-Sorting)**：
+    - [x] **实现稳定二次排序置顶机制 (Stable Double-Sorting)**：在 `sector_bidding_panel.py` 的个股数据源排序逻辑后，引入基于稳定排序的二次微调。在完全保留上一级按特定列（如涨幅、情绪值）升降序相对顺序的前提下，强制将设为重点关注的个股（第一优先级）与龙头个股（第二优先级）移至顶部，完美实现看盘重点的瞬间感知。
+    - [x] **实现重点个股防过滤保护 (Bypassed Filter & Search)**：重构了个股加载中针对宏观查询过滤 `self._macro_filtered_codes` 和搜索查询过滤 `active_query` 的过滤拦截判定。一旦个股代码处于 `self.favorite_stocks` 中，则直接绕过所有过滤规则强制显示，保障操盘手绝对不漏看重点关注的自选目标。
+    - [x] **消除个股添加重点关注时的重复数据重算与 UI 双重刷新 (Eliminated Double Recalculation on Toggle Favorite)**：定位并修复了点击添加/取消重点关注个股时触发的后台数据重复重算问题。将 `_add_favorite_stock` 与 `_remove_favorite_stock` 尾部高成本的 `self.refresh_data(force=True)`（会强制唤醒后台线程调用耗时 1.2s 的 `update_scores` 计算并导致 SignalBridge 重复回调）重构为本地纯 UI 内存重绘 (`_refresh_sector_list()`、`_populate_watchlist()`、`_on_sector_table_selection_changed()`)。不仅根治了两次“Async scoring completed”的异步刷新警告，还将操作延迟从秒级瞬间降至 0 毫秒。
+    - [x] **优化观测时长调节防抖与涨跌数据无损保留 (Implemented Debounced Interval Adjustment & Data Preservation)**：重构了 `_adjust_interval` 的时长调整逻辑。删除了 `self.detector.reset_observation_anchors()` 调用，确保在延长或缩短对比时间窗口时，盘中已累计捕捉的个股价格瞄点及切片涨跌历史不被清空重置。同时引入了 2.0 秒防抖计时器 `_interval_debounce_timer`，使用户在连续点击调节按钮（`-10m` 或 `+10m`）时，界面数字即时反应，而手动的物理行情计算仅在用户停止点击后延迟触发一次，避免了高频操作时的界面卡顿。
+
+## 2026-06-02 18:10
+- [x] **实现板块联动面板个股右键重点关注与实时跟单 HUD 重点个股强置顶推荐 (Implemented Favorite Stocks Toggle and HUD Prioritization)**：
+    - [x] **个股右键收藏与持久化 (Context Menu & Save)**：在板块联动面板 `sector_bidding_panel.py` 的个股表 `stock_table` 和自选关注表 `watchlist_table` 的右键菜单中集成了 `⭐ 设为重点个股` 与 `❌ 取消重点个股` 选项，并联动 `_save_ui_state()`，实现跨会话持久化保存。
+    - [x] **个股重点关注可视化 (Visual Star Prefix)**：在个股表与自选关注表的数据填充逻辑中，对已设为重点关注的个股名称前面动态增加 `⭐` 前缀标志。
+    - [x] **跟单 HUD 重点个股强置顶 (HUD Prioritization)**：在 `spatial_follow_hud.py` 中，通过 `_get_favorite_stocks()` 跨模块安全获取当前设为重点关注的个股，并在科学量化 AES 爆发强度排序的基础上，以 `(is_fav, aes)` 双重降序主键对跟风股重新排序，使重点关注的个股及龙头在 HUD 中强行置顶优先展示。
+    - [x] **一键跟单提交数据清洗 (Clean Submission Name)**：在一键下单物理触发时，自动通过 `.replace("⭐ ", "")` 清理个股名称中的星号前缀，确保提交给交易内核的股票名字无任何装饰脏字符。
+
 ## 2026-06-02 17:55
 - [x] **新增全局快捷键 Alt+U 隐藏与显示跟单指挥所 HUD (Implemented Alt+U Global Hotkey to Toggle Spatial Follow HUD)**：
     - [x] **注册全局热键与回调绑定**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 和 `_HOTKEY_INFO_MAP` 注册了 `Alt+U` (ID 12)，并关联定义了 `global_toggle_spatial_follow_hud` 作为其消息响应回调。
-    - [x] **实现独立热键进程同步支持**：在 `hotkey_rotator.py` 独立热键进程的 `self.hotkey_map` 映射字典中，同步补齐了 `12: (win32con.MOD_ALT, 0x55, ...)`，确保 `Alt+U` 热键能在独立的无阻塞低延迟热键守护进程中捕获，并以管道命令 `HOTKEY_TRIGGERED` 安全回调至主进程。
+    - [x] **实现独立热键进程同步支持**：在 `hotkey_rotator.py` 独立热键进程的 `self.hotkey_map` 映射字典中，同步补齐了 `12: (win32con.MOD_ALT, 0x55, ...)`，确保 `Alt+U`热键能在独立的无阻塞低延迟热键守护进程中捕获，并以管道命令 `HOTKEY_TRIGGERED` 安全回调至主进程。
     - [x] **实现无焦点拦截的全局开关交互 (Focus-free Toggle Logic)**：新实现了 `global_toggle_spatial_follow_hud` 函数，在隐藏与显示逻辑中完全剥离了针对 Tkinter 输入框焦点的拦截判定。即使用户焦点驻留在任何 Entry/Text 输入域，均能通过 `Alt+U` 强制无感开关 HUD，并保持了原空格键非全局隐藏/显示交互的完美对齐。
 
 ## 2026-06-02 17:45

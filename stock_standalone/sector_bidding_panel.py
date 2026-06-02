@@ -1737,6 +1737,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
         self._active_search_query = ""
         self.favorite_sectors = set()       # [NEW] 重点关注的板块集合
+        self.favorite_stocks = set()        # [NEW] 重点关注的个股集合
 
         # 🚀 [Performance] Pre-cached UI Resources
         self._color_red = QColor("#FF4444")
@@ -1953,6 +1954,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             data_to_save['use_dragon_race'] = self.cb_dragon_race.isChecked() if hasattr(self, 'cb_dragon_race') else False
             data_to_save['watchlist_mode'] = getattr(self, '_watchlist_mode', "NORMAL")
             data_to_save['favorite_sectors'] = list(self.favorite_sectors)
+            data_to_save['favorite_stocks'] = list(self.favorite_stocks)
 
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
@@ -2045,6 +2047,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             if 'favorite_sectors' in ui_state:
                 self.favorite_sectors = set(ui_state['favorite_sectors'])
+            if 'favorite_stocks' in ui_state:
+                self.favorite_stocks = set(ui_state['favorite_stocks'])
             
             logger.debug("📊 [SectorPanel] UI state restored (including History Group & Macro Query)")
         except Exception as e:
@@ -3677,7 +3681,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 
                 # [NEW] 增加对宏观查询条件过滤的支持 (Stage 1 Filtering)
                 if self._is_macro_active and self._macro_filtered_codes:
-                    if code not in self._macro_filtered_codes:
+                    if code not in self._macro_filtered_codes and code not in self.favorite_stocks:
                         continue
 
                 if r_data:
@@ -3708,8 +3712,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         else:
             # Fallback: 使用传统的 Leader + Followers 结构
             rows = []
-            # 龙头过滤
-            if not self._is_macro_active or (leader_code in self._macro_filtered_codes):
+             # 龙头过滤
+            if not self._is_macro_active or (leader_code in self._macro_filtered_codes) or (leader_code in self.favorite_stocks):
                 rows.append({
                     'code': leader_code, 
                     'name': leader_name,
@@ -3735,7 +3739,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 跟随股过滤
             for f in data.get('followers', []):
                 if self._is_macro_active and self._macro_filtered_codes:
-                    if f['code'] not in self._macro_filtered_codes:
+                    if f['code'] not in self._macro_filtered_codes and f['code'] not in self.favorite_stocks:
                         continue
                 f_klines = f.get('klines', [])
                 rows.append({
@@ -3767,7 +3771,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if active_query and not force_show_all:
             filtered_rows = []
             for r in rows:
-                if self._evaluate_search_condition(active_query, r):
+                # 重点关注个股强制显示，绕过搜索过滤
+                if (r.get('code') in self.favorite_stocks) or self._evaluate_search_condition(active_query, r):
                     filtered_rows.append(r)
             rows = filtered_rows
         
@@ -3799,6 +3804,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             rows.sort(key=lambda r: r.get('price_diff', 0.0), reverse=rev)
         elif col == 7:  # dff (切片力度)
             rows.sort(key=lambda r: r.get('dff', 0.0), reverse=rev)
+            
+        # 稳定二次排序：确保重点关注的个股以及龙头在任何情况下都在最顶层优先展示
+        # 优先级：重点关注个股优先展示在最上方，其次是龙头个股，其余跟随股按原本排序规则排列
+        rows.sort(key=lambda r: (
+            1 if r.get('code') in self.favorite_stocks else 0,
+            1 if '龙头' in r.get('role', '') else 0
+        ), reverse=True)
         
         # [NEW] Pre-compute search blobs for all rows (bulk move to worker context eventually)
         for r in rows:
@@ -3869,7 +3881,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             user_role_v1=data.get('sector', '未知'))
             
             # 2. 名称
-            self._update_cell(self.stock_table, i, 1, r['name'])
+            disp_name = f"⭐ {r['name']}" if r['code'] in self.favorite_stocks else r['name']
+            self._update_cell(self.stock_table, i, 1, disp_name)
 
             # 3. 角色
             role_c = self._color_red if '龙头' in r['role'] else None
@@ -4281,7 +4294,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.watchlist_table, i, 0, w['code'])
             
             # 2. 名称
-            self._update_cell(self.watchlist_table, i, 1, w['name'])
+            disp_name = f"⭐ {w['name']}" if w['code'] in self.favorite_stocks else w['name']
+            self._update_cell(self.watchlist_table, i, 1, disp_name)
             
             # 3. 涨幅
             p_val = w.get('pct', 0)
@@ -4511,7 +4525,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             menu.addAction("🚀 发送到关联软件", lambda: mw.tk_dispatch_queue.put(
                 lambda c=code: mw.original_push_logic(c) if hasattr(mw, 'original_push_logic') else None
             ))
-            menu.addSeparator()
+        menu.addSeparator()
+        if code in self.favorite_stocks:
+            menu.addAction("❌ 取消重点个股", lambda c=code: self._remove_favorite_stock(c))
+        else:
+            menu.addAction("⭐ 设为重点个股", lambda c=code: self._add_favorite_stock(c))
+        menu.addSeparator()
 
         menu.addAction("📋 复制代码", lambda: self._copy_to_clipboard(code))
         
@@ -4877,6 +4896,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             menu.addAction(f"📂 定位所属板块: {sector_name}", lambda: self._locate_sector(sector_name))
             
         menu.addSeparator()
+        if code in self.favorite_stocks:
+            menu.addAction("❌ 取消重点个股", lambda c=code: self._remove_favorite_stock(c))
+        else:
+            menu.addAction("⭐ 设为重点个股", lambda c=code: self._add_favorite_stock(c))
+        menu.addSeparator()
         
         selected_rows = set([it.row() for it in self.stock_table.selectedItems()])
         title_dna = f"🧬 执行 DNA 审计 ({len(selected_rows)}只...)" if len(selected_rows) > 1 else f"🧬 执行 DNA 审计 ({name})"
@@ -4922,6 +4946,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(code)
 
+    def _add_favorite_stock(self, code: str):
+        if not code:
+            return
+        self.favorite_stocks.add(code)
+        self._save_ui_state()
+        # [OPTIMIZE] 仅局部刷新 UI，不触发耗时的后台行情重新计算
+        self._refresh_sector_list()
+        self._populate_watchlist()
+        if self.sector_table.currentRow() >= 0:
+            self._on_sector_table_selection_changed()
+
+    def _remove_favorite_stock(self, code: str):
+        if not code:
+            return
+        if code in self.favorite_stocks:
+            self.favorite_stocks.remove(code)
+        self._save_ui_state()
+        # [OPTIMIZE] 仅局部刷新 UI，不触发耗时的后台行情重新计算
+        self._refresh_sector_list()
+        self._populate_watchlist()
+        if self.sector_table.currentRow() >= 0:
+            self._on_sector_table_selection_changed()
+
     # ------------------------------------------------------------------ strategy
     def _on_threshold_changed(self, val):
         """同步强度门槛到 detector 并刷新列表"""
@@ -4935,8 +4982,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         new_m = max(1, curr_m + delta_m)
         self.detector.comparison_interval = new_m * 60
         self.lbl_interval.setText(f"{new_m}m")
-        # 调节时间意味着对比基准变了，重置所有锚点 (包括个股价格瞄点)
-        self.detector.reset_observation_anchors()
+        
+        # [NEW] 防抖机制，避免连续点击造成重复计算
+        if not hasattr(self, '_interval_debounce_timer'):
+            self._interval_debounce_timer = QTimer(self)
+            self._interval_debounce_timer.setSingleShot(True)
+            self._interval_debounce_timer.timeout.connect(self._on_interval_debounce_timeout)
+            
+        self._interval_debounce_timer.start(2000)  # 2秒内狂点只触发最后一次
+
+    def _on_interval_debounce_timeout(self):
+        """防抖定时器回调：保存 UI 状态并执行刷新"""
+        self._save_ui_state()
         self.manual_refresh()
 
 
