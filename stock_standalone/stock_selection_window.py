@@ -68,6 +68,17 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.live_strategy: Optional['StockLiveStrategy'] = live_strategy
         self.selector: Optional['StockSelector'] = stock_selector
         
+        # 🚀 [NEW] 订阅全局关注变更通知，并启动主线程专属轮询机制
+        self._favorites_dirty = False
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"Favorites subscribe failed: {e}")
+        
+        # 启动主线程专属的 300ms 轮询心跳以安全刷新重点关注，杜绝任何跨线程 Tkinter GIL 崩溃
+        self.after(300, self._poll_favorites_loop)
+        
         # --- History Config ---
         self.history_file: str = "stock_sector_history.json"
         self.history: list[str] = self.load_history()
@@ -126,6 +137,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if self.history:
             self.concept_filter_var.set(self.history[0])
             
+        self._pending_column_widths = {}
         self.load_data()
 
         # [FIX] ESC 关闭窗口
@@ -141,6 +153,12 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        # [全局重点关注退订] 防止内存泄漏
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.debug(f"Favorites unsubscribe failed: {e}")
         # 🚀 [NEW] 级联销毁所有打开的交易确认弹窗，防止残留
         try:
             if hasattr(self, "_active_confirm_wins"):
@@ -160,6 +178,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self._save_guidance_column_widths()
         except Exception as e:
             logger.error(f"[guidance_column_widths] Save failed: {e}")
+            
+        # 👑 [NEW] 窗口关闭及退出时将所有未写盘的 Treeview 列宽脏数据一次性原子刷入磁盘
+        try:
+            self._flush_column_widths_to_disk()
+        except Exception as e:
+            logger.error(f"[ColumnWidthsPersistence] Close flush failed: {e}")
+
         # [NEW] 关闭并保存浮动交易看板
         try:
             win = getattr(self, "_kernel_toast_win", None)
@@ -195,6 +220,76 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         except Exception as e:
             print(f"保存窗口位置失败: {e}")
         self.destroy()
+
+    def _on_favorites_changed(self):
+        """[全局重点关注同步回调] 纯Python操作，绝对不碰任何Tkinter底层C对象，避开GIL崩溃"""
+        self._favorites_dirty = True
+
+    def _refresh_ui_favorites(self):
+        """安全地在主线程中只刷新页面置顶显示，绝不重载底层计算数据，省去99%开销与GIL崩溃"""
+        try:
+            if not hasattr(self, 'df_full_candidates') or self.df_full_candidates.empty:
+                return
+
+            # 1. 直接从内存全量缓存中复制，保留原有的业务数据逻辑
+            self.df_candidates = self.df_full_candidates.copy()
+
+            # 2. 重新应用当前的 Concept Filter 过滤
+            filter_str = self.concept_filter_var.get().strip()
+            if filter_str:
+                keywords = filter_str.split()
+                for kw in keywords:
+                    mask = (
+                        self.df_candidates['category'].str.contains(kw, case=False, regex=False, na=False) | 
+                        self.df_candidates['code'].str.contains(kw, case=False, regex=False, na=False) | 
+                        self.df_candidates['name'].str.contains(kw, case=False, regex=False, na=False)
+                    )
+                    self.df_candidates = self.df_candidates[mask]
+
+            # 3. 根据全新 favorites 标记重新物理置顶排序
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                self.df_candidates['is_fav'] = self.df_candidates['code'].apply(lambda x: 1 if str(x) in fav_stocks else 0)
+                
+                if '连阳涨幅' in self.df_candidates.columns:
+                    self.df_candidates = self.df_candidates.sort_values(by=['is_fav', '连阳涨幅'], ascending=[False, False])
+                else:
+                    self.df_candidates = self.df_candidates.sort_values(by='is_fav', ascending=False)
+            except Exception as e:
+                logger.warning(f"Failed to sort favorites on refresh: {e}")
+
+            # 4. 刷新顶部标题统计
+            self._update_title_stats()
+
+            # 5. 清空树并重新画入 (0 毫秒级极速渲染)
+            children = self.tree.get_children()
+            if children:
+                self.tree.delete(*children)
+            self._render_token += 1
+            self._do_bulk_render(self._render_token)
+
+            # 6. 同步极速重绘 Tab 2: 板块聚焦表
+            if hasattr(self, '_refresh_sector_tab'):
+                self._refresh_sector_tab()
+        except Exception as e:
+            logger.warning(f"Failed to refresh favorites display in selection window: {e}")
+
+    def _poll_favorites_loop(self):
+        """[主线程专属心跳轮询] 独立的小卫士，每隔300ms安全检测脏标记"""
+        try:
+            if getattr(self, '_favorites_dirty', False):
+                self._favorites_dirty = False
+                self._refresh_ui_favorites()
+        except Exception as e:
+            logger.debug(f"Favorites poll error: {e}")
+        finally:
+            try:
+                if self.winfo_exists():
+                    self.after(300, self._poll_favorites_loop)
+            except Exception:
+                pass
 
     def _sync_feature_colors(self):
         """响应主窗口 win_var 变化，同步切换颜色集"""
@@ -303,13 +398,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 return [elm for elm in style.map(style_name, query_opt=option) if elm[:2] != ("!disabled", "!selected")]
                 
             style.map("Dark.Treeview",
-                      foreground=[("selected", "#55ffff")] + fixed_map("Dark.Treeview", "foreground"),
-                      background=[("selected", "#1a3a5f")] + fixed_map("Dark.Treeview", "background"))
+                      foreground=[("selected", "#55ffff")],
+                      background=[("selected", "#1a3a5f")])
                       
             # 对默认的 Treeview 样式进行解锁，使原生白底表格在 Windows 主题下能正确渲染 tag_configure 的行背景（浅绿/浅红），绝不退化为黑白灰
             style.map("Treeview",
-                      foreground=[("selected", "#ffffff")] + fixed_map("Treeview", "foreground"),
-                      background=[("selected", "#0078d7")] + fixed_map("Treeview", "background"))
+                      foreground=[("selected", "#ffffff")],
+                      background=[("selected", "#0078d7")])
         except Exception:
             pass
         
@@ -413,6 +508,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # --- Main Notebook（选股表 + 板块聚焦 + 决策队列）---
         self._notebook = ttk.Notebook(self)
         self._notebook.pack(fill="both", expand=True, padx=5, pady=5)
+        self._notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         # ── Tab 1: 策略选股表（原有，保持不变）──────────────────────────────────
         tab_select = tk.Frame(self._notebook)
@@ -483,6 +579,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click) # 🚀 [NEW] 双击联动标记
         self.tree.bind("<Button-3>", self.show_context_menu)
+
+        # 智能自动加载列宽与手动调整防抖捕获
+        self._selection_cols_initialized = False
+        self.after(50, lambda: self._restore_all_tree_column_widths("selection", self.tree))
+        self.tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("selection", self.tree), add="+")
 
         # ── Tab 2: 板块聚焦（盘中热力）────────────────────────────────────────
         tab_sector = tk.Frame(self._notebook)
@@ -678,8 +779,21 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                  return
             
             # Default sorting: 连阳涨幅 descending
-            if '连阳涨幅' in self.df_candidates.columns:
-                self.df_candidates = self.df_candidates.sort_values(by='连阳涨幅', ascending=False)
+            # [重点关注置顶] 优先把设为重点关注的个股及板块排列在最前面，实现置顶推荐
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                self.df_candidates['is_fav'] = self.df_candidates['code'].apply(lambda x: 1 if str(x) in fav_stocks else 0)
+                
+                if '连阳涨幅' in self.df_candidates.columns:
+                    self.df_candidates = self.df_candidates.sort_values(by=['is_fav', '连阳涨幅'], ascending=[False, False])
+                else:
+                    self.df_candidates = self.df_candidates.sort_values(by='is_fav', ascending=False)
+            except Exception as e:
+                logger.warning(f"Failed to sort favorites: {e}")
+                if '连阳涨幅' in self.df_candidates.columns:
+                    self.df_candidates = self.df_candidates.sort_values(by='连阳涨幅', ascending=False)
 
             self._update_title_stats()
 
@@ -730,6 +844,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # 🚀 [加固] 确保 matched_concept tag 被正确高反差亮红配置
         self.tree.tag_configure("matched_concept", foreground="#ff3333", font=("Microsoft YaHei", 9, "bold"))
+        self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+        self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
 
         # 1. 冻结渲染 (通过隐藏所有列实现)
         all_cols = list(self.tree["columns"])
@@ -752,7 +868,18 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
 
                 display_name = row.name
+                # [🚀 标星高亮] 如果是重点关注的自选股，加上 star 星标并高亮
+                is_fav_stock = False
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    if code in GlobalFavoriteManager().get_favorite_stocks():
+                        display_name = "【重点】" + display_name
+                        is_fav_stock = True
+                except:
+                    pass
                 all_tags = [tag]
+                if is_fav_stock:
+                    all_tags.append("favorite")
                 if code in self._row_features:
                     f_tags, icon = self._row_features[code]
                     if f_tags: all_tags.extend(f_tags)
@@ -825,15 +952,30 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self.tree.focus(all_items[0])
             except: pass
 
-        # 5. 列宽自适应
-        if not self._column_widths_cached:
-            self.after(50, lambda: self._auto_fit_columns(force=False))
+        # 5. 列宽智能加载与防重置保护 (首次载入尝试恢复自定义宽度，未自定义时再进行自动测量，后续刷新绝对不覆盖用户调整)
+        if not getattr(self, '_selection_cols_initialized', False):
+            self._selection_cols_initialized = True
+            has_custom = self._restore_all_tree_column_widths("selection", self.tree)
+            if not has_custom:
+                self.after(50, lambda: self._auto_fit_columns(force=True))
 
     def _auto_fit_columns(self, force: bool = False):
         """
         根据内容自动调整列宽
         :param force: 是否强制重新测量（默认缓存后不重测）
         """
+        # 如果已经有了自定义的持久化列宽配置，绝对不需要再进行任何自动测量与重置
+        try:
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    cf_data = json.load(f)
+                if 'selection_column_widths' in cf_data:
+                    return
+        except Exception:
+            pass
+
         if not force and self._column_widths_cached:
             return
 
@@ -1103,6 +1245,38 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
         self.load_data()
 
+    def _link_to_visualizer_auto(self, code):
+        """
+        🚀 统一可视化联动接口：
+        在今日实时模式与历史复盘模式下智能切分并透传正确的时间标记 (timestamp)
+        """
+        if not code:
+            return
+        stock_code = str(code).zfill(6)
+        
+        # 1. 优先尝试通达信/同花顺物理联动
+        if hasattr(self, 'sender') and self.sender:
+            try:
+                self.sender.send(stock_code)
+            except Exception:
+                pass
+                
+        # 2. 可视化器跨进程联动 (Pipe/Socket 异步分流)
+        if self.master and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
+            query_date = getattr(self, 'current_date', "")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            if query_date and query_date != today_str:
+                # 历史复盘模式：同步历史日期
+                if hasattr(self.master, 'link_to_visualizer'):
+                    self.master.link_to_visualizer(stock_code, query_date)
+                    logger.info(f"[Linkage] SelectionWindow linked {stock_code} at {query_date} (History Mode)")
+                    return
+            
+            # 今日实时模式：仅切换股票代码
+            if hasattr(self.master, 'open_visualizer'):
+                self.master.open_visualizer(stock_code)
+
     def on_select(self, event):
         """
         选中事件：获取选中代码并尝试发送联动
@@ -1116,25 +1290,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         values = self.tree.item(item_id, "values")
         if values:
             stock_code = str(values[0]).zfill(6)
-            
-            # 1. 基础联动 (通达信/同花顺)
-            if hasattr(self, 'sender') and self.sender:
-                self.sender.send(stock_code)
-            
-            # 2. 可视化器联动 (基础跳转与时间同步)
-            if self.master and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-                if hasattr(self.master, 'link_to_visualizer'):
-                     # 🚀 [NEW] 用户需求：单击触发深度联动。如果是历史复盘 (非今天)，则强制同步时间
-                     query_date = self.current_date
-                     today_str = datetime.now().strftime("%Y-%m-%d")
-                     
-                     if query_date != today_str:
-                         # 历史复盘模式：同步日期
-                         self.master.link_to_visualizer(stock_code, query_date)
-                         logger.info(f"SelectionWindow: Linked {stock_code} at {query_date} (History Mode)")
-                     else:
-                         # 今日实时模式：仅切换股票
-                         self.master.open_visualizer(stock_code)
+            self._link_to_visualizer_auto(stock_code)
 
     def _on_concept_combo_right_click(self, event):
         """右键自动粘贴剪贴板文本并执行检索"""
@@ -1612,7 +1768,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
     def sort_tree(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         
-        # 🚀 [NEW] 板块过滤与有筛选条件时的前3个题材权重最高绝对优先排序算法
+        # [NEW] 板块过滤与有筛选条件时的前3个题材权重最高绝对优先排序算法
         current_filter = ""
         if hasattr(self, 'concept_filter_var'):
             current_filter = self.concept_filter_var.get().lower().strip()
@@ -1621,32 +1777,52 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
         kws = current_filter.split() if current_filter else []
         
-        if col == "category" and kws:
-            def get_sort_key(t):
-                val = str(t[0]).lower()
-                cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
-                match_idx = 999
-                for idx, cat in enumerate(cats):
-                    if any(kw in cat for kw in kws):
-                        match_idx = idx
-                        break
-                # 数学对齐：确保升序降序匹配度最高的（match_idx越小）股票永远绝对排在最前面
-                prio = match_idx if not reverse else (999 - match_idx)
-                return (prio, t[0])
-                
-            try:
-                l.sort(key=get_sort_key, reverse=reverse)
-            except Exception:
-                l.sort(reverse=reverse)
-        else:
-            # 尝试转为数字排序
-            try:
-                # 针对 rank 列或其他整数列，优先尝试 int，再 float
-                l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1, reverse=reverse)
-            except ValueError:
-                l.sort(reverse=reverse)
+        # 对一组列表进行原排序
+        def sort_sub_list(sub_l):
+            if col == "category" and kws:
+                def get_sort_key(t):
+                    val = str(t[0]).lower()
+                    cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                    match_idx = 999
+                    for idx, cat in enumerate(cats):
+                        if any(kw in cat for kw in kws):
+                            match_idx = idx
+                            break
+                    prio = match_idx if not reverse else (999 - match_idx)
+                    return (prio, t[0])
+                try:
+                    sub_l.sort(key=get_sort_key, reverse=reverse)
+                except Exception:
+                    sub_l.sort(reverse=reverse)
+            else:
+                try:
+                    sub_l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1.0, reverse=reverse)
+                except ValueError:
+                    sub_l.sort(reverse=reverse)
+            return sub_l
 
-        for index, (val, k) in enumerate(l):
+        # [🚀 收藏置顶二次排序] 分流收藏和普通个股，实现置顶且保持内部完美排序
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            
+            fav_list = []
+            normal_list = []
+            for val, k in l:
+                if str(k) in fav_stocks:
+                    fav_list.append((val, k))
+                else:
+                    normal_list.append((val, k))
+                    
+            sorted_fav = sort_sub_list(fav_list)
+            sorted_normal = sort_sub_list(normal_list)
+            final_list = sorted_fav + sorted_normal
+        except Exception as e:
+            logger.warning(f"Favorites sorting failed: {e}")
+            final_list = sort_sub_list(l)
+        
+        for index, (val, k) in enumerate(final_list):
             self.tree.move(k, '', index)
 
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
@@ -1745,6 +1921,25 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             label=f"🔍 运行 Re-entry 历史回测 ({code})",
             command=lambda: self._on_run_reentry_backtest_menu(code)
         )
+        
+        # [🚀 NEW] GlobalFavoriteManager 设为重点个股和取消重点个股选项
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            
+            menu.add_separator()
+            if code in fav_mgr.get_favorite_stocks():
+                menu.add_command(
+                    label="❌ 取消重点个股",
+                    command=lambda: [fav_mgr.remove_favorite_stock(code), self.after(0, self.load_data)]
+                )
+            else:
+                menu.add_command(
+                    label="⭐ 设为重点个股",
+                    command=lambda: [fav_mgr.add_favorite_stock(code), self.after(0, self.load_data)]
+                )
+        except Exception as e:
+            logger.warning(f"Failed to add favorites to context menu: {e}")
 
         menu.post(event.x_root, event.y_root)
     def quick_apply_concept_filter(self, concept: str):
@@ -2349,8 +2544,24 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
             if has_matched_concept:
                 all_tags.append("matched_concept")
             
+            # [🚀 历史追踪收藏高亮配置]
+            self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+            
+            display_name = item['name']
+            is_fav_stock = False
+            try:
+                from global_favorites import GlobalFavoriteManager
+                if item['code'] in GlobalFavoriteManager().get_favorite_stocks():
+                    display_name = "【重点】" + display_name
+                    is_fav_stock = True
+            except:
+                pass
+                
+            if is_fav_stock:
+                all_tags.append("favorite")
+                
             self.tree.insert("", "end", iid=item['code'], values=(
-                item['code'], item['name'], item['hits'], short_sector,
+                item['code'], display_name, item['hits'], short_sector,
                 f"{item['base_price']:.2f}", f"{item['curr_price']:.2f}",
                 f"{roi:+.2f}%", item['pattern']
             ), tags=tuple(all_tags))
@@ -2411,7 +2622,7 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
     def _sort_tree(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         
-        # 🚀 [NEW] 历史追踪有筛选过滤条件时的前3个题材权重最高绝对优先排序算法
+        # [NEW] 历史追踪有筛选过滤条件时的前3个题材权重最高绝对优先排序算法
         current_filter = ""
         if hasattr(self, 'search_var'):
             current_filter = self.search_var.get().lower().strip()
@@ -2420,29 +2631,52 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
             
         kws = current_filter.split() if current_filter else []
         
-        if col == "sector" and kws:
-            def get_sort_key(t):
-                val = str(t[0]).lower()
-                cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
-                match_idx = 999
-                for idx, cat in enumerate(cats):
-                    if any(kw in cat for kw in kws):
-                        match_idx = idx
-                        break
-                # 数学对齐：确保升序降序匹配度最高的（match_idx越小）股票永远绝对排在最前面
-                prio = match_idx if not reverse else (999 - match_idx)
-                return (prio, t[0])
-                
-            try:
-                l.sort(key=get_sort_key, reverse=reverse)
-            except Exception:
-                l.sort(reverse=reverse)
-        else:
-            try:
-                l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
-            except:
-                l.sort(reverse=reverse)
-        for index, (val, k) in enumerate(l):
+        # 内部基础排序
+        def sort_sub_list(sub_l):
+            if col == "sector" and kws:
+                def get_sort_key(t):
+                    val = str(t[0]).lower()
+                    cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                    match_idx = 999
+                    for idx, cat in enumerate(cats):
+                        if any(kw in cat for kw in kws):
+                            match_idx = idx
+                            break
+                    prio = match_idx if not reverse else (999 - match_idx)
+                    return (prio, t[0])
+                    
+                try:
+                    sub_l.sort(key=get_sort_key, reverse=reverse)
+                except Exception:
+                    sub_l.sort(reverse=reverse)
+            else:
+                try:
+                    sub_l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
+                except:
+                    sub_l.sort(reverse=reverse)
+            return sub_l
+
+        # [🚀 重点关注个股置顶二次排序] 分流重点个股与普通个股
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            fav_list = []
+            normal_list = []
+            for val, k in l:
+                if str(k) in fav_stocks:
+                    fav_list.append((val, k))
+                else:
+                    normal_list.append((val, k))
+            
+            sorted_fav = sort_sub_list(fav_list)
+            sorted_normal = sort_sub_list(normal_list)
+            final_list = sorted_fav + sorted_normal
+        except Exception as e:
+            logger.warning(f"Historical tracker sorting failed: {e}")
+            final_list = sort_sub_list(l)
+
+        for index, (val, k) in enumerate(final_list):
             self.tree.move(k, '', index)
         self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
         # [NEW] 排序后自动滚动到顶部
@@ -2516,6 +2750,11 @@ def _init_sector_tab(self, parent: tk.Frame):
 
     self._sector_tree.bind("<<TreeviewSelect>>", self._on_sector_selected)
 
+    # 智能自动加载列宽与手动调整防抖捕获
+    self._sector_cols_initialized = False
+    self.after(50, lambda: self._restore_all_tree_column_widths("sector", self._sector_tree))
+    self._sector_tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("sector", self._sector_tree), add="+")
+
     # ── 成员股详情（下半区）──────────────────────────────────────────────────
     bottom_frame = tk.Frame(self._sector_paned, bg="#0e1621")
     self._sector_paned.add(bottom_frame, height=200)
@@ -2553,6 +2792,11 @@ def _init_sector_tab(self, parent: tk.Frame):
     self._member_tree.bind("<<TreeviewSelect>>", self._on_member_selected)
     self._member_tree.bind("<Double-1>", self._on_member_selected)
     self._member_tree.bind("<Button-3>", self.show_context_menu)
+
+    # 智能自动加载列宽与手动调整防抖捕获
+    self._member_cols_initialized = False
+    self.after(50, lambda: self._restore_all_tree_column_widths("member", self._member_tree))
+    self._member_tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("member", self._member_tree), add="+")
 
 
 def _init_decision_tab(self, parent: tk.Frame):
@@ -2692,6 +2936,11 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._signal_tree.bind("<<TreeviewSelect>>", self._on_signal_selected)
     self._signal_tree.bind("<Button-3>", self.show_context_menu)
 
+    # 智能自动加载列宽与手动调整防抖捕获
+    self._signal_cols_initialized = False
+    self.after(50, lambda: self._restore_all_tree_column_widths("signal", self._signal_tree))
+    self._signal_tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("signal", self._signal_tree), add="+")
+
     self._sig_tooltip_win = None
     self._sig_last_hover_id = None
     
@@ -2810,6 +3059,15 @@ def _init_decision_tab(self, parent: tk.Frame):
     self._pos_tree.bind("<Button-3>", self.show_context_menu)
     self._log_tree.bind("<Button-3>", self.show_context_menu)
 
+    # 智能自动加载列宽与手动调整防抖捕获
+    self._pos_cols_initialized = False
+    self.after(50, lambda: self._restore_all_tree_column_widths("pos", self._pos_tree))
+    self._pos_tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("pos", self._pos_tree), add="+")
+
+    self._log_cols_initialized = False
+    self.after(50, lambda: self._restore_all_tree_column_widths("log", self._log_tree))
+    self._log_tree.bind("<ButtonRelease-1>", lambda e: self._on_treeview_column_resize("log", self._log_tree), add="+")
+
     # [NEW] 启动决策树行慢闪烁呼吸灯定时器
     self._schedule_kernel_blink()
 
@@ -2858,12 +3116,48 @@ def _refresh_sector_tab(self):
         # 清空并重填（板块数量少，不需要Diff模型）
         self._sector_tree.delete(*self._sector_tree.get_children())
 
-        for i, s in enumerate(hot_sectors, 1):
+        # [🚀 确保收藏板块高亮 tag 配置]
+        self._sector_tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+
+        # [🚀 板块默认置顶] 识别重点关注的板块并强置顶
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_sectors = fav_mgr.get_favorite_sectors()
+            fav_sectors_list = []
+            normal_sectors = []
+            for s in hot_sectors:
+                sec_name = s.get('name', '')
+                if sec_name in fav_sectors:
+                    fav_sectors_list.append(s)
+                else:
+                    normal_sectors.append(s)
+            sorted_sectors = fav_sectors_list + normal_sectors
+        except Exception as e:
+            logger.warning(f"Failed to sort hot sectors: {e}")
+            sorted_sectors = hot_sectors
+
+        for i, s in enumerate(sorted_sectors, 1):
             tag = "hot1" if i == 1 else ("hot2" if i == 2 else ("hot3" if i == 3 else "normal"))
             followers_str = " / ".join(s.get('follower_codes', []))
+            
+            sec_name = s.get('name', '')
+            is_fav_sec = False
+            try:
+                from global_favorites import GlobalFavoriteManager
+                if sec_name in GlobalFavoriteManager().get_favorite_sectors():
+                    sec_name = "【重点】" + sec_name
+                    is_fav_sec = True
+            except:
+                pass
+                
+            sec_tags = [tag]
+            if is_fav_sec:
+                sec_tags.append("favorite")
+
             self._sector_tree.insert("", "end", iid=str(i), values=(
                 f"#{i}",
-                s.get('name', ''),
+                sec_name,
                 f"{s.get('heat_score', 0):.1f}",
                 f"{s.get('bidding_score', 0):.2f}",
                 s.get('zt_count', 0),
@@ -2965,14 +3259,8 @@ def _on_sector_selected(self, event=None):
             ), tags=(tag,))
         
         # 自动联动到龙头股
-        if leader_code and hasattr(self, 'sender') and self.sender:
-            try:
-                self.sender.send(leader_code)
-            except Exception:
-                pass
-            if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-                if hasattr(self.master, 'open_visualizer'):
-                    self.master.open_visualizer(leader_code)
+        if leader_code:
+            self._link_to_visualizer_auto(leader_code)
     except Exception as e:
         logger.debug(f"[on_sector_selected] error: {e}")
 
@@ -2983,14 +3271,7 @@ def _on_member_selected(self, event=None):
     if not sel:
         return
     code = sel[0]
-    if hasattr(self, 'sender') and self.sender:
-        try:
-            self.sender.send(code)
-        except Exception:
-            pass
-    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-        if hasattr(self.master, 'open_visualizer'):
-            self.master.open_visualizer(code)
+    self._link_to_visualizer_auto(code)
 
 
 def _force_refresh_sector(self):
@@ -3009,11 +3290,40 @@ def _sort_sector_tree(self, col: str):
     """板块列表点击表头排序"""
     try:
         items = [(self._sector_tree.set(k, col), k) for k in self._sector_tree.get_children('')]
+        
+        # 内部基础排序
+        def sort_sub_sectors(sub_l):
+            try:
+                sub_l.sort(key=lambda x: float(str(x[0]).replace('%', '').replace('#', '').replace('▲', '').replace('▼', '') or 0), reverse=True)
+            except Exception:
+                sub_l.sort()
+            return sub_l
+
+        # [🚀 收藏置顶二次排序] 分流已收藏板块和普通板块，实现重点板块强置顶
         try:
-            items.sort(key=lambda x: float(x[0].replace('%', '').replace('#', '').replace('▲', '').replace('▼', '') or 0), reverse=True)
-        except Exception:
-            items.sort()
-        for idx, (_, k) in enumerate(items):
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_sectors = fav_mgr.get_favorite_sectors()
+            fav_list = []
+            normal_list = []
+            for val, k in items:
+                # 从 values 中精确提取板块名
+                vals = self._sector_tree.item(k, "values")
+                sec_name = vals[1].replace("【重点】", "").replace("【重点】", "").strip() if len(vals) > 1 else ""
+                
+                if sec_name in fav_sectors:
+                    fav_list.append((val, k))
+                else:
+                    normal_list.append((val, k))
+            
+            sorted_fav = sort_sub_sectors(fav_list)
+            sorted_normal = sort_sub_sectors(normal_list)
+            final_items = sorted_fav + sorted_normal
+        except Exception as e:
+            logger.warning(f"Sector favorites sorting failed: {e}")
+            final_items = sort_sub_sectors(items)
+
+        for idx, (_, k) in enumerate(final_items):
             self._sector_tree.move(k, '', idx)
         # [NEW] 排序后自动滚动到顶部
         self._sector_tree.yview_moveto(0)
@@ -3456,17 +3766,7 @@ def _kernel_show_toast(self, text, kind="info", records=None):
                     return
                 code = values[0]
                 if code and code != "ERROR" and code != "代码":
-                    code = str(code).zfill(6)
-                    # 联动主界面 K 线图 (通过 sender 发送)
-                    if hasattr(self, 'sender') and self.sender:
-                        try:
-                            self.sender.send(code)
-                        except Exception:
-                            pass
-                    # 联动可视化视口
-                    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-                        if hasattr(self.master, 'open_visualizer'):
-                            self.master.open_visualizer(code)
+                    self._link_to_visualizer_auto(code)
             
             self._kernel_toast_tree.bind("<<TreeviewSelect>>", on_toast_select)
             self._kernel_toast_tree.bind("<Double-1>", on_toast_select)
@@ -4017,14 +4317,7 @@ def _on_signal_selected(self, event=None):
     if not sel:
         return
     code = sel[0]
-    if hasattr(self, 'sender') and self.sender:
-        try:
-            self.sender.send(code)
-        except Exception:
-            pass
-    if self.master and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-        if hasattr(self.master, 'open_visualizer'):
-            self.master.open_visualizer(code)
+    self._link_to_visualizer_auto(code)
 
 def _sort_signal_tree(self, col: str):
     """决策信号列表点击表头排序"""
@@ -4635,14 +4928,7 @@ def _on_pos_selected(self, event=None):
         if not sel:
             return
         code = str(sel[0]).zfill(6)  # iid 就是个股代码本身
-        if hasattr(self, 'sender') and self.sender:
-            try:
-                self.sender.send(code)
-            except Exception:
-                pass
-        if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-            if hasattr(self.master, 'open_visualizer'):
-                self.master.open_visualizer(code)
+        self._link_to_visualizer_auto(code)
     except Exception as e:
         logger.debug(f"[on_pos_selected] error: {e}")
 
@@ -4657,14 +4943,7 @@ def _on_log_selected(self, event=None):
         vals = item.get('values', [])
         if len(vals) > 2:
             code = str(vals[2]).zfill(6)  # values[2] 是个股代码
-            if hasattr(self, 'sender') and self.sender:
-                try:
-                    self.sender.send(code)
-                except Exception:
-                    pass
-            if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-                if hasattr(self.master, 'open_visualizer'):
-                    self.master.open_visualizer(code)
+            self._link_to_visualizer_auto(code)
     except Exception as e:
         logger.debug(f"[on_log_selected] error: {e}")
 
@@ -4897,14 +5176,7 @@ def _show_kernel_confirm_dialog(self, sig, action, price):
     win.bind("<Escape>", lambda e: on_ignore())
     
     # 联动 K 线与可视化
-    if hasattr(self, 'sender') and self.sender:
-        try:
-            self.sender.send(code)
-        except Exception:
-            pass
-    if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-        if hasattr(self.master, 'open_visualizer'):
-            self.master.open_visualizer(code)
+    self._link_to_visualizer_auto(code)
 
 
 StockSelectionWindow._show_kernel_confirm_dialog = _show_kernel_confirm_dialog
@@ -5032,7 +5304,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
     self._guidance_tree.tag_configure("warning_red", background="#2b1414", foreground="#ff4444")      # 破位高位防震 -> 醒目高对比红
     self._guidance_tree.tag_configure("super_cyan", background="#0c222b", foreground="#00ffff")       # 5日线主升浪/极速支撑 -> 电竞极速青
     self._guidance_tree.tag_configure("trend_green", background="#0d2215", foreground="#00ff88")      # 10日线反转/趋势 -> 盎然反弹绿
-    self._guidance_tree.tag_configure("pullback_yellow", background="#24220d", foreground="#ffd700")  # SWS盈利线低吸/防守支撑 -> 黄金沙漏黄
+    self._guidance_tree.tag_configure("pullback_yellow", background="#24220d", foreground="#ffff00")  # SWS盈利线低吸/防守支撑 -> 黄金沙漏黄
     self._guidance_tree.tag_configure("defense_blue", background="#161626", foreground="#d670ff")     # 60日线生死防守 -> 战术防守紫/蓝
 
 
@@ -5041,14 +5313,7 @@ def _init_guidance_tab(self, parent: tk.Frame):
         sel = self._guidance_tree.selection()
         if not sel: return
         code = sel[0]
-        if hasattr(self, 'sender') and self.sender:
-            try:
-                self.sender.send(code)
-            except Exception:
-                pass
-        if getattr(self, 'master', None) and getattr(self.master, "vis_var", None) and self.master.vis_var.get():
-            if hasattr(self.master, 'open_visualizer'):
-                self.master.open_visualizer(code)
+        self._link_to_visualizer_auto(code)
                 
     def _on_guidance_double_click(event=None):
         sel = self._guidance_tree.selection()
@@ -5579,56 +5844,14 @@ def _save_guidance_column_widths(self):
     """保存每日操作指南 Treeview 的列宽"""
     if not hasattr(self, "_guidance_tree") or not self._guidance_tree.winfo_exists():
         return
-    try:
-        scale = self._get_dpi_scale_factor()
-        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
-        
-        widths = {}
-        # 👑 动态使用 self._guidance_tree["columns"] 遍历所有列，完美解决新列 percent 和 dff 被遗漏的问题！
-        for col in self._guidance_tree["columns"]:
-            try:
-                widths[col] = int(self._guidance_tree.column(col, "width") / scale)
-            except Exception:
-                pass
-        
-        data = {}
-        if os.path.exists(config_file_path):
-            with open(config_file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        
-        data['guidance_column_widths'] = widths
-        
-        tmp_file = config_file_path + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        os.replace(tmp_file, config_file_path)
-        logger.debug(f"[guidance_column_widths] Saved: {widths}")
-    except Exception as e:
-        logger.error(f"[guidance_column_widths] Save failed: {e}")
+    self._save_all_tree_column_widths("guidance", self._guidance_tree, force_write=False)
 
 
-def _restore_guidance_column_widths(self):
+def _restore_guidance_column_widths(self) -> bool:
     """恢复每日操作指南 Treeview 的列宽"""
     if not hasattr(self, "_guidance_tree") or not self._guidance_tree.winfo_exists():
-        return
-    try:
-        scale = self._get_dpi_scale_factor()
-        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
-        
-        if os.path.exists(config_file_path):
-            with open(config_file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            widths = data.get('guidance_column_widths', {})
-            if widths:
-                for col, w in widths.items():
-                    try:
-                        self._guidance_tree.column(col, width=int(w * scale))
-                    except Exception:
-                        pass
-                logger.debug(f"[guidance_column_widths] Restored: {widths}")
-    except Exception as e:
-        logger.error(f"[guidance_column_widths] Restore failed: {e}")
+        return False
+    return self._restore_all_tree_column_widths("guidance", self._guidance_tree)
 
 
 def _auto_fit_guidance_columns(self):
@@ -5706,5 +5929,166 @@ StockSelectionWindow.show_guidance_tab = show_guidance_tab
 StockSelectionWindow._save_guidance_column_widths = _save_guidance_column_widths
 StockSelectionWindow._restore_guidance_column_widths = _restore_guidance_column_widths
 StockSelectionWindow._auto_fit_guidance_columns = _auto_fit_guidance_columns
+
+
+# ── 智能列宽自动持久化及自适应双保险逻辑 ─────────────────────────────────────
+def _save_all_tree_column_widths(self, tree_name: str, tree_widget: ttk.Treeview, force_write: bool = False):
+    """通用保存任意 Treeview 的列宽到内存暂存区，并在 force_write=True 时立刻刷盘"""
+    if not tree_widget or not tree_widget.winfo_exists():
+        return
+    try:
+        scale = self._get_dpi_scale_factor()
+        widths = {}
+        for col in tree_widget["columns"]:
+            try:
+                widths[col] = int(tree_widget.column(col, "width") / scale)
+            except Exception:
+                pass
+        
+        if not hasattr(self, "_pending_column_widths"):
+            self._pending_column_widths = {}
+            
+        self._pending_column_widths[f'{tree_name}_column_widths'] = widths
+        
+        if force_write:
+            self._flush_column_widths_to_disk()
+    except Exception as e:
+        logger.error(f"[{tree_name}_column_widths] Save in-memory failed: {e}")
+
+def _flush_column_widths_to_disk(self):
+    """将内存中所有暂存的 Treeview 修改脏数据一次性合并刷入磁盘 (窗口关闭、退出或防抖定时器触发时)"""
+    if not getattr(self, "_pending_column_widths", None):
+        return
+    try:
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+        
+        data = {}
+        if os.path.exists(config_file_path):
+            try:
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+        
+        # 合并有真正发生变动的配置，无变动直接短路，减少写盘操作
+        changed = False
+        for k, v in self._pending_column_widths.items():
+            if data.get(k) != v:
+                data[k] = v
+                changed = True
+        
+        if not changed:
+            return
+            
+        # 指数退避式安全原子写入
+        import threading
+        tmp_file = config_file_path + f".tmp.{os.getpid()}.{threading.get_ident()}"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            
+        import time
+        for i in range(5):
+            try:
+                if os.path.exists(config_file_path):
+                    os.remove(config_file_path)
+                os.rename(tmp_file, config_file_path)
+                break
+            except Exception:
+                time.sleep(0.05)
+        else:
+            os.replace(tmp_file, config_file_path)
+            
+        logger.debug(f"[ColumnWidthsPersistence] Successfully flushed to disk: {list(self._pending_column_widths.keys())}")
+        self._pending_column_widths.clear()
+    except Exception as e:
+        logger.error(f"[ColumnWidthsPersistence] Flush to disk failed: {e}")
+
+def _restore_all_tree_column_widths(self, tree_name: str, tree_widget: ttk.Treeview) -> bool:
+    """通用恢复任意 Treeview 的列宽，返回 True 表示恢复成功"""
+    if not tree_widget or not tree_widget.winfo_exists():
+        return False
+    try:
+        # 优先读取内存暂存区，从而保证即时状态高保真，然后再回退磁盘配置
+        if hasattr(self, "_pending_column_widths") and f'{tree_name}_column_widths' in self._pending_column_widths:
+            widths = self._pending_column_widths[f'{tree_name}_column_widths']
+            scale = self._get_dpi_scale_factor()
+            for col, w in widths.items():
+                try:
+                    tree_widget.column(col, width=int(w * scale))
+                except Exception:
+                    pass
+            return True
+            
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+        
+        if os.path.exists(config_file_path):
+            with open(config_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            widths = data.get(f'{tree_name}_column_widths', {})
+            if widths:
+                for col, w in widths.items():
+                    try:
+                        tree_widget.column(col, width=int(w * scale))
+                    except Exception:
+                        pass
+                logger.debug(f"[{tree_name}_column_widths] Restored: {widths}")
+                return True
+    except Exception as e:
+        logger.error(f"[{tree_name}_column_widths] Restore failed: {e}")
+    return False
+
+def _on_treeview_column_resize(self, tree_name: str, tree_widget: ttk.Treeview):
+    """拖拽列宽防抖事件处理：即时记入内存，10秒防抖静默刷盘"""
+    try:
+        # 1. 立即记入内存暂存区，保证操作响应亚毫秒级，且绝不产生即时写盘
+        self._save_all_tree_column_widths(tree_name, tree_widget, force_write=False)
+        
+        # 2. 开启 10000ms (10秒) 防抖延迟原子刷盘
+        timer_attr = f"_{tree_name}_resize_timer"
+        if hasattr(self, timer_attr) and getattr(self, timer_attr):
+            self.after_cancel(getattr(self, timer_attr))
+        
+        def _delayed_save():
+            try:
+                self._flush_column_widths_to_disk()
+            except Exception:
+                pass
+            setattr(self, timer_attr, None)
+            
+        setattr(self, timer_attr, self.after(10000, _delayed_save))
+    except Exception:
+        pass
+
+def _on_notebook_tab_changed(self, event=None):
+    """当用户切换页面时，以双保险形式重新强制复位自定义列宽，防范高频行数据刷新产生的布局漂移"""
+    try:
+        if not hasattr(self, '_notebook') or not self._notebook.winfo_exists():
+            return
+        current_tab = self._notebook.index("current")
+        if current_tab == 0:
+            self._restore_all_tree_column_widths("selection", self.tree)
+        elif current_tab == 1:
+            self._restore_all_tree_column_widths("sector", self._sector_tree)
+            self._restore_all_tree_column_widths("member", self._member_tree)
+        elif current_tab == 2:
+            self._restore_all_tree_column_widths("signal", self._signal_tree)
+            self._restore_all_tree_column_widths("pos", self._pos_tree)
+            self._restore_all_tree_column_widths("log", self._log_tree)
+        elif current_tab == 3:
+            self._restore_guidance_column_widths()
+    except Exception as e:
+        logger.debug(f"[NotebookTabChanged] Error: {e}")
+
+
+# 绑定到 StockSelectionWindow 实例方法中
+StockSelectionWindow._save_all_tree_column_widths = _save_all_tree_column_widths
+StockSelectionWindow._flush_column_widths_to_disk = _flush_column_widths_to_disk
+StockSelectionWindow._restore_all_tree_column_widths = _restore_all_tree_column_widths
+StockSelectionWindow._on_treeview_column_resize = _on_treeview_column_resize
+StockSelectionWindow._on_notebook_tab_changed = _on_notebook_tab_changed
+
 
 
