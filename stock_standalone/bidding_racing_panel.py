@@ -923,7 +923,8 @@ class RacingPieWidget(QWidget):
 class SectorDetailDialog(QDialog, WindowMixin):
     """板块成分股详情弹窗 - 结构与领军个股一致"""
     def __init__(self, sector_name, detector, linkage_cb, parent=None):
-        super().__init__(parent)
+        super().__init__(None) # [🚀 独立窗口解耦] 传入 None，在 Windows 任务栏和 OS 窗口管理中完全解耦父子拥有关系，实现单独操作
+        self._py_parent = parent
         # 必须最先赋值
         self.detector = detector
         self.linkage_cb = linkage_cb
@@ -970,6 +971,10 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.timer.start(500) 
         self.refresh_data()
         self.setUpdatesEnabled(True)
+
+    def parent(self):
+        """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
+        return getattr(self, "_py_parent", None)
 
     def get_ui_state(self):
         """导出窗口状态用于统一管理"""
@@ -1693,7 +1698,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
 class CategoryDetailDialog(QDialog, WindowMixin):
     """饼图分类成分股详情弹窗 - 结构与板块详情一致"""
     def __init__(self, category_name, detector, linkage_cb, parent=None):
-        super().__init__(parent)
+        super().__init__(None) # [🚀 独立窗口解耦] 传入 None，在 Windows 任务栏 and OS 窗口管理中完全解耦父子拥有关系，实现单独操作
+        self._py_parent = parent
         self.detector = detector
         self.linkage_cb = linkage_cb
         self.category_name = category_name
@@ -1730,6 +1736,10 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.timer.start(500) 
         self.refresh_data()
         self.setUpdatesEnabled(True)
+
+    def parent(self):
+        """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
+        return getattr(self, "_py_parent", None)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -2729,6 +2739,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_code_check.clicked.connect(self._on_code_check_triggered)
         query_bar.addWidget(self.btn_code_check)
         
+        # 6.5.5 统一置顶按钮
+        self.btn_raise_all = QPushButton("📌统一置顶")
+        self.btn_raise_all.setFixedWidth(85)
+        self.btn_raise_all.setToolTip("将主窗口及所有打开的子窗口统一显示到最前方")
+        self.btn_raise_all.setStyleSheet("""
+            QPushButton { background-color: #6C5B7B; color: white; border-radius: 4px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #7B6888; }
+        """)
+        self.btn_raise_all.clicked.connect(self._on_raise_all_windows_triggered)
+        query_bar.addWidget(self.btn_raise_all)
+        
         # 6.6 回放暂停/继续按钮 (默认隐藏)
         self.btn_pause = QPushButton("⏸ 暂停")
         self.btn_pause.setFixedWidth(70)
@@ -3329,6 +3350,35 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self.query_input.blockSignals(False)
             
         logger.info(f"🧪 [RacingPanel] Test query completed. Single_stock={is_single_stock}")
+
+    def _on_raise_all_windows_triggered(self):
+        """[🚀 统一置顶] 一键将主窗口及所有打开的赛马子窗口带到最前方显示"""
+        try:
+            # 1. 激活并升起主窗口
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            
+            # 2. 依次激活并升起所有打开的子窗口
+            raised_count = 0
+            for dlg_key, dlg in list(self._detail_dialogs.items()):
+                try:
+                    if dlg and dlg.isVisible():
+                        dlg.show()
+                        dlg.raise_()
+                        dlg.activateWindow()
+                        raised_count += 1
+                except:
+                    pass
+            
+            # 3. 气泡提示
+            from gui_utils import toast_message
+            if raised_count > 0:
+                toast_message(self, f"📌 已统一置顶主窗口及 {raised_count} 个子窗口")
+            else:
+                toast_message(self, "📌 已前置主窗口 (当前无打开的子窗口)")
+        except Exception as e:
+            traceback.print_exc()
 
     def _on_code_check_triggered(self, target_code=None):
         """对选定个股或随机个股调出 check_code 详检分析报告 (🔍详检 按钮专用)"""

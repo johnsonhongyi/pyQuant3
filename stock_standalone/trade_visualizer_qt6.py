@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+# # 🚀 [IPC/FIXED] 智能兼容 Nuitka / PyInstaller 编译环境，物理提取真实软件根目录加入 sys.path，彻底根治跨进程/多进程运行时 scratch 导入失败
+# try:
+#     from sys_utils import get_app_root
+#     current_dir = get_app_root()
+# except Exception:
+#     current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# if current_dir not in sys.path:
+#     sys.path.insert(0, current_dir)
 import time
 import pickle
 import struct
@@ -11503,6 +11512,9 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 同步归一化后的数据
         self.day_df = day_df
+        # 🚀 [IPC/FIXED] 强制构建当前股票的最权威日期索引映射，彻底根治无历史信号股票的联动缺失 Bug
+        dates = day_df.index
+        self._cached_date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
         self._last_rendered_code = code
         self.tick_df = tick_df
         if is_new_stock:
