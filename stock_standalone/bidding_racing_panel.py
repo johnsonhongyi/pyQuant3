@@ -299,20 +299,30 @@ class HitHighlightDelegate(QStyledItemDelegate):
         
         # 精确匹配 paint 中的宽度计算，防止高度预估不足导致上下重影
         if option.widget:
-            available_w = option.widget.viewport().width()
+            # 引入 minimumWidth 兜底，防止视图未完全显示或高频刷新时 viewport().width() 返回小值导致高度估算偏大
+            available_w = max(option.widget.viewport().width(), option.widget.minimumWidth())
+            # [🚀 核心加固] 扣除垂直滚动条预估宽度 (约16-25px) 及 adjusted(6, 4, -4, -4) 边缘缩进 10px，
+            # 确保 sizeHint 的估算宽度略小于或等于实际绘制宽度，从而计算出足够安全的行高。
+            available_w -= 35
         elif self.parent() and hasattr(self.parent(), 'width'):
-            available_w = self.parent().width()
+            # 如果 parent 是 QComboBox，它的 view() 可能设置了 minimumWidth
+            parent_widget = self.parent()
+            combo_w = parent_widget.width()
+            view_min_w = 0
+            if hasattr(parent_widget, 'view') and parent_widget.view():
+                view_min_w = parent_widget.view().minimumWidth()
+            available_w = max(combo_w, view_min_w) - 35
         else:
-            available_w = option.rect.width()
+            available_w = option.rect.width() - 10
             
         if available_w < 50:
-            available_w = 300
+            available_w = 650  # 与 view().setMinimumWidth 默认值对齐，保证默认良好的排版宽度
             
-        doc.setTextWidth(max(10, available_w - 10))
+        doc.setTextWidth(max(10, available_w))
         doc.setDocumentMargin(0)
         doc.setHtml(html_text)
         
-        return QSize(int(doc.idealWidth()) + 10, int(doc.size().height()) + 8)
+        return QSize(int(doc.idealWidth()) + 10, int(doc.size().height()) + 14)
 
 GLOBAL_SCROLLBAR_STYLE = """
 QScrollBar:vertical {
@@ -2615,7 +2625,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.query_input.setPlaceholderText("宏观过滤: 涨幅>3 and score>10")
         self.query_input.setToolTip("输入逻辑表达式进行个股/板块全链路过滤 (Enter 执行)")
         self.query_input.setMinimumWidth(300)
-        self.query_input.view().setMinimumWidth(450) # [NEW] 扩展下拉列表宽度，防止长逻辑截断
+        self.query_input.view().setMinimumWidth(650) # [NEW] 扩展下拉列表宽度，防止长逻辑截断
         self.query_input.lineEdit().returnPressed.connect(self._on_query_triggered)
         self.query_input.activated.connect(self._on_query_triggered)
 

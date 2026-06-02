@@ -1,11 +1,17 @@
+## 2026-06-02 15:30
+- [x] **修复赛马历史查询下拉框长表达式截断与高度计算重影 Bug (Fixed Racing History Query Dropdown Clipping & Overlapping)**：
+    - [x] **物理加固 `HitHighlightDelegate.sizeHint` 可用宽度判定**：引入了基于 `option.widget.minimumWidth()` 的最大值合并兜底机制。即使在高频刷新或冷启动时下拉视图尚未完全显示使得 `viewport().width()` 返回 `0` 或小数值，系统也能准确提取预设的最小宽度（`650px`），彻底解决了因此导致的高度估算偏大及排版重影的顽疾。
+    - [x] **扩展下拉视图物理最小宽度限制**：在 `bidding_racing_panel.py` 的 `query_input` 初始化时，将下拉视图 `view().setMinimumWidth()` 强制由 `450px` 拓宽至 `650px`。为超长宏观表达式提供了极其充裕的排版横向空间，保证了 `[Hit: N]` 等核心统计信息百分之百完整呈现，彻底消除了被横向截断或显示不全的缺陷。
+
 ## 2026-06-02 10:25
 - [x] **完全剥离前端 UI 重复自愈写盘，实现无损只读内存渲染 (Cleaned Frontend UI Auto-Heal File Write Loops)**：
     - [x] **清理 PyQt6 `signal_dashboard_panel.py` 反复读写**：
         - 移除了 `async_fetch_task` 抓取线程中繁重冗余的本地 HDF5 加载、个股真名自愈判断以及写回 `premarket_diagnose.json` 的重复流程，仅在内存中安全格式化时间戳。
-        - 移除了主线程 `_refresh_guidance_table` 刷新渲染时多余的 `any_healed` 状态追踪与异步 `async_write_back` 回写线程，使前端展现回归纯粹、高性能的“只读”渲染。
+        - 移除了主线程 `_refresh_guidance_table` 刷新渲染时多余 of `any_healed` 状态追踪与异步 `async_write_back` 回写线程，使前端展现回归纯粹、高性能的“只读”渲染。
         - 彻底删除了主线程中预先提取 `ui_name_map` 字典和拉取 `_get_df_all_realtime()` 的冗余计算，完全避免每次标签刷新和定时刷新时的无意义计算开销（CPU 减负）。
     - [x] **清理 Tkinter `stock_selection_window.py` 刷新写盘**：
         - 彻底删除了 每日操作指南 Treeview 刷新函数 `_refresh_guidance_tab` 末尾的 `any_healed` 逻辑和向 `filepath` 重复 json 写回动作，同样仅在内存中通过 `resolve_stock_name` 完成 UI 的显示兜底，杜绝了多端高频刷新造成的本地磁盘读写冲突和 CPU 瞬时开销。
+
 
 ## 2026-06-02 02:30
 - [x] **实现多层联网与持久自愈的个股名字解析器，彻底解决“个股_”占位符问题 (Implemented Multi-layer Network & Persistent Self-healing Stock Name Resolver)**：
