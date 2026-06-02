@@ -5297,7 +5297,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.sector_table.blockSignals(True)
                 self._update_table_optimized(self.stock_table, flattened_ts)
                 
-                sort_attr_map_sector = {0:'sector', 1:'score', 2:'score_diff', 3:'leader_name', 4:'leader_pct', 5:'leader_start_pct', 6:'leader_pct_diff'}
+                sort_attr_map_sector = {0:'sector', 1:'score', 2:'avg_pct', 3:'leader_name', 4:'leader_pct', 5:'leader_start_pct', 6:'leader_pct_diff'}
                 s_attr_sec = sort_attr_map_sector.get(self._sort_col_sector, 'score')
                 is_rev_sec = (self._sort_order_sector == Qt.SortOrder.DescendingOrder)
                 
@@ -5305,8 +5305,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 def get_sec_val(sec, attr):
                     if attr == 'leader_start_pct':
                         return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
-                    if attr == 'score_diff':
-                        return sec.get('score', 0) - sec.get('score_anchor', sec.get('score', 0))
+                    if attr == 'avg_pct':
+                        return sec.get('avg_pct', 0.0)
                     return sec.get(attr, 0)
 
                 # 全量排序结果
@@ -5514,12 +5514,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not is_first_init: self._table_highlights[("sector", s_name, 1)] = time.time()
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
 
-            # 2. 得分增量 (展示相对于锚点的强度增量)
-            score_anchor = sec.get('score_anchor', score)
-            score_diff = score - score_anchor
-            c_diff = self._UI_CACHE["COLOR_RED"] if score_diff > 0.05 else (self._UI_CACHE["COLOR_GREEN"] if score_diff < -0.05 else Qt.GlobalColor.white)
+            # 2. 涨跌 (板块内个股平均涨跌幅)
+            avg_pct = sec.get('avg_pct', 0.0)
+            c_diff = self._UI_CACHE["COLOR_RED"] if avg_pct > 0.0 else (self._UI_CACHE["COLOR_GREEN"] if avg_pct < 0.0 else Qt.GlobalColor.white)
             
-            if self._update_cell(table, i, 2, score_diff, color=c_diff, fmt="{:+.1f}"):
+            if self._update_cell(table, i, 2, avg_pct, color=c_diff, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("sector", s_name, 2))
                 

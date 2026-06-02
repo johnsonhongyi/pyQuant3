@@ -3215,6 +3215,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, '_app_exiting'):
                 self._app_exiting.set()  # 通知所有监听线程立即停止
 
+            # 🚀 [NEW] Stop and join Watchdog (GuardDog) thread early
+            if hasattr(self, '_watchdog_thread') and self._watchdog_thread is not None:
+                if self._watchdog_thread.is_alive():
+                    try:
+                        self._watchdog_thread.join(timeout=0.8)
+                        logger.info("🛑 [on_close] Watchdog thread joined successfully.")
+                    except Exception as ex:
+                        logger.warning(f"Failed to join watchdog thread: {ex}")
+
             # 🚀 [NEW] 优雅注销并回收 Windows 底层内置全局热键监听线程
             try:
                 self._shutdown_global_hotkeys()
@@ -3516,6 +3525,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 4.2 清理 Pipe / Queue / SyncManager
             # ---------------------------------------------------------
             logger.info("正在清理资源管道与 SyncManager...")
+
+            # 🚀 [NEW] Stop and join IPC worker thread before closing connection pipes
+            if hasattr(self, '_ipc_worker_stop') and self._ipc_worker_stop is not None:
+                self._ipc_worker_stop.set()
+            if hasattr(self, '_ipc_task_queue') and self._ipc_task_queue is not None:
+                try:
+                    self._ipc_task_queue.put(None, block=False)
+                except Exception:
+                    pass
+            if hasattr(self, '_ipc_worker_thread') and self._ipc_worker_thread is not None:
+                if self._ipc_worker_thread.is_alive():
+                    try:
+                        self._ipc_worker_thread.join(timeout=0.8)
+                        logger.info("🛑 [on_close] IPC worker thread joined successfully.")
+                    except Exception as ex:
+                        logger.warning(f"Failed to join IPC worker thread: {ex}")
 
             if hasattr(self, 'viz_conn') and self.viz_conn:
                 try:
@@ -4107,7 +4132,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             force_reset = True
             logger.info(f"{today} 触发 9:25 第二阶段全局重置")
 
-        self.init_global_concept_data(concept_score, avg_percents, scores, follow_ratios, force_reset)
+        self.init_global_concept_data(concepts, avg_percents, scores, follow_ratios, force_reset)
 
         # logger.info(f'concept_score[:10]:{concept_score[:10]}')
         self.concept_top5 = concept_score[:5]
@@ -6401,6 +6426,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info("📡 Diagnostic Watchdog exited.")
             
         t = threading.Thread(target=watchdog_loop, name="GuardDog", daemon=True)
+        self._watchdog_thread = t
         t.start()
 
     def _dump_ui_stack(self):
@@ -12904,6 +12930,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if h not in current_visible_hwnds:
                             current_visible_hwnds.append(h)
                             name_map[h] = f"🔍 概念前10监控 ({win_id}) [MonitorWindow_{win_id}]"
+                except Exception:
+                    pass
+
+        # 10.1. 总览 概念分析Top10 窗口 (PyQt6 - pyqtgraph)
+        if hasattr(self, '_pg_windows') and self._pg_windows:
+            pg_win_dict = self._pg_windows.get("总览_10")
+            if pg_win_dict and pg_win_dict.get("win") is not None:
+                try:
+                    w = pg_win_dict["win"]
+                    if w.isVisible():
+                        h = int(w.winId())
+                        if h not in current_visible_hwnds:
+                            current_visible_hwnds.append(h)
+                            name_map[h] = "📊 总览 概念分析Top10 (ConceptAnalysisTop10)"
                 except Exception:
                     pass
             

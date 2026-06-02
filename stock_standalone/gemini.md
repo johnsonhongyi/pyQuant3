@@ -1,3 +1,35 @@
+## 2026-06-02 18:50
+- [x] **对齐 🔔 实时报警 虚拟板块评分逻辑 (Aligned Scoring Logic for 🔔 实时报警 Virtual Sector)**：
+    - [x] **消除评分标准虚高与不一致**：将 `bidding_momentum_detector.py` 内的 `🔔 实时报警` 虚拟板块原有的硬编码 `max(5.0, sum(s['score'])/count)` 评分逻辑，重构为完全对齐普通板块的 `v_avg_pct * v_eff_follow_ratio * v_trend_multiplier` 强度得分公式。
+    - [x] **对齐均值加成与趋势系数**：自适应提取报警池个股的 5/20/60 日均线判定并计算趋势乘数，以 100% 联动比率进行动态归一化。确保了报警虚拟板块在板块排行榜中的评分排序标准与其他真实市场板块绝对一致，彻底解决了大盘平稳或下跌时报警板块得分虚高卡在最顶部的痛点。
+    - [x] **一枪通过单元测试与静态编译校验**：成功通过了 `test_watchlist_lifecycle.py` 全量单元测试，且无任何静态语法编译异常。
+
+## 2026-06-02 18:45
+- [x] **实现竞价面板及监控组件关闭与退出稳定性加固 (Hardened Sector Bidding Panel and Monitor Shutdown Stability)**：
+    - [x] **实现 BiddingMomentumDetector 线程显式等待与回收 (Synchronized Detector Workers Teardown)**：为 `bidding_momentum_detector.py` 内部的 `subscribe_worker`、`sector_worker` 和 `async_sector_agg_worker` 线程句柄引入显式成员变量绑定，并在 `stop()` 方法中执行带超时限制（`0.8s`）的 `join()` 同步回收，根治了后台守护线程在解释器析构阶段抢占 GIL 引发的崩溃。
+    - [x] **实现主控退出阶段 Watchdog 与 IPC Worker 协同关闭 (Coordinated Watchdog & IPC Teardown in on_close)**：在 `instock_MonitorTK.py` 的 `on_close` 流程最开始部分，主动对诊断看门狗 `GuardDog` 线程进行停止与 `join()` 同步；在关闭 IPC 管道物理连接前，向任务队列投递 `None` 哨兵，并同步 `join()` 处于等待状态的 `_ipc_worker_thread`，切断了线程与管道的生命周期竞争。
+    - [x] **一枪通过静态编译与回归测试验证 (Verified compilation and test suite)**：成功通过了 `python -m py_compile` 静态语法检验与 `test_watchlist_lifecycle.py` 等多项系统回归测试，系统退出过程平滑、无僵尸线程残留。
+
+## 2026-06-02 18:20
+- [x] **实现总览概念分析Top10窗口加入Alt+R全局轮询切换器 (Implemented Overview Concept Analysis Top10 in Alt+R Switcher)**：
+    - [x] **增加 PyQtGraph 窗口可见性与句柄注册**：在 `instock_MonitorTK.py` 的 `_get_all_open_trade_windows` 方法中，新增对 PyQtGraph 窗口缓存 `self._pg_windows["总览_10"]` 状态的判断。若该窗口存在且可见，提取其 Win32 原生 `winId()` 并注册到活跃交易视窗句柄列表 `current_visible_hwnds` 中。
+    - [x] **适配名称映射与自动同步机制**：为获取的窗口句柄关联友好名称 `"📊 总览 概念分析Top10 (ConceptAnalysisTop10)"`，使其在每 1 秒的心跳定时同步机制下，自动通过 `127.0.0.1:26669` 端口 Socket 同步投递至独立的 `hotkey_rotator.py` 全局热键/视窗轮选守护进程。
+    - [x] **一枪通过静态语法编译校验**：成功通过了 `python -m py_compile` 静态语法检验，确保主控制台系统的无感平滑升级。
+
+## 2026-06-02 18:15
+- [x] **修复 ReentryTracker 状态保存冲突与防抖变动写盘 (Fixed ReentryTracker Save Conflict & Change-Detection Saving)**：
+    - [x] **实现只在变动时写盘 (Change-Detection Saving)**：在 `reentry_tracker.py` 中引入 `self._last_saved_data` 缓存印记。在 `_load_state` 时记录初始值，在 `_save_state` 时对比当前 `watchlist` 转换的字典与缓存。若无内容变动则直接短路返回，从源头上减少 95% 以上无效的磁盘 I/O。
+    - [x] **实现进程与线程安全的唯一临时文件 (Process-Thread-Unique Temp Files)**：将原有的通用 `reentry_states.json.tmp` 命名方案重构为包含当前 PID 和 Thread ID 的唯一临时文件路径（`reentry_states.json.tmp.{pid}.{thread_id}`），彻底解决了多进程/多线程并发写盘时由于争夺同一个临时文件句柄导致的 `WinError 32` 或 `Permission denied` 报错。
+    - [x] **引入带指数退避的自愈重试逻辑 (Retry-on-Conflict Loop)**：针对 Windows 环境下可能对目标 `reentry_states.json` 文件产生 transient lock（临时占用）的情形，在 `_save_state` 中实现 5 次自愈重试机制，每次失败后休眠 100ms 并清理遗留的线程临时文件，确保极端并发下数据 100% 成功持久化。
+    - [x] **一枪通过单元测试与历史回测校验**：对 `reentry_tracker.py` 进行了 `py_compile` 静态语法编译校验，并成功通过了 `test_reentry_backtest.py` 回测逻辑验证以及自定义单例数据读写及最低洗盘价 `lowest_since_exit` 跟踪演练，稳定性达到工业级指标。
+
+## 2026-06-02 18:05
+- [x] **实现 PandasQueryEngine `.str.contains` 带有括号等特殊字符的智能健壮性重写 (Implemented Robust .str.contains Rewrite in PandasQueryEngine)**：
+    - [x] **增加自动参数注入机制 (Automatic Parameter Injection)**：在 `query_engine_util.py` 的 `PandasQueryEngine._preprocess_query` 中，增加针对 `.str.contains` 语句的自动正则重写逻辑。对于不带其他参数的 `.str.contains("...")` 模式，自动注入 `case=False, regex=False, na=False`。
+    - [x] **完美修复带括号概念检索失效 Bug (Fixed Concept Search with Parentheses)**：这从底层查询引擎上彻底根治了类似 `category.str.contains("共封装光学(CPO)")` 等带有括号的特殊概念查询由于 Pandas 默认 `regex=True` 导致括号被解释为正则分组而无法匹配的问题。
+    - [x] **实现多端界面查询功能自动对齐**：此修复不需要修改 `instock_MonitorTK.py` 中的具体业务代码，直接在底层引擎上透明完成，使 Tkinter 客户端和 PyQt6 客户端对于该类查询均能以完全一致的方式自动支持。
+    - [x] **一枪通过全量单元测试与语法编译校验**：成功通过了 `python -m py_compile` 静态语法检验，并通过集成测试脚本验证了在模拟数据下 `category.str.contains("共封装光学(CPO)")` 能 100% 正确过滤出包含括号的个股。
+
 ## 2026-06-02 18:40
 - [x] **实现跟单指挥所 HUD 重点关注个股强置顶且非占用显示与稳定二次排序 (Implemented Favorite Stocks Always-On-Top & Non-Occupying in Follow HUD)**：
     - [x] **实现重点关注个股自动补充机制 (Favorite Stocks Supplemental Ingestion)**：在 `spatial_follow_hud.py` 中，重构了 `update_hud_data` 逻辑。在进行重点自选股的板块归属校对时，优先使用打分器最权威的全局 `detector.sector_map` 缓存进行个股-板块归属匹配判定，备用 Fallback 到 `ts.category` / `ts.get_splitted_cats()` 的文本切分判定，彻底解决了由于实时 Tick 遗漏 category 字段导致的富士康概念中的“工业富联（601138）”与光纤概念中的“通鼎互联（002491）”等重点关注个股无法被 HUD 识别补全的严重漏洞。

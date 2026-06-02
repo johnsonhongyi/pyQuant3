@@ -4860,8 +4860,8 @@ class StockLiveStrategy:
                 logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
                 for sector_info in concept_top5[:5]:
                     sector_name = sector_info[0]
-                    # 匹配板块
-                    sub_df = df[df['category'].fillna('').str.contains(sector_name)].copy()
+                    # 匹配板块 (使用 regex=False，免除特殊字符/括号过滤失败问题)
+                    sub_df = df[df['category'].fillna('').str.contains(sector_name, regex=False, na=False)].copy()
                     
                     if not sub_df.empty:
                         # 权衡选择逻辑: 
