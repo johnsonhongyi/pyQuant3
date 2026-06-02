@@ -1,3 +1,10 @@
+## 2026-06-03 02:40
+- [x] **实现板块与概念强度分 10倍高精度数值放大与量纲同步对齐 (Implemented 10x Scale Scaling & Dimension Alignment for Sector Intensity Scores)**：
+    - [x] **重构 Sector 强度打分模型 (Scaled Sector Score by 10x)**：将 `bidding_momentum_detector.py` 中的 `board_score` 及虚拟报警板块得分 `v_board_score` 计算统一乘以 `10.0` 放大因子。这极大地提高了高强度、核心热点板块在竞价与盘中震荡时的数值辨识度与强反差区分度，避免了以往由于数值差异过小（如 1.05 对比 1.08）导致的视觉钝化。
+    - [x] **等比例对齐下游联动与报警阈值 (Aligned Downstream Thresholds)**：将检测器中所有基于强度得分的过滤和标记阈值（如大单强度归类、强攻板块/活跃板块判定标准、领领涨股联动触发等）等比例同步放大 10 倍，在保证打分精细化的同时，完全维护了系统既有业务标签的稳定性与鲁棒性。
+    - [x] **同步对齐 Tkinter 概念强度评估量纲 (Synchronized Tkinter Concept Scoring)**：将 `instock_MonitorTK.py` 中的 `get_global_concepts_ranking` 与 `get_following_concepts_by_correlation` 的得分计算逻辑亦等比例放大 10 倍。打通了选股面板大屏与 PyQt 竞价面板之间的量纲共享屏障，确保在不同窗口、不同视图间切换时，板块/概念强度判定标准绝对同构。
+    - [x] **通过高强度仿真与静态回归测试 (Passed Compilation & Replay Validation)**：在无交易时段下，顺利通过了 `test_bidding_replay.py` 的高频 Tick 板块分析与联动回放测试，各下游模块在放大后的打分量纲下运行平稳，无任何异常、零计算开销增加。
+
 ## 2026-06-03 00:15
 - [x] **实现强势股选股面板全表格智能列宽自动持久化与双保险自适应加载机制 (Implemented Global Treeview Column Width Persistence & Double-Safe Recovery in Selector Window)**：
     - [x] **设计高通用 DRY 架构列宽管理器 (Designed Centralized DRY Width Controller)**：在 `stock_selection_window.py` 底部引入了通用的 `_save_all_tree_column_widths`、`_restore_all_tree_column_widths` 和 `_on_treeview_column_resize` 原子函数，并优雅绑定为 `StockSelectionWindow` 类方法。成功解耦并消成了为每个 Treeview 编写独立持久化逻辑的 YAGNI 重复（对齐 SOLID 单一职责与接口隔离原则）。
