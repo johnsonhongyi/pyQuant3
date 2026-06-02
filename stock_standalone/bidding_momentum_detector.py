@@ -33,7 +33,7 @@ from linkage_service import get_link_manager
 
 # ---- 模块级预编译常量 (避免每次调用重新编译) ----
 # 板块分类字符串切割 regex，覆盖所有常见分隔符
-_RE_CAT_SPLIT = re.compile(r'[;；,，/\- ]')
+_RE_CAT_SPLIT = re.compile(r'[;；,，/|]')
 # 非数字字符清理，用于代码规范化
 _RE_NON_DIGIT = re.compile(r'[^\d]')
 # 连续阳线天数提取
@@ -191,7 +191,7 @@ class TickSeries:
     单只个股的分钟 K 线滚动队列，外加基础统计缓存。
     """
     __slots__ = ('code', 'klines', 'last_close', 'last_high', 'last_low', 
-                 'open_price', 'now_price', 'high_day', 'low_day', 'ma20', 'ma60', 
+                 'open_price', 'now_price', 'high_day', 'low_day', 'ma5', 'ma20', 'ma60', 
                  'category', 'name', 'score', 'first_breakout_ts', 'pattern_hint',
                  'is_untradable', 'is_counter_trend', 'is_gap_leader', 'lastdu', 'lastdu4',
                  'ral', 'top0', 'top15', 'is_accumulating', 'is_reversal',
@@ -201,7 +201,7 @@ class TickSeries:
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
                  'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min',
                  '_bar_active_reward', '_last_active_price', 'opening_bonus', 'total_amount',
-                 '_cached_baseline', '_cached_baseline_detail', '_cached_yang_days', '_last_baseline_date')
+                 '_cached_baseline', '_cached_baseline_detail', '_cached_yang_days', '_last_baseline_date', 'per1d')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
@@ -213,6 +213,7 @@ class TickSeries:
         self.now_price: float = 0.0 # [NEW] 实时 Tick 价格
         self.high_day: float = 0.0
         self.low_day: float = 0.0
+        self.ma5: float = 0.0
         self.ma20: float = 0.0
         self.ma60: float = 0.0
         self.category: str = ''
@@ -265,6 +266,7 @@ class TickSeries:
         self._cached_baseline_detail: str = ""
         self._cached_yang_days: int = 0
         self._last_baseline_date: str = ""
+        self.per1d: float = 0.0
 
     def update_racing_status(self, cur_close: float, vwap: float, open_p: float, now_ts: float, low_p: float = 0.0, nlow: float = 0.0):
         """更新赛马模式稳定性状态 - 核心逻辑对齐 IntradayDecisionEngine"""
@@ -325,6 +327,9 @@ class TickSeries:
         v_list_low = _val('low', 0.0)
         self.low_day = float(v_list_low) if v_list_low else 0.0
         
+        v_ma5 = _val('ma5d', _val('ma51d', 0.0))
+        self.ma5 = float(v_ma5) if v_ma5 else 0.0
+
         v_ma20 = _val('ma20d', 0.0)
         self.ma20 = float(v_ma20) if v_ma20 else 0.0
         
@@ -356,6 +361,9 @@ class TickSeries:
 
         v_stage = _val('cycle_stage', _val('cycle_stage_vect', 2))
         self.cycle_stage = int(v_stage) if v_stage else 2
+
+        v_per1d = _val('percent', _val('per1d', 0.0))
+        self.per1d = float(v_per1d) if v_per1d is not None else 0.0
 
         self._splitted_cats = None # 重置缓存
 
@@ -413,12 +421,16 @@ class TickSeries:
     @property
     def current_pct(self) -> float:
         """当前在日内的涨幅 (%), 基于 last_close"""
-        if self.last_close <= 0:
-            return 0.0
-        # [FIX] 优先使用实时价格
-        cp = self.current_price
-        if cp <= 0: return 0.0
-        return (cp - self.last_close) / self.last_close * 100.0
+        pct_calc = 0.0
+        if self.last_close > 0:
+            cp = self.current_price
+            if cp > 0:
+                pct_calc = (cp - self.last_close) / self.last_close * 100.0
+        
+        # 兼容 get_following_concepts_by_correlation 逻辑：若实时涨幅是 0，且 per1d 存在且不为 0，用 per1d
+        if abs(pct_calc) < 1e-5 and getattr(self, 'per1d', 0.0) != 0.0:
+            return self.per1d
+        return pct_calc
 
     @property
     def current_price(self) -> float:
@@ -734,8 +746,8 @@ class BiddingMomentumDetector:
         self.score_threshold = 1.0
         # 板块入场所需个股最低分
         self.sector_min_score = 2.0
-        # [NEW] 板块综合强度门槛 (board_score)
-        self.sector_score_threshold: float = 4.0
+        # [NEW] 板块综合强度门槛 (board_score)，下调以适应对齐后的平均得分公式
+        self.sector_score_threshold: float = 0.0
         self.last_data_ts = 0.0
 
         # key=code, val={name, sector, pct, time_str, reason, reason, pattern_hint, release_risk}
@@ -1317,9 +1329,13 @@ class BiddingMomentumDetector:
         # =========================
         # 启动线程
         # =========================
-        threading.Thread(target=subscribe_worker, name="subscribe_worker", daemon=True).start()
-        threading.Thread(target=sector_worker, name="sector_worker", daemon=True).start()
-        threading.Thread(target=async_sector_agg_worker, name="async_sector_agg_worker", daemon=True).start()
+        self._subscribe_thread = threading.Thread(target=subscribe_worker, name="subscribe_worker", daemon=True)
+        self._sector_thread = threading.Thread(target=sector_worker, name="sector_worker", daemon=True)
+        self._async_sector_agg_thread = threading.Thread(target=async_sector_agg_worker, name="async_sector_agg_worker", daemon=True)
+
+        self._subscribe_thread.start()
+        self._sector_thread.start()
+        self._async_sector_agg_thread.start()
 
     def get_active_sectors(self) -> List[Dict[str, Any]]:
         """
@@ -1686,8 +1702,10 @@ class BiddingMomentumDetector:
             try:
                 t.cancel()
                 logger.info("🛑 BiddingMomentumDetector chunk timer cancelled successfully.")
+                if t.is_alive():
+                    t.join(timeout=0.5)
             except Exception as e:
-                logger.warning(f"Error cancelling BiddingMomentumDetector timer: {e}")
+                logger.warning(f"Error cancelling/joining BiddingMomentumDetector timer: {e}")
             self._chunk_timer = None
             
         # [NEW] 优雅关闭后台异步 worker 线程，彻底根除线程残留与退出假死
@@ -1700,6 +1718,16 @@ class BiddingMomentumDetector:
             logger.info("🛑 BiddingMomentumDetector background workers triggered for exit.")
         except Exception as e:
             logger.warning(f"Error sending exit signals to background queues: {e}")
+
+        # [NEW] 显式 join 线程，防止退出时解释器销毁导致 GIL 报错
+        for thread_attr in ['_subscribe_thread', '_sector_thread', '_async_sector_agg_thread']:
+            t = getattr(self, thread_attr, None)
+            if t and t.is_alive():
+                try:
+                    t.join(timeout=0.8)
+                    logger.info(f"🛑 BiddingMomentumDetector thread {thread_attr} joined.")
+                except Exception as e:
+                    logger.warning(f"Error joining thread {thread_attr}: {e}")
             
         self.on_score_finished = None
 
@@ -3575,7 +3603,11 @@ class BiddingMomentumDetector:
                         # [P0-OPT] __slots__ 保证字段存在，直接访问替换 getattr 防御
                         data = {
                             'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
+                            'close': ts.current_price,
                             'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
+                            'ma5': ts.ma5, 'ma5d': ts.ma5,
+                            'ma20': ts.ma20, 'ma20d': ts.ma20,
+                            'ma60': ts.ma60, 'ma60d': ts.ma60,
                             'first_breakout_ts': ts.first_breakout_ts,
                             'pattern_hint': ts.pattern_hint,
                             'opening_bonus': ts.opening_bonus,
@@ -3612,7 +3644,7 @@ class BiddingMomentumDetector:
                             target_sectors.update(cats)
                         if ts.score >= 0.5:
                             for cat in cats:
-                                if cat not in SECTOR_BLACKLIST and len(cat) <= 8:
+                                if cat not in SECTOR_BLACKLIST and len(cat) <= 30:
                                     self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
                         else:
                             for cat in cats:
@@ -3653,18 +3685,8 @@ class BiddingMomentumDetector:
         # 改为：若是增量模式只取本轮 active_codes 的 pct 平均，全量模式才遍历缓存。
         market_avg_pct = 0.0
         with self._lock:
-            # ① 局部 snap：仅包含本次 aggregate 需要更新的 codes（active_codes），
-            #    供后续 watchlist / sector 计算使用，避免全量 5500 只拷贝。
-            if active_codes is not None:
-                # 增量模式：只拷贝本轮处理的 codes + 已持久化的龙头相关 codes
-                relevant = set(active_codes)
-                for _s in self.active_sectors.values():
-                    if _s.get('leader'): relevant.add(_s['leader'])
-                    for _rc in _s.get('race_candidates', []): relevant.add(_rc.get('code', ''))
-                snap = {c: v for c, v in self._global_snap_cache.items() if c in relevant}
-            else:
-                # 全量模式：必须全量拷贝（供 sector 完整计算）
-                snap = dict(self._global_snap_cache)
+            # snap: 必须全量拷贝（供 sector 完整计算），避免增量局部更新导致板块内成员数据缺失
+            snap = dict(self._global_snap_cache)
 
             # 市场均价：直接从缓存的 pct 字段增量读取，不再为此做额外全量遍历
             _cached_avg = getattr(self, '_cached_market_avg_pct', 0.0)
@@ -3815,53 +3837,94 @@ class BiddingMomentumDetector:
 
             # [P1-OPT] Use prefetched sector_full_map
             all_member_codes = sector_full_map.get(sector, set())
-            active_member_count = 0
-            total_pct = 0.0
-            leader_sign = 1 if leader_pct > 0 else (-1 if leader_pct < 0 else 0)
+            # 聚合计算：收集有数据的成员涨幅
+            member_percents = []
             for c in all_member_codes:
                 if c in snap:
-                    mc_pct = snap[c]['pct']
-                    mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
-                    if mc_sign == leader_sign and mc_sign != 0:
-                        active_member_count += 1
-                        total_pct += mc_pct
+                    mc_pct = snap[c].get('pct')
+                    if mc_pct is not None and not pd.isna(mc_pct):
+                        member_percents.append(mc_pct)
             
-            # 聚合计算：分母判定
-            actual_data_count = sum(1 for c in all_member_codes if c in snap)
+            actual_data_count = len(member_percents)
             if actual_data_count < 1:
                 # 没有任何成员在 snap 中有数据，跳过
                 continue
             
-            # [FIX] 联动分析与强度综合评分：分母应使用实际参与统计的样本数，而非板块全员数
-            # 否则在局部更新或数据源不全时，avg_pct 会被严重稀释
-            follow_ratio = active_member_count / actual_data_count
-            avg_pct = total_pct / actual_data_count
+            # 对齐 get_following_concepts_by_correlation 的均值算法
+            avg_pct = sum(member_percents) / actual_data_count
             
-            # [REFINED] 噪点过滤：成员数过少（少于 3 只股，原为 4）的概念通常是虚假的，剔除。
-            if len(all_member_codes) < 3:
+            # 对齐 get_following_concepts_by_correlation 的跟随率算法
+            leader_sign = 1 if leader_pct >= 0 else -1
+            active_member_count = 0
+            for mc_pct in member_percents:
+                mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
+                if mc_sign == leader_sign:
+                    active_member_count += 1
+            
+            follow_ratio = active_member_count / actual_data_count
+            
+            # [REFINED] 噪点过滤：对齐 GUI 过滤杂音门槛 (成员数不少于 2)
+            if len(all_member_codes) < 2:
                 skipped_reasons[sector] = f"too_few_members({len(all_member_codes)})"
                 if sector in new_active: del new_active[sector]
                 continue
 
             # [NEW] 提前计算 board_score，避免后续标签逻辑出现 UnboundLocalError
-            # 计算群体热度加成
             s_top0_sum = sum(1 for s in stocks if s.get('top0', 0) > 0)
             s_top15_sum = sum(1 for s in stocks if s.get('top15', 0) > 0)
             hotness_multiplier = min(2.0, 1.0 + (s_top0_sum * 0.1) + (s_top15_sum * 0.03))
 
-            # [REFINED] 极严格过滤：模仿 TK 去弱留强逻辑
-            # 以群体效应 (avg_pct * follow_ratio) 为核心依据。
-            tk_correlation_score = avg_pct * follow_ratio * 4.0 
+            # 计算趋势加成 (完全对齐 get_following_concepts_by_correlation 逻辑)
+            bullish_count = 0
+            above_60_count = 0
+            member_count = 0
+            for c in all_member_codes:
+                if c in snap:
+                    member_count += 1
+                    c_data = snap[c]
+                    price = c_data['price']
+                    ma5 = c_data.get('ma5', 0.0)
+                    ma20 = c_data.get('ma20', 0.0)
+                    ma60 = c_data.get('ma60', 0.0)
+                    
+                    is_bullish = False
+                    is_above_60 = True
+                    if ma5 > 0.001 and ma20 > 0.001 and ma60 > 0.001:
+                        is_bullish = (ma5 > ma20) and (ma20 > ma60) and (price > ma60)
+                        is_above_60 = price > ma60
+                    
+                    if is_bullish:
+                        bullish_count += 1
+                    if is_above_60:
+                        above_60_count += 1
+            
+            bullish_ratio = bullish_count / member_count if member_count > 0 else 0.0
+            above_60_ratio = above_60_count / member_count if member_count > 0 else 1.0
+            
+            trend_multiplier = 1.0 + (bullish_ratio * 1.5)
+            if above_60_ratio < 0.3:
+                trend_multiplier *= 0.3
 
-            # 最终板分公式：(板块均值加权 + 联动比例加权 + 个股强势溢价) * 热度系数
-            board_score = (avg_pct * 0.8 + follow_ratio * 4.0 + (candidate_leader['score'] * 0.05) + tk_correlation_score) * hotness_multiplier
+            eff_follow_ratio = follow_ratio
+            if eff_follow_ratio < 0.5 and abs(avg_pct) > 2.0:
+                eff_follow_ratio = 0.5
+
+            # 最终板分公式：对齐 get_following_concepts_by_correlation 评分公式，使数值及排序完全一致
+            board_score = avg_pct * eff_follow_ratio * trend_multiplier
+
+            # 🎯 [Detector-Diag] 特别针对重点题材输出诊断日志，供调试分析
+            if "共封装光学" in sector or "CPO" in sector or "AI PC" in sector:
+                logger.info(
+                    f"🎯 [Detector-Diag] Sector: {sector} | members: {len(all_member_codes)} | "
+                    f"avg_pct: {avg_pct:.2f} | follow: {follow_ratio:.2f} | "
+                    f"trend: {trend_multiplier:.2f} | score: {board_score:.2f}"
+                )
 
             # ----------------------------------------------------
             # ⚡ 第一阶段初筛与过滤门槛校验 (Early-Exit)
             # ----------------------------------------------------
-            # 基础门槛：下调门槛，增强对竞价初期及异动概念的捕捉灵敏度
-            # 原条件: follow_ratio < 0.15 and avg_pct < 1.5
-            if follow_ratio < 0.10 and avg_pct < 1.0:
+            # 基础门槛：降低门槛以敏感捕捉初期及异动概念
+            if follow_ratio < 0.05 and avg_pct < 0.5:
                  skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f})"
                  new_active.pop(sector, None)
                  continue
@@ -3943,7 +4006,7 @@ class BiddingMomentumDetector:
             # 联动板块分析 (精简版) - [OPTIMIZED] 仅对强势、有活力的龙头板块计算联动以节省 CPU
             linked_concepts = []
             if board_score >= 5.0 or abs(leader_pct) >= 1.0:
-                leader_concepts = [c.strip() for c in _RE_CAT_SPLIT.split(l_data['category']) if c.strip() and len(c.strip()) <= 8]
+                leader_concepts = [c.strip() for c in _RE_CAT_SPLIT.split(l_data['category']) if c.strip() and len(c.strip()) <= 30]
                 if leader_concepts:
                     for concept in leader_concepts:
                         if concept == sector: continue
@@ -4009,7 +4072,9 @@ class BiddingMomentumDetector:
                 'ts': time.time(), # [FIX] 添加时间戳，用于 GC
                 'score_diff': round(score_diff, 2),        # 对比固定时长(30m)的变动
                 'staged_diff': round(staged_diff, 2),      # 阶段性变动 (10分阈值重置)
-                'follow_ratio': round(follow_ratio, 2), 'leader': leader_code,
+                'follow_ratio': round(follow_ratio, 2),
+                'avg_pct': round(avg_pct, 2),
+                'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
                 'leader_price': l_data.get('price', 0.0),
@@ -4068,32 +4133,82 @@ class BiddingMomentumDetector:
                     
                     v_leader = sbc_stocks[0]
                     v_sector = "🔔 实时报警"
-                    v_board_score = max(5.0, sum(s['score'] for s in sbc_stocks) / len(sbc_stocks))
+                    v_avg_pct = round(sum(s['pct'] for s in sbc_stocks) / len(sbc_stocks), 2) if sbc_stocks else 0.0
+                    
+                    # 对齐 get_following_concepts_by_correlation 评分公式，使评分标准与普通板块完全一致
+                    v_bullish_count = 0
+                    v_above_60_count = 0
+                    for s in sbc_stocks:
+                        price = s.get('price', 0.0)
+                        ma5 = s.get('ma5', 0.0)
+                        ma20 = s.get('ma20', 0.0)
+                        ma60 = s.get('ma60', 0.0)
+                        
+                        is_bullish = False
+                        is_above_60 = True
+                        if ma5 > 0.001 and ma20 > 0.001 and ma60 > 0.001:
+                            is_bullish = (ma5 > ma20) and (ma20 > ma60) and (price > ma60)
+                            is_above_60 = price > ma60
+                        
+                        if is_bullish:
+                            v_bullish_count += 1
+                        if is_above_60:
+                            v_above_60_count += 1
+                            
+                    v_bullish_ratio = v_bullish_count / len(sbc_stocks) if sbc_stocks else 0.0
+                    v_above_60_ratio = v_above_60_count / len(sbc_stocks) if sbc_stocks else 1.0
+                    
+                    v_trend_multiplier = 1.0 + (v_bullish_ratio * 1.5)
+                    if v_above_60_ratio < 0.3:
+                        v_trend_multiplier *= 0.3
+                        
+                    # 虚拟板块始终保持 100% 联动，所以 follow_ratio = 1.0
+                    v_eff_follow_ratio = 1.0
+                    
+                    v_board_score = v_avg_pct * v_eff_follow_ratio * v_trend_multiplier
                     
                     # 虚拟板块锚点保护
                     if v_sector not in self.sector_anchors:
                         self.sector_anchors[v_sector] = v_board_score
                     
+                    v_leader_ts = self._tick_series.get(v_leader['code'])
                     new_active[v_sector] = {
                         'sector': v_sector, 'score': round(v_board_score, 2), 'tags': "🚀 实时异动",
                         'ts': time.time(),
                         'score_diff': round(v_board_score - self.sector_anchors[v_sector], 2),
                         'staged_diff': 0.0,
                         'follow_ratio': 1.0, # 虚拟板块始终保持 100% 联动
+                        'avg_pct': v_avg_pct,
                         'leader': v_leader['code'],
                         'leader_name': v_leader['name'],
                         'leader_pct': round(v_leader['pct'], 2),
+                        'leader_pct_diff': round(v_leader.get('pct_diff', 0.0), 2),
                         'leader_price': v_leader.get('price', 0.0),
-                        'leader_high_day': v_leader.get('high_day', 0),
+                        'leader_klines': list(v_leader_ts.klines)[-35:] if (v_leader_ts and v_leader_ts.klines) else (self.realtime_service.get_minute_klines(v_leader['code'], n=35) if self.realtime_service else []),
                         'leader_last_close': v_leader.get('last_close', 0),
+                        'leader_high_day': v_leader.get('high_day', 0),
+                        'leader_low_day': v_leader.get('low_day', 0),
+                        'leader_last_high': v_leader.get('last_high', 0),
+                        'leader_last_low': v_leader.get('last_low', 0),
+                        'leader_first_ts': v_leader.get('ts', 0),
                         'race_candidates': [],
                         'followers': [
                             {
                                 'code': s['code'], 'name': s['name'], 'pct': s['pct'],
-                                'score': s.get('score', 0.0), 'price': s.get('price', 0.0),
+                                'score': s.get('score', 0.0), 
+                                'score_diff': s.get('score_diff', 0.0),
+                                'pct_diff': s.get('pct_diff', 0.0),
+                                'price_diff': s.get('price_diff', 0.0),
+                                'dff': s.get('dff', 0.0),
+                                'price': s.get('price', 0.0),
                                 'first_ts': s.get('ts', 0), 'pattern_hint': 'SBC',
+                                'untradable': s.get('is_untradable', False),
                                 'klines': s.get('klines', []),
-                                'last_close': s.get('last_close', 0.0)
+                                'last_close': s.get('last_close', 0.0),
+                                'high_day': s.get('high_day', 0.0),
+                                'low_day': s.get('low_day', 0.0),
+                                'last_high': s.get('last_high', 0.0),
+                                'last_low': s.get('last_low', 0.0)
                             } for s in sbc_stocks # 这里展示全部预警股
                         ],
                         'linked_concepts': []

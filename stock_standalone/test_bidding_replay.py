@@ -925,7 +925,7 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
 
                     
                     leader_pattern = sec_info.get('pattern_hint', '')
-                    leader_time = pd.Timestamp.fromtimestamp(sec_info['leader_first_ts']).strftime('%H:%M:%S') if sec_info['leader_first_ts']>0 else 'N/A'
+                    leader_time = pd.Timestamp.fromtimestamp(sec_info.get('leader_first_ts', 0)).strftime('%H:%M:%S') if sec_info.get('leader_first_ts', 0) > 0 else 'N/A'
                     
                     # [NEW] 打印龙头的涨跌与分差
                     l_pct_diff = sec_info.get('leader_pct_diff', 0.0)

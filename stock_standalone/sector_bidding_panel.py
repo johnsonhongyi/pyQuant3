@@ -2296,7 +2296,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         bar_lay_3.addWidget(self.spin_sector_min_score)
         
         bar_lay_3.addWidget(QLabel(" 🔥 板块强度≥"))
-        self.spin_sector_score_threshold = self._make_spin(0.0, 50.0, 1.0, self.detector.sector_score_threshold)
+        self.spin_sector_score_threshold = self._make_spin(-10.0, 10.0, 0.1, self.detector.sector_score_threshold)
         bar_lay_3.addWidget(self.spin_sector_score_threshold)
 
         bar_lay_3.addWidget(self._sep())
@@ -2976,7 +2976,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         if col == 0: sectors.sort(key=lambda x: (is_fav(x), x.get('sector', '')), reverse=not asc)
         elif col == 1: sectors.sort(key=lambda x: (is_fav(x), x.get('score', 0)), reverse=not asc)
-        elif col == 2: sectors.sort(key=lambda x: (is_fav(x), x.get('score_diff', 0)), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: (is_fav(x), x.get('avg_pct', 0.0)), reverse=not asc)
         elif col == 3: sectors.sort(key=lambda x: (is_fav(x), x.get('leader_name', '')), reverse=not asc)
 
         # 6. 表格渲染 (Dirty Check Update)
@@ -3015,16 +3015,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.sector_table, i, 0, display_name, 
                             color=color, user_role=sn)
 
-            diff = sdata.get('score_diff', 0.0)
+            avg_pct = sdata.get('avg_pct', 0.0)
 
             # Col 1: Score
             self._update_cell(self.sector_table, i, 1, f"{sc:.1f}", 
                             color=color, alignment=Qt.AlignmentFlag.AlignCenter, 
                             is_numeric=True)
 
-            # Col 2: Diff
-            diff_text = f"{diff:+.1f}" if diff != 0 else "0.0"
-            diff_color = self._color_red if diff > 0.1 else (self._color_green if diff < -0.1 else color)
+            # Col 2: Avg Pct (Rise/Fall)
+            diff_text = f"{avg_pct:+.2f}%" if avg_pct != 0 else "0.00%"
+            diff_color = self._color_red if avg_pct > 0 else (self._color_green if avg_pct < 0 else color)
             self._update_cell(self.sector_table, i, 2, diff_text, 
                             color=diff_color, alignment=Qt.AlignmentFlag.AlignCenter, 
                             is_numeric=True)
@@ -4306,7 +4306,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             s_val = w.get('sector', '')
             # 过滤掉市场标签
             market_tags = ['科创板', '创业板', '主板', '中小板', '北证']
-            all_cats = s_val.split(';')
+            all_cats = [c.strip() for c in re.split(r'[;；,，/|]', s_val) if c.strip()]
             cats = [c for c in all_cats if c not in market_tags]
             sector_short = cats[0] if cats else (all_cats[0] if all_cats else 'N/A')
             self._update_cell(self.watchlist_table, i, 3, sector_short)
@@ -4420,7 +4420,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 找到板块并选中
             target_sector = None
-            parts = [p.strip() for p in sector_name.split(';') if p.strip()]
+            parts = [p.strip() for p in re.split(r'[;；,，/|]', sector_name) if p.strip()]
             
             # [UX] 如果点击的是板块溯源记录 (名称列就是板块名)，优先按名称定位
             item_name = self.watchlist_table.item(row, 1)
@@ -5119,7 +5119,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     self.spin_consec_bars.setValue(p_data["consec_bars"])
                 if "sector_score_threshold" in p_data:
                     # 优先使用 spin_sector_score_threshold
-                    self.spin_sector_score_threshold.setValue(p_data["sector_score_threshold"])
+                    val = p_data["sector_score_threshold"]
+                    if val >= 1.0:
+                        val = 0.0
+                    self.spin_sector_score_threshold.setValue(val)
 
                 # 同步到 detector
                 self._on_strategy_changed()
