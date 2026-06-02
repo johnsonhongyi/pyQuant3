@@ -1026,6 +1026,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._sector_focus_data: List[dict] = []
         self._engine_ctrl = None
         
+        # [GlobalFavorites] 订阅全局重点关注变更通知，实现亚毫秒级无缝联动刷新
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"[SignalDashboardPanel] Failed to subscribe to GlobalFavoriteManager: {e}")
+        
         # --- 2. 组件与窗口初始化 ---
         self._vol_dialog = VolumeDetailsDialog(None)
         # [MOD] 不与信号面板绑定生命周期 (parent为None)，但保持代码点击联动
@@ -1131,7 +1138,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """)
 
     def stop(self):
-        """停止所有计时器和订阅，释放资源"""
+        """停止所有计时器 and 订阅，释放资源"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"[SignalDashboardPanel] Failed to unsubscribe favorites during stop: {e}")
+
         try:
             if hasattr(self, '_alert_save_timer') and self._alert_save_timer:
                 self._alert_save_timer.stop()
@@ -1195,6 +1208,43 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._save_ui_state()
         self.stop()
         event.accept()
+
+    def _on_favorites_changed(self):
+        """[GlobalFavorites] 全局重点关注状态变更回调：线程安全地派发到 Qt 主线程执行 UI 刷新"""
+        QTimer.singleShot(0, self._refresh_ui_for_favorites)
+
+    def _refresh_ui_for_favorites(self):
+        """[GlobalFavorites] 全局收藏变更时，强制重绘当前视图和全表以更新 ⭐ 指示器和排序"""
+        try:
+            # 1. 刷新标准信号表
+            self._refresh_all_tables()
+            
+            # 2. 如果当前在引擎 Tab（如板块热力、龙头追踪、决策队列等），触发重新渲染以立刻生效
+            current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+            if current_tab_text == "📋 每日操作指南":
+                try:
+                    import os
+                    filepath = os.path.join(get_app_root(), "logs", "premarket_diagnose.json")
+                    if os.path.exists(filepath):
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        self._refresh_guidance_table(data)
+                except Exception:
+                    pass
+            elif current_tab_text == "🌟 决策队列":
+                if hasattr(self, '_last_decisions') and self._last_decisions:
+                    self._refresh_decision_table(self._last_decisions, force=True)
+            elif current_tab_text == "🐉 龙头追踪":
+                if hasattr(self, '_last_dragons') and self._last_dragons:
+                    self._refresh_dragon_table(self._last_dragons, force=True)
+            elif current_tab_text == "🔥 板块热力":
+                if hasattr(self, '_last_sectors') and self._last_sectors:
+                    self._refresh_sector_table(self._last_sectors, force=True)
+            elif current_tab_text == "🌐 战略趋势":
+                if hasattr(self, '_last_trends') and self._last_trends:
+                    self._refresh_strategic_table(self._last_trends, force=True)
+        except Exception as e:
+            logger.warning(f"[SignalDashboardPanel] Error refreshing UI for favorites: {e}")
 
     @staticmethod
     def _clean_tab_name(name: str) -> str:
@@ -2228,6 +2278,52 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             return (1, str(v)) # 非数字作为字符串排在后面
                     rows_data.sort(key=lambda x: (safe_key(x["sort_val"]), x["code_val"]), reverse=reverse)
 
+                    # 稳定二次排序：重点关注的个股 or 板块在任何情况下都在最顶层优先展示
+                    from global_favorites import GlobalFavoriteManager
+                    fav_mgr = GlobalFavoriteManager()
+
+                    # 动态查找代码、个股名称、板块名称列索引，防止在板块热力表中因“龙头名称”与“板块名称”共存而产生索引覆盖
+                    stock_code_col = -1
+                    stock_name_col = -1
+                    sector_name_col = -1
+                    for j in range(col_count):
+                        h_item = table.horizontalHeaderItem(j)
+                        if h_item:
+                            h_text = h_item.text().strip()
+                            if h_text in ["代码", "龙头"]:
+                                stock_code_col = j
+                            elif h_text in ["名称", "龙头名称"]:
+                                stock_name_col = j
+                            elif h_text in ["板块名称", "所属板块", "板块/内容"]:
+                                sector_name_col = j
+
+                    def get_fav_priority(row_dict):
+                        items = row_dict["items"]
+                        # 1. 优先查个股代码是否收藏
+                        if stock_code_col >= 0 and stock_code_col < len(items) and items[stock_code_col]:
+                            code = items[stock_code_col].text().strip()
+                            for icon in ['⭐', '🔔']:
+                                code = code.replace(icon, '').strip()
+                            if code in fav_mgr.favorite_stocks:
+                                return 1
+                        # 2. 查个股名称是否收藏
+                        if stock_name_col >= 0 and stock_name_col < len(items) and items[stock_name_col]:
+                            name = items[stock_name_col].text().strip()
+                            for icon in ['⭐', '🔔']:
+                                name = name.replace(icon, '').strip()
+                            if name in fav_mgr.favorite_stocks:
+                                return 1
+                        # 3. 查板块名称是否收藏
+                        if sector_name_col >= 0 and sector_name_col < len(items) and items[sector_name_col]:
+                            sec = items[sector_name_col].text().strip()
+                            for icon in ['⭐', '★重点', '[★重点]', '🔔']:
+                                sec = sec.replace(icon, '').strip()
+                            if sec in fav_mgr.favorite_sectors:
+                                return 1
+                        return 0
+
+                    rows_data.sort(key=get_fav_priority, reverse=True)
+
                 # Phase 3: Write-back
                 with timed_ctx("  [Phase 3] Write-back", warn_ms=100):
                     table.clearSelection()
@@ -2677,13 +2773,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._alert_detail_dialog.table.selectRow(0)
         self._alert_detail_dialog.table.setFocus()
 
-    def _refresh_decision_table(self, decisions: List[dict]):
+    def _refresh_decision_table(self, decisions: List[dict], force=False):
         table = self.tables.get("🌟 决策队列")
         if not table: return
+        self._last_decisions = decisions
         
         # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
         sig = self._compute_data_signature(decisions)
-        if getattr(table, '_last_sig', None) == sig:
+        if not force and getattr(table, '_last_sig', None) == sig:
             return
         table._last_sig = sig
         
@@ -2717,9 +2814,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if sort_col == 13: return d.get('pct_diff', 0.0)
             if sort_col == 14: return d.get('dff', 0.0)
             if sort_col == 15: return d.get('reason', '')
-            return 0
-
         decisions = sorted(decisions, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+        
+        # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+        decisions.sort(key=is_fav, reverse=True)
 
         was_sorting = table.isSortingEnabled()
         table.setSortingEnabled(False)
@@ -2756,9 +2857,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 c_color = "#ffff00" if code.startswith('30') else "#00ffff"
                 self._fast_update_cell(table, i, 7, code, color_key=c_color, bold=True)
                 
-                self._fast_update_cell(table, i, 8, d.get('name', ''))
+                stock_name = d.get('name', '')
+                is_fav_stock = code in fav_mgr.favorite_stocks
+                display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                self._fast_update_cell(table, i, 8, display_name, bold=is_fav_stock)
+                
                 self._fast_update_cell(table, i, 9, d.get('signal_type', ''))
-                self._fast_update_cell(table, i, 10, d.get('sector', ''))
+                
+                sec_name = d.get('sector', '')
+                is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                self._fast_update_cell(table, i, 10, display_sec, bold=is_fav_sec)
                 self._fast_update_cell(table, i, 11, d.get('current_price', 0.0), numeric_val=d.get('current_price', 0.0))
                 self._fast_update_cell(table, i, 12, d.get('suggest_price', 0.0), numeric_val=d.get('suggest_price', 0.0))
                 
@@ -2795,13 +2904,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.setProperty("layoutAboutToBeChanged", False)
             table.viewport().update()
 
-    def _refresh_dragon_table(self, dragons: List[dict]):
+    def _refresh_dragon_table(self, dragons: List[dict], force=False):
         table = self.tables.get("🐉 龙头追踪")
         if not table: return
+        self._last_dragons = dragons
         
         # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
         sig = self._compute_data_signature(dragons)
-        if getattr(table, '_last_sig', None) == sig:
+        if not force and getattr(table, '_last_sig', None) == sig:
             return
         table._last_sig = sig
         
@@ -2835,9 +2945,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if sort_col == 9: return d.get('vwap', 0.0)
                 if sort_col == 10: return d.get('last_update', '')
                 if sort_col == 11: return d.get('tags', '')
-                return 0
-
             dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+            
+            # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+            dragons.sort(key=is_fav, reverse=True)
 
             was_sorting = table.isSortingEnabled()
             table.setSortingEnabled(False)
@@ -2863,8 +2977,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     
                     c_color = "#ffff00" if code.startswith('30') else "#00ffff"
                     self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
-                    self._fast_update_cell(table, i, 2, d.get('name', ''), bold=('龙' in st_lbl))
-                    self._fast_update_cell(table, i, 3, d.get('sector', ''))
+                    
+                    stock_name = d.get('name', '')
+                    is_fav_stock = code in fav_mgr.favorite_stocks
+                    display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                    self._fast_update_cell(table, i, 2, display_name, bold=('龙' in st_lbl) or is_fav_stock)
+                    
+                    sec_name = d.get('sector', '')
+                    is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                    display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                    self._fast_update_cell(table, i, 3, display_sec, bold=is_fav_sec)
                     
                     c_pct = d.get('current_pct', 0.0)
                     cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
@@ -2902,13 +3024,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.blockSignals(False)
                 table.viewport().update()
 
-    def _refresh_sector_table(self, sectors: List[dict]):
+    def _refresh_sector_table(self, sectors: List[dict], force=False):
         table = self.tables.get("🔥 板块热力")
         if not table: return
+        self._last_sectors = sectors
         
         # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
         sig = self._compute_data_signature(sectors)
-        if getattr(table, '_last_sig', None) == sig:
+        if not force and getattr(table, '_last_sig', None) == sig:
             return
         table._last_sig = sig
         
@@ -2938,9 +3061,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if sort_col == 7: return s.get('follow_ratio', 0.0)
             if sort_col == 8: return s.get('follower_detail', '')
             if sort_col == 9: return s.get('updated_at', '')
-            return 0
-
         sectors = sorted(sectors, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+        
+        # 稳定二次排序：确保重点关注的板块在任何情况下都在最顶层优先展示
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = lambda x: 1 if x.get('name', '') in fav_mgr.favorite_sectors else 0
+        sectors.sort(key=is_fav, reverse=True)
 
         was_sorting = table.isSortingEnabled()
         table.setSortingEnabled(False)
@@ -2958,7 +3085,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.setRowCount(len(sectors))
 
             for i, s in enumerate(sectors):
-                self._fast_update_cell(table, i, 0, s.get('name', ''), bold=True)
+                sec_name = s.get('name', '')
+                is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                display_name = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                self._fast_update_cell(table, i, 0, display_name, bold=True)
                 
                 heat = s.get('heat_score', 0.0)
                 h_color = "#ff0000" if heat >= 40 else "#ffffff"
@@ -2972,8 +3102,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 t_bg = "alert_bg" if res_tag else None
                 self._fast_update_cell(table, i, 3, merged_type, color_key=t_color, bg_key=t_bg, bold=bool(res_tag))
 
-                self._fast_update_cell(table, i, 4, s.get('leader_code', ''))
-                self._fast_update_cell(table, i, 5, s.get('leader_name', ''))
+                leader_code = s.get('leader_code', '')
+                self._fast_update_cell(table, i, 4, leader_code)
+                
+                leader_name = s.get('leader_name', '')
+                if leader_code in fav_mgr.favorite_stocks:
+                    leader_name = f"⭐ {leader_name}"
+                self._fast_update_cell(table, i, 5, leader_name)
                 
                 l_pct = s.get('leader_change_pct', 0.0)
                 lp_color = "#ff4444" if l_pct > 0 else "#ffffff"
@@ -2998,13 +3133,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
 
-    def _refresh_strategic_table(self, trends: List[dict]):
+    def _refresh_strategic_table(self, trends: List[dict], force=False):
         table = self.tables.get("🌐 战略趋势")
         if not table: return
+        self._last_trends = trends
         
         # [🚀 ZERO-CPU DATA-SIGNATURE GATE] 极速指纹脏检查，数据不变瞬间秒退，彻底切断一切 Tab 切换卡顿与假死
         sig = self._compute_data_signature(trends)
-        if getattr(table, '_last_sig', None) == sig:
+        if not force and getattr(table, '_last_sig', None) == sig:
             return
         table._last_sig = sig
 
@@ -3036,9 +3172,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if sort_col == 7: return t.get('resonance', 0.0)
                 if sort_col == 8: return t.get('updated_at', '')
                 if sort_col == 9: return t.get('reason', '')
-                return 0
-
             trends = sorted(trends, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+            
+            # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+            trends.sort(key=is_fav, reverse=True)
 
             # [PERF] 极致锁定：停止一切布局重绘
             was_sorting = table.isSortingEnabled()
@@ -3064,9 +3204,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     c_color = "#00ffff" if not code.startswith('30') else "#ffff00"
                     self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
                     
-                    self._fast_update_cell(table, i, 2, t.get('name', ''))
+                    stock_name = t.get('name', '')
+                    is_fav_stock = code in fav_mgr.favorite_stocks
+                    display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                    self._fast_update_cell(table, i, 2, display_name, bold=is_fav_stock)
+                    
                     self._fast_update_cell(table, i, 3, t.get('stage', ''))
-                    self._fast_update_cell(table, i, 4, t.get('sector', ''))
+                    
+                    sec_name = t.get('sector', '')
+                    is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                    display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                    self._fast_update_cell(table, i, 4, display_sec, bold=is_fav_sec)
                     
                     sc = t.get('score', 0.0)
                     sc_color = "#ff0000" if sc > 80 else ("#ffaa00" if sc > 60 else "#ffffff")
@@ -3538,8 +3686,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 f = grade_item.font(); f.setBold(True); grade_item.setFont(f)
 
             # 核心列 (存入缓存)
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav_stock = code in fav_mgr.favorite_stocks
+            
             is_alerted = get_alert_manager().is_alerted(code)
             display_name = f"🔔{name}" if is_alerted else name
+            if is_fav_stock and not display_name.startswith("⭐"):
+                display_name = f"⭐ {display_name}"
             alert_bg = self._brushes.get("alert_bg", QBrush(QColor("#4B0082")))
             alert_fg = self._colors.get("#ffffff") if is_alerted else None
             
@@ -3712,8 +3866,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # 获取次数统计和报警状态
         count = self._stock_stats.get(code, {}).get("count", 1)
+        
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav_stock = code in fav_mgr.favorite_stocks
+        
         is_alerted = get_alert_manager().is_alerted(code)
         display_name = f"🔔{name}" if is_alerted else name
+        if is_fav_stock and not display_name.startswith("⭐"):
+            display_name = f"⭐ {display_name}"
 
         # 转换中文化形态/信号展示
         display_pattern = pattern
@@ -4162,84 +4323,136 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             table.selectRow(row)
             sel_rows = [row]
 
-        # 动态获取代码
+        # 动态获取代码与名称列
         code_col = -1
         name_col = -1
         for i in range(table.columnCount()):
             h = table.horizontalHeaderItem(i)
             if h:
                 if h.text() in ["代码", "龙头"]: code_col = i
-                elif h.text() in ["名称", "龙头名称"]: name_col = i
+                elif h.text() in ["名称", "龙头名称", "板块名称"]: name_col = i
         
-        if code_col == -1: return
-        code = table.item(row, code_col).text()
-        name = table.item(row, name_col).text() if name_col != -1 else ""
+        # 动态寻找所属板块名称列
+        sector_col = -1
+        for i in range(table.columnCount()):
+            h = table.horizontalHeaderItem(i)
+            if h and h.text() in ["板块名称", "所属板块", "板块/内容"]:
+                sector_col = i
+                break
+
+        code = ""
+        name = ""
+        sector = ""
+
+        if code_col != -1 and table.item(row, code_col):
+            code = table.item(row, code_col).text().strip()
+            for icon in ['⭐', '🔔']:
+                code = code.replace(icon, '').strip()
+
+        if name_col != -1 and table.item(row, name_col):
+            name = table.item(row, name_col).text().strip()
+            for icon in ['⭐', '🔔']:
+                name = name.replace(icon, '').strip()
+
+        if sector_col != -1 and table.item(row, sector_col):
+            sector = table.item(row, sector_col).text().strip()
+            for icon in ['⭐', '★重点', '[★重点]']:
+                sector = sector.replace(icon, '').strip()
+
+        if not code and not sector:
+            return
 
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #1a1c2c; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #2a2d42; }")
         
-        # 1. 复制
-        copy_action = menu.addAction(f"📋 复制代码: {code}")
-        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
-        
-        menu.addSeparator()
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
 
-        # 2. DNA 审计
-        title = f"🧬 执行 DNA 审计 ({len(sel_rows)}只...)" if len(sel_rows) > 1 else f"🧬 执行 DNA 审计"
-        dna_action = menu.addAction(title)
-        dna_action.triggered.connect(lambda: self._run_dna_audit_selected(table))
-
-        menu.addSeparator()
-
-        # 3. 大格局战略关注 (Macro Watchlist)
-        # ⭐ [FIX] 即使初始化时没连上，右键点击时也尝试重新连接一次
-        if self._engine_ctrl is None:
-            self._engine_ctrl = get_engine_controller()
-
-        if self._engine_ctrl:
-            try:
-                m_watchlist = self._engine_ctrl.get_macro_watchlist()
-                if code in m_watchlist:
-                    macro_action = menu.addAction(f"🛡️ 移除战略关注: {code}")
-                    macro_action.triggered.connect(lambda: self._engine_ctrl.remove_from_macro_watchlist(code))
-                else:
-                    macro_action = menu.addAction(f"🌐 战略趋势重点关注: {code}")
-                    macro_action.triggered.connect(lambda: self._engine_ctrl.add_to_macro_watchlist(code, name))
-            except Exception as e:
-                logger.error(f"❌ [Dashboard] Menu logic failed: {e}")
-
-        current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
-        if current_tab_text == "📋 每日操作指南":
+        # 1. 复制代码与股票重点关注
+        if code:
+            copy_action = menu.addAction(f"📋 复制代码: {code}")
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
+            
             menu.addSeparator()
-            delete_action = menu.addAction(f"🗑 删除此操作指南: {code}")
             
-            def _delete_gui_guidance():
-                from PyQt6.QtWidgets import QMessageBox
-                res = QMessageBox.question(
-                    self, "确认删除", f"是否确定从每日操作指南中删除股票 {code} 的记录？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No
-                )
-                if res != QMessageBox.StandardButton.Yes:
-                    return
-                import os
-                import json
-                filepath = os.path.join(get_app_root(), "logs", "premarket_diagnose.json")
-                if not os.path.exists(filepath):
-                    return
+            is_fav_stock = code in fav_mgr.favorite_stocks
+            if is_fav_stock:
+                fav_action = menu.addAction(f"❌ 取消重点个股: {name} ({code})")
+                fav_action.triggered.connect(lambda: fav_mgr.remove_favorite_stock(code))
+            else:
+                fav_action = menu.addAction(f"⭐ 设为重点个股: {name} ({code})")
+                fav_action.triggered.connect(lambda: fav_mgr.add_favorite_stock(code))
+                
+            menu.addSeparator()
+
+        # 2. 板块重点关注
+        if sector:
+            is_fav_sec = sector in fav_mgr.favorite_sectors
+            if is_fav_sec:
+                sec_fav_action = menu.addAction(f"❌ 取消重点板块: {sector}")
+                sec_fav_action.triggered.connect(lambda: fav_mgr.remove_favorite_sector(sector))
+            else:
+                sec_fav_action = menu.addAction(f"⭐ 设为重点板块: {sector}")
+                sec_fav_action.triggered.connect(lambda: fav_mgr.add_favorite_sector(sector))
+                
+            menu.addSeparator()
+
+        # 3. DNA 审计与大格局战略关注 (如果包含个股代码)
+        if code:
+            title = f"🧬 执行 DNA 审计 ({len(sel_rows)}只...)" if len(sel_rows) > 1 else f"🧬 执行 DNA 审计"
+            dna_action = menu.addAction(title)
+            dna_action.triggered.connect(lambda: self._run_dna_audit_selected(table))
+
+            menu.addSeparator()
+
+            # ⭐ [FIX] 即使初始化时没连上，右键点击时也尝试重新连接一次
+            if self._engine_ctrl is None:
+                self._engine_ctrl = get_engine_controller()
+
+            if self._engine_ctrl:
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, list):
-                        new_data = [d for d in data if d.get('code') != code]
-                        with open(filepath, "w", encoding="utf-8") as f:
-                            json.dump(new_data, f, ensure_ascii=False, indent=2)
-                    self._refresh_guidance_table(new_data)
-                    self.status_label.setText(f"🗑 已从操作指南中成功删除 {code}")
-                except Exception as ex:
-                    QMessageBox.critical(self, "错误", f"删除失败: {ex}")
-            
-            delete_action.triggered.connect(_delete_gui_guidance)
+                    m_watchlist = self._engine_ctrl.get_macro_watchlist()
+                    if code in m_watchlist:
+                        macro_action = menu.addAction(f"🛡️ 移除战略关注: {code}")
+                        macro_action.triggered.connect(lambda: self._engine_ctrl.remove_from_macro_watchlist(code))
+                    else:
+                        macro_action = menu.addAction(f"🌐 战略趋势重点关注: {code}")
+                        macro_action.triggered.connect(lambda: self._engine_ctrl.add_to_macro_watchlist(code, name))
+                except Exception as e:
+                    logger.error(f"❌ [Dashboard] Menu logic failed: {e}")
+
+            current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+            if current_tab_text == "📋 每日操作指南":
+                menu.addSeparator()
+                delete_action = menu.addAction(f"🗑 删除此操作指南: {code}")
+                
+                def _delete_gui_guidance():
+                    from PyQt6.QtWidgets import QMessageBox
+                    res = QMessageBox.question(
+                        self, "确认删除", f"是否确定从每日操作指南中删除股票 {code} 的记录？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No
+                    )
+                    if res != QMessageBox.StandardButton.Yes:
+                        return
+                    import os
+                    import json
+                    filepath = os.path.join(get_app_root(), "logs", "premarket_diagnose.json")
+                    if not os.path.exists(filepath):
+                        return
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if isinstance(data, list):
+                            new_data = [d for d in data if d.get('code') != code]
+                            with open(filepath, "w", encoding="utf-8") as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                        self._refresh_guidance_table(new_data)
+                        self.status_label.setText(f"🗑 已从操作指南中成功删除 {code}")
+                    except Exception as ex:
+                        QMessageBox.critical(self, "错误", f"删除失败: {ex}")
+                
+                delete_action.triggered.connect(_delete_gui_guidance)
 
         menu.exec(table.viewport().mapToGlobal(pos))
 
@@ -4800,7 +5013,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             is_num = 0 if isinstance(main_key, (int, float)) else 1
             return (is_num, main_key, d.get('code', ''))
 
+        self._last_guidance_data = data
         data_sorted = sorted(data, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+        
+        # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+        data_sorted.sort(key=is_fav, reverse=True)
 
         was_sorting = table.isSortingEnabled()
         table.setSortingEnabled(False)
@@ -4826,7 +5046,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 
                 # 填充各单元格
                 self._fast_update_cell(table, i, 0, d.get('code', ''), data=d)
-                self._fast_update_cell(table, i, 1, d.get('name', ''), data=d)
+                
+                stock_name = d.get('name', '')
+                is_fav_stock = d.get('code', '') in fav_mgr.favorite_stocks
+                display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                self._fast_update_cell(table, i, 1, display_name, data=d, bold=is_fav_stock)
                 self._fast_update_cell(table, i, 2, d.get('timestamp', '--'), data=d)
                 self._fast_update_cell(table, i, 3, f"{d.get('entry_price', 0.0):.2f}", numeric_val=d.get('entry_price', 0.0), data=d)
                 self._fast_update_cell(table, i, 4, f"{int(d.get('volume', 0)):,}", numeric_val=d.get('volume', 0), data=d)
