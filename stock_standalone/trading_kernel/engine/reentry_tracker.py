@@ -2,6 +2,8 @@ from logger_utils import LoggerFactory
 import json
 import os
 import logging
+import time
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Tuple
 
@@ -76,23 +78,47 @@ class ReentryTracker:
                     for code, d in data.items():
                         self.watchlist[code] = ReentryWatchItem.from_dict(d)
                 logger.info(f"📂 [ReentryTracker] 已加载 {len(self.watchlist)} 个止损二次启动跟踪标的")
+                self._last_saved_data = data
+            else:
+                self._last_saved_data = {}
         except Exception as e:
             logger.error(f"❌ [ReentryTracker] 载入状态失败: {e}")
+            self._last_saved_data = {}
 
     def _save_state(self):
         """原子持久化止损股票池"""
         if "PYTEST_CURRENT_TEST" in os.environ:
             return
 
-        try:
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            temp_file = self.state_file + ".tmp"
-            data = {code: item.to_dict() for code, item in self.watchlist.items()}
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_file, self.state_file)
-        except Exception as e:
-            logger.error(f"❌ [ReentryTracker] 保存状态失败: {e}")
+        data = {code: item.to_dict() for code, item in self.watchlist.items()}
+        # 变动检测：如果数据没有任何变化，则直接返回，避免不必要的写盘和锁竞争
+        if data == getattr(self, "_last_saved_data", None):
+            return
+
+        max_retries = 5
+        retry_delay = 0.1
+        temp_file = f"{self.state_file}.tmp.{os.getpid()}.{threading.get_ident()}"
+
+        for attempt in range(max_retries):
+            try:
+                os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(temp_file, self.state_file)
+                self._last_saved_data = data  # 保存成功，更新缓存印记
+                break
+            except (OSError, PermissionError) as e:
+                # 尝试清理临时文件
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ [ReentryTracker] 保存状态尝试 {attempt + 1} 失败 (文件被占用/无权限)，将在 {retry_delay}s 后重试: {e}")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ [ReentryTracker] 保存状态最终失败 (已重试 {max_retries} 次): {e}")
 
     def register_exit(self, code: str, stop_price: float, exit_time: str = None):
         """当个股被平仓/止损时，注册入 Re-entry 观察矩阵"""

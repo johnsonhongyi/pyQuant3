@@ -1928,7 +1928,7 @@ class HotlistPanel(QWidget, WindowMixin):
                 # 所有出现在循环中的代码都更新板块缓存
                 category = str(row.get('category', ''))
                 if category:
-                    sectors = category.split(';')
+                    sectors = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
                     main_sector = sectors[0] if sectors else ''
                     if main_sector:
                         sector_map[code] = main_sector

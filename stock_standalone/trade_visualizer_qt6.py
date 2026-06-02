@@ -6042,7 +6042,7 @@ class MainWindow(QMainWindow, WindowMixin):
             matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
             if matches:
                 # fmt = matches[0]
-                fmt = f'category.str.contains("{matches[0]}")'
+                fmt = f'category.str.contains("{matches[0]}", case=False, regex=False)'
             else:
                 fmt = text  # 原样
 
@@ -6075,9 +6075,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 query_str = keyword
             else:
                 if 'category' in df.columns:
-                    query_str = f'category.str.contains("{keyword}", na=False)'
+                    query_str = f'category.str.contains("{keyword}", case=False, regex=False, na=False)'
                 else:
                     query_str = keyword
+
+            # [ROBUSTNESS] 自动为 contains 注入 case=False, regex=False, na=False，根治带括号/空格概念过滤失败的问题
+            if '.str.contains(' in query_str and 'regex=' not in query_str:
+                query_str = re.sub(r'\.str\.contains\((["\'])(.*?)\1\s*\)', r'.str.contains(\1\2\1, case=False, regex=False, na=False)', query_str)
 
             from stock_logic_utils import ensure_parentheses_balanced
             final_query = ensure_parentheses_balanced(query_str)

@@ -3882,8 +3882,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         df_tmp['percent'] = percent_series
         
         # 3. 展开概念
+        import re
         df_tmp['category'] = df_tmp['category'].fillna('').astype(str)
-        df_exploded = df_tmp.assign(category=df_tmp['category'].str.split(';')).explode('category')
+        df_tmp['category'] = df_tmp['category'].apply(lambda x: [p.strip() for p in re.split(r'[;；,，/|]', x) if p.strip()])
+        df_exploded = df_tmp.explode('category')
         df_exploded['category'] = df_exploded['category'].str.strip()
         
         # 过滤无效
@@ -3906,8 +3908,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             bullish_ratio=('is_bullish', 'mean')
         )
         
-        # 过滤杂音（成员小于 3 的板块通常没代表性）
-        agg_df = agg_df[agg_df['count'] >= 3]
+        # 过滤杂音（成员小于 2 的板块通常没代表性，对齐其它模块）
+        agg_df = agg_df[agg_df['count'] >= 2]
         
         # 5. 计算综合得分 (针对总览模式优化的公式)
         # Score = avg_percent * (1 + bullish_ratio)
@@ -3965,8 +3967,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info(f"[WARN] 未找到 {code} 的数据")
                 return []
         # --- 获取股票所属的概念列表 ---
+        import re
         stock_categories = [
-            c.strip() for c in str(stock_row.get('category', '')).split(';') if c.strip()
+            c.strip() for c in re.split(r'[;；,，/|]', str(stock_row.get('category', ''))) if c.strip()
         ]
         # logger.info(f'stock_categories : {stock_categories}')
         if not stock_categories:
@@ -3981,8 +3984,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         df_tmp['percent'] = percent_series
         
         # 1. 拆分并展开 category 列，同时清洗
+        import re
         df_tmp['category'] = df_tmp['category'].fillna('').astype(str)
-        df_exploded = df_tmp.assign(category=df_tmp['category'].str.split(';')).explode('category')
+        df_tmp['category'] = df_tmp['category'].apply(lambda x: [p.strip() for p in re.split(r'[;；,，/|]', x) if p.strip()])
+        df_exploded = df_tmp.explode('category')
         df_exploded['category'] = df_exploded['category'].str.strip()
         
         # 预计算每只个股的趋势状态
