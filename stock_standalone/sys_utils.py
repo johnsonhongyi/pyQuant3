@@ -437,3 +437,132 @@ def ensure_all_configs_released():
         except Exception as e:
             logger.error(f"预加载释放 {fname} 异常: {e}")
     logger.info("✅ 抢占式预加载自愈释放完成，全物理安全屏障已建立。")
+
+_resolved_name_cache = {}
+
+def resolve_stock_name(code_clean: str) -> str:
+    """
+    高精度、多通道、带内存高速缓存与联网兜底的个股名字解析器。
+    专门根治“个股_XXXXXX”或代码数字做名字等 placeholder 占位符问题。
+    """
+    code_clean = str(code_clean).strip()
+    # 剥离表情
+    for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
+        code_clean = code_clean.replace(icon, '').strip()
+    code_clean = code_clean.zfill(6)
+
+    # 0. 内存高速缓存首位拦截，极速 O(1) 返回，避免无谓的 I/O 和网络请求
+    global _resolved_name_cache
+    if code_clean in _resolved_name_cache:
+        cached_name = _resolved_name_cache[code_clean]
+        if cached_name and not cached_name.startswith("个股_") and not cached_name.isdigit() and cached_name != code_clean:
+            return cached_name
+
+    # 1. 优先从 top_all.h5 里面解析
+    base_dir = get_app_root()
+    import pandas as pd
+    for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+        if os.path.exists(path):
+            try:
+                df_top = pd.read_hdf(path, 'top_all')
+                if not df_top.empty:
+                    if 'name' in df_top.columns:
+                        if df_top.index.name == 'code':
+                            name_map = df_top['name'].to_dict()
+                        elif 'code' in df_top.columns:
+                            name_map = dict(zip(df_top['code'].astype(str).str.zfill(6), df_top['name']))
+                        else:
+                            name_map = dict(zip(df_top.index.astype(str).str.zfill(6), df_top['name']))
+                        name = name_map.get(code_clean)
+                        if name and not str(name).startswith("个股_") and not str(name).isdigit() and name != code_clean:
+                            res_name = str(name).strip()
+                            _resolved_name_cache[code_clean] = res_name
+                            return res_name
+            except Exception:
+                pass
+
+    # 2. 其次从最新的竞价赛马快照中提取
+    try:
+        snapshots_dir = os.path.join(base_dir, "snapshots")
+        if os.path.exists(snapshots_dir):
+            files = [f for f in os.listdir(snapshots_dir) if f.startswith("racing_") and f.endswith(".json")]
+            if files:
+                files.sort(reverse=True)
+                for file in files[:3]:
+                    filepath = os.path.join(snapshots_dir, file)
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            snap_data = json.load(f)
+                            rows = []
+                            if isinstance(snap_data, list):
+                                rows = snap_data
+                            elif isinstance(snap_data, dict):
+                                for key in ["current_df", "data", "records"]:
+                                    if key in snap_data and isinstance(snap_data[key], list):
+                                        rows = snap_data[key]
+                                        break
+                            for r in rows:
+                                if isinstance(r, dict):
+                                    c = str(r.get("code") or "").strip().zfill(6)
+                                    n = str(r.get("name") or "").strip()
+                                    if c == code_clean and n and not n.startswith("个股_") and not n.isdigit() and n != code_clean:
+                                        _resolved_name_cache[code_clean] = n
+                                        return n
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 3. 再其次从 logs/premarket_diagnose.json 中的历史记录中查找
+    diagnose_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+    if os.path.exists(diagnose_file):
+        try:
+            with open(diagnose_file, "r", encoding="utf-8") as f:
+                old_diagnoses = json.load(f)
+                if isinstance(old_diagnoses, list):
+                    for item in old_diagnoses:
+                        h_code = item.get("code")
+                        h_name = item.get("name")
+                        if h_code and h_name:
+                            h_code_clean = str(h_code).strip().zfill(6)
+                            h_name_clean = str(h_name).strip()
+                            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
+                                h_name_clean = h_name_clean.replace(icon, '').strip()
+                            if h_name_clean.startswith("回测_"):
+                                h_name_clean = h_name_clean[3:].strip()
+                            if h_code_clean == code_clean and h_name_clean and not h_name_clean.startswith("个股_") and not h_name_clean.isdigit():
+                                _resolved_name_cache[code_clean] = h_name_clean
+                                return h_name_clean
+        except Exception:
+            pass
+
+    # 4. 终极网络兜底：通过新浪 API 联网拉取
+    import urllib.request
+    import re
+    # 格式化 code 加上 sh/sz/bj 前缀
+    prefix = "sh" if code_clean.startswith("6") else ("bj" if code_clean.startswith(("8", "4", "9")) else "sz")
+    url = f"http://hq.sinajs.cn/list={prefix}{code_clean}"
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36',
+                'Referer': 'http://finance.sina.com.cn'
+            }
+        )
+        with urllib.request.urlopen(req, timeout=3) as response:
+            html = response.read().decode('gbk', errors='ignore')
+            # 格式：var hq_str_sh600000="浦发银行,..."
+            match = re.search(r'="([^,"]+)', html)
+            if match:
+                name = match.group(1).strip()
+                if name and not name.startswith("个股_") and not name.isdigit():
+                    logger.warning(f"🌐 [NETWORK-RESOLVE] Successfully fetched stock name for {code_clean} from Sina API: {name}")
+                    _resolved_name_cache[code_clean] = name
+                    return name
+    except Exception as e:
+        logger.error(f"Failed to fetch name from Sina for {code_clean}: {e}")
+
+    return f"个股_{code_clean}"
+
+

@@ -57,8 +57,8 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
     import os
     import json
     try:
-        from sys_utils import get_base_path
-        base_dir = get_base_path()
+        from sys_utils import get_app_root, resolve_stock_name
+        base_dir = get_app_root()
     except Exception:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
@@ -72,28 +72,11 @@ def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float,
         name_str = name_str.split("-")[-1].strip()
     name = name_str
 
-    if not name or str(name).startswith("个股_"):
-        # Look up from top_all.h5 to get the real stock name
+    filepath = os.path.join(base_dir, "logs", "premarket_diagnose.json")
+
+    if not name or str(name).startswith("个股_") or str(name) == code_clean or str(name).isdigit():
         try:
-            import pandas as pd
-            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
-                if os.path.exists(path):
-                    df_top = pd.read_hdf(path, 'top_all')
-                    if not df_top.empty:
-                        code_zfill = code_clean.zfill(6)
-                        if df_top.index.name == 'code' and code_zfill in df_top.index:
-                            name = df_top.loc[code_zfill, 'name']
-                            break
-                        elif 'code' in df_top.columns:
-                            matched = df_top[df_top['code'].astype(str).str.zfill(6) == code_zfill]
-                            if not matched.empty:
-                                name = matched.iloc[0]['name']
-                                break
-                        else:
-                            idx_str = df_top.index.astype(str).str.zfill(6)
-                            if code_zfill in idx_str.values:
-                                name = df_top.loc[df_top.index.astype(str).str.zfill(6) == code_zfill, 'name'].iloc[0]
-                                break
+            name = resolve_stock_name(code_clean)
         except Exception:
             pass
 

@@ -2412,27 +2412,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                             with open(diagnose_file, "r", encoding="utf-8") as f:
                                 data = json.load(f)
                             
-                            # ── 盘前操作指南真名自愈并回写持久化 ──
-                            any_healed = False
-                            name_map = {}
-                            # 加载 top_all.h5 建立代码到名字映射
-                            for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
-                                if os.path.exists(path):
-                                    try:
-                                        import pandas as pd
-                                        df_top = pd.read_hdf(path, 'top_all')
-                                        if not df_top.empty:
-                                            if 'name' in df_top.columns:
-                                                if df_top.index.name == 'code':
-                                                    name_map = df_top['name'].to_dict()
-                                                elif 'code' in df_top.columns:
-                                                    name_map = dict(zip(df_top['code'].astype(str).str.zfill(6), df_top['name']))
-                                                else:
-                                                    name_map = dict(zip(df_top.index.astype(str).str.zfill(6), df_top['name']))
-                                            break
-                                    except Exception as e:
-                                        logger.error(f"Failed to load name map in dashboard thread: {e}")
-                                        
                             from datetime import datetime
                             try:
                                 mtime = os.path.getmtime(diagnose_file)
@@ -2441,41 +2420,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                                 file_modified_time = datetime.now().strftime("%Y-%m-%d")
 
                             for d in data:
-                                # 自动修复/格式化时间戳为 YYYY-MM-DD 格式
+                                # 自动在内存中修复/格式化时间戳为 YYYY-MM-DD 格式，不进行落盘
                                 ts = d.get('timestamp')
                                 if not ts:
                                     d['timestamp'] = file_modified_time
-                                    any_healed = True
                                 elif len(ts) > 10:  # 自动裁切为 YYYY-MM-DD
                                     d['timestamp'] = ts[:10]
-                                    any_healed = True
-
-                                code = d.get('code') or ''
-                                name = d.get('name') or ''
-                                code_clean = str(code).strip()
-                                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
-                                    code_clean = code_clean.replace(icon, '').strip()
-                                code_clean = code_clean.zfill(6)
-                                
-                                name_clean = str(name).strip()
-                                for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
-                                    name_clean = name_clean.replace(icon, '').strip()
-                                    
-                                if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
-                                    healed_name = name_map.get(code_clean)
-                                    if healed_name:
-                                        d['name'] = healed_name
-                                        any_healed = True
-                                        
-                            if any_healed:
-                                try:
-                                    with open(diagnose_file, "w", encoding="utf-8") as f:
-                                        json.dump(data, f, indent=4, ensure_ascii=False)
-                                    logger.info("✨ [DASHBOARD-HEAL] Successfully persisted healed stock names back to premarket_diagnose.json")
-                                except Exception as write_err:
-                                    logger.error(f"❌ [DASHBOARD-HEAL] Failed to write back healed names: {write_err}")
                     except Exception as json_err:
-                        logger.error(f"Failed to load/heal pre-market diagnose file: {json_err}")
+                        logger.error(f"Failed to load pre-market diagnose file: {json_err}")
                     self.sig_engine_data_fetched.emit(tab_name, data)
 
                 elif tab_name == "🌟 决策队列":
@@ -4737,26 +4689,37 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             it = table.item(sel_ranges[0].topRow(), 0)
             if it: selected_code = it.text()
 
-        # 👑 在排序之前，利用实时内存大表，富化并合入每只个股的当日涨幅 (percent) 和资金 dff，确保支持按新列高保真数值排序！
+        # 👑 在排序之前，利用实时内存大表，富化并合入每只个股的当日涨幅 (percent) 和资金 dff，提供内存兜底名字自愈！
         rt = self._get_df_all_realtime()
         import pandas as pd
         for d in data:
             code = d.get('code') or ''
             code_clean = str(code).strip()
             # 物理剥离表情符号
-            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠']:
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
                 code_clean = code_clean.replace(icon, '').strip()
             code_clean = code_clean.zfill(6)
+            
+            name = d.get('name') or ''
+            name_clean = str(name).strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
+                name_clean = name_clean.replace(icon, '').strip()
+                
+            is_backtest_prefix = name_clean.startswith("回测_")
+            if is_backtest_prefix:
+                name_clean = name_clean[3:].strip()
             
             pct = 0.0
             dff_val = 0.0
             has_rt = False
+            realtime_name = None
             if rt is not None and not rt.empty:
                 if code_clean in rt.index:
                     row = rt.loc[code_clean]
                     if isinstance(row, pd.Series):
                         pct = row.get('percent', row.get('pct', row.get('pct_diff', 0.0)))
                         dff_val = row.get('dff', 0.0)
+                        realtime_name = row.get('name')
                         has_rt = True
             
             if not has_rt:
@@ -4765,6 +4728,29 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 
             d['percent'] = float(pct or 0.0)
             d['dff'] = float(dff_val or 0.0)
+
+            # 主线程渲染前强力名字自愈拦截，仅修改内存属性用于显示，不向文件落盘
+            if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+                healed_name = None
+                if realtime_name and not str(realtime_name).startswith("个股_") and not str(realtime_name).isdigit() and realtime_name != code_clean:
+                    healed_name = str(realtime_name)
+                
+                # 从决策引擎中查找
+                if not healed_name and self._engine_ctrl:
+                    name_cand = self._engine_ctrl._get_stock_name(code_clean)
+                    if name_cand and name_cand != code_clean and not name_cand.startswith("个股_") and not name_cand.isdigit():
+                        healed_name = name_cand
+                
+                # 终极多通道联网兜底
+                if not healed_name:
+                    from sys_utils import resolve_stock_name
+                    healed_name = resolve_stock_name(code_clean)
+                
+                if healed_name:
+                    if is_backtest_prefix:
+                        d['name'] = f"回测_{healed_name}"
+                    else:
+                        d['name'] = healed_name
 
         # 排序处理
         sort_col = getattr(table, '_sort_col', 0)

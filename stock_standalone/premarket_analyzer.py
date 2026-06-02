@@ -12,7 +12,7 @@ except Exception:
     pass
 
 try:
-    from sys_utils import get_base_path, get_app_root
+    from sys_utils import get_base_path, get_app_root, resolve_stock_name
     pkg_dir = get_base_path()
 except Exception:
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -82,35 +82,25 @@ def run_premarket_diagnose() -> list:
                 "is_fallback": True
             }
 
-    # Load name map from top_all.h5 to resolve real Chinese stock names
-    name_map = {}
-    for path in [r'g:\top_all.h5', os.path.join(get_app_root(), 'top_all.h5')]:
-        if os.path.exists(path):
-            try:
-                df_top = pd.read_hdf(path, 'top_all')
-                if not df_top.empty:
-                    if 'name' in df_top.columns:
-                        if df_top.index.name == 'code':
-                            name_map = df_top['name'].to_dict()
-                        elif 'code' in df_top.columns:
-                            name_map = dict(zip(df_top['code'].astype(str).str.zfill(6), df_top['name']))
-                        else:
-                            name_map = dict(zip(df_top.index.astype(str).str.zfill(6), df_top['name']))
-                    break
-            except Exception as e:
-                logger.error(f"Failed to load name map from {path}: {e}")
-
     # 2. Iterate and analyze each stock
     for code, pos in positions.items():
         # Strip any emojis from code just in case
         code_clean = str(code).strip()
-        for icon in ['🔴', '🟢', '📊', '⚠️']:
+        for icon in ['🔴', '🟢', '📊', '⚠️', '👑']:
             code_clean = code_clean.replace(icon, '').strip()
         code_clean = code_clean.zfill(6)
 
         name = pos.get("name")
-        if not name or str(name).startswith("个股_"):
-            name = name_map.get(code_clean, name or f"个股_{code_clean}")
+        name_clean = ""
+        if name:
+            name_clean = str(name).strip()
+            for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
+                name_clean = name_clean.replace(icon, '').strip()
+            if name_clean.startswith("回测_"):
+                name_clean = name_clean[3:].strip()
+
+        if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
+            name = resolve_stock_name(code_clean)
 
         logger.debug(f"Analyzing {name} ({code_clean})...")
         
