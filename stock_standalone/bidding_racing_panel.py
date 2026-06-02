@@ -5176,19 +5176,19 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     else:
                         sec['leader_pct_diff'] = 0.0
 
-            # [NEW] 🧬 UI 阶段过滤：仅在显示前对板块表进行裁切
-            if self._is_macro_active:
-                # 判定逻辑：如果该板块的龙头或其展示的跟随股中有任何一个命中过滤，则保留该板块
-                filtered_sectors = []
-                for sec in active_sectors:
-                    involved = [sec.get('leader')] + [f.get('code') for f in sec.get('followers', []) if isinstance(f, dict)]
-                    # 补充对 followers 是字符串列表的兼容
-                    if not any(isinstance(f, dict) for f in sec.get('followers', [])):
-                         involved += [self._name_index.get(f) for f in sec.get('followers', []) if isinstance(f, str)]
+            # # [NEW] 🧬 UI 阶段过滤：仅在显示前对板块表进行裁切
+            # if self._is_macro_active:
+            #     # 判定逻辑：如果该板块的龙头或其展示的跟随股中有任何一个命中过滤，则保留该板块
+            #     filtered_sectors = []
+            #     for sec in active_sectors:
+            #         involved = [sec.get('leader')] + [f.get('code') for f in sec.get('followers', []) if isinstance(f, dict)]
+            #         # 补充对 followers 是字符串列表的兼容
+            #         if not any(isinstance(f, dict) for f in sec.get('followers', [])):
+            #              involved += [self._name_index.get(f) for f in sec.get('followers', []) if isinstance(f, str)]
                     
-                    if any(c in self._macro_filtered_codes_set for c in involved if c):
-                        filtered_sectors.append(sec)
-                active_sectors = filtered_sectors
+            #         if any(c in self._macro_filtered_codes_set for c in involved if c):
+            #             filtered_sectors.append(sec)
+            #     active_sectors = filtered_sectors
 
             # --- 2. [WORK-ZONE] 锁外分析计算 ---
             # 宽放个股显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股
@@ -5317,9 +5317,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     reverse=is_rev_sec
                 )
 
-                # [NEW] 宏观查询模式下，板块表仅展示其领涨股命中过滤条件的板块
-                if self._is_macro_active:
-                    all_sorted_sectors = [s for s in all_sorted_sectors if s.get('leader') in self._macro_filtered_codes]
+
 
                 # [🚀 标注建议] 根据开关执行龙头去重逻辑
                 unique_leader_sectors = []

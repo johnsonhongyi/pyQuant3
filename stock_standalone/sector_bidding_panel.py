@@ -1701,9 +1701,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if main_detector:
             logger.debug("📡 [SectorPanel] Using unified global BiddingMomentumDetector from main_window.")
             self.detector = main_detector
+            self._is_global_detector = True
         else:
             logger.warning("📡 [SectorPanel] No global racing_detector found on main_window. Instantiating local fallback.")
             self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
+            self._is_global_detector = False
 
         # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程 of the event pump blind spot!
         self.detector.on_score_finished = self._on_score_finished_callback
@@ -1734,6 +1736,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_source_df = None         # [NEW] 缓存最新的全量行情 DataFrame (用于宏观查询)
         self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
         self._active_search_query = ""
+        self.favorite_sectors = set()       # [NEW] 重点关注的板块集合
 
         # 🚀 [Performance] Pre-cached UI Resources
         self._color_red = QColor("#FF4444")
@@ -1912,10 +1915,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self, 'detector') and self.detector:
             # 清理回调绑定，防止野指针与内存泄露
             self.detector.on_score_finished = None
-            try:
-                self.detector.stop() # 🛑 强力取消打分器后台 Timer 与打分循环，根治退出假死与冲突
-            except Exception as ex:
-                logger.warning(f"[SectorBiddingPanel] Failed to stop detector: {ex}")
+            if not getattr(self, '_is_global_detector', False):
+                try:
+                    self.detector.stop() # 🛑 强力取消打分器后台 Timer 与打分循环，根治退出假死与冲突
+                except Exception as ex:
+                    logger.warning(f"[SectorBiddingPanel] Failed to stop detector: {ex}")
             # 这里是真正关闭，我们保存数据
             self.detector.save_persistent_data()
             
@@ -1948,6 +1952,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             data_to_save['macro_query'] = self.query_input.currentText() if hasattr(self, 'query_input') else ""
             data_to_save['use_dragon_race'] = self.cb_dragon_race.isChecked() if hasattr(self, 'cb_dragon_race') else False
             data_to_save['watchlist_mode'] = getattr(self, '_watchlist_mode', "NORMAL")
+            data_to_save['favorite_sectors'] = list(self.favorite_sectors)
 
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
             
@@ -2037,6 +2042,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._watchlist_mode = ui_state['watchlist_mode']
                 if self._watchlist_mode == "DRAGON_3D" and hasattr(self, 'btn_dragon_3d'):
                     self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
+            
+            if 'favorite_sectors' in ui_state:
+                self.favorite_sectors = set(ui_state['favorite_sectors'])
             
             logger.debug("📊 [SectorPanel] UI state restored (including History Group & Macro Query)")
         except Exception as e:
@@ -2950,20 +2958,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # [NEW] 5. Python Level Sorting
         col, asc = self._sector_sort_col, self._sector_sort_asc
         
-        # [NEW] 应用宏观查询过滤到板块列表
-        if self._is_macro_active and self._macro_filtered_codes:
-            filtered_sectors = []
-            for s in sectors:
-                # 判准逻辑：如果板块龙头或跟随者中有任何一个满足宏观查询，则显示该板块
-                all_involved = [s.get('leader')] + [f.get('code') for f in s.get('followers', [])]
-                if any(c in self._macro_filtered_codes for c in all_involved if c):
-                    filtered_sectors.append(s)
-            sectors = filtered_sectors
+        # # [NEW] 应用宏观查询过滤到板块列表
+        # if self._is_macro_active and self._macro_filtered_codes:
+        #     filtered_sectors = []
+        #     for s in sectors:
+        #         # 判准逻辑：如果板块龙头或跟随者中有任何一个满足宏观查询，则显示该板块
+        #         all_involved = [s.get('leader')] + [f.get('code') for f in s.get('followers', [])]
+        #         if any(c in self._macro_filtered_codes for c in all_involved if c):
+        #             filtered_sectors.append(s)
+        #     sectors = filtered_sectors
 
-        if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
-        elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
-        elif col == 2: sectors.sort(key=lambda x: x.get('score_diff', 0), reverse=not asc)
-        elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
+        is_fav = lambda x: 1 if x.get('sector', '') in self.favorite_sectors else 0
+
+        if col == 0: sectors.sort(key=lambda x: (is_fav(x), x.get('sector', '')), reverse=not asc)
+        elif col == 1: sectors.sort(key=lambda x: (is_fav(x), x.get('score', 0)), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: (is_fav(x), x.get('score_diff', 0)), reverse=not asc)
+        elif col == 3: sectors.sort(key=lambda x: (is_fav(x), x.get('leader_name', '')), reverse=not asc)
 
         # 6. 表格渲染 (Dirty Check Update)
         self._ui_refreshing = True
@@ -2997,7 +3007,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 icon_char = "📊"
 
             # Col 0: Name
-            self._update_cell(self.sector_table, i, 0, f"{icon_char} {sn}", 
+            display_name = f"⭐ {icon_char} {sn}" if sn in self.favorite_sectors else f"{icon_char} {sn}"
+            self._update_cell(self.sector_table, i, 0, display_name, 
                             color=color, user_role=sn)
 
             diff = sdata.get('score_diff', 0.0)
@@ -3019,7 +3030,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
             # Col 4: Tags
-            self._update_cell(self.sector_table, i, 4, tags, font=self._small_font)
+            display_tags = f"[★重点] {tags}" if sn in self.favorite_sectors else tags
+            self._update_cell(self.sector_table, i, 4, display_tags, font=self._small_font)
 
             if sn == selected_sector:
                 self.sector_table.selectRow(i)
@@ -5337,10 +5349,36 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2a2a3e; color: #aad4ff; border: 1px solid #4a4a6e; } QMenu::item:selected { background-color: #3e3e5e; }")
         
+        # 添加/删除 重点关注板块
+        if sector_name in self.favorite_sectors:
+            act_fav = menu.addAction("❌ 取消重点关注")
+            act_fav.triggered.connect(lambda: self._remove_favorite_sector(sector_name))
+        else:
+            act_fav = menu.addAction("⭐ 设为重点关注")
+            act_fav.triggered.connect(lambda: self._add_favorite_sector(sector_name))
+            
+        menu.addSeparator()
         act_reconstruct = menu.addAction("🛠️ 手工重建跟随股 (针对旧快照)")
         act_reconstruct.triggered.connect(lambda: self._handle_reconstruct_followers(sector_name))
         
         menu.exec(self.sector_table.viewport().mapToGlobal(pos))
+        
+    def _add_favorite_sector(self, sector_name):
+        self.favorite_sectors.add(sector_name)
+        self._save_ui_state()
+        self._refresh_sector_list()
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"⭐ 板块 [{sector_name}] 已设为重点关注")
+            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+    def _remove_favorite_sector(self, sector_name):
+        if sector_name in self.favorite_sectors:
+            self.favorite_sectors.remove(sector_name)
+            self._save_ui_state()
+            self._refresh_sector_list()
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText(f"❌ 板块 [{sector_name}] 已取消重点关注")
+                self.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;")
         
     def _handle_reconstruct_followers(self, sector_name):
         """调用 detector 重建跟随股并刷新 UI"""

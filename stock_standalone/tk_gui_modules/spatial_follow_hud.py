@@ -112,6 +112,21 @@ class DictWrapper:
                 pass
         return val
 
+class HorizontalScrollFilter(QtCore.QObject):
+    """用于将鼠标在水平候选区滚动时的垂直滚轮动作转化为水平滚动的事件过滤器"""
+    def __init__(self, scroll_area):
+        super().__init__(scroll_area)
+        self.scroll_area = scroll_area
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Wheel:
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            bar = self.scroll_area.horizontalScrollBar()
+            if bar:
+                bar.setValue(bar.value() - delta // 2)
+            return True
+        return super().eventFilter(obj, event)
+
 class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     """
     SpatialFollowHUD - 盘中实时板块跟单可视化微型指挥所 (Persistent Glassmorphism HUD)
@@ -123,6 +138,35 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     """
     
     order_submitted = pyqtSignal(str, str, float)  # (代码, 动作, 比例)
+
+    def _get_favorite_sectors(self) -> set:
+        """获取重点关注板块的集合"""
+        if self.main_app:
+            panel = getattr(self.main_app, 'sector_bidding_panel', None)
+            if panel and hasattr(panel, 'favorite_sectors'):
+                return panel.favorite_sectors
+        return set()
+
+    def _get_prioritized_active_sectors(self, detector) -> list:
+        """获取重排后的活跃板块列表，重点关注板块优先"""
+        if not detector:
+            return []
+        try:
+            raw_list = detector.get_active_sectors()
+            if not raw_list:
+                return []
+            fav_sectors = self._get_favorite_sectors()
+            if not fav_sectors:
+                return raw_list
+            fav_active = [s for s in raw_list if s.get('sector') in fav_sectors]
+            non_fav_active = [s for s in raw_list if s.get('sector') not in fav_sectors]
+            return fav_active + non_fav_active
+        except Exception as e:
+            logger.warning(f"⚠️ [HUD Priority Sectors] Failed to prioritize active sectors: {e}")
+            try:
+                return detector.get_active_sectors()
+            except:
+                return []
 
     def _get_active_detector(self) -> Optional[Any]:
         """[SSOT] 获取主窗口当前活跃运行且真正有打分数据的 BiddingMomentumDetector 实例"""
@@ -549,7 +593,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         # 精致的霓虹呼吸阴影 (Cyan Drop Shadow)
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(22)
+        shadow.setBlurRadius(16)
         shadow.setColor(QtGui.QColor(0, 240, 255, 110))
         shadow.setOffset(0, 0)
         self.main_frame.setGraphicsEffect(shadow)
@@ -736,20 +780,33 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         header_layout.addWidget(self.lbl_update_time)
         pano_layout.addLayout(header_layout)
         
-        # [NEW] 热门风口候选导航栏 (Top 5 Hot Sectors Shortcut)
+        # [NEW] 热门风口候选导航栏 (Top 10 Hot Sectors Scrollable Shortcut)
         self.hot_btns = []
-        self._current_top5_sectors = []
+        self._current_top5_sectors = []  # 保持命名兼容
         self._is_switching_btn = False  # 防止信号重入
         
-        hot_layout = QtWidgets.QHBoxLayout()
-        hot_layout.setSpacing(4)
-        hot_layout.setContentsMargins(0, 2, 0, 2)
+        hot_container_layout = QtWidgets.QHBoxLayout()
+        hot_container_layout.setContentsMargins(0, 2, 0, 2)
+        hot_container_layout.setSpacing(4)
         
         lbl_hint = QtWidgets.QLabel("🔥 候选:", self)
         lbl_hint.setStyleSheet("color: rgba(0, 240, 255, 0.75); font-size: 10px; font-weight: bold;")
-        hot_layout.addWidget(lbl_hint)
+        hot_container_layout.addWidget(lbl_hint)
         
-        for idx in range(5):
+        self.scroll_area = QtWidgets.QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setFixedHeight(28)
+        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        
+        scroll_widget = QtWidgets.QWidget()
+        scroll_widget.setStyleSheet("background: transparent;")
+        scroll_layout = QtWidgets.QHBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(4)
+        
+        for idx in range(10):
             btn = QtWidgets.QPushButton("⏳ 等待行情...", self)
             btn.setCheckable(True)
             btn.setProperty("sector_index", idx)
@@ -774,10 +831,17 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 }
             """)
             btn.clicked.connect(self._on_hot_sector_clicked)
-            hot_layout.addWidget(btn)
+            scroll_layout.addWidget(btn)
             self.hot_btns.append(btn)
             
-        pano_layout.addLayout(hot_layout)
+        scroll_widget.setLayout(scroll_layout)
+        self.scroll_area.setWidget(scroll_widget)
+        
+        self.scroll_filter = HorizontalScrollFilter(self.scroll_area)
+        self.scroll_area.viewport().installEventFilter(self.scroll_filter)
+        
+        hot_container_layout.addWidget(self.scroll_area)
+        pano_layout.addLayout(hot_container_layout)
 
         # 核心指标网格
         pano_grid = QtWidgets.QGridLayout()
@@ -997,7 +1061,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         
         # ── 5. 设置自适应布局包裹 ──
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.addWidget(self.main_frame)
         
         # ── 6. 精致的无边框缩放 Grip ──
@@ -1007,7 +1071,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         if hasattr(self, 'sizegrip'):
-            self.sizegrip.move(self.width() - self.sizegrip.width() - 4, self.height() - self.sizegrip.height() - 4)
+            self.sizegrip.move(self.width() - self.sizegrip.width() - 24, self.height() - self.sizegrip.height() - 24)
 
     def _setup_timer(self) -> None:
         """主界面的定时脏刷新计时器（高灵敏度 1.0s 封顶）"""
@@ -1105,7 +1169,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             detector = self._get_active_detector()
             if detector:
                 try:
-                    active_list = detector.get_active_sectors()
+                    active_list = self._get_prioritized_active_sectors(detector)
                     if active_list:
                         sector_name = active_list[0].get('sector', '')
                 except Exception:
@@ -1140,7 +1204,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                     is_valid = sector_name in detector.active_sectors if sector_name else False
                 
                 if has_active and (not sector_name or not is_valid):
-                    active_list = detector.get_active_sectors()
+                    active_list = self._get_prioritized_active_sectors(detector)
                     if active_list:
                         old_name = sector_name
                         sector_name = active_list[0].get('sector', '')
@@ -1153,9 +1217,9 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         if detector:
             try:
                 # 从权威 Bidding 探测器中直接获取最鲜活的活跃风口
-                active_list = detector.get_active_sectors()
+                active_list = self._get_prioritized_active_sectors(detector)
                 if active_list:
-                    # 🚀 [NEW] 提前拉取 FocusController 备用字典以补齐这 5 个板块的属性
+                    # 🚀 [NEW] 提前拉取 FocusController 备用字典以补齐这 10 个板块的属性
                     fc_loader = None
                     try:
                         from sector_focus_engine import get_focus_controller
@@ -1163,9 +1227,9 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                     except:
                         pass
                     
-                    # 使用 DictWrapper 零拷贝包装为对象，并自动融合 FocusController 备用属性，保留前 5 个最强风口
+                    # 使用 DictWrapper 零拷贝包装为对象，并自动融合 FocusController 备用属性，保留前 10 个最强风口
                     hot_sectors = []
-                    for d in active_list[:5]:
+                    for d in active_list[:10]:
                         sec_name = d.get('sector', '')
                         fc_sec = fc_loader.sector_map.get_sector_heat(sec_name) if (fc_loader and sec_name) else None
                         hot_sectors.append(DictWrapper(d, fallback_obj=fc_sec))
@@ -1180,13 +1244,13 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             fc = get_focus_controller()
             if fc:
                 try:
-                    hot_sectors = fc.sector_map.get_hot_sectors(5)
+                    hot_sectors = fc.sector_map.get_hot_sectors(10)
                 except Exception as e:
                     logger.warning(f"Failed to get hot sectors from FocusController: {e}")
 
         self._current_top5_sectors = [s.name for s in hot_sectors]
         
-        # 实时更新 5 个热门风口候选导航按钮的字样与可视度
+        # 实时更新 10 个热门风口候选导航按钮的字样与可视度
         self._is_switching_btn = True
         try:
             for i, btn in enumerate(self.hot_btns):
@@ -1206,7 +1270,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self._is_switching_btn = True
             try:
                 for i, s_name in enumerate(self._current_top5_sectors):
-                    self.hot_btns[i].setChecked(s_name == sector_name)
+                    if i < len(self.hot_btns):
+                        self.hot_btns[i].setChecked(s_name == sector_name)
             finally:
                 self._is_switching_btn = False
         else:
@@ -1233,11 +1298,20 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 self._is_switching_btn = True
                 try:
                     for i, s_name in enumerate(self._current_top5_sectors):
-                        self.hot_btns[i].setChecked(s_name == sector_name)
+                        if i < len(self.hot_btns):
+                            self.hot_btns[i].setChecked(s_name == sector_name)
                 finally:
                     self._is_switching_btn = False
 
         self.sector_name = sector_name
+        
+        # 🚀 [NEW] 自动跟随滚动到选中板块显示
+        if hasattr(self, 'scroll_area') and hasattr(self, 'hot_btns'):
+            for btn in self.hot_btns:
+                if btn.isChecked() and btn.isVisible():
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(50, lambda b=btn: self.scroll_area.ensureWidgetVisible(b))
+                    break
             
         # 🚀 [NEW] 数据纵深融合：拉取 FocusController 中关于该板块的全量极客指标作为备用
         fc_detail = None
@@ -1741,7 +1815,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             detector = self._get_active_detector()
             if detector:
                 try:
-                    active_list = detector.get_active_sectors()
+                    active_list = self._get_prioritized_active_sectors(detector)
                     if active_list:
                         target_sector = active_list[0].get('sector', '')
                 except Exception as e:
@@ -1832,18 +1906,46 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 )
                 return
             
-            if res.get("kernel_executed"):
+            action = res.get("kernel_action", "HOLD")
+            allowed = res.get("kernel_allowed", True)
+            reject_code = res.get("kernel_reject_code", "")
+            
+            if action == "HOLD":
+                reason_dict = res.get("kernel_reason", {})
+                confidence = res.get("kernel_confidence", 0.0)
+                setup_name = reason_dict.get("setup", "N/A")
+                dff_val = reason_dict.get("dff", 0.0)
+                heat_val = reason_dict.get("sector_heat", 0.0)
+                
                 QtWidgets.QMessageBox.information(
                     self,
-                    "🎉 跟单成功",
-                    f"一键跟单委托物理投递成功！\n个股: {name}({code})\n仓位: {size_pct:.1%}\n委托编号: {res.get('kernel_order_id')}"
+                    "💡 交易内核：建议观望 (HOLD)",
+                    f"个股: {name}({code})\n"
+                    f"交易内核综合评估当前行情状态，给出【保持观望】(HOLD) 决策，暂不进行物理跟单开仓。\n\n"
+                    f"主要评估指标：\n"
+                    f"  - 综合评分 (Confidence): {confidence:.4f}\n"
+                    f"  - 分支形态 (Setup): {setup_name}\n"
+                    f"  - 板块热度 (Heat): {heat_val:.2f}\n"
+                    f"  - 核心DFF强度: {dff_val:.2f}\n\n"
+                    f"未满足入场开仓标准（综合评分需 >= 0.55，且形态/资金共振需符合开仓要求）。"
                 )
-            else:
-                reject_code = res.get("kernel_reject_code", "UNKNOWN")
+            elif not allowed or reject_code or not res.get("kernel_executed"):
+                r_code = reject_code if reject_code else "RISK_BLOCKED"
                 QtWidgets.QMessageBox.warning(
                     self,
                     "❌ 跟单被拒",
-                    f"跟单委托被交易内核或风控卡口拒绝！\n拒绝码: {reject_code}"
+                    f"跟单委托被交易内核或风控卡口拒绝！\n"
+                    f"个股: {name}({code})\n"
+                    f"拒绝码: {r_code}"
+                )
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "🎉 跟单成功",
+                    f"一键跟单委托物理投递成功！\n"
+                    f"个股: {name}({code})\n"
+                    f"仓位: {size_pct:.1%}\n"
+                    f"委托编号: {res.get('kernel_order_id')}"
                 )
                 
         except Exception as e:
@@ -1950,7 +2052,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             event.accept()
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
-        """支持鼠标滚轮滚动循环切换 5 个候选板块，同时精准隔离跟风个股明细表防冲突"""
+        """支持鼠标滚轮滚动循环切换 10 个候选板块，同时精准隔离跟风个股明细表防冲突"""
         # 1. 判定是否有候选板块数据
         if not hasattr(self, '_current_top5_sectors') or not self._current_top5_sectors:
             super().wheelEvent(event)
