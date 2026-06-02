@@ -5431,7 +5431,6 @@ def _refresh_guidance_tab(self):
                 
         data_sorted = sorted(data, key=_get_sort_key, reverse=sort_desc)
         
-        any_healed = False
         for d in data_sorted:
             code = d.get('code') or ''
             name = d.get('name') or ''
@@ -5449,10 +5448,14 @@ def _refresh_guidance_tab(self):
                 
             if not name_clean or name_clean.isdigit() or name_clean == code_clean or name_clean.startswith("个股_"):
                 healed_name = code_to_name.get(code_clean)
+                if not healed_name:
+                    try:
+                        from sys_utils import resolve_stock_name
+                        healed_name = resolve_stock_name(code_clean)
+                    except Exception:
+                        pass
                 if healed_name:
                     name = healed_name
-                    d['name'] = healed_name
-                    any_healed = True
             
             raw_sec = code_to_sector.get(code_clean, '')
             sector_str = self._get_short_category(raw_sec)
@@ -5518,14 +5521,6 @@ def _refresh_guidance_tab(self):
                 tags=(tag,)
             )
             
-        if any_healed:
-            try:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-                logger.info("✨ [GUIDANCE-HEAL] Successfully persisted healed stock names back to logs/premarket_diagnose.json")
-            except Exception as write_err:
-                logger.error(f"❌ [GUIDANCE-HEAL] Failed to write back healed names: {write_err}")
-                
         self._guidance_tips_lbl.config(text=f"📊 已成功拉取并呈现 {len(data_sorted)} 条作战指导", fg="#888888")
         
         # 仅在打开/首次载入时执行一次自动恢复或自动测量，后续刷新时保持用户手动调整的列宽不被强行覆盖
