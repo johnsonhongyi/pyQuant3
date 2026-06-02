@@ -2336,6 +2336,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         9: (win32con.MOD_ALT, 0x52, "Alt+R"),  # R - 切换下一个窗口
         10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R - 切换上一个窗口
         11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J - 交易内核决策流水分析
+        12: (win32con.MOD_ALT, 0x55, "Alt+U"),  # U - 突破跟单指挥所 HUD
     }
     _HOTKEY_INFO_MAP = {
         0: "一键静音 (关闭所有语音报警)",
@@ -2350,6 +2351,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         9: "视窗轮换 (向下轮转多屏窗口)",
         10: "视窗轮换 (向上轮转多屏窗口)",
         11: "决策流水 (成交与决策分析看板)",
+        12: "突破跟单 (隐藏/显示跟单指挥所 HUD)",
     }
     def _diagnose_hotkey_conflict(self, desc):
         """当热键注册失败时，自动通过系统进程快照扫描潜在的冲突来源进程"""
@@ -2412,6 +2414,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             9: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(1)),
             10: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(-1)),
             11: lambda: self._schedule_after(0, self.open_decision_flow_panel),
+            12: lambda: self._schedule_after(0, self.global_toggle_spatial_follow_hud),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -6809,6 +6812,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.open_spatial_follow_hud(sector_name, auto_popup=True)
         except Exception as e:
             logger.error(f"[HUD] toggle_spatial_follow_hud 异常: {e}", exc_info=True)
+
+    def global_toggle_spatial_follow_hud(self) -> None:
+        """全局热键 Alt+U 触发：唤醒/显示/隐藏 板块跟单指挥所 SpatialFollowHUD (不判断输入框焦点)"""
+        now = time.time()
+        last_action = getattr(self, '_last_hud_toggle_t', 0.0)
+        if now - last_action < 0.25:
+            return
+        self._last_hud_toggle_t = now
+
+        try:
+            # 如果已拉起并且处于显示状态，再次按下执行自动隐藏，闭环交互！
+            if getattr(self, 'spatial_follow_hud', None) is not None and self.spatial_follow_hud.isVisible():
+                logger.info("🛸 [HUD] 检测到跟单指挥所已处于显示状态，全局热键触发自动隐藏...")
+                self.spatial_follow_hud.hide()
+                return
+
+            from sector_focus_engine import get_focus_controller
+            fc = get_focus_controller()
+            if not fc:
+                return
+                
+            hot_sectors = fc.get_hot_sectors(top_n=1)
+            if not hot_sectors:
+                # 没有任何板块突破，友好提示
+                toast_message(self, "📡 暂无板块爆发信号，监听中...")
+                return
+                
+            sector_name = hot_sectors[0]['name']
+            self.open_spatial_follow_hud(sector_name, auto_popup=True)
+        except Exception as e:
+            logger.error(f"[HUD] global_toggle_spatial_follow_hud 异常: {e}", exc_info=True)
 
     def open_strategy_scan(self):
         """一键打开策略扫描"""

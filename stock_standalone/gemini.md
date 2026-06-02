@@ -1,3 +1,49 @@
+## 2026-06-02 17:55
+- [x] **新增全局快捷键 Alt+U 隐藏与显示跟单指挥所 HUD (Implemented Alt+U Global Hotkey to Toggle Spatial Follow HUD)**：
+    - [x] **注册全局热键与回调绑定**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 和 `_HOTKEY_INFO_MAP` 注册了 `Alt+U` (ID 12)，并关联定义了 `global_toggle_spatial_follow_hud` 作为其消息响应回调。
+    - [x] **实现独立热键进程同步支持**：在 `hotkey_rotator.py` 独立热键进程的 `self.hotkey_map` 映射字典中，同步补齐了 `12: (win32con.MOD_ALT, 0x55, ...)`，确保 `Alt+U` 热键能在独立的无阻塞低延迟热键守护进程中捕获，并以管道命令 `HOTKEY_TRIGGERED` 安全回调至主进程。
+    - [x] **实现无焦点拦截的全局开关交互 (Focus-free Toggle Logic)**：新实现了 `global_toggle_spatial_follow_hud` 函数，在隐藏与显示逻辑中完全剥离了针对 Tkinter 输入框焦点的拦截判定。即使用户焦点驻留在任何 Entry/Text 输入域，均能通过 `Alt+U` 强制无感开关 HUD，并保持了原空格键非全局隐藏/显示交互的完美对齐。
+
+## 2026-06-02 17:45
+- [x] **解耦板块面板与赛马面板的宏观查询过滤，恢复左侧活跃板块全量展示 (Decoupled Macro Query Filtering from Active Sectors List in Bidding Panels)**：
+    - [x] **解耦板块联动面板左侧列表过滤 (Decoupled Sector Bidding Panel Left Table)**：移除了 `sector_bidding_panel.py` 的 `_refresh_sector_list` 中针对 `sectors` 列表的宏观查询 `self._macro_filtered_codes` 物理过滤。确保左侧活跃板块不受搜索影响、始终完整展示，极大维护了盘中监控视野的完整性。
+    - [x] **同步重构盘中赛马面板左侧列表过滤 (Decoupled Bidding Racing Panel Left Table)**：同步移除了 `bidding_racing_panel.py` 内 `update_visuals` 方法中过滤 `active_sectors` 以及在排序后对 `all_sorted_sectors` 根据领涨股命中的过滤拦截。使赛马看板的左侧板块排列恢复完整，行为表现与板块联动面板高度一致（符合 SOLID / DRY 原则）。
+    - [x] **保留并验证右侧个股与自选过滤 (Preserved Right-side Stock and Watchlist Filters)**：板块明细个股表及重点关注表（Watchlist）中依据 `self._macro_filtered_codes` 进行的个股级别过滤逻辑保持完全不变，实现了“宏观查询仅过滤个股，左侧板块显示不受影响”的精准定制要求。
+    - [x] **100% 通过静态语法及逻辑编译校验**：成功通过了 `python -m py_compile` 静态语法检验，确保工业级的交付品质。
+
+## 2026-06-02 17:25
+- [x] **重构 HUD 一键跟单内核反馈路由，修复无拒绝信息 Bug (Refactored HUD Submit Follow Kernel Dispatch & Fixed Blank Reject Reason Bug)**：
+    - [x] **区分 HOLD 与物理拒绝 (Decoupled HOLD from REJECTED)**：分析了提交跟单后，当内核综合决策为 `HOLD`（代表评分未达标如 0.5336 < 0.55，系统建议观望）而非风控硬性卡住时，原 UI 逻辑会将 `kernel_executed=False` 直接误判为“跟单被风控拒绝”并弹窗警告的缺陷。
+    - [x] **设计精准三态分流提示框 (Implemented High-Fidelity Multi-Branch Dialogue)**：在 `spatial_follow_hud.py` 的 `_on_submit_clicked` 下单反馈处重构了分流判定：
+        1. **HOLD（建议观望）状态**：采用 `QMessageBox.information` 弹窗友好提示当前内核给出观望决策，并以高可解释性展示综合评分 (Confidence)、分支形态 (Setup)、板块热度 (Heat) 以及 DFF 强度，明确提示用户其属于“合理观望”而非异常被拒。
+        2. **REJECTED（风控或内核拒绝）状态**：仅在 `allowed=False` 或 `reject_code` 存在时触发警告，并且当拒绝码缺失时通过 `RISK_BLOCKED` 自动补齐安全兜底，根治了弹窗中“拒绝码:”后方显示空白的问题。
+        3. **SUCCESS（跟单成功）状态**：仅在物理成功委托下单后弹出交易委托投递成功提示，显著提升了实盘操盘时的直觉体验与交互质量。
+
+## 2026-06-02 16:55
+- [x] **修复竞价面板关闭后再次打开无数据展示 Bug (Fixed Sector Bidding Panel Re-open Blank Data Bug)**：
+    - [x] **引入 Detector 全局性判定标记 (Global Detector Tracking)**：在 `SectorBiddingPanel.__init__` 中新增 `self._is_global_detector` 状态标志。如果 `detector` 是从主窗口 `main_window` 共享的全局唯一 `racing_detector` 实例，将其标记为 `True`，本地 fallback 创建的打分器则标记为 `False`。
+    - [x] **物理隔断全局打分器被误杀 (Prevented Global Detector Termination)**：重构了 `closeEvent` 析构回收逻辑。在关闭子面板时，仅在非全局 `detector` 时才执行 `self.detector.stop()` 来销毁线程和置位停止状态。这彻底消除了此前“关闭竞价面板后，把全局打分器的后台 `async_sector_agg_worker` 工作线程彻底退出且把 `_stop_event` 设为 `set`，导致再次打开面板时打分任务无法被工作线程消费，造成 UI 永久白屏”的特大逻辑漏洞，完美实现了竞价面板的多次开闭与实时数据的毫秒级即时载入！
+
+## 2026-06-02 17:15
+- [x] **修复 HUD 滚动重绘导致 Windows `UpdateLayeredWindowIndirect` 失败 Bug (Fixed HUD Layered Window Clipping Paint Bug)**：
+    - [x] **分析负坐标脏区根源 (Analyzed Dirty Rect Coordinate Mismatch)**：定位到在半透明无边框（`WA_TranslucentBackground`）窗口下，阴影发光效果（`QGraphicsDropShadowEffect`）和内部新引入的 `QScrollArea` 水平滚动发生冲突。由于滚动时子部件坐标变为负数，阴影模糊计算扩展后产生负坐标和超界尺寸（如 `dirty=(1368x862 -12, 88)`，超出窗口 1344 物理宽度），导致 Windows 分层窗口系统抛出“参数错误”并拒绝刷新。
+    - [x] **重构自适应布局阴影安全边界 (Implemented Layout Margins Safeguard)**：将顶级窗口 `main_layout` 的 `setContentsMargins` 由原先的 `(0, 0, 0, 0)` 物理拓宽至 `(20, 20, 20, 20)`，并在 `_init_ui` 中将阴影的 `BlurRadius` 缩紧至 `16px`。这确保了阴影的所有发光绘制完全包裹在顶级窗口物理范围内部，从物理上隔绝了脏区越界。
+    - [x] **微调无边框缩放手柄布局 (Fine-tuned SizeGrip Layout)**：配合 20px 边距，将 `resizeEvent` 中无边框拖拽 Grip 的坐标定位从 `-4px` 右下偏置微调为 `-24px`。这保证了缩放手柄精准靠在不透明 `main_frame` 的内侧右下角，既保证了物理窗口的流畅拖拽与事件接收，又彻底消除了 Windows 系统的渲染报错。
+
+## 2026-06-02 16:45
+- [x] **实现实时跟单 HUD 10板块扩容与水平鼠标滚轮跟随滚动 (Implemented HUD 10-Sectors Expansion & Horizontal Wheel/Auto-Scroll Integration)**：
+    - [x] **导航候选板块数量翻倍 (Sectors Capacity Doubled)**：将 HUD 顶层候选快捷导航按钮从 5 个翻倍扩展到 10 个，并同步将 `update_hud_data` 内部对 active 探测器和 FocusController 备用获取热度板块的切割上限由 5 提升至 10。
+    - [x] **引入 QScrollArea 平滑滚动容器 (Scrollable Candidate Layout)**：为了在有限 HUD 窗口内优雅容纳 10 个候选按钮，废弃了原有的硬编码水平容器，重构为高度限制为 28px 的 `QScrollArea` 水平滚动区（隐藏横向与纵向滚动条，无边框背景透明），完美解决按钮拥挤与溢出遮挡。
+    - [x] **实现鼠标滚轮左右滑行 (Horizontal Scroll Filter)**：创建并为 `QScrollArea.viewport()` 安装了 `HorizontalScrollFilter` 事件过滤器。精准将鼠标指针悬停在候选区时的垂直滚轮（Y方向）角度位移在后台自动映射并转换为水平滚动条（X方向）的平滑滑行，让操盘手可以通过滚轮极速浏览板块。
+    - [x] **实现自动选中跟随滚动 (Ensure Selected Visible)**：在 `update_hud_data` 设置完板块被选中状态后，通过 `QTimer.singleShot(50, ...)` 异步原子派发，自动将处于 `checked` 且 `visible` 状态的板块按钮传给 `scroll_area.ensureWidgetVisible(btn)`。无论用户是通过键盘方向键（Left/Right/Up/Down）、鼠标滚轮全局轮动，还是外部数据源切换激活，HUD 都能以极客流畅度瞬间自动将对应板块按钮滚动并呈现至可视范围中央，极致提升盘中跟单的心流体验。
+
+## 2026-06-02 16:30
+- [x] **优化板块联动监控与实时影子跟单 HUD 重点板块高强度联动 (Optimized Sector Bidding Panel & Spatial Follow HUD Priority Watchlist)**：
+    - [x] **实现活跃板块列表右键收藏自愈机制**：在 `sector_bidding_panel.py` 的板块列表上集成右键 `⭐ 设为重点关注` 与 `❌ 取消重点关注` 交互菜单，并双向绑定了 `_save_ui_state()` 与 `_restore_ui_state()`，实现跨会话的 UI 状态持久化。
+    - [x] **新增可视化重点关注标示**：在板块联动面板列表渲染 `_refresh_sector_list` 时，对于已设为重点关注的板块，第一列板块名称前增加 `⭐` 前缀标志，最后一列 tags 前缀增加 `[★重点]` 标签进行高辨识度醒目展现。
+    - [x] **实现重点板块强排序置顶优先级**：在 Python 级排序中引入 `is_fav` 权重主键 `(is_fav(x), 属性值)`。在默认状态及手动点击表头排序时，重点板块在降序下完美置顶，实现了排序时重点板块优先排列。
+    - [x] **打通实时跟单 HUD 重点异动高优置顶感知 (HUD Priority Sync)**：在 `spatial_follow_hud.py` 中，通过 `_get_favorite_sectors` 跨进程/面板安全获取重点收藏数据，并实现 `_get_prioritized_active_sectors` 对话框重排算法。在 HUD 的冷启动定位、候选导航生成以及定时脏刷新寻址中，优先读取并推荐已被列为重点关注的板块及其个股异动。当关注重点板块少于 5 个时，平滑混合填充其他热门活跃板块，物理达成 100% 极客操盘看盘视野。
+
 ## 2026-06-02 15:30
 - [x] **修复赛马历史查询下拉框长表达式截断与高度计算重影 Bug (Fixed Racing History Query Dropdown Clipping & Overlapping)**：
     - [x] **物理加固 `HitHighlightDelegate.sizeHint` 可用宽度判定**：引入了基于 `option.widget.minimumWidth()` 的最大值合并兜底机制。即使在高频刷新或冷启动时下拉视图尚未完全显示使得 `viewport().width()` 返回 `0` 或小数值，系统也能准确提取预设的最小宽度（`650px`），彻底解决了因此导致的高度估算偏大及排版重影的顽疾。
