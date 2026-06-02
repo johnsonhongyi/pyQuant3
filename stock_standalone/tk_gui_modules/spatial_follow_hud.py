@@ -141,19 +141,17 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
 
     def _get_favorite_sectors(self) -> set:
         """获取重点关注板块的集合"""
-        if self.main_app:
-            panel = getattr(self.main_app, 'sector_bidding_panel', None)
-            if panel and hasattr(panel, 'favorite_sectors'):
-                return panel.favorite_sectors
-        return set()
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_sectors()
 
     def _get_favorite_stocks(self) -> set:
         """获取重点关注个股的集合"""
-        if self.main_app:
-            panel = getattr(self.main_app, 'sector_bidding_panel', None)
-            if panel and hasattr(panel, 'favorite_stocks'):
-                return panel.favorite_stocks
-        return set()
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_stocks()
+
+    def _on_favorites_changed(self):
+        # 跨线程安全派发到 Qt 主线程
+        QtCore.QTimer.singleShot(0, lambda: self.update_hud_data(self.sector_name))
 
     def _get_prioritized_active_sectors(self, detector) -> list:
         """获取重排后的活跃板块列表，重点关注板块优先"""
@@ -271,6 +269,10 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         # 此期间禁止一切被动 resize 触发存盘，彻底秒杀首次显示时由于 Layout 自适应导致列宽文件被覆盖损毁的大 Bug！
         self._boot_locked = True
         QtCore.QTimer.singleShot(1500, lambda: setattr(self, '_boot_locked', False))
+
+        # Subscribe to global favorites
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
 
     def _load_stays_on_top(self) -> bool:
         """从 window_config.json 加载置顶状态"""
@@ -2179,9 +2181,17 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
                 btn.click()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        # 在退出/隐藏时物理持久化列宽和窗口坐标
+        # 在退出/隐藏时物理持久化列宽 and 窗口坐标
         self._save_column_widths()
         self.save_window_position_qt_visual(self, "SpatialFollowHUD")
+        
+        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"[SpatialFollowHUD] Failed to unsubscribe favorites: {e}")
+            
         super().closeEvent(event)
 
     def hideEvent(self, event: QtGui.QHideEvent) -> None:

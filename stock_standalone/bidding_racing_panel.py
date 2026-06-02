@@ -1288,12 +1288,21 @@ class SectorDetailDialog(QDialog, WindowMixin):
         # 预计算合成评分 (用于锁外高性能排序)
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
 
+        # [GlobalFavorites] 从单例读取重点关注个股，用于排序置顶
+        try:
+            from global_favorites import GlobalFavoriteManager
+            _fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            _fav_stocks = set()
+        
         # [🚀 极限性能] 预提取所有排序所需属性，避免 lambda 内部重复 lookup
         sort_payload = []
         for ts in data_list:
             has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in sbc_registry
-            prio = 2 if has_sbc else (1 if has_alert else 0)
+            is_fav = ts.code in _fav_stocks
+            # prio: 3=重点关注 > 2=SBC破位 > 1=报警 > 0=普通
+            prio = 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
             
             cp = getattr(ts, 'current_pct', 0) or 0
             pd = getattr(ts, 'pct_diff', 0) or 0
@@ -1309,7 +1318,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 s_key = (prio, str(val), ts.code)
             else:
                 s_key = (val if val is not None else 0, ts.code)
-            sort_payload.append((s_key, ts, prio, has_alert, has_sbc))
+            sort_payload.append((s_key, ts, prio, has_alert, has_sbc, is_fav))
         
         # [🚀 排序优化] 使用 Top-K 堆排序算法：O(N log K)
         # 针对大数据量场景（如全A股），仅提取 Top-K 标的进行渲染，性能提升 5-10 倍
@@ -1324,7 +1333,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         flattened = []
         seen_codes_render = set()
-        for s_key, ts, prio, is_alerted, is_sbc in sort_payload:
+        for s_key, ts, prio, is_alerted, is_sbc, is_fav in sort_payload:
             # [🚀 渲染去重] 即使 sort_payload 中由于某些极端情况存在重复 ts，渲染前也必须拦截
             # 统一提取 6 位标准代码作为排他性 ID
             r_code = _RE_NON_DIGIT.sub('', str(ts.code))[-6:].zfill(6)
@@ -1358,7 +1367,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 getattr(ts, 'pct_diff', 0) or 0,
                 dff2,
                 reason,
-                is_alerted # 传给渲染器
+                is_alerted, # 传给渲染器
+                is_fav,     # [GlobalFavorites] 重点关注标志
             ))
 
         total = len(data_list)
@@ -1380,13 +1390,22 @@ class SectorDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted = row
+            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted, is_fav = row
             
             # [⚡ 报警核验]
             # is_alerted = get_alert_manager().is_alerted(code) # 已在 refresh_data 预计算
             bg_c = QColor("#4B0082") if is_alerted else None
             txt_c = QColor("#FFFFFF") if is_alerted else None
-            d_name = f"🔔{name}" if is_alerted else name
+            # 名称装饰：重点个股 ⭐ 优先于报警 🔔
+            if is_fav:
+                d_name = f"⭐ {name}"
+                if not is_alerted:
+                    bg_c = QColor("#1A2A1A")  # 深绿底色区分重点关注
+                    txt_c = QColor("#00FF88")
+            elif is_alerted:
+                d_name = f"🔔{name}"
+            else:
+                d_name = name
 
             self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
             self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
@@ -2497,6 +2516,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.refresh_timer.start(200) # [⚡ 性能均衡] 5FPS 既能满足实时感，又能大幅降低 CPU 负载
         
         QTimer.singleShot(5000, self._check_auto_anchor)
+        
+        # [GlobalFavorites] 注册订阅，任何面板（竞价/HUD）变更 favorites 后立即刷新本面板
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -3566,6 +3589,36 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if code_item and name_item:
             self._on_stock_clicked(code_item.text(), name_item.text())
 
+    @property
+    def favorite_sectors(self) -> set:
+        """直接从 GlobalFavoriteManager 单例读取，无需中转竞价面板。"""
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_sectors()
+
+    @property
+    def favorite_stocks(self) -> set:
+        """直接从 GlobalFavoriteManager 单例读取，无需中转竞价面板。"""
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_stocks()
+
+    def _on_favorites_changed(self):
+        """GlobalFavoriteManager 回调：跨线程安全派发到 Qt 主线程刷新 UI。"""
+        QTimer.singleShot(0, self.update_visuals)
+
+    def _toggle_favorite_stock(self, code: str):
+        """切换个股重点关注状态，通过 GlobalFavoriteManager 原子更新并广播。"""
+        clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
+        from global_favorites import GlobalFavoriteManager
+        action = GlobalFavoriteManager().toggle_favorite_stock(clean_code)
+        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {clean_code}")
+
+    def _toggle_favorite_sector(self, sector_name: str):
+        """切换板块重点关注状态，通过 GlobalFavoriteManager 原子更新并广播。"""
+        clean_sector = sector_name.replace("⭐ ", "").strip()
+        from global_favorites import GlobalFavoriteManager
+        action = GlobalFavoriteManager().toggle_favorite_sector(clean_sector)
+        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点板块: {clean_sector}")
+
     def _on_stock_context_menu(self, pos):
         """个股表右键菜单"""
         item = self.stock_table.itemAt(pos)
@@ -3576,6 +3629,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        # [NEW] 重点关注个股切换支持
+        clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
+        fav_stocks = self.favorite_stocks
+        if clean_code in fav_stocks:
+            act_fav = menu.addAction("❌ 取消重点个股")
+        else:
+            act_fav = menu.addAction("⭐ 设为重点个股")
+        act_fav.triggered.connect(lambda: self._toggle_favorite_stock(clean_code))
+        
+        menu.addSeparator()
         
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_context_viz"))
@@ -3596,14 +3660,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
         menu.addSeparator()
         
-        # # [NEW] 重置活跃功能
-        # selected_rows = sorted(list(set([it.row() for it in self.stock_table.selectedItems()])))
-        # if not selected_rows: selected_rows = [row]
-        
-        # title_reset = f"🔄 重置活跃 ({len(selected_rows)}只)" if len(selected_rows) > 1 else f"🔄 重置活跃 ({name})"
-        # act_reset = menu.addAction(title_reset)
-        # act_reset.triggered.connect(lambda: self._reset_stock_active(selected_rows))
-
         # [🚀 全局重置] 用户明确要求：重置活跃是全局重置，不是针对单个
         act_reset = menu.addAction("🔄 重置全局活跃")
         act_reset.triggered.connect(self._reset_stock_active)
@@ -3612,7 +3668,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
         ma = getattr(self, 'main_app', None)
         if ma and hasattr(ma, 'tk_dispatch_queue'):
-            clean_name = name.replace("🔔", "").strip()
+            clean_name = name.replace("🔔", "").replace("⭐ ", "").replace("⚡", "").strip()
             menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: ma.tk_dispatch_queue.put(
                 lambda: ma.add_voice_monitor_dialog(c, n) if hasattr(ma, 'add_voice_monitor_dialog') else None
             ))
@@ -3643,8 +3699,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         if codes:
             self.detector.reset_stock_active(codes)
-            logger.info(f"🔄 [RacingPanel] 用户手动重置了 {len(codes)} 只个股的活跃计数")
-            # 立即触发一次 UI 刷新（通过版本号间接或直接刷新）
+            logger.info(f"🔄 [RacingPanel] 用户手动重置了 {len(codes)} 只个股 of active counts")
+            # 立即触发一次 UI 刷新
             self.update_visuals()
 
     def _on_sector_context_menu(self, pos):
@@ -3652,34 +3708,53 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         item = self.sector_table.itemAt(pos)
         if not item: return
         row = item.row()
-        leader_item = self.sector_table.item(row, 3)
-        if not leader_item: return
         
-        text = leader_item.text()
-        match = _RE_BRACKET_CODE.search(text)
-        if match:
-            code = match.group(1)
-            name = text.split("(")[0].strip()
-            
-            menu = QMenu(self)
-            menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
-            
-            act_viz = menu.addAction(f"📊 联动可视化 (龙头: {name})")
-            act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_sector_context_viz"))
-            
-            # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
-            ma = getattr(self, 'main_app', None)
-            if ma and hasattr(ma, 'tk_dispatch_queue'):
+        sec_name_item = self.sector_table.item(row, 0)
+        if not sec_name_item: return
+        sector_name = sec_name_item.data(Qt.ItemDataRole.UserRole)
+        if not sector_name:
+            sector_name = sec_name_item.text().replace("⭐ ", "").strip()
+        if not sector_name: return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        # [NEW] 重点关注板块切换支持
+        clean_sector = sector_name.replace("⭐ ", "").strip()
+        fav_sectors = self.favorite_sectors
+        if clean_sector in fav_sectors:
+            act_fav = menu.addAction("❌ 取消重点板块")
+        else:
+            act_fav = menu.addAction("⭐ 设为重点板块")
+        act_fav.triggered.connect(lambda: self._toggle_favorite_sector(clean_sector))
+        
+        # Check if leader info is available
+        leader_item = self.sector_table.item(row, 3)
+        if leader_item:
+            text = leader_item.text()
+            match = _RE_BRACKET_CODE.search(text)
+            if match:
+                code = match.group(1)
+                name = text.split("(")[0].strip()
+                
                 menu.addSeparator()
-                clean_name = name.replace("🔔", "").strip()
-                menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: ma.tk_dispatch_queue.put(
-                    lambda: ma.add_voice_monitor_dialog(c, n) if hasattr(ma, 'add_voice_monitor_dialog') else None
-                ))
-                menu.addAction("🚀 发送到关联软件", lambda c=code: ma.tk_dispatch_queue.put(
-                    lambda: ma.original_push_logic(c) if hasattr(ma, 'original_push_logic') else None
-                ))
-            
-            menu.exec(self.sector_table.viewport().mapToGlobal(pos))
+                
+                act_viz = menu.addAction(f"📊 联动可视化 (龙头: {name})")
+                act_viz.triggered.connect(lambda: self._execute_linkage(code, name, source="racing_sector_context_viz"))
+                
+                # 🚀 [NEW] tk_dispatch_queue 语音预警与推送逻辑 (避开 GIL)
+                ma = getattr(self, 'main_app', None)
+                if ma and hasattr(ma, 'tk_dispatch_queue'):
+                    menu.addSeparator()
+                    clean_name = name.replace("🔔", "").replace("⭐ ", "").replace("⚡", "").strip()
+                    menu.addAction("🔔 加入语音预警", lambda c=code, n=clean_name: ma.tk_dispatch_queue.put(
+                        lambda: ma.add_voice_monitor_dialog(c, n) if hasattr(ma, 'add_voice_monitor_dialog') else None
+                    ))
+                    menu.addAction("🚀 发送到关联软件", lambda c=code: ma.tk_dispatch_queue.put(
+                        lambda: ma.original_push_logic(c) if hasattr(ma, 'original_push_logic') else None
+                    ))
+        
+        menu.exec(self.sector_table.viewport().mapToGlobal(pos))
 
     def keyPressEvent(self, event):
         """支持 Enter 键快速触发联动"""
@@ -3713,7 +3788,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """双击打开板块领军个股详情弹窗"""
         item = self.sector_table.item(row, 0) # 板块名称列
         if not item: return
-        sec_name = item.text()
+        sec_name = item.data(Qt.ItemDataRole.UserRole) or item.text().replace("⭐ ", "").strip()
         self._open_sector_detail(sec_name)
 
     def _open_sector_detail(self, sec_name):
@@ -4339,6 +4414,13 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行所有定时器彻底注销与原子联行保存"""
+        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"[BiddingRacingRhythmPanel] Failed to unsubscribe favorites: {e}")
+
         # [⭐ 新增] 退出前安全暂停后台回测工作，释放算力
         worker = getattr(self, 'replay_worker', None)
         if worker and getattr(worker, 'is_running', False) and not getattr(worker, 'is_paused', True):
@@ -5193,8 +5275,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             # 宽放个股显示阈值，确保午盘休息时不仅能看到之前的龙头，也能看到活跃个股
             # [NEW] 🧬 UI 阶段过滤：先按原有流程跑完活跃筛选
             if self._is_macro_active and not getattr(self, "_force_full_view", False):
-                # 宏观过滤模式下，允许穿透展示所有匹配个股 (不受 0.001/0.05 等活跃阈值限制)
-                active_ts = [ts for ts in raw_ts_list if ts.code in self._macro_filtered_codes_set]
+                # 宏观过滤模式下，允许穿透展示所有匹配个股 (不受 0.001/0.05 等活跃阈值限制) 或者是重点个股
+                active_ts = [ts for ts in raw_ts_list if ts.code in self._macro_filtered_codes_set or ts.code in self.favorite_stocks]
             else:
                 # [FIX] 当执行清空或者查询为空时，还原完整数据集，显示全部数据
                 active_ts = raw_ts_list
@@ -5206,7 +5288,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             for ts in active_ts:
                 role = get_racing_role(ts)
                 dist[role] += 1
-                if not sel_cat or role == sel_cat:
+                if not sel_cat or role == sel_cat or ts.code in self.favorite_stocks:
                     filtered_ts.append(ts)
 
             # [🚀 性能优化] 预计算所有过滤后个股的合成评分，避免在排序循环中重复计算
@@ -5290,7 +5372,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 
                 # [🚀 扩展展示] 宏观查询模式下，展示更多命中个股 (100只)，普通模式仅 Top 20
                 limit_stock = 100 if self._is_macro_active else 20
-                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)[:limit_stock]
+                sorted_raw = sorted(filtered_ts, key=get_stock_sort_key, reverse=is_rev)
+                # 稳定二次排序：确保重点关注的个股以及龙头在任何情况下都在最顶层优先展示
+                def get_favorite_and_role_priority(ts):
+                    is_fav = 1 if ts.code in self.favorite_stocks else 0
+                    is_leader = 1 if get_racing_role(ts) == "龙头" else 0
+                    return (is_fav, is_leader)
+                sorted_raw.sort(key=get_favorite_and_role_priority, reverse=True)
+                sorted_raw = sorted_raw[:limit_stock]
                 flattened_ts = [flatten_ts(ts) for ts in sorted_raw]
                 
                 self.stock_table.blockSignals(True)
@@ -5315,6 +5404,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     key=lambda x: (get_sec_val(x, s_attr_sec), x.get('sector', '')), 
                     reverse=is_rev_sec
                 )
+                # 稳定二次排序：确保重点关注的板块在任何情况下都在最顶层优先展示
+                all_sorted_sectors.sort(key=lambda x: 1 if x.get('sector', '') in self.favorite_sectors else 0, reverse=True)
 
 
 
@@ -5392,12 +5483,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
 
 
-    def _update_cell(self, table, row, col, val, color=None, align=None, is_numeric=True, bg_color=None, sort_prio=None, fmt=None):
+    def _update_cell(self, table, row, col, val, color=None, align=None, is_numeric=True, bg_color=None, sort_prio=None, fmt=None, text_override=None):
         it = table.item(row, col)
         
         # [🚀 极限性能] 数值脏检查：跳过昂贵的 f-string 格式化与 setText
         if it and it.data(Qt.ItemDataRole.UserRole) == val:
             changed = False
+            if text_override is not None and it.text() != text_override:
+                it.setText(text_override)
+                changed = True
             if sort_prio is not None and hasattr(it, 'sort_prio') and it.sort_prio != sort_prio:
                 it.sort_prio = sort_prio
                 changed = True
@@ -5409,7 +5503,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 changed = True
             return changed
 
-        text = fmt.format(val) if (fmt and val is not None) else str(val if val is not None else "")
+        text = text_override if text_override is not None else (fmt.format(val) if (fmt and val is not None) else str(val if val is not None else ""))
         if not it:
             if sort_prio is not None:
                 it = LabeledStockItem(text, sort_prio) # 专门处理带图标排序
@@ -5460,8 +5554,12 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 display_name = f"⚡{display_name}"
                 sort_p = 2
 
+            clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
+            if clean_code in self.favorite_stocks:
+                display_name = f"⭐ {display_name}"
+
             self._update_cell(table, i, 0, display_code, color=txt_c, is_numeric=False, bg_color=bg_c)
-            self._update_cell(table, i, 1, display_name, color=txt_c, is_numeric=False, bg_color=bg_c, sort_prio=sort_p)
+            self._update_cell(table, i, 1, name, color=txt_c, is_numeric=False, bg_color=bg_c, sort_prio=sort_p, text_override=display_name)
             if self._update_cell(table, i, 2, score, color=self._UI_CACHE["COLOR_GOLD"], fmt="{:.1f}"):
                 if not is_first_init: self._table_highlights[("stock", code, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("stock", code, 2))
@@ -5506,7 +5604,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             
         for i, sec in enumerate(sectors):
             s_name = sec.get('sector', '未知')
-            self._update_cell(table, i, 0, s_name, is_numeric=False)
+            display_s_name = f"⭐ {s_name}" if s_name in self.favorite_sectors else s_name
+            self._update_cell(table, i, 0, s_name, is_numeric=False, text_override=display_s_name)
             
             # 1. 强度得分
             score = round(sec.get('score', 0), 1)

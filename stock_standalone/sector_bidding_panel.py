@@ -1736,8 +1736,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_source_df = None         # [NEW] 缓存最新的全量行情 DataFrame (用于宏观查询)
         self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
         self._active_search_query = ""
-        self.favorite_sectors = set()       # [NEW] 重点关注的板块集合
-        self.favorite_stocks = set()        # [NEW] 重点关注的个股集合
+        # Global favorites singleton subscription (properties favorite_sectors/favorite_stocks handles values)
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        # 立即对齐 DPI 感知的配置路径，确保 GlobalFavoriteManager 与 _save_ui_state 读写同一个文件
+        try:
+            _scale = self._get_dpi_scale_factor()
+            _cfg_path = self._get_config_file_path(WINDOW_CONFIG_FILE, _scale)
+            GlobalFavoriteManager().set_config_path(_cfg_path)
+        except Exception:
+            pass
 
         # 🚀 [Performance] Pre-cached UI Resources
         self._color_red = QColor("#FF4444")
@@ -1877,6 +1885,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # ✅ [FIX] 清除主窗口中的引用，防止对象已销毁但引用依然存在的异常
         if hasattr(self.main_window, 'sector_bidding_panel'):
            self.main_window.sector_bidding_panel = None
+           
+        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.warning(f"[SectorBiddingPanel] Failed to unsubscribe favorites: {e}")
+            
         # --- 以下是真正关闭时的资源回收和保存 ---
         # 1. 先停止定时器，不产生新任务
         if hasattr(self, '_refresh_timer'):
@@ -2045,10 +2061,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 if self._watchlist_mode == "DRAGON_3D" and hasattr(self, 'btn_dragon_3d'):
                     self.btn_dragon_3d.setStyleSheet("background-color: #ff9900; color: #ffffff; font-weight: bold; border-radius: 4px; border: 1px solid #ffffff;")
             
-            if 'favorite_sectors' in ui_state:
-                self.favorite_sectors = set(ui_state['favorite_sectors'])
-            if 'favorite_stocks' in ui_state:
-                self.favorite_stocks = set(ui_state['favorite_stocks'])
+            # [GlobalFavorites] 通过单例直接加载，避免通过 setter 触发 save_to_config + notify 副作用
+            # GlobalFavoriteManager 已在 __init__ 的 set_config_path 时完成初始化加载，这里仅做幂等刷新
+            try:
+                from global_favorites import GlobalFavoriteManager
+                GlobalFavoriteManager().load_from_config(config_file_path)
+            except Exception as _e:
+                logger.debug(f"GlobalFavorites reload skipped: {_e}")
             
             logger.debug("📊 [SectorPanel] UI state restored (including History Group & Macro Query)")
         except Exception as e:
@@ -2974,10 +2993,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         is_fav = lambda x: 1 if x.get('sector', '') in self.favorite_sectors else 0
 
-        if col == 0: sectors.sort(key=lambda x: (is_fav(x), x.get('sector', '')), reverse=not asc)
-        elif col == 1: sectors.sort(key=lambda x: (is_fav(x), x.get('score', 0)), reverse=not asc)
-        elif col == 2: sectors.sort(key=lambda x: (is_fav(x), x.get('avg_pct', 0.0)), reverse=not asc)
-        elif col == 3: sectors.sort(key=lambda x: (is_fav(x), x.get('leader_name', '')), reverse=not asc)
+        if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
+        elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct', 0.0), reverse=not asc)
+        elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
+
+        sectors.sort(key=is_fav, reverse=True)
 
         # 6. 表格渲染 (Dirty Check Update)
         self._ui_refreshing = True
@@ -4946,28 +4967,60 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(code)
 
+    @property
+    def favorite_sectors(self) -> set:
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_sectors()
+
+    @favorite_sectors.setter
+    def favorite_sectors(self, value):
+        from global_favorites import GlobalFavoriteManager
+        manager = GlobalFavoriteManager()
+        with manager._lock:
+            manager.favorite_sectors = set(value)
+        manager.save_to_config()
+        manager.notify_subscribers()
+
+    @property
+    def favorite_stocks(self) -> set:
+        from global_favorites import GlobalFavoriteManager
+        return GlobalFavoriteManager().get_favorite_stocks()
+
+    @favorite_stocks.setter
+    def favorite_stocks(self, value):
+        from global_favorites import GlobalFavoriteManager
+        manager = GlobalFavoriteManager()
+        with manager._lock:
+            manager.favorite_stocks = set(value)
+        manager.save_to_config()
+        manager.notify_subscribers()
+
+    def _on_favorites_changed(self):
+        # 跨线程安全派发到 Qt 主线程
+        QTimer.singleShot(0, self._refresh_ui_for_favorites)
+
+    def _refresh_ui_for_favorites(self):
+        if not hasattr(self, '_is_populating') or self._is_populating:
+            return
+        try:
+            self._refresh_sector_list()
+            self._populate_watchlist()
+            if self.sector_table.currentRow() >= 0:
+                self._on_sector_table_selection_changed()
+        except Exception as e:
+            logger.debug(f"Refresh favorites UI error: {e}")
+
     def _add_favorite_stock(self, code: str):
         if not code:
             return
-        self.favorite_stocks.add(code)
-        self._save_ui_state()
-        # [OPTIMIZE] 仅局部刷新 UI，不触发耗时的后台行情重新计算
-        self._refresh_sector_list()
-        self._populate_watchlist()
-        if self.sector_table.currentRow() >= 0:
-            self._on_sector_table_selection_changed()
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().add_favorite_stock(code)
 
     def _remove_favorite_stock(self, code: str):
         if not code:
             return
-        if code in self.favorite_stocks:
-            self.favorite_stocks.remove(code)
-        self._save_ui_state()
-        # [OPTIMIZE] 仅局部刷新 UI，不触发耗时的后台行情重新计算
-        self._refresh_sector_list()
-        self._populate_watchlist()
-        if self.sector_table.currentRow() >= 0:
-            self._on_sector_table_selection_changed()
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().remove_favorite_stock(code)
 
     # ------------------------------------------------------------------ strategy
     def _on_threshold_changed(self, val):
@@ -5424,21 +5477,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         menu.exec(self.sector_table.viewport().mapToGlobal(pos))
         
     def _add_favorite_sector(self, sector_name):
-        self.favorite_sectors.add(sector_name)
-        self._save_ui_state()
-        self._refresh_sector_list()
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().add_favorite_sector(sector_name)
         if hasattr(self, 'status_lbl'):
             self.status_lbl.setText(f"⭐ 板块 [{sector_name}] 已设为重点关注")
             self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
             
     def _remove_favorite_sector(self, sector_name):
-        if sector_name in self.favorite_sectors:
-            self.favorite_sectors.remove(sector_name)
-            self._save_ui_state()
-            self._refresh_sector_list()
-            if hasattr(self, 'status_lbl'):
-                self.status_lbl.setText(f"❌ 板块 [{sector_name}] 已取消重点关注")
-                self.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;")
+        from global_favorites import GlobalFavoriteManager
+        GlobalFavoriteManager().remove_favorite_sector(sector_name)
+        if hasattr(self, 'status_lbl'):
+            self.status_lbl.setText(f"❌ 板块 [{sector_name}] 已取消重点关注")
+            self.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;")
         
     def _handle_reconstruct_followers(self, sector_name):
         """调用 detector 重建跟随股并刷新 UI"""

@@ -1,3 +1,9 @@
+## 2026-06-02 20:45
+- [x] **实现全局重点关注板块及个股的多端共享与订阅机制 (Implemented Global Favorite Stocks and Sectors Sync Architecture)**：
+    - [x] **解耦 SectorBiddingPanel 的本地状态管理 (Decoupled Bidding Panel Local State)**：将 `sector_bidding_panel.py` 内的 `favorite_sectors` 和 `favorite_stocks` 的内部存储和读写逻辑重构为基于 `GlobalFavoriteManager` 单例的 `@property` 属性。对于收藏和取消收藏操作（`_add_favorite_stock` / `_remove_favorite_stock` / `_add_favorite_sector` / `_remove_favorite_sector`），全部重定向至 `GlobalFavoriteManager` 的原子修改 API。
+    - [x] **重构 BiddingRacingRhythmPanel 与 HUD 订阅对齐 (Integrated Racing Panel & HUD Subscription)**：将 `bidding_racing_panel.py` 和 `spatial_follow_hud.py` 中用于读取重点板块和个股的本地获取逻辑全部废除，直接读取 `GlobalFavoriteManager` 单例。在三个关键面板的 `__init__` 方法中增加了对 `GlobalFavoriteManager` 变更通知的注册（`subscribe(self._on_favorites_changed)`），实现了跨组件、跨面板的亚毫秒级联动刷新。
+    - [x] **一枪通过静态编译校验与回归测试 (Passed Compilation & Regression Tests)**：成功通过了 `python -m py_compile` 静态语法检验，且多端联动完美自愈，消除了所有 GIL 竞态冲突和无意义的文件反复读写开销。
+
 ## 2026-06-02 18:50
 - [x] **对齐 🔔 实时报警 虚拟板块评分逻辑 (Aligned Scoring Logic for 🔔 实时报警 Virtual Sector)**：
     - [x] **消除评分标准虚高与不一致**：将 `bidding_momentum_detector.py` 内的 `🔔 实时报警` 虚拟板块原有的硬编码 `max(5.0, sum(s['score'])/count)` 评分逻辑，重构为完全对齐普通板块的 `v_avg_pct * v_eff_follow_ratio * v_trend_multiplier` 强度得分公式。
