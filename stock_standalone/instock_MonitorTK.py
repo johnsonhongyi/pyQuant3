@@ -3936,10 +3936,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 过滤杂音（成员小于 2 的板块通常没代表性，对齐其它模块）
         agg_df = agg_df[agg_df['count'] >= 2]
         
-        # 5. 计算综合得分 (针对总览模式优化的公式)
-        # Score = avg_percent * (1 + bullish_ratio)
-        # 这样既考虑了当日爆发力，也考虑了板块结构性。
-        agg_df['score'] = agg_df['avg_percent'] * (1.0 + agg_df['bullish_ratio'])
+        # 5. 计算综合得分 (针对总览模式优化的公式) 并放大 10 倍以保持评分尺度一致
+        agg_df['score'] = agg_df['avg_percent'] * (1.0 + agg_df['bullish_ratio']) * 10.0
         
         # 6. 排序并取 TopN
         # reverse=True: 领涨优先; reverse=False: 领跌优先
@@ -4092,8 +4090,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
             score *= trend_multiplier
             
-            # 保留两位小数
-            score = round(score, 2)
+            # 保留两位小数，并放大 10 倍以提升梯度和辨识度
+            score = round(score * 10.0, 2)
             avg_percent = round(avg_percent, 2)
             follow_ratio = round(follow_ratio, 2)
             

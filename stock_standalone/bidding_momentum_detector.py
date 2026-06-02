@@ -3909,8 +3909,8 @@ class BiddingMomentumDetector:
             if eff_follow_ratio < 0.5 and abs(avg_pct) > 2.0:
                 eff_follow_ratio = 0.5
 
-            # 最终板分公式：对齐 get_following_concepts_by_correlation 评分公式，使数值及排序完全一致
-            board_score = avg_pct * eff_follow_ratio * trend_multiplier
+            # 最终板分公式：对齐 get_following_concepts_by_correlation 评分公式，并乘以 10 放大以提升梯度与辨识度
+            board_score = avg_pct * eff_follow_ratio * trend_multiplier * 10.0
 
             # 🎯 [Detector-Diag] 特别针对重点题材输出诊断日志，供调试分析
             if "共封装光学" in sector or "CPO" in sector or "AI PC" in sector:
@@ -3981,7 +3981,6 @@ class BiddingMomentumDetector:
 
                 if day_open > 0 and isinstance(l_data.get('price'), (int, float)) and l_data.get('price') > day_open:
                     tags.append("高走")
-                
                 # 记录竞价情绪
                 now_t = int(time.strftime("%H%M"))
                 if 920 <= now_t <= 925:
@@ -3990,12 +3989,12 @@ class BiddingMomentumDetector:
                 if 1300 <= now_t <= 1310: tags.append("午后异动")
                 
                 # [NEW] 主流延续性标签：如果龙头是昨日选股器选出的强势股，且板块强势
-                if leader_code in self.stock_selector_seeds and board_score > 5.5:
+                if leader_code in self.stock_selector_seeds and board_score > 55.0:
                     tags.append("🔥 延续")
             
             # [NEW] 标记板块类型
             sector_type = "📈 跟随"
-            if board_score > 6.0 and (leader_pct > 5.0 or s_top0_sum > 0) and follow_ratio > 0.4: sector_type = "🔥 强攻"
+            if board_score > 60.0 and (leader_pct > 5.0 or s_top0_sum > 0) and follow_ratio > 0.4: sector_type = "🔥 强攻"
             elif any(s.get('is_accumulating') for s in stocks) or (sum(s.get('ral', 0) for s in stocks)/len(stocks) > 12):
                 sector_type = "♨️ 蓄势"
             elif any(s.get('is_reversal') for s in stocks):
@@ -4005,7 +4004,7 @@ class BiddingMomentumDetector:
             
             # 联动板块分析 (精简版) - [OPTIMIZED] 仅对强势、有活力的龙头板块计算联动以节省 CPU
             linked_concepts = []
-            if board_score >= 5.0 or abs(leader_pct) >= 1.0:
+            if board_score >= 50.0 or abs(leader_pct) >= 1.0:
                 leader_concepts = [c.strip() for c in _RE_CAT_SPLIT.split(l_data['category']) if c.strip() and len(c.strip()) <= 30]
                 if leader_concepts:
                     for concept in leader_concepts:
@@ -4165,7 +4164,7 @@ class BiddingMomentumDetector:
                     # 虚拟板块始终保持 100% 联动，所以 follow_ratio = 1.0
                     v_eff_follow_ratio = 1.0
                     
-                    v_board_score = v_avg_pct * v_eff_follow_ratio * v_trend_multiplier
+                    v_board_score = v_avg_pct * v_eff_follow_ratio * v_trend_multiplier * 10.0
                     
                     # 虚拟板块锚点保护
                     if v_sector not in self.sector_anchors:
