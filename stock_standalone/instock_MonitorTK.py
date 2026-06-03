@@ -703,6 +703,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.racing_detector = None
                 logger.error(f"⚠️ BiddingMomentumDetector 初始化失败: {rd_e}")
 
+            # 🚀 [NEW] 初始化情绪反转引擎与决策 FSM 状态机
+            try:
+                from market_sentiment_fsm import MarketSentimentFSM
+                from auction_decision_engine import AuctionDecisionEngine
+                self.sentiment_fsm = MarketSentimentFSM()
+                self.sentiment_fsm.load_latest_snapshot()
+                self.auction_engine = AuctionDecisionEngine(self.sentiment_fsm)
+                logger.info("✅ MarketSentimentFSM & AuctionDecisionEngine 成功全局就绪")
+            except Exception as se_e:
+                self.sentiment_fsm = None
+                self.auction_engine = None
+                logger.error(f"⚠️ 情绪状态机/竞价引擎全局初始化失败: {se_e}")
+
             logger.info(f"✅ RealtimeDataService (Global) 已就绪 (Main PID: {os.getpid()})")
             
             self._last_ui_heartbeat = time.time()
@@ -1529,6 +1542,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             now_time = now_dt.hour * 100 + now_dt.minute
             is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
 
+            # 🚀 [NEW] Sentiment Reversal Engine 09:25 AM Auction Gateway
+            if is_trade_day and now_time == 925:
+                if not getattr(self, "_bg_auction_gate_run_today", "") == today_str:
+                    self._bg_auction_gate_run_today = today_str
+                    try:
+                        self.executor.submit(self.run_auction_reversal_strategy, today_str)
+                    except Exception as ae:
+                        logger.error(f"[BgKernel] Failed to submit run_auction_reversal_strategy: {ae}")
+
             executed = []
             blocked = []
             errors = []
@@ -1800,6 +1822,95 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.warning(f"Error in bg_kernel_auto_execute_once: {e}")
         finally:
             self._bg_kernel_executing = False
+
+
+    def run_auction_reversal_strategy(self, today_str: str):
+        """
+        09:25 集合竞价结束、开盘前，触发情绪翻转与修复策略信号生成并投递执行。
+        """
+        logger.info(f"⚡ [AuctionGate] Starting pre-market auction sentiment reversal strategy for {today_str}...")
+        try:
+            # 1. 确保 BiddingMomentumDetector 存在
+            if not getattr(self, "racing_detector", None):
+                logger.warning("[AuctionGate] BiddingMomentumDetector is not initialized. Bypassing.")
+                return
+
+            # 如果 FSM 或 Engine 尚未初始化，则在此处惰性加载
+            if not getattr(self, "sentiment_fsm", None) or not getattr(self, "auction_engine", None):
+                from market_sentiment_fsm import MarketSentimentFSM
+                from auction_decision_engine import AuctionDecisionEngine
+                self.sentiment_fsm = MarketSentimentFSM()
+                self.sentiment_fsm.load_latest_snapshot()
+                self.auction_engine = AuctionDecisionEngine(self.sentiment_fsm)
+
+            # 2. 检查前一日情绪快照是否加载成功
+            if not self.sentiment_fsm.yesterday_snapshot:
+                # 尝试再次加载
+                self.sentiment_fsm.load_latest_snapshot()
+                if not self.sentiment_fsm.yesterday_snapshot:
+                    logger.warning("[AuctionGate] Yesterday sentiment snapshot is still missing. Reversal logic aborted.")
+                    return
+
+            # 3. 构造今日竞价瞬时快照 (BiddingSnapshot)
+            bidding_snap = self.sentiment_fsm.build_bidding_snapshot(self.racing_detector)
+            if not bidding_snap.stock_snap:
+                logger.warning("[AuctionGate] Empty bidding snapshot from detector. Bypassing.")
+                return
+
+            # 4. 生成竞价信号
+            signals = self.auction_engine.generate_signals(bidding_snap)
+            if not signals:
+                logger.info("[AuctionGate] No pre-market auction reversal signals triggered today.")
+                return
+
+            logger.info(f"⚡ [AuctionGate] Triggered {len(signals)} auction reversal signals: {[s.code for s in signals]}")
+
+            # 5. 实例化临时风控覆盖 (RiskLimits override)
+            from trading_kernel.engine.risk_gate import RiskLimits
+            limits_override = RiskLimits(
+                max_position_pct=0.30,  # 允许最多 30% 仓位
+                max_single_order_pct=0.20,
+                max_daily_loss_pct=0.08  # 保持 8% 跌幅限制
+            )
+
+            # 6. 获取 KernelService 单例
+            from trading_kernel.kernel_service import get_kernel_service
+            kernel = get_kernel_service()
+            if not kernel:
+                logger.error("[AuctionGate] TradingKernelService instance is missing.")
+                return
+
+            # 7. 转换并提交每一个竞价信号到 TradingKernelService 执行
+            from auction_decision_engine import map_auction_signal_to_dict
+            from trade_gateway import get_trade_gateway
+            trade_gw = get_trade_gateway()
+
+            for sig in signals:
+                # 映射为 decision_item 字典格式
+                item_dict = map_auction_signal_to_dict(sig)
+
+                logger.info(f"[AuctionGate] Submitting auction signal for {sig.code} ({sig.name}) under override risk limits...")
+
+                # 这里的 evaluate_decision_item 已经修改为支持 limits_override 
+                # 且 write_journal=True 可以自动将流水分步物理落盘存入交易流水
+                res = kernel.evaluate_decision_item(item_dict, write_journal=True, limits_override=limits_override)
+
+                action = res.get("kernel_action", "HOLD")
+                allowed = res.get("kernel_allowed", False)
+                order_id = res.get("kernel_order_id", "")
+
+                logger.info(f"[AuctionGate] Result for {sig.code}: action={action}, allowed={allowed}, order_id={order_id}")
+
+                if not allowed:
+                    reject_code = res.get("kernel_reject_code", "BLOCK")
+                    logger.warning(f"[AuctionGate] Reversal Signal for {sig.code} was BLOCKED by Kernel: {reject_code}")
+                else:
+                    logger.info(f"[AuctionGate] Reversal Signal for {sig.code} SUCCESSFULLY EXECUTED/CONFIRMED.")
+
+        except Exception as e:
+            logger.error(f"[AuctionGate] Error running pre-market auction reversal strategy: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
 
     def _bg_kernel_heartbeat(self):
