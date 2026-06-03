@@ -958,8 +958,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             from global_favorites import GlobalFavoriteManager
             GlobalFavoriteManager().subscribe(self._on_favorites_changed)
-            # 配置全局重点关注行样式
-            self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+            # 配置全局重点关注行样式（三个梯度，S级最浅，A级次之，普通最深）
+            self.tree.tag_configure("favorite_S", background="#11293c", foreground="#a8d3f7", font=("Microsoft YaHei", 9, "bold"))
+            self.tree.tag_configure("favorite_A", background="#ccffcc", foreground="#006600", font=("Microsoft YaHei", 9, "bold"))
+            self.tree.tag_configure("favorite", background="#e6ffe6", foreground="#00cc00", font=("Microsoft YaHei", 9, "bold"))
         except Exception as e:
             logger.warning(f"Favorites subscribe failed: {e}")
         
@@ -14623,7 +14625,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         feature_cols = [c for c in f_cols_raw if c in df.columns]
         
         # 聚合显示列与特征列，确保 row_data 与 values 严格同源
-        all_cols = list(dict.fromkeys(cols_to_show + feature_cols))
+        all_cols_list = cols_to_show + feature_cols
+        if 'grade' in df.columns:
+            all_cols_list.append('grade')
+        all_cols = list(dict.fromkeys(all_cols_list))
         
         # 💡 [ZERO-COPY] 不做 full copy, 仅做 column view
         df_view = df[all_cols]
@@ -14632,6 +14637,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         col_map = {col: i for i, col in enumerate(all_cols)}
         show_idx = [col_map[c] for c in cols_to_show]
         feat_idx = {c: col_map[c] for c in feature_cols}
+        grade_idx_in_all = col_map.get('grade', -1)
         name_in_show = cols_to_show.index('name') if 'name' in cols_to_show else -1
         
         use_fm = self._use_feature_marking and hasattr(self, 'feature_marker')
@@ -14662,7 +14668,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     from global_favorites import GlobalFavoriteManager
                     if code_val in GlobalFavoriteManager().get_favorite_stocks():
                         formatted_values[name_in_show] = "【重点】" + formatted_values[name_in_show]
-                        tags = tuple(list(tags) + ["favorite"])
+                        fav_tag = "favorite"
+                        try:
+                            grade_val = None
+                            if grade_idx_in_all >= 0:
+                                grade_val = str(row[grade_idx_in_all]).strip().upper()
+                            if not grade_val:
+                                grade_val = GlobalFavoriteManager().get_stock_grade(code_val).strip().upper()
+                            if "S" in grade_val:
+                                fav_tag = "favorite_S"
+                            elif "A" in grade_val:
+                                fav_tag = "favorite_A"
+                        except Exception:
+                            pass
+                        tags = tuple(list(tags) + [fav_tag])
                 except Exception as e:
                     logger.debug(f"Failed to apply favorite tags: {e}")
             

@@ -182,6 +182,12 @@ class TreeviewIncrementalUpdater:
             feature_data = feature_cols
         
         # name 列在 columns 中的索引
+        # 预提取 grade 列
+        if 'grade' in df.columns:
+            grades = df['grade'].fillna('C').astype(str).tolist()
+        else:
+            grades = ['C'] * n_rows
+
         name_idx = columns.index('name') if 'name' in columns else -1
         
         # 构建结果（最小化循环内操作）
@@ -195,7 +201,7 @@ class TreeviewIncrementalUpdater:
             values = [col_arrays[j][i] for j in range(n_cols)]
             
             # 特征标记处理
-            row_data = None
+            row_data = {'grade': grades[i]}
             if feature_data:
                 try:
                     # 快速构建 row_data 字典
@@ -204,7 +210,7 @@ class TreeviewIncrementalUpdater:
                     if price_val == 0 and fd['trade']:
                         price_val = fd['trade'][i]
                     
-                    row_data = {
+                    row_data.update({
                         'percent': fd['percent'][i] if fd['percent'] else 0,
                         'volume': fd['volume'][i] if fd['volume'] else 0,
                         'category': fd['category'][i] if fd['category'] else '',
@@ -224,7 +230,7 @@ class TreeviewIncrementalUpdater:
                         'lv': fd['lv'][i] if fd['lv'] else 0,
                         'llowvol': fd['llowvol'][i] if fd['llowvol'] else 0,
                         'lastdu4': fd['lastdu4'][i] if fd['lastdu4'] else 0
-                    }
+                    })
                     
                     # 添加图标
                     if name_idx >= 0 and feature_marker:
@@ -232,7 +238,7 @@ class TreeviewIncrementalUpdater:
                         if icon:
                             values[name_idx] = f"{icon} {values[name_idx]}"
                 except Exception:
-                    row_data = None
+                    pass
             
             # 🚀 [NEW] 全局重点关注前缀标记 (无论是否有 feature_data)
             try:
@@ -291,7 +297,20 @@ class TreeviewIncrementalUpdater:
                 try:
                     from global_favorites import GlobalFavoriteManager
                     if code in GlobalFavoriteManager().get_favorite_stocks():
-                        all_tags.append("favorite")
+                        fav_tag = "favorite"
+                        try:
+                            grade_val = None
+                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                                grade_val = str(row_data['grade']).strip().upper()
+                            if not grade_val:
+                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
+                            if "S" in grade_val:
+                                fav_tag = "favorite_S"
+                            elif "A" in grade_val:
+                                fav_tag = "favorite_A"
+                        except Exception:
+                            pass
+                        all_tags.append(fav_tag)
                 except Exception:
                     pass
                 if all_tags:
@@ -328,7 +347,20 @@ class TreeviewIncrementalUpdater:
             try:
                 from global_favorites import GlobalFavoriteManager
                 if code in GlobalFavoriteManager().get_favorite_stocks():
-                    all_tags.append("favorite")
+                    fav_tag = "favorite"
+                    try:
+                        grade_val = None
+                        if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                            grade_val = str(row_data['grade']).strip().upper()
+                        if not grade_val:
+                            grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
+                        if "S" in grade_val:
+                            fav_tag = "favorite_S"
+                        elif "A" in grade_val:
+                            fav_tag = "favorite_A"
+                    except Exception:
+                        pass
+                    all_tags.append(fav_tag)
             except Exception:
                 pass
             if all_tags:
@@ -382,7 +414,20 @@ class TreeviewIncrementalUpdater:
                 try:
                     from global_favorites import GlobalFavoriteManager
                     if code in GlobalFavoriteManager().get_favorite_stocks():
-                        all_tags.append("favorite")
+                        fav_tag = "favorite"
+                        try:
+                            grade_val = None
+                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                                grade_val = str(row_data['grade']).strip().upper()
+                            if not grade_val:
+                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
+                            if "S" in grade_val:
+                                fav_tag = "favorite_S"
+                            elif "A" in grade_val:
+                                fav_tag = "favorite_A"
+                        except Exception:
+                            pass
+                        all_tags.append(fav_tag)
                 except Exception:
                     pass
                 if all_tags:
@@ -430,7 +475,7 @@ class TreeviewIncrementalUpdater:
         new_codes = set(df['code'].astype(str))
         old_codes = set(self._item_map.keys())
         
-        # 1. 删除不存在的行
+        # 1. 删除不存在 of lines
         deleted = 0
         codes_to_delete = old_codes - new_codes
         for code in codes_to_delete:
@@ -450,12 +495,26 @@ class TreeviewIncrementalUpdater:
             else:
                 col_indices[col] = -1
         
+        # 预计算特征标记列索引
+        feat_col_indices = {}
+        if self.feature_marker and self.feature_marker.enable_colors:
+            feature_cols = [
+                'percent', 'volume', 'category', 'price', 'trade',
+                'high4', 'max5', 'max10', 'hmax', 'hmax60',
+                'low4', 'low10', 'low60', 'lmin', 'min5', 'cmean',
+                'hv', 'lv', 'llowvol', 'lastdu4', 'ma5d', 'ma20d', 'ma60d'
+            ]
+            for col in feature_cols:
+                if col in df_columns:
+                    feat_col_indices[col] = df_columns.index(col)
+        
+        grade_idx_df = df_columns.index('grade') if 'grade' in df_columns else -1
         code_idx = df_columns.index('code') if 'code' in df_columns else -1
         data_array = df.values
         n_rows = len(data_array)
         
-        rows_to_update: list = []  # (code, values, iid)
-        rows_to_add: list = []     # (code, values)
+        rows_to_update: list = []  # (code, values, iid, row_data)
+        rows_to_add: list = []     # (code, values, row_data)
         
         for i in range(n_rows):
             row_arr = data_array[i]
@@ -479,11 +538,46 @@ class TreeviewIncrementalUpdater:
                 else:
                     values.append("")
             
+            # 构建 row_data
+            row_data = {'grade': str(row_arr[grade_idx_df]).strip().upper() if grade_idx_df >= 0 else 'C'}
+            if self.feature_marker and self.feature_marker.enable_colors:
+                try:
+                    price_val = row_arr[feat_col_indices['price']] if 'price' in feat_col_indices else 0
+                    if price_val == 0 and 'trade' in feat_col_indices:
+                        price_val = row_arr[feat_col_indices['trade']]
+                    
+                    row_data.update({
+                        'percent': row_arr[feat_col_indices['percent']] if 'percent' in feat_col_indices else 0,
+                        'volume': row_arr[feat_col_indices['volume']] if 'volume' in feat_col_indices else 0,
+                        'category': row_arr[feat_col_indices['category']] if 'category' in feat_col_indices else '',
+                        'price': price_val,
+                        'high4': row_arr[feat_col_indices['high4']] if 'high4' in feat_col_indices else 0,
+                        'max5': row_arr[feat_col_indices['max5']] if 'max5' in feat_col_indices else 0,
+                        'max10': row_arr[feat_col_indices['max10']] if 'max10' in feat_col_indices else 0,
+                        'hmax': row_arr[feat_col_indices['hmax']] if 'hmax' in feat_col_indices else 0,
+                        'hmax60': row_arr[feat_col_indices['hmax60']] if 'hmax60' in feat_col_indices else 0,
+                        'low4': row_arr[feat_col_indices['low4']] if 'low4' in feat_col_indices else 0,
+                        'low10': row_arr[feat_col_indices['low10']] if 'low10' in feat_col_indices else 0,
+                        'low60': row_arr[feat_col_indices['low60']] if 'low60' in feat_col_indices else 0,
+                        'lmin': row_arr[feat_col_indices['lmin']] if 'lmin' in feat_col_indices else 0,
+                        'min5': row_arr[feat_col_indices['min5']] if 'min5' in feat_col_indices else 0,
+                        'cmean': row_arr[feat_col_indices['cmean']] if 'cmean' in feat_col_indices else 0,
+                        'hv': row_arr[feat_col_indices['hv']] if 'hv' in feat_col_indices else 0,
+                        'lv': row_arr[feat_col_indices['lv']] if 'lv' in feat_col_indices else 0,
+                        'llowvol': row_arr[feat_col_indices['llowvol']] if 'llowvol' in feat_col_indices else 0,
+                        'lastdu4': row_arr[feat_col_indices['lastdu4']] if 'lastdu4' in feat_col_indices else 0,
+                        'ma5d': row_arr[feat_col_indices['ma5d']] if 'ma5d' in feat_col_indices else 0,
+                        'ma20d': row_arr[feat_col_indices['ma20d']] if 'ma20d' in feat_col_indices else 0,
+                        'ma60d': row_arr[feat_col_indices['ma60d']] if 'ma60d' in feat_col_indices else 0
+                    })
+                except Exception:
+                    pass
+            
             if code in self._item_map:
                 iid = self._item_map[code]
-                rows_to_update.append((code, values, iid))
+                rows_to_update.append((code, values, iid, row_data))
             else:
-                rows_to_add.append((code, values, None))
+                rows_to_add.append((code, values, row_data))
         
         # 3. 批量新增行（使用 displaycolumns 优化）
         added = 0
@@ -492,14 +586,43 @@ class TreeviewIncrementalUpdater:
         
         # 4. 逐行更新（通常数量少，向内存缓存对比）
         updated = 0
-        for code, values, iid in rows_to_update:
+        for code, values, iid, row_data in rows_to_update:
             try:
                 # ✅ [OPTIMIZE] 使用内存缓存而非 tree.item 读取 (极其耗时)
                 old_values = self._values_cache.get(code)
                 
                 # 只有当缓存不存在或值变化时才更新
                 if old_values is None or tuple(values) != old_values:
-                    self.tree.item(iid, values=values)
+                    # 构建 tags
+                    all_tags = []
+                    if row_data and self.feature_marker and self.feature_marker.enable_colors:
+                        try:
+                            tags = self.feature_marker.get_tags_for_row(row_data)
+                            if tags:
+                                all_tags.extend(tags)
+                        except Exception:
+                            pass
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        if code in GlobalFavoriteManager().get_favorite_stocks():
+                            fav_tag = "favorite"
+                            try:
+                                grade_val = None
+                                if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                                    grade_val = str(row_data['grade']).strip().upper()
+                                if not grade_val:
+                                    grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
+                                if "S" in grade_val:
+                                    fav_tag = "favorite_S"
+                                elif "A" in grade_val:
+                                    fav_tag = "favorite_A"
+                            except Exception:
+                                pass
+                            all_tags.append(fav_tag)
+                    except Exception:
+                        pass
+                    
+                    self.tree.item(iid, values=values, tags=tuple(all_tags))
                     self._values_cache[code] = tuple(values)  # 更新缓存
                     updated += 1
             except Exception as e:
@@ -554,7 +677,20 @@ class TreeviewIncrementalUpdater:
                 try:
                     from global_favorites import GlobalFavoriteManager
                     if code in GlobalFavoriteManager().get_favorite_stocks():
-                        all_tags.append("favorite")
+                        fav_tag = "favorite"
+                        try:
+                            grade_val = None
+                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                                grade_val = str(row_data['grade']).strip().upper()
+                            if not grade_val:
+                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
+                            if "S" in grade_val:
+                                fav_tag = "favorite_S"
+                            elif "A" in grade_val:
+                                fav_tag = "favorite_A"
+                        except Exception:
+                            pass
+                        all_tags.append(fav_tag)
                 except Exception:
                     pass
                 if all_tags:

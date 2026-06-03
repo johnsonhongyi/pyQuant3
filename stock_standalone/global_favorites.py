@@ -23,6 +23,7 @@ class GlobalFavoriteManager:
     def _init_manager(self):
         self.favorite_sectors: Set[str] = set()
         self.favorite_stocks: Set[str] = set()
+        self.stock_grades = {}
         self._subscribers = []
         self._lock = threading.Lock()
         
@@ -30,6 +31,34 @@ class GlobalFavoriteManager:
         self._config_path = WINDOW_CONFIG_FILE
         # Load initially from the default path
         self.load_from_config()
+        self.load_grades_from_voice_alert_config()
+
+    def load_grades_from_voice_alert_config(self):
+        try:
+            from sys_utils import get_conf_path
+            path = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                grades = {}
+                for key, stock in data.items():
+                    code = stock.get('code') or key.split('_')[0]
+                    grade = stock.get('grade') or stock.get('snapshot', {}).get('grade', '')
+                    if grade:
+                        grades[code] = grade
+                with self._lock:
+                    self.stock_grades.update(grades)
+                logger.info(f"[GlobalFavorites] Loaded {len(grades)} stock grades from {path}.")
+        except Exception as e:
+            logger.error(f"Failed to load grades from voice alert config: {e}")
+
+    def set_stock_grades(self, grades: dict):
+        with self._lock:
+            self.stock_grades.update(grades)
+            
+    def get_stock_grade(self, code: str) -> str:
+        with self._lock:
+            return self.stock_grades.get(code, "C")
             
     def set_config_path(self, path: str):
         """更新配置文件路径（支持 DPI 缩放感知的路径）并重新加载。"""

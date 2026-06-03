@@ -1085,6 +1085,13 @@ class StockLiveStrategy:
             except TypeError:
                 self.daily_pattern_detector.set_stock_grades(grades)
             
+        # 同步评级数据到 GlobalFavoriteManager 共享实例
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().set_stock_grades(grades)
+        except Exception as e:
+            logger.error(f"Failed to sync stock grades to GlobalFavoriteManager: {e}")
+
         logger.debug(f"Synced {len(grades)} stock grades to detectors.")
 
     def _save_monitors(self):
