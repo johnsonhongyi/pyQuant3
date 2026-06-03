@@ -59,6 +59,25 @@ def init_pulse_db():
             )
         """)
         
+        # 3. Daily Sentiment Table: For Sentiment Reversal tracking
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS daily_sentiment (
+                date TEXT PRIMARY KEY,
+                index_pct REAL,
+                breadth_ratio REAL,
+                up_count INTEGER,
+                down_count INTEGER,
+                limit_up INTEGER,
+                limit_down INTEGER,
+                temperature REAL,
+                worst_sectors_json TEXT,
+                top_sectors_json TEXT,
+                indices_json TEXT,
+                source_version TEXT,
+                created_at TEXT
+            )
+        """)
+        
         conn.commit()
         conn.close()
         logger.info("[DB] Market Pulse tables initialized.")
@@ -227,3 +246,129 @@ def get_all_recorded_dates():
     finally:
         conn.close()
     return dates
+
+def save_daily_sentiment(date_str: str, snapshot: dict) -> bool:
+    init_pulse_db()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        clean_worst = _convert_to_serializable(snapshot.get('worst_sectors', []))
+        clean_top = _convert_to_serializable(snapshot.get('top_sectors', []))
+        clean_indices = _convert_to_serializable(snapshot.get('indices', []))
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        cur.execute("""
+            INSERT INTO daily_sentiment (
+                date, index_pct, breadth_ratio, up_count, down_count,
+                limit_up, limit_down, temperature, worst_sectors_json,
+                top_sectors_json, indices_json, source_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                index_pct=excluded.index_pct,
+                breadth_ratio=excluded.breadth_ratio,
+                up_count=excluded.up_count,
+                down_count=excluded.down_count,
+                limit_up=excluded.limit_up,
+                limit_down=excluded.limit_down,
+                temperature=excluded.temperature,
+                worst_sectors_json=excluded.worst_sectors_json,
+                top_sectors_json=excluded.top_sectors_json,
+                indices_json=excluded.indices_json,
+                source_version=excluded.source_version,
+                created_at=excluded.created_at
+        """, (
+            date_str,
+            float(snapshot.get('index_pct', 0.0)),
+            float(snapshot.get('breadth_ratio', 0.0)),
+            int(snapshot.get('up_count', 0)),
+            int(snapshot.get('down_count', 0)),
+            int(snapshot.get('limit_up', 0)),
+            int(snapshot.get('limit_down', 0)),
+            float(snapshot.get('temperature', 0.0)),
+            json.dumps(clean_worst, ensure_ascii=False),
+            json.dumps(clean_top, ensure_ascii=False),
+            json.dumps(clean_indices, ensure_ascii=False),
+            snapshot.get('source_version', 'daily_sentiment.v1'),
+            created_at
+        ))
+        conn.commit()
+        logger.info(f"[DB] Saved daily sentiment for {date_str}.")
+        return True
+    except Exception as e:
+        logger.error(f"[DB Save Daily Sentiment Error] {e}")
+        traceback.print_exc()
+        return False
+    finally:
+        conn.close()
+
+from typing import Optional
+
+def get_daily_sentiment(date_str: str) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM daily_sentiment WHERE date=?", (date_str,))
+        row = cur.fetchone()
+        if row:
+            return {
+                'date': row[0],
+                'index_pct': row[1],
+                'breadth_ratio': row[2],
+                'up_count': row[3],
+                'down_count': row[4],
+                'limit_up': row[5],
+                'limit_down': row[6],
+                'temperature': row[7],
+                'worst_sectors': json.loads(row[8]) if row[8] else [],
+                'top_sectors': json.loads(row[9]) if row[9] else [],
+                'indices': json.loads(row[10]) if row[10] else [],
+                'source_version': row[11],
+                'created_at': row[12]
+            }
+    except Exception as e:
+        logger.error(f"[DB Get Daily Sentiment Error] {e}")
+    finally:
+        conn.close()
+    return None
+
+def get_latest_sentiment_before(date_str: str) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM daily_sentiment WHERE date < ? ORDER BY date DESC LIMIT 1", (date_str,))
+        row = cur.fetchone()
+        if row:
+            return {
+                'date': row[0],
+                'index_pct': row[1],
+                'breadth_ratio': row[2],
+                'up_count': row[3],
+                'down_count': row[4],
+                'limit_up': row[5],
+                'limit_down': row[6],
+                'temperature': row[7],
+                'worst_sectors': json.loads(row[8]) if row[8] else [],
+                'top_sectors': json.loads(row[9]) if row[9] else [],
+                'indices': json.loads(row[10]) if row[10] else [],
+                'source_version': row[11],
+                'created_at': row[12]
+            }
+    except Exception as e:
+        logger.error(f"[DB Get Latest Sentiment Before Error] {e}")
+    finally:
+        conn.close()
+    return None
+
+def get_sentiment_dates(limit: int = 120) -> list[str]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    dates = []
+    try:
+        cur.execute("SELECT date FROM daily_sentiment ORDER BY date DESC LIMIT ?", (limit,))
+        dates = [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"[DB Sentiment Dates Query Error] {e}")
+    finally:
+        conn.close()
+    return dates
+

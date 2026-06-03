@@ -593,7 +593,7 @@ class TradingKernelService:
         self._mode = target
         return True
 
-    def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True) -> dict[str, Any]:
+    def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True, limits_override: RiskLimits | None = None) -> dict[str, Any]:
         # 处于回测模拟模式下，直接短路返回，无需响应策略交易流以避免资源浪费
         if hasattr(self, "paper_adapter") and self.paper_adapter and getattr(self.paper_adapter, "_is_simulation", False):
             return {
@@ -812,7 +812,7 @@ class TradingKernelService:
         signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)
         intent = decide(signal, state)
-        risk = evaluate(intent, signal, state, self.limits)
+        risk = evaluate(intent, signal, state, limits_override or self.limits)
 
         signal_hash = stable_hash(signal)
         intent_hash = stable_hash(intent)
