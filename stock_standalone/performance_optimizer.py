@@ -234,6 +234,14 @@ class TreeviewIncrementalUpdater:
                 except Exception:
                     row_data = None
             
+            # 🚀 [NEW] 全局重点关注前缀标记 (无论是否有 feature_data)
+            try:
+                from global_favorites import GlobalFavoriteManager
+                if code in GlobalFavoriteManager().get_favorite_stocks() and name_idx >= 0:
+                    values[name_idx] = "【重点】" + values[name_idx]
+            except Exception:
+                pass
+            
             rows_data.append((code, values, row_data))
             # 更新缓存（仅在准备数据时，真正更新在 update 方法中）
         
@@ -271,14 +279,23 @@ class TreeviewIncrementalUpdater:
                 iid = self.tree.insert("", "end", values=values)
                 self._item_map[code] = iid
                 
-                # 应用颜色标记
+                # 应用颜色与重点标记
+                all_tags = []
                 if row_data and self.feature_marker and self.feature_marker.enable_colors:
                     try:
                         tags = self.feature_marker.get_tags_for_row(row_data)
                         if tags:
-                            self.tree.item(iid, tags=tuple(tags))
+                            all_tags.extend(tags)
                     except Exception:
                         pass
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    if code in GlobalFavoriteManager().get_favorite_stocks():
+                        all_tags.append("favorite")
+                except Exception:
+                    pass
+                if all_tags:
+                    self.tree.item(iid, tags=tuple(all_tags))
                 
                 added += 1
             
@@ -299,13 +316,23 @@ class TreeviewIncrementalUpdater:
             iid = self.tree.insert("", "end", values=values)
             self._item_map[code] = iid
             
+            # 应用颜色与重点标记
+            all_tags = []
             if row_data and self.feature_marker and self.feature_marker.enable_colors:
                 try:
                     tags = self.feature_marker.get_tags_for_row(row_data)
                     if tags:
-                        self.tree.item(iid, tags=tuple(tags))
+                        all_tags.extend(tags)
                 except Exception:
                     pass
+            try:
+                from global_favorites import GlobalFavoriteManager
+                if code in GlobalFavoriteManager().get_favorite_stocks():
+                    all_tags.append("favorite")
+            except Exception:
+                pass
+            if all_tags:
+                self.tree.item(iid, tags=tuple(all_tags))
             
             added += 1
         return added
@@ -343,13 +370,23 @@ class TreeviewIncrementalUpdater:
                 iid = self.tree.insert("", "end", values=values)
                 self._item_map[code] = iid
                 
+                # 应用颜色与重点标记
+                all_tags = []
                 if row_data and self.feature_marker and self.feature_marker.enable_colors:
                     try:
                         tags = self.feature_marker.get_tags_for_row(row_data)
                         if tags:
-                            self.tree.item(iid, tags=tuple(tags))
+                            all_tags.extend(tags)
                     except Exception:
                         pass
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    if code in GlobalFavoriteManager().get_favorite_stocks():
+                        all_tags.append("favorite")
+                except Exception:
+                    pass
+                if all_tags:
+                    self.tree.item(iid, tags=tuple(all_tags))
             
             self.tree["displaycolumns"] = saved_displaycolumns
             
@@ -505,14 +542,23 @@ class TreeviewIncrementalUpdater:
                 self._item_map[code] = iid
                 self._values_cache[code] = tuple(values)  # ✅ [NEW] 存入缓存
                 
-                # 应用颜色标记
+                # 应用颜色与重点标记
+                all_tags = []
                 if row_data and self.feature_marker and self.feature_marker.enable_colors:
                     try:
                         tags = self.feature_marker.get_tags_for_row(row_data)
                         if tags:
-                            self.tree.item(iid, tags=tuple(tags))
+                            all_tags.extend(tags)
                     except Exception:
                         pass
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    if code in GlobalFavoriteManager().get_favorite_stocks():
+                        all_tags.append("favorite")
+                except Exception:
+                    pass
+                if all_tags:
+                    self.tree.item(iid, tags=tuple(all_tags))
                 
                 added += 1
             

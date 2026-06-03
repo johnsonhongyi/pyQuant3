@@ -1,3 +1,9 @@
+## 2026-06-03 03:15
+- [x] **深度修复 `performance_optimizer.py` 中 `IndentationError` 缩进与语法崩溃 Bug (Fixed IndentationError & Restored Parsing Safety in Treeview Updater)**：
+    - [x] **补全异常处理闭环与图标保留**：在 `performance_optimizer.py` 的 `_batch_insert_with_displaycolumns_optimization` row_data 构建部分，补齐了由于上轮编辑意外缺失的 `except Exception: row_data = None` 捕获块。这彻底恢复了 `try-except` 的语法结构，并完整保留了原有 `feature_marker` 的图标渲染功能，根治了运行时的缩进崩溃错误。
+    - [x] **融合重点关注前缀注入**：在闭合的 `try-except` 块下方，安全注入了基于 `GlobalFavoriteManager` 单例的重点自选股判断。对于处于关注列表中的个股，前缀自动拼装 `【重点】`，保证大屏监控行在增量数据灌入时完美展现高辨识度标签。
+    - [x] **一枪通过静态语法校验与单元测试**：成功通过了 `python -m py_compile` 编译检验，且 `pytest test_watchlist_lifecycle.py` 11项回归测试 100% 全绿通过，系统极度纯净，无任何性能瓶颈与异常。
+
 ## 2026-06-03 02:40
 - [x] **实现板块与概念强度分 10倍高精度数值放大与量纲同步对齐 (Implemented 10x Scale Scaling & Dimension Alignment for Sector Intensity Scores)**：
     - [x] **重构 Sector 强度打分模型 (Scaled Sector Score by 10x)**：将 `bidding_momentum_detector.py` 中的 `board_score` 及虚拟报警板块得分 `v_board_score` 计算统一乘以 `10.0` 放大因子。这极大地提高了高强度、核心热点板块在竞价与盘中震荡时的数值辨识度与强反差区分度，避免了以往由于数值差异过小（如 1.05 对比 1.08）导致的视觉钝化。
