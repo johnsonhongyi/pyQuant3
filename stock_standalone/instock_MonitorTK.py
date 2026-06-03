@@ -953,6 +953,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
+        # 🚀 [NEW] 全局重点关注订阅与样式初始化
+        self._favorites_dirty = False
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+            # 配置全局重点关注行样式
+            self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+        except Exception as e:
+            logger.warning(f"Favorites subscribe failed: {e}")
+        
+        # 启动自选股状态心跳轮询
+        self.after(300, self._poll_favorites_loop)
+
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
         self.bind("<Control-slash>", lambda e: self.open_indicator_help())
         
@@ -3185,6 +3198,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
+        # 🚀 [NEW] 取消全局重点关注订阅
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.debug(f"Favorites unsubscribe failed: {e}")
+
         # ⭐ [GIL_MONITOR] 第一步：关闭呼吸器 Watchdog，避免销毁期误报 FROZEN
         try:
             if getattr(self, '_gil_monitor', None):
@@ -5396,9 +5416,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 5. 排序 (轻量)
             cur_res = self.global_values.getkey("resample") or 'd'
             if df is not None and not df.empty:
+                # 注入 is_fav 标记
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                    df = df.copy()
+                    if 'code' not in df.columns:
+                        df['code'] = df.index.astype(str)
+                    df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                except Exception as e:
+                    logger.warning(f"Failed to check favorites in pump: {e}")
+                    df['is_fav'] = 0
+
                 sort_col = getattr(self, 'sortby_col', None)
                 if sort_col and sort_col in df.columns:
-                    df = df.sort_values(by=sort_col, ascending=getattr(self, 'sortby_col_ascend', False))
+                    df = df.sort_values(by=['is_fav', sort_col], ascending=[False, getattr(self, 'sortby_col_ascend', False)])
+                else:
+                    df = df.sort_values(by='is_fav', ascending=False)
+                
+                # 移除临时排序列 is_fav 以免被其他地方误用
+                df.drop(columns=['is_fav'], inplace=True)
+
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
 
@@ -5514,6 +5552,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         ).fillna(50)
 
                 # 4. [PERF] CPU预计算：在后台线程完成 Treeview 的排序运算，彻底解放 UI 线程
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                    df = df.copy()
+                    if 'code' not in df.columns:
+                        df['code'] = df.index.astype(str)
+                    df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                except Exception as e:
+                    logger.warning(f"Failed to check favorites in compute sort: {e}")
+                    df['is_fav'] = 0
+
                 if sortby_col and sortby_col in df.columns:
                     try:
                         if sortby_col == 'name' and feature_marker:
@@ -5528,18 +5577,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 scores.append((prio, str(name_val)))
                             
                             score_series = pd.Series(scores, index=df.index)
-                            df = df.loc[score_series.sort_values(ascending=sortby_col_ascend).index]
+                            df['prio_score'] = score_series
+                            df = df.sort_values(by=['is_fav', 'prio_score'], ascending=[False, sortby_col_ascend])
+                            df.drop(columns=['prio_score'], inplace=True)
                         else:
                             is_num = pd.api.types.is_numeric_dtype(df[sortby_col])
                             if is_num:
-                                df = df.sort_values(by=sortby_col, ascending=sortby_col_ascend)
+                                df = df.sort_values(by=['is_fav', sortby_col], ascending=[False, sortby_col_ascend])
                             else:
                                 try:
-                                    df = df.loc[pd.to_numeric(df[sortby_col], errors='coerce').fillna(0).sort_values(ascending=sortby_col_ascend).index]
-                                except:
-                                    df = df.sort_values(by=sortby_col, ascending=sortby_col_ascend)
+                                    df['_sort_num_col'] = pd.to_numeric(df[sortby_col], errors='coerce').fillna(0)
+                                    df = df.sort_values(by=['is_fav', '_sort_num_col'], ascending=[False, sortby_col_ascend])
+                                    df.drop(columns=['_sort_num_col'], inplace=True)
+                                except Exception:
+                                    df = df.sort_values(by=['is_fav', sortby_col], ascending=[False, sortby_col_ascend])
                     except Exception as e:
                         logger.warning(f"[Compute Sorting] 预排序计算失败: {e}")
+                else:
+                    df = df.sort_values(by='is_fav', ascending=False)
+
+                if 'is_fav' in df.columns:
+                    df.drop(columns=['is_fav'], inplace=True)
 
             # 4. 策略引擎 (fire-and-forget, 内置节流)
             if not full_df.empty:
@@ -8147,6 +8205,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         menu.add_separator()
 
+        # —— 重点关注个股相关 (Favorites) ——
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = stock_code in fav_mgr.get_favorite_stocks()
+            
+            # 单只操作
+            if is_fav:
+                menu.add_command(
+                    label=f"⭐ 取消重点个股 ({stock_code})",
+                    command=lambda sc=stock_code: [fav_mgr.remove_favorite_stock(sc), self._on_favorites_changed()]
+                )
+            else:
+                menu.add_command(
+                    label=f"⭐ 设为重点个股 ({stock_code})",
+                    command=lambda sc=stock_code: [fav_mgr.add_favorite_stock(sc), self._on_favorites_changed()]
+                )
+            
+            # 批量操作
+            if len(code_to_name) > 1:
+                codes_list = list(code_to_name.keys())
+                menu.add_command(
+                    label=f"⭐ 批量设为重点 ({len(codes_list)}只)",
+                    command=lambda cl=codes_list: self._add_favorites_batch(cl)
+                )
+                menu.add_command(
+                    label=f"⭐ 批量取消重点 ({len(codes_list)}只)",
+                    command=lambda cl=codes_list: self._remove_favorites_batch(cl)
+                )
+            menu.add_separator()
+        except Exception as e:
+            logger.warning(f"Failed to add favorites to context menu: {e}")
+
         # —— 策略相关 ——
         menu.add_command(
             label="🧪 测试买卖策略",
@@ -8281,6 +8372,72 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if t_str < last_td:
                     return t_str
         return None
+
+    def _on_favorites_changed(self):
+        """[GIL SAFE] 仅设置纯 Python 脏标记，不触碰任何 Tcl/Tk C-API"""
+        self._favorites_dirty = True
+
+    def _poll_favorites_loop(self):
+        """[Tkinter 主线程专属心跳轮询] 安全执行界面重绘加载与置顶"""
+        if self._is_closing:
+            return
+        try:
+            if getattr(self, '_favorites_dirty', False):
+                self._favorites_dirty = False
+                logger.info("🔑 [Favorites Poller] Favorites changed, triggering UI refresh...")
+                self._refresh_ui_favorites()
+        except Exception as e:
+            logger.warning(f"Error in poll_favorites_loop: {e}")
+        finally:
+            self.after(300, self._poll_favorites_loop)
+
+    def _refresh_ui_favorites(self):
+        """[0ms 内存重绘] 收到重点关注通知后，仅在内存层面对当前数据做二次置顶并重绘 UI"""
+        try:
+            if not hasattr(self, 'current_df') or self.current_df.empty:
+                return
+            df = self.current_df.copy()
+            if 'code' not in df.columns:
+                df['code'] = df.index.astype(str)
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                sort_col = getattr(self, 'sortby_col', None)
+                sort_col_asc = getattr(self, 'sortby_col_ascend', False)
+                if sort_col and sort_col in df.columns:
+                    df = df.sort_values(by=['is_fav', sort_col], ascending=[False, sort_col_asc])
+                else:
+                    df = df.sort_values(by='is_fav', ascending=False)
+                if 'is_fav' in df.columns:
+                    df.drop(columns=['is_fav'], inplace=True)
+            except Exception as e:
+                logger.warning(f"Failed to sort favorites on refresh: {e}")
+            if hasattr(self, 'tree_updater'):
+                self.tree_updater._values_cache.clear()
+            self.refresh_tree(df, force=True)
+        except Exception as e:
+            logger.warning(f"Failed to refresh favorites display: {e}")
+
+    def _add_favorites_batch(self, codes):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            for c in codes:
+                fav_mgr.add_favorite_stock(c)
+            self._on_favorites_changed()
+        except Exception as e:
+            logger.error(f"Failed to add favorites batch: {e}")
+
+    def _remove_favorites_batch(self, codes):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            for c in codes:
+                fav_mgr.remove_favorite_stock(c)
+            self._on_favorites_changed()
+        except Exception as e:
+            logger.error(f"Failed to remove favorites batch: {e}")
 
     def _run_dna_audit_batch(self, code_to_name, end_date=None):
         import threading
@@ -14394,8 +14551,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.info(f"[TreeUpdater] 列配置变更: {len(cols_to_show)}列 (差异示例: {list(diff_cols)[:3]})")
                 
                 # ✅ 检测是否只是排序（数据相同但顺序不同）
-                # 如果是排序操作，强制全量刷新以确保顺序正确
-                force_full = False
+                # 如果是排序操作，或者是强制刷新，强制全量刷新以确保顺序正确
+                force_full = force
                 if hasattr(self, '_last_df_codes'):
                     current_codes = df['code'].astype(str).tolist()
                     # 如果code集合相同但顺序不同，说明是排序操作
@@ -14496,6 +14653,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 icon, tags = self.feature_marker.get_marks_fast(row, feat_idx)
                 if icon and name_in_show >= 0:
                     formatted_values[name_in_show] = f"{icon}{formatted_values[name_in_show]}"
+
+            # 🚀 [NEW] 全局重点关注标记与高亮
+            code_idx_in_show = cols_to_show.index('code') if 'code' in cols_to_show else -1
+            if code_idx_in_show >= 0 and name_in_show >= 0:
+                code_val = str(raw_values[code_idx_in_show]).zfill(6)
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    if code_val in GlobalFavoriteManager().get_favorite_stocks():
+                        formatted_values[name_in_show] = "【重点】" + formatted_values[name_in_show]
+                        tags = tuple(list(tags) + ["favorite"])
+                except Exception as e:
+                    logger.debug(f"Failed to apply favorite tags: {e}")
             
             iid = self.tree.insert("", "end", values=formatted_values, tags=tags)
 
@@ -14564,40 +14733,56 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sortby_col =  col
         self.sortby_col_ascend = not reverse
         logger.debug(f'self.sortby_col_ascend: {self.sortby_col_ascend}')
+        
+        # 1. 注入 is_fav 标记
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+            df = self.current_df.copy()
+            if 'code' not in df.columns:
+                df['code'] = df.index.astype(str)
+            df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+        except Exception as e:
+            logger.warning(f"Failed to check favorites in manual sort: {e}")
+            df = self.current_df.copy()
+            df['is_fav'] = 0
+
+        # 2. 排序
         if col in ['code']:
-            df_sorted = self.current_df.reset_index(drop=True).sort_values(
-                by=col, key=lambda s: s.astype(str), ascending=not reverse)
+            df_sorted = df.reset_index(drop=True).sort_values(
+                by=['is_fav', col], key=lambda s: s.astype(str) if s.name == col else s, ascending=[False, not reverse])
 
         elif col == 'MainU':
-            # ✅ MainU 极限性能排序（采用静态 LUT O(N) 矢量化映射）
             from mainu_sort import compute_mainu_sort_column
-            sort_keys = compute_mainu_sort_column(self.current_df['MainU'])
-            df_sorted = self.current_df.loc[sort_keys.sort_values(ascending=not reverse).index]
+            sort_keys = compute_mainu_sort_column(df['MainU'])
+            df['_mainu_sort_key'] = sort_keys
+            df_sorted = df.sort_values(by=['is_fav', '_mainu_sort_key'], ascending=[False, not reverse])
+            df_sorted.drop(columns=['_mainu_sort_key'], inplace=True)
 
-        elif pd.api.types.is_numeric_dtype(self.current_df[col]):
-            df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df_sorted = df.sort_values(by=['is_fav', col], ascending=[False, not reverse])
         elif col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-            # ✅ 名称排序支持图标优先级（使用分值权重进行排序）
             fm = self.feature_marker
             def _get_row_priority(r):
                 row_dict = r.to_dict()
                 row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
                 icon = fm.get_icon_for_row(row_dict)
-                # 返回 (分值, 名称) 二元组作为排序键
                 return (fm.get_priority_score(icon), row_dict.get('name', ''))
             
-            # 生成排序键序列
-            sort_keys = self.current_df.apply(_get_row_priority, axis=1)
-            # 使用 loc (基于标签排序) 而非 iloc，防止索引越界
-            df_sorted = self.current_df.loc[sort_keys.sort_values(ascending=not reverse).index]
+            sort_keys = df.apply(_get_row_priority, axis=1)
+            df['_prio_sort_key'] = sort_keys
+            df_sorted = df.sort_values(by=['is_fav', '_prio_sort_key'], ascending=[False, not reverse])
+            df_sorted.drop(columns=['_prio_sort_key'], inplace=True)
         else:
-            # 通用列排序：检测是否为全数字字符串列
             try:
-                # 尝试将列转为 numeric，如果成功则按数字排 (使用 loc 确保索引对齐)
-                df_sorted = self.current_df.loc[pd.to_numeric(self.current_df[col], errors='coerce').fillna(0).sort_values(ascending=not reverse).index]
+                df['_num_col'] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                df_sorted = df.sort_values(by=['is_fav', '_num_col'], ascending=[False, not reverse])
+                df_sorted.drop(columns=['_num_col'], inplace=True)
             except:
-                # 回退到字符串排序
-                df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
+                df_sorted = df.sort_values(by=['is_fav', col], key=lambda s: s.astype(str) if s.name == col else s, ascending=[False, not reverse])
+
+        if 'is_fav' in df_sorted.columns:
+            df_sorted.drop(columns=['is_fav'], inplace=True)
 
         self.refresh_tree(df_sorted, force=True)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
