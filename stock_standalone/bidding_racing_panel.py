@@ -5026,6 +5026,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """[🚀 性能加速版] 动态合成显示分数"""
         try:
             main_score = ts.score
+            
+            # [NEW] 针对 V-Reversal 预处理池的高频过滤与重核
+            v_pool = set()
+            if self.detector and self.detector.realtime_service and hasattr(self.detector.realtime_service, 'kline_cache'):
+                v_pool = self.detector.realtime_service.kline_cache.get_v_reversal_pool()
+            
+            if ts.code in v_pool:
+                # 命中 V反池，强行赋予基础活跃分，突破静默状态
+                main_score = max(main_score, 85.0)
+
             if main_score < 0.01:
                 activity_score = (getattr(ts, 'signal_count', 0) * 1.5) + (abs(ts.current_pct) * 0.2)
                 return max(activity_score, getattr(ts, 'momentum_score', 0) * 0.05)

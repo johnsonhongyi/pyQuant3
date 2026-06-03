@@ -833,6 +833,14 @@ class BiddingMomentumDetector:
             self._load_stock_selector_data()
         else:
             logger.info("📡 [Detector] Lazy load enabled. Synchronous init skipped.")
+
+        # [NEW] 初始化 V-Reversal 预处理池状态
+        if self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+            try:
+                self.realtime_service.kline_cache.load_consolidation_state()
+                logger.info("✅ V-Reversal consolidation state loaded into BiddingMomentumDetector.")
+            except Exception as e:
+                logger.error(f"❌ Failed to load V-Reversal consolidation state: {e}")
         
         # [NEW] 信号总线联动：接收来自底层 Tracker 的形态确认信号 (如 SBC-Breakout)
         # self._signal_bus = SignalBus()
@@ -1306,6 +1314,17 @@ class BiddingMomentumDetector:
                     _t_agg = time.perf_counter()
                     self._aggregate_sectors(active_codes=final_active_codes, _from_scheduler=_from_scheduler)
                     _agg_ms = (time.perf_counter() - _t_agg) * 1000
+                    
+                    # [NEW] 定期调用 V-Reversal 增量波段状态更新 (每 5 分钟)
+                    if hasattr(self, 'realtime_service') and getattr(self.realtime_service, 'kline_cache', None):
+                        now_ts = time.time()
+                        _last_wave_update = getattr(self, '_last_wave_update_ts', 0)
+                        if now_ts - _last_wave_update > 300:
+                            try:
+                                self.realtime_service.kline_cache.update_wave_structure_state()
+                                self._last_wave_update_ts = now_ts
+                            except Exception as e:
+                                logger.error(f"[AsyncSectorAgg] Failed to update V-Reversal wave state: {e}")
                     
                     # [DEBUG] 打印分析日志
                     if _agg_ms > 800:
