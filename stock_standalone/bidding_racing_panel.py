@@ -5445,7 +5445,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     if attr == 'leader_start_pct':
                         return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
                     if attr == 'avg_pct':
-                        return sec.get('avg_pct', 0.0)
+                        return sec.get('avg_pct_diff', 0.0)
                     return sec.get(attr, 0)
 
                 # 全量排序结果
@@ -5664,10 +5664,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self._apply_flash_effect(table.item(i, 1), ("sector", s_name, 1))
 
             # 2. 涨跌 (板块内个股平均涨跌幅)
-            avg_pct = sec.get('avg_pct', 0.0)
-            c_diff = self._UI_CACHE["COLOR_RED"] if avg_pct > 0.0 else (self._UI_CACHE["COLOR_GREEN"] if avg_pct < 0.0 else Qt.GlobalColor.white)
+            avg_pct_diff = sec.get('avg_pct_diff', 0.0)
+            c_diff = self._UI_CACHE["COLOR_RED"] if avg_pct_diff > 0.0 else (self._UI_CACHE["COLOR_GREEN"] if avg_pct_diff < 0.0 else Qt.GlobalColor.white)
             
-            if self._update_cell(table, i, 2, avg_pct, color=c_diff, fmt="{:+.2f}%"):
+            if self._update_cell(table, i, 2, avg_pct_diff, color=c_diff, fmt="{:+.2f}%"):
                 if not is_first_init: self._table_highlights[("sector", s_name, 2)] = time.time()
             self._apply_flash_effect(table.item(i, 2), ("sector", s_name, 2))
                 

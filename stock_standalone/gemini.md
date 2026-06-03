@@ -1,3 +1,35 @@
+## 2026-06-03 14:30
+- [x] **实现观测时长点击直接手动输入功能 (Implemented Manual Keyboard Input for Observation Duration)**：
+    - [x] **重构 `lbl_interval` 为 `QLineEdit` 文本输入框**：在 `sector_bidding_panel.py` 的主工具栏中，将原先只读的 `QLabel` 标签重构为可点击编辑 the `QLineEdit`。统一配置深黑高雅输入框样式，并追加右侧 `"m"` 分钟单位文本提示，实现更直观的交互。
+    - [x] **引入 QIntValidator 整数验证器与 `editingFinished` 信号**：为该输入框配置 `QIntValidator(1, 9999)`，限制用户仅能输入正整数，并在用户敲击回车或失去焦点时触发 `_on_interval_edited` 回调，实时解析并应用新的分钟数到 `detector.comparison_interval` 中。
+    - [x] **对齐状态恢复与防抖自愈**：在 `_adjust_interval` 与 `_restore_ui_state` 中同步去除原有的 `"m"` 字符赋值拼接，直接写入纯数字文本，且在手动输入时同样享有了 2 秒的防抖延迟加载机制，完美守护实盘运行性能。
+    - [x] **优化模块级导包结构**：将 `QIntValidator` 从 `sector_bidding_panel.py` 的局部函数调用块中移至文件顶部模块级导入区域，消除了 UI 主线程渲染时的动态查找开销。
+    - [x] **通过静态编译与回归测试 (Passed Tests & Compilation)**：顺利通过了 `py_compile` 编译与 `test_watchlist_lifecycle.py` 单元测试。
+
+## 2026-06-03 14:20
+- [x] **修复板块观测时长到期后活跃板块涨跌数据未自动更新 Bug (Fixed Sector Metric Autoupdate on Observation Anchor Reset)**：
+    - [x] **引入板块切片涨跌幅指标 (Implemented Sector slice percent change avg_pct_diff)**：在 `bidding_momentum_detector.py` 的板块聚合 `_aggregate_sectors` 和板块重构 `_reconstruct_sector_from_candidates` 中引入了 `avg_pct_diff`，用于计算板块内所有成员个股自观测时长锚点建立以来的平均百分比变动（即 `pct_diff` 均值）。同时，对虚拟 "实时报警" 板块也计算了 `v_avg_pct_diff`。这确保了在观测时长重置时，板块能够获取到与个股完全一致的重置锚点数据，而不是只显示绝对的当日平均涨幅 `avg_pct`。
+    - [x] **重构面板 Col 2 为 `avg_pct_diff` 渲染与排序 (Rendered and Sorted Col 2 by avg_pct_diff)**：修改了 `sector_bidding_panel.py` (竞价大屏) 和 `bidding_racing_panel.py` (赛马大屏) 的板块列表 Col 2 (涨跌) 单元格更新和排序逻辑。将原先展示的绝对当日涨幅 `avg_pct` 升级为展示与观测时间段深度挂钩的切片平均涨跌幅 `avg_pct_diff`。
+    - [x] **实现观测时长到期自动重置自愈 (Fixed UI Auto-Update on Reset)**：使得观测时长（如 1 分钟）到期后，检测器自动调用 `reset_observation_anchors` 瞬间重置 `pct_diff` 之后，活跃板块的 `涨跌` 列数据能够同步清零并重新开始统计，彻底解决了“个股重置变化了，但活跃板块没有自动更新”的业务逻辑 Bug。
+    - [x] **一枪通过静态编译与回归测试 (Passed Tests & Compilation)**：通过了 `py_compile` 静态语法校验，且 `test_watchlist_lifecycle.py` 中 11 项核心回归单元测试 100% 通过。
+
+## 2026-06-03 14:15
+- [x] **修复观测时长重置与详情个股涨跌幅重置不同步 Bug (Fixed Observation Anchor Reset & Stock Metrics Synchronization Bug)**：
+    - [x] **根治重置动作下 snap_cache 及 persistent 缓存残留 (Fixed Stale Cache Residue on Reset)**：在 `reset_observation_anchors` 中，增加了对 `self._global_snap_cache`、`self._sector_active_stocks_persistent` 以及 `self.active_sectors` 的同步清理和字段重置。确保在调用基准重置时，所有的 `pct_diff`、`price_diff` 和 `signal_count` 在缓存中被瞬间归零，且 `price_anchor` 同步对齐为当前价格，彻底解决了由于缓存未及时重置导致的详情页个股涨跌幅不更新或残留旧值的 Bug。
+    - [x] **补全 _reconstruct_sector_from_candidates 龙头及跟随股属性 (Aligned Reconstructed Leader & Follower Metrics)**：补齐了板块详情重构逻辑中缺失的 `leader_pct_diff`、`leader_price_diff`、`leader_dff`、`leader_score`、`leader_momentum_score` 等关键龙头股字段，以及跟随股的 `high_day`、`pattern_hint`、`untradable` 等属性。保证了在历史/回放或详情面板重构拉起时，界面呈现的数据指标与实盘聚合数据完全同构。
+    - [x] **一枪通过编译与回归测试 (Passed Tests & Compilation)**：通过了静态编译校验，且 `test_watchlist_lifecycle.py` 中 11 项单元测试 100% 通过。
+
+## 2026-06-03 14:00
+- [x] **修复板块竞价面板观测时长自动重置与个股涨跌幅同步滞后 Bug (Fixed Sector Bidding Auto-Reset Failure & Stock Change Sync Lag)**：
+    - [x] **实现历史/回放模式下模拟时间重置自适应 (Adapted simulated timeline for resets)**：在 `BiddingMomentumDetector.reset_observation_anchors` 接口中引入 `now_ts` 可选参数，允许传入模拟/历史数据的时间戳。在 `_aggregate_sectors` 聚合循环中，通过 `last_data_ts` 捕获当前数据时刻，并结合 `in_history_mode` 标识直接绕过墙上钟表时间（Wall-clock time）和交易时段拦截，确保在历史复盘或非交易时段下观测时长基准仍能准确触发重置。
+    - [x] **补全个股领涨指标向活跃面板的属性传递 (Propagated leader metrics for UI sync)**：在 `bidding_momentum_detector.py` 内部计算完成绩后，将 `leader_price_diff`（领涨股价比上次的价差）、`leader_dff`（领涨股DFF差值）、`leader_score`（强度）以及 `leader_momentum_score` 完整注入到 `target_sectors` 字典中，并扩展了 `snap_data` 缓存模式。这根治了前端 `SectorBiddingPanel` 面板因数据字典缺少核心字段导致个股详情中涨跌数据出现 0.0 或滞后更新的缺陷。
+    - [x] **通过回归测试与代码编译 (Passed tests & compilation)**：通过 `py_compile` 静态编译，且 `test_watchlist_lifecycle.py` 中 11 项单元测试回归 100% 通过。
+
+## 2026-06-03 13:30
+- [x] **修复可视化第一次运行提取回测信号并重绘图表属性缺失崩溃 Bug (Fixed AttributeError 'MainWindow' object has no attribute 'tick_df' on Cold Start Backtest)**：
+    - [x] **属性兜底初始化**：在 `MainWindow.__init__` 中补齐了核心日K与分时数据容器 `self.day_df` 和 `self.tick_df` 的默认 `pd.DataFrame()` 实例化，避免了冷启动或属性尚未由 DataLoader 加载完毕时，其它逻辑（如快捷键回测）强行提取导致的 `AttributeError` 崩溃。
+    - [x] **重绘竞态自愈防护**：在 `_show_backtest_result` 提取回测信号并强制重绘的入口，引入了对 `day_df` 和 `tick_df` 的 `getattr` 安全获取，并增加了当前股票匹配度校验 `getattr(self, 'current_code', '') == code_clean`。如果在回测跑完时主力数据尚未加载好，会直接跳过即时重绘，而是依靠 `DataLoaderThread` 稍后完成加载时在 `render_charts` 流程中自动读取缓存绘制，实现了非阻塞、零报错的无感操盘。
+
 ## 2026-06-03 11:30
 - [x] **修复 DataProcessWorker 与异步打分器冲突导致的重复刷新与数据漏算 Bug (Fixed Redundant Refreshes & Data Dropping in DataProcessWorker)**：
     - [x] **分析双重刷新与漏算原因**：定位并确认在 `sector_bidding_panel.py` 中，`DataProcessWorker` 仍然沿用了历史遗留的 100 只个股分片循环机制，通过 55 次迭代高频调用 `detector.update_scores`。而打分器内部已被重构为自带节流（0.3s）与 Chunk Scheduler 异步分帧状态机。两套分片机制冲突导致了：（1）1.46s 计算周期内，0.3s 防抖多次放行，导致重复触发了多次 `on_score_finished` 回调和 UI 刷新；（2）大量分片在 0.3s 内被节流阀直接丢弃，导致 90% 以上的个股增量打分失效。

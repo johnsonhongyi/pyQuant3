@@ -1050,7 +1050,7 @@ class BiddingMomentumDetector:
     # 公共接口
     # =========================================================
 
-    def reset_observation_anchors(self):
+    def reset_observation_anchors(self, now_ts=None):
         """
         手动或按周期重置所有观测基准：
         1. 重置板块强度锚点
@@ -1059,7 +1059,7 @@ class BiddingMomentumDetector:
         4. 重置全局基准时间
         5. [NEW] 重置全量活跃数与赛马稳定性时长
         """
-        now = time.time()
+        now = now_ts if now_ts is not None else time.time()
         with self._lock:
             self.baseline_time = now
             self.sector_anchors.clear()
@@ -1070,7 +1070,7 @@ class BiddingMomentumDetector:
                 # [IMMEDIATE] 瞬间全量重置活跃数 (USER-RULE: 活跃数应随基准同步重置)
                 ts.signal_count = 0
                 # [FIX] 将上一次信号时间重置为当前分钟，防止复位后由于得分仍然达标而立即触发 +1
-                curr_min = int(time.time() // 60)
+                curr_min = int(now // 60)
                 ts._last_sig_min = curr_min
                 ts._bar_active_reward = 0
                 ts._last_active_price = ts.current_price # 以当前价格为新基准
@@ -1092,7 +1092,34 @@ class BiddingMomentumDetector:
                     tracker.clear()
                     logger.info("✅ [Detector] IntradayEmotionTracker (SBC) signals has been cleared.")
 
-            logger.info(f"🔄 [Detector] All observation anchors and active metrics have been reset.")
+            # 瞬间更新 snap_cache, persistent cache 以及 active_sectors 中的对应字段，确保彻底清爽、无任何延迟残留
+            for code, snap in self._global_snap_cache.items():
+                snap['pct_diff'] = 0.0
+                snap['price_diff'] = 0.0
+                snap['signal_count'] = 0
+                snap['pattern_hint'] = ""
+                ts = self._tick_series.get(code)
+                if ts:
+                    snap['price_anchor'] = ts.price_anchor
+
+            for sec_name, stocks_dict in self._sector_active_stocks_persistent.items():
+                for code, snap in stocks_dict.items():
+                    snap['pct_diff'] = 0.0
+                    snap['price_diff'] = 0.0
+                    snap['signal_count'] = 0
+                    snap['pattern_hint'] = ""
+                    ts = self._tick_series.get(code)
+                    if ts:
+                        snap['price_anchor'] = ts.price_anchor
+
+            for sec_info in self.active_sectors.values():
+                sec_info['score_diff'] = 0.0
+                sec_info['staged_diff'] = 0.0
+                sec_info['leader_pct_diff'] = 0.0
+                sec_info['leader_price_diff'] = 0.0
+                sec_info['leader_dff'] = 0.0
+
+            logger.info(f"🔄 [Detector] All observation anchors and active metrics have been reset at timestamp: {now}.")
 
 
     def set_strategy(self, key: str, **kwargs):
@@ -2960,20 +2987,45 @@ class BiddingMomentumDetector:
             info['score_diff'] = round(board_score - self.sector_anchors[sector_name], 2)
         
         # 2. 确定龙头
-        current_leader = candidates[0]['code']
-        info['leader'] = current_leader
-        info['leader_name'] = candidates[0]['name']
-        info['leader_pct'] = candidates[0].get('pct', 0.0)
-        info['leader_price'] = candidates[0].get('price', 0.0)
-        info['leader_klines'] = candidates[0].get('klines', [])
+        l_data = candidates[0]
+        leader_code = l_data['code']
+        l_ts = self._tick_series.get(leader_code)
+        
+        info['leader'] = leader_code
+        info['leader_name'] = l_data['name']
+        info['leader_pct'] = round(l_data.get('pct', 0.0), 2)
+        info['leader_pct_diff'] = round(l_data.get('pct_diff', 0.0), 2)
+        info['leader_price_diff'] = round(l_data.get('price_diff', 0.0), 2)
+        info['leader_dff'] = round(l_data.get('dff', 0.0), 2)
+        info['leader_score'] = round(l_data.get('score', 0.0), 2)
+        info['leader_momentum_score'] = round(l_data.get('momentum_score', 0.0), 2)
+        info['leader_price'] = l_data.get('price', 0.0)
+        info['leader_klines'] = list(l_ts.klines)[-35:] if (l_ts and l_ts.klines) else (l_data.get('klines', [])[-35:])
+        info['leader_last_close'] = l_data.get('last_close', 0)
+        info['leader_high_day'] = l_data.get('high_day', 0)
+        info['leader_low_day'] = l_data.get('low_day', 0)
+        info['leader_last_high'] = l_data.get('last_high', 0)
+        info['leader_last_low'] = l_data.get('last_low', 0)
+        info['leader_first_ts'] = l_data.get('first_breakout_ts', 0)
+        info['pattern_hint'] = l_data.get('pattern_hint', '主力拉升')
+        info['is_untradable'] = l_data.get('is_untradable', False)
         
         # 2.5 计算板块今日真实涨停家数并物理注入 (与 HUD 完美闭环)
         zt_count = 0
+        member_percents = []
+        member_pct_diffs = []
         for s in candidates:
             pct = s.get('pct', 0.0)
             if pct >= get_limit_up_threshold(s['code']):
                 zt_count += 1
+            if pct is not None and not pd.isna(pct):
+                member_percents.append(pct)
+            pct_diff = s.get('pct_diff')
+            if pct_diff is not None and not pd.isna(pct_diff):
+                member_pct_diffs.append(pct_diff)
         info['zt_count'] = zt_count
+        info['avg_pct'] = round(sum(member_percents) / len(member_percents), 2) if member_percents else 0.0
+        info['avg_pct_diff'] = round(sum(member_pct_diffs) / len(member_pct_diffs), 2) if member_pct_diffs else 0.0
         
         # 3. 重建角色名单 (仅在模式开启时执行)
         race_candidates = []
@@ -3000,10 +3052,13 @@ class BiddingMomentumDetector:
                 'dff': s.get('dff', 0.0),
                 'klines': s.get('klines', []),
                 'last_close': s.get('last_close', 0.0),
+                'high_day': s.get('high_day', 0.0),
                 'first_ts': s.get('first_breakout_ts', 0.0),
                 'score_diff': round(s.get('score_diff', 0.0), 2),
                 'pct_diff': round(s.get('pct_diff', 0.0), 2),
-                'price_diff': round(s.get('price_diff', 0.0), 3)
+                'price_diff': round(s.get('price_diff', 0.0), 3),
+                'pattern_hint': s.get('pattern_hint', ''),
+                'untradable': s.get('is_untradable', False)
             } for s in candidates[1:16]
         ]
 
@@ -3600,6 +3655,7 @@ class BiddingMomentumDetector:
                             'last_high': ts.last_high,
                             'last_low': ts.last_low,
                             'total_amount': ts.total_amount,
+                            'momentum_score': ts.momentum_score,
                         }
                         self._global_snap_cache[code] = data
                         _pct_sum_delta += ts.current_pct
@@ -3741,15 +3797,18 @@ class BiddingMomentumDetector:
         
         # 4. [NEW] 全局对照基准重置逻辑 (移动到循环外，每周期仅检查一次)
         now = time.time()
+        is_hist = getattr(self, 'in_history_mode', False) or getattr(self, 'simulation_mode', False)
+        if is_hist and getattr(self, 'last_data_ts', 0) > 0:
+            now = self.last_data_ts
         
         # [🚀 ROOT-FIX] 明确初始化 new_active，防止逻辑分支导致 UnboundLocalError
         # 如果是全量刷新 (target_sectors is None)，则从空表开始构建；如果是局部刷新，则基于现有状态增量更新
         new_active = {} if target_sectors is None else self.active_sectors.copy()
 
         # [OPTIMIZE] 当在非交易时间不要重置基准数据，保留最后的涨跌变化
-        if self.is_active_session() and not self.in_history_mode:
+        if self.is_active_session():
             if now - self.baseline_time >= self.comparison_interval:
-                self.reset_observation_anchors()
+                self.reset_observation_anchors(now_ts=now)
 
                 # [Added] 仅在基准重置时，强制全量重刷板块，防止锚点丢失导致的数据显示异常
                 target_sectors = None
@@ -3804,13 +3863,17 @@ class BiddingMomentumDetector:
 
             # [P1-OPT] Use prefetched sector_full_map
             all_member_codes = sector_full_map.get(sector, set())
-            # 聚合计算：收集有数据的成员涨幅
+            # 聚合计算：收集有数据的成员涨幅和相对基准的变化
             member_percents = []
+            member_pct_diffs = []
             for c in all_member_codes:
                 if c in snap:
                     mc_pct = snap[c].get('pct')
                     if mc_pct is not None and not pd.isna(mc_pct):
                         member_percents.append(mc_pct)
+                    mc_pct_diff = snap[c].get('pct_diff')
+                    if mc_pct_diff is not None and not pd.isna(mc_pct_diff):
+                        member_pct_diffs.append(mc_pct_diff)
             
             actual_data_count = len(member_percents)
             if actual_data_count < 1:
@@ -3819,6 +3882,7 @@ class BiddingMomentumDetector:
             
             # 对齐 get_following_concepts_by_correlation 的均值算法
             avg_pct = sum(member_percents) / actual_data_count
+            avg_pct_diff = sum(member_pct_diffs) / len(member_pct_diffs) if member_pct_diffs else 0.0
             
             # 对齐 get_following_concepts_by_correlation 的跟随率算法
             leader_sign = 1 if leader_pct >= 0 else -1
@@ -4040,9 +4104,14 @@ class BiddingMomentumDetector:
                 'staged_diff': round(staged_diff, 2),      # 阶段性变动 (10分阈值重置)
                 'follow_ratio': round(follow_ratio, 2),
                 'avg_pct': round(avg_pct, 2),
+                'avg_pct_diff': round(avg_pct_diff, 2),
                 'leader': leader_code,
                 'leader_name': l_data['name'], 'leader_pct': round(l_data['pct'], 2),
                 'leader_pct_diff': round(l_data.get('pct_diff', 0.0), 2),
+                'leader_price_diff': round(l_data.get('price_diff', 0.0), 2),
+                'leader_dff': round(l_data.get('dff', 0.0), 2),
+                'leader_score': round(l_data.get('score', 0.0), 2),
+                'leader_momentum_score': round(l_data.get('momentum_score', 0.0), 2),
                 'leader_price': l_data.get('price', 0.0),
                 'leader_klines': list(l_ts.klines)[-35:] if (l_ts and l_ts.klines) else (self.realtime_service.get_minute_klines(leader_code, n=35) if self.realtime_service else []),
                 'leader_last_close': l_data.get('last_close', 0),
@@ -4100,6 +4169,7 @@ class BiddingMomentumDetector:
                     v_leader = sbc_stocks[0]
                     v_sector = "🔔 实时报警"
                     v_avg_pct = round(sum(s['pct'] for s in sbc_stocks) / len(sbc_stocks), 2) if sbc_stocks else 0.0
+                    v_avg_pct_diff = round(sum(s.get('pct_diff', 0.0) for s in sbc_stocks) / len(sbc_stocks), 2) if sbc_stocks else 0.0
                     
                     # 对齐 get_following_concepts_by_correlation 评分公式，使评分标准与普通板块完全一致
                     v_bullish_count = 0
@@ -4145,6 +4215,7 @@ class BiddingMomentumDetector:
                         'staged_diff': 0.0,
                         'follow_ratio': 1.0, # 虚拟板块始终保持 100% 联动
                         'avg_pct': v_avg_pct,
+                        'avg_pct_diff': v_avg_pct_diff,
                         'leader': v_leader['code'],
                         'leader_name': v_leader['name'],
                         'leader_pct': round(v_leader['pct'], 2),

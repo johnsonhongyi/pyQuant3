@@ -3176,6 +3176,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.render_mode_atomic = True # [NEW] 渲染模式：True 为标准原子模式（等数据），False 为极速性能模式 (GhostBar)
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
+        self.day_df = pd.DataFrame()
+        self.tick_df = pd.DataFrame()
         self.garbage_threads = []         # ⭐ 线程回收站：防止 QThread 被提前 GC 导致崩溃 (1.6)
         # self.realtime_worker = None
         self.last_initialized_trade_day = None  # 记录最后一次初始化的交易日
@@ -9470,11 +9472,16 @@ class MainWindow(QMainWindow, WindowMixin):
             # 同时保留单主键以向下兼容
             self.reentry_backtest_signals[code_clean] = signals_list
             self.reentry_backtest_best_branch[code_clean] = best_branch
-            logger.debug(f"✅ 成功加载 {code_clean} ({resample}) 的 {len(signals_list)} 个 Re-entry 回测信号，最佳/适合分支策略: {best_branch}")
-            
             # 2. 物理强制触发重绘，使新标记瞬间在 K 线图上浮现！
-            self.render_charts(code_clean, self.day_df, self.tick_df, force=True)
-            self.show_status_message(f"✅ 回测完成！已将 {len(signals_list)} 个买卖点物理标记在 K 线图上，并识别出适合策略: {best_branch}", 4000)
+            day_df = getattr(self, 'day_df', None)
+            tick_df = getattr(self, 'tick_df', None)
+            
+            # 仅在当前股票与回测股票匹配且主日线数据已加载时才触发重绘
+            if day_df is not None and not day_df.empty and getattr(self, 'current_code', '') == code_clean:
+                self.render_charts(code_clean, day_df, tick_df, force=True)
+                self.show_status_message(f"✅ 回测完成！已将 {len(signals_list)} 个买卖点物理标记在 K 线图上，并识别出适合策略: {best_branch}", 4000)
+            else:
+                logger.debug(f"[Backtest] Data for {code_clean} not fully loaded or mismatched. Backtest signals cached, will render upon data arrival.")
         except Exception as e:
             logger.error(f"❌ 提取回测信号并重绘图表失败: {e}")
             
