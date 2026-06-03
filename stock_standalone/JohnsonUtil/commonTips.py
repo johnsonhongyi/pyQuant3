@@ -706,6 +706,7 @@ class GlobalConfig:
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
         self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=1800, value_type="int")
         self.mem_threshold_mb = self.get_with_writeback("general", "mem_threshold_mb", fallback=1800, value_type="int")
+        self.kline_cache_max_len = self.get_with_writeback("general", "kline_cache_max_len", fallback=300, value_type="int")
         self.concept_top10_window_col = self.get_with_writeback("general", "concept_top10_window_col", fallback=["code", "name", "rank", "percent", "dff", "volume","red","win"], value_type="list")
         self.periodic_report_interval = self.get_with_writeback("general", "periodic_report_interval", fallback=15, value_type="int") # [NEW] 定点播报周期(分钟)
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
@@ -1010,6 +1011,7 @@ sina_MultiIndex_limit: int = CFG.sina_MultiIndex_limit
 voice_rate: int = CFG.voice_rate
 realtime_save_interval: int = CFG.realtime_save_interval
 mem_threshold_mb: int = CFG.mem_threshold_mb
+kline_cache_max_len: int = CFG.kline_cache_max_len
 voice_volume: float = CFG.voice_volume
 vis_column_map: Dict[str] = CFG.vis_column_map
 sector_write_blk: Dict[str] = CFG.sector_write_blk
