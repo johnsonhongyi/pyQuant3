@@ -58,10 +58,13 @@ class AuctionDecisionEngine:
         
         signals = []
         
+        # 活跃板块（持续性依据）：仅从当前被资金持续认可的活跃板块中挖掘
+        current_active_sector_names = {s.name for s in bidding.active_sectors}
+        
         # 4. 根据不同情绪状态运行不同决策子模块
         if state == SentimentState.REVERSAL:
             # 情绪反转开仓策略：
-            # 寻找属于昨日大跌板块的个股，且今日竞价表现出强劲拉升或抢筹迹象。
+            # 寻找属于昨日大跌板块的个股，且昨日个股大跌，今日竞价表现出强劲拉升或抢筹迹象。
             for s in bidding_stocks:
                 code = s.get('code', '')
                 name = s.get('name', '')
@@ -70,6 +73,9 @@ class AuctionDecisionEngine:
                 pct = s.get('pct', 0.0)
                 price = s.get('price', 0.0)
                 is_untradable = s.get('is_untradable', False)
+                yesterday_pct = s.get('yesterday_pct', s.get('prev_pct', 0.0))
+                dff = s.get('dff', 0.0)
+                vol_ratio = s.get('volume_ratio', s.get('vol_ratio', 0.0))
                 
                 if is_untradable or not code:
                     continue
@@ -85,28 +91,32 @@ class AuctionDecisionEngine:
                         
                 if is_target_sector:
                     # 反转个股条件：开盘抢筹幅度和强度达标
-                    # 价格开幅合理 (不要开太高以防主力出货, <= 4.0%; 不要太弱, >= -1.0%)
-                    # 竞价得分 > 75
-                    if -1.0 <= pct <= 4.0 and score >= 75.0:
+                    # 昨跌 <= -3%, 今日高开 0.0 ~ 4.0%, dff > 0 或 放量
+                    if yesterday_pct <= -3.0 and 0.0 < pct < 4.0 and score >= 75.0 and (dff > 0 or vol_ratio >= 1.5):
+                        if matched_sector not in current_active_sector_names:
+                            continue # 过滤缺乏持续性的板块
+                            
                         meta = {
                             "matched_sector": matched_sector,
                             "yesterday_sector_pct": getattr(self.fsm._sector_record_by_name.get(matched_sector), 'avg_pct', 0.0),
                             "stock_pct": pct,
-                            "stock_score": score
+                            "stock_score": score,
+                            "yesterday_pct": yesterday_pct,
+                            "dff": dff
                         }
                         signals.append(AuctionSignal(
                             code=code,
                             name=name,
                             sector=sector,
-                            signal_type='REVERSAL_BUY',
+                            signal_type='情绪反转买入',
                             price=price,
                             pct=pct,
                             score=score,
                             confidence=0.85,
-                            rule_id='REVERSAL_WORST_SECTOR_REBOUND',
+                            rule_id='大跌板块错杀反转',
                             metadata=meta
                         ))
-                        
+
         elif state == SentimentState.REPAIR:
             # 修复期策略：
             # 板块有大资金介入修复，个股竞价走高，开盘直接买入最强的龙头/排头兵。
@@ -133,6 +143,9 @@ class AuctionDecisionEngine:
                 if is_repaired_sector:
                     # 个股必须开盘高于昨日收盘价且高开合理 (0.5% 到 5.0%)，得分 > 80.0
                     if 0.5 <= pct <= 5.0 and score >= 80.0:
+                        if sector not in current_active_sector_names:
+                            continue
+                            
                         meta = {
                             "repaired_sector": sector,
                             "stock_pct": pct,
@@ -142,12 +155,59 @@ class AuctionDecisionEngine:
                             code=code,
                             name=name,
                             sector=sector,
-                            signal_type='REPAIR_BUY',
+                            signal_type='修复抢筹买入',
                             price=price,
                             pct=pct,
                             score=score,
                             confidence=0.75,
-                            rule_id='REPAIR_SECTOR_LEADER_ENTRY',
+                            rule_id='错杀主线修复抢筹',
+                            metadata=meta
+                        ))
+
+        # 独立评估主线强延续 CONTINUATION_BUY
+        yesterday_top = self.fsm._yesterday_top_sectors
+        if state != SentimentState.FOMO:
+            for s in bidding_stocks:
+                code = s.get('code', '')
+                name = s.get('name', '')
+                sector = s.get('category', '')
+                score = s.get('score', 0.0)
+                pct = s.get('pct', 0.0)
+                price = s.get('price', 0.0)
+                is_untradable = s.get('is_untradable', False)
+                yesterday_pct = s.get('yesterday_pct', s.get('prev_pct', 0.0))
+                is_limit_up = yesterday_pct >= 9.8
+                
+                if is_untradable or not code:
+                    continue
+                    
+                is_top_sector = False
+                for sec_name in yesterday_top:
+                    if sec_name in sector:
+                        is_top_sector = True
+                        break
+                        
+                if is_top_sector and (yesterday_pct >= 3.0 or is_limit_up):
+                    if -1.0 < pct < 5.0 and score >= 85.0:  # 强延续且未大幅低开，也未过度高开
+                        if sector not in current_active_sector_names:
+                            continue
+                            
+                        meta = {
+                            "matched_sector": sector,
+                            "stock_pct": pct,
+                            "stock_score": score,
+                            "yesterday_pct": yesterday_pct
+                        }
+                        signals.append(AuctionSignal(
+                            code=code,
+                            name=name,
+                            sector=sector,
+                            signal_type='主线强延续买入',
+                            price=price,
+                            pct=pct,
+                            score=score,
+                            confidence=0.80,
+                            rule_id='最强主线龙头延续',
                             metadata=meta
                         ))
                         
@@ -211,7 +271,7 @@ def map_auction_signal_to_dict(sig: AuctionSignal) -> dict:
         "priority": sig.score,
         "sector": sig.sector,
         "action": "BUY",
-        "reason": f"Sentiment reversal: {sig.rule_id}",
+        "reason": f"情绪与竞价决策: {sig.rule_id}",
         "created_at": datetime.now().isoformat(timespec="seconds")
     }
 

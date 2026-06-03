@@ -62,7 +62,9 @@ class TestAuctionEngine(unittest.TestCase):
                     "score": 85.0, # high strength
                     "pct": 1.5, # reasonable high open
                     "price": 35.5,
-                    "is_untradable": False
+                    "is_untradable": False,
+                    "yesterday_pct": -4.5,
+                    "dff": 10.0
                 },
                 "002440": {
                     "code": "002440",
@@ -85,12 +87,12 @@ class TestAuctionEngine(unittest.TestCase):
         self.assertTrue(len(signals) > 0)
         
         for sig in signals:
-            self.assertEqual(sig.signal_type, "REVERSAL_BUY")
+            self.assertEqual(sig.signal_type, "情绪反转买入")
             # Map signal to dict format for Trading Kernel
             item_dict = map_auction_signal_to_dict(sig)
             self.assertEqual(item_dict["code"], sig.code)
             self.assertEqual(item_dict["action"], "BUY")
-            self.assertTrue("Sentiment reversal" in item_dict["reason"])
+            self.assertTrue("情绪与竞价决策" in item_dict["reason"])
             print(f"Generated Auction Signal Dict: {item_dict}")
 
 if __name__ == '__main__':
