@@ -862,7 +862,14 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         try:
             # 2. 预准备所有数据行 (Python 快速构建，避免在 insert 循环内做 format/logic)
-            # 使用 itertuples 遍历
+            # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+            fav_stocks = set()
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+            except Exception:
+                pass
+
             insert_batch = []
             for row in self.df_candidates.itertuples(index=False):
                 code = str(row.code)
@@ -877,15 +884,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
 
                 display_name = row.name
-                # [🚀 标星高亮] 如果是重点关注的自选股，加上 star 星标并高亮
+                # [🚀 标星高亮] 如果是重点关注 of 自选股，加上 star 星标并高亮
                 is_fav_stock = False
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    if code in GlobalFavoriteManager().get_favorite_stocks():
-                        display_name = "【重点】" + display_name
-                        is_fav_stock = True
-                except:
-                    pass
+                if code in fav_stocks:
+                    display_name = "【重点】" + display_name
+                    is_fav_stock = True
                 all_tags = [tag]
                 if is_fav_stock:
                     all_tags.append("favorite")

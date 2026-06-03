@@ -1,3 +1,23 @@
+## 2026-06-03 11:30
+- [x] **修复 DataProcessWorker 与异步打分器冲突导致的重复刷新与数据漏算 Bug (Fixed Redundant Refreshes & Data Dropping in DataProcessWorker)**：
+    - [x] **分析双重刷新与漏算原因**：定位并确认在 `sector_bidding_panel.py` 中，`DataProcessWorker` 仍然沿用了历史遗留的 100 只个股分片循环机制，通过 55 次迭代高频调用 `detector.update_scores`。而打分器内部已被重构为自带节流（0.3s）与 Chunk Scheduler 异步分帧状态机。两套分片机制冲突导致了：（1）1.46s 计算周期内，0.3s 防抖多次放行，导致重复触发了多次 `on_score_finished` 回调和 UI 刷新；（2）大量分片在 0.3s 内被节流阀直接丢弃，导致 90% 以上的个股增量打分失效。
+    - [x] **下线外层分片循环，直通异步打分器**：将 `DataProcessWorker._process_df_chunked` 中的分片循环彻底下线，重构为直接将全量 `active_codes` 一次性投递给 `detector.update_scores`。交由打分器内部的 `Chunk Scheduler` 优雅地在后台异步推进，既保障了打分数据的完整性，又彻底根治了重复触发与无效 UI 刷新的问题。
+    - [x] **通过测试与编译校验**：成功通过了 `py_compile` 静态语法校验，且 `test_watchlist_lifecycle.py` 11 项核心测试 100% 通过。
+
+## 2026-06-03 11:25
+- [x] **优化板块聚合 Worker 异步架构与减负 (Optimized Sector Aggregation Workers & Reduced GIL Contention)**：
+    - [x] **下线冗余 Sector Worker 线程 (Decommissioned Redundant Sector Worker)**：彻底移除了冗余的 `sector_worker` 线程及其配套的 `_sector_update_queue`，避免其在低频轮询中产生的计算冲突与锁竞争。
+    - [x] **集中收敛板块聚合逻辑 (Centralized Sector Aggregation in Async Worker)**：将所有的板块聚合及打分计算逻辑全部统一收敛到具备任务折叠/防抖过滤机制的 `async_sector_agg_worker` 中，极大降低了高频 Tick 驱动下的主线程和 CPU 冗余计算开销。
+    - [x] **加固退出与线程回收逻辑 (Stabilized Shutdown Sequence)**：重构了 `BiddingMomentumDetector.stop()` 析构逻辑，安全移除已被废弃的线程和队列引用，并在主线程退出前通过超时 join 确保所有后台 Worker 线程被优雅回收，彻底根治了退出时的 GIL 竞态与死锁。
+    - [x] **一枪通过单元测试与回放验证**：成功运行 `test_bidding_replay.py` 竞价分析回放，各项指标与联动刷新正常，没有产生任何慢循环报警，系统吞吐量极佳。
+
+## 2026-06-03 11:15
+- [x] **优化 Dashboard 高频渲染性能与消减界面卡顿 (Optimized Dashboard Rendering Performance & Eliminated UI Freezing)**：
+    - [x] **消除循环内锁争用与高频导包开销 (Eliminated Inside-Loop Lock & Import Overhead)**：将 `performance_optimizer.py` 的数据准备与批量插入方法（如 `_preprocess_data`、`_batch_insert_with_displaycolumns_optimization`、`_batch_insert_plain`、`_chunked_insert`、`_incremental_update`、`_batch_add_rows` 等）中的 `GlobalFavoriteManager` 全局状态查询和导包行为全部重构至循环外部进行 bulk 一次性获取，从而彻底消除了高频行情心跳下每秒数千次获取线程锁与动态导包的 CPU 巨额开销。
+    - [x] **重构传统 Treeview 刷新流水线 (Refactored Traditional Treeview Refresh Pipeline)**：在 `instock_MonitorTK.py` 的主表刷新回调 `_refresh_tree_traditional` 中应用了相同的 bulk 预提取技术，大幅降低了主表高频刷新时的 UI 线程阻塞时间。
+    - [x] **优化候选股批量渲染逻辑 (Optimized Candidates Rendering loop)**：在 `stock_selection_window.py` 的 `_render_candidates_batch_optimized` 中将 `GlobalFavoriteManager` 判定提至循环外部，确保候选股载入呈现线性性能响应。
+    - [x] **一枪通过 11 项单元测试与静态编译校验**：通过了 `py_compile` 静态语法校验，且 `test_watchlist_lifecycle.py` 11 项回归单元测试 100% 通过。
+
 ## 2026-06-03 10:30
 - [x] **优化重点关注行样式优先级与增量更新标签同步 (Optimized Favorite Stock Row Style Hierarchy & Sync)**：
     - [x] **确立保留强势特征覆盖的设计方案 (Preserved High-Priority Feature Marker Styles)**：

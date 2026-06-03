@@ -1513,20 +1513,13 @@ class DataProcessWorker(QThread):
 
             total = len(active_codes)
             if total > 0:
-                for start in range(0, total, self.chunk_size):
-                    if not self._is_running:
-                        return
-                    end = start + self.chunk_size
-                    batch_codes = active_codes[start:end]
-                    try:
-                        self.detector.update_scores(active_codes=batch_codes)
-                    except Exception:
-                        self._safe_log_error(
-                            "[Worker] update_scores chunk failed:\n"
-                            + traceback.format_exc()
-                        )
-                    # 主动 Yield GIL
-                    time.sleep(self.chunk_sleep)
+                try:
+                    self.detector.update_scores(active_codes=active_codes)
+                except Exception:
+                    self._safe_log_error(
+                        "[Worker] update_scores failed:\n"
+                        + traceback.format_exc()
+                    )
 
             try: _gil_mark("update_scores:end")
             except Exception: pass

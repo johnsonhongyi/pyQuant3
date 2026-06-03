@@ -142,6 +142,14 @@ class TreeviewIncrementalUpdater:
         columns = self.columns
         feature_marker = self.feature_marker
         
+        # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+        fav_stocks = set()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            pass
+        
         # 预提取 code 列
         if 'code' in df.columns:
             codes = df['code'].astype(str).tolist()
@@ -197,7 +205,7 @@ class TreeviewIncrementalUpdater:
         for i in range(n_rows):
             code = codes[i]
             
-            # 构建 values 列表（使用预提取的列数组）
+            # 构建 values 列表（使用预提取 of 列数组）
             values = [col_arrays[j][i] for j in range(n_cols)]
             
             # 特征标记处理
@@ -241,12 +249,8 @@ class TreeviewIncrementalUpdater:
                     pass
             
             # 🚀 [NEW] 全局重点关注前缀标记 (无论是否有 feature_data)
-            try:
-                from global_favorites import GlobalFavoriteManager
-                if code in GlobalFavoriteManager().get_favorite_stocks() and name_idx >= 0:
-                    values[name_idx] = "【重点】" + values[name_idx]
-            except Exception:
-                pass
+            if name_idx >= 0 and code in fav_stocks:
+                values[name_idx] = "【重点】" + values[name_idx]
             
             rows_data.append((code, values, row_data))
             # 更新缓存（仅在准备数据时，真正更新在 update 方法中）
@@ -273,6 +277,17 @@ class TreeviewIncrementalUpdater:
         原理: 隐藏列后插入不会触发每行的重绘，最后恢复列时只重绘一次
         """
         try:
+            # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+            fav_stocks = set()
+            grades_dict = {}
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                grades_dict = fav_mgr.stock_grades
+            except Exception:
+                pass
+
             # 保存当前 displaycolumns 设置
             saved_displaycolumns = self.tree["displaycolumns"]
             
@@ -294,25 +309,21 @@ class TreeviewIncrementalUpdater:
                             all_tags.extend(tags)
                     except Exception:
                         pass
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    if code in GlobalFavoriteManager().get_favorite_stocks():
-                        fav_tag = "favorite"
-                        try:
-                            grade_val = None
-                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
-                                grade_val = str(row_data['grade']).strip().upper()
-                            if not grade_val:
-                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
-                            if "S" in grade_val:
-                                fav_tag = "favorite_S"
-                            elif "A" in grade_val:
-                                fav_tag = "favorite_A"
-                        except Exception:
-                            pass
-                        all_tags.append(fav_tag)
-                except Exception:
-                    pass
+                if code in fav_stocks:
+                    fav_tag = "favorite"
+                    try:
+                        grade_val = None
+                        if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                            grade_val = str(row_data['grade']).strip().upper()
+                        if not grade_val:
+                            grade_val = grades_dict.get(code, "C").strip().upper()
+                        if "S" in grade_val:
+                            fav_tag = "favorite_S"
+                        elif "A" in grade_val:
+                            fav_tag = "favorite_A"
+                    except Exception:
+                        pass
+                    all_tags.append(fav_tag)
                 if all_tags:
                     self.tree.item(iid, tags=tuple(all_tags))
                 
@@ -330,6 +341,17 @@ class TreeviewIncrementalUpdater:
     
     def _batch_insert_plain(self, rows_data: List[Tuple[str, list, Optional[dict]]]) -> int:
         """普通批量插入（无优化）"""
+        # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+        fav_stocks = set()
+        grades_dict = {}
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            grades_dict = fav_mgr.stock_grades
+        except Exception:
+            pass
+
         added = 0
         for code, values, row_data in rows_data:
             iid = self.tree.insert("", "end", values=values)
@@ -344,25 +366,21 @@ class TreeviewIncrementalUpdater:
                         all_tags.extend(tags)
                 except Exception:
                     pass
-            try:
-                from global_favorites import GlobalFavoriteManager
-                if code in GlobalFavoriteManager().get_favorite_stocks():
-                    fav_tag = "favorite"
-                    try:
-                        grade_val = None
-                        if row_data and isinstance(row_data, dict) and 'grade' in row_data:
-                            grade_val = str(row_data['grade']).strip().upper()
-                        if not grade_val:
-                            grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
-                        if "S" in grade_val:
-                            fav_tag = "favorite_S"
-                        elif "A" in grade_val:
-                            fav_tag = "favorite_A"
-                    except Exception:
-                        pass
-                    all_tags.append(fav_tag)
-            except Exception:
-                pass
+            if code in fav_stocks:
+                fav_tag = "favorite"
+                try:
+                    grade_val = None
+                    if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                        grade_val = str(row_data['grade']).strip().upper()
+                    if not grade_val:
+                        grade_val = grades_dict.get(code, "C").strip().upper()
+                    if "S" in grade_val:
+                        fav_tag = "favorite_S"
+                    elif "A" in grade_val:
+                        fav_tag = "favorite_A"
+                except Exception:
+                    pass
+                all_tags.append(fav_tag)
             if all_tags:
                 self.tree.item(iid, tags=tuple(all_tags))
             
@@ -390,6 +408,17 @@ class TreeviewIncrementalUpdater:
             self._batch_insert_with_displaycolumns_optimization(rows_data)
             return
         
+        # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+        fav_stocks = set()
+        grades_dict = {}
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            grades_dict = fav_mgr.stock_grades
+        except Exception:
+            pass
+
         end_idx = min(start_idx + self.chunk_size, len(rows_data))
         chunk = rows_data[start_idx:end_idx]
         
@@ -411,25 +440,21 @@ class TreeviewIncrementalUpdater:
                             all_tags.extend(tags)
                     except Exception:
                         pass
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    if code in GlobalFavoriteManager().get_favorite_stocks():
-                        fav_tag = "favorite"
-                        try:
-                            grade_val = None
-                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
-                                grade_val = str(row_data['grade']).strip().upper()
-                            if not grade_val:
-                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
-                            if "S" in grade_val:
-                                fav_tag = "favorite_S"
-                            elif "A" in grade_val:
-                                fav_tag = "favorite_A"
-                        except Exception:
-                            pass
-                        all_tags.append(fav_tag)
-                except Exception:
-                    pass
+                if code in fav_stocks:
+                    fav_tag = "favorite"
+                    try:
+                        grade_val = None
+                        if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                            grade_val = str(row_data['grade']).strip().upper()
+                        if not grade_val:
+                            grade_val = grades_dict.get(code, "C").strip().upper()
+                        if "S" in grade_val:
+                            fav_tag = "favorite_S"
+                        elif "A" in grade_val:
+                            fav_tag = "favorite_A"
+                    except Exception:
+                        pass
+                    all_tags.append(fav_tag)
                 if all_tags:
                     self.tree.item(iid, tags=tuple(all_tags))
             
@@ -585,6 +610,17 @@ class TreeviewIncrementalUpdater:
             added = self._batch_add_rows(rows_to_add)
         
         # 4. 逐行更新（通常数量少，向内存缓存对比）
+        # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+        fav_stocks = set()
+        grades_dict = {}
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            grades_dict = fav_mgr.stock_grades
+        except Exception:
+            pass
+
         updated = 0
         for code, values, iid, row_data in rows_to_update:
             try:
@@ -602,25 +638,21 @@ class TreeviewIncrementalUpdater:
                                 all_tags.extend(tags)
                         except Exception:
                             pass
-                    try:
-                        from global_favorites import GlobalFavoriteManager
-                        if code in GlobalFavoriteManager().get_favorite_stocks():
-                            fav_tag = "favorite"
-                            try:
-                                grade_val = None
-                                if row_data and isinstance(row_data, dict) and 'grade' in row_data:
-                                    grade_val = str(row_data['grade']).strip().upper()
-                                if not grade_val:
-                                    grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
-                                if "S" in grade_val:
-                                    fav_tag = "favorite_S"
-                                elif "A" in grade_val:
-                                    fav_tag = "favorite_A"
-                            except Exception:
-                                pass
-                            all_tags.append(fav_tag)
-                    except Exception:
-                        pass
+                    if code in fav_stocks:
+                        fav_tag = "favorite"
+                        try:
+                            grade_val = None
+                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                                grade_val = str(row_data['grade']).strip().upper()
+                            if not grade_val:
+                                grade_val = grades_dict.get(code, "C").strip().upper()
+                            if "S" in grade_val:
+                                fav_tag = "favorite_S"
+                            elif "A" in grade_val:
+                                fav_tag = "favorite_A"
+                        except Exception:
+                            pass
+                        all_tags.append(fav_tag)
                     
                     self.tree.item(iid, values=values, tags=tuple(all_tags))
                     self._values_cache[code] = tuple(values)  # 更新缓存
@@ -644,8 +676,8 @@ class TreeviewIncrementalUpdater:
         Args:
             rows_to_add: (code, values, row_data) 列表
             
-        Returns:
-            成功添加的行数
+            Returns:
+                成功添加的行数
         """
         if not rows_to_add:
             return 0
@@ -653,6 +685,17 @@ class TreeviewIncrementalUpdater:
         add_count = len(rows_to_add)
         
         try:
+            # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+            fav_stocks = set()
+            grades_dict = {}
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                grades_dict = fav_mgr.stock_grades
+            except Exception:
+                pass
+
             # 保存当前 displaycolumns 设置
             saved_displaycolumns = self.tree["displaycolumns"]
             
@@ -674,25 +717,21 @@ class TreeviewIncrementalUpdater:
                             all_tags.extend(tags)
                     except Exception:
                         pass
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    if code in GlobalFavoriteManager().get_favorite_stocks():
-                        fav_tag = "favorite"
-                        try:
-                            grade_val = None
-                            if row_data and isinstance(row_data, dict) and 'grade' in row_data:
-                                grade_val = str(row_data['grade']).strip().upper()
-                            if not grade_val:
-                                grade_val = GlobalFavoriteManager().get_stock_grade(code).strip().upper()
-                            if "S" in grade_val:
-                                fav_tag = "favorite_S"
-                            elif "A" in grade_val:
-                                fav_tag = "favorite_A"
-                        except Exception:
-                            pass
-                        all_tags.append(fav_tag)
-                except Exception:
-                    pass
+                if code in fav_stocks:
+                    fav_tag = "favorite"
+                    try:
+                        grade_val = None
+                        if row_data and isinstance(row_data, dict) and 'grade' in row_data:
+                            grade_val = str(row_data['grade']).strip().upper()
+                        if not grade_val:
+                            grade_val = grades_dict.get(code, "C").strip().upper()
+                        if "S" in grade_val:
+                            fav_tag = "favorite_S"
+                        elif "A" in grade_val:
+                            fav_tag = "favorite_A"
+                    except Exception:
+                        pass
+                    all_tags.append(fav_tag)
                 if all_tags:
                     self.tree.item(iid, tags=tuple(all_tags))
                 
