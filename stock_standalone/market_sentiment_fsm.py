@@ -151,7 +151,7 @@ class MarketSentimentFSM:
         
         # 2. 抓取个股缓存 (浅拷贝)
         with detector._lock:
-            stock_snap = dict(detector.global_snap_cache)
+            stock_snap = dict(detector._global_snap_cache)
             # 获取大盘上涨/下跌家数（如果 detector 有这个字段，或者通过 cct 拿）
             # 兼容处理：如果没有，退避为 0
             limit_up = 0
@@ -293,7 +293,8 @@ class MarketSentimentFSM:
             "confidence": confidence,
             "matched_rules": matched_rules,
             "repaired_worst_sectors": repaired_worst_sectors,
-            "blocked_reasons": blocked_reasons
+            "blocked_reasons": blocked_reasons,
+            "missing_worst_sectors": len(self._yesterday_worst_sectors) == 0
         }
         
         return next_state

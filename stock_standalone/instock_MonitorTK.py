@@ -1542,14 +1542,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             now_time = now_dt.hour * 100 + now_dt.minute
             is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
 
-            # 🚀 [NEW] Sentiment Reversal Engine 09:25 AM Auction Gateway
-            if is_trade_day and now_time == 925:
-                if not getattr(self, "_bg_auction_gate_run_today", "") == today_str:
-                    self._bg_auction_gate_run_today = today_str
-                    try:
-                        self.executor.submit(self.run_auction_reversal_strategy, today_str)
-                    except Exception as ae:
-                        logger.error(f"[BgKernel] Failed to submit run_auction_reversal_strategy: {ae}")
+            # 🚀 [NEW] Sentiment Reversal Engine 09:25 AM ~ 10:30 AM Action Window
+            if is_trade_day and 925 <= now_time <= 1030:
+                try:
+                    self.executor.submit(self.run_auction_reversal_strategy, today_str)
+                except Exception as ae:
+                    logger.error(f"[BgKernel] Failed to submit run_auction_reversal_strategy: {ae}")
 
             executed = []
             blocked = []
@@ -1859,18 +1857,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 4. 生成竞价信号
             signals = self.auction_engine.generate_signals(bidding_snap)
-            if not signals:
-                logger.info("[AuctionGate] No pre-market auction reversal signals triggered today.")
+            if getattr(self, "_auction_reversal_date", "") != today_str:
+                self._auction_reversal_date = today_str
+                self._auction_signaled_codes = set()
+
+            # 过滤掉今日已经发送过反转信号的个股，确保有持续性且不再重复轰炸
+            new_signals = [sig for sig in signals if sig.code not in self._auction_signaled_codes]
+            if not new_signals:
                 return
 
-            logger.info(f"⚡ [AuctionGate] Triggered {len(signals)} auction reversal signals: {[s.code for s in signals]}")
+            logger.info(f"⚡ [AuctionGate] Triggered {len(new_signals)} NEW auction reversal signals: {[s.code for s in new_signals]}")
 
             # 5. 实例化临时风控覆盖 (RiskLimits override)
             from trading_kernel.engine.risk_gate import RiskLimits
             limits_override = RiskLimits(
-                max_position_pct=0.30,  # 允许最多 30% 仓位
-                max_single_order_pct=0.20,
-                max_daily_loss_pct=0.08  # 保持 8% 跌幅限制
+                max_single_stock_position_pct=0.30,  # 允许最多 30% 仓位
+                max_single_size_pct=0.20,
+                max_pct_diff=4.0  # 不追高开过大的
             )
 
             # 6. 获取 KernelService 单例
@@ -1885,7 +1888,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             from trade_gateway import get_trade_gateway
             trade_gw = get_trade_gateway()
 
-            for sig in signals:
+            for sig in new_signals:
+                self._auction_signaled_codes.add(sig.code)
                 # 映射为 decision_item 字典格式
                 item_dict = map_auction_signal_to_dict(sig)
 
