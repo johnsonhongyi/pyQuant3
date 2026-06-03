@@ -1,3 +1,24 @@
+## 2026-06-03 10:30
+- [x] **优化重点关注行样式优先级与增量更新标签同步 (Optimized Favorite Stock Row Style Hierarchy & Sync)**：
+    - [x] **确立保留强势特征覆盖的设计方案 (Preserved High-Priority Feature Marker Styles)**：
+        - 进一步明确并采纳了用户的设计反馈：为了在实盘中直观地看到个股的强弱变化，**不需要强制将所有重点关注股都染成统一的暗红色**。
+        - 尚未加速启动的自选股（无日内强势特征）仅有 `('favorite',)` / `('favorite_S',)` / `('favorite_A',)` 标签，呈现淡绿色/淡蓝色弱势/平稳背景；而已经启动或具有强势特征（如 `limit_up` 涨停或 `near_limit_up` 临近涨停）的重点股，其强势特征标签具有更高优先级，能覆盖背景色，从而达到“一眼区分强弱”的高效盯盘效果。
+    - [x] **柔化弱势状态配色并替换爆发暗红 (Softened Favorite Colors to Elegant Light Colors)**：
+        - 针对用户反馈爆发暗红背景（`#4a1515`）和黄金加粗字（`#ffff00`）在弱势/未启动状态下视觉效果过于突兀的问题，重构为雅致的**淡绿/淡蓝**体系，保持字重加粗，使其既具辨识度又极具工程美感。
+    - [x] **实现三级淡色高亮差异化配色 (Implemented 3-Tier Pale Light Palette for Favorite Stocks)**：
+        - 针对工业富联（走势结构最好/新高龙头）等需要更高视觉区分度的需求，将重点关注的背景和文字细分为三个极浅等级（抛弃了深绿色）：
+            - **`favorite_S` (S级最好/极浅淡蓝色)**：背景 `#11293c`（极浅钢蓝/海蓝色），文字 `#a8d3f7`（浅天蓝色）。用于区分走势结构最优秀的龙头（如上涨3%新高的工业富联）。
+            - **`favorite_A` (A级次之/中度浅绿色)**：背景 `#122f1f`（浅森绿色），文字 `#9adcb4`（浅薄荷绿色）。
+            - **`favorite` (普通自选/标准浅绿色)**：背景 `#183624`（雅致淡绿色），文字 `#a8f0c0`（淡薄荷绿色）。
+    - [x] **调整 `"favorite"` 标签追加至末尾以实现分级样式覆盖**：
+        - 将 `performance_optimizer.py` 中 `_batch_insert_with_displaycolumns_optimization`、`_batch_insert_plain`、`_chunked_insert`、`_incremental_update` 以及 `_batch_add_rows` 方法中 `"favorite"`/`"favorite_S"`/`"favorite_A"` 的顺序调整至末尾（即 `all_tags.append(fav_tag)`），作为兜底背景色。
+        - 同步将 `instock_MonitorTK.py` 中的 `_refresh_tree_traditional` 中的 `tags = tuple(["favorite"] + list(tags))` 改回 `tags = tuple(list(tags) + ["favorite"])`，保持双更新方案下的一致。
+    - [x] **补全增量更新中 `rows_to_update` 的特征 tags 实时刷新与 favorite 同步**：
+        - 修复了 `_incremental_update` 中仅更新 rows 文本 values 而从未刷新 tags 的缺陷，通过预提取特征标记列并重构 rows 循环数据解析，为更新行动态组装 `row_data` 与 `tags`。从而在重点关注状态或盘中价格触发颜色标签改变时，增量刷新也能毫秒级高保真地对齐最新的标签样式与高亮显示。
+    - [x] **修复板块热力表中重点关注板块无法着色 Bug**：
+        - 修复了 `stock_selection_window.py` 内部 `_refresh_sector_list` 插入板块时，将已标记的 `sec_tags` 在 insert 时错误地丢弃（旧代码中硬编码使用 `tags=(tag,)`），导致重点板块无法正常渲染高亮的 Bug，改为 `tags=tuple(sec_tags)`，使自选板块状态能完美高亮。
+    - [x] **通过静态编译与回归生命周期测试**：通过了 `py_compile` 静态语法检验，且 `test_watchlist_lifecycle.py` 11 项单元测试回归 100% 通过。
+
 ## 2026-06-03 03:15
 - [x] **深度修复 `performance_optimizer.py` 中 `IndentationError` 缩进与语法崩溃 Bug (Fixed IndentationError & Restored Parsing Safety in Treeview Updater)**：
     - [x] **补全异常处理闭环与图标保留**：在 `performance_optimizer.py` 的 `_batch_insert_with_displaycolumns_optimization` row_data 构建部分，补齐了由于上轮编辑意外缺失的 `except Exception: row_data = None` 捕获块。这彻底恢复了 `try-except` 的语法结构，并完整保留了原有 `feature_marker` 的图标渲染功能，根治了运行时的缩进崩溃错误。

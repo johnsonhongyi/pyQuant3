@@ -675,6 +675,14 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 
                 # 初始化用户标注列与历史回溯字段映射
                 if not self.df_full_candidates.empty:
+                    if 'grade' in self.df_full_candidates.columns:
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            grades_dict = self.df_full_candidates.set_index('code')['grade'].dropna().astype(str).to_dict()
+                            GlobalFavoriteManager().set_stock_grades(grades_dict)
+                        except Exception as e:
+                            logger.error(f"Failed to sync grades from candidates: {e}")
+
                     if 'user_status' not in self.df_full_candidates.columns:
                         self.df_full_candidates['user_status'] = "待定"
                     if 'user_reason' not in self.df_full_candidates.columns:
@@ -844,8 +852,9 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # 🚀 [加固] 确保 matched_concept tag 被正确高反差亮红配置
         self.tree.tag_configure("matched_concept", foreground="#ff3333", font=("Microsoft YaHei", 9, "bold"))
-        self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
-        self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+        self.tree.tag_configure("favorite_S", background="#11293c", foreground="#a8d3f7", font=("Microsoft YaHei", 9, "bold"))
+        self.tree.tag_configure("favorite_A", background="#ccffcc", foreground="#006600", font=("Microsoft YaHei", 9, "bold"))
+        self.tree.tag_configure("favorite", background="#e6ffe6", foreground="#00cc00", font=("Microsoft YaHei", 9, "bold"))
 
         # 1. 冻结渲染 (通过隐藏所有列实现)
         all_cols = list(self.tree["columns"])
@@ -2121,6 +2130,7 @@ class HistoricalSelectionTrackerWorker(threading.Thread):
                             'sector': row.get('category', 'N/A'),
                             'hits': 1, 'base_price': p,
                             'max_score': float(row.get('score', 0)),
+                            'grade': row.get('grade', 'C'),
                             'dates': [d_obj]
                         }
                     else:
@@ -2545,7 +2555,9 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
                 all_tags.append("matched_concept")
             
             # [🚀 历史追踪收藏高亮配置]
-            self.tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+            self.tree.tag_configure("favorite_S", background="#11293c", foreground="#a8d3f7", font=("Microsoft YaHei", 9, "bold"))
+            self.tree.tag_configure("favorite_A", background="#ccffcc", foreground="#006600", font=("Microsoft YaHei", 9, "bold"))
+            self.tree.tag_configure("favorite", background="#e6ffe6", foreground="#00cc00", font=("Microsoft YaHei", 9, "bold"))
             
             display_name = item['name']
             is_fav_stock = False
@@ -2558,7 +2570,13 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
                 pass
                 
             if is_fav_stock:
-                all_tags.append("favorite")
+                fav_tag = "favorite"
+                grade_val = str(item.get('grade', '')).strip().upper()
+                if "S" in grade_val:
+                    fav_tag = "favorite_S"
+                elif "A" in grade_val:
+                    fav_tag = "favorite_A"
+                all_tags.append(fav_tag)
                 
             self.tree.insert("", "end", iid=item['code'], values=(
                 item['code'], display_name, item['hits'], short_sector,
@@ -3117,7 +3135,9 @@ def _refresh_sector_tab(self):
         self._sector_tree.delete(*self._sector_tree.get_children())
 
         # [🚀 确保收藏板块高亮 tag 配置]
-        self._sector_tree.tag_configure("favorite", background="#4a1515", foreground="#ffff00", font=("Microsoft YaHei", 9, "bold"))
+        self._sector_tree.tag_configure("favorite_S", background="#11293c", foreground="#a8d3f7", font=("Microsoft YaHei", 9, "bold"))
+        self._sector_tree.tag_configure("favorite_A", background="#ccffcc", foreground="#006600", font=("Microsoft YaHei", 9, "bold"))
+        self._sector_tree.tag_configure("favorite", background="#e6ffe6", foreground="#00cc00", font=("Microsoft YaHei", 9, "bold"))
 
         # [🚀 板块默认置顶] 识别重点关注的板块并强置顶
         try:
@@ -3165,7 +3185,7 @@ def _refresh_sector_tab(self):
                 s.get('leader_name', ''),
                 f"{s.get('leader_change_pct', 0):+.2f}%",
                 followers_str,
-            ), tags=(tag,))
+            ), tags=tuple(sec_tags))
 
         now_str = datetime.now().strftime('%H:%M:%S')
         self._sector_status_lbl.config(
