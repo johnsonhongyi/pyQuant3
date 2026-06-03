@@ -1,7 +1,25 @@
 # -*- coding:utf-8 -*-
 import sys
 import functools
+import logging
+import threading
+from collections import deque
 from JohnsonUtil import LoggerFactory
+
+# Thread-safe global deque for realtime service logs
+realtime_service_logs = deque(maxlen=200)
+realtime_logs_lock = threading.Lock()
+
+class RealtimeServiceLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            # Capture logs from realtime_data_service.py and key related service/strategy modules
+            if record.filename in ('realtime_data_service.py', 'bidding_momentum_detector.py', 'sbc_core.py', 'auction_decision_engine.py'):
+                fmt_msg = self.format(record)
+                with realtime_logs_lock:
+                    realtime_service_logs.append(fmt_msg)
+        except Exception:
+            self.handleError(record)
 
 class SafeLoggerWriter:
     """防止管道关闭时抛出异常"""
@@ -64,6 +82,17 @@ def init_logging(log_file="appTk.log", level=None, redirect_print=False, show_de
         level=level
     )
 
+    # Register our custom handler to capture realtime service logs
+    has_handler = any(isinstance(h, RealtimeServiceLogHandler) for h in logger.handlers)
+    if not has_handler:
+        handler = RealtimeServiceLogHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s" if show_detail else "(%(funcName)s:%(lineno)s): %(message)s",
+            datefmt="%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
     if redirect_print:
         sys.stdout = LoggerWriter(LoggerFactory.INFO)
         sys.stderr = LoggerWriter(LoggerFactory.ERROR)
@@ -74,6 +103,17 @@ def init_logging(log_file="appTk.log", level=None, redirect_print=False, show_de
 def init_logging_noprint(log_file="appTk.log", level=None, redirect_print=False, show_detail=True):
     """初始化全局日志 (简易版)"""
     logger = LoggerFactory.getLogger("instock_TK", logpath=log_file, show_detail=show_detail, level=level)
+
+    # Register our custom handler to capture realtime service logs
+    has_handler = any(isinstance(h, RealtimeServiceLogHandler) for h in logger.handlers)
+    if not has_handler:
+        handler = RealtimeServiceLogHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s" if show_detail else "(%(funcName)s:%(lineno)s): %(message)s",
+            datefmt="%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     if redirect_print:
         class SimpleLoggerWriter:

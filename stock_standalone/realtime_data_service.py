@@ -805,7 +805,8 @@ class MinuteKlineCache:
             self.save_consolidation_state()
             return
 
-        klines = self.get_klines(code, n=30) # 增量更新只需看最近的局部数据 (如最近 30 分钟)
+        n_len = getattr(cct.CFG, 'update_wave_klines', 100)
+        klines = self.get_klines(code, n=n_len) # 增量更新只需看最近的局部数据 (从配置中动态获取)
         if len(klines) < 10: return
         
         try:
@@ -1977,9 +1978,11 @@ class DataPublisher:
         self.last_db_check = 0.0
 
         # Time-based goals (Hours)
-        # 恢复旧的性能模式：满 261 裁切到 200 (约 3.3 小时)
-        self.TARGET_HOURS_HP = 3.5
-        self.TARGET_HOURS_LEGACY = 3.3
+        # 动态基于配置文件中的 kline_cache_max_len 计算目标小时数，确保实际 tick 限制与配置一致
+        config_max_len = int(getattr(cct.CFG, 'kline_cache_max_len', 300))
+        self.TARGET_HOURS_HP = config_max_len / 60.0
+        # Legacy 模式稍微降低一点以在降级时释放内存，但不小于 200 根
+        self.TARGET_HOURS_LEGACY = max(200.0, config_max_len * 0.95) / 60.0
 
         # Mode-based settings: Calculate max_len based on default 60s first
         default_interval = 60
@@ -2176,7 +2179,7 @@ class DataPublisher:
         # 如果基于 observed interval 下掉 max_len，会导致已有的高频历史数据被强行裁切。
         base_interval = 60 
         cache_len = int((target_h * 3600) / base_interval)
-        cache_len = max(240, cache_len) # 强制最小 4 小时 (240 根)
+        # cache_len = max(240, cache_len) # 强制最小 4 小时 (240 根)
         
         self.kline_cache.set_mode(max_len=cache_len)
         logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Limit: {cache_len}K (Fixed Base 60s)")
