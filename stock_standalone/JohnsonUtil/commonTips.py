@@ -711,6 +711,7 @@ class GlobalConfig:
         self.periodic_report_interval = self.get_with_writeback("general", "periodic_report_interval", fallback=15, value_type="int") # [NEW] 定点播报周期(分钟)
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.sector_write_blk = self.get_with_writeback("general", "sector_write_blk", fallback='098.blk', value_type="str")
+        self.update_wave_klines = self.get_with_writeback("general", "update_wave_klines", fallback=100, value_type="int")
         self.multiprocessingQueue = self.get_with_writeback("general", "multiprocessingQueue", fallback=300, value_type="int")
         self.gil_monitor = self.get_with_writeback("general", "gil_monitor", fallback=0, value_type="int")
         self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")

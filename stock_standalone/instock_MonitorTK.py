@@ -64,7 +64,7 @@ from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
-from logger_utils import LoggerFactory, init_logging, with_log_level
+from logger_utils import LoggerFactory, init_logging, with_log_level, realtime_service_logs, realtime_logs_lock
 # from stock_live_strategy import StockLiveStrategy
 # from realtime_data_service import DataPublisher
 StockLiveStrategy = cct.LazyClass('stock_live_strategy', 'StockLiveStrategy')
@@ -18728,11 +18728,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             btn_frame = tk.Frame(log_win)
             btn_frame.pack(fill="x", padx=5, pady=2)
             
-            log_messages: deque[str] = deque(maxlen=20)  # Store last 20 log entries
-            log_messages.append(f"[{time.strftime('%H:%M:%S')}] Monitor Started.")
-
-            def add_log(msg: str):
-                log_messages.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+            # Log window opened
+            logger.warning("Realtime Data Service Monitor Window Opened.")
 
             def toggle_pause():
                 if hasattr(self, 'realtime_service') and self.realtime_service:
@@ -18742,7 +18739,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         new_state = not current_paused
                         self.realtime_service.set_paused(new_state)
                         action = "Paused" if new_state else "Resumed"
-                        add_log(f"Service {action} manually.")
+                        logger.warning(f"手动操作：Service {action}")
                     except Exception as e:
                         logger.error(f"Toggle pause failed: {e}")
 
@@ -18751,10 +18748,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if messagebox.askyesno("Confirm Reset", "Are you sure you want to reset the Realtime Service state?\nThis will clear all cached K-lines and emotions."):
                         try:
                             self.realtime_service.reset_state()
-                            add_log("Service state RESET manually.")
+                            logger.warning("手动操作：Service state RESET")
                         except Exception as e:
                             logger.error(f"Manual reset failed: {e}")
-                            add_log(f"Reset FAILED: {e}")
 
             pause_btn = tk.Button(btn_frame, text="Pause Service", command=toggle_pause, font=("Microsoft YaHei", 9))
             pause_btn.pack(side="left", padx=5)
@@ -18779,7 +18775,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         is_hp = status.get('high_performance_mode', True)
                         new_hp = not is_hp
                         self.realtime_service.set_high_performance(new_hp)
-                        add_log(f"Mode switched to {'HighPerf' if new_hp else 'Legacy'}")
+                        logger.warning(f"手动操作：Mode switched to {'HighPerf' if new_hp else 'Legacy'}")
                     except Exception as e:
                         logger.error(f"Toggle perf mode failed: {e}")
 
@@ -18868,7 +18864,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     msg += f"\n[!] ERROR: {status['error']}\n"
                 
                 msg += "\n" + "="*10 + " RECENT LOGS " + "="*10 + "\n"
-                msg += "\n".join(list(log_messages))
+                with realtime_logs_lock:
+                    recent_list = list(realtime_service_logs)
+                recent_logs = recent_list[-30:]  # Show last 30 log lines
+                msg += "\n".join(recent_logs)
                 
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)

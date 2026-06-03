@@ -1,3 +1,14 @@
+## 2026-06-04 00:10
+- [x] **修复 K线历史缓存长度与配置文件上限不一致的 Bug (Fixed Discrepancy between K-Line Cache Length and Configuration Limit)**：
+    - [x] **消除硬编码性能模式目标小时数覆盖 (Removed Hardcoded TARGET_HOURS Override)**：动态关联 `cct.CFG.kline_cache_max_len`（默认 300）与 `TARGET_HOURS_HP` 及 `TARGET_HOURS_LEGACY`。用 `config_max_len / 60.0` 动态计算目标时长小时数。
+    - [x] **修复 UI 监视看板极限值显示不一致 (Fixed Cache History Limit Discrepancy in UI Status)**：解决了当系统开机或切换性能模式时，硬编码的 `3.5` 小时限制（210 根）强制覆盖用户在 `global.ini` 中配置的 `kline_cache_max_len = 300` 从而导致 UI 界面中 `cache_history_limit` 恒显为 210 的问题。现在系统可以完美根据用户配置的大小（如 300 根）动态计算并应用缓存极限。
+
+## 2026-06-03 23:50
+- [x] **修复实时服务日志在 Tkinter 界面下不可见 Bug (Fixed Realtime Service Log Invisibility in Tkinter UI)**：
+    - [x] **实现实时服务日志拦截器 (Implemented RealtimeServiceLogHandler)**：在 `logger_utils.py` 中，开发了专门针对 `realtime_data_service.py` 及其核心计算组件（如 `bidding_momentum_detector.py`, `sbc_core.py`, `auction_decision_engine.py`）日志输出的 `RealtimeServiceLogHandler` 拦截处理器。通过线程安全的全局 `deque` 环形队列（容量 200），自动在内存中过滤并捕获这部分核心服务产生的警告与业务日志，成功在冷启动及盘中运行阶段将其拦截并驻留在内存中。
+    - [x] **重构 Tkinter 实时服务日志控制台 (Re-engineered Tkinter Realtime Service Monitor to Unified Stream)**：在 `instock_MonitorTK.py` 的 `open_realtime_monitor` 窗口及数据刷新流水线中，废弃了原先相互孤立、仅能手动追加的前端局部 `log_messages` 队列。改为在每次 UI 心跳（5秒）刷新时，直接安全地从 `logger_utils` 的全局线程锁保护 of `realtime_service_logs` 内存队列中提取最新的 30 条详细业务日志进行滚动合并展示。
+    - [x] **完全保留原有文件记录且零性能阻碍**：通过将此处理器挂载至 LoggerFactory 返回的全局 root 记录器上，成功让初始化日志既能无损落地物理日志文件 `instock_tk.log`，又能在 Tkinter 监控弹窗中实时更新展现，消除了在应用启动时由于冷启动加载时差导致日志输出“静默丢失”的严重观测漏洞。
+
 ## 2026-06-03 21:00
 - [x] **实现 V型反转与多波段 VWAP 监控系统工程落地与全链条集成 (Implemented Full-Chain Integration for V-Reversal & Consolidation Watchlist System)**：
     - [x] **实现 BiddingMomentumDetector 冷启动自愈与状态重载 (Cold-start State Recovery in Detector)**：在 `bidding_momentum_detector.py` 的 `__init__` 初始化过程中，新增了 `self.realtime_service.cache.load_consolidation_state()` 调用。确保当应用崩溃后冷启动时，打分器能自动从 Ramdisk 的 `json.gz` 快照中恢复上一个运行周期的波段相位，实现断点续传。
