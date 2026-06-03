@@ -14643,6 +14643,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         use_fm = self._use_feature_marking and hasattr(self, 'feature_marker')
         target_iid = None
         
+        # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
+        fav_stocks = set()
+        grades_dict = {}
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            grades_dict = fav_mgr.stock_grades
+        except Exception as e:
+            logger.warning(f"Failed to fetch global favorites or grades cache: {e}")
+
         # 4. 极速单流插入 (itertuples 是 Pandas 最快迭代器)
         for row in df_view.itertuples(index=False):
             # 获取显示值 (Lazy 处理 NaN)
@@ -14664,26 +14675,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             code_idx_in_show = cols_to_show.index('code') if 'code' in cols_to_show else -1
             if code_idx_in_show >= 0 and name_in_show >= 0:
                 code_val = str(raw_values[code_idx_in_show]).zfill(6)
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    if code_val in GlobalFavoriteManager().get_favorite_stocks():
-                        formatted_values[name_in_show] = "【重点】" + formatted_values[name_in_show]
-                        fav_tag = "favorite"
-                        try:
-                            grade_val = None
-                            if grade_idx_in_all >= 0:
-                                grade_val = str(row[grade_idx_in_all]).strip().upper()
-                            if not grade_val:
-                                grade_val = GlobalFavoriteManager().get_stock_grade(code_val).strip().upper()
-                            if "S" in grade_val:
-                                fav_tag = "favorite_S"
-                            elif "A" in grade_val:
-                                fav_tag = "favorite_A"
-                        except Exception:
-                            pass
-                        tags = tuple(list(tags) + [fav_tag])
-                except Exception as e:
-                    logger.debug(f"Failed to apply favorite tags: {e}")
+                if code_val in fav_stocks:
+                    formatted_values[name_in_show] = "【重点】" + formatted_values[name_in_show]
+                    fav_tag = "favorite"
+                    try:
+                        grade_val = None
+                        if grade_idx_in_all >= 0:
+                            grade_val = str(row[grade_idx_in_all]).strip().upper()
+                        if not grade_val:
+                            grade_val = grades_dict.get(code_val, "C").strip().upper()
+                        if "S" in grade_val:
+                            fav_tag = "favorite_S"
+                        elif "A" in grade_val:
+                            fav_tag = "favorite_A"
+                    except Exception:
+                        pass
+                    tags = tuple(list(tags) + [fav_tag])
             
             iid = self.tree.insert("", "end", values=formatted_values, tags=tags)
 

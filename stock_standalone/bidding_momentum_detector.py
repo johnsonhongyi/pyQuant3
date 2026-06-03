@@ -823,7 +823,6 @@ class BiddingMomentumDetector:
         self.on_score_finished = None
 
         self._subscribe_queue = Queue()
-        self._sector_update_queue = Queue()
         self._register_worker_started = False
         
         # [NEW] 异步板块聚合任务队列与退出信号 (异步分层解耦)
@@ -1202,8 +1201,8 @@ class BiddingMomentumDetector:
             for c in new_codes:
                 self._subscribe_queue.put(c)
 
-        # sector update 不阻塞主线程
-        self._sector_update_queue.put(True)
+        # sector update is handled asynchronously after score updates to avoid redundant calculations
+        pass
 
         # ===============================
         # 5. 启动后台 worker（只启动一次）
@@ -1234,36 +1233,7 @@ class BiddingMomentumDetector:
                     continue
 
         # =========================
-        # ② sector worker（低频更新）
-        # =========================
-        def sector_worker():
-            import time
-            import queue
-            while not self._stop_event.is_set():
-                try:
-                    trigger = self._sector_update_queue.get(timeout=1.0)
-                    if trigger is None:
-                        break
-
-                    try:
-                        # ❗ 控频：最多 1次/300ms
-                        time.sleep(0.3)
-
-                        with self._lock:
-                            if hasattr(self, '_tick_series'):
-                                # 只做轻量触发，不 rebuild
-                                self.data_version += 1
-
-                        # 延迟真正 sector rebuild
-                        self._aggregate_sectors(active_codes=None)
-
-                    except Exception as e:
-                        logger.warning(f"[SectorWorker] failed: {e}")
-                except queue.Empty:
-                    continue
-
-        # =========================
-        # ③ 异步板块聚合 worker (分层异步，完成后更新，防抖折叠)
+        # ② 异步板块聚合 worker (分层异步，完成后更新，防抖折叠)
         # =========================
         def async_sector_agg_worker():
             import queue
@@ -1312,7 +1282,7 @@ class BiddingMomentumDetector:
                     
                     # [DEBUG] 打印分析日志
                     if _agg_ms > 800:
-                        logger.info(f"⚡ [AsyncSectorAgg] Aggregated sectors in {_agg_ms:.1f}ms (active={len(final_active_codes) if final_active_codes else 'ALL'})")
+                         logger.info(f"⚡ [AsyncSectorAgg] Aggregated sectors in {_agg_ms:.1f}ms (active={len(final_active_codes) if final_active_codes else 'ALL'})")
                     
                     # 板块计算全部完成后，异步通知外部 UI 统一刷新（完成后更新模式）
                     if hasattr(self, 'on_score_finished') and self.on_score_finished:
@@ -1330,11 +1300,9 @@ class BiddingMomentumDetector:
         # 启动线程
         # =========================
         self._subscribe_thread = threading.Thread(target=subscribe_worker, name="subscribe_worker", daemon=True)
-        self._sector_thread = threading.Thread(target=sector_worker, name="sector_worker", daemon=True)
         self._async_sector_agg_thread = threading.Thread(target=async_sector_agg_worker, name="async_sector_agg_worker", daemon=True)
 
         self._subscribe_thread.start()
-        self._sector_thread.start()
         self._async_sector_agg_thread.start()
 
     def get_active_sectors(self) -> List[Dict[str, Any]]:
@@ -1714,13 +1682,12 @@ class BiddingMomentumDetector:
         try:
             self._async_sector_agg_queue.put(None)
             self._subscribe_queue.put(None)
-            self._sector_update_queue.put(None)
             logger.info("🛑 BiddingMomentumDetector background workers triggered for exit.")
         except Exception as e:
             logger.warning(f"Error sending exit signals to background queues: {e}")
 
         # [NEW] 显式 join 线程，防止退出时解释器销毁导致 GIL 报错
-        for thread_attr in ['_subscribe_thread', '_sector_thread', '_async_sector_agg_thread']:
+        for thread_attr in ['_subscribe_thread', '_async_sector_agg_thread']:
             t = getattr(self, thread_attr, None)
             if t and t.is_alive():
                 try:
