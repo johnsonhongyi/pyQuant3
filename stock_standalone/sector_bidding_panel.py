@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFileDialog, QAbstractItemView, QCalendarWidget, QStyle, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPoint, QRect, QThread, pyqtSignal, QObject, QByteArray, QDate, QEvent
-from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat
+from PyQt6.QtGui import QColor, QFont, QAction, QPen, QPainter, QTextCharFormat, QIntValidator
 import pyqtgraph as pg
 import numpy as np
 import pandas as pd
@@ -2319,10 +2319,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.btn_sub_10.clicked.connect(lambda: self._adjust_interval(-10))
         bar_lay_3.addWidget(self.btn_sub_10)
         
-        self.lbl_interval = QLabel(f"{int(self.detector.comparison_interval/60)}m")
-        self.lbl_interval.setStyleSheet("color: #00ff88; font-weight: bold; min-width: 30px;")
+        self.lbl_interval = QLineEdit(str(int(self.detector.comparison_interval / 60)))
+        self.lbl_interval.setStyleSheet("background: #1C1C1E; color: #00ff88; font-weight: bold; border: 1px solid #3A3A3C; border-radius: 3px; min-width: 35px; max-width: 35px; padding: 2px;")
         self.lbl_interval.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_interval.setValidator(QIntValidator(1, 9999))
+        self.lbl_interval.editingFinished.connect(self._on_interval_edited)
         bar_lay_3.addWidget(self.lbl_interval)
+        
+        bar_lay_3.addWidget(QLabel("m"))
         
         self.btn_add_10 = QPushButton("+10m")
         self.btn_add_10.setMinimumWidth(40)
@@ -2988,7 +2992,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
         elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
-        elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct', 0.0), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct_diff', 0.0), reverse=not asc)
         elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
 
         sectors.sort(key=is_fav, reverse=True)
@@ -3029,7 +3033,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.sector_table, i, 0, display_name, 
                             color=color, user_role=sn)
 
-            avg_pct = sdata.get('avg_pct', 0.0)
+            avg_pct_diff = sdata.get('avg_pct_diff', 0.0)
 
             # Col 1: Score
             self._update_cell(self.sector_table, i, 1, f"{sc:.1f}", 
@@ -3037,8 +3041,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             is_numeric=True)
 
             # Col 2: Avg Pct (Rise/Fall)
-            diff_text = f"{avg_pct:+.2f}%" if avg_pct != 0 else "0.00%"
-            diff_color = self._color_red if avg_pct > 0 else (self._color_green if avg_pct < 0 else color)
+            diff_text = f"{avg_pct_diff:+.2f}%" if avg_pct_diff != 0 else "0.00%"
+            diff_color = self._color_red if avg_pct_diff > 0 else (self._color_green if avg_pct_diff < 0 else color)
             self._update_cell(self.sector_table, i, 2, diff_text, 
                             color=diff_color, alignment=Qt.AlignmentFlag.AlignCenter, 
                             is_numeric=True)
@@ -5027,7 +5031,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         curr_m = int(self.detector.comparison_interval / 60)
         new_m = max(1, curr_m + delta_m)
         self.detector.comparison_interval = new_m * 60
-        self.lbl_interval.setText(f"{new_m}m")
+        self.lbl_interval.setText(str(new_m))
         
         # [NEW] 防抖机制，避免连续点击造成重复计算
         if not hasattr(self, '_interval_debounce_timer'):
@@ -5041,6 +5045,30 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """防抖定时器回调：保存 UI 状态并执行刷新"""
         self._save_ui_state()
         self.manual_refresh()
+
+    def _on_interval_edited(self):
+        """手动直接输入对比时长"""
+        try:
+            val_text = self.lbl_interval.text().strip()
+            if not val_text:
+                return
+            new_m = int(val_text)
+            if new_m < 1:
+                new_m = 1
+                self.lbl_interval.setText("1")
+            
+            # 只有在数值真的改变时才更新并触发防抖刷新
+            if self.detector.comparison_interval != new_m * 60:
+                self.detector.comparison_interval = new_m * 60
+                
+                if not hasattr(self, '_interval_debounce_timer'):
+                    self._interval_debounce_timer = QTimer(self)
+                    self._interval_debounce_timer.setSingleShot(True)
+                    self._interval_debounce_timer.timeout.connect(self._on_interval_debounce_timeout)
+                
+                self._interval_debounce_timer.start(2000)
+        except Exception as e:
+            self.lbl_interval.setText(str(int(self.detector.comparison_interval / 60)))
 
 
     def _on_strategy_changed(self):
@@ -5143,7 +5171,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 if "comparison_interval_min" in p_data:
                     ival = p_data["comparison_interval_min"]
                     self.detector.comparison_interval = ival * 60
-                    self.lbl_interval.setText(f"{ival}m")
+                    self.lbl_interval.setText(str(ival))
                 
                 # 恢复勾选状态
                 strat_data = p_data.get("strategies", {})
