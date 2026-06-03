@@ -3,6 +3,10 @@ from datetime import datetime
 import threading
 import gc
 import sys
+import os
+import json
+import gzip
+import glob
 import pandas as pd
 import numpy as np
 import sqlite3
@@ -11,6 +15,7 @@ from typing import Any, Optional, cast, List
 from collections.abc import Callable
 import psutil
 import os
+from sys_utils import get_app_root
 
 # ── 环境配置 ─────────────────────────────────────────────────────────────────
 try:
@@ -85,6 +90,11 @@ class MinuteKlineCache:
         # [NEW] 限频日志计数器
         self._day_log_cycle_count = 0  # 今日已打印异常的周期数
         self._last_log_date = ""        # 上次打印日志的日期
+        
+        # [NEW] 状态机与独立的V反预处理监控池
+        self._consolidation_flags: dict[str, dict[str, Any]] = {} # 记录个股跌幅与缩量状态
+        self._v_reversal_pool: set[str] = set() # 潜伏监控池 (横盘缩量达标)
+        
         self._lock = threading.Lock() # 真正的锁
         
     def __len__(self) -> int:
@@ -195,6 +205,11 @@ class MinuteKlineCache:
             required_cols = ['code', 'time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start']
             avail_cols = [c for c in required_cols if c in cols]
             df = df[avail_cols].copy() # 仅 copy 筛选过的子集
+            
+            # [FIX] Fill missing required columns to prevent KeyError in subsequent NumPy array extraction
+            for c in required_cols:
+                if c not in df.columns:
+                    df[c] = 0.0 if c != 'code' else ''
             
             # code 规范化（核心：如果已经是 str 则跳过 astype）
             if 'code' in cols:
@@ -756,57 +771,263 @@ class MinuteKlineCache:
             
             if tick_df is not None and not tick_df.empty:
                 logger.info(f"💡 Supplemental fetch for {code}: retrieved {len(tick_df)} ticks from Sina trajectory.")
+                
+                # Preprocess tick_df to match from_dataframe expectations
+                tick_df = tick_df.reset_index()
+                if 'ticktime' in tick_df.columns:
+                    tick_df = tick_df.rename(columns={'ticktime': 'time'})
+                if 'cum_vol_start' not in tick_df.columns:
+                    tick_df['cum_vol_start'] = tick_df['volume'] if 'volume' in tick_df.columns else 0.0
+                
                 # 将轨迹数据转换为 K 线并合并 (⚡ Essential: merge=True)
-                # Note: from_dataframe with merge=True adds/updates stocks without clearing others
-                # tick_df = self.fast_fill_from_tick(tick_df)
                 self.from_dataframe(tick_df, merge=True)
                 self._supplemented_codes.add(code)
+                
+                # [NEW] 轨迹数据拉取完成后，立刻对该股单独触发一次状态机评估，防止等待 5 分钟周期
+                self.update_wave_structure_state(code=code)
+                
         except Exception as e:
             logger.error(f"❌ Supplemental fetch failed for {code}: {e}")
 
-    def detect_v_shape(self, code: str, window: int = 30) -> bool:
+    def update_wave_structure_state(self, code: Optional[str] = None) -> None:
         """
-        检测 V 型反转 (30分钟窗口)
-        逻辑:
-        1. 窗口内最低点跌幅较深 (相对于窗口起始或当日开盘, 这里简化为相对于窗口内最高点跌幅 > 2%)
-        2. 当前价格较最低点明显反弹 (反弹幅度 > 1.5%)
-        3. 当前价格接近或超过窗口起始价
+        高阶增量状态机：识别图谱中的“底背离缩量 -> 放量拉升远离VWAP -> 缩量回踩VWAP -> 再次放量拉升”的多波段进攻结构。
+        如果 code 为 None，则遍历缓存中的所有 code，并在最后将状态同步至 Ramdisk。
+        核心优势：完全依赖持久化的 _consolidation_flags，跨日断点续传。即便几天前的数据被挤出 300-len 缓存，
+        由于状态（如 wave_1_peak, anchor_low）已保存在字典中，依旧能完美接力计算。
         """
-        klines = self.get_klines(code, n=window)
-        if len(klines) < 10:
-            return False
-            
+        if code is None:
+            # batch execute
+            codes_to_check = list(self._shared_cache.keys())
+            for c in codes_to_check:
+                self.update_wave_structure_state(code=c)
+            # 批量更新完毕后，执行一次防抖落盘至 Ramdisk
+            self.save_consolidation_state()
+            return
+
+        klines = self.get_klines(code, n=30) # 增量更新只需看最近的局部数据 (如最近 30 分钟)
+        if len(klines) < 10: return
+        
         try:
-            closes = [k['close'] for k in klines]
-            lows = [k['low'] for k in klines]
-            highs = [k['high'] for k in klines]
+            # 提取近期特征
+            closes = np.array([k['close'] for k in klines], dtype=np.float32)
+            vols = np.array([k['volume'] for k in klines], dtype=np.float32)
+            cums = np.array([k['cum_vol_start'] for k in klines], dtype=np.float32)
             
-            curr_price = closes[-1]
-            min_low = min(lows)
-            max_high = max(highs)
+            recent_close = closes[-1]
+            recent_max = float(np.max(closes))
+            recent_min = float(np.min(closes))
+            recent_avg_vol = float(np.mean(vols[-5:])) if len(vols) >= 5 else float(np.mean(vols))
             
-            # 1. 并没有太大的跌幅，忽略
-            # (最高点 - 最低点) / 最高点 < 2% -> 波动太小
-            if max_high == 0: return False
-            drop_range = (max_high - min_low) / max_high
-            if drop_range < 0.02:
-                return False
+            # 简易近似计算近期 VWAP (实际可传入更精准的真实 VWAP)
+            vwap = float(np.sum(closes * vols) / np.sum(vols)) if np.sum(vols) > 0 else recent_close
+            
+            # --- 1. 获取持久化的上一刻状态 ---
+            # 如果程序崩溃后重启，这里 get 到的就是从 json 恢复出来的完整多日进度！
+            state = self._consolidation_flags.get(code, {"phase": "INIT", "update_ts": 0})
+            phase = state.get("phase", "INIT")
+            
+            # --- 2. 状态流转引擎 (State Machine) ---
+            
+            if phase == "INIT":
+                # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
+                # 假设通过跌幅和极度缩量确认
+                if recent_avg_vol > 0 and (recent_max - recent_min) / recent_min < 0.02:
+                    # 简化判定：只要属于极度横盘，就先算作初步潜伏
+                    state["phase"] = "CONSOLIDATING"
+                    state["anchor_low"] = recent_min
+                    state["base_vol"] = recent_avg_vol
+                    self._v_reversal_pool.add(code)
+                    
+            elif phase == "CONSOLIDATING":
+                # 在横盘期，监控“放量拉升远离VWAP” (第一波进攻)
+                anchor_low = state.get("anchor_low", recent_min)
+                base_vol = state.get("base_vol", recent_avg_vol)
                 
-            # 2. 从最低点反弹力度
-            # (当前 - 最低) / 最低
-            if min_low == 0: return False
-            rebound: float = (curr_price - min_low) / min_low
-            
-            # 3. 反弹确认
-            if rebound > 0.015:
-                # 进一步确认形态：最低点出现在窗口中间而非刚开始
-                # 简单处理：只要反弹够猛且刚跌过
-                return True
+                # 条件：价格上穿 VWAP 并拉开距离 (如 > 1.5%)，且成交量显著放大 (如 > 2.5倍基准量)
+                if recent_close > vwap * 1.015 and recent_avg_vol > base_vol * 2.5:
+                    state["phase"] = "WAVE_UP"
+                    state["wave_1_start_price"] = recent_close
+                    state["wave_1_start_vwap"] = vwap
+                    if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 触发第一波放量进攻! 价:{recent_close} VWAP:{vwap}")
+                    
+            elif phase == "WAVE_UP":
+                # 在进攻浪中，监控“缩量回踩VWAP”
+                # 更新波段最高点
+                state["wave_peak"] = max(state.get("wave_peak", 0), recent_max)
+                
+                # 回踩条件：价格回落到 VWAP 附近 (如距离 VWAP < 1%)，且量能萎缩
+                if recent_close < vwap * 1.01 and recent_avg_vol < state.get("base_vol", recent_avg_vol) * 1.5:
+                    state["phase"] = "PULLBACK"
+                    state["pullback_price"] = recent_close
+                    if self.verbose: logger.info(f"📉 [波段跟踪] {code} 触发缩量回踩VWAP! 价:{recent_close}")
+                    
+            elif phase == "PULLBACK":
+                # 回踩完毕后，监控“再次放量拉升” (第二波/N波进攻)
+                wave_peak = state.get("wave_peak", 9999)
+                
+                # 条件：再次放量，并且价格有突破前高的趋势
+                if recent_avg_vol > state.get("base_vol", recent_avg_vol) * 2.0 and recent_close > state.get("pullback_price", recent_close) * 1.02:
+                    state["phase"] = "WAVE_UP_2"  # 或者循环回 WAVE_UP
+                    if self.verbose: logger.info(f"🚀 [波段跟踪] {code} 完美命中第二波拉升结构! 即将发射信号。")
+                    # 这里可以将个股抛给高维策略做全面测试
+                    
+            # --- 3. 增量更新状态并刷入内存字典 ---
+            state["update_ts"] = time.time()
+            self._consolidation_flags[code] = state
                 
         except Exception as e:
-            logger.error(f"V-shape check error: {e}")
+            logger.error(f"update_wave_structure_state error for {code}: {e}")
+
+    def get_v_reversal_pool(self) -> set[str]:
+        """供外层引擎高速检索潜伏池成员"""
+        return self._v_reversal_pool
+        
+    def get_consolidation_flags(self, code: str) -> dict:
+        """获取潜伏期锚点数据 (供突破校验使用)"""
+        return self._consolidation_flags.get(code, {})
+
+    def save_consolidation_state(self, filepath: str = "") -> bool:
+        """持久化保存潜伏池状态，默认保存到 Ramdisk"""
+        if not filepath:
+            filepath = str(cct.get_ramdisk_path("v_reversal_pool.json"))
             
-        return False
+        phase_map = {
+            "INIT": "初始状态",
+            "CONSOLIDATING": "横盘潜伏",
+            "WAVE_UP": "首波拉升",
+            "PULLBACK": "缩量回踩",
+            "WAVE_UP_2": "二次拉升"
+        }
+            
+        try:
+            # 深拷贝并转换状态机语言
+            mapped_flags = {}
+            for code, state in self._consolidation_flags.items():
+                mapped_state = state.copy()
+                if "phase" in mapped_state:
+                    mapped_state["phase"] = phase_map.get(mapped_state["phase"], mapped_state["phase"])
+                mapped_flags[code] = mapped_state
+
+            state_dict = {
+                "update_time": time.time(),
+                "v_reversal_pool": list(self._v_reversal_pool),
+                "consolidation_flags": mapped_flags
+            }
+            # 使用临时文件写入后重命名，确保原子性防止写一半崩溃
+            tmp_file = filepath + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(state_dict, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, filepath)
+            if self.verbose:
+                logger.info(f"💾 [V反潜伏池] 状态已持久化至 {filepath} (容量: {len(self._v_reversal_pool)} 只)")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 持久化潜伏池状态失败: {e}")
+            return False
+
+    def load_consolidation_state(self, filepath: str = "") -> bool:
+        """冷启动/崩溃恢复：加载潜伏池状态 (默认从 Ramdisk)"""
+        if not filepath:
+            filepath = str(cct.get_ramdisk_path("v_reversal_pool.json"))
+            
+        phase_map_rev = {
+            "初始状态": "INIT",
+            "横盘潜伏": "CONSOLIDATING",
+            "首波拉升": "WAVE_UP",
+            "缩量回踩": "PULLBACK",
+            "二次拉升": "WAVE_UP_2"
+        }
+            
+        if not os.path.exists(filepath):
+            # 如果 ramdisk 没有，尝试从 logs 目录的备份加载
+            logs_dir = os.path.join(get_app_root(), "logs")
+            backup_files = sorted(glob.glob(os.path.join(logs_dir, "v_reversal_pool_*.json.gz")), reverse=True)
+            if backup_files:
+                backup_file = backup_files[0]
+                logger.warning(f"⚠️ [V反潜伏池] 找不到 {filepath}，正尝试从备份恢复: {backup_file}")
+                try:
+                    with gzip.open(backup_file, "rt", encoding="utf-8") as f:
+                        state = json.load(f)
+                except Exception as e:
+                    logger.error(f"❌ 从备份文件恢复潜伏池状态失败: {e}")
+                    return False
+            else:
+                logger.warning(f"⚠️ [V反潜伏池] 找不到 {filepath}，且未发现备份文件")
+                return False
+        else:
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            except Exception as e:
+                logger.error(f"❌ 读取Ramdisk潜伏池状态失败: {e}")
+                return False
+                
+        try:
+            # 清理过期状态 (例如超过 7 天未更新)
+            now_ts = time.time()
+            valid_flags = {}
+            valid_pool = set()
+            
+            for code, flag_data in state.get("consolidation_flags", {}).items():
+                update_ts = flag_data.get("update_ts", 0)
+                if now_ts - update_ts < 7 * 86400: # 7天内有效
+                    # 还原映射语言为系统内部标识
+                    if "phase" in flag_data:
+                        flag_data["phase"] = phase_map_rev.get(flag_data["phase"], flag_data["phase"])
+                    valid_flags[code] = flag_data
+                    if code in state.get("v_reversal_pool", []):
+                        valid_pool.add(code)
+            
+            with self._lock:
+                self._consolidation_flags.update(valid_flags)
+                self._v_reversal_pool.update(valid_pool)
+                
+            if self.verbose:
+                logger.info(f"🔄 [V反潜伏池] 成功从 {filepath} 恢复 {len(valid_pool)} 只监控个股")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 加载潜伏池状态失败: {e}")
+            return False
+
+    def backup_consolidation_state_to_gz(self) -> bool:
+        """
+        供 TK 主程序退出时调用：将 Ramdisk 中的最新状态备份到项目 logs/ 目录，
+        压缩为 YYYYMMDD.json.gz 格式，并自动保留最近 7 天。
+        """
+        try:
+            # 1. 确保最新状态已写入 Ramdisk
+            ramdisk_path = str(cct.get_ramdisk_path("v_reversal_pool.json"))
+            self.save_consolidation_state(ramdisk_path)
+            
+            # 2. 读取要备份的 JSON 文本
+            if not os.path.exists(ramdisk_path):
+                return False
+            with open(ramdisk_path, "rb") as f:
+                data = f.read()
+                
+            # 3. 确定目标路径 (logs 目录)
+            logs_dir = os.path.join(get_app_root(), "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            today_str = datetime.now().strftime("%Y%m%d")
+            backup_file = os.path.join(logs_dir, f"v_reversal_pool_{today_str}.json.gz")
+            
+            # 4. Gzip 压缩写入
+            with gzip.open(backup_file, "wb") as gz_f:
+                gz_f.write(data)
+            logger.info(f"📦 [V反潜伏池] 退出备份已生成: {backup_file}")
+            
+            # 5. 清理超过 7 天的历史备份
+            backup_pattern = os.path.join(logs_dir, "v_reversal_pool_*.json.gz")
+            existing_backups = sorted(glob.glob(backup_pattern))
+            if len(existing_backups) > 7:
+                for old_file in existing_backups[:-7]:
+                    os.remove(old_file)
+                    logger.debug(f"🗑️ 已清理过期潜伏池备份: {old_file}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 退出备份潜伏池状态失败: {e}")
+            return False
 
 class TickAggregator:
     """
@@ -1796,6 +2017,9 @@ class DataPublisher:
         self.maintenance_thread = threading.Thread(target=self._maintenance_task, daemon=True)
         self.maintenance_thread.start()
         
+        # [NEW] 冷启动预热重点关注个股的状态机
+        self.warm_up_favorites()
+        
         # Start external data scraper thread
         self.scraper_thread = threading.Thread(target=self._scraper_task, daemon=True)
         self.scraper_thread.start()
@@ -1858,6 +2082,20 @@ class DataPublisher:
                     logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
                     self._is_recovered_empty = False
                     self.data_version += 1
+                    
+                    # [NEW] 利用恢复的全网存量 K 线，瞬间初始化并重构全市场 V反 状态机
+                    try:
+                        # 优先尝试从持久化文件(Ramdisk/Gzip)加载上一周期的状态机
+                        if self.kline_cache.load_consolidation_state() and len(self.kline_cache.get_v_reversal_pool()) > 0:
+                            logger.warn(f"✅ [Init] 成功从持久化文件中恢复全网状态机，跳过全量重构。当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
+                        else:
+                            logger.warn("🚀 [Init] 状态机缓存为空或未找到，正在从本地存量历史 K 线中全量重算 V型反转状态机...")
+                            start_t = time.time()
+                            self.kline_cache.update_wave_structure_state(None)
+                            cost_ms = (time.time() - start_t) * 1000
+                            logger.warn(f"✅ [Init] 全量状态机重构并落盘完毕! 耗时: {cost_ms:.2f}ms, 当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
+                    except Exception as state_err:
+                        logger.error(f"⚠️ [Init] 全网状态机初始化异常: {state_err}")
                 else:
                     logger.warning("ℹ️ No MinuteKlineCache found on disk or empty. Protection ACTIVE.")
                     self._is_recovered_empty = True
@@ -2677,8 +2915,26 @@ class DataPublisher:
         return self.emotion_tracker.get_scores_batch(codes)
 
     def get_v_shape_signal(self, code: str, window: int = 30) -> bool:
-        """获取个股是否有 V 型反转信号"""
-        return self.kline_cache.detect_v_shape(code, window)
+        """获取个股是否有 V 型反转信号，对于缺失行情个股触发异步拉取"""
+        if hasattr(self.kline_cache, 'get_v_reversal_pool'):
+            klines = self.kline_cache.get_klines(code, n=30)
+            if len(klines) < 10 and code not in self.kline_cache._supplemented_codes:
+                self.kline_cache._fetch_supplemental_data_async(code)
+            return code in self.kline_cache.get_v_reversal_pool()
+        return False
+
+    def warm_up_favorites(self):
+        """系统冷启动时，自动为所有重点关注个股预热历史轨迹，完成全量状态机初始化"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_codes = GlobalFavoriteManager().get_favorite_stocks()
+            if fav_codes:
+                logger.info(f"🚀 [WarmUp] 正在为 {len(fav_codes)} 只重点关注个股预热 V型反转状态机...")
+                for code in fav_codes:
+                    if code not in self.kline_cache._supplemented_codes:
+                        self.kline_cache._supplemental_fetch(code)
+        except Exception as e:
+            logger.error(f"⚠️ [WarmUp] 重点关注个股预热失败: {e}")
 
     def get_55188_data(self, code: Optional[str] = None) -> dict[str, Any]:
         """获取指定的 55188 外部数据 (人气、主力排名、题材、板块得分等)"""

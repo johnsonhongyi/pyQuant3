@@ -3344,6 +3344,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # =========================================================
             try:
                 self.stop_refresh()  # 设置 refresh_flag = False，切断主数据刷新循环
+                
+                # 🚀 [NEW] Backup V-Reversal consolidation state to GZ on exit
+                if hasattr(self, 'realtime_service') and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        self.realtime_service.kline_cache.backup_consolidation_state_to_gz()
+                    except Exception as e:
+                        logger.error(f"[V-Reversal Backup Error] {e}")
             except Exception:
                 pass
 

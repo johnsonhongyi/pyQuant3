@@ -1,3 +1,13 @@
+## 2026-06-03 21:00
+- [x] **实现 V型反转与多波段 VWAP 监控系统工程落地与全链条集成 (Implemented Full-Chain Integration for V-Reversal & Consolidation Watchlist System)**：
+    - [x] **实现 BiddingMomentumDetector 冷启动自愈与状态重载 (Cold-start State Recovery in Detector)**：在 `bidding_momentum_detector.py` 的 `__init__` 初始化过程中，新增了 `self.realtime_service.cache.load_consolidation_state()` 调用。确保当应用崩溃后冷启动时，打分器能自动从 Ramdisk 的 `json.gz` 快照中恢复上一个运行周期的波段相位，实现断点续传。
+    - [x] **引入低频异步增量波段状态更新机制 (Low-frequency Async Wave State Update)**：在后台 `async_sector_agg_worker` 循环中，挂载了针对 `self.realtime_service.cache.update_wave_structure_state()` 的定期调用引擎（通过 300 秒的时间防抖控制，每 5 分钟执行一次）。彻底解耦了高频 Tick 与低频多日波段评估，不仅确保系统对大形态 V 型反转个股的常态化监控，还能每 5 分钟自动将最新状态防抖持久化至 Ramdisk，实现了盘中无感热备份。
+    - [x] **实现 Bidding Racing 面板命中强行置顶重核展示 (Forced Priority Display for V-Reversal Hits in Racing Panel)**：在 `bidding_racing_panel.py` 的高频打分逻辑 `_get_synthetic_score` 中，增加了针对预处理池 `cache.get_v_reversal_pool()` 的极速集合成员校验（Set Matching）。一旦命中目标个股，强行赋予 `max(main_score, 85.0)` 基础活跃权重。这瞬间突破了静默过滤阈值，促使符合 V 翻转或横盘突破的潜伏个股在 UI 面板上被高亮呈现与策略重核。
+    - [x] **完美闭环退出阶段状态自动归档与全时自愈 (Auto-archiving on Application Exit & GZ Fallback Recovery)**：
+        - 在主应用生命周期钩子 `instock_MonitorTK.py` 的 `on_close` 方法中，注入了 `self.realtime_service.cache.backup_consolidation_state_to_gz()` 析构存储动作。
+        - 完善 `load_consolidation_state`：冷启动时，若 Ramdisk 不存在当日状态快照，将自动降级使用 `gzip.open` 解析并加载 `logs/v_reversal_pool_*.json.gz` 的历史备份数据，完美跨日无缝续传。
+        - 修复路径获取支持打包：重构了备份路径解析，采用 `sys_utils.get_app_root()` 对齐了全局的双轨路径架构，彻底消除了 `__file__` 相对寻址在 Nuitka Onefile/Standalone 环境中的漂移失效问题，保障 `logs/` 目录存取万无一失。
+
 ## 2026-06-03 19:50
 - [x] **实现竞价情绪反转策略全链条闭环集成 (Implemented Full-Chain Closed-Loop Integration for Auction Sentiment Reversal Strategy)**：
     - [x] **根治 Python 3.9 类型系统与 slots 语法兼容性限制 (Fixed Python 3.9 Type Hint & slots Compatibility)**：
