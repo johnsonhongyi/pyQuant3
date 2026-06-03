@@ -1710,12 +1710,12 @@ class DataPublisher:
         self._save_lock = threading.Lock()
         # 核心缓存组件 (传递 verbose)
         self.kline_cache = MinuteKlineCache(
-            max_len=200, # 极限性能模式：满 261 裁切至 200，减少 CPU 抖动
+            max_len=int(getattr(cct.CFG, 'kline_cache_max_len', 300)), # 300 阈值可以通过配置文件设置
             simulation_mode=simulation_mode,
             verbose=verbose
         )
         self.auto_switch_enabled = True # 开启自动降级/清理
-        self.mem_threshold_mb = int(getattr(cct.CFG, 'mem_threshold_mb', 1800))  # 1.6GB 阈值
+        self.mem_threshold_mb = int(getattr(cct.CFG, 'mem_threshold_mb', 1800))  # 1.8GB 阈值
         self.node_threshold = 2000000 # 200万节点阈值
         # =========================
         # Persistent Cache Settings
