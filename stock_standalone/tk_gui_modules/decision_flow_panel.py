@@ -2807,9 +2807,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         service.paper_adapter.initial_capital = total_cap
                         service.paper_adapter.account.initial_capital = total_cap
                         
-                        # 对可用资金进行零值保护，防止意外浮点数溢出为负数
-                        if service.paper_adapter.account.cash < 0:
-                            service.paper_adapter.account.cash = 0.0
+                        # 移除强制清零，允许短暂负数以体现真实透支，防止“无限资金轮动”的平仓印钞漏洞
+                        # if service.paper_adapter.account.cash < 0:
+                        #     service.paper_adapter.account.cash = 0.0
                         
                         # 保存状态
                         if hasattr(service.paper_adapter, "_save_state"):
@@ -3621,20 +3621,29 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         entry_cost_sum += float(pos_obj.entry_price) * vol
                         market_val_sum += float(pos_obj.current_price) * vol
                         
-                    # 3. 智能计算合理、健康的资金规模 (尊重现有总资产，保持一致性)
-                    current_initial = float(getattr(service.paper_adapter, "initial_capital", 0.0) or 0.0)
-                    if current_initial >= entry_cost_sum and current_initial > 0:
-                        target_cap = current_initial
-                        logger.info(f"[Self-Healing] Respecting current initial capital: {target_cap}")
-                    else:
-                        # 只有原资金无效或不足以覆盖持仓时，才自愈重调资金规模 (默认至少 1,000,000.0)
-                        min_cap = max(1000000.0, entry_cost_sum * 1.5)
-                        target_cap = float((int(min_cap) // 100000) * 100000)
-                        if target_cap < min_cap:
-                            target_cap += 100000.0
-                        logger.info(f"[Self-Healing] Auto-expanded initial capital to: {target_cap} (cost: {entry_cost_sum})")
+                    # 3. 智能对齐初始资金与可用现金 (严格保护历史盈亏，不随意抹除)
+                    target_cap = float(getattr(service.paper_adapter, "initial_capital", 1000000.0) or 1000000.0)
+                    if target_cap <= 0:
+                        target_cap = 1000000.0
                         
-                    new_cash = max(0.0, target_cap - entry_cost_sum)
+                    current_cash = float(getattr(service.paper_adapter.account, "cash", 0.0))
+                    total_equity_cost_based = current_cash + entry_cost_sum
+                    
+                    if total_equity_cost_based < target_cap * 0.2 and current_cash <= 0:
+                        # 极端异常情况：本金严重缩水且无现金，重置为基准
+                        new_cash = max(0.0, target_cap - entry_cost_sum)
+                        logger.warning(f"[Self-Healing] Critical fund mismatch detected (equity={total_equity_cost_based} < 20% cap). Reset cash to {new_cash}")
+                    else:
+                        new_cash = current_cash
+                        logger.info(f"[Self-Healing] Preserving current cash to protect realized PnL: {new_cash}")
+
+                    # 如果出现严重透支（如模拟盘无视可用资金买入），扩容本金以使其合法化，保证总盈亏对账绝对平衡，而不是凭空印钞
+                    if new_cash < 0:
+                        shortfall = -new_cash
+                        extra_cap = float((int(shortfall) // 100000 + 1) * 100000)
+                        target_cap += extra_cap
+                        new_cash += extra_cap
+                        logger.info(f"[Self-Healing] Expanded capital by {extra_cap} to cover negative cash. New cap: {target_cap}, New cash: {new_cash}")
                     
                     # 4. 同步可用现金与初始资金到纸盘适配器和老柜台风控
                     service.paper_adapter.initial_capital = target_cap
