@@ -665,6 +665,21 @@ class TreeviewIncrementalUpdater:
                 except Exception:
                     pass
         
+        # 5. 修正排序（同步 df 的顺序到 Treeview）
+        try:
+            # 获取 df 中的代码顺序 (df 本身已经经过 sort_values 排好序了)
+            if 'code' in df.columns:
+                ordered_codes = df['code'].astype(str).tolist()
+            else:
+                ordered_codes = [str(x) for x in df.index]
+                
+            for idx, code in enumerate(ordered_codes):
+                iid = self._item_map.get(code)
+                if iid:
+                    self.tree.move(iid, '', idx)
+        except Exception as e:
+            logger.debug(f"Sync tree order failed: {e}")
+            
         duration = time.time() - start_time
         logger.info(f"[TreeviewUpdater] 增量更新: +{added} ~{updated} -{deleted}行, 耗时{duration:.3f}s")
         return (added, updated, deleted)

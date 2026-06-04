@@ -5963,7 +5963,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._is_gui_rendering = True
                         try:
                             # 1. 刷新主 Treeview (核心任务)
-                            self.refresh_tree(ui_df)
+                            self.refresh_tree(ui_df, skip_sort=True)
                         finally:
                             self._is_gui_rendering = False
                         self._last_tree_render_ts = now
@@ -14666,7 +14666,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"❌ 切换特征颜色失败: {e}")
 
-    def refresh_tree(self, df=None, force=False):
+    def refresh_tree(self, df=None, force=False, skip_sort=False):
         """刷新 TreeView，保证列和数据严格对齐。 (高性能版：强制节流)"""
         start_time = time.time()
         
@@ -14692,6 +14692,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df = self.current_df.copy() if hasattr(self, 'current_df') else None
 
         # ⚡ [PERF] 排序计算已转移到 compute_executor 预计算，UI线程直接应用排序好的 df
+        # [NEW] 针对 UI 端的搜索、过滤等操作产生的未排序 df 进行补齐排序
+        if df is not None and not df.empty and not skip_sort:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                if 'code' not in df.columns:
+                    df['code'] = df.index.astype(str)
+                df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                
+                sort_col = getattr(self, 'sortby_col', None)
+                if sort_col and sort_col in df.columns:
+                    asc = getattr(self, 'sortby_col_ascend', False)
+                    if sort_col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
+                        fm = self.feature_marker
+                        cols = df.columns.tolist()
+                        feat_idx = {c: i+1 for i, c in enumerate(cols)}
+                        scores = []
+                        for row in df.itertuples(name=None):
+                            icon = fm.get_icon_fast(row, feat_idx)
+                            prio = fm.get_priority_score(icon)
+                            scores.append(prio)
+                        df['prio_score'] = scores
+                        df = df.sort_values(by=['is_fav', 'prio_score'], ascending=[False, asc])
+                        df.drop(columns=['prio_score'], inplace=True)
+                    else:
+                        is_num = pd.api.types.is_numeric_dtype(df[sort_col])
+                        if is_num:
+                            df = df.sort_values(by=['is_fav', sort_col], ascending=[False, asc])
+                        else:
+                            try:
+                                df['_sort_num_col'] = pd.to_numeric(df[sort_col], errors='coerce').fillna(0)
+                                df = df.sort_values(by=['is_fav', '_sort_num_col'], ascending=[False, asc])
+                                df.drop(columns=['_sort_num_col'], inplace=True)
+                            except:
+                                df = df.sort_values(by=['is_fav', sort_col], key=lambda s: s.astype(str) if s.name == sort_col else s, ascending=[False, asc])
+                else:
+                    df = df.sort_values(by='is_fav', ascending=False)
+                
+                if 'is_fav' in df.columns:
+                    df.drop(columns=['is_fav'], inplace=True)
+            except Exception as e:
+                logger.warning(f"[UI Sorting] 界面重排序失败: {e}")
 
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
@@ -15009,7 +15051,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if 'is_fav' in df_sorted.columns:
             df_sorted.drop(columns=['is_fav'], inplace=True)
 
-        self.refresh_tree(df_sorted, force=True)
+        self.refresh_tree(df_sorted, force=True, skip_sort=True)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
         self.tree.yview_moveto(0)
 
