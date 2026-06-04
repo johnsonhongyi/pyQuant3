@@ -140,7 +140,7 @@ class ReentryTracker:
                 lowest_since_exit=stop_price,
                 status="OBSERVING"
             )
-            logger.info(f"🎯 [ReentryTracker] {code} 止损离场 (价: {stop_price:.2f}, 时间: {self.watchlist[code].exit_time})，送入二次启动观察矩阵")
+            logger.info(f"🎯 [ReentryTracker] {code} 平仓/止损离场 (价: {stop_price:.2f}, 时间: {self.watchlist[code].exit_time})，送入二次启动观察矩阵")
             self._save_state()
 
     def update_price(self, code: str, current_price: float):
@@ -173,10 +173,33 @@ class ReentryTracker:
             # 检查是否超出观察期，若超出则自动淘汰过期 (超强势股动态延长至 12 天)
             try:
                 def parse_dt(dt_str: str) -> datetime:
-                    dt_str = dt_str.replace("T", " ")
+                    if not dt_str:
+                        return datetime.now()
+                    dt_str = dt_str.strip().replace("T", " ")
+                    if "-" not in dt_str and "/" not in dt_str:
+                        today_prefix = datetime.now().strftime("%Y-%m-%d")
+                        dt_str = f"{today_prefix} {dt_str}"
                     if len(dt_str) > 19:
                         dt_str = dt_str[:19]
-                    return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y%m%d %H:%M:%S"):
+                        try:
+                            return datetime.strptime(dt_str, fmt)
+                        except ValueError:
+                            continue
+                    import re
+                    nums = re.findall(r"\d+", dt_str)
+                    if len(nums) >= 5:
+                        try:
+                            year = int(nums[0])
+                            month = int(nums[1])
+                            day = int(nums[2])
+                            hour = int(nums[3])
+                            minute = int(nums[4])
+                            second = int(nums[5]) if len(nums) > 5 else 0
+                            return datetime(year, month, day, hour, minute, second)
+                        except Exception:
+                            pass
+                    return datetime.now()
 
                 exit_dt = parse_dt(item.exit_time)
                 curr_dt = parse_dt(current_time_str) if current_time_str else datetime.now()
