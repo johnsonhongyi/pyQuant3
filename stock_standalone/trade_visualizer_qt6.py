@@ -118,6 +118,34 @@ KEYBOARD_AVAILABLE = True  # 假设可用，具体在注册时检查
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
 logger = LoggerFactory.getLogger()
+
+def _to_date_str_safe(d):
+    """
+    [SAFETY] 鲁棒日期格式化解析器，防止混合、空或整型时间戳导致 strftime 崩溃
+    """
+    if d is None or pd.isnull(d):
+        return ""
+    if isinstance(d, str):
+        return d
+    if isinstance(d, (int, float, np.integer, np.floating)):
+        try:
+            val = int(d)
+            if val > 5 * 10**9:
+                if val > 5 * 10**14:
+                    val = val // 10**9
+                elif val > 5 * 10**11:
+                    val = val // 10**6
+                else:
+                    val = val // 10**3
+            import datetime as dt_module
+            return dt_module.datetime.fromtimestamp(val).strftime('%Y-%m-%d')
+        except Exception:
+            return str(d)
+    try:
+        return d.strftime('%Y-%m-%d')
+    except Exception:
+        return str(d)
+
 # Ensure project root is in path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -1657,10 +1685,12 @@ def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFra
     # ---------- 2. 时间统一转 datetime ----------
     ts = pd.to_datetime(ts, errors='coerce')
 
-    # ---------- 3. 统一成“日粒度 YYYY-MM-DD” (仅在需要时) ----------
-    if 'date' in df.columns:
-        if normalize:
-            df['date'] = ts.dt.normalize()
+    # ---------- 3. 统一成“日粒度 YYYY-MM-DD” ----------
+    if ts is not None:
+        if hasattr(ts, 'dt'):
+            df['date'] = ts.dt.normalize() if normalize else ts
+        elif hasattr(ts, 'normalize'):
+            df['date'] = ts.normalize() if normalize else ts
         else:
             df['date'] = ts
 
@@ -7676,7 +7706,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 优化：使用类属性缓存好的 date_map，如果没有则动态创建
         date_map = getattr(self, '_cached_date_map', {})
         if not date_map or len(date_map) != len(dates):
-            date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
+            date_map = {_to_date_str_safe(d): i for i, d in enumerate(dates)}
             self._cached_date_map = date_map
         
         new_signals = []
@@ -7804,8 +7834,10 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.warning(f"[InitialLoad] No displayable data for {code}")
 
     def _need_ghost_bar(self,day_df):
+        if day_df is None or day_df.empty:
+            return False
 
-        last_hist_date = str(day_df.index[-1]).split()[0]
+        last_hist_date = _to_date_str_safe(day_df.index[-1]).split()[0]
         today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
         last_trade_date = cct.get_last_trade_date()
 
@@ -7824,9 +7856,9 @@ class MainWindow(QMainWindow, WindowMixin):
         # ===============================
         missing_last_trade_bar = last_hist_date < last_trade_date
         if missing_last_trade_bar:
-            logger.error(
+            logger.warning(
                 f"[KLINE DATA MISSING] Last hist date {last_hist_date} "
-                f"< last trade date {last_trade_date} — 日线缺失最近交易日数据"
+                f"< last trade date {last_trade_date} — 日线缺失最近交易日数据 (个股可能处于停牌、数据断档或已退市状态)"
             )
 
         # ===============================
@@ -11521,7 +11553,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.day_df = day_df
         # 🚀 [IPC/FIXED] 强制构建当前股票的最权威日期索引映射，彻底根治无历史信号股票的联动缺失 Bug
         dates = day_df.index
-        self._cached_date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
+        self._cached_date_map = {_to_date_str_safe(d): i for i, d in enumerate(dates)}
         self._last_rendered_code = code
         self.tick_df = tick_df
         if is_new_stock:

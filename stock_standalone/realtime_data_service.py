@@ -63,6 +63,48 @@ class KLineItem:
             "cum_vol_start": self.cum_vol_start
         }
 
+
+def _normalize_time_column(series: pd.Series) -> pd.Series:
+    """
+    [SAFETY] 智能强力时间戳规整器，兼容各种混合类型（Timestamp/str/数值），归一化为秒级 int64。
+    """
+    try:
+        if pd.api.types.is_numeric_dtype(series):
+            arr = series.values.astype('float64')
+            max_val = np.nanmax(arr) if arr.size > 0 else 0
+            if max_val > 5 * 10**9:
+                if max_val > 5 * 10**14:
+                    arr = arr // 10**9
+                elif max_val > 5 * 10**11:
+                    arr = arr // 10**6
+                else:
+                    arr = arr // 10**3
+            return pd.Series(arr, index=series.index).fillna(0).astype('int64')
+        
+        num_series = pd.to_numeric(series, errors='coerce')
+        mask_is_num = num_series.notna()
+        
+        result = num_series.copy()
+        if (~mask_is_num).any():
+            dt_temp = pd.to_datetime(series[~mask_is_num], errors='coerce')
+            ts_series = dt_temp.astype('int64') // 10**9
+            ts_series = ts_series.where(ts_series > 0, 0)
+            result[~mask_is_num] = ts_series
+            
+        arr = result.values.astype('float64')
+        max_val = np.nanmax(arr) if arr.size > 0 else 0
+        if max_val > 5 * 10**9:
+            if max_val > 5 * 10**14:
+                arr = arr // 10**9
+            elif max_val > 5 * 10**11:
+                arr = arr // 10**6
+            else:
+                arr = arr // 10**3
+        return pd.Series(arr, index=series.index).fillna(0).astype('int64')
+    except Exception:
+        return pd.to_numeric(series, errors='coerce').fillna(0).astype('int64')
+
+
 class MinuteKlineCache:
     """
     分时K线缓存
@@ -75,12 +117,14 @@ class MinuteKlineCache:
     _is_dirty: bool
     _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
     simulation_mode: bool
+    _publisher: Optional[Any]
 
     def __init__(self, max_len: int = 200, simulation_mode: bool = False, verbose: bool = False):
         self._max_len = max_len
         self._slack = 61  # [OPTIMIZED] 满 261 裁切到 200，减少频繁 del 操作带来的性能波动
         self.simulation_mode = simulation_mode
         self.verbose = verbose
+        self._publisher = None
         self._shared_cache: dict[str, list[KLineItem]] = {} # code -> list[KLineItem]
         self._last_update_ts: dict[str, int] = {}
         self._is_dirty = False # 脏标记：是否有新数据产生
@@ -92,6 +136,7 @@ class MinuteKlineCache:
         self._last_log_date = ""        # 上次打印日志的日期
         
         # [NEW] 状态机与独立的V反预处理监控池
+        self._raw_loaded_df: Optional[pd.DataFrame] = None # 用于持久化合并的无损DataFrame
         self._consolidation_flags: dict[str, dict[str, Any]] = {} # 记录个股跌幅与缩量状态
         self._v_reversal_pool: set[str] = set() # 潜伏监控池 (横盘缩量达标)
         
@@ -108,6 +153,9 @@ class MinuteKlineCache:
             # 1. 快速统计总量
             total_nodes = sum(len(dq) for dq in self._shared_cache.values())
             if total_nodes == 0:
+                if hasattr(self, '_raw_loaded_df') and self._raw_loaded_df is not None and not self._raw_loaded_df.empty:
+                    self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
+                    return self._raw_loaded_df.copy()
                 return pd.DataFrame()
                 
             # 2. 预分配 NumPy 数组
@@ -140,10 +188,51 @@ class MinuteKlineCache:
                 
                 curr_idx = end_idx
             
-        return pd.DataFrame({
-            'code': codes, 'time': times, 'open': opens, 'high': highs,
-            'low': lows, 'close': closes, 'volume': vols, 'cum_vol_start': cums
-        })
+            current_df = pd.DataFrame({
+                'code': codes, 'time': times, 'open': opens, 'high': highs,
+                'low': lows, 'close': closes, 'volume': vols, 'cum_vol_start': cums
+            })
+
+            # [MERGE PROTECTION] 智能合并历史载入数据，防止非活跃个股在裁剪后写入导致磁盘历史数据丢失
+            if hasattr(self, '_raw_loaded_df') and self._raw_loaded_df is not None and not self._raw_loaded_df.empty:
+                try:
+                    # 强制规整 time 列为 int64，code 列为 str 并去除空格，杜绝混合类型去重失效
+                    if 'code' in self._raw_loaded_df.columns:
+                        self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
+                    if 'time' in self._raw_loaded_df.columns:
+                        self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
+
+                    if 'code' in current_df.columns:
+                        current_df['code'] = current_df['code'].astype(str).str.strip()
+                    if 'time' in current_df.columns:
+                        current_df['time'] = _normalize_time_column(current_df['time'])
+                    
+                    # 合并并以 current_df (内存中最新数据) 为准
+                    combined_df = pd.concat([self._raw_loaded_df, current_df])
+                    combined_df['code'] = combined_df['code'].astype(str)
+                    combined_df['time'] = combined_df['time'].astype('int64')
+                    
+                    # 按 code, time 去重并保留最新
+                    combined_df = combined_df.drop_duplicates(subset=['code', 'time'], keep='last')
+                    # 限制每只个股的最大长度为 max_len (无损裁切)
+                    # 先按照 ['code', 'time'] 升序排列以保证 tail 取到最新
+                    combined_df = combined_df.sort_values(by=['code', 'time'], ascending=True)
+                    combined_df = combined_df.groupby('code', as_index=False).tail(self._max_len)
+                    
+                    combined_df = combined_df.reset_index(drop=True)
+                    self._raw_loaded_df = combined_df.copy()
+                    return combined_df
+                except Exception as e:
+                    logger.error(f"❌ Error merging raw_loaded_df in to_dataframe: {e}")
+                    return current_df.reset_index(drop=True)
+            else:
+                self._raw_loaded_df = current_df.copy()
+                if 'code' in self._raw_loaded_df.columns:
+                    self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
+                if 'time' in self._raw_loaded_df.columns:
+                    self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
+                self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
+                return current_df.reset_index(drop=True)
         
     def count_gaps(self, threshold: int = 200, active_codes: Optional[set[str]] = None) -> dict[str, int]:
         """
@@ -165,6 +254,56 @@ class MinuteKlineCache:
                         low_tick_codes[code] = 0
         
         return low_tick_codes
+
+    def is_active_stock(self, code: str, publisher: Optional[Any] = None) -> bool:
+        """
+        判断一只个股是否是活跃股票（自选股、持仓股、曾有异动的股票、或者正在监控池中的股票）
+        活跃股票保留满额 (max_len) 的 K 线缓存，非活跃股票仅保留 120 根，以便极限回收内存。
+        """
+        # 1. 优先判定：是否是重点关注个股 (自选股)
+        try:
+            from global_favorites import GlobalFavoriteManager
+            if code in GlobalFavoriteManager().get_favorite_stocks():
+                return True
+        except Exception:
+            pass
+
+        # 2. 检查 V反潜伏监控池 (自身成员变量)
+        if code in self._v_reversal_pool:
+            return True
+
+        # 3. 检查状态机中已有的进度，如果非 INIT 状态，说明已经开始有明显的波动，算作活跃
+        state = self._consolidation_flags.get(code)
+        if state and state.get("phase", "INIT") != "INIT":
+            return True
+
+        # 4. 检查当前持仓个股 (持仓股必须保全完整K线)
+        try:
+            from trading_kernel.kernel_service import get_kernel_service
+            service = get_kernel_service()
+            if service:
+                for adapter in [service.paper_adapter, service.confirm_adapter, service.broker_adapter]:
+                    if adapter and code in adapter.get_positions():
+                        return True
+        except Exception:
+            pass
+
+        # 5. 检查与 DataPublisher 关联的状态
+        if publisher is not None:
+            # 5a. 检查选股种子股
+            detector = getattr(publisher, "racing_detector", None)
+            if detector is not None:
+                if code in getattr(detector, "stock_selector_seeds", {}):
+                    return True
+                # 5b. 检查日内监控产生的 watchlist
+                if code in getattr(detector, "daily_watchlist", {}):
+                    return True
+
+        # 6. 如果是已被补充抓取过的个股 (说明用户在 UI 查看过它，或者触发过 SBC 回放等)
+        if code in self._supplemented_codes:
+            return True
+
+        return False
 
     def prune_stale_stocks(self, max_idle_days: int = 3):
         """
@@ -220,34 +359,8 @@ class MinuteKlineCache:
 
             # time 规范化
             if 'time' in cols:
-                # [SAFETY] 确保 time 是 float/int 类型的时间戳 (修正混合类型下的解析偏差)
-                if not pd.api.types.is_numeric_dtype(df['time']):
-                    try:
-                        # 核心修复：针对混合类型 (int/float 和 datetime)，分别处理
-                        # 避免 pd.to_datetime 将 Unix 秒级时间戳误认为 nanoseconds (导致日期变成 1970年)
-                        
-                        # 1. 尝试识别已经是数字的部分
-                        df['time_numeric'] = pd.to_numeric(df['time'], errors='coerce')
-                        mask_is_num = df['time_numeric'].notna()
-                        
-                        # 2. 识别需要转换的部分 (如 datetime 对象或字符串)
-                        if (~mask_is_num).any():
-                            target_rows = df[~mask_is_num]
-                            dt_temp = pd.to_datetime(target_rows['time'], errors='coerce')
-                            # 转换为 Unix 秒
-                            if dt_temp.dt.tz is None:
-                                ts_series = dt_temp.dt.tz_localize('Asia/Shanghai', ambiguous='infer').view('int64') // 10**9
-                            else:
-                                ts_series = dt_temp.dt.tz_convert('Asia/Shanghai').view('int64') // 10**9
-                            df.loc[~mask_is_num, 'time_numeric'] = ts_series
-                        
-                        df['time'] = df['time_numeric']
-                        # 下面两行由于是 copy 操作后的子集 df，无需 drop 以提升性能，后续只取 avail_cols
-                    except Exception as e:
-                        logger.warning(f"⚠️ MinuteKlineCache time conversion error: {e}")
-                
-                # 重新转换为 int64 排列
-                times_arr = df['time'].values.astype('int64') # 升级为 int64 防止溢出
+                df['time'] = _normalize_time_column(df['time'])
+                times_arr = df['time'].values
                 
                 # --- [FIX] 全向量化时间准入判定 ---
                 # UTC+8 转换 (28800s)
@@ -282,8 +395,39 @@ class MinuteKlineCache:
             if df.empty:
                 return
 
-            # 2. 排序与去重 (mergesort 保证稳定性，但这里 code 已排序)
+            # 2. 排序与重排去重
             df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
+
+            # [MERGE PROTECTION] 维护并保存一份未经内存裁剪 of 完整 DataFrame 用于未来的写盘持久化
+            if not hasattr(self, '_raw_loaded_df') or self._raw_loaded_df is None or self._raw_loaded_df.empty:
+                self._raw_loaded_df = df.copy()
+                if 'code' in self._raw_loaded_df.columns:
+                    self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
+                if 'time' in self._raw_loaded_df.columns:
+                    self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
+                self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
+            else:
+                try:
+                    # 强制规整 time 列为 int64，code 列为 str 并去除空格，确保去重万无一失
+                    if 'code' in self._raw_loaded_df.columns:
+                        self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
+                    if 'time' in self._raw_loaded_df.columns:
+                        self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
+
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.strip()
+                    if 'time' in df.columns:
+                        df['time'] = _normalize_time_column(df['time'])
+                    
+                    combined = pd.concat([self._raw_loaded_df, df])
+                    combined['code'] = combined['code'].astype(str)
+                    combined['time'] = combined['time'].astype('int64')
+                    
+                    combined = combined.drop_duplicates(subset=['code', 'time'], keep='last')
+                    combined = combined.sort_values(by=['code', 'time'], ascending=True)
+                    self._raw_loaded_df = combined.groupby('code', as_index=False).tail(self._max_len).reset_index(drop=True)
+                except Exception as e:
+                    logger.error(f"❌ Error updating _raw_loaded_df in from_dataframe: {e}")
 
             # 3. 提取底层 NumPy 数组实现“极限迭代”
             codes = df['code'].values
@@ -312,6 +456,15 @@ class MinuteKlineCache:
                 s_idx, e_idx = boundaries[i], boundaries[i+1]
                 code = str(codes[s_idx])
                 
+                # 动态计算此个股需要保留的最大长度 limit_len
+                limit_len = max_len
+                if not self.is_active_stock(code, getattr(self, '_publisher', None)):
+                    limit_len = min(120, max_len)
+                
+                # numpy slicing 级物理截断，极限减少 KLineItem 实例化数量
+                if (e_idx - s_idx) > limit_len:
+                    s_idx = e_idx - limit_len
+                
                 kl_list = [
                     KLineItem(t, o, h, l, cl, v, cv)
                     for t, o, h, l, cl, v, cv in zip(
@@ -336,17 +489,17 @@ class MinuteKlineCache:
                             if new_items:
                                 # 3. 合并并重排序 (保持 KLineItem 对象引用)
                                 combined = sorted(new_items + existing, key=lambda x: x.time)
-                                # 4. 严格裁切至 max_len
-                                if len(combined) > max_len:
-                                    combined = combined[-max_len:]
+                                # 4. 严格裁切至 limit_len
+                                if len(combined) > limit_len:
+                                    combined = combined[-limit_len:]
                                 shared_cache[code] = combined
                         else:
                             # 缓存为空但 code 已在 dict 中 (很少见)，直接赋值
-                            shared_cache[code] = kl_list[-max_len:] if len(kl_list) > max_len else kl_list
+                            shared_cache[code] = kl_list[-limit_len:] if len(kl_list) > limit_len else kl_list
                     else:
                         # 全量覆盖或新个股
-                        if len(kl_list) > max_len:
-                            kl_list = kl_list[-max_len:]
+                        if len(kl_list) > limit_len:
+                            kl_list = kl_list[-limit_len:]
                         shared_cache[code] = kl_list
 
             self._is_dirty = True
@@ -1948,6 +2101,7 @@ class DataPublisher:
             simulation_mode=simulation_mode,
             verbose=verbose
         )
+        self.kline_cache._publisher = self
         self.auto_switch_enabled = True # 开启自动降级/清理
         self.mem_threshold_mb = int(getattr(cct.CFG, 'mem_threshold_mb', 1800))  # 1.8GB 阈值
         self.node_threshold = 2000000 # 200万节点阈值
