@@ -4623,6 +4623,20 @@ def _on_one_key_self_heal(self):
         if hasattr(service.paper_adapter, "_save_state"):
             service.paper_adapter._save_state()
             
+        # 5.5 强制校正 state_manager 状态锁与实际持仓一致
+        try:
+            current_states = service.state_manager.snapshot()
+            for code_str, state_val in current_states.items():
+                if code_str not in active_positions and state_val == "IN_TRADE":
+                    service.state_manager.set(code_str, "FLAT")
+                    logger.info(f"[Self-Healing] Reset state_manager for {code_str} to FLAT (no holdings)")
+            for code_str in active_positions:
+                if current_states.get(code_str) != "IN_TRADE":
+                    service.state_manager.set(code_str, "IN_TRADE")
+                    logger.info(f"[Self-Healing] Set state_manager for {code_str} to IN_TRADE")
+        except Exception as e_sm_heal:
+            logger.error(f"[Self-Healing] Failed to sync state_manager: {e_sm_heal}")
+            
         # 6. 重新刷新持仓与数据展示
         self._kernel_refresh_positions(show_message=False)
         

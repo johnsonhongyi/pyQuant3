@@ -632,6 +632,18 @@ class TradingKernelService:
                 if hasattr(pos, "max_high") and pos.max_high > 0.0 and getattr(pos, "entry_price", 0.0) > 0.0:
                     max_pnl_since_entry = (pos.max_high - pos.entry_price) / pos.entry_price * 100.0
 
+            # 👑 引入终极自愈保护：如果物理持仓 pos 不存在（无持仓），但 state_manager 状态为 IN_TRADE，
+            # 说明是幽灵残留状态，强制自愈重置为 FLAT，彻底解决“空仓却被 ALREADY_IN_TRADE 拦截”的痛点！
+            # 如果物理持仓 pos 存在（有持仓），但 state_manager 状态为 FLAT，说明是状态丢失，强制自愈对准为 IN_TRADE！
+            current_state_in_manager = self.state_manager.get(code)
+            has_holding = (code in active_executor.account.positions)
+            if not has_holding and current_state_in_manager == "IN_TRADE":
+                self.state_manager.set(code, "FLAT")
+                logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from IN_TRADE to FLAT due to zero holdings.")
+            elif has_holding and current_state_in_manager == "FLAT":
+                self.state_manager.set(code, "IN_TRADE")
+                logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from FLAT to IN_TRADE due to active holdings.")
+
         item_dict = dict(item)
         item_dict["is_swing_low_mode"] = is_swing_low_mode
         item_dict["tp_triggered"] = tp_triggered
@@ -962,6 +974,20 @@ class TradingKernelService:
                 snap = self.broker_adapter.get_account_snapshot()
                 self.paper_adapter.account.cash = float(snap.get("cash", self.paper_adapter.account.cash))
                 self.paper_adapter._save_state()
+                
+                # 重新同步更新全量 state_manager 中的股票状态与物理持仓对齐
+                try:
+                    current_states = self.state_manager.snapshot()
+                    for code_str, state_val in current_states.items():
+                        if code_str not in broker_pos and state_val == "IN_TRADE":
+                            self.state_manager.set(code_str, "FLAT")
+                            logger.info(f"🔄 [PositionSync] Auto-healed state for {code_str} from IN_TRADE to FLAT (no actual holdings).")
+                    for code_str in broker_pos:
+                        if current_states.get(code_str) != "IN_TRADE":
+                            self.state_manager.set(code_str, "IN_TRADE")
+                            logger.info(f"🔄 [PositionSync] Auto-healed state for {code_str} to IN_TRADE (aligned with actual holdings).")
+                except Exception as e_sync_state:
+                    logger.error(f"Failed to align state_manager with broker positions during sync: {e_sync_state}")
                 
                 # 重新校验一次
                 local_pos_after = self.paper_adapter.get_positions()
