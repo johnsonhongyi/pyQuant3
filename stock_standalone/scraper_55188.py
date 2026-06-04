@@ -566,9 +566,11 @@ class Scraper55188:
                 text,
                 repr(e)
             )
-            return []
+            return pd.DataFrame()
     
     def merge_theme_logic(self, df: pd.DataFrame , debug = False) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=['name', 'theme_name', 'theme_logic', 'theme_date'])
         debug_logs = []
 
         def merge_one(sub: pd.DataFrame,debug=debug) -> pd.Series:
@@ -743,7 +745,7 @@ class Scraper55188:
 
             theme_dfs.append(df_t)
 
-        df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame()
+        df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame(columns=['code', 'theme_name', 'theme_logic', 'theme_date'])
         if not df_theme.empty:
             df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
 
