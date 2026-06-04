@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger("DecisionEngine")
 
 from trading_kernel.core.intent import DecisionIntent, DecisionReason
 from trading_kernel.core.signal import StrategySignal
@@ -128,7 +131,7 @@ class SuperTrendMA5Branch(BaseStrategyBranch):
                 ma10_val = ctx["ma10d"] if ctx["ma10d"] > 0.0 else ctx["sws"]
                 is_ma5_trend_ok = (ctx["ma5d"] > ma10_val) or (ctx["swl"] > ctx["sws"])
                 if is_ma5_climbing and is_ma5_trend_ok:
-                    if ctx["low_price"] <= ctx["ma5d"] * 1.015 and ctx["price"] >= ctx["ma5d"] * 0.985 and ctx["vol_ratio"] < 1.15:
+                    if ctx["low_price"] > 0.0 and ctx["low_price"] <= ctx["ma5d"] * 1.015 and ctx["price"] >= ctx["ma5d"] * 0.985 and ctx["vol_ratio"] < 1.15:
                         is_add_back = True
                         
             if is_st_falsified:
@@ -370,7 +373,7 @@ class SwsPullbackBranch(BaseStrategyBranch):
                 
             is_add_back = False
             if ctx["tp_triggered"] and (is_swing_low_mode or regime == "SWING_LOW_BUY") and ctx["sws"] > 0:
-                if ctx["low_price"] <= ctx["sws"] * 1.015 and ctx["price"] >= ctx["sws"] * 0.985 and ctx["vol_ratio"] < 0.95:
+                if ctx["low_price"] > 0.0 and ctx["low_price"] <= ctx["sws"] * 1.015 and ctx["price"] >= ctx["sws"] * 0.985 and ctx["vol_ratio"] < 0.95:
                     is_add_back = True
                     
             if is_breakout_tp or is_upper_vol_tp:
@@ -481,7 +484,7 @@ class OscillatingBreakdownBranch(BaseStrategyBranch):
         is_sws_downward = (sws > 0 and sws_prev5 > 0 and sws < sws_prev5 * 0.99)
         
         # 或者持仓状态下价格已经踩穿工作线 1.5% 以上，说明破位已被确认
-        is_breakdown_held = (state == "IN_TRADE" and sws > 0 and ctx["low_price"] < sws * 0.985)
+        is_breakdown_held = (state == "IN_TRADE" and sws > 0 and ctx["low_price"] > 0.0 and ctx["low_price"] < sws * 0.985)
         
         return is_sws_downward or is_breakdown_held
 
@@ -504,7 +507,7 @@ class OscillatingBreakdownBranch(BaseStrategyBranch):
             confidence = 0.10
         elif state == "IN_TRADE":
             # 持仓阶段，极敏锐破位风控与主动撤离
-            is_breakdown = (ctx["sws"] > 0 and ctx["low_price"] < ctx["sws"] * 0.985)
+            is_breakdown = (ctx["sws"] > 0 and ctx["low_price"] > 0.0 and ctx["low_price"] < ctx["sws"] * 0.985)
             is_time_failsafe = (ctx["days_held"] >= 2 and ctx["pnl_pct"] < 3.0)
             is_collapse = (ctx["pct_diff"] < -1.5 or ctx["dff"] < -1.0)
             
@@ -809,6 +812,18 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     # ── 5. 自动寻找策略路由并激活对应分支决策 ──
     active_branch = StrategyRouter.route(signal, state, ctx)
     action, size_pct, regime, setup, confidence, suggest_price = active_branch.decide(signal, state, ctx)
+
+    if action == "SELL":
+        logger.info(
+            f"📉 [DecisionEngine] 触发平仓/止损信号: {signal.code} ({signal.name}) | "
+            f"策略分支: {active_branch.name} | "
+            f"形态原因 (Setup): {setup} | "
+            f"运行模式: {regime} | "
+            f"持仓天数: {ctx.get('days_held', 0)}天 | "
+            f"盈亏比例 (PnL): {ctx.get('pnl_pct', 0.0):.2f}% | "
+            f"今日放量比 (VolRatio): {ctx.get('vol_ratio', 1.0):.2f} | "
+            f"当前股价: {ctx.get('price', 0.0):.2f} 元"
+        )
 
     # ── 6. 统一动态止损价格设定 ──
     stop_price = None

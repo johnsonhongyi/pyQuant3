@@ -4,13 +4,69 @@ import os
 import time
 import sys
 import traceback
+import threading
 from datetime import datetime
 from typing import Any, Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from tk_gui_modules.window_mixin import WindowMixin
 from JohnsonUtil import LoggerFactory
-from stock_logic_utils import toast_message
+from stock_logic_utils import toast_message as legacy_toast
+
+# Shadow legacy toast_message to prevent cross-frame Tkinter GIL thread crashes in PyQt windows
+def toast_message(parent, text, duration=1500):
+    try:
+        from PyQt6 import QtWidgets, QtCore
+        active_win = QtWidgets.QApplication.activeWindow()
+        if active_win:
+            QtCore.QTimer.singleShot(0, lambda: _show_qt_toast(active_win, text, duration))
+            return
+    except Exception as ex:
+        pass
+    try:
+        legacy_toast(parent, text, duration)
+    except Exception:
+        pass
+
+def _show_qt_toast(parent_win, text, duration=1500):
+    try:
+        from PyQt6 import QtWidgets, QtCore
+        toast = QtWidgets.QFrame(parent_win)
+        toast.setStyleSheet("""
+            QFrame {
+                background-color: rgba(0, 0, 0, 190);
+                color: white;
+                border-radius: 5px;
+                padding: 6px 12px;
+            }
+            QLabel {
+                color: white;
+                font-size: 11px;
+                font-family: "Microsoft YaHei";
+            }
+        """)
+        toast.setWindowFlags(QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint)
+        toast.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        toast.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        
+        layout = QtWidgets.QHBoxLayout(toast)
+        layout.setContentsMargins(10, 5, 10, 5)
+        lbl = QtWidgets.QLabel(text, toast)
+        layout.addWidget(lbl)
+        
+        toast.adjustSize()
+        geo = parent_win.geometry()
+        center_x = geo.x() + (geo.width() - toast.width()) // 2
+        center_y = geo.y() + (geo.height() - toast.height()) // 2
+        toast.move(center_x, center_y)
+        
+        toast.show()
+        QtCore.QTimer.singleShot(duration, toast.close)
+    except Exception as e:
+        try:
+            logger.error(f"Failed to show shadow Qt toast: {e}")
+        except Exception:
+            pass
 
 logger = LoggerFactory.getLogger("instock_TK.DecisionFlowPanel")
 from sys_utils import get_app_root
@@ -407,6 +463,224 @@ class OperatorChecklistDialog(QtWidgets.QDialog):
         ok_btn.clicked.connect(self.accept)
         btn_layout.addWidget(ok_btn)
         main_layout.addLayout(btn_layout)
+
+
+class DecisionDetailsDialog(QtWidgets.QDialog):
+    """💡 核心决策及风控检验流水详情 (Core Decision & Risk Analysis Details)"""
+    def __init__(self, rec: dict, parent=None):
+        super().__init__(parent)
+        self.rec = rec
+        self.setWindowTitle("💡 核心决策及风控检验流水详情")
+        self.resize(750, 600)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121214;
+                color: #E2E2E6;
+            }
+            QTabWidget::pane {
+                border: 1px solid #2E2E35;
+                background-color: #16161A;
+            }
+            QTabBar::tab {
+                background-color: #1E1E24;
+                color: #A2A2A6;
+                padding: 6px 15px;
+                border: 1px solid #2E2E35;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-family: "Microsoft YaHei";
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #16161A;
+                color: #FFFFFF;
+                border-bottom: 1px solid #16161A;
+            }
+            QTableWidget {
+                background-color: #16161A;
+                border: none;
+                color: #E2E2E6;
+                gridline-color: #2E2E35;
+                font-family: "Microsoft YaHei";
+                font-size: 11px;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QHeaderView::section {
+                background-color: #1E1E24;
+                color: #A2A2A6;
+                border: 1px solid #2E2E35;
+                padding: 4px;
+            }
+            QTextEdit {
+                background-color: #16161A;
+                border: none;
+                color: #00E676;
+                font-family: "Consolas", "Courier New", monospace;
+                font-size: 11px;
+            }
+            QPushButton {
+                background-color: #1E1E24;
+                border: 1px solid #2E2E35;
+                border-radius: 3px;
+                padding: 6px 15px;
+                color: #C2C2C6;
+                font-family: "Microsoft YaHei";
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #2E2E38;
+                border-color: #00E676;
+                color: #FFFFFF;
+            }
+        """)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        self.tabs = QtWidgets.QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Tab 1: 核心分析表格
+        self.tab_metrics = QtWidgets.QWidget()
+        self.tab_metrics_layout = QtWidgets.QVBoxLayout(self.tab_metrics)
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["分类", "指标参数/决策项", "数值/状态说明"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tab_metrics_layout.addWidget(self.table)
+        self.tabs.addTab(self.tab_metrics, "💡 核心指标与风控分析")
+        
+        # Tab 2: 原始 JSON
+        self.tab_raw = QtWidgets.QWidget()
+        self.tab_raw_layout = QtWidgets.QVBoxLayout(self.tab_raw)
+        self.json_edit = QtWidgets.QTextEdit()
+        self.json_edit.setReadOnly(True)
+        self.tab_raw_layout.addWidget(self.json_edit)
+        self.tabs.addTab(self.tab_raw, "📋 原始决策日志 JSON")
+        
+        # 填充数据
+        self._populate_data()
+        
+        # 底部按钮
+        btn_layout = QtWidgets.QHBoxLayout()
+        copy_json_btn = QtWidgets.QPushButton("📋 复制 JSON 数据")
+        copy_json_btn.clicked.connect(self._copy_json)
+        btn_layout.addWidget(copy_json_btn)
+        btn_layout.addStretch()
+        close_btn = QtWidgets.QPushButton("关闭")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+    def _populate_data(self):
+        # 1. 原始 JSON 数据填充
+        import json
+        try:
+            formatted_json = json.dumps(self.rec, indent=4, ensure_ascii=False)
+            self.json_edit.setPlainText(formatted_json)
+        except Exception as e:
+            self.json_edit.setPlainText(f"JSON 格式化失败: {e}\\n\\n原始数据:\\n{str(self.rec)}")
+            
+        # 2. 表格填充
+        is_audit = (self.rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT")
+        rows = []
+        
+        if is_audit:
+            # 审计日志填充
+            orig_order = self.rec.get("original_order", {})
+            meta = self.rec.get("override_metadata", {})
+            rows.append(("系统审计", "事件类型", "人工确认审计 (HUMAN_CONFIRMATION_AUDIT)"))
+            rows.append(("系统审计", "触发时间", str(self.rec.get("timestamp", ""))))
+            rows.append(("系统审计", "股票代码", str(orig_order.get("code", ""))))
+            rows.append(("系统审计", "原始买卖", str(orig_order.get("action", ""))))
+            rows.append(("系统审计", "原始拟仓", f"{float(orig_order.get('size_pct', 0.0))*100:.1f}%"))
+            rows.append(("系统审计", "操盘确认", "已确认同意" if self.rec.get("confirmed") else "已拒绝/超时"))
+            rows.append(("系统审计", "干预理由", str(self.rec.get("override_reason", ""))))
+            if meta.get("size_changed"):
+                rows.append(("系统审计", "实际执行仓位", f"{float(meta.get('actual_size_pct', 0.0))*100:.1f}%"))
+        else:
+            trace = self.rec.get("trace", {})
+            sig = self.rec.get("signal", {})
+            intent = self.rec.get("intent", {})
+            risk = self.rec.get("risk", {})
+            k_res = self.rec.get("kernel_result", {})
+            if not isinstance(k_res, dict): k_res = {}
+            
+            # 基本数据
+            rows.append(("基本信息", "触发时间", str(self.rec.get("journal_ts", "") or trace.get("timestamp", ""))))
+            rows.append(("基本信息", "股票代码", f"{sig.get('code', '')} ({sig.get('name', '')})"))
+            rows.append(("基本信息", "触发价格", f"{sig.get('price', 0.0):.2f} 元" if sig.get('price') else "N/A"))
+            rows.append(("基本信息", "系统 Trace ID", str(trace.get("trace_id", "N/A"))))
+            
+            # 策略决策意图
+            rows.append(("策略意图", "状态机前态", str(trace.get("state", "FLAT"))))
+            rows.append(("策略意图", "建议动作", str(intent.get("action", "HOLD"))))
+            rows.append(("策略意图", "建议仓位", f"{float(intent.get('size_pct', 0.0))*100:.1f}%" if intent.get('size_pct') is not None else "N/A"))
+            rows.append(("策略意图", "置信度评分", str(intent.get("confidence", "N/A"))))
+            rows.append(("策略意图", "动态止损价", f"{float(intent.get('stop_price', 0.0)):.2f} 元" if intent.get("stop_price") else "N/A"))
+            
+            # 详细理由
+            reason = intent.get("reason", {})
+            if isinstance(reason, dict):
+                rows.append(("决策参数", "路由策略分支 (Branch)", str(reason.get("routed_branch", "N/A"))))
+                rows.append(("决策参数", "入场/出场形态 (Setup)", str(reason.get("setup", "N/A"))))
+                rows.append(("决策参数", "所属运行模式 (Regime)", str(reason.get("regime", "N/A"))))
+                rows.append(("决策参数", "板块强度", str(reason.get("sector_heat", "N/A"))))
+                rows.append(("决策参数", "个股强度 (Priority)", str(sig.get("features", {}).get("priority", "N/A"))))
+                rows.append(("决策参数", "板块龙头领涨", "⭐是" if reason.get("is_leader") else "否"))
+                rows.append(("决策参数", "突破判定", "是" if reason.get("breakout") else "否"))
+                rows.append(("决策参数", "多日资金流向 (dff)", str(reason.get("dff", "N/A"))))
+                rows.append(("决策参数", "二次重入信号", "🎯是" if reason.get("is_reentry_signal") else "否"))
+                if reason.get("reentry_reason"):
+                    rows.append(("决策参数", "重入判定理由", str(reason.get("reentry_reason"))))
+            
+            # 风控判定
+            rows.append(("风控核验", "风控通过", "🟢 允许 (Allowed)" if risk.get("allowed", True) else "🔴 拦截 (Blocked)"))
+            rows.append(("风控核验", "最终决策动作", str(risk.get("final_action", "HOLD"))))
+            rows.append(("风控核验", "最终批准仓位", f"{float(risk.get('final_size_pct', 0.0))*100:.1f}%" if risk.get('final_size_pct') is not None else "N/A"))
+            
+            reject_msg = k_res.get("kernel_reject_code", "")
+            if not reject_msg and not risk.get("allowed", True):
+                reject_msg = risk.get("reject_context", {}).get("message") or risk.get("reject_context", {}).get("code", "")
+            if reject_msg:
+                rows.append(("风控核验", "拦截原因", f"⚠️ {reject_msg}"))
+                
+            if risk.get("order"):
+                rows.append(("委托订单", "核发委托单 ID", str(risk["order"].get("order_id", ""))))
+                rows.append(("委托订单", "委托股数", str(risk["order"].get("volume", ""))))
+                rows.append(("委托订单", "最终订单状态", "已提交执行" if k_res.get("kernel_executed") else "待处理/未执行"))
+
+        self.table.setRowCount(len(rows))
+        for r_idx, (cat, name, val) in enumerate(rows):
+            item_cat = QtWidgets.QTableWidgetItem(cat)
+            item_name = QtWidgets.QTableWidgetItem(name)
+            item_val = QtWidgets.QTableWidgetItem(val)
+            
+            # 着色增强
+            if "🔴" in val or "🔴" in name or "拦截" in val:
+                item_val.setForeground(QtGui.QColor("#FF1744"))
+                item_val.setFont(QtGui.QFont("Microsoft YaHei", 10, QtGui.QFont.Weight.Bold))
+            elif "🟢" in val or "允许" in val:
+                item_val.setForeground(QtGui.QColor("#00E676"))
+                item_val.setFont(QtGui.QFont("Microsoft YaHei", 10, QtGui.QFont.Weight.Bold))
+            elif "⭐" in val or "🎯" in val:
+                item_val.setForeground(QtGui.QColor("#FFEB3B"))
+                
+            self.table.setItem(r_idx, 0, item_cat)
+            self.table.setItem(r_idx, 1, item_name)
+            self.table.setItem(r_idx, 2, item_val)
+            
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, 100)
+        self.table.setColumnWidth(1, 180)
+
+    def _copy_json(self):
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.setText(self.json_edit.toPlainText())
+        QtWidgets.QMessageBox.information(self, "复制成功", "原始决策 JSON 已经成功复制到剪贴板。")
 
 
 class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
@@ -1050,7 +1324,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._adjust_column_widths()
 
     def _on_cell_double_clicked(self, row, column):
-        """双击表格行，提取股票代码并向主进程派发跳转联动"""
+        """双击表格行，提取股票代码并向主进程派发跳转联动，并弹出详情对话框"""
         code_item = self.table.item(row, 1)
         name_item = self.table.item(row, 2)
         if code_item and code_item.text():
@@ -1059,6 +1333,13 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             self._last_linked_code = code
             logger.info(f"Double clicked on DecisionFlow: {code} ({name}), linking...")
             self.code_clicked.emit(code, name)
+
+        # 提取第 0 列的 UserRole 数据 (即完整原始日志 rec) 并弹出详情框
+        rec_item = self.table.item(row, 0)
+        rec = rec_item.data(QtCore.Qt.ItemDataRole.UserRole) if rec_item else None
+        if isinstance(rec, dict):
+            dlg = DecisionDetailsDialog(rec, self)
+            dlg.exec()
 
     def _on_table_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
         """当键盘或鼠标切换决策表格的当前行时，自动联动"""
@@ -1857,6 +2138,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             elif col_idx == 10 and trace_id: # Trace ID 悬浮提示
                 cell_item.setToolTip(f"防伪全量签名 ID: {trace_id}")
                 
+            if col_idx == 0:
+                cell_item.setData(QtCore.Qt.ItemDataRole.UserRole, rec)
+                
             self.table.setItem(row_idx, col_idx, cell_item)
 
     def _filter_table(self):
@@ -1972,8 +2256,18 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _clear_view(self):
         """清空当前表格显示 (不删除物理文件)"""
-        self.table.setRowCount(0)
-        self.status_label.setText("显示已清空。等待新增决策流水信号...")
+        self.table.blockSignals(True)
+        try:
+            # 显式在 Python 持有 GIL 的控制范围内，逐行清空 UserRole 绑定的字典数据，
+            # 避免在 setRowCount(0) 批量销毁时底层 C++ 析构导致多线程 GC 冲突。
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item:
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+            self.table.setRowCount(0)
+            self.status_label.setText("显示已清空。等待新增决策流水信号...")
+        finally:
+            self.table.blockSignals(False)
         toast_message(self.parent_app, "表格显示已清空")
 
     def closeEvent(self, event):
@@ -2195,17 +2489,20 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         df = self.parent_app.current_df
                     
                     if df is not None and not df.empty:
-                        # ── 预先构建 {pure_code: raw_index_key} 字典，实现 O(1) 物理防线，消除 str/int/后缀 不一致 ──
-                        index_map = {}
-                        for idx_val in df.index:
-                            idx_str = str(idx_val)
-                            # 提取纯数字代码作为键
-                            pure = "".join(filter(str.isdigit, idx_str))[:6]
-                            if len(pure) == 6:
-                                index_map[pure] = idx_val
-                                
+                        # ── 局部精准哈希查找，绝不遍历 df.index 以彻底消灭高频多线程 GIL 异常 ──
                         for code in temp_positions.keys():
-                            idx_val = index_map.get(code)
+                            idx_val = None
+                            for potential_key in [code, int(code) if code.isdigit() else None, 
+                                                 f"{code}.SH", f"{code}.SZ", f"{code}.SS",
+                                                 f"sh{code}", f"sz{code}", f"SH{code}", f"SZ{code}"]:
+                                if potential_key is None:
+                                    continue
+                                try:
+                                    if potential_key in df.index:
+                                        idx_val = potential_key
+                                        break
+                                except Exception:
+                                    pass
                             if idx_val is not None:
                                 target_row = df.loc[idx_val]
                                 now_price = None
@@ -2261,16 +2558,25 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                             if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
                                                 df_rt = self.parent_app.df_all
                                             if df_rt is not None:
-                                                for idx in df_rt.index:
-                                                    idx_str = str(idx)
-                                                    idx_pure = "".join(filter(str.isdigit, idx_str))[:6]
-                                                    if idx_pure == p_code_pure:
-                                                        row = df_rt.loc[idx]
-                                                        if hasattr(row, "ndim") and row.ndim > 1:
-                                                            row = row.iloc[0]
-                                                        name_val = row.get("name", "内核持仓")
-                                                        sector_val = row.get("sector", row.get("sector_name", ""))
-                                                        break
+                                                # 局部精准哈希匹配，绝不遍历 df_rt.index 以消灭多线程 GIL 异常
+                                                idx_val = None
+                                                for potential_key in [p_code_pure, int(p_code_pure) if p_code_pure.isdigit() else None,
+                                                                      f"{p_code_pure}.SH", f"{p_code_pure}.SZ", f"{p_code_pure}.SS",
+                                                                      f"sh{p_code_pure}", f"sz{p_code_pure}", f"SH{p_code_pure}", f"SZ{p_code_pure}"]:
+                                                    if potential_key is None:
+                                                        continue
+                                                    try:
+                                                        if potential_key in df_rt.index:
+                                                            idx_val = potential_key
+                                                            break
+                                                    except Exception:
+                                                        pass
+                                                if idx_val is not None:
+                                                    row = df_rt.loc[idx_val]
+                                                    if hasattr(row, "ndim") and row.ndim > 1:
+                                                        row = row.iloc[0]
+                                                    name_val = row.get("name", "内核持仓")
+                                                    sector_val = row.get("sector", row.get("sector_name", ""))
                                         except Exception:
                                             pass
                                         entry_p = float(pos_obj.entry_price)
@@ -2892,12 +3198,30 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
     def _on_one_key_self_heal(self):
         """一键自适应数据自愈修复：智能调整资金规模、修复个股缺失价格、清理 0 股幽灵持仓、并物理同步适配器与柜台数据（后台线程安全）"""
         try:
+            # 1. 主线程即时反馈与确认防误触
+            reply = QtWidgets.QMessageBox.question(
+                self, 
+                "一键数据自愈确认", 
+                "即将执行全量账户与资产自愈对账：\n\n"
+                "1. 清理幽灵持仓（0股）\n"
+                "2. 修复个股价格缺失/异常\n"
+                "3. 自愈开仓时间（从流水中追溯）\n"
+                "4. 智能对齐初始资金与可用现金\n"
+                "5. 同步所有内存与磁盘状态\n\n"
+                "此过程将在后台安全执行，请确认是否继续？",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+
             def _async_heal_worker():
                 try:
                     from trading_kernel.kernel_service import get_kernel_service
                     from trade_gateway import get_trade_gateway
                     import numpy as np
                     import math
+                    import time
+                    import uuid
                     
                     def safe_float(v, fallback=0.0):
                         if v is None:
@@ -2935,13 +3259,18 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                             service.paper_adapter.account.positions.pop(c_code, None)
                             removed_ghosts.append(c_code)
                             
-                    # 清理 legacy 柜台持仓
-                    with trade_gw._lock:
-                        for c_code in list(trade_gw._positions.keys()):
-                            leg_pos = trade_gw._positions[c_code]
-                            if leg_pos.shares <= 0:
-                                trade_gw._positions.pop(c_code, None)
-                                removed_ghosts.append(c_code)
+                    # 清理 legacy 柜台持仓，使用 3.0 秒超时避免死锁
+                    if trade_gw._lock.acquire(timeout=3.0):
+                        try:
+                            for c_code in list(trade_gw._positions.keys()):
+                                leg_pos = trade_gw._positions[c_code]
+                                if leg_pos.shares <= 0:
+                                    trade_gw._positions.pop(c_code, None)
+                                    removed_ghosts.append(c_code)
+                        finally:
+                            trade_gw._lock.release()
+                    else:
+                        logger.warning("[Self-Healing] Failed to acquire trade_gw._lock for cleaning ghosts within 3 seconds, skipping.")
 
                     # 1.1 价格自愈：物理修复价格数据 (entry_price / current_price) 缺失、0 或为 NaN 的情况
                     def is_invalid_price(p):
@@ -3104,26 +3433,30 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                 healed_times_count += 1
                                 logger.info(f"[Self-Healing] Restored open time for {c_code} from journal: {pos_obj.entry_time}")
                     
-                    # 同时自愈老版柜台的持仓与价格
-                    with trade_gw._lock:
-                        for c_code in list(trade_gw._positions.keys()):
-                            leg_pos = trade_gw._positions[c_code]
-                            leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
-                            if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
-                                try:
-                                    ts_str = code_times[leg_pure]["open_time"]
-                                    this_year = datetime.now().year
-                                    dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
-                                    leg_pos.entry_time = dt
+                    # 同时自愈老版柜台的持仓与价格，使用 3.0 秒超时避免死锁
+                    if trade_gw._lock.acquire(timeout=3.0):
+                        try:
+                            for c_code in list(trade_gw._positions.keys()):
+                                leg_pos = trade_gw._positions[c_code]
+                                leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
+                                if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
+                                    try:
+                                        ts_str = code_times[leg_pure]["open_time"]
+                                        this_year = datetime.now().year
+                                        dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
+                                        leg_pos.entry_time = dt
+                                    except Exception:
+                                        pass
                                 
-                                except Exception:
-                                    pass
-                            
-                            # 价格同步
-                            paper_pos = service.paper_adapter.account.positions.get(leg_pure)
-                            if paper_pos:
-                                leg_pos.price = paper_pos.entry_price
-                                leg_pos.current_price = paper_pos.current_price
+                                # 价格同步
+                                paper_pos = service.paper_adapter.account.positions.get(leg_pure)
+                                if paper_pos:
+                                    leg_pos.price = paper_pos.entry_price
+                                    leg_pos.current_price = paper_pos.current_price
+                        finally:
+                            trade_gw._lock.release()
+                    else:
+                        logger.warning("[Self-Healing] Failed to acquire trade_gw._lock for syncing positions within 3 seconds, skipping.")
                     
                     # 2. 统计当前活跃持仓的买入成本 and 最新市值
                     active_positions = service.paper_adapter.account.positions
@@ -3177,44 +3510,96 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     except Exception as e_sm_heal:
                         logger.error(f"[Self-Healing] Failed to sync state_manager: {e_sm_heal}")
                         
-                    # 6. 回到 UI 线程更新与提示
-                    def _on_heal_finished_ui():
-                        # 清除 UI 缓存指纹，强制触发 Qt 刷新
-                        if hasattr(self, "_last_rendered_state"):
-                            delattr(self, "_last_rendered_state")
-                            
-                        self._refresh_positions_tab()
-                        
-                        # 7. 显示成功对话框
+                    # 5.6 构造并物理追加自愈流水记录
+                    try:
                         pnl_val = market_val_sum - entry_cost_sum
                         pnl_pct = (pnl_val / entry_cost_sum * 100.0) if entry_cost_sum > 0 else 0.0
+                        rec_heal = {
+                            "trace": {
+                                "trace_id": f"heal-{uuid.uuid4().hex[:8]}",
+                                "timestamp": datetime.now().isoformat()
+                            },
+                            "signal": {
+                                "code": "HEAL",
+                                "name": "数据自愈",
+                                "action": "MAINT",
+                                "signal_type": "系统自愈对账",
+                                "reason": f"清理幽灵数: {len(set(removed_ghosts))} | 价格自愈数: {healed_prices_count} | 时间对齐数: {healed_times_count}",
+                                "priority": 100
+                            },
+                            "risk": {
+                                "allowed": True,
+                                "final_action": "MAINT",
+                                "reject_reason": "",
+                                "reject_context": {}
+                            },
+                            "kernel_action": "MAINT",
+                            "kernel_reject_code": "",
+                            "journal_type": "SELF_HEAL_AUDIT",
+                            "journal_ts": datetime.now().isoformat(),
+                            "heal_stats": {
+                                "ghosts_cleaned": len(set(removed_ghosts)),
+                                "prices_healed": healed_prices_count,
+                                "times_healed": healed_times_count,
+                                "initial_capital": target_cap,
+                                "cash": new_cash,
+                                "entry_cost_sum": entry_cost_sum,
+                                "market_val_sum": market_val_sum,
+                                "pnl_val": pnl_val,
+                                "pnl_pct": pnl_pct
+                            }
+                        }
                         
-                        msg_text = (
-                            f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
-                            f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
-                            f"2️⃣ <b>自愈价格数据</b>：修复补齐了 <b>{healed_prices_count}</b> 处无效/缺失的价格指标。<br>"
-                            f"3️⃣ <b>自愈开仓时间</b>：从决策流水日志中自愈修复了 <b>{healed_times_count}</b> 个持仓的开仓时间。<br>"
-                            f"4️⃣ <b>对齐初始资金</b>：已完美尊重并对齐初始资产为 <b>¥ {target_cap:,.2f}</b> (与总资金量一致)。<br>"
-                            f"5️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
-                            f"6️⃣ <b>资产盈亏重算</b>：<br>"
-                            f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
-                            f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
-                            f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
-                            f"<i>* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！</i>"
-                        )
-                        
-                        box = QtWidgets.QMessageBox(self)
-                        box.setIcon(QtWidgets.QMessageBox.Icon.Information)
-                        box.setWindowTitle("一键数据自愈修复")
-                        box.setText(msg_text)
-                        box.setTextFormat(QtCore.Qt.TextFormat.RichText)
-                        box.exec()
+                        journal_path = getattr(self, "journal_path", None)
+                        if journal_path:
+                            # Write physical record to journal
+                            with open(journal_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps(rec_heal, ensure_ascii=False) + "\n")
+                            logger.info("[Self-Healing] Successfully appended self-heal trace record to journal.")
+                    except Exception as e_rec:
+                        logger.error(f"[Self-Healing] Failed to append heal record to journal: {e_rec}")
+
+                    # 6. 回到 UI 线程更新与提示
+                    def _on_heal_finished_ui():
+                        try:
+                            # 清除 UI 缓存指纹，强制触发 Qt 刷新
+                            if hasattr(self, "_last_rendered_state"):
+                                delattr(self, "_last_rendered_state")
+                                
+                            self._refresh_positions_tab()
+                            
+                            # 7. 显示成功对话框
+                            box = QtWidgets.QMessageBox(self)
+                            box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                            box.setWindowTitle("一键数据自愈修复")
+                            
+                            msg_text = (
+                                f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
+                                f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
+                                f"2️⃣ <b>自愈价格数据</b>：修复补齐了 <b>{healed_prices_count}</b> 处无效/缺失的价格指标。<br>"
+                                f"3️⃣ <b>自愈开仓时间</b>：从决策流水日志中自愈修复了 <b>{healed_times_count}</b> 个持仓的开仓时间。<br>"
+                                f"4️⃣ <b>对齐初始资金</b>：已完美尊重并对齐初始资产为 <b>¥ {target_cap:,.2f}</b> (与总资金量一致)。<br>"
+                                f"5️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
+                                f"6️⃣ <b>资产盈亏重算</b>：<br>"
+                                f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
+                                f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
+                                f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
+                                f"<i>* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！</i>"
+                            )
+                            box.setText(msg_text)
+                            box.setTextFormat(QtCore.Qt.TextFormat.RichText)
+                            box.exec()
+                        except Exception as ui_ex:
+                            logger.error(f"[Self-Healing] Error in _on_heal_finished_ui: {ui_ex}\n{__import__('traceback').format_exc()}")
 
                     QtCore.QTimer.singleShot(0, _on_heal_finished_ui)
                 except Exception as ex:
-                    logger.error(f"Error in _async_heal_worker: {ex}")
+                    logger.error(f"Error in _async_heal_worker: {ex}\n{__import__('traceback').format_exc()}")
                     def _on_heal_error_ui():
-                        QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈执行时抛出异常: {ex}")
+                        try:
+                            QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈执行时抛出异常: {ex}")
+                        except Exception as ui_ex2:
+                            logger.error(f"[Self-Healing] Error showing error dialog: {ui_ex2}")
                     QtCore.QTimer.singleShot(0, _on_heal_error_ui)
 
             # 启动守护线程执行
