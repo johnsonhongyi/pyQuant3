@@ -34,6 +34,35 @@ class RiskLimits:
     blacklist: tuple[str, ...] = ()
 
 
+RISK_CN_TEMPLATES = {
+    "CONSECUTIVE_LOSS_COOLDOWN": "连续亏损冷静期保护：当前已连续亏损 {consecutive_losses} 笔（限制为 {limit} 笔），触发交易冷却冻结",
+    "DAILY_LOSS_LIMIT_EXCEEDED": "每日亏损限额超限：今日已亏损 {today_pnl_loss:.2f} 元，已达每日最高亏损限额 {limit:.2f} 元，限制交易",
+    "HIGH_EXTENSION_NO_CHASE": "超强拉升防追高拦截：今日涨幅偏离值 {pct_diff:.2f}%，已超过限制阈值 {limit:.2f}%",
+    "NON_TRADING_SESSION": "非有效交易时间段：当前时间 {time} 处于交易非活跃期，拦截开平仓",
+    "BLACKLISTED_SYMBOL": "黑名单股票拦截：个股处于系统禁入黑名单列表中",
+    "SIGNAL_EXPIRED": "信号过期失效：信号生成时间与当前时间差 {diff_seconds:.1f} 秒超过 300 秒限制",
+    "LOW_VOLUME_BLOCKED": "极度缩量拦截：个股成交量/额为 {volume:.2f}，低于限制下限 {limit:.2f}",
+    "BUY_DISABLED": "买入功能已被全局禁用",
+    "LOW_CONFIDENCE": "置信度不足拦截：信号置信度为 {confidence:.2f}，低于风控要求的最低门槛 {limit:.2f}",
+    "ALREADY_IN_TRADE": "已有相同标的持仓，限制重复开仓",
+    "ADD_REQUIRES_POSITION": "加仓操作失败：当前无此个股底仓",
+    "SINGLE_STOCK_EXPOSURE_EXCEEDED": "单股最高持仓限额超限：当前单股敞口为 {current_exposure:.2%}，已达个股仓位限制上限 {limit:.2%}",
+    "SECTOR_EXPOSURE_EXCEEDED": "单板块最高暴露限额超限：当前板块累计敞口为 {current_sector_exposure:.2%}，已达板块限制上限 {limit:.2%}",
+    "TOTAL_EXPOSURE_EXCEEDED": "总仓位累计暴露限额超限：当前总敞口为 {current_total_exposure:.2%}，已达总限制上限 {limit:.2%}",
+}
+
+def _enrich_reject_message(reject: dict) -> dict:
+    if not reject:
+        return reject
+    code_val = reject.get("code")
+    if code_val in RISK_CN_TEMPLATES:
+        try:
+            reject["message"] = RISK_CN_TEMPLATES[code_val].format(**reject)
+        except Exception:
+            reject["message"] = RISK_CN_TEMPLATES[code_val]
+    return reject
+
+
 def parse_ts(t_str: str) -> datetime | None:
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%H:%M:%S"):
         try:
@@ -175,7 +204,7 @@ def evaluate(
             allowed=False,
             final_action="BLOCK",
             final_size_pct=0.0,
-            reject_context=reject,
+            reject_context=_enrich_reject_message(reject),
             order=None,
         )
 
@@ -194,12 +223,12 @@ def evaluate(
                     allowed=False,
                     final_action="BLOCK",
                     final_size_pct=0.0,
-                    reject_context={
+                    reject_context=_enrich_reject_message({
                         "code": "SINGLE_STOCK_EXPOSURE_EXCEEDED",
                         "current_exposure": current_stock_exposure,
                         "limit": limits.max_single_stock_position_pct,
                         "severity": "HARD_BLOCK",
-                    },
+                    }),
                     order=None,
                 )
         
@@ -211,12 +240,12 @@ def evaluate(
                     allowed=False,
                     final_action="BLOCK",
                     final_size_pct=0.0,
-                    reject_context={
+                    reject_context=_enrich_reject_message({
                         "code": "SECTOR_EXPOSURE_EXCEEDED",
                         "current_sector_exposure": current_sector_exposure,
                         "limit": limits.max_single_sector_exposure_pct,
                         "severity": "HARD_BLOCK",
-                    },
+                    }),
                     order=None,
                 )
                 
@@ -228,12 +257,12 @@ def evaluate(
                     allowed=False,
                     final_action="BLOCK",
                     final_size_pct=0.0,
-                    reject_context={
+                    reject_context=_enrich_reject_message({
                         "code": "TOTAL_EXPOSURE_EXCEEDED",
                         "current_total_exposure": current_total_exposure,
                         "limit": limits.total_exposure_cap_pct,
                         "severity": "HARD_BLOCK",
-                    },
+                    }),
                     order=None,
                 )
 
