@@ -3201,3 +3201,10 @@ epack_hdf_db 和 load_hdf_db_timed_ctx 的完整定义，并加固了 os.replace
         - 该调整既严格保障了跨进程高频信号数据的高通量顺滑发包和主线程零卡顿，同时又极大规避了由于 Windows 系统 OS 级资源分配短时紧张带来的无谓的通信阻断和大量无辜的 socket.timeout 误报。
     - [x] **UI 事件循环亚 20ms 级交付收官 (Achieved Sub-20ms Event Loop Parity)**：
         - 配合此前落地的 200ms 信号列队缓存发射与防抖重绘以及底层行情零深拷贝策略，整个 UI 事件循环响应率得到终极闭环确认，全系 QTimer 渲染负担彻底解除！
+  
+## 2026-06-04 23:05  
+- [x] **修复 Treeview 增量更新导致重点关注及过滤后排序失效的 Bug (Fixed Treeview Incremental Update Sorting Failure)**：  
+    - [x] **同步物理顺序**：在 performance_optimizer.py 的 TreeviewIncrementalUpdater._incremental_update 中补齐了对 UI 组件实际位置的重新排序。在数据发生增量更新或过滤重算后，使用 	ree.move(iid, '', idx) 严格依照排序后的 DataFrame 顺序移动 UI 节点。彻底解决了由于增量更新仅刷新文本但未更改节点位置，导致的" "点击重点关注或后台刷新后优先置顶失效，必须重新点击表头重算的痛点，确保前后端排序始终严格一致。 
+  
+- [x] **修复搜索、过滤等 UI 手动操作后重点关注及排序失效的 Bug (Fixed UI Manual Filter Sorting Failure)**：  
+    - [x] **补全 UI 级排序降级机制**：在 instock_MonitorTK.py 的 efresh_tree 中，补齐了针对 UI 端手动产生的过滤结果的重新排序机制。引入了 skip_sort 标志位：由后台 compute_executor 计算投递过来的预排序结果强制跳过此步以保留性能优势；而对于用户通过上方搜索框、过滤或下拉框等产生的离线、未排序的数据，则在呈现前调用内置算法自动恢复以 is_fav 和 sortby_col（优先降序/升序）为主键的排列组合。彻底解决并满足了" "搜索后或者切换过滤后，系统能自动记忆并延续排序方式，同时重点列表自动吸顶优先显示的用户核心体验诉求。 
