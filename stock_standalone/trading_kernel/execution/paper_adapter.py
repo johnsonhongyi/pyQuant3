@@ -171,12 +171,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     if not isinstance(pos_data, dict):
                         continue
                     entry_p = safe_float(pos_data.get("entry_price"), 0.0)
+                    
+                    e_time_raw = str(pos_data.get("entry_time") or "N/A")
+                    if e_time_raw != "N/A" and " " in e_time_raw:
+                        date_p, time_p = e_time_raw.split(" ", 1)
+                        if len(date_p) == 5:
+                            e_time_raw = f"{datetime.now().year}-{date_p} {time_p}"
+                            
                     positions[code] = Position(
                         code=str(pos_data.get("code") or code),
                         entry_price=entry_p,
                         volume=safe_float(pos_data.get("volume"), 0.0),
                         current_price=safe_float(pos_data.get("current_price"), entry_p),
-                        entry_time=str(pos_data.get("entry_time") or "N/A"),
+                        entry_time=e_time_raw,
                         regime=str(pos_data.get("regime") or "BREAKOUT_ALLOWED"),
                         tp_triggered=bool(pos_data.get("tp_triggered", False)),
                         max_high=safe_float(pos_data.get("max_high"), entry_p)
@@ -206,7 +213,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                                 if ts_str:
                                     if "T" in ts_str:
                                         parts = ts_str.split("T")
-                                        formatted_ts = f"{parts[0][5:]} {parts[1][:8]}"
+                                        formatted_ts = f"{parts[0]} {parts[1][:8]}"
                                     else:
                                         formatted_ts = ts_str
                                 else:
@@ -438,7 +445,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     entry_price=price,
                     volume=volume,
                     current_price=price,
-                    entry_time=datetime.now().strftime("%m-%d %H:%M:%S")
+                    entry_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 )
 
         elif action in {"SELL", "REDUCE"}:

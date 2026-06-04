@@ -39,7 +39,7 @@ class PanelManager:
                 
                 # 双击行跳转联动
                 self._decision_flow_win.code_clicked.connect(
-                    lambda c, n: self.app.tk_dispatch_queue.put(lambda: self.app.on_code_click(c))
+                    lambda c, n, d: self.app.tk_dispatch_queue.put(lambda: self.app.on_code_click(c, date=d))
                 )
                 
             self._decision_flow_win.show()
