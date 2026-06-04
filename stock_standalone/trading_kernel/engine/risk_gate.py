@@ -120,6 +120,19 @@ def evaluate(
     is_trading_hour = (925 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)
     
     if action in {"BUY", "ADD"}:
+        # 预先计算弹性防追高偏离限额与豁免状态
+        code_str = str(signal.code)
+        is_20cm = code_str.startswith(("688", "300", "301", "302"))
+        multiplier = 2.0 if is_20cm else 1.0
+        
+        is_reentry = getattr(intent, "is_reentry_signal", False) or getattr(intent, "is_reentry", False)
+        is_high_confidence = getattr(intent, "confidence", 0.0) >= 0.80
+        if is_reentry or is_high_confidence:
+            multiplier *= 1.5
+            
+        chase_limit = limits.max_pct_diff * multiplier
+        is_exempt = (is_reentry and getattr(intent, "confidence", 0.0) >= 0.85)
+
         if not is_trading_hour:
             reject = {"code": "NON_TRADING_SESSION", "time": signal.ts, "severity": "HARD_BLOCK"}
         
@@ -155,11 +168,11 @@ def evaluate(
             }
             
         # 6. High extension no-chase block
-        elif float(signal.features.get("pct_diff", 0.0)) > limits.max_pct_diff:
+        elif not is_exempt and float(signal.features.get("pct_diff", 0.0)) > chase_limit:
             reject = {
                 "code": "HIGH_EXTENSION_NO_CHASE",
                 "pct_diff": signal.features.get("pct_diff", 0.0),
-                "limit": limits.max_pct_diff,
+                "limit": chase_limit,
                 "severity": "HARD_BLOCK",
             }
             

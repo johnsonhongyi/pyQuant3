@@ -313,6 +313,39 @@ class SwsPullbackBranch(BaseStrategyBranch):
                     setup = "MA10_TREND_FOLLOW"
                     confidence = 0.85
                     
+            # 💡 3. 新增尾盘低风险建仓规则 (TAIL_LOW_RISK_ENTRY)：
+            # 异动进入视野(dff>0/高优先级/最强龙头) + 回调洗盘缩量跌无可跌(vol_ratio<0.9/回踩均线) + 尾盘时段(14:30-15:00)
+            if action == "HOLD":
+                time_part = signal.ts.split()[-1] if " " in signal.ts else signal.ts.split("T")[-1]
+                try:
+                    parts = time_part.split(":")
+                    hhmm = int(parts[0]) * 100 + int(parts[1])
+                except Exception:
+                    hhmm = 930
+                
+                is_tail_session = (1430 <= hhmm <= 1500)
+                if is_tail_session:
+                    has_money_in = (ctx["dff"] > 0 or ctx["priority"] >= 70 or ctx["is_leader"] or ctx["is_reentry"])
+                    
+                    ma5_v = ctx["ma5d"]
+                    ma10_v = ctx["ma10d"] if ctx["ma10d"] > 0 else ctx["sws"]
+                    sws_v = ctx["sws"]
+                    
+                    near_ma5 = (ma5_v > 0 and ctx["price"] <= ma5_v * 1.015 and ctx["price"] >= ma5_v * 0.985)
+                    near_ma10 = (ma10_v > 0 and ctx["price"] <= ma10_v * 1.015 and ctx["price"] >= ma10_v * 0.985)
+                    near_sws = (sws_v > 0 and ctx["price"] <= sws_v * 1.015 and ctx["price"] >= sws_v * 0.985)
+                    
+                    is_pullback = (near_ma5 or near_ma10 or near_sws)
+                    is_shrink = (ctx["vol_ratio"] < 0.9 or ctx["vol_shrink_3d"] or ctx["is_doji"])
+                    
+                    if has_money_in and is_pullback and is_shrink:
+                        action = "BUY"
+                        size_pct = 0.35
+                        regime = "SWING_LOW_BUY"
+                        setup = "TAIL_LOW_RISK_ENTRY"
+                        confidence = 0.90
+                        suggest_price = ctx["price"]
+                        
             if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
                 action = "BUY"
                 size_pct = 0.40 if ctx["is_reentry"] else 0.30

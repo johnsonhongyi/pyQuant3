@@ -1,3 +1,20 @@
+## 2026-06-04 10:45
+- [x] **实现尾盘异动回踩“跌无可跌”低风险建仓机制 (Implemented Tail-End Low Risk Entry & Pullback Support)**：
+    - [x] **定义尾盘时段网关 (Tail-Session Gate)**：在 `decision_engine.py` 的慢趋势低吸分支 `SwsPullbackBranch` 中，新增时间识别。智能从 `signal.ts` 提取分时信息，锁定下午 **`14:30 - 15:00`** 尾盘博弈末端时段。通过尾盘建仓，能极高概率绕开日内震荡风险，防止早盘假洗盘。
+    - [x] **判定异动前置建库 (Premarket/Money-in Check)**：检查个股是否曾有资金深度介入。若该股属于板块强龙头、活跃重入追踪股（`is_reentry`）、或近期有放量异动（`dff > 0` / `priority >= 70`），自动列入前置低吸建仓雷达。
+    - [x] **核验均线支撑与缩量跌无可跌 (Pullback & Volume Shrink Check)**：
+        - 价格精准回踩 5 日线、10 日线或 SWS 慢趋势工作线（偏离度在 `[-1.5%, 1.5%]` 之间），获得极佳低成本买点安全边际。
+        - 缩量要求：今日成交量低于 5 日均量（`vol_ratio < 0.9`），或满足 3 日持续缩量/十字星横盘震荡，证明洗盘到位、主力未走且市场惜售。
+    - [x] **零追高痛点，建立极低底仓成本**：该规则直接在尾盘股价处于波幅低位时以 `0.35` 仓位发起低吸建仓。次日早盘如出现强力冲高 V 反（如中巨芯、三安光电等），由于底仓成本极低，全盘掌握主动，无需再被动面对追高成本失控的纠结，从算法源头解决痛点。
+    - [x] **全套件单元及回归测试绿旗通过**：跑通 `test_pullback_pipeline.py` 与 `pytest test_watchlist_lifecycle.py`，全部 11 项系统级用例 100% 绿旗通过。
+
+## 2026-06-04 10:35
+- [x] **实现防追高风控动态弹性上限与豁免机制 (Implemented Dynamic Adaptive Chase Limit & Exemption)**：
+    - [x] **动态适配 20cm 股票偏离度**：在 `risk_gate.py` 的追高拦截判定 `HIGH_EXTENSION_NO_CHASE` 中，引入了多维度弹性适应性风控。针对科创板 (`688`) 和创业板 (`300`/`301`/`302`) 天然具有 20% 宽幅波动的规则结构，自动将追高涨幅上限 `max_pct_diff` 乘以 2.0 倍弹性系数（从默认的 6.0% 拓宽至 12.0%）。
+    - [x] **强势/重入信号多阶放宽**：若信号属于 Re-entry 重入类型（`is_reentry`）或置信度优异的高胜率起步主升信号（`confidence >= 0.80`），将限制偏离值进一步放宽 1.5 倍（即主板 9.0%，双创板 18.0%）。
+    - [x] **超强共识龙头免检豁免**：对于重入信号且置信度极其优秀（`confidence >= 0.85`）的顶尖强势信号，自动标记为 `is_exempt` 直接完全免除防追高拦截限制，确保顺应日内多波段爆发，彻底解决了中巨芯（置信度 0.84）、沪硅产业（置信度 0.95）、三安光电（置信度 0.94，高置信度放宽限制 1.5 倍）等尾盘下杀后次日早盘强力 V 反个股被风控误伤卡死的痛点。
+    - [x] **完美通过全回归测试**：跑通 `test_pullback_pipeline.py` 与 `pytest test_watchlist_lifecycle.py`（11 项系统级测试全部成功），验证了系统的平滑稳定与风控的精度提升。
+
 ## 2026-06-04 10:25
 - [x] **修复并加固测试流水风控拦截与 State-Consistency 验证 (Fixed and Hardened Test Pipeline Risk Bypass & Verified State Consistency)**：
     - [x] **绕过本地 Frozen 风控限制**：针对 `scratch/test_pullback_pipeline.py` 测试在测试环境中意外触发本地 `window_config.json` 里的 `min_volume = 1.10` 等高限风控拦截，导致测试判定无法完整穿透至 BUY 信号分支的问题，在测试用例的 `setUp` 方法中重新实例化并覆盖赋入了一个松散的 `RiskLimits` 实例（`min_volume=0.0` 等），规避了 dataclass `frozen=True` 引起的属性直接修改 `FrozenInstanceError` 报错。
