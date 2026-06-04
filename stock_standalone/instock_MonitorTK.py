@@ -1198,7 +1198,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              
         # Check if already open
         if hasattr(self, '_pulse_win') and self._pulse_win and self._pulse_win.winfo_exists():
-            self._pulse_win.lift()
+            if self._pulse_win.state() != "withdrawn" and self._pulse_win.focus_displayof() == self._pulse_win:
+                self._pulse_win.withdraw()
+            else:
+                self._pulse_win.deiconify()
+                self._pulse_win.lift()
+                self._pulse_win.focus_force()
             return
             
         self._pulse_win = self._pulse_viewer_class(self, self) # Pass self as master and monitor_app
@@ -1206,6 +1211,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_live_signal_viewer(self):
         """打开实时信号仪表盘 (Alt+L)"""
         try:
+            # 🚀 [NEW] 再次点击自动隐藏，如果已经打开且非前台则显示在最前面
+            if hasattr(self, "_signal_dashboard_win") and self._signal_dashboard_win is not None:
+                if self._signal_dashboard_win.isVisible():
+                    if self._signal_dashboard_win.isActiveWindow():
+                        self._signal_dashboard_win.hide()
+                    else:
+                        self._signal_dashboard_win.raise_()
+                        self._signal_dashboard_win.activateWindow()
+                    return
+
             # 🛡️ Qt6 窗口由 PyQt6 驱动
             if not hasattr(self, "_signal_dashboard_win") or self._signal_dashboard_win is None:
                 # 确保 Qt 环境已初始化
@@ -1241,6 +1256,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_decision_flow_panel(self):
         """打开交易内核决策流水分析面板 (Alt+J)"""
         try:
+            # 🚀 [NEW] 再次点击自动隐藏，如果已经打开且非前台则显示在最前面
+            if hasattr(self, "_decision_flow_win") and self._decision_flow_win is not None:
+                if self._decision_flow_win.isVisible():
+                    if self._decision_flow_win.isActiveWindow():
+                        self._decision_flow_win.hide()
+                    else:
+                        self._decision_flow_win.raise_()
+                        self._decision_flow_win.activateWindow()
+                    return
+
             if not hasattr(self, "_decision_flow_win") or self._decision_flow_win is None:
                 from PyQt6 import QtWidgets
                 if not QtWidgets.QApplication.instance():
@@ -1254,7 +1279,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 self._decision_flow_win = DecisionFlowPanel(parent=self)
                 self._decision_flow_win.code_clicked.connect(
-                    lambda c, n: self.tk_dispatch_queue.put(lambda: self.on_code_click(c))
+                    lambda c, n, d: self.tk_dispatch_queue.put(lambda: self.on_code_click(c, date=d))
                 )
                 
             self._decision_flow_win.show()
@@ -1270,6 +1295,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
+        # [🚀 鲁棒性增强 & 自动隐藏判断]
+        is_alive = False
+        if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
+            try:
+                self._racing_panel_win.isVisible()
+                is_alive = True
+            except RuntimeError:
+                self._racing_panel_win = None
+
+        if is_alive:
+            if self._racing_panel_win.isVisible():
+                if self._racing_panel_win.isActiveWindow():
+                    self._racing_panel_win.hide()
+                else:
+                    self._racing_panel_win.raise_()
+                    self._racing_panel_win.activateWindow()
+            else:
+                self._racing_panel_win.show()
+                self._racing_panel_win.raise_()
+                self._racing_panel_win.activateWindow()
+            return
         # [🚀 统一防抖保护] 赛马与回测共享冷却时间，避免资源抢占与 GIL 崩溃 (10s 阈值)
         now = time.time()
         last_unified = getattr(self, '_last_racing_backtest_unified_t', 0)
@@ -1286,15 +1332,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         try:
-            # [🚀 鲁棒性增强] 增加对 C++ 侧对象是否存活的实质性判定
-            is_alive = False
-            if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
-                try:
-                    self._racing_panel_win.isVisible()
-                    is_alive = True
-                except RuntimeError:
-                    self._racing_panel_win = None
-
             if not is_alive:
                 # 确保 Qt 环境已初始化
                 from PyQt6 import QtWidgets
@@ -3866,7 +3903,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_column_manager(self):
         if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
-            self.ColumnSetManager.open_column_manager_editor()
+            if self.ColumnSetManager.state() != "withdrawn" and self.ColumnSetManager.focus_displayof() == self.ColumnSetManager:
+                self.ColumnSetManager.withdraw()
+            else:
+                self.ColumnSetManager.deiconify()
+                self.ColumnSetManager.lift()
+                self.ColumnSetManager.focus_force()
         else:
             if not self.df_all.empty:
                 self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
@@ -3882,6 +3924,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         )
                 # 关闭时清理引用
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
+                self.ColumnSetManager.bind("<Alt-c>", lambda e: self.ColumnSetManager.withdraw())
             else:
                 self._schedule_after(1000,self._on_open_column_manager)
 
@@ -9697,7 +9740,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_handbook_overview(self):
         """手札总览窗口"""
         try:
+            # ✅ 窗口复用与自我隐藏逻辑
+            if hasattr(self, '_handbook_win') and self._handbook_win and self._handbook_win.winfo_exists():
+                if self._handbook_win.state() != "withdrawn" and self._handbook_win.focus_displayof() == self._handbook_win:
+                    self._handbook_win.withdraw()
+                else:
+                    self._handbook_win.deiconify()
+                    self._handbook_win.lift()
+                    self._handbook_win.focus_force()
+                return
+
             win = tk.Toplevel(self)
+            self._handbook_win = win
             win.title("手札总览")
             # --- 窗口定位 ---
             w, h = 900, 600
@@ -9708,8 +9762,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pos_y = (sh - h) // 2
             win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
             
-            # ESC 关闭
+            # ESC 和 Alt+D 关闭/隐藏
             win.bind("<Escape>", lambda e: win.destroy())
+            win.bind("<Alt-d>", lambda e: win.withdraw())
             win.lift()
             win.focus_force()
             win.attributes("-topmost", True)
@@ -11997,14 +12052,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
             return
 
-        # 窗口复用
+        # 窗口复用与自身隐藏
         if hasattr(self, '_strategy_manager_win') and self._strategy_manager_win and self._strategy_manager_win.winfo_exists():
-            self._strategy_manager_win.deiconify()
-            self._strategy_manager_win.lift()
-            self._strategy_manager_win.focus_force()
-            if verify_code:
-                self._strategy_manager_win.notebook.select(self._strategy_manager_win.tab_verify)
-                self._strategy_manager_win.set_verify_code(verify_code)
+            if self._strategy_manager_win.state() != "withdrawn" and self._strategy_manager_win.focus_displayof() == self._strategy_manager_win:
+                self._strategy_manager_win.withdraw()
+            else:
+                self._strategy_manager_win.deiconify()
+                self._strategy_manager_win.lift()
+                self._strategy_manager_win.focus_force()
+                if verify_code:
+                    self._strategy_manager_win.notebook.select(self._strategy_manager_win.tab_verify)
+                    self._strategy_manager_win.set_verify_code(verify_code)
             return
 
         try:
@@ -12175,11 +12233,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
             return
 
-        # ✅ 窗口复用逻辑
-        if self._voice_monitor_win and self._voice_monitor_win.winfo_exists():
-            self._voice_monitor_win.deiconify()
-            self._voice_monitor_win.lift()
-            self._voice_monitor_win.focus_force()
+        # ✅ 窗口复用与自我隐藏逻辑
+        if hasattr(self, '_voice_monitor_win') and self._voice_monitor_win and self._voice_monitor_win.winfo_exists():
+            if self._voice_monitor_win.state() != "withdrawn" and self._voice_monitor_win.focus_displayof() == self._voice_monitor_win:
+                self._voice_monitor_win.withdraw()
+            else:
+                self._voice_monitor_win.deiconify()
+                self._voice_monitor_win.lift()
+                self._voice_monitor_win.focus_force()
             return
 
         try:

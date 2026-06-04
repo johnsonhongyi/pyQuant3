@@ -688,8 +688,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
     ⚡ 交易内核决策流水分析面板 (Trading Kernel Decision Flow)
     采用 PyQt6 构建的只读高性能监控看板，完美适配 Windows 多进程并发环境。
     """
-    # 股票点击跳转信号 (code, name)
-    code_clicked = QtCore.pyqtSignal(str, str)
+    # 股票点击跳转信号 (code, name, date)
+    code_clicked = QtCore.pyqtSignal(str, str, str)
 
     def __init__(self, parent=None, journal_path: str = "logs/trading_kernel_trace.jsonl"):
         super().__init__()
@@ -753,6 +753,10 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self.slow_timer = QtCore.QTimer(self)
         self.slow_timer.timeout.connect(self._slow_update_cycle)
         self.slow_timer.start(2000)
+
+        # 6. 绑定快捷键 Alt+J 用于再次点击时自动隐藏
+        self._shortcut_hide = QtGui.QShortcut(QtGui.QKeySequence("Alt+J"), self)
+        self._shortcut_hide.activated.connect(self.hide)
 
     def _init_ui(self):
         """初始化极富科技感、暗黑渐变之美的决策监控界面 (Premium Dark Mode)"""
@@ -892,11 +896,11 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
         # 主数据表格 (只读)
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(13)
         headers = [
             "日期时间", "代码", "名称", "前态", "动作", 
             "拟仓位", "打分", "风控结果", "阻断码", 
-            "止损价", "Trace ID", "决策理由摘要"
+            "止损价", "信号盈亏", "Trace ID", "决策理由摘要"
         ]
         self.table.setHorizontalHeaderLabels(headers)
         
@@ -1327,16 +1331,29 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         """双击表格行，提取股票代码并向主进程派发跳转联动，并弹出详情对话框"""
         code_item = self.table.item(row, 1)
         name_item = self.table.item(row, 2)
+        
+        # 提前提取第 0 列的 UserRole 数据 (即完整原始日志 rec)
+        rec_item = self.table.item(row, 0)
+        rec = rec_item.data(QtCore.Qt.ItemDataRole.UserRole) if rec_item else None
+        
         if code_item and code_item.text():
             code = code_item.text().strip()
             name = name_item.text().strip() if name_item else ""
             self._last_linked_code = code
-            logger.info(f"Double clicked on DecisionFlow: {code} ({name}), linking...")
-            self.code_clicked.emit(code, name)
+            
+            date_str = ""
+            if isinstance(rec, dict):
+                ts = rec.get("journal_ts", "") or rec.get("trace", {}).get("timestamp", "")
+                if ts:
+                    ts_str = str(ts)
+                    if len(ts_str) >= 10 and "-" in ts_str:
+                        date_str = ts_str.split(" ")[0]
+                    elif len(ts_str) >= 8:
+                        date_str = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]}"
+                        
+            logger.info(f"Double clicked on DecisionFlow: {code} ({name}) {date_str}, linking...")
+            self.code_clicked.emit(code, name, date_str)
 
-        # 提取第 0 列的 UserRole 数据 (即完整原始日志 rec) 并弹出详情框
-        rec_item = self.table.item(row, 0)
-        rec = rec_item.data(QtCore.Qt.ItemDataRole.UserRole) if rec_item else None
         if isinstance(rec, dict):
             dlg = DecisionDetailsDialog(rec, self)
             dlg.exec()
@@ -1354,8 +1371,21 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     return
                 self._last_linked_code = code
                 name = name_item.text().strip() if name_item else ""
-                # logger.info(f"Navigation cell changed linkage on DecisionFlowTable: {code} ({name})")
-                self.code_clicked.emit(code, name)
+                
+                date_str = ""
+                rec_item = self.table.item(currentRow, 0)
+                rec = rec_item.data(QtCore.Qt.ItemDataRole.UserRole) if rec_item else None
+                if isinstance(rec, dict):
+                    ts = rec.get("journal_ts", "") or rec.get("trace", {}).get("timestamp", "")
+                    if ts:
+                        ts_str = str(ts)
+                        if len(ts_str) >= 10 and "-" in ts_str:
+                            date_str = ts_str.split(" ")[0]
+                        elif len(ts_str) >= 8:
+                            date_str = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]}"
+                            
+                # logger.info(f"Navigation cell changed linkage on DecisionFlowTable: {code} ({name}) {date_str}")
+                self.code_clicked.emit(code, name, date_str)
 
     def _show_system_workflow_dialog(self):
         """弹出系统操作指南与风控参数详解窗口"""
@@ -1875,6 +1905,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         # C. 刷新实时持仓与浮盈数据
         self._refresh_positions_tab()
         
+        # 实时同步决策流水的信号盈亏
+        self._refresh_flow_pnl()
+        
         # D. 执行 [GUI Watchdog] 日志流更新停滞状态审计
         try:
             now = time.time()
@@ -1922,24 +1955,101 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         except Exception as e_watch:
             logger.warning(f"Error in DecisionFlowPanel FlowWatchdog slow cycle: {e_watch}")
 
+    def _refresh_flow_pnl(self):
+        """动态刷新决策流水的盈亏情况"""
+        if not hasattr(self, "table") or self.table.rowCount() == 0:
+            return
+            
+        df = None
+        if self.parent_app:
+            if hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None and not self.parent_app.df_all.empty:
+                df = self.parent_app.df_all
+            elif hasattr(self.parent_app, "current_df") and self.parent_app.current_df is not None and not self.parent_app.current_df.empty:
+                df = self.parent_app.current_df
+                
+        if df is None or df.empty:
+            return
+            
+        self.table.blockSignals(True)
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 1)
+            pnl_item = self.table.item(row, 10)
+            
+            if not code_item or not pnl_item:
+                continue
+                
+            code = code_item.text().strip()
+            signal_price = pnl_item.data(QtCore.Qt.ItemDataRole.UserRole)
+            
+            if signal_price and float(signal_price) > 0:
+                idx_val = None
+                for potential_key in [code, int(code) if code.isdigit() else None, 
+                                     f"{code}.SH", f"{code}.SZ", f"{code}.SS",
+                                     f"sh{code}", f"sz{code}", f"SH{code}", f"SZ{code}"]:
+                    if potential_key is None: continue
+                    try:
+                        if potential_key in df.index:
+                            idx_val = potential_key
+                            break
+                    except Exception:
+                        pass
+                
+                if idx_val is not None:
+                    target_row = df.loc[idx_val]
+                    now_price = None
+                    if hasattr(target_row, "ndim") and target_row.ndim > 1:
+                        row_item = target_row.iloc[0]
+                    else:
+                        row_item = target_row
+                        
+                    for col in ["now", "close", "price", "trade"]:
+                        if col in df.columns:
+                            val = row_item.get(col)
+                            try:
+                                if val is not None:
+                                    if hasattr(val, "values"):
+                                        val = val.values[0]
+                                    if float(val) > 0:
+                                        now_price = float(val)
+                                        break
+                            except (ValueError, TypeError, IndexError):
+                                pass
+                                
+                    if now_price is not None:
+                        pnl_pct = (now_price - float(signal_price)) / float(signal_price) * 100.0
+                        pnl_color = "#00E676" if pnl_pct >= 0 else "#FF1744"
+                        pnl_sign = "+" if pnl_pct >= 0 else ""
+                        text = f"{pnl_sign}{pnl_pct:.2f}%"
+                        
+                        if pnl_item.text() != text:
+                            pnl_item.setText(text)
+                            pnl_item.setForeground(QtGui.QColor(pnl_color))
+                            if isinstance(pnl_item, SortableTableWidgetItem):
+                                pnl_item.value = pnl_pct
+        self.table.blockSignals(False)
+
     def _parse_timestamp(self, ts_str: Any) -> str:
-        """防弹自愈时间戳解析器：统一格式化为 MM-DD HH:MM:SS"""
+        """防弹自愈时间戳解析器：统一格式化为 YYYY-MM-DD HH:MM:SS"""
         if not ts_str:
-            return datetime.now().strftime("%m-%d %H:%M:%S")
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             ts_str_clean = str(ts_str).strip()
             if "T" in ts_str_clean:
                 parts = ts_str_clean.split("T")
-                date_part = parts[0][5:] # "05-23"
+                date_part = parts[0] # "2026-05-23"
                 time_part = parts[1][:8] # "20:30:15"
                 return f"{date_part} {time_part}"
             elif " " in ts_str_clean:
                 parts = ts_str_clean.split(" ")
-                date_part = parts[0][5:]
+                date_part = parts[0]
+                if len(date_part) == 5:
+                    date_part = f"{datetime.now().year}-{date_part}"
                 time_part = parts[1][:8]
                 return f"{date_part} {time_part}"
+            elif len(ts_str_clean) >= 14 and ts_str_clean.isdigit():
+                return f"{ts_str_clean[:4]}-{ts_str_clean[4:6]}-{ts_str_clean[6:8]} {ts_str_clean[8:10]}:{ts_str_clean[10:12]}:{ts_str_clean[12:14]}"
             elif len(ts_str_clean) >= 8:
-                return ts_str_clean[-8:]
+                return ts_str_clean
             else:
                 return ts_str_clean
         except Exception:
@@ -2039,7 +2149,19 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 reject_code = RISK_CN_SHORT[reject_code]
             
             stop_price_val = kernel_res.get("kernel_stop_price", 0.0) or rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
+            
+            # 持续跟踪止损价，防止平仓后丢失
+            if not hasattr(self, "_last_stop_prices"):
+                self._last_stop_prices = {}
+            if stop_price_val and float(stop_price_val) > 0:
+                self._last_stop_prices[code] = float(stop_price_val)
+            elif code in self._last_stop_prices and str(action).upper() in ("SELL", "REDUCE"):
+                stop_price_val = self._last_stop_prices[code]
+                
             stop_price = f"{float(stop_price_val):.2f}" if stop_price_val else "0.00"
+            
+            # 提取信号价格作为盈亏基准
+            signal_price = float(sig.get("price", 0.0) or intent.get("price", 0.0) or kernel_res.get("kernel_price", 0.0) or 0.0)
             
             trace_id = trace.get("trace_id", "") or kernel_res.get("kernel_trace_id", "") or rec.get("kernel_trace_id", "")
             short_trace_id = trace_id[:8] if trace_id else "N/A"
@@ -2082,6 +2204,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             (risk_allowed, None),    # 风控红绿卡片
             (str(reject_code), "#FF8A80"),
             (stop_price, "#B0BEC5"),
+            ("-", "#B0BEC5"),        # 信号盈亏占位
             (short_trace_id, "#78909C"),
             (reason_summary, "#81C784")  # 决策理由柔和绿色
         ]
@@ -2112,9 +2235,16 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     sort_val = float(stop_price_val) if ('stop_price_val' in locals() and stop_price_val) else 0.0
                 except ValueError:
                     sort_val = 0.0
+            elif col_idx == 10:
+                # 信号盈亏
+                sort_val = 0.0
 
             cell_item = SortableTableWidgetItem(str(text), sort_val)
             cell_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            
+            # 挂载价格以供后续盈亏计算
+            if col_idx == 10 and 'signal_price' in locals():
+                cell_item.setData(QtCore.Qt.ItemDataRole.UserRole, signal_price)
             
             # 设置默认前景色
             if color_hex:
@@ -2135,7 +2265,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 else:
                     cell_item.setForeground(QtGui.QColor("#FF1744"))
                     cell_item.setFont(QtGui.QFont("Microsoft YaHei", 9, QtGui.QFont.Weight.Bold))
-            elif col_idx == 10 and trace_id: # Trace ID 悬浮提示
+            elif col_idx == 11 and trace_id: # Trace ID 悬浮提示
                 cell_item.setToolTip(f"防伪全量签名 ID: {trace_id}")
                 
             if col_idx == 0:
@@ -2364,7 +2494,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             else:
                 # 🛡️ 异常列宽自动校正门禁：防范此前因 bug 导致的列宽被意外折叠为 0 像素的死锁
                 fit_needed = False
-                if hasattr(self, "table") and self.table.columnCount() == 12:
+                if hasattr(self, "table") and self.table.columnCount() == 13:
                     for idx in range(self.table.columnCount()):
                         if self.table.columnWidth(idx) < 15:
                             fit_needed = True
@@ -2419,12 +2549,22 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         """双击持仓表格行，提取持仓个股代码并向主进程派发跳转联动"""
         code_item = self.pos_table.item(row, 0)
         name_item = self.pos_table.item(row, 1)
+        open_time_item = self.pos_table.item(row, 8)
         if code_item and code_item.text():
             code = code_item.text().strip()
             name = name_item.text().strip() if name_item else ""
             self._last_linked_code = code
-            logger.info(f"Double clicked on KernelPosition: {code} ({name}), linking...")
-            self.code_clicked.emit(code, name)
+            
+            date_str = ""
+            if open_time_item and open_time_item.text():
+                ts_str = open_time_item.text().strip()
+                if len(ts_str) >= 10 and "-" in ts_str:
+                    date_str = ts_str.split(" ")[0]
+                elif len(ts_str) >= 8:
+                    date_str = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]}"
+                    
+            logger.info(f"Double clicked on KernelPosition: {code} ({name}) {date_str}, linking...")
+            self.code_clicked.emit(code, name, date_str)
 
     def _on_pos_table_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
         """当键盘或鼠标切换持仓表格的当前行时，自动联动"""
@@ -2439,8 +2579,18 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     return
                 self._last_linked_code = code
                 name = name_item.text().strip() if name_item else ""
-                logger.info(f"Navigation cell changed linkage on KernelPositionsTable: {code} ({name})")
-                self.code_clicked.emit(code, name)
+                
+                open_time_item = self.pos_table.item(currentRow, 8)
+                date_str = ""
+                if open_time_item and open_time_item.text():
+                    ts_str = open_time_item.text().strip()
+                    if len(ts_str) >= 10 and "-" in ts_str:
+                        date_str = ts_str.split(" ")[0]
+                    elif len(ts_str) >= 8:
+                        date_str = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]}"
+                        
+                logger.info(f"Navigation cell changed linkage on KernelPositionsTable: {code} ({name}) {date_str}")
+                self.code_clicked.emit(code, name, date_str)
 
     def _refresh_positions_tab(self):
         """核心无摩擦刷新：直接从 `get_kernel_service()` 单例物理提取内存中最新持仓与浮盈状态"""
@@ -2845,6 +2995,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 open_time = pos_data["open_time"]
                 close_time = pos_data["close_time"]
                 
+                if volume == 0 and open_time == "N/A" and close_time != "N/A":
+                    open_time = close_time
+                
                 # 精密名称补齐：优先从父窗口的全局df_all查找以确保包含全量股票，降级为当前显示数据集current_df
                 stock_name = ""
                 if self.parent_app:
@@ -2942,7 +3095,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _adjust_column_widths(self):
         """极致模式自适应：按照可视化左侧列的紧凑显示方式，强行重设并压实列宽参数"""
-        if hasattr(self, "table") and self.table.columnCount() == 12:
+        if hasattr(self, "table") and self.table.columnCount() == 13:
             total_w = self.table.viewport().width()
             if total_w > 100:
                 # 0.日期时间, 1.代码, 2.名称, 3.前态, 4.动作, 5.拟仓, 6.打分, 7.风控, 8.阻断, 9.止损, 10.Trace ID, 11.决策理由摘要
