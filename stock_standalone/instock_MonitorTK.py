@@ -1544,10 +1544,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 🚀 [NEW] Sentiment Reversal Engine 09:25 AM ~ 10:30 AM Action Window
             if is_trade_day and 925 <= now_time <= 1030:
-                try:
-                    self.executor.submit(self.run_auction_reversal_strategy, today_str)
-                except Exception as ae:
-                    logger.error(f"[BgKernel] Failed to submit run_auction_reversal_strategy: {ae}")
+                if getattr(self, "_bg_auction_gate_run_today", "") != today_str:
+                    try:
+                        self.executor.submit(self.run_auction_reversal_strategy, today_str)
+                    except Exception as ae:
+                        logger.error(f"[BgKernel] Failed to submit run_auction_reversal_strategy: {ae}")
 
             executed = []
             blocked = []
@@ -1826,7 +1827,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         09:25 集合竞价结束、开盘前，触发情绪翻转与修复策略信号生成并投递执行。
         """
-        logger.info(f"⚡ [AuctionGate] Starting pre-market auction sentiment reversal strategy for {today_str}...")
+        if getattr(self, "_bg_auction_gate_run_today", "") == today_str:
+            return
+
+        try_count_attr = f"_auction_try_count_{today_str}"
+        try_count = getattr(self, try_count_attr, 0)
+        if try_count >= 3:
+            # 尝试 3 次仍缺失数据，直接将当天锁死，防止每 15 秒无限刷屏
+            self._bg_auction_gate_run_today = today_str
+            logger.warning(f"⚠️ [AuctionGate] Max retries reached for today ({today_str}). Reversal logic permanently bypassed.")
+            return
+
+        setattr(self, try_count_attr, try_count + 1)
+
+        logger.info(f"⚡ [AuctionGate] Starting pre-market auction sentiment reversal strategy for {today_str}... (Attempt {try_count + 1}/3)")
         try:
             # 1. 确保 BiddingMomentumDetector 存在
             if not getattr(self, "racing_detector", None):
@@ -1911,6 +1925,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 else:
                     logger.info(f"[AuctionGate] Reversal Signal for {sig.code} SUCCESSFULLY EXECUTED/CONFIRMED.")
 
+            # 成功运行，设置今日锁定标识
+            self._bg_auction_gate_run_today = today_str
         except Exception as e:
             logger.error(f"[AuctionGate] Error running pre-market auction reversal strategy: {e}")
             import traceback

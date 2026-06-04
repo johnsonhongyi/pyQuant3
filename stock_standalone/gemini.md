@@ -1,3 +1,21 @@
+## 2026-06-04 09:55
+- [x] **修复竞价反转策略 15秒循环重复调用与日志刷屏 Bug (Fixed Premarket Reversal Strategy 15s Loop & Warning Spam)**：
+    - [x] **实现单日运行锁屏断路器 (Implemented _bg_auction_gate_run_today day-lock)**：在 `instock_MonitorTK.py` 的主循环 `bg_kernel_auto_execute_once` 中，补充了 `_bg_auction_gate_run_today != today_str` 的判定。只有在今日未运行过反转逻辑的情况下才提交后台任务，阻断了每 15 秒心跳中无条件提交造成的算力浪费与重入风险。
+    - [x] **引入单日重试阈值防御机制 (Attempt Throttling Limit 3)**：在 `run_auction_reversal_strategy` 起手位置，增加了针对数据缺失情况的重试计数。允许单日最大重试 3 次（以防开盘初数据未对齐的瞬时延迟）；若 3 次后仍由于“昨日情绪快照缺失”或“数据未就绪”提前退出，直接物理阻断并静默锁死，彻底杜绝了警告日志在终端无限刷屏的现象。
+    - [x] **一枪通过编译与单元回归测试 (Passed Compilation & Regression Tests)**：编译完全通过，`test_watchlist_lifecycle.py` 全部 passed。
+
+## 2026-06-04 09:38
+- [x] **修复实时数据服务中 V型反转波段状态机除以零 Bug (Fixed float division by zero in update_wave_structure_state)**：
+    - [x] **根治极度缩量/未初始化价格导致的除以零 (Zero-division prevention for recent_min)**：在 `realtime_data_service.py` 内部 `update_wave_structure_state` 函数的状态机 `INIT` 阶段中，增加了 `recent_min > 0` 的置前过滤条件，避免部分新股、停牌股或冷启动阶段极度缩量（导致 `recent_min` 为 0）个股在计算波幅 `(recent_max - recent_min) / recent_min` 时触发 `float division by zero` 运行时错误。
+    - [x] **一枪通过静态编译与回归测试 (Passed Compilation & Regression Tests)**：编译完全通过，`test_watchlist_lifecycle.py` 测试套件运行良好。
+
+## 2026-06-04 02:00
+- [x] **加固 UI 线程稳定性，消除 manual_sell 与 self_heal 引发的 PyEval_RestoreThread 致命崩溃 Bug (Hardened UI Thread Stability & Resolved PyEval_RestoreThread GIL Crash)**：
+    - [x] **重构手动平仓逻辑为异步后台处理 (Asynchronous manual_sell_position execution)**：将 `_manual_sell_position` 中包含高延迟 API 探测、日志数据库追加以及盘后/盘中状态落盘的逻辑完整封装并移至后台 `threading.Thread` 中异步执行，彻底阻断了由于主线程等待网络与磁盘 I/O 带来的 UI 假死与 GIL 状态被意外剥离的隐患。
+    - [x] **重构一键自愈逻辑为异步工作流 (Asynchronous on_one_key_self_heal execution)**：将 `_on_one_key_self_heal` 中涉及的大批量持仓比对、状态落盘及配置校验彻底重构为 `_async_heal_worker` 并在后台守护线程中处理，极大地减轻了主界面的计算压迫与 GIL 争抢。
+    - [x] **使用 QTimer.singleShot 进行 thread-safe UI 回调桥接 (Bridged UI Actions via QTimer.singleShot)**：为了防止非 GUI 线程接触 Tkinter/PyQt 原生 C-API 或在多线程中直接操作 UI 部件而触发 Nuitka 的 GIL 物理崩溃，所有涉及 `QMessageBox` 弹窗、`_refresh_positions_tab` 表格重新加载以及交互式 toast 信息反馈的操作，均通过 `QtCore.QTimer.singleShot(0, ...)` 重新调度并投递回 Qt 主 GUI 线程队列执行，完美实现跨线程的稳定自愈。
+    - [x] **一枪通过全量编译与回归测试 (Passed Compilation & Regression Tests)**：通过了静态编译语法校验，并且 `test_watchlist_lifecycle.py` 11 项系统级核心单元测试 100% 通过，系统整体运行安全无损。
+
 ## 2026-06-04 00:10
 - [x] **修复 K线历史缓存长度与配置文件上限不一致的 Bug (Fixed Discrepancy between K-Line Cache Length and Configuration Limit)**：
     - [x] **消除硬编码性能模式目标小时数覆盖 (Removed Hardcoded TARGET_HOURS Override)**：动态关联 `cct.CFG.kline_cache_max_len`（默认 300）与 `TARGET_HOURS_HP` 及 `TARGET_HOURS_LEGACY`。用 `config_max_len / 60.0` 动态计算目标时长小时数。

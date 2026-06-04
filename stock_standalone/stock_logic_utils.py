@@ -623,24 +623,56 @@ def safe_prev_signal_array(df: Optional[pd.DataFrame]) -> np.ndarray:
         safe_vals.append(0)
     return np.array(safe_vals)
 def toast_message(master, text, duration=1500):
-    """短暂提示信息（浮层，不阻塞）"""
-    toast = tk.Toplevel(master)
-    toast.overrideredirect(True)
-    toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
-    label.pack()
+    """短暂提示信息（浮层，不阻塞，线程安全）"""
+    if master is None:
+        return
+
+    def _safe_toast():
+        try:
+            # 确认 master 是否还健在
+            if hasattr(master, 'winfo_exists') and not master.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            toast = tk.Toplevel(master)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
+            label.pack()
+            try:
+                master.update_idletasks()
+                master_x = master.winfo_rootx()
+                master_y = master.winfo_rooty()
+                master_w = master.winfo_width()
+            except Exception:
+                master_x, master_y, master_w = 100, 100, 400
+            
+            try:
+                toast.update_idletasks()
+                toast_w = toast.winfo_width()
+                toast_h = toast.winfo_height()
+                toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+            except Exception:
+                pass
+            
+            toast.after(duration, lambda: _safe_destroy(toast))
+        except Exception as e:
+            logger.debug(f"[toast_message] Tkinter layout exception: {e}")
+
+    def _safe_destroy(widget):
+        try:
+            if widget and widget.winfo_exists():
+                widget.destroy()
+        except Exception:
+            pass
+
     try:
-        master.update_idletasks()
-        master_x = master.winfo_rootx()
-        master_y = master.winfo_rooty()
-        master_w = master.winfo_width()
-    except Exception:
-        master_x, master_y, master_w = 100, 100, 400
-    toast.update_idletasks()
-    toast_w = toast.winfo_width()
-    toast_h = toast.winfo_height()
-    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
-    toast.after(duration, toast.destroy)
+        master.after(0, _safe_toast)
+    except Exception as e:
+        logger.debug(f"[toast_message] Failed to schedule toast via after: {e}")
+
 
 class RealtimeSignalManager:
     state_df: pd.DataFrame

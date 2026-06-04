@@ -2751,7 +2751,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._refresh_positions_tab()
 
     def _manual_sell_position(self, code: str, name: str, show_message: bool = True):
-        """手动平仓单只个股（同步桥接老网关和平仓新交易内核，完美记账）"""
+        """手动平仓单只个股（异步桥接老网关和平仓新交易内核，安全防GIL崩溃）"""
         try:
             from trade_gateway import get_trade_gateway
             trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
@@ -2764,64 +2764,74 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                                      QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No) == QtWidgets.QMessageBox.StandardButton.Yes:
                     return
 
-            # 1. 物理计算平仓价格 (最新价优先)
-            price = 0.0
-            if self.parent_app and hasattr(self.parent_app, "selector") and self.parent_app.selector is not None:
-                df_rt = getattr(self.parent_app.selector, 'df_all_realtime', None)
-                if df_rt is not None and code in df_rt.index:
-                    price = float(df_rt.loc[code].get('trade', 0) or 0)
-            
-            if price <= 0:
-                # Fallback 从 pos_table 或 adapter 获取
+            def _async_sell_worker():
                 try:
-                    from trading_kernel.kernel_service import get_kernel_service
-                    service = get_kernel_service()
-                    if service and service.paper_adapter:
-                        pos = service.paper_adapter.account.positions.get(code)
-                        if pos:
-                            price = float(pos.current_price or pos.entry_price)
-                except Exception:
-                    pass
-            if price <= 0:
-                price = 1.0  # 安全低保底
+                    # 1. 物理计算平仓价格 (最新价优先)
+                    price = 0.0
+                    if self.parent_app and hasattr(self.parent_app, "selector") and self.parent_app.selector is not None:
+                        df_rt = getattr(self.parent_app.selector, 'df_all_realtime', None)
+                        if df_rt is not None and code in df_rt.index:
+                            price = float(df_rt.loc[code].get('trade', 0) or 0)
+                    
+                    if price <= 0:
+                        # Fallback 从 pos_table 或 adapter 获取
+                        try:
+                            from trading_kernel.kernel_service import get_kernel_service
+                            service = get_kernel_service()
+                            if service and service.paper_adapter:
+                                pos = service.paper_adapter.account.positions.get(code)
+                                if pos:
+                                    price = float(pos.current_price or pos.entry_price)
+                        except Exception:
+                            pass
+                    if price <= 0:
+                        price = 1.0  # 安全低保底
 
-            # 2. 物理调用老版模拟网关执行平仓卖出，实现原有的平仓逻辑不变！
-            trade_gw.submit_sell(code, price, reason="内核面板上手工平仓")
+                    # 2. 物理调用老版模拟网关执行平仓卖出，实现原有的平仓逻辑不变！
+                    trade_gw.submit_sell(code, price, reason="内核面板上手工平仓")
 
-            # 3. 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
-            sig_sell = {
-                "code": code,
-                "name": name,
-                "signal_type": "手工平仓",
-                "action": "SELL",
-                "price": price,
-                "current_price": price,
-                "suggest_price": price,
-                "reason": "内核面板上手工平仓",
-                "journal_ts": datetime.now().isoformat(),
-                "created_at": datetime.now().isoformat(),
-            }
-            try:
-                from trading_kernel.kernel_service import enrich_decision_item
-                enrich_decision_item(sig_sell, write_journal=True)
-            except Exception as e_journal:
-                logger.warning(f"Error enriching sell journal: {e_journal}")
+                    # 3. 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+                    sig_sell = {
+                        "code": code,
+                        "name": name,
+                        "signal_type": "手工平仓",
+                        "action": "SELL",
+                        "price": price,
+                        "current_price": price,
+                        "suggest_price": price,
+                        "reason": "内核面板上手工平仓",
+                        "journal_ts": datetime.now().isoformat(),
+                        "created_at": datetime.now().isoformat(),
+                    }
+                    try:
+                        from trading_kernel.kernel_service import enrich_decision_item
+                        enrich_decision_item(sig_sell, write_journal=True)
+                    except Exception as e_journal:
+                        logger.warning(f"Error enriching sell journal: {e_journal}")
 
-            # 4. 强制物理保存 paper_adapter 最新空状态
-            try:
-                from trading_kernel.kernel_service import get_kernel_service
-                service = get_kernel_service()
-                if service and service.paper_adapter:
-                    if hasattr(service.paper_adapter, "_save_state"):
-                        service.paper_adapter._save_state()
-            except Exception:
-                pass
+                    # 4. 强制物理保存 paper_adapter 最新空状态
+                    try:
+                        from trading_kernel.kernel_service import get_kernel_service
+                        service = get_kernel_service()
+                        if service and service.paper_adapter:
+                            if hasattr(service.paper_adapter, "_save_state"):
+                                service.paper_adapter._save_state()
+                    except Exception:
+                        pass
 
-            # 5. 立即局部主动触发表格重新渲染
-            self._refresh_positions_tab()
-            
-            if show_message:
-                toast_message(self.parent_app, f"手工平仓成功: {name} ({code})")
+                    # 5. 回到 UI 线程刷新
+                    def _on_sell_finished_ui():
+                        self._refresh_positions_tab()
+                        if show_message:
+                            toast_message(self.parent_app, f"手工平仓成功: {name} ({code})")
+
+                    QtCore.QTimer.singleShot(0, _on_sell_finished_ui)
+                except Exception as ex:
+                    logger.error(f"Error in async_sell_worker: {ex}")
+
+            # 启动工作线程
+            t = threading.Thread(target=_async_sell_worker, daemon=True)
+            t.start()
         except Exception as e:
             logger.error(f"Error in manual_sell_position: {e}")
 
@@ -2857,303 +2867,322 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             logger.error(f"Error in manual_sell_all_positions: {e}")
 
     def _on_one_key_self_heal(self):
-        """一键自适应数据自愈修复：智能调整资金规模、修复个股缺失价格、清理 0 股幽灵持仓、并物理同步适配器与柜台数据"""
+        """一键自适应数据自愈修复：智能调整资金规模、修复个股缺失价格、清理 0 股幽灵持仓、并物理同步适配器与柜台数据（后台线程安全）"""
         try:
-            from trading_kernel.kernel_service import get_kernel_service
-            from trade_gateway import get_trade_gateway
-            import numpy as np
-            import math
-            
-            def safe_float(v, fallback=0.0):
-                if v is None:
-                    return fallback
+            def _async_heal_worker():
                 try:
-                    if isinstance(v, (np.floating, np.integer)):
-                        return float(v)
-                except Exception:
-                    pass
-                try:
-                    return float(v)
-                except (ValueError, TypeError):
-                    return fallback
-            
-            service = get_kernel_service()
-            if not service or not service.paper_adapter:
-                QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易内核服务未就绪")
-                return
-                
-            trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
-            if not trade_gw:
-                QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易网关未就绪")
-                return
-                
-            # 1. 物理清理所有 volume/shares <= 0 的幽灵/已平仓持仓，防范 float 盈亏计算干扰
-            removed_ghosts = []
-            
-            # 清理 paper_adapter 内存持仓
-            for c_code, p_obj in list(service.paper_adapter.account.positions.items()):
-                if p_obj.volume <= 0:
-                    service.paper_adapter.account.positions.pop(c_code, None)
-                    removed_ghosts.append(c_code)
+                    from trading_kernel.kernel_service import get_kernel_service
+                    from trade_gateway import get_trade_gateway
+                    import numpy as np
+                    import math
                     
-            # 清理 legacy 柜台持仓
-            with trade_gw._lock:
-                for c_code in list(trade_gw._positions.keys()):
-                    leg_pos = trade_gw._positions[c_code]
-                    if leg_pos.shares <= 0:
-                        trade_gw._positions.pop(c_code, None)
-                        removed_ghosts.append(c_code)
-
-            # 1.1 价格自愈：物理修复价格数据 (entry_price / current_price) 缺失、0 或为 NaN 的情况
-            def is_invalid_price(p):
-                if p is None:
-                    return True
-                try:
-                    fp = float(p)
-                    return fp <= 0 or math.isnan(fp) or math.isinf(fp)
-                except Exception:
-                    return True
-            
-            df_all = getattr(self.parent_app, "df_all", None)
-            rt_price_map = {}
-            if df_all is not None:
-                try:
-                    for idx, row in df_all.iterrows():
-                        raw_c = str(idx)
-                        pure_c = "".join(filter(str.isdigit, raw_c))[:6]
-                        if pure_c:
-                            price_val = safe_float(row.get("close") or row.get("price") or row.get("last_close") or row.get("open"), 0.0)
-                            if price_val > 0:
-                                rt_price_map[pure_c] = price_val
-                except Exception as ex:
-                    logger.error(f"Error mapping rt_price_map: {ex}")
-            
-            # 从 orders 流水中回溯计算所有个股的买入均价
-            order_entry_prices = {}
-            if service.paper_adapter.orders:
-                try:
-                    sorted_orders = sorted(
-                        [o for o in service.paper_adapter.orders if isinstance(o, dict)],
-                        key=lambda x: str(x.get("timestamp") or "")
-                    )
-                    temp_volumes = {}
-                    temp_costs = {}
-                    for o in sorted_orders:
-                        c = o.get("code")
-                        if not c:
-                            continue
-                        pure_c = "".join(filter(str.isdigit, str(c)))[:6]
-                        act = str(o.get("action") or "").upper()
-                        p = safe_float(o.get("price"), 0.0)
-                        vol = safe_float(o.get("volume"), 0.0)
-                        if p <= 0 or vol <= 0:
-                            continue
-                        if act in {"BUY", "ADD"}:
-                            temp_volumes[pure_c] = temp_volumes.get(pure_c, 0.0) + vol
-                            temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) + (p * vol)
-                        elif act in {"SELL", "REDUCE"}:
-                            rem_vol = max(0.0, temp_volumes.get(pure_c, 0.0) - vol)
-                            if rem_vol <= 0:
-                                temp_volumes.pop(pure_c, None)
-                                temp_costs.pop(pure_c, None)
-                            else:
-                                ratio = rem_vol / temp_volumes[pure_c]
-                                temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) * ratio
-                                temp_volumes[pure_c] = rem_vol
-                    
-                    for pure_c, tot_vol in temp_volumes.items():
-                        if tot_vol > 0:
-                            avg_p = temp_costs.get(pure_c, 0.0) / tot_vol
-                            if avg_p > 0:
-                                order_entry_prices[pure_c] = avg_p
-                except Exception as ex:
-                    logger.error(f"Error computing order_entry_prices: {ex}")
-
-            # 遍历并自愈修复持仓的价格
-            healed_prices_count = 0
-            for c_code, pos_obj in list(service.paper_adapter.account.positions.items()):
-                pure_c = "".join(filter(str.isdigit, str(c_code)))[:6]
-                
-                # 修复 current_price
-                rt_p = rt_price_map.get(pure_c, 0.0)
-                if is_invalid_price(pos_obj.current_price):
-                    if rt_p > 0:
-                        pos_obj.current_price = rt_p
-                        healed_prices_count += 1
-                        logger.info(f"[Self-Healing] Repaired current_price for {c_code} with real-time price: {rt_p}")
-                    elif not is_invalid_price(pos_obj.entry_price):
-                        pos_obj.current_price = pos_obj.entry_price
-                        healed_prices_count += 1
-                        logger.info(f"[Self-Healing] Repaired current_price for {c_code} fallback to entry_price: {pos_obj.entry_price}")
-                
-                # 修复 entry_price
-                if is_invalid_price(pos_obj.entry_price):
-                    if pure_c in order_entry_prices:
-                        pos_obj.entry_price = order_entry_prices[pure_c]
-                        healed_prices_count += 1
-                        logger.info(f"[Self-Healing] Repaired entry_price for {c_code} from order ledger: {pos_obj.entry_price}")
-                    elif rt_p > 0:
-                        pos_obj.entry_price = rt_p
-                        healed_prices_count += 1
-                        logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with real-time price fallback: {rt_p}")
-                    elif not is_invalid_price(pos_obj.current_price):
-                        pos_obj.entry_price = pos_obj.current_price
-                        healed_prices_count += 1
-                        logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with current_price fallback: {pos_obj.current_price}")
-
-            # 1.2 从决策流水日志中自愈修复缺失的开仓时间
-            journal_path = self.journal_path
-            code_times = {}
-            if os.path.exists(journal_path):
-                try:
-                    with open(journal_path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                rec = json.loads(line)
-                            except Exception:
-                                continue
-                            
-                            is_audit = (rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT")
-                            if is_audit:
-                                orig_order = rec.get("original_order", {})
-                                code = orig_order.get("code", "")
-                                confirmed = rec.get("confirmed", False)
-                                action = orig_order.get("action", "").upper()
-                                if not confirmed:
-                                    continue
-                                ts = rec.get("timestamp", "")
-                            else:
-                                sig = rec.get("signal", {})
-                                code = sig.get("code", "")
-                                action = rec.get("kernel_action", "") or rec.get("action", "")
-                                if not action:
-                                    risk = rec.get("risk", {})
-                                    action = risk.get("final_action", "")
-                                action = action.upper()
-                                ts = rec.get("journal_ts", "") or rec.get("trace", {}).get("timestamp", "")
-                            
-                            if not code or not action or not ts:
-                                continue
-                            
-                            code = "".join(filter(str.isdigit, str(code)))[:6]
-                            if len(code) != 6:
-                                continue
-                                
-                            formatted_ts = self._parse_timestamp(ts)
-                            
-                            if code not in code_times:
-                                code_times[code] = {"open_time": "N/A", "close_time": "N/A"}
-                            
-                            if action in {"BUY", "ADD"}:
-                                if code_times[code]["open_time"] == "N/A":
-                                    code_times[code]["open_time"] = formatted_ts
-                            elif action in {"SELL", "REDUCE"}:
-                                code_times[code]["close_time"] = formatted_ts
-                except Exception as ex:
-                    logger.error(f"Error scanning journal file for self-heal: {ex}")
-            
-            # 对 positions 里的 entry_time 进行自愈修复
-            healed_times_count = 0
-            for c_code, pos_obj in service.paper_adapter.account.positions.items():
-                current_entry_time = getattr(pos_obj, "entry_time", "N/A")
-                if current_entry_time == "N/A" or current_entry_time == "":
-                    if c_code in code_times and code_times[c_code]["open_time"] != "N/A":
-                        pos_obj.entry_time = code_times[c_code]["open_time"]
-                        healed_times_count += 1
-                        logger.info(f"[Self-Healing] Restored open time for {c_code} from journal: {pos_obj.entry_time}")
-            
-            # 同时自愈老版柜台的持仓与价格
-            with trade_gw._lock:
-                for c_code in list(trade_gw._positions.keys()):
-                    leg_pos = trade_gw._positions[c_code]
-                    leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
-                    if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
+                    def safe_float(v, fallback=0.0):
+                        if v is None:
+                            return fallback
                         try:
-                            ts_str = code_times[leg_pure]["open_time"]
-                            this_year = datetime.now().year
-                            dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
-                            leg_pos.entry_time = dt
+                            if isinstance(v, (np.floating, np.integer)):
+                                return float(v)
                         except Exception:
                             pass
+                        try:
+                            return float(v)
+                        except (ValueError, TypeError):
+                            return fallback
                     
-                    # 价格同步
-                    paper_pos = service.paper_adapter.account.positions.get(leg_pure)
-                    if paper_pos:
-                        leg_pos.price = paper_pos.entry_price
-                        leg_pos.current_price = paper_pos.current_price
-            
-            # 2. 统计当前活跃持仓的买入成本 and 最新市值
-            active_positions = service.paper_adapter.account.positions
-            entry_cost_sum = 0.0
-            market_val_sum = 0.0
-            
-            for code_key, pos_obj in active_positions.items():
-                vol = float(pos_obj.volume)
-                entry_cost_sum += float(pos_obj.entry_price) * vol
-                market_val_sum += float(pos_obj.current_price) * vol
-                
-            # 3. 智能计算合理、健康的资金规模 (尊重现有总资产，保持一致性)
-            current_initial = float(getattr(service.paper_adapter, "initial_capital", 0.0) or 0.0)
-            if current_initial >= entry_cost_sum and current_initial > 0:
-                target_cap = current_initial
-                logger.info(f"[Self-Healing] Respecting current initial capital: {target_cap}")
-            else:
-                # 只有原资金无效或不足以覆盖持仓时，才自愈重调资金规模 (默认至少 1,000,000.0)
-                min_cap = max(1000000.0, entry_cost_sum * 1.5)
-                target_cap = float((int(min_cap) // 100000) * 100000)
-                if target_cap < min_cap:
-                    target_cap += 100000.0
-                logger.info(f"[Self-Healing] Auto-expanded initial capital to: {target_cap} (cost: {entry_cost_sum})")
-                
-            new_cash = max(0.0, target_cap - entry_cost_sum)
-            
-            # 4. 同步可用现金与初始资金到纸盘适配器和老柜台风控
-            service.paper_adapter.initial_capital = target_cap
-            service.paper_adapter.account.initial_capital = target_cap
-            service.paper_adapter.account.cash = new_cash
-            
-            trade_gw.total_capital = target_cap
-            if hasattr(trade_gw, "risk_manager") and trade_gw.risk_manager:
-                trade_gw.risk_manager.total_capital = target_cap
-                
-            # 5. 强行将新数据做物理落盘持久化
-            if hasattr(service.paper_adapter, "_save_state"):
-                service.paper_adapter._save_state()
-                
-            # 6. 清除 UI 缓存指纹，强制触发 Qt 刷新
-            if hasattr(self, "_last_rendered_state"):
-                delattr(self, "_last_rendered_state")
-                
-            self._refresh_positions_tab()
-            
-            # 7. 显示成功对话框
-            pnl_val = market_val_sum - entry_cost_sum
-            pnl_pct = (pnl_val / entry_cost_sum * 100.0) if entry_cost_sum > 0 else 0.0
-            
-            msg_text = (
-                f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
-                f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
-                f"2️⃣ <b>自愈价格数据</b>：修复补齐了 <b>{healed_prices_count}</b> 处无效/缺失的价格指标。<br>"
-                f"3️⃣ <b>自愈开仓时间</b>：从决策流水日志中自愈修复了 <b>{healed_times_count}</b> 个持仓的开仓时间。<br>"
-                f"4️⃣ <b>对齐初始资金</b>：已完美尊重并对齐初始资产为 <b>¥ {target_cap:,.2f}</b> (与总资金量一致)。<br>"
-                f"5️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
-                f"6️⃣ <b>资产盈亏重算</b>：<br>"
-                f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
-                f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
-                f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
-                f"<i>* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！</i>"
-            )
-            
-            box = QtWidgets.QMessageBox(self)
-            box.setIcon(QtWidgets.QMessageBox.Icon.Information)
-            box.setWindowTitle("一键数据自愈修复")
-            box.setText(msg_text)
-            box.setTextFormat(QtCore.Qt.TextFormat.RichText)
-            box.exec()
-            
+                    service = get_kernel_service()
+                    if not service or not service.paper_adapter:
+                        def _notify_no_service():
+                            QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易内核服务未就绪")
+                        QtCore.QTimer.singleShot(0, _notify_no_service)
+                        return
+                        
+                    trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+                    if not trade_gw:
+                        def _notify_no_gateway():
+                            QtWidgets.QMessageBox.warning(self, "数据自愈", "模拟交易网关未就绪")
+                        QtCore.QTimer.singleShot(0, _notify_no_gateway)
+                        return
+                        
+                    # 1. 物理清理所有 volume/shares <= 0 的幽灵/已平仓持仓，防范 float 盈亏计算干扰
+                    removed_ghosts = []
+                    
+                    # 清理 paper_adapter 内存持仓
+                    for c_code, p_obj in list(service.paper_adapter.account.positions.items()):
+                        if p_obj.volume <= 0:
+                            service.paper_adapter.account.positions.pop(c_code, None)
+                            removed_ghosts.append(c_code)
+                            
+                    # 清理 legacy 柜台持仓
+                    with trade_gw._lock:
+                        for c_code in list(trade_gw._positions.keys()):
+                            leg_pos = trade_gw._positions[c_code]
+                            if leg_pos.shares <= 0:
+                                trade_gw._positions.pop(c_code, None)
+                                removed_ghosts.append(c_code)
+
+                    # 1.1 价格自愈：物理修复价格数据 (entry_price / current_price) 缺失、0 或为 NaN 的情况
+                    def is_invalid_price(p):
+                        if p is None:
+                            return True
+                        try:
+                            fp = float(p)
+                            return fp <= 0 or math.isnan(fp) or math.isinf(fp)
+                        except Exception:
+                            return True
+                    
+                    df_all = getattr(self.parent_app, "df_all", None)
+                    rt_price_map = {}
+                    if df_all is not None:
+                        try:
+                            for idx, row in df_all.iterrows():
+                                raw_c = str(idx)
+                                pure_c = "".join(filter(str.isdigit, raw_c))[:6]
+                                if pure_c:
+                                    price_val = safe_float(row.get("close") or row.get("price") or row.get("last_close") or row.get("open"), 0.0)
+                                    if price_val > 0:
+                                        rt_price_map[pure_c] = price_val
+                        except Exception as ex:
+                            logger.error(f"Error mapping rt_price_map: {ex}")
+                    
+                    # 从 orders 流水中回溯计算所有个股的买入均价
+                    order_entry_prices = {}
+                    if service.paper_adapter.orders:
+                        try:
+                            sorted_orders = sorted(
+                                [o for o in service.paper_adapter.orders if isinstance(o, dict)],
+                                key=lambda x: str(x.get("timestamp") or "")
+                            )
+                            temp_volumes = {}
+                            temp_costs = {}
+                            for o in sorted_orders:
+                                c = o.get("code")
+                                if not c:
+                                    continue
+                                pure_c = "".join(filter(str.isdigit, str(c)))[:6]
+                                act = str(o.get("action") or "").upper()
+                                p = safe_float(o.get("price"), 0.0)
+                                vol = safe_float(o.get("volume"), 0.0)
+                                if p <= 0 or vol <= 0:
+                                    continue
+                                if act in {"BUY", "ADD"}:
+                                    temp_volumes[pure_c] = temp_volumes.get(pure_c, 0.0) + vol
+                                    temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) + (p * vol)
+                                elif act in {"SELL", "REDUCE"}:
+                                    rem_vol = max(0.0, temp_volumes.get(pure_c, 0.0) - vol)
+                                    if rem_vol <= 0:
+                                        temp_volumes.pop(pure_c, None)
+                                        temp_costs.pop(pure_c, None)
+                                    else:
+                                        ratio = rem_vol / temp_volumes[pure_c]
+                                        temp_costs[pure_c] = temp_costs.get(pure_c, 0.0) * ratio
+                                        temp_volumes[pure_c] = rem_vol
+                            
+                            for pure_c, tot_vol in temp_volumes.items():
+                                if tot_vol > 0:
+                                    avg_p = temp_costs.get(pure_c, 0.0) / tot_vol
+                                    if avg_p > 0:
+                                        order_entry_prices[pure_c] = avg_p
+                        except Exception as ex:
+                            logger.error(f"Error computing order_entry_prices: {ex}")
+
+                    # 遍历并自愈修复持仓的价格
+                    healed_prices_count = 0
+                    for c_code, pos_obj in list(service.paper_adapter.account.positions.items()):
+                        pure_c = "".join(filter(str.isdigit, str(c_code)))[:6]
+                        
+                        # 修复 current_price
+                        rt_p = rt_price_map.get(pure_c, 0.0)
+                        if is_invalid_price(pos_obj.current_price):
+                            if rt_p > 0:
+                                pos_obj.current_price = rt_p
+                                healed_prices_count += 1
+                                logger.info(f"[Self-Healing] Repaired current_price for {c_code} with real-time price: {rt_p}")
+                            elif not is_invalid_price(pos_obj.entry_price):
+                                pos_obj.current_price = pos_obj.entry_price
+                                healed_prices_count += 1
+                                logger.info(f"[Self-Healing] Repaired current_price for {c_code} fallback to entry_price: {pos_obj.entry_price}")
+                        
+                        # 修复 entry_price
+                        if is_invalid_price(pos_obj.entry_price):
+                            if pure_c in order_entry_prices:
+                                pos_obj.entry_price = order_entry_prices[pure_c]
+                                healed_prices_count += 1
+                                logger.info(f"[Self-Healing] Repaired entry_price for {c_code} from order ledger: {pos_obj.entry_price}")
+                            elif rt_p > 0:
+                                pos_obj.entry_price = rt_p
+                                healed_prices_count += 1
+                                logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with real-time price fallback: {rt_p}")
+                            elif not is_invalid_price(pos_obj.current_price):
+                                pos_obj.entry_price = pos_obj.current_price
+                                healed_prices_count += 1
+                                logger.info(f"[Self-Healing] Repaired entry_price for {c_code} with current_price fallback: {pos_obj.current_price}")
+
+                    # 1.2 从决策流水日志中自愈修复缺失的开仓时间
+                    journal_path = self.journal_path
+                    code_times = {}
+                    if os.path.exists(journal_path):
+                        try:
+                            with open(journal_path, "r", encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        rec = json.loads(line)
+                                    except Exception:
+                                        continue
+                                    
+                                    is_audit = (rec.get("journal_type") == "HUMAN_CONFIRMATION_AUDIT")
+                                    if is_audit:
+                                        orig_order = rec.get("original_order", {})
+                                        code = orig_order.get("code", "")
+                                        confirmed = rec.get("confirmed", False)
+                                        action = orig_order.get("action", "").upper()
+                                        if not confirmed:
+                                            continue
+                                        ts = rec.get("timestamp", "")
+                                    else:
+                                        sig = rec.get("signal", {})
+                                        code = sig.get("code", "")
+                                        action = rec.get("kernel_action", "") or rec.get("action", "")
+                                        if not action:
+                                            risk = rec.get("risk", {})
+                                            action = risk.get("final_action", "")
+                                        action = action.upper()
+                                        ts = rec.get("journal_ts", "") or rec.get("trace", {}).get("timestamp", "")
+                                    
+                                    if not code or not action or not ts:
+                                        continue
+                                    
+                                    code = "".join(filter(str.isdigit, str(code)))[:6]
+                                    if len(code) != 6:
+                                        continue
+                                        
+                                    formatted_ts = self._parse_timestamp(ts)
+                                    
+                                    if code not in code_times:
+                                        code_times[code] = {"open_time": "N/A", "close_time": "N/A"}
+                                    
+                                    if action in {"BUY", "ADD"}:
+                                        if code_times[code]["open_time"] == "N/A":
+                                            code_times[code]["open_time"] = formatted_ts
+                                    elif action in {"SELL", "REDUCE"}:
+                                        code_times[code]["close_time"] = formatted_ts
+                        except Exception as ex:
+                            logger.error(f"Error scanning journal file for self-heal: {ex}")
+                    
+                    # 对 positions 里的 entry_time 进行自愈修复
+                    healed_times_count = 0
+                    for c_code, pos_obj in service.paper_adapter.account.positions.items():
+                        current_entry_time = getattr(pos_obj, "entry_time", "N/A")
+                        if current_entry_time == "N/A" or current_entry_time == "":
+                            if c_code in code_times and code_times[c_code]["open_time"] != "N/A":
+                                pos_obj.entry_time = code_times[c_code]["open_time"]
+                                healed_times_count += 1
+                                logger.info(f"[Self-Healing] Restored open time for {c_code} from journal: {pos_obj.entry_time}")
+                    
+                    # 同时自愈老版柜台的持仓与价格
+                    with trade_gw._lock:
+                        for c_code in list(trade_gw._positions.keys()):
+                            leg_pos = trade_gw._positions[c_code]
+                            leg_pure = "".join(filter(str.isdigit, str(c_code)))[:6]
+                            if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
+                                try:
+                                    ts_str = code_times[leg_pure]["open_time"]
+                                    this_year = datetime.now().year
+                                    dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
+                                    leg_pos.entry_time = dt
+                                
+                                except Exception:
+                                    pass
+                            
+                            # 价格同步
+                            paper_pos = service.paper_adapter.account.positions.get(leg_pure)
+                            if paper_pos:
+                                leg_pos.price = paper_pos.entry_price
+                                leg_pos.current_price = paper_pos.current_price
+                    
+                    # 2. 统计当前活跃持仓的买入成本 and 最新市值
+                    active_positions = service.paper_adapter.account.positions
+                    entry_cost_sum = 0.0
+                    market_val_sum = 0.0
+                    
+                    for code_key, pos_obj in active_positions.items():
+                        vol = float(pos_obj.volume)
+                        entry_cost_sum += float(pos_obj.entry_price) * vol
+                        market_val_sum += float(pos_obj.current_price) * vol
+                        
+                    # 3. 智能计算合理、健康的资金规模 (尊重现有总资产，保持一致性)
+                    current_initial = float(getattr(service.paper_adapter, "initial_capital", 0.0) or 0.0)
+                    if current_initial >= entry_cost_sum and current_initial > 0:
+                        target_cap = current_initial
+                        logger.info(f"[Self-Healing] Respecting current initial capital: {target_cap}")
+                    else:
+                        # 只有原资金无效或不足以覆盖持仓时，才自愈重调资金规模 (默认至少 1,000,000.0)
+                        min_cap = max(1000000.0, entry_cost_sum * 1.5)
+                        target_cap = float((int(min_cap) // 100000) * 100000)
+                        if target_cap < min_cap:
+                            target_cap += 100000.0
+                        logger.info(f"[Self-Healing] Auto-expanded initial capital to: {target_cap} (cost: {entry_cost_sum})")
+                        
+                    new_cash = max(0.0, target_cap - entry_cost_sum)
+                    
+                    # 4. 同步可用现金与初始资金到纸盘适配器和老柜台风控
+                    service.paper_adapter.initial_capital = target_cap
+                    service.paper_adapter.account.initial_capital = target_cap
+                    service.paper_adapter.account.cash = new_cash
+                    
+                    trade_gw.total_capital = target_cap
+                    if hasattr(trade_gw, "risk_manager") and trade_gw.risk_manager:
+                        trade_gw.risk_manager.total_capital = target_cap
+                        
+                    # 5. 强行将新数据做物理落盘持久化
+                    if hasattr(service.paper_adapter, "_save_state"):
+                        service.paper_adapter._save_state()
+                        
+                    # 6. 回到 UI 线程更新与提示
+                    def _on_heal_finished_ui():
+                        # 清除 UI 缓存指纹，强制触发 Qt 刷新
+                        if hasattr(self, "_last_rendered_state"):
+                            delattr(self, "_last_rendered_state")
+                            
+                        self._refresh_positions_tab()
+                        
+                        # 7. 显示成功对话框
+                        pnl_val = market_val_sum - entry_cost_sum
+                        pnl_pct = (pnl_val / entry_cost_sum * 100.0) if entry_cost_sum > 0 else 0.0
+                        
+                        msg_text = (
+                            f"🎉 <b>一键账户资产与资金自愈成功！</b><br><br>"
+                            f"1️⃣ <b>清理幽灵持仓</b>：已物理剥离 {len(set(removed_ghosts))} 只已平仓 (0股) 行。<br>"
+                            f"2️⃣ <b>自愈价格数据</b>：修复补齐了 <b>{healed_prices_count}</b> 处无效/缺失的价格指标。<br>"
+                            f"3️⃣ <b>自愈开仓时间</b>：从决策流水日志中自愈修复了 <b>{healed_times_count}</b> 个持仓的开仓时间。<br>"
+                            f"4️⃣ <b>对齐初始资金</b>：已完美尊重并对齐初始资产为 <b>¥ {target_cap:,.2f}</b> (与总资金量一致)。<br>"
+                            f"5️⃣ <b>可用现金对账</b>：已精准修正为 <b>¥ {new_cash:,.2f}</b> (账户保持健康购买力)。<br>"
+                            f"6️⃣ <b>资产盈亏重算</b>：<br>"
+                            f"   - 持仓总成本：¥ {entry_cost_sum:,.2f}<br>"
+                            f"   - 持仓最新市值：¥ {market_val_sum:,.2f}<br>"
+                            f"   - 浮动总盈亏：<b><font color='{'#00E676' if pnl_val >= 0 else '#FF1744'}'>¥ {pnl_val:+,.2f} ({pnl_pct:+.2f}%)</font></b><br><br>"
+                            f"<i>* 修正后数据已安全持久化写入本地配置文件，在重新启动后依然保持完美对账自愈！</i>"
+                        )
+                        
+                        box = QtWidgets.QMessageBox(self)
+                        box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                        box.setWindowTitle("一键数据自愈修复")
+                        box.setText(msg_text)
+                        box.setTextFormat(QtCore.Qt.TextFormat.RichText)
+                        box.exec()
+
+                    QtCore.QTimer.singleShot(0, _on_heal_finished_ui)
+                except Exception as ex:
+                    logger.error(f"Error in _async_heal_worker: {ex}")
+                    def _on_heal_error_ui():
+                        QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈执行时抛出异常: {ex}")
+                    QtCore.QTimer.singleShot(0, _on_heal_error_ui)
+
+            # 启动守护线程执行
+            t = threading.Thread(target=_async_heal_worker, daemon=True)
+            t.start()
         except Exception as e:
             logger.error(f"Error in One-Key Self-Heal: {e}")
-            QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈执行时抛出异常: {e}")
+            QtWidgets.QMessageBox.critical(self, "出错", f"一键自愈触发失败: {e}")
