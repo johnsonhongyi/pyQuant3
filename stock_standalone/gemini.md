@@ -1,3 +1,19 @@
+## 2026-06-04 10:05
+- [x] **统一优化与标准化前端风控拦截展示信息为中文 (Standardized Frontend Risk Rejection Metrics to Friendly Chinese)**：
+    - [x] **内核底层中文详细信息外显**：在 `trading_kernel/kernel_service.py` 的交易内核结果组装中，将原先默认的 `"kernel_reject_code"` 覆盖提取逻辑，优化为优先读取 `risk.reject_context.get("message")`（带有上下文变量的富中文描述），确保拦截源头即输出标准中文日志。
+    - [x] **UI 交互全中文拦截转换（双保险防御）**：
+        - 针对 PyQt 架构的 `tk_gui_modules/decision_flow_panel.py`（决策流面板）以及 `signal_dashboard_panel.py`（信号看板），引入了本地简短转换 `RISK_CN_SHORT` 映射表，对可能遗漏的英文代码（如 `HIGH_EXTENSION_NO_CHASE`）和 `BLOCK` 提供兜底翻译。
+        - 针对 Tkinter 架构的 `stock_selection_window.py`（选股窗口信号 Tab），应用相同的本地转换机制，保证不论在哪个表格（Treeview/TableWidget）中，均只会展示友好的中文风控信息。
+    - [x] **一枪通过单元与回归测试**：编译顺利通过，且 `pytest test_watchlist_lifecycle.py` 和 `scratch/test_auction_engine.py` 测试套件 100% 成功。
+    - [x] **修复潜伏池状态 JSON 序列化 float32 报错 (Fixed NumPy float32 serialization error)**：
+        - 针对 `realtime_data_service.py` 状态机在冷启动或每 5 分钟增量计算波幅阶段，从 numpy 数组取得的 `closes[-1]` 含有 `np.float32` 数据类型，直接导致持久化至 Ramdisk 时的 `json.dump` 触发 `Object of type float32 is not JSON serializable` 报错的问题。
+        - **双重转换加固**：
+            1. 源头将 `recent_close` 赋值包装为 `float(closes[-1])`。
+            2. 在 `save_consolidation_state` 的 `json.dump` 中定义并应用了 `NpEncoder` 自定义 JSON 编码器，实现对 `np.floating`/`np.integer`/`np.ndarray` 的无缝类型转换和兜底序列化，消除了状态保存隐患。
+    - [x] **修复 PyInstaller 打包脚本在部分 Windows CMD 下的解析报错 (Fixed spec and loop command unrecognized error in instock-pyinstall-to-exe.cmd)**：
+        - **原因定位**：该批处理文件以 UTF-8（不带 BOM）格式保存。中文 Windows CMD 默认使用 GBK（CP936）代码页加载文件。如果批处理中含有中文注释，由于多字节中文编码错乱，乱码中的部分字节会被误解析为 CMD 命令行连接/重定向符号（如 `&`, `|` 等），将正常指令强行截断，从而触发 `'为0' is not recognized as an internal or external command` 等大量语法报错。
+        - **终极解决方案**：在完全遵守全局 UTF-8 编码要求的前提下，对 `instock-pyinstall-to-exe.cmd` 文件进行重构，将所有中文注释与中文输出全部替换为纯 ASCII（英文及符号）表示。由于纯 ASCII 在 UTF-8 和 ANSI/GBK 编码下具有完全相同的字节展现，从而彻底根治了 CMD 解释器的乱码解析 Bug，打包流程得以畅通执行。
+
 ## 2026-06-04 09:55
 - [x] **修复竞价反转策略 15秒循环重复调用与日志刷屏 Bug (Fixed Premarket Reversal Strategy 15s Loop & Warning Spam)**：
     - [x] **实现单日运行锁屏断路器 (Implemented _bg_auction_gate_run_today day-lock)**：在 `instock_MonitorTK.py` 的主循环 `bg_kernel_auto_execute_once` 中，补充了 `_bg_auction_gate_run_today != today_str` 的判定。只有在今日未运行过反转逻辑的情况下才提交后台任务，阻断了每 15 秒心跳中无条件提交造成的算力浪费与重入风险。

@@ -815,7 +815,7 @@ class MinuteKlineCache:
             vols = np.array([k['volume'] for k in klines], dtype=np.float32)
             cums = np.array([k['cum_vol_start'] for k in klines], dtype=np.float32)
             
-            recent_close = closes[-1]
+            recent_close = float(closes[-1])
             recent_max = float(np.max(closes))
             recent_min = float(np.min(closes))
             recent_avg_vol = float(np.mean(vols[-5:])) if len(vols) >= 5 else float(np.mean(vols))
@@ -915,10 +915,22 @@ class MinuteKlineCache:
                 "v_reversal_pool": list(self._v_reversal_pool),
                 "consolidation_flags": mapped_flags
             }
+            
+            class NpEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    import numpy as np
+                    if isinstance(obj, (np.float32, np.float64, np.floating)):
+                        return float(obj)
+                    if isinstance(obj, (np.int32, np.int64, np.integer)):
+                        return int(obj)
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    return super(NpEncoder, self).default(obj)
+
             # 使用临时文件写入后重命名，确保原子性防止写一半崩溃
             tmp_file = filepath + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(state_dict, f, ensure_ascii=False, indent=2)
+                json.dump(state_dict, f, cls=NpEncoder, ensure_ascii=False, indent=2)
             os.replace(tmp_file, filepath)
             if self.verbose:
                 logger.info(f"💾 [V反潜伏池] 状态已持久化至 {filepath} (容量: {len(self._v_reversal_pool)} 只)")

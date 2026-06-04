@@ -834,7 +834,7 @@ class TradingKernelService:
             "kernel_size_pct": risk.final_size_pct,
             "kernel_confidence": intent.confidence,
             "kernel_allowed": risk.allowed,
-            "kernel_reject_code": str(risk.reject_context.get("code", "")) if risk.reject_context else "",
+            "kernel_reject_code": str(risk.reject_context.get("message", risk.reject_context.get("code", ""))) if risk.reject_context else "",
             "kernel_stop_price": intent.stop_price,
             "kernel_trace_id": trace.trace_id,
             "kernel_reason": asdict(intent.reason),

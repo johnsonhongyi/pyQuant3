@@ -1732,7 +1732,30 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             
             reject_code = kernel_res.get("kernel_reject_code", "") or rec.get("kernel_reject_code", "")
             if not reject_code and not allowed_val:
-                reject_code = risk.get("reject_context", {}).get("code", "RISK_REJECT")
+                reject_code = risk.get("reject_context", {}).get("message") or risk.get("reject_context", {}).get("code", "RISK_REJECT")
+            
+            # 双重保险：对于残留的英文代码进行本地中文简短转换
+            RISK_CN_SHORT = {
+                "CONSECUTIVE_LOSS_COOLDOWN": "连续亏损冷静期拦截",
+                "DAILY_LOSS_LIMIT_EXCEEDED": "每日亏损超限拦截",
+                "HIGH_EXTENSION_NO_CHASE": "超强拉升防追高拦截",
+                "NON_TRADING_SESSION": "非交易时间段拦截",
+                "BLACKLISTED_SYMBOL": "黑名单股票拦截",
+                "SIGNAL_EXPIRED": "信号过期失效",
+                "LOW_VOLUME_BLOCKED": "极度缩量拦截",
+                "BUY_DISABLED": "买入被全局禁用",
+                "LOW_CONFIDENCE": "置信度不足拦截",
+                "ALREADY_IN_TRADE": "已有持仓限制重复开仓",
+                "ADD_REQUIRES_POSITION": "加仓无底仓拦截",
+                "SINGLE_STOCK_EXPOSURE_EXCEEDED": "单股持仓限额超限",
+                "SECTOR_EXPOSURE_EXCEEDED": "单板块暴露限额超限",
+                "TOTAL_EXPOSURE_EXCEEDED": "总仓位暴露限额超限",
+                "RISK_REJECT": "风控拒绝",
+                "SIMULATION_BYPASS": "模拟测试绕过",
+                "BLOCK": "风控拦截",
+            }
+            if reject_code in RISK_CN_SHORT:
+                reject_code = RISK_CN_SHORT[reject_code]
             
             stop_price_val = kernel_res.get("kernel_stop_price", 0.0) or rec.get("kernel_stop_price", 0.0) or intent.get("stop_price", 0.0)
             stop_price = f"{float(stop_price_val):.2f}" if stop_price_val else "0.00"

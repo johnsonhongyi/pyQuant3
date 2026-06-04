@@ -3372,13 +3372,42 @@ def _refresh_decision_tab(self):
                 if s['status'] in ('已忽略', '已成交'):
                     tag = "done"
 
+                reject_code = s.get('kernel_reject_code', '')
+                if not s.get('kernel_allowed'):
+                    if not reject_code:
+                        reject_code = "BLOCK"
+                    # 双重保险：对于残留的英文代码进行本地中文简短转换
+                    RISK_CN_SHORT = {
+                        "CONSECUTIVE_LOSS_COOLDOWN": "连续亏损冷静期拦截",
+                        "DAILY_LOSS_LIMIT_EXCEEDED": "每日亏损超限拦截",
+                        "HIGH_EXTENSION_NO_CHASE": "超强拉升防追高拦截",
+                        "NON_TRADING_SESSION": "非交易时间段拦截",
+                        "BLACKLISTED_SYMBOL": "黑名单股票拦截",
+                        "SIGNAL_EXPIRED": "信号过期失效",
+                        "LOW_VOLUME_BLOCKED": "极度缩量拦截",
+                        "BUY_DISABLED": "买入被全局禁用",
+                        "LOW_CONFIDENCE": "置信度不足拦截",
+                        "ALREADY_IN_TRADE": "已有持仓限制重复开仓",
+                        "ADD_REQUIRES_POSITION": "加仓无底仓拦截",
+                        "SINGLE_STOCK_EXPOSURE_EXCEEDED": "单股持仓限额超限",
+                        "SECTOR_EXPOSURE_EXCEEDED": "单板块暴露限额超限",
+                        "TOTAL_EXPOSURE_EXCEEDED": "总仓位暴露限额超限",
+                        "RISK_REJECT": "风控拒绝",
+                        "SIMULATION_BYPASS": "模拟测试绕过",
+                        "BLOCK": "风控拦截",
+                    }
+                    if reject_code in RISK_CN_SHORT:
+                        reject_code = RISK_CN_SHORT[reject_code]
+                else:
+                    reject_code = "OK"
+
                 values = (
                     s.get('created_at', ''),
                     priority,
                     s.get('kernel_action', ''),
                     f"{float(s.get('kernel_size_pct', 0) or 0):.0%}",
                     f"{float(s.get('kernel_confidence', 0) or 0):.2f}",
-                    "OK" if s.get('kernel_allowed') else (s.get('kernel_reject_code') or "BLOCK"),
+                    reject_code,
                     code, s['name'], s['sector'],
                     s['signal_type'],
                     s.get('suggest_price', 0),
