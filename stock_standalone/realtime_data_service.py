@@ -833,7 +833,7 @@ class MinuteKlineCache:
             if phase == "INIT":
                 # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
                 # 假设通过跌幅和极度缩量确认
-                if recent_avg_vol > 0 and (recent_max - recent_min) / recent_min < 0.02:
+                if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < 0.02:
                     # 简化判定：只要属于极度横盘，就先算作初步潜伏
                     state["phase"] = "CONSOLIDATING"
                     state["anchor_low"] = recent_min
