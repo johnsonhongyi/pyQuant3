@@ -1,3 +1,21 @@
+## 2026-06-05 11:25
+- [x] **实现竞价面板后台自动检测与未开启警报机制 (Implemented Bidding Panel Background Detection & Missing Warnings)**：
+    - [x] **废除竞价面板未开启时的赛马降级**：遵循用户指导，废除了 `_inject_focus_engine` 中在面板未开启时向 `racing_detector` 的降级获取逻辑，完全基于交易期内自动初始化的竞价面板 (`sector_bidding_panel`)。
+    - [x] **实现交易期未开启/无数据自动审计与计数**：通过 `cct.get_work_time()` 精准锁定交易时段，并在注入失败时（面板未打开、无 detector 或 `inject_from_detector` 返回失败）对计数器自增。
+    - [x] **超过3次触发日志 warning 预警**：连续 3 次检测周期无法获取数据时，在后台线程中自动产生 `logger.warning` 警报日志，帮助操盘手及时发现和排查面板未开启问题，确保交易数据流程的绝对顺畅。
+- [x] **根治后台决策流与数据注入在行情高频下因 UI 优化限流导致停滞的 Bug (Fixed Background Decision Flow & Bidding Stagnation Due to UI-Throttling Early-Return)**：
+    - [x] **彻底解耦后台任务与 UI 早退/过滤 (Decoupled Background Tasks from UI Throttling)**：重构了 `instock_MonitorTK.py` 中的 `_apply_tree_data_sync` 方法。将后台数据驱动的核心调度任务——`lf_panel_feed` (竞价数据同步) 与 `lf_engine_inject` (决策/交易内核注入)——物理移动至 UI 渲染限流及早期返回（`df_hash == last_hash`）之前执行，确保任何后台业务逻辑在行情到达时均能立即运转，彻底不受 UI 渲染频率的限制。
+    - [x] **解决 5点价格采样指纹所引发的 `has_update` 饥饿问题**：此前的哈希指纹校验因为只采样了 5 只个股 of 收盘价变动，这在 5,500+ 只个股环境下极难触发变动，使得 `has_update` 长期处于 `False`，导致决策引擎 `_inject_focus_engine` 被无限期饿死。当前移除了对 `has_update` 的不合理依赖，使其仅遵循设定的 `duration_sleep_time` 真实步长执行注入。
+    - [x] **废除最小化/折叠隐藏状态下的 isVisible 过滤 (Feed Data Even When Hidden/Minimized)**：去除了 `sector_bidding_panel` 数据推送时必须满足 `isVisible()` 的前提条件。现在只要面板被创建存在，即使被用户最小化或以非销毁模式 hide 隐藏，也会源源不断接收实时数据推送，促使底层的 `BiddingMomentumDetector` 在后台高频高精地刷新板块打分，保证决策链和交易日志流程顺畅如初。
+
+## 2026-06-05 03:05
+- [x] **解耦后台任务初始化与行情数据到达依赖，修复 FlowWatchdog 决策流停滞误报 (Decoupled Housekeeping & Fixed False Stagnation Watchdog Alerts)**：
+    - [x] **后台任务与首屏数据解耦**：将 `_batch_init_housekeeping` 集中初始化方法与首屏实时行情到达（第一次 sync 数据）彻底解耦，改为在主 Tk 窗口 `__init__` 初始化后延迟 2 秒（`self._schedule_after(2000)`）自动无条件拉起。由此，即便在非交易时段，交易内核心跳等常驻后台常驻服务也能立即启动监听。
+    - [x] **加固窗口恢复触发**：将 `self.restore_all_monitor_windows` 的调用从后台初始化移动到数据同步 `_apply_tree_data_sync` 内部，仅在 `self.df_all` 首次有数据且非空时执行，彻底避免了冷启动阶段 `df_all` 为空导致概念窗口恢复失败的 Bug。
+    - [x] **打通后台内核执行心跳**：在 `bg_kernel_auto_execute_once` 心跳物理执行的头部，增加了对共享 `self.global_dict["kernel_heartbeat_time"] = time.time()` 时间戳的自动写入，确保交易内核在没有任何交易信号的静默期间，仍能定时提供活跃标识。
+    - [x] **修复 Watchdog Stagnation 误报**：在决策流监控大屏的看门狗 `FlowWatchdog` 判定循环中，加入了对 `kernel_heartbeat_time` 的共享读取判定。只要后台交易内核的心跳在 60 秒内更新过，即自动重置 `_last_growth_time`，彻底根治了高频运行在“无交易日内”时由于日志文件无物理增长而错误报出“决策流已停止超过50分钟”的误警。
+    - [x] **100% 绿旗跑通系统回归测试**：编译顺利通过，且 `pytest test_watchlist_lifecycle.py` 11 项核心回归用例 100% 成功。
+
 ## 2026-06-05 00:35
 - [x] **根治 `minute_kline_cache.pkl` 退出写盘后的物理文件体积异常膨胀与稀疏索引内存泄漏 (Fixed Pickle Size Inflation & RangeIndex Alignment)**：
     - [x] **排查定位文件膨胀原因**：分析发现，`MinuteKlineCache` 在 `to_dataframe()` 中执行 `groupby('code').tail()` 合并以及在 `from_dataframe()` 中进行数据拼接时，返回的 DataFrame 保留了非连续、稀疏的 `Int64Index` 索引（大小约为 164.7 万个整型索引值）。虽然两端数据内容、行数完全一样，但这 164.7 万个显式整型索引值被 pandas 一起序列化写入了 Pickle 文件中，即使经 zstd 压缩也会白白多出 **2.10 MB** 的物理空间（从 16.75MB 膨胀到 18.85MB），且在内存中产生了额外的 **12.5 MB** 稀疏索引开销。

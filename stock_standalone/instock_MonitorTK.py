@@ -578,6 +578,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_dispatch_kick = 0  
         self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
         self._is_ui_sync_pending = False # 🛡️ [NEW] UI 同步任务待处理标志位
+        self._bidding_panel_missing_count = 0
 
         # [NEW] 初始化同步 Rotator 窗口的专用队列和单 worker 后台长驻发送线程，根治 Window 管理器句柄耗尽崩溃
         import queue
@@ -937,6 +938,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 定时检查队列
         self._schedule_after(1000, self.update_tree)
+
+        # 🚀 [NEW] 启动后台常驻服务集中初始化 (解耦首屏行情数据到达依赖)
+        self._schedule_after(2000, self._batch_init_housekeeping)
 
         # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
         self.tk_dispatch_queue = queue.Queue()
@@ -1437,8 +1441,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 _sbp = getattr(self, 'sector_bidding_panel', None)
                 _detector = getattr(_sbp, 'detector', None) if _sbp else None
+                
+                # 仅直接从竞价面板获取 detector，不用降级去全局赛马获取
+                injected = False
                 if _detector is not None:
-                    fc.inject_from_detector(_detector)
+                    injected = fc.inject_from_detector(_detector)
+                
+                # 交易期检测机制
+                if cct.get_work_time():
+                    if not injected:
+                        self._bidding_panel_missing_count = getattr(self, '_bidding_panel_missing_count', 0) + 1
+                        if self._bidding_panel_missing_count >= 3:
+                            logger.warning(
+                                f"⚠️ [BiddingPanelWatchdog] 交易期内检测/获取 SectorFocusController.inject_from_detector() 失败！"
+                                f"当前竞价面板状态: {'未打开' if not _sbp else '已打开但无detector数据'}. "
+                                f"连续未检测到周期数: {self._bidding_panel_missing_count} 次"
+                            )
+                    else:
+                        self._bidding_panel_missing_count = 0
+                else:
+                    self._bidding_panel_missing_count = 0
                 
                 try:
                     from scraper_55188 import get_cache_df as _55188_cache
@@ -1511,6 +1533,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def bg_kernel_auto_execute_once(self, auto_mode=True):
         """Execute approved kernel BUY/SELL decisions once through the existing mock gateway in background."""
+        # 记录交易内核后台执行的心跳时间，供 Watchdog 审计使用 (防止无交易信号时误报已停滞)
+        if hasattr(self, "global_dict") and self.global_dict is not None:
+            self.global_dict["kernel_heartbeat_time"] = time.time()
+
         # 处于回测模拟模式下，直接短路，无需响应策略交易流以避免资源浪费和数据污染
         from signal_grading_hub import get_signal_grading_hub
         if get_signal_grading_hub()._simulation_mode:
@@ -5933,6 +5959,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
                 
+                # -------------------------------------------------------------
+                # 🛡️ 后台数据驱动任务 (不受 UI 过滤与 Hash 变动限制，确保交易内核高频顺畅 tick)
+                # -------------------------------------------------------------
+                lt_now = time.time()
+                # 1. 竞价面板/检测器数据同步 (即使面板未打开或隐藏/最小化，只要面板存在，也同步数据以驱动后台计算)
+                _panel = getattr(self, "sector_bidding_panel", None)
+                if _panel:
+                    # 使用 1.5s 节流，防止高频行情下任务队列堆积
+                    if lt_now - getattr(self, '_last_panel_feed_ts', 0) > 1.5:
+                        def _do_panel_sync(p=_panel, d=full_df):
+                            try:
+                                p.on_realtime_data_arrived(d)
+                            except Exception as e:
+                                logger.error(f"Panel sync failed: {e}")
+                        self._put_deduped_task("lf_panel_feed", _do_panel_sync)
+                        self._last_panel_feed_ts = lt_now
+
+                # 2. 后台交易/决策引擎注入与 tick 驱动 (只受 duration_sleep_time 限制，不受 has_update/UI 限制)
+                _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
+                if lt_now - _fc_last >= duration_sleep_time:
+                    self._put_deduped_task("lf_engine_inject", lambda d=full_df: self._inject_focus_engine(d))
+                    self._focus_ctrl_last_inject = lt_now
+
                 # [STABILITY] 极其重要的限流：如果数据毫无变动，且过滤条件未发生变化，且非强制刷新，直接跳回
                 current_query = getattr(self, '_last_value', "")
                 last_render_query = getattr(self, '_last_render_query', "")
@@ -5972,7 +6021,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
                 
                 # 1. 独立调度：Top10 窗口
-                lt_now = time.time()
                 if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
                     self._put_deduped_task("lf_top10", lambda: self.update_all_top10_windows())
                     
@@ -5984,32 +6032,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self._concept_detail_win.update_data(d)
                         self._put_deduped_task("lf_category", _do_cat_update)
 
-                    # 3. 独立调度：竞价面板的数据推送
-                    _panel = getattr(self, "sector_bidding_panel", None)
-                    if _panel and _panel.isVisible():
-                        def _do_panel_sync(p=_panel, d=full_df):
-                            try:
-                                p.on_realtime_data_arrived(d) # full_df 已是独立快照，调用端负责 copy 隔离
-                            except Exception as e:
-                                logger.error(f"Panel sync failed: {e}")
-                        self._put_deduped_task("lf_panel_feed", _do_panel_sync)
-
-                    # 4. 独立调度：后台注入决策引擎
-                    _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
-                    if has_update and (lt_now - _fc_last >= duration_sleep_time):
-                        self._put_deduped_task("lf_engine_inject", lambda d=full_df: self._inject_focus_engine(d))
-                        self._focus_ctrl_last_inject = lt_now
-
                     self._last_low_freq_ts = lt_now
 
 
                 # ⭐ 交易 GUI 同步 (轻量级)
                 if hasattr(self, '_trading_gui_qt6') and self._trading_gui_qt6:
                     self._trading_gui_qt6.df_all = self.df_all
-                # 4. [HOUSEKEEPING] 窗口恢复与后台任务集中初始化
-                if not hasattr(self, "_restore_done"):
-                    self._restore_done = True
-                    self._schedule_after(2000, self._batch_init_housekeeping)
+                # 4. [HOUSEKEEPING] 窗口恢复 (首次 df_all 有数据时执行)
+                if not hasattr(self, "_monitor_windows_restored") and not self.df_all.empty:
+                    self._monitor_windows_restored = True
+                    self._schedule_after(2000, self.restore_all_monitor_windows)
 
                 # 🧹 周期性手动 GC (根据反馈：按 50 次更新触发一次，降低卡顿)
                 if not hasattr(self, '_update_count'): self._update_count = 0
@@ -6074,7 +6106,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _batch_init_housekeeping(self):
         """[OPTIMIZE] 集中处理后台常驻任务的初始化，减少主线程计时器碎片"""
-        self.restore_all_monitor_windows()
+        if getattr(self, '_is_closing', False):
+            return
         self._schedule_after(3000, self._start_feedback_listener)
         self._schedule_after(4000, self._bg_premarket_diagnose_heartbeat)
         self._schedule_after(5000, self._bg_kernel_heartbeat)

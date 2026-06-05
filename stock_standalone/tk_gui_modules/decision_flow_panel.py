@@ -1924,6 +1924,13 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             now_time_int = now_dt.hour * 100 + now_dt.minute
             is_active_trading = is_trade_day and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
             
+            # 检查后台交易内核心跳状态 (P0-1 核心心跳审计)
+            heartbeat_ok = False
+            if self.parent_app and hasattr(self.parent_app, "global_dict") and self.parent_app.global_dict is not None:
+                last_hb = self.parent_app.global_dict.get("kernel_heartbeat_time", 0.0)
+                if now - last_hb < 60.0:  # 心跳在 60 秒内更新过
+                    heartbeat_ok = True
+            
             if not hasattr(self, '_last_growth_time'):
                 self._last_growth_time = now
                 
@@ -1937,8 +1944,12 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         self._last_growth_time = now
                         self._last_tracked_size = current_size
                 
+                # 如果后台心跳正常更新，说明决策流线程处于活跃状态，即便无流水物理增长，也重置增长时间
+                if heartbeat_ok:
+                    self._last_growth_time = now
+                
                 inactive_duration = now - self._last_growth_time
-                if inactive_duration > 300: # 5分钟没有更新
+                if inactive_duration > 300: # 5分钟没有更新且心跳丢失
                     minutes = inactive_duration / 60
                     self.status_label.setText(f"⚠️ [FlowWatchdog] 决策流已停滞超过 {minutes:.1f} 分钟！请检查后台策略与行情")
                     self.status_label.setStyleSheet("color: #FFCC00; font-weight: bold;")
