@@ -1526,16 +1526,35 @@ class DragonLeaderTracker:
             rec = self._records.get(code)
         if rec is None or rec.status in (DragonStatus.ELIMINATED, DragonStatus.WARNING):
             return None
-        # [MOD] 信号触发放宽：物理新高 或 涨幅保持在 5% 以上且今日不弱(dff>0)
+        # [MOD] 信号触发放宽：
+        # 1. 强势突破：物理新高 或 盘中大涨(涨幅 >= 5% 且 dff > 0.5)
+        # 2. 中途低吸/温和回调：未创新高，但今日跌幅可控且资金流出受限，允许生成低吸回踩候选信号送往决策引擎做深度均线判定
+        # [FIX #4] 跌幅越大，对 DFF 要求越严格，防止主力大幅出货时被错误放行为"温和洗盘"
         is_physical_new_hi = rec.today_high > rec.prev_day_high
         is_dynamic_strong  = rec.current_pct >= 5.0 and rec.dff > 0.5
+        if rec.current_pct >= -2.0:
+            is_orderly_pullback = (rec.dff >= -2.0)   # 轻微回调：限制宽DFF
+        elif rec.current_pct >= -4.0:
+            is_orderly_pullback = (rec.dff >= -1.0)   # 中幅回调：主力净流出受限
+        else:  # -4.0 ~ -5.5
+            is_orderly_pullback = (rec.dff >= 0.0)    # 深幅回调：必须是净流入才放行
         
-        if rec.prev_day_high > 0 and not is_physical_new_hi and not is_dynamic_strong:
+        is_allowed_signal = is_physical_new_hi or is_dynamic_strong or is_orderly_pullback
+        
+        if rec.prev_day_high > 0 and not is_allowed_signal:
             return None
         if rec.current_price <= 0:
             return None
 
-        base = 85 if rec.status == DragonStatus.DRAGON else 75
+        # 区分是突破状态还是回调状态
+        is_breakout = is_physical_new_hi or is_dynamic_strong
+        
+        # [MOD] 如果是回调低吸信号，下调基础优先级(真龙75，候选龙65)，防止打乱排位，但在决策引擎中依然能正常分析
+        if is_breakout:
+            base = 85 if rec.status == DragonStatus.DRAGON else 75
+        else:
+            base = 75 if rec.status == DragonStatus.DRAGON else 65
+            
         priority = int(
             base
             + min(rec.consecutive_new_highs, 3) * 3   # 最多 +9
@@ -1546,6 +1565,9 @@ class DragonLeaderTracker:
         priority = min(100, priority)
 
         tag = "🐉 真龙头" if rec.status == DragonStatus.DRAGON else "🌱 候选龙"
+        if not is_breakout:
+            tag += "(回踩中)"
+            
         reason = (
             f"{tag} 连续{rec.consecutive_new_highs}日新高 "
             f"累计{rec.cum_pct_from_entry:+.1f}% "
@@ -1553,9 +1575,10 @@ class DragonLeaderTracker:
             f"[{' '.join(rec.tags[-3:])}]"
         )
         suggest = round(rec.vwap * 1.001, 3) if rec.vwap > 0 else rec.current_price
+        sig_type = SignalType.HOT_FOLLOW if is_breakout else SignalType.PULLBACK_BUY
         return DecisionSignal(
             code=code, name=rec.name, sector=rec.sector,
-            signal_type=SignalType.HOT_FOLLOW,
+            signal_type=sig_type,
             priority=priority,
             suggest_price=suggest,
             current_price=rec.current_price,
@@ -1566,7 +1589,7 @@ class DragonLeaderTracker:
             is_leader=True,
             pct_diff=rec.cum_pct_from_entry,
             dff=rec.dff,
-            sector_type="🐉 龙头持续",
+            sector_type="🐉 龙头持续" if is_breakout else "🐉 龙头回调",
         )
 
     # ── 查询接口 ──────────────────────────────────────────────────────────────
@@ -1841,21 +1864,43 @@ class IntradayPullbackDetector:
         diff_from_vwap = (price - vwap) / vwap if vwap > 0 else 0.0
 
         # ── [C] 强势前置条件：硬性剔除弱势股与结构破坏的个股 ──────────────────
-        # ── [C] 强势前置条件：必须是启动中的“蛟龙” ──────────────────
-        # 1. 启动阳线收盘价不破原则：如果跌破昨日收盘（启动点），直接宣告死亡
-        if price < prev_close:
-            logger.debug(f"[Pullback] {code} 被拦截: 价格({price}) < 昨收({prev_close})")
-            return None
+        # 对于战略性关注股 (自选股或已追踪龙头)，放行涨幅与昨收限制，以支持回调中途低吸；
+        # 仅对普通股实施严格的日内强势拦截。
         
-        # 2. 涨幅门槛：非极端强势不入场 (启动点通常在 3%~5% 以上)
-        if change_pct < 2.0:           # [MOD] 门槛下调至 2.0%
-            logger.debug(f"[Pullback] {code} 被拦截: 涨幅({change_pct:.2f}%) < 2.0%")
-            return None
-        
-        # 3. 分时结构：必须在均价线之上运行 (VWAP 是多空生死线)
-        if diff_from_vwap < -0.005:    
-            logger.debug(f"[Pullback] {code} 被拦截: 破均线({diff_from_vwap*100:.2f}%)")
-            return None
+        # 探测是否是战略自选股或被跟踪的龙头
+        is_strategic_focus = False
+        try:
+            ctrl = get_focus_controller()
+            if ctrl:
+                is_in_watchlist = (code in ctrl.macro_watchlist.get_all())
+                is_in_dragon = (code in ctrl.dragon_tracker._records)
+                is_strategic_focus = is_in_watchlist or is_in_dragon
+        except Exception:
+            pass
+
+        if not is_strategic_focus:
+            # 1. 启动阳线收盘价不破原则：如果跌破昨日收盘（启动点），直接宣告死亡
+            if price < prev_close:
+                logger.debug(f"[Pullback] {code} 被拦截: 价格({price}) < 昨收({prev_close})")
+                return None
+            
+            # 2. 涨幅门槛：非极端强势不入场 (启动点通常在 3%~5% 以上)
+            if change_pct < 2.0:           # [MOD] 门槛下调至 2.0%
+                logger.debug(f"[Pullback] {code} 被拦截: 涨幅({change_pct:.2f}%) < 2.0%")
+                return None
+            
+            # 3. 分时结构：必须在均价线之上运行 (VWAP 是多空生死线)
+            if diff_from_vwap < -0.005:    
+                logger.debug(f"[Pullback] {code} 被拦截: 破均线({diff_from_vwap*100:.2f}%)")
+                return None
+        else:
+            # 针对自选重点监控股，放宽限制：允许日内低吸，但如果大跌超 -5.5% 或严重破均线 (-2.5%) 依然拦截以防高位崩盘
+            if change_pct < -5.5:
+                logger.debug(f"[Pullback-Strategic] {code} 被拦截: 跌幅过大({change_pct:.2f}%) < -5.5%")
+                return None
+            if diff_from_vwap < -0.025:
+                logger.debug(f"[Pullback-Strategic] {code} 被拦截: 严重跌破均线({diff_from_vwap*100:.2f}%) < -2.5%")
+                return None
         
         # [NEW] 开盘 10 分钟加权：09:30-09:40 是黄金狙击时段
         now_time = datetime.now()
@@ -1916,6 +1961,16 @@ class IntradayPullbackDetector:
                 tag = "🚀 龙头突破" if (is_king and is_breakout) else ("👑 龙头起步" if is_king else "👥 跟随共振")
                 reason = (f"{tag}: 启动幅度{pct_diff:+.1f}% 资金dff={dff:+.2f} 站稳启动均线上方")
                 priority = int(80 + sector_heat * 0.2 + pct_diff * 4 + morning_bonus)
+
+        # 形态6：[NEW] 战略重点关注股回调洗盘探测
+        # [FIX #2] 增加冷静洗盘前置校验：价格尤均价附近(±1.5%)且未放量时才允许兑底，
+        # 防止强势大涨日或巨量放量日被错误标注为“回调探测”信号低优先级推送
+        if signal_type is None and is_strategic_focus:
+            is_calm_pullback = (-0.025 <= diff_from_vwap <= 0.015) and vol_ratio < 1.2
+            if is_calm_pullback:
+                signal_type = SignalType.PULLBACK_BUY
+                reason = f"🎯 重点关注股中途低吸/回调探测: 振幅/回落{drop_from_high*100:.1f}% 均价差{diff_from_vwap*100:.2f}% 缩量{vol_ratio:.2f}"
+                priority = int(65 + sector_heat * 0.15)
 
         if signal_type is None:
             return None

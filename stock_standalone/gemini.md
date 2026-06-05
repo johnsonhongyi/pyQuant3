@@ -1,3 +1,22 @@
+## 2026-06-05 22:03
+- [x] **全面复查最新 commit 并修复 6 处策略逻辑 Bug (Full Strategy Logic Bug Sweep & Fix)**：
+    - [x] **[P0-Bug#1] 删除 `SuperTrendMA10Branch.decide` 双重 `return` 死代码**：去除 `decision_engine.py` 第 285 行因合并冲突残留的完全重复的 `return` 语句，消除代码歧义与维护隐患。
+    - [x] **[P0-Bug#2] 修复形态6兜底对放量/高位日无条件触发**：在 `sector_focus_engine.py` 的形态6(战略关注股回调探测)触发前增加 `is_calm_pullback` 前置校验（价格在均价 ±1.5% 内 且 `vol_ratio < 1.2`），彻底防止强势大涨日或巨量放量日被错误标注为低优先级 `PULLBACK_BUY` 信号推送至决策层，从根源消除噪声信号。
+    - [x] **[P0-Bug#3] 根治 `PULLBACK_BUY` 信号在 `StrategyRouter` 空仓 Fallback 被防御分支拦截**：在 `StrategyRouter.route` 的 Fallback 匹配中引入 `is_pullback_signal` 判定。当信号类型为 `PULLBACK_BUY` / `VWAP_SUPPORT` 时，直接跳过 `OscillatingBreakdownBranch` 的匹配，进入正常低吸分支路由。彻底解决 SWS 短期下倾时所有放行的回调信号被防御分支一刀切 `HOLD` 的问题，真正打通中途低吸的开仓通道。
+    - [x] **[P1-Bug#4] 收紧 `is_orderly_pullback` 的 DFF 门槛与跌幅联动**：在 `sector_focus_engine.py` 的 `get_dragon_signal` 中，将原先的固定 `dff >= -2.0` 改为三档联动判定：轻微回调(≥-2%)允许 DFF≥-2，中幅回调(-4%~-2%)要求 DFF≥-1，深幅回调(-5.5%~-4%)必须 DFF≥0（净流入）。防止深幅出货股被错误放行。
+    - [x] **[P1-Bug#5] 修复尾盘策略时间解析对纯日期格式静默失效**：在 `TAIL_LOW_RISK_ENTRY` 的 `hhmm` 解析后增加范围校验 `800 <= hhmm <= 1600`，当回测 `signal.ts` 仅含日期无时间部分时自动回退到 930，防止所有回测中的尾盘低吸策略因误解析而静默不触发。
+    - [x] **[P1-Bug#6] 限制 `SwsPullbackBranch.IN_TRADE` 的置信度加仓条件**：将原先无条件的 `confidence >= 0.80` 追加 0.20 仓逻辑，增加 `dff >= 0.0` (主力净流入) 和 `regime == "SWING_LOW_BUY"` 双重前提，防止主力流出或观望模式下被动超仓。
+    - [x] **100% 绿旗通过全量回归测试**：运行 `pytest test_watchlist_lifecycle.py` 全量 11 项用例 100% 通过（耗时 0.75s）。
+
+## 2026-06-05 21:50
+- [x] **打通中途低吸与尾盘稳健开仓的底层信号传导链路 (Optimized Mid-Trend Low-Risk Entry & Decoupled Pullback Signal Gate)**：
+    - [x] **定位实盘半山腰开仓病灶**：经深度审计，发现回测引擎（无条件逐日调用 `decide()`）与实盘行情扫描流存在数据拦截断层。盘中 `IntradayPullbackDetector` 和 `get_dragon_signal` 针对普通个股一刀切地采用了强势突破硬性拦截（要求跌破昨收拦截、涨幅 < 2.0% 拦截、跌破均价线拦截），导致自选股及龙头股在缩量洗盘、踩线回调的回调日根本无法生成 `DecisionSignal` 推送给大脑，导致决策引擎在低吸点被“饿死”，被迫推迟到次日大涨“半山腰”时才开仓。
+    - [x] **放行龙头与战略关注股回调通道**：
+        - 在 `DragonTracker.get_dragon_signal` 中引入了 `is_orderly_pullback` 判定（今日跌幅可控 `>= -5.5%` 且资金流出受限 `dff >= -2.0`），允许处于温和洗盘的龙头股生成 `SignalType.PULLBACK_BUY` 回踩信号，并打上 `"🐉 龙头回调"` 的专属标签推送至决策层。
+        - 在 `IntradayPullbackDetector._check` 中引入 `is_strategic_focus` 自适应判定（自选股或已追踪龙头），豁免其原本 of 日内强势突破拦截，仅在跌幅失控（`< -5.5%`）或严重破位（`< -2.5%`）时进行保护性过滤。若未匹配高频形态，则由新设的“形态6：战略重点关注股回调洗盘探测”兜底生成 `PULLBACK_BUY` 回调探测信号。
+    - [x] **激活尾盘踩线低吸闭环**：通过放行回调信号，自选股与龙头即使在缩量回调日也能顺利灌入交易内核，在 14:30 - 15:00 尾盘时段完美激活 `SwsPullbackBranch` 下的 `TAIL_LOW_RISK_ENTRY` 尾盘低风险踩线买入规则（0.35仓位），真正实现了均线支撑位的极佳低成本买点建仓。
+    - [x] **高标准通过 11 项生命周期测试**：修改完全兼容现有接口，通过运行 `pytest test_watchlist_lifecycle.py` 11 项全量回归测试 100% 绿旗通过。
+
 ## 2026-06-05 21:30
 - [x] **补全大结构启动确认前置日期显示 (Prefixed Confirmation Date for Dragon Launch logs)**：
     - [x] **日志最前面显示确认日期**：在 `scratch/test_reentry_backtest.py` 的开仓建仓及加仓回补的大结构启动确认事件打印行最前，动态注入 `f"{current_date}"` 确认日期变量。格式与列表其余的“建仓”、“分支轮转”等行对齐，极大提升了回测报告的行排版可读性与时间追踪效率。
