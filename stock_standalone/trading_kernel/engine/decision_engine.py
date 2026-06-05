@@ -281,8 +281,6 @@ class SuperTrendMA10Branch(BaseStrategyBranch):
                 confidence = 0.95
 
         return action, size_pct, regime, setup, confidence, suggest_price
-                
-        return action, size_pct, regime, setup, confidence, suggest_price
 
 
 class SwsPullbackBranch(BaseStrategyBranch):
@@ -337,6 +335,9 @@ class SwsPullbackBranch(BaseStrategyBranch):
                 try:
                     parts = time_part.split(":")
                     hhmm = int(parts[0]) * 100 + int(parts[1])
+                    # [FIX #5] 防止纯日期格式(如'2026-06-05')被误解析为巨大整数
+                    if not (800 <= hhmm <= 1600):
+                        hhmm = 930
                 except Exception:
                     hhmm = 930
                 
@@ -424,7 +425,8 @@ class SwsPullbackBranch(BaseStrategyBranch):
             elif regime != "SWING_LOW_BUY" and (ctx["pct_diff"] < -1.5 or ctx["dff"] < -1.0):
                 action = "SELL"
                 size_pct = 1.0
-            elif confidence >= 0.80:
+            # [FIX #6] 加仓必须满足：主力净流入(dff>=0) 且处于正常波段买入模式(SWING_LOW_BUY)，防止主力流出时无条件追仓超仓
+            elif confidence >= 0.80 and ctx.get("dff", -1.0) >= 0.0 and regime == "SWING_LOW_BUY":
                 action = "ADD"
                 size_pct = 0.20
                 
@@ -678,7 +680,11 @@ class StrategyRouter:
                 return TrendMA60Branch
         
         # 3. 常规空仓或 Fallback 特征动态匹配
-        if OscillatingBreakdownBranch.match(signal, state, ctx):
+        # [FIX #3] 如果是回踩低吸/均线支撑信号，跳过防御分支——
+        # 防御分支(OscillatingBreakdown)会在 SWS 短期下倾时产生 HOLD，
+        # 会将放行的 PULLBACK_BUY 信号在决策层全部拦截，导致中途低吸开仓失效。
+        is_pullback_signal = str(signal.signal_type).upper() in {"PULLBACK_BUY", "VWAP_SUPPORT"}
+        if not is_pullback_signal and OscillatingBreakdownBranch.match(signal, state, ctx):
             return OscillatingBreakdownBranch
             
         if SuperTrendMA5Branch.match(signal, state, ctx):
