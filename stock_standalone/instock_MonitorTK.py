@@ -5094,8 +5094,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 3. [ASYNC UPGRADE] 将耗时的策略处理异步化，避免阻塞 UI 线程 (尤其是 manual_scan)
         try:
-            # 兼容：从全局配置读取当前周期 (归一化处理，防止 'd' vs 'D')
-            cur_res = str(self.global_values.getkey("resample") or 'd').lower().strip()
+            # 策略引擎始终使用日线周期 'd'，resample_ui 仅影响可视化显示，不影响底层交易逻辑
+            # [MULTI-RESAMPLE BUG FIX] cur_res 硬编码为 'd'，防止大周期 UI 设定污染策略分支
+            cur_res = 'd'
             cur_concept = getattr(self, 'concept_top5', None)
 
             # 🛠️ [SNAPSHOT] 对数据进行快照化，防止子线程处理时主线程正在修改引发 RuntimeError: dict changed size during iteration
@@ -5596,6 +5597,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
 
             # 3. 源数据脏检查 (轻量)
+            # 仅检查日线轨道(full_df)变化，日线未变则大周期必然未变
             p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
             df_hash = 0
             if p_col:
@@ -6001,8 +6003,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._last_apply_df_hash = df_hash
 
                 if hasattr(self, 'selector') and self.selector:
-                    self.selector.df_all_realtime = self.df_all_res
-                    self.selector.resample = cur_res
+                    # [MULTI-RESAMPLE BUG FIX] 选股器始终使用日线数据 (self.df_all)，
+                    # 不使用大周期 df_all_res。选股/报警/强势筛选逻辑均基于日线指标设计。
+                    self.selector.df_all_realtime = self.df_all
+                    self.selector.resample = 'd'
 
                 # 2. [CORE-UI] 刷新主表格 (独立限流 + 忙碌守卫 + 存在校验)
                 # ⭐ [OPTIMIZE] 如果 ui_df 为 None (主要见于中间包)，直接跳过耗时 3s 的 Treeview 刷新

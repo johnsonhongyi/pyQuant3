@@ -1,3 +1,9 @@
+## 2026-06-05 22:35
+- [x] **全面审计并修复多周期 Resample 数据流隔离 Bug (Full Multi-Resample Pipeline Isolation Audit & Fix)**：
+    - [x] **[P0-Bug#1] 修复选股器接收大周期数据**：在 `instock_MonitorTK.py` 的 `_apply_tree_data_sync` 中，将 `selector.df_all_realtime = self.df_all_res` 修正为 `selector.df_all_realtime = self.df_all`，将 `selector.resample = cur_res` 修正为 `selector.resample = 'd'`。彻底确保选股/强势筛选/报警逻辑永远基于日线数据运作，不受 UI 大周期设定污染。
+    - [x] **[P0-Bug#2] 根治策略引擎 `resample` 参数泄漏大周期值**：在 `_run_live_strategy_process` 内部，将原先从 `global_values.getkey("resample")` 动态读取 UI 设定周期的 `cur_res` 硬编码为 `'d'`。彻底阻断了策略分支判断（如 `if resample == 'w'`）因 UI 切换到非日线周期而被错误激活的逻辑污染。
+    - [x] **100% 架构设计复核**：复核并确认竞价面板 (`on_realtime_data_arrived`)、交易内核注入 (`_inject_focus_engine`)、赛马面板 (`df_all`)、`detect_signals` 信号检测均已正确绑定日线 `full_df`，架构设计符合多周期隔离原则。
+
 ## 2026-06-05 22:03
 - [x] **全面复查最新 commit 并修复 6 处策略逻辑 Bug (Full Strategy Logic Bug Sweep & Fix)**：
     - [x] **[P0-Bug#1] 删除 `SuperTrendMA10Branch.decide` 双重 `return` 死代码**：去除 `decision_engine.py` 第 285 行因合并冲突残留的完全重复的 `return` 语句，消除代码歧义与维护隐患。
