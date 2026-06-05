@@ -9920,6 +9920,21 @@ def refresh_alert_center():
     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
         return
 
+    # 1. 记住当前选中的 stock_code 和 focused stock_code
+    prev_selected_code = None
+    selected_items = alert_tree.selection()
+    if selected_items:
+        vals = alert_tree.item(selected_items[0], "values")
+        if vals and len(vals) > 1:
+            prev_selected_code = vals[1]
+
+    prev_focused_code = None
+    focused_item = alert_tree.focus()
+    if focused_item:
+        vals = alert_tree.item(focused_item, "values")
+        if vals and len(vals) > 1:
+            prev_focused_code = vals[1]
+
     # 清空并设置 tag
     alert_tree.delete(*alert_tree.get_children())
     alert_tree.tag_configure("strong_up", background="#FFE4E1", foreground="red")      # 强势拉升，淡粉色背景，红字
@@ -10100,18 +10115,38 @@ def refresh_alert_center():
         else:
             tag = "not_triggered"
             
-        alert_tree.insert("", "end", values=vals, tags=(tag,))
+        alert_tree.insert("", "end", iid=code, values=vals, tags=(tag,))
 
-    # 选中第一行以便展示
-    if alert_tree.get_children():
+    # 如果有之前的排序，则应用排序
+    if alert_sort_column is not None:
+        try:
+            alert_treeview_sort_column(alert_sort_column, alert_sort_reverse)
+        except Exception as e:
+            logger.error(f"恢复排序失败: {e}")
+
+    # 恢复选中的行，以及焦点行
+    restored = False
+    children = alert_tree.get_children()
+    if prev_selected_code and prev_selected_code in children:
+        # [AL-LINK] 恢复选中时，先设置抑制标志以防止重复触发联动事件
+        alert_tree._suppress_linkage = True
+        alert_tree.selection_set(prev_selected_code)
+        alert_tree.focus(prev_selected_code)
+        restored = True
+    elif prev_focused_code and prev_focused_code in children:
+        alert_tree.focus(prev_focused_code)
+        restored = True
+
+    # 如果未能成功恢复选择/焦点，则默认选中第一行（原有逻辑）
+    if not restored and children:
         # [AL-LINK] 只有开启了“自动联动”开关，才在数据刷新时自动执行选中（可能触发联动）
         if alert_link_var and alert_link_var.get():
-            first_item = alert_tree.get_children()[0]
+            first_item = children[0]
             alert_tree.selection_set(first_item)
             alert_tree.focus(first_item)
         else:
             # 开关关闭时，仅聚焦不选中（不触发联动）
-            first_item = alert_tree.get_children()[0]
+            first_item = children[0]
             alert_tree.focus(first_item)
 
     alert_window.update_idletasks()

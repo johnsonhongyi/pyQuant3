@@ -1,5 +1,11 @@
 # pyQuant3 Gemini Progress Tracker
 
+## 2026-06-05 12:05
+- [x] **修复报警中心自动刷新时丢失选中与焦点状态问题 (Fixed Selection Loss & Focus Reset in Alert Center on Refresh)**：
+    - [x] **实现选中与焦点状态保存与恢复 (Selection & Focus Restoration)**：在 `refresh_alert_center()` 的最前端增加对当前选中行及焦点行的股票代码 (stock_code) 的缓存。在清空列表重绘时，通过指定 `iid=code` 设定稳定的 Treeview 行标识符，并在重绘完成后重新设置对应的选中及聚焦行。
+    - [x] **引入联动事件抑制机制 (`_suppress_linkage` Integration)**：为防止恢复选中操作触发 `<<TreeviewSelect>>` 事件进而导致主视口或第三方端产生不必要的高频联动，特在恢复 `selection_set` 时对 `alert_tree` 设置 `_suppress_linkage = True`。
+    - [x] **保留默认首行回退与自动重排**：如果由于数据项滑出或被清空导致原本选中的个股代码在当前列表已不复存在，系统将平滑回退至原有的“自动聚焦第一行”的机制。同时，如果在刷新前用户对特定列进行了排序，在重绘后系统会自动应用现有的 `alert_sort_column` 规则，实现排布结构一致性。
+
 ## 2026-06-01 01:45
 - [x] **修复打包后 rank 数据缺失问题 (Fixed Packaged Rank Data Missing)**：
     - [x] **完全本地化 `build_hma_and_trendscore` 排序与指标计算函数 (Localized Core Ranking Algorithm)**：在 `异动联动.py` 内部引入了自包含的 `build_hma_and_trendscore_local` 替代函数，完全复制了原本在 `stock_standalone/data_utils.py` 中的算法结构（包含 HMA 平均线、TrendS 趋势强度、强势因子归一化和连阳加权等）。
