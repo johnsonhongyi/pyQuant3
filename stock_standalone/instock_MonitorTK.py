@@ -15577,13 +15577,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._label_widgets = []
         self._selected_index = 0
 
-        # 键盘事件只在滚动区域有效
-        canvas.bind("<Up>", self._on_key)
-        canvas.bind("<Down>", self._on_key)
-        canvas.bind("<Prior>", self._on_key)
-        canvas.bind("<Next>", self._on_key)
+        # 键盘事件在整个窗口有效，防止焦点丢失且避免焦点抢夺导致的死锁
+        win.bind("<Up>", self._on_key)
+        win.bind("<Down>", self._on_key)
+        win.bind("<Prior>", self._on_key)
+        win.bind("<Next>", self._on_key)
         # 获取焦点
-        canvas.focus_set()
+        win.focus_set()
         # --- 关闭窗口 ---
         def on_close_detail_window():
             self.save_window_position(win, "detail_window")
@@ -15600,13 +15600,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._register_hwnd_to_mru(win.winfo_id())
         # --- 初始内容 ---
         self.update_concept_detail_content()
-        def _keep_focus(event):
-            """防止焦点丢失"""
-            if self._concept_win._content_frame and self._concept_win._content_frame.winfo_exists():
-                self._concept_win._content_frame.focus_set()
-
-        # 在初始化中绑定一次
-        canvas.bind("<FocusOut>", _keep_focus)
         # win.bind("<FocusIn>", lambda e, w=win: self.on_monitor_window_focus(w))
         # 初始化时绑定
         win.bind("<Button-1>", lambda e, w=win: self.on_monitor_window_focus(w))

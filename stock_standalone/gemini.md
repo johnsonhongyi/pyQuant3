@@ -1,3 +1,9 @@
+## 2026-06-06 02:15
+- [x] **修复修改备注时闪屏卡死与概念分析窗口焦点冲突 Bug (Fixed Note Editing UI Freeze & Focus Conflict)**：
+    - [x] **根治 `<FocusOut>` 焦点强占死循环**：在 `instock_MonitorTK.py` 的 `show_concept_detail_window` 中移除了对 Canvas 组件的 `_keep_focus` 绑定（该机制通过 `<FocusOut>` 事件强制触发 `focus_set()` 保持窗口焦点）。该设计在用户双击备注弹出 `askstring_at_parent_single` 模态对话框时，会因焦点转移而陷入无限强占焦点的死循环，导致界面疯狂闪屏且主线程完全卡死。
+    - [x] **重构键盘事件绑定至 Toplevel 视窗**：将原本绑定在 `canvas` 组件上的键盘导航事件（`<Up>`、`<Down>`、`<Prior>`、`<Next>`）改为主窗口 `win` (Toplevel) 的直接绑定，并由 `win.focus_set()` 取代 `canvas.focus_set()`。确保在不引入强占焦点事件循环的情况下，键盘上下翻页、翻屏导航能顺畅响应，并与模态输入框完美兼容。
+    - [x] **系统稳定性与回归验证**：运行 `pytest test_watchlist_lifecycle.py` 全量通过，交互流程平滑稳定。
+
 ## 2026-06-05 22:35
 - [x] **全面审计并修复多周期 Resample 数据流隔离 Bug (Full Multi-Resample Pipeline Isolation Audit & Fix)**：
     - [x] **[P0-Bug#1] 修复选股器接收大周期数据**：在 `instock_MonitorTK.py` 的 `_apply_tree_data_sync` 中，将 `selector.df_all_realtime = self.df_all_res` 修正为 `selector.df_all_realtime = self.df_all`，将 `selector.resample = cur_res` 修正为 `selector.resample = 'd'`。彻底确保选股/强势筛选/报警逻辑永远基于日线数据运作，不受 UI 大周期设定污染。
