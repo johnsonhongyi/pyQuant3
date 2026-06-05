@@ -369,7 +369,7 @@ class DecisionSignal:
             'reason': self.reason,
             'leader_code': self.leader_code,
             'is_leader': self.is_leader,
-            'created_at': self.created_at.strftime('%H:%M:%S') if getattr(self, 'created_at', None) else "",
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if getattr(self, 'created_at', None) else "",
             'status': self.status,
             'hits': getattr(self, 'hits', 1)
         }
@@ -627,6 +627,9 @@ class SectorFocusMap:
                                       last_close/high_day/pattern_hint 等
         """
         if not active_sectors:
+            if stock_snap:
+                with self._lock:
+                    self._detector_stock_snap.update(stock_snap)
             return
         try:
             self._follow_miner.update_and_evaluate(active_sectors, stock_snap)
@@ -2532,12 +2535,7 @@ class SectorFocusController:
                     detector.comparison_interval = 3600
                     logger.info("[SectorFocusController] comparison_interval 已更新为 60 分钟")
 
-            # 2. 获取板块数据
-            active_sectors = detector.get_active_sectors()
-            if not active_sectors:
-                return False
-
-            # 3. 获取个股快照（_global_snap_cache 内含完整 pct_diff/dff/klines）
+            # 2. 获取个股快照（_global_snap_cache 内含完整 pct_diff/dff/klines）
             with detector._lock:
                 stock_snap = dict(detector._global_snap_cache)
             
@@ -2549,8 +2547,10 @@ class SectorFocusController:
                         self._name_cache.update(names)
                     self.dragon_tracker.sync_names(names)
 
-            # 4. 注入板块图（优先通道）
+            # 3. 获取板块数据
+            active_sectors = detector.get_active_sectors()
 
+            # 4. 注入板块图（优先通道）
             self.sector_map.inject_detector_sectors(active_sectors, stock_snap)
 
             # 5. 同步竞价评分 {code: score}（兼容旧通道）
@@ -2568,7 +2568,7 @@ class SectorFocusController:
                 f"[SectorFocusController] inject_from_detector: "
                 f"{len(active_sectors)} sectors, {len(stock_snap)} stocks"
             )
-            return True
+            return True if (active_sectors or stock_snap) else False
 
         except Exception as e:
             logger.warning(f"[SectorFocusController] inject_from_detector failed: {e}")

@@ -824,7 +824,15 @@ class TradingKernelService:
         signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)
         intent = decide(signal, state)
-        risk = evaluate(intent, signal, state, limits_override or self.limits)
+        # [FIX] 传入真实持仓字典，确保 ALREADY_IN_TRADE 检查基于物理持仓，而非仅依赖 state_manager
+        _active_exec = self.executor or self.paper_adapter
+        _held_codes = {}
+        try:
+            if _active_exec and getattr(_active_exec, 'account', None):
+                _held_codes = dict(_active_exec.account.positions)
+        except Exception:
+            pass
+        risk = evaluate(intent, signal, state, limits_override or self.limits, held_codes=_held_codes)
 
         signal_hash = stable_hash(signal)
         intent_hash = stable_hash(intent)

@@ -4749,6 +4749,7 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         self.text_area.tag_configure("highlight_strategy_title", foreground="#33ccff", font=("Consolas", 11, "bold"))
         self.text_area.tag_configure("highlight_status_holding", foreground="#ffcc00", font=("Consolas", 10, "bold"))
         self.text_area.tag_configure("highlight_status_observing", foreground="#a8a8a8", font=("Consolas", 10, "bold"))
+        self.text_area.tag_configure("highlight_dragon_confirm", foreground="#ff3333", font=("Consolas", 12, "bold"))
         
         self._apply_highlights()
         
@@ -4805,6 +4806,7 @@ class BacktestReportDialog(tk.Toplevel, WindowMixin):
         highlight_line_pattern("🔴【最新买卖点决策】", "highlight_latest_red")
         highlight_line_pattern("🟢【最新买卖点决策】", "highlight_latest_green")
         highlight_line_pattern("👑 【当前战术状态与活跃分支策略】", "highlight_strategy_title")
+        highlight_line_pattern("🔥【强势龙头大结构启动确认】🔥", "highlight_dragon_confirm")
         highlight_pattern("💼 正在持仓中 (筹码做T滚动持股中)", "highlight_status_holding")
         highlight_pattern("📊 保持空仓观察 (KEEP OBSERVING)", "highlight_status_observing")
         

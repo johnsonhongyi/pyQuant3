@@ -1,3 +1,35 @@
+## 2026-06-05 21:30
+- [x] **补全大结构启动确认前置日期显示 (Prefixed Confirmation Date for Dragon Launch logs)**：
+    - [x] **日志最前面显示确认日期**：在 `scratch/test_reentry_backtest.py` 的开仓建仓及加仓回补的大结构启动确认事件打印行最前，动态注入 `f"{current_date}"` 确认日期变量。格式与列表其余的“建仓”、“分支轮转”等行对齐，极大提升了回测报告的行排版可读性与时间追踪效率。
+
+## 2026-06-05 21:10
+- [x] **实现龙头大结构启动确认 K 线主图 🚀 火箭专属图符标记与上下错位防遮挡渲染机制 (Implemented 🚀 Icon & Offset Rendering for Dragon Launch Confirmation)**：
+    - [x] **打通回测大结构信号数据持久化链路**：在 `scratch/test_reentry_backtest.py` 的建仓和回补事件判定段，若龙头大结构启动确认 `is_dragon` 成立，自动向 `_last_backtest_signals` 追加一条 `action="DRAGON"`、`desc="大结构启动确认"` 的信号点，从而将此战术特征无损输送至前端渲染器。
+    - [x] **实现 🚀 极客火箭图符高反差映射**：重构了 `trade_visualizer_qt6.py` 的回测信号映射逻辑。当探测到动作代码为 `DRAGON` 或事件描述为 `大结构启动确认` 时，显式覆盖图符 `symbol_override="🚀"` 并放大尺寸至 `24px`，使操作决定在大图上直观可见。
+    - [x] **实现上下物理错位防堆叠算法 (Offset Rendering)**：在历史 K 线信号的位置上，将火箭 🚀 的 Y 坐标偏移量微调下移至 `y_low * 0.955`，而常规买入（三角/五角星）维持在 `y_low * 0.985`。这确保了同一天内两个动作叠加触发时完美错开、零重叠、零遮挡。
+    - [x] **取消 Emoji 标志的多余 B / S 文本标签**：在 `update_signals` 的 K 线图标签生成逻辑中，增加了 `not is_emoji` 的前置检查。若是小火箭 `🚀` 等 Emoji 特殊信号点，直接跳过生成 "B" / "S" 额外文本图元，彻底根治了图元和火箭符号重叠的凌乱感。
+    - [x] **一枪通过 11 项全系统生命周期核心测试**：成功运行 `pytest test_watchlist_lifecycle.py` 全量通过；且实测 `python scratch/run_backtest_ds_bj.py` 终端输出完全正常。
+
+## 2026-06-05 20:40
+- [x] **修复主表执行测试首次点击定位失效 Bug (Fixed Failure of First Scroll-To-Code in Test Code Execution)**：
+    - [x] **重构点击触发逻辑**：在 `instock_MonitorTK.py` 的 `on_test_code` 方法中，将 `onclick` 参数的判定提升为最高优先级判定条件。只要是 `onclick=True`（由点击或测试触发动作引发的调用），不论输入的代码是新选择的 code 还是上一次已选的 code，均无条件执行个股筛选、`check_code` 评估、主 Treeview 滚动定位以及 K 线监控定位（`tree_scroll_to_code`）。
+    - [x] **消除定位滞后与逻辑冗余**：重构去除了原本将滚动定位逻辑只塞在 `self._select_on_test_code == code` 的 `else` 判定分支下的漏洞，彻底解决了个股测试在第一次点击时无法滚动定位到主 Tree 行的体验缺陷，代码结构更清晰，符合 KISS 与 DRY 原则。
+    - [x] **完美通过回归测试**：跑通 `pytest test_watchlist_lifecycle.py` 全量用例，语法编译与多进程运行稳定，无任何回归问题。
+
+## 2026-06-05 20:30
+- [x] **实现龙头大结构启动确认行独立置顶与高亮渲染机制 (Implemented Independent Placement & Highlight for Dragon Launch Confirmation)**：
+    - [x] **实现龙头确认信息前置化独立成行**：重构了 `test_reentry_backtest.py` 中的建仓与回补事件判定。将原先拼接在事件行尾的 `dragon_tag`（💥大结构启动确认）解耦提取，在 `trade_events` 列表中以 `🔥【强势龙头大结构启动确认】🔥 [分支策略: {策略名}] (💥大结构启动确认)` 独立为一行，插在对应买入建仓或回补事件行的**正上方**。这完美遵循了“先确认大结构才有后续持仓”的操盘决策逻辑。
+    - [x] **引入 Tkinter UI 红色加大加粗渲染**：在 `stock_selection_window.py` 内部 `BacktestReportDialog` 的 `_apply_highlights` 和 `tag_configure` 机制中，新增了 `highlight_dragon_confirm` 渲染标签。将该行底色及前景色设置为高对比度红色（`#ff3333`），字号加大为 `12px` 并进行 `bold` 物理加粗，显著提升了回测报告在多端客户端及控制台上的视觉聚焦度。
+    - [x] **100% 绿旗通过回归测试**：成功执行了东山精密和博杰股份的最新数据回测判定，测试日志中龙头大结构判定行在买入点上方精准展现；且 `pytest test_watchlist_lifecycle.py` 11 项系统级生命周期测试 100% 成功。
+
+## 2026-06-05 20:12
+- [x] **实现强势股大阳/涨停启动确认与收盘价防线量化审计机制 (Implemented Strong Stock Launch Confirmation & Price Floor Audit)**：
+    - [x] **定义物理启动日锚定 (Launch Day Anchor)**：在 `check_strong_dragon_memory` 中增加了大阳/涨停启动日的自动检测（过去 10 个交易日内存在涨停或 >=9.5% 且高开大实体大阳线）。
+    - [x] **实现收盘价物理防御不破审计 (Launch Close Price Support Gate)**：自启动日以来，对所有交易日的收盘价实施物理审计。要求期间每一天的收盘价均未物理跌破启动日收盘价（`Close >= LaunchClose * 0.995`），保障支撑线防区完备。
+    - [x] **实现高位缩量横盘洗盘确认 (Volume Shrink & Consolidation Check)**：审计横盘调整期间日均成交量（低于启动日的 80% 或今日缩量）与振幅偏离度，确认主力高位洗盘到位、惜售锁仓。
+    - [x] **多端同步与回测试验绿旗跑通 (Multi-period Test Alignment & 100% Passed)**：将新版时序记忆算法同步应用于盘前体检 (`premarket_analyzer.py`) 和回测框架 (`test_reentry_backtest.py`)。成功回测出东山精密在 04-14 强力确认支撑买入、博杰股份 04-13 低吸，且 `pytest test_watchlist_lifecycle.py` 11 项生命周期核心测试 100% 绿旗通过。
+    - [x] **补齐回测报告与作战计划日志龙头特征显示 (Aligned Backtest Report & Plan Dragon-Tag Display)**：在 `test_reentry_backtest.py` 的建仓/回补事件输出流，以及导出至盘前计划表单的 `reason` 参数末尾，动态注入了 `(💥大结构启动确认)` 醒目标识。这使得回测日志与计划清单的白盒逻辑清晰可见，方便操盘手追溯建仓底气。
+
 ## 2026-06-05 11:25
 - [x] **实现竞价面板后台自动检测与未开启警报机制 (Implemented Bidding Panel Background Detection & Missing Warnings)**：
     - [x] **废除竞价面板未开启时的赛马降级**：遵循用户指导，废除了 `_inject_focus_engine` 中在面板未开启时向 `racing_detector` 的降级获取逻辑，完全基于交易期内自动初始化的竞价面板 (`sector_bidding_panel`)。

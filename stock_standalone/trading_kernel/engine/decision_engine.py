@@ -97,14 +97,28 @@ class SuperTrendMA5Branch(BaseStrategyBranch):
                 
             if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
                 action = "BUY"
-                size_pct = 0.40 if ctx["is_reentry"] else 0.30
+                is_consolidation = bool(ctx.get("is_consolidation_stage", False))
+                if is_consolidation:
+                    size_pct = 0.20
+                else:
+                    size_pct = 0.40 if ctx["is_reentry"] else 0.30
                 
         elif state == "IN_TRADE":
             # 止盈：向上强力突破通道天花板或大平台顶
             is_breakout_tp = (ctx["pbreak"] == 1 or (ctx["ptop"] > 0 and ctx["price"] >= ctx["ptop"] * 1.01)) and ctx["pnl_pct"] >= 5.0 and ctx["vol_ratio"] >= 1.4
             is_upper_vol_tp = (ctx["upper"] > 0.0 and ctx["price"] >= ctx["upper"] * 0.97 and ctx["vol_ratio"] >= 1.2 and ctx["pbreak"] == 0 and ctx["pnl_pct"] >= 2.0)
             
-            is_time_failsafe = (ctx["days_held"] >= 2 and ctx["pnl_pct"] < 3.0)
+            # 👑 优化 T+2 时间保护：如果持仓 >= 2 天且盈亏 < 3.0%，但如果个股是大结构强龙头，或者它并没有继续破位（仍在5日线上方且斜率向上），则宽容扛住不止损
+            is_time_failsafe = False
+            if ctx["days_held"] >= 2 and ctx["pnl_pct"] < 3.0:
+                is_ma5_up = (ctx["ma5d"] >= ctx["ma5d_prev5"] * 1.002) if ctx.get("ma5d_prev5", 0) > 0 else True
+                is_price_above_ma5 = (ctx["price"] >= ctx["ma5d"] * 0.99)
+                is_dragon = ctx.get("is_leader", False) or ctx.get("is_reentry", False) or ctx.get("was_strong_dragon", False) or (ctx.get("priority", 0) >= 80)
+                
+                # 如果既不是龙头，且走势已经跌破5日线（或5日线已经拐头向下，表明真实破位了），才触发时间保护平仓
+                if not (is_dragon or (is_price_above_ma5 and is_ma5_up)):
+                    is_time_failsafe = True
+
             
             # 🚀 主升结构证伪判定：次日低开高走且未收复昨日高点，或形成三日高点下移的结构
             high_prev1 = ctx.get("high_prev1", 0.0)
@@ -363,7 +377,8 @@ class SwsPullbackBranch(BaseStrategyBranch):
             is_trend_decaying = (sws_val > 0.0 and sws_prev5 > 0.0 and sws_val < sws_prev5 * 1.001) or (ctx["price"] < sws_val * 0.985)
             
             is_time_failsafe = False
-            if ctx["days_held"] >= 3 and ctx["pnl_pct"] < 3.0 and is_trend_decaying:
+            max_hold_days = 5 if ctx.get("is_consolidation_stage", False) else 3
+            if ctx["days_held"] >= max_hold_days and ctx["pnl_pct"] < -1.5 and is_trend_decaying:
                 is_time_failsafe = True
                 
             is_weak_no_accelerate = False
@@ -480,8 +495,29 @@ class OscillatingBreakdownBranch(BaseStrategyBranch):
     def match(cls, signal: StrategySignal, state: str, ctx: dict) -> bool:
         sws = ctx["sws"]
         sws_prev5 = ctx["sws_prev5"]
+        price = ctx["price"]
+        dff = ctx["dff"]
+        vol_ratio = ctx["vol_ratio"]
+        pct_diff = ctx["pct_diff"]
+
+        # 👑 引入 V 反强力修复豁免机制：防止在急跌诱空次日强承接时被防守误杀
+        close_prev1 = ctx.get("close_prev1", 0.0)
+        is_yesterday_panic = (close_prev1 > 0.0 and pct_diff < -6.0) or (close_prev1 > 0.0 and close_prev1 <= ctx.get("low_prev1", 0.0) * 1.01)
+        is_today_strong_rebound = (price > ctx.get("open", 0.0) and pct_diff > 2.0 and dff > 1.0)
+        
+        is_v_reversal_exempt = False
+        if sws > 0.0:
+            is_rebound_above_sws = (price >= sws * 0.998)
+            is_dff_recovery = (dff > 1.8 and vol_ratio > 1.3 and price > ctx.get("open", 0.0))
+            if is_rebound_above_sws or is_dff_recovery or (is_yesterday_panic and is_today_strong_rebound):
+                is_v_reversal_exempt = True
+
+        if is_v_reversal_exempt:
+            return False
+
         # 10日支撑线明显呈向下倾斜趋势，代表已经进入震荡杀跌破位期
-        is_sws_downward = (sws > 0 and sws_prev5 > 0 and sws < sws_prev5 * 0.99)
+        # 优化：收紧向下倾斜门槛从 0.99 至 0.975，避免良性震荡洗盘被误杀
+        is_sws_downward = (sws > 0 and sws_prev5 > 0 and sws < sws_prev5 * 0.975)
         
         # 或者持仓状态下价格已经踩穿工作线 1.5% 以上，说明破位已被确认
         is_breakdown_held = (state == "IN_TRADE" and sws > 0 and ctx["low_price"] > 0.0 and ctx["low_price"] < sws * 0.985)
@@ -699,6 +735,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     breakout = pct_diff > 0.3 or "BREAKOUT" in signal.signal_type.upper()
     dff_positive = dff > 0
     is_leader = bool(signal.features.get("is_leader", False))
+    was_strong_dragon = bool(signal.features.get("was_strong_dragon", False))
     regime = "BREAKOUT_ALLOWED" if sector_heat >= 20 and priority >= 50 else "WATCH_ONLY"
     
     if state == "IN_TRADE":
@@ -732,6 +769,14 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         pass
 
     confidence = _confidence(priority, sector_heat, pct_diff, dff)
+    # 👑 引入置信度弹性补偿：
+    # 1. 龙头个股（is_leader）在冰点行情下获得额外的胜率补偿加分
+    if is_leader:
+        confidence = min(0.95, round(confidence + 0.08, 4))
+    # 2. 如果大单动量(dff)和放量度(volume_ratio)产生强烈共振，加分补偿
+    if dff > 2.0 and volume_ratio > 1.3:
+        confidence = min(0.95, round(confidence + 0.05, 4))
+        
     if is_reentry:
         confidence = min(0.95, round(confidence * reentry_boost, 4))
 
@@ -778,6 +823,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         "breakout": breakout,
         "dff_positive": dff_positive,
         "is_leader": is_leader,
+        "was_strong_dragon": was_strong_dragon,
         "regime": regime,
         "is_reentry": is_reentry,
         "vol_shrink_3d": vol_shrink_3d,
@@ -833,10 +879,23 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         # A. 如果当前被路由为超级强势主升浪分支，防守线紧咬 5日线下方 1.5% (方案B：强势股挂单收窄至1.5%，防回踩极浅踏空)
         if active_branch == SuperTrendMA5Branch:
             ma5_val = float(_num(signal, "ma5d", swl))
-            if ma5_val > 0:
-                stop_price = round(ma5_val * 0.985, 3)
+            ma10_val = float(_num(signal, "ma10d", sws))
+            # 👑 龙头大结构记忆：如果是核心龙头、重入突击股或高优先级强股，止损放宽到 10 日线下方 1.8% 或 5日线下方 4%，防日内急回踩扫损
+            was_strong_dragon = ctx.get("was_strong_dragon", False)
+            has_dragon_memory = is_leader or is_reentry or was_strong_dragon or (priority >= 80)
+            if has_dragon_memory:
+                if ma10_val > 0:
+                    stop_price = round(ma10_val * 0.982, 3)
+                elif ma5_val > 0:
+                    stop_price = round(ma5_val * 0.96, 3)
+                else:
+                    stop_price = round(suggest_price * 0.95, 3)
             else:
-                stop_price = round(suggest_price * 0.985, 3)
+                if ma5_val > 0:
+                    stop_price = round(ma5_val * 0.985, 3)
+                else:
+                    stop_price = round(suggest_price * 0.985, 3)
+
         # B. 如果当前被路由为主力 10日线反转支撑分支，防守线坚守 10日线下方 1.5%
         elif active_branch == SuperTrendMA10Branch:
             ma10_val = float(_num(signal, "ma10d", sws))

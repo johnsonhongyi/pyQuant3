@@ -867,15 +867,17 @@ class SignalOverlay:
                 label_text = None
                 text_color = (255, 255, 255)
                 
-                if sig.signal_type in (SignalType.BUY, SignalType.SHADOW_BUY):
-                    label_text = "B"
-                    text_color = (255, 0, 0)      # 极其醒目的绝对纯红色，提供高亮对比
-                elif sig.signal_type == SignalType.ADD:
-                    label_text = "A"
-                    text_color = (255, 215, 0)    # 亮金黄色，标识加仓
-                elif sig.signal_type in (SignalType.SELL, SignalType.STOP_LOSS, SignalType.TAKE_PROFIT, SignalType.SHADOW_SELL):
-                    label_text = "S"
-                    text_color = (0, 255, 0)      # 纯绿色，清晰显示卖出/止损/止盈
+                # 如果是 Emoji 标记（如火箭 🚀），则不额外画 B / S 标签以防重叠
+                if not is_emoji:
+                    if sig.signal_type in (SignalType.BUY, SignalType.SHADOW_BUY):
+                        label_text = "B"
+                        text_color = (255, 0, 0)      # 极其醒目的绝对纯红色，提供高亮对比
+                    elif sig.signal_type == SignalType.ADD:
+                        label_text = "A"
+                        text_color = (255, 215, 0)    # 亮金黄色，标识加仓
+                    elif sig.signal_type in (SignalType.SELL, SignalType.STOP_LOSS, SignalType.TAKE_PROFIT, SignalType.SHADOW_SELL):
+                        label_text = "S"
+                        text_color = (0, 255, 0)      # 纯绿色，清晰显示卖出/止损/止盈
                 
                 if label_text:
                     txt = self._get_text_item(target)
@@ -12385,20 +12387,27 @@ class MainWindow(QMainWindow, WindowMixin):
             
             k_idx = self._find_date_index(day_df, s_date)
             if k_idx != -1:
-                # 智能识别底层子类动作，映射到具有极客美感且不会导致视图拉伸的常规 Scatter 图符
-                is_buy = (s_action == "BUY")
-                if is_buy:
-                    if "回补" in s_desc or "加仓" in s_desc:
-                        sig_type = SignalType.ADD  # 加仓/回补：五角星 ('p')，颜色 (255, 100, 100)
-                    else:
-                        sig_type = SignalType.BUY  # 建仓：朝上三角 ('t1')，颜色 (255, 0, 0)
+                symbol_override_val = ""
+                size_override_val = 18
+                if s_action == "DRAGON" or s_desc == "大结构启动确认":
+                    sig_type = SignalType.BUY
+                    symbol_override_val = "🚀"
+                    size_override_val = 24
                 else:
-                    if "止损" in s_desc or "防守" in s_desc:
-                        sig_type = SignalType.STOP_LOSS  # 止损：绿色叉号 ('x')，颜色 (0, 255, 0)
-                    elif "止盈" in s_desc or "减仓" in s_desc:
-                        sig_type = SignalType.TAKE_PROFIT  # 止盈/减仓：金色星型 ('star')，颜色 (255, 215, 0)
+                    is_buy = (s_action == "BUY")
+                    if is_buy:
+                        if "回补" in s_desc or "加仓" in s_desc:
+                            sig_type = SignalType.ADD  # 加仓/回补：五角星 ('p')，颜色 (255, 100, 100)
+                        else:
+                            sig_type = SignalType.BUY  # 建仓：朝上三角 ('t1')，颜色 (255, 0, 0)
                     else:
-                        sig_type = SignalType.SELL  # 普通卖出：朝下三角 ('t')，颜色 (0, 255, 0)
+                        if "止损" in s_desc or "防守" in s_desc:
+                            sig_type = SignalType.STOP_LOSS  # 止损：绿色叉号 ('x')，颜色 (0, 255, 0)
+                        elif "止盈" in s_desc or "减仓" in s_desc:
+                            sig_type = SignalType.TAKE_PROFIT  # 止盈/减仓：金色星型 ('star')，颜色 (255, 215, 0)
+                        else:
+                            sig_type = SignalType.SELL  # 普通卖出：朝下三角 ('t')，颜色 (0, 255, 0)
+                    size_override_val = 25 if sig_type == SignalType.STOP_LOSS else (22 if sig_type == SignalType.TAKE_PROFIT else 18)
                 
                 kline_signals.append(SignalPoint(
                     code=code, 
@@ -12408,7 +12417,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     signal_type=sig_type,
                     reason=f"[{s_branch}] {s_desc}",
                     source=SignalSource.STRATEGY_ENGINE,
-                    size_override=25 if sig_type == SignalType.STOP_LOSS else (22 if sig_type == SignalType.TAKE_PROFIT else 18)
+                    symbol_override=symbol_override_val,
+                    size_override=size_override_val
                 ))
 
         # 6. ⚡ [NEW] Structural Breakout Champion (SBC) Signals
@@ -12486,8 +12496,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 y_low = row['low']
                 y_high = row['high']
                 if is_buy:
-                    # 价格标签在低价下方 1.5%，防止悬空
-                    y_v = y_low * 0.985
+                    if sig.symbol_override == "🚀":
+                        y_v = y_low * 0.955  # 🚀火箭更靠下方，与常规买入三角错开
+                    else:
+                        # 价格标签在低价下方 1.5%，防止悬空
+                        y_v = y_low * 0.985
                 else:
                     # 价格标签在高价上方 1.5%
                     y_v = y_high * 1.015

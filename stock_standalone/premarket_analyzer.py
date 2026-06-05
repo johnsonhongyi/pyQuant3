@@ -37,6 +37,90 @@ def get_branch_cn(branch_name: str) -> str:
     }
     return name_map.get(branch_name, branch_name)
 
+
+def check_strong_dragon_memory(df: pd.DataFrame, current_idx: int = -1) -> bool:
+    """
+    通过历史日线切片计算该股是否具备“强势股大结构记忆与启动确认”：
+    1. 过去 10 个交易日内存在启动日（涨停板或 >=9.5% 的大阳线）。
+    2. 自启动日以来的所有交易日，收盘价均未物理跌破启动日的收盘价 (Launch Close Price Not Broken)。
+    3. 横盘整理期间成交量显著萎缩 (平均成交量低于启动日成交量的 80% 或今日缩量)。
+    """
+    if df is None or len(df) < 12:
+        return False
+        
+    if current_idx == -1 or current_idx >= len(df):
+        current_idx = len(df) - 1
+        
+    start_lookback = max(1, current_idx - 10)
+    launch_indices = []
+    
+    for idx in range(start_lookback, current_idx + 1):
+        c_val = float(df['close'].iloc[idx])
+        p_val = float(df['close'].iloc[idx-1])
+        h_val = float(df['high'].iloc[idx])
+        l_val = float(df['low'].iloc[idx])
+        
+        is_limit_up = (c_val >= round(p_val * 1.095, 2) - 0.01)
+        is_big_yang = (c_val >= p_val * 1.095) or (c_val >= p_val * 1.093 and h_val == c_val)
+        
+        if is_limit_up or is_big_yang:
+            launch_indices.append(idx)
+            
+    if not launch_indices:
+        return False
+        
+    for launch_idx in launch_indices:
+        if launch_idx == current_idx:
+            c_val = float(df['close'].iloc[launch_idx])
+            o_val = float(df['open'].iloc[launch_idx])
+            p_val = float(df['close'].iloc[launch_idx-1]) if launch_idx > 0 else c_val
+            if (df['high'].iloc[launch_idx] == df['low'].iloc[launch_idx]) or (o_val >= p_val * 1.04):
+                return True
+            continue
+            
+        launch_close = float(df['close'].iloc[launch_idx])
+        launch_vol = float(df['vol'].iloc[launch_idx])
+        
+        is_broken = False
+        vol_sum = 0.0
+        count_days = 0
+        
+        for k in range(launch_idx + 1, current_idx + 1):
+            k_close = float(df['close'].iloc[k])
+            k_vol = float(df['vol'].iloc[k])
+            
+            if k_close < launch_close * 0.995:
+                is_broken = True
+                break
+                
+            vol_sum += k_vol
+            count_days += 1
+            
+        if is_broken:
+            continue
+            
+        avg_vol = (vol_sum / count_days) if count_days > 0 else 0.0
+        is_vol_shrink = (avg_vol <= launch_vol * 0.85) or (float(df['vol'].iloc[current_idx]) <= launch_vol * 0.75)
+        
+        curr_price = float(df['close'].iloc[current_idx])
+        is_in_range = (curr_price >= launch_close * 0.995 and curr_price <= launch_close * 1.12)
+        
+        if is_vol_shrink and is_in_range:
+            return True
+            
+    limit_ups_8d = 0
+    start_8d = max(1, current_idx - 8)
+    for idx in range(start_8d, current_idx + 1):
+        if float(df['close'].iloc[idx]) >= round(float(df['close'].iloc[idx-1]) * 1.095, 2) - 0.01:
+            limit_ups_8d += 1
+            
+    if limit_ups_8d >= 2:
+        return True
+        
+    return False
+
+
+
 def run_premarket_diagnose() -> list:
     """
     Run pre-market diagnostics for all current holdings in paper_account_state.json.
@@ -224,6 +308,7 @@ def run_premarket_diagnose() -> list:
                 "is_swing_low_mode": False,
                 "raw_reason": "盘前持仓个股体检",
                 "open": open_curr,
+                "was_strong_dragon": check_strong_dragon_memory(df),
             }
         )
         

@@ -50,6 +50,90 @@ def get_branch_cn(branch_name: str) -> str:
     return name_map.get(branch_name, branch_name)
 
 
+def check_strong_dragon_memory(df: pd.DataFrame, current_idx: int = -1) -> bool:
+    """
+    通过历史日线切片计算该股是否具备“强势股大结构记忆与启动确认”：
+    1. 过去 10 个交易日内存在启动日（涨停板或 >=9.5% 的大阳线）。
+    2. 自启动日以来的所有交易日，收盘价均未物理跌破启动日的收盘价 (Launch Close Price Not Broken)。
+    3. 横盘整理期间成交量显著萎缩 (平均成交量低于启动日成交量的 80% 或今日缩量)。
+    """
+    if df is None or len(df) < 12:
+        return False
+        
+    if current_idx == -1 or current_idx >= len(df):
+        current_idx = len(df) - 1
+        
+    start_lookback = max(1, current_idx - 10)
+    launch_indices = []
+    
+    for idx in range(start_lookback, current_idx + 1):
+        c_val = float(df['close'].iloc[idx])
+        p_val = float(df['close'].iloc[idx-1])
+        h_val = float(df['high'].iloc[idx])
+        l_val = float(df['low'].iloc[idx])
+        
+        is_limit_up = (c_val >= round(p_val * 1.095, 2) - 0.01)
+        is_big_yang = (c_val >= p_val * 1.095) or (c_val >= p_val * 1.093 and h_val == c_val)
+        
+        if is_limit_up or is_big_yang:
+            launch_indices.append(idx)
+            
+    if not launch_indices:
+        return False
+        
+    for launch_idx in launch_indices:
+        if launch_idx == current_idx:
+            c_val = float(df['close'].iloc[launch_idx])
+            o_val = float(df['open'].iloc[launch_idx])
+            p_val = float(df['close'].iloc[launch_idx-1]) if launch_idx > 0 else c_val
+            if (df['high'].iloc[launch_idx] == df['low'].iloc[launch_idx]) or (o_val >= p_val * 1.04):
+                return True
+            continue
+            
+        launch_close = float(df['close'].iloc[launch_idx])
+        launch_vol = float(df['vol'].iloc[launch_idx])
+        
+        is_broken = False
+        vol_sum = 0.0
+        count_days = 0
+        
+        for k in range(launch_idx + 1, current_idx + 1):
+            k_close = float(df['close'].iloc[k])
+            k_vol = float(df['vol'].iloc[k])
+            
+            if k_close < launch_close * 0.995:
+                is_broken = True
+                break
+                
+            vol_sum += k_vol
+            count_days += 1
+            
+        if is_broken:
+            continue
+            
+        avg_vol = (vol_sum / count_days) if count_days > 0 else 0.0
+        is_vol_shrink = (avg_vol <= launch_vol * 0.85) or (float(df['vol'].iloc[current_idx]) <= launch_vol * 0.75)
+        
+        curr_price = float(df['close'].iloc[current_idx])
+        is_in_range = (curr_price >= launch_close * 0.995 and curr_price <= launch_close * 1.12)
+        
+        if is_vol_shrink and is_in_range:
+            return True
+            
+    limit_ups_8d = 0
+    start_8d = max(1, current_idx - 8)
+    for idx in range(start_8d, current_idx + 1):
+        if float(df['close'].iloc[idx]) >= round(float(df['close'].iloc[idx-1]) * 1.095, 2) - 0.01:
+            limit_ups_8d += 1
+            
+    if limit_ups_8d >= 2:
+        return True
+        
+    return False
+
+
+
+
 def update_premarket_diagnose_json(code_clean: str, name: str, close_val: float, predicted_ma5: float, upper_val: float, sws_support: float, stop_price: float, action: str, action_cn: str, branch: str, branch_cn: str, reason: str, has_position: bool, entry_price: float = 0.0):
     """
     将手动回测个股当前的的操作机会与战术交易计划更新或追加到 logs/premarket_diagnose.json 中。
@@ -390,6 +474,7 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
                     "close_prev1": close_prev1,
                     "open_prev1": open_prev1,
                     "open": float(df['open'].iloc[row_idx]),
+                    "was_strong_dragon": check_strong_dragon_memory(df, row_idx),
                 }
             )
 
@@ -464,6 +549,18 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
                 current_stop = trailing_stop
                 max_high_since_entry = max(max_high_since_entry, close)
                 
+                is_dragon = check_strong_dragon_memory(df, row_idx)
+                if is_dragon:
+                    trade_events.append(
+                        f"{current_date} 🔥【强势龙头大结构启动确认】🔥 [分支策略: {get_branch_cn(active_branch_name)}] (💥大结构启动确认)"
+                    )
+                    _last_backtest_signals[code_clean].append({
+                        "date": str(current_date),
+                        "action": "DRAGON",
+                        "price": float(close),
+                        "branch": str(active_branch_name),
+                        "desc": "大结构启动确认"
+                    })
                 if setup_name == "MA5_TREND_ADD_BACK":
                     if is_limit_order_filled:
                         log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 👑 [MA5-ADD-BACK EVENT] 盘中跌破预计算理论5日线挂单价 {fill_price:.2f} 元，自动买入回补 70% 满仓！")
@@ -586,7 +683,8 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
                 "setup": "",
                 "tp_triggered": tp_triggered,
                 "is_swing_low_mode": is_swing_low_mode,
-                "raw_reason": "逐日回溯模拟信号"
+                "raw_reason": "逐日回溯模拟信号",
+                "was_strong_dragon": check_strong_dragon_memory(df, row_idx),
             }
         )
 
@@ -600,6 +698,15 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
         is_swing_low_triggered = (intent.action == "BUY" and intent.reason.regime == "SWING_LOW_BUY")
 
         if is_reentry_triggered or is_swing_low_triggered:
+            # 👑 引入真实成交判定过滤：如果是缩量一字涨停，或者开盘封死涨停，在实际交易中是无法买入的
+            close_prev1 = float(df['close'].iloc[row_idx - 1]) if row_idx >= 1 else close
+            is_limit_up_one_word = (high_price == low_price and close >= close_prev1 * 1.095)
+            is_open_limit_up_dead = (open_curr >= close_prev1 * 1.095 and low_price >= open_curr * 0.998)
+            
+            if is_limit_up_one_word or is_open_limit_up_dead:
+                log(f"[DATE: {current_date}] 收盘价: {close:.2f} | 🚫 [REAL-TRADE BLOCKED] 一字涨停或高开无量板，实际无法建仓成交！")
+                continue
+
             current_setup = intent.reason.setup if intent.reason else ""
             active_branch_name = getattr(intent.reason, "routed_branch", "UnknownBranch")
             last_branch_name = active_branch_name
@@ -615,6 +722,18 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
             has_position = True
 
             log("\n" + "*" * 80)
+            is_dragon = check_strong_dragon_memory(df, row_idx)
+            if is_dragon:
+                trade_events.append(
+                    f"{current_date} 🔥【强势龙头大结构启动确认】🔥 [分支策略: {get_branch_cn(active_branch_name)}] (💥大结构启动确认)"
+                )
+                _last_backtest_signals[code_clean].append({
+                    "date": str(current_date),
+                    "action": "DRAGON",
+                    "price": float(close),
+                    "branch": str(active_branch_name),
+                    "desc": "大结构启动确认"
+                })
             if is_swing_low_triggered:
                 log(f"[SWING-LOW BUY TRIGGERED SUCCESS!] | 激活分支策略: {active_branch_name}")
                 trade_events.append(
@@ -730,11 +849,13 @@ def run_backtest_and_get_report(code: str, name: str, only_report: bool = True, 
                 latest_branch = _last_backtest_best_branch.get((code_clean, resample), _last_backtest_best_branch.get(code_clean, "SuperTrendMA5Branch"))
                 branch_cn = get_branch_cn(latest_branch)
                 
+                is_dragon_last = check_strong_dragon_memory(df, len(df) - 1)
+                dragon_suffix = " (💥强势股大结构启动确认)" if is_dragon_last else ""
                 latest_reason = getattr(intent.reason, "raw_reason", "手动回测智能战术决策计划") if intent and intent.reason else "手动回测智能战术决策计划"
                 if has_position:
-                    latest_reason = f"💼 正在模拟持仓中(滚动做T)。{latest_reason}"
+                    latest_reason = f"💼 正在模拟持仓中(滚动做T)。{latest_reason}{dragon_suffix}"
                 else:
-                    latest_reason = f"📊 回测最新决策: {action_cn}。{latest_reason}"
+                    latest_reason = f"📊 回测最新决策: {action_cn}。{latest_reason}{dragon_suffix}"
                     
                 update_premarket_diagnose_json(
                     code_clean=code_clean,
