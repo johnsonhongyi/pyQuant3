@@ -18263,22 +18263,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not hasattr(self, "_select_on_test_code"):
                 self._select_on_test_code = None
 
-            # 判断是否为新的 code
-            if self._select_on_test_code != code:
-                # 更新缓存，并筛选对应行
+            if onclick:
+                # 只要是点击触发，一律筛选该股并滚动定位
                 self._select_on_test_code = code
                 df_code = df_all.loc[df_all.index == code]
-                results = check_code(df_all,code,self.search_var1.get())
+                results = check_code(df_all, code, self.search_var1.get())
+                self.tree_scroll_to_code(code)
+                if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                    self.kline_monitor.tree_scroll_to_code_kline(code)
             else:
-                if onclick:
+                # 非点击触发
+                if self._select_on_test_code != code:
+                    # 第一次（不同code），筛选该股
+                    self._select_on_test_code = code
                     df_code = df_all.loc[df_all.index == code]
-                    results = check_code(df_all,code,self.search_var1.get())
-                    # logger.info(f'check_code: {results}')
-                    self.tree_scroll_to_code(code)
-                    if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
-                        self.kline_monitor.tree_scroll_to_code_kline(code)
-                # 连续选择相同 code，则显示全部
+                    results = check_code(df_all, code, self.search_var1.get())
                 else:
+                    # 连续相同 code，显示全部
                     df_code = df_all
         else:
             df_code = df_all
