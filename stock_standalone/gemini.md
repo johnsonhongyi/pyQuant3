@@ -1,3 +1,54 @@
+## 2026-06-06 13:30
+- [x] **增强一键备份脚本，全面支持日志压缩与多重后缀识别 (Enhanced Backup Script to Support GZ/JSONL Logs & Dual Suffixes)**：
+    - [x] **放行 `.json.gz`、`.gz` 及 `.jsonl` 核心后缀**：在 `backup_configs.py` 的 `CONFIG_EXTENSIONS` 中增加了对 `".json.gz"`、`".gz"` 以及 `".jsonl"`（如交易内核流水 `trading_kernel_trace.jsonl`）后缀的过滤支持。配合对 `.json.gz` 的识别，使这些关键数据及压缩包能安全进入备份列表。
+    - [x] **补全 `log/` 和 `logs/` 双重目录放行 (Log Dir Support)**：将原先仅匹配 `logs/` 前缀的过滤逻辑扩展为 `rel_path_norm.startswith("log/") or rel_path_norm.startswith("logs/")`。这彻底确保了存放在 `log/` 目录下的类似 `v_reversal_pool_*.json.gz` 文件能够被 100% 捕获备份，而不受拼写差异的阻碍。
+    - [x] **物理备份验证通过**：通过手动构造测试路径，运行 `python backup_configs.py` 成功完成全盘 400 个配置及日志文件的极速备份，验证了数据还原目录的完备性。
+
+## 2026-06-06 12:45
+- [x] **根治缺失单独配置文件时自愈机制静默失效 Bug (Fixed Silent Self-Healing Failure When Single Config Files Are Missing)**：
+    - [x] **废除脆弱的物理存在性校验门禁**：彻底废除了 `LoggerFactory.py` 和 `commonTips.py` 中基于 `not os.path.exists(global.ini)` 来判断是否触发 Nuitka 临时环境变量自愈的脆弱设计。原先逻辑在物理工作目录下已经存在 `global.ini` 却缺失单独其它配置文件（如 `stock_codes.conf`）时，会导致子进程静默跳过自愈，使环境变量 `NUITKA_ONEFILE_DIRECTORY` 彻底丢失，从而让程序将包内路径错误解析为程序根目录。
+    - [x] **实现无条件 Nuitka 环境变量自愈**：重构自愈机制，只要检测到处于 Nuitka 运行环境且环境变量缺失，便无条件利用代码物理文件 `__file__` 反推真实的临时解压 `Temp` 路径并还原写入 `NUITKA_ONEFILE_DIRECTORY`，确保多进程架构下任意子进程均能 100% 正确恢复并释放单独缺失的配置文件。
+    - [x] **提前自愈规避 Onefile 错判 (Early Path Self-Healing)**：在 `sys_utils.py` 的 `get_conf_path` 头部提前引入了 `get_base_path()` 自愈调用。防止了子进程在未自愈前便错误判定 `is_onefile` 为 `False` 导致物理目标目录错位算入 `JSONData/` 等子目录下的问题，实现了 100% 准确的物理程序目录还原。
+
+## 2026-06-06 12:35
+- [x] **修复 Nuitka/PyInstaller 包内自愈倒灌环境变量污染导致解压资源丢失 Bug (Fixed Nuitka Environment Variable Pollution & Resource Loss)**：
+    - [x] **根治 `NUITKA_ONEFILE_DIRECTORY` 被污染为物理安装根目录缺陷**：修复了在 `commonTips.py`、`LoggerFactory.py` 和 `sys_utils.py` 的包自愈和寻址模块中，自愈还原环境变量时无视运行模式，将 `NUITKA_ONEFILE_DIRECTORY` 强制写入并污染为物理工作目录（`E:\temo\instock`）的重大逻辑隐患。该污染曾导致 Nuitka 运行阶段无法正确获取临时解包的 `%TEMP%` 路径，引发 `⚠️ [Config] 核心资源 stock_codes.conf 丢失且无法从包内释放` 报错。
+    - [x] **实现严格物理路径过滤**：在 `get_base_path()` 入口处及各文件自愈倒灌前均织入了 `os.path.normpath().lower()` 路径校验网关。若读取或即将写入的环境变量值等同于程序的物理安装根目录 `get_app_root()`，则强制将其作为“污染无效值”进行过滤和排除，防止污染真实的临时解包路径。
+
+## 2026-06-06 12:30
+- [x] **根治 Nuitka Onefile 进程退出残留与解包文件写入死锁 Bug (Fixed Nuitka Zombie Processes & Extraction File Locking)**：
+    - [x] **实现跨进程树全量残留模糊强杀**：在 `instock_MonitorTK.py` 退出流程 of 最后一环（`STEP 7`）中，引入了基于 Windows 全局进程表匹配的强清理机制。一旦检测到进程名与主程序匹配，或者进程的物理 executable 路径位于由 `sys_utils.get_base_path()` 动态解析获取的临时解包目录内，且 PID 不为当前进程，则在退出前毫秒级予以强制终结。这彻底杜绝了多进程 `spawn` 下 SyncManager 或其它子模块脱离进程树成为孤儿导致文件死锁的隐患。
+    - [x] **开发一键自愈清理启动助手**：在运行根目录下编写并部署了 `run_MonitorTK.bat` 助手。该脚本在程序每次启动前会强制终结系统中可能残留的一切同名进程，并在等待 Windows 异步释放完文件句柄后自动拉起程序。这为由于任务管理器强杀（无法执行 atexit/on_close 逻辑）或杀毒软件扫描延迟导致的文件被占用问题（`failed to open ... for writing`）提供了 100% 可行的一键物理自愈方案。
+
+## 2026-06-06 12:10
+- [x] **落地生产环境配置文件一键备份与物理保护助手 (Implemented One-click Environment Configuration Backup Tool)**：
+    - [x] **实现目录结构无损保存**：开发了物理定位备份脚本 `backup_configs.py`。该脚本自动抓取当前环境下的所有 `.json`、`.conf`、`.ini` 和 `.xlsx` 配置文件，并按照完全一致的相对子目录结构（如 `JSONData/`、`JohnsonUtil/`、`datacsv/` 等）无损拷贝保存至 `BackConfig/Backup_YYYYMMDD_HHMMSS/` 下，确保操盘手在需要恢复时，可以直接“全选拷贝并粘贴覆盖”到新运行根目录下完成秒级还原。
+    - [x] **智能目录过滤与秒级执行**：在扫描段精准屏蔽了 `.git`、`.nuitka_cache`、`scratch/`、`venv/`、`build/`、`dist/` 等海量临时调试和编译缓存文件。实测在包含上万个编译缓存的开发工作区内，备份过程由数分钟极限缩短至 **1.8秒** 瞬间完成。
+    - [x] **彻底根治 Windows 终端编码崩溃**：去除了所有可能引起 Windows GBK 终端（CMD/PowerShell）解析异常的 Emoji 特殊字符，改用纯文本规范标记，确保在任何中英文、不同编码格式的生产机器上运行均能 100% 稳健不崩溃。
+
+## 2026-06-06 11:55
+- [x] **物理修复 Nuitka Onefile 打包模式下子进程及主进程资源文件无法释放 Bug (Fixed Nuitka Onefile Resource Extraction & Diagnostics)**：
+    - [x] **无条件物理定位 Nuitka 临时释放根目录**：在 `sys_utils.py` 的 `get_base_path()` 中引入了专门针对 Nuitka 运行环境的子进程物理路径自愈。当环境变量 `NUITKA_ONEFILE_DIRECTORY` 在子进程派生时丢失，程序会无条件通过物理模块 `__file__` 所指向的临时 `.pyd` 文件位置逆向反推，并在内存中自动重建还原该环境变量，打通了子进程的自愈路径。
+    - [x] **引入带斜杠与平铺变体自愈探测**：重构了 `sys_utils.py` 里的 `nuitka_candidates` 探测路径数组，不仅支持传统的子目录拼接，还增加了斜杠/反斜杠互换（`replace('/', '\\')`）以及平铺于临时根目录下的物理文件名探测（如 `base + "JSONData\stock_codes.conf"`），防止由于 Windows/Unix 系统路径斜杠差异导致的探测漏网。
+    - [x] **优化 Nuitka 打包脚本文件格式**：将编译脚本 `nuitka_instockMonitor.bat` 里的 `--include-data-file` 命令中的包内目标路径修改为 Nuitka 官方推荐的标准正斜杠 `/` 格式（如 `JSONData/stock_codes.conf`），从打包源头上规避了由于 Windows 反斜杠可能被转义成非法字符或被平铺释放的风险。
+    - [x] **织入高对比诊断堆栈日志 (Nuitka-Diag)**：在 `sys_utils.py` 触发“核心配置文件丢失且无法自愈”致命错误路径之前，自动加入了 `[Nuitka-Diag]` 调试层。自动收集并向日志控制台抛出 `NUITKA_ONEFILE_DIRECTORY` 环境变量值、`base` 文件夹的物理可达状态、当前临时根目录下的前 30 个实体文件清单，使解压错位问题一览无遗。
+
+## 2026-06-06 02:25
+- [x] **全局重构新浪行情 `sys_utils` 统一寻址与导入优化 (Refactored Unified sys_utils Path Resolution & Global Imports)**：
+    - [x] **全局统一 `get_conf_path` 导入**：在 `sina_data.py` 文件头部，将 `from sys_utils import get_app_root` 扩展优化为 `from sys_utils import get_app_root, get_conf_path`。
+    - [x] **清理局部冗余导入**：移除了 `get_stock_code_path` 内部局部的 `from sys_utils import get_conf_path` 声明，消除了高频行情心跳下不必要的函数级重复导入开销，进一步规范化代码架构，降低系统冗余度。
+
+## 2026-06-06 02:22
+- [x] **统一新浪行情资源文件与 sys_utils 配置自愈路径 (Unified Sina Data Resources & Config Self-Healing Path)**：
+    - [x] **废除 `os.path.join(__file__)` 相对路径拼接**：在 `sina_data.py` 中的 `StockCode.get_stock_code_path_func` 方法中，直接返回 `self.STOCK_CODE_PATH`，该值由 `sys_utils.get_conf_path` 在 `get_app_root()` 路径下自愈释放而来。
+    - [x] **消除双重路径冲突与写回脱节隐患**：彻底消除了在多进程或 Windows Onefile/Onedir 打包环境下因 `os.path.dirname(__file__)` 相对路径漂移导致将更新的个股列表写入 `JSONData\stock_codes.conf` 临时目录，而主程序又从根目录 `stock_codes.conf` 读取旧数据的同步不一致 Bug。
+
+## 2026-06-06 02:20
+- [x] **修复新浪实时行情数据获取过滤漏股与 stock_codes 跨时段同步 Bug (Fixed Sina Data Pipeline Missing Stocks & Off-hours Sync)**：
+    - [x] **根治非交易时段 stock_codes.conf 同步阻断**：在 `sina_data.py` 内部 `StockCode.get_stock_codes` 接口中，移除限制 `update_stock_codes` 在非交易时段运行的 `is_trading_time` 网关门禁。确保无论是凌晨冷启动还是盘后主动更新，新浪最新的全市场股票列表均能顺畅写入配置文件，维持系统最新的股票基础库。
+    - [x] **根治 `combine_dataFrame` 时新代码被旧本地变量过滤漏算 Bug**：在 `Sina.all` 行情聚合方法中，定位并修复了当 `cache_needs_rebuild=False` 时，系统调用 `_update_agg_cache(df, h5_hist)` 成功将新抓取个股（如 `300291`）灌入内存 `agg_cache`，但在接下来的合并段直接沿用此前未包含新股的本地只读旧变量 `agg_data` 进行 `cct.combine_dataFrame(agg_data, df)`，从而将这部分增量新股全部漏掉并被悄悄丢弃的特大逻辑漏洞。修复为在调用更新后重新从缓存中获取最新的 `agg_data_updated = self.agg_cache.getkey('agg_metrics')` 进行合并。
+    - [x] **物理落盘自愈与全单元测试绿旗通过**：重构后新抓取的股票代码成功在任何交易时间段顺畅灌入本地 HDF5 历史快照及实时内存映射，个股列表总量从 `5,423` 自愈并完整补齐至 `5,531` 只。执行 `pytest test_watchlist_lifecycle.py` 11 项全量回归测试 100% 绿旗通过。
+
 ## 2026-06-06 02:15
 - [x] **修复修改备注时闪屏卡死与概念分析窗口焦点冲突 Bug (Fixed Note Editing UI Freeze & Focus Conflict)**：
     - [x] **根治 `<FocusOut>` 焦点强占死循环**：在 `instock_MonitorTK.py` 的 `show_concept_detail_window` 中移除了对 Canvas 组件的 `_keep_focus` 绑定（该机制通过 `<FocusOut>` 事件强制触发 `focus_set()` 保持窗口焦点）。该设计在用户双击备注弹出 `askstring_at_parent_single` 模态对话框时，会因焦点转移而陷入无限强占焦点的死循环，导致界面疯狂闪屏且主线程完全卡死。

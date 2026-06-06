@@ -3878,11 +3878,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 import psutil
 
+                # 1. 强制终止直接派生的子进程树
                 current_process = psutil.Process(os.getpid())
                 children = current_process.children(recursive=True)
 
                 if children:
-                    print(f"发现遗留子进程，正在强制释放: {[c.pid for c in children]}")
+                    print(f"发现直接遗留子进程，正在强制释放: {[c.pid for c in children]}")
 
                     for child in children:
                         try:
@@ -3893,9 +3894,50 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     psutil.wait_procs(children, timeout=0.8)
                     time.sleep(0.3)
 
+                # 2. 强力清理同名残留进程以及处于临时解压目录下的衍生进程 (免写死，完全动态路径匹配)
+                try:
+                    my_pid = os.getpid()
+                    my_exe_name = os.path.basename(sys.executable).lower()
+                    
+                    # 动态解析 Nuitka / PyInstaller 临时解包文件夹路径
+                    from sys_utils import get_base_path, get_app_root
+                    base_path_lower = get_base_path().lower()
+                    app_root_lower = get_app_root().lower()
+                    
+                    # 只有解压路径与可执行文件物理所在路径不一致时，才属于单文件解压临时运行模式
+                    is_temp_run = (base_path_lower != app_root_lower)
+                    
+                    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+                        try:
+                            pid = proc.info['pid']
+                            if pid == my_pid:
+                                continue
+                            proc_name = (proc.info['name'] or "").lower()
+                            proc_exe = (proc.info['exe'] or "").lower()
+                            
+                            is_target = False
+                            # 2.1 匹配同名进程（排除 python 调试器本身）
+                            if "python" not in my_exe_name and proc_name == my_exe_name:
+                                is_target = True
+                            # 2.2 匹配处于临时解压释放路径中的任何衍生进程
+                            if not is_target and is_temp_run and proc_exe:
+                                if proc_exe.startswith(base_path_lower) or base_path_lower in proc_exe:
+                                    is_target = True
+                                        
+                            if is_target:
+                                print(f"发现后台残留占用进程: PID={pid}, EXE={proc_exe}，正在实施强力清理...")
+                                p_obj = psutil.Process(pid)
+                                p_obj.kill()
+                        except Exception:
+                            pass
+                    time.sleep(0.2)
+                except Exception as e_proc_scan:
+                    print(f"扫描残留进程发生异常: {e_proc_scan}")
+
                 try:
                     from JohnsonUtil.LoggerFactory import stopLogger
                     print("程序运行结束，Bye.")
+                    sys.stdout.flush()
                     stopLogger()
                 except Exception:
                     pass
@@ -19638,6 +19680,14 @@ def parse_args():
         help="清理 follow_queue 数据库中的冗余重复活跃记录 (执行一次性排重)"
     )
 
+    # 一键备份配置文件参数
+    parser.add_argument(
+        "-backup",
+        "--backup",
+        dest="backup",
+        action="store_true",
+        help="一键备份当前生成环境的所有变更过的配置文件到当前目录下的 BackConfig 目录下并退出"
+    )
 
     args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
     return args
@@ -19894,6 +19944,16 @@ if __name__ == "__main__":
         main_SIGBREAK()
 
         args = parse_args()  # 解析命令行参数
+
+        # ✅ 命令行一键备份配置文件并退出
+        if getattr(args, 'backup', False):
+            import backup_configs
+            try:
+                backup_configs.main()
+                sys.exit(0)
+            except Exception as e:
+                print(f"配置文件一键备份失败: {e}")
+                sys.exit(1)
 
         # ✅ 启动使用命令行参数覆盖默认初始化 (if provided)
         if getattr(args, 'resample', None):
