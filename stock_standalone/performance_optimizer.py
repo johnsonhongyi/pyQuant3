@@ -156,12 +156,28 @@ class TreeviewIncrementalUpdater:
         else:
             codes = [str(i) for i in df.index]
         
+        # 获取需要转换为 float 格式化的自定义列
+        try:
+            from JohnsonUtil import commonTips as cct
+            co2float_cols = cct.CFG.co2float
+        except Exception:
+            co2float_cols = ["signal_strength", "signal4d"]
+
+        def _fmt_sig(v):
+            try:
+                return f"{float(v):.2f}"
+            except:
+                return str(v)
+
         # 预提取显示列的值（使用 numpy 提取每列，然后组装）
         col_arrays = []
         for col in columns:
             if col in df.columns:
                 # fillna 处理 NaN
-                arr = df[col].fillna('').tolist()
+                if col in co2float_cols:
+                    arr = [_fmt_sig(x) if pd.notna(x) else '' for x in df[col]]
+                else:
+                    arr = df[col].fillna('').tolist()
             else:
                 arr = [''] * n_rows
             col_arrays.append(arr)
@@ -541,6 +557,13 @@ class TreeviewIncrementalUpdater:
         rows_to_update: list = []  # (code, values, iid, row_data)
         rows_to_add: list = []     # (code, values, row_data)
         
+        # 获取需要转换为 float 格式化的自定义列
+        try:
+            from JohnsonUtil import commonTips as cct
+            co2float_cols = cct.CFG.co2float
+        except Exception:
+            co2float_cols = ["signal_strength", "signal4d"]
+
         for i in range(n_rows):
             row_arr = data_array[i]
             
@@ -559,7 +582,14 @@ class TreeviewIncrementalUpdater:
                     if pd.isna(val):
                         values.append("")
                     else:
-                        values.append(val)
+                        if col in co2float_cols:
+                            try:
+                                formatted_val = f"{float(val):.2f}"
+                            except:
+                                formatted_val = str(val)
+                            values.append(formatted_val)
+                        else:
+                            values.append(val)
                 else:
                     values.append("")
             

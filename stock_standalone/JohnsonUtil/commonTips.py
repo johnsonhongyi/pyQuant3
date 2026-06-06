@@ -717,6 +717,7 @@ class GlobalConfig:
         self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")
         self.hud_global_suppression = self.get_with_writeback("general", "hud_global_suppression", fallback=90, value_type="int")
         self.vol_up_details_col = self.get_with_writeback("general", "vol_up_details_col", fallback=["代码", "名称", "涨幅%", "量比", "DFF", "DFF2", "DFF3"], value_type="list")
+        self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",

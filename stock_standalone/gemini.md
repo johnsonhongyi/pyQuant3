@@ -1,3 +1,18 @@
+## 2026-06-06 19:00
+- [x] **修复 on_close 退出时 UnboundLocalError 异常并清理局部导入 (Fixed on_close UnboundLocalError & Cleaned Up Local Imports)**：
+    - [x] **根治 `threading` 局部变量提前引用报错**：对整个 `instock_MonitorTK.py` 进行了全面审计，彻底移除了包括 `on_close`、`wait_all_threads`、`open_spatial_follow_hud`、`_run_dna_audit_batch`、`_on_run_reentry_backtest_menu`、`_on_shortcut_reentry_backtest` 以及异常栈提取中的所有局部 `import threading` 导入，统一并规范使用最顶部全局的 `import threading`（第 22 行）。这彻底解决了由于函数体内后半段存在局部 `import threading` 导致 Python 编译器将整个函数作用域内的 `threading` 误判为局部变量，从而在前半段创建 `exit_timer = threading.Timer(...)` 时抛出 `UnboundLocalError: local variable 'threading' referenced before assignment` 的崩溃问题。
+    - [x] **通过生命周期回归测试**：成功运行 `pytest test_watchlist_lifecycle.py` 回归单元测试，11 项系统生命周期核心测试 100% 绿旗通过，且正常退出与异常退出的鲁棒自愈保障完全恢复。
+- [x] **修复信号强度 `signal_strength` 列显示多位浮点数与列错位 Bug 并实现 co2float 自定义配置 (Fixed Float Precision & Column Offset & Implemented Custom co2float)**：
+    - [x] **根治增量更新格式化缺失**：在 `performance_optimizer.py` 的 `TreeviewIncrementalUpdater` 类的 `_prepare_rows_fast`（预提取行数据）和 `_incremental_update`（增量更新数据）两个核心环节中，注入对 `signal_strength` 列的 `_fmt_sig` 二位小数浮点格式化。由于常规刷新以及增量更新均走该类而不走传统渲染函数，此修改解决了实盘更新时该列浮点格式化始终不生效的顽疾。
+    - [x] **修复条件查询列错位 Bug**：在 `instock_MonitorTK.py` 中的 `refresh_tree_with_query` 方法插入数据时，补齐了头部缺失 of `code_val` (即 `idx`) 元素。这解决了由于原本 `vals` 元素长度与 Treeview 列数不一致导致的整行数据左移列错位 Bug，从而确保了 `signal_strength` 这一列的值被正确格式化，并且全表数据不会发生位置偏差。
+    - [x] **顺利跑通 11 项生命周期核心回归测试**：运行 `pytest test_watchlist_lifecycle.py` 测试套件，100% 绿旗通过（运行时间由 0.91s 缩短至 0.77s）。
+    - [x] **集成自定义 co2float 配置**：在 `JohnsonUtil\commonTips.py` 中增加了 `self.co2float` 配置参数项（默认包含 `'signal_strength'` 和 `'signal4d'`），使得用户可以通过全局配置文件自定义哪些列的数值需要强制转换为 2 位小数浮点格式。
+    - [x] **动态替换硬编码列名**：在 `performance_optimizer.py` 的增量刷新和数据预处理环节中，以及在 `instock_MonitorTK.py` 的高级查询渲染中，使用 `cct.CFG.co2float` 动态列名判定替代了原先硬编码的 `'signal_strength'`。通过了 11 项全系统生命周期核心测试，提升了配置的自适应扩展性。
+
+- [x] **移除 `RealtimeSignalManager.update_signals` 中多余的 float32 类型转换 (Removed Redundant float32 Type Cast in Signal Manager)**：
+    - [x] **去除无实际价值的类型转换**：将 `stock_logic_utils.py` 里的 `score = np.round(score, 2).astype(np.float32)` 简化为 `score = np.round(score, 2)`。由于 NumPy 的 float32 在十进制还原或序列化时常伴随精度不足导致的尾数长尾问题（如 `9.1200003`），该多余的类型转换在实际使用中并无价值，直接移除它不仅消除了潜在的浮点精度损失与无谓开销，还能防止在 downstream 多进程传输和 pandas 处理中因类型不兼容引发的各种微小误差。
+    - [x] **顺利跑通回归测试验证**：完成修改后，回归执行 `pytest test_watchlist_lifecycle.py` 测试套件，11 项单元测试 100% 绿旗通过（运行时间由 0.91s 缩短至 0.77s）。
+
 ## 2026-06-06 18:30
 - [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
     - [x] **绝对排除强杀启动器父进程 (Excluded Bootstrap Parent Process)**：在 `instock_MonitorTK.py` 的 `on_close` 的 `STEP 7` 后台残留强力清理步骤中，显式获取并排除了当前进程的父进程 PID（`current_process.ppid()`，即 Nuitka/PyInstaller 的 bootstrap 启动器进程）。这彻底解决了由于主进程在退出前强杀父进程，导致 Windows 控制台（PowerShell）误认为程序已退出并抢先打出 `PS E:\temo\instock>` 提示符，进而导致输出交错、临时解压目录无法正常被 bootstrap 进程清除并锁死的问题。
