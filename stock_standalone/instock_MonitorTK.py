@@ -15345,7 +15345,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 如果是"使用"动作，且当前历史匹配，同步 Var 以触发 apply_search
                 if source == "use" and selected_query and arg_key[-8:] == self.query_manager.current_key:
                     key_suffix = arg_key[-8:]
-                    if key_suffix in ["history4", "history5"]:
+                    if key_suffix in ["history3", "history4", "history5"]:
                         # 临时用作 history1 条件进行联合过滤，但不污染 history1
                         self._temp_history_source = key_suffix
                         self._temp_history_query = selected_query
@@ -15380,6 +15380,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             search_map = self.search_map1
         elif history_attr == 'history2' and hasattr(self, 'search_map2'):
             search_map = self.search_map2
+        elif history_attr == 'history3' and hasattr(self, 'search_map3'):
+            search_map = self.search_map3
         elif history_attr == 'history4' and hasattr(self, 'search_map4'):
             search_map = self.search_map4
         elif history_attr == 'history5' and hasattr(self, 'search_map5'):
@@ -18278,7 +18280,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         temp_src = getattr(self, "_temp_history_source", None)
         if temp_src:
             current_q = val1
-            if temp_src == "history4" and hasattr(self, 'search_map4'):
+            if temp_src == "history3" and hasattr(self, 'search_map3'):
+                current_q = self.search_map3.get(current_q, current_q)
+            elif temp_src == "history4" and hasattr(self, 'search_map4'):
                 current_q = self.search_map4.get(current_q, current_q)
             elif temp_src == "history5" and hasattr(self, 'search_map5'):
                 current_q = self.search_map5.get(current_q, current_q)
@@ -18291,8 +18295,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._temp_history_query = ""
                 temp_src = None
 
-        # 根据来源分组解析映射标签（避免使用 search_map1 翻译 history4/5 的 label 失败）
-        if temp_src == "history4":
+        # 根据来源分组解析映射标签（避免使用 search_map1 翻译 history3/4/5 的 label 失败）
+        if temp_src == "history3":
+            if hasattr(self, 'search_map3'):
+                val1 = self.search_map3.get(val1, val1)
+        elif temp_src == "history4":
             if hasattr(self, 'search_map4'):
                 val1 = self.search_map4.get(val1, val1)
         elif temp_src == "history5":
@@ -18321,7 +18328,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 1. 更新搜索历史（防污染：若是临时历史则写入其对应组，绝对不碰 history1）
         try:
             if val1:
-                if temp_src == "history4":
+                if temp_src == "history3":
+                    self.sync_history(val1, self.search_history3, None, "history3", "history3")
+                elif temp_src == "history4":
                     self.sync_history(val1, self.search_history4, None, "history4", "history4")
                 elif temp_src == "history5":
                     self.sync_history(val1, self.search_history5, None, "history5", "history5")

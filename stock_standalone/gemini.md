@@ -1,10 +1,10 @@
 ## 2026-06-07 00:23
-- [x] **实现临时使用 history4/history5 等历史列过滤且防污染功能 (Implemented Temp History Group Filtering & Prevented Pollution)**：
-    - [x] **实现临时过滤与主 query 桥接**：在 `instock_MonitorTK.py` 中的 `sync_history_from_QM` 接收到 `history4` 或 `history5` 的使用动作时，拦截并设置 `self._temp_history_source` 临时标志，将选中的 query 同步至顶部 `search_var1` 中展示，并直接拉起联合搜索过滤。
+- [x] **实现临时使用 history3/history4/history5 等历史列过滤且防污染功能 (Implemented Temp History Group Filtering & Prevented Pollution)**：
+    - [x] **实现临时过滤与主 query 桥接**：在 `instock_MonitorTK.py` 中的 `sync_history_from_QM` 接收到 `history3`、`history4` 或 `history5` 的使用动作时，拦截并设置 `self._temp_history_source` 临时标志，将选中的 query 同步至顶部 `search_var1` 中展示，并直接拉起联合搜索过滤。
     - [x] **修复原本 sync_history_from_QM 中的 current_key 校验失效 Bug**：定位并修复了原本 configs 里的 `arg_key`（带有 `search_` 前缀）与 `current_key` 格式不一致导致 `source == "use"` 时匹配校验始终不通过的 Bug，重构为基于 `arg_key[-8:]` 的安全对齐匹配。
-    - [x] **实现映射标签解包与防污染写入**：在 `apply_search` 过滤及更新搜索历史阶段，根据当前临时来源，自适应调用对应历史列（如 `search_map4`）解析翻译 label，并在写入历史记录时重定向同步写入对应的历史分组（`history4`/`history5`）中，确保真正的 `history1` 不受到任何污染。
+    - [x] **实现映射标签解包与防污染写入**：在 `apply_search` 过滤及更新搜索历史阶段，根据当前临时来源，自适应调用对应历史列（如 `search_map3`/`search_map4`/`search_map5`）解析翻译 label，并在写入历史记录时重定向同步写入对应的历史分组（`history3`/`history4`/`history5`）中，确保真正的 `history1` 不受到任何污染。
     - [x] **实现智能括号拆解与自愈 (Implemented Intelligent Bracket Splitting & Self-healing)**：
-        - 补齐了在 `sync_history` 里面对 `history4`/`5` 分组对应的 `search_map4`/`5` 的映射翻译链，使非 history1/2 分组在 `sync_history` 时也能正常解包；
+        - 补齐了在 `sync_history` 里面对 `history3`/`history4`/`history5` 分组对应的 `search_map3`/`4`/`5` 的映射翻译链，使非 history1/2 分组在 `sync_history` 时也能正常解包；
         - 在 `sync_history` 的增量写入环节以及 `history_manager.py` 的 `_normalize_record` 最底层加载转换环节，均织入了智能小括号拆解自愈算法。如果输入/加载的表达式呈现 `"备注 (真正的Query)"` 的形式（例如先前被意外写入的 label 数据），系统会自动剥离提取纯 Query，并将前置部分作为 note 保存，彻底隔离 note 对 query 的污染，根治了语法执行报错的问题。
     - [x] **实现双向同步与清空自愈**：在 `apply_search` 执行前引入自愈判定，如果顶部输入框的值被用户手动编辑改变或清空，则自动清空临时状态并重置为正常的 `history1` 写入。同时在 `clean_search` 清空顶部时显式清空临时标志。
     - [x] **实现双击置顶与隐藏窗口自动存盘 (Implemented Auto-Save on Window Hide)**：在 `history_manager.py` 的 `use_query` 置顶操作中，以及在 `instock_MonitorTK.py` 的 `sync_history` 增量回写中，均补齐了 `_history_changed = True` 的状态修改标记。这彻底解决了用户在双击置顶/搜索后按 Esc 隐藏历史管理器时，因没有触发修改标志导致新顺序未自动持久化写入磁盘，进而导致再次打开时顺序恢复的体验 Bug。
