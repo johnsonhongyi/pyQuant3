@@ -16,7 +16,7 @@ EXCLUDE_DIRS = {
     ".git", ".idea", ".vscode", "__pycache__", "build", "dist", "venv", 
     "env", ".pytest_cache", ".agents", "BackConfig", "artifacts", 
     ".nuitka_cache", ".nuitka", "scratch", "test_vs_clang.build", 
-    ".pytest_temp", "JohnsonUtil", "JSONData", "jupyterAlgo"
+    ".pytest_temp", "JohnsonUtil", "JSONData", "jupyterAlgo","archives"
 }
 
 # 关注的配置文件类型

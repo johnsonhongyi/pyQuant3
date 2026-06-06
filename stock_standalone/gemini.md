@@ -1,3 +1,20 @@
+## 2026-06-06 18:30
+- [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
+    - [x] **绝对排除强杀启动器父进程 (Excluded Bootstrap Parent Process)**：在 `instock_MonitorTK.py` 的 `on_close` 的 `STEP 7` 后台残留强力清理步骤中，显式获取并排除了当前进程的父进程 PID（`current_process.ppid()`，即 Nuitka/PyInstaller 的 bootstrap 启动器进程）。这彻底解决了由于主进程在退出前强杀父进程，导致 Windows 控制台（PowerShell）误认为程序已退出并抢先打出 `PS E:\temo\instock>` 提示符，进而导致输出交错、临时解压目录无法正常被 bootstrap 进程清除并锁死的问题。
+    - [x] **稳健化子进程 PID 获取以防 `NoSuchProcess` 报错**：在处理直接派生子进程的强杀与等待逻辑中，将 `alive_pids` 的提取语句从原先脆弱的列表推导式重构为使用 `try-except` 包裹的显式 `p.is_running()` 状态核查，彻底规避了等待过程中由于进程物理死亡导致 `psutil.NoSuchProcess` 崩溃的概率。
+    - [x] **优化 Logger 停止与线程回收时序**：将 `stopLogger()` 执行顺序前移并配合 `time.sleep(0.1)` 步进缓冲，给予 `QueueListener` 监控等线程充足的反应时间安全注销并安全解绑控制台 stdout/stderr。
+    - [x] **强化进程与线程诊断输出准确性**：
+        - 打印 `Remaining children` 时弃用旧的缓存对象，通过 `psutil.Process(os.getpid()).children(recursive=True)` 动态获取最新的物理残留进程树快照。
+        - 打印活动线程时，在输出中注入 `t.ident` 以便于快速区分底层各线程的角色定位。
+        - 新增 `FINAL STATUS` 输出，实时显示最终存活线程计数，彻底量化退出质量。
+    - [x] **顺利跑通 11 项全系统生命周期核心测试**：执行 `pytest test_watchlist_lifecycle.py`，全部 11 项回归单元测试 100% 绿旗通过。
+
+## 2026-06-06 14:00
+- [x] **修复缺失单独配置文件时自愈机制失效与防污染过滤 (Fixed Single Config Healing & Prevention of Path Pollution)**：
+    - [x] **提前自愈规避 Onefile 错判 (Early Path Self-Healing)**：在 `sys_utils.py` 的 `get_conf_path` 头部提前引入了 `get_base_path()` 显式自愈调用。防止子进程在未自愈前由于 `NUITKA_ONEFILE_DIRECTORY` 环境变量尚未就绪，而将 `is_onefile` 误判为 `False` 导致物理目标目录错位，实现了 100% 准确的打包路径还原。
+    - [x] **实现 Nuitka 临时目录防污染过滤 (Strict Nuitka Path Validation)**：在 `get_base_path()` 提取或回写 `NUITKA_ONEFILE_DIRECTORY` 时，增加了与 `get_app_root()` 的规范化比对逻辑。若检测到二者等同（通常是因为在非打包或被意外污染的环境下被写入了程序物理安装根目录），则强制过滤此污染值，确保程序在 Nuitka Onefile 打包环境下能无误释放和还原缺失的配置文件。
+    - [x] **回归测试通过**：物理修改后执行 `pytest test_watchlist_lifecycle.py` 进行 11 项生命周期回归测试，100% 绿旗通过。
+
 ## 2026-06-06 13:30
 - [x] **增强一键备份脚本，全面支持日志压缩与多重后缀识别 (Enhanced Backup Script to Support GZ/JSONL Logs & Dual Suffixes)**：
     - [x] **放行 `.json.gz`、`.gz` 及 `.jsonl` 核心后缀**：在 `backup_configs.py` 的 `CONFIG_EXTENSIONS` 中增加了对 `".json.gz"`、`".gz"` 以及 `".jsonl"`（如交易内核流水 `trading_kernel_trace.jsonl`）后缀的过滤支持。配合对 `.json.gz` 的识别，使这些关键数据及压缩包能安全进入备份列表。

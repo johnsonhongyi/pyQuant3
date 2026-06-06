@@ -119,7 +119,10 @@ def get_base_path() -> str:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
     if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-        return os.environ["NUITKA_ONEFILE_DIRECTORY"]
+        val = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+        app_root = get_app_root()
+        if os.path.normpath(os.path.abspath(val)).lower() != os.path.normpath(os.path.abspath(app_root)).lower():
+            return val
         
     # 🚀 Nuitka 子进程自愈：如果 Nuitka 编译下环境变量丢失，通过物理模块 __file__ 路径直接锁定解压临时根目录
     is_nuitka = "__compiled__" in globals() or hasattr(sys, "nuitka_version")
@@ -129,10 +132,12 @@ def get_base_path() -> str:
             # 如果 sys_utils.py 存放在子目录里（通常在根目录，但以防万一）
             if os.path.basename(this_dir) in ("JohnsonUtil", "JSONData"):
                 this_dir = os.path.dirname(this_dir)
-            # 还原环境变量，保障后续或其它子进程获取一致
-            os.environ["NUITKA_ONEFILE_DIRECTORY"] = this_dir
-            logger.info(f"[get_base_path] Nuitka子进程通过 __file__ 自愈还原临时释放目录: {this_dir}")
-            return this_dir
+            app_root = get_app_root()
+            if os.path.normpath(os.path.abspath(this_dir)).lower() != os.path.normpath(os.path.abspath(app_root)).lower():
+                # 还原环境变量，保障后续或其它子进程获取一致
+                os.environ["NUITKA_ONEFILE_DIRECTORY"] = this_dir
+                logger.info(f"[get_base_path] Nuitka子进程通过 __file__ 自愈还原临时释放目录: {this_dir}")
+                return this_dir
         except Exception as e:
             logger.error(f"[get_base_path] Nuitka子进程通过 __file__ 还原路径失败: {e}")
 
@@ -208,6 +213,7 @@ RESOURCE_MAP = {
 
 def get_conf_path(fname, base_dir=None):
     """获取并验证配置文件路径，如果物理磁盘不存在，自动创建层级目录并从内置资源包中智能解压自愈"""
+    get_base_path() # 提前触发自愈以防 is_onefile 判定被绕过
     if base_dir is None:
         base_dir = get_app_root()
         
@@ -322,7 +328,7 @@ def get_conf_path(fname, base_dir=None):
             # 执行物理复制
             import shutil
             shutil.copy(src, default_path)
-            logger.info(f"成功自愈释放配置文件并归位: {default_path}")
+            logger.warning(f"成功自愈释放配置文件并归位: {default_path}")
             return default_path
         except Exception as e:
             logger.exception(f"自愈释放配置文件失败: {e}")
