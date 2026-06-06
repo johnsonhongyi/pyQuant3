@@ -23,7 +23,7 @@ np = cct.LazyModule('numpy')
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import LoggerFactory
-from sys_utils import get_app_root
+from sys_utils import get_app_root, get_conf_path
 log = LoggerFactory.getLogger("sina_data")
 # import trollius as asyncio
 # from trollius.coroutines import From
@@ -107,7 +107,6 @@ def get_stock_code_path() -> Optional[str]:
     """
     获取并验证 stock_codes.conf
     """
-    from sys_utils import get_conf_path
     
     cfg_file = get_conf_path("stock_codes.conf", base_dir=BASE_DIR)
     
@@ -159,7 +158,8 @@ class StockCode:
 
     # @property
     def get_stock_code_path_func(self) -> str:
-        return os.path.join(os.path.dirname(__file__), self.STOCK_CODE_PATH)
+        # ⚡ [FIX] 直接返回已由 sys_utils.get_conf_path 解析得到的绝对路径，避免在 Nuitka/PyInstaller 多进程环境下产生多余且错误的相对路径拼接
+        return self.STOCK_CODE_PATH
 
     def update_stock_codes(self) -> List[str]:
         """获取所有股票 ID 到 all_stock_code 目录下"""
@@ -209,19 +209,9 @@ class StockCode:
             [type] -- [description]
         """
         # print "days:",cct.creation_date_duration(self.stock_code_path)
-        is_trading_time = cct.get_trade_date_status() and (930 <= cct.get_now_time_int() <= 1500)
-        if realtime and is_trading_time:
-            # all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
-            # grep_stock_codes = re.compile('~(\d+)`')
-            # response = requests.get(all_stock_codes_url)
-            # stock_codes = grep_stock_codes.findall(response.text)
-            # stock_codes = [elem for elem in stock_codes if elem.startswith(('6','30','00'))]
-            # df= rl.get_sina_Market_json('all')
-            # stock_codes = df.index.tolist()
+        if realtime:
             stock_codes = self.update_stock_codes()
-            log.info("readltime codes:%s" % (len(stock_codes)))
-            # with open(self.stock_code_path, 'w') as f:
-            # f.write(json.dumps(dict(stock=stock_codes)))
+            log.info("realtime codes:%s" % (len(stock_codes)))
             return stock_codes
         else:
             with open(self.stock_code_path) as f:
@@ -529,7 +519,9 @@ class Sina:
                     df_final = self._rebuild_agg_cache(h5_hist, df)
                 else:
                     self._update_agg_cache(df, h5_hist)
-                    df_final = cct.combine_dataFrame(agg_data, df)
+                    # ⚡ [FIX] 重新从缓存中获取更新后的 agg_metrics 实例，避免新抓取的股票代码在合并时被旧本地变量过滤丢弃
+                    agg_data_updated = self.agg_cache.getkey('agg_metrics')
+                    df_final = cct.combine_dataFrame(agg_data_updated, df)
 
                 df_final = self.combine_lastbuy(df_final)
                 for c in ['nhigh', 'nlow', 'nclose']:
@@ -2552,11 +2544,10 @@ if __name__ == "__main__":
 
     unique_dates = sina.get_tick_dates()
     print(f'unique_dates: {unique_dates}')
-    import ipdb;ipdb.set_trace()
 
     dm = sina.all
 
-    code_l = ['603363','000868','603917','600392','300713','000933','002505','603676']
+    code_l = ['300291','000868','603917','600392','300713','000933','002505','603676']
     dd = sina.get_real_time_tick(code_l)
     dde = sina.get_real_time_tick(code_l, enrich_data=True)
     import ipdb;ipdb.set_trace()

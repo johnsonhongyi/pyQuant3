@@ -118,10 +118,25 @@ def get_base_path() -> str:
     """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
-    elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
         return os.environ["NUITKA_ONEFILE_DIRECTORY"]
-    else:
-        return get_app_root()
+        
+    # 🚀 Nuitka 子进程自愈：如果 Nuitka 编译下环境变量丢失，通过物理模块 __file__ 路径直接锁定解压临时根目录
+    is_nuitka = "__compiled__" in globals() or hasattr(sys, "nuitka_version")
+    if is_nuitka:
+        try:
+            this_dir = os.path.dirname(os.path.abspath(__file__))
+            # 如果 sys_utils.py 存放在子目录里（通常在根目录，但以防万一）
+            if os.path.basename(this_dir) in ("JohnsonUtil", "JSONData"):
+                this_dir = os.path.dirname(this_dir)
+            # 还原环境变量，保障后续或其它子进程获取一致
+            os.environ["NUITKA_ONEFILE_DIRECTORY"] = this_dir
+            logger.info(f"[get_base_path] Nuitka子进程通过 __file__ 自愈还原临时释放目录: {this_dir}")
+            return this_dir
+        except Exception as e:
+            logger.error(f"[get_base_path] Nuitka子进程通过 __file__ 还原路径失败: {e}")
+
+    return get_app_root()
 
     
 RESOURCE_MAP = {
@@ -260,12 +275,10 @@ def get_conf_path(fname, base_dir=None):
 
     # --- 2. 物理不存在，执行自愈释放 ---
     # 先确定内置解包临时根目录 (base)
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        # PyInstaller 经典的临时解压根目录
-        base = sys._MEIPASS
-    elif "NUITKA_ONEFILE_DIRECTORY" in os.environ:
-        # Nuitka Onefile 经典的临时解压根目录
-        base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+    is_packaged = getattr(sys, "frozen", False) or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    if is_packaged:
+        # 打包模式下，由 get_base_path() 统一提供并负责环境变量丢失的逆向自愈
+        base = get_base_path()
     else:
         # 源码开发环境下
         base = get_base_path()
@@ -273,26 +286,12 @@ def get_conf_path(fname, base_dir=None):
         if os.path.basename(base) == 'JohnsonUtil':
             base = os.path.dirname(base)
 
-    # 🚀 Nuitka/PyInstaller 多进程包内自愈：如果在子进程下环境变量丢失，导致 base 指向了外部目录而不是临时解压目录
-    # （检测外部 exe 目录下既没有 JohnsonUtil/global.ini 也没有 global.ini），则利用 __file__ 物理定位包内根目录
-    if not os.path.exists(os.path.join(base, "JohnsonUtil", "global.ini")) and not os.path.exists(os.path.join(base, "global.ini")):
-        this_dir = os.path.dirname(os.path.abspath(__file__))
-        if os.path.basename(this_dir) == "JohnsonUtil":
-            pkg_base = os.path.dirname(this_dir)
-        else:
-            pkg_base = this_dir
-        
-        # 如果通过代码定位的根目录下确实有 global.ini 模板
-        if os.path.exists(os.path.join(pkg_base, "JohnsonUtil", "global.ini")) or os.path.exists(os.path.join(pkg_base, "global.ini")):
-            base = pkg_base
-            os.environ["NUITKA_ONEFILE_DIRECTORY"] = pkg_base
-            logger.info(f"[自愈] 子进程检测到环境变量丢失，已通过物理代码路径锁定临时资源根并还原环境变量: {base}")
-
     # 拼接包内的源文件绝对路径
     src = os.path.join(base, src_rel)
 
     # 如果源文件在上述 base 目录下不存在，进行常见包内路径多重自愈探测
     if not os.path.exists(src):
+        # 💥 多维自愈探测候选：兼容 Nuitka 在不同环境下可能发生平铺释放或路径斜杠错位的极端情况
         nuitka_candidates = [
             os.path.join(base, "JohnsonUtil", src_rel),
             os.path.join(base, "JSONData", src_rel),
@@ -300,7 +299,12 @@ def get_conf_path(fname, base_dir=None):
             os.path.join(base, "datacsv", src_rel),
             os.path.join(base, os.path.basename(src_rel)),
             os.path.join(base, "JohnsonUtil", os.path.basename(src_rel)),
-            os.path.join(base, "JSONData", os.path.basename(src_rel))
+            os.path.join(base, "JSONData", os.path.basename(src_rel)),
+            # 兼容 Windows/Unix 斜杠/反斜杠互换及平铺路径 (如 base\"JSONData\stock_codes.conf")
+            os.path.join(base, src_rel.replace('/', '\\')),
+            os.path.join(base, src_rel.replace('\\', '/')),
+            os.path.join(base, os.path.dirname(src_rel).replace('/', '\\'), os.path.basename(src_rel)),
+            os.path.join(base, os.path.dirname(src_rel).replace('\\', '/'), os.path.basename(src_rel))
         ]
         for cand in nuitka_candidates:
             if os.path.exists(cand) and os.path.getsize(cand) > 0:
@@ -334,6 +338,19 @@ def get_conf_path(fname, base_dir=None):
         return default_path
 
     # 核心资源彻底丢失且无法解压，打印致命日志
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version"):
+        try:
+            onefile_dir = os.environ.get("NUITKA_ONEFILE_DIRECTORY", "N/A")
+            exists_base = os.path.exists(base)
+            files_in_base = []
+            if exists_base:
+                files_in_base = os.listdir(base)[:30]
+            logger.error(f"[Nuitka-Diag] base_dir={base} (exists={exists_base}), NUITKA_ONEFILE_DIRECTORY={onefile_dir}")
+            logger.error(f"[Nuitka-Diag] Files in base: {files_in_base}")
+            logger.error(f"[Nuitka-Diag] Expected src={src}, default_path={default_path}")
+        except Exception as ex:
+            logger.error(f"[Nuitka-Diag] 诊断信息收集失败: {ex}")
+
     logger.error(f"⚠️ [Config] 核心资源 {fname} 丢失且无法从包内释放")
     return default_path
 
