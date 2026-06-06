@@ -3891,12 +3891,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception:
                             pass
 
-                    psutil.wait_procs(children, timeout=0.8)
-                    time.sleep(0.3)
+                    gone, alive = psutil.wait_procs(children, timeout=2.0)
+                    for p in alive:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+                    psutil.wait_procs(alive, timeout=2.0)
+                    
+                    alive_pids = []
+                    for p in alive:
+                        try:
+                            if p.is_running():
+                                alive_pids.append(p.pid)
+                        except Exception:
+                            pass
+                    if alive_pids:
+                        print(f"alive after kill: {alive_pids}")
 
                 # 2. 强力清理同名残留进程以及处于临时解压目录下的衍生进程 (免写死，完全动态路径匹配)
                 try:
                     my_pid = os.getpid()
+                    my_ppid = current_process.ppid()
                     my_exe_name = os.path.basename(sys.executable).lower()
                     
                     # 动态解析 Nuitka / PyInstaller 临时解包文件夹路径
@@ -3910,7 +3926,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     for proc in psutil.process_iter(['pid', 'name', 'exe']):
                         try:
                             pid = proc.info['pid']
-                            if pid == my_pid:
+                            # 绝对不要强杀自身或启动器父进程
+                            if pid == my_pid or pid == my_ppid:
                                 continue
                             proc_name = (proc.info['name'] or "").lower()
                             proc_exe = (proc.info['exe'] or "").lower()
@@ -3939,12 +3956,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     print("程序运行结束，Bye.")
                     sys.stdout.flush()
                     stopLogger()
+                    time.sleep(0.1)
                 except Exception:
                     pass
 
+                print("Remaining children:")
+                try:
+                    print(psutil.Process(os.getpid()).children(recursive=True))
+                except Exception as e_child:
+                    print(f"Error fetching remaining children: {e_child}")
+
+                print("Remaining threads:")
+                import threading
+                for t in threading.enumerate():
+                    print(f"THREAD: {t.name} id={t.ident} daemon={t.daemon}")
+
+                print(f"FINAL STATUS: threads={len(threading.enumerate())}")
+
                 print("清理完成，正在物理切断进程...")
+                sys.stdout.flush()
+                sys.stderr.flush()
 
             finally:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
                 # ⚠ 永远不要 cancel failsafe
                 # 因为如果 destroy()/stopLogger()/psutil 某步卡死
                 # 仍需依赖 failsafe 保底物理退出
