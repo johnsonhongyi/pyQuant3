@@ -1,3 +1,23 @@
+## 2026-06-07 00:23
+- [x] **实现临时使用 history4/history5 等历史列过滤且防污染功能 (Implemented Temp History Group Filtering & Prevented Pollution)**：
+    - [x] **实现临时过滤与主 query 桥接**：在 `instock_MonitorTK.py` 中的 `sync_history_from_QM` 接收到 `history4` 或 `history5` 的使用动作时，拦截并设置 `self._temp_history_source` 临时标志，将选中的 query 同步至顶部 `search_var1` 中展示，并直接拉起联合搜索过滤。
+    - [x] **修复原本 sync_history_from_QM 中的 current_key 校验失效 Bug**：定位并修复了原本 configs 里的 `arg_key`（带有 `search_` 前缀）与 `current_key` 格式不一致导致 `source == "use"` 时匹配校验始终不通过的 Bug，重构为基于 `arg_key[-8:]` 的安全对齐匹配。
+    - [x] **实现映射标签解包与防污染写入**：在 `apply_search` 过滤及更新搜索历史阶段，根据当前临时来源，自适应调用对应历史列（如 `search_map4`）解析翻译 label，并在写入历史记录时重定向同步写入对应的历史分组（`history4`/`history5`）中，确保真正的 `history1` 不受到任何污染。
+    - [x] **实现智能括号拆解与自愈 (Implemented Intelligent Bracket Splitting & Self-healing)**：
+        - 补齐了在 `sync_history` 里面对 `history4`/`5` 分组对应的 `search_map4`/`5` 的映射翻译链，使非 history1/2 分组在 `sync_history` 时也能正常解包；
+        - 在 `sync_history` 的增量写入环节以及 `history_manager.py` 的 `_normalize_record` 最底层加载转换环节，均织入了智能小括号拆解自愈算法。如果输入/加载的表达式呈现 `"备注 (真正的Query)"` 的形式（例如先前被意外写入的 label 数据），系统会自动剥离提取纯 Query，并将前置部分作为 note 保存，彻底隔离 note 对 query 的污染，根治了语法执行报错的问题。
+    - [x] **实现双向同步与清空自愈**：在 `apply_search` 执行前引入自愈判定，如果顶部输入框的值被用户手动编辑改变或清空，则自动清空临时状态并重置为正常的 `history1` 写入。同时在 `clean_search` 清空顶部时显式清空临时标志。
+    - [x] **实现双击置顶与隐藏窗口自动存盘 (Implemented Auto-Save on Window Hide)**：在 `history_manager.py` 的 `use_query` 置顶操作中，以及在 `instock_MonitorTK.py` 的 `sync_history` 增量回写中，均补齐了 `_history_changed = True` 的状态修改标记。这彻底解决了用户在双击置顶/搜索后按 Esc 隐藏历史管理器时，因没有触发修改标志导致新顺序未自动持久化写入磁盘，进而导致再次打开时顺序恢复的体验 Bug。
+    - [x] **修复冷启动大变动误保存弹窗与实例化笔误 (Fixed Cold-start Save Prompt & Instantiation Typo)**：
+        - 修复了主窗口初始化第 4583 行将 `self.search_history5` 错误实例化为 `h4` 分组（而非 `h5` 分组）的笔误，消除了冷启动同步时 history5 内存数据被 history4 覆盖污染的隐患；
+        - 重构了 `sync_history` 尾部的变动标记逻辑。只有在新旧历史的实质内容或顺序发生真实改变时（而非程序内部初始化同步时），才将 `_history_changed` 置为 `True`，根治了冷启动后开合窗口无故弹出“历史发生较大变动是否保存”提示的 Bug；
+        - 修复了 `save_search_history` 方法在比对变动数量时的格式与去重失配缺陷。在读取磁盘 `old_data` 时不仅对其元素执行 `_normalize_record` 自愈剥离，并且在变化比对阶段也对 `old_data` 同样执行 `_normalize_history` 进行去重处理。这确保了新旧列表在比对阶段的格式与去重状态 100% 严密对齐（皆为去重后的纯 query 列表），彻底消除了因磁盘数据中存在重复项、格式不一致而引起的虚假 12 条/36 条变动弹窗误报。
+    - [x] **添加 combo 空指针安全防御**：在 `sync_history` 尾部增加 `if combo:` 保护，防止主界面在没有 history4/5 combo 控件的情况下更新其 values 时抛出 AttributeError 报错。
+    - [x] **修复主进程退出卡死 25 秒与可视化进程退出残留 Bug (Fixed Application Exit Hang & Visualizer Zombie Residuals)**：
+        - 修复了 `instock_MonitorTK.py` 的退出方法 `on_close` 中，调用 `save_search_history` 存档时因未传入阈值导致的后台隐藏模态弹窗挂起主线程 25 秒的致命 Bug，改为传入 `confirm_threshold=9999` 彻底屏蔽退出阶段的任何弹窗阻断；
+        <!-- - 重构了 `trade_visualizer_qt6.py` 的伴生 Pipe 断开捕获逻辑。在 `_poll_command_queue` 捕获到 Pipe 异常断开的第一时间，显式执行窗口关闭 `self.close()` 并退出 `QApplication.quit()`，实现可视化子进程在 TK 主进程退出/强退时的秒级自动注销与完全自毁，彻底根除了僵尸进程残留后台的问题。 -->
+    - [x] **通过回归测试与针对性自测用例**：编写了针对该特性的 6 个自测单元测试用例，并在主回归测试套件 `test_watchlist_lifecycle.py` 中 100% 绿旗通过（11项全部 Passed）。
+
 ## 2026-06-06 19:00
 - [x] **修复 on_close 退出时 UnboundLocalError 异常并清理局部导入 (Fixed on_close UnboundLocalError & Cleaned Up Local Imports)**：
     - [x] **根治 `threading` 局部变量提前引用报错**：对整个 `instock_MonitorTK.py` 进行了全面审计，彻底移除了包括 `on_close`、`wait_all_threads`、`open_spatial_follow_hud`、`_run_dna_audit_batch`、`_on_run_reentry_backtest_menu`、`_on_shortcut_reentry_backtest` 以及异常栈提取中的所有局部 `import threading` 导入，统一并规范使用最顶部全局的 `import threading`（第 22 行）。这彻底解决了由于函数体内后半段存在局部 `import threading` 导致 Python 编译器将整个函数作用域内的 `threading` 误判为局部变量，从而在前半段创建 `exit_timer = threading.Timer(...)` 时抛出 `UnboundLocalError: local variable 'threading' referenced before assignment` 的崩溃问题。

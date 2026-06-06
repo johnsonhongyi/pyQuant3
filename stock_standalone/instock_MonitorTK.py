@@ -3612,7 +3612,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             try:
                 if hasattr(self, 'query_manager'):
-                    self.query_manager.save_search_history()
+                    self.query_manager.save_search_history(confirm_threshold=9999)
             except Exception:
                 pass
 
@@ -4580,7 +4580,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_history2 = self._format_history_list(h2, self.search_map2) 
         self.search_history3 = [r["query"] for r in h3]
         self.search_history4 = self._format_history_list(h4, self.search_map4)
-        self.search_history5 = self._format_history_list(h4, self.search_map5)
+        self.search_history5 = self._format_history_list(h5, self.search_map5)
 
         # [MODIFIED] Update combobox values with formatted history
         self.search_combo1['values'] = self.search_history1
@@ -15343,13 +15343,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 logger.debug(f"KLineMonitor sync failed: {e}")
 
                 # 如果是"使用"动作，且当前历史匹配，同步 Var 以触发 apply_search
-                if source == "use" and selected_query and arg_key == self.query_manager.current_key:
-                    var_name = f"search_var{arg_key[-1]}"
-                    if hasattr(self, var_name):
-                        getattr(self, var_name).set(selected_query)
-                        # 如果是 history4，手动触发一次搜索
-                        if arg_key == "history4":
-                            self.apply_search()
+                if source == "use" and selected_query and arg_key[-8:] == self.query_manager.current_key:
+                    key_suffix = arg_key[-8:]
+                    if key_suffix in ["history4", "history5"]:
+                        # 临时用作 history1 条件进行联合过滤，但不污染 history1
+                        self._temp_history_source = key_suffix
+                        self._temp_history_query = selected_query
+                        self.search_var1.set(selected_query)
+                        self.apply_search()
+                    elif key_suffix == "history1":
+                        # 回归正常的 history1，清空临时状态
+                        self._temp_history_source = None
+                        self._temp_history_query = ""
+                        self.search_var1.set(selected_query)
+                        self.apply_search()
+                    elif key_suffix == "history2":
+                        # 正常的 history2 条件
+                        self.search_var2.set(selected_query)
+                        self.apply_search()
+                    else:
+                        var_name = f"search_var{arg_key[-1]}"
+                        if hasattr(self, var_name):
+                            getattr(self, var_name).set(selected_query)
         
         # ✅ 子窗口同步：转发给策略白盒管理窗口
         if hasattr(self, "_strategy_manager_win") and self._strategy_manager_win and getattr(self._strategy_manager_win, "winfo_exists", lambda: False)():
@@ -15365,6 +15380,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             search_map = self.search_map1
         elif history_attr == 'history2' and hasattr(self, 'search_map2'):
             search_map = self.search_map2
+        elif history_attr == 'history4' and hasattr(self, 'search_map4'):
+            search_map = self.search_map4
+        elif history_attr == 'history5' and hasattr(self, 'search_map5'):
+            search_map = self.search_map5
 
         # [MODIFIED] Reconstruct display label if note exists (for BOTH edited and new paths)
         display_val = val
@@ -15427,12 +15446,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             search_history.insert(0, display_val)
             # if len(search_history) > 20:
             #     search_history[:] = search_history[:20]
-        combo['values'] = search_history
-        try:
-            # Entry shows raw val, list shows formatted display_val
-            combo.set(val) 
-        except Exception:
-            pass
+        if combo:
+            combo['values'] = search_history
+            try:
+                # Entry shows raw val, list shows formatted display_val
+                combo.set(val) 
+            except Exception:
+                pass
 
         # ----------------------
         # ⚠️ 增量同步到 QueryHistoryManager
@@ -15445,16 +15465,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # [MODIFIED] Resolve display label to raw query
             raw_q = search_map.get(q, q) if search_map else q
             
+            # 🛡️ 智能括号剥离拆解：若 raw_q 仍呈现为 "备注 (表达式)"，强力自愈解析以分流 note 和 query
+            note_val = ""
+            if isinstance(raw_q, str) and "(" in raw_q and raw_q.endswith(")"):
+                idx_bracket = raw_q.find('(')
+                if idx_bracket > 0:
+                    note_val = raw_q[:idx_bracket].strip()
+                    raw_q = raw_q[idx_bracket+1:-1].strip()
+
             if raw_q in existing_queries:
                 # 保留原来的 note / starred
-                new_history.append(existing_queries[raw_q])
+                item = existing_queries[raw_q]
+                if note_val and not item.get("note"):
+                    item["note"] = note_val
+                new_history.append(item)
             else:
                 # 新建
-                # if hasattr(self, "_last_value") and self._last_value.find(q) >=0:
-                #     continue
-                new_history.append({"query": raw_q, "starred":  0, "note": ""})
+                new_history.append({"query": raw_q, "starred": 0, "note": note_val})
+
+        # 🛡️ 只有在 new_history 和原 history 的实质内容或顺序发生真实改变时，才标记改变
+        original_history = getattr(self.query_manager, history_attr, [])
+        is_changed = False
+        if len(original_history) != len(new_history):
+            is_changed = True
+        else:
+            for orig, new in zip(original_history, new_history):
+                if orig.get("query") != new.get("query") or orig.get("note") != new.get("note") or orig.get("starred") != new.get("starred"):
+                    is_changed = True
+                    break
 
         setattr(self.query_manager, history_attr, new_history)
+        if is_changed:
+            self.query_manager._history_changed = True
 
         if self.query_manager.current_key == current_key:
             self.query_manager.current_history = new_history
@@ -18232,9 +18274,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
         
-        # 解析映射标签（如果有）
-        if hasattr(self, 'search_map1'):
-            val1 = self.search_map1.get(val1, val1)
+        # 安全自愈机制：如果顶部的 query 已被手动修改，则清空临时状态
+        temp_src = getattr(self, "_temp_history_source", None)
+        if temp_src:
+            current_q = val1
+            if temp_src == "history4" and hasattr(self, 'search_map4'):
+                current_q = self.search_map4.get(current_q, current_q)
+            elif temp_src == "history5" and hasattr(self, 'search_map5'):
+                current_q = self.search_map5.get(current_q, current_q)
+            else:
+                current_q = self.search_map1.get(current_q, current_q)
+                
+            last_temp_q = getattr(self, "_temp_history_query", "")
+            if current_q != last_temp_q:
+                self._temp_history_source = None
+                self._temp_history_query = ""
+                temp_src = None
+
+        # 根据来源分组解析映射标签（避免使用 search_map1 翻译 history4/5 的 label 失败）
+        if temp_src == "history4":
+            if hasattr(self, 'search_map4'):
+                val1 = self.search_map4.get(val1, val1)
+        elif temp_src == "history5":
+            if hasattr(self, 'search_map5'):
+                val1 = self.search_map5.get(val1, val1)
+        else:
+            if hasattr(self, 'search_map1'):
+                val1 = self.search_map1.get(val1, val1)
+                
         if hasattr(self, 'search_map2'):
             val2 = self.search_map2.get(val2, val2)
 
@@ -18251,10 +18318,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         combined_query = " and ".join(parts)
         self._last_value = combined_query
 
-        # 1. 更新搜索历史
+        # 1. 更新搜索历史（防污染：若是临时历史则写入其对应组，绝对不碰 history1）
         try:
             if val1:
-                self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
+                if temp_src == "history4":
+                    self.sync_history(val1, self.search_history4, None, "history4", "history4")
+                elif temp_src == "history5":
+                    self.sync_history(val1, self.search_history5, None, "history5", "history5")
+                else:
+                    self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
             if val2:
                 self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
         except Exception as ex:
@@ -18389,6 +18461,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """清空指定搜索框内容 (1=bottom, 2=middle/ctrl, 3=history4/ctrl_new)"""
         if which == 1:
             self.search_var1.set("")
+            self._temp_history_source = None
+            self._temp_history_query = ""
         elif which == 2:
             self.search_var2.set("")
         # elif which == 3:
