@@ -473,11 +473,11 @@ class QueryHistoryManager:
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
                         loaded_data = json.load(f)
-                        old_data["history1"] = self._dedup(loaded_data.get("history1", []))
-                        old_data["history2"] = self._dedup(loaded_data.get("history2", []))
-                        old_data["history3"] = self._dedup(loaded_data.get("history3", []))
-                        old_data["history4"] = self._dedup(loaded_data.get("history4", []))
-                        old_data["history5"] = self._dedup(loaded_data.get("history5", []))
+                        old_data["history1"] = [self._normalize_record(r) for r in self._dedup(loaded_data.get("history1", []))]
+                        old_data["history2"] = [self._normalize_record(r) for r in self._dedup(loaded_data.get("history2", []))]
+                        old_data["history3"] = [self._normalize_record(r) for r in self._dedup(loaded_data.get("history3", []))]
+                        old_data["history4"] = [self._normalize_record(r) for r in self._dedup(loaded_data.get("history4", []))]
+                        old_data["history5"] = [self._normalize_record(r) for r in self._dedup(loaded_data.get("history5", []))]
                     except json.JSONDecodeError:
                         pass
 
@@ -501,8 +501,12 @@ class QueryHistoryManager:
                 new_set = {r['query'] for r in new_list}
                 return len(new_set - old_set) + len(old_set - new_set)
 
-            delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
-            delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
+            # ⭐ 核心修复：比对前对旧数据老列表同样执行 _normalize_history 进行去重和规整，确保对比双方的规则完全对齐，彻底消除由于去重或微小格式规整导致的虚假 12 条/36 条变动
+            old_h1_norm = self._normalize_history(old_data.get("history1", []))
+            old_h2_norm = self._normalize_history(old_data.get("history2", []))
+
+            delta1 = changes_count(old_h1_norm, merged_data["history1"])
+            delta2 = changes_count(old_h2_norm, merged_data["history2"])
 
             if delta1 + delta2 >= confirm_threshold:
                 if not messagebox.askyesno("确认保存", f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"):
@@ -587,9 +591,33 @@ class QueryHistoryManager:
                     q = q_dict["query"]
             except:
                 pass
-            return {"query": q, "starred": r.get("starred", False), "note": r.get("note", "")}
+            
+            note = r.get("note", "")
+            # 🛡️ 智能括号拆解自愈：如果磁盘或内存中存入的 query 带有 "备注 (表达式)"，自动拆分出真正的 query
+            if isinstance(q, str) and "(" in q and q.endswith(")"):
+                idx_bracket = q.find('(')
+                if idx_bracket > 0:
+                    note_extracted = q[:idx_bracket].strip()
+                    query_extracted = q[idx_bracket+1:-1].strip()
+                    if query_extracted:
+                        q = query_extracted
+                        if not note:
+                            note = note_extracted
+
+            return {"query": q, "starred": r.get("starred", False), "note": note}
         elif isinstance(r, str):
-            return {"query": r, "starred": 0, "note": ""}
+            # 对纯字符串也有自愈拆解
+            q = r.strip()
+            note = ""
+            if "(" in q and q.endswith(")"):
+                idx_bracket = q.find('(')
+                if idx_bracket > 0:
+                    note_extracted = q[:idx_bracket].strip()
+                    query_extracted = q[idx_bracket+1:-1].strip()
+                    if query_extracted:
+                        q = query_extracted
+                        note = note_extracted
+            return {"query": q, "starred": 0, "note": note}
         else:
             return {"query": str(r), "starred": 0, "note": ""}
 
@@ -865,6 +893,7 @@ class QueryHistoryManager:
             if callable(self.sync_history_callback):
                 self.sync_history_callback(search_history5=self.history5, source="use", selected_query=query)
         
+        self._history_changed = True
         self.refresh_tree()
         # self.save_search_history() # 不再不停自动保存，由用户应用过滤器或关闭时保存
 
