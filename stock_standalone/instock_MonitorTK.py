@@ -3375,7 +3375,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"[UI] 全量队列强制清理失败: {e}\n{traceback.format_exc()}")
 
     def wait_all_threads(self, timeout=0.5):
-        import threading
         main = threading.current_thread()
         for t in threading.enumerate():
             # ❗ 跳过当前主线程以及所有守护线程 (daemon=True)
@@ -3967,7 +3966,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     print(f"Error fetching remaining children: {e_child}")
 
                 print("Remaining threads:")
-                import threading
                 for t in threading.enumerate():
                     print(f"THREAD: {t.name} id={t.ident} daemon={t.daemon}")
 
@@ -6796,7 +6794,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             import traceback
             import sys
-            import threading
             # 🛡️ [HIGH-SECURITY] 使用 100% 纯 Python traceback 机制安全提取主线程堆栈，
             # 彻底杜绝 faulthandler.dump_traceback 向无 fileno 的内存流写入时触发的底层 C 级别 Access Violation 闪退
             main_frame = sys._current_frames().get(threading.main_thread().ident)
@@ -7123,7 +7120,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_spatial_follow_hud(self, sector_name: str, signal_item: Optional[Any] = None, auto_popup: bool = False) -> None:
         """打开或更新置顶跟单指挥所 SpatialFollowHUD (Thread-safe)"""
-        import threading
         is_main_thread = (threading.current_thread() == threading.main_thread())
         
         if not is_main_thread:
@@ -8041,8 +8037,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 保留 DISPLAY_COLS
         display_df = df[DISPLAY_COLS]
         self.tree.delete(*self.tree.get_children())
+
+        # 获取需要转换为 float 格式化的自定义列
+        try:
+            co2float_cols = cct.CFG.co2float
+        except Exception:
+            co2float_cols = ["signal_strength", "signal4d"]
+
+        def _fmt_sig(v):
+            try:
+                return f"{float(v):.2f}"
+            except:
+                return str(v)
+
         for idx, row in display_df.iterrows():
-            self.tree.insert("", "end", values=[row[col] for col in DISPLAY_COLS])
+            code_val = str(idx).zfill(6)
+            raw_vals = [row[col] for col in DISPLAY_COLS]
+            vals = [code_val] + [
+                _fmt_sig(v) if DISPLAY_COLS[i] in co2float_cols and pd.notna(v) else (v if pd.notna(v) else "")
+                for i, v in enumerate(raw_vals)
+            ]
+            self.tree.insert("", "end", values=vals)
 
     def refresh_tree_with_query2(self, query_dict=None):
         """
@@ -8740,7 +8755,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to remove favorites batch: {e}")
 
     def _run_dna_audit_batch(self, code_to_name, end_date=None):
-        import threading
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
         from tkinter import messagebox
         
@@ -9456,7 +9470,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _on_run_reentry_backtest_menu(self, code: str, name: str):
         """右键菜单触发 Re-entry 模拟交易回测，与 Alt+X 快捷键一致，不弹出计算提示窗口，直接后台异步运行并在精美独立弹窗中非阻塞展示结论"""
         try:
-            import threading
             from scratch.test_reentry_backtest import run_backtest_and_get_report
             from JohnsonUtil.commonTips import timed_ctx
             
@@ -12275,7 +12288,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _on_shortcut_reentry_backtest(self, event=None):
         """Alt+X 一键触发 Re-entry 历史回测 (大屏 Tkinter 端)"""
-        import threading
         
         # 1. 优先从当前 Treeview 焦点行中提取最纯净的代码和名字
         item = self.tree.focus()
