@@ -1,3 +1,17 @@
+## 2026-06-08 18:35
+- [x] **修复由于 realtime Tick price_map 缺失/NaN 导致 fallback 到 close 产生假止损触发 Bug (Fixed False Stop-Loss Triggered by Fallback to Yesterday's Close)**：
+    - [x] **根治 _bg_get_realtime_price_map 中的 close fallback 逻辑**：排查并定位了 `instock_MonitorTK.py` 的 `_bg_get_realtime_price_map` 方法中，在 real-time price 临时出现空值或 NaN 时（如开盘瞬时、数据同步间隙或网络 Tick 延迟），会错误 fallback 到 `close`（即昨日收盘价/日线级别收盘价）的逻辑 Bug。在 Mock 交易追踪时，这导致当前价格（`current_price`）被意外更新为较低的昨日收盘价，直接触及止损防线，进而在开仓后几秒内错误触发假止损平仓。
+    - [x] **收紧实时行情采信列范围**：将 targeted 模式和 vectorized 模式下的列范围限制为仅包含当天活跃盘中的实时交易价格字段 `['trade', 'price', 'now']`，彻底剔除 `close` 列。如果在实时数据中这三列均为空值/NaN，则不再向 `price_map` 中写入该股价格，使得 Mock 交易网关在更新价格时，该股直接跳过更新，安全保持上一个有效的最新实盘成交价，直到下一个有效的 Tick 传入，从而彻底消除了瞬间的假止损误报。
+    - [x] **单元与集成测试绿旗验证**：在 `scratch/test_realtime_price_fallback.py` 中编写并运行了针对 fallback 逻辑的单元测试，模拟各种实时列缺失与 close 列存在的极端场景，测试 100% 绿旗通过。同时再次执行系统全生命周期核心回归测试 `pytest test_watchlist_lifecycle.py` 11 项用例全部成功（100% Passed），系统稳定，零业务侧回归破坏。
+
+## 2026-06-08 12:20
+- [x] **实现信号分类列表个股重复信号折叠/去重过滤功能 (Implemented Stock Signals Deduplication & Folding)**：
+    - [x] **添加 `[x] 折叠重复` 控制复选框**：在 `signal_dashboard_panel.py` 顶部控制区的 `corner_widget` 容器中，新增了 `self.fold_check` 复选框（默认开启），采用紧凑扁平化 QSS 样式。绑定 `_on_fold_check_changed` 信号槽，触发一键重新渲染并保存当前 UI 状态。
+    - [x] **重构全量刷新数据归类 (`_refresh_all_tables`)**：当启用折叠重复时，在归类历史信号阶段对 `全部信号`、各分类信号及 `其它信号` 进行 `code` 去重；使用 `OrderedDict` 并应用“先 pop 后赋值”的移位覆盖方案，确保个股仅保留最新的那条触发记录（包括最新的触发时间、详情描述），且其在列表中的位置完全对齐最新触发的时间线。若未启用折叠，则无损恢复展示全量历史信号明细。
+    - [x] **重构单条增量插入过滤 (`_insert_row`)**：将原先无条件的 code 覆盖去重机制修改为由 `fold_check.isChecked()` 控制。当勾选“折叠重复”时才触发移除已存旧行的逻辑，确保折叠状态与增量事件流入时的物理响应 100% 对齐。
+    - [x] **跨会话持久化与自愈**：在 `_collect_ui_state` 状态导出与 `_restore_ui_state` 状态恢复链路中，补齐了对 `fold_duplicates` checked 状态的存取逻辑。在 `_restore_ui_state` 完成配置恢复后，自动触发一次 `_refresh_all_tables` 进行数据对齐，避免了冷启动数据流错乱。
+    - [x] **全面通过自动化与单元功能测试**：通过运行全量核心生命周期回归测试 `pytest test_watchlist_lifecycle.py`（11项用例 100% Passed），并在 `scratch/test_fold_duplicates.py` 中编写自测试用例完全验证了折叠与去重的正确性。
+
 ## 2026-06-07 00:23
 - [x] **实现临时使用 history3/history4/history5 等历史列过滤且防污染功能 (Implemented Temp History Group Filtering & Prevented Pollution)**：
     - [x] **实现临时过滤与主 query 桥接**：在 `instock_MonitorTK.py` 中的 `sync_history_from_QM` 接收到 `history3`、`history4` 或 `history5` 的使用动作时，拦截并设置 `self._temp_history_source` 临时标志，将选中的 query 同步至顶部 `search_var1` 中展示，并直接拉起联合搜索过滤。
