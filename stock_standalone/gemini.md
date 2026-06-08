@@ -1,3 +1,11 @@
+## 2026-06-08 19:15
+- [x] **统一于 `sys_utils.py` 实现统一的交易时间接口并重构全部调用方 (Unified Trading Hours Check Interface in sys_utils.py & Refactored All Callers)**：
+    - [x] **实现统一的交易时间判定接口**：在 `sys_utils.py` 中新增 `is_active_trading_hours(bypass: bool = False) -> bool` 接口。该接口统合了标准 A 股连续竞价交易时间（09:30-11:30, 13:00-15:00）的判定。同时，智能集成了测试环境（自动检测 `pytest` 与 `test` 命令行参数）判定，在测试时自动豁免并返回 `True`，保证了测试用例可跨时区全天候运行。
+    - [x] **重构全部零散时间判定**：将原本分散散落于 `paper_adapter.py`、`trade_gateway.py`、`kernel_service.py`、`journal.py`、`stock_selection_window.py` 与 `instock_MonitorTK.py` 中的多处硬编码或重复制约逻辑全部移除，统一改为导入 `sys_utils` 并调用 `sys_utils.is_active_trading_hours`，极大提升了系统的工程整洁度（DRY 原则）。
+    - [x] **修复 bg_kernel_auto_execute_once 中 is_trade_day 未定义 NameError 崩溃**：修复了在 `instock_MonitorTK.py` 中由于移除旧的 inline 时间变量导致竞价反转策略触发口（第 1610 行）发生 `NameError: name 'is_trade_day' is not defined` 崩溃的问题，重新规范导入 `JohnsonUtil.commonTips` 并解析出 `is_trade_day` 与 `now_time`。
+    - [x] **通过回归测试与时段校验测试**：再次运行 `pytest test_watchlist_lifecycle.py`（11 项系统生命周期核心测试全部 100% 通过），同时在 `scratch/test_trading_hours_restriction.py` 中验证了新重构后的时间拦截网关对盘前/盘后委托订单的拦截有效性，测试全部 OK。
+
+
 ## 2026-06-08 18:35
 - [x] **修复由于 realtime Tick price_map 缺失/NaN 导致 fallback 到 close 产生假止损触发 Bug (Fixed False Stop-Loss Triggered by Fallback to Yesterday's Close)**：
     - [x] **根治 _bg_get_realtime_price_map 中的 close fallback 逻辑**：排查并定位了 `instock_MonitorTK.py` 的 `_bg_get_realtime_price_map` 方法中，在 real-time price 临时出现空值或 NaN 时（如开盘瞬时、数据同步间隙或网络 Tick 延迟），会错误 fallback 到 `close`（即昨日收盘价/日线级别收盘价）的逻辑 Bug。在 Mock 交易追踪时，这导致当前价格（`current_price`）被意外更新为较低的昨日收盘价，直接触及止损防线，进而在开仓后几秒内错误触发假止损平仓。

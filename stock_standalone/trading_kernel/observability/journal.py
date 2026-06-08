@@ -127,10 +127,9 @@ class JsonlJournal:
             except ImportError:
                 import common as cct
 
-        # 计算当前是否在交易活跃期 (交易日且 09:15-11:30 或 13:00-15:05)
-        is_trade_day = cct.get_trade_date_status()
-        now_time = now_dt.hour * 100 + now_dt.minute
-        is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
+        # 计算当前是否在交易活跃期 (交易日且 09:30-11:30 或 13:00-15:00)
+        import sys_utils
+        is_active_trading = sys_utils.is_active_trading_hours(bypass=False)
 
         # 提取当前最新价格 (用于细粒度防重，放行有实质价格或止损价格波动的真实数据更新)
         current_price = _safe_get(payload.get("kernel_result", {}), "kernel_stop_price") or _safe_get(sig, "price") or 0.0

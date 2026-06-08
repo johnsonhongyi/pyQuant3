@@ -394,17 +394,13 @@ class PaperExecutionAdapter(ExecutionAdapter):
             logger.error(f"⚠️ [PaperAdapter] Error reading initial_capital: {e}, fallback to default 1000000.0")
             equity = 1000000.0
 
+        import sys_utils
+        bypass = self._is_test or self._is_simulation
         if action in {"BUY", "ADD"}:
             # 校验是否为交易日交易时间（测试环境/模拟模式豁免）
-            if not (self._is_test or self._is_simulation):
-                import JohnsonUtil.commonTips as cct
-                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
-                now_t = cct.get_now_time_int()
-                if 915 <= now_t < 925:
-                    is_trading_hour = False
-                if not is_trading_hour:
-                    logger.warning(f"[Trade Gate] Rejected BUY/ADD order for {code} because current time is before 09:25:00 or not within trading hours.")
-                    return False
+            if not sys_utils.is_active_trading_hours(bypass=bypass):
+                logger.warning(f"[Trade Gate] Rejected BUY/ADD order for {code} because current time is not within active trading hours (09:30-11:30, 13:00-15:00).")
+                return False
 
             # 计算开仓金额
             target_value = equity * order.size_pct
@@ -449,15 +445,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 )
 
         elif action in {"SELL", "REDUCE"}:
-            if not (self._is_test or self._is_simulation):
-                import JohnsonUtil.commonTips as cct
-                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
-                now_t = cct.get_now_time_int()
-                if 915 <= now_t < 925:
-                    is_trading_hour = False
-                if not is_trading_hour:
-                    logger.warning(f"[Trade Gate] Rejected {action} order for {code} because current time is before 09:25:00 or not within trading hours.")
-                    return False
+            if not sys_utils.is_active_trading_hours(bypass=bypass):
+                logger.warning(f"[Trade Gate] Rejected {action} order for {code} because current time is not within active trading hours (09:30-11:30, 13:00-15:00).")
+                return False
 
             if code not in self.account.positions:
                 return False
