@@ -923,11 +923,8 @@ class TradingKernelService:
                 import common as cct
         
         # 获取工作日与交易时间
-        is_trade_day = cct.get_trade_date_status()
-        now_dt = datetime.now()
-        now_time = now_dt.hour * 100 + now_dt.minute
-        # 正常活跃时段：09:15-11:30, 13:00-15:05
-        is_active = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
+        import sys_utils
+        is_active = sys_utils.is_active_trading_hours(bypass=False)
         if not is_active:
             logger.warning("⚠️ [Preconditions] Currently NON_TRADING_SESSION, but allowing LIVE_AUTO mode pre-set. Orders will remain blocked until the session starts.")
 

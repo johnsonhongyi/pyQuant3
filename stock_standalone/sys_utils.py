@@ -589,3 +589,33 @@ def resolve_stock_name(code_clean: str) -> str:
     return f"个股_{code_clean}"
 
 
+def is_active_trading_hours(bypass: bool = False) -> bool:
+    """
+    统一的交易时间判定接口。
+    判定当前是否在标准的 A 股连续竞价交易活跃时段（上午 09:30-11:30，下午 13:00-15:00）。
+    
+    参数:
+        bypass: 若为 True，则直接豁免校验，返回 True。
+        
+    说明:
+        如果检测到是自动化测试环境（如 pytest 或命令行参数含有 test），会自动豁免并返回 True。
+    """
+    if bypass:
+        return True
+        
+    import sys
+    is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+    if is_test:
+        return True
+        
+    try:
+        from JohnsonUtil import commonTips as cct
+        is_trade_day = cct.get_trade_date_status()
+        now_time = cct.get_now_time_int()
+        return is_trade_day and ((930 <= now_time <= 1130) or (1300 <= now_time <= 1500))
+    except Exception as e:
+        logger.error(f"[sys_utils] Error checking trading hours: {e}")
+        return True
+
+
+

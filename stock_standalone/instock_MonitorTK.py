@@ -1603,12 +1603,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 trade_gw.update_prices(price_map)
             trade_gw.check_stop_loss()
 
-            is_trade_day = cct.get_trade_date_status()
-            now_dt = datetime.now()
-            now_time = now_dt.hour * 100 + now_dt.minute
-            is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
+            import sys_utils
+            is_active_trading = sys_utils.is_active_trading_hours(bypass=False)
 
             # 🚀 [NEW] Sentiment Reversal Engine 09:25 AM ~ 10:30 AM Action Window
+            import JohnsonUtil.commonTips as cct
+            is_trade_day = cct.get_trade_date_status()
+            now_time = cct.get_now_time_int()
             if is_trade_day and 925 <= now_time <= 1030:
                 if getattr(self, "_bg_auction_gate_run_today", "") != today_str:
                     try:

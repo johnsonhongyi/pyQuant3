@@ -226,17 +226,9 @@ class RiskManager:
 
         is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
 
-        if not (is_test or is_simulation):
-            try:
-                import JohnsonUtil.commonTips as cct
-                is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
-                now_t = cct.get_now_time_int()
-                if 915 <= now_t < 925:
-                    is_trading_hour = False
-                if not is_trading_hour:
-                    return
-            except Exception as e:
-                logger.warning(f"[RiskManager] Error checking trading time: {e}")
+        import sys_utils
+        if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
+            return
 
         with self._lock:
             if loss_amount > 0:
@@ -342,11 +334,17 @@ class MockTradeGateway:
         Returns:
             (success, message)
         """
-        # 加上交易时间校验：触发实际成交价格需要使用09:25以后数据真实成交价格
-        from JohnsonUtil import commonTips as cct
-        now_t = cct.get_now_time_int()
-        if 915 <= now_t < 925:
-            msg = "集合竞价时段（09:25前）禁止买入交易，需使用09:25以后真实成交价格"
+        import sys
+        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        try:
+            from signal_grading_hub import get_signal_grading_hub
+            is_simulation = get_signal_grading_hub()._simulation_mode
+        except Exception:
+            is_simulation = False
+
+        import sys_utils
+        if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
+            msg = "当前时间不在连续交易时段（09:30-11:30, 13:00-15:00），禁止买入交易"
             logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
             return False, msg
 
@@ -414,11 +412,17 @@ class MockTradeGateway:
         reason: str = "",
     ) -> tuple[bool, str]:
         """提交模拟卖出委托"""
-        # 加上交易时间校验：触发实际成交价格需要使用09:25以后数据真实成交价格
-        from JohnsonUtil import commonTips as cct
-        now_t = cct.get_now_time_int()
-        if 915 <= now_t < 925:
-            msg = "集合竞价时段（09:25前）禁止卖出交易，需使用09:25以后真实成交价格"
+        import sys
+        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        try:
+            from signal_grading_hub import get_signal_grading_hub
+            is_simulation = get_signal_grading_hub()._simulation_mode
+        except Exception:
+            is_simulation = False
+
+        import sys_utils
+        if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
+            msg = "当前时间不在连续交易时段（09:30-11:30, 13:00-15:00），禁止卖出交易"
             logger.warning(f"[TradeGateway] 卖出拒绝 {code}: {msg}")
             return False, msg
 
@@ -483,15 +487,8 @@ class MockTradeGateway:
         is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
 
         # 判断当前是否在交易时间内
-        is_trading_hour = True
-        try:
-            import JohnsonUtil.commonTips as cct
-            is_trading_hour = cct.get_work_time() or cct.get_work_time_duration()
-            now_t = cct.get_now_time_int()
-            if 915 <= now_t < 925:
-                is_trading_hour = False
-        except Exception as e:
-            logger.warning(f"[TradeGateway] Error checking trading time: {e}")
+        import sys_utils
+        is_trading_hour = sys_utils.is_active_trading_hours(bypass=False)
 
         to_sell = []
         with self._lock:

@@ -3943,10 +3943,8 @@ def _kernel_auto_execute_once(self, auto_mode=False):
             messagebox.showwarning("Kernel", "决策引擎未初始化")
             return
 
-    is_trade_day = cct.get_trade_date_status()
-    now_dt = datetime.now()
-    now_time = now_dt.hour * 100 + now_dt.minute
-    is_active_trading = is_trade_day and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1505))
+    import sys_utils
+    is_active_trading = sys_utils.is_active_trading_hours(bypass=False)
 
     # 动态初始化今日去重缓存
     today_str = datetime.now().strftime("%Y-%m-%d")
