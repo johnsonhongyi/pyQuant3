@@ -1274,6 +1274,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             except Exception:
                 continue
 
+        # [NEW] 保存折叠重复个股状态
+        if hasattr(self, 'fold_check'):
+            data['fold_duplicates'] = self.fold_check.isChecked()
+
         return data
     def _save_ui_state(self):
         """高性能保存表格布局状态（Dirty Check + 防重复写盘）"""
@@ -1354,6 +1358,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._is_initializing = False
                 return
             
+            # [NEW] 恢复折叠重复个股状态
+            if 'fold_duplicates' in ui_state and hasattr(self, 'fold_check'):
+                self.fold_check.blockSignals(True)
+                self.fold_check.setChecked(bool(ui_state['fold_duplicates']))
+                self.fold_check.blockSignals(False)
+            
             restored_count = 0
             for name, table in self.tables.items():
                 clean_name = self._clean_tab_name(name)
@@ -1367,6 +1377,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._reapply_table_stretch_mode(name, table)
             
             logger.debug(f"✅ [Dashboard] UI state restored for {restored_count} tables.")
+            
+            # [NEW] 恢复配置后触发一次全表刷新，确保折叠状态正确渲染
+            self._refresh_all_tables()
             
             # 恢复完成后，采集当前快照作为 dirty-check 基准
             QTimer.singleShot(200, self._finalize_restore)
@@ -1690,9 +1703,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         corner_lay = QHBoxLayout(corner_widget)
         corner_lay.setContentsMargins(0, 0, 10, 0)
         corner_lay.setSpacing(5)
+        
+        # [NEW] 折叠重复个股复选框
+        self.fold_check = QCheckBox("折叠重复")
+        self.fold_check.setStyleSheet("QCheckBox { color: #aaa; font-weight: bold; font-size: 8.5pt; } QCheckBox:hover { color: #fff; }")
+        self.fold_check.setChecked(True) # 默认开启折叠
+        self.fold_check.stateChanged.connect(self._on_fold_check_changed)
+        
         corner_lay.addWidget(self.type_filter)
         corner_lay.addWidget(self.search_input)
         corner_lay.addWidget(self.btn_dna_audit_signal)
+        corner_lay.addWidget(self.fold_check)
         corner_lay.addWidget(self.manual_run_btn)
         corner_lay.addWidget(self.reset_btn)
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
@@ -3670,16 +3691,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # 🔍 [PERF] O(1) 查找现有行索引
             table_cache = self._row_cache.setdefault(table, {})
             existing_row = -1
-            old_meta = table_cache.get(code)
-            if old_meta:
-                try:
-                    # 兼容旧版本直接存 Item 的情况
-                    old_item = old_meta['item'] if isinstance(old_meta, dict) else old_meta
-                    existing_row = table.row(old_item)
-                    if existing_row >= 0:
-                        table.removeRow(existing_row)
-                except (RuntimeError, Exception): 
-                    pass 
+            if self.fold_check.isChecked():
+                old_meta = table_cache.get(code)
+                if old_meta:
+                    try:
+                        # 兼容旧版本直接存 Item 的情况
+                        old_item = old_meta['item'] if isinstance(old_meta, dict) else old_meta
+                        existing_row = table.row(old_item)
+                        if existing_row >= 0:
+                            table.removeRow(existing_row)
+                    except (RuntimeError, Exception): 
+                        pass 
             
             # [A1] insertRow(0) → appendRow (O(1) 尾部追加)
             new_row = table.rowCount()
@@ -3823,25 +3845,62 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             # 2. 批量归类（内存操作，亚毫秒级）
             table_events = {name: [] for name in self.tables.keys()}
-            for event in self._all_events:
-                payload = event.payload
-                # 简单复刻 _append_to_tables 的逻辑（仅分组）
-                if event.event_type in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
-                    table_events["全部信号"].append(event)
+            
+            fold_duplicates = self.fold_check.isChecked() if hasattr(self, 'fold_check') else False
+            
+            if fold_duplicates:
+                table_events_map = {name: OrderedDict() for name in self.tables.keys()}
+                for event in self._all_events:
+                    payload = event.payload
+                    code = payload.get('code', '')
+                    if not code: continue
                     
-                    pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
-                    detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
-                    
-                    matched_cats = 0
-                    for cat, keywords in CATEGORY_MAP.items():
-                        if not keywords: continue
-                        if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
-                            if cat in table_events:
-                                table_events[cat].append(event)
-                                matched_cats += 1
-                    
-                    if matched_cats == 0 and "其它信号" in table_events:
-                        table_events["其它信号"].append(event)
+                    if event.event_type in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
+                        if code in table_events_map["全部信号"]:
+                            table_events_map["全部信号"].pop(code)
+                        table_events_map["全部信号"][code] = event
+                        
+                        pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
+                        detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
+                        
+                        matched_cats = 0
+                        for cat, keywords in CATEGORY_MAP.items():
+                            if not keywords: continue
+                            if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
+                                if cat in table_events_map:
+                                    if code in table_events_map[cat]:
+                                        table_events_map[cat].pop(code)
+                                    table_events_map[cat][code] = event
+                                    matched_cats += 1
+                        
+                        if matched_cats == 0 and "其它信号" in table_events_map:
+                            if code in table_events_map["其它信号"]:
+                                table_events_map["其它信号"].pop(code)
+                            table_events_map["其它信号"][code] = event
+                
+                for name in table_events.keys():
+                    if name in table_events_map:
+                        table_events[name] = list(table_events_map[name].values())
+            else:
+                for event in self._all_events:
+                    payload = event.payload
+                    # 简单复刻 _append_to_tables 的逻辑（仅分组）
+                    if event.event_type in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
+                        table_events["全部信号"].append(event)
+                        
+                        pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
+                        detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
+                        
+                        matched_cats = 0
+                        for cat, keywords in CATEGORY_MAP.items():
+                            if not keywords: continue
+                            if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
+                                if cat in table_events:
+                                    table_events[cat].append(event)
+                                    matched_cats += 1
+                        
+                        if matched_cats == 0 and "其它信号" in table_events:
+                            table_events["其它信号"].append(event)
                 
             # 3. 物理灌入（O(N) 填充）
             for name, table in self.tables.items():
@@ -4169,6 +4228,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._update_stats_display()
         except Exception as e:
             logger.debug(f"Update market stats failed: {e}")
+
+    def _on_fold_check_changed(self, state):
+        """[GUI] 折叠重复状态改变时，触发全表刷新"""
+        self._refresh_all_tables()
+        self._save_ui_timer.start() # 触发防抖保存
 
     def _on_card_clicked(self, key):
         # 1. 映射表定义

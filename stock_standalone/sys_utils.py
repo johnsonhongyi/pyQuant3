@@ -136,7 +136,7 @@ def get_base_path() -> str:
             if os.path.normpath(os.path.abspath(this_dir)).lower() != os.path.normpath(os.path.abspath(app_root)).lower():
                 # 还原环境变量，保障后续或其它子进程获取一致
                 os.environ["NUITKA_ONEFILE_DIRECTORY"] = this_dir
-                logger.warning(f"[get_base_path] Nuitka子进程通过 __file__ 自愈还原临时释放目录: {this_dir}")
+                logger.debug(f"[get_base_path] Nuitka子进程通过 __file__ 自愈还原临时释放目录: {this_dir}")
                 return this_dir
         except Exception as e:
             logger.error(f"[get_base_path] Nuitka子进程通过 __file__ 还原路径失败: {e}")

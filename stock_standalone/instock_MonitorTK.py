@@ -1505,12 +1505,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except ValueError:
                             pass
                     if row is not None:
-                        price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
+                        # We only use today's active trading price columns: 'trade', 'price', and 'now'.
+                        # We MUST NOT fall back to 'close' (yesterday's close) to avoid false stop loss triggers.
+                        price = float(row.get('trade', row.get('price', row.get('now', 0))) or 0)
                         if price > 0:
                             price_map[code_str] = price
             else:
                 # Vectorized fast pandas extraction of entire price map
-                cols = ['trade', 'price', 'close']
+                # Only use today's active trading price columns, excluding 'close'.
+                cols = ['trade', 'price', 'now']
                 available_cols = [c for c in cols if c in df_rt.columns]
                 if available_cols:
                     series = None
