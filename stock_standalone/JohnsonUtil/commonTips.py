@@ -704,7 +704,7 @@ class GlobalConfig:
         self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=200, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
-        self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=1800, value_type="int")
+        self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=3600, value_type="int")
         self.mem_threshold_mb = self.get_with_writeback("general", "mem_threshold_mb", fallback=1800, value_type="int")
         self.kline_cache_max_len = self.get_with_writeback("general", "kline_cache_max_len", fallback=300, value_type="int")
         self.concept_top10_window_col = self.get_with_writeback("general", "concept_top10_window_col", fallback=["code", "name", "rank", "percent", "dff", "volume","red","win"], value_type="list")
