@@ -3942,6 +3942,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'stop_flag') and self.stop_flag is not None:
             if not self.stop_flag.value:
                 logger.info("[Lifecycle] 检测到 stop_flag 为 False，Visualizer 正在自启退出程序...")
+                try:
+                    self.save_splitter_state()
+                    self.save_window_position_qt_visual(self, "trade_visualizer")
+                    if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+                        self.save_window_position_qt(self.kline_detail_win, "kline_detail_window")
+                    logger.info("[Lifecycle] 自毁前同步保存窗口及分割器状态成功。")
+                except Exception as e:
+                    logger.error(f"[Lifecycle] 自毁保存状态失败: {e}")
                 self.close()
                 # 保险：3秒后若还没关，强制退出
                 QTimer.singleShot(3000, lambda: sys.exit(0))
@@ -6883,6 +6891,14 @@ class MainWindow(QMainWindow, WindowMixin):
         """轮询内部指令 Pipe (优化版：合并同轮重复切换)"""
         if hasattr(self, 'stop_flag') and self.stop_flag and not self.stop_flag.value:
             logger.info("[Visualizer] Stop flag detected (False), initiating self-destruct...")
+            try:
+                self.save_splitter_state()
+                self.save_window_position_qt_visual(self, "trade_visualizer")
+                if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+                    self.save_window_position_qt(self.kline_detail_win, "kline_detail_window")
+                logger.info("[Visualizer] 自毁前同步保存窗口及分割器状态成功。")
+            except Exception as e:
+                logger.error(f"[Visualizer] 自毁保存状态失败: {e}")
             self.close()
             QApplication.quit()
             return
