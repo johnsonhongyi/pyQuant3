@@ -1389,22 +1389,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _reapply_table_stretch_mode(self, tab_name: str, table: QTableWidget):
         """
-        ⭐ [KEY FIX] restoreState() 会将 Stretch 模式覆盖为 Interactive，
-        导致列无法铺满表格，右侧出现白色空白。
-        必须在每次 restoreState 之后重新应用 Stretch 模式。
+        统一设置所有表格的所有列为 Interactive 模式，允许手动调整，
+        同时设置 setStretchLastSection(True) 让最后一列自适应拉伸，填满右侧空白。
         """
         header = table.horizontalHeader()
         ncols = table.columnCount()
         if ncols == 0:
             return
-        # 信号分类 Tab（8列）：col5「详情」拉伸
-        _SIGNAL_TABS = {"全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"}
-        if any(t in tab_name for t in _SIGNAL_TABS):
-            if ncols > 5:
-                header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-            return
-        # 其余所有 Tab：最后一列拉伸填充整个表格宽度
-        header.setSectionResizeMode(ncols - 1, QHeaderView.ResizeMode.Stretch)
+        for j in range(ncols):
+            header.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
 
     def _finalize_restore(self):
         """恢复完成后的收尾：采集快照 + 解除初始化锁"""
@@ -1823,10 +1817,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._align_table_headers_left(table)
         
         h = table.horizontalHeader()
-        # ⭐ [KEY FIX] Interactive 模式 + 最后一列拉伸，确保铺满整个表格宽度
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         h.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        h.setSectionResizeMode(len(cols) - 1, QHeaderView.ResizeMode.Stretch)  # 「详情」自动拉伸
-        # 预设列宽（详情列为 Stretch 无需设置宽度）
+        h.setStretchLastSection(True)
+        # 预设列宽
         table.setColumnWidth(0, 80)
         table.setColumnWidth(1, 60)
         table.setColumnWidth(2, 100)
@@ -1873,9 +1867,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; alternate-background-color: #161b29; }")
         table.setAlternatingRowColors(True)
         header = table.horizontalHeader()
-        # ⭐ Interactive 模式 + col5「详情」拉伸，填满整个表格宽度
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)  # 详情自动拉伸
+        header.setStretchLastSection(True)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -1909,9 +1903,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        # [PERF] Interactive 模式
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        header.setStretchLastSection(True)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_cell_clicked)
@@ -1981,8 +1975,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # ⭐ [KEY FIX] 必须设置 Interactive 模式，防止数据刷新时 Qt 自动 ResizeToContents 覆盖持久化列宽
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        # 最后一列「理由」自动拉伸
-        header.setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.Stretch)
+        # 最后一列「理由」允许手动调整列宽并自动拉伸填充剩余空间
+        header.setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
         
         # ⭐ [KEY FIX] 预设紧凑默认列宽（仅在无持久化配置时生效，有配置时由 showEvent 覆盖）
         default_widths = {
@@ -2026,9 +2021,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        # [PERF] Interactive 模式
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 跟风明细拉伸
+        header.setStretchLastSection(True)
         
         # [MOD] 统一单击与双击联动处理器
         table.cellClicked.connect(self._on_sector_table_clicked)
@@ -2063,9 +2058,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        # [PERF] Interactive 模式
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 标签拉伸
+        header.setStretchLastSection(True)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -2099,9 +2094,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.setStyleSheet("QTableWidget { background-color: #0d121f; color: #ffffff; }")
         
         header = table.horizontalHeader()
-        # [PERF] Interactive 模式
+        # ⭐ 统一采用 Interactive 模式 + setStretchLastSection(True) 自适应拉伸
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(len(columns)-1, QHeaderView.ResizeMode.Stretch) # 理由拉伸
+        header.setStretchLastSection(True)
         
         table.cellClicked.connect(self._on_cell_clicked)
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -2135,23 +2130,63 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self.code_clicked.emit(c_it.text(), n_it.text() if n_it else "")
 
     def _on_sector_table_double_clicked(self, row, col):
-        """板块表双击：寻找该行龙头并复制到剪贴板，随后发送联动"""
+        """板块表双击：若双击跟风明细列则展示详情弹窗，否则寻找该行龙头并复制到剪贴板，随后发送联动"""
         table = self.tables.get("🔥 板块热力")
         if not table: return
-        item = table.item(row, 4)
-        name_item = table.item(row, 5)
-        if item and item.text():
-            code = item.text()
-            name = name_item.text() if name_item else ""
+        
+        header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
+        if header == "跟风明细":
+            # 1. 从单元格中获取绑定的板块字典数据
+            it = table.item(row, col)
+            if not it: return
+            s = it.data(self._ROLE_DATA)
+            if not s or not isinstance(s, dict): return
             
-            # [NEW] 双击复制功能
-            header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
-            if header in ["龙头", "龙头名称"]:
-                clipboard = QApplication.clipboard()
-                clipboard.setText(code)
-                self.status_label.setText(f"📋 龙头代码 {code} ({name}) 已复制")
+            sector_name = s.get('name', '')
+            codes = s.get('follower_codes', [])
+            if not codes:
+                # 尝试从 follower_detail 字符串中提取 6 位代码作为兜底
+                detail_str = s.get('follower_detail', '')
+                codes = re.findall(r'\d{6}', detail_str)
                 
-            self.code_clicked.emit(code, name)
+            if not codes:
+                self.status_label.setText(f"⚠️ 板块 {sector_name} 暂无跟风明细个股")
+                return
+                
+            # 2. 实例化/获取详情弹窗并绑定联动
+            if not self._alert_detail_dialog:
+                self._alert_detail_dialog = MarketAlertDetailDialog(self)
+                self._alert_detail_dialog.code_clicked.connect(self.code_clicked)
+                
+            # 3. 设置窗口标题为当前板块跟风明细
+            self._alert_detail_dialog.setWindowTitle(f"🔥 {sector_name} - 跟风个股明细")
+            
+            # 4. 获取最新行情快照并刷新弹窗
+            df_all = self._get_snapshot_df()
+            self._alert_detail_dialog.update_data(codes, df_snapshot=df_all, details=None)
+            self._alert_detail_dialog.show()
+            self._alert_detail_dialog.raise_()
+            self._alert_detail_dialog.activateWindow()
+            
+            # 🎯 自动选择第一行并获取焦点，支持键盘上下键联动
+            if self._alert_detail_dialog.table.rowCount() > 0:
+                self._alert_detail_dialog.table.clearSelection()
+                self._alert_detail_dialog.table.selectRow(0)
+            self._alert_detail_dialog.table.setFocus()
+        else:
+            item = table.item(row, 4)
+            name_item = table.item(row, 5)
+            if item and item.text():
+                code = item.text()
+                name = name_item.text() if name_item else ""
+                
+                # [NEW] 双击复制功能
+                if header in ["龙头", "龙头名称"]:
+                    clipboard = QApplication.clipboard()
+                    clipboard.setText(code)
+                    self.status_label.setText(f"📋 龙头代码 {code} ({name}) 已复制")
+                    
+                self.code_clicked.emit(code, name)
 
     def _setup_bus_connection(self):
         bus = get_signal_bus()
@@ -2744,10 +2779,48 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._on_alert_double_clicked(row, col)
 
     def _on_alert_double_clicked(self, row, column):
-        """[GUI] 双击预警行，查看个股异动明细"""
+        """[GUI] 双击预警行，查看个股异动明细（如果是板块/内容列双击，则展示文本详情弹窗）"""
         table = self.tables.get("📡 市场预警")
         if not table: return
         
+        # 1. 拦截“板块/内容”列双击，显示文本详情弹窗
+        header = table.horizontalHeaderItem(column).text() if table.horizontalHeaderItem(column) else ""
+        if header == "板块/内容":
+            detail_item = table.item(row, column)
+            detail = detail_item.text().strip() if detail_item else ""
+            
+            # 从单元格 data 或该行其他列的单元格中尝试提取代码与名称
+            code, name = "-", "-"
+            it = table.item(row, column)
+            if not it: it = table.item(row, 0)
+            if it:
+                alert = it.data(self._ROLE_DATA)
+                if not alert or not isinstance(alert, dict):
+                    for c in range(table.columnCount()):
+                        tmp_it = table.item(row, c)
+                        if tmp_it:
+                            alert = tmp_it.data(self._ROLE_DATA)
+                            if isinstance(alert, dict): break
+                
+                if isinstance(alert, dict):
+                    metadata = alert.get('metadata', {})
+                    codes = metadata.get('codes', [])
+                    if not codes:
+                        codes = re.findall(r'\d{6}', alert.get('content', ''))
+                    if codes:
+                        code = codes[0]
+                        df_all = self._get_snapshot_df()
+                        if df_all is not None and code in df_all.index:
+                            name = str(df_all.loc[code, 'name'])
+            
+            try:
+                from signal_dashboard_panel import SignalDetailDialog
+                dialog = SignalDetailDialog(code, name, "板块/内容", detail, self)
+                dialog.exec()
+            except Exception as e:
+                logger.error(f"Failed to open SignalDetailDialog from alert: {e}")
+            return
+            
         # ⭐ [FIX] 从单元格 UserRole 中直接获取原始 alert 数据，解决排序/过滤导致的索引错位问题
         it = table.item(row, column) # 优先取当前点击列
         if not it: it = table.item(row, 0) # 兜底取首列
@@ -3164,7 +3237,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._fast_update_cell(table, i, 6, f"{l_pct:+.2f}%", color_key=lp_color, numeric_val=l_pct)
 
                 self._fast_update_cell(table, i, 7, s.get('follow_ratio', 0.0), numeric_val=s.get('follow_ratio', 0.0))
-                self._fast_update_cell(table, i, 8, s.get('follower_detail', ''))
+                self._fast_update_cell(table, i, 8, s.get('follower_detail', ''), data=s)
                 self._fast_update_cell(table, i, 9, s.get('updated_at', ''))
 
             if current_selection:
@@ -4625,15 +4698,29 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         clipboard = QApplication.clipboard()
         header = table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else ""
         
-        if header == "详情":
-            detail = table.item(row, col).text()
-            # 动态寻找时间列 (通常在 0 或 1)
-            time_str = table.item(row, 0).text() if table.columnCount() > 0 else ""
+        if header in ["详情", "理由", "所属板块", "捕捉理由", "核心理由", "形态/信号"]:
+            detail_item = table.item(row, col)
+            detail = detail_item.text().strip() if detail_item else ""
+            
+            # 动态生成模式描述作为标题中的信号种类展示
+            pattern_desc = header
+            if header in ["详情", "形态/信号"]:
+                # 尝试取当前行可能存在的形态/信号列文本作为 pattern
+                sig_col = -1
+                for i in range(table.columnCount()):
+                    h = table.horizontalHeaderItem(i)
+                    if h and h.text() in ["形态/信号", "信号", "形态"]:
+                        sig_col = i
+                        break
+                if sig_col != -1 and table.item(row, sig_col):
+                    pattern_desc = table.item(row, sig_col).text().strip()
+                    
             try:
                 from signal_dashboard_panel import SignalDetailDialog
-                dialog = SignalDetailDialog(code, name, time_str, detail, self)
+                dialog = SignalDetailDialog(code, name, pattern_desc, detail, self)
                 dialog.exec()
-            except: pass
+            except Exception as e:
+                logger.error(f"Failed to open SignalDetailDialog: {e}")
             return
             
         if header == "代码": clipboard.setText(code)
@@ -4800,13 +4887,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         ncols = table.columnCount()
 
         # 1. 确定哪一列是 Stretch（不参与 resizeToContents 测量上限）
-        _SIGNAL_TABS = {"全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号"}
-        stretch_col = 5 if any(t in tab_name for t in _SIGNAL_TABS) else (ncols - 1)
+        stretch_col = ncols - 1
 
-        # 2. 暂时把 Stretch 列改回 Interactive，让 resizeColumnsToContents 能测量它
-        header.setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Interactive)
-
-        # 3. 执行内容自动测量
+        # 2. 执行内容自动测量
         table.resizeColumnsToContents()
 
         # 4. 对非 Stretch 列施加合理上限（防止长文本列撑得过宽）
