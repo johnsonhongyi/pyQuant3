@@ -3687,7 +3687,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             qtz_proc = getattr(self, 'qt_process', None)
             if qtz_proc and qtz_proc.is_alive():
                 print("正在停止 Qt 可视化子进程 (qt_process)...")
-                qtz_proc.join(timeout=0.5)
+                qtz_proc.join(timeout=1.5)
 
                 if qtz_proc.is_alive():
                     qtz_proc.terminate()

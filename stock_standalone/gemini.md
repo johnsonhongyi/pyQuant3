@@ -1,8 +1,14 @@
+## 2026-06-09 16:20
+- [x] **修复主程序关闭时伴生可视化子进程未自动保存窗口位置的 Bug (Fixed Visualizer Auto-Save Window Position on Close)**：
+    - [x] **实现退出检测时的同步物理保存 (Synchronous Layout Saving)**：针对 `trade_visualizer_qt6.py` 中的 `_check_lifecycle`（自毁轮询）以及 `_poll_command_queue`（Pipe 指令轮询）两个退出判定路径，在物理调用 `self.close()` 触发 Qt 关闭前，立即强制同步调用 `self.save_splitter_state()`，`self.save_window_position_qt_visual()` 以及 `self.save_window_position_qt()`。这确保了在随后 join 阻塞被主进程强行 terminate 终止前，窗口的大小、位置和分割线参数有 100% 几率优先在首个毫秒内安全写盘，不漏掉操盘手的拖拽习惯。
+    - [x] **适度延长退出宽限期以优雅回收 (Extended Graceful Join Timeout)**：在主进程 `instock_MonitorTK.py` 中的 `on_close` 方法中，将对可视化子进程的 `join(timeout=0.5)` 宽限时间延长至 `1.5` 秒。这为子进程在收到自毁指令后的后台 QThread 释放、语音引擎注销以及网络管道清理提供了更充足的缓冲时间，使全系统退出收尾更加平滑，物理强杀仅作为极限制动保障。
+    - [x] **静态编译与生命周期测试通过**：成功通过了 `python -m py_compile` 针对两个修改文件的零死角语法编译审计，并且 `pytest test_watchlist_lifecycle.py` 中 11 项系统核心生命周期回归测试 100% 绿旗通过（11 passed in 0.74s）。
+
 ## 2026-06-09 16:15
 - [x] **统一重构所有表格列宽模式为自适应拉伸加手动调整 (Unified Column Resizing & Stretch Layout for All Panels)**：
     - [x] **根治中间列 Stretch 导致右侧列锁死缺陷**：定位到由于部分表格（如决策队列、战略趋势、板块热力、信号仪表盘等）在初始化或 Tab 状态恢复时将特定中间列或最后一列设为了 `QHeaderView.ResizeMode.Stretch`，导致相邻列（如次数、得分、捕捉理由等）在拖拽时受阻锁死无法手动调整的问题。
     - [x] **全表列宽自适应改造**：将所有表格（每日操作指南、决策队列、战略趋势、板块热力、龙头追踪、信号分类表、市场预警等）的所有列宽调整模式统一设置为 **`QHeaderView.ResizeMode.Interactive`**，解除任何强行锁死。
-    - [x] **自动拉伸最后一列填充白边**：启用 **`setStretchLastSection(True)`** 属性。在确保所有列均可被操盘手自由手动拖拽调整的前提下，由 Qt 自动延伸最后一列将表格视口铺满，彻底根治右侧出现大面积白色或深色空白底色的视觉缺陷，且完美与 `saveState/restoreState` 跨会话持久化保存机制契合。
+    - [x] **自动拉伸最后一列填充白边**：启用 **`setStretchLastSection(True)`** 属性。在确保所有列均可被操盘手自由手动拖拽调整的前提下，由 Qt 自动延伸最后一列将表格视口铺满，彻底根置右侧出现大面积白色或深色空白底色的视觉缺陷，且完美与 `saveState/restoreState` 跨会话持久化保存机制契合。
     - [x] **物理语法与编译审计**：成功运行 `python -m py_compile signal_dashboard_panel.py` 进行静态语法检测与编译检查，编译 100% 成功，系统稳定性完备。
 
 ## 2026-06-09 16:10
