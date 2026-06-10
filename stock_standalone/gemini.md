@@ -1,3 +1,11 @@
+## 2026-06-10 18:30
+- [x] **实现高性能动态增量基准计算与脏检查 Hash 升级，根治盘中个股破位信号大面积漏报 Bug (Implemented High-Performance Incremental Baseline & Upgraded Dirty Check Hash)**：
+    - [x] **实现渐进式动态增量基准锚定 (Dynamic Incremental Baseline)**：在 `DailyEmotionBaseline` 的 `calculate_baseline` 中，引入了 `_initial_calc_done` 初始化状态变量。对冷启动初始大包股票进行 >=100 只的基准门槛判定；初始化成功后，后续盘中刷新仅通过 `~isin(self._structural_anchors)` 动态提取出尚未建立基准的极个别新增股票子集，只对其进行增量基准计算，空子集则在 1 微秒内短路退出，完美兼顾了策略的实时增量加载与极高性能开销。
+    - [x] **根治由于校验失败导致的数据残留**：在初始基准门槛计算不足 100 只触发失败返回时，显式调用缓存的 `clear()` 清空所有未就绪的数据结构，并在跨天检测中进行深度同步重置，彻底排除了基准未就绪状态下的脏缓存污染。
+    - [x] **打通实时行情数据流完整调用链**：修改 `DataPublisher.update_batch` 逻辑，在盘中心跳中无条件调用 `calculate_baseline(df)` 以接收增量新股（由其内部增量判断安全过滤），并升级了首屏未就绪检测条件，确保全天候任意冷启动/热加载时段的数据管道完整无损。
+    - [x] **升级 Pump 线程脏检查 Hash 算法为 50点联合指纹**：定位并清除了 `instock_MonitorTK.py` 的 `_process_tree_data_async` 中仅对 DataFrame 首尾及中间 3 点价格进行求和判断的脆弱 hash 算法。该算法在 Favorites 列表置顶或这三只个股停牌不跳动时，会屏蔽全市场其它 5000+ 个股的更新。重构升级为全场 **50点均匀采样 + 价格与成交量联合 Hash** 校验，既保留了拦截重复帧的能力，又彻底消除了高频行情下局部个股停价屏蔽全场的致命缺陷。
+    - [x] **编写专属测试与全回归测试 100% 通过**：在 `scratch/test_incremental_baseline.py` 中编写了覆盖初始门槛拦截、初始计算成功、增量补充计算以及跨天重置等所有临界分支的专用单元测试，全部绿旗通过。系统级集成回归测试 `pytest test_watchlist_lifecycle.py` (11 项核心生命周期用例) 100% 全绿通过（Passed in 1.33s），系统零回归破坏。
+
 ## 2026-06-10 17:35
 - [x] **重构并升级信号分类面板，实现 V型反转 信号独立查看与卡片联动 (Upgraded Signal Dashboard Panel for V-shape Reversal)**：
     - [x] **物理替换“尾盘诱多”分类为“V型反转”**：在 `signal_dashboard_panel.py` 中，将原先在 `CATEGORY_MAP`、`SIGNAL_TYPE_MAP`、`SIGNAL_TYPE_KEYWORDS` 中的 `trap` (尾盘诱多) 映射表及关键字全面重构替换为 `v_reversal` (V型反转) 以及 V反 相关匹配字眼（如 `v_shape`, `V_SHAPE`, `V反`, `V型反转`）。
