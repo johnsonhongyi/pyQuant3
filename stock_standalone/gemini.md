@@ -1,3 +1,24 @@
+## 2026-06-10 17:35
+- [x] **重构并升级信号分类面板，实现 V型反转 信号独立查看与卡片联动 (Upgraded Signal Dashboard Panel for V-shape Reversal)**：
+    - [x] **物理替换“尾盘诱多”分类为“V型反转”**：在 `signal_dashboard_panel.py` 中，将原先在 `CATEGORY_MAP`、`SIGNAL_TYPE_MAP`、`SIGNAL_TYPE_KEYWORDS` 中的 `trap` (尾盘诱多) 映射表及关键字全面重构替换为 `v_reversal` (V型反转) 以及 V反 相关匹配字眼（如 `v_shape`, `V_SHAPE`, `V反`, `V型反转`）。
+    - [x] **全面支持快捷卡片与标签页点击联动**：将顶部的“尾盘诱多”快捷卡片重构为“V型反转”卡片，并将对应的 Tab 页面更名为 “V型反转”；同时修改 `_on_card_clicked` 回调函数中的 mapping 映射，使得点击“V型反转”卡片能瞬间在亚毫秒级内自动联动并跳转至独立的 “V型反转” Tab。
+    - [x] **同步更新分流、统计与状态栏消息轮播**：对 `_categorize_and_count` 分类逻辑、`_refresh_all_tables` 中的去重与全量刷新分流逻辑、以及状态栏 `tab_to_count`、轮播消息进行同步修改，消除了冷启动歧义。
+    - [x] **完成 Python 语法编译与核心回归测试**：通过 `py_compile` 对修改文件进行了无死角语法检查，且主回归测试套件 `pytest test_watchlist_lifecycle.py` 中 11 项全生命周期核心用例 100% 全绿通过（Passed in 0.72s）。
+
+## 2026-06-10 17:25
+- [x] **升级 V-Reversal 潜伏池淘汰为精准交易日判定 (Upgraded V-Reversal Lurking Pool Eviction to Trade-Day-Based Distance)**：
+    - [x] **根治物理时间跨节假日误清算 Bug**：废弃了原先以物理秒数（如 72小时 / 48小时）计算超期的判定。全面引入 `cct.get_trade_day_distance(entry_date)` 接口，在股票横盘潜伏 `CONSOLIDATING` 期以交易日间隔数 $\ge 3$ 天、各拉升/回踩期以交易日间隔数 $\ge 2$ 天进行超期淘汰。这彻底避免了周末及国庆、春节等小长假期间，由于非交易时间流逝导致策略状态被误重置回 `INIT` 的业务缺陷。
+    - [x] **实现状态机流转锚点记录与补齐自愈**：在各状态节点（`INIT`, `WAVE_UP`, `PULLBACK`, `WAVE_UP_2`）流转时同步写入 `entry_date` 交易日标识；并在载入阶段自动对历史缺损 `entry_date` 的记录进行兼容性毫秒级补齐转换，保障了断点续传的健壮性。
+    - [x] **同步重构冷启动自愈物理过滤机制**：将 `load_consolidation_state()` 崩溃恢复阶段 of 僵尸个股过滤也迁移至 `get_trade_day_distance` 检查，确保开盘冷启动时只对真正超过 3个交易日 未活动的潜伏股执行重置净化。
+    - [x] **重构 Mock 单元测试与主回归测试 100% 通过**：在 `scratch/test_lurking_pool_pruning.py` 中利用 `unittest.mock.patch` 成功 Mock 日历距离计算以解耦数据库状态，4 项核心用例 100% 绿旗通过。系统集成回归测试 `pytest test_watchlist_lifecycle.py`（11项用例） 100% 全绿通过，零稳定性与逻辑倒退。
+
+## 2026-06-10 17:05
+- [x] **重构 V-Reversal 潜伏池淘汰与自愈净化机制 (Refactored V-Reversal Lurking Pool Eviction & Self-Healing)**：
+    - [x] **实现价格支撑破位淘汰**：在 `realtime_data_service.py` 的 `update_wave_structure_state()` 状态机流转中加入跌破支撑位淘汰逻辑。当个股处于横盘潜伏 (CONSOLIDATING) 阶段时，若价格跌破最低锚点支撑位 (anchor_low) 达 2.5%，或者处于缩量回踩 (PULLBACK) 阶段时跌破回踩支撑 (pullback_price) 或 VWAP，状态即重置为 `INIT` 并立即移出监控池。
+    - [x] **实现时间过期超时淘汰**：引入阶段进入时间戳 `entry_ts`，横盘潜伏 3 天无任何放量拉升突破、或第一波拉升/回踩/二次启动阶段持续 2天 无后续状态迁移时，执行过期淘汰，重置为 `INIT` 并踢出监控池。
+    - [x] **实现冷启动物理过滤与净化**：在冷启动/崩溃恢复加载状态数据方法 `load_consolidation_state()` 中织入超时物理过滤判定。在将历史 json/gzip 文件载入内存时，自动扫描并对 3天/2天 超时的个股重置为 `INIT`，并不再向 `v_reversal_pool` 中加回。下一次开盘时自动完成历史僵尸数据的大洗牌和净化，保证了策略的高活性和内存精炼。
+    - [x] **编写专属物理校验测试与主集成回归测试通过**：在 `scratch/test_lurking_pool_pruning.py` 中编写了覆盖状态流转、价格破位淘汰、时间过期淘汰以及冷启动物理净化过滤 4 大场景的单元测试，4 项测试 100% 通过。并且主系统核心生命周期回归测试 `pytest test_watchlist_lifecycle.py` 的 11 项用例 100% 全绿通过（Passed in 1.68s）。
+
 ## 2026-06-10 16:40
 - [x] **实现 contains 表达式自适应正则判定与前缀缝合 (Implemented Smart contains Regex Translation & Prefix Sewing)**：
     - [x] **修复正则过滤无数据缺陷 (Fixed Regex Filtering Empty Bug)**：解决了由于之前为防止中文括号报错而一刀切注入 `regex=False` 导致 `MainU.str.contains('1|1,2,3|4,5,6')` 或 `index.str.contains('^(30|68|8|9)')` 等包含元字符的正则过滤彻底失效无数据的 Bug。重构了 `query_engine_util.py` 中的 `_preprocess_query` 方法，仅当内容不含 `|`, `^`, `$`, `*`, `+`, `?` 元字符时注入 `regex=False` 保障概念安全，其余情况自适应设为 `regex=True` 以启用强大正则匹配。

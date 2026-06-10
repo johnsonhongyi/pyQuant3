@@ -848,7 +848,7 @@ CATEGORY_MAP = {
     "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
     "结构破位": ["SBC-Breakdown", "Breakdown", "断头铡刀", "严重破位", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
-    "尾盘诱多": ["tail_end_trap", "尾盘诱多", "陷阱"],
+    "V型反转": ["v_shape", "v_shape_signal", "V_SHAPE", "V反", "V型反转", "V-Shape"],
     "其它信号": []
 }
 
@@ -862,7 +862,7 @@ SIGNAL_TYPE_MAP = {
     "BREAKOUT_STAR": "起跳新星",
     "PATTERN": "形态异动",
     "ALERT": "预警信号",
-    "tail_end_trap": "尾盘诱多"
+    "v_reversal": "V型反转"
 }
 
 SIGNAL_TYPE_KEYWORDS = {
@@ -872,7 +872,7 @@ SIGNAL_TYPE_KEYWORDS = {
     "SBC-Breakdown": ["SBC-Breakdown", "破位", "结构破位", "跌破", "风险", "破位"],
     "BREAKOUT_STAR": ["BREAKOUT_STAR", "起跳新星"],
     "PATTERN": ["PATTERN", "形态", "信号"],
-    "tail_end_trap": ["tail_end_trap", "尾盘诱多"],
+    "v_reversal": ["v_shape", "v_shape_signal", "V_SHAPE", "V反", "V型反转", "V-Shape"],
 }
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -1574,7 +1574,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             ("dragon", "🐉 龙头池", "#FFD700"),
             ("follow", "跟单信号", "#FFD700"),
             ("breakout", "突破加速", "#FF4500"),
-            ("trap", "尾盘诱多", "#1E90FF"),
+            ("v_reversal", "V型反转", "#1E90FF"),
             ("risk", "风险卖出", "#00FA9A"),
             ("breakdown", "结构破位", "#87CEFA"),
             ("other", "其它信号", "#A9A9A9"),
@@ -1714,7 +1714,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.tables: Dict[str, QTableWidget] = {}
 
         # [MOD] 恢复页签：保留基础页签，并将预警中枢置后以供查看效果
-        all_tabs = ["📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "卖点预警", "结构破位", "买入机会", "其它信号", "📡 市场预警"]
+        all_tabs = ["📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力", "全部信号", "跟单信号", "突破加速", "V型反转", "卖点预警", "结构破位", "买入机会", "其它信号", "📡 市场预警"]
         for tab_name in all_tabs:
             if tab_name == "📡 市场预警":
                 table = self._create_alert_hub_table()
@@ -3464,7 +3464,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     elif cat_key == "结构破位": cats.add("breakdown")
                     elif cat_key == "跟单信号": cats.add("follow")
                     elif cat_key == "买入机会": cats.add("bull")
-                    elif cat_key == "尾盘诱多": cats.add("trap")
+                    elif cat_key == "V型反转": cats.add("v_reversal")
             
             if not cats: cats.add("other")
             event._cached_cats = cats
@@ -4124,7 +4124,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.cards["breakout"].setText(str(get_row_count("突破加速")))
             self.cards["risk"].setText(str(get_row_count("卖点预警")))
             self.cards["breakdown"].setText(str(get_row_count("结构破位")))
-            self.cards["trap"].setText(str(get_row_count("尾盘诱多")))
+            self.cards["v_reversal"].setText(str(get_row_count("V型反转")))
             self.cards["other"].setText(str(get_row_count("其它信号")))
 
             
@@ -4152,13 +4152,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 # [MOD] 准备轮播消息池 (在这里更新变量，UI由定时器切换显示)
                 self._carousel_messages = [
                     f"🕒 同步: {datetime.now().strftime('%H:%M:%S')} | 下次扫描: {self._get_next_scan_time()} |🐉: 真龙 {d_total} | 候选 {c_total} | 预警 {w_total}",
-                    f"🔥 市场信号: F:{get_row_count('跟单信号')} | B:{get_row_count('突破加速')} | T:{get_row_count('尾盘诱多')} | R:{get_row_count('卖点预警')} | S:{get_row_count('结构破位')}",
+                    f"🔥 市场信号: F:{get_row_count('跟单信号')} | B:{get_row_count('突破加速')} | V:{get_row_count('V型反转')} | R:{get_row_count('卖点预警')} | S:{get_row_count('结构破位')}",
                     f"🌡️ 盘中概况: 涨 {market_up} | 跌 {market_down} | 均温 {prof_temp if prof_temp else 'N/A'}℃"
                 ]
                 
                 # [MOD] 动态获取各 Tab 行数用于状态栏展示
                 counts_parts = []
-                tab_to_count = ["🌟 决策队列", "全部信号", "跟单信号", "突破加速", "尾盘诱多", "买入机会", "卖点预警", "结构破位"]
+                tab_to_count = ["🌟 决策队列", "全部信号", "跟单信号", "突破加速", "V型反转", "买入机会", "卖点预警", "结构破位"]
                 for t_name in tab_to_count:
                     tbl = self.tables.get(t_name)
                     if tbl:
@@ -4314,7 +4314,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             "dragon": "🐉 龙头追踪",
             "follow": "跟单信号", 
             "breakout": "突破加速", 
-            "trap": "尾盘诱多",
+            "v_reversal": "V型反转",
             "risk": "卖点预警", 
             "breakdown": "结构破位", 
             "other": "其它信号",

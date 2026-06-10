@@ -982,7 +982,8 @@ class MinuteKlineCache:
             phase = state.get("phase", "INIT")
             
             # --- 2. 状态流转引擎 (State Machine) ---
-            
+            now_ts = time.time()
+            today_str = cct.get_today()
             if phase == "INIT":
                 # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
                 # 假设通过跌幅和极度缩量确认
@@ -991,39 +992,136 @@ class MinuteKlineCache:
                     state["phase"] = "CONSOLIDATING"
                     state["anchor_low"] = recent_min
                     state["base_vol"] = recent_avg_vol
+                    state["entry_ts"] = now_ts
+                    state["entry_date"] = today_str
                     self._v_reversal_pool.add(code)
                     
             elif phase == "CONSOLIDATING":
-                # 在横盘期，监控“放量拉升远离VWAP” (第一波进攻)
                 anchor_low = state.get("anchor_low", recent_min)
                 base_vol = state.get("base_vol", recent_avg_vol)
                 
-                # 条件：价格上穿 VWAP 并拉开距离 (如 > 1.5%)，且成交量显著放大 (如 > 2.5倍基准量)
-                if recent_close > vwap * 1.015 and recent_avg_vol > base_vol * 2.5:
-                    state["phase"] = "WAVE_UP"
-                    state["wave_1_start_price"] = recent_close
-                    state["wave_1_start_vwap"] = vwap
-                    if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 触发第一波放量进攻! 价:{recent_close} VWAP:{vwap}")
-                    
+                # 提取或补齐交易日锚点
+                entry_date = state.get("entry_date")
+                if not entry_date:
+                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
+                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
+                    state["entry_date"] = entry_date
+                
+                trade_dist = cct.get_trade_day_distance(entry_date)
+                if trade_dist is None:
+                    trade_dist = 0
+                
+                # [淘汰 1]: 跌破支撑位淘汰 (跌破 anchor_low 2.5%)
+                if recent_close < anchor_low * 0.975:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 跌破潜伏支撑位({anchor_low:.2f} -> {recent_close:.2f}), 触发淘汰!")
+                # [淘汰 2]: 时间过期淘汰 (3个交易日无任何动静突破)
+                elif trade_dist >= 3:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 潜伏超时({trade_dist}交易日无放量拉升), 触发淘汰!")
+                else:
+                    # 在横盘期，监控“放量拉升远离VWAP” (第一波进攻)
+                    # 条件：价格上穿 VWAP 并拉开距离 (如 > 1.5%)，且成交量显著放大 (如 > 2.5倍基准量)
+                    if recent_close > vwap * 1.015 and recent_avg_vol > base_vol * 2.5:
+                        state["phase"] = "WAVE_UP"
+                        state["wave_1_start_price"] = recent_close
+                        state["wave_1_start_vwap"] = vwap
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 触发第一波放量进攻! 价:{recent_close} VWAP:{vwap}")
+                        
             elif phase == "WAVE_UP":
                 # 在进攻浪中，监控“缩量回踩VWAP”
                 # 更新波段最高点
                 state["wave_peak"] = max(state.get("wave_peak", 0), recent_max)
                 
-                # 回踩条件：价格回落到 VWAP 附近 (如距离 VWAP < 1%)，且量能萎缩
-                if recent_close < vwap * 1.01 and recent_avg_vol < state.get("base_vol", recent_avg_vol) * 1.5:
-                    state["phase"] = "PULLBACK"
-                    state["pullback_price"] = recent_close
-                    if self.verbose: logger.info(f"📉 [波段跟踪] {code} 触发缩量回踩VWAP! 价:{recent_close}")
-                    
-            elif phase == "PULLBACK":
-                # 回踩完毕后，监控“再次放量拉升” (第二波/N波进攻)
-                wave_peak = state.get("wave_peak", 9999)
+                # 提取或补齐交易日锚点
+                entry_date = state.get("entry_date")
+                if not entry_date:
+                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
+                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
+                    state["entry_date"] = entry_date
                 
-                # 条件：再次放量，并且价格有突破前高的趋势
-                if recent_avg_vol > state.get("base_vol", recent_avg_vol) * 2.0 and recent_close > state.get("pullback_price", recent_close) * 1.02:
-                    state["phase"] = "WAVE_UP_2"  # 或者循环回 WAVE_UP
-                    if self.verbose: logger.info(f"🚀 [波段跟踪] {code} 完美命中第二波拉升结构! 即将发射信号。")
+                trade_dist = cct.get_trade_day_distance(entry_date)
+                if trade_dist is None:
+                    trade_dist = 0
+                
+                # [淘汰 1]: 跌破拉升支撑/VWAP 淘汰 (跌破 vwap 3%)
+                if recent_close < vwap * 0.97:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 第一波拉升夭折(跌破VWAP), 触发淘汰!")
+                # [淘汰 2]: 拉升期超时 (2个交易日未进入回踩)
+                elif trade_dist >= 2:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 拉升超时({trade_dist}交易日无回踩/无新高), 触发淘汰!")
+                else:
+                    # 回踩条件：价格回落到 VWAP 附近 (如距离 VWAP < 1%)，且量能萎缩
+                    if recent_close < vwap * 1.01 and recent_avg_vol < state.get("base_vol", recent_avg_vol) * 1.5:
+                        state["phase"] = "PULLBACK"
+                        state["pullback_price"] = recent_close
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"📉 [波段跟踪] {code} 触发缩量回踩VWAP! 价:{recent_close}")
+                        
+            elif phase == "PULLBACK":
+                pullback_price = state.get("pullback_price", recent_close)
+                
+                # 提取或补齐交易日锚点
+                entry_date = state.get("entry_date")
+                if not entry_date:
+                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
+                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
+                    state["entry_date"] = entry_date
+                
+                trade_dist = cct.get_trade_day_distance(entry_date)
+                if trade_dist is None:
+                    trade_dist = 0
+                
+                # [淘汰 1]: 回踩漏了/支撑破位 (跌破 pullback_price 2.5% 或跌破 vwap 2%)
+                if recent_close < pullback_price * 0.975 or recent_close < vwap * 0.98:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩支撑破位({pullback_price:.2f} -> {recent_close:.2f}), 触发淘汰!")
+                # [淘汰 2]: 回踩超时 (2个交易日内无二次拉升)
+                elif trade_dist >= 2:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩超时({trade_dist}交易日无二次启动), 触发淘汰!")
+                else:
+                    # 回踩完毕后，监控“再次放量拉升” (第二波/N波进攻)
+                    # 条件：再次放量，并且价格有突破前高的趋势
+                    if recent_avg_vol > state.get("base_vol", recent_avg_vol) * 2.0 and recent_close > pullback_price * 1.02:
+                        state["phase"] = "WAVE_UP_2"  # 或者循环回 WAVE_UP
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"🚀 [波段跟踪] {code} 完美命中第二波拉升结构! 即将发射信号。")
+                        
+            elif phase == "WAVE_UP_2":
+                # 提取或补齐交易日锚点
+                entry_date = state.get("entry_date")
+                if not entry_date:
+                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
+                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
+                    state["entry_date"] = entry_date
+                
+                trade_dist = cct.get_trade_day_distance(entry_date)
+                if trade_dist is None:
+                    trade_dist = 0
+                
+                # [淘汰 1]: 二次拉升后跌破 VWAP 2%
+                if recent_close < vwap * 0.98:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升破位(跌破VWAP), 触发淘汰!")
+                # [淘汰 2]: 二次拉升超时 (2个交易日)
+                elif trade_dist >= 2:
+                    state["phase"] = "INIT"
+                    self._v_reversal_pool.discard(code)
+                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升超时({trade_dist}交易日), 触发淘汰!")
                     # 这里可以将个股抛给高维策略做全面测试
                     
             # --- 3. 增量更新状态并刷入内存字典 ---
@@ -1140,10 +1238,43 @@ class MinuteKlineCache:
                 if now_ts - update_ts < 7 * 86400: # 7天内有效
                     # 还原映射语言为系统内部标识
                     if "phase" in flag_data:
-                        flag_data["phase"] = phase_map_rev.get(flag_data["phase"], flag_data["phase"])
+                        raw_phase = flag_data["phase"]
+                        phase_mapped = phase_map_rev.get(raw_phase, raw_phase)
+                        
+                        # 引入细粒度过期过滤 (例如 3天/2天 交易日超时)
+                        entry_date = flag_data.get("entry_date")
+                        if not entry_date:
+                            entry_date_ts = flag_data.get("entry_ts", update_ts)
+                            if entry_date_ts > 0:
+                                entry_date = datetime.fromtimestamp(entry_date_ts).strftime("%Y-%m-%d")
+                            else:
+                                entry_date = cct.get_today()
+                            flag_data["entry_date"] = entry_date
+                        
+                        trade_dist = cct.get_trade_day_distance(entry_date)
+                        if trade_dist is None:
+                            trade_dist = 0
+                            
+                        is_expired = False
+                        if phase_mapped == "CONSOLIDATING" and trade_dist >= 3:
+                            is_expired = True
+                        elif phase_mapped in ["WAVE_UP", "PULLBACK", "WAVE_UP_2"] and trade_dist >= 2:
+                            is_expired = True
+                            
+                        if is_expired:
+                            # 细粒度超时了，直接将其重置为 INIT，且不加入 valid_pool
+                            flag_data["phase"] = "INIT"
+                            flag_data["entry_ts"] = now_ts
+                            flag_data["update_ts"] = now_ts
+                        else:
+                            flag_data["phase"] = phase_mapped
+                            if "entry_ts" not in flag_data:
+                                flag_data["entry_ts"] = update_ts
+                            
+                            if code in state.get("v_reversal_pool", []):
+                                valid_pool.add(code)
+                    
                     valid_flags[code] = flag_data
-                    if code in state.get("v_reversal_pool", []):
-                        valid_pool.add(code)
             
             with self._lock:
                 self._consolidation_flags.update(valid_flags)
