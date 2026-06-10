@@ -969,11 +969,33 @@ class TradingKernelService:
                 from trading_kernel.execution.paper_adapter import Position
                 new_positions = {}
                 for code, pos_data in broker_pos.items():
+                    # 尝试保留原有 paper_adapter 中的开仓时间
+                    old_entry_time = "N/A"
+                    if hasattr(self, "paper_adapter") and self.paper_adapter and self.paper_adapter.account:
+                        old_pos = self.paper_adapter.account.positions.get(code)
+                        if old_pos and old_pos.entry_time and old_pos.entry_time != "N/A":
+                            old_entry_time = old_pos.entry_time
+                    
+                    # 其次尝试从 broker_pos 提供的 pos_data 里获取
+                    if old_entry_time == "N/A" or not old_entry_time:
+                        b_time = pos_data.get("entry_time") or pos_data.get("open_time")
+                        if b_time and b_time != "N/A":
+                            from datetime import datetime
+                            if isinstance(b_time, datetime):
+                                old_entry_time = b_time.strftime("%Y-%m-%d %H:%M:%S")
+                            else:
+                                old_entry_time = str(b_time)
+
+                    if old_entry_time == "N/A" or not old_entry_time:
+                        from datetime import datetime
+                        old_entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                     new_positions[code] = Position(
                         code=code,
                         entry_price=float(pos_data.get("entry_price", 0.0)),
                         volume=float(pos_data.get("volume", 0.0)),
-                        current_price=float(pos_data.get("current_price", pos_data.get("entry_price", 0.0)))
+                        current_price=float(pos_data.get("current_price", pos_data.get("entry_price", 0.0))),
+                        entry_time=old_entry_time
                     )
                 self.paper_adapter.account.positions = new_positions
                 snap = self.broker_adapter.get_account_snapshot()
