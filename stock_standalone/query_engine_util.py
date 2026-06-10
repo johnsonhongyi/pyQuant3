@@ -182,11 +182,18 @@ class PandasQueryEngine:
         # 情况 B: 中文字符标签 (逻辑) -> (逻辑)
         res = re.sub(r'^\s*[\u4e00-\u9fa5\-]+\s*(?=\()', '', res)
         
-        # [ROBUSTNESS] 自动为 contains 注入 case=False, regex=False, na=False，根治带括号/空格概念过滤失败的问题
+        # [ROBUSTNESS] 智能为 contains 注入 case=False, na=False
+        # 根据匹配内容是否包含正则元字符，决定 regex 是 True 还是 False，以兼顾带括号中文与强大正则过滤
         if '.str.contains(' in res:
+            def _contains_repl(match):
+                quote = match.group(1)
+                content = match.group(2)
+                has_regex_chars = any(char in content for char in ['|', '^', '$', '*', '+', '?'])
+                regex_val = "True" if has_regex_chars else "False"
+                return f'.str.contains({quote}{content}{quote}, case=False, regex={regex_val}, na=False)'
             res = re.sub(
                 r'\.str\.contains\((["\'])(.*?)\1\s*\)',
-                r'.str.contains(\1\2\1, case=False, regex=False, na=False)',
+                _contains_repl,
                 res
             )
         

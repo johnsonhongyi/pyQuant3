@@ -1,3 +1,16 @@
+## 2026-06-10 16:40
+- [x] **实现 contains 表达式自适应正则判定与前缀缝合 (Implemented Smart contains Regex Translation & Prefix Sewing)**：
+    - [x] **修复正则过滤无数据缺陷 (Fixed Regex Filtering Empty Bug)**：解决了由于之前为防止中文括号报错而一刀切注入 `regex=False` 导致 `MainU.str.contains('1|1,2,3|4,5,6')` 或 `index.str.contains('^(30|68|8|9)')` 等包含元字符的正则过滤彻底失效无数据的 Bug。重构了 `query_engine_util.py` 中的 `_preprocess_query` 方法，仅当内容不含 `|`, `^`, `$`, `*`, `+`, `?` 元字符时注入 `regex=False` 保障概念安全，其余情况自适应设为 `regex=True` 以启用强大正则匹配。
+    - [x] **支持 contains 缝合自愈并撤销特定 CPO/半导体包裹自愈**：在 `history_manager.py` 自愈环节中，仅针对被截断的 `index.str.contains` 和 `MainU.str.contains` 等 contains 前缀历史记录进行自动缝合与备注还原。根据用户最新指令，已撤销对纯中文词（半导体、新能源等）以及 CPO 相关词在历史载入时的特定 category.str.contains 自动包裹自愈，全部恢复至原生态。
+    - [x] **单元与集成测试通过**：在 `test_cpo_history_fix.py` 中验证了撤销后 CPO 与纯中文的原样保留、以及 index/MainU 缝合和 QueryEngine 智能正则判定，8 项测试 100% 成功。主测试套件 `pytest test_watchlist_lifecycle.py` 100% 回归成功。
+
+
+## 2026-06-10 16:30
+- [x] **修复 Query 包含小括号时（如共封装光学(CPO)）被误拆分损坏的 Bug (Fixed Parenthesis Query Splitting & Corruption Bug)**：
+    - [x] **根治 `history_manager.py` 中的 _normalize_record 括号提取逻辑**：彻底清除了之前意外引入的、对带括号的 query 强行当做 `"备注 (表达式)"` 进行提取的脆弱字符串匹配判定。直接恢复为此前正确的版本，保留完整的 Python/Pandas 代码表达式（如 `category.str.contains("共封装光学(CPO)")`），不再越权污染 query 的原生内容。
+    - [x] **根治 `instock_MonitorTK.py` 中的 sync_history 括号流污染**：同步清除了 `sync_history` 阶段中将 query 进行小括号拆分分流 note 的逻辑，使显示 label 到 raw query 的映射还原彻底恢复为纯粹的字典查表，保证了界面输入和回写时的 100% 格式对齐与不失真。
+    - [x] **编写专属验证单元测试与回归测试通过**：在 `scratch/test_cpo_history_fix.py` 中编写了专门针对包含嵌套括号 query（CPO）的自测试验证脚本，测试 100% 成功。并且主回归测试套件 `pytest test_watchlist_lifecycle.py` 的 11 项全生命周期核心用例 100% 全绿通过（Passed in 0.70s），系统零回归破坏。
+
 ## 2026-06-09 16:20
 - [x] **修复主程序关闭时伴生可视化子进程未自动保存窗口位置的 Bug (Fixed Visualizer Auto-Save Window Position on Close)**：
     - [x] **实现退出检测时的同步物理保存 (Synchronous Layout Saving)**：针对 `trade_visualizer_qt6.py` 中的 `_check_lifecycle`（自毁轮询）以及 `_poll_command_queue`（Pipe 指令轮询）两个退出判定路径，在物理调用 `self.close()` 触发 Qt 关闭前，立即强制同步调用 `self.save_splitter_state()`，`self.save_window_position_qt_visual()` 以及 `self.save_window_position_qt()`。这确保了在随后 join 阻塞被主进程强行 terminate 终止前，窗口的大小、位置和分割线参数有 100% 几率优先在首个毫秒内安全写盘，不漏掉操盘手的拖拽习惯。

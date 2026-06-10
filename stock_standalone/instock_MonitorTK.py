@@ -15471,23 +15471,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # [MODIFIED] Resolve display label to raw query
             raw_q = search_map.get(q, q) if search_map else q
             
-            # 🛡️ 智能括号剥离拆解：若 raw_q 仍呈现为 "备注 (表达式)"，强力自愈解析以分流 note 和 query
-            note_val = ""
-            if isinstance(raw_q, str) and "(" in raw_q and raw_q.endswith(")"):
-                idx_bracket = raw_q.find('(')
-                if idx_bracket > 0:
-                    note_val = raw_q[:idx_bracket].strip()
-                    raw_q = raw_q[idx_bracket+1:-1].strip()
-
             if raw_q in existing_queries:
                 # 保留原来的 note / starred
                 item = existing_queries[raw_q]
-                if note_val and not item.get("note"):
-                    item["note"] = note_val
                 new_history.append(item)
             else:
                 # 新建
-                new_history.append({"query": raw_q, "starred": 0, "note": note_val})
+                new_history.append({"query": raw_q, "starred": 0, "note": ""})
 
         # 🛡️ 只有在 new_history 和原 history 的实质内容或顺序发生真实改变时，才标记改变
         original_history = getattr(self.query_manager, history_attr, [])

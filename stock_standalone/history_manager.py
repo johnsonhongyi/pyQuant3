@@ -591,35 +591,33 @@ class QueryHistoryManager:
                     q = q_dict["query"]
             except:
                 pass
-            
             note = r.get("note", "")
-            # 🛡️ 智能括号拆解自愈：如果磁盘或内存中存入的 query 带有 "备注 (表达式)"，自动拆分出真正的 query
-            if isinstance(q, str) and "(" in q and q.endswith(")"):
-                idx_bracket = q.find('(')
-                if idx_bracket > 0:
-                    note_extracted = q[:idx_bracket].strip()
-                    query_extracted = q[idx_bracket+1:-1].strip()
-                    if query_extracted:
-                        q = query_extracted
-                        if not note:
-                            note = note_extracted
-
-            return {"query": q, "starred": r.get("starred", False), "note": note}
         elif isinstance(r, str):
-            # 对纯字符串也有自愈拆解
-            q = r.strip()
+            q = r
             note = ""
-            if "(" in q and q.endswith(")"):
-                idx_bracket = q.find('(')
-                if idx_bracket > 0:
-                    note_extracted = q[:idx_bracket].strip()
-                    query_extracted = q[idx_bracket+1:-1].strip()
-                    if query_extracted:
-                        q = query_extracted
-                        note = note_extracted
-            return {"query": q, "starred": 0, "note": note}
         else:
-            return {"query": str(r), "starred": 0, "note": ""}
+            q = str(r)
+            note = ""
+
+        q = q.strip()
+        note = note.strip()
+
+        # 🛡️ 仅保留被切开的 contains 前缀自动缝合还原逻辑
+        q_clean = q
+        if (q_clean.startswith('"') and q_clean.endswith('"')) or (q_clean.startswith("'") and q_clean.endswith("'")):
+            q_clean = q_clean[1:-1].strip()
+
+        is_contains_corrupted = False
+        # 如果 note 属于被切开的 contains 前缀（如 category.str.contains, index.str.contains, MainU.str.contains）
+        if isinstance(note, str) and (note.endswith(".str.contains") or note in ["category.str.contains", "index.str.contains", "MainU.str.contains"]):
+            is_contains_corrupted = True
+
+        if is_contains_corrupted:
+            # 重新缝合被切开的 contains 表达式，并保留核心搜索词为备注
+            q = f'{note}("{q_clean}")'
+            note = q_clean
+
+        return {"query": q, "starred": r.get("starred", False) if isinstance(r, dict) else 0, "note": note}
 
     def switch_group(self, event=None):
         self.clear_hits()
