@@ -1348,6 +1348,7 @@ class DailyEmotionBaseline:
         self._baseline_details: dict[str, str] = {} # {code: status_description}
         self._structural_anchors: dict[str, dict[str, float]] = {} # {code: {yesterday_high, prev_high, ma60, ma20}}
         self._last_calc_date: Optional[str] = None
+        self._initial_calc_done = False
         self.verbose = verbose
     
     def get_last_calc_date(self) -> Optional[str]:
@@ -1362,9 +1363,19 @@ class DailyEmotionBaseline:
         from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
         try:
-            count = 0
             # 临时增加 robust 检查
             if df.empty: return
+
+            # 如果尚未完成初始计算，或者日期发生变更，需要重新进行完整初始化并清空缓存
+            if not getattr(self, '_initial_calc_done', False) or self._last_calc_date != today:
+                self._baselines.clear()
+                self._baseline_details.clear()
+                self._structural_anchors.clear()
+                self._initial_calc_done = False
+
+            # 初始化标志保护
+            if not hasattr(self, '_initial_calc_done'):
+                self._initial_calc_done = False
 
             # 转换为 dict 迭代更快，而且为了逻辑清晰
             # 这里的 df 应该是 full candidate list 或者包含 historical data columns 的 df
@@ -1396,8 +1407,22 @@ class DailyEmotionBaseline:
                     logger.debug(f"⏳ Skipping baseline calculation: Missing historical columns (Need {essential_cols}). Waiting for enriched data.")
                 return
 
+            # [🚀 OPTIMIZATION] 增量个股提取：只对尚未计算过锚点的值进行运算
+            if self._initial_calc_done:
+                if 'code' in df.columns:
+                    mask = ~df['code'].astype(str).str.strip().str.zfill(6).isin(self._structural_anchors)
+                else:
+                    mask = ~df.index.astype(str).str.strip().str.zfill(6).isin(self._structural_anchors)
+                df_to_calc = df[mask]
+            else:
+                df_to_calc = df
+
+            if df_to_calc.empty:
+                return
+
             valid_anchor_count = 0
-            for idx, row in df.iterrows():
+            count = 0
+            for idx, row in df_to_calc.iterrows():
                 # 兼容：如果 code 在列中则取列，否则取 index
                 if 'code' in row:
                     code_val = row['code']
@@ -1406,6 +1431,10 @@ class DailyEmotionBaseline:
                 
                 code_str = str(code_val).strip().zfill(6)
                 
+                # 双重保护，如果已经存在于字典中，直接跳过
+                if self._initial_calc_done and code_str in self._structural_anchors:
+                    continue
+
                 # [NEW] 获取通过矩阵预处理的结构和活跃度综合基础分
                 score = float(row.get('structure_base_score', 50.0))
                 
@@ -1650,13 +1679,18 @@ class DailyEmotionBaseline:
             
             # [🚀 VALIDATION] 门槛判定：如果有效锚点个股太少（不足 100 只），则认为基准数据尚未就绪
             # 不标记 _last_calc_date，让下一批数据有机会重新计算
-            if valid_anchor_count < 100:
-                if self.verbose:
-                    logger.warning(f"⚠️ Baseline calculation results in too few valid anchors ({valid_anchor_count}/100). Retrying later.")
-                return
+            if not self._initial_calc_done:
+                if valid_anchor_count < 100:
+                    if self.verbose:
+                        logger.warning(f"⚠️ Baseline calculation results in too few valid anchors ({valid_anchor_count}/100). Retrying later.")
+                    self._baselines.clear()
+                    self._baseline_details.clear()
+                    self._structural_anchors.clear()
+                    return
+                self._initial_calc_done = True
 
             self._last_calc_date = today
-            logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks (Valid: {valid_anchor_count}).")
+            logger.info(f"✅ Daily Emotion Baseline Calculated for {count} new stocks (Valid in batch: {valid_anchor_count}, Total anchors: {len(self._structural_anchors)}).")
         except Exception as e:
             logger.error(f"Calculate Baseline Error: {e}")
 
@@ -3013,8 +3047,8 @@ class DataPublisher:
             if is_new_batch:
                 self._last_update_wall_time = time.time()
 
-            # 无论是否实时，若基准尚未计算，优先尝试一次
-            if self.emotion_baseline.get_last_calc_date() is None:
+            # 无论是否实时，若基准尚未计算或未完整初始化，优先尝试一次
+            if self.emotion_baseline.get_last_calc_date() is None or not getattr(self.emotion_baseline, '_initial_calc_done', False):
                 self.emotion_baseline.calculate_baseline(df)
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
                 if not is_trading:
@@ -3063,11 +3097,10 @@ class DataPublisher:
                 self.data_version += 1
                 
                 # 情绪与 KLine 更新
-                # [OPTIMIZED] Skip calculate_baseline if already done for TODAY
+                # [OPTIMIZED] Support incremental updates of newly added stocks
                 # [FIX] Simulation 模式下跳过自动重新计算，防止覆盖手动设置的大样基准
                 if not self.simulation_mode:
-                    if self.emotion_baseline.get_last_calc_date() != datetime.now().strftime("%Y-%m-%d"):
-                        self.emotion_baseline.calculate_baseline(df)
+                    self.emotion_baseline.calculate_baseline(df)
                     
                 self.emotion_tracker.update_batch(df, self.emotion_baseline)
                 

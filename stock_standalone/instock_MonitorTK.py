@@ -5678,14 +5678,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if full_df is None or full_df.empty:
                 return
 
-            # 3. 源数据脏检查 (轻量)
+            # 3. 源数据脏检查 (轻量级 50 点指纹防重检查，防止首尾个股不动时屏蔽全局)
             # 仅检查日线轨道(full_df)变化，日线未变则大周期必然未变
             p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
             df_hash = 0
             if p_col:
                 n = len(full_df)
-                idx = [0, n // 2, n - 1] if n > 2 else list(range(n))
-                df_hash = hash(n) ^ hash(full_df[p_col].iloc[idx].sum())
+                if n > 0:
+                    sample_size = min(50, n)
+                    step = max(1, n // sample_size)
+                    idx = list(range(0, n, step))[:sample_size]
+                    
+                    val_sum = full_df[p_col].iloc[idx].sum()
+                    vol_col = next((c for c in ['volume', 'amount'] if c in full_df.columns), None)
+                    vol_sum = full_df[vol_col].iloc[idx].sum() if vol_col else 0
+                    df_hash = hash(n) ^ hash(val_sum) ^ hash(vol_sum)
+                    
             if not query and not force and getattr(self, '_last_processed_df_hash', -1) == df_hash:
                 return
             self._last_processed_df_hash = df_hash
