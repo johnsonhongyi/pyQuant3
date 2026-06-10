@@ -224,7 +224,7 @@ class RiskManager:
         except Exception:
             is_simulation = False
 
-        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        is_test = 'pytest' in sys.modules or any('pytest' in arg.lower() for arg in sys.argv)
 
         import sys_utils
         if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
@@ -335,7 +335,7 @@ class MockTradeGateway:
             (success, message)
         """
         import sys
-        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        is_test = 'pytest' in sys.modules or any('pytest' in arg.lower() for arg in sys.argv)
         try:
             from signal_grading_hub import get_signal_grading_hub
             is_simulation = get_signal_grading_hub()._simulation_mode
@@ -413,7 +413,7 @@ class MockTradeGateway:
     ) -> tuple[bool, str]:
         """提交模拟卖出委托"""
         import sys
-        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        is_test = 'pytest' in sys.modules or any('pytest' in arg.lower() for arg in sys.argv)
         try:
             from signal_grading_hub import get_signal_grading_hub
             is_simulation = get_signal_grading_hub()._simulation_mode
@@ -430,6 +430,21 @@ class MockTradeGateway:
             pos = self._positions.get(code)
             if pos is None:
                 return False, f"{code} 不在持仓中"
+            
+            # 校验 T+1 规则：当日买不能当日卖（开仓日期不能为今天，测试和回测模拟模式除外）
+            if not (is_test or is_simulation):
+                if pos.entry_time:
+                    entry_date = pos.entry_time.date() if hasattr(pos.entry_time, 'date') else None
+                    if not entry_date:
+                        try:
+                            entry_date = datetime.strptime(str(pos.entry_time).split(" ")[0], "%Y-%m-%d").date()
+                        except Exception:
+                            pass
+                    if entry_date == datetime.now().date():
+                        msg = f"{code} 触发 T+1 规则拦截：开仓时间为 {pos.entry_time}，当日买入不能当日平仓"
+                        logger.warning(f"[T+1 Rule Gate] {msg}")
+                        return False, msg
+
             pos.update_price(price)
             pnl_pct = pos.pnl_pct
             pnl_val = pos.pnl_value
@@ -484,7 +499,7 @@ class MockTradeGateway:
             # 赛马回测模拟模式不用走这个流程，直接短路返回
             return
 
-        is_test = 'pytest' in sys.modules or any('test' in arg.lower() for arg in sys.argv)
+        is_test = 'pytest' in sys.modules or any('pytest' in arg.lower() for arg in sys.argv)
 
         # 判断当前是否在交易时间内
         import sys_utils
@@ -494,6 +509,18 @@ class MockTradeGateway:
         with self._lock:
             for code, pos in self._positions.items():
                 if pos.current_price > 0 and pos.current_price <= pos.stop_loss:
+                    # 校验 T+1 规则：如果当日买入则不能当日止损（测试和回测模拟模式除外）
+                    if not (is_test or is_simulation):
+                        if pos.entry_time:
+                            entry_date = pos.entry_time.date() if hasattr(pos.entry_time, 'date') else None
+                            if not entry_date:
+                                try:
+                                    entry_date = datetime.strptime(str(pos.entry_time).split(" ")[0], "%Y-%m-%d").date()
+                                except Exception:
+                                    pass
+                            if entry_date == datetime.now().date():
+                                continue
+
                     # 如果是非交易时间，且非测试、非回测模拟，则仅提示/执行流程一次，防高频刷屏
                     if not is_trading_hour and not is_test and not is_simulation:
                         if code not in self._non_trade_notified_stop_loss:

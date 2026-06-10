@@ -270,7 +270,13 @@ class PaperExecutionAdapter(ExecutionAdapter):
                             f"[State-Check] Loaded positions ({len(positions)} holdings) differ from order ledger derivation ({len(recon_positions)} holdings). "
                             f"Preserving persistent snapshot to prevent accidental reset. Use manual self-heal if necessary."
                         )
-                
+                # 智能自愈：若持久化持仓中的 entry_time 为 "N/A"，尝试从流水推导的 recon_positions 中修复补齐
+                for code_c, pos_obj in positions.items():
+                    if pos_obj.entry_time == "N/A" and code_c in recon_positions:
+                        if recon_positions[code_c].entry_time and recon_positions[code_c].entry_time != "N/A":
+                            pos_obj.entry_time = recon_positions[code_c].entry_time
+                            logger.info(f"[State-Healing] Healed entry_time for {code_c} from orders ledger: {pos_obj.entry_time}")
+
                 self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
             except Exception as e:
                 logger.error(f"[State-Loading] Critical error loading state: {e}. Fallback to default state.")

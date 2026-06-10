@@ -2748,10 +2748,17 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                         p_entry_time = getattr(pos_obj, "entry_time", "N/A")
                                         if p_entry_time and p_entry_time != "N/A":
                                             try:
-                                                this_year = datetime.now().year
-                                                entry_time_dt = datetime.strptime(f"{this_year}-{p_entry_time}", "%Y-%m-%d %H:%M:%S")
+                                                entry_time_dt = datetime.strptime(p_entry_time, "%Y-%m-%d %H:%M:%S")
                                             except Exception:
-                                                pass
+                                                try:
+                                                    this_year = datetime.now().year
+                                                    entry_time_dt = datetime.strptime(f"{this_year}-{p_entry_time}", "%Y-%m-%d %H:%M:%S")
+                                                except Exception:
+                                                    try:
+                                                        today_str = datetime.now().strftime("%Y-%m-%d")
+                                                        entry_time_dt = datetime.strptime(f"{today_str} {p_entry_time}", "%Y-%m-%d %H:%M:%S")
+                                                    except Exception:
+                                                        pass
                                                 
                                         leg_pos = LegacyPosition(
                                             code=p_code_pure,
@@ -2784,17 +2791,47 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                     entry_p = float(old_pos.get("entry_price", 0.0))
                                     curr_p = float(old_pos.get("current_price", entry_p))
                                     if o_code_pure not in service.paper_adapter.account.positions:
+                                        # 智能抓取并还原老网关的 entry_time
+                                        sync_entry_time = "N/A"
+                                        with trade_gw._lock:
+                                            for old_key, leg_pos_obj in trade_gw._positions.items():
+                                                old_pure = "".join(filter(str.isdigit, str(old_key)))[:6]
+                                                if old_pure == o_code_pure:
+                                                    if leg_pos_obj.entry_time:
+                                                        if isinstance(leg_pos_obj.entry_time, datetime):
+                                                            sync_entry_time = leg_pos_obj.entry_time.strftime("%Y-%m-%d %H:%M:%S")
+                                                        else:
+                                                            sync_entry_time = str(leg_pos_obj.entry_time)
+                                                    break
+                                        if sync_entry_time == "N/A" or not sync_entry_time:
+                                            sync_entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                                         # 老网关新买入的持仓，同步至新内核并扣除买入成本
                                         service.paper_adapter.account.positions[o_code_pure] = PaperPosition(
                                             code=o_code_pure,
                                             entry_price=entry_p,
                                             volume=vol,
                                             current_price=curr_p,
+                                            entry_time=sync_entry_time,
                                         )
                                         service.paper_adapter.account.cash -= entry_p * vol
                                     else:
                                         # 针对已有的持仓，如有股数发生增量变动，扣减或退回对应的买入成本
                                         pos_obj = service.paper_adapter.account.positions[o_code_pure]
+                                        
+                                        # 智能恢复丢失为 "N/A" 的 entry_time
+                                        if pos_obj.entry_time == "N/A" or not pos_obj.entry_time:
+                                            with trade_gw._lock:
+                                                for old_key, leg_pos_obj in trade_gw._positions.items():
+                                                    old_pure = "".join(filter(str.isdigit, str(old_key)))[:6]
+                                                    if old_pure == o_code_pure and leg_pos_obj.entry_time:
+                                                        if isinstance(leg_pos_obj.entry_time, datetime):
+                                                            pos_obj.entry_time = leg_pos_obj.entry_time.strftime("%Y-%m-%d %H:%M:%S")
+                                                        else:
+                                                            pos_obj.entry_time = str(leg_pos_obj.entry_time)
+                                                        logger.info(f"[Bridge-Anti-Reverse] Healed existing position entry_time from legacy gateway: {pos_obj.entry_time}")
+                                                        break
+
                                         diff_vol = vol - pos_obj.volume
                                         if diff_vol != 0:
                                             service.paper_adapter.account.cash -= diff_vol * entry_p
@@ -3606,9 +3643,28 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                                 if leg_pure in code_times and code_times[leg_pure]["open_time"] != "N/A":
                                     try:
                                         ts_str = code_times[leg_pure]["open_time"]
-                                        this_year = datetime.now().year
-                                        dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
-                                        leg_pos.entry_time = dt
+                                        dt = None
+                                        try:
+                                            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                                        except Exception:
+                                            pass
+                                        
+                                        if dt is None:
+                                            try:
+                                                this_year = datetime.now().year
+                                                dt = datetime.strptime(f"{this_year}-{ts_str}", "%Y-%m-%d %H:%M:%S")
+                                            except Exception:
+                                                pass
+                                                
+                                        if dt is None:
+                                            try:
+                                                today_str = datetime.now().strftime("%Y-%m-%d")
+                                                dt = datetime.strptime(f"{today_str} {ts_str}", "%Y-%m-%d %H:%M:%S")
+                                            except Exception:
+                                                pass
+                                                
+                                        if dt is not None:
+                                            leg_pos.entry_time = dt
                                     except Exception:
                                         pass
                                 
