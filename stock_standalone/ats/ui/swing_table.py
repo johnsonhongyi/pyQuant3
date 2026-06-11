@@ -5,13 +5,15 @@ Tracks the status of stocks in the MA20 pullback lifecycle.
 Lifecycle stages: 回踩中 (Pulling back), 回踩企稳 (Pullback stabilized), 持股中 (Holding), 已平仓 (Closed).
 """
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QHBoxLayout, QPushButton
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHeaderView, QLabel, QHBoxLayout, QPushButton
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_WARN, COLOR_INFO, COLOR_ACCENT
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_WARN, COLOR_INFO, COLOR_ACCENT, auto_fit_columns_once, NumericTableWidgetItem
+from ats.ui.base_table import BaseATSTableWidget
 
 class SwingStateTable(QWidget):
-    stock_clicked = pyqtSignal(str, str) # code, name
+    stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
+    stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,27 +38,27 @@ class SwingStateTable(QWidget):
         layout.addLayout(header)
 
         # Table
-        self.table = QTableWidget()
+        self.table = BaseATSTableWidget()
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "推荐理由"
         ])
         
-        # Table configuration
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 90)
-        self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(3, 110)
-        self.table.setColumnWidth(4, 110)
+        # Table configuration using base widget's persistence
+        self.table.setup_persistence(
+            config_key="ats_swing_table_state",
+            default_widths=[90, 100, 90, 110, 110, 90, 100, 250],
+            max_widths={7: 350}
+        )
         
         self.table.setAlternatingRowColors(True)
-        self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.stock_activated.connect(self.stock_clicked.emit)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         
         layout.addWidget(self.table)
 
     def load_mock_data(self):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
         # Mock data: code, name, price, state, ma20_dist, limit_ups, position, reason
@@ -72,7 +74,7 @@ class SwingStateTable(QWidget):
         self.table.setRowCount(len(mock_data))
         for row_idx, row_data in enumerate(mock_data):
             for col_idx, text in enumerate(row_data):
-                item = QTableWidgetItem(text)
+                item = NumericTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 # Dynamic cell styling based on state/pct
@@ -93,20 +95,23 @@ class SwingStateTable(QWidget):
                         item.setForeground(QColor(COLOR_UP))
                     else:
                         item.setForeground(QColor(COLOR_DOWN))
-
+ 
                 elif col_idx == 6: # Position
                     if text != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
                 
                 self.table.setItem(row_idx, col_idx, item)
+        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
+        self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setRowCount(len(data_list))
         for row_idx, row_data in enumerate(data_list):
             for col_idx, text in enumerate(row_data):
-                item = QTableWidgetItem(str(text))
+                item = NumericTableWidgetItem(str(text))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 # Dynamic cell styling based on state/pct
@@ -134,14 +139,28 @@ class SwingStateTable(QWidget):
                         item.setFont(self._get_bold_font())
                 
                 self.table.setItem(row_idx, col_idx, item)
+        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
+        self.table.setSortingEnabled(True)
 
     def _get_bold_font(self):
         font = self.table.font()
         font.setBold(True)
         return font
 
-    def _on_cell_clicked(self, row, col):
+    def _on_cell_double_clicked(self, row, col):
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
         if code_item and name_item:
-            self.stock_clicked.emit(code_item.text(), name_item.text())
+            code = code_item.text()
+            name = name_item.text()
+            state = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            ma20_dist = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
+            limit_ups = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
+            pos = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
+            reason = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            context_info = {
+                'position': '波段回调跟踪器 (Swing Pullback Tracker)',
+                'reason': reason,
+                'status': f"MA20偏离: {ma20_dist} | 连板/新高天数: {limit_ups} | 推荐仓位: {pos} | 当前状态: {state}"
+            }
+            self.stock_double_clicked.emit(code, name, context_info)

@@ -7,15 +7,19 @@ Contains widgets for:
 - BacktestReportPanel: Backtest statistics and performance cards.
 """
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QPushButton
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QLabel, QGridLayout, QPushButton
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem
+from ats.ui.base_table import BaseATSTableWidget
 
 class TradeFlowTable(QWidget):
     """
     Table widget displaying transaction histories and orders.
     """
+    stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
+    stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
@@ -26,13 +30,19 @@ class TradeFlowTable(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(6)
 
-        self.table = QTableWidget()
+        self.table = BaseATSTableWidget()
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "时间", "代码", "名称", "方向", "成交价", "成交数量", "成交金额", "策略来源"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setup_persistence(
+            config_key="ats_trade_flow_table_state",
+            default_widths=[90, 80, 90, 80, 90, 90, 100, 200],
+            max_widths={7: 300}
+        )
         self.table.setAlternatingRowColors(True)
+        self.table.stock_activated.connect(self.stock_clicked.emit)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         layout.addWidget(self.table)
 
     def load_mock_flow(self):
@@ -46,11 +56,12 @@ class TradeFlowTable(QWidget):
         self.update_flow_list(mock_data)
 
     def update_flow_list(self, flow_list):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setRowCount(len(flow_list))
         for row, data in enumerate(flow_list):
             for col, text in enumerate(data):
-                item = QTableWidgetItem(str(text))
+                item = NumericTableWidgetItem(str(text))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 if col == 3: # Action (Buy/Sell)
@@ -66,12 +77,36 @@ class TradeFlowTable(QWidget):
                         item.setFont(font)
                 
                 self.table.setItem(row, col, item)
+        auto_fit_columns_once(self.table, "ats_trade_flow_table_state", max_widths={7: 300})
+        self.table.setSortingEnabled(True)
+
+    def _on_cell_double_clicked(self, row, col):
+        code_item = self.table.item(row, 1)
+        name_item = self.table.item(row, 2)
+        if code_item and name_item:
+            code = code_item.text()
+            name = name_item.text()
+            time_str = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
+            action = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            price = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
+            qty = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
+            amount = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
+            strategy = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            context_info = {
+                'position': '交易流水 (Trade Flow)',
+                'reason': f"触发策略: {strategy}",
+                'status': f"成交流水: 于 {time_str} 执行【{action}】{qty}股 | 成交价: {price} | 成交总额: {amount}元"
+            }
+            self.stock_double_clicked.emit(code, name, context_info)
 
 
 class PositionPanel(QWidget):
     """
     Panel displaying active holdings, cash, and total assets.
     """
+    stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
+    stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
@@ -108,13 +143,18 @@ class PositionPanel(QWidget):
         layout.addWidget(self.summary_widget)
 
         # Holdings Table
-        self.table = QTableWidget()
+        self.table = BaseATSTableWidget()
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "代码", "名称", "持仓股数", "成本价", "当前价", "市值", "盈亏比例", "占仓比"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setup_persistence(
+            config_key="ats_position_table_state",
+            default_widths=[80, 90, 90, 90, 90, 100, 100, 80]
+        )
         self.table.setAlternatingRowColors(True)
+        self.table.stock_activated.connect(self.stock_clicked.emit)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         layout.addWidget(self.table)
 
     def load_mock_positions(self):
@@ -141,11 +181,12 @@ class PositionPanel(QWidget):
             self.lbl_pnl.setText(f"总盈亏: +0.00 (0.00%)")
             self.lbl_pnl.setStyleSheet("font-weight: bold; font-size: 12pt; color: #e2e2e5;")
 
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setRowCount(len(positions_list))
         for row, data in enumerate(positions_list):
             for col, text in enumerate(data):
-                item = QTableWidgetItem(str(text))
+                item = NumericTableWidgetItem(str(text))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 if col == 6: # PnL
@@ -158,11 +199,32 @@ class PositionPanel(QWidget):
                     item.setForeground(QColor(COLOR_INFO))
                     
                 self.table.setItem(row, col, item)
+        auto_fit_columns_once(self.table, "ats_position_table_state")
+        self.table.setSortingEnabled(True)
 
     def _get_bold_font(self):
         font = self.table.font()
         font.setBold(True)
         return font
+
+    def _on_cell_double_clicked(self, row, col):
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if code_item and name_item:
+            code = code_item.text()
+            name = name_item.text()
+            qty = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
+            cost = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            price = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
+            market_val = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
+            pnl = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
+            alloc = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            context_info = {
+                'position': '当前持仓 (Holdings Panel)',
+                'reason': f"实盘配置占仓比: {alloc}",
+                'status': f"当前持仓: {qty} 股 | 成本价: {cost}元 | 当前价: {price}元 | 市值: {market_val}元 | 持仓盈亏: {pnl}"
+            }
+            self.stock_double_clicked.emit(code, name, context_info)
 
 
 class BacktestReportPanel(QWidget):
