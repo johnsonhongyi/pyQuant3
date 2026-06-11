@@ -237,7 +237,12 @@ def getBollFilter_vect(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl,
     # ===== 上下界过滤 =====
     if filter:
         # 统一时间段 mask
-        mask_filter = ((df.buy > df.llastp) | (df.buy > df.hmax*ct.changeRatio) | (df.buy < df.lmin*ct.changeRatioUp))
+        now_t = cct.get_now_time_int()
+        if 915 < now_t <= 1000:
+            # 早盘黄金段 (09:15 - 10:00)：放宽价格异动过滤门槛，保证异动龙头股不被漏掉
+            mask_filter = ((df.buy > df.llastp) | (df.buy > df.hmax*ct.changeRatio) | (df.buy < df.lmin*ct.changeRatioUp) | (df.percent >= -2.0))
+        else:
+            mask_filter = ((df.buy > df.llastp) | (df.buy > df.hmax*ct.changeRatio) | (df.buy < df.lmin*ct.changeRatioUp))
         df = df[mask_filter]
 
     # ===== ENE 处理 =====
@@ -463,13 +468,16 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
         if filter:
 
-            if cct.get_now_time_int() > 915 and cct.get_now_time_int() <= 1000:
-                df = df[((df.buy > df.llastp)) | (df.buy > df.hmax *
-                                                  ct.changeRatio) | (df.buy < df.lmin * ct.changeRatioUp)]
-
-            elif cct.get_now_time_int() > 1000 and cct.get_now_time_int() <= 1430:
-                df = df[((df.buy > df.llastp)) | (df.buy > df.hmax *
-                                                  ct.changeRatio) | (df.buy < df.lmin * ct.changeRatioUp)]
+            now_t = cct.get_now_time_int()
+            if 915 < now_t <= 1000:
+                # 早盘黄金段 (09:15 - 10:00)：大幅放宽价格异动过滤门槛，确保异动结构股、龙头股与关注板块个股不被漏掉
+                # 放宽条件：满足原价格突破条件，或当前涨幅 >= -2.0% (允许轻微低开/回踩拉升) 均保留
+                df = df[
+                    (df.buy > df.llastp) | 
+                    (df.buy > df.hmax * ct.changeRatio) | 
+                    (df.buy < df.lmin * ct.changeRatioUp) | 
+                    (df.percent >= -2.0)
+                ]
             else:
                 df = df[((df.buy > df.llastp)) | (df.buy > df.hmax *
                                                   ct.changeRatio) | (df.buy < df.lmin * ct.changeRatioUp)]
@@ -481,12 +489,27 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 df['volRatio'] = (list(map(lambda x, y: round(
                     x / y / radio_t, 1), df.nvol.values, df.lv.values)))
 
-                if 'nclose' in df.columns:
-                    df = df[(((df.buy > df.lastp) & (df.nclose > df.lastp))) | ((
-                        (df.percent > -5) & ((df.vstd + df.lvol) * 1.2 < df.nvol) & (df.nvol > (df.vstd + df.lvol))))]
+                if 915 < now_t <= 1000:
+                    # 早盘黄金段 (09:15 - 10:00)：放宽量能限制，防止高频轮询初期成交量未充分累积时被误杀
+                    if 'nclose' in df.columns:
+                        df = df[
+                            (((df.buy > df.lastp) & (df.nclose > df.lastp))) | 
+                            (df.percent >= -2.0) |
+                            (((df.percent > -5) & ((df.vstd + df.lvol) * 0.8 < df.nvol) & (df.nvol > (df.vstd + df.lvol) * 0.8)))
+                        ]
+                    else:
+                        df = df[
+                            (((df.buy > df.lastp))) | 
+                            (df.percent >= -2.0) |
+                            (((df.percent > -5) & ((df.vstd + df.lvol) * 0.8 < df.nvol) & (df.nvol > (df.vstd + df.lvol) * 0.8)))
+                        ]
                 else:
-                    df = df[(((df.buy > df.lastp))) | ((
-                        (df.percent > -5) & ((df.vstd + df.lvol) * 1.2 < df.nvol) & (df.nvol > (df.vstd + df.lvol))))]
+                    if 'nclose' in df.columns:
+                        df = df[(((df.buy > df.lastp) & (df.nclose > df.lastp))) | ((
+                            (df.percent > -5) & ((df.vstd + df.lvol) * 1.2 < df.nvol) & (df.nvol > (df.vstd + df.lvol))))]
+                    else:
+                        df = df[(((df.buy > df.lastp))) | ((
+                            (df.percent > -5) & ((df.vstd + df.lvol) * 1.2 < df.nvol) & (df.nvol > (df.vstd + df.lvol))))]
 
             if percent:
                 pass

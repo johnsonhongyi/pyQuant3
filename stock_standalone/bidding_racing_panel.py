@@ -117,6 +117,47 @@ def _get_df_all_cascading(widget) -> Optional[pd.DataFrame]:
                 return df_all
     return None
 
+def _get_df_all_and_lock_cascading(widget):
+    """
+    智能级联寻址 df_all 及其对应的线程锁 _df_lock
+    返回 (df_all, df_lock) 二元组
+    """
+    if widget is None:
+        return None, None
+    # 1. 自身
+    df_all = getattr(widget, 'df_all', None)
+    if df_all is not None and not df_all.empty:
+        return df_all, getattr(widget, '_df_lock', None)
+    # 2. 自身的 main_app
+    main_app = getattr(widget, 'main_app', None)
+    if main_app is not None:
+        df_all = getattr(main_app, 'df_all', None)
+        if df_all is not None and not df_all.empty:
+            return df_all, getattr(main_app, '_df_lock', None)
+    # 3. 自身的 parent()
+    parent_func = getattr(widget, 'parent', None)
+    if parent_func is not None and callable(parent_func):
+        p = parent_func()
+        if p is not None:
+            df_all = getattr(p, 'df_all', None)
+            if df_all is not None and not df_all.empty:
+                return df_all, getattr(p, '_df_lock', None)
+            p_main = getattr(p, 'main_app', None)
+            if p_main is not None:
+                df_all = getattr(p_main, 'df_all', None)
+                if df_all is not None and not df_all.empty:
+                    return df_all, getattr(p_main, '_df_lock', None)
+    # 4. 自身的 detector.main_app
+    detector = getattr(widget, 'detector', None)
+    if detector is not None:
+        d_main = getattr(detector, 'main_app', None)
+        if d_main is not None:
+            df_all = getattr(d_main, 'df_all', None)
+            if df_all is not None and not df_all.empty:
+                return df_all, getattr(d_main, '_df_lock', None)
+    return None, None
+
+
 def _safe_extract_dff2(df_all, code, detector=None) -> float:
     """从全局 df_all 安全提取 dff2 列，如果不存在或数据为空，优先使用 detector 中的 TickSeries 实时计算，其次使用 buy/trade 与 llow/low 自动计算"""
     dff2 = 0.0
@@ -3111,9 +3152,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._is_macro_active = True
         self._macro_query_str = query
         try:
-            # 1. 寻找数据源 (df_all)
-            df_src = _get_df_all_cascading(self)
-            df = df_src.copy() if df_src is not None else None
+            # 1. 寻找数据源 (df_all) 与线程锁
+            df_src, df_lock = _get_df_all_and_lock_cascading(self)
+            if df_src is not None:
+                if df_lock is not None:
+                    with df_lock:
+                        df = df_src.copy()
+                else:
+                    df = df_src.copy()
+            else:
+                df = None
             
             # [🚀 核心增强] 动态行情同步逻辑
             if df is not None and not df.empty and self.detector and self.detector._tick_series:
@@ -3154,6 +3202,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     if updates:
                         # [🚀 性能优化] 仅在必要时转换为 DataFrame 批量更新
                         up_df = pd.DataFrame.from_dict(updates, orient='index')
+                        # [🚀 核心防错与加速] 预先将 up_df 的索引对齐到 df 的索引，消除赋值时 pandas 内部隐式对齐引发的 blockmanager 错位风险
+                        up_df = up_df.reindex(df.index)
                         for col in up_df.columns:
                             df[col] = up_df[col]
                         
@@ -3227,13 +3277,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _on_query_test_triggered(self):
         """测试指定代码或全局数据，计算下拉菜单中各历史条件的命中数量 (🧪测试 按钮专用)"""
-        # 1. 寻找数据源 (df_all)
-        df = _get_df_all_cascading(self)
-            
-        if df is None or df.empty:
+        # 1. 寻找数据源 (df_all) 与线程锁
+        df_src, df_lock = _get_df_all_and_lock_cascading(self)
+        if df_src is None or df_src.empty:
             return
 
-        df_code = df.copy() # 避免污染原数据
+        if df_lock is not None:
+            with df_lock:
+                df_code = df_src.copy()
+        else:
+            df_code = df_src.copy()
         
         # 2. 动态行情与元数据深度同步
         if self.detector and self.detector._tick_series:
@@ -3288,6 +3341,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                             updates[c][col_name] = ts.current_pct
                 if updates:
                     up_df = pd.DataFrame.from_dict(updates, orient='index')
+                    # [🚀 核心防错与加速] 预先将 up_df 的索引对齐到 df_code 的索引，消除赋值时 pandas 内部隐式对齐引发的 blockmanager 错位风险
+                    up_df = up_df.reindex(df_code.index)
                     for col in up_df.columns:
                         df_code[col] = up_df[col]
 
@@ -3393,13 +3448,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
     def _on_code_check_triggered(self, target_code=None):
         """对选定个股或随机个股调出 check_code 详检分析报告 (🔍详检 按钮专用)"""
-        # 1. 寻找数据源 (df_all)
-        df = _get_df_all_cascading(self)
-            
-        if df is None or df.empty:
+        # 1. 寻找数据源 (df_all) 与线程锁
+        df_src, df_lock = _get_df_all_and_lock_cascading(self)
+        if df_src is None or df_src.empty:
             return
 
-        df_code = df.copy() # 避免污染原数据
+        if df_lock is not None:
+            with df_lock:
+                df_code = df_src.copy()
+        else:
+            df_code = df_src.copy()
         
         # 2. 动态行情与元数据深度同步 (彻底补齐所有字段，消除 "少col" 的隐患)
         if self.detector and self.detector._tick_series:
@@ -3454,6 +3512,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                             updates[c][col_name] = ts.current_pct
                 if updates:
                     up_df = pd.DataFrame.from_dict(updates, orient='index')
+                    # [🚀 核心防错与加速] 预先将 up_df 的索引对齐到 df_code 的索引，消除赋值时 pandas 内部隐式对齐引发 of blockmanager 错位风险
+                    up_df = up_df.reindex(df_code.index)
                     for col in up_df.columns:
                         df_code[col] = up_df[col]
 
