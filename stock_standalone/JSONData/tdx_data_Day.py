@@ -7155,7 +7155,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if newdays is None or newdays > 0:
                     h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
-    if len(top_all) > 5:
+    if len(top_all) > 0:
         top_all = cct.combine_dataFrame(
             top_all, tdxdata, col=None, compare=None, append=False)
         top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0

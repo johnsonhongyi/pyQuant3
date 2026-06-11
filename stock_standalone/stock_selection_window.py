@@ -3633,12 +3633,15 @@ def _get_realtime_price_map(self, codes=None):
                     except ValueError:
                         pass
                 if row is not None:
-                    price = float(row.get('trade', row.get('price', row.get('close', 0))) or 0)
+                    # We only use today's active trading price columns: 'trade', 'price', and 'now'.
+                    # We MUST NOT fall back to 'close' (yesterday's close) to avoid false stop loss triggers.
+                    price = float(row.get('trade', row.get('price', row.get('now', 0))) or 0)
                     if price > 0:
                         price_map[code_str] = price
         else:
             # Vectorized fast pandas extraction of entire price map
-            cols = ['trade', 'price', 'close']
+            # Only use today's active trading price columns, excluding 'close'.
+            cols = ['trade', 'price', 'now']
             available_cols = [c for c in cols if c in df_rt.columns]
             if available_cols:
                 series = None
@@ -3657,6 +3660,7 @@ def _get_realtime_price_map(self, codes=None):
     except Exception as e:
         logger.warning(f"Error in _get_realtime_price_map: {e}")
     return price_map
+
 
 
 def _kernel_set_status(self, text, kind="info"):
@@ -3952,7 +3956,8 @@ def _kernel_auto_execute_once(self, auto_mode=False):
         self._kernel_last_trade_date = today_str
         self._kernel_today_buys = set()
         self._kernel_today_sells = set()
-        self._kernel_today_mocks = set()
+        self._kernel_today_mock_buys = set()
+        self._kernel_today_mock_sells = set()
         self._kernel_today_confirmed = set()
         self._kernel_today_ignored = set()
         # 尝试从今日已记录的日志中恢复已模拟执行的 code，保障跨会话一致性
@@ -3974,7 +3979,14 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                                     sig = data.get("signal", {})
                                     c_val = sig.get("code") if isinstance(sig, dict) else getattr(sig, "code", None)
                                     if c_val:
-                                        self._kernel_today_mocks.add(str(c_val).zfill(6))
+                                        code_str = str(c_val).zfill(6)
+                                        action_str = str(data.get("kernel_result", {}).get("kernel_action", "") or "").upper()
+                                        if action_str in ("BUY", "ADD"):
+                                            self._kernel_today_mock_buys.add(code_str)
+                                        elif action_str in ("SELL", "REDUCE"):
+                                            self._kernel_today_mock_sells.add(code_str)
+                                        else:
+                                            self._kernel_today_mock_buys.add(code_str)
                         except Exception:
                             continue
             except Exception:
@@ -4001,6 +4013,10 @@ def _kernel_auto_execute_once(self, auto_mode=False):
     try:
         signals = self._focus_ctrl.get_decision_queue()
         positions = {p['code']: p for p in self._trade_gw.get_positions()}
+
+        # 记录本轮循环中已执行过的买入与卖出，防止同一秒内对同一只股票同时触发买入和平仓
+        loop_executed_buys = set()
+        loop_executed_sells = set()
         
         # 仅针对活跃持仓与待决策个股执行极速针对性价格提取，避开对数千只股票的O(N)大循环
         target_codes = list(positions.keys()) + [str(sig.get('code', '')).zfill(6) for sig in signals]
@@ -4013,6 +4029,14 @@ def _kernel_auto_execute_once(self, auto_mode=False):
             action = str(sig.get('kernel_action', '') or '').upper()
             allowed = bool(sig.get('kernel_allowed'))
             if action in ("HOLD", "", "BLOCK", "ERROR"):
+                continue
+
+            # 🛡️ 本轮循环同秒反向交易拦截，防止同一秒/心跳内对同只个股既开仓又平仓
+            if action in ("BUY", "ADD") and code in loop_executed_sells:
+                logger.warning(f"[Kernel] 拦截 {code} {action} 决策：本轮内刚执行过卖出，禁止同秒反向交易")
+                continue
+            if action in ("SELL", "REDUCE") and code in loop_executed_buys:
+                logger.warning(f"[Kernel] 拦截 {code} {action} 决策：本轮内刚执行过买入，禁止同秒反向交易")
                 continue
                 
             # 1. 风控未通过拦截
@@ -4139,6 +4163,7 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                     )
                     if ok:
                         self._kernel_today_buys.add(code)
+                        loop_executed_buys.add(code)
                         executed.append(f"LIVE_{action} {code}")
                         executed_codes.append(code)
                         self._focus_ctrl.decision_queue.update_status(code, "已提交")
@@ -4158,9 +4183,11 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                         })
                         enrich_decision_item(sig, write_journal=True)
                 else:
-                    if code in self._kernel_today_mocks:
+                    if code in self._kernel_today_mock_buys:
                         continue
-                    self._kernel_today_mocks.add(code)
+                    if code in self._kernel_today_mock_sells:
+                        # 冷却拦截
+                        continue
                     
                     # 提交到模拟网关以同步更新持仓和流水，真正做到“模拟成交，写持仓和盈亏”
                     ok, msg = self._trade_gw.submit_buy(
@@ -4172,14 +4199,26 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                         reason=sig.get('reason', ''),
                     )
                     
-                    executed.append(f"MOCK_{action} {code}")
-                    executed_codes.append(code)
-                    self._focus_ctrl.decision_queue.update_status(code, "已提交")
-                    records.append({
-                        "code": code, "name": sig.get('name', ''), "action": action,
-                        "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
-                    })
-                    enrich_decision_item(sig, write_journal=True)
+                    if ok:
+                        self._kernel_today_mock_buys.add(code)
+                        loop_executed_buys.add(code)
+                        executed.append(f"MOCK_{action} {code}")
+                        executed_codes.append(code)
+                        self._focus_ctrl.decision_queue.update_status(code, "已提交")
+                        positions[code] = {"code": code}
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
+                        })
+                        enrich_decision_item(sig, write_journal=True)
+                    else:
+                        blocked.append(f"{code}:{msg}")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拒绝", "detail": msg
+                        })
+                        enrich_decision_item(sig, write_journal=True)
 
             elif action in ("SELL", "REDUCE"):
                 if code not in positions:
@@ -4209,6 +4248,7 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                     )
                     if ok:
                         self._kernel_today_sells.add(code)
+                        loop_executed_sells.add(code)
                         executed.append(f"LIVE_{action} {code}")
                         executed_codes.append(code)
                         self._focus_ctrl.decision_queue.update_status(code, "已成交")
@@ -4228,9 +4268,8 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                         })
                         enrich_decision_item(sig, write_journal=True)
                 else:
-                    if code in self._kernel_today_mocks:
+                    if code in self._kernel_today_mock_sells:
                         continue
-                    self._kernel_today_mocks.add(code)
 
                     sell_price = float(price_map.get(code, price) or price)
                     ok, msg = self._trade_gw.submit_sell(
@@ -4239,14 +4278,26 @@ def _kernel_auto_execute_once(self, auto_mode=False):
                         reason="MockSell",
                     )
                     
-                    executed.append(f"MOCK_{action} {code}")
-                    executed_codes.append(code)
-                    self._focus_ctrl.decision_queue.update_status(code, "已成交")
-                    records.append({
-                        "code": code, "name": sig.get('name', ''), "action": action,
-                        "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
-                    })
-                    enrich_decision_item(sig, write_journal=True)
+                    if ok:
+                        self._kernel_today_mock_sells.add(code)
+                        loop_executed_sells.add(code)
+                        executed.append(f"MOCK_{action} {code}")
+                        executed_codes.append(code)
+                        self._focus_ctrl.decision_queue.update_status(code, "已成交")
+                        positions.pop(code, None)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
+                        })
+                        enrich_decision_item(sig, write_journal=True)
+                    else:
+                        blocked.append(f"{code}:{msg}")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拒绝", "detail": msg
+                        })
+                        enrich_decision_item(sig, write_journal=True)
 
     except Exception as e:
         errors.append(str(e))

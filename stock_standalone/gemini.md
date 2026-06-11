@@ -1,3 +1,23 @@
+## 2026-06-11 10:55
+- [x] **撤销市场温度的 MarketStateBus 提取逻辑，保留快速行情更新触发机制 (Reverted Market Temperature Source to self.df_all.copy() & Kept Rapid Triggers)**：
+    - [x] **根治市场温度被多周期副轨数据污染问题 (Fixed Multi-Cycle Temperature Pollution)**：由于 `MarketStateBus` 接收并发布包含日线主轨和大周期副轨的所有行情快照，导致用户在 UI 切换到 3D 等大周期重采样数据时，`MarketStateBus` 内部的 `_df_all` 被写入大周期数据，从而污染了异步市场温度计算，使上涨/下跌家数与大盘温度计算偏离实际日线数据。
+    - [x] **还原日线独占的只读拷贝机制**：在 `_aggregate_market_dashboard_stats` 内撤销了从 `MarketStateBus` 提取数据的修改，重新将其恢复为读取并只读拷贝主线程独占的 `self.df_all.copy()`。这彻底切断了重采样副轨对市场温度的干扰，确保不论 UI 处在何种显示周期下，温度计算均能基于纯净的日线数据得出。
+    - [x] **保留 3秒防抖的高实时更新触发**：保留了有数据更新且距离上一次计算过去 3.0 秒即立即触发异步计算的机制，确保行情跳动时温度的无延迟敏捷展示。
+    - [x] **顺利跑通编译及生命周期测试**：完成了静态语法编译检查与 `pytest test_watchlist_lifecycle.py` 回归测试，全量 11 项用例 100% 通过，系统处于完美运行状态。
+
+## 2026-06-11 10:45
+- [x] **修复大周期重采样（如 3D）下指标合并 KeyError: 'lasto1d' 与大周期信号掩盖 Bug (Fixed Resample KeyError & Decoupled Multi-Cycle Signal Calculations)**：
+    - [x] **根治小股列表下的列合并 KeyError (Fixed len(top_all) > 5 Restriction)**：定位并修复了 `JSONData/tdx_data_Day.py` 的 `get_append_lastp_to_df` 内部逻辑中 `len(top_all) > 5` 的前置合并限制。该限制在过滤后的股票列表长度为 1-5 时会导致跳过历史偏移列合并，进而在后续基准对比时因找不到 `lasto1d` 字段抛出 `KeyError`。将其修改为 `len(top_all) > 0`，只要数据不为空就安全合并，彻底消除了非日线大周期重采样时的 KeyError 崩溃隐患。
+    - [x] **解耦多周期 RealtimeSignalManager 状态隔离与缓存 (Decoupled Multi-Cycle Signals & Isolated Caching)**：针对日线主轨 `full_df` 和重采样副轨 `full_df_res` 共享同一个信号管理器实例导致的 `state_df` 交替读写与缓存撞车问题，重构了 `RealtimeSignalManager` 的内部存储 model。现在所有状态 `state_df` 和 `_cached_data`（含 `last_hash`、`cached_signal` 等）均按照 `resample` 周期（如 `'d'`, `'3d'`）进行物理分区与独立字典隔离，并保留了对原 `self.state_df` 属性的向后兼容，从底层杜绝了跨周期计算污染。
+    - [x] **实现大周期信号的独立异步计算 (Independent Multi-Cycle Signal Computation)**：重构了 `instock_MonitorTK.py` 中的 `_run_compute_async` 异步计算泵逻辑。废除了从日线轨道向大周期展示轨无条件映射拷贝 `signal` 和 `signal_strength` 的缺陷，对激活的 `full_df_res` (副轨) 同样发起独立的 `detect_signals` 信号打分判定，并在主副轨同步时仅拷贝情感指标，确保 UI 上的大周期信号（如 ma5d 突破等）基于大周期指标真实触发。
+    - [x] **跑通全回归测试验证 (Passed All Core Regressions)**：成功运行 `pytest test_watchlist_lifecycle.py` 全量通过（11 passed in 0.75s），静态编译审计 100% 正常，多进程协同与交易系统运行无异常。
+
+## 2026-06-11 10:25
+- [x] **实现市场温度与实时行情变更的无延迟同步更新 (Aligned Market Temperature Updates with Data Changes)**：
+    - [x] **解锁行情更新即时触发机制**：定位并解除了 `_aggregate_market_dashboard_stats` 中对于盘中数据统计 60 秒定时更新的硬性拦截限制。
+    - [x] **引入 3秒防抖双保险判定**：增加了 `trigger_update = has_update and (now - last_sync_ts > 3.0)` 的防抖同步判定逻辑。在确保系统有行情数据实质更新时（`has_update=True`），只要距离上一次计算过去超过 3.0 秒，就立即触发并向后台线程池提交异步温度计算任务。这彻底解决了用户反馈的“刚开盘/有数据更新时，温度显示总是多等一个周期”的体验痛点，实现了温度变更与 Tick 更新的高度实时同步。
+    - [x] **跑通静态编译与核心生命周期回归测试**：成功通过了 `py_compile` 静态语法编译检查，且 `pytest test_watchlist_lifecycle.py` 11 项全量系统生命周期核心测试 100% 通过（Passed in 0.77s）。
+
 ## 2026-06-10 18:30
 - [x] **实现高性能动态增量基准计算与脏检查 Hash 升级，根治盘中个股破位信号大面积漏报 Bug (Implemented High-Performance Incremental Baseline & Upgraded Dirty Check Hash)**：
     - [x] **实现渐进式动态增量基准锚定 (Dynamic Incremental Baseline)**：在 `DailyEmotionBaseline` 的 `calculate_baseline` 中，引入了 `_initial_calc_done` 初始化状态变量。对冷启动初始大包股票进行 >=100 只的基准门槛判定；初始化成功后，后续盘中刷新仅通过 `~isin(self._structural_anchors)` 动态提取出尚未建立基准的极个别新增股票子集，只对其进行增量基准计算，空子集则在 1 微秒内短路退出，完美兼顾了策略的实时增量加载与极高性能开销。

@@ -282,8 +282,27 @@ class MockTradeGateway:
         self._positions: Dict[str, Position] = {}   # {code: Position}
         self._trade_log: List[TradeRecord] = []      # 今日流水（内存）
         self._non_trade_notified_stop_loss = set()   # 非交易时段已提示止损标的（防高频刷屏）
+        self._today_sold_codes = set()
         self._lock = threading.Lock()
         self._init_db()
+        # 从本地数据库恢复今日已卖出的股票，保证跨会话冷却状态不丢失
+        try:
+            from db_utils import SQLiteConnectionManager
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            c.execute(
+                "SELECT code FROM mock_trade_log WHERE date = ? AND action = 'SELL'",
+                (today_str,)
+            )
+            rows = c.fetchall()
+            for r in rows:
+                self._today_sold_codes.add(str(r[0]).zfill(6))
+            c.close()
+        except Exception as e:
+            logger.warning(f"[TradeGateway] Failed to restore today sold codes: {e}")
+
 
     # ── DB 初始化 ──────────────────────────────────────────────────────────────
 
@@ -347,6 +366,14 @@ class MockTradeGateway:
             msg = "当前时间不在连续交易时段（09:30-11:30, 13:00-15:00），禁止买入交易"
             logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
             return False, msg
+
+        # 今日卖出冷却拦截（测试和回放模拟模式除外）
+        if not (is_test or is_simulation):
+            with self._lock:
+                if code in self._today_sold_codes:
+                    msg = f"{code} 触发今日卖出冷却拦截：今日已平仓卖出，触发日内再次买入冷却"
+                    logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+                    return False, msg
 
         # 风控检查
         with self._lock:
@@ -454,6 +481,7 @@ class MockTradeGateway:
             strategy_tag = pos.strategy_tag
             pos.status = "已平仓"
             del self._positions[code]
+            self._today_sold_codes.add(code)
 
         # 记录实现亏损（用于风控监控）
         if pnl_val < 0:
@@ -645,6 +673,7 @@ class MockTradeGateway:
         with self._lock:
             self._trade_log.clear()
             self._non_trade_notified_stop_loss.clear()
+            self._today_sold_codes.clear()
         self.risk_manager.reset_day()
         logger.info("[TradeGateway] 每日重置完成")
 
