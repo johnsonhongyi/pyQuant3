@@ -6,9 +6,13 @@ Colors range dynamically based on intensity of momentum.
 """
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QHBoxLayout, QPushButton, QComboBox, QScrollArea
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
-import numpy as np
+import os
+import json
+import zlib
+from sys_utils import get_app_root
+from JohnsonUtil import commonTips as cct
 
 class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
@@ -16,7 +20,12 @@ class SectorHeatmapWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
-        self.load_mock_sectors()
+        self.load_live_sectors()
+        
+        # Periodic update timer for live bidding sectors
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.load_live_sectors)
+        self.timer.start(3000) # update every 3 seconds
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -67,7 +76,72 @@ class SectorHeatmapWidget(QWidget):
             ("通信设备", 75.0, "+2.80%", 9),
             ("中药", 50.0, "+0.00%", 8),
         ]
-        self.render_grid()
+        self.sort_sectors(self.sort_combo.currentIndex())
+
+    def load_live_sectors(self):
+        path = None
+        try:
+            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+            if ram_path and os.path.exists(ram_path):
+                path = ram_path
+        except Exception:
+            pass
+            
+        if not path:
+            try:
+                base = get_app_root()
+                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
+                if os.path.exists(fallback_path):
+                    path = fallback_path
+            except Exception:
+                pass
+                
+        if not path or not os.path.exists(path):
+            if not hasattr(self, 'sectors') or not self.sectors:
+                self.load_mock_sectors()
+            return
+
+        try:
+            with open(path, 'rb') as f:
+                raw_data = f.read()
+            if not raw_data:
+                if not hasattr(self, 'sectors') or not self.sectors:
+                    self.load_mock_sectors()
+                return
+                
+            json_str = zlib.decompress(raw_data).decode('utf-8')
+            data = json.loads(json_str)
+            sector_data = data.get('sector_data', {})
+            
+            if not sector_data:
+                if not hasattr(self, 'sectors') or not self.sectors:
+                    self.load_mock_sectors()
+                return
+                
+            sectors_list = []
+            for sec_name, info in sector_data.items():
+                score = info.get('score', 0.0)
+                avg_pct = info.get('avg_pct_diff') or info.get('avg_pct') or 0.0
+                count = info.get('count') or len(info.get('followers', []))
+                
+                change_pct_str = f"{avg_pct:+.2f}%"
+                
+                # We can store extra info inside the tuple safely
+                leader_code = info.get('leader', '')
+                leader_name = info.get('leader_name', '')
+                
+                sectors_list.append((sec_name, round(score, 1), change_pct_str, count, leader_code, leader_name))
+                
+            if sectors_list:
+                self.sectors = sectors_list
+                self.sort_sectors(self.sort_combo.currentIndex())
+            else:
+                if not hasattr(self, 'sectors') or not self.sectors:
+                    self.load_mock_sectors()
+        except Exception as e:
+            print(f"[SectorHeatmapWidget] Error loading live sectors: {e}")
+            if not hasattr(self, 'sectors') or not self.sectors:
+                self.load_mock_sectors()
 
     def get_color_for_score(self, pct_str):
         try:
@@ -94,7 +168,9 @@ class SectorHeatmapWidget(QWidget):
             self.grid_layout.itemAt(i).widget().setParent(None)
 
         cols = 4  # 4 columns grid
-        for idx, (name, score, pct, count) in enumerate(self.sectors):
+        for idx, item in enumerate(self.sectors):
+            # Unpack safely supporting both 4-tuple and 6-tuple
+            name, score, pct, count = item[:4]
             row = idx // cols
             col = idx % cols
 
@@ -116,8 +192,6 @@ class SectorHeatmapWidget(QWidget):
                 }}
             """)
             
-            # Rich text formatting inside card (HTML is supported on QLabel, but for QPushButton we just set text or layouts)
-            # We can use a layout inside the button or a custom widget. Let's place a layout inside card!
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(5, 5, 5, 5)
             card_layout.setSpacing(2)

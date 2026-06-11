@@ -509,7 +509,10 @@ class ATSMainWindow(QMainWindow):
         dialog.exec()
 
     def on_sector_clicked(self, name):
-        self.status_bar.showMessage(f"选中板块: {name} | 正在筛选相关成分股...")
+        self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
+        from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
+        dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, parent=self)
+        dialog.exec()
 
     def on_heartbeat(self):
         # In actual P6, this is where we query live shared memory.

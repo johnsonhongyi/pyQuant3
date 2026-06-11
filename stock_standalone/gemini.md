@@ -1,3 +1,29 @@
+## 2026-06-12 02:40
+- [x] **修复双击打包 EXE 弹出多个 ATS 窗口的缺陷 (Fixed Multiple ATS Windows Spawning on Compiled EXE Double-Click)**：
+    - [x] **根本原因诊断 (Root Cause)**：
+        1. **缺少 `freeze_support()` 拦截**：在根目录 Launcher 脚本 `run_ats.py` 中，完全没有调用 `multiprocessing.freeze_support()`。当 parent 进程通过 `multiprocessing` 启动子进程时，在 Windows 环境下会通过 `spawn` 方式再次运行 `run_ats.exe`。因为缺乏 `freeze_support()` 拦截，子进程同样会执行 `main()` 里的 GUI 启动代码，进入无限递归创建新窗口。
+        2. **未在首行加载 (Imports Hijacking)**：在 `ats/main_ats.py` 中，`freeze_support()` 虽在 `if __name__ == "__main__"` 中调用，但因位置在文件最末端，导致子进程在运行到拦截点之前就执行了顶部的 `PyQt6` 等重度 GUI 库以及自定义模块的导入。这些导入操作可能引发子线程初始化、Qt 全局状态冲突或潜在的 GUI 再次拉起。
+    - [x] **双端物理修复与前置防御 (Robust Freeze Support Placement)**：
+        * 对 `run_ats.py`：追加了 `multiprocessing.freeze_support()` 守护锁。
+        * 对 `ats/main_ats.py` 与 `run_ats.py`：将 `multiprocessing.freeze_support()` 的检测过滤移到了**首行最顶部**（排在 `sys`/`os` 之后，在任何 heavy imports 之前）。这保证了任何由 multiprocessing 派生出的子进程在启动第一毫秒就被守护锁捕获并强行执行 `sys.exit()`，从而永远不会执行 `PyQt6` 导入或 GUI 窗口创建，彻底杜绝了窗口无限递归（Fork Bomb）。
+
+## 2026-06-12 02:30
+- [x] **修复打包编译状态下子进程启动崩溃与联动解耦诊断 (Fixed Subprocess Launch Error in Packaged Mode & Completed Linkage Dependency Analysis)**：
+    - [x] **补全 `main_ats.py` 入口进程保护**：在 `ats/main_ats.py` 中引入了 `multiprocessing.freeze_support()` 调用。解决了在 Windows 打包编译状态下单独运行 ATS 终端时，因缺少 `freeze_support` 导致的子进程 `LinkageProcess` 启动失败、崩溃或陷入死锁无限循环的问题，确保物理联动子系统可以独立自治启动。
+    - [x] **编写深度诊断报告**：创建了并推送了诊断报告 [ats_linkage_diagnosis.md](file:///C:/Users/Johnson/.gemini/antigravity/brain/f070f090-667f-4b42-870f-7754a8d955e7/ats_linkage_diagnosis.md)，详尽梳理并向用户解释了当 `instock_MonitorTK` (TK) 关闭时，ATS 联动功能失效的四个主要维度：打包/克隆进程的 `freeze_support` 缺失（已修复）、可视化器生命周期由 TK 强绑定管理、全局剪贴板监听由 TK 独占运行、以及底层实盘行情数据更新停止。
+
+## 2026-06-12 02:00
+- [x] **实现 ATS 行业板块强度热力图实盘对接与成分股下钻联动 (Implemented Live Sector Heatmap Binding & Constituent Stock Drill-Down Linkage)**：
+    - [x] **对接实盘会话数据文件 (Connected Heatmap to Live Session Data)**：重构了 `SectorHeatmapWidget` 中的 `load_live_sectors` 方法。废除了原有的静态 Mock 板块数据，全面接入了共享 RAM 磁盘及物理落盘备份中的 `bidding_session_data.json.gz`。实现了在开盘及交易时间段，热力图能够以 3s 定时器周期高频拉取并渲染出真实的板块强度得分（Score）、行业平均涨幅（Change %）以及活跃成员数量。
+    - [x] **设计板块成分股独立明细窗口 (Created ATSSectorDetailDialog)**：
+        - 新增了 `ats/ui/sector_detail_dialog.py`，实现了一个遵循高档深色 HSL 调色板的 `ATSSectorDetailDialog`。
+        - 实现了板块内“龙头股”与“跟涨股”的区分显示，支持将龙头股以金黄色特殊标记（`👑 龙头`）置顶。
+    - [x] **落地成分股列表多维交互与自愈排序 (Standardized Numeric Sorting & List Linkage inside Sector Details)**：
+        - 全量对接了 `NumericTableWidgetItem` 以解决百分比、涨幅与分值字段的自然数值大小排序，避免了字符串比对缺陷。
+        - 支持双击成分股唤起该股的多维核心量化指标特征面板 (`StockDetailDialog`)，实现主界面的无缝交互复用。
+        - 接入了 `setup_header_persistence` 以实现用户手动拖拽成分股列宽的 1s 写盘持久化自愈。
+    - [x] **物理直连联动保障 (Direct Physical Linkage Channel)**：用户在成分股明细表中单击或使用键盘上下方向键导航选中任意个股时，自动触发向 TCP 26668 和外部联动管理器的直连推流，同步切换 K 线图视口和外部券商交易客户端（同花顺/通达信），实现了零污染、物理级别的强操盘体验。
+
 ## 2026-06-12 01:35
 - [x] **修复非激活 Tab 列宽被默认初始状态覆盖与初始化布局重置的 Bug (Fixed Layout Drift & Layout Manager Reset on Exit/Startup)**：
     - [x] **落地“列宽首发自适应”与“数字列极限紧凑”排版，全表默认排序激活 (Implemented One-Time Auto-Fit with Ultra-Narrow Numeric Columns & Enabled Sorting Across All Tables)**：

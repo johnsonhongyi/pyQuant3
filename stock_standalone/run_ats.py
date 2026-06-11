@@ -6,6 +6,11 @@ Runs the Autonomous Trading System dashboard.
 
 import sys
 import os
+import multiprocessing
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 from PyQt6.QtWidgets import QApplication
 
 # Ensure workspace root is in path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
