@@ -1569,7 +1569,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._bg_kernel_last_trade_date = today_str
                 self._bg_kernel_today_buys = set()
                 self._bg_kernel_today_sells = set()
-                self._bg_kernel_today_mocks = set()
+                self._bg_kernel_today_mock_buys = set()
+                self._bg_kernel_today_mock_sells = set()
                 self._bg_kernel_today_confirmed = set()
                 self._bg_kernel_today_ignored = set()
                 # 从历史日志中恢复跨会话去重标记
@@ -1591,7 +1592,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             sig = data.get("signal", {})
                                             c_val = sig.get("code") if isinstance(sig, dict) else getattr(sig, "code", None)
                                             if c_val:
-                                                self._bg_kernel_today_mocks.add(str(c_val).zfill(6))
+                                                code_str = str(c_val).zfill(6)
+                                                action_str = str(data.get("kernel_result", {}).get("kernel_action", "") or "").upper()
+                                                if action_str in ("BUY", "ADD"):
+                                                    self._bg_kernel_today_mock_buys.add(code_str)
+                                                elif action_str in ("SELL", "REDUCE"):
+                                                    self._bg_kernel_today_mock_sells.add(code_str)
+                                                else:
+                                                    self._bg_kernel_today_mock_buys.add(code_str)
                                 except Exception:
                                     continue
                     except Exception:
@@ -1643,6 +1651,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             signals = focus_ctrl.get_decision_queue()
             positions = {p['code']: p for p in trade_gw.get_positions()}
 
+            # 记录本轮循环中已执行过的买入与卖出，防止同一秒内对同一只股票同时触发买入和平仓
+            loop_executed_buys = set()
+            loop_executed_sells = set()
+
             target_codes = list(positions.keys()) + [str(sig.get('code', '')).zfill(6) for sig in signals]
             targeted_price_map = self._bg_get_realtime_price_map(codes=target_codes)
 
@@ -1651,6 +1663,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 action = str(sig.get('kernel_action', '') or '').upper()
                 allowed = bool(sig.get('kernel_allowed'))
                 if action in ("HOLD", "", "BLOCK", "ERROR"):
+                    continue
+
+                # 🛡️ 本轮循环同秒反向交易拦截，防止同一秒/心跳内对同只个股既开仓又平仓
+                if action in ("BUY", "ADD") and code in loop_executed_sells:
+                    logger.warning(f"[BgKernel] 拦截 {code} {action} 决策：本轮内刚执行过卖出，禁止同秒反向交易")
+                    continue
+                if action in ("SELL", "REDUCE") and code in loop_executed_buys:
+                    logger.warning(f"[BgKernel] 拦截 {code} {action} 决策：本轮内刚执行过买入，禁止同秒反向交易")
                     continue
 
                 if not allowed:
@@ -1769,6 +1789,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         )
                         if ok:
                             self._bg_kernel_today_buys.add(code)
+                            loop_executed_buys.add(code)
                             executed.append(f"LIVE_{action} {code}")
                             executed_codes.append(code)
                             focus_ctrl.decision_queue.update_status(code, "已提交")
@@ -1788,10 +1809,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             })
                             enrich_decision_item(sig, write_journal=True)
                     else:
-                        if code in self._bg_kernel_today_mocks:
+                        if code in self._bg_kernel_today_mock_buys:
                             continue
-                        self._bg_kernel_today_mocks.add(code)
-
+                        if code in self._bg_kernel_today_mock_sells:
+                            # 冷却拦截
+                            continue
+                        
                         ok, msg = trade_gw.submit_buy(
                             code=code,
                             name=sig.get('name', ''),
@@ -1801,14 +1824,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             reason=sig.get('reason', ''),
                         )
 
-                        executed.append(f"MOCK_{action} {code}")
-                        executed_codes.append(code)
-                        focus_ctrl.decision_queue.update_status(code, "已提交")
-                        records.append({
-                            "code": code, "name": sig.get('name', ''), "action": action,
-                            "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
-                        })
-                        enrich_decision_item(sig, write_journal=True)
+                        if ok:
+                            self._bg_kernel_today_mock_buys.add(code)
+                            loop_executed_buys.add(code)
+                            executed.append(f"MOCK_{action} {code}")
+                            executed_codes.append(code)
+                            focus_ctrl.decision_queue.update_status(code, "已提交")
+                            positions[code] = {"code": code}
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "模拟已提交", "detail": "PAPER 模拟买入成功"
+                            })
+                            enrich_decision_item(sig, write_journal=True)
+                        else:
+                            blocked.append(f"{code}:{msg}")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拒绝", "detail": msg
+                            })
+                            enrich_decision_item(sig, write_journal=True)
 
                 elif action in ("SELL", "REDUCE"):
                     if code not in positions:
@@ -1838,6 +1873,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         )
                         if ok:
                             self._bg_kernel_today_sells.add(code)
+                            loop_executed_sells.add(code)
                             executed.append(f"LIVE_{action} {code}")
                             executed_codes.append(code)
                             focus_ctrl.decision_queue.update_status(code, "已成交")
@@ -1857,9 +1893,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             })
                             enrich_decision_item(sig, write_journal=True)
                     else:
-                        if code in self._bg_kernel_today_mocks:
+                        if code in self._bg_kernel_today_mock_sells:
                             continue
-                        self._bg_kernel_today_mocks.add(code)
 
                         sell_price = float(price_map.get(code, price) or price)
                         ok, msg = trade_gw.submit_sell(
@@ -1868,14 +1903,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             reason="MockSell",
                         )
 
-                        executed.append(f"MOCK_{action} {code}")
-                        executed_codes.append(code)
-                        focus_ctrl.decision_queue.update_status(code, "已成交")
-                        records.append({
-                            "code": code, "name": sig.get('name', ''), "action": action,
-                            "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
-                        })
-                        enrich_decision_item(sig, write_journal=True)
+                        if ok:
+                            self._bg_kernel_today_mock_sells.add(code)
+                            loop_executed_sells.add(code)
+                            executed.append(f"MOCK_{action} {code}")
+                            executed_codes.append(code)
+                            focus_ctrl.decision_queue.update_status(code, "已成交")
+                            positions.pop(code, None)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "模拟已成交", "detail": "PAPER 模拟卖出成功"
+                            })
+                            enrich_decision_item(sig, write_journal=True)
+                        else:
+                            blocked.append(f"{code}:{msg}")
+                            blocked_codes.append(code)
+                            records.append({
+                                "code": code, "name": sig.get('name', ''), "action": action,
+                                "status": "拒绝", "detail": msg
+                            })
+                            enrich_decision_item(sig, write_journal=True)
 
             msg = f"后台执行={len(executed)} 拦截={len(blocked)} 错误={len(errors)}"
             if executed or errors:
@@ -5810,10 +5857,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"[Compute] detect_signals failed: {e}")
 
+            if full_df_res is not None and not full_df_res.empty:
+                try:
+                    full_df_res = detect_signals(full_df_res)
+                except Exception as e:
+                    logger.error(f"[Compute] detect_signals on full_df_res failed: {e}")
+
             # 在所有 df_all（即 full_df）计算完成后，将计算列同步到展示轨 full_df_res 上，避免计算两次
             if full_df_res is not None and not full_df_res.empty:
                 try:
-                    cols_to_sync = ['emotion_status', 'signal_strength', 'signal', 'emotion']
+                    cols_to_sync = ['emotion_status', 'emotion']
                     # 确保 code 列在两轨数据中都存在（防止未 sanitize 或 DataFrame 重构产生缺失）
                     if 'code' not in full_df.columns:
                         full_df = full_df.copy()
@@ -5828,12 +5881,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             mapped_series = full_df_res['code'].map(mapping_df[col])
                             if col == 'emotion_status':
                                 full_df_res[col] = mapped_series.fillna(50).astype(int)
-                            elif col == 'signal':
-                                full_df_res[col] = mapped_series.fillna('')
                             elif col == 'emotion':
                                 full_df_res[col] = mapped_series.fillna('中性')
-                            elif col == 'signal_strength':
-                                full_df_res[col] = mapped_series.fillna(0)
                             else:
                                 full_df_res[col] = mapped_series
                 except Exception as e:
@@ -6227,11 +6276,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             now = time.time()
             
             # Throttling: 实时同步每 60 秒一次，或看板/赛马首次打开时强制同步
+            # [NEW] 保证市场温度跟数据更新一致：一旦有数据变更且距离上次计算超过 3 秒，也立即执行
             trigger_dash = dashboard and not getattr(self, '_dashboard_first_sync_done', False)
             trigger_racing = racing and not getattr(self, '_racing_first_sync_done', False)
             trigger_time = (now - getattr(self, '_last_dashboard_sync_ts', 0) > 60)
+            trigger_update = has_update and (now - getattr(self, '_last_dashboard_sync_ts', 0) > 3.0)
             
-            if trigger_dash or trigger_racing or trigger_time:
+            if trigger_dash or trigger_racing or trigger_time or trigger_update:
                 self._last_dashboard_sync_ts = now
                 if dashboard: self._dashboard_first_sync_done = True
                 if racing: self._racing_first_sync_done = True
@@ -6241,9 +6292,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         from market_pulse_engine import DailyPulseEngine
                         from JSONData import sina_data
                         
-                        # [PERF] 从 MarketStateBus 获取只读快照，避免主线程 df_all 被并发修改
-                        bus_data = self.market_bus.get_latest()
-                        df = bus_data[1] if bus_data else (self.df_all if hasattr(self, 'df_all') else None)
+                        df = self.df_all.copy() if hasattr(self, 'df_all') else None
                         if df is None or df.empty: return
                         
                         up_count = down_count = flat_count = vol_down = vol_up = 0
@@ -6291,12 +6340,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         vol_up_details.append(item_data)
                             
                             if 'score' in df.columns:
-                                scanned_df = df[df['score'] > 0]
-                                if not scanned_df.empty:
-                                    sample_count = len(scanned_df)
-                                    ready_pct = (scanned_df['score'] > 85).mean() * 100
-                                    if sample_count < 20: ready_pct = ready_pct * (sample_count / 20)
-                            
+                                # [PRO STYLE] 高分占比 ready_pct 计算逻辑，与 DailyPulseEngine.generate_daily_pulse 保持 100% 算法对齐
+                                # 分母为持仓监控股与前 30 只市场高分候选股的总和，实现平滑和防膨胀，使温度能真实客观反映冷清与火热
+                                strategy_engine = getattr(self, 'live_strategy', None)
+                                monitored_stocks = getattr(strategy_engine, '_monitored_stocks', {}) if strategy_engine else {}
+                                combined_codes = list(monitored_stocks.keys())
+                                
+                                high_quality_candidates = df[df['score'] > 80].sort_values(by='score', ascending=False).head(30).index.tolist()
+                                for code in high_quality_candidates:
+                                    if code not in combined_codes:
+                                        combined_codes.append(code)
+                                        
+                                if combined_codes:
+                                    sub_df = df.loc[df.index.intersection(combined_codes)]
+                                    if not sub_df.empty:
+                                        high_score_count = (sub_df['score'] > 85).sum()
+                                        ready_pct = (high_score_count / len(sub_df)) * 100
+                                
                             breadth_data = {'up_ratio': up_count / (up_count + down_count + flat_count) if (up_count + down_count + flat_count) > 0 else 0.5}
 
                         # 2. 指数行情

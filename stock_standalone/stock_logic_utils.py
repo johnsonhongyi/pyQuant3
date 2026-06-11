@@ -675,20 +675,31 @@ def toast_message(master, text, duration=1500):
 
 
 class RealtimeSignalManager:
-    state_df: pd.DataFrame
-
     def __init__(self) -> None:
         # [FIX] 增加线程锁，确保跨线程计算信号时的状态一致性，防止 GIL 冲突
         self._lock = threading.Lock()
-        # 使用 DataFrame 存储状态以实现向量化更新
-        self.state_df = pd.DataFrame(columns=[
+        self.vol_cols = ['vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4']
+        # 统一使用按周期 (resample) 隔离的 state_df
+        self._state_dfs = {}
+        self._cached_data = {}
+
+        # 兼容旧代码直接访问 self.state_df，默认指向日线 'd'
+        self._state_dfs['d'] = pd.DataFrame(columns=[
             'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak',
             'vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4', 'vol_ptr'
         ])
-        self.vol_cols = ['vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4']
-        self._last_hash = None
-        self._cached_signal_strength = None
-        self._cached_signal = None
+        
+    @property
+    def state_df(self):
+        # 兼容旧属性访问，指向日线状态
+        return self._state_dfs.setdefault('d', pd.DataFrame(columns=[
+            'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak',
+            'vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4', 'vol_ptr'
+        ]))
+
+    @state_df.setter
+    def state_df(self, value):
+        self._state_dfs['d'] = value
 
     def update_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
@@ -711,21 +722,41 @@ class RealtimeSignalManager:
         if df.index.name != 'code':
             df.set_index('code', inplace=True, drop=False)
 
+        # 提取当前周期 resample 标识，默认为 'd'
+        resample = 'd'
+        if 'resample' in df.columns and len(df) > 0:
+            resample = str(df['resample'].iloc[0]).strip()
+
+        cache = self._cached_data.setdefault(resample, {
+            'last_hash': None,
+            'cached_signal_strength': None,
+            'cached_signal': None
+        })
+
         try:
             current_hash = hash(tuple(df[price_col].values)) ^ hash(tuple(df['volume'].values))
-            if self._last_hash == current_hash and self._cached_signal is not None and len(self._cached_signal) == len(df):
-                df['signal_strength'] = self._cached_signal_strength
-                df['signal'] = self._cached_signal
+            if cache['last_hash'] == current_hash and cache['cached_signal'] is not None and len(cache['cached_signal']) == len(df):
+                df['signal_strength'] = cache['cached_signal_strength']
+                df['signal'] = cache['cached_signal']
                 return df
-            self._last_hash = current_hash
+            cache['last_hash'] = current_hash
         except Exception:
             pass
 
         codes = df.index
         
         with self._lock:
+            # 提取或初始化当前周期的 state_df
+            state_df = self._state_dfs.get(resample)
+            if state_df is None:
+                state_df = pd.DataFrame(columns=[
+                    'prev_now', 'today_high', 'today_low', 'prev_signal', 'down_streak',
+                    'vol_h0', 'vol_h1', 'vol_h2', 'vol_h3', 'vol_h4', 'vol_ptr'
+                ])
+                self._state_dfs[resample] = state_df
+
             # 快速更新 state_df，补齐缺失的股票
-            missing_codes = codes.difference(self.state_df.index)
+            missing_codes = codes.difference(state_df.index)
             if not missing_codes.empty:
                 new_states = pd.DataFrame({
                     'prev_now': df.loc[missing_codes, price_col],
@@ -740,10 +771,11 @@ class RealtimeSignalManager:
                     'vol_h4': np.nan,
                     'vol_ptr': 1
                 }, index=missing_codes)
-                self.state_df = pd.concat([self.state_df, new_states])
+                state_df = pd.concat([state_df, new_states])
+                self._state_dfs[resample] = state_df
     
             # 提取历史状态数据
-            state = self.state_df.loc[codes]
+            state = state_df.loc[codes]
             # 提取成交量历史并计算均值
             avg_vol_arr = np.nanmean(state[self.vol_cols].values.astype(float), axis=1)
         
@@ -777,7 +809,6 @@ class RealtimeSignalManager:
         open_arr = df.get('open', now_arr).values if 'open' in df.columns else now_arr
 
         # 向量化成交量异常判断
-        # ⚡ 优化：使用预计算好的均值数组，避免在向量化逻辑中进行循环
         vol_boom_now = volume_arr > avg_vol_arr
 
         # 向量化逻辑判断
@@ -827,25 +858,27 @@ class RealtimeSignalManager:
         signal_col[sell_cond] = 'SELL'
         
         df['signal'] = signal_col
-        self._cached_signal_strength = score.copy()
-        self._cached_signal = signal_col.copy()
+        cache['cached_signal_strength'] = score.copy()
+        cache['cached_signal'] = signal_col.copy()
 
         # ⚡ 批量同步回 state_df
         with self._lock:
-            self.state_df.loc[codes, 'prev_now'] = now_arr
-            self.state_df.loc[codes, 'today_high'] = updated_today_high
-            self.state_df.loc[codes, 'today_low'] = updated_today_low
-            self.state_df.loc[codes, 'down_streak'] = updated_down_streak
-            self.state_df.loc[codes, 'prev_signal'] = signal_col
+            state_df.loc[codes, 'prev_now'] = now_arr
+            state_df.loc[codes, 'today_high'] = updated_today_high
+            state_df.loc[codes, 'today_low'] = updated_today_low
+            state_df.loc[codes, 'down_streak'] = updated_down_streak
+            state_df.loc[codes, 'prev_signal'] = signal_col
             
             # 处理成交量历史 (完全向量化)
-            ptrs = self.state_df.loc[codes, 'vol_ptr'].values.astype(int) % 5
+            ptrs = state_df.loc[codes, 'vol_ptr'].values.astype(int) % 5
             for i in range(5):
                 mask = (ptrs == i)
                 if mask.any():
-                    self.state_df.loc[codes[mask], f'vol_h{i}'] = volume_arr[mask]
+                    state_df.loc[codes[mask], f'vol_h{i}'] = volume_arr[mask]
             
-            self.state_df.loc[codes, 'vol_ptr'] += 1
+            state_df.loc[codes, 'vol_ptr'] += 1
+            
+            self._state_dfs[resample] = state_df
 
         return df
 
