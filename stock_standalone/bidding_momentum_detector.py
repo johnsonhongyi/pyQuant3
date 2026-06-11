@@ -1879,8 +1879,31 @@ class BiddingMomentumDetector:
             if not cct.get_day_istrade_date():
                 is_trade_day = False
 
-            if not force and not is_trade_day:
-                return
+            # [🚀 FIX] 非交易日持久化写盘安全隔离保护
+            if not is_trade_day:
+                has_valid_post_trade_archive = False
+                main_path = self._get_persistence_path()
+                if os.path.exists(main_path):
+                    try:
+                        with open(main_path, 'rb') as f:
+                            decompressed = zlib.decompress(f.read())
+                            existing_data = json.loads(decompressed.decode('utf-8'))
+                            exist_last_ts = existing_data.get('last_data_ts', 0.0)
+                            if exist_last_ts > 0:
+                                exist_dt = datetime.datetime.fromtimestamp(exist_last_ts)
+                                if exist_dt.hour >= 15:
+                                    has_valid_post_trade_archive = True
+                    except Exception as e:
+                        logger.debug(f"Failed to check existing archive: {e}")
+
+                if force and not has_valid_post_trade_archive:
+                    logger.info("🛡️ [Detector] 非交易日，且未检测到有效的 15:00 后收盘存档。允许 force=True 强行写入保底数据。")
+                elif not force:
+                    logger.info("🛡️ [Detector] 非交易日自动保存，拒绝写入。")
+                    return
+                else:
+                    logger.info("🛡️ [Detector] 非交易日且已存在有效的 15:00 后收盘存档，拒绝覆写以保护已有数据。")
+                    return
 
             now = datetime.datetime.now()
 
@@ -1900,7 +1923,7 @@ class BiddingMomentumDetector:
                     mtime = os.path.getmtime(main_path)
                     f_dt = datetime.datetime.fromtimestamp(mtime)
 
-                    if now.hour >= 15 or not is_trade_day:
+                    if (now.hour >= 15 or not is_trade_day) and not force:
                         current_sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
                         if current_sig_count < 5 and (now - f_dt).days <= 2:
                             logger.info(f"🛡️ [Detector] Session empty ({current_sig_count}). Protecting existing data.")
@@ -2131,7 +2154,11 @@ class BiddingMomentumDetector:
                     ts.price_anchor = stock_price_anchors.get(code, 0.0)
                     
                     if is_cross_day:
-                        ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                        ts.score = 0.0
+                        ts.momentum_score = 0.0
+                        ts.score_anchor = 0.0
+                        ts.price_anchor = 0.0
+                        ts.first_breakout_ts = 0.0
                     else:
                         ts.first_breakout_ts = _get('fb', ts.first_breakout_ts)
 
@@ -2181,7 +2208,11 @@ class BiddingMomentumDetector:
                     ts.price_anchor = stock_price_anchors.get(code, 0.0)
                     
                     if is_cross_day:
-                        ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
+                        ts.score = 0.0
+                        ts.momentum_score = 0.0
+                        ts.score_anchor = 0.0
+                        ts.price_anchor = 0.0
+                        ts.first_breakout_ts = 0.0
                     else:
                         ts.last_close = m.get('last_close', ts.last_close)
                         ts.open_price = m.get('open_price', ts.open_price)
@@ -2234,7 +2265,7 @@ class BiddingMomentumDetector:
                 
                 self.active_sectors = new_active_sectors if not is_cross_day else {}
                 self.sector_anchors = new_sector_anchors if not is_cross_day else {}
-                self.baseline_time = new_baseline_time
+                self.baseline_time = new_baseline_time if not is_cross_day else time.time()
                 self.last_data_ts = new_last_data_ts
                 self.stock_selector_seeds = new_stock_selector_seeds
                 self.daily_watchlist = new_daily_watchlist
@@ -4405,6 +4436,18 @@ class BiddingMomentumDetector:
                 return 915 <= hm <= 1500
             return True
             
+        # [🚀 FIX] 严格校验今日是否为交易日，非交易日直接判定为非活跃会话，防止非交易日启动重置数据
+        is_trade_day = False
+        try:
+            is_trade_day = cct.get_trade_date_status() and cct.get_day_istrade_date() and cct.get_work_day_status()
+        except Exception:
+            try:
+                is_trade_day = cct.get_trade_date_status()
+            except Exception:
+                pass
+        if not is_trade_day:
+            return False
+
         now = datetime.datetime.now()
         hm = now.hour * 100 + now.minute
         return 915 <= hm <= 1500

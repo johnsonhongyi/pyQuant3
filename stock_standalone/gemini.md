@@ -1,3 +1,19 @@
+## 2026-06-11 17:50
+- [x] **修复回放/回测模式下自动重置基准计时在非交易日或盘后不触发的 Bug (Fixed Auto-Reset Trigger Failure in Backtest/Replay Mode on Weekends/Off-Hours)**：
+    - [x] **解除墙上时间限制 (Bypassed Wall-Clock Date Restrictions)**：在 `bidding_racing_panel.py` 中，针对自动基准重置检测判定，增加了 `is_simulation` 回放模式判定分支。在回放模式下，直接通过行情数据包中的时间戳（即日内分秒时间 `time_hhmm`）进行时段有效性筛选（`9:15-11:30` 或 `13:00-15:05`），从而跳过了对系统本地墙上时间的 `cct.get_trade_date_status()`（交易日判定）和 `cct.get_work_time()` 限制。
+    - [x] **解决非交易时间测试自动重置停滞问题**：这彻底解决了在周末、节假日或收盘后进行录像回放/策略回测时，由于墙上时钟属于非交易时间导致赛马面板中 `is_trading_time` 判定恒为 `False`，进而导致自动定时基准重置逻辑被完全跳过的业务缺陷。
+    - [x] **保障高可靠回归与编译**：经 `py_compile` 静态编译检查以及 `pytest test_watchlist_lifecycle.py` 全量用例测试，11 项核心回归测试均 100% 绿旗通过。
+
+## 2026-06-11 17:15
+- [x] **修复盘后及非交易日重置与持久化数据写入 Bug (Fixed After-Hours & Weekend Session Reset & Write Protection)**：
+    - [x] **防止非交易时间自动重置 (Blocked Off-Hours Reset)**：重构了 `bidding_momentum_detector.py` 的 `is_active_session` 方法。在实时交易模式下，严格限制仅在交易日（且在 09:15-15:00 期间）才判定为活跃会话。这彻底避免了周末、节假日或盘后重启时自动触发 `reset_observation_anchors` 导致的涨跌计时重置与数据清零问题。
+    - [x] **实现非交易日写盘智能隔离保护 (Weekend Save Protection & Post-Market Archive Check)**：在 `save_persistent_data` 写入逻辑中引入了智能双校验拦截门禁。当判定当前为非交易日（通过 `cct.get_day_istrade_date()` 等判定）时：
+        - 优先读取并解压磁盘上的现有存档文件（`bidding_session_data.json.gz`），提取其 `last_data_ts` 属性。
+        - 若现有存档已被证明包含有效的 15:00 交易收盘后数据（`hour >= 15`），则**绝对拒绝覆写**（即便带有 `force=True`），以保护历史最终时间片涨跌数据免受空内存污染。
+        - 若现有存档不存在、损坏或未包含 15:00 后的交易后数据，在 `force=True` 时则**允许写入保底存档**，确保始终至少留有一份交易日的收盘数据。
+    - [x] **规范跨交易日数据自愈重置 (Standardized Cross-Day Reset)**：在 `load_persistent_data` 中，当判定当前为跨日启动时，显式将个股 `ts.price_anchor` 归零，并同步将 `self.baseline_time` 规整重设为当前时间。确保新交易日启动后，能够顺畅基于新开盘价进行计时与百分比涨跌计算。
+    - [x] **测试校验全量通过**：在 `scratch` 目录编写了专项单元测试 `test_weekend_persistence.py` 完整校验了非交易日 `is_active_session` 与 `save_persistent_data` 拦截动作，且运行全量生命周期集成测试 `pytest test_watchlist_lifecycle.py` 11 项用例全部绿旗通过。
+
 ## 2026-06-11 16:50
 - [x] **无侵入式根治双 GUI 框架 (Tkinter + PyQt6) 窗口关闭时的 GIL 冲突崩溃 (Root-fixed Cross-Framework GIL Crash on Racing Panel Closure)**：
     - [x] **定位崩溃根源**：排查发现当在 Python 直接运行或编译环境下关闭 PyQt6 赛马面板时，`closed` 信号会同步触发连接的 Tkinter 状态更新回调。由于是直接在 PyQt6 的 C++ 关闭/析构调用栈中去操作 Tkinter API（如 `self.after` 等注册动作），引发了 Python 底层的 GIL 锁争夺和 `PyEval_RestoreThread` 错误，导致整个 Python 主进程被强行中止。
