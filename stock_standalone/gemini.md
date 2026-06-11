@@ -1,3 +1,26 @@
+## 2026-06-11 22:30
+- [x] **制作 ATS 打包配置文件 (Created PyInstaller Spec File for ATS v2)**：
+    - [x] **分析冗余与优化选项**：研究了 `instock_MonitorTK.spec` 的打包配置，对齐了其中关于 `trash_list`（Qt6WebEngineCore、Qt6WebEngineWidgets、Qt6Pdf、Qt6Quick 等）冗余 DLL/库的剔除逻辑。
+    - [x] **配置 hiddenimports 与 datas**：精细整理了 `pyqtgraph`、`PyQt6`、`pandas`、`numpy`、`configobj` 等核心隐式与显式依赖库及 `a_trade_calendar` 数据路径和工作区配置文件。
+    - [x] **完成 spec 配置与静态编译验证**：输出 `ats.spec`，添加了 `configobj` 隐式依赖项以解决打包版无法读写 `G:\h5config.txt` 配置文件的问题。使用 `python -m py_compile ats.spec` 验证语法，确保编译通过、平稳无隐患。
+    - [x] **升级启动器路径解析 (Upgraded Launcher Path Resolution for Nuitka/PyInstaller)**：重构了 `run_ats.py` 与 `ats/main_ats.py` 中的 `sys.path` 注入逻辑。抛弃了原生易在编译单文件临时释放目录下失效 of `__file__` 相对路径解析，全面接入基于 `sys_utils.get_app_root()` 的统一物理绝对路径获取机制，确保编译版本与源码环境下的双向完美兼容性。
+    - [x] **实现字体缩放微调与跨会话持久化 (Implemented Font Size Adjuster & Persistence)**：
+        - [x] 在 `ats/ui/styles.py` 中将全局默认 QWidget 字号从 11pt 下调至更小巧的 9pt。
+        - [x] 在 `ATSMainWindow` 顶部控制工具栏（ToolBar）中新增了 `A-` (减小) 和 `A+` (增大) 双向微调按钮，并实时在 `lbl_font_size` 指示器上展示当前字号。
+        - [x] 实现了 `load_font_size()` 与 `save_font_size()` 持久化机制，将字号大小（`ats_font_size`）以原子化写入形式自动存取到系统统一配置文件 `window_config.json` 中。
+        - [x] 编写了 `apply_qss_with_font_size()` 模块，通过正则动态更新并重载全局 QSS 样式表，实现了表格、树形股票池、Tab 页等全部 UI 组件的秒级重绘缩放，极大提升了紧凑分屏监控场景下的信息密度。
+
+## 2026-06-11 22:20
+- [x] **实施独立自治交易决策系统（ATS v2） (Implementation of Autonomous Trading System v2)**：
+    - [x] **初始化项目结构**：创建 `ats/` 目录并配置 `__init__.py` 等基础项。
+    - [x] **P0 阶段：Qt Dashboard 原型实现**：构建统一风格的 QSS 配色系统，搭建主窗口、树形股票池、波段跟踪表、交易流水/持仓 Tab、以及市场热度（饼图/柱图）原型。
+    - [x] **P1 阶段：IPCBridge & SQLite 接入**：实现只读数据库查询与基础配置载入，读取并展现真实的历史信号、交易流水与资金曲线。
+    - [x] **P2 阶段：UniverseManager 漏斗模型**：实现雷达池、观察池、交易池的三层晋升与淘汰过滤。
+    - [x] **P3 阶段：SwingTracker 状态机**：实现 MA20 回踩企稳与出场状态机及推荐理由。
+    - [x] **P4 阶段：BacktestEngine 信号有效性分析**：历史信号胜率、盈亏比、最大回撤等回测指标统计。
+    - [x] **P5 阶段：TradeJournal 绩效统计**：提取并格式化交易历史与策略胜率分类饼图。
+    - [x] **P6 阶段：SharedMemory & Queue 实时接入**：对接盘中 `df_all` 行情共享内存与实时信号 `mp.Queue`。
+
 ## 2026-06-11 20:45
 - [x] **打通测试与模拟回放模式下的今日卖出冷却拦截校验 (Enabled Cooldown Verification for Tests & Replay Mode)**：
     - [x] **新增 `enforce_cooldown_in_test` 属性控制**：在 `trade_gateway.py` 的 `MockTradeGateway` 中引入了 `self.enforce_cooldown_in_test` 属性，默认值为 `False`。当该属性为 `True` 时，即便处于 pytest 测试或回放模拟模式，也强制执行今日卖出冷却拦截校验，支持高敏感度测试下的冷却机制验证。
