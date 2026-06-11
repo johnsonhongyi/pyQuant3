@@ -1,3 +1,19 @@
+## 2026-06-11 11:55
+- [x] **修复多进程状态覆盖与自愈日志反复振荡刷屏的 Bug (Fixed Multi-Process State Overwrite & Healing Log Oscillation Bug)**：
+    - [x] **攻克多进程/多实例状态乒乓覆盖漏点**：排查出 `StateManager` (状态锁管理器) 在执行 `set` 写入时，由于未在写入前从磁盘同步最新状态，当多进程同时运行（如 Tkinter 主进程与 PyQt6 可视化伴随进程）且某一方持有旧内存状态时，其 `set` 动作会用过期的 `IN_TRADE` 内存状态合并并强行覆盖物理 JSON 文件，将另一方自愈完成的 `FLAT` 状态倒退回滚。这造成了多进程状态不断“乒乓震荡”，促使 Tkinter 主进程每次心跳都再次触发 `StateManagerSelfHeal` 警告自愈。
+    - [x] **实现强一致性写入前同步**：重构了 `state_manager.py` 里的同步与写入机制。为 `_sync_from_file` 增加了 `force` 强制不节流同步标志，并在 `set` 方法头部强制无节流地执行 `_sync_from_file(force=True)`。这确保任何进程在更改任何股票状态前，必须先物理拉取最新的共享磁盘状态，杜绝了过期内存对磁盘正确状态的篡改，从根本上消除了状态自愈的温床。
+    - [x] **升级并向后兼容进程级唯一去重冷却**：将 `trade_gateway.py` 与 `kernel_service.py` 里的 `_log_cooldown` 由类实例属性升级为模块全局变量（`_GATEWAY_LOG_COOLDOWN` 与 `_HEAL_LOG_COOLDOWN`），并通过定义类 `@property` 完美向下兼容，使得不论对象如何被重建或被不同导入方式二次实例化，只要处于同一个进程空间内，都能共享唯一的冷却记忆。
+    - [x] **测试通过**：本地单元测试 `scratch/test_high_pullback_and_log_cooldown.py` 以及系统回归测试 `test_watchlist_lifecycle.py`（11项生命周期用例）全部绿旗通过。
+
+## 2026-06-11 11:45
+- [x] **修复交易信号追在当天顶部与休市时段频繁触发买入的 Bug (Fixed Chasing Top & Off-Hours Buy Signals Bug)**：
+    - [x] **实现向量化防追高与防冲高回落拦截**：在 `stock_logic_utils.py` 的 `RealtimeSignalManager.update_signals` 中，引入了基于昨日收盘价 `lastp1d` 的实时涨幅 `percent_arr` 与从日内最高点回撤幅度 `pullback_arr` 计算。定义了当最新涨幅 $\ge 7.5\%$（防追高）或高位回吐幅度 $\ge 3.0\%$（防冲高回落）时的买入拦截掩码 `block_mask`。在生成买入信号时，将满足 `block_mask` 的个股强行置为空，从源头阻断了顶部追高与回落接盘信号的产生。
+    - [x] **补齐主程序买入下单前置保护网关**：在 `instock_MonitorTK.py` 里的自动决策下单主循环 `_bg_kernel_auto_execute_once` 中，在调用 `submit_buy` 之前织入前置过滤。对处于 (1) 持仓满 10 只限制且不属于已有持仓的买入，(2) 处于非交易时段 `not is_active_trading` 的买入，(3) 属于今日已卖出冷却 `_today_sold_codes` 的买入，直接在前线实施物理拦截，并写入对应的 UI 拦截说明（如“非交易时段”、“持仓已满(10只)”、“卖出冷却中”），彻底阻止了这部分多余下单请求投递给网关。
+- [x] **实现自愈状态对齐与网关风控拒绝警告的 300秒冷却去重机制 (Implemented 300s Cooldown Deduplication for Healing & Rejection Warnings)**：
+    - [x] **根治 StateManagerSelfHeal 日志狂刷 Bug**：在 `trading_kernel/kernel_service.py` 里的 `evaluate_decision_item` 状态自愈对齐中，引入了 `_log_cooldown` 内存去重字典，对从 `FLAT` ➜ `IN_TRADE` 以及 `IN_TRADE` ➜ `FLAT` 的自愈警告日志执行 300 秒冷却拦截，冷却期内降低日志输出，杜绝了每秒心跳循环下的日志刷屏。
+    - [x] **根治 MockTradeGateway 警告日志刷屏**：在 `trade_gateway.py` 里的 `submit_buy` 中，针对非交易时段拒绝、今日已卖出冷却拦截、以及风控 limits 不通过等所有警告输出均套上了 300 秒（5分钟）的 key 去重防线。与主程序前置拦截相互配合，达成了交易后台零噪声日志的极致整洁体验。
+    - [x] **编写专属测试与全量回归 100% 通过**：在 `scratch/test_high_pullback_and_log_cooldown.py` 中编写了覆盖涨幅屏蔽、回吐屏蔽、以及风控满额下警告去重冷却的所有边界条件的单元测试，全部绿旗通过。同步运行了全量核心回归测试 `pytest test_watchlist_lifecycle.py`，11 项生命周期集成用例 100% 成功通过，全系统运行极其稳定。
+
 ## 2026-06-11 10:55
 - [x] **撤销市场温度的 MarketStateBus 提取逻辑，保留快速行情更新触发机制 (Reverted Market Temperature Source to self.df_all.copy() & Kept Rapid Triggers)**：
     - [x] **根治市场温度被多周期副轨数据污染问题 (Fixed Multi-Cycle Temperature Pollution)**：由于 `MarketStateBus` 接收并发布包含日线主轨和大周期副轨的所有行情快照，导致用户在 UI 切换到 3D 等大周期重采样数据时，`MarketStateBus` 内部的 `_df_all` 被写入大周期数据，从而污染了异步市场温度计算，使上涨/下跌家数与大盘温度计算偏离实际日线数据。

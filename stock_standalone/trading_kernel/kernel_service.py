@@ -15,6 +15,7 @@ from trading_kernel.observability.journal import JsonlJournal
 from trading_kernel.observability.trace_hasher import stable_hash
 
 logger = LoggerFactory.getLogger("instock_TK.KernelService")
+_HEAL_LOG_COOLDOWN = {}
 import pandas as pd
 from sys_utils import get_base_path, get_app_root
 
@@ -76,6 +77,10 @@ def load_trading_mode_from_config() -> str:
 class TradingKernelService:
     # 算法内核 version 锁死指纹 (Phase 9: Precondition)
     KERNEL_VERSION = "2026.05.23.01"
+
+    @property
+    def _log_cooldown(self) -> dict[str, float]:
+        return _HEAL_LOG_COOLDOWN
 
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl"):
         self.state_manager = StateManager()
@@ -637,12 +642,21 @@ class TradingKernelService:
             # 如果物理持仓 pos 存在（有持仓），但 state_manager 状态为 FLAT，说明是状态丢失，强制自愈对准为 IN_TRADE！
             current_state_in_manager = self.state_manager.get(code)
             has_holding = (code in active_executor.account.positions)
+            import time
             if not has_holding and current_state_in_manager == "IN_TRADE":
                 self.state_manager.set(code, "FLAT")
-                logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from IN_TRADE to FLAT due to zero holdings.")
+                now = time.time()
+                cooldown_key = f"heal_flat_{code}"
+                if now - _HEAL_LOG_COOLDOWN.get(cooldown_key, 0) >= 300:
+                    logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from IN_TRADE to FLAT due to zero holdings.")
+                    _HEAL_LOG_COOLDOWN[cooldown_key] = now
             elif has_holding and current_state_in_manager == "FLAT":
                 self.state_manager.set(code, "IN_TRADE")
-                logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from FLAT to IN_TRADE due to active holdings.")
+                now = time.time()
+                cooldown_key = f"heal_intrade_{code}"
+                if now - _HEAL_LOG_COOLDOWN.get(cooldown_key, 0) >= 300:
+                    logger.warning(f"🔄 [StateManagerSelfHeal] Auto-aligned state for {code} from FLAT to IN_TRADE due to active holdings.")
+                    _HEAL_LOG_COOLDOWN[cooldown_key] = now
 
         item_dict = dict(item)
         item_dict["is_swing_low_mode"] = is_swing_low_mode

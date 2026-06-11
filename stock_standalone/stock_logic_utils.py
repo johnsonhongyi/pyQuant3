@@ -848,9 +848,26 @@ class RealtimeSignalManager:
         score += prev_signal_arr
         df['signal_strength'] = score
         
+        # 计算实时涨幅与高位回撤幅度
+        percent_arr = np.zeros(len(df))
+        pullback_arr = np.zeros(len(df))
+        
+        valid_lastp = (lastp1d > 0.0)
+        percent_arr[valid_lastp] = (now_arr[valid_lastp] - lastp1d[valid_lastp]) / lastp1d[valid_lastp] * 100.0
+        pullback_arr[valid_lastp] = (updated_today_high[valid_lastp] - now_arr[valid_lastp]) / lastp1d[valid_lastp] * 100.0
+        
+        # 1. 涨幅限制：防追高阈值 7.5%
+        too_high_mask = (percent_arr >= 7.5)
+        # 2. 冲高回落限制：高位回吐幅度 >= 3.0%
+        too_much_pullback_mask = (pullback_arr >= 3.0)
+        
+        block_mask = too_high_mask | too_much_pullback_mask
+        
         signal_col = np.full(len(df), '', dtype=object)
-        signal_col[score >= 9] = 'BUY_S'
-        signal_col[(score >= 6) & (score < 9)] = 'BUY_N'
+        
+        # 只有在未被拦截的情况下才生成买入信号
+        signal_col[(score >= 9) & ~block_mask] = 'BUY_S'
+        signal_col[(score >= 6) & (score < 9) & ~block_mask] = 'BUY_N'
         signal_col[(score < 6) & (macd < 0)] = 'SELL_WEAK'
 
         sell_cond = ((macddif < macddea) & (macd < 0)) | ((rsi < 45) & (kdj_j < kdj_k)) | \

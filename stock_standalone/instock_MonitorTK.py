@@ -1760,6 +1760,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 is_live = (mode == "LIVE_AUTO" and is_active_trading)
 
                 if action in ("BUY", "ADD"):
+                    # 1. 持仓上限 10 只拦截
+                    if len(positions) >= 10 and code not in positions:
+                        blocked.append(f"{code}:PORTFOLIO_FULL")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "持仓已满(10只)"
+                        })
+                        continue
+
+                    # 2. 非交易时段拦截
+                    if not is_active_trading:
+                        blocked.append(f"{code}:NON_TRADING_HOURS")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "非交易时段"
+                        })
+                        continue
+
+                    # 3. 今日卖出冷却拦截
+                    today_sold = getattr(trade_gw, "_today_sold_codes", set())
+                    if code in today_sold:
+                        blocked.append(f"{code}:SOLD_COOLDOWN")
+                        blocked_codes.append(code)
+                        records.append({
+                            "code": code, "name": sig.get('name', ''), "action": action,
+                            "status": "拦截", "detail": "卖出冷却中"
+                        })
+                        continue
+
                     if code in positions:
                         blocked.append(f"{code}:ALREADY_POS")
                         blocked_codes.append(code)

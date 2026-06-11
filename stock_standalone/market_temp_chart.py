@@ -155,9 +155,19 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         lay.setSpacing(10)
         
         # 1. 顶部状态简报
+        self.setStyleSheet("background-color: #0d121f; color: #abb2bf;")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.info_label = QLabel("正在加载今日温度历史走势...")
-        self.info_label.setFont(QFont("Microsoft YaHei", 10, QFont.Weight.Bold))
-        self.info_label.setStyleSheet("color: #00FFCC;")
+        self.info_label.setFont(QFont("Microsoft YaHei", 10))
+        self.info_label.setStyleSheet("""
+            QLabel {
+                background-color: #161b2d;
+                color: #e0e6ed;
+                border: 1px solid #232d4b;
+                border-radius: 6px;
+                padding: 8px 12px;
+            }
+        """)
         lay.addWidget(self.info_label)
         
         # 2. 创建 pyqtgraph 绘图视口
@@ -196,7 +206,7 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         records = MarketTempHistoryManager().get_data()
         
         if not records:
-            self.info_label.setText("⚠️ 今日暂无记录的温度指标数据 (需盘中开启行情心跳触发)")
+            self.info_label.setText("<span style='color: #ff5252; font-weight: bold;'>⚠️ 今日暂无记录的温度指标数据</span> <span style='color: #a0aec0;'>(需盘中开启行情心跳触发)</span>")
             return
             
         # 2. 解析指标数据
@@ -210,8 +220,11 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         # 3. 更新顶部文字说明
         last_rec = records[-1]
         self.info_label.setText(
-            f"🕒 数据截止: {last_rec['time_str']} | 🌡️ 最新温度: {last_rec['temp']:.1f}°C | "
-            f"📈 上涨: {last_rec['up']} | 📉 下跌: {last_rec['down']} | 🚀 放量: {last_rec['vol_up']}"
+            f"🕒 <span style='color: #a0aec0;'>数据截止:</span> <span style='color: #38bdf8; font-weight: bold;'>{last_rec['time_str']}</span> <span style='color: #4a5568;'>|</span> "
+            f"🌡️ <span style='color: #a0aec0;'>最新温度:</span> <span style='color: #ff9f43; font-weight: bold;'>{last_rec['temp']:.1f}°C</span> <span style='color: #4a5568;'>|</span> "
+            f"📈 <span style='color: #a0aec0;'>上涨:</span> <span style='color: #ff5252; font-weight: bold;'>{last_rec['up']}</span> <span style='color: #4a5568;'>|</span> "
+            f"📉 <span style='color: #a0aec0;'>下跌:</span> <span style='color: #2ed573; font-weight: bold;'>{last_rec['down']}</span> <span style='color: #4a5568;'>|</span> "
+            f"🚀 <span style='color: #a0aec0;'>放量:</span> <span style='color: #ffa502; font-weight: bold;'>{last_rec['vol_up']}</span>"
         )
         
         # 4. 清理旧绘图区重新创建
