@@ -73,10 +73,10 @@ class StateManager:
         except OSError:
             pass
 
-    def _sync_from_file(self) -> None:
+    def _sync_from_file(self, force: bool = False) -> None:
         """从共享物理文件中同步全局状态至本进程内存，并具备自愈恢复能力"""
         now = time.time()
-        if now - self._last_sync < self._throttle_interval:
+        if not force and (now - self._last_sync < self._throttle_interval):
             return  # 节流短路，降低高频行情下的 I/O 损耗
             
         if not os.path.exists(self._filepath):
@@ -119,7 +119,7 @@ class StateManager:
                 with open(temp_filepath, "w", encoding="utf-8") as f:
                     json.dump(merged, f, ensure_ascii=False, indent=2)
                 
-                # Windows 下需先 remove 再 rename
+                # Windows 下需先 remove再 rename
                 if os.path.exists(self._filepath):
                     os.remove(self._filepath)
                 os.rename(temp_filepath, self._filepath)
@@ -137,6 +137,8 @@ class StateManager:
         if state not in VALID_STATES:
             raise ValueError(f"invalid trade state: {state}")
         with self._lock:
+            # 强制不节流地执行一次磁盘数据同步，使内存与磁盘物理对齐，防止旧内存回滚磁盘
+            self._sync_from_file(force=True)
             self._states[str(code)] = state
             self._flush_to_file()
             self._last_sync = time.time()

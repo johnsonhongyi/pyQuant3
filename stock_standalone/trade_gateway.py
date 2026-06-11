@@ -22,6 +22,7 @@ TradeGateway — 模拟交易网关 + 风控管理
 
 from __future__ import annotations
 from logger_utils import LoggerFactory
+_GATEWAY_LOG_COOLDOWN = {}
 
 import logging
 import sqlite3
@@ -303,6 +304,11 @@ class MockTradeGateway:
         except Exception as e:
             logger.warning(f"[TradeGateway] Failed to restore today sold codes: {e}")
 
+    @property
+    def _log_cooldown(self) -> dict[str, float]:
+        return _GATEWAY_LOG_COOLDOWN
+
+
 
     # ── DB 初始化 ──────────────────────────────────────────────────────────────
 
@@ -362,9 +368,14 @@ class MockTradeGateway:
             is_simulation = False
 
         import sys_utils
+        import time
         if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
             msg = "当前时间不在连续交易时段（09:30-11:30, 13:00-15:00），禁止买入交易"
-            logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+            now = time.time()
+            cooldown_key = f"buy_refuse_hours_{code}"
+            if now - _GATEWAY_LOG_COOLDOWN.get(cooldown_key, 0) >= 300:
+                logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+                _GATEWAY_LOG_COOLDOWN[cooldown_key] = now
             return False, msg
 
         # 今日卖出冷却拦截（测试和回放模拟模式除外）
@@ -372,7 +383,11 @@ class MockTradeGateway:
             with self._lock:
                 if code in self._today_sold_codes:
                     msg = f"{code} 触发今日卖出冷却拦截：今日已平仓卖出，触发日内再次买入冷却"
-                    logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+                    now = time.time()
+                    cooldown_key = f"buy_refuse_sold_{code}"
+                    if now - _GATEWAY_LOG_COOLDOWN.get(cooldown_key, 0) >= 300:
+                        logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+                        _GATEWAY_LOG_COOLDOWN[cooldown_key] = now
                     return False, msg
 
         # 风控检查
@@ -385,7 +400,11 @@ class MockTradeGateway:
             )
 
         if not ok:
-            logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+            now = time.time()
+            cooldown_key = f"buy_refuse_risk_{code}_{msg}"
+            if now - _GATEWAY_LOG_COOLDOWN.get(cooldown_key, 0) >= 300:
+                logger.warning(f"[TradeGateway] 买入拒绝 {code}: {msg}")
+                _GATEWAY_LOG_COOLDOWN[cooldown_key] = now
             return False, msg
 
         shares = self.risk_manager.calc_buy_shares(price)
