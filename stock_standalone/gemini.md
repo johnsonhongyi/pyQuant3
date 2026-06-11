@@ -1,3 +1,43 @@
+## 2026-06-11 23:45
+- [x] **实现股票双击详情窗口与实盘量化特征数据全面接入 (Implemented Live Feature Integration on Item Double-Click Dialog)**：
+    - [x] **设计高档深色详情窗口 (StockDetailDialog)**：在 `ats/ui/main_window.py` 中引入 `StockDetailDialog` 控件。采用纯深灰背景、大字号红绿涨跌上色标题以及自适应双色行交替表格，专门展示双击个股的多维核心特征。
+    - [x] **打通实盘 DataFrame 行情快照数据流 (Live Snapshot Caching)**：在 `_handle_realtime_data` 行情分发槽中引入 `self.current_df = df` 动态缓存，彻底废止了之前仅使用 Mock 数据的行为，实现盘中实盘最新特征指标的毫秒级数据覆盖。
+    - [x] **支持指标全量动态遍历与智能 Fallback (Dynamic Inspection & Fallback)**：
+        - 优先读取并漂亮格式化展示如最新价、涨跌幅、成交量、成交额、VWAP 分时均线及 MA20 趋势等标准特征。
+        - 采用动态遍历算法，自动将当前个股在实盘 DataFrame 中计算得到的全部剩余高级量化特征字段展示于表格中。
+        - 对未收到行情快照的冷启动状态，提供智能 Fallback 逻辑，自动展示证券基础字段并予以友好提示，保证系统绝不中断或崩溃。
+    - [x] **顺利通过 11 项核心回归测试**：经 `pytest test_watchlist_lifecycle.py` 集成验证全部 100% 绿旗通过，且静态语法校验无一报错。
+
+## 2026-06-11 23:30
+- [x] **优化 ATS 股票池树形布局与全局树形智能全功能排序 (Optimized Tree Layout & Implemented Custom Intelligent Tree Sorting)**：
+    - [x] **根治 QTreeWidget 布局挤压与左侧留白 (Fixed Indentation Margin Squeeze)**：在 `ats/ui/universe_widget.py` 中将 `self.tree.setIndentation(10)`。将层级缩进从系统的默认大尺寸极限压缩至 10 像素。这不仅完美保留了根节点的展开/收折箭头，且使得子项与根节点近乎左对齐，彻底消除了“左边留空导致挤压后侧显示位置”的视觉缺陷，保证窗口能全部显示数据信息。
+    - [x] **实现分类节点物理锁死 (Static Root Category Ordering)**：引入 `UniverseTreeItem` 代替 `QTreeWidgetItem`。通过重写 `__lt__` 并读取当前 header 的 `sortIndicatorOrder()`，实现了在任何列的正序或反序表头点击下，顶层分类（候选雷达、精选观察、实盘交易）在物理层面上始终雷打不动地保持预设的相对顺序（1 ➔ 2 ➔ 3），而仅有分类内部的个股按选定列进行排序。
+    - [x] **落地智能全功能数值/百分比排序 (Smart Numerical/Percent Sorting)**：
+        - 针对代码列，自动提取 6 位数字代码转整型进行数值大小比较.
+        - 针对最新价/涨幅列以及持仓百分比列，使用正则自动解析出带有 `+`、`-` 及 `%` 的数值并转换为 float 进行真实幅度排序，消除了“10.0% 排在 2.0% 前面”的字符串排序缺陷。
+    - [x] **引入排序开关节流保护 (Sorting Toggle Throttling)**：在 `UniverseTreeWidget` 重新装填数据（`load_mock_data` 和 `update_pools`）期间，在清空和灌入数据的全生命周期前后依次执行 `setSortingEnabled(False)` 和 `setSortingEnabled(True)`。这避免了在数据高速加载过程中的频繁排序触发，消除了高频刷新下的画面撕裂与假死。
+    - [x] **顺利通过 11 项全系统核心回归测试**：经 `pytest test_watchlist_lifecycle.py` 全量联测，用时 0.76s 并且 100% 绿旗通过。
+
+## 2026-06-11 23:20
+- [x] **修复并精细化重构赛马板块得分模型，落地“龙头先行，跟涨增益”机制 (Implemented 'Leader Base + Follower Bonus' for Sector Scoring)**：
+    - [x] **确立“龙头先行”基础贡献分 (Leader Base)**：设立 `leader_base = max(0.0, leader_pct) * 1.2`，使板块在龙头出现大涨或封板时获取一定的基础分（如 20% 龙头单独上涨提供 24.0 保底分），以此通过基础选股过滤，保障龙头能被面板捕获。
+    - [x] **引入“跟涨增益”共识分 (Follower Bonus)**：仅当板块平均涨幅 `avg_pct > 0` 时，基于 `math.log2(active_count) * avg_pct * eff_follow_ratio * trend_multiplier * 3.0` 递增。如果只有单个个股拉升，其余成份股不跟随，则增益分为 `0`。跟涨的活跃成份股越多、平均涨幅越大，增益分越高，直至触及 `98.5` 评分上限。
+    - [x] **完美恢复个股板块区分度**：此机制彻底杜绝了“单股封板带动整个板块满分”的问题，使板块强度评分精准反映出真实的“板块效应”强弱。
+    - [x] **顺利跑通所有单元与集成测试**：11 项系统核心集成测试以及 5 项专项买卖决策/冷却拦截测试均 100% 成功通过。
+
+## 2026-06-11 23:10
+- [x] **实现所有 Table 和 Tree 的列宽跨会话自动保存与恢复 (Implemented Header Persistence for All Tables & Trees)**：
+    - [x] **实现统一的高效 Header 持久化管理器 (setup_header_persistence)**：在 `ats/ui/styles.py` 中引入了模块全局函数 `setup_header_persistence()`。通过对 `horizontalHeader()` 进行 Interactive 交互模式配置、利用 `QTimer` 实施 1s 防抖写盘保存、配合 hex 序列化机制读写本地配置文件 `window_config.json`，完美实现了表格与树形控件的自愈保存。
+    - [x] **实现列宽门槛与最大宽度物理保护 (Column Width Limits)**：在管理器内部，支持指定特定列（如“推荐理由”、“策略来源”、“核心特征”等大文本长字段）的最大宽度限制，即使在高频数据重绘及列宽拉伸时也绝不撑破 UI 布局。
+    - [x] **深度集成 ATS v2 四大核心组件**：
+        - `ats/ui/swing_table.py`：对 `SwingStateTable` 绑定 `ats_swing_table_state` 键，限制“推荐理由”最大宽度为 350px。
+        - `ats/ui/trade_flow.py`：对 `TradeFlowTable` 绑定 `ats_trade_flow_table_state`，限制“策略来源”最大宽度为 300px。
+        - `ats/ui/trade_flow.py`：对 `PositionPanel` 绑定 `ats_position_table_state`。
+        - `ats/ui/universe_widget.py`：对 `UniverseTreeWidget` 绑定 `ats_universe_tree_state`，限制最后一列最大宽度为 350px。
+- [x] **打通正式数据实时推送与静默后台自愈保活 (Enabled Live Data Streaming & Silent Backend Keep-Alive)**：
+    - [x] **实现 Unicode 逃逸与异常编码防御 (Fixed Unicode Launcher Error)**：针对 Windows 系统默认控制台编码为 GBK 时打印含有 Emoji 的窗口标题（`window.windowTitle()`）导致的 `UnicodeEncodeError` 崩溃，在 `run_ats.py` 的主入口中织入了 ascii 降级编码保护，实现了 Launcher 跨平台无缝兼容。
+    - [x] **完成全量静态编译与 11 项系统核心回归测试**：通过 `py_compile` 对所有 UI 及 Launcher 模块进行了全量编译审计无一报错；同时运行 `pytest test_watchlist_lifecycle.py` 11 项全生命周期集成测试，均 100% 绿旗通过，证明系统双向数据分发与后台守护状态绝对稳定。
+
 ## 2026-06-11 22:30
 - [x] **制作 ATS 打包配置文件 (Created PyInstaller Spec File for ATS v2)**：
     - [x] **分析冗余与优化选项**：研究了 `instock_MonitorTK.spec` 的打包配置，对齐了其中关于 `trash_list`（Qt6WebEngineCore、Qt6WebEngineWidgets、Qt6Pdf、Qt6Quick 等）冗余 DLL/库的剔除逻辑。

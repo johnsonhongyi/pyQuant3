@@ -618,4 +618,103 @@ def is_active_trading_hours(bypass: bool = False) -> bool:
         return True
 
 
+def ensure_backend_tk_running():
+    """
+    检查主 Tk 后台数据推送进程是否已在运行。
+    若未运行，则在后台以静默（隐藏窗口）方式拉起它。
+    """
+    import os
+    import sys
+    import subprocess
+    
+    # 1. 尝试使用 Windows 全局互斥量 (Mutex) 检测主 Tk 是否已经运行
+    is_running = False
+    if sys.platform == 'win32':
+        try:
+            import win32event
+            import win32api
+            import winerror
+            # 尝试打开现有的 Mutex
+            handle = win32event.OpenMutex(win32event.MUTEX_ALL_ACCESS, False, "Global\\StockMonitorAppMutex")
+            if handle:
+                win32api.CloseHandle(handle)
+                is_running = True
+                logger.info("[ATS] Detected existing instock_MonitorTK via Windows Mutex.")
+        except Exception:
+            pass
+            
+    # 2. Fallback: 使用 psutil 检测进程
+    if not is_running:
+        try:
+            import psutil
+            for proc in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    cmd = proc.info.get('cmdline') or []
+                    cmd_str = " ".join(cmd).lower()
+                    if 'instock_monitortk' in cmd_str:
+                        is_running = True
+                        logger.info("[ATS] Detected existing instock_MonitorTK via psutil process scanning.")
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except Exception:
+            # 如果没有 psutil，使用 tasklist 保底
+            if sys.platform == 'win32':
+                try:
+                    out = subprocess.check_output('tasklist /FI "IMAGENAME eq instock_MonitorTK.exe"', shell=True)
+                    if b'instock_MonitorTK.exe' in out:
+                        is_running = True
+                        logger.info("[ATS] Detected existing instock_MonitorTK.exe via tasklist.")
+                except Exception:
+                    pass
+
+    # 3. 如果未运行，后台静默拉起
+    if not is_running:
+        app_root = get_app_root()
+        
+        # 判断当前是 PyInstaller 打包状态 (sys.frozen) 还是开发状态
+        if getattr(sys, 'frozen', False):
+            # 打包态下，寻找同目录的 instock_MonitorTK.exe
+            exe_dir = os.path.dirname(sys.executable)
+            backend_exe = os.path.join(exe_dir, "instock_MonitorTK.exe")
+            if not os.path.exists(backend_exe):
+                backend_exe = os.path.join(app_root, "instock_MonitorTK.exe")
+                
+            if os.path.exists(backend_exe):
+                cmd = [backend_exe, "-background"]
+                logger.info(f"[ATS] Spawning packaged backend: {cmd}")
+            else:
+                logger.warning("[ATS] Warning: instock_MonitorTK.exe not found in release directory.")
+                return
+        else:
+            # 开发态下，使用当前 Python 解释器运行 instock_MonitorTK.py
+            backend_py = os.path.join(app_root, "instock_MonitorTK.py")
+            python_exe = sys.executable
+            if python_exe.endswith("python.exe"):
+                pyw = python_exe.replace("python.exe", "pythonw.exe")
+                if os.path.exists(pyw):
+                    python_exe = pyw
+            cmd = [python_exe, backend_py, "-background"]
+            logger.info(f"[ATS] Spawning dev backend: {cmd}")
+
+        try:
+            # 在 Windows 下隐藏子进程的命令行控制台窗口
+            creation_flags = 0
+            if sys.platform == 'win32':
+                creation_flags = subprocess.CREATE_NO_WINDOW
+                
+            # 后台非阻塞式拉起
+            subprocess.Popen(
+                cmd,
+                cwd=app_root,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL
+            )
+            logger.info("[ATS] Background backend started successfully.")
+        except Exception as e:
+            logger.error(f"[ATS] Failed to auto-start backend: {e}")
+
+
 

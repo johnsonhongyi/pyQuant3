@@ -7802,16 +7802,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                             header = struct.pack("!I", len(payload))
 
-                            # 2️⃣ socket 单独计时
+                            # 2️⃣ socket 分发到 26668 (可视化) 和 26670 (ATS 终端)
                             with timed_ctx("viz_IPC_send", warn_ms=1000):
-                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                    s.settimeout(0.2) # 极限压缩至 200ms，减少 GIL 竞争窗口同时保障可靠性
-                                    s.connect((ipc_host, ipc_port))
-                                    s.sendall(b"DATA" + header + payload)
+                                send_success_any = False
+                                
+                                # 发送给 26668 (可视化窗口)
+                                try:
+                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                        s.settimeout(0.2)
+                                        s.connect((ipc_host, ipc_port))
+                                        s.sendall(b"DATA" + header + payload)
+                                        send_success_any = True
+                                except (socket.timeout, ConnectionError, OSError):
+                                    pass
 
-                            logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
-                            sent = True
-                            self._viz_ipc_fail_count = 0 # 成功清零
+                                # 发送给 26670 (ATS 终端)
+                                try:
+                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                                        s2.settimeout(0.2)
+                                        s2.connect(('127.0.0.1', 26670))
+                                        s2.sendall(b"DATA" + header + payload)
+                                        send_success_any = True
+                                except (socket.timeout, ConnectionError, OSError):
+                                    pass
+
+                                if send_success_any:
+                                    logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
+
+                                    sent = True
+                                    self._viz_ipc_fail_count = 0  # 成功清零
+                                else:
+                                    # 两个通道均失败时，抛出异常以触发冷却
+                                    raise ConnectionError("Both Port 26668 and 26670 connection failed.")
+
                             
                             # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
                             if self.qt_process is not None and self.qt_process.is_alive():
@@ -19940,6 +19963,15 @@ def parse_args():
         help="一键备份当前生成环境的所有变更过的配置文件到当前目录下的 BackConfig 目录下并退出"
     )
 
+    # 新增后台静默运行参数
+    parser.add_argument(
+        "-background",
+        "--background",
+        dest="background",
+        action="store_true",
+        help="以无界面(后台守护)模式启动运行"
+    )
+
     args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
     return args
 
@@ -20496,6 +20528,11 @@ if __name__ == "__main__":
             sys.exit(0)
     
         app = StockMonitorApp()
+        
+        # [🚀 NEW] 如果指定了后台守护运行参数，直接隐藏主窗口，使程序对用户静默
+        if getattr(args, 'background', False):
+            app.withdraw()
+            logger.info("🚀 [INIT] App running in DAEMON (background) mode. Tkinter GUI is hidden.")
     
         # [🚀 增强] 初始化全局退出计数器，用于 KeyboardInterrupt 暴力退出控制
         _exit_ctrl_c_count = 0

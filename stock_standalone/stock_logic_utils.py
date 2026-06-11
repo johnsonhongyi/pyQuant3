@@ -880,7 +880,8 @@ class RealtimeSignalManager:
         score += ((updated_down_streak >= 2) & (now_arr > state['prev_now'].values * 1.005)) * 2
 
         # [NEW] 低开高走且开盘即最低 (Low-Open-Go-High & Open-Is-Lowest Intraday Surges)
-        avg_price_arr = df.get('avg_price', df.get('average', now_arr)).values
+        avg_price_val = df.get('avg_price', df.get('average', now_arr))
+        avg_price_arr = avg_price_val.values if hasattr(avg_price_val, 'values') else avg_price_val
         avg_price_arr = np.nan_to_num(avg_price_arr.astype(float), nan=now_arr)
         
         open_is_lowest = (low_arr > 0) & ((open_arr - low_arr) / np.maximum(open_arr, 0.001) < 0.005)
@@ -888,7 +889,8 @@ class RealtimeSignalManager:
         is_pullup = now_arr > open_arr * 1.02
         above_vwap = (avg_price_arr > 0) & (now_arr > avg_price_arr)
         
-        ratio_arr = df.get('ratio', np.zeros(len(df))).values
+        ratio_val = df.get('ratio', np.zeros(len(df)))
+        ratio_arr = ratio_val.values if hasattr(ratio_val, 'values') else ratio_val
         ratio_arr = np.nan_to_num(ratio_arr.astype(float), nan=0.0)
         vol_confirmed = (ratio_arr > 0.8) | (volume_arr > avg_vol_arr * 1.2)
         

@@ -151,11 +151,23 @@ def _ipc_sender_worker():
                 # 指令：4 字节前缀 'CODE' + '|' + 'SIGNAL|' + 负载
                 msg = f"CODE|SIGNAL|{payload}"
                 ipc_client.enqueue_command(msg)
-                
-                # 标记任务完成 (入队即视为分发完成，后台线程负责可靠传输)
-                for _ in batch: ipc_queue.task_done()
-            else:
-                for _ in batch: ipc_queue.task_done()
+
+            # 4. [🚀 NEW] 同时分发给 ATS v2 终端的 Port 26670
+            import pickle
+            import struct
+            for item in batch:
+                try:
+                    payload_ats = pickle.dumps(('SIGNAL', item), protocol=pickle.HIGHEST_PROTOCOL)
+                    header_ats = struct.pack("!I", len(payload_ats))
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                        s2.settimeout(0.2)
+                        s2.connect(('127.0.0.1', 26670))
+                        s2.sendall(b"DATA" + header_ats + payload_ats)
+                except (socket.timeout, ConnectionError, OSError):
+                    pass  # ATS 终端未运行，静默忽略
+
+            for _ in batch:
+                ipc_queue.task_done()
             
         except Empty:
             continue
