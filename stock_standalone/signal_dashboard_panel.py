@@ -4112,6 +4112,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         market_down = self._market_stats.get('down', 0)
         prof_temp = self._market_stats.get('temperature')
 
+        # [NEW] 记录温度、涨跌及放量历史趋势，以便图表呈现
+        if prof_temp is not None:
+            try:
+                from market_temp_chart import MarketTempHistoryManager
+                vol_up = self._market_stats.get('vol_up', 0)
+                MarketTempHistoryManager().add_record(prof_temp, market_up, market_down, vol_up)
+            except Exception as e:
+                logger.warning(f"Failed to record market temp history: {e}")
+
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
         # [FIX] 无论当前窗口是否有新信号，都必须更新统计（确保清空或低频时 UI 准确）
         with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
@@ -4357,39 +4366,18 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._vol_dialog.activateWindow()
 
     def _on_market_temp_clicked(self, event):
-        """点击温度计弹出专业复盘详情窗口 - 异步稳定版"""
+        """点击温度计弹出温度与指标趋势折线图"""
         try:
-            # 1. 发布到总线作为日志/追踪 (不使用 return，因为主程序暂无监听器，仅作解耦记录)
-            bus = get_signal_bus()
-            if bus:
-                bus.publish(SignalBus.EVENT_ALERT, "UI_ACTION", {"action": "open_market_pulse"})
-                logger.info("📡 [UI] MarketPulse opening request published via SignalBus")
-
-            # 2. 寻找主窗口并进行安全分发 (这是目前最可靠的跨框架打开方式)
-            main_window = getattr(self, 'parent_app', None)
-            if not main_window:
-                for widget in QApplication.topLevelWidgets():
-                    if hasattr(widget, 'open_market_pulse'):
-                        main_window = widget
-                        break
-            
-            if main_window:
-                # ✅ [关键适配] 使用 tk_dispatch_queue 确保在 Tkinter 主线程执行，彻底规避 GIL 锁问题
-                if hasattr(main_window, 'tk_dispatch_queue') and main_window.tk_dispatch_queue:
-                    # 优先级最高：如果主程序提供了专门的 Tk 任务调度队列
-                    main_window.tk_dispatch_queue.put(lambda: main_window.open_market_pulse())
-                elif hasattr(main_window, 'after'):
-                    # 备选：如果主程序是 Tkinter 对象但没有扩展队列
-                    main_window.after(10, lambda: main_window.open_market_pulse())
-                else:
-                    # 纯 Qt 或其它环境：通过 QTimer 异步触发，避免当前调用栈冲突
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(10, lambda: main_window.open_market_pulse())
-            else:
-                logger.warning("⚠️ [UI] Failed to find main_window for open_market_pulse")
-                    
+            from market_temp_chart import MarketTempChartDialog
+            if not hasattr(self, '_temp_chart_dialog') or self._temp_chart_dialog is None:
+                self._temp_chart_dialog = MarketTempChartDialog(self)
+            self._temp_chart_dialog.update_chart()
+            self._temp_chart_dialog.show()
+            self._temp_chart_dialog.raise_()
+            self._temp_chart_dialog.activateWindow()
+            logger.info("📡 [UI] MarketTempChartDialog opened successfully")
         except Exception as e:
-            logger.error(f"Failed to open MarketPulseViewer: {e}")
+            logger.exception(f"Failed to open market temp chart: {e}")
 
     def _on_vol_code_clicked(self, code, name):
         """处理异动放量窗口代码点击联动"""
