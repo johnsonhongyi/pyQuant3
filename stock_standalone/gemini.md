@@ -1,3 +1,37 @@
+## 2026-06-11 16:50
+- [x] **无侵入式根治双 GUI 框架 (Tkinter + PyQt6) 窗口关闭时的 GIL 冲突崩溃 (Root-fixed Cross-Framework GIL Crash on Racing Panel Closure)**：
+    - [x] **定位崩溃根源**：排查发现当在 Python 直接运行或编译环境下关闭 PyQt6 赛马面板时，`closed` 信号会同步触发连接的 Tkinter 状态更新回调。由于是直接在 PyQt6 的 C++ 关闭/析构调用栈中去操作 Tkinter API（如 `self.after` 等注册动作），引发了 Python 底层的 GIL 锁争夺和 `PyEval_RestoreThread` 错误，导致整个 Python 主进程被强行中止。
+    - [x] **实现纯 Python 异步队列解耦隔离 (Thread-Safe Event Queue Routing)**：在主程序 `instock_MonitorTK.py` 绑定赛马面板 `closed` 信号的位置，重构为异步排队递交机制——`closed.connect(lambda: self.tk_dispatch_queue.put(self._on_racing_panel_closed))`。这在信号触发的第一时间仅调用了线程安全的 Python 管道操作，零延迟返回，允许 PyQt6 顺畅、完整地退栈并自动销毁（`deleteLater()`）；而真正的 Tkinter 清理动作则由 Tkinter 主事件循环通过 `tk_dispatch_queue` 在安全的 Tk 线程上下文里独立消费并执行，完美实现了两套 GUI 事件流与 GIL 控制权的无冲突隔离。
+    - [x] **测试校验 100% 通过**：经静态编译检查，运行全量核心生命周期回归测试 `pytest test_watchlist_lifecycle.py`（11项用例）全部完美通过，运行极其稳定。
+
+## 2026-06-11 16:40
+- [x] **修复赛马面板调起 🔍详检 触发 GIL 释放导致 Tkinter 主线程崩溃的 Bug (Fixed Racing Panel check_code GIL Restore Crash Bug)**：
+    - [x] **定位崩溃根源**：排查到当在 PyQt6 赛马面板中点击 `🔍详检` 按钮时，会同步调用基于 Tkinter 架构的 `check_code` 函数。由于是在 PyQt 的 UI 事件回调线程中直接实例化 Tkinter 的 `Toplevel` 窗口，两个 GUI 框架在同一个 Python 主进程的事件循环中发生冲突，导致 Tkinter 底层发生 `PyEval_RestoreThread` GIL 状态异常并崩溃。
+    - [x] **实现跨框架主线程队列派发机制 (Thread-safe Dispatch)**：在赛马面板的 `_on_code_check_triggered` 中，引入对主程序派发队列 `tk_dispatch_queue` 的判断。若当前存在 Tkinter 主程序的 `tk_dispatch_queue`，则使用 `ma.tk_dispatch_queue.put` 异步将 `check_code` 实例化任务派发到真正的 Tkinter 主事件循环线程中执行，并传入 `parent=ma` (即主 Tk 实例)；若不存在，则 Fallback 到同步直接调用。这在物理上彻底实现了 PyQt 与 Tk 之间的线程隔离，根除了 GIL 冲突崩溃。
+    - [x] **回归测试通过**：静态语法编译无异常，运行全量集成测试 `pytest test_watchlist_lifecycle.py` 11 项用例全部成功通过。
+
+## 2026-06-11 16:30
+- [x] **修复赛马面板提示导入导致的 `ImportError` 与 PyQt 气泡提示重构 (Fixed Racing Panel ImportError & Rebuilt PyQt6 Toast Message)**：
+    - [x] **根治导入错误**：排查到 `bidding_racing_panel.py` 中有 5 处尝试从 `gui_utils` 导入本不存在 of `toast_message`（实际定义在 `stock_logic_utils` 且使用的是 Tkinter 架构）。这会导致调用“一键置顶”或测试策略时触发 `ImportError` 崩溃。
+    - [x] **实现 PyQt 原生气泡提示共享并遵循 DRY 规则**：在公共逻辑层 `stock_logic_utils.py` 模块级新增了 `toast_messageQT` 提示函数。该函数通过内部动态导入 PyQt6 组件提供高兼容性保障，避免在没有 PyQt6 依赖的纯 Tk 环境中发生导入错误。
+    - [x] **移除冗余导入并优雅重构**：删除了赛马面板中临时实现的本地 PyQt6 toast 函数，统一通过 `from stock_logic_utils import toast_messageQT as toast_message` 导入使用，以极简的代码实现了 PyQt 环境气泡提示的复用，并消除了跨框架多线程调用下的不稳定隐患。
+    - [x] **测试通过**：经 `py_compile` 静态语法编译检查与 `pytest test_watchlist_lifecycle.py` 11 项生命周期集成用例全量绿旗通过。
+
+## 2026-06-11 15:55
+- [x] **实现置顶右侧“联动”开关与状态自动持久化 (Implemented Top-Right Auto-Linkage Toggle & State Persistence)**：
+    - [x] **添加 UI 交互控件至置顶按钮右侧**：移除了先前顶层工具栏最右侧的复选框。改在宏观查询栏（与 `📌统一置顶` 按钮同行）右侧放置全新的 `QCheckBox("🔗 联动")` 开关，简写为“联动”，并使用高对比度精美 HSL 配色进行样式渲染，默认设置为关闭 (`False`)。
+    - [x] **打通生命周期与状态持久化管道**：
+        - [x] 将自动联动状态 `auto_linkage_enabled` 物理绑定到 `_save_ui_state` 中，随分割线、表格列宽等一起自动写盘保存。
+        - [x] 在 `_restore_ui_state` 阶段实现跨会话自动读取，若未配置则安全 Fallback 到 `False`（默认关闭），并通过 `blockSignals` 防抖隔离，保障冷启动的纯净性。
+        - [x] 重构 `showEvent` 与开关槽函数 `_on_auto_linkage_changed`，由面板展示时“无条件开启”重构为“依据用户的 UI 勾选状态”向 `detector` 动态授权和更新，确保了配置的终极一致性。
+
+## 2026-06-11 15:30
+- [x] **修复赛马面板自动联动重复发送与关闭后 Tk 整个崩溃的 Bug (Fixed Racing Panel Auto-Linkage Duplication & Application Exit Crash Bug)**：
+    - [x] **根治自动联动多股交替推送风暴**：定位到 `bidding_momentum_detector.py` 中的 `_update_daily_dragon_top2` 在每次行情心跳时遍历并自动推送所有活跃板块的 Top 2 强势个股至 `link_manager`，由于存在多只股票（可达 20+ 只）高频交替推送，导致 `LinkageManagerProxy.push` 内部的单个 `_last_pushed_code` 去重机制被交替覆盖而失效，引发通达信后台高频重复联动风暴。重构为只在今日最强的第一名龙头股发生切换或满足冷却时自动投递联动，从物理上完美消除了重复投递，降低了 CPU 负载与前台闪烁。
+    - [x] **根治关闭赛马面板时 wrapper 提前被 GC 导致的 GIL 崩溃**：排查到在 Nuitka 编译环境下，PySide6/PyQt6 与 Tkinter 混用时，当赛马面板触发 `closeEvent` 的过程中，直接在同步信号中执行了 `self.main_app._racing_panel_win = None` 强引用置空。这导致 Python 包装类（Wrapper）在此次 C++ 析构流程尚未退出执行栈前便提前被垃圾回收（GC）销毁，从而在 C++ 底层析构继续回调时触发 `PyEval_RestoreThread` 内存访问异常与 GIL 状态失效导致 TK 主进程直接崩溃。重构为在 `closeEvent` 内部彻底删除该行直接置空逻辑，将其完全交给 Tkinter 端的 `_on_racing_panel_closed` 经 `self.after(100, _safe_clear)` 延时 100ms 异步置空。
+        - [x] **增设 UI 心跳与关闭间隙的 `_is_closing` 物理屏蔽门锁**：为了防止在上述 100ms 异步释放的过渡期内，主程序每秒的 UI 窗口同步心跳 `sync_rotator_windows` (会遍历调用 `_get_all_open_trade_windows`) 去访问已经析构但尚未置 None 的面板之 `isVisible()` 或 `winId()` 属性触发的 GIL 崩溃错误，在 `closeEvent` 顶层强制同步挂载 `self._is_closing = True`。并在 `_get_all_open_trade_windows` 内针对赛马面板以及板块竞价、信号看板、仪表盘、跟单指挥所等所有 PyQt6 窗口全面织入 `not getattr(win, '_is_closing', False)` 的短路物理防护，彻底消除了异步空窗期踩雷崩溃的隐患。
+    - [x] **编译与系统级生命周期测试 100% 通过**：通过 `py_compile` 静态语法检查，且运行全量核心回归测试 `pytest test_watchlist_lifecycle.py`，11 项用例全部成功通过，无任何回归问题。
+
 ## 2026-06-11 12:28
 - [x] **无侵入式修复 Nuitka 编译环境下 PyQt 槽函数断开连接崩溃的 Bug (Non-Intrusive Fix for Nuitka compiled_method Disconnect Crash Bug)**：
     - [x] **定位 compiled_method 错误根源**：排查发现当系统在 Nuitka 编译打包环境下运行时，PyQt6 绑定的槽函数被编译成了 Nuitka 专属的 `compiled_method` 类型。如果在组件更新或销毁时调用 `pyqtBoundSignal.disconnect`，PyQt6 底层无法辨识已编译方法而会抛出 `TypeError: 'compiled_method' object is not connected`，直接导致崩溃。

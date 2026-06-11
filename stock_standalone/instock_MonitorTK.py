@@ -68,6 +68,21 @@ from logger_utils import LoggerFactory, init_logging, with_log_level, realtime_s
 # from stock_live_strategy import StockLiveStrategy
 # from realtime_data_service import DataPublisher
 StockLiveStrategy = cct.LazyClass('stock_live_strategy', 'StockLiveStrategy')
+
+def is_qt_win_alive(win):
+    """安全判定 PyQt6 窗口是否依然存活且可用 (规避 Nuitka 下 C++ 销毁引发的 GIL 崩溃)"""
+    if win is None:
+        return False
+    try:
+        from PyQt6.sip import isdeleted
+        if isdeleted(win):
+            return False
+        if getattr(win, '_is_closing', False):
+            return False
+        return True
+    except Exception:
+        return False
+
 DataPublisher = cct.LazyClass('realtime_data_service', 'DataPublisher')
 DailyPulseEngine = cct.LazyClass('market_pulse_engine', 'DailyPulseEngine')
 SignalDashboardPanel = cct.LazyClass('signal_dashboard_panel', 'SignalDashboardPanel')
@@ -1299,14 +1314,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
-        # [🚀 鲁棒性增强 & 自动隐藏判断]
-        is_alive = False
-        if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
-            try:
-                self._racing_panel_win.isVisible()
-                is_alive = True
-            except RuntimeError:
-                self._racing_panel_win = None
+        is_alive = is_qt_win_alive(getattr(self, "_racing_panel_win", None))
+        if not is_alive:
+            self._racing_panel_win = None
 
         if is_alive:
             if self._racing_panel_win.isVisible():
@@ -1353,7 +1363,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._racing_panel_win.df_all = self.df_all
                 
                 # [NEW] ⚡ 建立双向生命周期闭环：窗口关闭时自动置空引用并触发防抖
-                self._racing_panel_win.closed.connect(self._on_racing_panel_closed)
+                self._racing_panel_win.closed.connect(lambda: self.tk_dispatch_queue.put(self._on_racing_panel_closed))
                 
 
                 
@@ -4985,13 +4995,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._last_racing_backtest_unified_t = now
 
         # [🚀 唯一性保护] 确保实盘赛马与回测互斥
-        is_racing_alive = False
-        if hasattr(self, "_racing_panel_win") and self._racing_panel_win is not None:
-            try:
-                if self._racing_panel_win.isVisible():
-                    is_racing_alive = True
-            except RuntimeError:
-                self._racing_panel_win = None
+        is_racing_alive = is_qt_win_alive(getattr(self, "_racing_panel_win", None)) and self._racing_panel_win.isVisible()
         
         if is_racing_alive:
             logger.warning("🏁 [Backtest] 实盘赛马面板正在运行，无法启动回测。")
@@ -6131,8 +6135,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as ex:
                     logger.error(f"[Sync] Failed to proactively update df_all to kernel: {ex}")
                 
-                # [NEW] ⚡ 同步更新赛马面板缓存的 df_all，确保数据 100% 同步
-                if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
+                # [NEW] ⚡ 同步更新赛马面板缓存 of df_all，确保数据 100% 同步
+                if is_qt_win_alive(getattr(self, '_racing_panel_win', None)):
                     self._racing_panel_win.df_all = full_df
                 
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
@@ -6308,8 +6312,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         try:
-            dashboard = getattr(self, '_signal_dashboard_win', None)
-            racing = getattr(self, '_racing_panel_win', None)
+            dashboard = getattr(self, '_signal_dashboard_win', None) if is_qt_win_alive(getattr(self, '_signal_dashboard_win', None)) else None
+            racing = getattr(self, '_racing_panel_win', None) if is_qt_win_alive(getattr(self, '_racing_panel_win', None)) else None
             now = time.time()
             
             # Throttling: 实时同步每 60 秒一次，或看板/赛马首次打开时强制同步
@@ -6439,13 +6443,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "temperature": temp, "summary": summary, "indices": indices_data, "breadth": breadth_data
                         }
                         
-                        if dashboard:
-                            self.tk_dispatch_queue.put(lambda s=final_stats: self._signal_dashboard_win.update_market_stats(s))
+                        if is_qt_win_alive(dashboard):
+                            self.tk_dispatch_queue.put(lambda s=final_stats: dashboard.update_market_stats(s) if is_qt_win_alive(dashboard) else None)
                             
                         # [NEW] 将处理好的温度指数数据挂载到竞价赛马监控
                         racing_panel = getattr(self, '_racing_panel_win', None)
-                        if racing_panel and hasattr(racing_panel, 'update_market_stats'):
-                            self.tk_dispatch_queue.put(lambda s=final_stats: racing_panel.update_market_stats(s))
+                        if is_qt_win_alive(racing_panel) and hasattr(racing_panel, 'update_market_stats'):
+                            self.tk_dispatch_queue.put(lambda s=final_stats: racing_panel.update_market_stats(s) if is_qt_win_alive(racing_panel) else None)
                         
                         try:
                             # [NEW] 将指数数据注入交易决策引擎，支持逆势策略计算
@@ -13412,8 +13416,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 3. 赛马面板 (PyQt6)
         if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
             try:
-                if self._racing_panel_win.isVisible():
-                    h = int(self._racing_panel_win.winId())
+                win = self._racing_panel_win
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "🏁 竞价赛马看板 (RacingPanel)"
             except Exception:
@@ -13422,8 +13427,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 4. 板块竞价面板 (PyQt6)
         if hasattr(self, 'sector_bidding_panel') and self.sector_bidding_panel is not None:
             try:
-                if self.sector_bidding_panel.isVisible():
-                    h = int(self.sector_bidding_panel.winId())
+                win = self.sector_bidding_panel
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "⚡ 板块竞价/尾盘联动 (SectorBidding)"
             except Exception:
@@ -13432,8 +13438,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 5. 信号看板 (PyQt6)
         if hasattr(self, '_live_signal_viewer') and self._live_signal_viewer is not None:
             try:
-                if self._live_signal_viewer.isVisible():
-                    h = int(self._live_signal_viewer.winId())
+                win = self._live_signal_viewer
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "📡 实时行情信号监控 (LiveSignalViewer)"
             except Exception:
@@ -13442,8 +13449,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 6. 信号仪表盘 (PyQt6 - SignalDashboardPanel)
         if hasattr(self, '_signal_dashboard_win') and self._signal_dashboard_win is not None:
             try:
-                if self._signal_dashboard_win.isVisible():
-                    h = int(self._signal_dashboard_win.winId())
+                win = self._signal_dashboard_win
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "🛡️ 策略信号仪表盘 (SignalDashboard)"
             except Exception:
@@ -13452,8 +13460,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 6.1. 交易内核决策流水监控 (PyQt6 - DecisionFlowPanel)
         if hasattr(self, '_decision_flow_win') and self._decision_flow_win is not None:
             try:
-                if self._decision_flow_win.isVisible():
-                    h = int(self._decision_flow_win.winId())
+                win = self._decision_flow_win
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "⚡ 交易内核决策流水监控 (DecisionFlowPanel)"
             except Exception:
@@ -13462,8 +13471,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 6.2. 实时板块突破跟单指挥所 (PyQt6 - SpatialFollowHUD)
         if hasattr(self, 'spatial_follow_hud') and self.spatial_follow_hud is not None:
             try:
-                if self.spatial_follow_hud.isVisible():
-                    h = int(self.spatial_follow_hud.winId())
+                win = self.spatial_follow_hud
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
                     current_visible_hwnds.append(h)
                     name_map[h] = "🛸 实时板块突破跟单指挥所 (SpatialFollowHUD)"
             except Exception:

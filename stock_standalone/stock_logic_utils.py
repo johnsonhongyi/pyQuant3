@@ -674,6 +674,42 @@ def toast_message(master, text, duration=1500):
         logger.debug(f"[toast_message] Failed to schedule toast via after: {e}")
 
 
+def toast_messageQT(parent, text, duration=1500):
+    """PyQt6 专用的非阻塞气泡提示，供 Qt6 环境复用 (KISS/SRP 原则)"""
+    try:
+        from PyQt6.QtWidgets import QFrame, QLabel, QHBoxLayout
+        from PyQt6.QtCore import Qt, QTimer, QPoint
+        
+        if parent is None or not hasattr(parent, 'winId'):
+            return
+            
+        toast = QFrame(parent)
+        toast.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        toast.setStyleSheet("background-color: rgba(15, 15, 15, 230); border-radius: 4px; border: 1px solid #444;")
+        
+        lbl = QLabel(text, toast)
+        lbl.setStyleSheet("color: #00FF00; font-size: 11px; font-family: 'Microsoft YaHei'; padding: 5px 10px;")
+        
+        lay = QHBoxLayout(toast)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(lbl)
+        
+        # 居中定位在 parent 上方
+        toast.adjustSize()
+        px = parent.x() + (parent.width() - toast.width()) // 2
+        py = parent.y() + 50
+        # 转换为全局坐标
+        g_pos = parent.mapToGlobal(QPoint(px - parent.x(), py - parent.y()))
+        toast.move(g_pos)
+        
+        toast.show()
+        
+        # 自动销毁
+        QTimer.singleShot(duration, toast.deleteLater)
+    except Exception as ex:
+        logger.debug(f"[toast_messageQT] Failed to show toast: {ex}")
+
+
 class RealtimeSignalManager:
     def __init__(self) -> None:
         # [FIX] 增加线程锁，确保跨线程计算信号时的状态一致性，防止 GIL 冲突

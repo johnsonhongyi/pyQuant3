@@ -2846,14 +2846,16 @@ class BiddingMomentumDetector:
                     'base_vol_ratio': c_vr
                 })
                 seen.add(code)
-                # [FIX] 仅在非复盘模式下投递联动，防止历史加载时队列溢出
-                if not self.in_history_mode and self.enable_background_linkage:
-                    # [ROOT-FIX] 标记为 auto=True 启用节流与去重，解决后台自动刷新导致的“灵异联动”
-                    self.link_manager.push(code, auto=True)
         
         # [UPGRADE] 今日全局势能排序 Top 30
         potential_today.sort(key=lambda x: x['score'], reverse=True)
         today_leaders = potential_today[:30]
+
+        # [FIX] 仅在非复盘模式下，且允许后台自动联动时，自动联动今日最强的第1名龙头股
+        # 避免在循环内对所有板块候选强势股全部投递，导致前台多股疯狂跳动及高频重复风暴
+        if not self.in_history_mode and self.enable_background_linkage and today_leaders:
+            top_code = today_leaders[0]['code']
+            self.link_manager.push(top_code, auto=True)
         
         # [UPGRADE] 极致剪裁：合并历史与今日，确保每一天都只保留 Top 30，且仅保留最近 3 日
         combined = history_only + today_leaders
