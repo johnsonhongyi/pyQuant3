@@ -4108,9 +4108,15 @@ class BiddingMomentumDetector:
             
             import math
             active_count = len(stocks)
-            base_score = math.log2(max(1, active_count)) * 12
-            perf_score = max(0, leader_pct) * 2.5
-            board_score_leader = base_score + perf_score
+            # 1. 龙头先行：基础贡献分由龙头本身涨幅决定
+            leader_base = max(0.0, leader_pct) * 1.2
+            
+            # 2. 跟涨增益：仅当板块个股出现跟随上涨 (avg_pct > 0) 时，基于个股数与跟随率计算板块效应增益分
+            follower_bonus = 0.0
+            if avg_pct > 0.0:
+                follower_bonus = math.log2(max(1, active_count)) * avg_pct * eff_follow_ratio * trend_multiplier * 3.0
+                
+            board_score_leader = leader_base + follower_bonus
             
             board_score = min(max(board_score_avg, board_score_leader), 98.5)
 
