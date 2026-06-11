@@ -1659,6 +1659,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 mode = "LIVE_AUTO"
 
             signals = focus_ctrl.get_decision_queue()
+            
+            # 优先处理 SELL/REDUCE 卖出平仓信号，以便在买入前先释放持仓数额，避免持仓满 10 只限制误杀买入信号
+            def signal_priority_key(sig):
+                act = str(sig.get('kernel_action', '') or '').upper()
+                if act in ("SELL", "REDUCE"):
+                    return 0
+                return 1
+            signals = sorted(signals, key=signal_priority_key)
+
             positions = {p['code']: p for p in trade_gw.get_positions()}
 
             # 记录本轮循环中已执行过的买入与卖出，防止同一秒内对同一只股票同时触发买入和平仓

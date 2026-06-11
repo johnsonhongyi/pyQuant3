@@ -879,6 +879,22 @@ class RealtimeSignalManager:
         score += vol_boom_now * 1
         score += ((updated_down_streak >= 2) & (now_arr > state['prev_now'].values * 1.005)) * 2
 
+        # [NEW] 低开高走且开盘即最低 (Low-Open-Go-High & Open-Is-Lowest Intraday Surges)
+        avg_price_arr = df.get('avg_price', df.get('average', now_arr)).values
+        avg_price_arr = np.nan_to_num(avg_price_arr.astype(float), nan=now_arr)
+        
+        open_is_lowest = (low_arr > 0) & ((open_arr - low_arr) / np.maximum(open_arr, 0.001) < 0.005)
+        is_low_or_flat_open = open_arr <= lastp1d * 1.015
+        is_pullup = now_arr > open_arr * 1.02
+        above_vwap = (avg_price_arr > 0) & (now_arr > avg_price_arr)
+        
+        ratio_arr = df.get('ratio', np.zeros(len(df))).values
+        ratio_arr = np.nan_to_num(ratio_arr.astype(float), nan=0.0)
+        vol_confirmed = (ratio_arr > 0.8) | (volume_arr > avg_vol_arr * 1.2)
+        
+        low_open_go_high_buy = open_is_lowest & is_low_or_flat_open & is_pullup & above_vwap & vol_confirmed
+        score += low_open_go_high_buy * 4
+
         # 信号逻辑
         prev_signal_arr = safe_prev_signal_array(df)
         score += prev_signal_arr
@@ -906,8 +922,12 @@ class RealtimeSignalManager:
         signal_col[(score >= 6) & (score < 9) & ~block_mask] = 'BUY_N'
         signal_col[(score < 6) & (macd < 0)] = 'SELL_WEAK'
 
+        # [NEW] 冲高破均价线下杀 (Surge & Break VWAP Downwards)
+        has_surged = (updated_today_high >= lastp1d * 1.015) | ((avg_price_arr > 0) & (updated_today_high >= avg_price_arr * 1.008))
+        break_vwap_sell = has_surged & (avg_price_arr > 0) & (now_arr < avg_price_arr * 0.998) & (now_arr < updated_today_high * 0.995)
+
         sell_cond = ((macddif < macddea) & (macd < 0)) | ((rsi < 45) & (kdj_j < kdj_k)) | \
-                    ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break
+                    ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break | break_vwap_sell
         signal_col[sell_cond] = 'SELL'
         
         df['signal'] = signal_col

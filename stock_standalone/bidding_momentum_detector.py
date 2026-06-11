@@ -151,9 +151,10 @@ def get_limit_up_threshold(code: str) -> float:
     code_str = str(code)
     if code_str.startswith(('688', '30')):
         return 19.5
-    elif code_str.startswith(('43', '83', '87', '92')):
+    elif code_str.startswith(('8', '43', '92')):
         return 29.5
     return 9.5
+
 
 def get_effective_trade_date(current_dt: Optional[datetime.datetime] = None) -> str:
     """
@@ -567,6 +568,7 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                         ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
                         ts.racing_start_ts = _get('rs', ts.racing_start_ts)
                         ts.signal_count = _get('sc', 0)
+                        ts.per1d = _get('p1d', ts.per1d)
                         
                         new_tick_series[code] = ts
                         new_snap_cache[code] = {
@@ -575,7 +577,8 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                             'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
                             'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                             'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
-                            'signal_count': ts.signal_count
+                            'signal_count': ts.signal_count,
+                            'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                         }
                         if not is_cross_day:
                             k_data = _get('k', None)
@@ -593,6 +596,7 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                         ts.momentum_score = momentum_scores.get(code, 0.0)
                         ts.score_anchor = stock_anchors.get(code, 0.0)
                         ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                        ts.per1d = m.get('p1d', ts.per1d)
                         
                         if is_cross_day:
                             ts.score = 0.0; ts.momentum_score = 0.0; ts.score_anchor = 0.0; ts.first_breakout_ts = 0.0
@@ -611,7 +615,8 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                             'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
                             'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                             'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
-                            'signal_count': getattr(ts, 'signal_count', 0)
+                            'signal_count': getattr(ts, 'signal_count', 0),
+                            'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                         }
 
                 result['tick_series'] = new_tick_series
@@ -2240,6 +2245,7 @@ class BiddingMomentumDetector:
                     ts.is_counter_trend = bool(_get('ic', ts.is_counter_trend))
                     ts.racing_start_ts = _get('rs', ts.racing_start_ts)
                     ts.signal_count = _get('sc', 0)
+                    ts.per1d = _get('p1d', ts.per1d)
                     
                     new_tick_series[code] = ts
                     new_snap_cache[code] = {
@@ -2248,7 +2254,8 @@ class BiddingMomentumDetector:
                         'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                         'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
-                        'signal_count': ts.signal_count
+                        'signal_count': ts.signal_count,
+                        'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                     }
                     if not is_cross_day:
                         kline_data = _get('k', None)
@@ -2270,6 +2277,7 @@ class BiddingMomentumDetector:
                     ts.momentum_score = momentum_scores.get(code, 0.0)
                     ts.score_anchor = stock_anchors.get(code, 0.0)
                     ts.price_anchor = stock_price_anchors.get(code, 0.0)
+                    ts.per1d = m.get('p1d', ts.per1d)
                     
                     if is_cross_day:
                         ts.score = 0.0
@@ -2292,7 +2300,8 @@ class BiddingMomentumDetector:
                         'first_breakout_ts': ts.first_breakout_ts, 'klines': [],
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                         'pattern_hint': ts.pattern_hint, 'vol_ratio': ts.vol_ratio,
-                        'signal_count': ts.signal_count
+                        'signal_count': ts.signal_count,
+                        'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                     }
 
             # Phase-2: 极短原子锁
@@ -2323,6 +2332,7 @@ class BiddingMomentumDetector:
                         existing_ts.is_counter_trend = ts.is_counter_trend
                         existing_ts.racing_start_ts = ts.racing_start_ts
                         existing_ts.signal_count = ts.signal_count
+                        existing_ts.per1d = ts.per1d
                         
                 for code, snap in new_snap_cache.items():
                     self._global_snap_cache[code] = snap
@@ -2529,6 +2539,7 @@ class BiddingMomentumDetector:
                     ts.is_counter_trend = bool(_get_val('ic', False))
                     ts.pattern_hint = _get_val('ph', '')
                     ts.signal_count = _get_val('sc', 0)
+                    ts.per1d = _get_val('p1d', 0.0)
                     if ts.signal_count > 0:
                         ts._last_sig_min = int(ts.first_breakout_ts // 60) if ts.first_breakout_ts > 0 else 0
                     
@@ -2547,7 +2558,8 @@ class BiddingMomentumDetector:
                         'pattern_hint': ts.pattern_hint, 'klines': list(ts.klines),
                         'is_untradable': ts.is_untradable, 'is_counter_trend': ts.is_counter_trend,
                         'ral': ts.ral, 'first_breakout_ts': ts.first_breakout_ts,
-                        'vol_ratio': ts.vol_ratio, 'signal_count': ts.signal_count
+                        'vol_ratio': ts.vol_ratio, 'signal_count': ts.signal_count,
+                        'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                     }
 
             # [PHASE-2] 原子替换 (短锁)
@@ -3507,6 +3519,39 @@ class BiddingMomentumDetector:
         if day_open > ts_obj.last_high and ts_obj.last_high > 0:
             bidding_score += 2.0
 
+        # [NEW] 竞价放量/爆量大额奖励 (Bidding Volume Breakout Bonus)
+        time_int = 930
+        if data_ts > 0:
+            try:
+                dt_val = _datetime.fromtimestamp(data_ts)
+                time_int = dt_val.hour * 100 + dt_val.minute
+            except:
+                pass
+        
+        if time_int <= 930:
+            is_star_chinext = code.startswith(('688', '30', '8', '43', '92'))
+            bidding_amt = ts_obj.total_vol * cur_close
+            if is_star_chinext:
+                if bidding_amt >= 8e7:  # 8000万以上
+                    bidding_score += 35.0
+                    ts_obj.pattern_hint = f"[竞价超限抢筹]|{ts_obj.pattern_hint or ''}"
+                elif bidding_amt >= 3e7:  # 3000万以上
+                    bidding_score += 20.0
+                    ts_obj.pattern_hint = f"[竞价大幅爆量]|{ts_obj.pattern_hint or ''}"
+                elif bidding_amt >= 1e7:  # 1000万以上
+                    bidding_score += 10.0
+                    ts_obj.pattern_hint = f"[竞价大额放量]|{ts_obj.pattern_hint or ''}"
+            else:
+                if bidding_amt >= 1.2e8:  # 1.2亿以上
+                    bidding_score += 35.0
+                    ts_obj.pattern_hint = f"[竞价超限抢筹]|{ts_obj.pattern_hint or ''}"
+                elif bidding_amt >= 5e7:  # 5000万以上
+                    bidding_score += 20.0
+                    ts_obj.pattern_hint = f"[竞价大幅爆量]|{ts_obj.pattern_hint or ''}"
+                elif bidding_amt >= 2e7:  # 2000万以上
+                    bidding_score += 10.0
+                    ts_obj.pattern_hint = f"[竞价大额放量]|{ts_obj.pattern_hint or ''}"
+
         # --- 2. 涨幅过滤 ---
         passed_filter = True
         if self.strategies['pct_change']['enabled']:
@@ -3772,6 +3817,8 @@ class BiddingMomentumDetector:
                             'last_low': ts.last_low,
                             'total_amount': ts.total_amount,
                             'momentum_score': ts.momentum_score,
+                            'yesterday_pct': ts.per1d,
+                            'prev_pct': ts.per1d,
                         }
                         self._global_snap_cache[code] = data
                         _pct_sum_delta += ts.current_pct

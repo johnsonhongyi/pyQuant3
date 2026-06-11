@@ -69,15 +69,15 @@ def test_paper_trading_complete_cycle() -> None:
     success = adapter.submit_order(add_order)
     assert success is True
 
-    # 账户总权益 106万 * 10% = 10.6万。
-    # 加仓股数 = 10.6万 / 12.0 = 8833.3333 股。
-    # 扣减现金 10.6万，剩余现金 = 70万 - 10.6万 = 59.4万。
+    # 账户持仓仓位恒定，以初始总资金为基准：100万 * 10% = 10万。
+    # 加仓股数 = 10万 / 12.0 = 8333.3333 股。
+    # 扣减现金 10万，剩余现金 = 70万 - 10万 = 60万。
     positions = adapter.get_positions()
     pos = positions["600000"]
     acct = adapter.get_account_snapshot()
     
-    assert abs(acct["cash"] - 594000.0) < 1.0
-    assert abs(pos["volume"] - 38833.33) < 1.0
+    assert abs(acct["cash"] - 600000.0) < 1.0
+    assert abs(pos["volume"] - 38333.33) < 1.0
     
     # 5. 平仓 SELL (以 13.0 元全平仓位)
     # 将最新价更新至 13.0 元

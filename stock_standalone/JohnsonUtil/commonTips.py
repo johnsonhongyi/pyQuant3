@@ -7150,7 +7150,7 @@ def func_compute_percd2021(open, close, high, low,
                     init_c += 35.0
                 else:
                     init_c += 20.0
-            elif str(code).startswith(('688','8')):
+            elif str(code).startswith(('688', '8', '43', '83', '87', '92')):
                 if percent_change >= 5:
                     init_c += 35.0
                 else:

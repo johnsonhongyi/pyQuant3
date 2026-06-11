@@ -113,7 +113,7 @@ def test_risk_gate_daily_loss_limit(mock_signal, mock_intent):
 
 
 def test_risk_gate_high_extension_no_chase(mock_intent):
-    # 涨幅偏离过高，比如当天已经涨了 8.5%，限制为 6.0%
+    # 涨幅偏离过高，比如当天已经涨了 9.5%，限制为 6.0% (高置信度乘数 1.5x 之后是 9.0%)
     signal_high = StrategySignal(
         code="600519",
         name="贵州茅台",
@@ -121,7 +121,7 @@ def test_risk_gate_high_extension_no_chase(mock_intent):
         source="SinaBidding",
         signal_type="BiddingRacing",
         price=1800.0,
-        features={"pct_diff": 8.5},
+        features={"pct_diff": 9.5},
     )
     limits = RiskLimits(max_pct_diff=6.0)
     decision = evaluate(intent=mock_intent, signal=signal_high, state="OUT_OF_TRADE", limits=limits)
