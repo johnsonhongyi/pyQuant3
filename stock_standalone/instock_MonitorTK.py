@@ -3629,6 +3629,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # =========================================================
 
             try:
+                from market_temp_chart import MarketTempHistoryManager
+                MarketTempHistoryManager().save_history()
+            except Exception as e:
+                logger.warning(f"Failed to save market temp history on exit: {e}")
+
+            try:
                 self.save_ui_states()
             except Exception:
                 pass
