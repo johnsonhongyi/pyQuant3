@@ -148,6 +148,7 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         self.load_window_position_qt(self, "market_temp_chart_dialog", default_width=900, default_height=650)
         
         self._init_ui()
+        self.update_chart()
 
     def _init_ui(self):
         lay = QVBoxLayout(self)
@@ -175,6 +176,55 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         self.graph_layout.setBackground('#0d121f')
         lay.addWidget(self.graph_layout)
         
+        # 2b. 初始化图表子图与数据曲线（仅创建一次，防止 clear 触发 disconnect 报错）
+        self.time_strs = []
+        
+        # Subplot 1: 🌡️ 市场温度 (0-100)
+        self.axis1 = TimeStrAxisItem(self.time_strs, orientation='bottom')
+        self.p1 = self.graph_layout.addPlot(
+            title="🌡️ 市场温度历史走势 (%)",
+            axisItems={'bottom': self.axis1}
+        )
+        self.p1.showGrid(x=True, y=True, alpha=0.3)
+        self.p1.setYRange(0, 100)
+        self.p1.setLabel('left', '温度', units='%')
+        
+        # 绘制温度折线
+        self.temp_curve = self.p1.plot(pen=pg.mkPen('#5bc0de', width=2.5), name="市场温度")
+        
+        # 添加 80% (火热) 和 20% (冰点) 辅助水平参考线
+        self.h_line_hot = pg.InfiniteLine(pos=80, angle=0, pen=pg.mkPen('#ff3333', width=1, style=Qt.PenStyle.DashLine))
+        self.h_line_cold = pg.InfiniteLine(pos=20, angle=0, pen=pg.mkPen('#33ccff', width=1, style=Qt.PenStyle.DashLine))
+        self.p1.addItem(self.h_line_hot)
+        self.p1.addItem(self.h_line_cold)
+        
+        # Subplot 2: 🚀 盘中放量个股数量
+        self.graph_layout.nextRow()
+        self.axis2 = TimeStrAxisItem(self.time_strs, orientation='bottom')
+        self.p2 = self.graph_layout.addPlot(
+            title="🚀 盘中放量暴增个股数量",
+            axisItems={'bottom': self.axis2}
+        )
+        self.p2.showGrid(x=True, y=True, alpha=0.3)
+        self.p2.setLabel('left', '家数')
+        self.vol_curve = self.p2.plot(pen=pg.mkPen('#ffa502', width=2), name="放量个股")
+        self.p2.setXLink(self.p1) # X轴与温度图联动
+        
+        # Subplot 3: 📊 上涨 vs 下跌家数对比
+        self.graph_layout.nextRow()
+        self.axis3 = TimeStrAxisItem(self.time_strs, orientation='bottom')
+        self.p3 = self.graph_layout.addPlot(
+            title="📊 上涨(红) vs 下跌(绿)家数对比",
+            axisItems={'bottom': self.axis3}
+        )
+        self.p3.showGrid(x=True, y=True, alpha=0.3)
+        self.p3.setLabel('left', '家数')
+        
+        # 绘制上涨家数 (红) 与下跌家数 (绿)
+        self.up_curve = self.p3.plot(pen=pg.mkPen('#ff4444', width=2), name="上涨")
+        self.down_curve = self.p3.plot(pen=pg.mkPen('#2ed573', width=2), name="下跌")
+        self.p3.setXLink(self.p1) # X轴与温度图联动
+        
         # 3. 底部操作栏
         btn_lay = QHBoxLayout()
         btn_lay.addStretch()
@@ -197,10 +247,6 @@ class MarketTempChartDialog(QDialog, WindowMixin):
         refresh_btn.clicked.connect(self.update_chart)
         btn_lay.addWidget(refresh_btn)
         lay.addLayout(btn_lay)
-        
-        # 4. 首次渲染数据
-        self.update_chart()
-
     def update_chart(self):
         # 1. 获取最新数据
         records = MarketTempHistoryManager().get_data()
@@ -227,58 +273,26 @@ class MarketTempChartDialog(QDialog, WindowMixin):
             f"🚀 <span style='color: #a0aec0;'>放量:</span> <span style='color: #ffa502; font-weight: bold;'>{last_rec['vol_up']}</span>"
         )
         
-        # 4. 清理旧绘图区重新创建
-        self.graph_layout.clear()
+        # 4. 更新时间轴的底层列表数据，供 TimeStrAxisItem 映射使用
+        self.time_strs.clear()
+        self.time_strs.extend(time_strs)
         
-        # ----------------------------------------------------------------------
-        # 创建 subplot 1: 🌡️ 市场温度 (0-100)
-        # ----------------------------------------------------------------------
-        p1 = self.graph_layout.addPlot(
-            title="🌡️ 市场温度历史走势 (%)",
-            axisItems={'bottom': TimeStrAxisItem(time_strs, orientation='bottom')}
-        )
-        p1.showGrid(x=True, y=True, alpha=0.3)
-        p1.setYRange(0, 100)
-        p1.setLabel('left', '温度', units='%')
+        # 5. 更新折线图数据与笔刷颜色 (温度大于 60 用红色，否则用淡蓝色)
+        temp_color = '#ff4444' if temps[-1] >= 60 else '#5bc0de'
+        self.temp_curve.setPen(pg.mkPen(temp_color, width=2.5))
+        self.temp_curve.setData(times, temps)
         
-        # 绘制温度折线 (温度大于 60 用红色，否则用淡蓝色)
-        temp_pen = pg.mkPen('#ff4444' if temps[-1] >= 60 else '#5bc0de', width=2.5)
-        p1.plot(times, temps, pen=temp_pen, name="市场温度")
+        self.vol_curve.setData(times, vol_ups)
+        self.up_curve.setData(times, ups)
+        self.down_curve.setData(times, downs)
         
-        # 添加 80% (火热) 和 20% (冰点) 辅助水平参考线
-        h_line_hot = pg.InfiniteLine(pos=80, angle=0, pen=pg.mkPen('#ff3333', width=1, style=Qt.PenStyle.DashLine))
-        h_line_cold = pg.InfiniteLine(pos=20, angle=0, pen=pg.mkPen('#33ccff', width=1, style=Qt.PenStyle.DashLine))
-        p1.addItem(h_line_hot)
-        p1.addItem(h_line_cold)
-        
-        # ----------------------------------------------------------------------
-        # 创建 subplot 2: 🚀 放量个股 (0-N)
-        # ----------------------------------------------------------------------
-        self.graph_layout.nextRow()
-        p2 = self.graph_layout.addPlot(
-            title="🚀 盘中放量暴增个股数量",
-            axisItems={'bottom': TimeStrAxisItem(time_strs, orientation='bottom')}
-        )
-        p2.showGrid(x=True, y=True, alpha=0.3)
-        p2.setLabel('left', '家数')
-        p2.plot(times, vol_ups, pen=pg.mkPen('#ffaa00', width=2), name="放量个股")
-        p2.setXLink(p1) # X轴与温度图联动
-        
-        # ----------------------------------------------------------------------
-        # 创建 subplot 3: 📊 上涨 vs 下跌家数
-        # ----------------------------------------------------------------------
-        self.graph_layout.nextRow()
-        p3 = self.graph_layout.addPlot(
-            title="📊 上涨(红) vs 下跌(绿)家数对比",
-            axisItems={'bottom': TimeStrAxisItem(time_strs, orientation='bottom')}
-        )
-        p3.showGrid(x=True, y=True, alpha=0.3)
-        p3.setLabel('left', '家数')
-        
-        # 绘制上涨家数 (红) 与下跌家数 (绿)
-        p3.plot(times, ups, pen=pg.mkPen('#ff4444', width=2), name="上涨")
-        p3.plot(times, downs, pen=pg.mkPen('#44ff44', width=2), name="下跌")
-        p3.setXLink(p1) # X轴与温度图联动
+        # 6. 通知子图表重新计算坐标和刻度
+        self.p1.getAxis('bottom').picture = None
+        self.p1.getAxis('bottom').update()
+        self.p2.getAxis('bottom').picture = None
+        self.p2.getAxis('bottom').update()
+        self.p3.getAxis('bottom').picture = None
+        self.p3.getAxis('bottom').update()
 
     def closeEvent(self, event):
         """关闭窗口时自动保存位置"""

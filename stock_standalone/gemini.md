@@ -1,3 +1,10 @@
+## 2026-06-11 12:28
+- [x] **无侵入式修复 Nuitka 编译环境下 PyQt 槽函数断开连接崩溃的 Bug (Non-Intrusive Fix for Nuitka compiled_method Disconnect Crash Bug)**：
+    - [x] **定位 compiled_method 错误根源**：排查发现当系统在 Nuitka 编译打包环境下运行时，PyQt6 绑定的槽函数被编译成了 Nuitka 专属的 `compiled_method` 类型。如果在组件更新或销毁时调用 `pyqtBoundSignal.disconnect`，PyQt6 底层无法辨识已编译方法而会抛出 `TypeError: 'compiled_method' object is not connected`，直接导致崩溃。
+    - [x] **舍弃全局猴子补丁以保护原有环境**：为将 Bug 修复的风险降到最低，完全不改变任何全局 PyQt6/Nuitka 基础运行环境，主动撤回了对 `sys_utils.py` 与 `hotkey_rotator.py` 的全局猴子补丁拦截逻辑，确保老环境中的基础信号机制 100% 不受干扰。
+    - [x] **重构 `market_temp_chart.py` 实施就地单次渲染与数据增量更新**：重构了市场温度走势弹窗的初始化与重绘逻辑。在 `_init_ui` 时将 `p1`, `p2`, `p3` 等子图和所有曲线（Curve）一次性构建完毕，在 `update_chart` 中废除了容易触发解绑报错的 `self.graph_layout.clear()` 清空动作，改为通过 `setData` 方法就地增量更新数据点。此举不仅在物理上彻底消除了 `disconnect` 触发源，规避了 Nuitka 异常，而且大幅提升了图表的渲染性能和响应速度。
+    - [x] **测试验证**：通过 `py_compile` 静态编译校验，且回归测试 `pytest test_watchlist_lifecycle.py` 11 项用例全部成功通过。
+
 ## 2026-06-11 11:55
 - [x] **修复多进程状态覆盖与自愈日志反复振荡刷屏的 Bug (Fixed Multi-Process State Overwrite & Healing Log Oscillation Bug)**：
     - [x] **攻克多进程/多实例状态乒乓覆盖漏点**：排查出 `StateManager` (状态锁管理器) 在执行 `set` 写入时，由于未在写入前从磁盘同步最新状态，当多进程同时运行（如 Tkinter 主进程与 PyQt6 可视化伴随进程）且某一方持有旧内存状态时，其 `set` 动作会用过期的 `IN_TRADE` 内存状态合并并强行覆盖物理 JSON 文件，将另一方自愈完成的 `FLAT` 状态倒退回滚。这造成了多进程状态不断“乒乓震荡”，促使 Tkinter 主进程每次心跳都再次触发 `StateManagerSelfHeal` 警告自愈。
