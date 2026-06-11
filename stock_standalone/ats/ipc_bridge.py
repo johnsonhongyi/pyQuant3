@@ -26,7 +26,7 @@ class IPCBridge:
             
         self.db_manager = SQLiteConnectionManager.get_instance(self.db_path)
 
-    def start_realtime_listener(self, port=26669, data_callback=None, signal_callback=None):
+    def start_realtime_listener(self, port=26670, data_callback=None, signal_callback=None):
         """
         Starts a daemon TCP server thread on the specified port.
         Listens for real-time market data updates or signals from the main process.

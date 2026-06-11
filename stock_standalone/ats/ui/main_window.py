@@ -5,9 +5,9 @@ Assembles the complete Autonomous Trading System UI dashboard.
 """
 
 import sys
-from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.styles import DARK_THEME_QSS
 from ats.ui.universe_widget import UniverseTreeWidget
@@ -15,6 +15,245 @@ from ats.ui.heatmap_widget import SectorHeatmapWidget
 from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
 from ats.ui.swing_table import SwingStateTable
 from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
+
+class StockDetailDialog(QDialog):
+    def __init__(self, code, name, df_row=None, context_info=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"📈 实时实盘个股详情 - {code} {name}")
+        self.resize(550, 650)
+        self.setMinimumSize(450, 550)
+        
+        # Inherit parent stylesheet to match the high-end dark theme
+        if parent and hasattr(parent, 'styleSheet'):
+            self.setStyleSheet(parent.styleSheet())
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #121214;
+                    color: #e2e2e5;
+                }
+                QLabel {
+                    color: #aad4ff;
+                }
+                QTableWidget {
+                    background-color: #18181c;
+                    alternate-background-color: #1f1f24;
+                    gridline-color: #2e2e36;
+                    border: 1px solid #2e2e36;
+                    color: #e2e2e5;
+                }
+                QHeaderView::section {
+                    background-color: #1a1a1f;
+                    color: #aad4ff;
+                    border: 1px solid #2e2e36;
+                    font-weight: bold;
+                }
+                QPushButton {
+                    background-color: #222228;
+                    border: 1px solid #3e3e4a;
+                    color: #e2e2e5;
+                    padding: 6px 15px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #2c2c35;
+                    border-color: #aad4ff;
+                    color: #ffffff;
+                }
+            """)
+            
+        self._init_ui(code, name, df_row, context_info)
+        
+    def _init_ui(self, code, name, df_row, context_info):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(12)
+        
+        # 1. Title and header info
+        header_layout = QHBoxLayout()
+        title_label = QLabel(f"📊 {code}  {name}")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #ffffff;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        price_str = "--"
+        pct_str = "--"
+        color_hex = "#8e8e93"
+        
+        if df_row is not None:
+            # Resolve price
+            for p_col in ['close', 'trade', 'price']:
+                if p_col in df_row and df_row[p_col] is not None and df_row[p_col] != '':
+                    try:
+                        price_str = f"{float(df_row[p_col]):.2f}"
+                        break
+                    except:
+                        pass
+            # Resolve percent
+            if 'percent' in df_row and df_row['percent'] is not None and df_row['percent'] != '':
+                try:
+                    pct_val = float(df_row['percent'])
+                    pct_str = f"{pct_val:+.2f}%"
+                    if pct_val > 0:
+                        color_hex = "#ff4444"
+                    elif pct_val < 0:
+                        color_hex = "#33cc5a"
+                except:
+                    pct_str = str(df_row['percent'])
+                    if pct_str.startswith("+"):
+                        color_hex = "#ff4444"
+                    elif pct_str.startswith("-"):
+                        color_hex = "#33cc5a"
+                        
+        price_pct_label = QLabel(f"{price_str}  ({pct_str})")
+        price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
+        header_layout.addWidget(price_pct_label)
+        layout.addLayout(header_layout)
+        
+        # 1.5 Context Info Block (If provided)
+        if context_info:
+            ctx_group = QGroupBox("📍 策略特征上下文 (Context Info)")
+            ctx_group.setStyleSheet("""
+                QGroupBox {
+                    border: 1px solid #2e2e36;
+                    border-radius: 6px;
+                    margin-top: 10px;
+                    font-weight: bold;
+                    color: #aad4ff;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 3px 0 3px;
+                }
+            """)
+            ctx_layout = QGridLayout(ctx_group)
+            ctx_layout.setContentsMargins(12, 18, 12, 12)
+            ctx_layout.setSpacing(10)
+            
+            # Position
+            lbl_pos_title = QLabel("触发位置:")
+            lbl_pos_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+            lbl_pos_val = QLabel(context_info.get('position', '--'))
+            lbl_pos_val.setStyleSheet("color: #ffffff; font-weight: bold;")
+            lbl_pos_val.setWordWrap(True)
+            
+            # Reason
+            lbl_reason_title = QLabel("推荐理由:")
+            lbl_reason_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+            lbl_reason_val = QLabel(context_info.get('reason', '--'))
+            lbl_reason_val.setStyleSheet("color: #ffaa44; font-weight: bold;")
+            lbl_reason_val.setWordWrap(True)
+            
+            # Status
+            lbl_status_title = QLabel("追涨/特征状态:")
+            lbl_status_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+            lbl_status_val = QLabel(context_info.get('status', '--'))
+            lbl_status_val.setStyleSheet("color: #00ff88; font-weight: bold;")
+            lbl_status_val.setWordWrap(True)
+            
+            ctx_layout.addWidget(lbl_pos_title, 0, 0)
+            ctx_layout.addWidget(lbl_pos_val, 0, 1)
+            ctx_layout.addWidget(lbl_reason_title, 1, 0)
+            ctx_layout.addWidget(lbl_reason_val, 1, 1)
+            ctx_layout.addWidget(lbl_status_title, 2, 0)
+            ctx_layout.addWidget(lbl_status_val, 2, 1)
+            
+            ctx_layout.setColumnStretch(1, 1)
+            layout.addWidget(ctx_group)
+            
+        # 2. Source indicator
+        hint_label = QLabel()
+        if df_row is not None:
+            hint_label.setText("🟢 已成功对接实盘行情快照核心特征:")
+            hint_label.setStyleSheet("color: #00ff88; font-size: 9.5pt; font-weight: bold;")
+        else:
+            hint_label.setText("⚠️ 暂无当前个股实盘快照特征数据（等待行情推送中）:")
+            hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
+        layout.addWidget(hint_label)
+        
+        # 3. Main feature table
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["指标核心特征", "特征实盘数据值"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        
+        features = []
+        if df_row is not None:
+            main_keys = {
+                'percent': '今日涨幅 (%)',
+                'close': '最新收盘价 (元)',
+                'trade': '最新成交价 (元)',
+                'open': '开盘价 (元)',
+                'high': '最高价 (元)',
+                'low': '最低价 (元)',
+                'volume': '累计成交量 (手/股)',
+                'amount': '累计成交额 (元)',
+                'vwap': '分时均价线 (VWAP)',
+                'ma20': '20日移动平均 (MA20)',
+                'category': '所属行业/概念板块',
+                'strategy': '匹配筛选策略'
+            }
+            
+            for k, label in main_keys.items():
+                if k in df_row and df_row[k] is not None and df_row[k] != '':
+                    val = df_row[k]
+                    if isinstance(val, float):
+                        if k in ('percent', 'pct_chg'):
+                            val_str = f"{val:+.2f}%"
+                        elif k in ('volume', 'amount') and val > 10000:
+                            val_str = f"{val:,.2f}"
+                        else:
+                            val_str = f"{val:.2f}"
+                    else:
+                        val_str = str(val)
+                    features.append((label, val_str))
+                    
+            for k, val in df_row.items():
+                if k not in main_keys and k not in ('code', 'name') and val is not None and val != '':
+                    label = k.replace('_', ' ').title()
+                    if isinstance(val, float):
+                        val_str = f"{val:.4f}"
+                    else:
+                        val_str = str(val)
+                    features.append((label, val_str))
+        else:
+            features = [
+                ("证券代码", code),
+                ("证券名称", name),
+                ("日内价格", "加载中..."),
+                ("实盘状态", "等待主进程推送行情"),
+                ("说明", "双击可实现实盘特征一屏清，当前暂未收到主进程行情推送")
+            ]
+            
+        self.table.setRowCount(len(features))
+        for row, (lbl, val) in enumerate(features):
+            item_lbl = QTableWidgetItem(lbl)
+            item_lbl.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 0, item_lbl)
+            
+            item_val = QTableWidgetItem(val)
+            item_val.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            if "涨幅" in lbl or "Percent" in lbl:
+                if val.startswith("+"):
+                    item_val.setForeground(QColor("#ff4444"))
+                elif val.startswith("-"):
+                    item_val.setForeground(QColor("#33cc5a"))
+            self.table.setItem(row, 1, item_val)
+            
+        layout.addWidget(self.table)
+        
+        # 4. Button close
+        btn_close = QPushButton("关闭窗口")
+        btn_close.clicked.connect(self.accept)
+        
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(btn_close)
+        layout.addLayout(bottom_layout)
 
 class ATSMainWindow(QMainWindow):
     realtime_data_signal = pyqtSignal(object)
@@ -26,6 +265,7 @@ class ATSMainWindow(QMainWindow):
         self.resize(1440, 900)
         self.current_font_size = self.load_font_size()
         self.apply_qss_with_font_size(self.current_font_size)
+        self.current_df = None  # Live streaming DataFrame snapshot data source
         
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
@@ -33,6 +273,7 @@ class ATSMainWindow(QMainWindow):
         
         self._init_toolbar()
         self._init_ui()
+        self._restore_layout_state()
         self._init_statusbar()
         
         # Load SQLite database data (P1 Integration)
@@ -86,13 +327,13 @@ class ATSMainWindow(QMainWindow):
         toolbar.addWidget(btn_font_inc)
 
     def _init_ui(self):
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(main_splitter)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.setCentralWidget(self.main_splitter)
 
         # 1. Left panel: Universe Tree (Width: 350)
         self.universe_widget = UniverseTreeWidget()
         self.universe_widget.setMinimumWidth(300)
-        main_splitter.addWidget(self.universe_widget)
+        self.main_splitter.addWidget(self.universe_widget)
 
         # 2. Center panel: Swing Table & Trading Tabs (Width: 700)
         center_widget = QWidget()
@@ -100,10 +341,10 @@ class ATSMainWindow(QMainWindow):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(6)
         
-        center_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.center_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.swing_table = SwingStateTable()
-        center_splitter.addWidget(self.swing_table)
+        self.center_splitter.addWidget(self.swing_table)
         
         # Bottom Tabs in center panel
         self.center_tabs = QTabWidget()
@@ -117,11 +358,11 @@ class ATSMainWindow(QMainWindow):
         self.backtest_panel = BacktestReportPanel()
         self.center_tabs.addTab(self.backtest_panel, "📊 离线回测报告 (Backtest)")
         
-        center_splitter.addWidget(self.center_tabs)
-        center_splitter.setSizes([450, 450])
+        self.center_splitter.addWidget(self.center_tabs)
+        self.center_splitter.setSizes([450, 450])
         
-        center_layout.addWidget(center_splitter)
-        main_splitter.addWidget(center_widget)
+        center_layout.addWidget(self.center_splitter)
+        self.main_splitter.addWidget(center_widget)
 
         # 3. Right panel: Heatmap & Distribution charts (Width: 390)
         right_widget = QWidget()
@@ -129,10 +370,10 @@ class ATSMainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
         
-        right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.right_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.heatmap_widget = SectorHeatmapWidget()
-        right_splitter.addWidget(self.heatmap_widget)
+        self.right_splitter.addWidget(self.heatmap_widget)
         
         # Right charts tab
         self.right_tabs = QTabWidget()
@@ -143,21 +384,31 @@ class ATSMainWindow(QMainWindow):
         self.equity_chart = EquityCurveChart()
         self.right_tabs.addTab(self.equity_chart, "📈 资金曲线 (Equity)")
         
-        right_splitter.addWidget(self.right_tabs)
-        right_splitter.setSizes([450, 450])
+        self.right_splitter.addWidget(self.right_tabs)
+        self.right_splitter.setSizes([450, 450])
         
-        right_layout.addWidget(right_splitter)
-        main_splitter.addWidget(right_widget)
+        right_layout.addWidget(self.right_splitter)
+        self.main_splitter.addWidget(right_widget)
 
         # Set stretch factors and initial sizes
-        main_splitter.setStretchFactor(0, 1)
-        main_splitter.setStretchFactor(1, 3)
-        main_splitter.setStretchFactor(2, 2)
-        main_splitter.setSizes([350, 700, 390])
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setStretchFactor(2, 2)
+        self.main_splitter.setSizes([350, 700, 390])
 
         # Connect internal signal linkages
+        # 1. 单击事件 -> 联动外部同花顺/通达信及可视化器 (link_stock)
+        self.universe_widget.stock_clicked.connect(self.link_stock)
+        self.swing_table.stock_clicked.connect(self.link_stock)
+        self.position_panel.stock_clicked.connect(self.link_stock)
+        self.trade_flow_table.stock_clicked.connect(self.link_stock)
+        
+        # 2. 双击事件 -> 弹窗详情展示 context_info (on_stock_clicked)
         self.universe_widget.stock_selected.connect(self.on_stock_clicked)
-        self.swing_table.stock_clicked.connect(self.on_stock_clicked)
+        self.swing_table.stock_double_clicked.connect(self.on_stock_clicked)
+        self.position_panel.stock_double_clicked.connect(self.on_stock_clicked)
+        self.trade_flow_table.stock_double_clicked.connect(self.on_stock_clicked)
+        
         self.heatmap_widget.sector_selected.connect(self.on_sector_clicked)
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
 
@@ -180,8 +431,82 @@ class ATSMainWindow(QMainWindow):
             self.lbl_rotator_status.setStyleSheet("color: #ff9900;")
             self.status_bar.showMessage("自动轮转引擎已暂停。")
 
-    def on_stock_clicked(self, code, name):
-        self.status_bar.showMessage(f"选中股票: {code} {name} (已同步推送至外部通达信/同花顺联动通道)")
+    def link_stock(self, code, name):
+        """
+        [LINKAGE] 单击个股触发联动：
+        1. 向 trade_visualizer_qt6 可视化服务器 (TCP 端口 26668) 发送 CODE|{code} 切换行情。
+        2. 调用 get_link_manager().push() 执行外部通达信/同花顺终端物理联动。
+        """
+        code_clean = str(code).strip()
+        self.status_bar.showMessage(f"🔗 [联动] 推送股票 {code_clean} {name} (已同步可视化及外部交易终端)")
+        
+        # 1. 异步向 26668 发送切换个股 socket 指令
+        import socket
+        import threading
+        
+        def send_switch():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.1) # 极低超时，不阻塞 UI
+                    s.connect(('127.0.0.1', 26668))
+                    s.sendall(f"CODE|{code_clean}".encode("utf-8"))
+            except Exception:
+                pass # 可视化器可能未启动，静默失败即可
+                
+        threading.Thread(target=send_switch, daemon=True).start()
+
+        # 2. 向独立联动进程投递物理联动任务 (TDX/THS 物理联动机能)
+        try:
+            from linkage_service import get_link_manager
+            get_link_manager().push(code_clean, auto=False)
+        except Exception as e:
+            print(f"[Linkage] External linkage failed: {e}")
+
+    def on_stock_clicked(self, code, name, context_info=None):
+        self.status_bar.showMessage(f"双击详情: {code} {name}")
+        
+        # Fetch real-time row data from the live streaming DataFrame (df_row)
+        df_row = None
+        code_clean = str(code).strip()
+        if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+            # Match code either in index or 'code' column
+            if code_clean in self.current_df.index:
+                df_row = self.current_df.loc[code_clean].to_dict()
+            elif 'code' in self.current_df.columns:
+                matched = self.current_df[self.current_df['code'] == code_clean]
+                if not matched.empty:
+                    df_row = matched.iloc[0].to_dict()
+                    
+        # If not found in current streaming df (e.g. outside trading hours or on non-trading days),
+        # auto-retrieve latest data from Sina API/local cache.
+        if df_row is None:
+            try:
+                from JSONData import sina_data
+                tick_df = sina_data.Sina().get_real_time_tick(code_clean, enrich_data=True)
+                if tick_df is not None and not tick_df.empty:
+                    df_row = tick_df.iloc[0].to_dict()
+                    
+                    # Map keys from Sina tick data to what detail table expects
+                    if 'trade' not in df_row and 'close' in df_row:
+                        df_row['trade'] = df_row['close']
+                    if 'close' not in df_row and 'trade' in df_row:
+                        df_row['close'] = df_row['trade']
+                    if 'percent' not in df_row and 'close' in df_row and 'llastp' in df_row:
+                        try:
+                            close_val = float(df_row['close'])
+                            last_val = float(df_row['llastp'])
+                            if last_val > 0:
+                                df_row['percent'] = (close_val - last_val) / last_val * 100
+                        except:
+                            pass
+                    if 'vwap' not in df_row and 'avg_price' in df_row:
+                        df_row['vwap'] = df_row['avg_price']
+            except Exception as e:
+                print(f"[ATSMainWindow] Error auto-retrieving Sina tick for {code_clean}: {e}")
+                    
+        # Launch detail dialog
+        dialog = StockDetailDialog(code, name, df_row, context_info, parent=self)
+        dialog.exec()
 
     def on_sector_clicked(self, name):
         self.status_bar.showMessage(f"选中板块: {name} | 正在筛选相关成分股...")
@@ -297,7 +622,7 @@ class ATSMainWindow(QMainWindow):
 
             # 6. Start real-time IPC socket listener (P6)
             self.bridge.start_realtime_listener(
-                port=26669,
+                port=26670,
                 data_callback=lambda data: self.realtime_data_signal.emit(data),
                 signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
             )
@@ -322,27 +647,76 @@ class ATSMainWindow(QMainWindow):
 
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
-        df = None
-        if isinstance(data_pkg, pd.DataFrame):
-            df = data_pkg
-        elif isinstance(data_pkg, dict):
-            df = data_pkg.get('full_snapshot')
+        
+        # 1. 识别协议格式与提取 DataFrame
+        msg_type = 'UPDATE_DF_ALL'
+        df_payload = None
+        
+        if isinstance(data_pkg, dict):
+            msg_type = data_pkg.get('type', 'UPDATE_DF_ALL')
+            df_payload = data_pkg.get('data')
+            if df_payload is None:
+                # 兼容历史数据结构
+                df_payload = data_pkg.get('full_snapshot')
+        elif isinstance(data_pkg, pd.DataFrame):
+            df_payload = data_pkg
         elif isinstance(data_pkg, tuple) and len(data_pkg) > 0:
-            df = data_pkg[0]
+            df_payload = data_pkg[0]
             
-        if df is not None and not df.empty:
+        if df_payload is None or not isinstance(df_payload, pd.DataFrame) or df_payload.empty:
+            return
+
+        # 2. 将提取出的 DataFrame 强制转换为以 code 字符串作为 index
+        df_payload = df_payload.copy()
+        if 'code' in df_payload.columns:
+            df_payload['code'] = df_payload['code'].astype(str).str.strip()
+            df_payload.set_index('code', inplace=True)
+        elif df_payload.index.name != 'code':
+            # 如果索引不是 code，尝试将其类型转换为 str
+            df_payload.index = df_payload.index.astype(str).str.strip()
+            df_payload.index.name = 'code'
+
+        # 3. 处理全量/增量更新
+        if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+            try:
+                df_diff = df_payload
+                # 取两边股票代码的交集
+                common_idx = self.current_df.index.intersection(df_diff.index)
+                if len(common_idx) > 0:
+                    for col in df_diff.columns:
+                        if col in self.current_df.columns:
+                            try:
+                                col_data = df_diff.loc[common_idx, col]
+                                valid_mask = col_data.notna()
+                                valid_indices = valid_mask[valid_mask].index
+                                if len(valid_indices) > 0:
+                                    self.current_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
+                            except Exception:
+                                pass
+                # 取 diff 中新出现的股票追加进来
+                new_idx = df_diff.index.difference(self.current_df.index)
+                if len(new_idx) > 0:
+                    self.current_df = pd.concat([self.current_df, df_diff.loc[new_idx]])
+            except Exception as e:
+                print(f"[ATS_Realtime] Apply diff error: {e}")
+        else:
+            # 全量更新或冷启动
+            self.current_df = df_payload
+
+        # 4. 更新 UI 显示
+        if self.current_df is not None and not self.current_df.empty:
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
             self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
             
-            # Calculate and update today's A-share return distribution
-            if 'percent' in df.columns:
-                pcts = df['percent'].dropna()
+            # 绘制 A 股涨跌幅度直方图
+            if 'percent' in self.current_df.columns:
+                pcts = self.current_df['percent'].dropna()
                 bins = [-999, -8, -6, -4, -2, 0, 2, 4, 6, 8, 999]
                 counts = pd.cut(pcts, bins=bins).value_counts().sort_index().tolist()
                 if len(counts) == 10:
                     self.dist_chart.update_data(counts)
             
-            self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(df)})")
+            self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
 
     def _handle_realtime_signal(self, signal):
         if not signal:
@@ -358,11 +732,13 @@ class ATSMainWindow(QMainWindow):
             import json
             import os
             from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
             config_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return int(data.get("ats_font_size", 9))  # 默认降为更紧凑的 9pt
+            with CONFIG_FILE_LOCK:
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        return int(data.get("ats_font_size", 9))  # 默认降为更紧凑的 9pt
         except Exception as e:
             print(f"[ATSMainWindow] Error loading font size: {e}")
         return 9
@@ -373,29 +749,31 @@ class ATSMainWindow(QMainWindow):
             import os
             import tempfile
             from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
             config_path = get_conf_path("window_config.json", get_app_root())
-            data = {}
-            if os.path.exists(config_path):
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                except Exception:
-                    pass
-            data["ats_font_size"] = size
-            
-            temp_dir = os.path.dirname(config_path) or "."
-            fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)
-            try:
-                with os.fdopen(fd, 'w', encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(temp_path, config_path)
-            except Exception as e:
-                if os.path.exists(temp_path):
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(config_path):
                     try:
-                        os.remove(temp_path)
-                    except:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
                         pass
-                raise e
+                data["ats_font_size"] = size
+                
+                temp_dir = os.path.dirname(config_path) or "."
+                fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)
+                try:
+                    with os.fdopen(fd, 'w', encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    os.replace(temp_path, config_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise e
         except Exception as e:
             print(f"[ATSMainWindow] Error saving font size: {e}")
 
@@ -418,3 +796,128 @@ class ATSMainWindow(QMainWindow):
             self.lbl_font_size.setText(f" {self.current_font_size} pt ")
             self.save_font_size(self.current_font_size)
             self.apply_qss_with_font_size(self.current_font_size)
+
+    def _restore_layout_state(self):
+        try:
+            import json
+            import os
+            from sys_utils import get_app_root, get_conf_path
+            from PyQt6.QtCore import QByteArray
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            config_path = get_conf_path("window_config.json", get_app_root())
+            if not os.path.exists(config_path):
+                return
+            with CONFIG_FILE_LOCK:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            
+            # 1. Restore geometry
+            geom_hex = data.get("ats_main_window_geometry")
+            if geom_hex:
+                self.restoreGeometry(QByteArray.fromHex(geom_hex.encode()))
+                
+            # 2. Restore splitters
+            if hasattr(self, 'main_splitter'):
+                main_sizes = data.get("ats_main_splitter_sizes")
+                if main_sizes:
+                    self.main_splitter.setSizes(main_sizes)
+            if hasattr(self, 'center_splitter'):
+                center_sizes = data.get("ats_center_splitter_sizes")
+                if center_sizes:
+                    self.center_splitter.setSizes(center_sizes)
+            if hasattr(self, 'right_splitter'):
+                right_sizes = data.get("ats_right_splitter_sizes")
+                if right_sizes:
+                    self.right_splitter.setSizes(right_sizes)
+            
+            # 3. Restore tabs active indexes
+            if hasattr(self, 'center_tabs'):
+                center_index = data.get("ats_center_tabs_index")
+                if center_index is not None:
+                    self.center_tabs.setCurrentIndex(int(center_index))
+            if hasattr(self, 'right_tabs'):
+                right_index = data.get("ats_right_tabs_index")
+                if right_index is not None:
+                    self.right_tabs.setCurrentIndex(int(right_index))
+        except Exception as e:
+            print(f"[ATSMainWindow] Error restoring layout state: {e}")
+
+    def _save_layout_state(self):
+        try:
+            import json
+            import os
+            import tempfile
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            config_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        pass
+                
+                # Save geometry
+                data["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
+                
+                # Save splitters
+                if hasattr(self, 'main_splitter'):
+                    data["ats_main_splitter_sizes"] = self.main_splitter.sizes()
+                if hasattr(self, 'center_splitter'):
+                    data["ats_center_splitter_sizes"] = self.center_splitter.sizes()
+                if hasattr(self, 'right_splitter'):
+                    data["ats_right_splitter_sizes"] = self.right_splitter.sizes()
+                    
+                # Save tabs index
+                if hasattr(self, 'center_tabs'):
+                    data["ats_center_tabs_index"] = self.center_tabs.currentIndex()
+                if hasattr(self, 'right_tabs'):
+                    data["ats_right_tabs_index"] = self.right_tabs.currentIndex()
+                
+                temp_dir = os.path.dirname(config_path) or "."
+                fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)
+                try:
+                    with os.fdopen(fd, 'w', encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    os.replace(temp_path, config_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise e
+        except Exception as e:
+            print(f"[ATSMainWindow] Error saving layout state: {e}")
+
+    def closeEvent(self, event):
+        # Synchronously save all layout configurations and column widths on application exit
+        try:
+            # First, save geometry and splitter layouts
+            self._save_layout_state()
+            
+            # Next, save column widths of tables and trees
+            if hasattr(self, 'universe_widget') and hasattr(self.universe_widget, 'tree'):
+                if hasattr(self.universe_widget.tree, 'save_header_state'):
+                    self.universe_widget.tree.save_header_state()
+            elif hasattr(self, 'universe_tree') and hasattr(self.universe_tree, 'tree'):
+                if hasattr(self.universe_tree.tree, 'save_header_state'):
+                    self.universe_tree.tree.save_header_state()
+            
+            if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
+                if hasattr(self.swing_table.table, 'save_column_widths'):
+                    self.swing_table.table.save_column_widths()
+                    
+            if hasattr(self, 'trade_flow_table') and hasattr(self.trade_flow_table, 'table'):
+                if hasattr(self.trade_flow_table.table, 'save_column_widths'):
+                    self.trade_flow_table.table.save_column_widths()
+                    
+            if hasattr(self, 'position_panel') and hasattr(self.position_panel, 'table'):
+                if hasattr(self.position_panel.table, 'save_column_widths'):
+                    self.position_panel.table.save_column_widths()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error saving column widths on close: {e}")
+            
+        super().closeEvent(event)
