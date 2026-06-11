@@ -57,6 +57,51 @@ class AuctionDecisionEngine:
         yesterday_worst = self.fsm._yesterday_worst_sectors
         
         signals = []
+        seen_codes = set()
+        
+        # ── 竞价爆量买入单独扫描通道 ──
+        for s in bidding_stocks:
+            code = s.get('code', '')
+            name = s.get('name', '')
+            sector = s.get('category', '')
+            score = s.get('score', 0.0)
+            pct = s.get('pct', 0.0)
+            price = s.get('price', 0.0)
+            is_untradable = s.get('is_untradable', False)
+            pattern_hint = s.get('pattern_hint', '')
+            
+            if is_untradable or not code:
+                continue
+                
+            has_bidding_breakout = any(kw in pattern_hint for kw in ("[竞价超限抢筹]", "[竞价大幅爆量]", "[竞价大额放量]"))
+            if has_bidding_breakout:
+                code_str = str(code)
+                if code_str.startswith(('688', '30')):
+                    limit_up_thr = 19.8
+                elif code_str.startswith(('8', '43', '92')):
+                    limit_up_thr = 29.8
+                else:
+                    limit_up_thr = 9.8
+                    
+                if -2.0 <= pct < limit_up_thr:
+                    meta = {
+                        "pattern_hint": pattern_hint,
+                        "stock_pct": pct,
+                        "stock_score": score
+                    }
+                    signals.append(AuctionSignal(
+                        code=code,
+                        name=name,
+                        sector=sector,
+                        signal_type='竞价爆量买入',
+                        price=price,
+                        pct=pct,
+                        score=score,
+                        confidence=0.90,
+                        rule_id='竞价爆量大额抢筹',
+                        metadata=meta
+                    ))
+                    seen_codes.add(code)
         
         # 活跃板块（持续性依据）：仅从当前被资金持续认可的活跃板块中挖掘
         current_active_sector_names = {s.name for s in bidding.active_sectors}
@@ -77,7 +122,7 @@ class AuctionDecisionEngine:
                 dff = s.get('dff', 0.0)
                 vol_ratio = s.get('volume_ratio', s.get('vol_ratio', 0.0))
                 
-                if is_untradable or not code:
+                if is_untradable or not code or code in seen_codes:
                     continue
                     
                 # 校验个股是否属于昨日最惨板块之一
@@ -130,7 +175,7 @@ class AuctionDecisionEngine:
                 price = s.get('price', 0.0)
                 is_untradable = s.get('is_untradable', False)
                 
-                if is_untradable or not code:
+                if is_untradable or not code or code in seen_codes:
                     continue
                     
                 # 寻找属于修复板块且得分强劲的个股
@@ -176,9 +221,16 @@ class AuctionDecisionEngine:
                 price = s.get('price', 0.0)
                 is_untradable = s.get('is_untradable', False)
                 yesterday_pct = s.get('yesterday_pct', s.get('prev_pct', 0.0))
-                is_limit_up = yesterday_pct >= 9.8
+                code_str = str(code)
+                if code_str.startswith(('688', '30')):
+                    limit_up_threshold = 19.8
+                elif code_str.startswith(('8', '43', '92')):
+                    limit_up_threshold = 29.8
+                else:
+                    limit_up_threshold = 9.8
+                is_limit_up = yesterday_pct >= limit_up_threshold
                 
-                if is_untradable or not code:
+                if is_untradable or not code or code in seen_codes:
                     continue
                     
                 is_top_sector = False
@@ -224,7 +276,7 @@ class AuctionDecisionEngine:
                 price = s.get('price', 0.0)
                 is_untradable = s.get('is_untradable', False)
                 
-                if is_untradable or not code:
+                if is_untradable or not code or code in seen_codes:
                     continue
                     
                 if 5.0 <= pct <= 8.5 and score >= 92.0:

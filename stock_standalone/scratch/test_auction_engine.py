@@ -95,5 +95,38 @@ class TestAuctionEngine(unittest.TestCase):
             self.assertTrue("情绪与竞价决策" in item_dict["reason"])
             print(f"Generated Auction Signal Dict: {item_dict}")
 
+    def test_bidding_breakout_generation(self):
+        # Mock bidding snapshot indicating a bidding breakout stock (with pattern_hint)
+        bidding = BiddingSnapshot(
+            date="2026-06-03",
+            generated_at="09:25:00",
+            up_count=2500,
+            down_count=2000,
+            limit_up=15,
+            limit_down=10,
+            active_sectors=(
+                SectorRecord(name="共封装光学", avg_pct=0.8, leader_code="601869", leader_name="长飞光纤", leader_pct=1.5, board_score=8.0),
+                SectorRecord(name="大基金持股", avg_pct=1.2, leader_code="002440", leader_name="闰土股份", leader_pct=2.0, board_score=12.0),
+            ),
+            stock_snap={
+                "601869": {
+                    "code": "601869",
+                    "name": "长飞光纤",
+                    "category": "共封装光学",
+                    "score": 85.0,
+                    "pct": 1.5,
+                    "price": 35.5,
+                    "is_untradable": False,
+                    "pattern_hint": "some hint [竞价大幅爆量] some other hint"
+                }
+            }
+        )
+        
+        # Test signal generation
+        signals = self.engine.generate_signals(bidding)
+        self.assertTrue(len(signals) > 0)
+        self.assertEqual(signals[0].signal_type, "竞价爆量买入")
+        print(f"Bidding breakout test passed with signal type: {signals[0].signal_type}")
+
 if __name__ == '__main__':
     unittest.main()

@@ -284,6 +284,7 @@ class MockTradeGateway:
         self._trade_log: List[TradeRecord] = []      # 今日流水（内存）
         self._non_trade_notified_stop_loss = set()   # 非交易时段已提示止损标的（防高频刷屏）
         self._today_sold_codes = set()
+        self.enforce_cooldown_in_test = False
         self._lock = threading.Lock()
         self._init_db()
         # 从本地数据库恢复今日已卖出的股票，保证跨会话冷却状态不丢失
@@ -378,8 +379,8 @@ class MockTradeGateway:
                 _GATEWAY_LOG_COOLDOWN[cooldown_key] = now
             return False, msg
 
-        # 今日卖出冷却拦截（测试和回放模拟模式除外）
-        if not (is_test or is_simulation):
+        # 今日卖出冷却拦截（测试和回放模拟模式除外，除非显式设定 enforce_cooldown_in_test）
+        if self.enforce_cooldown_in_test or not (is_test or is_simulation):
             with self._lock:
                 if code in self._today_sold_codes:
                     msg = f"{code} 触发今日卖出冷却拦截：今日已平仓卖出，触发日内再次买入冷却"

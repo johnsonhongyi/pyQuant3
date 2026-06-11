@@ -1696,7 +1696,7 @@ class IntradayDecisionEngine:
         open_p = float(row.get("open", 0))
         high = float(row.get("high", 0))
         low = float(row.get("low", 0))
-        nclose = float(row.get("nclose", 0))
+        nclose = float(row.get("avg_price") or row.get("nclose") or snapshot.get("nclose") or price)
         volume = float(row.get("volume", 0))
         ratio = float(row.get("ratio", 0))
         
@@ -1762,17 +1762,17 @@ class IntradayDecisionEngine:
             buy_score = 0.0
             buy_reasons = []
             
-        # 风险熔断：如果是派发结构，严禁开盘高走买入
-        structure = debug.get("structure", "UNKNOWN")
-        if structure == "派发":
-            debug["realtime_skip"] = "派发结构禁买"
-            return result
-        
-        # ⭐ [NEW] 边界防御：尾盘诱多陷阱 (Tail-end Trap Defense)
-        # 如果检测到尾盘诱多，直接禁买，不进入评分环节
-        if snapshot.get("tail_end_trap", False):
-            debug["realtime_skip"] = "⚠️检测到尾盘诱多陷阱，禁止站岗"
-            return result
+            # 风险熔断：如果是派发结构，严禁开盘高走买入
+            structure = debug.get("structure", "UNKNOWN")
+            if structure == "派发":
+                debug["realtime_skip"] = "派发结构禁买"
+                return result
+            
+            # ⭐ [NEW] 边界防御：尾盘诱多陷阱 (Tail-end Trap Defense)
+            # 如果检测到尾盘诱多，直接禁买，不进入评分环节
+            if snapshot.get("tail_end_trap", False):
+                debug["realtime_skip"] = "⚠️检测到尾盘诱多陷阱，禁止站岗"
+                return result
             
             # 趋势熔断：如果重心显著下移，禁止普通高开买入 (User Requirement)
             if not vwap_trend_ok:
@@ -1885,21 +1885,29 @@ class IntradayDecisionEngine:
             rv5_val = snapshot.get("red", 0)
             red = int(rv5_val) if not pd.isna(rv5_val) else 0
 
-            # [新增] 条件9: 主升浪加速启动 (Opening Low-High Acceleration)
+            # [新增] 条件9: 主升浪/强势选股加速启动 (Opening Low-High Acceleration)
             # 用户痛点：开盘5分钟最低走高，随后加速封板，容易丢失
-            # 特征：低开或平开(gap<1%) -> 开盘即最低 -> 快速拉升 -> 量能配合
-            is_main_wave_candidate = (win >= 2 or red >= 5)
+            # 特征：低开或平开(gap<=1.5%) -> 开盘即最低 -> 快速拉升 -> 量能配合
+            selection_score = float(snapshot.get("score", 0))
+            is_selected = selection_score >= 45
+            ma20 = float(row.get("ma20d", 0))
+            is_ma20_startup = (ma20 > 0 and price >= ma20 * 0.99 and price <= ma20 * 1.04)
+            is_main_wave_candidate = (win >= 2 or red >= 5 or is_selected or is_ma20_startup)
             open_near_low = (low > 0 and (open_p - low)/open_p < 0.005) # 开盘即最低
-            rapid_pull_up = (price > open_p * 1.025) # 快速拉升 > 2.5%
+            rapid_pull_up = (price > open_p * 1.02) # 快速拉升 > 2%
             
-            if is_main_wave_candidate and open_near_low and rapid_pull_up:
+            if is_main_wave_candidate and open_near_low and rapid_pull_up and gap_up <= 0.015:
                 # 进一步检查量能：必须有量才能确认是加速
-                # 1. 换手率达标(>1.0% in early) OR 2. 量比放大(>1.5)
-                vol_confirmed = (ratio > 0.8) or (volume > 1.5)
+                # 1. 换手率达标(>0.8% in early) OR 2. 量比放大(>1.2)
+                vol_confirmed = (ratio > 0.8) or (volume > 1.2)
                 
                 if vol_confirmed and price > nclose:
                     acc_score = 0.35
                     acc_msg = "主升加速(开盘最低走高)"
+                    if is_selected:
+                        acc_msg += "[精选股]"
+                    if is_ma20_startup:
+                        acc_msg += "[MA20启动]"
                     
                     # 如果是低开拉起，含金量更高 (洗盘结束)
                     if open_p < last_close:
@@ -2075,7 +2083,29 @@ class IntradayDecisionEngine:
                 }
 
         # ========== 2. 跌破均价卖出策略 (具备记忆与诱多识别) ==========
-        if mode in ("full", "sell_only"):
+        if mode in ("full", "sell_only") and not _is_t1_restricted:
+            # 【新热点板块龙头保护】识别 连阳、主升、核心 标签
+            reason_str = str(snapshot.get('reason', '')).lower()
+            is_main_wave = any(tag in reason_str for tag in ["连阳", "主升", "核心", "热门", "龙头"])
+            
+            # C. [NEW] 冲高破分时均线下杀 (Surge & Break VWAP Downwards)
+            # 解决用户痛点：早盘或盘中冲高后，跌破分时均价线（VWAP）下杀，应该是明确的卖点
+            highest_today_g = float(snapshot.get('highest_today', high))
+            has_surged = (highest_today_g >= last_close * 1.015) or (nclose > 0 and highest_today_g >= nclose * 1.008)
+            
+            if has_surged and nclose > 0 and price < nclose * 0.998:
+                # 确定是从高位回落跌破均线
+                if price < highest_today_g * 0.995:
+                    sell_pos = 0.1 if is_main_wave else 0.0
+                    reason = f"冲高({(highest_today_g/last_close-1):.1%})后跌破分时均线(VWAP:{nclose:.2f})下杀"
+                    return {
+                        "triggered": True,
+                        "action": "卖出",
+                        "position": round(sell_pos, 2),
+                        "reason": reason,
+                        "debug": debug
+                    }
+
             # A. 核心偏离检测
             deviation = (nclose - price) / nclose if nclose > 0 else 0
             # 动态阈值建议：昨涨 5% 容忍 1.5%，昨涨 10% 容忍 2.5% 左右的非典型波动
@@ -2092,7 +2122,7 @@ class IntradayDecisionEngine:
                 highest_today_g = float(snapshot.get('highest_today', price))
                 dist_from_high = (highest_today_g - price) / highest_today_g if highest_today_g > 0 else 0
                 
-                # 如果离日内高点超过 3.5%，且不是第一次破位报警，则不重复触发，让 _stop_check 接管
+                # 如果离日内高点超过 3.5%，且不是第一次破位报警，则不重复触发，让 _stop_check接管
                 if dist_from_high > 0.035 and snapshot.get("sell_triggered_today", False):
                     debug["sell_skip_reason"] = f"离高点{dist_from_high:.1%}已过最优点, _stop_check接管"
                 else:
@@ -2158,8 +2188,8 @@ class IntradayDecisionEngine:
                         "action": "卖出",
                         "position": round(sell_pos, 2),
                         "reason": reason,
-                    "debug": debug
-                }
+                        "debug": debug
+                    }
             
             # 修复逻辑：如果曾经破位，但现在稳稳站回均线 1%，可解除报警 (StockLiveStrategy 侧维护 snapshot)
             if snapshot.get("sell_triggered_today", False) and price > nclose * 1.01:
@@ -2168,18 +2198,21 @@ class IntradayDecisionEngine:
         # ========== 3. 量价信号策略 ==========
         volume_price_result = self._volume_price_signal(row, snapshot, mode, debug)
         if volume_price_result["triggered"]:
-            return volume_price_result
+            # 如果是 T+1 限制且信号为卖出，则拦截不触发
+            if not (volume_price_result["action"] == "卖出" and _is_t1_restricted):
+                return volume_price_result
             
         # ========== 4. 跌穿昨日最低价 (User defined priority rule) ==========
-        last_low = float(snapshot.get("last_low", 0))
-        if last_low > 0 and price < last_low:
-             return {
-                 "triggered": True,
-                 "action": "卖出",
-                 "position": 0.0,
-                 "reason": f"跌穿昨低({last_low:.2f})破位主杀",
-                 "debug": debug
-             }
+        if not _is_t1_restricted:
+            last_low = float(snapshot.get("last_low", 0))
+            if last_low > 0 and price < last_low:
+                 return {
+                     "triggered": True,
+                     "action": "卖出",
+                     "position": 0.0,
+                     "reason": f"跌穿昨低({last_low:.2f})破位主杀",
+                     "debug": debug
+                 }
         
         return result
 

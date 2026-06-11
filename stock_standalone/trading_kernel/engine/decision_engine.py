@@ -744,6 +744,31 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     was_strong_dragon = bool(signal.features.get("was_strong_dragon", False))
     regime = "BREAKOUT_ALLOWED" if sector_heat >= 20 and priority >= 50 else "WATCH_ONLY"
     
+    # ── 2.5 竞价爆量突破决策，走独立直接放行通道 ──
+    if signal.signal_type == "竞价爆量买入":
+        reason = DecisionReason(
+            regime="BREAKOUT_ALLOWED",
+            setup="竞价巨量抢筹突破",
+            sector_heat=sector_heat,
+            sector_rank=None,
+            is_leader=is_leader,
+            breakout=True,
+            volume_ratio=volume_ratio,
+            dff=dff,
+            dff_positive=dff_positive,
+            price_above_vwap=True,
+            confidence_inputs=(),
+        )
+        return DecisionIntent(
+            code=signal.code,
+            action="BUY",
+            size_pct=0.30,
+            stop_price=round(price * 0.94, 3) if price > 0 else None,
+            confidence=0.90,
+            reason=reason,
+            expires_at=signal.ts,
+        )
+    
     if state == "IN_TRADE":
         inherited_regime = signal.features.get("regime")
         if inherited_regime:

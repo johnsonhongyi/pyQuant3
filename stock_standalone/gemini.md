@@ -1,3 +1,28 @@
+## 2026-06-11 20:45
+- [x] **打通测试与模拟回放模式下的今日卖出冷却拦截校验 (Enabled Cooldown Verification for Tests & Replay Mode)**：
+    - [x] **新增 `enforce_cooldown_in_test` 属性控制**：在 `trade_gateway.py` 的 `MockTradeGateway` 中引入了 `self.enforce_cooldown_in_test` 属性，默认值为 `False`。当该属性为 `True` 时，即便处于 pytest 测试或回放模拟模式，也强制执行今日卖出冷却拦截校验，支持高敏感度测试下的冷却机制验证。
+    - [x] **升级单元测试确保冷却逻辑 100% 覆盖**：在 `scratch/test_trade_gateway_cooldown.py` 中，在 `setUp` 时显式将 `self.gateway.enforce_cooldown_in_test` 设置为 `True`。此举使测试用例能够成功模拟并覆盖真实的今日卖出冷却拦截逻辑。经 `pytest scratch/test_trade_gateway_cooldown.py` 测试，冷却拦截逻辑 100% 成功验证。
+
+## 2026-06-11 20:30
+- [x] **修复早盘低开拉升加速买入与冲高破均线卖出决策被误杀与失效 Bug (Fixed Early Morning Low-Open Acceleration Buy & Surge Break VWAP Sell Failures)**：
+    - [x] **根治 `_realtime_priority_check` 缩进错误导致的买入逻辑死代码 Bug**：排查并发现 `intraday_decision_engine.py` 中由于先前合并或编辑失误，自 `if not vwap_trend_ok:`（第 1777 行）开始直至 `buy_score >= threshold` 等买入评分触发与跟单强化的全套核心逻辑（约 300 行代码）被错误地缩进在了 `if snapshot.get("tail_end_trap", False):` 判定分支内部。由于该尾盘诱多陷阱判定在绝大多数正常交易时段均为 `False`，导致整个实时高走、突破和低吸拦截的买入逻辑实际上沦为了无法运行的死代码，从源头上阻断了实时信号的触发。现已将受影响的全部逻辑块向左退回 4 格，正确归置到 `if mode in ("full", "buy_only"):` 的 12 格缩进级别下，使其实盘及回测中能够无误触发。
+    - [x] **新增并打通早盘低开拉升加速买入逻辑 (`_realtime_priority_check` 强化)**：在 A 股早盘黄金时段（09:15 - 10:00），当个股小幅低开但开盘后迅速放量高走（`ratio >= 1.2` 且最新价高于今日均线与开盘价，且偏离幅度合理）时，对强势筛选股或 MA20 启动加速股执行高敏感度买入触发。放宽此时的 5 日线乖离率惩罚限制，确保黄金时间的龙头个股能第一时间捕获建仓，不至于“看盘时已涨停”。
+    - [x] **实现早盘冲高破均线杀跌卖出保护逻辑 (`_sell_decision` 强化)**：在 `_sell_decision` 中新增“冲高破均线下杀”的卖点拦截分支。若日内最高涨幅曾达较大幅度（如超过 3.5%），但随后价格放量跌穿分时均价线（VWAP）且持续下杀，则对非 T+1 限制个股强制生成 `action="卖出"` 的降仓或平仓信号，并在 reason 中明确提示 `"冲高跌破均价线出局"`，彻底解决了分时结构卖点逻辑的缺失。
+    - [x] **编写专属单元测试验证并 100% 通过**：在 `scratch/test_vwap_patterns.py` 中编写了覆盖上述低开高走拉升加速买入、以及冲高破均线卖出两类新特征模式的单元测试用例。经 `pytest scratch/test_vwap_patterns.py` 与全系统 11 项生命周期核心回归测试 `pytest test_watchlist_lifecycle.py` 联测，所有测试用例均 100% 绿旗通过，确保了生产级策略的安全平稳落地。
+
+## 2026-06-11 20:06
+- [x] **补全竞价爆量与北交所涨停门槛对齐的单元测试 (Completed Unit Tests for Bidding Breakout & BJ Stock Limit-up Thresholds)**：
+    - [x] **增加竞价爆量买入单独扫描的测试用例**：在 `scratch/test_auction_engine.py` 中新实现了 `test_bidding_breakout_generation` 方法。使用包含 `[竞价大幅爆量]` 的 `pattern_hint` 以及在非 PANIC 状态下的 active_sectors 环境，成功验证了 AuctionDecisionEngine 能够精准识别爆量特征个股并生成 `signal_type="竞价爆量买入"`。
+    - [x] **打通决策引擎测试链路**：使用 `scratch/test_bidding_breakout_decide.py` 完整跑通了 `signal_type="竞价爆量买入"` 的交易意图测试。验证了该信号能够通过 `decision_engine.py` 的独立直接放行通道，生成 30% 仓位比例和合理止损的 BUY 决策意图。
+    - [x] **全量单元与集成测试 100% 绿旗通过**：经 `py_compile` 静态语法编译检查与 `pytest test_watchlist_lifecycle.py` 全量 11 项用例测试，以及 `scratch/test_auction_engine.py` 测试，均 100% 成功通过。
+
+## 2026-06-11 19:55
+- [x] **修复竞价多股同时平仓与买入下单时的持仓上限 (MAX_POSITIONS = 10) 误杀 Bug (Fixed Portfolio Full Risk Rejection Bug under Concurrent Buy/Sell Signals)**：
+    - [x] **实现信号队列优先顺序排序 (Ordered Signal Processing Queue)**：在 `instock_MonitorTK.py` 的主循环获取 `signals` 决策信号队列后，立即对其进行就地排序。无条件将 `SELL` (卖出) 和 `REDUCE` (减仓) 决策排在所有买入 (`BUY`/`ADD` 等) 决策的前面执行。
+    - [x] **无侵入式释放额度与完全自愈**：通过排序保证在任何一轮心跳内，所有的卖出/平仓动作在物理上优先提交给模拟交易网关 `MockTradeGateway` 消费，使 `positions` 数量第一时间在内存和网关中被剔除，释放额度。这样随后执行的买入决策就能顺利通过 `RiskManager.can_buy` 持仓上限校验，消除了由于买卖信号执行顺序随机而导致买入信号被风控误杀的痛点。
+    - [x] **编写专属单元测试保障正确性**：在 `scratch/test_position_limit_release.py` 中编写了专门针对该持仓限额释放逻辑的单元测试，本地验证全部通过。
+    - [x] **通过核心系统级回归测试**：运行 `pytest test_watchlist_lifecycle.py` 11 项全生命周期测试全部 100% 成功通过。
+
 ## 2026-06-11 19:30
 - [x] **修复早盘黄金段因过度严格过滤导致强势异动龙头股与关注板块个股被误杀的 Bug (Fixed Missing Early Morning Breakouts & Focus Sector Leaders)**：
     - [x] **放宽 `getBollFilter` 及 `getBollFilter_vect` 早盘价格过滤阈值**：在 `JSONData/stockFilter.py` 中，针对早盘黄金时段（09:15 - 10:00）的过滤条件，新增了 `percent >= -2.0` 的宽松分支。只要个股处于小幅低开、平盘或轻微回踩拉升状态（涨幅 $\ge -2.0\%$），即使其当前未突破昨收且未触及昨日极端波幅（昨高/昨低），也予以保留。这确保了在早盘蓄势或轻微回撤后迅速向上拉升的强异动龙头股（如炬光科技）能够顺利展现，防止“看盘时已涨停”的体验痛点。
