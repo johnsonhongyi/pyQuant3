@@ -6,6 +6,10 @@ Initializes the Qt6 Application and launches the ATS Terminal.
 
 import sys
 import os
+import multiprocessing
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 # Ensure project root is in python path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
