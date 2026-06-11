@@ -2276,7 +2276,7 @@ class DataPublisher:
         cache_path = cct.get_ramdisk_path("minute_kline_cache.pkl")
         self._cache_path = str(cache_path) if cache_path else "" 
         self._last_save_ts = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
-        self._save_interval = int(getattr(cct.CFG, 'realtime_save_interval', 1800)) # 每 30 分钟备份一次到磁盘
+        self._save_interval = int(getattr(cct.CFG, 'realtime_save_interval', 3600)) # 每 30 分钟备份一次到磁盘
         self._enable_backup = enable_backup # 是否启用 .bak 文件备份 (Ramdisk 空间紧张默认关闭)
         self.cache_slot: DataFrameCacheSlot = DataFrameCacheSlot(
                 cache_file=self._cache_path,

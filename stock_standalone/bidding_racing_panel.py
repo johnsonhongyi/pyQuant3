@@ -5228,8 +5228,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             interval_sec = self._reset_cycle_mins * 60
             # [🚀 修复] 遵循用户要求，回放模式下也使用数据时间戳判定，确保 100x 回放逻辑一致
             if curr_time - self._last_anchor_reset_data_ts > interval_sec:
-                # [FIX] 使用系统标准函数：判断是否为交易时间且为交易日
-                is_trading_time = cct.get_work_time(time_hhmm) and cct.get_trade_date_status()
+                # [FIX] 录像回放/回测模式下，直接由数据内的时间戳判断交易时间，不受当前墙上日期限制
+                if is_simulation:
+                    is_trading_time = (915 <= time_hhmm <= 1130) or (1300 <= time_hhmm <= 1505)
+                else:
+                    is_trading_time = cct.get_work_time(time_hhmm) and cct.get_trade_date_status()
                 
                 if is_trading_time:
                     logger.info(f"⏰ [Panel] 到达基准重置周期 ({self._reset_cycle_mins} min), 正在自动录入起点快照并执行刷新...")
