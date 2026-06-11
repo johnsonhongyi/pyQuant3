@@ -1,3 +1,27 @@
+## 2026-06-11 19:30
+- [x] **修复早盘黄金段因过度严格过滤导致强势异动龙头股与关注板块个股被误杀的 Bug (Fixed Missing Early Morning Breakouts & Focus Sector Leaders)**：
+    - [x] **放宽 `getBollFilter` 及 `getBollFilter_vect` 早盘价格过滤阈值**：在 `JSONData/stockFilter.py` 中，针对早盘黄金时段（09:15 - 10:00）的过滤条件，新增了 `percent >= -2.0` 的宽松分支。只要个股处于小幅低开、平盘或轻微回踩拉升状态（涨幅 $\ge -2.0\%$），即使其当前未突破昨收且未触及昨日极端波幅（昨高/昨低），也予以保留。这确保了在早盘蓄势或轻微回撤后迅速向上拉升的强异动龙头股（如炬光科技）能够顺利展现，防止“看盘时已涨停”的体验痛点。
+    - [x] **放宽早盘量能累积门槛**：在 `getBollFilter` 中对 `vstd` 相关的量能判定引入了早盘动态松弛。在早盘黄金时段（09:15 - 10:00），将成交量与昨日波动加权值之比的系数从原本的 1.2 倍放宽至 0.8 倍，或者只要 `percent >= -2.0` 即免除量能误杀，解决了早盘心跳初期由于分时成交量尚未充分累积导致的优质异动股被隐性过滤的问题。
+    - [x] **保障高可靠回归与编译**：经 `py_compile` 静态编译检查以及 `pytest test_watchlist_lifecycle.py` 11 项全生命周期核心测试，全部 100% 绿旗通过。
+
+## 2026-06-11 18:45
+- [x] **修复早盘/回测模式下因大盘拖累导致强势龙头个股板块漏报的 Bug (Fixed Missing Active Sectors with Strong Leaders Bug)**：
+    - [x] **实现双轨混合板块评分公式 (Implemented Hybrid Sector Score Formula)**：在 `bidding_momentum_detector.py` 的 `_aggregate_sectors` 中，将原有的基于成员平均涨幅的单一板分公式重构为双轨混合模式。除了计算均值强度外，额外根据板块内活跃成员数与领跑龙头的最高涨幅计算启发式板块得分，并取两者最大值（上限 98.5）。这确保了当板块内有强力领涨龙头（如大涨或涨停）时，即使板块内其他多数个股由于早盘未启动或大盘拖累导致整体均值为负或极低，板块得分仍能保持高敏感度与高辨识度，完美对齐了 UI 层原有的指标预期。
+    - [x] **优化第一阶段过滤规则与短路保护 (Optimized Early-Exit Filter with Short-Circuit Protection)**：在第一阶段初筛中，增加了 `leader_pct < 5.0` 过滤兜底判定。当领跑龙头涨幅 $\ge 5.0\%$ 时，即使板块跟随率与平均涨幅低于基础门槛，也绝对不执行短路拦截与剔除，从物理源头上保护了早盘极速冲高和突破的“龙头异动 structures”不被漏报。
+    - [x] **顺利通过 11 项生命周期测试**：运行 `pytest test_watchlist_lifecycle.py` 全部绿旗通过，没有引起任何回归副作用。
+
+## 2026-06-11 18:30
+- [x] **修复回测/模拟回放模式下板块突然消失 the Bug (Fixed Sector Disappearance Bug in Replay/Backtest Mode)**：
+    - [x] **修复 `_do_rebuild_sector_map` 中的代码索引对齐 (Fixed Index-to-Column Alignment)**：在 `_do_rebuild_sector_map` 重建板块映射方法中，增加了对 `code` 字段是否在 columns 中存在的判定。如果 `code` 作为 index 存在（而不在 columns 列中），自动将其拷贝到 columns 以供 `itertuples(index=False)` 提取。这根治了回放/回测初始化阶段因 index 未暴露到 tuple 导致 `sector_map` 变为空集，进而引发盘中板块突然大面积消失的 Bug。
+    - [x] **实现模拟模式同步数据评估与聚合 (Implemented Synchronous Evaluation & Aggregation in Simulation Mode)**：在 `bidding_momentum_detector.py` 的 `update_scores` 方法中，针对 `simulation_mode` 或 `in_history_mode` 激活状态，新增了同步评估 `_update_scores_synchronously` 方法。跳过了生产环境中的分帧异步更新机制，实现单帧内对所有个股评分的同步计算以及对板块指标的实时同步聚合。这消除了回测/回放过程中由于后台多线程异步计算导致的“数据断档”和前后端数据不一致隐患，使实盘信号与回测信号达成 100% 高保真一致性。
+    - [x] **顺利跑通 11 项全系统生命周期测试**：运行 `pytest test_watchlist_lifecycle.py` 全部通过，测试用例及模拟行情流运行状态完备。
+
+## 2026-06-11 18:00
+- [x] **修复宏观查询及详检功能并发读取/更新 df_all 引发 Pandas BlockManager 内部 `Gaps in blk ref_locs` AssertionError 的 Bug (Fixed Gaps in blk ref_locs AssertionError Bug)**：
+    - [x] **实现线程安全的 DataFrame 级联拷贝 (Thread-Safe df_all Cascading Copy)**：新增了 `_get_df_all_and_lock_cascading(widget)` 级联定位器。在从 `self`、`main_app` 或 `detector` 寻址并复制 `df_all` 时，一并获取并加锁其关联的 `self._df_lock` 线程锁，从物理上防止主线程/高频 Pump 写入线程在后台更新替换该 DataFrame 时 GUI 线程同时进行 `.copy()`，从源头上消除了拷贝到不一致内存块的隐患。
+    - [x] **向量化索引预对齐 (Vectorized Reindexing Alignment)**：在 `_run_macro_query_internal`、`_on_query_test_triggered` 以及 `_on_code_check_triggered` 更新动态行情与元数据字段的位置，引入了 `up_df = up_df.reindex(df.index)` 强制对齐操作。消除了将部分行更新数据 `up_df` 直接赋值到完整行数据 `df` 时，由于 pandas 内部隐式对齐和 block manager 重构冲突导致的 internal block 错位及 `Gaps in blk ref_locs` 异常，同时获得了更高的赋值速度。
+    - [x] **通过回归测试**：经 `py_compile` 静态编译检查以及 `pytest test_watchlist_lifecycle.py` 11 项核心回归测试，全部绿旗成功通过。
+
 ## 2026-06-11 17:50
 - [x] **修复回放/回测模式下自动重置基准计时在非交易日或盘后不触发的 Bug (Fixed Auto-Reset Trigger Failure in Backtest/Replay Mode on Weekends/Off-Hours)**：
     - [x] **解除墙上时间限制 (Bypassed Wall-Clock Date Restrictions)**：在 `bidding_racing_panel.py` 中，针对自动基准重置检测判定，增加了 `is_simulation` 回放模式判定分支。在回放模式下，直接通过行情数据包中的时间戳（即日内分秒时间 `time_hhmm`）进行时段有效性筛选（`9:15-11:30` 或 `13:00-15:05`），从而跳过了对系统本地墙上时间的 `cct.get_trade_date_status()`（交易日判定）和 `cct.get_work_time()` 限制。

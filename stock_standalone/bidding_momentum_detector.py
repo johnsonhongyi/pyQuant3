@@ -434,7 +434,7 @@ class TickSeries:
 
     @property
     def current_price(self) -> float:
-        # [FIX] 优先返还最新的 Tick 价格，否则回退到 K 线
+        # [FIX] 优先返还最新的 Tick 价格，否则回退到 K 线，最后回退到昨收价 (防止回测/回放冷启动阶段因 0.0 价格导致均线判定失效)
         if self.now_price > 0:
             return self.now_price
         if not self.klines:
@@ -1411,13 +1411,77 @@ class BiddingMomentumDetector:
             # 兼容旧接口：直接更新版本号并投递异步板块聚合，彻底防止同步计算导致的卡顿
             with self._lock:
                 self.data_version += 1
-            self._async_sector_agg_queue.put(
-                (active_codes if not force else None, False)
-            )
+            if getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False):
+                self._aggregate_sectors(active_codes=active_codes if not force else None, _from_scheduler=False)
+            else:
+                self._async_sector_agg_queue.put(
+                    (active_codes if not force else None, False)
+                )
             return
 
         # 👉 启动 Chunk Scheduler 状态机（异步分帧执行，不阻塞当前线程）
-        self.start_update_scores(active_codes=active_codes, force=force, eval_dt=eval_dt)
+        if getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False):
+            self._update_scores_synchronously(active_codes=active_codes, force=force, eval_dt=eval_dt)
+        else:
+            self.start_update_scores(active_codes=active_codes, force=force, eval_dt=eval_dt)
+
+    def _update_scores_synchronously(self, active_codes=None, force: bool = False, eval_dt=None):
+        """
+        在模拟模式或历史复盘模式下，同步计算所有评分并同步执行板块聚合，以保证数据强一致性。
+        """
+        with self._score_lock:
+            # 1. 收集待评估代码
+            with self._lock:
+                if active_codes is not None and not force:
+                    all_codes = [c for c in active_codes if c in self._tick_series]
+                    essential = set(self.stock_selector_seeds.keys()) | set(self.daily_watchlist.keys())
+                    for s_info in self.active_sectors.values():
+                        if s_info.get('leader'): essential.add(s_info['leader'])
+                        for f in s_info.get('followers', []):
+                            if f.get('code'): essential.add(f['code'])
+                        for rc in s_info.get('race_candidates', []):
+                            if rc.get('code'): essential.add(rc['code'])
+
+                    scan_all = (getattr(self, '_full_scan_counter', 0) % 60 == 0)
+                    if not self.active_sectors or len(self.active_sectors) == 0:
+                        scan_all = True
+                    self._full_scan_counter = getattr(self, '_full_scan_counter', 0) + 1
+
+                    codes = []
+                    for code in all_codes:
+                        if scan_all or (code in essential):
+                            codes.append(code)
+                            continue
+                        ts = self._tick_series[code]
+                        if abs(ts.current_pct) > 1.5 or ts.vol_ratio > 2.0:
+                            codes.append(code)
+                else:
+                    codes = list(self._tick_series.keys())
+
+                if eval_dt is None:
+                    eval_dt = datetime.datetime.fromtimestamp(self.last_data_ts) if self.last_data_ts > 0 else datetime.datetime.now()
+                anchor_930 = eval_dt.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+
+            # 2. 同步评估所有代码
+            for code in codes:
+                try:
+                    self._evaluate_code_unlocked(code, anchor_930=anchor_930)
+                except Exception as e:
+                    logger.warning(f"[ScoreSync] error: {e}")
+
+            # 3. 同步执行板块聚合
+            with self._lock:
+                self.last_processed_count = len(codes)
+                self.data_version += 1
+
+            self._aggregate_sectors(active_codes=None if force else codes, _from_scheduler=True)
+            
+            if self.on_score_finished:
+                try:
+                    self.on_score_finished()
+                except Exception as e:
+                    logger.error(f"[ScoreFinishedSync] callback error: {e}")
+
 
     def start_update_scores(self, active_codes=None, force: bool = False, eval_dt=None):
         """
@@ -3992,23 +4056,32 @@ class BiddingMomentumDetector:
             if eff_follow_ratio < 0.5 and abs(avg_pct) > 2.0:
                 eff_follow_ratio = 0.5
 
-            # 最终板分公式：对齐 get_following_concepts_by_correlation 评分公式，并乘以 10 放大以提升梯度与辨识度
-            board_score = avg_pct * eff_follow_ratio * trend_multiplier * 10.0
+            # 最终板分公式：结合平均强度得分与领跑龙头异动强得分，防止由于大盘拖累或板块大部分未启动导致异动板块被漏掉
+            board_score_avg = avg_pct * eff_follow_ratio * trend_multiplier * 10.0
+            
+            import math
+            active_count = len(stocks)
+            base_score = math.log2(max(1, active_count)) * 12
+            perf_score = max(0, leader_pct) * 2.5
+            board_score_leader = base_score + perf_score
+            
+            board_score = min(max(board_score_avg, board_score_leader), 98.5)
 
             # 🎯 [Detector-Diag] 特别针对重点题材输出诊断日志，供调试分析
             if "共封装光学" in sector or "CPO" in sector or "AI PC" in sector:
                 logger.info(
                     f"🎯 [Detector-Diag] Sector: {sector} | members: {len(all_member_codes)} | "
                     f"avg_pct: {avg_pct:.2f} | follow: {follow_ratio:.2f} | "
-                    f"trend: {trend_multiplier:.2f} | score: {board_score:.2f}"
+                    f"trend: {trend_multiplier:.2f} | score_avg: {board_score_avg:.2f} | "
+                    f"score_leader: {board_score_leader:.2f} | final_score: {board_score:.2f}"
                 )
 
             # ----------------------------------------------------
             # ⚡ 第一阶段初筛与过滤门槛校验 (Early-Exit)
             # ----------------------------------------------------
-            # 基础门槛：降低门槛以敏感捕捉初期及异动概念
-            if follow_ratio < 0.05 and avg_pct < 0.5:
-                 skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f})"
+            # 基础门槛：降低门槛以敏感捕捉初期及异动概念，若有强力领涨龙头(>=5.0%)则不予短路过滤
+            if follow_ratio < 0.05 and avg_pct < 0.5 and leader_pct < 5.0:
+                 skipped_reasons[sector] = f"weak_momentum(pct={avg_pct:.1f}, ratio={follow_ratio:.2f}, leader={leader_pct:.1f})"
                  new_active.pop(sector, None)
                  continue
             
@@ -4356,6 +4429,9 @@ class BiddingMomentumDetector:
 
     def _do_rebuild_sector_map(self, df: pd.DataFrame):
         """真正的重建逻辑"""
+        if 'code' not in df.columns:
+            df = df.copy()
+            df['code'] = df.index.astype(str)
         new_map: Dict[str, Set[str]] = defaultdict(set)
         for row in df.itertuples(index=False):
             # [🚀 格式规范化] 强制提取 6 位数字代码，剔除后缀(如 .SH/.SZ)，防止同一只股票以不同格式重复入表
