@@ -36,6 +36,8 @@ from PyQt6.QtGui import (
 
 from tk_gui_modules.qt_table_utils import EnhancedTableWidget, NumericTableWidgetItem
 
+from stock_logic_utils import toast_messageQT as toast_message
+
 class LabeledStockItem(QTableWidgetItem):
     """支持信号优先级排序的表格项 - 确保 ⚡ 和 🔔 能够被排在最前面 (权重越大越靠前)"""
     def __init__(self, text, sort_prio=0):
@@ -2750,6 +2752,18 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self.btn_raise_all.clicked.connect(self._on_raise_all_windows_triggered)
         query_bar.addWidget(self.btn_raise_all)
         
+        # [🚀 新增] 自动联动开关 (置顶右侧)，默认关闭，简写为 🔗联动
+        self.check_auto_linkage = QCheckBox("🔗 联动")
+        self.check_auto_linkage.setChecked(False)
+        self.check_auto_linkage.setStyleSheet("""
+            QCheckBox { color: #00FFCC; font-size: 11px; font-weight: bold; spacing: 5px; }
+            QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #555; background: #2C2C2E; }
+            QCheckBox::indicator:checked { background: #00FFCC; border-color: #00FFCC; image: url(none); }
+            QCheckBox:hover { color: white; }
+        """)
+        self.check_auto_linkage.stateChanged.connect(lambda state: self._on_auto_linkage_changed())
+        query_bar.addWidget(self.check_auto_linkage)
+        
         # 6.6 回放暂停/继续按钮 (默认隐藏)
         self.btn_pause = QPushButton("⏸ 暂停")
         self.btn_pause.setFixedWidth(70)
@@ -3295,7 +3309,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 is_single_stock = True
             else:
                 try:
-                    from gui_utils import toast_message
                     toast_message(self, f"未找到代码 {code}")
                 except: pass
                 return
@@ -3339,7 +3352,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.query_input.setItemData(i, query_data, Qt.ItemDataRole.UserRole)
                 
             try:
-                from gui_utils import toast_message
                 if is_single_stock:
                     toast_message(self, f"✅ 已测试代码 {code}，请下拉菜单查看各条件的命中情况")
                 else:
@@ -3372,7 +3384,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     pass
             
             # 3. 气泡提示
-            from gui_utils import toast_message
             if raised_count > 0:
                 toast_message(self, f"📌 已统一置顶主窗口及 {raised_count} 个子窗口")
             else:
@@ -3486,7 +3497,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if valid_codes:
                     stock_code = random.choice(valid_codes)
                     try:
-                        from gui_utils import toast_message
                         toast_message(self, f"🎲 未选定个股，已随机选择 {stock_code} ({df_code.at[stock_code, 'name'] if 'name' in df_code.columns else ''}) 进行详检")
                     except: pass
 
@@ -3494,9 +3504,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if stock_code and query_expr:
             try:
                 from stock_logic_utils import check_code
-                check_code(df_code, stock_code, [{"expr": query_expr}], parent=None)
+                ma = getattr(self, 'main_app', None)
+                if ma and hasattr(ma, 'tk_dispatch_queue'):
+                    # 派发到 Tkinter 主线程队列执行，消除在 PyQt 线程直接实例化 Tk 带来的 GIL 崩溃隐患
+                    ma.tk_dispatch_queue.put(
+                        lambda: check_code(df_code, stock_code, [{"expr": query_expr}], parent=ma)
+                    )
+                else:
+                    check_code(df_code, stock_code, [{"expr": query_expr}], parent=None)
                 try:
-                    from gui_utils import toast_message
                     toast_message(self, f"✅ 已成功调起 {stock_code} 的 🔍详检报告")
                 except: pass
             except Exception as e:
@@ -4455,15 +4471,24 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             return applied_count > 0
         return False
 
+    def _on_auto_linkage_changed(self):
+        enabled = self.check_auto_linkage.isChecked() if hasattr(self, 'check_auto_linkage') else False
+        if hasattr(self, 'detector') and self.detector:
+            self.detector.enable_background_linkage = enabled
+            logger.info(f"📡 Racing Panel: Background Linkage toggled to {enabled} via UI.")
+        self._trigger_save_ui()
+
     def showEvent(self, event):
-        """[⭐ 监控授权] 窗口显示时，授权 Detector 开启后台自动联动"""
+        """[⭐ 监控授权] 窗口显示时，依据 UI 开关状态授权 Detector 后台自动联动"""
         super().showEvent(event)
         if hasattr(self, 'detector') and self.detector:
-            self.detector.enable_background_linkage = True
-            logger.info("📡 Racing Panel: Background Linkage AUTHORIZED.")
+            enabled = self.check_auto_linkage.isChecked() if hasattr(self, 'check_auto_linkage') else False
+            self.detector.enable_background_linkage = enabled
+            logger.info(f"📡 Racing Panel: Background Linkage authorized as {enabled} from UI state.")
 
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行所有定时器彻底注销与原子联行保存"""
+        self._is_closing = True
         # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
         try:
             from global_favorites import GlobalFavoriteManager
@@ -4518,11 +4543,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
         self.save_window_position_qt(self, "BiddingRacingRhythmPanel")
         
-        # ✅ 通知外部引用失效（关键：确保 TK 应用层感知对象已销毁）
-        if hasattr(self, "main_app") and self.main_app:
-            try:
-                self.main_app._racing_panel_win = None
-            except: pass
+        # ✅ 外部引用注销由 Tkinter 层的 _on_racing_panel_closed() 异步 safe_clear 统一处理，杜绝提前 GC 导致 GIL 崩溃
             
         # [🚀 方案 1] 停子进程 (强制收口) - 必须在 closed.emit() 之前，防止外部 os._exit 抢跑
         try:
@@ -4657,6 +4678,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "current_anchor_ts": self._current_anchor_ts,
                 "auto_reset_enabled": self.check_auto_reset.isChecked(),
                 "dedup_leader_enabled": self.check_dedup_leader.isChecked(), # [NEW] 保存龙头去重开关状态
+                "auto_linkage_enabled": self.check_auto_linkage.isChecked() if hasattr(self, 'check_auto_linkage') else False, # [NEW] 保存自动联动开关状态
                 "reset_cycle": self._reset_cycle_mins,
                 "sector_history": self._sector_history,
                 "window_geometry": self.saveGeometry().toHex().data().decode(),
@@ -4726,6 +4748,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             dedup_leader_enabled = conf.get("dedup_leader_enabled", True)
             if hasattr(self, 'check_dedup_leader'):
                 self.check_dedup_leader.setChecked(dedup_leader_enabled)
+
+            # [NEW] 恢复自动联动开关状态，默认 False
+            auto_linkage_enabled = conf.get("auto_linkage_enabled", False)
+            if hasattr(self, 'check_auto_linkage'):
+                self.check_auto_linkage.blockSignals(True)
+                self.check_auto_linkage.setChecked(auto_linkage_enabled)
+                self.check_auto_linkage.blockSignals(False)
+                if hasattr(self, 'detector') and self.detector:
+                    self.detector.enable_background_linkage = auto_linkage_enabled
 
             # [NEW] 恢复历史分组索引 (默认使用 history5)
             history_idx = conf.get("history_selector_index", 4)
