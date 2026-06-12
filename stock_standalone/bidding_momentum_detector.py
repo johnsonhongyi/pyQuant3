@@ -202,12 +202,13 @@ class TickSeries:
                  'score_anchor', 'score_diff', 'price_anchor', 'pct_diff', 'price_diff', 'dff', 'cycle_stage',
                  'racing_start_ts', 'last_stable_ts', 'racing_duration', 'signal_count', '_last_sig_min',
                  '_bar_active_reward', '_last_active_price', 'opening_bonus', 'total_amount',
-                 '_cached_baseline', '_cached_baseline_detail', '_cached_yang_days', '_last_baseline_date', 'per1d')
+                 '_cached_baseline', '_cached_baseline_detail', '_cached_yang_days', '_last_baseline_date', 'per1d', 'custom_cols')
 
     def __init__(self, code: str, max_len: int = 30):
         self.code = code
         self.klines: deque = deque(maxlen=max_len)
         self.last_close: float = 0.0
+        self.custom_cols: dict = {}
         self.last_high: float = 0.0
         self.last_low: float = 0.0
         self.open_price: float = 0.0
@@ -347,6 +348,25 @@ class TickSeries:
         
         v_dff = _val('dff', 0.0)
         self.dff = float(v_dff) if v_dff else 0.0
+        
+        # 自动提取自定义列，通过 _val 提取并写入自定义结构 custom_cols
+        self.custom_cols = {}
+        core_keys = {'code', 'name', 'role', 'price', 'percent', 'score', 'price_diff', 'dff', 'trend', 'hint'}
+        import JohnsonUtil.commonTips as cct
+        configured_cols = set()
+        if hasattr(cct, 'CFG'):
+            if hasattr(cct.CFG, 'bidding_window_col'):
+                configured_cols.update(cct.CFG.bidding_window_col)
+            if hasattr(cct.CFG, 'concept_top10_window_col'):
+                configured_cols.update(cct.CFG.concept_top10_window_col)
+        for col_name in configured_cols:
+            if col_name not in core_keys:
+                val = _val(col_name, None)
+                if val is not None:
+                    try:
+                        self.custom_cols[col_name] = float(val)
+                    except (ValueError, TypeError):
+                        self.custom_cols[col_name] = str(val)
         
         # [NEW] 捕获实盘量能核心指标
         self.vol_ratio = float(_val('volume', _val('vol_ratio', 0.0)))
@@ -3128,6 +3148,10 @@ class BiddingMomentumDetector:
         info['leader_score'] = round(l_data.get('score', 0.0), 2)
         info['leader_momentum_score'] = round(l_data.get('momentum_score', 0.0), 2)
         info['leader_price'] = l_data.get('price', 0.0)
+        if l_ts and getattr(l_ts, 'custom_cols', None):
+            for k, v in l_ts.custom_cols.items():
+                info[f"leader_{k}"] = v
+                info[k] = v
         info['leader_klines'] = list(l_ts.klines)[-35:] if (l_ts and l_ts.klines) else (l_data.get('klines', [])[-35:])
         info['leader_last_close'] = l_data.get('last_close', 0)
         info['leader_high_day'] = l_data.get('high_day', 0)
@@ -3170,8 +3194,9 @@ class BiddingMomentumDetector:
         info['race_candidates'] = race_candidates
         
         # 4. 填充跟随股列表 (Top 15)
-        info['followers'] = [
-            {
+        followers_list = []
+        for s in candidates[1:16]:
+            f_dict = {
                 'code': s['code'], 
                 'name': s.get('name', s['code']), 
                 'pct': s.get('pct', 0.0), 
@@ -3187,8 +3212,15 @@ class BiddingMomentumDetector:
                 'price_diff': round(s.get('price_diff', 0.0), 3),
                 'pattern_hint': s.get('pattern_hint', ''),
                 'untradable': s.get('is_untradable', False)
-            } for s in candidates[1:16]
-        ]
+            }
+            ts = self._tick_series.get(s['code'])
+            if ts and getattr(ts, 'custom_cols', None):
+                f_dict.update(ts.custom_cols)
+            for col_name in configured_cols:
+                if col_name not in core_keys and col_name in s:
+                    f_dict[col_name] = s[col_name]
+            followers_list.append(f_dict)
+        info['followers'] = followers_list
 
     # =========================================================
     # 内部：订阅回调
@@ -3754,6 +3786,9 @@ class BiddingMomentumDetector:
         active_codes: 如果提供，则只更新受这些个股影响的板块（增量模式）。
         _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
+        configured_cols = getattr(cct.CFG, 'bidding_window_col', [])
+        core_keys = {'code', 'name', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+
         # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
             from tk_gil_monitor import last_call as _glc
@@ -3820,6 +3855,8 @@ class BiddingMomentumDetector:
                             'yesterday_pct': ts.per1d,
                             'prev_pct': ts.per1d,
                         }
+                        if getattr(ts, 'custom_cols', None):
+                            data.update(ts.custom_cols)
                         self._global_snap_cache[code] = data
                         _pct_sum_delta += ts.current_pct
                         _pct_count_delta += 1
@@ -4275,6 +4312,36 @@ class BiddingMomentumDetector:
             anchor = self.sector_anchors[sector]
             staged_diff = board_score - anchor
 
+            sbc_followers = []
+            for s in stocks[1:15]:
+                f_dict = {
+                    'code': s['code'], 
+                    'name': s['name'], 
+                    'pct': s['pct'], 
+                    'score': s.get('score', 0.0), 
+                    'score_diff': s.get('score_diff', 0.0), 
+                    'pct_diff': s.get('pct_diff', 0.0), 
+                    'price_diff': s.get('price_diff', 0.0), 
+                    'dff': s.get('dff', 0.0), 
+                    'price': s.get('price', 0.0), 
+                    'first_ts': s['first_breakout_ts'],
+                    'pattern_hint': s.get('pattern_hint', ''),  
+                    'untradable': s.get('is_untradable', False),
+                    'klines': s.get('klines', []),
+                    'last_close': s.get('last_close', 0.0),
+                    'high_day': s.get('high_day', 0.0),
+                    'low_day': s.get('low_day', 0.0),
+                    'last_high': s.get('last_high', 0.0),
+                    'last_low': s.get('last_low', 0.0)
+                }
+                ts = self._tick_series.get(s['code'])
+                if ts and getattr(ts, 'custom_cols', None):
+                    f_dict.update(ts.custom_cols)
+                for col_name in configured_cols:
+                    if col_name not in core_keys and col_name in s:
+                        f_dict[col_name] = s[col_name]
+                sbc_followers.append(f_dict)
+
             new_active[sector] = {
                 'sector': sector, 'score': round(board_score, 2), 'tags': " ".join(tags),
                 'ts': time.time(), # [FIX] 添加时间戳，用于 GC
@@ -4299,29 +4366,7 @@ class BiddingMomentumDetector:
                 'leader_last_low': l_data.get('last_low', 0),
                 'leader_first_ts': l_data['first_breakout_ts'],
                 'race_candidates': race_candidates,
-                'followers': [
-                    {
-                        'code': s['code'], 
-                        'name': s['name'], 
-                        'pct': s['pct'], 
-                        'score': s.get('score', 0.0), 
-                        'score_diff': s.get('score_diff', 0.0), 
-                        'pct_diff': s.get('pct_diff', 0.0), 
-                        'price_diff': s.get('price_diff', 0.0), 
-                        'dff': s.get('dff', 0.0), 
-                        'price': s.get('price', 0.0), 
-                        'first_ts': s['first_breakout_ts'],
-                        'pattern_hint': s.get('pattern_hint', ''),  
-                        'untradable': s.get('is_untradable', False),
-                        # [NEW] 这里的关键：补充绘制分时图所需的 K 线和基准数据
-                        'klines': s.get('klines', []),
-                        'last_close': s.get('last_close', 0.0),
-                        'high_day': s.get('high_day', 0.0),
-                        'low_day': s.get('low_day', 0.0),
-                        'last_high': s.get('last_high', 0.0),
-                        'last_low': s.get('last_low', 0.0)
-                    } for s in stocks[1:15]
-                ],
+                'followers': sbc_followers,
                 'linked_concepts': linked_concepts[:3]
             }
 
@@ -4386,6 +4431,33 @@ class BiddingMomentumDetector:
                         self.sector_anchors[v_sector] = v_board_score
                     
                     v_leader_ts = self._tick_series.get(v_leader['code'])
+                    sbc_followers2 = []
+                    for s in sbc_stocks:
+                        f_dict = {
+                            'code': s['code'], 'name': s['name'], 'pct': s['pct'],
+                            'score': s.get('score', 0.0), 
+                            'score_diff': s.get('score_diff', 0.0),
+                            'pct_diff': s.get('pct_diff', 0.0),
+                            'price_diff': s.get('price_diff', 0.0),
+                            'dff': s.get('dff', 0.0),
+                            'price': s.get('price', 0.0),
+                            'first_ts': s.get('ts', 0), 'pattern_hint': 'SBC',
+                            'untradable': s.get('is_untradable', False),
+                            'klines': s.get('klines', []),
+                            'last_close': s.get('last_close', 0.0),
+                            'high_day': s.get('high_day', 0.0),
+                            'low_day': s.get('low_day', 0.0),
+                            'last_high': s.get('last_high', 0.0),
+                            'last_low': s.get('last_low', 0.0)
+                        }
+                        ts = self._tick_series.get(s['code'])
+                        if ts and getattr(ts, 'custom_cols', None):
+                            f_dict.update(ts.custom_cols)
+                        for col_name in configured_cols:
+                            if col_name not in core_keys and col_name in s:
+                                f_dict[col_name] = s[col_name]
+                        sbc_followers2.append(f_dict)
+
                     new_active[v_sector] = {
                         'sector': v_sector, 'score': round(v_board_score, 2), 'tags': "🚀 实时异动",
                         'ts': time.time(),
@@ -4407,25 +4479,7 @@ class BiddingMomentumDetector:
                         'leader_last_low': v_leader.get('last_low', 0),
                         'leader_first_ts': v_leader.get('ts', 0),
                         'race_candidates': [],
-                        'followers': [
-                            {
-                                'code': s['code'], 'name': s['name'], 'pct': s['pct'],
-                                'score': s.get('score', 0.0), 
-                                'score_diff': s.get('score_diff', 0.0),
-                                'pct_diff': s.get('pct_diff', 0.0),
-                                'price_diff': s.get('price_diff', 0.0),
-                                'dff': s.get('dff', 0.0),
-                                'price': s.get('price', 0.0),
-                                'first_ts': s.get('ts', 0), 'pattern_hint': 'SBC',
-                                'untradable': s.get('is_untradable', False),
-                                'klines': s.get('klines', []),
-                                'last_close': s.get('last_close', 0.0),
-                                'high_day': s.get('high_day', 0.0),
-                                'low_day': s.get('low_day', 0.0),
-                                'last_high': s.get('last_high', 0.0),
-                                'last_low': s.get('last_low', 0.0)
-                            } for s in sbc_stocks # 这里展示全部预警股
-                        ],
+                        'followers': sbc_followers2,
                         'linked_concepts': []
                     }
 

@@ -321,6 +321,7 @@ st_key_sort = CFG.st_key_sort
 
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 concept_top10_window_col = getattr(CFG, 'concept_top10_window_col', ["code", "name", "rank", "percent", "dff", "volume","red","win"])
+bidding_window_col = getattr(CFG, 'bidding_window_col', ["code", "name", "role", "price", "percent", "score", "price_diff", "dff", "trend", "hint"])
 
 # -------------------- 常量 -------------------- #
 MAX_ALERT_POPUP_QUEUE = 300 # [OPTIMIZED] 提升单批次弹窗队列容量，应对大规模并发
