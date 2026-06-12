@@ -20,6 +20,15 @@ from query_engine_util import query_engine
 # 获取或创建日志记录器
 logger: logging.Logger = LoggerFactory.getLogger("instock_TK.StockLogic")
 
+def safe_values(val: Any) -> Any:
+    """
+    获取 Series 或 DataFrame 类似对象的 values 属性 (numpy.ndarray)。
+    如果输入已经是 numpy.ndarray 或其他无 values 属性的对象，则直接返回自身。
+    """
+    if hasattr(val, 'values'):
+        return val.values
+    return val
+
 # === 概念过滤逻辑 ===
 GENERIC_KEYWORDS = [
     "国企改革", "沪股通", "深股通", "融资融券", "高股息", "MSCI", "中字头",
@@ -770,7 +779,7 @@ class RealtimeSignalManager:
         })
 
         try:
-            current_hash = hash(tuple(df[price_col].values)) ^ hash(tuple(df['volume'].values))
+            current_hash = hash(tuple(safe_values(df[price_col]))) ^ hash(tuple(safe_values(df['volume'])))
             if cache['last_hash'] == current_hash and cache['cached_signal'] is not None and len(cache['cached_signal']) == len(df):
                 df['signal_strength'] = cache['cached_signal_strength']
                 df['signal'] = cache['cached_signal']
@@ -813,36 +822,36 @@ class RealtimeSignalManager:
             # 提取历史状态数据
             state = state_df.loc[codes]
             # 提取成交量历史并计算均值
-            avg_vol_arr = np.nanmean(state[self.vol_cols].values.astype(float), axis=1)
+            avg_vol_arr = np.nanmean(safe_values(state[self.vol_cols]).astype(float), axis=1)
         
         # [FIX] 重新提取当前价格数组，用于后续向量化计算
-        now_arr = df[price_col].values
+        now_arr = safe_values(df[price_col])
         
-        high_arr = df['high'].values
-        low_arr = df['low'].values
-        volume_arr = df['volume'].values
+        high_arr = safe_values(df['high'])
+        low_arr = safe_values(df['low'])
+        volume_arr = safe_values(df['volume'])
         
         # 向量化计算当前最高的/最低的价格
-        updated_today_high = np.maximum(state['today_high'].values, high_arr)
-        updated_today_low = np.minimum(state['today_low'].values, low_arr)
+        updated_today_high = np.maximum(safe_values(state['today_high']), high_arr)
+        updated_today_low = np.minimum(safe_values(state['today_low']), low_arr)
         
         # 计算辅助指标
-        ma51d = df.get('ma51d', now_arr).values if 'ma51d' in df.columns else now_arr
-        ma10d = df.get('ma10d', now_arr).values if 'ma10d' in df.columns else now_arr
-        lastp1d = df.get('lastp1d', now_arr).values if 'lastp1d' in df.columns else now_arr
-        lastp2d = df.get('lastp2d', now_arr).values if 'lastp2d' in df.columns else now_arr
-        lastp3d = df.get('lastp3d', now_arr).values if 'lastp3d' in df.columns else now_arr
-        macddif = df.get('macddif', 0).values if 'macddif' in df.columns else np.zeros(len(df))
-        macddea = df.get('macddea', 0).values if 'macddea' in df.columns else np.zeros(len(df))
-        macd = df.get('macd', 0).values if 'macd' in df.columns else np.zeros(len(df))
-        macdlast1 = df.get('macdlast1', 0).values if 'macdlast1' in df.columns else np.zeros(len(df))
-        macdlast2 = df.get('macdlast2', 0).values if 'macdlast2' in df.columns else np.zeros(len(df))
-        macdlast3 = df.get('macdlast3', 0).values if 'macdlast3' in df.columns else np.zeros(len(df))
-        rsi = df.get('rsi', 50).values if 'rsi' in df.columns else np.full(len(df), 50.0)
-        kdj_j = df.get('kdj_j', 50).values if 'kdj_j' in df.columns else np.full(len(df), 50.0)
-        kdj_k = df.get('kdj_k', 50).values if 'kdj_k' in df.columns else np.full(len(df), 50.0)
-        kdj_d = df.get('kdj_d', 50).values if 'kdj_d' in df.columns else np.full(len(df), 50.0)
-        open_arr = df.get('open', now_arr).values if 'open' in df.columns else now_arr
+        ma51d = safe_values(df.get('ma51d', now_arr)) if 'ma51d' in df.columns else now_arr
+        ma10d = safe_values(df.get('ma10d', now_arr)) if 'ma10d' in df.columns else now_arr
+        lastp1d = safe_values(df.get('lastp1d', now_arr)) if 'lastp1d' in df.columns else now_arr
+        lastp2d = safe_values(df.get('lastp2d', now_arr)) if 'lastp2d' in df.columns else now_arr
+        lastp3d = safe_values(df.get('lastp3d', now_arr)) if 'lastp3d' in df.columns else now_arr
+        macddif = safe_values(df.get('macddif', 0)) if 'macddif' in df.columns else np.zeros(len(df))
+        macddea = safe_values(df.get('macddea', 0)) if 'macddea' in df.columns else np.zeros(len(df))
+        macd = safe_values(df.get('macd', 0)) if 'macd' in df.columns else np.zeros(len(df))
+        macdlast1 = safe_values(df.get('macdlast1', 0)) if 'macdlast1' in df.columns else np.zeros(len(df))
+        macdlast2 = safe_values(df.get('macdlast2', 0)) if 'macdlast2' in df.columns else np.zeros(len(df))
+        macdlast3 = safe_values(df.get('macdlast3', 0)) if 'macdlast3' in df.columns else np.zeros(len(df))
+        rsi = safe_values(df.get('rsi', 50)) if 'rsi' in df.columns else np.full(len(df), 50.0)
+        kdj_j = safe_values(df.get('kdj_j', 50)) if 'kdj_j' in df.columns else np.full(len(df), 50.0)
+        kdj_k = safe_values(df.get('kdj_k', 50)) if 'kdj_k' in df.columns else np.full(len(df), 50.0)
+        kdj_d = safe_values(df.get('kdj_d', 50)) if 'kdj_d' in df.columns else np.full(len(df), 50.0)
+        open_arr = safe_values(df.get('open', now_arr)) if 'open' in df.columns else now_arr
 
         # 向量化成交量异常判断
         vol_boom_now = volume_arr > avg_vol_arr
@@ -856,12 +865,12 @@ class RealtimeSignalManager:
         kdj_bull = (kdj_j > kdj_k) & (kdj_k > kdj_d)
         kdj_strong = kdj_j > 60
         morning_gap_up = open_arr <= low_arr * 1.001
-        intraday_up = now_arr > state['prev_now'].values
+        intraday_up = now_arr > safe_values(state['prev_now'])
         intraday_high_break = now_arr > updated_today_high
         intraday_low_break = now_arr < updated_today_low
 
         # 更新连跌天数
-        updated_down_streak = np.where(now_arr < state['prev_now'].values, state['down_streak'].values + 1, 0)
+        updated_down_streak = np.where(now_arr < safe_values(state['prev_now']), safe_values(state['down_streak']) + 1, 0)
 
         # 评分系统
         score = np.zeros(len(df))
@@ -877,7 +886,7 @@ class RealtimeSignalManager:
         score += intraday_up * 1
         score += intraday_high_break * 2
         score += vol_boom_now * 1
-        score += ((updated_down_streak >= 2) & (now_arr > state['prev_now'].values * 1.005)) * 2
+        score += ((updated_down_streak >= 2) & (now_arr > safe_values(state['prev_now']) * 1.005)) * 2
 
         # [NEW] 低开高走且开盘即最低 (Low-Open-Go-High & Open-Is-Lowest Intraday Surges)
         avg_price_val = df.get('avg_price', df.get('average', now_arr))
@@ -945,7 +954,7 @@ class RealtimeSignalManager:
             state_df.loc[codes, 'prev_signal'] = signal_col
             
             # 处理成交量历史 (完全向量化)
-            ptrs = state_df.loc[codes, 'vol_ptr'].values.astype(int) % 5
+            ptrs = safe_values(state_df.loc[codes, 'vol_ptr']).astype(int) % 5
             for i in range(5):
                 mask = (ptrs == i)
                 if mask.any():
@@ -992,8 +1001,8 @@ def calc_breakout_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["signal_strength"] = 0
     df["signal"] = ""
 
-    ma_short = df.get('ma51d', df['close']).values
-    ma_mid = df.get('ma10d', df['close']).values
+    ma_short = safe_values(df.get('ma51d', df['close']))
+    ma_mid = safe_values(df.get('ma10d', df['close']))
 
     cond_trend_up = (df['close'] > ma_short) & (ma_short > ma_mid)
     cond_trend_turn = (df['close'] > ma_short) & (df['ma51d'].diff() > 0)
@@ -1103,12 +1112,12 @@ def calc_platform_breakout(df: pd.DataFrame, lookback: int = 120) -> pd.DataFram
     vol_ma5 = df['volume'].rolling(5).mean().fillna(df['volume'])
     
     # 提取底层 NumPy 数组，彻底摆脱 Pandas 对象的循环内开销
-    high_arr = df['high'].values
-    low_arr = df['low'].values
-    close_arr = df['close'].values
-    volume_arr = df['volume'].values
-    vol_ma5_arr = vol_ma5.values
-    ma20_arr = ma20_series.values
+    high_arr = safe_values(df['high'])
+    low_arr = safe_values(df['low'])
+    close_arr = safe_values(df['close'])
+    volume_arr = safe_values(df['volume'])
+    vol_ma5_arr = safe_values(vol_ma5)
+    ma20_arr = safe_values(ma20_series)
     
     platform_tops = [np.nan] * n
     platform_bottoms = [np.nan] * n  # 💥 新增 platform_bottoms 容器
@@ -1120,22 +1129,22 @@ def calc_platform_breakout(df: pd.DataFrame, lookback: int = 120) -> pd.DataFram
     
     # 寻找局部高点（11天中心最大值，使用收盘价确定平台以过滤冲高试盘噪声）
     is_local_max = (df['close'] == df['close'].rolling(11, center=True, min_periods=1).max())
-    is_local_max_arr = is_local_max.values
+    is_local_max_arr = safe_values(is_local_max)
     
     # 1. 向量化预计算所有区间的全局最高收盘价以消除循环内 rolling.max() 开销
     highest_high_series = df['close'].rolling(lookback - 3, min_periods=1).max().shift(4)
-    highest_high_arr = highest_high_series.values
+    highest_high_arr = safe_values(highest_high_series)
     
     # 2. 向量化提取所有局部高点的索引，利用 np.searchsorted 在 O(log P) 时间内快速切片
     peak_indices = np.where(is_local_max_arr)[0]
     
     # 寻找局部低点（11天中心最小值，使用收盘价确定平台底中枢）
     is_local_min = (df['close'] == df['close'].rolling(11, center=True, min_periods=1).min())
-    is_local_min_arr = is_local_min.values
+    is_local_min_arr = safe_values(is_local_min)
     
     # 1. 向量化预计算所有区间的全局最低收盘价以消除循环内 rolling.min() 开销
     lowest_low_series = df['close'].rolling(lookback - 3, min_periods=1).min().shift(4)
-    lowest_low_arr = lowest_low_series.values
+    lowest_low_arr = safe_values(lowest_low_series)
     
     # 2. 向量化提取所有局部低点的索引
     valley_indices = np.where(is_local_min_arr)[0]

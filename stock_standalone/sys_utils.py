@@ -22,6 +22,10 @@ def assert_main_thread(tag=""):
         # 如果是生产环境，可以只打日志不抛异常
         raise RuntimeError(msg)
 
+def is_packaged_env() -> bool:
+    """判断当前运行环境是否为打包后的可执行程序 (PyInstaller / Nuitka)"""
+    return getattr(sys, "frozen", False) or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+
 def get_app_root() -> str:
     """Nuitka / PyInstaller / dev 统一兼容的物理可执行程序所在绝对根目录 (直接返回 str 格式)"""
     # 优先从环境变量获取，确保子进程完美继承父进程定位的物理路径
@@ -281,7 +285,7 @@ def get_conf_path(fname, base_dir=None):
 
     # --- 2. 物理不存在，执行自愈释放 ---
     # 先确定内置解包临时根目录 (base)
-    is_packaged = getattr(sys, "frozen", False) or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    is_packaged = is_packaged_env()
     if is_packaged:
         # 打包模式下，由 get_base_path() 统一提供并负责环境变量丢失的逆向自愈
         base = get_base_path()
@@ -474,12 +478,22 @@ def resolve_stock_name(code_clean: str) -> str:
         code_clean = code_clean.replace(icon, '').strip()
     code_clean = code_clean.zfill(6)
 
-    # 0. 内存高速缓存首位拦截，极速 O(1) 返回，避免无谓的 I/O 和网络请求
+    # 0. 内存高速缓存首位拦截，极速 O(1) 返回，避免无谓 of I/O 和网络请求
     global _resolved_name_cache
     if code_clean in _resolved_name_cache:
         cached_name = _resolved_name_cache[code_clean]
         if cached_name and not cached_name.startswith("个股_") and not cached_name.isdigit() and cached_name != code_clean:
             return cached_name
+
+    # 0.5 优先使用本地内置的 sina_data 行情引擎极速解析
+    try:
+        from JSONData import sina_data
+        local_name = sina_data.Sina(readonly=True).get_code_cname(code_clean)
+        if local_name and not local_name.startswith("个股_") and not local_name.isdigit() and local_name != code_clean:
+            _resolved_name_cache[code_clean] = local_name
+            return local_name
+    except Exception:
+        pass
 
     # 1. 优先从 top_all.h5 里面解析
     base_dir = get_app_root()
@@ -672,8 +686,7 @@ def ensure_backend_tk_running():
     if not is_running:
         app_root = get_app_root()
         
-        # 判断当前是 PyInstaller 打包状态 (sys.frozen) 还是开发状态
-        if getattr(sys, 'frozen', False):
+        if is_packaged_env():
             # 打包态下，寻找同目录的 instock_MonitorTK.exe
             exe_dir = os.path.dirname(sys.executable)
             backend_exe = os.path.join(exe_dir, "instock_MonitorTK.exe")
