@@ -1,8 +1,19 @@
+## 2026-06-12 23:10
+- [x] **重构 ATS 终端启动入口布局并入下拉功能菜单 (Relocated ATS Launcher to Bottom Action Dropdown)**：
+    - [x] **自工具栏移除显式按钮**：从 `instock_MonitorTK.py` 主工具栏中删除了占位的 `"ATS🤖"` 显式按钮。
+    - [x] **集成入底部功能选择菜单**：在 `self.action_combo`（底部功能下拉框）的 `options` 列表中追加了 `"ATS终端"` 选项，并在 `run_action` 调度方法中映射绑定 `open_ats_panel`。这样在保持全局 `Alt+P` 快捷键依然可用的前提下，避免了半成品或板块数据缺失的组件占用显眼黄金布局。
+
+## 2026-06-12 22:45
+- [x] **修复实时决策闪烁逻辑时导致的同一代码重复联动 Bug (Fixed Duplicate Linkage Storm Triggered by Real-Time Decision Signal Mark)**：
+    - [x] **移除 _kernel_mark_signal_rows 内部的自动选中设置 (Removed Auto Selection Set in Signal Row Marker)**：在 `stock_selection_window.py` 的 `_kernel_mark_signal_rows`（决策行标记与闪烁）中，注释掉了自动调用 `self._signal_tree.selection_set(first)` 的逻辑。
+    - [x] **保留高亮渲染与视口聚焦 (Kept Viewport Focus & Tag Highlighting)**：仍旧保留 `self._signal_tree.focus(first)` 和 `self._signal_tree.see(first)` 定位机制，确保新产生的交易信号行仍能在列表里正常呈现和闪烁，同时彻底避免了心跳定时器刷新以及多个状态机高频重算时带来的外部软件交替重复联动风暴。
+    - [x] **回归测试 100% 绿旗通过**: 成功运行 `pytest test_watchlist_lifecycle.py`，11 项核心回归测试全数通过。
+
 ## 2026-06-12 22:10
 - [x] **修复竞价赛马冷启动分时走势图缺失与自愈拉取 (Fixed Bidding Racing Panel Cold-Start Minute Chart Missing & Active Auto-Retrieval)**:
     - [x] **根治冷启动拉取缺失与 K线 cache 遗失**: 修复了在 `sector_bidding_panel.py` 的传统龙头及跟随股行构建中，因先前修改直接采用静态推送字段 `f.get('klines')` 代替 `self._follower_klines(code)` 导致冷启动数据为空（仅有水平单根直线）的缺陷。
     - [x] **补全传统龙头 `'k_cache'` 结构**: 在 `Fallback: 使用传统的 Leader + Followers 结构` 龙头的 `row_item` 构筑中补齐了 `'k_cache'`，为绘图委托提供完整的 `prices` 与 `volumes` 序列。
-    - [x] **引入第三级自愈行情拉取与同步**: 在 `_populate_table` 的 `[HOT-FIX] 多级自愈行情补齐` 中，在 `detector` 缓存和 `TickSeries` 缓存均无 K线 时，加入对 `_follower_klines(code)` 的第三级主动拉取并同步。这能自动在冷启动后瞬间触发 API 补全 35 根 K线 写入缓存，完美自愈恢复完整的走势图，并且 100% 避免了对原绘图和计算逻辑的侵入。
+    - [x] **引入 third-level 自愈行情拉取与同步**: 在 `_populate_table` 的 `[HOT-FIX] 多级自愈行情补齐` 中，在 `detector` 缓存和 `TickSeries` 缓存均无 K线 时，加入对 `_follower_klines(code)` 的第三级主动拉取并同步。这能自动在冷启动后瞬间触发 API 补全 35 根 K线 写入缓存，完美自愈恢复完整的走势图，并且 100% 避免了对原绘图和计算逻辑的侵入。
     - [x] **集成回归测试 100% 绿旗通过**: 成功运行 `pytest test_watchlist_lifecycle.py`，全量 11 项生命周期与联动集成测试全数通过。
 
 ## 2026-06-12 21:50
