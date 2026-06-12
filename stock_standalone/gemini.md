@@ -1,3 +1,54 @@
+## 2026-06-12 21:50
+- [x] **实现左侧活跃板块表添加过滤统计列 (Implemented Filtered Count Column 'cout' for Active Sectors Table)**:
+    - [x] **初始化与配置更新**: 在 `sector_bidding_panel.py` 中将 `sector_table` 由 5 列调整为 6 列，并在龙头列后面插入以 `'cout'` 为表头的数量统计列。
+    - [x] **实现实时过滤条件统计逻辑**: 新增 `_get_filtered_stock_count` 工具方法，动态提取板块内龙头与跟随者个股，并在宏观过滤与搜索过滤条件的约束下精准计算剩余可用个股数量。在无过滤条件时，自动返回该板块当前全部个股数。
+    - [x] **更新列对齐与手动排序**: 调整 `_refresh_sector_list` 里的物理列渲染映射，自动将 `_filtered_count` 绑定到 Col 4（即龙头后面），并更新 Python 级排序映射，使得点击 `cout` 表头时能够实现准确的数值大小排序。
+    - [x] **UI 状态恢复加固**: 升级了 `_save_ui_state` 和 `_restore_ui_state` 方法，在恢复 `sector_table` 的 Header 状态前添加列数校验保护，防止因列数增加导致 Hex 恢复异常或白屏。
+    - [x] **回归测试 100% 跑通**: 11 项核心生命周期测试全部顺利通过。
+
+## 2026-06-12 21:40
+- [x] **优化自定义列的通用渲染逻辑，避免强制浮点格式化 (Optimized Custom Column Formatting to Prevent Forced Float Rendering)**:
+    - [x] **按原样渲染自定义列值**: 废弃了对所有浮点数一律使用 `f"{val:.2f}"` 的强制格式化行为。新逻辑会检测浮点数是否是整数（如 `1807.0`），如果是，则自动剥离尾部零并显示为整数样式（如 `1807`），对于包含真实小数的浮点数以及非数值类型，则按其本真数据输出，实现了“数据是什么就显示什么”的非侵入式自动兼容。
+    - [x] **自动配置数值排序标志**: 在自定义列中，如果检测到值是整数、浮点数或可转换为浮点数的字符串，系统在底层渲染时会自动开启 `is_numeric=True`，以确保用户在双击表头手动排序时能够获得自然数值顺序，而非 ASCII 字符串顺序。
+    - [x] **回归测试 100% 通过**: 全量 11 项生命周期自动化集成测试全部绿旗通过。
+
+## 2026-06-12 21:35
+- [x] **修复 `bidding_momentum_detector.py` 中的 `NameError: name 'configured_cols' is not defined` 异常 (Fixed NameError for configured_cols in Sector Aggregation Worker)**:
+    - [x] **定义缺少的配置列与核心键变量**: 在 `_aggregate_sectors` 内部，首部初始化并定义了 `configured_cols` (读取自 `cct.CFG.bidding_window_col`) 和 `core_keys` 集合。这彻底解决了异步板块聚合线程在计算跟随股自定义列合并时因缺少定义导致的崩溃。
+    - [x] **保障自定义列在板块聚合时的完整传递**: 修复后，自定义列能够安全地在行业板块、SBC虚拟板块聚合数据包生成时无缝传递至 `followers` 和 `leader` 结构中。
+    - [x] **全量回归测试 100% 绿旗通过**: 成功运行 `pytest test_watchlist_lifecycle.py`，全量 11 项生命周期与数据一致性测试 100% 顺利通过。
+
+## 2026-06-12 21:30
+- [x] **完全消除 `SectorBiddingPanel` 表格行构建的 `'dff2'` 硬编码与合并高亮渲染渲染逻辑 (Completely Removed Hardcoded 'dff2' in Sector Table Row Building & Unified DFF Highlight Rendering)**:
+    - [x] **物理剔除行构建中的 `'dff2'` 硬编码**: 在 `sector_bidding_panel.py` 的个股表格更新循环 `_populate_table` 中，彻底删除了四处（第 3715, 3752, 3788, 3821 行）硬编码的 `'dff2': ...` 键值。利用已有的动态列通用提取逻辑 `for col_key in self.stock_cols:`，自动完成 `dff2` 以及 `dff3`、`rank` 等所有任意自定义配置列的数据拉取和写入，做到了百分之百的非侵入式通用解耦。
+    - [x] **通用化 `dff` 系列单元格渲染高亮**: 在单元格值更新与样式着色时，将原本相互独立的 `elif col_key == "dff"` 和 `elif col_key == "dff2"` 两个硬编码判断分支合并为通用的 `elif col_key.startswith("dff")`。使得所有以 `dff` 前缀命名的动态度量列均能共享相同的高亮颜色渲染模式，而其他非 `dff` 列（如 `rank` 等）均能安全走 `else` 分支进行通用的数值格式化与通用排序。
+    - [x] **回归测试 100% 通过**: 重新运行 `pytest test_watchlist_lifecycle.py` 11 项全生命周期核心集成与联动测试，全部绿旗无报错通过，保障了竞价面板在各类动态列配置下的系统健壮性。
+
+## 2026-06-12 21:00
+- [x] **实现自定义列从 df_all 强直连获取与前置强力自愈，修复历史复盘分时/缩量图丢失 (Implemented Direct Custom Column Fetching from df_all & Pre-processing Self-healing to Restore K-line / Trend Charts)**:
+    - [x] **打通自定义列与 `df_all` 行情直连**: 遵循最简非侵入式设计（KISS），在 `bidding_momentum_detector.py` 的个股元数据更新 `update_meta` 阶段，自适应将配置项 `bidding_window_col` 声明的自定义列数值拉取并存储至 `ts.custom_cols`，并在生成全局 `_global_snap_cache` 行情快照时动态合并。UI 面板的数据获取方式（即 `f.get(col_key)`）和历史加载走势图的原有自愈补偿逻辑 100% 保持原有逻辑不变，不仅减少了 UI 层的数据处理开销，更避免了重写造成的 any 副作用。
+    - [x] **自适应历史存档数据恢复与持久化**: 在 `load_from_snapshot`（历史复盘加载）中，新增自适应解包流程，支持将新版列式或旧版字典式快照中已存档的自定义列（如 `dff2` 列）重新找回并还原至 `new_snap_cache` 中，并在持久化序列化时将 `custom_cols` 并入 `meta_cols` 保存，保证了历史与实盘数据表现的一致性。
+    - [x] **维持所有硬编码原有列逻辑与自愈结构不变**: 原汁原味地保留了原有硬编码的 10 列及其自愈补偿机制（如 `klines`、`k_cache` 补齐、涨跌计算等），不对原有稳定代码产生任何侵入或重写，确保全系统高可靠度稳定运行。
+    - [x] **修复行业板块聚合与联动双击白屏及自定义列丢失 (Fixed Custom Columns in Sector Aggregation & Double-Click Visualizer blank screen)**:
+        - 修复了 `bidding_momentum_detector.py` 在 `_aggregate_sectors` 板块聚合（真实行业板块以及 SBC 虚拟板块）中生成 `followers` 和 `leader` 字典数据时由于硬编码键名导致自定义列（如 `dff2` 等）在跟随股和龙头对象中发生数据丢失的 Bug，实现了自动合并 custom columns。
+        - 同步升级了 `load_from_snapshot` 反序列化快照方法，支持在复盘回溯时根据配置项自适应补齐并还原历史跟随股和龙头对象的自定义列数据。
+        - 修复了 `sector_bidding_panel.py` 双击个股图表联动中，由硬编码列索引 `8` 导致的双击白屏及越界 Bug。现在改用 `self.stock_cols.index("trend")` / `"code"` / `"name"` 等动态定位索引以进行精确视口联动及数据恢复。
+    - [x] **回归测试 100% 成功通过**: 运行 `pytest test_watchlist_lifecycle.py` 测试套件，11 项核心回归测试 100% 全部通过。
+
+
+## 2026-06-12 20:30
+- [x] **实现竞价面板动态列配置与独立自动排序架构 (Implemented Dynamic Column Configuration & Independent Manual Sorting for Bidding Panel)**:
+    - [x] **动态获取并加载列配置 (Dynamic Configuration Loading)**: 在 `__init__` 中将原本硬编码 the 10 列结构重构为由 `GlobalConfig` 的 `bidding_window_col` 配置项（如 `cct.CFG.bidding_window_col`）动态提供。定义了集中式列名翻译字典 `col_map` 和默认宽度映射 `col_width_map`，并支持自定义列的动态增删与重新排序。
+    - [x] **实现列宽自适应持久化自愈保护 (Adaptive Column Width Persistence Protection)**: 在 `_save_ui_state` 中同步保存当前的 `stock_table_cols` 列配置，并在 `_restore_ui_state` 中加入配置一致性校验。若用户通过修改配置调整了列数或列顺序，系统能瞬间感知差异并自动跳过旧 Hex 状态的 `restoreState` 恢复（以防旧布局覆盖或白屏），平滑退回到默认列宽自适应排版中，并在下一次正常退出时自动覆盖更新为最新的正确持久化状态。
+    - [x] **实现 UI 的动态初始化 (Dynamic Column Initialization)**: 重构了 `_init_ui` 中的表格表头构建逻辑，动态计算列数并设置表头文字。根据动态列宽字典对每一列设置初始交互宽度，并指定最后一列自动拉伸铺满视口，完美消除了右侧白边。若配置中包含分时图列 `"trend"`，则动态将其绑定到对应的 `TrendDelegate` 委托渲染中。
+    - [x] **重构完全独立的动态排序机制 (Dynamic Manual Sorting Logic)**: 彻底重写了 `_populate_table` 里的手工排序方法，废弃了原先写死的列索引（如 `0`、`3`、`8` 等）。现在程序能自适应从当前列配置中寻址排序列 the key name，并根据该键名动态映射执行对应的字段排序（如按 `pct` 涨幅、按 `score` 情绪等），同时保留了针对关注股与龙头股的稳定二次置顶防线。
+    - [x] **加固列索引自适应提取与行填充逻辑 (Index-Independent Cell Population)**: 
+        - 针对选中状态恢复中代码列的查找，引入了 `self.stock_cols.index("code")` 动态定位，防范越界；
+        - 在 `_populate_table` 的行单元格渲染中，将原本按 `0~9` 顺序硬编码填充十列的臃肿逻辑，重构为根据 `stock_cols` 进行动态循环迭代。基于 `col_key` 自适应上色及填充“代码”、“名称”、“角色”、“现价”、“涨幅%”、“情绪”等内容，做到了与列的实际物理顺序解耦，彻底打通了竞价/尾盘板块联动监控的动态列配置架构。
+    - [x] **实现自定义列的动态数据流拉取与自动通用渲染 (Dynamic Custom Column Data Loading & Rendering)**: 重构了 `_populate_table` 数据装填流程，在行数据构建时自动遍历 `stock_cols` 从原始行情数据源中动态检索取值。同时在排序判断与表格单元格渲染逻辑中增加了 `else` 通用兜底分支，使得任何未硬编码的自定义列（如 `"dff2"`, `"red"`, `"win"` 等）都能自动完成数据拉取、类型转换、高频刷新渲染与对应的数值/字符串智能排序。
+    - [x] **修复缩进错误 (Fixed Unexpected Indent)**: 修复了 `sector_bidding_panel.py` 的第 1802 行 `self.setWindowTitle` 以及第 2513 行 `vh = self.stock_table.verticalHeader()` 的缩进错误，确保面板 and 后台线程正常启动加载。
+    - [x] **11 项核心回归测试 100% 成功通过 (100% Pass of All Tests)**: 运行 `pytest test_watchlist_lifecycle.py` 测试套件，11 项生命周期与联动集成测试全量通过，无任何回归问题。
+
 ## 2026-06-12 19:40
 - [x] **优化个股名称解析并拦截个股占位符污染 (Optimized Stock Name Resolution & Prevented Placeholder Pollution)**:
     - [x] **集成本地行情引擎极速解析 (Integrated Local Sina Engine Resolution)**: 在 `sys_utils.py` 的 `resolve_stock_name(code_clean)` 解析函数中引入了第 0.5 步。在内存高速缓存之后，优先实例化并使用 `JSONData.sina_data.Sina(readonly=True).get_code_cname(code_clean)` 来检索权威股票名称。此设计能够使程序在毫秒级内获取到最新且准确的中文名称，同时彻底避免了不必要的 HDF5 文件读取、竞价赛马快照分析和重复的历史诊断记录检索。

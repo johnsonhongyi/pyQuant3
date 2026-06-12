@@ -1762,6 +1762,43 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._macro_filtered_codes = [] # List of codes that pass Stage 1
         self._is_macro_active = False
 
+        # 动态获取列配置
+        self.stock_cols = getattr(cct.CFG, 'bidding_window_col', ["code", "name", "role", "price", "percent", "score", "price_diff", "dff", "trend", "hint"])
+        
+        # 英文列名到中文列名的映射
+        self.col_map = {
+            "code": "代码",
+            "name": "名称",
+            "role": "角色",
+            "price": "现价",
+            "percent": "涨幅%",
+            "score": "情绪",
+            "price_diff": "涨跌",
+            "dff": "dff",
+            "trend": "分时走势",
+            "hint": "形态暗示(安)"
+        }
+        
+        # 英文列名到默认宽度的映射
+        self.col_width_map = {
+            "code": 65,
+            "name": 75,
+            "role": 60,
+            "price": 65,
+            "percent": 75,
+            "score": 55,
+            "price_diff": 120,
+            "dff": 60,
+            "trend": 95,
+            "hint": 150
+        }
+
+        # 重新修正默认排序列索引
+        try:
+            self._sort_col = self.stock_cols.index("percent")
+        except ValueError:
+            self._sort_col = 0
+
         self.setWindowTitle("🚀 竞价/尾盘板块联动监控 (Tick 订阅)")
         self.resize(1100, 680)
         
@@ -1947,7 +1984,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 保存各表状态 (Hex 格式)
             data_to_save['sector_table_state'] = self.sector_table.horizontalHeader().saveState().toHex().data().decode()
+            data_to_save['sector_table_cols_count'] = self.sector_table.columnCount()
             data_to_save['stock_table_state'] = self.stock_table.horizontalHeader().saveState().toHex().data().decode()
+            data_to_save['stock_table_cols'] = list(self.stock_cols)
             data_to_save['watchlist_table_state'] = self.watchlist_table.horizontalHeader().saveState().toHex().data().decode()
             
             # 保存 Splitter 状态
@@ -2000,9 +2039,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 恢复各表列状态
             if 'sector_table_state' in ui_state:
-                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['sector_table_state'].encode()))
+                saved_count = ui_state.get('sector_table_cols_count', 0)
+                if saved_count == self.sector_table.columnCount():
+                    self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['sector_table_state'].encode()))
+                else:
+                    logger.info("📊 [SectorPanel] sector_table column count changed, bypassing restoreState.")
             if 'stock_table_state' in ui_state:
-                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['stock_table_state'].encode()))
+                # 检查保存的列配置是否与当前完全一致
+                saved_cols = ui_state.get('stock_table_cols', [])
+                if list(saved_cols) == list(self.stock_cols):
+                    self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['stock_table_state'].encode()))
+                else:
+                    logger.info("📊 [SectorPanel] stock_table columns configuration changed, bypassing restoreState to apply default widths.")
             if 'watchlist_table_state' in ui_state:
                 self.watchlist_table.horizontalHeader().restoreState(QByteArray.fromHex(ui_state['watchlist_table_state'].encode()))
             
@@ -2386,8 +2434,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         lbl_sec.setStyleSheet("font-weight:bold;background:#2a2a3e;color:#aad4ff;padding:2px;")
         llay.addWidget(lbl_sec)
 
-        self.sector_table = QTableWidget(0, 5)
-        self.sector_table.setHorizontalHeaderLabels(['板块', '强度', '涨跌', '龙头', '状态'])
+        self.sector_table = QTableWidget(0, 6)
+        self.sector_table.setHorizontalHeaderLabels(['板块', '强度', '涨跌', '龙头', 'cout', '状态'])
         self.sector_table.setAlternatingRowColors(True)
         self.sector_table.setFont(QFont("Microsoft YaHei", 9))
         self.sector_table.verticalHeader().setVisible(False)
@@ -2439,24 +2487,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         rlay.addWidget(self.leader_lbl)
 
         # 个股表（带排序）
-        COLS = ['代码', '名称', '角色', '现价', '涨幅%', '情绪', '涨跌', 'dff', '分时走势', '形态暗示(安)']
+        COLS = [self.col_map.get(col_key, col_key) for col_key in self.stock_cols]
         self.stock_table = QTableWidget(0, len(COLS))
         self.stock_table.setHorizontalHeaderLabels(COLS)
         hdr = self.stock_table.horizontalHeader()
         if hdr:
             hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-            # 🚀 [C-Reinforcement] 显式设置各列初始宽度与伸缩行为
-            self.stock_table.setColumnWidth(0, 65)  # 代码
-            self.stock_table.setColumnWidth(1, 75)  # 名称
-            self.stock_table.setColumnWidth(2, 60)  # 角色
-            self.stock_table.setColumnWidth(3, 65)  # 现价
-            self.stock_table.setColumnWidth(4, 75)  # 涨幅
-            self.stock_table.setColumnWidth(5, 55)  # 情绪 (score)
-            self.stock_table.setColumnWidth(6, 120) # 涨跌 [p_diff (pct_slc)]
-            self.stock_table.setColumnWidth(7, 60)  # dff
-            self.stock_table.setColumnWidth(8, 95)  # 分时走势 (绘图列)
+            # 🚀 动态设置各列初始宽度与伸缩行为
+            for col_idx, col_key in enumerate(self.stock_cols):
+                width = self.col_width_map.get(col_key, 80)
+                self.stock_table.setColumnWidth(col_idx, width)
             
-            # 最后一列“形态暗示”设置为自动拉伸，确前面的列位置固定
+            # 最后一列设置为自动拉伸，确保前面的列位置固定
             hdr.setSectionResizeMode(len(COLS)-1, QHeaderView.ResizeMode.Stretch)
             
             hdr.sectionClicked.connect(self._on_header_clicked)
@@ -2470,7 +2512,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self.stock_table.setAlternatingRowColors(True)
         self.stock_table.setFont(QFont("Microsoft YaHei", 9))
         self.stock_table.setSortingEnabled(False)   # 手动排序
-        self.stock_table.setItemDelegateForColumn(8, TrendDelegate(self)) # [FIX] 对准分时走势列
+        if "trend" in self.stock_cols:
+            self.stock_table.setItemDelegateForColumn(self.stock_cols.index("trend"), TrendDelegate(self)) # [FIX] 对准分时走势列
         self.stock_table.horizontalHeader().sortIndicatorChanged.connect(lambda: self.stock_table.scrollToTop())
         vh = self.stock_table.verticalHeader()
         if vh: vh.setDefaultSectionSize(32) # 紧凑行高
@@ -2988,12 +3031,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         #             filtered_sectors.append(s)
         #     sectors = filtered_sectors
 
+        # 计算每个板块符合当前过滤条件的个股数并存入 _filtered_count
+        for sdata in sectors:
+            sdata['_filtered_count'] = self._get_filtered_stock_count(sdata)
+
         is_fav = lambda x: 1 if x.get('sector', '') in self.favorite_sectors else 0
 
         if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
         elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
         elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct_diff', 0.0), reverse=not asc)
         elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
+        elif col == 4: sectors.sort(key=lambda x: x.get('_filtered_count', 0), reverse=not asc)
 
         sectors.sort(key=is_fav, reverse=True)
 
@@ -3014,6 +3062,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             tags = sdata.get('tags', '')
             lp = sdata.get('leader_pct', 0)
             ln = sdata.get('leader_name', '未知')
+            fc = sdata.get('_filtered_count', 0)
 
             # Pre-compute search blob (avoid concat in eval)
             sdata['_search_blob'] = f"{sn} {tags} {ln}".lower()
@@ -3035,7 +3084,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
             avg_pct_diff = sdata.get('avg_pct_diff', 0.0)
 
-            # Col 1: Score
+            # Col 1: Score (强度)
             self._update_cell(self.sector_table, i, 1, f"{sc:.1f}", 
                             color=color, alignment=Qt.AlignmentFlag.AlignCenter, 
                             is_numeric=True)
@@ -3051,9 +3100,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.sector_table, i, 3, f"{ln} ({lp:+.1f}%)", 
                             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            # Col 4: Tags
+            # Col 4: cout (符合条件的个股数量)
+            self._update_cell(self.sector_table, i, 4, str(fc), 
+                            color=color, alignment=Qt.AlignmentFlag.AlignCenter, 
+                            is_numeric=True)
+
+            # Col 5: Tags
             display_tags = f"[★重点] {tags}" if sn in self.favorite_sectors else tags
-            self._update_cell(self.sector_table, i, 4, display_tags, font=self._small_font)
+            self._update_cell(self.sector_table, i, 5, display_tags, font=self._small_font)
 
             if sn == selected_sector:
                 self.sector_table.selectRow(i)
@@ -3639,6 +3693,110 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     
         return True
 
+    def _get_filtered_stock_count(self, data: dict) -> int:
+        """[ignoring loop detection]
+        统计板块内个股中符合当前过滤条件（宏观过滤+搜索过滤）的数量。
+        """
+        stocks = []
+        leader_code = data.get('leader', '')
+        leader_name = data.get('leader_name', '未知')
+        race_candidates = data.get('race_candidates', [])
+        is_penetrating = getattr(self, '_force_show_all_in_stock_table', False)
+
+        if race_candidates and not is_penetrating:
+            for rc in race_candidates:
+                code = rc['code']
+                r_data = None
+                if code == leader_code:
+                    r_data = {
+                        'pct_diff': data.get('leader_pct_diff', 0.0),
+                        'price_diff': data.get('leader_price_diff', 0.0),
+                        'dff': data.get('leader_dff', 0.0),
+                        'score': data.get('leader_score', data.get('score', 0.0)),
+                        'hint': data.get('pattern_hint', '主力拉升'),
+                        'untradable': data.get('is_untradable', False),
+                        'is_counter': data.get('is_counter_trend', False)
+                    }
+                else:
+                    for f in data.get('followers', []):
+                        if f['code'] == code:
+                            r_data = f
+                            break
+                    if not r_data:
+                        r_data = rc
+                
+                if self._is_macro_active and self._macro_filtered_codes:
+                    if code not in self._macro_filtered_codes and code not in self.favorite_stocks:
+                        continue
+                
+                row_item = {
+                    'code': code,
+                    'name': rc.get('name', '未知'),
+                    'role': rc.get('role', '跟随📌'),
+                    'pct': rc.get('pct', 0.0),
+                    'price': r_data.get('price', 0.0) if hasattr(r_data, 'get') else 0.0,
+                    'pct_diff': r_data.get('pct_diff', 0.0) if hasattr(r_data, 'get') else 0.0,
+                    'price_diff': r_data.get('price_diff', 0.0) if hasattr(r_data, 'get') else 0.0,
+                    'dff': r_data.get('dff', 0.0) if hasattr(r_data, 'get') else 0.0,
+                    'score': r_data.get('score', 0.0) if hasattr(r_data, 'get') else 0.0,
+                    'hint': r_data.get('hint', r_data.get('pattern_hint', '板块联动')) if hasattr(r_data, 'get') else '板块联动',
+                    'untradable': r_data.get('untradable', r_data.get('is_untradable', False)) if hasattr(r_data, 'get') else False,
+                    'is_counter': r_data.get('is_counter', False) if hasattr(r_data, 'get') else False,
+                    'category': data.get('sector', '--')
+                }
+                stocks.append(row_item)
+        else:
+            l_pass = True
+            if self._is_macro_active and self._macro_filtered_codes:
+                if leader_code not in self._macro_filtered_codes and leader_code not in self.favorite_stocks:
+                    l_pass = False
+            if l_pass and leader_code:
+                stocks.append({
+                    'code': leader_code,
+                    'name': leader_name,
+                    'role': '👑龙头',
+                    'pct': data.get('leader_pct', 0.0),
+                    'price': data.get('leader_price', 0.0),
+                    'pct_diff': data.get('leader_pct_diff', 0.0),
+                    'price_diff': data.get('leader_price_diff', 0.0),
+                    'dff': data.get('leader_dff', 0.0),
+                    'score': data.get('leader_score', data.get('score', 0.0)),
+                    'hint': data.get('pattern_hint', '板块联动'),
+                    'untradable': data.get('is_untradable', False),
+                    'is_counter': data.get('is_counter_trend', False),
+                    'category': data.get('sector', '--')
+                })
+            for f in data.get('followers', []):
+                f_code = f['code']
+                if self._is_macro_active and self._macro_filtered_codes:
+                    if f_code not in self._macro_filtered_codes and f_code not in self.favorite_stocks:
+                        continue
+                stocks.append({
+                    'code': f_code,
+                    'name': f['name'],
+                    'role': '📌跟随',
+                    'pct': f['pct'],
+                    'price': f['price'],
+                    'pct_diff': f.get('pct_diff', 0.0),
+                    'price_diff': f.get('price_diff', 0.0),
+                    'dff': f.get('dff', 0.0),
+                    'score': f.get('score', 0.0),
+                    'hint': f.get('pattern_hint', '板块联动'),
+                    'untradable': f.get('untradable', False),
+                    'is_counter': False,
+                    'category': data.get('sector', '--')
+                })
+
+        active_query = getattr(self, '_active_search_query', '')
+        if active_query and not is_penetrating:
+            filtered_count = 0
+            for r in stocks:
+                if (r.get('code') in self.favorite_stocks) or self._evaluate_search_condition(active_query, r):
+                    filtered_count += 1
+            return filtered_count
+        else:
+            return len(stocks)
+
     # ------------------------------------------------------------------ table fill
     def _populate_table(self, data: dict, reset_to_top: bool = False):
         leader_code   = data.get('leader', '')
@@ -3704,7 +3862,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
                 if r_data:
                     f_klines = r_data.get('klines', [])
-                    rows.append({
+                    row_item = {
                         'code': code, 'name': rc.get('name', '未知'),
                         'role': rc.get('role', '跟随📌'),
                         'pct': rc.get('pct', 0.0), 'price': r_data.get('price', 0.0),
@@ -3726,13 +3884,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         'hint': r_data.get('hint', r_data.get('pattern_hint', '板块联动')),
                         'untradable': r_data.get('untradable', r_data.get('is_untradable', False)),
                         'is_counter': r_data.get('is_counter', False)
-                    })
+                    }
+                    for col_key in self.stock_cols:
+                        if col_key not in row_item:
+                            val = r_data.get(col_key, rc.get(col_key, data.get(col_key)))
+                            if val is not None:
+                                row_item[col_key] = val
+                    rows.append(row_item)
         else:
             # Fallback: 使用传统的 Leader + Followers 结构
             rows = []
              # 龙头过滤
             if not self._is_macro_active or (leader_code in self._macro_filtered_codes) or (leader_code in self.favorite_stocks):
-                rows.append({
+                row_item = {
                     'code': leader_code, 
                     'name': leader_name,
                     'role': '🏆龙头',
@@ -3752,7 +3916,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'hint': data.get('pattern_hint', '主力拉升'),
                     'untradable': data.get('is_untradable', False),
                     'is_counter': data.get('is_counter_trend', False)
-                })
+                }
+                for col_key in self.stock_cols:
+                    if col_key not in row_item:
+                        val = data.get(f"leader_{col_key}", data.get(col_key))
+                        if val is not None:
+                            row_item[col_key] = val
+                rows.append(row_item)
             
             # 跟随股过滤
             for f in data.get('followers', []):
@@ -3760,7 +3930,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     if f['code'] not in self._macro_filtered_codes and f['code'] not in self.favorite_stocks:
                         continue
                 f_klines = f.get('klines', [])
-                rows.append({
+                row_item = {
                     'code': f['code'], 'name': f['name'],
                     'role': '📌跟随',
                     'pct': f['pct'], 'price': f['price'],
@@ -3782,7 +3952,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'hint': f.get('pattern_hint', '板块联动'),
                     'untradable': f.get('untradable', False),
                     'is_counter': False
-                })
+                }
+                for col_key in self.stock_cols:
+                    if col_key not in row_item:
+                        val = f.get(col_key)
+                        if val is not None:
+                            row_item[col_key] = val
+                rows.append(row_item)
+
         # Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
         force_show_all = getattr(self, '_force_show_all_in_stock_table', False)
@@ -3805,23 +3982,38 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         col = self._sort_col
         rev = not self._sort_asc
         
-        if col == 0:    # 代码
+        # 动态找出排序列 of col_key
+        col_key = ""
+        if 0 <= col < len(self.stock_cols):
+            col_key = self.stock_cols[col]
+            
+        if col_key == "code":    # 代码
             rows.sort(key=lambda r: r.get('code', ''), reverse=rev)
-        elif col == 1:  # 名称
+        elif col_key == "name":  # 名称
             rows.sort(key=lambda r: r.get('name', ''), reverse=rev)
-        elif col == 2:  # 角色
+        elif col_key == "role":  # 角色
             rows.sort(key=lambda r: r.get('role', ''), reverse=rev)
-        elif col == 3:  # 现价
+        elif col_key == "price":  # 现价
             rows.sort(key=lambda r: r.get('price', 0.0), reverse=rev)
-        elif col == 4:  # 涨幅
+        elif col_key == "percent":  # 涨幅
             rows.sort(key=lambda r: r.get('pct', 0.0), reverse=rev)
-        elif col == 5:  # 情绪 (score)
+        elif col_key == "score":  # 情绪 (score)
             rows.sort(key=lambda r: r.get('score', 0.0), reverse=rev)
-        elif col == 6:  # 涨跌 (切片涨跌/价格差值)
-            # 优先按价格差值排序，更直观
+        elif col_key == "price_diff":  # 涨跌 (切片涨跌/价格差值)
             rows.sort(key=lambda r: r.get('price_diff', 0.0), reverse=rev)
-        elif col == 7:  # dff (切片力度)
-            rows.sort(key=lambda r: r.get('dff', 0.0), reverse=rev)
+        elif col_key.startswith("dff"):  # dff/dff2 (切片力度)
+            rows.sort(key=lambda r: r.get(col_key, 0.0), reverse=rev)
+        else:
+            # 自动针对自定义列值进行排序 (支持数字与字符串)
+            def get_sort_val(r):
+                val = r.get(col_key)
+                if val is None:
+                    return -999999.0 if not rev else 999999.0
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return str(val)
+            rows.sort(key=get_sort_val, reverse=rev)
             
         # 稳定二次排序：确保重点关注的个股以及龙头在任何情况下都在最顶层优先展示
         # 优先级：重点关注个股优先展示在最上方，其次是龙头个股，其余跟随股按原本排序规则排列
@@ -3834,7 +4026,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         for r in rows:
             if '_search_blob' not in r:
                 r['_search_blob'] = (f"{r['code']} {r['name']} {r['hint']} {r['role']}").lower()
-
+ 
         # 💡 [ENHANCEMENT] 如果用户没有主动点击排序，默认将龙头置顶
         # (这仅在上述 col 匹配不到或强制恢复时生效)
         # if col == -1: ...
@@ -3847,7 +4039,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not self._last_selected_code and not reset_to_top:
             curr_row = self.stock_table.currentRow()
             if curr_row >= 0:
-                item = self.stock_table.item(curr_row, 0)
+                try:
+                    code_idx = self.stock_cols.index("code")
+                except ValueError:
+                    code_idx = 0
+                item = self.stock_table.item(curr_row, code_idx)
                 if item: self._last_selected_code = item.text()
         
         if reset_to_top:
@@ -3894,70 +4090,85 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         if r.get('last_close', 0) > 0 and r.get('price', 0) > 0:
                             r['pct'] = (r['price'] - r['last_close']) / r['last_close'] * 100
 
-            # 1. 代码
-            self._update_cell(self.stock_table, i, 0, r['code'], 
-                            user_role_v1=data.get('sector', '未知'))
-            
-            # 2. 名称
-            disp_name = f"⭐ {r['name']}" if r['code'] in self.favorite_stocks else r['name']
-            self._update_cell(self.stock_table, i, 1, disp_name)
-
-            # 3. 角色
-            role_c = self._color_red if '龙头' in r['role'] else None
-            role_f = self._bold_font if '龙头' in r['role'] else None
-            self._update_cell(self.stock_table, i, 2, r['role'], color=role_c, font=role_f)
-
-            # 4. 现价
-            self._update_cell(self.stock_table, i, 3, f"{r['price']:.2f}")
-
-            # 5. 涨幅
-            pct_c = self._color_red if r['pct'] > 0 else self._color_green
-            self._update_cell(self.stock_table, i, 4, f"{r['pct']:+.2f}%", color=pct_c)
-            
-            # 6. 情绪 (score) [NEW]
-            s_val = r.get('score', 0.0)
-            s_c = self._color_yellow if s_val > 10 else (QColor("#FFA500") if s_val > 5 else None)
-            self._update_cell(self.stock_table, i, 5, f"{s_val:.1f}", color=s_c, is_numeric=True)
-
-            # 7. 涨跌 [绝对额]
-            p_diff = r.get('price_diff', 0.0)
-            pct_slc = r.get('pct_diff', 0.0)
-            diff_c = self._color_red if (p_diff > 0.001 or pct_slc > 0.01) else (self._color_green if (p_diff < -0.001 or pct_slc < -0.01) else self._color_gray)
-            self._update_cell(self.stock_table, i, 6, f"{p_diff:+.2f}", 
-                            color=diff_c, alignment=Qt.AlignmentFlag.AlignCenter, is_numeric=True)
-
-            # 8. dff
-            dff_val = r.get('dff', 0.0)
-            dff_c = self._color_yellow if dff_val > 0 else (QColor("#00FFFF") if dff_val < 0 else None)
-            self._update_cell(self.stock_table, i, 7, f"{dff_val:+.2f}", 
-                            color=dff_c, is_numeric=True)
-
-            # 9. 分时走势 (绘图列)
-            # [OPTIMIZE] Use pre-calculated cache from Step 1
-            k_cache = r.get('k_cache', {})
-            k_data = {
-                'klines': r.get('klines', []),      
-                'prices': k_cache.get('prices', []),
-                'volumes': k_cache.get('volumes', []),
-                'last_close': r.get('last_close', 0),
-                'now_price': r.get('price', 0)
-            }
-            # Note: _update_cell handles diff check for data objects
-            self._update_cell(self.stock_table, i, 8, "", user_role=k_data)
-
-            # 10. 形态暗示
-            hint_str = r['hint']
-            if r['untradable']: hint_str = "🚫一字板 " + hint_str
-            if r['is_counter']: hint_str = "🔥逆势 " + hint_str
-            
-            hint_c = None
-            if "今日主杀" in hint_str or "破均价线" in hint_str: hint_c = QColor("#FF1111")
-            elif "新高" in hint_str or "突破" in hint_str or "放量" in hint_str: hint_c = self._color_yellow
-            elif "支撑" in hint_str or "多头" in hint_str: hint_c = QColor("#FF99CC")
-            elif r['untradable']: hint_c = self._color_gray
-            elif r['is_counter']: hint_c = self._color_yellow
-                
-            self._update_cell(self.stock_table, i, 9, hint_str, color=hint_c)
+            # 动态写入列
+            for col_idx, col_key in enumerate(self.stock_cols):
+                if col_key == "code":
+                    self._update_cell(self.stock_table, i, col_idx, r['code'], 
+                                    user_role_v1=data.get('sector', '未知'))
+                elif col_key == "name":
+                    disp_name = f"⭐ {r['name']}" if r['code'] in self.favorite_stocks else r['name']
+                    self._update_cell(self.stock_table, i, col_idx, disp_name)
+                elif col_key == "role":
+                    role_c = self._color_red if '龙头' in r['role'] else None
+                    role_f = self._bold_font if '龙头' in r['role'] else None
+                    self._update_cell(self.stock_table, i, col_idx, r['role'], color=role_c, font=role_f)
+                elif col_key == "price":
+                    self._update_cell(self.stock_table, i, col_idx, f"{r['price']:.2f}")
+                elif col_key == "percent":
+                    pct_c = self._color_red if r['pct'] > 0 else self._color_green
+                    self._update_cell(self.stock_table, i, col_idx, f"{r['pct']:+.2f}%", color=pct_c)
+                elif col_key == "score":
+                    s_val = r.get('score', 0.0)
+                    s_c = self._color_yellow if s_val > 10 else (QColor("#FFA500") if s_val > 5 else None)
+                    self._update_cell(self.stock_table, i, col_idx, f"{s_val:.1f}", color=s_c, is_numeric=True)
+                elif col_key == "price_diff":
+                    p_diff = r.get('price_diff', 0.0)
+                    pct_slc = r.get('pct_diff', 0.0)
+                    diff_c = self._color_red if (p_diff > 0.001 or pct_slc > 0.01) else (self._color_green if (p_diff < -0.001 or pct_slc < -0.01) else self._color_gray)
+                    self._update_cell(self.stock_table, i, col_idx, f"{p_diff:+.2f}", 
+                                    color=diff_c, alignment=Qt.AlignmentFlag.AlignCenter, is_numeric=True)
+                elif col_key.startswith("dff"):
+                    dff_val = r.get(col_key, 0.0)
+                    dff_c = self._color_yellow if dff_val > 0 else (QColor("#00FFFF") if dff_val < 0 else None)
+                    self._update_cell(self.stock_table, i, col_idx, f"{dff_val:+.2f}", 
+                                    color=dff_c, is_numeric=True)
+                elif col_key == "trend":
+                    k_cache = r.get('k_cache', {})
+                    k_data = {
+                        'klines': r.get('klines', []),      
+                        'prices': k_cache.get('prices', []),
+                        'volumes': k_cache.get('volumes', []),
+                        'last_close': r.get('last_close', 0),
+                        'now_price': r.get('price', 0)
+                    }
+                    self._update_cell(self.stock_table, i, col_idx, "", user_role=k_data)
+                elif col_key == "hint":
+                    hint_str = r['hint']
+                    if r['untradable']: hint_str = "🚫一字板 " + hint_str
+                    if r['is_counter']: hint_str = "🔥逆势 " + hint_str
+                    
+                    hint_c = None
+                    if "今日主杀" in hint_str or "破均价线" in hint_str: hint_c = QColor("#FF1111")
+                    elif "新高" in hint_str or "突破" in hint_str or "放量" in hint_str: hint_c = self._color_yellow
+                    elif "支撑" in hint_str or "多头" in hint_str: hint_c = QColor("#FF99CC")
+                    elif r['untradable']: hint_c = self._color_gray
+                    elif r['is_counter']: hint_c = self._color_yellow
+                        
+                    self._update_cell(self.stock_table, i, col_idx, hint_str, color=hint_c)
+                else:
+                    # 自定义列自动渲染与通用取值逻辑
+                    val = r.get(col_key)
+                    is_num = False
+                    if val is None:
+                        val_str = ""
+                    else:
+                        if isinstance(val, (int, float)):
+                            is_num = True
+                            if isinstance(val, float):
+                                if val.is_integer():
+                                    val_str = str(int(val))
+                                else:
+                                    val_str = str(val)
+                            else:
+                                val_str = str(val)
+                        else:
+                            val_str = str(val)
+                            try:
+                                float(val_str)
+                                is_num = True
+                            except ValueError:
+                                pass
+                    self._update_cell(self.stock_table, i, col_idx, val_str, is_numeric=is_num)
 
             if r['code'] == self._last_selected_code:
                 target_row = i
@@ -4721,22 +4932,32 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         break
     # ------------------------------------------------------------------ linkage
     def _on_stock_double_clicked(self, row, col):
-        code_item = self.stock_table.item(row, 0)
-        name_item = self.stock_table.item(row, 1)
+        try:
+            idx_code = self.stock_cols.index("code")
+            idx_name = self.stock_cols.index("name")
+        except ValueError:
+            return
+        code_item = self.stock_table.item(row, idx_code)
+        name_item = self.stock_table.item(row, idx_name)
         if not code_item: return
         code = code_item.text()
         name = name_item.text() if name_item else code
 
-        # 复制功能：代码列(0)复制代码，名称列(1)复制名称
-        if col == 0:
+        # 复制功能：代码列复制代码，名称列复制名称
+        if col == idx_code:
             self._copy_to_clipboard(code)
             return
-        elif col == 1:
+        elif col == idx_name:
             self._copy_to_clipboard(name)
             return
 
-        # 双击功能只在分时走势 (Column 8) 上有效
-        if col != 8:
+        try:
+            idx_trend = self.stock_cols.index("trend")
+        except ValueError:
+            idx_trend = -1
+
+        # 双击功能只在分时走势上有效
+        if col != idx_trend:
             return
 
         # 💡 [ENHANCEMENT] 尝试从 realtime_service 获取全量 K 线 (n=240, 约一整天)
@@ -4797,7 +5018,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 原因是 _populate_table 会默认选中 Row 0，导致点击首行时 currentCellChanged 信号失效。
         # 此时只能依靠 cellClicked 触发联动。若还限制列索引，会导致点中“现价/涨幅”等列时由于 return 逻辑而无反应。
         # 现在改为全行点击均联动，且强制获取焦点以增强稳定性。
-        code_item = self.stock_table.item(row, 0)
+        try:
+            idx_code = self.stock_cols.index("code")
+        except ValueError:
+            idx_code = 0
+        code_item = self.stock_table.item(row, idx_code)
         if code_item:
             code = code_item.text()
             if not self.stock_table.hasFocus():
@@ -4884,7 +5109,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             return
             
         # 记录当前选中的代码
-        item = self.stock_table.item(row, 0)
+        try:
+            idx_code = self.stock_cols.index("code")
+        except ValueError:
+            idx_code = 0
+        item = self.stock_table.item(row, idx_code)
         if item:
             self._last_selected_code = item.text()
 
@@ -4897,19 +5126,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not item:
             return
         row = item.row()
-        code = (self.stock_table.item(row, 0) or QTableWidgetItem()).text()
-        name = (self.stock_table.item(row, 1) or QTableWidgetItem()).text()
+        try:
+            idx_code = self.stock_cols.index("code")
+            idx_name = self.stock_cols.index("name")
+        except ValueError:
+            idx_code = 0
+            idx_name = 1
+        code = (self.stock_table.item(row, idx_code) or QTableWidgetItem()).text()
+        name = (self.stock_table.item(row, idx_name) or QTableWidgetItem()).text()
         if not code:
             return
 
         menu = QMenu(self)
         menu.addAction(f"🔗 联动 [{code}] {name}",
-                       lambda: self.on_stock_clicked(row, 0))
+                       lambda: self.on_stock_clicked(row, idx_code))
         menu.addAction(f"📈 主窗口定位",
-                       lambda: self.on_stock_clicked(row, 0))
+                       lambda: self.on_stock_clicked(row, idx_code))
         
         # [NEW] 定位所属板块
-        sector_name = (self.stock_table.item(row, 0) or QTableWidgetItem()).data(Qt.ItemDataRole.UserRole + 1)
+        sector_name = (self.stock_table.item(row, idx_code) or QTableWidgetItem()).data(Qt.ItemDataRole.UserRole + 1)
         if sector_name:
             menu.addAction(f"📂 定位所属板块: {sector_name}", lambda: self._locate_sector(sector_name))
             

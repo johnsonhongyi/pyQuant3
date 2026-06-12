@@ -708,6 +708,7 @@ class GlobalConfig:
         self.mem_threshold_mb = self.get_with_writeback("general", "mem_threshold_mb", fallback=1800, value_type="int")
         self.kline_cache_max_len = self.get_with_writeback("general", "kline_cache_max_len", fallback=300, value_type="int")
         self.concept_top10_window_col = self.get_with_writeback("general", "concept_top10_window_col", fallback=["code", "name", "rank", "percent", "dff", "volume","red","win"], value_type="list")
+        self.bidding_window_col = self.get_with_writeback("general", "bidding_window_col", fallback=["code", "name", "role", "price", "percent", "score", "price_diff", "dff","dff2","Rank", "trend", "hint"], value_type="list")
         self.periodic_report_interval = self.get_with_writeback("general", "periodic_report_interval", fallback=15, value_type="int") # [NEW] 定点播报周期(分钟)
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         self.sector_write_blk = self.get_with_writeback("general", "sector_write_blk", fallback='098.blk', value_type="str")
@@ -1019,6 +1020,7 @@ vis_column_map: Dict[str] = CFG.vis_column_map
 sector_write_blk: Dict[str] = CFG.sector_write_blk
 multiprocessingQueue: int = CFG.multiprocessingQueue
 concept_top10_window_col: List[str] = CFG.concept_top10_window_col
+bidding_window_col: List[str] = CFG.bidding_window_col
 hud_sector_cooldown: int = CFG.hud_sector_cooldown
 hud_global_suppression: int = CFG.hud_global_suppression
 vol_up_details_col: List[str] = CFG.vol_up_details_col
