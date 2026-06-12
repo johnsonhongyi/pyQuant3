@@ -30,118 +30,90 @@ class UniverseTreeItem(QTreeWidgetItem):
                 w2 = w2 if w2 is not None else 0
                 
                 # Keep root category nodes in static order: Radar (1) < Watchlist (2) < Trading (3)
-                # Regardless of sorting order (Ascending vs Descending)
                 order = tree.header().sortIndicatorOrder()
                 if order == Qt.SortOrder.DescendingOrder:
                     return w1 > w2
                 else:
                     return w1 < w2
-            # Safety fallback for cross-level comparison (not expected to happen)
             return is_self_root
             
-        # Otherwise, compare child stock rows
+        # Compare child stock rows based on the selected column
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            c1 = self.data(0, Qt.ItemDataRole.UserRole)
+            c2 = other.data(0, Qt.ItemDataRole.UserRole)
+            is_fav1 = c1 in fav_mgr.get_favorite_stocks() if c1 else False
+            is_fav2 = c2 in fav_mgr.get_favorite_stocks() if c2 else False
+            
+            if is_fav1 != is_fav2:
+                order = tree.header().sortIndicatorOrder()
+                if order == Qt.SortOrder.DescendingOrder:
+                    return is_fav1 < is_fav2
+                else:
+                    return is_fav1 > is_fav2
+        except Exception:
+            pass
+            
         t1 = self.text(column)
         t2 = other.text(column)
         
         import re
         
-        if column == 0:
-            # Code/Name sorting: extract 6-digit numeric stock code
-            c1_match = re.search(r'\d{6}', t1)
-            c2_match = re.search(r'\d{6}', t2)
-            if c1_match and c2_match:
+        # Helper to extract first float number
+        def extract_float(s):
+            match = re.search(r'[-+]?\d*\.?\d+', s)
+            if match:
                 try:
-                    c1_val = int(c1_match.group())
-                    c2_val = int(c2_match.group())
-                    if c1_val != c2_val:
-                        return c1_val < c2_val
-                except ValueError:
-                    pass
-            return t1 < t2
-            
-        elif column == 1:
-            def get_col1_val(text):
-                # Extract percentage first
-                pct_match = re.search(r'\(([-+]?\d*\.?\d+)%\)', text)
-                if pct_match:
-                    try:
-                        return float(pct_match.group(1))
-                    except:
-                        pass
-                # Fallback to first token price
-                try:
-                    tokens = text.split()
-                    if tokens:
-                        clean_p = tokens[0].replace('￥', '').replace('$', '').replace('+', '').strip()
-                        return float(clean_p)
+                    return float(match.group())
                 except:
                     pass
-                return None
+            return None
 
-            v1 = get_col1_val(t1)
-            v2 = get_col1_val(t2)
-            
-            if v1 is not None and v2 is not None:
-                if v1 != v2:
-                    return v1 < v2
-                # Fallback to code
-                try:
-                    c1 = int(re.search(r'\d{6}', self.text(0)).group())
-                    c2 = int(re.search(r'\d{6}', other.text(0)).group())
-                    return c1 < c2
-                except:
-                    return self.text(0) < other.text(0)
-            elif v1 is None and v2 is None:
-                return t1 < t2
-            elif v1 is None:
-                return False
-            elif v2 is None:
-                return True
-                
-        elif column == 2:
-            # Strategy/Position sorting: extract position percentage, e.g. "持仓中 (15%)"
-            pos_re = r'\((\d+)%\)'
-            po1_match = re.search(pos_re, t1)
-            po2_match = re.search(pos_re, t2)
-            
-            p1_val, p2_val = None, None
-            if po1_match:
-                try:
-                    p1_val = float(po1_match.group(1))
-                except ValueError:
-                    pass
-            if po2_match:
-                try:
-                    p2_val = float(po2_match.group(1))
-                except ValueError:
-                    pass
-                    
-            if p1_val is not None and p2_val is not None:
-                if p1_val != p2_val:
-                    return p1_val < p2_val
-                # Fallback to code
-                try:
-                    c1 = int(re.search(r'\d{6}', self.text(0)).group())
-                    c2 = int(re.search(r'\d{6}', other.text(0)).group())
-                    return c1 < c2
-                except:
-                    return self.text(0) < other.text(0)
-            elif p1_val is None and p2_val is None:
-                return t1 < t2
-            elif p1_val is None:
-                return False
-            elif p2_val is None:
-                return True
-        else:
-            # Fallback to alphanumeric text comparison
-            if t1 != t2:
-                return t1 < t2
+        if column == 0:
+            # Code sorting
             try:
-                c1 = int(re.search(r'\d{6}', self.text(0)).group())
-                c2 = int(re.search(r'\d{6}', other.text(0)).group())
-                return c1 < c2
+                v1 = int(t1.strip())
+                v2 = int(t2.strip())
+                return v1 < v2
             except:
-                return self.text(0) < other.text(0)
+                return t1 < t2
+        elif column == 1:
+            # Name sorting
+            return t1 < t2
+        elif column == 2:
+            # Price sorting
+            v1 = extract_float(t1)
+            v2 = extract_float(t2)
+            if v1 is not None and v2 is not None:
+                return v1 < v2
+            return t1 < t2
+        elif column == 3:
+            # Percent sorting
+            v1 = extract_float(t1)
+            v2 = extract_float(t2)
+            if v1 is not None and v2 is not None:
+                return v1 < v2
+            return t1 < t2
+        elif column == 4:
+            # Description / Status sorting
+            return t1 < t2
+        elif column == 5:
+            # Strategy / Position sorting: check for percentage e.g. "(15%)"
+            pos_re = r'\((\d+)%\)'
+            p1_match = re.search(pos_re, t1)
+            p2_match = re.search(pos_re, t2)
+            p1_val = float(p1_match.group(1)) if p1_match else None
+            p2_val = float(p2_match.group(1)) if p2_match else None
+            if p1_val is not None and p2_val is not None:
+                return p1_val < p2_val
+            elif p1_val is not None:
+                return True
+            elif p2_val is not None:
+                return False
+            return t1 < t2
+        else:
+            return t1 < t2
 
 
 class UniverseTreeWidget(QWidget):
@@ -161,7 +133,7 @@ class UniverseTreeWidget(QWidget):
 
         # Title / Search Bar
         header_layout = QHBoxLayout()
-        title_label = QLabel("🌌 策略股票池 (Multi-Tier Universe)")
+        title_label = QLabel("策略股票池 (Multi-Tier Universe)")
         title_label.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
         header_layout.addWidget(title_label)
         header_layout.addStretch()
@@ -176,8 +148,8 @@ class UniverseTreeWidget(QWidget):
 
         # Tree Widget
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["代码/名称", "最新价/涨幅", "筛选机制/持仓", "核心特征/追踪状态"])
-        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["代码", "名称", "现价", "涨幅", "核心特征/追踪状态", "筛选机制/持仓"])
+        self.tree.setColumnCount(6)
         self.tree.setAlternatingRowColors(True)
         
         # 1. 物理极限压缩缩进，解决“左边留空导致挤压显示位置”的视觉缺陷
@@ -189,8 +161,7 @@ class UniverseTreeWidget(QWidget):
         setup_header_persistence(
             self.tree,
             config_key="ats_universe_tree_state",
-            default_widths=[180, 100, 120, 200],
-            max_widths={3: 350}
+            default_widths=[75, 90, 75, 75, 200, 120]
         )
         
         self.tree.itemClicked.connect(self._on_item_clicked)
@@ -205,13 +176,13 @@ class UniverseTreeWidget(QWidget):
         self.tree.setSortingEnabled(False)
         self.tree.clear()
 
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
         # 1. Radar Pool
-        self.radar_root = UniverseTreeItem(self.tree)
-        self.radar_root.setText(0, "🌌 候选雷达池 (Radar Pool)")
-        self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1) # Radar Pool weight
-        
         radar_items = [
             ("600519", "贵州茅台", "1650.00", "+1.25%", "MA20强支撑", "回踩20日均线企稳中"),
             ("002415", "海康威视", "32.40", "+0.85%", "波段吸筹", "缩量小幅震荡企稳"),
@@ -219,139 +190,195 @@ class UniverseTreeWidget(QWidget):
             ("601318", "中国平安", "45.10", "+2.10%", "机构持仓异动", "拉升拉回布林中轨"),
             ("000333", "美的集团", "62.30", "-0.40%", "大消费弱回调", "缩量回踩布林下轨")
         ]
+        self.radar_root = UniverseTreeItem(self.tree)
+        self.radar_root.setText(0, f"候选雷达池 (Radar Pool) ({len(radar_items)})")
+        self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+        self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1) # Radar Pool weight
         
         for code, name, price, pct, strategy, desc in radar_items:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.radar_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            # Apply color based on percent sign
-            if pct.startswith("+"):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+"):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
 
         # 2. Watchlist Pool
-        self.watch_root = UniverseTreeItem(self.tree)
-        self.watch_root.setText(0, "📌 精选观察池 (Watchlist Pool)")
-        self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2) # Watchlist weight
-
         watch_items = [
             ("300750", "宁德时代", "185.50", "+3.80%", "MA20企稳突破", "黄金早盘爆量拉升"),
             ("600111", "北方稀土", "19.25", "+4.95%", "资源股复苏", "低开拉升冲破VWAP"),
             ("002594", "比亚迪", "245.00", "+2.50%", "新能源车风口", "日线收敛三角形突破")
         ]
+        self.watch_root = UniverseTreeItem(self.tree)
+        self.watch_root.setText(0, f"精选观察池 (Watchlist Pool) ({len(watch_items)})")
+        self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+        self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2) # Watchlist weight
 
         for code, name, price, pct, strategy, desc in watch_items:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.watch_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if pct.startswith("+"):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+"):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
 
         # 3. Trading Pool
-        self.trade_root = UniverseTreeItem(self.tree)
-        self.trade_root.setText(0, "💰 实盘交易池 (Trading Pool)")
-        self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3) # Trading Pool weight
-
         trade_items = [
             ("600030", "中信证券", "20.15", "+1.10%", "持仓中 (15%)", "基准+1.20% | 跟踪持股中"),
             ("000001", "平安银行", "10.45", "-0.95%", "持仓中 (10%)", "跌破VWAP警示 | 冷却防守")
         ]
+        self.trade_root = UniverseTreeItem(self.tree)
+        self.trade_root.setText(0, f"实盘交易池 (Trading Pool) ({len(trade_items)})")
+        self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+        self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3) # Trading Pool weight
 
         for code, name, price, pct, strategy, desc in trade_items:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.trade_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if pct.startswith("+"):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+"):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
 
         self.tree.expandAll()
-        auto_fit_columns_once(self.tree, "ats_universe_tree_state", max_widths={3: 350})
+        auto_fit_columns_once(self.tree, "ats_universe_tree_state")
         self.tree.setSortingEnabled(True)
 
     def update_pools(self, radar_list, watch_list, trade_list):
         self.tree.setSortingEnabled(False)
         self.tree.clear()
 
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
         # 1. Radar Pool
         self.radar_root = UniverseTreeItem(self.tree)
-        self.radar_root.setText(0, f"🌌 候选雷达池 (Radar Pool) ({len(radar_list)})")
+        self.radar_root.setText(0, f"候选雷达池 (Radar Pool) ({len(radar_list)})")
         self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1)
         for code, name, price, pct, strategy, desc in radar_list:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.radar_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
 
         # 2. Watchlist Pool
         self.watch_root = UniverseTreeItem(self.tree)
-        self.watch_root.setText(0, f"📌 精选观察池 (Watchlist Pool) ({len(watch_list)})")
+        self.watch_root.setText(0, f"精选观察池 (Watchlist Pool) ({len(watch_list)})")
         self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2)
         for code, name, price, pct, strategy, desc in watch_list:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.watch_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
 
         # 3. Trading Pool
         self.trade_root = UniverseTreeItem(self.tree)
-        self.trade_root.setText(0, f"💰 实盘交易池 (Trading Pool) ({len(trade_list)})")
+        self.trade_root.setText(0, f"实盘交易池 (Trading Pool) ({len(trade_list)})")
         self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3)
         for code, name, price, pct, strategy, desc in trade_list:
+            is_fav = code in fav_stocks
             item = UniverseTreeItem(self.trade_root)
-            item.setText(0, f"{code} {name}")
-            item.setText(1, f"{price} ({pct})")
-            item.setText(2, strategy)
-            item.setText(3, desc)
+            item.setText(0, code)
+            item.setText(1, f"⭐ {name}" if is_fav else name)
+            item.setText(2, price)
+            item.setText(3, pct)
+            item.setText(4, desc)
+            item.setText(5, strategy)
             item.setData(0, Qt.ItemDataRole.UserRole, code)
             item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(1, QColor(COLOR_UP))
+            if is_fav:
+                for col in range(6):
+                    item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(col, QColor("#00FF88"))
             else:
-                item.setForeground(1, QColor(COLOR_DOWN))
+                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                    item.setForeground(3, QColor(COLOR_UP))
+                else:
+                    item.setForeground(3, QColor(COLOR_DOWN))
         
         self.tree.expandAll()
-        auto_fit_columns_once(self.tree, "ats_universe_tree_state", max_widths={3: 350})
+        auto_fit_columns_once(self.tree, "ats_universe_tree_state")
         self.tree.setSortingEnabled(True)
 
     def _on_item_clicked(self, item, column):
@@ -372,7 +399,6 @@ class UniverseTreeWidget(QWidget):
         name = item.data(1, Qt.ItemDataRole.UserRole)
         if code and code != "root":
             parent_name = item.parent().text(0) if item.parent() else "未知股票池"
-            # 去除前缀 emoji 以便展示
             if "雷达" in parent_name:
                 pool_clean = "候选雷达池 (Radar Pool)"
             elif "精选" in parent_name:
@@ -382,8 +408,8 @@ class UniverseTreeWidget(QWidget):
             else:
                 pool_clean = parent_name
                 
-            strategy = item.text(2)
-            desc = item.text(3)
+            strategy = item.text(5)
+            desc = item.text(4)
             context_info = {
                 'position': f'策略股票池 -> {pool_clean}',
                 'reason': strategy,
@@ -392,10 +418,8 @@ class UniverseTreeWidget(QWidget):
             self.stock_selected.emit(code, name, context_info)
 
     def filter_tree(self, text):
-        # Simplistic filtering of items
         text = text.lower()
         if not text:
-            # Show all
             for i in range(self.tree.topLevelItemCount()):
                 root = self.tree.topLevelItem(i)
                 root.setHidden(False)
@@ -408,7 +432,7 @@ class UniverseTreeWidget(QWidget):
             root_visible = False
             for j in range(root.childCount()):
                 child = root.child(j)
-                txt = child.text(0).lower() + child.text(2).lower() + child.text(3).lower()
+                txt = "".join([child.text(col).lower() for col in range(6)])
                 if text in txt:
                     child.setHidden(False)
                     root_visible = True
@@ -427,6 +451,10 @@ class UniverseTreeWidget(QWidget):
             
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QAction
+        from global_favorites import GlobalFavoriteManager
+        
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = str(code).strip() in fav_mgr.get_favorite_stocks()
         
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -449,7 +477,25 @@ class UniverseTreeWidget(QWidget):
         copy_action = QAction(f"📋 复制股票代码 {code} ({name})", self)
         copy_action.triggered.connect(lambda: self._copy_to_clipboard(code))
         menu.addAction(copy_action)
+        
+        menu.addSeparator()
+        
+        if is_fav:
+            fav_action = QAction(f"❌ 取消重点关注 {code}", self)
+        else:
+            fav_action = QAction(f"⭐ 设为重点关注 {code}", self)
+        fav_action.triggered.connect(lambda: self._toggle_favorite(code))
+        menu.addAction(fav_action)
+        
         menu.exec(self.tree.mapToGlobal(pos))
+
+    def _toggle_favorite(self, code):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_mgr.toggle_favorite_stock(str(code).strip())
+        except Exception as e:
+            print(f"[Universe] Toggle favorite stock error: {e}")
 
     def _copy_to_clipboard(self, text):
         try:

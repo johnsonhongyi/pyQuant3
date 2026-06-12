@@ -21,6 +21,11 @@ class SectorHeatmapWidget(QWidget):
         super().__init__(parent)
         self._init_ui()
         self.load_live_sectors()
+        
+        # 5-second active auto-refresh for realtime responsiveness
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.load_live_sectors)
+        self.refresh_timer.start(5000)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -196,6 +201,7 @@ class SectorHeatmapWidget(QWidget):
             sector_counts = {}
             sector_changes = {}
             sector_leaders = {}
+            self.sector_to_codes = {}
             
             for code in v_reversal_pool:
                 code_str = str(code).strip()
@@ -203,6 +209,10 @@ class SectorHeatmapWidget(QWidget):
                 if not sec:
                     continue
                     
+                if sec not in self.sector_to_codes:
+                    self.sector_to_codes[sec] = []
+                self.sector_to_codes[sec].append(code_str)
+                
                 flag_info = consolidation_flags.get(code_str, {})
                 phase = flag_info.get('phase', 'INIT')
                 weight = phase_weights.get(phase, 20.0)
@@ -230,12 +240,14 @@ class SectorHeatmapWidget(QWidget):
             sectors_list = []
             for sec, count in sector_counts.items():
                 avg_score = sector_scores[sec] / count
+                # Incorporate active count momentum into sector intensity scoring to prioritize highly resonant hot sectors
+                intensity_score = avg_score * (1.0 + 0.15 * count)
                 avg_pct = sum(sector_changes[sec]) / len(sector_changes[sec])
                 change_pct_str = f"{avg_pct:+.2f}%"
                 
                 leader_code, _, leader_name = sector_leaders.get(sec, ('', 0.0, ''))
                 
-                sectors_list.append((sec, round(avg_score, 1), change_pct_str, count, leader_code, leader_name))
+                sectors_list.append((sec, round(intensity_score, 1), change_pct_str, count, leader_code, leader_name))
                 
             if sectors_list:
                 self.sectors = sectors_list
@@ -272,8 +284,10 @@ class SectorHeatmapWidget(QWidget):
                         data = json.loads(json_str)
                         sector_data = data.get('sector_data', {})
                         self._cached_session_sectors = []
+                        self.sector_to_codes = {}
                         if sector_data:
                             for sec_name, info in sector_data.items():
+                                self.sector_to_codes[sec_name] = []
                                 score = info.get('score', 0.0)
                                 avg_pct = info.get('avg_pct_diff') or info.get('avg_pct') or 0.0
                                 count = info.get('count') or len(info.get('followers', []))
@@ -281,6 +295,12 @@ class SectorHeatmapWidget(QWidget):
                                 leader_code = info.get('leader', '')
                                 leader_name = info.get('leader_name', '')
                                 self._cached_session_sectors.append((sec_name, round(score, 1), change_pct_str, count, leader_code, leader_name))
+                                if leader_code:
+                                    self.sector_to_codes[sec_name].append(str(leader_code).strip())
+                                for fol in info.get('followers', []):
+                                    f_code = fol.get('code')
+                                    if f_code:
+                                        self.sector_to_codes[sec_name].append(str(f_code).strip())
                         self._last_session_path = path
                         self._last_session_mtime = session_mtime
                 except Exception as e:
@@ -292,63 +312,94 @@ class SectorHeatmapWidget(QWidget):
                 return
 
         # 3. Fallback to mock sectors if all else fails
+        if not hasattr(self, 'sector_to_codes'):
+            self.sector_to_codes = {}
         if not hasattr(self, 'sectors') or not self.sectors:
             self.load_mock_sectors()
 
     def get_color_for_score(self, pct_str):
         try:
-            val = float(pct_str.replace("%", ""))
+            val = float(pct_str.replace("%", "").replace("+", ""))
         except:
             val = 0.0
         
-        # Color mapping:
-        # High positive -> bright crimson red
-        # Zero -> dark charcoal/grey
-        # High negative -> bright cyber green
+        # Premium dark technology translucent theme matching core styling
         if val > 0:
-            intensity = min(int(val * 50), 180) # scale factor
-            return f"background-color: rgb({70 + intensity}, 18, 28); border: 1px solid #ff4444;"
+            intensity = min(int(val * 40), 100)
+            bg = f"rgba({110 + intensity}, 20, 35, {0.18 + intensity/220.0:.2f})"
+            border = f"rgba(255, 68, 90, {0.35 + intensity/220.0:.2f})"
         elif val < 0:
-            intensity = min(int(abs(val) * 50), 180)
-            return f"background-color: rgb(12, {50 + intensity}, 28); border: 1px solid #33cc5a;"
+            intensity = min(int(abs(val) * 40), 100)
+            bg = f"rgba(15, {90 + intensity}, 45, {0.18 + intensity/220.0:.2f})"
+            border = f"rgba(40, 210, 95, {0.35 + intensity/220.0:.2f})"
         else:
-            return "background-color: #222228; border: 1px solid #3e3e4a;"
+            bg = "rgba(38, 38, 45, 0.25)"
+            border = "rgba(70, 70, 80, 0.35)"
+            
+        return bg, border
 
     def render_grid(self):
         # Clear layout first
         for i in reversed(range(self.grid_layout.count())): 
-            self.grid_layout.itemAt(i).widget().setParent(None)
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        fav_stocks = fav_mgr.get_favorite_stocks()
+        fav_sectors = fav_mgr.get_favorite_sectors()
 
         cols = 4  # 4 columns grid
         for idx, item in enumerate(self.sectors):
-            # Unpack safely supporting both 4-tuple and 6-tuple
             name, score, pct, count = item[:4]
             row = idx // cols
             col = idx % cols
 
             # Card Widget
             card = QPushButton()
-            card.setMinimumSize(120, 80)
+            card.setMinimumSize(120, 85)
             
-            # Label overlay
-            style = self.get_color_for_score(pct)
+            # Check if this sector or any stock inside is favorite
+            is_fav_sec = name in fav_sectors
+            sec_codes = getattr(self, 'sector_to_codes', {}).get(name, [])
+            has_fav_stock = any(c in fav_stocks for c in sec_codes)
+            is_highlight = is_fav_sec or has_fav_stock
+
+            if is_highlight:
+                bg_style = "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2A1A, stop:1 #111E11);"
+                border_style = "border: 1.5px solid rgba(255, 215, 0, 0.8);"
+                display_name = f"⭐ {name}"
+            else:
+                bg, border = self.get_color_for_score(pct)
+                bg_style = f"background-color: {bg};"
+                border_style = f"border: 1px solid {border};"
+                display_name = name
+            
+            # Premium card stylesheet with glowing borders and smooth scale/hover transition
             card.setStyleSheet(f"""
                 QPushButton {{
-                    {style}
+                    {bg_style}
+                    {border_style}
                     border-radius: 6px;
                     color: white;
                     text-align: center;
                 }}
                 QPushButton:hover {{
-                    border: 2.5px solid #ffffff;
+                    background-color: rgba(255, 255, 255, 0.08);
+                    border: 1.5px solid #ffffff;
                 }}
             """)
             
+            # Enable custom context menu for favorites management
+            card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            card.customContextMenuRequested.connect(lambda pos, n=name: self._show_sector_context_menu(pos, n))
+            
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(5, 5, 5, 5)
+            card_layout.setContentsMargins(4, 4, 4, 4)
             card_layout.setSpacing(2)
             
-            name_lbl = QLabel(name)
+            name_lbl = QLabel(display_name)
             name_lbl.setStyleSheet("font-weight: bold; color: #ffffff; background: transparent; font-size: 11pt;")
             name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
@@ -356,7 +407,7 @@ class SectorHeatmapWidget(QWidget):
             info_lbl.setStyleSheet("color: #e2e2e5; background: transparent; font-size: 9pt;")
             info_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            count_lbl = QLabel(f"活跃数: {count}")
+            count_lbl = QLabel(f"成员: {count}")
             count_lbl.setStyleSheet("color: #aad4ff; background: transparent; font-size: 8pt; font-style: italic;")
             count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -364,15 +415,89 @@ class SectorHeatmapWidget(QWidget):
             card_layout.addWidget(info_lbl)
             card_layout.addWidget(count_lbl)
             
-            # Connect action
             card.clicked.connect(lambda checked, n=name: self.sector_selected.emit(n))
             self.grid_layout.addWidget(card, row, col)
 
     def sort_sectors(self, index):
-        if index == 0: # By score desc
-            self.sectors.sort(key=lambda x: x[1], reverse=True)
-        elif index == 1: # By percent desc
-            self.sectors.sort(key=lambda x: float(x[2].replace("%", "")), reverse=True)
-        elif index == 2: # By active count desc
-            self.sectors.sort(key=lambda x: x[3], reverse=True)
+        def safe_float_pct(val_str):
+            try:
+                return float(str(val_str).replace("%", "").replace("+", ""))
+            except:
+                return 0.0
+
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        fav_stocks = fav_mgr.get_favorite_stocks()
+        fav_sectors = fav_mgr.get_favorite_sectors()
+        
+        def get_sort_key(x):
+            sec_name = x[0]
+            is_fav_sec = sec_name in fav_sectors
+            sec_codes = getattr(self, 'sector_to_codes', {}).get(sec_name, [])
+            has_fav_stock = any(c in fav_stocks for c in sec_codes)
+            is_highlight = is_fav_sec or has_fav_stock
+            
+            # Primary key: 0 if highlighted, 1 if not
+            prim = 0 if is_highlight else 1
+            
+            if index == 0:
+                sec_val = -float(x[1])
+            elif index == 1:
+                sec_val = -safe_float_pct(x[2])
+            else:
+                sec_val = -int(x[3])
+                
+            return (prim, sec_val)
+
+        self.sectors.sort(key=get_sort_key)
         self.render_grid()
+
+    def _show_sector_context_menu(self, pos, sector_name):
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        from global_favorites import GlobalFavoriteManager
+        
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = sector_name in fav_mgr.get_favorite_sectors()
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
+        
+        if is_fav:
+            fav_action = QAction(f"❌ 取消重点关注板块 {sector_name}", self)
+        else:
+            fav_action = QAction(f"⭐ 设为重点关注板块 {sector_name}", self)
+        
+        fav_action.triggered.connect(lambda: self._toggle_favorite_sector(sector_name))
+        menu.addAction(fav_action)
+        
+        sender_card = self.sender()
+        if sender_card:
+            global_pos = sender_card.mapToGlobal(pos)
+        else:
+            global_pos = self.mapToGlobal(pos)
+            
+        menu.exec(global_pos)
+
+    def _toggle_favorite_sector(self, sector_name):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_mgr.toggle_favorite_sector(sector_name)
+        except Exception as e:
+            print(f"[SectorHeatmap] Toggle favorite sector error: {e}")
