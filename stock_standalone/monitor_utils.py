@@ -24,11 +24,13 @@ def save_display_config(config_file: str, config: Dict[str, Any]) -> None:
 
 def save_monitor_list(monitor_list_file: str, monitor_windows_dict: Dict[str, Any], logger: Any) -> None:
     """保存当前的监控股票列表到文件"""
+    from sys_utils import resolve_stock_name
     monitor_list = [win['stock_info'] for win in monitor_windows_dict.values()]
     mo_list = []
     if len(monitor_list) > 0:
         for m in monitor_list:
-            stock_code = m[0]
+            m_copied = list(m)
+            stock_code = m_copied[0]
             if stock_code:
                 stock_code = stock_code.zfill(6)
 
@@ -36,11 +38,17 @@ def save_monitor_list(monitor_list_file: str, monitor_windows_dict: Dict[str, An
                 logger.info(f"错误请输入有效的6位股票代码:{m}")
                 continue
             
+            m_copied[0] = stock_code
+            if len(m_copied) < 2:
+                m_copied.append("")
+            
             # 确保结构升级：带 create_time
-            if len(m) < 4:
+            if len(m_copied) < 4:
+                while len(m_copied) < 3:
+                    m_copied.append("")
                 create_time = datetime.now().strftime("%Y-%m-%d %H")
-                m.append(create_time)
-            mo_list.append(m)
+                m_copied.append(create_time)
+            mo_list.append(m_copied)
             
         with open(monitor_list_file, "w", encoding="utf-8") as f:
             json.dump(mo_list, f, ensure_ascii=False, indent=2)
@@ -51,12 +59,22 @@ def save_monitor_list(monitor_list_file: str, monitor_windows_dict: Dict[str, An
 
 def load_monitor_list(monitor_list_file: str) -> List[List[Any]]:
     """从文件加载监控股票列表"""
+    from sys_utils import resolve_stock_name
     if os.path.exists(monitor_list_file):
         with open(monitor_list_file, "r", encoding="utf-8") as f:
             try:
                 loaded_list = json.load(f)
                 if isinstance(loaded_list, list) and all(isinstance(item, (list, tuple)) for item in loaded_list):
-                    return [list(item) for item in loaded_list]
+                    fixed_list = []
+                    for item in loaded_list:
+                        item_list = list(item)
+                        if len(item_list) > 0:
+                            code = str(item_list[0]).zfill(6)
+                            item_list[0] = code
+                            if len(item_list) < 2:
+                                item_list.append("")
+                            fixed_list.append(item_list)
+                    return fixed_list
                 return []
             except (json.JSONDecodeError, TypeError):
                 return []

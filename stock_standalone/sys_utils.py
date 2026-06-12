@@ -466,34 +466,176 @@ def ensure_all_configs_released():
     logger.info("✅ 抢占式预加载自愈释放完成，全物理安全屏障已建立。")
 
 _resolved_name_cache = {}
+_name_cache_lock = threading.Lock()
+_SINA_ENGINE = None
+
+def _load_name_cache():
+    global _resolved_name_cache
+    try:
+        path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        v_str = str(v).strip()
+                        k_str = str(k).strip().zfill(6)
+                        if v_str and not v_str.startswith("个股_") and not v_str.isdigit() and v_str != k_str:
+                            _resolved_name_cache[k_str] = v_str
+    except Exception as e:
+        logger.error(f"Failed to load stock name cache: {e}")
+
+    # 2. 如果发现缓存量过小（比如小于 4500 只，通常 A 股有 5000+），说明需要一次性灌入补齐，实现“一次干活终身受益”
+    if len(_resolved_name_cache) < 4500:
+        logger.info(f"⚡ [NameCache Bootstrap] Current cache size ({len(_resolved_name_cache)}) is small. Initiating full stock name bootstrap...")
+        boostrap_success = False
+        
+        # 尝试通过 Sina Engine 一次性读取并提取全量代码名字
+        try:
+            from JSONData import sina_data
+            engine = sina_data.Sina(readonly=True)
+            df = engine.all
+            if df is not None and not df.empty and 'name' in df.columns:
+                name_map = df['name'].to_dict()
+                added_count = 0
+                for k, v in name_map.items():
+                    k_clean = str(k).strip().zfill(6)
+                    v_clean = str(v).strip()
+                    if v_clean and not v_clean.startswith("个股_") and not v_clean.isdigit() and v_clean != k_clean:
+                        if k_clean not in _resolved_name_cache:
+                            _resolved_name_cache[k_clean] = v_clean
+                            added_count += 1
+                logger.info(f"✅ [NameCache Bootstrap] Successfully bootstrapped {added_count} names from Sina Engine (all). Total cached: {len(_resolved_name_cache)}")
+                boostrap_success = True
+        except Exception as e:
+            logger.warning(f"⚠ [NameCache Bootstrap] Sina Engine bootstrap failed: {e}")
+            
+        # 如果 Sina Engine 失败了，尝试通过 top_all.h5 数据库一次性提取
+        if not boostrap_success:
+            try:
+                base_dir = get_app_root()
+                import pandas as pd
+                for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+                    if os.path.exists(path):
+                        df_top = pd.read_hdf(path, 'top_all')
+                        if not df_top.empty and 'name' in df_top.columns:
+                            name_map = {}
+                            if df_top.index.name == 'code':
+                                name_map = df_top['name'].to_dict()
+                            elif 'code' in df_top.columns:
+                                name_map = dict(zip(df_top['code'].astype(str).str.zfill(6), df_top['name']))
+                            else:
+                                name_map = dict(zip(df_top.index.astype(str).str.zfill(6), df_top['name']))
+                            
+                            added_count = 0
+                            for k, v in name_map.items():
+                                k_clean = str(k).strip().zfill(6)
+                                v_clean = str(v).strip()
+                                if v_clean and not v_clean.startswith("个股_") and not v_clean.isdigit() and v_clean != k_clean:
+                                    if k_clean not in _resolved_name_cache:
+                                        _resolved_name_cache[k_clean] = v_clean
+                                        added_count += 1
+                            logger.info(f"✅ [NameCache Bootstrap] Successfully bootstrapped {added_count} names from top_all.h5 ({path}). Total cached: {len(_resolved_name_cache)}")
+                            boostrap_success = True
+                            break
+            except Exception as e:
+                logger.warning(f"⚠ [NameCache Bootstrap] top_all.h5 bootstrap failed: {e}")
+                
+        # 3. 如果成功灌入了新名字，一次性把全部名字持久化写入 stock_name_cache.json
+        if boostrap_success:
+            try:
+                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(_resolved_name_cache, f, ensure_ascii=False, indent=2)
+                logger.info(f"💾 [NameCache Bootstrap] Saved complete stock name database ({len(_resolved_name_cache)} entries) to {path}")
+            except Exception as e:
+                logger.error(f"Failed to save bootstrapped cache: {e}")
+
+def _save_to_name_cache(code: str, name: str):
+    global _resolved_name_cache
+    # 提取纯 6 位数字代码以保证缓存 key 的规范性
+    import re
+    code_clean = str(code).strip()
+    code_match = re.search(r'(\d{6})', code_clean)
+    if code_match:
+        code_clean = code_match.group(1)
+    else:
+        code_clean = code_clean.zfill(6)
+        
+    name_clean = str(name).strip()
+    if not name_clean or name_clean.startswith("个股_") or name_clean.isdigit() or name_clean == code_clean:
+        return
+    
+    with _name_cache_lock:
+        if _resolved_name_cache.get(code_clean) == name_clean:
+            return
+        _resolved_name_cache[code_clean] = name_clean
+        try:
+            path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            disk_data = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        disk_data = json.load(f)
+                except:
+                    pass
+            disk_data[code_clean] = name_clean
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(disk_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save stock name cache: {e}")
+
+# 执行初始化加载
+_load_name_cache()
 
 def resolve_stock_name(code_clean: str) -> str:
     """
-    高精度、多通道、带内存高速缓存与联网兜底的个股名字解析器。
+    高精度、多通道、带内存与磁盘高速持久化缓存的个股名字解析器。
     专门根治“个股_XXXXXX”或代码数字做名字等 placeholder 占位符问题。
+    首次解析成功后写入磁盘，绝对防止二次重复解析和多余的网络 API 请求。
     """
-    code_clean = str(code_clean).strip()
+    original_input = str(code_clean).strip()
+    code_clean = original_input
     # 剥离表情
     for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑']:
         code_clean = code_clean.replace(icon, '').strip()
-    code_clean = code_clean.zfill(6)
 
-    # 0. 内存高速缓存首位拦截，极速 O(1) 返回，避免无谓 of I/O 和网络请求
+    # 💥 关键修复：从输入中通过正则表达式提取 6 位纯数字股票代码，彻底治愈“个股_XXXXXX”等占位符
+    import re
+    code_match = re.search(r'(\d{6})', code_clean)
+    if code_match:
+        code_clean = code_match.group(1)
+    else:
+        # 如果确实不包含 6 位数字，说明可能是单纯的中文字符串名字，直接返回
+        if code_clean and not code_clean.startswith("个股_") and not code_clean.isdigit():
+            logger.debug(f"[resolve_stock_name] Input {original_input!r} has no 6-digit code. Returning as is: {code_clean!r}")
+            return code_clean
+        code_clean = code_clean.zfill(6)
+
+    # 0. 内存/磁盘高速缓存首位拦截，极速 O(1) 返回，避免无谓 of I/O 和网络请求
     global _resolved_name_cache
     if code_clean in _resolved_name_cache:
         cached_name = _resolved_name_cache[code_clean]
         if cached_name and not cached_name.startswith("个股_") and not cached_name.isdigit() and cached_name != code_clean:
             return cached_name
 
-    # 0.5 优先使用本地内置的 sina_data 行情引擎极速解析
+    logger.info(f"[resolve_stock_name] Start multi-channel resolution for code: {code_clean} (original: {original_input!r})")
+
+    # 0.5 优先使用本地内置 of sina_data 行情引擎极速解析
     try:
-        from JSONData import sina_data
-        local_name = sina_data.Sina(readonly=True).get_code_cname(code_clean)
+        global _SINA_ENGINE
+        if _SINA_ENGINE is None:
+            from JSONData import sina_data
+            _SINA_ENGINE = sina_data.Sina(readonly=True)
+        local_name = _SINA_ENGINE.get_code_cname(code_clean)
         if local_name and not local_name.startswith("个股_") and not local_name.isdigit() and local_name != code_clean:
-            _resolved_name_cache[code_clean] = local_name
+            logger.info(f"[resolve_stock_name] Channel 0.5 (Sina Engine) resolved {code_clean} -> {local_name}")
+            _save_to_name_cache(code_clean, local_name)
             return local_name
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[resolve_stock_name] Sina local engine failed: {e}", exc_info=True)
 
     # 1. 优先从 top_all.h5 里面解析
     base_dir = get_app_root()
@@ -513,10 +655,11 @@ def resolve_stock_name(code_clean: str) -> str:
                         name = name_map.get(code_clean)
                         if name and not str(name).startswith("个股_") and not str(name).isdigit() and name != code_clean:
                             res_name = str(name).strip()
-                            _resolved_name_cache[code_clean] = res_name
+                            logger.info(f"[resolve_stock_name] Channel 1 (top_all.h5) resolved {code_clean} -> {res_name}")
+                            _save_to_name_cache(code_clean, res_name)
                             return res_name
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[resolve_stock_name] top_all.h5 reading failed ({path}): {e}", exc_info=True)
 
     # 2. 其次从最新的竞价赛马快照中提取
     try:
@@ -543,12 +686,13 @@ def resolve_stock_name(code_clean: str) -> str:
                                     c = str(r.get("code") or "").strip().zfill(6)
                                     n = str(r.get("name") or "").strip()
                                     if c == code_clean and n and not n.startswith("个股_") and not n.isdigit() and n != code_clean:
-                                        _resolved_name_cache[code_clean] = n
+                                        logger.info(f"[resolve_stock_name] Channel 2 (racing snapshot) resolved {code_clean} -> {n}")
+                                        _save_to_name_cache(code_clean, n)
                                         return n
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+                    except Exception as e:
+                        logger.warning(f"[resolve_stock_name] racing json failed ({file}): {e}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"[resolve_stock_name] snapshots check failed: {e}", exc_info=True)
 
     # 3. 再其次从 logs/premarket_diagnose.json 中的历史记录中查找
     diagnose_file = os.path.join(base_dir, "logs", "premarket_diagnose.json")
@@ -568,38 +712,41 @@ def resolve_stock_name(code_clean: str) -> str:
                             if h_name_clean.startswith("回测_"):
                                 h_name_clean = h_name_clean[3:].strip()
                             if h_code_clean == code_clean and h_name_clean and not h_name_clean.startswith("个股_") and not h_name_clean.isdigit():
-                                _resolved_name_cache[code_clean] = h_name_clean
+                                logger.info(f"[resolve_stock_name] Channel 3 (premarket_diagnose.json) resolved {code_clean} -> {h_name_clean}")
+                                _save_to_name_cache(code_clean, h_name_clean)
                                 return h_name_clean
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[resolve_stock_name] premarket_diagnose failed: {e}", exc_info=True)
 
-    # 4. 终极网络兜底：通过新浪 API 联网拉取
-    import urllib.request
-    import re
-    # 格式化 code 加上 sh/sz/bj 前缀
-    prefix = "sh" if code_clean.startswith("6") else ("bj" if code_clean.startswith(("8", "4", "9")) else "sz")
-    url = f"http://hq.sinajs.cn/list={prefix}{code_clean}"
-    try:
-        req = urllib.request.Request(
-            url, 
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36',
-                'Referer': 'http://finance.sina.com.cn'
-            }
-        )
-        with urllib.request.urlopen(req, timeout=3) as response:
-            html = response.read().decode('gbk', errors='ignore')
-            # 格式：var hq_str_sh600000="浦发银行,..."
-            match = re.search(r'="([^,"]+)', html)
-            if match:
-                name = match.group(1).strip()
-                if name and not name.startswith("个股_") and not name.isdigit():
-                    logger.warning(f"🌐 [NETWORK-RESOLVE] Successfully fetched stock name for {code_clean} from Sina API: {name}")
-                    _resolved_name_cache[code_clean] = name
-                    return name
-    except Exception as e:
-        logger.error(f"Failed to fetch name from Sina for {code_clean}: {e}")
+    # 4. 终极网络兜底：通过新浪 API 联网拉取 (仅限 6 位纯数字代码)
+    if code_clean.isdigit() and len(code_clean) == 6:
+        import urllib.request
+        import re
+        # 格式化 code 加上 sh/sz/bj 前缀
+        prefix = "sh" if code_clean.startswith("6") else ("bj" if code_clean.startswith(("8", "4", "9")) else "sz")
+        url = f"http://hq.sinajs.cn/list={prefix}{code_clean}"
+        try:
+            req = urllib.request.Request(
+                url, 
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36',
+                    'Referer': 'http://finance.sina.com.cn'
+                }
+            )
+            with urllib.request.urlopen(req, timeout=3) as response:
+                html = response.read().decode('gbk', errors='ignore')
+                # 格式：var hq_str_sh600000="浦发银行,..."
+                match = re.search(r'="([^,"]+)', html)
+                if match:
+                    name = match.group(1).strip()
+                    if name and not name.startswith("个股_") and not name.isdigit():
+                        logger.warning(f"🌐 [NETWORK-RESOLVE] Successfully fetched stock name for {code_clean} from Sina API: {name}")
+                        _save_to_name_cache(code_clean, name)
+                        return name
+        except Exception as e:
+            logger.error(f"[resolve_stock_name] Failed to fetch name from Sina for {code_clean}: {e}")
 
+    logger.warning(f"[resolve_stock_name] All channels failed to resolve name for {code_clean}. Fallback to placeholder.")
     return f"个股_{code_clean}"
 
 

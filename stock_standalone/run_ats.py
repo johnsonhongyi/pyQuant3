@@ -33,6 +33,14 @@ def main():
     except Exception as e:
         print(f"[ATS Launcher] Failed to ensure backend running: {e}")
 
+    # try:
+    #     from sys_utils import resolve_stock_name
+    #     print(f"[ATS Test Resolve] Starting test resolve for 600000...")
+    #     resolved = resolve_stock_name('600000')
+    #     print(f"[ATS Test Resolve] Result for 600000 -> {resolved}")
+    # except Exception as e:
+    #     print(f"[ATS Test Resolve] Exception occurred: {e}")
+
     app = QApplication(sys.argv)
     window = ATSMainWindow()
     # For automated headless testing/validation, we can show then immediately close or verify window title.
