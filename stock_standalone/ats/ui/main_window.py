@@ -346,6 +346,11 @@ class ATSMainWindow(QMainWindow):
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
         self.stock_history_cache = {}
+        self.history_loading_codes = set()
+        self.history_failed_codes = set()
+        self.prices_loading_codes = set()
+        self.prices_failed_codes = set()
+        self._is_closing = False
         
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
@@ -1070,19 +1075,31 @@ class ATSMainWindow(QMainWindow):
         if not codes:
             return
         
+        # Filter out codes already loading or failed
+        codes_to_load = [c for c in codes if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
+        if not codes_to_load:
+            return
+            
+        for code in codes_to_load:
+            self.prices_loading_codes.add(code)
+            
         import threading
         def worker():
             try:
                 from JSONData import sina_data
                 s = sina_data.Sina()
                 
-                valid_codes = [c for c in codes if c and len(c) == 6]
+                valid_codes = [c for c in codes_to_load if c and len(c) == 6]
                 if not valid_codes:
+                    for code in codes_to_load:
+                        self.prices_loading_codes.discard(code)
+                        self.prices_failed_codes.add(code)
                     return
                     
                 # Direct online fetch using Sina's list data API to get real-time price and llastp
                 tick_df = s.get_stock_list_data(valid_codes)
                         
+                loaded_codes = set()
                 if tick_df is not None and not tick_df.empty:
                     for idx, row in tick_df.iterrows():
                         code_str = str(idx).strip().zfill(6)
@@ -1095,11 +1112,21 @@ class ATSMainWindow(QMainWindow):
                             pct = 0.0
                             
                         self.price_pct_cache[code_str] = (price, pct)
+                        loaded_codes.add(code_str)
                         
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(0, self.refresh_realtime_ui)
+                # Update loading/failed states
+                for code in codes_to_load:
+                    self.prices_loading_codes.discard(code)
+                    if code not in loaded_codes:
+                        self.prices_failed_codes.add(code)
+                        
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, self.refresh_realtime_ui)
             except Exception as e:
                 print(f"[ATSMainWindow] Error loading prices in background: {e}")
+                for code in codes_to_load:
+                    self.prices_loading_codes.discard(code)
+                    self.prices_failed_codes.add(code)
                 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1107,8 +1134,14 @@ class ATSMainWindow(QMainWindow):
         if not codes:
             return
         
-        # Mark as loading with empty lists
-        for code in codes:
+        # Filter out codes that are already loading or failed
+        codes_to_load = [c for c in codes if c not in self.history_loading_codes and c not in self.history_failed_codes]
+        if not codes_to_load:
+            return
+            
+        # Mark as loading
+        for code in codes_to_load:
+            self.history_loading_codes.add(code)
             if code not in self.stock_history_cache:
                 self.stock_history_cache[code] = []
                 
@@ -1119,36 +1152,50 @@ class ATSMainWindow(QMainWindow):
                 import os
                 path = 'g:\\sina_MultiIndex_data.h5'
                 if not os.path.exists(path):
+                    for code in codes_to_load:
+                        self.history_loading_codes.discard(code)
+                        self.history_failed_codes.add(code)
                     return
                 with pd.HDFStore(path, mode='r') as store:
-                    code_query = ", ".join([f"'{c}'" for c in codes])
+                    code_query = ", ".join([f"'{c}'" for c in codes_to_load])
                     df = store.select('/all_30', where=f"code in [{code_query}]")
                 
-                if df.empty:
-                    return
-                
-                dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
-                grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
-                
-                for (code, d), val in grouped.items():
-                    d_str = d.strftime("%Y-%m-%d")
-                    hist = self.stock_history_cache.get(code, [])
-                    if not any(item[0] == d_str for item in hist):
-                        hist.append((d_str, float(val)))
-                    self.stock_history_cache[code] = hist
+                loaded_codes = set()
+                if not df.empty:
+                    dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
+                    grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
                     
-                for code in codes:
-                    if code in self.stock_history_cache:
-                        self.stock_history_cache[code].sort(key=lambda x: x[0])
+                    for (code, d), val in grouped.items():
+                        d_str = d.strftime("%Y-%m-%d")
+                        hist = self.stock_history_cache.get(code, [])
+                        if not any(item[0] == d_str for item in hist):
+                            hist.append((d_str, float(val)))
+                        self.stock_history_cache[code] = hist
+                        loaded_codes.add(code)
+                        
+                    for code in codes_to_load:
+                        if code in self.stock_history_cache:
+                            self.stock_history_cache[code].sort(key=lambda x: x[0])
+                
+                # Update status of loading and failed codes
+                for code in codes_to_load:
+                    self.history_loading_codes.discard(code)
+                    if code not in loaded_codes:
+                        self.history_failed_codes.add(code)
                 
                 # Trigger thread-safe UI update
                 QTimer.singleShot(0, self.refresh_realtime_ui)
             except Exception as e:
                 print(f"[ATSMainWindow] Error loading history in background: {e}")
+                for code in codes_to_load:
+                    self.history_loading_codes.discard(code)
+                    self.history_failed_codes.add(code)
                 
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_realtime_ui(self):
+        if getattr(self, '_is_closing', False):
+            return
         has_df = self.current_df is not None and not self.current_df.empty
         
         # 1. Update prices/percents in universe_manager pools
@@ -1420,6 +1467,26 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Error saving layout state: {e}")
 
     def closeEvent(self, event):
+        self._is_closing = True
+        
+        # Stop main heartbeat timer
+        if hasattr(self, 'update_timer') and self.update_timer.isActive():
+            self.update_timer.stop()
+            
+        # Stop favorites watcher thread
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().shutdown()
+        except Exception as ex:
+            print(f"[ATSMainWindow] Error shutting down favorites: {ex}")
+            
+        # Stop IPC listener socket server
+        if hasattr(self, 'bridge') and self.bridge is not None:
+            try:
+                self.bridge.stop_listener()
+            except Exception as ex:
+                print(f"[ATSMainWindow] Error stopping IPC listener: {ex}")
+
         # Synchronously save all layout configurations and column widths on application exit
         try:
             # Unsubscribe from global favorites changes
@@ -1461,6 +1528,8 @@ class ATSMainWindow(QMainWindow):
         QTimer.singleShot(0, self._safe_favorites_changed)
 
     def _safe_favorites_changed(self):
+        if getattr(self, '_is_closing', False):
+            return
         try:
             # Refresh universe tree and swing table
             self.refresh_realtime_ui()

@@ -21,11 +21,6 @@ class SectorHeatmapWidget(QWidget):
         super().__init__(parent)
         self._init_ui()
         self.load_live_sectors()
-        
-        # 5-second active auto-refresh for realtime responsiveness
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.load_live_sectors)
-        self.refresh_timer.start(5000)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -79,6 +74,12 @@ class SectorHeatmapWidget(QWidget):
         self.sort_sectors(self.sort_combo.currentIndex())
 
     def load_live_sectors(self):
+        import time
+        now = time.time()
+        if hasattr(self, '_last_load_time') and now - self._last_load_time < 10.0:
+            return
+        self._last_load_time = now
+        
         import glob
         import gzip
         import re

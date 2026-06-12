@@ -31,28 +31,49 @@ class IPCBridge:
         Starts a daemon TCP server thread on the specified port.
         Listens for real-time market data updates or signals from the main process.
         """
+        self._listener_running = True
+        self.server_socket = None
+        
         def listen_loop():
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                server_socket.bind(('127.0.0.1', port))
-                server_socket.listen(5)
+                self.server_socket.bind(('127.0.0.1', port))
+                self.server_socket.listen(5)
                 print(f"[IPCBridge] Realtime listener server started on 127.0.0.1:{port}")
             except Exception as e:
                 print(f"[IPCBridge] Failed to bind realtime server to port {port}: {e}")
                 return
 
-            while True:
+            while self._listener_running:
                 try:
-                    conn, addr = server_socket.accept()
+                    conn, addr = self.server_socket.accept()
+                    if not self._listener_running:
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                        break
                     threading.Thread(target=self._handle_client, args=(conn, data_callback, signal_callback), daemon=True).start()
                 except Exception as e:
-                    print(f"[IPCBridge] accept error: {e}")
+                    if self._listener_running:
+                        print(f"[IPCBridge] accept error: {e}")
                     break
         
         t = threading.Thread(target=listen_loop, daemon=True)
         t.start()
         return t
+
+    def stop_listener(self):
+        """
+        Stops the realtime socket listener server cleanly by closing the socket.
+        """
+        self._listener_running = False
+        if hasattr(self, 'server_socket') and self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception as e:
+                print(f"[IPCBridge] Error closing server socket: {e}")
 
     def _handle_client(self, conn, data_callback, signal_callback):
         try:
@@ -82,6 +103,12 @@ class IPCBridge:
                             data_callback(body)
                         elif cmd == 'SIGNAL' and signal_callback:
                             signal_callback(body)
+                        elif cmd == 'SIGNALS' and signal_callback:
+                            for item in body:
+                                try:
+                                    signal_callback(item)
+                                except Exception as sig_err:
+                                    print(f"[IPCBridge] Error in batched signal callback: {sig_err}")
         except Exception as e:
             pass
         finally:

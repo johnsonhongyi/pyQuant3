@@ -152,12 +152,12 @@ def _ipc_sender_worker():
                 msg = f"CODE|SIGNAL|{payload}"
                 ipc_client.enqueue_command(msg)
 
-            # 4. [🚀 NEW] 同时分发给 ATS v2 终端的 Port 26670
-            import pickle
-            import struct
-            for item in batch:
+            # 4. [🚀 NEW] 同时分发给 ATS v2 终端的 Port 26670 (批量打包分发，减少 TCP 建立开销)
+            if batch:
+                import pickle
+                import struct
                 try:
-                    payload_ats = pickle.dumps(('SIGNAL', item), protocol=pickle.HIGHEST_PROTOCOL)
+                    payload_ats = pickle.dumps(('SIGNALS', batch), protocol=pickle.HIGHEST_PROTOCOL)
                     header_ats = struct.pack("!I", len(payload_ats))
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                         s2.settimeout(0.2)

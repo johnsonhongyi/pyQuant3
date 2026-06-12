@@ -55,6 +55,10 @@ class KernelTracePanel(QWidget):
             return
 
         try:
+            mtime = os.path.getmtime(path)
+            if getattr(self, '_last_mtime', 0.0) == mtime:
+                return
+            self._last_mtime = mtime
             # Read all lines safely
             lines = []
             with open(path, "r", encoding="utf-8") as f:

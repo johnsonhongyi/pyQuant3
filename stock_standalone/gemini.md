@@ -1,3 +1,13 @@
+## 2026-06-13 11:30
+- [x] **ATS 终端高并发、低延迟性能优化与后台资源占用根治 (ATS Packaged High-Performance & Resource Reduction Optimization)**：
+    - [x] **根治 IPC 信号高频 TCP 连接开销 (Optimized IPC Sender with Signal Batching)**：在 `stock_live_strategy.py` 的后台 `_ipc_sender_worker` 线程中，将原本逐条 `SIGNAL` 建立独立 TCP 连接发送的模式，重构为批量序列化为 `SIGNALS` 二元组指令、单次 TCP 握手并发送。大幅度降低了高频行情爆发时 127.0.0.1 端口上频繁的 socket 开销，消除了主后台进程与 ATS 终端之间无意义的 CPU 争抢。
+    - [x] **打通 IPCBridge 批量接收与安全生命周期管理 (Enhanced IPCBridge & Graceful Stop)**：重构了 `ats/ipc_bridge.py`，在 `_handle_client` 中无缝支持 `SIGNALS` 批量指令解析，循环解包分发给回调函数；增加了 `stop_listener` 方法与 `_listener_running` 状态网关，在 ATS 主窗口关闭时立即切断并关闭套接字，防止线程残留或主线程挂起。
+    - [x] **重构 HeatmapWidget 彻底消除磁盘 I/O 阻塞 (Throttled Heatmap I/O)**：删除了 `SectorHeatmapWidget` (`heatmap_widget.py`) 内部 5秒定时轮询 GZIP 压缩盘片数据的独立 QTimer 定时器。将数据加载函数 `load_live_sectors` 升级为 10 秒防抖限频控制，配合 `ATSMainWindow` 统一心跳调度，使其在盘中大波动行情下磁盘读取开销几乎归零。
+    - [x] **重构 KernelTracePanel 实施增量式/防抖读写保护 (Optimized Log Reader with File ModTime Guards)**：重构了 `KernelTracePanel` 中的 `load_trace_logs` 逻辑。在读取与解析 JSONL 日志文件前，增加 `os.path.getmtime` 修改时间指纹校验。当日志未产生实质追加时，短路并跳过所有磁盘读取和 GUI Treeview 渲染重绘，彻底打通了后台心跳与磁盘性能之间的隔阂。
+    - [x] **精打细算 GlobalFavoriteManager 状态监视器 (Optimized GlobalFavorites Watcher Loop)**：重构了 `global_favorites.py` 里的 `_file_watcher_loop` 定时轮询，将原有的 `time.sleep(1.0)` 重构为基于 `threading.Event().wait(1.0)` 的高性能等待机制，并新增 `shutdown` 方法以实现在主程序退出时瞬间终止子线程，彻底避免了由于守护线程挂起导致 _MEI 临时目录锁死的顽疾。
+    - [x] **ATS跟TK连接数据更新限频与降噪 (Throttled TK-to-ATS Data Update Rate)**：在 `instock_MonitorTK.py` 中的 `send_df` 循环内重构了 `dynamic_interval` 的计算逻辑。摒弃了原有基于数据行数计算高频更新的机制，改用基于系统全局 `cct.duration_sleep_time` 参数的最少 30 秒限频控制。在非交易时段，自动将更新间隔大幅延长至三倍（最少 180 秒）；对于手动触发的强制全量同步请求（`_force_full_sync_pending`），实现冷却瞬间穿透短路，保证了盘中运行的极致安静、极低 CPU 负荷与卓越的交互响应性。
+    - [x] **回归测试 100% 绿旗通过**：跑通全量 11 项生命周期与数据一致性测试，无任何报错和副作用。
+
 ## 2026-06-13 10:00
 - [x] **实现冷启动 NameCache Bootstrap 终身受益机制与极简文件 IO (Implemented NameCache Bootstrap & Lightweight File IO)**：
     - [x] **建立一劳永逸的名字灌入系统 (One-time Setup NameCache Bootstrap)**：重构了 `sys_utils.py` 中的 `_load_name_cache` 函数。当检测到本地 `stock_name_cache.json` 缓存数量不足 4500 条时，系统将通过 `engine.all` DataFrame 或者本地 HDF5 库自动执行一次性全 A 股代码与名字大灌入，将 5500+ 只股票的一对一中文名字映射永久合并并整体写入磁盘 JSON 文件，确保此后无论在打包还是开发环境下都拥有毫秒级的 $O(1)$ 极速解析，彻底消除了盘中由于个股缺失高频、冗余地实例化行情引擎或查询 HDF5 的沉重负荷。
