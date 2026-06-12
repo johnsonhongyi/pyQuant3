@@ -1,7 +1,36 @@
+## 2026-06-13 10:00
+- [x] **实现冷启动 NameCache Bootstrap 终身受益机制与极简文件 IO (Implemented NameCache Bootstrap & Lightweight File IO)**：
+    - [x] **建立一劳永逸的名字灌入系统 (One-time Setup NameCache Bootstrap)**：重构了 `sys_utils.py` 中的 `_load_name_cache` 函数。当检测到本地 `stock_name_cache.json` 缓存数量不足 4500 条时，系统将通过 `engine.all` DataFrame 或者本地 HDF5 库自动执行一次性全 A 股代码与名字大灌入，将 5500+ 只股票的一对一中文名字映射永久合并并整体写入磁盘 JSON 文件，确保此后无论在打包还是开发环境下都拥有毫秒级的 $O(1)$ 极速解析，彻底消除了盘中由于个股缺失高频、冗余地实例化行情引擎或查询 HDF5 的沉重负荷。
+    - [x] **精炼自选股与监控列表持久化通道 (Removed Redundant Lookup in File IO)**：重构了 `monitor_utils.py` 里的 `save_monitor_list` 与 `load_monitor_list` 逻辑。去除了读写 `monitor_category_list.json` 文件时对名字的强行补齐解析，将文件读写还原为纯粹的序列化和反序列化物理流。使底层 IO 绝对纯净，将个股名字的补齐工作完全交给 UI 渲染层与高性能双层缓存的搭配，显著降低了自选股保存时的 CPU 消耗。
+    - [x] **修复 NameCache Bootstrap 对 Sina Engine 依赖的崩溃缺陷**：修复了在 Sina 引擎未完整访问 `Sina.all` 属性时 `engine.stockcode` 默认仍为 `None` 导致 `NoneType has no attribute cname_dict` 的异常警告。重构为通过 `engine.all` 属性的 `name` 列直接提取完整映射。
+    - [x] **修复 MonitorTK 多重 Qt 绑定编译冲突**：在 `instock_MonitorTK.spec` 的 `excludes` 列表中排除 `PyQt6` 相关模块，彻底根治了由于双重 Qt 框架导入导致 PyInstaller 抛出 `attempt to collect multiple Qt bindings packages` 错误被迫中止打包的顽疾。
+
+## 2026-06-13 09:15
+- [x] **修复股票名称解析提取与防越界崩溃 Bug (Fixed Stock Name Resolution Extraction & Out-of-Bounds Crash Bug)**：
+    - [x] **实现强健的 6 位数字代码正则提取**：在 `sys_utils.py` 的 `resolve_stock_name` 函数中，引入了精准的正则表达式 `r'(\d{6})'` 以从各种不规则占位符（如 `"个股_600000"`、`"🔴个股_600000"`、`"sh600000"`、`"000002.SZ"` 等）中干净提取出 6 位纯数字股票代码。
+    - [x] **修复打包环境下 `JSONData` 导入并优化其加载检测性能 (Fixed & Restored Packaging Support for Sina Local Engine)**：
+        - 从 `ats.spec` 的 `excludes` 中正式剔除了 `tables` (PyTables) 与 `h5py`；同时将 `JSONData`、`JSONData.sina_data`、`tables`、`h5py` 添加至 `hiddenimports` 中，使得打包后的 `ATS_Terminal.exe` 可以正常加载本地行情引擎。
+        - 引入全局缓存变量 `_SINA_DATA_AVAILABLE`，在程序首次调用 `resolve_stock_name` 时对 `JSONData.sina_data.Sina` 引擎的可导入性与可用性做一次性安全探测，后续调用通过状态缓存直接短路，彻底根治了因打包依赖不齐高频抛出/捕获 `ImportError` 带来的 CPU 负担与 UI 卡顿。
+    - [x] **限制网络 API 访问与防止编码崩溃**：对网络 API（新浪 API）的查询进行了物理限制，只有提取出合法的 6 位纯数字代码时才允许发起网络请求。有效拦截了由于传入包含 emoji 或非 ASCII 占位符字符串在 Windows 环境下抛出的 `UnicodeEncodeError` 崩溃。
+    - [x] **打通多层解析通道的自测自检日志**：为名称解析的各层路由（内存缓存、本地新浪引擎、HDF5数据库、Racing快照、盘前诊断、新浪网络 API 等）补齐了详细的 logger 跟踪输出，大幅提升了盘中及初始化阶段解析链路的可回溯性。
+    - [x] **编写专属测试脚本并跑通全量测试**：创建了 `scratch/test_resolve_name.py` 验证脚本，并在控制台下顺利跑通所有包含各种占位符的前缀/后缀/emoji 混合输入的测试用例，全量 `pytest test_watchlist_lifecycle.py` 11 项生命周期集成测试 100% 绿旗通过。
+
+## 2026-06-13 09:00
+- [x] **实现高吞吐个股名称内存-磁盘双层持久化缓存与自愈净化 (Implemented High-Performance Stock Name Dual-Layer Caching & Self-Healing)**：
+    - [x] **建立 `stock_name_cache.json` 物理持久化库**：在 `sys_utils.py` 中实现了 `_load_name_cache` 和 `_save_to_name_cache`。在程序初始化时毫秒级载入历史已解析个股名称，并在解析成功时利用线程锁（`_name_cache_lock`）安全原子写入磁盘 `datacsv/stock_name_cache.json`。这从根本上杜绝了多次启动时重复调用新浪网络 API 和 H5 磁盘读取，有效防止主进程卡死和网络资源浪费。
+    - [x] **实施自选股列表源头物理净化**：在 `monitor_utils.py` 的 `save_monitor_list` 和 `load_monitor_list` 中，接入了 `resolve_stock_name` 自愈引擎。在读写 `monitor_category_list.json` 时，自动拦截并纠正“个股_XXXXXX”或代码等不规范 placeholder 占位符，实现自愈写回，保证物理存储的绝对干净和无二次冗余解析。
+    - [x] **回归测试 100% 顺利跑通**：成功运行 `pytest test_watchlist_lifecycle.py`，11 个测试用例无一失败。
+
+## 2026-06-13 08:00
+- [x] **修复打包后 EXE 无法运行/闪退的问题 (Fixed Package EXE Execution/Crash Issues)**：
+    - [x] **完全剥离非主进程（如独立 ATS 终端）对 Tkinter 模块的深层耦合**：由于 `global_favorites.py` 曾在顶层导入了 `tk_gui_modules.gui_config`，在单独打包 PyQt 架构的 `ATS_Terminal.exe` 时，会导致未打入 `tk_gui_modules` 依赖而抛出 `ModuleNotFoundError` 闪退，或在运行时载入 Tk 库产生双重 GUI 事件循环冲突崩溃。现已通过调用 `sys_utils` 重新计算 `WINDOW_CONFIG_FILE` 路径，完全剥离了对 `tk_gui_modules` 的强导入依赖。
+    - [x] **根治后台守护线程动态 Import 导致的导入锁死 (Avoided Threaded Dynamic Import Deadlocks)**：将 `FavoritesWatcher` 后台线程内的 `import time` 动态导入移到了文件最顶层，消除了 Python 虚拟机和 Nuitka/PyInstaller 在多线程打包时因导入锁（Import Lock）冲突导致的随机卡死/无法启动问题。
+    - [x] **回归测试 100% 顺利跑通**：成功运行 `pytest test_watchlist_lifecycle.py`，11 个测试用例无一失败。
+
 ## 2026-06-13 06:00
 - [x] **修复 Alt+P 快捷键在主控制台窗口中双重触发导致首次无效的 Bug (Fixed Alt+P Duplicate Triggering Bug)**：
     - [x] **引入 300ms 防抖防重入机制**：在 `instock_MonitorTK.py` 的 `open_ats_panel` 方法头部引入基于时间戳的重入保护。若两次触发间隔小于 0.3 秒，则直接判定为重复事件并进行拦截。这彻底根治了当主控制台（Tk 窗口）处于活动状态时，按下 Alt+P 同时触发 Tk 本地键盘事件与全局热键后台管道消息，造成“显示-隐藏”瞬间抵消、用户必须按两次才能唤出面板的体验问题。
-    - [x] **测试通过验证**：跑通全量 15 个单元/集成测试用例，确保无任何运行期和退出期冲突。
+    - [x] **测试通过验证**：跑通全量 15 个单元/集成测试用例，确保无任何运行期 and 退出期冲突。
 
 ## 2026-06-13 05:00
 - [x] **修复 ATS 终端重点关注切换时数据丢失与界面排版损坏问题并加固测试 (Fixed ATS UI Data Loss and Layout Corruption on Favorites Toggle & Test Hardening)**：

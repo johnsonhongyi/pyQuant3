@@ -3,8 +3,17 @@ import os
 import json
 import logging
 import threading
+import time
 from typing import Set, Callable
-from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+import sys_utils
+
+_base_dir = sys_utils.get_app_root()
+def _get_fav_config_path(filename="window_config.json"):
+    path = sys_utils.get_conf_path(filename, _base_dir)
+    if not path:
+        path = os.path.join(_base_dir, filename)
+    return str(path)
+WINDOW_CONFIG_FILE = _get_fav_config_path("window_config.json")
 
 logger = logging.getLogger("instock_TK.GlobalFavoriteManager")
 
@@ -77,7 +86,6 @@ class GlobalFavoriteManager:
             self.load_from_config(path)
             
     def _file_watcher_loop(self):
-        import time
         while not self._watcher_stop.is_set():
             try:
                 time.sleep(1.0)
