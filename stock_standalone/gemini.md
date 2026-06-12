@@ -1,3 +1,35 @@
+## 2026-06-12 17:35
+- [x] **ATS系统自测自检与核心功能验证 (ATS Self-Testing & Core Functionality Verification)**:
+    - [x] **运行全量测试用例并分析结果 (Run All Test Cases and Analyze Results)**: 运行 `pytest` 跑通了全部 52 项单元与集成测试。
+    - [x] **编制系统级自测自检能力报告 (Compile System-Level Self-Testing Report)**: 梳理 5 大类测试模块（生命周期、核心管道、日内决策、安全网关、交易内核与风控），整理测试指令和测试覆盖度，写入专门的 Artifact 报告中。
+    - [x] **检查核心实盘与模拟数据管道状态 (Verify Live and Simulation Data Pipeline Status)**: 确保 `IPCBridge` (Port 26670) 的实时消息路由与 `current_df` 快照在非交易时段的安全回退自愈正常。
+
+## 2026-06-12 04:00
+- [x] **实现实时行情管道绑定、UniverseManager动态过滤与SwingStateTable实盘对接 (Implemented Real-Time Pipeline Binding, Dynamic Filtering & Live Swing State Integration)**:
+    - [x] **打通 UniverseManager 实时数据驱动 funnels (Connected UniverseManager to Live IPC Stream)**: 在 `ATSMainWindow` 中引入 `UniverseManager`。并在 `load_db_data` 阶段，将原本静态/Mock 的个股及持仓池加载重构为将真实 SQLite 历史信号及 open positions 灌入 `universe_manager`，然后调用 `get_pools()` 来初始化 Tree Widget 视图。
+    - [x] **后台异步预加载/补齐历史数据 (Background Lazy-Loading of Historical OHLCV)**: 引入 `_async_load_stock_history(codes)`，在启动或收到实时行情遇到未缓存历史的个股时，自动在后台线程中利用 `pd.HDFStore` 和 `select('/all_30')` 提取历史收盘序列并填充 `stock_history_cache`，最终触发 thread-safe QTimer 回调更新，消除了主线程读取大文件带来的假死与 IO 阻塞。
+    - [x] **实盘行情驱动的 MA20d 回调状态机自愈计算 (Live MA20d Swing State Calculations)**: 在 `refresh_realtime_ui()` 中，将实时 `current_df` 行情与后台缓存的历史收盘价序列无缝拼接（对齐当天最新价），计算滚动 MA20 和 MA5。随后直接调起 `SwingTracker.update_stock_state` 对雷达/观察/交易三池中的个股进行状态机转移与推荐理由计算。
+    - [x] **SwingStateTable 彻底脱离 Mock (Decoupled Swing State Table from Mock)**: 重写了 `SwingStateTable` 的初始化，取消启动时的 mock 装填，并将 "🔄 刷新状态" 按钮绑定至 `load_db_data(force=True)`；由 `ATSMainWindow` 统一通过 `update_data_list(swing_rows)` 投递真实的实盘计算结果。
+    - [x] **11 项核心回归测试与集成测试 100% 绿旗跑通 (100% Pass of All Tests)**: 执行 `pytest test_watchlist_lifecycle.py` 以及运行 Launcher 的 `ATS_TEST_MODE` 集成测试，均完美通过且退出无任何线程残留与死锁。
+
+## 2026-06-12 03:45
+- [x] **进一步加固股票名称解析逻辑 (Further Solidified Stock Name Resolution Fallback)**:
+    - [x] **引入 local Sina 数据库作为兜底查询 (Added Local Sina Database Fallback)**: 在 `get_stock_name(code)` 中新增了第四级兜底。若缓存、实时行情、以及 SQLite 本地交易与信号历史中都未检索到名称时，直接从本地加载的 `Sina` 行情全量库 `get_code_cname(code)` 中获取名称。这完美解决了如 `605589`（圣泉集团） and `301123`（奕东电子）等仅存在于纸面持仓文件（`paper_account_state.json`）但本地数据库无历史交易且非开盘交易时段的冷启动个股大面积显示为“未知”的缺陷。
+    - [x] **11 项核心回归测试 100% 绿旗通过 (100% Pass of All 11 Watchlist Regression Tests)**: 运行 `pytest test_watchlist_lifecycle.py` 测试用例无任何异常。
+
+## 2026-06-12 03:30
+- [x] **优化全局股票名称解析与冷启动性能 (Optimized Authoritative Stock Name Resolution & Cold-start Performance)**:
+    - [x] **实现分层多重股票名称查询 (Hierarchical Name Resolution Fallback Chain)**: 在 `ATSMainWindow` 中引入了 `get_stock_name(code)` 的多级 high-reliability 提取机制。依次通过缓存（`name_cache`）-> 实时快照内存数据（`current_df`）-> SQLite数据库底层检索，消除了高频刷新或冷启动时个股名称因没有实时广播而显示为"未知"的缺陷。
+    - [x] **在板块成分股对话框中接入名称查询链 (Unified Name Resolution in Sector Detail Dialog)**: 重构了 `ATSSectorDetailDialog` 以使其通过父窗口继承并直接调用 `get_stock_name`。彻底解决了板块龙头与成分个股列表在未接收到最新 Tick 行情广播时，大面积显示为"未知"的缺陷，提升了数据完整度。
+    - [x] **落地毫秒级 Pandas 向量化更新 (Fast Vectorized Name Cache Updates)**: 废除了在 `load_db_data` 中逐行循环遍历 `current_df.iterrows()` 更新缓存的低效做法，重构为 Pandas 向量化的一键式更新机制 `_update_name_cache_from_df`，并在 `_handle_realtime_data` 行情广播接收点高频复用，将耗时从秒级降低至亚毫秒级，根治了主线程 I/O 阻塞造成的卡顿与假死。
+    - [x] **通过 11 项核心回归测试 100% 绿旗通过 (100% Pass of All 11 Watchlist Regression Tests)**: 运行 `pytest test_watchlist_lifecycle.py` 测试用例无任何异常。
+
+## 2026-06-12 03:00
+- [x] **实现实时交易与决策内核流水的响应式对接与看板心跳同步 (Implemented Reactive Integration of Live Trading & Kernel Trace Logs)**：
+    - [x] **接入 KernelTracePanel 并实现实时决策日志跟踪 (Kernel Trace Panel Integration)**：在 `ATSMainWindow` 中引入了 `KernelTracePanel` 并接入到中央 QTabWidget 标签页，支持高频解析 `trading_kernel_trace.jsonl` 中决策流水的实时追踪。同时在 `StockDetailDialog` 详情窗口内，自动对目标股票的内核日志进行实时深度检索与统计，展示如内核决策动作、置信度、风控状态及触发原因等量化指标。
+    - [x] **落地 paper_account_state.json 纸面账户实盘同步 (Live Paper Account Sync)**：在 `ATSMainWindow.load_db_data()` 中实现了实盘与 SQLite 数据库的双轨混合提取，优先加载并反解实盘 `logs/paper_account_state.json` 里的实时可用资金、最新持仓和流水记录，完成了与真实量化内核状态的物理对齐。
+    - [x] **建立 3秒高频自愈心跳与监听保护 (3s Heartbeat Sync & Auto-Initialization)**：在 `ATSMainWindow.__init__` 中初始化 `self._listener_started = False` 防重置标志，并将全局 QTimer 定时刷新心跳调整至 3000ms。每次心跳不仅自动更新持仓、资金与交易流，还同步拉取最新板块热力图及内核决策流水，确保各面板间 100% 数据一致性。
+
 ## 2026-06-12 02:40
 - [x] **修复双击打包 EXE 弹出多个 ATS 窗口的缺陷 (Fixed Multiple ATS Windows Spawning on Compiled EXE Double-Click)**：
     - [x] **根本原因诊断 (Root Cause)**：

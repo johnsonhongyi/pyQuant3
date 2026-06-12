@@ -21,11 +21,6 @@ class SectorHeatmapWidget(QWidget):
         super().__init__(parent)
         self._init_ui()
         self.load_live_sectors()
-        
-        # Periodic update timer for live bidding sectors
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.load_live_sectors)
-        self.timer.start(3000) # update every 3 seconds
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -79,6 +74,175 @@ class SectorHeatmapWidget(QWidget):
         self.sort_sectors(self.sort_combo.currentIndex())
 
     def load_live_sectors(self):
+        import glob
+        import gzip
+        import re
+        import zlib
+        
+        # 1. Try to find the latest v_reversal_pool backup in logs/
+        base = get_app_root()
+        logs_dir = os.path.join(base, "logs")
+        pattern = os.path.join(logs_dir, "v_reversal_pool_*.json.gz")
+        files = sorted(glob.glob(pattern))
+        
+        v_reversal_data = None
+        fpath = files[-1] if files else None
+        
+        # Determine latest reversal path and check if changed
+        ram_path = None
+        if not fpath:
+            try:
+                ram_path = cct.get_ramdisk_path("v_reversal_pool.json")
+            except Exception:
+                pass
+                
+        latest_reversal_path = fpath if fpath else ram_path
+        latest_reversal_mtime = os.path.getmtime(latest_reversal_path) if latest_reversal_path and os.path.exists(latest_reversal_path) else 0
+        
+        if latest_reversal_path and os.path.exists(latest_reversal_path):
+            if (getattr(self, '_last_reversal_path', None) != latest_reversal_path or 
+                getattr(self, '_last_reversal_mtime', None) != latest_reversal_mtime or 
+                not hasattr(self, '_cached_v_reversal_pool')):
+                try:
+                    if latest_reversal_path.endswith('.gz'):
+                        with gzip.open(latest_reversal_path, 'rb') as f:
+                            raw_data = f.read()
+                    else:
+                        with open(latest_reversal_path, 'rb') as f:
+                            raw_data = f.read()
+                    try:
+                        v_reversal_data = json.loads(raw_data.decode('utf-8'))
+                    except Exception:
+                        json_str = zlib.decompress(raw_data).decode('utf-8')
+                        v_reversal_data = json.loads(json_str)
+                        
+                    if v_reversal_data:
+                        self._cached_v_reversal_pool = v_reversal_data.get('v_reversal_pool', [])
+                        self._cached_consolidation_flags = v_reversal_data.get('consolidation_flags', {})
+                        self._last_reversal_path = latest_reversal_path
+                        self._last_reversal_mtime = latest_reversal_mtime
+                except Exception as e:
+                    print(f"[SectorHeatmapWidget] Error loading reversal pool {latest_reversal_path}: {e}")
+        
+        has_reversal = hasattr(self, '_cached_v_reversal_pool') and self._cached_v_reversal_pool
+        
+        if has_reversal:
+            v_reversal_pool = self._cached_v_reversal_pool
+            consolidation_flags = self._cached_consolidation_flags
+            
+            # Map codes to sector
+            stock_to_sector = {}
+            main_win = self.window()
+            p = self.parent()
+            while p:
+                if hasattr(p, 'current_df'):
+                    main_win = p
+                    break
+                p = p.parent()
+                
+            current_df = None
+            if main_win and hasattr(main_win, 'current_df'):
+                current_df = main_win.current_df
+                
+            # Vectorized category extraction from current_df (takes < 1ms instead of ~1500ms)
+            if current_df is not None and not current_df.empty and 'category' in current_df.columns:
+                try:
+                    cats = current_df['category'].dropna()
+                    temp_map = {str(k).strip(): str(v).split(';')[0].strip() for k, v in cats.to_dict().items() if str(v).strip()}
+                    stock_to_sector.update(temp_map)
+                except Exception as e:
+                    print(f"[SectorHeatmapWidget] Error extracting categories: {e}")
+                            
+            # Lazy loaded fallback mapping from recent daily bidding snapshots (once)
+            if not hasattr(self, '_bidding_stock_to_sector'):
+                self._bidding_stock_to_sector = {}
+                try:
+                    snapshot_files = glob.glob(os.path.join(base, "snapshots", "bidding_*.json.gz"))
+                    valid_snapshots = [f for f in snapshot_files if re.search(r'bidding_\d{8}\.json\.gz$', f)]
+                    valid_snapshots = sorted(valid_snapshots, reverse=True)
+                    for spath in valid_snapshots[:3]:
+                        try:
+                            with open(spath, 'rb') as f:
+                                raw_data = f.read()
+                            json_str = zlib.decompress(raw_data).decode('utf-8')
+                            data = json.loads(json_str)
+                            sector_data = data.get('sector_data', {})
+                            for sec_name, info in sector_data.items():
+                                if info.get('leader'):
+                                    self._bidding_stock_to_sector[str(info.get('leader')).strip()] = sec_name
+                                for fol in info.get('followers', []):
+                                    if fol.get('code'):
+                                        self._bidding_stock_to_sector[str(fol.get('code')).strip()] = sec_name
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            
+            # Combine real-time categories and snapshot fallbacks
+            for k, v in self._bidding_stock_to_sector.items():
+                if k not in stock_to_sector:
+                    stock_to_sector[k] = v
+                    
+            # Perform aggregation
+            phase_weights = {
+                "二次拉升": 100.0, "WAVE_UP_2": 100.0,
+                "首波拉升": 80.0, "WAVE_UP": 80.0,
+                "缩量回踩": 60.0, "PULLBACK": 60.0,
+                "横盘潜伏": 40.0, "CONSOLIDATING": 40.0,
+                "初始状态": 20.0, "INIT": 20.0
+            }
+            
+            sector_scores = {}
+            sector_counts = {}
+            sector_changes = {}
+            sector_leaders = {}
+            
+            for code in v_reversal_pool:
+                code_str = str(code).strip()
+                sec = stock_to_sector.get(code_str)
+                if not sec:
+                    continue
+                    
+                flag_info = consolidation_flags.get(code_str, {})
+                phase = flag_info.get('phase', 'INIT')
+                weight = phase_weights.get(phase, 20.0)
+                
+                sector_scores[sec] = sector_scores.get(sec, 0.0) + weight
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+                
+                pct_val = 0.0
+                stock_name = ""
+                if current_df is not None and code_str in current_df.index:
+                    row = current_df.loc[code_str]
+                    stock_name = str(row.get('name', ''))
+                    try:
+                        pct_val = float(row.get('percent', 0.0))
+                    except:
+                        pass
+                        
+                if sec not in sector_changes:
+                    sector_changes[sec] = []
+                sector_changes[sec].append(pct_val)
+                
+                if sec not in sector_leaders or pct_val > sector_leaders[sec][1]:
+                    sector_leaders[sec] = (code_str, pct_val, stock_name)
+                    
+            sectors_list = []
+            for sec, count in sector_counts.items():
+                avg_score = sector_scores[sec] / count
+                avg_pct = sum(sector_changes[sec]) / len(sector_changes[sec])
+                change_pct_str = f"{avg_pct:+.2f}%"
+                
+                leader_code, _, leader_name = sector_leaders.get(sec, ('', 0.0, ''))
+                
+                sectors_list.append((sec, round(avg_score, 1), change_pct_str, count, leader_code, leader_name))
+                
+            if sectors_list:
+                self.sectors = sectors_list
+                self.sort_sectors(self.sort_combo.currentIndex())
+                return
+
+        # 2. Fallback to bidding_session_data.json.gz (legacy logic with modification time cache)
         path = None
         try:
             ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
@@ -89,59 +253,47 @@ class SectorHeatmapWidget(QWidget):
             
         if not path:
             try:
-                base = get_app_root()
                 fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
                 if os.path.exists(fallback_path):
                     path = fallback_path
             except Exception:
                 pass
                 
-        if not path or not os.path.exists(path):
-            if not hasattr(self, 'sectors') or not self.sectors:
-                self.load_mock_sectors()
-            return
-
-        try:
-            with open(path, 'rb') as f:
-                raw_data = f.read()
-            if not raw_data:
-                if not hasattr(self, 'sectors') or not self.sectors:
-                    self.load_mock_sectors()
-                return
-                
-            json_str = zlib.decompress(raw_data).decode('utf-8')
-            data = json.loads(json_str)
-            sector_data = data.get('sector_data', {})
+        if path and os.path.exists(path):
+            session_mtime = os.path.getmtime(path)
+            if (getattr(self, '_last_session_path', None) != path or 
+                getattr(self, '_last_session_mtime', None) != session_mtime or 
+                not hasattr(self, '_cached_session_sectors')):
+                try:
+                    with open(path, 'rb') as f:
+                        raw_data = f.read()
+                    if raw_data:
+                        json_str = zlib.decompress(raw_data).decode('utf-8')
+                        data = json.loads(json_str)
+                        sector_data = data.get('sector_data', {})
+                        self._cached_session_sectors = []
+                        if sector_data:
+                            for sec_name, info in sector_data.items():
+                                score = info.get('score', 0.0)
+                                avg_pct = info.get('avg_pct_diff') or info.get('avg_pct') or 0.0
+                                count = info.get('count') or len(info.get('followers', []))
+                                change_pct_str = f"{avg_pct:+.2f}%"
+                                leader_code = info.get('leader', '')
+                                leader_name = info.get('leader_name', '')
+                                self._cached_session_sectors.append((sec_name, round(score, 1), change_pct_str, count, leader_code, leader_name))
+                        self._last_session_path = path
+                        self._last_session_mtime = session_mtime
+                except Exception as e:
+                    print(f"[SectorHeatmapWidget] Error loading legacy bidding_session_data: {e}")
             
-            if not sector_data:
-                if not hasattr(self, 'sectors') or not self.sectors:
-                    self.load_mock_sectors()
-                return
-                
-            sectors_list = []
-            for sec_name, info in sector_data.items():
-                score = info.get('score', 0.0)
-                avg_pct = info.get('avg_pct_diff') or info.get('avg_pct') or 0.0
-                count = info.get('count') or len(info.get('followers', []))
-                
-                change_pct_str = f"{avg_pct:+.2f}%"
-                
-                # We can store extra info inside the tuple safely
-                leader_code = info.get('leader', '')
-                leader_name = info.get('leader_name', '')
-                
-                sectors_list.append((sec_name, round(score, 1), change_pct_str, count, leader_code, leader_name))
-                
-            if sectors_list:
-                self.sectors = sectors_list
+            if hasattr(self, '_cached_session_sectors') and self._cached_session_sectors:
+                self.sectors = self._cached_session_sectors
                 self.sort_sectors(self.sort_combo.currentIndex())
-            else:
-                if not hasattr(self, 'sectors') or not self.sectors:
-                    self.load_mock_sectors()
-        except Exception as e:
-            print(f"[SectorHeatmapWidget] Error loading live sectors: {e}")
-            if not hasattr(self, 'sectors') or not self.sectors:
-                self.load_mock_sectors()
+                return
+
+        # 3. Fallback to mock sectors if all else fails
+        if not hasattr(self, 'sectors') or not self.sectors:
+            self.load_mock_sectors()
 
     def get_color_for_score(self, pct_str):
         try:
