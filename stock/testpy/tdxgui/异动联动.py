@@ -5212,11 +5212,13 @@ duration_date_day = CFG.duration_date_day
 # ]
 
 today_tdx_df_last_read_date = None
+today_tdx_df_last_fail_time = None
 
 def _get_tdx_data_df(stock_code=None):
     global sina_data_last_updated_time, sina_data_df
     global pytables_status, today_tdx_df
     global today_tdx_df_last_read_date
+    global today_tdx_df_last_fail_time
 
     basedir = win10_ramdisk + os.sep
     ptype = 'low'
@@ -5233,14 +5235,27 @@ def _get_tdx_data_df(stock_code=None):
         logger.info(f"📅 检测到日期变更或首次初始化，重置并重新读取 TDX 数据：{today_tdx_df_last_read_date} -> {current_date}")
         today_tdx_df = None
         today_tdx_df_last_read_date = current_date
+        today_tdx_df_last_fail_time = None
 
-    logger.info(f"🔄fname:{fname} table:{table} ")
-    # ① 读取 TDX 数据（只读一次）
-    if pytables_status and (today_tdx_df is None or today_tdx_df.empty):
-        today_tdx_df = read_hdf_table(fname, table)
+    current_time = time.time()
     
-    if today_tdx_df is None or today_tdx_df.empty:
-        return today_tdx_df
+    # 限制高频重试：如果之前读取失败，并且距离上次失败不足 30 秒，则直接返回空 DataFrame
+    if today_tdx_df is None:
+        if today_tdx_df_last_fail_time is not None and (current_time - today_tdx_df_last_fail_time < 30):
+            return pd.DataFrame()
+            
+        if pytables_status:
+            logger.info(f"🔄 正在读取每日一次 of TDX 数据: fname={fname}, table={table}")
+            # 限制写锁超时为 2 秒，防止主线程卡顿
+            df_read = read_hdf_table(fname, table, timeout=2)
+            if df_read is not None and not df_read.empty:
+                today_tdx_df = df_read
+                today_tdx_df_last_fail_time = None
+            else:
+                # 记录失败时间，但不将 today_tdx_df 设为 empty DataFrame，以便在 30 秒冷却后重试
+                today_tdx_df_last_fail_time = current_time
+                logger.warning(f"⚠️ 读取 TDX 数据失败，进入 30 秒重试冷却时间...")
+                return pd.DataFrame()
 
     return today_tdx_df
 
@@ -5272,7 +5287,8 @@ def _get_sina_data_realtime(stock_code=None):
         
         try:
             logger.info(f"🔄 刷新 sina_data 缓存 (时段: {'交易期' if is_trade_session else '非交易期'}, 间隔: {refresh_interval}m)")
-            sina_data = read_hdf_table(fname, table)
+            # 限制写锁超时为 1 秒，防止主线程卡顿
+            sina_data = read_hdf_table(fname, table, timeout=1)
             if sina_data is not None and not sina_data.empty:
                 # 确保代码列是索引且为字符串补齐格式
                 if '代码' in sina_data.columns:
@@ -5358,10 +5374,14 @@ def _get_sina_data_realtime(stock_code=None):
                         logger.info(f"📊 已同步更新 today_tdx_df 实时 OHLCV (n={len(today_tdx_df)}, multi={_is_multi})")
                     except Exception as ex:
                         logger.error(f"⚠️ 更新 today_tdx_df 实时数据失败: {ex}")
+            else:
+                # 失败时设置最后更新时间为 30 秒前的虚拟时间点，从而冷却限流 30 秒，避免高频反复读取
+                sina_data_last_updated_time = current_time - timedelta(minutes=refresh_interval) + timedelta(seconds=30)
         except Exception as e:
             import traceback
             logger.error(f"❌ 刷新 sina_data 缓存失败:\n{traceback.format_exc()}")
-            # 失败时不重置 time，以便下一轮重试，但维持旧 df
+            # 异常时同样冷却限流 30 秒，避免反复读取
+            sina_data_last_updated_time = current_time - timedelta(minutes=refresh_interval) + timedelta(seconds=30)
 
     # --- 返回逻辑 ---
     if sina_data_df is None:
@@ -9436,24 +9456,38 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     global sina_data_df
     orig_rules = alerts_rules.copy()
 
+    def safe_float(v, default=0.0):
+        if v is None or str(v).strip() in ('', '--', 'None'):
+            return default
+        try:
+            return float(v)
+        except Exception:
+            return default
+
     price, percent, vol = 5.0, 1.0, 1
     if new and stock_info is not None:
         if stock_code in alerts_rules.keys():
             del alerts_rules[stock_code]
         logger.info(f'stock_info:{stock_info}')
         code, name, *_ , percent,price, vol = stock_info
+        price = safe_float(price)
+        percent = safe_float(percent)
+        vol = safe_float(vol)
         if price < 0.1:
             # 优先从 sina_data_df 获取最新行情
             if sina_data_df is not None and not sina_data_df.empty and code in sina_data_df.index:
                 # stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
                 dd = sina_data_df.loc[code]
-                price = dd.close
-                percent = round((dd.close - dd.llastp) / dd.llastp * 100, 1)
-                vol = round(dd.turnover / 100 / 10000 / 100, 1)
+                price = safe_float(dd.close)
+                percent = round((price - safe_float(dd.llastp)) / safe_float(dd.llastp) * 100, 1) if safe_float(dd.llastp) != 0 else 0.0
+                vol = round(safe_float(dd.turnover) / 100 / 10000 / 100, 1)
             # 如果 sina_data_df 无数据，则从 monitor_windows 获取已有 stock_info
             elif code in monitor_windows:
                 stock_info = monitor_windows[code].get('stock_info', [code, name, 0, 0, 0.0, 0.0, 0])
                 _, _, _, _, percent, price, vol = stock_info
+                price = safe_float(price)
+                percent = safe_float(percent)
+                vol = safe_float(vol)
             # 如果都没有，使用默认值
         # code, name, *_ , percent,price, vol = stock_info
 
@@ -9462,6 +9496,9 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
             # logger.info(f'2:{stock_info[-3]}')
             if stock_info is not None:
                 code, name, *_ , percent,price, vol = stock_info
+                price = safe_float(price)
+                percent = safe_float(percent)
+                vol = safe_float(vol)
             # 如果 stock_code 是字符串，格式 "CODE NAME"
             elif not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
                 code, name = stock_code.split()
@@ -9471,14 +9508,17 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
                 if sina_data_df is not None and not sina_data_df.empty and code in sina_data_df.index:
                     # stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
                     dd = sina_data_df.loc[code]
-                    price = dd.close
-                    percent = round((dd.close - dd.llastp) / dd.llastp * 100, 1)
-                    vol = round(dd.turnover / 100 / 10000 / 100, 1)
+                    price = safe_float(dd.close)
+                    percent = round((price - safe_float(dd.llastp)) / safe_float(dd.llastp) * 100, 1) if safe_float(dd.llastp) != 0 else 0.0
+                    vol = round(safe_float(dd.turnover) / 100 / 10000 / 100, 1)
 
                 # 如果 sina_data_df 无数据，则从 monitor_windows 获取已有 stock_info
                 elif code in monitor_windows:
                     stock_info = monitor_windows[code].get('stock_info', [code, name, 0, 0, 0.0, 0.0, 0])
                     _, _, _, _, percent, price, vol = stock_info
+                    price = safe_float(price)
+                    percent = safe_float(percent)
+                    vol = safe_float(vol)
 
                 # 如果都没有，使用默认值
                 else:
@@ -9487,19 +9527,31 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) == 5:
                 code, _ , percent,price, vol = stock_code
+                price = safe_float(price)
+                percent = safe_float(percent)
+                vol = safe_float(vol)
                 logger.info(f'price : {price},percent:{percent}, vol:{vol}')
 
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) >= 7:
                 code, name, percent, price, vol = parse_stock_list(stock_code)
+                price = safe_float(price)
+                percent = safe_float(percent)
+                vol = safe_float(vol)
             else:
                 code = stock_code
                 stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
                 code, name, percent, price, vol = parse_stock_list(stock_info)
+                price = safe_float(price)
+                percent = safe_float(percent)
+                vol = safe_float(vol)
                 if percent == 0 or price == 0:
                     if code in monitor_windows.keys():
                         stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
                         _, _, _, _, percent,price, vol = stock_info
-            if float(vol) == 0.0:
+                        price = safe_float(price)
+                        percent = safe_float(percent)
+                        vol = safe_float(vol)
+            if safe_float(vol) == 0.0:
                 vol = 0.8
         except (ValueError, IndexError):
             # 处理可能的解包错误
@@ -10214,6 +10266,7 @@ def refresh_alert_center():
     #     alert_window.after(0, _select_last)
 
 
+flush_alerts_after_id = None
 flushing = False    # 全局变量，防止多次执行
 # 全局 set，存放所有已经插入过的警报（防止重复插入）
 # 全局：
@@ -10223,7 +10276,15 @@ flushing = False    # 全局变量，防止多次执行
 def flush_alerts():
     """定时刷新报警缓冲区，将 alerts_buffer 写入 alerts_history，然后用 refresh_alert_center 刷新 Treeview"""
     global alerts_buffer, alerts_history, alert_tree
-    global flushing, inserted_alert_keys
+    global flushing, inserted_alert_keys, flush_alerts_after_id
+
+    # 1. 立即取消任何已经安排的定时调用，防止多重定时器循环并存
+    if flush_alerts_after_id is not None:
+        try:
+            root.after_cancel(flush_alerts_after_id)
+        except Exception:
+            pass
+        flush_alerts_after_id = None
 
     if flushing:
         return
@@ -10276,9 +10337,9 @@ def flush_alerts():
 
         # 安排下次执行
         if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
-            root.after(30000, flush_alerts)
+            flush_alerts_after_id = root.after(30000, flush_alerts)
         else:
-            root.after(delay_ms, flush_alerts)
+            flush_alerts_after_id = root.after(delay_ms, flush_alerts)
 
     finally:
         flushing = False
