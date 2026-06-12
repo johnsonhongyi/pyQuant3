@@ -7722,13 +7722,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(2)
                         continue
                     
-                    n_rows = len(df_to_check)
-                    dynamic_interval = min_interval
-                    if n_rows > 3000: dynamic_interval = 2.5
-                    if n_rows > 5000: dynamic_interval = 5.0
+                    # 🚀 [THROTTLE] ats跟tk链接数据更新频率限制 (最少30秒, 基于 cct.duration_sleep_time)
+                    # 交易期最少 30 秒，非交易期大幅度延长（如 180 秒）
+                    is_work = cct.get_work_time()
+                    base_interval = float(getattr(cct, 'duration_sleep_time', getattr(getattr(cct, 'CFG', None), 'duration_sleep_time', 30.0)))
+                    if is_work:
+                        dynamic_interval = max(30.0, base_interval)
+                    else:
+                        dynamic_interval = max(180.0, base_interval * 3.0)
                     
-                    # ⭐ 限流 + 抖动
-                    if now - last_send_time < dynamic_interval:
+                    # ⭐ 限流 + 抖动 (如果是强制全量同步请求，则无视冷却时间直接发送)
+                    is_forced = getattr(self, '_force_full_sync_pending', False)
+                    if not is_forced and now - last_send_time < dynamic_interval:
                         time.sleep(1.0) # 小碎步休眠防止 CPU 100%
                         continue
                     

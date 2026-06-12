@@ -86,9 +86,8 @@ class GlobalFavoriteManager:
             self.load_from_config(path)
             
     def _file_watcher_loop(self):
-        while not self._watcher_stop.is_set():
+        while not self._watcher_stop.wait(1.0):
             try:
-                time.sleep(1.0)
                 path = self._config_path
                 if path and os.path.exists(path):
                     mtime = os.path.getmtime(path)
@@ -103,6 +102,14 @@ class GlobalFavoriteManager:
                         self.load_from_config(path)
             except Exception as e:
                 logger.error(f"Error in FavoritesWatcher loop: {e}")
+
+    def shutdown(self):
+        """
+        Shuts down the file watcher thread cleanly.
+        """
+        self._watcher_stop.set()
+        if hasattr(self, '_watcher_thread') and self._watcher_thread.is_alive():
+            self._watcher_thread.join(timeout=1.0)
 
     def load_from_config(self, config_path: str = None):
         path = config_path or self._config_path
