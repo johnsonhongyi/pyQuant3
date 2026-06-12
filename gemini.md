@@ -1,3 +1,13 @@
+## 2026-06-12 15:00
+- [x] **优化 HDF5 读写性能与防卡死保护 (Optimized HDF5 Read Performance & Anti-Freeze Protection)**：
+    - [x] **实现 TDX 每日一次性读取缓存 (Once-a-Day TDX Caching)**：重构了 `_get_tdx_data_df`，在 `today_tdx_df` 缓存有效且日期未发生变更时，直接复用内存数据，避免了在盘中或打开报警中心等交互时高频、重复地读取 HDF5 磁盘文件，从根本上消除了由此引发的主线程 I/O 阻塞与假死。
+    - [x] **加固 TDX 读取失败冷却与 30秒 延迟重试机制 (TDX Read Failure Cooldown & 30s Retry)**：修复了当日 TDX 加载失败直接置为空 DataFrame 占位导致全天无法恢复的缺陷。引入 `today_tdx_df_last_fail_time` 变量，在读取失败时保持 `today_tdx_df = None` 但进入 30 秒冷却退避期；冷却期间立即返回空 DataFrame 隔离 I/O，超时后重新尝试读盘自愈。
+    - [x] **根治报警中心定时刷新器重复叠加导致的 UI 卡顿 (Fixed Timer Multiplication in Alert Center)**：修复了当运行时间较长时打开报警中心发生严重卡顿的逻辑漏洞。原代码在 `refresh_all_stock_data` 定时器中同步调用了 `flush_alerts`，而 `flush_alerts` 内部又自带 `root.after(30000, flush_alerts)` 循环。每当数据刷新时，都会额外分裂并派生出一个全新的、无限循环的 `flush_alerts` 并行定时器，导致运行越久并行的 Treeview 刷新和排序动作越密集。现引入 `flush_alerts_after_id` 句柄，在每次调用或重新调度时，强行取消并覆盖原有的定时任务，彻底消除了定时器分裂叠加。
+    - [x] **限制 HDF5 读取锁定超时 (Added Read Timeout to read_hdf_table)**：在 `_get_tdx_data_df` 中增加了 `timeout=2`，在 `_get_sina_data_realtime` 刷新 `sina_data` 缓存时增加了 `timeout=1`。此限制防止了当 background 写入进程持有排他锁时，主线程无限期挂起等待，极大提升了 UI 交互 of 稳定性与容错能力。
+    - [x] **新增失败/空数据 30秒 虚拟时间冷却机制 (30-second virtual cooldown on read failure/empty)**：在 `_get_sina_data_realtime` 读取 `sina_data.h5` 发生异常或返回空数据时，将缓存最后更新时间（`sina_data_last_updated_time`）调整为虚拟时间点，从而强行引入 30 秒冷却退避期。在此冷却期内，后续的高频读取请求将直接短路，避免在脏数据或磁盘锁竞争剧烈时产生密集的读盘重试。
+    - [x] **修复报警规则编辑器类型不匹配崩溃 (Fixed TypeError in open_alert_editor)**：修复了右键菜单触发“添加报警规则”或“编辑报警规则”时，由于从 Treeview 获取的值全为字符串类型，直接解包所得的 `price` 为 `str` 导致与 `float` 比较 (`price < 0.1`) 时抛出 `TypeError: '<' not supported` 崩溃。在 `open_alert_editor` 中增加了 `safe_float` 安全转换，确保解包后的 `price`、`percent`、`vol` 均已转换为 float，彻底杜绝此崩溃。
+
+
 ## 2026-04-18 04:45
 - [x] **修复退出异常与线程残留 (Fixed Application Exit Error & Thread Leak)**：
     - [x] **补全分层线程池关闭逻辑**：在 `instock_MonitorTK.py` 的 `on_close` 方法中补齐了对 `pump_executor` 和 `compute_executor` 的显式 `shutdown()` 调用。这彻底解决了退出时由于 `ThreadPoolExecutor` 默认创建非守护线程导致的 `[STILL ALIVE] pump_0` 错误警告，确保了应用能够更优雅、快速地完成资源回收。

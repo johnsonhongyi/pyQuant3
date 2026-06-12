@@ -1,5 +1,24 @@
 # pyQuant3 Gemini Progress Tracker
 
+## 2026-06-12 06:45
+- [x] **修复主线程 HDF5 读写锁冲突导致的 GUI 界面卡死问题 (Fixed GUI Freezes Caused by HDF5 Read Lock Contention)**：
+    - [x] **实现每日 TDX 数据只读一次与失败冷却重试机制 (Strictly Once-a-day TDX Data Loading & Retry Cooldown)**：
+        - 在 `_get_tdx_data_df()` 中重构了每日 TDX 数据的加载逻辑。当且仅当内存中 `today_tdx_df` 缓存有效且日期未发生变更时，直接复用内存数据，避免重复读取磁盘。
+        - 引入 `today_tdx_df_last_fail_time` 变量。当遇到读取失败或超时（`timeout=2`）时，保持 `today_tdx_df = None`，但进入 30 秒冷却重试保护期。在冷却期间内，高频更新直接短路返回空 `pd.DataFrame()` 隔离磁盘 I/O；超过 30 秒后可自发重新尝试读盘自愈。这既防止了失败后的频繁重试卡顿，又保障了系统在磁盘锁释放后的数据自愈能力。
+    - [x] **引入新浪实时数据读取限流与超时缩减 (Throttled Sina Real-time Read & Shortened Timeout)**：
+        - 在 `_get_sina_data_realtime()` 中引入 `sina_data_last_attempt_time` 限流机制。若因后台进程锁文件或读写冲突导致读取失败，强制限流 30 秒内禁止再次读取磁盘 HDF5，防止高频定时器或用户刷新动作触发密集的 I/O 阻塞。
+        - 将 `read_hdf_table` 读取实时行情的超时限制为 1 秒 (`timeout=1`)，即使 HDF5 处于写锁定状态，也能在 1 秒内超时退出并使用内存中原有的行情缓存，彻底根治了打开报警中心时因主线程长达 10 秒等待写锁而造成的卡死假死现象。
+    - [x] **根治报警中心定时器重复叠加分裂 (Fixed Timer Multiplication in Alert Center)**：
+        - 修复了当运行时间较长时打开报警中心发生严重卡顿的逻辑漏洞。原代码在 `refresh_all_stock_data` 定时器中同步调用了 `flush_alerts`，而 `flush_alerts` 内部又自带 `root.after(30000, flush_alerts)` 循环。
+        - 每次数据刷新触发同步调用时，都会额外派生出一个全新的、并行无限循环的 `flush_alerts` 定时刷新任务。长时间运行后会积攒数十甚至数百个并行循环同时重绘 Treeview 导致 CPU 占用暴涨和界面严重卡顿。
+        - 引入全局 `flush_alerts_after_id` 句柄，在执行 `flush_alerts` 前主动取消（`after_cancel`）并清理之前的待执行定时任务，确保在任何时候都只有**唯一**的一个定时器循环在运行，彻底消除了定时器分裂问题。
+    - [x] **优化冗余日志输出**：去除了每次调用 `_get_tdx_data_df` 都会触发的 `logger.info(f"🔄fname:{fname} table:{table} ")` 冗余输出，仅在真实触发磁盘 I/O 读取时进行日志记录，降低了高频调用下的 I/O 与 CPU 损耗。
+    - [x] **修复报警规则编辑器类型不匹配崩溃 (Fixed TypeError in open_alert_editor)**：
+        - 修复了右键菜单触发“添加报警规则”或“编辑报警规则”时，由于从 Treeview 获取的值全为字符串类型，解包所得的 `price` 被作为 `str` 直接与 `float` 比较 (`price < 0.1`) 从而导致抛出 `TypeError: '<' not supported` 的严重崩溃。
+        - 在 `open_alert_editor` 中增加了 `safe_float` 安全转型转换工具函数。
+        - 对解包以及各个分支获取到的 `price`、`percent`、`vol` 统一应用了安全转换过滤，确保后续判定、阈值比较和变量绑定都使用绝对安全的数值浮点类型，彻底杜绝此崩溃。
+
+
 ## 2026-06-05 12:05
 - [x] **修复报警中心自动刷新时丢失选中与焦点状态问题 (Fixed Selection Loss & Focus Reset in Alert Center on Refresh)**：
     - [x] **实现选中与焦点状态保存与恢复 (Selection & Focus Restoration)**：在 `refresh_alert_center()` 的最前端增加对当前选中行及焦点行的股票代码 (stock_code) 的缓存。在清空列表重绘时，通过指定 `iid=code` 设定稳定的 Treeview 行标识符，并在重绘完成后重新设置对应的选中及聚焦行。
