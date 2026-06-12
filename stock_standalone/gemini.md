@@ -1,3 +1,10 @@
+## 2026-06-12 22:10
+- [x] **修复竞价赛马冷启动分时走势图缺失与自愈拉取 (Fixed Bidding Racing Panel Cold-Start Minute Chart Missing & Active Auto-Retrieval)**:
+    - [x] **根治冷启动拉取缺失与 K线 cache 遗失**: 修复了在 `sector_bidding_panel.py` 的传统龙头及跟随股行构建中，因先前修改直接采用静态推送字段 `f.get('klines')` 代替 `self._follower_klines(code)` 导致冷启动数据为空（仅有水平单根直线）的缺陷。
+    - [x] **补全传统龙头 `'k_cache'` 结构**: 在 `Fallback: 使用传统的 Leader + Followers 结构` 龙头的 `row_item` 构筑中补齐了 `'k_cache'`，为绘图委托提供完整的 `prices` 与 `volumes` 序列。
+    - [x] **引入第三级自愈行情拉取与同步**: 在 `_populate_table` 的 `[HOT-FIX] 多级自愈行情补齐` 中，在 `detector` 缓存和 `TickSeries` 缓存均无 K线 时，加入对 `_follower_klines(code)` 的第三级主动拉取并同步。这能自动在冷启动后瞬间触发 API 补全 35 根 K线 写入缓存，完美自愈恢复完整的走势图，并且 100% 避免了对原绘图和计算逻辑的侵入。
+    - [x] **集成回归测试 100% 绿旗通过**: 成功运行 `pytest test_watchlist_lifecycle.py`，全量 11 项生命周期与联动集成测试全数通过。
+
 ## 2026-06-12 21:50
 - [x] **实现左侧活跃板块表添加过滤统计列 (Implemented Filtered Count Column 'cout' for Active Sectors Table)**:
     - [x] **初始化与配置更新**: 在 `sector_bidding_panel.py` 中将 `sector_table` 由 5 列调整为 6 列，并在龙头列后面插入以 `'cout'` 为表头的数量统计列。
