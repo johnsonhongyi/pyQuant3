@@ -143,11 +143,25 @@ class ATSSectorDetailDialog(QDialog):
                 self.stats_lbl.setText("❌ 当前板块暂无成分股明细特征")
                 return
                 
+            # Resolve name using parent's get_stock_name if empty
+            get_name_fn = None
+            p = self.parent()
+            while p:
+                if hasattr(p, 'get_stock_name'):
+                    get_name_fn = p.get_stock_name
+                    break
+                p = p.parent()
+
             score = sec_info.get('score', 0.0)
             self.score_lbl.setText(f"强度得分: {score:.1f}")
             
             leader_code = sec_info.get('leader', '')
             leader_name = sec_info.get('leader_name', '')
+            if not leader_name and get_name_fn:
+                leader_name = get_name_fn(leader_code)
+            if not leader_name or leader_name == "未知":
+                leader_name = sec_info.get('leader_name') or leader_code
+                
             leader_pct = sec_info.get('leader_pct', 0.0)
             leader_dff = sec_info.get('leader_dff') or sec_info.get('leader_pct_diff') or 0.0
             leader_score = sec_info.get('leader_score', 0.0)
@@ -173,11 +187,16 @@ class ATSSectorDetailDialog(QDialog):
                 f_code = fol.get('code')
                 if f_code == leader_code:
                     continue
+                f_name = fol.get('name', '')
+                if not f_name and get_name_fn:
+                    f_name = get_name_fn(f_code)
+                if not f_name or f_name == "未知":
+                    f_name = fol.get('name') or f_code
                 f_pct = fol.get('pct', 0.0)
                 f_dff = fol.get('dff') or fol.get('pct_diff') or 0.0
                 rows.append({
                     'code': f_code,
-                    'name': fol.get('name', ''),
+                    'name': f_name,
                     'score': fol.get('score', 0.0),
                     'type': '跟涨',
                     'pct': f_pct,

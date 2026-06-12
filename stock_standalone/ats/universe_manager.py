@@ -115,19 +115,26 @@ class UniverseManager:
         if df_all is None or df_all.empty:
             return
 
-        # Simple pipeline implementation:
-        # 1. Filter stocks near MA20d supporting -> Radar
-        # 2. Check intraday volumes -> Promote to Watchlist
-        # 3. Check buy triggers -> Promote to Trade pool
+        # Get currently tracked codes
+        tracked_codes = set(self.radar_pool.keys()) | set(self.watch_pool.keys()) | set(self.trade_pool.keys())
         
-        # Iterating through dataframe
-        for code, row in df_all.iterrows():
+        # Only evaluate tracked codes or pre-filtered data with real ma20 column to avoid mock flooding
+        if 'ma20' in df_all.columns:
+            dev = (df_all['close'] - df_all['ma20']) / df_all['ma20'] * 100
+            valid_mask = (dev >= -1.0) & (dev <= 2.0)
+            target_df = df_all[valid_mask | df_all.index.isin(tracked_codes)]
+        else:
+            common_codes = [c for c in tracked_codes if c in df_all.index]
+            target_df = df_all.loc[common_codes]
+
+        # Iterating through target dataframe
+        for code, row in target_df.iterrows():
             name = row.get('name', '个股')
             price = row.get('close', row.get('price', 0.0))
             pct = row.get('percent', 0.0)
             
-            # Let's say MA20 value is available or mock computed
-            ma20 = row.get('ma20', price * 0.99) # fallback: slightly below price
+            # Use real ma20 if present in row, otherwise default to slightly below price for tracked codes
+            ma20 = row.get('ma20', price * 0.99)
             deviation = (price - ma20) / ma20 * 100
             
             # Funnel Condition 1: Radar (deviation within -1% and +2%)

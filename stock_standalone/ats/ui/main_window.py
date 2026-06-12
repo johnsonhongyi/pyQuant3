@@ -15,6 +15,9 @@ from ats.ui.heatmap_widget import SectorHeatmapWidget
 from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
 from ats.ui.swing_table import SwingStateTable
 from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
+from ats.ui.kernel_trace_panel import KernelTracePanel
+from ats.universe_manager import UniverseManager
+from ats.swing_tracker import SwingTracker
 
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None):
@@ -22,6 +25,30 @@ class StockDetailDialog(QDialog):
         self.setWindowTitle(f"📈 实时实盘个股详情 - {code} {name}")
         self.resize(550, 650)
         self.setMinimumSize(450, 550)
+        
+        # Auto-scan latest kernel trace
+        self.kernel_info = {}
+        try:
+            from sys_utils import get_app_root
+            import os
+            import json
+            base = get_app_root()
+            trace_path = os.path.join(base, "logs", "trading_kernel_trace.jsonl")
+            if os.path.exists(trace_path):
+                with open(trace_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                data = json.loads(line)
+                                signal_data = data.get("signal", {})
+                                intent_data = data.get("intent", {})
+                                trace_code = signal_data.get("code") or intent_data.get("code") or ""
+                                if str(trace_code).strip() == str(code).strip():
+                                    self.kernel_info = data
+                            except Exception:
+                                pass
+        except Exception as e:
+            print(f"Error scanning kernel trace in dialog: {e}")
         
         # Inherit parent stylesheet to match the high-end dark theme
         if parent and hasattr(parent, 'styleSheet'):
@@ -221,6 +248,52 @@ class StockDetailDialog(QDialog):
                         val_str = str(val)
                     features.append((label, val_str))
         else:
+            features.append(("证券代码", code))
+            features.append(("证券名称", name))
+            
+        # Add trading kernel trace features if available
+        if hasattr(self, 'kernel_info') and self.kernel_info:
+            res = self.kernel_info.get("kernel_result", {})
+            sig = self.kernel_info.get("signal", {})
+            intent = self.kernel_info.get("intent", {})
+            
+            # Action
+            action = res.get("kernel_action") or intent.get("action") or "HOLD"
+            action_cn = "买入" if action == "BUY" else ("卖出" if action == "SELL" else "观察")
+            features.append(("🤖 内核决策动作", action_cn))
+            
+            # Confidence
+            conf = res.get("kernel_confidence") or intent.get("confidence") or 0.0
+            conf_str = f"{conf:.2%}" if isinstance(conf, float) else str(conf)
+            features.append(("🤖 内核决策置信度", conf_str))
+            
+            # State
+            state = res.get("kernel_state") or "NORMAL"
+            features.append(("🤖 内核运行状态", str(state)))
+            
+            # Reject code
+            reject = res.get("kernel_reject_code")
+            if reject:
+                features.append(("🚫 风控阻断代码", str(reject)))
+                
+            # Signal Type
+            sig_type = sig.get("signal_type") or ""
+            if sig_type:
+                features.append(("⚡ 触发信号类型", str(sig_type)))
+                
+            # Reason
+            reason = sig.get("features", {}).get("raw_reason") or intent.get("reason", {}).get("raw_reason") or ""
+            if not reason and intent.get("reason"):
+                reason = str(intent.get("reason"))
+            if reason:
+                features.append(("💡 内核决策依据", str(reason)))
+                
+            # Timestamp
+            ts = self.kernel_info.get("journal_ts") or self.kernel_info.get("timestamp") or ""
+            if ts:
+                features.append(("📅 内核评估时间", str(ts).replace("T", " ")))
+                
+        if len(features) <= 2:
             features = [
                 ("证券代码", code),
                 ("证券名称", name),
@@ -266,6 +339,12 @@ class ATSMainWindow(QMainWindow):
         self.current_font_size = self.load_font_size()
         self.apply_qss_with_font_size(self.current_font_size)
         self.current_df = None  # Live streaming DataFrame snapshot data source
+        self._listener_started = False
+        self.name_cache = {}  # Global name cache to prevent "未知" names
+        
+        self.universe_manager = UniverseManager()
+        self.swing_tracker = SwingTracker()
+        self.stock_history_cache = {}
         
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
@@ -276,13 +355,39 @@ class ATSMainWindow(QMainWindow):
         self._restore_layout_state()
         self._init_statusbar()
         
+        # Prepopulate name cache from database history on startup
+        self._prepopulate_name_cache()
+        
         # Load SQLite database data (P1 Integration)
-        self.load_db_data()
+        self.load_db_data(force=True)
         
         # Setup simple timer for mock ticker updating (simulate live environment in P0)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.on_heartbeat)
-        self.update_timer.start(2000)
+        self.update_timer.start(3000)
+
+    def _prepopulate_name_cache(self):
+        self.name_cache = {}
+        try:
+            from ats.ipc_bridge import IPCBridge
+            bridge = IPCBridge()
+            queries = [
+                "SELECT DISTINCT code, name FROM signal_history WHERE name IS NOT NULL AND name != ''",
+                "SELECT DISTINCT code, name FROM trade_records WHERE name IS NOT NULL AND name != ''"
+            ]
+            for query in queries:
+                try:
+                    with bridge.db_manager.execute_query(query) as cursor:
+                        for row in cursor.fetchall():
+                            c = str(row[0]).strip()
+                            n = str(row[1]).strip()
+                            if c and n:
+                                self.name_cache[c] = n
+                except Exception as e:
+                    print(f"[ATSMainWindow] Prepopulate cache query failed: {e}")
+        except Exception as e:
+            print(f"[ATSMainWindow] Prepopulate cache failed: {e}")
+
 
     def _init_toolbar(self):
         toolbar = QToolBar("Main Controls")
@@ -358,6 +463,9 @@ class ATSMainWindow(QMainWindow):
         self.backtest_panel = BacktestReportPanel()
         self.center_tabs.addTab(self.backtest_panel, "📊 离线回测报告 (Backtest)")
         
+        self.kernel_trace_panel = KernelTracePanel()
+        self.center_tabs.addTab(self.kernel_trace_panel, "🤖 内核轨迹 (Kernel Trace)")
+        
         self.center_splitter.addWidget(self.center_tabs)
         self.center_splitter.setSizes([450, 450])
         
@@ -402,14 +510,17 @@ class ATSMainWindow(QMainWindow):
         self.swing_table.stock_clicked.connect(self.link_stock)
         self.position_panel.stock_clicked.connect(self.link_stock)
         self.trade_flow_table.stock_clicked.connect(self.link_stock)
+        self.kernel_trace_panel.stock_clicked.connect(self.link_stock)
         
         # 2. 双击事件 -> 弹窗详情展示 context_info (on_stock_clicked)
         self.universe_widget.stock_selected.connect(self.on_stock_clicked)
         self.swing_table.stock_double_clicked.connect(self.on_stock_clicked)
         self.position_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.trade_flow_table.stock_double_clicked.connect(self.on_stock_clicked)
+        self.kernel_trace_panel.stock_double_clicked.connect(self.on_stock_clicked)
         
         self.heatmap_widget.sector_selected.connect(self.on_sector_clicked)
+        self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
 
     def _init_statusbar(self):
@@ -515,26 +626,148 @@ class ATSMainWindow(QMainWindow):
         dialog.exec()
 
     def on_heartbeat(self):
-        # In actual P6, this is where we query live shared memory.
-        # For P0, we do a minor change simulation to make UI look alive.
-        pass
+        # 1. Periodically load and update DB data
+        self.load_db_data()
+        
+        # 2. Periodically load trace logs
+        if hasattr(self, 'kernel_trace_panel'):
+            self.kernel_trace_panel.load_trace_logs()
+            
+        # 3. Periodically load sector heatmap
+        if hasattr(self, 'heatmap_widget'):
+            self.heatmap_widget.load_live_sectors()
 
-    def load_db_data(self):
+    def _update_name_cache_from_df(self, df):
+        if df is not None and not df.empty and 'name' in df.columns:
+            try:
+                # Fast vectorized extraction of code -> name
+                temp_dict = df['name'].dropna().to_dict()
+                cleaned_dict = {str(k).strip(): str(v).strip() for k, v in temp_dict.items() if str(v).strip()}
+                self.name_cache.update(cleaned_dict)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error updating name cache from df: {e}")
+
+    def get_stock_name(self, code):
+        if not code:
+            return "未知"
+        code_str = str(code).strip()
+        # 1. Try name_cache
+        name = self.name_cache.get(code_str)
+        if name:
+            return name
+            
+        # 2. Try current_df
+        if self.current_df is not None and code_str in self.current_df.index:
+            name = str(self.current_df.loc[code_str].get('name', '')).strip()
+            if name:
+                self.name_cache[code_str] = name
+                return name
+                
+        # 3. Try fallback query to DB
         try:
             from ats.ipc_bridge import IPCBridge
-            self.bridge = IPCBridge()
+            bridge = IPCBridge()
+            query = f"SELECT name FROM trade_records WHERE code = '{code_str}' AND name IS NOT NULL AND name != '' LIMIT 1"
+            with bridge.db_manager.execute_query(query) as cursor:
+                row = cursor.fetchone()
+                if row and row[0]:
+                    name = str(row[0]).strip()
+                    self.name_cache[code_str] = name
+                    return name
+            query = f"SELECT name FROM signal_history WHERE code = '{code_str}' AND name IS NOT NULL AND name != '' LIMIT 1"
+            with bridge.db_manager.execute_query(query) as cursor:
+                row = cursor.fetchone()
+                if row and row[0]:
+                    name = str(row[0]).strip()
+                    self.name_cache[code_str] = name
+                    return name
+        except Exception:
+            pass
             
-            # 1. Load trade flows
+        # 4. Try querying local Sina handbook/database
+        try:
+            from JSONData import sina_data
+            name = sina_data.Sina().get_code_cname(code_str)
+            if name and name != code_str:
+                self.name_cache[code_str] = name
+                return name
+        except Exception:
+            pass
+            
+        return "未知"
+
+    def load_db_data(self, force=False):
+        try:
+            # First, check if logs/paper_account_state.json exists and read it
+            # This contains live paper account status (positions, cash, orders)
+            import os
+            import json
+            from sys_utils import get_app_root
+            
+            base = get_app_root()
+            state_path = os.path.join(base, "logs", "paper_account_state.json")
+            db_path = os.path.join(base, "trading_signals.db")
+            if not os.path.exists(db_path):
+                db_path = "./trading_signals.db"
+                
+            db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
+            paper_mtime = os.path.getmtime(state_path) if os.path.exists(state_path) else 0
+            
+            # Check modification time to avoid redundant heavy IO/queries
+            if not force and getattr(self, '_last_db_mtime', None) == db_mtime and getattr(self, '_last_paper_mtime', None) == paper_mtime:
+                return
+                
+            self._last_db_mtime = db_mtime
+            self._last_paper_mtime = paper_mtime
+            
+            state_data = None
+            if os.path.exists(state_path):
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        state_data = json.load(f)
+                except Exception as e:
+                    print(f"[ATSMainWindow] Error loading paper_account_state.json: {e}")
+
+            from ats.ipc_bridge import IPCBridge
+            if not hasattr(self, 'bridge') or self.bridge is None:
+                self.bridge = IPCBridge()
+            
+            # Update name cache from current_df if available using fast vectorized call
+            self._update_name_cache_from_df(self.current_df)
+            
+            # --- 1. Load trade flows (Orders) ---
+            flow_data = []
+            if state_data and "orders" in state_data:
+                for o in state_data["orders"]:
+                    action = "买入" if o.get('action') == 'BUY' else "卖出"
+                    qty = o.get('volume') or 0
+                    price = o.get('price') or 0.0
+                    amount = price * qty
+                    ts = o.get('timestamp') or ''
+                    if 'T' in ts:
+                        ts = ts.replace('T', ' ')
+                    flow_data.append((
+                        str(ts),
+                        str(o.get('code') or ''),
+                        "", # Filled from cache later
+                        str(action),
+                        f"{price:.2f}" if price else "0.00",
+                        f"{int(qty):,}" if qty else "0",
+                        f"{amount:,.2f}" if amount else "0.00",
+                        "核对无误"
+                    ))
+                flow_data.sort(key=lambda x: x[0], reverse=True)
+                
             flow_df = self.bridge.get_all_trade_flows()
             if not flow_df.empty:
-                flow_data = []
+                db_flow_data = []
                 for _, row in flow_df.iterrows():
                     action = row.get('action') or ('买入' if row.get('status') == 'OPEN' else '卖出')
                     date = row.get('buy_date') if action == '买入' else (row.get('sell_date') or row.get('buy_date'))
                     price = row.get('buy_price') if action == '买入' else (row.get('sell_price') or row.get('buy_price'))
                     qty = row.get('buy_amount') or 0
                     amount = price * qty if price and qty else 0.0
-                    flow_data.append((
+                    db_flow_data.append((
                         str(date or ''),
                         str(row.get('code') or ''),
                         str(row.get('name') or ''),
@@ -544,92 +777,212 @@ class ATSMainWindow(QMainWindow):
                         f"{amount:,.2f}" if amount else "0.00",
                         str(row.get('buy_reason') or '自动触发')
                     ))
+                # Update global name cache with any names from database flow data
+                for x in db_flow_data:
+                    c = x[1]
+                    n = x[2]
+                    if c and n and n != "未知":
+                        self.name_cache[c] = n
+                        
+                final_flow = []
+                seen_orders = set()
+                # Process paper account orders
+                for item in flow_data:
+                    code = item[1]
+                    name = self.get_stock_name(code)
+                    key = (item[0], code, item[3])
+                    if key not in seen_orders:
+                        final_flow.append((item[0], code, name, item[3], item[4], item[5], item[6], item[7]))
+                        seen_orders.add(key)
+                # Process DB flows
+                for item in db_flow_data:
+                    key = (item[0], item[1], item[3])
+                    if key not in seen_orders:
+                        final_flow.append(item)
+                        seen_orders.add(key)
+                
+                final_flow.sort(key=lambda x: x[0], reverse=True)
+                if final_flow:
+                    self.trade_flow_table.update_flow_list(final_flow)
+            else:
                 if flow_data:
-                    self.trade_flow_table.update_flow_list(flow_data)
-
-            # 2. Load open positions
-            pos_df = self.bridge.get_open_positions()
-            if not pos_df.empty:
-                pos_data = []
-                cash = 1000000.0
+                    # Resolve names from cache
+                    resolved_flow_data = []
+                    for item in flow_data:
+                        code = item[1]
+                        name = self.get_stock_name(code)
+                        resolved_flow_data.append((item[0], code, name, item[3], item[4], item[5], item[6], item[7]))
+                    self.trade_flow_table.update_flow_list(resolved_flow_data)
+ 
+            # --- 2. Load open positions ---
+            pos_data = []
+            cash = 1000000.0
+            total_assets = 1000000.0
+            
+            if state_data and "positions" in state_data:
+                cash = state_data.get("cash", 1000000.0)
+                positions = state_data.get("positions", {})
                 total_market_value = 0.0
-                for _, row in pos_df.iterrows():
-                    code = row.get('code')
-                    name = row.get('name')
-                    qty = row.get('buy_amount') or 0
-                    cost = row.get('buy_price') or 0.0
-                    price = cost  # Fallback for last price
+                
+                for code, p in positions.items():
+                    name = self.get_stock_name(code)
+                    if name == "未知" and p.get("name"):
+                        name = p.get("name")
+                    qty = p.get("volume") or 0.0
+                    cost = p.get("entry_price") or 0.0
+                    price = p.get("current_price") or cost
+                    
+                    # Update price to current_df price if available
+                    if hasattr(self, 'current_df') and self.current_df is not None and code in self.current_df.index:
+                        try:
+                            price_val = float(self.current_df.loc[code].get('close', self.current_df.loc[code].get('trade', price)))
+                            if price_val > 0:
+                                price = price_val
+                        except:
+                            pass
+                            
                     market_val = qty * price
                     total_market_value += market_val
-                    cash -= market_val
-                    pnl_pct = "+0.00%"
-                    alloc = f"{(market_val / 1000000.0) * 100:.1f}%"
-                    pos_data.append((
-                        str(code or ''),
-                        str(name or ''),
-                        f"{int(qty):,}" if qty else "0",
-                        f"{cost:.2f}" if cost else "0.00",
-                        f"{price:.2f}" if price else "0.00",
-                        f"{market_val:,.2f}" if market_val else "0.00",
-                        pnl_pct,
+                    pnl = (price - cost) * qty
+                    pnl_pct_val = ((price - cost) / cost * 100) if cost else 0.0
+                    pnl_pct = f"{pnl_pct_val:+.2f}%"
+                    
+                    pos_data.append({
+                        'code': code,
+                        'name': name,
+                        'qty': qty,
+                        'cost': cost,
+                        'price': price,
+                        'market_val': market_val,
+                        'pnl_pct': pnl_pct,
+                        'pnl_val': pnl
+                    })
+                
+                total_assets = cash + total_market_value
+                
+                formatted_pos = []
+                for p in pos_data:
+                    alloc = f"{(p['market_val'] / total_assets) * 100:.1f}%" if total_assets else "0.0%"
+                    formatted_pos.append((
+                        str(p['code']),
+                        str(p['name']),
+                        f"{int(p['qty']):,}" if p['qty'] else "0",
+                        f"{p['cost']:.2f}" if p['cost'] else "0.00",
+                        f"{p['price']:.2f}" if p['price'] else "0.00",
+                        f"{p['market_val']:,.2f}" if p['market_val'] else "0.00",
+                        p['pnl_pct'],
                         alloc
                     ))
-                if pos_data:
-                    self.position_panel.update_positions(pos_data, cash=max(0.0, cash), total_assets=cash + total_market_value)
-
-            # 3. Load historical signals
+                self.position_panel.update_positions(formatted_pos, cash=cash, total_assets=total_assets)
+            else:
+                pos_df = self.bridge.get_open_positions()
+                if not pos_df.empty:
+                    db_pos_data = []
+                    total_market_value = 0.0
+                    for _, row in pos_df.iterrows():
+                        code = row.get('code')
+                        name = row.get('name') or self.get_stock_name(code)
+                        qty = row.get('buy_amount') or 0
+                        cost = row.get('buy_price') or 0.0
+                        price = cost  # Fallback for last price
+                        market_val = qty * price
+                        total_market_value += market_val
+                        pnl_pct = "+0.00%"
+                        alloc = f"{(market_val / 1000000.0) * 100:.1f}%"
+                        db_pos_data.append((
+                            str(code or ''),
+                            str(name or ''),
+                            f"{int(qty):,}" if qty else "0",
+                            f"{cost:.2f}" if cost else "0.00",
+                            f"{price:.2f}" if price else "0.00",
+                            f"{market_val:,.2f}" if market_val else "0.00",
+                            pnl_pct,
+                            alloc
+                        ))
+                    self.position_panel.update_positions(db_pos_data, cash=cash, total_assets=cash + total_market_value)
+ 
+            # --- 3. Load historical signals and populate universe manager ---
+            self.universe_manager.radar_pool.clear()
+            self.universe_manager.watch_pool.clear()
+            self.universe_manager.trade_pool.clear()
+            
             signals_df = self.bridge.get_historical_signals(limit=50)
             if not signals_df.empty:
-                radar_list = []
-                watch_list = []
-                trade_list = []
                 for _, row in signals_df.iterrows():
-                    code = row.get('code')
-                    name = row.get('name')
-                    price = row.get('price') or 0.0
+                    code = str(row.get('code') or '').strip()
+                    if not code:
+                        continue
+                    name = row.get('name') or self.get_stock_name(code)
+                    if name == "未知":
+                        name = ""
+                    price = float(row.get('price') or 0.0)
                     action = row.get('action')
                     reason = row.get('reason') or '指标共振'
-                    pct = "+0.0%"
                     strategy = row.get('resample') or 'd'
                     
-                    sig_tuple = (str(code or ''), str(name or ''), f"{price:.2f}", pct, f"周期:{strategy}", str(reason))
                     if action == 'BUY':
-                        watch_list.append(sig_tuple)
+                        self.universe_manager.watch_pool[code] = {
+                            "name": name,
+                            "price": price,
+                            "pct": 0.0,
+                            "strategy": f"周期:{strategy}",
+                            "reason": reason
+                        }
                     else:
-                        radar_list.append(sig_tuple)
-                
-                # Add open positions to trade list
+                        self.universe_manager.radar_pool[code] = {
+                            "name": name,
+                            "price": price,
+                            "pct": 0.0,
+                            "strategy": f"周期:{strategy}",
+                            "reason": reason
+                        }
+            
+            # Add open positions to trade pool
+            pos_df = self.bridge.get_open_positions()
+            if not pos_df.empty:
                 for _, row in pos_df.iterrows():
-                    trade_list.append((
-                        str(row.get('code') or ''),
-                        str(row.get('name') or ''),
-                        f"{row.get('buy_price') or 0.0:.2f}",
-                        "+0.0%",
-                        "当前持仓",
-                        "大级别多头持股"
-                    ))
-                
-                # Update universe tree
-                self.universe_widget.update_pools(radar_list[:15], watch_list[:15], trade_list)
-
-            # 4. Load equity curves
+                    p_code = str(row.get('code') or '').strip()
+                    if not p_code:
+                        continue
+                    name = row.get('name') or self.get_stock_name(p_code)
+                    price = float(row.get('buy_price') or 0.0)
+                    self.universe_manager.trade_pool[p_code] = {
+                        "name": name,
+                        "price": price,
+                        "pct": 0.0,
+                        "strategy": "当前持仓",
+                        "reason": "大级别多头持股"
+                    }
+            
+            # Refresh tree widget UI
+            radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+            self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+            
+            # Pre-fetch history for these initial stocks asynchronously to populate swing states
+            all_init_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+            if all_init_codes:
+                self._async_load_stock_history(all_init_codes)
+ 
+            # --- 4. Load equity curves ---
             dates, strat_equity, bench_equity = self.bridge.get_equity_curve_data()
             x = list(range(len(dates)))
             self.equity_chart.update_curve(x, strat_equity, bench_equity)
-
-            # 5. Load performance metrics using BacktestEngine
+ 
+            # --- 5. Load performance metrics ---
             from ats.backtest_engine import BacktestEngine
             self.backtest_engine = BacktestEngine(self.bridge)
             metrics = self.backtest_engine.calculate_performance_metrics()
             self.backtest_panel.update_stats(metrics)
-
-            # 6. Start real-time IPC socket listener (P6)
-            self.bridge.start_realtime_listener(
-                port=26670,
-                data_callback=lambda data: self.realtime_data_signal.emit(data),
-                signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
-            )
-
+ 
+            # --- 6. Start real-time IPC socket listener (P6) ---
+            if not getattr(self, '_listener_started', False):
+                self.bridge.start_realtime_listener(
+                    port=26670,
+                    data_callback=lambda data: self.realtime_data_signal.emit(data),
+                    signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
+                )
+                self._listener_started = True
+ 
         except Exception as e:
             print(f"[ATSMainWindow] Error loading SQLite data: {e}")
 
@@ -706,7 +1059,10 @@ class ATSMainWindow(QMainWindow):
             # 全量更新或冷启动
             self.current_df = df_payload
 
-        # 4. 更新 UI 显示
+        # Fast vectorized name cache update
+        self._update_name_cache_from_df(self.current_df)
+
+        # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
             self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
@@ -719,7 +1075,122 @@ class ATSMainWindow(QMainWindow):
                 if len(counts) == 10:
                     self.dist_chart.update_data(counts)
             
+            self.refresh_realtime_ui()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
+
+    def _async_load_stock_history(self, codes):
+        if not codes:
+            return
+        
+        # Mark as loading with empty lists
+        for code in codes:
+            if code not in self.stock_history_cache:
+                self.stock_history_cache[code] = []
+                
+        import threading
+        def worker():
+            try:
+                import pandas as pd
+                import os
+                path = 'g:\\sina_MultiIndex_data.h5'
+                if not os.path.exists(path):
+                    return
+                with pd.HDFStore(path, mode='r') as store:
+                    code_query = ", ".join([f"'{c}'" for c in codes])
+                    df = store.select('/all_30', where=f"code in [{code_query}]")
+                
+                if df.empty:
+                    return
+                
+                dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
+                grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
+                
+                for (code, d), val in grouped.items():
+                    d_str = d.strftime("%Y-%m-%d")
+                    hist = self.stock_history_cache.get(code, [])
+                    if not any(item[0] == d_str for item in hist):
+                        hist.append((d_str, float(val)))
+                    self.stock_history_cache[code] = hist
+                    
+                for code in codes:
+                    if code in self.stock_history_cache:
+                        self.stock_history_cache[code].sort(key=lambda x: x[0])
+                
+                # Trigger thread-safe UI update
+                QTimer.singleShot(0, self.refresh_realtime_ui)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error loading history in background: {e}")
+                
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_realtime_ui(self):
+        if self.current_df is None or self.current_df.empty:
+            return
+            
+        # 1. Update prices/percents in universe_manager pools
+        for pool in [self.universe_manager.radar_pool, self.universe_manager.watch_pool, self.universe_manager.trade_pool]:
+            for code in list(pool.keys()):
+                if code in self.current_df.index:
+                    row = self.current_df.loc[code]
+                    pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
+                    pool[code]['pct'] = float(row.get('percent', 0.0))
+                    
+        # 2. Run pipeline filtering
+        self.universe_manager.run_pipeline_filtering(self.current_df)
+        
+        # 3. Update universe tree widget
+        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+        
+        # 4. Update swing state table
+        all_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+        missing_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
+        if missing_codes:
+            self._async_load_stock_history(missing_codes)
+            
+        swing_rows = []
+        import datetime
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        for code in all_codes:
+            if code in self.stock_history_cache and self.stock_history_cache[code]:
+                hist = self.stock_history_cache[code]
+                if code in self.current_df.index:
+                    row = self.current_df.loc[code]
+                    latest_close = float(row.get('close', row.get('price', 0.0)))
+                    name = self.get_stock_name(code)
+                    
+                    # Append or replace today's price
+                    close_series = [item[1] for item in hist]
+                    if hist[-1][0] == today_str:
+                        close_series[-1] = latest_close
+                    else:
+                        close_series.append(latest_close)
+                        
+                    # Calc rolling MA
+                    import pandas as pd
+                    close_pd = pd.Series(close_series)
+                    ma20_series = close_pd.rolling(20, min_periods=1).mean().tolist()
+                    ma5_series = close_pd.rolling(5, min_periods=1).mean().tolist()
+                    
+                    # Update state machine
+                    state, dev_str, position, reason = self.swing_tracker.update_stock_state(
+                        code, name, latest_close, close_series, ma20_series, ma5_series
+                    )
+                    
+                    # limit ups (consecutive close days up)
+                    limit_ups = 0
+                    if len(close_series) > 1:
+                        for idx in range(len(close_series)-1, 0, -1):
+                            if close_series[idx] > close_series[idx-1] * 1.002:
+                                limit_ups += 1
+                            else:
+                                break
+                    
+                    swing_rows.append((
+                        code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, reason
+                    ))
+        if swing_rows:
+            self.swing_table.update_data_list(swing_rows)
 
     def _handle_realtime_signal(self, signal):
         if not signal:

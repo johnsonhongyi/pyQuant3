@@ -18,7 +18,6 @@ class SwingStateTable(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
-        self.load_mock_data()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -32,9 +31,8 @@ class SwingStateTable(QWidget):
         header.addWidget(title)
         header.addStretch()
         
-        btn_refresh = QPushButton("🔄 刷新状态")
-        btn_refresh.clicked.connect(self.load_mock_data)
-        header.addWidget(btn_refresh)
+        self.btn_refresh = QPushButton("🔄 刷新状态")
+        header.addWidget(self.btn_refresh)
         layout.addLayout(header)
 
         # Table
