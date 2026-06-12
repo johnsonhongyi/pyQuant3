@@ -341,6 +341,7 @@ class ATSMainWindow(QMainWindow):
         self.current_df = None  # Live streaming DataFrame snapshot data source
         self._listener_started = False
         self.name_cache = {}  # Global name cache to prevent "未知" names
+        self.price_pct_cache = {}  # Cache for price and percent when current_df is empty/missing
         
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
@@ -350,6 +351,13 @@ class ATSMainWindow(QMainWindow):
         self.realtime_data_signal.connect(self._handle_realtime_data)
         self.realtime_signal_signal.connect(self._handle_realtime_signal)
         
+        # Subscribe to global favorite changes
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            print(f"[ATSMainWindow] Error subscribing to favorites: {e}")
+            
         self._init_toolbar()
         self._init_ui()
         self._restore_layout_state()
@@ -653,48 +661,28 @@ class ATSMainWindow(QMainWindow):
         code_str = str(code).strip()
         # 1. Try name_cache
         name = self.name_cache.get(code_str)
-        if name:
+        if name and name != "未知" and not name.startswith("个股_"):
             return name
             
-        # 2. Try current_df
+        # 2. Use system-wide authoritative and robust resolver with networking and file self-healing fallbacks
+        try:
+            from sys_utils import resolve_stock_name
+            res_name = resolve_stock_name(code_str)
+            if res_name and not res_name.startswith("个股_"):
+                self.name_cache[code_str] = res_name
+                return res_name
+            name = res_name
+        except Exception:
+            pass
+            
+        # 3. Try current_df
         if self.current_df is not None and code_str in self.current_df.index:
-            name = str(self.current_df.loc[code_str].get('name', '')).strip()
-            if name:
-                self.name_cache[code_str] = name
-                return name
+            name_df = str(self.current_df.loc[code_str].get('name', '')).strip()
+            if name_df:
+                self.name_cache[code_str] = name_df
+                return name_df
                 
-        # 3. Try fallback query to DB
-        try:
-            from ats.ipc_bridge import IPCBridge
-            bridge = IPCBridge()
-            query = f"SELECT name FROM trade_records WHERE code = '{code_str}' AND name IS NOT NULL AND name != '' LIMIT 1"
-            with bridge.db_manager.execute_query(query) as cursor:
-                row = cursor.fetchone()
-                if row and row[0]:
-                    name = str(row[0]).strip()
-                    self.name_cache[code_str] = name
-                    return name
-            query = f"SELECT name FROM signal_history WHERE code = '{code_str}' AND name IS NOT NULL AND name != '' LIMIT 1"
-            with bridge.db_manager.execute_query(query) as cursor:
-                row = cursor.fetchone()
-                if row and row[0]:
-                    name = str(row[0]).strip()
-                    self.name_cache[code_str] = name
-                    return name
-        except Exception:
-            pass
-            
-        # 4. Try querying local Sina handbook/database
-        try:
-            from JSONData import sina_data
-            name = sina_data.Sina().get_code_cname(code_str)
-            if name and name != code_str:
-                self.name_cache[code_str] = name
-                return name
-        except Exception:
-            pass
-            
-        return "未知"
+        return name if name else "未知"
 
     def load_db_data(self, force=False):
         try:
@@ -1078,6 +1066,43 @@ class ATSMainWindow(QMainWindow):
             self.refresh_realtime_ui()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
 
+    def _async_load_stock_prices(self, codes):
+        if not codes:
+            return
+        
+        import threading
+        def worker():
+            try:
+                from JSONData import sina_data
+                s = sina_data.Sina()
+                
+                valid_codes = [c for c in codes if c and len(c) == 6]
+                if not valid_codes:
+                    return
+                    
+                # Direct online fetch using Sina's list data API to get real-time price and llastp
+                tick_df = s.get_stock_list_data(valid_codes)
+                        
+                if tick_df is not None and not tick_df.empty:
+                    for idx, row in tick_df.iterrows():
+                        code_str = str(idx).strip().zfill(6)
+                        price = float(row.get('close', 0.0))  # Current price is stored under 'close' after mapping
+                        llastp = float(row.get('llastp', 0.0))  # Yesterday's close is stored under 'llastp'
+                        
+                        if llastp > 0:
+                            pct = (price - llastp) / llastp * 100.0
+                        else:
+                            pct = 0.0
+                            
+                        self.price_pct_cache[code_str] = (price, pct)
+                        
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(0, self.refresh_realtime_ui)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error loading prices in background: {e}")
+                
+        threading.Thread(target=worker, daemon=True).start()
+
     def _async_load_stock_history(self, codes):
         if not codes:
             return
@@ -1124,29 +1149,50 @@ class ATSMainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_realtime_ui(self):
-        if self.current_df is None or self.current_df.empty:
-            return
-            
+        has_df = self.current_df is not None and not self.current_df.empty
+        
         # 1. Update prices/percents in universe_manager pools
+        all_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+        missing_realtime_codes = []
+        
         for pool in [self.universe_manager.radar_pool, self.universe_manager.watch_pool, self.universe_manager.trade_pool]:
             for code in list(pool.keys()):
-                if code in self.current_df.index:
+                if has_df and code in self.current_df.index:
                     row = self.current_df.loc[code]
                     pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
                     pool[code]['pct'] = float(row.get('percent', 0.0))
-                    
+                elif code in self.price_pct_cache:
+                    price, pct = self.price_pct_cache[code]
+                    pool[code]['price'] = price
+                    pool[code]['pct'] = pct
+                else:
+                    if code in self.stock_history_cache and self.stock_history_cache[code]:
+                        pool[code]['price'] = float(self.stock_history_cache[code][-1][1])
+                        pool[code]['pct'] = 0.0
+                    else:
+                        pool[code]['price'] = 0.0
+                        pool[code]['pct'] = 0.0
+                    missing_realtime_codes.append(code)
+
+        if missing_realtime_codes:
+            import time
+            now = time.time()
+            if not hasattr(self, "_last_price_fetch_time") or now - self._last_price_fetch_time > 15:
+                self._last_price_fetch_time = now
+                self._async_load_stock_prices(missing_realtime_codes)
+                
         # 2. Run pipeline filtering
-        self.universe_manager.run_pipeline_filtering(self.current_df)
-        
+        if has_df:
+            self.universe_manager.run_pipeline_filtering(self.current_df)
+            
         # 3. Update universe tree widget
         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
         self.universe_widget.update_pools(radar_list, watch_list, trade_list)
         
         # 4. Update swing state table
-        all_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
-        missing_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
-        if missing_codes:
-            self._async_load_stock_history(missing_codes)
+        missing_history_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
+        if missing_history_codes:
+            self._async_load_stock_history(missing_history_codes)
             
         swing_rows = []
         import datetime
@@ -1154,41 +1200,48 @@ class ATSMainWindow(QMainWindow):
         for code in all_codes:
             if code in self.stock_history_cache and self.stock_history_cache[code]:
                 hist = self.stock_history_cache[code]
-                if code in self.current_df.index:
+                
+                latest_close = None
+                if has_df and code in self.current_df.index:
                     row = self.current_df.loc[code]
                     latest_close = float(row.get('close', row.get('price', 0.0)))
-                    name = self.get_stock_name(code)
+                elif code in self.price_pct_cache:
+                    latest_close = self.price_pct_cache[code][0]
+                else:
+                    latest_close = float(hist[-1][1])
                     
-                    # Append or replace today's price
-                    close_series = [item[1] for item in hist]
-                    if hist[-1][0] == today_str:
-                        close_series[-1] = latest_close
-                    else:
-                        close_series.append(latest_close)
-                        
-                    # Calc rolling MA
-                    import pandas as pd
-                    close_pd = pd.Series(close_series)
-                    ma20_series = close_pd.rolling(20, min_periods=1).mean().tolist()
-                    ma5_series = close_pd.rolling(5, min_periods=1).mean().tolist()
+                name = self.get_stock_name(code)
+                
+                # Append or replace today's price
+                close_series = [item[1] for item in hist]
+                if hist[-1][0] == today_str:
+                    close_series[-1] = latest_close
+                else:
+                    close_series.append(latest_close)
                     
-                    # Update state machine
-                    state, dev_str, position, reason = self.swing_tracker.update_stock_state(
-                        code, name, latest_close, close_series, ma20_series, ma5_series
-                    )
-                    
-                    # limit ups (consecutive close days up)
-                    limit_ups = 0
-                    if len(close_series) > 1:
-                        for idx in range(len(close_series)-1, 0, -1):
-                            if close_series[idx] > close_series[idx-1] * 1.002:
-                                limit_ups += 1
-                            else:
-                                break
-                    
-                    swing_rows.append((
-                        code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, reason
-                    ))
+                # Calc rolling MA
+                import pandas as pd
+                close_pd = pd.Series(close_series)
+                ma20_series = close_pd.rolling(20, min_periods=1).mean().tolist()
+                ma5_series = close_pd.rolling(5, min_periods=1).mean().tolist()
+                
+                # Update state machine
+                state, dev_str, position, reason = self.swing_tracker.update_stock_state(
+                    code, name, latest_close, close_series, ma20_series, ma5_series
+                )
+                
+                # limit ups (consecutive close days up)
+                limit_ups = 0
+                if len(close_series) > 1:
+                    for idx in range(len(close_series)-1, 0, -1):
+                        if close_series[idx] > close_series[idx-1] * 1.002:
+                            limit_ups += 1
+                        else:
+                            break
+                
+                swing_rows.append((
+                    code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, reason
+                ))
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
 
@@ -1369,6 +1422,13 @@ class ATSMainWindow(QMainWindow):
     def closeEvent(self, event):
         # Synchronously save all layout configurations and column widths on application exit
         try:
+            # Unsubscribe from global favorites changes
+            try:
+                from global_favorites import GlobalFavoriteManager
+                GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+            except Exception as ex:
+                print(f"[ATSMainWindow] Error unsubscribing from favorites: {ex}")
+
             # First, save geometry and splitter layouts
             self._save_layout_state()
             
@@ -1395,3 +1455,24 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Error saving column widths on close: {e}")
             
         super().closeEvent(event)
+
+    def _on_favorites_changed(self):
+        # Thread-safe trigger UI refresh on favorite changes using QTimer
+        QTimer.singleShot(0, self._safe_favorites_changed)
+
+    def _safe_favorites_changed(self):
+        try:
+            # Refresh universe tree
+            if hasattr(self, 'universe_widget'):
+                # Under the hood it updates pools or mock data
+                self.universe_widget.load_mock_data()
+                self.universe_widget.update_pools(self.current_df, self.swing_tracker)
+            
+            # Refresh swing table via realtime refresh
+            self.refresh_realtime_ui()
+                
+            # Refresh heatmap widget
+            if hasattr(self, 'heatmap_widget'):
+                self.heatmap_widget.load_live_sectors()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")

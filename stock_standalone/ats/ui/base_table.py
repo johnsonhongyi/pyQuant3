@@ -103,6 +103,18 @@ class BaseATSTableWidget(QTableWidget):
         code = code_item.text().strip()
         name = name_item.text().strip() if name_item else ""
         
+        # Clean code to handle prefixes like ⭐
+        code_clean = "".join(c for c in code if c.isalnum())
+        if not code_clean:
+            return
+            
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        from global_favorites import GlobalFavoriteManager
+        
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = code_clean in fav_mgr.get_favorite_stocks()
+        
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -121,13 +133,31 @@ class BaseATSTableWidget(QTableWidget):
             }
         """)
         
-        copy_label = f"📋 复制股票代码 {code}"
+        copy_label = f"📋 复制股票代码 {code_clean}"
         if name:
             copy_label += f" ({name})"
         copy_action = QAction(copy_label, self)
-        copy_action.triggered.connect(lambda: self._copy_to_clipboard(code))
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(code_clean))
         menu.addAction(copy_action)
+        
+        menu.addSeparator()
+        
+        if is_fav:
+            fav_action = QAction(f"❌ 取消重点关注 {code_clean}", self)
+        else:
+            fav_action = QAction(f"⭐ 设为重点关注 {code_clean}", self)
+        fav_action.triggered.connect(lambda: self._toggle_favorite(code_clean))
+        menu.addAction(fav_action)
+        
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _toggle_favorite(self, code):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_mgr.toggle_favorite_stock(str(code).strip())
+        except Exception as e:
+            print(f"[BaseATSTable] Toggle favorite stock error: {e}")
 
     def _copy_to_clipboard(self, text):
         try:

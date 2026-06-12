@@ -388,6 +388,12 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
             except Exception as e:
                 print(f"[HeaderPersistence] Failed to restore state for {config_key}: {e}")
 
+        # 无论是否恢复成功，强制把所有列设回 Interactive 拖拽模式，防止 restoreState 恢复了历史配置中其他非交互的 resizeMode
+        header.blockSignals(True)
+        for col in range(col_count):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        header.blockSignals(False)
+
         if not restored:
             if default_widths:
                 header.blockSignals(True)

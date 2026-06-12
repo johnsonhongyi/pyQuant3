@@ -1,3 +1,36 @@
+## 2026-06-13 02:00
+- [x] **实现 ATS 终端重点关注个股/板块置顶、高亮与右键上下文菜单联动 (Implemented ATS Favorites Pinning, Highlighting, and Context Menu Linkage)**:
+    - [x] **左侧股票池 (Universe Tree) 重点个股置顶与高亮**: 重构了 `UniverseTreeWidget` 的数据更新方法。通过 `GlobalFavoriteManager` 获取重点个股列表，在 Mock 模式与实盘状态下自动对重点关注个股在各池（雷达、观察、交易）内部进行强制置顶降序排序。对重点关注个股添加 `"⭐ "` 名称前缀，统一涂装深绿背景 (`#1A2A1A`) 与亮绿前景 (`#00FF88`)。
+    - [x] **左侧股票池 (Universe Tree) 右键菜单快速关注/取消关注**: 为股票树节点连接了 `customContextMenuRequested` 信号。右键单击股票节点时，能自适应解析股票代码和名称并弹出上下文菜单，支持快速“设为重点关注”或“取消重点关注”个股，实现了用户与全局关注管理器 (`GlobalFavoriteManager`) 的顺畅无缝交互。
+    - [x] **大级别均线回调跟踪器 (Swing Pullback Table) 重点个股置顶与高亮**: 重构了 `SwingStateTable` 的 `update_data_list` 和 `load_mock_data`。通过 `GlobalFavoriteManager` 重点个股检测对列表个股执行置顶，自动附加 `"⭐ "` 名称前缀，并将该行所有单元格以深绿背景 (`#1A2A1A`) 和亮绿前景 (`#00FF88`) 统一高亮渲染。
+    - [x] **大级别均线回调跟踪器全局联动**: 修复了在 `ATSMainWindow` 订阅 global favorites change 时调用的方法，并纠正了 `_safe_favorites_changed` 中的 `update_data_list` 重绘，统一路由至主线程 `refresh_realtime_ui()` 进行大级别状态机状态数据及重点涂装的彻底刷新。
+    - [x] **行业板块强度热力图 (Sector Heatmap Grid) 重点板块置顶、高亮与右键菜单**:
+        - **代码映射收集**：在 `load_live_sectors` 中为 `v_reversal_pool` 聚合与 legacy Fallback 聚合两路数据源补齐了 `self.sector_to_codes` 板块下辖个股代码映射，支持板块内重点个股穿透性识别。
+        - **多维置顶排序**：重写了 `sort_sectors` 的排序 `key` 算法。将“是否为重点关注板块”或“该板块是否包含重点关注个股”合成为首要排序权值，从而保证所有重点板块和个股所属板块全部置顶。
+        - **金黄发光视觉与右键菜单**：重写了 `render_grid` 卡片绘制。将置顶板块的卡片样式升级为科技风深绿底色渐变 (`#1A2A1A` 到 `#111E11`) 搭配 `1.5px solid rgba(255, 215, 0, 0.8)` 金黄发光边框，并在板块卡片上连接 `customContextMenuRequested` 右键事件，支持用户在板块卡片上右键快速切换板块的重点关注状态。
+    - [x] **完成专项单元测试与 100% 绿旗通过**: 新增了 `test_favorites_pinning_and_styling.py` 专项单元测试，完整覆盖了全局管理器、策略股票树、波段回调表、行业热力图的关注操作、置顶排序、高亮着色、前缀识别等全链条联动。结合原有的 `test_watchlist_lifecycle.py` 测试套件，全部顺利通过，证明了系统的极高可靠性与兼容性。
+
+## 2026-06-13 00:30
+- [x] **修复 ATS 终端个股涨幅及大级别均线冷启动空白并升级板块热力图视觉 (Fixed ATS Live Price/MA20 Blank & Upgraded Heatmap Aesthetics)**：
+    - [x] **左侧股票池涨幅与现价多维度自愈拉取 (Universe Tree Price/Percent Auto-Retrieval)**：重构了 `refresh_realtime_ui` 方法中的数据更新机制。当 IPC 管道尚未接收到来自主进程的 `current_df` 广播或 `current_df` 为空时，通过新增的 `_async_load_stock_prices` 方法在后台异步调用新浪实时 API 并缓存到 `self.price_pct_cache` 中。同时对个股的当前价格和百分比涨幅增加了 15 秒节流防抖控制，彻底解决了冷启动或非交易时段股票池涨幅显示为 `0.00%` 以及个股分列后手动排序混乱的缺陷。
+    - [x] **重构并修复 `_async_load_stock_prices` 行情拉取接口 (Fixed & Optimized Offline/Real-time Stock Price Loader)**：原先的 `_async_load_stock_prices` 使用 `s.get_real_time_tick(enrich_data=False)` 且从 HDF5 中读取，使得缺乏 `percent` 列而计算出来的涨幅一直归零（且伴有 3秒左右的 IO 阻塞）。现重构为直接通过 `s.get_stock_list_data` 联网拉取新浪实时行情，绕过巨量 HDF5 IO，并使用 `(close - llastp) / llastp * 100` 公式计算实际涨幅百分比，确保在冷启动和周末时股票池依然能显示最准确的非 0 昨收涨幅。
+    - [x] **打通大级别均线 MA20d 状态机双重兜底计算 (Decoupled MA20d Calculations from current_df)**：去除了 `refresh_realtime_ui` 刷新中对 `current_df` 不能为空的硬限制，重构了状态机的输入数据构造逻辑。当个股尚未被主行情进程广播时，系统能自动融合 `price_pct_cache` 的缓存价格或读取历史 K 线最后一天收盘价（`hist[-1][1]`）作为当天最新价格。拼装好包含今天最新价的完整序列后，再调用 `swing_tracker.update_stock_state` 对雷达/观察/交易三池 the 个股进行滚动均线计算与状态机转移，彻底修复了冷启动后大级别面板一片空白的故障。
+    - [x] **重构板块热力图强度计算、微光视觉效果与安全浮点排序 (Aesthetic Heatmap Aggregation & Safe Float Sorting)**：
+        - **融合活跃成员加权得分**：将原本粗暴的 `avg_score = sector_scores[sec] / count` 重构为更能体现行业板块真实热度凝聚力的融合指数得分 `intensity_score = avg_score * (1.0 + 0.15 * count)`，有效避免了只有 1 只垃圾股的小板块虚高占榜。
+        - **升级科技风微光卡片**：废除了原先刺眼粗糙的纯红/纯绿物理卡片边框设计，改为与整套深色系深度融合的半透明 HSL 柔和渐变底色与白色微光光晕 `hover` 发光动画，支持 5 秒自适应异步定时刷新。
+        - **引入安全浮点与数值排序防御**：在 `sort_sectors` 中为百分比字符串与成员数排序编写了 `safe_float_pct` 异常防御函数，以浮点数值降序代替原先可能导致顺序错乱的 ASCII 字符串字典序，实现了板块强度、涨跌幅、成员数的精准自然降序排序。
+    - [x] **当前持仓权威个股中文名称解析 DRY 复用 (Unified Authoritative Stock Name Resolution)**：将 `main_window.py` 里的 `get_stock_name` 直接路由至系统底层的 `sys_utils.resolve_stock_name` 接口，使得打包成 EXE 后能够自动复用本地 HDF5 库、当日盘前诊断缓存以及新浪网络备用 API 等多物理通道，彻底清除了在 Nuitka/PyInstaller 独立编译打包环境下持仓个股名称显示为“未知”的痛点。
+    - [x] **调整左侧策略股票池列顺序，将策略周期调整至最后一列展示 (Swapped Left Tree Columns to Position Period on the Last Column)**：重构了 `UniverseTreeWidget` 的表头文本与默认宽度逻辑，将“核心特征/追踪状态”放置在第 4 列（倒数第二列），将“筛选机制/持仓（即‘周期:d’或持仓状态）”移动至第 5 列（最后一列）。同时同步对齐了 items 填充方法（`load_mock_data` 和 `update_pools`）、双击联动数据结构提取、`__lt__` 数字与特殊字符自动排序逻辑以及列宽极限自适应限制。
+    - [x] **根治左侧策略股票池列宽被旧缓存锁死及最大宽度限制卡住无法调整问题 (Fixed Universe Tree Column Width Locked & Resize Frozen)**：
+        - 彻底去除了 `UniverseTreeWidget` 表格中针对第 4 列（现为“核心特征/追踪状态”）的硬编码最大宽度 `max_widths={4: 350}` 限制，允许该列在 DPI 缩放与不同窗口宽度下无障碍横向拉伸。
+        - 升级了 `ats/ui/styles.py` 的通用列宽持久化还原器 `setup_header_persistence` 的 `restore_action` 机制：在每次从本地 `window_config.json` 物理还原表头状态（`restoreState`）之后，强制通过循环重新把所有列的 SectionResizeMode 设置为 `QHeaderView.ResizeMode.Interactive`。这不仅避免了因旧版缓存配置文件中残留的不一致 resize 模式将特定列卡死不可拉拽的顽疾，而且从根本上支持了用户自由拉伸每一列交界线。
+    - [x] **彻底剔除左侧股票池标题及树根节点 Emoji 视觉噪音并补全 Mock 统计数量 (Removed Left Tree Emoji Badges & Populated Mock Statistics)**：
+        - 将 `universe_widget.py` 中 `title_label` 里的 `"🌌 策略股票池"` 净化为 `"策略股票池"`；
+        - 将左侧股票池中三个树根节点上的 `"🌌 候选雷达池"`、`"📌 精选观察池"`、`"💰 实盘交易池"` 对应 emoji 图标全部彻底物理剥离；
+        - 补全了 `load_mock_data` 缺少的统计后缀，使得 Mock 模式与实盘状态保持一致，均呈现诸如 `"候选雷达池 (Radar Pool) (5)"` 的统一纯文字加数量统计格式，保证了视觉的精简一致性。
+    - [x] **修复由于 Mock 数组未定义先引用引发的 UnboundLocalError (Fixed UnboundLocalError in Mock Data Loading)**：在 `universe_widget.py` 的 `load_mock_data` 方法中，将 `radar_items`、`watch_items` 和 `trade_items` 数据集的初始化定义代码全部前置调整到各自对应 Tree 根节点设置 `setText(0, ...)` 之前，彻底清除了在加载 Mock 股票池时因未定义先引用引发的崩溃异常。
+    - [x] **回归测试 100% 绿旗跑通**: 成功运行 `pytest test_watchlist_lifecycle.py`，全量 11 项生命周期与数据一致性测试无任何警告通过。
+
 ## 2026-06-12 23:10
 - [x] **重构 ATS 终端启动入口布局并入下拉功能菜单 (Relocated ATS Launcher to Bottom Action Dropdown)**：
     - [x] **自工具栏移除显式按钮**：从 `instock_MonitorTK.py` 主工具栏中删除了占位的 `"ATS🤖"` 显式按钮。
