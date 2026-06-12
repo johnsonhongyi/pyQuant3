@@ -116,7 +116,7 @@ from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
 import hotkey_rotator
 from ext_data_viewer import ExtDataViewer
-from sys_utils import get_app_root
+from sys_utils import get_app_root, is_packaged_env
 from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
 import stock_indicator_help
@@ -391,9 +391,8 @@ def get_visualizer_path(file_base='trade_visualizer_qt6'):
     - 开发环境 -> .py 文件路径
     - 打包 exe  -> exe 文件路径
     """
-    if getattr(sys, 'frozen', False):
-        # 打包后的 exe 所在目录
-        base_path = os.path.dirname(sys.executable)
+    base_path = get_app_root()
+    if is_packaged_env():
         path = os.path.join(base_path, f"{file_base}.exe")
         if os.path.exists(path):
             return path
@@ -401,8 +400,6 @@ def get_visualizer_path(file_base='trade_visualizer_qt6'):
             logger.error(f"Visualizer exe not found: {path}")
             return None
     else:
-        # 开发环境
-        base_path = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base_path, f"{file_base}.py")
         if os.path.exists(path):
             return path
@@ -1025,6 +1022,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-w>", lambda event: self.open_dna_auditor_top50())
         self.bind("<Alt-g>", self._on_shortcut_reentry_backtest)
         self.bind("<Alt-G>", self._on_shortcut_reentry_backtest)
+        self.bind("<Alt-p>", lambda event: self.open_ats_panel())
+        self.bind("<Alt-P>", lambda event: self.open_ats_panel())
         self.bind("<space>", lambda event: self.toggle_spatial_follow_hud())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
@@ -1311,6 +1310,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"打开决策流水面板失败: {e}\n{traceback.format_exc()}")
             messagebox.showerror("Error", f"Failed to open Decision Flow Panel: {e}")
+
+    def open_ats_panel(self):
+        """打开运行 ATS 智能操盘终端 (Alt+P)"""
+        try:
+            base_path = get_app_root()
+            if is_packaged_env():
+                path = os.path.join(base_path, "ATS_Terminal.exe")
+                if os.path.exists(path):
+                    logger.info(f"🚀 [ATS] Running packaged exe: {path}")
+                    subprocess.Popen([path], cwd=base_path)
+                    toast_message(self, "ATS智能终端启动中...")
+                else:
+                    logger.error(f"❌ [ATS] ATS_Terminal.exe not found at: {path}")
+                    messagebox.showerror("错误", f"未找到 ATS_Terminal.exe 运行文件！\n路径: {path}")
+            else:
+                path = os.path.join(base_path, "run_ats.py")
+                if os.path.exists(path):
+                    logger.info(f"🚀 [ATS] Running development script: {path}")
+                    subprocess.Popen([sys.executable, path], cwd=base_path)
+                    toast_message(self, "ATS智能终端启动中...")
+                else:
+                    logger.error(f"❌ [ATS] run_ats.py not found at: {path}")
+                    messagebox.showerror("错误", f"未找到 run_ats.py 文件！\n路径: {path}")
+        except Exception as e:
+            logger.error(f"❌ [ATS] Failed to launch ATS: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("错误", f"启动 ATS 终端失败: {e}")
 
     def open_racing_panel(self):
         """打开竞价赛马与节奏监控面板 (Alt+M)"""
@@ -4820,6 +4845,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="ATS🤖", command=lambda: self.open_ats_panel(), font=self.default_font_bold, fg="darkblue", pady=2).pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())

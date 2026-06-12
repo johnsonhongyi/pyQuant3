@@ -1,3 +1,26 @@
+## 2026-06-12 19:40
+- [x] **优化个股名称解析并拦截个股占位符污染 (Optimized Stock Name Resolution & Prevented Placeholder Pollution)**:
+    - [x] **集成本地行情引擎极速解析 (Integrated Local Sina Engine Resolution)**: 在 `sys_utils.py` 的 `resolve_stock_name(code_clean)` 解析函数中引入了第 0.5 步。在内存高速缓存之后，优先实例化并使用 `JSONData.sina_data.Sina(readonly=True).get_code_cname(code_clean)` 来检索权威股票名称。此设计能够使程序在毫秒级内获取到最新且准确的中文名称，同时彻底避免了不必要的 HDF5 文件读取、竞价赛马快照分析和重复的历史诊断记录检索。
+    - [x] **降低多余的网络请求 (Reduced Redundant Network Requests)**: 当本地 `sina_data` 含有缓存或能从本地数据源读取出真名时，直接返回并加入内存缓存中，极大减少了由于冷启动、无名字或新股等频繁向新浪 API 联网轮询请求的开销，降低了被新浪封禁 IP 的风险。
+    - [x] **回归测试 100% 成功通过 (Passed All Watchlist Regression Tests)**: 运行 `pytest test_watchlist_lifecycle.py` 测试套件，11 项核心回归和集成测试全部绿旗通过，无任何异常或兼容性冲突。
+
+## 2026-06-12 19:30
+- [x] **实现 TK 主界面集成 ATS 智能操盘终端启动入口 (Integrated ATS Launcher into TK Monitor UI)**:
+    - [x] **实现环境自适应启动机制**: 在 `instock_MonitorTK.py` 中实现了 `open_ats_panel()` 与 `get_visualizer_path()` 的 Nuitka/PyInstaller 兼容自适应逻辑。引入了统一的检测函数 `is_packaged_env()`，并通过 `get_app_root()` 统一获取绝对根目录。该机制能够自动识别当前程序是否处于打包模式（兼容 PyInstaller、Nuitka standalone 和 Nuitka onefile）：若是打包后的 exe 环境，则直接在后台以异步非阻塞形式唤起对应的 `ATS_Terminal.exe` 或 `trade_visualizer_qt6.exe`；如果是 native Python 脚本开发环境，则后台异步唤起相应的 `.py` 脚本，保证运行兼容性，避免主线程 I/O 卡顿与路径漂移。
+    - [x] **在主控制面板添加 ATS 快捷启动按钮**: 在 `ctrl_frame` 主工具栏中添加了 `ATS🤖` 功能按钮，其位置排在 `信号🔥` 按钮后，前景色为 `darkblue`。
+    - [x] **注册全局 Alt+P 快捷键**: 绑定了 `Alt+p` 与 `Alt+P` 的全局键盘快捷键，使得交易员可以直接用键盘瞬间唤起 ATS 操盘控制台，实现了全终端一致的键盘导航操作体验。
+    - [x] **自测试运行 100% 通过**: 运行 `test_watchlist_lifecycle.py` 测试套件，11 个核心测试用例全部绿旗通过，没有引入 any 语法或功能性冲突。
+
+
+
+
+
+## 2026-06-12 18:25
+- [x] **修复信号检测 detect_signals 中的 NumPy 数组 values 属性异常 (Fixed detect_signals NumPy Array AttributeError)**:
+    - [x] **实现 safe_values 健壮性提取器**: 在 `stock_logic_utils.py` 首部增加了全局 `safe_values(val)` 辅助函数。该函数在获取 Series 或 DataFrame 列的 values 数组时，会自动检测其类型。如果对象已经是一个 `numpy.ndarray`（即无 `values` 属性），则直接返回该对象本身，从而彻底杜绝了因数据类型在计算管道中发生变化导致的 `'numpy.ndarray' object has no attribute 'values'` 运行时崩溃。
+    - [x] **全量更新 stock_logic_utils.py 的提取逻辑**: 将 `RealtimeSignalManager.update_signals`、`calc_breakout_signals` 和 `calculate_intraday_breakout_for_single_stock` 方法中的全部 20 余处 direct `.values` 调用重构为 `safe_values(...)` 保护调用。这既保证了极速向量化计算性能，又保证了在高频实时行情推送下的极端类型安全性。
+    - [x] **52 项核心自测自检 100% 绿旗跑通**: 重新运行 pytest 测试套件，全量 52 个回归测试与集成测试用例全部一次性无警告通过，未引入任何副作用。
+
 ## 2026-06-12 17:35
 - [x] **ATS系统自测自检与核心功能验证 (ATS Self-Testing & Core Functionality Verification)**:
     - [x] **运行全量测试用例并分析结果 (Run All Test Cases and Analyze Results)**: 运行 `pytest` 跑通了全部 52 项单元与集成测试。
