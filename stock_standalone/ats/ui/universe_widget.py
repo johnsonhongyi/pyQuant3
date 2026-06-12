@@ -123,6 +123,7 @@ class UniverseTreeWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._is_mock_active = False
         self._init_ui()
         self.load_mock_data()
 
@@ -173,6 +174,7 @@ class UniverseTreeWidget(QWidget):
         layout.addWidget(self.tree)
 
     def load_mock_data(self):
+        self._is_mock_active = True
         self.tree.setSortingEnabled(False)
         self.tree.clear()
 
@@ -210,12 +212,17 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+"):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+"):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
 
         # 2. Watchlist Pool
         watch_items = [
@@ -243,12 +250,17 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+"):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+"):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
 
         # 3. Trading Pool
         trade_items = [
@@ -275,18 +287,24 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+"):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+"):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
 
         self.tree.expandAll()
         auto_fit_columns_once(self.tree, "ats_universe_tree_state")
         self.tree.setSortingEnabled(True)
 
     def update_pools(self, radar_list, watch_list, trade_list):
+        self._is_mock_active = False
         self.tree.setSortingEnabled(False)
         self.tree.clear()
 
@@ -316,12 +334,17 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
 
         # 2. Watchlist Pool
         self.watch_root = UniverseTreeItem(self.tree)
@@ -343,12 +366,17 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
 
         # 3. Trading Pool
         self.trade_root = UniverseTreeItem(self.tree)
@@ -370,12 +398,17 @@ class UniverseTreeWidget(QWidget):
             if is_fav:
                 for col in range(6):
                     item.setBackground(col, QColor("#1A2A1A"))
-                    item.setForeground(col, QColor("#00FF88"))
+                item.setForeground(0, QColor("#00FF88"))
+                item.setForeground(1, QColor("#00FF88"))
+                item.setForeground(2, QColor("#e2e2e5"))
+                item.setForeground(4, QColor("#e2e2e5"))
+                item.setForeground(5, QColor("#e2e2e5"))
+            
+            # Respect A-share red/green convention for percentage column
+            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
+                item.setForeground(3, QColor(COLOR_UP))
             else:
-                if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                    item.setForeground(3, QColor(COLOR_UP))
-                else:
-                    item.setForeground(3, QColor(COLOR_DOWN))
+                item.setForeground(3, QColor(COLOR_DOWN))
         
         self.tree.expandAll()
         auto_fit_columns_once(self.tree, "ats_universe_tree_state")

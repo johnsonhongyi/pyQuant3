@@ -560,6 +560,7 @@ class HotkeyListener(threading.Thread):
             10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R [视窗轮换 (向上轮转多屏窗口)]"),  # Shift+R
             11: (win32con.MOD_ALT, 0x4A, "Alt+J [决策流水 (成交与决策分析看板)]"),  # J
             12: (win32con.MOD_ALT, 0x55, "Alt+U [突破跟单 (隐藏/显示跟单指挥所 HUD)]"),  # U
+            13: (win32con.MOD_ALT, 0x50, "Alt+P [智能操盘 (隐藏/显示ATS自治交易终端)]"),  # P
         }
         self.registered_ids = []
 

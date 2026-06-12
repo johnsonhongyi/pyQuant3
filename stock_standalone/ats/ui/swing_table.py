@@ -17,6 +17,7 @@ class SwingStateTable(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._is_mock_active = False
         self._init_ui()
 
     def _init_ui(self):
@@ -56,6 +57,7 @@ class SwingStateTable(QWidget):
         layout.addWidget(self.table)
 
     def load_mock_data(self):
+        self._is_mock_active = True
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
@@ -89,37 +91,42 @@ class SwingStateTable(QWidget):
                 
                 if is_fav:
                     item.setBackground(QColor("#1A2A1A"))
-                    item.setForeground(QColor("#00FF88"))
+                
+                # Dynamic cell styling based on state/pct, preserving it for favorite stocks too
+                if col_idx in (0, 1): # Code and Name
+                    if is_fav:
+                        item.setForeground(QColor("#00FF88"))
+                    else:
+                        item.setForeground(QColor("#e2e2e5"))
+                elif col_idx == 3: # State column
+                    if text == "回踩中":
+                        item.setForeground(QColor(COLOR_WARN))
+                    elif text == "回踩企稳":
+                        item.setForeground(QColor(COLOR_INFO))
+                        item.setFont(self._get_bold_font())
+                    elif text == "持股中":
+                        item.setForeground(QColor(COLOR_ACCENT))
+                        item.setFont(self._get_bold_font())
+                    elif text == "已平仓":
+                        item.setForeground(QColor(COLOR_DOWN))
+                elif col_idx == 4: # MA20 deviation
+                    if text.startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    else:
+                        item.setForeground(QColor(COLOR_DOWN))
+                elif col_idx == 6: # Position
+                    if text != "0%":
+                        item.setForeground(QColor(COLOR_ACCENT))
+                        item.setFont(self._get_bold_font())
                 else:
-                    # Dynamic cell styling based on state/pct
-                    if col_idx == 3: # State column
-                        if text == "回踩中":
-                            item.setForeground(QColor(COLOR_WARN))
-                        elif text == "回踩企稳":
-                            item.setForeground(QColor(COLOR_INFO))
-                            item.setFont(self._get_bold_font())
-                        elif text == "持股中":
-                            item.setForeground(QColor(COLOR_ACCENT))
-                            item.setFont(self._get_bold_font())
-                        elif text == "已平仓":
-                            item.setForeground(QColor(COLOR_DOWN))
-                    
-                    elif col_idx == 4: # MA20 deviation
-                        if text.startswith("+"):
-                            item.setForeground(QColor(COLOR_UP))
-                        else:
-                            item.setForeground(QColor(COLOR_DOWN))
-     
-                    elif col_idx == 6: # Position
-                        if text != "0%":
-                            item.setForeground(QColor(COLOR_ACCENT))
-                            item.setFont(self._get_bold_font())
+                    item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
         auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
         self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
+        self._is_mock_active = False
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
@@ -143,31 +150,35 @@ class SwingStateTable(QWidget):
                 
                 if is_fav:
                     item.setBackground(QColor("#1A2A1A"))
-                    item.setForeground(QColor("#00FF88"))
+                
+                # Dynamic cell styling based on state/pct, preserving it for favorite stocks too
+                if col_idx in (0, 1): # Code and Name
+                    if is_fav:
+                        item.setForeground(QColor("#00FF88"))
+                    else:
+                        item.setForeground(QColor("#e2e2e5"))
+                elif col_idx == 3: # State column
+                    if text == "回踩中":
+                        item.setForeground(QColor(COLOR_WARN))
+                    elif text == "回踩企稳":
+                        item.setForeground(QColor(COLOR_INFO))
+                        item.setFont(self._get_bold_font())
+                    elif text == "持股中":
+                        item.setForeground(QColor(COLOR_ACCENT))
+                        item.setFont(self._get_bold_font())
+                    elif text == "已平仓":
+                        item.setForeground(QColor(COLOR_DOWN))
+                elif col_idx == 4: # MA20 deviation
+                    if str(text).startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    elif str(text).startswith("-"):
+                        item.setForeground(QColor(COLOR_DOWN))
+                elif col_idx == 6: # Position
+                    if str(text) != "0%":
+                        item.setForeground(QColor(COLOR_ACCENT))
+                        item.setFont(self._get_bold_font())
                 else:
-                    # Dynamic cell styling based on state/pct
-                    if col_idx == 3: # State column
-                        if text == "回踩中":
-                            item.setForeground(QColor(COLOR_WARN))
-                        elif text == "回踩企稳":
-                            item.setForeground(QColor(COLOR_INFO))
-                            item.setFont(self._get_bold_font())
-                        elif text == "持股中":
-                            item.setForeground(QColor(COLOR_ACCENT))
-                            item.setFont(self._get_bold_font())
-                        elif text == "已平仓":
-                            item.setForeground(QColor(COLOR_DOWN))
-                    
-                    elif col_idx == 4: # MA20 deviation
-                        if str(text).startswith("+"):
-                            item.setForeground(QColor(COLOR_UP))
-                        elif str(text).startswith("-"):
-                            item.setForeground(QColor(COLOR_DOWN))
-
-                    elif col_idx == 6: # Position
-                        if str(text) != "0%":
-                            item.setForeground(QColor(COLOR_ACCENT))
-                            item.setFont(self._get_bold_font())
+                    item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
         auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
