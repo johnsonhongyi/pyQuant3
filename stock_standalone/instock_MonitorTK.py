@@ -4761,7 +4761,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -4815,6 +4815,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.setup_global_hotkey(show_toast=True, mode="GLOBAL")
             elif action == "关闭全局快捷键":
                 self.setup_global_hotkey(show_toast=True, mode="LOCAL")
+            elif action == "ATS终端":
+                self.open_ats_panel()
 
 
         def on_select(event=None):
@@ -4846,7 +4848,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="ATS🤖", command=lambda: self.open_ats_panel(), font=self.default_font_bold, fg="darkblue", pady=2).pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())

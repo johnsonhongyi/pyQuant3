@@ -3719,7 +3719,7 @@ def _kernel_mark_signal_rows(self, executed=None, blocked=None, errors=None):
                 self._signal_tree.item(code, tags=("kernel_error",))
                 first = first or code
         if first:
-            self._signal_tree.selection_set(first)
+            # self._signal_tree.selection_set(first)
             self._signal_tree.focus(first)
             self._signal_tree.see(first)
     except Exception:
