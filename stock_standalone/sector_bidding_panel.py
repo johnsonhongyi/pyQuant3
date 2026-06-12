@@ -3915,7 +3915,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'last_low': data.get('leader_last_low', 0),
                     'hint': data.get('pattern_hint', '主力拉升'),
                     'untradable': data.get('is_untradable', False),
-                    'is_counter': data.get('is_counter_trend', False)
+                    'is_counter': data.get('is_counter_trend', False),
+                    'k_cache': {
+                        'prices': [float(k.get('close', 0)) for k in leader_klines],
+                        'volumes': [float(k.get('volume', k.get('vol', 0))) for k in leader_klines]
+                    }
                 }
                 for col_key in self.stock_cols:
                     if col_key not in row_item:
@@ -4089,6 +4093,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             }
                         if r.get('last_close', 0) > 0 and r.get('price', 0) > 0:
                             r['pct'] = (r['price'] - r['last_close']) / r['last_close'] * 100
+                
+                # 第三级补齐：从实时行情接口拉取并同步 (解决冷启动分时数据缺失)
+                if not r.get('klines'):
+                    k_list = self._follower_klines(code)
+                    if k_list:
+                        r['klines'] = k_list
+                        r['k_cache'] = {
+                            'prices': [float(k.get('close', r.get('price', 0))) for k in k_list],
+                            'volumes': [float(k.get('volume', k.get('vol', 0))) for k in k_list]
+                        }
+                elif not r.get('k_cache'):
+                    k_list = r['klines']
+                    r['k_cache'] = {
+                        'prices': [float(k.get('close', r.get('price', 0))) for k in k_list],
+                        'volumes': [float(k.get('volume', k.get('vol', 0))) for k in k_list]
+                    }
 
             # 动态写入列
             for col_idx, col_key in enumerate(self.stock_cols):
