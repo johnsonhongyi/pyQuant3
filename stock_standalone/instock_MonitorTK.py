@@ -1314,7 +1314,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_ats_panel(self):
         """打开运行 ATS 智能操盘终端 (Alt+P)"""
+        # 防重入与防抖保护：限制高频重复触发 (例如 300ms 以内的连续按键或本地/全局双重触发事件)
+        import time
+        now = time.time()
+        last_t = getattr(self, "_last_ats_panel_trigger_t", 0.0)
+        if now - last_t < 0.3:
+            logger.info("[ATS] Trigger too frequent (<0.3s), bypassing duplicate event.")
+            return
+        self._last_ats_panel_trigger_t = now
+
         try:
+            import ctypes
+            # 1. 在操作系统级别查找已运行的 ATS 终端窗口
+            title = "🛡️ ATS v2 智能自治股票交易终端 (Autonomous Trading Terminal)"
+            hwnd = ctypes.windll.user32.FindWindowW(None, title)
+            
+            if hwnd:
+                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+                
+                if is_visible and foreground_hwnd == hwnd:
+                    # 如果窗口当前可见且处于前台（即当前活动窗口），再次按快捷键则隐藏它
+                    ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE = 0
+                    logger.info("[ATS] Window is already active, hiding it.")
+                    toast_message(self, "ATS智能终端已隐藏")
+                else:
+                    # 如果窗口不可见，或者在后台，则将其唤醒、恢复并置顶聚焦
+                    if ctypes.windll.user32.IsIconic(hwnd):
+                        ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                    else:
+                        ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    logger.info("[ATS] Window is background/hidden, restoring and bringing to foreground.")
+                    toast_message(self, "ATS智能终端已置顶")
+                
+                # 状态改变后立即触发一次同步给快捷键进程
+                self.sync_rotator_windows()
+                return
+
+            # 2. 如果窗口不存在，则说明尚未启动，进行冷启动拉起
             base_path = get_app_root()
             if is_packaged_env():
                 path = os.path.join(base_path, "ATS_Terminal.exe")
@@ -2751,6 +2789,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             10: lambda: self._schedule_after(0, lambda: self.show_qt_rotator_dialog(-1)),
             11: lambda: self._schedule_after(0, self.open_decision_flow_panel),
             12: lambda: self._schedule_after(0, self.global_toggle_spatial_follow_hud),
+            13: lambda: self._schedule_after(0, self.open_ats_panel),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -13505,6 +13544,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     name_map[h] = "📡 实时行情信号监控 (LiveSignalViewer)"
             except Exception:
                 pass
+
+        # 5.1. ATS 智能操盘终端 (外部进程)
+        try:
+            import ctypes
+            ats_hwnd = ctypes.windll.user32.FindWindowW(None, "🛡️ ATS v2 智能自治股票交易终端 (Autonomous Trading Terminal)")
+            if ats_hwnd:
+                if ctypes.windll.user32.IsWindow(ats_hwnd) and ctypes.windll.user32.IsWindowVisible(ats_hwnd):
+                    if ats_hwnd not in current_visible_hwnds:
+                        current_visible_hwnds.append(ats_hwnd)
+                        name_map[ats_hwnd] = "🛡️ ATS 智能自治交易终端 (ATSTerminal)"
+        except Exception:
+            pass
 
         # 6. 信号仪表盘 (PyQt6 - SignalDashboardPanel)
         if hasattr(self, '_signal_dashboard_win') and self._signal_dashboard_win is not None:

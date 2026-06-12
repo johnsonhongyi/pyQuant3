@@ -26,12 +26,18 @@ class GlobalFavoriteManager:
         self.stock_grades = {}
         self._subscribers = []
         self._lock = threading.Lock()
+        self._last_config_mtime = 0.0
         
         # Default config path — may be updated to DPI-aware path by the panel
         self._config_path = WINDOW_CONFIG_FILE
         # Load initially from the default path
         self.load_from_config()
         self.load_grades_from_voice_alert_config()
+
+        # Start a background file mtime watcher thread for cross-process synchronization
+        self._watcher_stop = threading.Event()
+        self._watcher_thread = threading.Thread(target=self._file_watcher_loop, daemon=True, name="FavoritesWatcher")
+        self._watcher_thread.start()
 
     def load_grades_from_voice_alert_config(self):
         try:
@@ -70,11 +76,32 @@ class GlobalFavoriteManager:
             logger.info(f"[GlobalFavorites] Config path updated: {old_path} → {path}, reloading...")
             self.load_from_config(path)
             
+    def _file_watcher_loop(self):
+        import time
+        while not self._watcher_stop.is_set():
+            try:
+                time.sleep(1.0)
+                path = self._config_path
+                if path and os.path.exists(path):
+                    mtime = os.path.getmtime(path)
+                    with self._lock:
+                        if mtime != self._last_config_mtime:
+                            need_load = True
+                        else:
+                            need_load = False
+                    
+                    if need_load:
+                        logger.info(f"🔄 [GlobalFavorites] Config file changed externally ({path}), reloading...")
+                        self.load_from_config(path)
+            except Exception as e:
+                logger.error(f"Error in FavoritesWatcher loop: {e}")
+
     def load_from_config(self, config_path: str = None):
         path = config_path or self._config_path
         if not path or not os.path.exists(path):
             return
         try:
+            mtime = os.path.getmtime(path)
             with open(path, "r", encoding="utf-8") as f:
                 full_data = json.load(f)
             
@@ -83,6 +110,7 @@ class GlobalFavoriteManager:
                 with self._lock:
                     self.favorite_sectors = set(ui_state.get('favorite_sectors', []))
                     self.favorite_stocks = set(ui_state.get('favorite_stocks', []))
+                    self._last_config_mtime = mtime
                 logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
                 self.notify_subscribers()
         except Exception as e:
@@ -121,6 +149,8 @@ class GlobalFavoriteManager:
             if os.path.exists(path):
                 os.remove(path)
             os.rename(tmp_path, path)
+            with self._lock:
+                self._last_config_mtime = os.path.getmtime(path)
             logger.debug(f"Saved favorites to {path}")
         except Exception as e:
             logger.error(f"Failed to save favorites to config: {e}")

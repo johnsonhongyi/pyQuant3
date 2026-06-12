@@ -1462,14 +1462,12 @@ class ATSMainWindow(QMainWindow):
 
     def _safe_favorites_changed(self):
         try:
-            # Refresh universe tree
-            if hasattr(self, 'universe_widget'):
-                # Under the hood it updates pools or mock data
-                self.universe_widget.load_mock_data()
-                self.universe_widget.update_pools(self.current_df, self.swing_tracker)
-            
-            # Refresh swing table via realtime refresh
+            # Refresh universe tree and swing table
             self.refresh_realtime_ui()
+            
+            # If the universe tree is currently displaying mock data, refresh the mock view too
+            if hasattr(self, 'universe_widget') and getattr(self.universe_widget, '_is_mock_active', False):
+                self.universe_widget.load_mock_data()
                 
             # Refresh heatmap widget
             if hasattr(self, 'heatmap_widget'):

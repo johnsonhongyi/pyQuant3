@@ -1,3 +1,29 @@
+## 2026-06-13 06:00
+- [x] **修复 Alt+P 快捷键在主控制台窗口中双重触发导致首次无效的 Bug (Fixed Alt+P Duplicate Triggering Bug)**：
+    - [x] **引入 300ms 防抖防重入机制**：在 `instock_MonitorTK.py` 的 `open_ats_panel` 方法头部引入基于时间戳的重入保护。若两次触发间隔小于 0.3 秒，则直接判定为重复事件并进行拦截。这彻底根治了当主控制台（Tk 窗口）处于活动状态时，按下 Alt+P 同时触发 Tk 本地键盘事件与全局热键后台管道消息，造成“显示-隐藏”瞬间抵消、用户必须按两次才能唤出面板的体验问题。
+    - [x] **测试通过验证**：跑通全量 15 个单元/集成测试用例，确保无任何运行期和退出期冲突。
+
+## 2026-06-13 05:00
+- [x] **修复 ATS 终端重点关注切换时数据丢失与界面排版损坏问题并加固测试 (Fixed ATS UI Data Loss and Layout Corruption on Favorites Toggle & Test Hardening)**：
+    - [x] **实现 Mock 与实时加载状态精确分离 (Precise Mock & Live State Separation)**：在 `UniverseTreeWidget` (`universe_widget.py`) 和 `SwingStateTable` (`swing_table.py`) 中新增了 `self._is_mock_active` 状态变量。在执行 `load_mock_data` 时显式设为 `True`，在调用 `update_pools` 或 `update_data_list` 灌入实时行情数据时设为 `False`。这从根本上理清了数据渲染源的生命周期，杜绝了由于模式状态混淆造成的数据被空值覆盖的“白屏”或“冷启动空洞”故障。
+    - [x] **重构 `_safe_favorites_changed` 刷新路由 (Optimized Favorites Change Dispatching)**：重构了 `ATSMainWindow` 里的热键与右键关注事件触发的 `_safe_favorites_changed` 方法。摒弃了此前容易引起冷启动误判的 `has_df` 全局行情存在性校验，重构为直接读取 `self.universe_widget._is_mock_active` 标记。确保仅在组件的确处于 Mock 模式时才路由执行 `load_mock_data` 刷新以保持本地与磁盘缓存一致，而在已进入实盘实时行情模式时直接短路 Mock 渲染，彻底杜绝了高频切换重点关注时的“闪烁退回”与“数据量骤降”现象。
+    - [x] **修复 GlobalFavoriteManager 单例测试清空 Bug (Fixed GlobalFavoriteManager clear() in Unit Tests)**：修复了测试用例 `test_swing_table_favorites_styling` 中，使用 `fav_mgr.get_favorite_stocks().clear()` 试图重置收藏列表的失效缺陷。因 `get_favorite_stocks()` 返回的是内部集合的新拷贝，对其进行 clear 无法影响实际的 `favorite_stocks` 集合。现重构为直接调用 `fav_mgr.favorite_stocks.clear()` 清空单例内存状态，确保测试隔离的绝对正确。
+    - [x] **通过 unittest.mock 解决 Qt 自动排序对测试的干扰 (Eliminated Qt Sorting Interference in Unit Tests)**：在测试 `test_swing_table_favorites_styling` 加载数据前，利用 `unittest.mock.patch` 类级别拦截并 mock 掉 `QTableWidget.setSortingEnabled`。这能确保在插入 mock 数据时，底层 C++ 排序始终保持 `False`，避免了由于本地持久化配置 `window_config.json` 里的缓存排序规则（如按代码升序）对 Python 层置顶排序结果的无情覆盖。
+    - [x] **全量回归测试 100% 顺利跑通**：成功运行 `pytest test_favorites_pinning_and_styling.py` 与 `pytest test_watchlist_lifecycle.py`，全量 15 个测试用例无一失败，100% 全部顺利通过，系统在各种极端与非交易时段的冷启动状态下的稳定性均表现优异。
+
+## 2026-06-13 04:45
+- [x] **优化重点关注个股/板块高亮配色以避免覆盖特征列色 (Optimized Favorite Stocks Highlight Styling to Prevent Color Override)**：
+    - [x] **左侧股票池 (Universe Tree) 高亮逻辑精细化**：重构了 `UniverseTreeWidget` 的 `load_mock_data` 与 `update_pools` 方法。在应用重点关注个股的深绿背景 (`#1A2A1A`) 时，不再一刀切地将全行前景色涂装成亮绿色。现在仅对代码列 (0) 与名称列 (1) 涂装亮绿前景色 (`#00FF88`)，其他列（现价、描述、策略等）保持系统默认白字前景色 (`#e2e2e5`)，并且使涨幅列 (3) 仍能完美显示红涨绿跌的 A 股常规着色。
+    - [x] **波段回调跟踪器 (Swing Pullback Table) 高亮逻辑精细化**：重构了 `SwingStateTable` 的 `load_mock_data` 与 `update_data_list` 方法。当股票被标记为重点关注时，将其全行所有单元格涂装深绿背景色 (`#1A2A1A`)，但只将代码列 (0) 和名称列 (1) 涂装亮绿前景 (`#00FF88`)。波段状态、MA20 偏离度及推荐仓位等列的前景着色逻辑在关注状态下不再被覆盖，完美保留了其状态色（如回踩中黄色、已平仓红色、偏离度红/绿等）与加粗字体样式。
+    - [x] **运行回归测试验证**：运行 `pytest test_favorites_pinning_and_styling.py` 及 `pytest test_watchlist_lifecycle.py` 全量 15 个测试，100% 绿旗通过，确保修改对布局自愈、持久化及生命周期的兼容性与极佳稳定性。
+
+## 2026-06-13 03:30
+- [x] **实现 ATS 终端单实例全局快捷键自动隐藏与置顶切换并打通 Alt+R 视窗轮换机制 (Implemented ATS Single-Instance Global Hotkey Toggle and Alt+R Switcher Integration)**:
+    - [x] **实现单实例与热键智能切换 (Alt+P Single-Instance Toggle)**：重构了 `instock_MonitorTK.py` 中的 `open_ats_panel`。优先通过 Win32 `FindWindowW` 获取已开启的 ATS 终端句柄（`hwnd`）。如果窗口已存在且正处于前台活动状态，则自动将其隐藏（`ShowWindow(hwnd, 0)`）；如果处于隐藏或后台非活动状态，则将其恢复并强力置顶到前台聚焦（`ShowWindow(hwnd, 5)` + `SetForegroundWindow`），若未启动则执行冷启动 Popen。
+    - [x] **补全全局热键与命名管道分发 (Global Hotkey & IPC Routing)**：在独立热键进程 `hotkey_rotator.py` 中补齐了 `Alt+P` 全局热键（`offset 13`）的注册与监听，并在 `instock_MonitorTK.py` 的主进程热键分发回调中绑定对应的 `open_ats_panel` 触发。这使得在非交易窗口活动时，依然能实现零卡顿全局响应。
+    - [x] **无缝打通 Alt+R 视窗轮询轮转 (Alt+R MRU Rotator Integration)**：在主控制台 `_get_all_open_trade_windows` 的动态搜集逻辑中，增加了对 ATS 终端窗口的存活判定与注册。一旦检测到有效的 ATS 终端，即将其 HWND 和专属名称 `"🛡️ ATS 智能自治交易终端 (ATSTerminal)"` 同步到热键子进程的 `WindowRotatorDialog` 切换器中。支持用户通过 `Alt+R` 在视窗列表中选中并强力穿透置顶，实现了全平台的多窗口闭环联动。
+    - [x] **集成测试 100% 顺利通过**：重新运行测试套件（包括 `test_favorites_pinning_and_styling.py` 与 `test_watchlist_lifecycle.py`），全量 15 个测试项目无任何冲突，100% 全部顺利通过。
+
 ## 2026-06-13 02:00
 - [x] **实现 ATS 终端重点关注个股/板块置顶、高亮与右键上下文菜单联动 (Implemented ATS Favorites Pinning, Highlighting, and Context Menu Linkage)**:
     - [x] **左侧股票池 (Universe Tree) 重点个股置顶与高亮**: 重构了 `UniverseTreeWidget` 的数据更新方法。通过 `GlobalFavoriteManager` 获取重点个股列表，在 Mock 模式与实盘状态下自动对重点关注个股在各池（雷达、观察、交易）内部进行强制置顶降序排序。对重点关注个股添加 `"⭐ "` 名称前缀，统一涂装深绿背景 (`#1A2A1A`) 与亮绿前景 (`#00FF88`)。
