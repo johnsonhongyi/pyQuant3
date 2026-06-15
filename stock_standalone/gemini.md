@@ -1,3 +1,8 @@
+## 2026-06-15 01:50
+- [x] **修复竞价赛马面板时间同步 Bug 与卡顿问题 (Fixed Racing Panel Time Sync Bug & UI Lag)**：
+    - [x] **实现 Detector 级别的数据日期强校验 (Implemented Detector-Level Date Validation)**：在 `bidding_momentum_detector.py` 的 `register_codes` 方法中添加了对 incoming 数据日期与系统日期的比对逻辑。在实盘模式下，过滤并拦截任何来自历史非今日的数据更新，防止历史数据时间戳污染全局时间 `self.last_data_ts`；在 `_evaluate_code_unlocked` 中对个股日内 `data_ts` 进行日期防御，如果日期早于今天则强制修正为当前系统时间。这彻底解决了开盘或重连时因旧 K 线数据将系统时钟错误拉回到昨天收盘的问题。
+    - [x] **加固赛马面板 UI 计时与渲染旁路优化 (Solidified Racing Panel Timing & Rendering Bypass)**：通过保证 `detector.last_data_ts` 这一时间源的纯净，使 `bidding_racing_panel.py` 中的 `update_visuals` 解析得到的 `time_hhmm` 在盘中能精准同步当前系统交易时间。这确保了自动重置锚点（`is_trading_time`）在交易时段正常触发，且收盘优化判定（`is_closing`）恢复正确感知，彻底根治了在收盘判定被错误激活时由于无节制 Treeview 重新装载导致的 3-7秒 界面假死和严重卡顿。
+
 ## 2026-06-13 11:30
 - [x] **ATS 终端高并发、低延迟性能优化与后台资源占用根治 (ATS Packaged High-Performance & Resource Reduction Optimization)**：
     - [x] **根治 IPC 信号高频 TCP 连接开销 (Optimized IPC Sender with Signal Batching)**：在 `stock_live_strategy.py` 的后台 `_ipc_sender_worker` 线程中，将原本逐条 `SIGNAL` 建立独立 TCP 连接发送的模式，重构为批量序列化为 `SIGNALS` 二元组指令、单次 TCP 握手并发送。大幅度降低了高频行情爆发时 127.0.0.1 端口上频繁的 socket 开销，消除了主后台进程与 ATS 终端之间无意义的 CPU 争抢。
