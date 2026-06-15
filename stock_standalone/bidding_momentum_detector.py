@@ -1200,7 +1200,17 @@ class BiddingMomentumDetector:
             if col:
                 v = df[col].max()
                 if isinstance(v, (int, float)) and v > self.last_data_ts:
-                    self.last_data_ts = float(v)
+                    # [🚀 ROOT-FIX] 实盘模式下日期校验，防止昨日历史数据错误更新全局时间戳
+                    is_valid = True
+                    if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
+                        try:
+                            v_date = _datetime.fromtimestamp(v).date()
+                            if v_date < datetime.date.today():
+                                is_valid = False
+                        except:
+                            is_valid = False
+                    if is_valid:
+                        self.last_data_ts = float(v)
         except:
             pass
 
@@ -3302,6 +3312,18 @@ class BiddingMomentumDetector:
             if data_ts <= 0:
                 if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
                     data_ts = time.time()
+
+        # [🚀 ROOT-FIX] 实盘模式下日期校验，如果是今天之前的历史数据时间戳，强制重置为当前系统时间
+        if not (getattr(self, 'simulation_mode', False) or getattr(self, 'in_history_mode', False)):
+            if data_ts > 0:
+                try:
+                    kline_date = _datetime.fromtimestamp(data_ts).date()
+                    if kline_date < datetime.date.today():
+                        data_ts = time.time()
+                except:
+                    data_ts = time.time()
+            else:
+                data_ts = time.time()
 
         score = 0.0
         # [FIX] 使用实时价格评估，确保 Tick 级别响应
