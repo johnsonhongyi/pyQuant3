@@ -436,6 +436,28 @@ def get_monitor_details_all_with_scale():
     - 主显示器排在最前
     - 返回 monitors 列表 + 汇总字符串
     """
+    # 强制设置进程级 DPI 意识，保证逻辑和物理分辨率检测结果在命令行与 UI 模式下完全对齐一致
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    # 尝试加载 GetDpiForMonitor 获取底层真实的物理缩放率
+    shcore = None
+    try:
+        shcore = ctypes.windll.shcore
+        shcore.GetDpiForMonitor.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint)
+        ]
+    except Exception:
+        pass
+
     monitor_handles = win32api.EnumDisplayMonitors()
     if not monitor_handles:
         return {"monitors": [], "summary": "0"}
@@ -458,10 +480,29 @@ def get_monitor_details_all_with_scale():
             physical_width = devmode.PelsWidth
             physical_height = devmode.PelsHeight
 
-            # 根据逻辑/物理分辨率计算 scale
-            scale_x = physical_width / logical_width if logical_width else 1.0
-            scale_y = physical_height / logical_height if logical_height else 1.0
-            scale = round((scale_x + scale_y) / 2, 2)
+            # 优先使用 GetDpiForMonitor 获取真实的物理 DPI 缩放值
+            scale = None
+            if shcore is not None:
+                try:
+                    dpi_x = ctypes.c_uint()
+                    dpi_y = ctypes.c_uint()
+                    # 0 代表 MDT_EFFECTIVE_DPI
+                    res = shcore.GetDpiForMonitor(int(monitor_handle), 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                    if res == 0: # S_OK
+                        scale = round(dpi_x.value / 96.0, 2)
+                except Exception:
+                    pass
+
+            # Fallback 策略：如果 API 获取失败，则采用逻辑/物理分辨率估算
+            if scale is None:
+                scale_x = physical_width / logical_width if logical_width else 1.0
+                scale_y = physical_height / logical_height if logical_height else 1.0
+                scale = round((scale_x + scale_y) / 2, 2)
+
+            # 在高 DPI 意识进程中，GetMonitorInfo 得到的 logical_width 可能退化成物理像素。
+            # 为了反映操作系统实际缩放的逻辑分辨率，在这里根据真实 scale 进行修正折算。
+            real_logical_width = int(physical_width / scale) if scale else logical_width
+            real_logical_height = int(physical_height / scale) if scale else logical_height
 
             monitors.append({
                 "device_name": device_name,
@@ -470,8 +511,8 @@ def get_monitor_details_all_with_scale():
                 "x": devmode.Position_x,
                 "y": devmode.Position_y,
                 "is_primary": is_primary,
-                "logical_width": logical_width,
-                "logical_height": logical_height,
+                "logical_width": real_logical_width,
+                "logical_height": real_logical_height,
                 "scale": scale
             })
         except Exception:

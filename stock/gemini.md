@@ -1,11 +1,18 @@
 # Gemini 任务跟进与计划
 
+## 2026-06-16 11:35
+- [x] **修复 UI 模式与命令行模式多屏幕拓扑签名不一致缺陷 (Aligned Display Topology Signatures)**：
+    - [x] **根治 DPI 虚拟化导致的分辨率与缩放检测偏差**：在 `window_manager/core.py` 的 `get_monitor_details_all_with_scale` 方法中，在执行显示器探测前强制初始化 `SetProcessDpiAwareness(2)`，保证命令行非 GUI 进程与 PyQt6 UI 进程具有完全相同的操作系统级 DPI 意识等级。
+    - [x] **调用 GetDpiForMonitor 获取真实物理缩放率**：修复了在 DPI-aware 模式下由于逻辑分辨率退化为物理像素导致计算所得的屏幕缩放率均变为 `1.0` 从而偏离实际设置的缺陷。通过引入并绑定 Windows API `GetDpiForMonitor`（传入强转为 `int(monitor_handle)` 的句柄），在任何进程状态下都能够准确、客观地获取操作系统中各显示器真实的物理缩放率（如 `1.25` 和 `1.0`）。
+    - [x] **基于真实缩放倒推还原逻辑分辨率**：在检测出真实 `scale` 之后，通过物理分辨率进行折合换算，生成与系统实际设置完全符合的逻辑分辨率（如 `1536x864` 和 `1920x1080`），从而确保二者读写的屏幕拓扑配置文件（如 `1920x1080@1.25_1920x1080@1.0_monitordisplay_config.json`）完全一致，且完全真实还原了用户的多屏幕拓扑组合特征。
+
 ## 2026-06-16 11:05
 - [x] **实现多显示器物理排布与拓扑结构保存恢复功能 (Save & Restore Multi-Monitor Display Layout)**：
     - [x] **移植与抽取多屏幕拓扑 API**：将原有 `current_display_configuration.py` 的多屏幕分辨率、物理相对坐标、主屏标记获取与恢复逻辑（基于 Windows API `ChangeDisplaySettingsEx`）进行工程化重写并集成进 `window_manager/core.py`，对外透出 `save_display_configuration` 和 `restore_display_configuration` 接口。
     - [x] **支持跨多显示器组合持久化**：使用显示器组合特征签名（如 `3840x2160@2.0_1920x1080@1.25` 等）区分不同的物理显示器拓扑环境，独立保存其各自的布局配置文件，提供高度智能的自适应适配与持久化能力。
     - [x] **在配置管理器 UI 中深度集成**：在 UI 的“当前物理显示器拓扑结构”面板中新增 **`💾 保存显示器物理拓扑`** 与 **`🔄 恢复显示器物理拓扑`** 按钮，直观呈现执行状态并联动 UI 信息重新加载，带有气泡弹窗通知。
     - [x] **加固后台无 UI 模式**：在 `manage_window_layout.py` 无 UI 运行分支中，注入屏幕物理排布自动恢复流程，实现窗口对齐前自动令屏幕放置位置拓扑自愈。
+    - [x] **实现右键窗口激活置顶功能 (Table Context Menu Window Foregrounding)**：在 QTableWidget 表格行中新增自定义右键菜单，提供 **`📌 窗口置顶并激活`** 功能。基于 Win32 API 突破 Windows 前台抢占限制（模拟虚拟 Alt 键释放特权），并完美兼容了模糊标题、`.py` 与 `.exe` 进程后缀的自动换算定位。
     - [x] **无损且向后兼容**：完全不破坏任何原有 `current_display_configuration.py` 和 `findSetWindowPos.py` 的原生行为，保持原有调用链路的绝对安全。
 
 ## 2026-06-16 10:40
