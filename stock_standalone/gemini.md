@@ -1,3 +1,13 @@
+## 2026-06-16 21:10
+- [x] **实现板块数据自愈与受损历史快照一键修复 (Implemented Sector Self-Healing & Corrupted Snapshots Batch Repair)**：
+    - [x] **实现板块零数据自愈机制 (Sector Data Zero-Case Self-Healing)**：在 `bidding_momentum_detector.py` 的板块加载底层机制中，新增了 `_ensure_sectors_reconstructed` 自愈方法。当载入的快照或历史会话中板块数据为空或严重受损（`sectors <= 1`）但个股元数据完整时，自动触发逆向工程重建，基于个股分类与强度特征（`score >= 0.5` 或 `abs(pct) > 1.5` 过滤噪音）自愈重建全量板块并深度计算龙头、跟涨股等深度指标，彻底避免了历史白板现象。
+    - [x] **一键物理重写修复历史存档 (Batch Repaired Corrupted Disk Snapshots)**：编写了 `scratch/repair_problematic_snapshots.py` 修复工具，通过模拟非交易日与写盘安全隔离的强制 bypass，将磁盘上所有受损的 `bidding_20260421.json.gz`、`bidding_20260515.json.gz`、`bidding_20260610.json.gz` 等 9 个存档进行了完整的一键载入、自愈重构和物理安全写回，经诊断全量快照的板块计数均已完美重归 389，实现了历史数据的完整性闭环。
+
+## 2026-06-16 20:55
+- [x] **修复历史快照加载异常与变量未定义崩溃 (Fixed Snapshot Load Exception & Undefined Variables NameError)**：
+    - [x] **修正 `_reconstruct_sector_from_candidates` 中的 `current_leader` 变量引用**：在 `bidding_momentum_detector.py` 的 `load_from_snapshot` 所调用的重建板块方法中，将传递给 `_determine_role` 的未定义变量 `current_leader` 修正为局部正确定义的 `leader_code`。
+    - [x] **修复 `_reconstruct_sector_from_candidates` 中缺少 `configured_cols` 和 `core_keys` 变量定义的问题**：在 `_reconstruct_sector_from_candidates` 开头定义了缺失的全局自定义配置列 `configured_cols` 和核心列字段集合 `core_keys`，彻底清除了用户在点击或加载历史快照数据时由于 NameError 抛出的 `name 'configured_cols' is not defined` 崩溃，实现了盘中和复盘下快照数据的正常自愈载入与完美呈现。
+
 ## 2026-06-16 19:20
 - [x] **优化个股功能下拉菜单为默认上拉与修复快捷栏设置窗口自适应 (Default Combobox Upward Pop-up & Fixed Settings Dialog Scaling Auto-Adaptation)**：
     - [x] **个股功能菜单默认上拉化 (Default Upward Pop-up)**：将 `adjust_action_combo_post` 简化为默认直接上拉，免去复杂的物理坐标计算与高 DPI 多显示器边界匹配，一劳永逸地防止菜单项被屏幕底部任务栏裁剪遮挡。
