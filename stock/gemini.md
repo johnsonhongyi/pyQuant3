@@ -1,5 +1,13 @@
 # Gemini 任务跟进与计划
 
+## 2026-06-16 11:05
+- [x] **实现多显示器物理排布与拓扑结构保存恢复功能 (Save & Restore Multi-Monitor Display Layout)**：
+    - [x] **移植与抽取多屏幕拓扑 API**：将原有 `current_display_configuration.py` 的多屏幕分辨率、物理相对坐标、主屏标记获取与恢复逻辑（基于 Windows API `ChangeDisplaySettingsEx`）进行工程化重写并集成进 `window_manager/core.py`，对外透出 `save_display_configuration` 和 `restore_display_configuration` 接口。
+    - [x] **支持跨多显示器组合持久化**：使用显示器组合特征签名（如 `3840x2160@2.0_1920x1080@1.25` 等）区分不同的物理显示器拓扑环境，独立保存其各自的布局配置文件，提供高度智能的自适应适配与持久化能力。
+    - [x] **在配置管理器 UI 中深度集成**：在 UI 的“当前物理显示器拓扑结构”面板中新增 **`💾 保存显示器物理拓扑`** 与 **`🔄 恢复显示器物理拓扑`** 按钮，直观呈现执行状态并联动 UI 信息重新加载，带有气泡弹窗通知。
+    - [x] **加固后台无 UI 模式**：在 `manage_window_layout.py` 无 UI 运行分支中，注入屏幕物理排布自动恢复流程，实现窗口对齐前自动令屏幕放置位置拓扑自愈。
+    - [x] **无损且向后兼容**：完全不破坏任何原有 `current_display_configuration.py` 和 `findSetWindowPos.py` 的原生行为，保持原有调用链路的绝对安全。
+
 ## 2026-06-16 10:40
 - [x] **重构 findSetWindowPos 为独立功能包 (Refactor findSetWindowPos into an independent package)**：
     - [x] **创建包结构**：在 `webTools/window_manager` 下创建模块包，包括 `__init__.py`，`core.py`，`ui.py`，`config.json`。

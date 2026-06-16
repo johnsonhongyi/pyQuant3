@@ -421,3 +421,163 @@ def apply_layout_config(config_manager: ConfigManager, res_name: str, show_cmd=S
             pass
             
     return True
+
+
+# ==========================================
+# 多显示器物理排布拓扑结构保存与恢复 API
+# ==========================================
+import win32api
+import win32con
+import pywintypes
+
+def get_monitor_details_all_with_scale():
+    """
+    获取所有显示器信息，同时计算 scale（DPI缩放）
+    - 主显示器排在最前
+    - 返回 monitors 列表 + 汇总字符串
+    """
+    monitor_handles = win32api.EnumDisplayMonitors()
+    if not monitor_handles:
+        return {"monitors": [], "summary": "0"}
+
+    monitors = []
+    for handle_tuple in monitor_handles:
+        monitor_handle = handle_tuple[0]
+
+        # 逻辑分辨率（系统显示逻辑）
+        try:
+            info = win32api.GetMonitorInfo(monitor_handle)
+            device_name = info.get("Device", "Unknown")
+            is_primary = (info.get("Flags", 0) & win32con.MONITORINFOF_PRIMARY) != 0
+            left, top, right, bottom = info["Monitor"]
+            logical_width = right - left
+            logical_height = bottom - top
+
+            # 物理分辨率（实际设置）
+            devmode = win32api.EnumDisplaySettings(device_name, win32con.ENUM_CURRENT_SETTINGS)
+            physical_width = devmode.PelsWidth
+            physical_height = devmode.PelsHeight
+
+            # 根据逻辑/物理分辨率计算 scale
+            scale_x = physical_width / logical_width if logical_width else 1.0
+            scale_y = physical_height / logical_height if logical_height else 1.0
+            scale = round((scale_x + scale_y) / 2, 2)
+
+            monitors.append({
+                "device_name": device_name,
+                "width": physical_width,
+                "height": physical_height,
+                "x": devmode.Position_x,
+                "y": devmode.Position_y,
+                "is_primary": is_primary,
+                "logical_width": logical_width,
+                "logical_height": logical_height,
+                "scale": scale
+            })
+        except Exception:
+            pass
+
+    # 主显示器排前
+    monitors.sort(key=lambda x: not x["is_primary"])
+
+    # 汇总字符串，用于区分不同显示器组合下的持久化文件命名
+    summary = "_".join(f"{m['width']}x{m['height']}@{m['scale']}" for m in monitors)
+    return {"monitors": monitors, "summary": summary}
+
+
+def is_same_display_config(current, saved):
+    """
+    判断当前显示器配置与已保存配置是否一致
+    支持逻辑分辨率 + scale 自动匹配
+    """
+    if len(current) != len(saved):
+        return False
+
+    def build_key(m):
+        return m.get("device_name") or (m.get("logical_width"), m.get("logical_height"), m.get("scale"))
+
+    cur_map = {build_key(m): m for m in current}
+    sav_map = {build_key(m): m for m in saved}
+
+    if cur_map.keys() != sav_map.keys():
+        return False
+
+    fields = ("width", "height", "x", "y", "is_primary", "scale", "logical_width", "logical_height")
+    for key, cur in cur_map.items():
+        if key not in sav_map:
+            return False
+        sav = sav_map[key]
+        for f in fields:
+            if cur.get(f) != sav.get(f):
+                return False
+    return True
+
+
+def save_display_configuration(filename="display_config.json") -> tuple:
+    """
+    保存当前显示器物理拓扑排布到 JSON 文件中（由显示器组合签名区分）
+    """
+    try:
+        config = get_monitor_details_all_with_scale()
+        if not config or not config["monitors"]:
+            return False, "未检测到有效的显示器数据"
+
+        summary = config["summary"]
+        out_filename = f"{summary}_monitor{filename}"
+        
+        with open(out_filename, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+        return True, out_filename
+    except Exception as e:
+        return False, str(e)
+
+
+def restore_display_configuration(filename="display_config.json") -> tuple:
+    """
+    读取并恢复显示器排列设置。
+    """
+    try:
+        monitor_info = get_monitor_details_all_with_scale()
+        if not monitor_info or not monitor_info["monitors"]:
+            return False, "未检测到当前连接的显示器"
+
+        summary = monitor_info["summary"]
+        current_monitors = monitor_info["monitors"]
+        in_filename = f"{summary}_monitor{filename}"
+
+        if not os.path.exists(in_filename):
+            # 自动保存当前作为默认
+            save_display_configuration(filename)
+            return False, f"未找到屏幕组合备份: {in_filename}，已将当前排布存为默认备份"
+
+        with open(in_filename, "r", encoding="utf-8") as f:
+            saved_config = json.load(f)
+
+        save_monitors = saved_config["monitors"]
+        if is_same_display_config(current_monitors, save_monitors):
+            return True, "当前屏幕物理排布与备份完全一致，跳过恢复"
+
+        # 执行 Windows 物理拓扑与排布坐标更改
+        for monitor in save_monitors:
+            device_name = monitor["device_name"]
+            try:
+                devmode = win32api.EnumDisplaySettings(device_name, win32con.ENUM_CURRENT_SETTINGS)
+                devmode.PelsWidth = monitor["width"]
+                devmode.PelsHeight = monitor["height"]
+                devmode.Position_x = monitor["x"]
+                devmode.Position_y = monitor["y"]
+
+                if monitor["is_primary"]:
+                    flags = win32con.CDS_UPDATEREGISTRY | win32con.CDS_NORESET | win32con.CDS_SET_PRIMARY
+                else:
+                    flags = win32con.CDS_UPDATEREGISTRY | win32con.CDS_NORESET
+
+                win32api.ChangeDisplaySettingsEx(device_name, devmode, flags)
+            except pywintypes.error as ex:
+                return False, f"设置显示器 '{device_name}' 排布失败: {ex}"
+
+        # 最终应用全部变更并触发系统广播
+        win32api.ChangeDisplaySettings(None, 0)
+        return True, f"已恢复多屏幕排布，配置包: {in_filename}"
+    except Exception as e:
+        return False, f"恢复多显示器排布时出错: {e}"
