@@ -4956,30 +4956,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
         self.action_combo.set("功能选择")
         
-        # 动态上拉显示判定 (当离屏幕底部太近时)
+        # 动态上拉显示判定 (直接设为默认上拉)
         def adjust_action_combo_post():
             try:
                 widget_height = self.action_combo.winfo_height()
                 popup = self.action_combo.tk.eval(f'ttk::combobox::PopdownWindow {self.action_combo._w}')
                 popup_height = self.action_combo.tk.call('winfo', 'reqheight', f'{popup}.f.l')
                 
-                screen_height = self.action_combo.winfo_screenheight()
-                widget_y = self.action_combo.winfo_rooty()
-                
-                space_below = screen_height - (widget_y + widget_height)
-                
-                # 若底部剩余空间小于下拉列表高度 + 40px (考虑任务栏高度和安全边距)
-                if space_below < (popup_height + 40):
-                    y_offset = -widget_height - popup_height
-                    style_combobox.configure('Action.TCombobox', postoffset=(0, y_offset, 0, 0))
-                else:
-                    style_combobox.configure('Action.TCombobox', postoffset=(0, 0, 0, 0))
+                # 默认直接上拉，免去复杂的屏幕尺寸与 DPI 坐标计算
+                y_offset = -widget_height - popup_height
+                style_combobox.configure('Action.TCombobox', postoffset=(0, y_offset, 0, 0))
             except Exception as e:
-                logger.error(f"Failed to adjust action_combo postoffset: {e}")
-                try:
-                    style_combobox.configure('Action.TCombobox', postoffset=(0, 0, 0, 0))
-                except:
-                    pass
+                logger.error(f"Failed to adjust action_combo postoffset (always up): {e}")
 
         self.action_combo.configure(postcommand=adjust_action_combo_post)
         
@@ -7468,12 +7456,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """打开顶部状态功能开关设置窗口"""
         settings_win = tk.Toplevel(self)
         settings_win.title("顶部快捷栏组件设置")
-        settings_win.geometry("580x680")
-        settings_win.resizable(False, False)
+        
+        # 获取系统 DPI 缩放因子，动态调整初始几何大小并允许拉伸
+        scale = self._get_dpi_scale_factor() if hasattr(self, '_get_dpi_scale_factor') else 1.0
+        init_w = int(580 * scale)
+        init_h = int(680 * scale)
+        settings_win.geometry(f"{init_w}x{init_h}")
+        settings_win.resizable(True, True)
         
         if hasattr(self, 'load_window_position'):
             try:
-                self.load_window_position(settings_win, "top_bar_settings")
+                self.load_window_position(settings_win, "top_bar_settings", default_width=580, default_height=680)
             except:
                 pass
                 
@@ -7484,6 +7477,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         header_frame.pack(fill="x", side="top")
         header_lbl = tk.Label(header_frame, text="⚙️ 快捷栏组件显示/隐藏控制", fg="white", bg="#343a40", font=("Microsoft YaHei", 11, "bold"))
         header_lbl.pack(pady=10, padx=15, side="left")
+        
+        # 底部操作栏 (提前 pack 保证在窗口高度不足或缩小时底栏按钮永远可见并居底)
+        btn_frame = tk.Frame(settings_win, bg="#f1f3f5", height=50)
+        btn_frame.pack(fill="x", side="bottom")
         
         # 使用 Notebook 实现分页
         notebook = ttk.Notebook(settings_win)
@@ -7627,9 +7624,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             cb.grid(row=row, column=0, sticky="w", padx=15, pady=5)
             row += 1
             
-        # 底部操作栏
-        btn_frame = tk.Frame(settings_win, bg="#f1f3f5", height=50)
-        btn_frame.pack(fill="x", side="bottom")
         
         def set_all(val):
             # 第一页快捷栏组件

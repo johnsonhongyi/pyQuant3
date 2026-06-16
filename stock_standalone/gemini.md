@@ -1,3 +1,9 @@
+## 2026-06-16 19:20
+- [x] **优化个股功能下拉菜单为默认上拉与修复快捷栏设置窗口自适应 (Default Combobox Upward Pop-up & Fixed Settings Dialog Scaling Auto-Adaptation)**：
+    - [x] **个股功能菜单默认上拉化 (Default Upward Pop-up)**：将 `adjust_action_combo_post` 简化为默认直接上拉，免去复杂的物理坐标计算与高 DPI 多显示器边界匹配，一劳永逸地防止菜单项被屏幕底部任务栏裁剪遮挡。
+    - [x] **设置窗口 DPI 缩放与自适应拉伸支持 (DPI-aware Resizable Settings Window)**：在 `open_top_bar_settings` 中根据 `_get_dpi_scale_factor()` 动态计算窗口初始大小，并开启 `resizable(True, True)` 支持，允许用户在缩放偏差较大时手动调节窗口尺寸。
+    - [x] **操作底栏防遮挡置底锁定 (Pinned Bottom Operations Bar)**：重构了组件 packing 顺序，将底部操作栏 `btn_frame` 提前至 `notebook` 之前进行 `side="bottom"` 的 pack。此举确保即使在窗口缩小或高度不足时，底部的“全选”、“全清”、“确定”按钮始终牢牢居底可见，决不被 notebook 挤出边界，彻底解决按钮无法操作的问题。
+
 ## 2026-06-16 19:00
 - [x] **优化顶部快捷栏右侧控制按钮细分显示与直接状态设置 (Optimized Top Bar Right Control Buttons Granular Toggle & Direct Variable Setter)**：
     - [x] **新增未开启功能的“直接执行”快捷入口 (Direct Execution Shortcuts for Disabled Top Bar Groups)**：在 Tab 1 (顶部快捷组件) 中，为 12 个可以直接执行的功能组件（如“监控”、“选股”、“竞价”、“赛马”等）在其复选框右侧扩展了 `▶ 执行` 按钮。
