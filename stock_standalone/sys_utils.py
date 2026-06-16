@@ -153,6 +153,10 @@ RESOURCE_MAP = {
         "src": "MonitorTK.ico",
         "dst": "MonitorTK.ico"
     },
+    "window_layout_config.json": {
+        "src": "webTools/window_manager/window_layout_config.json",
+        "dst": "window_layout_config.json"
+    },
     "window_config.json": {
         "src": "window_config.json",
         "dst": "window_config.json"

@@ -11,7 +11,31 @@
 import sys
 import os
 
-# 确保父目录在 sys.path 中，以便可以作为 package 导入 window_manager
+# 1. 优先将项目根目录加入 sys.path，导入 sys_utils 并对齐 get_app_root
+try:
+    import sys_utils
+except Exception as e:
+    import traceback
+    print(f"[DEBUG] sys_utils import failed in manage_window_layout.py entry (first try): {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    # manage_window_layout.py 位于 webTools/ 目录下，其父目录是项目根目录
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    try:
+        import sys_utils
+    except Exception as e2:
+        print(f"[DEBUG] sys_utils import failed in manage_window_layout.py entry (second try): {e2}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys_utils = None
+
+if sys_utils:
+    # 锁定并写入环境变量，保障多进程完美一致
+    app_root = sys_utils.get_app_root()
+else:
+    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 2. 确保 webTools 目录在 sys.path 中，以便可以作为 package 导入 window_manager
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
@@ -19,13 +43,23 @@ if current_dir not in sys.path:
 from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name
 
 if __name__ == '__main__':
-    # 检查命令行参数中是否包含 --ui 或 -ui
+    # 检查命令行参数中是否包含 --ui / -ui 或日志参数 -log
     use_ui = False
-    for arg in sys.argv[1:]:
+    debug_mode = False
+    
+    for i, arg in enumerate(sys.argv):
         if arg.lower() in ['--ui', '-ui']:
             use_ui = True
-            break
-            
+        elif arg.lower() == '-log':
+            debug_mode = True
+            if i + 1 < len(sys.argv):
+                os.environ["APP_DEBUG"] = sys.argv[i + 1]
+                
+    if debug_mode:
+        print(f"[DEBUG] App root resolved to: {app_root}")
+        print(f"[DEBUG] sys.path: {sys.path}")
+        print(f"[DEBUG] Environment APP_DEBUG set to: {os.environ.get('APP_DEBUG')}")
+
     if use_ui:
         print("正在启动桌面窗口坐标布局配置管理器 UI...")
         run_ui()
