@@ -340,8 +340,11 @@ if __name__ == '__main__':
         print('find AutoHotkey')
 
     if not find_window_by_title_safe('findSetWindowPos'):
-        os.system('cmd /c start python findSetWindowPos.py')
+        manage_window_layout_path = 'C:\\Users\\Johnson\\Documents\\TDX\\55188\\manage_window_layout.exe'
+        # os.system('cmd /c start python findSetWindowPos.py')
+        run_system_fpath(manage_window_layout_path)
         time.sleep(2)
+
     # if not find_proc_windows('联动精灵',visible=False):
     
     # if find_window_by_title_safe('通达信金融终端'): 
