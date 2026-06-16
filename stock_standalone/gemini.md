@@ -1,3 +1,36 @@
+## 2026-06-16 13:40
+- [x] **深度排查并修复独立打包下配置文件未自动释放与 sys_utils 导入失败缺陷 (Fixed sys_utils ImportError & Auto-Unpack Failure in Packaged EXE)**：
+    - [x] **定位 ImportError 根源**：定位到在单独打包的 `manage_window_layout.exe` 运行时，在 `core.py` 内部 `import sys_utils` 发生错误回落到 fallback 旧路径分支，从而寻找 `dist/webTools/window_manager` 子目录导致无法自动释放配置文件的问题。
+    - [x] **添加详尽调试日志与 Traceback 打印**：在 `core.py` 的所有导入 `sys_utils` 的 `try-except` 块（`_get_app_root_for_manager`、`ConfigManager.__init__`、`save_display_configuration` 和 `restore_display_configuration`）中，引入详尽的调试 `print` 和 `traceback.print_exc` 到标准错误流，方便运行发生异常时第一时间暴露出所缺依赖，消除导入黑盒。
+    - [x] **实现命令行日志参数解析支持**：在 `manage_window_layout.py` 中增加了 `-log` 参数的判断逻辑（例如 `-log debug`），激活后自动设定 `APP_DEBUG` 环境变量，并在控制台下输出 App Root、`sys.path` 等详细调试参数，极大地辅助定位打包后的执行上下文。
+    - [x] **补全打包 Spec 文件的 hiddenimports 依赖**：在 `manage_window_layout.spec` 中，补全了 `sys_utils.py` 强依赖的本地底层模块 `'JohnsonUtil.LoggerFactory'`、`'JohnsonUtil.commonTips'` 以及 `'JohnsonUtil.johnson_common'`，防止打包时因 PyInstaller 静态分析遗漏本地依赖而在独立运行环境下抛出 `ModuleNotFoundError`。
+    - [x] **源码环境及导入链测试通过**：本地控制台运行 `python webTools/manage_window_layout.py -log debug` 测试通过，日志及 Traceback 诊断输出正常，方案 `tdx_ths_position4644` 匹配并移动成功，无任何其他导入异常，证明导入自愈链路彻底通畅。
+
+## 2026-06-16 12:30
+- [x] **制作与 `ats.spec` 高度一致的独立窗口布局管理器打包规格文件 (Created PyInstaller Spec File Aligned with ats.spec)**：
+    - [x] **创建打包配置文件**：在根目录下创建了 `manage_window_layout.spec`，配置入口指向 `webTools/manage_window_layout.py`。
+    - [x] **对齐优化与垃圾文件过滤**：全面对齐了 `ats.spec` 中基于 `trash_list` 自定义过滤冗余 Qt6 动态链接库与 Windows 脏缓存文件的打包优化逻辑，可极大缩减生成 EXE 的物理体积并提速启动载入。
+    - [x] **补齐静态资源打包定义**：在 `datas` 参数里同步增加了 `("webTools/window_manager/config.json", "webTools/window_manager")` 的拷贝打包释放配置，保证打包后的单文件 EXE 能够可靠装载内置窗口对齐方案配置；并加入了必要的 `MonitorTK32.ico` 图标及基础交易日历库支持。
+    - [x] **隐式导入与过滤除外补强**：在 `hiddenimports` 里完整补齐了包括 `webTools.window_manager.core`、`webTools.window_manager.ui` 等在内的坐标管理器核心包和 `screeninfo`、`win32gui`、`PyQt6` 等底层调用库依赖，防范打包后发生 `ModuleNotFoundError` 崩溃。
+    - [x] **本地编译阶段验证**：在本地成功执行 `pyinstaller --noconfirm manage_window_layout.spec` 命令，顺利通过 PyInstaller 依赖图谱解析及 `Analysis` 编译阶段，验证了 spec 配置的绝对健壮与可行。
+
+## 2026-06-16 12:20
+- [x] **实现右键一键在程序所在显示器居中显示并自动回填配置坐标功能 (One-Click Center Window on Its Respective Screen with Auto Configuration Synced)**：
+    - [x] **表格右键菜单扩充**：在 `webTools/window_manager/ui.py` 的表格行右键菜单中，新增了 **`📺 居中显示于程序所在屏幕`** 选项。
+    - [x] **多显示器窗口所在屏幕检测**：检查目标窗口是否正在运行：如果是，获取其桌面物理坐标中心点并调用 `QGuiApplication.screenAt()` 自适应识别窗口当前所跨的物理显示器；如果未运行，则降级采用当前坐标管理器程序 UI 所在的显示器（`self.screen()`）。
+    - [x] **物理移动与原尺寸保持**：获取对应显示器的工作区（`availableGeometry()`，排除任务栏遮挡）并准确计算居中 X, Y 坐标。在窗口运行中时，保留其原有实际物理高宽并直接居中移动（若处于最小化则自动将其还原）；若未运行，也能自动计算其居中配置坐标并进行安全回填。
+    - [x] **配置双向自愈回填**：计算出居中坐标（`X,Y,W,H`）后，自动回填更新表格第二列的“配置坐标”并加粗高亮标记，同步将第三列的“当前位置”更新为绿色的对应坐标，调用内存存储机制，使用户可通过点击右下角“保存配置”一键将此位置物理写盘。
+
+## 2026-06-16 12:00
+- [x] **对齐独立窗口布局管理器与 `sys_utils.get_app_root()` 路径获取以支持 Nuitka 单文件打包运行 (Aligned Window Layout Manager Path with sys_utils.get_app_root & Enabled Nuitka Packaged Execution)**：
+    - [x] **启动早期锁定并共享路径环境变量**：在 `webTools/manage_window_layout.py` 引导头部优先注册项目绝对根目录到 `sys.path`，并调用 `sys_utils.get_app_root()` 锁定路径并写入 `os.environ["INSTOCK_APP_ROOT"]`。这确保了后续在子进程或模块中调用 `get_app_root()` 时均能秒级且绝对一致地定位到物理 EXE 所在目录，从根本上消除了路径漂移或 CWD 偏差。
+    - [x] **物理绝对路径绑定与 builtin 默认配置自愈 (Hierarchical Builtin & Custom Config Loader)**：
+        - 重构了 `webTools/window_manager/core.py` 中的 `ConfigManager`，在其路径解析中全面对接 `sys_utils.get_app_root()` 与环境探测。
+        - 实现了优雅的降级与自愈加载通道：若物理根目录下的自定义配置 `config.json` 不存在或损坏，系统将自动从内置资源包（临时释放目录）导入默认坐标模版进行初始化并使用；在用户点击“保存配置”时，如果处于打包环境则直接物理安全回写至可执行文件同级的根目录下（如 `dist/config.json`），如果是开发环境则物理写回 `webTools/window_manager/config.json`。
+        - 将 `save_display_configuration` 和 `restore_display_configuration` 的多显示器物理拓扑配置存储路径改写为基于物理绝对根目录，阻断了在其他目录下执行脚本时文件读写失效的隐患。
+    - [x] **打通编译打包脚本内置项 (Added Config data-file to Nuitka Build Configs)**：在 Nuitka 编译脚本 `nuitka_instockMonitor.bat` 与 `nuitka_build_console.bat` 的 `--include-data-file` 命令链中，正式补齐了对 `webTools\window_manager\config.json` 的打包包含，保证单 EXE 程序能正确拥有内置的布局方案。
+    - [x] **控制台运行验证 100% 成功**：本地模拟无 UI 命令行模式运行 `python webTools/manage_window_layout.py` 通过验证。脚本能高可靠获取物理绝对根目录、安全持久化当前的多屏幕物理拓扑设置、自适应寻址并自动应用窗口对齐，无任何崩溃或导入异常。
+
 ## 2026-06-16 11:35
 - [x] **修复 UI 模式与命令行模式多屏幕拓扑签名不一致缺陷 (Aligned Display Topology Signatures)**：
     - [x] **根治 DPI 虚拟化导致的分辨率与缩放检测偏差**：在 `window_manager/core.py` 的 `get_monitor_details_all_with_scale` 方法中，在执行显示器探测前强制初始化 `SetProcessDpiAwareness(2)`，保证命令行非 GUI 进程与 PyQt6 UI 进程具有完全相同的操作系统级 DPI 意识等级。

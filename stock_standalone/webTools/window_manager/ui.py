@@ -1040,8 +1040,109 @@ class WindowPosManagerUI(QMainWindow):
                         self.save_current_table_to_memory()
                         self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
 
+    def center_window_on_current_screen(self, row):
+        """将选定行的窗口物理居中移动到其自身当前所在的屏幕(未运行时回退至本程序所在屏幕)，并同步回写配置与当前位置"""
+        import time
+        title_item = self.table_widget.item(row, 0)
+        pos_item = self.table_widget.item(row, 1)
+        if not title_item or not pos_item:
+            return
+            
+        title = title_item.text().strip()
+        cfg_pos = pos_item.text().strip()
+        
+        # 1. 默认大小与坐标解析
+        w, h = 800, 600  # 默认兜底大小
+        parts = [p.strip() for p in cfg_pos.split(',')]
+        if len(parts) == 4:
+            try:
+                w = int(parts[2])
+                h = int(parts[3])
+            except ValueError:
+                pass
+                
+        # 2. 检查窗口是否正在运行，如果正在运行，尝试获取其实际大小
+        titles_to_try = [title]
+        if title.endswith('.py') and not title.startswith('py'):
+            titles_to_try.append(title.replace('.py', '.exe'))
+        elif title.endswith('.exe'):
+            titles_to_try.append(title.replace('.exe', '.py'))
+            
+        found_hwnd = None
+        for t in titles_to_try:
+            found = core.find_windows_by_title_safe(t)
+            if found:
+                found_hwnd, _ = found[0]
+                break
+                
+        window_center_point = None
+        if found_hwnd:
+            left, top, rw, rh = core.get_window_rect(found_hwnd)
+            # 排除最小化状态下的负数位置
+            if not (left < -10000 and top < -10000) and rw > 50 and rh > 50:
+                w, h = rw, rh
+                # 计算运行中窗口的中心点
+                window_center_point = QtCore.QPoint(left + rw // 2, top + rh // 2)
+
+        # 3. 确定目标屏幕：若窗口运行中，则取其中心点所在的屏幕；否则取当前坐标管理器本身所在的屏幕
+        screen = None
+        if window_center_point:
+            screen = QtGui.QGuiApplication.screenAt(window_center_point)
+            
+        if not screen:
+            # 未运行或获取失败，回退至坐标管理器 UI 所在的显示器
+            screen = self.screen()
+            
+        if not screen:
+            # 终极回退至主屏幕
+            screen = QtGui.QGuiApplication.primaryScreen()
+            
+        if not screen:
+            self.log(f"⚠️ 无法获取目标显示器信息")
+            return
+            
+        # 4. 获取屏幕可用工作区
+        geom = screen.availableGeometry()
+        screen_x = geom.x()
+        screen_y = geom.y()
+        screen_w = geom.width()
+        screen_h = geom.height()
+        
+        # 5. 计算居中位置
+        new_x = screen_x + (screen_w - w) // 2
+        new_y = screen_y + (screen_h - h) // 2
+        new_pos_str = f"{new_x},{new_y},{w},{h}"
+        
+        # 6. 同步更新 UI 配置与回写内存
+        self.table_widget.blockSignals(True)
+        pos_item.setText(new_pos_str)
+        # 坐标加粗以作视觉标记
+        pos_item.setFont(QtGui.QFont("Segoe UI", weight=QtGui.QFont.Weight.Bold))
+        self.table_widget.blockSignals(False)
+        
+        self.save_current_table_to_memory()
+        
+        # 7. 物理移动窗口 (如果窗口运行中)
+        if found_hwnd:
+            self.log(f"正在尝试将窗口 '{title}' 在其所在显示器居中移动...")
+            # 如果最小化，先还原
+            left, top, _, _ = core.get_window_rect(found_hwnd)
+            if left < -10000 and top < -10000:
+                core.user32.ShowWindow(found_hwnd, core.SW_SHOWNORMAL)
+                time.sleep(0.1)
+                
+            if core.set_window_hwnd_pos(found_hwnd, new_pos_str):
+                self.log(f"📺 居中显示: 成功将窗口 '{title}' 移动到其屏幕居中位置: [{new_pos_str}]")
+            else:
+                self.log(f"⚠️ 物理移动窗口 '{title}' 失败")
+        else:
+            self.log(f"📺 居中显示: 窗口 '{title}' 当前未运行，已在默认屏幕同步居中配置坐标为 [{new_pos_str}]。")
+            
+        # 8. 刷新当前状态列
+        self.refresh_current_positions()
+
     def show_context_menu(self, pos):
-        """表格右键菜单：支持将选中的窗口置顶并激活"""
+        """表格右键菜单：支持将选中的窗口置顶并激活、在当前屏幕居中"""
         item = self.table_widget.itemAt(pos)
         if not item:
             return
@@ -1072,6 +1173,7 @@ class WindowPosManagerUI(QMainWindow):
         """)
         
         activate_action = menu.addAction("📌 窗口置顶并激活")
+        center_action = menu.addAction("📺 居中显示于程序所在屏幕")
         action = menu.exec(self.table_widget.mapToGlobal(pos))
         
         if action == activate_action:
@@ -1088,6 +1190,8 @@ class WindowPosManagerUI(QMainWindow):
                     "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
                 )
                 self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
+        elif action == center_action:
+            self.center_window_on_current_screen(row)
 
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""

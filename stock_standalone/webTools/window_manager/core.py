@@ -298,38 +298,75 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
     return success
 
 
+def _get_app_root_for_manager() -> str:
+    try:
+        import sys_utils
+        return sys_utils.get_app_root()
+    except Exception as e:
+        import sys
+        import traceback
+        print(f"[DEBUG] sys_utils import failed in _get_app_root_for_manager first try: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        try:
+            import sys_utils
+            return sys_utils.get_app_root()
+        except Exception as e2:
+            print(f"[DEBUG] sys_utils import failed in _get_app_root_for_manager second try: {e2}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return project_root
+
+
 class ConfigManager:
     """管理分类持久化的 JSON 配置"""
     
     def __init__(self, config_path=None):
         if config_path is None:
-            # 默认保存在当前包目录下的 config.json
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            # 统一使用项目标准的 sys_utils.get_conf_path 托管自愈
+            try:
+                import sys_utils
+                config_path = sys_utils.get_conf_path("window_layout_config.json")
+            except Exception as e:
+                import sys
+                import traceback
+                print(f"[DEBUG] sys_utils import failed in ConfigManager.__init__: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                app_root = _get_app_root_for_manager()
+                config_path = os.path.join(app_root, "webTools", "window_manager", "window_layout_config.json")
         self.config_path = config_path
         self.config_data = {}
         self.load()
 
     def load(self):
         """从文件读取 JSON 配置"""
+        loaded = False
+        # 优先尝试读取磁盘上的持久化配置文件
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self.config_data = json.load(f)
-                # 校验格式，如果不是分类的字典，则进行初始化
-                if not isinstance(self.config_data, dict):
-                    self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
-                for cat in ["single_display", "multi_display", "custom_special"]:
-                    if cat not in self.config_data:
-                        self.config_data[cat] = {}
+                loaded = True
             except Exception as e:
                 print(f"Failed to load config from {self.config_path}: {e}")
-                self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
-        else:
+
+        # 兜底初始化空数据
+        if not loaded:
             self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
+
+        # 校验格式，如果不是分类的字典，则进行初始化
+        if not isinstance(self.config_data, dict):
+            self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
+        for cat in ["single_display", "multi_display", "custom_special"]:
+            if cat not in self.config_data:
+                self.config_data[cat] = {}
             
     def save(self):
         """保存当前内存中的配置到文件"""
         try:
+            # 确保物理持久化文件夹存在
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.config_data, f, ensure_ascii=False, indent=4)
             return True
@@ -564,7 +601,18 @@ def save_display_configuration(filename="display_config.json") -> tuple:
             return False, "未检测到有效的显示器数据"
 
         summary = config["summary"]
-        out_filename = f"{summary}_monitor{filename}"
+        file_key = f"{summary}_monitor{filename}"
+        
+        try:
+            import sys_utils
+            out_filename = sys_utils.get_conf_path(file_key)
+        except Exception as e:
+            import sys
+            import traceback
+            print(f"[DEBUG] sys_utils import failed in save_display_configuration: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            app_root = _get_app_root_for_manager()
+            out_filename = os.path.join(app_root, file_key)
         
         with open(out_filename, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -584,7 +632,18 @@ def restore_display_configuration(filename="display_config.json") -> tuple:
 
         summary = monitor_info["summary"]
         current_monitors = monitor_info["monitors"]
-        in_filename = f"{summary}_monitor{filename}"
+        file_key = f"{summary}_monitor{filename}"
+        
+        try:
+            import sys_utils
+            in_filename = sys_utils.get_conf_path(file_key)
+        except Exception as e:
+            import sys
+            import traceback
+            print(f"[DEBUG] sys_utils import failed in restore_display_configuration: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            app_root = _get_app_root_for_manager()
+            in_filename = os.path.join(app_root, file_key)
 
         if not os.path.exists(in_filename):
             # 自动保存当前作为默认

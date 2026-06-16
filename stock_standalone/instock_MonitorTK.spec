@@ -36,6 +36,7 @@ a = Analysis(
         ("JohnsonUtil/global.ini", "JohnsonUtil"),
         ("JohnsonUtil/wencai/同花顺板块行业.xlsx", "JohnsonUtil/wencai"),
         ("strategy_config.json", "."),
+        ("webTools/window_manager/window_layout_config.json", "webTools/window_manager"),
          ],
     hiddenimports=['a_trade_calendar','JSONData.sina_data','JSONData.tdx_hdf5_api',  'JSONData.realdatajson',
                     'JSONData.wencaiData',  'JSONData.tdxbk', 'pandas','JohnsonUtil.johnson_cons', 'configobj',
