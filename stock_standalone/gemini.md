@@ -1,8 +1,21 @@
+## 2026-06-16 17:30
+- [x] **深度代码审查与 V型反转 (V-Reversal) 管道安全加固 (V-Reversal Code Review & Pipeline Hardening)**：
+    - [x] **修复 `_has_anomaly_pattern` 关键解包异常 (Fixed Unpacking TypeError)**：去除了冗余代码后，补上了 `try` 块末尾缺失 of `return False, ""` 语句，从物理上杜绝了对非特征个股返回 `None` 进而引发 `TypeError: cannot unpack non-iterable NoneType object` 导致的策略崩溃。
+    - [x] **合并并更新异动形态检测规则 (Merged & Updated Anomaly Pattern Detection Rules)**：彻底梳理了 `_has_anomaly_pattern` 中被截断 of dead code 逻辑，将其中更准确的参数阈值与形态名称与原函数完成了深度合并。包含了将“低开高走”阈值放宽至 `0.995`、将“高开高走”对比目标从开盘价修正为日内最高价（`price > high * 0.98`）、合并并新增了“强势维持”及“蓄势窄幅缩量”形态判定，避免了此前因死代码清理导致的形态检测丢失。
+    - [x] **加固 `get_v_shape_signal` 代码格式化 (Code Key Normalization)**：在 `realtime_data_service.py` 检索 `_consolidation_flags` 前，对传入的 `code` 强制执行 `str().strip().zfill(6)` 规范化转换，消除了因键值格式（含空格或整型）导致的字典命中丢失隐患。
+    - [x] **完成自动化 FSM 全状态单元测试验证 (Validated Transition Flow)**：再次跑通 `scratch/test_v_reversal_fsm.py` 自动化测试，验证了从 `INIT` -> `CONSOLIDATING` -> `WAVE_UP` -> `PULLBACK` -> `WAVE_UP_2` -> `INIT` 的 5 级状态机迁移的 100% 正确性，并在 `v_reversal_code_review_findings.md` 归档。
+
+## 2026-06-16 16:30
+- [x] **统一与重构 V型反转 (V-Reversal) 信号 FSM 状态机管道并打通实盘自动化入队 (Unified & Refactored V-Reversal FSM Signal Pipeline & Enabled Live Auto-Queue Integration)**：
+    - [x] **完成 V反 FSM 状态流转单元测试**：在 `scratch/test_v_reversal_fsm.py` 中编写了高保真状态流转单元测试，模拟了完整的 `INIT` -> `CONSOLIDATING` -> `WAVE_UP` -> `PULLBACK` -> `WAVE_UP_2` -> `INIT` 的状态流转链，并对各阶段的 `get_v_shape_signal` 信号值进行了产生和恢复的严格断言。测试 100% 成功通过，验证了状态机的绝对健壮性与准确度。
+    - [x] **统一信号源与淘汰旧有 Heuristics 逻辑**：使 `DataPublisher.get_v_shape_signal` 彻底依赖 FSM breakout 突破判定（仅在 `WAVE_UP` 和 `WAVE_UP_2` 阶段触发 `True`），并在 `stock_live_strategy.py` 中彻底废除了旧有的 30 周期 K线 几何跌幅/反弹 Heuristics 启发式计算代码，实现了逻辑 of 单源统一。
+    - [x] **实现 FSM 信号实时状态注入与策略入队防重入**：在实盘策略心跳中，通过 `v_shape_triggered` 标记实现防重复发送机制，使得每个进攻波段（如第一波 `WAVE_UP` 与第二波 `WAVE_UP_2`）仅触发一次增益与入队，配合日内异动特征（`has_anomaly`）自动将符合条件的个股写入交易决策队列 `add_to_follow_queue`，形成高效闭环。
+
 ## 2026-06-16 16:00
 - [x] **优化 `manage_window_layout` 独立瘦身打包与多屏配置动态包含 (Optimized Lean Packaging & Dynamic Config Bundling for Window Manager)**：
     - [x] **精炼打包排除与本地依赖引入**：在 `manage_window_layout.spec` 中，将 `sys_utils` 和 `JohnsonUtil` 等本地底层依赖正确加入 `hiddenimports` 并从 `excludes` 中移除，同时保持对 `pandas`、`numpy`、`a_trade_calendar` 等重型第三方库的强力排除，完美削减打包体积至仅 39MB。
     - [x] **实现多屏幕拓扑配置文件动态打包**：在 spec 中引入 `glob` 机制，在 datas 释放列表中动态打包当前运行同级目录下所有的 `*monitordisplay_config.json` 配置文件。确保独立打包程序能够在各类物理显示器拓扑环境下实现开箱即用的配置自愈与恢复。
-    - [x] **完成独立 EXE 纯净环境验证**：成功运行 `pyinstaller --noconfirm manage_window_layout.spec` 完成瘦身打包，并在纯净的控制台环境下执行 `dist\manage_window_layout.exe -log debug` 验证通过。没有任何未捕获依赖报错或配置缺失异常，自适应寻址 `tdx_ths_position4644` 并瞬间实现所有窗口在逻辑屏幕坐标下的完美对齐，数据及运行状态完全符合预期。
+    - [x] **完成独立 EXE 纯净环境验证**：成功运行 `pyinstaller --noconfirm manage_window_layout.spec`完成瘦身打包，并在纯净的控制台环境下执行 `dist\manage_window_layout.exe -log debug` 验证通过。没有任何未捕获依赖报错或配置缺失异常，自适应寻址 `tdx_ths_position4644` 并瞬间实现所有窗口在逻辑屏幕坐标下的完美对齐，数据及运行状态完全符合预期。
 
 ## 2026-06-16 13:45
 - [x] **深度排查并修复 V型反转 (V-Reversal) 信号永远无输出的两个根因 (Fixed V-Reversal Signal Permanently Silent)**：

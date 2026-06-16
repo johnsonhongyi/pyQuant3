@@ -1772,13 +1772,14 @@ class StockLiveStrategy:
 
     def _has_anomaly_pattern(self, row: Any) -> tuple[bool, str]:
         """
-        检测是否具有异动特征 (Restore from 9ce1a1d)
+        检测是否具有异动特征 (Merged & Cleaned)
         
         异动特征包括：
-        1. 低开高走：开盘 < 昨收 且 收盘 > 开盘 且 涨幅 > 1%
-        2. 高开高走：开盘 > 昨收+1% 且 收盘接近最高 且 涨幅 > 2%
-        3. 冲高回落收新高：最高 > 昨收+3% 且 收盘 < 最高 但 收盘价 > 昨收+1%
-        4. 多日十字星缩量：连阳后回踩 + 十字星形态 + 缩量
+        1. 低开高走：开盘 < 昨收 * 0.995 且 收盘 > 开盘 且 涨幅 >= 1%
+        2. 高开高走：开盘 > 昨收 * 1.01 且 收盘接近最高 (收盘 > 最高 * 0.98) 且 涨幅 >= 2%
+        3. 强势维持：最高 > 昨收 * 1.03 且 收盘接近最高 (收盘 > 最高 * 0.97) 且 涨幅 >= 1%
+        4. 冲高回落收新高：最高 > 昨收 * 1.03 且 收盘跌落最高 (收盘 < 最高 * 0.98) 且 涨幅 >= 1%
+        5. 蓄势窄幅缩量：连阳后回踩 + 十字星形态 (实体 < 1%) + 缩量 (量比 < 0.8)
         
         Returns:
             (has_anomaly, anomaly_type): 是否有异动特征及类型
@@ -1797,62 +1798,37 @@ class StockLiveStrategy:
             if price <= 0 or lastp1d <= 0:
                 return False, ""
             
-            # 1. 低开高走：开盘 < 昨收 * 0.99 且 收盘 > 开盘 且 涨幅 > 1.0
-            is_low_open_high_close = (open_p < lastp1d * 0.99) and (price > open_p) and (p_val > 1.0)
-            if is_low_open_high_close:
-                return True, "低开高走"
-            
-            # 2. 高开高走：开盘 > 昨收 * 1.01 且 收盘 > 开盘 * 0.98 且 涨幅 > 2.0
-            is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > open_p * 0.98) and (p_val > 2.0)
-            if is_high_open_high_close:
-                return True, "高开高走"
-            
-            # 3. 冲高回落收新高：最高 > 昨收 * 1.03 且 收盘 < 最高 * 0.98 且 涨幅 > 1.0
-            surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
-            is_surge_pullback_new_high = (surge_ratio > 0.03) and (price < high * 0.98) and (p_val > 1.0)
-            if is_surge_pullback_new_high:
-                return True, "冲高回落收新高"
-            
-            # 4. 多日回踩收十字星缩量：连阳后回踩 + 十字星形态 + 缩量
-            body_ratio = abs(price - open_p) / price if price > 0 else 1
-            is_doji = body_ratio < 0.01  # 十字星：实体<1%
-            is_shrink_volume = volume < 0.8  # 缩量 (Assumption: 'volume' is volume ratio)
-            is_after_rally = win >= 2  # 此前连阳
-            if is_doji and is_shrink_volume and is_after_rally:
-                return True, "多日十字星缩量"
-            
-            return False, ""
-        except Exception as e:
-            logger.debug(f"Anomaly pattern check error: {e}")
-            return False, ""
-
-            # --- 2. 低开高走 ---
-            # 逻辑：开盘杀跌跌破昨收，但随后收复并大幅走高 (阳线实体大)
+            # 1. 低开高走：开盘 < 昨收 * 0.995 且 收盘 > 开盘 且 涨幅 >= 1.0
             is_low_open_high_close = (open_p < lastp1d * 0.995) and (price > open_p) and (p_val >= 1.0)
             if is_low_open_high_close:
                 return True, "低开高走"
             
-            # --- 3. 高开高走 ---
-            # 逻辑：开盘即在昨收1%以上，且价格始终维持在高位 (不补缺口或不深踩)
+            # 2. 高开高走：开盘 > 昨收 * 1.01 且 收盘 > 最高 * 0.98 且 涨幅 >= 2.0
             is_high_open_high_close = (open_p > lastp1d * 1.01) and (price > high * 0.98) and (p_val >= 2.0)
             if is_high_open_high_close:
                 return True, "高开高走"
             
-            # --- 4. 冲高回落强势维持 (归集之前策略) ---
-            # 逻辑：最高涨幅一度很大(>=3%)，虽小幅回吐但仍维持在强势区间(>=1.0%)
+            # 3. 冲高回落 / 强势维持 / 冲高回落收新高
             surge_ratio = (high - lastp1d) / lastp1d if lastp1d > 0 else 0
-            if surge_ratio >= 0.03 and price > high * 0.97 and p_val >= 1.0:
-                return True, "强势维持"
+            if surge_ratio >= 0.03 and p_val >= 1.0:
+                # 强势维持：最高涨幅一度很大(>=3%)，虽极小幅回吐但仍维持在极强势区间 (收盘 > 最高 * 0.97)
+                if price > high * 0.97:
+                    return True, "强势维持"
+                # 冲高回落收新高：最高涨幅很大(>=3%)，收盘回吐较多但依然收于 1% 以上
+                elif price < high * 0.98:
+                    return True, "冲高回落收新高"
             
-            # --- 5. 多日缩量窄幅形态 (蓄势模式) ---
-            # 逻辑：此前有温和放量连阳(win>=2)，当前实体极小(<1%)且量能极度萎缩(<0.8)
+            # 4. 多日回踩收十字星缩量（蓄势窄幅缩量）：此前有温和放量连阳(win >= 2)，当前实体极小(< 1%)且量能萎缩(< 0.8)
             body_ratio = abs(price - open_p) / price if price > 0 else 1
-            if win >= 2 and body_ratio < 0.01 and volume < 0.8:
+            is_doji = body_ratio < 0.01  # 十字星：实体<1%
+            is_shrink_volume = volume < 0.8  # 缩量
+            is_after_rally = win >= 2  # 此前连阳
+            if is_after_rally and is_doji and is_shrink_volume:
                 return True, "蓄势窄幅缩量"
-
+            
             return False, ""
         except Exception as e:
-            logger.debug(f"Anomaly pattern hub error: {e}")
+            logger.debug(f"Anomaly pattern check error: {e}")
             return False, ""
 
     @with_log_level(LoggerFactory.INFO)
@@ -2801,11 +2777,53 @@ class StockLiveStrategy:
         
         if self.realtime_service:
             try:
-                # 2. 注入 V 型反转信号 (保持单条，因为检测逻辑较重且目前无批量接口)
+                # 2. 注入 V 型反转信号 (基于 FSM 状态机)
                 v_shape = self.realtime_service.get_v_shape_signal(code)
                 snap['v_shape_signal'] = v_shape
+                
+                # --- 防重复和防轰炸的增量触发逻辑 ---
+                if 'v_shape_triggered' not in snap:
+                    snap['v_shape_triggered'] = False
+
                 if v_shape:
-                    logger.debug(f"⚡ {code} 触发 V 型反转信号")
+                    if not snap['v_shape_triggered']:
+                        snap['v_shape_triggered'] = True
+                        snap['rt_emotion'] = snap.get('rt_emotion', rt_emotion) + 15
+                        
+                        fsm_state = self.realtime_service.kline_cache.get_consolidation_flags(code)
+                        phase_name = fsm_state.get("phase", "WAVE_UP")
+                        
+                        logger.info(f"⚡ V-Shape FSM Breakout Detected {code}: Phase {phase_name} Price {current_price}")
+                        
+                        # [NEW] V_SHAPE 入队需配合异动特征
+                        try:
+                            has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
+                            if has_anomaly:
+                                hub = get_trading_hub()
+                                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                                ts = TrackedSignal(
+                                    code=code, 
+                                    name=data.get('name', ''),
+                                    signal_type=f'V_SHAPE({anomaly_type})',
+                                    detected_date=today_str,
+                                    detected_price=current_price,
+                                    entry_strategy='回踩MA5',
+                                    status='TRACKING',
+                                    priority=9,
+                                    source='RealTime',
+                                    notes=f"V-Shape FSM Breakout ({phase_name}) | {anomaly_type}"
+                                )
+                                hub.add_to_follow_queue(ts)
+                                logger.info(f"📋 V-Shape+异动入队: {code} ({anomaly_type})")
+                            else:
+                                logger.debug(f"V-Shape {code} FSM Breakout skipped: no anomaly pattern")
+                        except Exception as e:
+                            logger.error(f"Failed to add V-Shape to queue for {code}: {e}")
+                else:
+                    # 如果 FSM 信号失效，重置触发标记，允许下一次波段拉升（如 WAVE_UP_2）重新触发
+                    snap['v_shape_triggered'] = False
+            except Exception as e:
+                logger.error(f"Realtime Service V-Shape Injection Error for {code}: {e}")
                     
                 # 3. 注入 55188 外部数据 (人气、主力、题材)
                 ext_55188 = all_55188.get(code)
@@ -3169,64 +3187,8 @@ class StockLiveStrategy:
                 # 🚀 [PARALLEL] 在 Worker 内并行更新历史 K 线缓存 (不再串行排队)
                 if hasattr(self, '_update_daily_history_cache'):
                     self._update_daily_history_cache(code, resample)
-
-                # --- 3.2 V-Shape K线形态 (来自批量脉冲缓存) ---
-                klines = all_klines.get(code, [])
-                
-                # --- [NEW] 数据异常检测: K线缺失 ---
-                if not klines:
-                    with self._data_exception_lock:
-                        existing = self._data_exceptions.get(code, "")
-                        self._data_exceptions[code] = f"{existing}, K线缺失" if existing else "K线缺失"
-                if len(klines) >= 15:
-                    lows = [k['low'] for k in klines]
-                    closes = [k['close'] for k in klines]
-                    p_curr = closes[-1]
-                    p_low = min(lows)
-                    p_start = closes[0]
-
-                    if p_start > 0 and p_low > 0:
-                        drop = (p_low - p_start) / p_start
-                        rebound = (p_curr - p_low) / p_low
-
-                        # --- 防重复触发 ---
-                        if 'v_shape_triggered' not in snap:
-                            snap['v_shape_triggered'] = False
-
-                        if drop < -0.02 and rebound > 0.015 and not snap['v_shape_triggered']:
-                            snap['v_shape_signal'] = True
-                            snap['rt_emotion'] += 15  # 加分
-                            snap['v_shape_triggered'] = True
-                            logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
-                            
-                            # [NEW] V_SHAPE 入队需配合异动特征
-                            try:
-                                # 检查是否有异动特征
-                                has_anomaly, anomaly_type = self._has_anomaly_pattern(row)
-                                if has_anomaly:
-                                    hub = get_trading_hub()
-                                    # import removed
-                                    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-                                    ts = TrackedSignal(
-                                        code=code, 
-                                        name=data.get('name', ''),
-                                        signal_type=f'V_SHAPE({anomaly_type})',
-                                        detected_date=today_str,
-                                        detected_price=p_curr,
-                                        entry_strategy='回踩MA5',
-                                        status='TRACKING',
-                                        priority=9,
-                                        source='RealTime',
-                                        notes=f"V-Shape Drop:{drop:.1%} Rebound:{rebound:.1%} | {anomaly_type}"
-                                    )
-                                    hub.add_to_follow_queue(ts)
-                                    logger.info(f"📋 V-Shape+异动入队: {code} ({anomaly_type})")
-                                else:
-                                    logger.debug(f"V-Shape {code} skipped: no anomaly pattern")
-                            except Exception as e:
-                                logger.error(f"Failed to add V-Shape to queue: {e}")
             except Exception as e:
-                logger.debug(f"v_shape_check error: {e}")
+                logger.debug(f"daily_history_cache update error: {e}")
 
         # 定义默认 shadow_decision，防止后续引用报错
         shadow_decision = {"action": "HOLD", "reason": "", "debug": {}}
