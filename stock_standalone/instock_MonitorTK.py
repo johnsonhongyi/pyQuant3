@@ -864,11 +864,146 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.signal_bridge_queue = mp.Queue(maxsize=50)  # ⭐ [NEW] 跨进程信号桥接队列
         self.viz_conn = mp.Pipe()           # ⭐ [NEW] 跨进程指令 Pipe (parent_conn, child_conn)
 
+        # Initialize top bar groups and default visibility
+        self.top_bar_visibility = {
+            "市场选择": True,
+            "stkey排序": True,
+            "周期选择": True,
+            "位置保存": True,
+            "搜索框": True,
+            "历史清删": True,
+            "个股监控": True,
+            "形态选股": True,
+            "写入BLK": True,
+            "全盘复盘": True,
+            "审计追溯": True,
+            "竞价面板": True,
+            "赛马监控": True,
+            "分时实时": True,
+            "55188特色": True,
+            "信号追踪": True,
+            "交易决策": True,
+            "信号总览": True,
+            "右侧控制": True
+        }
+        self.right_control_visibility = {
+            "Win": True,
+            "TDX": True,
+            "THS": True,
+            "DC": True,
+            "Tip": True,
+            "Real": True,
+            "Vis": True,
+            "Vo": True,
+            "Pop": True,
+            "ALink": True,
+            "📊": True
+        }
+        self.top_bar_groups = {
+            "市场选择": {
+                "widgets": ["top_market_lbl", "market_combo"],
+                "pack_opts": [
+                    {"side": "left", "padx": 2},
+                    {"side": "left", "padx": 5}
+                ]
+            },
+            "stkey排序": {
+                "widgets": ["top_stkey_lbl", "st_key_sort_entry"],
+                "pack_opts": [
+                    {"side": "left", "padx": 2},
+                    {"side": "left"}
+                ]
+            },
+            "周期选择": {
+                "widgets": ["top_resample_lbl", "resample_combo"],
+                "pack_opts": [
+                    {"side": "left"},
+                    {"side": "left", "padx": 5}
+                ]
+            },
+            "位置保存": {
+                "widgets": ["top_save_pos_btn", "top_load_pos_btn"],
+                "pack_opts": [
+                    {"side": "left", "padx": 2},
+                    {"side": "left", "padx": 2}
+                ]
+            },
+            "搜索框": {
+                "widgets": ["search_combo2"],
+                "pack_opts": [
+                    {"side": "left", "padx": 5, "fill": "x", "expand": True}
+                ]
+            },
+            "历史清删": {
+                "widgets": ["top_clean_btn2", "top_delete_btn2"],
+                "pack_opts": [
+                    {"side": "left", "padx": 2},
+                    {"side": "left", "padx": 2}
+                ]
+            },
+            "个股监控": {
+                "widgets": ["top_monitor_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "形态选股": {
+                "widgets": ["top_select_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "写入BLK": {
+                "widgets": ["top_write_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "全盘复盘": {
+                "widgets": ["top_fupan_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "审计追溯": {
+                "widgets": ["top_audit_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "竞价面板": {
+                "widgets": ["top_bidding_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "赛马监控": {
+                "widgets": ["top_racing_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "分时实时": {
+                "widgets": ["top_realtime_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "55188特色": {
+                "widgets": ["top_ext55188_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "信号追踪": {
+                "widgets": ["top_trace_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "交易决策": {
+                "widgets": ["top_decision_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "信号总览": {
+                "widgets": ["top_signal_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "右侧控制": {
+                "widgets": ["top_frame_right"],
+                "pack_opts": [{"side": "right", "padx": 2, "pady": 1}]
+            }
+        }
+
         # UI 构建
+        self.top_ctrl_frame = ctrl_frame
         self._build_ui(ctrl_frame)
 
         # checkbuttons 顶部右侧
         self.init_checkbuttons(ctrl_frame)
+
+        # 应用顶部工具栏可见性
+        self.apply_top_bar_visibility()
 
         # ✅ 股票特征标记器初始化（必须在性能优化器之前）
         if FEATURE_MARKER_AVAILABLE:
@@ -4617,8 +4752,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _build_ui(self, ctrl_frame):
 
+
         # Market 下拉菜单
-        tk.Label(ctrl_frame, text="Market:").pack(side="left", padx=2)
+        self.top_market_lbl = tk.Label(ctrl_frame, text="Market:")
+        self.top_market_lbl.pack(side="left", padx=2)
 
         # 显示中文 → 内部 code + blkname
         self.market_map = {
@@ -4661,17 +4798,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
         
-        tk.Label(ctrl_frame, text="stkey:").pack(side="left", padx=2)
+        self.top_stkey_lbl = tk.Label(ctrl_frame, text="stkey:")
+        self.top_stkey_lbl.pack(side="left", padx=2)
         self.st_key_sort_value = tk.StringVar()
-        self.st_key_sort_entry = tk.Entry(ctrl_frame, textvariable=self.st_key_sort_value,width=5)
+        self.st_key_sort_entry = tk.Entry(ctrl_frame, textvariable=self.st_key_sort_value, width=5)
         self.st_key_sort_entry.pack(side="left")
         # 绑定回车键提交
         self.st_key_sort_entry.bind("<Return>", self.on_st_key_sort_enter)
         self.st_key_sort_value.set(self.st_key_sort) 
         
         # --- resample 下拉框 ---
-        resampleValues = ["d",'2d','3d', "w", "m"]
-        tk.Label(ctrl_frame, text="resample:").pack(side="left")
+        resampleValues = ["d", "2d", "3d", "w", "m"]
+        self.top_resample_lbl = tk.Label(ctrl_frame, text="resample:")
+        self.top_resample_lbl.pack(side="left")
         self.resample_combo = ttk.Combobox(ctrl_frame, values=resampleValues, width=3)
         self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
         self.resample_combo.pack(side="left", padx=5)
@@ -4689,8 +4828,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.reload_cfg_value()
                 toast_message(self, "主窗口位置与配置已恢复")
 
-        tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2).pack(side="left", padx=2)
+        self.top_save_pos_btn = tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2)
+        self.top_save_pos_btn.pack(side="left", padx=2)
+        self.top_load_pos_btn = tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2)
+        self.top_load_pos_btn.pack(side="left", padx=2)
+
         self._last_resample = self.resample_combo.get().strip()
 
         # ✅ 关键：同步一次状态
@@ -4800,13 +4942,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端", "快捷栏设置"]
         self.action_var = tk.StringVar()
+        
+        # 初始化自定义样式以控制下拉位置
+        style_combobox = ttk.Style()
+        style_combobox.configure('Action.TCombobox', postoffset=(0, 0, 0, 0))
+        
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
-            values=options, state="readonly", width=10
+            values=options, state="readonly", width=10,
+            style='Action.TCombobox', height=12
         )
         self.action_combo.set("功能选择")
+        
+        # 动态上拉显示判定 (当离屏幕底部太近时)
+        def adjust_action_combo_post():
+            try:
+                widget_height = self.action_combo.winfo_height()
+                popup = self.action_combo.tk.eval(f'ttk::combobox::PopdownWindow {self.action_combo._w}')
+                popup_height = self.action_combo.tk.call('winfo', 'reqheight', f'{popup}.f.l')
+                
+                screen_height = self.action_combo.winfo_screenheight()
+                widget_y = self.action_combo.winfo_rooty()
+                
+                space_below = screen_height - (widget_y + widget_height)
+                
+                # 若底部剩余空间小于下拉列表高度 + 40px (考虑任务栏高度和安全边距)
+                if space_below < (popup_height + 40):
+                    y_offset = -widget_height - popup_height
+                    style_combobox.configure('Action.TCombobox', postoffset=(0, y_offset, 0, 0))
+                else:
+                    style_combobox.configure('Action.TCombobox', postoffset=(0, 0, 0, 0))
+            except Exception as e:
+                logger.error(f"Failed to adjust action_combo postoffset: {e}")
+                try:
+                    style_combobox.configure('Action.TCombobox', postoffset=(0, 0, 0, 0))
+                except:
+                    pass
+
+        self.action_combo.configure(postcommand=adjust_action_combo_post)
         
         # [NEW] 回测按钮 - 放在功能选择框前面
         self.backtest_btn = tk.Button(bottom_search_frame, text=" 回测 ", 
@@ -4856,6 +5031,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.setup_global_hotkey(show_toast=True, mode="LOCAL")
             elif action == "ATS终端":
                 self.open_ats_panel()
+            elif action == "快捷栏设置":
+                self.open_top_bar_settings()
 
 
         def on_select(event=None):
@@ -4866,27 +5043,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
 
-        tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
+        self.top_clean_btn2 = tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2))
+        self.top_clean_btn2.pack(side="left", padx=2)
+        self.top_delete_btn2 = tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2))
+        self.top_delete_btn2.pack(side="left", padx=2)
         
         # 为 search_var4/history4 添加 专门的清空/删除按钮 (在 search_combo4 之后)
         # tk.Button(ctrl_frame, text="清空4", command=lambda: self.clean_search(3)).pack(side="left", padx=2)
         # tk.Button(ctrl_frame, text="删除4", command=lambda: self.delete_search_history(3)).pack(side="left", padx=2)
         
-        tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk(), font=self.default_font_bold, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="复盘", command=self.open_market_pulse, font=self.default_font_bold, 
-                  bg="purple", fg="white", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="审计", command=self.open_dna_auditor_top50, font=self.default_font_bold, 
-                  bg="#004d99", fg="white", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="赛马🏁", command=lambda: self.open_racing_panel(), font=self.default_font_bold, fg="darkred", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2).pack(side="left", padx=2)
+        self.top_monitor_btn = tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init(), font=self.default_font_bold, pady=2)
+        self.top_monitor_btn.pack(side="left", padx=2)
+        self.top_select_btn = tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window(), font=self.default_font_bold, pady=2)
+        self.top_select_btn.pack(side="left", padx=2)
+        self.top_write_btn = tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk(), font=self.default_font_bold, pady=2)
+        self.top_write_btn.pack(side="left", padx=2)
+        self.top_fupan_btn = tk.Button(ctrl_frame, text="复盘", command=self.open_market_pulse, font=self.default_font_bold, bg="purple", fg="white", pady=2)
+        self.top_fupan_btn.pack(side="left", padx=2)
+        self.top_audit_btn = tk.Button(ctrl_frame, text="审计", command=self.open_dna_auditor_top50, font=self.default_font_bold, bg="#004d99", fg="white", pady=2)
+        self.top_audit_btn.pack(side="left", padx=2)
+        self.top_bidding_btn = tk.Button(ctrl_frame, text="竞价🚀", command=lambda: self.open_sector_bidding_panel(), font=self.default_font_bold, fg="blue", pady=2)
+        self.top_bidding_btn.pack(side="left", padx=2)
+        self.top_racing_btn = tk.Button(ctrl_frame, text="赛马🏁", command=lambda: self.open_racing_panel(), font=self.default_font_bold, fg="darkred", pady=2)
+        self.top_racing_btn.pack(side="left", padx=2)
+        self.top_realtime_btn = tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=self.default_font, pady=2)
+        self.top_realtime_btn.pack(side="left", padx=2)
+        self.top_ext55188_btn = tk.Button(ctrl_frame, text="55188", command=lambda: self.open_ext_data_viewer(), font=self.default_font_bold, fg="darkgreen", pady=2)
+        self.top_ext55188_btn.pack(side="left", padx=2)
+        self.top_trace_btn = tk.Button(ctrl_frame, text="追踪", command=lambda: self.open_live_signal_trace(), font=self.default_font_bold, fg="purple", pady=2)
+        self.top_trace_btn.pack(side="left", padx=2)
+        self.top_decision_btn = tk.Button(ctrl_frame, text="交易", command=lambda: self.open_decision_flow_panel(), font=self.default_font_bold, fg="#99004d", pady=2)
+        self.top_decision_btn.pack(side="left", padx=2)
+        self.top_signal_btn = tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2)
+        self.top_signal_btn.pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())
@@ -7120,6 +7309,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 保持 Tk.Frame 不变，因为它是容器
         frame_right = tk.Frame(parent_frame, bg="#f0f0f0") 
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
+        self.top_frame_right = frame_right
 
         self.win_var = tk.BooleanVar(value=False)
         # ✅ 绑定win_var变化回调，实时切换特征颜色显示
@@ -7135,6 +7325,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # [FIX] 绑定监听以同步影子变量，防止后台线程直接调用 .get() 导致 GIL 崩溃
         self.vis_var.trace_add('write', lambda *args: setattr(self, '_vis_enabled_cache', self.vis_var.get()))
         self.alert_popup_var = tk.BooleanVar(value=True) # 💥 默认开启报警弹窗
+        
+        self.right_control_widgets = {}
+        
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
@@ -7152,55 +7345,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 text=text, 
                 variable=var, 
                 command=self.update_linkage_status,
-                # 💥 注意：ttk 组件不再使用 bg, font 等直接参数
-                # bg="#f0f0f0", 
-                # font=('Microsoft YaHei', 9), # 字体应该通过 Style 统一设置
-                # padx=0, pady=0, bd=0, highlightthickness=0
             )
-            cb.pack(side=tk.LEFT, padx=1)
+            self.right_control_widgets[text] = cb
 
-        ttk.Checkbutton(
+        cb_vo = ttk.Checkbutton(
             frame_right,
             text="Vo",
             variable=self.voice_var,
             command=self.on_voice_toggle
-        ).pack(side=tk.LEFT, padx=1)
+        )
+        self.right_control_widgets["Vo"] = cb_vo
 
-        ttk.Checkbutton(
+        cb_pop = ttk.Checkbutton(
             frame_right,
             text="Pop",
             variable=self.alert_popup_var,
             command=self.save_ui_states # 实时保存状态
-        ).pack(side=tk.LEFT, padx=1)
+        )
+        self.right_control_widgets["Pop"] = cb_pop
 
         # 🚀 [NEW] 将 ALink 放置在最末尾
-        ttk.Checkbutton(
+        cb_alink = ttk.Checkbutton(
             frame_right,
             text="ALink",
             variable=self.alert_link_var,
             command=self.save_ui_states
-        ).pack(side=tk.LEFT, padx=1)
+        )
+        self.right_control_widgets["ALink"] = cb_alink
 
-        ttk.Button(
+        btn_vis = ttk.Button(
             frame_right,
             text="📊", 
             width=3,
             command=lambda: self.open_visualizer(getattr(self, 'select_code', None))
-        ).pack(side=tk.LEFT, padx=1)
-
-        # ttk.Button(
-        #     frame_right,
-        #     text="策略", 
-        #     width=5,
-        #     command=self.open_strategy_scan
-        # ).pack(side=tk.LEFT, padx=1)
-
-        # ttk.Button(
-        #     frame_right,
-        #     text="竞价🚀",
-        #     width=6,
-        #     command=self.open_sector_bidding_panel
-        # ).pack(side=tk.LEFT, padx=1)
+        )
+        self.right_control_widgets["📊"] = btn_vis
 
         # Initialize persisted variables that are not bound to main UI buttons immediately
         self.force_d_cycle_var = tk.BooleanVar(value=True)
@@ -7208,11 +7387,278 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # Load persisted states
         self.load_ui_states()
         
+        # 首次应用右侧控制按钮可见性
+        self.apply_right_controls_visibility()
+        
         # ⚡ [NEW] 加载完状态后，强制同步一次语音引擎状态 (防止 UI 为 False 但后台引擎默认为 True)
         self.on_voice_toggle()
         
         # Apply strict linkage immediately
         self._schedule_after(100, self.update_linkage_status)
+
+    def apply_top_bar_visibility(self):
+        """应用顶部快捷栏各组件的显示与隐藏"""
+        try:
+            # 1. 收集并隐藏所有定义的组件
+            for group_name, group_info in self.top_bar_groups.items():
+                for widget_name in group_info["widgets"]:
+                    widget = getattr(self, widget_name, None)
+                    if widget and widget.winfo_exists():
+                        widget.pack_forget()
+
+            # 2. 首先摆放 side=tk.RIGHT 的右侧组件
+            for group_name, group_info in self.top_bar_groups.items():
+                is_visible = self.top_bar_visibility.get(group_name, True)
+                if not is_visible:
+                    continue
+                for idx, widget_name in enumerate(group_info["widgets"]):
+                    widget = getattr(self, widget_name, None)
+                    opts = group_info["pack_opts"][idx]
+                    if widget and widget.winfo_exists() and opts.get("side") == "right":
+                        widget.pack(**opts)
+
+            # 3. 然后按顺序摆放 side=tk.LEFT 的左侧组件
+            for group_name, group_info in self.top_bar_groups.items():
+                is_visible = self.top_bar_visibility.get(group_name, True)
+                if not is_visible:
+                    continue
+                for idx, widget_name in enumerate(group_info["widgets"]):
+                    widget = getattr(self, widget_name, None)
+                    opts = group_info["pack_opts"][idx]
+                    if widget and widget.winfo_exists() and opts.get("side") != "right":
+                        pack_opts = opts.copy()
+                        if "side" not in pack_opts:
+                            pack_opts["side"] = "left"
+                        widget.pack(**pack_opts)
+            # 4. 应用右侧各控制按钮的可见性
+            self.apply_right_controls_visibility()
+        except Exception as e:
+            logger.error(f"Error applying top bar visibility: {e}")
+
+    def apply_right_controls_visibility(self):
+        """应用右侧各控制按钮的显示与隐藏"""
+        try:
+            if not hasattr(self, 'right_control_widgets'):
+                return
+            
+            # 先 pack_forget 所有右侧控制子组件
+            for widget in self.right_control_widgets.values():
+                if widget and widget.winfo_exists():
+                    widget.pack_forget()
+            
+            # 如果“右侧控制”整体是可见的，才依次把需要的子按钮 pack 出来
+            if self.top_bar_visibility.get("右侧控制", True):
+                order = ["Win", "TDX", "THS", "DC", "Tip", "Real", "Vis", "Vo", "Pop", "ALink", "📊"]
+                for key in order:
+                    widget = self.right_control_widgets.get(key)
+                    if widget and widget.winfo_exists():
+                        is_visible = self.right_control_visibility.get(key, True)
+                        if is_visible:
+                            widget.pack(side=tk.LEFT, padx=1)
+        except Exception as e:
+            logger.error(f"Error applying right controls visibility: {e}")
+
+    def toggle_top_bar_group(self, group_name, is_visible):
+        """切换单个组件组的可见性"""
+        self.top_bar_visibility[group_name] = is_visible
+        self.apply_top_bar_visibility()
+        self.save_ui_states()
+
+    def open_top_bar_settings(self):
+        """打开顶部状态功能开关设置窗口"""
+        settings_win = tk.Toplevel(self)
+        settings_win.title("顶部快捷栏组件设置")
+        settings_win.geometry("580x680")
+        settings_win.resizable(False, False)
+        
+        if hasattr(self, 'load_window_position'):
+            try:
+                self.load_window_position(settings_win, "top_bar_settings")
+            except:
+                pass
+                
+        settings_win.configure(bg="#f8f9fa")
+        
+        # 标题栏
+        header_frame = tk.Frame(settings_win, bg="#343a40", height=45)
+        header_frame.pack(fill="x", side="top")
+        header_lbl = tk.Label(header_frame, text="⚙️ 快捷栏组件显示/隐藏控制", fg="white", bg="#343a40", font=("Microsoft YaHei", 11, "bold"))
+        header_lbl.pack(pady=10, padx=15, side="left")
+        
+        # 使用 Notebook 实现分页
+        notebook = ttk.Notebook(settings_win)
+        notebook.pack(fill="both", expand=True, padx=15, pady=10)
+        
+        # --- 第一页: 顶部快捷组件 ---
+        tab1 = tk.Frame(notebook, bg="#f8f9fa")
+        notebook.add(tab1, text="顶部快捷组件")
+        
+        list_frame1 = tk.LabelFrame(tab1, text="选择需要展示的快捷组件组 (未打开的功能右侧可直接执行)", font=("Microsoft YaHei", 9, "bold"), bg="#f8f9fa", fg="#495057", padx=10, pady=10)
+        list_frame1.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 针对可以直接执行的功能，映射它们具体的执行指令
+        exec_map = {
+            "个股监控": ("监控", lambda: self.KLineMonitor_init()),
+            "形态选股": ("选股", lambda: self.open_stock_selection_window()),
+            "写入BLK": ("写入", lambda: self.write_to_blk()),
+            "全盘复盘": ("复盘", lambda: self.open_market_pulse()),
+            "审计追溯": ("审计", lambda: self.open_dna_auditor_top50()),
+            "竞价面板": ("竞价", lambda: self.open_sector_bidding_panel()),
+            "赛马监控": ("赛马", lambda: self.open_racing_panel()),
+            "分时实时": ("实时", lambda: self.open_realtime_monitor()),
+            "55188特色": ("55188", lambda: self.open_ext_data_viewer()),
+            "信号追踪": ("追踪", lambda: self.open_live_signal_trace()),
+            "交易决策": ("交易", lambda: self.open_decision_flow_panel()),
+            "信号总览": ("信号", lambda: self.open_live_signal_viewer()),
+        }
+        
+        # 设置列宽度，列2作为中部间隔列
+        list_frame1.columnconfigure(0, weight=2)
+        list_frame1.columnconfigure(1, weight=1)
+        list_frame1.columnconfigure(2, minsize=20)
+        list_frame1.columnconfigure(3, weight=2)
+        list_frame1.columnconfigure(4, weight=1)
+        
+        chk_vars = {}
+        exec_buttons = {}  # 缓存执行按钮引用以便动态控制状态
+        
+        row = 0
+        col = 0
+        for group_name in self.top_bar_groups.keys():
+            var = tk.BooleanVar(value=self.top_bar_visibility.get(group_name, True))
+            chk_vars[group_name] = var
+            
+            grid_col_cb = 0 if col == 0 else 3
+            grid_col_btn = 1 if col == 0 else 4
+            
+            # 勾选框
+            cb = ttk.Checkbutton(list_frame1, text=group_name, variable=var)
+            cb.grid(row=row, column=grid_col_cb, sticky="w", padx=(10, 5), pady=6)
+            
+            # 如果是可直接执行的功能，在其右侧增加“直接执行”的小按钮
+            if group_name in exec_map:
+                btn_text, cmd_func = exec_map[group_name]
+                btn_exec = ttk.Button(list_frame1, text=f"▶ {btn_text}", width=6)
+                
+                # 闭包封装：执行后关闭设置窗口以便用户直接看操作效果
+                def make_exec_cmd(c_func=cmd_func):
+                    return lambda: [c_func(), settings_win.destroy()]
+                
+                btn_exec.configure(command=make_exec_cmd(cmd_func))
+                btn_exec.grid(row=row, column=grid_col_btn, sticky="w", padx=(0, 10), pady=4)
+                exec_buttons[group_name] = btn_exec
+                
+                # 初始状态：若已打开，则禁用执行按钮；若未打开，则允许直接执行
+                btn_exec.configure(state="disabled" if var.get() else "normal")
+            else:
+                # 占位控件保持网格整齐
+                lbl_place = tk.Label(list_frame1, text="", bg="#f8f9fa", width=6)
+                lbl_place.grid(row=row, column=grid_col_btn, sticky="w", padx=(0, 10), pady=4)
+            
+            # 联动绑定：点击切换开关时，同步启用或禁用“直接执行”按钮
+            def make_toggle_cb(g_name, v):
+                def toggle():
+                    self.toggle_top_bar_group(g_name, v.get())
+                    if g_name in exec_buttons:
+                        exec_buttons[g_name].configure(state="disabled" if v.get() else "normal")
+                return toggle
+                
+            cb.configure(command=make_toggle_cb(group_name, var))
+            
+            col += 1
+            if col > 1: # 每行展示2个
+                col = 0
+                row += 1
+                
+        # --- 第二页: 右侧控制选项 ---
+        tab2 = tk.Frame(notebook, bg="#f8f9fa")
+        notebook.add(tab2, text="右侧控制选项")
+        
+        # 左栏: 控制按钮显示/隐藏
+        left_sub_frame = tk.LabelFrame(tab2, text="显示/隐藏控制按钮", font=("Microsoft YaHei", 9, "bold"), bg="#f8f9fa", fg="#495057", padx=10, pady=10)
+        left_sub_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        
+        right_chk_vars = {}
+        row = 0
+        order = ["Win", "TDX", "THS", "DC", "Tip", "Real", "Vis", "Vo", "Pop", "ALink", "📊"]
+        for key in order:
+            var = tk.BooleanVar(value=self.right_control_visibility.get(key, True))
+            right_chk_vars[key] = var
+            
+            def make_right_toggle_cb(k, v):
+                def toggle():
+                    self.right_control_visibility[k] = v.get()
+                    self.apply_right_controls_visibility()
+                    self.save_ui_states()
+                return toggle
+                
+            cb = ttk.Checkbutton(left_sub_frame, text=key, variable=var, command=make_right_toggle_cb(key, var))
+            cb.grid(row=row, column=0, sticky="w", padx=15, pady=4)
+            row += 1
+            
+        # 右栏: 开关状态设置 (实时生效与同步)
+        right_sub_frame = tk.LabelFrame(tab2, text="直接调整选项状态 (值)", font=("Microsoft YaHei", 9, "bold"), bg="#f8f9fa", fg="#495057", padx=10, pady=10)
+        right_sub_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        
+        # 将 right_sub_frame 中的各种 BooleanVar 绑定 checkbutton，这些 checkbutton 共享主界面的 BooleanVar，因此会实时反映并修改值！
+        val_configs = [
+            ("Win (win_var)", self.win_var, self.update_linkage_status),
+            ("TDX (tdx_var)", self.tdx_var, self.update_linkage_status),
+            ("THS (ths_var)", self.ths_var, self.update_linkage_status),
+            ("DC (dfcf_var)", self.dfcf_var, self.update_linkage_status),
+            ("Tip (tip_var)", self.tip_var, self.update_linkage_status),
+            ("Real (realtime_var)", self.realtime_var, self.update_linkage_status),
+            ("Vis (vis_var)", self.vis_var, self.update_linkage_status),
+            ("Vo (voice_var)", self.voice_var, self.on_voice_toggle),
+            ("Pop (alert_popup_var)", self.alert_popup_var, self.save_ui_states),
+            ("ALink (alert_link_var)", self.alert_link_var, self.save_ui_states)
+        ]
+        
+        row = 0
+        for label_text, var, cmd in val_configs:
+            def make_val_cb(v, c):
+                def on_val_change():
+                    if c:
+                        c()
+                    self.save_ui_states()
+                return on_val_change
+                
+            cb = ttk.Checkbutton(right_sub_frame, text=label_text, variable=var, command=make_val_cb(var, cmd))
+            cb.grid(row=row, column=0, sticky="w", padx=15, pady=5)
+            row += 1
+            
+        # 底部操作栏
+        btn_frame = tk.Frame(settings_win, bg="#f1f3f5", height=50)
+        btn_frame.pack(fill="x", side="bottom")
+        
+        def set_all(val):
+            # 第一页快捷栏组件
+            for group_name, var in chk_vars.items():
+                var.set(val)
+                self.top_bar_visibility[group_name] = val
+                if group_name in exec_buttons:
+                    exec_buttons[group_name].configure(state="disabled" if val else "normal")
+            # 第二页右侧按钮显示
+            for key, var in right_chk_vars.items():
+                var.set(val)
+                self.right_control_visibility[key] = val
+                
+            self.apply_top_bar_visibility()
+            self.save_ui_states()
+            
+        ttk.Button(btn_frame, text="全选", command=lambda: set_all(True)).pack(side="left", padx=15, pady=10)
+        ttk.Button(btn_frame, text="全清", command=lambda: set_all(False)).pack(side="left", padx=5, pady=10)
+        
+        def save_and_close():
+            if hasattr(self, 'save_window_position'):
+                try:
+                    self.save_window_position(settings_win, "top_bar_settings")
+                except:
+                    pass
+            settings_win.destroy()
+            toast_message(self, "快捷栏设置已保存并应用")
+            
+        ttk.Button(btn_frame, text="确定", command=save_and_close).pack(side="right", padx=15, pady=10)
 
     def open_sector_bidding_panel(self):
         """手动打开竞价/尾盘板块联动监控面板 (异步构建版，防 Tk 主线程冻结)"""
@@ -7484,6 +7930,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.sortby_col_ascend = bool(saved_sort_asc)
                 logger.info(f"Restored sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
 
+            # Restore top bar visibility
+            saved_visibility = ui_state.get('top_bar_visibility', {})
+            if isinstance(saved_visibility, dict):
+                for key, val in saved_visibility.items():
+                    self.top_bar_visibility[key] = bool(val)
+
+            # Restore right control visibility
+            saved_right_visibility = ui_state.get('right_control_visibility', {})
+            if isinstance(saved_right_visibility, dict):
+                for key, val in saved_right_visibility.items():
+                    self.right_control_visibility[key] = bool(val)
+
             logger.info(f"UI states loaded: {len(ui_state)} items")
 
         except Exception as e:
@@ -7523,6 +7981,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             config['ui_persistence']['sortby_col'] = self.sortby_col
             config['ui_persistence']['sortby_col_ascend'] = self.sortby_col_ascend
             logger.info(f"Saving sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
+
+            # Save top bar visibility
+            config['ui_persistence']['top_bar_visibility'] = getattr(self, 'top_bar_visibility', {})
+
+            # Save right control visibility
+            config['ui_persistence']['right_control_visibility'] = getattr(self, 'right_control_visibility', {})
 
             with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
