@@ -140,7 +140,7 @@ class MinuteKlineCache:
         self._consolidation_flags: dict[str, dict[str, Any]] = {} # 记录个股跌幅与缩量状态
         self._v_reversal_pool: set[str] = set() # 潜伏监控池 (横盘缩量达标)
         
-        self._lock = threading.Lock() # 真正的锁
+        self._lock = threading.RLock() # 真正的锁
         
     def __len__(self) -> int:
         return len(self._shared_cache)
@@ -829,6 +829,10 @@ class MinuteKlineCache:
                     volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
                 ))
                 self._is_dirty = True
+                try:
+                    self.update_wave_structure_state(code)
+                except Exception as e:
+                    logger.error(f"Failed to update wave state for {code} on first K-line: {e}")
                 return
 
             # 获取 last_k 引用 (安全获取)
@@ -906,6 +910,10 @@ class MinuteKlineCache:
                         del klines[:num_to_trim]
                     
                 self._is_dirty = True
+                try:
+                    self.update_wave_structure_state(code)
+                except Exception as e:
+                    logger.error(f"Failed to update wave state for {code} on new minute K-line: {e}")
             else:
                 # 忽略过时数据，且进行最后一次确认防止由于时钟回拨误判
                 if last_k.time - minute_ts > 86400: # 跨天级别脏数据
@@ -3106,6 +3114,18 @@ class DataPublisher:
                 
                 if any(col in df.columns for col in ['trade', 'now', 'price', 'close', 'hq_last', 'llastp']):
                     self.kline_cache.update_batch(df, self.subscribers)
+                    
+                    # [NEW] Real-time V-Reversal state machine update for pool stocks
+                    # Only update stocks already in the pool to catch real-time breakouts
+                    pool = self.kline_cache.get_v_reversal_pool()
+                    if pool and 'code' in df.columns:
+                        for raw_c in df['code'].dropna().unique():
+                            code_str = str(raw_c).strip().zfill(6)
+                            if code_str in pool:
+                                try:
+                                    self.kline_cache.update_wave_structure_state(code=code_str)
+                                except Exception as e:
+                                    logger.error(f"Failed to update real-time wave state for pool stock {code_str}: {e}")
                 
                 # [NEW] ⚡ 赛马/赛道探测逻辑嵌入 (One Calculation, Global Availability)
                 if self.racing_detector is not None:
@@ -3250,6 +3270,7 @@ class DataPublisher:
     def get_v_shape_signal(self, code: str, window: int = 30) -> bool:
         """获取个股是否有 V 型反转信号，对于缺失行情个股触发异步拉取"""
         if hasattr(self.kline_cache, 'get_v_reversal_pool'):
+            code = str(code).strip().zfill(6)
             klines = self.kline_cache.get_klines(code, n=30)
             # [FIX] 原来调用的 _fetch_supplemental_data_async 不存在，改为正确的线程异步拉取
             if len(klines) < 10 and code not in self.kline_cache._supplemented_codes:
@@ -3260,7 +3281,11 @@ class DataPublisher:
                     daemon=True,
                     name=f"VShapeSupFetch_{code}"
                 ).start()
-            return code in self.kline_cache.get_v_reversal_pool()
+            
+            # --- Unify signal logic: only return True if the FSM is in breakout phases ---
+            state = self.kline_cache.get_consolidation_flags(code)
+            phase = state.get("phase", "INIT")
+            return phase in ["WAVE_UP", "WAVE_UP_2"]
         return False
 
     def warm_up_favorites(self):
