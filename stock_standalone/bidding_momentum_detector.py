@@ -329,6 +329,20 @@ class TickSeries:
         v_now = _val('now', _val('trade', _val('price', _val('nclose', self.now_price))))
         self.now_price = float(v_now) if v_now else 0.0
         
+        # [NEW] 实时计算增量涨跌与涨幅，确保跳过评分评估的个股在 UI 展现时依然拥有最新的增量数值
+        if self.price_anchor <= 0.0 and self.now_price > 0.0:
+            self.price_anchor = self.now_price
+            
+        if self.price_anchor > 0.0:
+            self.price_diff = self.now_price - self.price_anchor
+            if self.last_close > 0.0:
+                self.pct_diff = (self.now_price - self.price_anchor) / self.last_close * 100.0
+            else:
+                self.pct_diff = 0.0
+        else:
+            self.price_diff = 0.0
+            self.pct_diff = 0.0
+
         v_high = _val('high', 0.0)
         self.high_day = float(v_high) if v_high else 0.0
         
@@ -3188,7 +3202,7 @@ class BiddingMomentumDetector:
     def _reconstruct_sector_from_candidates(self, sector_name: str, info: dict, candidates: list, market_avg: float):
         """内部核心逻辑：根据候选人名单填充板块详情、角色和跟随股"""
         configured_cols = getattr(cct.CFG, 'bidding_window_col', [])
-        core_keys = {'code', 'name', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+        core_keys = {'code', 'name', 'role', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
 
         # 1. 计算龙分并排序 (强制重算以响应算法切换)
         board_score = info.get('score', 0.0)
@@ -3251,13 +3265,35 @@ class BiddingMomentumDetector:
         if getattr(self, 'use_dragon_race', False):
             for s in candidates[:15]:
                 role = self._determine_role(s, leader_code, s['leader_score'])
-                race_candidates.append({
-                    'code': s['code'], 'name': s['name'], 'role': role,
-                    'pct': round(s.get('pct', 0.0), 2), 'score': round(s.get('score', 0.0), 1),
+                rc_item = {
+                    'code': s['code'], 
+                    'name': s['name'], 
+                    'role': role,
+                    'pct': round(s.get('pct', 0.0), 2), 
+                    'score': round(s.get('score', 0.0), 1),
                     'l_score': round(s['leader_score'], 1),
-                    'pct_diff': round(s.get('pct_diff', 0.0), 2),
-                    'score_diff': round(s.get('score_diff', 0.0), 2)
-                })
+                    'score_diff': s.get('score_diff', 0.0),
+                    'pct_diff': s.get('pct_diff', 0.0),
+                    'price_diff': s.get('price_diff', 0.0),
+                    'dff': s.get('dff', 0.0),
+                    'price': s.get('price', 0.0),
+                    'first_ts': s.get('first_breakout_ts', 0.0),
+                    'pattern_hint': s.get('pattern_hint', ''), 
+                    'is_untradable': s.get('is_untradable', False),
+                    'is_counter_trend': s.get('is_counter_trend', False),
+                    'last_close': s.get('last_close', 0.0),
+                    'high_day': s.get('high_day', 0.0),
+                    'low_day': s.get('low_day', 0.0),
+                    'last_high': s.get('last_high', 0.0),
+                    'last_low': s.get('last_low', 0.0)
+                }
+                ts = self._tick_series.get(s['code'])
+                if ts and getattr(ts, 'custom_cols', None):
+                    rc_item.update(ts.custom_cols)
+                for col_name in configured_cols:
+                    if col_name not in core_keys and col_name in s:
+                        rc_item[col_name] = s[col_name]
+                race_candidates.append(rc_item)
         info['race_candidates'] = race_candidates
         
         # 4. 填充跟随股列表 (Top 15)
@@ -3266,6 +3302,7 @@ class BiddingMomentumDetector:
             f_dict = {
                 'code': s['code'], 
                 'name': s.get('name', s['code']), 
+                'role': self._determine_role(s, leader_code, s.get('leader_score', 0.0)),
                 'pct': s.get('pct', 0.0), 
                 'score': s.get('score', 0.0), 
                 'price': s.get('price', 0.0), 
@@ -3866,7 +3903,7 @@ class BiddingMomentumDetector:
         _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
         configured_cols = getattr(cct.CFG, 'bidding_window_col', [])
-        core_keys = {'code', 'name', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+        core_keys = {'code', 'name', 'role', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
 
         # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
@@ -4234,7 +4271,12 @@ class BiddingMomentumDetector:
                 
             board_score_leader = leader_base + follower_bonus
             
-            board_score = min(max(board_score_avg, board_score_leader), 98.5)
+            raw_score = max(board_score_avg, board_score_leader)
+            if raw_score > 85.0:
+                # 渐进式非线性压缩，最大值逼近 99.5，保留明显的强弱梯度，解决高频撞顶失去区分度的问题
+                board_score = 85.0 + (raw_score - 85.0) / (1.0 + (raw_score - 85.0) / 14.5)
+            else:
+                board_score = max(0.0, raw_score)
 
             # 🎯 [Detector-Diag] 特别针对重点题材输出诊断日志，供调试分析
             if "共封装光学" in sector or "CPO" in sector or "AI PC" in sector:
@@ -4269,14 +4311,35 @@ class BiddingMomentumDetector:
             race_candidates = []
             for s in stocks:
                 role = self._determine_role(s, leader_code, s['leader_score'])
-                race_candidates.append({
-                    'code': s['code'], 'name': s['name'], 'role': role,
-                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
+                rc_item = {
+                    'code': s['code'], 
+                    'name': s['name'], 
+                    'role': role,
+                    'pct': round(s['pct'], 2), 
+                    'score': round(s.get('score', 0.0), 1),
                     'l_score': round(s['leader_score'], 1),
-                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
+                    'score_diff': s.get('score_diff', 0.0),
+                    'pct_diff': s.get('pct_diff', 0.0),
+                    'price_diff': s.get('price_diff', 0.0),
+                    'dff': s.get('dff', 0.0),
+                    'price': s.get('price', 0.0),
+                    'first_ts': s.get('first_breakout_ts', 0.0),
+                    'pattern_hint': s.get('pattern_hint', ''), 
                     'is_untradable': s.get('is_untradable', False),
-                    'is_counter_trend': s.get('is_counter_trend', False)
-                })
+                    'is_counter_trend': s.get('is_counter_trend', False),
+                    'last_close': s.get('last_close', 0.0),
+                    'high_day': s.get('high_day', 0.0),
+                    'low_day': s.get('low_day', 0.0),
+                    'last_high': s.get('last_high', 0.0),
+                    'last_low': s.get('last_low', 0.0)
+                }
+                ts = self._tick_series.get(s['code'])
+                if ts and getattr(ts, 'custom_cols', None):
+                    rc_item.update(ts.custom_cols)
+                for col_name in configured_cols:
+                    if col_name not in core_keys and col_name in s:
+                        rc_item[col_name] = s[col_name]
+                race_candidates.append(rc_item)
 
             # 提取龙头元数据供后续使用
             tags = []
@@ -4396,6 +4459,7 @@ class BiddingMomentumDetector:
                 f_dict = {
                     'code': s['code'], 
                     'name': s['name'], 
+                    'role': self._determine_role(s, leader_code, s['leader_score']),
                     'pct': s['pct'], 
                     'score': s.get('score', 0.0), 
                     'score_diff': s.get('score_diff', 0.0), 

@@ -1,3 +1,7 @@
+## 2026-06-16 21:30
+- [x] **优化板块评分上限截断与强攻概念梯度展示 (Optimized Board Score Capping & Enhanced Strength Gradient)**：
+    - [x] **引入非线性渐进式软压缩算法 (Soft Non-Linear Compression)**：重构了 `bidding_momentum_detector.py` 中的 `board_score` 计算公式，废除了 `min(..., 98.5)` 的硬上限截断。针对强度超出 85.0 的板块，采用双曲渐进公式进行软压缩，使超高分板块得分平滑收敛在 85.0 ~ 99.5 之间，在维持数值在合理区间的前提下，彻底解决了超强题材“千篇一律”触顶 98.5 分而失去区分度的痛点，保留了明显的强弱梯队层次。
+
 ## 2026-06-16 21:10
 - [x] **实现板块数据自愈与受损历史快照一键修复 (Implemented Sector Self-Healing & Corrupted Snapshots Batch Repair)**：
     - [x] **实现板块零数据自愈机制 (Sector Data Zero-Case Self-Healing)**：在 `bidding_momentum_detector.py` 的板块加载底层机制中，新增了 `_ensure_sectors_reconstructed` 自愈方法。当载入的快照或历史会话中板块数据为空或严重受损（`sectors <= 1`）但个股元数据完整时，自动触发逆向工程重建，基于个股分类与强度特征（`score >= 0.5` 或 `abs(pct) > 1.5` 过滤噪音）自愈重建全量板块并深度计算龙头、跟涨股等深度指标，彻底避免了历史白板现象。

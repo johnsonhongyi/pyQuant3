@@ -3774,7 +3774,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 stocks.append({
                     'code': f_code,
                     'name': f['name'],
-                    'role': '📌跟随',
+                    'role': f.get('role', '📌跟随'),
                     'pct': f['pct'],
                     'price': f['price'],
                     'pct_diff': f.get('pct_diff', 0.0),
