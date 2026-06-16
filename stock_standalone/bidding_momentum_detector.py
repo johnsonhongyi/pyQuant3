@@ -1984,7 +1984,7 @@ class BiddingMomentumDetector:
         except Exception as e:
             logger.debug(f"Session backup failed: {e}")
 
-    def save_persistent_data(self, force=False):
+    def save_persistent_data(self, force=False, bypass_checks=False):
         """最终统一版：旧版控制流 + 新版数据结构（完全行为对齐）"""
         # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
@@ -1994,7 +1994,7 @@ class BiddingMomentumDetector:
             pass
 
         # === ① history mode（旧版优先级最高）
-        if getattr(self, "in_history_mode", False):
+        if getattr(self, "in_history_mode", False) and not bypass_checks:
             logger.debug("[Detector] Skip save in history mode.")
             return
 
@@ -2005,7 +2005,7 @@ class BiddingMomentumDetector:
                 is_trade_day = False
 
             # [🚀 FIX] 非交易日持久化写盘安全隔离保护
-            if not is_trade_day:
+            if not is_trade_day and not bypass_checks:
                 has_valid_post_trade_archive = False
                 main_path = self._get_persistence_path()
                 if os.path.exists(main_path):
@@ -2033,7 +2033,7 @@ class BiddingMomentumDetector:
             now = datetime.datetime.now()
 
             # === ③ 时间过滤（严格按旧版顺序）
-            if not force:
+            if not force and not bypass_checks:
                 if now.hour >= 16:
                     return
                 if is_trade_day:
@@ -2048,7 +2048,7 @@ class BiddingMomentumDetector:
                     mtime = os.path.getmtime(main_path)
                     f_dt = datetime.datetime.fromtimestamp(mtime)
 
-                    if (now.hour >= 15 or not is_trade_day) and not force:
+                    if (now.hour >= 15 or not is_trade_day) and not force and not bypass_checks:
                         current_sig_count = len([ts for ts in self._tick_series.values() if ts.score > 0])
                         if current_sig_count < 5 and (now - f_dt).days <= 2:
                             logger.info(f"🛡️ [Detector] Session empty ({current_sig_count}). Protecting existing data.")
@@ -2057,7 +2057,7 @@ class BiddingMomentumDetector:
                     logger.debug(f"Persistence quality check error: {e}")
 
             # === ⑤ 内容检查（恢复旧版严格逻辑）
-            if not force:
+            if not force and not bypass_checks:
                 if not self.active_sectors:
                     return
 
@@ -3266,26 +3266,12 @@ class BiddingMomentumDetector:
             for s in candidates[:15]:
                 role = self._determine_role(s, leader_code, s['leader_score'])
                 rc_item = {
-                    'code': s['code'], 
-                    'name': s['name'], 
-                    'role': role,
-                    'pct': round(s.get('pct', 0.0), 2), 
-                    'score': round(s.get('score', 0.0), 1),
+                    'code': s['code'], 'name': s['name'], 'role': role,
+                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
                     'l_score': round(s['leader_score'], 1),
-                    'score_diff': s.get('score_diff', 0.0),
-                    'pct_diff': s.get('pct_diff', 0.0),
-                    'price_diff': s.get('price_diff', 0.0),
-                    'dff': s.get('dff', 0.0),
-                    'price': s.get('price', 0.0),
-                    'first_ts': s.get('first_breakout_ts', 0.0),
-                    'pattern_hint': s.get('pattern_hint', ''), 
+                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
                     'is_untradable': s.get('is_untradable', False),
-                    'is_counter_trend': s.get('is_counter_trend', False),
-                    'last_close': s.get('last_close', 0.0),
-                    'high_day': s.get('high_day', 0.0),
-                    'low_day': s.get('low_day', 0.0),
-                    'last_high': s.get('last_high', 0.0),
-                    'last_low': s.get('last_low', 0.0)
+                    'is_counter_trend': s.get('is_counter_trend', False)
                 }
                 ts = self._tick_series.get(s['code'])
                 if ts and getattr(ts, 'custom_cols', None):
@@ -3302,7 +3288,6 @@ class BiddingMomentumDetector:
             f_dict = {
                 'code': s['code'], 
                 'name': s.get('name', s['code']), 
-                'role': self._determine_role(s, leader_code, s.get('leader_score', 0.0)),
                 'pct': s.get('pct', 0.0), 
                 'score': s.get('score', 0.0), 
                 'price': s.get('price', 0.0), 
@@ -3903,7 +3888,7 @@ class BiddingMomentumDetector:
         _from_scheduler: True 表示由 _finish_score 调用，data_version 已在外部递增，此处跳过。
         """
         configured_cols = getattr(cct.CFG, 'bidding_window_col', [])
-        core_keys = {'code', 'name', 'role', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+        core_keys = {'code', 'name', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
 
         # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
@@ -4312,26 +4297,12 @@ class BiddingMomentumDetector:
             for s in stocks:
                 role = self._determine_role(s, leader_code, s['leader_score'])
                 rc_item = {
-                    'code': s['code'], 
-                    'name': s['name'], 
-                    'role': role,
-                    'pct': round(s['pct'], 2), 
-                    'score': round(s.get('score', 0.0), 1),
+                    'code': s['code'], 'name': s['name'], 'role': role,
+                    'pct': round(s['pct'], 2), 'score': round(s.get('score', 0.0), 1),
                     'l_score': round(s['leader_score'], 1),
-                    'score_diff': s.get('score_diff', 0.0),
-                    'pct_diff': s.get('pct_diff', 0.0),
-                    'price_diff': s.get('price_diff', 0.0),
-                    'dff': s.get('dff', 0.0),
-                    'price': s.get('price', 0.0),
-                    'first_ts': s.get('first_breakout_ts', 0.0),
-                    'pattern_hint': s.get('pattern_hint', ''), 
+                    'pattern_hint': s.get('pattern_hint', ''), # [🚀 FIX] 补全形态暗示
                     'is_untradable': s.get('is_untradable', False),
-                    'is_counter_trend': s.get('is_counter_trend', False),
-                    'last_close': s.get('last_close', 0.0),
-                    'high_day': s.get('high_day', 0.0),
-                    'low_day': s.get('low_day', 0.0),
-                    'last_high': s.get('last_high', 0.0),
-                    'last_low': s.get('last_low', 0.0)
+                    'is_counter_trend': s.get('is_counter_trend', False)
                 }
                 ts = self._tick_series.get(s['code'])
                 if ts and getattr(ts, 'custom_cols', None):

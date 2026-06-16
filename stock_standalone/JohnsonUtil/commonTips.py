@@ -3647,7 +3647,7 @@ def get_trade_day_distance(datastr, endday=None):
         end.strftime('%Y-%m-%d')
     )
 
-    log.debug(f'start: {start} end: {end}')
+    # log.debug(f'start: {start} end: {end}')
     # 关键：点位数 → 间隔数
     return max(cnt - 1, 0)
 
