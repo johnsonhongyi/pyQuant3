@@ -2116,7 +2116,7 @@ class BiddingMomentumDetector:
                         return [_clean_data(item) for item in obj]
                     return obj
                 
-                sector_data_snap = {name: _clean_data(info) for name, info in active_sectors_snap.items() if info.get('score', 0) > 0}
+                sector_data_snap = {name: _clean_data(info) for name, info in active_sectors_snap.items()}
                 stock_scores_snap = {code: round(ts.score, 2) for code, ts in significant_stocks.items()}
                 momentum_scores_snap = {code: round(ts.momentum_score, 2) for code, ts in significant_stocks.items() if ts.momentum_score > 0}
 
@@ -2407,6 +2407,7 @@ class BiddingMomentumDetector:
             import traceback
             traceback.print_exc()
         
+        self._ensure_sectors_reconstructed()
         self._gc_old_sectors()
         self._init_dragon_3day_tracker()
 
@@ -2691,24 +2692,8 @@ class BiddingMomentumDetector:
                 
                 self.data_version += 1 # [FIX] Notify UI of data change after snapshot load
                 
-            # [CRITICAL] 为历史快照全量重建跟随股与角色态势
-            # 性能优化：先建立个股 -> 板块的反向索引，避免 O(S*N) 的嵌套循环导致 UI 卡死
-            logger.info(f"🔄 [Detector] 为 {len(self.active_sectors)} 个板块并行重建深度数据态势...")
-            
-            from collections import defaultdict
-            code_sector_map = defaultdict(list)
-            for code, snap in self._global_snap_cache.items():
-                cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(snap.get('category', ''))) if c.strip()]
-                for cat in cats:
-                    code_sector_map[cat].append(snap)
-            
-            market_avg = getattr(self, 'last_market_avg', 0.0)
-            for s_name, info in self.active_sectors.items():
-                candidates = code_sector_map.get(s_name, [])
-                if candidates:
-                    self._reconstruct_sector_from_candidates(s_name, info, candidates, market_avg)
-
-            logger.info(f"🎬 [Detector] 历史快照已加载并重建完成: {filepath}")
+            self._ensure_sectors_reconstructed()
+            logger.info(f"[Detector] Historical snapshot loaded and reconstructed successfully: {filepath}")
             return True
         except Exception as e:
             logger.error(f"Failed to load snapshot: {e}")
@@ -3146,8 +3131,65 @@ class BiddingMomentumDetector:
             if not candidates: return
             self._reconstruct_sector_from_candidates(sector_name, info, candidates, market_avg)
 
+    def _ensure_sectors_reconstructed(self):
+        """[SELF-HEALING] If active_sectors is empty, reconstruct them from stock categories"""
+        from collections import defaultdict
+        code_sector_map = defaultdict(list)
+        for code, snap in self._global_snap_cache.items():
+            cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(snap.get('category', ''))) if c.strip()]
+            for cat in cats:
+                code_sector_map[cat].append(snap)
+
+        market_avg = getattr(self, 'last_market_avg', 0.0)
+
+        if len(self.active_sectors) > 1:
+            logger.info(f"[Detector] Reconstructing depth data for {len(self.active_sectors)} sectors...")
+            for s_name, info in list(self.active_sectors.items()):
+                candidates = code_sector_map.get(s_name, [])
+                if candidates:
+                    self._reconstruct_sector_from_candidates(s_name, info, candidates, market_avg)
+            return
+
+        self.active_sectors.clear()
+
+        if not code_sector_map:
+            return
+
+        logger.info("[Detector] Active sectors is empty or corrupted, attempting to reconstruct from stock data...")
+        for s_name, candidates in code_sector_map.items():
+            if not s_name:
+                continue
+            # Filter inactive sectors (to avoid noise, at least one stock must have score >= 0.5 or absolute pct > 1.5)
+            if not any(s.get('score', 0.0) >= 0.5 or abs(s.get('pct', 0.0)) > 1.5 for s in candidates):
+                continue
+            
+            info = {
+                'sector': s_name,
+                'score': 0.0,
+                'tags': "自动重建",
+                'ts': time.time(),
+                'score_diff': 0.0,
+                'staged_diff': 0.0,
+                'follow_ratio': 1.0,
+                'avg_pct': 0.0,
+                'avg_pct_diff': 0.0,
+                'leader': '',
+                'leader_name': '',
+                'leader_pct': 0.0,
+                'leader_price': 0.0,
+                'leader_klines': [],
+                'race_candidates': [],
+                'followers': [],
+                'linked_concepts': []
+            }
+            self._reconstruct_sector_from_candidates(s_name, info, candidates, market_avg)
+            self.active_sectors[s_name] = info
+
     def _reconstruct_sector_from_candidates(self, sector_name: str, info: dict, candidates: list, market_avg: float):
         """内部核心逻辑：根据候选人名单填充板块详情、角色和跟随股"""
+        configured_cols = getattr(cct.CFG, 'bidding_window_col', [])
+        core_keys = {'code', 'name', 'pct', 'score', 'score_diff', 'pct_diff', 'price_diff', 'dff', 'price', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+
         # 1. 计算龙分并排序 (强制重算以响应算法切换)
         board_score = info.get('score', 0.0)
         for snap in candidates:
@@ -3208,7 +3250,7 @@ class BiddingMomentumDetector:
         race_candidates = []
         if getattr(self, 'use_dragon_race', False):
             for s in candidates[:15]:
-                role = self._determine_role(s, current_leader, s['leader_score'])
+                role = self._determine_role(s, leader_code, s['leader_score'])
                 race_candidates.append({
                     'code': s['code'], 'name': s['name'], 'role': role,
                     'pct': round(s.get('pct', 0.0), 2), 'score': round(s.get('score', 0.0), 1),
@@ -4529,6 +4571,8 @@ class BiddingMomentumDetector:
 
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
+        if not self.is_active_session():
+            return
         now = time.time()
         # [REFINED] 动态获取 sleep 时间，如果 CFG 没变，尝试从文件重新加载或使用合理默认值
         # 考虑到 cct.CFG 可能不会实时响应 global.ini 变化，这里我们强制获取最新
