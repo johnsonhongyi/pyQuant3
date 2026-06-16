@@ -701,7 +701,7 @@ class GlobalConfig:
         self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent', 'Rank', 'dff','per1d', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
         self.start_init_tdx_time = self.get_with_writeback("general", "start_init_tdx_time", fallback=800, value_type="int")
         self.sina_MultiIndex_startTime = self.get_with_writeback("general", "sina_MultiIndex_startTime", fallback=925, value_type="int")
-        self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=200, value_type="int")
+        self.sina_MultiIndex_limit = self.get_with_writeback("general", "sina_MultiIndex_limit", fallback=150, value_type="int")
         self.voice_rate = self.get_with_writeback("general", "voice_rate", fallback=220, value_type="int")
         self.voice_volume = self.get_with_writeback("general", "voice_volume", fallback=1.2, value_type="float")
         self.realtime_save_interval = self.get_with_writeback("general", "realtime_save_interval", fallback=3600, value_type="int")

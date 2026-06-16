@@ -121,7 +121,10 @@ def decompress_klines(compressed):
         for item in compact_data:
             if not isinstance(item, (list, tuple)) or len(item) < 3: continue
             ts = base_ts + item[0] * 60
-            dt_str = _datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                dt_str = _datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                dt_str = _datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
             out.append({'datetime': dt_str, 'time': ts, 'close': item[1], 'volume': item[2]})
         return out
 
@@ -132,7 +135,10 @@ def decompress_klines(compressed):
     
     for i in range(len(offsets)):
         ts = base_ts + offsets[i] * 60
-        dt_str = _datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            dt_str = _datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            dt_str = _datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
         out.append({
             'datetime': dt_str,
             'time': ts,
@@ -1757,20 +1763,26 @@ class BiddingMomentumDetector:
                 for code, info in self.daily_watchlist.items():
                     ts = info.get('trigger_ts', 0)
                     if ts > 0:
-                        item_date = datetime.datetime.fromtimestamp(ts).date()
-                        if item_date < today:
-                            stale_found = True
-                            break
+                        try:
+                            item_date = datetime.datetime.fromtimestamp(ts).date()
+                            if item_date < today:
+                                stale_found = True
+                                break
+                        except Exception:
+                            pass
             
             # 2. 如果重点表没发现，检查活跃板块表 (可能昨天没有涨停但有很多异动板块)
             if not stale_found and self.active_sectors:
                 for name, info in self.active_sectors.items():
                     ts = info.get('ts', 0) # 这里的 ts 是最后更新时间
                     if ts > 0:
-                        item_date = datetime.datetime.fromtimestamp(ts).date()
-                        if item_date < today:
-                            stale_found = True
-                            break
+                        try:
+                            item_date = datetime.datetime.fromtimestamp(ts).date()
+                            if item_date < today:
+                                stale_found = True
+                                break
+                        except Exception:
+                            pass
         
         if stale_found:
             logger.warning(f"🧹 [Detector] 自愈清理：检测到昨日残留数据 (触发时期早于 {today})，正在强制肃清。")
@@ -2575,8 +2587,11 @@ class BiddingMomentumDetector:
                     
                     ts.klines.clear()
                     k_data = _get_val('k', [])
-                    for k in decompress_klines(k_data):
-                        ts.push_kline(k)
+                    try:
+                        for k in decompress_klines(k_data):
+                            ts.push_kline(k)
+                    except Exception:
+                        pass
                 
                     new_tick_series[code] = ts
                     new_snap_cache[code] = {
