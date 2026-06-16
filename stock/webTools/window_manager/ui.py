@@ -471,11 +471,17 @@ class WindowPosManagerUI(QMainWindow):
 
         # 主配置列表编辑区 (Table)
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(2)
-        self.table_widget.setHorizontalHeaderLabels(["窗口匹配标识/关键字 (模糊匹配)", "窗口坐标 (X,Y,Width,Height)"])
+        self.table_widget.setColumnCount(3)
+        self.table_widget.setHorizontalHeaderLabels([
+            "窗口匹配标识/关键字 (模糊匹配)", 
+            "配置坐标 (X,Y,Width,Height)", 
+            "当前桌面实际位置 (不一致标红/点击可单项回填)"
+        ])
         self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table_widget.itemChanged.connect(self.on_table_item_changed)
+        self.table_widget.cellClicked.connect(self.on_table_cell_clicked)
         
         # 中部表格及表格右侧操作按钮
         mid_layout = QHBoxLayout()
@@ -496,6 +502,13 @@ class WindowPosManagerUI(QMainWindow):
         self.btn_capture_wins.setStyleSheet("background-color: #4f46e5; border: none; font-weight: bold;")
         self.btn_capture_wins.clicked.connect(self.capture_desktop_windows)
         table_op_layout.addWidget(self.btn_capture_wins)
+        
+        table_op_layout.addSpacing(10)
+        
+        self.btn_update_existing = QPushButton("🔄 更新已有窗口坐标")
+        self.btn_update_existing.setStyleSheet("background-color: #059669; border: none; font-weight: bold;")
+        self.btn_update_existing.clicked.connect(self.update_existing_windows_pos)
+        table_op_layout.addWidget(self.btn_update_existing)
         
         table_op_layout.addStretch()
         mid_layout.addLayout(table_op_layout, stretch=1)
@@ -626,7 +639,13 @@ class WindowPosManagerUI(QMainWindow):
             pos_item.setForeground(QtGui.QColor("#10b981"))
             self.table_widget.setItem(row, 1, pos_item)
             
+            # 当前位置列初始化
+            cur_item = QTableWidgetItem("[检测中]")
+            cur_item.setForeground(QtGui.QColor("#6b7280"))
+            self.table_widget.setItem(row, 2, cur_item)
+            
         self.table_widget.blockSignals(False)
+        self.refresh_current_positions()
         self.log(f"已载入配置方案: {res_name} (含 {len(mapping)} 条窗口移动规则)")
 
     def get_table_data(self) -> dict:
@@ -651,8 +670,10 @@ class WindowPosManagerUI(QMainWindow):
             self.config_manager.set_resolution_mapping(current_res, mapping)
 
     def on_table_item_changed(self, item):
-        """当单元格数据改变时，自动同步暂存到内存"""
-        self.save_current_table_to_memory()
+        """当单元格数据改变时，自动同步暂存到内存，并刷新状态比对"""
+        if item.column() in (0, 1):
+            self.save_current_table_to_memory()
+            self.refresh_current_positions()
 
     def add_table_row(self):
         """在表格底部插入一行空规则"""
@@ -668,8 +689,13 @@ class WindowPosManagerUI(QMainWindow):
         pos_item.setForeground(QtGui.QColor("#10b981"))
         self.table_widget.setItem(row, 1, pos_item)
         
+        cur_item = QTableWidgetItem("[新添加]")
+        cur_item.setForeground(QtGui.QColor("#6b7280"))
+        self.table_widget.setItem(row, 2, cur_item)
+        
         self.table_widget.blockSignals(False)
         self.save_current_table_to_memory()
+        self.refresh_current_positions()
         self.table_widget.scrollToBottom()
 
     def delete_table_row(self):
@@ -820,6 +846,153 @@ class WindowPosManagerUI(QMainWindow):
             self.save_current_table_to_memory()
             self.log(f"捕获窗口导入完成：追加了 {added_count} 条，覆盖更新了 {updated_count} 条。")
 
+    def update_existing_windows_pos(self):
+        """一键从桌面上获取当前配置表中已存在的窗口的实际坐标，并原地回填更新"""
+        current_res = self.get_current_selected_resolution()
+        if not current_res:
+            QMessageBox.warning(self, "提示", "请先选择或创建一个配置方案")
+            return
+            
+        # 获取当前表格中已存在的全部规则名 (匹配标识)
+        existing_rules = []
+        for row in range(self.table_widget.rowCount()):
+            item = self.table_widget.item(row, 0)
+            if item:
+                existing_rules.append((row, item.text().strip()))
+                
+        if not existing_rules:
+            self.log("当前配置方案无任何规则，无需更新。")
+            return
+            
+        self.table_widget.blockSignals(True)
+        updated_count = 0
+        
+        for row, title in existing_rules:
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            found_hwnd = None
+            for t in titles_to_try:
+                found = core.find_windows_by_title_safe(t)
+                if found:
+                    found_hwnd, found_title = found[0] # 取第一个匹配到的窗口
+                    break
+                    
+            if found_hwnd:
+                # 获取桌面当前真实的坐标大小
+                left, top, width, height = core.get_window_rect(found_hwnd)
+                # 排除被最小化隐藏的异常大负值坐标
+                if left < -10000 and top < -10000:
+                    self.log(f"⚠️ 窗口 '{title}' 当前被最小化，已跳过捕获。")
+                    continue
+                    
+                pos_str = f"{left},{top},{width},{height}"
+                
+                # 检查是否和原配置不同
+                pos_item = self.table_widget.item(row, 1)
+                old_pos = pos_item.text().strip() if pos_item else ""
+                
+                if old_pos != pos_str:
+                    if not pos_item:
+                        pos_item = QTableWidgetItem(pos_str)
+                        pos_item.setForeground(QtGui.QColor("#10b981"))
+                        self.table_widget.setItem(row, 1, pos_item)
+                    else:
+                        pos_item.setText(pos_str)
+                        
+                    # 给这行坐标加粗以作视觉标记
+                    pos_item.setFont(QtGui.QFont("Segoe UI", weight=QtGui.QFont.Weight.Bold))
+                    
+                    self.log(f"🔄 更新成功: '{title}' 坐标 [{old_pos}] ➡ [{pos_str}]")
+                    updated_count += 1
+                else:
+                    self.log(f"➖ 窗口 '{title}' 位置未改变。")
+                    
+        self.table_widget.blockSignals(False)
+        self.refresh_current_positions()
+        self.save_current_table_to_memory()
+        
+        if updated_count > 0:
+            self.log(f"一键更新完成！成功更新了 {updated_count} 个运行中窗口的最新坐标。")
+            QMessageBox.information(self, "更新完成", f"已成功更新 {updated_count} 个窗口在当前桌面上的位置坐标！\n请不要忘记点击右下角‘保存配置’将其写入磁盘。")
+        else:
+            self.log("一键更新完成！当前桌面运行中的窗口位置与配置表中一致。")
+            QMessageBox.information(self, "提示", "所有窗口位置均与配置表中一致，无需更新。")
+
+    def refresh_current_positions(self):
+        """刷新第三列：当前桌面上各窗口的实际位置，并比对颜色 (一致显绿, 不一致显红, 未运行显灰)"""
+        self.table_widget.blockSignals(True)
+        for row in range(self.table_widget.rowCount()):
+            title_item = self.table_widget.item(row, 0)
+            pos_item = self.table_widget.item(row, 1)
+            if not title_item or not pos_item:
+                continue
+                
+            title = title_item.text().strip()
+            cfg_pos = pos_item.text().strip()
+            
+            # 支持 .py / .exe 互相匹配
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            found_hwnd = None
+            for t in titles_to_try:
+                found = core.find_windows_by_title_safe(t)
+                if found:
+                    found_hwnd, _ = found[0]
+                    break
+                    
+            cur_item = self.table_widget.item(row, 2)
+            if not cur_item:
+                cur_item = QTableWidgetItem()
+                self.table_widget.setItem(row, 2, cur_item)
+                
+            # 设置只读，只允许查看和点击更新
+            cur_item.setFlags(cur_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            
+            if found_hwnd:
+                left, top, width, height = core.get_window_rect(found_hwnd)
+                if left < -10000 and top < -10000:
+                    cur_item.setText("[最小化中]")
+                    cur_item.setForeground(QtGui.QColor("#eab308")) # 黄色
+                else:
+                    real_pos = f"{left},{top},{width},{height}"
+                    cur_item.setText(real_pos)
+                    
+                    if real_pos == cfg_pos:
+                        cur_item.setForeground(QtGui.QColor("#10b981")) # 绿色，完全一致
+                    else:
+                        cur_item.setForeground(QtGui.QColor("#ef4444")) # 红色，不一致
+            else:
+                cur_item.setText("[未运行]")
+                cur_item.setForeground(QtGui.QColor("#6b7280")) # 灰色，未检测到
+                
+        self.table_widget.blockSignals(False)
+
+    def on_table_cell_clicked(self, row, column):
+        """点击单元格触发快速交互：如果点击第三列(当前位置)且数据有变，则直接回填至第二列配置中"""
+        if column == 2:
+            cur_item = self.table_widget.item(row, 2)
+            pos_item = self.table_widget.item(row, 1)
+            title_item = self.table_widget.item(row, 0)
+            
+            if cur_item and pos_item and title_item:
+                cur_text = cur_item.text().strip()
+                # 只有是合格的 X,Y,W,H 坐标格式才可更新
+                if re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text):
+                    cfg_text = pos_item.text().strip()
+                    if cur_text != cfg_text:
+                        pos_item.setText(cur_text)
+                        self.refresh_current_positions()
+                        self.save_current_table_to_memory()
+                        self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
+
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""
         self.save_current_table_to_memory()
@@ -862,10 +1035,10 @@ class WindowPosManagerUI(QMainWindow):
                     success_count += 1
                     break
             if not moved:
-                self.log(f"⚠️ 未在桌面上匹配到该运行窗口: '{title}' (已跳过)")
                 missing_count += 1
                 
         self.log(f"🏁 布局应用完毕！成功移动 {success_count} 个窗口，忽略 {missing_count} 个未启动窗口。")
+        self.refresh_current_positions()
 
 
 def main():
