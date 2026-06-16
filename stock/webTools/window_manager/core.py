@@ -150,16 +150,34 @@ def detect_display_config_name() -> str:
             displaySet = Display_Detection()
             displayNum = displaySet[0]
             displayMainRes = displaySet[1][0]
+            
+            # 获取当前系统的物理 DPI 缩放比例
+            try:
+                hdc = ctypes.windll.user32.GetDC(0)
+                dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX = 88
+                ctypes.windll.user32.ReleaseDC(0, hdc)
+                scale = dpi_x / 96.0
+            except Exception:
+                scale = 1.0
+
             if displayNum > 1:
                 displayRes = 0 
                 for i in range(1, displayNum + 1):
-                    displayRes += displaySet[i][0]
+                    val = displaySet[i][0]
+                    # displaySet[2] 为主屏幕，受 DPI 缩放影响，因此在高 DPI-aware 进程下需要缩放折合
+                    if i == 2 and scale > 1.0:
+                        val = int(val / scale)
+                    displayRes += val
+                
                 if 3800 < displayRes < 4700:
                     displayRes = 4644
-                elif 4700 < displayRes:
+                elif displayRes >= 4700:
                     displayRes = 5376
                 return f'tdx_ths_position{displayRes}'
             else:
+                # 单屏也支持逻辑像素折合，使 UI 与 CLI 保持一致
+                if scale > 1.0:
+                    displayMainRes = int(displayMainRes / scale)
                 return f'tdx_ths_position{displayMainRes}'
         except Exception:
             pass
