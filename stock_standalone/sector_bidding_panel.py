@@ -2553,6 +2553,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         h_header_lay.addWidget(self.macro_info_lbl)
         
         # [NEW] 写入板块功能按钮 - 移至右侧并缩小尺寸
+        # [NEW] 手动强制持久化按钮
+        self.btn_manual_persist = QPushButton("💾 强制保存")
+        self.btn_manual_persist.setToolTip("手动强制持久化竞价与赛马数据（无视时间限制与检查）")
+        self.btn_manual_persist.setStyleSheet("QPushButton { background: #2b3a4a; color: #aad4ff; font-size: 11px; padding: 1px 5px; border: 1px solid #4a6fa5; border-radius: 3px; } QPushButton:hover { background: #3b4e63; }")
+        self.btn_manual_persist.clicked.connect(self._manual_persist_data)
+        h_header_lay.addWidget(self.btn_manual_persist)
+
         self.btn_dna_audit_watchlist = QPushButton("🧬 DNA审计")
         self.btn_dna_audit_watchlist.setToolTip("执行批量 DNA 审计与特征提炼分析")
         self.btn_dna_audit_watchlist.setStyleSheet("QPushButton { background: #333; color: white; font-size: 11px; padding: 1px 5px; border: 1px solid #555; border-radius: 3px; } QPushButton:hover { background: #444; }")
@@ -2823,6 +2830,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.status_lbl.setText("❌ SBC 错误")
             self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
         QMessageBox.critical(self, "SBC 测试错误", err_msg)
+
+    def _manual_persist_data(self):
+        """手动强制持久化竞价与赛马数据，无视时间限制与检查"""
+        if not getattr(self, 'detector', None):
+            QMessageBox.warning(self, "保存失败", "探测器尚未初始化，无法保存。")
+            return
+        
+        try:
+            logger.info("⏳ 手动触发强制持久化竞价与赛马数据 (无视时间与检查)...")
+            self.detector.update_scores(skip_evaluate=True)
+            self.detector.save_persistent_data(force=True, bypass_checks=True)
+            logger.info("✅ 竞价与赛马数据手动强制持久化保存成功。")
+            if hasattr(self, 'status_lbl'):
+                self.status_lbl.setText("💾 竞价数据已强制保存")
+                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+                QTimer.singleShot(3000, lambda: self.status_lbl.setText("准备就绪"))
+            QMessageBox.information(self, "保存成功", "竞价与赛马数据已成功强制持久化落盘！")
+        except Exception as e:
+            logger.error(f"❌ 手动强制持久化失败: {e}")
+            QMessageBox.critical(self, "保存出错", f"手动持久化发生异常: {str(e)}")
 
     # ── [NEW] TDX Block Support ─────────────────────────────────────
     def write_to_blk(self, append=True):
