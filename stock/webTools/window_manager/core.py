@@ -1,0 +1,405 @@
+# -*- coding: utf-8 -*-
+"""
+窗口管理器核心逻辑模块
+提供窗口查找、位置与大小设定、屏幕分辨率检测等底层逻辑。
+支持加载与保存独立的持久化 JSON 配置。
+"""
+
+import ctypes
+from ctypes import wintypes
+import time
+import os
+import re
+import json
+from collections import namedtuple
+import win32gui
+from screeninfo import get_monitors
+
+# 尝试导入项目内特有的显示器检测模块以保持向后兼容，如果失败则使用通用的 screeninfo 回退
+try:
+    from mouseMonitor.displayDetction import Display_Detection
+except ImportError:
+    # 动态将上级目录加入路径以防包内调用时无法导入
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        from mouseMonitor.displayDetction import Display_Detection
+    except ImportError:
+        Display_Detection = None
+
+try:
+    from current_display_configuration import restore_display_configuration
+except ImportError:
+    restore_display_configuration = None
+
+# 定义基础窗口信息结构
+WindowInfo = namedtuple('WindowInfo', 'pid title left top width height hwnd')
+
+# Windows API 定义与初始化
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+
+# 校验辅助函数
+def check_zero(result, func, args):    
+    if not result:
+        err = ctypes.get_last_error()
+        if err:
+            pass # 发生非破坏性错误时不引发崩溃，返回原参数
+    return args
+
+if not hasattr(wintypes, 'LPDWORD'):
+    wintypes.LPDWORD = ctypes.POINTER(wintypes.DWORD)
+
+WNDENUMPROC = ctypes.WINFUNCTYPE(
+    wintypes.BOOL,
+    wintypes.HWND,    
+    wintypes.LPARAM,
+)
+
+user32.EnumWindows.errcheck = check_zero
+user32.EnumWindows.argtypes = (WNDENUMPROC, wintypes.LPARAM)
+user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+user32.IsIconic.argtypes = (wintypes.HWND,)
+user32.GetForegroundWindow.argtypes = ()
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.ShowWindow.argtypes = (wintypes.HWND, wintypes.BOOL)
+user32.ShowWindow.restype = wintypes.BOOL
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, wintypes.LPDWORD)
+user32.GetWindowTextLengthW.errcheck = check_zero
+user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+user32.GetWindowTextW.errcheck = check_zero
+user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+
+# 窗口显示常量
+SW_HIDE = 0
+SW_SHOWNORMAL = 1
+SW_SHOWMINIMIZED = 2
+SW_SHOWMAXIMIZED = 3
+SW_SHOWNOACTIVATE = 4
+SW_SHOW = 5
+SW_MINIMIZE = 6
+SW_SHOWMINNOACTIVE = 7
+SW_SHOWNA = 8
+SW_RESTORE = 9
+SW_SHOWDEFAULT = 10
+SW_FORCEMINIMIZE = 11
+
+
+def get_window_rect(hwnd) -> tuple:
+    """获取窗口在屏幕上的实际像素边界(left, top, width, height)"""
+    rect = ctypes.wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.pointer(rect))
+    left = rect.left
+    top = rect.top
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    return (left, top, width, height)
+
+
+def get_screen_resolution_summary() -> dict:
+    """
+    通过 screeninfo 及 win32 获取显示器配置汇总
+    返回结构: { "total_width": int, "primary_res": str, "monitors": list, "display_num": int }
+    """
+    summary = {
+        "total_width": 0,
+        "primary_res": "1920x1080",
+        "monitors": [],
+        "display_num": 0
+    }
+    
+    try:
+        monitors = get_monitors()
+        summary["display_num"] = len(monitors)
+        for i, m in enumerate(monitors):
+            summary["monitors"].append({
+                "index": i + 1,
+                "name": m.name,
+                "width": m.width,
+                "height": m.height,
+                "x": m.x,
+                "y": m.y,
+                "is_primary": m.is_primary
+            })
+            summary["total_width"] += m.width
+            if m.is_primary:
+                summary["primary_res"] = f"{m.width}x{m.height}"
+    except Exception as e:
+        # 回退：如果没有屏幕信息或读取出错
+        summary["display_num"] = 1
+        summary["total_width"] = user32.GetSystemMetrics(0) # SM_CXSCREEN
+        summary["primary_res"] = f"{user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)}"
+        summary["monitors"].append({
+            "index": 1,
+            "name": "Primary",
+            "width": user32.GetSystemMetrics(0),
+            "height": user32.GetSystemMetrics(1),
+            "x": 0,
+            "y": 0,
+            "is_primary": True
+        })
+    return summary
+
+
+def detect_display_config_name() -> str:
+    """
+    使用内置与外部逻辑探测出当前系统应匹配的配置名(如: tdx_ths_position1920)
+    """
+    if Display_Detection is not None:
+        try:
+            displaySet = Display_Detection()
+            displayNum = displaySet[0]
+            displayMainRes = displaySet[1][0]
+            if displayNum > 1:
+                displayRes = 0 
+                for i in range(1, displayNum + 1):
+                    displayRes += displaySet[i][0]
+                if 3800 < displayRes < 4700:
+                    displayRes = 4644
+                elif 4700 < displayRes:
+                    displayRes = 5376
+                return f'tdx_ths_position{displayRes}'
+            else:
+                return f'tdx_ths_position{displayMainRes}'
+        except Exception:
+            pass
+
+    # 无法调用 Display_Detection 时的原生回退逻辑
+    summary = get_screen_resolution_summary()
+    if summary["display_num"] > 1:
+        # 双屏/多屏
+        total_w = summary["total_width"]
+        if 3800 < total_w < 4700:
+            total_w = 4644
+        elif total_w > 4700:
+            total_w = 5376
+        # 如果总宽度不是典型值，可默认回退到 Double 或者是总宽度
+        if total_w in [4644, 5376]:
+            return f'tdx_ths_position{total_w}'
+        else:
+            return 'tdx_ths_positionDouble'
+    else:
+        # 单屏
+        mon = summary["monitors"][0] if summary["monitors"] else None
+        res_w = mon["width"] if mon else 1920
+        # 兼容一些非标 DPI 的主分辨率名称
+        return f'tdx_ths_position{res_w}'
+
+
+def list_visible_windows(fuzzy_title="") -> list:
+    """列出当前所有可见的顶层窗口，如果指定了 fuzzy_title 则过滤"""
+    result = []
+    
+    @WNDENUMPROC
+    def enum_proc(hWnd, lParam):
+        if user32.IsWindowVisible(hWnd):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hWnd, ctypes.byref(pid))
+            length = user32.GetWindowTextLengthW(hWnd) + 1
+            if length > 1:
+                title_buf = ctypes.create_unicode_buffer(length)
+                user32.GetWindowTextW(hWnd, title_buf, length)
+                title = title_buf.value.strip()
+                if title:
+                    if not fuzzy_title or re.search(re.escape(fuzzy_title), title, re.IGNORECASE):
+                        left, top, width, height = get_window_rect(hWnd)
+                        result.append(WindowInfo(
+                            pid=pid.value, 
+                            title=title, 
+                            left=left, 
+                            top=top, 
+                            width=width, 
+                            height=height,
+                            hwnd=hWnd
+                        ))
+        return True
+        
+    user32.EnumWindows(enum_proc, 0)
+    return result
+
+
+def find_windows_by_title_safe(target_title: str) -> list:
+    """基于正则模糊匹配，安全查找符合名称的窗口，返回 [(hwnd, title), ...]"""
+    found = []
+    escaped_title = re.escape(target_title)
+    pattern = re.compile(escaped_title, re.IGNORECASE)
+
+    def enum_handler(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            window_title = win32gui.GetWindowText(hwnd)
+            if pattern.search(window_title):
+                found.append((hwnd, window_title))
+        return True
+        
+    win32gui.EnumWindows(enum_handler, None)
+    return found
+
+
+def set_window_hwnd_pos(hwnd, pos_str: str):
+    """
+    通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小
+    """
+    try:
+        parts = [int(p.strip()) for p in pos_str.split(',')]
+        if len(parts) == 4:
+            x, y, width, height = parts
+            # 先重置为普通窗口，以防窗口处于最小化或最大化状态导致无法移动
+            # 并移动位置
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 1) # SWP_NOSIZE = 1
+            # 设定窗口大小
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, width, height, 2) # SWP_NOMOVE = 2
+            return True
+    except Exception as e:
+        print(f"Error setting window pos for HWND {hwnd}: {e}")
+    return False
+
+
+def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNORMAL) -> bool:
+    """
+    模糊匹配窗口标题，并将其移动到指定位置。
+    如果窗口处于最小化状态，则会自动执行 show_cmd 还原窗口。
+    """
+    found = find_windows_by_title_safe(target_title)
+    if not found:
+        return False
+        
+    success = False
+    for hwnd, title in found:
+        # 检测窗口是否被隐藏或最小化
+        left, top, width, height = get_window_rect(hwnd)
+        if left < -10000 and top < -10000:
+            user32.ShowWindow(hwnd, show_cmd)
+            time.sleep(0.1)
+            
+        if set_window_hwnd_pos(hwnd, pos_str):
+            success = True
+            
+        if show_cmd != SW_SHOWNORMAL:
+            user32.ShowWindow(hwnd, show_cmd)
+            
+    return success
+
+
+class ConfigManager:
+    """管理分类持久化的 JSON 配置"""
+    
+    def __init__(self, config_path=None):
+        if config_path is None:
+            # 默认保存在当前包目录下的 config.json
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        self.config_path = config_path
+        self.config_data = {}
+        self.load()
+
+    def load(self):
+        """从文件读取 JSON 配置"""
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    self.config_data = json.load(f)
+                # 校验格式，如果不是分类的字典，则进行初始化
+                if not isinstance(self.config_data, dict):
+                    self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
+                for cat in ["single_display", "multi_display", "custom_special"]:
+                    if cat not in self.config_data:
+                        self.config_data[cat] = {}
+            except Exception as e:
+                print(f"Failed to load config from {self.config_path}: {e}")
+                self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
+        else:
+            self.config_data = {"single_display": {}, "multi_display": {}, "custom_special": {}}
+            
+    def save(self):
+        """保存当前内存中的配置到文件"""
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config_data, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            print(f"Failed to save config to {self.config_path}: {e}")
+            return False
+
+    def get_categories(self) -> list:
+        """获取所有分类"""
+        return ["single_display", "multi_display", "custom_special"]
+
+    def get_resolutions_by_category(self, category: str) -> list:
+        """获取特定分类下的所有方案名"""
+        if category in self.config_data:
+            return sorted(list(self.config_data[category].keys()))
+        return []
+
+    def get_resolutions(self) -> list:
+        """获取所有可用分辨率配置方案的名称（扁平列表）"""
+        res_list = []
+        for cat in self.get_categories():
+            res_list.extend(self.get_resolutions_by_category(cat))
+        return sorted(list(set(res_list)))
+
+    def get_category_of_resolution(self, res_name: str) -> str:
+        """判断一个方案名属于哪个分类"""
+        for cat in self.get_categories():
+            if res_name in self.config_data[cat]:
+                return cat
+        return "custom_special" # 默认分类
+
+    def get_resolution_mapping(self, res_name: str) -> dict:
+        """获取指定分辨率配置的窗口坐标映射表"""
+        for cat in self.get_categories():
+            if res_name in self.config_data.get(cat, {}):
+                return self.config_data[cat][res_name]
+        return {}
+
+    def set_resolution_mapping(self, res_name: str, mapping: dict, category: str = None):
+        """更新指定分辨率的配置"""
+        if not category:
+            category = self.get_category_of_resolution(res_name)
+            
+        # 确保分类存在
+        if category not in self.config_data:
+            self.config_data[category] = {}
+            
+        # 如果该配置在其他分类中也存在，先删掉，避免重复
+        for cat in self.get_categories():
+            if cat != category and res_name in self.config_data[cat]:
+                del self.config_data[cat][res_name]
+                
+        self.config_data[category][res_name] = mapping
+        
+    def delete_resolution(self, res_name: str):
+        """删除某个分辨率的配置"""
+        for cat in self.get_categories():
+            if res_name in self.config_data.get(cat, {}):
+                del self.config_data[cat][res_name]
+
+
+def apply_layout_config(config_manager: ConfigManager, res_name: str, show_cmd=SW_SHOWNORMAL):
+    """
+    根据给定的配置段名称，一键应用其所有的窗口位置设定
+    """
+    mapping = config_manager.get_resolution_mapping(res_name)
+    if not mapping:
+        print(f"No configuration mapping found for: {res_name}")
+        return False
+        
+    print(f"Applying layout for: {res_name}")
+    for title, pos_str in mapping.items():
+        # 兼容处理：支持将 .py 的配置同样应用给对应的 .exe 进程窗口
+        # 例如配置里写 'sina_Monitor.py'，那么 'sina_Monitor.exe' 也会被正确移动
+        titles_to_try = [title]
+        if title.endswith('.py') and not title.startswith('py'):
+            titles_to_try.append(title.replace('.py', '.exe'))
+        elif title.endswith('.exe'):
+            titles_to_try.append(title.replace('.exe', '.py'))
+            
+        moved = False
+        for t in titles_to_try:
+            if set_window_pos_by_title(t, pos_str, show_cmd):
+                moved = True
+                print(f"Successfully positioned: {t} -> {pos_str}")
+                
+        if not moved:
+            # 记录未查找到的窗口，供调试
+            pass
+            
+    return True
