@@ -1,8 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import a_trade_calendar
-
-csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_calendar.csv")
+import glob
 
 block_cipher = None
 
@@ -20,41 +18,53 @@ a = Analysis(
     ['webTools/manage_window_layout.py'],
     pathex=['.'],
     binaries=[],
-    datas=[(csv_path, "a_trade_calendar"),
+    datas=[
         ("MonitorTK.ico", "."),
-        ("window_config.json", "."),
-        ("JSONData/stock_codes.conf", "JSONData"),
-        ("JSONData/count.ini", "JSONData"),
-        ("JohnsonUtil/global.ini", "JohnsonUtil"),
-        ("strategy_config.json", "."),
         ("webTools/window_manager/window_layout_config.json", "webTools/window_manager"),
-         ],
-    hiddenimports=['a_trade_calendar', 'pandas', 'numpy', 'pyqtgraph', 'sqlite3',
-                    'sys_utils', 'db_utils', 'webTools.window_manager.core', 'webTools.window_manager.ui',
-                    'mouseMonitor.displayDetction', 'current_display_configuration',
-                    'screeninfo', 'win32gui', 'win32con', 'PyQt6',
-                    'configobj', 'JSONData', 'JSONData.sina_data', 'tables', 'h5py',
-                    'JSONData.tdx_hdf5_api', 'JSONData.realdatajson', 'JSONData.wencaiData',
-                    'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'JohnsonUtil.LoggerFactory',
-                    'JohnsonUtil.commonTips', 'JohnsonUtil.johnson_common', 'tushare', 'pandas_ta',
-                    'talib.stream', 'talib.abstract'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
+    ] + [(f, ".") for f in glob.glob("*monitordisplay_config.json")],
+    hiddenimports=[
+        'sys_utils',
+        'webTools.window_manager.core', 
+        'webTools.window_manager.ui',
+        'screeninfo', 
+        'win32gui', 
+        'win32con', 
+        'PyQt6',
+        'configobj',
+        'JohnsonUtil.johnson_cons',
+        'JohnsonUtil.LoggerFactory',
+        'JohnsonUtil.commonTips'
+    ],
     excludes=[
-        'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtPdf', 
-        'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtVirtualKeyboard', 
-        'PyQt6.QtMultimedia', 'PyQt6.QtBluetooth', 'PyQt6.QtPositioning',
-        'PyQt6.QtSensors', 'PyQt6.QtWebChannel', 'PyQt6.QtWebSockets',
-        'PyQt6.QtSql', 'PyQt6.QtTest', 'PyQt6.QtXml', 'PyQt6.QtQuickWidgets',
-        'PyQt6.QtQuick3D', 'PyQt6.QtRemoteObjects',
-        'PyQt5', 'PySide2', 'PySide6',
-        'matplotlib', 'scipy', 'jedi', 'IPython', 'notebook',
-        'lxml', 'cryptography',
-        'numba', 'llvmlite', 'botocore', 'boto3'
+        'a_trade_calendar',
+        'db_utils',
+        'JSONData',
+        'pandas',
+        'numpy',
+        'pyqtgraph',
+        'sqlite3',
+        'tables',
+        'h5py',
+        'tushare',
+        'pandas_ta',
+        'talib',
+        'matplotlib',
+        'scipy',
+        'jedi',
+        'IPython',
+        'notebook',
+        'lxml',
+        'cryptography',
+        'numba',
+        'llvmlite',
+        'botocore',
+        'boto3',
+        'PyQt5',
+        'PySide2',
+        'PySide6'
     ],
     noarchive=False,
-    optimize=1,              # 相当于 -OO，保留文档字符串供 numpy 运行
+    optimize=1,              # 相当于 -OO，保留文档字符串
 )
 
 # --- 核心优化：强制从 binaries 和 datas 中过滤掉垃圾文件与 Windows pip 残留脏文件 ---
