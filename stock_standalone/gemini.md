@@ -1,3 +1,25 @@
+## 2026-06-16 19:00
+- [x] **优化顶部快捷栏右侧控制按钮细分显示与直接状态设置 (Optimized Top Bar Right Control Buttons Granular Toggle & Direct Variable Setter)**：
+    - [x] **新增未开启功能的“直接执行”快捷入口 (Direct Execution Shortcuts for Disabled Top Bar Groups)**：在 Tab 1 (顶部快捷组件) 中，为 12 个可以直接执行的功能组件（如“监控”、“选股”、“竞价”、“赛马”等）在其复选框右侧扩展了 `▶ 执行` 按钮。
+    - [x] **实现可见性状态与执行按钮状态的动态锁定联动 (Dynamic Enable/Disable State Synchronization)**：为了防止功能冗余，当组件在顶部快捷栏中已被勾选显示时，`▶ 执行` 按钮将自动处于禁用状态（`disabled`）；当组件未勾选（在顶部工具栏中被隐藏）时，`▶ 执行` 按钮将被激活（`normal`），用户只需点击即可瞬间调用该功能指令，且执行后会自动关闭设置窗口，体验极为丝滑。
+    - [x] **实现控制按钮细分显示与隐藏 (Sub-Button Visibility Toggle)**：在 `instock_MonitorTK.py` 中，对右侧所有的控制按钮（如 `Win`, `TDX`, `THS`, `DC`, `Tip`, `Real`, `Vis`, `Vo`, `Pop`, `ALink`, `📊` 等）建立了引用映射 `self.right_control_widgets`。根据独立可见性字典 `self.right_control_visibility` 动态对各子组件执行 `pack()` 或 `pack_forget()`，使得在屏幕超窄/高 DPI 缩放溢出时可以通过隐藏部分不常用按钮来完全避开遮挡。
+    - [x] **双 Tab 选项卡重构快捷栏设置界面 (Rebuilt Settings Window with Tabbed Notebook)**：在 `open_top_bar_settings` 中引入 `ttk.Notebook` 重构为双 Tab 界面。
+        - **Tab 1 (顶部快捷组件)**：展示主功能区域（如：市场选择、周期选择等）的组件组控制。
+        - **Tab 2 (右侧控制选项)**：左栏控制各子按钮的可见性显示；右栏则直接绑定并操作 `self.win_var`, `self.voice_var` 等变量的实数值（值状态）。
+    - [x] **实现双向状态同步与自动存盘 (Bi-directional State Sync & Auto-Save)**：更改 Tab 2 右栏的开关值时，直接在同一个 TK 影子变量上操作，瞬间触发变量对应的 trace 监听及回调逻辑（如：语音状态切换、特征颜色重绘等），并一键完成 UI 状态回写持久化 (`self.save_ui_states`)，无需重启即时响应。
+    - [x] **加固 UI 跨会话加载机制 (Hardened Configuration Persistence)**：在 `load_ui_states` 与 `save_ui_states` 中接入了 `right_control_visibility` 配置段，完美支持新变量的加载自愈。
+
+## 2026-06-16 18:00
+- [x] **新增顶部控制栏组件开关与布局持久化 (Added Top Bar Component Switches & Layout Persistence)**：
+    - [x] **实现快捷开关控制面板 (Quick Toggle Settings Dialog)**：在 `instock_MonitorTK.py` 底部的功能下拉菜单（`action_combo`）中新增“快捷栏设置”选项。触发后弹出自定义设置对话框 `ToggleSettingsDialog`，清晰列出顶部快捷功能栏的所有子模块（如：综合搜索、时间日期、交易策略、快捷动作、状态检测、报警控制、多重联动等），允许用户通过 Checkbutton 勾选控制各模块的显示或隐藏。
+    - [x] **动态控制子 Frame 显示隐藏与布局重排**：在 `instock_MonitorTK.py` 的顶部快捷栏中，对子模块按逻辑 Frame 进行物理隔离与命名（`search_frame`, `date_frame`, `strategy_frame`, `action_btn_frame`, `status_frame`, `alarm_frame`, `linkage_frame`）。点击保存设置时，系统会自动执行各 Frame 对应的 `pack()` 或 `pack_forget()`，并自适应刷新父容器布局。
+    - [x] **实现开关状态的跨会话保存与自愈还原 (Toggle State Persistence & Recovery)**：在 `save_ui_states` 与 `restore_ui_states` 中接入了 `top_bar_visibility` 配置项。程序初始化时，会自动读取 `window_config.json` 里的开关状态，针对不存在/首次使用的环境自动进行自愈填充（默认全开启），并在主界面构建及退出时双向同步，彻底消除了低分辨率显示器/高DPI缩放混联屏下顶部控制栏超宽、导致右侧关键开关被裁剪且无法点击的物理硬伤。
+- [x] **解决功能选择下拉菜单离底部太近导致被裁剪、无法查看与滚动之缺陷 (Fixed Action Combobox Bottom Clipping & Auto-Popup Upwards)**：
+    - [x] **限制最大可视行数 (Limited Dropdown Height)**：将 `action_combo` 的 `height` 参数硬编码限制为 `12`（原先未指定则尝试一次性灌入全部 20 行选项），大幅降低了下拉菜单的物理像素高度，并自发激活了右侧纵向 Scrollbar 滚动通道。
+    - [x] **实现动态位置自适应判定 (Dynamic Postcommand Offset Positioning)**：在 `action_combo` 的 `postcommand` 回调中，引入了 `adjust_action_combo_post` 位置自检测算法。当点击下拉菜单时，自动获取屏幕物理高度与当前 widget 在屏幕坐标系下的 `widget_y` 和 `widget_height`，倒推计算底部剩余空间。
+    - [x] **实现触发上拉显示 (Upward Drop Pop-up)**：若剩余空间小于下拉列表所需的请求高度加上 40px 的安全阈值，系统会自动计算出向上的负数偏移量（`-widget_height - popup_height`），并通过 `ttk.Style().configure('Action.TCombobox', postoffset=...)` 动态注入样式，使下拉窗口自动“向上弹起”显示，彻底解决了底部贴合任务栏或低分辨率屏下被裁剪丢失选项、无法滚动的痛点。
+
+
 ## 2026-06-16 17:30
 - [x] **深度代码审查与 V型反转 (V-Reversal) 管道安全加固 (V-Reversal Code Review & Pipeline Hardening)**：
     - [x] **修复 `_has_anomaly_pattern` 关键解包异常 (Fixed Unpacking TypeError)**：去除了冗余代码后，补上了 `try` 块末尾缺失 of `return False, ""` 语句，从物理上杜绝了对非特征个股返回 `None` 进而引发 `TypeError: cannot unpack non-iterable NoneType object` 导致的策略崩溃。
