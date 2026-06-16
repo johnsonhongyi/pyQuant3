@@ -131,7 +131,7 @@ timeout /t 5 /nobreak >nul
 
 REM 最后启动 macRun.py
 echo 启动 macRun.py
-python macRun.py
+echo "python macRun.py"
 timeout /t 2 /nobreak >nul
 
 echo 所有程序启动完成
