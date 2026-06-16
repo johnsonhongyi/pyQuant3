@@ -986,8 +986,8 @@ class MinuteKlineCache:
             today_str = cct.get_today()
             if phase == "INIT":
                 # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
-                # 假设通过跌幅和极度缩量确认
-                if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < 0.02:
+                # [FIX] 原振幅 < 0.02(2%) 过于苛刻，大多数整理结构都是 3-6%，放宽为 0.06
+                if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < 0.06:
                     # 简化判定：只要属于极度横盘，就先算作初步潜伏
                     state["phase"] = "CONSOLIDATING"
                     state["anchor_low"] = recent_min
@@ -3251,8 +3251,15 @@ class DataPublisher:
         """获取个股是否有 V 型反转信号，对于缺失行情个股触发异步拉取"""
         if hasattr(self.kline_cache, 'get_v_reversal_pool'):
             klines = self.kline_cache.get_klines(code, n=30)
+            # [FIX] 原来调用的 _fetch_supplemental_data_async 不存在，改为正确的线程异步拉取
             if len(klines) < 10 and code not in self.kline_cache._supplemented_codes:
-                self.kline_cache._fetch_supplemental_data_async(code)
+                import threading
+                threading.Thread(
+                    target=self.kline_cache._supplemental_fetch,
+                    args=(code,),
+                    daemon=True,
+                    name=f"VShapeSupFetch_{code}"
+                ).start()
             return code in self.kline_cache.get_v_reversal_pool()
         return False
 
