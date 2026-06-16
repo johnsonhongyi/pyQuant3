@@ -32,12 +32,17 @@ if __name__ == '__main__':
     else:
         print("检测到无 UI 参数，正在后台自动探测并应用窗口对齐...")
         
-        # 实例化配置并探测当前分辨率推荐的方案名
+        # 1. 尝试自适应恢复已存的多屏幕物理拓扑布局
+        from window_manager import restore_display_configuration
+        restored, msg = restore_display_configuration()
+        print(f"[Screen Layout] {msg}")
+        
+        # 2. 实例化配置并探测推荐的分辨率方案名
         config_mgr = ConfigManager()
         rec_name = detect_display_config_name()
         print(f"当前系统匹配的最佳配置方案为: {rec_name}")
         
-        # 尝试应用该配置
+        # 3. 尝试应用窗口布局位置
         success = apply_layout_config(config_mgr, rec_name)
         if success:
             print("[OK] 窗口坐标布局自动对齐应用完成！")

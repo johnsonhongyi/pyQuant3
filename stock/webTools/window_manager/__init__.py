@@ -12,7 +12,9 @@ from .core import (
     set_window_hwnd_pos,
     list_visible_windows,
     find_windows_by_title_safe,
-    get_screen_resolution_summary
+    get_screen_resolution_summary,
+    save_display_configuration,
+    restore_display_configuration
 )
 
 from .ui import (
@@ -29,6 +31,8 @@ __all__ = [
     'list_visible_windows',
     'find_windows_by_title_safe',
     'get_screen_resolution_summary',
+    'save_display_configuration',
+    'restore_display_configuration',
     'WindowPosManagerUI',
     'run_ui'
 ]

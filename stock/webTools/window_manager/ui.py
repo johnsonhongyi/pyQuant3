@@ -438,6 +438,22 @@ class WindowPosManagerUI(QMainWindow):
         self.lbl_display_details.setWordWrap(True)
         self.lbl_display_details.setStyleSheet("color: #d1d5db; line-height: 1.4;")
         gb_display_layout.addWidget(self.lbl_display_details)
+        
+        # 增加显示器物理布局保存/恢复按钮栏
+        screen_btn_bar = QHBoxLayout()
+        self.btn_save_screen_layout = QPushButton("💾 保存显示器物理拓扑")
+        self.btn_save_screen_layout.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-weight: bold;")
+        self.btn_save_screen_layout.clicked.connect(self.save_physical_screen_layout)
+        
+        self.btn_restore_screen_layout = QPushButton("🔄 恢复显示器物理拓扑")
+        self.btn_restore_screen_layout.setStyleSheet("background-color: #ea580c; color: white; padding: 4px 10px; font-weight: bold;")
+        self.btn_restore_screen_layout.clicked.connect(self.restore_physical_screen_layout)
+        
+        screen_btn_bar.addWidget(self.btn_save_screen_layout)
+        screen_btn_bar.addWidget(self.btn_restore_screen_layout)
+        screen_btn_bar.addStretch()
+        gb_display_layout.addLayout(screen_btn_bar)
+
         main_layout.addWidget(self.gb_display_info)
 
         # 配置管理控制栏
@@ -545,6 +561,35 @@ class WindowPosManagerUI(QMainWindow):
     def log(self, text: str):
         """输出一条日志"""
         self.log_output.append(f"[{QtCore.QTime.currentTime().toString('hh:mm:ss')}] {text}")
+
+    def save_physical_screen_layout(self):
+        """保存当前多显示器的物理排布与相对坐标到磁盘"""
+        success, msg = core.save_display_configuration()
+        if success:
+            QMessageBox.information(self, "保存成功", f"当前显示器拓扑结构已保存！\n配置文件: {msg}")
+            self.log(f"💾 多显示器物理排布保存成功: {msg}")
+        else:
+            QMessageBox.critical(self, "保存失败", f"无法保存显示器配置: {msg}")
+            self.log(f"❌ 保存显示器配置失败: {msg}")
+
+    def restore_physical_screen_layout(self):
+        """一键从磁盘恢复当前屏幕组合下保存的物理排布与拓扑"""
+        reply = QMessageBox.question(
+            self, 
+            "确认恢复", 
+            "是否确定恢复已保存的显示器物理排布相对位置？\n这会瞬间刷新您的系统显示设置并重新排布桌面上所有屏幕。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.log("正在尝试还原多显示器物理拓扑...")
+            success, msg = core.restore_display_configuration()
+            if success:
+                QMessageBox.information(self, "恢复完成", msg)
+                self.log(f"🔄 {msg}")
+                self.load_screen_info()
+            else:
+                QMessageBox.warning(self, "恢复提示", msg)
+                self.log(f"⚠️ {msg}")
 
     def load_screen_info(self):
         """探测当前连接的显示器参数并在 UI 呈现"""
