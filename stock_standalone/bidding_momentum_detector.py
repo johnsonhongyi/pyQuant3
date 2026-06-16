@@ -2527,6 +2527,21 @@ class BiddingMomentumDetector:
             codes_list = meta_cols.get('code', [])
             meta_idx_map = {c: idx for idx, c in enumerate(codes_list)} if codes_list else {}
             
+            # [RECOVER_PREPARATION] 预先扫描快照中的 sector_data 的 race_candidates，收集历史自定义列
+            snapshot_custom_cols = {}
+            _bidding_core_keys = {'code', 'name', 'role', 'pct', 'score', 'l_score', 'pattern_hint', 'is_untradable', 'is_counter_trend', 'klines', 'last_close', 'high_day', 'low_day', 'last_high', 'last_low'}
+            raw_sectors_for_scan = data.get('sector_data', {})
+            for sec_name, sec_info in raw_sectors_for_scan.items():
+                if isinstance(sec_info, dict):
+                    for c_item in sec_info.get('race_candidates', []):
+                        c_code = c_item.get('code')
+                        if c_code:
+                            custom_part = {k: v for k, v in c_item.items() if k not in _bidding_core_keys}
+                            if custom_part:
+                                if c_code not in snapshot_custom_cols:
+                                    snapshot_custom_cols[c_code] = {}
+                                snapshot_custom_cols[c_code].update(custom_part)
+
             for code, score in stock_scores.items():
                 # [🚀 SANITIZATION] 过滤无效代码
                 if code == '000000' or len(code) != 6 or not code.isdigit():
@@ -2535,6 +2550,12 @@ class BiddingMomentumDetector:
                 ts = TickSeries(code)
                 ts.score = score
                 ts.momentum_score = momentum_scores.get(code, 0.0)
+                
+                # [RECOVER] 还原个股的自定义列数据
+                if code in snapshot_custom_cols:
+                    if not hasattr(ts, 'custom_cols') or ts.custom_cols is None:
+                        ts.custom_cols = {}
+                    ts.custom_cols.update(snapshot_custom_cols[code])
                 
                 # 统一的属性获取器，支持 meta_cols (新列式) 及 meta_data (老字典式)
                 _get_val = None
@@ -2621,6 +2642,8 @@ class BiddingMomentumDetector:
                         'vol_ratio': ts.vol_ratio, 'signal_count': ts.signal_count,
                         'yesterday_pct': ts.per1d, 'prev_pct': ts.per1d
                     }
+                    if hasattr(ts, 'custom_cols') and ts.custom_cols:
+                        new_snap_cache[code].update(ts.custom_cols)
 
             # [PHASE-2] 原子替换 (短锁)
             with self._lock:

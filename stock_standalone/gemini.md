@@ -1,3 +1,20 @@
+## 2026-06-16 23:55
+- [x] **全局对齐使用参数存放配置文件并加固语音模块参数读取 (Aligned Voice Rate & Volume Parameters & Hardened Settings Reading)**：
+    - [x] **物理对齐 SAPI 与 pyttsx3 引擎默认值**：将 `alert_manager.py` 中的 `getattr(cct, 'voice_rate', ...)` 和 `getattr(cct, 'voice_volume', ...)` 缺省默认值分别从 `200`/`1.0` 调整为 `220`/`1.2`，以完全契合 `global.ini` 默认的系统配置参数。
+    - [x] **强化可视化终端语音参数读取鲁棒性**：重构了 `trade_visualizer_qt6.py` 中直接读取 `cct.voice_rate` 与 `cct.voice_volume` 的属性调用为安全的 `getattr` 降级接口，并完全对齐了 `220` 及 `1.2` 的系统级缺省配置，彻底消除了由于外部模块初始化时配置字典尚未就绪抛出 `AttributeError` 阻断语音播报的风险。
+    - [x] **跑通全链路语音播报集成验证**：运行 `verify_voice.py` 成功调用 `VoiceAnnouncer` 通过本地双引擎语音播放测试，无报错且性能稳定。
+
+## 2026-06-16 23:45
+- [x] **实现历史快照载入时自定义列数据自动提取与动态显示 (Implemented Automatic Custom Column Extraction & Dynamic Display on History Load)**：
+    - [x] **实现快照自定义列预扫描与提取机制**：重构了 `load_from_snapshot`，在个股重构阶段前新增了 `raw_sectors` 的 `race_candidates` 预扫描逻辑。能够自动提取出保存在历史快照中的所有自定义列数据（如 `Rank`、`dff2`、`red`、`volume`、`win` 等非核心度量列），并建立 `code -> custom_dict` 的快速查找表。
+    - [x] **完成自定义字段物理还原到 TickSeries 与全局缓存**：在反序列化循环中，将扫描到的自定义列数据重新塞回新创建的 `ts.custom_cols` 以及用于 UI 渲染的 `new_snap_cache[code]` 字典中。此举保证了后续在执行 `_ensure_sectors_reconstructed` 进行板块重建时，`_reconstruct_sector_from_candidates` 能从全局快照缓存中获取到完整的自定义列，进而动态显示在竞价面板与复盘看板的表格中。
+
+## 2026-06-16 23:25
+- [x] **重构竞价龙头竞赛选手 `race_candidates` 构造以实现绝对精简持久化 (Refactored race_candidates for Lean Persistence)**：
+    - [x] **实现精简模式的字段裁剪**：重构了 `bidding_momentum_detector.py` 中的 `race_candidates` 构造逻辑，剥离了如 `score_diff`、`pct_diff`、`price_diff`、`dff` 等冗余度量字段。只保留用于 UI 页面精细化“角色”展示的核心元数据字段（如 `code`、`name`、`role`、`pct`、`score`、`l_score`、`pattern_hint` 等），在完全保障复盘数据恢复的前提下，极大削减了快照落盘时的物理体积，从根本上消除了冗余大数据的落盘开销。
+    - [x] **修复由于字典大括号缺失引发的语法错误 (Fixed Missing Curly Brace SyntaxError)**：修复了先前版本中在 `for s in stocks:` 遍历中因拼写或不当合并造成的 `race_candidates.append({` 大括号未闭合以及 `rc_item` 变量未定义便直接调用的严重语法缺陷，恢复了模块的语法健壮性。
+    - [x] **跑通全量单元与集成回归测试**：在本地成功跑通 `pytest scratch/test_manual_force_save.py scratch/test_load_snapshot.py scratch/test_self_heal_sectors.py` 等一整套与持久化、自愈及快照加载相关的单元测试，测试 100% 绿旗通过，没有引入任何副作用。
+
 ## 2026-06-16 21:30
 - [x] **优化板块评分上限截断与强攻概念梯度展示 (Optimized Board Score Capping & Enhanced Strength Gradient)**：
     - [x] **引入非线性渐进式软压缩算法 (Soft Non-Linear Compression)**：重构了 `bidding_momentum_detector.py` 中的 `board_score` 计算公式，废除了 `min(..., 98.5)` 的硬上限截断。针对强度超出 85.0 的板块，采用双曲渐进公式进行软压缩，使超高分板块得分平滑收敛在 85.0 ~ 99.5 之间，在维持数值在合理区间的前提下，彻底解决了超强题材“千篇一律”触顶 98.5 分而失去区分度的痛点，保留了明显的强弱梯队层次。

@@ -220,13 +220,13 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                         
                         # 转换 rate 和 volume
                         # pyttsx3 的 rate 200 为正常。SpVoice 的 Rate 范围是 -10 到 10，默认为 0。
-                        # 进行映射：cct.voice_rate 默认为 200。映射公式: (rate - 200) // 20
-                        v_rate = getattr(cct, 'voice_rate', 200)
+                        # 进行映射：cct.voice_rate 默认为 220。映射公式: (rate - 200) // 20
+                        v_rate = getattr(cct, 'voice_rate', 220)
                         sp_rate = max(-10, min(10, (v_rate - 200) // 20))
                         speaker.Rate = sp_rate
                         
                         # pyttsx3 的 volume 1.0 为最大。SpVoice 的 Volume 范围是 0 到 100。
-                        v_vol = getattr(cct, 'voice_volume', 1.0)
+                        v_vol = getattr(cct, 'voice_volume', 1.2)
                         sp_vol = max(0, min(100, int(v_vol * 100)))
                         speaker.Volume = sp_vol
                         
@@ -259,8 +259,8 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                             pyttsx3._activeEngines.clear()
                     
                     engine = pyttsx3.init()
-                    engine.setProperty('rate', getattr(cct, 'voice_rate', 200))
-                    engine.setProperty('volume', getattr(cct, 'voice_volume', 1.0))
+                    engine.setProperty('rate', getattr(cct, 'voice_rate', 220))
+                    engine.setProperty('volume', getattr(cct, 'voice_volume', 1.2))
                     
                     # [FIX] 不再使用引擎级别的 callback 来强行 interrupt。
                     # SAPI5 强行 stop 容易触发底层死锁并导致全局 GIL 锁死（进而引发 Tk 假死）！

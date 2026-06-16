@@ -300,8 +300,8 @@ def _voice_worker(queue, stop_flag, feedback_queue=None, abort_event=None, pause
                 rate = engine.getProperty('rate')
                 logger.debug(f'rate:{rate}')
                 if isinstance(rate, (int, float)):
-                    engine.setProperty('rate', cct.voice_rate)
-                    engine.setProperty('volume', cct.voice_volume)
+                    engine.setProperty('rate', getattr(cct, 'voice_rate', 220))
+                    engine.setProperty('volume', getattr(cct, 'voice_volume', 1.2))
                 
                 def check_abort(name=None, location=None, length=None):
                     if not stop_flag.value:
