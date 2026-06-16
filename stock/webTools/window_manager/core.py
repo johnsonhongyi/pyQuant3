@@ -581,3 +581,51 @@ def restore_display_configuration(filename="display_config.json") -> tuple:
         return True, f"已恢复多屏幕排布，配置包: {in_filename}"
     except Exception as e:
         return False, f"恢复多显示器排布时出错: {e}"
+
+
+def bring_window_to_top_by_title(title: str) -> bool:
+    """
+    根据模糊窗口标题查找到运行中的窗口，并将其强行置顶激活呈现到最前端前台
+    """
+    hwnds = find_windows_by_title_safe(title)
+    if not hwnds:
+        # 针对 .py / .exe 兼容性，也尝试匹配交替后的标题名
+        titles_to_try = []
+        if title.endswith('.py') and not title.startswith('py'):
+            titles_to_try.append(title.replace('.py', '.exe'))
+        elif title.endswith('.exe'):
+            titles_to_try.append(title.replace('.exe', '.py'))
+            
+        for t in titles_to_try:
+            hwnds = find_windows_by_title_safe(t)
+            if hwnds:
+                break
+                
+    if not hwnds:
+        return False
+
+    hwnd = hwnds[0][0]
+    import win32gui
+    import win32con
+    try:
+        # 如果窗口处于最小化，则恢复为常规状态
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        else:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            
+        # 强行抢焦点并置顶
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            # 在某些 Windows 环境中通过发送虚拟 Alt 击键强制获得焦点特权
+            import ctypes
+            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0) # Alt Down
+            win32gui.SetForegroundWindow(hwnd)
+            ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0) # Alt Up
+            
+        win32gui.BringWindowToTop(hwnd)
+        return True
+    except Exception as e:
+        print(f"Failed to bring window to top: {e}")
+        return False

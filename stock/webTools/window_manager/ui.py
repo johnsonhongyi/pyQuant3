@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
-    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit
+    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu
 )
 
 # 导入核心模块
@@ -498,6 +498,8 @@ class WindowPosManagerUI(QMainWindow):
         self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table_widget.itemChanged.connect(self.on_table_item_changed)
         self.table_widget.cellClicked.connect(self.on_table_cell_clicked)
+        self.table_widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_widget.customContextMenuRequested.connect(self.show_context_menu)
         
         # 中部表格及表格右侧操作按钮
         mid_layout = QHBoxLayout()
@@ -1037,6 +1039,55 @@ class WindowPosManagerUI(QMainWindow):
                         self.refresh_current_positions()
                         self.save_current_table_to_memory()
                         self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
+
+    def show_context_menu(self, pos):
+        """表格右键菜单：支持将选中的窗口置顶并激活"""
+        item = self.table_widget.itemAt(pos)
+        if not item:
+            return
+            
+        row = item.row()
+        title_item = self.table_widget.item(row, 0)
+        if not title_item or not title_item.text().strip():
+            return
+            
+        title = title_item.text().strip()
+        
+        # 弹窗式右键菜单，匹配整体暗黑风格
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e293b;
+                color: #f3f4f6;
+                border: 1px solid #475569;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                padding: 6px 18px;
+            }
+            QMenu::item:selected {
+                background-color: #3b82f6;
+                color: white;
+            }
+        """)
+        
+        activate_action = menu.addAction("📌 窗口置顶并激活")
+        action = menu.exec(self.table_widget.mapToGlobal(pos))
+        
+        if action == activate_action:
+            self.log(f"正在尝试将窗口置顶并激活: '{title}'...")
+            success = core.bring_window_to_top_by_title(title)
+            if success:
+                self.log(f"✅ 成功置顶并激活窗口: '{title}'")
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "置顶失败", 
+                    f"未能在桌面上匹配定位到运行中的窗口: '{title}'\n\n"
+                    "请确认:\n1. 目标程序是否确实已正常运行且主界面已打开。\n"
+                    "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
+                )
+                self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
 
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""
