@@ -43,7 +43,7 @@ from tqdm.contrib.concurrent import process_map
 # import numpy as np
 import subprocess
 # print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after subprocess")
-import a_trade_calendar
+# import a_trade_calendar
 # import a_trade_calendar
 # from py_mini_racer import py_mini_racer
 
@@ -2200,6 +2200,8 @@ def get_ramdisk_dir() -> str:
     os_platform: str = get_sys_platform()
     basedir: Optional[str] = None
     for root in ramdisk_rootList:
+        if not root:
+            continue
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
             if is_main_process() and not _RAMDISK_LOGGED and log.isEnabledFor(10):
@@ -7679,7 +7681,9 @@ def re_find_chinese(cmd):
     result = re.findall(re_words, cmd)
     return result
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d',noformat=False):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=None,block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d',noformat=False):
+    if top_temp is None:
+        top_temp = pd.DataFrame()
     end = True
     import readline
     import rlcompleter

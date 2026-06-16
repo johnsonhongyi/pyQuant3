@@ -347,6 +347,8 @@ ramdisk_rootList = [win10_ramdisk_triton,win10_ramdisk_root, mac_ramdisk_root]
 def get_log_file(log_n='stock.log'):
     basedir = None
     for root in ramdisk_rootList:
+        if not root:
+            continue
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
             break

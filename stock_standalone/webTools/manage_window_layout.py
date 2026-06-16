@@ -11,29 +11,23 @@
 import sys
 import os
 
-# 1. 优先将项目根目录加入 sys.path，导入 sys_utils 并对齐 get_app_root
-try:
-    import sys_utils
-except Exception as e:
-    import traceback
-    print(f"[DEBUG] sys_utils import failed in manage_window_layout.py entry (first try): {e}", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
-    # manage_window_layout.py 位于 webTools/ 目录下，其父目录是项目根目录
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    try:
-        import sys_utils
-    except Exception as e2:
-        print(f"[DEBUG] sys_utils import failed in manage_window_layout.py entry (second try): {e2}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        sys_utils = None
+def get_app_root() -> str:
+    """获取程序物理根目录。独立于 sys_utils，避免加载无关依赖。"""
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root and os.path.exists(env_root):
+        return env_root
 
-if sys_utils:
-    # 锁定并写入环境变量，保障多进程完美一致
-    app_root = sys_utils.get_app_root()
-else:
-    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        calculated_root = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        # 开发环境下，项目根目录是 webTools 的上级目录
+        calculated_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    return calculated_root
+
+app_root = get_app_root()
 
 # 2. 确保 webTools 目录在 sys.path 中，以便可以作为 package 导入 window_manager
 current_dir = os.path.dirname(os.path.abspath(__file__))

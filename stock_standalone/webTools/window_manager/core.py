@@ -9,6 +9,7 @@ import ctypes
 from ctypes import wintypes
 import time
 import os
+import sys
 import re
 import json
 from collections import namedtuple
@@ -20,7 +21,6 @@ try:
     from mouseMonitor.displayDetction import Display_Detection
 except ImportError:
     # 动态将上级目录加入路径以防包内调用时无法导入
-    import sys
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
         from mouseMonitor.displayDetction import Display_Detection
@@ -298,25 +298,52 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
     return success
 
 
-def _get_app_root_for_manager() -> str:
-    try:
-        import sys_utils
-        return sys_utils.get_app_root()
-    except Exception as e:
-        import sys
-        import traceback
-        print(f"[DEBUG] sys_utils import failed in _get_app_root_for_manager first try: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        try:
-            import sys_utils
-            return sys_utils.get_app_root()
-        except Exception as e2:
-            print(f"[DEBUG] sys_utils import failed in _get_app_root_for_manager second try: {e2}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            return project_root
+def get_app_root() -> str:
+    """获取程序物理根目录。独立于 sys_utils，避免加载无关依赖。"""
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root and os.path.exists(env_root):
+        return env_root
+
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        calculated_root = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        # 对应本地开发环境项目根目录 (webTools/window_manager 的上上级)
+        calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    return calculated_root
+
+
+def get_conf_path(fname: str) -> str:
+    """
+    获取并加载配置文件的路径，支持从内置资源包自愈释放。
+    """
+    app_root = get_app_root()
+    dst_path = os.path.join(app_root, fname)
+
+    if not os.path.exists(dst_path):
+        # 找到内置释放目录
+        base = getattr(sys, "_MEIPASS", None)
+        if not base and "NUITKA_ONEFILE_DIRECTORY" in os.environ:
+            base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
+        if not base:
+            base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # window_layout_config.json 在内置包中位于 webTools/window_manager/ 目录下
+        src_path = os.path.join(base, "webTools", "window_manager", fname)
+        if not os.path.exists(src_path):
+            src_path = os.path.join(base, fname)
+
+        if os.path.exists(src_path):
+            try:
+                import shutil
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                shutil.copy(src_path, dst_path)
+            except Exception as e:
+                print(f"[自愈] 释放配置文件失败: {e}", file=sys.stderr)
+
+    return dst_path
 
 
 class ConfigManager:
@@ -324,17 +351,7 @@ class ConfigManager:
     
     def __init__(self, config_path=None):
         if config_path is None:
-            # 统一使用项目标准的 sys_utils.get_conf_path 托管自愈
-            try:
-                import sys_utils
-                config_path = sys_utils.get_conf_path("window_layout_config.json")
-            except Exception as e:
-                import sys
-                import traceback
-                print(f"[DEBUG] sys_utils import failed in ConfigManager.__init__: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                app_root = _get_app_root_for_manager()
-                config_path = os.path.join(app_root, "webTools", "window_manager", "window_layout_config.json")
+            config_path = get_conf_path("window_layout_config.json")
         self.config_path = config_path
         self.config_data = {}
         self.load()
@@ -603,16 +620,7 @@ def save_display_configuration(filename="display_config.json") -> tuple:
         summary = config["summary"]
         file_key = f"{summary}_monitor{filename}"
         
-        try:
-            import sys_utils
-            out_filename = sys_utils.get_conf_path(file_key)
-        except Exception as e:
-            import sys
-            import traceback
-            print(f"[DEBUG] sys_utils import failed in save_display_configuration: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            app_root = _get_app_root_for_manager()
-            out_filename = os.path.join(app_root, file_key)
+        out_filename = get_conf_path(file_key)
         
         with open(out_filename, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)
@@ -634,16 +642,7 @@ def restore_display_configuration(filename="display_config.json") -> tuple:
         current_monitors = monitor_info["monitors"]
         file_key = f"{summary}_monitor{filename}"
         
-        try:
-            import sys_utils
-            in_filename = sys_utils.get_conf_path(file_key)
-        except Exception as e:
-            import sys
-            import traceback
-            print(f"[DEBUG] sys_utils import failed in restore_display_configuration: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            app_root = _get_app_root_for_manager()
-            in_filename = os.path.join(app_root, file_key)
+        in_filename = get_conf_path(file_key)
 
         if not os.path.exists(in_filename):
             # 自动保存当前作为默认

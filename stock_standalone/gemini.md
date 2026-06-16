@@ -1,3 +1,8 @@
+## 2026-06-16 13:45
+- [x] **深度排查并修复 V型反转 (V-Reversal) 信号永远无输出的两个根因 (Fixed V-Reversal Signal Permanently Silent)**：
+    - [x] **根因1：调用不存在的方法名 (Fatal: Missing Method)**：`realtime_data_service.py` 中 `DataPublisher.get_v_shape_signal()` 内部调用了 `self.kline_cache._fetch_supplemental_data_async(code)`，这个方法**根本不存在**于 `MinuteKlineCache` 类中（正确名称为 `_supplemental_fetch`）。该调用在运行时抛出 `AttributeError`，被 `stock_live_strategy.py` 中的宽泛 `except` 静默吞掉，导致 V型反转信号链路直接断路。**修复**：改为用守护线程 `threading.Thread(target=self.kline_cache._supplemental_fetch, ...)` 正确异步触发。
+    - [x] **根因2：INIT 状态进池门槛过于苛刻 (Logic: Threshold Too Tight)**：`update_wave_structure_state` 状态机中，一个股票从 `INIT` 进入 `CONSOLIDATING`（潜伏监控池）的判定条件是分钟 K 线振幅 `(max-min)/min < 0.02`（即 2%）。对于正常 A 股日内行情，这几乎是不可能满足的条件，导致 `_v_reversal_pool` 始终为空，`get_v_shape_signal()` 永远返回 `False`。**修复**：将进池振幅门槛从 `0.02` 放宽至 `0.06`（6%），覆盖大多数正常整理形态。
+
 ## 2026-06-16 13:40
 - [x] **深度排查并修复独立打包下配置文件未自动释放与 sys_utils 导入失败缺陷 (Fixed sys_utils ImportError & Auto-Unpack Failure in Packaged EXE)**：
     - [x] **定位 ImportError 根源**：定位到在单独打包的 `manage_window_layout.exe` 运行时，在 `core.py` 内部 `import sys_utils` 发生错误回落到 fallback 旧路径分支，从而寻找 `dist/webTools/window_manager` 子目录导致无法自动释放配置文件的问题。
