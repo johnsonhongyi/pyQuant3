@@ -1199,7 +1199,7 @@ class WindowPosManagerUI(QMainWindow):
         
         if self.config_manager.save():
             QMessageBox.information(self, "成功", "配置文件已成功按分类持久化保存到磁盘！")
-            self.log("配置文件已写入磁盘 config.json。")
+            self.log("配置文件已写入磁盘 window_layout_config.json。")
         else:
             QMessageBox.critical(self, "错误", "配置文件写入磁盘失败，请检查文件写权限！")
 

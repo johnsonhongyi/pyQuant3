@@ -43,8 +43,7 @@ from tqdm.contrib.concurrent import process_map
 # import numpy as np
 import subprocess
 # print(f"DEBUG: pandas loaded? {'pandas' in sys.modules} after subprocess")
-# import a_trade_calendar
-# import a_trade_calendar
+import a_trade_calendar
 # from py_mini_racer import py_mini_racer
 
 # from py_mini_racer import py_mini_racer

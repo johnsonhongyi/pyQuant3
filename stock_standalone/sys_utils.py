@@ -147,16 +147,17 @@ def get_base_path() -> str:
 
     return get_app_root()
 
+# "window_layout_config.json": {
+#     "src": "webTools/window_manager/window_layout_config.json",
+#     "dst": "window_layout_config.json"
+# },
     
 RESOURCE_MAP = {
     "MonitorTK.ico": {
         "src": "MonitorTK.ico",
         "dst": "MonitorTK.ico"
     },
-    "window_layout_config.json": {
-        "src": "webTools/window_manager/window_layout_config.json",
-        "dst": "window_layout_config.json"
-    },
+
     "window_config.json": {
         "src": "window_config.json",
         "dst": "window_config.json"

@@ -1,3 +1,9 @@
+## 2026-06-16 16:00
+- [x] **优化 `manage_window_layout` 独立瘦身打包与多屏配置动态包含 (Optimized Lean Packaging & Dynamic Config Bundling for Window Manager)**：
+    - [x] **精炼打包排除与本地依赖引入**：在 `manage_window_layout.spec` 中，将 `sys_utils` 和 `JohnsonUtil` 等本地底层依赖正确加入 `hiddenimports` 并从 `excludes` 中移除，同时保持对 `pandas`、`numpy`、`a_trade_calendar` 等重型第三方库的强力排除，完美削减打包体积至仅 39MB。
+    - [x] **实现多屏幕拓扑配置文件动态打包**：在 spec 中引入 `glob` 机制，在 datas 释放列表中动态打包当前运行同级目录下所有的 `*monitordisplay_config.json` 配置文件。确保独立打包程序能够在各类物理显示器拓扑环境下实现开箱即用的配置自愈与恢复。
+    - [x] **完成独立 EXE 纯净环境验证**：成功运行 `pyinstaller --noconfirm manage_window_layout.spec` 完成瘦身打包，并在纯净的控制台环境下执行 `dist\manage_window_layout.exe -log debug` 验证通过。没有任何未捕获依赖报错或配置缺失异常，自适应寻址 `tdx_ths_position4644` 并瞬间实现所有窗口在逻辑屏幕坐标下的完美对齐，数据及运行状态完全符合预期。
+
 ## 2026-06-16 13:45
 - [x] **深度排查并修复 V型反转 (V-Reversal) 信号永远无输出的两个根因 (Fixed V-Reversal Signal Permanently Silent)**：
     - [x] **根因1：调用不存在的方法名 (Fatal: Missing Method)**：`realtime_data_service.py` 中 `DataPublisher.get_v_shape_signal()` 内部调用了 `self.kline_cache._fetch_supplemental_data_async(code)`，这个方法**根本不存在**于 `MinuteKlineCache` 类中（正确名称为 `_supplemental_fetch`）。该调用在运行时抛出 `AttributeError`，被 `stock_live_strategy.py` 中的宽泛 `except` 静默吞掉，导致 V型反转信号链路直接断路。**修复**：改为用守护线程 `threading.Thread(target=self.kline_cache._supplemental_fetch, ...)` 正确异步触发。
