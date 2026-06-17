@@ -73,12 +73,32 @@ class PerformanceEngine:
         return psutil.cpu_percent(interval=None)
 
     @staticmethod
+    def get_disk_queue_length() -> float:
+        """获取 Windows 物理磁盘当前队列长度 (CurrentDiskQueueLength)"""
+        try:
+            if platform.system() == "Windows":
+                # 使用 wmic 快速查询物理磁盘队列长度
+                res = subprocess.check_output(
+                    'wmic path Win32_PerfFormattedData_PerfDisk_PhysicalDisk where "Name=\'_Total\'" get CurrentDiskQueueLength',
+                    shell=True,
+                    text=True,
+                    stderr=subprocess.DEVNULL
+                )
+                lines = [line.strip() for line in res.splitlines() if line.strip()]
+                if len(lines) > 1:
+                    return float(lines[1])
+        except Exception:
+            pass
+        return 0.0
+
+    @staticmethod
     def scan_and_group_processes() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         [极限性能优化版] 扫描系统所有活动进程，并生成：
         - 物理级 PID 缓存自愈，仅抓取新进程的静态属性，消除重复 Windows API 调用
         - 无权限/系统进程静默拦截，彻底根除高频 AccessDenied 异常的上下文卡顿
         - 复用 Process 实体，实现亚毫秒级高精度 CPU 占比提取
+        - [NEW] 获取并汇总各进程的线程数 (Threads)
         """
         raw_list = []
         grouped_dict = {}
@@ -125,6 +145,10 @@ class PerformanceEngine:
                     mem_info = p_obj.memory_info()
                     rss_mb = mem_info.rss / (1024 ** 2)
                     status = p_obj.status() or "unknown"
+                    try:
+                        threads = p_obj.num_threads() or 1
+                    except Exception:
+                        threads = 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     # 动态属性提取失败也可能是进程死亡或被保护
                     continue
@@ -141,6 +165,7 @@ class PerformanceEngine:
                     "name": name,
                     "rss_mb": rss_mb,
                     "cpu_pct": cpu_pct,
+                    "threads": threads,
                     "status": status,
                     "path": exe_path
                 })
@@ -152,15 +177,17 @@ class PerformanceEngine:
                         "count": 0,
                         "total_rss_mb": 0.0,
                         "max_cpu": 0.0,
+                        "total_threads": 0,
                         "pids": []
                     }
                 grouped_dict[name]["count"] += 1
                 grouped_dict[name]["total_rss_mb"] += rss_mb
                 grouped_dict[name]["max_cpu"] = max(grouped_dict[name]["max_cpu"], cpu_pct)
+                grouped_dict[name]["total_threads"] += threads
                 grouped_dict[name]["pids"].append(pid)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                # 凡是初始化或读取静态属性遭遇 AccessDenied / 找不到的进程，均物理标记为屏蔽，未来彻底不碰
+                # 凡是初始化 or 读取静态属性遭遇 AccessDenied / 找不到的进程，均物理标记为屏蔽，未来彻底不碰
                 PerformanceEngine._BLOCKED_PIDS.add(pid)
                 PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
                 continue
@@ -173,6 +200,143 @@ class PerformanceEngine:
         grouped_list.sort(key=lambda x: x["total_rss_mb"], reverse=True)
 
         return grouped_list, raw_list
+
+    @staticmethod
+    def run_system_diagnostics(grouped_list: List[Dict[str, Any]], raw_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        根据进程和系统指标，评估系统性能状态，输出针对性的诊断预警与建议。
+        """
+        diagnostics = {
+            "warnings": [],
+            "key_processes": {
+                "python": {"threads": 0, "count": 0, "rss_mb": 0.0},
+                "tdx": {"threads": 0, "count": 0, "rss_mb": 0.0},
+                "hexin": {"threads": 0, "count": 0, "rss_mb": 0.0},
+                "mainfree": {"threads": 0, "count": 0, "rss_mb": 0.0},
+                "weixin": {"threads": 0, "count": 0, "rss_mb": 0.0}
+            },
+            "other_key_processes": [],
+            "total_threads_monitored": 0,
+            "disk_queue": 0.0
+        }
+
+        # 统计关键进程以及自适应筛选其他重载线程进程
+        other_candidates = []
+        for g in grouped_list:
+            name_lower = g["name"].lower()
+            threads = g.get("total_threads", 0)
+            rss = g.get("total_rss_mb", 0.0)
+            cnt = g.get("count", 0)
+            
+            is_core = False
+            if "python" in name_lower or "instock" in name_lower:
+                diagnostics["key_processes"]["python"]["threads"] += threads
+                diagnostics["key_processes"]["python"]["count"] += cnt
+                diagnostics["key_processes"]["python"]["rss_mb"] += rss
+                is_core = True
+            elif "tdx" in name_lower or "tc.exe" in name_lower:
+                diagnostics["key_processes"]["tdx"]["threads"] += threads
+                diagnostics["key_processes"]["tdx"]["count"] += cnt
+                diagnostics["key_processes"]["tdx"]["rss_mb"] += rss
+                is_core = True
+            elif "hexin" in name_lower or "ths.exe" in name_lower:
+                diagnostics["key_processes"]["hexin"]["threads"] += threads
+                diagnostics["key_processes"]["hexin"]["count"] += cnt
+                diagnostics["key_processes"]["hexin"]["rss_mb"] += rss
+                is_core = True
+            elif "mainfree" in name_lower:
+                diagnostics["key_processes"]["mainfree"]["threads"] += threads
+                diagnostics["key_processes"]["mainfree"]["count"] += cnt
+                diagnostics["key_processes"]["mainfree"]["rss_mb"] += rss
+                is_core = True
+            elif "wechat" in name_lower:
+                diagnostics["key_processes"]["weixin"]["threads"] += threads
+                diagnostics["key_processes"]["weixin"]["count"] += cnt
+                diagnostics["key_processes"]["weixin"]["rss_mb"] += rss
+                is_core = True
+
+            # 非核心进程且线程数 >= 20，则作为自适应监控对象
+            if not is_core and threads >= 20:
+                other_candidates.append({
+                    "name": g["name"],
+                    "threads": threads,
+                    "rss_mb": rss,
+                    "count": cnt
+                })
+
+        # 按线程数降序，取前5个作为活跃系统重载进程
+        other_candidates.sort(key=lambda x: x["threads"], reverse=True)
+        diagnostics["other_key_processes"] = other_candidates[:5]
+
+        # 获取磁盘队列长度
+        disk_q = PerformanceEngine.get_disk_queue_length()
+        diagnostics["disk_queue"] = disk_q
+
+        # 进行条件分析
+        # 1. 磁盘队列警告
+        if disk_q >= 2.0:
+            diagnostics["warnings"].append({
+                "level": "DANGER",
+                "title": "磁盘 I/O 发生严重阻塞 (Disk Queue >= 2.0)",
+                "desc": f"当前物理磁盘活动队列长度为 {disk_q:.2f}，已大于警戒值 2.0！这往往代表磁盘读写积压严重，通常会导致量化主程序或行情端发生卡顿和假死。建议打开系统自带的资源监视器 (resmon.exe) 磁盘页，核对是否有高频读写的 H5 数据库锁冲突。"
+            })
+        elif disk_q > 0.0:
+            diagnostics["warnings"].append({
+                "level": "INFO",
+                "title": "磁盘 I/O 状态健康 (Disk Queue < 2.0)",
+                "desc": f"当前物理磁盘活动队列长度为 {disk_q:.2f}，属于正常区间。磁盘不是当前性能瓶颈 of 元凶。"
+            })
+
+        # 2. 线程风暴分析 (包含自适应重载线程数)
+        core_threads = (
+            diagnostics["key_processes"]["python"]["threads"] +
+            diagnostics["key_processes"]["tdx"]["threads"] +
+            diagnostics["key_processes"]["hexin"]["threads"] +
+            diagnostics["key_processes"]["mainfree"]["threads"] +
+            diagnostics["key_processes"]["weixin"]["threads"]
+        )
+        other_heavy_threads = sum(item["threads"] for item in diagnostics["other_key_processes"])
+        total_threads_monitored = core_threads + other_heavy_threads
+        diagnostics["total_threads_monitored"] = total_threads_monitored
+
+        if total_threads_monitored >= 400:
+            diagnostics["warnings"].append({
+                "level": "DANGER",
+                "title": "高危警告：系统线程风暴 (OS Scheduler Overload)",
+                "desc": f"检测到监控的活跃进程累计占用高达 {total_threads_monitored} 个系统线程！这会导致 Windows 调度器内的时间片切换（CreateThread/ExitThread）开销爆满，CPU 资源碎片化，使所有行情和策略响应明显变慢。建议清理无用后台软件或一键清理微信小程序（WeChatAppEx.exe）等重载进程。"
+            })
+        elif total_threads_monitored >= 250:
+            diagnostics["warnings"].append({
+                "level": "WARNING",
+                "title": "系统活跃线程数偏高 (OS Scheduler High Load)",
+                "desc": f"核心进程及自适应重载进程累计占用线程数达 {total_threads_monitored} 个（核心: {core_threads}，其他重载: {other_heavy_threads}）。OS 调度负荷偏高，可能会产生轻微粘滞感。建议清理后台闲置进程。"
+            })
+        else:
+            diagnostics["warnings"].append({
+                "level": "INFO",
+                "title": "系统线程调度环境健康",
+                "desc": f"核心进程及自适应重载进程累计占用线程数 {total_threads_monitored} 个，处于非常健康的轻量区间。"
+            })
+
+        # 3. 针对非核心重负载线程进程的自适应警告
+        for item in diagnostics["other_key_processes"]:
+            if item["threads"] >= 40:
+                diagnostics["warnings"].append({
+                    "level": "WARNING",
+                    "title": f"检测到非核心进程 [{item['name']}] 占用大量线程 ({item['threads']} 个)",
+                    "desc": f"非核心进程组 {item['name']} 当前在系统内累计占用了 {item['threads']} 个线程（共 {item['count']} 个并发实例），总内存占用为 {item['rss_mb']:.1f} MB。过多的线程容易导致 Windows 时间片调度被碎片化，可能影响股票行情推送和策略计算速度，建议在实盘交易时段关闭或限制该进程的后台活动。"
+                })
+
+        # 4. 针对微信小程序进程的专属提醒
+        weixin_total_rss = diagnostics["key_processes"]["weixin"]["rss_mb"]
+        if weixin_total_rss > 1024.0:
+            diagnostics["warnings"].append({
+                "level": "WARNING",
+                "title": "微信小程序/后台占用内存过高",
+                "desc": f"微信相关进程当前累计占用内存达 {weixin_total_rss/1024:.2f} GB！强烈建议执行上方的一键优化引擎，彻底清理 WeChatAppEx 小程序，以释放这 100+ 线程及内存空间。"
+            })
+
+        return diagnostics
 
     @staticmethod
     def kill_process_by_pid(pid: int) -> Tuple[bool, str]:
@@ -310,11 +474,11 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                     pass
             
             # 获取分组统计表的列宽
-            grouped_cols = ("name", "count", "total_rss", "max_cpu", "pids")
+            grouped_cols = ("name", "count", "total_rss", "max_cpu", "threads", "pids")
             grouped_widths = [int(self.tree_grouped.column(col, "width") / scale) for col in grouped_cols]
             
             # 获取明细列表的列宽
-            raw_cols = ("pid", "name", "rss", "cpu", "status", "path")
+            raw_cols = ("pid", "name", "rss", "cpu", "threads", "status", "path")
             raw_widths = [int(self.tree_raw.column(col, "width") / scale) for col in raw_cols]
             
             data["sys_performance_analyzer_columns"] = {
@@ -365,14 +529,14 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 
                 # 恢复分组表列宽
                 grouped_widths = cols_data.get("grouped", [])
-                grouped_cols = ("name", "count", "total_rss", "max_cpu", "pids")
+                grouped_cols = ("name", "count", "total_rss", "max_cpu", "threads", "pids")
                 if len(grouped_widths) == len(grouped_cols):
                     for col, w in zip(grouped_cols, grouped_widths):
                         self.tree_grouped.column(col, width=int(w * scale))
                 
                 # 恢复明细表列宽
                 raw_widths = cols_data.get("raw", [])
-                raw_cols = ("pid", "name", "rss", "cpu", "status", "path")
+                raw_cols = ("pid", "name", "rss", "cpu", "threads", "status", "path")
                 if len(raw_widths) == len(raw_cols):
                     for col, w in zip(raw_cols, raw_widths):
                         self.tree_raw.column(col, width=int(w * scale))
@@ -478,7 +642,11 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
 
         # 卡片 4: 活跃进程数量
         self.card_procs = self.create_dashboard_card(cards_frame, "系统活动进程总数", "0 个", COLOR_WARNING)
-        self.card_procs.pack(side="left", fill="both", expand=True)
+        self.card_procs.pack(side="left", fill="both", expand=True, padx=(0, 10))
+
+        # 卡片 5: 物理磁盘队列长度
+        self.card_disk_queue = self.create_dashboard_card(cards_frame, "物理磁盘队列长度", "0.00", COLOR_ACCENT)
+        self.card_disk_queue.pack(side="left", fill="both", expand=True)
 
     def create_dashboard_card(self, parent: ttk.Frame, title: str, init_val: str, color_theme: str) -> ttk.Frame:
         """快捷创建卡片组件"""
@@ -549,14 +717,15 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         # 分组表格
         self.tree_grouped = self.create_treeview(
             tab_grouped,
-            columns=("name", "count", "total_rss", "max_cpu", "pids"),
-            headings=("📦 进程映像名称 (Executable Name)", "🔢 实例数", "💾 总物理内存占用 (Total RAM)", "⚡ 峰值 CPU %", "🔑 包含 PID 集合")
+            columns=("name", "count", "total_rss", "max_cpu", "threads", "pids"),
+            headings=("📦 进程映像名称 (Executable Name)", "🔢 实例数", "💾 总物理内存占用 (Total RAM)", "⚡ 峰值 CPU %", "🧵 总线程数", "🔑 包含 PID 集合")
         )
         self.tree_grouped.column("name", width=220, anchor="w")
-        self.tree_grouped.column("count", width=80, anchor="center")
-        self.tree_grouped.column("total_rss", width=140, anchor="e")
-        self.tree_grouped.column("max_cpu", width=90, anchor="center")
-        self.tree_grouped.column("pids", width=420, anchor="w")
+        self.tree_grouped.column("count", width=70, anchor="center")
+        self.tree_grouped.column("total_rss", width=130, anchor="e")
+        self.tree_grouped.column("max_cpu", width=80, anchor="center")
+        self.tree_grouped.column("threads", width=80, anchor="center")
+        self.tree_grouped.column("pids", width=380, anchor="w")
 
         # -------------------- 选项卡 2：明细进程表 (支持实时模糊搜索) --------------------
         tab_raw = ttk.Frame(self.notebook, padding=5)
@@ -582,15 +751,66 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         # 明细表格
         self.tree_raw = self.create_treeview(
             tab_raw,
-            columns=("pid", "name", "rss", "cpu", "status", "path"),
-            headings=("🔑 PID", "📦 进程名称", "💾 物理内存 (RAM)", "⚡ CPU %", "💡 运行状态", "📂 可执行文件路径 (File Path)")
+            columns=("pid", "name", "rss", "cpu", "threads", "status", "path"),
+            headings=("🔑 PID", "📦 进程名称", "💾 物理内存 (RAM)", "⚡ CPU %", "🧵 线程数", "💡 运行状态", "📂 可执行文件路径 (File Path)")
         )
-        self.tree_raw.column("pid", width=85, anchor="center")
-        self.tree_raw.column("name", width=180, anchor="w")
-        self.tree_raw.column("rss", width=120, anchor="e")
-        self.tree_raw.column("cpu", width=80, anchor="center")
-        self.tree_raw.column("status", width=90, anchor="center")
-        self.tree_raw.column("path", width=500, anchor="w")
+        self.tree_raw.column("pid", width=75, anchor="center")
+        self.tree_raw.column("name", width=160, anchor="w")
+        self.tree_raw.column("rss", width=110, anchor="e")
+        self.tree_raw.column("cpu", width=70, anchor="center")
+        self.tree_raw.column("threads", width=70, anchor="center")
+        self.tree_raw.column("status", width=80, anchor="center")
+        self.tree_raw.column("path", width=450, anchor="w")
+
+        # -------------------- 选项卡 3：系统健康诊断与预警 (Health Diagnostics) --------------------
+        tab_diagnosis = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(tab_diagnosis, text=" 🩺 系统健康诊断 (Diagnostics) ")
+
+        # 诊断报告容器
+        diag_container = ttk.Frame(tab_diagnosis)
+        diag_container.pack(fill="both", expand=True)
+
+        # 左右分栏：左侧是关键指标面板，右侧是诊断预警列表
+        diag_left = ttk.Frame(diag_container, width=320, padding=5)
+        diag_left.pack(side="left", fill="y", padx=(0, 10))
+        diag_left.pack_propagate(False)
+
+        diag_right = ttk.Frame(diag_container, padding=5)
+        diag_right.pack(side="right", fill="both", expand=True)
+
+        # 左栏：关键量化进程的线程&内存汇总
+        lbl_left_title = ttk.Label(diag_left, text="📊 核心进程载荷统计", font=self.font_title, foreground=COLOR_HIGHLIGHT)
+        lbl_left_title.pack(anchor="w", pady=(5, 15))
+
+        # 关键统计数据表格
+        self.tree_key_stats = ttk.Treeview(diag_left, columns=("proc_name", "threads", "rss"), show="headings", height=10)
+        self.tree_key_stats.heading("proc_name", text="进程类别")
+        self.tree_key_stats.heading("threads", text="线程数")
+        self.tree_key_stats.heading("rss", text="总内存")
+        self.tree_key_stats.column("proc_name", width=120, anchor="w")
+        self.tree_key_stats.column("threads", width=80, anchor="center")
+        self.tree_key_stats.column("rss", width=100, anchor="e")
+        self.tree_key_stats.pack(fill="x", pady=5)
+
+        # 磁盘与系统说明
+        lbl_diag_tip = ttk.Label(diag_left, text="💡 诊断指标说明:\n1. 磁盘队列: 物理磁盘当前未处理请求数。若 >= 2.0，磁盘正发生读写积压。\n2. 累计线程: 核心进程（Python/通达信/同花顺/微信）以及系统内其他高负载非核心进程（标记为 ⚠️）所累计占用的线程总数。若 >= 400，OS 时间片调度将发生严重卡顿与碎片化阻塞。", font=self.font_small, foreground=COLOR_TEXT_MUTED, justify="left", wraplength=280)
+        lbl_diag_tip.pack(anchor="w", pady=(15, 5))
+
+        # 右栏：诊断预警列表 (List of warnings)
+        lbl_right_title = ttk.Label(diag_right, text="🚨 系统健康诊断告警与分析建议", font=self.font_title, foreground=COLOR_WARNING)
+        lbl_right_title.pack(anchor="w", pady=(5, 10))
+
+        # 使用只读文本区域
+        self.txt_warnings = tk.Text(diag_right, bg=COLOR_CARD, fg=COLOR_TEXT_MAIN, wrap="word", font=self.font_body, bd=1, relief="solid", padx=10, pady=10)
+        self.txt_warnings.pack(fill="both", expand=True)
+        self.txt_warnings.configure(state="disabled")
+
+        # 配置 Text tags 的颜色和样式
+        self.txt_warnings.tag_configure("danger_title", foreground=COLOR_DANGER, font=self.font_title)
+        self.txt_warnings.tag_configure("warning_title", foreground=COLOR_WARNING, font=self.font_title)
+        self.txt_warnings.tag_configure("info_title", foreground=COLOR_HIGHLIGHT, font=self.font_title)
+        self.txt_warnings.tag_configure("body", foreground=COLOR_TEXT_MAIN, font=self.font_body)
+        self.txt_warnings.tag_configure("muted", foreground=COLOR_TEXT_MUTED, font=self.font_small)
 
     def create_treeview(self, parent: ttk.Frame, columns: tuple, headings: tuple) -> ttk.Treeview:
         """通用封装：快速创建高颜值暗黑 Treeview 带美化滚动条"""
@@ -676,8 +896,11 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 self.grouped_data = grouped
                 self.raw_data = raw
 
-                # 3. 线程安全地回调 UI 进行绘制
-                self.after(0, lambda: self.render_ui(ram_info, cpu_pct, is_manual))
+                # 3. 运行系统健康诊断
+                diagnostics = PerformanceEngine.run_system_diagnostics(grouped, raw)
+
+                # 4. 线程安全地回调 UI 进行绘制
+                self.after(0, lambda: self.render_ui(ram_info, cpu_pct, diagnostics, is_manual))
             except Exception as e:
                 self.after(0, lambda: self.set_status_text(f"❌ 性能指标抓取发生异常: {e}", COLOR_DANGER))
 
@@ -685,7 +908,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         worker_thread = threading.Thread(target=async_worker, daemon=True)
         worker_thread.start()
 
-    def render_ui(self, ram_info: dict, cpu_pct: float, is_manual=False):
+    def render_ui(self, ram_info: dict, cpu_pct: float, diagnostics: dict, is_manual=False):
         """渲染顶部核心卡片及表格数据"""
         # 更新卡片数值
         self.card_ram_pct.lbl_val.configure(text=f"{ram_info['percent']}%")
@@ -701,14 +924,93 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         self.card_cpu.lbl_val.configure(text=f"{cpu_pct:.1f}%")
         self.card_procs.lbl_val.configure(text=f"{len(self.raw_data)} 个")
 
+        # 更新磁盘队列卡片数值与颜色
+        disk_q = diagnostics["disk_queue"]
+        self.card_disk_queue.lbl_val.configure(text=f"{disk_q:.2f}")
+        if disk_q >= 2.0:
+            self.card_disk_queue.lbl_val.configure(foreground=COLOR_DANGER)
+        elif disk_q > 0.0:
+            self.card_disk_queue.lbl_val.configure(foreground=COLOR_WARNING)
+        else:
+            self.card_disk_queue.lbl_val.configure(foreground=COLOR_ACCENT)
+
         # 刷新渲染表格数据
         self.render_grouped_table()
         self.apply_filter()  # 应用搜索框内容后渲染明细表格
+        
+        # 刷新渲染系统健康诊断 Tab
+        self.render_diagnostics_tab(diagnostics)
 
         # 更新底端状态栏
         self.time_lbl.configure(text=f"最后同步时间: {time.strftime('%H:%M:%S')}")
         if is_manual:
             self.set_status_text("✅ 物理内存与进程状态手动刷新成功！", COLOR_ACCENT)
+
+    def render_diagnostics_tab(self, diagnostics: dict):
+        """渲染系统健康诊断卡与警告列表"""
+        # 1. 刷新左侧核心进程载荷统计 Treeview
+        for item in self.tree_key_stats.get_children():
+            self.tree_key_stats.delete(item)
+
+        key_names = {
+            "python": "量化系统/Python",
+            "tdx": "通达信交易端",
+            "hexin": "同花顺程序",
+            "mainfree":"东方财富",
+            "weixin": "微信及小程序"
+        }
+
+        for key, name in key_names.items():
+            stats = diagnostics["key_processes"][key]
+            rss_val = stats["rss_mb"]
+            rss_str = f"{rss_val:.1f} MB"
+            if rss_val >= 1024:
+                rss_str = f"{rss_val/1024:.2f} GB"
+            
+            self.tree_key_stats.insert("", "end", values=(
+                name,
+                f"{stats['threads']} 个",
+                rss_str
+            ))
+
+        # 自适应添加其他高负载非核心进程至 Treeview 中
+        for item in diagnostics.get("other_key_processes", []):
+            rss_val = item["rss_mb"]
+            rss_str = f"{rss_val:.1f} MB"
+            if rss_val >= 1024:
+                rss_str = f"{rss_val/1024:.2f} GB"
+            
+            self.tree_key_stats.insert("", "end", values=(
+                f"⚠️ {item['name']}",
+                f"{item['threads']} 个",
+                rss_str
+            ))
+
+        # 2. 刷新右侧文本区域警告列表
+        self.txt_warnings.configure(state="normal")
+        self.txt_warnings.delete("1.0", "end")
+
+        warnings = diagnostics.get("warnings", [])
+        if not warnings:
+            self.txt_warnings.insert("end", "🎉 系统健康诊断：未检测到任何异常载荷或阻塞风险。你的 Windows 时间片调度环境非常健康。\n\n", "info_title")
+        else:
+            for idx, w in enumerate(warnings, 1):
+                level = w["level"]
+                title_tag = "info_title"
+                if level == "DANGER":
+                    title_tag = "danger_title"
+                elif level == "WARNING":
+                    title_tag = "warning_title"
+
+                self.txt_warnings.insert("end", f"{idx}. 【{level}】{w['title']}\n", title_tag)
+                self.txt_warnings.insert("end", f"{w['desc']}\n\n", "body")
+                
+        self.txt_warnings.insert("end", "-" * 60 + "\n", "muted")
+        self.txt_warnings.insert("end", "🛠️ 高阶系统卡顿排查指引:\n", "info_title")
+        self.txt_warnings.insert("end", "• [磁盘 I/O 排查] 按 Win+R 输入 resmon.exe 打开系统自带的资源监视器，切换到'磁盘'选项卡，展开'磁盘活动'，在'物理磁盘'模块下核对活动时间和磁盘队列长度。如果队列长度 >= 2 且某个 .h5 或 .db 文件读写频繁，说明是该文件锁争抢严重。\n", "body")
+        self.txt_warnings.insert("end", "• [OS 时间片调度排查] 频繁的线程创建与销毁 (Thread Storm) 是通达信和量化前台卡顿的隐形元凶。例如，微信占用超过 100+ 线程，同花顺/恒生也是线程大户，在实盘交易时段，强烈建议退出无用聊天软件，释放 CPU 线程时间片资源。\n", "body")
+
+        self.txt_warnings.configure(state="disabled")
 
     def render_grouped_table(self):
         """加载渲染进程分组汇总表 (降序)"""
@@ -736,6 +1038,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 g['count'],
                 rss_str,
                 f"{g['max_cpu']:.1f}%",
+                g.get('total_threads', 0),
                 pids_str
             ))
 
@@ -775,6 +1078,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 r['name'],
                 rss_str,
                 f"{r['cpu_pct']:.1f}%",
+                r.get('threads', 1),
                 r['status'],
                 r['path']
             ))
@@ -804,7 +1108,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             values = tree.item(item)["values"]
             pid = int(values[0])
             name = values[1]
-            path = values[5]
+            path = values[6]
             
             menu.add_command(label=f"🔬 查看 PID {pid} 诊断详情", command=lambda: self.view_process_detail_action(pid, name, path))
             menu.add_command(label=f"🔪 强制终止该单个进程 (PID: {pid})", command=lambda: self.kill_single_process_action(pid, name))
@@ -818,10 +1122,8 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         data_list = []
         for child in tree.get_children(""):
             val = tree.set(child, col)
-            # 对含有数字/容量后缀的列进行智能科学排序适配
             sort_val = val
             if col in ("total_rss", "rss"):
-                # 将 "MB/GB" 转化为统一 Float 参与物理排序
                 try:
                     num_part = float(val.split()[0])
                     if "GB" in val:
@@ -829,9 +1131,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                     sort_val = num_part
                 except:
                     sort_val = 0.0
-            elif col == "count":
-                sort_val = int(val)
-            elif col == "pid":
+            elif col in ("count", "pid", "threads"):
                 sort_val = int(val)
             elif "cpu" in col.lower():
                 try:
@@ -843,18 +1143,15 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
 
             data_list.append((sort_val, child))
 
-        # 执行排序
         data_list.sort(reverse=reverse)
 
-        # 重新编排顺序
         for index, (val, child) in enumerate(data_list):
             tree.move(child, "", index)
 
-        # 重置表头点击状态实现升降序双向切换
         tree.heading(col, command=lambda: self.sort_treeview_column(tree, col, not reverse))
 
     # --------------------------------------------------------------------------
-    # 进程控制管理动作 (Process Management Actions)
+    # 进程控制管理动作 (Process Control Actions)
     # --------------------------------------------------------------------------
     def kill_single_process_action(self, pid: int, name: str):
         """强制结束单体进程"""
@@ -972,6 +1269,11 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         ram = PerformanceEngine.get_system_ram_info()
         cpu = PerformanceEngine.get_system_cpu_percent()
         
+        # 运行系统健康诊断
+        diagnostics = PerformanceEngine.run_system_diagnostics(self.grouped_data, self.raw_data)
+        disk_q = diagnostics["disk_queue"]
+        total_key_threads = diagnostics["total_threads_monitored"]
+        
         # 取分组 Top 10
         top_groups = self.grouped_data[:10]
         
@@ -985,22 +1287,37 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
 * 💡 物理内存可用: {ram['available_gb']:.2f} GB
 * ⚡ CPU 瞬时总体载荷: {cpu:.1f}%
 * 🔑 活动进程总数: {len(self.raw_data)} 个
-
-## 🔍 2. 常驻内存 (RSS) 消耗前十名进程汇总
-以下是将同名多进程映像物理汇总后的消耗排名：
-
+* 💿 物理磁盘队列长度: {disk_q:.2f} (警告阈值: >= 2.0)
+* 🧵 核心及重载进程累计占用线程: {total_key_threads} 个 (量化系统、通达信、同花顺、东财、微信及其他高负载进程)
 """
+        other_heavy_list = diagnostics.get("other_key_processes", [])
+        if other_heavy_list:
+            report_content += "\n### ⚠️ 自动检测到的其他高负载非核心进程组 (线程 >= 20):\n"
+            for item in other_heavy_list:
+                report_content += f"* **{item['name']}** -> 累计线程数: **{item['threads']}** 个 | 内存占用: {item['rss_mb']:.1f} MB | 并发实例数: {item['count']} 个\n"
+
+        report_content += """
+## 🩺 2. 系统健康诊断告警列表
+"""
+        warnings = diagnostics.get("warnings", [])
+        if not warnings:
+            report_content += "🎉 系统健康诊断：未检测到任何异常载荷或阻塞风险。你的 Windows 时间片调度环境非常健康。\n\n"
+        else:
+            for idx, w in enumerate(warnings, 1):
+                report_content += f"### {idx}. 【{w['level']}】{w['title']}\n* **分析建议**: {w['desc']}\n\n"
+
+        report_content += "\n## 🔍 3. 常驻内存 (RSS) 消耗前十名进程汇总\n以下是将同名多进程映像物理汇总后的消耗排名：\n\n"
         for i, g in enumerate(top_groups, 1):
             rss_str = f"{g['total_rss_mb']:.2f} MB"
             if g['total_rss_mb'] >= 1024:
                 rss_str = f"{g['total_rss_mb']/1024:.2f} GB"
-            report_content += f"{i}. **{g['name']}** (活动实例: {g['count']} 个) -> 累计占用: **{rss_str}** | 峰值 CPU: {g['max_cpu']:.1f}%\n"
+            report_content += f"{i}. **{g['name']}** (活动实例: {g['count']} 个) -> 累计占用: **{rss_str}** | 峰值 CPU: {g['max_cpu']:.1f}% | 线程数: {g.get('total_threads', 0)}\n"
 
         report_content += """
-## ⚡ 3. 智能优化建议
-1. 当前系统开发环境组件 (Antigravity.exe & language_server) 及日常办公 (WeChat / Edge) 占据了大量缓存。
-2. 建议对常驻后台的微信小程序渲染进程 `WeChatAppEx.exe` 及闲置 `powershell.exe` 进行定期清理，可以直接释放 2GB 以上内存。
-3. 行情系统主控 `instock_MonitorTK_Nuita.exe` 当前占用属于多进程并发架构下的安全阈值，无需担忧。
+## ⚡ 4. 智能优化建议与卡顿排查
+1. **微信小程序 WeChatAppEx.exe**: 实盘交易时段常驻后台占用了 100+ 线程与 1.5GB+ 内存，是 OS 线程时间片碎片化竞争的元凶，建议退出微信或点击一键清理。
+2. **通达信 & 同花顺**: 频繁的 CreateThread / ExitThread 内核调用容易引起 system 调度过载，建议交易完毕后关闭或重启。
+3. **磁盘 I/O 阻塞**: 若磁盘队列 >= 2.0，建议打开 Windows 的资源监视器 `resmon.exe` -> 磁盘页，排查大文件（如 HDF5 读写）的读写冲突。
 """
         
         # 写入临时文件
