@@ -1,3 +1,8 @@
+## 2026-06-17 19:50
+- [x] **优化窗口坐标分类管理器 UI 表格双击编辑与回填功能 (Optimized Window Layout Table Double-Click Edit & Fillback Trigger)**：
+    - [x] **实现按列智能交互分流 (Column-Specific Interactivity Branching)**：重构了 `webTools/window_manager/ui.py` 中的 `on_table_cell_double_clicked` 动作。当双击第 0 列（窗口匹配标识）时，执行“窗口置顶并激活”逻辑；当双击第 2 列（当前桌面实际位置）时，触发“单项快速回填配置坐标”；双击第 1 列（配置坐标）等其他可编辑列时，通过显式调用 `self.table_widget.editItem(item)` 手动触发编辑，防止全局 `NoEditTriggers` 阻止了双击编辑，同时避免了第 0 列在双击置顶时误入编辑状态，实现了更符合用户预期、更加清爽且高效率的交互体验。
+    - [x] **将单项快速回填改为双击触发 (Changed Quick Fillback to Double-Click)**：将原本在 `on_table_cell_clicked` 中的第 2 列单击自动回填逻辑彻底移除，并转移合并至双击事件中，避免在普通选取行或浏览时的误点击导致配置坐标被覆盖。
+
 ## 2026-06-17 15:45
 - [x] **根治 V型反转 (V-Reversal) 状态机无限重入导致潜伏池满溢与信号哑默漏洞 (Resolved V-Reversal Loop Leak, Cooldown Protection & Signal Recovery)**：
     - [x] **实现日内/交易日级淘汰隔离冷却机制 (Implemented Cooldown Gate)**：在 `update_wave_structure_state` 的 `INIT` 状态添加冷却机制。若该股此前因为超时或跌破支撑被淘汰，则记录 `last_fail_ts`；在此后至少 240 分钟（1个交易日）且不得在同一交易日内重新进入 `CONSOLIDATING` 潜伏监控池，彻底阻断了“被淘汰 -> 下一秒直接满足 < 6% 振幅 -> 瞬间拉回潜伏池并重置 entry_date 为当天”的逻辑死循环。

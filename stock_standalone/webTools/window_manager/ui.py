@@ -179,7 +179,10 @@ class CaptureWindowsDialog(QDialog):
         self.setWindowTitle("捕获当前桌面窗口坐标")
         self.resize(650, 450)
         self.selected_windows = []
+        self.all_windows = []
+        self.selected_set = set()
         self.init_ui()
+        self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
         self.refresh_windows()
 
     def init_ui(self):
@@ -193,6 +196,13 @@ class CaptureWindowsDialog(QDialog):
             QLabel {
                 color: #e0e0e0;
                 font-size: 12px;
+            }
+            QLineEdit {
+                background-color: #15151a;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 4px 6px;
             }
             QListWidget {
                 background-color: #15151a;
@@ -243,6 +253,7 @@ class CaptureWindowsDialog(QDialog):
         # 窗口列表
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         layout.addWidget(self.list_widget)
 
         # 按钮栏
@@ -254,6 +265,20 @@ class CaptureWindowsDialog(QDialog):
         
         btn_layout.addWidget(self.btn_select_all)
         btn_layout.addWidget(self.btn_refresh)
+        
+        # 添加关键字过滤搜索框
+        btn_layout.addWidget(QLabel(" 🔍 过滤:"))
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("输入关键字快速匹配...")
+        self.txt_search.setFixedWidth(160)
+        self.txt_search.textChanged.connect(self.filter_windows)
+        btn_layout.addWidget(self.txt_search)
+        
+        # 添加清空按钮
+        self.btn_clear_search = QPushButton("清空")
+        self.btn_clear_search.clicked.connect(self.clear_search)
+        btn_layout.addWidget(self.btn_clear_search)
+        
         btn_layout.addStretch()
 
         self.btn_cancel = QPushButton("取消")
@@ -270,8 +295,17 @@ class CaptureWindowsDialog(QDialog):
         for i in range(self.list_widget.count()):
             self.list_widget.item(i).setSelected(True)
 
+    def on_selection_changed(self):
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if item.isSelected():
+                self.selected_set.add(item_data)
+            else:
+                self.selected_set.discard(item_data)
+
     def refresh_windows(self):
-        self.list_widget.clear()
+        self.selected_set.clear()
         # 获取所有可见窗口
         win_list = core.list_visible_windows()
         
@@ -298,19 +332,147 @@ class CaptureWindowsDialog(QDialog):
             if not exclude:
                 filtered_wins.append(w)
                 
-        # 按标题排序并添加到列表
+        # 按标题排序并存入 self.all_windows
         filtered_wins.sort(key=lambda x: x.title.lower())
+        self.all_windows = []
         for w in filtered_wins:
-            item = QListWidgetItem(f"{w.title}  [{w.left},{w.top},{w.width},{w.height}]")
-            # 存储窗口数据 (包含捕捉到的进程启动路径)
             exe_path = getattr(w, 'exe_path', '')
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, (w.title, f"{w.left},{w.top},{w.width},{w.height}", exe_path))
+            self.all_windows.append((w.title, f"{w.left},{w.top},{w.width},{w.height}", exe_path))
+            
+        self.filter_windows()
+
+    def filter_windows(self):
+        # 暂时断开选择变化信号，防止 clear() 以及重新填充时频繁触发 selected_set 的更新
+        try:
+            self.list_widget.itemSelectionChanged.disconnect(self.on_selection_changed)
+        except (TypeError, RuntimeError):
+            pass
+
+        self.list_widget.clear()
+        search_kw = self.txt_search.text().strip().lower()
+        
+        for title, pos_str, exe_path in self.all_windows:
+            if search_kw and search_kw not in title.lower() and search_kw not in exe_path.lower():
+                continue
+            
+            item = QListWidgetItem(f"{title}  [{pos_str}]")
+            item_data = (title, pos_str, exe_path)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, item_data)
             self.list_widget.addItem(item)
+            
+            # 如果之前在选中列表中，恢复选中状态
+            if item_data in self.selected_set:
+                item.setSelected(True)
+                
+        # 重新绑定选择变化信号
+        self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
 
     def accept_selection(self):
-        self.selected_windows = []
-        for item in self.list_widget.selectedItems():
-            self.selected_windows.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
+        self.selected_windows = list(self.selected_set)
+        self.accept()
+
+    def clear_search(self):
+        self.txt_search.clear()
+
+    def on_item_double_clicked(self, item):
+        item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if item_data:
+            title, pos_str, exe_path = item_data
+            core.bring_window_to_top_by_title(title)
+
+
+class EditPathDialog(QDialog):
+    """编辑程序路径对话框，支持手动输入与文件浏览"""
+    def __init__(self, title, current_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"编辑程序路径 - {title}")
+        self.resize(500, 140)
+        self.final_path = ""
+        self.current_path = current_path
+        self.init_ui()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e24;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 12px;
+            }
+            QLineEdit {
+                background-color: #15151a;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #2e2e38;
+                border: 1px solid #4a4a56;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+            }
+            QPushButton#btnConfirm {
+                background-color: #0ea5e9;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnConfirm:hover {
+                background-color: #0284c7;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        layout.addWidget(QLabel("程序可执行文件路径 (留空表示不自动启动):"))
+        
+        row = QHBoxLayout()
+        self.txt_path = QLineEdit(self.current_path)
+        row.addWidget(self.txt_path, stretch=4)
+        
+        self.btn_browse = QPushButton("浏览...")
+        self.btn_browse.clicked.connect(self.browse_file)
+        row.addWidget(self.btn_browse, stretch=1)
+        layout.addLayout(row)
+        
+        layout.addSpacing(10)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("确定")
+        self.btn_confirm.setObjectName("btnConfirm")
+        self.btn_confirm.clicked.connect(self.accept_path)
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_confirm)
+        layout.addLayout(btn_layout)
+
+    def browse_file(self):
+        from PyQt6.QtWidgets import QFileDialog
+        import os
+        initial_dir = ""
+        if self.txt_path.text().strip():
+            dir_name = os.path.dirname(self.txt_path.text().strip())
+            if os.path.exists(dir_name):
+                initial_dir = dir_name
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择可执行程序/脚本", 
+            initial_dir, 
+            "可执行文件 (*.exe *.bat *.cmd *.py);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.txt_path.setText(os.path.normpath(file_path))
+
+    def accept_path(self):
+        self.final_path = self.txt_path.text().strip()
         self.accept()
 
 
@@ -1254,22 +1416,8 @@ class WindowPosManagerUI(QMainWindow):
         self.table_widget.blockSignals(False)
 
     def on_table_cell_clicked(self, row, column):
-        """点击单元格触发快速交互：如果点击第三列(当前位置)且数据有变，则直接回填至第二列配置中"""
-        if column == 2:
-            cur_item = self.table_widget.item(row, 2)
-            pos_item = self.table_widget.item(row, 1)
-            title_item = self.table_widget.item(row, 0)
-            
-            if cur_item and pos_item and title_item:
-                cur_text = cur_item.text().strip()
-                # 只有是合格的 X,Y,W,H 坐标格式才可更新
-                if re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text):
-                    cfg_text = pos_item.text().strip()
-                    if cur_text != cfg_text:
-                        pos_item.setText(cur_text)
-                        self.refresh_current_positions()
-                        self.save_current_table_to_memory()
-                        self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
+        """点击单元格触发快速交互：保留接口备用，原本的第2列单击回填已移至双击触发"""
+        pass
 
     def center_window_on_current_screen(self, row):
         """将选定行的窗口物理居中移动到其自身当前所在的屏幕(未运行时回退至本程序所在屏幕)，并同步回写配置与当前位置"""
@@ -1425,13 +1573,16 @@ class WindowPosManagerUI(QMainWindow):
                     break
         
         start_action = None
+        start_admin_action = None
         if exe_path and os.path.exists(exe_path):
             start_action = menu.addAction(f"🚀 启动程序 ({os.path.basename(exe_path)})")
+            start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({os.path.basename(exe_path)})")
             menu.addSeparator()
 
         activate_action = menu.addAction("📌 窗口置顶并激活")
         center_action = menu.addAction("📺 居中显示于程序所在屏幕")
         edit_action = menu.addAction("✏️ 编辑该单元格")
+        edit_path_action = menu.addAction("⚙️ 编辑程序启动路径")
         action = menu.exec(self.table_widget.mapToGlobal(pos))
         
         if start_action and action == start_action:
@@ -1439,64 +1590,127 @@ class WindowPosManagerUI(QMainWindow):
             try:
                 import subprocess
                 subprocess.Popen(exe_path, cwd=os.path.dirname(exe_path))
-                
-                # 程序启动后自动布局轮询
-                pos_str = pos_item.text().strip()
-                def wait_and_apply(attempts=0):
-                    if attempts > 30: # 尝试30次，共15秒
-                        self.log(f"⚠️ 启动程序 '{title}' 等待窗口创建超时，放弃自动应用布局。")
-                        return
-                        
-                    titles_to_try = [title]
-                    if title.endswith('.py') and not title.startswith('py'):
-                        titles_to_try.append(title.replace('.py', '.exe'))
-                    elif title.endswith('.exe'):
-                        titles_to_try.append(title.replace('.exe', '.py'))
-                        
-                    moved = False
-                    for t in titles_to_try:
-                        if core.set_window_pos_by_title(t, pos_str):
-                            self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}]")
-                            self.refresh_current_positions()
-                            moved = True
-                            break
-                            
-                    if not moved:
-                        QtCore.QTimer.singleShot(500, lambda: wait_and_apply(attempts + 1))
-                        
-                # 给予进程初始创建时间 1.5 秒后开始高频轮询探测
-                QtCore.QTimer.singleShot(1500, wait_and_apply)
-                
+                self._setup_post_launch_layout_timer(title, pos_item)
+            except OSError as e:
+                # 针对 WinError 740 (需要管理员权限) 进行自适应提权启动
+                if getattr(e, 'winerror', None) == 740 or "740" in str(e):
+                    self.log(f"⚠️ 检测到启动需要权限 (WinError 740)，尝试以管理员身份提权启动...")
+                    self._launch_as_admin(exe_path, title, pos_item)
+                else:
+                    QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
+                    self.log(f"启动程序失败: {e}")
             except Exception as e:
                 QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
                 self.log(f"启动程序失败: {e}")
+        elif start_admin_action and action == start_admin_action:
+            self.log(f"正在以管理员身份启动程序: {exe_path}")
+            self._launch_as_admin(exe_path, title, pos_item)
         elif action == activate_action:
             self.on_table_cell_double_clicked(row, 0)
         elif action == center_action:
             self.center_window_on_current_screen(row)
         elif action == edit_action:
             self.table_widget.editItem(item)
+        elif action == edit_path_action:
+            dialog = EditPathDialog(title, exe_path, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                new_path = dialog.final_path
+                if pos_item:
+                    pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, new_path)
+                    self.save_current_table_to_memory()
+                    self.request_save_config_debounced()
+                    self.log(f"🎯 已更新程序 '{title}' 的启动路径 ➡ {new_path}")
+                    self.on_resolution_changed()
+
+    def _setup_post_launch_layout_timer(self, title, pos_item):
+        """程序启动后启动定时器，高频轮询检测窗口创建并应用坐标"""
+        pos_str = pos_item.text().strip()
+        def wait_and_apply(attempts=0):
+            if attempts > 30: # 尝试30次，共15秒
+                self.log(f"⚠️ 启动程序 '{title}' 等待窗口创建超时，放弃自动应用布局。")
+                return
+                
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            moved = False
+            for t in titles_to_try:
+                if core.set_window_pos_by_title(t, pos_str):
+                    self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}]")
+                    self.refresh_current_positions()
+                    moved = True
+                    break
+                    
+            if not moved:
+                QtCore.QTimer.singleShot(500, lambda: wait_and_apply(attempts + 1))
+                
+        # 给予进程初始创建时间 1.5 秒后开始高频轮询探测
+        QtCore.QTimer.singleShot(1500, wait_and_apply)
+
+    def _launch_as_admin(self, exe_path, title, pos_item):
+        """通过 os.startfile(..., 'runas') 提权以管理员身份启动程序"""
+        try:
+            import os
+            os.startfile(exe_path, 'runas')
+            self._setup_post_launch_layout_timer(title, pos_item)
+        except OSError as e:
+            # WinError 1223 表示用户取消了 UAC 提权
+            if getattr(e, 'winerror', None) == 1223 or "1223" in str(e):
+                self.log(f"ℹ️ 用户取消了 UAC 权限请求，放弃以管理员身份启动。")
+            else:
+                QMessageBox.warning(self, "启动失败", f"无法以管理员身份启动程序: {e}")
+                self.log(f"以管理员身份启动程序失败: {e}")
+        except Exception as e:
+            QMessageBox.warning(self, "启动失败", f"无法以管理员身份启动程序: {e}")
+            self.log(f"以管理员身份启动程序失败: {e}")
 
     def on_table_cell_double_clicked(self, row, column):
-        """双击单元格默认动作：将选中的窗口置顶并激活"""
-        title_item = self.table_widget.item(row, 0)
-        if not title_item or not title_item.text().strip():
-            return
+        """双击单元格动作：
+        - 窗口匹配标识(第0列)双击：自动置顶并激活窗口
+        - 当前桌面实际位置(第2列)双击：触发单项快速回填配置坐标
+        - 其他列(如第1列)双击：恢复双击编辑功能
+        """
+        if column == 0:
+            title_item = self.table_widget.item(row, 0)
+            if not title_item or not title_item.text().strip():
+                return
+                
+            title = title_item.text().strip()
+            self.log(f"正在尝试将窗口置顶并激活: '{title}'...")
+            success = core.bring_window_to_top_by_title(title)
+            if success:
+                self.log(f"✅ 成功置顶并激活窗口: '{title}'")
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "置顶失败", 
+                    f"未能在桌面上匹配定位到运行中的窗口: '{title}'\n\n"
+                    "请确认:\n1. 目标程序是否确实已正常运行且主界面已打开。\n"
+                    "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
+                )
+                self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
+        elif column == 2:
+            cur_item = self.table_widget.item(row, 2)
+            pos_item = self.table_widget.item(row, 1)
+            title_item = self.table_widget.item(row, 0)
             
-        title = title_item.text().strip()
-        self.log(f"正在尝试将窗口置顶并激活: '{title}'...")
-        success = core.bring_window_to_top_by_title(title)
-        if success:
-            self.log(f"✅ 成功置顶并激活窗口: '{title}'")
+            if cur_item and pos_item and title_item:
+                cur_text = cur_item.text().strip()
+                # 只有是合格的 X,Y,W,H 坐标格式才可更新
+                if re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text):
+                    cfg_text = pos_item.text().strip()
+                    if cur_text != cfg_text:
+                        pos_item.setText(cur_text)
+                        self.refresh_current_positions()
+                        self.save_current_table_to_memory()
+                        self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
         else:
-            QMessageBox.warning(
-                self, 
-                "置顶失败", 
-                f"未能在桌面上匹配定位到运行中的窗口: '{title}'\n\n"
-                "请确认:\n1. 目标程序是否确实已正常运行且主界面已打开。\n"
-                "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
-            )
-            self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
+            item = self.table_widget.item(row, column)
+            if item and (item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable):
+                self.table_widget.editItem(item)
 
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""
