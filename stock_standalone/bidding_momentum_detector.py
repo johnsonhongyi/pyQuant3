@@ -1604,26 +1604,40 @@ class BiddingMomentumDetector:
 
     def _schedule_score_step(self):
         """
-        [Chunk Scheduler] 调度下一帧（10ms 后）。
-        使用 threading.Timer 实现与 Tk/Qt 无关的通用调度，
-        适配 DataProcessWorker（QThread）后台线程环境。
+        [Chunk Scheduler] 启动评分循环（单一后台线程，避免每帧 new threading.Timer）。
+        取消旧的 Timer 防止重叠；只在尚未有活跃 executor 任务时提交新任务。
         """
-        # 取消上一个 timer（防止重复触发）
+        # 取消上一个 timer（兼容旧逻辑，防止残留 Timer 重复触发）
         old = self._chunk_timer
         if old is not None:
             try: old.cancel()
             except Exception: pass
-        t = threading.Timer(0.010, self._score_step)  # 10ms 一帧
-        t.daemon = True
-        t.name = "ScoreChunkTimer"
-        self._chunk_timer = t
-        t.start()
+            self._chunk_timer = None
+
+        # [PERF] 用单一后台线程替代每帧 new threading.Timer
+        # 避免每次评分产生 ~55 个系统线程的创建/销毁开销
+        if not hasattr(self, '_score_executor') or self._score_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._score_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ScoreLoop")
+
+        self._score_executor.submit(self._score_loop)
+
+    def _score_loop(self):
+        """[PERF] 在单一后台线程内以 10ms yield 间隔逐帧执行，替代递归 threading.Timer 风暴"""
+        while self._score_active:
+            self._score_step_inner()
+            if self._score_active:
+                time.sleep(0.010)  # [YIELD] 让出 GIL 给 UI 线程，等价原 Timer(0.010)
 
     def _score_step(self):
+        """[兼容接口] 保留供外部可能的直接调用，内部转发到 _score_step_inner"""
+        self._score_step_inner()
+
+    def _score_step_inner(self):
         """
-        [Chunk Scheduler] Step 2（核心帧执行器）：
-        每次执行 _score_chunk_size 只个股的评估，然后调度下一帧。
-        全程无锁执行，帧间 GIL 完全释放给 UI 线程。
+        [Chunk Scheduler] 核心帧执行器：
+        每次执行 _score_chunk_size 只个股的评估。
+        全程无锁执行，帧间 time.sleep(0.010) 释放 GIL 给 UI 线程。
         """
         # ⭐ [GIL_MONITOR] 集中式埋点 (关闭时物理零开销，参数延迟求值)
         try:
@@ -1649,10 +1663,8 @@ class BiddingMomentumDetector:
             logger.warning(f"[ScoreChunk] error: {e}")
 
         self._score_index = end_idx
-        # [STREAMING] 标记本帧已评估的 codes 为舄（dirty），供 aggregate 增量定位受影响的 sector
+        # [STREAMING] 标记本帧已评估的 codes 为脏（dirty），供 aggregate 增量定位受影响的 sector
         self._sector_dirty_codes.update(chunk)
-
-        self._schedule_score_step()
 
     def _finish_score(self):
         """
@@ -1851,6 +1863,16 @@ class BiddingMomentumDetector:
             except Exception as e:
                 logger.warning(f"Error cancelling/joining BiddingMomentumDetector timer: {e}")
             self._chunk_timer = None
+
+        # [PERF-NEW] 关闭 score_loop 执行器（替代原 threading.Timer 风暴）
+        executor = getattr(self, '_score_executor', None)
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                try: executor.shutdown(wait=False)
+                except Exception: pass
+            self._score_executor = None
             
         # [NEW] 优雅关闭后台异步 worker 线程，彻底根除线程残留与退出假死
         if hasattr(self, '_stop_event'):

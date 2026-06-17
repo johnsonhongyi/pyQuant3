@@ -1,3 +1,24 @@
+## 2026-06-17 22:00
+- [x] **新增窗口捕获关键字快速过滤与修复东财核心进程 KeyError 崩溃 (Added Window Capturing Keyword Filter & Fixed Eastmoney Diagnostics KeyError)**：
+    - [x] **实现窗口捕获搜索框与模糊匹配过滤 (Implemented Capturing Window Filter & Fuzzy Matching)**：在“捕获当前桌面窗口坐标”对话框（`CaptureWindowsDialog`）底部按钮栏中，新增了 `🔍 过滤` 输入框。用户可在文本框中直接输入窗口标题或可执行程序路径关键字进行实时模糊过滤。
+    - [x] **新增搜索过滤清空按钮 (Added Clear Button for Filter Input)**：在过滤框右侧新增了“清空”按钮，点击后一键复位搜索关键字，立即在列表中重新渲染并完整显示捕获到的全部窗口。
+    - [x] **实现双击窗口项置顶前台展示 (Implemented Double-Click to Bring Window to Foreground)**：为窗口项列表绑定了 `itemDoubleClicked` 信号，用户双击列表中的任一进程行时，系统自动调用 `core.bring_window_to_top_by_title` 底层 API，一键将其在桌面上强行置顶、还原并激活到最前台，极大地方便了交易员甄别和定位目标窗口。
+    - [x] **完成多过滤状态下的增量选中恢复 (Implemented Selection Preservation Across Filters)**：重构了列表项的信号绑定与数据管理。通过引入内存全量窗口数据 `self.all_windows` 以及多选跟踪集合 `self.selected_set`，在用户频繁过滤和清空输入框时，能够无缝保持其他已被过滤隐藏项的选中状态，极大地提升了用户多选并导入窗口的交互体验。
+    - [x] **新增右键菜单编辑程序启动路径功能 (Added Right-Click Option to Edit Application Launch Path)**：针对系统某些窗口无法通过 Windows API 自动获取到有效可执行文件路径的局限，在窗口坐标规则表格的右键上下文菜单中，新增了 `⚙️ 编辑程序启动路径` 功能。允许用户通过新设计的 `EditPathDialog` 对话框手动输入/粘贴绝对路径，或者直接使用 `QFileDialog` 浏览并选取可执行文件（`.exe`、`.bat`、`.cmd`、`.py`），更新后自动触发内存数据同步与防抖存盘。
+    - [x] **根治系统诊断中心东财进程 KeyError 崩溃 (Fixed Eastmoney Process KeyError in Diagnostics Engine)**：修复了性能诊断工具 `sys_performance_analyzer.py` 在运行诊断时，由于在 `diagnostics["key_processes"]` 的初始化词典中遗漏了东方财富进程的键名，而前端依然对其进行累加与渲染，导致在首屏加载和定时刷新时抛出 `KeyError: 'mainfree'` 崩溃的 Bug。通过在初始化阶段补齐 `"mainfree"` 键，使诊断中心能够完美兼容并流畅地展示东财核心进程的线程数和物理内存指标。
+
+## 2026-06-17 21:45
+- [x] **修复坐标管理器外部程序启动权限限制与新增右键管理员运行 (Fixed App Launch Permission Issues & Added Run-As-Admin Option)**：
+    - [x] **实现右键“以管理员身份启动”选项 (Added Run-As-Admin Right-Click Item)**：在 `webTools/window_manager/ui.py` 的窗口坐标规则表格右键上下文菜单中，新增了 `🛡️ 以管理员身份启动` 动作，允许用户显式以特权模式拉起需要高权限的系统工具或量化终端。
+    - [x] **实现 WinError 740 自适应提权启动 (Implemented Auto-Elevation on Permission Block)**：针对用户运行 `resmon.exe` 等需要管理员特权的程序时引发的 `OSError: [WinError 740] 请求的操作需要提升` 权限异常，重构了 `show_context_menu` 中的启动捕获逻辑。一旦捕获到该错误，系统将自动使用 `os.startfile(exe_path, 'runas')` fallback 触发 Windows UAC 弹出授权提示，实现自愈拉起。
+    - [x] **完成 UAC 取消友好防护与启动后布局轮询重构 (Added UAC Denial Handling & DRY Refactor)**：在提权启动方法 `_launch_as_admin` 中加入了对 Windows `WinError 1223` (用户拒绝了 UAC 授权) 的友好捕获和静默日志输出，防止弹出二次报错框。同时，将程序启动后的等待窗口创建与自动应用坐标的轮询逻辑提取为独立的 `_setup_post_launch_layout_timer` 辅助方法，遵循 DRY 干净编码原则。
+
+## 2026-06-17 21:15
+- [x] **自适应系统重载线程分析与进程监控优化 (Adaptive Heavy Thread & Process Diagnostics Optimization)**：
+    - [x] **扩展非核心及新增东财核心进程监控 (Eastmoney & Non-Core Process Monitoring)**：在 `sys_performance_analyzer.py` 中重构了 `run_system_diagnostics` 逻辑。除量化Python、通达信、同花顺、微信外，正式将“东方财富（mainfree）”纳入核心进程统计分析。同时增加对系统内线程数 >= 20 的非核心进程进行自适应统计分析，提取线程数排名前 5 的重载进程并在诊断列表中进行自适应警告，引导交易员关闭对交易产生调度干扰的软件。
+    - [x] **升级诊断表格与导出 Markdown 体检报告**：将诊断页面中 `tree_key_stats` 表格高度调整为 10，自动以 `⚠️ [进程名]` 格式灌入其他活跃高负载进程的线程数和总内存；同步重构了 `generate_md_report` 方法，在导出的 Markdown 体检报告中增加专属板块列举非核心高负载进程，将系统报警线程阈值由 300 适配提升至 400。
+    - [x] **完成窗口对齐管理器双击分流与回填加固**：重构了 `webTools/window_manager/ui.py` 中的双击及单击行为。将单项快速回填从单击彻底移至双击事件，并且限制第 0 列双击仅触发置顶激活，第 1 列等可编辑列保留双击修改，完美分流了交互行为。
+
 ## 2026-06-17 19:50
 - [x] **优化窗口坐标分类管理器 UI 表格双击编辑与回填功能 (Optimized Window Layout Table Double-Click Edit & Fillback Trigger)**：
     - [x] **实现按列智能交互分流 (Column-Specific Interactivity Branching)**：重构了 `webTools/window_manager/ui.py` 中的 `on_table_cell_double_clicked` 动作。当双击第 0 列（窗口匹配标识）时，执行“窗口置顶并激活”逻辑；当双击第 2 列（当前桌面实际位置）时，触发“单项快速回填配置坐标”；双击第 1 列（配置坐标）等其他可编辑列时，通过显式调用 `self.table_widget.editItem(item)` 手动触发编辑，防止全局 `NoEditTriggers` 阻止了双击编辑，同时避免了第 0 列在双击置顶时误入编辑状态，实现了更符合用户预期、更加清爽且高效率的交互体验。

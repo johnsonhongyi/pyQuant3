@@ -1233,6 +1233,7 @@ class DataProcessWorker(QThread):
         # =========================================================================
         self._last_emit_ts = 0.0
         self._last_slow_log_ts = 0.0
+        self._last_stall_log_ts = 0.0   # [NEW] 独立节流: STALL 日志防刷屏 (30s)
         self._last_error_log_ts = 0.0
 
         # =========================================================================
@@ -1533,8 +1534,15 @@ class DataProcessWorker(QThread):
             # ================================================================
             dur = time.perf_counter() - start_time
             if dur > 0.3:
-                self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) counts: {total} slow: {dur:.3f}s")
-
+                # now_ts = time.time()
+                # if now_ts - self._last_stall_log_ts > 30:  # 30s 节流，防止每轮行情都刷 STALL 日志
+                #     self._last_stall_log_ts = now_ts
+                #     # [FIX] _score_codes 在 start_update_scores 内同步赋值，update_scores() 返回时已就位
+                #     # 代表本轮 Chunk Scheduler 实际计划处理的过滤后代码量（非上一轮滞后值）
+                #     actual_count = len(getattr(self.detector, '_score_codes', []) or [])
+                #     self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) input:{total} computed:{actual_count} slow: {dur:.3f}s")
+                actual_count = len(getattr(self.detector, '_score_codes', []) or [])
+                self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) input:{total} computed:{actual_count} slow: {dur:.3f}s")
             self.latest_df = df
 
             # [🚀 PERF] 异步分片模式下，此处立即 emit 会导致空刷新抢占 _last_refresh_ts，
@@ -2762,7 +2770,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_score_finished_callback(self):
         """[ROOT-FIX] 打分分片计算全部结束后的回调。
         通过 QObject 信号桥梁将刷新动作安全、线程合规地调度回主线程，彻底消除 QTimer 警告！"""
-        logger.warning("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh via SignalBridge.")
+        logger.debug("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh via SignalBridge.")
         with self._update_lock:
             self._force_update_requested = True
         
@@ -2961,13 +2969,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         try:
             now = time.time()
             
-            # [REFINED] 统一使用数据更新周期 (cct.duration_sleep_time) 控制 UI 渲染节奏
+            # [ALIGN] 完全遵从 duration_sleep_time：后台数据刷新多慢，UI 就多慢。
+            # 仅在用户触发（_force_update_requested）时可绕过时间门控立即刷新。
             try:
-                # [OPTIMIZE] 在交易活跃时稍微收紧节流 (最低 1s 渲染一次)，避免 UI 假死
-                limit = float(getattr(cct.CFG, 'duration_sleep_time', 5.0))
-                limit = max(1.0, limit)
+                limit = float(getattr(cct.CFG, 'duration_sleep_time', 30.0))
+                limit = max(5.0, limit)  # 最低 5s，避免极端配置下失控；不再强制 1s
             except:
-                limit = 5.0
+                limit = 30.0
                 
             with self._update_lock:
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
