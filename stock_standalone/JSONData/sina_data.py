@@ -2058,6 +2058,10 @@ class Sina:
 
         if not is_loader:
             # ⚡ [WAITER PATH] - 阻塞并在唤醒后通过 Ready Barrier 验证
+            if item and item.get('ready'):
+                # 💡 [OPTIMIZE] 如果已经有旧缓存数据，直接返回旧数据，不阻塞等待后台刷新
+                return item['df']
+
             if debug:
                 log.info(f"[SingleFlight] Waiter blocking for {table} ...")
             
@@ -2072,46 +2076,52 @@ class Sina:
                 return pd.DataFrame()
 
         # ⚡ [LOADER PATH] - 进入 IO 执行 (Level 6: Production Stable)
-        try:
-            if debug:
-                log.info(f"[SingleFlight] Loader starting IO: {table}")
-            
-            h5_hist = self.agg_cache.getkey(cache_key_df)
-            last_time = self.agg_cache.getkey(cache_key_time)
-
-            need_load = (
-                h5_hist is None or 
-                last_time is None or 
-                (time.time() - float(last_time) > limit_time and cct.get_work_time_duration())
-            )
-
-            if need_load:
-                with timed_ctx(f"load_h5_{table}", warn_ms=1000):
-                    h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
+        def _do_load():
+            try:
+                if debug:
+                    log.info(f"[SingleFlight] Loader starting IO: {table}")
                 
-                if h5_hist is not None and not h5_hist.empty:
-                    # [OPTIMIZE] 不再使用 agg_cache (GlobalValues) 持久化 172MB 的巨型数据，
-                    # 避免在 builtins 中产生双重引用导致无法 GC 内存暴涨。
-                    # 统一交由 _MEM_CACHE 和 limit_time 处理 L1 软缓存
-                    self.agg_cache.setkey(cache_key_time, time.time())
-            
-            # ⚡ [1. CACHE WRITE] 先写缓存和 Ready 标志 (确保数据可见性)
-            if h5_hist is not None and not h5_hist.empty:
-                self._MEM_CACHE[table] = {
-                    'df': h5_hist, 
-                    'last_time': time.time(),
-                    'ready': True 
-                }
-            
-            return h5_hist if h5_hist is not None else pd.DataFrame()
+                h5_hist = self.agg_cache.getkey(cache_key_df)
+                last_time = self.agg_cache.getkey(cache_key_time)
 
-        finally:
-            # ⚡ [2. STATE CLEANUP] 先清理加载状态，[3. SIGNAL] 最后唤醒 Waiters
-            # 必须在 finally 中单次唤醒，确保 Waiters 醒来时 Loading 状态已同步清理
-            with self._LOAD_LOCK:
-                if self._LOADING_ST.get(table) == event:
-                    del self._LOADING_ST[table]
-            event.set() 
+                need_load = (
+                    h5_hist is None or 
+                    last_time is None or 
+                    (time.time() - float(last_time) > limit_time and cct.get_work_time_duration())
+                )
+
+                if need_load:
+                    with timed_ctx(f"load_h5_{table}", warn_ms=1000):
+                        h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
+                    
+                    if h5_hist is not None and not h5_hist.empty:
+                        self.agg_cache.setkey(cache_key_time, time.time())
+                
+                # ⚡ [1. CACHE WRITE] 先写缓存和 Ready 标志 (确保数据可见性)
+                if h5_hist is not None and not h5_hist.empty:
+                    self._MEM_CACHE[table] = {
+                        'df': h5_hist, 
+                        'last_time': time.time(),
+                        'ready': True 
+                    }
+            except Exception as e:
+                log.error(f"[SingleFlight] _do_load Exception for {table}: {e}")
+            finally:
+                # ⚡ [2. STATE CLEANUP] 先清理加载状态，[3. SIGNAL] 最后唤醒 Waiters
+                with self._LOAD_LOCK:
+                    if self._LOADING_ST.get(table) == event:
+                        del self._LOADING_ST[table]
+                event.set() 
+
+        # 💡 [OPTIMIZE] 如果已有旧缓存（非冷启动），则派发到后台线程执行，立即返回旧数据
+        if item and item.get('ready'):
+            threading.Thread(target=_do_load, name=f"HDF5_AsyncLoader_{table}", daemon=True).start()
+            return item['df']
+        else:
+            # 冷启动，必须同步阻塞执行
+            _do_load()
+            res = self._MEM_CACHE.get(table)
+            return res['df'] if res and res.get('ready') else pd.DataFrame()
 
     def get_sina_MultiIndex_data(self):
         """兼容性包装：使用统一缓存获取 MultiIndex 数据"""

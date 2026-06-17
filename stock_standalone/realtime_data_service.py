@@ -3326,16 +3326,22 @@ class DataPublisher:
 
     def warm_up_favorites(self):
         """系统冷启动时，自动为所有重点关注个股预热历史轨迹，完成全量状态机初始化"""
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_codes = GlobalFavoriteManager().get_favorite_stocks()
-            if fav_codes:
-                logger.info(f"🚀 [WarmUp] 正在为 {len(fav_codes)} 只重点关注个股预热 V型反转状态机...")
-                for code in fav_codes:
-                    if code not in self.kline_cache._supplemented_codes:
-                        self.kline_cache._supplemental_fetch(code)
-        except Exception as e:
-            logger.error(f"⚠️ [WarmUp] 重点关注个股预热失败: {e}")
+        def _do_warmup():
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_codes = GlobalFavoriteManager().get_favorite_stocks()
+                if fav_codes:
+                    logger.info(f"🚀 [WarmUp] 正在为 {len(fav_codes)} 只重点关注个股异步预热 V型反转状态机...")
+                    for code in fav_codes:
+                        if code not in self.kline_cache._supplemented_codes:
+                            self.kline_cache._supplemental_fetch(code)
+                    logger.info(f"✅ [WarmUp] {len(fav_codes)} 只重点关注个股预热完成。")
+            except Exception as e:
+                logger.error(f"⚠️ [WarmUp] 重点关注个股预热失败: {e}")
+                
+        # [OPTIMIZE] 后台异步执行预热，避免阻塞主线程及导致子进程(如 Linkage Service)启动延迟长达 5 秒
+        import threading
+        threading.Thread(target=_do_warmup, name="WarmUpFavorites", daemon=True).start()
 
     def get_55188_data(self, code: Optional[str] = None) -> dict[str, Any]:
         """获取指定的 55188 外部数据 (人气、主力排名、题材、板块得分等)"""
