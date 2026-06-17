@@ -7,13 +7,15 @@
 import sys
 import os
 import re
+import keyboard
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
-    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu
+    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon
 )
+from PyQt6.QtGui import QAction, QIcon
 
 # 导入核心模块
 try:
@@ -22,6 +24,47 @@ except ImportError:
     import core
 
 
+class HotkeyLineEdit(QLineEdit):
+    """自动捕获按键组合的输入框"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 设置为只读模式以防止传统输入字符，改由事件拦截处理
+        self.setReadOnly(True)
+        self.setPlaceholderText("点击后直接按下快捷键...")
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        
+        # 退格、删除或 ESC 清空快捷键
+        if key in (QtCore.Qt.Key.Key_Backspace, QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Escape):
+            self.setText("")
+            return
+            
+        # 忽略单纯的修饰键按下
+        if key in (QtCore.Qt.Key.Key_Control, QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_Alt, QtCore.Qt.Key.Key_Meta, QtCore.Qt.Key.Key_unknown):
+            return
+            
+        key_str = []
+        if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+            key_str.append("ctrl")
+        if modifiers & QtCore.Qt.KeyboardModifier.AltModifier:
+            key_str.append("alt")
+        if modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            key_str.append("shift")
+        if modifiers & QtCore.Qt.KeyboardModifier.MetaModifier:
+            key_str.append("win")
+            
+        # 提取最终键名
+        key_name = QtGui.QKeySequence(key).toString().lower()
+        # 剥离多余的修饰符字符串
+        key_name = key_name.replace("ctrl+", "").replace("alt+", "").replace("shift+", "").replace("meta+", "")
+        
+        if key_name:
+            key_str.append(key_name)
+            self.setText("+".join(key_str))
+            
+            
 class NewResolutionDialog(QDialog):
     """
     新建配置方案对话框
@@ -273,14 +316,116 @@ class CaptureWindowsDialog(QDialog):
 
 class WindowPosManagerUI(QMainWindow):
     """主窗口：窗口坐标及分布管理器"""
+    toggle_ui_signal = QtCore.pyqtSignal()
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("股票交易终端 - 窗口坐标分类管理器")
         self.resize(980, 700)
+        self._hotkey_hook = None
         self.config_manager = core.ConfigManager()
+        self.current_bound_hotkey = self.config_manager.config_data.get("global_hotkey", "ctrl+alt+w")
         self.init_ui()
         self.load_screen_info()
         self.refresh_resolutions_combo()
+        self.setup_tray_icon()
+        self.bind_hotkey(self.current_bound_hotkey)
+        self.toggle_ui_signal.connect(self.toggle_visibility)
+        
+        # 允许驻留后台
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def setup_tray_icon(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        
+        tray_menu = QMenu(self)
+        show_action = tray_menu.addAction("显示主界面")
+        show_action.triggered.connect(self.showNormal)
+        quit_action = tray_menu.addAction("完全退出")
+        quit_action.triggered.connect(self.force_quit)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+        self.tray_icon.activated.connect(self.on_tray_activated)
+        
+    def force_quit(self):
+        try:
+            if getattr(self, '_hotkey_hook', None):
+                keyboard.remove_hotkey(self._hotkey_hook)
+        except:
+            pass
+        QApplication.instance().quit()
+        
+    def on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.toggle_visibility()
+            
+    def closeEvent(self, event):
+        if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            self.hide()
+            self.log("界面已隐藏至状态栏。")
+            event.ignore()
+        else:
+            try:
+                if getattr(self, '_hotkey_hook', None):
+                    keyboard.remove_hotkey(self._hotkey_hook)
+            except:
+                pass
+            event.accept()
+            
+    def toggle_visibility(self):
+        if self.isVisible():
+            if self.isActiveWindow():
+                self.hide()
+            else:
+                self._force_show_and_top()
+        else:
+            self._force_show_and_top()
+            
+    def _force_show_and_top(self):
+        # 取消永久置顶属性，改为正常显示状态
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+        
+        # 使用底层 API 强制夺取 Windows 前台焦点
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            # 模拟轻按 Alt 键以绕过 Windows 系统的焦点抢夺拦截限制
+            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0) # Alt Down
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0) # Alt Up
+        except Exception:
+            pass
+            
+    def bind_hotkey(self, hotkey_str):
+        if not hotkey_str:
+            return False
+        try:
+            if getattr(self, '_hotkey_hook', None):
+                keyboard.remove_hotkey(self._hotkey_hook)
+                self._hotkey_hook = None
+            self._hotkey_hook = keyboard.add_hotkey(hotkey_str, self.toggle_ui_signal.emit)
+            self.current_bound_hotkey = hotkey_str
+            self.log(f"已绑定全局热键: {hotkey_str}")
+            return True
+        except Exception as e:
+            self.log(f"绑定热键失败: {e}")
+            return False
+            
+    def on_bind_hotkey_clicked(self):
+        new_hk = self.le_hotkey.text().strip()
+        if new_hk:
+            success = self.bind_hotkey(new_hk)
+            if success:
+                self.config_manager.config_data["global_hotkey"] = new_hk
+                self.config_manager.save()
+                QMessageBox.information(self, "绑定测试成功", f"✅ 热键【{new_hk}】测试绑定成功并已保存！\n您可以立即按下该组合键测试隐藏/呼出效果。")
+            else:
+                QMessageBox.warning(self, "绑定测试失败", f"❌ 热键【{new_hk}】绑定失败！\n这可能是因为系统热键冲突或是不支持该按键组合。\n请重新点击输入框录入其他快捷键。")
 
     def init_ui(self):
         # 全局深色现代 QSS 样式设计
@@ -496,8 +641,10 @@ class WindowPosManagerUI(QMainWindow):
         self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_widget.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_widget.itemChanged.connect(self.on_table_item_changed)
         self.table_widget.cellClicked.connect(self.on_table_cell_clicked)
+        self.table_widget.cellDoubleClicked.connect(self.on_table_cell_double_clicked)
         self.table_widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_widget.customContextMenuRequested.connect(self.show_context_menu)
         
@@ -544,6 +691,20 @@ class WindowPosManagerUI(QMainWindow):
 
         # 底部应用栏
         bottom_bar = QHBoxLayout()
+        
+        # --- 全局热键配置 ---
+        self.lbl_hotkey = QLabel("全局热键:")
+        bottom_bar.addWidget(self.lbl_hotkey)
+        
+        self.le_hotkey = HotkeyLineEdit()
+        self.le_hotkey.setFixedWidth(150)
+        self.le_hotkey.setText(getattr(self, 'current_bound_hotkey', ''))
+        bottom_bar.addWidget(self.le_hotkey)
+        
+        self.btn_bind_hotkey = QPushButton("绑定")
+        self.btn_bind_hotkey.clicked.connect(self.on_bind_hotkey_clicked)
+        bottom_bar.addWidget(self.btn_bind_hotkey)
+        
         bottom_bar.addStretch()
         
         self.btn_save_config = QPushButton("💾 保存配置")
@@ -555,6 +716,11 @@ class WindowPosManagerUI(QMainWindow):
         self.btn_apply_layout.setObjectName("btnApply")
         self.btn_apply_layout.clicked.connect(self.apply_current_layout)
         bottom_bar.addWidget(self.btn_apply_layout)
+        
+        self.btn_full_exit = QPushButton("❌ 完全退出")
+        self.btn_full_exit.setObjectName("btnDeleteRes") # 复用红色的删除按钮样式
+        self.btn_full_exit.clicked.connect(self.force_quit)
+        bottom_bar.addWidget(self.btn_full_exit)
         
         main_layout.addLayout(bottom_bar)
 
@@ -672,7 +838,31 @@ class WindowPosManagerUI(QMainWindow):
         self.table_widget.setRowCount(0)
         
         mapping = self.config_manager.get_resolution_mapping(res_name)
+        
+        # 分离运行中与未运行的规则，让已打开的程序默认显示在最上面
+        running_items = []
+        stopped_items = []
         for title, pos_str in mapping.items():
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            is_running = False
+            for t in titles_to_try:
+                if core.find_windows_by_title_safe(t):
+                    is_running = True
+                    break
+                    
+            if is_running:
+                running_items.append((title, pos_str))
+            else:
+                stopped_items.append((title, pos_str))
+                
+        sorted_mapping = running_items + stopped_items
+        
+        for title, pos_str in sorted_mapping:
             row = self.table_widget.rowCount()
             self.table_widget.insertRow(row)
             
@@ -1174,29 +1364,46 @@ class WindowPosManagerUI(QMainWindow):
         
         activate_action = menu.addAction("📌 窗口置顶并激活")
         center_action = menu.addAction("📺 居中显示于程序所在屏幕")
+        edit_action = menu.addAction("✏️ 编辑该单元格")
         action = menu.exec(self.table_widget.mapToGlobal(pos))
         
         if action == activate_action:
-            self.log(f"正在尝试将窗口置顶并激活: '{title}'...")
-            success = core.bring_window_to_top_by_title(title)
-            if success:
-                self.log(f"✅ 成功置顶并激活窗口: '{title}'")
-            else:
-                QMessageBox.warning(
-                    self, 
-                    "置顶失败", 
-                    f"未能在桌面上匹配定位到运行中的窗口: '{title}'\n\n"
-                    "请确认:\n1. 目标程序是否确实已正常运行且主界面已打开。\n"
-                    "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
-                )
-                self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
+            self.on_table_cell_double_clicked(row, 0)
         elif action == center_action:
             self.center_window_on_current_screen(row)
+        elif action == edit_action:
+            self.table_widget.editItem(item)
+
+    def on_table_cell_double_clicked(self, row, column):
+        """双击单元格默认动作：将选中的窗口置顶并激活"""
+        title_item = self.table_widget.item(row, 0)
+        if not title_item or not title_item.text().strip():
+            return
+            
+        title = title_item.text().strip()
+        self.log(f"正在尝试将窗口置顶并激活: '{title}'...")
+        success = core.bring_window_to_top_by_title(title)
+        if success:
+            self.log(f"✅ 成功置顶并激活窗口: '{title}'")
+        else:
+            QMessageBox.warning(
+                self, 
+                "置顶失败", 
+                f"未能在桌面上匹配定位到运行中的窗口: '{title}'\n\n"
+                "请确认:\n1. 目标程序是否确实已正常运行且主界面已打开。\n"
+                "2. 窗口标题是否匹配该关键字（支持模糊匹配）。"
+            )
+            self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
 
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""
         self.save_current_table_to_memory()
         
+        new_hk = self.le_hotkey.text().strip()
+        if new_hk:
+            self.config_manager.config_data["global_hotkey"] = new_hk
+            self.bind_hotkey(new_hk)
+            
         if self.config_manager.save():
             QMessageBox.information(self, "成功", "配置文件已成功按分类持久化保存到磁盘！")
             self.log("配置文件已写入磁盘 window_layout_config.json。")
