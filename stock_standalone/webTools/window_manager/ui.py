@@ -682,6 +682,14 @@ class WindowPosManagerUI(QMainWindow):
             QPushButton#btnDeleteRes:hover {
                 background-color: #dc2626;
             }
+            QPushButton#btnPerf {
+                background-color: #8b5cf6;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnPerf:hover {
+                background-color: #7c3aed;
+            }
             QTableWidget {
                 background-color: #16161a;
                 border: 1px solid #2a2a32;
@@ -869,6 +877,11 @@ class WindowPosManagerUI(QMainWindow):
         
         bottom_bar.addStretch()
         
+        self.btn_open_perf = QPushButton("📐 性能分析")
+        self.btn_open_perf.setObjectName("btnPerf")
+        self.btn_open_perf.clicked.connect(self.open_performance_analyzer)
+        bottom_bar.addWidget(self.btn_open_perf)
+        
         self.btn_save_config = QPushButton("💾 保存配置")
         self.btn_save_config.setObjectName("btnSave")
         self.btn_save_config.clicked.connect(self.save_all_config)
@@ -891,6 +904,63 @@ class WindowPosManagerUI(QMainWindow):
     def log(self, text: str):
         """输出一条日志"""
         self.log_output.append(f"[{QtCore.QTime.currentTime().toString('hh:mm:ss')}] {text}")
+
+    def open_performance_analyzer(self):
+        """以独立多进程/子进程形式拉起系统性能与内存诊断分析器"""
+        is_running = False
+        if hasattr(self, '_detailed_analysis_process') and self._detailed_analysis_process:
+            # 兼容 mp.Process 和 subprocess.Popen
+            if hasattr(self._detailed_analysis_process, 'is_alive'):
+                is_running = self._detailed_analysis_process.is_alive()
+            elif hasattr(self._detailed_analysis_process, 'poll'):
+                is_running = self._detailed_analysis_process.poll() is None
+                
+        if is_running:
+            try:
+                # 尝试置顶已有的窗口
+                core.bring_window_to_top_by_title("量化系统后台性能")
+                self.log("ℹ️ 系统性能分析器已在后台运行中，请检查任务栏。")
+                return
+            except Exception:
+                pass
+
+        # 尝试使用 multiprocessing 安全拉起
+        try:
+            import multiprocessing as mp
+            mp.freeze_support()
+            
+            # 为了能在 sys.path 中找到 sys_performance_analyzer，我们需要将项目根目录加入 sys.path
+            app_root = core.get_app_root()
+            if app_root not in sys.path:
+                sys.path.insert(0, app_root)
+                
+            from sys_performance_analyzer import launch_analyzer
+            
+            proc = mp.Process(
+                target=launch_analyzer,
+                name="SystemPerformanceAnalyzer",
+                daemon=True
+            )
+            proc.start()
+            self._detailed_analysis_process = proc
+            self.log(f"🚀 系统性能分析诊断器子进程成功拉起 (PID: {proc.pid})")
+        except Exception as e:
+            self.log(f"❌ 无法以多进程形式启动系统性能分析器: {e}")
+            # fallback: 尝试用 subprocess.Popen 拉起
+            try:
+                import subprocess
+                app_root = core.get_app_root()
+                script_path = os.path.join(app_root, "sys_performance_analyzer.py")
+                if os.path.exists(script_path):
+                    # 在非 frozen 环境下使用 python 运行脚本
+                    proc = subprocess.Popen([sys.executable, script_path], creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
+                    self._detailed_analysis_process = proc
+                    self.log(f"🚀 [Fallback] 通过 subprocess 成功拉起性能分析器脚本 (PID: {proc.pid})")
+                else:
+                    QMessageBox.critical(self, "启动失败", f"找不到性能分析器脚本，且多进程启动失败:\n{e}")
+            except Exception as ex:
+                self.log(f"❌ Fallback 启动也失败: {ex}")
+                QMessageBox.critical(self, "启动失败", f"无法启动系统性能分析器:\n{ex}")
 
     def save_physical_screen_layout(self):
         """保存当前多显示器的物理排布与相对坐标到磁盘"""

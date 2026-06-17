@@ -33,7 +33,8 @@ a = Analysis(
         'configobj',
         'JohnsonUtil.johnson_cons',
         'JohnsonUtil.LoggerFactory',
-        'JohnsonUtil.commonTips'
+        'JohnsonUtil.commonTips',
+        'sys_performance_analyzer'
     ],
     excludes=[
         'a_trade_calendar',
