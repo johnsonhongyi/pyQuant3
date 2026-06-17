@@ -6378,13 +6378,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.df_all = full_df
                     self.df_all_res = full_df_res if full_df_res is not None else full_df
                 
-                # ⚡ [NEW] 主动强力注入交易内核特征预加载温热
+                # ⚡ [NEW] 主动强力注入交易内核特征预加载温热 (移至 compute_executor 异步执行以彻底释放主线程)
                 try:
                     from trading_kernel.kernel_service import get_kernel_service
                     kernel_srv = get_kernel_service()
                     if not kernel_srv._indicator_cache:
-                        logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache...")
-                        kernel_srv.update_df_all(full_df)
+                        logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache asynchronously...")
+                        self.compute_executor.submit(kernel_srv.update_df_all, full_df)
                 except Exception as ex:
                     logger.error(f"[Sync] Failed to proactively update df_all to kernel: {ex}")
                 
