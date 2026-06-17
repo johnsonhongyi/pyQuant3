@@ -1,3 +1,8 @@
+## 2026-06-17 14:25
+- [x] **修复 PyQtGraph 概念分析条形图闪烁定时器闭包 NameError 崩溃 (Fixed NameError in PyQtGraph Bar Flashing Timer Closure)**：
+    - [x] **默认参数绑定解决编译后自由变量生命周期异常**：在 `instock_MonitorTK.py` 中的嵌套定时回调函数 `flash_delta` 中，通过指定默认形参 `w_dict=w_dict` 与 `win=win`，将外部词法作用域中的自由变量强绑定至函数对象属性，防止在 Nuitka 编译环境下外层函数执行完毕、作用域栈销毁后导致定时器触发时抛出 `NameError: free variable 'w_dict' referenced before assignment in enclosing scope` 异常。
+    - [x] **加固类型与安全属性读取防护**：将 `flash_delta` 内部通过硬编码 `w_dict["delta_bars"]` 获取对象改写为基于 `isinstance(w_dict, dict)` 的 `w_dict.get("delta_bars")` 安全读取，规避空值或非常规数据引发的属性与键值错误，提升主控制台后台闪烁定时器的运行时健壮性。
+
 ## 2026-06-16 23:55
 - [x] **全局对齐使用参数存放配置文件并加固语音模块参数读取 (Aligned Voice Rate & Volume Parameters & Hardened Settings Reading)**：
     - [x] **物理对齐 SAPI 与 pyttsx3 引擎默认值**：将 `alert_manager.py` 中的 `getattr(cct, 'voice_rate', ...)` 和 `getattr(cct, 'voice_volume', ...)` 缺省默认值分别从 `200`/`1.0` 调整为 `220`/`1.2`，以完全契合 `global.ini` 默认的系统配置参数。

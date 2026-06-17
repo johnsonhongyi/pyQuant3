@@ -18606,10 +18606,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win._flash_state = True
                 win._flash_timer = QtCore.QTimer(win)
 
-                def flash_delta():
-                    for bar in w_dict["delta_bars"]:
-                        if bar is not None:
-                            bar.setVisible(win._flash_state)
+                def flash_delta(w_dict=w_dict, win=win):
+                    delta_bars = w_dict.get("delta_bars") if isinstance(w_dict, dict) else None
+                    if delta_bars:
+                        for bar in delta_bars:
+                            if bar is not None:
+                                bar.setVisible(win._flash_state)
                     win._flash_state = not win._flash_state
 
                 win._flash_timer.timeout.connect(flash_delta)
