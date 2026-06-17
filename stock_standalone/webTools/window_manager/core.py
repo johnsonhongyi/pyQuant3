@@ -15,6 +15,7 @@ import json
 from collections import namedtuple
 import win32gui
 from screeninfo import get_monitors
+import psutil
 
 # 尝试导入项目内特有的显示器检测模块以保持向后兼容，如果失败则使用通用的 screeninfo 回退
 try:
@@ -33,7 +34,7 @@ except ImportError:
     restore_display_configuration = None
 
 # 定义基础窗口信息结构
-WindowInfo = namedtuple('WindowInfo', 'pid title left top width height hwnd')
+WindowInfo = namedtuple('WindowInfo', 'pid title left top width height hwnd exe_path')
 
 # Windows API 定义与初始化
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -221,6 +222,12 @@ def list_visible_windows(fuzzy_title="") -> list:
                 if title:
                     if not fuzzy_title or re.search(re.escape(fuzzy_title), title, re.IGNORECASE):
                         left, top, width, height = get_window_rect(hWnd)
+                        exe_path = ""
+                        try:
+                            proc = psutil.Process(pid.value)
+                            exe_path = proc.exe()
+                        except Exception:
+                            pass
                         result.append(WindowInfo(
                             pid=pid.value, 
                             title=title, 
@@ -228,7 +235,8 @@ def list_visible_windows(fuzzy_title="") -> list:
                             top=top, 
                             width=width, 
                             height=height,
-                            hwnd=hWnd
+                            hwnd=hWnd,
+                            exe_path=exe_path
                         ))
         return True
         
@@ -251,6 +259,18 @@ def find_windows_by_title_safe(target_title: str) -> list:
         
     win32gui.EnumWindows(enum_handler, None)
     return found
+
+def get_exe_path(hwnd) -> str:
+    """安全提取指定窗口句柄对应的物理可执行路径"""
+    try:
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value > 0:
+            proc = psutil.Process(pid.value)
+            return proc.exe()
+    except Exception:
+        pass
+    return ""
 
 
 def set_window_hwnd_pos(hwnd, pos_str: str):

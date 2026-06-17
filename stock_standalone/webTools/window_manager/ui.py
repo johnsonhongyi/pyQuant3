@@ -302,15 +302,15 @@ class CaptureWindowsDialog(QDialog):
         filtered_wins.sort(key=lambda x: x.title.lower())
         for w in filtered_wins:
             item = QListWidgetItem(f"{w.title}  [{w.left},{w.top},{w.width},{w.height}]")
-            # 存储窗口数据
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, (w.title, f"{w.left},{w.top},{w.width},{w.height}"))
+            # 存储窗口数据 (包含捕捉到的进程启动路径)
+            exe_path = getattr(w, 'exe_path', '')
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, (w.title, f"{w.left},{w.top},{w.width},{w.height}", exe_path))
             self.list_widget.addItem(item)
 
     def accept_selection(self):
         self.selected_windows = []
         for item in self.list_widget.selectedItems():
-            title, pos_str = item.data(QtCore.Qt.ItemDataRole.UserRole)
-            self.selected_windows.append((title, pos_str))
+            self.selected_windows.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         self.accept()
 
 
@@ -839,10 +839,15 @@ class WindowPosManagerUI(QMainWindow):
         
         mapping = self.config_manager.get_resolution_mapping(res_name)
         
-        # 分离运行中与未运行的规则，让已打开的程序默认显示在最上面
+        # 分离运行中与未运行的规则，优先级：运行中 > 有路径 > 无路径
         running_items = []
+        ready_items = []
         stopped_items = []
-        for title, pos_str in mapping.items():
+        for title, raw_pos_str in mapping.items():
+            parts = raw_pos_str.split('|')
+            pos_str = parts[0]
+            exe_path = parts[1] if len(parts) > 1 else ""
+            
             titles_to_try = [title]
             if title.endswith('.py') and not title.startswith('py'):
                 titles_to_try.append(title.replace('.py', '.exe'))
@@ -851,18 +856,23 @@ class WindowPosManagerUI(QMainWindow):
                 
             is_running = False
             for t in titles_to_try:
-                if core.find_windows_by_title_safe(t):
+                found = core.find_windows_by_title_safe(t)
+                if found:
                     is_running = True
+                    if not exe_path:
+                        exe_path = core.get_exe_path(found[0][0])
                     break
                     
             if is_running:
-                running_items.append((title, pos_str))
+                running_items.append((title, pos_str, exe_path))
+            elif exe_path and os.path.exists(exe_path):
+                ready_items.append((title, pos_str, exe_path))
             else:
-                stopped_items.append((title, pos_str))
+                stopped_items.append((title, pos_str, exe_path))
                 
-        sorted_mapping = running_items + stopped_items
+        sorted_mapping = running_items + ready_items + stopped_items
         
-        for title, pos_str in sorted_mapping:
+        for title, pos_str, exe_path in sorted_mapping:
             row = self.table_widget.rowCount()
             self.table_widget.insertRow(row)
             
@@ -874,6 +884,8 @@ class WindowPosManagerUI(QMainWindow):
             # 位置数据项
             pos_item = QTableWidgetItem(pos_str)
             pos_item.setForeground(QtGui.QColor("#10b981"))
+            if exe_path:
+                pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, exe_path)
             self.table_widget.setItem(row, 1, pos_item)
             
             # 当前位置列初始化
@@ -895,8 +907,13 @@ class WindowPosManagerUI(QMainWindow):
             if name_item and pos_item:
                 title = name_item.text().strip()
                 pos_str = pos_item.text().strip()
+                exe_path = pos_item.data(QtCore.Qt.ItemDataRole.UserRole)
+                
                 if title and re.match(r"^-?\d+,-?\d+,\d+,\d+$", pos_str):
-                    mapping[title] = pos_str
+                    if exe_path:
+                        mapping[title] = f"{pos_str}|{exe_path}"
+                    else:
+                        mapping[title] = pos_str
         return mapping
 
     def save_current_table_to_memory(self):
@@ -1055,7 +1072,7 @@ class WindowPosManagerUI(QMainWindow):
             added_count = 0
             updated_count = 0
             
-            for title, pos_str in selected:
+            for title, pos_str, exe_path in selected:
                 found_row = -1
                 for row in range(self.table_widget.rowCount()):
                     t_item = self.table_widget.item(row, 0)
@@ -1064,7 +1081,10 @@ class WindowPosManagerUI(QMainWindow):
                         break
                         
                 if found_row >= 0:
-                    self.table_widget.item(found_row, 1).setText(pos_str)
+                    pos_item = self.table_widget.item(found_row, 1)
+                    pos_item.setText(pos_str)
+                    if exe_path:
+                        pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, exe_path)
                     updated_count += 1
                 else:
                     row = self.table_widget.rowCount()
@@ -1076,6 +1096,8 @@ class WindowPosManagerUI(QMainWindow):
                     
                     pos_item = QTableWidgetItem(pos_str)
                     pos_item.setForeground(QtGui.QColor("#10b981"))
+                    if exe_path:
+                        pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, exe_path)
                     self.table_widget.setItem(row, 1, pos_item)
                     added_count += 1
                     
@@ -1112,10 +1134,12 @@ class WindowPosManagerUI(QMainWindow):
                 titles_to_try.append(title.replace('.exe', '.py'))
                 
             found_hwnd = None
+            found_exe_path = ""
             for t in titles_to_try:
                 found = core.find_windows_by_title_safe(t)
                 if found:
-                    found_hwnd, found_title = found[0] # 取第一个匹配到的窗口
+                    found_hwnd, found_title = found[0]
+                    found_exe_path = core.get_exe_path(found_hwnd)
                     break
                     
             if found_hwnd:
@@ -1128,14 +1152,21 @@ class WindowPosManagerUI(QMainWindow):
                     
                 pos_str = f"{left},{top},{width},{height}"
                 
-                # 检查是否和原配置不同
+                # 检查是否和原配置不同，或者是否缺 exe_path
                 pos_item = self.table_widget.item(row, 1)
                 old_pos = pos_item.text().strip() if pos_item else ""
+                old_exe_path = pos_item.data(QtCore.Qt.ItemDataRole.UserRole) if pos_item else ""
+                
+                # 若缺失路径则顺便自愈
+                if pos_item and not old_exe_path and found_exe_path:
+                    pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
                 
                 if old_pos != pos_str:
                     if not pos_item:
                         pos_item = QTableWidgetItem(pos_str)
                         pos_item.setForeground(QtGui.QColor("#10b981"))
+                        if found_exe_path:
+                            pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
                         self.table_widget.setItem(row, 1, pos_item)
                     else:
                         pos_item.setText(pos_str)
@@ -1179,10 +1210,12 @@ class WindowPosManagerUI(QMainWindow):
                 titles_to_try.append(title.replace('.exe', '.py'))
                 
             found_hwnd = None
+            found_exe_path = ""
             for t in titles_to_try:
                 found = core.find_windows_by_title_safe(t)
                 if found:
                     found_hwnd, _ = found[0]
+                    found_exe_path = core.get_exe_path(found_hwnd)
                     break
                     
             cur_item = self.table_widget.item(row, 2)
@@ -1194,6 +1227,10 @@ class WindowPosManagerUI(QMainWindow):
             cur_item.setFlags(cur_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             
             if found_hwnd:
+                # 若原来没有 exe_path，但现在程序运行了，自动自愈补齐并保存到单元格
+                if not pos_item.data(QtCore.Qt.ItemDataRole.UserRole) and found_exe_path:
+                    pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
+                    
                 left, top, width, height = core.get_window_rect(found_hwnd)
                 if left < -10000 and top < -10000:
                     cur_item.setText("[最小化中]")
@@ -1362,12 +1399,73 @@ class WindowPosManagerUI(QMainWindow):
             }
         """)
         
+        pos_item = self.table_widget.item(row, 1)
+        exe_path = pos_item.data(QtCore.Qt.ItemDataRole.UserRole) if pos_item else ""
+        
+        # 自动自愈：如果右键时发现没有 exe_path，动态抓取一下（对付刚启动还没保存的情况）
+        if not exe_path and pos_item:
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            for t in titles_to_try:
+                found = core.find_windows_by_title_safe(t)
+                if found:
+                    extracted_path = core.get_exe_path(found[0][0])
+                    if extracted_path:
+                        exe_path = extracted_path
+                        pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, exe_path)
+                    break
+        
+        start_action = None
+        if exe_path and os.path.exists(exe_path):
+            start_action = menu.addAction(f"🚀 启动程序 ({os.path.basename(exe_path)})")
+            menu.addSeparator()
+
         activate_action = menu.addAction("📌 窗口置顶并激活")
         center_action = menu.addAction("📺 居中显示于程序所在屏幕")
         edit_action = menu.addAction("✏️ 编辑该单元格")
         action = menu.exec(self.table_widget.mapToGlobal(pos))
         
-        if action == activate_action:
+        if start_action and action == start_action:
+            self.log(f"正在启动程序: {exe_path}")
+            try:
+                import subprocess
+                subprocess.Popen(exe_path, cwd=os.path.dirname(exe_path))
+                
+                # 程序启动后自动布局轮询
+                pos_str = pos_item.text().strip()
+                def wait_and_apply(attempts=0):
+                    if attempts > 30: # 尝试30次，共15秒
+                        self.log(f"⚠️ 启动程序 '{title}' 等待窗口创建超时，放弃自动应用布局。")
+                        return
+                        
+                    titles_to_try = [title]
+                    if title.endswith('.py') and not title.startswith('py'):
+                        titles_to_try.append(title.replace('.py', '.exe'))
+                    elif title.endswith('.exe'):
+                        titles_to_try.append(title.replace('.exe', '.py'))
+                        
+                    moved = False
+                    for t in titles_to_try:
+                        if core.set_window_pos_by_title(t, pos_str):
+                            self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}]")
+                            self.refresh_current_positions()
+                            moved = True
+                            break
+                            
+                    if not moved:
+                        QtCore.QTimer.singleShot(500, lambda: wait_and_apply(attempts + 1))
+                        
+                # 给予进程初始创建时间 1.5 秒后开始高频轮询探测
+                QtCore.QTimer.singleShot(1500, wait_and_apply)
+                
+            except Exception as e:
+                QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
+                self.log(f"启动程序失败: {e}")
+        elif action == activate_action:
             self.on_table_cell_double_clicked(row, 0)
         elif action == center_action:
             self.center_window_on_current_screen(row)
@@ -1427,7 +1525,10 @@ class WindowPosManagerUI(QMainWindow):
         success_count = 0
         missing_count = 0
         
-        for title, pos_str in mapping.items():
+        for title, raw_pos_str in mapping.items():
+            parts = raw_pos_str.split('|')
+            pos_str = parts[0]
+            
             titles_to_try = [title]
             if title.endswith('.py') and not title.startswith('py'):
                 titles_to_try.append(title.replace('.py', '.exe'))
