@@ -861,6 +861,8 @@ class WindowPosManagerUI(QMainWindow):
                     is_running = True
                     if not exe_path:
                         exe_path = core.get_exe_path(found[0][0])
+                        if exe_path:
+                            self.request_save_config_debounced()
                     break
                     
             if is_running:
@@ -1160,6 +1162,7 @@ class WindowPosManagerUI(QMainWindow):
                 # 若缺失路径则顺便自愈
                 if pos_item and not old_exe_path and found_exe_path:
                     pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
+                    self.request_save_config_debounced()
                 
                 if old_pos != pos_str:
                     if not pos_item:
@@ -1230,6 +1233,7 @@ class WindowPosManagerUI(QMainWindow):
                 # 若原来没有 exe_path，但现在程序运行了，自动自愈补齐并保存到单元格
                 if not pos_item.data(QtCore.Qt.ItemDataRole.UserRole) and found_exe_path:
                     pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
+                    self.request_save_config_debounced()
                     
                 left, top, width, height = core.get_window_rect(found_hwnd)
                 if left < -10000 and top < -10000:
@@ -1417,6 +1421,7 @@ class WindowPosManagerUI(QMainWindow):
                     if extracted_path:
                         exe_path = extracted_path
                         pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, exe_path)
+                        self.request_save_config_debounced()
                     break
         
         start_action = None
@@ -1507,6 +1512,24 @@ class WindowPosManagerUI(QMainWindow):
             self.log("配置文件已写入磁盘 window_layout_config.json。")
         else:
             QMessageBox.critical(self, "错误", "配置文件写入磁盘失败，请检查文件写权限！")
+
+    def request_save_config_debounced(self):
+        """触发防抖存盘，10秒内如果有多次调用仅在10秒后执行一次静默保存"""
+        if not hasattr(self, '_save_timer'):
+            self._save_timer = QtCore.QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.timeout.connect(self._execute_silent_save)
+            
+        if not self._save_timer.isActive():
+            self._save_timer.start(10000) # 10 秒防抖
+            
+    def _execute_silent_save(self):
+        """执行静默防抖存盘"""
+        self.save_current_table_to_memory()
+        if self.config_manager.save():
+            self.log("✅ 探测到配置自愈，已自动触发静默防抖保存机制落盘。")
+        else:
+            self.log("❌ 自动防抖保存配置文件失败。")
 
     def apply_current_layout(self):
         """一键应用当前方案的所有规则到桌面运行中的窗口"""

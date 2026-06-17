@@ -37,13 +37,23 @@ if current_dir not in sys.path:
 from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name
 
 if __name__ == '__main__':
-    # 检查命令行参数中是否包含 --ui / -ui 或日志参数 -log
-    use_ui = False
+    # 默认启动 UI，可以通过 --cli / -cli / --noui / --apply 等参数取消 UI 直接在后台执行排版
+    use_ui = True
     debug_mode = False
     
     for i, arg in enumerate(sys.argv):
-        if arg.lower() in ['--ui', '-ui']:
-            use_ui = True
+        if arg.lower() in ['-h', '--help']:
+            print("==== 桌面窗口坐标布局配置管理器 ====")
+            print("用法: manage_window_layout.exe [参数]")
+            print("\n默认行为:")
+            print("  不加任何参数时，将启动完整的图形化操作界面 (UI)。")
+            print("\n可选参数:")
+            print("  -h, --help    显示此帮助信息并退出。")
+            print("  -noui, -cli, -apply\n                静默模式。不启动 UI 界面，直接在后台自动探测屏幕并应用布局。")
+            print("  -log <level>  开启调试模式并指定级别 (例如: -log debug)。")
+            sys.exit(0)
+        elif arg.lower() in ['--noui', '-noui', '--cli', '-cli', '--apply', '-apply']:
+            use_ui = False
         elif arg.lower() == '-log':
             debug_mode = True
             if i + 1 < len(sys.argv):
@@ -76,4 +86,4 @@ if __name__ == '__main__':
             print("[OK] 窗口坐标布局自动对齐应用完成！")
         else:
             print(f"[Tips] 提示: 方案 '{rec_name}' 暂无任何窗口移动规则。")
-            print("如需添加新窗口或录入屏幕，请运行: python manage_window_layout.py --ui")
+            print("如需添加新窗口或录入屏幕，请直接双击运行本程序（或不在命令行加任何参数）。")
