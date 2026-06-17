@@ -1,6 +1,14 @@
+## 2026-06-17 15:30
+- [x] **优化 PyQuant3 系统高频行情推送下的主线程与 I/O 并发性能 (Optimized Main-Thread & I/O Performance for High-Frequency Streaming)**：
+    - [x] **异步更新交易内核缓存 (Asynchronous Kernel Cache Update)**：将 `instock_MonitorTK.py` 中的 `kernel_srv.update_df_all` 主动温热与注入逻辑由主线程同步调用重构为通过 `self.compute_executor.submit` 进行后台异步派发，彻底避免了高频 Tick 推送时主线程因大规模 Pandas 指标计算被挂起/假死（例如 `apply_tree_data_sync_timed` 耗时近 18 秒）的瓶颈。
+    - [x] **异步化实盘扫描策略下的全部数据库写入与状态更新 (Asynchronous Database Operations in StockLiveStrategy)**：重构了 `StockLiveStrategy._check_strategies` 中的所有 I/O-bound 数据库写操作。将原先同步调用的批量写信号 `log_signal_batch`、写状态 `log_status_batch` 以及更新跟踪状态 `update_follow_status` 统一异步化提交给主后台线程消费的 `self.db_queue`，彻底清除了实盘策略计算检测循环在爆发期产生的 SQLite 读写锁竞争和 I/O 阻塞。
+    - [x] **防御性加固 Bidding 种子数据结构加载 (Defensive Schema Validation for Stock Selector Seeds)**：补全了 `bidding_momentum_detector.py` 中的 `_load_stock_selector_data` 方法对 empty/None DataFrame 以及 `'code'` 列是否存在的防错和自愈处理，防止从 `TradingLogger` 读出空数据时抛出 `KeyError: 'code'` 导致全天监控启动断路。
+    - [x] **修复 SnapCache 结构缺失以保障持久化恢复 (Fixed Missing Code Attribute in SnapCache for Stable Recovery)**：在 `bidding_momentum_detector.py` 构建 `_global_snap_cache` 的数据时补齐了 `'code': code` 键值属性，使得后续自愈板块重建和个股反序列化加载时能够正确提取出完整的代码标识。
+    - [x] **物理对齐多核 CPU 线程上限配置与执行资源隔离 (Aligned Multi-Core ThreadPoolExecutor Worker Limits)**：对 `StockLiveStrategy` 内部的 `self.executor` 和 `self._io_executor` 最大线程数量进行了安全计算，设定为 `min(32, (os.cpu_count() or 4) * 2)` 并融合了系统 `livestrategy_max_workers` 配置，降低了过多线程带来的频繁上下文切换和 GIL 争抢。
+
 ## 2026-06-17 14:25
 - [x] **修复 PyQtGraph 概念分析条形图闪烁定时器闭包 NameError 崩溃 (Fixed NameError in PyQtGraph Bar Flashing Timer Closure)**：
-    - [x] **默认参数绑定解决编译后自由变量生命周期异常**：在 `instock_MonitorTK.py` 中的嵌套定时回调函数 `flash_delta` 中，通过指定默认形参 `w_dict=w_dict` 与 `win=win`，将外部词法作用域中的自由变量强绑定至函数对象属性，防止在 Nuitka 编译环境下外层函数执行完毕、作用域栈销毁后导致定时器触发时抛出 `NameError: free variable 'w_dict' referenced before assignment in enclosing scope` 异常。
+    - [x] **默认参数绑定解决编译后自由变量生命周期异常**：在 `instock_MonitorTK.py` 中的嵌套定时回调函数 `flash_delta` 中，通过指定默认形参 `w_dict=w_dict` 与 `win=win`，将外部词法作用域中的自由变量强绑定至函数对象属性，防止在 Nuitka 编译环境下外层函数执行完毕、作用域栈销作用销毁后导致定时器触发时抛出 `NameError: free variable 'w_dict' referenced before assignment in enclosing scope` 异常。
     - [x] **加固类型与安全属性读取防护**：将 `flash_delta` 内部通过硬编码 `w_dict["delta_bars"]` 获取对象改写为基于 `isinstance(w_dict, dict)` 的 `w_dict.get("delta_bars")` 安全读取，规避空值或非常规数据引发的属性与键值错误，提升主控制台后台闪烁定时器的运行时健壮性。
 
 ## 2026-06-16 23:55

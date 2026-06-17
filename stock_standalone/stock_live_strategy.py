@@ -532,12 +532,16 @@ class StockLiveStrategy:
             self._using_shared_executor = True
             logger.info("✅ StockLiveStrategy: 已连接主 Master 共享线程池")
         else:
-            self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)
+            # 限制计算/扫描线程上限，避免 GIL 争抢及过多上下文切换开销，提升 CPU 利用效率
+            max_cpu_workers = min(32, (os.cpu_count() or 4) * 2)
+            workers = min(max_cpu_workers, getattr(cct, 'livestrategy_max_workers', 6))
+            self.executor = ThreadPoolExecutor(max_workers=workers)
             self._using_shared_executor = False
-            logger.debug(f"ℹ️ StockLiveStrategy: 独立创建私有线程池 (Workers: {cct.livestrategy_max_workers})")
+            logger.debug(f"ℹ️ StockLiveStrategy: 独立创建私有线程池 (Workers: {workers})")
         
         # ⭐ [NEW] 专门用于慢速 I/O、磁盘数据读取、告警播报和外部请求的独立线程池，彻底杜绝父子任务饥饿死锁
-        self._io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="LiveStrategy_IO")
+        io_workers = min(32, (os.cpu_count() or 4) * 2)
+        self._io_executor = ThreadPoolExecutor(max_workers=io_workers, thread_name_prefix="LiveStrategy_IO")
         
         self._is_checking_resamples: set[str] = set() # [NEW] 并行运行状态锁，按 resample 隔离防止并发冲突
         self._last_process_time = 0.0 # 🛡️ Ensure init 
@@ -2640,7 +2644,7 @@ class StockLiveStrategy:
                             if res.get('db_sync_note'):
                                  try:
                                      hub_sync = get_trading_hub()
-                                     hub_sync.update_follow_status(res['code'], notes=res['db_sync_note'])
+                                     self.db_queue.put((hub_sync.update_follow_status, (res['code'],), {'notes': res['db_sync_note']}))
                                  except: pass
 
                         except Exception as e_res:
@@ -2659,8 +2663,10 @@ class StockLiveStrategy:
             if cost_loop_ms > 1000:
                 logger.warning(f"🚀 [OPTIMIZED] loop_total_execution cost={cost_loop_ms/1000:.2f} s for {len(valid_keys)} stocks (submitted={submitted_count})")
 
-            if signal_batch: self.trading_logger.log_signal_batch(signal_batch)
-            if status_batch: self.trading_logger.log_status_batch(status_batch)
+            if signal_batch:
+                self.db_queue.put((self.trading_logger.log_signal_batch, (signal_batch,), {}))
+            if status_batch:
+                self.db_queue.put((self.trading_logger.log_status_batch, (status_batch,), {}))
 
         except Exception as e:
             logger.error(f"🚨 [ENGINE_CRITICAL] _check_strategies failed: {e}")

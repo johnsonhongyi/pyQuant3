@@ -923,14 +923,19 @@ class BiddingMomentumDetector:
             t_logger = TradingLogger()
             # 获取最近一天的选股记录 (不带 limit，使用默认逻辑)
             df_seeds = t_logger.get_selections_df() 
-            if not df_seeds.empty and 'code' in df_seeds.columns:
+            if df_seeds is not None and not df_seeds.empty and 'code' in df_seeds.columns:
                 # 过滤高分种子
-                high_df = df_seeds[df_seeds['score'] >= 80]
+                score_col = 'score' if 'score' in df_seeds.columns else None
+                if score_col:
+                    high_df = df_seeds[df_seeds[score_col] >= 80]
+                else:
+                    high_df = df_seeds
                 self.stock_selector_seeds = {
                     str(r.code).zfill(6): {'code': str(r.code).zfill(6), 'reason': getattr(r, 'reason', '')}
                     for r in high_df.itertuples(index=False)
+                    if hasattr(r, 'code') and r.code
                 }
-                logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股 (Sc>=80)")
+                logger.info(f"[Detector] 成功加载 {len(self.stock_selector_seeds)} 只预选种子股")
             
             # [FIX] 模拟模式下不加载持久化会话数据，防止实盘干扰回测结果
             if not self.simulation_mode:
@@ -3944,6 +3949,7 @@ class BiddingMomentumDetector:
                     if ts:
                         # [P0-OPT] __slots__ 保证字段存在，直接访问替换 getattr 防御
                         data = {
+                            'code': code,
                             'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
                             'close': ts.current_price,
                             'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
