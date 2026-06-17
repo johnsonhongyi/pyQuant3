@@ -1,3 +1,12 @@
+## 2026-06-17 15:45
+- [x] **根治 V型反转 (V-Reversal) 状态机无限重入导致潜伏池满溢与信号哑默漏洞 (Resolved V-Reversal Loop Leak, Cooldown Protection & Signal Recovery)**：
+    - [x] **实现日内/交易日级淘汰隔离冷却机制 (Implemented Cooldown Gate)**：在 `update_wave_structure_state` 的 `INIT` 状态添加冷却机制。若该股此前因为超时或跌破支撑被淘汰，则记录 `last_fail_ts`；在此后至少 240 分钟（1个交易日）且不得在同一交易日内重新进入 `CONSOLIDATING` 潜伏监控池，彻底阻断了“被淘汰 -> 下一秒直接满足 < 6% 振幅 -> 瞬间拉回潜伏池并重置 entry_date 为当天”的逻辑死循环。
+    - [x] **修复冷启动持久化超时自愈失效 (Fixed Load-time Auto-Expire Cooldown)**：在 `load_consolidation_state` 加载还原过程中，若个股满足细粒度超时（`trade_dist >= 3`），在重置为 `INIT` 状态的同时强制写入当日的 `last_fail_ts = now_ts`，使得系统在清空僵尸满溢池时能够稳定隔离，当天绝对无法被误加回，使监控个股池规模回落到几十只活跃潜伏股的健康水平。
+    - [x] **实现状态机反序列化防重复加载保护 (Idempotent State Loading Guard)**：在 `load_consolidation_state` 引入了独立的 `_fsm_state_restored` 属性检测（避免了原 K 线数据缓存恢复标记 `_is_restored` 被 from_dataframe 提前设为 True 导致状态机加载被断路走入 else 分支重新计算 4468 只个股的 Bug）。成功实现了冷启动时，对重复加载请求的幂等短路拦截，根治了重复触发清洗日志。
+    - [x] **实现自愈清洗后即时物理落盘覆盖与默认振幅阈值收紧 (Auto-Save After Clean-up & Amplitude Hardening)**：为了防止自愈清洗了脏数据但因未物理写盘在重启后被磁盘老数据再次污染，在 `load_consolidation_state` 清洗完脏数据之后立刻强制调用 `save_consolidation_state(filepath)` 物理落盘，将个股在磁盘上洗为 `INIT` 状态并全量写入 `last_fail_ts` 进行日内冷却隔离。同时，将初始进入潜伏的默认振幅门槛由 `0.06`（6%）收紧至 `0.035`（3.5%），支持配置项 `v_reversal_amplitude_limit` 动态调节，实现高保真过滤降噪。
+    - [x] **实现多地数据读取一致的线程安全工厂模式 (Implemented DataServiceFactory)**：在 `realtime_data_service.py` 底部引入了 `DataServiceFactory` 工厂注册表类。该工厂采用线程安全的双重检查锁（Double-Checked Locking）实现全局唯一的内存数据源分发，并提供了显式实例注册 `register_instance` 及测试清理 `clear_instances` 接口，从根本上保证了多地读取行情及状态数据时内存引用的绝对一致。
+    - [x] **设计并扩展 FSM 状态转移与冷却隔离单元测试 (Expanded Cooldown Unit Tests)**：在 `test_v_reversal_fsm.py` 中增加了 `STEP 6` (冷却期预防与过期自愈) 模拟，高保真还原了“个股经历 Breakdown 破位 -> 普通平盘在冷却期内被拦截在潜伏池外 -> 重置 last_fail_ts 到 24小时前 -> 再次更新顺利进入潜伏期”的全链路状态机断言测试，单元测试 100% 绿旗通过。
+
 ## 2026-06-17 15:30
 - [x] **优化 PyQuant3 系统高频行情推送下的主线程与 I/O 并发性能 (Optimized Main-Thread & I/O Performance for High-Frequency Streaming)**：
     - [x] **异步更新交易内核缓存 (Asynchronous Kernel Cache Update)**：将 `instock_MonitorTK.py` 中的 `kernel_srv.update_df_all` 主动温热与注入逻辑由主线程同步调用重构为通过 `self.compute_executor.submit` 进行后台异步派发，彻底避免了高频 Tick 推送时主线程因大规模 Pandas 指标计算被挂起/假死（例如 `apply_tree_data_sync_timed` 耗时近 18 秒）的瓶颈。

@@ -129,6 +129,7 @@ class MinuteKlineCache:
         self._last_update_ts: dict[str, int] = {}
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
+        self._fsm_state_restored = False # 记录状态机文件是否已经恢复，防二次重复加载
         self._supplemented_codes = set()
         self._bidding_pruned_today = {} # {code: date_str} 记录今日已清理竞价数据的日期
         # [NEW] 限频日志计数器
@@ -993,16 +994,25 @@ class MinuteKlineCache:
             now_ts = time.time()
             today_str = cct.get_today()
             if phase == "INIT":
-                # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
-                # [FIX] 原振幅 < 0.02(2%) 过于苛刻，大多数整理结构都是 3-6%，放宽为 0.06
-                if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < 0.06:
-                    # 简化判定：只要属于极度横盘，就先算作初步潜伏
-                    state["phase"] = "CONSOLIDATING"
-                    state["anchor_low"] = recent_min
-                    state["base_vol"] = recent_avg_vol
-                    state["entry_ts"] = now_ts
-                    state["entry_date"] = today_str
-                    self._v_reversal_pool.add(code)
+                # [NEW] 冷却机制拦截：在冷却期内 (同一天内，或者 240 分钟以内) 阻止该股重新进入潜伏期
+                last_fail_ts = state.get("last_fail_ts", 0)
+                is_cooldown = False
+                if last_fail_ts > 0:
+                    last_fail_date = datetime.fromtimestamp(last_fail_ts).strftime("%Y-%m-%d")
+                    if last_fail_date == today_str or (now_ts - last_fail_ts < 240 * 60):
+                        is_cooldown = True
+                
+                if not is_cooldown:
+                    # 寻找初始的“底背离缩量”潜伏池目标 (类似原来的 detect_v_shape)
+                    v_amp_limit = getattr(cct.CFG, 'v_reversal_amplitude_limit', 0.035)
+                    if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < v_amp_limit:
+                        # 简化判定：只要属于极度横盘，就先算作初步潜伏
+                        state["phase"] = "CONSOLIDATING"
+                        state["anchor_low"] = recent_min
+                        state["base_vol"] = recent_avg_vol
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        self._v_reversal_pool.add(code)
                     
             elif phase == "CONSOLIDATING":
                 anchor_low = state.get("anchor_low", recent_min)
@@ -1022,11 +1032,13 @@ class MinuteKlineCache:
                 # [淘汰 1]: 跌破支撑位淘汰 (跌破 anchor_low 2.5%)
                 if recent_close < anchor_low * 0.975:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 跌破潜伏支撑位({anchor_low:.2f} -> {recent_close:.2f}), 触发淘汰!")
-                # [淘汰 2]: 时间过期淘汰 (3个交易日无任何动静突破)
+                # [淘汰 2]: 时间过期淘汰 (3个交易日无 any 动静突破)
                 elif trade_dist >= 3:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 潜伏超时({trade_dist}交易日无放量拉升), 触发淘汰!")
                 else:
@@ -1059,11 +1071,13 @@ class MinuteKlineCache:
                 # [淘汰 1]: 跌破拉升支撑/VWAP 淘汰 (跌破 vwap 3%)
                 if recent_close < vwap * 0.97:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 第一波拉升夭折(跌破VWAP), 触发淘汰!")
                 # [淘汰 2]: 拉升期超时 (2个交易日未进入回踩)
                 elif trade_dist >= 2:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 拉升超时({trade_dist}交易日无回踩/无新高), 触发淘汰!")
                 else:
@@ -1092,11 +1106,13 @@ class MinuteKlineCache:
                 # [淘汰 1]: 回踩漏了/支撑破位 (跌破 pullback_price 2.5% 或跌破 vwap 2%)
                 if recent_close < pullback_price * 0.975 or recent_close < vwap * 0.98:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩支撑破位({pullback_price:.2f} -> {recent_close:.2f}), 触发淘汰!")
                 # [淘汰 2]: 回踩超时 (2个交易日内无二次拉升)
                 elif trade_dist >= 2:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩超时({trade_dist}交易日无二次启动), 触发淘汰!")
                 else:
@@ -1123,11 +1139,13 @@ class MinuteKlineCache:
                 # [淘汰 1]: 二次拉升后跌破 VWAP 2%
                 if recent_close < vwap * 0.98:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升破位(跌破VWAP), 触发淘汰!")
                 # [淘汰 2]: 二次拉升超时 (2个交易日)
                 elif trade_dist >= 2:
                     state["phase"] = "INIT"
+                    state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升超时({trade_dist}交易日), 触发淘汰!")
                     # 这里可以将个股抛给高维策略做全面测试
@@ -1200,6 +1218,11 @@ class MinuteKlineCache:
 
     def load_consolidation_state(self, filepath: str = "") -> bool:
         """冷启动/崩溃恢复：加载潜伏池状态 (默认从 Ramdisk)"""
+        if self._fsm_state_restored:
+            if self.verbose:
+                logger.info("ℹ️ [V反潜伏池] 状态机已在之前加载恢复，跳过重复的磁盘读取。")
+            return True
+            
         if not filepath:
             filepath = str(cct.get_ramdisk_path("v_reversal_pool.json"))
             
@@ -1241,6 +1264,12 @@ class MinuteKlineCache:
             valid_flags = {}
             valid_pool = set()
             
+            # [NEW] 自动判定满溢脏数据：如果从磁盘恢复出的监控池容量异常臃肿 (> 1000)，判定为受历史漏洞污染的脏数据并触发一键自愈清洗
+            raw_pool = state.get("v_reversal_pool", [])
+            need_cleanup = (len(raw_pool) > 1000)
+            if need_cleanup:
+                logger.warning(f"🚨 [V反潜伏池] 检测到历史持久化脏数据满溢 (当前容量: {len(raw_pool)} 只)，正在触发一键自愈清洗与日内隔离...")
+            
             for code, flag_data in state.get("consolidation_flags", {}).items():
                 update_ts = flag_data.get("update_ts", 0)
                 if now_ts - update_ts < 7 * 86400: # 7天内有效
@@ -1269,11 +1298,13 @@ class MinuteKlineCache:
                         elif phase_mapped in ["WAVE_UP", "PULLBACK", "WAVE_UP_2"] and trade_dist >= 2:
                             is_expired = True
                             
-                        if is_expired:
-                            # 细粒度超时了，直接将其重置为 INIT，且不加入 valid_pool
+                        # [NEW] 自愈清洗条件：如果是 CONSOLIDATING 且触发了满溢清洗
+                        if is_expired or (need_cleanup and phase_mapped == "CONSOLIDATING"):
+                            # 细粒度超时或满溢，直接将其重置为 INIT，且不加入 valid_pool
                             flag_data["phase"] = "INIT"
                             flag_data["entry_ts"] = now_ts
                             flag_data["update_ts"] = now_ts
+                            flag_data["last_fail_ts"] = now_ts  # [NEW] 写入冷却保护，当天不得重新进入潜伏期
                         else:
                             flag_data["phase"] = phase_mapped
                             if "entry_ts" not in flag_data:
@@ -1287,6 +1318,11 @@ class MinuteKlineCache:
             with self._lock:
                 self._consolidation_flags.update(valid_flags)
                 self._v_reversal_pool.update(valid_pool)
+                self._fsm_state_restored = True  # [NEW] 标记为已成功恢复，防止二次重复读盘
+                
+            # [NEW] 满溢清理后物理写盘，防止重启后再次读取到未经清洗的旧脏数据导致4468重新进池
+            if need_cleanup:
+                self.save_consolidation_state(filepath)
                 
             if self.verbose:
                 logger.info(f"🔄 [V反潜伏池] 成功从 {filepath} 恢复 {len(valid_pool)} 只监控个股")
@@ -3433,6 +3469,44 @@ class DataPublisher:
         except Exception as e:
             logger.error(f"get_status error: {e}")
             return {"error": str(e)}
+
+class DataServiceFactory:
+    """
+    数据服务工厂 (Factory for Unified Shared Data Sources)
+    用于确保系统在多处读取数据时，能够共享完全一致的同一个内存对象实例，
+    实现“单一真源”的并发读取一致性，并杜绝重复的磁盘/内存载入消耗。
+    """
+    _instances: dict[type, Any] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls, instance_class: type, *args, **kwargs) -> Any:
+        """
+        线程安全的工厂方法：获取唯一共享的实例。
+        如果实例不存在，会自动初始化并将其缓存在注册表中。
+        """
+        if instance_class not in cls._instances:
+            with cls._lock:
+                if instance_class not in cls._instances:
+                    # 动态创建实例并加入注册表，确保全局唯一
+                    cls._instances[instance_class] = instance_class(*args, **kwargs)
+        return cls._instances[instance_class]
+
+    @classmethod
+    def register_instance(cls, instance_class: type, instance: Any) -> None:
+        """
+        显式注册一个已创建好的共享实例 (例如在最外层模块初始化好的主服务实例)
+        """
+        with cls._lock:
+            cls._instances[instance_class] = instance
+
+    @classmethod
+    def clear_instances(cls) -> None:
+        """
+        清除缓存的所有工厂实例 (通常在单元测试或系统重载时使用)
+        """
+        with cls._lock:
+            cls._instances.clear()
 
 if __name__ == "__main__":
     # 🧪 Standalone Test Functionality
