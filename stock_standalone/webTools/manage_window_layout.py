@@ -27,16 +27,24 @@ def get_app_root() -> str:
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
     return calculated_root
 
-app_root = get_app_root()
-
-# 2. 确保 webTools 目录在 sys.path 中，以便可以作为 package 导入 window_manager
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-
-from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name
 
 if __name__ == '__main__':
+    import multiprocessing as mp
+    mp.freeze_support()
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
+    app_root = get_app_root()
+
+    # 确保 webTools 目录在 sys.path 中，以便可以作为 package 导入 window_manager
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+
+    from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name
+
     # 默认启动 UI，可以通过 --cli / -cli / --noui / --apply 等参数取消 UI 直接在后台执行排版
     use_ui = True
     debug_mode = False
