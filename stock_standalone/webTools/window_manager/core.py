@@ -475,7 +475,11 @@ def apply_layout_config(config_manager: ConfigManager, res_name: str, show_cmd=S
         return False
         
     print(f"Applying layout for: {res_name}")
-    for title, pos_str in mapping.items():
+    for title, raw_pos_str in mapping.items():
+        # 解析坐标与可能附加的执行路径，防止传递给底层引发 int() 转换异常
+        parts = str(raw_pos_str).split('|')
+        pos_str = parts[0].strip()
+        
         # 兼容处理：支持将 .py 的配置同样应用给对应的 .exe 进程窗口
         # 例如配置里写 'sina_Monitor.py'，那么 'sina_Monitor.exe' 也会被正确移动
         titles_to_try = [title]
