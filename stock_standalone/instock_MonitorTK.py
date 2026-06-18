@@ -19723,6 +19723,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         try:
+            from tkinter import ttk
+            _GLOBAL_CODE_NAME_CACHE = {}
             log_win = tk.Toplevel(self)
             self._realtime_monitor_win = log_win
             log_win.title("Realtime Data Service Monitor")
@@ -19730,9 +19732,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 使用 WindowMixin 加载位置
             window_id = "RealtimeData"
             if hasattr(self, 'load_window_position'):
-                self.load_window_position(log_win, window_id, default_width=300, default_height=300)
+                self.load_window_position(log_win, window_id, default_width=1000, default_height=500)
             else:
-                log_win.geometry("300x300")
+                log_win.geometry("1000x500")
             
             # Control frame
             btn_frame = tk.Frame(log_win)
@@ -19805,10 +19807,478 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                  font=("Microsoft YaHei", 9, "bold"), fg="#d35400", bg="#fdf2e9")
             audit_btn.pack(side="left", padx=10)
 
-            # Simple text area for status and logs
-            text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
-            text_area.pack(fill="both", expand=True, padx=5, pady=5)
+            # 🚀 [NEW] 引入左右分栏布局，完美呈现潜伏池与日内分时监控状态
+            paned = tk.PanedWindow(log_win, orient="horizontal", sashrelief="raised", sashwidth=4)
+            paned.pack(fill="both", expand=True, padx=5, pady=5)
+
+            def save_sash_pos():
+                try:
+                    pos = paned.sash_coord(0)[0]
+                    if pos <= 0:
+                        return
+                    import json
+                    from sys_utils import get_conf_path
+                    cfg_file = get_conf_path("window_config.json")
+                    cfg = {}
+                    if os.path.exists(cfg_file):
+                        with open(cfg_file, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                    cfg["RealtimeData_sash"] = pos
+                    with open(cfg_file, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    logger.error(f"Failed to save sash position: {e}")
+
+            def load_sash_pos():
+                try:
+                    import json
+                    from sys_utils import get_conf_path
+                    cfg_file = get_conf_path("window_config.json")
+                    if os.path.exists(cfg_file):
+                        with open(cfg_file, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                        return cfg.get("RealtimeData_sash")
+                except Exception:
+                    pass
+                return None
+
+            saved_sash = load_sash_pos()
+            if saved_sash is not None:
+                log_win.after(100, lambda: paned.sash_place(0, saved_sash, 0))
+
+            paned.bind("<ButtonRelease-1>", lambda e: save_sash_pos())
+
+            # 左侧：原有日志与服务状态 (40% 宽度)
+            left_frame = tk.Frame(paned)
+            paned.add(left_frame, minsize=280)
+
+            # 右侧：潜伏池个股列表与状态监控 (60% 宽度)
+            right_frame = tk.Frame(paned)
+            paned.add(right_frame, minsize=550)
+
+            # Left Pane: Simple text area for status and logs
+            text_area = tk.Text(left_frame, font=("Consolas", 10), bg="#f0f0f0")
+            text_area.pack(fill="both", expand=True, padx=2, pady=2)
             
+            # Right Pane: V-Reversal Pool Frame
+            pool_label_frame = tk.LabelFrame(right_frame, text="📍 强庄二次起爆监控池 (V-Reversal Pool)", font=("Microsoft YaHei", 9, "bold"))
+            pool_label_frame.pack(fill="both", expand=True, padx=2, pady=2)
+
+            # 监控池顶部快捷操作栏
+            pool_bar = tk.Frame(pool_label_frame)
+            pool_bar.pack(fill="x", side="top", padx=5, pady=2)
+
+            add_label = tk.Label(pool_bar, text="代码:", font=("Microsoft YaHei", 9))
+            add_label.pack(side="left", padx=2)
+
+            add_entry = tk.Entry(pool_bar, width=8, font=("Consolas", 9))
+            add_entry.pack(side="left", padx=2)
+
+            # Treeview 表格定义
+            columns = ("code", "name", "phase", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
+            tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="browse")
+            tree.tag_configure("fav", background="#eefcf7", foreground="#00aa55")
+
+            headers = {
+                "code": "代码", "name": "名称", "phase": "当前阶段",
+                "dff": "dff", "Rank": "Rank",
+                "dff3": "大底dff3", "dff2": "前低dff2",
+                "entry_date": "入池时间", "anchor_low": "锚点低价", "vol_ratio": "放量倍数"
+            }
+            
+            def tree_sort(tv, col, reverse):
+                l = [(tv.set(k, col), k) for k in tv.get_children("")]
+                try:
+                    l.sort(key=lambda t: float(t[0].replace('%','').replace('x','')), reverse=reverse)
+                except ValueError:
+                    l.sort(reverse=reverse)
+                for index, (val, k) in enumerate(l):
+                    tv.move(k, "", index)
+                tv.heading(col, command=lambda: tree_sort(tv, col, not reverse))
+
+            for col in columns:
+                text = headers.get(col, col)
+                tree.heading(col, text=text, command=lambda c=col: tree_sort(tree, c, False))
+                tree.column(col, anchor="center", width=70)
+            tree.column("phase", width=85)
+            tree.column("entry_date", width=85)
+
+            vsb = ttk.Scrollbar(pool_label_frame, orient="vertical", command=tree.yview)
+            hsb = ttk.Scrollbar(pool_label_frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+            vsb.pack(side="right", fill="y")
+            hsb.pack(side="bottom", fill="x")
+            tree.pack(side="left", fill="both", expand=True)
+
+            phase_map = {
+                "INIT": "初始状态",
+                "CONSOLIDATING": "横盘潜伏",
+                "WAVE_UP": "首波拉升",
+                "PULLBACK": "缩量回踩",
+                "WAVE_UP_2": "二次拉升"
+            }
+
+            def get_stock_name(code: str) -> str:
+                # 规范化代码为6位数字
+                code_clean = str(code).strip().zfill(6)
+                if code_clean in _GLOBAL_CODE_NAME_CACHE:
+                    return _GLOBAL_CODE_NAME_CACHE[code_clean]
+                
+                # 1. 优先从主窗口全局 self.df_all 提取，启动后该对象已常驻内存，极其快速
+                if hasattr(self, 'df_all') and self.df_all is not None:
+                    try:
+                        df = self.df_all
+                        if code_clean in df.index:
+                            name = df.loc[code_clean].get('name', '未知')
+                            if name and name != "未知":
+                                if isinstance(name, pd.Series):
+                                    name = name.iloc[0]
+                                _GLOBAL_CODE_NAME_CACHE[code_clean] = name
+                                return name
+                        elif 'code' in df.columns:
+                            row = df[df['code'] == code_clean]
+                            if not row.empty and 'name' in row.columns:
+                                name = row['name'].iloc[0]
+                                if name and name != "未知":
+                                    _GLOBAL_CODE_NAME_CACHE[code_clean] = name
+                                    return name
+                    except Exception:
+                        pass
+                
+                # 2. 备用：从 current_df 获取
+                try:
+                    if hasattr(self, 'current_df') and self.current_df is not None:
+                        curr = self.current_df
+                        if 'code' in curr.columns:
+                            name_row = curr[curr['code'] == code_clean]
+                            if not name_row.empty and 'name' in name_row.columns:
+                                name = name_row['name'].iloc[0]
+                                _GLOBAL_CODE_NAME_CACHE[code_clean] = name
+                                return name
+                        elif code_clean in curr.index:
+                            n = curr.loc[code_clean].get('name', '未知')
+                            _GLOBAL_CODE_NAME_CACHE[code_clean] = n
+                            return n
+                except Exception:
+                    pass
+                
+                # 3. 兜底：使用权威本地 tdx API
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                    name = tdd.get_sina_data_code(code_clean)
+                    if name and name != "未知":
+                        _GLOBAL_CODE_NAME_CACHE[code_clean] = name
+                        return name
+                except Exception:
+                    pass
+                return "未知"
+
+            def get_df_all_val(code: str, col_name: str, default="-") -> str:
+                code_clean = str(code).strip().zfill(6)
+                if hasattr(self, 'df_all') and self.df_all is not None:
+                    try:
+                        df = self.df_all
+                        if code_clean in df.index:
+                            val = df.loc[code_clean].get(col_name, default)
+                            if val is not None and not pd.isna(val):
+                                if isinstance(val, pd.Series):
+                                    val = val.iloc[0]
+                                if isinstance(val, float):
+                                    return f"{val:.2f}"
+                                return str(val)
+                        elif 'code' in df.columns:
+                            row = df[df['code'] == code_clean]
+                            if not row.empty and col_name in row.columns:
+                                val = row[col_name].iloc[0]
+                                if val is not None and not pd.isna(val):
+                                    if isinstance(val, float):
+                                        return f"{val:.2f}"
+                                    return str(val)
+                    except Exception:
+                        pass
+                return default
+
+
+            is_refreshing_pool = False
+
+            def reset_refreshing_flag():
+                nonlocal is_refreshing_pool
+                is_refreshing_pool = False
+
+            # 刷新池中数据
+            def refresh_pool_data():
+                nonlocal is_refreshing_pool
+                if not log_win.winfo_exists():
+                    return
+                is_refreshing_pool = True
+                
+                # 记录当前选中项，以便刷新后恢复选中
+                selected_item = tree.selection()
+                selected_code = None
+                if selected_item:
+                    selected_code = tree.item(selected_item[0], "values")[0]
+
+                # 保存当前的滚动位置，自动更新后不改变显示位置
+                try:
+                    y_scroll_pos = tree.yview()
+                    x_scroll_pos = tree.xview()
+                except Exception:
+                    y_scroll_pos = x_scroll_pos = None
+
+                # 清理旧数据
+                for item in tree.get_children():
+                    tree.delete(item)
+
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        pool = self.realtime_service.kline_cache.get_v_reversal_pool()
+                        
+                        # 统计各阶段数量
+                        stats = {"INIT": 0, "CONSOLIDATING": 0, "WAVE_UP": 0, "PULLBACK": 0, "WAVE_UP_2": 0}
+                        total_count = 0
+                        
+                        for code in list(pool):
+                            flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
+                            phase_raw = flags.get("phase", "INIT")
+                            stats[phase_raw] = stats.get(phase_raw, 0) + 1
+                            total_count += 1
+                            
+                        # 动态更新 LabelFrame 标题，展示最新统计信息
+                        stats_text = f"🎯 V型反转 监控潜伏池 (总数: {total_count} | 横盘: {stats.get('CONSOLIDATING', 0)} | 首拉: {stats.get('WAVE_UP', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)})"
+                        pool_label_frame.config(text=stats_text)
+
+                        for code in list(pool):
+                            flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
+                            phase_raw = flags.get("phase", "INIT")
+                            phase_cn = phase_map.get(phase_raw, phase_raw)
+                            
+                            # 优先使用已持久化保存的名称，省去每次查询开销
+                            name = flags.get("name")
+                            if not name or name == "未知":
+                                name = get_stock_name(code)
+                                if name and name != "未知":
+                                    with self.realtime_service.kline_cache._lock:
+                                        self.realtime_service.kline_cache._consolidation_flags[code]["name"] = name
+                            
+                            # 检测是否为重点关注个股，如果是，名称前加 ⭐
+                            is_fav_stock = False
+                            try:
+                                from global_favorites import GlobalFavoriteManager
+                                is_fav_stock = code in GlobalFavoriteManager().get_favorite_stocks()
+                            except Exception:
+                                pass
+                            display_name = f"⭐ {name}" if is_fav_stock else name
+
+                            anchor_low = flags.get("anchor_low", 0.0)
+                            anchor_low_str = f"{anchor_low:.2f}" if anchor_low > 0 else "-"
+                            
+                            vol_ratio_str = "-"
+                            try:
+                                klines = self.realtime_service.kline_cache.get_klines(code, n=5)
+                                if klines:
+                                    recent_avg_vol = np.mean([k['volume'] for k in klines])
+                                    base_vol = flags.get("base_vol", 0.0)
+                                    if base_vol > 0:
+                                        vol_ratio_str = f"{recent_avg_vol / base_vol:.1f}x"
+                            except Exception:
+                                pass
+
+                            # 根据 columns 动态构建 values，随时可以自定义添加 col
+                            row_values = []
+                            for col in columns:
+                                if col == "code":
+                                    row_values.append(code)
+                                elif col == "name":
+                                    row_values.append(display_name)
+                                elif col == "phase":
+                                    row_values.append(phase_cn)
+                                elif col == "entry_date":
+                                    row_values.append(flags.get("entry_date", "-"))
+                                elif col == "anchor_low":
+                                    row_values.append(anchor_low_str)
+                                elif col == "vol_ratio":
+                                    row_values.append(vol_ratio_str)
+                                else:
+                                    # 其它所有列（如 Rank, dff, dff2, dff3 或其他新增列）一律优先从 df_all 提取
+                                    val = get_df_all_val(code, col, None)
+                                    if val is None:
+                                        # 如果 df_all 中没有，再从 flags 字典中拿，或者直接使用 "-"
+                                        val = flags.get(col, "-")
+                                        if isinstance(val, float):
+                                            val = f"{val:.2f}"
+                                        else:
+                                            val = str(val)
+                                    row_values.append(val)
+
+                            item_id = tree.insert("", "end", values=tuple(row_values), tags=("fav",) if is_fav_stock else ())
+                            
+                            # 恢复选中状态
+                            if selected_code and code == selected_code:
+                                tree.selection_set(item_id)
+                                tree.focus(item_id)
+
+                        # 恢复滚动位置
+                        if y_scroll_pos is not None:
+                            try:
+                                tree.yview_moveto(y_scroll_pos[0])
+                                tree.xview_moveto(x_scroll_pos[0])
+                            except Exception:
+                                pass
+
+                    except Exception as e:
+                        logger.error(f"Error in refreshing pool tree: {e}")
+                    finally:
+                        log_win.after(200, reset_refreshing_flag)
+
+            # 强制回填与控制逻辑
+            def force_consolidate_stock(code: str):
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        with self.realtime_service.kline_cache._lock:
+                            state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
+                            state["phase"] = "CONSOLIDATING"
+                            state["anchor_low"] = float(self.realtime_service.kline_cache.get_klines(code, n=1)[0]['close']) if self.realtime_service.kline_cache.get_klines(code, n=1) else 0.0
+                            state["base_vol"] = 0.0
+                            state["entry_ts"] = time.time()
+                            state["entry_date"] = cct.get_today()
+                            state["last_fail_ts"] = 0
+                            # 手动加入或强设潜伏时，同时获取并持久化名字，实现一次解决
+                            state["name"] = get_stock_name(code)
+                            self.realtime_service.kline_cache._consolidation_flags[code] = state
+                            self.realtime_service.kline_cache._v_reversal_pool.add(code)
+                            self.realtime_service.kline_cache.save_consolidation_state()
+                        logger.warning(f"手动操作：已强制将 {code} 置为 CONSOLIDATING 潜伏状态并存盘")
+                        refresh_pool_data()
+                    except Exception as e:
+                        logger.error(f"Force consolidate failed: {e}")
+
+            def force_evict_stock(code: str):
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        with self.realtime_service.kline_cache._lock:
+                            state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
+                            state["phase"] = "INIT"
+                            state["last_fail_ts"] = time.time()
+                            self.realtime_service.kline_cache._consolidation_flags[code] = state
+                            self.realtime_service.kline_cache._v_reversal_pool.discard(code)
+                            self.realtime_service.kline_cache.save_consolidation_state()
+                        logger.warning(f"手动操作：已强制从潜伏池剔除 {code} 并设为冷却")
+                        refresh_pool_data()
+                    except Exception as e:
+                        logger.error(f"Force evict failed: {e}")
+
+            def view_stock_kline(code: str):
+                # 🚀 优先使用主窗口自带的、带有线程安全和 after 缓冲逻辑的异步 on_code_click，彻底防止主线程死锁卡死
+                if hasattr(self, 'on_code_click'):
+                    try:
+                        self.on_code_click(code)
+                        logger.info(f"💡 双击异步联动个股: {code}")
+                        return
+                    except Exception as e:
+                        logger.error(f"Failed calling on_code_click: {e}")
+                
+                # 兼容性回退
+                if hasattr(self, 'open_visualizer'):
+                    try:
+                        self.open_visualizer(code)
+                        logger.info(f"💡 双击联动可视化进程: {code}")
+                        return
+                    except Exception:
+                        pass
+                if hasattr(self, 'change_code'):
+                    try:
+                        self.change_code(code)
+                        return
+                    except Exception:
+                        pass
+                if hasattr(self, 'link_manager') and self.link_manager:
+                    try:
+                        self.link_manager.send_command("SWITCH_CODE", {"code": code})
+                        return
+                    except Exception:
+                        pass
+                logger.warning(f"无法联动切换股票: {code}，未找到匹配的可视化接口。")
+
+            def handle_add_stock():
+                code = add_entry.get().strip().zfill(6)
+                if len(code) == 6 and code.isdigit():
+                    force_consolidate_stock(code)
+                    add_entry.delete(0, tk.END)
+                else:
+                    messagebox.showerror("Error", "请输入正确的6位股票代码！")
+
+            add_btn = tk.Button(pool_bar, text="➕ 手动添加监控", command=handle_add_stock, font=("Microsoft YaHei", 9), bg="#e8f8f5")
+            add_btn.pack(side="left", padx=5)
+
+            refresh_btn = tk.Button(pool_bar, text="🔄 刷新池", command=refresh_pool_data, font=("Microsoft YaHei", 9))
+            refresh_btn.pack(side="right", padx=5)
+
+            # 绑定双击事件联动
+            def on_tree_double_click(event):
+                selected = tree.selection()
+                if selected:
+                    code = tree.item(selected[0], "values")[0]
+                    view_stock_kline(code)
+
+            tree.bind("<Double-1>", on_tree_double_click)
+
+            # 绑定鼠标选择与上下键联动 (仅响应真实用户硬件事件，彻底避开后台定时刷新干扰)
+            def on_tree_select(event):
+                selected = tree.selection()
+                if selected:
+                    code = tree.item(selected[0], "values")[0]
+                    view_stock_kline(code)
+
+            tree.bind("<ButtonRelease-1>", on_tree_select)
+            tree.bind("<KeyRelease-Up>", on_tree_select)
+            tree.bind("<KeyRelease-Down>", on_tree_select)
+            tree.bind("<KeyRelease-Prior>", on_tree_select) # PageUp
+            tree.bind("<KeyRelease-Next>", on_tree_select)  # PageDown
+            tree.bind("<KeyRelease-Home>", on_tree_select)
+            tree.bind("<KeyRelease-End>", on_tree_select)
+
+            # 绑定右键菜单与自选同步修正
+            def show_context_menu(event):
+                selected = tree.selection()
+                if not selected:
+                    return
+                code = tree.item(selected[0], "values")[0]
+                
+                menu = tk.Menu(tree, tearoff=0)
+                menu.add_command(label="🔍 联动查看分时/K线", command=lambda: view_stock_kline(code))
+                menu.add_separator()
+                menu.add_command(label="⚡ 强制剔除并冷却该股", command=lambda: force_evict_stock(code))
+                menu.add_command(label="🔄 强制设为 CONSOLIDATING 潜伏", command=lambda: force_consolidate_stock(code))
+                menu.add_separator()
+                
+                # 获取该股是否已是重点关注
+                is_fav = False
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    is_fav = code in GlobalFavoriteManager().get_favorite_stocks()
+                except Exception:
+                    pass
+
+                def toggle_favorite():
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        manager = GlobalFavoriteManager()
+                        if is_fav:
+                            manager.remove_favorite_stock(code)
+                            logger.warning(f"手动操作：已将 {code} 移出重点关注个股")
+                        else:
+                            manager.add_favorite_stock(code)
+                            logger.warning(f"手动操作：已将 {code} 设为重点关注个股")
+                        refresh_pool_data()
+                    except Exception as e:
+                        logger.error(f"Toggle favorite failed: {e}")
+
+                menu.add_command(label="❌ 取消重点关注" if is_fav else "⭐ 设为重点关注个股", command=toggle_favorite)
+                menu.post(event.x_root, event.y_root)
+
+            tree.bind("<Button-3>", show_context_menu) # Windows 右键
+
             # 定义关闭回调
             def on_close():
                 if hasattr(self, 'save_window_position'):
@@ -19816,6 +20286,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.save_window_position(log_win, window_id)
                     except Exception as e:
                         logger.error(f"Error in task: {e}")
+                save_sash_pos()
                 self._realtime_monitor_win = None
                 log_win.destroy()
 
@@ -19855,21 +20326,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 msg += f"total_nodes          : {status.get('total_nodes', 0)}\n"
                 msg += f"avg_nodes_per_stock  : {status.get('avg_nodes_per_stock', 0):.2f}\n"
                 msg += f"subscribers          : {status.get('subscribers', 0)}\n"
-                msg += f"target_hours         : {status.get('target_hours', 0)}\n"
+                msg += f"target_hours         : {status.get('target_hours', 0):.1f}\n"
                 msg += f"mem_threshold        : {status.get('mem_threshold', 0)}\n"
                 msg += f"cache_history_limit  : {status.get('cache_history_limit', 0)}\n"
                 msg += f"last_update          : {status.get('last_update', 0)}\n"
                 msg += f"server_time          : {cct.get_unixtime_to_time(status.get('server_time', 0))}\n"
-                # "avg_interval_sec": int(avg_interval),
-                # "expected_interval": self.expected_interval,
-                # "history_coverage_minutes": int(history_sec / 60),
-                # "emotions_tracked": len(self.emotion_tracker.scores),
-                # "auto_switch": self.auto_switch_enabled,
-                # "node_threshold": self.node_threshold,
-                # "node_capacity_pct": (total_nodes / self.node_threshold * 100) if self.node_threshold else 0,
-                # "max_batch_time_ms": int(self.max_batch_time * 1000),
-                # "last_batch_time_ms": int(self.last_batch_time * 1000),
-                # "processing_speed_row_per_sec": int(avg_speed),
+
                 if "error" in status:
                     msg += f"\n[!] ERROR: {status['error']}\n"
                 
@@ -19881,6 +20343,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
+
+                # 同步更新右侧监控池 Treeview 数据，展现最灵动的交互
+                try:
+                    refresh_pool_data()
+                except Exception as e:
+                    logger.error(f"Auto refresh pool data failed: {e}")
+
                 log_win.after(5000, update_status) 
                 
             update_status()

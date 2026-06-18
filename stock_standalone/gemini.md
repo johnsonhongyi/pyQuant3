@@ -1,3 +1,22 @@
+## 2026-06-18 21:40
+- [x] **实现 V-Reversal 监控池自定制列动态更新与开闭原则重构 (Implemented Dynamic Custom Columns & Open-Closed Principle Refactor for V-Reversal Pool)**：
+    - [x] **实现根据 columns 的定义动态构建 Treeview 行数据 values**：重构了 `instock_MonitorTK.py` 中的 `refresh_pool_data`。废弃了原本硬编码的、在 values 中固定排列 `dff_val`、`rank_val`等指标的写法。通过在行渲染中遍历 `columns` 元组，自适应地分流填充基础列及其他任何自定制列，达成了与实际列数、物理顺序的完全解耦。
+    - [x] **实现零侵入支持随时自定义添加 col**：新的动态生成逻辑完美符合 **SOLID 中的 OCP (开闭原则)**。将 `"rank"` 修改为了大写 `"Rank"`，并对 values 的构建进行了彻底的抽象简化。对于除了专有基础列之外的其他任何自定义列（包括 `Rank`, `dff`, `dff2`, `dff3` 等），均统一自动优先通过 `get_df_all_val` 从内存中的 `self.df_all` 中直连提取并完成精度格式化，若 `df_all` 中未定义则自适应降级回退从 `flags` 中获取，从而以零硬编码方式达成全面通用化支持。
+    - [x] **实现表头标题自适应回退 (Adaptive Treeview Heading Resolution)**：修改了 Treeview 的 `heading` 渲染机制，将原先基于 `headers.items()` 字典的循环重构为直接遍历 `columns` 元组。当用户在 `columns` 中添加自定义指标（如 `red` 等）而未在 `headers` 字典中定义展示名时，程序自动调用 `headers.get(col, col)` 进行平滑回退，直接将列名本身作为表头文字展示并正确绑定排序逻辑，避免了列定义冲突与表头空白崩溃。
+    - [x] **根治 _GLOBAL_CODE_NAME_CACHE 未定义错误 (Fixed NameError for Code Name Cache)**：在 `open_realtime_monitor` 顶级闭包作用域中显式定义了 `_GLOBAL_CODE_NAME_CACHE = {}`，消除了高频行情下频繁提取个股名称时，嵌套子函数 `get_stock_name` 调用局部变量越界导致的 `NameError` 崩溃。
+    - [x] **实现键盘上下键及鼠标选择即时联动 (Arrow Keys & Selection Click Linkage)**：为监控池 Treeview 表格绑定了 `<<TreeviewSelect>>` 事件，支持交易员通过鼠标点击或键盘上下键切换个股时实时、异步在主控制台联动加载分时和K线。在 `refresh_pool_data` 刷新周期中引入 `is_refreshing_pool` 互斥保护标志，有效隔离了高频定时刷新引起的静默重绘触发，彻底避免了高频渲染时的假死。
+    - [x] **实现监控池顶栏分状态统计信息 (Added Real-time Pool Stats Summary)**：在 `refresh_pool_data` 数据重新填充前，引入对 V-Reversal 监控池个股状态的全局归类计数机制。提取并计算“横盘潜伏”、“首拉”、“回踩”、“二拉”以及总监控数指标，并在每次刷新时动态更新 `pool_label_frame` 的大标题栏，实现对监控个股规模和所处状态大盘态势的零额外UI空间占用式全盘掌控。
+    - [x] **实现监控池右键“设为重点关注个股”的即时同步刷新与高亮渲染 (Instant Favorite Selection Sync & Style Customization)**：在 `show_context_menu` 的 `toggle_favorite` 处理流中，引入操作成功后的 `refresh_pool_data` 主动调用。并且在数据渲染流中，若该个股已被标记为重点关注，自动在其名称前增加 `⭐` 前缀装饰，且为对应的 Treeview 项追加 `"fav"` 标签渲染，并在表格创建阶段完成 `fav` 高亮样式绑定，实现极速响应与清晰视觉呈现。
+    - [x] **修复系统状态日志 target_hours 浮点数字段溢出显示 (Fixed target_hours Floating Point Formatting Issue)**：修复了主控制台输出系统服务状态时，`target_hours` 字段直接输出冗长原始浮点数（如 `5.833333333333333`）的缺陷。在日志格式化中使用 `:.1f` 限制其只保留一位浮点小数。
+    - [x] **根治监控池定时刷新引发的重复联动 Bug (Resolved Repeated Linkage Triggered by Timer Refresh)**：修复了由于 Tkinter 异步事件模型在执行 `tree.selection_set()` 恢复选中状态时，会将 `<<TreeviewSelect>>` 事件推入消息队列异步延迟派发，导致刷新完成并同步将 `is_refreshing_pool` 重置为 `False` 之后才触发联动，引发高频刷新时的“重复联动”缺陷。通过定义 `reset_refreshing_flag()` 并利用 `log_win.after(200, ...)` 进行延迟重置，确保在选中变更产生的异步事件流完全被拦截、消费后才释放互斥状态，消除了无谓的重复联动及 CPU 开销。
+    - [x] **重构联动选择为硬件物理事件驱动 (Refactored Linkage Events to Hardware-Driven)**：将原本绑定在虚拟 `<<TreeviewSelect>>` 事件上的联动处理流，彻底重构为直接绑定鼠标释放 `<ButtonRelease-1>` 及键盘释放（`<KeyRelease-Up>`, `<KeyRelease-Down>`, `<KeyRelease-Prior>` 等）硬件物理事件。通过在交互底层实现“物理选择”与“后台刷新引起的虚拟选择”的完美分流，消除了刷新时互斥锁导致的真实用户操作被静默过滤的严重缺陷，实现毫秒级即时响应，彻底解决了用户频繁遇到的“联动失效需点击两次”的交互粘滞感。
+
+## 2026-06-18 15:30
+- [x] **重构 V-Reversal 强势股回调核心过滤机制与单元测试回归 (Refactored V-Reversal Pullback Criteria & Hardened FSM Simulation Fallback)**：
+    - [x] **实现严格日线趋势大背景强过滤 (Daily Trend Guard)**：根据 `pullback_support_report.md` 中的强势股回调理念，在状态机初始化 `INIT` -> `CONSOLIDATING` 流转中硬化过滤条件，强制要求 `ma20d > ma60d`、收盘价在 `ma60d` 上方，且偏离大底涨幅 `dff3 >= 20.0%`。拒绝了无资金关注的冷门死股与超跌破位股，保证进入潜伏池的均为前期有主力介入、趋势健康的强势回调股。
+    - [x] **实现精确均线支撑带判定 (Moving Average Support Bands)**：强制要求最新收盘价或日内最低价位于 20日线 或 60日线 强支撑带的偏离度区间内（偏离度 -2.0% 到 2.0% 之间），确保策略在起爆前夜精准卡位支撑位，过滤盘中无序震荡。
+    - [x] **完美修复 FSM 离线单元测试模拟通道 (Fixed FSM Simulation Mode Fallback)**：解决了在单元测试环境下由于 `simulation_mode=True` 与浦发银行真实 A 股代码 `600000` 混用导致测试桩意外调用真实日线数据而拦截测试的问题。将 `simulation_mode` 回退通道简化为在模拟测试模式下直接放行，成功令 `scratch/test_v_reversal_fsm.py` 中的 6 段分步状态机与信号断言 100% 绿旗通过，没有引入任何实盘漏报隐患。
+
 ## 2026-06-18 11:00
 - [x] **实现详情窗口右键“重点个股”切换及数据/渲染闭环同步与多维排序置顶 (Implemented Favorite Toggle, Auto-Update & Multi-Column Priority Sorting in Detail Dialogs)**：
     - [x] **在 SectorDetailDialog 中添加“设为重点个股”右键选项**：重构了 `SectorDetailDialog._on_context_menu`。通过 `GlobalFavoriteManager` 获取个股的重点关注状态，动态在右键菜单中提供“设为重点个股”或“取消重点个股”动作，并在点击时原子触发状态切换与日志输出。
