@@ -6065,7 +6065,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df = df.copy()
                     if 'code' not in df.columns:
                         df['code'] = df.index.astype(str)
-                    df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                    df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
                 except Exception as e:
                     logger.warning(f"Failed to check favorites in pump: {e}")
                     df['is_fav'] = 0
@@ -6202,7 +6202,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df = df.copy()
                     if 'code' not in df.columns:
                         df['code'] = df.index.astype(str)
-                    df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                    df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
                 except Exception as e:
                     logger.warning(f"Failed to check favorites in compute sort: {e}")
                     df['is_fav'] = 0
@@ -9392,7 +9392,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 from global_favorites import GlobalFavoriteManager
                 fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-                df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
                 sort_col = getattr(self, 'sortby_col', None)
                 sort_col_asc = getattr(self, 'sortby_col_ascend', False)
                 if sort_col and sort_col in df.columns:
@@ -15521,7 +15521,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
                 if 'code' not in df.columns:
                     df['code'] = df.index.astype(str)
-                df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+                df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
                 
                 sort_col = getattr(self, 'sortby_col', None)
                 if sort_col and sort_col in df.columns:
@@ -15830,7 +15830,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df = self.current_df.copy()
             if 'code' not in df.columns:
                 df['code'] = df.index.astype(str)
-            df['is_fav'] = df['code'].apply(lambda x: 1 if x in fav_stocks else 0)
+            df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
         except Exception as e:
             logger.warning(f"Failed to check favorites in manual sort: {e}")
             df = self.current_df.copy()
@@ -19811,10 +19811,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             paned = tk.PanedWindow(log_win, orient="horizontal", sashrelief="raised", sashwidth=4)
             paned.pack(fill="both", expand=True, padx=5, pady=5)
 
+            sash_restored = False
+
             def save_sash_pos():
+                if not sash_restored:
+                    return
                 try:
                     pos = paned.sash_coord(0)[0]
-                    if pos <= 0:
+                    if pos <= 50:
+                        return
+                    width = paned.winfo_width()
+                    if width > 100 and pos >= width - 50:
                         return
                     import json
                     from sys_utils import get_conf_path
@@ -19842,9 +19849,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
                 return None
 
-            saved_sash = load_sash_pos()
-            if saved_sash is not None:
-                log_win.after(100, lambda: paned.sash_place(0, saved_sash, 0))
+            def restore_sash(event=None):
+                nonlocal sash_restored
+                if sash_restored:
+                    return
+                saved_sash = load_sash_pos()
+                if saved_sash is not None:
+                    width = paned.winfo_width()
+                    if width > 100:  # 确保已经分配合理的大小
+                        try:
+                            # 尝试放置 sash
+                            paned.sash_place(0, saved_sash, 0)
+                            sash_restored = True
+                        except Exception:
+                            pass
+
+            paned.bind("<Configure>", restore_sash)
+            log_win.after(200, restore_sash)  # 兜底延迟执行
 
             paned.bind("<ButtonRelease-1>", lambda e: save_sash_pos())
 
@@ -19886,15 +19907,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "entry_date": "入池时间", "anchor_low": "锚点低价", "vol_ratio": "放量倍数"
             }
             
+            current_sort_column = None
+            current_sort_reverse = False
+
             def tree_sort(tv, col, reverse):
-                l = [(tv.set(k, col), k) for k in tv.get_children("")]
-                try:
-                    l.sort(key=lambda t: float(t[0].replace('%','').replace('x','')), reverse=reverse)
-                except ValueError:
-                    l.sort(reverse=reverse)
-                for index, (val, k) in enumerate(l):
-                    tv.move(k, "", index)
-                tv.heading(col, command=lambda: tree_sort(tv, col, not reverse))
+                nonlocal current_sort_column, current_sort_reverse
+                current_sort_column = col
+                current_sort_reverse = reverse
+                
+                # 重新绘制表头文字，显示升降序指示箭头，同时清除其它列的箭头
+                for c in columns:
+                    base_text = headers.get(c, c)
+                    if c == col:
+                        arrow = " ▼" if reverse else " ▲"
+                        tv.heading(c, text=base_text + arrow, command=lambda: tree_sort(tv, col, not reverse))
+                    else:
+                        tv.heading(c, text=base_text, command=lambda _c=c: tree_sort(tv, _c, False))
+                
+                refresh_pool_data()
 
             for col in columns:
                 text = headers.get(col, col)
@@ -20008,7 +20038,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 刷新池中数据
             def refresh_pool_data():
-                nonlocal is_refreshing_pool
+                nonlocal is_refreshing_pool, current_sort_column, current_sort_reverse
                 if not log_win.winfo_exists():
                     return
                 is_refreshing_pool = True
@@ -20048,6 +20078,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         stats_text = f"🎯 V型反转 监控潜伏池 (总数: {total_count} | 横盘: {stats.get('CONSOLIDATING', 0)} | 首拉: {stats.get('WAVE_UP', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)})"
                         pool_label_frame.config(text=stats_text)
 
+                        # 重点个股优先显示（置顶）
+                        fav_set = set()
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            fav_set = set(GlobalFavoriteManager().get_favorite_stocks())
+                        except Exception:
+                            pass
+                        
+                        pool_rows = []
                         for code in list(pool):
                             flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
                             phase_raw = flags.get("phase", "INIT")
@@ -20062,12 +20101,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         self.realtime_service.kline_cache._consolidation_flags[code]["name"] = name
                             
                             # 检测是否为重点关注个股，如果是，名称前加 ⭐
-                            is_fav_stock = False
-                            try:
-                                from global_favorites import GlobalFavoriteManager
-                                is_fav_stock = code in GlobalFavoriteManager().get_favorite_stocks()
-                            except Exception:
-                                pass
+                            is_fav_stock = code in fav_set
                             display_name = f"⭐ {name}" if is_fav_stock else name
 
                             anchor_low = flags.get("anchor_low", 0.0)
@@ -20111,10 +20145,57 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             val = str(val)
                                     row_values.append(val)
 
-                            item_id = tree.insert("", "end", values=tuple(row_values), tags=("fav",) if is_fav_stock else ())
+                            pool_rows.append({
+                                "code": code,
+                                "is_fav": is_fav_stock,
+                                "values": tuple(row_values)
+                            })
+
+                        # 执行多维稳定排序，保持置顶特权
+                        if current_sort_column and current_sort_column in columns:
+                            col_idx = columns.index(current_sort_column)
                             
-                            # 恢复选中状态
-                            if selected_code and code == selected_code:
+                            def get_sort_key(row):
+                                val_str = row["values"][col_idx]
+                                val_clean = str(val_str).replace('⭐ ', '').replace('%', '').replace('x', '')
+                                prio = 1 if row["is_fav"] else 0
+                                
+                                # 将字符串转换成相应的数值，如果转换失败则作为字符串处理
+                                is_num = False
+                                val = None
+                                if val_clean != "-" and val_clean != "":
+                                    try:
+                                        val = float(val_clean)
+                                        is_num = True
+                                    except ValueError:
+                                        val = val_clean.lower()
+                                
+                                if current_sort_reverse:
+                                    # 降序排列 (reverse=True)
+                                    if is_num:
+                                        val_to_use = val if val is not None else -999999.0
+                                        return (prio, 0, val_to_use, row["code"])
+                                    else:
+                                        val_to_use = val if val is not None else ""
+                                        return (prio, 1, val_to_use, row["code"])
+                                else:
+                                    # 升序排列 (reverse=False)
+                                    if is_num:
+                                        val_to_use = val if val is not None else 999999.0
+                                        return (-prio, 0, val_to_use, row["code"])
+                                    else:
+                                        val_to_use = val if val is not None else ""
+                                        return (-prio, 1, val_to_use, row["code"])
+                            
+                            pool_rows = sorted(pool_rows, key=get_sort_key, reverse=current_sort_reverse)
+                        else:
+                            # 默认排序：代码升序，且重点关注置顶
+                            pool_rows = sorted(pool_rows, key=lambda r: (- (1 if r["is_fav"] else 0), r["code"]))
+
+                        # 数据批量插入与选中态恢复
+                        for row in pool_rows:
+                            item_id = tree.insert("", "end", values=row["values"], tags=("fav",) if row["is_fav"] else ())
+                            if selected_code and row["code"] == selected_code:
                                 tree.selection_set(item_id)
                                 tree.focus(item_id)
 
@@ -20129,7 +20210,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Error in refreshing pool tree: {e}")
                     finally:
-                        log_win.after(200, reset_refreshing_flag)
+                        if log_win.winfo_exists():
+                            try:
+                                log_win.after(200, reset_refreshing_flag)
+                            except Exception:
+                                is_refreshing_pool = False
+                        else:
+                            is_refreshing_pool = False
 
             # 强制回填与控制逻辑
             def force_consolidate_stock(code: str):
@@ -20224,11 +20311,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.bind("<Double-1>", on_tree_double_click)
 
             # 绑定鼠标选择与上下键联动 (仅响应真实用户硬件事件，彻底避开后台定时刷新干扰)
+            last_linked_code = None
             def on_tree_select(event):
-                selected = tree.selection()
-                if selected:
-                    code = tree.item(selected[0], "values")[0]
-                    view_stock_kline(code)
+                nonlocal last_linked_code
+                try:
+                    selected = tree.selection()
+                    if selected:
+                        item_data = tree.item(selected[0], "values")
+                        if item_data and len(item_data) > 0:
+                            code = item_data[0]
+                            if code == last_linked_code:
+                                return
+                            last_linked_code = code
+                            view_stock_kline(code)
+                except Exception as ex:
+                    logger.debug(f"Treeview select linkage transient error: {ex}")
 
             tree.bind("<ButtonRelease-1>", on_tree_select)
             tree.bind("<KeyRelease-Up>", on_tree_select)

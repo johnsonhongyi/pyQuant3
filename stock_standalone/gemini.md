@@ -1,3 +1,13 @@
+## 2026-06-18 23:50
+- [x] **修复实时数据服务监控窗口垂直分隔条持久化失效与自动变回的 Bug (Fixed PanedWindow Sash Position Persistence Bug)**：
+    - [x] **引入初始化渲染守护标志 (Initialization Guard Flag)**：新增 `sash_restored` 状态变量，在窗口成功恢复持久化的 `sash_place` 位置前，强行阻断并过滤掉所有无效或未渲染完毕时触发的 `save_sash_pos` 动作，彻底防止了空配置或极小边界坐标将正确的历史配置数据覆盖。
+    - [x] **实现基于组件分配尺寸事件的自适应加载机制 (Size-Aware Load & Layout Synchronization)**：放弃原来 100ms 盲盒延时加载，重构为直接绑定 `PanedWindow` 自身的 `<Configure>` 事件。当且仅当组件获得了真实宽度（`width > 100`）后才执行首次 `sash_place` 并置位还原标志，完全消除了由于渲染阶段提前截断 (clamp) 限制导致的 sash 位置退化变回。
+    - [x] **添加极端尺寸过滤保护 (Extreme Coordinate Guard)**：在 `save_sash_pos` 中增加了对坐标边界的过滤，偏左（`pos <= 50`）或偏右（`pos >= width - 50`）的临界脏数据将直接抛弃，杜绝了极端拉伸下的非法坐标持久化。
+
+## 2026-06-18 23:35
+- [x] **修复主视图重点个股匹配类型不匹配导致置顶失效的 Bug (Fixed Type Mismatch Bug for Favorites Pinning in Main View)**：
+    - [x] **统一股票代码 string & zfill(6) 标准化匹配**：修复了在主线程的过滤、后台计算线程的 `_run_compute_async`、主视图手动排序、自选刷新通知等 5 处与 `fav_stocks` 判断是否存在（`x in fav_stocks`）的地方。由于 A 股 DataFrame 的 `code` 列常为 `int64`、`float64` 或非标准格式字符串，而 `fav_stocks` 集合内始终为 6 位数字符串，导致类型比对结果恒为 `False` 使得主视图上的重点关注置顶彻底失效。重构为 `str(x).strip().zfill(6) in fav_stocks` 统一规范化匹配，彻底恢复了主视图各处排序逻辑下重点个股的绝对置顶和保留效果。
+
 ## 2026-06-18 21:40
 - [x] **实现 V-Reversal 监控池自定制列动态更新与开闭原则重构 (Implemented Dynamic Custom Columns & Open-Closed Principle Refactor for V-Reversal Pool)**：
     - [x] **实现根据 columns 的定义动态构建 Treeview 行数据 values**：重构了 `instock_MonitorTK.py` 中的 `refresh_pool_data`。废弃了原本硬编码的、在 values 中固定排列 `dff_val`、`rank_val`等指标的写法。通过在行渲染中遍历 `columns` 元组，自适应地分流填充基础列及其他任何自定制列，达成了与实际列数、物理顺序的完全解耦。
@@ -10,6 +20,9 @@
     - [x] **修复系统状态日志 target_hours 浮点数字段溢出显示 (Fixed target_hours Floating Point Formatting Issue)**：修复了主控制台输出系统服务状态时，`target_hours` 字段直接输出冗长原始浮点数（如 `5.833333333333333`）的缺陷。在日志格式化中使用 `:.1f` 限制其只保留一位浮点小数。
     - [x] **根治监控池定时刷新引发的重复联动 Bug (Resolved Repeated Linkage Triggered by Timer Refresh)**：修复了由于 Tkinter 异步事件模型在执行 `tree.selection_set()` 恢复选中状态时，会将 `<<TreeviewSelect>>` 事件推入消息队列异步延迟派发，导致刷新完成并同步将 `is_refreshing_pool` 重置为 `False` 之后才触发联动，引发高频刷新时的“重复联动”缺陷。通过定义 `reset_refreshing_flag()` 并利用 `log_win.after(200, ...)` 进行延迟重置，确保在选中变更产生的异步事件流完全被拦截、消费后才释放互斥状态，消除了无谓的重复联动及 CPU 开销。
     - [x] **重构联动选择为硬件物理事件驱动 (Refactored Linkage Events to Hardware-Driven)**：将原本绑定在虚拟 `<<TreeviewSelect>>` 事件上的联动处理流，彻底重构为直接绑定鼠标释放 `<ButtonRelease-1>` 及键盘释放（`<KeyRelease-Up>`, `<KeyRelease-Down>`, `<KeyRelease-Prior>` 等）硬件物理事件。通过在交互底层实现“物理选择”与“后台刷新引起的虚拟选择”的完美分流，消除了刷新时互斥锁导致的真实用户操作被静默过滤的严重缺陷，实现毫秒级即时响应，彻底解决了用户频繁遇到的“联动失效需点击两次”的交互粘滞感。
+    - [x] **实现监控池重点个股优先显示与置顶 (Prioritized Favorite Stocks in Monitor Pool)**：在数据填充逻辑 `refresh_pool_data` 中，引入基于 `GlobalFavoriteManager` 的个股排序预处理。在生成监控池列表时，通过 $O(1)$ 复杂度的集合判断，将所有被标星（⭐）的重点关注个股提取并强制置顶显示在表格最上方，普通监控股在下方依次排列，使交易员能第一眼聚焦核心自选股状态变化。
+    - [x] **重构监控池为一步法多维排序与排列表头状态指示 (Unified Single-Pass Multi-dimensional Sort & Column Header Sort Direction Indicator)**：借鉴赛马面板的设计理念，在 `refresh_pool_data` 的排序流中，使用单一多维元组 Key 的计算来取代原本的双层 `sorted`。降序时根据 `(prio, type_flag, val, code)` 排序，升序时根据 `(-prio, type_flag, val, code)` 排序，确保不管如何排序重点个股都牢牢置顶，并支持数值和字母列的自适应安全比对。同时，在 `tree_sort` 阶段动态修改选定排序列的表头文本，以 `▲`/`▼` 标记指示当前排序朝向，且在自动定时刷新期间完美保持用户指定的排序，解决了刷新后排序状态丢失的难题。
+
 
 ## 2026-06-18 15:30
 - [x] **重构 V-Reversal 强势股回调核心过滤机制与单元测试回归 (Refactored V-Reversal Pullback Criteria & Hardened FSM Simulation Fallback)**：
