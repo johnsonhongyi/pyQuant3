@@ -39,7 +39,7 @@ a = Analysis(
          ] + datas_st,
     hiddenimports=['a_trade_calendar','JSONData.sina_data','JSONData.tdx_hdf5_api',  'JSONData.realdatajson',
                     'JSONData.wencaiData',  'JSONData.tdxbk', 'pandas','JohnsonUtil.johnson_cons', 'configobj',
-                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract'] + hiddenimports_st,
+                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract', 'sys_performance_analyzer'] + hiddenimports_st,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

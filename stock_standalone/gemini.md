@@ -1,3 +1,12 @@
+## 2026-06-18 11:00
+- [x] **实现详情窗口右键“重点个股”切换及数据/渲染闭环同步与多维排序置顶 (Implemented Favorite Toggle, Auto-Update & Multi-Column Priority Sorting in Detail Dialogs)**：
+    - [x] **在 SectorDetailDialog 中添加“设为重点个股”右键选项**：重构了 `SectorDetailDialog._on_context_menu`。通过 `GlobalFavoriteManager` 获取个股的重点关注状态，动态在右键菜单中提供“设为重点个股”或“取消重点个股”动作，并在点击时原子触发状态切换与日志输出。
+    - [x] **在 CategoryDetailDialog 中添加“设为重点个股”右键选项**：同样重构了 `CategoryDetailDialog._on_context_menu` 的上下文菜单，实现重点个股切换逻辑的统一。
+    - [x] **实现详情窗口重点状态变更的订阅与退订闭环**：在两个 Dialog 初始化 `__init__` 时订阅了 `GlobalFavoriteManager` 变化通知，在窗口关闭 `closeEvent` 中进行退订释放。任何地方改变重点状态，两处详情窗口均能利用 `QTimer.singleShot` 安全刷新本表数据。
+    - [x] **为 CategoryDetailDialog 引入重点个股置顶与高亮渲染对齐**：重构了 `CategoryDetailDialog.refresh_data`。从单例中拉取 `_fav_stocks` 将重点个股赋予最高排序优先级（`prio = 3`）在分类内强制置顶；在 `_render_table` 渲染时，在名称前附带 ⭐ 装饰，并在无报警时应用特有深绿背景（`#1A2A1A`）与亮绿前景（`#00FF88`）高亮显示，与主界面及板块成分股达到绝对视觉一致。
+    - [x] **实现全局排序状态下重点个股的绝对置顶显示 (Fixed Default Priority Display Across All Sorting Columns)**：重构了 `SectorDetailDialog` 与 `CategoryDetailDialog` 的 `refresh_data` 排序 key 构造逻辑。引入根据 `is_rev` 动态反转 `prio` 映射的排序算法。确保无论用户切换按任何字段升序或降序排列，重点个股（包括破位、报警个股）始终能够根据 `prio` 规则强制置顶在表格最上方，其它普通股在其下方继续按用户选定的字段进行正反向排序，彻底解决了原先只有按名称排序才置顶的业务缺陷。
+    - [x] **修复添加重点个股后详情页状态未能即时刷新同步的漏洞 (Fixed Sync Refresh Lag)**：在两处详情窗口的 `_on_favorites_changed` 订阅回调方法中，补齐了 `self._dirty = True` 置脏设置。这强制穿透了原有的版本与时间戳脏检查，使添加/取消重点个股的瞬间能自动、立即触发整个明细表格的重新提取与高亮重绘，消除了交互粘滞与延时。
+
 ## 2026-06-17 22:00
 - [x] **新增窗口捕获关键字快速过滤与修复东财核心进程 KeyError 崩溃 (Added Window Capturing Keyword Filter & Fixed Eastmoney Diagnostics KeyError)**：
     - [x] **实现窗口捕获搜索框与模糊匹配过滤 (Implemented Capturing Window Filter & Fuzzy Matching)**：在“捕获当前桌面窗口坐标”对话框（`CaptureWindowsDialog`）底部按钮栏中，新增了 `🔍 过滤` 输入框。用户可在文本框中直接输入窗口标题或可执行程序路径关键字进行实时模糊过滤。
