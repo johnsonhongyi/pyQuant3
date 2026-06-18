@@ -6378,6 +6378,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.df_all = full_df
                     self.df_all_res = full_df_res if full_df_res is not None else full_df
                 
+                # 缓存 df_all 到分时 K 线缓存中，避免高频均线补齐时读取磁盘 HDF5
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        self.realtime_service.kline_cache.set_df_all_cache(full_df)
+                    except Exception as ex:
+                        logger.error(f"[Sync] Failed to set df_all_cache: {ex}")
+                
                 # ⚡ [NEW] 主动强力注入交易内核特征预加载温热 (移至 compute_executor 异步执行以彻底释放主线程)
                 try:
                     from trading_kernel.kernel_service import get_kernel_service
@@ -9183,6 +9190,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         menu = tk.Menu(self, tearoff=0)
 
         # —— 基础功能 ——
+        menu.add_command(
+            label=f"📋 复制股票代码 ({stock_code})",
+            command=lambda: [pyperclip.copy(stock_code), self.status_var2.set(f"已复制股票代码 {stock_code}")]
+        )
+
         menu.add_command(
             label=f"📝 复制提取信息 ({stock_code})",
             command=lambda: self.copy_stock_info(stock_code)
@@ -14098,6 +14110,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
+        # 9.2. 强庄二次起爆监控池窗口 (Tk - _realtime_monitor_win)
+        if hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win is not None:
+            try:
+                if self._realtime_monitor_win.winfo_exists():
+                    h = self._realtime_monitor_win.winfo_id()
+                    current_visible_hwnds.append(h)
+                    name_map[h] = "🎯 强庄二次起爆监控池 (RealtimeMonitor)"
+            except Exception:
+                pass
+
         # 10. 概念放量监控子窗口 (Tk - self.monitor_windows 中的所有有效 toplevel 窗口)
         if hasattr(self, 'monitor_windows') and self.monitor_windows:
             for win_id, win_info in self.monitor_windows.items():
@@ -14198,6 +14220,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._stock_selection_win.deiconify()
                     self._stock_selection_win.lift()
                     self._stock_selection_win.focus_force()
+                except Exception:
+                    pass
+        elif hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win and self._realtime_monitor_win.winfo_exists():
+            if hwnd == self._realtime_monitor_win.winfo_id():
+                try:
+                    self._realtime_monitor_win.deiconify()
+                    self._realtime_monitor_win.lift()
+                    self._realtime_monitor_win.focus_force()
                 except Exception:
                     pass
 
@@ -14326,6 +14356,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         name_map[hwnd] = "📈 传统K线监控 (KLineMonitor)"
                     elif "ConceptDetail" in raw_name:
                         name_map[hwnd] = "💡 概念异动详情 (ConceptDetail)"
+                    elif "RealtimeMonitor" in raw_name:
+                        name_map[hwnd] = "🎯 强庄二次起爆监控池 (RealtimeMonitor)"
                     elif "MonitorWindow_" in raw_name:
                         # 提炼出独特代码如 "板块名称_代码"
                         mon_id = raw_name.split("MonitorWindow_")[-1].split("(")[0]
@@ -19896,12 +19928,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             add_entry.pack(side="left", padx=2)
 
             # Treeview 表格定义
-            columns = ("code", "name", "phase", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
+            columns = ("code", "name", "phase", "structure", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
             tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="browse")
             tree.tag_configure("fav", background="#eefcf7", foreground="#00aa55")
+            tree.tag_configure("buy_zone", background="#fff9eb", foreground="#b87333")  # 黄金买入点 (潜伏/回踩)
 
             headers = {
-                "code": "代码", "name": "名称", "phase": "当前阶段",
+                "code": "代码", "name": "名称", "phase": "当前阶段", "structure": "支撑分级",
                 "dff": "dff", "Rank": "Rank",
                 "dff3": "大底dff3", "dff2": "前低dff2",
                 "entry_date": "入池时间", "anchor_low": "锚点低价", "vol_ratio": "放量倍数"
@@ -19931,6 +19964,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tree.heading(col, text=text, command=lambda c=col: tree_sort(tree, c, False))
                 tree.column(col, anchor="center", width=70)
             tree.column("phase", width=85)
+            tree.column("structure", width=70)
             tree.column("entry_date", width=85)
 
             vsb = ttk.Scrollbar(pool_label_frame, orient="vertical", command=tree.yview)
@@ -20078,11 +20112,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         state["phase"] = "CONSOLIDATING"
                                         klines = self.realtime_service.kline_cache.get_klines(code, n=1)
                                         state["anchor_low"] = float(klines[0]['close']) if klines else 0.0
-                                        state["base_vol"] = 0.0
+                                        klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
+                                        state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
                                         state["entry_ts"] = time.time()
                                         state["entry_date"] = cct.get_today()
                                         state["last_fail_ts"] = 0
                                         state["name"] = get_stock_name(code)
+                                        # 注入时预填 structure 占位，由状态机下次 tick 通过自愈补齐器更新为真实值
+                                        if "structure" not in state or not state["structure"]:
+                                            state["structure"] = "待计算"
 
                                         self.realtime_service.kline_cache._consolidation_flags[code] = state
                                         self.realtime_service.kline_cache._v_reversal_pool.add(code)
@@ -20107,6 +20145,88 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # 动态更新 LabelFrame 标题，展示最新统计信息
                         stats_text = f"🎯 V型反转 监控潜伏池 (总数: {total_count} | 横盘: {stats.get('CONSOLIDATING', 0)} | 首拉: {stats.get('WAVE_UP', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)})"
                         pool_label_frame.config(text=stats_text)
+
+                        # ✅ [df_all 内存补齐] 直接从已在内存中的 df_all 提取均线/低价字段
+                        # 取代原来的异步线程 + 磁盘日线读取，彻底消除盘中高频刷新时的 IO 压力
+                        try:
+                            kline_cache = self.realtime_service.kline_cache
+                            df_snap = self.df_all  # 取一次引用，避免重复 hasattr
+                            if df_snap is not None and not df_snap.empty:
+                                for c in list(pool):
+                                    f = kline_cache.get_consolidation_flags(c)
+                                    sv = f.get("structure", None)
+                                    if sv not in (None, "", "-", "待计算", "None"):
+                                        continue  # 已有有效值则跳过
+
+                                    c_clean = str(c).strip().zfill(6)
+                                    try:
+                                        row = df_snap.loc[c_clean] if c_clean in df_snap.index else None
+                                        if row is None and 'code' in df_snap.columns:
+                                            _m = df_snap[df_snap['code'] == c_clean]
+                                            row = _m.iloc[0] if not _m.empty else None
+                                        if row is None:
+                                            continue
+
+                                        # 从 df_all 直接读取多条均线（标准列名 ma5d/ma10d/ma20d/ma60d）
+                                        def _fv(keys, default=0.0):
+                                            for k in keys:
+                                                v = row.get(k, None)
+                                                if v is not None and not pd.isna(v):
+                                                    return float(v)
+                                            return default
+
+                                        ma5  = _fv(['ma5d',  'ma5'])
+                                        ma10 = _fv(['ma10d', 'ma10'])
+                                        ma20 = _fv(['ma20d', 'ma20'])
+                                        ma60 = _fv(['ma60d', 'ma60'])
+                                        latest_close = _fv(['close', 'trade'])
+                                        latest_low   = _fv(['low', 'lastl'])
+
+                                        if ma20 <= 0 or ma60 <= 0 or latest_close <= 0:
+                                            continue
+
+                                        # ── 支撑分级：5档（优先级从高到低）──────────────────
+                                        # 1. 多头排列：ma5 > ma10 > ma20，且收盘在 ma5 之上
+                                        #    说明趋势最强，短线均线仍托举价格
+                                        if (ma5 > 0 and ma10 > 0
+                                                and ma5 > ma10 > ma20
+                                                and latest_close >= ma5 * 0.995):
+                                            structure_type = "多头排列"
+                                        # 2. MA5 回踩：短线回踩 5 日线附近（-2% ~ +1%）
+                                        elif (ma5 > 0
+                                              and ma5 * 0.98 <= latest_low <= ma5 * 1.01):
+                                            structure_type = "MA5回踩"
+                                        # 3. MA10 回踩：中短线回踩 10 日线附近（-2% ~ +1%）
+                                        elif (ma10 > 0
+                                              and ma10 * 0.98 <= latest_low <= ma10 * 1.01):
+                                            structure_type = "MA10回踩"
+                                        # 4. MA20/60 粘合：变盘前夕，偏离度 ≤ 5%
+                                        elif ma60 > 0 and abs(ma20 - ma60) / ma60 <= 0.05:
+                                            structure_type = "MA20/60粘合"
+                                        # 5. MA60 支撑：收盘跌破 ma20 但仍在 ma60 上方防守
+                                        elif latest_low < ma20 * 0.97:
+                                            structure_type = "MA60支撑"
+                                        # 默认：MA20 附近横盘整理
+                                        else:
+                                            structure_type = "MA20整理"
+
+                                        # dff3/dff2 优先从 df_all 取现成字段
+                                        calc_dff3 = _fv(['dff3'], 0.0)
+                                        calc_dff2 = _fv(['dff2'], 0.0)
+
+                                        with kline_cache._lock:
+                                            s = kline_cache._consolidation_flags.get(c, {})
+                                            s["structure"] = structure_type
+                                            if s.get("dff3", 0.0) == 0.0 and calc_dff3 != 0.0:
+                                                s["dff3"] = round(calc_dff3, 1)
+                                            if s.get("dff2", 0.0) == 0.0 and calc_dff2 != 0.0:
+                                                s["dff2"] = round(calc_dff2, 1)
+                                            kline_cache._consolidation_flags[c] = s
+                                        logger.debug(f"⚡ [df_all补齐] {c} 结构={structure_type}")
+                                    except Exception as _ex_c:
+                                        logger.debug(f"fill_structure from df_all: skip {c}: {_ex_c}")
+                        except Exception as _ex_fill:
+                            logger.debug(f"fill_structure from df_all outer: {_ex_fill}")
 
                         # 重点个股优先显示（置顶）
                         fav_set = set()
@@ -20157,6 +20277,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     row_values.append(display_name)
                                 elif col == "phase":
                                     row_values.append(phase_cn)
+                                elif col == "structure":
+                                    # 支撑分级：直接从 flags 读取，不走 df_all 通用路径
+                                    structure_val = flags.get("structure", None)
+                                    if not structure_val or structure_val == "None" or str(structure_val).strip() == "":
+                                        structure_val = "-"
+                                    row_values.append(structure_val)
                                 elif col == "entry_date":
                                     row_values.append(flags.get("entry_date", "-"))
                                 elif col == "anchor_low":
@@ -20224,7 +20350,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         # 数据批量插入与选中态恢复
                         for row in pool_rows:
-                            item_id = tree.insert("", "end", values=row["values"], tags=("fav",) if row["is_fav"] else ())
+                            row_tags = []
+                            if row["is_fav"]:
+                                row_tags.append("fav")
+                            else:
+                                code_clean = row["code"]
+                                flags = self.realtime_service.kline_cache.get_consolidation_flags(code_clean)
+                                phase_raw = flags.get("phase", "INIT")
+                                if phase_raw in ["CONSOLIDATING", "PULLBACK"]:
+                                    row_tags.append("buy_zone")
+                            
+                            item_id = tree.insert("", "end", values=row["values"], tags=tuple(row_tags))
                             if selected_code and row["code"] == selected_code:
                                 tree.selection_set(item_id)
                                 tree.focus(item_id)
@@ -20255,13 +20391,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         with self.realtime_service.kline_cache._lock:
                             state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
                             state["phase"] = "CONSOLIDATING"
-                            state["anchor_low"] = float(self.realtime_service.kline_cache.get_klines(code, n=1)[0]['close']) if self.realtime_service.kline_cache.get_klines(code, n=1) else 0.0
-                            state["base_vol"] = 0.0
+                            klines_1 = self.realtime_service.kline_cache.get_klines(code, n=1)
+                            state["anchor_low"] = float(klines_1[0]['close']) if klines_1 else 0.0
+                            klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
+                            state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
                             state["entry_ts"] = time.time()
                             state["entry_date"] = cct.get_today()
                             state["last_fail_ts"] = 0
                             # 手动加入或强设潜伏时，同时获取并持久化名字，实现一次解决
                             state["name"] = get_stock_name(code)
+                            # 预填 structure 占位，由状态机下次 tick 通过自愈补齐器更新为真实值
+                            if "structure" not in state or not state.get("structure"):
+                                state["structure"] = "待计算"
                             self.realtime_service.kline_cache._consolidation_flags[code] = state
                             self.realtime_service.kline_cache._v_reversal_pool.add(code)
                             self.realtime_service.kline_cache.save_consolidation_state()
@@ -20374,6 +20515,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 menu = tk.Menu(tree, tearoff=0)
                 menu.add_command(label="🔍 联动查看分时/K线", command=lambda: view_stock_kline(code))
+                menu.add_separator()
+                menu.add_command(label="📋 复制股票代码", command=lambda: [pyperclip.copy(code)])
                 menu.add_separator()
                 menu.add_command(label="⚡ 强制剔除并冷却该股", command=lambda: force_evict_stock(code))
                 menu.add_command(label="🔄 强制设为 CONSOLIDATING 潜伏", command=lambda: force_consolidate_stock(code))
@@ -20745,9 +20888,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 如果 CSV 本身已经有 code 列，不要再插入
                 if 'code' in df.columns:
                     df = df.copy()
-                #停止刷新
                 self.stop_refresh()
                 self.df_all = df
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        self.realtime_service.kline_cache.set_df_all_cache(df)
+                    except Exception as ex:
+                        logger.error(f"[Sync] Failed to set df_all_cache from CSV: {ex}")
                 self.refresh_tree(df, force=True)
                 idx =file_path.find('monitor')
                 status_txt = file_path[idx:]
