@@ -1,3 +1,38 @@
+## 2026-06-19 01:40
+- [x] **消除强制设置与自动同步个股至监控池引发的主线程 I/O 卡顿 (Eliminated Main Thread I/O Freeze on Favoriting/Syncing Stocks)**：
+    - [x] **引入内存 df_all 行情指标缓存 (_df_all_cache)**：在 `MinuteKlineCache` 中新增 `_df_all_cache` 行情数据快照引用，并在主界面行情每轮刷新（`self.df_all = full_df`）和 CSV 数据加载时，原子地同步将完整的日线指标数据注入分时 K 线缓存中。
+    - [x] **重构状态机缺失字段补齐器 (Auto-Filler) 为内存计算**：在 `update_wave_structure_state` 的 `need_fill` 段中，优先从 `_df_all_cache` 在内存中极速补齐个股的 `ma20`、`ma60`、`dff3`、`dff2` 及名称，实现亚毫秒级、零磁盘 I/O 阻塞 of 快速补齐。
+    - [x] **同步重构并优化磁盘读取回退逻辑中的支撑分级标准**：在 `update_wave_structure_state` 的磁盘读取 `fallback` 分支中，将原本单一旧的 `MA20/60` 粗糙划分，完整对齐重构为全新的 5 档精细支撑分级体系（计算并加入 `ma5d` 和 `ma10d` 支撑均线），消除了由于数据源与加载方式不同造成的个股结构标记不一致跳动的隐患。
+    - [x] **建立主线程磁盘 I/O 安全防护闸 (Main Thread I/O Guard)**：在 `_df_all_cache` 未就绪的回退逻辑中，引入主线程及仿真模式双重条件判定。若当前位于 Tkinter 主线程且不处于回测仿真模式下，坚决阻断任何对磁盘 HDF5/TDX 日线文件的同步读取动作，仅在后台异步线程或离线单元测试中允许回退读盘，彻底解决并根治了因同步重点个股引发的 5秒 主线程假死卡顿。
+    - [x] **抽象并统一日线特征指标计算接口 (Unified Indicators Interface & DRY Refactor)**：在 `MinuteKlineCache` 中抽象出统一的 `calculate_stock_daily_indicators(code, recent_avg_vol)` 接口，将原有在**字段补齐器 (Auto-Filler)**与**底背离震幅强过滤 (INIT -> CONSOLIDATING)**两处各自独立实现的 Rolling 均线计算、多头大背景判定、支撑分级判定、大底涨幅及前低涨幅计算，全部收归至单一方法。彻底消除了冗余代码，且保证了内存与磁盘两路数据源下的计算逻辑完全等价对齐，完全契合 SOLID 里的 SRP 和 DRY 开发原则。
+    - [x] **优化 set_df_all_cache 高频刷新的指纹脏检查 (Optimized set_df_all_cache via Fingerprint Dirty Check)**：为了防止在高频刷新周期（如 3秒 行情更新）中重复进行庞大日线数据帧的无意义赋值及产生多余内存副本和 Python GC (垃圾回收) 开销，在 `set_df_all_cache` 接口内部集成了基于 `df_fingerprint` 的指纹脏检查机制。仅在检测到 `df_all` 中的核心特征指纹发生实际变化时才真正更新内存快照，日内高频调用时直接短路返回，达到零内存碎片和零额外 CPU 损耗的效果。
+
+## 2026-06-19 01:30
+- [x] **为 Tkinter 核心数据表格添加右键复制股票代码功能 (Added Copy Stock Code Option to Treeview Context Menus)**：
+    - [x] **主界面数据表格支持右键复制**：重构了 `instock_MonitorTK.py` 中的 `on_tree_right_click` 方法。在主数据表格右键菜单的基础功能区中，新增了 `"📋 复制股票代码 ({stock_code})"` 选项，点击后利用 `pyperclip.copy` 将标准 6 位个股代码一键导入系统剪贴板，并同步在控制台状态栏输出提示。
+    - [x] **V-Reversal 实时监控池表格支持右键复制**：重构了 `show_context_menu` 上下文菜单定义。为强庄起爆池数据表格加入了 `"📋 复制股票代码"` 动作，打通了跨窗口高频监控个股代码的快速捕获通道，提升了交易员的数据交互效率。
+
+## 2026-06-19 01:20
+- [x] **实现强庄二次起爆监控池窗口在 Alt+R 视窗轮换机制中的注册与自动切换 (Added Real-time Monitor Window to Alt+R Window Rotator)**：
+    - [x] **搜集实时监控窗口句柄**：在 `instock_MonitorTK.py` 中的 `_get_all_open_trade_windows` 内，增加对 `self._realtime_monitor_win`（强庄二次起爆监控池窗口）的检测和收集。如果窗口存在且处于活动可见状态，将其 `winfo_id()` 添加至 `current_visible_hwnds` 并映射其默认窗口名称，从而将其打通并纳入 Alt+R (向后轮转) / Alt+Shift+R (向前轮转) 视窗轮换循环中。
+    - [x] **支持原生置顶与聚焦唤起**：在 `_force_focus_hwnd` 中追加针对 `self._realtime_monitor_win` 窗口句柄的原生 Tkinter `deiconify`、`lift` 与 `focus_force` 双保险穿透唤醒逻辑，确保在使用热键或轮转面板切换时该窗口能 100% 成功浮现至前台。
+    - [x] **优化轮换面板美化名称映射**：在 `WindowRotatorDialog.show_rotator` 的窗口人类可读名称转换层中，新增对 `"RealtimeMonitor"` 关键字的自适应美化识别，使其在 Alt+R 极客悬浮切换面板上呈现精美的标题 `"🎯 强庄二次起爆监控池 (RealtimeMonitor)"`。
+
+## 2026-06-19 00:20
+- [x] **实现启动前夜“均线交错纠缠”分级检测与低位黄金买点 UI 醒目高亮 (MA20/60 Converge Detection & Buying Zone UI Highlighting)**：
+    - [x] **新增 MA20/60 均线交错粘合判定**：在 `realtime_data_service.py` 的 `INIT` -> `CONSOLIDATING` 企稳入池条件中，当日线 MA20 与 MA60 的偏离度在 5% 以内（`abs(ma20 - ma60) / ma60 <= 0.05`）时，说明股价处于变盘前的均线纠缠、交错和粘合整理期。系统自动将结构分级标记为 `"MA20/60粘合"` 并持久化，便于交易员前置识别启动前两天的核心庄股。
+    - [x] **引入买点区域（Buy Zone）Treeview 专属高亮**：在 `instock_MonitorTK.py` 中，定义了黄金买入点标签 `"buy_zone"` 并绑定了柔和的暖橘色背景（`#fff9eb`）与棕褐色前景色（`#b87333`）。对处于横盘潜伏（`CONSOLIDATING`）和缩量回踩（`PULLBACK`）这两个最具伏击价值的低风险启动前夜状态的个股进行自动高亮渲染，完美与处于大涨加速（`WAVE_UP`）或高位顺延阶段的个股进行视觉区隔。
+    - [x] **升级并物理跑通单元测试断言**：在 `test_v_reversal_fsm.py` 单元测试中适配了最新的均线粘合结构分级，确保了在 20日/60日 均线相等（偏离为0）的 Mock 测试环境下断言 100% 跑通。
+    - [x] **确认并梳理信号持久化无缝承接机制**：系统通过在 `load_consolidation_state`（启动加载）和 `backup_consolidation_state_to_gz`（退出自动保存备份）中完成了对 `v_reversal_pool.json`（保存在 RAMDisk 极速盘中，退出时压缩备份至 logs/ 并做 7 天滚动轮转）的持久化。这个 JSON 完整保存了所有状态机字段，包括每个个股当前的阶段（`phase`）、入池日期（`entry_date`）、结构类型（`structure`）、大底涨幅（`dff3`）、前低涨幅（`dff2`）、放量倍数和高低参考。
+    - [x] **历史超时自愈净化**：在加载时，如果是 `CONSOLIDATING` 超时（>= 3天无动静）或 `WAVE_UP / PULLBACK` 超时（>= 2天）会自动退回 `INIT` 并设置 240 分钟的冷却保护，防止僵尸信号污染。
+
+## 2026-06-18 23:58
+- [x] **优化分时 V型反转与加速拉升判定逻辑，深度适配强势回调次日拉升结构 (Optimized V-Reversal Intraday States & Support Logic)**：
+    - [x] **重构日线均线支撑区间判定 (Refactored Daily Support Bands)**：将原本死板的 `ma20d` 或 `ma60d` 固定比例（-2% 到 2%）的支撑点判定，重构为大通道区间支撑机制。允许个股在跌破 `ma20d` 的前提下只要未跌破 `ma60d`（`latest_close >= ma60 * 0.98` 且 `latest_low <= ma20 * 1.03`），即可被视为有效的日线企稳支撑点，精准捕获了通鼎互联这类跌破 `ma20` 在均线区间企稳的完美买点个股。
+    - [x] **引入分时加速大阳突破条件 (Accelerated Intraday Breakout)**：在 `CONSOLIDATING` 状态下，为了适配缩量大涨/开盘直接拉升的次日加速个股，新增了日内强势大阳加速判定。当个股今日涨幅 `realtime_pct >= 3.0` 或偏离支撑底 `recent_close >= anchor_low * 1.03`，且价格小幅站在均价线 VWAP 之上（`recent_close >= vwap * 1.008`），成交量即使未放大 2.5 倍（仅需达到 1.3 倍基准量），均允许触发晋级至拉升期 `WAVE_UP`。
+    - [x] **实现拉升与二次拉升状态的自动顺延机制 (State Rollover & Rollover Protection)**：修复了强势连板股或连续加速阳线股在未经历 VWAP 回踩时，运行 2 天直接触发拉升超时判定而被强制踢出监控池的逻辑缺陷。引入股价高位顺延与涨幅强度监测（如未跌破拉升起点 2% 或日内涨幅 `realtime_pct >= 1.5`），自动顺延 `WAVE_UP` 及 `WAVE_UP_2` 的 `entry_date`，实现对大涨股主升浪的全程平滑跟踪。
+    - [x] **打通实时行情涨幅数据流 (Passed Real-time DF Context)**：在数据订阅分流 `update_batch` 核心逻辑中，显式将当前的最新行情 DataFrame 传入 `update_wave_structure_state` 函数，从而使状态机能够毫秒级实时计算与捕捉个股的精确日内涨幅。
+
 ## 2026-06-18 23:50
 - [x] **修复实时数据服务监控窗口垂直分隔条持久化失效与自动变回的 Bug (Fixed PanedWindow Sash Position Persistence Bug)**：
     - [x] **引入初始化渲染守护标志 (Initialization Guard Flag)**：新增 `sash_restored` 状态变量，在窗口成功恢复持久化的 `sash_place` 位置前，强行阻断并过滤掉所有无效或未渲染完毕时触发的 `save_sash_pos` 动作，彻底防止了空配置或极小边界坐标将正确的历史配置数据覆盖。

@@ -951,7 +951,165 @@ class MinuteKlineCache:
         except Exception as e:
             logger.error(f"❌ Supplemental fetch failed for {code}: {e}")
 
-    def update_wave_structure_state(self, code: Optional[str] = None) -> None:
+    def set_df_all_cache(self, df: pd.DataFrame) -> None:
+        """设置完整的 df_all 缓存快照，用于高频内存补齐 (集成指纹脏位检测以防内存/GC开销)"""
+        if df is None or df.empty:
+            return
+        try:
+            fp_cols = [c for c in ['code', 'close', 'now', 'trade', 'ma20d', 'ma20', 'ma60d', 'ma60'] if c in df.columns]
+            if not fp_cols:
+                fp_cols = None
+            new_fp = df_fingerprint(df, cols=fp_cols)
+            old_fp = getattr(self, '_df_all_cache_fp', None)
+            if old_fp == new_fp:
+                return
+            self._df_all_cache = df
+            self._df_all_cache_fp = new_fp
+            if self.verbose:
+                logger.info(f"💾 [df_all缓存更新] 数据发生实际变更，更新缓存快照 (指纹: {new_fp})")
+        except Exception as e:
+            self._df_all_cache = df
+
+    def calculate_stock_daily_indicators(self, code: str, recent_avg_vol: float = 0.0) -> Optional[dict[str, Any]]:
+        """
+        [DRY Refactor] 统一指标计算接口：计算多头趋势、支撑及均线结构。
+        优先使用内存中的 df_all_cache，避免主线程磁盘 I/O。
+        """
+        filled_from_cache = False
+        res = {}
+        
+        # 1. 尝试从内存 df_all_cache 读取
+        df_snap = getattr(self, '_df_all_cache', None)
+        if df_snap is not None and not df_snap.empty:
+            try:
+                row_match = df_snap[df_snap['code'].astype(str).str.strip().str.zfill(6) == code]
+                if not row_match.empty:
+                    def _fv(keys, default=0.0):
+                        for k in keys:
+                            if k in row_match.columns:
+                                val = row_match[k].iloc[0]
+                                if pd.notna(val):
+                                    return val
+                        return default
+
+                    ma5 = float(_fv(['ma5d', 'ma5'], 0.0))
+                    ma10 = float(_fv(['ma10d', 'ma10'], 0.0))
+                    ma20 = float(_fv(['ma20d', 'ma20'], 0.0))
+                    ma60 = float(_fv(['ma60d', 'ma60'], 0.0))
+                    latest_close = float(_fv(['close', 'trade', 'now'], 0.0))
+                    latest_low = float(_fv(['low'], 0.0))
+                    calc_dff3 = float(_fv(['dff3'], 0.0))
+                    calc_dff2 = float(_fv(['dff2'], 0.0))
+                    
+                    # 1. 多头大背景 (ma20 > ma60 且价格在 ma60之上) 且大周期偏离大底涨幅 dff3 >= 20.0%
+                    dff3_limit = getattr(cct.CFG, 'v_reversal_dff3_limit', 20.0)
+                    is_trend_ok = (ma20 > ma60) and (latest_close > ma60) and (calc_dff3 >= dff3_limit)
+                    
+                    # 2. 价格或最低价企稳于 ma20d - ma60d 的支撑区间 (允许跌破 ma20d，但在 ma60d 之上有强支撑且不破位)
+                    on_support = (latest_close >= ma60 * 0.98) and (latest_low <= ma20 * 1.03)
+
+                    structure_type = "MA20整理"
+                    if (ma5 > 0 and ma10 > 0 and ma5 > ma10 > ma20 and latest_close >= ma5 * 0.995):
+                        structure_type = "多头排列"
+                    elif (ma5 > 0 and ma5 * 0.98 <= latest_low <= ma5 * 1.01):
+                        structure_type = "MA5回踩"
+                    elif (ma10 > 0 and ma10 * 0.98 <= latest_low <= ma10 * 1.01):
+                        structure_type = "MA10回踩"
+                    elif ma60 > 0 and abs(ma20 - ma60) / ma60 <= 0.05:
+                        structure_type = "MA20/60粘合"
+                    elif latest_low < ma20 * 0.97:
+                        structure_type = "MA60支撑"
+                    else:
+                        structure_type = "MA20整理"
+
+                    res = {
+                        "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
+                        "latest_close": latest_close, "latest_low": latest_low,
+                        "dff3": round(calc_dff3, 1), "dff2": round(calc_dff2, 1),
+                        "structure_type": structure_type,
+                        "is_trend_ok": is_trend_ok,
+                        "on_support": on_support,
+                        "is_strong_trend": (is_trend_ok and on_support),
+                        "name": str(_fv(['name'], "未知"))
+                    }
+                    filled_from_cache = True
+            except Exception as e:
+                logger.error(f"Error calculating indicators from df_all_cache for {code}: {e}")
+
+        # 2. 回退到磁盘读取
+        if not filled_from_cache:
+            is_main = threading.current_thread() is threading.main_thread()
+            if is_main and not self.simulation_mode:
+                if self.verbose:
+                    logger.info(f"⚠️ [计算指标跳过] 主线程缺少 df_all_cache，为防假死跳过同步读取 {code} 日线文件")
+                return None
+            else:
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                    day_df = tdd.get_tdx_Exp_day_to_df(code, dl=80)
+                    if day_df is not None and len(day_df) >= 60:
+                        day_df = day_df.sort_index(ascending=True)
+                        day_df['ma5d'] = day_df['close'].rolling(5).mean()
+                        day_df['ma10d'] = day_df['close'].rolling(10).mean()
+                        day_df['ma20d'] = day_df['close'].rolling(20).mean()
+                        day_df['ma60d'] = day_df['close'].rolling(60).mean()
+                        
+                        latest_close = float(day_df['close'].iloc[-1])
+                        latest_low = float(day_df['low'].iloc[-1])
+                        ma5 = float(day_df['ma5d'].iloc[-1]) if len(day_df) >= 5 else 0.0
+                        ma10 = float(day_df['ma10d'].iloc[-1]) if len(day_df) >= 10 else 0.0
+                        ma20 = float(day_df['ma20d'].iloc[-1]) if len(day_df) >= 20 else 0.0
+                        ma60 = float(day_df['ma60d'].iloc[-1]) if len(day_df) >= 60 else 0.0
+                        
+                        min_close = float(day_df['close'].iloc[-60:].min())
+                        calc_dff3 = ((latest_close - min_close) / min_close * 100)
+                        
+                        # 1. 多头大背景 (ma20 > ma60 且价格在 ma60之上) 且大周期偏离大底涨幅 dff3 >= 20.0%
+                        dff3_limit = getattr(cct.CFG, 'v_reversal_dff3_limit', 20.0)
+                        is_trend_ok = (ma20 > ma60) and (latest_close > ma60) and (calc_dff3 >= dff3_limit)
+                        
+                        # 2. 价格或最低价企稳于 ma20d - ma60d 的支撑区间 (允许跌破 ma20d，但在 ma60d 之上有强支撑且不破位)
+                        on_support = (latest_close >= ma60 * 0.98) and (latest_low <= ma20 * 1.03)
+
+                        structure_type = "MA20整理"
+                        if (ma5 > 0 and ma10 > 0 and ma5 > ma10 > ma20 and latest_close >= ma5 * 0.995):
+                            structure_type = "多头排列"
+                        elif (ma5 > 0 and ma5 * 0.98 <= latest_low <= ma5 * 1.01):
+                            structure_type = "MA5回踩"
+                        elif (ma10 > 0 and ma10 * 0.98 <= latest_low <= ma10 * 1.01):
+                            structure_type = "MA10回踩"
+                        elif ma60 > 0 and abs(ma20 - ma60) / ma60 <= 0.05:
+                            structure_type = "MA20/60粘合"
+                        elif latest_low < ma20 * 0.97:
+                            structure_type = "MA60支撑"
+                        else:
+                            structure_type = "MA20整理"
+
+                        # 自动获取名字
+                        name = "未知"
+                        try:
+                            name_val = tdd.get_sina_data_code(code)
+                            if name_val and name_val != "未知":
+                                name = name_val
+                        except Exception: pass
+
+                        res = {
+                            "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
+                            "latest_close": latest_close, "latest_low": latest_low,
+                            "dff3": round(calc_dff3, 1), "dff2": round(((latest_close - float(day_df['low'].iloc[-10:].min())) / float(day_df['low'].iloc[-10:].min()) * 100), 1),
+                            "structure_type": structure_type,
+                            "is_trend_ok": is_trend_ok,
+                            "on_support": on_support,
+                            "is_strong_trend": (is_trend_ok and on_support),
+                            "name": name
+                        }
+                except Exception as e:
+                    logger.error(f"Error calculating indicators from H5 disk for {code}: {e}")
+                    return None
+                    
+        return res if res else None
+
+    def update_wave_structure_state(self, code: Optional[str] = None, df: Optional[pd.DataFrame] = None) -> None:
         """
         高阶增量状态机：识别图谱中的“底背离缩量 -> 放量拉升远离VWAP -> 缩量回踩VWAP -> 再次放量拉升”的多波段进攻结构。
         如果 code 为 None，则遍历缓存中的所有 code，并在最后将状态同步至 Ramdisk。
@@ -962,7 +1120,7 @@ class MinuteKlineCache:
             # batch execute
             codes_to_check = list(self._shared_cache.keys())
             for c in codes_to_check:
-                self.update_wave_structure_state(code=c)
+                self.update_wave_structure_state(code=c, df=df)
             # 批量更新完毕后，执行一次防抖落盘至 Ramdisk
             self.save_consolidation_state()
             return
@@ -985,10 +1143,44 @@ class MinuteKlineCache:
             # 简易近似计算近期 VWAP (实际可传入更精准的真实 VWAP)
             vwap = float(np.sum(closes * vols) / np.sum(vols)) if np.sum(vols) > 0 else recent_close
             
+            # 提取实时日内涨幅 (以百分比表示，如 10.0 代表 10%)
+            realtime_pct = 0.0
+            if df is not None and not df.empty:
+                row_match = df[df['code'].astype(str).str.strip().str.zfill(6) == code]
+                if not row_match.empty:
+                    for pct_col in ['changepercent', 'percent', 'pct_chg', 'pct']:
+                        if pct_col in row_match.columns:
+                            try:
+                                realtime_pct = float(row_match[pct_col].iloc[0])
+                                break
+                            except Exception:
+                                pass
+
             # --- 1. 获取持久化的上一刻状态 ---
             # 如果程序崩溃后重启，这里 get 到的就是从 json 恢复出来的完整多日进度！
             state = self._consolidation_flags.get(code, {"phase": "INIT", "update_ts": 0})
             phase = state.get("phase", "INIT")
+            # --- 🚀 [NEW] 缺失字段补齐器 (Auto-Filler) ---
+            # 如果是已经进池的个股，但由于重点个股注入或旧数据加载，缺失了均线结构、底背离偏离度或基准量能，在此做一次性同步补齐
+            if phase != "INIT":
+                need_fill = (
+                    "structure" not in state or 
+                    state.get("structure") in ("-", "待计算", None, "None", "") or
+                    state.get("base_vol", 0.0) <= 0.0 or 
+                    state.get("dff3", 0.0) == 0.0
+                )
+                if need_fill:
+                    metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol)
+                    if metrics:
+                        state["structure"] = metrics["structure_type"]
+                        state["dff3"] = metrics["dff3"]
+                        state["dff2"] = metrics["dff2"]
+                        if state.get("base_vol", 0.0) <= 0.0:
+                            state["base_vol"] = recent_avg_vol
+                        if "name" not in state or state.get("name") == "未知":
+                            state["name"] = metrics["name"]
+                        if self.verbose:
+                            logger.info(f"⚡ [补齐自愈] 自动补齐 {code} 特征: 结构={metrics['structure_type']}, dff3={metrics['dff3']}%, base_vol={state['base_vol']:.1f}")
             
             # --- 2. 状态流转引擎 (State Machine) ---
             now_ts = time.time()
@@ -1008,43 +1200,32 @@ class MinuteKlineCache:
                     if recent_avg_vol > 0 and recent_min > 0 and (recent_max - recent_min) / recent_min < v_amp_limit:
                         # 🚀 [NEW] 中京电子/海光信息式强庄良性回调大趋势与均线支撑强过滤
                         is_strong_trend = False
-                        day_df = None
+                        structure_type = "MA20整理"
+                        calc_dff3 = 0.0
+                        calc_dff2 = 0.0
+                        name_val = "未知"
                         
-                        try:
-                            from JSONData import tdx_data_Day as tdd
-                            day_df = tdd.get_tdx_Exp_day_to_df(code, dl=80)
-                            if day_df is not None and len(day_df) >= 60:
-                                day_df = day_df.sort_index(ascending=True)
-                                day_df['ma20d'] = day_df['close'].rolling(20).mean()
-                                day_df['ma60d'] = day_df['close'].rolling(60).mean()
-                                
-                                latest_close = float(day_df['close'].iloc[-1])
-                                latest_low = float(day_df['low'].iloc[-1])
-                                ma20 = float(day_df['ma20d'].iloc[-1])
-                                ma60 = float(day_df['ma60d'].iloc[-1])
-                                
-                                min_close = float(day_df['close'].iloc[-60:].min())
-                                calc_dff3 = ((latest_close - min_close) / min_close * 100)
-                                
-                                # 1. 多头大背景 (ma20 > ma60 且价格在 ma60之上) 且大周期偏离大底涨幅 dff3 >= 20.0%
-                                dff3_limit = getattr(cct.CFG, 'v_reversal_dff3_limit', 20.0)
-                                is_trend_ok = (ma20 > ma60) and (latest_close > ma60) and (calc_dff3 >= dff3_limit)
-                                # 2. 价格或最低价处于 20日线 或 60日线 的均线支撑带 (偏离度 -2% 到 2.0% 之间)
-                                on_support = (
-                                    (0.98 <= latest_low / ma20 <= 1.02) or 
-                                    (0.98 <= latest_low / ma60 <= 1.02) or
-                                    (0.98 <= latest_close / ma20 <= 1.02) or 
-                                    (0.98 <= latest_close / ma60 <= 1.02)
-                                )
-                                
-                                if is_trend_ok and on_support:
-                                    is_strong_trend = True
-                        except Exception as e:
-                            logger.error(f"Error fetching daily metrics for V-Shape filter {code}: {e}")
+                        metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol)
+                        if metrics:
+                            is_strong_trend = metrics["is_strong_trend"]
+                            structure_type = metrics["structure_type"]
+                            calc_dff3 = metrics["dff3"]
+                            calc_dff2 = metrics["dff2"]
+                            name_val = metrics["name"]
                         
                         # 单元测试防退化退水通道：在模拟测试模式下直接放行
                         if not is_strong_trend and self.simulation_mode:
                             is_strong_trend = True
+                            if metrics:
+                                structure_type = metrics["structure_type"]
+                                calc_dff3 = metrics["dff3"]
+                                calc_dff2 = metrics["dff2"]
+                                name_val = metrics["name"]
+                            else:
+                                structure_type = "MA20/60粘合"  # Mock default
+                                calc_dff3 = 25.0
+                                calc_dff2 = 5.0
+                                name_val = "模拟个股"
                         
                         if is_strong_trend:
                             state["phase"] = "CONSOLIDATING"
@@ -1052,21 +1233,11 @@ class MinuteKlineCache:
                             state["base_vol"] = recent_avg_vol
                             state["entry_ts"] = now_ts
                             state["entry_date"] = today_str
-                            state["dff3"] = round(calc_dff3, 1) if 'calc_dff3' in locals() else 0.0
-                            if 'day_df' in locals() and day_df is not None:
-                                low_min = float(day_df['low'].iloc[-10:].min())
-                                state["dff2"] = round(((latest_close - low_min) / low_min * 100), 1) if 'latest_close' in locals() else 0.0
-                            else:
-                                state["dff2"] = 0.0
-                            
-                            # 自动解析股票中文名称并塞入状态字典，用于永久化
-                            try:
-                                from JSONData import tdx_data_Day as tdd
-                                name = tdd.get_sina_data_code(code)
-                                if name and name != "未知":
-                                    state["name"] = name
-                            except Exception:
-                                pass
+                            state["structure"] = structure_type  # 写入结构分级标签
+                            state["dff3"] = calc_dff3
+                            state["dff2"] = calc_dff2
+                            if name_val and name_val != "未知":
+                                state["name"] = name_val
                             
                             self._v_reversal_pool.add(code)
 
@@ -1099,15 +1270,21 @@ class MinuteKlineCache:
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 潜伏超时({trade_dist}交易日无放量拉升), 触发淘汰!")
                 else:
-                    # 在横盘期，监控“放量拉升远离VWAP” (第一波进攻)
-                    # 条件：价格上穿 VWAP 并拉开距离 (如 > 1.5%)，且成交量显著放大 (如 > 2.5倍基准量)
-                    if recent_close > vwap * 1.015 and recent_avg_vol > base_vol * 2.5:
+                    # 突破条件优化 (大级别分时信号优化)
+                    # 1. 传统条件：价格上穿 VWAP 并拉开距离 (>= 1.5%)，且量能显著放大 (>= 2.5倍基准)
+                    cond_vwap_break = (recent_close >= vwap * 1.015) and (recent_avg_vol >= base_vol * 2.5)
+                    # 2. 均线上企稳后的次日加速大涨条件：今日日内涨幅较大 (>= 3.0%)，或者相对潜伏支撑低点上涨超过 3.0% 并开始远离均线
+                    # 且为了防御缩量封板或突发拉升，成交量只需有适度放大（>= 1.3倍）或直接是大单加速（由涨幅支撑）
+                    cond_accelerate = (realtime_pct >= 3.0 or recent_close >= anchor_low * 1.03) and (recent_close >= vwap * 1.008) and (recent_avg_vol >= base_vol * 1.3 or realtime_pct >= 4.0)
+
+                    if cond_vwap_break or cond_accelerate:
                         state["phase"] = "WAVE_UP"
                         state["wave_1_start_price"] = recent_close
                         state["wave_1_start_vwap"] = vwap
+                        state["wave_peak"] = recent_close
                         state["entry_ts"] = now_ts
                         state["entry_date"] = today_str
-                        if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 触发第一波放量进攻! 价:{recent_close} VWAP:{vwap}")
+                        if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 企稳拉升/次日加速突破! 价:{recent_close} 涨幅:{realtime_pct}%")
                         
             elif phase == "WAVE_UP":
                 # 在进攻浪中，监控“缩量回踩VWAP”
@@ -1131,12 +1308,19 @@ class MinuteKlineCache:
                     state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 第一波拉升夭折(跌破VWAP), 触发淘汰!")
-                # [淘汰 2]: 拉升期超时 (2个交易日未进入回踩)
+                # [淘汰 2]: 拉升期超时判定
                 elif trade_dist >= 2:
-                    state["phase"] = "INIT"
-                    state["last_fail_ts"] = now_ts
-                    self._v_reversal_pool.discard(code)
-                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 拉升超时({trade_dist}交易日无回踩/无新高), 触发淘汰!")
+                    # 顺延保护：如果股价依然坚挺（没有比拉升起点跌超 2%），或者今日收红/大涨，或者日线强势，则不判定为淘汰，而是将拉升状态顺延
+                    is_still_strong = (recent_close >= state.get("wave_1_start_price", recent_close) * 0.98) or (realtime_pct >= 1.5)
+                    if is_still_strong:
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于强势大涨拉升中，顺延 WAVE_UP 状态")
+                    else:
+                        state["phase"] = "INIT"
+                        state["last_fail_ts"] = now_ts
+                        self._v_reversal_pool.discard(code)
+                        if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 拉升后滞涨走弱, 触发淘汰!")
                 else:
                     # 回踩条件：价格回落到 VWAP 附近 (如距离 VWAP < 1%)，且量能萎缩
                     if recent_close < vwap * 1.01 and recent_avg_vol < state.get("base_vol", recent_avg_vol) * 1.5:
@@ -1166,16 +1350,25 @@ class MinuteKlineCache:
                     state["last_fail_ts"] = now_ts
                     self._v_reversal_pool.discard(code)
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩支撑破位({pullback_price:.2f} -> {recent_close:.2f}), 触发淘汰!")
-                # [淘汰 2]: 回踩超时 (2个交易日内无二次拉升)
+                # [淘汰 2]: 回踩超时判定
                 elif trade_dist >= 2:
-                    state["phase"] = "INIT"
-                    state["last_fail_ts"] = now_ts
-                    self._v_reversal_pool.discard(code)
-                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩超时({trade_dist}交易日无二次启动), 触发淘汰!")
+                    # 顺延保护：如果股价依然处于安全回踩区间（未跌破 pullback_price * 0.975 且未跌破 vwap 2%），则顺延回踩状态，允许在均线支撑上进行整理
+                    is_still_valid = (recent_close >= pullback_price * 0.975) and (recent_close >= vwap * 0.98)
+                    if is_still_valid:
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于均线支撑安全回踩中，顺延 PULLBACK 状态")
+                    else:
+                        state["phase"] = "INIT"
+                        state["last_fail_ts"] = now_ts
+                        self._v_reversal_pool.discard(code)
+                        if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 回踩超时且走弱, 触发淘汰!")
                 else:
-                    # 回踩完毕后，监控“再次放量拉升” (第二波/N波进攻)
-                    # 条件：再次放量，并且价格有突破前高的趋势
-                    if recent_avg_vol > state.get("base_vol", recent_avg_vol) * 2.0 and recent_close > pullback_price * 1.02:
+                    # 二波拉升突破信号优化
+                    cond_v2_break = (recent_avg_vol >= state.get("base_vol", recent_avg_vol) * 2.0) and (recent_close >= pullback_price * 1.02)
+                    cond_v2_accelerate = (realtime_pct >= 3.5 or recent_close >= pullback_price * 1.025) and (recent_close >= vwap * 1.008)
+
+                    if cond_v2_break or cond_v2_accelerate:
                         state["phase"] = "WAVE_UP_2"  # 或者循环回 WAVE_UP
                         state["entry_ts"] = now_ts
                         state["entry_date"] = today_str
@@ -1201,10 +1394,16 @@ class MinuteKlineCache:
                     if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升破位(跌破VWAP), 触发淘汰!")
                 # [淘汰 2]: 二次拉升超时 (2个交易日)
                 elif trade_dist >= 2:
-                    state["phase"] = "INIT"
-                    state["last_fail_ts"] = now_ts
-                    self._v_reversal_pool.discard(code)
-                    if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升超时({trade_dist}交易日), 触发淘汰!")
+                    is_still_strong = (recent_close >= state.get("pullback_price", recent_close) * 0.98) or (realtime_pct >= 1.5)
+                    if is_still_strong:
+                        state["entry_ts"] = now_ts
+                        state["entry_date"] = today_str
+                        if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于二次拉升强势中，顺延 WAVE_UP_2 状态")
+                    else:
+                        state["phase"] = "INIT"
+                        state["last_fail_ts"] = now_ts
+                        self._v_reversal_pool.discard(code)
+                        if self.verbose: logger.info(f"🗑️ [波段跟踪] {code} 二次拉升后走弱超时, 触发淘汰!")
                     # 这里可以将个股抛给高维策略做全面测试
                     
             # --- 3. 增量更新状态并刷入内存字典 ---
@@ -3217,7 +3416,7 @@ class DataPublisher:
                             code_str = str(raw_c).strip().zfill(6)
                             if code_str in pool:
                                 try:
-                                    self.kline_cache.update_wave_structure_state(code=code_str)
+                                    self.kline_cache.update_wave_structure_state(code=code_str, df=df)
                                 except Exception as e:
                                     logger.error(f"Failed to update real-time wave state for pool stock {code_str}: {e}")
                 
