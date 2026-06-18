@@ -3,6 +3,7 @@
     - [x] **引入初始化渲染守护标志 (Initialization Guard Flag)**：新增 `sash_restored` 状态变量，在窗口成功恢复持久化的 `sash_place` 位置前，强行阻断并过滤掉所有无效或未渲染完毕时触发的 `save_sash_pos` 动作，彻底防止了空配置或极小边界坐标将正确的历史配置数据覆盖。
     - [x] **实现基于组件分配尺寸事件的自适应加载机制 (Size-Aware Load & Layout Synchronization)**：放弃原来 100ms 盲盒延时加载，重构为直接绑定 `PanedWindow` 自身的 `<Configure>` 事件。当且仅当组件获得了真实宽度（`width > 100`）后才执行首次 `sash_place` 并置位还原标志，完全消除了由于渲染阶段提前截断 (clamp) 限制导致的 sash 位置退化变回。
     - [x] **添加极端尺寸过滤保护 (Extreme Coordinate Guard)**：在 `save_sash_pos` 中增加了对坐标边界的过滤，偏左（`pos <= 50`）或偏右（`pos >= width - 50`）的临界脏数据将直接抛弃，杜绝了极端拉伸下的非法坐标持久化。
+    - [x] **实现重点关注个股自动同步灌入 V-Reversal 监控池 (Auto-Sync Favorites into V-Reversal Pool)**：在监控池数据刷新函数 `refresh_pool_data` 中，引入了自选股增量扫描同步逻辑。每次刷新时，自动比对 `GlobalFavoriteManager` 的规范化股票列表与监控池当前成分股。若检测到有新增的重点关注个股不在池中，则使用安全锁自动将其以 `CONSOLIDATING` 状态灌入 `v_reversal_pool`，并在提取首行收盘价作锚点后强制写盘存盘，实现了自选股状态的跨模块即时自动关联。
 
 ## 2026-06-18 23:35
 - [x] **修复主视图重点个股匹配类型不匹配导致置顶失效的 Bug (Fixed Type Mismatch Bug for Favorites Pinning in Main View)**：
