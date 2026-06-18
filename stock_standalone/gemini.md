@@ -1,3 +1,16 @@
+## 2026-06-19 10:00
+- [x] **彻底根治 open_realtime_monitor 分隔条打包后持久化失效（WINDOW_CONFIG_FILE 静态快照根因修复）**：
+    - [x] **定位并消除根本原因（Static Snapshot Bug）**：`gui_config.py` 中的 `WINDOW_CONFIG_FILE` 是模块导入时的静态快照常量（`_base_dir = get_app_root()` 在 import 阶段执行一次便固化）。在打包环境下，若 `INSTOCK_APP_ROOT` 环境变量尚未初始化，`get_app_root()` 可能返回临时目录路径，导致 `WINDOW_CONFIG_FILE` 固化为错误的路径，使 `save_sash_pos` 写入的文件与 `load_sash_pos` / `load_window_position` 读取的文件不是同一个物理位置，引发永久失效。
+    - [x] **引入运行时动态路径计算 (`_get_sash_cfg_file`)**：在 `open_realtime_monitor` 闭包中提取出独立的 `_get_sash_cfg_file()` 辅助函数，不再依赖模块级静态常量 `WINDOW_CONFIG_FILE`，改为在每次调用时通过 `sys_utils.get_app_root()` 动态实时获取物理绝对根目录，配合 DPI scale 自动选择 `window_config.json` 或 `scale{N}_window_config.json`，与 `WindowMixin._get_config_file_path` 完全对齐。提供双重降级兜底：先降级到 `WINDOW_CONFIG_FILE` 模块常量，再降级到 `get_conf_path`，任何环境均不崩溃。
+    - [x] **统一 save / load 读写同一个文件**：`save_sash_pos` 与 `load_sash_pos` 均调用同一个 `_get_sash_cfg_file()` 函数，彻底保证 save 写入与 load 读取物理路径完全一致，根治了打包后 sash 位置"保存了但读不到"的核心缺陷。
+    - [x] **DPI Scale 坐标归一化 (DPI-Normalized Coordinate)**：save 时除以 scale 存逻辑坐标，load 时乘以 scale 还原物理坐标，消除高 DPI 屏幕 sash 漂移。
+    - [x] **原子写入与 debug 日志**：保持 `.tmp` 文件原子替换机制，新增 `logger.debug` 输出保存路径，便于打包环境下追踪配置写入是否成功。
+    - [x] **默认 339 分配比例 (Default 3-7 Layout via 339 Logical Pixels)**：在 `restore_sash` 内部加入无历史配置的默认 fallback 逻辑。在首次运行或无配置文件时，不再置空，而是默认将分隔条拉至 `339` 逻辑像素位置（乘以 DPI scale 还原物理像素），提供符合交易习惯的 3-7 分配初始布局，并完美承接后续的手动调整和持久化。
+
+## 2026-06-19 09:30
+- [x] **（旧）open_realtime_monitor 分隔条持久化初版修复（已被上方根因修复取代）**：
+    - [x] 引入 `sash_restored` 守护标志、`<Configure>` 事件驱动恢复、极端坐标过滤等防御机制（见 2026-06-18 23:50 条目）。
+
 ## 2026-06-19 01:40
 - [x] **消除强制设置与自动同步个股至监控池引发的主线程 I/O 卡顿 (Eliminated Main Thread I/O Freeze on Favoriting/Syncing Stocks)**：
     - [x] **引入内存 df_all 行情指标缓存 (_df_all_cache)**：在 `MinuteKlineCache` 中新增 `_df_all_cache` 行情数据快照引用，并在主界面行情每轮刷新（`self.df_all = full_df`）和 CSV 数据加载时，原子地同步将完整的日线指标数据注入分时 K 线缓存中。

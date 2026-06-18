@@ -19845,6 +19845,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             sash_restored = False
 
+            def _get_sash_cfg_file() -> str:
+                """运行时动态获取 sash 配置文件的物理绝对路径。
+                
+                关键：不使用 WINDOW_CONFIG_FILE 这个模块加载时的静态快照常量，
+                而是在每次调用时通过 get_app_root() + _get_config_file_path() 动态计算，
+                确保打包环境下 save 和 load 始终读写同一个物理文件。
+                """
+                try:
+                    from sys_utils import get_app_root
+                    import json as _json
+                    scale = self._get_dpi_scale_factor()
+                    app_root = get_app_root()
+                    # 根据 DPI scale 选择正确的配置文件名（与 WindowMixin._get_config_file_path 对齐）
+                    if scale > 1.5:
+                        fname = f"scale{int(scale)}_window_config.json"
+                    else:
+                        fname = "window_config.json"
+                    return os.path.join(app_root, fname)
+                except Exception:
+                    # 终极降级：通过模块级常量回退
+                    try:
+                        from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+                        scale = self._get_dpi_scale_factor()
+                        return self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+                    except Exception:
+                        from sys_utils import get_conf_path
+                        return get_conf_path("window_config.json")
+
             def save_sash_pos():
                 if not sash_restored:
                     return
@@ -19855,28 +19883,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     width = paned.winfo_width()
                     if width > 100 and pos >= width - 50:
                         return
+                    scale = self._get_dpi_scale_factor()
+                    cfg_file = _get_sash_cfg_file()
+                    # 归一化：除以 DPI scale 后存储，高 DPI 下重新打开时能正确还原
+                    pos_normalized = int(pos / scale)
                     import json
-                    from sys_utils import get_conf_path
-                    cfg_file = get_conf_path("window_config.json")
                     cfg = {}
                     if os.path.exists(cfg_file):
-                        with open(cfg_file, "r", encoding="utf-8") as f:
-                            cfg = json.load(f)
-                    cfg["RealtimeData_sash"] = pos
-                    with open(cfg_file, "w", encoding="utf-8") as f:
+                        try:
+                            with open(cfg_file, "r", encoding="utf-8") as f:
+                                cfg = json.load(f)
+                        except Exception:
+                            pass
+                    cfg["RealtimeData_sash"] = pos_normalized
+                    tmp_file = cfg_file + ".tmp"
+                    with open(tmp_file, "w", encoding="utf-8") as f:
                         json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_file, cfg_file)
+                    logger.debug(f"[sash] 已保存 pos={pos_normalized} -> {cfg_file}")
                 except Exception as e:
                     logger.error(f"Failed to save sash position: {e}")
 
             def load_sash_pos():
                 try:
                     import json
-                    from sys_utils import get_conf_path
-                    cfg_file = get_conf_path("window_config.json")
+                    scale = self._get_dpi_scale_factor()
+                    cfg_file = _get_sash_cfg_file()
                     if os.path.exists(cfg_file):
                         with open(cfg_file, "r", encoding="utf-8") as f:
                             cfg = json.load(f)
-                        return cfg.get("RealtimeData_sash")
+                        val = cfg.get("RealtimeData_sash")
+                        if val is not None:
+                            # 反归一化：乘以 DPI scale 还原物理像素
+                            return int(val * scale)
                 except Exception:
                     pass
                 return None
@@ -19885,16 +19924,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 nonlocal sash_restored
                 if sash_restored:
                     return
-                saved_sash = load_sash_pos()
-                if saved_sash is not None:
-                    width = paned.winfo_width()
-                    if width > 100:  # 确保已经分配合理的大小
-                        try:
-                            # 尝试放置 sash
-                            paned.sash_place(0, saved_sash, 0)
-                            sash_restored = True
-                        except Exception:
-                            pass
+                width = paned.winfo_width()
+                if width > 100:  # 确保已经分配合理的大小
+                    saved_sash = load_sash_pos()
+                    if saved_sash is None:
+                        # 默认使用 339 逻辑像素，乘以 DPI scale 还原物理像素
+                        scale = self._get_dpi_scale_factor()
+                        saved_sash = int(339 * scale)
+                    try:
+                        paned.sash_place(0, saved_sash, 0)
+                        sash_restored = True
+                    except Exception:
+                        pass
 
             paned.bind("<Configure>", restore_sash)
             log_win.after(200, restore_sash)  # 兜底延迟执行
