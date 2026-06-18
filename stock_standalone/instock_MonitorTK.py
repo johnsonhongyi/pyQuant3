@@ -20063,6 +20063,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
                     try:
                         pool = self.realtime_service.kline_cache.get_v_reversal_pool()
+
+                        # 自动将系统中的重点关注个股加入到监控池
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            fav_stocks = {str(x).strip().zfill(6) for x in GlobalFavoriteManager().get_favorite_stocks()}
+                            fav_stocks = {c for c in fav_stocks if len(c) == 6 and c.isdigit()}
+                            missing_favs = fav_stocks - set(pool)
+                            if missing_favs:
+                                added_count = 0
+                                with self.realtime_service.kline_cache._lock:
+                                    for code in missing_favs:
+                                        state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
+                                        state["phase"] = "CONSOLIDATING"
+                                        klines = self.realtime_service.kline_cache.get_klines(code, n=1)
+                                        state["anchor_low"] = float(klines[0]['close']) if klines else 0.0
+                                        state["base_vol"] = 0.0
+                                        state["entry_ts"] = time.time()
+                                        state["entry_date"] = cct.get_today()
+                                        state["last_fail_ts"] = 0
+                                        state["name"] = get_stock_name(code)
+
+                                        self.realtime_service.kline_cache._consolidation_flags[code] = state
+                                        self.realtime_service.kline_cache._v_reversal_pool.add(code)
+                                        added_count += 1
+                                    if added_count > 0:
+                                        self.realtime_service.kline_cache.save_consolidation_state()
+                                        logger.warning(f"系统同步：自动将 {added_count} 只重点关注个股添加到 V-Reversal 监控池")
+                                        pool = self.realtime_service.kline_cache.get_v_reversal_pool()
+                        except Exception as ex:
+                            logger.error(f"Auto-adding favorite stocks to pool failed: {ex}")
                         
                         # 统计各阶段数量
                         stats = {"INIT": 0, "CONSOLIDATING": 0, "WAVE_UP": 0, "PULLBACK": 0, "WAVE_UP_2": 0}
