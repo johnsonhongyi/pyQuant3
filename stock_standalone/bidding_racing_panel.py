@@ -1014,6 +1014,13 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.timer.start(500) 
         self.refresh_data()
         self.setUpdatesEnabled(True)
+        
+        # [GlobalFavorites] 订阅重点关注变化
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.error(f"Subscribe favorites failed in SectorDetailDialog: {e}")
 
     def parent(self):
         """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
@@ -1361,11 +1368,20 @@ class SectorDetailDialog(QDialog, WindowMixin):
             elif attr == 'dff2': val = _safe_extract_dff2(df_all, ts.code, self.detector)
             else: val = getattr(ts, attr, 0) or 0
             
-            # 构建稳定排序 Key
-            if attr == 'name':
-                s_key = (prio, str(val), ts.code)
+            # 构建稳定排序 Key (无论升序降序，均将 prio 摆在首位，且支持按属性数值正确升降序排序)
+            if is_rev:
+                # 降序排列 (reverse=True): 
+                # 想要 prio 越大的在前面 (3, 2, 1, 0)，直接放 prio；
+                # 想要 val 越大的在前面，直接放 val。
+                s_key = (prio, val if val is not None else -999999, ts.code)
             else:
-                s_key = (val if val is not None else 0, ts.code)
+                # 升序排列 (reverse=False):
+                # 想要 prio 越大的依然置顶在前面，为了在从小到大排序下置顶，使用 -prio (即 -3, -2, -1, 0)；
+                # 想要 val 越小的在前面，直接放 val。
+                if isinstance(val, (int, float)):
+                    s_key = (-prio, val if val is not None else 999999, ts.code)
+                else:
+                    s_key = (-prio, str(val) if val is not None else "", ts.code)
             sort_payload.append((s_key, ts, prio, has_alert, has_sbc, is_fav))
         
         # [🚀 排序优化] 使用 Top-K 堆排序算法：O(N log K)
@@ -1570,6 +1586,18 @@ class SectorDetailDialog(QDialog, WindowMixin):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
         
+        # [NEW] 重点关注个股切换支持
+        clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
+        from global_favorites import GlobalFavoriteManager
+        fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        if clean_code in fav_stocks:
+            act_fav = menu.addAction("❌ 取消重点个股")
+        else:
+            act_fav = menu.addAction("⭐ 设为重点个股")
+        act_fav.triggered.connect(lambda: self._toggle_favorite_stock(clean_code))
+        
+        menu.addSeparator()
+        
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="sector_dialog_context"))
         
@@ -1693,10 +1721,29 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 self.timer.deleteLater()
                 self.timer = None
             except: pass
+        
+        # [GlobalFavorites] 取消订阅重点关注变化
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.error(f"Unsubscribe favorites failed in SectorDetailDialog: {e}")
+
         # [统一管理] 不再独立存档，由主面板 closeEvent 统一调用状态导出
         self._save_header_state()
         # self.save_window_position_qt_visual(self, "SectorDetail_Unified")
         super().closeEvent(event)
+
+    def _toggle_favorite_stock(self, code: str):
+        """切换个股重点关注状态"""
+        from global_favorites import GlobalFavoriteManager
+        action = GlobalFavoriteManager().toggle_favorite_stock(code)
+        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+
+    def _on_favorites_changed(self):
+        """GlobalFavoriteManager 回调，刷新列表"""
+        self._dirty = True
+        QTimer.singleShot(0, self.refresh_data)
 
     def _run_dna_audit_top20(self):
         """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
@@ -1779,6 +1826,13 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.timer.start(500) 
         self.refresh_data()
         self.setUpdatesEnabled(True)
+        
+        # [GlobalFavorites] 订阅重点关注变化
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.error(f"Subscribe favorites failed in CategoryDetailDialog: {e}")
 
     def parent(self):
         """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
@@ -1984,11 +2038,19 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         alert_manager = get_alert_manager()
         score_cache = {ts.code: self._get_synthetic_score(ts) for ts in data_list}
         
+        # [GlobalFavorites] 从单例读取重点关注个股，用于排序置顶
+        try:
+            from global_favorites import GlobalFavoriteManager
+            _fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            _fav_stocks = set()
+        
         sort_payload = []
         for ts in data_list:
             has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in reg
-            prio = 2 if has_sbc else (1 if has_alert else 0)
+            is_fav = ts.code in _fav_stocks
+            prio = 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
             
             cp = getattr(ts, 'current_pct', 0) or 0
             pd = getattr(ts, 'pct_diff', 0) or 0
@@ -2000,11 +2062,21 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 val = _safe_extract_dff2(df_all, ts.code, self.detector)
             else: val = getattr(ts, attr, 0) or 0
             
-            if attr == 'name':
-                s_key = (prio, str(val), ts.code)
+            # 构建稳定排序 Key (无论升序降序，均将 prio 摆在首位，且支持按属性数值正确升降序排序)
+            if is_rev:
+                # 降序排列 (reverse=True): 
+                # 想要 prio 越大的在前面 (3, 2, 1, 0)，直接放 prio；
+                # 想要 val 越大的在前面，直接放 val。
+                s_key = (prio, val if val is not None else -999999, ts.code)
             else:
-                s_key = (val if val is not None else 0, ts.code)
-            sort_payload.append((s_key, ts, prio, has_alert, has_sbc))
+                # 升序排列 (reverse=False):
+                # 想要 prio 越大的依然置顶在前面，为了在从小到大排序下置顶，使用 -prio (即 -3, -2, -1, 0)；
+                # 想要 val 越小的在前面，直接放 val。
+                if isinstance(val, (int, float)):
+                    s_key = (-prio, val if val is not None else 999999, ts.code)
+                else:
+                    s_key = (-prio, str(val) if val is not None else "", ts.code)
+            sort_payload.append((s_key, ts, prio, has_alert, has_sbc, is_fav))
 
         # [🚀 排序优化] 使用 Top-K 堆排序：O(N log K)
         DISPLAY_K = RENDER_TOP_K
@@ -2017,7 +2089,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
         
         flattened = []
-        for s_key, ts, prio, is_alerted, is_sbc in sort_payload:
+        for s_key, ts, prio, is_alerted, is_sbc, is_fav in sort_payload:
             # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
             reason = ""
             if self._show_reason:
@@ -2046,7 +2118,8 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                              getattr(ts, 'pct_diff', 0) or 0,
                              dff2,
                              reason,
-                             is_alerted))
+                             is_alerted,
+                             is_fav))
         avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / len(data_list) if data_list else 0
         total_count = len(data_list)
         stats_text = (f"📊 统计: 共 {total_count} 只{' (仅显Top%d)' % RENDER_TOP_K if total_count > RENDER_TOP_K else ''} | "
@@ -2060,13 +2133,22 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         if self.table.rowCount() != len(data):
             self.table.setRowCount(len(data))
         for i, row in enumerate(data):
-            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted = row
+            code, name, score, sig, pct, start_pct, dff, dff2, reason, is_alerted, is_fav = row
             
             # [⚡ 报警核验]
             # is_alerted = get_alert_manager().is_alerted(code) # 已预计算
             bg_c = QColor("#4B0082") if is_alerted else None
             txt_c = QColor("#FFFFFF") if is_alerted else None
-            d_name = f"🔔{name}" if is_alerted else name
+            # 名称装饰：重点个股 ⭐ 优先于报警 🔔
+            if is_fav:
+                d_name = f"⭐ {name}"
+                if not is_alerted:
+                    bg_c = QColor("#1A2A1A")  # 深绿底色区分重点关注
+                    txt_c = QColor("#00FF88")
+            elif is_alerted:
+                d_name = f"🔔{name}"
+            else:
+                d_name = name
 
             self._update_dialog_cell(i, 0, code, color=txt_c, bg_color=bg_c)
             self._update_dialog_cell(i, 1, d_name, color=txt_c, bg_color=bg_c)
@@ -2184,6 +2266,18 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2C2C2E; color: white; border: 1px solid #444; } QMenu::item:selected { background-color: #005BB7; }")
+        
+        # [NEW] 重点关注个股切换支持
+        clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
+        from global_favorites import GlobalFavoriteManager
+        fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        if clean_code in fav_stocks:
+            act_fav = menu.addAction("❌ 取消重点个股")
+        else:
+            act_fav = menu.addAction("⭐ 设为重点个股")
+        act_fav.triggered.connect(lambda: self._toggle_favorite_stock(clean_code))
+        
+        menu.addSeparator()
         
         act_viz = menu.addAction(f"📊 联动可视化 ({name})")
         act_viz.triggered.connect(lambda: self.linkage_cb(code, name, source="category_dialog_context"))
@@ -2305,9 +2399,28 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 self.timer.deleteLater()
                 self.timer = None
             except: pass
+            
+        # [GlobalFavorites] 取消订阅重点关注变化
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception as e:
+            logger.error(f"Unsubscribe favorites failed in CategoryDetailDialog: {e}")
+
         # [统一管理] 不再独立存档
         self._save_header_state()
         super().closeEvent(event)
+
+    def _toggle_favorite_stock(self, code: str):
+        """切换个股重点关注状态"""
+        from global_favorites import GlobalFavoriteManager
+        action = GlobalFavoriteManager().toggle_favorite_stock(code)
+        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+
+    def _on_favorites_changed(self):
+        """GlobalFavoriteManager 回调，刷新列表"""
+        self._dirty = True
+        QTimer.singleShot(0, self.refresh_data)
 
     def _run_dna_audit_top20(self):
         """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
