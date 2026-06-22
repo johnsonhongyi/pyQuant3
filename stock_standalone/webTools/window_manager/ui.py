@@ -262,9 +262,12 @@ class CaptureWindowsDialog(QDialog):
         self.btn_select_all.clicked.connect(self.select_all)
         self.btn_refresh = QPushButton("刷新列表")
         self.btn_refresh.clicked.connect(self.refresh_windows)
+        self.btn_update_coords = QPushButton("🔄 更新最新坐标")
+        self.btn_update_coords.clicked.connect(self.update_active_coordinates)
         
         btn_layout.addWidget(self.btn_select_all)
         btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_update_coords)
         
         # 添加关键字过滤搜索框
         btn_layout.addWidget(QLabel(" 🔍 过滤:"))
@@ -373,6 +376,73 @@ class CaptureWindowsDialog(QDialog):
 
     def clear_search(self):
         self.txt_search.clear()
+
+    def update_active_coordinates(self):
+        """手动获取列表中所有窗口当前在桌面上的最新物理坐标，并刷新列表文字，保留选中状态"""
+        if self.list_widget.count() == 0:
+            return
+            
+        self.list_widget.blockSignals(True)
+        try:
+            try:
+                self.list_widget.itemSelectionChanged.disconnect(self.on_selection_changed)
+            except (TypeError, RuntimeError):
+                pass
+                
+            updated_count = 0
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if not item_data:
+                    continue
+                    
+                title, pos_str, exe_path = item_data
+                
+                titles_to_try = [title]
+                if title.endswith('.py') and not title.startswith('py'):
+                    titles_to_try.append(title.replace('.py', '.exe'))
+                elif title.endswith('.exe'):
+                    titles_to_try.append(title.replace('.exe', '.py'))
+                    
+                found_hwnd = None
+                for t in titles_to_try:
+                    found = core.find_windows_by_title_safe(t)
+                    if found:
+                        found_hwnd, _ = found[0]
+                        break
+                        
+                if found_hwnd:
+                    left, top, width, height = core.get_window_rect(found_hwnd)
+                    if left < -10000 and top < -10000:
+                        continue
+                    new_pos_str = f"{left},{top},{width},{height}"
+                    
+                    if new_pos_str != pos_str:
+                        item.setText(f"{title}  [{new_pos_str}]")
+                        new_item_data = (title, new_pos_str, exe_path)
+                        item.setData(QtCore.Qt.ItemDataRole.UserRole, new_item_data)
+                        
+                        # 同步更新 self.all_windows 里的对应项
+                        for idx, (t_all, p_all, e_all) in enumerate(self.all_windows):
+                            if t_all == title:
+                                self.all_windows[idx] = (title, new_pos_str, exe_path)
+                                break
+                                
+                        # 如果是已选中，同步更新 selected_set 里的数据
+                        if item.isSelected():
+                            self.selected_set.discard(item_data)
+                            self.selected_set.add(new_item_data)
+                            
+                        updated_count += 1
+                        
+            if updated_count > 0:
+                QMessageBox.information(self, "更新成功", f"成功手动更新了 {updated_count} 个运行中窗口的最新物理坐标！")
+            else:
+                QMessageBox.information(self, "提示", "未检测到任何窗口位置发生变化。")
+                
+        finally:
+            self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+            self.list_widget.blockSignals(False)
 
     def on_item_double_clicked(self, item):
         item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -535,6 +605,27 @@ class WindowPosManagerUI(QMainWindow):
             except:
                 pass
             event.accept()
+
+    def detect_and_refresh_state(self):
+        """自动检测物理屏幕拓扑结构并刷新当前桌面各窗口的实际坐标位置"""
+        self.load_screen_info()
+        self.refresh_current_positions()
+
+    def on_refresh_pos_clicked(self):
+        self.detect_and_refresh_state()
+        self.log("已手动刷新当前桌面各窗口的实际坐标位置与显示器拓扑。")
+
+    def showEvent(self, event):
+        """窗口被显示时自动刷新位置检测"""
+        super().showEvent(event)
+        self.detect_and_refresh_state()
+
+    def changeEvent(self, event):
+        """窗口状态改变时，如从最小化恢复，自动刷新位置检测"""
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            if not self.isMinimized():
+                self.detect_and_refresh_state()
             
     def toggle_visibility(self):
         if self.isVisible():
@@ -562,6 +653,9 @@ class WindowPosManagerUI(QMainWindow):
             ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0) # Alt Up
         except Exception:
             pass
+            
+        # 激活前台后自动同步检测桌面位置状态
+        self.detect_and_refresh_state()
             
     def bind_hotkey(self, hotkey_str):
         if not hotkey_str:
@@ -832,6 +926,13 @@ class WindowPosManagerUI(QMainWindow):
         table_op_layout.addWidget(self.btn_delete_row)
         
         table_op_layout.addSpacing(20)
+        
+        self.btn_refresh_pos = QPushButton("🔄 刷新当前位置")
+        self.btn_refresh_pos.setStyleSheet("background-color: #0891b2; border: none; font-weight: bold;")
+        self.btn_refresh_pos.clicked.connect(self.on_refresh_pos_clicked)
+        table_op_layout.addWidget(self.btn_refresh_pos)
+        
+        table_op_layout.addSpacing(10)
         
         self.btn_capture_wins = QPushButton("📸 捕获桌面窗口")
         self.btn_capture_wins.setStyleSheet("background-color: #4f46e5; border: none; font-weight: bold;")
