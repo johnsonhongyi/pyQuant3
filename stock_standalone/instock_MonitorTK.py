@@ -636,6 +636,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sortby_col_ascend = None
         self.select_code = None
         self.vis_select_code = None
+        self._user_interacted = False
+        self._last_interaction_time = 0
+        self._last_shown_tip_code = None
         self.ColumnSetManager = None
         self.ColManagerconfig = None
         self._open_column_manager_job = None
@@ -1117,6 +1120,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # self.tree.bind("<ButtonRelease-1>", self.on_tree_click_for_tooltip)
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
+
+        # ✅ 绑定手动用户操作事件，用于标记手动交互
+        self.tree.bind("<Button-1>", lambda e: self._set_user_interaction(e), add="+")
+        self.tree.bind("<KeyPress>", lambda e: self._set_user_interaction(e), add="+")
 
         # 🚀 [NEW] 全局重点关注订阅与样式初始化
         self._favorites_dirty = False
@@ -7222,74 +7229,83 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"推送 stock_info 出错: {e} {row}")
             return False
 
+    def _set_user_interaction(self, event=None):
+        """标记用户手动操作，用于过滤自动刷新导致的弹窗"""
+        self._user_interacted = True
+        self._last_interaction_time = time.time()
+
     def on_tree_select(self, event):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            self.selected_stock_info = None
-            return
-        item_id = selected_item[0]
-        item = self.tree.item(selected_item[0])
-        values = item.get("values")
-        # 假设你的 tree 列是 (code, name, price, …)
-        stock_info = {
-            "code": values[0],
-            "name": values[1] if len(values) > 1 else "",
-            "extra": values  # 保留整行
-        }
-        self.selected_stock_info = stock_info
+        try:
+            selected_item = self.tree.selection()
+            if not selected_item:
+                self.selected_stock_info = None
+                return
+            item_id = selected_item[0]
+            item = self.tree.item(selected_item[0])
+            values = item.get("values")
+            # 假设你的 tree 列是 (code, name, price, …)
+            stock_info = {
+                "code": values[0],
+                "name": values[1] if len(values) > 1 else "",
+                "extra": values  # 保留整行
+            }
+            self.selected_stock_info = stock_info
 
-        if selected_item:
-            stock_info = self.tree.item(selected_item[0], 'values')
-            stock_code = stock_info[0]
-            stock_name = stock_info[1]
+            if selected_item:
+                stock_info = self.tree.item(selected_item[0], 'values')
+                stock_code = stock_info[0]
+                stock_name = stock_info[1]
 
-            send_tdx_Key = (self.select_code != stock_code)
-            self.select_code = stock_code
+                send_tdx_Key = (self.select_code != stock_code)
+                self.select_code = stock_code
 
-            stock_code = str(stock_code).zfill(6)
-            logger.debug(f'stock_code:{stock_code}')
-            # logger.info(f"选中股票代码: {stock_code}")
-            if send_tdx_Key and stock_code:
-                self.sender.send(stock_code)
-            # Auto-launch Visualizer if enabled
-            if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
-                self.open_visualizer(stock_code)
+                stock_code = str(stock_code).zfill(6)
+                logger.debug(f'stock_code:{stock_code}')
+                # logger.info(f"选中股票代码: {stock_code}")
+                if send_tdx_Key and stock_code:
+                    self.sender.send(stock_code)
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code)
 
-            # if self.voice_var.get():
-            if self.tip_var.get():
-                # =========================
-                # ✅ 构造 fake mouse event
-                # =========================
-                try:
-                    # ==========================
-                    # ✅ 构造模拟 event
-                    # ==========================
+                # if self.voice_var.get():
+                if self.tip_var.get():
+                    # =========================
+                    # ✅ 构造 fake mouse event
+                    # =========================
+                    try:
+                        # ==========================
+                        # ✅ 构造模拟 event
+                        # ==========================
 
-                    x_root = getattr(self, "event_x_root", None)
-                    y_root = getattr(self, "event_y_root", None)
+                        x_root = getattr(self, "event_x_root", None)
+                        y_root = getattr(self, "event_y_root", None)
 
-                    # 没有鼠标坐标就退回到行中心
-                    if x_root is None or y_root is None:
-                        bbox = self.tree.bbox(item_id)
-                        if not bbox:
-                            return
-                        x, y, w, h = bbox
+                        # 没有鼠标坐标就退回到行中心
+                        if x_root is None or y_root is None:
+                            bbox = self.tree.bbox(item_id)
+                            if not bbox:
+                                return
+                            x, y, w, h = bbox
 
-                        x_root = self.tree.winfo_rootx() + x + w + 10
-                        y_root = self.tree.winfo_rooty() + y + h // 2
+                            x_root = self.tree.winfo_rootx() + x + w + 10
+                            y_root = self.tree.winfo_rooty() + y + h // 2
 
-                    fake_event = SimpleNamespace(
-                        x=0,
-                        y=0,
-                        x_root=x_root,
-                        y_root=y_root
-                    )
+                        fake_event = SimpleNamespace(
+                            x=0,
+                            y=0,
+                            x_root=x_root,
+                            y_root=y_root
+                        )
 
-                    # ✅ 复用 Tooltip 入口
-                    self.on_tree_click_for_tooltip(fake_event,stock_code,stock_name)
+                        # ✅ 复用 Tooltip 入口
+                        self.on_tree_click_for_tooltip(fake_event,stock_code,stock_name)
 
-                except Exception as e:
-                    logger.warning(f"Tooltip select trigger failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"Tooltip select trigger failed: {e}")
+        finally:
+            # 清除临时交互标记，让下次非物理事件恢复为默认非手动状态
+            self._user_interacted = False
 
     def update_send_status(self, status_dict):
         # 更新状态栏
@@ -9185,6 +9201,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vals = self.tree.item(item_id, 'values')
             stock_code = str(vals[idx_code]).zfill(6)
             stock_name = str(vals[idx_name])
+            
+            # 🚀 [NEW] 右键直接复制股票代码到剪贴板，并设置状态栏，提高效率
+            pyperclip.copy(stock_code)
+            self.status_var2.set(f"已复制股票代码 {stock_code}")
         except Exception:
             stock_code = "000000"
             stock_name = "未知"
@@ -9251,10 +9271,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
         )
 
-        menu.add_command(
-            label="🧪 测试Code策略",
-            command=lambda: check_code(self.df_all, stock_code, self.search_var1.get())
-        )
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        if cur_resample != 'd':
+            menu.add_command(
+                label="🧪 测试Code策略 (日线)",
+                command=lambda: check_code(
+                    self.df_all,
+                    stock_code,
+                    self.search_var1.get()
+                )
+            )
+            menu.add_command(
+                label=f"🧪 测试Code策略 ({cur_resample.upper()})",
+                command=lambda: check_code(
+                    self.df_all_res if (hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all,
+                    stock_code,
+                    self.search_var1.get()
+                )
+            )
+        else:
+            menu.add_command(
+                label="🧪 测试Code策略",
+                command=lambda: check_code(
+                    self.df_all,
+                    stock_code,
+                    self.search_var1.get()
+                )
+            )
 
         menu.add_command(
             label="🔍 策略白盒评估...",
@@ -9351,6 +9394,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         menu.add_separator()
 
         # —— 其他管理 ——
+        menu.add_command(
+            label=f"📋 复制股票代码 ({stock_code})",
+            command=lambda: [pyperclip.copy(stock_code), self.status_var2.set(f"已复制股票代码 {stock_code}")]
+        )
         menu.add_command(
             label="🚫 黑名单管理中心",
             command=self.open_blacklist_manager
@@ -9539,10 +9586,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def get_stock_info_text(self, code):
         """获取格式化的股票信息文本"""
-        if code not in self.df_all.index:
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+        if code not in df_active.index:
             return None
             
-        stock_data = self.df_all.loc[code]
+        stock_data = df_active.loc[code]
         
         # 计算/获取字段
         name = stock_data.get('name', 'N/A')
@@ -9599,12 +9648,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 1. 尝试获取价格和信息，用于自动添加备注
             close_price = "N/A"
             info_text = ""
-            if stock_code in self.df_all.index:
-                close_price = self.df_all.loc[stock_code].get('trade', 'N/A')
+            cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+            df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+            if stock_code in df_active.index:
+                close_price = df_active.loc[stock_code].get('trade', 'N/A')
                 info_text = self.get_stock_info_text(stock_code)
 
             # 2. 执行原有推送
-            if self.push_stock_info(stock_code, self.df_all.loc[stock_code] if stock_code in self.df_all.index else None):
+            if self.push_stock_info(stock_code, df_active.loc[stock_code] if stock_code in df_active.index else None):
                  self.status_var2.set(f"发送成功: {stock_code}")
                  
                  # 3. 如果发送成功，自动添加手札
@@ -9631,11 +9682,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             from intraday_decision_engine import IntradayDecisionEngine
             # 检查数据是否存在
-            if code not in self.df_all.index:
+            cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+            df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+            if code not in df_active.index:
                 messagebox.showwarning("数据缺失", f"未找到代码 {code} 的数据")
                 return
             
-            row = self.df_all.loc[code]
+            row = df_active.loc[code]
             
             # 构建行情数据字典
             row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
@@ -10134,6 +10187,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.save_window_position(win, window_id)
             win.destroy()
             self.strategy_report_win = None
+            self._last_shown_tip_code = None
             
         win.bind("<Escape>", on_close)
         win.protocol("WM_DELETE_WINDOW", on_close)
@@ -10679,8 +10733,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # values: (time, code, name, content_preview)
                 target_code = values[1]
                 stock_code = str(target_code).zfill(6)
-                # pyperclip.copy(stock_code)
-                # toast_message(self, f"stock_code: {stock_code} 已复制")
+                pyperclip.copy(stock_code)
+                self.status_var2.set(f"已复制股票代码 {stock_code}")
                 self.tree_scroll_to_code(stock_code)
 
             def on_handbook_on_click(event):
@@ -13938,6 +13992,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         return result
 
+
     def _find_visualizer_hwnd(self):
         """兼容接口：获取可视化窗口句柄 (已接入 500ms 缓存保护)"""
         return self._scan_windows_cached().get("visualizer", 0)
@@ -15043,7 +15098,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.apply_search()
             else:
                 # 重新加载数据
-                self.tree.after(100, lambda: self.refresh_tree(self.df_all, force=True))
+                cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+                df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+                self.tree.after(100, lambda: self.refresh_tree(df_active, force=True))
 
     def restore_tree_selection(tree, code: str, col_index: int = 0):
         """
@@ -15385,14 +15442,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_tree_click_for_tooltip(self, event, stock_code=None, stock_name=None, is_manual=False):
         if not is_manual and not self.tip_var.get(): return
 
-        # 1. 取消舊任務 (核心防抖)
-        if getattr(self, '_tooltip_timer', None):
-            try:
-                self.after_cancel(self._tooltip_timer)
-            except Exception as e:
-                logger.error(f"Error in task: {e}")
-            self._tooltip_timer = None
-
         # 2. 獲取代碼 (解析當前點擊的股票)
         if stock_code is None:
             item = self.tree.identify_row(event.y)
@@ -15401,9 +15450,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not values: return
             stock_code, stock_name = str(values[0]), str(values[1])
 
+        # 💥 [NEW] 核心判斷：只有手動操作且股票代碼改變時才彈出 (防止自動刷新和重複代碼彈窗)
+        if not is_manual:
+            is_user = getattr(self, '_user_interacted', False) or (time.time() - getattr(self, '_last_interaction_time', 0) < 0.2)
+            if not is_user:
+                logger.debug(f"[Tooltip] 忽略非手動操作 (如自動刷新) 彈窗: {stock_code}")
+                return
+            
+            # 重複代碼不彈窗
+            last_shown = getattr(self, '_last_shown_tip_code', None)
+            if last_shown == stock_code:
+                logger.debug(f"[Tooltip] 忽略重複代碼彈窗: {stock_code}")
+                return
+
+        # 1. 取消舊任務 (核心防抖)
+        if getattr(self, '_tooltip_timer', None):
+            try:
+                self.after_cancel(self._tooltip_timer)
+            except Exception as e:
+                logger.error(f"Error in task: {e}")
+            self._tooltip_timer = None
+
         # 3. 定義打包任務 (包含計算 + 顯示)
         def do_heavy_work():
-            # 只有當 200ms 內沒有新操作時，這兩行才會執行一次
+            # 只有當 200ms 內沒有新操作時，這兩行才會执行一次
+            self._last_shown_tip_code = stock_code # 記錄最後顯示的股票代碼
             self.test_strategy_for_stock(stock_code, stock_name)
             self.show_stock_tooltip(stock_code, event)
             self._tooltip_timer = None # 執行完清空標記
@@ -15457,6 +15528,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             def on_hide(event=None):
                 self.save_window_position(win, "stock_tooltip")
                 win.withdraw() # 隱藏而不是銷毀
+                self._last_shown_tip_code = None
             
             win.bind("<Escape>", on_hide)
             win.protocol("WM_DELETE_WINDOW", on_hide)
@@ -17747,7 +17819,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             item = tree.focus()
             if item:
                 code = tree.item(item, "values")[0]
-                self._on_label_double_click_top10(code, int(item))
+                self._on_label_double_click_top10(code, tree.index(item))
 
         # 右键菜单
         def on_right_click(event):
@@ -17756,7 +17828,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tree.selection_set(item)
                 tree.focus(item)
                 code = tree.item(item, "values")[0]
-                self._on_label_right_click_top10(code, int(item))
+                self._on_label_right_click_top10(code, tree.index(item))
 
         # 键盘上下移动选中项
         def on_key(event):
@@ -17868,7 +17940,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if sel:
             idx = sel[0]
             code = tree.item(idx, "values")[0]
-            self._on_label_double_click_top10(code, int(idx))
+            self._on_label_double_click_top10(code, tree.index(idx))
 
 
     def _on_tree_right_click_newTop10(self, tree, event):
@@ -17885,7 +17957,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 获取 code 并执行逻辑
         code = tree.item(item, "values")[0]
-        self._on_label_right_click_top10(code, int(item))
+        self._on_label_right_click_top10(code, tree.index(item))
 
     
 
@@ -19200,7 +19272,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.select_code = None
         self.sortby_col = None
         self.sortby_col_ascend = None
-        self.refresh_tree(self.df_all, force=True)
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+        self.refresh_tree(df_active, force=True)
         resample = self.resample_combo.get()
         # self.status_var.set(f"搜索框 {which} 已清空")
         # self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
@@ -20587,6 +20661,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not selected:
                     return
                 code = tree.item(selected[0], "values")[0]
+                
+                # 🚀 [NEW] 右键自动复制股票代码到剪贴板，并更新状态栏
+                pyperclip.copy(code)
+                self.status_var2.set(f"已复制股票代码 {code}")
                 
                 menu = tk.Menu(tree, tearoff=0)
                 menu.add_command(label="🔍 联动查看分时/K线", command=lambda: view_stock_kline(code))

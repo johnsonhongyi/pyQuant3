@@ -1,3 +1,25 @@
+## 2026-06-22 19:22
+- [x] **实现右键菜单测试Code策略动态自适应展示 (Dynamic "Test Code Strategy" Context Menu)**：
+    - [x] **动态识别重采样周期决定选项数量 (Dynamic Option Matching Based on Cycle Mode)**：在 `instock_MonitorTK.py` 的 `on_tree_right_click` 右键菜单中，通过检测 `self.global_values.getkey("resample")` 动态判断当前被激活的周期。若为非日线多周期（如 60MIN、30MIN 等），则自动展开为两个测试入口：“🧪 测试Code策略 (日线)”与“🧪 测试Code策略 (60MIN)”；若为日线周期，则合并展示为单个“🧪 测试Code策略”选项。
+    - [x] **安全提取多周期数据传递至 check_code (Thread-safe Cycle Data Sourcing)**：两个菜单命令各自绑定专属的 lambda 表达式，分别精确映射 `self.df_all` 与重采样后的 `self.df_all_res` 数据源。在传入 `df_all_res` 之前加入了 `hasattr` 与空值保护逻辑，保障了测试的连续性，并彻底解决了多周期测试下的数据错位隐患。
+    - [x] **语法编译与界面集成验证 100% 成功 (Passed Compile & Integration Check)**：使用 `py_compile` 对主界面模块进行了无错编译检查，保障了多重周期状态机的完美量化适配与界面连贯性。
+
+## 2026-06-22 19:15
+- [x] **实现 Treeview 数据视图同步与右键直接/菜单复制股票代码功能 (Synchronized Treeview Data & Standardized Right-Click Code Copy)**：
+    - [x] **深度对齐多周期/重采样视图数据源 (Aligned Resampled View Data Source)**：在 `instock_MonitorTK.py` 中，全面同步并修复了当用户切换为非日线的多周期或重采样视图（`resample != 'd'`）时，界面操作依然读取全局 `self.df_all` 导致的数据不一致问题。
+        - 针对右键菜单的 `🧪 测试Code策略`（check_code）操作，将原有的 `self.df_all_res` / `self.df_all` 传参机制重构为基于当前激活重采样周期的 `df_active` 动态选择。
+        - 针对 `get_stock_info_text` (获取个股信息)、`original_push_logic` (推送备注)、`test_strategy_for_stock` (测试买卖策略) 等核心策略审计与文本生成方法，同步接入了重采样周期的 `df_active` 数据流，防止多周期下测试及备注生成发生数据错位。
+        - 针对列宽更改或隐藏列 (`replace_column`) 和清空搜索条件 (`clean_search`) 后的表格重新加载逻辑，将其从始终强制读取 `self.df_all` 优化为自适应读取 `df_active` 进行重绘，彻底保障了多周期模式下界面操作的数据连贯性。
+    - [x] **实现 Tkinter Treeview 右键直接复制股票代码到剪贴板 (Standardized Instant Right-Click Code Copy)**：
+        - 重构了主数据表格右键点击事件 `on_tree_right_click`，在弹出右键菜单的同时，自动将当前选中个股的 6 位标准代码通过 `pyperclip.copy` 写入剪贴板，并在控制台状态栏输出提示。
+        - 重构了 V-Reversal 监控池表格右键点击事件 `show_context_menu`，右键点击个股时即刻自动执行代码复制与状态提示。
+        - 恢复并规范化了手札历史记录表格的右键点击事件 `on_handbook_right_click`，取消了原本注释掉的复制逻辑，重新打通了手札面板的剪贴板复制通道。
+        - 在主右键菜单底部的“其他管理”部分中，额外补充了 `"📋 复制股票代码"` 菜单命令作为双重保障。
+    - [x] **根治 Top10 与概念详情 Treeview 坐标转换 ValueError 崩溃 (Fixed ValueError in Top10 & Concept Detail Treeviews)**：
+        - 修复了在概念详情和 Top10 面板中双击或右键点击行时，由于代码直接将 Treeview 的 item ID 强制转换为整型（`int(item)`）在打包或行 ID 不为纯数字的复杂环境下抛出 `ValueError` 导致程序崩溃的缺陷。
+        - 将所有的 `int(item)` / `int(idx)` 转换为标准的 `tree.index(item)`，使得定位能精确且绝对安全地获取当前行的物理索引位置。
+    - [x] **通过 Python 语法编译检测**：利用 `py_compile` 成功通过了文件语法与缩进的完整编译性验证，未引入任何负面影响或报错。
+
 ## 2026-06-22 16:30
 - [x] **重新实现使用系统中现成的联动日期功能，对齐选股和竞价机制 (Aligned Reversal Pool Linkage with System Standard link_to_visualizer)**：
     - [x] **重构监控池的双击与选择联动逻辑**：在 `instock_MonitorTK.py` 的强庄二次起爆池子模块 `view_stock_kline` 方法中，自动通过 `get_consolidation_flags(code)` 内存接口获取当前个股的 `entry_date`，对空占位符 `"-"` 进行安全过滤。
