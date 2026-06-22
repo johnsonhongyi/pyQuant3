@@ -1,3 +1,32 @@
+## 2026-06-22 22:55
+- [x] **修复双击弹窗焦点获取与自启动优化左侧面板无数据自动隐藏 (Fixed Dialog Focus & Auto-Hiding Left Autostart Pane)**：
+    - [x] **实现双击弹窗强制焦点获取 (Enforced Detail Dialog Keyboard Focus)**：在 `AutostartItemDetailDialog`、`ProcessItemDetailDialog` 和 `ProcessGroupDetailDialog` 的 `__init__` 初始化方法中，增加 `self.focus_force()` 调用。确保弹出的属性详情窗口在生成时能够即刻、强制抢占键盘输入焦点，解决了用户双击后窗口没有焦点导致按下 Esc 键无法快速关闭详情页的痛点。
+    - [x] **实现自启动优化左侧面板无数据时自动隐藏 (Auto-Hiding Common Apps Panel & Auto-Expanding)**：
+        - 重构了 `render_autostart_cards`，将原始静态 common_apps 的无配置卡片进行过滤，只渲染用户系统上真正配置过、启用或禁用了的有效交易/量化软件卡片；
+        - 当过滤后常见软件自启动状态卡片数量为 0 时（即没有可优化的常见交易/量化软件配置），调用 `self.auto_left.pack_forget()` 自动隐藏左侧优化面板，释放所占用的 430 像素宽度空间，并将右侧的全量自启动 Treeview 表格自动横向撑满整个主选项卡，消除了以前“只剩一个标题框却霸占了大量屏幕宽度导致右侧命令行显示太窄”的视觉缺陷；
+        - 当检测到有数据时，自动通过指定 `before=self.auto_right` 进行局部 `pack` 重新插入到左侧，保证布局的对称与一致。
+    - [x] **通过 Python 语法与编译性安全性验证 (Passed Compiler Check)**：运行 `py_compile` 对主界面模块进行了无错编译检查，保障了逻辑与界面改动的工程可靠性。
+
+## 2026-06-22 22:50
+- [x] **修复双击详情页白屏、右键复制失效与文件路径打开定位优化 (Fixed Details Blank, Copy Error & Open Location Resiliency)**：
+    - [x] **修复双击详情页无内容渲染与支持 Esc 键关闭 (Fixed Blank Details Dialog & Added Esc Close)**：彻底排查并根治了由于在 `ttk.Frame` 构造函数中错误传入不支持的 `background` 属性所引发的 `_tkinter.TclError` 异常中断问题。将 `AutostartItemDetailDialog`、`ProcessItemDetailDialog` 和 `ProcessGroupDetailDialog` 中的子卡片及行列容器重构为原生 `tk.Frame` 并指定 `bg` 属性，彻底恢复了详情属性表单与交互按钮的正常渲染。同时在详情窗口顶部绑定 `<Escape>` 事件，支持一键 Esc 极速关闭对话框。
+    - [x] **修复右键复制任务/命令方法缺失崩溃 (Fixed AttributeError on Right-Click Copy)**：在主界面类 `SystemPerformanceAnalyzerGUI` 中补全了 `copy_text_to_clipboard` 方法，引入 `pyperclip` 进行剪贴板复制及底端状态栏同步提示，完美解决了右键复制计划任务名称或命令行时抛出 `AttributeError: '_tkinter.tkapp' object has no attribute 'copy_text_to_clipboard'` 的严重 Bug。
+    - [x] **优化命令行物理路径提取与右键打开所在目录体验 (Optimized Physical Path Sourcing & Resilient Open Location)**：
+        - 重构了 `extract_physical_path`，支持 Windows 环境变量（如 `%SystemRoot%` 等）的自动展开，并对未被双引号包裹但包含空格参数的命令行（如 `C:\Program Files...`）引入贪婪匹配探测机制，以智能提取出最长存在的可执行文件物理路径；
+        - 放宽了右键菜单前置限制，允许为所有项都生成“📂 打开所在目录”菜单，在执行时进行自愈式尝试；
+        - 升级了 `open_file_location_action` 的防错设计，支持在运行时剔除引号及补全系统 PATH 和 `System32` 等绝对路径。如果文件仍不存在，则自动转为打开并定位其父级目录，消除了以往“找不到物理文件时完全无法右键打开”的用户痛点。
+    - [x] **通过 Python 语法与编译性安全性验证 (Passed Compiler Check)**：运行 `py_compile` 对主界面模块进行了无错编译检查，保障了逻辑与界面改动的工程可靠性。
+
+## 2026-06-22 22:45
+- [x] **实现计划任务独立 Tab 管理与自启动/计划任务双击详情与命令行编辑 (Implemented Dedicated Task Scheduler Tab & Autostart Detail Editor)**：
+    - [x] **计划任务与常规自启动项物理隔离 (Decoupled Scheduled Tasks)**：重构了 `AutostartManager.list_all_autostart_items`，将非 Microsoft\Windows 的第三方计划任务从原有的常规注册表/快捷方式自启动列表中完全隔离，保证数据源逻辑的 SRP (单一职责) 原则。
+    - [x] **新增独立的“📅 计划任务管理”选项卡 (Added Dedicated Tasks Tab)**：在 GUI 选项卡第 4 项后面，新增了“📅 计划任务管理 (Tasks)”Tab 并调用 `build_tasks_tab`。以全新的 4 列 Treeview（🔑 任务名称、💡 状态、📂 任务路径、💿 运行程序命令行）独立渲染和管理计划任务数据，支持各列排序及鼠标右键菜单事件。
+    - [x] **实现双击项详情查看与编辑对话框 (`AutostartItemDetailDialog`)**：为自启动列表和计划任务列表的 `<Double-1>` 双击事件绑定了全新实现的属性详情与编辑对话框。该对话框支持只读属性（项目名称、来源路径、当前状态）的一键复制，并支持直接编辑“运行命令/路径”文本框进行修改保存。
+    - [x] **支持快捷方式与计划任务底层参数更新 (Low-dependency Command Updating)**：在 `AutostartManager` 类中实现了 `update_item_command` 静态方法。针对快捷方式 `.lnk` 的修改，通过 PowerShell 原生 COM 组件 WScript.Shell 重新设定 TargetPath 和 Arguments；针对计划任务的修改，通过 PowerShell 原生 `New-ScheduledTaskAction` 和 `Set-ScheduledTask` 更新命令，彻底消除了对 `pywin32` 重型依赖的引入。
+    - [x] **加固 Windows 提权修改与异常防护 (Elevated Command Execution & Error Protection)**：当普通权限执行 `schtasks` 修改失败（拒绝访问）时，系统自动调用 `runas` 提权拉起 `powershell.exe` 完成动作；同时在 `run_as_admin` 提权脚本中优雅捕获了 `WinError 1223` (用户主动取消 UAC 授权) 异常并打印日志，避免程序发生非预期崩溃。
+    - [x] **一键智能优化与列宽跨会话持久化 (Task Diagnostics & Width Persistence)**：为计划任务 Tab 新增了“一键优化”功能，可模糊匹配并批量禁用包含常见更新（如 google, edge, logi, nvidia, steam 等）的非核心后台更新计划任务；同时，扩充了 `save_column_widths` 与 `load_column_widths` 对 columns 为 `"tasks"` 的列宽的读写能力，实现列宽持久化。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：运行 `py_compile` 对修改后的模块进行了无错编译检查，保障了逻辑与界面改动的工程可靠性。
+
 ## 2026-06-22 21:10
 - [x] **为主窗口坐标管理器添加手动刷新当前位置功能 (Added Manual Position Refresh for Main Window)**：
     - [x] **新增“🔄 刷新当前位置”按钮 (Added Refresh Button on Main UI)**：在 `WindowPosManagerUI` 主界面的 “📸 捕获桌面窗口” 按钮上方，新增了 `self.btn_refresh_pos` 按钮并使用青蓝色背景，为用户提供手动的即时窗口检测刷新入口。
