@@ -3285,7 +3285,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             df = df.sort_index(ascending=True)
             df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
             df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-            df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+            df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
             df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
@@ -3312,7 +3312,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 df = df.sort_index(ascending=True)
                 df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
                 df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
                 df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
@@ -3360,7 +3360,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
 
 
@@ -3553,7 +3553,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         df = df.sort_index(ascending=True)
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
@@ -3591,7 +3591,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
                 df = df.sort_index(ascending=True)
                 df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
                 df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+                df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
                 df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
@@ -3652,7 +3652,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
@@ -4426,7 +4426,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         # df['ma5d'].fillna(0)
         # df['ma10d'].fillna(0)
@@ -6123,7 +6123,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         import talib
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=26)
+        df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
         df['obv'] = obv_cross_days_fast_vector(df)
 

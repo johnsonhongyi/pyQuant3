@@ -1,3 +1,9 @@
+## 2026-06-22 21:10
+- [x] **为主窗口坐标管理器添加手动刷新当前位置功能 (Added Manual Position Refresh for Main Window)**：
+    - [x] **新增“🔄 刷新当前位置”按钮 (Added Refresh Button on Main UI)**：在 `WindowPosManagerUI` 主界面的 “📸 捕获桌面窗口” 按钮上方，新增了 `self.btn_refresh_pos` 按钮并使用青蓝色背景，为用户提供手动的即时窗口检测刷新入口。
+    - [x] **实现位置与显示器拓扑的手动刷新 (Implemented Manual Refresh logic)**：新增了主窗口的 `on_refresh_pos_clicked` 槽函数，在用户点击按钮时调用 `detect_and_refresh_state`，刷新各运行窗口的实际坐标以及显示器拓扑结构，并在执行状态日志中记录，方便在窗口最小化或打开时随时进行数据比对与更新。
+    - [x] **通过 Python 编译性验证 (Passed Compilation Verification)**：运行 `py_compile` 对主界面模块进行了无错编译检查，保障了逻辑与界面改动的工程可靠性。
+
 ## 2026-06-22 19:22
 - [x] **实现右键菜单测试Code策略动态自适应展示 (Dynamic "Test Code Strategy" Context Menu)**：
     - [x] **动态识别重采样周期决定选项数量 (Dynamic Option Matching Based on Cycle Mode)**：在 `instock_MonitorTK.py` 的 `on_tree_right_click` 右键菜单中，通过检测 `self.global_values.getkey("resample")` 动态判断当前被激活的周期。若为非日线多周期（如 60MIN、30MIN 等），则自动展开为两个测试入口：“🧪 测试Code策略 (日线)”与“🧪 测试Code策略 (60MIN)”；若为日线周期，则合并展示为单个“🧪 测试Code策略”选项。
