@@ -9941,11 +9941,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     text=f"建议: {action} | 仓位: {result['position']*100:.0f}%", 
                     bg=action_color
                 )
+                # 记录最后一次滚动位置并记录到全局变量中
+                last_yview = win.txt_widget.yview()[0]
+                self._last_strategy_report_yview = last_yview
+                
                 win.txt_widget.config(state='normal')
                 win.txt_widget.delete('1.0', 'end')
                 win.txt_widget.insert('1.0', report_text)
                 win.txt_widget.config(state='disabled')
-                win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(1.0))
+                # 保持原滚动位置，不要自动滚动到底部
+                win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(last_yview))
                 win.report_text = report_text # 更新复制引用的文本
                 return
             else:
@@ -9986,7 +9991,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         win.txt_widget.insert('1.0', report_text)
         win.txt_widget.config(state='disabled')
-        win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(1.0))
+        # 获取上次保存的滚动位置，默认为 0.0 (顶部)
+        last_y = getattr(self, '_last_strategy_report_yview', 0.0)
+        win.txt_widget.after(100, lambda: win.txt_widget.yview_moveto(last_y))
         
         # 底部按钮
         btn_frame = tk.Frame(win)
@@ -10184,6 +10191,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  width=12).pack(side='left', padx=5)
 
         def on_close(event=None):
+            # 关闭前记录最后的滚动位置
+            if hasattr(win, 'txt_widget'):
+                self._last_strategy_report_yview = win.txt_widget.yview()[0]
             self.save_window_position(win, window_id)
             win.destroy()
             self.strategy_report_win = None
