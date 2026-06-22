@@ -6683,7 +6683,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if top5 is not None:
                             try:
                                 if isinstance(top5, list):
-                                    pcts = [float(item[1]) for item in top5[:5] if len(item) > 1]
+                                    # [BUGFIX] concept_top5 结构为 (板块名, 评分, 平均涨幅, 随同比例, 多头比例)
+                                    # item[1] 是评分 score (通常在100以上)，item[2] 才是题材真正的平均涨幅 avg_percent
+                                    # 修复错用评分作为涨幅导致的市场温度一直顶格在 100℃ 火热的问题
+                                    pcts = [float(item[2]) for item in top5[:5] if len(item) > 2]
                                 elif isinstance(top5, pd.DataFrame):
                                     pcts = top5['percent'].head(5).tolist() if 'percent' in top5.columns else []
                                 if pcts: sector_heat = sum(pcts) / len(pcts)

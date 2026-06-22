@@ -237,22 +237,24 @@ class MinuteKlineCache:
         
     def count_gaps(self, threshold: int = 200, active_codes: Optional[set[str]] = None) -> dict[str, int]:
         """
-        统计数据完整性：返回低于 threshold 个 tick 的 ticker 数量及详情
+        统计数据完整性：仅针对活跃股票 (is_active_stock) 统计低于 threshold 个 tick 的 ticker 数量及详情
         active_codes: 当前活跃的代码集合 (如来自最新行情快照)，若传入则包含 cache 中完全缺失的代码
         """
         low_tick_codes = {}
         with self._lock:
             # 1. 遍历已有缓存
             for code, dq in self._shared_cache.items():
-                count = len(dq)
-                if count < threshold:
-                    low_tick_codes[code] = count
+                if self.is_active_stock(code):
+                    count = len(dq)
+                    if count < threshold:
+                        low_tick_codes[code] = count
             
             # 2. 检查活跃但完全缺失的代码
             if active_codes:
                 for code in active_codes:
-                    if code not in self._shared_cache or not self._shared_cache[code]:
-                        low_tick_codes[code] = 0
+                    if self.is_active_stock(code):
+                        if code not in self._shared_cache or not self._shared_cache[code]:
+                            low_tick_codes[code] = 0
         
         return low_tick_codes
 
