@@ -20677,22 +20677,42 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             self._ext_data_viewer_win = ExtDataViewer(self)
             
+        df_ext = pd.DataFrame()
+        last_update_ts = 0
+        
         if self.realtime_service:
             try:
                 # 优先直接从服务拉取最新全量数据
                 ext_status = self.realtime_service.get_55188_data()
                 if ext_status and 'df' in ext_status:
                     df_ext = ext_status['df']
-                    self._ext_data_viewer_win.update_data(df_ext)
-                    # 同时同步给策略模块，确保一致性
-                    if hasattr(self, 'live_strategy') and self.live_strategy:
-                        self.live_strategy.ext_data_55188 = df_ext
-                        self.live_strategy.last_ext_update_ts = ext_status.get('last_update', 0)
-                
-                if auto_update:
-                    logger.debug("55188 Data auto-pop/refresh triggered.")
+                    last_update_ts = ext_status.get('last_update', 0)
             except Exception as e:
-                logger.error(f"Update ExtDataViewer failed: {e}")
+                logger.error(f"Update ExtDataViewer from service failed: {e}")
+
+        # 🚀 [DEGRADATION] 如果服务未返回或返回空，主进程直接从本地缓存读取，防止白屏
+        if df_ext.empty:
+            try:
+                from scraper_55188 import load_cache
+                df_ext = load_cache()
+                last_update_ts = time.time()
+                if not df_ext.empty:
+                    logger.info(f"📂 UI Fallback: Loaded 55188 data directly from local cache ({len(df_ext)} rows)")
+            except Exception as ex:
+                logger.error(f"Fallback reading 55188 cache directly failed: {ex}")
+
+        if not df_ext.empty:
+            self._ext_data_viewer_win.update_data(df_ext)
+            # 同时同步给策略模块，确保一致性
+            if hasattr(self, 'live_strategy') and self.live_strategy:
+                self.live_strategy.ext_data_55188 = df_ext
+                try:
+                    self.live_strategy.last_ext_update_ts = int(last_update_ts)
+                except:
+                    self.live_strategy.last_ext_update_ts = 0
+            
+            if auto_update:
+                logger.debug("55188 Data auto-pop/refresh triggered.")
 
     def _check_ext_data_update(self):
         """周期性检查 55188 外部数据是否有更新，触发 UI 同步或弹窗"""

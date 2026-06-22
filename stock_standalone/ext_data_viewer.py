@@ -86,6 +86,10 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.btn_dna = tk.Button(self.status_frame, text="🧬 DNA审计", font=("微软雅黑", 9, "bold"), fg="#ffffff", bg="#333333", relief="flat", command=self._run_dna_audit_selected, width=12)
         self.btn_dna.pack(side="right", padx=5, pady=2)
         
+        # 🔄 [NEW] 刷新按钮贴行附加，位于 DNA 审计按钮左侧
+        self.btn_refresh = tk.Button(self.status_frame, text="🔄 刷新", font=("微软雅黑", 9, "bold"), fg="#ffffff", bg="#005BB7", relief="flat", command=self._manual_refresh, width=10)
+        self.btn_refresh.pack(side="right", padx=5, pady=2)
+        
         # 存储各 Tab 的计数
         self.counts = {"主力排名": 0, "人气榜单": 0, "题材挖掘": 0}
         
@@ -259,6 +263,13 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         elif tab_text == "人气榜单": return self.tree_hot
         elif tab_text == "题材挖掘": return self.tree_theme
         return None
+
+    def _manual_refresh(self):
+        """手动刷新：尝试从 realtime_service 获取最新数据并重绘 UI"""
+        logger.info("🔄 ExtDataViewer: 手动刷新触发...")
+        parent = self.master
+        if parent and hasattr(parent, 'open_ext_data_viewer'):
+            parent.open_ext_data_viewer(auto_update=False)
 
     def _run_dna_audit_selected(self):
         """🚀 [DNA-BATCH] 极限审计当前视图所选 / Top20"""

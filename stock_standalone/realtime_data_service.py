@@ -2644,6 +2644,16 @@ class DataPublisher:
         self.scraper_55188 = Scraper55188()
         self.ext_data_55188 = pd.DataFrame()
         self.last_ext_update_ts = 0.0
+        # 🚀 [NEW] 启动时自动从缓存加载数据，防止数据未更新前清理缓存
+        try:
+            from scraper_55188 import load_cache
+            cached_55188 = load_cache()
+            if cached_55188 is not None and not cached_55188.empty:
+                self.ext_data_55188 = cached_55188
+                self.last_ext_update_ts = time.time()
+                logger.info(f"💾 成功从本地缓存加载 55188 外部数据: {len(self.ext_data_55188)} 条记录")
+        except Exception as e:
+            logger.error(f"⚠️ 启动加载 55188 缓存数据失败: {e}")
 
         # [NEW] Thread control
         self._stop_event = threading.Event()
