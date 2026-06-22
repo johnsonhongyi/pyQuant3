@@ -20471,7 +20471,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.error(f"Force evict failed: {e}")
 
             def view_stock_kline(code: str):
-                # 🚀 优先使用主窗口自带的、带有线程安全和 after 缓冲逻辑的异步 on_code_click，彻底防止主线程死锁卡死
+                # 🚀 优先使用系统内现成的联动日期功能 link_to_visualizer，确保时间与选股、竞价对齐
+                entry_date = None
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
+                        entry_date = flags.get("entry_date", None)
+                        if entry_date == "-":
+                            entry_date = None
+                    except Exception:
+                        pass
+                
+                # 🚀 自动修复入池时间：若入池日期不是实际交易日，则自动修复为其前一个实际交易日（如非交易日0619修正为0618）
+                if entry_date:
+                    try:
+                        if not cct.get_day_istrade_date(entry_date):
+                            prev_trade_date = cct.get_last_trade_date(entry_date)
+                            if prev_trade_date:
+                                logger.info(f"💡 [V-Reversal] 入池时间 {entry_date} 不是实际交易日，自动修复为其前一个交易日 {prev_trade_date}")
+                                entry_date = prev_trade_date
+                    except Exception as e:
+                        logger.error(f"Auto-correct entry_date failed: {e}")
+                
+                # 如果有入池日期，则调用系统现成的 link_to_visualizer 联动
+                if entry_date and hasattr(self, 'link_to_visualizer'):
+                    try:
+                        self.link_to_visualizer(code, entry_date)
+                        logger.info(f"💡 [V-Reversal] 使用系统现成 link_to_visualizer 联动个股: {code} 时间: {entry_date}")
+                        return
+                    except Exception as e:
+                        logger.error(f"Failed calling link_to_visualizer: {e}")
+                
+                # 回退使用主窗口自带的、带有线程安全和 after 缓冲逻辑的异步 on_code_click，彻底防止主线程死锁卡死
                 if hasattr(self, 'on_code_click'):
                     try:
                         self.on_code_click(code)
