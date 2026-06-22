@@ -8116,7 +8116,7 @@ if __name__ == '__main__':
     code = '300905'
     resample = 'd'
 
-    code = '002361'
+    code = '688200'
     df2=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df3=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d')
     df4=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
