@@ -1917,7 +1917,7 @@ class WindowPosManagerUI(QMainWindow):
             self.log("❌ 自动防抖保存配置文件失败。")
 
     def apply_current_layout(self):
-        """一键应用当前方案的所有规则到桌面运行中的窗口"""
+        """一键应用当前方案的所有规则到桌面运行中的窗口 (仅对位置有变动的窗口执行操作)"""
         current_res = self.get_current_selected_resolution()
         if not current_res:
             return
@@ -1930,30 +1930,64 @@ class WindowPosManagerUI(QMainWindow):
             self.log("配置为空，没有需要移动的窗口。")
             return
             
-        success_count = 0
+        moved_count = 0
+        skip_count = 0
         missing_count = 0
         
         for title, raw_pos_str in mapping.items():
             parts = raw_pos_str.split('|')
             pos_str = parts[0]
             
+            try:
+                cfg_parts = [int(p.strip()) for p in pos_str.split(',')]
+            except Exception:
+                cfg_parts = []
+                
+            if len(cfg_parts) != 4:
+                self.log(f"⚠️ 规则 '{title}' 的坐标格式错误: {pos_str}")
+                continue
+                
             titles_to_try = [title]
             if title.endswith('.py') and not title.startswith('py'):
                 titles_to_try.append(title.replace('.py', '.exe'))
             elif title.endswith('.exe'):
                 titles_to_try.append(title.replace('.exe', '.py'))
                 
-            moved = False
+            found_any = False
+            moved_any = False
+            skip_any = False
+            
             for t in titles_to_try:
-                if core.set_window_pos_by_title(t, pos_str):
-                    moved = True
-                    self.log(f"✅ 成功定位并设置窗口: '{t}' -> [{pos_str}]")
-                    success_count += 1
+                hwnds = core.find_windows_by_title_safe(t)
+                if hwnds:
+                    found_any = True
+                    for hwnd, actual_title in hwnds:
+                        left, top, w, h = core.get_window_rect(hwnd)
+                        is_minimized = (left < -10000 and top < -10000)
+                        is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
+                        
+                        if is_minimized or is_diff:
+                            if is_minimized:
+                                core.user32.ShowWindow(hwnd, core.SW_SHOWNORMAL)
+                                import time
+                                time.sleep(0.1)
+                            if core.set_window_hwnd_pos(hwnd, pos_str):
+                                self.log(f"✅ 成功设置窗口: '{actual_title}' -> [{pos_str}]")
+                                moved_any = True
+                        else:
+                            self.log(f"➖ 窗口 '{actual_title}' 位置一致 [{pos_str}]，跳过应用")
+                            skip_any = True
                     break
-            if not moved:
+                    
+            if not found_any:
                 missing_count += 1
-                
-        self.log(f"🏁 布局应用完毕！成功移动 {success_count} 个窗口，忽略 {missing_count} 个未启动窗口。")
+            else:
+                if moved_any:
+                    moved_count += 1
+                elif skip_any:
+                    skip_count += 1
+                    
+        self.log(f"🏁 布局应用完毕！移动/调整 {moved_count} 个，保持/跳过 {skip_count} 个，忽略 {missing_count} 个未启动。")
         self.refresh_current_positions()
 
 
