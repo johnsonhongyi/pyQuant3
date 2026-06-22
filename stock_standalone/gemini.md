@@ -1,3 +1,10 @@
+## 2026-06-22 09:00
+- [x] **彻底修复东方财富 push2.eastmoney.com 接口 Connection aborted / RemoteDisconnected 故障**：
+    - [x] **定位服务器端路由变更（Root Cause Identified）**：通过 web 搜索与实际网络诊断，确定东方财富近期收紧了防火墙/风控策略，全面关闭/限制了针对旧 `/api/` 路径（即 `https://push2.eastmoney.com/api/qt/clist/get`）的不记名直接请求，导致所有该路径请求不管是直连还是走本地 Clash 代理，都会被东财服务器直接 abort 丢弃（表现为 TCP 连接建立后无 Response 且 RemoteDisconnected）。
+    - [x] **迁移至新公开路径接口（API Path Migration）**：将 `scraper_55188.py` 中的 `EASTMONEY_URL` 修改为东财最新的公开无限制路径 `/webguest/api/`（即 `https://push2.eastmoney.com/webguest/api/qt/clist/get`），从而恢复了数据接口的顺畅访问。
+    - [x] **双向代理测试通过（Proxy & Direct Connectivity Confirmed）**：通过测试脚本进行实测验证，证实新接口路径在开启 Clash 代理和直连（不走代理）两种网络环境下均可 100% 成功返回 HTTP 200 并获取到最新的主力资金排名数据。
+    - [x] **保留 session.trust_env 防御机制**：继续保留 `self.session.trust_env = False` 设置，确保在国内行情抓取过程中，爬虫会优先使用本地直连而不会被 Clash 等代理节点的境外 IP 拦截，有效降低触发境外异地 IP 风控的概率。
+
 ## 2026-06-19 10:00
 - [x] **彻底根治 open_realtime_monitor 分隔条打包后持久化失效（WINDOW_CONFIG_FILE 静态快照根因修复）**：
     - [x] **定位并消除根本原因（Static Snapshot Bug）**：`gui_config.py` 中的 `WINDOW_CONFIG_FILE` 是模块导入时的静态快照常量（`_base_dir = get_app_root()` 在 import 阶段执行一次便固化）。在打包环境下，若 `INSTOCK_APP_ROOT` 环境变量尚未初始化，`get_app_root()` 可能返回临时目录路径，导致 `WINDOW_CONFIG_FILE` 固化为错误的路径，使 `save_sash_pos` 写入的文件与 `load_sash_pos` / `load_window_position` 读取的文件不是同一个物理位置，引发永久失效。

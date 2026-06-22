@@ -171,13 +171,14 @@ class Scraper55188:
     Enhanced to support full market (including GEM) and detailed reasoning.
     """
     
-    EASTMONEY_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+    EASTMONEY_URL = "https://push2.eastmoney.com/webguest/api/qt/clist/get"
     THS_URL = "https://eq.10jqka.com.cn/open/api/hot_list/v1/hot_stock/a/hour/data.txt"
     UPCHINA_THEME_URL = "https://prx.upchina.com/json/specialTheme/getTSDataNewThemeByDate"
     UPCHINA_STOCK_URL = "https://gateway.upchina.com/json/stockextweb/stockExtDetail"
     
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False  # 忽略系统代理，防止 ProxyError
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
@@ -243,7 +244,7 @@ class Scraper55188:
             except Exception:
                 pass
             logger.warning(
-                "fetch_theme_stocks failed | status=%s | resp=%s | err=%s",
+                "fetch_eastmoney_zhuli failed | status=%s | resp=%s | err=%s",
                 status,
                 text,
                 repr(e)
