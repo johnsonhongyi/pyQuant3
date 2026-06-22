@@ -12259,7 +12259,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if t_ts:
                 t_str = str(t_ts).replace("-", "")
                 last_td = str(cct.get_last_trade_date()).replace("-", "")
-                if t_str >= last_td:
+                if t_str > last_td:
                     has_valid_linkage = False # 降低标记权重，隐藏竖线和 Label
         
         if not has_valid_linkage:

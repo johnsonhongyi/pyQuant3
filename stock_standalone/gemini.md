@@ -1,3 +1,11 @@
+## 2026-06-22 16:30
+- [x] **重新实现使用系统中现成的联动日期功能，对齐选股和竞价机制 (Aligned Reversal Pool Linkage with System Standard link_to_visualizer)**：
+    - [x] **重构监控池的双击与选择联动逻辑**：在 `instock_MonitorTK.py` 的强庄二次起爆池子模块 `view_stock_kline` 方法中，自动通过 `get_consolidation_flags(code)` 内存接口获取当前个股的 `entry_date`，对空占位符 `"-"` 进行安全过滤。
+    - [x] **直接复用系统跨工具联动接口**：如果个股存在入池日期，则不再经过 `on_code_click` 的通用个股点击切换，而是直接调用系统现成的、与选股 (StockSelector) 和竞价 (SectorBiddingPanel) 高度一致的 `self.link_to_visualizer(code, entry_date)` 跨工具日期联动接口，彻底消除了针对通用逻辑的侵入式修改和短路拦截 Bug。
+    - [x] **入池日期非交易日校准与自动修复**：在调用 `link_to_visualizer` 之前，通过 `cct.get_day_istrade_date(entry_date)` 判断其是否为有效交易日。若当前入池日期处于周末、节假日或尚未产生数据的交易日（非交易日），则利用 `cct.get_last_trade_date(entry_date)` 自动校准并修复为其前一个实际的有效交易日（例如将非交易日 0619 自动修正为 0618），彻底解决了非交易日状态下双击无法绘制高亮线或数据看板的缺陷。
+    - [x] **放宽当天入池标记隐藏限制**：在 `trade_visualizer_qt6.py` 中，将时间线画线判定由 `t_str >= last_td` 调整为 `t_str > last_td`。这使得当天刚进入监控池的股票（日期与最后交易日相等）双击时，依然能在右侧最新 K 线柱上成功绘制联动黄色虚线和详细数据看板，完美恢复当天个股的日期标线和数据联动。
+    - [x] **完成编译检查与状态机单元测试**：通过了 `py_compile` 对两份代码文件的语法检查，并确保了 `test_v_reversal_fsm.py` 单元测试断言 100% 成功跑通，确认未对系统其他模块引入任何非预期负面影响。
+
 ## 2026-06-22 11:45
 - [x] **修复冷启动缺口补全引起的全市场股票无限 HDF5 重复回补漏洞 (Fixed Full-Market Loop of HDF5 Gap Recovery)**：
     - [x] **限制 count_gaps 仅统计活跃个股 (Restricted count_gaps to Active Stocks Only)**：在 `realtime_data_service.py` 内部的 `count_gaps` 中，无论是已有缓存检查还是缺失个股快照对齐，均加入了 `if self.is_active_stock(code):` 的白名单限制。确保非活跃个股即便在物理截断至 120 根后，也绝不会触发低水位警告回补，从根本上阻断了 5000+ 非活跃股票参与间隙回补的无限循环。
