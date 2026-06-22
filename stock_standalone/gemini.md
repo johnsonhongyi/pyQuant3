@@ -1,3 +1,11 @@
+## 2026-06-22 10:00
+- [x] **优化 55188 数据可视化工具持久化缓存与手动刷新机制 (Optimized 55188 Persistence-First Caching & Manual Refresh)**：
+    - [x] **实现持久化数据降级保护 (Persistence-First Fallback)**：在 `scraper_55188.py` 的数据抓取与合并中引入了缓存保护逻辑。当同花顺人气接口 (THS Hotlist) 或题材抓取失败返回空 DataFrame 时，系统将自动从历史缓存文件 `cache_55188_snapshot.pkl` 中读取对应模块的字段进行无缝融合补充，防止了由于网络瞬时抖动、风控或代理异常造成整张表或核心字段被强行置空。
+    - [x] **引入服务启动数据预加载 (Startup Cache Pre-loading)**：在 `realtime_data_service.py` 初始化时，增加从 `load_cache()` 加载历史 55188 缓存数据的安全逻辑，使服务一旦启动即可获得上一次有效数据，不用等待首轮定时抓取结束，彻底根治了冷启动首屏空白问题。
+    - [x] **实现 UI 查看器本地降级渲染 (UI Degraded Rendering)**：在 `instock_MonitorTK.py` 的 `open_ext_data_viewer` 中增加了备用降级策略。若后台实时服务未建立或未返回有效数据（df_ext.empty），主进程将直接从本地 HDF5/PKL 缓存中加载数据渲染界面，防止在多进程网络未就绪或接口崩溃时 UI 呈现“大白屏”或“冷启动空洞”。
+    - [x] **新增“🔄 刷新”手动刷新触发器 (Added Manual Refresh Trigger)**：在 `ext_data_viewer.py` 的底部状态栏，位于 DNA 审计按钮左侧新增了“🔄 刷新”按钮。用户点击该按钮即可立刻向实时服务发送拉取请求并重新渲染 UI，提高了实时排查 API 最新行情的效率。
+    - [x] **修复东财主力资金排名获取 bug (Fixed Eastmoney Main Force Rank Issue)**：由于东财近期 API 升级后 `f225`（主力排名）字段返回值全为 0 导致主界面“主力排名”视图的排名全部显示为 0。根据东财 API 返回数据已通过 `fid=f184` 并按主力净占比降序排序的特征，直接在数据清洗阶段根据 DataFrame 的行索引自适应计算生成真实的 `zhuli_rank`，彻底恢复了主界面主力排名的名次显示。
+
 ## 2026-06-22 09:00
 - [x] **彻底修复东方财富 push2.eastmoney.com 接口 Connection aborted / RemoteDisconnected 故障**：
     - [x] **定位服务器端路由变更（Root Cause Identified）**：通过 web 搜索与实际网络诊断，确定东方财富近期收紧了防火墙/风控策略，全面关闭/限制了针对旧 `/api/` 路径（即 `https://push2.eastmoney.com/api/qt/clist/get`）的不记名直接请求，导致所有该路径请求不管是直连还是走本地 Clash 代理，都会被东财服务器直接 abort 丢弃（表现为 TCP 连接建立后无 Response 且 RemoteDisconnected）。

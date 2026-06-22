@@ -225,6 +225,10 @@ class Scraper55188:
             df = df.rename(columns=rename_map)
             df = df[df['code'].str.isnumeric()]
             
+            # 🚀 [FIX] 东财新版 API 中 f225 (主力排名) 返回值全为 0。
+            # 由于接口已传入 fid=f184 并按主力净占比降序排序返回，这里直接根据 DataFrame 行索引生成真实的 rank 排名
+            df['zhuli_rank'] = range(1, len(df) + 1)
+            
             # 数值标准化：EM 返回的是乘以 100 后的值
             for col in ['price', 'change_pct', 'net_ratio']:
                 if col in df.columns:
@@ -687,78 +691,103 @@ class Scraper55188:
             return load_cache()
 
         # 3. 抓取人气
+        df_old = load_cache()
         df_hot = self.fetch_ths_hotlist()
+        if df_hot.empty and df_old is not None and not df_old.empty:
+            logger.warning("⚠️ THS hotlist fetch returned empty. Restoring from cache.")
+            cols_to_extract = [c for c in ['code', 'name', 'hot_rank', 'hot_tag', 'hot_reason'] if c in df_old.columns]
+            if 'hot_rank' in df_old.columns:
+                df_hot = df_old[df_old['hot_rank'] < 990][cols_to_extract].copy()
+            else:
+                df_hot = df_old[cols_to_extract].copy()
 
         # 4. 抓取题材与逻辑
         themes = self.fetch_concept_mining_themes(count=count)
         theme_dfs = []
-        for theme in themes:
-            p_code = theme.get("sPlateCode")
-            if not p_code:
-                continue
+        if themes:
+            for theme in themes:
+                p_code = theme.get("sPlateCode")
+                if not p_code:
+                    continue
 
-            df_t = self.fetch_theme_stocks(p_code)
-            if df_t.empty:
-                continue
+                df_t = self.fetch_theme_stocks(p_code)
+                if df_t.empty:
+                    continue
 
-            # 初始化列
-            for col in ['theme_name', 'theme_logic', 'theme_date']:
-                if col not in df_t.columns:
-                    df_t[col] = ''
+                # 初始化列
+                for col in ['theme_name', 'theme_logic', 'theme_date']:
+                    if col not in df_t.columns:
+                        df_t[col] = ''
 
-            df_t['theme_name'] = str(theme.get("sPlateName") or "")
+                df_t['theme_name'] = str(theme.get("sPlateName") or "")
 
-            # 处理日期
-            raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime") or
-                        theme.get("sDate") or theme.get("uiDate") or
-                        theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
-                        theme.get("sDriveTime") or theme.get("sDriveDate") or
-                        theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
-            theme_date = ''
-            try:
-                s_date = str(raw_date).strip()
-                if s_date.isdigit() and len(s_date) >= 10:
-                    ts = int(s_date)
-                    if len(s_date) == 13:
-                        ts //= 1000
-                    theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
-                elif len(s_date) >= 8 and s_date[:8].isdigit():
-                    theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
-                elif "/" in s_date or "-" in s_date:
-                    m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
-                    if m:
-                        theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-            except Exception:
+                # 处理日期
+                raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime") or
+                            theme.get("sDate") or theme.get("uiDate") or
+                            theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
+                            theme.get("sDriveTime") or theme.get("sDriveDate") or
+                            theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
                 theme_date = ''
-            df_t['theme_date'] = theme_date or ''
+                try:
+                    s_date = str(raw_date).strip()
+                    if s_date.isdigit() and len(s_date) >= 10:
+                        ts = int(s_date)
+                        if len(s_date) == 13:
+                            ts //= 1000
+                        theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
+                    elif len(s_date) >= 8 and s_date[:8].isdigit():
+                        theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
+                    elif "/" in s_date or "-" in s_date:
+                        m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
+                        if m:
+                            theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+                except Exception:
+                    theme_date = ''
+                df_t['theme_date'] = theme_date or ''
 
-            # 整合逻辑
-            df_t['theme_logic'] = df_t.get('theme_logic', '').fillna('')
-            for idx, row in df_t.iterrows():
-                logic = row.get('theme_logic', '').strip()
-                drive = theme.get("driveLogic", "").strip()
-                if not logic and drive:
-                    logic = f"【背景】{drive}"
-                pos_logic = row.get('position', '').strip() if 'position' in row else ''
-                if pos_logic:
-                    logic = f"{logic} {pos_logic}".strip()
-                df_t.at[idx, 'theme_logic'] = logic
+                # 整合逻辑
+                df_t['theme_logic'] = df_t.get('theme_logic', '').fillna('')
+                for idx, row in df_t.iterrows():
+                    logic = row.get('theme_logic', '').strip()
+                    drive = theme.get("driveLogic", "").strip()
+                    if not logic and drive:
+                        logic = f"【背景】{drive}"
+                    pos_logic = row.get('position', '').strip() if 'position' in row else ''
+                    if pos_logic:
+                        logic = f"{logic} {pos_logic}".strip()
+                    df_t.at[idx, 'theme_logic'] = logic
 
-            theme_dfs.append(df_t)
+                theme_dfs.append(df_t)
 
         df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame(columns=['code', 'theme_name', 'theme_logic', 'theme_date'])
-        if not df_theme.empty:
-            df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
+        
+        # 🚨 [FALLBACK] 题材数据抓取保护
+        if df_theme.empty and df_old is not None and not df_old.empty:
+            logger.warning("⚠️ Upchina theme stocks fetch returned empty. Restoring from cache.")
+            cols_to_extract = [c for c in ['code', 'name', 'theme_name', 'theme_logic', 'theme_date'] if c in df_old.columns]
+            if 'theme_name' in df_old.columns:
+                df_theme_unique = df_old[df_old['theme_name'] != ''][cols_to_extract].copy()
+            else:
+                df_theme_unique = df_old[cols_to_extract].copy()
+            
+            if 'code' in df_theme_unique.columns:
+                df_theme_unique = df_theme_unique.set_index('code')
+        else:
+            if not df_theme.empty:
+                df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
 
-        # 5. 把 hot_tag join 进 df_theme
-        if not df_hot.empty:
-            df_hot_idx = df_hot.set_index('code')[['hot_tag', 'hot_reason']]
-            df_theme = df_theme.join(df_hot_idx, on='code')
+            # 5. 把 hot_tag join 进 df_theme
+            if not df_hot.empty:
+                df_hot_idx = df_hot.set_index('code')[['hot_tag', 'hot_reason']]
+                cols_to_drop = [c for c in ['hot_tag', 'hot_reason'] if c in df_theme.columns]
+                if cols_to_drop:
+                    df_theme = df_theme.drop(columns=cols_to_drop)
+                df_theme = df_theme.join(df_hot_idx, on='code')
 
-        # 6. 合并主题逻辑
-        df_theme_unique = self.merge_theme_logic(df_theme)
-        if 'theme_date' in df_theme_unique.columns:
-            df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
+            # 6. 合并主题逻辑
+            df_theme_unique = self.merge_theme_logic(df_theme)
+            if 'theme_date' in df_theme_unique.columns:
+                df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
 
         # 7. 构建代码全集
         all_codes = set()
@@ -766,6 +795,8 @@ class Scraper55188:
             if not df.empty:
                 if 'code' in df.columns:
                     all_codes.update(df['code'])
+                elif df.index.name == 'code':
+                    all_codes.update(df.index)
                 else:
                     all_codes.update(df.index)
         if not all_codes:
@@ -783,10 +814,12 @@ class Scraper55188:
             if 'name' not in result.columns:
                 result['name'] = df_hot_idx['name']
             else:
-                # Change: Don't fillna('') before combine_first, or it blocks the fallback
-                # result['name'] = result['name'].fillna('').combine_first(df_hot_idx['name'])
                 result['name'] = result['name'].combine_first(df_hot_idx['name'])
             
+            # 避开 join 重复列冲突
+            cols_to_drop = [c for c in ['hot_rank', 'hot_tag', 'hot_reason'] if c in result.columns]
+            if cols_to_drop:
+                result = result.drop(columns=cols_to_drop)
             result = result.join(df_hot_idx[['hot_rank', 'hot_tag', 'hot_reason']], how='left', rsuffix='_hot')
 
         # 注入题材
@@ -798,6 +831,9 @@ class Scraper55188:
                 else:
                      result['name'] = result['name'].combine_first(df_theme_unique['name'])
 
+            cols_to_drop = [c for c in ['theme_name', 'theme_logic', 'theme_date'] if c in result.columns]
+            if cols_to_drop:
+                result = result.drop(columns=cols_to_drop)
             result = result.join(df_theme_unique[['theme_name', 'theme_logic', 'theme_date']], how='left')
 
         # 8. 清洗默认值
