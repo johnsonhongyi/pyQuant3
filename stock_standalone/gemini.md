@@ -1,3 +1,20 @@
+## 2026-06-22 11:45
+- [x] **修复冷启动缺口补全引起的全市场股票无限 HDF5 重复回补漏洞 (Fixed Full-Market Loop of HDF5 Gap Recovery)**：
+    - [x] **限制 count_gaps 仅统计活跃个股 (Restricted count_gaps to Active Stocks Only)**：在 `realtime_data_service.py` 内部的 `count_gaps` 中，无论是已有缓存检查还是缺失个股快照对齐，均加入了 `if self.is_active_stock(code):` 的白名单限制。确保非活跃个股即便在物理截断至 120 根后，也绝不会触发低水位警告回补，从根本上阻断了 5000+ 非活跃股票参与间隙回补的无限循环。
+    - [x] **实现高效精准批量获取与缓存复用 (Achieved Efficient Batch Fetch & Cache Reuse)**：通过白名单过滤，将单次 HDF5 精准回补的个股规模从 5500+ 只压缩至仅存的数十只活跃监控股（自选、重点及 V反潜伏池成分股），不仅满足了“回补数据只能批量获取”的高性能诉求，还杜绝了主线程的大规模磁盘 I/O 阻塞和 SingleFlight 内存暴涨。
+    - [x] **验证 Python 级语法与单元测试安全 (Passed Syntax & Unit Test Regressions)**：执行了 `py_compile` 编译验证与 `test_v_reversal_fsm.py` 状态机联动单元测试，状态流转与冷却自愈断言全部通过，未引入任何乱码及功能倒退。
+
+## 2026-06-22 11:35
+- [x] **优化 Sina 行情引擎冷启动与盘中重复加载性能 (Optimized Sina Engine Startup & Re-load Performance)**：
+    - [x] **实现 StockCode 模块级全局单例化 (StockCode Module-Level Singleton)**：将 `StockCode` 改为模块级全局单例（通过 `get_global_stock_code()`），避免了每次调用 `Sina.all` 属性或 `Sina.market` 时重复实例化 `StockCode()`。从而彻底根治了冷启动和行情刷新时频繁触发 `stock_codes.conf` 配置文件物理读取和 `creation_date_duration` 计算所导致的磁盘 I/O 损耗。
+    - [x] **消除冷启动大量的重复配置读取日志 (Eliminated Duplicate Startup Configuration Logs)**：由于 `StockCode` 单例化，冷启动期间原本高频密集的 `使用 stock_codes.conf 配置: ...` 以及 `date_duration days: ... read stock_codes.conf` 的提示日志在全进程生命周期中仅在首次初始化时输出一次，有效消除了大量的冗余日志和无谓的磁盘读取，符合“绝对不允许单点执行批量数据”的开发规范。
+    - [x] **完全保留 UTF-8 编码与中文注释安全性**：在物理重构过程中，全量保持了 `JSONData\sina_data.py` 原本的 UTF-8 (without BOM) 编码格式，未引入任何乱码或语法编译异常，并通过了 `test_v_reversal_fsm.py` 状态机单元测试。
+
+## 2026-06-22 11:30
+- [x] **修复策略信号面板“市场温度”数值溢出常驻 100℃ 漏洞 (Fixed Dashboard Market Temperature Permanently 100℃ Bug)**：
+    - [x] **修正板块强度涨幅数据索引偏离**：在 `instock_MonitorTK.py` 中的 `_aggregate_market_dashboard_stats` 方法内，将计算板块前 5 题材涨幅时错误的元组提取索引 `item[1]`（题材板块评分，通常在 100~150 上下）修正为 `item[2]`（题材板块平均实际涨幅）。这解决了板块题材热度计算时因底数溢出乘以系数后直接触碰 100.0℃ 上限封顶的缺陷，使策略信号面板的市场温度能真实降温，并与每日复盘温度的计算结果完美对齐。
+    - [x] **完成 Python 级语法编译验证**：通过在本地执行 `py_compile` 对修改后的 Tkinter 主界面逻辑执行了编译安全性检查，验证未引入任何语法及层级缩进异常。
+
 ## 2026-06-22 10:00
 - [x] **优化 55188 数据可视化工具持久化缓存与手动刷新机制 (Optimized 55188 Persistence-First Caching & Manual Refresh)**：
     - [x] **实现持久化数据降级保护 (Persistence-First Fallback)**：在 `scraper_55188.py` 的数据抓取与合并中引入了缓存保护逻辑。当同花顺人气接口 (THS Hotlist) 或题材抓取失败返回空 DataFrame 时，系统将自动从历史缓存文件 `cache_55188_snapshot.pkl` 中读取对应模块的字段进行无缝融合补充，防止了由于网络瞬时抖动、风控或代理异常造成整张表或核心字段被强行置空。

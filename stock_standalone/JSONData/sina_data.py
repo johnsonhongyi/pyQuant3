@@ -125,6 +125,14 @@ def get_stock_code_path() -> Optional[str]:
     log.info(f"使用 stock_codes.conf 配置: {cfg_file}")
     return cfg_file
 
+_GLOBAL_STOCK_CODE = None
+
+def get_global_stock_code():
+    global _GLOBAL_STOCK_CODE
+    if _GLOBAL_STOCK_CODE is None:
+        _GLOBAL_STOCK_CODE = StockCode()
+    return _GLOBAL_STOCK_CODE
+
 class StockCode:
     start_t: float
     STOCK_CODE_PATH: Optional[str] = "stock_codes.conf"
@@ -387,7 +395,7 @@ class Sina:
     @property
     def all(self) -> pd.DataFrame:
         """获取所有实时数据 (优化 HDF5 加载逻辑)"""
-        self.stockcode = StockCode()
+        self.stockcode = get_global_stock_code()
         self.stock_code_path = self.stockcode.stock_code_path
         self.market_type = "all"
         all_codes = self.stockcode.get_stock_codes()
@@ -900,7 +908,7 @@ class Sina:
 
             self.market_type = market
             self.table = 'all' # ⚡ [FIX] 统一从 all 表读取，减小 IO 复杂度，避免子市场表缺失导致误报日志
-            self.stockcode = StockCode()
+            self.stockcode = get_global_stock_code()
             self.stock_code_path = self.stockcode.stock_code_path
             all_codes = self.stockcode.get_stock_codes()
             self.load_stock_codes(all_codes)
