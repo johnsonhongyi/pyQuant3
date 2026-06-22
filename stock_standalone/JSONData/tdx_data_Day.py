@@ -5865,6 +5865,7 @@ def add_last_days_features(df, lastdays=10):
         df_new[f'per{da}d'] = df_new['perd'].shift(da-1)
         df_new[f'upper{da}'] = df_new['upper'].shift(da-1)
         df_new[f'ma5{da}d'] = df_new['ma5d'].shift(da-1)
+        df_new[f'ma10{da}d'] = df_new['ma10d'].shift(da-1)
         df_new[f'ma20{da}d'] = df_new['ma20d'].shift(da-1)
         df_new[f'ma60{da}d'] = df_new['ma60d'].shift(da-1)
         df_new[f'perc{da}d'] = df_new['perlastp'].shift(da-1)
@@ -6072,6 +6073,7 @@ def generate_lastN_features_dict(df, lastdays=5):
         'perd': 'per',
         'upper': 'upper',
         'ma5d': 'ma5',
+        'ma10d': 'ma10',
         'ma20d': 'ma20',
         'ma60d': 'ma60',
         'perlastp': 'perc',
@@ -6170,7 +6172,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         df = compute_cross_indicators(df, [('ma5d', 'ma10d', 'op')], [('upper', 'ma5d', 'topU', 'eneU')])
 
         df = compute_perd_df(df,lastdays=lastdays,resample=resample,normalized=normalized)
-
+        
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).round(1)
         df = df.fillna(0)
         df['vcra'] = len(df[df.vchange > vc_radio])
@@ -7155,7 +7157,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if newdays is None or newdays > 0:
                     h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
-    if len(top_all) > 0:
+    if len(top_all) > 5:
         top_all = cct.combine_dataFrame(
             top_all, tdxdata, col=None, compare=None, append=False)
         top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
@@ -7195,7 +7197,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 
-    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra','obv','gren']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra','obv','gren','signal_streng']    
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
@@ -7246,8 +7248,6 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
         if col in tdxdata.columns:
             tdxdata[col] = tdxdata[col].astype(int)
     # top_all = cct.reduce_memory_usage(top_all)       
-    if top_all.index.name != 'code':
-        top_all = top_all.rename_axis('code')
     if lastpTDX_DF is None:
         tdx_code = [co for co in codelist if co in tdxdata.index]
         tdxdata = tdxdata.loc[tdx_code]
