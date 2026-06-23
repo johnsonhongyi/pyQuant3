@@ -22049,6 +22049,14 @@ if __name__ == "__main__":
         if getattr(args, 'background', False):
             app.withdraw()
             logger.info("🚀 [INIT] App running in DAEMON (background) mode. Tkinter GUI is hidden.")
+        else:
+            # 仅在前台主 GUI 进程中启动 Web 联动 HTTP 服务，避免后台守护进程和其它子进程冲突
+            try:
+                import sys_utils
+                sys_utils.start_stock_name_server()
+                logger.info("🚀 [INIT] Direct HTTP Linkage Server started on port 26672")
+            except Exception as e:
+                logger.error(f"Failed to start Direct HTTP Linkage Server: {e}")
     
         # [🚀 增强] 初始化全局退出计数器，用于 KeyboardInterrupt 暴力退出控制
         _exit_ctrl_c_count = 0

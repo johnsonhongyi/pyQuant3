@@ -914,7 +914,16 @@ def get_cached_stock_names():
     except Exception:
         return b"{}"
 
+_server_started = False
+_server_lock = threading.Lock()
+
 def start_stock_name_server():
+    global _server_started
+    with _server_lock:
+        if _server_started:
+            return
+        _server_started = True
+
     from http.server import BaseHTTPRequestHandler, HTTPServer
     import json
     import os
@@ -983,9 +992,6 @@ def start_stock_name_server():
     t = threading.Thread(target=run_server, daemon=True, name="StockNameHTTP")
     t.start()
 
-import multiprocessing
-if multiprocessing.current_process().name == "MainProcess":
-    start_stock_name_server()
 
 
 
