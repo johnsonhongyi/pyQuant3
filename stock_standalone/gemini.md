@@ -1,3 +1,13 @@
+## 2026-06-23 17:50
+- [x] **实现网页直连 HTTP 系统联动与本地文件 I/O 内存缓存优化 (Implemented Direct HTTP Web Linkage with Local File Memory Cache Optimization)**：
+    - [x] **实现直连 HTTP 派发系统联动 (Implemented Direct HTTP Dispatch Linkage)**：在 `instock_MonitorTK.py` 中新增 `_on_http_link_code` 直连联动处理方法，避开对剪贴板 `_last_clip_code` 缓存状态的更新与检测，直接通过 `self.tk_dispatch_queue.put(lambda: self.open_visualizer(code))` 将联动任务排入主线程的执行队列中，彻底避免了 clipboard 重复检测和污染问题。
+    - [x] **加入直连联动频控与队列溢出防护 (Added Linkage Throttle & Queue Overflow Protection)**：在 `_on_http_link_code` 内部集成了 1 秒以内的同股票点击去重频控（Throttling），同时增加了队列大小限制（若 `qsize > 100` 则丢弃），极大地减轻了频繁点击对客户端主线程重绘及 IPC 联动的计算负担。
+    - [x] **支持关闭 K 线可视化时对 TDX 等软件的独立联动 (Independent TDX Linkage Support When K-Line Visualizer Closed)**：修复了当关闭 `vis_var`（即不显示自研 K 线窗口）但保持 TDX/同花顺/东方财富等三方软件联动开启时，网页端点击股票无法实现三方软件联动切换的 Bug。在 `_on_http_link_code` 内部独立且无条件执行了 `self.sender.send(stock_code)` 发送，并在联动时原子级更新 `self.select_code` 以触发剪贴板去重保护，确保双轨联动在任意配置组合下均能完美运作。
+    - [x] **引入 stock_name_cache 本地内存缓存机制 (Added Memory Cache for Stock Name Cache File)**：在 `sys_utils.py` 中实现了 `get_cached_stock_names()`，通过 `os.path.getmtime` 高效检测 `stock_name_cache.json` 磁盘文件的最后修改时间。若文件未被修改，则直接在内存中读取缓存的 binary 数据并返回，消除了每次油猴脚本加载时产生的重复磁盘 I/O 负担，极大节省了系统资源。
+    - [x] **在本地服务中提供通用 `/link` 路由接口 (Added `/link` Endpoint to Micro Server)**：在 `sys_utils.py` 内部引入 `register_link_callback` API，并为本地微型 HTTP 服务新增了对 `/link?code=xxxxxx` 请求的捕获逻辑。当收到来自网页 Hippos 联动请求时，若已在主 GUI 中注册了回调，则在后台线程中触发回调，支持跨域访问及异常捕获，实现了对外部个股联动指令 of 直连分发。
+    - [x] **油猴脚本升级支持“直连联动 + 复制退避”双保险 (Upgraded Tampermonkey Script with Dual Linkage Options)**：修改了 `网页联动伴侣.js` 与 `网页联动伴侣2.js` 的个股点击响应事件。当用户点击高亮个股时，脚本会优先向 `127.0.0.1:26672/link?code=xxxxxx` 发送异步 HTTP 请求，直接唤醒本地系统联动显示；若 HTTP 请求超时、失败或返回非 200/ok 响应（如监控客户端未启动时），则自动退避 fallback 到原先的 `GM_setClipboard` 写入剪贴板联动模式，极大地减少了不必要的剪贴板污染，提升了多端联动流畅性。
+
+
 ## 2026-06-23 17:45
 - [x] **限制本地 HTTP 服务仅在主进程启动并防范句柄泄漏 (Restricted Local HTTP Server to MainProcess & Prevented Socket Handle Leak)**：
     - [x] **限制主进程启动守护线程 (Restricted to MainProcess)**：在 `sys_utils.py` 末尾调用 `start_stock_name_server()` 时，增加了 `multiprocessing.current_process().name == "MainProcess"` 条件判断。有效阻断了当 `sys_utils` 被行情或策略多进程/子进程导入时，子进程高频、重复地启动后台 HTTP 服务线程的问题。

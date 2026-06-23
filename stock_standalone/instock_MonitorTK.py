@@ -1106,12 +1106,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
-        # 📋 启动后台剪贴板监听服务 (包含自动查重逻辑，避免重复发送当前已选中代码)
         self.clipboard_monitor = start_clipboard_listener(
             self.sender, 
             ignore_func=lambda code: code.strip() == str(getattr(self, 'select_code', '')).strip(),
             on_new_code=self._on_clipboard_code_visualizer
         )
+
+        # 🚀 注册本地微型 HTTP 服务联动接口
+        try:
+            import sys_utils
+            sys_utils.register_link_callback(self._on_http_link_code)
+        except Exception as e:
+            logger.error(f"Failed to register link callback: {e}")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
@@ -3701,12 +3707,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
-        # 🚀 [NEW] 取消全局重点关注订阅
+        # 🚀 [NEW] 取消全局重点关注订阅与联动回调
         try:
             from global_favorites import GlobalFavoriteManager
             GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
         except Exception as e:
             logger.debug(f"Favorites unsubscribe failed: {e}")
+
+        try:
+            import sys_utils
+            sys_utils.register_link_callback(None)
+        except Exception:
+            pass
 
         # ⭐ [GIL_MONITOR] 第一步：关闭呼吸器 Watchdog，避免销毁期误报 FROZEN
         try:
@@ -8016,6 +8028,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error saving UI states: {e}")
 
+
+    def _on_http_link_code(self, stock_code):
+        try:
+            if not stock_code:
+                return
+            
+            # 🚀 性能频控保护：1秒内同一只股票直接去重，减轻主线程负担
+            now = time.time()
+            if getattr(self, "_last_http_link_code", None) == stock_code:
+                if now - getattr(self, "_last_http_link_time", 0) < 1.0:
+                    return
+            self._last_http_link_code = stock_code
+            self._last_http_link_time = now
+
+            # 更新 select_code 以便 clipboard 监听的 ignore_func 能识别并忽略此股票代码，防止回圈触发
+            self.select_code = stock_code
+
+            # 1. 触发 TDX / 同花顺 / 东方财富 联动发送 (后台线程直接执行，保持与剪贴板监听一致)
+            # 2. 如果开启了 vis_var 联动，则放入 Tk 队列触发 UI 联动
+            if hasattr(self, 'vis_var') and self.vis_var.get():
+                if self.tk_dispatch_queue.qsize() > 100:
+                    return
+                self.tk_dispatch_queue.put(
+                    lambda c=stock_code: self.open_visualizer(c)
+                )
+            elif hasattr(self, 'sender') and self.sender:
+                try:
+                    self.sender.send(stock_code)
+                except Exception as ex:
+                    logger.error(f"HTTP link sender.send error: {ex}")
+
+            
+        except Exception as e:
+            logger.error(f"process http link task error: {e}")
 
     # def _on_clipboard_code_visualizer(self, stock_code):
         
