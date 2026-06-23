@@ -5254,6 +5254,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 🚀 [NEW] 支持回车键确认
         dialog.bind("<Return>", lambda e: on_run())
+        # 补全关闭协议，防止 grab_set 锁死主窗口交互
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def _run_backtest_replay_process(self, replay_date, start_time, verbose=True, log_level="ERROR"):
         """独立多进程启动 test_bidding_replay.py，兼容 EXE 打包环境 (高性能透传模式)"""
@@ -5704,6 +5707,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _start_process(self):
+        # 🛡️ [RECOVERY] 启动前强力清理旧子进程，防范 Windows 句柄/僵尸进程泄露
+        if hasattr(self, 'proc') and self.proc is not None:
+            try:
+                if self.proc.is_alive():
+                    self.proc.terminate()
+                    self.proc.join(timeout=1.0)
+                else:
+                    self.proc.join(timeout=0.2) # 回收僵尸进程资源
+            except Exception as e_proc_clean:
+                logger.warning(f"⚠️ 清理旧数据进程失败: {e_proc_clean}")
+            self.proc = None
+
         self.refresh_flag = mp.Value('b', True)
         self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
         self.detect_calc_support = mp.Value('b', detect_calc_support)  # 'i' 表示整数
@@ -5723,13 +5738,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 🚀 [NEW] 启动行情总线监听线程 (P0-3)
         # 职责：将 Queue 中的数据包瞬间转移到 MarketStateBus，释放 Queue 积压
-        self._bus_worker_thread = threading.Thread(
-            target=self._market_bus_worker_loop,
-            name="MarketBusWorker",
-            daemon=True
-        )
-        self._bus_worker_thread.start()
-        # logger.info("✅ [PERF] MarketBusWorker thread started.")
+        # 🛡️ [RECOVERY] 复用已有常驻监听线程，杜绝高频重启下的线程泄露与 CPU 占满
+        if not hasattr(self, '_bus_worker_thread') or self._bus_worker_thread is None or not self._bus_worker_thread.is_alive():
+            self._bus_worker_thread = threading.Thread(
+                target=self._market_bus_worker_loop,
+                name="MarketBusWorker",
+                daemon=True
+            )
+            self._bus_worker_thread.start()
+            logger.info("✅ [PERF] MarketBusWorker thread started.")
+        else:
+            logger.info("📡 MarketBusWorker thread is already running, reuse it.")
 
 
     def stop_refresh(self):
@@ -6575,8 +6594,89 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(4000, self._bg_premarket_diagnose_heartbeat)
         self._schedule_after(5000, self._bg_kernel_heartbeat)
         self._schedule_after(8000, self._check_ext_data_update)
+        self._schedule_after(10000, self.controlled_gc_loop)  # 🚀 [NEW] 定期内存/句柄自愈清理
         self._schedule_after(28000, self.KLineMonitor_init)
         self._schedule_after(58000, self.schedule_15_30_job)
+
+    def controlled_gc_loop(self):
+        """
+        [ULTIMATE PERF] 全局自愈与内存/句柄清理中枢
+        每 60 秒定期执行：
+        1. 清除所有已关闭/销毁的 Tkinter 子窗口在追踪字典中的残留引用，防止引用泄漏。
+        2. 显式触发 gc.collect() 释放 cyclic 垃圾。
+        """
+        if getattr(self, "_is_closing", False):
+            return
+
+        try:
+            # 1. 清理 self.monitor_windows
+            if hasattr(self, 'monitor_windows') and self.monitor_windows:
+                dead_keys = []
+                for k, v in list(self.monitor_windows.items()):
+                    w = v.get("toplevel")
+                    if not w or not w.winfo_exists():
+                        dead_keys.append(k)
+                for k in dead_keys:
+                    try:
+                        del self.monitor_windows[k]
+                    except: pass
+                if dead_keys:
+                    logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead monitor_windows references.")
+
+            # 2. 清理 self._pg_top10_window_simple
+            if hasattr(self, '_pg_top10_window_simple') and self._pg_top10_window_simple:
+                dead_keys = []
+                for k, v in list(self._pg_top10_window_simple.items()):
+                    w = v.get("win")
+                    if not w or not w.winfo_exists():
+                        dead_keys.append(k)
+                for k in dead_keys:
+                    try:
+                        del self._pg_top10_window_simple[k]
+                    except: pass
+                if dead_keys:
+                    logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead _pg_top10_window_simple references.")
+
+            # 3. 清理 self._pg_windows
+            if hasattr(self, '_pg_windows') and self._pg_windows:
+                dead_keys = []
+                for k, v in list(self._pg_windows.items()):
+                    w = v.get("win") if isinstance(v, dict) else None
+                    if not w:
+                        w = v.get("toplevel") if isinstance(v, dict) else None
+                    if not w or not w.winfo_exists():
+                        dead_keys.append(k)
+                for k in dead_keys:
+                    try:
+                        del self._pg_windows[k]
+                    except: pass
+                if dead_keys:
+                    logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead _pg_windows references.")
+
+            # 4. 清理 self.code_to_alert_win
+            if hasattr(self, 'code_to_alert_win') and self.code_to_alert_win:
+                dead_keys = []
+                for k, w in list(self.code_to_alert_win.items()):
+                    if not w or not w.winfo_exists():
+                        dead_keys.append(k)
+                for k in dead_keys:
+                    try:
+                        del self.code_to_alert_win[k]
+                    except: pass
+                if dead_keys:
+                    logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead code_to_alert_win references.")
+
+            # 5. 强制执行垃圾回收
+            cleaned = gc.collect()
+            logger.debug(f"🛡️ [GC] Periodic memory optimization completed. gc.collect() cleared {cleaned} objects.")
+        except Exception as e:
+            logger.warning(f"Error in controlled_gc_loop: {e}")
+
+        # 每 1 小时轮巡一次 (降低至 3,600,000ms，最大化规避交易时段 GC 引起的主线程微卡顿)
+        try:
+            self.after(3600000, self.controlled_gc_loop)
+        except:
+            pass
 
     def _aggregate_market_dashboard_stats(self, has_update: bool):
         """[EXTRA] 计算全盘统计概览 (上涨/下跌/指数/温度)，通过主线程分步执行或线程池"""
@@ -7691,6 +7791,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             toast_message(self, "快捷栏设置已保存并应用")
             
         ttk.Button(btn_frame, text="确定", command=save_and_close).pack(side="right", padx=15, pady=10)
+        # 补全 WM_DELETE_WINDOW 与 ESC 绑定，点 × 关闭时同样执行保存
+        settings_win.protocol("WM_DELETE_WINDOW", save_and_close)
+        settings_win.bind("<Escape>", lambda e: save_and_close())
 
     def open_sector_bidding_panel(self):
         """手动打开竞价/尾盘板块联动监控面板 (异步构建版，防 Tk 主线程冻结)"""
@@ -11525,10 +11628,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.bind("<Up>", lambda e: win.after(10, on_select))
         tree.bind("<Down>", lambda e: win.after(10, on_select))
         
-        def on_win_close():
+        def on_win_close(event=None):
             if hasattr(self, 'save_window_position'): self.save_window_position(win, window_id)
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_win_close)
+        win.bind("<Escape>", on_win_close)
         
         refresh()
 
@@ -16604,6 +16708,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._concept_win = None
 
         win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+        win.bind("<Escape>", lambda e: on_close_detail_window())
         if hasattr(self, '_register_hwnd_to_mru') and win.winfo_exists():
             self._register_hwnd_to_mru(win.winfo_id())
         # --- 初始内容 ---
@@ -17319,6 +17424,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, '_concept_top10_win') and self._concept_top10_win == win:
                 self._concept_top10_win = None
 
+            # 🛡️ [RECOVERY] 清理 monitor_windows 的强引用，彻底解决 GDI/内存泄漏
+            if hasattr(self, 'monitor_windows') and unique_code in self.monitor_windows:
+                try:
+                    del self.monitor_windows[unique_code]
+                except Exception:
+                    pass
+
         win.on_close = on_close
         win.protocol("WM_DELETE_WINDOW", on_close)
         win.bind("<Escape>", lambda e: on_close())  # ESC关闭窗口
@@ -17399,12 +17511,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win.deiconify()
                 win.lift()
                 win._concept_name = concept_name  # 更新概念名
-                if hasattr(win, "_chk_auto") and hasattr(win, "_spin_interval"):
-                    # 复用已有控件，恢复值
-                    chk_auto = win._chk_auto
-                    spin_interval = win._spin_interval
-                # 重新绑定复制按钮
-                # self._bind_copy_expr(win)
+                # 🛡️ [RECOVERY] 复用窗口时，同步更新 monitor_windows 追踪，防止旧键残留或新键缺失
+                old_key = getattr(win, "_unique_code", None)
+                if old_key and hasattr(self, 'monitor_windows') and old_key in self.monitor_windows:
+                    try:
+                        del self.monitor_windows[old_key]
+                    except Exception:
+                        pass
+                
+                new_key = f"{concept_name or ''}_{code or ''}"
+                win._unique_code = new_key
+                if hasattr(self, 'monitor_windows'):
+                    self.monitor_windows[new_key] = {
+                        'toplevel': win,
+                        'monitor_tree': getattr(win, "_tree_top10", None),
+                        'stock_info': code
+                    }
 
                 self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
                 return
@@ -17486,6 +17608,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # unique_code = f"{code or ''}_{top_n or ''}"
         unique_code = f"{concept_name or ''}_{code or ''}"
+        win._unique_code = unique_code  # 👈 保存唯一键名至窗口对象上以支持动态删除
         self.monitor_windows[unique_code] = {
                 'toplevel': win,
                 'monitor_tree': tree,
@@ -17629,6 +17752,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             unbind_mousewheel()
             win.destroy()
             self._concept_top10_win = None
+
+            # 🛡️ [RECOVERY] 清理 monitor_windows 的强引用，使用 win._unique_code 动态获取，彻底解决 GDI/内存泄漏
+            current_key = getattr(win, "_unique_code", None)
+            if current_key and hasattr(self, 'monitor_windows') and current_key in self.monitor_windows:
+                try:
+                    del self.monitor_windows[current_key]
+                except Exception:
+                    pass
+            # 同步清理 _pg_top10_window_simple 中的强引用，防止 GDI 泄漏
+            if current_key and hasattr(self, '_pg_top10_window_simple') and current_key in self._pg_top10_window_simple:
+                try:
+                    del self._pg_top10_window_simple[current_key]
+                except Exception:
+                    pass
         def window_focus_bring_monitor_status(win):
             if bring_monitor_status:
                 self.on_monitor_window_focus(win)
@@ -19135,6 +19272,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"股票详情 - {code}")
         win.geometry("400x300")
+        # 关闭协议与 ESC 绑定（防止 GDI 句柄泄漏）
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.bind("<Escape>", lambda e: win.destroy())
         tk.Label(win, text=f"正在加载个股 {code} ...", font=self.default_font_bold).pack(pady=10)
 
         # 如果有 df_filtered 数据，可以显示详细行情
@@ -20810,6 +20950,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 log_win.destroy()
 
             log_win.protocol("WM_DELETE_WINDOW", on_close)
+            log_win.bind("<Escape>", lambda e: on_close())
             
             def update_status():
                 if not log_win.winfo_exists():
