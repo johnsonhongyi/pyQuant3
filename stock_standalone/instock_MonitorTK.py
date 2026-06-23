@@ -14063,6 +14063,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """兼容接口：获取股票异动监控窗口句柄 (已接入 500ms 缓存保护)"""
         return self._scan_windows_cached().get("stock_monitor", 0)
 
+    def _get_toplevel_hwnd(self, hwnd):
+        """获取 Win32 顶层窗口句柄，消除 Tkinter winfo_id() (内部 Frame 句柄) 与 GetForegroundWindow() (顶层 Wrapper 句柄) 的不一致性"""
+        if not hwnd:
+            return 0
+        try:
+            import ctypes
+            # GA_ROOT = 2 (获取根祖先窗口，即顶层 Wrapper HWND)
+            root_hwnd = ctypes.windll.user32.GetAncestor(int(hwnd), 2)
+            if root_hwnd:
+                return root_hwnd
+        except Exception:
+            pass
+        return int(hwnd)
+
     def _register_hwnd_to_mru(self, hwnd):
         """将有效的 HWND 注册到 MRU 窗口切换列表中，如果已存在则移动到最前"""
         if not hwnd:
@@ -14073,6 +14087,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             hwnd = int(hwnd)
         except (ValueError, TypeError):
             return
+        
+        # 标准化为 Win32 顶层 Wrapper HWND
+        hwnd = self._get_toplevel_hwnd(hwnd)
         
         if hwnd in self._window_mru_list:
             self._window_mru_list.remove(hwnd)
@@ -14091,7 +14108,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 1. 主控制台 (Tk)
         if self.winfo_exists():
             try:
-                h = self.winfo_id()
+                h = self._get_toplevel_hwnd(self.winfo_id())
                 current_visible_hwnds.append(h)
                 name_map[h] = "💻 主控制台 (MainConsole)"
             except Exception as e:
@@ -14101,7 +14118,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, '_stock_selection_win') and self._stock_selection_win is not None:
             try:
                 if self._stock_selection_win.winfo_exists():
-                    h = self._stock_selection_win.winfo_id()
+                    h = self._get_toplevel_hwnd(self._stock_selection_win.winfo_id())
                     current_visible_hwnds.append(h)
                     name_map[h] = "📊 策略选股与人工复核 (StockSelection)"
             except Exception:
@@ -14214,7 +14231,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, 'kline_monitor') and self.kline_monitor is not None:
             try:
                 if self.kline_monitor.winfo_exists():
-                    h = self.kline_monitor.winfo_id()
+                    h = self._get_toplevel_hwnd(self.kline_monitor.winfo_id())
                     current_visible_hwnds.append(h)
                     name_map[h] = "📈 传统K线监控 (KLineMonitor)"
             except Exception:
@@ -14224,7 +14241,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, '_concept_win') and self._concept_win is not None:
             try:
                 if self._concept_win.winfo_exists():
-                    h = self._concept_win.winfo_id()
+                    h = self._get_toplevel_hwnd(self._concept_win.winfo_id())
                     current_visible_hwnds.append(h)
                     name_map[h] = "💡 概念异动详情 (ConceptDetail)"
             except Exception:
@@ -14234,7 +14251,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win is not None:
             try:
                 if self._realtime_monitor_win.winfo_exists():
-                    h = self._realtime_monitor_win.winfo_id()
+                    h = self._get_toplevel_hwnd(self._realtime_monitor_win.winfo_id())
                     current_visible_hwnds.append(h)
                     name_map[h] = "🎯 强庄二次起爆监控池 (RealtimeMonitor)"
             except Exception:
@@ -14246,7 +14263,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     w = win_info.get("toplevel")
                     if w and w.winfo_exists():
-                        h = w.winfo_id()
+                        h = self._get_toplevel_hwnd(w.winfo_id())
                         if h not in current_visible_hwnds:
                             current_visible_hwnds.append(h)
                             name_map[h] = f"🔍 概念前10监控 ({win_id}) [MonitorWindow_{win_id}]"
@@ -14327,7 +14344,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         
         # 🛡️ 双保险：针对 Tk 窗口，在原生句柄穿透前先触发 Tk 原生的置顶唤醒逻辑
-        if self.winfo_exists() and hwnd == self.winfo_id():
+        if self.winfo_exists() and hwnd == self._get_toplevel_hwnd(self.winfo_id()):
             try:
                 self.deiconify()
                 self.lift()
@@ -14335,7 +14352,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
         elif hasattr(self, '_stock_selection_win') and self._stock_selection_win and self._stock_selection_win.winfo_exists():
-            if hwnd == self._stock_selection_win.winfo_id():
+            if hwnd == self._get_toplevel_hwnd(self._stock_selection_win.winfo_id()):
                 try:
                     self._stock_selection_win.deiconify()
                     self._stock_selection_win.lift()
@@ -14343,7 +14360,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception:
                     pass
         elif hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win and self._realtime_monitor_win.winfo_exists():
-            if hwnd == self._realtime_monitor_win.winfo_id():
+            if hwnd == self._get_toplevel_hwnd(self._realtime_monitor_win.winfo_id()):
                 try:
                     self._realtime_monitor_win.deiconify()
                     self._realtime_monitor_win.lift()
@@ -14714,6 +14731,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.list_widget.blockSignals(True)
                     core_idx = self.core_hwnds.index(target_hwnd)
                     self.list_widget.setCurrentRow(core_idx)
+                    item = self.list_widget.item(core_idx)
+                    if item:
+                        self.list_widget.scrollToItem(item)
                     self.list_widget.blockSignals(False)
                     
                     for btn in self.tile_buttons.values():

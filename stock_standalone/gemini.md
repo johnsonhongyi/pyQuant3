@@ -1,6 +1,12 @@
+## 2026-06-23 20:00
+- [x] **修复 Alt+R 轮转切换时主控制台无法定位、无法轮询与丢失高亮缺陷 (Aligned Tkinter Window HWNDs and Enabled Auto-Scroll in Rotator to Resolve Console Selection & Visibility Bug)**：
+    - [x] **解决 Tkinter 内外部 HWND 判定不一致 (Aligned Internal & Top-Level HWNDs)**：由于 Tkinter 的 `winfo_id()` 返回的是内部组件 Frame 的 HWND，而 Windows 物理前台 `GetForegroundWindow()` 获取的永远是外层包裹它的顶层容器窗口 HWND，导致二者因不匹配而无法触发 MRU 冒泡。现引入 `_get_toplevel_hwnd()`，通过 `GetAncestor(hwnd, 2)` 将所有 Tkinter 窗口 HWND 自动归一化为顶层 Wrapper HWND，从而实现了与 `GetForegroundWindow()` 的完美对齐，主控制台能够被正确感知前台聚焦并更新 MRU 顺序。
+    - [x] **解决 QListWidget 高亮项超出视口不可见缺陷 (Enabled Auto-Scroll for Highlighted Items)**：在 `WindowRotatorDialog.apply_highlight_to_ui` 中引入了 `self.list_widget.scrollToItem(item)` 逻辑。当窗口数量较多且产生滚动条时，切换高亮能够自动让高亮焦点项（如位于最底部的主控制台）自动滚动展现在可视区域正中，彻底解决了“上下翻页找不到主控制台”的问题。
+    - [x] **适配双保险置顶唤醒逻辑 (Updated Focus-Restore Logic)**：在 `_force_focus_hwnd` 置顶穿透的双保险策略中，将 Tk 窗口对比同样重构为基于顶层 Wrapper HWND 的比对，确保了主控制台、策略选股、强庄监控池在切换时能 100% 被拉起置顶并聚焦。
+
 ## 2026-06-23 19:50
 - [x] **修复并解耦实时数据服务监控窗口遮挡主视图缺陷 (Decoupled Realtime Monitor Window from Root to Prevent Stacking/Z-Order Blocking)**：
-    - [x] **解耦 Toplevel 窗口 Master 拥有者 (Decoupled Toplevel Master)**：将 `open_realtime_monitor` 首次创建 `Toplevel` 的构造方式由 `tk.Toplevel(self)` 重构为 `tk.Toplevel()`（即不传入主窗口 `self` 作为主控参数）。该改动将监控窗口实例化为完全独立的 OS 顶层窗口，防止 Windows 操作系统默认强制将 Owned Window 置于 Owner Window 前方的 Z-order 锁定限制，确保主窗口在被点击或聚焦时能够顺利被提到前台展示，完美消除了监控窗口永久遮挡主窗口的交互问题。
+    - [x] **解耦 Toplevel 窗口 Master 拥有者 (Decoupled Toplevel Master)**：将 `open_realtime_monitor` 首次创建 `Toplevel` 的构造方式由 `tk.Toplevel(self)` 重构为 `tk.Toplevel()`（即不传入主窗口 `self` 作为主控参数）。该改动将监控窗口实例化为完全独立的 OS 顶层窗口，防止 Windows 操作系统默认强制将 Owned Window 置于 Owner Window 前方的 Z-order 锁定限制，确保主窗口在被点击或聚焦时能够顺利被提到前台展示，完美消除了监控窗口永久遮挡主窗口 of 交互问题。
 
 ## 2026-06-23 19:40
 - [x] **修复实时数据服务监控窗口唤起与 V-Reversal 监控池联动缺陷 (Fixed Realtime Monitor Window Focus & V-Reversal Linkage Fallback)**：
