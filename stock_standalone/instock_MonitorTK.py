@@ -6602,11 +6602,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         [ULTIMATE PERF] 全局自愈与内存/句柄清理中枢
         每 60 秒定期执行：
-        1. 清除所有已关闭/销毁的 Tkinter 子窗口在追踪字典中的残留引用，防止引用泄漏。
+        1. 清除所有已关闭/销毁的 Tkinter/PyQt 子窗口在追踪字典中的残留引用，防止引用泄漏。
         2. 显式触发 gc.collect() 释放 cyclic 垃圾。
         """
         if getattr(self, "_is_closing", False):
             return
+
+        def _is_win_alive(w):
+            if not w:
+                return False
+            if hasattr(w, 'winfo_exists'):
+                try:
+                    return w.winfo_exists()
+                except Exception:
+                    return False
+            # 兼容 PyQt 窗口
+            return is_qt_win_alive(w)
 
         try:
             # 1. 清理 self.monitor_windows
@@ -6614,7 +6625,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 dead_keys = []
                 for k, v in list(self.monitor_windows.items()):
                     w = v.get("toplevel")
-                    if not w or not w.winfo_exists():
+                    if not _is_win_alive(w):
                         dead_keys.append(k)
                 for k in dead_keys:
                     try:
@@ -6628,7 +6639,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 dead_keys = []
                 for k, v in list(self._pg_top10_window_simple.items()):
                     w = v.get("win")
-                    if not w or not w.winfo_exists():
+                    if not _is_win_alive(w):
                         dead_keys.append(k)
                 for k in dead_keys:
                     try:
@@ -6644,7 +6655,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     w = v.get("win") if isinstance(v, dict) else None
                     if not w:
                         w = v.get("toplevel") if isinstance(v, dict) else None
-                    if not w or not w.winfo_exists():
+                    if not _is_win_alive(w):
                         dead_keys.append(k)
                 for k in dead_keys:
                     try:
@@ -6657,7 +6668,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if hasattr(self, 'code_to_alert_win') and self.code_to_alert_win:
                 dead_keys = []
                 for k, w in list(self.code_to_alert_win.items()):
-                    if not w or not w.winfo_exists():
+                    if not _is_win_alive(w):
                         dead_keys.append(k)
                 for k in dead_keys:
                     try:

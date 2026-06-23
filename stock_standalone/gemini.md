@@ -1,3 +1,8 @@
+## 2026-06-23 21:15
+- [x] **修复 controlled_gc_loop 中 QWidget 缺少 winfo_exists 导致的 AttributeError 崩溃 (Fixed AttributeError: QWidget has no winfo_exists in controlled_gc_loop)**：
+    - [x] **实现跨框架窗口存活自适应检测 (_is_win_alive Helper)**：在 `controlled_gc_loop` 内部定义了 `_is_win_alive` 辅助函数。该函数优先通过 `hasattr(w, 'winfo_exists')` 判定是否为 Tkinter 窗口并安全调用其原生检测；对于不具备此属性的 PyQt6 QWidget 窗口，自动路由退避至 `is_qt_win_alive` 状态检测，彻底杜绝了后台 GC 轮巡扫描自愈字典时因类型混用抛出 `AttributeError` 崩溃。
+    - [x] **通过 Python 语法编译验证 (Passed Compiler Check)**：运行 `py_compile` 对修改后的主界面模块进行了无错编译检查。
+
 ## 2026-06-23 21:00
 - [x] **全面审查并修复系统所有 Toplevel 窗口的内存泄漏与关闭协议缺陷 (Full Window Lifecycle Audit & Memory Leak Fixes)**：
     - [x] **根治 `open_stock_detail` GDI 句柄累积泄漏 (Fixed GDI Leak in open_stock_detail)**：`open_stock_detail` 方法每次被调用都会创建新的 `Toplevel` 窗口但完全缺失 `WM_DELETE_WINDOW` 协议与 ESC 绑定。用户无法正常关闭，多次调用会累积 GDI 句柄。已补全 `win.protocol("WM_DELETE_WINDOW", win.destroy)` 和 `win.bind("<Escape>", lambda e: win.destroy())`。
