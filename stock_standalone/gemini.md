@@ -1,3 +1,21 @@
+## 2026-06-23 21:00
+- [x] **全面审查并修复系统所有 Toplevel 窗口的内存泄漏与关闭协议缺陷 (Full Window Lifecycle Audit & Memory Leak Fixes)**：
+    - [x] **根治 `open_stock_detail` GDI 句柄累积泄漏 (Fixed GDI Leak in open_stock_detail)**：`open_stock_detail` 方法每次被调用都会创建新的 `Toplevel` 窗口但完全缺失 `WM_DELETE_WINDOW` 协议与 ESC 绑定。用户无法正常关闭，多次调用会累积 GDI 句柄。已补全 `win.protocol("WM_DELETE_WINDOW", win.destroy)` 和 `win.bind("<Escape>", lambda e: win.destroy())`。
+    - [x] **补全 `open_top_bar_settings` 关闭协议 (Added WM_DELETE_WINDOW & ESC to Settings Window)**：顶部快捷栏设置窗口仅有"确定"按钮调用 `save_and_close`，用户直接点击 × 关闭时不会执行保存逻辑。已在确定按钮后增加 `settings_win.protocol("WM_DELETE_WINDOW", save_and_close)` 与 `settings_win.bind("<Escape>", ...)` 确保任何关闭方式都会保存并应用配置。
+    - [x] **修复 `open_backtest_replay_dialog` 模态锁 (Fixed grab_set Deadlock on Close)**：回测回放对话框调用了 `dialog.grab_set()` 但未设置 `WM_DELETE_WINDOW` 协议，用户点击 × 时因模态锁残留会锁死主窗口交互。已补全关闭协议与 ESC 绑定，确保任何路径下 `grab_set` 都能被正确释放。
+    - [x] **补全 `open_blacklist_manager` ESC 绑定 (Added ESC to Blacklist Manager)**：黑名单管理器有 `WM_DELETE_WINDOW` 协议但缺少 `<Escape>` 绑定，键盘操作不连贯。已将 `on_win_close` 签名改为 `event=None` 并绑定至 `<Escape>`。
+    - [x] **补全概念详情窗口 `_concept_win` ESC 绑定 (Added ESC to Concept Detail Window)**：概念异动详情窗口有 `WM_DELETE_WINDOW` 协议但缺少 `<Escape>` 绑定。已在 `win.protocol` 后追加 ESC 绑定。
+    - [x] **补全 `open_realtime_monitor` ESC 绑定 (Added ESC to Realtime Monitor Window)**：实时数据服务监控窗口已有关闭协议但缺少键盘快捷关闭支持。已追加 `log_win.bind("<Escape>", lambda e: on_close())`。
+    - [x] **修复 `_pg_top10_window_simple` 字典强引用泄漏 (Fixed Strong Reference Leak in pg_top10 Dict)**：`show_concept_top10_window` 的 `_on_close` 回调已清理 `monitor_windows` 字典，但同名窗口在 `_pg_top10_window_simple` 字典中的强引用从未被释放，导致 Toplevel 实例无法被 GC 回收。已在 `_on_close` 中同步清理 `_pg_top10_window_simple[current_key]`，彻底切断引用链。
+    - [x] **通过 Python 语法编译验证 (Passed Compiler Check)**：运行 `py_compile` 对主界面模块进行了无错编译检查，7 处修改全部通过验证，无任何语法或缩进异常。
+
+## 2026-06-23 20:30
+- [x] **修复 show_concept_top10_window 关闭时内存/GDI句柄泄漏缺陷 (Fixed Memory & GDI Leak in Concept Top 10 Window Close)**：
+    - [x] **彻底清理 monitor_windows 中的强引用 (Cleared monitor_windows Strong References)**：在 `show_concept_top10_window` 内部的 `_on_close` 事件处理函数中，新增了物理清理逻辑。当窗口被销毁时，从全局 `self.monitor_windows` 字典中主动删除当前窗口对应的 `unique_code` 强引用键值对，彻底切断了 Tkinter Toplevel 窗口及 Treeview 实例的引用链，解决了因长期运行产生 GDI 句柄与内存持续膨胀的泄漏缺陷。
+    - [x] **修复窗口复用路径下的键名残留与泄漏隐患 (Resolved Key Desync in Reuse Path)**：针对 `show_concept_top10_window` 的窗口复用机制（即不销毁旧窗口，直接更新并重置内容），由于 `_on_close` 闭包只捕获了窗口首次创建时的 `unique_code`，导致后续复用为其他概念板块时，关闭时删除了旧的键名，而使后续复用的键名永久残留在 `monitor_windows` 中。现将 `unique_code` 属性化绑定至窗口实例对象 `win._unique_code`，在复用路径中动态移除旧键并注册新键；在 `_on_close` 阶段动态读取并清理，彻底杜绝了窗口复用场景下的任何引用泄漏。
+    - [x] **调整全局 GC 轮巡时间至一小时 (Adjusted GC Polling Loop to 1 Hour)**：将 `controlled_gc_loop` 的轮巡延迟由 10 分钟进一步拉长到 1 小时（3,600,000ms），在保证引用归零主动销毁的高效运行前提下，最大化规避交易时间段由强制全量垃圾回收造成的主线程微卡顿，提升系统的高频响应能力。
+
+
 ## 2026-06-23 20:00
 - [x] **修复 Alt+R 轮转切换时主控制台无法定位、无法轮询与丢失高亮缺陷 (Aligned Tkinter Window HWNDs and Enabled Auto-Scroll in Rotator to Resolve Console Selection & Visibility Bug)**：
     - [x] **解决 Tkinter 内外部 HWND 判定不一致 (Aligned Internal & Top-Level HWNDs)**：由于 Tkinter 的 `winfo_id()` 返回的是内部组件 Frame 的 HWND，而 Windows 物理前台 `GetForegroundWindow()` 获取的永远是外层包裹它的顶层容器窗口 HWND，导致二者因不匹配而无法触发 MRU 冒泡。现引入 `_get_toplevel_hwnd()`，通过 `GetAncestor(hwnd, 2)` 将所有 Tkinter 窗口 HWND 自动归一化为顶层 Wrapper HWND，从而实现了与 `GetForegroundWindow()` 的完美对齐，主控制台能够被正确感知前台聚焦并更新 MRU 顺序。
