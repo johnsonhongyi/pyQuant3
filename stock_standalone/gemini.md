@@ -1,3 +1,9 @@
+## 2026-06-23 18:30
+- [x] **彻底根治打包后本地 HTTP 服务多监听占用与句柄继承泄露缺陷 (Resolved Duplicate Listeners & Socket Inheritance Leak)**：
+    - [x] **限制 HTTP 联动服务仅在主进程启动 (Restricted to MainProcess)**：在 `sys_utils.py` 中增加了主进程守护线程校验；并在 `instock_MonitorTK.py` 主入口 `StockMonitorApp` 初始化时，仅对前台非后台守护模式（`background == False`）的主 GUI 实例显式启动 `start_stock_name_server`，彻底杜绝了后台守护进程或子进程的端口竞争与多次监听。
+    - [x] **设置 Socket 句柄不可继承 (Prevent Socket Inheritance)**：在 Web 服务器端口绑定成功后，显式执行 `server.socket.set_inheritable(False)`，防止主进程创建监听 socket 后由于 Windows 的句柄继承机制，将监听句柄传递给随后 spawn 的多进程，根治了 Windows 下 `netstat` 报出多个子进程 PID 占用且同时 LISTENING `26672` 端口的问题。
+    - [x] **实现 stock_name_cache 本地内存缓存机制 (Stock Name Cache Memory Optimization)**：重构了 `get_cached_stock_names()` 接口，利用 `os.path.getmtime` 动态比对磁盘文件的最后修改时间。在文件未被修改时直接复用内存中已反序列化的 binary 数据，省去了高频加载时的大量重复文件 I/O 开销，显著节省了 CPU 与磁盘资源。
+
 ## 2026-06-23 17:50
 - [x] **实现网页直连 HTTP 系统联动与本地文件 I/O 内存缓存优化 (Implemented Direct HTTP Web Linkage with Local File Memory Cache Optimization)**：
     - [x] **实现直连 HTTP 派发系统联动 (Implemented Direct HTTP Dispatch Linkage)**：在 `instock_MonitorTK.py` 中新增 `_on_http_link_code` 直连联动处理方法，避开对剪贴板 `_last_clip_code` 缓存状态的更新与检测，直接通过 `self.tk_dispatch_queue.put(lambda: self.open_visualizer(code))` 将联动任务排入主线程的执行队列中，彻底避免了 clipboard 重复检测和污染问题。
