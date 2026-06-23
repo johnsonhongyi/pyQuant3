@@ -882,4 +882,65 @@ def ensure_backend_tk_running():
             logger.error(f"[ATS] Failed to auto-start backend: {e}")
 
 
+# ----------------------------------------------------
+# 本地微型 HTTP 服务，专门为油猴油猴网页联动脚本提供股票名字和代码映射
+# ----------------------------------------------------
+def start_stock_name_server():
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json
+    import os
+    
+    class StockNameHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/stock_names':
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+                self.end_headers()
+                
+                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+                try:
+                    if os.path.exists(path):
+                        with open(path, 'r', encoding='utf-8') as f:
+                            self.wfile.write(f.read().encode('utf-8'))
+                    else:
+                        self.wfile.write(b"{}")
+                except Exception as e:
+                    self.wfile.write(b"{}")
+            else:
+                self.send_error(404)
+                
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+            self.end_headers()
+                
+        def log_message(self, format, *args):
+            pass
+
+    def run_server():
+        try:
+            server = HTTPServer(('127.0.0.1', 26672), StockNameHandler)
+            try:
+                server.socket.set_inheritable(False)
+            except Exception:
+                pass
+            server.serve_forever()
+        except Exception:
+            pass
+            
+    import threading
+    t = threading.Thread(target=run_server, daemon=True, name="StockNameHTTP")
+    t.start()
+
+import multiprocessing
+if multiprocessing.current_process().name == "MainProcess":
+    start_stock_name_server()
+
+
+
 

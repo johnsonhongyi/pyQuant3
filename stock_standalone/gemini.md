@@ -1,3 +1,27 @@
+## 2026-06-23 17:45
+- [x] **限制本地 HTTP 服务仅在主进程启动并防范句柄泄漏 (Restricted Local HTTP Server to MainProcess & Prevented Socket Handle Leak)**：
+    - [x] **限制主进程启动守护线程 (Restricted to MainProcess)**：在 `sys_utils.py` 末尾调用 `start_stock_name_server()` 时，增加了 `multiprocessing.current_process().name == "MainProcess"` 条件判断。有效阻断了当 `sys_utils` 被行情或策略多进程/子进程导入时，子进程高频、重复地启动后台 HTTP 服务线程的问题。
+    - [x] **设置 Socket 句柄不可继承 (Prevented Socket Handle Inheritance)**：在 HTTP 服务绑定成功后，显式调用了 `server.socket.set_inheritable(False)`，防止主进程创建监听 socket 后因 Windows `CreateProcess` 默认句柄继承机制将监听句柄传递给后续 Spawn 的多进程，从而彻底清除了在 Windows 系统下 `netstat` 报出多个子进程 PID 占用且同时 LISTENING `26672` 端口的现象。
+
+## 2026-06-23 17:40
+- [x] **优化网页联动伴侣英文/空格/全半角混合股票名匹配机制 (Optimized Web Linkage Partner for Mixed Casing, Full/Half-Width & Spaced Stock Names)**：
+    - [x] **实现全角/半角与大小写自适应正则生成 (Adaptive Width & Case Regex Generation)**：引入 `toHalfWidth` 与 `getCharacterPattern` 辅助函数，将含英文字母/数字的股票名字中的每个字符均转换为对应支持大小写、全半角混合形式的正则字符集（如字母 `A` 映射为 `[aAａＡ]`，数字 `0` 映射为 `[0０]`）。
+    - [x] **支持股票名字内部可选空格匹配 (Support Optional Inner Spacing Matching)**：在构建匹配正则时，对名字内相邻字符间插入 `\s*`（可选空格）正则量词，确保网页中“万科A”、“万 科Ａ”、“深桑达 A”等各异的拼写格式均能被高精度匹配并捕获。
+    - [x] **规范化映射查找键名 (Normalized Cache Lookup Keys)**：重构了 `loadStockNames` 数据初始化和 `applyHighlight` 查询匹配过程。解析股票数据时，将缓存名字经过全角转半角、去空格及转大写处理后的结果 `normalizeNameForLookup(name)` 作为映射键名；高亮匹配时，同样规范化所提取的文本进行 $O(1)$ 映射查询，完美解决了由于页面文本与本地缓存格式差异（如全半角 `Ａ`/`A`、包含与省略空格等）导致的 “深桑达Ａ”、“京东方A” 联动高亮失败的问题。
+
+## 2026-06-23 17:15
+- [x] **优化网页联动伴侣加载可靠性与高亮扫描机制 (Optimized Web Linkage Partner Loading Reliability & Highlight Scanning)**：
+    - [x] **实现本地微型 HTTP 服务 (Implemented Local Micro HTTP Server)**：在 `sys_utils.py` 末尾引入常驻守护线程 Web 服务，监听 `127.0.0.1:26672` 端口，在访问 `/stock_names` 路径时直接返回 `stock_name_cache.json` 内容并设置 CORS 跨域头。多进程启动冲突时安全捕获并忽略，保证单实例独占。
+    - [x] **支持 HTTP 本地端口与文件双通道智能加载 (Dual-Channel Smart Loading)**：重构了 `网页联动伴侣.js` 中的 `loadStockNames`。在 Tampermonkey 头声明中追加 `@connect 127.0.0.1` 授权；加载时优先通过 `GM_xmlhttpRequest` 请求 `http://127.0.0.1:26672/stock_names` 端口（避开本地 `file:///` 混合内容拦截），失败时自动 fallback 回退到原本地 `file:///` 协议读取；在所有加载流程中加入全量 try-catch 保护，彻底解决了在 Chrome 严苛安全沙箱下油猴脚本初始化失败挂掉“无反应”的痛点。
+    - [x] **根治已处理文本节点对后续高亮扫描的物理阻断 (Fixed ContextualWalker Processed Nodes Blocking)**：修改了高亮的核心方法 `applyHighlight`，将 `processedNodes.add` 收集移动至 `matchedAny` 判定分支。对于没有任何中文股票名匹配成功的文本节点不再将其塞进已处理 WeakSet 缓存，放行并确保后续的数字代码正则表达式能正常高亮显示。
+
+## 2026-06-23 17:05
+- [x] **升级网页联动伴侣支持本地股票名称缓存高亮与联动 (Upgraded Web Linkage Partner for Local Stock Name Caching, Highlighting & Linkage)**：
+    - [x] **引入本地 `stock_name_cache.json` 读取权限与路径配置**：在 Tampermonkey 油猴脚本头部元数据声明中，补全了 `@grant GM_xmlhttpRequest` 和 `@connect file` 的跨域网络请求特权，以支持读取位于本地 `D:\JohnsonProgram\instockMonitorTK\datacsv\stock_name_cache.json` 的股票代码与中文名字映射配置。
+    - [x] **实现股票名称与代码的双向缓存映射与排序排序正则生成 (Bi-directional Mapping & Length-Sorted Regex Generation)**：重构了脚本初始化流程，实现 `loadStockNames()` 异步拉取并解析本地缓存。为了防止中文匹配时“短词优先匹配导致长词被截断”的冲突（例如“深南电”抢先匹配导致“深南电A”高亮出错），在生成匹配正则 `STOCK_NAME_REGEX` 前，将所有合法的股票名称按字符长度从长到短进行降序排序拼接。
+    - [x] **重构 DOM 高亮与事件绑定实现名称联动 (Refactored DOM Highlighting & Dynamic Name Linkage)**：修改了 `applyHighlight` 函数。在对网页文本进行 ContextualWalker 遍历时，分别使用 `STOCK_NAME_REGEX` (匹配中文名称) 与 `STOCK_SCAN_REGEX` (匹配数字代码) 进行双重匹配高亮包裹。对于中文名称高亮的节点，其 `dataset.code` 属性被动态绑定为映射解析出的 6 位股票代码，并设置 `title` 属性用于在鼠标悬浮时提示对应的股票代码，点击后即可完美写入系统剪贴板，一键唤醒本地监控系统联动。
+    - [x] **实现沙箱特权降级与错误友好引导 (Sandbox Cooldown & Friendly Permission Guide)**：加固了脚本对浏览器沙箱环境 file 协议读取受限的容错机制。在读取失败时，在开发者控制台中打印详细、直观的手动配置步骤（引导用户去浏览器扩展管理页面为 Tampermonkey 开启“允许访问文件网址”权限），并平滑回退，仅使用原生股票代码正则高亮功能，绝不中断网页正常访问与其他核心联动功能。
+
 ## 2026-06-22 22:55
 - [x] **修复双击弹窗焦点获取与自启动优化左侧面板无数据自动隐藏 (Fixed Dialog Focus & Auto-Hiding Left Autostart Pane)**：
     - [x] **实现双击弹窗强制焦点获取 (Enforced Detail Dialog Keyboard Focus)**：在 `AutostartItemDetailDialog`、`ProcessItemDetailDialog` 和 `ProcessGroupDetailDialog` 的 `__init__` 初始化方法中，增加 `self.focus_force()` 调用。确保弹出的属性详情窗口在生成时能够即刻、强制抢占键盘输入焦点，解决了用户双击后窗口没有焦点导致按下 Esc 键无法快速关闭详情页的痛点。
