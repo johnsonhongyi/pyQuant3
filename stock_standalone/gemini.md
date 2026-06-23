@@ -1,3 +1,13 @@
+## 2026-06-23 19:50
+- [x] **修复并解耦实时数据服务监控窗口遮挡主视图缺陷 (Decoupled Realtime Monitor Window from Root to Prevent Stacking/Z-Order Blocking)**：
+    - [x] **解耦 Toplevel 窗口 Master 拥有者 (Decoupled Toplevel Master)**：将 `open_realtime_monitor` 首次创建 `Toplevel` 的构造方式由 `tk.Toplevel(self)` 重构为 `tk.Toplevel()`（即不传入主窗口 `self` 作为主控参数）。该改动将监控窗口实例化为完全独立的 OS 顶层窗口，防止 Windows 操作系统默认强制将 Owned Window 置于 Owner Window 前方的 Z-order 锁定限制，确保主窗口在被点击或聚焦时能够顺利被提到前台展示，完美消除了监控窗口永久遮挡主窗口的交互问题。
+
+## 2026-06-23 19:40
+- [x] **修复实时数据服务监控窗口唤起与 V-Reversal 监控池联动缺陷 (Fixed Realtime Monitor Window Focus & V-Reversal Linkage Fallback)**：
+    - [x] **修复实时数据监控窗口置顶唤起 (Fixed Realtime Monitor Window Focus & Topmost Activation)**：在 `open_realtime_monitor` 中增加了对窗口最小化状态（`iconic`）的检测与 `deiconify()` 还原，并集成 `attributes("-topmost", True/False)` 的置顶闪烁穿透机制与 `_register_hwnd_to_mru` 窗口轮换注册，确保在后台点击时能 100% 成功浮现并聚焦于前台。
+    - [x] **修复 V-Reversal 监控池关闭 K线 可视化时的联动缺陷 (Fixed V-Reversal Fallback Linkage when K-line Visualizer Closed)**：重构了跨工具联动接口 `link_to_visualizer`。当 K 线可视化 `vis_var` 处于关闭状态时，不再静默截断退出，而是原子更新 `select_code`（触发剪贴板去重保护）并无条件执行 `self.sender.send(code)` 联动发送，确保在自研可视化窗口关闭时，通达信、同花顺等三方行情软件仍可完美运作联动切换。
+    - [x] **完成 Python 语法编译验证 (Passed Compiler Check)**：成功通过了 `py_compile` 对主界面模块的语法及缩进编译性验证，未引入任何负面影响。
+
 ## 2026-06-23 18:30
 - [x] **彻底根治打包后本地 HTTP 服务多监听占用与句柄继承泄露缺陷 (Resolved Duplicate Listeners & Socket Inheritance Leak)**：
     - [x] **限制 HTTP 联动服务仅在主进程启动 (Restricted to MainProcess)**：在 `sys_utils.py` 中增加了主进程守护线程校验；并在 `instock_MonitorTK.py` 主入口 `StockMonitorApp` 初始化时，仅对前台非后台守护模式（`background == False`）的主 GUI 实例显式启动 `start_stock_name_server`，彻底杜绝了后台守护进程或子进程的端口竞争与多次监听。

@@ -8105,6 +8105,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         # 🚀 [FIX] 增加 vis_var 状态检测，全局决定是否允许联动开启/透传
         if hasattr(self, 'vis_var') and not self.vis_var.get():
+            self.select_code = code  # 原子级更新 select_code 以触发剪贴板去重保护
+            if hasattr(self, 'sender') and self.sender:
+                try:
+                    self.sender.send(code)
+                except Exception as ex:
+                    logger.error(f"link_to_visualizer fallback sender.send error: {ex}")
             return
         # ⭐ [THROTTLE] 联动限流：避免 1s 内对同一只股票重复发送联动 (由于 T80 及策略震荡可能触发多次)
         now = time.time()
@@ -19883,14 +19889,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_realtime_monitor(self):
         """打开实时数据服务监控窗口 (支持窗口复用)"""
         if hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win and self._realtime_monitor_win.winfo_exists():
-            self._realtime_monitor_win.lift()
-            self._realtime_monitor_win.focus_force()
+            try:
+                if self._realtime_monitor_win.state() == "iconic":
+                    self._realtime_monitor_win.state("normal")
+                self._realtime_monitor_win.deiconify()
+                self._realtime_monitor_win.lift()
+                self._realtime_monitor_win.focus_force()
+                self._realtime_monitor_win.attributes("-topmost", True)
+                self._realtime_monitor_win.attributes("-topmost", False)
+                if hasattr(self, '_register_hwnd_to_mru'):
+                    self._register_hwnd_to_mru(self._realtime_monitor_win.winfo_id())
+            except Exception as e:
+                logger.error(f"Failed to lift realtime monitor window: {e}")
             return
 
         try:
             from tkinter import ttk
             _GLOBAL_CODE_NAME_CACHE = {}
-            log_win = tk.Toplevel(self)
+            log_win = tk.Toplevel()  # 💡 改为独立窗口，不指定 master，解除 Z轴 遮挡锁定限制
             self._realtime_monitor_win = log_win
             log_win.title("Realtime Data Service Monitor")
             
@@ -19900,6 +19916,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.load_window_position(log_win, window_id, default_width=1000, default_height=500)
             else:
                 log_win.geometry("1000x500")
+            
+            # 注册到 MRU 队列以实现多窗口完美轮转与恢复
+            if hasattr(self, '_register_hwnd_to_mru'):
+                self._register_hwnd_to_mru(log_win.winfo_id())
             
             # Control frame
             btn_frame = tk.Frame(log_win)
