@@ -341,9 +341,43 @@
         const el = e.target.closest('.stock-highlight');
         if (!el) return;
         e.stopPropagation();
-        GM_setClipboard(el.dataset.code, 'text');
-        console.log('[Stock Copied]', el.dataset.code);
+        
+        const code = el.dataset.code;
+        
+        // 尝试通过 HTTP 联动接口调用本地系统联动能力
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `http://127.0.0.1:26672/link?code=${code}`,
+            timeout: 800,
+            onload: function(response) {
+                let success = false;
+                try {
+                    if (response.status === 200) {
+                        const resJson = JSON.parse(response.responseText);
+                        if (resJson.status === 'ok') {
+                            success = true;
+                            console.log('[Stock Linked via HTTP]', code);
+                        }
+                    }
+                } catch(err) {}
+                
+                if (!success) {
+                    fallbackCopy(code);
+                }
+            },
+            onerror: function() {
+                fallbackCopy(code);
+            },
+            ontimeout: function() {
+                fallbackCopy(code);
+            }
+        });
     }, true);
+
+    function fallbackCopy(code) {
+        GM_setClipboard(code, 'text');
+        console.log('[Stock Copied (Fallback)]', code);
+    }
 
     /* ================= 扫描调度 ================= */
 

@@ -885,6 +885,35 @@ def ensure_backend_tk_running():
 # ----------------------------------------------------
 # 本地微型 HTTP 服务，专门为油猴油猴网页联动脚本提供股票名字和代码映射
 # ----------------------------------------------------
+_link_callback = None
+
+def register_link_callback(callback):
+    global _link_callback
+    _link_callback = callback
+
+_stock_names_cache_data = None
+_stock_names_cache_mtime = 0
+
+def get_cached_stock_names():
+    global _stock_names_cache_data, _stock_names_cache_mtime
+    import os
+    path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+    try:
+        if not os.path.exists(path):
+            return b"{}"
+        mtime = os.path.getmtime(path)
+        if _stock_names_cache_data is not None and mtime == _stock_names_cache_mtime:
+            return _stock_names_cache_data
+        
+        # 缓存失效或首次加载：执行文件读取
+        with open(path, 'rb') as f:
+            data = f.read()
+        _stock_names_cache_data = data
+        _stock_names_cache_mtime = mtime
+        return data
+    except Exception:
+        return b"{}"
+
 def start_stock_name_server():
     from http.server import BaseHTTPRequestHandler, HTTPServer
     import json
@@ -899,16 +928,33 @@ def start_stock_name_server():
                 self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
                 self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
                 self.end_headers()
+                self.wfile.write(get_cached_stock_names())
+            elif self.path.startswith('/link'):
+                from urllib.parse import urlparse, parse_qs
+                query = urlparse(self.path).query
+                params = parse_qs(query)
+                code_list = params.get('code')
                 
-                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-                try:
-                    if os.path.exists(path):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            self.wfile.write(f.read().encode('utf-8'))
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+                self.end_headers()
+                
+                if code_list and len(code_list[0]) == 6:
+                    code = code_list[0]
+                    global _link_callback
+                    if _link_callback is not None:
+                        try:
+                            _link_callback(code)
+                            self.wfile.write(b'{"status": "ok", "message": "linked"}')
+                        except Exception as e:
+                            self.wfile.write(f'{{"status": "error", "message": "{str(e)}"}}'.encode('utf-8'))
                     else:
-                        self.wfile.write(b"{}")
-                except Exception as e:
-                    self.wfile.write(b"{}")
+                        self.wfile.write(b'{"status": "error", "message": "no callback registered"}')
+                else:
+                    self.wfile.write(b'{"status": "error", "message": "invalid code"}')
             else:
                 self.send_error(404)
                 
