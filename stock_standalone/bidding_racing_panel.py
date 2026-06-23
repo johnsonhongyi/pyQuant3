@@ -3108,8 +3108,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         bottom_lay.addLayout(sec_title_lay)
         
-        self.sector_table = EnhancedTableWidget(0, 8)
-        self.sector_table.setHorizontalHeaderLabels(["板块名称", "强度得分", "涨跌", "领涨龙头", "龙头涨幅", "起点涨幅", "龙头DFF", "联动详情"])
+        self.sector_table = EnhancedTableWidget(0, 9)
+        self.sector_table.setHorizontalHeaderLabels(["板块名称", "强度得分", "涨跌", "领涨龙头", "龙头涨幅", "起点涨幅", "龙头DFF", "龙头DFF2", "联动详情"])
         s_header = self.sector_table.horizontalHeader()
         s_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         # [🚀 实时持久化] 当列宽变动时，即时记录
@@ -4846,6 +4846,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             conf = {
                 "header_stock": state_stock,
                 "header_sector": state_sector,
+                "stock_table_cols_count": self.stock_table.columnCount(),
+                "sector_table_cols_count": self.sector_table.columnCount(),
                 "splitter_main": self.main_splitter.saveState().toHex().data().decode(),
                 "history": self._anchor_history[-100:],
                 "current_anchor_ts": self._current_anchor_ts,
@@ -4897,9 +4899,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
             # 1. 恢复列宽与排序状态 (Header States)
             if "header_stock" in conf:
-                self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_stock"].encode()))
+                saved_count = conf.get("stock_table_cols_count", 0)
+                if saved_count == 0 or saved_count == self.stock_table.columnCount():
+                    self.stock_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_stock"].encode()))
+                else:
+                    logger.info("📊 [RacingPanel] stock_table column count changed, bypassing restoreState.")
             if "header_sector" in conf:
-                self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_sector"].encode()))
+                saved_count = conf.get("sector_table_cols_count", 0)
+                if saved_count == 0 or saved_count == self.sector_table.columnCount():
+                    self.sector_table.horizontalHeader().restoreState(QByteArray.fromHex(conf["header_sector"].encode()))
+                else:
+                    logger.info("📊 [RacingPanel] sector_table column count changed, bypassing restoreState.")
             
             # [🚀 修复] 解决旧 8 列配置加载导致第 7 列 DFF2 被错误隐藏或宽度异常的兼容性问题
             self.stock_table.setColumnHidden(7, False) # DFF2 必须始终显示
@@ -4909,6 +4919,14 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             self.stock_table.setColumnHidden(8, not self._global_show_reason)
             if self._global_show_reason and self.stock_table.columnWidth(8) < 10:
                 self.stock_table.setColumnWidth(8, 120)
+
+            # 板块表的兼容性处理：第 7 列是龙头DFF2，第 8 列是联动详情
+            self.sector_table.setColumnHidden(7, False)
+            if self.sector_table.columnWidth(7) < 10:
+                self.sector_table.setColumnWidth(7, 62)
+            self.sector_table.setColumnHidden(8, False)
+            if self.sector_table.columnWidth(8) < 10:
+                self.sector_table.setColumnWidth(8, 150)
             
             # 2. 恢复重置周期与开关
             self._reset_cycle_mins = conf.get("reset_cycle", 60)
@@ -5653,7 +5671,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.sector_table.blockSignals(True)
                 self._update_table_optimized(self.stock_table, flattened_ts)
                 
-                sort_attr_map_sector = {0:'sector', 1:'score', 2:'avg_pct', 3:'leader_name', 4:'leader_pct', 5:'leader_start_pct', 6:'leader_pct_diff'}
+                sort_attr_map_sector = {0:'sector', 1:'score', 2:'avg_pct', 3:'leader_name', 4:'leader_pct', 5:'leader_start_pct', 6:'leader_pct_diff', 7:'leader_dff2'}
                 s_attr_sec = sort_attr_map_sector.get(self._sort_col_sector, 'score')
                 is_rev_sec = (self._sort_order_sector == Qt.SortOrder.DescendingOrder)
                 
@@ -5663,6 +5681,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
                     if attr == 'avg_pct':
                         return sec.get('avg_pct_diff', 0.0)
+                    if attr == 'leader_dff2':
+                        l_code = sec.get('leader', '')
+                        if l_code:
+                            return _safe_extract_dff2(df_all, l_code, self.detector)
+                        return 0.0
                     return sec.get(attr, 0)
 
                 # 全量排序结果
@@ -5869,6 +5892,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if table.rowCount() != len(sectors):
             table.setRowCount(len(sectors))
             
+        df_all = _get_df_all_cascading(self)
+            
         for i, sec in enumerate(sectors):
             s_name = sec.get('sector', '未知')
             display_s_name = f"⭐ {s_name}" if s_name in self.favorite_sectors else s_name
@@ -5913,7 +5938,15 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 if not is_first_init: self._table_highlights[("sector", s_name, 6)] = time.time()
             self._apply_flash_effect(table.item(i, 6), ("sector", s_name, 6))
 
-            # 7. 联动详情
+            # 7. 龙头DFF2 (新增)
+            l_code = sec.get('leader', '')
+            l_dff2 = _safe_extract_dff2(df_all, l_code, self.detector) if l_code else 0.0
+            c_dff2 = self._UI_CACHE["COLOR_RED"] if l_dff2 > 0.001 else (self._UI_CACHE["COLOR_GREEN"] if l_dff2 < -0.001 else Qt.GlobalColor.white)
+            if self._update_cell(table, i, 7, l_dff2, color=c_dff2, fmt="{:+.2f}%"):
+                if not is_first_init: self._table_highlights[("sector", s_name, 7)] = time.time()
+            self._apply_flash_effect(table.item(i, 7), ("sector", s_name, 7))
+
+            # 8. 联动详情
             followers = sec.get('followers', [])
             f_items = []
             for f in followers[:3]:
@@ -5925,9 +5958,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 f_items.append(f"{f_name}({f['pct']:+.1f}%)")
             
             f_txt = ",".join(f_items)
-            if self._update_cell(table, i, 7, f_txt, is_numeric=False):
-                if not is_first_init: self._table_highlights[("sector", s_name, 7)] = time.time()
-            self._apply_flash_effect(table.item(i, 7), ("sector", s_name, 7))
+            if self._update_cell(table, i, 8, f_txt, is_numeric=False):
+                if not is_first_init: self._table_highlights[("sector", s_name, 8)] = time.time()
+            self._apply_flash_effect(table.item(i, 8), ("sector", s_name, 8))
 
     def _refresh_fading_only(self):
         if not self._table_highlights: return

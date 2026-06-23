@@ -373,7 +373,7 @@ class SignalGradingHub:
         
         # 如果处于模拟/回测模式，我们不把警报发送到总线，只打印日志，以防止高频回测把 UI 搞垮
         if self._simulation_mode:
-            logger.debug(f"{msg} (Suppressed in GUI)")
+            # logger.debug(f"{msg} (Suppressed in GUI)")
             return
             
         logger.debug(msg) # 强制控制台输出

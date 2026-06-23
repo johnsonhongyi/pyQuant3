@@ -20293,7 +20293,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             add_entry.pack(side="left", padx=2)
 
             # Treeview 表格定义
-            columns = ("code", "name", "phase", "structure", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
+            columns = tuple(cct.v_reversal_pool_col) if hasattr(cct, 'v_reversal_pool_col') else ("code", "name", "phase", "structure", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
             tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="browse")
             tree.tag_configure("fav", background="#eefcf7", foreground="#00aa55")
             tree.tag_configure("buy_zone", background="#fff9eb", foreground="#b87333")  # 黄金买入点 (潜伏/回踩)
@@ -20301,6 +20301,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             headers = {
                 "code": "代码", "name": "名称", "phase": "当前阶段", "structure": "支撑分级",
                 "dff": "dff", "Rank": "Rank",
+                "red": "红盘", "slope": "斜率",
                 "dff3": "大底dff3", "dff2": "前低dff2",
                 "entry_date": "入池时间", "anchor_low": "锚点低价", "vol_ratio": "放量倍数"
             }
@@ -20328,9 +20329,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 text = headers.get(col, col)
                 tree.heading(col, text=text, command=lambda c=col: tree_sort(tree, c, False))
                 tree.column(col, anchor="center", width=70)
-            tree.column("phase", width=85)
-            tree.column("structure", width=70)
-            tree.column("entry_date", width=85)
+            if "phase" in columns:
+                tree.column("phase", width=85)
+            if "structure" in columns:
+                tree.column("structure", width=70)
+            if "entry_date" in columns:
+                tree.column("entry_date", width=85)
 
             vsb = ttk.Scrollbar(pool_label_frame, orient="vertical", command=tree.yview)
             hsb = ttk.Scrollbar(pool_label_frame, orient="horizontal", command=tree.xview)

@@ -717,6 +717,7 @@ class GlobalConfig:
         self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")
         self.hud_global_suppression = self.get_with_writeback("general", "hud_global_suppression", fallback=90, value_type="int")
         self.vol_up_details_col = self.get_with_writeback("general", "vol_up_details_col", fallback=["代码", "名称", "涨幅%", "量比", "DFF", "DFF2", "DFF3"], value_type="list")
+        self.v_reversal_pool_col = self.get_with_writeback("general", "v_reversal_pool_col", fallback=["code", "name", "phase", "structure","win", "dff", "Rank", "red", "slope", "dff3", "dff2", "entry_date", "anchor_low", "vol_ratio"], value_type="list")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
@@ -1023,6 +1024,7 @@ bidding_window_col: List[str] = CFG.bidding_window_col
 hud_sector_cooldown: int = CFG.hud_sector_cooldown
 hud_global_suppression: int = CFG.hud_global_suppression
 vol_up_details_col: List[str] = CFG.vol_up_details_col
+v_reversal_pool_col: List[str] = CFG.v_reversal_pool_col
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep

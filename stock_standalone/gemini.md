@@ -1,3 +1,12 @@
+## 2026-06-23 22:30
+- [x] **实现最强板块赛道表格支持“龙头DFF2”列及自顺应排序兼容 (Implemented 龙头DFF2 Column & Sorting in Sector Table with Backward Compatibility)**：
+    - [x] **新增“龙头DFF2”列并更新表头 (Added 龙头DFF2 Column & Header)**：在 `bidding_racing_panel.py` 中将 `sector_table` 的初始化列数由 8 列扩展为 9 列，并在“龙头DFF”与“联动详情”之间合理插入了“龙头DFF2”表头。
+    - [x] **实现龙头DFF2数据动态渲染 (Implemented Dynamic Rendering of 龙头DFF2)**：在 `_update_sector_table_optimized` 内部引入 `_get_df_all_cascading(self)` 级联获取 `df_all`，并利用现成的 `_safe_extract_dff2` 安全提取领涨龙头股的 DFF2 数据项并绑定至第 7 列渲染，自适应红绿文本配色与渐变高亮。
+    - [x] **升级最强板块手动排序系统 (Upgraded Sector Sorting for DFF2)**：在排序映射 `sort_attr_map_sector` 中将第 7 列索引绑定至 `leader_dff2` 属性，并在 `get_sec_val` 中扩展对 `leader_dff2` 的判定，使其调用 `_safe_extract_dff2` 返回其真实分值参与排行榜的动态重排。
+    - [x] **实现列数自适应持久化与恢复检验 (Implemented Adaptive Column Count Persistence & Load Verification)**：在 `_save_ui_state` 状态存盘时，额外采集并持久化了 `stock_table_cols_count` 与 `sector_table_cols_count`；在 `_restore_ui_state` 阶段对保存的列数与当前 UI 列数做前置对齐校验。如列数不一致则自动绕过（bypass）`restoreState` 回退至默认宽度并配合下方的安全防御修复列宽，消除了因系统升级列数变动导致旧状态强行恢复引起列宽崩坏的缺陷。
+    - [x] **加固旧布局数据兼容自愈 (Hardened Layout Backward Compatibility)**：在 `_restore_ui_state` 中为 `sector_table` 补齐了多列状态可见性与宽度安全防御，防止因加载旧版 8 列配置而导致新增的“龙头DFF2”与“联动详情”两列宽度为 0 或被误隐藏。
+    - [x] **通过 Python 语法编译验证 (Passed Compiler Check)**：对 `bidding_racing_panel.py` 完成了无错编译检测，保证模块启动及运作性能的稳定性。
+
 ## 2026-06-23 21:15
 - [x] **修复 controlled_gc_loop 中 QWidget 缺少 winfo_exists 导致的 AttributeError 崩溃 (Fixed AttributeError: QWidget has no winfo_exists in controlled_gc_loop)**：
     - [x] **实现跨框架窗口存活自适应检测 (_is_win_alive Helper)**：在 `controlled_gc_loop` 内部定义了 `_is_win_alive` 辅助函数。该函数优先通过 `hasattr(w, 'winfo_exists')` 判定是否为 Tkinter 窗口并安全调用其原生检测；对于不具备此属性的 PyQt6 QWidget 窗口，自动路由退避至 `is_qt_win_alive` 状态检测，彻底杜绝了后台 GC 轮巡扫描自愈字典时因类型混用抛出 `AttributeError` 崩溃。
