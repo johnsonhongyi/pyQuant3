@@ -714,6 +714,7 @@ class GlobalConfig:
         self.update_wave_klines = self.get_with_writeback("general", "update_wave_klines", fallback=100, value_type="int")
         self.multiprocessingQueue = self.get_with_writeback("general", "multiprocessingQueue", fallback=300, value_type="int")
         self.gil_monitor = self.get_with_writeback("general", "gil_monitor", fallback=0, value_type="int")
+        self.dump_all_monitor = self.get_with_writeback("general", "dump_all_monitor", fallback=0, value_type="int")
         self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")
         self.hud_global_suppression = self.get_with_writeback("general", "hud_global_suppression", fallback=90, value_type="int")
         self.vol_up_details_col = self.get_with_writeback("general", "vol_up_details_col", fallback=["代码", "名称", "涨幅%", "量比", "DFF", "DFF2", "DFF3"], value_type="list")
@@ -1019,6 +1020,7 @@ voice_volume: float = CFG.voice_volume
 vis_column_map: Dict[str] = CFG.vis_column_map
 sector_write_blk: Dict[str] = CFG.sector_write_blk
 multiprocessingQueue: int = CFG.multiprocessingQueue
+dump_all_monitor: int = CFG.dump_all_monitor
 concept_top10_window_col: List[str] = CFG.concept_top10_window_col
 bidding_window_col: List[str] = CFG.bidding_window_col
 hud_sector_cooldown: int = CFG.hud_sector_cooldown

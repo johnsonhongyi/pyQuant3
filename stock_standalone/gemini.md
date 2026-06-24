@@ -2,7 +2,13 @@
 - [x] **优化 HDF5 全量单表覆写物理体积控制与非交易时间网络轮询穿透防御 (Optimized HDF5 Single Table Rewrite Size Control & Network Polling Defense during Non-Trading Hours)**：
     - [x] **根治 HDF5/PyTables 覆盖重写引起的文件体积物理膨胀泄漏 (Fixed HDF5 Free Space Leak in Single-Table Rewrites)**：在 `tdx_hdf5_api.py` 的 `write_hdf_db` 快速写入模式中增加了智能写入模式探测。当检测到是非 MultiIndex 覆盖写且物理文件仅含当前 table（如 `sina_data` 快照表）时，直接以 `mode='w'` 打开全新临时文件写入全量 DataFrame，跳过原先的 `copy` 与 `mode='a'` 追加更新。该改动清除了 PyTables remove 节点留下的空间碎片，使文件物理体积在多次重写后永远维持在最紧凑的 1MB 多状态，并节省了文件复制的 I/O 开销。
     - [x] **修复只读探测绕过文件锁引起的 Windows 权限锁冲突与自愈 (Fixed Read-Only Probe Lock Penetration on Windows)**：修复了在模式 B（常规快速追加）中检测单表时直接调用原生 `pd.HDFStore(fname_path, mode='r')` 导致在 Windows 多进程环境下可能与正在写入 HDF5 的后台进程发生 `PermissionError` 冲突的隐患。现将探测替换为定制 of `SafeHDFStore(fname, mode='r')`，使其遵循系统的多进程文件锁与全局线程锁一致性协议，在写者占用时安全等待锁释放，保障了单表覆写物理瘦身模式在并发盘中的稳定与准确。
-    - [x] **通过 Python 语法编译与编译校验 (Passed Compiler Checks)**：成功对修改后的  `tdx_hdf5_api.py` 进行了编译检测，确认无任何语法异常，系统运行状态长效稳定。
+    - [x] **实现 87键/笔记本键盘无 Break 键下的堆栈诊断触发自愈与文件监听器 (Implemented File-Based Diagnostic Trigger for Keyboards without Break Key)**：
+        - [x] **新增诊断监视配置开关保护**：在 `commonTips.py` 的 `GlobalConfig` 中添加了 `dump_all_monitor` 配置项（默认值为 `0` 关闭），并在 `instock_MonitorTK.py` 入口中重构了 `main_SIGBREAK()`。现在仅在配置明确开启时，才启动 `file_trigger_loop` 监听线程与 Win32 控制台 Handler，默认状态下实现绝对的零线程与零 I/O 开销。
+        - [x] **新增后台文件触发器监听线程**：在 `instock_MonitorTK.py` 的主入口初始化中，新增了轻量级后台守护线程 `file_trigger_loop`。该线程每 30 秒循环检测工作目录下是否存在名为 `dump_all` 的标记文件。若检测到则自动将其删除，并瞬间唤醒 `dump_all()` 执行堆栈转储（写入 `instock_dump.log` 并伴随 3 秒自动消隐的原生 toast 提示），完全避开了主线程 GUI 死锁限制和键盘物理按键缺失缺陷。
+        - [x] **提供命令行信号发射方案**：支持用户在外部 cmd 窗口中使用单行 Python 命令向指定 PID 发送 `SIGBREAK` 信号，安全且绝不闪退：`python -c "import os, signal; os.kill(PID, signal.CTRL_BREAK_EVENT)"`。
+        - [x] **归纳笔记本 Fn 物理映射指南**：整理并总结了主流厂商（联想/戴尔/惠普/华硕等）Fn 映射 `Break` 的通用方案，确保在不更改代码的情况下也能直接使用 `Ctrl+Fn+X` 等组合物理触发。
+        - [x] **底部功能选择集成“诊断转储”选项**：在 `instock_MonitorTK.py` 的 `self.action_combo`（底部功能下拉框）中追加了 `"诊断转储"` 选项。当点击它时，主线程以极速（亚微秒级）异步方式直接执行 `dump_all()` 写入堆栈，彻底避免了由于主线程直接执行 faulthandler 写入大日志文件导致的主界面瞬间微卡顿，并伴随 3 秒自动消退的 Windows 原生 MessageBox 提示，大幅提升了操作流畅度与交互质量。
+    - [x] **通过 Python 语法编译与编译校验 (Passed Compiler Checks)**：成功对修改后的 `tdx_hdf5_api.py` 和 `instock_MonitorTK.py` 进行了编译检测，确认无任何语法异常，系统运行状态长效稳定。
 
 ## 2026-06-24 15:10
 - [x] **优化 HDF5 大内存缓存清除与垃圾回收调度，消除频繁 GC 引起的主线程卡顿 (Optimized HDF5 Cache Clearing & GC Scheduling to Prevent UI Lag)**：

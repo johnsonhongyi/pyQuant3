@@ -217,7 +217,8 @@ def dump_all():
 
         # 2. 强力加固：将当前堆栈转储直接物理存盘至独立文件，即便控制台不可见，也能一键追溯
         try:
-            dump_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instock_dump.log")
+            from sys_utils import get_app_root
+            dump_file_path = os.path.join(get_app_root(), "instock_dump.log")
             with open(dump_file_path, "w", encoding="utf-8") as f:
                 f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
                 try:
@@ -4961,7 +4962,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端", "快捷栏设置"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端", "快捷栏设置", "诊断转储"]
         self.action_var = tk.StringVar()
         
         # 初始化自定义样式以控制下拉位置
@@ -5040,6 +5041,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_ats_panel()
             elif action == "快捷栏设置":
                 self.open_top_bar_settings()
+            elif action == "诊断转储":
+                try:
+                    dump_all()
+                    def show_triggered_toast():
+                        try:
+                            from sys_utils import get_app_root
+                            dump_file_path = os.path.join(get_app_root(), 'instock_dump.log')
+                            import ctypes
+                            ctypes.windll.user32.MessageBoxTimeoutW(
+                                0,
+                                f"程序运行堆栈已成功转储并输出至:\n{dump_file_path}",
+                                "诊断转储成功",
+                                0x40 | 0x1000,
+                                0,
+                                3000
+                            )
+                        except Exception:
+                            pass
+                    import threading
+                    threading.Thread(target=show_triggered_toast, daemon=True).start()
+                except Exception as ex:
+                    logger.error(f"Failed to dump stack via UI action: {ex}")
 
 
         def on_select(event=None):
@@ -21767,6 +21790,10 @@ def write_to_hdf():
 
 
 def main_SIGBREAK():
+    # 动态检测是否需要开启后台监听，如果没有配置打开则直接跳过
+    if not getattr(cct, "dump_all_monitor", 0):
+        return
+
     # =========================
     # 仅主进程 + 主线程
     # =========================
@@ -21850,24 +21877,38 @@ def main_SIGBREAK():
                 )
 
         # -------------------------
-        # keyboard hotkey
+        # ⚡ [FIX] 文件触发诊断 (File-Based Diagnostic Trigger)
+        # 为没有 Break 键的 87键/笔记本键盘用户提供极其简单的堆栈转储手段。
+        # 启动一个后台守护线程检测工作目录下是否存在 "dump_all" 文件，
+        # 如果存在则删除文件并触发 dump_all()，不依赖主线程消息循环。
         # -------------------------
-        # try:
-        #     import keyboard
+        def file_trigger_loop():
+            from sys_utils import get_app_root
+            trigger_file = os.path.join(get_app_root(), "dump_all")
+            while True:
+                time.sleep(30.0)
+                if os.path.exists(trigger_file):
+                    try:
+                        os.remove(trigger_file)
+                    except Exception:
+                        pass
+                    logger.warning("🔔 [Trigger] Detected dump_all file, triggering stack dump...")
+                    try:
+                        dump_all()
+                    except Exception as de:
+                        logger.error(f"Failed to dump stack via file trigger: {de}")
 
-        #     keyboard.add_hotkey(
-        #         "ctrl+alt+d",
-        #         dump_all
-        #     )
-        #     print("✅ Hotkey registered: Ctrl+Alt+D", flush=True)
-        #     logger.info(
-        #         "✅ Hotkey registered: Ctrl+Alt+D"
-        #     )
-
-        # except Exception as e:
-        #     logger.warning(
-        #         f"⚠️ Hotkey failed: {e}"
-        #     )
+        try:
+            t_trigger = threading.Thread(target=file_trigger_loop, daemon=True, name="Dump_File_Trigger_Thread")
+            t_trigger.start()
+            logger.info("✅ File-based diagnostic trigger daemon started successfully (dump_all)")
+            if sys.stdout is not None:
+                try:
+                    print("✅ File-based diagnostic trigger daemon started successfully (dump_all)", flush=True)
+                except Exception:
+                    pass
+        except Exception as e_trigger:
+            logger.warning(f"⚠️ Failed to start file-based diagnostic trigger: {e_trigger}")
 
     # =========================
     # SIGBREAK（仅在主线程 + 安全时）
