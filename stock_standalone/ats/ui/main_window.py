@@ -18,7 +18,7 @@ from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
 from ats.ui.kernel_trace_panel import KernelTracePanel
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
-
+from JohnsonUtil import commonTips as cct
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None):
         super().__init__(parent)
@@ -661,7 +661,6 @@ class ATSMainWindow(QMainWindow):
         else:
             # 只有在交易时间段，且超过 10 分钟（600秒）没有收到更新时才手动请求一次，防止高频请求导致 TK 后台持续发送
             try:
-                import commonTips as cct
                 is_work = cct.get_work_time()
             except Exception:
                 is_work = False
@@ -1289,111 +1288,107 @@ class ATSMainWindow(QMainWindow):
         import datetime
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         for code in all_codes:
-            if code in self.stock_history_cache and self.stock_history_cache[code]:
+            latest_close = 0.0
+            dff_val = 0.0
+            rank_val = 0
+            dff2_val = 0.0
+            dff3_val = 0.0
+            
+            if has_df and code in self.current_df.index:
+                import pandas as pd
+                row = self.current_df.loc[code]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                latest_close = float(row.get('close', row.get('price', 0.0)))
+                try: dff_val = float(row.get('dff', 0.0))
+                except: pass
+                try: rank_val = int(row.get('Rank', row.get('rank', 0)))
+                except: pass
+                try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
+                except: pass
+                try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
+                except: pass
+            elif code in self.price_pct_cache:
+                latest_close = self.price_pct_cache[code][0]
+            elif code in self.stock_history_cache and self.stock_history_cache[code]:
+                latest_close = float(self.stock_history_cache[code][-1][1])
+                
+            name = self.get_stock_name(code)
+            
+            # Try to use database history first
+            has_history = (code in self.stock_history_cache and self.stock_history_cache[code])
+            
+            if has_history:
                 hist = self.stock_history_cache[code]
-                
-                latest_close = None
-                dff_val = 0.0
-                rank_val = 0
-                dff2_val = 0.0
-                dff3_val = 0.0
-                
-                if has_df and code in self.current_df.index:
-                    import pandas as pd
-                    row = self.current_df.loc[code]
-                    if isinstance(row, pd.DataFrame):
-                        row = row.iloc[0]
-                    latest_close = float(row.get('close', row.get('price', 0.0)))
-                    try: dff_val = float(row.get('dff', 0.0))
-                    except: pass
-                    try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                    except: pass
-                    try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
-                    except: pass
-                    try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
-                    except: pass
-                elif code in self.price_pct_cache:
-                    latest_close = self.price_pct_cache[code][0]
+                close_series = [item[1] for item in hist]
+                if hist[-1][0] == today_str:
+                    close_series[-1] = latest_close
                 else:
-                    latest_close = float(hist[-1][1])
-                    
-                name = self.get_stock_name(code)
+                    close_series.append(latest_close)
+                close_series = [float(x) for x in close_series if x is not None]
                 
-                # Try to use database history first
-                has_history = (code in self.stock_history_cache and self.stock_history_cache[code])
+                # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
+                ma20_series = []
+                ma5_series = []
+                for i in range(len(close_series)):
+                    sub20 = close_series[max(0, i - 19) : i + 1]
+                    ma20_series.append(sum(sub20) / len(sub20) if sub20 else close_series[i])
+                    sub5 = close_series[max(0, i - 4) : i + 1]
+                    ma5_series.append(sum(sub5) / len(sub5) if sub5 else close_series[i])
+            else:
+                # Fallback: Reconstruct history and MAs from the real-time slice data (up to compute_lastdays days)
+                # This allows the state machine to run immediately even if HDF5 is missing/empty
+                is_in_df = (has_df and code in self.current_df.index)
+                row_data = row if is_in_df else {}
                 
-                if has_history:
-                    hist = self.stock_history_cache[code]
-                    close_series = [item[1] for item in hist]
-                    if hist[-1][0] == today_str:
-                        close_series[-1] = latest_close
+                limit_days = int(getattr(cct, 'compute_lastdays', 9))
+                
+                # Extract lastp1d ... lastp{limit_days}d dynamically
+                history_closes = []
+                last_val = latest_close
+                for d_idx in range(limit_days, 0, -1):
+                    col_name = f"lastp{d_idx}d"
+                    val_raw = row_data.get(col_name, last_val) if is_in_df else last_val
+                    try:
+                        val = float(val_raw)
+                    except:
+                        val = last_val
+                    if val > 0:  # Avoid 0 or invalid values
+                        history_closes.append(val)
+                        last_val = val
+                        
+                close_series = history_closes + [latest_close]
+                
+                try:
+                    current_ma20 = float(row_data.get('ma20d', latest_close)) if is_in_df else latest_close
+                except:
+                    current_ma20 = latest_close
+                try:
+                    current_ma5 = float(row_data.get('ma5d', latest_close)) if is_in_df else latest_close
+                except:
+                    current_ma5 = latest_close
+                
+                ma20_series = [current_ma20] * len(close_series)
+                ma5_series = [current_ma5] * len(close_series)
+            
+            # Update state machine
+            state, dev_str, position, reason = self.swing_tracker.update_stock_state(
+                code, name, latest_close, close_series, ma20_series, ma5_series
+            )
+            
+            # limit ups (consecutive close days up)
+            limit_ups = 0
+            if len(close_series) > 1:
+                for idx in range(len(close_series)-1, 0, -1):
+                    if close_series[idx] > close_series[idx-1] * 1.002:
+                        limit_ups += 1
                     else:
-                        close_series.append(latest_close)
-                    close_series = [float(x) for x in close_series if x is not None]
-                    
-                    # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
-                    ma20_series = []
-                    ma5_series = []
-                    for i in range(len(close_series)):
-                        sub20 = close_series[max(0, i - 19) : i + 1]
-                        ma20_series.append(sum(sub20) / len(sub20) if sub20 else close_series[i])
-                        sub5 = close_series[max(0, i - 4) : i + 1]
-                        ma5_series.append(sum(sub5) / len(sub5) if sub5 else close_series[i])
-                else:
-                    # Fallback: Reconstruct history and MAs from the real-time slice data (up to compute_lastdays days)
-                    # This allows the state machine to run immediately even if HDF5 is missing/empty
-                    is_in_df = (has_df and code in self.current_df.index)
-                    row_data = row if is_in_df else {}
-                    
-                    import commonTips as cct
-                    limit_days = int(getattr(cct, 'compute_lastdays', 9))
-                    
-                    # Extract lastp1d ... lastp{limit_days}d dynamically
-                    history_closes = []
-                    last_val = latest_close
-                    for d_idx in range(limit_days, 0, -1):
-                        col_name = f"lastp{d_idx}d"
-                        val_raw = row_data.get(col_name, last_val) if is_in_df else last_val
-                        try:
-                            val = float(val_raw)
-                        except:
-                            val = last_val
-                        if val > 0:  # Avoid 0 or invalid values
-                            history_closes.append(val)
-                            last_val = val
-                            
-                    close_series = history_closes + [latest_close]
-                    
-                    try:
-                        current_ma20 = float(row_data.get('ma20d', latest_close)) if is_in_df else latest_close
-                    except:
-                        current_ma20 = latest_close
-                    try:
-                        current_ma5 = float(row_data.get('ma5d', latest_close)) if is_in_df else latest_close
-                    except:
-                        current_ma5 = latest_close
-                    
-                    ma20_series = [current_ma20] * len(close_series)
-                    ma5_series = [current_ma5] * len(close_series)
-                
-                # Update state machine
-                state, dev_str, position, reason = self.swing_tracker.update_stock_state(
-                    code, name, latest_close, close_series, ma20_series, ma5_series
-                )
-                
-                # limit ups (consecutive close days up)
-                limit_ups = 0
-                if len(close_series) > 1:
-                    for idx in range(len(close_series)-1, 0, -1):
-                        if close_series[idx] > close_series[idx-1] * 1.002:
-                            limit_ups += 1
-                        else:
-                            break
-                
-                swing_rows.append((
-                    code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
-                    f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", reason
-                ))
+                        break
+            
+            swing_rows.append((
+                code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
+                f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", reason
+            ))
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
 
