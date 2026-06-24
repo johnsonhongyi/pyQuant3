@@ -6677,7 +6677,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if dead_keys:
                     logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead code_to_alert_win references.")
 
-            # 5. 强制执行垃圾回收
+            # 5. 清理 Sina 内存缓存引用，确保 HDF5 大缓存被彻底丢弃回收
+            try:
+                from JSONData import sina_data
+                sina_data.Sina().clear_unified_cache(force_gc=False)
+            except Exception as gc_err:
+                logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
+
+            # 6. 强制执行垃圾回收
             cleaned = gc.collect()
             logger.debug(f"🛡️ [GC] Periodic memory optimization completed. gc.collect() cleared {cleaned} objects.")
         except Exception as e:
