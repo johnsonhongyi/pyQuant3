@@ -3232,6 +3232,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.info('[Pipe] Feedback listener cmd REQ_FULL_SYNC')
                             self._force_full_sync_pending = True
                             self._df_first_send_done = False
+                            if hasattr(self, '_send_df_wake_event'):
+                                self._send_df_wake_event.set()
+
+                        elif obj and obj.get("cmd") == "ATS_RECEIVED":
+                            logger.info('[Pipe] Feedback listener cmd ATS_RECEIVED')
+                            self._force_full_sync_pending = False
+                            self._df_first_send_done = True
+                            self._last_ats_recv_confirm_time = time.time()
 
                         elif obj and obj.get("cmd") == "VIZ_EXIT":
                             logger.debug('[Pipe] Visualizer exited. Cleaning up qt_process state.')
@@ -8362,16 +8370,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             max_jitter = 0.2    # 随机抖动
             logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
             count = 0
+            self._ats_enabled_cache = False  # ⭐ ATS 活跃状态缓存
             self._cold_start = True # ⭐ [NEW] 冷启动标志
             
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                ats_enabled = getattr(self, '_ats_enabled_cache', False)
                 
                 # ⭐ 核心判断：是否需要跳过本轮同步（没开且无强制请求）
-                if not vis_enabled and not getattr(self, '_force_full_sync_pending', False):
+                if not vis_enabled and not ats_enabled and not getattr(self, '_force_full_sync_pending', False):
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
-                        if getattr(self, '_vis_enabled_cache', True):
+                        if getattr(self, '_vis_enabled_cache', True) or getattr(self, '_ats_enabled_cache', False):
                             break
                         time.sleep(0.2)
                     else:
@@ -8392,6 +8402,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(2)
                         continue
                 sent = False  # ⭐ 本轮是否成功发送
+                sent_to_ats = False
                 try:
                     now = time.time()
                     
@@ -8413,6 +8424,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     # ⭐ 限流 + 抖动 (如果是强制全量同步请求，则无视冷却时间直接发送)
                     is_forced = getattr(self, '_force_full_sync_pending', False)
+                    if is_forced:
+                        # 强制同步请求增加 5.0 秒冷却保护，并且如果 10 秒内已收到 ATS 确认，则不再重复发送
+                        last_confirm = getattr(self, '_last_ats_recv_confirm_time', 0.0)
+                        if now - last_confirm < 10.0:
+                            self._force_full_sync_pending = False
+                            is_forced = False
+                        elif now - getattr(self, '_last_forced_sync_time', 0.0) < 5.0:
+                            self._force_full_sync_pending = False
+                            is_forced = False
+                        else:
+                            self._last_forced_sync_time = now
+                            
                     if not is_forced and now - last_send_time < dynamic_interval:
                         time.sleep(1.0) # 小碎步休眠防止 CPU 100%
                         continue
@@ -8540,77 +8563,88 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
                     # ======================================================
                     vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                    ats_enabled = getattr(self, '_ats_enabled_cache', False)
                     
                     # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
                     now_ipc = time.time()
                     ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
                     
-                    if not sent and vis_enabled and now_ipc > ipc_cooldown:
-                        try:
-                            # 1️⃣ pickle 单独计时
-                            with timed_ctx("viz_IPC_pickle", warn_ms=10000):
-                                payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
-                                        protocol=pickle.HIGHEST_PROTOCOL)
+                    # [NEW] 没有数据更新且不是强制全量同步请求时，直接跳过物理发送 (与可视化一致)
+                    if msg_type == 'DF_DIFF_EMPTY' and not is_forced:
+                        sent = True
+                    else:
+                        if is_forced or ((vis_enabled or ats_enabled) and now_ipc > ipc_cooldown):
+                            try:
+                                # 1️⃣ pickle 单独计时
+                                with timed_ctx("viz_IPC_pickle", warn_ms=10000):
+                                    payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
+                                            protocol=pickle.HIGHEST_PROTOCOL)
 
-                            header = struct.pack("!I", len(payload))
+                                header = struct.pack("!I", len(payload))
 
-                            # 2️⃣ socket 分发到 26668 (可视化) 和 26670 (ATS 终端)
-                            with timed_ctx("viz_IPC_send", warn_ms=1000):
+                                # 2️⃣ socket 分发到 26668 (可视化) 和 26670 (ATS 终端)
                                 send_success_any = False
+                                sent_to_ats = False
                                 
-                                # 发送给 26668 (可视化窗口)
-                                try:
-                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                        s.settimeout(0.2)
-                                        s.connect((ipc_host, ipc_port))
-                                        s.sendall(b"DATA" + header + payload)
-                                        send_success_any = True
-                                except (socket.timeout, ConnectionError, OSError):
-                                    pass
+                                # 发送给 26668 (可视化窗口) —— 仅在 Pipe 没发送成功时进行 Socket 兜底
+                                if vis_enabled and not sent:
+                                    with timed_ctx("viz_IPC_send", warn_ms=1000):
+                                        try:
+                                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                                s.settimeout(2.0)  # 增加到 2.0 秒，防止大包超时
+                                                s.connect((ipc_host, ipc_port))
+                                                s.sendall(b"DATA" + header + payload)
+                                                send_success_any = True
+                                                sent = True
+                                        except (socket.timeout, ConnectionError, OSError):
+                                            pass
 
-                                # 发送给 26670 (ATS 终端)
-                                try:
-                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-                                        s2.settimeout(0.2)
-                                        s2.connect(('127.0.0.1', 26670))
-                                        s2.sendall(b"DATA" + header + payload)
-                                        send_success_any = True
-                                except (socket.timeout, ConnectionError, OSError):
-                                    pass
+                                # 发送给 26670 (ATS 终端) —— 独立通道，只要到了这步就必定尝试发送给 ATS
+                                if ats_enabled or is_forced:
+                                    with timed_ctx("ats_IPC_send", warn_ms=1000):
+                                        try:
+                                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                                                s2.settimeout(2.0)  # 增加到 2.0 秒，防止大包超时
+                                                s2.connect(('127.0.0.1', 26670))
+                                                s2.sendall(b"DATA" + header + payload)
+                                                send_success_any = True
+                                                sent_to_ats = True
+                                                self._ats_enabled_cache = True  # 标记 ATS 处于活跃状态，激活自动周期推送
+                                        except (socket.timeout, ConnectionError, OSError):
+                                            self._ats_enabled_cache = False  # 标记 ATS 离线，停止自动推送以释放 CPU/I/O
 
                                 if send_success_any:
-                                    logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
-
-                                    sent = True
+                                    logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")
                                     self._viz_ipc_fail_count = 0  # 成功清零
                                 else:
                                     # 两个通道均失败时，抛出异常以触发冷却
                                     raise ConnectionError("Both Port 26668 and 26670 connection failed.")
 
-                            
-                            # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
-                            if self.qt_process is not None and self.qt_process.is_alive():
-                                logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
+                                # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
+                                if self.qt_process is not None and self.qt_process.is_alive():
+                                    logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
 
-                        except (socket.timeout, ConnectionError, OSError) as e:
-                            # 只有当真正失败时才记录
-                            fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
-                            self._viz_ipc_fail_count = fail_count
-                            
-                            # 如果连续失败 3 次，开启 10-60 秒的冷却 (非工作时间更久)
-                            if fail_count >= 3:
-                                cooldown_dur = 60 if not cct.get_work_time() else 10
-                                self._viz_ipc_cooldown_until = now_ipc + cooldown_dur
-                                logger.info(f"⚠️ [IPC] Failed {fail_count} times, enter {cooldown_dur}s cooldown. (Error: {e})")
-                            
-                            if not vis_enabled:
-                                sent = True
+                            except (socket.timeout, ConnectionError, OSError) as e:
+                                # 只有当真正失败时才记录
+                                fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
+                                self._viz_ipc_fail_count = fail_count
+                                
+                                # 如果连续失败 3 次，开启 10-60 秒的冷却 (非工作时间更久)
+                                if fail_count >= 3:
+                                    cooldown_dur = 60 if not cct.get_work_time() else 10
+                                    self._viz_ipc_cooldown_until = now_ipc + cooldown_dur
+                                    logger.info(f"⚠️ [IPC] Failed {fail_count} times, enter {cooldown_dur}s cooldown. (Error: {e})")
+                                
+                                if not vis_enabled and not ats_enabled:
+                                    sent = True
 
                 except Exception:
                     logger.exception("[send_df] unexpected error")
                 finally:
                     if sent:
                         cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
+                    if sent_to_ats:
+                        cct.print_timing_summary_filter(include_prefix="ats_", top_n=10)
                 # ======================================================
                 # ⭐ 6️⃣ 状态更新（只在这里）
                 # ======================================================
