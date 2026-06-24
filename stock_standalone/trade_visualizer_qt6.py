@@ -1240,7 +1240,7 @@ class DataLoaderThread(QThread):
                     try:
                         with timed_ctx(f"get_real_time_tick_att{attempt}", warn_ms=800):
                             # tick_df = sina_data.Sina().get_real_time_tick(self.code, enrich_data=True)
-                            s = self.sina if self.sina else sina_data.Sina()
+                            s = self.sina if self.sina else sina_data.Sina(readonly=True)
                             tick_df = s.get_real_time_tick(self.code, enrich_data=True)
                             # logger.debug(f'get_real_time_tick_att{attempt} get_real_time_tick : {tick_df[:3]}')
                         if not tick_df.empty:
@@ -1529,7 +1529,7 @@ def tick_to_daily_bar_slow(tick_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def test_tick_df():
-    s = sina_data.Sina()
+    s = sina_data.Sina(readonly=True)
     tick_df = s.get_real_time_tick('000603')
     today_bar = tick_to_daily_bar(tick_df)
     print(f'today_bar: {today_bar}')
@@ -1560,7 +1560,7 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
     if interval is None:
         interval = getattr(cct.CFG, 'duration_sleep_time', 5)
     
-    s = sina_instance if sina_instance else sina_data.Sina()
+    s = sina_instance if sina_instance else sina_data.Sina(readonly=True)
     current_code = None
     force_fetch = False
     
@@ -2877,7 +2877,7 @@ class RealtimeWorker(QObject):
         self._timer.timeout.connect(self._poll)
         self._code = None
         self._running = False
-        self._sina = sina if sina else sina_data.Sina()
+        self._sina = sina if sina else sina_data.Sina(readonly=True)
 
     def start(self, code):
         self._code = code
@@ -3145,7 +3145,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.last_voice_ts = "" # 记录最后一次播报的信号时间
         self._voice_paused = False # [NEW] 独立的语音暂停标志
         self.verbose_log_enabled = False # [NEW] 控制台详细日志开关
-        self.sina = sina_data.Sina() # [NEW] Centralized Sina instance for the main process
+        self.sina = sina_data.Sina(readonly=True) # [NEW] Centralized Sina instance for the main process
         
         # 🚀 [NEW] Centralized Thread Pool for Visualizer background tasks
         self.executor = ThreadPoolExecutor(max_workers=cct.livestrategy_max_workers)

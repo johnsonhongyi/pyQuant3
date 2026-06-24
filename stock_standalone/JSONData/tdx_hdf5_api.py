@@ -45,6 +45,10 @@ import shutil
 import errno
 import threading
 
+# ⚡ [CACHE] sina_MultiIndex_data 轨迹数据全局内存缓存，用于消除盘中频繁读盘的延迟
+_SINA_MI_CACHE = {}  # {table_name: DataFrame}
+_SINA_MI_LOCK = threading.RLock()
+
 # # 从 global.ini 读取 MultiIndex 文件限额 (默认 150MB)
 # def _load_sina_multiindex_limit():
 #     try:
@@ -411,7 +415,7 @@ class SafeHDFStore(pd.HDFStore):
                 # 🚀 [CORE] 必须在全局锁内执行 super().__init__，因为 PyTables/HDF5 在 Windows 下非线程安全
                 with _HDF_GLOBAL_LOCK:
                     with timed_ctx(f"hdfstore_open_{attempt}"):
-                        super().__init__(self.fname, **kwargs)
+                        super().__init__(self.fname, mode=self.mode, **kwargs)
                 opened = True
                 break
             except (tables.exceptions.HDF5ExtError, OSError, ValueError, PermissionError) as e:
@@ -444,7 +448,7 @@ class SafeHDFStore(pd.HDFStore):
             with timed_ctx("check_corrupt_keys"):
                 self._check_and_clean_corrupt_keys()
             with timed_ctx("reopen_hdf"):
-                super().__init__(self.fname, **kwargs)
+                super().__init__(self.fname, mode=self.mode, **kwargs)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
@@ -2374,6 +2378,45 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     duration = time.time() - time_t
     if duration > 3.0 and is_work_time:
         log.warning(f"⚠️ [SLOW] write_hdf_db is slow: {fname} took {duration:.2f}s (is_work_time={is_work_time})")
+    # ⚡ [CACHE-SYNC] 如果是 sina_MultiIndex_data 并且写入成功，同步更新全局内存缓存（附带最新的 mtime/size）
+    if 'sina_MultiIndex_data' in fname:
+        fname_path = cct.get_ramdisk_path(fname)
+        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
+            fname_path += '.h5'
+            
+        current_mtime = 0.0
+        current_size = 0
+        if os.path.exists(fname_path):
+            try:
+                current_mtime = os.path.getmtime(fname_path)
+                current_size = os.path.getsize(fname_path)
+            except Exception:
+                pass
+
+        global _SINA_MI_CACHE, _SINA_MI_LOCK
+        with _SINA_MI_LOCK:
+            if table in _SINA_MI_CACHE:
+                # 只有当缓存已经初始化才进行更新
+                if not append or rewrite:
+                    updated_df = df.copy()
+                    log.debug(f"⚡ [CACHE-SYNC] Overwrote memory cache for {fname}/{table} with {len(df)} rows")
+                else:
+                    old_df = _SINA_MI_CACHE[table]['df']
+                    combined = pd.concat([old_df, df])
+                    idx_names = list(combined.index.names)
+                    if len(idx_names) > 0 and None not in idx_names:
+                        combined = combined[~combined.index.duplicated(keep='last')]
+                    else:
+                        combined = combined[~combined.index.duplicated(keep='last')]
+                    updated_df = combined
+                    log.debug(f"⚡ [CACHE-SYNC] Appended {len(df)} rows to memory cache for {fname}/{table}, new size: {len(combined)}")
+                
+                _SINA_MI_CACHE[table] = {
+                    'df': updated_df,
+                    'mtime': current_mtime,
+                    'size': current_size
+                }
+
     log.debug("write hdf total time:%0.2f" % (time.time() - time_t))
     return True
 
@@ -2521,11 +2564,61 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     优化版 load_hdf_db — 保留原有行为与参数，仅优化性能与日志级别
     """
     time_t = time.time()
-    global RAMDISK_KEY, INIT_LOG_Error
+    global RAMDISK_KEY, INIT_LOG_Error, _SINA_MI_CACHE, _SINA_MI_LOCK
 
     # 与原逻辑一致：RAMDISK_KEY 非 0 时直接返回 None
     if not RAMDISK_KEY < 1:
         return None
+
+    # ⚡ [CACHE-LOAD] 针对 'sina_MultiIndex_data' 的大轨迹表进行读缓存拦截与多进程物理变更感知
+    is_sina_mi = 'sina_MultiIndex_data' in fname
+    if is_sina_mi:
+        fname_path = cct.get_ramdisk_path(fname)
+        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
+            fname_path += '.h5'
+            
+        current_mtime = 0.0
+        current_size = 0
+        if os.path.exists(fname_path):
+            try:
+                current_mtime = os.path.getmtime(fname_path)
+                current_size = os.path.getsize(fname_path)
+            except Exception:
+                pass
+
+        with _SINA_MI_LOCK:
+            cache_entry = _SINA_MI_CACHE.get(table)
+        
+        # 仅当缓存存在且物理文件的 mtime 和 size 完全匹配时，才直接从内存返回以杜绝多进程数据不一致
+        if (cache_entry is not None and 
+            cache_entry.get('mtime') == current_mtime and 
+            cache_entry.get('size') == current_size):
+            
+            cache_df = cache_entry['df']
+            log.debug(f"⚡ [CACHE-HIT] load_hdf_db hit memory cache for {fname}/{table} (mtime match)")
+            # 如果提供了 code_l，我们在内存 DataFrame 上直接进行过滤并返回，不需要读盘
+            if code_l is not None:
+                try:
+                    if MultiIndex:
+                        try:
+                            df_filtered = cache_df.loc[cache_df.index.isin(code_l, level='code')]
+                        except Exception:
+                            mask = cache_df.index.get_level_values('code').isin(code_l)
+                            df_filtered = cache_df.loc[mask]
+                    else:
+                        dif_index = cache_df.index.intersection(code_l)
+                        df_filtered = cache_df.loc[dif_index]
+                except Exception as ex:
+                    log.error(f"Failed filtering code_l from cached df: {ex}")
+                    df_filtered = cache_df.copy()
+            else:
+                df_filtered = cache_df.copy()
+            
+            try:
+                df_filtered.fillna(0, inplace=True)
+            except Exception:
+                df_filtered = df_filtered.fillna(0)
+            return df_filtered
 
     df = None
     dd = None
@@ -2874,6 +2967,26 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                         write_hdf_db(fname, df, table=table, index=index, MultiIndex=True, rewrite=True)
             except Exception:
                 pass
+
+    if is_sina_mi and code_l is None and df is not None and not df.empty:
+        fname_path = cct.get_ramdisk_path(fname)
+        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
+            fname_path += '.h5'
+        current_mtime = 0.0
+        current_size = 0
+        if os.path.exists(fname_path):
+            try:
+                current_mtime = os.path.getmtime(fname_path)
+                current_size = os.path.getsize(fname_path)
+            except Exception:
+                pass
+        with _SINA_MI_LOCK:
+            _SINA_MI_CACHE[table] = {
+                'df': df.copy(),
+                'mtime': current_mtime,
+                'size': current_size
+            }
+            log.info(f"⚡ [CACHE-INIT] Loaded and cached {len(df)} rows for {fname}/{table} (mtime: {current_mtime}, size: {current_size})")
 
     return df
     # 与原函数保持一致：返回 reduce_memory_usage(df)

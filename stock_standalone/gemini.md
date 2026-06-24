@@ -1,3 +1,9 @@
+## 2026-06-24 18:30
+- [x] **修复由于 SafeHDFStore 底层漏传 mode 参数导致 HDF5 只读模式失效及物理修改时间变动 Bug (Fixed Read-Only Mode Ineffectiveness & HDF5 mtime Alteration Bug)**：
+    - [x] **根治 SafeHDFStore constructor 中底层 pandas HDFStore 漏传 mode 参数之缺陷 (Fixed Missing mode Parameter in SafeHDFStore Constructor)**：在 `tdx_hdf5_api.py` 的 `SafeHDFStore` 类的构造函数中，修复了在调用 `super().__init__` 实例化底层 `pd.HDFStore` 时未显式传入 `mode=self.mode` 的问题。在此之前，底层的 pandas 引擎因为缺省退化为默认的 `'a'` (追加/写) 模式，即使上层以只读 `'r'` 模式实例化，仍然会以写方式打开 HDF5 文件。这导致在 Windows 系统中，一旦读取文件，其物理修改时间 `mtime` 在文件关闭时都会被强制触碰更新，进而破坏了基于文件修改时间戳的内存缓存匹配机制，产生极其频繁的 HDF5 读盘开销。现通过补齐 `mode=self.mode`，让只读模式在底层真正生效，物理修改时间绝不再变动。
+    - [x] **将可视化子进程行情数据引擎全面升级为只读实例 (Upgraded Visualizer Sina instances to Read-Only)**：在 `trade_visualizer_qt6.py` 中，将所有在 `DataLoaderThread` 线程 fallback、`realtime_worker_process` 实时子进程、`RealtimeUpdateWorker` 轮询工作器以及 `MainWindow` 主窗口中实例化 `Sina()` 行情引擎的地方，全面修改为使用只读模式的 `Sina(readonly=True)`。另外，本次补充对 `DataLoaderThread` 内部遗留的 fallback 默认实例化（第 1243 行）以及 `test_tick_df` 测试函数（第 1532 行）进行了全面补齐改动。至此，可视化进程端的全部 `Sina` 行情实例均已升级为只读模式，消除了任何隐式改写大轨迹文件的隐患，保障了系统的稳定性。
+    - [x] **通过 Python 语法编译与只读缓存命中性集成回归测试 (Passed Compiler Checks & Cache Integration Tests)**：编写并执行了集成测试脚本，证实 `Sina(readonly=True)` 在物理读取大轨迹文件 `sina_MultiIndex_data.h5` 后，文件的修改时间 `mtime` 保持绝对未变，且第二次及后续的读取请求可 100% 瞬间命中内存缓存拦截屏障，达成了零 I/O 阻塞；同时对 `tdx_hdf5_api.py` 和 `trade_visualizer_qt6.py` 进行了语法编译检测，确认无任何异常。
+
 ## 2026-06-24 16:20
 - [x] **优化 HDF5 全量单表覆写物理体积控制与非交易时间网络轮询穿透防御 (Optimized HDF5 Single Table Rewrite Size Control & Network Polling Defense during Non-Trading Hours)**：
     - [x] **根治 HDF5/PyTables 覆盖重写引起的文件体积物理膨胀泄漏 (Fixed HDF5 Free Space Leak in Single-Table Rewrites)**：在 `tdx_hdf5_api.py` 的 `write_hdf_db` 快速写入模式中增加了智能写入模式探测。当检测到是非 MultiIndex 覆盖写且物理文件仅含当前 table（如 `sina_data` 快照表）时，直接以 `mode='w'` 打开全新临时文件写入全量 DataFrame，跳过原先的 `copy` 与 `mode='a'` 追加更新。该改动清除了 PyTables remove 节点留下的空间碎片，使文件物理体积在多次重写后永远维持在最紧凑的 1MB 多状态，并节省了文件复制的 I/O 开销。
