@@ -1319,21 +1319,62 @@ class ATSMainWindow(QMainWindow):
                     
                 name = self.get_stock_name(code)
                 
-                # Append or replace today's price
-                close_series = [item[1] for item in hist]
-                if hist[-1][0] == today_str:
-                    close_series[-1] = latest_close
-                else:
-                    close_series.append(latest_close)
+                # Try to use database history first
+                has_history = (code in self.stock_history_cache and self.stock_history_cache[code])
+                
+                if has_history:
+                    hist = self.stock_history_cache[code]
+                    close_series = [item[1] for item in hist]
+                    if hist[-1][0] == today_str:
+                        close_series[-1] = latest_close
+                    else:
+                        close_series.append(latest_close)
+                    close_series = [float(x) for x in close_series if x is not None]
                     
-                # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
-                ma20_series = []
-                ma5_series = []
-                for i in range(len(close_series)):
-                    sub20 = close_series[max(0, i - 19) : i + 1]
-                    ma20_series.append(sum(sub20) / len(sub20))
-                    sub5 = close_series[max(0, i - 4) : i + 1]
-                    ma5_series.append(sum(sub5) / len(sub5))
+                    # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
+                    ma20_series = []
+                    ma5_series = []
+                    for i in range(len(close_series)):
+                        sub20 = close_series[max(0, i - 19) : i + 1]
+                        ma20_series.append(sum(sub20) / len(sub20) if sub20 else close_series[i])
+                        sub5 = close_series[max(0, i - 4) : i + 1]
+                        ma5_series.append(sum(sub5) / len(sub5) if sub5 else close_series[i])
+                else:
+                    # Fallback: Reconstruct history and MAs from the real-time slice data (up to compute_lastdays days)
+                    # This allows the state machine to run immediately even if HDF5 is missing/empty
+                    is_in_df = (has_df and code in self.current_df.index)
+                    row_data = row if is_in_df else {}
+                    
+                    import commonTips as cct
+                    limit_days = int(getattr(cct, 'compute_lastdays', 9))
+                    
+                    # Extract lastp1d ... lastp{limit_days}d dynamically
+                    history_closes = []
+                    last_val = latest_close
+                    for d_idx in range(limit_days, 0, -1):
+                        col_name = f"lastp{d_idx}d"
+                        val_raw = row_data.get(col_name, last_val) if is_in_df else last_val
+                        try:
+                            val = float(val_raw)
+                        except:
+                            val = last_val
+                        if val > 0:  # Avoid 0 or invalid values
+                            history_closes.append(val)
+                            last_val = val
+                            
+                    close_series = history_closes + [latest_close]
+                    
+                    try:
+                        current_ma20 = float(row_data.get('ma20d', latest_close)) if is_in_df else latest_close
+                    except:
+                        current_ma20 = latest_close
+                    try:
+                        current_ma5 = float(row_data.get('ma5d', latest_close)) if is_in_df else latest_close
+                    except:
+                        current_ma5 = latest_close
+                    
+                    ma20_series = [current_ma20] * len(close_series)
+                    ma5_series = [current_ma5] * len(close_series)
                 
                 # Update state machine
                 state, dev_str, position, reason = self.swing_tracker.update_stock_state(
