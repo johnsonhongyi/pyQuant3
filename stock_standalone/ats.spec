@@ -36,7 +36,7 @@ a = Analysis(
                     'configobj', 'JSONData', 'JSONData.sina_data', 'tables', 'h5py',
                     'JSONData.tdx_hdf5_api', 'JSONData.realdatajson', 'JSONData.wencaiData',
                     'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'tushare', 'pandas_ta',
-                    'talib.stream', 'talib.abstract'],
+                    'JohnsonUtil.commonTips','talib.stream', 'talib.abstract'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
