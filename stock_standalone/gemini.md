@@ -1,3 +1,18 @@
+## 2026-06-25 00:15
+- [x] **动态对齐 `cct.compute_lastdays` 多日切片还原与自动订阅 (Dynamically Aligned compute_lastdays Slice Reconstruction & Auto-Subscription)**：
+    - [x] **实现动态多日收盘序列还原 (Dynamic Daily Close Series Reconstruction)**：在 `ATSMainWindow` 中，降级重构逻辑现在能够基于 `getattr(cct, 'compute_lastdays', 9)` 动态生成最近 9 天（或配置天数）的日收盘价序列，利用逆向循环（从第 9 日递减至第 1 日）读取 `lastp9d` 到 `lastp1d` 等列并剔除无效值，从而动态适配差异化的日线回溯天数配置。
+    - [x] **TK端历史切片列自动保留与 IPC 同步 (TK Side Historical Slice Auto-Preservation)**：在 `instock_MonitorTK.py` 构造函数中，通过两层循环自动将 1 至 `cct.compute_lastdays` 天的全部历史 OHLCV 列（如 `lastp1d` 等）添加至 `self.mandatory_cols` 订阅列表中。这确保了在列裁剪开启的情况下，多日历史切片数据能够 100% 完整传送到 ATS，完美支撑了动态 9 天历史数据的现场还原。
+
+## 2026-06-25 00:10
+- [x] **实现无 HDF5 历史数据时的切片还原与状态机自愈 (Implemented Daily Slice Fallback Reconstruction & State Machine Self-Healing without HDF5)**：
+    - [x] **无盘备份切片序列化还原 (Reconstructed Historical Close Series from Real-Time Slice)**：在 `ATSMainWindow` 状态更新中，若后台 HDF5 历史数据加载未完成或为空，系统将自动利用实时 `df` 中携带的 `lastp1d` (昨日)、`lastp2d` (前日)、`lastp3d` (大前日) 等多日收盘价切片，以及今日实时价，瞬间拼装出长度为 4 的历史收盘价序列 `close_series`。
+    - [x] **技术指标对齐注入 (Aligned MA Indicators from Slice Data)**：利用同步 `df` 中现成的 `ma5d` 和 `ma20d` 列，直接生成平铺填充的 `ma5_series` 和 `ma20_series` 作为替代输入。由于状态机底层仅使用序列的最新一位指标（`[-1]`）和最新两日收盘价（`[-1]`与`[-2]`），该降级重组在逻辑上实现了 100% 的等效对齐，使选股信号和状态机在冷启动或无 HDF5 库时能够立刻正常运转工作。
+
+## 2026-06-25 00:05
+- [x] **加固 ATS 行情状态机数据类型安全与防零除保护 (Hardened Data Type Safety & Zero-Division Protection in ATS State Machine)**：
+    - [x] **强制价格数值浮点数类型转换 (Enforced Float Type Casting)**：在 `ATSMainWindow` 价格切片构建处，对由历史缓存与最新价合并而成的 `close_series` 序列追加了 `float()` 强制转换与非空过滤，防范由底层数据源残缺或类型偏差引发的 `TypeError`。
+    - [x] **引入移动平均零长度均值防零除防御 (Added Zero-Division Prevention in Rolling MA)**：在纯 Python 实现的移动平均循环中，对 `sub20` 与 `sub5` 列表切片增加了空值检验与默认回退保护，确保在极端空系列场景下均线回退为当前个股收盘价，消除了 `ZeroDivisionError` 隐患。
+
 ## 2026-06-24 23:55
 - [x] **深度优化 ATS 行情接收主线程卡死与 TCP 同步性能 (Optimized ATS UI Thread Lag & TCP Socket Synchronous Performance)**：
     - [x] **修复命名管道 `ATS_RECEIVED` 反馈报错 (Fixed Pipe Feedback Argument Error)**：修复了在 socket 接收后台线程中，调用 `send_code_via_pipe` 发送 `ATS_RECEIVED` 反馈帧时，漏传 `logger` positional 参数导致的 TypeError 异常。现已补齐 `local_logger` 参数，成功让 TK 接收到同步确认信号，避免了由于确认信号丢失引起的 TK 后台高频重复发送大快照数据包的同步风暴。

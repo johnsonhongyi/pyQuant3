@@ -780,6 +780,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             'vol_ratio', 'power_idx', 'category', 'lastdu4',
             'dff', 'dff2', 'Rank', 'buy', 'llastp' # 🛡️ 增加可视化所需的缺失列
         }
+        # Automatically add all lastp/h/l/o/v columns up to compute_lastdays to ensure they are synchronized
+        limit = int(getattr(cct, 'compute_lastdays', 5))
+        for i in range(1, limit + 1):
+            for suffix in ['p', 'h', 'l', 'o', 'v']:
+                self.mandatory_cols.add(f'last{suffix}{i}d')
         self.update_required_columns()
 
         # ----------------- 控件框 ----------------- #
