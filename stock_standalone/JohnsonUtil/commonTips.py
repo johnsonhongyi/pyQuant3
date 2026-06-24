@@ -8469,6 +8469,18 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
             subdf = subdf.drop(drop_sub_col, axis=1)
         if len(subdf.columns) > 0:
             no_index = no_index.merge(subdf, left_index=True, right_index=True, how='left')
+            
+            # 🛡️ [FIX] 补齐 subdf 独有的行数据，防止合并时丢弃新增品种（例如新增北交所股票）
+            sub_only_idx = subdf.index.difference(maindf.index)
+            if not sub_only_idx.empty:
+                sub_only_df = subdf.loc[sub_only_idx]
+                for col in maindf.columns:
+                    if col not in sub_only_df.columns:
+                        sub_only_df[col] = 0
+                # 对齐列顺序
+                sub_only_df = sub_only_df[maindf.columns]
+                no_index = pd.concat([no_index, sub_only_df], axis=0)
+
             maindf = maindf.drop([inx for inx in maindf.index if inx in subdf.index], axis=0)
             maindf = pd.concat([maindf, no_index], axis=0)
     else:
