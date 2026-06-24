@@ -1423,10 +1423,10 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         f"[SINA-FETCH] urls={len(url_list)} batch={batch_size} "
         f"pause={pause_range} block={g_sina_blocked['count']}"
     )
-
     df_list = []
     loop = asyncio.get_event_loop()
     total_batches = (len(url_list) + batch_size - 1) // batch_size
+    fetch_success = True
 
     for i in range(0, len(url_list), batch_size):
         batch_num = i // batch_size + 1
@@ -1435,33 +1435,47 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         try:
             rs = loop.run_until_complete(asyncio.gather(*tasks))
             log.info(f"[SINA-进度] 批次 {batch_num}/{total_batches} 完成 ✓")
+            for r_idx, r in enumerate(rs):
+                if r is None or r.empty:
+                    log.error(f"[SINA-ERROR] 批次 {batch_num} 中的第 {r_idx+1} 个请求失败或返回空数据！")
+                    fetch_success = False
         except Exception as e:
             set_blocked(120, f"batch error:{e}")
+            fetch_success = False
+            break
+
+        if not fetch_success:
             break
 
         for r in rs:
             if r is not None and not r.empty:
                 df_list.append(r)
 
-    if not df_list:
-        log.error("no data fetched")
-        return []
+    # 判定拉取完整性：如果失败或结果集不全，则回退并不写入 HDF5
+    if not fetch_success or len(df_list) < len(url_list):
+        log.error(f"[SINA-FATAL] Fetch incomplete: expected {len(url_list)} URL results, got {len(df_list)}. Aborting HDF5 cache writeback!")
+        h5 = h5a.load_hdf_db(h5_fname, table=h5_table, limit_time=9999999)
+        if h5 is not None and len(h5) > 0:
+            log.warning(f"[HDF-FALLBACK] Successfully fell back to existing HDF5 cache with {len(h5)} rows")
+            df = h5
+        else:
+            log.error("[HDF-FALLBACK] No existing HDF5 cache available to fallback to!")
+            return []
+    else:
+        df = pd.concat(df_list, ignore_index=True)
+        if 'ratio' in df.columns:
+            df['ratio'] = df['ratio'].astype(float).round(1)
+        if 'percent' in df.columns:
+            df['percent'] = df['percent'].astype(float).round(2)
+        df = df.drop_duplicates('code').set_index('code')
 
-    df = pd.concat(df_list, ignore_index=True)
-    if 'ratio' in df.columns:
-        df['ratio'] = df['ratio'].astype(float).round(1)
-    if 'percent' in df.columns:
-        df['percent'] = df['percent'].astype(float).round(2)
-    df = df.drop_duplicates('code').set_index('code')
+        if df is not None and len(df) > 0:
+            if market=='all':
+                h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False, rewrite=True)
+            else:
+                h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=True)
 
     if df is not None and len(df) > 0:
-        if 'code' in df.columns:
-            df = df.drop_duplicates('code').set_index('code')
-        if market=='all':
-            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table,append=False)
-        else:
-            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table,append=True)
-        # if showtime: print(("Market-df:%s %s" % (format((time.time() - start_t), '.1f'), len(df))), end=' ')
         if market == 'all':
             co_inx = [inx for inx in df.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
             df = df.loc[co_inx]            
@@ -1486,9 +1500,9 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
             co_inx = [inx for inx in codel if inx in df.index]
             df = df.loc[co_inx]
         log.info(f"return sina_ratio market:{market} count:{len(df)}")
-
     else:
-        if showtime:print(("no data Market-df:%s" % (format((time.time() - start_t), '.2f'))))
+        if showtime:
+            print(("no data Market-df:%s" % (format((time.time() - start), '.2f'))))
         log.error("no data Market-df:%s"%(url_list[0]))
         return []
 

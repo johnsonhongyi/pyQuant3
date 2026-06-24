@@ -190,12 +190,17 @@ class StockCode:
         stock_codes = grep_stock_codes.findall(response.text)
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('60', '30', '00','688','43','83','87','92'))]))
         '''
-
         df = rl.get_sina_Market_json('all')
         stock_codes = df.index.tolist()
-        if len(stock_codes) < 5300:
-            log.error(f"update_stock_codes codes:{len(stock_codes)} < 5300 get_sina_Market_json获取数据不全,停止更新")
+        
+        # [DYNAMIC FILTER PROTECTION] 动态安全性校验，防止因个别网络包失败导致的残缺代码库覆盖
+        old_codes = self.get_stock_codes()
+        min_threshold = max(5500, int(len(old_codes) * 0.995)) if old_codes else 5500
+        
+        if len(stock_codes) < min_threshold:
+            log.error(f"update_stock_codes codes:{len(stock_codes)} < {min_threshold} get_sina_Market_json获取数据不全,停止更新")
             return (self.get_stock_codes())
+
         # stock_info_bj_name_code_df = stock_info_bj_name_code()
         # bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
         # stock_codes.extend(bj_list)
@@ -2563,13 +2568,14 @@ if __name__ == "__main__":
 
     # log.setLevel(LoggerFactory.DEBUG)
     # sina = Sina()
-    sina = Sina(readonly=True)
+    sina = Sina(readonly=False)
 
     unique_dates = sina.get_tick_dates()
     print(f'unique_dates: {unique_dates}')
 
     dm = sina.all
-
+    import ipdb;ipdb.set_trace()
+    
     code_l = ['300291','000868','603917','600392','300713','000933','002505','603676']
     dd = sina.get_real_time_tick(code_l)
     dde = sina.get_real_time_tick(code_l, enrich_data=True)
