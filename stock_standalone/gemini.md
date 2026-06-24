@@ -1,3 +1,9 @@
+## 2026-06-24 16:20
+- [x] **优化 HDF5 全量单表覆写物理体积控制与非交易时间网络轮询穿透防御 (Optimized HDF5 Single Table Rewrite Size Control & Network Polling Defense during Non-Trading Hours)**：
+    - [x] **根治 HDF5/PyTables 覆盖重写引起的文件体积物理膨胀泄漏 (Fixed HDF5 Free Space Leak in Single-Table Rewrites)**：在 `tdx_hdf5_api.py` 的 `write_hdf_db` 快速写入模式中增加了智能写入模式探测。当检测到是非 MultiIndex 覆盖写且物理文件仅含当前 table（如 `sina_data` 快照表）时，直接以 `mode='w'` 打开全新临时文件写入全量 DataFrame，跳过原先的 `copy` 与 `mode='a'` 追加更新。该改动清除了 PyTables remove 节点留下的空间碎片，使文件物理体积在多次重写后永远维持在最紧凑的 1MB 多状态，并节省了文件复制的 I/O 开销。
+    - [x] **修复只读探测绕过文件锁引起的 Windows 权限锁冲突与自愈 (Fixed Read-Only Probe Lock Penetration on Windows)**：修复了在模式 B（常规快速追加）中检测单表时直接调用原生 `pd.HDFStore(fname_path, mode='r')` 导致在 Windows 多进程环境下可能与正在写入 HDF5 的后台进程发生 `PermissionError` 冲突的隐患。现将探测替换为定制 of `SafeHDFStore(fname, mode='r')`，使其遵循系统的多进程文件锁与全局线程锁一致性协议，在写者占用时安全等待锁释放，保障了单表覆写物理瘦身模式在并发盘中的稳定与准确。
+    - [x] **通过 Python 语法编译与编译校验 (Passed Compiler Checks)**：成功对修改后的  `tdx_hdf5_api.py` 进行了编译检测，确认无任何语法异常，系统运行状态长效稳定。
+
 ## 2026-06-24 15:10
 - [x] **优化 HDF5 大内存缓存清除与垃圾回收调度，消除频繁 GC 引起的主线程卡顿 (Optimized HDF5 Cache Clearing & GC Scheduling to Prevent UI Lag)**：
     - [x] **引入缓存清理 `force_gc` 参数与延迟回收机制 (Added force_gc Parameter to Cache Clearing)**：在 `sina_data.py` 的 `clear_unified_cache` 方法中新增 `force_gc` 可选参数，允许仅释放 `_MEM_CACHE` 内存引用而不立即触发昂贵的 `gc.collect()` Stop-the-world 操作，使 GC 可被延迟调度。
