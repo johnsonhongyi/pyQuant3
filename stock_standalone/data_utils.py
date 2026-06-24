@@ -691,63 +691,85 @@ def process_merged_sina_signal_eval(df, mode='A'):
 def process_merged_sina_with_history(df, mode='A'):
     """
     结合多日历史背景（eval1d, eval2d, signal1d等）给出精准实时信号
+    (已重构：抛弃布林线上轨，使用均线系统判定大阳线启动，修复状态机死锁)
     """
     # 1. 提取基础数据
-    curr_c = df['now']
+    curr_c = df['now'] if 'now' in df.columns else df['close']
     curr_o = df['open']
     curr_l = df['low']
-    curr_a = df['volume']
     
-    # 2. 提取历史特征 (来自 all_features 合并进来的列)
-    upper_1d = df['upper1']
+    # 兼容实时行情与历史回测的成交量列
+    curr_a = df['vol'] if 'vol' in df.columns else df['volume']
+    
+    # 2. 提取历史特征
     close_1d = df['lastp1d']
     amount_1d = df['lastv1d']
     eval_1d   = df['eval1d'].fillna(9).astype(int)   # 昨天状态
     eval_2d   = df['eval2d'].fillna(9).astype(int)   # 前天状态
     signal_1d = df['signal1d'].fillna(5).astype(int) # 昨天产生的信号
-    ma_ref    = df['ma51d']                # 支撑位
+    
+    # 提取多条均线作为参考
+    ma5_curr = df['ma51d'] if 'ma51d' in df.columns else df['ma5d']
+    ma10_curr = df['ma10d'] if 'ma10d' in df.columns else df['ma5d']
+    ma20_curr = df['ma20d'] if 'ma20d' in df.columns else df['ma5d']
+    ma60_curr = df['ma60d'] if 'ma60d' in df.columns else ma20_curr
 
-    # 3. 核心条件判定
-    # 启动：价格突围 + 放量
-    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (curr_a > 1.1)
-    # 持续：维持在压力位上方
-    cond_trend_continue = (curr_c > upper_1d) & (close_1d > upper_1d)
-    # 回撤：缩量且守住均线
-    cond_pullback = (curr_c < close_1d) & (curr_l >= ma_ref) & (curr_a < amount_1d)
-    # 破位：跌破均线
-    cond_bear = (curr_c < ma_ref)
+    # 3. 核心条件判定 (基于均线的大阳线启动)
+    # 计算涨幅
+    pct = (curr_c - close_1d) / close_1d * 100
+    is_big_yang = (pct >= 4.0) & (curr_c > curr_o)
+    
+    # 启动：今日开盘在均线之下，且收出一根大阳线站上MA5，同时放量
+    started_under_ma = (curr_o < ma5_curr) | (curr_o < ma10_curr) | (curr_o < ma20_curr) | (curr_o < ma60_curr)
+    # 只有不在主升期时，大阳线才叫启动。否则叫延续或反包
+    cond_trend_start = is_big_yang & started_under_ma & (curr_c > ma5_curr) & (curr_a > amount_1d * 1.1) & (~eval_1d.isin([1, 2, 3]))
+    
+    # 持续：只要站在 MA20 之上，就认定为主升延续
+    cond_trend_continue = (curr_c >= ma20_curr)
+    
+    # 回撤：缩量且守住生命线 MA60
+    cond_pullback = (curr_c < close_1d) & (curr_l >= ma60_curr) & (curr_a < amount_1d)
+    
+    # 破位：跌破大结构生命线 MA60，或【有效跌破 MA20】(连续两日收盘低于MA20)
+    # 因为很多强势股盘中或单日会刺穿 MA20 骗线，所以增加两日确认机制
+    ma20_1d = df['ma20d'].shift(1).fillna(ma20_curr)
+    effective_break_ma20 = (curr_c < ma20_curr) & (close_1d < ma20_1d)
+    cond_bear = (curr_c < ma60_curr) | effective_break_ma20
 
     # 4. 实时状态推演 (EVAL_STATE)
     curr_eval = eval_1d.copy()
     
-    # 状态更新逻辑
+    # 【修复死锁Bug】：如果昨日是启动(1)，今日延续，必须允许其切换到主升(2)
+    curr_eval = np.where((eval_1d == 1) & cond_trend_continue, 2, curr_eval)
+    
+    # 常规状态流转
     curr_eval = np.where(cond_trend_start, 1, curr_eval)
-    curr_eval = np.where((curr_eval != 1) & cond_trend_continue, 2, curr_eval)
+    curr_eval = np.where((eval_1d == 9) & cond_trend_continue & (~cond_trend_start), 2, curr_eval) # 从空头直接跳入主升
     curr_eval = np.where((eval_1d.isin([2, 3])) & cond_pullback, 3, curr_eval)
+    
     # 修复：昨日回撤，今日企稳
-    curr_eval = np.where((eval_1d == 3) & (curr_l >= ma_ref) & (curr_c >= close_1d), 2, curr_eval)
-    # 风控破位
+    curr_eval = np.where((eval_1d == 3) & (curr_l >= ma60_curr) & (curr_c >= close_1d), 2, curr_eval)
+    
+    # 风控破位最高优先级
     curr_eval = np.where(cond_bear, 9, curr_eval)
 
     # 5. 结合历史深度给出交易信号 (trade_signal)
-    # 5=HOLD, 1=买一, 2=买二, -1=卖出
     df['trade_signal'] = 5 
 
-    # --- 买一逻辑：昨日启动(1) + 今日确认主升(2) + 过滤高开 ---
+    # --- 买一逻辑：昨日启动(1) + 今日确认主升(2) + 过滤极端高开(>3%) ---
     mask_buy1 = (eval_1d == 1) & (curr_eval == 2) & (curr_o <= close_1d * 1.03)
     df.loc[mask_buy1, 'trade_signal'] = 1
 
-    # --- 买二逻辑：昨日主升(2) + 今日初次缩量回撤(3) ---
-    # 结合 eval2d 确保不是连续下跌，而是主升后的首次回撤
-    mask_buy2 = (eval_1d == 2) & (curr_eval == 3) & (eval_2d == 2)
+    # --- 买二逻辑：趋势中的均线回踩反包 (最低价曾靠近MA20/MA60 5%以内，且今日大阳线反包) ---
+    near_support = (curr_l <= ma20_curr * 1.05) | (curr_l <= ma60_curr * 1.05)
+    mask_buy2 = eval_1d.isin([1, 2, 3]) & near_support & is_big_yang
     df.loc[mask_buy2, 'trade_signal'] = 2
 
     # --- 卖出逻辑：有持仓(1,2,3) + 今日转空头(9) ---
     mask_sell = (eval_1d.isin([1, 2, 3])) & (curr_eval == 9)
     df.loc[mask_sell, 'trade_signal'] = -1
     
-    # --- 修正：如果昨天已经是买一信号，且今天状态依然健康，则维持 HOLD ---
-    # 避免重复发出买入指令
+    # --- 修正：避免重复发信号 ---
     mask_already_in = (signal_1d == 1) & (curr_eval == 2)
     df.loc[mask_already_in, 'trade_signal'] = 5
 

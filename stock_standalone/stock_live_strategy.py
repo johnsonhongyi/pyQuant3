@@ -2820,11 +2820,46 @@ class StockLiveStrategy:
                                     notes=f"V-Shape FSM Breakout ({phase_name}) | {anomaly_type}"
                                 )
                                 hub.add_to_follow_queue(ts)
+                                messages.append(("PATTERN", f"V_SHAPE({anomaly_type}) | FSM Phase: {phase_name}"))
                                 logger.info(f"📋 V-Shape+异动入队: {code} ({anomaly_type})")
                             else:
                                 logger.debug(f"V-Shape {code} FSM Breakout skipped: no anomaly pattern")
                         except Exception as e:
                             logger.error(f"Failed to add V-Shape to queue for {code}: {e}")
+                            
+                        # ----------------------------------------------------
+                        # --- [NEW] MA60/MA20 结构触发翻转阳信号 (MA60 Reversal Yang) ---
+                        # ----------------------------------------------------
+                        try:
+                            ma60 = float(row.get('ma60d', 0) or snap.get('ma60d', 0))
+                            ma20 = float(row.get('ma20d', 0) or snap.get('ma20d', 0))
+                            open_p = float(row.get('open', 0))
+                            low_p = float(row.get('low', 0))
+                            pct = float(row.get('per1d', row.get('percent', 0)))
+                            if ma60 > 0 and open_p > 0 and pct >= 3.0 and current_price > open_p:
+                                # 判断是否是均线附近启动的大阳线 (最低价触及均线 5% 内，收盘站上均线)
+                                started_near_ma = (low_p <= ma60 * 1.05) or (ma20 > 0 and low_p <= ma20 * 1.05)
+                                if started_near_ma:
+                                    hub = get_trading_hub()
+                                    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                                    ts_ma = TrackedSignal(
+                                        code=code, 
+                                        name=data.get('name', ''),
+                                        signal_type='V_SHAPE(MA60翻转阳)',
+                                        detected_date=today_str,
+                                        detected_price=current_price,
+                                        entry_strategy='MA60结构翻转',
+                                        status='TRACKING',
+                                        priority=9,
+                                        source='RealTime',
+                                        notes=f"MA60/MA20 回踩翻转阳线 (涨幅 {pct:.1f}%)"
+                                    )
+                                    hub.add_to_follow_queue(ts_ma)
+                                    messages.append(("PATTERN", f"V_SHAPE(MA60翻转阳) | 涨幅: {pct:.1f}%"))
+                                    logger.info(f"📋 V-Shape(MA60翻转阳) 入队: {code}")
+                        except Exception as e:
+                            logger.error(f"Failed to detect MA60 Reversal for {code}: {e}")
+                            
                 else:
                     # 如果 FSM 信号失效，重置触发标记，允许下一次波段拉升（如 WAVE_UP_2）重新触发
                     snap['v_shape_triggered'] = False
@@ -2877,9 +2912,11 @@ class StockLiveStrategy:
                 
                 # --- [NEW] 数据异常检测: 历史K线缓存缺失 ---
                 if prev_rows is None or prev_rows.empty:
-                    with self._data_exception_lock:
-                        existing = self._data_exceptions.get(code, "")
-                        self._data_exceptions[code] = f"{existing}, 历史缓存缺失" if existing else "历史缓存缺失"
+                    # 如果后台线程正在抓取中，说明只是冷启动延迟，无需报异常
+                    if f"{code}_{resample}" not in getattr(self, '_pending_hist_fetches', set()):
+                        with self._data_exception_lock:
+                            existing = self._data_exceptions.get(code, "")
+                            self._data_exceptions[code] = f"{existing}, 历史缓存缺失" if existing else "历史缓存缺失"
                 
                 snap['day_df'] = prev_rows # [NEW] 供决策引擎进行顶部检测
                 det_events = self.daily_pattern_detector.update(
@@ -2934,8 +2971,8 @@ class StockLiveStrategy:
         # --- 注入日线中轴趋势数据 (Daily Midline Trend) ---
         try:
             # 昨中轴
-            last_h = float(row.get('last_high', 0))
-            last_l = float(row.get('last_low', 0))
+            last_h = float(row.get('lasth1d', 0))
+            last_l = float(row.get('lastl1d', 0))
             if last_h > 0 and last_l > 0:
                 snap['yesterday_midline'] = (last_h + last_l) / 2
             else:
@@ -2946,8 +2983,8 @@ class StockLiveStrategy:
                 snap['yesterday_midline'] = float(row.get('last_close', 0)) # fallback
 
             # 前中轴
-            last2_h = float(row.get('last2_high', 0))
-            last2_l = float(row.get('last2_low', 0))
+            last2_h = float(row.get('lasth2d', 0))
+            last2_l = float(row.get('lastl2d', 0))
             if last2_h > 0 and last2_l > 0:
                 snap['day_before_midline'] = (last2_h + last2_l) / 2
             else:
@@ -3220,6 +3257,8 @@ class StockLiveStrategy:
                     with self._data_exception_lock:
                         existing = self._data_exceptions.get(code, "")
                         self._data_exceptions[code] = f"{existing}, 状态机缺失" if existing else "状态机缺失"
+                    # [FIX] 设置默认值，防止每一轮都重复报错
+                    snap['trade_phase'] = 'IDLE'
                 
                 curr_phase_str = snap.get('trade_phase', 'IDLE')
                 try:

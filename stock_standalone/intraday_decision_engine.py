@@ -359,6 +359,15 @@ class IntradayDecisionEngine:
             
             action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
             
+            # --- [NEW] MA20 主升浪回调买点 (BUY 2) ---
+            trade_signal = row.get('trade_signal', snapshot.get('trade_signal', 0))
+            if not pd.isna(trade_signal) and int(trade_signal) == 2:
+                action = "买入"
+                base_pos = max(base_pos, 0.45) # 强力底分仓位
+                ma_reason = "[MA20黄金坑] 主升趋势确立且企稳反包(BUY2)"
+                debug["is_priority"] = True
+                debug["trade_signal"] = 2
+                
             if racing_result["triggered"]:
                 action = "买入"
                 # 直接提升基础仓位，并确保包含 [重点] 标记

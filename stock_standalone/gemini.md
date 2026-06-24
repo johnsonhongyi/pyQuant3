@@ -1,3 +1,8 @@
+## 2026-06-24 21:00
+- [x] **实现 MA20 主升浪黄金坑策略的实盘预警闭环 (Integrated MA20 Trend BUY2 Logic into Live Strategy and Dashboard)**：
+    - [x] **接入实盘决策引擎 (Decision Engine Integration)**：在 `intraday_decision_engine.py` 的买入判定逻辑中，成功引入 `trade_signal == 2`（MA20回踩反包）的捕获分支。一旦识别到该历史信号，引擎将自动将决策置为 "买入"，并强行给予 `0.45` 的高基础仓位评分（超越 0.40 的买入硬门槛），同时输出附带 `[MA20黄金坑]` 和 `BUY2` 标识的高优先判定理由，彻底打通了从历史选股到盘中拦截的执行链路。
+    - [x] **报警信息染色与视效增强 (Dashboard Highlighting)**：在 `signal_dashboard_panel.py` 中更新了 UI 视觉规则，在 `_get_pattern_color` 颜色过滤器中新增了对 `BUY2` 或 `黄金坑` 关键字的探测。一旦命中，立刻触发显眼的 `#FFD700` (金色) 报警高亮；同时更新 `CATEGORY_MAP`，将 `BUY2` 和 `黄金坑` 同步收录至“买入机会”与“跟单信号”分组，实现报警瀑布流的精准推流与多维展示。
+
 ## 2026-06-24 18:40
 - [x] **全面将非 TK 主程序中加载 `sina_data` 获取数据的实例升级为只读模式 (Upgraded non-Tk main programs loading sina_data to Read-Only)**：
     - [x] **升级 `realtime_data_service.py` 内部 `Sina` 行情实例**：将 `backfill_gaps_from_hdf5` 缓存清理处 `sina_data.Sina().clear_unified_cache(...)` 及 `recover_from_hdf5_by_codes` 数据精准恢复处 `sina_data.Sina()` 实例化全部升级为只读模式的 `Sina(readonly=True)`，彻底消除了缺口补全和数据精准恢复时由于修改时间 `mtime` 变动导致的文件独占和频繁 I/O 问题。

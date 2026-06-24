@@ -843,12 +843,12 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
 
 # 定义信号分类
 CATEGORY_MAP = {
-    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马", "重点", "终极确认", "优胜", "候选者"],
+    "跟单信号": ["跟单", "FOLLOW", "enter_queue", "WATCHING", "VALIDATED", "就绪", "入场", "BREAKOUT_STAR", "起跳新星", "low_open_pinbar", "rising_structure", "Pinbar", "结构改善", "赛马", "重点", "终极确认", "优胜", "候选者", "BUY2", "黄金坑"],
     "突破加速": ["BREAKOUT_STAR", "Fast-Track", "momentum", "breakout", "strong_auction_open", "master_momentum", "high_sideways_break", "突破", "SBC-Breakout", "🚀强势结构", "🔥趋势加速", "跟单"],
-    "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy"],
+    "买入机会": ["BREAKOUT_STAR", "ma60反转启动", "BUY", "bottom_signal", "instant_pullback", "open_is_low", "low_open_high_walk", "open_is_low_volume", "nlow_is_low_volume", "low_open_breakout", "bear_trap_reversal", "early_momentum_buy", "BUY2", "黄金坑"],
     "卖点预警": ["SELL", "EXIT", "top_signal", "high_drop", "bull_trap_exit", "momentum_failure", "风险", "警告", "卖出", "止损", "平仓"],
     "结构破位": ["SBC-Breakdown", "Breakdown", "断头铡刀", "严重破位", "跌破MA10", "跌破MA5", "结构派发", "破位", "momentum_failure", "⚠️结构破位"],
-    "V型反转": ["v_shape", "v_shape_signal", "V_SHAPE", "V反", "V型反转", "V-Shape"],
+    "V型反转": ["v_shape", "v_shape_signal", "V_SHAPE", "V反", "V型反转", "V-Shape", "BUY2", "黄金坑"],
     "其它信号": []
 }
 
@@ -3740,6 +3740,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if "⚠️" in pattern or "SELL" in pattern or "破位" in detail: 
                 return "#ff00ff"
             return "#FFD700"
+            
+        if "BUY2" in detail or "黄金坑" in detail:
+            return "#FFD700"  # 金色高亮黄金坑回调买点
             
         if "[重点]" in detail or "[重点]" in pattern: 
             return "#FFD700"
