@@ -2251,13 +2251,28 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
                 # --- 模式 B: 常规快速追加 (Copy -> Append) ---
                 if not needs_prune:
+                    only_one_table = True
                     if os.path.exists(fname_path):
+                        try:
+                            # 探测是否只含有当前的这一个 table
+                            # ⚡ [FIX] 使用系统定制的 SafeHDFStore 替代原生 pd.HDFStore，引入文件锁与全局锁保护，
+                            # 防止在 Windows 环境下与其他正在写盘的进程冲突导致 PermissionError 误置 only_one_table
+                            with SafeHDFStore(fname, mode='r') as test_store:
+                                keys = list(test_store.keys())
+                                if len(keys) > 1 or (len(keys) == 1 and ('/' + table) not in keys):
+                                    only_one_table = False
+                        except Exception:
+                            only_one_table = False
+
+                    use_write_mode = (not MultiIndex) and only_one_table
+                    if not use_write_mode and os.path.exists(fname_path):
                         shutil.copy2(fname_path, temp_fname)
                     
                     try:
                         if MultiIndex:
                             df = normalize_SCHEMA(df)
-                        with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
+                        mode_to_use = 'w' if use_write_mode else 'a'
+                        with pd.HDFStore(temp_fname, mode=mode_to_use, complib=complib) as tmp_h5:
                             put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
                     except ValueError as ve:
                         if "cannot match existing table structure" in str(ve):
