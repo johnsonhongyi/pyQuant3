@@ -38,16 +38,16 @@ class SwingStateTable(QWidget):
 
         # Table
         self.table = BaseATSTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels([
-            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "推荐理由"
+            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "DFF", "Rank", "DFF2", "DFF3", "推荐理由"
         ])
         
         # Table configuration using base widget's persistence
         self.table.setup_persistence(
             config_key="ats_swing_table_state",
-            default_widths=[90, 100, 90, 110, 110, 90, 100, 250],
-            max_widths={7: 350}
+            default_widths=[90, 100, 90, 110, 110, 90, 100, 60, 50, 60, 60, 250],
+            max_widths={11: 350}
         )
         
         self.table.setAlternatingRowColors(True)
@@ -61,14 +61,14 @@ class SwingStateTable(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
-        # Mock data: code, name, price, state, ma20_dist, limit_ups, position, reason
+        # Mock data: code, name, price, state, ma20_dist, limit_ups, position, dff, rank, dff2, dff3, reason
         mock_data = [
-            ("600519", "贵州茅台", "1650.00", "回踩中", "-0.85%", "0", "0%", "日线缩量向20日均线靠拢"),
-            ("002415", "海康威视", "32.40", "回踩企稳", "+0.15%", "1", "15%", "MA20强支撑处出现十字星K线"),
-            ("300750", "宁电时代", "185.50", "持股中", "+3.20%", "0", "20%", "回踩确认后阳线收回，多头排列"),
-            ("600111", "北方稀土", "19.25", "持股中", "+4.85%", "2", "30%", "放量冲出平台，强势上涨波段"),
-            ("000001", "平安银行", "10.45", "已平仓", "-1.50%", "0", "0%", "跌破20日均线离场信号触发"),
-            ("002594", "比亚迪", "245.00", "回踩企稳", "+0.05%", "0", "10%", "前期大涨后回踩MA20量能极度萎缩")
+            ("600519", "贵州茅台", "1650.00", "回踩中", "-0.85%", "0", "0%", "1.2", "15", "0.8", "0.5", "日线缩量向20日均线靠拢"),
+            ("002415", "海康威视", "32.40", "回踩企稳", "+0.15%", "1", "15%", "2.5", "8", "1.5", "1.0", "MA20强支撑处出现十字星K线"),
+            ("300750", "宁电时代", "185.50", "持股中", "+3.20%", "0", "20%", "4.2", "3", "2.8", "2.1", "回踩确认后阳线收回，多头排列"),
+            ("600111", "北方稀土", "19.25", "持股中", "+4.85%", "2", "30%", "5.5", "1", "3.5", "2.8", "放量冲出平台，强势上涨波段"),
+            ("000001", "平安银行", "10.45", "已平仓", "-1.50%", "0", "0%", "-1.0", "88", "-0.5", "-0.8", "跌破20日均线离场信号触发"),
+            ("002594", "比亚迪", "245.00", "回踩企稳", "+0.05%", "0", "10%", "1.8", "12", "1.2", "0.9", "前期大涨后回踩MA20量能极度萎缩")
         ]
 
         from global_favorites import GlobalFavoriteManager
@@ -118,11 +118,22 @@ class SwingStateTable(QWidget):
                     if text != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
+                elif col_idx in (7, 9, 10): # DFF, DFF2, DFF3
+                    try:
+                        val = float(text)
+                        if val > 0:
+                            item.setForeground(QColor(COLOR_UP))
+                        elif val < 0:
+                            item.setForeground(QColor(COLOR_DOWN))
+                        else:
+                            item.setForeground(QColor("#e2e2e5"))
+                    except ValueError:
+                        item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={11: 350})
         self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
@@ -177,11 +188,22 @@ class SwingStateTable(QWidget):
                     if str(text) != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
+                elif col_idx in (7, 9, 10): # DFF, DFF2, DFF3
+                    try:
+                        val = float(text)
+                        if val > 0:
+                            item.setForeground(QColor(COLOR_UP))
+                        elif val < 0:
+                            item.setForeground(QColor(COLOR_DOWN))
+                        else:
+                            item.setForeground(QColor("#e2e2e5"))
+                    except ValueError:
+                        item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={7: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={11: 350})
         self.table.setSortingEnabled(True)
 
     def _get_bold_font(self):
@@ -199,10 +221,14 @@ class SwingStateTable(QWidget):
             ma20_dist = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
             limit_ups = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
             pos = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
-            reason = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            dff = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            rank = self.table.item(row, 8).text() if self.table.item(row, 8) else ""
+            dff2 = self.table.item(row, 9).text() if self.table.item(row, 9) else ""
+            dff3 = self.table.item(row, 10).text() if self.table.item(row, 10) else ""
+            reason = self.table.item(row, 11).text() if self.table.item(row, 11) else ""
             context_info = {
                 'position': '波段回调跟踪器 (Swing Pullback Tracker)',
                 'reason': reason,
-                'status': f"MA20偏离: {ma20_dist} | 连板/新高天数: {limit_ups} | 推荐仓位: {pos} | 当前状态: {state}"
+                'status': f"MA20偏离: {ma20_dist} | 连板/新高天数: {limit_ups} | 推荐仓位: {pos} | 当前状态: {state} | DFF: {dff} | Rank: {rank}"
             }
             self.stock_double_clicked.emit(code, name, context_info)

@@ -1020,8 +1020,7 @@ class ATSMainWindow(QMainWindow):
         if 'code' in df_payload.columns:
             df_payload['code'] = df_payload['code'].astype(str).str.strip()
             df_payload.set_index('code', inplace=True)
-        elif df_payload.index.name != 'code':
-            # 如果索引不是 code，尝试将其类型转换为 str
+        else:
             df_payload.index = df_payload.index.astype(str).str.strip()
             df_payload.index.name = 'code'
 
@@ -1249,9 +1248,25 @@ class ATSMainWindow(QMainWindow):
                 hist = self.stock_history_cache[code]
                 
                 latest_close = None
+                dff_val = 0.0
+                rank_val = 0
+                dff2_val = 0.0
+                dff3_val = 0.0
+                
                 if has_df and code in self.current_df.index:
+                    import pandas as pd
                     row = self.current_df.loc[code]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
                     latest_close = float(row.get('close', row.get('price', 0.0)))
+                    try: dff_val = float(row.get('dff', 0.0))
+                    except: pass
+                    try: rank_val = int(row.get('Rank', row.get('rank', 0)))
+                    except: pass
+                    try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
+                    except: pass
+                    try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
+                    except: pass
                 elif code in self.price_pct_cache:
                     latest_close = self.price_pct_cache[code][0]
                 else:
@@ -1287,7 +1302,8 @@ class ATSMainWindow(QMainWindow):
                             break
                 
                 swing_rows.append((
-                    code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, reason
+                    code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
+                    f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", reason
                 ))
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)

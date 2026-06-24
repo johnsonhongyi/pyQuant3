@@ -78,9 +78,9 @@ class ATSSectorDetailDialog(QDialog):
         
         # Table of members
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
-            "代码", "名称", "得分", "类型", "涨幅", "起点", "DFF", "形态提示"
+            "代码", "名称", "得分", "类型", "涨幅", "起点", "DFF", "Rank", "DFF2", "DFF3", "形态提示"
         ])
         
         # Set headers left align and vertical center
@@ -145,19 +145,23 @@ class ATSSectorDetailDialog(QDialog):
                 
             # Resolve name using parent's get_stock_name if empty
             get_name_fn = None
+            current_df = None
             p = self.parent()
             while p:
                 if hasattr(p, 'get_stock_name'):
                     get_name_fn = p.get_stock_name
+                if hasattr(p, 'current_df'):
+                    current_df = p.current_df
+                if get_name_fn and current_df is not None:
                     break
                 p = p.parent()
 
             score = sec_info.get('score', 0.0)
             self.score_lbl.setText(f"强度得分: {score:.1f}")
             
-            leader_code = sec_info.get('leader', '')
+            leader_code = str(sec_info.get('leader', '')).strip()
             leader_name = sec_info.get('leader_name', '')
-            if not leader_name and get_name_fn:
+            if not leader_name and get_name_fn and leader_code:
                 leader_name = get_name_fn(leader_code)
             if not leader_name or leader_name == "未知":
                 leader_name = sec_info.get('leader_name') or leader_code
@@ -169,6 +173,21 @@ class ATSSectorDetailDialog(QDialog):
             followers = sec_info.get('followers', [])
             self.stats_lbl.setText(f"成员数: {len(followers) + (1 if leader_code else 0)} | 领涨龙头: {leader_name} ({leader_code})")
             
+            leader_rank = 0
+            leader_dff2 = 0.0
+            leader_dff3 = 0.0
+            if current_df is not None and leader_code and leader_code in current_df.index:
+                import pandas as pd
+                l_row = current_df.loc[leader_code]
+                if isinstance(l_row, pd.DataFrame):
+                    l_row = l_row.iloc[0]
+                try: leader_rank = int(l_row.get('Rank', l_row.get('rank', 0)))
+                except: pass
+                try: leader_dff2 = float(l_row.get('DFF2', l_row.get('dff2', 0.0)))
+                except: pass
+                try: leader_dff3 = float(l_row.get('DFF3', l_row.get('dff3', 0.0)))
+                except: pass
+
             # Combine leader and followers into rows list
             rows = []
             if leader_code:
@@ -180,12 +199,15 @@ class ATSSectorDetailDialog(QDialog):
                     'pct': leader_pct,
                     'start_pct': leader_pct - leader_dff,
                     'dff': leader_dff,
+                    'rank': leader_rank,
+                    'dff2': leader_dff2,
+                    'dff3': leader_dff3,
                     'pattern': '领涨先锋'
                 })
                 
             for fol in followers:
-                f_code = fol.get('code')
-                if f_code == leader_code:
+                f_code = str(fol.get('code', '')).strip()
+                if not f_code or f_code == leader_code:
                     continue
                 f_name = fol.get('name', '')
                 if not f_name and get_name_fn:
@@ -194,6 +216,21 @@ class ATSSectorDetailDialog(QDialog):
                     f_name = fol.get('name') or f_code
                 f_pct = fol.get('pct', 0.0)
                 f_dff = fol.get('dff') or fol.get('pct_diff') or 0.0
+                f_rank = 0
+                f_dff2 = 0.0
+                f_dff3 = 0.0
+                if current_df is not None and f_code in current_df.index:
+                    import pandas as pd
+                    f_row = current_df.loc[f_code]
+                    if isinstance(f_row, pd.DataFrame):
+                        f_row = f_row.iloc[0]
+                    try: f_rank = int(f_row.get('Rank', f_row.get('rank', 0)))
+                    except: pass
+                    try: f_dff2 = float(f_row.get('DFF2', f_row.get('dff2', 0.0)))
+                    except: pass
+                    try: f_dff3 = float(f_row.get('DFF3', f_row.get('dff3', 0.0)))
+                    except: pass
+                    
                 rows.append({
                     'code': f_code,
                     'name': f_name,
@@ -202,6 +239,9 @@ class ATSSectorDetailDialog(QDialog):
                     'pct': f_pct,
                     'start_pct': f_pct - f_dff,
                     'dff': f_dff,
+                    'rank': f_rank,
+                    'dff2': f_dff2,
+                    'dff3': f_dff3,
                     'pattern': fol.get('pattern_hint', '')
                 })
                 
@@ -264,10 +304,35 @@ class ATSSectorDetailDialog(QDialog):
                     dff_item.setForeground(QColor("#33cc5a"))
                 self.table.setItem(row_idx, 6, dff_item)
                 
-                # 7. Pattern
+                # 7. Rank
+                rank_item = NumericTableWidgetItem(str(r['rank']))
+                rank_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 7, rank_item)
+                
+                # 8. DFF2
+                dff2_val = r['dff2']
+                dff2_item = NumericTableWidgetItem(f"{dff2_val:+.2f}%")
+                dff2_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if dff2_val > 0.001:
+                    dff2_item.setForeground(QColor("#ff4444"))
+                elif dff2_val < -0.001:
+                    dff2_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 8, dff2_item)
+                
+                # 9. DFF3
+                dff3_val = r['dff3']
+                dff3_item = NumericTableWidgetItem(f"{dff3_val:+.2f}%")
+                dff3_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if dff3_val > 0.001:
+                    dff3_item.setForeground(QColor("#ff4444"))
+                elif dff3_val < -0.001:
+                    dff3_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 9, dff3_item)
+                
+                # 10. Pattern
                 pat_item = QTableWidgetItem(str(r['pattern'] or '--'))
                 pat_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 7, pat_item)
+                self.table.setItem(row_idx, 10, pat_item)
                 
             self.table.setSortingEnabled(True)
             self.table.resizeColumnsToContents()
