@@ -606,21 +606,40 @@ def generate_simple_vect_features(df):
 
 
 def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
-    """通过命名管道发送股票代码"""
+    """通过命名管道发送股票代码 (带 busy/not_found 重试机制)"""
     import win32file
+    import win32pipe
+    import winerror
+    import pywintypes
     import json
+    import time
     if isinstance(code, dict):
         code = json.dumps(code, ensure_ascii=False)
-    try:
-        handle = win32file.CreateFile(
-            pipe_name, win32file.GENERIC_WRITE, 0, None,
-            win32file.OPEN_EXISTING, 0, None
-        )
-        win32file.WriteFile(handle, code.encode("utf-8"))
-        win32file.CloseHandle(handle)
-        return True
-    except Exception as e:
-        logger.info(f"发送数据到管道失败: {e}")
+    payload = code.encode("utf-8")
+    for attempt in range(5):
+        try:
+            handle = win32file.CreateFile(
+                pipe_name, win32file.GENERIC_WRITE, 0, None,
+                win32file.OPEN_EXISTING, 0, None
+            )
+            win32file.WriteFile(handle, payload)
+            win32file.CloseHandle(handle)
+            return True
+        except pywintypes.error as e:
+            if e.winerror == winerror.ERROR_PIPE_BUSY:
+                try:
+                    win32pipe.WaitNamedPipe(pipe_name, 1000)
+                    continue
+                except Exception:
+                    pass
+            elif e.winerror == winerror.ERROR_FILE_NOT_FOUND:
+                time.sleep(0.5)
+                continue
+            logger.info(f"发送数据到管道失败 (尝试 {attempt+1}): {e}")
+            break
+        except Exception as e:
+            logger.info(f"发送数据到管道未知失败 (尝试 {attempt+1}): {e}")
+            break
     return False
 
 

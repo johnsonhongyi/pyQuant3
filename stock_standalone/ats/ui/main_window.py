@@ -650,6 +650,36 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
 
+        # 4. Periodically request full sync if data is empty (cold start) or if we haven't received pushed data for > 10 minutes during trading hours
+        import time
+        now = time.time()
+        should_sync = False
+        if not hasattr(self, "current_df") or self.current_df is None or self.current_df.empty:
+            # 即使冷启动数据为空，也限制至少 15 秒请求一次，防止数据传输中高频重发导致堵塞
+            if now - getattr(self, "_last_pipe_sync_t", 0) > 15:
+                should_sync = True
+        else:
+            # 只有在交易时间段，且超过 10 分钟（600秒）没有收到更新时才手动请求一次，防止高频请求导致 TK 后台持续发送
+            try:
+                import commonTips as cct
+                is_work = cct.get_work_time()
+            except Exception:
+                is_work = False
+            
+            if is_work and (now - getattr(self, "_last_recv_t", 0) > 600):
+                if now - getattr(self, "_last_pipe_sync_t", 0) > 60:
+                    should_sync = True
+            
+        if should_sync:
+            self._last_pipe_sync_t = now
+            try:
+                from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                import logging
+                local_logger = logging.getLogger("ATS")
+                send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+            except Exception as e:
+                print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
+
     def _update_name_cache_from_df(self, df):
         if df is not None and not df.empty and 'name' in df.columns:
             try:
@@ -975,6 +1005,17 @@ class ATSMainWindow(QMainWindow):
                     signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
                 )
                 self._listener_started = True
+                
+                # Trigger immediate sync upon listener startup
+                try:
+                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                    import logging
+                    import time
+                    local_logger = logging.getLogger("ATS")
+                    self._last_pipe_sync_t = time.time()  # 初始化时间戳，防止 heartbeat 瞬间重复请求
+                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                except Exception as e:
+                    print(f"[ATSMainWindow] Startup failed to send REQ_FULL_SYNC: {e}")
  
         except Exception as e:
             print(f"[ATSMainWindow] Error loading SQLite data: {e}")
@@ -1015,14 +1056,15 @@ class ATSMainWindow(QMainWindow):
         if df_payload is None or not isinstance(df_payload, pd.DataFrame) or df_payload.empty:
             return
 
-        # 2. 将提取出的 DataFrame 强制转换为以 code 字符串作为 index
-        df_payload = df_payload.copy()
-        if 'code' in df_payload.columns:
-            df_payload['code'] = df_payload['code'].astype(str).str.strip()
-            df_payload.set_index('code', inplace=True)
-        else:
-            df_payload.index = df_payload.index.astype(str).str.strip()
-            df_payload.index.name = 'code'
+        # 2. 将提取出的 DataFrame 强制转换为以 code 字符串作为 index (如果后台没有预先处理)
+        if not (df_payload.index.name == 'code' and df_payload.index.dtype == object):
+            df_payload = df_payload.copy()
+            if 'code' in df_payload.columns:
+                df_payload['code'] = df_payload['code'].astype(str).str.strip()
+                df_payload.set_index('code', inplace=True)
+            else:
+                df_payload.index = df_payload.index.astype(str).str.strip()
+                df_payload.index.name = 'code'
 
         # 3. 处理全量/增量更新
         if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
@@ -1069,6 +1111,9 @@ class ATSMainWindow(QMainWindow):
             
             self.refresh_realtime_ui()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
+            import time
+            self._last_recv_t = time.time()
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
 
     def _async_load_stock_prices(self, codes):
         if not codes:
@@ -1281,11 +1326,14 @@ class ATSMainWindow(QMainWindow):
                 else:
                     close_series.append(latest_close)
                     
-                # Calc rolling MA
-                import pandas as pd
-                close_pd = pd.Series(close_series)
-                ma20_series = close_pd.rolling(20, min_periods=1).mean().tolist()
-                ma5_series = close_pd.rolling(5, min_periods=1).mean().tolist()
+                # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
+                ma20_series = []
+                ma5_series = []
+                for i in range(len(close_series)):
+                    sub20 = close_series[max(0, i - 19) : i + 1]
+                    ma20_series.append(sum(sub20) / len(sub20))
+                    sub5 = close_series[max(0, i - 4) : i + 1]
+                    ma5_series.append(sum(sub5) / len(sub5))
                 
                 # Update state machine
                 state, dev_str, position, reason = self.swing_tracker.update_stock_state(

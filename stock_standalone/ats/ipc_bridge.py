@@ -90,7 +90,7 @@ class IPCBridge:
                 
                 data = b""
                 while len(data) < length:
-                    packet = conn.recv(min(length - len(data), 4096))
+                    packet = conn.recv(min(length - len(data), 65536))
                     if not packet:
                         break
                     data += packet
@@ -100,6 +100,31 @@ class IPCBridge:
                     if isinstance(payload, tuple) and len(payload) >= 2:
                         cmd, body = payload[0], payload[1]
                         if cmd == 'UPDATE_DF_DATA' and data_callback:
+                            # 在后台线程预先处理 DataFrame 的索引以减轻 UI 线程负担
+                            if isinstance(body, pd.DataFrame) and not body.empty:
+                                try:
+                                    body = body.copy()
+                                    if 'code' in body.columns:
+                                        body['code'] = body['code'].astype(str).str.strip()
+                                        body.set_index('code', inplace=True)
+                                    else:
+                                        body.index = body.index.astype(str).str.strip()
+                                        body.index.name = 'code'
+                                except Exception as preprocess_err:
+                                    print(f"[IPCBridge] Background DataFrame preprocess error: {preprocess_err}")
+                            # 立即在后台线程（不受 UI 渲染卡顿影响）告知 TK 停止发送，清除发送状态
+                            try:
+                                import sys
+                                from sys_utils import get_app_root
+                                root = get_app_root()
+                                if root not in sys.path:
+                                    sys.path.insert(0, root)
+                                from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                                import logging
+                                local_logger = logging.getLogger("ATS_Bridge")
+                                send_code_via_pipe({"cmd": "ATS_RECEIVED"}, local_logger, PIPE_NAME_TK)
+                            except Exception as pipe_err:
+                                print(f"[IPCBridge] Failed to send ATS_RECEIVED: {pipe_err}")
                             data_callback(body)
                         elif cmd == 'SIGNAL' and signal_callback:
                             signal_callback(body)
