@@ -205,7 +205,7 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                     from JSONData import sina_data
                 except ImportError:
                     from stock_standalone.JSONData import sina_data
-                sina = sina_data.Sina()
+                sina = sina_data.Sina(readonly=True)
                 logger.info(f"📡 正在从 Sina 获取 {code} 实时数据 (limit_time={limit_time})...")
                 stock_df = sina.get_real_time_tick(code, l_limit_time=limit_time, enrich_data=True)
                 if stock_df is None or stock_df.empty:
@@ -272,7 +272,7 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                         from JSONData import sina_data
                     except ImportError:
                         from stock_standalone.JSONData import sina_data
-                    sina = sina_data.Sina()
+                    sina = sina_data.Sina(readonly=True)
                     sina_df = sina.get_real_time_tick(code, enrich_data=True)
                     if sina_df is not None and not sina_df.empty:
                         logger.info(f"⚡ [Sina] Successfully retrieved {len(sina_df)} ticks for backup.")

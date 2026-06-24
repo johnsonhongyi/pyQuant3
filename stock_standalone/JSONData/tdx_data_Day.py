@@ -4461,9 +4461,9 @@ def get_sina_data_cname(cname,index=False):
 def get_sina_data_code(code,index=False):
     # index_status=False
     if not index:
-        cname = sina_data.Sina().get_code_cname(code)
+        cname = sina_data.Sina(readonly=True).get_code_cname(code)
     else:
-        cname = sina_data.Sina().get_stock_code_data(code,index=index).name[0]
+        cname = sina_data.Sina(readonly=True).get_stock_code_data(code,index=index).name[0]
     return cname
 
 def get_sina_datadf_cnamedf(code,df,index=False,categorylimit=16):
@@ -4509,7 +4509,7 @@ def getSinaIndexdf():
 
 tdxbkdict={'近期新高':'880865','近期异动':'880884'}
 
-def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
+def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False, readonly=True):
     ### Sina获取 Ratio 和tdx数据
     with timed_ctx("getSinaAlldf", warn_ms=1000):
         print("initdx", end=' ')
@@ -4529,7 +4529,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         m_mark=[]
     if isinstance(market, list):
         code_l = market 
-        df = sina_data.Sina().get_stock_list_data(code_l)
+        df = sina_data.Sina(readonly=readonly).get_stock_list_data(code_l)
 
     elif market == 'rzrq':
 
@@ -4537,7 +4537,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         code_l = cct.read_to_blocknew('068')
         code_l.extend(df.code.tolist())
         code_l = list(set(code_l))
-        df = sina_data.Sina().get_stock_list_data(code_l)
+        df = sina_data.Sina(readonly=readonly).get_stock_list_data(code_l)
 
     elif market == 'cx':
         df = cct.get_rzrq_code(market)
@@ -4553,7 +4553,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     elif market == 'index':
             # blkname = '061.blk'
         # df = sina_data.Sina().get_stock_code_data('999999,399001,399006',index=True)
-        df = sina_data.Sina().get_stock_code_data(['999999', '399006', '399001'], index=True)
+        df = sina_data.Sina(readonly=readonly).get_stock_code_data(['999999', '399006', '399001'], index=True)
 
     # elif market.lower().find('indb') >=0 :
     #         # blkname = '061.blk'
@@ -4569,7 +4569,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             # blkname = '061.blk'
 
         code_l = cct.read_to_blocknew(market)
-        df = sina_data.Sina().get_stock_list_data(code_l)
+        df = sina_data.Sina(readonly=readonly).get_stock_list_data(code_l)
 
         # if len(code_l) > 0:
         #     df = sina_data.Sina().get_stock_list_data(code_l)
@@ -4579,10 +4579,10 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         # df = pd.read_csv(block_path,dtype={'code':str},encoding = 'gbk')
     elif market in ['kcb','sh', 'sz', 'cyb' ,'kcb' ,'bj']:
         # df = rl.get_sina_Market_json(market)
-        df = sina_data.Sina().market(market)
+        df = sina_data.Sina(readonly=readonly).market(market)
         # df = sina_data.Sina().market(market)
     elif market in ['all','bj']:
-        df = sina_data.Sina().all
+        df = sina_data.Sina(readonly=readonly).all
         if market in ['bj']:
             co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92'))]
             df = df.loc[co_inx]
@@ -4591,7 +4591,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
 
     elif market in tdxbkdict.keys():
         codelist = tdxbk.get_tdx_gn_block_code(tdxbkdict[market])
-        df = sina_data.Sina().get_stock_list_data(codelist)
+        df = sina_data.Sina(readonly=readonly).get_stock_list_data(codelist)
     else:
         if filename == 'cxg':
             df = wcd.get_wcbk_df(filter=market, market=filename,
@@ -4601,7 +4601,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
                                  perpage=1000, days=ct.wcd_limit_day,monitor=True)
         if 'code' in df.columns:
             df = df.set_index('code')
-        df = sina_data.Sina().get_stock_list_data(df.index.tolist())
+        df = sina_data.Sina(readonly=readonly).get_stock_list_data(df.index.tolist())
 
 
     if isinstance(df, pd.DataFrame) and 'code' in df.columns:
@@ -4617,7 +4617,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             dfw_codel = dfw.index.tolist()
         else:
             dfw_codel = m_0
-        dfw = sina_data.Sina().get_stock_list_data(dfw_codel)
+        dfw = sina_data.Sina(readonly=readonly).get_stock_list_data(dfw_codel)
         df = cct.combine_dataFrame(df,dfw,append=True)
         codelist = df.index.astype(str).tolist()
         

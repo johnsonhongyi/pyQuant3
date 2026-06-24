@@ -13,7 +13,7 @@ def test_enrich():
     code = '688787'
     print(f"Testing enrich_data for {code}...")
     try:
-        sina = sina_data.Sina()
+        sina = sina_data.Sina(readonly=True)
         # Test real-time fetch with enrichment
         df = sina.get_real_time_tick(code, enrich_data=True, debug=True)
         

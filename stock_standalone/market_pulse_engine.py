@@ -114,7 +114,7 @@ class DailyPulseEngine:
         try:
             # Synchronize with MonitorTK's successful implementation
             from JSONData import sina_data
-            sina = sina_data.Sina()
+            sina = sina_data.Sina(readonly=True)
             # [KEY CHANGE] Use get_stock_list_data which performs internal mapping
             idf = sina.get_stock_list_data(idx_codes, index=True)
             if idf is not None and not idf.empty:

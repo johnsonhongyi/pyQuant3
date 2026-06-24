@@ -606,7 +606,7 @@ class ATSMainWindow(QMainWindow):
         if df_row is None:
             try:
                 from JSONData import sina_data
-                tick_df = sina_data.Sina().get_real_time_tick(code_clean, enrich_data=True)
+                tick_df = sina_data.Sina(readonly=True).get_real_time_tick(code_clean, enrich_data=True)
                 if tick_df is not None and not tick_df.empty:
                     df_row = tick_df.iloc[0].to_dict()
                     
@@ -1087,7 +1087,7 @@ class ATSMainWindow(QMainWindow):
         def worker():
             try:
                 from JSONData import sina_data
-                s = sina_data.Sina()
+                s = sina_data.Sina(readonly=True)
                 
                 valid_codes = [c for c in codes_to_load if c and len(c) == 6]
                 if not valid_codes:

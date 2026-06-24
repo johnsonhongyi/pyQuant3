@@ -441,7 +441,7 @@ class StockLiveStrategy:
         self._market_win_rate_ts: float
         self.scan_hot_concepts_status: bool
         self.shadow_engine: IntradayDecisionEngine
-        self._sina_data = sina_data.Sina()
+        self._sina_data = sina_data.Sina(readonly=True)
         self._voice = VoiceAnnouncer()
         self.voice_announcer = self._voice # Alias for backward compatibility
         self.voice_enabled = voice_enabled

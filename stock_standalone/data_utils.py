@@ -2141,7 +2141,8 @@ def _handle_init_tdx(
         top_now = tdd.getSinaAlldf(
             market=market,
             vol=ct.json_countVol,
-            vtype=ct.json_countType
+            vtype=ct.json_countType,
+            readonly=False
         )
 
         resamples = ['d','2d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
@@ -2286,13 +2287,15 @@ def _run_main_pipeline(
             top_now = tdd.getSinaAlldf(
                 market=indf.code.tolist(),
                 vol=ct.json_countVol,
-                vtype=ct.json_countType
+                vtype=ct.json_countType,
+                readonly=False
             )
         else:
             top_now = tdd.getSinaAlldf(
                 market=market,
                 vol=ct.json_countVol,
-                vtype=ct.json_countType
+                vtype=ct.json_countType,
+                readonly=False
             )
 
     if top_now.empty:
@@ -2676,7 +2679,8 @@ def fetch_and_process(
                 top_now = tdd.getSinaAlldf(
                     market=market,
                     vol=ct.json_countVol,
-                    vtype=ct.json_countType
+                    vtype=ct.json_countType,
+                    readonly=False
                 )
                 
                 init_res_m = resample
@@ -2748,11 +2752,11 @@ def fetch_and_process(
                     indf = get_indb_df()
                     stock_code_list = indf.code.tolist()
                 
-                    top_now = tdd.getSinaAlldf(market=stock_code_list,vol=ct.json_countVol, vtype=ct.json_countType)
+                    top_now = tdd.getSinaAlldf(market=stock_code_list,vol=ct.json_countVol, vtype=ct.json_countType, readonly=False)
             else:
                 with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
                 
-                    top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+                    top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType, readonly=False)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")
                 time.sleep(duration_sleep_time)
