@@ -28,7 +28,7 @@ def test_real_data_injection(code='600000'):
 
         # 2. 获取实时 Tick 数据 (模拟日内最新 OHLC)
         with data_utils.timed_ctx("get_real_time_tick", warn_ms=800):
-            tick_df = sina_data.Sina().get_real_time_tick(code)
+            tick_df = sina_data.Sina(readonly=True).get_real_time_tick(code)
             
         if tick_df is None or tick_df.empty:
             print("未能获取到实时 Tick")

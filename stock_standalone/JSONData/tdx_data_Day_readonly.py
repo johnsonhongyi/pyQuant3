@@ -3293,10 +3293,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 
     if dm is None and end is None:
         if index_status:
-            dm = sina_data.Sina().get_stock_code_data(code, index=index_status)
+            dm = sina_data.Sina(readonly=True).get_stock_code_data(code, index=index_status)
 
         else:
-            dm = sina_data.Sina().get_stock_code_data(code)
+            dm = sina_data.Sina(readonly=True).get_stock_code_data(code)
 
 
     if df is not None and len(df) > 0:
@@ -3563,10 +3563,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         # if dm is None and today != df.index[-1]:
         # log.warn('today != end:%s'%(df.index[-1]))
         if index_status:
-            dm = sina_data.Sina().get_stock_code_data(code, index=index_status)
+            dm = sina_data.Sina(readonly=True).get_stock_code_data(code, index=index_status)
             # dm = dm.set_index('code')
         else:
-            dm = sina_data.Sina().get_stock_code_data(code)
+            dm = sina_data.Sina(readonly=True).get_stock_code_data(code)
     if len(df) != 0 and duration == 0:
         writedm = False
     else:
@@ -3607,7 +3607,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             if code in dm.index:
                 dm = dm.loc[code, :].to_frame().T
             else:
-                dm = sina_data.Sina().get_stock_code_data(code)
+                dm = sina_data.Sina(readonly=True).get_stock_code_data(code)
                 if dm is None or len(dm) == 0:
                     log.error("code is't find:%s" % (code))
                     return df
@@ -3967,7 +3967,7 @@ def Write_tdx_all_to_hdf(market, h5_fname='tdx_all_df', h5_table='all', dl=300, 
     for ma in mlist:
         dd = pd.DataFrame()
         if not index:
-            df = sina_data.Sina().market(ma)
+            df = sina_data.Sina(readonly=True).market(ma)
             dfcode = df.index.tolist()
         else:
             dfcode = market
@@ -4099,11 +4099,11 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
         for mk in mlist:
             time_t = time.time()
             if not index:
-                df = sina_data.Sina().market(mk)
+                df = sina_data.Sina(readonly=True).market(mk)
                 if 'b1' in df.columns:
                     df = df[(df.b1 > 0) | (df.a1 > 0)]
             else:
-                df = sina_data.Sina().get_stock_list_data(market)
+                df = sina_data.Sina(readonly=True).get_stock_list_data(market)
             allcount = len(df)
             # df = rl.get_sina_Market_json(mk)
             # print df.loc['600581']
@@ -4228,7 +4228,7 @@ def search_Tdx_multi_data_duration(fname='tdx_all_df_300', table='all_300', df=N
 def check_tdx_Exp_day_duration(market='all'):
     duration_zero=[]
     duration_other=[]
-    df = sina_data.Sina().market(market)
+    df = sina_data.Sina(readonly=True).market(market)
     df = df[df.high > 0]    
     for code in df.index:
         dd = get_tdx_Exp_day_to_df(code, dl=1) 
@@ -4243,7 +4243,7 @@ def check_tdx_Exp_day_duration(market='all'):
     return duration_other
 
 def write_market_index_to_df():
-    dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
+    dm_index = sina_data.Sina(readonly=True).get_stock_list_data(tdx_index_code_list,index=True)
     for inx in tdx_index_code_list:
         log.info(f'write index append to df:{inx}')
         get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
@@ -4295,7 +4295,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc
     if len(duration_code) > 0:
         for mk in mlist:
             time_t = time.time()
-            df = sina_data.Sina().market(mk)
+            df = sina_data.Sina(readonly=True).market(mk)
 
             if df is None or len(df) < 10:
                 print("dsina_data f is None")
@@ -4351,7 +4351,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc
 
     if market == 'all':
 
-        dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
+        dm_index = sina_data.Sina(readonly=True).get_stock_list_data(tdx_index_code_list,index=True)
         for inx in tdx_index_code_list:
             get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
         print("")
@@ -4390,7 +4390,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
     today = cct.get_today()
     if dm is None and (today != df.index[-1] or df.vol[-1] < df.vol[-2] * 0.8)and (cct.get_now_time_int() < 830 or cct.get_now_time_int() > 930):
 
-        dm = sina_data.Sina().get_stock_code_data(code)
+        dm = sina_data.Sina(readonly=True).get_stock_code_data(code)
 
     if dm is not None and df is not None and not dm.empty:
 
@@ -4445,17 +4445,17 @@ def get_sina_data_df(code,index=False):
 
     if isinstance(code, list):
         if len(code) > 0:
-            dm = sina_data.Sina().get_stock_list_data(code,index=index)
+            dm = sina_data.Sina(readonly=True).get_stock_list_data(code,index=index)
         else:
             dm=[]
             log.error("code is None:%s"%(code))
     else:
-        dm = sina_data.Sina().get_stock_code_data(code,index=index)
+        dm = sina_data.Sina(readonly=True).get_stock_code_data(code,index=index)
     return dm
 
 def get_sina_data_cname(cname,index=False):
     # index_status=False
-    code = sina_data.Sina().get_cname_code(cname)
+    code = sina_data.Sina(readonly=True).get_cname_code(cname)
     return code
 
 def get_sina_data_code(code,index=False):
@@ -4675,7 +4675,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     time_s = time.time()
 
     if not market_all and market != 'index':
-        dm = sina_data.Sina().get_stock_list_data(codelist)
+        dm = sina_data.Sina(readonly=readonly).get_stock_list_data(codelist)
     else:
         dm = df
 
@@ -8291,7 +8291,7 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
     # df=search_Tdx_multi_data_duration()
     #test Jupyter bug
-    code_list = sina_data.Sina().market('all').index.tolist()
+    code_list = sina_data.Sina(readonly=True).market('all').index.tolist()
     df=search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start='20150501', end=None, freq=None, col=None, index='date')
     code_uniquelist=df.index.get_level_values('code').unique()
     code_select = code_uniquelist[random.randint(0,len(code_uniquelist)-1)]

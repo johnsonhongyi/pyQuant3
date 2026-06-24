@@ -1,3 +1,9 @@
+## 2026-06-24 18:40
+- [x] **全面将非 TK 主程序中加载 `sina_data` 获取数据的实例升级为只读模式 (Upgraded non-Tk main programs loading sina_data to Read-Only)**：
+    - [x] **升级 `realtime_data_service.py` 内部 `Sina` 行情实例**：将 `backfill_gaps_from_hdf5` 缓存清理处 `sina_data.Sina().clear_unified_cache(...)` 及 `recover_from_hdf5_by_codes` 数据精准恢复处 `sina_data.Sina()` 实例化全部升级为只读模式的 `Sina(readonly=True)`，彻底消除了缺口补全和数据精准恢复时由于修改时间 `mtime` 变动导致的文件独占和频繁 I/O 问题。
+    - [x] **升级 `instock_MonitorTK.py` 定期 GC 自愈清理中 `Sina` 实例**：将一小时定期 `controlled_gc_loop` 内存/句柄自愈清理循环中调用 `clear_unified_cache` 的 `Sina()` 实例化修改为 `Sina(readonly=True)`。
+    - [x] **完成 Python 语法编译与无错验证 (Passed Syntax & Compiler Checks)**：执行了 `py_compile` 对修改后的所有 Python 模块进行了无错编译检查，保障系统长效稳定。
+
 ## 2026-06-24 18:30
 - [x] **修复由于 SafeHDFStore 底层漏传 mode 参数导致 HDF5 只读模式失效及物理修改时间变动 Bug (Fixed Read-Only Mode Ineffectiveness & HDF5 mtime Alteration Bug)**：
     - [x] **根治 SafeHDFStore constructor 中底层 pandas HDFStore 漏传 mode 参数之缺陷 (Fixed Missing mode Parameter in SafeHDFStore Constructor)**：在 `tdx_hdf5_api.py` 的 `SafeHDFStore` 类的构造函数中，修复了在调用 `super().__init__` 实例化底层 `pd.HDFStore` 时未显式传入 `mode=self.mode` 的问题。在此之前，底层的 pandas 引擎因为缺省退化为默认的 `'a'` (追加/写) 模式，即使上层以只读 `'r'` 模式实例化，仍然会以写方式打开 HDF5 文件。这导致在 Windows 系统中，一旦读取文件，其物理修改时间 `mtime` 在文件关闭时都会被强制触碰更新，进而破坏了基于文件修改时间戳的内存缓存匹配机制，产生极其频繁的 HDF5 读盘开销。现通过补齐 `mode=self.mode`，让只读模式在底层真正生效，物理修改时间绝不再变动。

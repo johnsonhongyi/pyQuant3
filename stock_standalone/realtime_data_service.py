@@ -929,7 +929,7 @@ class MinuteKlineCache:
         """
         try:
             from JSONData import sina_data
-            sina = sina_data.Sina()
+            sina = sina_data.Sina(readonly=True)
             # 💡 [USER HINT] 使用 enrich_data=True 获取当日完整轨迹
             tick_df = sina.get_real_time_tick(code, enrich_data=True)
             
@@ -3161,7 +3161,7 @@ class DataPublisher:
 
             # [MEMORY OPTIMIZE] 仅清理缓存引用，避免频繁 GC 导致 UI 卡顿，真正 GC 延迟到统一 GC 循环中
             from JSONData import sina_data
-            sina_data.Sina().clear_unified_cache(force_gc=False)
+            sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
             
         except Exception as e:
             logger.error(f"backfill_gaps error: {e}")
@@ -3169,7 +3169,7 @@ class DataPublisher:
     def recover_from_hdf5_by_codes(self, code_list: list[str]) -> pd.DataFrame:
         """从 HDF5 精准恢复指定代码的数据"""
         from JSONData import sina_data
-        sina = sina_data.Sina()
+        sina = sina_data.Sina(readonly=True)
         # 获取全量 MultiIndex 缓存数据 (已内部管理 SingleFlight 与 L6 缓存)
         h5_mi = sina.get_sina_MultiIndex_data()
         

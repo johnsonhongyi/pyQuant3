@@ -23,7 +23,7 @@ def benchmark():
     print(f"--- Benchmarking {code} ---")
     
     # 1. 获取数据
-    sina = sina_data.Sina()
+    sina = sina_data.Sina(readonly=True)
     day_df = tdd.get_tdx_Exp_day_to_df(code, dl=60)
     tick_df = sina.get_real_time_tick(code, enrich_data=True)
     
@@ -37,11 +37,11 @@ def benchmark():
     print("\n[Testing sbc_core.run_sbc_analysis_core]")
     
     # 2.1 Before optimization (no object reuse)
-    start_time = time.time()
+    start_time = time.perf_counter()
     iterations = 20
     for i in range(iterations):
         _ = sbc_core.run_sbc_analysis_core(code, day_df, tick_df, verbose=False)
-    no_reuse_time = (time.time() - start_time) / iterations
+    no_reuse_time = (time.perf_counter() - start_time) / iterations
     print(f"Average time (NO object reuse): {no_reuse_time*1000:.2f} ms")
     
     # 2.2 After optimization (with object reuse)
@@ -50,22 +50,26 @@ def benchmark():
     engine = IntradayDecisionEngine()
     baseline = DailyEmotionBaseline()
     
-    start_time = time.time()
+    start_time = time.perf_counter()
     for i in range(iterations):
         _ = sbc_core.run_sbc_analysis_core(code, day_df, tick_df, verbose=False, engine=engine, baseline_loader=baseline)
-    reuse_time = (time.time() - start_time) / iterations
+    reuse_time = (time.perf_counter() - start_time) / iterations
     print(f"Average time (WITH object reuse): {reuse_time*1000:.2f} ms")
     print(f"SBC Speedup (Object Reuse): {(no_reuse_time/reuse_time - 1)*100:.1f}%")
 
     # 3. Simulate Cache Hit (MainWindow)
     print("\n[Testing Cache Hit Simulation]")
-    start_time = time.time()
-    for i in range(iterations):
+    start_time = time.perf_counter()
+    cache_iterations = 100000  # Increase iterations for cache hit to get a measurable elapsed time
+    for i in range(cache_iterations):
         # Cache hit simulation: O(1) dictionary lookup
         _ = [] # mock signals
-    cache_hit_time = (time.time() - start_time) / iterations
+    cache_hit_time = (time.perf_counter() - start_time) / cache_iterations
     print(f"Average time (CACHE HIT): {cache_hit_time*1000:.6f} ms")
-    print(f"Overall Speedup for Static View: {(no_reuse_time/cache_hit_time):.0f}x")
+    if cache_hit_time > 0:
+        print(f"Overall Speedup for Static View: {(no_reuse_time/cache_hit_time):.0f}x")
+    else:
+        print("Overall Speedup for Static View: Inf x (Cache hit too fast to measure)")
 
 if __name__ == "__main__":
     benchmark()

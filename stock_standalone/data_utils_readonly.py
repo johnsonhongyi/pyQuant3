@@ -2141,8 +2141,7 @@ def _handle_init_tdx(
         top_now = tdd.getSinaAlldf(
             market=market,
             vol=ct.json_countVol,
-            vtype=ct.json_countType,
-            readonly=False
+            vtype=ct.json_countType
         )
 
         resamples = ['d','2d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
@@ -2287,15 +2286,13 @@ def _run_main_pipeline(
             top_now = tdd.getSinaAlldf(
                 market=indf.code.tolist(),
                 vol=ct.json_countVol,
-                vtype=ct.json_countType,
-                readonly=False
+                vtype=ct.json_countType
             )
         else:
             top_now = tdd.getSinaAlldf(
                 market=market,
                 vol=ct.json_countVol,
-                vtype=ct.json_countType,
-                readonly=False
+                vtype=ct.json_countType
             )
 
     if top_now.empty:

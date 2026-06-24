@@ -6703,7 +6703,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 5. 清理 Sina 内存缓存引用，确保 HDF5 大缓存被彻底丢弃回收
             try:
                 from JSONData import sina_data
-                sina_data.Sina().clear_unified_cache(force_gc=False)
+                sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
             except Exception as gc_err:
                 logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
 

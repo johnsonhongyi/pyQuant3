@@ -1404,7 +1404,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     def get_major_indices(self, **kwargs) -> pd.DataFrame:
         """获取主要指数 (上证, 深证, 创业板, 科创板)"""
         import JSONData.sina_data as sina_data
-        return sina_data.Sina().get_major_indices()
+        return sina_data.Sina(readonly=True).get_major_indices()
 
     # --------- URL 构建 ---------
     url_list = []
