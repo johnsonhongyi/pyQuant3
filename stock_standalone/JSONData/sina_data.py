@@ -2135,7 +2135,7 @@ class Sina:
         """兼容性包装：使用统一缓存获取 MultiIndex 数据"""
         return self._load_hdf_hist_unified()
 
-    def clear_unified_cache(self, table: str = None):
+    def clear_unified_cache(self, table: str = None, force_gc: bool = True):
         """
         [OPTIMIZATION] 主动清理千万级行的 MultiIndex HDF5 内存缓存。
         专为长时间运行的长驻 UI 进程设计，在回补历史数据完毕后应强制调用此方法释放 500MB+ 的 DataFrame，
@@ -2150,9 +2150,14 @@ class Sina:
                     cleared_any = True
         
         if cleared_any:
-            log.info(f"🧹 Sina._MEM_CACHE cleared for {table_keys}. Forcing GC...")
-            import gc
-            gc.collect()
+            if force_gc:
+                log.info(f"🧹 Sina._MEM_CACHE cleared for {table_keys}. Forcing GC...")
+                import gc
+                gc.collect()
+            else:
+                log.info(f"🧹 Sina._MEM_CACHE cleared for {table_keys}. GC deferred to unified loop.")
+        else:
+            log.debug(f"🧹 Sina._MEM_CACHE has no cache for {table_keys} to clear.")
 
     # def get_code_df_fast(h5_hist: pd.DataFrame, code: str, debug=False) -> pd.DataFrame:
     #     """

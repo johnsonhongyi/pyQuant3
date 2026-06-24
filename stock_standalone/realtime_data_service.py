@@ -2639,6 +2639,17 @@ class DataPublisher:
         self.max_batch_time = 0.0
         self.batch_rates_dq = deque(maxlen=10) # Last 10 batch rates (rows/sec)
         self.data_version = 0
+        self.backfilled_codes_today = set()
+        self._last_backfill_date = ""
+        self.bad_gap_codes_path = os.path.join(get_app_root(), 'datacsv', 'backfill_bad_codes.json')
+        self.bad_gap_codes = set()
+        if os.path.exists(self.bad_gap_codes_path):
+            try:
+                with open(self.bad_gap_codes_path, 'r', encoding='utf-8') as f:
+                    self.bad_gap_codes = set(json.load(f))
+                logger.info(f"💾 Loaded {len(self.bad_gap_codes)} bad gap codes from {self.bad_gap_codes_path}")
+            except Exception as e:
+                logger.error(f"Error loading bad gap codes: {e}")
         
         self._last_save_ts = self.start_time  # [FIX] Prevent immediate save on startup
 
@@ -3110,7 +3121,7 @@ class DataPublisher:
             logger.error(traceback.format_exc())
             return pd.DataFrame()
 
-    def backfill_gaps_from_hdf5(self, code_list: list[str]):
+    def backfill_gaps_from_hdf5(self, code_list: list[str], threshold: int = 200):
         """
         针对特定缺口个股执行精准补全 (离线 HDF5 路径)
         """
@@ -3120,13 +3131,37 @@ class DataPublisher:
             # 1. 从 HDF5 抓取这些代码的历史全量
             h5_df = self.recover_from_hdf5_by_codes(code_list)
             if h5_df is not None and not h5_df.empty:
-                logger.debug(f"📡 Backfilling gaps for {len(code_list)} codes from HDF5...")
+                logger.info(f"📡 Backfilling gaps for {len(code_list)} codes from HDF5...")
                 self.kline_cache.from_dataframe(h5_df, merge=True)
                 self.data_version += 1
                 
-            # [MEMORY OPTIMIZE] 强制清理刚刚被拉入内存的 1GB HDF5 轨迹，避免 TK UI 程序常驻内存暴涨
+            # 2. 判定回补后依然达不到阈值的异常/停牌个股并写入持久化
+            bad_codes_detected = []
+            with self.kline_cache._lock:
+                for code in code_list:
+                    cnt = len(self.kline_cache._shared_cache.get(code, []))
+                    if cnt < threshold:
+                        bad_codes_detected.append(code)
+            
+            if bad_codes_detected:
+                new_added = False
+                for c in bad_codes_detected:
+                    if c not in self.bad_gap_codes:
+                        self.bad_gap_codes.add(c)
+                        new_added = True
+                
+                if new_added:
+                    try:
+                        os.makedirs(os.path.dirname(self.bad_gap_codes_path), exist_ok=True)
+                        with open(self.bad_gap_codes_path, 'w', encoding='utf-8') as f:
+                            json.dump(sorted(list(self.bad_gap_codes)), f, ensure_ascii=False, indent=4)
+                        logger.info(f"💾 Updated bad gap codes file: added {len(bad_codes_detected)} codes (Total: {len(self.bad_gap_codes)}). Saved to {self.bad_gap_codes_path}")
+                    except Exception as io_err:
+                        logger.error(f"Failed to save bad gap codes to file: {io_err}")
+
+            # [MEMORY OPTIMIZE] 仅清理缓存引用，避免频繁 GC 导致 UI 卡顿，真正 GC 延迟到统一 GC 循环中
             from JSONData import sina_data
-            sina_data.Sina().clear_unified_cache()
+            sina_data.Sina().clear_unified_cache(force_gc=False)
             
         except Exception as e:
             logger.error(f"backfill_gaps error: {e}")
@@ -3387,6 +3422,13 @@ class DataPublisher:
                     # [Optimization] 启动初期加速体检 (前10次批次每60秒一次，之后15分钟一次)
                     gap_interval = 60 if self.update_count < 10 else 900
                     if now_t - self._last_gap_log_t > gap_interval:
+                        # 每日重置已回补集合
+                        today_str = datetime.now().strftime('%Y-%m-%d')
+                        if getattr(self, '_last_backfill_date', '') != today_str:
+                            self._last_backfill_date = today_str
+                            self.backfilled_codes_today = set()
+                            logger.info(f"♻️ Reset daily backfill codes set for {today_str}")
+
                         # 获取当前 snapshot 中的所有代码，用于发现完全缺失的个股
                         active_codes = set(df['code'].astype(str).str.strip().str.zfill(6).tolist()) if not df.empty else None
                         
@@ -3397,15 +3439,18 @@ class DataPublisher:
                         self._last_gap_log_t = now_t
                         
                         if low_tick_codes:
-                            # 启动异步补全，防止阻塞主心跳
-                            codes_to_fix = list(low_tick_codes.keys())
-                            threading.Thread(
-                                target=self.backfill_gaps_from_hdf5,
-                                args=(codes_to_fix,),
-                                daemon=True
-                            ).start()
-
-                # Continue with existing pipeline...
+                            # 过滤掉今天已经尝试回补过的股票，以及在 bad_gap_codes 中的异常/停牌个股
+                            codes_to_fix = [c for c in low_tick_codes.keys() if c not in self.backfilled_codes_today and c not in self.bad_gap_codes]
+                            if codes_to_fix:
+                                # 将这批代码加入已尝试集合，防止未来的重复动作
+                                self.backfilled_codes_today.update(codes_to_fix)
+                                logger.info(f"📡 Found {len(codes_to_fix)} gap codes. Triggering one-time gap backfill from HDF5...")
+                                # 启动异步补全，防止阻塞主心跳
+                                threading.Thread(
+                                    target=self.backfill_gaps_from_hdf5,
+                                    args=(codes_to_fix, target_threshold),
+                                    daemon=True
+                                ).start()
                 self.update_count += 1
                 self.data_version += 1
                 

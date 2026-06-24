@@ -1,3 +1,13 @@
+## 2026-06-24 15:10
+- [x] **优化 HDF5 大内存缓存清除与垃圾回收调度，消除频繁 GC 引起的主线程卡顿 (Optimized HDF5 Cache Clearing & GC Scheduling to Prevent UI Lag)**：
+    - [x] **引入缓存清理 `force_gc` 参数与延迟回收机制 (Added force_gc Parameter to Cache Clearing)**：在 `sina_data.py` 的 `clear_unified_cache` 方法中新增 `force_gc` 可选参数，允许仅释放 `_MEM_CACHE` 内存引用而不立即触发昂贵的 `gc.collect()` Stop-the-world 操作，使 GC 可被延迟调度。
+    - [x] **消除回补缺口时的频繁 GC (Removed Frequent GC during Gap Recovery)**：在 `realtime_data_service.py` 内部的 `backfill_gaps_from_hdf5` 方法中，将 `clear_unified_cache` 变更为 `clear_unified_cache(force_gc=False)`，防止频繁补全数据时密集垃圾回收引发的 Tkinter UI 假死与微卡顿。
+    - [x] **将缓存物理回收统一归并至全局 GC 中枢 (Consolidated Cache GC into Unified Loop)**：在 `instock_MonitorTK.py` 里的一小时定期 `controlled_gc_loop` 中，在执行 `gc.collect()` 之前前置注入 `clear_unified_cache(force_gc=False)` 动作，实现大内存缓存释放与句柄引用的定期集中自愈。
+    - [x] **通过 Python 语法编译与集成验证 (Passed Syntax & Compiler Checks)**：执行了 `py_compile` 对修改后的三个 Python 模块进行了无错编译检查，保障系统长效稳定。
+    - [x] **实现缺口补全失败股本地持久化与跨天永久物理过滤机制 (Implemented Persistent Bad Gap Codes Filtering)**：
+        - [x] **新增坏个股持久化存储**：在 `DataPublisher` 初始化时，自动读取本地 `datacsv/backfill_bad_codes.json` 问题股清单，缓存至 `self.bad_gap_codes` 集合中。
+        - [x] **回补后达标体检与文件追加**：在 `backfill_gaps_from_hdf5` 回补结束后，对这批个股在 `MinuteKlineCache` 里的条数进行体检。若长度低于 `threshold`，则判定该股数据残缺（停牌/新股/退市等），将其自动追加并物理持久化回 `datacsv/backfill_bad_codes.json`（已按照 JSON 数组自动格式化并排序）。
+        - [x] **多维静态网络拦截**：在 `update_batch` 间隙检测前，对检测出的缺口代码同时过滤 `self.backfilled_codes_today`（日内冷却）与 `self.bad_gap_codes`（久病异常静态网关），彻底规避了无数据/问题个股引起的每日高频重复 HDF5 读盘导致的死锁与主线程假死。
 ## 2026-06-23 22:30
 - [x] **实现最强板块赛道表格支持“龙头DFF2”列及自顺应排序兼容 (Implemented 龙头DFF2 Column & Sorting in Sector Table with Backward Compatibility)**：
     - [x] **新增“龙头DFF2”列并更新表头 (Added 龙头DFF2 Column & Header)**：在 `bidding_racing_panel.py` 中将 `sector_table` 的初始化列数由 8 列扩展为 9 列，并在“龙头DFF”与“联动详情”之间合理插入了“龙头DFF2”表头。
