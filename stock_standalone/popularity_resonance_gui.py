@@ -38,14 +38,32 @@ except ImportError:
         logger as service_logger
     )
 
+import traceback
+
+def _log_import_error(name):
+    try:
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(base_dir, "linkage_err.log")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"--- IMPORT ERROR FOR {name} AT {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+    except:
+        pass
+
 try:
     from linkage_service import get_link_manager
-except ImportError:
+except Exception:
+    _log_import_error("linkage_service")
     get_link_manager = None
 
 try:
     from JohnsonUtil.stock_sender import StockSender
-except ImportError:
+except Exception:
+    _log_import_error("StockSender")
     StockSender = None
 
 def get_app_root():
@@ -64,10 +82,16 @@ class PRServiceGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("人气综合排行榜2.22")
-        self.root.geometry("620x760")
         
-        # 加载配置
+        # 加载配置（必须在设置 geometry 前加载）
         self.config = self.load_config_settings()
+        
+        # 恢复窗口位置与大小，默认 620x760
+        saved_geo = self.config.get("geometry", "620x760")
+        try:
+            self.root.geometry(saved_geo)
+        except Exception:
+            self.root.geometry("620x760")
         
         self.is_running = False
         self.refresh_thread = None
@@ -88,6 +112,7 @@ class PRServiceGUI:
             self.local_sender = None
             
         self.create_widgets()
+
         
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
@@ -102,6 +127,7 @@ class PRServiceGUI:
         self.save_config_settings()
         self.root.destroy()
 
+
     def load_config_settings(self):
         if os.path.exists(CONFIG_FILE):
             try:
@@ -115,7 +141,9 @@ class PRServiceGUI:
             "interval": 5,
             "link_tdx": True,
             "link_ths": True,
-            "link_vis": True
+            "link_vis": True,
+            "sort_col": None,
+            "sort_descending": False
         }
         
     def save_config_settings(self):
@@ -126,6 +154,18 @@ class PRServiceGUI:
             self.config["link_tdx"] = self.link_tdx_var.get()
             self.config["link_ths"] = self.link_ths_var.get()
             self.config["link_vis"] = self.link_vis_var.get()
+            
+            # 保存窗口位置与大小
+            try:
+                self.config["geometry"] = self.root.winfo_geometry()
+            except Exception:
+                pass
+            
+            # 保存排序状态
+            if hasattr(self, "tree_res") and self.tree_res is not None:
+                self.config["sort_col"] = self.tree_res.sort_col
+                self.config["sort_descending"] = self.tree_res.sort_descending
+                
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except:
@@ -154,12 +194,28 @@ class PRServiceGUI:
                 self.lbl_status.config(text=f"加载缓存失败: {e}", fg="red")
 
     def create_widgets(self):
-        # 全局样式配置，窄边框和扁平化风格
+        # 全局样式配置 - clam主题 + 极窄滚动条 + 扁平风格
         style = ttk.Style(self.root)
-        # 不使用 theme_use("clam")，使用默认主题，以保证全局兼容且无排版错乱
+        style.theme_use("clam")
         style.configure(".", font=("Microsoft YaHei", 9))
         style.configure("Treeview.Heading", font=("Microsoft YaHei", 9, "bold"))
-        style.configure("Treeview", rowheight=18, font=("Microsoft YaHei", 9), background="white", fieldbackground="white", borderwidth=0)
+        style.configure("Treeview", rowheight=18, font=("Microsoft YaHei", 9),
+                        background="white", fieldbackground="white", borderwidth=0)
+        # 极窄滚动条（6px，无箭头）
+        style.configure("Slim.Vertical.TScrollbar",
+                        gripcount=0,
+                        background="#BBBBBB",
+                        darkcolor="#999999",
+                        lightcolor="#CCCCCC",
+                        troughcolor="#F0F0F0",
+                        bordercolor="#F0F0F0",
+                        arrowsize=0,
+                        width=6)
+        style.layout("Slim.Vertical.TScrollbar",
+                     [("Vertical.Scrollbar.trough",
+                       {"sticky": "ns",
+                        "children": [("Vertical.Scrollbar.thumb",
+                                      {"expand": "1", "sticky": "nswe"})]})])
         
         # 主显示区域 (左右分栏)
         main_pane = tk.Frame(self.root)
@@ -297,10 +353,11 @@ class PRServiceGUI:
 
         tree.column("idx", width=35, anchor="center", stretch=False)
         tree.column("code", width=65, anchor="center", stretch=False)
-        tree.column("name", width=90, anchor="center", stretch=False)
+        tree.column("name", width=90, anchor="center", stretch=True)   # 允许随窗口拉伸
         tree.column("val", width=60, anchor="center", stretch=False)
 
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview,
+                                  style="Slim.Vertical.TScrollbar")
         tree.configure(yscrollcommand=scrollbar.set)
 
         tree.pack(side="left", fill="both", expand=True)
@@ -311,11 +368,93 @@ class PRServiceGUI:
         tree.tag_configure("down", foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
         tree.tag_configure("flat", foreground="#000000", font=("Microsoft YaHei", 9))
 
+        # 绑定点击表头排序
+        for col in ("idx", "code", "name", "val"):
+            tree.heading(col, command=lambda c=col, t=tree: self.sort_column(t, c, False))
+
+        tree.sort_col = self.config.get("sort_col", None)
+        tree.sort_descending = self.config.get("sort_descending", False)
+
         # 绑定联动事件
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         tree.bind("<Double-1>", self.on_tree_select)
 
         return tree
+
+    def sort_column(self, tree, col, reverse, auto_restore=False):
+        # 1. 提取数据项并转化为可排序的值
+        l = []
+        for k in tree.get_children(''):
+            val = tree.set(k, col)
+            l.append((val, k))
+            
+        def try_convert(val):
+            if val is None:
+                return -9999.0
+            val_str = str(val).strip().replace('%', '')
+            if not val_str:
+                return -9999.0
+            try:
+                return float(val_str)
+            except ValueError:
+                return val_str.lower()
+                
+        # 2. 稳定原地排序
+        l.sort(key=lambda t: try_convert(t[0]), reverse=reverse)
+        
+        # 3. 重新插入视图
+        for index, (val, k) in enumerate(l):
+            tree.move(k, '', index)
+            
+        # 4. 保存排序状态
+        tree.sort_col = col
+        tree.sort_descending = reverse
+        
+        if not auto_restore:
+            # 手动点击时更新该列 heading，以便下次反转方向
+            tree.heading(col, command=lambda: self.sort_column(tree, col, not reverse))
+            
+            # 同步排序到其他窗口
+            all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
+            for other_tree in all_trees:
+                if other_tree != tree:
+                    self.sort_column(other_tree, col, reverse, auto_restore=True)
+            
+            # 立即触发配置持久化保存
+            self.save_config_settings()
+            
+        # 5. 更新表头的 ▲/▼ 指示器
+        self.update_header_arrows(tree, col, reverse)
+
+    def update_header_arrows(self, tree, active_col, reverse):
+        # 探测当前 Tree 绑定的 first_col_title 基础名称
+        first_title = "东"
+        if tree == self.tree_em:
+            first_title = "东"
+        elif tree == self.tree_ths:
+            first_title = "花"
+        elif tree == self.tree_lh:
+            first_title = "开"
+        elif tree == self.tree_tgb:
+            first_title = "淘"
+        elif tree == self.tree_res:
+            first_title = "合"
+            
+        base_headers = {
+            "idx": first_title,
+            "code": "代码",
+            "name": "名称",
+            "val": "涨幅" if first_title == "花" else "涨"
+        }
+        
+        for col in ("idx", "code", "name", "val"):
+            base_text = base_headers[col]
+            if col == active_col:
+                arrow = " ↓" if reverse else " ↑"
+                tree.heading(col, text=f"{base_text}{arrow}")
+            else:
+                tree.heading(col, text=base_text)
+
 
     def on_tree_select(self, event):
         tree = event.widget
@@ -424,7 +563,6 @@ class PRServiceGUI:
                         quotes = fetch_realtime_quotes(list(data.keys()))
                         with quotes_lock:
                             all_quotes.update(quotes)
-                        self.root.after(0, lambda: self.update_single_table(source_name, data, quotes))
                 except Exception as ex:
                     service_logger.error(f"获取 {source_name} 数据失败: {ex}")
             
@@ -470,8 +608,8 @@ class PRServiceGUI:
                 except Exception as cache_err:
                     service_logger.error(f"写入数据缓存失败: {cache_err}")
             
-            # 5. 在主线程中安全地更新共振表及整体布局
-            self.root.after(0, lambda: self.update_resonance_table(resonance_results[:limit], all_quotes))
+            # 5. 在主线程中安全地更新所有表（包括去重过滤和整体布局）
+            self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
             
             # 保存用户当前输入的值到配置文件
             self.root.after(0, self.save_config_settings)
@@ -481,80 +619,21 @@ class PRServiceGUI:
         finally:
             self.root.after(0, lambda: self.btn_refresh.config(state="normal", text="查询刷新"))
 
-    def update_single_table(self, source, data_dict, quotes):
-        if source == "em":
-            tree = self.tree_em
-        elif source == "ths":
-            tree = self.tree_ths
-        elif source == "lh":
-            tree = self.tree_lh
-        elif source == "tgb":
-            tree = self.tree_tgb
-        else:
-            return
-            
-        for item in tree.get_children():
-            tree.delete(item)
-            
-        sorted_items = sorted(data_dict.items(), key=lambda x: x[1])
-        for rank, (code, _) in enumerate(sorted_items, 1):
-            quote = quotes.get(code, {"name": "--", "percent": 0.0})
-            name = quote["name"]
-            pct = quote["percent"]
-            
-            tag = "flat"
-            if pct > 0:
-                tag = "up"
-            elif pct < 0:
-                tag = "down"
-            
-            tree.insert("", "end", values=(rank, code, name, f"{pct:.2f}"), tags=(tag,))
-            
-        em_empty = len(self.tree_em.get_children()) == 0
-        ths_empty = len(self.tree_ths.get_children()) == 0
-        lh_empty = len(self.tree_lh.get_children()) == 0
-        tgb_empty = len(self.tree_tgb.get_children()) == 0
-        res_empty = len(self.tree_res.get_children()) == 0
-        
-        self.refresh_layout(em_empty, ths_empty, lh_empty, res_empty, tgb_empty)
-        self.lbl_status.config(text=f"已更新 {source.upper()} 排名数据", fg="blue")
-
-    def update_resonance_table(self, resonance_results, quotes):
-        for item in self.tree_res.get_children():
-            self.tree_res.delete(item)
-            
-        for rank, item in enumerate(resonance_results, 1):
-            code = item["code"]
-            quote = quotes.get(code, {"name": "--", "percent": 0.0})
-            name = quote["name"]
-            pct = quote["percent"]
-            
-            tag = "flat"
-            if pct > 0:
-                tag = "up"
-            elif pct < 0:
-                tag = "down"
-                
-            self.tree_res.insert("", "end", values=(rank, code, name, f"{pct:.2f}"), tags=(tag,))
-            
-        em_empty = len(self.tree_em.get_children()) == 0
-        ths_empty = len(self.tree_ths.get_children()) == 0
-        lh_empty = len(self.tree_lh.get_children()) == 0
-        tgb_empty = len(self.tree_tgb.get_children()) == 0
-        res_empty = len(self.tree_res.get_children()) == 0
-        
-        self.refresh_layout(em_empty, ths_empty, lh_empty, res_empty, tgb_empty)
-        self.lbl_status.config(text="全部更新完成", fg="blue")
-
-
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):
         self.clear_all_trees()
 
-        # 定义辅助函数填充单个表格
+        # 1. 提取所有进入“合”表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
+        resonance_set = {item["code"] for item in resonance_results}
+
+        # 2. 定义带去重功能的单个表格填充辅助函数
         def populate(tree, data_dict):
-            # 排序
             sorted_items = sorted(data_dict.items(), key=lambda x: x[1])
-            for rank, (code, _) in enumerate(sorted_items, 1):
+            display_rank = 1
+            for _, (code, _) in enumerate(sorted_items, 1):
+                # 如果该个股已被归入共振榜，则在其他表（东、花、开、淘）中过滤去重
+                if code in resonance_set:
+                    continue
+                    
                 quote = quotes.get(code, {"name": "--", "percent": 0.0})
                 name = quote["name"]
                 pct = quote["percent"]
@@ -565,15 +644,16 @@ class PRServiceGUI:
                 elif pct < 0:
                     tag = "down"
                 
-                tree.insert("", "end", values=(rank, code, name, f"{pct:.2f}"), tags=(tag,))
+                tree.insert("", "end", values=(display_rank, code, name, f"{pct:.2f}"), tags=(tag,))
+                display_rank += 1
 
-        # 填充前4个表
+        # 3. 填充前4个表并过滤去重
         populate(self.tree_em, em_data)
         populate(self.tree_ths, ths_data)
         populate(self.tree_lh, lh_data)
         populate(self.tree_tgb, tgb_data)
 
-        # 填充共振 Combined 表格
+        # 4. 填充共振“合”表
         for rank, item in enumerate(resonance_results, 1):
             code = item["code"]
             quote = quotes.get(code, {"name": "--", "percent": 0.0})
@@ -588,14 +668,19 @@ class PRServiceGUI:
                 
             self.tree_res.insert("", "end", values=(rank, code, name, f"{pct:.2f}"), tags=(tag,))
 
-        # 动态隐藏没有数据的板块
-        em_empty = len(em_data) == 0
-        ths_empty = len(ths_data) == 0
-        lh_empty = len(lh_data) == 0
-        tgb_empty = len(tgb_data) == 0
-        res_empty = len(resonance_results) == 0
+        # 5. 依据表格中实际插入的子项数量，动态隐藏/显示板块
+        em_empty = len(self.tree_em.get_children()) == 0
+        ths_empty = len(self.tree_ths.get_children()) == 0
+        lh_empty = len(self.tree_lh.get_children()) == 0
+        tgb_empty = len(self.tree_tgb.get_children()) == 0
+        res_empty = len(self.tree_res.get_children()) == 0
         
         self.refresh_layout(em_empty, ths_empty, lh_empty, res_empty, tgb_empty)
+
+        # 6. 对所有具有排序状态的表格进行排序自愈
+        for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+            if getattr(tree, "sort_col", None) is not None:
+                self.sort_column(tree, tree.sort_col, getattr(tree, "sort_descending", False), auto_restore=True)
 
         self.lbl_status.config(text="更新完成", fg="blue")
 

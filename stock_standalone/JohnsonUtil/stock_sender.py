@@ -160,12 +160,29 @@ class StockSender:
                     'ths': self._get_flag(self.ths_var),
                     'dfcf': self._get_flag(self.dfcf_var)
                 }
-                from linkage_service import get_link_manager
+                try:
+                    from linkage_service import get_link_manager
+                except ImportError:
+                    import sys
+                    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if root not in sys.path:
+                        sys.path.append(root)
+                    from linkage_service import get_link_manager
+                
                 # 投递到独立的后台进程进行节流与重叠执行
                 get_link_manager().push(stock_code, flags=flags, auto=auto)
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                # 记录报错到 linkage_err.log 以便分析
+                try:
+                    import traceback
+                    log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "linkage_err.log")
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"--- proxy push error AT {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                        f.write(traceback.format_exc())
+                        f.write("\n")
+                except:
+                    pass
 
         # [FIX] 在物理执行路径（或降级路径）上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
         flags = {
