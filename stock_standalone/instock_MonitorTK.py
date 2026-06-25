@@ -17743,7 +17743,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win.bind("<Escape>", lambda e: on_close())  # ESC关闭窗口
 
         # 填充数据
-        self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+        self._fill_concept_top10_content(win, concept_name, df_concept, code=code, is_init=True)
         if focus_force:
             # logger.info(f'新创建，focus_force聚焦并显示TK:{unique_code}')
             win.transient(self)              # 关联主窗口
@@ -17779,9 +17779,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             def do_focus():
                 children = tree.get_children()
                 if children:
-                    tree.selection_set(children[0])
-                    tree.focus(children[0])
-                    tree.see(children[0])
+                    has_multi_sort = bool(getattr(tree, 'sort_level1_col', None))
+                    if has_multi_sort:
+                        sel = tree.selection()
+                        target = sel[0] if sel else children[0]
+                        tree.focus(target)
+                        tree.yview_moveto(0)
+                    else:
+                        tree.selection_set(children[0])
+                        tree.focus(children[0])
+                        tree.see(children[0])
                 tree.focus_set()
 
             # 等 UI / after / PG timer 全部稳定下来
@@ -17835,7 +17842,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'stock_info': code
                     }
 
-                self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+                self._fill_concept_top10_content(win, concept_name, df_concept, code=code, is_init=True)
                 return
 
         except Exception:
@@ -18087,7 +18094,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win.bind("<Button-1>", lambda e, w=win: window_focus_bring_monitor_status(w))
         win.protocol("WM_DELETE_WINDOW", _on_close)
         # 填充数据
-        self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+        self._fill_concept_top10_content(win, concept_name, df_concept, code=code, is_init=True)
         # 窗口已创建 / 已复用
         self._focus_top10_tree(win)
 
@@ -18151,7 +18158,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._fill_concept_top10_content(win, concept_name)
         logger.debug(f'update_all_top10_windows_finish')
 
-    def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
+    def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50, is_init=False):
         """
         填充概念Top10内容到Treeview（支持实时刷新）。
         - df_concept: 可选，若为 None 则从 self.df_all 获取
@@ -18316,10 +18323,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     if tree.winfo_exists() and tree.exists(target_iid):
                         # 🛡️ 避免排序时的滚动冲突：若外部标记跳过 once，则只高亮、不 see
-                        if not getattr(win, "_skip_see_once", False):
+                        should_see = True
+                        if getattr(win, "_skip_see_once", False):
+                            win._skip_see_once = False # 消费并重置标记
+                            should_see = False
+                        
+                        if is_init and bool(getattr(tree, 'sort_level1_col', None)):
+                            should_see = False
+                            
+                        if should_see:
                             tree.see(target_iid)
                         else:
-                            win._skip_see_once = False # 消费并重置标记
+                            tree.yview_moveto(0)
                         
                         self._highlight_tree_selection(tree, target_iid)
                 except Exception as e:
