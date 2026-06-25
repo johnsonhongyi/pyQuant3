@@ -15976,7 +15976,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"❌ 切换特征颜色失败: {e}")
 
-    def refresh_tree(self, df=None, force=False, skip_sort=False):
+    def refresh_tree(self, df=None, force=False, skip_sort=False, scroll_to_view=False):
         """刷新 TreeView，保证列和数据严格对齐。 (高性能版：强制节流)"""
         start_time = time.time()
         
@@ -16093,7 +16093,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 恢复选中状态
                 if self.select_code:
-                    self.tree_updater.restore_selection(self.select_code)
+                    self.tree_updater.restore_selection(self.select_code, scroll_to_view=scroll_to_view)
                 
                 # 记录性能
                 duration = time.time() - start_time
@@ -16107,10 +16107,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"[TreeUpdater] 增量更新失败,回退到全量刷新: {e}")
                 # 回退到传统方式
-                self._refresh_tree_traditional(df, cols_to_show)
+                self._refresh_tree_traditional(df, cols_to_show, scroll_to_view=scroll_to_view)
         else:
             # 使用传统方式刷新
-            self._refresh_tree_traditional(df, cols_to_show)
+            self._refresh_tree_traditional(df, cols_to_show, scroll_to_view=scroll_to_view)
 
         # ✅ 双击表头绑定 - 需要保留以支持列组合管理器
         # 这个绑定不会干扰排序,因为on_tree_double_click会区分heading和cell区域
@@ -16127,7 +16127,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 更新状态栏
         self.update_status()
     
-    def _refresh_tree_traditional(self, df, cols_to_show):
+    def _refresh_tree_traditional(self, df, cols_to_show, scroll_to_view=False):
         """[PERF] 传统的全量刷新方式 (作为增量更新的备用方案)"""
         # ⚡ [PERF] True 95+ Ultimate Version: Zero-Copy + Fast-Marker + Atomic GUI
         
@@ -16226,7 +16226,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if target_iid:
             self.tree.selection_set(target_iid)
             self.tree.focus(target_iid)
-            self.tree.see(target_iid)
+            has_active_sort = bool(getattr(self.tree, 'sort_level1_col', None) or getattr(self.tree, 'sortby_col', None))
+            if scroll_to_view and not has_active_sort:
+                self.tree.see(target_iid)
 
 
     def adjust_column_widths(self):

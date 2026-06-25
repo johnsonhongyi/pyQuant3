@@ -809,12 +809,13 @@ class TreeviewIncrementalUpdater:
             self.tree.delete(iid)
         self._item_map.clear()
     
-    def restore_selection(self, code: str) -> bool:
+    def restore_selection(self, code: str, scroll_to_view: bool = False) -> bool:
         """
         恢复选中状态
         
         Args:
             code: 要选中的股票代码
+            scroll_to_view: 是否滚动到视图中
             
         Returns:
             是否成功恢复选中
@@ -823,7 +824,10 @@ class TreeviewIncrementalUpdater:
             iid = self._item_map[code]
             self.tree.selection_set(iid)
             self.tree.focus(iid)
-            self.tree.see(iid)
+            # 当存在活跃的多级/普通排序时，不进行自动滚动定位
+            has_active_sort = bool(getattr(self.tree, 'sort_level1_col', None) or getattr(self.tree, 'sortby_col', None))
+            if scroll_to_view and not has_active_sort:
+                self.tree.see(iid)
             return True
         return False
 

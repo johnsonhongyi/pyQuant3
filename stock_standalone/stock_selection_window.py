@@ -12,6 +12,7 @@ from typing import Optional, Any, TYPE_CHECKING
 from collections import Counter
 import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
+from tk_gui_modules.treeview_mixin import TreeviewMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 import logging
 from JohnsonUtil import commonTips as cct
@@ -45,7 +46,7 @@ try:
 except ImportError:
     HAS_CALENDAR = False
 
-class StockSelectionWindow(tk.Toplevel, WindowMixin):
+class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
     """
     策略选股确认视窗
     允许用户在导入监控前人工筛选、标注
@@ -137,6 +138,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if self.history:
             self.concept_filter_var.set(self.history[0])
             
+        # 🛡️ 初始化并应用统一的多级排序
+        self._init_tree_sort_state(self.tree)
+        self._apply_saved_selection_sort_state()
+
         self._pending_column_widths = {}
         self.load_data()
 
@@ -153,6 +158,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        try:
+            self.save_ui_states()
+        except Exception as e:
+            logger.error(f"Failed to save sort states on close: {e}")
         # [全局重点关注退订] 防止内存泄漏
         try:
             from global_favorites import GlobalFavoriteManager
@@ -253,10 +262,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 fav_stocks = fav_mgr.get_favorite_stocks()
                 self.df_candidates['is_fav'] = self.df_candidates['code'].apply(lambda x: 1 if str(x) in fav_stocks else 0)
                 
-                if '连阳涨幅' in self.df_candidates.columns:
-                    self.df_candidates = self.df_candidates.sort_values(by=['is_fav', '连阳涨幅'], ascending=[False, False])
-                else:
-                    self.df_candidates = self.df_candidates.sort_values(by='is_fav', ascending=False)
+                # Apply custom multi-level or default sorting
+                self.df_candidates = self._sort_dataframe(self.df_candidates, self.tree)
             except Exception as e:
                 logger.warning(f"Failed to sort favorites on refresh: {e}")
 
@@ -264,11 +271,19 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self._update_title_stats()
 
             # 5. 清空树并重新画入 (0 毫秒级极速渲染)
+            selected_items = self.tree.selection()
             children = self.tree.get_children()
             if children:
                 self.tree.delete(*children)
             self._render_token += 1
-            self._do_bulk_render(self._render_token)
+            self._do_bulk_render(self._render_token, scroll_to_top=False)
+            if selected_items:
+                try:
+                    self.tree.selection_set(selected_items)
+                    if selected_items:
+                        self.tree.focus(selected_items[0])
+                except:
+                    pass
 
             # 6. 同步极速重绘 Tab 2: 板块聚焦表
             if hasattr(self, '_refresh_sector_tab'):
@@ -575,7 +590,6 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.tag_configure("grade_S", foreground="#e91e63", font=("Arial", 9, "bold")) # Pink/Red for S
         self.tree.tag_configure("grade_A", foreground="#f57c00", font=("Arial", 9, "bold")) # Orange for A
 
-        self.tree.bind("<ButtonRelease-1>", self.on_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Double-1>", self.on_double_click) # 🚀 [NEW] 双击联动标记
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -646,6 +660,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if not self.selector:
             return
 
+        self._last_selected_code = None
         query_date = target_date if target_date else self.current_date
         is_today = (query_date == datetime.now().strftime("%Y-%m-%d"))
         
@@ -794,14 +809,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 fav_stocks = fav_mgr.get_favorite_stocks()
                 self.df_candidates['is_fav'] = self.df_candidates['code'].apply(lambda x: 1 if str(x) in fav_stocks else 0)
                 
-                if '连阳涨幅' in self.df_candidates.columns:
-                    self.df_candidates = self.df_candidates.sort_values(by=['is_fav', '连阳涨幅'], ascending=[False, False])
-                else:
-                    self.df_candidates = self.df_candidates.sort_values(by='is_fav', ascending=False)
+                # Apply custom multi-level or default sorting
+                self.df_candidates = self._sort_dataframe(self.df_candidates, self.tree)
             except Exception as e:
                 logger.warning(f"Failed to sort favorites: {e}")
-                if '连阳涨幅' in self.df_candidates.columns:
-                    self.df_candidates = self.df_candidates.sort_values(by='连阳涨幅', ascending=False)
 
             self._update_title_stats()
 
@@ -827,7 +838,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
             # ✅ [OPTIMIZE] 采用“批量冻结 UI”渲染模式
             self._render_token += 1
-            self._do_bulk_render(self._render_token)
+            self._do_bulk_render(self._render_token, scroll_to_top=True)
             
             # ✅ [NEW] 联动刷新每日操作指南 Tab
             if hasattr(self, '_refresh_guidance_tab'):
@@ -839,7 +850,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             traceback.print_exc()
             messagebox.showerror("错误", f"加载数据失败: {e}")
 
-    def _do_bulk_render(self, token: int):
+    def _do_bulk_render(self, token: int, scroll_to_top: bool = False):
         """
         🚀 [ULTIMATE PERF] 批量插入 + UI 渲染冻结
         bypass Tcl 层每行重绘产生的 O(n²) 级卡顿
@@ -956,13 +967,14 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.tree.update_idletasks()
 
         # 🚀 [NEW] 加载完成后，自动选中第一行，避免用户需要手动点选才能锁定“最新视图”进行审计
-        all_items = self.tree.get_children()
-        if all_items:
-            try:
-                self.tree.selection_set(all_items[0])
-                self.tree.see(all_items[0])
-                self.tree.focus(all_items[0])
-            except: pass
+        if scroll_to_top:
+            all_items = self.tree.get_children()
+            if all_items:
+                try:
+                    self.tree.selection_set(all_items[0])
+                    self.tree.see(all_items[0])
+                    self.tree.focus(all_items[0])
+                except: pass
 
         # 5. 列宽智能加载与防重置保护 (首次载入尝试恢复自定义宽度，未自定义时再进行自动测量，后续刷新绝对不覆盖用户调整)
         if not getattr(self, '_selection_cols_initialized', False):
@@ -1291,18 +1303,35 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def on_select(self, event):
         """
-        选中事件：获取选中代码并尝试发送联动
+        选中事件：获取选中代码并采用延迟防抖发送联动
         """
+        if hasattr(self, '_delayed_select_timer') and self._delayed_select_timer:
+            self.after_cancel(self._delayed_select_timer)
+            self._delayed_select_timer = None
+
         selection = self.tree.selection()
         if not selection:
             return
             
         # 获取第一项
         item_id = selection[0]
+        if not self.tree.exists(item_id):
+            return
         values = self.tree.item(item_id, "values")
         if values:
             stock_code = str(values[0]).zfill(6)
-            self._link_to_visualizer_auto(stock_code)
+            # 引入防重机制，防止重复联动触发闪烁
+            last_code = getattr(self, '_last_selected_code', None)
+            if last_code == stock_code:
+                return
+            
+            # 延迟 100ms 执行物理联动，彻底合并因重排、刷新或双重点击引发的多次事件
+            self._delayed_select_timer = self.after(100, lambda: self._execute_select_linkage(stock_code))
+
+    def _execute_select_linkage(self, stock_code):
+        self._delayed_select_timer = None
+        self._last_selected_code = stock_code
+        self._link_to_visualizer_auto(stock_code)
 
     def _on_concept_combo_right_click(self, event):
         """右键自动粘贴剪贴板文本并执行检索"""
@@ -1778,72 +1807,253 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             messagebox.showerror("日志错误", f"保存反馈日志失败: {e}")
 
     def sort_tree(self, col, reverse):
-        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        
-        # [NEW] 板块过滤与有筛选条件时的前3个题材权重最高绝对优先排序算法
-        current_filter = ""
-        if hasattr(self, 'concept_filter_var'):
-            current_filter = self.concept_filter_var.get().lower().strip()
-        elif hasattr(self, 'search_var'):
-            current_filter = self.search_var.get().lower().strip()
-            
-        kws = current_filter.split() if current_filter else []
-        
-        # 对一组列表进行原排序
-        def sort_sub_list(sub_l):
-            if col == "category" and kws:
-                def get_sort_key(t):
-                    val = str(t[0]).lower()
-                    cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
-                    match_idx = 999
-                    for idx, cat in enumerate(cats):
-                        if any(kw in cat for kw in kws):
-                            match_idx = idx
-                            break
-                    prio = match_idx if not reverse else (999 - match_idx)
-                    return (prio, t[0])
-                try:
-                    sub_l.sort(key=get_sort_key, reverse=reverse)
-                except Exception:
-                    sub_l.sort(reverse=reverse)
-            else:
-                try:
-                    sub_l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1.0, reverse=reverse)
-                except ValueError:
-                    sub_l.sort(reverse=reverse)
-            return sub_l
+        self.sort_mixin_by_column(self.tree, col, self._get_mixin_current_col_asc(self.tree, col))
 
-        # [🚀 收藏置顶二次排序] 分流收藏和普通个股，实现置顶且保持内部完美排序
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_stocks = fav_mgr.get_favorite_stocks()
-            
-            fav_list = []
-            normal_list = []
-            for val, k in l:
-                if str(k) in fav_stocks:
-                    fav_list.append((val, k))
+    def get_scaled_value(self) -> float:
+        return getattr(self, 'scale_factor', 1.0)
+
+    def trigger_multi_level_sort(self, scroll_to_top: bool = False):
+        """主 Tree 触发多级排序动作 (通过 DataFrame 排序重渲染)"""
+        if self.df_candidates is not None and not self.df_candidates.empty:
+            selected_items = self.tree.selection()
+            self.df_candidates = self._sort_dataframe(self.df_candidates, self.tree)
+            children = self.tree.get_children()
+            if children:
+                self.tree.delete(*children)
+            self._render_token += 1
+            self._do_bulk_render(self._render_token, scroll_to_top=scroll_to_top)
+            if selected_items and not scroll_to_top:
+                try:
+                    self.tree.selection_set(selected_items)
+                    if selected_items:
+                        self.tree.focus(selected_items[0])
+                except:
+                    pass
+
+    def _sort_dataframe(self, df: pd.DataFrame, tree=None) -> pd.DataFrame:
+        """根据当前 Treeview 的多级排序规则及重点个股优先（is_fav）逻辑，对 DataFrame 进行排序"""
+        if df is not None and not df.empty:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                if 'code' in df.columns:
+                    df['is_fav'] = df['code'].apply(lambda x: 1 if str(x) in fav_stocks else 0)
                 else:
-                    normal_list.append((val, k))
+                    df['is_fav'] = 0
+            except Exception as e:
+                logger.warning(f"Failed to check favorites in _sort_dataframe: {e}")
+                df['is_fav'] = 0
+                
+            t = tree or self.tree
+            self._init_tree_sort_state(t)
+            
+            sort_cols = ['is_fav']
+            sort_ascends = [False]
+            
+            bound_cols = set()
+            
+            if t.sort_level1_col and t.sort_level1_col in df.columns:
+                sort_cols.append(t.sort_level1_col)
+                sort_ascends.append(t.sort_level1_asc)
+                bound_cols.add(t.sort_level1_col)
+                
+            if t.sort_level2_col and t.sort_level2_col in df.columns:
+                sort_cols.append(t.sort_level2_col)
+                sort_ascends.append(t.sort_level2_asc)
+                bound_cols.add(t.sort_level2_col)
+                
+            if t.sort_level3_col and t.sort_level3_col in df.columns:
+                sort_cols.append(t.sort_level3_col)
+                sort_ascends.append(t.sort_level3_asc)
+                bound_cols.add(t.sort_level3_col)
+                
+            temp_col = t.sortby_col
+            if temp_col and temp_col not in bound_cols and temp_col in df.columns:
+                sort_cols.append(temp_col)
+                sort_ascends.append(t.sortby_col_ascend)
+                
+            if len(sort_cols) == 1:
+                if '连阳涨幅' in df.columns:
+                    sort_cols.append('连阳涨幅')
+                    sort_ascends.append(False)
+                elif 'code' in df.columns:
+                    sort_cols.append('code')
+                    sort_ascends.append(True)
                     
-            sorted_fav = sort_sub_list(fav_list)
-            sorted_normal = sort_sub_list(normal_list)
-            final_list = sorted_fav + sorted_normal
-        except Exception as e:
-            logger.warning(f"Favorites sorting failed: {e}")
-            final_list = sort_sub_list(l)
-        
-        for index, (val, k) in enumerate(final_list):
-            self.tree.move(k, '', index)
+            logger.info(f"[_sort_dataframe] Sorting df by {sort_cols} with asc={sort_ascends}")
+            try:
+                df = df.sort_values(by=sort_cols, ascending=sort_ascends)
+            except Exception as ex:
+                logger.error(f"Error sorting dataframe: {ex}, fallback to basic sort")
+                df = df.sort_values(by='is_fav', ascending=False)
+                
+        return df
 
-        self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
-        # [NEW] 排序后自动滚动到顶部
-        self.tree.yview_moveto(0)
+    # Delegating perform_tree_multi_level_sort and _sort_id_list_by_column_stable to TreeviewMixin.
+
+    def _get_all_selection_trees(self):
+        trees = []
+        if hasattr(self, 'tree') and self.tree and self.tree.winfo_exists():
+            trees.append(self.tree)
+        if hasattr(self, '_sector_tree') and self._sector_tree and self._sector_tree.winfo_exists():
+            trees.append(self._sector_tree)
+        if hasattr(self, '_member_tree') and self._member_tree and self._member_tree.winfo_exists():
+            trees.append(self._member_tree)
+        if hasattr(self, '_signal_tree') and self._signal_tree and self._signal_tree.winfo_exists():
+            trees.append(self._signal_tree)
+        if hasattr(self, '_guidance_tree') and self._guidance_tree and self._guidance_tree.winfo_exists():
+            trees.append(self._guidance_tree)
+        if hasattr(self, '_pos_tree') and self._pos_tree and self._pos_tree.winfo_exists():
+            trees.append(self._pos_tree)
+        if hasattr(self, '_log_tree') and self._log_tree and self._log_tree.winfo_exists():
+            trees.append(self._log_tree)
+        return trees
+
+    def _get_tree_config_key(self, tree: ttk.Treeview) -> str:
+        if tree == self.tree:
+            return 'selection_candidates_sort'
+        elif hasattr(self, '_sector_tree') and tree == self._sector_tree:
+            return 'selection_sector_sort'
+        elif hasattr(self, '_member_tree') and tree == self._member_tree:
+            return 'selection_member_sort'
+        elif hasattr(self, '_signal_tree') and tree == self._signal_tree:
+            return 'selection_signal_sort'
+        elif hasattr(self, '_guidance_tree') and tree == self._guidance_tree:
+            return 'selection_guidance_sort'
+        elif hasattr(self, '_pos_tree') and tree == self._pos_tree:
+            return 'selection_pos_sort'
+        elif hasattr(self, '_log_tree') and tree == self._log_tree:
+            return 'selection_log_sort'
+        return 'selection_window_sort'  # Fallback
+
+    def _apply_saved_selection_sort_state(self, tree=None):
+        """从 window_config.json 读取并应用独立的排序状态"""
+        try:
+            if not os.path.exists(WINDOW_CONFIG_FILE):
+                self._apply_default_selection_sort_state(tree)
+                return
+                
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            trees = [tree] if tree else self._get_all_selection_trees()
+            
+            for t in trees:
+                if not t or not t.winfo_exists():
+                    continue
+                self._init_tree_sort_state(t)
+                key = self._get_tree_config_key(t)
+                sort_state = config.get(key)
+                
+                # Check for legacy key fallback for candidates tree
+                if not sort_state and t == self.tree:
+                    sort_state = config.get('selection_window_sort')
+                
+                if not sort_state:
+                    self._apply_default_selection_sort_state(t)
+                    continue
+                    
+                valid_cols = t.cget("columns")
+                
+                t.sortby_col = sort_state.get('sortby_col')
+                if t.sortby_col and t.sortby_col not in valid_cols:
+                    t.sortby_col = 'code' if 'code' in valid_cols else (valid_cols[0] if valid_cols else None)
+                t.sortby_col_ascend = bool(sort_state.get('sortby_col_ascend', True))
+                
+                l1 = sort_state.get('sort_level1_col')
+                t.sort_level1_col = l1 if l1 in valid_cols else None
+                t.sort_level1_asc = bool(sort_state.get('sort_level1_asc', True))
+                
+                l2 = sort_state.get('sort_level2_col')
+                t.sort_level2_col = l2 if l2 in valid_cols else None
+                t.sort_level2_asc = bool(sort_state.get('sort_level2_asc', True))
+                
+                l3 = sort_state.get('sort_level3_col')
+                t.sort_level3_col = l3 if l3 in valid_cols else None
+                t.sort_level3_asc = bool(sort_state.get('sort_level3_asc', True))
+                
+                t.multi_sort_click_count = int(sort_state.get('multi_sort_click_count', 0))
+                
+                self.update_mixin_tree_headers(t)
+                
+        except Exception as e:
+            logger.error(f"Error applying selection sort state: {e}")
+            self._apply_default_selection_sort_state(tree)
+
+    def _apply_default_selection_sort_state(self, tree=None):
+        """兜底默认排序状态"""
+        trees = [tree] if tree else self._get_all_selection_trees()
+        for t in trees:
+            self._init_tree_sort_state(t)
+            valid_cols = t.cget("columns")
+            t.sortby_col = "code" if "code" in valid_cols else (valid_cols[0] if valid_cols else None)
+            t.sortby_col_ascend = True
+            t.sort_level1_col = None
+            t.sort_level1_asc = True
+            t.sort_level2_col = None
+            t.sort_level2_asc = True
+            t.sort_level3_col = None
+            t.sort_level3_asc = True
+            t.multi_sort_click_count = 0
+            self.update_mixin_tree_headers(t)
+
+    def _save_mixin_ui_states(self, tree: ttk.Treeview) -> None:
+        """多级排序发生改变时的保存状态处理器，仅保存和更新发生了改变的当前活跃树"""
+        self._last_active_concept_tree = tree
+        self.save_ui_states(tree)
+
+    def save_ui_states(self, tree=None):
+        """保存指定的 tree 或所有 tree 的排序状态到 window_config.json"""
+        try:
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            trees = [tree] if tree else self._get_all_selection_trees()
+            
+            for t in trees:
+                if not t or not t.winfo_exists():
+                    continue
+                self._init_tree_sort_state(t)
+                key = self._get_tree_config_key(t)
+                config[key] = {
+                    'sortby_col': t.sortby_col,
+                    'sortby_col_ascend': t.sortby_col_ascend,
+                    'sort_level1_col': t.sort_level1_col,
+                    'sort_level1_asc': t.sort_level1_asc,
+                    'sort_level2_col': t.sort_level2_col,
+                    'sort_level2_asc': t.sort_level2_asc,
+                    'sort_level3_col': t.sort_level3_col,
+                    'sort_level3_asc': t.sort_level3_asc,
+                    'multi_sort_click_count': t.multi_sort_click_count
+                }
+            
+            # 使用原子操作写盘
+            temp_file = WINDOW_CONFIG_FILE + ".tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            os.replace(temp_file, WINDOW_CONFIG_FILE)
+            
+            if tree:
+                logger.info(f"[StockSelectionWindow] Saved independent sort state for tree {key}")
+            else:
+                logger.info(f"[StockSelectionWindow] Saved all independent sort states")
+                
+        except Exception as e:
+            logger.error(f"Error saving selection window sort states: {e}")
 
     def show_context_menu(self, event):
         """显示右键菜单 (通用)"""
         tree = event.widget
+        # [NEW] 优先拦截并处理表头右键多级排序菜单
+        if hasattr(self, 'show_header_context_menu') and self.show_header_context_menu(tree, event):
+            return
+            
         item_id = tree.identify_row(event.y)
         if not item_id:
             return
@@ -2186,7 +2396,7 @@ class HistoricalSelectionTrackerWorker(threading.Thread):
             logger.error(f"SelectionTracker Error: {e}")
             self.callback_queue.put(('error', str(e)))
 
-class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
+class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin, TreeviewMixin):
     """选股多日追踪对比弹窗 (Tkinter 版)"""
     def __init__(self, parent, selector):
         super().__init__(parent)
@@ -2212,6 +2422,10 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
                 self.search_var.set(parent_filter)
         self.after(200, lambda: self._start_analysis())
         
+        # 🛡️ 初始化并应用统一的多级排序
+        self._init_tree_sort_state(self.tree)
+        self._apply_saved_selection_sort_state()
+
         # 定时检查队列数据
         self._check_queue_id = self.after(300, self._process_queue)
         
@@ -2343,6 +2557,10 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
     def show_context_menu(self, event):
         """显示追踪面板的右键菜单，同步支持只显示前5、同名板块标红高亮与多端联级过滤"""
         tree = event.widget
+        # [NEW] 优先拦截并处理表头右键多级排序菜单
+        if hasattr(self, 'show_header_context_menu') and self.show_header_context_menu(tree, event):
+            return
+            
         item_id = tree.identify_row(event.y)
         if not item_id:
             return
@@ -2587,6 +2805,9 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
                 f"{roi:+.2f}%", item['pattern']
             ), tags=tuple(all_tags))
             
+        # 🛡️ 自动运行多级排序
+        self.perform_tree_multi_level_sort(self.tree)
+        
         # 🚀 [NEW] 筛选过滤后，动态重新计算并实时显示统计指标（总数、上涨、下跌、平均ROI）
         filtered_count = len(self.tree.get_children())
         if filtered_count > 0:
@@ -2616,10 +2837,27 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
             self.status_lbl.config(text="🔍 无匹配个股", fg="#888888")
 
     def _on_select(self, event, force_link=False):
+        if hasattr(self, '_delayed_select_timer') and self._delayed_select_timer:
+            self.after_cancel(self._delayed_select_timer)
+            self._delayed_select_timer = None
+            
         sel = self.tree.selection()
         if not sel: return
         
         code = sel[0]
+        if not self.tree.exists(code):
+            return
+        # 引入防重机制，防止重复联动触发闪烁
+        last_code = getattr(self, '_last_selected_code', None)
+        if last_code == code:
+            return
+            
+        # 延迟 100ms 执行联动，彻底解决高频闪烁问题
+        self._delayed_select_timer = self.after(100, lambda: self._execute_tracker_linkage(code))
+
+    def _execute_tracker_linkage(self, code):
+        self._delayed_select_timer = None
+        self._last_selected_code = code
         # 联动主界面
         if hasattr(self.parent_win, 'tree_scroll_to_code'):
              self.parent_win.tree_scroll_to_code(code)
@@ -2641,67 +2879,119 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin):
         self.destroy()
 
     def _sort_tree(self, col, reverse):
-        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        
-        # [NEW] 历史追踪有筛选过滤条件时的前3个题材权重最高绝对优先排序算法
-        current_filter = ""
-        if hasattr(self, 'search_var'):
-            current_filter = self.search_var.get().lower().strip()
-        elif hasattr(self.parent_win, 'concept_filter_var'):
-            current_filter = self.parent_win.concept_filter_var.get().lower().strip()
-            
-        kws = current_filter.split() if current_filter else []
-        
-        # 内部基础排序
-        def sort_sub_list(sub_l):
-            if col == "sector" and kws:
-                def get_sort_key(t):
-                    val = str(t[0]).lower()
-                    cats = [c.strip() for c in re.split(r'[;|★\s]', val) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
-                    match_idx = 999
-                    for idx, cat in enumerate(cats):
-                        if any(kw in cat for kw in kws):
-                            match_idx = idx
-                            break
-                    prio = match_idx if not reverse else (999 - match_idx)
-                    return (prio, t[0])
-                    
-                try:
-                    sub_l.sort(key=get_sort_key, reverse=reverse)
-                except Exception:
-                    sub_l.sort(reverse=reverse)
-            else:
-                try:
-                    sub_l.sort(key=lambda t: float(t[0].replace('%','')) if t[0] and t[0].strip() else -999, reverse=reverse)
-                except:
-                    sub_l.sort(reverse=reverse)
-            return sub_l
+        self.sort_mixin_by_column(self.tree, col, self._get_mixin_current_col_asc(self.tree, col))
 
-        # [🚀 重点关注个股置顶二次排序] 分流重点个股与普通个股
+    def get_scaled_value(self) -> float:
+        return getattr(self.parent_win, 'scale_factor', 1.0)
+
+    # Delegating perform_tree_multi_level_sort and _sort_id_list_by_column_stable to TreeviewMixin.
+
+    def _get_tree_config_key(self, tree: ttk.Treeview) -> str:
+        return 'selection_history_sort'
+
+    def _apply_saved_selection_sort_state(self):
+        """应用独立的排序状态到历史追踪的 Tree"""
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_stocks = fav_mgr.get_favorite_stocks()
-            fav_list = []
-            normal_list = []
-            for val, k in l:
-                if str(k) in fav_stocks:
-                    fav_list.append((val, k))
-                else:
-                    normal_list.append((val, k))
+            if not os.path.exists(WINDOW_CONFIG_FILE):
+                self._apply_default_selection_sort_state()
+                return
+                
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                
+            key = self._get_tree_config_key(self.tree)
+            sort_state = config.get(key)
             
-            sorted_fav = sort_sub_list(fav_list)
-            sorted_normal = sort_sub_list(normal_list)
-            final_list = sorted_fav + sorted_normal
+            # Check legacy key fallback
+            if not sort_state:
+                sort_state = config.get('selection_window_sort')
+                
+            if not sort_state:
+                self._apply_default_selection_sort_state()
+                return
+                
+            t = self.tree
+            self._init_tree_sort_state(t)
+            valid_cols = t.cget("columns")
+            
+            t.sortby_col = sort_state.get('sortby_col')
+            if t.sortby_col and t.sortby_col not in valid_cols:
+                t.sortby_col = 'code' if 'code' in valid_cols else (valid_cols[0] if valid_cols else None)
+            t.sortby_col_ascend = bool(sort_state.get('sortby_col_ascend', True))
+            
+            l1 = sort_state.get('sort_level1_col')
+            t.sort_level1_col = l1 if l1 in valid_cols else None
+            t.sort_level1_asc = bool(sort_state.get('sort_level1_asc', True))
+            
+            l2 = sort_state.get('sort_level2_col')
+            t.sort_level2_col = l2 if l2 in valid_cols else None
+            t.sort_level2_asc = bool(sort_state.get('sort_level2_asc', True))
+            
+            l3 = sort_state.get('sort_level3_col')
+            t.sort_level3_col = l3 if l3 in valid_cols else None
+            t.sort_level3_asc = bool(sort_state.get('sort_level3_asc', True))
+            
+            t.multi_sort_click_count = int(sort_state.get('multi_sort_click_count', 0))
+            
+            self.update_mixin_tree_headers(t)
+            
         except Exception as e:
-            logger.warning(f"Historical tracker sorting failed: {e}")
-            final_list = sort_sub_list(l)
+            logger.error(f"Error applying selection sort state in dialog: {e}")
+            self._apply_default_selection_sort_state()
 
-        for index, (val, k) in enumerate(final_list):
-            self.tree.move(k, '', index)
-        self.tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
-        # [NEW] 排序后自动滚动到顶部
-        self.tree.yview_moveto(0)
+    def _apply_default_selection_sort_state(self):
+        t = self.tree
+        self._init_tree_sort_state(t)
+        valid_cols = t.cget("columns")
+        t.sortby_col = "code" if "code" in valid_cols else (valid_cols[0] if valid_cols else None)
+        t.sortby_col_ascend = True
+        t.sort_level1_col = None
+        t.sort_level1_asc = True
+        t.sort_level2_col = None
+        t.sort_level2_asc = True
+        t.sort_level3_col = None
+        t.sort_level3_asc = True
+        t.multi_sort_click_count = 0
+        self.update_mixin_tree_headers(t)
+
+    def _save_mixin_ui_states(self, tree: ttk.Treeview) -> None:
+        """多级排序发生改变时的保存状态处理器"""
+        self.save_ui_states()
+
+    def save_ui_states(self):
+        """历史追踪窗口的排序状态独立持久化"""
+        try:
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            t = self.tree
+            self._init_tree_sort_state(t)
+            key = self._get_tree_config_key(t)
+            config[key] = {
+                'sortby_col': t.sortby_col,
+                'sortby_col_ascend': t.sortby_col_ascend,
+                'sort_level1_col': t.sort_level1_col,
+                'sort_level1_asc': t.sort_level1_asc,
+                'sort_level2_col': t.sort_level2_col,
+                'sort_level2_asc': t.sort_level2_asc,
+                'sort_level3_col': t.sort_level3_col,
+                'sort_level3_asc': t.sort_level3_asc,
+                'multi_sort_click_count': t.multi_sort_click_count
+            }
+            
+            temp_file = WINDOW_CONFIG_FILE + ".tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            os.replace(temp_file, WINDOW_CONFIG_FILE)
+            
+            logger.info(f"[HistoryTrack] Saved independent sort state for history dialog: {key}")
+        except Exception as e:
+            logger.error(f"Error saving history sort states: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2770,6 +3060,7 @@ def _init_sector_tab(self, parent: tk.Frame):
     top_frame.grid_columnconfigure(0, weight=1)
 
     self._sector_tree.bind("<<TreeviewSelect>>", self._on_sector_selected)
+    self._sector_tree.bind("<Button-3>", self.show_context_menu)
 
     # 智能自动加载列宽与手动调整防抖捕获
     self._sector_cols_initialized = False
@@ -3190,6 +3481,9 @@ def _refresh_sector_tab(self):
                 followers_str,
             ), tags=tuple(sec_tags))
 
+        # 🛡️ 自动运行多级排序
+        self.perform_tree_multi_level_sort(self._sector_tree)
+
         now_str = datetime.now().strftime('%H:%M:%S')
         self._sector_status_lbl.config(
             text=f"✅ 已更新 {now_str} | 监控板块: {len(hot_sectors)} 个",
@@ -3311,47 +3605,7 @@ def _force_refresh_sector(self):
 
 def _sort_sector_tree(self, col: str):
     """板块列表点击表头排序"""
-    try:
-        items = [(self._sector_tree.set(k, col), k) for k in self._sector_tree.get_children('')]
-        
-        # 内部基础排序
-        def sort_sub_sectors(sub_l):
-            try:
-                sub_l.sort(key=lambda x: float(str(x[0]).replace('%', '').replace('#', '').replace('▲', '').replace('▼', '') or 0), reverse=True)
-            except Exception:
-                sub_l.sort()
-            return sub_l
-
-        # [🚀 收藏置顶二次排序] 分流已收藏板块和普通板块，实现重点板块强置顶
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_sectors = fav_mgr.get_favorite_sectors()
-            fav_list = []
-            normal_list = []
-            for val, k in items:
-                # 从 values 中精确提取板块名
-                vals = self._sector_tree.item(k, "values")
-                sec_name = vals[1].replace("【重点】", "").replace("【重点】", "").strip() if len(vals) > 1 else ""
-                
-                if sec_name in fav_sectors:
-                    fav_list.append((val, k))
-                else:
-                    normal_list.append((val, k))
-            
-            sorted_fav = sort_sub_sectors(fav_list)
-            sorted_normal = sort_sub_sectors(normal_list)
-            final_items = sorted_fav + sorted_normal
-        except Exception as e:
-            logger.warning(f"Sector favorites sorting failed: {e}")
-            final_items = sort_sub_sectors(items)
-
-        for idx, (_, k) in enumerate(final_items):
-            self._sector_tree.move(k, '', idx)
-        # [NEW] 排序后自动滚动到顶部
-        self._sector_tree.yview_moveto(0)
-    except Exception as e:
-        logger.debug(f"_sort_sector_tree: {e}")
+    self.sort_mixin_by_column(self._sector_tree, col, self._get_mixin_current_col_asc(self._sector_tree, col))
 
 
 def _refresh_decision_tab(self):
@@ -3430,6 +3684,9 @@ def _refresh_decision_tab(self):
                     self._signal_tree.item(existing[code], values=values, tags=(tag,))
                 else:
                     self._signal_tree.insert("", "end", iid=code, values=values, tags=(tag,))
+
+            # 🛡️ 自动运行多级排序
+            self.perform_tree_multi_level_sort(self._signal_tree)
         except Exception as e:
             logger.debug(f"[decision_tab] signal refresh: {e}")
 
@@ -4422,18 +4679,7 @@ def _on_signal_selected(self, event=None):
 
 def _sort_signal_tree(self, col: str):
     """决策信号列表点击表头排序"""
-    try:
-        items = [(self._signal_tree.set(k, col), k) for k in self._signal_tree.get_children('')]
-        try:
-            items.sort(key=lambda x: float(x[0].replace('%', '').replace('#', '').replace('+', '').replace('-', '') or 0), reverse=True)
-        except Exception:
-            items.sort(reverse=True)
-        for idx, (_, k) in enumerate(items):
-            self._signal_tree.move(k, '', idx)
-        # [NEW] 排序后自动滚动到顶部
-        self._signal_tree.yview_moveto(0)
-    except Exception as e:
-        logger.debug(f"_sort_signal_tree: {e}")
+    self.sort_mixin_by_column(self._signal_tree, col, self._get_mixin_current_col_asc(self._signal_tree, col))
 
 
 def show_decision_tab(self):
@@ -5455,6 +5701,10 @@ def _init_guidance_tab(self, parent: tk.Frame):
             messagebox.showinfo("每日盘前操作指南详情", msg, parent=self)
 
     def _show_guidance_context_menu(event):
+        # [NEW] 优先拦截并处理表头右键多级排序菜单
+        if hasattr(self, 'show_header_context_menu') and self.show_header_context_menu(self._guidance_tree, event):
+            return
+            
         item_id = self._guidance_tree.identify_row(event.y)
         if not item_id:
             return
@@ -5903,6 +6153,9 @@ def _refresh_guidance_tab(self):
                 tags=(tag,)
             )
             
+        # 🛡️ 自动运行多级排序
+        self.perform_tree_multi_level_sort(self._guidance_tree)
+
         self._guidance_tips_lbl.config(text=f"📊 已成功拉取并呈现 {len(data_sorted)} 条作战指导", fg="#888888")
         
         # 仅在打开/首次载入时执行一次自动恢复或自动测量，后续刷新时保持用户手动调整的列宽不被强行覆盖
@@ -5931,16 +6184,7 @@ def _refresh_guidance_tab(self):
 
 def _sort_guidance_tree(self, col: str):
     """每日操作指南列表点击表头排序"""
-    current_col = getattr(self, '_guid_sort_col', "code")
-    current_desc = getattr(self, '_guid_sort_desc', False)
-    
-    if current_col == col:
-        self._guid_sort_desc = not current_desc
-    else:
-        self._guid_sort_col = col
-        self._guid_sort_desc = False
-        
-    self._refresh_guidance_tab()
+    self.sort_mixin_by_column(self._guidance_tree, col, self._get_mixin_current_col_asc(self._guidance_tree, col))
 
 
 def show_guidance_tab(self):

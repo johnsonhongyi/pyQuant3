@@ -121,13 +121,22 @@ class GlobalFavoriteManager:
                 full_data = json.load(f)
             
             ui_state = full_data.get("sector_bidding_panel_persistence_ui_state")
+            changed = False
             if ui_state:
+                new_sectors = set(ui_state.get('favorite_sectors', []))
+                new_stocks = set(ui_state.get('favorite_stocks', []))
                 with self._lock:
-                    self.favorite_sectors = set(ui_state.get('favorite_sectors', []))
-                    self.favorite_stocks = set(ui_state.get('favorite_stocks', []))
+                    if new_sectors != self.favorite_sectors or new_stocks != self.favorite_stocks:
+                        changed = True
+                    self.favorite_sectors = new_sectors
+                    self.favorite_stocks = new_stocks
                     self._last_config_mtime = mtime
                 logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
-                self.notify_subscribers()
+                if changed:
+                    self.notify_subscribers()
+            else:
+                with self._lock:
+                    self._last_config_mtime = mtime
         except Exception as e:
             logger.error(f"Failed to load favorites from config: {e}")
 
