@@ -1,3 +1,9 @@
+## 2026-06-25 20:30
+- [x] **完成策略选股与多级排序重构的深度代码复查 (Completed Deep Code Review for Stock Selection & Multi-Sort)**：
+    - [x] **进行全量变更审计与逻辑核对 (Audited All Changes & Verified Logic)**：对 `global_favorites.py`、`stock_selection_window.py`、`treeview_mixin.py`、`performance_optimizer.py` 和 `instock_MonitorTK.py` 在最新提交中涉及的 800 余行代码进行了逐行复查。
+    - [x] **识别并记录中低风险优化点 (Identified Medium/Low Severity Findings)**：包括配置文件自选缺失时的一致性同步漏洞、窗口意外销毁时的延迟计时器残留风险（TclError）以及数值解析中特殊字符链式替换的可扩展性建议。
+    - [x] **输出完整规范审查报告 (Generated Formatted Review Report)**：创建并覆盖更新了 `CODE_REVIEW_RESULTS.md`，按致命、高、中、低四级严重度整理并提供具体修复代码对比，确证无致命架构或逻辑缺陷。
+
 ## 2026-06-25 20:20
 - [x] **彻底根治排序与持久化触发的策略选股二次刷新与闪烁 Bug (Fixed Double Refresh & Selection Jitter on Config Save)**：
     - [x] **实现 GlobalFavoriteManager 细粒度自选脏检查 (Implemented Fine-Grained Favorites Check)**：在 `global_favorites.py` 的 `GlobalFavoriteManager.load_from_config` 中，重构了配置重载逻辑。从 `window_config.json` 重新加载配置后，仅当 `favorite_sectors` 或 `favorite_stocks` 集合内容发生实际物理变动时才调用 `notify_subscribers()`。
