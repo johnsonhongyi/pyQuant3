@@ -1,3 +1,33 @@
+## 2026-06-25 16:00
+- [x] **修复多级级联排序点击其他列时重置主排序之 Bug (Fixed Master Sort Resetting when Clicking Other Columns)**：
+    - [x] **修复 `sort_mixin_by_column` 中的重置逻辑**：在 `treeview_mixin.py` 中，重构了 `sort_mixin_by_column` 的点击判定流程。当检测到当前存在主排序（`L1`）但点击的是其他全新的排序列时，不再执行一键清除所有多级排序的重置动作，而是保留已绑定的主排序（`sort_level1_col` 及其方向），仅更新并覆盖 `tree.sortby_col` 与 `tree.sortby_col_ascend` 作为临时从/次排序后缀。
+    - [x] **对齐单列与多级排序状态的分流清除**：仅在当前没有设置任何主排序（`L1` 为 None）且点击全新排序列时，才真正执行一键重置多级排序为单列排序的操作，保障了多级排序的视觉稳定性与操作逻辑一致性。
+    - [x] **无错通过物理编译验证**：运行 `py_compile` 物理编译工具，成功通过了对 `treeview_mixin.py` 和 `instock_MonitorTK.py` 的无错编译。
+
+## 2026-06-25 15:50
+- [x] **优化实时指标内存缓存前置注入与日志降噪 (Optimized Realtime Indicator In-Memory Cache Injection & Log Throttling)**：
+    - [x] **前置更新内存指标辅助缓存 (`_df_all_cache`)**：在 `realtime_data_service.py` 中，将 `set_df_all_cache(df)` 的调用时机前置移动到 `MinuteKlineCache.update_batch` 的头部。这确保了在 background strategy thread 执行重计算和指标状态评估前，最新的全量行情 DataFrame 已经提前注入到了内存缓存中，彻底根治了冷启动及盘中首次重计算时由于 `df_snap` 暂未就绪而产生空/None 警告的漏洞。
+    - [x] **修复指纹脏位检查类型错误 (Fixed Fingerprint Dirty Check TypeError)**：重构了 `set_df_all_cache` 的指纹列选择逻辑，当监测的字段均未在 columns 中出现时，回退并默认使用 `['code']` 或 `list(df.columns)` 进行特征计算，避免产生 `NoneType` 不可迭代的类型错误。
+    - [x] **引入警告日志频控降噪机制 (Implemented Warn Log Throttling & Cooldown)**：在 `calculate_stock_daily_indicators` 中，针对 `df_snap` 为空/None 引入了全局 60 秒的限频拦截闸；针对个股代码未匹配成功引入了针对个股 ID 的 300 秒（5分钟）限频，杜绝了系统冷启动或数据不匹配状态下瞬时产生数千行警告日志轰炸导致的磁盘 I/O 争抢。
+
+## 2026-06-25 14:30
+- [x] **彻底删除 HDF5 磁盘回退读取机制 (Completely Removed HDF5 Disk Fallback Reads)**：
+    - [x] **删除 `calculate_stock_daily_indicators` 中的磁盘回退逻辑**：在 `realtime_data_service.py` 中，彻底移除 `calculate_stock_daily_indicators` 方法里的磁盘读取和回退逻辑，阻断一切在缓存缺失时对 HDF5 文件 (`get_tdx_Exp_day_to_df`) 的同步/异步物理读盘动作，使该方法完全依赖高效的内存数据。
+    - [x] **实现通过 `df` 直接匹配指标**：将 `calculate_stock_daily_indicators` 的参数列表扩充，在 `update_wave_structure_state` 调用链中直接传入当前的 `df`，从而实现直接在内存 DataFrame 查找 `ma20d` 等全部指标数据。如果未获取到，则输出相应的日志警告（`logger.warning`），保障数据链路的异常可追溯。
+
+## 2026-06-25 15:30
+- [x] **修复取消全部多级排序后的状态残留与默认排序 Bug (Fixed Sorting Reversion on Clear All & Stale State Persistence)**：
+    - [x] **彻底重构 `clear_all_mixin_multi_sort` 清理逻辑**：在 `treeview_mixin.py` 中，彻底消除了“取消多级排序后依然触发 `sort_mixin_by_column`”的冗余调用。现在清除操作将完全置空 `sort_levelX_col` (L1-L3)、`sortby_col` 与 `sortby_col_ascend` 等所有排序状态变量，防止产生陈旧状态残留。
+    - [x] **实现双端排序状态深度同步 (Synchronized Double-Ended Sorting States)**：清空操作不仅重置 `tree` 对象的私有属性，还同时同步重置主 `App` 实例上的所有对应排序状态，确保状态机内存完全一致，并正常触发 `save_ui_states()` 以免在重启或点击列头时再次反弹回旧有的排序。
+    - [x] **智能重置首点击默认降序 (Initialized New Click to Descending)**：优化了 `_get_mixin_current_col_asc`，当点击非当前排序列时，默认以降序（`reverse=True` 即 `sortby_col_ascend=False`）作为首次排序起始方向，使得“清空所有”后的下一次点击能够按股票行情最直观的由高到低规则重新干净排序。
+
+## 2026-06-25 12:50
+- [x] **实现通用多级排序架构 (Unified Reusable Treeview Multi-Sort Mixin)**：
+    - [x] **完全抽象 TreeviewMixin 多级排序 (Abstracted Generic Multi-Sort Logic)**：将 `StockMonitorApp` 中所有与多级排序状态（`sort_levelX_col`, `sort_levelX_asc`）、状态维护（`_init_tree_sort_state`）相关的逻辑完全迁移下沉至 `TreeviewMixin`，消除了主窗口类的多处冗余代码，并提高了组件复用度，完美对齐 DRY 与 SOLID 原则。
+    - [x] **重构主窗口与辅助视图进行委托 (Refactored Subclasses to Delegate to Mixin)**：将 `instock_MonitorTK.py` 中的 `sort_by_column`、`update_tree_headers` 等排序控制及渲染方法重构为调用 `TreeviewMixin` 的对应实现（如 `sort_mixin_by_column` 和 `update_mixin_tree_headers`），实现了在保留主视图排序自定义性（如 favoriting 置顶、MainU 缠论特殊列排序）的同时进行完美的底层统一。
+    - [x] **拓展支持 ExtDataViewer 辅助窗口多级排序 (Integrated Multi-Sort in ExtDataViewer)**：重构了 `ext_data_viewer.py`，其内部所有的 Treeview 在创建时均动态绑定 Mixin 的 `sort_tree_column`；右键点击表头可弹出统一的多级排序菜单（主/从/次排序及取消），点击即可立即重排并更新表头箭头状态，实现了全系统排序体验的无缝对齐。
+    - [x] **无错通过 Python 物理编译与静态语法分析 (Passed Compilation Verification)**：运行 `py_compile` 对修改后的 `tk_gui_modules/treeview_mixin.py`、`instock_MonitorTK.py` 以及 `ext_data_viewer.py` 完成了语法物理编译，确认无任何报错或异常。
+
 ## 2026-06-25 12:40
 - [x] **重构并提纯多级级联排序逻辑，实现“不绑定临时后缀”与“冷启动默认排序箭头” (Optimized Master-Suffix Multi-Sort UX & Cold-Start Arrow Indication)**：
     - [x] **实现临时后缀多级排序 (Non-binding Master-Suffix Sorting)**：撤销了点击新列自动解除主排序或物理设置多级的旧逻辑。现在通过右键设定的主/从/次排序属于“绑定配置”；左键点击新列头将作为“临时后缀”（不污染绑定变量），在 `_sort_dataframe` 中动态拼装为二级 (🟡[从]) 或三级 (🟢[次]) 参与排序。用户直接点击任意其他新列即可无阻碍更换临时从/次排序，无需手动解除多级绑定，彻底消除了粘滞感。

@@ -191,3 +191,344 @@ class TreeviewMixin:
         for idx, row in df.iterrows():
             values = [row.get(col, '') for col in display_cols]
             self.tree.insert("", "end", values=values)
+
+    def _init_tree_sort_state(self, tree: ttk.Treeview) -> None:
+        """初始化指定 Treeview 的多级排序属性"""
+        if not hasattr(tree, 'sort_level1_col'):
+            # 如果是主 Treeview，则尝试从 App 实例的属性进行对齐初始化，保持持久化一致
+            if tree == getattr(self, 'tree', None):
+                tree.sort_level1_col = getattr(self, 'sort_level1_col', None)
+                tree.sort_level1_asc = getattr(self, 'sort_level1_asc', True)
+                tree.sort_level2_col = getattr(self, 'sort_level2_col', None)
+                tree.sort_level2_asc = getattr(self, 'sort_level2_asc', True)
+                tree.sort_level3_col = getattr(self, 'sort_level3_col', None)
+                tree.sort_level3_asc = getattr(self, 'sort_level3_asc', True)
+                tree.sortby_col = getattr(self, 'sortby_col', None)
+                tree.sortby_col_ascend = getattr(self, 'sortby_col_ascend', False)
+            else:
+                tree.sort_level1_col = None
+                tree.sort_level1_asc = True
+                tree.sort_level2_col = None
+                tree.sort_level2_asc = True
+                tree.sort_level3_col = None
+                tree.sort_level3_asc = True
+                tree.sortby_col = None
+                tree.sortby_col_ascend = False
+
+    def _get_clean_header_text(self, tree: ttk.Treeview, col: str) -> str:
+        """获取不含排序前缀的干净表头文字"""
+        header_map = {
+            'code': '代码', 'name': '名称', 'grade': '等级',
+            'trade': '现价', 'percent': '涨幅', 'volume': '量比',
+            'amount': '成交额', 'category': '行业/题材', 'emotion_status': '情绪状态',
+            'zhuli_rank': '排名', 'change_pct': '涨幅%', 'win': '胜率', 'sum_perc': '盈亏%',
+            'net_ratio': '主力净占比%', 'sector': '所属板块', 'hot_rank': '排名',
+            'hot_tag': '标签', 'hot_reason': '深度推导逻辑', 'theme_date': '日期',
+            'theme_name': '所属题材', 'theme_logic': '题材逻辑推演'
+        }
+        if col in header_map:
+            return header_map[col]
+            
+        current_text = tree.heading(col, "text")
+        clean_text = current_text
+        clean_text = clean_text.replace("↑", "").replace("↓", "")
+        clean_text = clean_text.replace("🔴[主]", "").replace("🟡[从]", "").replace("🟢[次]", "")
+        return clean_text.strip()
+
+    def update_mixin_tree_headers(self, tree: ttk.Treeview) -> None:
+        """根据当前多级排序状态刷新指定 Treeview 的表头，并重新绑定排序命令"""
+        self._init_tree_sort_state(tree)
+        
+        bound_cols = set()
+        if tree.sort_level1_col:
+            bound_cols.add(tree.sort_level1_col)
+        if tree.sort_level2_col:
+            bound_cols.add(tree.sort_level2_col)
+        if tree.sort_level3_col:
+            bound_cols.add(tree.sort_level3_col)
+
+        cols = tree["columns"]
+        for col in cols:
+            text = self._get_clean_header_text(tree, col)
+            is_multi = False
+            col_asc = True
+            
+            if tree.sort_level1_col == col:
+                col_asc = bool(tree.sort_level1_asc)
+                text = f"🔴[主] {text}"
+                is_multi = True
+            elif tree.sort_level2_col == col:
+                col_asc = bool(tree.sort_level2_asc)
+                text = f"🟡[从] {text}"
+                is_multi = True
+            elif tree.sort_level3_col == col:
+                col_asc = bool(tree.sort_level3_asc)
+                text = f"🟢[次] {text}"
+                is_multi = True
+                
+            # 动态从/次排序指示器
+            if tree.sort_level1_col and col not in bound_cols:
+                if tree.sortby_col == col:
+                    bound_cnt = len(bound_cols)
+                    if bound_cnt == 1:
+                        text = f"🟡[从] {text}"
+                    elif bound_cnt == 2:
+                        text = f"🟢[次] {text}"
+                    col_asc = bool(tree.sortby_col_ascend)
+                    is_multi = True
+
+            if is_multi or tree.sortby_col == col:
+                arrow = "↑ " if col_asc else "↓ "
+                text = arrow + text
+                
+            tree.heading(col, text=text, command=lambda _col=col: self.sort_mixin_by_column(tree, _col, self._get_mixin_current_col_asc(tree, _col)))
+
+    def _get_mixin_current_col_asc(self, tree: ttk.Treeview, col: str) -> bool:
+        """获取当前指定列的排序方向"""
+        self._init_tree_sort_state(tree)
+        if col == tree.sort_level1_col:
+            return bool(tree.sort_level1_asc)
+        elif col == tree.sort_level2_col:
+            return bool(tree.sort_level2_asc)
+        elif col == tree.sort_level3_col:
+            return bool(tree.sort_level3_asc)
+        # 如果是单排，且不是当前列，点击新列默认按降序排列(需要 reverse=True 才能让 sortby_col_ascend = not reverse = False)
+        if tree.sortby_col != col:
+            return True
+        return bool(tree.sortby_col_ascend)
+
+    def sort_mixin_by_column(self, tree: ttk.Treeview, col: str, reverse: bool) -> None:
+        """左键点击表头时的核心多级排序状态处理与切换"""
+        self._init_tree_sort_state(tree)
+        
+        is_multi_clicked = False
+        if col == tree.sort_level1_col:
+            tree.sort_level1_asc = not tree.sort_level1_asc
+            is_multi_clicked = True
+        elif col == tree.sort_level2_col:
+            tree.sort_level2_asc = not tree.sort_level2_asc
+            is_multi_clicked = True
+        elif col == tree.sort_level3_col:
+            tree.sort_level3_asc = not tree.sort_level3_asc
+            is_multi_clicked = True
+            
+        if is_multi_clicked:
+            # 同步到主 App 的属性（若是主 Tree）
+            if tree == getattr(self, 'tree', None):
+                self.sort_level1_asc = tree.sort_level1_asc
+                self.sort_level2_asc = tree.sort_level2_asc
+                self.sort_level3_asc = tree.sort_level3_asc
+                
+            self.update_mixin_tree_headers(tree)
+            self.trigger_mixin_multi_level_sort(tree)
+            if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
+                self.save_ui_states()
+            return
+            
+        # 如果当前设置了主排序（L1），点击其他全新列头时，保留主排序，将其作为临时从/次排序
+        if tree.sort_level1_col is not None:
+            if tree.sortby_col == col:
+                tree.sortby_col_ascend = not tree.sortby_col_ascend
+            else:
+                tree.sortby_col = col
+                tree.sortby_col_ascend = not reverse
+                
+            if tree == getattr(self, 'tree', None):
+                self.sortby_col = col
+                self.sortby_col_ascend = tree.sortby_col_ascend
+        else:
+            # 一键自动解除所有多级排序，切回单列排序
+            tree.sort_level1_col = None
+            tree.sort_level2_col = None
+            tree.sort_level3_col = None
+            tree.sortby_col = col
+            tree.sortby_col_ascend = not reverse
+            
+            if tree == getattr(self, 'tree', None):
+                self.sort_level1_col = None
+                self.sort_level2_col = None
+                self.sort_level3_col = None
+                self.sortby_col = col
+                self.sortby_col_ascend = tree.sortby_col_ascend
+                self.multi_sort_click_count = 0
+            
+        self.update_mixin_tree_headers(tree)
+        self.trigger_mixin_multi_level_sort(tree)
+        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
+            self.save_ui_states()
+
+    def set_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str, level: int) -> None:
+        """把某列设为指定的排序级别"""
+        self._init_tree_sort_state(tree)
+        
+        if tree.sort_level1_col == col_name:
+            tree.sort_level1_col = None
+        if tree.sort_level2_col == col_name:
+            tree.sort_level2_col = None
+        if tree.sort_level3_col == col_name:
+            tree.sort_level3_col = None
+
+        if level == 1:
+            tree.sort_level1_col = col_name
+            tree.sort_level1_asc = True
+        elif level == 2:
+            tree.sort_level2_col = col_name
+            tree.sort_level2_asc = True
+        elif level == 3:
+            tree.sort_level3_col = col_name
+            tree.sort_level3_asc = True
+
+        if tree == getattr(self, 'tree', None):
+            self.sort_level1_col = tree.sort_level1_col
+            self.sort_level1_asc = tree.sort_level1_asc
+            self.sort_level2_col = tree.sort_level2_col
+            self.sort_level2_asc = tree.sort_level2_asc
+            self.sort_level3_col = tree.sort_level3_col
+            self.sort_level3_asc = tree.sort_level3_asc
+            self.multi_sort_click_count = 1 if level == 1 else getattr(self, 'multi_sort_click_count', 0)
+
+        self.update_mixin_tree_headers(tree)
+        self.trigger_mixin_multi_level_sort(tree)
+        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
+            self.save_ui_states()
+
+    def clear_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str) -> None:
+        """取消某列的多级排序设置"""
+        self._init_tree_sort_state(tree)
+
+        if tree.sort_level1_col == col_name:
+            tree.sort_level1_col = None
+        if tree.sort_level2_col == col_name:
+            tree.sort_level2_col = None
+        if tree.sort_level3_col == col_name:
+            tree.sort_level3_col = None
+
+        if tree == getattr(self, 'tree', None):
+            self.sort_level1_col = tree.sort_level1_col
+            self.sort_level2_col = tree.sort_level2_col
+            self.sort_level3_col = tree.sort_level3_col
+            if not self.sort_level1_col:
+                self.multi_sort_click_count = 0
+
+        self.update_mixin_tree_headers(tree)
+        self.trigger_mixin_multi_level_sort(tree)
+        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
+            self.save_ui_states()
+
+    def clear_all_mixin_multi_sort(self, tree: ttk.Treeview) -> None:
+        """清除全部的多级排序"""
+        self._init_tree_sort_state(tree)
+
+        tree.sort_level1_col = None
+        tree.sort_level1_asc = True
+        tree.sort_level2_col = None
+        tree.sort_level2_asc = True
+        tree.sort_level3_col = None
+        tree.sort_level3_asc = True
+        tree.sortby_col = None
+        tree.sortby_col_ascend = False
+        
+        if tree == getattr(self, 'tree', None):
+            self.sort_level1_col = None
+            self.sort_level1_asc = True
+            self.sort_level2_col = None
+            self.sort_level2_asc = True
+            self.sort_level3_col = None
+            self.sort_level3_asc = True
+            self.sortby_col = None
+            self.sortby_col_ascend = False
+            self.multi_sort_click_count = 0
+
+        self.update_mixin_tree_headers(tree)
+        self.trigger_mixin_multi_level_sort(tree)
+            
+        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
+            self.save_ui_states()
+
+    def trigger_mixin_multi_level_sort(self, tree: ttk.Treeview) -> None:
+        """通用触发多级排序动作"""
+        if hasattr(self, 'trigger_multi_level_sort') and tree == getattr(self, 'tree', None):
+            self.trigger_multi_level_sort()
+            return
+        self.perform_tree_multi_level_sort(tree)
+
+    def perform_tree_multi_level_sort(self, tree: ttk.Treeview) -> None:
+        """直接对 Treeview 中的行进行多级稳定排序"""
+        self._init_tree_sort_state(tree)
+        
+        bound_cols = set()
+        active_levels = []
+        
+        if tree.sort_level1_col:
+            active_levels.append((tree.sort_level1_col, not tree.sort_level1_asc))
+            bound_cols.add(tree.sort_level1_col)
+        if tree.sort_level2_col:
+            active_levels.append((tree.sort_level2_col, not tree.sort_level2_asc))
+            bound_cols.add(tree.sort_level2_col)
+        if tree.sort_level3_col:
+            active_levels.append((tree.sort_level3_col, not tree.sort_level3_asc))
+            bound_cols.add(tree.sort_level3_col)
+            
+        temp_col = tree.sortby_col
+        if temp_col and temp_col not in bound_cols and temp_col in tree.cget("columns"):
+            active_levels.append((temp_col, not tree.sortby_col_ascend))
+
+        if not active_levels:
+            return
+            
+        # 依次从低优先级到高优先级进行稳定排序
+        for col, rev in reversed(active_levels):
+            self.sort_tree_by_single_column_stable(tree, col, rev)
+
+    def sort_tree_by_single_column_stable(self, tree: ttk.Treeview, col: str, reverse: bool) -> None:
+        """单列稳定排序"""
+        if col not in tree.cget("columns"):
+            return
+            
+        l = [(tree.set(k, col), k) for k in tree.get_children('')]
+        
+        def _key_func(t):
+            s = str(t[0]).strip()
+            if not s or s == '-':
+                return (1, "") if not reverse else (-1, "")
+            try:
+                val = float(s.replace('%', '').replace('+', ''))
+                return (0, val)
+            except (ValueError, TypeError):
+                return (2, s.lower())
+                
+        if col == 'name' and hasattr(self, 'feature_marker'):
+            fm = getattr(self, 'feature_marker')
+            l.sort(key=lambda t: (fm.get_priority_score(t[0]), t[0]), reverse=reverse)
+        elif col == 'MainU':
+            from mainu_sort import mainu_sort_score
+            l.sort(key=lambda t: mainu_sort_score(t[0]), reverse=reverse)
+        else:
+            l.sort(key=_key_func, reverse=reverse)
+            
+        for index, (val, k) in enumerate(l):
+            tree.move(k, '', index)
+
+    def show_header_context_menu(self, tree: ttk.Treeview, event: tk.Event) -> bool:
+        """通用表头右键多级排序上下文菜单。返回 True 表示事件已被处理，False 表示由行右键菜单继续处理"""
+        region = tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return False
+            
+        col_id = tree.identify_column(event.x)
+        if not col_id:
+            return True
+            
+        col_name = tree.column(col_id, option="id")
+        self._init_tree_sort_state(tree)
+        
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label=f"🔴 设为 【主排序】 ({col_name})", command=lambda: self.set_mixin_multi_sort_level(tree, col_name, 1))
+        menu.add_command(label=f"🟡 设为 【从排序】 ({col_name})", command=lambda: self.set_mixin_multi_sort_level(tree, col_name, 2))
+        menu.add_command(label=f"🟢 设为 【次排序】 ({col_name})", command=lambda: self.set_mixin_multi_sort_level(tree, col_name, 3))
+        menu.add_separator()
+        menu.add_command(label=f"❌ 取消此列的排序设置", command=lambda: self.clear_mixin_multi_sort_level(tree, col_name))
+        menu.add_command(label=f"🚫 清空所有多级排序", command=lambda: self.clear_all_mixin_multi_sort(tree))
+        
+        menu.post(event.x_root, event.y_root)
+        return True
