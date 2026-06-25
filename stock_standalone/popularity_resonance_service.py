@@ -46,6 +46,65 @@ def clean_stock_code(code: str) -> str:
         return code[2:]
     return code[-6:]
 
+def fetch_realtime_quotes(codes: list[str]) -> dict[str, dict]:
+    """
+    从新浪财经批量获取股票的实时行情（名称、最新价、涨幅）
+    返回: { 股票代码: { "name": 名称, "price": 最新价, "percent": 涨幅 } }
+    """
+    if not codes:
+        return {}
+        
+    url_codes = []
+    for c in codes:
+        if c.startswith(('5', '6', '9')):
+            prefix = 'sh'
+        elif c.startswith(('43', '83', '87', '92')):
+            prefix = 'bj'
+        else:
+            prefix = 'sz'
+        url_codes.append(f"{prefix}{c}")
+        
+    url = f"http://hq.sinajs.cn/list={','.join(url_codes)}"
+    req = urllib.request.Request(url, headers={"Referer": "http://finance.sina.com.cn"})
+    
+    result = {}
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            lines = response.read().decode('gbk').splitlines()
+            for line in lines:
+                if not line.strip():
+                    continue
+                parts = line.split('=')
+                if len(parts) < 2:
+                    continue
+                left, right = parts[0], parts[1]
+                code = left[-6:]
+                
+                val_str = right.strip('"; \n\r')
+                if not val_str:
+                    continue
+                fields = val_str.split(',')
+                if len(fields) < 4:
+                    continue
+                    
+                name = fields[0]
+                yesterday_close = float(fields[2] or 0)
+                current_price = float(fields[3] or 0)
+                
+                percent = 0.0
+                if yesterday_close > 0:
+                    percent = (current_price - yesterday_close) / yesterday_close * 100
+                    
+                result[code] = {
+                    "name": name,
+                    "price": current_price,
+                    "percent": percent
+                }
+    except Exception as e:
+        logger.error(f"批量抓取新浪行情失败: {e}")
+        
+    return result
+
 def fetch_eastmoney(limit: int = 100) -> dict[str, int]:
     """
     获取东方财富人气榜数据 (POST 方式)
@@ -227,26 +286,30 @@ def calculate_resonance_scores(
     resonance_list.sort(key=lambda x: x['score'], reverse=True)
     return resonance_list
 
-def write_to_tdx_blocks(codes: list[str]) -> None:
+def write_to_tdx_blocks(codes: list[str], blk_filename: str = "RQG.blk") -> None:
     """
-    将股票代码写入通达信的自选板块文件中 (RQG.blk)。
+    将股票代码写入通达信的自选板块文件中。
     支持写入多个存在的工作路径，解决路径错配问题。
     """
     if not codes:
         logger.warning("没有股票代码需要写入.")
         return
         
-    blk_filename = "RQG.blk"
-    
+    # 确保后缀名为 .blk
+    blk_filename = blk_filename.strip()
+    if not blk_filename.endswith(".blk"):
+        blk_filename += ".blk"
+        
     # 1. 写入主通达信目录 (由 cct.write_to_blocknew 自动联动 new_tdx2 和 zd_dxzq)
     if cct is not None:
         try:
             primary_path = os.path.join(cct.get_tdx_dir_blocknew(), blk_filename)
             cct.write_to_blocknew(primary_path, codes, append=False, doubleFile=False)
             logger.info(f"成功更新主自选板块文件: {primary_path}")
+            return 
         except Exception as e:
             logger.error(f"写入主自选板块文件失败: {e}")
-            
+        
     # 2. 兜底写入 D:\kxg 目录 (原易语言EXE的硬编码目标)
     kxg_dir = r"D:\kxg\T0002\blocknew"
     if os.path.exists(kxg_dir):
@@ -264,7 +327,7 @@ def write_to_tdx_blocks(codes: list[str]) -> None:
         except Exception as e:
             logger.error(f"写入兜底自选文件失败: {e}")
 
-def run_sync(max_stocks: int = 50) -> list[dict]:
+def run_sync(max_stocks: int = 50, blk_filename: str = "RQG.blk") -> list[dict]:
     """运行一次完整的人气共振采集与写入"""
     logger.info("开始拉取各大平台人气榜单...")
     
@@ -288,8 +351,8 @@ def run_sync(max_stocks: int = 50) -> list[dict]:
     top_codes = [r['code'] for r in top_results]
     
     # 写入通达信自选文件
-    logger.info("写入通达信自选文件...")
-    write_to_tdx_blocks(top_codes)
+    logger.info(f"写入通达信自选文件: {blk_filename}...")
+    write_to_tdx_blocks(top_codes, blk_filename=blk_filename)
     
     return top_results
 

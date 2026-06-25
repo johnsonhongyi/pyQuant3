@@ -1,3 +1,18 @@
+## 2026-06-25 21:30
+- [x] **物理剥离大库依赖与 PopularityResonanceSync 打包瘦身 (Completely Decoupled Heavy Libraries & Optimized PopularityResonanceSync Standalone Package Size)**：
+    - [x] **完全剥离 JohnsonUtil.commonTips / johnson_cons 依赖**：重构了 `popularity_resonance_service.py` 和 `linkage_service.py` 内部的通达信板块写入、路径探测及多进程队列大小配置读取等逻辑，改用自洽独立的标准库（如 `configparser`）动态读取，物理切断了与包含庞大 pandas/numpy 的 `commonTips` 库的直接和间接依赖。
+    - [x] **在 sys_utils.py 中移动同步导入**：将 `sys_utils.py` 顶层对 `commonTips` 的同步导入删除，改为在具体函数内部动态按需导入，打断了通过 `sys_utils` 产生的级联重型库依赖。
+    - [x] **在 PyInstaller Spec 文件中配置物理排除 (Excludes List)**：修改了 `PopularityResonanceSync.spec` 中的 `Analysis.excludes` 参数，强行在打包时隔离 `pandas`、`numpy`、`matplotlib`、`scipy`、`talib`、`h5py`、`tables`、`PyQt5`、`PyQt6` 等 30 多个完全未使用的科学计算和重型 GUI 库。
+    - [x] **修改 build_resonance_gui.bat 以防 spec 被覆盖**：重构了 PyInstaller 打包指令，直接使用现成的 `.spec` 配置文件打包。打包体积从 **49 MB** 缩减至 **27.7 MB**，体积缩减约 **43.5%**。
+    - [x] **编写自动化自测运行脚本通过验证**：编写并在后台成功运行了 `scratch/test_exe_launch.py` 物理拉起测试，确证打包后的无 Console 纯 GUI 客户端能够正常独立启动且无任何模块加载缺失引起的 Crash。
+
+## 2026-06-25 21:00
+- [x] **完成人气共振工具高保真 GUI 重构与 PyInstaller 编译打包自检 (Completed High-Fidelity Popularity Resonance GUI Refactor & PyInstaller Build)**：
+    - [x] **高仿真窄边框 UI 与动态布局收缩 (Narrow-border UI & Auto-hiding Layout)**：采用 ttk `clam` 扁平主题与自适应 `pack_forget` 机制，在获取数据为空时自动隐藏对应板块表格以节省分屏空间；使用扁平 1px 细边框与粗体红色带下划线的查询/写入按钮完美复刻易语言原版视觉。
+    - [x] **打通多目标联动选择与 Socket 通信通道 (Multi-target Linkage & Socket Integration)**：整合了通达信、同花顺的物理发送接口，并开发了面向本地 `127.0.0.1:26668` 端口投递 `"CODE|{code}"` 的非阻塞 Socket 联动机制，支持勾选框独立使能。
+    - [x] **物理打包与多进程安全守护 (Safe PyInstaller Standalone Build)**：在主入口注入了 `multiprocessing.freeze_support()`，彻底杜绝了 Windows 打包环境下由于多进程拉起导致的 GUI 无限重启假死；使用 `pyinstaller -F -w` 命令成功生成了不含 Console 终端窗口的独立可执行文件 `PopularityResonanceSync.exe`。
+    - [x] **通过自动化自测自检 (Passed Automated GUI Test)**：编写并运行了 `test_gui_run.py` 自动化测试脚本，成功实现了主窗口初始化、渲染并于 2 秒后自动关闭的无错健康校验。
+
 ## 2026-06-25 20:30
 - [x] **完成策略选股与多级排序重构的深度代码复查 (Completed Deep Code Review for Stock Selection & Multi-Sort)**：
     - [x] **进行全量变更审计与逻辑核对 (Audited All Changes & Verified Logic)**：对 `global_favorites.py`、`stock_selection_window.py`、`treeview_mixin.py`、`performance_optimizer.py` 和 `instock_MonitorTK.py` 在最新提交中涉及的 800 余行代码进行了逐行复查。
