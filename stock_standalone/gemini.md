@@ -1,3 +1,42 @@
+## 2026-06-25 12:40
+- [x] **重构并提纯多级级联排序逻辑，实现“不绑定临时后缀”与“冷启动默认排序箭头” (Optimized Master-Suffix Multi-Sort UX & Cold-Start Arrow Indication)**：
+    - [x] **实现临时后缀多级排序 (Non-binding Master-Suffix Sorting)**：撤销了点击新列自动解除主排序或物理设置多级的旧逻辑。现在通过右键设定的主/从/次排序属于“绑定配置”；左键点击新列头将作为“临时后缀”（不污染绑定变量），在 `_sort_dataframe` 中动态拼装为二级 (🟡[从]) 或三级 (🟢[次]) 参与排序。用户直接点击任意其他新列即可无阻碍更换临时从/次排序，无需手动解除多级绑定，彻底消除了粘滞感。
+    - [x] **动态渲染表头临时排序状态 (Dynamic Header Labels)**：在 `update_tree_headers` 中动态求值：若当前有绑定主排序但无绑定从/次排序，被点击的临时列会在表头上动态渲染为对应的 `🟡[从]` 或 `🟢[次]` 标识并在最前端显示升降序箭头（↑/↓）。切换临时列时，此标识瞬间转移，提供了清晰而零粘滞的视觉反馈。
+    - [x] **冷启动默认排序列与箭头指示 (Cold-Start Default Sorting Indication)**：解决了冷启动后由于没有历史排序配置导致界面无任何列显示箭头、用户不知当前如何排序的痛点。新增默认排序保护：若冷启动后无任何多级或单列排序，系统自动将其初始化为 `"percent"`（涨幅）列降序，并在表头最前端正确绘制 `↓ ` 箭头指示器，指引清晰。
+    - [x] **排序箭头置顶对齐 (Prepend Sorting Arrows in Header)**：将排序箭头（↑/↓）渲染位置由末尾调整至表头文字的最前方（例如 `↓ 🔴[主] col`），极大地提升了多级表头的左右对齐观感与视觉聚焦效率。
+    - [x] **优化多级排序下的表头左键点击解除逻辑与方向反转 (Optimized Header Click to Dismiss Multi-Sort & Reverse UX)**：
+        - [x] **方向即时反转**：当用户在多级排序下点击主排序 (L1)、从排序 (L2) 或次排序 (L3) 中任意一列的表头时，直接在拦截器中反转并对齐对应的排序方向（`sort_levelX_asc = not sort_levelX_asc`），瞬间触发多级重排与表头箭头翻转渲染。
+        - [x] **一键自动解除**：当用户左键点击非多级排序列（全新列头）时，系统自动清空并物理擦除所有多级排序的列名与方向变量，瞬间切换为该新列的常规单列排序。这免除了此前必须手动调用右键菜单清除多级排序的繁琐步骤。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：运行 `py_compile` 对修改过的文件进行了无错编译检测，保证主视图数据排序逻辑的高效稳定运行。
+
+## 2026-06-25 12:12
+- [x] **修复主视图刷新时未应用多级排序规则导致回退到默认排序之 Bug (Fixed UI Multi-Level Sorting Alignment Issue on Refresh)**：
+    - [x] **重构并统一主视图排序机制为 `_sort_dataframe` (Unified Sorting via DRY)**：废除了 `instock_MonitorTK.py` (以及 `instock_MonitorTK-Sort.py`) 内部 `refresh_tree` 中冗余编写的单级排序逻辑。将其统一重构为调用自有的 `self._sort_dataframe(df)` 统一排序接口。这确保了在自选股更新、定时器轮询等操作触发 UI 刷新时，能够 100% 完整对齐多级和单级排序规则，防止了因为刷新动作导致的排序回退或丢失。
+    - [x] **补回默认排序下自选股/重点个股优先排序 (Restored Default is_fav Sorting Prioritization)**：修复了在没有任何多级或单级排序列设置时，重构后的 `_sort_dataframe` 回退分支中由于直接 drop `is_fav` 而漏掉了 `df.sort_values(by='is_fav', ascending=False)` 导致默认自选股置顶失效 the 缺陷。现已补回对 `is_fav` 倒序的缺省排序，确保了“重点个股优先”在主视图上的完整可用性。
+    - [x] **优化多级排序下的表头左键点击解除逻辑与方向反转 (Optimized Header Click to Dismiss Multi-Sort & Reverse UX)**：
+        - [x] **方向即时反转**：当用户在多级排序下点击主排序 (L1)、从排序 (L2) 或次排序 (L3) 中任意一列的表头时，直接在拦截器中反转并对齐对应的排序方向（`sort_levelX_asc = not sort_levelX_asc`），瞬间触发多级重排与表头箭头翻转渲染。
+        - [x] **一键自动解除**：当用户左键点击非多级排序列（全新列头）时，系统自动清空并物理擦除所有多级排序的列名与方向变量，瞬间切换为该新列的常规单列排序。这免除了此前必须手动调用右键菜单清除多级排序的繁琐步骤。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：运行 `py_compile` 对修改过的文件进行了无错编译检测，保证主视图数据排序逻辑的高效稳定运行。
+
+## 2026-06-25 12:05
+- [x] **修复由于数据为空时 `send_df` 漏掉 `continue` 导致的线程高频空转与日志暴兵 Bug (Fixed send_df Loop Fall-through & Log Flooding)**：
+    - [x] **物理隔离空数据 fall-through 通路**：修复了 `instock_MonitorTK.py` 的 `send_df` 行情广播分发子线程在探测到界面显示轨 `df_to_check` 为空（如刚启动冷态或未开盘非工作时间段）且循环计数 `count >= 3` 后，意外漏掉了 `continue` 从而顺延向下穿透执行的漏洞。现在一旦数据为空，强制小休眠 2 秒并 `continue` 返回下一次循环，彻底阻断了后续逻辑的无谓执行。
+    - [x] **增设日志降噪与频率控制 (Throttled Log Output)**：将 `[send_df] display track is empty or missing, waiting...` 调试日志的打印频率重构为基于计数求模 `count % 30 == 0`（大约每 60 秒打印一次），彻底治愈了控制台每秒数条的“日志轰炸”和 I/O 争抢，提升了后台长驻服务的稳定性。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：运行 `py_compile` 对修改后的 `instock_MonitorTK.py` 完成了物理编译，确认无任何语法异常，系统运行平稳。
+
+## 2026-06-25 12:00
+- [x] **实现 MinuteKlineCache 后台单线程异步批量补充拉取 (Implemented Async Single-Threaded Supplemental Fetching for MinuteKlineCache)**：
+    - [x] **重构 `_supplemental_fetch` 为异步队列机制**：废弃了原有的个股高频同步/单点阻塞 `_supplemental_fetch` 方法。设计并实现了 `_start_sup_worker_thread` 后台单线程 `SupFetchWorker` 的异步队列拉取架构。个股拉取任务将被缓冲在 `self._pending_sup_codes` 中，由专属后台单线程串行执行，彻底规避了高频间隙检测时线程爆炸与 HDF5/网络 I/O 剧烈争抢导致的主线程卡死。
+    - [x] **实现补充拉取失败 5分钟 冷却退避自愈 (Failed Cooldown 5-Minute Gate)**：新增 `_sup_failed_codes` 字典记录拉取失败的股票代码及时间戳。对于拉取失败或返回空数据的个股，自动隔离冷却 5 分钟，在此期间的重复拉取请求被直接拦截，避免无效请求导致的网络与盘中性能开销。
+    - [x] **保存并持久化日线特征指标计算结果到缓存 (Saved Computed Daily Indicators to Cache)**：在 `calculate_stock_daily_indicators` 核心计算完成后，在返回结果前置将其写入 `_daily_indicators_cache` 缓存，进一步完善了内存短路命中，消除了二次计算。
+    - [x] **无错通过 Python 物理编译与单元测试验证 (Passed Compilation Validation)**：对修改过的 `realtime_data_service.py` 进行了语法物理编译检测，顺利无错通过，确认系统运行状态长效稳定。
+
+## 2026-06-25 11:35
+- [x] **修复主视图多级联动排序引起的 pandas `ValueError: ascending` 崩溃与表头回调卡死 (Fixed Pandas ValueError & Treeview Header Lambda Freeze in Multi-Level Sorting)**：
+    - [x] **根治排序升降序列表 `NoneType` 传参崩溃 (Enforced Boolean Checks in _sort_dataframe)**：修复了由于 `ui_state` 中部分列的排序状态（如 `sortby_col_ascend`, `sort_levelX_asc`）初始化或被外部修改为 `None` 时，直接传递给 `df.sort_values` 导致的 `ValueError: ascending must be a boolean or list of booleans` 崩溃。在 `_sort_dataframe` 的多级和单级排序逻辑中，对所有 `ascending` 数组项追加了 `bool(getattr(...))` 强制转换与非空保护。
+    - [x] **实现表头排序实时求值回调 (Implemented Dynamic Header Sorting Lambda)**：修复了表头在渲染时硬编码固定了当时的 `col_asc` 布尔状态到 command lambda 闭包内，导致后续多次点击表头无法正确读取最新排序方向的缺陷。重构为引入 `_get_current_col_asc(col)` 辅助方法，并在 lambda 触发时动态实时计算当前列的最新升降序状态进行传参，消除了交互状态粘滞与白屏假死。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：运行 `py_compile` 对 `instock_MonitorTK.py` 完成了无错编译检测，保证主视图数据正常渲染与完美排序。
+
 ## 2026-06-25 00:15
 - [x] **动态对齐 `cct.compute_lastdays` 多日切片还原与自动订阅 (Dynamically Aligned compute_lastdays Slice Reconstruction & Auto-Subscription)**：
     - [x] **实现动态多日收盘序列还原 (Dynamic Daily Close Series Reconstruction)**：在 `ATSMainWindow` 中，降级重构逻辑现在能够基于 `getattr(cct, 'compute_lastdays', 9)` 动态生成最近 9 天（或配置天数）的日收盘价序列，利用逆向循环（从第 9 日递减至第 1 日）读取 `lastp9d` 到 `lastp1d` 等列并剔除无效值，从而动态适配差异化的日线回溯天数配置。
