@@ -1,3 +1,10 @@
+## 2026-06-25 18:00
+- [x] **实现概念板块窗口 Treeview 多级排序跨会话持久化与跨窗口广播同步 (Implemented Persistent Concept Sort & Cross-Window Sync)**：
+    - [x] **实现共用排序状态加载与冷启动恢复**：在 `instock_MonitorTK.py` 中实现了 `_apply_saved_concept_sort_state` 辅助方法。在 `show_concept_top10_window` 和 `show_concept_top10_window_simple` 概念子窗口创建并初始化 Treeview 时，均通过该方法从 `window_config.json` 文件的 `concept_top10_sort` 配置节点下安全反序列化加载共用的多级排序属性（L1-L3 排序字段、方向及点击计数器等），确保了所有概念板块子窗口在启动时都能一致自愈式应用相同的多级排序，避免了原先硬编码 `"percent"` 默认值的限制。
+    - [x] **重构 `treeview_mixin.py` 排序触发并建立最近活跃缓存机制**：在 `treeview_mixin.py` 中新增 `_save_mixin_ui_states` 方法，将 5 处多级/单列排序修改回调判定由“仅主表触发保存”放宽至“任意 Treeview 变更均触发保存”。特引入 `self._last_active_concept_tree` 临时指针，当非主表的概念子窗口 Treeview 触发排序修改时，将当前 Treeview 引用自动暂存到主 App 实例上。
+    - [x] **实现跨窗口排序广播同步与即时保存**：重构了主 App 的 `save_ui_states` 持久化逻辑，在保存时自动识别 `_last_active_concept_tree` 所对应的概念子窗口实例，将其最新排序状态提取并更新至 `window_config.json` 进行持久化；同时，将该最新排序状态同步应用到**其他所有当前正打开着**的简单概念子窗口（`_pg_top10_window_simple` 字典中的 win）及标准概念板块窗口（`_concept_win`）上，并重新渲染其表头的指示器箭头。这真正实现了多个概念板块分析窗口间的无阻碍共用和状态对齐。
+    - [x] **无错通过 Python 物理编译验证**：运行 `py_compile` 物理编译工具，成功通过了对 `instock_MonitorTK.py` 和 `tk_gui_modules/treeview_mixin.py` 的无错物理编译，确证逻辑与句法完整高保真。
+
 ## 2026-06-25 17:35
 - [x] **修复主视图高频行情刷新时跳过排序导致的多级排序回退 Bug (Fixed Main View Sorting Reversion on Real-time Refresh)**：
     - [x] **引入排序状态智能拦截 (`has_active_sort`)**：在 `instock_MonitorTK.py` 的主表刷新函数 `refresh_tree` 中，由于高频行情同步或定时刷新时默认带入 `skip_sort=True` 导致已设定的排序乱序。现增加 `has_active_sort` 属性判定，若当前 `self.tree`（或主窗口 `self`）上存在活跃的多级排序（L1-L3）或单列排序，则强制忽略 `skip_sort=True`，继续对数据执行 DataFrame 重排序，从根本上保证了刷新时排序状态的稳定。

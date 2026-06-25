@@ -215,6 +215,16 @@ class TreeviewMixin:
                 tree.sortby_col = None
                 tree.sortby_col_ascend = False
 
+    def _save_mixin_ui_states(self, tree: ttk.Treeview) -> None:
+        """多级排序发生改变时的保存状态分流处理器"""
+        if tree != getattr(self, 'tree', None):
+            self._last_active_concept_tree = tree
+        if hasattr(self, 'save_ui_states'):
+            try:
+                self.save_ui_states()
+            except Exception:
+                pass
+
     def _get_clean_header_text(self, tree: ttk.Treeview, col: str) -> str:
         """获取不含排序前缀的干净表头文字"""
         header_map = {
@@ -321,8 +331,7 @@ class TreeviewMixin:
                 
             self.update_mixin_tree_headers(tree)
             self.trigger_mixin_multi_level_sort(tree)
-            if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
-                self.save_ui_states()
+            self._save_mixin_ui_states(tree)
             return
             
         # 如果当前设置了主排序（L1），点击其他全新列头时，保留主排序，将其作为临时从/次排序
@@ -354,8 +363,7 @@ class TreeviewMixin:
             
         self.update_mixin_tree_headers(tree)
         self.trigger_mixin_multi_level_sort(tree)
-        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
-            self.save_ui_states()
+        self._save_mixin_ui_states(tree)
 
     def set_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str, level: int) -> None:
         """把某列设为指定的排序级别"""
@@ -389,8 +397,7 @@ class TreeviewMixin:
 
         self.update_mixin_tree_headers(tree)
         self.trigger_mixin_multi_level_sort(tree)
-        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
-            self.save_ui_states()
+        self._save_mixin_ui_states(tree)
 
     def clear_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str) -> None:
         """取消某列的多级排序设置"""
@@ -412,8 +419,7 @@ class TreeviewMixin:
 
         self.update_mixin_tree_headers(tree)
         self.trigger_mixin_multi_level_sort(tree)
-        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
-            self.save_ui_states()
+        self._save_mixin_ui_states(tree)
 
     def clear_all_mixin_multi_sort(self, tree: ttk.Treeview) -> None:
         """清除全部的多级排序"""
@@ -442,8 +448,7 @@ class TreeviewMixin:
         self.update_mixin_tree_headers(tree)
         self.trigger_mixin_multi_level_sort(tree)
             
-        if hasattr(self, 'save_ui_states') and tree == getattr(self, 'tree', None):
-            self.save_ui_states()
+        self._save_mixin_ui_states(tree)
 
     def trigger_mixin_multi_level_sort(self, tree: ttk.Treeview) -> None:
         """通用触发多级排序动作"""

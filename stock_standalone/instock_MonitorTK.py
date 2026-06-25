@@ -8184,6 +8184,62 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             config['ui_persistence']['multi_sort_click_count'] = self.multi_sort_click_count
             logger.info(f"Saving multi-sort states: L1={self.sort_level1_col}, L2={self.sort_level2_col}, L3={self.sort_level3_col}")
 
+            # [NEW] 保存概念板块 Treeview 的共用多级排序状态，并应用同步到全部打开概念窗口
+            concept_sort = None
+            concept_trees = []
+            
+            if hasattr(self, "_concept_win") and self._concept_win and self._concept_win.winfo_exists():
+                tree = getattr(self._concept_win, "_tree_top10", None)
+                if tree:
+                    concept_trees.append(tree)
+            
+            if hasattr(self, "_pg_top10_window_simple"):
+                for item in self._pg_top10_window_simple.values():
+                    win = item.get("win")
+                    if win and win.winfo_exists():
+                        tree = getattr(win, "_tree_top10", None)
+                        if tree:
+                            concept_trees.append(tree)
+            
+            if concept_trees:
+                # 优先选用最近被用户鼠标点击/排序过的那个 concept tree
+                rep_tree = None
+                last_active = getattr(self, "_last_active_concept_tree", None)
+                if last_active and last_active in concept_trees:
+                    rep_tree = last_active
+                else:
+                    rep_tree = concept_trees[0]
+                concept_sort = {
+                    'sortby_col': getattr(rep_tree, 'sortby_col', 'percent'),
+                    'sortby_col_ascend': getattr(rep_tree, 'sortby_col_ascend', False),
+                    'sort_level1_col': getattr(rep_tree, 'sort_level1_col', None),
+                    'sort_level1_asc': getattr(rep_tree, 'sort_level1_asc', True),
+                    'sort_level2_col': getattr(rep_tree, 'sort_level2_col', None),
+                    'sort_level2_asc': getattr(rep_tree, 'sort_level2_asc', True),
+                    'sort_level3_col': getattr(rep_tree, 'sort_level3_col', None),
+                    'sort_level3_asc': getattr(rep_tree, 'sort_level3_asc', True),
+                    'multi_sort_click_count': getattr(rep_tree, 'multi_sort_click_count', 0),
+                }
+                config['ui_persistence']['concept_top10_sort'] = concept_sort
+                logger.info(f"Saving concept multi-sort states: L1={concept_sort['sort_level1_col']}, L2={concept_sort['sort_level2_col']}, L3={concept_sort['sort_level3_col']}")
+                
+                # 同步广播给其他打开的概念板块 Treeview 并更新表头指示箭头
+                for t in concept_trees:
+                    if t != rep_tree:
+                        t.sortby_col = concept_sort['sortby_col']
+                        t.sortby_col_ascend = concept_sort['sortby_col_ascend']
+                        t.sort_level1_col = concept_sort['sort_level1_col']
+                        t.sort_level1_asc = concept_sort['sort_level1_asc']
+                        t.sort_level2_col = concept_sort['sort_level2_col']
+                        t.sort_level2_asc = concept_sort['sort_level2_asc']
+                        t.sort_level3_col = concept_sort['sort_level3_col']
+                        t.sort_level3_asc = concept_sort['sort_level3_asc']
+                        t.multi_sort_click_count = concept_sort['multi_sort_click_count']
+                        try:
+                            self.update_mixin_tree_headers(t)
+                        except Exception as ex:
+                            logger.debug(f"Failed to update headers for concept tree: {ex}")
+
             # Save top bar visibility
             config['ui_persistence']['top_bar_visibility'] = getattr(self, 'top_bar_visibility', {})
 
@@ -8198,6 +8254,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Error saving UI states: {e}")
 
+    def _apply_saved_concept_sort_state(self, tree) -> None:
+        """从配置文件加载保存的概念板块多级排序，并应用到指定的 tree 上"""
+        try:
+            # 初始化多级排序状态属性
+            self._init_tree_sort_state(tree)
+            
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                persistence = config.get('ui_persistence', {}).get('concept_top10_sort', {})
+                if persistence:
+                    tree.sortby_col = persistence.get('sortby_col', 'percent')
+                    tree.sortby_col_ascend = persistence.get('sortby_col_ascend', False)
+                    tree.sort_level1_col = persistence.get('sort_level1_col', None)
+                    tree.sort_level1_asc = persistence.get('sort_level1_asc', True)
+                    tree.sort_level2_col = persistence.get('sort_level2_col', None)
+                    tree.sort_level2_asc = persistence.get('sort_level2_asc', True)
+                    tree.sort_level3_col = persistence.get('sort_level3_col', None)
+                    tree.sort_level3_asc = persistence.get('sort_level3_asc', True)
+                    tree.multi_sort_click_count = persistence.get('multi_sort_click_count', 0)
+                    return
+        except Exception as e:
+            logger.warning(f"加载概念板块多级排序状态失败: {e}")
+            
+        # 默认使用涨幅进行降序排序
+        tree.sortby_col = "percent"
+        tree.sortby_col_ascend = False
 
     def _on_http_link_code(self, stock_code):
         try:
@@ -17430,9 +17513,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 50)
             tree.column(col, anchor="center", width=width)
 
-        # 默认使用涨幅进行降序排序并初始化多级表头
-        tree.sortby_col = "percent"
-        tree.sortby_col_ascend = False
+        # 尝试加载并应用已保存的概念板块多级排序，若无则使用默认的涨幅降序
+        self._apply_saved_concept_sort_state(tree)
         self.update_mixin_tree_headers(tree)
 
         # 保存引用，独立窗口不复用 _concept_top10_win
@@ -17801,9 +17883,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 40)
             tree.column(col, anchor="center", width=width)
 
-        # 默认使用涨幅进行降序排序并初始化多级表头
-        tree.sortby_col = "percent"
-        tree.sortby_col_ascend = False
+        # 尝试加载并应用已保存的概念板块多级排序，若无则使用默认的涨幅降序
+        self._apply_saved_concept_sort_state(tree)
         self.update_mixin_tree_headers(tree)
 
         # 保存引用
