@@ -17,7 +17,11 @@ try:
 except Exception:
     pass
 from JohnsonUtil import LoggerFactory
-from JohnsonUtil import commonTips as cct
+try:
+    from JohnsonUtil import commonTips as cct
+except ImportError:
+    cct = None
+
 # [ROOT-FIX] 设置标记，防止本进程内部调用 StockSender 时再次通过 Proxy 转发导致无限递归
 os.environ["IN_LINKAGE_PROCESS_MARK"] = "1"
 
@@ -41,6 +45,16 @@ class LinkageService:
                 logger.info("📡 Linkage Service: StockSender initialized.")
             except Exception as e:
                 logger.error(f"Failed to init StockSender: {e}")
+                try:
+                    import traceback
+                    from sys_utils import get_app_root
+                    log_path = os.path.join(get_app_root(), "linkage_err.log")
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"--- ERROR AT {time.strftime('%Y-%m-%d %H:%M:%S')} (PID: {os.getpid()}) ---\n")
+                        f.write(traceback.format_exc())
+                        f.write("\n")
+                except Exception as ex:
+                    logger.error(f"Failed to write linkage_err.log: {ex}")
 
     def run(self):
         logger.info(f"🚀 Linkage Service process started (PID: {os.getpid()})")
@@ -132,7 +146,7 @@ class LinkageManagerProxy:
         return cls._instance
 
     def _init(self):
-        _multiprocessingQueue = getattr(cct, "multiprocessingQueue", 300)
+        _multiprocessingQueue = getattr(cct, "multiprocessingQueue", 300) if cct is not None else 300
         self.queue = multiprocessing.Queue(maxsize=_multiprocessingQueue)
         self._last_pushed_code = None # [NEW] 记录上一次成功投递的代码，用于极速去重
         self.process = multiprocessing.Process(

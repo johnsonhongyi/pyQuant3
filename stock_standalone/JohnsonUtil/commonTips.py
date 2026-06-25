@@ -8514,7 +8514,7 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
     #         maindf = maindf.rename_axis('code')
     return maindf
 
-get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')
+# get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')
 
 if __name__ == '__main__':
 

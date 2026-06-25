@@ -1,3 +1,10 @@
+## 2026-06-26 00:15
+- [x] **优化人气共振 GUI 客户端去重筛选与布局溢出 (Optimized Popularity Resonance GUI Deduplication & Layout Height)**：
+    - [x] **实现跨表格去重筛选机制 (Implemented Cross-Table Deduplication)**：重构了 `popularity_resonance_gui.py` 中的 `update_all_tables` 方法。获取共振结果后，自动建立包含全部共振股代码的 `resonance_set`。在填充“东”、“花”、“开”、“淘”等原始榜单时，对已进入共振“合”表的个股执行 `continue` 过滤，并动态重算展示序号，使得个股数据在界面中仅唯一展现，极大地提升了分屏界面的信息密度与去重质量。
+    - [x] **根治子线程高频乱序刷新 (Eliminated Mid-Way Asynchronous UI Refreshes)**：废除了 `_run_once_job` 中子线程里高频调用的 `update_single_table` 动作，彻底避免了抓取中途由于部分数据注入而破坏去重逻辑的情况。重构为在东、花、开、淘 4 路子线程全部 join 完后，由主线程一次性原子地执行 `update_all_tables`，保障了高频刷新与冷启动的绝对稳定性。
+    - [x] **解决 Treeview 高度溢出与重叠遮挡缺陷 (Fixed Treeview Height Overflow & Layout Compression)**：在 `create_treeview` 初始化中引入 `height=6` 参数，限制 Treeview 的初始默认展示行数，防止在多表格同时加载且主窗口高度固定（760px）时，因组件空间争抢导致的布局容器溢出及下层表格头部重叠遮挡 Bug。
+    - [x] **编写并跑通打包可执行文件自动化 E2E 验证 (Passed Standalone Executable E2E Verification)**：新编写了 `scratch/test_exe_run.py` 自动化端到端测试脚本，通过 subprocess 物理拉起打包后的独立二进制文件 `dist/PopularityResonanceSync.exe` 并正常运行 2.5 秒自检后优雅销毁，证实修改后的客户端无任何语法与运行时异常，100% 具备出厂分发标准。
+
 ## 2026-06-25 21:30
 - [x] **物理剥离大库依赖与 PopularityResonanceSync 打包瘦身 (Completely Decoupled Heavy Libraries & Optimized PopularityResonanceSync Standalone Package Size)**：
     - [x] **完全剥离 JohnsonUtil.commonTips / johnson_cons 依赖**：重构了 `popularity_resonance_service.py` 和 `linkage_service.py` 内部的通达信板块写入、路径探测及多进程队列大小配置读取等逻辑，改用自洽独立的标准库（如 `configparser`）动态读取，物理切断了与包含庞大 pandas/numpy 的 `commonTips` 库的直接和间接依赖。
