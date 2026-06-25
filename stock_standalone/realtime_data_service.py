@@ -572,6 +572,9 @@ class MinuteKlineCache:
         if df is None or df.empty:
             return
             
+        # 实时数据更新时，注入更新 _df_all_cache 内存辅助，保障后续指标与状态机计算直接使用内存快照
+        self.set_df_all_cache(df)
+            
         # [REMOVED] Automatic supplemental fetch removed per user feedback.
         # Regular refreshes now handle all codes via dual-snapshot (Full + Filtered).
         # _supplemental_fetch remains available for manual on-demand usage (e.g. SBC Replay).
@@ -1034,7 +1037,7 @@ class MinuteKlineCache:
         try:
             fp_cols = [c for c in ['code', 'close', 'now', 'trade', 'ma20d', 'ma20', 'ma60d', 'ma60'] if c in df.columns]
             if not fp_cols:
-                fp_cols = None
+                fp_cols = ['code'] if 'code' in df.columns else list(df.columns)
             new_fp = df_fingerprint(df, cols=fp_cols)
             old_fp = getattr(self, '_df_all_cache_fp', None)
             if old_fp == new_fp:
@@ -1046,10 +1049,10 @@ class MinuteKlineCache:
         except Exception as e:
             self._df_all_cache = df
 
-    def calculate_stock_daily_indicators(self, code: str, recent_avg_vol: float = 0.0) -> Optional[dict[str, Any]]:
+    def calculate_stock_daily_indicators(self, code: str, recent_avg_vol: float = 0.0, df: Optional[pd.DataFrame] = None) -> Optional[dict[str, Any]]:
         """
         [DRY Refactor] 统一指标计算接口：计算多头趋势、支撑及均线结构。
-        优先使用内存中的 df_all_cache，避免主线程磁盘 I/O。
+        优先使用传入的 df，其次使用内存中的 df_all_cache，避免磁盘 I/O。
         """
         today_str = cct.get_today()
         cache_key = (code, today_str)
@@ -1060,8 +1063,8 @@ class MinuteKlineCache:
         filled_from_cache = False
         res = {}
         
-        # 1. 尝试从内存 df_all_cache 读取
-        df_snap = getattr(self, '_df_all_cache', None)
+        # 1. 尝试从传入的 df 或内存 df_all_cache 读取
+        df_snap = df if df is not None and not df.empty else getattr(self, '_df_all_cache', None)
         if df_snap is not None and not df_snap.empty:
             try:
                 row_match = df_snap[df_snap['code'].astype(str).str.strip().str.zfill(6) == code]
@@ -1115,80 +1118,31 @@ class MinuteKlineCache:
                         "name": str(_fv(['name'], "未知"))
                     }
                     filled_from_cache = True
+                else:
+                    now_t = time.time()
+                    with self._lock:
+                        if not hasattr(self, '_last_warn_timestamps'):
+                            self._last_warn_timestamps = {}
+                        last_t = self._last_warn_timestamps.get(f"code_{code}", 0.0)
+                        should_log = (now_t - last_t > 300.0)
+                        if should_log:
+                            self._last_warn_timestamps[f"code_{code}"] = now_t
+                    if should_log:
+                        logger.warning(f"⚠️ [指标计算警告] df_snap 存在，但未匹配到股票代码 {code}。")
             except Exception as e:
                 logger.error(f"Error calculating indicators from df_all_cache for {code}: {e}")
+        else:
+            now_t = time.time()
+            with self._lock:
+                if not hasattr(self, '_last_warn_timestamps'):
+                    self._last_warn_timestamps = {}
+                last_t = self._last_warn_timestamps.get("empty_snap", 0.0)
+                should_log = (now_t - last_t > 60.0)
+                if should_log:
+                    self._last_warn_timestamps["empty_snap"] = now_t
+            if should_log:
+                logger.warning(f"⚠️ [指标计算警告] 无法计算指标，df_snap 为 None 或 empty (当前阻断相同警告60秒，部分股票 code: {code})。")
 
-        # 2. 回退到磁盘读取
-        if not filled_from_cache:
-            is_main = threading.current_thread() is threading.main_thread()
-            if is_main and not self.simulation_mode:
-                if self.verbose:
-                    logger.info(f"⚠️ [计算指标跳过] 主线程缺少 df_all_cache，为防假死跳过同步读取 {code} 日线文件")
-                return None
-            else:
-                try:
-                    from JSONData import tdx_data_Day as tdd
-                    day_df = tdd.get_tdx_Exp_day_to_df(code, dl=80)
-                    if day_df is not None and len(day_df) >= 60:
-                        day_df = day_df.sort_index(ascending=True)
-                        day_df['ma5d'] = day_df['close'].rolling(5).mean()
-                        day_df['ma10d'] = day_df['close'].rolling(10).mean()
-                        day_df['ma20d'] = day_df['close'].rolling(20).mean()
-                        day_df['ma60d'] = day_df['close'].rolling(60).mean()
-                        
-                        latest_close = float(day_df['close'].iloc[-1])
-                        latest_low = float(day_df['low'].iloc[-1])
-                        ma5 = float(day_df['ma5d'].iloc[-1]) if len(day_df) >= 5 else 0.0
-                        ma10 = float(day_df['ma10d'].iloc[-1]) if len(day_df) >= 10 else 0.0
-                        ma20 = float(day_df['ma20d'].iloc[-1]) if len(day_df) >= 20 else 0.0
-                        ma60 = float(day_df['ma60d'].iloc[-1]) if len(day_df) >= 60 else 0.0
-                        
-                        min_close = float(day_df['close'].iloc[-60:].min())
-                        calc_dff3 = ((latest_close - min_close) / min_close * 100)
-                        
-                        # 1. 多头大背景 (ma20 > ma60 且价格在 ma60之上) 且大周期偏离大底涨幅 dff3 >= 20.0%
-                        dff3_limit = getattr(cct.CFG, 'v_reversal_dff3_limit', 20.0)
-                        is_trend_ok = (ma20 > ma60) and (latest_close > ma60) and (calc_dff3 >= dff3_limit)
-                        
-                        # 2. 价格或最低价企稳于 ma20d - ma60d 的支撑区间 (允许跌破 ma20d，但在 ma60d 之上有强支撑且不破位)
-                        on_support = (latest_close >= ma60 * 0.98) and (latest_low <= ma20 * 1.03)
-
-                        structure_type = "MA20整理"
-                        if (ma5 > 0 and ma10 > 0 and ma5 > ma10 > ma20 and latest_close >= ma5 * 0.995):
-                            structure_type = "多头排列"
-                        elif (ma5 > 0 and ma5 * 0.98 <= latest_low <= ma5 * 1.01):
-                            structure_type = "MA5回踩"
-                        elif (ma10 > 0 and ma10 * 0.98 <= latest_low <= ma10 * 1.01):
-                            structure_type = "MA10回踩"
-                        elif ma60 > 0 and abs(ma20 - ma60) / ma60 <= 0.05:
-                            structure_type = "MA20/60粘合"
-                        elif latest_low < ma20 * 0.97:
-                            structure_type = "MA60支撑"
-                        else:
-                            structure_type = "MA20整理"
-
-                        # 自动获取名字
-                        name = "未知"
-                        try:
-                            name_val = tdd.get_sina_data_code(code)
-                            if name_val and name_val != "未知":
-                                name = name_val
-                        except Exception: pass
-
-                        res = {
-                            "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
-                            "latest_close": latest_close, "latest_low": latest_low,
-                            "dff3": round(calc_dff3, 1), "dff2": round(((latest_close - float(day_df['low'].iloc[-10:].min())) / float(day_df['low'].iloc[-10:].min()) * 100), 1),
-                            "structure_type": structure_type,
-                            "is_trend_ok": is_trend_ok,
-                            "on_support": on_support,
-                            "is_strong_trend": (is_trend_ok and on_support),
-                            "name": name
-                        }
-                except Exception as e:
-                    logger.error(f"Error calculating indicators from H5 disk for {code}: {e}")
-                    return None
-                    
         if res:
             with self._lock:
                 if not hasattr(self, '_daily_indicators_cache'):
@@ -1257,7 +1211,7 @@ class MinuteKlineCache:
                     state.get("dff3", 0.0) == 0.0
                 )
                 if need_fill:
-                    metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol)
+                    metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol, df)
                     if metrics:
                         state["structure"] = metrics["structure_type"]
                         state["dff3"] = metrics["dff3"]
@@ -1292,7 +1246,7 @@ class MinuteKlineCache:
                         calc_dff2 = 0.0
                         name_val = "未知"
                         
-                        metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol)
+                        metrics = self.calculate_stock_daily_indicators(code, recent_avg_vol, df)
                         if metrics:
                             is_strong_trend = metrics["is_strong_trend"]
                             structure_type = metrics["structure_type"]
