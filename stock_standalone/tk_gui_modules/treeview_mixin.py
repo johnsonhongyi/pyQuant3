@@ -450,17 +450,31 @@ class TreeviewMixin:
             
         self._save_mixin_ui_states(tree)
 
-    def trigger_mixin_multi_level_sort(self, tree: ttk.Treeview) -> None:
+    def trigger_mixin_multi_level_sort(self, tree: ttk.Treeview, scroll_to_top: bool = False) -> None:
         """通用触发多级排序动作"""
         if hasattr(self, 'trigger_multi_level_sort') and tree == getattr(self, 'tree', None):
-            self.trigger_multi_level_sort()
+            import inspect
+            sig = inspect.signature(self.trigger_multi_level_sort)
+            if 'scroll_to_top' in sig.parameters:
+                self.trigger_multi_level_sort(scroll_to_top=scroll_to_top)
+            else:
+                self.trigger_multi_level_sort()
             return
-        self.perform_tree_multi_level_sort(tree)
+        self.perform_tree_multi_level_sort(tree, scroll_to_top=scroll_to_top)
 
-    def perform_tree_multi_level_sort(self, tree: ttk.Treeview) -> None:
+    def perform_tree_multi_level_sort(self, tree: ttk.Treeview, scroll_to_top: bool = False) -> None:
         """直接对 Treeview 中的行进行多级稳定排序"""
         self._init_tree_sort_state(tree)
         
+        if hasattr(self, 'trigger_multi_level_sort') and tree == getattr(self, 'tree', None):
+            import inspect
+            sig = inspect.signature(self.trigger_multi_level_sort)
+            if 'scroll_to_top' in sig.parameters:
+                self.trigger_multi_level_sort(scroll_to_top=scroll_to_top)
+            else:
+                self.trigger_multi_level_sort()
+            return
+            
         bound_cols = set()
         active_levels = []
         
@@ -478,41 +492,128 @@ class TreeviewMixin:
         if temp_col and temp_col not in bound_cols and temp_col in tree.cget("columns"):
             active_levels.append((temp_col, not tree.sortby_col_ascend))
 
-        if not active_levels:
+        children = tree.get_children('')
+        if not children:
             return
-            
-        # 依次从低优先级到高优先级进行稳定排序
-        for col, rev in reversed(active_levels):
-            self.sort_tree_by_single_column_stable(tree, col, rev)
 
-    def sort_tree_by_single_column_stable(self, tree: ttk.Treeview, col: str, reverse: bool) -> None:
-        """单列稳定排序"""
-        if col not in tree.cget("columns"):
-            return
+        # Determine if we should prioritize favorites (is_fav_key_tree)
+        is_fav_key_tree = False
+        if children and all(len(str(c)) == 6 and str(c).isdigit() for c in children[:3]):
+            is_fav_key_tree = True
+        elif hasattr(self, '_member_tree') and tree == getattr(self, '_member_tree', None):
+            is_fav_key_tree = True
+        elif hasattr(self, '_signal_tree') and tree == getattr(self, '_signal_tree', None):
+            is_fav_key_tree = True
+        elif hasattr(self, '_guidance_tree') and tree == getattr(self, '_guidance_tree', None):
+            is_fav_key_tree = True
             
-        l = [(tree.set(k, col), k) for k in tree.get_children('')]
+        if is_fav_key_tree:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+            except Exception:
+                fav_stocks = set()
+                
+            fav_children = []
+            normal_children = []
+            for ch in children:
+                code = str(ch)
+                if code in fav_stocks:
+                    fav_children.append(ch)
+                else:
+                    normal_children.append(ch)
+                    
+            for col, rev in reversed(active_levels):
+                fav_children = self._sort_id_list_by_column_stable(tree, fav_children, col, rev)
+                normal_children = self._sort_id_list_by_column_stable(tree, normal_children, col, rev)
+                
+            if not active_levels:
+                # Default stable sort
+                fav_children = self._sort_id_list_by_column_stable(tree, fav_children, 'code', False)
+                normal_children = self._sort_id_list_by_column_stable(tree, normal_children, 'code', False)
+                
+            final_children = fav_children + normal_children
+        else:
+            final_children = list(children)
+            for col, rev in reversed(active_levels):
+                final_children = self._sort_id_list_by_column_stable(tree, final_children, col, rev)
+                
+            if not active_levels:
+                first_col = tree.cget("columns")[0]
+                final_children = self._sort_id_list_by_column_stable(tree, final_children, first_col, False)
+                
+        for index, ch in enumerate(final_children):
+            tree.move(ch, '', index)
+            
+        if scroll_to_top:
+            tree.yview_moveto(0)
+
+    def _sort_id_list_by_column_stable(self, tree: ttk.Treeview, id_list: list, col: str, reverse: bool) -> list:
+        """根据某一列的值对 IID 列表进行稳定排序"""
+        if col not in tree.cget("columns"):
+            return id_list
+            
+        l = [(tree.set(k, col), k) for k in id_list]
+        
+        action_priority = {
+            "买入建仓": 1, "建仓": 1, "做T回补": 2, "回补": 2,
+            "分批大止盈": 3, "大止盈": 3, "止损": 4, "保持观察": 5, "观察": 5
+        }
+        branch_priority = {
+            "5日线主升浪": 1, "5日线极速支撑": 1, "10日线反转": 2, "10日线趋势": 2,
+            "SWS盈利线低吸": 3, "SWS防守支撑": 3, "60日线生死防守": 4, "破位高位防震": 5
+        }
+        
+        current_filter = ""
+        if hasattr(self, 'concept_filter_var'):
+            current_filter = self.concept_filter_var.get().lower().strip()
+        elif hasattr(self, 'search_var'):
+            current_filter = self.search_var.get().lower().strip()
+        elif hasattr(self, 'parent_win') and hasattr(self.parent_win, 'concept_filter_var'):
+            current_filter = self.parent_win.concept_filter_var.get().lower().strip()
+        kws = current_filter.split() if current_filter else []
         
         def _key_func(t):
             s = str(t[0]).strip()
             if not s or s == '-':
                 return (1, "") if not reverse else (-1, "")
+                
+            if col in ("action", "action_cn"):
+                return (0, action_priority.get(s, 99))
+            if col in ("branch", "branch_cn"):
+                return (0, branch_priority.get(s, 99))
+            if col in ("sector", "category") and kws:
+                import re
+                cats = [c.strip() for c in re.split(r'[;|★\s]', s.lower()) if c.strip() and c.strip() not in ('nan', 'NaN', '0')]
+                match_idx = 999
+                for idx, cat in enumerate(cats):
+                    if any(kw in cat for kw in kws):
+                        match_idx = idx
+                        break
+                prio = match_idx if not reverse else (999 - match_idx)
+                return (prio, s)
+                
             try:
-                val = float(s.replace('%', '').replace('+', ''))
+                cleaned = s.replace('%', '').replace('+', '').replace('★', '').replace('▲', '').replace('▼', '').strip()
+                val = float(cleaned)
                 return (0, val)
             except (ValueError, TypeError):
                 return (2, s.lower())
                 
-        if col == 'name' and hasattr(self, 'feature_marker'):
-            fm = getattr(self, 'feature_marker')
+        fm = getattr(self, 'feature_marker', None) or getattr(getattr(self, 'parent_win', None), 'feature_marker', None)
+        if col == 'name' and fm:
             l.sort(key=lambda t: (fm.get_priority_score(t[0]), t[0]), reverse=reverse)
         elif col == 'MainU':
-            from mainu_sort import mainu_sort_score
-            l.sort(key=lambda t: mainu_sort_score(t[0]), reverse=reverse)
+            try:
+                from mainu_sort import mainu_sort_score
+                l.sort(key=lambda t: mainu_sort_score(t[0]), reverse=reverse)
+            except Exception:
+                l.sort(key=_key_func, reverse=reverse)
         else:
             l.sort(key=_key_func, reverse=reverse)
             
-        for index, (val, k) in enumerate(l):
-            tree.move(k, '', index)
+        return [k for _, k in l]
 
     def show_header_context_menu(self, tree: ttk.Treeview, event: tk.Event) -> bool:
         """通用表头右键多级排序上下文菜单。返回 True 表示事件已被处理，False 表示由行右键菜单继续处理"""
