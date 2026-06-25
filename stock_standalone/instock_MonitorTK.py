@@ -15920,7 +15920,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # ⚡ [PERF] 排序计算已转移到 compute_executor 预计算，UI线程直接应用排序好的 df
         # [NEW] 针对 UI 端的搜索、过滤等操作产生的未排序 df 进行补齐排序
-        if df is not None and not df.empty and not skip_sort:
+        # [FORCE SORT] 如果当前有活跃的排序状态（多级或单级），即使 skip_sort=True，也必须强制重排序以保持状态
+        tree_obj = getattr(self, 'tree', None)
+        has_active_sort = False
+        if tree_obj:
+            has_active_sort = bool(getattr(tree_obj, 'sort_level1_col', None) or getattr(tree_obj, 'sortby_col', None))
+        else:
+            has_active_sort = bool(getattr(self, 'sort_level1_col', None) or getattr(self, 'sortby_col', None))
+
+        if df is not None and not df.empty and (not skip_sort or has_active_sort):
             try:
                 df = self._sort_dataframe(df)
             except Exception as e:
@@ -16187,26 +16195,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # ----------------- 多级排序相关辅助函数 ----------------- #
     def _sort_dataframe(self, df):
         """对 DataFrame 应用当前的排序规则 (支持多级 and 单级排序)"""
-        # 收集已绑定的多级排序级别，强制确保 asc_val 为 bool 类型，防御 None 崩溃
+        # 收集已绑定的多级排序级别，优先从 tree 实例上读取属性，防御同步偏差
+        tree = getattr(self, 'tree', None)
+        
+        sort_l1_col = getattr(tree, 'sort_level1_col', None) if tree else getattr(self, 'sort_level1_col', None)
+        sort_l1_asc = getattr(tree, 'sort_level1_asc', True) if tree else getattr(self, 'sort_level1_asc', True)
+        
+        sort_l2_col = getattr(tree, 'sort_level2_col', None) if tree else getattr(self, 'sort_level2_col', None)
+        sort_l2_asc = getattr(tree, 'sort_level2_asc', True) if tree else getattr(self, 'sort_level2_asc', True)
+        
+        sort_l3_col = getattr(tree, 'sort_level3_col', None) if tree else getattr(self, 'sort_level3_col', None)
+        sort_l3_asc = getattr(tree, 'sort_level3_asc', True) if tree else getattr(self, 'sort_level3_asc', True)
+        
+        sortby_col = getattr(tree, 'sortby_col', None) if tree else getattr(self, 'sortby_col', None)
+        sortby_col_asc = getattr(tree, 'sortby_col_ascend', False) if tree else getattr(self, 'sortby_col_ascend', False)
+
         active_levels = []
         bound_cols = set()
         
-        if getattr(self, 'sort_level1_col', None):
-            active_levels.append((self.sort_level1_col, bool(getattr(self, 'sort_level1_asc', True))))
-            bound_cols.add(self.sort_level1_col)
-        if getattr(self, 'sort_level2_col', None):
-            active_levels.append((self.sort_level2_col, bool(getattr(self, 'sort_level2_asc', True))))
-            bound_cols.add(self.sort_level2_col)
-        if getattr(self, 'sort_level3_col', None):
-            active_levels.append((self.sort_level3_col, bool(getattr(self, 'sort_level3_asc', True))))
-            bound_cols.add(self.sort_level3_col)
+        if sort_l1_col:
+            active_levels.append((sort_l1_col, bool(sort_l1_asc)))
+            bound_cols.add(sort_l1_col)
+        if sort_l2_col:
+            active_levels.append((sort_l2_col, bool(sort_l2_asc)))
+            bound_cols.add(sort_l2_col)
+        if sort_l3_col:
+            active_levels.append((sort_l3_col, bool(sort_l3_asc)))
+            bound_cols.add(sort_l3_col)
 
         # 动态追加：如果有主排序，且存在临时排序列（不在绑定列中），则它作为从排序（L2）或次排序（L3）动态追加参与计算
-        if getattr(self, 'sort_level1_col', None):
-            temp_col = getattr(self, 'sortby_col', None)
-            if temp_col and temp_col not in bound_cols:
+        if sort_l1_col:
+            if sortby_col and sortby_col not in bound_cols:
                 if len(active_levels) < 3:
-                    active_levels.append((temp_col, bool(getattr(self, 'sortby_col_ascend', False))))
+                    active_levels.append((sortby_col, bool(sortby_col_asc)))
 
         # 注入 is_fav 标记
         if 'is_fav' not in df.columns:
@@ -16278,10 +16299,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return df_sorted
         else:
             # 单级排序 fallback
-            sort_col = getattr(self, 'sortby_col', None)
+            sort_col = sortby_col
             if sort_col and sort_col in df.columns:
                 # 强制转换为布尔值，防御 None 崩溃
-                sort_asc = bool(getattr(self, 'sortby_col_ascend', False))
+                sort_asc = bool(sortby_col_asc)
                 if sort_col == 'MainU':
                     from mainu_sort import compute_mainu_sort_column
                     sort_keys = compute_mainu_sort_column(df['MainU'])
@@ -17405,10 +17426,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
         limit_col = ['volume','red','win','dff']
         for col in columns:
-            tree.heading(col, text=col_texts.get(col, col), anchor="center",
-                         command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
+            tree.heading(col, text=col_texts.get(col, col), anchor="center")
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 50)
             tree.column(col, anchor="center", width=width)
+
+        # 默认使用涨幅进行降序排序并初始化多级表头
+        tree.sortby_col = "percent"
+        tree.sortby_col_ascend = False
+        self.update_mixin_tree_headers(tree)
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
@@ -17771,11 +17796,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
         limit_col = ['volume','red','win','dff']
         for col in columns:
-            tree.heading(col, text=col_texts.get(col, col), anchor="center",
-                         command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
+            tree.heading(col, text=col_texts.get(col, col), anchor="center")
             # width = 80 if col == "name" else (40 if col == "rank" else 60)
             width = 80 if col in ["name","code"] else (30 if col in limit_col else 40)
             tree.column(col, anchor="center", width=width)
+
+        # 默认使用涨幅进行降序排序并初始化多级表头
+        tree.sortby_col = "percent"
+        tree.sortby_col_ascend = False
+        self.update_mixin_tree_headers(tree)
 
         # 保存引用
         win._content_frame_top10 = frame
@@ -18091,8 +18120,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.delete(*tree.get_children())
 
         # 排序状态获取
-        win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
-        sort_col, ascending = win._top10_sort_state["col"], win._top10_sort_state["asc"]
+        self._init_tree_sort_state(tree)
+        sort_col = tree.sort_level1_col or tree.sortby_col or "percent"
+        if tree.sort_level1_col:
+            ascending = bool(tree.sort_level1_asc)
+        elif tree.sortby_col:
+            ascending = bool(tree.sortby_col_ascend)
+        else:
+            ascending = False
         
         # 🛡️ 智能排序列映射与容错转换 (支持动态添加列后的正确数值排序)
         df_sorted = df_concept.copy()
@@ -18177,6 +18212,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
             code_to_iid[code_row] = iid
 
+        # 执行通用多级/单列排序自愈
+        self.perform_tree_multi_level_sort(tree)
+
         # --- 更新状态栏数量 ---
         if hasattr(win, "_status_label_top10") and win._status_label_top10.winfo_exists():
             visible_count = len(df_display[df_display["percent"] > 2])
@@ -18242,6 +18280,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 右键菜单
         def on_right_click(event):
+            if self.show_header_context_menu(tree, event):
+                return
             item = tree.identify_row(event.y)
             if item:
                 tree.selection_set(item)
@@ -18363,6 +18403,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _on_tree_right_click_newTop10(self, tree, event):
+        if self.show_header_context_menu(tree, event):
+            return
         item = tree.identify_row(event.y)
         if not item:
             return
