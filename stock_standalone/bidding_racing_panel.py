@@ -68,6 +68,9 @@ except ImportError:
 
 logger = LoggerFactory.getLogger(name=__name__, level=LoggerFactory.WARNING)
 
+# [NEW] 全局活动赛马详情窗口注册中心，用于跨窗口多级排序即时广播同步
+_active_racing_detail_dialogs = []
+
 SEARCH_HISTORY_GROUP = "bidding_racing"
 
 # [🚀 DNA Process Management] 全局审计进程句柄，用于窗口复用
@@ -989,6 +992,13 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._sort_col = 2 # 默认排序: 结构分
         self._sort_order = Qt.SortOrder.DescendingOrder
         
+        # [NEW] 注册到全局活动详情窗口列表
+        if self not in _active_racing_detail_dialogs:
+            _active_racing_detail_dialogs.append(self)
+            
+        # [NEW] 加载赛马详情共用多级排序状态
+        self._apply_saved_racing_detail_sort()
+        
         # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
         self._boot_lock = True
         self._is_height_doubled = False # [NEW] 高度翻倍状态位
@@ -1013,6 +1023,7 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.timer.timeout.connect(self.refresh_data)
         self.timer.start(500) 
         self.refresh_data()
+        self._update_header_labels()
         self.setUpdatesEnabled(True)
         
         # [GlobalFavorites] 订阅重点关注变化
@@ -1156,6 +1167,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self.table.code_double_clicked.connect(lambda c, n: self.linkage_cb(c, n, source="sector_dialog_double"))
         
         self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        self.table.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.horizontalHeader().customContextMenuRequested.connect(self._on_header_context_menu)
         # [统一管理] 停用实时列宽保存，由主面板统一落盘
         # self.table.horizontalHeader().sectionResized.connect(self._save_header_state)
         # 右键菜单支持 - [🚀 直出一层] 禁用基类默认菜单干扰
@@ -1326,10 +1339,6 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._last_rendered_ts = curr_ts
 
         # --- [🔒 锁外计算] 排序与统计全部移到临界区外执行，降低 GIL 竞争 ---
-        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
-        attr = col_attr_map.get(self._sort_col, 'score')
-        is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
-        
         # [🚀 性能加速] 提到循环外，避免在排序 lambda 中重复查找
         tracker = None
         if self.detector and self.detector.realtime_service:
@@ -1349,78 +1358,135 @@ class SectorDetailDialog(QDialog, WindowMixin):
             _fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
         except Exception:
             _fav_stocks = set()
+
+        # 级联排序准备：逆序依次对各个层级进行稳定排序
+        data_to_sort = list(data_list)
+        sort_levels = []
         
-        # [🚀 极限性能] 预提取所有排序所需属性，避免 lambda 内部重复 lookup
-        sort_payload = []
-        for ts in data_list:
+        # 最底层：临时后缀排序 (即 self._sort_col)
+        is_suffix_desc = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        sort_levels.append((self._sort_col, is_suffix_desc))
+        
+        # 往上：L3, L2, L1
+        if getattr(self, 'sort_level3_col', None) is not None:
+            sort_levels.append((self.sort_level3_col, not self.sort_level3_asc))
+        if getattr(self, 'sort_level2_col', None) is not None:
+            sort_levels.append((self.sort_level2_col, not self.sort_level2_asc))
+        if getattr(self, 'sort_level1_col', None) is not None:
+            sort_levels.append((self.sort_level1_col, not self.sort_level1_asc))
+            
+        # 预计算所有排序列的值，消除排序循环中的锁竞争和复杂运算，并强行对齐类型以避免比较时的 TypeError
+        sort_values_cache = {}
+        import pandas as pd
+        import numpy as np
+        with self.detector._lock:
+            for ts in data_to_sort:
+                cp = getattr(ts, 'current_pct', 0.0)
+                if cp is None or pd.isna(cp) or np.isnan(cp): cp = 0.0
+                else: cp = float(cp)
+                
+                pd_val = getattr(ts, 'pct_diff', 0.0)
+                if pd_val is None or pd.isna(pd_val) or np.isnan(pd_val): pd_val = 0.0
+                else: pd_val = float(pd_val)
+                
+                # 预先计算 dff2（在锁内一次性计算）
+                df_llow = None
+                if df_all is not None and ts.code in df_all.index:
+                    try:
+                        if 'llow' in df_all.columns:
+                            df_llow = df_all.loc[ts.code, 'llow']
+                        elif 'low' in df_all.columns:
+                            df_llow = df_all.loc[ts.code, 'low']
+                        if hasattr(df_llow, 'iloc'):
+                            df_llow = df_llow.iloc[0]
+                        if df_llow is not None:
+                            df_llow = float(df_llow)
+                            if df_llow <= 0.001:
+                                df_llow = None
+                    except Exception:
+                        df_llow = None
+                        
+                buy_f = ts.current_price
+                llow_f = df_llow if df_llow is not None else ts.low_day
+                if llow_f <= 0.001:
+                    llow_f = ts.open_price
+                if llow_f <= 0.001:
+                    llow_f = ts.last_close
+                
+                dff2_val = 0.0
+                if buy_f > 0.001 and llow_f > 0.001:
+                    dff2_val = round((buy_f - llow_f) / llow_f * 100, 1)
+                elif df_all is not None and ts.code in df_all.index and 'dff2' in df_all.columns:
+                    try:
+                        dff2_val = float(df_all.loc[ts.code, 'dff2'])
+                    except Exception:
+                        pass
+                if dff2_val is None or pd.isna(dff2_val) or np.isnan(dff2_val):
+                    dff2_val = 0.0
+                else:
+                    dff2_val = float(dff2_val)
+                
+                score_val = score_cache.get(ts.code, 0.0)
+                if score_val is None or pd.isna(score_val) or np.isnan(score_val): score_val = 0.0
+                else: score_val = float(score_val)
+                
+                sig_val = getattr(ts, 'signal_count', 0)
+                if sig_val is None or pd.isna(sig_val) or np.isnan(sig_val): sig_val = 0.0
+                else: sig_val = float(sig_val)
+
+                sort_values_cache[ts.code] = {
+                    'code': str(ts.code or ''),
+                    'name': str(getattr(ts, 'name', '') or ts.code or ''),
+                    'score': score_val,
+                    'signal_count': sig_val,
+                    'current_pct': cp,
+                    'start_pct': cp - pd_val,
+                    'pct_diff': pd_val,
+                    'dff2': dff2_val
+                }
+
+        for col_idx, is_descending in sort_levels:
+            self._perform_single_sort_level(data_to_sort, col_idx, is_descending, sort_values_cache)
+            
+        # 最顶层：重点关注/SBC/报警优先级置顶排序 (稳定排序)
+        def prio_key(ts):
             has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in sbc_registry
             is_fav = ts.code in _fav_stocks
-            # prio: 3=重点关注 > 2=SBC破位 > 1=报警 > 0=普通
-            prio = 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
+            return 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
             
-            cp = getattr(ts, 'current_pct', 0) or 0
-            pd = getattr(ts, 'pct_diff', 0) or 0
-            
-            if attr == 'start_pct': val = cp - pd
-            elif attr == 'pct_diff': val = pd
-            elif attr == 'score': val = score_cache.get(ts.code, 0)
-            elif attr == 'dff2': val = _safe_extract_dff2(df_all, ts.code, self.detector)
-            else: val = getattr(ts, attr, 0) or 0
-            
-            # 构建稳定排序 Key (无论升序降序，均将 prio 摆在首位，且支持按属性数值正确升降序排序)
-            if is_rev:
-                # 降序排列 (reverse=True): 
-                # 想要 prio 越大的在前面 (3, 2, 1, 0)，直接放 prio；
-                # 想要 val 越大的在前面，直接放 val。
-                s_key = (prio, val if val is not None else -999999, ts.code)
-            else:
-                # 升序排列 (reverse=False):
-                # 想要 prio 越大的依然置顶在前面，为了在从小到大排序下置顶，使用 -prio (即 -3, -2, -1, 0)；
-                # 想要 val 越小的在前面，直接放 val。
-                if isinstance(val, (int, float)):
-                    s_key = (-prio, val if val is not None else 999999, ts.code)
-                else:
-                    s_key = (-prio, str(val) if val is not None else "", ts.code)
-            sort_payload.append((s_key, ts, prio, has_alert, has_sbc, is_fav))
+        data_to_sort.sort(key=prio_key, reverse=True)
         
-        # [🚀 排序优化] 使用 Top-K 堆排序算法：O(N log K)
-        # 针对大数据量场景（如全A股），仅提取 Top-K 标的进行渲染，性能提升 5-10 倍
+        # 截取 RenderTopK 个元素
         DISPLAY_K = RENDER_TOP_K
-        if len(sort_payload) > DISPLAY_K:
-            if is_rev:
-                sort_payload = heapq.nlargest(DISPLAY_K, sort_payload, key=lambda x: x[0])
-            else:
-                sort_payload = heapq.nsmallest(DISPLAY_K, sort_payload, key=lambda x: x[0])
-        else:
-            sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
+        data_to_sort = data_to_sort[:DISPLAY_K]
         
         flattened = []
         seen_codes_render = set()
-        for s_key, ts, prio, is_alerted, is_sbc, is_fav in sort_payload:
-            # [🚀 渲染去重] 即使 sort_payload 中由于某些极端情况存在重复 ts，渲染前也必须拦截
-            # 统一提取 6 位标准代码作为排他性 ID
+        for ts in data_to_sort:
             r_code = _RE_NON_DIGIT.sub('', str(ts.code))[-6:].zfill(6)
             if r_code in seen_codes_render: continue
             seen_codes_render.add(r_code)
+            
+            has_alert = alert_manager.is_alerted(ts.code)
+            has_sbc = ts.code in sbc_registry
+            is_fav = ts.code in _fav_stocks
 
-            # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
+            # [自适应节流] 理由提取
             reason = ""
             if self._show_reason:
-                if is_sbc: reason = sbc_registry[ts.code].get('desc', '')
+                if has_sbc: reason = sbc_registry[ts.code].get('desc', '')
                 if not reason: reason = getattr(ts, 'pattern_hint', "")
 
-            # [🚀 名称兜底] 优先从 ts 取，如果 ts 没名称，尝试从探测器的名称索引或主程序实时快照中提取
+            # [🚀 名称兜底]
             ts_name = getattr(ts, 'name', '')
             if not ts_name or ts_name == ts.code or ts_name == '未知':
-                # 尝试从探测器索引找
                 ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
-                # 再次兜底：如果还没找到，尝试从主程序的全局快照提取
                 if (not ts_name or ts_name == ts.code or ts_name == '未知') and df_all is not None:
                     if ts.code in df_all.index:
                         ts_name = str(df_all.loc[ts.code, 'name'])
 
-            # [DFF2 提取] 从全局 df_all 安全提取 dff2 列 (自适应 Fallback 自动计算)
+            # [DFF2 提取]
             dff2 = _safe_extract_dff2(df_all, ts.code, self.detector)
 
             flattened.append((
@@ -1431,8 +1497,8 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 getattr(ts, 'pct_diff', 0) or 0,
                 dff2,
                 reason,
-                is_alerted, # 传给渲染器
-                is_fav,     # [GlobalFavorites] 重点关注标志
+                has_alert,
+                is_fav,
             ))
 
         total = len(data_list)
@@ -1704,17 +1770,271 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 self.parent().parent().update_visuals()
 
     def _on_header_clicked(self, logical_index):
-        if self._sort_col == logical_index:
-            self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+        # 1. 检查当前是否点击了多级排序列之一 (L1-L3)
+        is_multi_clicked = False
+        if logical_index == getattr(self, "sort_level1_col", None):
+            self.sort_level1_asc = not self.sort_level1_asc
+            is_multi_clicked = True
+        elif logical_index == getattr(self, "sort_level2_col", None):
+            self.sort_level2_asc = not self.sort_level2_asc
+            is_multi_clicked = True
+        elif logical_index == getattr(self, "sort_level3_col", None):
+            self.sort_level3_asc = not self.sort_level3_asc
+            is_multi_clicked = True
+            
+        if is_multi_clicked:
+            self._update_header_labels()
+            self._save_racing_detail_sort_states()
+            self.table.scrollToTop()
+            self._dirty = True
+            self.refresh_data()
+            return
+            
+        # 2. 如果当前有 L1 主排序，点击全新列时，设为临时从/次排序后缀
+        if getattr(self, "sort_level1_col", None) is not None:
+            if self._sort_col == logical_index:
+                self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+            else:
+                self._sort_col = logical_index
+                self._sort_order = Qt.SortOrder.DescendingOrder
         else:
+            # 一键自动解除所有多级排序，切回单列排序
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
             self._sort_col = logical_index
-            self._sort_order = Qt.SortOrder.DescendingOrder
-        self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+            self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+            
+        self._update_header_labels()
+        self._save_racing_detail_sort_states()
         self.table.scrollToTop()
         self._dirty = True
         self.refresh_data()
 
+    def _on_header_context_menu(self, pos):
+        header = self.table.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+        if logical_index < 0: return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1A1A1E; color: #FFF; border: 1px solid #333; }
+            QMenu::item:selected { background-color: #004488; }
+        """)
+        
+        action_l1 = menu.addAction("设为 🔴[主]排序")
+        action_l2 = menu.addAction("设为 🟡[从]排序")
+        action_l3 = menu.addAction("设为 🟢[次]排序")
+        
+        menu.addSeparator()
+        action_clear_col = menu.addAction("取消当前列多级排序")
+        action_clear_all = menu.addAction("清除全部多级排序")
+        
+        global_pos = header.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        
+        if not selected_action: return
+        
+        if selected_action == action_l1:
+            self.sort_level1_col = logical_index
+            self.sort_level1_asc = True
+        elif selected_action == action_l2:
+            self.sort_level2_col = logical_index
+            self.sort_level2_asc = True
+        elif selected_action == action_l3:
+            self.sort_level3_col = logical_index
+            self.sort_level3_asc = True
+        elif selected_action == action_clear_col:
+            if self.sort_level1_col == logical_index: self.sort_level1_col = None
+            if self.sort_level2_col == logical_index: self.sort_level2_col = None
+            if self.sort_level3_col == logical_index: self.sort_level3_col = None
+        elif selected_action == action_clear_all:
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
+            self._sort_col = 2
+            self._sort_order = Qt.SortOrder.DescendingOrder
+            
+        self._update_header_labels()
+        self._save_racing_detail_sort_states()
+        self.table.scrollToTop()
+        self._dirty = True
+        self.refresh_data()
+
+    def _apply_saved_racing_detail_sort(self):
+        """从 window_config.json 加载共用的赛马详情窗口多级排序配置"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                persistence = config.get('ui_persistence', {}).get('bidding_racing_detail_sort', {})
+                if persistence:
+                    self.sort_level1_col = persistence.get('sort_level1_col', None)
+                    self.sort_level1_asc = persistence.get('sort_level1_asc', True)
+                    self.sort_level2_col = persistence.get('sort_level2_col', None)
+                    self.sort_level2_asc = persistence.get('sort_level2_asc', True)
+                    self.sort_level3_col = persistence.get('sort_level3_col', None)
+                    self.sort_level3_asc = persistence.get('sort_level3_asc', True)
+                    self._sort_col = persistence.get('sortby_col', 2)
+                    self._sort_order = Qt.SortOrder.DescendingOrder if not persistence.get('sortby_col_ascend', False) else Qt.SortOrder.AscendingOrder
+                    return
+        except Exception as e:
+            logger.warning(f"加载赛马详情窗口多级排序状态失败: {e}")
+        
+        self.sort_level1_col = None
+        self.sort_level1_asc = True
+        self.sort_level2_col = None
+        self.sort_level2_asc = True
+        self.sort_level3_col = None
+        self.sort_level3_asc = True
+        self._sort_col = 2
+        self._sort_order = Qt.SortOrder.DescendingOrder
+
+    def _save_racing_detail_sort_states(self):
+        """保存赛马详情窗口的多级排序，并广播同步到所有其他打开的详情窗口"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            if 'ui_persistence' not in config:
+                config['ui_persistence'] = {}
+                
+            detail_sort = {
+                'sortby_col': self._sort_col,
+                'sortby_col_ascend': (self._sort_order == Qt.SortOrder.AscendingOrder),
+                'sort_level1_col': self.sort_level1_col,
+                'sort_level1_asc': self.sort_level1_asc,
+                'sort_level2_col': self.sort_level2_col,
+                'sort_level2_asc': self.sort_level2_asc,
+                'sort_level3_col': self.sort_level3_col,
+                'sort_level3_asc': self.sort_level3_asc,
+            }
+            config['ui_persistence']['bidding_racing_detail_sort'] = detail_sort
+            
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            
+            # 广播同步给所有其他打开的赛马详情窗口
+            for dialog in _active_racing_detail_dialogs:
+                if dialog != self:
+                    dialog.sort_level1_col = self.sort_level1_col
+                    dialog.sort_level1_asc = self.sort_level1_asc
+                    dialog.sort_level2_col = self.sort_level2_col
+                    dialog.sort_level2_asc = self.sort_level2_asc
+                    dialog.sort_level3_col = self.sort_level3_col
+                    dialog.sort_level3_asc = self.sort_level3_asc
+                    dialog._sort_col = self._sort_col
+                    dialog._sort_order = self._sort_order
+                    dialog._update_header_labels()
+                    dialog._dirty = True
+                    dialog.refresh_data()
+        except Exception as e:
+            logger.error(f"Error saving racing detail sort states: {e}")
+
+    def _update_header_labels(self):
+        """更新表头上的🔴[主]、🟡[从]、🟢[次]等排序修饰文字"""
+        base_headers = ["代码", "名称", "结构分", "信号数", "当前涨幅", "起点涨幅", "切片涨幅", "dff2"]
+        bound_cols = set()
+        if self.sort_level1_col is not None:
+            bound_cols.add(self.sort_level1_col)
+        if self.sort_level2_col is not None:
+            bound_cols.add(self.sort_level2_col)
+        if self.sort_level3_col is not None:
+            bound_cols.add(self.sort_level3_col)
+            
+        for col_idx in range(self.table.columnCount()):
+            item = self.table.horizontalHeaderItem(col_idx)
+            if not item: continue
+            
+            text = base_headers[col_idx] if col_idx < len(base_headers) else item.text()
+            for prefix in ["🔴[主] ", "🟡[从] ", "🟢[次] ", "↓ ", "↑ "]:
+                text = text.replace(prefix, "")
+            
+            prefix = ""
+            asc = True
+            is_sorted = False
+            
+            if self.sort_level1_col == col_idx:
+                prefix = "🔴[主] "
+                asc = self.sort_level1_asc
+                is_sorted = True
+            elif self.sort_level2_col == col_idx:
+                prefix = "🟡[从] "
+                asc = self.sort_level2_asc
+                is_sorted = True
+            elif self.sort_level3_col == col_idx:
+                prefix = "🟢[次] "
+                asc = self.sort_level3_asc
+                is_sorted = True
+                
+            if self.sort_level1_col is not None and col_idx not in bound_cols:
+                if self._sort_col == col_idx:
+                    bound_cnt = len(bound_cols)
+                    if bound_cnt == 1:
+                        prefix = "🟡[从] "
+                    elif bound_cnt >= 2:
+                        prefix = "🟢[次] "
+                    asc = (self._sort_order == Qt.SortOrder.AscendingOrder)
+                    is_sorted = True
+            elif self.sort_level1_col is None:
+                if self._sort_col == col_idx:
+                    asc = (self._sort_order == Qt.SortOrder.AscendingOrder)
+                    is_sorted = True
+                    
+            if is_sorted:
+                arrow = "↑ " if asc else "↓ "
+                item.setText(f"{arrow}{prefix}{text}")
+            else:
+                item.setText(text)
+
+    def _get_col_value_for_sort(self, ts, col_idx):
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
+        attr = col_attr_map.get(col_idx, 'score')
+        
+        df_all = _get_df_all_cascading(self)
+        cp = getattr(ts, 'current_pct', 0) or 0
+        pd = getattr(ts, 'pct_diff', 0) or 0
+        
+        if attr == 'start_pct': val = cp - pd
+        elif attr == 'pct_diff': val = pd
+        elif attr == 'score': val = self._get_synthetic_score(ts)
+        elif attr == 'dff2': val = _safe_extract_dff2(df_all, ts.code, self.detector)
+        else: val = getattr(ts, attr, 0) or 0
+        return val
+
+    def _perform_single_sort_level(self, items, col_idx, is_descending, sort_values_cache):
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
+        attr = col_attr_map.get(col_idx, 'score')
+        is_num = (attr not in ('code', 'name'))
+        
+        def sort_key(ts):
+            val = sort_values_cache.get(ts.code, {}).get(attr, None)
+            if val is None:
+                if is_num:
+                    return -999999.0 if is_descending else 999999.0
+                else:
+                    return ""
+            return val
+            
+        try:
+            items.sort(key=sort_key, reverse=is_descending)
+        except TypeError:
+            # 最后的防崩溃兜底，但在规整类型后基本不会触发
+            items.sort(key=lambda ts: str(sort_key(ts)), reverse=is_descending)
+
+
     def closeEvent(self, event):
+        # [NEW] 注销全局活动详情窗口列表
+        if self in _active_racing_detail_dialogs:
+            _active_racing_detail_dialogs.remove(self)
+            
         if hasattr(self, 'timer') and self.timer:
             try:
                 self.timer.stop()
@@ -1807,6 +2127,13 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._sort_col = 2 # 默认排序: 结构分
         self._sort_order = Qt.SortOrder.DescendingOrder
         
+        # [NEW] 注册到全局活动详情窗口列表
+        if self not in _active_racing_detail_dialogs:
+            _active_racing_detail_dialogs.append(self)
+            
+        # [NEW] 加载赛马详情共用多级排序状态
+        self._apply_saved_racing_detail_sort()
+        
         self._boot_lock = True
         self._is_height_doubled = False
         self._show_reason = False
@@ -1825,6 +2152,7 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.timer.timeout.connect(self.refresh_data)
         self.timer.start(500) 
         self.refresh_data()
+        self._update_header_labels()
         self.setUpdatesEnabled(True)
         
         # [GlobalFavorites] 订阅重点关注变化
@@ -1902,6 +2230,8 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self.table.code_double_clicked.connect(lambda c, n: self.linkage_cb(c, n, source="category_dialog_double"))
         
         self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        self.table.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.horizontalHeader().customContextMenuRequested.connect(self._on_header_context_menu)
         # [统一管理] 停用实时列宽保存
         # self.table.horizontalHeader().sectionResized.connect(self._save_header_state)
         
@@ -2028,10 +2358,6 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._last_rendered_ts = curr_ts
 
         # [🚀 锁外计算] 预提取所有排序所需属性
-        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
-        attr = col_attr_map.get(self._sort_col, 'score')
-        is_rev = (self._sort_order == Qt.SortOrder.DescendingOrder)
-        
         # 智能级联寻址最精准的 df_all 缓存 (锁外一键预提取，彻底规避循环内部重复 lookup 与 getattr 损耗)
         df_all = _get_df_all_cascading(self)
         
@@ -2044,82 +2370,148 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             _fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
         except Exception:
             _fav_stocks = set()
+
+        # 级联排序准备：逆序依次对各个层级进行稳定排序
+        data_to_sort = list(data_list)
+        sort_levels = []
         
-        sort_payload = []
-        for ts in data_list:
+        # 最底层：临时后缀排序 (即 self._sort_col)
+        is_suffix_desc = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        sort_levels.append((self._sort_col, is_suffix_desc))
+        
+        # 往上：L3, L2, L1
+        if getattr(self, 'sort_level3_col', None) is not None:
+            sort_levels.append((self.sort_level3_col, not self.sort_level3_asc))
+        if getattr(self, 'sort_level2_col', None) is not None:
+            sort_levels.append((self.sort_level2_col, not self.sort_level2_asc))
+        if getattr(self, 'sort_level1_col', None) is not None:
+            sort_levels.append((self.sort_level1_col, not self.sort_level1_asc))
+            
+        # 预计算所有排序列的值，消除排序循环中的锁竞争和复杂运算，并强行对齐类型以避免比较时的 TypeError
+        sort_values_cache = {}
+        import pandas as pd
+        import numpy as np
+        with self.detector._lock:
+            for ts in data_to_sort:
+                cp = getattr(ts, 'current_pct', 0.0)
+                if cp is None or pd.isna(cp) or np.isnan(cp): cp = 0.0
+                else: cp = float(cp)
+                
+                pd_val = getattr(ts, 'pct_diff', 0.0)
+                if pd_val is None or pd.isna(pd_val) or np.isnan(pd_val): pd_val = 0.0
+                else: pd_val = float(pd_val)
+                
+                # 预先计算 dff2（在锁内一次性计算）
+                df_llow = None
+                if df_all is not None and ts.code in df_all.index:
+                    try:
+                        if 'llow' in df_all.columns:
+                            df_llow = df_all.loc[ts.code, 'llow']
+                        elif 'low' in df_all.columns:
+                            df_llow = df_all.loc[ts.code, 'low']
+                        if hasattr(df_llow, 'iloc'):
+                            df_llow = df_llow.iloc[0]
+                        if df_llow is not None:
+                            df_llow = float(df_llow)
+                            if df_llow <= 0.001:
+                                df_llow = None
+                    except Exception:
+                        df_llow = None
+                        
+                buy_f = ts.current_price
+                llow_f = df_llow if df_llow is not None else ts.low_day
+                if llow_f <= 0.001:
+                    llow_f = ts.open_price
+                if llow_f <= 0.001:
+                    llow_f = ts.last_close
+                
+                dff2_val = 0.0
+                if buy_f > 0.001 and llow_f > 0.001:
+                    dff2_val = round((buy_f - llow_f) / llow_f * 100, 1)
+                elif df_all is not None and ts.code in df_all.index and 'dff2' in df_all.columns:
+                    try:
+                        dff2_val = float(df_all.loc[ts.code, 'dff2'])
+                    except Exception:
+                        pass
+                if dff2_val is None or pd.isna(dff2_val) or np.isnan(dff2_val):
+                    dff2_val = 0.0
+                else:
+                    dff2_val = float(dff2_val)
+                
+                score_val = score_cache.get(ts.code, 0.0)
+                if score_val is None or pd.isna(score_val) or np.isnan(score_val): score_val = 0.0
+                else: score_val = float(score_val)
+                
+                sig_val = getattr(ts, 'signal_count', 0)
+                if sig_val is None or pd.isna(sig_val) or np.isnan(sig_val): sig_val = 0.0
+                else: sig_val = float(sig_val)
+
+                sort_values_cache[ts.code] = {
+                    'code': str(ts.code or ''),
+                    'name': str(getattr(ts, 'name', '') or ts.code or ''),
+                    'score': score_val,
+                    'signal_count': sig_val,
+                    'current_pct': cp,
+                    'start_pct': cp - pd_val,
+                    'pct_diff': pd_val,
+                    'dff2': dff2_val
+                }
+
+        for col_idx, is_descending in sort_levels:
+            self._perform_single_sort_level(data_to_sort, col_idx, is_descending, sort_values_cache)
+            
+        # 最顶层：重点关注/SBC/报警优先级置顶排序 (稳定排序)
+        def prio_key(ts):
             has_alert = alert_manager.is_alerted(ts.code)
             has_sbc = ts.code in reg
             is_fav = ts.code in _fav_stocks
-            prio = 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
+            return 3 if is_fav else (2 if has_sbc else (1 if has_alert else 0))
             
-            cp = getattr(ts, 'current_pct', 0) or 0
-            pd = getattr(ts, 'pct_diff', 0) or 0
-            
-            if attr == 'start_pct': val = cp - pd
-            elif attr == 'pct_diff': val = pd
-            elif attr == 'score': val = score_cache.get(ts.code, 0)
-            elif attr == 'dff2':
-                val = _safe_extract_dff2(df_all, ts.code, self.detector)
-            else: val = getattr(ts, attr, 0) or 0
-            
-            # 构建稳定排序 Key (无论升序降序，均将 prio 摆在首位，且支持按属性数值正确升降序排序)
-            if is_rev:
-                # 降序排列 (reverse=True): 
-                # 想要 prio 越大的在前面 (3, 2, 1, 0)，直接放 prio；
-                # 想要 val 越大的在前面，直接放 val。
-                s_key = (prio, val if val is not None else -999999, ts.code)
-            else:
-                # 升序排列 (reverse=False):
-                # 想要 prio 越大的依然置顶在前面，为了在从小到大排序下置顶，使用 -prio (即 -3, -2, -1, 0)；
-                # 想要 val 越小的在前面，直接放 val。
-                if isinstance(val, (int, float)):
-                    s_key = (-prio, val if val is not None else 999999, ts.code)
-                else:
-                    s_key = (-prio, str(val) if val is not None else "", ts.code)
-            sort_payload.append((s_key, ts, prio, has_alert, has_sbc, is_fav))
-
-        # [🚀 排序优化] 使用 Top-K 堆排序：O(N log K)
+        data_to_sort.sort(key=prio_key, reverse=True)
+        
+        # 截取 RenderTopK 个元素
         DISPLAY_K = RENDER_TOP_K
-        if len(sort_payload) > DISPLAY_K:
-            if is_rev:
-                sort_payload = heapq.nlargest(DISPLAY_K, sort_payload, key=lambda x: x[0])
-            else:
-                sort_payload = heapq.nsmallest(DISPLAY_K, sort_payload, key=lambda x: x[0])
-        else:
-            sort_payload.sort(key=lambda x: x[0], reverse=is_rev)
+        data_to_sort = data_to_sort[:DISPLAY_K]
         
         flattened = []
-        for s_key, ts, prio, is_alerted, is_sbc, is_fav in sort_payload:
-            # [自适应节流] 只有在打开显示开关时才进行昂贵的理由提取
+        seen_codes_render = set()
+        for ts in data_to_sort:
+            r_code = _RE_NON_DIGIT.sub('', str(ts.code))[-6:].zfill(6)
+            if r_code in seen_codes_render: continue
+            seen_codes_render.add(r_code)
+            
+            has_alert = alert_manager.is_alerted(ts.code)
+            has_sbc = ts.code in reg
+            is_fav = ts.code in _fav_stocks
+
+            # [自适应节流] 理由提取
             reason = ""
             if self._show_reason:
-                if is_sbc: 
-                    reason = reg[ts.code].get('desc', '')
-                if not reason: 
-                    reason = getattr(ts, 'pattern_hint', "")
+                if has_sbc: reason = reg[ts.code].get('desc', '')
+                if not reason: reason = getattr(ts, 'pattern_hint', "")
 
             # [🚀 名称兜底]
             ts_name = getattr(ts, 'name', '')
-            # 已在锁外一键提取 df_all 缓存
-
             if not ts_name or ts_name == ts.code or ts_name == '未知':
                 ts_name = getattr(self.detector, '_code_index', {}).get(ts.code, ts_name)
                 if (not ts_name or ts_name == ts.code or ts_name == '未知') and df_all is not None:
                     if ts.code in df_all.index:
                         ts_name = str(df_all.loc[ts.code, 'name'])
 
-            # [DFF2 提取] 从全局 df_all 安全提取 dff2 列 (自适应 Fallback 自动计算)
+            # [DFF2 提取]
             dff2 = _safe_extract_dff2(df_all, ts.code, self.detector)
 
-            flattened.append((ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
-                             getattr(ts, 'signal_count', 0) or 0,
-                             getattr(ts, 'current_pct', 0) or 0,
-                             (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
-                             getattr(ts, 'pct_diff', 0) or 0,
-                             dff2,
-                             reason,
-                             is_alerted,
-                             is_fav))
+            flattened.append((
+                ts.code, ts_name or '未知', score_cache.get(ts.code, 0), 
+                getattr(ts, 'signal_count', 0) or 0,
+                getattr(ts, 'current_pct', 0) or 0,
+                (getattr(ts, 'current_pct', 0) or 0) - (getattr(ts, 'pct_diff', 0) or 0),
+                getattr(ts, 'pct_diff', 0) or 0,
+                dff2,
+                reason,
+                has_alert,
+                is_fav,
+            ))
         avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / len(data_list) if data_list else 0
         total_count = len(data_list)
         stats_text = (f"📊 统计: 共 {total_count} 只{' (仅显Top%d)' % RENDER_TOP_K if total_count > RENDER_TOP_K else ''} | "
@@ -2382,17 +2774,271 @@ class CategoryDetailDialog(QDialog, WindowMixin):
             self.refresh_data()
 
     def _on_header_clicked(self, logical_index):
-        if self._sort_col == logical_index:
-            self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+        # 1. 检查当前是否点击了多级排序列之一 (L1-L3)
+        is_multi_clicked = False
+        if logical_index == getattr(self, "sort_level1_col", None):
+            self.sort_level1_asc = not self.sort_level1_asc
+            is_multi_clicked = True
+        elif logical_index == getattr(self, "sort_level2_col", None):
+            self.sort_level2_asc = not self.sort_level2_asc
+            is_multi_clicked = True
+        elif logical_index == getattr(self, "sort_level3_col", None):
+            self.sort_level3_asc = not self.sort_level3_asc
+            is_multi_clicked = True
+            
+        if is_multi_clicked:
+            self._update_header_labels()
+            self._save_racing_detail_sort_states()
+            self.table.scrollToTop()
+            self._dirty = True
+            self.refresh_data()
+            return
+            
+        # 2. 如果当前有 L1 主排序，点击全新列时，设为临时从/次排序后缀
+        if getattr(self, "sort_level1_col", None) is not None:
+            if self._sort_col == logical_index:
+                self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+            else:
+                self._sort_col = logical_index
+                self._sort_order = Qt.SortOrder.DescendingOrder
         else:
+            # 一键自动解除所有多级排序，切回单列排序
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
             self._sort_col = logical_index
-            self._sort_order = Qt.SortOrder.DescendingOrder
-        self.table.horizontalHeader().setSortIndicator(logical_index, self._sort_order)
+            self._sort_order = Qt.SortOrder.AscendingOrder if self._sort_order == Qt.SortOrder.DescendingOrder else Qt.SortOrder.DescendingOrder
+            
+        self._update_header_labels()
+        self._save_racing_detail_sort_states()
         self.table.scrollToTop()
         self._dirty = True
         self.refresh_data()
 
+    def _on_header_context_menu(self, pos):
+        header = self.table.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+        if logical_index < 0: return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1A1A1E; color: #FFF; border: 1px solid #333; }
+            QMenu::item:selected { background-color: #004488; }
+        """)
+        
+        action_l1 = menu.addAction("设为 🔴[主]排序")
+        action_l2 = menu.addAction("设为 🟡[从]排序")
+        action_l3 = menu.addAction("设为 🟢[次]排序")
+        
+        menu.addSeparator()
+        action_clear_col = menu.addAction("取消当前列多级排序")
+        action_clear_all = menu.addAction("清除全部多级排序")
+        
+        global_pos = header.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        
+        if not selected_action: return
+        
+        if selected_action == action_l1:
+            self.sort_level1_col = logical_index
+            self.sort_level1_asc = True
+        elif selected_action == action_l2:
+            self.sort_level2_col = logical_index
+            self.sort_level2_asc = True
+        elif selected_action == action_l3:
+            self.sort_level3_col = logical_index
+            self.sort_level3_asc = True
+        elif selected_action == action_clear_col:
+            if self.sort_level1_col == logical_index: self.sort_level1_col = None
+            if self.sort_level2_col == logical_index: self.sort_level2_col = None
+            if self.sort_level3_col == logical_index: self.sort_level3_col = None
+        elif selected_action == action_clear_all:
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
+            self._sort_col = 2
+            self._sort_order = Qt.SortOrder.DescendingOrder
+            
+        self._update_header_labels()
+        self._save_racing_detail_sort_states()
+        self.table.scrollToTop()
+        self._dirty = True
+        self.refresh_data()
+
+    def _apply_saved_racing_detail_sort(self):
+        """从 window_config.json 加载共用的赛马详情窗口多级排序配置"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                persistence = config.get('ui_persistence', {}).get('bidding_racing_detail_sort', {})
+                if persistence:
+                    self.sort_level1_col = persistence.get('sort_level1_col', None)
+                    self.sort_level1_asc = persistence.get('sort_level1_asc', True)
+                    self.sort_level2_col = persistence.get('sort_level2_col', None)
+                    self.sort_level2_asc = persistence.get('sort_level2_asc', True)
+                    self.sort_level3_col = persistence.get('sort_level3_col', None)
+                    self.sort_level3_asc = persistence.get('sort_level3_asc', True)
+                    self._sort_col = persistence.get('sortby_col', 2)
+                    self._sort_order = Qt.SortOrder.DescendingOrder if not persistence.get('sortby_col_ascend', False) else Qt.SortOrder.AscendingOrder
+                    return
+        except Exception as e:
+            logger.warning(f"加载赛马详情窗口多级排序状态失败: {e}")
+        
+        self.sort_level1_col = None
+        self.sort_level1_asc = True
+        self.sort_level2_col = None
+        self.sort_level2_asc = True
+        self.sort_level3_col = None
+        self.sort_level3_asc = True
+        self._sort_col = 2
+        self._sort_order = Qt.SortOrder.DescendingOrder
+
+    def _save_racing_detail_sort_states(self):
+        """保存赛马详情窗口的多级排序，并广播同步到所有其他打开的详情窗口"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            if 'ui_persistence' not in config:
+                config['ui_persistence'] = {}
+                
+            detail_sort = {
+                'sortby_col': self._sort_col,
+                'sortby_col_ascend': (self._sort_order == Qt.SortOrder.AscendingOrder),
+                'sort_level1_col': self.sort_level1_col,
+                'sort_level1_asc': self.sort_level1_asc,
+                'sort_level2_col': self.sort_level2_col,
+                'sort_level2_asc': self.sort_level2_asc,
+                'sort_level3_col': self.sort_level3_col,
+                'sort_level3_asc': self.sort_level3_asc,
+            }
+            config['ui_persistence']['bidding_racing_detail_sort'] = detail_sort
+            
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            
+            # 广播同步给所有其他打开的赛马详情窗口
+            for dialog in _active_racing_detail_dialogs:
+                if dialog != self:
+                    dialog.sort_level1_col = self.sort_level1_col
+                    dialog.sort_level1_asc = self.sort_level1_asc
+                    dialog.sort_level2_col = self.sort_level2_col
+                    dialog.sort_level2_asc = self.sort_level2_asc
+                    dialog.sort_level3_col = self.sort_level3_col
+                    dialog.sort_level3_asc = self.sort_level3_asc
+                    dialog._sort_col = self._sort_col
+                    dialog._sort_order = self._sort_order
+                    dialog._update_header_labels()
+                    dialog._dirty = True
+                    dialog.refresh_data()
+        except Exception as e:
+            logger.error(f"Error saving racing detail sort states: {e}")
+
+    def _update_header_labels(self):
+        """更新表头上的🔴[主]、🟡[从]、🟢[次]等排序修饰文字"""
+        base_headers = ["代码", "名称", "结构分", "信号数", "当前涨幅", "起点涨幅", "切片涨幅", "dff2"]
+        bound_cols = set()
+        if self.sort_level1_col is not None:
+            bound_cols.add(self.sort_level1_col)
+        if self.sort_level2_col is not None:
+            bound_cols.add(self.sort_level2_col)
+        if self.sort_level3_col is not None:
+            bound_cols.add(self.sort_level3_col)
+            
+        for col_idx in range(self.table.columnCount()):
+            item = self.table.horizontalHeaderItem(col_idx)
+            if not item: continue
+            
+            text = base_headers[col_idx] if col_idx < len(base_headers) else item.text()
+            for prefix in ["🔴[主] ", "🟡[从] ", "🟢[次] ", "↓ ", "↑ "]:
+                text = text.replace(prefix, "")
+            
+            prefix = ""
+            asc = True
+            is_sorted = False
+            
+            if self.sort_level1_col == col_idx:
+                prefix = "🔴[主] "
+                asc = self.sort_level1_asc
+                is_sorted = True
+            elif self.sort_level2_col == col_idx:
+                prefix = "🟡[从] "
+                asc = self.sort_level2_asc
+                is_sorted = True
+            elif self.sort_level3_col == col_idx:
+                prefix = "🟢[次] "
+                asc = self.sort_level3_asc
+                is_sorted = True
+                
+            if self.sort_level1_col is not None and col_idx not in bound_cols:
+                if self._sort_col == col_idx:
+                    bound_cnt = len(bound_cols)
+                    if bound_cnt == 1:
+                        prefix = "🟡[从] "
+                    elif bound_cnt >= 2:
+                        prefix = "🟢[次] "
+                    asc = (self._sort_order == Qt.SortOrder.AscendingOrder)
+                    is_sorted = True
+            elif self.sort_level1_col is None:
+                if self._sort_col == col_idx:
+                    asc = (self._sort_order == Qt.SortOrder.AscendingOrder)
+                    is_sorted = True
+                    
+            if is_sorted:
+                arrow = "↑ " if asc else "↓ "
+                item.setText(f"{arrow}{prefix}{text}")
+            else:
+                item.setText(text)
+
+    def _get_col_value_for_sort(self, ts, col_idx):
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
+        attr = col_attr_map.get(col_idx, 'score')
+        
+        df_all = _get_df_all_cascading(self)
+        cp = getattr(ts, 'current_pct', 0) or 0
+        pd = getattr(ts, 'pct_diff', 0) or 0
+        
+        if attr == 'start_pct': val = cp - pd
+        elif attr == 'pct_diff': val = pd
+        elif attr == 'score': val = self._get_synthetic_score(ts)
+        elif attr == 'dff2': val = _safe_extract_dff2(df_all, ts.code, self.detector)
+        else: val = getattr(ts, attr, 0) or 0
+        return val
+
+    def _perform_single_sort_level(self, items, col_idx, is_descending, sort_values_cache):
+        col_attr_map = {0:'code', 1:'name', 2:'score', 3:'signal_count', 4:'current_pct', 5:'start_pct', 6:'pct_diff', 7:'dff2'}
+        attr = col_attr_map.get(col_idx, 'score')
+        is_num = (attr not in ('code', 'name'))
+        
+        def sort_key(ts):
+            val = sort_values_cache.get(ts.code, {}).get(attr, None)
+            if val is None:
+                if is_num:
+                    return -999999.0 if is_descending else 999999.0
+                else:
+                    return ""
+            return val
+            
+        try:
+            items.sort(key=sort_key, reverse=is_descending)
+        except TypeError:
+            # 最后的防崩溃兜底，但在规整类型后基本不会触发
+            items.sort(key=lambda ts: str(sort_key(ts)), reverse=is_descending)
+
+
     def closeEvent(self, event):
+        # [NEW] 注销全局活动详情窗口列表
+        if self in _active_racing_detail_dialogs:
+            _active_racing_detail_dialogs.remove(self)
+            
         if hasattr(self, 'timer') and self.timer:
             try:
                 self.timer.stop()
@@ -2639,10 +3285,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._last_ui_update_ts = 0 
         self._table_highlights = {}
         
-        self._sort_col = 2 
-        self._sort_order = Qt.SortOrder.DescendingOrder
-        self._sort_col_sector = 1 
-        self._sort_order_sector = Qt.SortOrder.DescendingOrder
+        self._apply_saved_main_sort()
         self._reset_cycle_mins = 60 
         
         self._UI_CACHE = {
@@ -2686,6 +3329,57 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         # [GlobalFavorites] 注册订阅，任何面板（竞价/HUD）变更 favorites 后立即刷新本面板
         from global_favorites import GlobalFavoriteManager
         GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+
+    def _apply_saved_main_sort(self):
+        """加载主面板的排序设置"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                persistence = config.get('ui_persistence', {}).get('bidding_racing_main_sort', {})
+                if persistence:
+                    self._sort_col = persistence.get('sortby_col', 2)
+                    self._sort_order = Qt.SortOrder.DescendingOrder if not persistence.get('sortby_col_ascend', False) else Qt.SortOrder.AscendingOrder
+                    self._sort_col_sector = persistence.get('sortby_col_sector', 1)
+                    self._sort_order_sector = Qt.SortOrder.DescendingOrder if not persistence.get('sortby_col_ascend_sector', False) else Qt.SortOrder.AscendingOrder
+                    return
+        except Exception as e:
+            logger.warning(f"加载主面板排序状态失败: {e}")
+            
+        # 默认值
+        self._sort_col = 2
+        self._sort_order = Qt.SortOrder.DescendingOrder
+        self._sort_col_sector = 1
+        self._sort_order_sector = Qt.SortOrder.DescendingOrder
+
+    def _save_main_sort_states(self):
+        """保存主面板的排序设置"""
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            if 'ui_persistence' not in config:
+                config['ui_persistence'] = {}
+                
+            main_sort = {
+                'sortby_col': self._sort_col,
+                'sortby_col_ascend': (self._sort_order == Qt.SortOrder.AscendingOrder),
+                'sortby_col_sector': self._sort_col_sector,
+                'sortby_col_ascend_sector': (self._sort_order_sector == Qt.SortOrder.AscendingOrder),
+            }
+            config['ui_persistence']['bidding_racing_main_sort'] = main_sort
+            
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error saving main racing sort states: {e}")
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -4276,6 +4970,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self._last_data_version = -1 
         self.update_visuals()
+        self._save_main_sort_states()
 
     def _on_sbc_stats_context_menu(self, pos):
         """基因报警卡片的右键菜单 - 提供重置功能"""
@@ -4988,6 +5683,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             if "splitter_main" in conf:
                 self.main_splitter.restoreState(QByteArray.fromHex(conf["splitter_main"].encode()))
                 
+            # [NEW] 同步应用排序指示器
+            self.stock_table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
+            self.sector_table.horizontalHeader().setSortIndicator(self._sort_col_sector, self._sort_order_sector)
+                
             # 5. [🚀 自动恢复 V2] 批量重开所有未关闭的明细窗口并还原其内部布局
             open_list = conf.get("open_details_v2", [])
             for win_info in open_list:
@@ -5632,6 +6331,76 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     tracker = getattr(self.detector.realtime_service, 'emotion_tracker', None)
                 sbc_registry = getattr(tracker, '_sbc_signals_registry', {}) if tracker else {}
 
+                # 预计算所有过滤后个股的排序列值，消除排序循环中的锁竞争和复杂运算
+                sort_values_cache = {}
+                import pandas as pd
+                import numpy as np
+                with self.detector._lock:
+                    for ts in filtered_ts:
+                        cp = getattr(ts, 'current_pct', 0.0)
+                        if cp is None or pd.isna(cp) or np.isnan(cp): cp = 0.0
+                        else: cp = float(cp)
+                        
+                        pd_val = getattr(ts, 'pct_diff', 0.0)
+                        if pd_val is None or pd.isna(pd_val) or np.isnan(pd_val): pd_val = 0.0
+                        else: pd_val = float(pd_val)
+                        
+                        # 预先计算 dff2（在锁内一次性计算）
+                        df_llow = None
+                        if df_all is not None and ts.code in df_all.index:
+                            try:
+                                if 'llow' in df_all.columns:
+                                    df_llow = df_all.loc[ts.code, 'llow']
+                                elif 'low' in df_all.columns:
+                                    df_llow = df_all.loc[ts.code, 'low']
+                                if hasattr(df_llow, 'iloc'):
+                                    df_llow = df_llow.iloc[0]
+                                if df_llow is not None:
+                                    df_llow = float(df_llow)
+                                    if df_llow <= 0.001:
+                                        df_llow = None
+                            except Exception:
+                                df_llow = None
+                                
+                        buy_f = ts.current_price
+                        llow_f = df_llow if df_llow is not None else ts.low_day
+                        if llow_f <= 0.001:
+                            llow_f = ts.open_price
+                        if llow_f <= 0.001:
+                            llow_f = ts.last_close
+                        
+                        dff2_val = 0.0
+                        if buy_f > 0.001 and llow_f > 0.001:
+                            dff2_val = round((buy_f - llow_f) / llow_f * 100, 1)
+                        elif df_all is not None and ts.code in df_all.index and 'dff2' in df_all.columns:
+                            try:
+                                dff2_val = float(df_all.loc[ts.code, 'dff2'])
+                            except Exception:
+                                pass
+                        if dff2_val is None or pd.isna(dff2_val) or np.isnan(dff2_val):
+                            dff2_val = 0.0
+                        else:
+                            dff2_val = float(dff2_val)
+                        
+                        score_val = score_cache.get(ts.code, 0.0)
+                        if score_val is None or pd.isna(score_val) or np.isnan(score_val): score_val = 0.0
+                        else: score_val = float(score_val)
+                        
+                        sig_val = getattr(ts, 'signal_count', 0)
+                        if sig_val is None or pd.isna(sig_val) or np.isnan(sig_val): sig_val = 0.0
+                        else: sig_val = float(sig_val)
+
+                        sort_values_cache[ts.code] = {
+                            'code': str(ts.code or ''),
+                            'name': str(getattr(ts, 'name', '') or ts.code or ''),
+                            'score': score_val,
+                            'signal_count': sig_val,
+                            'current_pct': cp,
+                            'start_pct': cp - pd_val,
+                            'pct_diff': pd_val,
+                            'dff2': dff2_val
+                        }
+
                 # 执行排行榜处理 (基于过滤后的结果，增加稳定性排序)
                 def get_stock_sort_key(ts):
                     # [🚀 排序优先级增强] ⚡(2) > 🔔(1) > 普通(0)
@@ -5639,16 +6408,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     has_sbc = ts.code in sbc_registry
                     prio = 2 if has_sbc else (1 if has_alert else 0)
                     
-                    if s_attr == 'start_pct':
-                        val = ts.current_pct - ts.pct_diff
-                    elif s_attr == 'pct_diff':
-                        val = ts.pct_diff
-                    elif s_attr == 'score':
-                        val = score_cache.get(ts.code, 0)
-                    elif s_attr == 'dff2':
-                        val = _safe_extract_dff2(df_all, ts.code, self.detector)
-                    else:
-                        val = getattr(ts, s_attr, 0)
+                    val = sort_values_cache.get(ts.code, {}).get(s_attr, 0.0)
                     
                     if s_attr == 'name':
                         # 确保图标个股在默认降序(Descending)时聚类在顶部
@@ -5675,23 +6435,38 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 s_attr_sec = sort_attr_map_sector.get(self._sort_col_sector, 'score')
                 is_rev_sec = (self._sort_order_sector == Qt.SortOrder.DescendingOrder)
                 
-                # [🚀 优化] 板块表手动排序逻辑 (对齐 DFF 与起点逻辑)
-                def get_sec_val(sec, attr):
-                    if attr == 'leader_start_pct':
-                        return sec.get('leader_pct', 0) - sec.get('leader_pct_diff', 0)
-                    if attr == 'avg_pct':
-                        return sec.get('avg_pct_diff', 0.0)
-                    if attr == 'leader_dff2':
-                        l_code = sec.get('leader', '')
-                        if l_code:
-                            return _safe_extract_dff2(df_all, l_code, self.detector)
-                        return 0.0
-                    return sec.get(attr, 0)
+                # 预计算板块排序所需的值，彻底规避排序比较时重复提取与互斥锁竞争
+                sector_values_cache = {}
+                for sec in active_sectors:
+                    sec_name = sec.get('sector', '')
+                    l_code = sec.get('leader', '')
+                    dff2_val = 0.0
+                    if l_code:
+                        if l_code in sort_values_cache:
+                            dff2_val = sort_values_cache[l_code]['dff2']
+                        else:
+                            dff2_val = _safe_extract_dff2(df_all, l_code, self.detector)
+                    
+                    val_score = sec.get('score', 0.0)
+                    val_avg_pct = sec.get('avg_pct_diff', 0.0)
+                    val_leader_pct = sec.get('leader_pct', 0.0)
+                    val_leader_pct_diff = sec.get('leader_pct_diff', 0.0)
+                    
+                    sector_values_cache[sec_name] = {
+                        'sector': str(sec_name or ''),
+                        'score': float(val_score) if val_score is not None else 0.0,
+                        'avg_pct': float(val_avg_pct) if val_avg_pct is not None else 0.0,
+                        'leader_name': str(sec.get('leader_name', '') or ''),
+                        'leader_pct': float(val_leader_pct) if val_leader_pct is not None else 0.0,
+                        'leader_start_pct': float(val_leader_pct - val_leader_pct_diff) if (val_leader_pct is not None and val_leader_pct_diff is not None) else 0.0,
+                        'leader_pct_diff': float(val_leader_pct_diff) if val_leader_pct_diff is not None else 0.0,
+                        'leader_dff2': float(dff2_val)
+                    }
 
                 # 全量排序结果
                 all_sorted_sectors = sorted(
                     active_sectors, 
-                    key=lambda x: (get_sec_val(x, s_attr_sec), x.get('sector', '')), 
+                    key=lambda x: (sector_values_cache.get(x.get('sector', ''), {}).get(s_attr_sec, 0.0), x.get('sector', '')), 
                     reverse=is_rev_sec
                 )
                 # 稳定二次排序：确保重点关注的板块在任何情况下都在最顶层优先展示

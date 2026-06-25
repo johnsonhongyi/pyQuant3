@@ -1,3 +1,10 @@
+## 2026-06-25 18:40
+- [x] **优化概念板块 Treeview 初始化自动滚动机制 (Optimized Concept Plate Treeview Auto-Scroll on Initialization)**：
+    - [x] **支持多级排序时自动顶部显示 (Auto-Scroll to Top when Multi-Level Sort Active)**：修改了 `_fill_concept_top10_content` 的内部 nested 函数 `scroll_and_highlight`，并引入 `is_init` 参数。当检测到窗口初始化 (`is_init=True`) 且多级排序处于激活状态（`bool(getattr(tree, 'sort_level1_col', None))`）时，抑制默认的 `tree.see(target_iid)` 滚动定位行为，转为调用 `tree.yview_moveto(0)` 使其默认从列表最顶部展示，只保留选中高亮。
+    - [x] **同步重构 `_focus_top10_tree` 避免排序复位滚动 (Refactored _focus_top10_tree to Avoid Scroll Conflict)**：重构了 `_focus_top10_tree` 延迟聚焦处理逻辑。当多级排序活跃时，智能读取当前树的选中项并对其执行焦点设置（`tree.focus(target)`），随后通过 `tree.yview_moveto(0)` 强行锁定顶端展示视角，避免了非多级排序下默认强行 `tree.see(children[0])` 复位导致的滚动冲突。
+    - [x] **更新所有冷启动调用站点 (Updated All Initialization Call Sites)**：升级了 `show_concept_top10_window_simple` 和 `show_concept_top10_window` 中三处新创建或重设数据时的 `_fill_concept_top10_content` 调用，显式注入了 `is_init=True` 属性，彻底对齐了冷启动与窗口新建场景下的顶部展现规则。
+    - [x] **无错通过 Python 物理编译验证 (Passed Compilation Verification)**：成功运行 `py_compile` 对主窗体模块进行编译，无任何语法、拼写或缩进问题。
+
 ## 2026-06-25 18:00
 - [x] **实现概念板块窗口 Treeview 多级排序跨会话持久化与跨窗口广播同步 (Implemented Persistent Concept Sort & Cross-Window Sync)**：
     - [x] **实现共用排序状态加载与冷启动恢复**：在 `instock_MonitorTK.py` 中实现了 `_apply_saved_concept_sort_state` 辅助方法。在 `show_concept_top10_window` 和 `show_concept_top10_window_simple` 概念子窗口创建并初始化 Treeview 时，均通过该方法从 `window_config.json` 文件的 `concept_top10_sort` 配置节点下安全反序列化加载共用的多级排序属性（L1-L3 排序字段、方向及点击计数器等），确保了所有概念板块子窗口在启动时都能一致自愈式应用相同的多级排序，避免了原先硬编码 `"percent"` 默认值的限制。
