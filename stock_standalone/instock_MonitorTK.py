@@ -8417,7 +8417,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f"[send_df] display track (resample={cur_resample}) is empty or missing, waiting...")
                     if count < 3:
                         count +=1
-                        time.sleep(2)
+                        time.sleep(5)
                         continue
                 sent = False  # ⭐ 本轮是否成功发送
                 sent_to_ats = False
@@ -16343,57 +16343,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _get_current_col_asc(self, col):
         """安全获取指定列的当前排序方向(布尔值)，用于点击表头实时求值"""
-        if col == getattr(self, 'sort_level1_col', None):
-            return bool(getattr(self, 'sort_level1_asc', True))
-        elif col == getattr(self, 'sort_level2_col', None):
-            return bool(getattr(self, 'sort_level2_asc', True))
-        elif col == getattr(self, 'sort_level3_col', None):
-            return bool(getattr(self, 'sort_level3_asc', True))
-        return bool(getattr(self, 'sortby_col_ascend', False))
+        return self._get_mixin_current_col_asc(self.tree, col)
 
     def update_tree_headers(self):
         """重新计算表头标签并渲染（带红黄绿多级排序标识及箭头）"""
-        bound_cols = set()
-        if getattr(self, 'sort_level1_col', None):
-            bound_cols.add(self.sort_level1_col)
-        if getattr(self, 'sort_level2_col', None):
-            bound_cols.add(self.sort_level2_col)
-        if getattr(self, 'sort_level3_col', None):
-            bound_cols.add(self.sort_level3_col)
-
-        for col in self.current_cols:
-            text = col
-            is_multi = False
-            col_asc = True
-            
-            if getattr(self, 'sort_level1_col', None) == col:
-                text = f"🔴[主] {col}"
-                col_asc = bool(getattr(self, 'sort_level1_asc', True))
-                is_multi = True
-            elif getattr(self, 'sort_level2_col', None) == col:
-                text = f"🟡[从] {col}"
-                col_asc = bool(getattr(self, 'sort_level2_asc', True))
-                is_multi = True
-            elif getattr(self, 'sort_level3_col', None) == col:
-                text = f"🟢[次] {col}"
-                col_asc = bool(getattr(self, 'sort_level3_asc', True))
-                is_multi = True
-            elif getattr(self, 'sortby_col', None) == col:
-                col_asc = bool(getattr(self, 'sortby_col_ascend', False))
-                # 提示用户这一列是作为临时从/次排序生效
-                if getattr(self, 'sort_level1_col', None) and col not in bound_cols:
-                    if getattr(self, 'sort_level2_col', None) is None:
-                        text = f"🟡[从] {col}"
-                    elif getattr(self, 'sort_level3_col', None) is None:
-                        text = f"🟢[次] {col}"
-            
-            # 如果是当前排序列，则在最前面加上升降序箭头
-            if is_multi or getattr(self, 'sortby_col', None) == col:
-                arrow = "↑ " if col_asc else "↓ "
-                text = arrow + text
-                
-            # 重新绑定列头的点击命令
-            self.tree.heading(col, text=text, command=lambda _col=col: self.sort_by_column(_col, self._get_current_col_asc(_col)))
+        self.update_mixin_tree_headers(self.tree)
 
     def trigger_multi_level_sort(self):
         """手动触发多级排序"""
@@ -16403,91 +16357,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def set_multi_sort_level(self, col_name, level):
         """将某列设置为多级排序的对应级别"""
-        # 清除此列原本在其他级别的配置，保证各级别列唯一
-        if self.sort_level1_col == col_name:
-            self.sort_level1_col = None
-        if self.sort_level2_col == col_name:
-            self.sort_level2_col = None
-        if self.sort_level3_col == col_name:
-            self.sort_level3_col = None
-
-        if level == 1:
-            self.sort_level1_col = col_name
-            self.sort_level1_asc = True
-            self.multi_sort_click_count = 1
-        elif level == 2:
-            self.sort_level2_col = col_name
-            self.sort_level2_asc = True
-        elif level == 3:
-            self.sort_level3_col = col_name
-            self.sort_level3_asc = True
-
-        self.update_tree_headers()
-        self.trigger_multi_level_sort()
-        self.save_ui_states()
+        self.set_mixin_multi_sort_level(self.tree, col_name, level)
 
     def clear_multi_sort_level(self, col_name):
         """清除此列的多级排序设置"""
-        if self.sort_level1_col == col_name:
-            self.sort_level1_col = None
-            self.multi_sort_click_count = 0
-        if self.sort_level2_col == col_name:
-            self.sort_level2_col = None
-        if self.sort_level3_col == col_name:
-            self.sort_level3_col = None
-
-        self.update_tree_headers()
-        self.trigger_multi_level_sort()
-        self.save_ui_states()
+        self.clear_mixin_multi_sort_level(self.tree, col_name)
 
     def clear_all_multi_sort(self):
         """清空所有的多级排序配置"""
-        self.sort_level1_col = None
-        self.sort_level2_col = None
-        self.sort_level3_col = None
-        self.multi_sort_click_count = 0
-        self.update_tree_headers()
-        
-        # 恢复成普通的单列排序（如果有）
-        if self.sortby_col:
-            # 重新触发一次单列排序
-            self.sort_by_column(self.sortby_col, not self.sortby_col_ascend)
-        self.save_ui_states()
+        self.clear_all_mixin_multi_sort(self.tree)
 
     def sort_by_column(self, col, reverse):
-        if col not in self.current_df.columns:
-            return
-        self.select_code = None
-
-        # 拦截：如果点击的列是已经设置的多级排序列中的一列，则反转其本身排序方向
-        is_multi_clicked = False
-        if col == getattr(self, 'sort_level1_col', None):
-            self.sort_level1_asc = not self.sort_level1_asc
-            is_multi_clicked = True
-        elif col == getattr(self, 'sort_level2_col', None):
-            self.sort_level2_asc = not self.sort_level2_asc
-            is_multi_clicked = True
-        elif col == getattr(self, 'sort_level3_col', None):
-            self.sort_level3_asc = not self.sort_level3_asc
-            is_multi_clicked = True
-
-        if is_multi_clicked:
-            self.update_tree_headers()
-            self.trigger_multi_level_sort()
-            self.save_ui_states()
-            return
-
-        # 否则（点击了全新非绑定列）：保留现有多级配置，只记录为临时单排序列，并在排序时动态追加为从/次排序
-        self.multi_sort_click_count = 0
-        self.sortby_col = col
-        self.sortby_col_ascend = not reverse
-        logger.debug(f'self.sortby_col_ascend: {self.sortby_col_ascend}')
-        
-        df_sorted = self._sort_dataframe(self.current_df)
-        self.refresh_tree(df_sorted, force=True, skip_sort=True)
-        self.update_tree_headers()
-        self.tree.yview_moveto(0)
-        self.save_ui_states()
+        self.sort_mixin_by_column(self.tree, col, reverse)
 
 
     def process_query_test(query: str):

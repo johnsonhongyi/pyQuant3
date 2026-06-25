@@ -124,7 +124,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         for cid, label, width in columns:
             # 数值列居中，其余列左对齐
             anchor = "center" if cid in ['code', 'zhuli_rank', 'hot_rank', 'price', 'change_pct', 'net_ratio', 'percent', 'win', 'sum_perc'] else "w"
-            tree.heading(cid, text=label, command=lambda _c=cid: self.sort_tree_column(tree, _c, False))
+            tree.heading(cid, text=label, command=lambda _c=cid: self.sort_tree_column(tree, _c, self._get_mixin_current_col_asc(tree, _c)))
             tree.column(cid, width=width, anchor=anchor)
             
         # 绑定点击事件
@@ -137,29 +137,8 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         return tree
 
     def sort_tree_column(self, tree, col, reverse):
-        """通用的 Treeview 排序逻辑"""
-        l = [(tree.set(k, col), k) for k in tree.get_children('')]
-        
-        def _key_func(t):
-            s = t[0].strip()
-            if not s or s == '-': 
-                # 空值或无效值始终排在最后（通过最小优先级）
-                return (-1, "")
-            try:
-                # 1. 尝试作为数字排序 (处理百分号、正号)
-                val = float(s.replace('%', '').replace('+', ''))
-                return (0, val)
-            except (ValueError, TypeError):
-                # 2. 否则作为字符串/日期排序
-                return (1, s.lower())
-
-        l.sort(key=_key_func, reverse=reverse)
-
-        for index, (val, k) in enumerate(l):
-            tree.move(k, '', index)
-
-        # 反转排序方向
-        tree.heading(col, command=lambda: self.sort_tree_column(tree, col, not reverse))
+        """通用的 Treeview 排序逻辑，支持多级排序"""
+        self.sort_mixin_by_column(tree, col, reverse)
 
     def _on_tree_select(self, event, tree):
         """处理切换选中项的联动（支持上下键）"""
@@ -189,6 +168,10 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
 
     def _on_tree_click(self, event, tree, button_type):
         """处理树视图点击联动"""
+        if button_type == "right":
+            if self.show_header_context_menu(tree, event):
+                return
+                
         item = tree.identify_row(event.y)
         if not item: return
         
