@@ -141,6 +141,13 @@ class MinuteKlineCache:
         self._consolidation_flags: dict[str, dict[str, Any]] = {} # 记录个股跌幅与缩量状态
         self._v_reversal_pool: set[str] = set() # 潜伏监控池 (横盘缩量达标)
         
+        # [NEW] 缓存与异步拉取队列，用于降低高频磁盘 I/O 和线程爆炸
+        self._daily_indicators_cache = {} # {(code, date_str): metrics_dict}
+        self._pending_sup_codes = set()
+        self._sup_fetching_codes = set()
+        self._sup_failed_codes = {} # code -> last_fail_ts
+        self._sup_worker_thread = None
+        
         self._lock = threading.RLock() # 真正的锁
         
     def __len__(self) -> int:
@@ -923,34 +930,101 @@ class MinuteKlineCache:
                     logger.debug(f"Ignore stale data for {code}: tick_t={minute_ts}, last_t={last_k.time}")
                 pass
 
+    def _start_sup_worker_thread(self):
+        with self._lock:
+            if self._sup_worker_thread is not None and self._sup_worker_thread.is_alive():
+                return
+            self._sup_worker_thread = threading.Thread(
+                target=self._sup_worker_loop,
+                name="SupFetchWorker",
+                daemon=True
+            )
+            self._sup_worker_thread.start()
+
+    def _sup_worker_loop(self):
+        import time
+        logger.info("🚀 Background Supplemental Fetch Worker started.")
+        while True:
+            try:
+                code_to_fetch = None
+                with self._lock:
+                    now = time.time()
+                    for code in list(self._pending_sup_codes):
+                        if code in self._sup_fetching_codes:
+                            continue
+                        if code in self._sup_failed_codes and now - self._sup_failed_codes[code] < 300:
+                            continue
+                        code_to_fetch = code
+                        break
+                    
+                    if code_to_fetch:
+                        self._pending_sup_codes.remove(code_to_fetch)
+                        self._sup_fetching_codes.add(code_to_fetch)
+                
+                if code_to_fetch:
+                    self._supplemental_fetch_impl(code_to_fetch)
+                    with self._lock:
+                        if code_to_fetch in self._sup_fetching_codes:
+                            self._sup_fetching_codes.remove(code_to_fetch)
+                else:
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Error in SupFetchWorker loop: {e}")
+                time.sleep(1)
+
     def _supplemental_fetch(self, code: str):
         """
-        [NEW] 补充抓取：对于 tick 数不足的个股，从 Sina 获取完整当日轨迹
+        [NEW] 异步补充抓取接口：将个股加入后台缓冲队列，由单线程串行拉取，防止线程爆炸与 I/O 争抢。
+        """
+        code_str = str(code).strip().zfill(6)
+        with self._lock:
+            now = time.time()
+            if code_str in self._supplemented_codes:
+                return
+            if code_str in self._sup_fetching_codes:
+                return
+            if code_str in self._sup_failed_codes and now - self._sup_failed_codes[code_str] < 300:
+                return
+            
+            self._pending_sup_codes.add(code_str)
+            
+        self._start_sup_worker_thread()
+
+    def _supplemental_fetch_impl(self, code: str):
+        """
+        [NEW] 实际执行补充抓取的私有方法，运行在专属的后台线程中
         """
         try:
             from JSONData import sina_data
             sina = sina_data.Sina(readonly=True)
-            # 💡 [USER HINT] 使用 enrich_data=True 获取当日完整轨迹
             tick_df = sina.get_real_time_tick(code, enrich_data=True)
             
             if tick_df is not None and not tick_df.empty:
                 logger.info(f"💡 Supplemental fetch for {code}: retrieved {len(tick_df)} ticks from Sina trajectory.")
                 
-                # Preprocess tick_df to match from_dataframe expectations
+                # Preprocess tick_df
                 tick_df = tick_df.reset_index()
                 if 'ticktime' in tick_df.columns:
                     tick_df = tick_df.rename(columns={'ticktime': 'time'})
                 if 'cum_vol_start' not in tick_df.columns:
                     tick_df['cum_vol_start'] = tick_df['volume'] if 'volume' in tick_df.columns else 0.0
                 
-                # 将轨迹数据转换为 K 线并合并 (⚡ Essential: merge=True)
+                # 将轨迹数据转换为 K 线并合并
                 self.from_dataframe(tick_df, merge=True)
-                self._supplemented_codes.add(code)
+                with self._lock:
+                    self._supplemented_codes.add(code)
+                    if code in self._sup_failed_codes:
+                        del self._sup_failed_codes[code]
                 
-                # [NEW] 轨迹数据拉取完成后，立刻对该股单独触发一次状态机评估，防止等待 5 分钟周期
+                # 轨迹数据拉取完成后，立刻对该股单独触发一次状态机评估
                 self.update_wave_structure_state(code=code)
-                
+            else:
+                with self._lock:
+                    self._sup_failed_codes[code] = time.time()
+                logger.warning(f"⚠️ Supplemental fetch for {code} returned empty data.")
         except Exception as e:
+            with self._lock:
+                self._sup_failed_codes[code] = time.time()
             logger.error(f"❌ Supplemental fetch failed for {code}: {e}")
 
     def set_df_all_cache(self, df: pd.DataFrame) -> None:
@@ -977,6 +1051,12 @@ class MinuteKlineCache:
         [DRY Refactor] 统一指标计算接口：计算多头趋势、支撑及均线结构。
         优先使用内存中的 df_all_cache，避免主线程磁盘 I/O。
         """
+        today_str = cct.get_today()
+        cache_key = (code, today_str)
+        with self._lock:
+            if hasattr(self, '_daily_indicators_cache') and cache_key in self._daily_indicators_cache:
+                return self._daily_indicators_cache[cache_key]
+
         filled_from_cache = False
         res = {}
         
@@ -1109,6 +1189,11 @@ class MinuteKlineCache:
                     logger.error(f"Error calculating indicators from H5 disk for {code}: {e}")
                     return None
                     
+        if res:
+            with self._lock:
+                if not hasattr(self, '_daily_indicators_cache'):
+                    self._daily_indicators_cache = {}
+                self._daily_indicators_cache[cache_key] = res
         return res if res else None
 
     def update_wave_structure_state(self, code: Optional[str] = None, df: Optional[pd.DataFrame] = None) -> None:

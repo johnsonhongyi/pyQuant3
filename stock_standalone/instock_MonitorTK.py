@@ -635,6 +635,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.sortby_col = None
         self.sortby_col_ascend = None
+        self.sort_level1_col = None
+        self.sort_level1_asc = True
+        self.sort_level2_col = None
+        self.sort_level2_asc = True
+        self.sort_level3_col = None
+        self.sort_level3_asc = True
+        self.multi_sort_click_count = 0
         self.select_code = None
         self.vis_select_code = None
         self._user_interacted = False
@@ -6132,26 +6139,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 5. 排序 (轻量)
             cur_res = self.global_values.getkey("resample") or 'd'
             if df is not None and not df.empty:
-                # 注入 is_fav 标记
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-                    df = df.copy()
-                    if 'code' not in df.columns:
-                        df['code'] = df.index.astype(str)
-                    df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
-                except Exception as e:
-                    logger.warning(f"Failed to check favorites in pump: {e}")
-                    df['is_fav'] = 0
-
-                sort_col = getattr(self, 'sortby_col', None)
-                if sort_col and sort_col in df.columns:
-                    df = df.sort_values(by=['is_fav', sort_col], ascending=[False, getattr(self, 'sortby_col_ascend', False)])
-                else:
-                    df = df.sort_values(by='is_fav', ascending=False)
-                
-                # 移除临时排序列 is_fav 以免被其他地方误用
-                df.drop(columns=['is_fav'], inplace=True)
+                df = self._sort_dataframe(df)
 
                 if 'resample' not in df.columns:
                     df['resample'] = cur_res
@@ -7566,6 +7554,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # Load persisted states
         self.load_ui_states()
+        # 默认值保护：如果当前既没有多级排序，也没有单列排序，那么设定一个默认排序列（如 percent 降序），使冷启动有箭头指示
+        if not getattr(self, 'sort_level1_col', None) and not getattr(self, 'sortby_col', None):
+            self.sortby_col = 'percent'
+            self.sortby_col_ascend = False
+        self.update_tree_headers()
         
         # 首次应用右侧控制按钮可见性
         self.apply_right_controls_visibility()
@@ -8119,6 +8112,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.sortby_col_ascend = bool(saved_sort_asc)
                 logger.info(f"Restored sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
 
+            # [NEW] 恢复多级排序设置
+            self.sort_level1_col = ui_state.get('sort_level1_col', None)
+            self.sort_level1_asc = bool(ui_state.get('sort_level1_asc', True))
+            self.sort_level2_col = ui_state.get('sort_level2_col', None)
+            self.sort_level2_asc = bool(ui_state.get('sort_level2_asc', True))
+            self.sort_level3_col = ui_state.get('sort_level3_col', None)
+            self.sort_level3_asc = bool(ui_state.get('sort_level3_asc', True))
+            self.multi_sort_click_count = int(ui_state.get('multi_sort_click_count', 0))
+            logger.info(f"Restored multi-sort states: L1={self.sort_level1_col}({self.sort_level1_asc}), L2={self.sort_level2_col}({self.sort_level2_asc}), L3={self.sort_level3_col}({self.sort_level3_asc})")
+
             # Restore top bar visibility
             saved_visibility = ui_state.get('top_bar_visibility', {})
             if isinstance(saved_visibility, dict):
@@ -8170,6 +8173,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             config['ui_persistence']['sortby_col'] = self.sortby_col
             config['ui_persistence']['sortby_col_ascend'] = self.sortby_col_ascend
             logger.info(f"Saving sort state: col={self.sortby_col}, ascending={self.sortby_col_ascend}")
+
+            # [NEW] 保存多级排序状态
+            config['ui_persistence']['sort_level1_col'] = self.sort_level1_col
+            config['ui_persistence']['sort_level1_asc'] = self.sort_level1_asc
+            config['ui_persistence']['sort_level2_col'] = self.sort_level2_col
+            config['ui_persistence']['sort_level2_asc'] = self.sort_level2_asc
+            config['ui_persistence']['sort_level3_col'] = self.sort_level3_col
+            config['ui_persistence']['sort_level3_asc'] = self.sort_level3_asc
+            config['ui_persistence']['multi_sort_click_count'] = self.multi_sort_click_count
+            logger.info(f"Saving multi-sort states: L1={self.sort_level1_col}, L2={self.sort_level2_col}, L3={self.sort_level3_col}")
 
             # Save top bar visibility
             config['ui_persistence']['top_bar_visibility'] = getattr(self, 'top_bar_visibility', {})
@@ -9394,7 +9407,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #         menu.post(event.x_root, event.y_root)
 
     def on_tree_right_click(self, event):
-        """右键点击 TreeView 行"""
+        """右键点击 TreeView 行或列头"""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            col_id = self.tree.identify_column(event.x)
+            if not col_id:
+                return
+            col_name = self.tree.column(col_id, option="id")
+            
+            # 表头右键菜单
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label=f"🔴 设为 【主排序】 ({col_name})", command=lambda: self.set_multi_sort_level(col_name, 1))
+            menu.add_command(label=f"🟡 设为 【从排序】 ({col_name})", command=lambda: self.set_multi_sort_level(col_name, 2))
+            menu.add_command(label=f"🟢 设为 【次排序】 ({col_name})", command=lambda: self.set_multi_sort_level(col_name, 3))
+            menu.add_separator()
+            menu.add_command(label=f"❌ 取消此列的排序设置", command=lambda: self.clear_multi_sort_level(col_name))
+            menu.add_command(label=f"🚫 清空所有多级排序", command=lambda: self.clear_all_multi_sort())
+            
+            menu.post(event.x_root, event.y_root)
+            return
+
         item_id = self.tree.identify_row(event.y)
 
         if not item_id:
@@ -15890,43 +15922,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # [NEW] 针对 UI 端的搜索、过滤等操作产生的未排序 df 进行补齐排序
         if df is not None and not df.empty and not skip_sort:
             try:
-                from global_favorites import GlobalFavoriteManager
-                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-                if 'code' not in df.columns:
-                    df['code'] = df.index.astype(str)
-                df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
-                
-                sort_col = getattr(self, 'sortby_col', None)
-                if sort_col and sort_col in df.columns:
-                    asc = getattr(self, 'sortby_col_ascend', False)
-                    if sort_col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-                        fm = self.feature_marker
-                        cols = df.columns.tolist()
-                        feat_idx = {c: i+1 for i, c in enumerate(cols)}
-                        scores = []
-                        for row in df.itertuples(name=None):
-                            icon = fm.get_icon_fast(row, feat_idx)
-                            prio = fm.get_priority_score(icon)
-                            scores.append(prio)
-                        df['prio_score'] = scores
-                        df = df.sort_values(by=['is_fav', 'prio_score'], ascending=[False, asc])
-                        df.drop(columns=['prio_score'], inplace=True)
-                    else:
-                        is_num = pd.api.types.is_numeric_dtype(df[sort_col])
-                        if is_num:
-                            df = df.sort_values(by=['is_fav', sort_col], ascending=[False, asc])
-                        else:
-                            try:
-                                df['_sort_num_col'] = pd.to_numeric(df[sort_col], errors='coerce').fillna(0)
-                                df = df.sort_values(by=['is_fav', '_sort_num_col'], ascending=[False, asc])
-                                df.drop(columns=['_sort_num_col'], inplace=True)
-                            except:
-                                df = df.sort_values(by=['is_fav', sort_col], key=lambda s: s.astype(str) if s.name == sort_col else s, ascending=[False, asc])
-                else:
-                    df = df.sort_values(by='is_fav', ascending=False)
-                
-                if 'is_fav' in df.columns:
-                    df.drop(columns=['is_fav'], inplace=True)
+                df = self._sort_dataframe(df)
             except Exception as e:
                 logger.warning(f"[UI Sorting] 界面重排序失败: {e}")
 
@@ -16188,67 +16184,310 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.tree.column(col, width=int(width))
         logger.debug(f'adjust_column_widths optimized done (rows:{len(df_sample)}) :{len(cols)}')
     # ----------------- 排序 ----------------- #
+    # ----------------- 多级排序相关辅助函数 ----------------- #
+    def _sort_dataframe(self, df):
+        """对 DataFrame 应用当前的排序规则 (支持多级 and 单级排序)"""
+        # 收集已绑定的多级排序级别，强制确保 asc_val 为 bool 类型，防御 None 崩溃
+        active_levels = []
+        bound_cols = set()
+        
+        if getattr(self, 'sort_level1_col', None):
+            active_levels.append((self.sort_level1_col, bool(getattr(self, 'sort_level1_asc', True))))
+            bound_cols.add(self.sort_level1_col)
+        if getattr(self, 'sort_level2_col', None):
+            active_levels.append((self.sort_level2_col, bool(getattr(self, 'sort_level2_asc', True))))
+            bound_cols.add(self.sort_level2_col)
+        if getattr(self, 'sort_level3_col', None):
+            active_levels.append((self.sort_level3_col, bool(getattr(self, 'sort_level3_asc', True))))
+            bound_cols.add(self.sort_level3_col)
+
+        # 动态追加：如果有主排序，且存在临时排序列（不在绑定列中），则它作为从排序（L2）或次排序（L3）动态追加参与计算
+        if getattr(self, 'sort_level1_col', None):
+            temp_col = getattr(self, 'sortby_col', None)
+            if temp_col and temp_col not in bound_cols:
+                if len(active_levels) < 3:
+                    active_levels.append((temp_col, bool(getattr(self, 'sortby_col_ascend', False))))
+
+        # 注入 is_fav 标记
+        if 'is_fav' not in df.columns:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                df = df.copy()
+                if 'code' not in df.columns:
+                    df['code'] = df.index.astype(str)
+                df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
+            except Exception as e:
+                df['is_fav'] = 0
+
+        if active_levels:
+            # 准备多级排序
+            by_cols = ['is_fav']
+            ascending_list = [False]
+            
+            for col_name, asc_val in active_levels:
+                if col_name not in df.columns:
+                    continue
+                if col_name == 'MainU':
+                    from mainu_sort import compute_mainu_sort_column
+                    sort_keys = compute_mainu_sort_column(df['MainU'])
+                    temp_col = '_temp_mainu_sort_key'
+                    df[temp_col] = sort_keys
+                    by_cols.append(temp_col)
+                    ascending_list.append(asc_val)
+                elif col_name == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
+                    fm = self.feature_marker
+                    def _get_row_priority(r):
+                        row_dict = r.to_dict()
+                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
+                        try:
+                            icon = fm.get_icon_for_row(row_dict)
+                            prio = fm.get_priority_score(icon)
+                        except Exception:
+                            prio = 0
+                        return (prio, row_dict.get('name', ''))
+                    
+                    sort_keys = df.apply(_get_row_priority, axis=1)
+                    temp_col = '_temp_name_sort_key'
+                    df[temp_col] = sort_keys
+                    by_cols.append(temp_col)
+                    ascending_list.append(asc_val)
+                elif col_name == 'code':
+                    temp_col = '_temp_code_sort_key'
+                    df[temp_col] = df[col_name].astype(str)
+                    by_cols.append(temp_col)
+                    ascending_list.append(asc_val)
+                elif pd.api.types.is_numeric_dtype(df[col_name]):
+                    by_cols.append(col_name)
+                    ascending_list.append(asc_val)
+                else:
+                    try:
+                        temp_col = f'_temp_num_{col_name}'
+                        df[temp_col] = pd.to_numeric(df[col_name], errors='coerce').fillna(0)
+                        by_cols.append(temp_col)
+                        ascending_list.append(asc_val)
+                    except:
+                        temp_col = f'_temp_str_{col_name}'
+                        df[temp_col] = df[col_name].astype(str)
+                        by_cols.append(temp_col)
+                        ascending_list.append(asc_val)
+            
+            df_sorted = df.sort_values(by=by_cols, ascending=ascending_list)
+            temp_cols = [c for c in df_sorted.columns if c.startswith('_temp_') or c == 'is_fav']
+            df_sorted.drop(columns=temp_cols, errors='ignore', inplace=True)
+            return df_sorted
+        else:
+            # 单级排序 fallback
+            sort_col = getattr(self, 'sortby_col', None)
+            if sort_col and sort_col in df.columns:
+                # 强制转换为布尔值，防御 None 崩溃
+                sort_asc = bool(getattr(self, 'sortby_col_ascend', False))
+                if sort_col == 'MainU':
+                    from mainu_sort import compute_mainu_sort_column
+                    sort_keys = compute_mainu_sort_column(df['MainU'])
+                    df['_mainu_sort_key'] = sort_keys
+                    df_sorted = df.sort_values(by=['is_fav', '_mainu_sort_key'], ascending=[False, sort_asc])
+                    df_sorted.drop(columns=['_mainu_sort_key'], errors='ignore', inplace=True)
+                    if 'is_fav' in df_sorted.columns:
+                        df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                    return df_sorted
+                elif sort_col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
+                    fm = self.feature_marker
+                    def _get_row_priority(r):
+                        row_dict = r.to_dict()
+                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
+                        try:
+                            icon = fm.get_icon_for_row(row_dict)
+                            prio = fm.get_priority_score(icon)
+                        except Exception:
+                            prio = 0
+                        return (prio, row_dict.get('name', ''))
+                    
+                    sort_keys = df.apply(_get_row_priority, axis=1)
+                    df['_prio_sort_key'] = sort_keys
+                    df_sorted = df.sort_values(by=['is_fav', '_prio_sort_key'], ascending=[False, sort_asc])
+                    df_sorted.drop(columns=['_prio_sort_key'], errors='ignore', inplace=True)
+                    if 'is_fav' in df_sorted.columns:
+                        df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                    return df_sorted
+                elif sort_col == 'code':
+                    df_sorted = df.sort_values(
+                        by=['is_fav', sort_col], key=lambda s: s.astype(str) if s.name == sort_col else s, ascending=[False, sort_asc])
+                    if 'is_fav' in df_sorted.columns:
+                        df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                    return df_sorted
+                elif pd.api.types.is_numeric_dtype(df[sort_col]):
+                    df_sorted = df.sort_values(by=['is_fav', sort_col], ascending=[False, sort_asc])
+                    if 'is_fav' in df_sorted.columns:
+                        df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                    return df_sorted
+                else:
+                    try:
+                        df['_num_col'] = pd.to_numeric(df[sort_col], errors='coerce').fillna(0)
+                        df_sorted = df.sort_values(by=['is_fav', '_num_col'], ascending=[False, sort_asc])
+                        df_sorted.drop(columns=['_num_col'], errors='ignore', inplace=True)
+                        if 'is_fav' in df_sorted.columns:
+                            df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                        return df_sorted
+                    except:
+                        df_sorted = df.sort_values(by=['is_fav', sort_col], key=lambda s: s.astype(str) if s.name == sort_col else s, ascending=[False, sort_asc])
+                        if 'is_fav' in df_sorted.columns:
+                            df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                        return df_sorted
+            else:
+                df_sorted = df.sort_values(by='is_fav', ascending=False)
+                if 'is_fav' in df_sorted.columns:
+                    df_sorted = df_sorted.copy()
+                    df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
+                return df_sorted
+
+    def _get_current_col_asc(self, col):
+        """安全获取指定列的当前排序方向(布尔值)，用于点击表头实时求值"""
+        if col == getattr(self, 'sort_level1_col', None):
+            return bool(getattr(self, 'sort_level1_asc', True))
+        elif col == getattr(self, 'sort_level2_col', None):
+            return bool(getattr(self, 'sort_level2_asc', True))
+        elif col == getattr(self, 'sort_level3_col', None):
+            return bool(getattr(self, 'sort_level3_asc', True))
+        return bool(getattr(self, 'sortby_col_ascend', False))
+
+    def update_tree_headers(self):
+        """重新计算表头标签并渲染（带红黄绿多级排序标识及箭头）"""
+        bound_cols = set()
+        if getattr(self, 'sort_level1_col', None):
+            bound_cols.add(self.sort_level1_col)
+        if getattr(self, 'sort_level2_col', None):
+            bound_cols.add(self.sort_level2_col)
+        if getattr(self, 'sort_level3_col', None):
+            bound_cols.add(self.sort_level3_col)
+
+        for col in self.current_cols:
+            text = col
+            is_multi = False
+            col_asc = True
+            
+            if getattr(self, 'sort_level1_col', None) == col:
+                text = f"🔴[主] {col}"
+                col_asc = bool(getattr(self, 'sort_level1_asc', True))
+                is_multi = True
+            elif getattr(self, 'sort_level2_col', None) == col:
+                text = f"🟡[从] {col}"
+                col_asc = bool(getattr(self, 'sort_level2_asc', True))
+                is_multi = True
+            elif getattr(self, 'sort_level3_col', None) == col:
+                text = f"🟢[次] {col}"
+                col_asc = bool(getattr(self, 'sort_level3_asc', True))
+                is_multi = True
+            elif getattr(self, 'sortby_col', None) == col:
+                col_asc = bool(getattr(self, 'sortby_col_ascend', False))
+                # 提示用户这一列是作为临时从/次排序生效
+                if getattr(self, 'sort_level1_col', None) and col not in bound_cols:
+                    if getattr(self, 'sort_level2_col', None) is None:
+                        text = f"🟡[从] {col}"
+                    elif getattr(self, 'sort_level3_col', None) is None:
+                        text = f"🟢[次] {col}"
+            
+            # 如果是当前排序列，则在最前面加上升降序箭头
+            if is_multi or getattr(self, 'sortby_col', None) == col:
+                arrow = "↑ " if col_asc else "↓ "
+                text = arrow + text
+                
+            # 重新绑定列头的点击命令
+            self.tree.heading(col, text=text, command=lambda _col=col: self.sort_by_column(_col, self._get_current_col_asc(_col)))
+
+    def trigger_multi_level_sort(self):
+        """手动触发多级排序"""
+        df_sorted = self._sort_dataframe(self.current_df)
+        self.refresh_tree(df_sorted, force=True, skip_sort=True)
+        self.tree.yview_moveto(0)
+
+    def set_multi_sort_level(self, col_name, level):
+        """将某列设置为多级排序的对应级别"""
+        # 清除此列原本在其他级别的配置，保证各级别列唯一
+        if self.sort_level1_col == col_name:
+            self.sort_level1_col = None
+        if self.sort_level2_col == col_name:
+            self.sort_level2_col = None
+        if self.sort_level3_col == col_name:
+            self.sort_level3_col = None
+
+        if level == 1:
+            self.sort_level1_col = col_name
+            self.sort_level1_asc = True
+            self.multi_sort_click_count = 1
+        elif level == 2:
+            self.sort_level2_col = col_name
+            self.sort_level2_asc = True
+        elif level == 3:
+            self.sort_level3_col = col_name
+            self.sort_level3_asc = True
+
+        self.update_tree_headers()
+        self.trigger_multi_level_sort()
+        self.save_ui_states()
+
+    def clear_multi_sort_level(self, col_name):
+        """清除此列的多级排序设置"""
+        if self.sort_level1_col == col_name:
+            self.sort_level1_col = None
+            self.multi_sort_click_count = 0
+        if self.sort_level2_col == col_name:
+            self.sort_level2_col = None
+        if self.sort_level3_col == col_name:
+            self.sort_level3_col = None
+
+        self.update_tree_headers()
+        self.trigger_multi_level_sort()
+        self.save_ui_states()
+
+    def clear_all_multi_sort(self):
+        """清空所有的多级排序配置"""
+        self.sort_level1_col = None
+        self.sort_level2_col = None
+        self.sort_level3_col = None
+        self.multi_sort_click_count = 0
+        self.update_tree_headers()
+        
+        # 恢复成普通的单列排序（如果有）
+        if self.sortby_col:
+            # 重新触发一次单列排序
+            self.sort_by_column(self.sortby_col, not self.sortby_col_ascend)
+        self.save_ui_states()
+
     def sort_by_column(self, col, reverse):
         if col not in self.current_df.columns:
             return
         self.select_code = None
-        self.sortby_col =  col
+
+        # 拦截：如果点击的列是已经设置的多级排序列中的一列，则反转其本身排序方向
+        is_multi_clicked = False
+        if col == getattr(self, 'sort_level1_col', None):
+            self.sort_level1_asc = not self.sort_level1_asc
+            is_multi_clicked = True
+        elif col == getattr(self, 'sort_level2_col', None):
+            self.sort_level2_asc = not self.sort_level2_asc
+            is_multi_clicked = True
+        elif col == getattr(self, 'sort_level3_col', None):
+            self.sort_level3_asc = not self.sort_level3_asc
+            is_multi_clicked = True
+
+        if is_multi_clicked:
+            self.update_tree_headers()
+            self.trigger_multi_level_sort()
+            self.save_ui_states()
+            return
+
+        # 否则（点击了全新非绑定列）：保留现有多级配置，只记录为临时单排序列，并在排序时动态追加为从/次排序
+        self.multi_sort_click_count = 0
+        self.sortby_col = col
         self.sortby_col_ascend = not reverse
         logger.debug(f'self.sortby_col_ascend: {self.sortby_col_ascend}')
         
-        # 1. 注入 is_fav 标记
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-            df = self.current_df.copy()
-            if 'code' not in df.columns:
-                df['code'] = df.index.astype(str)
-            df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
-        except Exception as e:
-            logger.warning(f"Failed to check favorites in manual sort: {e}")
-            df = self.current_df.copy()
-            df['is_fav'] = 0
-
-        # 2. 排序
-        if col in ['code']:
-            df_sorted = df.reset_index(drop=True).sort_values(
-                by=['is_fav', col], key=lambda s: s.astype(str) if s.name == col else s, ascending=[False, not reverse])
-
-        elif col == 'MainU':
-            from mainu_sort import compute_mainu_sort_column
-            sort_keys = compute_mainu_sort_column(df['MainU'])
-            df['_mainu_sort_key'] = sort_keys
-            df_sorted = df.sort_values(by=['is_fav', '_mainu_sort_key'], ascending=[False, not reverse])
-            df_sorted.drop(columns=['_mainu_sort_key'], inplace=True)
-
-        elif pd.api.types.is_numeric_dtype(df[col]):
-            df_sorted = df.sort_values(by=['is_fav', col], ascending=[False, not reverse])
-        elif col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-            fm = self.feature_marker
-            def _get_row_priority(r):
-                row_dict = r.to_dict()
-                row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
-                icon = fm.get_icon_for_row(row_dict)
-                return (fm.get_priority_score(icon), row_dict.get('name', ''))
-            
-            sort_keys = df.apply(_get_row_priority, axis=1)
-            df['_prio_sort_key'] = sort_keys
-            df_sorted = df.sort_values(by=['is_fav', '_prio_sort_key'], ascending=[False, not reverse])
-            df_sorted.drop(columns=['_prio_sort_key'], inplace=True)
-        else:
-            try:
-                df['_num_col'] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                df_sorted = df.sort_values(by=['is_fav', '_num_col'], ascending=[False, not reverse])
-                df_sorted.drop(columns=['_num_col'], inplace=True)
-            except:
-                df_sorted = df.sort_values(by=['is_fav', col], key=lambda s: s.astype(str) if s.name == col else s, ascending=[False, not reverse])
-
-        if 'is_fav' in df_sorted.columns:
-            df_sorted.drop(columns=['is_fav'], inplace=True)
-
+        df_sorted = self._sort_dataframe(self.current_df)
         self.refresh_tree(df_sorted, force=True, skip_sort=True)
-        self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
+        self.update_tree_headers()
         self.tree.yview_moveto(0)
+        self.save_ui_states()
 
 
     def process_query_test(query: str):
