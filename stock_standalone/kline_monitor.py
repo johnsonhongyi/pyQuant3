@@ -4,6 +4,8 @@ from tkinter import ttk
 import threading
 import time
 import re
+import json
+import os
 import traceback
 import numpy as np
 import pandas as pd
@@ -15,11 +17,12 @@ from JohnsonUtil import commonTips as cct
 from gui_utils import askstring_at_parent_single
 from stock_logic_utils import detect_signals, get_row_tags, ensure_parentheses_balanced
 from history_manager import toast_message
+from tk_gui_modules.treeview_mixin import TreeviewMixin
 
 # 获取或创建日志记录器
 logger = LoggerFactory.getLogger("instock_TK.KLineMonitor")
 
-class KLineMonitor(tk.Toplevel):
+class KLineMonitor(tk.Toplevel, TreeviewMixin):
     def __init__(self, parent: tk.Widget, get_df_func: Callable[[], Optional[pd.DataFrame]], refresh_interval: int = 30, history3: Optional[Callable[[], List[str]]] = None ,logger=logger) -> None :
         super().__init__(parent)
         self.master = parent
@@ -120,8 +123,43 @@ class KLineMonitor(tk.Toplevel):
             ("red", "连阳", 30),
             ("emotion", "情绪", 60)
         ]:
-            self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_columnKLine(c, onclick=True))
+            self.tree.heading(col, text=text)
             self.tree.column(col, width=w, anchor="center")
+
+        # 初始化多级排序状态属性
+        self._init_tree_sort_state(self.tree)
+        
+        # 尝试从配置文件中读取并加载历史排序状态
+        loaded = False
+        try:
+            try:
+                from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            except ImportError:
+                WINDOW_CONFIG_FILE = "window_config.json"
+                
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                persistence = config.get('kline_monitor_persistence', {})
+                if persistence:
+                    self.tree.sortby_col = persistence.get('sortby_col', 'percent')
+                    self.tree.sortby_col_ascend = persistence.get('sortby_col_ascend', False)
+                    self.tree.sort_level1_col = persistence.get('sort_level1_col', None)
+                    self.tree.sort_level1_asc = persistence.get('sort_level1_asc', True)
+                    self.tree.sort_level2_col = persistence.get('sort_level2_col', None)
+                    self.tree.sort_level2_asc = persistence.get('sort_level2_asc', True)
+                    self.tree.sort_level3_col = persistence.get('sort_level3_col', None)
+                    self.tree.sort_level3_asc = persistence.get('sort_level3_asc', True)
+                    self.tree.multi_sort_click_count = persistence.get('multi_sort_click_count', 0)
+                    loaded = True
+        except Exception as e:
+            logger.warning(f"[KLineMonitor] 加载排序状态失败: {e}")
+            
+        if not loaded:
+            self.tree.sortby_col = "percent"
+            self.tree.sortby_col_ascend = False
+            
+        self.update_mixin_tree_headers(self.tree)
 
         self.tree.tag_configure("neutral", background="#f0f0f0")
         for sig in self.signal_types:
@@ -182,11 +220,17 @@ class KLineMonitor(tk.Toplevel):
         self.refresh_thread = threading.Thread(target=self.refresh_loop, daemon=True)
         self.refresh_thread.start()
         self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
+        self.bind("<Destroy>", self.on_destroy_persistence)
        
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=860, default_height=560)
         except Exception:
             self.geometry("860x460")
+
+    def get_scaled_value(self) -> float:
+        if hasattr(self.master, "scale_factor"):
+            return self.master.scale_factor
+        return 1.0
 
     def _do_dna_audit(self) -> None:
         """🚀 [SMART-ROUTING] 智能选区路由算法：对齐全局审计逻辑"""
@@ -386,6 +430,9 @@ class KLineMonitor(tk.Toplevel):
 
     def on_tree_kline_monitor_right_click(self, event=None, item_id=None):
         try:
+            if event is not None:
+                if self.show_header_context_menu(self.tree, event):
+                    return
             if item_id is None and event is not None:
                 item_id = self.tree.identify_row(event.y)
             if not item_id:
@@ -689,8 +736,8 @@ class KLineMonitor(tk.Toplevel):
                 tags=tuple(row["tag"]) 
             )
 
-        if getattr(self, "sort_column", None):
-            self.treeview_sort_columnKLine(self.sort_column, self.sort_reverse)
+        # 执行通用多级排序自愈
+        self.perform_tree_multi_level_sort(self.tree)
 
         if selected_code:
             for item in self.tree.get_children():
@@ -800,8 +847,61 @@ class KLineMonitor(tk.Toplevel):
         self.update_table(df)
         return df
 
+    def save_ui_states(self) -> None:
+        """保存 KLineMonitor 的 UI 排序状态"""
+        try:
+            config = {}
+            try:
+                from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            except ImportError:
+                WINDOW_CONFIG_FILE = "window_config.json"
+
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except Exception:
+                    pass
+
+            if 'kline_monitor_persistence' not in config:
+                config['kline_monitor_persistence'] = {}
+
+            tree = getattr(self, 'tree', None)
+            if tree:
+                persistence = config['kline_monitor_persistence']
+                try:
+                    persistence['sortby_col'] = getattr(tree, 'sortby_col', None)
+                    persistence['sortby_col_ascend'] = getattr(tree, 'sortby_col_ascend', False)
+                    persistence['sort_level1_col'] = getattr(tree, 'sort_level1_col', None)
+                    persistence['sort_level1_asc'] = getattr(tree, 'sort_level1_asc', True)
+                    persistence['sort_level2_col'] = getattr(tree, 'sort_level2_col', None)
+                    persistence['sort_level2_asc'] = getattr(tree, 'sort_level2_asc', True)
+                    persistence['sort_level3_col'] = getattr(tree, 'sort_level3_col', None)
+                    persistence['sort_level3_asc'] = getattr(tree, 'sort_level3_asc', True)
+                    persistence['multi_sort_click_count'] = getattr(tree, 'multi_sort_click_count', 0)
+                except Exception as ex:
+                    logger.debug(f"[KLineMonitor] 读取 Tree 排序状态失败 (可能组件已被销毁): {ex}")
+
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            logger.info("KLineMonitor UI states saved.")
+        except Exception as e:
+            logger.error(f"[KLineMonitor] 保存 UI 状态失败: {e}")
+
+    def on_destroy_persistence(self, event=None) -> None:
+        """当 KLineMonitor 被物理销毁时触发的状态持久化保险"""
+        if event and event.widget == self:
+            try:
+                self.save_ui_states()
+            except Exception as e:
+                logger.debug(f"[KLineMonitor] Destroy event save state failed: {e}")
+
     def on_kline_monitor_close(self):
         self.stop()
+        try:
+            self.save_ui_states()
+        except Exception as e:
+            logger.warning(f"[KLineMonitor] 关闭时保存状态失败: {e}")
         try:
             self.master.save_window_position(self, "KLineMonitor")
         except Exception:

@@ -1,3 +1,23 @@
+## 2026-06-25 17:35
+- [x] **修复主视图高频行情刷新时跳过排序导致的多级排序回退 Bug (Fixed Main View Sorting Reversion on Real-time Refresh)**：
+    - [x] **引入排序状态智能拦截 (`has_active_sort`)**：在 `instock_MonitorTK.py` 的主表刷新函数 `refresh_tree` 中，由于高频行情同步或定时刷新时默认带入 `skip_sort=True` 导致已设定的排序乱序。现增加 `has_active_sort` 属性判定，若当前 `self.tree`（或主窗口 `self`）上存在活跃的多级排序（L1-L3）或单列排序，则强制忽略 `skip_sort=True`，继续对数据执行 DataFrame 重排序，从根本上保证了刷新时排序状态的稳定。
+    - [x] **重构 `_sort_dataframe` 以优先从 tree 读取状态 (Unified State Reading source)**：在 `_sort_dataframe` 数据重排序时，重构为优先从 `self.tree`（`tree` 控件实例）上直接求值排序状态字段（`sort_level1_col`、`sortby_col` 等），若无则 fallback 至 App 的私有属性上。这彻底解决了 UI 交互与数据刷新排序时的数据读取偏差，消除了状态异步残留，实现了普通排序与多级排序完全同步。
+    - [x] **无错通过物理编译验证**：运行 `py_compile` 工具，成功通过了对 `instock_MonitorTK.py` 的无错编译验证。
+- [x] **实现 K线监控窗口 (`KLineMonitor`) 多级排序跨会话持久化与销毁事件物理保险 (Implemented Persistent Multi-Sort & Destroy Event Guard for KLineMonitor)**：
+    - [x] **实现 `save_ui_states` 持久化接口与组件销毁容错**：在 `kline_monitor.py` 中为 `KLineMonitor` 类增加了 `save_ui_states` 方法。当用户左键或右键修改排序（如通过 `TreeviewMixin` 设置主/从/次级或临时后缀排序）时，该方法会自动将 `self.tree` 的排序状态（`sortby_col`、`sort_levelX_col` 等）实时写入到统一的 `window_config.json` 的 `kline_monitor_persistence` 配置节点下。特别加入了 `TclError`/`AttributeError` 容错读取，防止在组件开始销毁时读取发生崩溃。
+    - [x] **引入 `<Destroy>` 事件物理保险机制**：在 `__init__` 中为 `KLineMonitor` 绑定了 `<Destroy>` 事件回调 `on_destroy_persistence`。当主 TK 窗口（`StockMonitorApp`）关闭、物理进程退出、或者子窗口本身被 `destroy()` 时，系统自动拦截该销毁动作并触发一次 `save_ui_states`，确保不管何种关闭场景下多级排序偏好都能 100% 被持久化。
+    - [x] **实现冷启动状态恢复**：在 `__init__` 构造中，先通过 `self._init_tree_sort_state(self.tree)` 初始化排序属性，随后尝试解析配置文件，若成功读取则原地还原各个多级排序列及排序方向，并调用 `update_mixin_tree_headers` 渲染带有对应级别标注 and 箭头的表头，使用户能在冷启动时即刻恢复先前的多级或单列排序。
+    - [x] **无错通过物理编译验证**：运行 `py_compile` 物理编译工具，成功通过了对 `kline_monitor.py` 的无错编译验证。
+
+
+## 2026-06-25 17:00
+- [x] **实现跨窗口 Treeview 通用多级排序复用与表头右键菜单集成 (Implemented Reusable Treeview Multi-Sort & Header Context Menu across Sub-Windows)**：
+    - [x] **重构概念 Top10 窗口系列支持通用多级/单列排序**：在 `instock_MonitorTK.py` 中的 `show_concept_top10_window` 与 `show_concept_top10_window_simple` 两个子窗口中，废除了旧有的自定义单列排序，彻底迁移并绑定至 `TreeviewMixin` 提供的多级排序方案。在窗口初始化时将初始排序列配置为 `percent` 降序，并调用 `update_mixin_tree_headers` 自动渲染冷启动排序箭头。
+    - [x] **对接 `_fill_concept_top10_content` 预排序与多级排序自愈**：重构了数据填充过程中的排序状态读取，自适应获取主排序列以切片过滤 Pandas DataFrame（避免了盲目只用 `percent` 切片导致的数据截断缺陷）；在 UI 插入数据完毕后，调用 `perform_tree_multi_level_sort` 原地稳定排序，从而使新灌入的最新行情或定时更新能完美自愈式维持用户的多级排序状态。
+    - [x] **重构 K线监控窗口 (`KLineMonitor`) 接入多级排序**：在 `kline_monitor.py` 中，使 `KLineMonitor` 类继承自 `TreeviewMixin` 并添加 `get_scaled_value` 缩放适配接口。废弃并移除了类中自定义 of `treeview_sort_columnKLine` 排序方法，通过 `update_mixin_tree_headers` 自动配置表头并支持通用多级排序。在刷新数据方法 `update_table` 尾部，调用 `perform_tree_multi_level_sort` 完成多级排序状态自愈。
+    - [x] **集成表头右键多级排序上下文菜单**：在 `instock_MonitorTK.py` 的概念子窗口右键回调 `_on_tree_right_click_newTop10` / `on_right_click`，以及 `kline_monitor.py` 的 `on_tree_kline_monitor_right_click` 中，优先通过 `show_header_context_menu(tree, event)` 拦截处理表头右键点击事件。如果点击发生在表头上，立即弹出多级排序配置菜单，实现了子窗口排序体验的 100% 对齐。
+    - [x] **无错通过物理编译验证**：运行 `py_compile` 对修改后的 `instock_MonitorTK.py` 和 `kline_monitor.py` 成功进行了无错物理编译，证明逻辑重构在语法上高保真。
+
 ## 2026-06-25 16:00
 - [x] **修复多级级联排序点击其他列时重置主排序之 Bug (Fixed Master Sort Resetting when Clicking Other Columns)**：
     - [x] **修复 `sort_mixin_by_column` 中的重置逻辑**：在 `treeview_mixin.py` 中，重构了 `sort_mixin_by_column` 的点击判定流程。当检测到当前存在主排序（`L1`）但点击的是其他全新的排序列时，不再执行一键清除所有多级排序的重置动作，而是保留已绑定的主排序（`sort_level1_col` 及其方向），仅更新并覆盖 `tree.sortby_col` 与 `tree.sortby_col_ascend` 作为临时从/次排序后缀。
