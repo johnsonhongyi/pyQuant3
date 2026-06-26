@@ -191,22 +191,29 @@ class StockCode:
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('60', '30', '00','688','43','83','87','92'))]))
         '''
         df = rl.get_sina_Market_json('all')
+        if df is None or df.empty:
+            log.error("update_stock_codes failed: get_sina_Market_json returned empty/None DataFrame")
+            return self.get_stock_codes(False)
+
         stock_codes = df.index.tolist()
+        # stock_codes = [c for c in stock_codes if len(c) == 6 and c.isdigit() and c.startswith(cct.code_startswith)]
         
         # [DYNAMIC FILTER PROTECTION] 动态安全性校验，防止因个别网络包失败导致的残缺代码库覆盖
-        old_codes = self.get_stock_codes()
-        min_threshold = max(5500, int(len(old_codes) * 0.995)) if old_codes else 5500
+        old_codes = self.get_stock_codes(False)
+        min_threshold = max(5000, int(len(old_codes) * 0.99)) if old_codes else 5000
         
         if len(stock_codes) < min_threshold:
             log.error(f"update_stock_codes codes:{len(stock_codes)} < {min_threshold} get_sina_Market_json获取数据不全,停止更新")
-            return (self.get_stock_codes(True))
+            self.stock_codes = old_codes
+            return old_codes
 
-        # stock_info_bj_name_code_df = stock_info_bj_name_code()
-        # bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
-        # stock_codes.extend(bj_list)
         log.error("update_stock_codes codes:%s" % (len(stock_codes)))
-        with open(self.stock_code_path, 'w') as f:
-            f.write(json.dumps(dict(stock=stock_codes)))
+        try:
+            with open(self.stock_code_path, 'w') as f:
+                f.write(json.dumps(dict(stock=stock_codes)))
+            self.stock_codes = stock_codes
+        except Exception as e:
+            log.error(f"Failed to write stock codes to {self.stock_code_path}: {e}")
         return stock_codes
     # @property
 
@@ -224,12 +231,19 @@ class StockCode:
         # print "days:",cct.creation_date_duration(self.stock_code_path)
         if realtime:
             stock_codes = self.update_stock_codes()
+            self.stock_codes = stock_codes
             log.info("realtime codes:%s" % (len(stock_codes)))
             return stock_codes
         else:
-            with open(self.stock_code_path) as f:
-                self.stock_codes = json.load(f)['stock']
-                return self.stock_codes
+            try:
+                if os.path.exists(self.stock_code_path) and os.path.getsize(self.stock_code_path) > 0:
+                    with open(self.stock_code_path) as f:
+                        self.stock_codes = json.load(f)['stock']
+                        return self.stock_codes
+            except Exception as e:
+                log.error(f"Error reading stock_codes.conf: {e}")
+            self.stock_codes = []
+            return self.stock_codes
 
 
 # -*- encoding: utf-8 -*-

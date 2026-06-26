@@ -1,3 +1,12 @@
+## 2026-06-26 09:00
+- [x] **修复 stock_codes.conf 数据自动更新与内存缓存同步机制 (Fixed stock_codes.conf Auto-Update & Memory Cache Sync)**：
+    - [x] **打通 `get_stock_codes(True)` 内存属性同步**：在 `get_stock_codes`（`realtime=True`）分支与 `update_stock_codes` 的写入成功分支中，补齐了对 `self.stock_codes = stock_codes` 的赋值，彻底根治了高频行情更新后内存中仍使用旧有缓存列表的 Bug。
+    - [x] **缩短更新判定周期至每日一次 (Set Update Frequency to Once-a-Day)**：将 `StockCode.__init__()` 中 `stock_codes.conf` 的更新判断阈值由 `> 5` 天大幅收缩至 `>= 1` 天。使系统能每日自动监测和补充新上市公司代码，确保自选监控池无遗漏。
+    - [x] **重构安全校验与异常保护拦截 (Hardened Update Safety & Exception Guard)**：
+        - 增加对 `get_sina_Market_json` 返回空值或 None 的检测判定，防止接口异常导致更新流程崩溃，异常时自动回退读取本地历史缓存。
+        - 引入对于股票代码是否满足 6 位纯数字且包含在 `cct.code_startswith` 首位白名单内的安全过滤，防范脏数据入库。
+        - 为配置文件读写操作添加 `try-except` 异常拦截层，防范多进程锁竞争时文件读写失败引发主线程 Crash。
+
 ## 2026-06-26 01:50
 - [x] **优化多级排序与人气共振持久化写盘机制，避免高频磁盘 I/O (Optimized Multi-Sort & Popularity Resonance Persistence Write)**：
     - [x] **消除排序点击与设置时的高频写盘**：重构了 `tk_gui_modules/treeview_mixin.py` 中的 `_save_mixin_ui_states` 方法，注释了即时调用 `self.save_ui_states()` 写盘的代码，使多级/普通排序状态变更仅在内存中维护，避免每次点击表头排序时频繁写入 JSON 配置文件。
