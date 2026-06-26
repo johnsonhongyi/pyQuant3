@@ -420,8 +420,7 @@ class PRServiceGUI:
                 if other_tree != tree:
                     self.sort_column(other_tree, col, reverse, auto_restore=True)
             
-            # 立即触发配置持久化保存
-            self.save_config_settings()
+            # [OPTIMIZE] 排序时仅在内存中更新状态，不执行写盘。退出关闭时统一持久化。
             
         # 5. 更新表头的 ▲/▼ 指示器
         self.update_header_arrows(tree, col, reverse)
@@ -611,8 +610,7 @@ class PRServiceGUI:
             # 5. 在主线程中安全地更新所有表（包括去重过滤和整体布局）
             self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
             
-            # 保存用户当前输入的值到配置文件
-            self.root.after(0, self.save_config_settings)
+            # [OPTIMIZE] 后台定时抓取或查询时不执行写盘，避免频繁的磁盘IO。退出关闭时统一持久化。
             
         except Exception as e:
             self.root.after(0, lambda: self.lbl_status.config(text=f"刷新失败: {e}", fg="red"))
@@ -698,7 +696,7 @@ class PRServiceGUI:
             blk_name = self.entry_blk_name.get().strip() or "RQG.blk"
             write_to_tdx_blocks(self.resonance_codes, blk_filename=blk_name)
             self.root.after(0, lambda: self.lbl_status.config(text=f"成功写入 {len(self.resonance_codes)} 只至 {blk_name}", fg="darkgreen"))
-            self.root.after(0, self.save_config_settings)
+            # [OPTIMIZE] 写入板块时不执行写盘，退出关闭时统一持久化。
         except Exception as e:
             self.root.after(0, lambda: self.lbl_status.config(text=f"写入失败: {e}", fg="red"))
         finally:

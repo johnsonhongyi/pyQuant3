@@ -219,11 +219,9 @@ class TreeviewMixin:
         """多级排序发生改变时的保存状态分流处理器"""
         if tree != getattr(self, 'tree', None):
             self._last_active_concept_tree = tree
-        if hasattr(self, 'save_ui_states'):
-            try:
-                self.save_ui_states()
-            except Exception:
-                pass
+        # ⚡ [OPTIMIZE] 全局所有的多级排序都不要点击排序就写盘，全部存在内存内，在退出/关闭窗口或程序时统一写盘。
+        # 这里不再主动调用 self.save_ui_states()以规避高频磁盘I/O。
+        pass
 
     def _get_clean_header_text(self, tree: ttk.Treeview, col: str) -> str:
         """获取不含排序前缀的干净表头文字"""

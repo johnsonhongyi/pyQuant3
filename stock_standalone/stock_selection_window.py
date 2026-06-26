@@ -1999,9 +1999,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             self.update_mixin_tree_headers(t)
 
     def _save_mixin_ui_states(self, tree: ttk.Treeview) -> None:
-        """多级排序发生改变时的保存状态处理器，仅保存和更新发生了改变的当前活跃树"""
+        """多级排序发生改变时的保存状态处理器，仅更新当前活跃树，不触发写盘"""
         self._last_active_concept_tree = tree
-        self.save_ui_states(tree)
 
     def save_ui_states(self, tree=None):
         """保存指定的 tree 或所有 tree 的排序状态到 window_config.json"""
@@ -2875,6 +2874,10 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin, TreeviewMixin):
     def _on_close(self):
         if self._worker: self._worker.stop()
         if hasattr(self, '_check_queue_id'): self.after_cancel(self._check_queue_id)
+        try:
+            self.save_ui_states()
+        except Exception as e:
+            logger.debug(f"[HistoryTrack] Save states failed: {e}")
         self.save_window_position(self, "选股历史追踪")
         self.destroy()
 
@@ -2955,8 +2958,8 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.update_mixin_tree_headers(t)
 
     def _save_mixin_ui_states(self, tree: ttk.Treeview) -> None:
-        """多级排序发生改变时的保存状态处理器"""
-        self.save_ui_states()
+        """多级排序发生改变时的保存状态处理器，在内存中保存状态，不触发写盘"""
+        pass
 
     def save_ui_states(self):
         """历史追踪窗口的排序状态独立持久化"""
