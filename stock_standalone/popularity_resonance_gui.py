@@ -142,13 +142,118 @@ class PRServiceGUI:
         # 监听窗口关闭事件，确保最终配置得到持久化保存
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # 订阅全局自选股改变通知
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        except Exception as e:
+            service_logger.debug(f"订阅全局自选股失败: {e}")
+
     def on_close(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+        except Exception:
+            pass
         try:
             self.sync_manager.stop()
         except Exception:
             pass
         self.save_config_settings()
         self.root.destroy()
+
+    def _on_favorites_changed(self):
+        # 使用 after 切换到 Tkinter 主线程运行
+        if hasattr(self, 'root'):
+            self.root.after(0, self._refresh_ui_favorites)
+
+    def _refresh_ui_favorites(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            return
+            
+        all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
+        for tree in all_trees:
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if not vals or len(vals) < 3:
+                    continue
+                code = str(vals[1]).strip().zfill(6)
+                name = str(vals[2]).strip()
+                
+                is_fav = code in fav_stocks
+                clean_name = name
+                if name.startswith("★ "):
+                    clean_name = name[len("★ "):]
+                
+                new_name = f"★ {clean_name}" if is_fav else clean_name
+                
+                curr_tags = list(tree.item(iid, "tags") or [])
+                has_fav_tag = "favorite" in curr_tags
+                
+                need_update = (name != new_name) or (is_fav != has_fav_tag)
+                if need_update:
+                    new_vals = list(vals)
+                    new_vals[2] = new_name
+                    tree.item(iid, values=tuple(new_vals))
+                    
+                    if is_fav and "favorite" not in curr_tags:
+                        curr_tags.append("favorite")
+                    elif not is_fav and "favorite" in curr_tags:
+                        curr_tags.remove("favorite")
+                    tree.item(iid, tags=tuple(curr_tags))
+
+    def show_context_menu(self, event):
+        tree = event.widget
+        # 选中鼠标右键点击的项
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+        tree.selection_set(item_id)
+        tree.focus(item_id)
+        
+        values = tree.item(item_id, "values")
+        if not values or len(values) < 3:
+            return
+            
+        code = str(values[1]).strip().zfill(6)
+        name = str(values[2]).strip()
+        if name.startswith("★ "):
+            name = name[len("★ "):]
+            
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = code in fav_mgr.get_favorite_stocks()
+        except Exception:
+            is_fav = False
+            fav_mgr = None
+            
+        menu = tk.Menu(self.root, tearoff=0)
+        if not is_fav:
+            menu.add_command(label=f"★ 添加重点关注 ({name})", command=lambda: self.add_to_favorites(code))
+        else:
+            menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
+            
+        menu.post(event.x_root, event.y_root)
+
+    def add_to_favorites(self, code):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().add_favorite_stock(code)
+            self.lbl_status.config(text=f"已添加重点关注: {code}", fg="darkgreen")
+        except Exception as e:
+            messagebox.showerror("错误", f"添加重点关注失败: {e}")
+
+    def remove_from_favorites(self, code):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().remove_favorite_stock(code)
+            self.lbl_status.config(text=f"已取消重点关注: {code}", fg="blue")
+        except Exception as e:
+            messagebox.showerror("错误", f"取消重点关注失败: {e}")
 
     def on_realtime_data_updated(self, df):
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
@@ -198,13 +303,20 @@ class PRServiceGUI:
                         
                         tree.item(iid, values=tuple(new_vals))
                         
-                        # 动态更新涨跌颜色 tag
+                        # 动态更新涨跌颜色 tag，并保持自选股状态
+                        curr_tags = list(tree.item(iid, "tags") or [])
+                        is_fav = "favorite" in curr_tags
+                        
                         tag = "flat"
                         if pct > 0:
                             tag = "up"
                         elif pct < 0:
                             tag = "down"
-                        tree.item(iid, tags=(tag,))
+                            
+                        new_tags = [tag]
+                        if is_fav:
+                            new_tags.append("favorite")
+                        tree.item(iid, tags=tuple(new_tags))
                     except Exception:
                         pass
 
@@ -513,6 +625,7 @@ class PRServiceGUI:
         tree.tag_configure("up", foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
         tree.tag_configure("down", foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
         tree.tag_configure("flat", foreground="#000000", font=("Microsoft YaHei", 9))
+        tree.tag_configure("favorite", background="#e6ffe6", font=("Microsoft YaHei", 9, "bold"))
 
         # 绑定点击表头排序
         for col in ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"):
@@ -523,6 +636,7 @@ class PRServiceGUI:
 
         # 绑定联动与双击事件
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        tree.bind("<Button-3>", self.show_context_menu)
         tree.bind("<Double-1>", self.on_tree_double_click)
 
         return tree
@@ -532,7 +646,8 @@ class PRServiceGUI:
         l = []
         for k in tree.get_children(''):
             val = tree.set(k, col)
-            l.append((val, k))
+            code = str(tree.set(k, "code")).strip().zfill(6)
+            l.append((val, code, k))
             
         def try_convert(val):
             if val is None:
@@ -545,11 +660,26 @@ class PRServiceGUI:
             except ValueError:
                 return (1, val_str.lower())
                 
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        def sort_key(item):
+            val, code, k = item
+            is_fav_bool = code in fav_stocks
+            if reverse:
+                fav_part = 1 if is_fav_bool else 0
+            else:
+                fav_part = 0 if is_fav_bool else 1
+            return (fav_part, try_convert(val))
+            
         # 2. 稳定原地排序
-        l.sort(key=lambda t: try_convert(t[0]), reverse=reverse)
+        l.sort(key=sort_key, reverse=reverse)
         
         # 3. 重新插入视图
-        for index, (val, k) in enumerate(l):
+        for index, (val, code, k) in enumerate(l):
             tree.move(k, '', index)
             
         # 4. 保存排序状态
@@ -795,9 +925,19 @@ class PRServiceGUI:
         df = getattr(self, "sync_manager", None)
         df_cache = df.get_current_df() if df is not None else None
 
+        # 获取全局自选股代码集合
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
         # 2. 定义带去重功能的单个表格填充辅助函数
         def populate(tree, data_dict):
-            sorted_items = sorted(data_dict.items(), key=lambda x: x[1])
+            sorted_items = sorted(
+                data_dict.items(),
+                key=lambda x: (0 if str(x[0]).strip().zfill(6) in fav_stocks else 1, x[1])
+            )
             display_rank = 1
             for _, (code, _) in enumerate(sorted_items, 1):
                 # 如果该个股已被归入共振榜，则在其他表（东、花、开、淘）中过滤去重
@@ -840,7 +980,14 @@ class PRServiceGUI:
                 elif pct < 0:
                     tag = "down"
                 
-                tree.insert("", "end", values=(display_rank, code, name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=(tag,))
+                code_str = str(code).strip().zfill(6)
+                is_fav = code_str in fav_stocks
+                display_name = f"★ {name}" if is_fav else name
+                tags = [tag]
+                if is_fav:
+                    tags.append("favorite")
+                
+                tree.insert("", "end", values=(display_rank, code, display_name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=tuple(tags))
                 display_rank += 1
 
         # 3. 填充前4个表并过滤去重
@@ -849,8 +996,12 @@ class PRServiceGUI:
         populate(self.tree_lh, lh_data)
         populate(self.tree_tgb, tgb_data)
 
-        # 4. 填充共振“合”表
-        for rank, item in enumerate(resonance_results, 1):
+        # 4. 填充共振“合”表，并自选置顶排序
+        sorted_res = sorted(
+            resonance_results,
+            key=lambda x: 0 if str(x["code"]).strip().zfill(6) in fav_stocks else 1
+        )
+        for rank, item in enumerate(sorted_res, 1):
             code = item["code"]
             quote = quotes.get(code, {"name": "--", "percent": 0.0})
             name = quote["name"]
@@ -888,7 +1039,14 @@ class PRServiceGUI:
             elif pct < 0:
                 tag = "down"
                 
-            self.tree_res.insert("", "end", values=(rank, code, name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=(tag,))
+            code_str = str(code).strip().zfill(6)
+            is_fav = code_str in fav_stocks
+            display_name = f"★ {name}" if is_fav else name
+            tags = [tag]
+            if is_fav:
+                tags.append("favorite")
+                
+            self.tree_res.insert("", "end", values=(rank, code, display_name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=tuple(tags))
 
         # 5. 依据表格中实际插入的子项数量，动态隐藏/显示板块
         em_empty = len(self.tree_em.get_children()) == 0
@@ -1128,17 +1286,37 @@ class PRServiceGUI:
                     
                 res_list.append((score, code, name, percent, price, dff2, dff3, rank, block))
                 
-            em_list.sort(key=lambda x: x[0])
-            ths_list.sort(key=lambda x: x[0])
-            lh_list.sort(key=lambda x: x[0])
-            tgb_list.sort(key=lambda x: x[0])
-            res_list.sort(key=lambda x: x[0], reverse=True)
+            # 获取全局自选股代码集合
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+            except Exception:
+                fav_stocks = set()
+
+            def list_sort_key(item, reverse_sub=False):
+                code = item[1]
+                code_str = str(code).strip().zfill(6)
+                is_fav = 0 if code_str in fav_stocks else 1
+                sub_val = item[0]
+                if reverse_sub:
+                    return (is_fav, -sub_val)
+                return (is_fav, sub_val)
+
+            em_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
+            ths_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
+            lh_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
+            tgb_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
+            res_list.sort(key=lambda x: list_sort_key(x, reverse_sub=True))
             
             def fill_tree(tree, data_list, is_score=False):
                 for idx, item in enumerate(data_list):
                     rank_or_score = item[0]
                     code, name, percent, price, dff2, dff3, rank_val, block = item[1:]
                     display_idx = idx + 1
+                    
+                    code_str = str(code).strip().zfill(6)
+                    is_fav = code_str in fav_stocks
+                    display_name = f"★ {name}" if is_fav else name
                     
                     tag = "flat"
                     try:
@@ -1148,7 +1326,11 @@ class PRServiceGUI:
                     except ValueError:
                         pass
                         
-                    tree.insert("", "end", values=(display_idx, code, name, percent, price, dff2, dff3, rank_val, block), tags=(tag,))
+                    tags = [tag]
+                    if is_fav:
+                        tags.append("favorite")
+                        
+                    tree.insert("", "end", values=(display_idx, code, display_name, percent, price, dff2, dff3, rank_val, block), tags=tuple(tags))
             
             fill_tree(self.tree_em, em_list)
             fill_tree(self.tree_ths, ths_list)
