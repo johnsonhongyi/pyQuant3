@@ -174,3 +174,4 @@ stock_standalone/.nuitka_cache/*
 stock_standalone/scratch/obsolete/*
 stock_standalone/scratch/test_*
 stock_standalone/logs/*
+stock_standalone/datacsv/*
