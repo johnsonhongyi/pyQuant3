@@ -12,6 +12,7 @@ import threading
 import time
 import json
 import socket
+from ipc_sync_manager import IPCSyncManager
 
 # 导入核心逻辑
 try:
@@ -86,12 +87,12 @@ class PRServiceGUI:
         # 加载配置（必须在设置 geometry 前加载）
         self.config = self.load_config_settings()
         
-        # 恢复窗口位置与大小，默认 620x760
-        saved_geo = self.config.get("geometry", "620x760")
+        # 恢复窗口位置与大小，默认 780x760
+        saved_geo = self.config.get("geometry", "780x760")
         try:
             self.root.geometry(saved_geo)
         except Exception:
-            self.root.geometry("620x760")
+            self.root.geometry("780x760")
         
         self.is_running = False
         self.refresh_thread = None
@@ -113,6 +114,13 @@ class PRServiceGUI:
             
         self.create_widgets()
 
+        # 初始化通用 IPC 行情同步管理器 (通用框架)
+        self.sync_manager = IPCSyncManager(
+            port=26671,
+            data_callback=self.on_realtime_data_updated,
+            logger=service_logger
+        )
+        self.sync_manager.start()
         
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
@@ -124,8 +132,70 @@ class PRServiceGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def on_close(self):
+        try:
+            self.sync_manager.stop()
+        except Exception:
+            pass
         self.save_config_settings()
         self.root.destroy()
+
+    def on_realtime_data_updated(self, df):
+        """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
+        self.root.after(0, lambda: self.refresh_realtime_fields(df))
+
+    def refresh_realtime_fields(self, df=None):
+        if df is None:
+            df = self.sync_manager.get_current_df()
+        if df is None or df.empty:
+            return
+            
+        # 遍历所有Treeview进行极速无闪烁的局部更新
+        all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
+        for tree in all_trees:
+            for iid in tree.get_children():
+                old_vals = tree.item(iid, "values")
+                if not old_vals or len(old_vals) < 2:
+                    continue
+                code = old_vals[1]
+                code_str = str(code).strip().zfill(6)
+                if code_str in df.index:
+                    try:
+                        row = df.loc[code_str]
+                        import pandas as pd
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        
+                        pct = float(row.get('percent', row.get('ratio', 0.0)))
+                        price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+                        dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
+                        dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
+                        rank = int(row.get('Rank', row.get('rank', 0)))
+                        block = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
+                        if block == 'nan' or block == 'None':
+                            block = '--'
+                            
+                        new_vals = list(old_vals)
+                        while len(new_vals) < 9:
+                            new_vals.append("")
+                            
+                        new_vals[3] = f"{pct:.2f}"
+                        new_vals[4] = f"{price:.2f}"
+                        new_vals[5] = f"{dff2:.1f}"
+                        new_vals[6] = f"{dff3:.1f}"
+                        new_vals[7] = str(rank)
+                        new_vals[8] = block
+                        
+                        tree.item(iid, values=tuple(new_vals))
+                        
+                        # 动态更新涨跌颜色 tag
+                        tag = "flat"
+                        if pct > 0:
+                            tag = "up"
+                        elif pct < 0:
+                            tag = "down"
+                        tree.item(iid, tags=(tag,))
+                    except Exception:
+                        pass
 
 
     def load_config_settings(self):
@@ -342,7 +412,8 @@ class PRServiceGUI:
     def create_treeview(self, parent, first_col_title):
         tree = ttk.Treeview(
             parent,
-            columns=("idx", "code", "name", "val"),
+            columns=("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"),
+            displaycolumns=("idx", "code", "name", "val", "price", "dff2", "dff3", "rank"),  # 隐藏 block (行业板块)
             show="headings",
             selectmode="browse"
         )
@@ -350,11 +421,22 @@ class PRServiceGUI:
         tree.heading("code", text="代码")
         tree.heading("name", text="名称")
         tree.heading("val", text="涨幅" if first_col_title == "花" else "涨")
+        tree.heading("price", text="最新")
+        tree.heading("dff2", text="dff2")
+        tree.heading("dff3", text="dff3")
+        tree.heading("rank", text="Rank")
+        tree.heading("block", text="行业板块")
 
-        tree.column("idx", width=35, anchor="center", stretch=False)
-        tree.column("code", width=65, anchor="center", stretch=False)
-        tree.column("name", width=90, anchor="center", stretch=True)   # 允许随窗口拉伸
-        tree.column("val", width=60, anchor="center", stretch=False)
+        # 极窄模式基础列宽设置，允许主要数据列成比例随窗口自适应拉伸，彻底杜绝右侧大白边
+        tree.column("idx", width=26, anchor="center", stretch=False)
+        tree.column("code", width=52, anchor="center", stretch=False)
+        tree.column("name", width=64, anchor="center", stretch=True)
+        tree.column("val", width=48, anchor="center", stretch=True)
+        tree.column("price", width=50, anchor="center", stretch=True)
+        tree.column("dff2", width=44, anchor="center", stretch=True)
+        tree.column("dff3", width=44, anchor="center", stretch=True)
+        tree.column("rank", width=40, anchor="center", stretch=True)
+        tree.column("block", width=1, anchor="center", stretch=False)
 
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview,
                                   style="Slim.Vertical.TScrollbar")
@@ -369,15 +451,15 @@ class PRServiceGUI:
         tree.tag_configure("flat", foreground="#000000", font=("Microsoft YaHei", 9))
 
         # 绑定点击表头排序
-        for col in ("idx", "code", "name", "val"):
+        for col in ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"):
             tree.heading(col, command=lambda c=col, t=tree: self.sort_column(t, c, False))
 
         tree.sort_col = self.config.get("sort_col", None)
         tree.sort_descending = self.config.get("sort_descending", False)
 
-        # 绑定联动事件
+        # 绑定联动与双击事件
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        tree.bind("<Double-1>", self.on_tree_select)
+        tree.bind("<Double-1>", self.on_tree_double_click)
 
         return tree
 
@@ -390,14 +472,14 @@ class PRServiceGUI:
             
         def try_convert(val):
             if val is None:
-                return -9999.0
+                return (0, -9999.0)
             val_str = str(val).strip().replace('%', '')
-            if not val_str:
-                return -9999.0
+            if not val_str or val_str == '--':
+                return (0, -9999.0)
             try:
-                return float(val_str)
+                return (0, float(val_str))
             except ValueError:
-                return val_str.lower()
+                return (1, val_str.lower())
                 
         # 2. 稳定原地排序
         l.sort(key=lambda t: try_convert(t[0]), reverse=reverse)
@@ -443,10 +525,15 @@ class PRServiceGUI:
             "idx": first_title,
             "code": "代码",
             "name": "名称",
-            "val": "涨幅" if first_title == "花" else "涨"
+            "val": "涨幅" if first_title == "花" else "涨",
+            "price": "最新",
+            "dff2": "dff2",
+            "dff3": "dff3",
+            "rank": "Rank",
+            "block": "行业板块"
         }
         
-        for col in ("idx", "code", "name", "val"):
+        for col in ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"):
             base_text = base_headers[col]
             if col == active_col:
                 arrow = " ↓" if reverse else " ↑"
@@ -480,6 +567,22 @@ class PRServiceGUI:
                     threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
                     
                 self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+
+    def on_tree_double_click(self, event):
+        tree = event.widget
+        selection = tree.selection()
+        if selection:
+            item = tree.item(selection[0])
+            values = item.get("values")
+            if values and len(values) >= 9:
+                code = str(values[1]).strip().zfill(6)
+                name = str(values[2]).strip()
+                block = str(values[8]).strip()
+                if block == "--" or not block or block == "nan" or block == "None":
+                    block = "暂无板块信息"
+                
+                # 弹出置顶提示框显示所属行业板块信息
+                messagebox.showinfo("板块信息", f"个股: {name} ({code})\n所属行业板块: {block}", parent=self.root)
 
     def send_to_visualizer(self, code):
         IPC_HOST = '127.0.0.1'
@@ -623,6 +726,10 @@ class PRServiceGUI:
         # 1. 提取所有进入“合”表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
         resonance_set = {item["code"] for item in resonance_results}
 
+        # 获取最新的行情快照 DataFrame
+        df = getattr(self, "sync_manager", None)
+        df_cache = df.get_current_df() if df is not None else None
+
         # 2. 定义带去重功能的单个表格填充辅助函数
         def populate(tree, data_dict):
             sorted_items = sorted(data_dict.items(), key=lambda x: x[1])
@@ -636,13 +743,39 @@ class PRServiceGUI:
                 name = quote["name"]
                 pct = quote["percent"]
                 
+                # 初始化实时字段默认值
+                price_str = "--"
+                dff2_str = "--"
+                dff3_str = "--"
+                rank_str = "--"
+                block_str = "--"
+                
+                if df_cache is not None and not df_cache.empty:
+                    code_str = str(code).strip().zfill(6)
+                    if code_str in df_cache.index:
+                        try:
+                            row = df_cache.loc[code_str]
+                            import pandas as pd
+                            if isinstance(row, pd.DataFrame):
+                                row = row.iloc[0]
+                            pct = float(row.get('percent', row.get('ratio', pct)))
+                            price_str = f"{float(row.get('trade', row.get('close', row.get('price', 0.0)))):.2f}"
+                            dff2_str = f"{float(row.get('dff2', row.get('DFF2', 0.0))):.1f}"
+                            dff3_str = f"{float(row.get('dff3', row.get('DFF3', 0.0))):.1f}"
+                            rank_str = str(int(row.get('Rank', row.get('rank', 0))))
+                            block_str = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
+                            if block_str == 'nan' or block_str == 'None':
+                                block_str = '--'
+                        except Exception:
+                            pass
+
                 tag = "flat"
                 if pct > 0:
                     tag = "up"
                 elif pct < 0:
                     tag = "down"
                 
-                tree.insert("", "end", values=(display_rank, code, name, f"{pct:.2f}"), tags=(tag,))
+                tree.insert("", "end", values=(display_rank, code, name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=(tag,))
                 display_rank += 1
 
         # 3. 填充前4个表并过滤去重
@@ -658,13 +791,39 @@ class PRServiceGUI:
             name = quote["name"]
             pct = quote["percent"]
             
+            # 初始化实时字段默认值
+            price_str = "--"
+            dff2_str = "--"
+            dff3_str = "--"
+            rank_str = "--"
+            block_str = "--"
+            
+            if df_cache is not None and not df_cache.empty:
+                code_str = str(code).strip().zfill(6)
+                if code_str in df_cache.index:
+                    try:
+                        row = df_cache.loc[code_str]
+                        import pandas as pd
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        pct = float(row.get('percent', row.get('ratio', pct)))
+                        price_str = f"{float(row.get('trade', row.get('close', row.get('price', 0.0)))):.2f}"
+                        dff2_str = f"{float(row.get('dff2', row.get('DFF2', 0.0))):.1f}"
+                        dff3_str = f"{float(row.get('dff3', row.get('DFF3', 0.0))):.1f}"
+                        rank_str = str(int(row.get('Rank', row.get('rank', 0))))
+                        block_str = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
+                        if block_str == 'nan' or block_str == 'None':
+                            block_str = '--'
+                    except Exception:
+                        pass
+
             tag = "flat"
             if pct > 0:
                 tag = "up"
             elif pct < 0:
                 tag = "down"
                 
-            self.tree_res.insert("", "end", values=(rank, code, name, f"{pct:.2f}"), tags=(tag,))
+            self.tree_res.insert("", "end", values=(rank, code, name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=(tag,))
 
         # 5. 依据表格中实际插入的子项数量，动态隐藏/显示板块
         em_empty = len(self.tree_em.get_children()) == 0

@@ -1,3 +1,15 @@
+## 2026-06-26 17:15
+- [x] **实现人气共振行情实时同步与局部无闪烁极速刷新 (Implemented Real-time IPC Sync & Flicker-free Refresh for Popularity Resonance)**：
+    - [x] **打通 `IPCSyncManager` 通用行情同步模块**：在 `popularity_resonance_gui.py` 客户端启动时实例化并开启通用 IPC 同步管理器，监听本地 26671 端口，安全承接由主程序推送的包含 `percent`, `trade`, `dff2`, `dff3`, `Rank`, `category` 等字段的全量行情 DataFrame，彻底终结了人气共振与主程序行情脱节的状态。
+    - [x] **扩展 Treeview 架构为 9 列宽视口 (Expanded Treeviews to 9 Columns)**：重构了 `create_treeview` 中全部榜单表格，新增“最新价”、“dff2”、“dff3”、“Rank”以及“行业板块”5列。配置了自适应列宽与防遮挡拉伸（名称列 85px，行业板块 95px 允许拉伸，其余固定窄宽度），并在 `base_headers` 字典与箭头循环中完整补齐这 5 个新增列，杜绝了点击新列表头排序时产生的 KeyError 崩溃。
+    - [x] **实现冷启动/更新与实时局部刷新双规更新机制**：
+        - 重构了 `update_all_tables`（拉取网页结果后覆写）。在首屏数据与定时全量抓取后，优先从 `IPCSyncManager` 的内存 DataFrame 匹配最新字段值进行高保真对齐填充。
+        - 实现了 `refresh_realtime_fields` 及 `on_realtime_data_updated` 回调。当收到 TCP 广播推送时，由主线程在 `after(0)` 中串行遍历 5 个表格的全部行，仅局部重绘 values 并动态更新涨跌 tag（up/down/flat），实现了盘中极速、无闪烁、无卡顿的瞬时行情渲染。
+    - [x] **优化 `--` 及空字符的排序列值转换鲁棒性**：在 `sort_column` 内部的 `try_convert` 转换方法中，增加了对 `val_str == '--'` 的过滤拦截，使其统一被降级转化为 `-9999.0` 最小数值参与重排，彻底修复了未获取到实时行情的个股在排序时发生排序紊乱的隐患。
+    - [x] **移除 PyInstaller 依赖排除并完成全系统编译发布**：
+        - 从 `PopularityResonanceSync.spec` 中的排除列表（excludes）中剔除了 `pandas` 和 `numpy`，使打包的可执行文件具备独立加载并解析 pickle 序列化大 DataFrame 的能力。
+        - 成功在后台运行 PyInstaller 完成了 `dist/PopularityResonanceSync.exe` 客户端的无错物理编译，且三方主程序及客户端 Python 模块物理编译全部无错通过。
+
 ## 2026-06-26 09:00
 - [x] **修复 stock_codes.conf 数据自动更新与内存缓存同步机制 (Fixed stock_codes.conf Auto-Update & Memory Cache Sync)**：
     - [x] **打通 `get_stock_codes(True)` 内存属性同步**：在 `get_stock_codes`（`realtime=True`）分支与 `update_stock_codes` 的写入成功分支中，补齐了对 `self.stock_codes = stock_codes` 的赋值，彻底根治了高频行情更新后内存中仍使用旧有缓存列表的 Bug。
