@@ -46,9 +46,6 @@ a = Analysis(
         'PIL',
         'shiboken6',
         'qtpy',
-        'pandas_ta',
-        'numpy',
-        'pandas',
         'talib.stream',
         'talib.abstract',
         'sys_performance_analyzer'

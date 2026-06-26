@@ -12,7 +12,17 @@ import threading
 import time
 import json
 import socket
+from datetime import datetime, timedelta
 from ipc_sync_manager import IPCSyncManager
+from sys_utils import get_app_root
+
+# 导入 tkcalendar 库支持，高保真还原日历选择器
+try:
+    import JohnsonUtil.tkcalendar_patch
+    from tkcalendar import DateEntry
+    HAS_CALENDAR = True
+except ImportError:
+    HAS_CALENDAR = False
 
 # 导入核心逻辑
 try:
@@ -97,6 +107,7 @@ class PRServiceGUI:
         self.is_running = False
         self.refresh_thread = None
         self.resonance_codes = []  # 缓存当前的共振股票代码
+        self.current_date = time.strftime("%Y-%m-%d")
         
         # 联动选择项变量
         self.link_tdx_var = tk.BooleanVar(value=self.config.get("link_tdx", True))
@@ -406,6 +417,59 @@ class PRServiceGUI:
         self.btn_loop = ttk.Button(settings_frame, text="启动自动", command=self.toggle_loop)
         self.btn_loop.pack(side="left", padx=5)
 
+        self.btn_history = ttk.Button(settings_frame, text="历史数据", command=self.open_history_data)
+        self.btn_history.pack(side="left", padx=5)
+
+        # 日期控制区组件，自适应自建日历选择与导航
+        date_frame = tk.Frame(settings_frame)
+        date_frame.pack(side="left", padx=5)
+        
+        tk.Label(date_frame, text="日期:").pack(side="left", padx=2)
+        
+        if HAS_CALENDAR:
+            self.date_entry = DateEntry(date_frame, width=12, background='darkblue', 
+                                      foreground='white', borderwidth=2, 
+                                      date_pattern='yyyy-mm-dd',
+                                      state='readonly')
+            try:
+                self.date_entry.set_date(datetime.strptime(self.current_date, "%Y-%m-%d"))
+            except Exception:
+                self.date_entry.set_date(datetime.now())
+            self.date_entry.pack(side="left", padx=2)
+            
+            # 动态覆写 drop_down 以强行实现自动上拉展示 (防止在底部被屏幕/窗口边缘遮挡)
+            def forced_up_drop_down(entry_self=self.date_entry):
+                try:
+                    type(entry_self).drop_down(entry_self)
+                    top_cal = getattr(entry_self, '_top_cal', None)
+                    if top_cal and top_cal.winfo_exists():
+                        top_cal.update_idletasks()
+                        x = entry_self.winfo_rootx()
+                        y = entry_self.winfo_rooty()
+                        cal_h = top_cal.winfo_reqheight()
+                        # 向上拉起：新 y 坐标 = 输入框 Y 坐标 - 日历高度 - 2
+                        new_y = y - cal_h - 2
+                        top_cal.geometry(f"+{x}+{new_y}")
+                except Exception as e:
+                    service_logger.debug(f"日历自动上拉失败: {e}")
+            
+            self.date_entry.drop_down = forced_up_drop_down
+            
+            self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
+            # 点击任何区域均可激活下拉日历
+            self.date_entry.bind("<Button-1>", lambda e: self._show_calendar(), add="+")
+            # 延时绘制日历已存历史高亮
+            self.root.after(500, self._refresh_calendar_highlights)
+        else:
+            self.date_var = tk.StringVar(value=self.current_date)
+            self.date_tk_entry = tk.Entry(date_frame, textvariable=self.date_var, width=11)
+            self.date_tk_entry.pack(side="left", padx=2)
+            tk.Button(date_frame, text="Go", command=self.on_date_changed, width=3).pack(side="left")
+
+        # 快速微调天数前进后退
+        tk.Button(date_frame, text="◀", command=lambda: self.shift_date(-1), width=2).pack(side="left", padx=1)
+        tk.Button(date_frame, text="▶", command=lambda: self.shift_date(1), width=2).pack(side="left", padx=1)
+
         self.lbl_status = tk.Label(settings_frame, text="就绪", fg="blue", font=("Microsoft YaHei", 9, "bold"))
         self.lbl_status.pack(side="right", padx=10)
 
@@ -710,10 +774,11 @@ class PRServiceGUI:
                 except Exception as cache_err:
                     service_logger.error(f"写入数据缓存失败: {cache_err}")
             
+            # 每日数据持久化更新当日数据 (在 save_daily_resonance_csv 内部自适应校验交易日)
+            self.save_daily_resonance_csv(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes)
+            
             # 5. 在主线程中安全地更新所有表（包括去重过滤和整体布局）
             self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
-            
-            # [OPTIMIZE] 后台定时抓取或查询时不执行写盘，避免频繁的磁盘IO。退出关闭时统一持久化。
             
         except Exception as e:
             self.root.after(0, lambda: self.lbl_status.config(text=f"刷新失败: {e}", fg="red"))
@@ -893,6 +958,361 @@ class PRServiceGUI:
             self.entry_interval.config(state="normal")
             self.entry_limit.config(state="normal")
             self.lbl_status.config(text="自动刷新已停止", fg="blue")
+
+    def _show_calendar(self):
+        if hasattr(self, 'date_entry'):
+            try:
+                self.date_entry.drop_down()
+            except Exception:
+                pass
+
+    def _refresh_calendar_highlights(self):
+        if not HAS_CALENDAR or not hasattr(self, 'date_entry'):
+            return
+        try:
+            csv_dir = os.path.join(get_app_root(), "datacsv")
+            if not os.path.exists(csv_dir):
+                return
+                
+            dates = []
+            for filename in os.listdir(csv_dir):
+                if filename.startswith("popularity_resonance_"):
+                    if filename.endswith(".csv.gz"):
+                        date_str = filename[len("popularity_resonance_"):-7]
+                    elif filename.endswith(".csv"):
+                        date_str = filename[len("popularity_resonance_"):-4]
+                    else:
+                        continue
+                    dates.append(date_str)
+                    
+            if not dates:
+                return
+                
+            # ✅ [OPTIMIZE] 防抖：如果日期集合没变，跳过刷新
+            dates_sig = hash(tuple(sorted(dates)))
+            if getattr(self, '_last_calendar_sig', None) == dates_sig:
+                return
+            self._last_calendar_sig = dates_sig
+            
+            # 获取 DateEntry 内部的 Calendar 实例
+            cal = self.date_entry._calendar
+            
+            # 清除之前的事件标签 (如果有)
+            cal.calevent_remove('all', 'has_data')
+            
+            # 配置高亮样式: 红色背景 (代表该日有选股数据，跟策略选股一致)
+            cal.tag_config('has_data', background='red', foreground='white')
+            
+            for date_str in dates:
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    cal.calevent_create(dt, "有数据", "has_data")
+                except Exception:
+                    pass
+            service_logger.info(f"✅ 人气共振日历已高亮 {len(dates)} 个日期")
+        except Exception as e:
+            service_logger.debug(f"刷新日历高亮失败: {e}")
+
+    def on_date_changed(self, event=None):
+        if hasattr(self, 'date_entry'):
+            selected_date = self.date_entry.get_date().strftime("%Y-%m-%d")
+        elif hasattr(self, 'date_var'):
+            selected_date = self.date_var.get().strip()
+        else:
+            return
+            
+        if selected_date == self.current_date:
+            return
+            
+        self.current_date = selected_date
+        self.load_history_by_date(selected_date)
+
+    def shift_date(self, delta):
+        try:
+            curr_d = datetime.strptime(self.current_date, "%Y-%m-%d")
+            new_d = curr_d + timedelta(days=delta)
+            new_date_str = new_d.strftime("%Y-%m-%d")
+            self.current_date = new_date_str
+            if hasattr(self, 'date_entry'):
+                self.date_entry.set_date(new_d)
+            elif hasattr(self, 'date_var'):
+                self.date_var.set(new_date_str)
+            self.load_history_by_date(new_date_str)
+        except Exception as e:
+            service_logger.error(f"微调日期失败: {e}")
+
+    def load_history_by_date(self, date_str):
+        csv_dir = os.path.join(get_app_root(), "datacsv")
+        gz_path = os.path.join(csv_dir, f"popularity_resonance_{date_str}.csv.gz")
+        csv_path = os.path.join(csv_dir, f"popularity_resonance_{date_str}.csv")
+        
+        file_path = None
+        if os.path.exists(gz_path):
+            file_path = gz_path
+        elif os.path.exists(csv_path):
+            file_path = csv_path
+            
+        if not file_path:
+            today = time.strftime("%Y-%m-%d")
+            if date_str == today:
+                self.lbl_status.config(text="今天尚未持久化数据，等待数据同步...", fg="blue")
+                return False
+            self.clear_all_trees()
+            self.lbl_status.config(text=f"无 {date_str} 的历史数据", fg="red")
+            return False
+            
+        try:
+            import pandas as pd
+            # pandas 自动识别并解压 .gz 结尾的压缩文件
+            df = pd.read_csv(file_path, encoding="utf-8")
+            
+            self.clear_all_trees()
+            
+            em_list = []
+            ths_list = []
+            lh_list = []
+            tgb_list = []
+            res_list = []
+            
+            def safe_str(val, default="--"):
+                if pd.isna(val) or str(val).strip().lower() in ('nan', 'none', ''):
+                    return default
+                return str(val).strip()
+
+            for _, row in df.iterrows():
+                code = str(row.get("code", "")).strip().zfill(6)
+                name = safe_str(row.get("name"), default="--")
+                
+                score_val = row.get("score", 0)
+                score = 0
+                if pd.notna(score_val):
+                    try:
+                        score = int(float(score_val))
+                    except ValueError:
+                        score = 0
+                
+                price = safe_str(row.get("price"))
+                percent = safe_str(row.get("percent"))
+                dff2 = safe_str(row.get("dff2"))
+                dff3 = safe_str(row.get("dff3"))
+                rank = safe_str(row.get("rank"))
+                block = safe_str(row.get("block"))
+                
+                em_rank = row.get("em_rank")
+                if pd.notna(em_rank) and str(em_rank).strip() and str(em_rank).strip().lower() not in ('nan', 'none'):
+                    try:
+                        em_list.append((int(float(em_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                    except ValueError:
+                        pass
+                    
+                ths_rank = row.get("ths_rank")
+                if pd.notna(ths_rank) and str(ths_rank).strip() and str(ths_rank).strip().lower() not in ('nan', 'none'):
+                    try:
+                        ths_list.append((int(float(ths_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                    except ValueError:
+                        pass
+                    
+                lh_rank = row.get("lh_rank")
+                if pd.notna(lh_rank) and str(lh_rank).strip() and str(lh_rank).strip().lower() not in ('nan', 'none'):
+                    try:
+                        lh_list.append((int(float(lh_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                    except ValueError:
+                        pass
+                    
+                tgb_rank = row.get("tgb_rank")
+                if pd.notna(tgb_rank) and str(tgb_rank).strip() and str(tgb_rank).strip().lower() not in ('nan', 'none'):
+                    try:
+                        tgb_list.append((int(float(tgb_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                    except ValueError:
+                        pass
+                    
+                res_list.append((score, code, name, percent, price, dff2, dff3, rank, block))
+                
+            em_list.sort(key=lambda x: x[0])
+            ths_list.sort(key=lambda x: x[0])
+            lh_list.sort(key=lambda x: x[0])
+            tgb_list.sort(key=lambda x: x[0])
+            res_list.sort(key=lambda x: x[0], reverse=True)
+            
+            def fill_tree(tree, data_list, is_score=False):
+                for idx, item in enumerate(data_list):
+                    rank_or_score = item[0]
+                    code, name, percent, price, dff2, dff3, rank_val, block = item[1:]
+                    display_idx = idx + 1
+                    
+                    tag = "flat"
+                    try:
+                        p_val = float(percent.replace('%', ''))
+                        if p_val > 0: tag = "up"
+                        elif p_val < 0: tag = "down"
+                    except ValueError:
+                        pass
+                        
+                    tree.insert("", "end", values=(display_idx, code, name, percent, price, dff2, dff3, rank_val, block), tags=(tag,))
+            
+            fill_tree(self.tree_em, em_list)
+            fill_tree(self.tree_ths, ths_list)
+            fill_tree(self.tree_lh, lh_list)
+            fill_tree(self.tree_tgb, tgb_list)
+            fill_tree(self.tree_res, res_list, is_score=True)
+            
+            self.resonance_codes = [x[1] for x in res_list]
+            self.refresh_layout(len(em_list)==0, len(ths_list)==0, len(lh_list)==0, len(res_list)==0, len(tgb_list)==0)
+            
+            # 对所有具有排序状态的表格进行排序自愈
+            for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+                if getattr(tree, "sort_col", None) is not None:
+                    self.sort_column(tree, tree.sort_col, getattr(tree, "sort_descending", False), auto_restore=True)
+
+            self.lbl_status.config(text=f"已加载 {date_str} 历史数据", fg="darkgreen")
+            return True
+        except Exception as e:
+            service_logger.error(f"加载 {date_str} 历史数据失败: {e}")
+            self.lbl_status.config(text=f"加载失败: {e}", fg="red")
+            return False
+
+    def open_history_data(self):
+        from tkinter import filedialog
+        csv_dir = os.path.join(get_app_root(), "datacsv")
+        os.makedirs(csv_dir, exist_ok=True)
+        
+        file_path = filedialog.askopenfilename(
+            initialdir=csv_dir,
+            title="选择历史共振数据",
+            filetypes=[
+                ("CSV/GZ Files", "*.csv *.csv.gz"),
+                ("Compressed GZ", "*.csv.gz"),
+                ("Normal CSV", "*.csv"),
+                ("All Files", "*.*")
+            ]
+        )
+        if not file_path:
+            return
+            
+        filename = os.path.basename(file_path)
+        date_str = None
+        if filename.startswith("popularity_resonance_"):
+            if filename.endswith(".csv.gz"):
+                date_str = filename[len("popularity_resonance_"):-7]
+            elif filename.endswith(".csv"):
+                date_str = filename[len("popularity_resonance_"):-4]
+                
+        if date_str:
+            if hasattr(self, 'date_entry'):
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    self.date_entry.set_date(dt)
+                except Exception:
+                    pass
+            elif hasattr(self, 'date_var'):
+                self.date_var.set(date_str)
+            self.current_date = date_str
+            self.load_history_by_date(date_str)
+        else:
+            messagebox.showerror("错误", "非标准的人气共振数据 CSV/GZ 文件")
+
+    def save_daily_resonance_csv(self, em_data, ths_data, lh_data, tgb_data, resonance_results, all_quotes):
+        # 1. 交易日及盘后判定限制
+        try:
+            import JSONData.common_otc as cct
+            if not cct.get_trade_date_status():
+                service_logger.info("今日非交易日，无需持久化盘后数据。")
+                return
+        except Exception as otc_err:
+            service_logger.debug(f"交易日判定服务异常: {otc_err}")
+            
+        try:
+            import pandas as pd
+            csv_dir = os.path.join(get_app_root(), "datacsv")
+            os.makedirs(csv_dir, exist_ok=True)
+            
+            today = time.strftime("%Y-%m-%d")
+            # 自动保存为压缩过的 .csv.gz 格式
+            csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
+            
+            current_df = self.sync_manager.get_current_df()
+            
+            rows = []
+            for r in resonance_results:
+                code = r.get('code', '')
+                score = r.get('score', 0)
+                
+                # 优先从 all_quotes 或 current_df 提取正确的股票名称，防止出现空值 and nan
+                name = ""
+                if code in all_quotes:
+                    name = all_quotes[code].get('name', '')
+                
+                if not name and current_df is not None and code in current_df.index:
+                    s_row = current_df.loc[code]
+                    import pandas as pd
+                    if isinstance(s_row, pd.DataFrame):
+                        s_row = s_row.iloc[0]
+                    name = s_row.get("name", s_row.get("Name", ''))
+                    
+                if not name:
+                    name = r.get('name', '')
+                    
+                if not name or str(name).strip().lower() in ('nan', 'none', ''):
+                    name = '--'
+                
+                row = {
+                    "code": code,
+                    "name": name,
+                    "score": score,
+                    "em_rank": em_data.get(code, ''),
+                    "ths_rank": ths_data.get(code, ''),
+                    "lh_rank": lh_data.get(code, ''),
+                    "tgb_rank": tgb_data.get(code, ''),
+                }
+                
+                price_val = "--"
+                percent_val = "--"
+                dff2_val = "--"
+                dff3_val = "--"
+                rank_val = "--"
+                block_val = "--"
+                
+                if current_df is not None and code in current_df.index:
+                    s_row = current_df.loc[code]
+                    import pandas as pd
+                    if isinstance(s_row, pd.DataFrame):
+                        s_row = s_row.iloc[0]
+                    price_val = s_row.get("trade", s_row.get("price", "--"))
+                    percent_val = s_row.get("percent", "--")
+                    dff2_val = s_row.get("dff2", "--")
+                    dff3_val = s_row.get("dff3", "--")
+                    rank_val = s_row.get("Rank", s_row.get("rank", "--"))
+                    block_val = s_row.get("category", "--")
+                
+                if price_val == "--" and code in all_quotes:
+                    q = all_quotes[code]
+                    price_val = q.get("price", "--")
+                    percent_val = q.get("percent", "--")
+                    
+                def clean_field(val):
+                    if pd.isna(val) or str(val).strip().lower() in ('nan', 'none', ''):
+                        return "--"
+                    return str(val).strip()
+
+                row.update({
+                    "price": clean_field(price_val),
+                    "percent": clean_field(percent_val),
+                    "dff2": clean_field(dff2_val),
+                    "dff3": clean_field(dff3_val),
+                    "rank": clean_field(rank_val),
+                    "block": clean_field(block_val)
+                })
+                rows.append(row)
+                
+            if rows:
+                df = pd.DataFrame(rows)
+                # 使用 gzip 压缩格式进行持久化
+                df.to_csv(csv_path, index=False, encoding="utf-8", compression="gzip")
+                service_logger.info(f"每日人气共振数据已安全持久化（GZ压缩）: {csv_path}")
+                # 写入成功后刷新一下日历高亮
+                self.root.after(0, self._refresh_calendar_highlights)
+        except Exception as e:
+            service_logger.error(f"每日数据持久化 CSV.GZ 失败: {e}")
 
 if __name__ == "__main__":
     # Windows/PyInstaller 多进程兼容性支持
