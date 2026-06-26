@@ -1,3 +1,11 @@
+## 2026-06-26 01:50
+- [x] **优化多级排序与人气共振持久化写盘机制，避免高频磁盘 I/O (Optimized Multi-Sort & Popularity Resonance Persistence Write)**：
+    - [x] **消除排序点击与设置时的高频写盘**：重构了 `tk_gui_modules/treeview_mixin.py` 中的 `_save_mixin_ui_states` 方法，注释了即时调用 `self.save_ui_states()` 写盘的代码，使多级/普通排序状态变更仅在内存中维护，避免每次点击表头排序时频繁写入 JSON 配置文件。
+    - [x] **重构子窗口排序状态内存处理**：修改了 `stock_selection_window.py` 中 `StockSelectionWindow` 与 `HistoricalSelectionTrackerDialog` 的 `_save_mixin_ui_states` 重写方法，同样移除了即时的 `save_ui_states()` 磁盘写操作。
+    - [x] **实现退出与销毁时统一持久化自愈**：在 `HistoricalSelectionTrackerDialog` 的 `_on_close` 窗口关闭回调中补全了 `self.save_ui_states()` 的安全调用，确保在用户关闭历史追踪窗口时，其独立的排序状态能够完整写盘保存。主控制台窗口与策略选股窗口本已在 `_on_close` 中集成了 `save_ui_states`，无需额外修改。
+    - [x] **优化人气共振客户端写盘逻辑**：重构了 `popularity_resonance_gui.py`，去除了在 `sort_column` 表头排序、`_run_once_job` 数据查询刷新及 `_write_block_job` 写入通达信板块时高频重复调用的 `save_config_settings()` 写盘动作，将这部分参数的持久化统一归并至 `on_close`（窗口关闭）以及用户手动修改输入字段触发的事件中。
+    - [x] **完成 Python 语法编译与无错回归测试**：成功对修改后的 `treeview_mixin.py`、`stock_selection_window.py` 和 `popularity_resonance_gui.py` 进行了编译检测，无任何语法及逻辑异常。
+
 ## 2026-06-26 00:15
 - [x] **优化人气共振 GUI 客户端去重筛选与布局溢出 (Optimized Popularity Resonance GUI Deduplication & Layout Height)**：
     - [x] **实现跨表格去重筛选机制 (Implemented Cross-Table Deduplication)**：重构了 `popularity_resonance_gui.py` 中的 `update_all_tables` 方法。获取共振结果后，自动建立包含全部共振股代码的 `resonance_set`。在填充“东”、“花”、“开”、“淘”等原始榜单时，对已进入共振“合”表的个股执行 `continue` 过滤，并动态重算展示序号，使得个股数据在界面中仅唯一展现，极大地提升了分屏界面的信息密度与去重质量。
