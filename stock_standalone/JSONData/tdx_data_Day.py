@@ -132,7 +132,7 @@ day_dir_bj = os.path.join(basedir, "Vipdoc", "bj", "lday")
 exp_path = os.path.join(basedir, "T0002", "export")
 
 day_path = {'sh': day_dir_sh, 'sz': day_dir_sz ,'bj': day_dir_bj}
-resample_dtype = ['d', 'w', 'm','2d','3d','5d']
+resample_dtype = ['d', 'w', 'm','2d','3d','5d', '45d', '3M']
 # http://www.douban.com/note/504811026/
 
 
@@ -7590,7 +7590,7 @@ def get_tdx_search_day_DF(market='cyb'):
     print("t:", time.time() - time_t)
     return results
 
-period_type_dic={'w':'W-FRI','m':'BM'}
+period_type_dic={'w':'W-FRI','m':'BM','45d':'45D','3m':'3M','3M':'3M'}
 
 def get_tdx_stock_period_to_type_in(df, period_day='W-FRI', periods=5, ncol=None, ratiodays=False):
     """_周期转换周K,月K_

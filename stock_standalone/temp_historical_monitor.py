@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import subprocess
 import socket
@@ -4326,7 +4326,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             resample_var = tk.StringVar(value=current_resample)
             
             resample_combo = ttk.Combobox(left_frame, textvariable=resample_var, width=10)
-            resample_combo['values'] = ['d', 'w', 'm', '30', '60']
+            resample_combo['values'] = ['d', '2d', '3d', '5d', '45d', 'w', 'm', '3M', '30', '60']
             resample_combo.pack(anchor="w", padx=10, pady=2)
 
             tk.Label(left_frame, text="瑙﹀彂闃堝€?", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))

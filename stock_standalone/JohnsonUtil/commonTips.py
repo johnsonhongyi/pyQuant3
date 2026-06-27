@@ -6502,7 +6502,7 @@ def MoniterArgmain():
     parser.add_argument('start', nargs='?', type=str, help='20150612')
     # parser.add_argument('e', nargs='?',action="store", dest="end", type=str, help='end')
     parser.add_argument('end', nargs='?', type=str, help='20160101')
-    parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm'], default='d',
+    parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', '2d', '3d', '5d', '45d', 'w', 'm', '3M'], default='d',
                         help='DateType')
     parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['f', 'b'], default='f',
                         help='Price Forward or back')
@@ -6607,7 +6607,7 @@ def LineArgmain():
     parser.add_argument('start', nargs='?', type=str, help='20150612')
     # parser.add_argument('e', nargs='?',action="store", dest="end", type=str, help='end')
     parser.add_argument('end', nargs='?', type=str, help='20160101')
-    parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm'], default='d',
+    parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', '2d', '3d', '5d', '45d', 'w', 'm', '3M'], default='d',
                         help='DateType')
     parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['f', 'b'], default='f',
                         help='Price Forward or back')

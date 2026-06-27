@@ -2186,7 +2186,7 @@ def _handle_init_tdx(
             readonly=False
         )
 
-        resamples = ['d','2d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
+        resamples =  ['d','2d', '3d', 'w', 'm','45d','3m'] if now_time <= 900 else ['3d']
 
         for res_m in resamples:
             if res_m == resample:
@@ -2727,7 +2727,7 @@ def fetch_and_process(
                 init_res_m = resample
 
                 if now_time <= 835:
-                    base_resamples = ['2d', '3d', 'w', 'm', 'd']
+                    base_resamples = ['2d', '3d', 'w', 'm','45d','3m', 'd']
                 else:
                     base_resamples = ['3d', 'w', 'd']
 
