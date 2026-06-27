@@ -8073,20 +8073,17 @@ class MainWindow(QMainWindow, WindowMixin):
         """[HELPER] 判断两个日期是否属于 self.resample 定义下的同一个周期"""
         if not date1 or not date2: return False
         try:
-            d1 = pd.to_datetime(date1)
-            d2 = pd.to_datetime(date2)
+            d1 = pd.to_datetime(date1).date()
+            d2 = pd.to_datetime(date2).date()
             
             if self.resample == 'd':
-                return d1.strftime('%Y-%m-%d') == d2.strftime('%Y-%m-%d')
-            elif self.resample == 'w':
-                # 判断是否属于同一个自然周 (pandas 默认周一为起点)
-                return d1.to_period('W') == d2.to_period('W')
-            elif self.resample == 'm':
-                # 判断是否属于同一个月
-                return d1.to_period('M') == d2.to_period('M')
-            else:
-                # 2d, 3d 等自定义周期，目前逻辑回退到按天比对
-                return d1.strftime('%Y-%m-%d') == d2.strftime('%Y-%m-%d')
+                return d1 == d2
+                
+            # 兼容 45d, 3M, 3m, w, m 等所有使用 label='right' 的 pandas resample 周期
+            # 因为 day_df 的最后一个 index (d1) 往往是该周期（如月末、季末、周五）的【结束边界】。
+            # 如果实时日期 (d2) 小于等于这个结束边界（d2 <= d1），说明实时行情仍属于这个未走完的 K 线。
+            return d2 <= d1
+                
         except Exception as e:
             logger.error(f"[PeriodCheck] Error comparing {date1} and {date2}: {e}")
             return False

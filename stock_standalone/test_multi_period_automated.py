@@ -34,6 +34,9 @@ def test_engine():
     res = engine.evaluate_strategy(strat, active_periods)
     
     print(f"策略执行完毕，找到 {len(res)} 只标的:")
+    import pprint
+    print("各周期及最终统计数据 (last_stats):")
+    pprint.pprint(engine.last_stats)
     if not res.empty:
         cols = ['name', 'close', 'percent', 'volume'] + [f'pass_{p}' for p in active_periods]
         cols = [c for c in cols if c in res.columns]

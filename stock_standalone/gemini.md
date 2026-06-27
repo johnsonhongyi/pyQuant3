@@ -1,3 +1,48 @@
+## 2026-06-27 15:45
+- [x] **多重并发联动控制与手动自定义指标动态生成 (Multi-Target Linkage & Dynamic Manual Column Entry)**：
+    - [x] **重构独立并行联动机制与状态持久化 (Parallel Linkage & State Saving)**：
+        - 摒弃了先前的“互斥回退”式联动，在底部 `stats_frame` 状态栏右侧新增了 `Vis`, `Tdx`, `Ths` 三个独立复选框。
+        - 允许用户自由组合，实现点击个股时同时联动 `Visualizer` (TCP IPC Port 26668) 以及本地 `TDX` 和 `THS`；在 `_load_state`、`_save_state` 中同步保存其 Boolean 状态，实现跨会话的自愈恢复。
+        - 在 `_do_linkage` 逻辑中完善了详细的联合联动状态指示，能在状态栏中清爽呈现诸如 `✅ 已触发联动: 000001 (Vis, Tdx)` 的提示。
+        - 绑定了 Tkinter 的 `WM_DELETE_WINDOW` 关闭协议，在窗口销毁前自动抓取并持久化当前的窗口几何大小和位置坐标（`geometry`），实现跨会话位置与尺寸的自动还原。
+    - [x] **实现手动列自定义配置池与交互式 Checkbutton 挂载 (Manual Column Entry & Interactive Checkboxes mount)**：
+        - 在自定义列选项后追加了手动输入文本框 `manual_col_entry`，并绑定了回车键与 `+`（添加）、`-`（移除）按钮。
+        - 输入任意合法的 DataFrame 属性名（如 `ma10d`、`vol`）并按回车或点击 `+` 后，系统会自动将其登记进 `manual_col_pool` 中，同时在 UI 上动态挂载一个全新的复选框，默认勾选并保存，免去了重新冷启动的成本；若点击 `-` 则会即时注销该列。
+        - 去除了冗余的 `"自定义列:"` 文本标签，使整个工具栏空间利用达到极致。
+        - 在 Treeview 渲染时由于采取了松散的 OCP 键解析，任何被激活的手动列皆会自动映射并呈现多周期数值（非数字依然安全打印为 `--`）。
+    - [x] **集成全局自选股“重点关注”与右键上下文菜单联动 (Global Watchlist/Favorites Integration)**：
+        - 在 Treeview 表格中集成了与人气共振相同的右键菜单事件绑定，支持右键快捷 `★ 添加重点关注` 或 `☆ 取消重点关注`。
+        - 订阅了 `GlobalFavoriteManager` 发布/订阅变更事件，任何其他窗口或外部变动触发自选列表更新时，筛选器会自动局部刷新个股 data 行（高亮 `★` 前缀并同步添加 `favorite` 标签）。
+        - 在 Style 配置中为 `favorite` 标签定制了加粗及红色字体样式（`#C62828`），并在筛选数据初始加载时智能匹配高亮状态。
+        - 完善了生命周期管理，在窗口销毁 `on_close` 时自动取消自选订阅，防范内存泄漏。
+        - 实现了重点关注股优先排列置顶渲染机制。在展示筛选结果时，将已被重点关注的个股无损相对顺序并推送到表格最顶部，使其在海量数据中首屏即可一目了然。
+    - [x] **优化工具栏布局防遮挡 (Optimized Toolbar Layout to Prevent Occlusion)**：
+        - 将核心操作按钮 `▶ 运行筛选` 的渲染排位前移到 `参与周期` 勾选框后、`自定义列` 之前，以确保在动态挂载大量指标导致表头无限向右延伸时，最核心的筛选执行按钮永远处于显眼的前端，免除被挤出视口或遮挡的痛点。
+    - [x] **通过自动化持久化验证与无错语法自检**：使用单行模拟运行对勾选变更、手动指标添加、配置文件写盘进行了全链路测试，完美编译无错，测试结果成功回写至 `standalone_tester_config.json`。
+
+## 2026-06-27 15:30
+- [x] **新增底部多周期筛选统计信息面板与指标度量 (Bottom Statistics Panel & Cross-Period Metrics)**：
+    - [x] **建立跨周期收集器 (Zero-Overhead Statistics Collector)**：
+        - 在 `multi_period_strategy_engine.py` 的 `evaluate_strategy` 计算流程中，集成了 `self.last_stats` 字典，收集每个参与周期的个股底数、通过条数、通过率百分比；并在合并筛选（交集/并集）和无符合条件拦截处理中，完整统计出全市场标的底数、最终通过只数和总股比，实现 $O(1)$ 零计算损耗的信息聚拢。
+    - [x] **实现 Tkinter 底部自适应统计信息栏布局 (Bottom Adaptive Statistics Frame Layout)**：
+        - 在 `standalone_multi_period_tester.py` 中新增 `self.stats_frame` 底部栏。通过严格的 `pack` 顺序，确保 `stats_frame` 牢固悬浮在最底部而不被上方 `expand=True` 的主 Treeview 挤出视口。
+        - 动态渲染“单周期通过率”（如 `d: 1092/5535(19.73%) | w: ...`）和“最终筛选结果”（如 `交集共 803 只 / 市场 5535 只 (14.508%)`），支持按所选策略和合并模式（交集/并集）智能切换文本，提供一目了然的数据决策支撑。
+    - [x] **跑通自动化验证与无错语法自检**：对 `test_multi_period_automated.py` 和主客户端进行了回归验证，编译与运行完全正常。
+
+## 2026-06-27 15:10
+- [x] **多周期联动筛选器自定义指标列与极窄自适应列宽模式 (Multi-Period Custom Columns & Ultra-Narrow Column Fit)**：
+    - [x] **集成 'Rank', 'dff', 'dff2', 'dff3' 自定义指标勾选与持久化 (Custom Columns & State Saving)**：
+        - 在独立验证版筛选器 `standalone_multi_period_tester.py` 工具栏中新增了“自定义列”复选框区域，供用户随时点击选择是否显示 `'Rank'`, `'dff'`, `'dff2'`, `'dff3'` 指标。
+        - 更新了 `_load_state`、`_save_state` 和 `_apply_state` 方法，将用户的自定义列偏好配置完美持久化至 `standalone_tester_config.json` 中，支持跨会话状态自愈还原。
+    - [x] **实现多周期指标动态列头生成与按需渲染 (Dynamic Multi-Period Columns Binding)**：
+        - 编写了 `_update_tree_columns` 统一列绑定方法，将勾选的自定义列与当前活跃的“参与周期”交叉组合，动态绑定生成类似 `Rank(d)`, `dff(w)`, `dff2(m)` 等多周期自定义列，并清理了原 `_init_ui` 中硬编码 columns 的冗余逻辑。
+        - 重构了 `_show_results`，当收到筛选结果时，对于每一个自定义列 `{col}_{period}`，自动路由到 `self.engine._period_dfs[period]` 数据帧中，通过个股 `code` 提取最真实的列字段数据并渲染，非数值返回 `'--'`，数值字段自动 round 四舍五入保留两位小数。
+    - [x] **实现极速本地缓存二次更新与周期改变重算 (Flicker-free Cache Refresh)**：
+        - 新增 `_on_custom_col_changed` 和 `_on_period_changed` 差异化事件响应：当用户仅勾选/取消勾选“自定义列”时，直接复用上一次计算保存的 `self.last_result_df` 与 `self.last_elapsed` 瞬间进行局部 Treeview 重绘，实现了真正的无闪烁、无 I/O 重绘；当且仅当改变“参与周期”且缓存不满足时，才触发后台 `_worker` 计算。
+    - [x] **实现窗口列自适应极窄排列模式 (_adjust_column_widths)**：
+        - 独立编写了 `_adjust_column_widths` 极窄自适应列宽测量算法，通过对表头汉字/符号/字母的近似像素测算，动态收窄或放宽各列像素宽（名称列限制 45-75px，数据及自定义列限制最小 32px，最大 100px），确保所有多周期自定义列紧凑平铺，完全消除了空白和溢出。
+    - [x] **无错通过 Python 语法编译与自检**：对修改后的 `standalone_multi_period_tester.py` 进行了 `py_compile` 无错编译，验证零语法及零缩进异常。
+
 ## 2026-06-27 12:00
 - [x] **全体系扩展并同步 45天 (45d) 与 3个月 (3M) 战略交易周期 (System-Wide Support for 45-day & 3-month Strategic Cycles)**：
     - [x] **扩展 Argparse 命令行参数解析器的周期选择**：
