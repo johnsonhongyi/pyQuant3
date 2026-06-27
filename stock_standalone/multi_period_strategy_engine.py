@@ -12,12 +12,18 @@ class MultiPeriodStrategyEngine:
         self._period_dfs: Dict[str, pd.DataFrame] = {}
         self._strategies: List[dict] = []
         self.config_path = "config/multi_period_strategies.json"
+        self.last_stats: dict = {}
         
     def load_period_data(self, period: str, top_now: pd.DataFrame) -> pd.DataFrame:
         """加载指定周期数据（复用 tdd.get_append_lastp_to_df）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
         
+        # 如果已经加载过该周期，直接复用缓存
+        if period in self._period_dfs and not self._period_dfs[period].empty:
+            logger.info(f"Reusing cached data for period {period}...")
+            return self._period_dfs[period]
+            
         # 默认取 60 个 k 线，大周期可以多取
         dl = ct.Resample_LABELS_Days.get(period, 60)
         try:
@@ -44,6 +50,12 @@ class MultiPeriodStrategyEngine:
             
         pass_codes_dict = {}
         
+        cross_mode = strategy_config.get('cross_mode', 'intersection')
+        self.last_stats = {
+            "periods": {},
+            "final": {"total": 0, "pass": 0, "ratio": 0.0, "mode": cross_mode}
+        }
+        
         for period in active_periods:
             if period not in self._period_dfs or self._period_dfs[period].empty:
                 logger.warning(f"Period {period} data not found or empty.")
@@ -59,14 +71,32 @@ class MultiPeriodStrategyEngine:
                 df_clean = df.fillna(0)
                 filtered_df = df_clean.query(cond['filter'])
                 pass_codes_dict[period] = set(filtered_df.index)
-                logger.info(f"Period {period} pass count: {len(filtered_df)}")
+                
+                total_cnt = len(df_clean)
+                pass_cnt = len(filtered_df)
+                ratio = (pass_cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+                self.last_stats["periods"][period] = {
+                    "total": total_cnt,
+                    "pass": pass_cnt,
+                    "ratio": ratio
+                }
+                logger.info(f"Period {period} pass count: {pass_cnt}")
             except Exception as e:
                 logger.error(f"Error evaluating period {period} condition: {e}")
                 
         if not pass_codes_dict:
+            base_period = 'd'
+            if base_period not in self._period_dfs and self._period_dfs:
+                base_period = list(self._period_dfs.keys())[0]
+            total_market = len(self._period_dfs[base_period]) if base_period in self._period_dfs else 0
+            self.last_stats["final"] = {
+                "total": total_market,
+                "pass": 0,
+                "ratio": 0.0,
+                "mode": cross_mode
+            }
             return pd.DataFrame()
             
-        cross_mode = strategy_config.get('cross_mode', 'intersection')
         if cross_mode == 'intersection':
             final_codes = set.intersection(*pass_codes_dict.values())
         else:
@@ -91,6 +121,17 @@ class MultiPeriodStrategyEngine:
         for period in active_periods:
             if period in pass_codes_dict:
                 result_df[f'pass_{period}'] = result_df.index.isin(pass_codes_dict[period])
+                
+        total_market = len(base_df)
+        final_pass = len(valid_codes)
+        final_ratio = (final_pass / total_market * 100) if total_market > 0 else 0.0
+        
+        self.last_stats["final"] = {
+            "total": total_market,
+            "pass": final_pass,
+            "ratio": final_ratio,
+            "mode": cross_mode
+        }
                 
         return result_df
 
