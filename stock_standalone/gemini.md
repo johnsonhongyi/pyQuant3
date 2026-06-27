@@ -1,3 +1,21 @@
+## 2026-06-27 12:00
+- [x] **全体系扩展并同步 45天 (45d) 与 3个月 (3M) 战略交易周期 (System-Wide Support for 45-day & 3-month Strategic Cycles)**：
+    - [x] **扩展 Argparse 命令行参数解析器的周期选择**：
+        - 更新了 `test_bidding_replay.py` 的 `--resample` choices 参数，加入了 `'45d'`, `'3M'`。
+        - 更新了 `jupyterAlgo/AlgoTest/chantdx.py` 的 `-d/--dtype` choices 参数，加入了 `'2d'`, `'3d'`, `'5d'`, `'45d'`, `'3M'`。
+        - 更新了 `chantdxpower.py` 的 `-d/--dtype` choices 参数，配置为 `['5','30','60', 'd', '2d', '3d', '5d', '45d', 'w', 'm', '3M']`。
+        - 更新了 `JohnsonUtil/commonTips.py` 中的 `LineArgmain` 和 `MoniterArgmain` 的 `-d/--dtype` choices 参数，增加了 `'2d', '3d', '5d', '45d'` 及 `'3M'` 支持，确保全平台命令行工具周期参数输入不被拦截阻断。
+        - 更新了 `instock_MonitorTK.py` 命令行启动参数中 `-resample` 的 choices 与 help 说明，加入了 `'5d', '45d', '3M'`，确保界面主程序在通过命令行传递周期参数启动时，不会因参数校验受阻。
+        - 修正了 `instock_MonitorTK.py` 主界面顶部 `resample_combo` 的 `values` 预设，调整为 `['d', '2d', '3d', 'w', 'm', '45d', '3M']` 递增排列，仅显示匹配的周期选项。
+    - [x] **同步策略控制与周期解析管道**：在 `stock_live_strategy.py` 中的 `resolve_stock_key` 方法里，同步更新了周期后缀解析列表（加入 `'2d'`, `'3d'`, `'5d'`, `'45d'`, `'3M'`），使得策略执行管道在盘中进行实时个股 Key 后缀校验时，能完美路由并识别 45天/3月 等大级别数据周期流。
+    - [x] **打通并验证大级别 K线 Resampling 计算闭环**：
+        - 编写并运行了 `scratch/test_resample_expand.py` 自动化测试脚本，对贵州茅台（600519）的 45d 和 3M 大周期数据进行实测提取与聚合计算。
+        - 测试证实：系统能无错加载、转换 Pandas 时序并完美完成 274 列全部技术指标（包含通道指标 `ptop`, `pbottom`, `pbreak`, `pdays`）的大级别 resample 矢量化计算，无任何 KeyError 或类型越界异常。
+    - [x] **完成 Python 语法编译与只读安全自检**：对修改后的 `stock_live_strategy.py`、`test_bidding_replay.py`、`jupyterAlgo/AlgoTest/chantdx.py`、`chantdxpower.py`、`commonTips.py` 以及 `instock_MonitorTK.py` 进行了 `py_compile` 编译验证，所有脚本 100% 物理编译无错通过。
+    - [x] **清理并删除无用的 `data_utils_readonly.py` 冗余副本 (Cleaned Up data_utils_readonly.py)**：
+        - 经全局文本检索验证，确认项目中无任何模块导入或依赖 `data_utils_readonly.py` 副本。
+        - 物理删除了该冗余只读副本，并对主模块 `data_utils.py` 执行了 `py_compile` 编译验证，自检通过无任何异常。
+
 ## 2026-06-26 17:15
 - [x] **实现人气共振行情实时同步与局部无闪烁极速刷新 (Implemented Real-time IPC Sync & Flicker-free Refresh for Popularity Resonance)**：
     - [x] **打通 `IPCSyncManager` 通用行情同步模块**：在 `popularity_resonance_gui.py` 客户端启动时实例化并开启通用 IPC 同步管理器，监听本地 26671 端口，安全承接由主程序推送的包含 `percent`, `trade`, `dff2`, `dff3`, `Rank`, `category` 等字段的全量行情 DataFrame，彻底终结了人气共振与主程序行情脱节的状态。

@@ -4848,11 +4848,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.st_key_sort_value.set(self.st_key_sort) 
         
         # --- resample 下拉框 ---
-        resampleValues = ["d", "2d", "3d", "w", "m"]
+        resampleValues = ['d', '2d', '3d', 'w', 'm', '45d', '3M']
         self.top_resample_lbl = tk.Label(ctrl_frame, text="resample:")
         self.top_resample_lbl.pack(side="left")
-        self.resample_combo = ttk.Combobox(ctrl_frame, values=resampleValues, width=3)
-        self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
+        self.resample_combo = ttk.Combobox(ctrl_frame, values=resampleValues, width=4)
+        try:
+            curr_val = self.global_values.getkey("resample")
+            curr_idx = resampleValues.index(curr_val)
+        except ValueError:
+            curr_idx = 0
+        self.resample_combo.current(curr_idx)
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         
@@ -11478,7 +11483,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             resample_var = tk.StringVar(value=current_resample)
             
             resample_combo = ttk.Combobox(left_frame, textvariable=resample_var, width=10)
-            resample_combo['values'] = ['d', 'w', 'm', '30', '60']
+            resample_combo['values'] = ['d', '2d', '3d', 'w', 'm','45d', '3M']
             resample_combo.pack(anchor="w", padx=10, pady=2)
 
             tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
@@ -21954,9 +21959,9 @@ def parse_args():
     parser.add_argument(
         "-resample",
         type=str,
-        choices=['2d', '3d', 'w', 'm', 'd'],
+        choices=['2d', '3d', '45d', 'w', 'm', '3M', 'd'],
         default=None,
-        help="K线重采样周期，可选：2d, 3d, w, m, d (默认从配置文件读取)"
+        help="K线重采样周期，可选：2d, 3d, 45d, w, m, 3M, d (默认从配置文件读取)"
     )
 
     parser.add_argument(

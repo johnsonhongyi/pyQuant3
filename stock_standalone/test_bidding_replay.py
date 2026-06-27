@@ -1077,7 +1077,7 @@ Usage Examples:
         parser.add_argument("--start", type=str, default="09:25:00", help="Simulation start time (HH:MM:SS)")
         parser.add_argument("--end", type=str, default="15:00:00", help="Simulation end time (HH:MM:SS)")
         parser.add_argument("--verbose", action="store_true", help="Show detailed price/performance logs (not concise).")
-        parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', 'w', 'm'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
+        parser.add_argument("--resample", type=str, default=None, choices=['d', '2d', '3d', '5d', '45d', 'w', 'm', '3M'], help="Data resample period for baseline registry (d: daily, w: weekly, m: monthly, etc.)")
         parser.add_argument("--codes", type=str, default=None, help="Stock codes for targeted testing (comma-separated, e.g., 688787,002536)")
         parser.add_argument("--date", type=str, default=None, help="Replay specific date (YYYY-MM-DD)")
         parser.add_argument("--today", action="store_true", help="Automatically replay today's data")

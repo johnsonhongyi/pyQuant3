@@ -3782,7 +3782,7 @@ class StockLiveStrategy:
             return pure_code
             
         # 尝试常用后缀 (兼容旧数据)
-        for suffix in ['d', 'w', 'm', '3d', '5', '15', '30', '60']:
+        for suffix in ['d', 'w', 'm', '2d', '3d', '5d', '45d', '3M', '5', '15', '30', '60']:
             alias = f"{pure_code}_{suffix}"
             if alias in self._monitored_stocks:
                 return alias

@@ -1331,7 +1331,7 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['5','30','60', 'd', '3d','w', 'm'], default='d', help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['5','30','60', 'd', '2d', '3d', '5d', '45d', 'w', 'm', '3M'], default='d', help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f', help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low', help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y', help='find duration low')

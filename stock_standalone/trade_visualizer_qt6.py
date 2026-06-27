@@ -1078,7 +1078,8 @@ duration_date_month = 1000    #3-ma20d
 #m : 510 ma26
 
 Resample_LABELS_Days = {'d':duration_date_day,'2d':duration_date_2d,'3d':duration_date_up,
-                      'w':duration_date_week,'m':duration_date_month}
+                      '5d':300, '45d':3000,
+                      'w':duration_date_week,'m':duration_date_month, '3M':4000}
 
 class DataLoaderThread(QThread):
     data_loaded: pyqtSignal = pyqtSignal(object, object, object, object) # code, day_df, tick_df, signal_history_df
@@ -3334,7 +3335,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._render_seq = 0 # [NEW] 渲染任务序列号，用于在耗时阶段检测并中断过时的渲染任务
 
         # ---- resample state ----
-        self.resample_keys = ['d','2d', '3d', 'w', 'm']
+        self.resample_keys = ['d','2d', '3d', 'w', 'm', '45d','3M']
 
         if self.resample in self.resample_keys:
             self.current_resample_idx = self.resample_keys.index(self.resample)
@@ -5632,6 +5633,8 @@ class MainWindow(QMainWindow, WindowMixin):
             '3d': '3D',
             'w': '1W',
             'm': '1M',
+            '45d': '45D',
+            '3M': '3M',
         }
 
         for key in self.resample_keys:
