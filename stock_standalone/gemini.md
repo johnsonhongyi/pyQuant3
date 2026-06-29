@@ -1,3 +1,17 @@
+## 2026-06-29 23:45
+- [x] **实现策略编辑器周期过滤条件的非破坏性启用/禁用机制与菜单联动自动忽略过滤 (Non-Destructive Condition Toggle & Menu Linkage Bypass)**：
+    - [x] **引入 `enabled` 状态控制，避免物理删除条件 (Preserved Conditions with enabled flag)**：在 `MultiPeriodStrategyEditor` 表单同步逻辑 `_sync_to_current_strategy` 中，无论周期的复选框勾选与否，只要曾经编辑过该过滤表达式，在保存时均予以完整保留，不再从 `conditions` 中物理剔除，而仅仅是将对应的 `"enabled"` 属性置为 `False`。
+    - [x] **实现关闭周期条件的文本原样展示与自愈加载 (Restored Original Condition Texts on Uncheck)**：更新了 `_on_select` 对周期的反填流程，在反填未启用（`enabled: False`）的周期时，仍会把过滤表达式填充到文本框内并做禁用处理；再次勾选后将自动转为可编辑状态，免去了重新输入的繁琐过程。首次无配置勾选时，自动填充默认过滤规则 `close > ma5d` 确保开箱即用。
+    - [x] **对齐导入与 JSON 应用清洗 Schema (Aligned JSON Import & Apply Schema)**：在 `_import_json_strategy` 和 `_apply_json_to_form` 模块中同步适配并提取了 `"enabled"` 标识，确保无论通过文本导入还是手动贴入，条件开关在内存与磁盘交互时始终对齐。
+    - [x] **策略引擎联动，自动屏蔽未勾选或关闭周期的限制过滤 (Automated Pass-All for Disabled / Unchecked Periods)**：在 `evaluate_strategy` 中增加了对 `cond.get('enabled', True)` 的有效性判定。如果某个周期虽然配了规则，但在策略中为 `enabled: False` 或是当前主窗口菜单（`active_periods`）中未选中它，则该周期自动短路并被引擎视为 display-only (只读展示周期)，所有个股在对应周期上置为 `pass: True` 且不进行交并集强力过滤，百分百达成了菜单没有选择时不启用过滤的诉求。
+
+## 2026-06-29 23:35
+- [x] **深度修复多周期动量 `win` 计算逻辑与图表视觉对齐 (Strict Multi-Period Momentum Alignment)**：
+    - [x] **废除放宽结构，实施严苛连阳判定 (Strict Consecutive Up-Closes)**：彻底重构了 `data_utils.py` 中 `strong_momentum_large_cycle_vect_new` 的路径A判定逻辑。将原本“允许出现1根高点回落”的放宽版本替换为严苛的 `cond_trend = np.all(P[:, c] > P[:, p] * 0.995)`。这意味着 `win` 现在严格等同于可视化图表上的“连阳K线数量”（收盘价连续抬高），完美解决了 000021 周线 `win(w)` 虚高为 9 而实际图表仅为 4 连阳的不一致问题。
+    - [x] **剔除路径B导致的连阳虚增 (Removed Path B Deflation)**：移除了原大周期计算中的“回踩支撑反包结构（路径B）”对 `max_win` 变量的劫持和直接赋值。原逻辑会将整个回踩区间的跨度粗暴写入 `win`，导致含有阴线的形态也被强行标高。移除后，`win` 指标回归其最纯粹的动量连续性本质，恢复了不同个股间的绝对区分度。
+    - [x] **验证实盘 `shift_intraday` 幽灵K线融合精度 (Verified Intraday Ghost Bar Fusion)**：编写独立物理脚本对 000021、688403、002674 及 603650 的 w、m 周期底层提取矩阵进行了脱机模拟与对齐验证。证明在配合 `shift_intraday=True` 后，实盘最新一期的价格被精确平移至序列前端（如 000021 的 58.86 完美衔接于 53.51 之前），生成了丝滑的 `58.86 > 53.51 > 39.57 > 29.0 > 25.57` 数据流，使其月线 `win(m)` 正确输出为 5 连阳。
+    - [x] **解决 `win(m): 0` 显示缺陷 (Resolved False Zero Display)**：明确了部分标的出现 `win(m): 0` 缺陷系由原先“高点不破” (`cond_high`) 对 `w=2` 的严格误判以及本地非交易时段持久化缓存双重叠加所致。通过在底层根治连阳判定公式并平铺合并矩阵计算，彻底消除了断层报错。
+
 ## 2026-06-29 18:28
 - [x] **根治缓存失效与UI状态不同步双重Bug (Fixed Cache Invalidation + Thread-safe Status UI)**：
     - [x] **引入 _top_now_cache_ts / _period_cache_ts 时间戳体系**：在 __init__ 中新增 _top_now_cache_ts = 0.0 与 _period_cache_ts: dict = {} 分别追踪 	op_now 和各周期数据的最后加载时间，为 TTL 判断提供时间依据。

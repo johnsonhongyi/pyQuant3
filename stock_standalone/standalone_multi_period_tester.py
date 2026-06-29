@@ -419,7 +419,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.tree.column(col, width=final_w, minwidth=20, stretch=True)
                 
     def _on_strategy_selected(self):
-        """切换策略时：保存状态 + 自动将周期勾选同步为该策略的 conditions 键集合"""
+        """切换策略时：保存状态，不改变周期的勾选，并立即触发筛选展示数据"""
         strat_name = self.strategy_var.get()
         strat_config = None
         for s in self.strategies:
@@ -428,16 +428,10 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 strat_config = s
                 break
         
-        if strat_config:
-            # 同步周期勾选：策略有配置该周期 → 勾选；否则不自动修改（已勾选的保留）
-            # 规则：策略 conditions 中有效的周期必须全部勾选；不在策略中的周期不强制取消
-            strategy_periods = set(strat_config.get('conditions', {}).keys())
-            for p, var in self.period_vars.items():
-                if p in strategy_periods:
-                    var.set(True)   # 策略需要 → 自动勾选
-                # 不在策略中的周期不强制取消，用户可自行决定
-        
         self._save_state()
+        
+        # 切换策略后，以当前显示的 col 及菜单选择的周期为准，立即运行筛选（不强刷缓存）
+        self.run_filter(force_reload=False)
 
     def sort_column(self, col, reverse):
         data = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
@@ -1365,14 +1359,18 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         else:
             strat['cross_mode'] = 'intersection'
             
-        # 同步各周期条件
+        # 同步各周期条件：保留所有配置的周期条件（无论勾选与否），只是通过 enabled 区分状态
         new_conditions = {}
         for period, row in self.cond_rows.items():
-            if row['enable_var'].get():
-                expr = row['expr_var'].get().strip()
+            expr = row['expr_var'].get().strip()
+            is_checked = row['enable_var'].get()
+            old_cond = strat.get('conditions', {}).get(period, {})
+            
+            if is_checked or expr or old_cond:
                 new_conditions[period] = {
-                    "filter": expr,
-                    "weight": strat.get('conditions', {}).get(period, {}).get('weight', 1.0)
+                    "filter": expr or old_cond.get('filter', 'close > ma5d'),
+                    "weight": old_cond.get('weight', 1.0),
+                    "enabled": is_checked
                 }
         strat['conditions'] = new_conditions
 
@@ -1410,10 +1408,15 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         for period, row in self.cond_rows.items():
             cond = strat.get('conditions', {}).get(period)
             if cond is not None:
-                row['enable_var'].set(True)
+                is_enabled = cond.get('enabled', True)
+                row['enable_var'].set(is_enabled)
                 row['expr_var'].set(cond.get('filter', ''))
-                row['entry'].config(state="normal")
-                row['btn_val'].config(state="normal")
+                if is_enabled:
+                    row['entry'].config(state="normal")
+                    row['btn_val'].config(state="normal")
+                else:
+                    row['entry'].config(state="disabled")
+                    row['btn_val'].config(state="disabled")
             else:
                 row['enable_var'].set(False)
                 row['expr_var'].set('')
@@ -1728,9 +1731,13 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
                 if isinstance(cond, dict):
                     flt = cond.get('filter', '').strip()
                     if flt:
-                        new_conditions[p] = {'filter': flt, 'weight': float(cond.get('weight', 1.0))}
+                        new_conditions[p] = {
+                            'filter': flt,
+                            'weight': float(cond.get('weight', 1.0)),
+                            'enabled': bool(cond.get('enabled', True))
+                        }
                 elif isinstance(cond, str) and cond.strip():
-                    new_conditions[p] = {'filter': cond.strip(), 'weight': 1.0}
+                    new_conditions[p] = {'filter': cond.strip(), 'weight': 1.0, 'enabled': True}
             if new_conditions:
                 strat['conditions'] = new_conditions
 
