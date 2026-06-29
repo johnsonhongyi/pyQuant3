@@ -1,3 +1,16 @@
+## 2026-06-27 18:15
+- [x] **多周期策略筛选器整合 (Integrating Multi-Period Strategy Tester)**:
+    - [x] **动态窗口生命周期管理 (Dynamic Window Lifecycle Management)**: 重构了 `StandaloneMultiPeriodTester` 使得当其作为 `tk.Toplevel` 子窗口嵌入主程序运行时，关闭操作转为 `withdraw()` 隐藏窗口而非 `destroy()` 销毁以保留状态；当作为独立程序运行时，正常释放并退订。
+    - [x] **主界面多入口注册与配置管理 (Main UI Entry Registration & Config)**:
+        - 注册 "多周期筛选" 到底部 "功能选择" 菜单下拉框并实现 `run_action` 跳转路由。
+        - 主窗体顶部快捷栏新增 "多周期🎯" 快捷按钮，并同步注册到 `open_top_bar_settings` 快捷栏控制中以支持可视化隐藏与配置持久化。
+    - [x] **全局快捷键联动与状态调度 (Global Shortcuts Alt-M)**:
+        - 在主窗口中注册 `<Alt-m>` 和 `<Alt-M>` 快捷键，实现对多周期筛选窗口的一键显隐切换与焦点重获。
+    - [x] **多进程生命周期与退订安全保护 (Process Lifecycle & Unsubscribe Guard)**:
+        - 在主窗口 `on_close` 销毁逻辑中，补全了对多周期筛选子窗口的显示退订（`GlobalFavoriteManager.unsubscribe`）与窗口 `destroy()` 动作，彻底阻断了内存泄露或 zombie 子进程残留的风险。
+    - [x] **无错编译与自检 (Syntax Verification & Self-Test)**:
+        - 完成了对 `instock_MonitorTK.py` 和 `standalone_multi_period_tester.py` 的语法无错编译验证。
+
 ## 2026-06-27 15:45
 - [x] **多重并发联动控制与手动自定义指标动态生成 (Multi-Target Linkage & Dynamic Manual Column Entry)**：
     - [x] **重构独立并行联动机制与状态持久化 (Parallel Linkage & State Saving)**：

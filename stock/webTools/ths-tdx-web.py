@@ -296,7 +296,8 @@ if __name__ == '__main__':
 
     if not find_window_by_title_safe('人气综合排行榜2.2'):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
-        run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.22.exe")
+        # run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.22.exe")
+        run_system_fpath("D:\\JohnsonProgram\\instockMonitorTK\\人气共振2.22.exe")
         time.sleep(1)
     if not find_window_by_title_safe('行业跟随'):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
