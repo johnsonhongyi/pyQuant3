@@ -454,7 +454,13 @@ def complete_indicators_pipeline(
         if resample == 'd':
             result_opt = strong_momentum_large_cycle_vect(top_all, max_days=cct.compute_lastdays, winlimit=1)
         else:
-            result_opt = strong_momentum_large_cycle_vect_new(top_all, max_days=cct.compute_lastdays, winlimit=1)
+            # pipeline 中 is_same=True 时已经完成了 lastNd 列的移位（close → lastp1d）
+            # is_same=True 时 win_start_idx=2: 从上个已完成周期起算，排除当前未完成的K线
+            _is_same_flag = locals().get('is_same', False)
+            _win_start = 2 if _is_same_flag else 1
+            result_opt = strong_momentum_large_cycle_vect_new(
+                top_all, max_days=cct.compute_lastdays, winlimit=1,
+                shift_intraday=False, win_start_idx=_win_start)
         
     with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
         clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
@@ -1969,7 +1975,7 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
 # df = pd.DataFrame(vect_daily_t)
 # check_real_time(df, ['688239', '601360'])
 
-def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False, shift_intraday=True):
+def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False, shift_intraday=True, win_start_idx=1):
     N = len(df)
     if N == 0:
         return {}
@@ -2024,33 +2030,85 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
     L = get_val_matrix('lastl')
     V = get_val_matrix('lastv')
 
-    # === 2. 主升结构窗口识别 ===
+    # === 2. 主升结构窗口识别 (双路径: 趋势延续 + 回踩反包) ===
     max_win = np.zeros(N, dtype=int)
 
-    for w in range(2, max_days + 1):
+    # 取 ma10d/ma20d 作为支撑带（用于路径B回踩支撑判断）
+    # 优先取均值，单列有效时退化为该列，均无效时退化为 0
+    ma10_vals = df['ma10d'].values if 'ma10d' in df.columns else np.zeros(N)
+    ma20_vals = df['ma20d'].values if 'ma20d' in df.columns else np.zeros(N)
+    has_ma10 = ma10_vals > 0
+    has_ma20 = ma20_vals > 0
+    support_band = np.where(
+        has_ma10 & has_ma20,
+        (ma10_vals + ma20_vals) / 2,          # ma10/ma20 中轨
+        np.where(has_ma20, ma20_vals,
+                 np.where(has_ma10, ma10_vals, 0.0))
+    )
 
-        c = np.arange(1, w)
-        p = np.arange(2, w + 1)
+    # --- 路径A: 放宽版经典主升结构 ---
+    # 大周期（月/周）允许出现1根回调K线（高点下移）而不判零
+    # 去掉 cond_low 约束：月线/周线低点在回踩过程中自然下移是正常现象，
+    # 强制低点抬高会误杀大量真实的大周期上升趋势。支撑结构由路径B单独识别。
+    for w in range(win_start_idx + 1, max_days + 1):
+        c = np.arange(win_start_idx, w)
+        p = np.arange(win_start_idx + 1, w + 1)
 
-        # ① 高点不破趋势
-        cond_high = np.all(H[:, c] >= H[:, p], axis=1)
+        # ① 高点不破趋势（放宽：最多允许1根高点回落）
+        high_ok = H[:, c] >= H[:, p]                        # (N, w-1) bool
+        cond_high = np.sum(high_ok, axis=1) >= max(1, high_ok.shape[1] - 1)
 
-        # ② 低点整体抬高（允许2%噪音）
-        cond_low = np.all(L[:, 1:w] >= L[:, 2:w+1] * 0.98, axis=1)
+        # ② 整体上涨（当前价 > w周期前价格）
+        cond_trend = P[:, win_start_idx] > P[:, w]
 
-        # ③ 整体上涨
-        cond_trend = P[:, 1] > P[:, w]
+        # ③ 阳线占多数（避免阴跌结构误判，月线至少一半为上涨月）
+        up_days = np.sum(P[:, win_start_idx:w+1] > P[:, win_start_idx+1:w+2], axis=1)
+        cond_bull = up_days >= max(1, (w - win_start_idx + 1) // 2)
 
-        # ④ 阳线占多数（避免阴跌结构误判）
-        up_days = np.sum(P[:, 1:w+1] > P[:, 2:w+2], axis=1)
-        cond_bull = up_days >= (w // 2)
+        combined = cond_high & cond_trend & cond_bull
+        max_win[combined] = np.maximum(max_win[combined], w - win_start_idx + 1)
+        # 注意: 不在此处 break，月线场景下 w=2 可能因近期回调而 False，
+        # 但 w=3,4,5 窗口覆盖整体上涨趋势完全成立，必须继续循环。
 
-        combined = cond_high & cond_low & cond_trend & cond_bull
+    # --- 路径B: 回踩支撑反包结构（大阳锚点 → 守 ma10/ma20 → 反包加速）---
+    # 核心逻辑：
+    #   1. 找到近期"大阳锚点K线"（涨幅 > 5%）
+    #   2. 锚点之后的回调低点 >= ma10/ma20 支撑带（诱空不破位）
+    #   3. 当前K线已反包或接近回调K线的高点（反包加速确认）
+    #   4. 整体结构仍在上行（current > pre-anchor）
+    _usable = min(max_days + 1, P.shape[1] - 1)
+    for anchor in range(win_start_idx + 1, min(_usable - 1, 7 + win_start_idx - 1)):
+        # 锚点大阳：anchor期前涨幅 > 3%（月线3%已属显著大阳，周线同理）
+        pct_anchor = (P[:, anchor] - P[:, anchor + 1]) / np.maximum(P[:, anchor + 1], 1e-9) * 100
+        is_big_anchor = pct_anchor > 3.0
 
-        if not np.any(combined):
-            break
+        if not np.any(is_big_anchor):
+            continue
 
-        max_win[combined] = w
+        # 回调区间: win_start_idx 到 anchor-1（锚点之后、当前之前的所有K线）
+        anchor_eff = anchor
+        if anchor_eff == win_start_idx + 1:
+            pullback_low  = L[:, win_start_idx]
+            pullback_high = H[:, win_start_idx]
+        else:
+            pullback_low  = np.min(L[:, win_start_idx:anchor_eff], axis=1)
+            pullback_high = np.max(H[:, win_start_idx:anchor_eff], axis=1)
+
+        # 条件1：回调低点守住 ma10/ma20 支撑带（允许3%缓冲）
+        # 若 support_band=0（无均线数据），则退化为锚点收盘的88%
+        eff_support = np.where(support_band > 0, support_band, P[:, anchor] * 0.88)
+        cond_support = pullback_low >= eff_support * 0.97
+
+        # 条件2：当前K线已反包或接近回调高点（97%即视为有效反包）
+        cond_engulf = P[:, win_start_idx] >= pullback_high * 0.97
+
+        # 条件3：整体仍在上行（current > anchor前一根）
+        pre_idx = min(anchor_eff + 2, _usable)
+        cond_overall_up = P[:, win_start_idx] > P[:, pre_idx]
+
+        comb_b = is_big_anchor & cond_support & cond_engulf & cond_overall_up
+        win_b  = anchor - win_start_idx + 2          # 覆盖的K线数（锚点到当前）
+        max_win[comb_b] = np.maximum(max_win[comb_b], win_b)
 
     # === 3. 过滤有效窗口 ===
     keep_idx = np.where(max_win >= winlimit)[0]
