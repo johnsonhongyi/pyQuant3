@@ -19,6 +19,7 @@ class MultiPeriodStrategyEngine:
         """加载指定周期数据（复用 tdd.get_append_lastp_to_df）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
+        from JohnsonUtil import commonTips as cct
         
         # 如果已经加载过该周期，直接复用缓存
         if period in self._period_dfs and not self._period_dfs[period].empty:
@@ -29,10 +30,11 @@ class MultiPeriodStrategyEngine:
         dl = ct.Resample_LABELS_Days.get(period, 60)
         try:
             logger.info(f"Loading data for period {period}...")
+            
             # 兼容 45d 和 3M 的 resample
             df, _ = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period)
             
-            # 使用 complete_indicators_pipeline 确保所有均线和计算指标齐全
+            # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
             from data_utils import complete_indicators_pipeline
             if df is not None and not df.empty:
                 df = complete_indicators_pipeline(df, logger, resample=period)
@@ -57,6 +59,9 @@ class MultiPeriodStrategyEngine:
             "final": {"total": 0, "pass": 0, "ratio": 0.0, "mode": cross_mode}
         }
         
+        # 默认 filter：当策略未配置该周期的条件时使用
+        _DEFAULT_FILTER = "close > ma5d"
+        
         for period in active_periods:
             if period not in self._period_dfs or self._period_dfs[period].empty:
                 logger.warning(f"Period {period} data not found or empty.")
@@ -64,7 +69,9 @@ class MultiPeriodStrategyEngine:
                 
             cond = strategy_config['conditions'].get(period)
             if not cond:
-                continue
+                # 周期已勾选但策略未配置该周期 → 用默认条件参与筛选（不跳过）
+                logger.info(f"Period {period} has no condition in strategy, using default: {_DEFAULT_FILTER}")
+                cond = {"filter": _DEFAULT_FILTER, "weight": 1.0}
                 
             df = self._period_dfs[period]
             try:
@@ -84,6 +91,7 @@ class MultiPeriodStrategyEngine:
                 logger.info(f"Period {period} pass count: {pass_cnt}")
             except Exception as e:
                 logger.error(f"Error evaluating period {period} condition: {e}")
+
                 
         if not pass_codes_dict:
             base_period = 'd'

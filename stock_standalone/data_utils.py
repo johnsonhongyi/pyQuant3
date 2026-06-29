@@ -273,6 +273,162 @@ def complete_indicators_pipeline(
 
     time_sum = time.time()
     
+    # 0. 针对非日线大周期 (w, m, 3d, 45d, 3M) 执行实盘数据对齐与 Ghost Bar 合并
+    if resample != 'd' and 'close' in top_all.columns:
+        import numpy as np
+        
+        today = cct.get_today()
+        # 获取数据库中最后一天的数据日期（通常为上一个交易日）
+        last_date = cct.get_trade_day_before(1)
+        if last_date == today:
+            last_date = cct.get_trade_day_before(2)
+        
+        is_trade_day = cct.get_trade_date_status()
+        now_time = cct.get_now_time_int()
+        # 只有在今天为交易日且已经开始交易（或盘中/盘后未归档）时，才需要进行实时行情对齐和移位
+        if is_trade_day and now_time >= 915 and last_date and today and last_date < today:
+            # 辅助函数：判断两个日期是否在 resample 周期下属于同一个 period
+            def check_same_period(date1, date2, period):
+                try:
+                    d1 = pd.to_datetime(date1).date()
+                    d2 = pd.to_datetime(date2).date()
+                    p_lower = period.lower()
+                    if p_lower == 'w':
+                        return d1.isocalendar()[:2] == d2.isocalendar()[:2]
+                    elif p_lower == 'm':
+                        return (d1.year, d1.month) == (d2.year, d2.month)
+                    elif p_lower in ('3d', '45d', '3m', '3M'):
+                        s = pd.Series([0, 0], index=[pd.Timestamp(d1), pd.Timestamp(d2)])
+                        resampled = s.resample(period, label='right').mean()
+                        return len(resampled) == 1
+                except Exception:
+                    pass
+                return False
+
+            is_same = check_same_period(last_date, today, resample)
+            
+            # 动态找出数据列中实际存在的最大周期 d 数量
+            max_d = 1
+            for col in top_all.columns:
+                if col.startswith('lastp') and col.endswith('d'):
+                    try:
+                        d_num = int(col[5:-1])
+                        if d_num > max_d:
+                            max_d = d_num
+                    except ValueError:
+                        pass
+
+            prefixes = ['lasto', 'lasth', 'lastl', 'lastp', 'lastv', 'upper', 'ma5', 'ma20', 'ma60', 'perc', 'per', 'eval', 'signal']
+            
+            # 过滤出有有效实时报价的股票
+            valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+            if valid_mask.any():
+                if is_same:
+                    # (0) 同一周期下，底层的 last1d 等列已经被置为当期(例如当周/当月周一)的局部指标。
+                    # 我们必须将所有的 lastNd 历史指示器列往后移位1位，使 1d 代表上一个已完成的周期，2d 代表上上个，以此类推。
+                    # 同时保留当期的 lopen/lhigh/llow/lvol 用于当期实时合并。
+                    def parse_indicator_col(col):
+                        if col.endswith('d'):
+                            body = col[:-1]
+                            i = len(body) - 1
+                            while i >= 0 and body[i].isdigit():
+                                i -= 1
+                            if i < len(body) - 1:
+                                prefix = body[:i+1]
+                                idx = int(body[i+1:])
+                                return prefix, idx, 'd'
+                        else:
+                            i = len(col) - 1
+                            while i >= 0 and col[i].isdigit():
+                                i -= 1
+                            if i < len(col) - 1:
+                                prefix = col[:i+1]
+                                idx = int(col[i+1:])
+                                return prefix, idx, ''
+                        return None
+
+                    shifted_values = {}
+                    for col in top_all.columns:
+                        parsed = parse_indicator_col(col)
+                        if parsed:
+                            prefix, idx, suffix = parsed
+                            src_col = f"{prefix}{idx+1}{suffix}"
+                            if src_col in top_all.columns:
+                                shifted_values[col] = top_all[src_col]
+                            else:
+                                shifted_values[col] = np.nan
+                    
+                    for col, val in shifted_values.items():
+                        top_all.loc[valid_mask, col] = val
+
+                    # (1) 同一周期：将今日实时行情合并到当前的周期 OHLC 中
+                    if 'lopen' in top_all.columns:
+                        top_all.loc[valid_mask, 'open'] = np.where(
+                            top_all.loc[valid_mask, 'lopen'] > 0,
+                            top_all.loc[valid_mask, 'lopen'],
+                            top_all.loc[valid_mask, 'open']
+                        )
+                    if 'lhigh' in top_all.columns:
+                        top_all.loc[valid_mask, 'high'] = np.maximum(
+                            top_all.loc[valid_mask, 'lhigh'].fillna(0),
+                            top_all.loc[valid_mask, 'high'].fillna(0)
+                        )
+                    if 'llow' in top_all.columns:
+                        top_all.loc[valid_mask, 'low'] = np.where(
+                            (top_all.loc[valid_mask, 'llow'] > 0) & (top_all.loc[valid_mask, 'low'] > 0),
+                            np.minimum(top_all.loc[valid_mask, 'llow'], top_all.loc[valid_mask, 'low']),
+                            np.where(top_all.loc[valid_mask, 'low'] > 0, top_all.loc[valid_mask, 'low'], top_all.loc[valid_mask, 'llow'])
+                        )
+                    if 'lvol' in top_all.columns:
+                        if 'vol' in top_all.columns:
+                            top_all.loc[valid_mask, 'vol'] = top_all.loc[valid_mask, 'lvol'].fillna(0) + top_all.loc[valid_mask, 'vol'].fillna(0)
+                        if 'volume' in top_all.columns:
+                            top_all.loc[valid_mask, 'volume'] = top_all.loc[valid_mask, 'lvol'].fillna(0) + top_all.loc[valid_mask, 'volume'].fillna(0)
+                else:
+                    # (2) 全新周期：不需要合并历史，OHLC 已经是今日的实时行情
+                    pass
+                
+                # (3) 重新计算当前周期的涨跌幅 percent (即 close 相对于前一周期昨收 lastp1d)
+                if 'lastp1d' in top_all.columns:
+                    top_all.loc[valid_mask, 'percent'] = (
+                        top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
+                    ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
+                    top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
+                
+                # (4) 重新计算均线指标 (包含今日实时价格 close，与历史 lastp1d, lastp2d 等)
+                # 计算 MA5
+                ma5_cols = ['close'] + [f'lastp{i}d' for i in range(1, 5)]
+                available_ma5 = [c for c in ma5_cols if c in top_all.columns]
+                if len(available_ma5) > 1:
+                    ma5_sum = sum(top_all[c].fillna(0) for c in available_ma5)
+                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma5)
+                    top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+                    top_all.loc[valid_mask, 'ma51d'] = top_all.loc[valid_mask, 'ma5d']
+                    
+                # 计算 MA10
+                ma10_cols = ['close'] + [f'lastp{i}d' for i in range(1, 10)]
+                available_ma10 = [c for c in ma10_cols if c in top_all.columns]
+                if len(available_ma10) > 1:
+                    ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
+                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
+                    top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+                    
+                # 计算 MA20
+                ma20_cols = ['close'] + [f'lastp{i}d' for i in range(1, 20)]
+                available_ma20 = [c for c in ma20_cols if c in top_all.columns]
+                if len(available_ma20) > 1:
+                    ma20_sum = sum(top_all[c].fillna(0) for c in available_ma20)
+                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma20)
+                    top_all.loc[valid_mask, 'ma20d'] = (ma20_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+                    top_all.loc[valid_mask, 'ma201d'] = top_all.loc[valid_mask, 'ma20d']
+                    
+                # 计算 MA60
+                ma60_cols = ['close'] + [f'lastp{i}d' for i in range(1, 60)]
+                available_ma60 = [c for c in ma60_cols if c in top_all.columns]
+                if len(available_ma60) > 1:
+                    ma60_sum = sum(top_all[c].fillna(0) for c in available_ma60)
+                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma60)
+                    top_all.loc[valid_mask, 'ma60d'] = (ma60_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
     # 1. 基础指标计算
     with timed_ctx("calc_indicators", warn_ms=1000):
         top_all = calc_indicators(top_all, logger, resample)
@@ -1813,10 +1969,44 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
 # df = pd.DataFrame(vect_daily_t)
 # check_real_time(df, ['688239', '601360'])
 
-def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False):
+def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False, shift_intraday=True):
     N = len(df)
     if N == 0:
         return {}
+
+    # === 0. 仅在 shift_intraday=True 且满足条件时，构造临时 shifted DataFrame 使得动量计算包含当期/当日实时 bar ===
+    if shift_intraday and 'close' in df.columns and 'lastp1d' in df.columns:
+        max_d = 1
+        for col in df.columns:
+            if col.startswith('lastp') and col.endswith('d'):
+                try:
+                    d_num = int(col[5:-1])
+                    if d_num > max_d:
+                        max_d = d_num
+                except ValueError:
+                    pass
+        
+        df_shifted = df.copy()
+        valid_mask = (df['close'] > 0) & (df['close'].notna())
+        
+        p0 = df['lastp0d'] if 'lastp0d' in df.columns else df['close']
+        h0 = df['lasth0d'] if 'lasth0d' in df.columns else df['high']
+        l0 = df['lastl0d'] if 'lastl0d' in df.columns else df['low']
+        v0 = df['lastv0d'] if 'lastv0d' in df.columns else (df['vol'] if 'vol' in df.columns else df['volume'])
+        
+        for i in range(max_d, 0, -1):
+            if i == 1:
+                df_shifted.loc[valid_mask, 'lastp1d'] = p0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lasth1d'] = h0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastl1d'] = l0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastv1d'] = v0.loc[valid_mask]
+            else:
+                for prefix in ['lastp', 'lasth', 'lastl', 'lastv']:
+                    dest_col = f"{prefix}{i}d"
+                    src_col = f"{prefix}{i-1}d"
+                    if src_col in df.columns:
+                        df_shifted.loc[valid_mask, dest_col] = df.loc[valid_mask, src_col]
+        df = df_shifted
 
     import numpy as np
 
@@ -1902,9 +2092,43 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
     }
 
 
-def strong_momentum_large_cycle_vect(df, max_days=10, winlimit=2,debug=False):
+def strong_momentum_large_cycle_vect(df, max_days=10, winlimit=2,debug=False, shift_intraday=True):
     N = len(df)
     if N == 0: return {}
+
+    # === 0. 仅在 shift_intraday=True 且满足条件时，构造临时 shifted DataFrame 使得动量计算包含当期/当日实时 bar ===
+    if shift_intraday and 'close' in df.columns and 'lastp1d' in df.columns:
+        max_d = 1
+        for col in df.columns:
+            if col.startswith('lastp') and col.endswith('d'):
+                try:
+                    d_num = int(col[5:-1])
+                    if d_num > max_d:
+                        max_d = d_num
+                except ValueError:
+                    pass
+        
+        df_shifted = df.copy()
+        valid_mask = (df['close'] > 0) & (df['close'].notna())
+        
+        p0 = df['lastp0d'] if 'lastp0d' in df.columns else df['close']
+        h0 = df['lasth0d'] if 'lasth0d' in df.columns else df['high']
+        l0 = df['lastl0d'] if 'lastl0d' in df.columns else df['low']
+        v0 = df['lastv0d'] if 'lastv0d' in df.columns else (df['vol'] if 'vol' in df.columns else df['volume'])
+        
+        for i in range(max_d, 0, -1):
+            if i == 1:
+                df_shifted.loc[valid_mask, 'lastp1d'] = p0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lasth1d'] = h0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastl1d'] = l0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastv1d'] = v0.loc[valid_mask]
+            else:
+                for prefix in ['lastp', 'lasth', 'lastl', 'lastv']:
+                    dest_col = f"{prefix}{i}d"
+                    src_col = f"{prefix}{i-1}d"
+                    if src_col in df.columns:
+                        df_shifted.loc[valid_mask, dest_col] = df.loc[valid_mask, src_col]
+        df = df_shifted
 
     # 1. 快速提取矩阵 (P, H, L, V)
     def get_val_matrix(prefix):

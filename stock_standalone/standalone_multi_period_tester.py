@@ -29,6 +29,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.engine = MultiPeriodStrategyEngine()
         self.strategies = self.engine.load_strategies()
         self.top_now = None
+        # 缓存时间戳：记录 top_now 和各周期数据的最后加载时间
+        self._top_now_cache_ts = 0.0          # top_now 全市场数据缓存时间戳
+        self._period_cache_ts: dict = {}      # {period: timestamp} 各周期数据缓存时间
         
         self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
         
@@ -151,7 +154,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             chk.pack(side="left")
             self.period_vars[p] = var
             
-        tk.Button(toolbar, text="▶ 运行筛选", command=self.run_filter, bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=20)
+        tk.Button(toolbar, text="▶ 运行筛选", command=lambda: self.run_filter(force_reload=False), bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+        tk.Button(toolbar, text="🔄 强制刷新", command=lambda: self.run_filter(force_reload=True), bg="#FF6F00", fg="white", font=("Arial", 9)).pack(side="left", padx=5)
             
         self.custom_col_frame = tk.Frame(toolbar)
         self.custom_col_frame.pack(side="left")
@@ -217,17 +221,24 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
-        self.tree = ttk.Treeview(tree_frame, show="headings")
-        
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        
-        # Style
         style = ttk.Style()
         style.configure("Treeview", rowheight=25)
         
+        self.tree = ttk.Treeview(tree_frame, show="headings")
+        
+        # 极窄垂直滚动条：用 tk.Scrollbar 直接设置 width=8，
+        # ttk.Scrollbar 在 Windows 主题下 width 参数无效
+        vsb = tk.Scrollbar(tree_frame, orient="vertical",
+                           command=self.tree.yview,
+                           width=8, bd=0, relief="flat",
+                           bg="#B0BEC5", troughcolor="#ECEFF1",
+                           activebackground="#78909C",
+                           highlightthickness=0)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        
+
         self.strategy_combo.bind('<<ComboboxSelected>>', lambda e: self._on_strategy_selected())
         self.tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         self.tree.bind("<Button-3>", self.show_context_menu)
@@ -358,7 +369,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                         self.last_elapsed = elapsed
                         self._show_results(result_df, elapsed)
                     else:
-                        self.run_filter()
+                        self.run_filter(force_reload=False)
                 except Exception as e:
                     self.status_var.set(f"计算失败: {e}")
 
@@ -391,12 +402,25 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.tree.column(col, width=final_w, minwidth=20, stretch=True)
                 
     def _on_strategy_selected(self):
+        """切换策略时：保存状态 + 自动将周期勾选同步为该策略的 conditions 键集合"""
         strat_name = self.strategy_var.get()
+        strat_config = None
         for s in self.strategies:
             if s['name'] == strat_name:
                 self.ui_state['strategy_id'] = s['id']
-                self._save_state()
+                strat_config = s
                 break
+        
+        if strat_config:
+            # 同步周期勾选：策略有配置该周期 → 勾选；否则不自动修改（已勾选的保留）
+            # 规则：策略 conditions 中有效的周期必须全部勾选；不在策略中的周期不强制取消
+            strategy_periods = set(strat_config.get('conditions', {}).keys())
+            for p, var in self.period_vars.items():
+                if p in strategy_periods:
+                    var.set(True)   # 策略需要 → 自动勾选
+                # 不在策略中的周期不强制取消，用户可自行决定
+        
+        self._save_state()
 
     def sort_column(self, col, reverse):
         data = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
@@ -474,7 +498,25 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if status_msg_parts:
             self.status_var.set(f"✅ 已触发联动: {code} ({', '.join(status_msg_parts)})")
 
-    def run_filter(self):
+    def _update_status(self, text):
+        """线程安全的底部状态日志更新（由 after(0,...) 保证在主线程执行，不调用 update_idletasks）"""
+        self.status_var.set(text)
+
+    # ── 缓存有效期常量 ──────────────────────────────────────────
+    _CACHE_TTL_TRADING    = 3600   # 交易时段缓存有效期：1小时
+    _CACHE_TTL_NON_TRADE  = None   # 非交易时段：永不过期（用 None 表示）
+
+    def _is_cache_valid(self, ts: float) -> bool:
+        """判断某个时间戳的缓存是否仍有效（交易时段1小时TTL，非交易时段永久有效）"""
+        if ts == 0.0:
+            return False
+        is_trade = cct.get_work_time_duration()  # 是否处于交易时段
+        if not is_trade:
+            return True  # 非交易时段：缓存永远有效，不重新拉取
+        # 交易时段：超过 TTL 则视为失效
+        return (time.time() - ts) < self._CACHE_TTL_TRADING
+
+    def run_filter(self, force_reload=False):
         active_periods = [p for p, var in self.period_vars.items() if var.get()]
         if not active_periods:
             messagebox.showwarning("警告", "请至少选择一个参与周期！")
@@ -485,26 +527,59 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if not strat_config:
             return
             
-        self.status_var.set("正在获取基础全市场数据...")
-        self.update_idletasks()
+        if force_reload:
+            # 强制刷新：清空所有缓存和时间戳
+            self.top_now = None
+            self._top_now_cache_ts = 0.0
+            self.engine._period_dfs.clear()
+            self._period_cache_ts.clear()
+            self.status_var.set("🔄 强制刷新：正在重新获取全部数据...")
+        else:
+            # 智能缓存：检查 top_now 缓存是否过期
+            if not self._is_cache_valid(self._top_now_cache_ts):
+                self.top_now = None
+                self._top_now_cache_ts = 0.0
+            # 检查各周期缓存是否过期，过期则清除
+            for p in list(self._period_cache_ts.keys()):
+                if not self._is_cache_valid(self._period_cache_ts.get(p, 0.0)):
+                    self._period_cache_ts.pop(p, None)
+                    self.engine._period_dfs.pop(p, None)
+            if self.top_now is None:
+                self.status_var.set("正在获取基础全市场数据...")
+            else:
+                is_trade = cct.get_work_time_duration()
+                age = int(time.time() - self._top_now_cache_ts)
+                trade_hint = "交易时段" if is_trade else "非交易时段"
+                self.status_var.set(f"⚡ 使用内存缓存 ({trade_hint}，缓存已存在 {age}s)，开始筛选...")
         
         threading.Thread(target=self._worker, args=(strat_config, active_periods), daemon=True).start()
         
     def _worker(self, strat_config, active_periods):
         try:
             start_time = time.time()
+            # ── 加载全市场行情 top_now ──────────────────────────
             if self.top_now is None:
+                self.after(0, self._update_status, "正在获取全市场实时行情...")
                 self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
-                
+                self._top_now_cache_ts = time.time()
+            # ── 逐周期加载 ─────────────────────────────────────
             for period in active_periods:
-                if period in self.engine._period_dfs and not self.engine._period_dfs[period].empty:
-                    self.status_var.set(f"⚡ 命中内存缓存，极速加载 {period} 周期...")
+                cached = (
+                    period in self.engine._period_dfs
+                    and not self.engine._period_dfs[period].empty
+                    and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+                )
+                if cached:
+                    age = int(time.time() - self._period_cache_ts.get(period, 0.0))
+                    self.after(0, self._update_status, f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
                 else:
-                    self.status_var.set(f"正在加载 {period} 周期特征数据 (首次需读取计算)...")
-                self.update_idletasks()
-                self.engine.load_period_data(period, self.top_now)
-                
-            self.status_var.set("正在执行跨周期交叉验证...")
+                    self.after(0, self._update_status, f"📥 [{period}] 首次加载或缓存过期，正在读取计算...")
+                    # 清除旧缓存，保证 engine 重新加载
+                    self.engine._period_dfs.pop(period, None)
+                    self.engine.load_period_data(period, self.top_now)
+                    self._period_cache_ts[period] = time.time()
+
+            self.after(0, self._update_status, "🔍 正在执行跨周期交叉验证...")
             result_df = self.engine.evaluate_strategy(strat_config, active_periods)
             
             elapsed = time.time() - start_time
@@ -512,7 +587,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.last_elapsed = elapsed
             self.after(0, self._show_results, result_df, elapsed)
         except Exception as e:
-            self.after(0, lambda: self.status_var.set(f"错误: {e}"))
+            import traceback
+            self.after(0, self._update_status, f"❌ 错误: {e}")
+            print(f"[MultiPeriodTester] _worker exception:\n{traceback.format_exc()}")
             
     def _show_results(self, df, elapsed):
         self._last_selected_code = None
