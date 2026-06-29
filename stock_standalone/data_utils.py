@@ -324,42 +324,8 @@ def complete_indicators_pipeline(
             valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
             if valid_mask.any():
                 if is_same:
-                    # (0) 同一周期下，底层的 last1d 等列已经被置为当期(例如当周/当月周一)的局部指标。
-                    # 我们必须将所有的 lastNd 历史指示器列往后移位1位，使 1d 代表上一个已完成的周期，2d 代表上上个，以此类推。
-                    # 同时保留当期的 lopen/lhigh/llow/lvol 用于当期实时合并。
-                    def parse_indicator_col(col):
-                        if col.endswith('d'):
-                            body = col[:-1]
-                            i = len(body) - 1
-                            while i >= 0 and body[i].isdigit():
-                                i -= 1
-                            if i < len(body) - 1:
-                                prefix = body[:i+1]
-                                idx = int(body[i+1:])
-                                return prefix, idx, 'd'
-                        else:
-                            i = len(col) - 1
-                            while i >= 0 and col[i].isdigit():
-                                i -= 1
-                            if i < len(col) - 1:
-                                prefix = col[:i+1]
-                                idx = int(col[i+1:])
-                                return prefix, idx, ''
-                        return None
-
-                    shifted_values = {}
-                    for col in top_all.columns:
-                        parsed = parse_indicator_col(col)
-                        if parsed:
-                            prefix, idx, suffix = parsed
-                            src_col = f"{prefix}{idx+1}{suffix}"
-                            if src_col in top_all.columns:
-                                shifted_values[col] = top_all[src_col]
-                            else:
-                                shifted_values[col] = np.nan
-                    
-                    for col, val in shifted_values.items():
-                        top_all.loc[valid_mask, col] = val
+                    # (0) 废除跨周期历史列原地移位: lastp1d 等列已天然代表前一个已完成周期的昨收
+                    # 直接保留当前的 lopen/lhigh/llow/lvol 用于当期实时合并即可。
 
                     # (1) 同一周期：将今日实时行情合并到当前的周期 OHLC 中
                     if 'lopen' in top_all.columns:
@@ -454,13 +420,11 @@ def complete_indicators_pipeline(
         if resample == 'd':
             result_opt = strong_momentum_large_cycle_vect(top_all, max_days=cct.compute_lastdays, winlimit=1)
         else:
-            # pipeline 中 is_same=True 时已经完成了 lastNd 列的移位（close → lastp1d）
-            # is_same=True 时 win_start_idx=2: 从上个已完成周期起算，排除当前未完成的K线
-            _is_same_flag = locals().get('is_same', False)
-            _win_start = 2 if _is_same_flag else 1
+            # 统一使用 shift_intraday=True 自动将当前活跃行情 (close 等) 无缝链接至动量评估序列的最前端 (lastp1d)
+            # 并固定从 win_start_idx=1 开始计算动量，确保大周期实盘的当前周期涨跌被正确纳入连阳(win)与斜率(slope)计算
             result_opt = strong_momentum_large_cycle_vect_new(
                 top_all, max_days=cct.compute_lastdays, winlimit=1,
-                shift_intraday=False, win_start_idx=_win_start)
+                shift_intraday=True, win_start_idx=1)
         
     with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
         clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
@@ -2046,69 +2010,25 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
                  np.where(has_ma10, ma10_vals, 0.0))
     )
 
-    # --- 路径A: 放宽版经典主升结构 ---
-    # 大周期（月/周）允许出现1根回调K线（高点下移）而不判零
-    # 去掉 cond_low 约束：月线/周线低点在回踩过程中自然下移是正常现象，
-    # 强制低点抬高会误杀大量真实的大周期上升趋势。支撑结构由路径B单独识别。
+    # --- 路径A: 严格连阳主升结构 ---
+    # 严格要求连阳（收盘价依次抬高），以对齐可视化图表上的真实连阳天数
     for w in range(win_start_idx + 1, max_days + 1):
         c = np.arange(win_start_idx, w)
         p = np.arange(win_start_idx + 1, w + 1)
 
-        # ① 高点不破趋势（放宽：最多允许1根高点回落）
-        high_ok = H[:, c] >= H[:, p]                        # (N, w-1) bool
+        # ① 收盘价严格依次抬高（连阳基础）
+        cond_trend = np.all(P[:, c] > P[:, p] * 0.995, axis=1)  # 允许0.5%极小误差，但基本要求抬高
+
+        # ② 高点不破趋势（最多允许1根高点轻微回落，但收盘必须满足①）
+        high_ok = H[:, c] >= H[:, p] * 0.99
         cond_high = np.sum(high_ok, axis=1) >= max(1, high_ok.shape[1] - 1)
 
-        # ② 整体上涨（当前价 > w周期前价格）
-        cond_trend = P[:, win_start_idx] > P[:, w]
-
-        # ③ 阳线占多数（避免阴跌结构误判，月线至少一半为上涨月）
-        up_days = np.sum(P[:, win_start_idx:w+1] > P[:, win_start_idx+1:w+2], axis=1)
-        cond_bull = up_days >= max(1, (w - win_start_idx + 1) // 2)
-
-        combined = cond_high & cond_trend & cond_bull
+        combined = cond_high & cond_trend
+        
+        # 只有在更短周期也是 combined (即没有断裂) 时，才赋予 max_win
+        # 因为是从小到大遍历 w，如果不 combined，理论上应该 break，但由于矩阵运算，我们需要用 np.where 逻辑
+        # 简单处理：只要 combined 成立，就更新 max_win
         max_win[combined] = np.maximum(max_win[combined], w - win_start_idx + 1)
-        # 注意: 不在此处 break，月线场景下 w=2 可能因近期回调而 False，
-        # 但 w=3,4,5 窗口覆盖整体上涨趋势完全成立，必须继续循环。
-
-    # --- 路径B: 回踩支撑反包结构（大阳锚点 → 守 ma10/ma20 → 反包加速）---
-    # 核心逻辑：
-    #   1. 找到近期"大阳锚点K线"（涨幅 > 5%）
-    #   2. 锚点之后的回调低点 >= ma10/ma20 支撑带（诱空不破位）
-    #   3. 当前K线已反包或接近回调K线的高点（反包加速确认）
-    #   4. 整体结构仍在上行（current > pre-anchor）
-    _usable = min(max_days + 1, P.shape[1] - 1)
-    for anchor in range(win_start_idx + 1, min(_usable - 1, 7 + win_start_idx - 1)):
-        # 锚点大阳：anchor期前涨幅 > 3%（月线3%已属显著大阳，周线同理）
-        pct_anchor = (P[:, anchor] - P[:, anchor + 1]) / np.maximum(P[:, anchor + 1], 1e-9) * 100
-        is_big_anchor = pct_anchor > 3.0
-
-        if not np.any(is_big_anchor):
-            continue
-
-        # 回调区间: win_start_idx 到 anchor-1（锚点之后、当前之前的所有K线）
-        anchor_eff = anchor
-        if anchor_eff == win_start_idx + 1:
-            pullback_low  = L[:, win_start_idx]
-            pullback_high = H[:, win_start_idx]
-        else:
-            pullback_low  = np.min(L[:, win_start_idx:anchor_eff], axis=1)
-            pullback_high = np.max(H[:, win_start_idx:anchor_eff], axis=1)
-
-        # 条件1：回调低点守住 ma10/ma20 支撑带（允许3%缓冲）
-        # 若 support_band=0（无均线数据），则退化为锚点收盘的88%
-        eff_support = np.where(support_band > 0, support_band, P[:, anchor] * 0.88)
-        cond_support = pullback_low >= eff_support * 0.97
-
-        # 条件2：当前K线已反包或接近回调高点（97%即视为有效反包）
-        cond_engulf = P[:, win_start_idx] >= pullback_high * 0.97
-
-        # 条件3：整体仍在上行（current > anchor前一根）
-        pre_idx = min(anchor_eff + 2, _usable)
-        cond_overall_up = P[:, win_start_idx] > P[:, pre_idx]
-
-        comb_b = is_big_anchor & cond_support & cond_engulf & cond_overall_up
-        win_b  = anchor - win_start_idx + 2          # 覆盖的K线数（锚点到当前）
-        max_win[comb_b] = np.maximum(max_win[comb_b], win_b)
 
     # === 3. 过滤有效窗口 ===
     keep_idx = np.where(max_win >= winlimit)[0]

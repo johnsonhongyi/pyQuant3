@@ -59,24 +59,27 @@ class MultiPeriodStrategyEngine:
             "final": {"total": 0, "pass": 0, "ratio": 0.0, "mode": cross_mode}
         }
         
-        # 默认 filter：当策略未配置该周期的条件时使用
-        _DEFAULT_FILTER = "close > ma5d"
-        
         for period in active_periods:
             if period not in self._period_dfs or self._period_dfs[period].empty:
                 logger.warning(f"Period {period} data not found or empty.")
                 continue
                 
             cond = strategy_config['conditions'].get(period)
-            if not cond:
-                # 周期已勾选但策略未配置该周期 → 用默认条件参与筛选（不跳过）
-                logger.info(f"Period {period} has no condition in strategy, using default: {_DEFAULT_FILTER}")
-                cond = {"filter": _DEFAULT_FILTER, "weight": 1.0}
-                
             df = self._period_dfs[period]
+            df_clean = df.fillna(0)
+            
+            if not cond or not cond.get('enabled', True):
+                # 周期已勾选但策略未配置该周期或该周期被关闭过滤 → 不作为限制条件参与筛选，仅做展示
+                logger.info(f"Period {period} has no condition or is disabled in strategy, skip filtering calculation.")
+                total_cnt = len(df_clean)
+                self.last_stats["periods"][period] = {
+                    "total": total_cnt,
+                    "pass": total_cnt,
+                    "ratio": 100.0
+                }
+                continue
+                
             try:
-                # 兼容 NaN 处理
-                df_clean = df.fillna(0)
                 filtered_df = df_clean.query(cond['filter'])
                 pass_codes_dict[period] = set(filtered_df.index)
                 
@@ -91,19 +94,24 @@ class MultiPeriodStrategyEngine:
                 logger.info(f"Period {period} pass count: {pass_cnt}")
             except Exception as e:
                 logger.error(f"Error evaluating period {period} condition: {e}")
-
                 
         if not pass_codes_dict:
+            # 如果所有勾选的周期在策略中都没有配置过滤规则，默认返回全市场股票且结果中这些周期通过列设为 True
             base_period = 'd'
             if base_period not in self._period_dfs and self._period_dfs:
                 base_period = list(self._period_dfs.keys())[0]
             total_market = len(self._period_dfs[base_period]) if base_period in self._period_dfs else 0
             self.last_stats["final"] = {
                 "total": total_market,
-                "pass": 0,
-                "ratio": 0.0,
+                "pass": total_market,
+                "ratio": 100.0,
                 "mode": cross_mode
             }
+            if base_period in self._period_dfs:
+                result_df = self._period_dfs[base_period].copy()
+                for period in active_periods:
+                    result_df[f'pass_{period}'] = True
+                return result_df
             return pd.DataFrame()
             
         if cross_mode == 'intersection':
@@ -130,6 +138,8 @@ class MultiPeriodStrategyEngine:
         for period in active_periods:
             if period in pass_codes_dict:
                 result_df[f'pass_{period}'] = result_df.index.isin(pass_codes_dict[period])
+            else:
+                result_df[f'pass_{period}'] = True
                 
         total_market = len(base_df)
         final_pass = len(valid_codes)
