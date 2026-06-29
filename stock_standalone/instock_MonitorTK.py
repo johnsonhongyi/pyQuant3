@@ -773,6 +773,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._voice_monitor_win: Optional[tk.Toplevel] = None
         self._realtime_monitor_win: Optional[tk.Toplevel] = None
         self._stock_selection_win: Optional[tk.Toplevel] = None
+        self._multi_period_tester_win = None
         self.txt_widget = None
 
         # 🛡️ 动态列订阅管理
@@ -900,6 +901,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             "信号追踪": True,
             "交易决策": True,
             "信号总览": True,
+            "多周期筛选": True,
             "右侧控制": True
         }
         self.right_control_visibility = {
@@ -1003,6 +1005,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             },
             "信号总览": {
                 "widgets": ["top_signal_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
+            "多周期筛选": {
+                "widgets": ["top_multi_period_btn"],
                 "pack_opts": [{"side": "left", "padx": 2}]
             },
             "右侧控制": {
@@ -1186,6 +1192,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-G>", self._on_shortcut_reentry_backtest)
         self.bind("<Alt-p>", lambda event: self.open_ats_panel())
         self.bind("<Alt-P>", lambda event: self.open_ats_panel())
+        self.bind("<Alt-n>", lambda event: self.toggle_multi_period_tester())
+        self.bind("<Alt-N>", lambda event: self.toggle_multi_period_tester())
         self.bind("<space>", lambda event: self.toggle_spatial_follow_hud())
         # 启动周期检测 RDP DPI 变化
         self._pg_default_sort_reverse = True # 默认看涨视角
@@ -3948,6 +3956,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 pass
 
             try:
+                if hasattr(self, "_multi_period_tester_win") and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        GlobalFavoriteManager().unsubscribe(self._multi_period_tester_win._on_favorites_changed)
+                    except Exception:
+                        pass
+                    self._multi_period_tester_win.destroy()
+            except Exception:
+                pass
+
+            try:
                 if hasattr(self, "_pg_top10_window_simple"):
                     self.save_all_monitor_windows()
                     for k, v in self._pg_top10_window_simple.items():
@@ -4987,7 +5006,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端", "快捷栏设置", "诊断转储"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "存档管理", "策略管理", "复盘数据", "实盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警","重置快捷键", "关闭全局快捷键", "ATS终端", "快捷栏设置", "多周期筛选", "诊断转储"]
         self.action_var = tk.StringVar()
         
         # 初始化自定义样式以控制下拉位置
@@ -5066,6 +5085,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_ats_panel()
             elif action == "快捷栏设置":
                 self.open_top_bar_settings()
+            elif action == "多周期筛选":
+                self.open_multi_period_tester()
             elif action == "诊断转储":
                 try:
                     dump_all()
@@ -5131,6 +5152,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.top_decision_btn.pack(side="left", padx=2)
         self.top_signal_btn = tk.Button(ctrl_frame, text="信号🔥", command=lambda: self.open_live_signal_viewer(), font=self.default_font_bold, fg="red", pady=2)
         self.top_signal_btn.pack(side="left", padx=2)
+        self.top_multi_period_btn = tk.Button(ctrl_frame, text="多周期🎯", command=lambda: self.open_multi_period_tester(), font=self.default_font_bold, fg="orange", pady=2)
+        self.top_multi_period_btn.pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())
@@ -7697,6 +7720,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             "信号追踪": ("追踪", lambda: self.open_live_signal_trace()),
             "交易决策": ("交易", lambda: self.open_decision_flow_panel()),
             "信号总览": ("信号", lambda: self.open_live_signal_viewer()),
+            "多周期筛选": ("多周期", lambda: self.open_multi_period_tester()),
         }
         
         # 设置列宽度，列2作为中部间隔列
@@ -15309,6 +15333,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"打开选股窗口失败: {e}")
             messagebox.showerror("错误", f"打开选股窗口失败: {e}")
             
+    def open_multi_period_tester(self):
+        """[NEW] 打开多周期联动策略筛选器 (支持窗口复用和隐藏/显示切换)"""
+        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+            try:
+                if not self._multi_period_tester_win.winfo_viewable():
+                    self._multi_period_tester_win.deiconify()
+                self._multi_period_tester_win.lift()
+                self._multi_period_tester_win.focus_force()
+                return
+            except Exception:
+                pass
+        
+        try:
+            from standalone_multi_period_tester import StandaloneMultiPeriodTester
+            self._multi_period_tester_win = StandaloneMultiPeriodTester(master=self)
+            self._multi_period_tester_win.lift()
+            self._multi_period_tester_win.focus_force()
+        except Exception as e:
+            logger.error(f"Failed to open StandaloneMultiPeriodTester: {e}")
+
+    def toggle_multi_period_tester(self):
+        """[NEW] 切换多周期联动策略筛选器的显示与隐藏"""
+        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+            if self._multi_period_tester_win.winfo_viewable():
+                self._multi_period_tester_win.withdraw()
+            else:
+                self._multi_period_tester_win.deiconify()
+                self._multi_period_tester_win.lift()
+                self._multi_period_tester_win.focus_force()
+        else:
+            self.open_multi_period_tester()
+
     def open_guidance_window(self):
         """直接打开每日操作指南选项卡"""
         self.open_stock_selection_window()

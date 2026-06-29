@@ -13,10 +13,16 @@ from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from tk_gui_modules.treeview_mixin import TreeviewMixin
 
-class StandaloneMultiPeriodTester(tk.Tk, TreeviewMixin):
-    def __init__(self):
-        super().__init__()
-        self.title("多周期联动策略筛选器 - 独立验证版")
+# 动态判定继承父类，当作为模块已存在主 Tk 窗口时继承 tk.Toplevel，否则继承 tk.Tk
+_parent_class = tk.Toplevel if tk._default_root else tk.Tk
+
+class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
+    def __init__(self, master=None):
+        if _parent_class == tk.Toplevel:
+            super().__init__(master)
+        else:
+            super().__init__()
+        self.title("多周期联动策略筛选器")
         self.geometry("1100x700")
         
         self.engine = MultiPeriodStrategyEngine()
@@ -620,13 +626,16 @@ class StandaloneMultiPeriodTester(tk.Tk, TreeviewMixin):
         self._save_state()
 
     def on_close(self):
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception:
-            pass
         self._save_state()
-        self.destroy()
+        if _parent_class == tk.Toplevel:
+            self.withdraw()
+        else:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
+            except Exception:
+                pass
+            self.destroy()
 
     def _on_favorites_changed(self):
         if hasattr(self, 'winfo_exists') and self.winfo_exists():
