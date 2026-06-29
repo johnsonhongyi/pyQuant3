@@ -1,3 +1,11 @@
+## 2026-06-29 11:30
+- [x] **统一多周期数据准备与指标计算管道 (Unified Multi-Period Data & Indicator Pipeline)**：
+    - [x] **提炼并封装统一指标流水线函数 (`complete_indicators_pipeline`)**：在 `data_utils.py` 中，抽取原本零散和重复的指标计算、0d 盘中实时行情数据注入 (`lastp0d`、`lasth0d` 等)、大级别动量计算 (`strong_momentum_large_cycle_vect` 系列)、前态压力回踩计数、动量回调系统评分以及 `build_hma_and_trendscore` 的完整序列，归并到一个健壮 of `complete_indicators_pipeline` 通用计算接口中。
+    - [x] **精简 `fetch_and_process` 核心主线程循环**：重构了 `data_utils.py` 中日线及 `resample_ui != 'd'` 大周期显示轨迹的两处超长且高度重复的指标计算与字段注入块。通过直接调用 `complete_indicators_pipeline`，彻底消除了冗余代码，并保障了盘中实时刷新与大周期显示更新在策略评估方面的一致性。
+    - [x] **对齐多周期策略引擎的数据准备机制**：在 `multi_period_strategy_engine.py` 的 `load_period_data` 方法中，将原先单一的 `calc_indicators` 重构为直接调用 `complete_indicators_pipeline`，确保在进行多周期筛选器计算时，大级别数据流 (w, m, 45d, 3M) 可以获得包括 Rank、win 及回踩评分系统等在内的完整动量统计字段，彻底消除了筛选器与监控主程序之间的数据缺失及精度对齐障碍。
+    - [x] **优化多周期筛选器运行日志显示布局 (Refined Status Log Layout for Multi-Period Tester)**：将原本放置在顶部工具栏 (toolbar) 右侧、容易被挤占和遮挡的 `status_var`（运行状态日志）标签，重新设计并挂载到最底部 `stats_frame` 状态栏的“正中间空白区域”，使用自适应 `fill="x", expand=True` 布局，确保无论窗口如何横向拉伸或收缩，运行中的提示日志（如“正在获取基础数据...”、“正在加载 d 周期...”）都能醒目、完整且始终居中显示。
+    - [x] **通过无错编译与自检 (Passed Syntax Verification & Self-Test)**：对 `data_utils.py`、`multi_period_strategy_engine.py` 及 `standalone_multi_period_tester.py` 执行了 `py_compile` 物理语法校验，全部无错通过，确保了高频行情运行时的极佳健壮性。
+
 ## 2026-06-27 18:15
 - [x] **多周期策略筛选器整合 (Integrating Multi-Period Strategy Tester)**:
     - [x] **动态窗口生命周期管理 (Dynamic Window Lifecycle Management)**: 重构了 `StandaloneMultiPeriodTester` 使得当其作为 `tk.Toplevel` 子窗口嵌入主程序运行时，关闭操作转为 `withdraw()` 隐藏窗口而非 `destroy()` 销毁以保留状态；当作为独立程序运行时，正常释放并退订。

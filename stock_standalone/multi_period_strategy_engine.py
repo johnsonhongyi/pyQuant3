@@ -31,10 +31,10 @@ class MultiPeriodStrategyEngine:
             # 兼容 45d 和 3M 的 resample
             df, _ = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period)
             
-            # 使用 calc_indicators 确保所有均线和计算指标齐全
-            from data_utils import calc_indicators
+            # 使用 complete_indicators_pipeline 确保所有均线和计算指标齐全
+            from data_utils import complete_indicators_pipeline
             if df is not None and not df.empty:
-                df = calc_indicators(df, logger, resample=period)
+                df = complete_indicators_pipeline(df, logger, resample=period)
                 self._period_dfs[period] = df
             return df
         except Exception as e:
