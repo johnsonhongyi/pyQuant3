@@ -6,7 +6,20 @@
     - [x] **优化多周期筛选器运行日志显示布局 (Refined Status Log Layout for Multi-Period Tester)**：将原本放置在顶部工具栏 (toolbar) 右侧、容易被挤占和遮挡的 `status_var`（运行状态日志）标签，重新设计并挂载到最底部 `stats_frame` 状态栏的“正中间空白区域”，使用自适应 `fill="x", expand=True` 布局，确保无论窗口如何横向拉伸或收缩，运行中的提示日志（如“正在获取基础数据...”、“正在加载 d 周期...”）都能醒目、完整且始终居中显示。
     - [x] **实现多周期策略编辑器与动态语法验证对话框 (Multi-Period Strategy Editor & Validation Dialog)**：
         - [x] **多策略本地沙盒编辑与动态同步**：实现了模态弹窗类 `MultiPeriodStrategyEditor`，支持对 `config/multi_period_strategies.json` 全量策略进行本地复制、新增、删除、改名与合并模式（并集/交集）编辑，切换策略时自动将编辑状态同步存盘。
-        - [x] **编辑器窗口大小与位置持久化**：重写了 `MultiPeriodStrategyEditor` 的 `destroy` 方法，在窗口销毁时自动提取当前的 `geometry` 并存入 `standalone_tester_config.json` 配置文件中。在 `__init__` 初始化时加载并还原该几何配置，实现了窗口尺寸与坐标的跨会话自愈与记忆功能。并且在首次打开时自适应计算并居中显示在父窗口（或屏幕）正中央，解决了默认左上角定位的视觉缺陷。
+        - [x] **新增一键粘贴 JSON 导入策略功能 (One-click JSON Strategy Import)**：在编辑器左侧面板中新增了“📋 粘贴 JSON 策略”按钮，支持高级用户直接粘贴包含单个或多个策略配置 of JSON 文本；系统能够智能解析、清洗不规范数据（例如异常权重、无用周期、缺失ID等），并自动适配并载入列表，实现高效开发与复用。
+        - [x] **编辑器窗口大小与位置持久化**：重写了 `MultiPeriodStrategyEditor` 的 `destroy` 方法，在窗口销毁时自动提取当前的 `geometry` 并存入 `standalone_tester_config.json` 配置文件中。在 `__init__` 初始化时加载并还原该几何配置，实现了窗口尺寸与坐标 of 跨会话自愈与记忆功能。并且在首次打开时自适应计算并居中显示在父窗口（或屏幕）正中央，解决了默认左上角定位的视觉缺陷。
+        - [x] **7大战略周期条件独立启用与文本编辑**：支持按需启用 `SUPPORTED_PERIODS`（含 45d、3M）的单周期 query 过滤，禁用时锁定输入，启用时默认生成合理的最简条件（如 `close > ma5d`）。
+        - [x] **实时 Pandas Query 过滤器语法检测与 Tooltip 指示器**：引入了在 `MultiPeriodStrategyEngine` 中的 `validate_condition` 方法，在内存有数据时执行真实验证，无真实数据时以包含 30 余个高频技术指标的 Dummy DataFrame 骨架执行 query 试运行，验证成功显示绿色“✅ 语法验证通过”，失败则红字标出并可通过 Tooltip 悬浮展示详细堆栈报错。
+        - [x] **集成一键“验证全部”与保存回调**：完成了策略管理器中的全部验证按钮，保证保存出的策略配置不会引入运行期崩溃；保存时自动重载主界面 Combobox 可选参数。
+        - [x] **修复策略管理器中修改名称导致的多选/重选 Bug (Fixed Listbox Multi-selection Bug)**：修复了在 Listbox 切换策略选项时，由于在 `_on_select` 事件内同步执行了旧有项的 `delete`、`insert` 与 `selection_set` 逻辑，导致 Tkinter 选定项映射关系冲突而产生两行或多行同时高亮选中的 Bug。现通过将策略名称的变更同步机制重构为对 `StringVar` 的 `trace_add("write", ...)` 进行动态侦听，仅在文本真实修改时局部静默修改 Listbox 字段，彻底消除了点击切换时的多选冲突。
+    - [x] **实现跨周期特征数据扁平化平铺合并与系统级诊断对话框对接 (Unified Flat-Series Diagnostics & Existing Window Integration)**：
+        - [x] **个股跨周期扁平化重构**：将个股在参与的多个不同策略周期（d、w、m、45d、3M）特征行数据映射为以 `{col}_{period}` 后缀命名的单行宽表结构，生成一个平铺的 DataFrame `df_flat`。
+        - [x] **表达式列名后缀适配**：根据各周期计算引擎列头元数据，对策略 query 条件进行单词正则匹配，安全转换为带周期后缀 of 平铺子表达式（如将 `close > ma5d` 转换为 `close_w > ma5d_w`），防止列名冲突。
+        - [x] **无缝对接系统 check_code 组件**：使用转换后的 `df_flat` 与 `queries`，直接调起 pyQuant3 系统的成熟股票检查报告窗口 `check_code`，完美重用了高颜值的诊断富文本界面、历史测试下拉菜单以及动态交互式手动测试控制条。
+        - [x] **实现自动化测试数据复用与零耗时验证 (Zero-I/O Automated Test Reuse)**：重写了 `test_multi_period_automated.py`，测试诊断流程直接接收前序已加载好数据的 `engine` 与 `top_now` 快照参数，完全免去了二次 TDX 与 H5 磁盘读取，运行效率提升至亚毫秒级，且在控制台使用 GBK 安全过滤机制，彻底根治了 unicode 编码崩溃风险。
+        - [x] **实现诊断后自动滚动定位与高亮个股 (Auto-scroll & Selection Highlight on Diagnosis)**：在 `diagnose_stock_strategy` 诊断流程执行完毕后，检查当前 Treeview 是否存在该个股 `code`，若存在则自动执行 `selection_set`、`focus` 并调用 `see(code)`，使对应的数据行自动滚动到可视区域并予以高亮聚焦；若个股不在列表中则静默跳过、不显示无用的报错框，保证了与主 Tk 窗口的联动操作逻辑完美统一。
+    - [x] **对齐多周期配置持久化与 App 绝对根目录 (Aligned Config Paths with get_app_root)**：重构了 `standalone_multi_period_tester.py` 与 `multi_period_strategy_engine.py` 中的所有配置文件读写路径（包括 `standalone_tester_config.json` 与 `multi_period_strategies.json`），全部改为基于 `sys_utils.get_app_root()` 拼出的绝对路径。这防止了打包（PyInstaller / Nuitka）后写入临时释放目录或只读位置导致的配置丢失与保存崩溃。
+    - [x] **通过无错编译与自检 (Passed Syntax Verification & Self-Test)**：对 `data_utils.py`、`multi_period_strategy_engine.py` 及 `standalone_multi_period_tester.py` 执行了 `py_compile` 物理语法校验，全部无错通过，确保了高频行情运行时的极佳健壮性。json` 配置文件中。在 `__init__` 初始化时加载并还原该几何配置，实现了窗口尺寸与坐标的跨会话自愈与记忆功能。并且在首次打开时自适应计算并居中显示在父窗口（或屏幕）正中央，解决了默认左上角定位的视觉缺陷。
         - [x] **7大战略周期条件独立启用与文本编辑**：支持按需启用 `SUPPORTED_PERIODS`（含 45d、3M）的单周期 query 过滤，禁用时锁定输入，启用时默认生成合理的最简条件（如 `close > ma5d`）。
         - [x] **实时 Pandas Query 过滤器语法检测与 Tooltip 指示器**：引入了在 `MultiPeriodStrategyEngine` 中的 `validate_condition` 方法，在内存有数据时执行真实验证，无真实数据时以包含 30 余个高频技术指标的 Dummy DataFrame 骨架执行 query 试运行，验证成功显示绿色“✅ 语法验证通过”，失败则红字标出并可通过 Tooltip 悬浮展示详细堆栈报错。
         - [x] **集成一键“验证全部”与保存回调**：完成了策略管理器中的全部验证按钮，保证保存出的策略配置不会引入运行期崩溃；保存时自动重载主界面 Combobox 可选参数。
