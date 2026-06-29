@@ -127,8 +127,21 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.ui_state['sortby_col_ascend'] = getattr(self.tree, 'sortby_col_ascend', False)
         except Exception:
             pass
-        with open(self.config_file, 'w', encoding='utf-8') as f:
-            json.dump(self.ui_state, f, ensure_ascii=False, indent=2)
+        try:
+            cfg = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+            # 合并时必须以磁盘上最新的配置为基准，然后更新 ui_state，但跳过 editor_geometry 等外部维护的字段
+            # 防止主窗口关闭时将旧的 editor_geometry 覆盖回去
+            for k, v in self.ui_state.items():
+                if k != "editor_geometry":
+                    cfg[k] = v
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.ui_state, f, ensure_ascii=False, indent=2)
 
     def _init_ui(self):
         self.status_var = tk.StringVar(value="准备就绪")
@@ -1101,6 +1114,29 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
             self.listbox.selection_set(0)
             self._on_select(None)
             
+        # 绑定退出事件
+        self.bind("<Escape>", lambda e: self._on_close())
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """窗口关闭处理：保存几何属性后销毁"""
+        try:
+            self.update_idletasks()  # 确保获取到最终计算的尺寸
+            geom = self.geometry()
+            if "+" in geom and not geom.startswith("1x1"):
+                config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
+                cfg = {}
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
+                cfg["editor_geometry"] = geom
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving editor geometry: {e}")
+        finally:
+            self.destroy()
+
     def _init_ui(self):
         main_pane = tk.PanedWindow(self, orient="horizontal", sashrelief="raised", sashwidth=4)
         main_pane.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1164,7 +1200,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         cond_lbl.pack(fill="x", anchor="w", pady=(10, 5))
         
         self.cond_frame = tk.Frame(self.right_frame)
-        self.cond_frame.pack(fill="both", expand=True)
+        self.cond_frame.pack(fill="x")
         
         self.cond_rows = {}
         for period in self.engine.SUPPORTED_PERIODS:
@@ -1197,7 +1233,65 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
                 "status_lbl": status_lbl,
                 "btn_val": btn_val
             }
-            
+
+        # --- 4. JSON 快速编辑面板（红圈空白区域）---
+        json_sep = tk.Frame(self.right_frame, height=1, bg="#BDBDBD")
+        json_sep.pack(fill="x", pady=(8, 0))
+
+        json_header = tk.Frame(self.right_frame)
+        json_header.pack(fill="x", pady=(4, 2))
+
+        json_lbl = tk.Label(json_header, text="📋 JSON 快速编辑模式",
+                            font=("Microsoft YaHei", 9, "bold"), fg="#00796B")
+        json_lbl.pack(side="left")
+
+        # 帮助提示
+        help_lbl = tk.Label(json_header,
+                            text="(直接粘贴或编辑 JSON → 点击 ✅ 应用；表单修改会自动刷新此处)",
+                            font=("Microsoft YaHei", 8), fg="#757575")
+        help_lbl.pack(side="left", padx=6)
+
+        btn_apply_json = tk.Button(json_header, text="✅ 应用JSON",
+                                   command=self._apply_json_to_form,
+                                   bg="#00796B", fg="white",
+                                   font=("Microsoft YaHei", 8, "bold"),
+                                   padx=6, pady=2)
+        btn_apply_json.pack(side="right", padx=2)
+
+        btn_copy_json = tk.Button(json_header, text="📋 复制",
+                                  command=self._copy_json_to_clipboard,
+                                  font=("Microsoft YaHei", 8),
+                                  padx=6, pady=2)
+        btn_copy_json.pack(side="right", padx=2)
+
+        btn_fmt_json = tk.Button(json_header, text="🔄 格式化",
+                                 command=self._reformat_json_editor,
+                                 font=("Microsoft YaHei", 8),
+                                 padx=6, pady=2)
+        btn_fmt_json.pack(side="right", padx=2)
+
+        # JSON 文本编辑器（带滚动条）
+        json_edit_frame = tk.Frame(self.right_frame)
+        json_edit_frame.pack(fill="both", expand=True, pady=(0, 4))
+
+        json_vsb = ttk.Scrollbar(json_edit_frame, orient="vertical")
+        json_hsb = ttk.Scrollbar(json_edit_frame, orient="horizontal")
+        self.json_editor = tk.Text(
+            json_edit_frame,
+            font=("Consolas", 9),
+            bd=1, relief="solid",
+            bg="#F5F5F5", fg="#1A237E",
+            wrap="none",
+            height=7,
+            yscrollcommand=json_vsb.set,
+            xscrollcommand=json_hsb.set
+        )
+        json_vsb.config(command=self.json_editor.yview)
+        json_hsb.config(command=self.json_editor.xview)
+        json_vsb.pack(side="right", fill="y")
+        json_hsb.pack(side="bottom", fill="x")
+        self.json_editor.pack(side="left", fill="both", expand=True)
+
         # --- 底部按钮区 ---
         bottom_bar = tk.Frame(self)
         bottom_bar.pack(fill="x", side="bottom", padx=10, pady=10)
@@ -1205,7 +1299,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         btn_val_all = tk.Button(bottom_bar, text="🔍 验证全部条件", command=self._validate_all, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9, "bold"))
         btn_val_all.pack(side="left", padx=5)
         
-        btn_cancel = tk.Button(bottom_bar, text="❌ 取消", command=self.destroy, font=("Microsoft YaHei", 9))
+        btn_cancel = tk.Button(bottom_bar, text="❌ 取消", command=self._on_close, font=("Microsoft YaHei", 9))
         btn_cancel.pack(side="right", padx=5)
         
         btn_save = tk.Button(bottom_bar, text="💾 保存并应用", command=self._save_to_engine, bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9, "bold"))
@@ -1285,6 +1379,9 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
                 row['btn_val'].config(state="disabled")
             row['status_lbl'].config(text="未验证", fg="gray")
 
+        # 5. 刷新 JSON 编辑器（同步显示当前策略 JSON）
+        self._refresh_json_editor(strat)
+
     def _on_enable_toggled(self, period):
         row = self.cond_rows[period]
         if row['enable_var'].get():
@@ -1302,6 +1399,13 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         row = self.cond_rows[period]
         if row['enable_var'].get():
             row['status_lbl'].config(text="未验证", fg="gray")
+        # 表单变动时延迟刷新 JSON 编辑器（防高频抖动）
+        if hasattr(self, '_json_refresh_id'):
+            try:
+                self.after_cancel(self._json_refresh_id)
+            except Exception:
+                pass
+        self._json_refresh_id = self.after(600, self._refresh_json_from_form)
 
     def _add_strategy(self):
         self._sync_to_current_strategy()
@@ -1478,6 +1582,148 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         btn_cancel = tk.Button(btn_frame, text="❌ 取消", command=dialog.destroy, font=("Microsoft YaHei", 9))
         btn_cancel.pack(side="right", padx=5)
 
+    # ===== JSON 编辑器相关方法 =====
+
+    def _refresh_json_editor(self, strat):
+        """将策略对象格式化为 JSON 并填入编辑器（只保留可编辑字段）"""
+        if not hasattr(self, 'json_editor'):
+            return
+        display = {
+            "name": strat.get("name", ""),
+            "cross_mode": strat.get("cross_mode", "intersection"),
+            "conditions": strat.get("conditions", {})
+        }
+        formatted = json.dumps(display, ensure_ascii=False, indent=2)
+        self.json_editor.config(state="normal")
+        self.json_editor.delete("1.0", tk.END)
+        self.json_editor.insert("1.0", formatted)
+        self._colorize_json_editor()
+
+    def _refresh_json_from_form(self):
+        """从表单读取当前状态并刷新 JSON 编辑器（表单 → JSON）"""
+        if self.current_idx < 0 or self.current_idx >= len(self.strategies):
+            return
+        # 构造临时策略对象（不写回 self.strategies）
+        strat = dict(self.strategies[self.current_idx])
+        strat['name'] = self.name_var.get().strip() or "未命名策略"
+        mode_val = self.mode_var.get()
+        strat['cross_mode'] = 'union' if 'union' in mode_val else 'intersection'
+        new_conditions = {}
+        for period, row in self.cond_rows.items():
+            if row['enable_var'].get():
+                expr = row['expr_var'].get().strip()
+                new_conditions[period] = {
+                    "filter": expr,
+                    "weight": strat.get('conditions', {}).get(period, {}).get('weight', 1.0)
+                }
+        strat['conditions'] = new_conditions
+        self._refresh_json_editor(strat)
+
+    def _colorize_json_editor(self):
+        """简单语法高亮：字符串 key 绿色，字符串 value 蓝色，数字/布尔橙色"""
+        if not hasattr(self, 'json_editor'):
+            return
+        editor = self.json_editor
+        for tag in ("json_key", "json_str", "json_num"):
+            editor.tag_remove(tag, "1.0", tk.END)
+        editor.tag_config("json_key", foreground="#1B5E20")   # 深绿: key
+        editor.tag_config("json_str", foreground="#1565C0")   # 深蓝: string value
+        editor.tag_config("json_num", foreground="#E65100")   # 橙色: number/bool
+
+        import re
+        content = editor.get("1.0", tk.END)
+        # JSON key ("xxx":)
+        for m in re.finditer(r'"([^"]+)"\s*:', content):
+            start = f"1.0 + {m.start()} chars"
+            end = f"1.0 + {m.end(1)+1} chars"
+            editor.tag_add("json_key", start, end)
+        # string values
+        for m in re.finditer(r':\s*("[^"]*")', content):
+            vs = m.start(1); ve = m.end(1)
+            editor.tag_add("json_str", f"1.0 + {vs} chars", f"1.0 + {ve} chars")
+        # numbers / booleans
+        for m in re.finditer(r':\s*(-?\d+\.?\d*|true|false|null)', content):
+            vs = m.start(1); ve = m.end(1)
+            editor.tag_add("json_num", f"1.0 + {vs} chars", f"1.0 + {ve} chars")
+
+    def _apply_json_to_form(self):
+        """将 JSON 编辑器内容解析并回填到表单（JSON → 表单）"""
+        if not hasattr(self, 'json_editor'):
+            return
+        raw = self.json_editor.get("1.0", tk.END).strip()
+        if not raw:
+            messagebox.showwarning("警告", "JSON 编辑器内容为空！", parent=self)
+            return
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            messagebox.showerror("JSON 语法错误", f"解析失败：{e}", parent=self)
+            return
+
+        if not isinstance(data, dict):
+            messagebox.showerror("格式错误", "根节点必须是 JSON 对象 {}。", parent=self)
+            return
+
+        # 先同步旧策略再覆盖
+        self._sync_to_current_strategy()
+        if self.current_idx < 0 or self.current_idx >= len(self.strategies):
+            messagebox.showwarning("提示", "请先在左侧选择一个策略。", parent=self)
+            return
+
+        strat = self.strategies[self.current_idx]
+        # 更新名称
+        if "name" in data:
+            strat['name'] = str(data['name']).strip() or strat['name']
+        # 更新合并模式
+        if "cross_mode" in data:
+            strat['cross_mode'] = data['cross_mode'] if data['cross_mode'] in ('union', 'intersection') else 'intersection'
+        # 更新条件
+        if "conditions" in data and isinstance(data['conditions'], dict):
+            new_conditions = {}
+            for p, cond in data['conditions'].items():
+                if p not in self.engine.SUPPORTED_PERIODS:
+                    continue
+                if isinstance(cond, dict):
+                    flt = cond.get('filter', '').strip()
+                    if flt:
+                        new_conditions[p] = {'filter': flt, 'weight': float(cond.get('weight', 1.0))}
+                elif isinstance(cond, str) and cond.strip():
+                    new_conditions[p] = {'filter': cond.strip(), 'weight': 1.0}
+            if new_conditions:
+                strat['conditions'] = new_conditions
+
+        # 回填表单（重用 _on_select 逻辑）
+        self._refresh_list()
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(self.current_idx)
+        self._on_select(None)
+        messagebox.showinfo("应用成功", f"JSON 已成功解析并更新策略「{strat['name']}」！", parent=self)
+
+    def _copy_json_to_clipboard(self):
+        """复制 JSON 编辑器内容到系统剪贴板"""
+        if not hasattr(self, 'json_editor'):
+            return
+        content = self.json_editor.get("1.0", tk.END).strip()
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        messagebox.showinfo("已复制", "JSON 内容已复制到剪贴板！", parent=self)
+
+    def _reformat_json_editor(self):
+        """格式化 JSON 编辑器中的内容（美化缩进）"""
+        if not hasattr(self, 'json_editor'):
+            return
+        raw = self.json_editor.get("1.0", tk.END).strip()
+        try:
+            data = json.loads(raw)
+            formatted = json.dumps(data, ensure_ascii=False, indent=2)
+            self.json_editor.delete("1.0", tk.END)
+            self.json_editor.insert("1.0", formatted)
+            self._colorize_json_editor()
+        except Exception as e:
+            messagebox.showerror("格式化失败", f"JSON 语法错误：{e}", parent=self)
+
+    # ===== 原有验证方法 =====
+
     def _validate_single(self, period):
         row = self.cond_rows[period]
         expr = row['expr_var'].get().strip()
@@ -1550,26 +1796,9 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         if success:
             self.on_save_callback()
             messagebox.showinfo("保存成功", "所有多周期策略已成功保存并重新加载！")
-            self.destroy()
+            self._on_close()
         else:
             messagebox.showerror("错误", "保存策略失败。")
-
-    def destroy(self):
-        """销毁窗口时，将当前的窗口几何属性（位置和大小）保存至配置文件"""
-        try:
-            geom = self.geometry()
-            if "+" in geom:
-                config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
-                cfg = {}
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
-                cfg["editor_geometry"] = geom
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-        super().destroy()
 
 
 if __name__ == "__main__":
