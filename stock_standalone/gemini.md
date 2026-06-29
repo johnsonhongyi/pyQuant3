@@ -4,6 +4,14 @@
     - [x] **精简 `fetch_and_process` 核心主线程循环**：重构了 `data_utils.py` 中日线及 `resample_ui != 'd'` 大周期显示轨迹的两处超长且高度重复的指标计算与字段注入块。通过直接调用 `complete_indicators_pipeline`，彻底消除了冗余代码，并保障了盘中实时刷新与大周期显示更新在策略评估方面的一致性。
     - [x] **对齐多周期策略引擎的数据准备机制**：在 `multi_period_strategy_engine.py` 的 `load_period_data` 方法中，将原先单一的 `calc_indicators` 重构为直接调用 `complete_indicators_pipeline`，确保在进行多周期筛选器计算时，大级别数据流 (w, m, 45d, 3M) 可以获得包括 Rank、win 及回踩评分系统等在内的完整动量统计字段，彻底消除了筛选器与监控主程序之间的数据缺失及精度对齐障碍。
     - [x] **优化多周期筛选器运行日志显示布局 (Refined Status Log Layout for Multi-Period Tester)**：将原本放置在顶部工具栏 (toolbar) 右侧、容易被挤占和遮挡的 `status_var`（运行状态日志）标签，重新设计并挂载到最底部 `stats_frame` 状态栏的“正中间空白区域”，使用自适应 `fill="x", expand=True` 布局，确保无论窗口如何横向拉伸或收缩，运行中的提示日志（如“正在获取基础数据...”、“正在加载 d 周期...”）都能醒目、完整且始终居中显示。
+    - [x] **实现多周期策略编辑器与动态语法验证对话框 (Multi-Period Strategy Editor & Validation Dialog)**：
+        - [x] **多策略本地沙盒编辑与动态同步**：实现了模态弹窗类 `MultiPeriodStrategyEditor`，支持对 `config/multi_period_strategies.json` 全量策略进行本地复制、新增、删除、改名与合并模式（并集/交集）编辑，切换策略时自动将编辑状态同步存盘。
+        - [x] **编辑器窗口大小与位置持久化**：重写了 `MultiPeriodStrategyEditor` 的 `destroy` 方法，在窗口销毁时自动提取当前的 `geometry` 并存入 `standalone_tester_config.json` 配置文件中。在 `__init__` 初始化时加载并还原该几何配置，实现了窗口尺寸与坐标的跨会话自愈与记忆功能。并且在首次打开时自适应计算并居中显示在父窗口（或屏幕）正中央，解决了默认左上角定位的视觉缺陷。
+        - [x] **7大战略周期条件独立启用与文本编辑**：支持按需启用 `SUPPORTED_PERIODS`（含 45d、3M）的单周期 query 过滤，禁用时锁定输入，启用时默认生成合理的最简条件（如 `close > ma5d`）。
+        - [x] **实时 Pandas Query 过滤器语法检测与 Tooltip 指示器**：引入了在 `MultiPeriodStrategyEngine` 中的 `validate_condition` 方法，在内存有数据时执行真实验证，无真实数据时以包含 30 余个高频技术指标的 Dummy DataFrame 骨架执行 query 试运行，验证成功显示绿色“✅ 语法验证通过”，失败则红字标出并可通过 Tooltip 悬浮展示详细堆栈报错。
+        - [x] **集成一键“验证全部”与保存回调**：完成了策略管理器中的全部验证按钮，保证保存出的策略配置不会引入运行期崩溃；保存时自动重载主界面 Combobox 可选参数。
+        - [x] **修复策略管理器中修改名称导致的多选/重选 Bug (Fixed Listbox Multi-selection Bug)**：修复了在 Listbox 切换策略选项时，由于在 `_on_select` 事件内同步执行了旧有项的 `delete`、`insert` 与 `selection_set` 逻辑，导致 Tkinter 选定项映射关系冲突而产生两行或多行同时高亮选中的 Bug。现通过将策略名称的变更同步机制重构为对 `StringVar` 的 `trace_add("write", ...)` 进行动态侦听，仅在文本真实修改时局部静默修改 Listbox 字段，彻底消除了点击切换时的多选冲突。
+    - [x] **对齐多周期配置持久化与 App 绝对根目录 (Aligned Config Paths with get_app_root)**：重构了 `standalone_multi_period_tester.py` 与 `multi_period_strategy_engine.py` 中的所有配置文件读写路径（包括 `standalone_tester_config.json` 与 `multi_period_strategies.json`），全部改为基于 `sys_utils.get_app_root()` 拼出的绝对路径。这防止了打包（PyInstaller / Nuitka）后写入临时释放目录或只读位置导致的配置丢失与保存崩溃。
     - [x] **通过无错编译与自检 (Passed Syntax Verification & Self-Test)**：对 `data_utils.py`、`multi_period_strategy_engine.py` 及 `standalone_multi_period_tester.py` 执行了 `py_compile` 物理语法校验，全部无错通过，确保了高频行情运行时的极佳健壮性。
 
 ## 2026-06-27 18:15

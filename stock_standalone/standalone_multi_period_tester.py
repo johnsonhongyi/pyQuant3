@@ -12,6 +12,7 @@ from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from tk_gui_modules.treeview_mixin import TreeviewMixin
+from sys_utils import get_app_root
 
 # 动态判定继承父类，当作为模块已存在主 Tk 窗口时继承 tk.Toplevel，否则继承 tk.Tk
 _parent_class = tk.Toplevel if tk._default_root else tk.Tk
@@ -29,7 +30,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.strategies = self.engine.load_strategies()
         self.top_now = None
         
-        self.config_file = "config/standalone_tester_config.json"
+        self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
         
         self._last_selected_code = None
         self._link_after_id = None
@@ -131,6 +132,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.strategy_combo = ttk.Combobox(toolbar, textvariable=self.strategy_var, state="readonly", width=25)
         self.strategy_combo['values'] = [s['name'] for s in self.strategies]
         self.strategy_combo.pack(side="left", padx=5)
+        
+        btn_edit_strat = tk.Button(toolbar, text="⚙", command=self.open_strategy_editor, width=2, bg="#ECEFF1", relief="groove")
+        btn_edit_strat.pack(side="left", padx=2)
         
         tk.Label(toolbar, text="参与周期:").pack(side="left", padx=5)
         self.period_vars = {}
@@ -749,6 +753,424 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.status_var.set(f"已取消重点关注: {code}")
         except Exception as e:
             messagebox.showerror("错误", f"取消重点关注失败: {e}")
+
+    def open_strategy_editor(self):
+        """打开多周期策略编辑器对话框"""
+        MultiPeriodStrategyEditor(self, self.engine, self._on_strategies_updated)
+
+    def _on_strategies_updated(self):
+        """当策略被保存或重载时的回调动作"""
+        self.strategies = self.engine.load_strategies()
+        self.strategy_combo['values'] = [s['name'] for s in self.strategies]
+        
+        curr_id = self.ui_state.get('strategy_id', '')
+        found = False
+        for s in self.strategies:
+            if s['id'] == curr_id:
+                self.strategy_var.set(s['name'])
+                found = True
+                break
+        if not found and self.strategies:
+            self.strategy_var.set(self.strategies[0]['name'])
+            self.ui_state['strategy_id'] = self.strategies[0]['id']
+            self._save_state()
+
+
+class MultiPeriodStrategyEditor(tk.Toplevel):
+    def __init__(self, parent, engine, on_save_callback):
+        super().__init__(parent)
+        self.title("多周期过滤策略编辑器")
+        
+        # 尝试从配置文件读取上次保存的窗口位置与大小
+        config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
+        editor_geom = "850x580"
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    editor_geom = cfg.get("editor_geometry", "850x580")
+            except Exception:
+                pass
+                
+        # 若是首次打开（配置中只存了宽高，不包含 '+' 偏移量），则执行居中计算
+        if "+" not in editor_geom:
+            try:
+                w, h = map(int, editor_geom.split("x"))
+            except Exception:
+                w, h = 850, 580
+                
+            # 优先计算居中于父窗口
+            parent_w = parent.winfo_width()
+            parent_h = parent.winfo_height()
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            
+            if parent_w > 100 and parent_h > 100:
+                x = parent_x + (parent_w - w) // 2
+                y = parent_y + (parent_h - h) // 2
+            else:
+                # 降级居中于屏幕
+                screen_w = self.winfo_screenwidth()
+                screen_h = self.winfo_screenheight()
+                x = (screen_w - w) // 2
+                y = (screen_h - h) // 2
+            editor_geom = f"{w}x{h}+{x}+{y}"
+            
+        self.geometry(editor_geom)
+        
+        self.transient(parent)
+        self.grab_set()
+        
+        self.engine = engine
+        self.on_save_callback = on_save_callback
+        
+        # 深拷贝策略配置，防止在未保存时直接修改全局数据
+        self.strategies = [json.loads(json.dumps(s)) for s in self.engine.load_strategies()]
+        self.current_idx = -1
+        self.tooltip = None
+        
+        self._init_ui()
+        self._refresh_list()
+        
+        if self.strategies:
+            self.listbox.selection_set(0)
+            self._on_select(None)
+            
+    def _init_ui(self):
+        main_pane = tk.PanedWindow(self, orient="horizontal", sashrelief="raised", sashwidth=4)
+        main_pane.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # --- 左侧策略列表区 ---
+        left_frame = tk.Frame(main_pane)
+        main_pane.add(left_frame, minsize=200)
+        
+        list_lbl = tk.Label(left_frame, text="策略列表", font=("Microsoft YaHei", 9, "bold"))
+        list_lbl.pack(fill="x", pady=2)
+        
+        list_container = tk.Frame(left_frame)
+        list_container.pack(fill="both", expand=True)
+        
+        self.listbox = tk.Listbox(list_container, font=("Microsoft YaHei", 9), selectmode="single")
+        vsb = ttk.Scrollbar(list_container, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscroll=vsb.set)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        
+        btn_frame = tk.Frame(left_frame)
+        btn_frame.pack(fill="x", pady=5)
+        
+        btn_add = tk.Button(btn_frame, text="➕ 新增策略", command=self._add_strategy, bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9))
+        btn_add.pack(side="left", fill="x", expand=True, padx=2)
+        
+        btn_del = tk.Button(btn_frame, text="➖ 删除策略", command=self._del_strategy, bg="#F44336", fg="white", font=("Microsoft YaHei", 9))
+        btn_del.pack(side="right", fill="x", expand=True, padx=2)
+        
+        # --- 右侧详细编辑区 ---
+        self.right_frame = tk.LabelFrame(main_pane, text="策略详细配置与验证", font=("Microsoft YaHei", 9, "bold"), padx=10, pady=10)
+        main_pane.add(self.right_frame, minsize=600)
+        
+        # 1. 策略名称
+        name_frame = tk.Frame(self.right_frame)
+        name_frame.pack(fill="x", pady=4)
+        tk.Label(name_frame, text="策略名称:", width=10, anchor="w").pack(side="left")
+        self.name_var = tk.StringVar()
+        self.name_entry = tk.Entry(name_frame, textvariable=self.name_var)
+        self.name_entry.pack(side="left", fill="x", expand=True)
+        self.name_var.trace_add("write", self._on_name_changed)
+        
+        # 2. 合并模式
+        mode_frame = tk.Frame(self.right_frame)
+        mode_frame.pack(fill="x", pady=4)
+        tk.Label(mode_frame, text="合并模式:", width=10, anchor="w").pack(side="left")
+        self.mode_var = tk.StringVar()
+        self.mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, state="readonly", values=["交集 (intersection)", "并集 (union)"])
+        self.mode_combo.pack(side="left")
+        
+        # 3. 周期条件列表
+        cond_lbl = tk.Label(self.right_frame, text="周期过滤条件 (将对各周期分别执行 DataFrame 过滤):", font=("Microsoft YaHei", 9, "bold"))
+        cond_lbl.pack(fill="x", anchor="w", pady=(10, 5))
+        
+        self.cond_frame = tk.Frame(self.right_frame)
+        self.cond_frame.pack(fill="both", expand=True)
+        
+        self.cond_rows = {}
+        for period in self.engine.SUPPORTED_PERIODS:
+            row = tk.Frame(self.cond_frame)
+            row.pack(fill="x", pady=3)
+            
+            enable_var = tk.BooleanVar(value=False)
+            chk = tk.Checkbutton(row, text=f"{period} 周期", variable=enable_var, width=10, anchor="w",
+                                 command=lambda p=period: self._on_enable_toggled(p))
+            chk.pack(side="left")
+            
+            expr_var = tk.StringVar()
+            entry = tk.Entry(row, textvariable=expr_var, state="disabled")
+            entry.pack(side="left", fill="x", expand=True, padx=5)
+            expr_var.trace_add("write", lambda *args, p=period: self._on_expr_changed(p))
+            
+            # 验证结果
+            status_lbl = tk.Label(row, text="未验证", fg="gray", width=25, anchor="w", font=("Microsoft YaHei", 9))
+            status_lbl.pack(side="left", padx=5)
+            
+            # 验证按钮
+            btn_val = tk.Button(row, text="🔍 验证", command=lambda p=period: self._validate_single(p), state="disabled", font=("Microsoft YaHei", 8))
+            btn_val.pack(side="right")
+            
+            self.cond_rows[period] = {
+                "enable_var": enable_var,
+                "chk": chk,
+                "expr_var": expr_var,
+                "entry": entry,
+                "status_lbl": status_lbl,
+                "btn_val": btn_val
+            }
+            
+        # --- 底部按钮区 ---
+        bottom_bar = tk.Frame(self)
+        bottom_bar.pack(fill="x", side="bottom", padx=10, pady=10)
+        
+        btn_val_all = tk.Button(bottom_bar, text="🔍 验证全部条件", command=self._validate_all, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9, "bold"))
+        btn_val_all.pack(side="left", padx=5)
+        
+        btn_cancel = tk.Button(bottom_bar, text="❌ 取消", command=self.destroy, font=("Microsoft YaHei", 9))
+        btn_cancel.pack(side="right", padx=5)
+        
+        btn_save = tk.Button(bottom_bar, text="💾 保存并应用", command=self._save_to_engine, bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9, "bold"))
+        btn_save.pack(side="right", padx=5)
+
+    def _refresh_list(self):
+        self.listbox.delete(0, tk.END)
+        for s in self.strategies:
+            self.listbox.insert(tk.END, s['name'])
+            
+    def _sync_to_current_strategy(self):
+        if self.current_idx < 0 or self.current_idx >= len(self.strategies):
+            return
+            
+        strat = self.strategies[self.current_idx]
+        strat['name'] = self.name_var.get().strip() or "未命名策略"
+        
+        mode_val = self.mode_var.get()
+        if "union" in mode_val:
+            strat['cross_mode'] = 'union'
+        else:
+            strat['cross_mode'] = 'intersection'
+            
+        # 同步各周期条件
+        new_conditions = {}
+        for period, row in self.cond_rows.items():
+            if row['enable_var'].get():
+                expr = row['expr_var'].get().strip()
+                new_conditions[period] = {
+                    "filter": expr,
+                    "weight": strat.get('conditions', {}).get(period, {}).get('weight', 1.0)
+                }
+        strat['conditions'] = new_conditions
+
+    def _on_name_changed(self, *args):
+        """当输入框中的策略名称被修改时，动态更新左侧列表对应项名称，防多选"""
+        if self.current_idx >= 0 and self.current_idx < len(self.strategies):
+            new_name = self.name_var.get().strip() or "未命名策略"
+            # 只有当新名字跟 listbox 对应项当前显示的名称不一致时才做修改，防止重新 selection_set 导致多选冲突
+            if self.listbox.get(self.current_idx) != new_name:
+                self.listbox.delete(self.current_idx)
+                self.listbox.insert(self.current_idx, new_name)
+                self.listbox.selection_set(self.current_idx)
+
+    def _on_select(self, event):
+        # 1. 同步当前正编辑的旧策略到内存
+        self._sync_to_current_strategy()
+            
+        # 2. 读取新选中的策略
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self.current_idx = idx
+        
+        strat = self.strategies[idx]
+        
+        # 3. 填充表单
+        self.name_var.set(strat['name'])
+        if strat.get('cross_mode') == 'union':
+            self.mode_combo.set("并集 (union)")
+        else:
+            self.mode_combo.set("交集 (intersection)")
+            
+        # 4. 填充各周期条件
+        for period, row in self.cond_rows.items():
+            cond = strat.get('conditions', {}).get(period)
+            if cond is not None:
+                row['enable_var'].set(True)
+                row['expr_var'].set(cond.get('filter', ''))
+                row['entry'].config(state="normal")
+                row['btn_val'].config(state="normal")
+            else:
+                row['enable_var'].set(False)
+                row['expr_var'].set('')
+                row['entry'].config(state="disabled")
+                row['btn_val'].config(state="disabled")
+            row['status_lbl'].config(text="未验证", fg="gray")
+
+    def _on_enable_toggled(self, period):
+        row = self.cond_rows[period]
+        if row['enable_var'].get():
+            row['entry'].config(state="normal")
+            row['btn_val'].config(state="normal")
+            if not row['expr_var'].get().strip():
+                row['expr_var'].set("close > ma5d")
+            row['status_lbl'].config(text="未验证", fg="gray")
+        else:
+            row['entry'].config(state="disabled")
+            row['btn_val'].config(state="disabled")
+            row['status_lbl'].config(text="已禁用", fg="#9E9E9E")
+
+    def _on_expr_changed(self, period):
+        row = self.cond_rows[period]
+        if row['enable_var'].get():
+            row['status_lbl'].config(text="未验证", fg="gray")
+
+    def _add_strategy(self):
+        self._sync_to_current_strategy()
+        
+        new_id = f"custom_strat_{int(time.time())}"
+        new_strat = {
+            "id": new_id,
+            "name": f"自定义策略_{len(self.strategies) + 1}",
+            "conditions": {
+                "d": {"filter": "close > ma5d", "weight": 1.0}
+            },
+            "cross_mode": "intersection"
+        }
+        self.strategies.append(new_strat)
+        self._refresh_list()
+        
+        new_idx = len(self.strategies) - 1
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(new_idx)
+        self.listbox.see(new_idx)
+        self._on_select(None)
+
+    def _del_strategy(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showwarning("提示", "请选择需要删除的策略。")
+            return
+        idx = sel[0]
+        
+        if messagebox.askyesno("确认", f"确定删除策略“{self.strategies[idx]['name']}”吗？"):
+            self.strategies.pop(idx)
+            self._refresh_list()
+            self.current_idx = -1
+            
+            # 清空表单
+            self.name_var.set("")
+            self.mode_combo.set("")
+            for row in self.cond_rows.values():
+                row['enable_var'].set(False)
+                row['expr_var'].set("")
+                row['entry'].config(state="disabled")
+                row['btn_val'].config(state="disabled")
+                row['status_lbl'].config(text="未验证", fg="gray")
+                
+            if self.strategies:
+                self.listbox.selection_set(0)
+                self._on_select(None)
+
+    def _validate_single(self, period):
+        row = self.cond_rows[period]
+        expr = row['expr_var'].get().strip()
+        if not expr:
+            row['status_lbl'].config(text="❌ 表达式为空", fg="red")
+            return False
+            
+        success, msg = self.engine.validate_condition(expr, period)
+        if success:
+            row['status_lbl'].config(text="✅ 语法验证通过", fg="#2E7D32")
+            return True
+        else:
+            short_msg = msg if len(msg) < 25 else msg[:22] + "..."
+            row['status_lbl'].config(text=short_msg, fg="#D32F2F")
+            self._create_tooltip(row['status_lbl'], msg)
+            return False
+
+    def _create_tooltip(self, widget, text):
+        def enter(event):
+            if self.tooltip:
+                self.tooltip.destroy()
+            self.tooltip = tk.Toplevel(widget)
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip.wm_geometry(f"+{event.x_root+15}+{event.y_root+10}")
+            lbl = tk.Label(self.tooltip, text=text, justify="left",
+                           bg="#FFFDE7", fg="#5D4037", relief="solid", bd=1,
+                           font=("Microsoft YaHei", 9), padx=5, pady=3)
+            lbl.pack()
+        def leave(event):
+            if self.tooltip:
+                self.tooltip.destroy()
+                self.tooltip = None
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
+    def _validate_all(self):
+        has_active = False
+        all_ok = True
+        for period, row in self.cond_rows.items():
+            if row['enable_var'].get():
+                has_active = True
+                ok = self._validate_single(period)
+                if not ok:
+                    all_ok = False
+        if not has_active:
+            messagebox.showwarning("验证失败", "请至少启用一个周期条件！")
+            return False
+        if all_ok:
+            messagebox.showinfo("验证成功", "所有启用的周期条件均已验证通过！")
+            return True
+        else:
+            messagebox.showerror("验证失败", "部分周期条件存在语法错误，请检查！")
+            return False
+
+    def _save_to_engine(self):
+        self._sync_to_current_strategy()
+        if not self.strategies:
+            messagebox.showwarning("警告", "策略列表不能为空！")
+            return
+            
+        for s in self.strategies:
+            if not s.get('conditions'):
+                messagebox.showwarning("警告", f"策略“{s['name']}”未配置任何有效过滤条件！")
+                return
+            if not s['name'].strip():
+                messagebox.showwarning("警告", "策略名称不能为空！")
+                return
+                
+        success = self.engine.save_strategies(self.strategies)
+        if success:
+            self.on_save_callback()
+            messagebox.showinfo("保存成功", "所有多周期策略已成功保存并重新加载！")
+            self.destroy()
+        else:
+            messagebox.showerror("错误", "保存策略失败。")
+
+    def destroy(self):
+        """销毁窗口时，将当前的窗口几何属性（位置和大小）保存至配置文件"""
+        try:
+            geom = self.geometry()
+            if "+" in geom:
+                config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
+                cfg = {}
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
+                cfg["editor_geometry"] = geom
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        super().destroy()
+
 
 if __name__ == "__main__":
     import multiprocessing
