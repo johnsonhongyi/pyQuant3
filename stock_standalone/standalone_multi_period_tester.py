@@ -187,6 +187,18 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         chk_ths = tk.Checkbutton(self.link_frame, text="Ths", variable=self.link_ths_var, bg="#f0f0f0", command=self._on_link_config_changed)
         chk_ths.pack(side="left", padx=2)
 
+        # 诊断控制 Frame
+        diagnose_frame = tk.Frame(self.stats_frame, bg="#f0f0f0")
+        diagnose_frame.pack(side="right", padx=10, pady=4)
+        
+        tk.Label(diagnose_frame, text="诊断个股:", font=("Microsoft YaHei", 9), bg="#f0f0f0", fg="#333333").pack(side="left")
+        self.diag_entry = tk.Entry(diagnose_frame, width=8, font=("Microsoft YaHei", 9))
+        self.diag_entry.pack(side="left", padx=2)
+        self.diag_entry.bind("<Return>", lambda e: self._on_diagnose_click())
+        
+        btn_diag = tk.Button(diagnose_frame, text="🔍 诊断", command=self._on_diagnose_click, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9), padx=5, pady=1)
+        btn_diag.pack(side="left", padx=2)
+
         self.stats_lbl_final = tk.Label(self.stats_frame, text="【最终筛选结果】暂无数据", font=("Microsoft YaHei", 9, "bold"), bg="#f0f0f0", fg="#2E7D32")
         self.stats_lbl_final.pack(side="right", padx=20, pady=4)
         
@@ -735,6 +747,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             menu.add_command(label=f"★ 添加重点关注 ({name})", command=lambda: self.add_to_favorites(code))
         else:
             menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
+        menu.add_separator()
+        menu.add_command(label=f"🔬 诊断个股策略通过情况 ({name})", command=lambda: self.diagnose_stock_strategy(code, name))
             
         menu.post(event.x_root, event.y_root)
 
@@ -753,6 +767,142 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.status_var.set(f"已取消重点关注: {code}")
         except Exception as e:
             messagebox.showerror("错误", f"取消重点关注失败: {e}")
+
+    def _on_diagnose_click(self):
+        code = self.diag_entry.get().strip()
+        if not code:
+            messagebox.showwarning("警告", "请输入要诊断的股票代码！")
+            return
+        # 提取并补全6位代码
+        code = "".join(x for x in code if x.isdigit()).zfill(6)
+        self.diagnose_stock_strategy(code)
+
+    def diagnose_stock_strategy(self, code, name=None):
+        import re
+        import pandas as pd
+        from tkinter import messagebox
+        
+        code = str(code).strip().zfill(6)
+        
+        # 1. 尝试获取股票名称
+        if not name:
+            if self.top_now is not None and code in self.top_now.index:
+                name = self.top_now.loc[code, 'name']
+            else:
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                    name = tdd.get_name_code(code)
+                except Exception:
+                    name = "未知股票"
+            if not name or name == "未知股票":
+                name = "未知股票"
+                
+        # 2. 提取当前选中的策略与周期
+        strat_name = self.strategy_var.get()
+        strat_config = next((s for s in self.strategies if s['name'] == strat_name), None)
+        if not strat_config:
+            messagebox.showwarning("警告", "未选中任何有效策略！", parent=self)
+            return
+            
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        if not active_periods:
+            messagebox.showwarning("警告", "请至少选择一个参与周期！", parent=self)
+            return
+            
+        # 3. 确保涉及周期的数据已经加载好，如果没加载，启动一个 loading 提示并同步载入
+        self.status_var.set(f"正在诊断 {code} 的多周期指标...")
+        self.update_idletasks()
+        
+        # 如果 self.top_now 尚未初始化，先获取全市场快照
+        if self.top_now is None:
+            try:
+                from JSONData import tdx_data_Day as tdd
+                from JohnsonUtil import johnson_cons as ct
+                self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
+            except Exception as e:
+                messagebox.showerror("错误", f"初始化市场基础数据失败: {e}", parent=self)
+                return
+                
+        # 同步加载未就绪的周期数据
+        for period in active_periods:
+            if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
+                self.status_var.set(f"正在加载 {period} 周期特征数据...")
+                self.update_idletasks()
+                try:
+                    self.engine.load_period_data(period, self.top_now)
+                except Exception as e:
+                    self.status_var.set(f"加载 {period} 周期失败: {e}")
+                    
+        self.status_var.set("准备就绪")
+        
+        # 4. 构建平铺多周期特征数据的单行 DataFrame
+        merged_row = {"name": name}
+        
+        # 定义列名后缀转换函数
+        def suffix_expr(expr, period_suffix, cols_set):
+            def repl(match):
+                word = match.group(0)
+                if word in cols_set:
+                    return f"{word}_{period_suffix}"
+                return word
+            return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', repl, expr)
+            
+        queries = []
+        for period in active_periods:
+            df_p = self.engine._period_dfs.get(period)
+            if df_p is not None and not df_p.empty:
+                # 获取该周期的指标列
+                valid_cols = set(df_p.columns)
+                if code in df_p.index:
+                    row_p = df_p.loc[code]
+                    if isinstance(row_p, pd.DataFrame):
+                        row_p = row_p.iloc[0]
+                    # 平铺到 merged_row 中，列名加后缀
+                    for k, val in row_p.to_dict().items():
+                        if k not in ('code', 'name'):
+                            merged_row[f"{k}_{period}"] = val
+                
+                # 转换过滤条件
+                cond = strat_config['conditions'].get(period)
+                if cond:
+                    raw_filter = cond['filter']
+                    suffixed_filter = suffix_expr(raw_filter, period, valid_cols)
+                    queries.append({
+                        "name": f"{period.upper()}周期条件",
+                        "expr": suffixed_filter
+                    })
+            else:
+                # 降级：如果无数据，我们也把条件加进去，它会自动提示缺失字段
+                cond = strat_config['conditions'].get(period)
+                if cond:
+                    queries.append({
+                        "name": f"{period.upper()}周期条件",
+                        "expr": cond['filter']
+                    })
+                    
+        if not queries:
+            messagebox.showwarning("警告", "未生成任何有效的诊断条件！", parent=self)
+            return
+            
+        # 构造 df_flat
+        df_flat = pd.DataFrame([merged_row], index=[code])
+        df_flat.index.name = 'code'
+        
+        # 5. 调用系统自带的 check_code 接口
+        try:
+            from stock_logic_utils import check_code
+            check_code(df_flat, code, queries, parent=self)
+        except Exception as e:
+            messagebox.showerror("错误", f"调起股票检查报告失败: {e}", parent=self)
+            
+        # 6. 诊断后自动滚动并聚焦到 tree 视图中的对应代码行（如果存在于结果集中则高亮定位，如果不存在则静默处理不抛出警告，与现有 tk 主窗口中的机制对齐）
+        try:
+            if self.tree.exists(code):
+                self.tree.selection_set(code)
+                self.tree.focus(code)
+                self.tree.see(code)
+        except Exception:
+            pass
 
     def open_strategy_editor(self):
         """打开多周期策略编辑器对话框"""
@@ -865,6 +1015,13 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         
         btn_del = tk.Button(btn_frame, text="➖ 删除策略", command=self._del_strategy, bg="#F44336", fg="white", font=("Microsoft YaHei", 9))
         btn_del.pack(side="right", fill="x", expand=True, padx=2)
+        
+        # JSON 导入按钮
+        json_btn_frame = tk.Frame(left_frame)
+        json_btn_frame.pack(fill="x", pady=(0, 5))
+        
+        btn_import_json = tk.Button(json_btn_frame, text="📋 粘贴 JSON 策略", command=self._import_json_strategy, bg="#009688", fg="white", font=("Microsoft YaHei", 9))
+        btn_import_json.pack(fill="x", expand=True, padx=2)
         
         # --- 右侧详细编辑区 ---
         self.right_frame = tk.LabelFrame(main_pane, text="策略详细配置与验证", font=("Microsoft YaHei", 9, "bold"), padx=10, pady=10)
@@ -1077,6 +1234,134 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
             if self.strategies:
                 self.listbox.selection_set(0)
                 self._on_select(None)
+
+    def _import_json_strategy(self):
+        self._sync_to_current_strategy()
+        
+        # 弹出粘贴 JSON 的窗口
+        dialog = tk.Toplevel(self)
+        dialog.title("粘贴 JSON 策略配置")
+        dialog.geometry("600x450")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        w, h = 600, 450
+        x = self.winfo_x() + (self.winfo_width() - w) // 2
+        y = self.winfo_y() + (self.winfo_height() - h) // 2
+        dialog.geometry(f"{w}x{h}+{x}+{y}")
+        
+        lbl = tk.Label(dialog, text="请在下方粘贴您的 JSON 策略，支持单条或 strategies 数组结构：", 
+                       font=("Microsoft YaHei", 9, "bold"), fg="#333", anchor="w")
+         # 防止缩进警告，保证整齐
+        lbl.pack(fill="x", padx=10, pady=10)
+        
+        text_area = tk.Text(dialog, font=("Consolas", 10), bd=2, relief="groove")
+        text_area.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # 默认填入一个占位示例，方便用户参考
+        placeholder = (
+            "{\n"
+            "  \"name\": \"多级别量变到质变共振策略\",\n"
+            "  \"cross_mode\": \"intersection\",\n"
+            "  \"conditions\": {\n"
+            "    \"3M\": {\"filter\": \"close > lower and close >= ma8d\", \"weight\": 1.0},\n"
+            "    \"45d\": {\"filter\": \"dff2 > 0 and Rank > 60 and close > ma20d\", \"weight\": 1.0},\n"
+            "    \"m\": {\"filter\": \"close > ma10d and close >= lastp1d\", \"weight\": 1.0},\n"
+            "    \"w\": {\"filter\": \"close > upper or (close > ma5d and dff > 0)\", \"weight\": 1.0},\n"
+            "    \"d\": {\"filter\": \"percent > 1.5 and Rank > 80\", \"weight\": 1.0}\n"
+            "  }\n"
+            "}"
+        )
+        text_area.insert("1.0", placeholder)
+        
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(fill="x", pady=10, padx=10)
+        
+        def do_import():
+            raw_text = text_area.get("1.0", tk.END).strip()
+            if not raw_text:
+                messagebox.showwarning("警告", "内容不能为空！", parent=dialog)
+                return
+            try:
+                data = json.loads(raw_text)
+            except Exception as e:
+                messagebox.showerror("JSON 语法错误", f"解析失败：{e}", parent=dialog)
+                return
+                
+            imported_list = []
+            if isinstance(data, dict):
+                if "strategies" in data and isinstance(data["strategies"], list):
+                    imported_list = data["strategies"]
+                else:
+                    imported_list = [data]
+            elif isinstance(data, list):
+                imported_list = data
+            else:
+                messagebox.showerror("格式错误", "JSON 根节点必须是字典或列表对象！", parent=dialog)
+                return
+                
+            valid_strats = []
+            for idx, item in enumerate(imported_list):
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name", "").strip()
+                if not name:
+                    name = f"未命名导入策略_{len(self.strategies) + len(valid_strats) + 1}"
+                
+                conditions = item.get("conditions", {})
+                if not isinstance(conditions, dict):
+                    continue
+                
+                clean_conditions = {}
+                for p, cond in conditions.items():
+                    if p not in self.engine.SUPPORTED_PERIODS:
+                        continue
+                    if not isinstance(cond, dict):
+                        if isinstance(cond, str):
+                            clean_conditions[p] = {"filter": cond, "weight": 1.0}
+                        continue
+                     
+                    flt = cond.get("filter", "").strip()
+                    if flt:
+                        clean_conditions[p] = {
+                            "filter": flt,
+                            "weight": float(cond.get("weight", 1.0))
+                        }
+                        
+                if not clean_conditions:
+                    clean_conditions["d"] = {"filter": "close > ma5d", "weight": 1.0}
+                    
+                new_strat = {
+                    "id": item.get("id") or f"custom_strat_{int(time.time())}_{idx}",
+                    "name": name,
+                    "conditions": clean_conditions,
+                    "cross_mode": item.get("cross_mode") or "intersection"
+                }
+                valid_strats.append(new_strat)
+                
+            if not valid_strats:
+                messagebox.showerror("导入失败", "未识别到任何符合条件的策略配置！", parent=dialog)
+                return
+                
+            self.strategies.extend(valid_strats)
+            self._refresh_list()
+            
+            new_idx = len(self.strategies) - len(valid_strats)
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(new_idx)
+            self.listbox.see(new_idx)
+            self._on_select(None)
+            
+            messagebox.showinfo("成功", f"成功导入 {len(valid_strats)} 条策略！", parent=dialog)
+            dialog.destroy()
+            
+        btn_ok = tk.Button(btn_frame, text="✅ 解析并导入", command=do_import, bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9, "bold"))
+        btn_ok.pack(side="right", padx=5)
+        
+        btn_cancel = tk.Button(btn_frame, text="❌ 取消", command=dialog.destroy, font=("Microsoft YaHei", 9))
+        btn_cancel.pack(side="right", padx=5)
 
     def _validate_single(self, period):
         row = self.cond_rows[period]
