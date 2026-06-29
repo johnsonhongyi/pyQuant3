@@ -256,6 +256,78 @@ def build_hma_and_trendscore(
     return df
 
 
+def complete_indicators_pipeline(
+    top_all: pd.DataFrame, 
+    logger: Any, 
+    resample: str, 
+    status_callback: Callable[[], Any] = None
+) -> pd.DataFrame:
+    """
+    对已加载的 top_all (大/小周期) 数据执行一致的指标计算与补齐管道，
+    计算包括 calc_indicators, process_merged_sina_with_history, 注入 0d 实时列,
+    strong_momentum_large_cycle_vect (动量/win), consecutive_above 系列,
+    scoring 系列, 以及 build_hma_and_trendscore。
+    """
+    if top_all is None or top_all.empty:
+        return top_all
+
+    time_sum = time.time()
+    
+    # 1. 基础指标计算
+    with timed_ctx("calc_indicators", warn_ms=1000):
+        top_all = calc_indicators(top_all, logger, resample)
+    
+    # 2. 补齐历史/实时成交量
+    with timed_ctx("sina_with_history", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
+    
+    # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
+    if 'now' in top_all.columns:
+        top_all['lastp0d'] = top_all['now']
+        top_all['lasth0d'] = top_all['high']
+        top_all['lastl0d'] = top_all['low']
+        top_all['lasto0d'] = top_all['open']
+        top_all['lastv0d'] = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+        # 为压力位注入 0d (复用昨日压力位作为今日参考线)
+        if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
+        if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
+        if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']
+
+    # 4. 动量与 win 属性计算
+    with timed_ctx("plus_history_sum_opt", warn_ms=1000):
+        if resample == 'd':
+            result_opt = strong_momentum_large_cycle_vect(top_all, max_days=cct.compute_lastdays, winlimit=1)
+        else:
+            result_opt = strong_momentum_large_cycle_vect_new(top_all, max_days=cct.compute_lastdays, winlimit=1)
+        
+    with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+        clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
+        top_all = align_sum_percent(top_all, clean_sum)
+
+    # 5. consecutive_above 系列支撑/破位计数
+    with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above_single(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    
+    # 6. scoring 系列
+    with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
+        top_all = scoring_momentum_pullback_system_base(top_all, max_days=cct.compute_lastdays)
+    with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
+        top_all = scoring_momentum_pullback_system_top(top_all, max_days=cct.compute_lastdays)
+    with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
+        top_all = buy_sell_score_momentum_vect(top_all, max_days=cct.compute_lastdays)
+    
+    # 7. build_hma_and_trendscore (生成 Rank / TrendS 等)
+    with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+        top_all = build_hma_and_trendscore(top_all, status_callback=status_callback)
+    
+    logger.debug(f'[complete_indicators_pipeline] resample={resample} elapsed={time.time() - time_sum:.2f}s')
+    return top_all
+
+
 def build_hma_and_trendscore_noVol(
     df,
     close_col='close',
@@ -2826,68 +2898,13 @@ def fetch_and_process(
                     df_allDF[resample] = top_all
 
 
-            time_sum = time.time()
-            with timed_ctx("calc_indicators", warn_ms=1000):
-                top_all = calc_indicators(top_all, logger, resample)
-            #step volume
-            with timed_ctx("sina_with_history", warn_ms=1000):
-                top_all = process_merged_sina_with_history(top_all)
-            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
-            # top_all = calc_indicators(top_all, resample)
+            with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
+                top_all = complete_indicators_pipeline(top_all, logger, resample, status_callback)
 
             if top_all is not None and not top_all.empty:
-                # --- [新增] 注入 0d 数据列，使 consecutive_above 生效 ---
-                # 只有在盘中且有实时行情时注入
-                if 'now' in top_all.columns:
-                    top_all['lastp0d'] = top_all['now']
-                    top_all['lasth0d'] = top_all['high']
-                    top_all['lastl0d'] = top_all['low']
-                    top_all['lasto0d'] = top_all['open']
-                    top_all['lastv0d'] = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
-                    # 为压力位注入 0d (复用昨日压力位作为今日参考线)
-                    if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
-                    if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
-                    if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']
-
-                sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort,top_all)
+                sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort, top_all)
             else:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
-
-            # test_opt(top_all,resample)
-            
-            with timed_ctx("plus_history_sum_opt", warn_ms=1000):
-                if resample == 'd':
-                    # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
-                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
-                else:
-                    # result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
-                    result_opt = strong_momentum_large_cycle_vect_new(top_all,max_days=cct.compute_lastdays,winlimit=1)
-            with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
-                # print(get_vect_daily_data(top_all,['002455']).T.to_string())
-                clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
-                top_all = align_sum_percent(top_all,clean_sum)
-
-            with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
-                top_all = strong_momentum_large_cycle_vect_consecutive_above(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
-            
-            with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
-                top_all = strong_momentum_large_cycle_vect_consecutive_above_single(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
-            with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
-                top_all = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
-            with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
-                top_all = scoring_momentum_pullback_system_base(top_all,max_days=cct.compute_lastdays)
-            # with timed_ctx("scoring_momentum_pullback_system_base_realtime", warn_ms=1000):
-                # top_all = scoring_momentum_pullback_system_base_realtime(top_all,max_days=cct.compute_lastdays)
-            with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
-                top_all = scoring_momentum_pullback_system_top(top_all,max_days=cct.compute_lastdays)
-            with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
-                top_all = buy_sell_score_momentum_vect(top_all,max_days=cct.compute_lastdays)
-            # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
-            # cct.print_timing_summary()
-          
-            logger.debug(f'clean_sum: {time.time() - time_sum:.2f}')
-            with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
-                top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
 
             top_temp = top_all.copy()
             with timed_ctx("getBollFilter", warn_ms=800):
@@ -2940,55 +2957,13 @@ def fetch_and_process(
                 # Save raw combined snapshot for resampled UI display calculations
                 # top_all_res_raw = top_all_res_raw.copy() if not top_all_res.empty else pd.DataFrame()
 
-                time_sum = time.time()
-                with timed_ctx("calc_indicators", warn_ms=1000):
-                    top_all_res = calc_indicators(top_all_res, logger, resample_res)
-                #step volume
-                with timed_ctx("sina_with_history", warn_ms=1000):
-                    top_all_res = process_merged_sina_with_history(top_all_res)
-                logger.info(f"resample_res UI  top_all_res:{len(top_all_res)} market : {market}  resample: {resample_res}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+                with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
+                    top_all_res = complete_indicators_pipeline(top_all_res, logger, resample_res, status_callback)
 
                 if top_all_res is not None and not top_all_res.empty:
-                    # --- [新增] 注入 0d 数据列，使 consecutive_above 生效 ---
-                    if 'now' in top_all_res.columns:
-                        top_all_res['lastp0d'] = top_all_res['now']
-                        top_all_res['lasth0d'] = top_all_res['high']
-                        top_all_res['lastl0d'] = top_all_res['low']
-                        top_all_res['lasto0d'] = top_all_res['open']
-                        top_all_res['lastv0d'] = top_all_res['vol'] if 'vol' in top_all_res.columns else top_all_res['volume']
-                        # 为压力位注入 0d (复用昨日压力位作为今日参考线)
-                        if 'upper1' in top_all_res.columns: top_all_res['upper0'] = top_all_res['upper1']
-                        if 'ma51d' in top_all_res.columns: top_all_res['ma50d'] = top_all_res['ma51d']
-                        if 'high41' in top_all_res.columns: top_all_res['high40'] = top_all_res['high41']
-
                     sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort, top_all_res)
                 else:
                     sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort)
-                
-                with timed_ctx("plus_history_sum_opt", warn_ms=1000):
-                    
-                    result_opt = strong_momentum_large_cycle_vect_new(top_all_res, max_days=cct.compute_lastdays, winlimit=1)
-                with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
-                    clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
-                    top_all_res = align_sum_percent(top_all_res, clean_sum)
-
-                with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
-                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
-                
-                with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
-                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above_single(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
-                with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
-                    top_all_res = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all_res, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
-                with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
-                    top_all_res = scoring_momentum_pullback_system_base(top_all_res, max_days=cct.compute_lastdays)
-                with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
-                    top_all_res = scoring_momentum_pullback_system_top(top_all_res, max_days=cct.compute_lastdays)
-                with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
-                    top_all_res = buy_sell_score_momentum_vect(top_all_res, max_days=cct.compute_lastdays)
-            
-                logger.debug(f'clean_sum: {time.time() - time_sum:.2f}')
-                with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
-                    top_all_res = build_hma_and_trendscore(top_all_res, status_callback=status_callback)
 
                 top_temp_res = top_all_res.copy()
                 with timed_ctx("getBollFilter", warn_ms=800):

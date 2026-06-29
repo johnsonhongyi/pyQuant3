@@ -120,6 +120,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             json.dump(self.ui_state, f, ensure_ascii=False, indent=2)
 
     def _init_ui(self):
+        self.status_var = tk.StringVar(value="准备就绪")
+        
         # --- Toolbar ---
         toolbar = tk.Frame(self, bd=1, relief="raised")
         toolbar.pack(fill="x", padx=5, pady=5)
@@ -158,9 +160,6 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         btn_remove = tk.Button(toolbar, text="-", width=2, command=self._remove_manual_col, bg="#FFEBEE", fg="#C62828", relief="groove")
         btn_remove.pack(side="left", padx=1)
         
-        self.status_var = tk.StringVar(value="准备就绪")
-        tk.Label(toolbar, textvariable=self.status_var, fg="blue").pack(side="right", padx=10)
-        
         # --- Bottom Statistics Bar ---
         self.stats_frame = tk.Frame(self, bd=1, relief="sunken", bg="#f0f0f0")
         self.stats_frame.pack(fill="x", padx=5, pady=3, side="bottom")
@@ -186,6 +185,10 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
         self.stats_lbl_final = tk.Label(self.stats_frame, text="【最终筛选结果】暂无数据", font=("Microsoft YaHei", 9, "bold"), bg="#f0f0f0", fg="#2E7D32")
         self.stats_lbl_final.pack(side="right", padx=20, pady=4)
+        
+        # 运行日志中间状态显示区域
+        self.status_lbl = tk.Label(self.stats_frame, textvariable=self.status_var, font=("Microsoft YaHei", 9, "bold"), bg="#f0f0f0", fg="#1A73E8")
+        self.status_lbl.pack(side="left", fill="x", expand=True, padx=10, pady=4)
         
         # --- Results Treeview ---
         tree_frame = tk.Frame(self)
