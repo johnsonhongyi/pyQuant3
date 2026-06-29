@@ -255,7 +255,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.strategy_combo.bind('<<ComboboxSelected>>', lambda e: self._on_strategy_selected())
         self.tree.bind('<<TreeviewSelect>>', self._on_tree_select)
         self.tree.bind("<Button-3>", self.show_context_menu)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", self._on_tree_leave)
         self.tree.tag_configure("favorite", foreground="#C62828", font=("Microsoft YaHei", 9, "bold"))
+        self.tree_tooltip = None
+        self.current_tooltip_col = None
 
     def _apply_state(self):
         if self.strategies:
@@ -462,6 +466,44 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if self._link_after_id:
             self.after_cancel(self._link_after_id)
         self._link_after_id = self.after(100, self._do_linkage)
+
+    def _on_tree_motion(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            col_id = self.tree.identify_column(event.x)
+            if col_id:
+                try:
+                    col_idx = int(col_id.replace('#', '')) - 1
+                    columns = self.tree['columns']
+                    if 0 <= col_idx < len(columns):
+                        col_name = columns[col_idx]
+                        if getattr(self, 'current_tooltip_col', None) != col_name:
+                            self._show_tree_tooltip(event.x_root, event.y_root + 20, col_name)
+                            self.current_tooltip_col = col_name
+                        return
+                except ValueError:
+                    pass
+        self._hide_tree_tooltip()
+
+    def _show_tree_tooltip(self, x, y, text):
+        self._hide_tree_tooltip()
+        self.tree_tooltip = tk.Toplevel(self)
+        self.tree_tooltip.wm_overrideredirect(True)
+        self.tree_tooltip.wm_geometry(f"+{x}+{y}")
+        self.tree_tooltip.attributes("-topmost", True)
+        lbl = tk.Label(self.tree_tooltip, text=text, justify="left",
+                       bg="#FFFDE7", fg="#1B5E20", relief="solid", bd=1,
+                       font=("Microsoft YaHei", 9, "bold"), padx=6, pady=4)
+        lbl.pack()
+
+    def _hide_tree_tooltip(self):
+        if getattr(self, 'tree_tooltip', None):
+            self.tree_tooltip.destroy()
+            self.tree_tooltip = None
+            self.current_tooltip_col = None
+
+    def _on_tree_leave(self, event):
+        self._hide_tree_tooltip()
 
     def _do_linkage(self):
         selection = self.tree.selection()
