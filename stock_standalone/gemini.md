@@ -1,3 +1,21 @@
+## 2026-06-29 16:35
+- [x] **修复策略编辑器保存后主窗口当前选择策略被重置的 Bug (Fixed Strategy Selection Reset on Save & Persisted Last Used Strategy)**：
+    - [x] **纠正策略 ID 覆写逻辑**：修复了 `_save_state` 中直接将 `strategy_var.get()` (策略名称) 赋值给 `strategy_id` 的 Bug。现改为在 `self.strategies` 列表中通过名称反向解析出唯一的 `strat_id` 后再写入 `self.ui_state['strategy_id']`，从根本上解决了配置写盘时数据类型不匹配的问题。
+    - [x] **实现策略编辑器保存时的主窗口原策略锁定**：更新了 `_on_strategies_updated` 回调。由于 `strategy_id` 正确保存为了 ID 字符串，系统在策略重载时可以通过 `curr_id` 完美匹配被重命名的策略或原激活策略。编辑/保存后不再会意外重置为列表中首个策略，确保运行的策略只能手动变动。
+    - [x] **自动记忆最后的运行与选择策略**：通过修正 `_save_state` 并让 `_apply_state` 在初始化时正确从 ID 映射还原，系统现在可以完美在跨会话中自动记忆 and 恢复最后的运行/选择策略，恢复高一致性的分析环境。
+    - [x] **为 Treeview 表格右键菜单新增“复制代码”与“复制行信息”功能 (Added Copy Code & Copy Row Info to Context Menu)**：
+        - [x] **代码极速提取**：新增右键菜单项 `📋 复制代码`，可瞬间将当前行个股的 6 位数字代码复制到系统剪贴板，并安全去除其他修饰前缀。
+        - [x] **全字段平铺复制**：新增右键菜单项 `📝 复制行信息`，可自动遍历当前行所有已启用的列表字段（包含基础的现价、涨幅以及全部自定义多周期指标列），并以 `表头名:字段值` 的高可读键值对以 ` | ` 符号拼接，一键复制到剪贴板，极大提高了数据比对与多平台交互的效率。
+        - [x] **状态反馈与安全转换**：操作完成后在底部状态栏同步提示 `已复制...` 给予即时反馈；添加了异常捕获与空值安全处理，防止在空数据或异常触发时引发 UI 挂起。
+    - [x] **完成全套自动化回归测试自检**：对 `standalone_multi_period_tester.py` 执行了物理编译，且顺利执行了 `test_multi_period_automated.py`，全量跨周期指标计算与校验在无 HDF5 IO 冲突状态下全绿通过。
+
+## 2026-06-29 16:30
+- [x] **窗口轮换 (Alt+R) 深度集成多周期联动策略筛选器 (Integrated Multi-Period Strategy Tester into Alt+R Window Rotator)**：
+    - [x] **打通窗口句柄收集与存活状态检测**：在 `instock_MonitorTK.py` 的 `_get_all_open_trade_windows` 方法中，新增对 `_multi_period_tester_win` 窗口的检测。要求窗口存在且处于可视状态（`winfo_exists` 且 `winfo_viewable`），将其顶层 HWND 句柄安全收集并映射为人类可读名称 `"🎯 多周期策略筛选器 (MultiPeriodTester)"`。
+    - [x] **实现强力穿透与聚焦置顶**：在 `_force_focus_hwnd` 方法中，补齐了针对 `_multi_period_tester_win` 顶层句柄的 Tk 原位置顶唤醒逻辑。当轮转目标切换至筛选器时，自动触发 `deiconify()`、`lift()` 及 `focus_force()`，实现窗口在任何叠层关系下的秒级唤醒与置顶聚焦。
+    - [x] **补全 Qt 切换面板的名称映射与高亮支持**：在 `WindowRotatorDialog.show_rotator` 方法中，将 `"MultiPeriodTester"` 登记并映射至可视高亮菜单。支持使用全局 Alt+R 快捷键、键盘上下键以及鼠标滚轮进行无缝轮选、高亮及确认切换。
+    - [x] **完成语法无错编译验证**：顺利对 `instock_MonitorTK.py` 执行了 `py_compile` 物理编译与自检，确保主程序在高频行情刷新与多进程并发联动下的卓越稳定性。
+
 ## 2026-06-29 11:30
 - [x] **统一多周期数据准备与指标计算管道 (Unified Multi-Period Data & Indicator Pipeline)**：
     - [x] **提炼并封装统一指标流水线函数 (`complete_indicators_pipeline`)**：在 `data_utils.py` 中，抽取原本零散和重复的指标计算、0d 盘中实时行情数据注入 (`lastp0d`、`lasth0d` 等)、大级别动量计算 (`strong_momentum_large_cycle_vect` 系列)、前态压力回踩计数、动量回调系统评分以及 `build_hma_and_trendscore` 的完整序列，归并到一个健壮 of `complete_indicators_pipeline` 通用计算接口中。

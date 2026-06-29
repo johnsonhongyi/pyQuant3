@@ -95,7 +95,14 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
     def _save_state(self):
         os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-        self.ui_state['strategy_id'] = self.strategy_var.get()
+        # 从当前选中的 strategy_var 名字解析出真实的 strategy_id，实现自动记忆最后的运行/选择策略
+        strat_name = self.strategy_var.get()
+        strat_id = ""
+        for s in self.strategies:
+            if s['name'] == strat_name:
+                strat_id = s['id']
+                break
+        self.ui_state['strategy_id'] = strat_id
         self.ui_state['periods'] = [p for p, var in self.period_vars.items() if var.get()]
         self.ui_state['custom_cols'] = [c for c, var in self.custom_col_vars.items() if var.get()]
         self.ui_state['manual_col_pool'] = list(self.manual_col_pool)
@@ -748,6 +755,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         else:
             menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
         menu.add_separator()
+        menu.add_command(label="📋 复制代码", command=lambda: self.copy_code(code))
+        menu.add_command(label="📝 复制行信息", command=lambda: self.copy_row_info(values))
+        menu.add_separator()
         menu.add_command(label=f"🔬 诊断个股策略通过情况 ({name})", command=lambda: self.diagnose_stock_strategy(code, name))
             
         menu.post(event.x_root, event.y_root)
@@ -767,6 +777,34 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.status_var.set(f"已取消重点关注: {code}")
         except Exception as e:
             messagebox.showerror("错误", f"取消重点关注失败: {e}")
+
+    def copy_code(self, code):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(code)
+            self.status_var.set(f"已复制代码: {code}")
+        except Exception as e:
+            messagebox.showerror("错误", f"复制代码失败: {e}")
+
+    def copy_row_info(self, values):
+        try:
+            cols = list(self.tree["columns"])
+            row_str_parts = []
+            for i, val in enumerate(values):
+                col_id = cols[i] if i < len(cols) else f"col_{i}"
+                col_name = self.tree.heading(col_id, "text") if i < len(cols) else col_id
+                # 过滤掉股票名称列里的星星前缀
+                val_str = str(val).strip()
+                if col_id == "name" and val_str.startswith("★ "):
+                    val_str = val_str[len("★ "):]
+                row_str_parts.append(f"{col_name}:{val_str}")
+            row_str = " | ".join(row_str_parts)
+            
+            self.clipboard_clear()
+            self.clipboard_append(row_str)
+            self.status_var.set(f"已复制行信息: {values[1] if len(values) > 1 else values[0]}")
+        except Exception as e:
+            messagebox.showerror("错误", f"复制行信息失败: {e}")
 
     def _on_diagnose_click(self):
         code = self.diag_entry.get().strip()

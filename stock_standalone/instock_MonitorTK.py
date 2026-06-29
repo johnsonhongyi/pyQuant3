@@ -14591,6 +14591,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
+        # 9.3. 多周期联动策略筛选器窗口 (Tk - _multi_period_tester_win)
+        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win is not None:
+            try:
+                if self._multi_period_tester_win.winfo_exists() and self._multi_period_tester_win.winfo_viewable():
+                    h = self._get_toplevel_hwnd(self._multi_period_tester_win.winfo_id())
+                    current_visible_hwnds.append(h)
+                    name_map[h] = "🎯 多周期策略筛选器 (MultiPeriodTester)"
+            except Exception:
+                pass
+
         # 10. 概念放量监控子窗口 (Tk - self.monitor_windows 中的所有有效 toplevel 窗口)
         if hasattr(self, 'monitor_windows') and self.monitor_windows:
             for win_id, win_info in self.monitor_windows.items():
@@ -14699,6 +14709,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._realtime_monitor_win.deiconify()
                     self._realtime_monitor_win.lift()
                     self._realtime_monitor_win.focus_force()
+                except Exception:
+                    pass
+        elif hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+            if hwnd == self._get_toplevel_hwnd(self._multi_period_tester_win.winfo_id()):
+                try:
+                    self._multi_period_tester_win.deiconify()
+                    self._multi_period_tester_win.lift()
+                    self._multi_period_tester_win.focus_force()
                 except Exception:
                     pass
 
@@ -14829,6 +14847,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         name_map[hwnd] = "💡 概念异动详情 (ConceptDetail)"
                     elif "RealtimeMonitor" in raw_name:
                         name_map[hwnd] = "🎯 强庄二次起爆监控池 (RealtimeMonitor)"
+                    elif "MultiPeriodTester" in raw_name:
+                        name_map[hwnd] = "🎯 多周期策略筛选器 (MultiPeriodTester)"
                     elif "MonitorWindow_" in raw_name:
                         # 提炼出独特代码如 "板块名称_代码"
                         mon_id = raw_name.split("MonitorWindow_")[-1].split("(")[0]
