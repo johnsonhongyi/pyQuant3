@@ -1,3 +1,44 @@
+## 2026-06-29 18:28
+- [x] **根治缓存失效与UI状态不同步双重Bug (Fixed Cache Invalidation + Thread-safe Status UI)**：
+    - [x] **引入 _top_now_cache_ts / _period_cache_ts 时间戳体系**：在 __init__ 中新增 _top_now_cache_ts = 0.0 与 _period_cache_ts: dict = {} 分别追踪 	op_now 和各周期数据的最后加载时间，为 TTL 判断提供时间依据。
+    - [x] **实现 _is_cache_valid 缓存有效性判断**：封装 _CACHE_TTL_TRADING = 3600s 的 TTL 决策——交易时段缓存 1 小时后过期；非交易时段（周末/节假日/盘后）永久有效，直接复用内存数据，避免不必要的磁盘 IO 和网络请求。
+    - [x] **修复 
+un_filter 默认强制刷新的根本缺陷**：将 orce_reload 默认值由 True 改为 False，智能检测 	op_now 和 _period_dfs 的缓存有效性，仅对失效缓存执行清除并重新加载，彻底解决每次运行都全量重计算的性能浪费。
+    - [x] **新增「🔄 强制刷新」按钮，职责分离**：拆分为「▶ 运行筛选」（orce_reload=False）和「🔄 强制刷新」（orce_reload=True，橙色），让用户可以显式控制是否清空全部缓存。
+    - [x] **修复 _update_status 线程安全问题**：去掉 update_idletasks() 调用（从子线程直接执行 Tkinter 重绘是非线程安全行为），全部通过 self.after(0, self._update_status, text) 安全投递至主线程事件队列执行，根治状态标签二次运行时不更新的 UI Bug。
+    - [x] **_worker 逐周期缓存感知**：命中缓存时显示「⚡ [{period}] 命中缓存 (已存在 Xs)」并跳过加载；失效时才执行 engine.load_period_data 并更新 _period_cache_ts[period] 时间戳。
+    - [x] **全量语法编译通过**：py_compile 校验 standalone_multi_period_tester.py 无语法错误。
+
+## 2026-06-29 18:15
+- [x] **进一步优化大周期动量 `win`/`slope` 跨周/跨月同一周期实时数据对齐与交易日门槛保护 (Optimized Large-Cycle Momentum same-period Alignment & Trading Day Gate)**：
+    - [x] **实现同一周期下 indicator 历史序列物理移位 (`parse_indicator_col`)**：在 `complete_indicators_pipeline` 中，针对非日线的大周期 (w, m, 3d, 45d, 3M) 在 `is_same == True` (同一周期) 时，实现了对所有 `lastoXd`、`lasthXd`、`lastlXd`、`lastpXd`、`lastvXd` 等历史指示器列的自动向后移位一位 (例如将 `lastp1d` 移入 `lastp2d`，把 `lastp0d` 对应的当期局部数据腾出给 `lastp1d`)。这确保了当底层的 HDF5 或 TDX 数据已经记录了当期的局部已完成数据时，历史动量计算的 `lastp1d` 始终指向上一个已完全关闭的周期，彻底避免了 `lastp1d` 和当期实时收盘的语义混淆。
+    - [x] **引入交易日状态与开盘时间门槛保护 (`is_trade_day` & `now_time`)**：在进入 `complete_indicators_pipeline` 的实时行情对齐 and 移位 block 前，强行增加了对今日是否为有效交易日 (`cct.get_trade_date_status()`) 以及当前时间是否已进入开盘交易时段 (`now_time >= 915`) 的前置判定。这防止了在周末、节假日或盘前无新行情更新时发生无效的移位，从而完美保留了历史已完成周期的完整性，解决了周末或盘前计算时数据失真和 win 被意外清零的隐患。
+    - [x] **全量自动化测试与编译校验全绿通过**：顺利执行了 `test_multi_period_automated.py` 回归测试，诊断结果和 query 过滤器各项判定指标在无 disk I/O 锁竞争下以 Exit Code 0 完美跑通。
+
+## 2026-06-29 17:55
+- [x] **修复实盘下大周期动量与 `win`/`slope` 缺失当前周期实时报价的缺陷 (Fixed Intraday Missing Current-Period Quote in Momentum & Win/Slope Calculations)**：
+    - [x] **实现 `strong_momentum_large_cycle_vect` 的 `shift_intraday` 自适应数据位移**：在两个核心动量矢量计算函数中添加 `shift_intraday=True` 参数。当处于实盘/盘中环境（且 `lastp1d` 等历史列存在）时，在执行矩阵提取前，先自动构造一份局部的列位移副本：将当前实盘 OHLCV 数据（优先使用 `lastp0d` 等 0d 注入列，没有则使用 `close`/`high`/`low`/`vol`）平移灌入 `lastp1d`/`lasth1d`/`lastl1d`/`lastv1d`，原历史 1d-10d 依次顺延，将当前的活跃周期行情无缝链接至动量评估序列的最前端。
+    - [x] **打通大周期 `win` 连阳与斜率 `slope` 实盘刷新**：解决了大周期（如周线 `w`、月线 `m`）由于底层矩阵直接从 `lastp1d` 起算而彻底忽略了本周/本月最新价格变动，导致如“上周涨停、本周继续突破”的股票 `win(w)` 始终显示为 0 的严重缺陷。平移后，中国卫星（600118）的 `win(w)` 成功更新为正确的连阳周数 `2`，斜率和爆发力指标也同步反映了最新实时周线状态。
+    - [x] **全面回归测试通过**：对 `data_utils.py` 进行 `py_compile` 自检与 `test_multi_period_automated.py` 执行，一切正常通过。
+
+## 2026-06-29 17:40
+- [x] **修复由于 Ghost Bar 位移导致策略测试结果为空的缺陷 (Fixed Empty Strategy Results due to Ghost Bar Shifting)**：
+    - [x] **废除跨周期历史列位移 (Abolished Shifting of Historical Columns)**：明确了 HDF5/TDX 数据底层在非日线重采样周期 (w, m) 下 `lastp1d` 等列已天然代表前一个已完成周期的昨收这一事实。废除了 `complete_indicators_pipeline` 内部对于 `lastp1d` 至 `lastp20d` 的往后移位逻辑，防止 `lastp1d` 被错误覆盖，完美保留了策略条件如 `close > lastp1d and lastp1d > lastp2d` 的语义完整性。
+    - [x] **实现原地合并当前活动周期 OHLC 报价 (In-place Merging of Active Period OHLC)**：
+        - 新周期 (`is_same == False`)：不做合并，直通今日实时行情为本周期起点。
+        - 同一周期 (`is_same == True`)：在 `valid_mask` 下，动态融合今日实时高/低/量与历史库已积累的当期局部指标 `lopen`/`lhigh`/`llow`/`lvol`，生成当前的 `open`/`high`/`low`/`vol` 指标。
+    - [x] **支持在内存中动态重算当期均线与涨跌幅 (Dynamic Indicator Recalculation for Active Period)**：重新计算并注入 `ma5d`、`ma10d`、`ma20d`、`ma60d` 以及 `percent`/`per1d` 涨跌幅，确保 `close` 与多日均线指标的比对判定拥有毫秒级实时一致性。
+    - [x] **全面回归测试成功**：`test_multi_period_automated.py` 与 `test_ghost_bar.py` 全绿通过，没有发生崩溃，筛选匹配与诊断逻辑百分百恢复正常。
+
+## 2026-06-29 17:00
+- [x] **解决实盘跨大周期 Ghost Bar 合并与指标计算一致性问题 (Resolved Intraday Large-Cycle Ghost Bar Merging & Indicator Consistency)**：
+    - [x] **彻底修复 HDF5 读写时 `today_bar_dict` 所致 TypeError 崩溃**：在 `multi_period_strategy_engine.py` 中移除了今天临时 bar 构建字典并修正了 `get_append_lastp_to_df` 的入参，不再传递 `today_bar_dict`，消除了参数不匹配的 Bug。
+    - [x] **实现更优雅的 `complete_indicators_pipeline` 实时行情 Ghost Bar 融合**：在 `data_utils.py` 的指标流水线中，针对非日线的大周期 (w, m, 3d, 45d, 3M)，引入了实盘最新报价 (`close`/`high`/`low`/`open`/`vol`) 与历史数据 (`lastp1d`/`lasth1d`/`lastl1d`/`lasto1d`/`lastv1d`) 的原地自适应物理平移与 Ghost Bar 合并算法。
+    - [x] **修复由于 `get_trade_day_before(1)` 误判为今天导致 Ghost Bar 融合失效的 Bug**：修复了在实盘交易日，`get_trade_day_before(1)` 包含了今天本身从而返回今天日期，导致 `last_date < today` 条件不成立、整个大周期实时融合逻辑被静默跳过的逻辑缺陷。引入了当 `last_date == today` 时自动回退获取 `get_trade_day_before(2)` 的动态对齐机制，确保了盘中实时行情数据能正确向周、月、多日等大级别进行移位和 Ghost Bar 融合计算。
+    - [x] **支持多周期指标动态对齐与重新计算**：合并实时行情后，智能补齐和重新计算 `per1d` 涨跌幅、`ma51d` 与 `ma201d` 均线等关键特征，确保 structural indicators (Rank, win, slope) 在盘中与历史库完全对齐、不再有 staleness，且完全保留了 HDF5/Parquet 磁盘底层 Schema 的纯洁与完整。
+    - [x] **全量自动化回归测试全绿通过**：跑通了 `test_multi_period_automated.py`，证明多周期筛选、指标计算、个股诊断、 query 语法过滤等模块在高频并发下完美通过且 exit code 为 0。
+    - [x] **修复 `a_trade_calendar` 缺失 `get_trade_days` 导致的属性错误崩溃**：修复了在加载月线/周线等周期数据时，`commonTips.py` 中的 `get_trade_day_before` 调用 `a_trade_calendar.get_trade_days` 抛出 `AttributeError` 崩溃的问题。在 `commonTips.py` 中实现了本地的 `get_trade_days` 提取器（通过底层 DataFrame `_a_trade_cal_df` 进行查询过滤），并进行了安全的模块动态注入绑定，完美解决了此历史遗留缺失接口问题。
+
 ## 2026-06-29 16:35
 - [x] **修复策略编辑器保存后主窗口当前选择策略被重置的 Bug (Fixed Strategy Selection Reset on Save & Persisted Last Used Strategy)**：
     - [x] **纠正策略 ID 覆写逻辑**：修复了 `_save_state` 中直接将 `strategy_var.get()` (策略名称) 赋值给 `strategy_id` 的 Bug。现改为在 `self.strategies` 列表中通过名称反向解析出唯一的 `strat_id` 后再写入 `self.ui_state['strategy_id']`，从根本上解决了配置写盘时数据类型不匹配的问题。

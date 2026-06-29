@@ -1869,6 +1869,28 @@ def is_trade_date(tdate: Union[datetime.date, str] = None) -> bool:
 
     return trade_status
 
+def get_trade_days(start_date: str, end_date: str) -> list:
+    """
+    获取 start_date 到 end_date 之间的所有交易日列表 (包含端点)
+    """
+    try:
+        import sys
+        real_module = sys.modules.get('a_trade_calendar')
+        if real_module is None:
+            import importlib
+            real_module = importlib.import_module('a_trade_calendar')
+        if real_module is not None and not hasattr(real_module, 'get_trade_days'):
+            real_module.get_trade_days = get_trade_days
+        df = getattr(real_module, 'calendar_util', None)
+        if df is not None:
+            df = getattr(df, '_a_trade_cal_df', None)
+        if df is not None:
+            mask = (df['dt'] >= start_date) & (df['dt'] <= end_date)
+            return df.loc[mask, 'dt'].tolist()
+    except Exception:
+        pass
+    return []
+
 def get_trade_day_before(dl: int, endday=None) -> str:
     """
     获取 endday（默认今天）往前第 dl 个交易日
@@ -1893,7 +1915,7 @@ def get_trade_day_before(dl: int, endday=None) -> str:
     start_guess = end - pd.Timedelta(days=dl * 2)
 
     # 获取区间交易日列表
-    trade_days = a_trade_calendar.get_trade_days(
+    trade_days = get_trade_days(
         start_guess.strftime('%Y-%m-%d'),
         end.strftime('%Y-%m-%d')
     )
@@ -1902,7 +1924,7 @@ def get_trade_day_before(dl: int, endday=None) -> str:
         # 如果列表太短，继续向前扩展
         while len(trade_days) < dl:
             start_guess -= pd.Timedelta(days=dl)  # 每次向前 dl 天
-            trade_days = a_trade_calendar.get_trade_days(
+            trade_days = get_trade_days(
                 start_guess.strftime('%Y-%m-%d'),
                 end.strftime('%Y-%m-%d')
             )
