@@ -15,6 +15,10 @@ def get_app_root() -> str:
     """获取程序物理根目录。独立于 sys_utils，避免加载无关依赖。"""
     env_root = os.environ.get("INSTOCK_APP_ROOT")
     if env_root and os.path.exists(env_root):
+        try:
+            os.chdir(env_root)
+        except Exception:
+            pass
         return env_root
 
     is_frozen = getattr(sys, "frozen", False)
@@ -23,6 +27,12 @@ def get_app_root() -> str:
     else:
         # 开发环境下，项目根目录是 webTools 的上级目录
         calculated_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 强制将当前进程的工作目录切换为定位到的绝对物理根目录，防止通过右键快捷菜单或计划任务等启动时导致的 CWD 不对
+    try:
+        os.chdir(calculated_root)
+    except Exception:
+        pass
 
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
     return calculated_root
