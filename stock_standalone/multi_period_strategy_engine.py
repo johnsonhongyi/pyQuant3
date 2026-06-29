@@ -3,6 +3,7 @@ import json
 import os
 from typing import Dict, List, Optional
 from JohnsonUtil import LoggerFactory
+from sys_utils import get_app_root
 logger = LoggerFactory.getLogger("MultiPeriodStrategyEngine")
 
 class MultiPeriodStrategyEngine:
@@ -11,7 +12,7 @@ class MultiPeriodStrategyEngine:
     def __init__(self):
         self._period_dfs: Dict[str, pd.DataFrame] = {}
         self._strategies: List[dict] = []
-        self.config_path = "config/multi_period_strategies.json"
+        self.config_path = os.path.join(get_app_root(), "config", "multi_period_strategies.json")
         self.last_stats: dict = {}
         
     def load_period_data(self, period: str, top_now: pd.DataFrame) -> pd.DataFrame:
@@ -182,3 +183,45 @@ class MultiPeriodStrategyEngine:
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump({"strategies": self._strategies}, f, ensure_ascii=False, indent=2)
         return self._strategies
+
+    def save_strategies(self, strategies: List[dict]) -> bool:
+        """保存策略配置"""
+        self._strategies = strategies
+        try:
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump({"strategies": self._strategies}, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save strategies config: {e}")
+            return False
+
+    def validate_condition(self, filter_str: str, period: str) -> tuple[bool, str]:
+        """验证过滤表达式的合法性"""
+        if not filter_str.strip():
+            return True, "表达式为空"
+            
+        # 1. 如果当前内存中已有对应周期的数据，直接使用其进行 query 校验
+        if period in self._period_dfs and not self._period_dfs[period].empty:
+            df = self._period_dfs[period]
+        else:
+            # 2. 否则，构造一个包含常用字段的 Dummy DataFrame 进行语法验证
+            dummy_cols = [
+                'open', 'close', 'high', 'low', 'volume', 'percent', 'ratio',
+                'ma5d', 'ma10d', 'ma20d', 'ma30d', 'ma60d', 'ma120d', 'ma250d',
+                'lastp1d', 'lastp2d', 'lastp3d', 'lasth1d', 'lasth2d', 'lasth3d',
+                'upper', 'lower', 'upper1', 'lower1', 'hmax', 'hmin',
+                'ptop', 'pbottom', 'pbreak', 'pdays', 'Rank', 'dff', 'dff2', 'dff3'
+            ]
+            # 填充一两行数值，避免 query 因数据类型问题报错
+            data = {col: [1.0, 2.0] for col in dummy_cols}
+            df = pd.DataFrame(data, index=['000001', '000002'])
+            
+        try:
+            # 尝试 query 试运行
+            df.query(filter_str)
+            return True, "✅ 语法验证通过"
+        except Exception as e:
+            # 移除错误提示中过长的调用堆栈，仅保留异常描述
+            err_msg = str(e).split('\n')[0]
+            return False, f"❌ 语法错误: {err_msg}"
