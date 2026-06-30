@@ -1,3 +1,30 @@
+## 2026-06-30 15:15
+- [x] **实现二次过滤条件自动持久化与启动自动加载 (Automatic Persistence & Reloading of Secondary Filter Query)**：
+    - [x] **新增属性与加载绑定**：在 `standalone_multi_period_tester.py` 初始化流程中，从 `ui_state` 中提取 `current_history_query` 并赋给 `self._current_history_query`；在 `QueryHistoryManager` 实例成功创建后，自动清空并同步将该过滤条件填入 `entry_query` 输入框。
+    - [x] **应用更改与自动存盘**：更新了 `_on_history_sync` 回调，当接收到 `"use"` 命令应用历史二次过滤条件时，自动调用 `_save_state()` 触发实时写入物理配置；同步在 `_clear_history_filter` 中增加了清空输入框文本、置空 `ui_state['current_history_query']` 并调用 `_save_state()` 的闭环自愈清除逻辑。
+    - [x] **自检与回归测试通过**：顺利通过了 `py_compile` 语法检测，且一并跑通了 `test_multi_period_automated.py` 回归测试套件，执行正常。
+
+## 2026-06-30 15:00
+- [x] **实现双击筛选结果表 Tree 行弹出个股概念板块与所属行业详情窗口 (Pop up Stock Concepts and Industry Details on Treeview Double-Click)**：
+    - [x] **绑定 Treeview 双击事件**：在 `standalone_multi_period_tester.py` 的 `_init_ui` 流程中增加了 `self.tree.bind("<Double-1>", self._on_tree_double_click)`，对列表双击行为进行实时捕获。
+    - [x] **实现板块行业精准获取与降级退避**：设计了多级数据匹配机制：双击时优先通过本地高速索引接口 `wencaiData.search_ths_data(code)` 瞬间获取最完备的板块概念列表与所属行业；若获取失败或为空，则自动降级在多周期缓存 `period_dfs` 中匹配提取，确保信息的稳定产出。
+    - [x] **精致排版格式化展示**：重构了文本输出样式。将原本用分号紧密分隔的杂乱概念文本，自动切分并转化为带序号的清晰缩进概念列表，大幅提升了盘中板块属性的视觉扫描效率。
+    - [x] **实现原地覆盖刷新与跨会话几何记忆**：设计并集成了 `show_category_detail` 独立 Toplevel 展示层：如果详情窗口已经存在，双击其他行时将原地重刷内容并强行置顶聚焦，避免生成过多的零散碎窗口；同时支持跨会话几何记忆功能，在窗口关闭或销毁时自动将最新位置与大小写回 `standalone_tester_config.json`，在下次加载时完美复现，完美契合极致交易体验。
+
+## 2026-06-30 12:00
+- [x] **实现按 ESC 打开嵌入式 History 选择框与二次过滤筛选机制 (Embedded History Selector on ESC & Secondary Result Filtering)**：
+    - [x] **嵌入式 UI 联动与 ESC 绑定**：在 `StandaloneMultiPeriodTester.__init__` 中实例化了 `QueryHistoryManager`。由于传入 `self`，自动全局绑定了 ESC 键与 Alt+Q 快捷键，支持随时在主窗口下方显示或隐藏历史 Query 搜索框。
+    - [x] **引入扁平化多周期宽表同步（`_build_flat_df`）**：在筛选结果刷新时，将所有活跃周期的技术指标列合并平铺至个股主数据行，并同步赋予 `query_manager.df_all`。这使得 history manager 的“测试”和“命中统计”功能能够直接评估包含多周期后缀（如 `close_d` 或 `ma5d_w`）的任意复杂表达式。
+    - [x] **实现 Pandas Query 二次过滤与多重语法安全退避**：设计了 `_apply_secondary_filter` 机制，在用户点击 history 选择框中的某条表达式时，自动适配并加上当前主选周期的后缀（例如将 `close > ma5d` 转换为 `close_d > ma5d_d`）并进行二次过滤。支持降级使用原始表达式及异常捕获退避，确保了语法错误绝不引起系统崩溃。
+    - [x] **底栏状态联动与一键清除过滤**：在底部状态栏新增了“❌ 清除过滤”按钮（仅在有历史二次过滤时展示），且在 `_show_results` 和底栏指标显示中全面集成了过滤前/过滤后的对比数量显示；在窗口关闭 `on_close` 中补齐了对 history 历史记录自动持久化保存的调用。
+
+## 2026-06-30 11:00
+- [x] **实现诊断个股输入框右键粘贴自动提取6位个股代码并触发诊断功能 (Automated 6-Digit Stock Code Extraction and Auto-Diagnosis on Right-Click)**：
+    - [x] **绑定右键单击事件 (`<Button-3>`)**：在 `standalone_multi_period_tester.py` 界面构建逻辑 `_init_ui` 中，为诊断个股输入框 `self.diag_entry` 绑定了 `<Button-3>` 事件，绑定了专属右键处理程序 `self._on_diag_entry_right_click`。
+    - [x] **实现剪贴板 6 位股票代码正则提取与诊断触发**：在 `_on_diag_entry_right_click` 中从系统剪贴板获取文本，并使用正则表达式 `\d{6}` 自动搜索匹配 6 位连续数字。若找到匹配项，自动清空并填入输入框，然后自动触发 `self._on_diagnose_click()` 开启诊断流程；若未找到则在状态栏进行友好提示。
+    - [x] **拦截默认事件以防冲突**：处理程序最后返回 `"break"`，阻止了默认右键菜单的弹出，确保用户体验一致。
+    - [x] **语法校验与自动化测试全绿通过**：顺利对 `standalone_multi_period_tester.py` 执行了 `py_compile` 语法校验，且通过了全套 `test_multi_period_automated.py` 自动化回归测试用例。
+
 ## 2026-06-29 23:45
 - [x] **实现策略编辑器周期过滤条件的非破坏性启用/禁用机制与菜单联动自动忽略过滤 (Non-Destructive Condition Toggle & Menu Linkage Bypass)**：
     - [x] **引入 `enabled` 状态控制，避免物理删除条件 (Preserved Conditions with enabled flag)**：在 `MultiPeriodStrategyEditor` 表单同步逻辑 `_sync_to_current_strategy` 中，无论周期的复选框勾选与否，只要曾经编辑过该过滤表达式，在保存时均予以完整保留，不再从 `conditions` 中物理剔除，而仅仅是将对应的 `"enabled"` 属性置为 `False`。

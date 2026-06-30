@@ -58,6 +58,33 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
+        # 历史二次过滤状态
+        self._current_history_query = self.ui_state.get('current_history_query', "")
+        self._history_filter_error = None
+        self.query_manager = None
+        
+        # 板块详情窗口句柄
+        self.detail_win = None
+        self.txt_widget = None
+        
+        try:
+            from history_manager import QueryHistoryManager
+            from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+            
+            self.query_manager = QueryHistoryManager(
+                self,
+                history_file=SEARCH_HISTORY_FILE,
+                sync_history_callback=self._on_history_sync
+            )
+            if hasattr(self.query_manager, "editor_frame"):
+                self.query_manager.editor_frame.pack_forget()
+            
+            if self._current_history_query and hasattr(self.query_manager, "entry_query"):
+                self.query_manager.entry_query.delete(0, tk.END)
+                self.query_manager.entry_query.insert(0, self._current_history_query)
+        except Exception as e:
+            print(f"[MultiPeriodTester] 实例化 QueryHistoryManager 失败: {e}")
+        
         # 订阅全局自选股改变通知
         try:
             from global_favorites import GlobalFavoriteManager
@@ -82,7 +109,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             "sort_level3_col": None,
             "sort_level3_asc": True,
             "sortby_col": None,
-            "sortby_col_ascend": False
+            "sortby_col_ascend": False,
+            "category_win_geometry": "",
+            "current_history_query": ""
         }
         if os.path.exists(self.config_file):
             try:
@@ -112,10 +141,16 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.ui_state['link_vis'] = self.link_vis_var.get()
         self.ui_state['link_tdx'] = self.link_tdx_var.get()
         self.ui_state['link_ths'] = self.link_ths_var.get()
+        self.ui_state['current_history_query'] = getattr(self, "_current_history_query", "")
         try:
             self.ui_state['geometry'] = self.geometry()
         except Exception:
             pass
+        if getattr(self, "detail_win", None) is not None and self.detail_win.winfo_exists():
+            try:
+                self.ui_state['category_win_geometry'] = self.detail_win.geometry()
+            except Exception:
+                pass
         try:
             self.ui_state['sort_level1_col'] = getattr(self.tree, 'sort_level1_col', None)
             self.ui_state['sort_level1_asc'] = getattr(self.tree, 'sort_level1_asc', True)
@@ -219,6 +254,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.diag_entry = tk.Entry(diagnose_frame, width=8, font=("Microsoft YaHei", 9))
         self.diag_entry.pack(side="left", padx=2)
         self.diag_entry.bind("<Return>", lambda e: self._on_diagnose_click())
+        self.diag_entry.bind("<Button-3>", self._on_diag_entry_right_click)
         
         btn_diag = tk.Button(diagnose_frame, text="🔍 诊断", command=self._on_diagnose_click, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9), padx=5, pady=1)
         btn_diag.pack(side="left", padx=2)
@@ -229,6 +265,14 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         # 运行日志中间状态显示区域
         self.status_lbl = tk.Label(self.stats_frame, textvariable=self.status_var, font=("Microsoft YaHei", 9, "bold"), bg="#f0f0f0", fg="#1A73E8")
         self.status_lbl.pack(side="left", fill="x", expand=True, padx=10, pady=4)
+        
+        # 创建清除历史二次过滤的按钮，默认不显示
+        self.btn_clear_history_filter = tk.Button(
+            self.stats_frame, text="❌ 清除过滤",
+            command=self._clear_history_filter,
+            bg="#FFEBEE", fg="#C62828", relief="groove",
+            font=("Microsoft YaHei", 8), padx=6, pady=1
+        )
         
         # --- Results Treeview ---
         tree_frame = tk.Frame(self)
@@ -257,6 +301,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.tree.bind("<Button-3>", self.show_context_menu)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", self._on_tree_leave)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.tag_configure("favorite", foreground="#C62828", font=("Microsoft YaHei", 9, "bold"))
         self.tree_tooltip = None
         self.current_tooltip_col = None
@@ -649,10 +694,52 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
         if df.empty:
             self.status_var.set(f"完成，未找到符合条件的标的。(耗时 {elapsed:.1f}s)")
+            if getattr(self, "query_manager", None) is not None:
+                self.query_manager.df_all = df
+            if hasattr(self, "btn_clear_history_filter"):
+                self.btn_clear_history_filter.pack_forget()
             return
             
-        self.status_var.set(f"完成，共筛选出 {len(df)} 只标的。(耗时 {elapsed:.1f}s)")
-        
+        # 同步给 query_manager 完整的宽表数据，以支持在 history 弹窗里进行“测试”或“双击”统计
+        flat_df = self._build_flat_df(df)
+        if getattr(self, "query_manager", None) is not None:
+            self.query_manager.df_all = flat_df
+            
+        # 应用二次历史过滤
+        filtered_df = flat_df
+        if getattr(self, "_current_history_query", ""):
+            filtered_df = self._apply_secondary_filter(flat_df, self._current_history_query)
+            if hasattr(self, "btn_clear_history_filter"):
+                self.btn_clear_history_filter.pack(side="right", padx=10, pady=1)
+        else:
+            if hasattr(self, "btn_clear_history_filter"):
+                self.btn_clear_history_filter.pack_forget()
+                
+        if filtered_df.empty:
+            if getattr(self, "_history_filter_error", None):
+                self.status_var.set(f"⚠️ {self._history_filter_error} (耗时 {elapsed:.1f}s)")
+            else:
+                self.status_var.set(f"完成，未找到符合二次过滤条件的标的。(二次过滤前 {len(df)} 只，耗时 {elapsed:.1f}s)")
+            return
+            
+        # 更新 stats_lbl_final 显示二次过滤状态
+        stats = getattr(self.engine, "last_stats", None)
+        if stats and stats.get("final"):
+            final = stats["final"]
+            mode_str = "交集" if final["mode"] == "intersection" else "并集"
+            if getattr(self, "_current_history_query", ""):
+                self.stats_lbl_final.config(
+                    text=f"【最终 ({mode_str})】 共 {len(filtered_df)} / 二次前 {len(df)} 只 ({len(filtered_df)/final['total']*100:.3f}%)"
+                )
+                
+        if getattr(self, "_current_history_query", ""):
+            if getattr(self, "_history_filter_error", None):
+                self.status_var.set(f"⚠️ {self._history_filter_error} (二次过滤前 {len(df)} 只，耗时 {elapsed:.1f}s)")
+            else:
+                self.status_var.set(f"完成，共筛选出 {len(filtered_df)} 只标的 (二次过滤前 {len(df)} 只，耗时 {elapsed:.1f}s)")
+        else:
+            self.status_var.set(f"完成，共筛选出 {len(filtered_df)} 只标的。(耗时 {elapsed:.1f}s)")
+            
         active_periods = [p for p, var in self.period_vars.items() if var.get()]
         active_customs = [c for c, var in self.custom_col_vars.items() if var.get()]
         
@@ -662,8 +749,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         except Exception:
             fav_stocks = set()
             
-        # 直接按原 DataFrame 顺序以 iid=code 插入所有行，排序与置顶交由 perform_tree_multi_level_sort 统一处理
-        for code, row in df.iterrows():
+        for code, row in filtered_df.iterrows():
             name = row.get('name', '--')
             price = round(row.get('close', 0), 2)
             percent = round(row.get('percent', 0), 2)
@@ -675,24 +761,19 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
             values = [code, display_name, price, percent, vol, ratio]
             
-            # 添加自定义列的值
             for c in active_customs:
                 for p in active_periods:
                     val = '--'
-                    if p in self.engine._period_dfs and code in self.engine._period_dfs[p].index:
-                        col_in_df = self.engine._period_dfs[p]
-                        if c in col_in_df.columns:
-                            raw_val = col_in_df.loc[code, c]
-                            if isinstance(raw_val, pd.Series):
-                                raw_val = raw_val.iloc[0]
-                            if pd.notna(raw_val):
-                                if isinstance(raw_val, (int, float)):
-                                    val = round(raw_val, 2)
-                                else:
-                                    val = str(raw_val)
+                    col_name = f"{c}_{p}"
+                    if col_name in filtered_df.columns:
+                        raw_val = row.get(col_name)
+                        if pd.notna(raw_val):
+                            if isinstance(raw_val, (int, float)):
+                                val = round(raw_val, 2)
+                            else:
+                                val = str(raw_val)
                     values.append(val)
             
-            # 添加周期通过列的值
             for p in active_periods:
                 pass_val = row.get(f'pass_{p}', False)
                 values.append('✅' if pass_val else '--')
@@ -702,6 +783,219 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
         self.perform_tree_multi_level_sort(self.tree)
         self._adjust_column_widths()
+
+    def _on_history_sync(self, **kwargs):
+        source = kwargs.get("source", "")
+        selected_query = kwargs.get("selected_query")
+        
+        if source == "use":
+            self._current_history_query = selected_query.strip() if selected_query else ""
+            self._save_state()
+            if self._current_history_query:
+                self.status_var.set(f"✅ 已应用历史二次过滤: {self._current_history_query}")
+            else:
+                self.status_var.set("已清除历史二次过滤")
+                
+            if self.last_result_df is not None:
+                self.after(0, self._show_results, self.last_result_df, self.last_elapsed)
+
+    def _build_flat_df(self, df):
+        if df is None or df.empty:
+            return df
+        
+        flat_rows = []
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        
+        for code, row in df.iterrows():
+            item_row = row.to_dict()
+            for period in active_periods:
+                df_p = self.engine._period_dfs.get(period)
+                if df_p is not None and not df_p.empty and code in df_p.index:
+                    row_p = df_p.loc[code]
+                    if isinstance(row_p, pd.DataFrame):
+                        row_p = row_p.iloc[0]
+                    for k, val in row_p.to_dict().items():
+                        if k not in ('code', 'name'):
+                            item_row[f"{k}_{period}"] = val
+            flat_rows.append(item_row)
+            
+        flat_df = pd.DataFrame(flat_rows, index=df.index)
+        flat_df.index.name = 'code'
+        return flat_df
+
+    def _suffix_query(self, expr, period_suffix):
+        import re
+        cols_set = set()
+        df_p = self.engine._period_dfs.get(period_suffix)
+        if df_p is not None and not df_p.empty:
+            cols_set = set(df_p.columns)
+            
+        def repl(match):
+            word = match.group(0)
+            if word in cols_set:
+                return f"{word}_{period_suffix}"
+            return word
+        return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', repl, expr)
+
+    def _apply_secondary_filter(self, df, query_expr):
+        if not query_expr or df is None or df.empty:
+            self._history_filter_error = None
+            return df
+        
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        target_period = 'd' if 'd' in active_periods else (active_periods[0] if active_periods else 'd')
+        
+        converted_query = self._suffix_query(query_expr, target_period)
+        
+        try:
+            filtered_df = df.query(converted_query)
+            self._history_filter_error = None
+            return filtered_df
+        except Exception as e1:
+            try:
+                filtered_df = df.query(query_expr)
+                self._history_filter_error = None
+                return filtered_df
+            except Exception as e2:
+                self._history_filter_error = f"过滤语法错误: {e2}"
+                return df
+
+    def _clear_history_filter(self):
+        self._current_history_query = ""
+        self._history_filter_error = None
+        if self.query_manager and hasattr(self.query_manager, "entry_query"):
+            try:
+                self.query_manager.entry_query.delete(0, tk.END)
+            except Exception:
+                pass
+        self._save_state()
+        if hasattr(self, "btn_clear_history_filter"):
+            self.btn_clear_history_filter.pack_forget()
+            
+        if self.last_result_df is not None:
+            self.after(0, self._show_results, self.last_result_df, self.last_elapsed)
+
+    def _on_tree_double_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+            
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+            
+        values = self.tree.item(item, "values")
+        if not values:
+            return
+            
+        code = str(values[0]).strip()
+        name = str(values[1]).strip()
+        
+        category_str = ""
+        hangye_str = ""
+        
+        # 优先从 wencaiData 获取，无则从缓存 period_dfs 里提取
+        try:
+            from JSONData import wencaiData as wcd
+            res = wcd.search_ths_data(code)
+            if res is not None and not res.empty:
+                row_w = res.iloc[0]
+                category_str = row_w.get('category', '')
+                hangye_str = row_w.get('hangye', '')
+        except Exception as e:
+            print(f"[MultiPeriodTester] Fetching category error: {e}")
+            
+        if not category_str:
+            active_periods = [p for p, var in self.period_vars.items() if var.get()]
+            for p in active_periods:
+                df_p = self.engine._period_dfs.get(p)
+                if df_p is not None and not df_p.empty and code in df_p.index:
+                    row_p = df_p.loc[code]
+                    if isinstance(row_p, pd.DataFrame):
+                        row_p = row_p.iloc[0]
+                    category_str = row_p.get('category', '')
+                    hangye_str = row_p.get('hangye', '')
+                    if category_str:
+                        break
+                        
+        if not category_str or str(category_str).strip() == 'nan':
+            category_str = "暂无板块概念信息"
+        if not hangye_str or str(hangye_str).strip() == 'nan':
+            hangye_str = "暂无行业分类信息"
+            
+        cats_list = [c.strip() for c in category_str.split(';') if c.strip()]
+        
+        content = f"个股代码: {code}\n"
+        content += f"个股名称: {name}\n"
+        content += f"所属行业: {hangye_str}\n"
+        content += "──────────────────────────────────────────\n"
+        content += "所属概念板块:\n"
+        if cats_list and cats_list[0] != "暂无板块概念信息":
+            for idx, cat in enumerate(cats_list, 1):
+                content += f"  {idx:02d}. {cat}\n"
+        else:
+            content += "  (无)\n"
+            
+        self.show_category_detail(code, name, content)
+
+    def show_category_detail(self, code, name, category_content):
+        def on_close():
+            try:
+                self.ui_state['category_win_geometry'] = self.detail_win.geometry()
+                self._save_state()
+            except Exception:
+                pass
+            if self.detail_win and self.detail_win.winfo_exists():
+                self.detail_win.destroy()
+            self.detail_win = None
+            self.txt_widget = None
+
+        if hasattr(self, "detail_win") and self.detail_win and self.detail_win.winfo_exists():
+            self.detail_win.title(f"板块行业详情 - {name} ({code})")
+            self.txt_widget.config(state="normal")
+            self.txt_widget.delete("1.0", tk.END)
+            self.txt_widget.insert("1.0", category_content)
+            self.txt_widget.config(state="disabled")
+            
+            state = self.detail_win.state()
+            if state == "iconic":
+                self.detail_win.deiconify()
+            self.detail_win.lift()
+            self.detail_win.focus_force()
+        else:
+            self.detail_win = tk.Toplevel(self)
+            self.detail_win.title(f"板块行业详情 - {name} ({code})")
+            self.detail_win.withdraw()
+            
+            saved_geom = self.ui_state.get('category_win_geometry', '')
+            if saved_geom:
+                try:
+                    self.detail_win.geometry(saved_geom)
+                except Exception:
+                    pass
+            if not saved_geom:
+                w, h = 450, 400
+                mx, my = self.winfo_pointerx(), self.winfo_pointery()
+                pos_x, pos_y = max(0, mx - w - 20), max(0, my - h - 20)
+                self.detail_win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+                
+            self.detail_win.deiconify()
+            
+            self.txt_widget = tk.Text(
+                self.detail_win, wrap="word", 
+                font=("Microsoft YaHei", 10), 
+                bg="#FAFAFA", fg="#212121",
+                padx=10, pady=10, relief="flat"
+            )
+            self.txt_widget.pack(expand=True, fill="both")
+            self.txt_widget.insert("1.0", category_content)
+            self.txt_widget.config(state="disabled")
+            
+            self.detail_win.bind("<Escape>", lambda e: on_close())
+            self.detail_win.protocol("WM_DELETE_WINDOW", on_close)
+            
+            self.detail_win.lift()
+            self.detail_win.focus_force()
 
     def _update_stats_ui(self):
         stats = getattr(self.engine, "last_stats", None)
@@ -779,6 +1073,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
     def on_close(self):
         self._save_state()
+        if getattr(self, "query_manager", None) is not None:
+            try:
+                self.query_manager.save_search_history()
+            except Exception as e:
+                print(f"Error saving query history on close: {e}")
         if _parent_class == tk.Toplevel:
             self.withdraw()
         else:
@@ -931,6 +1230,23 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.status_var.set(f"已复制行信息: {values[1] if len(values) > 1 else values[0]}")
         except Exception as e:
             messagebox.showerror("错误", f"复制行信息失败: {e}")
+
+    def _on_diag_entry_right_click(self, event):
+        try:
+            clipboard_text = self.clipboard_get().strip()
+        except Exception:
+            return "break"
+        if clipboard_text:
+            import re
+            match = re.search(r'\d{6}', clipboard_text)
+            if match:
+                code = match.group(0)
+                self.diag_entry.delete(0, tk.END)
+                self.diag_entry.insert(0, code)
+                self._on_diagnose_click()
+            else:
+                self.status_var.set(f"⚠️ 右键粘贴失败：剪贴板中未找到6位数字代码")
+        return "break"
 
     def _on_diagnose_click(self):
         code = self.diag_entry.get().strip()
