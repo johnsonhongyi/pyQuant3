@@ -1,3 +1,8 @@
+## 2026-06-30 16:30
+- [x] **实现自适应自定义列宽与冗余周期列智能剔除 (Adaptive Columns & Duplicate Cross-Period Elimination)**：
+    - [x] **引入 `_get_display_periods_for_custom_col` 自适应列过滤器**：针对例如 `dff`、`dff2`、`dff3` 及 `Rank` 等已知在各周期数据完全相同的自定义列，或者在运行时通过对各周期数据列比对（以浮点精度 `1e-5` 或 `fillna` 字符串等进行跨周期列等值判定）发现一模一样的自定义指标，在 Treeview 头部构建及数据插入时，只自动保留并显示最小的活跃周期，剔除了其他冗余的重复列（如不再同时显示冗余的 `dff(d)`、`dff(w)`、`dff(m)`，而只保留最小周期 `dff(d)`）。
+    - [x] **同步自愈渲染管线更新**：在 `_show_results` 刷新数据的头部，强制触发 `_update_tree_columns` 对 Treeview 表头的结构化重组，使得在切换不同自选策略或数据重新载入时，能瞬间自适应调整列名显示，且数据行 `values` 插入的数量与 Treeview 自定义列配置 100% 保持原子一致性。
+
 ## 2026-06-30 16:15
 - [x] **实现自选股更新全局广播的 PyQt 独立订阅与 Tkinter 轮询分离 (Separated Global Favorites Updates via PyQt Subscriptions & Tkinter Version Polling)**：
     - [x] **根本性消除 GIL 线程调用冲突与 Nuitka 环境崩溃 (Eliminated GIL Violations & PyEval_RestoreThread Crashes)**：针对在多进程或后台线程修改自选股（如点击“取消重点个股”）时出现的 `Fatal Python error: PyEval_RestoreThread` GIL 冲突崩溃，将 Tkinter 主界面 `MonitorTK` 与嵌入式 `StandaloneMultiPeriodTester` 从 `GlobalFavoriteManager` 的直接订阅者队列中彻底注销，改用基于内存版本号 `version` 属性的主线程心跳自愈轮询（每 300ms/500ms），彻底消除了跨解释器线程调用 Tkinter 对象的 python 闭包导致的崩溃。

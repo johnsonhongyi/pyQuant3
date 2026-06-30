@@ -356,14 +356,56 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         except Exception:
             pass
 
+    def _get_display_periods_for_custom_col(self, col_name, active_periods, df=None):
+        """
+        判断某个自定义列在各周期的数据是否相同。如果相同，只保留最小周期；否则保留所有活跃周期。
+        """
+        if not active_periods:
+            return []
+            
+        # 静态白名单保护：dff, dff2, dff3, Rank 已知是各周期相同的
+        if col_name.lower() in ("dff", "dff2", "dff3", "rank"):
+            return [active_periods[0]]
+            
+        # 如果 df 存在且不为空，可以通过实际数据进行比对
+        if df is not None and not df.empty and len(active_periods) > 1:
+            p0 = active_periods[0]
+            col0 = f"{col_name}_{p0}"
+            if col0 in df.columns:
+                is_all_same = True
+                for p in active_periods[1:]:
+                    col_p = f"{col_name}_{p}"
+                    if col_p in df.columns:
+                        series0 = df[col0]
+                        series_p = df[col_p]
+                        try:
+                            diff = (series0 - series_p).abs().max()
+                            if pd.isna(diff) or diff > 1e-5:
+                                if not series0.fillna("").astype(str).equals(series_p.fillna("").astype(str)):
+                                    is_all_same = False
+                                    break
+                        except Exception:
+                            if not series0.fillna("").astype(str).equals(series_p.fillna("").astype(str)):
+                                is_all_same = False
+                                break
+                    else:
+                        is_all_same = False
+                        break
+                if is_all_same:
+                    return [p0]
+                    
+        return active_periods
+
     def _update_tree_columns(self):
         base_cols = ["code", "name", "price", "percent", "volume", "ratio"]
         active_periods = [p for p, var in self.period_vars.items() if var.get()]
         active_customs = [c for c, var in self.custom_col_vars.items() if var.get()]
         
         custom_cols = []
+        df = getattr(self, "last_result_df", None)
         for c in active_customs:
-            for p in active_periods:
+            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df)
+            for p in disp_periods:
                 custom_cols.append(f"{c}_{p}")
                 
         pass_cols = [f"pass_{p}" for p in active_periods]
@@ -380,7 +422,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             "ratio": "量比"
         }
         for c in active_customs:
-            for p in active_periods:
+            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df)
+            for p in disp_periods:
                 headers[f"{c}_{p}"] = f"{c}({p})"
         for p in active_periods:
             headers[f"pass_{p}"] = f"{p}通过"
@@ -688,6 +731,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
     def _show_results(self, df, elapsed):
         self._last_selected_code = None
+        self._update_tree_columns()
         for item in self.tree.get_children():
             self.tree.delete(item)
             
@@ -763,7 +807,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             values = [code, display_name, price, percent, vol, ratio]
             
             for c in active_customs:
-                for p in active_periods:
+                disp_periods = self._get_display_periods_for_custom_col(c, active_periods, filtered_df)
+                for p in disp_periods:
                     val = '--'
                     col_name = f"{c}_{p}"
                     if col_name in filtered_df.columns:
