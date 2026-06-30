@@ -709,9 +709,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 🚀 [NEW] UI 专用原子快照存储 (P0-2)
             self.ui_state_store = AtomicStateStore()
             
-            # 🔥 同步初始化 DataPublisher (启动时直接加载)
+            # 🚀 [NEW] 异步初始化 DataPublisher (启动后台加载)
             self.realtime_service = DataPublisher(high_performance=True)
-            self._realtime_service_ready = True
+            self._realtime_service_ready = False
             
             # 🚀 [NEW] 全局初始化赛道探测器
             try:
@@ -7093,6 +7093,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._last_ui_heartbeat = time.time()
             self._heartbeat_scheduled = False
             if not getattr(self, "_is_closing", False):
+                # 📡 检测 RealtimeDataService (DataPublisher) 异步加载就绪状态
+                if not getattr(self, '_realtime_service_ready', False) and self.realtime_service and getattr(self.realtime_service, 'is_ready', False):
+                    self._realtime_service_ready = True
+                    logger.info("📡 RealtimeDataService (DataPublisher) recovery completed! Notifying callbacks...")
+                    if hasattr(self, '_realtime_ready_callbacks'):
+                        for cb in self._realtime_ready_callbacks:
+                            try:
+                                cb()
+                            except Exception as cb_e:
+                                logger.warning(f"Error in realtime ready callback: {cb_e}")
+                        self._realtime_ready_callbacks.clear()
+
                 # 每1秒（约10次心跳）将当前窗口同步给热键进程
                 sync_cnt = getattr(self, '_rotator_sync_counter', 0)
                 sync_cnt += 1

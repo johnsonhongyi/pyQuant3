@@ -2635,6 +2635,8 @@ class DataPublisher:
         self._last_save_status = "N/A" # 上次保存状态
         self._last_update_date: Optional[str] = None # 最近处理的数据日期 (YYYY-MM-DD)
         self._is_recovered_empty = False # 是否处于“加载失败导致空数据”的危险状态
+        self.is_ready = False # 🚀 [ASYNC] 异步加载就绪状态
+        self._pending_batches = [] # 🚀 [ASYNC] 异步加载期间积压的实时数据批次缓存
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -2724,83 +2726,97 @@ class DataPublisher:
         # =========================
         # Crash Recovery: Load Last Snapshot
         # =========================
-        try:
-            # --- [UNIFIED CACHE FIX] ---
-            # 策略：优先加载 PKL 快照。如果 PKL 缺失或数据量严重不足 (少于 2000 只股)，
-            # 则尝试从 sina_MultiIndex_data.h5 增量恢复。
-            if not self.simulation_mode:
-                cached_df = self.cache_slot.load_df()
-                
-                # [REFINED] 强化缺失检查：不仅看股票总数，还需盘查今日活跃数据覆盖量
-                # 如果 PKL 中的分钟 K 线基本都是历史数据（今日节点太少），则强制从 HDF5 增量补回。
-                total_stocks = 0
-                today_nodes_count = 0
-                if not cached_df.empty:
-                    # 快速获取股票总数
-                    if 'code' in cached_df.columns:
-                        total_stocks = len(cached_df['code'].unique())
+        self.is_ready = False
+        def run_recovery():
+            try:
+                # --- [UNIFIED CACHE FIX] ---
+                # 策略：优先加载 PKL 快照。如果 PKL 缺失或数据量严重不足 (少于 2000 只股)，
+                # 则尝试从 sina_MultiIndex_data.h5 增量恢复。
+                if not self.simulation_mode:
+                    cached_df = self.cache_slot.load_df()
                     
-                    # 采样检测今日数据密度 (使用 NumPy 向量化，不解析对象)
-                    if 'time' in cached_df.columns:
-                        try:
-                            ts_arr = pd.to_numeric(cached_df['time'], errors='coerce').values
-                            # UTC+8 0点日期值
-                            today_val = int((time.time() + 28800) // 86400)
-                            # 计算所有节点的日期并对比
-                            today_nodes_count = np.sum(((ts_arr + 28800) // 86400) == today_val)
-                        except:
-                            today_nodes_count = 0
-                
-                # 判定补回准则：
-                # 1. 股票总数不足 2000 (系统性缺失)
-                # 2. 或是处于盘中活跃期 (09:25后)，但今日数据节点不足 5000 (严重覆盖不足)
-                hhmm_now = int(datetime.now().strftime('%H%M'))
-                need_h5_recovery = (total_stocks < 2000)
-                if not need_h5_recovery and (920 <= hhmm_now <= 1515):
-                    if today_nodes_count < 5000:
-                        logger.info(f"📡 Snapshot lacks today's data ({today_nodes_count} nodes), triggering HDF5 backfill...")
-                        need_h5_recovery = True
-                
-                if need_h5_recovery:
-                    logger.info(f"📡 Attempting recovery from HDF5 (Total Stocks: {total_stocks}, Today Nodes: {today_nodes_count})...")
-                    h5_df = self.recover_from_hdf5()
-                    if not h5_df.empty:
-                        if cached_df.empty:
-                            cached_df = h5_df
-                        else:
-                            # 合并：以 H5 为准，补全最新行情。注意：concat 必须保持 time 顺序，后续 from_dataframe 会重排
-                            cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
-                        new_total = len(cached_df['code'].unique())
-                        logger.info(f"✅ Recovery success. Total stocks: {new_total}")
+                    # [REFINED] 强化缺失检查：不仅看股票总数，还需盘查今日活跃数据覆盖量
+                    # 如果 PKL 中的分钟 K 线基本都是历史数据（今日节点太少），则强制从 HDF5 增量补回。
+                    total_stocks = 0
+                    today_nodes_count = 0
+                    if not cached_df.empty:
+                        # 快速获取股票总数
+                        if 'code' in cached_df.columns:
+                            total_stocks = len(cached_df['code'].unique())
+                        
+                        # 采样检测今日数据密度 (使用 NumPy 向量化，不解析对象)
+                        if 'time' in cached_df.columns:
+                            try:
+                                ts_arr = pd.to_numeric(cached_df['time'], errors='coerce').values
+                                # UTC+8 0点日期值
+                                today_val = int((time.time() + 28800) // 86400)
+                                # 计算所有节点的日期并对比
+                                today_nodes_count = np.sum(((ts_arr + 28800) // 86400) == today_val)
+                            except:
+                                today_nodes_count = 0
+                    
+                    # 判定补回准则：
+                    # 1. 股票总数不足 2000 (系统性缺失)
+                    # 2. 或是处于盘中活跃期 (09:25后)，但今日数据节点不足 5000 (严重覆盖不足)
+                    hhmm_now = int(datetime.now().strftime('%H%M'))
+                    need_h5_recovery = (total_stocks < 2000)
+                    if not need_h5_recovery and (920 <= hhmm_now <= 1515):
+                        if today_nodes_count < 5000:
+                            logger.info(f"📡 Snapshot lacks today's data ({today_nodes_count} nodes), triggering HDF5 backfill...")
+                            need_h5_recovery = True
+                    
+                    if need_h5_recovery:
+                        logger.info(f"📡 Attempting recovery from HDF5 (Total Stocks: {total_stocks}, Today Nodes: {today_nodes_count})...")
+                        h5_df = self.recover_from_hdf5()
+                        if not h5_df.empty:
+                            if cached_df.empty:
+                                cached_df = h5_df
+                            else:
+                                # 合并：以 H5 为准，补全最新行情。注意：concat 必须保持 time 顺序，后续 from_dataframe 会重排
+                                cached_df = pd.concat([cached_df, h5_df]).drop_duplicates(subset=['code', 'time'], keep='last')
+                            new_total = len(cached_df['code'].unique())
+                            logger.info(f"✅ Recovery success. Total stocks: {new_total}")
 
-                if not cached_df.empty:
-                    with timed_ctx("from_dataframe_timed", warn_ms=5000):
-                        self.kline_cache.from_dataframe(cached_df)
-                    logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
-                    self._is_recovered_empty = False
-                    self.data_version += 1
-                    
-                    # [NEW] 利用恢复的全网存量 K 线，瞬间初始化并重构全市场 V反 状态机
-                    try:
-                        # 优先尝试从持久化文件(Ramdisk/Gzip)加载上一周期的状态机
-                        if self.kline_cache.load_consolidation_state() and len(self.kline_cache.get_v_reversal_pool()) > 0:
-                            logger.warn(f"✅ [Init] 成功从持久化文件中恢复全网状态机，跳过全量重构。当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
-                        else:
-                            logger.warn("🚀 [Init] 状态机缓存为空或未找到，正在从本地存量历史 K 线中全量重算 V型反转状态机...")
-                            start_t = time.time()
-                            self.kline_cache.update_wave_structure_state(None)
-                            cost_ms = (time.time() - start_t) * 1000
-                            logger.warn(f"✅ [Init] 全量状态机重构并落盘完毕! 耗时: {cost_ms:.2f}ms, 当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
-                    except Exception as state_err:
-                        logger.error(f"⚠️ [Init] 全网状态机初始化异常: {state_err}")
+                    if not cached_df.empty:
+                        with timed_ctx("from_dataframe_timed", warn_ms=5000):
+                            self.kline_cache.from_dataframe(cached_df)
+                        logger.info(f"♻️ MinuteKlineCache recovered: {len(cached_df)} nodes.")
+                        self._is_recovered_empty = False
+                        self.data_version += 1
+                        
+                        # [NEW] 利用恢复的全网存量 K 线，瞬间初始化并重构全市场 V反 状态机
+                        try:
+                            # 优先尝试从持久化文件(Ramdisk/Gzip)加载上一周期的状态机
+                            if self.kline_cache.load_consolidation_state() and len(self.kline_cache.get_v_reversal_pool()) > 0:
+                                logger.warn(f"✅ [Init] 成功从持久化文件中恢复全网状态机，跳过全量重构。当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
+                            else:
+                                logger.warn("🚀 [Init] 状态机缓存为空或未找到，正在从本地存量历史 K 线中全量重算 V型反转状态机...")
+                                start_t = time.time()
+                                self.kline_cache.update_wave_structure_state(None)
+                                cost_ms = (time.time() - start_t) * 1000
+                                logger.warn(f"✅ [Init] 全量状态机重构并落盘完毕! 耗时: {cost_ms:.2f}ms, 当前潜伏池数量: {len(self.kline_cache.get_v_reversal_pool())}")
+                        except Exception as state_err:
+                            logger.error(f"⚠️ [Init] 全网状态机初始化异常: {state_err}")
+                    else:
+                        logger.warning("ℹ️ No MinuteKlineCache found on disk or empty. Protection ACTIVE.")
+                        self._is_recovered_empty = True
                 else:
-                    logger.warning("ℹ️ No MinuteKlineCache found on disk or empty. Protection ACTIVE.")
-                    self._is_recovered_empty = True
-            else:
-                logger.info("🛡️ Simulation Mode: Skipping Live MinuteKlineCache recovery to ensure data isolation.")
-        except Exception as e:
-            logger.error(f"Snapshot load error: {e}")
-            self._is_recovered_empty = True
+                    logger.info("🛡️ Simulation Mode: Skipping Live MinuteKlineCache recovery to ensure data isolation.")
+            except Exception as e:
+                logger.error(f"Snapshot load error: {e}")
+                self._is_recovered_empty = True
+            finally:
+                self.is_ready = True
+                if hasattr(self, '_pending_batches') and self._pending_batches:
+                    logger.info(f"🔄 Processing {len(self._pending_batches)} buffered real-time batches after recovery...")
+                    for pending_df in self._pending_batches:
+                        try:
+                            self.update_batch(pending_df)
+                        except Exception as p_e:
+                            logger.error(f"Error processing pending batch: {p_e}")
+                    self._pending_batches.clear()
+
+        threading.Thread(target=run_recovery, name="DataPublisher_Recovery", daemon=True).start()
 
     def reset_state(self):
         """
@@ -3068,11 +3084,12 @@ class DataPublisher:
             limit_time_int = int(getattr(cct, 'sina_limit_time', 60))
             h5_table = f"all_{limit_time_int}"
             
-            logger.info(f"🔍 Reading HDF5: {h5_fname} table: {h5_table}")
-            # 使用 tdx_hdf5_api 的统一接口读取
-            df_mi = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False, MultiIndex=True)
+            logger.info(f"🔍 Reading HDF5 via Sina unified cache: {h5_fname} table: {h5_table}")
+            from JSONData import sina_data
+            sina = sina_data.Sina(readonly=True)
+            df_mi = sina.get_sina_MultiIndex_data()
             if df_mi is None or df_mi.empty:
-                logger.warning("⚠️ HDF5 recovery source is empty.")
+                logger.warning("⚠️ HDF5 recovery source (Sina cache) is empty.")
                 return pd.DataFrame()
             
             # 1. 结构转换：MultiIndex -> Flat DataFrame
@@ -3166,7 +3183,21 @@ class DataPublisher:
         """
         if not code_list: return
         
+        now_t = time.time()
+        last_t = getattr(self, '_last_backfill_time', 0.0)
+        if now_t - last_t < 30.0:
+            logger.info(f"📡 Throttling gap backfill. Cooldown active (elapsed: {now_t - last_t:.1f}s < 30s). skipping.")
+            return
+
+        if not hasattr(self, '_backfill_lock'):
+            self._backfill_lock = threading.Lock()
+
+        if not self._backfill_lock.acquire(blocking=False):
+            logger.info("📡 Another gap backfill task is already running. Skipping this request.")
+            return
+        
         try:
+            self._last_backfill_time = now_t
             # 1. 从 HDF5 抓取这些代码的历史全量
             h5_df = self.recover_from_hdf5_by_codes(code_list)
             if h5_df is not None and not h5_df.empty:
@@ -3204,6 +3235,8 @@ class DataPublisher:
             
         except Exception as e:
             logger.error(f"backfill_gaps error: {e}")
+        finally:
+            self._backfill_lock.release()
 
     def recover_from_hdf5_by_codes(self, code_list: list[str]) -> pd.DataFrame:
         """从 HDF5 精准恢复指定代码的数据"""
@@ -3309,6 +3342,13 @@ class DataPublisher:
         """
         接收来自 fetch_and_process 的 DataFrame 快照
         """
+        if not getattr(self, 'is_ready', False):
+            if not hasattr(self, '_pending_batches'):
+                self._pending_batches = []
+            self._pending_batches.append(df.copy())
+            logger.info(f"⏳ Background recovery in progress. Buffered 1 real-time batch ({len(df)} rows).")
+            return
+
         t0 = time.time()
         is_trading = cct.get_work_time_duration()
 
@@ -3792,6 +3832,7 @@ class DataPublisher:
             num_subscribers = sum(len(v) for v in self.subscribers.values())
             
             return {
+                "is_ready": self.is_ready,
                 "klines_cached": len(self.kline_cache.cache),
                 "total_nodes": total_nodes,
                 "avg_nodes_per_stock": avg_nodes,
