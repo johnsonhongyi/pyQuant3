@@ -33,7 +33,6 @@ class GlobalFavoriteManager:
         self.favorite_sectors: Set[str] = set()
         self.favorite_stocks: Set[str] = set()
         self.stock_grades = {}
-        self._subscribers = []
         self._lock = threading.Lock()
         self._last_config_mtime = 0.0
         self._version = 0
@@ -44,15 +43,15 @@ class GlobalFavoriteManager:
         self.load_from_config()
         self.load_grades_from_voice_alert_config()
 
-    @property
-    def version(self) -> int:
-        with self._lock:
-            return self._version
-
         # Start a background file mtime watcher thread for cross-process synchronization
         self._watcher_stop = threading.Event()
         self._watcher_thread = threading.Thread(target=self._file_watcher_loop, daemon=True, name="FavoritesWatcher")
         self._watcher_thread.start()
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
 
     def load_grades_from_voice_alert_config(self):
         try:
@@ -141,7 +140,6 @@ class GlobalFavoriteManager:
                 if changed:
                     with self._lock:
                         self._version += 1
-                    self.notify_subscribers()
             else:
                 with self._lock:
                     self._last_config_mtime = mtime
@@ -192,7 +190,6 @@ class GlobalFavoriteManager:
             self.favorite_sectors.add(sector)
             self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
 
     def remove_favorite_sector(self, sector: str):
         with self._lock:
@@ -200,7 +197,6 @@ class GlobalFavoriteManager:
                 self.favorite_sectors.remove(sector)
                 self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
 
     def toggle_favorite_sector(self, sector: str):
         with self._lock:
@@ -212,7 +208,6 @@ class GlobalFavoriteManager:
                 action = "added"
             self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
         return action
 
     def add_favorite_stock(self, code: str):
@@ -220,7 +215,6 @@ class GlobalFavoriteManager:
             self.favorite_stocks.add(code)
             self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
 
     def remove_favorite_stock(self, code: str):
         with self._lock:
@@ -228,7 +222,6 @@ class GlobalFavoriteManager:
                 self.favorite_stocks.remove(code)
                 self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
 
     def toggle_favorite_stock(self, code: str):
         with self._lock:
@@ -240,35 +233,7 @@ class GlobalFavoriteManager:
                 action = "added"
             self._version += 1
         self.save_to_config()
-        self.notify_subscribers()
         return action
-
-    def subscribe(self, callback: Callable[[], None]):
-        with self._lock:
-            if callback not in self._subscribers:
-                self._subscribers.append(callback)
-
-    def unsubscribe(self, callback: Callable[[], None]):
-        with self._lock:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-    def notify_subscribers(self):
-        with self._lock:
-            subs = list(self._subscribers)
-        for sub in subs:
-            try:
-                # 🛡️ 物理避免从非 GIL 线程直接调用可能已处于销毁期或属不同 GUI 框架（如 Tkinter）的普通 Python 回调。
-                # 允许 PyQt 等采用心跳/单发机制的槽函数本身在它们各自的主线程工作。
-                sub_self = getattr(sub, '__self__', None)
-                if sub_self is not None:
-                    class_name = sub_self.__class__.__name__
-                    if "MonitorTK" in class_name or "MultiPeriodTester" in class_name:
-                        logger.debug(f"[GlobalFavorites] Bypass calling Tkinter subscriber {class_name} directly to avoid GIL crash.")
-                        continue
-                sub()
-            except Exception as e:
-                logger.error(f"Subscriber notification error: {e}")
 
     def get_favorite_sectors(self) -> Set[str]:
         with self._lock:

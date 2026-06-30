@@ -1162,7 +1162,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.warning(f"Favorites subscribe failed: {e}")
         
         # 启动自选股状态心跳轮询
-        self.after(300, self._poll_favorites_loop)
+        self.after(500, self._poll_favorites_loop)
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
         self.bind("<Control-slash>", lambda e: self.open_indicator_help())
@@ -9815,7 +9815,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.warning(f"Error in poll_favorites_loop: {e}")
         finally:
-            self.after(300, self._poll_favorites_loop)
+            self.after(500, self._poll_favorites_loop)
 
     def _refresh_ui_favorites(self):
         """[0ms 内存重绘] 收到重点关注通知后，仅在内存层面对当前数据做二次置顶并重绘 UI"""

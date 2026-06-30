@@ -69,16 +69,15 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.live_strategy: Optional['StockLiveStrategy'] = live_strategy
         self.selector: Optional['StockSelector'] = stock_selector
         
-        # 🚀 [NEW] 订阅全局关注变更通知，并启动主线程专属轮询机制
-        self._favorites_dirty = False
+        # 🚀 [NEW] 初始化自选股版本并启动主线程专属轮询机制
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+            self._last_favorites_version = GlobalFavoriteManager().version
         except Exception as e:
-            logger.warning(f"Favorites subscribe failed: {e}")
+            logger.warning(f"Favorites init failed: {e}")
         
-        # 启动主线程专属的 300ms 轮询心跳以安全刷新重点关注，杜绝任何跨线程 Tkinter GIL 崩溃
-        self.after(300, self._poll_favorites_loop)
+        # 启动主线程专属的 500ms 轮询心跳以安全刷新重点关注，杜绝任何跨线程 Tkinter GIL 崩溃
+        self.after(500, self._poll_favorites_loop)
         
         # --- History Config ---
         self.history_file: str = "stock_sector_history.json"
@@ -162,12 +161,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             self.save_ui_states()
         except Exception as e:
             logger.error(f"Failed to save sort states on close: {e}")
-        # [全局重点关注退订] 防止内存泄漏
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.debug(f"Favorites unsubscribe failed: {e}")
+
         # 🚀 [NEW] 级联销毁所有打开的交易确认弹窗，防止残留
         try:
             if hasattr(self, "_active_confirm_wins"):
@@ -230,9 +224,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             print(f"保存窗口位置失败: {e}")
         self.destroy()
 
-    def _on_favorites_changed(self):
-        """[全局重点关注同步回调] 纯Python操作，绝对不碰任何Tkinter底层C对象，避开GIL崩溃"""
-        self._favorites_dirty = True
+
 
     def _refresh_ui_favorites(self):
         """安全地在主线程中只刷新页面置顶显示，绝不重载底层计算数据，省去99%开销与GIL崩溃"""
@@ -292,17 +284,19 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             logger.warning(f"Failed to refresh favorites display in selection window: {e}")
 
     def _poll_favorites_loop(self):
-        """[主线程专属心跳轮询] 独立的小卫士，每隔300ms安全检测脏标记"""
+        """[主线程专属心跳轮询] 独立的小卫士，每隔300ms安全检测版本变化"""
         try:
-            if getattr(self, '_favorites_dirty', False):
-                self._favorites_dirty = False
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
                 self._refresh_ui_favorites()
         except Exception as e:
             logger.debug(f"Favorites poll error: {e}")
         finally:
             try:
                 if self.winfo_exists():
-                    self.after(300, self._poll_favorites_loop)
+                    self.after(500, self._poll_favorites_loop)
             except Exception:
                 pass
 
