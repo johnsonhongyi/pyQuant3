@@ -274,8 +274,11 @@ class PRServiceGUI:
             df = self.sync_manager.get_current_df()
         if df is None or df.empty:
             return
-            
-        # 遍历所有Treeview进行极速无闪烁的局部更新
+
+        _, _, _extra_cols = self._get_all_cols()
+        # 基础可更新列索引: [3]=val, [4]=price, [5]=dff2, [6]=dff3, [7]=rank
+        BASE_UPDATE_COUNT = 8  # idx/code/name/val/price/dff2/dff3/rank
+
         all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
         for tree in all_trees:
             for iid in tree.get_children():
@@ -290,7 +293,7 @@ class PRServiceGUI:
                         import pandas as pd
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
-                        
+
                         pct = float(row.get('percent', row.get('ratio', 0.0)))
                         price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
                         dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
@@ -299,30 +302,58 @@ class PRServiceGUI:
                         block = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
                         if block == 'nan' or block == 'None':
                             block = '--'
-                            
+
+                        # 更新 _block_cache（不写进 Treeview）
+                        if block and block != '--':
+                            if not hasattr(self, '_block_cache'):
+                                self._block_cache = {}
+                            self._block_cache[code_str] = block
+
                         new_vals = list(old_vals)
-                        while len(new_vals) < 9:
+                        # 确保至少有 BASE_UPDATE_COUNT 列
+                        while len(new_vals) < BASE_UPDATE_COUNT:
                             new_vals.append("")
-                            
+
                         new_vals[3] = f"{pct:.2f}"
                         new_vals[4] = f"{price:.2f}"
                         new_vals[5] = f"{dff2:.1f}"
                         new_vals[6] = f"{dff3:.1f}"
                         new_vals[7] = str(rank)
-                        new_vals[8] = block
-                        
+
+                        # 更新自定义追加列（从 BASE_UPDATE_COUNT 索引开始）
+                        for ei, ec in enumerate(_extra_cols):
+                            idx_in_vals = BASE_UPDATE_COUNT + ei
+                            while len(new_vals) <= idx_in_vals:
+                                new_vals.append("--")
+                            try:
+                                v = None
+                                for key in (ec, ec.lower(), ec.upper()):
+                                    try:
+                                        v = row.get(key)
+                                    except Exception:
+                                        pass
+                                    if v is not None:
+                                        break
+                                if v is None or str(v) in ('nan', 'None', ''):
+                                    new_vals[idx_in_vals] = "--"
+                                else:
+                                    try:
+                                        new_vals[idx_in_vals] = f"{float(v):.2f}"
+                                    except (ValueError, TypeError):
+                                        new_vals[idx_in_vals] = str(v)
+                            except Exception:
+                                pass
+
                         tree.item(iid, values=tuple(new_vals))
-                        
+
                         # 动态更新涨跌颜色 tag，并保持自选股状态
                         curr_tags = list(tree.item(iid, "tags") or [])
                         is_fav = "favorite" in curr_tags
-                        
                         tag = "flat"
                         if pct > 0:
                             tag = "up"
                         elif pct < 0:
                             tag = "down"
-                            
                         new_tags = [tag]
                         if is_fav:
                             new_tags.append("favorite")
@@ -595,34 +626,70 @@ class PRServiceGUI:
         self.lbl_status = tk.Label(settings_frame, text="就绪", fg="blue", font=("Microsoft YaHei", 9, "bold"))
         self.lbl_status.pack(side="right", padx=10)
 
+    # ── 固定基础列（block 已移除，通过 _block_cache 字典存储，双击查询）──
+    _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank")
+    _BASE_HEADERS = {
+        "idx":   "",            # 由 first_col_title 动态填充
+        "code":  "代码",
+        "name":  "名称",
+        "val":   "涨",          # 花标签时改为"涨幅"
+        "price": "最新",
+        "dff2":  "dff2",
+        "dff3":  "dff3",
+        "rank":  "Rank",
+    }
+
+    def _get_all_cols(self):
+        """返回 (all_cols, display_cols, extra_cols) 三元组，支持 cct.popularity_col 追加"""
+        extra = []
+        try:
+            cfg_cols = getattr(cct, 'popularity_col', []) or []
+            seen = set(self._BASE_FIXED_COLS)
+            for c in cfg_cols:
+                c = str(c).strip()
+                if c and c not in seen:
+                    extra.append(c)
+                    seen.add(c)
+        except Exception:
+            pass
+        all_cols = self._BASE_FIXED_COLS + tuple(extra)
+        display_cols = all_cols  # 所有列均显示
+        return all_cols, display_cols, extra
+
     def create_treeview(self, parent, first_col_title):
+        all_cols, display_cols, extra_cols = self._get_all_cols()
+
         tree = ttk.Treeview(
             parent,
-            columns=("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"),
-            displaycolumns=("idx", "code", "name", "val", "price", "dff2", "dff3", "rank"),  # 隐藏 block (行业板块)
+            columns=all_cols,
+            displaycolumns=display_cols,
             show="headings",
             selectmode="browse"
         )
-        tree.heading("idx", text=first_col_title)
-        tree.heading("code", text="代码")
-        tree.heading("name", text="名称")
-        tree.heading("val", text="涨幅" if first_col_title == "花" else "涨")
+        # 基础列表头
+        tree.heading("idx",   text=first_col_title)
+        tree.heading("code",  text="代码")
+        tree.heading("name",  text="名称")
+        tree.heading("val",   text="涨幅" if first_col_title == "花" else "涨")
         tree.heading("price", text="最新")
-        tree.heading("dff2", text="dff2")
-        tree.heading("dff3", text="dff3")
-        tree.heading("rank", text="Rank")
-        tree.heading("block", text="行业板块")
+        tree.heading("dff2",  text="dff2")
+        tree.heading("dff3",  text="dff3")
+        tree.heading("rank",  text="Rank")
 
-        # 极窄模式基础列宽设置，允许主要数据列成比例随窗口自适应拉伸，彻底杜绝右侧大白边
-        tree.column("idx", width=26, anchor="center", stretch=False)
-        tree.column("code", width=52, anchor="center", stretch=False)
-        tree.column("name", width=64, anchor="center", stretch=True)
-        tree.column("val", width=48, anchor="center", stretch=True)
+        # 基础列宽
+        tree.column("idx",   width=26, anchor="center", stretch=False)
+        tree.column("code",  width=52, anchor="center", stretch=False)
+        tree.column("name",  width=64, anchor="center", stretch=True)
+        tree.column("val",   width=48, anchor="center", stretch=True)
         tree.column("price", width=50, anchor="center", stretch=True)
-        tree.column("dff2", width=44, anchor="center", stretch=True)
-        tree.column("dff3", width=44, anchor="center", stretch=True)
-        tree.column("rank", width=40, anchor="center", stretch=True)
-        tree.column("block", width=1, anchor="center", stretch=False)
+        tree.column("dff2",  width=44, anchor="center", stretch=True)
+        tree.column("dff3",  width=44, anchor="center", stretch=True)
+        tree.column("rank",  width=40, anchor="center", stretch=True)
+
+        # 追加自定义列的表头与列宽
+        for ec in extra_cols:
+            tree.heading(ec, text=ec)
+            tree.column(ec, width=48, anchor="center", stretch=True)
 
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview,
                                   style="Slim.Vertical.TScrollbar")
@@ -632,13 +699,13 @@ class PRServiceGUI:
         scrollbar.pack(side="right", fill="y")
 
         # 颜色标签
-        tree.tag_configure("up", foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
-        tree.tag_configure("down", foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
-        tree.tag_configure("flat", foreground="#000000", font=("Microsoft YaHei", 9))
+        tree.tag_configure("up",       foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
+        tree.tag_configure("down",     foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
+        tree.tag_configure("flat",     foreground="#000000", font=("Microsoft YaHei", 9))
         tree.tag_configure("favorite", background="#e6ffe6", font=("Microsoft YaHei", 9, "bold"))
 
         # 绑定点击表头排序
-        for col in ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"):
+        for col in all_cols:
             tree.heading(col, command=lambda c=col, t=tree: self.sort_column(t, c, False))
 
         tree.sort_col = self.config.get("sort_col", None)
@@ -724,21 +791,18 @@ class PRServiceGUI:
             first_title = "淘"
         elif tree == self.tree_res:
             first_title = "合"
-            
-        base_headers = {
-            "idx": first_title,
-            "code": "代码",
-            "name": "名称",
-            "val": "涨幅" if first_title == "花" else "涨",
-            "price": "最新",
-            "dff2": "dff2",
-            "dff3": "dff3",
-            "rank": "Rank",
-            "block": "行业板块"
-        }
-        
-        for col in ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank", "block"):
-            base_text = base_headers[col]
+
+        base_headers = dict(self._BASE_HEADERS)
+        base_headers["idx"] = first_title
+        base_headers["val"] = "涨幅" if first_title == "花" else "涨"
+        # 补充自定义列（列名即显示文字）
+        _, _, extra_cols = self._get_all_cols()
+        for ec in extra_cols:
+            base_headers[ec] = ec
+
+        all_display = self._BASE_FIXED_COLS + tuple(extra_cols)
+        for col in all_display:
+            base_text = base_headers.get(col, col)
             if col == active_col:
                 arrow = " ↓" if reverse else " ↑"
                 tree.heading(col, text=f"{base_text}{arrow}")
@@ -778,13 +842,14 @@ class PRServiceGUI:
         if selection:
             item = tree.item(selection[0])
             values = item.get("values")
-            if values and len(values) >= 9:
+            if values and len(values) >= 2:
                 code = str(values[1]).strip().zfill(6)
-                name = str(values[2]).strip()
-                block = str(values[8]).strip()
-                if block == "--" or not block or block == "nan" or block == "None":
+                name = str(values[2]).strip() if len(values) >= 3 else code
+                # 从 _block_cache 字典查询板块信息（不再依赖隐藏列）
+                block = getattr(self, '_block_cache', {}).get(code, "--")
+                if not block or block in ("--", "nan", "None"):
                     block = "暂无板块信息"
-                
+
                 # 弹出置顶提示框显示所属行业板块信息
                 messagebox.showinfo("板块信息", f"个股: {name} ({code})\n所属行业板块: {block}", parent=self.root)
 
@@ -928,7 +993,7 @@ class PRServiceGUI:
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):
         self.clear_all_trees()
 
-        # 1. 提取所有进入“合”表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
+        # 1. 提取所有进入"合"表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
         resonance_set = {item["code"] for item in resonance_results}
 
         # 获取最新的行情快照 DataFrame
@@ -942,6 +1007,37 @@ class PRServiceGUI:
         except Exception:
             fav_stocks = set()
 
+        # 预计算本次的自定义追加列（全局统一，所有 tree 共享同一列结构）
+        _, _, _extra_cols = self._get_all_cols()
+        # 板块信息缓存，不再存入 Treeview，双击时查询
+        self._block_cache = {}
+
+        def _read_extra_vals(row_obj) -> tuple:
+            """从 df_cache 行中读取自定义列的值，找不到则返回 '--'"""
+            if row_obj is None or not _extra_cols:
+                return tuple(["--"] * len(_extra_cols))
+            result = []
+            for ec in _extra_cols:
+                try:
+                    v = None
+                    for key in (ec, ec.lower(), ec.upper()):
+                        try:
+                            v = row_obj.get(key)
+                        except Exception:
+                            pass
+                        if v is not None:
+                            break
+                    if v is None or str(v) in ('nan', 'None', ''):
+                        result.append("--")
+                    else:
+                        try:
+                            result.append(f"{float(v):.2f}")
+                        except (ValueError, TypeError):
+                            result.append(str(v))
+                except Exception:
+                    result.append("--")
+            return tuple(result)
+
         # 2. 定义带去重功能的单个表格填充辅助函数
         def populate(tree, data_dict):
             sorted_items = sorted(
@@ -953,51 +1049,59 @@ class PRServiceGUI:
                 # 如果该个股已被归入共振榜，则在其他表（东、花、开、淘）中过滤去重
                 if code in resonance_set:
                     continue
-                    
+
                 quote = quotes.get(code, {"name": "--", "percent": 0.0})
                 name = quote["name"]
                 pct = quote["percent"]
-                
-                # 初始化实时字段默认值
+
                 price_str = "--"
                 dff2_str = "--"
                 dff3_str = "--"
                 rank_str = "--"
                 block_str = "--"
-                
+                row_obj = None
+
                 if df_cache is not None and not df_cache.empty:
                     code_str = str(code).strip().zfill(6)
                     if code_str in df_cache.index:
                         try:
-                            row = df_cache.loc[code_str]
+                            row_obj = df_cache.loc[code_str]
                             import pandas as pd
-                            if isinstance(row, pd.DataFrame):
-                                row = row.iloc[0]
-                            pct = float(row.get('percent', row.get('ratio', pct)))
-                            price_str = f"{float(row.get('trade', row.get('close', row.get('price', 0.0)))):.2f}"
-                            dff2_str = f"{float(row.get('dff2', row.get('DFF2', 0.0))):.1f}"
-                            dff3_str = f"{float(row.get('dff3', row.get('DFF3', 0.0))):.1f}"
-                            rank_str = str(int(row.get('Rank', row.get('rank', 0))))
-                            block_str = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
+                            if isinstance(row_obj, pd.DataFrame):
+                                row_obj = row_obj.iloc[0]
+                            pct = float(row_obj.get('percent', row_obj.get('ratio', pct)))
+                            price_str = f"{float(row_obj.get('trade', row_obj.get('close', row_obj.get('price', 0.0)))):.2f}"
+                            dff2_str = f"{float(row_obj.get('dff2', row_obj.get('DFF2', 0.0))):.1f}"
+                            dff3_str = f"{float(row_obj.get('dff3', row_obj.get('DFF3', 0.0))):.1f}"
+                            rank_str = str(int(row_obj.get('Rank', row_obj.get('rank', 0))))
+                            block_str = str(row_obj.get('category', row_obj.get('blockname', row_obj.get('hy', '--'))))
                             if block_str == 'nan' or block_str == 'None':
                                 block_str = '--'
                         except Exception:
-                            pass
+                            row_obj = None
 
                 tag = "flat"
                 if pct > 0:
                     tag = "up"
                 elif pct < 0:
                     tag = "down"
-                
+
                 code_str = str(code).strip().zfill(6)
                 is_fav = code_str in fav_stocks
                 display_name = f"★ {name}" if is_fav else name
                 tags = [tag]
                 if is_fav:
                     tags.append("favorite")
-                
-                tree.insert("", "end", values=(display_rank, code, display_name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=tuple(tags))
+
+                # 板块写入缓存，不写入 Treeview
+                if block_str and block_str not in ('--', 'nan', 'None'):
+                    self._block_cache[code_str] = block_str
+
+                # 基础列 + 自定义追加列
+                extra_vals = _read_extra_vals(row_obj)
+                row_values = (display_rank, code, display_name, f"{pct:.2f}",
+                              price_str, dff2_str, dff3_str, rank_str) + extra_vals
+                tree.insert("", "end", values=row_values, tags=tuple(tags))
                 display_rank += 1
 
         # 3. 填充前4个表并过滤去重
@@ -1006,7 +1110,7 @@ class PRServiceGUI:
         populate(self.tree_lh, lh_data)
         populate(self.tree_tgb, tgb_data)
 
-        # 4. 填充共振“合”表，并自选置顶排序
+        # 4. 填充共振"合"表，并自选置顶排序
         sorted_res = sorted(
             resonance_results,
             key=lambda x: 0 if str(x["code"]).strip().zfill(6) in fav_stocks else 1
@@ -1016,47 +1120,55 @@ class PRServiceGUI:
             quote = quotes.get(code, {"name": "--", "percent": 0.0})
             name = quote["name"]
             pct = quote["percent"]
-            
-            # 初始化实时字段默认值
+
             price_str = "--"
             dff2_str = "--"
             dff3_str = "--"
             rank_str = "--"
             block_str = "--"
-            
+            row_obj_res = None
+
             if df_cache is not None and not df_cache.empty:
                 code_str = str(code).strip().zfill(6)
                 if code_str in df_cache.index:
                     try:
-                        row = df_cache.loc[code_str]
+                        row_obj_res = df_cache.loc[code_str]
                         import pandas as pd
-                        if isinstance(row, pd.DataFrame):
-                            row = row.iloc[0]
-                        pct = float(row.get('percent', row.get('ratio', pct)))
-                        price_str = f"{float(row.get('trade', row.get('close', row.get('price', 0.0)))):.2f}"
-                        dff2_str = f"{float(row.get('dff2', row.get('DFF2', 0.0))):.1f}"
-                        dff3_str = f"{float(row.get('dff3', row.get('DFF3', 0.0))):.1f}"
-                        rank_str = str(int(row.get('Rank', row.get('rank', 0))))
-                        block_str = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
+                        if isinstance(row_obj_res, pd.DataFrame):
+                            row_obj_res = row_obj_res.iloc[0]
+                        pct = float(row_obj_res.get('percent', row_obj_res.get('ratio', pct)))
+                        price_str = f"{float(row_obj_res.get('trade', row_obj_res.get('close', row_obj_res.get('price', 0.0)))):.2f}"
+                        dff2_str = f"{float(row_obj_res.get('dff2', row_obj_res.get('DFF2', 0.0))):.1f}"
+                        dff3_str = f"{float(row_obj_res.get('dff3', row_obj_res.get('DFF3', 0.0))):.1f}"
+                        rank_str = str(int(row_obj_res.get('Rank', row_obj_res.get('rank', 0))))
+                        block_str = str(row_obj_res.get('category', row_obj_res.get('blockname', row_obj_res.get('hy', '--'))))
                         if block_str == 'nan' or block_str == 'None':
                             block_str = '--'
                     except Exception:
-                        pass
+                        row_obj_res = None
 
             tag = "flat"
             if pct > 0:
                 tag = "up"
             elif pct < 0:
                 tag = "down"
-                
+
             code_str = str(code).strip().zfill(6)
             is_fav = code_str in fav_stocks
             display_name = f"★ {name}" if is_fav else name
             tags = [tag]
             if is_fav:
                 tags.append("favorite")
-                
-            self.tree_res.insert("", "end", values=(rank, code, display_name, f"{pct:.2f}", price_str, dff2_str, dff3_str, rank_str, block_str), tags=tuple(tags))
+
+            # 板块写入缓存，不写入 Treeview
+            if block_str and block_str not in ('--', 'nan', 'None'):
+                self._block_cache[code_str] = block_str
+
+            # 共振表同样追加自定义列
+            extra_vals_res = _read_extra_vals(row_obj_res)
+            row_values_res = (rank, code, display_name, f"{pct:.2f}",
+                              price_str, dff2_str, dff3_str, rank_str) + extra_vals_res
+            self.tree_res.insert("", "end", values=row_values_res, tags=tuple(tags))
 
         # 5. 依据表格中实际插入的子项数量，动态隐藏/显示板块
         em_empty = len(self.tree_em.get_children()) == 0
@@ -1213,13 +1325,13 @@ class PRServiceGUI:
         csv_dir = os.path.join(get_app_root(), "datacsv")
         gz_path = os.path.join(csv_dir, f"popularity_resonance_{date_str}.csv.gz")
         csv_path = os.path.join(csv_dir, f"popularity_resonance_{date_str}.csv")
-        
+
         file_path = None
         if os.path.exists(gz_path):
             file_path = gz_path
         elif os.path.exists(csv_path):
             file_path = csv_path
-            
+
         if not file_path:
             today = time.strftime("%Y-%m-%d")
             if date_str == today:
@@ -1228,20 +1340,27 @@ class PRServiceGUI:
             self.clear_all_trees()
             self.lbl_status.config(text=f"无 {date_str} 的历史数据", fg="red")
             return False
-            
+
         try:
             import pandas as pd
-            # pandas 自动识别并解压 .gz 结尾的压缩文件
             df = pd.read_csv(file_path, encoding="utf-8")
-            
+
             self.clear_all_trees()
-            
+            # 重置板块缓存（历史数据也要支持双击查板块）
+            self._block_cache = {}
+
+            # 获取当前配置的自定义追加列
+            _, _, _extra_cols = self._get_all_cols()
+            # 检测 CSV 中实际存在哪些自定义列（旧文件可能没有）
+            csv_cols = set(df.columns.tolist())
+            available_extra = [c for c in _extra_cols if c in csv_cols]
+
             em_list = []
             ths_list = []
             lh_list = []
             tgb_list = []
             res_list = []
-            
+
             def safe_str(val, default="--"):
                 if pd.isna(val) or str(val).strip().lower() in ('nan', 'none', ''):
                     return default
@@ -1250,7 +1369,7 @@ class PRServiceGUI:
             for _, row in df.iterrows():
                 code = str(row.get("code", "")).strip().zfill(6)
                 name = safe_str(row.get("name"), default="--")
-                
+
                 score_val = row.get("score", 0)
                 score = 0
                 if pd.notna(score_val):
@@ -1258,44 +1377,56 @@ class PRServiceGUI:
                         score = int(float(score_val))
                     except ValueError:
                         score = 0
-                
-                price = safe_str(row.get("price"))
+
+                price   = safe_str(row.get("price"))
                 percent = safe_str(row.get("percent"))
-                dff2 = safe_str(row.get("dff2"))
-                dff3 = safe_str(row.get("dff3"))
-                rank = safe_str(row.get("rank"))
-                block = safe_str(row.get("block"))
-                
+                dff2    = safe_str(row.get("dff2"))
+                dff3    = safe_str(row.get("dff3"))
+                rank    = safe_str(row.get("rank"))
+                block   = safe_str(row.get("block"))
+
+                # 写入板块缓存，供双击查询
+                if block and block != '--':
+                    self._block_cache[code] = block
+
+                # 读取自定义列值（CSV 中有则取，否则 '--'）
+                extra_vals = tuple(safe_str(row.get(c)) for c in _extra_cols)
+
+                # 基础列构成固定 8 元 + 自定义列（不含 block）
+                base_row = (percent, price, dff2, dff3, rank)
+                # 完整行元组：(rank_or_score, code, name, percent, price, dff2, dff3, rank) + extra_vals
+                full_item_base = (code, name, percent, price, dff2, dff3, rank) + extra_vals
+
                 em_rank = row.get("em_rank")
                 if pd.notna(em_rank) and str(em_rank).strip() and str(em_rank).strip().lower() not in ('nan', 'none'):
                     try:
-                        em_list.append((int(float(em_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                        em_list.append((int(float(em_rank)),) + full_item_base)
                     except ValueError:
                         pass
-                    
+
                 ths_rank = row.get("ths_rank")
                 if pd.notna(ths_rank) and str(ths_rank).strip() and str(ths_rank).strip().lower() not in ('nan', 'none'):
                     try:
-                        ths_list.append((int(float(ths_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                        ths_list.append((int(float(ths_rank)),) + full_item_base)
                     except ValueError:
                         pass
-                    
+
                 lh_rank = row.get("lh_rank")
                 if pd.notna(lh_rank) and str(lh_rank).strip() and str(lh_rank).strip().lower() not in ('nan', 'none'):
                     try:
-                        lh_list.append((int(float(lh_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                        lh_list.append((int(float(lh_rank)),) + full_item_base)
                     except ValueError:
                         pass
-                    
+
                 tgb_rank = row.get("tgb_rank")
                 if pd.notna(tgb_rank) and str(tgb_rank).strip() and str(tgb_rank).strip().lower() not in ('nan', 'none'):
                     try:
-                        tgb_list.append((int(float(tgb_rank)), code, name, percent, price, dff2, dff3, rank, block))
+                        tgb_list.append((int(float(tgb_rank)),) + full_item_base)
                     except ValueError:
                         pass
-                    
-                res_list.append((score, code, name, percent, price, dff2, dff3, rank, block))
-                
+
+                res_list.append((score,) + full_item_base)
+
             # 获取全局自选股代码集合
             try:
                 from global_favorites import GlobalFavoriteManager
@@ -1317,40 +1448,46 @@ class PRServiceGUI:
             lh_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
             tgb_list.sort(key=lambda x: list_sort_key(x, reverse_sub=False))
             res_list.sort(key=lambda x: list_sort_key(x, reverse_sub=True))
-            
-            def fill_tree(tree, data_list, is_score=False):
+
+            # 列数 = 8个基础列 + len(_extra_cols)（block 已移除）
+            def fill_tree(tree, data_list):
                 for idx, item in enumerate(data_list):
+                    # item: (rank_or_score, code, name, percent, price, dff2, dff3, rank_val, *extra_vals)
                     rank_or_score = item[0]
-                    code, name, percent, price, dff2, dff3, rank_val, block = item[1:]
+                    code = item[1]
+                    name = item[2]
+                    rest = item[3:]  # percent, price, dff2, dff3, rank_val, *extra_vals
                     display_idx = idx + 1
-                    
+
                     code_str = str(code).strip().zfill(6)
                     is_fav = code_str in fav_stocks
                     display_name = f"★ {name}" if is_fav else name
-                    
+
                     tag = "flat"
                     try:
-                        p_val = float(percent.replace('%', ''))
+                        p_val = float(str(item[3]).replace('%', ''))
                         if p_val > 0: tag = "up"
                         elif p_val < 0: tag = "down"
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
-                        
+
                     tags = [tag]
                     if is_fav:
                         tags.append("favorite")
-                        
-                    tree.insert("", "end", values=(display_idx, code, display_name, percent, price, dff2, dff3, rank_val, block), tags=tuple(tags))
-            
+
+                    # values = (显示序号, code, name, percent, price, dff2, dff3, rank, *extra_vals)
+                    values = (display_idx, code, display_name) + rest
+                    tree.insert("", "end", values=values, tags=tuple(tags))
+
             fill_tree(self.tree_em, em_list)
             fill_tree(self.tree_ths, ths_list)
             fill_tree(self.tree_lh, lh_list)
             fill_tree(self.tree_tgb, tgb_list)
-            fill_tree(self.tree_res, res_list, is_score=True)
-            
+            fill_tree(self.tree_res, res_list)
+
             self.resonance_codes = [x[1] for x in res_list]
             self.refresh_layout(len(em_list)==0, len(ths_list)==0, len(lh_list)==0, len(res_list)==0, len(tgb_list)==0)
-            
+
             # 对所有具有排序状态的表格进行排序自愈
             for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
                 if getattr(tree, "sort_col", None) is not None:
@@ -1486,13 +1623,36 @@ class PRServiceGUI:
                     return str(val).strip()
 
                 row.update({
-                    "price": clean_field(price_val),
+                    "price":   clean_field(price_val),
                     "percent": clean_field(percent_val),
-                    "dff2": clean_field(dff2_val),
-                    "dff3": clean_field(dff3_val),
-                    "rank": clean_field(rank_val),
-                    "block": clean_field(block_val)
+                    "dff2":    clean_field(dff2_val),
+                    "dff3":    clean_field(dff3_val),
+                    "rank":    clean_field(rank_val),
+                    "block":   clean_field(block_val)
                 })
+
+                # 追加自定义列到 CSV（支持将来新增列的持久化）
+                _, _, _extra_cols = self._get_all_cols()
+                for ec in _extra_cols:
+                    ec_val = "--"
+                    if current_df is not None and code in current_df.index:
+                        try:
+                            s_row2 = current_df.loc[code]
+                            if isinstance(s_row2, pd.DataFrame):
+                                s_row2 = s_row2.iloc[0]
+                            v = None
+                            for key in (ec, ec.lower(), ec.upper()):
+                                try:
+                                    v = s_row2.get(key)
+                                except Exception:
+                                    pass
+                                if v is not None:
+                                    break
+                            if v is not None and str(v) not in ('nan', 'None', ''):
+                                ec_val = clean_field(v)
+                        except Exception:
+                            pass
+                    row[ec] = ec_val
                 rows.append(row)
                 
             if rows:
