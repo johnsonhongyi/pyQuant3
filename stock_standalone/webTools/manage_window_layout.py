@@ -34,7 +34,7 @@ def get_app_root() -> str:
     except Exception:
         pass
 
-    os.environ["INSTOCK_APP_ROOT"] = calculated_root
+    # 作为通用桌面管理器，不再向全局 os.environ 写入 INSTOCK_APP_ROOT，防止污染拉起的子进程环境变量
     return calculated_root
 
 

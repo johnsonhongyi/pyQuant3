@@ -1760,7 +1760,15 @@ class WindowPosManagerUI(QMainWindow):
             self.log(f"正在启动程序: {exe_path}")
             try:
                 import subprocess
-                subprocess.Popen(exe_path, cwd=os.path.dirname(exe_path))
+                # 切换工作目录后再执行，确保任何通用程序都在其自身的物理文件夹中加载资源与配置文件
+                old_cwd = os.getcwd()
+                try:
+                    target_dir = os.path.dirname(exe_path)
+                    if target_dir and os.path.exists(target_dir):
+                        os.chdir(target_dir)
+                    subprocess.Popen(exe_path, cwd=target_dir)
+                finally:
+                    os.chdir(old_cwd)
                 self._setup_post_launch_layout_timer(title, pos_item)
             except OSError as e:
                 # 针对 WinError 740 (需要管理员权限) 进行自适应提权启动
@@ -1825,7 +1833,15 @@ class WindowPosManagerUI(QMainWindow):
         """通过 os.startfile(..., 'runas') 提权以管理员身份启动程序"""
         try:
             import os
-            os.startfile(exe_path, 'runas')
+            # 提权启动前临时切换工作目录，确保提权子进程正常定位其物理目录
+            old_cwd = os.getcwd()
+            try:
+                target_dir = os.path.dirname(exe_path)
+                if target_dir and os.path.exists(target_dir):
+                    os.chdir(target_dir)
+                os.startfile(exe_path, 'runas')
+            finally:
+                os.chdir(old_cwd)
             self._setup_post_launch_layout_timer(title, pos_item)
         except OSError as e:
             # WinError 1223 表示用户取消了 UAC 提权

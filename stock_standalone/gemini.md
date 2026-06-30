@@ -1,3 +1,9 @@
+## 2026-06-30 20:00
+- [x] **彻底重构桌面窗口布局配置管理器 (Layout Manager) 通用启动与工作目录 (CWD) 切换机制 (Completely Refactored Generic Process Launching & Working Directory Switching)**：
+    - [x] **彻底根治 `INSTOCK_APP_ROOT` 环境污染**：秉承通用软件设计原则，彻底移除了窗口布局管理器在 `core.py` 与 `manage_window_layout.py` 中向全局 `os.environ` 写入特定环境变量 `INSTOCK_APP_ROOT` 的侵入式拟合代码。这从根本上确保了布局管理器作为通用工具，不会污染任何被其启动的子进程的环境变量 block。
+    - [x] **实现启动前物理切换 `os.chdir` 工作目录 (CWD)**：针对启动各种程序（包括普通启动与提权管理员启动），在 `subprocess.Popen` 和 `os.startfile` 执行前，利用 `os.chdir(os.path.dirname(exe_path))` 物理切换父进程当前工作目录，执行完毕后在 `finally` 块中自动复原。这使得任何被启动的通用程序（如 `人气共振2.22.exe`）都能在其真实的程序路径内执行，从而正确且自愈地定位自身的配置文件。
+    - [x] **编译校验全绿通过**：对 `ui.py`、`core.py` 和 `manage_window_layout.py` 均执行了 `py_compile` 语法校验，测试与启动功能稳定。
+
 ## 2026-06-30 19:20
 - [x] **完成全局自选股 (Global Favorites) 订阅注销与 QTimer 轮询同步架构重构 (Decommissioned Legacy Subscriptions & Migrated GUI Modules to Thread-Safe Polling)**：
     - [x] **完全停用并删除 legacy callback 订阅模式**：在 `global_favorites.py` 中删除了 deprecated `subscribe`、`unsubscribe` 和 `notify_subscribers` 接口，同时从所有自选股增删改操作中完全剥离了 `self.notify_subscribers()` 回调触发，从根源上消除了跨线程、跨 GUI 框架调用 Tkinter/PyQt 对象闭包引发的 `PyEval_RestoreThread` GIL 冲突崩溃。
