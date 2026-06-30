@@ -1130,8 +1130,6 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.destroy()
 
     def _poll_favorites_loop(self):
-        if not hasattr(self, 'tree') or not self.winfo_exists():
-            return
         try:
             from global_favorites import GlobalFavoriteManager
             current_version = GlobalFavoriteManager().version
@@ -1141,7 +1139,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         except Exception as e:
             pass
         finally:
-            self.after(500, self._poll_favorites_loop)
+            try:
+                if self.winfo_exists():
+                    self.after(500, self._poll_favorites_loop)
+            except Exception:
+                pass
 
     def _refresh_ui_favorites(self):
         try:

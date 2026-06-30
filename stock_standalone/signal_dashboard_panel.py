@@ -1026,12 +1026,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._sector_focus_data: List[dict] = []
         self._engine_ctrl = None
         
-        # [GlobalFavorites] 订阅全局重点关注变更通知，实现亚毫秒级无缝联动刷新
+        # Initialize favorites version-tracking and start polling loop
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.warning(f"[SignalDashboardPanel] Failed to subscribe to GlobalFavoriteManager: {e}")
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
         
         # --- 2. 组件与窗口初始化 ---
         self._vol_dialog = VolumeDetailsDialog(None)
@@ -1139,11 +1144,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def stop(self):
         """停止所有计时器 and 订阅，释放资源"""
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.warning(f"[SignalDashboardPanel] Failed to unsubscribe favorites during stop: {e}")
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
 
         try:
             if hasattr(self, '_alert_save_timer') and self._alert_save_timer:
@@ -1212,6 +1214,16 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _on_favorites_changed(self):
         """[GlobalFavorites] 全局重点关注状态变更回调：线程安全地派发到 Qt 主线程执行 UI 刷新"""
         QTimer.singleShot(0, self._refresh_ui_for_favorites)
+
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
 
     def _refresh_ui_for_favorites(self):
         """[GlobalFavorites] 全局收藏变更时，强制重绘当前视图和全表以更新 ⭐ 指示器和排序"""

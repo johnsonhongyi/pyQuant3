@@ -1,3 +1,21 @@
+## 2026-06-30 19:20
+- [x] **完成全局自选股 (Global Favorites) 订阅注销与 QTimer 轮询同步架构重构 (Decommissioned Legacy Subscriptions & Migrated GUI Modules to Thread-Safe Polling)**：
+    - [x] **完全停用并删除 legacy callback 订阅模式**：在 `global_favorites.py` 中删除了 deprecated `subscribe`、`unsubscribe` 和 `notify_subscribers` 接口，同时从所有自选股增删改操作中完全剥离了 `self.notify_subscribers()` 回调触发，从根源上消除了跨线程、跨 GUI 框架调用 Tkinter/PyQt 对象闭包引发的 `PyEval_RestoreThread` GIL 冲突崩溃。
+    - [x] **重构并统一全系统自选股轮询频率为 500ms (Standardized All GUI Polling Intervals to 500ms)**：
+        - 为防止高频 UI 重绘带来不必要的 CPU 资源开销，将全系统所有 Tkinter 及 PyQt 模块中涉及的全局自选股心跳同步周期统一锁定为 **500ms**，在保障实时响应的同时最大化保护主线程性能。
+        - 涉及并更新的模块包括：
+            - **`spatial_follow_hud.py`**：`_favorites_poll_timer` 定时器设定为 500ms。
+            - **`signal_dashboard_panel.py`**：`_favorites_poll_timer` 定时器调整为 500ms。
+            - **`sector_bidding_panel.py`**：`_favorites_poll_timer` 定时器调整为 500ms。
+            - **`bidding_racing_panel.py`**：`SectorDetailDialog`、`CategoryDetailDialog` 及 `BiddingRacingRhythmPanel` 的自选股轮询定时器统一设定为 500ms。
+            - **`ats/ui/main_window.py`**：`_favorites_poll_timer` 调整为 500ms。
+            - **`standalone_multi_period_tester.py` (多周期管理器)**：轮询定时器设定为 500ms，且集成了 `winfo_exists()` 闭包保护以防止退出时报错。
+            - **`stock_selection_window.py`**：自选股轮询更新间隔由 300ms 调整为 500ms。
+            - **`popularity_resonance_gui.py`**：自选股状态更新间隔由 300ms 调整为 500ms。
+            - **`instock_MonitorTK.py`**：主界面心跳轮询间隔由 300ms 调整为 500ms。
+    - [x] **系统自检与语法校验全绿通过**：使用 `py_compile` 物理编译模块对所有修改后的 9 个 Python 文件进行校验，均 100% 编译成功且无任何语法或逻辑异常，系统跨线程及 IPC 状态同步运行稳定。
+
+
 ## 2026-06-30 16:30
 - [x] **实现自适应自定义列宽与冗余周期列智能剔除 (Adaptive Columns & Duplicate Cross-Period Elimination)**：
     - [x] **引入 `_get_display_periods_for_custom_col` 自适应列过滤器**：针对例如 `dff`、`dff2`、`dff3` 及 `Rank` 等已知在各周期数据完全相同的自定义列，或者在运行时通过对各周期数据列比对（以浮点精度 `1e-5` 或 `fillna` 字符串等进行跨周期列等值判定）发现一模一样的自定义指标，在 Treeview 头部构建及数据插入时，只自动保留并显示最小的活跃周期，剔除了其他冗余的重复列（如不再同时显示冗余的 `dff(d)`、`dff(w)`、`dff(m)`，而只保留最小周期 `dff(d)`）。

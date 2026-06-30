@@ -356,12 +356,17 @@ class ATSMainWindow(QMainWindow):
         self.realtime_data_signal.connect(self._handle_realtime_data)
         self.realtime_signal_signal.connect(self._handle_realtime_signal)
         
-        # Subscribe to global favorite changes
+        # Initialize favorites version-tracking and start polling loop
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
-        except Exception as e:
-            print(f"[ATSMainWindow] Error subscribing to favorites: {e}")
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
             
         self._init_toolbar()
         self._init_ui()
@@ -1589,12 +1594,9 @@ class ATSMainWindow(QMainWindow):
 
         # Synchronously save all layout configurations and column widths on application exit
         try:
-            # Unsubscribe from global favorites changes
-            try:
-                from global_favorites import GlobalFavoriteManager
-                GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-            except Exception as ex:
-                print(f"[ATSMainWindow] Error unsubscribing from favorites: {ex}")
+            # Stop favorites poll timer
+            if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+                self._favorites_poll_timer.stop()
 
             # First, save geometry and splitter layouts
             self._save_layout_state()
@@ -1626,6 +1628,16 @@ class ATSMainWindow(QMainWindow):
     def _on_favorites_changed(self):
         # Thread-safe trigger UI refresh on favorite changes using QTimer
         QTimer.singleShot(0, self._safe_favorites_changed)
+
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
 
     def _safe_favorites_changed(self):
         if getattr(self, '_is_closing', False):

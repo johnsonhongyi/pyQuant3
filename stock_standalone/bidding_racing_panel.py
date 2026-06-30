@@ -1026,12 +1026,17 @@ class SectorDetailDialog(QDialog, WindowMixin):
         self._update_header_labels()
         self.setUpdatesEnabled(True)
         
-        # [GlobalFavorites] 订阅重点关注变化
+        # Initialize favorites version-tracking and start polling loop
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.error(f"Subscribe favorites failed in SectorDetailDialog: {e}")
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
 
     def parent(self):
         """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
@@ -2042,12 +2047,9 @@ class SectorDetailDialog(QDialog, WindowMixin):
                 self.timer = None
             except: pass
         
-        # [GlobalFavorites] 取消订阅重点关注变化
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.error(f"Unsubscribe favorites failed in SectorDetailDialog: {e}")
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
 
         # [统一管理] 不再独立存档，由主面板 closeEvent 统一调用状态导出
         self._save_header_state()
@@ -2064,6 +2066,16 @@ class SectorDetailDialog(QDialog, WindowMixin):
         """GlobalFavoriteManager 回调，刷新列表"""
         self._dirty = True
         QTimer.singleShot(0, self.refresh_data)
+
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
 
     def _run_dna_audit_top20(self):
         """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
@@ -2155,12 +2167,17 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         self._update_header_labels()
         self.setUpdatesEnabled(True)
         
-        # [GlobalFavorites] 订阅重点关注变化
+        # Initialize favorites version-tracking and start polling loop
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.error(f"Subscribe favorites failed in CategoryDetailDialog: {e}")
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
 
     def parent(self):
         """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
@@ -3046,12 +3063,9 @@ class CategoryDetailDialog(QDialog, WindowMixin):
                 self.timer = None
             except: pass
             
-        # [GlobalFavorites] 取消订阅重点关注变化
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.error(f"Unsubscribe favorites failed in CategoryDetailDialog: {e}")
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
 
         # [统一管理] 不再独立存档
         self._save_header_state()
@@ -3067,6 +3081,16 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         """GlobalFavoriteManager 回调，刷新列表"""
         self._dirty = True
         QTimer.singleShot(0, self.refresh_data)
+
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
 
     def _run_dna_audit_top20(self):
         """🚀 [DNA-BATCH] 极限审计：选取最高20只 (包含选定项)，或者按多选触发"""
@@ -3326,9 +3350,17 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         QTimer.singleShot(5000, self._check_auto_anchor)
         
-        # [GlobalFavorites] 注册订阅，任何面板（竞价/HUD）变更 favorites 后立即刷新本面板
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        # Initialize favorites version-tracking and start polling loop
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
 
     def _apply_saved_main_sort(self):
         """加载主面板的排序设置"""
@@ -4538,6 +4570,16 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         """GlobalFavoriteManager 回调：跨线程安全派发到 Qt 主线程刷新 UI。"""
         QTimer.singleShot(0, self.update_visuals)
 
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
+
     def _toggle_favorite_stock(self, code: str):
         """切换个股重点关注状态，通过 GlobalFavoriteManager 原子更新并广播。"""
         clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
@@ -5357,12 +5399,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def closeEvent(self, event):
         """[⭐ 统一管理] 退出时执行所有定时器彻底注销与原子联行保存"""
         self._is_closing = True
-        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.warning(f"[BiddingRacingRhythmPanel] Failed to unsubscribe favorites: {e}")
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
 
         # [⭐ 新增] 退出前安全暂停后台回测工作，释放算力
         worker = getattr(self, 'replay_worker', None)

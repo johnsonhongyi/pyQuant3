@@ -1737,9 +1737,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_source_df = None         # [NEW] 缓存最新的全量行情 DataFrame (用于宏观查询)
         self._is_leader_search_mode = False # [NEW] 龙头搜索模式标志
         self._active_search_query = ""
-        # Global favorites singleton subscription (properties favorite_sectors/favorite_stocks handles values)
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        # Initialize favorites version-tracking and start polling loop
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
         # 立即对齐 DPI 感知的配置路径，确保 GlobalFavoriteManager 与 _save_ui_state 读写同一个文件
         try:
             _scale = self._get_dpi_scale_factor()
@@ -1924,12 +1932,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if hasattr(self.main_window, 'sector_bidding_panel'):
            self.main_window.sector_bidding_panel = None
            
-        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.warning(f"[SectorBiddingPanel] Failed to unsubscribe favorites: {e}")
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
             
         # --- 以下是真正关闭时的资源回收和保存 ---
         # 1. 先停止定时器，不产生新任务
@@ -5285,6 +5290,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_favorites_changed(self):
         # 跨线程安全派发到 Qt 主线程
         QTimer.singleShot(0, self._refresh_ui_for_favorites)
+
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
 
     def _refresh_ui_for_favorites(self):
         if not hasattr(self, '_is_populating') or self._is_populating:

@@ -153,6 +153,16 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         # 跨线程安全派发到 Qt 主线程
         QtCore.QTimer.singleShot(0, lambda: self.update_hud_data(self.sector_name))
 
+    def _poll_favorites_loop(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._on_favorites_changed()
+        except Exception:
+            pass
+
     def _get_prioritized_active_sectors(self, detector) -> list:
         """获取重排后的活跃板块列表，重点关注板块优先"""
         if not detector:
@@ -270,9 +280,17 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self._boot_locked = True
         QtCore.QTimer.singleShot(1500, lambda: setattr(self, '_boot_locked', False))
 
-        # Subscribe to global favorites
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+        # Initialize favorites version-tracking and start polling loop
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QtCore.QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
 
     def _load_stays_on_top(self) -> bool:
         """从 window_config.json 加载置顶状态"""
@@ -2185,12 +2203,9 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         self._save_column_widths()
         self.save_window_position_qt_visual(self, "SpatialFollowHUD")
         
-        # [GlobalFavorites] 注销订阅，防止关闭后依然收到全局通知引发 C++ 内存崩溃及野指针内存泄漏
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.warning(f"[SpatialFollowHUD] Failed to unsubscribe favorites: {e}")
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
             
         super().closeEvent(event)
 

@@ -142,19 +142,17 @@ class PRServiceGUI:
         # 监听窗口关闭事件，确保最终配置得到持久化保存
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # 订阅全局自选股改变通知
+        # 初始化自选股版本并启动心跳轮询
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+            self._last_favorites_version = GlobalFavoriteManager().version
         except Exception as e:
-            service_logger.debug(f"订阅全局自选股失败: {e}")
+            service_logger.debug(f"初始化自选股轮询失败: {e}")
+        
+        if hasattr(self, 'root'):
+            self.root.after(500, self._poll_favorites_loop)
 
     def on_close(self):
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception:
-            pass
         try:
             self.sync_manager.stop()
         except Exception:
@@ -162,10 +160,22 @@ class PRServiceGUI:
         self.save_config_settings()
         self.root.destroy()
 
-    def _on_favorites_changed(self):
-        # 使用 after 切换到 Tkinter 主线程运行
-        if hasattr(self, 'root'):
-            self.root.after(0, self._refresh_ui_favorites)
+    def _poll_favorites_loop(self):
+        if not hasattr(self, 'root') or not self.root:
+            return
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._refresh_ui_favorites()
+        except Exception as e:
+            service_logger.debug(f"Error in poll_favorites_loop: {e}")
+        finally:
+            try:
+                self.root.after(500, self._poll_favorites_loop)
+            except Exception:
+                pass
 
     def _refresh_ui_favorites(self):
         try:
