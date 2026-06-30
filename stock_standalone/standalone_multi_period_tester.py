@@ -88,7 +88,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         # 订阅全局自选股改变通知
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+            self._last_favorites_version = GlobalFavoriteManager().version
+            self.after(500, self._poll_favorites_loop)
         except Exception:
             pass
         
@@ -1081,16 +1082,21 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if _parent_class == tk.Toplevel:
             self.withdraw()
         else:
-            try:
-                from global_favorites import GlobalFavoriteManager
-                GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-            except Exception:
-                pass
             self.destroy()
 
-    def _on_favorites_changed(self):
-        if hasattr(self, 'winfo_exists') and self.winfo_exists():
-            self.after(0, self._refresh_ui_favorites)
+    def _poll_favorites_loop(self):
+        if not hasattr(self, 'tree') or not self.winfo_exists():
+            return
+        try:
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                self._refresh_ui_favorites()
+        except Exception as e:
+            pass
+        finally:
+            self.after(500, self._poll_favorites_loop)
 
     def _refresh_ui_favorites(self):
         try:
