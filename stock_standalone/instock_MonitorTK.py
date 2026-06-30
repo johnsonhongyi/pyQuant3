@@ -1151,10 +1151,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tree.bind("<KeyPress>", lambda e: self._set_user_interaction(e), add="+")
 
         # 🚀 [NEW] 全局重点关注订阅与样式初始化
-        self._favorites_dirty = False
         try:
             from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().subscribe(self._on_favorites_changed)
+            self._last_favorites_version = GlobalFavoriteManager().version
             # 配置全局重点关注行样式（三个梯度，S级最浅，A级次之，普通最深）
             self.tree.tag_configure("favorite_S", background="#11293c", foreground="#a8d3f7", font=("Microsoft YaHei", 9, "bold"))
             self.tree.tag_configure("favorite_A", background="#ccffcc", foreground="#006600", font=("Microsoft YaHei", 9, "bold"))
@@ -3736,13 +3735,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
-        # 🚀 [NEW] 取消全局重点关注订阅与联动回调
-        try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().unsubscribe(self._on_favorites_changed)
-        except Exception as e:
-            logger.debug(f"Favorites unsubscribe failed: {e}")
-
         try:
             import sys_utils
             sys_utils.register_link_callback(None)
@@ -3957,11 +3949,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             try:
                 if hasattr(self, "_multi_period_tester_win") and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
-                    try:
-                        from global_favorites import GlobalFavoriteManager
-                        GlobalFavoriteManager().unsubscribe(self._multi_period_tester_win._on_favorites_changed)
-                    except Exception:
-                        pass
                     self._multi_period_tester_win.destroy()
             except Exception:
                 pass
@@ -9819,9 +9806,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self._is_closing:
             return
         try:
-            if getattr(self, '_favorites_dirty', False):
-                self._favorites_dirty = False
-                logger.info("🔑 [Favorites Poller] Favorites changed, triggering UI refresh...")
+            from global_favorites import GlobalFavoriteManager
+            current_version = GlobalFavoriteManager().version
+            if current_version != getattr(self, '_last_favorites_version', 0):
+                self._last_favorites_version = current_version
+                logger.info("🔑 [Favorites Poller] Favorites version changed, triggering UI refresh...")
                 self._refresh_ui_favorites()
         except Exception as e:
             logger.warning(f"Error in poll_favorites_loop: {e}")

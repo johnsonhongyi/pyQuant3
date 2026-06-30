@@ -1,7 +1,14 @@
+## 2026-06-30 16:15
+- [x] **实现自选股更新全局广播的 PyQt 独立订阅与 Tkinter 轮询分离 (Separated Global Favorites Updates via PyQt Subscriptions & Tkinter Version Polling)**：
+    - [x] **根本性消除 GIL 线程调用冲突与 Nuitka 环境崩溃 (Eliminated GIL Violations & PyEval_RestoreThread Crashes)**：针对在多进程或后台线程修改自选股（如点击“取消重点个股”）时出现的 `Fatal Python error: PyEval_RestoreThread` GIL 冲突崩溃，将 Tkinter 主界面 `MonitorTK` 与嵌入式 `StandaloneMultiPeriodTester` 从 `GlobalFavoriteManager` 的直接订阅者队列中彻底注销，改用基于内存版本号 `version` 属性的主线程心跳自愈轮询（每 300ms/500ms），彻底消除了跨解释器线程调用 Tkinter 对象的 python 闭包导致的崩溃。
+    - [x] **实现全局自选股管理器安全订阅物理过滤 (Added Subscriber Guard to GlobalFavoriteManager)**：在 `global_favorites.py` 的 `notify_subscribers` 行情分发机制中，新增了针对回调接收宿主的类名反射分析；自动过滤并跳过名中包含 `"MonitorTK"` 或 `"MultiPeriodTester"` 的回调对象，只保留 PyQt 相关的订阅，在通信源头上为 Tkinter 树结构建立了物理防火墙。
+    - [x] **补全 PyQt 窗口生命周期注销与 Toplevel 销毁自愈 (Aligned Lifecycle Cleanup)**：确认了 `SectorDetailDialog`、`CategoryDetailDialog` 及 `BiddingRacingRhythmPanel` 在窗口关闭（`closeEvent`）时均能干净地注销 favorites 订阅，移除了 Tkinter 侧的多余 `unsubscribe` 代码以精简生命周期，防止了对象已被 C++ 析构但回调残留导致的野指针崩溃。
+
 ## 2026-06-30 15:45
 - [x] **实现粘贴/导入策略重名自动添加数字尾缀保护 (Automated Duplication Suffixing on JSON Paste & Import)**：
     - [x] **优化导入名称查重 (`_import_json_strategy`)**：当用户粘贴 JSON 导入多周期策略时，系统会自动与 `self.strategies` 和当前 `valid_strats` 队列中已存在的名字比对；若发现重复，则自动在其后追加 `_1`、`_2` 等数字尾缀进行递增，直到不重名为止，防止策略配置被意外覆盖或吞没。
     - [x] **优化编辑应用查重 (`_apply_json_to_form`)**：在右侧 JSON 编辑器中修改策略名称并应用时，对新名称进行查重检测（排除当前正在编辑的策略索引 `self.current_idx` 自身）。如果新名字与现存其他任何策略发生冲突，则自动追加数字尾缀，保障各策略实例拥有独立的命名标识。
+    - [x] **语法校验与回归测试**：通过了 `py_compile` 物理编译无错自检，且执行 `test_multi_period_automated.py` 自动化测试用例全绿通过。apply_json_to_form`)**：在右侧 JSON 编辑器中修改策略名称并应用时，对新名称进行查重检测（排除当前正在编辑的策略索引 `self.current_idx` 自身）。如果新名字与现存其他任何策略发生冲突，则自动追加数字尾缀，保障各策略实例拥有独立的命名标识。
     - [x] **语法校验与回归测试**：通过了 `py_compile` 物理编译无错自检，且执行 `test_multi_period_automated.py` 自动化测试用例全绿通过。
 
 ## 2026-06-30 15:30

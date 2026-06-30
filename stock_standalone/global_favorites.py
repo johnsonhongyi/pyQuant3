@@ -36,12 +36,18 @@ class GlobalFavoriteManager:
         self._subscribers = []
         self._lock = threading.Lock()
         self._last_config_mtime = 0.0
+        self._version = 0
         
         # Default config path — may be updated to DPI-aware path by the panel
         self._config_path = WINDOW_CONFIG_FILE
         # Load initially from the default path
         self.load_from_config()
         self.load_grades_from_voice_alert_config()
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
 
         # Start a background file mtime watcher thread for cross-process synchronization
         self._watcher_stop = threading.Event()
@@ -133,6 +139,8 @@ class GlobalFavoriteManager:
                     self._last_config_mtime = mtime
                 logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
                 if changed:
+                    with self._lock:
+                        self._version += 1
                     self.notify_subscribers()
             else:
                 with self._lock:
@@ -182,6 +190,7 @@ class GlobalFavoriteManager:
     def add_favorite_sector(self, sector: str):
         with self._lock:
             self.favorite_sectors.add(sector)
+            self._version += 1
         self.save_to_config()
         self.notify_subscribers()
 
@@ -189,6 +198,7 @@ class GlobalFavoriteManager:
         with self._lock:
             if sector in self.favorite_sectors:
                 self.favorite_sectors.remove(sector)
+                self._version += 1
         self.save_to_config()
         self.notify_subscribers()
 
@@ -200,6 +210,7 @@ class GlobalFavoriteManager:
             else:
                 self.favorite_sectors.add(sector)
                 action = "added"
+            self._version += 1
         self.save_to_config()
         self.notify_subscribers()
         return action
@@ -207,6 +218,7 @@ class GlobalFavoriteManager:
     def add_favorite_stock(self, code: str):
         with self._lock:
             self.favorite_stocks.add(code)
+            self._version += 1
         self.save_to_config()
         self.notify_subscribers()
 
@@ -214,6 +226,7 @@ class GlobalFavoriteManager:
         with self._lock:
             if code in self.favorite_stocks:
                 self.favorite_stocks.remove(code)
+                self._version += 1
         self.save_to_config()
         self.notify_subscribers()
 
@@ -225,6 +238,7 @@ class GlobalFavoriteManager:
             else:
                 self.favorite_stocks.add(code)
                 action = "added"
+            self._version += 1
         self.save_to_config()
         self.notify_subscribers()
         return action
@@ -244,6 +258,14 @@ class GlobalFavoriteManager:
             subs = list(self._subscribers)
         for sub in subs:
             try:
+                # 🛡️ 物理避免从非 GIL 线程直接调用可能已处于销毁期或属不同 GUI 框架（如 Tkinter）的普通 Python 回调。
+                # 允许 PyQt 等采用心跳/单发机制的槽函数本身在它们各自的主线程工作。
+                sub_self = getattr(sub, '__self__', None)
+                if sub_self is not None:
+                    class_name = sub_self.__class__.__name__
+                    if "MonitorTK" in class_name or "MultiPeriodTester" in class_name:
+                        logger.debug(f"[GlobalFavorites] Bypass calling Tkinter subscriber {class_name} directly to avoid GIL crash.")
+                        continue
                 sub()
             except Exception as e:
                 logger.error(f"Subscriber notification error: {e}")
