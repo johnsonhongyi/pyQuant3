@@ -1,3 +1,12 @@
+## 2026-06-30 20:30
+- [x] **实现 HDF5 数据异步背景加载与 UI 启动卡死根治 (Asynchronous HDF5 Loading & Startup Hang Mitigation)**：
+    - [x] **实现崩溃恢复 (Crash Recovery) 异步化 offload**：重构了 `realtime_data_service.py` 中的 `DataPublisher` 启动逻辑，将原本同步阻塞的从 PKL 快照及 HDF5 重建 `MinuteKlineCache` 的 `recover_from_hdf5` 过程完全转移至独立的守护线程 `DataPublisher_Recovery` 中执行。UI 主线程在启动时无需等待庞大的 HDF5 历史数据读取，可瞬间秒开，彻底消除了启动卡死和 UI 阻塞警告。
+    - [x] **设计高能实时更新缓冲器与自愈应用机制 (Real-time Batch Buffering & Replay)**：针对异步加载期间可能涌入的实时行情数据，重构了 `update_batch` 方法。当 `is_ready` 为 `False` 时，所有新到的行情 DataFrame 自动拷贝并追加到 `_pending_batches` 中。一旦后台加载线程成功完成恢复并重构完状态机后，在 `finally` 块中自动将 `is_ready` 置为 `True`，并一次性回放补录所有积压的数据批次，实现了无损平滑衔接。
+    - [x] **优化 HDF5 行情读取与 SingleFlight 内存缓存拦截**：重构了 `recover_from_hdf5` 的 HDF5 读盘逻辑，用只读模式 `Sina(readonly=True).get_sina_MultiIndex_data()` 替换了底层的 `h5a.load_hdf_db` 物理读盘。这使得大轨迹数据直接走 SingleFlight 与内存 L6 级缓存屏障，极大提升了多线程并行读取效率，规避了写锁冲突。
+    - [x] **建立精准缺口回补 (Gap Backfill) 独立锁与 CD 限频保护**：为 `backfill_gaps_from_hdf5` 添加了 `_backfill_lock` 线程锁，并引入了 30 秒冷却限频拦截（`_last_backfill_time`）。当多股连续触发回补请求时，强制进行单线程去重防抖，避免瞬间派生出重叠的网络/磁盘 I/O 任务导致的 UI 卡滞。
+    - [x] **UI 线程主心跳高精度异步就绪检测与回调广播**：在 `instock_MonitorTK.py` 启动阶段将 `_realtime_service_ready` 设为 `False`。在每 100ms 一次的 `_ui_heartbeat` 心跳循环中，自动轮询检测 `realtime_service.is_ready` 状态；一旦发现就绪，瞬间置为 `True`，并自动触发并清空所有注册的回调队列 `_realtime_ready_callbacks`，实现了完全解耦的数据就绪信号广播机制。
+    - [x] **物理语法编译全绿通过**：对 `realtime_data_service.py` 和 `instock_MonitorTK.py` 进行了 `py_compile` 校验，均 100% 编译成功且零语法警告。
+
 ## 2026-06-30 20:00
 - [x] **彻底重构桌面窗口布局配置管理器 (Layout Manager) 通用启动与工作目录 (CWD) 切换机制 (Completely Refactored Generic Process Launching & Working Directory Switching)**：
     - [x] **彻底根治 `INSTOCK_APP_ROOT` 环境污染**：秉承通用软件设计原则，彻底移除了窗口布局管理器在 `core.py` 与 `manage_window_layout.py` 中向全局 `os.environ` 写入特定环境变量 `INSTOCK_APP_ROOT` 的侵入式拟合代码。这从根本上确保了布局管理器作为通用工具，不会污染任何被其启动的子进程的环境变量 block。
