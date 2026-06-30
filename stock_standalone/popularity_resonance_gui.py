@@ -15,7 +15,7 @@ import socket
 from datetime import datetime, timedelta
 from ipc_sync_manager import IPCSyncManager
 from sys_utils import get_app_root
-
+from JohnsonUtil import commonTips as cct
 # 导入 tkcalendar 库支持，高保真还原日历选择器
 try:
     import JohnsonUtil.tkcalendar_patch
@@ -1406,7 +1406,6 @@ class PRServiceGUI:
     def save_daily_resonance_csv(self, em_data, ths_data, lh_data, tgb_data, resonance_results, all_quotes):
         # 1. 交易日及盘后判定限制
         try:
-            import JSONData.common_otc as cct
             if not cct.get_trade_date_status():
                 service_logger.info("今日非交易日，无需持久化盘后数据。")
                 return
