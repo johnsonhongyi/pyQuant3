@@ -1,8 +1,23 @@
+## 2026-06-30 15:45
+- [x] **实现粘贴/导入策略重名自动添加数字尾缀保护 (Automated Duplication Suffixing on JSON Paste & Import)**：
+    - [x] **优化导入名称查重 (`_import_json_strategy`)**：当用户粘贴 JSON 导入多周期策略时，系统会自动与 `self.strategies` 和当前 `valid_strats` 队列中已存在的名字比对；若发现重复，则自动在其后追加 `_1`、`_2` 等数字尾缀进行递增，直到不重名为止，防止策略配置被意外覆盖或吞没。
+    - [x] **优化编辑应用查重 (`_apply_json_to_form`)**：在右侧 JSON 编辑器中修改策略名称并应用时，对新名称进行查重检测（排除当前正在编辑的策略索引 `self.current_idx` 自身）。如果新名字与现存其他任何策略发生冲突，则自动追加数字尾缀，保障各策略实例拥有独立的命名标识。
+    - [x] **语法校验与回归测试**：通过了 `py_compile` 物理编译无错自检，且执行 `test_multi_period_automated.py` 自动化测试用例全绿通过。
+
+## 2026-06-30 15:30
+- [x] **修复策略编辑器 JSON 导入/应用覆写 Bug (Fixed Strategy JSON Import & Application Overwrite Bug)**：
+    - [x] **问题根源定位**：在 `MultiPeriodStrategyEditor` 粘贴 JSON 并应用（触发 `_apply_json_to_form`）后，会重设界面 Listbox 选择并同步调用 `_on_select(None)` 刷新表单。然而，`_on_select` 在其生命周期的第一阶段会无条件地调用 `_sync_to_current_strategy()` 将旧表单的值同步覆盖写入正在编辑的策略，从而导致刚刚成功解析并反填进内存的新策略配置被覆盖回退为旧表单值，最终导致配置丢失与引擎存盘失效。
+    - [x] **解耦防覆写机制**：为 `_on_select(self, event, sync=True)` 引入可选的 `sync` 状态控制。当由 Listbox 正常切换策略时，默认开启 `sync=True` 保证编辑状态不丢失；而在 `_apply_json_to_form` 结尾回填表单时，传递 `sync=False` 从而直接短路并跳过表单对内存的覆写，实现 JSON 配置的物理更新与数据闭环。
+    - [x] **校验与回归测试**：通过了 `py_compile` 语法物理编译；并在脱机状态下完美通过了 `test_multi_period_automated.py` 全套多周期回归测试用例，运行无误。
+on_select(self, event, sync=True)` 引入可选的 `sync` 状态控制。当由 Listbox 正常切换策略时，默认开启 `sync=True` 保证编辑状态不丢失；而在 `_apply_json_to_form` 结尾回填表单时，传递 `sync=False` 从而直接短路并跳过表单对内存的覆写，实现 JSON 配置的物理更新与数据闭环。
+    - [x] **校验与回归测试**：通过了 `py_compile` 语法物理编译；并在脱机状态下完美通过了 `test_multi_period_automated.py` 全套多周期回归测试用例，运行无误。
+
 ## 2026-06-30 15:15
 - [x] **实现二次过滤条件自动持久化与启动自动加载 (Automatic Persistence & Reloading of Secondary Filter Query)**：
     - [x] **新增属性与加载绑定**：在 `standalone_multi_period_tester.py` 初始化流程中，从 `ui_state` 中提取 `current_history_query` 并赋给 `self._current_history_query`；在 `QueryHistoryManager` 实例成功创建后，自动清空并同步将该过滤条件填入 `entry_query` 输入框。
     - [x] **应用更改与自动存盘**：更新了 `_on_history_sync` 回调，当接收到 `"use"` 命令应用历史二次过滤条件时，自动调用 `_save_state()` 触发实时写入物理配置；同步在 `_clear_history_filter` 中增加了清空输入框文本、置空 `ui_state['current_history_query']` 并调用 `_save_state()` 的闭环自愈清除逻辑。
     - [x] **自检与回归测试通过**：顺利通过了 `py_compile` 语法检测，且一并跑通了 `test_multi_period_automated.py` 回归测试套件，执行正常。
+
 
 ## 2026-06-30 15:00
 - [x] **实现双击筛选结果表 Tree 行弹出个股概念板块与所属行业详情窗口 (Pop up Stock Concepts and Industry Details on Treeview Double-Click)**：
