@@ -1700,9 +1700,10 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
                 self.listbox.insert(self.current_idx, new_name)
                 self.listbox.selection_set(self.current_idx)
 
-    def _on_select(self, event):
+    def _on_select(self, event, sync=True):
         # 1. 同步当前正编辑的旧策略到内存
-        self._sync_to_current_strategy()
+        if sync:
+            self._sync_to_current_strategy()
             
         # 2. 读取新选中的策略
         sel = self.listbox.curselection()
@@ -1890,6 +1891,15 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
                 if not name:
                     name = f"未命名导入策略_{len(self.strategies) + len(valid_strats) + 1}"
                 
+                # 重名检查并添加尾缀
+                existing_names = [s['name'] for s in self.strategies] + [s['name'] for s in valid_strats]
+                if name in existing_names:
+                    original_name = name
+                    counter = 1
+                    while name in existing_names:
+                        name = f"{original_name}_{counter}"
+                        counter += 1
+                
                 conditions = item.get("conditions", {})
                 if not isinstance(conditions, dict):
                     continue
@@ -2034,7 +2044,19 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         strat = self.strategies[self.current_idx]
         # 更新名称
         if "name" in data:
-            strat['name'] = str(data['name']).strip() or strat['name']
+            new_name = str(data['name']).strip()
+            if not new_name:
+                new_name = strat['name']
+            
+            # 重名检查并添加尾缀（排除自身）
+            existing_names = [s['name'] for i, s in enumerate(self.strategies) if i != self.current_idx]
+            if new_name in existing_names:
+                original_name = new_name
+                counter = 1
+                while new_name in existing_names:
+                    new_name = f"{original_name}_{counter}"
+                    counter += 1
+            strat['name'] = new_name
         # 更新合并模式
         if "cross_mode" in data:
             strat['cross_mode'] = data['cross_mode'] if data['cross_mode'] in ('union', 'intersection') else 'intersection'
@@ -2061,7 +2083,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         self._refresh_list()
         self.listbox.selection_clear(0, tk.END)
         self.listbox.selection_set(self.current_idx)
-        self._on_select(None)
+        self._on_select(None, sync=False)
         messagebox.showinfo("应用成功", f"JSON 已成功解析并更新策略「{strat['name']}」！", parent=self)
 
     def _copy_json_to_clipboard(self):
