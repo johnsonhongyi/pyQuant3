@@ -92,7 +92,7 @@ class PerformanceEngine:
         return 0.0
 
     @staticmethod
-    def scan_and_group_processes() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def scan_and_group_processes(check_orphaned: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         [极限性能优化版] 扫描系统所有活动进程，并生成：
         - 物理级 PID 缓存自愈，仅抓取新进程的静态属性，消除重复 Windows API 调用
@@ -129,9 +129,15 @@ class PerformanceEngine:
                 # 3.2 优先命中静态缓存
                 if pid in PerformanceEngine._STATIC_INFO_CACHE:
                     name, exe_path, p_obj = PerformanceEngine._STATIC_INFO_CACHE[pid]
+                    # 检查进程是否仍然存活。若已退出则清除缓存并跳过，防止句柄残留导致进程无法彻底回收(Zombie)
+                    if not p_obj.is_running():
+                        PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
+                        continue
                 else:
                     # 缓存未命中：仅在此处初始化 Process 实体并一次性提取静态属性
                     p_obj = psutil.Process(pid)
+                    if not p_obj.is_running():
+                        continue
                     name = p_obj.name() or "Unknown"
                     try:
                         exe_path = p_obj.exe() or "N/A"
@@ -142,6 +148,9 @@ class PerformanceEngine:
 
                 # 3.3 提取动态属性：rss 相比 uss 非常轻量，几乎不消耗 I/O 开销
                 try:
+                    if not p_obj.is_running():
+                        PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
+                        continue
                     mem_info = p_obj.memory_info()
                     rss_mb = mem_info.rss / (1024 ** 2)
                     status = p_obj.status() or "unknown"
@@ -149,8 +158,9 @@ class PerformanceEngine:
                         threads = p_obj.num_threads() or 1
                     except Exception:
                         threads = 1
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     # 动态属性提取失败也可能是进程死亡或被保护
+                    PerformanceEngine._STATIC_INFO_CACHE.pop(pid, None)
                     continue
 
                 # 3.4 亚毫秒级复用 CPU 提取
@@ -158,6 +168,72 @@ class PerformanceEngine:
                     cpu_pct = p_obj.cpu_percent(interval=None) or 0.0
                 except Exception:
                     cpu_pct = 0.0
+
+                is_orphaned = False
+                cmdline = ""
+                
+                # 仅在启用孤立检测时，执行高成本的父进程与可见窗口判断
+                if check_orphaned:
+                    try:
+                        cmdline = " ".join(p_obj.cmdline())
+                    except Exception:
+                        cmdline = ""
+
+                    # 1. 判定父进程是否死亡/失效
+                    parent_dead = False
+                    try:
+                        parent = p_obj.parent()
+                        if parent is None:
+                            parent_dead = True
+                        else:
+                            try:
+                                # 尝试获取父进程属性以确保其活在系统中，并比对创建时间防PID复用
+                                _ = parent.name()
+                                if parent.create_time() > p_obj.create_time():
+                                    parent_dead = True
+                            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                                parent_dead = True
+                    except psutil.NoSuchProcess:
+                        parent_dead = True
+                    except psutil.AccessDenied:
+                        # 权限拒绝说明父进程是高权限进程（如系统服务），一般仍在运行
+                        parent_dead = False
+                    except Exception:
+                        parent_dead = False
+
+                    # 2. 只有当父进程明确死亡时，再检查是否符合孤立进程的特征
+                    if parent_dead:
+                        name_lower = name.lower()
+                        suspect_names = {"conhost.exe", "python.exe", "pythonw.exe", "cmd.exe", "powershell.exe", "git.exe"}
+                        is_suspect = (name_lower in suspect_names)
+                        
+                        # 检查是否与当前主程序存在物理/工作目录/命令行关联
+                        app_dir = os.path.dirname(os.path.abspath(__file__)).lower()
+                        is_associated = False
+                        try:
+                            exe = p_obj.exe().lower()
+                            if app_dir in exe:
+                                is_associated = True
+                        except Exception:
+                            pass
+                        
+                        if not is_associated:
+                            try:
+                                cwd = p_obj.cwd().lower()
+                                if app_dir in cwd:
+                                    is_associated = True
+                            except Exception:
+                                pass
+
+                        if not is_associated and cmdline:
+                            cmd_lower = cmdline.lower()
+                            if app_dir in cmd_lower or "instock_monitortk" in cmd_lower:
+                                is_associated = True
+                        
+                        # 孤立判定：必须是嫌疑类型（conhost/python等）且明确与当前主程序/工作区存在关联的进程
+                        # 且在 Windows 下没有任何可见的 GUI 窗口（若有可见窗口，说明是正常运行的交互主程序，非孤立残留）
+                        if is_suspect and is_associated and not PerformanceEngine.has_visible_window(pid):
+                            is_orphaned = True
 
                 # 记录明细数据
                 raw_list.append({
@@ -167,7 +243,9 @@ class PerformanceEngine:
                     "cpu_pct": cpu_pct,
                     "threads": threads,
                     "status": status,
-                    "path": exe_path
+                    "path": exe_path,
+                    "is_orphaned": is_orphaned,
+                    "cmdline": cmdline
                 })
 
                 # 记录分组汇总数据
@@ -178,13 +256,16 @@ class PerformanceEngine:
                         "total_rss_mb": 0.0,
                         "max_cpu": 0.0,
                         "total_threads": 0,
-                        "pids": []
+                        "pids": [],
+                        "has_orphaned": False
                     }
                 grouped_dict[name]["count"] += 1
                 grouped_dict[name]["total_rss_mb"] += rss_mb
                 grouped_dict[name]["max_cpu"] = max(grouped_dict[name]["max_cpu"], cpu_pct)
                 grouped_dict[name]["total_threads"] += threads
                 grouped_dict[name]["pids"].append(pid)
+                if is_orphaned:
+                    grouped_dict[name]["has_orphaned"] = True
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 # 凡是初始化 or 读取静态属性遭遇 AccessDenied / 找不到的进程，均物理标记为屏蔽，未来彻底不碰
@@ -195,11 +276,142 @@ class PerformanceEngine:
         # 明细排序 (按内存降序)
         raw_list.sort(key=lambda x: x["rss_mb"], reverse=True)
 
-        # 分组排序 (按总内存降序)
+        # 分组排序 (优先把含有孤立残留进程的分组排在最前面，其次按总内存降序)
         grouped_list = list(grouped_dict.values())
-        grouped_list.sort(key=lambda x: x["total_rss_mb"], reverse=True)
+        grouped_list.sort(key=lambda x: (x.get("has_orphaned", False), x["total_rss_mb"]), reverse=True)
 
         return grouped_list, raw_list
+
+    @staticmethod
+    def check_process_association(pid: int, p_obj: psutil.Process = None, cmdline: str = "") -> Tuple[bool, str]:
+        """
+        检查指定进程是否与主程序存在关联，返回 (是否关联, 关联描述)
+        """
+        try:
+            if not p_obj:
+                p_obj = psutil.Process(pid)
+            
+            # 1. 查找当前环境中所有主程序 PID 候选
+            main_pids = []
+            for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    name_p = p.info['name'] or ""
+                    cmd_p = p.info['cmdline'] or []
+                    cmd_str = " ".join(cmd_p).lower()
+                    if "instock_monitortk" in name_p.lower() or "instock_monitortk" in cmd_str:
+                        main_pids.append(p.pid)
+                except Exception:
+                    continue
+            
+            # 当前运行进程及其父进程
+            try:
+                curr_pid = os.getpid()
+                main_pids.append(curr_pid)
+                curr_proc = psutil.Process(curr_pid)
+                parent_proc = curr_proc.parent()
+                if parent_proc:
+                    main_pids.append(parent_proc.pid)
+            except Exception:
+                pass
+            main_pids = list(set(main_pids))
+
+            # 2. 如果 PID 本身就在主程序候选列表中
+            if p_obj.pid in main_pids:
+                return True, f"主程序或其直接父/子进程 (PID: {p_obj.pid})"
+
+            # 3. 检查是否为这些主程序进程的子孙进程
+            try:
+                curr_parent = p_obj.parent()
+                while curr_parent is not None:
+                    if curr_parent.pid in main_pids:
+                        return True, f"主程序派生的子孙进程 (父 PID: {curr_parent.pid})"
+                    curr_parent = curr_parent.parent()
+            except Exception:
+                pass
+
+            # 4. 检查物理目录关联
+            app_dir = os.path.dirname(os.path.abspath(__file__)).lower()
+            try:
+                exe = p_obj.exe().lower()
+                if app_dir in exe:
+                    return True, "运行程序位于主程序物理工作空间下"
+            except Exception:
+                pass
+
+            # 5. 检查命令行关键字关联
+            if not cmdline:
+                try:
+                    cmdline = " ".join(p_obj.cmdline())
+                except Exception:
+                    cmdline = ""
+            if cmdline:
+                cmd_lower = cmdline.lower()
+                if app_dir in cmd_lower or "instock_monitortk" in cmd_lower:
+                    return True, "命令行关联主程序工作空间"
+
+        except Exception as e:
+            return False, f"诊断失败: {e}"
+
+        return False, "无明显关联"
+
+    @staticmethod
+    def has_visible_window(pid: int) -> bool:
+        """检查指定 PID 是否在 Windows 中拥有可见的 GUI 窗口"""
+        if platform.system() != "Windows":
+            return False
+        import ctypes
+        user32 = ctypes.windll.user32
+        has_win = [False]
+        
+        def enum_windows_callback(hwnd, extra):
+            if user32.IsWindowVisible(hwnd):
+                lpdw_process_id = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lpdw_process_id))
+                if lpdw_process_id.value == pid:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        has_win[0] = True
+                        return False  # 停止枚举
+            return True
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        callback = EnumWindowsProc(enum_windows_callback)
+        user32.EnumWindows(callback, 0)
+        return has_win[0]
+
+    @staticmethod
+    def show_window_by_pid(pid: int) -> bool:
+        """尝试激活并显示指定 PID 的可见主窗口"""
+        if platform.system() != "Windows":
+            return False
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd_list = []
+        
+        def enum_windows_callback(hwnd, extra):
+            if user32.IsWindowVisible(hwnd):
+                lpdw_process_id = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(lpdw_process_id))
+                if lpdw_process_id.value == pid:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    hwnd_list.append((hwnd, length))
+            return True
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        callback = EnumWindowsProc(enum_windows_callback)
+        user32.EnumWindows(callback, 0)
+        
+        if not hwnd_list:
+            return False
+            
+        # 优先选择有标题的窗口
+        hwnd_list.sort(key=lambda x: x[1], reverse=True)
+        best_hwnd = hwnd_list[0][0]
+        
+        # 恢复并置顶
+        user32.ShowWindow(best_hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(best_hwnd)
+        return True
 
     @staticmethod
     def run_system_diagnostics(grouped_list: List[Dict[str, Any]], raw_list: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -334,6 +546,126 @@ class PerformanceEngine:
                 "level": "WARNING",
                 "title": "微信小程序/后台占用内存过高",
                 "desc": f"微信相关进程当前累计占用内存达 {weixin_total_rss/1024:.2f} GB！强烈建议执行上方的一键优化引擎，彻底清理 WeChatAppEx 小程序，以释放这 100+ 线程及内存空间。"
+            })
+
+        # 5. 孤立/残留进程分析 (支持所有孤立进程及主进程关联检测)
+        all_orphaned_procs = []
+        high_cpu_orphaned_procs = []
+        associated_orphaned_procs = []
+
+        # 获取当前主程序 PID 候选
+        main_pids = []
+        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                name_p = p.info['name'] or ""
+                cmd_p = p.info['cmdline'] or []
+                cmd_str = " ".join(cmd_p).lower()
+                if "instock_monitortk" in name_p.lower() or "instock_monitortk" in cmd_str:
+                    main_pids.append(p.pid)
+            except Exception:
+                continue
+        try:
+            curr_pid = os.getpid()
+            main_pids.append(curr_pid)
+            curr_proc = psutil.Process(curr_pid)
+            parent_proc = curr_proc.parent()
+            if parent_proc:
+                main_pids.append(parent_proc.pid)
+        except Exception:
+            pass
+        main_pids = list(set(main_pids))
+
+        app_dir = os.path.dirname(os.path.abspath(__file__)).lower()
+
+        for r in raw_list:
+            if r.get("is_orphaned", False):
+                pid = r["pid"]
+                cpu_pct = r.get("cpu_pct", 0.0)
+                name = r["name"]
+
+                # 二次验证父进程存活/有效性
+                parent_exists = True
+                try:
+                    p = psutil.Process(pid)
+                    parent = p.parent()
+                    if parent is None:
+                        parent_exists = False
+                    elif parent.create_time() > p.create_time():
+                        parent_exists = False
+                except Exception:
+                    parent_exists = False
+
+                if not parent_exists:
+                    # 检查是否关联主程序
+                    is_associated = False
+                    try:
+                        p = psutil.Process(pid)
+                        curr_parent = p.parent()
+                        while curr_parent is not None:
+                            if curr_parent.pid in main_pids:
+                                is_associated = True
+                                break
+                            curr_parent = curr_parent.parent()
+                    except Exception:
+                        pass
+
+                    if not is_associated:
+                        try:
+                            exe = p.exe().lower()
+                            if app_dir in exe:
+                                is_associated = True
+                        except Exception:
+                            pass
+
+                    if not is_associated:
+                        try:
+                            cwd = p.cwd().lower()
+                            if app_dir in cwd:
+                                is_associated = True
+                        except Exception:
+                            pass
+
+                    if not is_associated:
+                        cmdline_str = r.get("cmdline", "").lower()
+                        if app_dir in cmdline_str or "instock_monitortk" in cmdline_str:
+                            is_associated = True
+
+                    r["is_associated"] = is_associated
+                    all_orphaned_procs.append(r)
+                    if cpu_pct > 0.5:
+                        high_cpu_orphaned_procs.append(r)
+                    if is_associated:
+                        associated_orphaned_procs.append(r)
+
+        if all_orphaned_procs:
+            count = len(all_orphaned_procs)
+            total_cpu = sum(p["cpu_pct"] for p in all_orphaned_procs)
+
+            high_cpu_pids = [f"{p['name']}(PID:{p['pid']}, CPU:{p['cpu_pct']:.1f}%)" for p in high_cpu_orphaned_procs]
+            assoc_pids = [f"{p['name']}(PID:{p['pid']})" for p in associated_orphaned_procs]
+            all_pids = [f"{p['name']}(PID:{p['pid']})" for p in all_orphaned_procs]
+
+            desc_lines = [
+                f"检测到系统内存在 {count} 个残留的孤立（Orphaned）无父进程或父进程失效的疑难进程。",
+                f"• 所有孤立进程: {', '.join(all_pids)}"
+            ]
+            if assoc_pids:
+                desc_lines.append(f"• 🔗 关联当前主程序的孤立进程: {', '.join(assoc_pids)}")
+            if high_cpu_orphaned_procs:
+                desc_lines.append(f"• 🔥 高 CPU 占用孤立进程: {', '.join(high_cpu_pids)} (累计占用 CPU: {total_cpu:.1f}%)")
+
+            desc_lines.append("此类孤立进程可能是之前的主程序或相关子模块异常退出/重启后残留的句柄死循环或后台任务，持续消耗 CPU 算力。建议利用下方一键智能优化引擎清理，或双击行在详情弹窗中结束进程。")
+            desc_str = "\n".join(desc_lines)
+
+            # 如果有高 CPU 占用或关联的孤立进程较多，提升告警级别
+            level = "WARNING"
+            if total_cpu > 5.0 or len(high_cpu_orphaned_procs) > 0 or len(associated_orphaned_procs) >= 2:
+                level = "DANGER"
+
+            diagnostics["warnings"].append({
+                "level": level,
+                "title": f"系统性能警告：检测到 {count} 个残留的孤立进程",
+                "desc": desc_str
             })
 
         return diagnostics
@@ -1163,7 +1495,7 @@ class ProcessItemDetailDialog(tk.Toplevel):
         self.kill_callback = kill_callback
         
         self.title("🔬 进程详细属性")
-        self.geometry("680x420")
+        self.geometry("680x485")
         self.configure(bg=COLOR_BG)
         self.resizable(True, True)
         self.transient(parent)
@@ -1189,9 +1521,34 @@ class ProcessItemDetailDialog(tk.Toplevel):
         lbl_title = ttk.Label(main_card, text="🔬 进程映像详细属性与控制", font=self.font_title, foreground=COLOR_HIGHLIGHT, background=COLOR_CARD)
         lbl_title.pack(anchor="w", pady=(0, 15))
 
+        parent_info_str = "无"
+        association_str = "无明显关联"
+        pid = proc_info.get("pid")
+        if pid:
+            try:
+                p_obj = psutil.Process(int(pid))
+                p_parent = p_obj.parent()
+                if p_parent:
+                    # 检查父进程被复用问题 (PID 复用)
+                    if p_parent.create_time() > p_obj.create_time():
+                        parent_info_str = f"无 (原父进程已死，PID {p_parent.pid} 已被新进程复用，属孤立)"
+                    else:
+                        parent_info_str = f"PID: {p_parent.pid} ({p_parent.name()})"
+                else:
+                    parent_info_str = "无 (孤立进程 / Orphaned)"
+                
+                # 检查主进程关联
+                has_assoc, assoc_desc = PerformanceEngine.check_process_association(p_obj.pid, p_obj, proc_info.get("cmdline", ""))
+                association_str = assoc_desc
+            except Exception:
+                parent_info_str = "无法获取 (可能无权限或已退出)"
+                association_str = "检查失败"
+
         fields = [
             ("进程 PID:", str(proc_info.get("pid", "")), "pid"),
             ("进程名称:", proc_info.get("name", ""), "name"),
+            ("父进程信息:", parent_info_str, "parent"),
+            ("主程序关联:", association_str, "association"),
             ("内存占用:", f"{proc_info.get('rss_mb', 0.0):.2f} MB", "rss"),
             ("CPU 使用率:", f"{proc_info.get('cpu_pct', 0.0):.1f}%", "cpu"),
             ("活跃线程数:", str(proc_info.get("threads", 1)), "threads"),
@@ -1218,6 +1575,13 @@ class ProcessItemDetailDialog(tk.Toplevel):
                                  activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
                                  bd=0, cursor="hand2", padx=8)
             btn_copy.pack(side="right", padx=(5, 0))
+            
+            if key == "pid":
+                btn_act = tk.Button(row, text=" 🔍 激活窗口 ", command=lambda v=val_text: self.activate_window(v),
+                                    bg=COLOR_HIGHLIGHT, fg=COLOR_BG, font=self.font_small,
+                                    activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
+                                    bd=0, cursor="hand2", padx=8)
+                btn_act.pack(side="right", padx=(5, 0))
 
         btn_frame = tk.Frame(main_card, bg=COLOR_CARD)
         btn_frame.pack(fill="x", side="bottom", pady=(10, 0))
@@ -1234,13 +1598,31 @@ class ProcessItemDetailDialog(tk.Toplevel):
                                bd=0, cursor="hand2", padx=15, pady=5)
         btn_cancel.pack(side="right")
 
+    def set_status_text(self, text, color):
+        if hasattr(self.parent, 'set_status_text'):
+            self.parent.set_status_text(text, color)
+        elif hasattr(self.parent, 'parent') and hasattr(self.parent.parent, 'set_status_text'):
+            self.parent.parent.set_status_text(text, color)
+
     def copy_to_clipboard(self, text):
         try:
             import pyperclip
             pyperclip.copy(text)
-            self.parent.set_status_text("✅ 已复制到剪贴板", COLOR_ACCENT)
+            self.set_status_text("✅ 已复制到剪贴板", COLOR_ACCENT)
         except Exception as e:
             messagebox.showerror("❌ 复制失败", str(e))
+
+    def activate_window(self, pid_str):
+        try:
+            pid = int(pid_str)
+            success = PerformanceEngine.show_window_by_pid(pid)
+            if success:
+                self.set_status_text(f"🎯 已成功激活并显示 PID {pid} 的窗口", COLOR_ACCENT)
+            else:
+                self.set_status_text(f"⚠️ PID {pid} 无可见窗口（属后台/孤立进程）", COLOR_WARNING)
+                messagebox.showwarning("⚠️ 激活失败", f"无法找到 PID {pid} 的可见窗口。\n该进程大概率为后台无界面进程或孤立残留。")
+        except Exception as e:
+            self.set_status_text(f"❌ 窗口激活异常: {e}", COLOR_DANGER)
 
     def kill_process(self):
         pid = self.proc_info.get("pid")
@@ -1249,12 +1631,12 @@ class ProcessItemDetailDialog(tk.Toplevel):
         if messagebox.askyesno("⚠️ 警告", f"您确定要强行终止 PID {pid} ({self.proc_info.get('name')}) 吗？\n这可能会导致未保存的数据丢失！"):
             success, msg = PerformanceEngine.kill_process_by_pid(pid)
             if success:
-                self.parent.set_status_text(f"✅ {msg}", COLOR_ACCENT)
+                self.set_status_text(f"✅ {msg}", COLOR_ACCENT)
                 messagebox.showinfo("⚡ 结束成功", msg)
                 self.kill_callback()
                 self.destroy()
             else:
-                self.parent.set_status_text(f"❌ {msg}", COLOR_DANGER)
+                self.set_status_text(f"❌ {msg}", COLOR_DANGER)
                 messagebox.showerror("❌ 结束失败", msg)
 
 
@@ -1308,6 +1690,8 @@ class ProcessGroupDetailDialog(tk.Toplevel):
         ]
 
         for label_text, val_text, key in fields:
+            if key == "pids":
+                continue
             row = tk.Frame(main_card, bg=COLOR_CARD)
             row.pack(fill="x", pady=4)
             
@@ -1327,6 +1711,49 @@ class ProcessGroupDetailDialog(tk.Toplevel):
                                  bd=0, cursor="hand2", padx=8)
             btn_copy.pack(side="right", padx=(5, 0))
 
+        # 包含 PID 集合特别呈现为支持双击激活的 Listbox
+        row_pids = tk.Frame(main_card, bg=COLOR_CARD)
+        row_pids.pack(fill="both", expand=True, pady=4)
+        
+        lbl_pids = ttk.Label(row_pids, text="包含 PID 集合:", font=self.font_body, background=COLOR_CARD, width=14, anchor="w")
+        lbl_pids.pack(side="left", anchor="n", pady=2)
+        
+        pids_frame = tk.Frame(row_pids, bg=COLOR_CARD)
+        pids_frame.pack(side="left", fill="both", expand=True)
+        
+        pids_listbox = tk.Listbox(pids_frame, bg=COLOR_HEADER, fg=COLOR_TEXT_MAIN,
+                                  selectbackground=COLOR_HIGHLIGHT, selectforeground=COLOR_BG,
+                                  font=self.font_body, bd=1, relief="solid", height=3, highlightthickness=0)
+        pids_listbox.pack(side="left", fill="both", expand=True)
+        
+        for p in pids_list:
+            pids_listbox.insert("end", str(p))
+            
+        scrollbar = ttk.Scrollbar(pids_frame, orient="vertical", command=pids_listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        pids_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        def on_pid_double_click(event):
+            try:
+                selected_idx = pids_listbox.curselection()
+                if not selected_idx:
+                    return
+                selected_pid = int(pids_listbox.get(selected_idx[0]))
+                
+                success = PerformanceEngine.show_window_by_pid(selected_pid)
+                if success:
+                    self.set_status_text(f"🎯 已成功激活并显示 PID {selected_pid} 的窗口", COLOR_ACCENT)
+                else:
+                    self.set_status_text(f"⚠️ PID {selected_pid} 无可见窗口（属后台/孤立进程）", COLOR_WARNING)
+                    messagebox.showwarning("⚠️ 激活失败", f"无法找到 PID {selected_pid} 的可见窗口。\n该进程大概率为后台无界面进程或孤立残留。")
+            except Exception as e:
+                self.set_status_text(f"❌ 窗口激活异常: {e}", COLOR_DANGER)
+                
+        pids_listbox.bind("<Double-1>", on_pid_double_click)
+        
+        lbl_tip_pid = ttk.Label(pids_frame, text="💡 提示: 双击 PID 列表项可尝试将其主窗口激活并显示到最前", font=self.font_small, foreground=COLOR_TEXT_MUTED, background=COLOR_CARD)
+        lbl_tip_pid.pack(anchor="w", pady=(2, 0))
+
         btn_frame = tk.Frame(main_card, bg=COLOR_CARD)
         btn_frame.pack(fill="x", side="bottom", pady=(10, 0))
 
@@ -1342,11 +1769,17 @@ class ProcessGroupDetailDialog(tk.Toplevel):
                                bd=0, cursor="hand2", padx=15, pady=5)
         btn_cancel.pack(side="right")
 
+    def set_status_text(self, text, color):
+        if hasattr(self.parent, 'set_status_text'):
+            self.parent.set_status_text(text, color)
+        elif hasattr(self.parent, 'parent') and hasattr(self.parent.parent, 'set_status_text'):
+            self.parent.parent.set_status_text(text, color)
+
     def copy_to_clipboard(self, text):
         try:
             import pyperclip
             pyperclip.copy(text)
-            self.parent.set_status_text("✅ 已复制到剪贴板", COLOR_ACCENT)
+            self.set_status_text("✅ 已复制到剪贴板", COLOR_ACCENT)
         except Exception as e:
             messagebox.showerror("❌ 复制失败", str(e))
 
@@ -1355,14 +1788,228 @@ class ProcessGroupDetailDialog(tk.Toplevel):
         if not name:
             return
         if messagebox.askyesno("⚠️ 警告", f"您确定要强行终止进程映像为 [{name}] 的所有进程实例吗？\n这可能会导致未保存的数据丢失！"):
-            self.parent.set_status_text(f"⏳ 正在尝试终止所有 [{name}] 进程...", COLOR_HIGHLIGHT)
+            self.set_status_text(f"⏳ 正在尝试终止所有 [{name}] 进程...", COLOR_HIGHLIGHT)
             self.update()
             success_count, fail_count = PerformanceEngine.kill_processes_by_name(name)
             msg = f"已成功结束 {success_count} 个 [{name}] 进程映像，失败 {fail_count} 个。"
-            self.parent.set_status_text(f"✅ {msg}", COLOR_ACCENT)
+            self.set_status_text(f"✅ {msg}", COLOR_ACCENT)
             messagebox.showinfo("⚡ 结束成功", msg)
             self.kill_callback()
             self.destroy()
+
+
+# ==============================================================================
+# Orphaned Process Selection & Cleanup Dialog
+# ==============================================================================
+class OrphanedProcessCleanupDialog(tk.Toplevel):
+    def __init__(self, parent, orphaned_list: List[Dict[str, Any]], refresh_callback):
+        super().__init__(parent)
+        self.parent = parent
+        self.orphaned_list = orphaned_list
+        self.refresh_callback = refresh_callback
+        
+        self.title("🧹 孤立进程智能清理选择")
+        self.geometry("780x480")
+        self.configure(bg=COLOR_BG)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+        self.focus_force()
+
+        # 支持 Esc 关闭
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self.font_title = parent.font_title
+        self.font_body = parent.font_body
+        self.font_small = parent.font_small
+
+        main_card = tk.Frame(self, bg=COLOR_CARD, padx=15, pady=15)
+        main_card.pack(fill="both", expand=True, padx=15, pady=15)
+
+        # 标题与说明
+        lbl_title = ttk.Label(main_card, text="🧹 检测到多个孤立残留进程", font=self.font_title, foreground=COLOR_HIGHLIGHT, background=COLOR_CARD)
+        lbl_title.pack(anchor="w", pady=(0, 5))
+        
+        lbl_desc = ttk.Label(main_card, text="请勾选需要强制结束的孤立进程（点击行或首列可切换选择状态，双击可查看进程属性）：", font=self.font_small, foreground=COLOR_TEXT_MUTED, background=COLOR_CARD)
+        lbl_desc.pack(anchor="w", pady=(0, 10))
+
+        # 表格容器
+        table_container = ttk.Frame(main_card)
+        table_container.pack(fill="both", expand=True)
+
+        # 创建 Treeview
+        self.tree = ttk.Treeview(
+            table_container,
+            columns=("select", "pid", "name", "rss", "cpu", "path"),
+            show="headings",
+            selectmode="browse"
+        )
+        self.tree.heading("select", text="选择")
+        self.tree.heading("pid", text="🔑 PID")
+        self.tree.heading("name", text="📦 进程名称")
+        self.tree.heading("rss", text="💾 内存占用")
+        self.tree.heading("cpu", text="⚡ CPU %")
+        self.tree.heading("path", text="📂 可执行路径")
+
+        self.tree.column("select", width=50, anchor="center")
+        self.tree.column("pid", width=80, anchor="center")
+        self.tree.column("name", width=150, anchor="w")
+        self.tree.column("rss", width=100, anchor="e")
+        self.tree.column("cpu", width=80, anchor="center")
+        self.tree.column("path", width=300, anchor="w")
+
+        vbar = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
+        vbar.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=vbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        # 插入数据 (默认全选)
+        for p in self.orphaned_list:
+            rss_str = f"{p['rss_mb']:.2f} MB"
+            if p['rss_mb'] >= 1024:
+                rss_str = f"{p['rss_mb']/1024:.2f} GB"
+            self.tree.insert("", "end", values=(
+                "☑",
+                p["pid"],
+                p["name"],
+                rss_str,
+                f"{p['cpu_pct']:.1f}%",
+                p["path"]
+            ))
+
+        # 绑定事件
+        self.tree.bind("<Button-1>", self.on_click_row)
+        self.tree.bind("<space>", self.on_press_space)
+        self.tree.bind("<Double-1>", self.on_double_click_row)
+
+        # 底部控制按钮
+        btn_frame = tk.Frame(main_card, bg=COLOR_CARD)
+        btn_frame.pack(fill="x", side="bottom", pady=(15, 0))
+
+        btn_select_all = tk.Button(btn_frame, text=" ☑ 全选 ", command=self.select_all,
+                                   bg=COLOR_HEADER, fg=COLOR_TEXT_MAIN, font=self.font_small,
+                                   activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
+                                   bd=0, cursor="hand2", padx=10, pady=4)
+        btn_select_all.pack(side="left", padx=(0, 5))
+
+        btn_invert = tk.Button(btn_frame, text=" 🔄 反选 ", command=self.invert_selection,
+                               bg=COLOR_HEADER, fg=COLOR_TEXT_MAIN, font=self.font_small,
+                               activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
+                               bd=0, cursor="hand2", padx=10, pady=4)
+        btn_invert.pack(side="left", padx=(0, 5))
+
+        btn_confirm = tk.Button(btn_frame, text=" 🛑 确认清理选中项 ", command=self.confirm_cleanup,
+                                bg=COLOR_DANGER, fg=COLOR_TEXT_MAIN, font=self.font_title,
+                                activebackground=COLOR_DANGER, activeforeground=COLOR_TEXT_MAIN,
+                                bd=0, cursor="hand2", padx=15, pady=5)
+        btn_confirm.pack(side="right", padx=(10, 0))
+
+        btn_cancel = tk.Button(btn_frame, text="  取消  ", command=self.destroy,
+                               bg=COLOR_HEADER, fg=COLOR_TEXT_MUTED, font=self.font_title,
+                               activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
+                               bd=0, cursor="hand2", padx=15, pady=5)
+        btn_cancel.pack(side="right")
+
+    def on_click_row(self, event):
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        self.toggle_item(item)
+
+    def on_press_space(self, event):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.toggle_item(selected[0])
+
+    def on_double_click_row(self, event):
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        values = self.tree.item(item)["values"]
+        pid = int(values[1])
+        proc_info = None
+        for p in self.orphaned_list:
+            if p["pid"] == pid:
+                proc_info = p
+                break
+        if proc_info:
+            ProcessItemDetailDialog(self, proc_info, lambda: self.remove_item_from_tree(item))
+
+    def remove_item_from_tree(self, item):
+        try:
+            self.tree.delete(item)
+            if not self.tree.get_children():
+                self.destroy()
+                self.refresh_callback()
+        except Exception:
+            pass
+
+    def toggle_item(self, item):
+        values = self.tree.item(item)["values"]
+        if not values:
+            return
+        current_state = values[0]
+        new_state = "☑" if current_state == "☐" else "☐"
+        new_values = (new_state,) + tuple(values[1:])
+        self.tree.item(item, values=new_values)
+
+    def select_all(self):
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            new_values = ("☑",) + tuple(values[1:])
+            self.tree.item(item, values=new_values)
+
+    def invert_selection(self):
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            current_state = values[0]
+            new_state = "☑" if current_state == "☐" else "☐"
+            new_values = (new_state,) + tuple(values[1:])
+            self.tree.item(item, values=new_values)
+
+    def confirm_cleanup(self):
+        selected_pids = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            if values[0] == "☑":
+                selected_pids.append(int(values[1]))
+                
+        if not selected_pids:
+            messagebox.showwarning("⚠️ 未选择", "未选择任何需要清理的孤立进程！")
+            return
+            
+        confirm = messagebox.askyesno(
+            "⚠️ 确认清理",
+            f"确定要强制结束选中的 {len(selected_pids)} 个孤立残留进程吗？\n"
+            f"这可能会导致进程中的未保存数据丢失！"
+        )
+        if not confirm:
+            return
+
+        success_count = 0
+        fail_count = 0
+        for pid in selected_pids:
+            success, _ = PerformanceEngine.kill_process_by_pid(pid)
+            if success:
+                success_count += 1
+            else:
+                fail_count += 1
+
+        messagebox.showinfo(
+            "⚡ 清理结果",
+            f"清理完成！\n"
+            f"• 成功结束: {success_count} 个进程\n"
+            f"• 失败: {fail_count} 个进程"
+        )
+        
+        self.destroy()
+        self.refresh_callback()
 
 
 # ==============================================================================
@@ -1398,6 +2045,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         self.search_var.trace_add("write", lambda *args: self.apply_filter())
         
         self.auto_refresh_var = tk.BooleanVar(value=True)
+        self.check_orphaned_var = tk.BooleanVar(value=False) # 默认不检查孤立进程，防止性能太慢
         self.last_update_time = time.time()
 
         # 初始化自定义现代暗黑样式
@@ -1436,6 +2084,14 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             pass
             
         self.destroy()
+
+    def on_check_orphaned_toggle(self):
+        """切换是否诊断孤立进程"""
+        try:
+            self.save_column_widths()
+        except Exception:
+            pass
+        self.refresh_data_manually()
 
     def save_column_widths(self):
         """保存表格列宽到统一的 window_config.json 中"""
@@ -1482,6 +2138,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 "autostart": autostart_widths,
                 "tasks": tasks_widths
             }
+            data["check_orphaned_processes"] = self.check_orphaned_var.get()
             
             # 🚀 [原子化写入] 使用临时文件 + os.replace 确保写入完整，防止 Windows 下并发导致的 0 字节损坏
             fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(config_file), text=True)
@@ -1521,6 +2178,9 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             if os.path.exists(config_file):
                 with open(config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                
+                if "check_orphaned_processes" in data:
+                    self.check_orphaned_var.set(data["check_orphaned_processes"])
                 
                 cols_data = data.get("sys_performance_analyzer_columns", {})
                 
@@ -1629,6 +2289,14 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                                      font=self.font_small, bd=0, highlightthickness=0)
         chk_refresh.pack(side="right", padx=10)
 
+        # 诊断孤立进程选项
+        chk_orphaned = tk.Checkbutton(title_bar, text="诊断孤立进程 (慢)", variable=self.check_orphaned_var,
+                                      bg=COLOR_BG, fg=COLOR_TEXT_MAIN, selectcolor=COLOR_CARD,
+                                      activebackground=COLOR_BG, activeforeground=COLOR_HIGHLIGHT,
+                                      font=self.font_small, bd=0, highlightthickness=0,
+                                      command=self.on_check_orphaned_toggle)
+        chk_orphaned.pack(side="right", padx=10)
+
         btn_manual = tk.Button(title_bar, text=" 🔄 立即刷新 ", command=self.refresh_data_manually,
                                bg=COLOR_HIGHLIGHT, fg=COLOR_BG, font=self.font_small,
                                activebackground=COLOR_HIGHLIGHT, activeforeground=COLOR_BG,
@@ -1690,6 +2358,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         btn_configs = [
             ("💬 清理微信小程序", "微信小程序渲染引擎 (WeChatAppEx) 关闭后常驻后台占用极高，点击彻底杀掉释放约 1-1.5GB 内存", self.optimize_wechat),
             ("🐚 结束残留终端", "清理多次编译或未完全退出的闲置 powershell.exe 后台进程", self.optimize_powershell),
+            ("🐚 清理孤立进程", "一键清理所有无父进程、与主程序关联或高 CPU 占用的孤立残留进程", self.optimize_orphaned_processes),
             ("📐 强退残留量化进程", "一键杀掉主程序或多进程卡死残存的 instock_MonitorTK 实例", self.optimize_monitor),
             ("📝 一键生成诊断报告", "在本地生成 Markdown 高阶系统体检报告并直接用记事本打开", self.generate_md_report)
         ]
@@ -2593,6 +3262,8 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         values = self.tree_raw.item(item)["values"]
         pid = values[0]
         name = values[1]
+        if name.startswith("⚠️ [孤立] "):
+            name = name[len("⚠️ [孤立] "):]
         rss_str = values[2]
         cpu_str = values[3]
         threads = values[4]
@@ -2632,6 +3303,8 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             
         values = self.tree_grouped.item(item)["values"]
         name = values[0]
+        if name.startswith("⚠️ [孤立残留] "):
+            name = name[len("⚠️ [孤立残留] "):]
         count = values[1]
         rss_str = values[2]
         cpu_str = values[3]
@@ -2681,6 +3354,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         container.pack(fill="both", expand=True)
 
         tree = ttk.Treeview(container, columns=columns, show="headings", selectmode="browse")
+        tree.tag_configure("orphaned", foreground=COLOR_DANGER)
         
         # 绑定列头和点击排序属性
         for col, head in zip(columns, headings):
@@ -2764,6 +3438,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
 
     def execute_refresh_cycle(self, is_manual=False):
         """核心数据异步加载闭环，确保主线程0毫秒阻塞"""
+        check_orphaned = self.check_orphaned_var.get()
         def async_worker():
             try:
                 # 1. 抓取系统硬件基础状况
@@ -2771,7 +3446,7 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
                 cpu_pct = PerformanceEngine.get_system_cpu_percent()
 
                 # 2. 扫描并归类排序进程 (在后台线程中进行 heavy calculations)
-                grouped, raw = PerformanceEngine.scan_and_group_processes()
+                grouped, raw = PerformanceEngine.scan_and_group_processes(check_orphaned=check_orphaned)
                 self.grouped_data = grouped
                 self.raw_data = raw
 
@@ -2912,17 +3587,18 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             if len(g['pids']) > 12:
                 pids_str += f" ... 等共 {len(g['pids'])} 个"
 
+            display_name = f"⚠️ [孤立残留] {g['name']}" if g.get('has_orphaned', False) else g['name']
             item_id = self.tree_grouped.insert("", "end", values=(
-                g['name'],
+                display_name,
                 g['count'],
                 rss_str,
                 f"{g['max_cpu']:.1f}%",
                 g.get('total_threads', 0),
                 pids_str
-            ))
+            ), tags=("orphaned",) if g.get('has_orphaned', False) else ())
 
             # 还原选中项
-            if g['name'] == selected_name:
+            if g['name'] == selected_name or display_name == selected_name:
                 self.tree_grouped.selection_set(item_id)
 
     def apply_filter(self):
@@ -2939,8 +3615,12 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         for item in self.tree_raw.get_children():
             self.tree_raw.delete(item)
 
+        # 对明细列表也按照孤立优先，其次内存降序来临时排序呈现
+        sorted_raw = list(self.raw_data)
+        sorted_raw.sort(key=lambda x: (x.get("is_orphaned", False), x["rss_mb"]), reverse=True)
+
         # 迭代数据源进行模糊比对
-        for r in self.raw_data:
+        for r in sorted_raw:
             if query:
                 pid_match = query in str(r['pid'])
                 name_match = query in r['name'].lower()
@@ -2952,15 +3632,16 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             if r['rss_mb'] >= 1024:
                 rss_str = f"{r['rss_mb']/1024:.2f} GB"
 
+            display_name = f"⚠️ [孤立] {r['name']}" if r.get('is_orphaned', False) else r['name']
             item_id = self.tree_raw.insert("", "end", values=(
                 r['pid'],
-                r['name'],
+                display_name,
                 rss_str,
                 f"{r['cpu_pct']:.1f}%",
                 r.get('threads', 1),
                 r['status'],
                 r['path']
-            ))
+            ), tags=("orphaned",) if r.get('is_orphaned', False) else ())
 
             # 还原选中
             if r['pid'] == selected_pid:
@@ -2982,11 +3663,15 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
         if tree == self.tree_grouped:
             values = tree.item(item)["values"]
             name = values[0]
+            if name.startswith("⚠️ [孤立残留] "):
+                name = name[len("⚠️ [孤立残留] "):]
             menu.add_command(label=f"🔪 结束全部该映像进程 ({name})", command=lambda: self.kill_grouped_processes_action(name))
         else:
             values = tree.item(item)["values"]
             pid = int(values[0])
             name = values[1]
+            if name.startswith("⚠️ [孤立] "):
+                name = name[len("⚠️ [孤立] "):]
             path = values[6]
             
             menu.add_command(label=f"🔬 查看 PID {pid} 诊断详情", command=lambda: self.view_process_detail_action(pid, name, path))
@@ -3149,6 +3834,29 @@ class SystemPerformanceAnalyzerGUI(tk.Tk):
             self.set_status_text("💡 未发现常驻后台的可终止 powershell.exe 进程。", COLOR_TEXT_MUTED)
             messagebox.showinfo("⚡ 扫描完成", "后台没有发现残留的 PowerShell 后台进程。")
         self.execute_refresh_cycle()
+
+    def optimize_orphaned_processes(self):
+        """一键清理所有已判定的孤立残留进程 (支持选择清理)"""
+        self.set_status_text("⏳ 正在扫描系统中的孤立残留进程...", COLOR_HIGHLIGHT)
+        self.update()
+        
+        try:
+            # 强制运行带 check_orphaned=True 的扫描，以获取最新的孤立进程列表
+            grouped, raw = PerformanceEngine.scan_and_group_processes(check_orphaned=True)
+        except Exception as e:
+            self.set_status_text(f"❌ 扫描孤立进程失败: {e}", COLOR_DANGER)
+            messagebox.showerror("❌ 错误", f"扫描孤立进程时发生错误: {e}")
+            return
+            
+        orphaned_procs = [r for r in raw if r.get("is_orphaned", False)]
+        
+        if not orphaned_procs:
+            self.set_status_text("💡 未检测到残留的孤立进程。", COLOR_TEXT_MUTED)
+            messagebox.showinfo("⚡ 扫描完成", "当前系统未检测到任何残留 of 孤立进程。")
+            return
+            
+        # 无论检测到几个孤立进程，均弹出选择列表窗口供用户手动核对、选择与确认清理
+        OrphanedProcessCleanupDialog(self, orphaned_procs, self.execute_refresh_cycle)
 
     def optimize_monitor(self):
         """一键结束残留的主系统进程实例"""
