@@ -790,7 +790,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         }
         # Automatically add all lastp/h/l/o/v columns up to compute_lastdays to ensure they are synchronized
         limit = int(getattr(cct, 'compute_lastdays', 5))
-        for i in range(1, limit + 1):
+        for i in range(1, limit + 3):
             for suffix in ['p', 'h', 'l', 'o', 'v']:
                 self.mandatory_cols.add(f'last{suffix}{i}d')
         self.update_required_columns()
