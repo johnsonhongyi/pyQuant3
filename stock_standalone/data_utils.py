@@ -120,6 +120,8 @@ def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd',
     if virtual:
         # 为了防止盘后数据 (vol == lastv1d) 在开盘初期由于 ratio_t 极小而导致虚拟成交量暴涨
         # 对 stale 数据不应用 ratio_t 除法
+        if 'last6vol' not in top_all.columns:
+            top_all['last6vol'] = vol_data.rolling(window=6, min_periods=1).mean()
         l6vol = top_all['last6vol'].replace(0, np.nan)
         v_ratio = vol_data / l6vol
         
@@ -271,6 +273,9 @@ def complete_indicators_pipeline(
     if top_all is None or top_all.empty:
         return top_all
 
+    if 'name' not in top_all.columns:
+        top_all['name'] = top_all.index
+
     time_sum = time.time()
     
     # 0. 针对非日线大周期 (w, m, 3d, 45d, 3M) 执行实盘数据对齐与 Ghost Bar 合并
@@ -354,47 +359,6 @@ def complete_indicators_pipeline(
                     # (2) 全新周期：不需要合并历史，OHLC 已经是今日的实时行情
                     pass
                 
-                # (3) 重新计算当前周期的涨跌幅 percent (即 close 相对于前一周期昨收 lastp1d)
-                if 'lastp1d' in top_all.columns:
-                    top_all.loc[valid_mask, 'percent'] = (
-                        top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
-                    ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
-                    top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
-                
-                # (4) 重新计算均线指标 (包含今日实时价格 close，与历史 lastp1d, lastp2d 等)
-                # 计算 MA5
-                ma5_cols = ['close'] + [f'lastp{i}d' for i in range(1, 5)]
-                available_ma5 = [c for c in ma5_cols if c in top_all.columns]
-                if len(available_ma5) > 1:
-                    ma5_sum = sum(top_all[c].fillna(0) for c in available_ma5)
-                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma5)
-                    top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
-                    top_all.loc[valid_mask, 'ma51d'] = top_all.loc[valid_mask, 'ma5d']
-                    
-                # 计算 MA10
-                ma10_cols = ['close'] + [f'lastp{i}d' for i in range(1, 10)]
-                available_ma10 = [c for c in ma10_cols if c in top_all.columns]
-                if len(available_ma10) > 1:
-                    ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
-                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
-                    top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
-                    
-                # # 计算 MA20
-                # ma20_cols = ['close'] + [f'lastp{i}d' for i in range(1, 20)]
-                # available_ma20 = [c for c in ma20_cols if c in top_all.columns]
-                # if len(available_ma20) > 1:
-                #     ma20_sum = sum(top_all[c].fillna(0) for c in available_ma20)
-                #     non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma20)
-                #     top_all.loc[valid_mask, 'ma20d'] = (ma20_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
-                #     top_all.loc[valid_mask, 'ma201d'] = top_all.loc[valid_mask, 'ma20d']
-                    
-                # # 计算 MA60
-                # ma60_cols = ['close'] + [f'lastp{i}d' for i in range(1, 60)]
-                # available_ma60 = [c for c in ma60_cols if c in top_all.columns]
-                # if len(available_ma60) > 1:
-                #     ma60_sum = sum(top_all[c].fillna(0) for c in available_ma60)
-                #     non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma60)
-                #     top_all.loc[valid_mask, 'ma60d'] = (ma60_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
     # 1. 基础指标计算
     with timed_ctx("calc_indicators", warn_ms=1000):
         top_all = calc_indicators(top_all, logger, resample)
@@ -402,6 +366,33 @@ def complete_indicators_pipeline(
     # 2. 补齐历史/实时成交量
     with timed_ctx("sina_with_history", warn_ms=1000):
         top_all = process_merged_sina_with_history(top_all)
+        
+    # 2.5 重新根据最新 close 实时计算当日涨跌幅及 MA5/MA10 均线覆写 (对所有时间周期 resample 生效)
+    import numpy as np
+    valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+    if valid_mask.any():
+        if 'lastp1d' in top_all.columns:
+            top_all.loc[valid_mask, 'percent'] = (
+                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
+            ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
+            top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
+        
+        # 计算 MA5
+        ma5_cols = ['close'] + [f'lastp{i}d' for i in range(1, 5)]
+        available_ma5 = [c for c in ma5_cols if c in top_all.columns]
+        if len(available_ma5) > 1:
+            ma5_sum = sum(top_all[c].fillna(0) for c in available_ma5)
+            non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma5)
+            top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+            top_all.loc[valid_mask, 'ma51d'] = top_all.loc[valid_mask, 'ma5d']
+            
+        # 计算 MA10
+        ma10_cols = ['close'] + [f'lastp{i}d' for i in range(1, 10)]
+        available_ma10 = [c for c in ma10_cols if c in top_all.columns]
+        if len(available_ma10) > 1:
+            ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
+            non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
+            top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
     
     # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
     if 'now' in top_all.columns:
@@ -885,8 +876,11 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     # 确保 vol 列镜像原始成交量。
     # 判定准则：如果 vol 列不存在，或者 volume 列显示出明显的原始成交量特征（通常远大于100）
 
-    if 'vol' not in top_all.columns or (top_all['volume'] > 5000).any():
-        top_all['vol'] = top_all['volume'] 
+    if 'vol' not in top_all.columns:
+        if 'volume' in top_all.columns:
+            top_all['vol'] = top_all['volume']
+    elif 'volume' in top_all.columns and (top_all['volume'] > 5000).any():
+        top_all['vol'] = top_all['volume']
         
     top_all['amount'] = top_all['vol'] * top_all['close']
     # 这里的 volume 将被更新为虚拟量比信号强度
@@ -924,6 +918,27 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
 
     # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
     # top_all['ratio'] = top_all['volume']
+    if 'llastp' not in top_all.columns:
+        if 'lastp1d' in top_all.columns:
+            top_all['llastp'] = top_all['lastp1d']
+        else:
+            top_all['llastp'] = top_all['close']
+            
+    if 'lastbuy' not in top_all.columns:
+        top_all['lastbuy'] = top_all['llastp']
+
+    if 'buy' not in top_all.columns:
+        top_all['buy'] = top_all['close']
+
+    if 'minclose' not in top_all.columns:
+        top_all['minclose'] = top_all['llastp']
+
+    if 'llow' not in top_all.columns:
+        if 'low' in top_all.columns:
+            top_all['llow'] = top_all['low']
+        else:
+            top_all['llow'] = top_all['close']
+
     now_time = cct.get_now_time_int()
     lastbuy_safe = top_all['lastbuy'].mask(top_all['lastbuy'] == 0, top_all['llastp'])
     
@@ -988,6 +1003,10 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
         top_all['strong_rebound_score'] = 0.0
         top_all['strong_structure_score'] = 0.0
         top_all['strong_node_score'] = 0.0
+
+    for col in ['dff', 'percent', 'volume', 'ratio', 'couts']:
+        if col not in top_all.columns:
+            top_all[col] = 0.0
 
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 
@@ -2954,8 +2973,13 @@ def _run_main_pipeline(
                 )
     else:
         with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+            if resample != 'd':
+                core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+            else:
+                top_now_filtered = top_now
             top_all = cct.combine_dataFrame(
-                top_all, top_now, col="couts", compare="dff"
+                top_all, top_now_filtered, col="couts", compare="dff"
             )
 
     with timed_ctx("calc_pipeline", warn_ms=1000):
@@ -3410,7 +3434,12 @@ def fetch_and_process(
                 lastpTDX_DF_Dict[resample] = lastpTDX_DF
             else:
                 with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
-                    top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
+                    if resample != 'd':
+                        core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                        top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+                    else:
+                        top_now_filtered = top_now
+                    top_all = cct.combine_dataFrame(top_all, top_now_filtered, col="couts", compare="dff")
                     df_allDF[resample] = top_all
 
 
@@ -3467,7 +3496,12 @@ def fetch_and_process(
                     lastpTDX_DF_Dict[resample_res] = lastpTDX_DF_res
                 else:
                     with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
-                        top_all_res = cct.combine_dataFrame(top_all_res, top_now, col="couts", compare="dff")
+                        if resample_res != 'd':
+                            core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                            top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+                        else:
+                            top_now_filtered = top_now
+                        top_all_res = cct.combine_dataFrame(top_all_res, top_now_filtered, col="couts", compare="dff")
                         df_allDF[resample_res] = top_all_res
 
                 # Save raw combined snapshot for resampled UI display calculations
