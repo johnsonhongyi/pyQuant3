@@ -1,3 +1,11 @@
+## 2026-07-01 15:10
+- [x] **根治冷启动及非交易时段 `lastbuy` 重置与丢失 Bug (Rooted Out `lastbuy` Overwrites on Cold Start & Off-Hours)**：
+    - [x] **实现 `Sina.all` 启动阶段 `lastbuydf` 从 HDF5 历史数据还原**：在 `Sina.all` 数据加载时（第 444-450 行），当检测到内存中 `lastbuydf` 未被初始化且 HDF5 载入的数据集中包含有效的 `'lastbuy'` 列时，自动将 HDF5 历史数据读取并恢复至内存全局缓存 `cct.GlobalValues().setkey('lastbuydf', h5['lastbuy'])` 中，从而彻底终结了冷启动打开监控主程序时 `lastbuy` 被清零重置的缺陷。
+    - [x] **修复冷启动首帧（`logtime == 0`）无条件重置已还原缓存的漏洞**：在 `format_response_data` （第 1554-1577 行）中重构了 `logtime == 0` 的执行路径。引入 `need_init` 判定，即使是启动的第一帧，若内存已成功从 HDF5 中恢复了 `lastbuydf`，则强制跳过重置，直接调用 `combine_lastbuy` 合并，防止冷启动时历史 `lastbuy` 瞬间被当前收盘价覆写为 0。
+    - [x] **实现非交易时段拦截重置逻辑并强制保留 `lastbuy`**：在 `format_response_data` 中重构了 `lastbuy` 重置条件，显式判定当前是否处于交易时段（`cct.get_work_time()`）。若处于非交易时段（周末、节假日或盘后），系统自动拦截并绕过重置步骤，无条件回退并调用 `combine_lastbuy(df)` 吞并并恢复最新有效缓存，保障用户在非交易时段也能顺利阅读及回溯差值。
+    - [x] **实现 `lastbuy` 被污染脏数据的防全等自愈自测机制 (Auto-Healing for Corrupted lastbuy Data)**：考虑到在修复覆盖重置 Bug 之前，冷启动时 `lastbuy` 被强制用现价覆写并保存回了 HDF5 磁盘文件，造成磁盘历史数据已被全等污染（`lastbuy` 等于 `close`，进而使 `dff` 恒为 `0.0`）。我们在 `combine_lastbuy`（第 1652-1678 行）中增加了防污染智能自愈机制：在合并时，检测若个股 `lastbuy` 与当前价 `close` 的全等率超过 95%，判定为历史 Bug 留下的脏数据，将自动拦截恢复逻辑；跳过已污染的内存缓存，利用更纯净的历史收盘价 `nclose` 或 `llastp` 进行重初始化并回填至 `lastbuy`，彻底恢复 `dff` 差值计算，并使其在下一个心跳保存中自动覆写纠正磁盘文件中的脏数据。
+    - [x] **物理语法编译全绿通过**：对 `sina_data.py` 进行了 `py_compile` 物理编译自检，无任何语法、拼写或缩进问题，系统稳定运行。
+
 ## 2026-07-01 14:35
 - [x] **优化收盘后挂起重开的 `rzrq` 自动初始化机制 (Optimized `rzrq` Auto-Initialization on Resume)**：
     - [x] **实现跨自然日 `rzrq` 自动重新获取**：在 `singleAnalyseUtil.py` 的启动流程中引入 `rzrq_date` 变量保存首次加载的日期，并在 `while 1` 循环的 `try` 块顶层增加自然日变化监测。当次日用户在终端挂起提示处按任意键继续时，系统一旦检测到 `today_str != rzrq_date`，将自动重新调用 `ffu.get_dfcfw_rzrq_SHSZ()` 刷新当天的融资融券指标并对齐日期戳，避免了昨日冗余数据导致的数据分析失准。
