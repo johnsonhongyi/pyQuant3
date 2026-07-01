@@ -585,10 +585,300 @@ def format_floats_slow(df):
     df_copy[float_cols] = df_copy[float_cols].round(2)
     return df_copy
 
-# for col, dtype in top_all.dtypes.items():print(col, dtype)
-# formatted_rows = format_floats(top_all).astype(str)
-# for row in formatted_rows.head(5).itertuples(index=False):
-#     print(", ".join(row))
+
+def calc_current_td_setup_vect(df: pd.DataFrame) -> pd.Series:
+    """
+    Vectorized calculation of the TD Setup count for the current day (index 0).
+    Returns a Series with:
+      positive integers for TD Sell Setup count (1 to 9+)
+      negative integers for TD Buy Setup count (-1 to -9+)
+      0 if no setup is active
+    """
+    n_rows = len(df)
+    up_count = np.zeros(n_rows, dtype=int)
+    down_count = np.zeros(n_rows, dtype=int)
+    
+    up_active = np.ones(n_rows, dtype=bool)
+    down_active = np.ones(n_rows, dtype=bool)
+    
+    # We trace backwards up to 15 bars to get the current consecutive count
+    for j in range(15):
+        c_col = 'close' if j == 0 else f'lastp{j}d'
+        ref_col = f'lastp{j+4}d'
+        
+        if c_col in df.columns and ref_col in df.columns:
+            c_val = df[c_col].fillna(0).values
+            ref_val = df[ref_col].fillna(0).values
+            
+            # Check up (Sell Setup)
+            up_cond = (c_val > ref_val) & (c_val > 0) & (ref_val > 0)
+            up_active = up_active & up_cond
+            up_count[up_active] += 1
+            
+            # Check down (Buy Setup)
+            down_cond = (c_val < ref_val) & (c_val > 0) & (ref_val > 0)
+            down_active = down_active & down_cond
+            down_count[down_active] += 1
+        else:
+            break
+            
+    # Combine up and down counts
+    td_setup = np.zeros(n_rows, dtype=int)
+    td_setup[up_count > 0] = up_count[up_count > 0]
+    td_setup[down_count > 0] = -down_count[down_count > 0]
+    
+    return pd.Series(td_setup, index=df.index)
+
+def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series:
+    """
+    Calculate the Node Strength Score for the "Strong Trend Pullback TD1/TD2 Reversal" pattern.
+    Returns a Series of scores from 0.0 to 100.0.
+    """
+    n_rows = len(df)
+    score = np.zeros(n_rows, dtype=float)
+    
+    # 1. 检查必要的基础列
+    required_cols = ['close', 'open', 'high', 'low', 'td_setup', 'percent']
+    for c in required_cols:
+        if c not in df.columns:
+            return pd.Series(score, index=df.index)
+            
+    # 特别对均线做兼容判断：如果没有 ma5d/ma20d 则无法计算强度，直接返回 0
+    if 'ma5d' not in df.columns or 'ma20d' not in df.columns:
+        return pd.Series(score, index=df.index)
+        
+    close = df['close'].fillna(0).values
+    open_val = df['open'].fillna(0).values
+    high = df['high'].fillna(0).values
+    low = df['low'].fillna(0).values
+    ma5 = df['ma5d'].fillna(0).values
+    ma20 = df['ma20d'].fillna(0).values
+    td_setup = df['td_setup'].fillna(0).values
+    pct = df['percent'].fillna(0).values
+    
+    # 计算均线的前序历史，用 values 规避 pandas 对齐开销
+    # 昨天的 MA20 / MA5
+    ma20_cols_last1 = [f'lastp{i}d' for i in range(1, 21)]
+    available_ma20_last1 = [c for c in ma20_cols_last1 if c in df.columns]
+    if len(available_ma20_last1) >= 10:
+        ma20_last1 = (sum(df[c].fillna(0) for c in available_ma20_last1) / len(available_ma20_last1)).values
+    else:
+        ma20_last1 = ma20
+        
+    ma20_cols_last2 = [f'lastp{i}d' for i in range(2, 22)]
+    available_ma20_last2 = [c for c in ma20_cols_last2 if c in df.columns]
+    if len(available_ma20_last2) >= 10:
+        ma20_last2 = (sum(df[c].fillna(0) for c in available_ma20_last2) / len(available_ma20_last2)).values
+    else:
+        ma20_last2 = ma20_last1
+
+    # 大周期 ma5 的昨值与前值
+    ma5_cols_last1 = [f'lastp{i}d' for i in range(1, 6)]
+    available_ma5_last1 = [c for c in ma5_cols_last1 if c in df.columns]
+    if len(available_ma5_last1) >= 3:
+        ma5_last1 = (sum(df[c].fillna(0) for c in available_ma5_last1) / len(available_ma5_last1)).values
+    else:
+        ma5_last1 = ma5
+        
+    ma5_cols_last2 = [f'lastp{i}d' for i in range(2, 7)]
+    available_ma5_last2 = [c for c in ma5_cols_last2 if c in df.columns]
+    if len(available_ma5_last2) >= 3:
+        ma5_last2 = (sum(df[c].fillna(0) for c in available_ma5_last2) / len(available_ma5_last2)).values
+    else:
+        ma5_last2 = ma5_last1
+
+    # 动态且精确计算指定历史位移 S (S=0为今天，S=1为昨天) 的均线
+    def get_ma_shift(L, S):
+        if S == 0:
+            if L == 5: return ma5
+            if L == 20: return ma20
+            if L == 60: return df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+            
+        cols_m = [f'lastp{i}d' for i in range(S, S + L)]
+        available_m = [c for c in cols_m if c in df.columns]
+        if len(available_m) >= max(3, L // 2):
+            return (sum(df[c].fillna(0) for c in available_m) / len(available_m)).values
+        else:
+            if L == 5: return ma5
+            if L == 20: return ma20
+            return df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+
+    # 生命健康周期维持校验 (当天不能大跌，且股价不能大幅破位)
+    # 使用今日的参考均线
+    ma_ref_today = ma20 if resample == 'd' else ma5
+    keep_alive = (close >= ma_ref_today * 0.965) & (pct > -4.0)
+    if resample == 'd' and 'ma60d' in df.columns:
+        keep_alive = keep_alive & (close > df['ma60d'].fillna(0).values * 0.965)
+
+    # ma5d 的主升结构：ma5d 不能处于大跌趋势中
+    ma5_rising = ma5 >= ma5_last1 * 0.995
+    keep_alive = keep_alive & ma5_rising
+
+    # OBV 约束：白线必须在黄线之上运行
+    if 'obv_val' in df.columns and 'maobv' in df.columns:
+        keep_alive = keep_alive & (df['obv_val'].fillna(0).values >= df['maobv'].fillna(0).values * 0.99)
+
+    final_score = np.zeros(n_rows, dtype=float)
+    
+    # 循环评估 d = 0 (今天) 到 4 (4天前) 的反弹启动特征，并取衰减后的最大值
+    for d in range(5):
+        # 提取第 d 天的输入价格和指标
+        if d == 0:
+            c_d = close
+            o_d = open_val
+            h_d = high
+            l_d = low
+            pct_d = pct
+            
+            ma5_d = ma5
+            ma20_d = ma20
+            ma60_d = df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+            
+            ma5_d_last1 = ma5_last1
+            ma20_d_last1 = ma20_last1
+            
+            # 今天是否为九转触发日
+            td_ok_d = (td_setup == 1) | (td_setup == 2) | (td_setup == -1) | (td_setup == -2) | (td_setup == -8) | (td_setup == -9)
+        else:
+            c_d = df[f'lastp{d}d'].fillna(0).values if f'lastp{d}d' in df.columns else close
+            o_d = df[f'lasto{d}d'].fillna(0).values if f'lasto{d}d' in df.columns else open_val
+            h_d = df[f'lasth{d}d'].fillna(0).values if f'lasth{d}d' in df.columns else high
+            l_d = df[f'lastl{d}d'].fillna(0).values if f'lastl{d}d' in df.columns else low
+            pct_d = df[f'per{d}d'].fillna(0).values if f'per{d}d' in df.columns else pct
+            
+            ma5_d = get_ma_shift(5, d)
+            ma20_d = get_ma_shift(20, d)
+            ma60_d = get_ma_shift(60, d)
+            
+            ma5_d_last1 = get_ma_shift(5, d + 1)
+            ma20_d_last1 = get_ma_shift(20, d + 1)
+            
+            # 计算第 d 天的 td_setup 状态是否匹配 (即今天 td_setup 是 S，则 d 天前为 S - d)
+            td_val_d = td_setup - d
+            td_ok_d = (td_val_d == 1) | (td_val_d == 2) | (td_val_d == -1) | (td_val_d == -2) | (td_val_d == -8) | (td_val_d == -9)
+            
+        # 评估第 d 天的趋势是否符合强势排列 (排除低位补涨无价值股票)
+        if resample == 'd':
+            ma_ref_d = ma20_d
+            ma_ref_d_last1 = ma20_d_last1
+            ma_trend_d = ma60_d
+            
+            ma60_d_last1 = get_ma_shift(60, d + 1)
+            strong_trend_align_d = (ma_ref_d >= ma_trend_d * 0.98) & (ma_trend_d >= ma60_d_last1 * 0.996)
+            trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.997) & (c_d >= ma_ref_d * 0.97) & (ma5_d > ma_ref_d * 0.95) & (c_d > ma_trend_d * 0.97) & strong_trend_align_d
+        else:
+            ma_ref_d = ma5_d
+            ma_ref_d_last1 = ma5_d_last1
+            
+            if resample in ('2d', '3d', '4d', '5d'):
+                trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.995) & (c_d >= ma_ref_d * 0.965)
+            else:
+                trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.997) & (c_d >= ma_ref_d * 0.97)
+                
+            ma_trend_d = ma20_d
+            ma_trend_d_last1 = get_ma_shift(20, d + 1)
+            strong_trend_align_d = (ma_ref_d >= ma_trend_d * 0.98) & (ma_trend_d >= ma_trend_d_last1 * 0.996)
+            
+            trend_ok_d = trend_ok_d & (c_d >= ma_trend_d * 0.98) & strong_trend_align_d
+            
+        # 评估第 d 天的健康回踩 (第 d, d+1, d+2 天的低点接近或低于参考均线，且当天没有大破位)
+        low_d0 = l_d
+        low_d1 = df[f'lastl{d+1}d'].fillna(0).values if f'lastl{d+1}d' in df.columns else l_d
+        low_d2 = df[f'lastl{d+2}d'].fillna(0).values if f'lastl{d+2}d' in df.columns else low_d1
+        
+        pullback_near_ma_d = (low_d0 <= ma_ref_d * 1.035) | (low_d1 <= ma_ref_d_last1 * 1.035) | (low_d2 <= ma_ref_d_last1 * 1.035)
+        not_breakdown_d = (c_d >= ma_ref_d * 0.965)
+        pullback_ok_d = pullback_near_ma_d & not_breakdown_d
+        
+        # 评估第 d 天的阳线和反包启动条件
+        is_yang_d = (c_d > o_d) & (pct_d > 0.5)
+        
+        eligible_d = trend_ok_d & pullback_ok_d & is_yang_d & td_ok_d
+        
+        # 提取第 d 天的 OBV 和量能指标
+        if 'obv_val' in df.columns and 'maobv' in df.columns:
+            if d == 0:
+                obv_val_d = df['obv_val'].fillna(0).values
+                maobv_d = df['maobv'].fillna(0).values
+                bs_d = df['bs'].fillna(1.0).values if 'bs' in df.columns else np.ones(n_rows)
+                vol_ratio_d_val = df['vol_ratio'].fillna(1.0).values if 'vol_ratio' in df.columns else np.ones(n_rows)
+            else:
+                obv_val_d = df[f'obv_val{d}d'].fillna(0).values if f'obv_val{d}d' in df.columns else np.zeros(n_rows)
+                maobv_d = df[f'maobv{d}d'].fillna(0).values if f'maobv{d}d' in df.columns else np.zeros(n_rows)
+                bs_d = df[f'bs{d}d'].fillna(1.0).values if f'bs{d}d' in df.columns else np.ones(n_rows)
+                vol_ratio_d_val = df[f'vol_ratio{d}d'].fillna(1.0).values if f'vol_ratio{d}d' in df.columns else np.ones(n_rows)
+            
+            # Rebound start node must also satisfy OBV above MAOBV
+            obv_ok_d = (obv_val_d >= maobv_d * 0.99)
+            eligible_d = eligible_d & obv_ok_d
+        else:
+            vol_ratio_d_val = np.ones(n_rows)
+            bs_d = np.ones(n_rows)
+
+        if not eligible_d.any():
+            continue
+            
+        score_d = np.zeros(n_rows, dtype=float)
+        score_d[eligible_d] = 50.0
+        
+        # A. 弹性涨幅加分 (最高 20 分)
+        score_d[eligible_d] += np.minimum(20.0, np.maximum(0.0, pct_d[eligible_d] * 2.0))
+        
+        # B. 成交量配合加分 (最高 15 分)
+        vol_d0 = df[f'lastv{d}d'].fillna(0).values if f'lastv{d}d' in df.columns else (df['vol'].fillna(0).values if 'vol' in df.columns else np.ones(n_rows))
+        vol_d1 = df[f'lastv{d+1}d'].fillna(0).values if f'lastv{d+1}d' in df.columns else np.ones(n_rows)
+        vol_d1 = np.where(vol_d1 > 0, vol_d1, 1.0)
+        vol_ratio_d = vol_d0 / vol_d1
+        score_d[eligible_d] += np.minimum(15.0, np.maximum(0.0, (vol_ratio_d[eligible_d] - 1.0) * 7.5))
+        
+        # F. OBV / Sustained Volume (BS) / Volume Doubling Additional Bonuses
+        if 'obv_val' in df.columns and 'maobv' in df.columns:
+            # 1. OBV Acceleration Bonus: OBV >= MAOBV * 1.05 -> +10 points
+            score_d[eligible_d] += np.where(obv_val_d[eligible_d] > maobv_d[eligible_d] * 1.05, 10.0, 0.0)
+        
+        if 'bs' in df.columns:
+            # 2. BS Sustained Volume: bs_d >= 0.7 -> +10 points
+            # 3. BS Shrunken Volume Penalty: bs_d < 0.4 -> -15 points (low-volume trap prevention)
+            score_d[eligible_d] += np.where(bs_d[eligible_d] >= 0.7, 10.0, np.where(bs_d[eligible_d] < 0.4, -15.0, 0.0))
+            
+        # 4. Volume Doubling Day Bonus: vol_ratio_d_val >= 1.9 -> +10 points
+        if 'vol_ratio' in df.columns:
+            score_d[eligible_d] += np.where(vol_ratio_d_val[eligible_d] >= 1.9, 10.0, 0.0)
+
+        # C. 反包范围加分 (最高 10 分)
+        high_d1 = df[f'lasth{d+1}d'].fillna(0).values if f'lasth{d+1}d' in df.columns else c_d
+        close_d1 = df[f'lastp{d+1}d'].fillna(0).values if f'lastp{d+1}d' in df.columns else c_d
+        open_d1 = df[f'lasto{d+1}d'].fillna(0).values if f'lasto{d+1}d' in df.columns else o_d
+        body_high_d1 = np.maximum(close_d1, open_d1)
+        engulf_high_d = c_d > high_d1
+        engulf_body_d = c_d > body_high_d1
+        score_d[eligible_d] += np.where(engulf_high_d[eligible_d], 10.0, np.where(engulf_body_d[eligible_d], 5.0, 0.0))
+        
+        # D. 结构时效加分
+        td_val_eligible = td_val_d[eligible_d] if d > 0 else td_setup[eligible_d]
+        bonus_td = np.zeros_like(td_val_eligible, dtype=float)
+        bonus_td[(td_val_eligible == 1) | (td_val_eligible == -1)] = 15.0
+        bonus_td[(td_val_eligible == 2) | (td_val_eligible == -2)] = 10.0
+        bonus_td[(td_val_eligible == -8) | (td_val_eligible == -9)] = 5.0
+        score_d[eligible_d] += bonus_td
+
+        
+        # E. 趋势评级加分
+        if 'TrendS' in df.columns:
+            try:
+                trends_float = df['TrendS'].astype(float).values
+                score_d[eligible_d] += np.where(trends_float[eligible_d] >= 80, 10.0, 0.0)
+            except Exception:
+                pass
+                
+        # 每日衰减 3 分
+        decayed_score_d = np.maximum(0.0, score_d - (d * 3.0))
+        final_score = np.maximum(final_score, decayed_score_d)
+        
+    final_score[~keep_alive] = 0.0
+    final_score = np.round(final_score, 1)
+    return pd.Series(final_score, index=df.index)
+
 
 def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
     """指标计算"""
@@ -671,6 +961,33 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     
     top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
     top_all['dff'].fillna(0, inplace=True)
+
+    # 计算 TD 序列当前计数
+    try:
+        top_all['td_setup'] = calc_current_td_setup_vect(top_all)
+        top_all['td_sell_setup'] = np.maximum(0, top_all['td_setup'])
+        top_all['td_buy_setup'] = np.maximum(0, -top_all['td_setup'])
+    except Exception as e:
+        logger.warning(f"calc_current_td_setup_vect failed: {e}")
+
+    # 计算 强势结构回踩反包 评分
+    try:
+        top_all['strong_rebound_score'] = calc_strong_rebound_score_vect(top_all, resample)
+        top_all['strong_structure_score'] = top_all['strong_rebound_score']
+        top_all['strong_node_score'] = top_all['strong_rebound_score']
+    except Exception as e:
+        logger.warning(f"calc_strong_rebound_score_vect failed: {e}")
+
+    if 'td_setup' not in top_all.columns:
+        top_all['td_setup'] = 0
+    if 'td_sell_setup' not in top_all.columns:
+        top_all['td_sell_setup'] = 0
+    if 'td_buy_setup' not in top_all.columns:
+        top_all['td_buy_setup'] = 0
+    if 'strong_rebound_score' not in top_all.columns:
+        top_all['strong_rebound_score'] = 0.0
+        top_all['strong_structure_score'] = 0.0
+        top_all['strong_node_score'] = 0.0
 
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 

@@ -1528,8 +1528,13 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
         'ma20d': 'ma20',
         'ma60d': 'ma60',
         'perlastp': 'perc',
-        'perd': 'per'
+        'perd': 'per',
+        'obv_val': 'obv_val',
+        'maobv': 'maobv',
+        'vol_ratio': 'vol_ratio',
+        'bs': 'bs'
     }
+
 
     for code, row in df.iterrows():
 
@@ -1640,8 +1645,13 @@ def generate_df_vect_daily_features_MultiIndex(df, lastdays=5):
         'ma20d': 'ma20',
         'ma60d': 'ma60',
         'perlastp': 'perc',
-        'perd': 'per'
+        'perd': 'per',
+        'obv_val': 'obv_val',
+        'maobv': 'maobv',
+        'vol_ratio': 'vol_ratio',
+        'bs': 'bs'
     }
+
 
     for code, df_stock in df.groupby(level=0):
         feat = {'code': code}  # 添加股票 code
@@ -3108,6 +3118,59 @@ def obv_cross_days_fast_vector(df: pd.DataFrame, ma_period: int = 30, buffer_rat
         cross_days[i] = count
 
     return pd.Series(cross_days, index=df.index, name='obv_cross_days')
+
+
+def compute_obv_and_volume_indicators(df: pd.DataFrame, ma_period: int = 30) -> pd.DataFrame:
+    close = df['close'].to_numpy(dtype=float)
+    vol = df['vol'].to_numpy(dtype=float)
+    n = len(close)
+    
+    # 1. OBV (white line)
+    obv = np.zeros(n, dtype=np.float64)
+    if n > 1:
+        diff = close[1:] - close[:-1]
+        signed_vol = np.zeros(n-1, dtype=np.float64)
+        signed_vol[diff>0] = vol[1:][diff>0]
+        signed_vol[diff<0] = -vol[1:][diff<0]
+        obv[1:] = np.cumsum(signed_vol)
+    
+    # 2. MAOBV (yellow line)
+    maobv = np.zeros(n, dtype=np.float64)
+    if n >= ma_period:
+        cumsum = np.cumsum(obv)
+        maobv[:ma_period-1] = obv[:ma_period-1]
+        maobv[ma_period-1:] = (cumsum[ma_period-1:] - np.concatenate(([0], cumsum[:-ma_period]))) / ma_period
+    else:
+        maobv[:] = obv
+        
+    df['obv_val'] = obv
+    df['maobv'] = maobv
+    
+    # 3. Cross Days (obv)
+    signal = obv > maobv * 0.99
+    cross_days = np.zeros(n, dtype=np.int32)
+    count = 0
+    for i in range(n):
+        if signal[i]:
+            count += 1
+        else:
+            count = 0
+        cross_days[i] = count
+    df['obv'] = cross_days # keeping 'obv' as cross days
+    
+    # 4. 倍量 (vol_ratio)
+    prev_vol = df['vol'].shift(1).replace(0, np.nan)
+    df['vol_ratio'] = (df['vol'] / prev_vol).fillna(1.0)
+    
+    # 5. BS (Volume ratio relative to last volume doubling day's volume)
+    # is_double: VOL/REF(VOL,1) > 2.0
+    is_double = df['vol_ratio'] > 2.0
+    double_vol = df['vol'].where(is_double)
+    last_double_vol = double_vol.ffill()
+    df['bs'] = (df['vol'] / last_double_vol).fillna(1.0)
+    
+    return df
+
 
 
 
@@ -6125,7 +6188,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = ema_tdx_numpy(df['close'], timeperiod=20)
         df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)
-        df['obv'] = obv_cross_days_fast_vector(df)
+        df = compute_obv_and_volume_indicators(df)
 
         # with timed_ctx("ema_tdx_numpy", warn_ms=2):
         #     df['ma60d'] = ema_tdx_numpy(df['close'], timeperiod=60)

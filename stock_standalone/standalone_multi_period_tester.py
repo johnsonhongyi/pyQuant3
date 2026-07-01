@@ -92,6 +92,12 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.after(500, self._poll_favorites_loop)
         except Exception:
             pass
+
+        # 绑定 Alt+/ 快捷键显示帮助文档
+        self.bind("<Alt-slash>", lambda e: self.show_help_documentation())
+        self.bind("<Alt-question>", lambda e: self.show_help_documentation())
+
+
         
     def _load_state(self):
         default_state = {
@@ -402,7 +408,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         active_customs = [c for c, var in self.custom_col_vars.items() if var.get()]
         
         custom_cols = []
-        df = getattr(self, "last_result_df", None)
+        df = getattr(self, "_last_flat_df", None)
         for c in active_customs:
             disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df)
             for p in disp_periods:
@@ -731,6 +737,10 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
     def _show_results(self, df, elapsed):
         self._last_selected_code = None
+        # 同步给 query_manager 完整的宽表数据，以支持在 history 弹窗里进行“测试”或“双击”统计
+        flat_df = self._build_flat_df(df)
+        self._last_flat_df = flat_df
+        
         self._update_tree_columns()
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -745,8 +755,6 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self.btn_clear_history_filter.pack_forget()
             return
             
-        # 同步给 query_manager 完整的宽表数据，以支持在 history 弹窗里进行“测试”或“双击”统计
-        flat_df = self._build_flat_df(df)
         if getattr(self, "query_manager", None) is not None:
             self.query_manager.df_all = flat_df
             
@@ -1128,6 +1136,128 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.withdraw()
         else:
             self.destroy()
+
+    def show_help_documentation(self):
+        """打开/显示系统多周期与信号指标使用说明文档，实时加载本地文件以支持动态互动更新，带搜索及编辑保存能力"""
+        from sys_utils import get_app_root
+        help_file_path = os.path.join(get_app_root(), "config", "multi_period_help.md")
+        
+        try:
+            with open(help_file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"读取帮助文档失败: {e}"
+            
+        # 弹出一个独立的窗口显示文档
+        help_win = tk.Toplevel(self)
+        help_win.title("多周期与信号策略帮助及管理中心 (Alt+/ 或 ESC 关闭)")
+        
+        # 恢复上次保存的窗口位置与尺寸
+        help_geom = self.ui_state.get("help_geometry", "900x700")
+        help_win.geometry(help_geom)
+        
+        # 顶部工具栏
+        help_toolbar = tk.Frame(help_win, bd=1, relief="raised", padx=5, pady=5)
+        help_toolbar.pack(side=tk.TOP, fill=tk.X)
+        
+        # 增加滚动条与文本域（必须在定义内层函数前创建，防止 NameError）
+        scrollbar = tk.Scrollbar(help_win)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 修复：font size 必须为整型 (10)
+        text_area = tk.Text(help_win, wrap=tk.WORD, yscrollcommand=scrollbar.set, font=("Microsoft YaHei", 10))
+        text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        scrollbar.config(command=text_area.yview)
+        
+        tk.Label(help_toolbar, text="搜索内容:", font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=5)
+        
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(help_toolbar, textvariable=search_var, width=20, font=("Microsoft YaHei", 9))
+        search_entry.pack(side=tk.LEFT, padx=5)
+        
+        match_index_ref = [0]
+        
+        def do_search(event=None):
+            text_area.tag_remove("match", "1.0", tk.END)
+            text_area.tag_remove("current_match", "1.0", tk.END)
+            query = search_var.get().strip()
+            if not query:
+                status_label.config(text="请输入搜索关键词", fg="blue")
+                return
+            
+            text_area.tag_configure("match", background="yellow", foreground="black")
+            
+            start_pos = "1.0"
+            matches = []
+            while True:
+                pos = text_area.search(query, start_pos, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end_pos = f"{pos} + {len(query)}c"
+                text_area.tag_add("match", pos, end_pos)
+                matches.append(pos)
+                start_pos = end_pos
+                
+            if matches:
+                idx = match_index_ref[0] % len(matches)
+                target_pos = matches[idx]
+                text_area.see(target_pos)
+                # 突出当前高亮的搜索结果
+                text_area.tag_configure("current_match", background="orange", foreground="black")
+                text_area.tag_add("current_match", target_pos, f"{target_pos} + {len(query)}c")
+                
+                status_label.config(text=f"找到 {len(matches)} 处匹配 (当前第 {idx + 1} 处)", fg="#2E7D32")
+                match_index_ref[0] += 1
+            else:
+                status_label.config(text="未找到匹配项", fg="#C62828")
+                
+        search_entry.bind("<Return>", do_search)
+        
+        btn_search = tk.Button(help_toolbar, text="下一个 🔍", command=do_search, font=("Microsoft YaHei", 9), relief="groove")
+        btn_search.pack(side=tk.LEFT, padx=5)
+        
+        # 状态提示
+        status_label = tk.Label(help_toolbar, text="状态: 可编辑模式 (Ctrl+S 保存)", font=("Microsoft YaHei", 9), fg="#555555")
+        status_label.pack(side=tk.LEFT, padx=15)
+        
+        # 保存修改函数
+        def do_save(event=None):
+            new_content = text_area.get("1.0", tk.END)
+            try:
+                with open(help_file_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                status_label.config(text="状态: 保存成功 ✔️", fg="#2E7D32")
+                # 延迟重置提示文字
+                help_win.after(1500, lambda: status_label.config(text="状态: 可编辑模式 (Ctrl+S 保存)", fg="#555555"))
+            except Exception as ex:
+                status_label.config(text=f"保存失败: {ex}", fg="#C62828")
+                
+        btn_save = tk.Button(help_toolbar, text="保存修改 💾", command=do_save, font=("Microsoft YaHei", 9, "bold"), bg="#E8F5E9", fg="#2E7D32", relief="groove")
+        btn_save.pack(side=tk.RIGHT, padx=10)
+        
+        # 写入内容
+        text_area.insert(tk.END, content)
+        
+        # 窗口关闭与位置/大小持久化保存逻辑
+        def on_help_win_close():
+            try:
+                geom = help_win.geometry()
+                self.ui_state["help_geometry"] = geom
+                self._save_state()
+            except Exception as ex:
+                print(f"Error saving help geometry: {ex}")
+            help_win.destroy()
+            
+        help_win.protocol("WM_DELETE_WINDOW", on_help_win_close)
+        
+        # 绑定快捷键
+        help_win.bind("<Control-s>", do_save)
+        help_win.bind("<Escape>", lambda e: on_help_win_close())
+        help_win.bind("<Alt-slash>", lambda e: on_help_win_close())
+        help_win.bind("<Alt-question>", lambda e: on_help_win_close())
+
+
+
 
     def _poll_favorites_loop(self):
         try:

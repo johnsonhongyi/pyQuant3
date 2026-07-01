@@ -155,51 +155,80 @@ class MultiPeriodStrategyEngine:
         return result_df
 
     def load_strategies(self):
+        loaded_from_file = False
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self._strategies = data.get('strategies', [])
+                    loaded_from_file = True
             except Exception as e:
                 logger.error(f"Failed to load strategies config: {e}")
                 
+        # 预置模板列表
+        presets = [
+            {
+                "id": "tpl_strong_pullback_rebound",
+                "name": "强势结构回踩反包启动",
+                "conditions": {
+                    "2d": {"filter": "strong_structure_score > 60", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "strong_structure_score > 55", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "strong_structure_score > 65", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_bottom_reversal",
+                "name": "大周期触底 + 小周期启动",
+                "conditions": {
+                    "m": {"filter": "close > ma10d and close > lastp1d", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "close > lastp1d and lastp1d > lastp2d and close > ma5d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "close > ma10d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_ma_resonance",
+                "name": "均线共振多头",
+                "conditions": {
+                    "m": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "ma5d > ma10d and ma10d > ma20d and close > ma5d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_pressure_break",
+                "name": "大周期压力突破",
+                "conditions": {
+                    "45d": {"filter": "close > upper1 or close > hmax", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "close > upper1", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "close > lastp1d and close > upper", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            }
+        ]
+
+        write_needed = False
         if not self._strategies:
-            # 预置 6 套模板
-            self._strategies = [
-                {
-                    "id": "tpl_bottom_reversal",
-                    "name": "大周期触底 + 小周期启动",
-                    "conditions": {
-                        "m": {"filter": "close > ma10d and close > lastp1d", "weight": 1.5},
-                        "w": {"filter": "close > lastp1d and lastp1d > lastp2d and close > ma5d", "weight": 1.2},
-                        "d": {"filter": "close > ma10d", "weight": 1.0}
-                    },
-                    "cross_mode": "intersection"
-                },
-                {
-                    "id": "tpl_ma_resonance",
-                    "name": "均线共振多头",
-                    "conditions": {
-                        "m": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.5},
-                        "w": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.2},
-                        "d": {"filter": "ma5d > ma10d and ma10d > ma20d and close > ma5d", "weight": 1.0}
-                    },
-                    "cross_mode": "intersection"
-                },
-                {
-                    "id": "tpl_pressure_break",
-                    "name": "大周期压力突破",
-                    "conditions": {
-                        "45d": {"filter": "close > upper1 or close > hmax", "weight": 1.5},
-                        "w": {"filter": "close > upper1", "weight": 1.2},
-                        "d": {"filter": "close > lastp1d and close > upper", "weight": 1.0}
-                    },
-                    "cross_mode": "intersection"
-                }
-            ]
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump({"strategies": self._strategies}, f, ensure_ascii=False, indent=2)
+            self._strategies = presets
+            write_needed = True
+        else:
+            # 如果加载了文件，检查是否缺少强势结构模板，缺少时自动增量合入
+            has_strong_tpl = any(s.get('id') == 'tpl_strong_pullback_rebound' for s in self._strategies)
+            if not has_strong_tpl:
+                # 插入到最前面
+                self._strategies.insert(0, presets[0])
+                write_needed = True
+
+        if write_needed:
+            try:
+                os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+                with open(self.config_path, 'w', encoding='utf-8') as f:
+                    json.dump({"strategies": self._strategies}, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to auto-save strategy presets: {e}")
+
         return self._strategies
 
     def save_strategies(self, strategies: List[dict]) -> bool:
