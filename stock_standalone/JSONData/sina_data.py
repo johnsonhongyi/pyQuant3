@@ -442,6 +442,12 @@ class Sina:
             
             # 核心修正：如果请求包含关键指数（999999），但载入的缓存中缺失该代码，则强制执行实时抓取以同步 HDF5
             if h5 is not None and len(h5) > 0:
+                # 如果内存中没有 lastbuydf，利用 HDF5 中已有的 lastbuy 数据初始化它
+                if cct.GlobalValues().getkey('lastbuydf') is None and 'lastbuy' in h5.columns:
+                    if (h5['lastbuy'].fillna(0) > 0).any():
+                        cct.GlobalValues().setkey('lastbuydf', h5['lastbuy'])
+                        log.info("Initialized memory lastbuydf from HDF5 database (len: %d)" % len(h5))
+
                 if '999999' not in h5.index.tolist():
                     log.debug("Sina.all: Cache missing index 999999, forcing live refresh to sync HDF5.")
                     h5 = None
@@ -1545,22 +1551,34 @@ class Sina:
             # )
 
 
-            if logtime == 0:
-                cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
-                                          df['close'].values, df['llastp'].values)))
-                cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
-
+            is_trade_time = cct.get_work_time()
+            if not is_trade_time:
+                # 非交易时段绝不重置 lastbuy，只合并已有缓存或 HDF5 中的 lastbuy
+                df = self.combine_lastbuy(df)
             else:
+                # 只有在交易时段内，才根据超时或初始化需要执行重置
                 need_init = cct.GlobalValues().getkey('lastbuydf') is None
-                if (cct.get_work_time() or need_init) and ((cct.GlobalValues().getkey('lastbuylogtime') is not None ) or self.lastbuy_timeout_status(logtime)):
-                    cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                    df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
-                                              df['close'].values, df['llastp'].values)))
-                    cct.GlobalValues().setkey('lastbuylogtime', None) 
-                    cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
+                if logtime == 0:
+                    cct.get_config_value_ramfile('sina_logtime', currvalue=time.time(), xtype='time', update=True)
+                    if need_init:
+                        # 只有当内存中彻底没有缓存时才以当前价初始化
+                        df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
+                                                  df['close'].values, df['llastp'].values)))
+                        cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
+                    else:
+                        # 如果已有缓存（如启动时从HDF5恢复的数据），则直接合并，不覆盖
+                        df = self.combine_lastbuy(df)
                 else:
-                    df = self.combine_lastbuy(df)
+                    if ((cct.GlobalValues().getkey('lastbuylogtime') is not None) or 
+                        self.lastbuy_timeout_status(logtime) or 
+                        need_init):
+                        cct.get_config_value_ramfile('sina_logtime', currvalue=time.time(), xtype='time', update=True)
+                        df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
+                                                  df['close'].values, df['llastp'].values)))
+                        cct.GlobalValues().setkey('lastbuylogtime', None) 
+                        cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
+                    else:
+                        df = self.combine_lastbuy(df)
                             
             df_mi = df.copy()
             if 'code' not in df_mi.columns:
@@ -1631,13 +1649,36 @@ class Sina:
         if h5 is None or h5.empty:
             return h5
         agg_metrics = self.agg_cache.getkey('agg_metrics')
-        # 1. lastbuy 兜底
-        if 'lastbuy' not in h5.columns or (h5['lastbuy'].fillna(0) <= 0).any():
+        # 1. lastbuy 兜底与防全等污染自愈
+        need_recovery = 'lastbuy' not in h5.columns or (h5['lastbuy'].fillna(0) <= 0).any()
+        
+        if not need_recovery and 'close' in h5.columns:
+            # 检查是否由于历史 Bug 导致数据已被物理写为与 close 全等
+            pos_mask = (h5['lastbuy'] > 0) & (h5['close'] > 0)
+            if pos_mask.sum() > 10:
+                equal_ratio = (h5.loc[pos_mask, 'lastbuy'] == h5.loc[pos_mask, 'close']).sum() / pos_mask.sum()
+                if equal_ratio > 0.95:
+                    need_recovery = True
+                    log.warning("[AUTO-HEAL] Detected lastbuy values corrupted (95%+ match with close due to legacy bug). Triggering auto-recovery...")
+
+        if need_recovery:
             lastbuydf = cct.GlobalValues().getkey('lastbuydf')
-            if lastbuydf is not None:
+            # 只有当 lastbuydf 存在且没有被全等污染时，我们才用它
+            lastbuydf_valid = False
+            if lastbuydf is not None and 'close' in h5.columns:
+                common_idx = h5.index.intersection(lastbuydf.index)
+                if len(common_idx) > 10:
+                    lastbuy_equal_ratio = (lastbuydf.reindex(common_idx) == h5.loc[common_idx, 'close']).sum() / len(common_idx)
+                    if lastbuy_equal_ratio < 0.90:
+                        lastbuydf_valid = True
+            
+            if lastbuydf_valid:
                 h5['lastbuy'] = lastbuydf.reindex(h5.index).fillna(0)
             elif agg_metrics is not None and 'nclose' in agg_metrics.columns:
                 h5['lastbuy'] = agg_metrics.reindex(h5.index)['nclose'].fillna(0)
+            elif 'llastp' in h5.columns:
+                # 最后的兜底：利用昨日收盘价初始化
+                h5['lastbuy'] = h5['llastp'].fillna(0)
 
         # 2. nclose 只在缺失时修复（方案三）
         if agg_metrics is not None and 'nclose' in agg_metrics.columns:
