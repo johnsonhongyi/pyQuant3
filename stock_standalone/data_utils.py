@@ -379,22 +379,22 @@ def complete_indicators_pipeline(
                     non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
                     top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
                     
-                # 计算 MA20
-                ma20_cols = ['close'] + [f'lastp{i}d' for i in range(1, 20)]
-                available_ma20 = [c for c in ma20_cols if c in top_all.columns]
-                if len(available_ma20) > 1:
-                    ma20_sum = sum(top_all[c].fillna(0) for c in available_ma20)
-                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma20)
-                    top_all.loc[valid_mask, 'ma20d'] = (ma20_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
-                    top_all.loc[valid_mask, 'ma201d'] = top_all.loc[valid_mask, 'ma20d']
+                # # 计算 MA20
+                # ma20_cols = ['close'] + [f'lastp{i}d' for i in range(1, 20)]
+                # available_ma20 = [c for c in ma20_cols if c in top_all.columns]
+                # if len(available_ma20) > 1:
+                #     ma20_sum = sum(top_all[c].fillna(0) for c in available_ma20)
+                #     non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma20)
+                #     top_all.loc[valid_mask, 'ma20d'] = (ma20_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+                #     top_all.loc[valid_mask, 'ma201d'] = top_all.loc[valid_mask, 'ma20d']
                     
-                # 计算 MA60
-                ma60_cols = ['close'] + [f'lastp{i}d' for i in range(1, 60)]
-                available_ma60 = [c for c in ma60_cols if c in top_all.columns]
-                if len(available_ma60) > 1:
-                    ma60_sum = sum(top_all[c].fillna(0) for c in available_ma60)
-                    non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma60)
-                    top_all.loc[valid_mask, 'ma60d'] = (ma60_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+                # # 计算 MA60
+                # ma60_cols = ['close'] + [f'lastp{i}d' for i in range(1, 60)]
+                # available_ma60 = [c for c in ma60_cols if c in top_all.columns]
+                # if len(available_ma60) > 1:
+                #     ma60_sum = sum(top_all[c].fillna(0) for c in available_ma60)
+                #     non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma60)
+                #     top_all.loc[valid_mask, 'ma60d'] = (ma60_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
     # 1. 基础指标计算
     with timed_ctx("calc_indicators", warn_ms=1000):
         top_all = calc_indicators(top_all, logger, resample)
