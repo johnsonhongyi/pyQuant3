@@ -6147,45 +6147,9 @@ def generate_lastN_features_dict(df, lastdays=5, resample='d'):
         'truer': 'truer'
     }
 
-    # 动态判定当前活跃周期的临时 K 线（Ghost Bar）在 df 中是否已重采样生成
-    # 适配全部 Resample_LABELS: d / 2d / 3d / 5d / 45d / w / m / 3M
-    _RESAMPLE_PERIOD_MAP = {
-        'w':  'W',   # 自然周
-        'm':  'M',   # 自然月
-        '3M': 'Q',   # 季度（3个月）
-    }
-    _RESAMPLE_N_DAYS_MAP = {
-        '2d':  2,
-        '3d':  3,
-        '5d':  5,
-        '45d': 45,
-    }
-    is_current_period_exists = False
-    if resample != 'd' and len(df) > 0:
-        try:
-            last_dt = df.index[-1]
-            today_str = cct.get_today()
-            last_ts = pd.to_datetime(last_dt)
-            today_ts = pd.to_datetime(today_str)
-            if resample in _RESAMPLE_PERIOD_MAP:
-                # 使用 pandas Period 精确匹配自然周/月/季度
-                freq = _RESAMPLE_PERIOD_MAP[resample]
-                is_current_period_exists = (today_ts.to_period(freq) == last_ts.to_period(freq))
-            elif resample in _RESAMPLE_N_DAYS_MAP:
-                # 多日聚合（2d/3d/5d/45d）：若今日在最后一根 Bar 的 N 日窗口内则 Ghost Bar 已存在
-                n = _RESAMPLE_N_DAYS_MAP[resample]
-                # 最后一根 Bar 代表的窗口起始日 = 该 Bar 日期 往前推 n-1 个自然日
-                window_start = last_ts - pd.Timedelta(days=n - 1)
-                is_current_period_exists = (window_start <= today_ts <= last_ts)
-            else:
-                # 未知周期，保守地假设 Ghost Bar 已存在，执行平移
-                is_current_period_exists = True
-        except Exception:
-            is_current_period_exists = True  # 发生异常时默认置为 True 保持向下兼容
-
     data = {}
     for da in range(1, lastdays + 1):
-        idx = da + 1 if (resample != 'd' and is_current_period_exists) else da
+        idx = da
         for col, prefix in COL_MAPPING.items():
             # 倒数索引为 -idx
             if col in df.columns and len(df) >= idx:
@@ -6547,6 +6511,7 @@ def get_tdx_exp_low_or_high_power(
     latest['open'] = dtemp.open
     latest['lowvol'] = dtemp.vol
     latest['last6vol'] = lastvol
+    latest['resdate']  = latest.name.strftime('%Y-%m-%d') if hasattr(latest.name, 'strftime') else str(latest.name)[:10]
 
     # ========= 获取旧的历史最低价 =========
     if ptype == 'high':
@@ -8222,7 +8187,7 @@ if __name__ == '__main__':
     df4=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
     df5=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['m'],resample='m')
     import ipdb;ipdb.set_trace()
-
+    code = '000566'
     # df=get_tdx_Exp_day_to_df(code,end='20260408',resample=resample)
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
 

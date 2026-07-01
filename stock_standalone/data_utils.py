@@ -282,55 +282,92 @@ def complete_indicators_pipeline(
     if resample != 'd' and 'close' in top_all.columns:
         import numpy as np
         
-        today = cct.get_today()
-        # 获取数据库中最后一天的数据日期（通常为上一个交易日）
-        last_date = cct.get_trade_day_before(1)
-        if last_date == today:
-            last_date = cct.get_trade_day_before(2)
         
+
+        today = cct.get_today()
         is_trade_day = cct.get_trade_date_status()
         now_time = cct.get_now_time_int()
-        # 只有在今天为交易日且已经开始交易（或盘中/盘后未归档）时，才需要进行实时行情对齐和移位
-        if is_trade_day and now_time >= 915 and last_date and today and last_date < today:
-            # 辅助函数：判断两个日期是否在 resample 周期下属于同一个 period
-            def check_same_period(date1, date2, period):
-                try:
-                    d1 = pd.to_datetime(date1).date()
-                    d2 = pd.to_datetime(date2).date()
-                    p_lower = period.lower()
-                    if p_lower == 'w':
-                        return d1.isocalendar()[:2] == d2.isocalendar()[:2]
-                    elif p_lower == 'm':
-                        return (d1.year, d1.month) == (d2.year, d2.month)
-                    elif p_lower in ('3d', '45d', '3m', '3M'):
-                        s = pd.Series([0, 0], index=[pd.Timestamp(d1), pd.Timestamp(d2)])
-                        resampled = s.resample(period, label='right').mean()
-                        return len(resampled) == 1
-                except Exception:
-                    pass
-                return False
-
-            is_same = check_same_period(last_date, today, resample)
-            
-            # 动态找出数据列中实际存在的最大周期 d 数量
-            max_d = 1
-            for col in top_all.columns:
-                if col.startswith('lastp') and col.endswith('d'):
-                    try:
-                        d_num = int(col[5:-1])
-                        if d_num > max_d:
-                            max_d = d_num
-                    except ValueError:
-                        pass
-
-            prefixes = ['lasto', 'lasth', 'lastl', 'lastp', 'lastv', 'upper', 'ma5', 'ma20', 'ma60', 'perc', 'per', 'eval', 'signal']
+        # 只有交易日且已开盘才需要对齐
+        if is_trade_day and now_time >= 915:
+            is_same = False
+            try:
+                today_ts = pd.to_datetime(today)
+                # ─── 优先路径：resdate 是 Ghost Bar 的周期截止日（如本周五 2026-07-03）
+                # 若 resdate >= today，说明当前未完结周期的 Ghost Bar 已经写入 top_all，
+                # 直接判定 is_same = True，无需做额外的周期归属运算。
+                if 'resdate' in top_all.columns:
+                    # resdate 列是 'YYYY-MM-DD' 字符串（由 latest.name.strftime 生成），直接 dropna 过滤
+                    valid_resdates = top_all['resdate'].dropna()
+                    if not valid_resdates.empty:
+                        # pd.to_datetime 统一化后比较：'2026-07-03' >= '2026-07-02' → is_same=True
+                        last_resdate_ts = pd.to_datetime(valid_resdates.max())
+                        if last_resdate_ts >= today_ts:
+                            is_same = True
+                
+                # ─── 兜底路径：resdate 不可用时，用上一个交易日与今日做周期归属判断
+                if not is_same:
+                    last_dt = cct.get_trade_day_before(1)
+                    if last_dt == today:
+                        last_dt = cct.get_trade_day_before(2)
+                    if last_dt and last_dt < today:
+                        _RESAMPLE_PERIOD_MAP = {
+                            'w':  'W', 'm':  'M', '3M': 'Q', '3m': 'Q',
+                        }
+                        _RESAMPLE_N_DAYS_MAP = {
+                            '2d': 2, '3d': 3, '5d': 5, '45d': 45,
+                        }
+                        last_ts = pd.to_datetime(last_dt)
+                        if resample in _RESAMPLE_PERIOD_MAP:
+                            freq = _RESAMPLE_PERIOD_MAP[resample]
+                            is_same = (today_ts.to_period(freq) == last_ts.to_period(freq))
+                        elif resample in _RESAMPLE_N_DAYS_MAP:
+                            n = _RESAMPLE_N_DAYS_MAP[resample]
+                            window_start = last_ts - pd.Timedelta(days=n - 1)
+                            is_same = (window_start <= today_ts <= last_ts)
+                        else:
+                            is_same = True
+            except Exception:
+                is_same = True
             
             # 过滤出有有效实时报价的股票
             valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
             if valid_mask.any():
                 if is_same:
-                    # (0) 废除跨周期历史列原地移位: lastp1d 等列已天然代表前一个已完成周期的昨收
-                    # 直接保留当前的 lopen/lhigh/llow/lvol 用于当期实时合并即可。
+                    # (0) 跨周期历史特征原地动态移位：既然是同一周期且未收盘，
+                    # 那么数据库在初始化加载时，最近一期的数据 (last1d) 实际包含了当前的未完结周期数据。
+                    # 我们需要先将当前未完结周期的 OHLV 特征暂存为 ghost 列以备后用。
+                    # 然后将全部历史特征向后平移 1 期，使 last1d 指向上一周期已完结的数据，
+                    # last2d 指向上上周期，依此类推。这样在 data_utils 后续的实时均线/涨跌幅重算中，
+                    # 昨收价 lastp1d 就能精确匹配已收盘历史周，而不会受到盘中未完结周的污染。
+                    
+                    if 'lasto1d' in top_all.columns: top_all['lasto_ghost'] = top_all['lasto1d']
+                    if 'lasth1d' in top_all.columns: top_all['lasth_ghost'] = top_all['lasth1d']
+                    if 'lastl1d' in top_all.columns: top_all['lastl_ghost'] = top_all['lastl1d']
+                    if 'lastv1d' in top_all.columns: top_all['lastv_ghost'] = top_all['lastv1d']
+                    if 'lastp1d' in top_all.columns: top_all['lastp_ghost'] = top_all['lastp1d']
+                    
+                    import re
+                    pattern = re.compile(r'^([a-zA-Z_]+?)(\d+)(d)?$')
+                    
+                    feature_cols = {}
+                    for col in top_all.columns:
+                        if col.endswith('_ghost'):
+                            continue
+                        match = pattern.match(col)
+                        if match:
+                            prefix, num_str, d_suffix = match.groups()
+                            num = int(num_str)
+                            d_suffix = d_suffix if d_suffix else ''
+                            feature_cols.setdefault(prefix, []).append((num, d_suffix, col))
+                            
+                    for prefix, cols_info in feature_cols.items():
+                        cols_info.sort(key=lambda x: x[0])
+                        for num, d_suffix, col in cols_info:
+                            prev_num = num - 1
+                            if prev_num > 0:
+                                prev_col = f"{prefix}{prev_num}{d_suffix}"
+                                if prev_col in top_all.columns:
+                                    top_all[prev_col] = top_all[col]
 
                     # (1) 同一周期：将今日实时行情合并到当前的周期 OHLC 中
                     if 'lopen' in top_all.columns:
@@ -397,10 +434,30 @@ def complete_indicators_pipeline(
     # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
     if 'now' in top_all.columns:
         top_all['lastp0d'] = top_all['now']
-        top_all['lasth0d'] = top_all['high']
-        top_all['lastl0d'] = top_all['low']
-        top_all['lasto0d'] = top_all['open']
-        top_all['lastv0d'] = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+        
+        curr_open = top_all['open']
+        curr_high = top_all['high']
+        curr_low = top_all['low']
+        curr_vol = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+        
+        # 优先使用 lopen/lhigh/llow/lvol 进行实时合并，或者使用 lasto_ghost 等作为大周期 Ghost Bar 兜底
+        if 'lasto_ghost' in top_all.columns:
+            top_all['lasto0d'] = np.where(top_all['lasto_ghost'] > 0, top_all['lasto_ghost'], curr_open)
+            top_all['lasth0d'] = np.maximum(top_all['lasth_ghost'].fillna(0), curr_high.fillna(0))
+            
+            ghost_low = top_all['lastl_ghost']
+            top_all['lastl0d'] = np.where(
+                (ghost_low > 0) & (curr_low > 0),
+                np.minimum(ghost_low, curr_low),
+                np.where(ghost_low > 0, ghost_low, curr_low)
+            )
+            top_all['lastv0d'] = top_all['lastv_ghost'].fillna(0) + curr_vol.fillna(0)
+        else:
+            top_all['lasto0d'] = curr_open
+            top_all['lasth0d'] = curr_high
+            top_all['lastl0d'] = curr_low
+            top_all['lastv0d'] = curr_vol
+            
         # 为压力位注入 0d (复用昨日压力位作为今日参考线)
         if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
         if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
