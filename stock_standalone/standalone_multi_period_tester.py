@@ -1139,8 +1139,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
     def show_help_documentation(self):
         """打开/显示系统多周期与信号指标使用说明文档，实时加载本地文件以支持动态互动更新，带搜索及编辑保存能力"""
-        from sys_utils import get_app_root
-        help_file_path = os.path.join(get_app_root(), "config", "multi_period_help.md")
+        from sys_utils import get_conf_path
+        help_file_path = get_conf_path("config/multi_period_help.md")
         
         try:
             with open(help_file_path, "r", encoding="utf-8") as f:

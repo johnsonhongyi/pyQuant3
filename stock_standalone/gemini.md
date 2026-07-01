@@ -1,3 +1,12 @@
+## 2026-07-01 12:35
+- [x] **修复打包与可执行文件环境下多周期帮助文档读取失败的 Bug (Fixed Multi-Period Help Document Loading Failure in Packaged Environments)**：
+    - [x] **整合 `get_conf_path` 到帮助文档路径加载 (Integrated `get_conf_path` for Help File Loading)**：重构了 `standalone_multi_period_tester.py` 中 `show_help_documentation` 方法的本地文件路径生成逻辑。将硬编码拼接 App 绝对根目录的代码，修改为调用系统统一的 `sys_utils.get_conf_path("config/multi_period_help.md")` 自愈接口，彻底终结了打包后由于物理绝对路径不存在导致的 FileNotFoundError 崩溃。
+    - [x] **注册自愈配置文件映射 (Registered File Mapping in RESOURCE_MAP)**：在 `sys_utils.py` 内部的统一自愈管理器 `RESOURCE_MAP` 字典中，新增了 `"multi_period_help.md"` 配置文件的物理映射对齐关系（`src` 与 `dst` 均配置为 `"config/multi_period_help.md"`）。这使得打包的 Onefile/Onedir 可执行文件在启动运行且物理磁盘上不存在该文档时，能自动从包内临时目录下自愈解压释放，平滑归位到本地物理目录。
+    - [x] **升级 PyInstaller 与 Nuitka 打包编译配置 (Updated Packaging Configurations)**：
+        - 更新了 `instock_MonitorTK.spec` 与 `MultiPeriodTester.spec` 的 `datas` 数据列表，加入了 `("config/multi_period_help.md", "config")` 路径对齐配置；
+        - 更新了 `nuitka_build_console.bat`、`nuitka_build_console_onlyClang.bat` 及 `nuitka_instockMonitor.bat` 里的 Nuitka 打包指令，添加了 `--include-data-file=config\multi_period_help.md=config\multi_period_help.md` 参数。这保证了在重新进行编译打包发布时，文档文件能够 100% 正确被打包进可执行文件的资源区。
+    - [x] **完成本地单行自愈功能测试与编译自检**：使用 Python 终端命令验证了 `get_conf_path` 在物理文件缺失下的自愈还原过程，文件成功释放回指定路径，且无语法或逻辑冲突。
+
 ## 2026-07-01 10:40
 - [x] **实现强势结构与神奇九转 (1结构) 反包加速算法 (Implemented Strong Structure Rebound & TD Setup Accelerating Algorithm)**：
     - [x] **实现 TD Setup 指标计算 (TD Setup Indicator)**：在 `data_utils.py` 中实现了神奇九转的买入结构（Buy Setup）和卖出结构（Sell Setup）计算。支持追踪连续收盘价低于/高于 4 日前收盘价的计数，并在结构完成或触发 1 结构（反包）时标记 `td_setup` 状态，用于快速锁定主升浪启动初期。

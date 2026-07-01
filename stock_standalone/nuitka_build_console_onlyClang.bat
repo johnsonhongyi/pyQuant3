@@ -299,6 +299,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=Qt6Test.dll ^
     --noinclude-dlls=Qt6Xml.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^

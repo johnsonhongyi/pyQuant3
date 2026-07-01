@@ -217,6 +217,10 @@ RESOURCE_MAP = {
     "同花顺板块行业.xlsx": {
         "src": "JohnsonUtil/wencai/同花顺板块行业.xlsx",
         "dst": "同花顺板块行业.xlsx"
+    },
+    "multi_period_help.md": {
+        "src": "config/multi_period_help.md",
+        "dst": "config/multi_period_help.md"
     }
 }
 
