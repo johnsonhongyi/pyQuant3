@@ -1,3 +1,10 @@
+## 2026-07-01 21:00
+- [x] **实现人气共振自动收盘持久化与手动刷新强制写盘机制 (Implemented Auto Post-Close Saving & Forced Persistence on Manual Refresh)**：
+    - [x] **实现手动刷新强制持久化功能 (Forced Persistence on Manual Refresh)**：重构了 `popularity_resonance_gui.py` 中的 `run_once_async` 方法与 `_run_once_job` 方法。新增了 `force_save` 参数，在手动点击“查询刷新”时强制设定 `force_save=True`，避开非交易日/盘后等严格的交易日日历限制，确保用户手动执行的查询数据能 100% 成功写入磁盘 CSV。
+    - [x] **设计收盘（15:15后）自动检测并自动持久化机制 (Post-Market Timed Auto-Save)**：在主客户端初始化流程中注入了 `_auto_save_fail_count` 与 `_last_auto_save_attempt_time` 状态控制，并注册了高可靠心跳检查器 `_check_auto_refresh_after_close`。在交易日 15:15 收盘后，若系统检测到当日的 `.csv.gz` 或 `.csv` 备份数据尚未生成，将自动开启后台线程执行查询刷新并强制持久化，实现了当日盘后数据的零人工干预式兜底。轮询心跳间隔已调整为每 30 分钟一次，以降低无谓的轮询频次并保护 CPU 性能。
+    - [x] **建立 5 分钟冷却限频与重试次数限制保护 (Throttling & Error Cooldown Guard)**：为防止网络异常、服务器拥堵或数据源为空时引发的高频反复重试，为收盘后的自动同步任务设定了 5 分钟（300秒）的防抖冷却期，并限制最高失败尝试次数为 5 次，既保证了数据终态可达与系统自愈，又彻底阻断了接口流量滥用。
+    - [x] **完成物理语法编译校验**：经物理编译无任何语法、拼写或缩进问题，各项参数流转及线程回调运行平稳。
+
 ## 2026-07-01 20:30
 - [x] **进一步精细化孤立进程判定与强制交互式清理 (Refined Orphaned Process Detection & Strict Interactive Cleanup)**：
     - [x] **收紧孤立进程关联性过滤条件**：在 `scan_and_group_processes` 的 `is_orphaned` 判定中，将原本的宽泛嫌疑判定 `is_suspect or is_associated` 收紧为严格的交集判定 `is_suspect and is_associated`。即任何嫌疑进程（如 `python.exe`, `cmd.exe`, `conhost.exe` 等）必须明确与当前主程序、工作区或其执行文件目录存在关联（通过 exe 路径、命令行或进程当前工作目录 `cwd` 的包含关系校验）才会被标记为孤立进程，彻底避免了将系统其他无关的后台 python、git、powershell 或 conhost 进程误报为孤立进程。
