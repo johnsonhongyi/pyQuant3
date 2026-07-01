@@ -1,3 +1,10 @@
+## 2026-07-01 10:40
+- [x] **实现强势结构与神奇九转 (1结构) 反包加速算法 (Implemented Strong Structure Rebound & TD Setup Accelerating Algorithm)**：
+    - [x] **实现 TD Setup 指标计算 (TD Setup Indicator)**：在 `data_utils.py` 中实现了神奇九转的买入结构（Buy Setup）和卖出结构（Sell Setup）计算。支持追踪连续收盘价低于/高于 4 日前收盘价的计数，并在结构完成或触发 1 结构（反包）时标记 `td_setup` 状态，用于快速锁定主升浪启动初期。
+    - [x] **实现强势结构回踩反弹评分 (Strong Structure Rebound Score)**：设计了 `strong_structure_score` 评估公式，整合了动量强度（`win` 连阳天数）、均线偏离度（黄金坑回踩 MA5/MA20 的距离）以及日内反包强度（昨阴今阳、收盘价包容、放量比等）。根据各周期特点自适应调整回踩通道（日线回踩 MA20d，小级别/2d/3d大结构回踩 MA5d），并对最终得分实施 50-100+ 的量化评级，自动过滤底部无价值反弹。
+    - [x] **多周期引擎与诊断面板深度融合 (Engine & Diagnostic Integration)**：在 `multi_period_strategy_engine.py` 的指标链中无缝载入 TD 计数和回踩评分，支持将 `strong_structure_score` 作为 query 过滤条件直接应用。
+    - [x] **验证测试与回归分析 (Verification & Test Runs)**：通过编写独立的验证脚本 `scratch_test_strong_structure.py` 在真实日线和 2d 周期数据上进行提取，成功筛选出 241 只日线和 378 只 2d 周期具备强势启动与 1 结构反包特征的标的，且排序清晰，回归测试 Exit Code 0。
+
 ## 2026-06-30 20:30
 - [x] **实现 HDF5 数据异步背景加载与 UI 启动卡死根治 (Asynchronous HDF5 Loading & Startup Hang Mitigation)**：
     - [x] **实现崩溃恢复 (Crash Recovery) 异步化 offload**：重构了 `realtime_data_service.py` 中的 `DataPublisher` 启动逻辑，将原本同步阻塞的从 PKL 快照及 HDF5 重建 `MinuteKlineCache` 的 `recover_from_hdf5` 过程完全转移至独立的守护线程 `DataPublisher_Recovery` 中执行。UI 主线程在启动时无需等待庞大的 HDF5 历史数据读取，可瞬间秒开，彻底消除了启动卡死和 UI 阻塞警告。
