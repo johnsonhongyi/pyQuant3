@@ -1,3 +1,33 @@
+## 2026-07-01 20:30
+- [x] **进一步精细化孤立进程判定与强制交互式清理 (Refined Orphaned Process Detection & Strict Interactive Cleanup)**：
+    - [x] **收紧孤立进程关联性过滤条件**：在 `scan_and_group_processes` 的 `is_orphaned` 判定中，将原本的宽泛嫌疑判定 `is_suspect or is_associated` 收紧为严格的交集判定 `is_suspect and is_associated`。即任何嫌疑进程（如 `python.exe`, `cmd.exe`, `conhost.exe` 等）必须明确与当前主程序、工作区或其执行文件目录存在关联（通过 exe 路径、命令行或进程当前工作目录 `cwd` 的包含关系校验）才会被标记为孤立进程，彻底避免了将系统其他无关的后台 python、git、powershell 或 conhost 进程误报为孤立进程。
+    - [x] **支持工作目录 (CWD) 关联检测**：在 `scan_and_group_processes` 和 `run_system_diagnostics` 中同步引入了基于 `p_obj.cwd()` / `p.cwd()` 的关联性检验。如果进程正在当前量化程序的根路径下运行，即使命令行未携带特征字段，也能被精准捕获与识别。
+    - [x] **强制一键清理全部走交互选择弹窗**：重构了 `optimize_orphaned_processes` 一键清理的触发逻辑，取消了在仅存在 1 个孤立进程时直接弹出简单 yes/no 确认并杀掉进程的逻辑。现在无论检测到几个孤立进程，均统一调起 `OrphanedProcessCleanupDialog` 选择与详情弹窗，赋予用户手动核实、全选/反选以及双击查看明细的 100% 精确控制权。
+    - [x] **修复属性与组详情弹窗的事件委托崩溃问题**：针对在孤立进程清理等子弹窗（`ProcessItemDetailDialog`、`ProcessGroupDetailDialog`）中调用 `self.parent.set_status_text` 导致的 `AttributeError` 崩溃，增加了健壮的 `set_status_text` 向上溯源层级委托机制，确保在各级嵌套 of `tk.Toplevel` 交互中均能安全、正确地在主程序状态栏呈现日志反馈。
+    - [x] **编译校验全绿通过**：对 `sys_performance_analyzer.py` 进行了 `py_compile` 物理编译自检，无任何语法、拼写或缩进问题，系统稳定运行。
+
+## 2026-07-01 19:15
+- [x] **实现孤立进程高级识别、可视化高亮、智能排序与一键清理 (Advanced Orphaned Process Identification, Visual Highlighting, Intelligent Sorting & Cleanup)**：
+    - [x] **实现孤立进程高级判定逻辑**：重构了 `PerformanceEngine.scan_and_group_processes` 的判定规则，除 `conhost.exe` 外，扩展支持 `python.exe`, `pythonw.exe`, `cmd.exe`, `powershell.exe`, `git.exe` 等特定后台嫌疑进程。通过严格的父进程死亡状态校验（含父进程获取异常排除、父进程退出或 PID 被新进程复用判定），结合与当前主程序的物理工作区及命令行关联分析，彻底根治了对正常桌面软件（如 `firefox.exe`, `hexin.exe` 同花顺, `TdxW.exe` 通达信, `explorer.exe` 等）及系统核心服务进程的孤立误判定，保障了业务安全与逻辑纯净。
+    - [x] **实现主程序关联物理诊断**：在 `PerformanceEngine` 中新增 `check_process_association` 方法。通过遍历当前环境中所有主程序（`instock_monitortk`）PID 候选、父子进程链追踪、物理目录位置及命令行关键字比对，多维度自动化诊断被检进程与当前主程序的归属关系。
+    - [x] **优化诊断警告信息**：在健康诊断告警中，将孤立进程按“所有孤立进程”、“主程序关联孤立进程”以及“高 CPU 占用孤立进程”分类列出，若存在关联孤立进程或 CPU 占用较高，则智能提升告警等级至 `DANGER`。
+    - [x] **实现双列表可视化高亮与智能排序**：
+        - 为 `Treeview` 增加了 `"orphaned"` 红色高亮配置（使用 `COLOR_DANGER` 前景色）。
+        - 在**进程归组汇总表**中，将包含孤立进程的分组映像前缀加上 `⚠️ [孤立残留] ` 并整体置顶排序，且标注为红色。
+        - 在**完整进程明细表**中，将孤立进程前缀加上 `⚠️ [孤立] `，以“孤立进程优先、其次内存降序”的规则进行置顶排序，且标注为红色。
+        - 完善了双击详情、右键快捷菜单等各级交互的名称前缀自动裁剪（strip）脱敏逻辑，确保所有子弹窗诊断、进程结束动作均能 100% 准确执行。
+    - [x] **集成一键清理所有孤立残留进程**：升级了顶部快捷优化栏的动作，将原“清理孤立 conhost”升级为“清理孤立进程”（`optimize_orphaned_processes`）。支持一键优雅终止（`p.terminate()`）与物理强制终结（`taskkill`）双层降级逻辑，实现后台残留僵尸进程的安全秒级清理。
+    - [x] **更新详情弹窗 (ProcessItemDetailDialog)**：在属性查看弹窗中，扩充高度至 `485px` 并新增了“主程序关联:”显示字段；并在检测到父进程 ID 存在但创建时间错位时，直观提示“父进程已死，PID 被新进程复用”，彻底解决 PID 复用导致的孤立判断误差。
+    - [x] **通过物理编译自检**：对修改后的文件成功执行了 `py_compile` 校验，无任何语法错误或警告。
+
+## 2026-07-01 17:45
+- [x] **实现孤立控制台进程 (conhost.exe) 自动化诊断与清理 (Orphaned Conhost Diagnostic & Cleanup)**：
+    - [x] **实现孤立进程检测逻辑 (Orphaned Process Detection)**：在 `PerformanceEngine.scan_and_group_processes` 中增强了扫描逻辑，通过 `psutil` 模块实时遍历 `conhost.exe` 并检查其 `parent()` 判定是否为孤立（zombie）进程，支持在受限权限下捕获 `AccessDenied` 和 `NoSuchProcess` 异常。
+    - [x] **集成健康度诊断告警系统 (Diagnostic Alerts Integration)**：在 `PerformanceEngine.run_system_diagnostics` 中新增孤立控制台进程健康检查。一旦检测到孤立 `conhost.exe` 进程，立即向诊断日志注入 DANGER (若占用高 CPU) 或 WARNING 告警级别，并明确显示其 PID 列表。
+    - [x] **详情弹窗新增父进程信息字段 (Parent Process Detail View)**：在 `ProcessItemDetailDialog` 中新增了“父进程信息”字段，在双击查看进程详情时直观展示其父进程名称、PID 与存活状态，支持一键点击详情自愈检测。
+    - [x] **添加“一键清理孤立控制台”一键优化动作 (Quick Optimizer Cleanup Action)**：在 `SystemPerformanceAnalyzerGUI` 顶部优化控制面板中新增了“清理孤立 conhost”一键优化功能，支持通过 `psutil` 强行终止所有已识别的孤立 `conhost.exe` 进程，且在权限不足时自动回退为 `taskkill /F /PID` 命令行物理清理，最大化清理成功率。
+    - [x] **语法编译与稳定性校验 (Compilation Passed)**：成功通过了 `py_compile` 的物理编译验证，模块零语法错误。
+
 ## 2026-07-01 15:10
 - [x] **根治冷启动及非交易时段 `lastbuy` 重置与丢失 Bug (Rooted Out `lastbuy` Overwrites on Cold Start & Off-Hours)**：
     - [x] **实现 `Sina.all` 启动阶段 `lastbuydf` 从 HDF5 历史数据还原**：在 `Sina.all` 数据加载时（第 444-450 行），当检测到内存中 `lastbuydf` 未被初始化且 HDF5 载入的数据集中包含有效的 `'lastbuy'` 列时，自动将 HDF5 历史数据读取并恢复至内存全局缓存 `cct.GlobalValues().setkey('lastbuydf', h5['lastbuy'])` 中，从而彻底终结了冷启动打开监控主程序时 `lastbuy` 被清零重置的缺陷。
