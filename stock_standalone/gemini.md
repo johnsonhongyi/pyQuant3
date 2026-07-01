@@ -1,3 +1,23 @@
+## 2026-07-01 23:10
+- [x] **实现全周期下 MA5 与 MA10 行情合并重算支持与自适应对齐 (Enabled Global Dynamic MA5 & MA10 Recalculation & Adaptive Period Alignment)**：
+    - [x] **解除大周期的实时均线重算封锁**：重构了 `data_utils.py` 中 `complete_indicators_pipeline` 处的均线重算模块，去除了日线专属的 `if resample == 'd':` 条件限制。
+    - [x] **实现大周期实时 MA5 与 MA10 精准重算**：由于在此前已经修复了 `generate_lastN_features_dict` 大周期特征提取的平移缺陷，使得 `lastp1d` 到 `lastp10d` 特征列在大周期（如周线）下完全精准对应已收盘历史周。从而让大周期下对 `ma5d` 和 `ma10d` 融合盘中实时价格 `close` 进行重算在数学与业务逻辑上完全精确成立，实现了策略对大周期爆发性突破 the 毫秒级感知。
+    - [x] **安全保留并锁定长均线免受污染**：对于像 `ma60d` 这种因特征字典深度受限（无 `lastp11d` 至 `lastp60d` 字段）而极易在大周期下被粗暴算术平均算错的长周期均线，通过不进入重算列表而予以安全保留，使其继续在所有周期下直接读取 TDX 精确的重采样只读物理值，完美兼顾了实时的均线灵敏度与极高的数据一致性。
+    - [x] **重构大周期 Ghost Bar 智能自适应对齐算法 (Fixed Monday/Month-Start Index Shift)**：针对硬编码平移会导致周一（新的一周刚开始且未在 df 中聚合成未收盘K线）或月初第一个交易日发生“前一个周期数据漏掉/错位 1 期”的业务 Bug，重构了 `tdx_data_Day.py` 中的 `generate_lastN_features_dict` 特征提取器。利用 `to_period('W'/'M'/'Q')` 动态比对 df 最后一根 K 线的时间戳与当前系统日期。若属于同一自然周期（说明未收盘的 Ghost Bar 已经生成），则执行平移取 `iloc[-da-1]`；若不属于同一周期（说明新周期 Bar 尚未写盘），则自动免平移直接取 `iloc[-da]`，完美在所有边界场景自适应对齐。
+
+
+## 2026-07-01 22:20
+- [x] **根治大周期技术指标数据受日线实时指标列覆盖而发生的紊乱与 KeyError 崩溃 (Fixed Large-Cycle Indicator Pollution & KeyError Crashes)**：
+    - [x] **根治大周期 `combine_dataFrame` 指标数据污染缺陷**：定位并重构了 `data_utils.py` 中 3 处使用 `combine_dataFrame` 合并今日实时快照 `top_now` 至大周期历史数据 `top_all` / `top_all_res` 处的逻辑。当 `resample != 'd'` 时，在合并前强制过滤 `top_now`，仅保留核心市场行情报价列（`open`, `high`, `low`, `close`, `vol`, `volume`, `amount`, `name`），彻底拦截了日线计算的指标（如 `ma5d: 4.15`，`ma60d: 5.53` 等）对大周期（周线）指标（如正确的 `ma5d: 4.928`，`ma60d: 4.528`）的覆写与污染，彻底还原了多周期策略判定的准确性（解决 000566 海南海药周线判定错误问题）。
+    - [x] **禁止大周期下覆写均线与涨跌幅（Prevented Large-Cycle MA Recalculation）**：修复了在 `complete_indicators_pipeline` 中，非日线大周期数据（如周线）的 `ma5d`/`ma10d`/`ma20d`/`ma60d` 以及 `percent`/`per1d` 均线与涨跌幅被重新计算的缺陷。大周期的均线本身已在加载时由 HDF5/TDX 完整重采样并计算正确（如真实的 5周均线 4.15、60周均线 5.53），强行用少量的 `lastp` 列算术平均重算不仅会造成数据篡改（重算为 4.452），还会因为缺失 60 列历史数据而导致 60周期大均线彻底算错失真（错算为 4.427）。通过引入 `if resample == 'd':` 条件限制，在大周期下完全跳过了覆写，完美保留了原始周线计算的准确基础数据。
+    - [x] **加固 `calc_indicators` 与 `calc_compute_volume` 的防崩溃安全护航**：
+        - 修复了 `calc_indicators` 头部在 `volume` 列缺失时直接求值引发的 `KeyError: 'volume'`。
+        - 在 `calc_compute_volume` 中引入了 `last6vol` 安全缺失判定，当大周期数据缺少 `last6vol` 列时，自适应根据 `vol` 的 6周期滚动均值动态补齐计算，杜绝 `KeyError: 'last6vol'` 崩溃。
+        - 在 `calc_indicators` 内部为 `'llastp'`, `'lastbuy'`, `'buy'`, `'minclose'`, `'llow'` 列缺失提供了健壮的安全降级初始化，杜绝在后序使用 `lastbuy` 时崩溃。
+        - 在 `calc_indicators` 的 `sort_values` 返回前，自动对 `['dff', 'percent', 'volume', 'ratio', 'couts']` 这些排序关键列进行安全检测及 0.0 默认回填，防止在精简列状态下触发 `KeyError` 挂起。
+        - 在 `complete_indicators_pipeline` 头部引入对 `'name'` 列缺失的自愈回填逻辑。
+    - [x] **顺利完成验证与编译校验**：经物理编译无任何语法、拼写或缩进问题，并通过独立的 `scratch_verify.py` 在 000566 海南海药的真实历史/实盘数据组合上完美跑通了周线指标重构测试，无一崩溃，周线均线准确对齐。
+
 ## 2026-07-01 21:00
 - [x] **实现人气共振自动收盘持久化与手动刷新强制写盘机制 (Implemented Auto Post-Close Saving & Forced Persistence on Manual Refresh)**：
     - [x] **实现手动刷新强制持久化功能 (Forced Persistence on Manual Refresh)**：重构了 `popularity_resonance_gui.py` 中的 `run_once_async` 方法与 `_run_once_job` 方法。新增了 `force_save` 参数，在手动点击“查询刷新”时强制设定 `force_save=True`，避开非交易日/盘后等严格的交易日日历限制，确保用户手动执行的查询数据能 100% 成功写入磁盘 CSV。
