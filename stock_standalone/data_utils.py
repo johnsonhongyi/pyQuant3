@@ -2298,10 +2298,11 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
     import numpy as np
 
     # === 1. 构造价格/量能矩阵 ===
+    # 增加列生成深度至 max_days + 4 以防路径B（平移 +2）访问越界
     def get_val_matrix(prefix):
-        cols = [f"{prefix}{i}d" for i in range(1, max_days + 2)]
+        cols = [f"{prefix}{i}d" for i in range(1, max_days + 4)]
         valid_cols = [c for c in cols if c in df.columns]
-        mat = np.zeros((N, max_days + 2))
+        mat = np.zeros((N, max_days + 4))
         if valid_cols:
             mat[:, 1:len(valid_cols)+1] = df[valid_cols].values
         return mat
@@ -2312,39 +2313,30 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
     V = get_val_matrix('lastv')
 
     # === 2. 主升结构窗口识别 (双路径: 趋势延续 + 回踩反包) ===
+    yesterday_up = P[:, win_start_idx] > P[:, win_start_idx + 1] * 0.995
     max_win = np.zeros(N, dtype=int)
 
-    # 取 ma10d/ma20d 作为支撑带（用于路径B回踩支撑判断）
-    # 优先取均值，单列有效时退化为该列，均无效时退化为 0
-    ma10_vals = df['ma10d'].values if 'ma10d' in df.columns else np.zeros(N)
-    ma20_vals = df['ma20d'].values if 'ma20d' in df.columns else np.zeros(N)
-    has_ma10 = ma10_vals > 0
-    has_ma20 = ma20_vals > 0
-    support_band = np.where(
-        has_ma10 & has_ma20,
-        (ma10_vals + ma20_vals) / 2,          # ma10/ma20 中轨
-        np.where(has_ma20, ma20_vals,
-                 np.where(has_ma10, ma10_vals, 0.0))
-    )
-
     # --- 路径A: 严格连阳主升结构 ---
-    # 严格要求连阳（收盘价依次抬高），以对齐可视化图表上的真实连阳天数
+    # 采用与日线一致的双轨制判定，即便当前周期 (本周) 微跌，也能回退并正确输出之前的历史连阳计数
     for w in range(win_start_idx + 1, max_days + 1):
-        c = np.arange(win_start_idx, w)
-        p = np.arange(win_start_idx + 1, w + 1)
+        # 路径 A: 包含当前周期 (从 win_start_idx 开始)
+        c_a = np.arange(win_start_idx, w)
+        p_a = np.arange(win_start_idx + 1, w + 1)
+        cond_trend_a = np.all(P[:, c_a] > P[:, p_a] * 0.995, axis=1)
+        high_ok_a = H[:, c_a] >= H[:, p_a] * 0.99
+        cond_high_a = np.sum(high_ok_a, axis=1) >= max(1, high_ok_a.shape[1] - 1)
+        combined_a = cond_trend_a & cond_high_a
 
-        # ① 收盘价严格依次抬高（连阳基础）
-        cond_trend = np.all(P[:, c] > P[:, p] * 0.995, axis=1)  # 允许0.5%极小误差，但基本要求抬高
+        # 路径 B: 排除当前周期 (向后偏移一位，从 win_start_idx + 1 开始)
+        c_b = np.arange(win_start_idx + 1, w + 1)
+        p_b = np.arange(win_start_idx + 2, w + 2)
+        cond_trend_b = np.all(P[:, c_b] > P[:, p_b] * 0.995, axis=1)
+        high_ok_b = H[:, c_b] >= H[:, p_b] * 0.99
+        cond_high_b = np.sum(high_ok_b, axis=1) >= max(1, high_ok_b.shape[1] - 1)
+        combined_b = cond_trend_b & cond_high_b
 
-        # ② 高点不破趋势（最多允许1根高点轻微回落，但收盘必须满足①）
-        high_ok = H[:, c] >= H[:, p] * 0.99
-        cond_high = np.sum(high_ok, axis=1) >= max(1, high_ok.shape[1] - 1)
-
-        combined = cond_high & cond_trend
-        
-        # 只有在更短周期也是 combined (即没有断裂) 时，才赋予 max_win
-        # 因为是从小到大遍历 w，如果不 combined，理论上应该 break，但由于矩阵运算，我们需要用 np.where 逻辑
-        # 简单处理：只要 combined 成立，就更新 max_win
+        # 归并判定
+        combined = (yesterday_up & combined_a) | (~yesterday_up & combined_b)
         max_win[combined] = np.maximum(max_win[combined], w - win_start_idx + 1)
 
     # === 3. 过滤有效窗口 ===
@@ -2352,24 +2344,29 @@ def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=Fals
     if len(keep_idx) == 0:
         return {}
 
-    # === 4. 结构斜率（每日平均涨幅 %）===
-    start_d = 1
-    end_d = max_win[keep_idx]
+    # === 4. 结构斜率（每日平均涨幅 %）与起终点计算 ===
+    # 动态确定连阳的起点 start_d 与终点 end_d
+    start_d = np.where(yesterday_up[keep_idx], win_start_idx, win_start_idx + 1)
+    end_d = start_d + max_win[keep_idx] - 1
 
     p_start = P[keep_idx, start_d]
     p_end = P[keep_idx, end_d]
 
-    slopes = (p_start - p_end) / p_end / (max_win[keep_idx] - 1) * 100
+    slopes = (p_start - p_end) / p_end / (np.maximum(1.0, max_win[keep_idx] - 1)) * 100
 
     # === 5. 量能爆发系数 ===
     v_sub = V[keep_idx].copy()
     col_range = np.arange(V.shape[1])
 
-    range_mask = (col_range >= 1) & (col_range <= end_d[:, None])
+    # 范围自适应对齐
+    range_mask = (col_range >= start_d[:, None]) & (col_range <= end_d[:, None])
     v_sub[~range_mask] = 0
 
     avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
-    vol_ratio = V[keep_idx, 1] / (avg_vols + 1e-9)
+    
+    # 提取起点量能用于比例计算
+    v_start = V[keep_idx, start_d]
+    vol_ratio = v_start / (avg_vols + 1e-9)
 
     power_idx = slopes * vol_ratio
 
