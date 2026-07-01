@@ -152,6 +152,12 @@ class PRServiceGUI:
         if hasattr(self, 'root'):
             self.root.after(500, self._poll_favorites_loop)
 
+        # 自动同步收盘数据状态初始化与定时器注册
+        self._auto_save_fail_count = 0
+        self._last_auto_save_attempt_time = 0.0
+        if hasattr(self, 'root'):
+            self.root.after(5000, self._check_auto_refresh_after_close)
+
     def on_close(self):
         try:
             self.sync_manager.stop()
@@ -915,9 +921,10 @@ class PRServiceGUI:
     def run_once_async(self):
         self.btn_refresh.config(state="disabled", text="正在查询...")
         self.lbl_status.config(text="正在获取数据...", fg="blue")
-        threading.Thread(target=self._run_once_job, daemon=True).start()
+        # 手动查询刷新，传入 force_save=True 以强制持久化数据
+        threading.Thread(target=self._run_once_job, args=(True,), daemon=True).start()
 
-    def _run_once_job(self):
+    def _run_once_job(self, force_save=False):
         try:
             em_data = {}
             ths_data = {}
@@ -980,7 +987,7 @@ class PRServiceGUI:
                     service_logger.error(f"写入数据缓存失败: {cache_err}")
             
             # 每日数据持久化更新当日数据 (在 save_daily_resonance_csv 内部自适应校验交易日)
-            self.save_daily_resonance_csv(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes)
+            self.save_daily_resonance_csv(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes, force_save=force_save)
             
             # 5. 在主线程中安全地更新所有表（包括去重过滤和整体布局）
             self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
@@ -1540,10 +1547,10 @@ class PRServiceGUI:
         else:
             messagebox.showerror("错误", "非标准的人气共振数据 CSV/GZ 文件")
 
-    def save_daily_resonance_csv(self, em_data, ths_data, lh_data, tgb_data, resonance_results, all_quotes):
+    def save_daily_resonance_csv(self, em_data, ths_data, lh_data, tgb_data, resonance_results, all_quotes, force_save=False):
         # 1. 交易日及盘后判定限制
         try:
-            if not cct.get_trade_date_status():
+            if not force_save and not cct.get_trade_date_status():
                 service_logger.info("今日非交易日，无需持久化盘后数据。")
                 return
         except Exception as otc_err:
@@ -1664,6 +1671,74 @@ class PRServiceGUI:
                 self.root.after(0, self._refresh_calendar_highlights)
         except Exception as e:
             service_logger.error(f"每日数据持久化 CSV.GZ 失败: {e}")
+
+    def _check_auto_refresh_after_close(self):
+        if not hasattr(self, 'root') or not self.root:
+            return
+        try:
+            today = time.strftime("%Y-%m-%d")
+            
+            # 1. 检查今日是否已持久化
+            csv_dir = os.path.join(get_app_root(), "datacsv")
+            gz_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
+            csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv")
+            has_persisted = os.path.exists(gz_path) or os.path.exists(csv_path)
+            
+            if not has_persisted:
+                # 2. 检查是否是交易日
+                is_trade_day = False
+                try:
+                    is_trade_day = cct.get_trade_date_status()
+                except Exception as e:
+                    service_logger.debug(f"检查交易日状态异常: {e}")
+                    
+                if is_trade_day:
+                    # 3. 检查时间是否在 15:15 之后
+                    now_time_str = time.strftime("%H:%M")
+                    if now_time_str >= "15:15":
+                        # 冷却时间：至少间隔 5 分钟（300秒）才重试一次，防止异常时高频请求
+                        import time as t_mod
+                        now_ts = t_mod.time()
+                        last_attempt = getattr(self, '_last_auto_save_attempt_time', 0.0)
+                        fail_count = getattr(self, '_auto_save_fail_count', 0)
+                        
+                        if now_ts - last_attempt >= 300.0:
+                            if not getattr(self, '_is_auto_saving_after_close', False):
+                                self._is_auto_saving_after_close = True
+                                self._last_auto_save_attempt_time = now_ts
+                                service_logger.info(f"检测到收盘（15:15后）且今日人气共振数据尚未持久化，启动自动刷新与持久化 (尝试次数: {fail_count + 1})...")
+                                
+                                def auto_job():
+                                    try:
+                                        self.root.after(0, lambda: self.lbl_status.config(text="自动同步数据中...", fg="blue"))
+                                        # 自动查询并强制持久化数据
+                                        self._run_once_job(force_save=True)
+                                        # 延迟检测文件是否成功写入
+                                        t_mod.sleep(5.0)
+                                        if os.path.exists(gz_path) or os.path.exists(csv_path):
+                                            self._auto_save_fail_count = 0
+                                            service_logger.info("收盘后自动同步并持久化人气共振数据成功。")
+                                            self.root.after(0, lambda: self.lbl_status.config(text="收盘自动持久化完成", fg="darkgreen"))
+                                        else:
+                                            self._auto_save_fail_count = fail_count + 1
+                                            service_logger.warning(f"收盘后自动同步数据未产生有效文件，当前失败次数: {self._auto_save_fail_count}")
+                                            self.root.after(0, lambda: self.lbl_status.config(text="收盘自动持久化失败", fg="red"))
+                                    except Exception as ex:
+                                        self._auto_save_fail_count = fail_count + 1
+                                        service_logger.error(f"收盘自动刷新持久化任务执行失败: {ex}")
+                                        self.root.after(0, lambda: self.lbl_status.config(text=f"持久化异常: {ex}", fg="red"))
+                                    finally:
+                                        self._is_auto_saving_after_close = False
+                                        
+                                threading.Thread(target=auto_job, daemon=True).start()
+        except Exception as e:
+            service_logger.error(f"收盘自动刷新检测异常: {e}")
+        finally:
+            try:
+                # 每 30 分钟轮询检测一次状态
+                self.root.after(1800000, self._check_auto_refresh_after_close)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     # Windows/PyInstaller 多进程兼容性支持
