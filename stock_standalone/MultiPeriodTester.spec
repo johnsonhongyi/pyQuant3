@@ -19,7 +19,9 @@ a = Analysis(
     ['standalone_multi_period_tester.py'],
     pathex=[],
     binaries=[],
-    datas=[(csv_path, "a_trade_calendar")],
+    datas=[(csv_path, "a_trade_calendar"),
+        ("config/multi_period_help.md", "config"),
+    ],
     hiddenimports=[
         'global_favorites', 'stock_logic_utils', 
         'pandas', 'numpy', 'tables', 'sqlite3', 
