@@ -1,3 +1,9 @@
+## 2026-07-01 14:35
+- [x] **优化收盘后挂起重开的 `rzrq` 自动初始化机制 (Optimized `rzrq` Auto-Initialization on Resume)**：
+    - [x] **实现跨自然日 `rzrq` 自动重新获取**：在 `singleAnalyseUtil.py` 的启动流程中引入 `rzrq_date` 变量保存首次加载的日期，并在 `while 1` 循环的 `try` 块顶层增加自然日变化监测。当次日用户在终端挂起提示处按任意键继续时，系统一旦检测到 `today_str != rzrq_date`，将自动重新调用 `ffu.get_dfcfw_rzrq_SHSZ()` 刷新当天的融资融券指标并对齐日期戳，避免了昨日冗余数据导致的数据分析失准。
+    - [x] **根治主循环高频 `get_today()` 的性能损耗**：将 `today_str = cct.get_today()` 的更新动作移至 `except (KeyboardInterrupt)` 中的 `cct_raw_input` 之后。这样，只有在每日收盘挂起、次日用户敲击回车继续运行的那个瞬间才会更新当前自然日，从而彻底避免了在盘中高速循环中高频、重复调用系统日期转换函数的性能开销。
+    - [x] **通过物理编译语法校验 (Passed Compiler Syntax Check)**：对 `singleAnalyseUtil.py` 执行了 `py_compile` 校验，无任何语法、拼写或缩进问题，系统稳定运行。
+
 ## 2026-07-01 14:30
 - [x] **优化 `lastbuy` 非交易时段持久化与保留 (Optimized `lastbuy` Persistence & Preservation During Off-Hours)**：
     - [x] **实现 `lastbuy` 交易时段条件重置 (Conditional Reset of `lastbuy` in Trading Session)**：重构了 `sina_data.py` 中的 `lastbuy` 重置判定。现在，系统仅在交易时段 (`cct.get_work_time()` 返回 True) 或内存中未初始化缓存 `lastbuydf` (`need_init` 为 True) 时，才触发重置 `lastbuy` 值至当前收盘价。

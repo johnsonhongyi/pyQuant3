@@ -679,6 +679,8 @@ if __name__ == '__main__':
     success = 0
     # rzrq = ffu.get_dfcfw_rzrq_SHSZ2()
     rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+    rzrq_date = cct.get_today()
+    today_str = cct.get_today()
     dl = 60
     fibc = 3
     fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
@@ -690,6 +692,10 @@ if __name__ == '__main__':
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     while 1:
         try:
+            if today_str != rzrq_date:
+                log.info("Trading day changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
+                rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                rzrq_date = today_str
             if not status:
                 if len(fibl) == 0 or fibcount >= fibc:
                     # print "change FibDiff"
@@ -701,6 +707,7 @@ if __name__ == '__main__':
                     # if rzrq['shrz'] == 0 or rzrq['szrz'] == 0 or rzrq['dff'] == 0 or rzrq['all'] == 0:
                     #     log.warn("rzrq 0")
                     rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                    rzrq_date = cct.get_today()
 
                 log.info('start get_hot_count')
                 get_hot_countNew(percentDuration, rzrq, fibl, fibc)
@@ -829,6 +836,7 @@ if __name__ == '__main__':
                     # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
                     print("1-ramdisk_back is OK")
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
+            today_str = cct.get_today()
             if len(st) == 0:
                 status = False
             elif st.lower() == 'g' or st.lower() == 'go':
