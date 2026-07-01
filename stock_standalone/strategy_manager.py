@@ -16,6 +16,7 @@ from history_manager import QueryHistoryManager
 from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
+from query_engine_util import query_engine
 
 logger = LoggerFactory.getLogger(name="StrategyManager")
 
@@ -843,7 +844,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                      if cols_to_add:
                          df_temp = df_temp.join(df_all[cols_to_add])
                 
-                df_temp = df_temp.query(final_query)
+                df_temp = df_temp.query(final_query, engine='python')
                 
             except Exception as e:
                 # 过滤失败显示在状态栏

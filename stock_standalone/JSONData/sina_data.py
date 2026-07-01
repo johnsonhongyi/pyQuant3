@@ -1552,7 +1552,8 @@ class Sina:
                 cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
 
             else:
-                if (cct.GlobalValues().getkey('lastbuylogtime') is not None ) or self.lastbuy_timeout_status(logtime):
+                need_init = cct.GlobalValues().getkey('lastbuydf') is None
+                if (cct.get_work_time() or need_init) and ((cct.GlobalValues().getkey('lastbuylogtime') is not None ) or self.lastbuy_timeout_status(logtime)):
                     cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
                     df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
                                               df['close'].values, df['llastp'].values)))

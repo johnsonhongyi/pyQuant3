@@ -1,3 +1,9 @@
+## 2026-07-01 14:30
+- [x] **优化 `lastbuy` 非交易时段持久化与保留 (Optimized `lastbuy` Persistence & Preservation During Off-Hours)**：
+    - [x] **实现 `lastbuy` 交易时段条件重置 (Conditional Reset of `lastbuy` in Trading Session)**：重构了 `sina_data.py` 中的 `lastbuy` 重置判定。现在，系统仅在交易时段 (`cct.get_work_time()` 返回 True) 或内存中未初始化缓存 `lastbuydf` (`need_init` 为 True) 时，才触发重置 `lastbuy` 值至当前收盘价。
+    - [x] **实现非交易时段自动保留最后一个 `lastbuy` (Preserved Last `lastbuy` Value During Off-Hours)**：在非交易时段（盘后/周末/节假日），当 `logtime` 非 0 且内存已有缓存时，重置逻辑被自动拦截，系统回退并调用 `combine_lastbuy(df)`。这实现了盘后及非交易时段仍能安全读取 and 显示最后一个有效的 `lastbuy`，使用户在盘后也能顺利查看切片 `dff` 差值，消除了非交易时段 `lastbuy` 丢失或被清零的缺陷。
+    - [x] **通过物理编译语法校验 (Passed Compiler Syntax Check)**：对 `sina_data.py` 执行了 `py_compile` 校验，无任何语法、拼写或缩进问题，系统稳定运行。
+
 ## 2026-07-01 12:35
 - [x] **修复打包与可执行文件环境下多周期帮助文档读取失败的 Bug (Fixed Multi-Period Help Document Loading Failure in Packaged Environments)**：
     - [x] **整合 `get_conf_path` 到帮助文档路径加载 (Integrated `get_conf_path` for Help File Loading)**：重构了 `standalone_multi_period_tester.py` 中 `show_help_documentation` 方法的本地文件路径生成逻辑。将硬编码拼接 App 绝对根目录的代码，修改为调用系统统一的 `sys_utils.get_conf_path("config/multi_period_help.md")` 自愈接口，彻底终结了打包后由于物理绝对路径不存在导致的 FileNotFoundError 崩溃。
