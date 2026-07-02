@@ -5726,7 +5726,7 @@ def build_hma_and_trendscore_local(
     for col in strong_cols:
         if col in df.columns:
             arr = df[col].fillna(0).values.astype('float32')
-            arr_ptp = arr.ptp()
+            arr_ptp = np.ptp(arr)
             if arr_ptp > 0:
                 arr = (arr - arr.min()) / arr_ptp
             else:
