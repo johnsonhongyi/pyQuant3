@@ -1,5 +1,10 @@
 # Gemini 任务跟进与计划
 
+## 2026-07-02 13:15
+- [x] **修复 NumPy 2.0 兼容性引起的异动联动 Rank 缺失问题**：
+    - [x] **修复本地排序计算崩溃**：在 `异动联动.py` 的 `build_hma_and_trendscore_local` 中，将已在 NumPy 2.0 中被移除的 `arr.ptp()` 成员方法调用修改为全局通用的 `np.ptp(arr)`。这彻底解决了由于 NumPy 版本不兼容导致 `fast_insert` 抛出 AttributeError 进而导致界面 `'rank'` 列空白的 bug。
+    - [x] **保留独立工具库稳定性**：保持 `stock_standalone/data_utils.py` 无损不作变动，以适配其对应的 NumPy 1.23.5 稳定环境，只对 `异动联动` 进行本地代码修正。
+
 ## 2026-06-16 11:35
 - [x] **修复 UI 模式与命令行模式多屏幕拓扑签名不一致缺陷 (Aligned Display Topology Signatures)**：
     - [x] **根治 DPI 虚拟化导致的分辨率与缩放检测偏差**：在 `window_manager/core.py` 的 `get_monitor_details_all_with_scale` 方法中，在执行显示器探测前强制初始化 `SetProcessDpiAwareness(2)`，保证命令行非 GUI 进程与 PyQt6 UI 进程具有完全相同的操作系统级 DPI 意识等级。
