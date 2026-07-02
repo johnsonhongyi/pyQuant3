@@ -386,6 +386,12 @@ class PRServiceGUI:
             "sort_descending": False
         }
         
+    def _get_dpi_scale_factor(self):
+        try:
+            return self.root.winfo_fpixels('1i') / 96.0
+        except Exception:
+            return 1.0
+
     def save_config_settings(self):
         try:
             self.config["blk_name"] = self.entry_blk_name.get().strip() or "RQG.blk"
@@ -406,6 +412,17 @@ class PRServiceGUI:
                 self.config["sort_col"] = self.tree_res.sort_col
                 self.config["sort_descending"] = self.tree_res.sort_descending
                 
+            # 保存 sash 比例
+            if hasattr(self, "paned") and hasattr(self, "sash_restored") and self.sash_restored:
+                try:
+                    pos = self.paned.sash_coord(0)[0]
+                    if pos > 50:
+                        width = self.paned.winfo_width()
+                        if width > 100 and pos < width - 50:
+                            self.config["sash_ratio"] = float(pos) / float(width)
+                except Exception as e:
+                    service_logger.error(f"Failed to save sash in config: {e}")
+
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except:
@@ -461,9 +478,15 @@ class PRServiceGUI:
         main_pane = tk.Frame(self.root)
         main_pane.pack(fill="both", expand=True, padx=4, pady=2)
 
+        # 引入中间垂直分隔的手动拖动
+        self.paned = tk.PanedWindow(main_pane, orient="horizontal", sashrelief="raised", sashwidth=4)
+        self.paned.pack(fill="both", expand=True)
+
+        self.sash_restored = False
+
         # 左分栏
-        self.left_frame = tk.Frame(main_pane)
-        self.left_frame.pack(side="left", fill="both", expand=True, padx=2)
+        self.left_frame = tk.Frame(self.paned)
+        self.paned.add(self.left_frame, minsize=200)
 
         # 查询刷新按钮
         self.btn_refresh = tk.Button(
@@ -490,13 +513,9 @@ class PRServiceGUI:
         self.ths_container = tk.Frame(self.left_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         self.tree_ths = self.create_treeview(self.ths_container, "花")
 
-        # 垂直分隔栏
-        self.v_sep = ttk.Separator(main_pane, orient="vertical")
-        self.v_sep.pack(side="left", fill="y", padx=6)
-
         # 右分栏
-        self.right_frame = tk.Frame(main_pane)
-        self.right_frame.pack(side="left", fill="both", expand=True, padx=2)
+        self.right_frame = tk.Frame(self.paned)
+        self.paned.add(self.right_frame, minsize=300)
 
         # 写入板块按钮
         self.btn_write = tk.Button(
@@ -529,6 +548,43 @@ class PRServiceGUI:
         # 淘 (TaoGuBa) Table Frame (1px 窄边框模式)
         self.tgb_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         self.tree_tgb = self.create_treeview(self.tgb_container, "淘")
+
+        self._last_paned_width = 0
+
+        # 设置 sash 的位置恢复与保存
+        def save_sash_pos(event=None):
+            if not self.sash_restored:
+                return
+            try:
+                pos = self.paned.sash_coord(0)[0]
+                if pos <= 50:
+                    return
+                width = self.paned.winfo_width()
+                if width > 100 and pos < width - 50:
+                    ratio = float(pos) / float(width)
+                    self.config["sash_ratio"] = ratio
+                    self.save_config_settings()
+                    service_logger.debug(f"[sash] 已保存 PR 界面 sash_ratio={ratio:.4f}")
+            except Exception as e:
+                service_logger.error(f"Failed to save sash position: {e}")
+
+        def restore_sash(event=None):
+            width = self.paned.winfo_width()
+            if width > 100:  # 确保已经分配合理的大小
+                # 只有在初次还原，或者宽度发生变化时，才按比例重置
+                if not self.sash_restored or abs(width - getattr(self, '_last_paned_width', 0)) > 2:
+                    self._last_paned_width = width
+                    ratio = self.config.get("sash_ratio", 380.0 / 780.0)
+                    target_sash = int(width * ratio)
+                    try:
+                        self.paned.sash_place(0, target_sash, 0)
+                        self.sash_restored = True
+                    except Exception:
+                        pass
+
+        self.paned.bind("<Configure>", restore_sash)
+        self.root.after(200, restore_sash)  # 兜底延迟执行
+        self.paned.bind("<ButtonRelease-1>", save_sash_pos)
 
         # 底部配置控制栏
         bottom_frame = tk.Frame(self.root, bd=1, relief="groove")

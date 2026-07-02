@@ -1,3 +1,10 @@
+## 2026-07-02 11:35
+- [x] **根治人气共振客户端 tk.PanedWindow 选项 weight 报错与等比拉伸优化 (Fixed tk.PanedWindow Weight Option Error & Optimized Proportional Resizing)**：
+    - [x] **修复 TclError: unknown option "-weight"**：定位并清除了在 `popularity_resonance_gui.py` 里的 `self.paned.add` 调用中传入的 `weight=1` 这一不支持参数，彻底消除了由于 tk.PanedWindow 和 ttk.Panedwindow 差异在 runtime 抛出的 `TclError`。
+    - [x] **实现无损且自适应分辨率的 `sash_ratio` 比例缩放算法**：重构了 `restore_sash` 和 `save_sash_pos` 核心逻辑，将传统的物理像素坐标存储升级为更科学的“无量纲分割比例”模式（`sash_ratio`）。当用户手动拖拽调整中间垂直分割线并松开鼠标（`ButtonRelease-1`）或关闭窗口时，计算其占容器总宽度的比例并存入 `popularity_resonance_config.json` 物理配置文件。
+    - [x] **实现窗口拉伸等比缩放**：在 `<Configure>`（配置调整）心跳和初次启动自愈还原时，动态使用当前容器物理宽度乘以 `sash_ratio` 比例自适应定位 sash，使左右两栏能在窗口横向拉伸时跟随主窗体完美等比缩放，彻底消除了单侧拉伸紊乱或白屏的缺陷。
+    - [x] **通过物理编译与挂起启动测试**：执行了 `py_compile` 自检与 `python popularity_resonance_gui.py` 试启动，主线程成功进入 mainloop 且无任何 Tcl 崩溃或启动卡住发生。
+
 ## 2026-07-01 23:10
 - [x] **实现全周期下 MA5 与 MA10 行情合并重算支持与自适应对齐 (Enabled Global Dynamic MA5 & MA10 Recalculation & Adaptive Period Alignment)**：
     - [x] **解除大周期的实时均线重算封锁**：重构了 `data_utils.py` 中 `complete_indicators_pipeline` 处的均线重算模块，去除了日线专属的 `if resample == 'd':` 条件限制。
