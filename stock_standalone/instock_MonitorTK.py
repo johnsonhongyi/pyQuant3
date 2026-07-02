@@ -4867,22 +4867,62 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         
-        # --- [NEW] 窗口位置联动 (Manual Pos Sync) ---
-        def save_main_pos():
+        # --- 窗口位置手动快照（Manual Snapshot，独立键 main_window_manual）---
+        # 与 on_close 自动持久化槽（main_window）分开，用于切换屏幕/分辨率变形后的单独修复。
+        _MANUAL_WIN_KEY = "main_window_manual"
+
+        def save_main_pos_manual():
+            """手动快照：保存到独立键，不影响自动持久化槽"""
             if hasattr(self, 'save_window_position'):
-                self.save_window_position(self, "main_window")
-                toast_message(self, "主窗口位置已保存")
+                self.save_window_position(self, _MANUAL_WIN_KEY)
+                toast_message(self, "📍 手动快照已保存（可用🔧恢复）")
 
-        def load_main_pos():
+        def restore_main_pos_manual():
+            """从手动快照槽恢复；若尚未保存过则提示"""
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            import json, os
+            # 检查手动快照是否存在
+            has_snapshot = False
+            try:
+                scale = self._get_dpi_scale_factor() if hasattr(self, '_get_dpi_scale_factor') else 1.0
+                cfg_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale) if hasattr(self, '_get_config_file_path') else WINDOW_CONFIG_FILE
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, "r", encoding="utf-8") as _f:
+                        _d = json.load(_f)
+                    has_snapshot = _MANUAL_WIN_KEY in _d
+            except Exception:
+                pass
+
+            if not has_snapshot:
+                toast_message(self, "⚠️ 尚无手动快照，请先点 📍 保存")
+                return
+
             if hasattr(self, 'load_window_position'):
-                self.load_window_position(self, "main_window")
-                self.reload_cfg_value()
-                toast_message(self, "主窗口位置与配置已恢复")
+                self.load_window_position(self, _MANUAL_WIN_KEY)
+                toast_message(self, "🔧 已从手动快照恢复位置")
 
-        self.top_save_pos_btn = tk.Button(ctrl_frame, text="💾", command=save_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2)
+        self.top_save_pos_btn = tk.Button(
+            ctrl_frame, text="📍", command=save_main_pos_manual,
+            font=("Segoe UI Symbol", 9), relief="flat", padx=2
+        )
         self.top_save_pos_btn.pack(side="left", padx=2)
-        self.top_load_pos_btn = tk.Button(ctrl_frame, text="🔄", command=load_main_pos, font=("Segoe UI Symbol", 9), relief="flat", padx=2)
+        # tooltip
+        try:
+            from tktooltip import ToolTip
+            ToolTip(self.top_save_pos_btn, msg="📍 手动保存窗口位置快照\n（独立于自动持久化，用于修复换屏变形）", delay=0.5)
+        except Exception:
+            pass
+
+        self.top_load_pos_btn = tk.Button(
+            ctrl_frame, text="🔧", command=restore_main_pos_manual,
+            font=("Segoe UI Symbol", 9), relief="flat", padx=2
+        )
         self.top_load_pos_btn.pack(side="left", padx=2)
+        try:
+            from tktooltip import ToolTip
+            ToolTip(self.top_load_pos_btn, msg="🔧 恢复手动快照位置\n（修复换屏/分辨率变形，需先点📍保存）", delay=0.5)
+        except Exception:
+            pass
 
         self._last_resample = self.resample_combo.get().strip()
 

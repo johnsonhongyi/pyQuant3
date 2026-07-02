@@ -409,9 +409,10 @@ def complete_indicators_pipeline(
     valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
     if valid_mask.any():
         if 'lastp1d' in top_all.columns:
-            top_all.loc[valid_mask, 'percent'] = (
+            raw_pct = (
                 top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
             ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
+            top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
             top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
         
         # 计算 MA5
@@ -420,7 +421,7 @@ def complete_indicators_pipeline(
         if len(available_ma5) > 1:
             ma5_sum = sum(top_all[c].fillna(0) for c in available_ma5)
             non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma5)
-            top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+            top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask].round(2)
             top_all.loc[valid_mask, 'ma51d'] = top_all.loc[valid_mask, 'ma5d']
             
         # 计算 MA10
@@ -429,7 +430,7 @@ def complete_indicators_pipeline(
         if len(available_ma10) > 1:
             ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
             non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
-            top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask]
+            top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask].round(2)
     
     # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
     if 'now' in top_all.columns:
