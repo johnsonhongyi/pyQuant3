@@ -8545,13 +8545,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
-                ats_enabled = getattr(self, '_ats_enabled_cache', False) or getattr(self, '_pr_enabled_cache', False)
+                now_sec = time.time()
+                ats_enabled = False
+                for port, key in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
+                    is_active = getattr(self, key, False)
+                    last_try = getattr(self, f'_last_try_{port}', 0.0)
+                    if is_active or (now_sec - last_try > 30.0):
+                        ats_enabled = True
                 
                 # ⭐ 核心判断：是否需要跳过本轮同步（没开且无强制请求）
                 if not vis_enabled and not ats_enabled and not getattr(self, '_force_full_sync_pending', False):
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
-                        if getattr(self, '_vis_enabled_cache', True) or getattr(self, '_ats_enabled_cache', False) or getattr(self, '_pr_enabled_cache', False):
+                        now_check = time.time()
+                        has_any_ats = False
+                        for p, k in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
+                            if getattr(self, k, False) or (now_check - getattr(self, f'_last_try_{p}', 0.0) > 30.0):
+                                has_any_ats = True
+                                break
+                        if getattr(self, '_vis_enabled_cache', True) or has_any_ats:
                             break
                         time.sleep(0.2)
                     else:
@@ -8656,7 +8668,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._last_send_df_hash = df_hash
                     mem = 0
                     # --- 🚀 [FIX 3] 增量计算逻辑优化 ---
-                    if hasattr(self, 'df_ui_prev') and not self._cold_start:
+                    is_cold = self._cold_start
+                    if hasattr(self, 'df_ui_prev') and not is_cold:
                         try:
                             with timed_ctx("viz_df_compare", warn_ms=10000):
                                 # 仅在已有缓存且不是冷启动时才 compare
@@ -8682,9 +8695,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         msg_type = 'UPDATE_DF_ALL'
                         self._cold_start = False # 重置冷启动标志
 
-
                     # 更新缓存
                     self.df_ui_prev = df_ui.copy()
+
+                    # --- 🚀 [ATS/PR DAILY FIX] 独立计算 26670/26671 日线数据包 ---
+                    df_daily = df_bus_all
+                    if cur_resample == 'd':
+                        msg_type_daily = msg_type
+                        payload_daily_to_send = payload_to_send
+                        self.df_daily_prev = df_ui.copy()
+                        sync_version_daily = self.sync_version
+                    else:
+                        # 非日线周期下，计算日线的增量/全量
+                        if hasattr(self, 'df_daily_prev') and self.df_daily_prev is not None and not is_cold:
+                            try:
+                                with timed_ctx("daily_df_compare", warn_ms=5000):
+                                    df_diff_daily = df_daily.compare(self.df_daily_prev, keep_shape=False, keep_equal=False)
+                                payload_daily_to_send = df_diff_daily
+                                if df_diff_daily.empty:
+                                    msg_type_daily = 'DF_DIFF_EMPTY'
+                                else:
+                                    msg_type_daily = 'UPDATE_DF_DIFF'
+                            except ValueError:
+                                msg_type_daily = 'UPDATE_DF_ALL'
+                                payload_daily_to_send = df_daily
+                        else:
+                            msg_type_daily = 'UPDATE_DF_ALL'
+                            payload_daily_to_send = df_daily
+                        
+                        self.df_daily_prev = df_daily.copy()
+                        
+                        if msg_type_daily == 'UPDATE_DF_ALL':
+                            self.sync_version_daily = 0
+                        else:
+                            self.sync_version_daily = getattr(self, 'sync_version_daily', 0) + 1
+                        sync_version_daily = self.sync_version_daily
 
                     if 'code' not in df_ui.columns:
                         df_ui = df_ui.reset_index()
@@ -8706,6 +8751,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'data': payload_to_send,
                         'ver': self.sync_version,
                         'resample': cur_resample
+                    }
+
+                    # --- 🎁 封装 26670/26671 专用的日线协议包 ---
+                    sync_package_daily = {
+                        'type': msg_type_daily,
+                        'data': payload_daily_to_send,
+                        'ver': sync_version_daily,
+                        'resample': 'd'
                     }
 
                     # ======================================================
@@ -8733,10 +8786,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
                     # ======================================================
                     vis_enabled = getattr(self, '_vis_enabled_cache', True)
-                    ats_enabled = getattr(self, '_ats_enabled_cache', False) or getattr(self, '_pr_enabled_cache', False)
+                    now_ipc = time.time()
+                    ats_enabled = False
+                    for port, key in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
+                        is_active = getattr(self, key, False)
+                        last_try = getattr(self, f'_last_try_{port}', 0.0)
+                        if is_active or (now_ipc - last_try > 30.0):
+                            ats_enabled = True
                     
                     # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
-                    now_ipc = time.time()
                     ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
                     
                     # [NEW] 没有数据更新且不是强制全量同步请求时，直接跳过物理发送 (与可视化一致)
@@ -8751,6 +8809,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             protocol=pickle.HIGHEST_PROTOCOL)
 
                                 header = struct.pack("!I", len(payload))
+
+                                if cur_resample == 'd':
+                                    payload_daily = payload
+                                    header_daily = header
+                                else:
+                                    with timed_ctx("daily_IPC_pickle", warn_ms=5000):
+                                        payload_daily = pickle.dumps(('UPDATE_DF_DATA', sync_package_daily),
+                                                protocol=pickle.HIGHEST_PROTOCOL)
+                                    header_daily = struct.pack("!I", len(payload_daily))
 
                                 # 2️⃣ socket 分发到 26668 (可视化) 以及 26670 / 26671 (外部终端)
                                 send_success_any = False
@@ -8769,18 +8836,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         except (socket.timeout, ConnectionError, OSError):
                                             pass
 
-                                # 发送给 26670 (ATS 终端) 和 26671 (人气共振终端) —— 只要到了这步就必定尝试发送
-                                if ats_enabled or is_forced:
+                                # 发送给 26670 (ATS 终端) 和 26671 (人气共振终端)
+                                # 只要端口是活跃的，或者距离上一次尝试超过冷却时间，或者有强制同步请求，就尝试发送
+                                need_ats_send = False
+                                for port in (26670, 26671):
+                                    active_key = '_ats_enabled_cache' if port == 26670 else '_pr_enabled_cache'
+                                    is_port_active = getattr(self, active_key, False)
+                                    last_try = getattr(self, f'_last_try_{port}', 0.0)
+                                    if is_port_active or is_forced or (now_ipc - last_try > 30.0):
+                                        need_ats_send = True
+                                        break
+                                
+                                if need_ats_send:
                                     with timed_ctx("ats_IPC_send", warn_ms=1000):
                                         for port in (26670, 26671):
                                             active_key = '_ats_enabled_cache' if port == 26670 else '_pr_enabled_cache'
                                             is_port_active = getattr(self, active_key, False)
-                                            if is_port_active or is_forced:
+                                            last_try = getattr(self, f'_last_try_{port}', 0.0)
+                                            
+                                            # 如果端口已经是活跃的，或者是强制同步请求，或者距离上次尝试连接超过30秒
+                                            if is_port_active or is_forced or (now_ipc - last_try > 30.0):
+                                                setattr(self, f'_last_try_{port}', now_ipc)
                                                 try:
                                                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                                                         s2.settimeout(1.5)  # 1.5秒超时防止阻塞
                                                         s2.connect(('127.0.0.1', port))
-                                                        s2.sendall(b"DATA" + header + payload)
+                                                        s2.sendall(b"DATA" + header_daily + payload_daily)
                                                         send_success_any = True
                                                         setattr(self, active_key, True)
                                                         if port == 26670:
