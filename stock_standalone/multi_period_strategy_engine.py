@@ -3,7 +3,7 @@ import json
 import os
 from typing import Dict, List, Optional
 from JohnsonUtil import LoggerFactory
-from sys_utils import get_app_root
+from sys_utils import get_app_root, get_conf_path
 logger = LoggerFactory.getLogger("MultiPeriodStrategyEngine")
 
 class MultiPeriodStrategyEngine:
@@ -12,7 +12,7 @@ class MultiPeriodStrategyEngine:
     def __init__(self):
         self._period_dfs: Dict[str, pd.DataFrame] = {}
         self._strategies: List[dict] = []
-        self.config_path = os.path.join(get_app_root(), "config", "multi_period_strategies.json")
+        self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
         
     def load_period_data(self, period: str, top_now: pd.DataFrame) -> pd.DataFrame:

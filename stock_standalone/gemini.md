@@ -1,3 +1,31 @@
+## 2026-07-03 15:50
+- [x] **实现策略编辑器自动定位当前选定策略 (Auto-Selecting Current Strategy in Strategy Editor)**：
+    - [x] **自动匹配 strategy_id 并定位**：在 `standalone_multi_period_tester.py` 中，重构了 `MultiPeriodStrategyEditor` 的初始化方法。打开策略编辑器时，不再硬编码默认选中第 0 个策略，而是动态提取父窗口当前选定的 `strategy_id`。如果找到匹配策略，则自动在 `listbox` 中高亮选中，并通过 `listbox.see()` 自动滚动至视口内，免去了用户每次打开编辑器后需要手动寻找和点击对应策略的繁琐步骤。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `standalone_multi_period_tester.py` 执行了物理编译校验，确认没有任何语法、拼写或缩进问题，系统完美保持稳定。
+
+## 2026-07-03 15:55
+- [x] **更新打包配置文件以包含多周期策略配置 (Updated Packaging Configurations to Include Multi-Period Strategy Config)**：
+    - [x] **补齐 PyInstaller 打包依赖**：在 `instock_MonitorTK.spec` 和 `MultiPeriodTester.spec` 文件的 `datas` 部分中，补齐了对 `"config/multi_period_strategies.json"` 的资源引用，确保 PyInstaller 编译时自动将其封包至二进制资源段。
+    - [x] **补齐 Nuitka 编译命令行选项**：在 `nuitka_instockMonitor.bat`、`nuitka_build_console.bat` 和 `nuitka_build_console_onlyClang.bat` 等 3 个 Nuitka 一键编译脚本中，新增了 `--include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json` 数据文件打包选项，打通了打包版程序在运行态时的按需提取及自愈路径。
+
+## 2026-07-03 15:52
+- [x] **实现多周期策略配置 (multi_period_strategies.json) 延迟与自愈释放 (Implemented Lazy-Loading & Auto-Release for Multi-Period Strategy Config)**：
+    - [x] **支持 get_conf_path 调用时动态自愈释放**：在 `sys_utils.py` 的 `RESOURCE_MAP` 字典中正式注册了 `"multi_period_strategies.json"`，并赋予其全新的 `delay_release: True` 属性。
+    - [x] **避免启动时无效释放**：在 `sys_utils.py` 的 `ensure_all_configs_released` 启动项初始化中加入过滤，智能跳过标记为 `delay_release` 的配置文件，完美满足了用户“在调用的时候再释放，没使用就不释放”的按需自愈需求，消除了无谓的启动期 I/O 动作。
+    - [x] **重构策略引擎初始化路径**：在 `multi_period_strategy_engine.py` 的构造函数中，将硬编码路径 `os.path.join(get_app_root(), ...)` 重构为 `get_conf_path("multi_period_strategies.json")`。确保了只有在真正实例化并调用多周期选股引擎时，才按需触发自愈释放，保证了逻辑优雅性与系统稳定性。
+    - [x] **自动化测试回归全绿通过**：通过 `test_multi_period_automated.py` 的测试验证，引擎成功从 `get_conf_path` 路径加载并保存配置，未引入任何副作用。
+
+## 2026-07-03 15:46
+- [x] **优化趋势大结构多周期选股策略配置 (Optimized Multi-Period Trend Strategy Config in JSON)**：
+    - [x] **定义并更新多周期趋势大结构策略模板 (Registered Trend Strategies in JSON)**：在 `config/multi_period_strategies.json` 配置文件中升级了“强势结构回踩反包启动”的周期条件，使其正式融合了 `d`、`2d`、`3d`、`m`、`45d` 等多时间周期交集；同时，新增了 3 个全新的量化趋势大结构策略：“趋势大结构：回踩企稳首次启动”、“趋势大结构：主升强加速”和“高风险破位：多周期跌破生命线”，物理解耦并支持在刚启动、强加速以及跌破支撑的个股观察。
+    - [x] **严格执行零底层修改原则 (Zero Source-Code Modification Guard)**：撤销了对 `data_utils.py` 和 `multi_period_strategy_engine.py` 的全部 Python 源码改动。坚持以纯配置形式注入业务策略的极简（KISS & YAGNI）工程原则。
+    - [x] **完整自动化回归与诊断数据闭环验证 (Validated Pipeline & Strategy Loading)**：通过运行 `test_multi_period_automated.py`，顺利通过了多周期数据读取、平铺合并以及交叉验证校验，无任何 `KeyError` 异常，测试全绿跑通。
+
+## 2026-07-03 07:45
+- [x] **优化多周期策略编辑器提示弹窗为非阻塞式 Toast (Optimized Strategy Editor Notifications with Non-Blocking Toasts)**：
+    - [x] **实现复制 JSON 非阻塞反馈 (Non-blocking JSON Copy Feedback)**：在 `standalone_multi_period_tester.py` 中，将 `_copy_json_to_clipboard` 中的 `messagebox.showinfo` 替换为 `show_toast(self, "📋 JSON 内容已复制到剪贴板！", duration=1200)`。此优化确保了用户在复制 JSON 时不会被模态弹窗打断，操作更流畅。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `standalone_multi_period_tester.py` 执行了物理编译校验，确认没有任何语法、拼写或缩进问题，系统完美保持稳定。
+
 ## 2026-07-03 07:15
 - [x] **实现策略候选与历史追踪 Treeview 剪贴板快速复制功能 (Implemented Right-Click Copy Helpers in Stock Selection & Tracker Window)**：
     - [x] **新增“复制代码”与“复制行信息”右键选项 (Added Copy Actions to Context Menus)**：在 `stock_selection_window.py` 关联的所有 Treeview 组件（主策略选股表、各分析子表、历史追踪表以及盘前操作指南表）的右键菜单中，统一整合了“📋 复制代码”和“📝 复制行信息”快捷选项，对齐了多周期联动策略筛选器的交互标准。
