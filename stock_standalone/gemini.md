@@ -1,3 +1,28 @@
+## 2026-07-04 06:20
+- [x] **实现板块个股详情列表与人气排行核心基础数据列完美对齐 (Aligned Category Stock Detail Columns with Main Popularity Rankings)**：
+    - [x] **重构个股详情基础列名与结构**：将 `show_concept_top10_window` 表格的列名由 `percent`, `dff`, `rank` 重构并统一为与人气排行主表一致的 `val` (涨幅), `price` (最新价格), `dff2`, `dff3`, `rank`。消除了原先二级列表缺失最新价格、dff2、dff3 等关键指标以及主副表字段不同名造成的混乱。
+    - [x] **补齐并丰富数据提取映射**：在实时模式与历史复盘模式的数据行解析中，同步补充了对 `price`, `dff2`, `dff3`, `rank`, `val` 的提取及quotes缓存兜底，确保无论实盘还是历史数据，个股详情表格显示内容完全真实对齐。
+    - [x] **升级双向排序联动机制**：在 `sort_column` 联动排序方法中，将个股窗口的映射机制更新为优先对齐新版列名并兼容历史列名。此时无论点击主窗口还是二级列表列头，同名排序列均能瞬间精准同步，消除了界面交互的滞后与脱节。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 06:10
+- [x] **根治历史复盘切换日期导致的数据重复残留及个股列表自定义列不一致缺陷 (Fixed History Data Accumulation & Mismatched Columns in Stock Details)**：
+    - [x] **实现历史加载强制物理清空 (Enforced Treeview Clear on History Load)**：在 `load_history_by_date` 中，一进入 `try` 块便强制调用 `self.clear_all_trees()`。这彻底根治了旧版中由于历史数据只追加不清理，导致在多次选择日期或重复点击时，同一股票代码在界面上疯狂叠加残留的 Bug。
+    - [x] **实现主窗口与个股 constituent 表头动态历史列对齐 (Synchronized Historical Columns in Constituents)**：
+        - 改变了在历史模式下个股二级 constituents 列表死板使用实时自定义配置列的机制。重构为当处于历史复盘模式时，自动解析历史 DataFrame 中的全部非基础列，作为历史数据当时专属的自定义列；
+        - 在主表（`load_history_by_date`）及双击弹出的 constituents 个股 Treeview 中同步配置这些历史列，实现了个股详情自定义列与主界面历史片段的 100% 自适应对齐；
+        - 在返回“今日实时行情”或发生实时数据刷新时，自动触发列结构重写以平滑重构还原为实时的自定义配置列。
+    - [x] **实现个股物理去重与个股名称多点补齐 (Stock Deduplication & Automated Name Resolve)**：
+        - 在 `show_concept_top10_window` constituents 列表提取数据行时，引入了 `seen_codes` 集合对个股进行去重，防止列表中产生冗余的重复代码行；
+        - 同时在主表数据渲染及个股列表数据解析中，引入了 `sys_utils` 的 `resolve_stock_name` 接口，在 `name == "--"` 或是空时智能读取本地缓存或调用网络接口进行兜底补齐，消除了个股名称显示为空白的缺陷。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 06:00
+- [x] **修复历史复盘个股与板块信息丢失及二级列表个股空白行冗余漏洞 (Fixed Historical Data Mapping & Empty Redundant Rows in Constituents)**：
+    - [x] **根治浮点数强转导致代码不匹配问题**：修复了在 `load_history_by_date` 中，从 CSV 读取个股代码时若存在浮点数会转化为带 `.0` 后缀的字符串（例如 `"600118.0"`），导致其与正常 6 位代码不匹配写入 `_block_cache` 的故障。重构为利用 `.split('.')[0]` 进行代码过滤分割与标准 zfill(6) 对齐，彻底消除了历史模式下双击个股出现“暂无板块信息”的错误。
+    - [x] **重构二级列表检索个股筛选逻辑**：废弃了原先对 `_block_cache` 全量累积缓存字典的慢速遍历（该方式会导致以往日期曾存在、但今日并未上榜的个股也被全部拉出来，导致列表充斥大量 0.0 与 `--` 的空白行）。重构为仅精准提取与过滤**当前数据源真正处于上榜或显示中的个股集**（历史模式遍历 `_history_df`，实时模式遍历 `df_all`），极大地提升了匹配效率，并彻底消除了 constituents 弹窗中数以百计的空白无效行，还原了干净精准的板块个股名单。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
 ## 2026-07-04 05:50
 - [x] **实现左右两侧表格自适应列宽与无障碍拉伸 (Dynamic Adaptive Column Widths on Splitter Resize)**：
     - [x] **实现通用自适应宽度算法**：在 `PRServiceGUI` 中新增了类成员方法 `self._adjust_tree_column_widths(tree)`。该方法在容器尺寸变化时，通过获取 Treeview 可视宽度并扣除滚动条占用，自动将剩余的可用宽度平均分配给所有 `stretch=True` 的可拉伸列，并同时将固定列（`idx`, `code`）设为固定宽度，保障了超窄尺寸下的最小可读限制（30px）。
