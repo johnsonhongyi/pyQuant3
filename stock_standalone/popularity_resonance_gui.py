@@ -305,11 +305,13 @@ class PRServiceGUI:
             "央企改革", "壳资源", "新股与次新股", "昨日涨停", "昨日连板", "百元股", "中字头",
             "低价股", "破发股", "外资背景", "QFII重仓", "社保重仓", "核心资产", "新三板",
             "深成指股", "沪深300股", "上证180股", "上证50股", "创业300股", "中证500", "成分股",
-            "高送转", "含可转债", "国家队持股", "地方政府平台", "央企控股", "军工改革"
+            "高送转", "含可转债", "国家队持股", "地方政府平台", "央企控股", "军工改革",
+            "中报", "中报送转", "季报", "年报", "一季报", "三季报", "业绩预增", "预增", "预亏",
+            "预降预亏", "送转股份", "业绩补偿"
         }
         if name_str in NOISE_CONCEPTS:
             return True
-        for keyword in ("改革", "股通", "成指", "重仓", "持股", "中字头", "融资", "昨日", "送转", "转债", "指数", "成分"):
+        for keyword in ("改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏"):
             if keyword in name_str:
                 return True
         return False
@@ -348,6 +350,8 @@ class PRServiceGUI:
             import re
             cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
             if cats:
+                # 仅保留前 5 个最核心的主流概念（黄金概念）进行筛选与排序
+                main_cats = cats[:5]
                 scores_dict = getattr(self, "_all_concept_scores", {})
                 
                 def get_cat_strength(cat_name):
@@ -359,10 +363,10 @@ class PRServiceGUI:
                     return max_c
                 
                 # 双重优先级排序：非低优先级(0)排前面，低优先级(1)排后面；在此基础上按强度（只数）降序排列
-                cats.sort(key=lambda c: (1 if self._is_noise_concept(c) else 0, -get_cat_strength(c)))
+                main_cats.sort(key=lambda c: (1 if self._is_noise_concept(c) else 0, -get_cat_strength(c)))
                 
                 # 获取前 3 个最强的实际意义板块并动态展示
-                top3_cats = cats[:3]
+                top3_cats = main_cats[:3]
                 for strongest_cat in top3_cats:
                     strength_num = get_cat_strength(strongest_cat)
                     menu.add_command(
@@ -411,6 +415,10 @@ class PRServiceGUI:
             return
 
         _, _, _extra_cols = self._get_all_cols()
+        # 实时推送时重新将列配置为实时的自定义列
+        for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
+            self._reconfigure_tree_columns(t, title, _extra_cols)
+
         BASE_UPDATE_COUNT = 8  # idx/code/name/val/price/dff2/dff3/rank
 
         # 创建用于统计的字典
@@ -941,6 +949,41 @@ class PRServiceGUI:
         display_cols = all_cols  # 所有列均显示
         return all_cols, display_cols, extra
 
+    def _reconfigure_tree_columns(self, tree, first_col_title, extra_cols):
+        # 1. 组合所有列
+        all_cols = self._BASE_FIXED_COLS + tuple(extra_cols)
+        
+        # 2. 重新配置 tree 的 columns
+        tree.configure(columns=all_cols, displaycolumns=all_cols)
+        
+        # 3. 重新设置固定表头和宽度
+        tree.heading("idx",   text=first_col_title)
+        tree.heading("code",  text="代码")
+        tree.heading("name",  text="名称")
+        tree.heading("val",   text="涨幅" if first_col_title == "花" else "涨")
+        tree.heading("price", text="最新")
+        tree.heading("dff2",  text="dff2")
+        tree.heading("dff3",  text="dff3")
+        tree.heading("rank",  text="Rank")
+        
+        tree.column("idx",   width=26, anchor="center", stretch=False)
+        tree.column("code",  width=52, anchor="center", stretch=False)
+        tree.column("name",  width=64, anchor="center", stretch=True)
+        tree.column("val",   width=48, anchor="center", stretch=True)
+        tree.column("price", width=50, anchor="center", stretch=True)
+        tree.column("dff2",  width=44, anchor="center", stretch=True)
+        tree.column("dff3",  width=44, anchor="center", stretch=True)
+        tree.column("rank",  width=40, anchor="center", stretch=True)
+        
+        # 4. 设置动态列的表头与宽度，并绑定点击排序
+        for ec in extra_cols:
+            tree.heading(ec, text=ec, command=lambda c=ec, t=tree: self.sort_column(t, c, False))
+            tree.column(ec, width=48, anchor="center", stretch=True)
+            
+        # 同时基础列也需要重新绑定排序
+        for c in self._BASE_FIXED_COLS:
+            tree.heading(c, command=lambda col=c, t=tree: self.sort_column(t, col, False))
+
     def create_treeview(self, parent, first_col_title):
         all_cols, display_cols, extra_cols = self._get_all_cols()
 
@@ -1071,12 +1114,7 @@ class PRServiceGUI:
                 try:
                     if self.concept_win.winfo_exists() and getattr(self, "concept_tree", None) is not None:
                         concept_cols = self.concept_tree["columns"]
-                        mapping = {
-                            "val": "percent",
-                            "dff2": "dff",
-                            "dff3": "dff"
-                        }
-                        target_col = mapping.get(col, col)
+                        target_col = col
                         if target_col in concept_cols:
                             self.sort_column(self.concept_tree, target_col, reverse, auto_restore=True)
                 except Exception as sync_err:
@@ -1142,8 +1180,13 @@ class PRServiceGUI:
         else:
             # 如果是其他 Treeview (例如个股列表)，使用通用表头字典
             col_texts = {
+                "idx": "序号",
                 "code": "代码",
                 "name": "名称",
+                "val": "涨幅(%)",
+                "price": "最新",
+                "dff2": "dff2",
+                "dff3": "dff3",
                 "rank": "Rank",
                 "percent": "涨幅(%)",
                 "dff": "dff",
@@ -1368,6 +1411,14 @@ class PRServiceGUI:
             "resonance_results": resonance_results,
             "quotes": quotes
         }
+
+        # 实时/缓存模式重新切回实时的自定义列配置
+        _, _, _extra_cols = self._get_all_cols()
+        self._reconfigure_tree_columns(self.tree_em, "东", _extra_cols)
+        self._reconfigure_tree_columns(self.tree_ths, "花", _extra_cols)
+        self._reconfigure_tree_columns(self.tree_lh, "龙", _extra_cols)
+        self._reconfigure_tree_columns(self.tree_tgb, "淘", _extra_cols)
+        self._reconfigure_tree_columns(self.tree_res, "合", _extra_cols)
 
         self.clear_all_trees()
 
@@ -1829,17 +1880,29 @@ class PRServiceGUI:
             df = pd.read_csv(file_path, encoding="utf-8")
             self._history_df = df
 
+            # 💥 一定要在载入历史数据一开始清空原有表格，防止切换或重新载入日期时旧数据残留和重复！
+            self.clear_all_trees()
+
             # 追加或保留板块缓存（历史数据也要支持双击查板块）
             if not hasattr(self, "_block_cache") or self._block_cache is None:
                 self._block_cache = {}
             # 用于统计前 10 概念热度的个股信息收集字典
             all_stocks_for_stats = {}
 
-            # 获取当前配置的自定义追加列
-            _, _, _extra_cols = self._get_all_cols()
-            # 检测 CSV 中实际存在哪些自定义列（旧文件可能没有）
-            csv_cols = set(df.columns.tolist())
-            available_extra = [c for c in _extra_cols if c in csv_cols]
+            # 检测 CSV 中实际存在哪些自定义列，不再死板取实时 extra_cols，实现完全的自适应
+            csv_cols = df.columns.tolist()
+            ignored = {"code", "name", "score", "em_rank", "ths_rank", "lh_rank", "tgb_rank", "price", "percent", "dff2", "dff3", "rank", "block"}
+            available_extra = [c for c in csv_cols if c not in ignored]
+
+            # 缓存当前使用的额外列，供双击 constituent 个股二级弹窗等自适应对齐使用
+            self.current_extra_cols = available_extra
+
+            # 动态重新配置 5 个 Treeview 的列
+            self._reconfigure_tree_columns(self.tree_em, "东", available_extra)
+            self._reconfigure_tree_columns(self.tree_ths, "花", available_extra)
+            self._reconfigure_tree_columns(self.tree_lh, "龙", available_extra)
+            self._reconfigure_tree_columns(self.tree_tgb, "淘", available_extra)
+            self._reconfigure_tree_columns(self.tree_res, "合", available_extra)
 
             em_list = []
             ths_list = []
@@ -1853,8 +1916,15 @@ class PRServiceGUI:
                 return str(val).strip()
 
             for _, row in df.iterrows():
-                code = str(row.get("code", "")).strip().zfill(6)
+                code = str(row.get("code", "")).strip().split('.')[0].zfill(6)
                 name = safe_str(row.get("name"), default="--")
+                # 💥 补齐个股名称兜底解析：防止单独运行、无缓存时历史个股名称全显示为 '--' 的情况
+                if name == "--" or not name.strip():
+                    try:
+                        from sys_utils import resolve_stock_name
+                        name = resolve_stock_name(code)
+                    except Exception:
+                        name = "--"
 
                 score_val = row.get("score", 0)
                 score = 0
@@ -1887,8 +1957,8 @@ class PRServiceGUI:
                         "ma60d": 0.0
                     }
 
-                # 读取自定义列值（CSV 中有则取，否则 '--'）
-                extra_vals = tuple(safe_str(row.get(c)) for c in _extra_cols)
+                # 读取自适应历史列值（CSV 中有则取，否则 '--'）
+                extra_vals = tuple(safe_str(row.get(c)) for c in available_extra)
 
                 # 基础列构成固定 8 元 + 自定义列（不含 block）
                 base_row = (percent, price, dff2, dff3, rank)
@@ -2498,11 +2568,14 @@ class PRServiceGUI:
         title_lbl.pack(anchor="w", pady=(2, 6), padx=4)
 
         # 获取主窗口当前的排序状态，支持与主窗口同步
-        main_sort_col = getattr(self.tree_res, "sort_col", self.config.get("sort_col", "percent"))
+        main_sort_col = getattr(self.tree_res, "sort_col", self.config.get("sort_col", "val"))
+        if main_sort_col == "percent":
+            main_sort_col = "val"
         main_sort_descending = getattr(self.tree_res, "sort_descending", self.config.get("sort_descending", True))
         
         # 将主排序列名映射为 5 元组的索引
         col_to_idx = {
+            "val": 2,
             "percent": 2,
             "volume": 3,
             "rank": 4,
@@ -2638,6 +2711,7 @@ class PRServiceGUI:
         [NEW] 复刻 tk 中的概念板块个股 Top10/Top50 幕口展示功能。
         已优化：支持历史复盘模式数据自动对齐、自适应自定义追加列、窗口复用自愈、Escape键关闭以及窗口位置记忆。
         以及：支持精准的中英文括号标准化匹配、跟人气主表一致的自选股优先多级排序及同步排序、以及底部上涨下跌股数与均幅统计。
+        板块个股详情列（code, name, val, price, dff2, dff3, rank 等）已与人气排行主窗口完全对齐。
         """
         import re
         import pandas as pd
@@ -2652,9 +2726,15 @@ class PRServiceGUI:
         is_history_mode = (current_view_date != today)
 
         df_all = self.sync_manager.get_current_df()
-        _, _, extra_cols = self._get_all_cols()
+        # 自动对齐列：如果处于历史模式且已加载历史数据，则直接对齐当前历史列结构，否则使用实时配置列
+        if is_history_mode and hasattr(self, "_history_df") and self._history_df is not None:
+            csv_cols = self._history_df.columns.tolist()
+            ignored = {"code", "name", "score", "em_rank", "ths_rank", "lh_rank", "tgb_rank", "price", "percent", "dff2", "dff3", "rank", "block"}
+            extra_cols = [c for c in csv_cols if c not in ignored]
+        else:
+            _, _, extra_cols = self._get_all_cols()
         
-        # 收集所有人气排行中包含此概念的个股
+        # 收集当前人气排行中真正存在的、包含此概念的个股
         matched_stocks = []
 
         def safe_str(val, default="--"):
@@ -2662,7 +2742,35 @@ class PRServiceGUI:
                 return default
             return str(val).strip()
 
-        for code_str, block_str in getattr(self, '_block_cache', {}).items():
+        # 1. 提取当前模式下正在显示的所有个股的数据行，并进行物理去重
+        current_stocks = []
+        seen_codes = set()
+        if is_history_mode:
+            if hasattr(self, "_history_df") and self._history_df is not None:
+                for _, row in self._history_df.iterrows():
+                    c = str(row.get("code", "")).strip().split('.')[0].zfill(6)
+                    if c and c != "000000" and c not in seen_codes:
+                        seen_codes.add(c)
+                        current_stocks.append((c, row))
+        else:
+            if df_all is not None:
+                for idx, row in df_all.iterrows():
+                    c = str(idx).strip().split('.')[0].zfill(6)
+                    if c and c != "000000" and c not in seen_codes:
+                        seen_codes.add(c)
+                        current_stocks.append((c, row))
+
+        # 2. 遍历并匹配属于 target_concept 的股票
+        for code_str, row in current_stocks:
+            # 优先从 _block_cache 获取这只个股 of 板块，如果是历史模式且行内自带 block 则从中获取
+            block_str = getattr(self, '_block_cache', {}).get(code_str, "")
+            if not block_str or block_str in ("--", "nan", "None"):
+                if hasattr(row, "get"):
+                    block_str = safe_str(row.get("block"))
+            
+            if not block_str or block_str in ("--", "nan", "None"):
+                continue
+
             cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
             cats_normalized = [self._normalize_concept_name(c) for c in cats]
             
@@ -2671,84 +2779,77 @@ class PRServiceGUI:
                 pct = 0.0
                 price = 0.0
                 rank_val = 0
-                dff = 0.0
-                volume = 0.0
-                red = 0
-                win_val = 0
+                dff2 = 0.0
+                dff3 = 0.0
 
-                # 优先从历史缓存的 DataFrame 读取
-                history_row = None
-                if is_history_mode and hasattr(self, "_history_df") and self._history_df is not None:
+                # 提取属性
+                if is_history_mode:
                     try:
-                        df_hist = self._history_df
-                        # 强转并正确剔除浮点数带来的 .0$ 后缀，zfill(6) 对齐
-                        matched_rows = df_hist[df_hist['code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(6) == code_str]
-                        if not matched_rows.empty:
-                            history_row = matched_rows.iloc[0]
-                    except Exception as ex:
-                        service_logger.debug(f"从历史DF查找 {code_str} 异常: {ex}")
-
-                # 读取属性
-                if is_history_mode and history_row is not None:
-                    try:
-                        name = safe_str(history_row.get("name"))
-                        pct_val = history_row.get("percent", 0.0)
+                        name = safe_str(row.get("name"))
+                        # 补齐个股名称兜底解析：防止单独运行、无缓存时历史个股名称全显示为 '--' 的情况
+                        if name == "--" or not name.strip():
+                            try:
+                                from sys_utils import resolve_stock_name
+                                name = resolve_stock_name(code_str)
+                            except Exception:
+                                name = "--"
+                        pct_val = row.get("percent", 0.0)
                         if pd.notna(pct_val):
                             try:
                                 pct = float(str(pct_val).replace('%', ''))
                             except ValueError:
                                 pct = 0.0
                         
-                        price_val = history_row.get("price", 0.0)
+                        price_val = row.get("price", 0.0)
                         if pd.notna(price_val):
                             try:
                                 price = float(price_val)
                             except ValueError:
                                 price = 0.0
                         
-                        rank_val_raw = history_row.get("rank", 0)
+                        rank_val_raw = row.get("rank", 0)
                         if pd.notna(rank_val_raw):
                             try:
                                 rank_val = int(float(rank_val_raw))
                             except ValueError:
                                 rank_val = 0
                         
-                        dff2_val = history_row.get("dff2", history_row.get("dff", 0.0))
+                        dff2_val = row.get("dff2", row.get("dff", 0.0))
                         if pd.notna(dff2_val):
                             try:
-                                dff = float(dff2_val)
+                                dff2 = float(dff2_val)
                             except ValueError:
-                                dff = 0.0
+                                dff2 = 0.0
 
-                        vol_val = history_row.get("volume", history_row.get("vol", 0.0))
-                        if pd.notna(vol_val):
+                        dff3_val = row.get("dff3", 0.0)
+                        if pd.notna(dff3_val):
                             try:
-                                volume = float(vol_val)
+                                dff3 = float(dff3_val)
                             except ValueError:
-                                volume = 0.0
-                        
-                        red = int(float(history_row.get("red", 0))) if pd.notna(history_row.get("red")) else 0
-                        win_val = int(float(history_row.get("win", 0))) if pd.notna(history_row.get("win")) else 0
+                                dff3 = 0.0
                     except Exception as parse_err:
                         service_logger.debug(f"解析历史数据 {code_str} 异常: {parse_err}")
                 else:
-                    # 实时模式
-                    if df_all is not None and code_str in df_all.index:
-                        try:
-                            row = df_all.loc[code_str]
-                            if isinstance(row, pd.DataFrame):
-                                row = row.iloc[0]
-                            name = row.get("name", row.get("Name", "--"))
-                            pct = float(row.get('percent', row.get('ratio', 0.0)))
-                            price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
-                            rank_val = int(row.get('Rank', row.get('rank', 0)))
-                            dff = row.get('dff', row.get('DFF', 0.0))
-                            volume = row.get('volume', row.get('vol', 0.0))
-                            red = row.get('red', 0)
-                            win_val = row.get('win', 0)
-                        except Exception:
-                            pass
-                
+                    try:
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        name = row.get("name", row.get("Name", "--"))
+                        pct = float(row.get('percent', row.get('ratio', 0.0)))
+                        price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+                        rank_val = int(row.get('Rank', row.get('rank', 0)))
+                        dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
+                        dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
+                    except Exception:
+                        pass
+
+                # 补齐个股名称兜底解析
+                if name == "--" or not name.strip():
+                    try:
+                        from sys_utils import resolve_stock_name
+                        name = resolve_stock_name(code_str)
+                    except Exception:
+                        name = "--"
+
                 # 从 quotes 缓存兜底个股名称等
                 if name == "--" and hasattr(self, '_last_data_cache') and self._last_data_cache:
                     q_data = self._last_data_cache.get("quotes", {})
@@ -2761,29 +2862,21 @@ class PRServiceGUI:
                 # 动态获取自定义列值
                 extra_vals = {}
                 for ec in extra_cols:
-                    val = "--"
-                    if is_history_mode and history_row is not None:
-                        val = safe_str(history_row.get(ec))
-                    elif not is_history_mode and df_all is not None and code_str in df_all.index:
-                        try:
-                            row = df_all.loc[code_str]
-                            if isinstance(row, pd.DataFrame):
-                                row = row.iloc[0]
-                            val = safe_str(row.get(ec))
-                        except Exception:
-                            pass
-                    extra_vals[ec] = val
+                    val_item = "--"
+                    try:
+                        val_item = safe_str(row.get(ec))
+                    except Exception:
+                        pass
+                    extra_vals[ec] = val_item
 
                 matched_stocks.append({
                     "code": code_str,
                     "name": name,
-                    "percent": pct,
+                    "val": pct,
                     "price": price,
+                    "dff2": dff2,
+                    "dff3": dff3,
                     "rank": rank_val,
-                    "dff": dff,
-                    "volume": volume,
-                    "red": red,
-                    "win": win_val,
                     "extra_vals": extra_vals
                 })
 
@@ -2792,7 +2885,7 @@ class PRServiceGUI:
             return
 
         # 默认按涨幅降序
-        matched_stocks.sort(key=lambda x: x["percent"], reverse=True)
+        matched_stocks.sort(key=lambda x: x["val"], reverse=True)
 
         # 3. 销毁并重建 Toplevel 窗口（自愈并适配动态列头）
         geo = self.config.get("concept_window_geometry", "600x385")
@@ -2824,17 +2917,17 @@ class PRServiceGUI:
         frame = tk.Frame(win, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         frame.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # 自适应列构成：基础列 + 配置的自定义列
-        columns = ["code", "name", "rank", "percent", "dff", "volume", "red", "win"] + list(extra_cols)
+        # 自适应列构成：基础列 + 配置的自定义列 (完全对齐人气排行)
+        columns = ["idx", "code", "name", "val", "price", "dff2", "dff3", "rank"] + list(extra_cols)
         col_texts = {
+            "idx": "序号",
             "code": "代码",
             "name": "名称",
-            "rank": "Rank",
-            "percent": "涨幅(%)",
-            "dff": "dff",
-            "volume": "成交量",
-            "red": "连阳",
-            "win": "主升"
+            "val": "涨幅(%)",
+            "price": "最新",
+            "dff2": "dff2",
+            "dff3": "dff3",
+            "rank": "Rank"
         }
 
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="Treeview")
@@ -2851,17 +2944,42 @@ class PRServiceGUI:
 
         for col in columns:
             tree.heading(col, text=col_texts.get(col, col), command=lambda c=col: sort_top10_column(tree, c, False))
-            if col in ("name", "code"):
-                width = 80
-            elif col in ("rank", "percent", "dff", "volume", "red", "win"):
+            if col == "idx":
+                width = 26
+                stretch = False
+            elif col == "code":
+                width = 52
+                stretch = False
+            elif col == "name":
+                width = 64
+                stretch = True
+            elif col == "val":
+                width = 48
+                stretch = True
+            elif col == "price":
                 width = 50
+                stretch = True
+            elif col == "dff2":
+                width = 44
+                stretch = True
+            elif col == "dff3":
+                width = 44
+                stretch = True
+            elif col == "rank":
+                width = 40
+                stretch = True
             else:
-                width = 65  # 自定义追加列的默认宽度
-            tree.column(col, anchor="center", width=width)
+                width = 48  # 自定义追加列的默认宽度
+                stretch = True
+            tree.column(col, anchor="center", width=width, stretch=stretch)
 
         tree.tag_configure("up",       foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
         tree.tag_configure("down",     foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
         tree.tag_configure("flat",     foreground="#000000", font=("Microsoft YaHei", 9))
+        tree.tag_configure("favorite", background="#e6ffe6", font=("Microsoft YaHei", 9, "bold"))
+
+        # 绑定大小改变事件以自适应列宽
+        tree.bind("<Configure>", lambda e, t=tree: self._adjust_tree_column_widths(t))
 
         self.concept_tree = tree
 
@@ -2870,8 +2988,8 @@ class PRServiceGUI:
             sel = tree.selection()
             if sel:
                 vals = tree.item(sel[0], "values")
-                if vals and len(vals) >= 1:
-                    code = str(vals[0]).strip().zfill(6)
+                if vals and len(vals) >= 2:
+                    code = str(vals[1]).strip().zfill(6) # 0 is idx, 1 is code
                     # 联动
                     is_tdx = self.link_tdx_var.get()
                     is_ths = self.link_ths_var.get()
@@ -2889,9 +3007,9 @@ class PRServiceGUI:
             sel = tree.selection()
             if sel:
                 vals = tree.item(sel[0], "values")
-                if vals and len(vals) >= 2:
-                    code = str(vals[0]).strip().zfill(6)
-                    name = str(vals[1]).strip()
+                if vals and len(vals) >= 3:
+                    code = str(vals[1]).strip().zfill(6) # 0 is idx, 1 is code
+                    name = str(vals[2]).strip()          # 2 is name
                     if name.startswith("★ "):
                         name = name[len("★ "):]
                     
@@ -2916,12 +3034,11 @@ class PRServiceGUI:
             is_fav = code_str in fav_stocks
             display_name = f"★ {name}" if is_fav else name
 
-            percent = item["percent"]
+            percent = item["val"]
+            price = item["price"]
+            dff2 = item["dff2"]
+            dff3 = item["dff3"]
             rank_val = item["rank"]
-            dff = item["dff"]
-            volume = item["volume"]
-            red = item["red"]
-            win_val = item["win"]
 
             tag = "flat"
             if percent > 0:
@@ -2929,25 +3046,37 @@ class PRServiceGUI:
             elif percent < 0:
                 tag = "down"
 
+            tags = [tag]
+            if is_fav:
+                tags.append("favorite")
+
+            percent_str = f"{percent:+.2f}" if percent > 0 else (f"{percent:.2f}" if percent < 0 else "0.00")
+            price_str = f"{price:.2f}" if isinstance(price, (int, float)) else str(price)
+            dff2_str = f"{dff2:.1f}" if isinstance(dff2, (int, float)) else str(dff2)
+            dff3_str = f"{dff3:.1f}" if isinstance(dff3, (int, float)) else str(dff3)
+            rank_str = str(rank_val)
+
             row_values = (
+                idx + 1,
                 code_str,
                 display_name,
-                rank_val,
-                f"{percent:.2f}",
-                f"{dff:.1f}" if isinstance(dff, (int, float)) else str(dff),
-                f"{volume:.1f}" if isinstance(volume, (int, float)) else str(volume),
-                red,
-                win_val
+                percent_str,
+                price_str,
+                dff2_str,
+                dff3_str,
+                rank_str
             )
             # 自定义列的值动态追加到元组中
             extra_vals = item.get("extra_vals", {})
             for ec in extra_cols:
                 row_values = row_values + (extra_vals.get(ec, "--"),)
 
-            tree.insert("", "end", values=row_values, tags=(tag,))
+            tree.insert("", "end", values=row_values, tags=tuple(tags))
 
         # 6. 同步人气主窗口的排序列和升降序
-        main_sort_col = getattr(self.tree_res, "sort_col", self.config.get("sort_col", "percent"))
+        main_sort_col = getattr(self.tree_res, "sort_col", self.config.get("sort_col", "val"))
+        if main_sort_col == "percent":
+            main_sort_col = "val"
         main_sort_descending = getattr(self.tree_res, "sort_descending", self.config.get("sort_descending", True))
         if main_sort_col in columns:
             sort_top10_column(tree, main_sort_col, main_sort_descending)
@@ -2956,12 +3085,12 @@ class PRServiceGUI:
         stat_frame = tk.Frame(win, bg="#F9F9F9", height=24)
         stat_frame.pack(side="bottom", fill="x", padx=4, pady=2)
 
-        up_stocks = [x for x in matched_stocks if x["percent"] > 0]
-        down_stocks = [x for x in matched_stocks if x["percent"] < 0]
-        flat_stocks = [x for x in matched_stocks if x["percent"] == 0]
+        up_stocks = [x for x in matched_stocks if x["val"] > 0]
+        down_stocks = [x for x in matched_stocks if x["val"] < 0]
+        flat_stocks = [x for x in matched_stocks if x["val"] == 0]
 
-        avg_up = sum(x["percent"] for x in up_stocks) / len(up_stocks) if up_stocks else 0.0
-        avg_down = sum(x["percent"] for x in down_stocks) / len(down_stocks) if down_stocks else 0.0
+        avg_up = sum(x["val"] for x in up_stocks) / len(up_stocks) if up_stocks else 0.0
+        avg_down = sum(x["val"] for x in down_stocks) / len(down_stocks) if down_stocks else 0.0
 
         stat_text = f" 统计: 上涨 {len(up_stocks)}只 (均幅 {avg_up:+.2f}%) | 下跌 {len(down_stocks)}只 (均幅 {avg_down:+.2f}%) | 平盘 {len(flat_stocks)}只"
         lbl_stat = tk.Label(stat_frame, text=stat_text, font=("Microsoft YaHei", 9, "bold"), fg="#333333", bg="#F9F9F9", anchor="w")
