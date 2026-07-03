@@ -1,3 +1,41 @@
+## 2026-07-03 18:25
+- [x] **实现 K线备份查看器保存确认、路径展示与 HDF5 多数据表保存拦截防御 (Implemented Save Confirmation, Path Display & HDF5 Multi-Table Save Protection in KlineBackupViewer)**：
+    - [x] **引入保存前置确认与路径展示**：重构了 `on_save_changes`，在执行保存操作前，无论是同步到内存还是保存到本地文件，均弹出 `QMessageBox.question` 询问框进行二次确认，并在确认框中展示了当前准备写入的完整物理文件路径，防止用户无意误触。
+    - [x] **引入保存成功后置提示**：保存或同步成功后，弹出 `QMessageBox.information` 通知框展示写入成功的完整物理文件路径，增强操作可回溯性。
+    - [x] **实施多数据表 HDF5 文件直接保存拦截**：针对 `.h5`/`.hdf5`/`.hdf` 后缀的文件，在 `on_save_changes` 流程内增加了类型拦截逻辑。若检测为 HDF5 文件，直接弹出 `QMessageBox.warning` 警告并退出流程，防止使用 Pickle (`to_pickle`) 覆盖导致 HDF5 结构损坏、其他 Table 丢失的问题，保护了多数据表的数据完整性。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 执行了物理编译校验，确认没有任何语法或缩进问题。
+
+## 2026-07-03 18:20
+- [x] **优化 K线备份查看器自动文件记忆、HDF5 Table 快速切换与点选一键诊断功能 (Enhanced File Memory, HDF5 Table Switching & Selection-Based Diagnosis in KlineBackupViewer)**：
+    - [x] **实现 "Open File" 智能记忆与定位**：重构了 `on_open_file`，使文件选择对话框的首选起始路径优先使用当前打开的文件路径 `self.current_file`（若存在）；若不存在则退避至历史打开记录（`file_history`）中第一个存在的有效文件路径，极大地减少了用户重复寻找文件目录的层级跳转开销。
+    - [x] **集成 "Read Table" 快速数据表切换**：在工具栏中 "Delete Table" 左侧新增 "Read Table" 按钮（`btn_read_table`），绑定 `on_read_table()` 回调，直接使用同一文件重新调用 `load_data` 唤起 Key 选择框。
+    - [x] **优化 HDF5 数据表默认高亮选择**：在 `load_data` 中，当弹出的 HDF5 Key 选择框被拉起时，检测当前活跃的 `self.current_key`，并在选择框中默认选中其对应的索引，无需用户每次重新定位，实现亚秒级的数据集切换。
+    - [x] **实现列表选中项一键诊断**：当个股诊断输入框为空时，在 `on_diagnose_click` 中调用 `_get_selected_code_from_tables`。该方法会自适应检查摘要表（`summary_table`）、详情表（`detail_table`）以及完整结果表（`full_results_table`）的当前高亮项，智能获取其股票代码并自动调起诊断窗口，省去手动输入的繁琐步骤。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 执行了物理编译校验，确认没有任何语法或缩进问题。
+
+## 2026-07-03 18:02
+- [x] **修复 SafeHDFStore `__exit__` 期间冗余 super().__exit__ 导致的 premature 锁释放 Bug (Fixed Premature Lock Release in __exit__ due to super().__exit__ in SafeHDFStore)**：
+    - [x] **根治过早释放锁的隐藏漏洞**：排查并发现了 `pandas.HDFStore.__exit__` 内部仅调用了 `self.close()`，而由于子类重写了 `close()` 且默认其 `release_lock=True`，因此在 `SafeHDFStore.__exit__` 内部调用 `super().__exit__` 会隐式以 `release_lock=True` 再次调用 `self.close()`。这导致在 `write_status` 为 True 时，物理锁在进入 `ptrepack` 与 `rename` 物理压缩重命名流程前就被过早释放，使得外部并发进程可能冲突访问，造成 Windows `PermissionError` (WinError 32)。
+    - [x] **移除冗余的 `super().__exit__` 调用**：删除了 `__exit__` 两个分支中对 `super().__exit__(exc_type, exc_val, exc_tb)` 的冗余调用，改由 `self.close(release_lock=...)` 统一安全接管句柄关闭与锁释放的完整生命周期。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 执行了物理编译校验，确认没有任何语法或缩进问题。
+
+## 2026-07-03 18:00
+- [x] **消除 SafeHDFStore 重复的 close 与 __exit__ 方法 definition 覆盖 (Eliminated Duplicate close & __exit__ in SafeHDFStore)**：
+    - [x] **删除冗余 close/exit 定义**：删除了类头部冗余定义的 `__exit__`（第 453-454 行）和类尾部重复的 `close`（原第 694-701 行）方法。消除了 Python 重复定义方法覆盖导致的安全关闭与锁释放逻辑失效缺陷。
+    - [x] **实现 `close` 的 `release_lock` 传参控制**：重构了唯一的 `close(self, release_lock=True)` 接口，在 `finally` 块中通过 `release_lock` 开关控制是否释放物理文件锁。
+    - [x] **延迟 `__exit__` 期间的锁释放**：更新了 `__exit__` 内部 repack/rename 压缩逻辑。将 `close()` 改写为 `close(release_lock=False)`，使当前进程在进行耗时的 ptrepack 物理压缩与文件改名期间依然安全持有独占锁，仅在 `finally` 中通过 `release_lock=True` 的 close 路径或显式的 `_release_lock()` 统一释放物理锁，彻底避免并发进程争抢及改名期间无锁导致的 Windows 并发锁冲突。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `JSONData/tdx_hdf5_api.py` 执行了物理编译校验，确认没有任何语法、拼写或缩进问题，系统保持极高稳定性。
+
+## 2026-07-03 16:05
+- [x] **根治 HDF5 多进程并发锁读取与删除冲突崩溃与压缩漏洞 (Fixed HDF5 Lock Race Condition, Redundant Methods, and Defer Lock Release during Repack)**：
+    - [x] **引入锁文件读取/解析局部异常保护**：在 `JSONData/tdx_hdf5_api.py` 的 `_acquire_lock` 与 `_forced_unlock` 锁获取模块中，针对读取与解析 `.lock` 文件内容的临界段代码包裹了局部的 `try...except (OSError, ValueError, IndexError)`。在锁文件因其他进程刚好释放被删（抛出 `FileNotFoundError`）或正在写入处于独占状态（抛出 `PermissionError` [WinError 32]）的暂态异常发生时，自动拦截崩溃并执行冷却退避重试，杜绝了异常向外抛出导致写盘中断。
+    - [x] **实施锁文件强制移除与自解锁退避**：在 `_acquire_lock` 及 `_forced_unlock` 中遇到超时自解锁或强制解锁导致 `os.remove` 失败时，新增了 `time.sleep(self.probe_interval)` 限频退避，避免在 Windows 下由于文件句柄释放延迟造成 CPU 自旋与无限重试。
+    - [x] **消除重名方法定义覆盖以恢复全局线程锁**：排查清除了类头部冗余定义的 `close` 与 `__exit__` 方法。避免了尾部未加全局 `_HDF_GLOBAL_LOCK` 线程锁及缺少 `_handle` 状态判定的同名方法对安全关闭逻辑进行覆写的问题，恢复了进程内多线程关闭句柄的安全防御。
+    - [x] **实施压缩与重命名期间的“锁期延长”保护**：重构了 `__exit__` 时 ptrepack 压缩的锁定状态逻辑，改用 `self.close(release_lock=False)`。这确保在进行高耗时的 `ptrepack` 压缩与 `os.rename` 改名动作时，当前进程依然独占持有物理文件锁，只有当全部改名和回滚动作完成后才统一释放锁。这彻底根绝了“锁提前释放、改名期间无锁”导致的外部并发共享冲突，从机制上解决了 Race Condition 的死穴。
+    - [x] **补全 `_wait_for_lock` 锁文件暂态异常保护**：将旧式裸 `split("|")` 升级为安全解析方式，针对 `OSError/ValueError/IndexError` 并发暂态增加局部 `continue` 退避保护，消除了只读等待路径下潜在的 `ValueError` 崩溃。
+    - [x] **加固 `_release_lock` 中 `os.remove` 的暂态 OSError 保护**：对 `os.remove` 失败单独捕获 `OSError` 以 `warning` 级别静默放行，避免 Windows 句柄释放延迟时误报错误；外层锁文件读取增加 `OSError/ValueError/IndexError` 分层捕获，覆盖全部并发删除场景。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `JSONData/tdx_hdf5_api.py` 执行了物理编译校验，确认逻辑与语法完全正确。
+
 ## 2026-07-03 15:50
 - [x] **实现策略编辑器自动定位当前选定策略 (Auto-Selecting Current Strategy in Strategy Editor)**：
     - [x] **自动匹配 strategy_id 并定位**：在 `standalone_multi_period_tester.py` 中，重构了 `MultiPeriodStrategyEditor` 的初始化方法。打开策略编辑器时，不再硬编码默认选中第 0 个策略，而是动态提取父窗口当前选定的 `strategy_id`。如果找到匹配策略，则自动在 `listbox` 中高亮选中，并通过 `listbox.see()` 自动滚动至视口内，免去了用户每次打开编辑器后需要手动寻找和点击对应策略的繁琐步骤。

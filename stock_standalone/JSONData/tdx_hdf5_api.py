@@ -450,10 +450,7 @@ class SafeHDFStore(pd.HDFStore):
             with timed_ctx("reopen_hdf"):
                 super().__init__(self.fname, mode=self.mode, **kwargs)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def close(self):
+    def close(self, release_lock=True):
         """关闭 HDFStore 并释放锁"""
         with _HDF_GLOBAL_LOCK:
             try:
@@ -463,7 +460,8 @@ class SafeHDFStore(pd.HDFStore):
             except Exception as e:
                 self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
             finally:
-                self._release_lock()
+                if release_lock:
+                    self._release_lock()
 
     def ensure_hdf_file(self):
         """确保 HDF5 文件存在"""
@@ -691,14 +689,6 @@ class SafeHDFStore(pd.HDFStore):
                 self.log.error(f"[{self.my_pid}] Failed to release lock: {e}")
 
 
-    def close(self):
-        """关闭 HDFStore 并释放锁"""
-        try:
-            super().close()
-        except Exception as e:
-            self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
-        finally:
-            self._release_lock()
 
     def write_safe(self, key, df, **kwargs):
         # from contextlib import contextmanager
@@ -742,8 +732,9 @@ class SafeHDFStore(pd.HDFStore):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.write_status:
             try:
-                self.close()
-                super().__exit__(exc_type, exc_val, exc_tb)
+                self.close(release_lock=False)
+                # super().__exit__ is omitted because it calls self.close() with release_lock=True,
+                # which would prematurely release the lock before the repack/compression process completes.
                 h5_size = int(os.path.getsize(self.fname) / 1e6)
                 if h5_size > 10 and self.mode != 'r':
                     with timed_ctx("release_lock"):
@@ -810,8 +801,7 @@ class SafeHDFStore(pd.HDFStore):
                 self.log.debug(f'clean:{self.fname}')
         else:
             with timed_ctx("exit close"):
-                self.close()
-                super().__exit__(exc_type, exc_val, exc_tb)
+                self.close(release_lock=True)
 
 
 # class SafeHDFStore_no_timed_ctx(pd.HDFStore):
