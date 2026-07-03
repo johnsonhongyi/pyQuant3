@@ -11,34 +11,34 @@ from typing import Optional, Any, Callable, Dict
 from tk_gui_modules.gui_config import (MINUTE_KLINE_VIEWER_HISTORY)
 # Handle multiple Qt bindings (PyQt6, PySide6, PyQt5)
 try:
-    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+    from PyQt6.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                  QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                 QInputDialog, QMessageBox)
+                                 QInputDialog, QMessageBox, QMenu)
     from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
     from PyQt6.QtGui import QIcon, QFont
 except ImportError:
     try:
-        from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+        from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                      QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                      QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                     QInputDialog, QMessageBox)
+                                     QInputDialog, QMessageBox, QMenu)
         from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
         from PySide6.QtGui import QIcon, QFont
     except ImportError:
         try:
-            from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+            from PyQt5.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                          QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                          QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                         QInputDialog, QMessageBox)
+                                         QInputDialog, QMessageBox, QMenu)
             from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
             from PyQt5.QtGui import QIcon, QFont
         except ImportError:
             try:
-                from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                from PySide2.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                              QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                              QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                             QInputDialog, QMessageBox)
+                                             QInputDialog, QMessageBox, QMenu)
                 from PySide2.QtCore import Qt, QAbstractTableModel, QModelIndex
                 from PySide2.QtGui import QIcon, QFont
             except ImportError:
@@ -174,6 +174,93 @@ class DataFrameModel(QAbstractTableModel):
                 self.layoutChanged.emit()
         except Exception as e:
             print(f"Sort Error: {e}")
+
+# Import Signal/pyqtSignal and QThread dynamically
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal as Signal
+except ImportError:
+    try:
+        from PySide6.QtCore import QThread, Signal
+    except ImportError:
+        try:
+            from PyQt5.QtCore import QThread, pyqtSignal as Signal
+        except ImportError:
+            try:
+                from PySide2.QtCore import QThread, Signal
+            except ImportError:
+                Signal = None
+                QThread = None
+
+class BacktestWorker(QThread):
+    finished = Signal(str, str, str)  # code, name, report
+
+    def __init__(self, code, name):
+        super().__init__()
+        self.code = code
+        self.name = name
+
+    def run(self):
+        try:
+            from scratch.test_reentry_backtest import run_backtest_and_get_report
+            report = run_backtest_and_get_report(self.code, self.name, only_report=True)
+            self.finished.emit(self.code, self.name, report)
+        except Exception as e:
+            self.finished.emit(self.code, self.name, f"运行回测出错: {e}")
+
+class BacktestReportQtDialog(QDialog):
+    def __init__(self, parent, code, name, report):
+        super().__init__(parent)
+        self.setWindowTitle(f"Re-entry 历史回测报告 - {name} ({code})")
+        self.resize(750, 550)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c101b;
+                color: #eeeeee;
+            }
+            QPlainTextEdit {
+                background-color: #05080e;
+                color: #55ffff;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11pt;
+                border: 1px solid #1a2233;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #1b3a4b;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2b5a75;
+            }
+            QLabel {
+                color: #ffcc00;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        
+        # Title Label
+        title_label = QLabel(f"🧬 【{name} ({code})】 Re-entry 历史模拟交易回测结论：")
+        title_label.setStyleSheet("font-size: 12pt; font-weight: bold;")
+        layout.addWidget(title_label)
+        
+        # Text Area
+        self.text_area = QPlainTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setPlainText(report)
+        layout.addWidget(self.text_area)
+        
+        # Close Button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch(1)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
 
 class KlineBackupViewer(QMainWindow, WindowMixin):
     def __init__(self, on_code_callback: Optional[Callable[[str], Any]] = None, service_proxy: Any = None, 
@@ -484,6 +571,21 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         filter_layout.addWidget(self.time_input)
         filter_layout.addWidget(self.btn_del_time)
         filter_layout.addStretch(1)
+        
+        # 诊断个股功能
+        filter_layout.addWidget(QLabel("诊断个股:"))
+        self.diag_input = QLineEdit()
+        self.diag_input.setPlaceholderText("Code...")
+        self.diag_input.setFixedWidth(80)
+        self.diag_input.returnPressed.connect(self.on_diagnose_click)
+        filter_layout.addWidget(self.diag_input)
+        
+        self.btn_diag = QPushButton("🔍 诊断")
+        self.btn_diag.clicked.connect(self.on_diagnose_click)
+        self.btn_diag.setStyleSheet("background-color: #0288D1; color: white; font-weight: bold;")
+        filter_layout.addWidget(self.btn_diag)
+        filter_layout.addSpacing(10)
+        
         filter_layout.addWidget(QLabel("Search Code:"))
         filter_layout.addWidget(self.search_input)
         main_layout.addLayout(filter_layout)
@@ -597,6 +699,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         
         main_layout.addWidget(self.main_splitter, 1)
 
+        self.setup_context_menus()
         self.statusBar().showMessage("Ready")
         self.resize(1100, 800)
         
@@ -1522,6 +1625,226 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             print(f"[ERROR] on_double_click: {e}")
             import traceback
             traceback.print_exc()
+
+    def on_diagnose_click(self):
+        """点击诊断按钮或回车时的触发逻辑"""
+        code = self.diag_input.text().strip()
+        if not code:
+            QMessageBox.warning(self, "警告", "请输入要诊断的股票代码！")
+            return
+        # 提取并补全6位代码
+        code = "".join(x for x in code if x.isdigit()).zfill(6)
+        self.diagnose_stock_strategy(code)
+
+    def diagnose_stock_strategy(self, code, name=None):
+        """诊断个股特征数据与查询条件匹配情况"""
+        import re
+        import pandas as pd
+        
+        code = str(code).strip().zfill(6)
+        
+        # 1. 尝试获取股票名称
+        if not name:
+            df = self.active_df
+            if not df.empty and 'code' in df.columns:
+                sub_df = df[df['code'] == code]
+                if not sub_df.empty and 'name' in sub_df.columns:
+                    name = sub_df.iloc[0]['name']
+            if not name:
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                    name = tdd.get_name_code(code)
+                except Exception:
+                    name = "未知股票"
+            if not name or name == "未知股票":
+                name = "未知股票"
+                
+        # 2. 提取当前选中的策略与周期 (对于 K-line viewer，用户当前输入的 query 表达式)
+        query_str = self.query_input.toPlainText().strip()
+        queries = []
+        if query_str:
+            queries.append({
+                "name": "当前查询过滤条件",
+                "expr": query_str
+            })
+            
+        # 3. 构造平铺该个股特征数据的单行 DataFrame
+        df_full = self.active_df
+        if df_full.empty:
+            QMessageBox.warning(self, "警告", "当前没有加载任何数据，无法诊断！")
+            return
+            
+        if 'code' not in df_full.columns:
+            QMessageBox.warning(self, "警告", "数据结构中未找到 code 列，无法诊断！")
+            return
+            
+        stock_df = df_full[df_full['code'] == code]
+        if stock_df.empty:
+            QMessageBox.warning(self, "警告", f"在当前数据中未找到个股 {code} 的记录，无法诊断！")
+            return
+            
+        df_flat = stock_df.iloc[-1:].copy()
+        df_flat.set_index('code', inplace=True, drop=False)
+        
+        # 4. 调用系统自带的 check_code 接口 (注意: parent 传 None，防止 PyQt/Tkinter 窗口冲突)
+        try:
+            from stock_logic_utils import check_code
+            check_code(df_flat, code, queries, parent=None)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
+
+    def setup_context_menus(self):
+        """设置表格的右键上下文菜单"""
+        for table in (self.summary_table, self.detail_table, self.full_results_table):
+            table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            table.customContextMenuRequested.connect(lambda pos, t=table: self.show_table_context_menu(pos, t))
+
+    def show_table_context_menu(self, pos, table_view):
+        """显示右键菜单"""
+        index = table_view.indexAt(pos)
+        if not index.isValid():
+            return
+            
+        model = index.model()
+        if not isinstance(model, DataFrameModel):
+            return
+            
+        df_data = model._data
+        row_idx = index.row()
+        
+        # 获取 code 和 name
+        code = ""
+        name = ""
+        if 'code' in df_data.columns:
+            code = str(df_data.iloc[row_idx]['code'])
+        else:
+            code = str(df_data.iloc[row_idx, 0])
+            
+        if 'name' in df_data.columns:
+            name = str(df_data.iloc[row_idx]['name'])
+            
+        code = code.strip().zfill(6)
+        if name:
+            name = name.replace("★", "").replace("【重点】", "").strip()
+            
+        # [🚀 NEW] GlobalFavoriteManager 设为重点个股和取消重点个股选项
+        is_fav = False
+        fav_mgr = None
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = code in fav_mgr.get_favorite_stocks()
+        except Exception as e:
+            print(f"[DEBUG] GlobalFavoriteManager load skip: {e}")
+            
+        menu = QMenu(self)
+        
+        # 1. 联动定位股票
+        action_link = menu.addAction(f"📂 联动定位股票 ({code} {name})")
+        action_link.triggered.connect(lambda: self._execute_linkage(code, source="right_click"))
+        
+        menu.addSeparator()
+        
+        # 2. 重点关注 Action
+        if fav_mgr is not None:
+            if is_fav:
+                action_fav = menu.addAction("❌ 取消重点个股")
+                action_fav.triggered.connect(lambda c=code: [fav_mgr.remove_favorite_stock(c), self.statusBar().showMessage(f"已取消重点个股: {c}", 2000)])
+            else:
+                action_fav = menu.addAction("⭐ 设为重点个股")
+                action_fav.triggered.connect(lambda c=code: [fav_mgr.add_favorite_stock(c), self.statusBar().showMessage(f"已设为重点个股: {c}", 2000)])
+            menu.addSeparator()
+            
+        # 3. 诊断个股 Action
+        action_diag = menu.addAction(f"🔬 诊断个股数据 ({code} {name})")
+        action_diag.triggered.connect(lambda: self.diagnose_stock_strategy(code, name))
+        
+        # 4. 运行回测 Action
+        action_backtest = menu.addAction(f"🔍 运行 Re-entry 历史回测 ({code})")
+        action_backtest.triggered.connect(lambda: self.run_reentry_backtest(code, name))
+        
+        menu.addSeparator()
+        
+        # 5. 复制代码 Action
+        action_copy_code = menu.addAction("📋 复制代码")
+        action_copy_code.triggered.connect(lambda: self.copy_code(code))
+        
+        # 6. 复制行信息 Action
+        action_copy_row = menu.addAction("📝 复制行信息")
+        action_copy_row.triggered.connect(lambda: self.copy_row_info(table_view, row_idx))
+        
+        menu.exec(table_view.viewport().mapToGlobal(pos))
+
+    def run_reentry_backtest(self, code, name):
+        """异步运行 Re-entry 历史回测"""
+        # Create a progress dialog/message
+        self._progress_dialog = QDialog(self)
+        self._progress_dialog.setWindowTitle("📡 正在计算")
+        self._progress_dialog.setFixedSize(320, 120)
+        self._progress_dialog.setStyleSheet("""
+            QDialog {
+                background-color: #0c101b;
+                color: white;
+            }
+            QLabel {
+                color: #55ffff;
+                font-weight: bold;
+            }
+        """)
+        
+        prog_layout = QVBoxLayout(self._progress_dialog)
+        lbl_msg = QLabel(f"正在对 【{name} ({code})】\n进行 Re-entry 历史回测分析...")
+        lbl_msg.setStyleSheet("font-size: 11pt; qproperty-alignment: AlignCenter;")
+        prog_layout.addWidget(lbl_msg)
+        
+        lbl_status = QLabel("请稍候，抓取数据并计算特征...")
+        lbl_status.setStyleSheet("color: #888888; font-size: 9pt; qproperty-alignment: AlignCenter;")
+        prog_layout.addWidget(lbl_status)
+        
+        self._worker = BacktestWorker(code, name)
+        self._worker.finished.connect(self.on_backtest_finished)
+        self._worker.start()
+        
+        self._progress_dialog.exec()
+
+    def on_backtest_finished(self, code, name, report):
+        if hasattr(self, '_progress_dialog') and self._progress_dialog:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+            
+        dialog = BacktestReportQtDialog(self, code, name, report)
+        dialog.exec()
+
+    def copy_code(self, code):
+        """复制代码到剪贴板"""
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(code)
+            self.statusBar().showMessage(f"已复制代码: {code}", 2000)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"复制代码失败: {e}")
+
+    def copy_row_info(self, table_view, row_idx):
+        """复制整行信息到剪贴板"""
+        try:
+            model = table_view.model()
+            if not isinstance(model, DataFrameModel):
+                return
+            df = model._data
+            if df.empty or row_idx >= len(df):
+                return
+            row = df.iloc[row_idx]
+            row_str_parts = []
+            for col in df.columns:
+                val = row[col]
+                row_str_parts.append(f"{col}:{val}")
+            row_str = " | ".join(row_str_parts)
+            
+            clipboard = QApplication.clipboard()
+            clipboard.setText(row_str)
+            self.statusBar().showMessage(f"已复制行信息", 2000)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"复制行信息失败: {e}")
 
     def on_add_row(self):
         """在当前选中的代码下新增一行"""

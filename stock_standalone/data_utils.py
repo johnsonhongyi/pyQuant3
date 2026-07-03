@@ -322,8 +322,11 @@ def complete_indicators_pipeline(
                             is_same = (today_ts.to_period(freq) == last_ts.to_period(freq))
                         elif resample in _RESAMPLE_N_DAYS_MAP:
                             n = _RESAMPLE_N_DAYS_MAP[resample]
-                            window_start = last_ts - pd.Timedelta(days=n - 1)
-                            is_same = (window_start <= today_ts <= last_ts)
+                            try:
+                                is_same = (today_ts.floor(f'{n}D') == last_ts.floor(f'{n}D'))
+                            except Exception:
+                                window_start = last_ts - pd.Timedelta(days=n - 1)
+                                is_same = (window_start <= today_ts <= last_ts)
                         else:
                             is_same = True
             except Exception:
@@ -340,34 +343,50 @@ def complete_indicators_pipeline(
                     # last2d 指向上上周期，依此类推。这样在 data_utils 后续的实时均线/涨跌幅重算中，
                     # 昨收价 lastp1d 就能精确匹配已收盘历史周，而不会受到盘中未完结周的污染。
                     
-                    if 'lasto1d' in top_all.columns: top_all['lasto_ghost'] = top_all['lasto1d']
-                    if 'lasth1d' in top_all.columns: top_all['lasth_ghost'] = top_all['lasth1d']
-                    if 'lastl1d' in top_all.columns: top_all['lastl_ghost'] = top_all['lastl1d']
-                    if 'lastv1d' in top_all.columns: top_all['lastv_ghost'] = top_all['lastv1d']
-                    if 'lastp1d' in top_all.columns: top_all['lastp_ghost'] = top_all['lastp1d']
+                    # 检查缓存中的 DataFrame 是否已经平移过，避免因为高频刷新重复平移导致数据退化
+                    if '_is_shifted' not in top_all.columns:
+                        top_all['_is_shifted'] = False
+                        
+                    mask_to_shift = ~top_all['_is_shifted'].fillna(False)
+                    # 仅针对有效股票且尚未移位的个股进行平移
+                    mask_to_shift = mask_to_shift & valid_mask
                     
-                    import re
-                    pattern = re.compile(r'^([a-zA-Z_]+?)(\d+)(d)?$')
-                    
-                    feature_cols = {}
-                    for col in top_all.columns:
-                        if col.endswith('_ghost'):
-                            continue
-                        match = pattern.match(col)
-                        if match:
-                            prefix, num_str, d_suffix = match.groups()
-                            num = int(num_str)
-                            d_suffix = d_suffix if d_suffix else ''
-                            feature_cols.setdefault(prefix, []).append((num, d_suffix, col))
-                            
-                    for prefix, cols_info in feature_cols.items():
-                        cols_info.sort(key=lambda x: x[0])
-                        for num, d_suffix, col in cols_info:
-                            prev_num = num - 1
-                            if prev_num > 0:
-                                prev_col = f"{prefix}{prev_num}{d_suffix}"
-                                if prev_col in top_all.columns:
-                                    top_all[prev_col] = top_all[col]
+                    if mask_to_shift.any():
+                        if 'lasto1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lasto_ghost'] = top_all.loc[mask_to_shift, 'lasto1d']
+                        if 'lasth1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lasth_ghost'] = top_all.loc[mask_to_shift, 'lasth1d']
+                        if 'lastl1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastl_ghost'] = top_all.loc[mask_to_shift, 'lastl1d']
+                        if 'lastv1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastv_ghost'] = top_all.loc[mask_to_shift, 'lastv1d']
+                        if 'lastp1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastp_ghost'] = top_all.loc[mask_to_shift, 'lastp1d']
+                        
+                        import re
+                        pattern = re.compile(r'^([a-zA-Z_]+?)(\d+)(d)?$')
+                        
+                        feature_cols = {}
+                        for col in top_all.columns:
+                            if col.endswith('_ghost') or col == '_is_shifted':
+                                continue
+                            match = pattern.match(col)
+                            if match:
+                                prefix, num_str, d_suffix = match.groups()
+                                num = int(num_str)
+                                d_suffix = d_suffix if d_suffix else ''
+                                feature_cols.setdefault(prefix, []).append((num, d_suffix, col))
+                                
+                        for prefix, cols_info in feature_cols.items():
+                            cols_info.sort(key=lambda x: x[0])
+                            for num, d_suffix, col in cols_info:
+                                prev_num = num - 1
+                                if prev_num > 0:
+                                    prev_col = f"{prefix}{prev_num}{d_suffix}"
+                                    if prev_col in top_all.columns:
+                                        top_all.loc[mask_to_shift, prev_col] = top_all.loc[mask_to_shift, col]
+                        
+                        top_all.loc[mask_to_shift, '_is_shifted'] = True
 
                     # (1) 同一周期：将今日实时行情合并到当前的周期 OHLC 中
                     if 'lopen' in top_all.columns:
@@ -394,7 +413,8 @@ def complete_indicators_pipeline(
                             top_all.loc[valid_mask, 'volume'] = top_all.loc[valid_mask, 'lvol'].fillna(0) + top_all.loc[valid_mask, 'volume'].fillna(0)
                 else:
                     # (2) 全新周期：不需要合并历史，OHLC 已经是今日的实时行情
-                    pass
+                    # 新周期开始，重置平移标记，以便后续进入“同一周期”时能够再次进行平移
+                    top_all.loc[valid_mask, '_is_shifted'] = False
                 
     # 1. 基础指标计算
     with timed_ctx("calc_indicators", warn_ms=1000):
@@ -3503,6 +3523,7 @@ def fetch_and_process(
 
             with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
                 top_all = complete_indicators_pipeline(top_all, logger, resample, status_callback)
+            df_allDF[resample] = top_all
 
             if top_all is not None and not top_all.empty:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort, top_all)
@@ -3567,6 +3588,7 @@ def fetch_and_process(
 
                 with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
                     top_all_res = complete_indicators_pipeline(top_all_res, logger, resample_res, status_callback)
+                df_allDF[resample_res] = top_all_res
 
                 if top_all_res is not None and not top_all_res.empty:
                     sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort, top_all_res)
