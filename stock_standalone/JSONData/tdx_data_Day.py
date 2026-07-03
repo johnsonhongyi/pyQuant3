@@ -7161,6 +7161,18 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     if lastpTDX_DF is None or len(lastpTDX_DF) == 0:
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table,code_l=codelist, timelimit=False,showtable=showtable)
         print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
+        
+        # 🛡️ 数据归零损坏自愈拦截
+        if h5 is not None and not h5.empty:
+            zero_check_col = 'llow' if 'llow' in h5.columns else ('lastp' if 'lastp' in h5.columns else None)
+            if zero_check_col is not None:
+                total_len = len(h5)
+                if total_len > 10:
+                    zero_count = (h5[zero_check_col] == 0).sum()
+                    if zero_count / total_len > 0.5:
+                        log.critical("🚨 [HDF-CORRUPTED] Detected all-zero data in %s/%s (%s/%s zeros). Forcing auto-rebuild." % (h5_fname, h5_table, zero_count, total_len))
+                        h5 = None
+
         if h5 is not None and not h5.empty:
             log.debug("load hdf data:%s %s %s" % (h5_fname, h5_table, len(h5)))
             tdxdata = h5

@@ -521,6 +521,10 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_save.setStyleSheet("background-color: #f39c12; color: white; font-weight: bold;")
         self.btn_save.clicked.connect(self.on_save_changes)
 
+        self.btn_read_table = QPushButton("📖 Read Table")
+        self.btn_read_table.setStyleSheet("background-color: #34495e; color: white;")
+        self.btn_read_table.clicked.connect(self.on_read_table)
+
         self.btn_del_table = QPushButton("🗑️ Delete Table")
         self.btn_del_table.setStyleSheet("background-color: #607d8b; color: white;")
         self.btn_del_table.clicked.connect(self.on_delete_table)
@@ -558,6 +562,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         top_toolbar.addWidget(self.btn_add_row)
         top_toolbar.addWidget(self.btn_del_row)
         top_toolbar.addWidget(self.btn_save)
+        top_toolbar.addWidget(self.btn_read_table)
         top_toolbar.addWidget(self.btn_del_table)
         top_toolbar.addStretch(1)
         top_toolbar.addWidget(QLabel("Source:"))
@@ -913,15 +918,20 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
     #             self.source_combo.setCurrentText("File")
 
     def on_open_file(self):
-        start_dir = ""
+        start_path = ""
         if self.current_file and os.path.exists(self.current_file):
-            start_dir = os.path.dirname(os.path.abspath(self.current_file))
+            start_path = self.current_file
+        elif self.file_history:
+            for path in self.file_history:
+                if os.path.exists(path):
+                    start_path = path
+                    break
 
         # 修改这里，添加 HDF5 支持
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             "Open Cache File",
-            start_dir,
+            start_path,
             "All Support (*.h5 *.pkl *.csv *.json *.gz);;CSV Files (*.csv);;HDF5 Files (*.h5);;Session Files (*.json *.json.gz);;Pickle Files (*.pkl);;All Files (*)"
         )
 
@@ -1191,13 +1201,18 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 if len(keys) == 1:
                     key = keys[0]
                 else:
+                    # 尝试默认选中当前的 key
+                    default_idx = 0
+                    if self.current_key in keys:
+                        default_idx = keys.index(self.current_key)
+
                     # 弹出选择框，让用户选择 key
                     key, ok = QInputDialog.getItem(
                         self,
                         "Select HDF5 Key",
                         "Choose dataset to load:",
                         keys,
-                        0,
+                        default_idx,
                         False
                     )
                     if not ok:
@@ -1630,11 +1645,35 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         """点击诊断按钮或回车时的触发逻辑"""
         code = self.diag_input.text().strip()
         if not code:
-            QMessageBox.warning(self, "警告", "请输入要诊断的股票代码！")
+            code = self._get_selected_code_from_tables()
+            
+        if not code:
+            QMessageBox.warning(self, "警告", "请输入要诊断的股票代码，或在列表中选择一只股票！")
             return
         # 提取并补全6位代码
         code = "".join(x for x in code if x.isdigit()).zfill(6)
         self.diagnose_stock_strategy(code)
+
+    def _get_selected_code_from_tables(self):
+        """尝试从各个数据表中提取当前选中的股票代码"""
+        for table in (self.summary_table, self.detail_table, self.full_results_table):
+            if not table:
+                continue
+            selection_model = table.selectionModel()
+            if not selection_model:
+                continue
+            index = selection_model.currentIndex()
+            if index.isValid():
+                model = index.model()
+                if isinstance(model, DataFrameModel):
+                    df_data = model._data
+                    row = index.row()
+                    if 0 <= row < len(df_data):
+                        if 'code' in df_data.columns:
+                            return str(df_data.iloc[row]['code'])
+                        elif len(df_data.columns) > 0:
+                            return str(df_data.iloc[row, 0])
+        return ""
 
     def diagnose_stock_strategy(self, code, name=None):
         """诊断个股特征数据与查询条件匹配情况"""
@@ -1907,25 +1946,75 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 if not self.service_proxy:
                     self.statusBar().showMessage("Memory Mode: No service proxy found.")
                     return
+                # 弹出确认框
+                reply = QMessageBox.question(
+                    self, 
+                    "确认同步", 
+                    "确定要同步更改到远程内存缓存中吗？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
                 try:
                     self.statusBar().showMessage("Saving to remote memory cache...")
                     self.service_proxy.kline_cache.from_dataframe(df)
                     self.statusBar().showMessage("Successfully saved to Memory!")
+                    QMessageBox.information(self, "同步成功", "更改已成功同步到内存缓存！")
                 except Exception as e:
                     self.statusBar().showMessage(f"Save to Memory Failed: {e}")
+                    QMessageBox.critical(self, "同步失败", f"同步到内存失败: {e}")
             else:
                 if not self.current_file:
                     self.statusBar().showMessage("File Mode: No file path.")
                     return
                 
+                # 🛡️ 拦截多数据表 HDF5 文件保存，防止覆盖损坏
+                ext = os.path.splitext(self.current_file)[1].lower()
+                if ext in ('.h5', '.hdf5', '.hdf'):
+                    QMessageBox.warning(
+                        self, 
+                        "保存被拦截", 
+                        f"检测到当前文件为 HDF5 格式：\n{os.path.basename(self.current_file)}\n\n"
+                        "⚠️ 该查看器暂不支持对多数据表 HDF5 文件直接保存更改（以防覆盖其他表或损坏文件）。\n"
+                        "系统已拦截本次保存操作！"
+                    )
+                    self.statusBar().showMessage("Save canceled: HDF5 save is disabled to prevent corruption.")
+                    return
+                
+                # 弹出保存确认框并显示保存路径
+                reply = QMessageBox.question(
+                    self, 
+                    "确认保存", 
+                    f"确定要保存当前更改到以下文件吗？\n\n{self.current_file}",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
                 self.statusBar().showMessage(f"Saving to {self.current_file} (zstd compressed)...")
                 # 统一使用 zstd 压缩保存，保持简洁的文件体积
                 df.to_pickle(self.current_file, compression='zstd')
                 self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} (Compressed)!")
+                QMessageBox.information(
+                    self, 
+                    "保存成功", 
+                    f"更改已成功保存至文件：\n{self.current_file}"
+                )
                 
         except Exception as e:
             self.statusBar().showMessage(f"Save Failed: {e}")
             print(f"DEBUG: Save General Error: {e}")
+            QMessageBox.critical(self, "错误", f"保存失败: {e}")
+
+    def on_read_table(self):
+        """读取/切换当前 HDF5 文件中的其他数据集 (Table)"""
+        if not self.current_file or not self.current_file.lower().endswith('.h5'):
+            self.statusBar().showMessage("Only HDF5 files support table reading/switching.")
+            return
+        self.load_data(self.current_file)
 
     def on_delete_table(self):
         """删除 HDF5 文件中的特定数据集 (Table)"""
