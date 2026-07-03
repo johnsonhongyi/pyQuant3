@@ -107,6 +107,8 @@ class PRServiceGUI:
         self.is_running = False
         self.refresh_thread = None
         self.resonance_codes = []  # 缓存当前的共振股票代码
+        self.selected_concept = None  # 用于保存当前选中的概念过滤条件
+        self._block_cache = {}        # 行业板块特征缓存
         self.current_date = time.strftime("%Y-%m-%d")
         
         # 联动选择项变量
@@ -164,6 +166,18 @@ class PRServiceGUI:
         except Exception:
             pass
         self.save_config_settings()
+        
+        # 在退出时同步保存一次最新的 block_cache
+        cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+                cache["block_cache"] = getattr(self, "_block_cache", {})
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
         self.root.destroy()
 
     def _poll_favorites_loop(self):
@@ -282,8 +296,10 @@ class PRServiceGUI:
             return
 
         _, _, _extra_cols = self._get_all_cols()
-        # 基础可更新列索引: [3]=val, [4]=price, [5]=dff2, [6]=dff3, [7]=rank
         BASE_UPDATE_COUNT = 8  # idx/code/name/val/price/dff2/dff3/rank
+
+        # 创建用于统计的字典
+        all_stocks_for_stats = {}
 
         all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
         for tree in all_trees:
@@ -293,6 +309,16 @@ class PRServiceGUI:
                     continue
                 code = old_vals[1]
                 code_str = str(code).strip().zfill(6)
+                
+                # 获取旧涨幅和价格，防止 df 中没有该股票时显示为空
+                pct = 0.0
+                try:
+                    pct = float(str(old_vals[3]).replace('%', ''))
+                except Exception:
+                    pass
+                price_str = str(old_vals[4])
+                row = None
+                
                 if code_str in df.index:
                     try:
                         row = df.loc[code_str]
@@ -300,8 +326,9 @@ class PRServiceGUI:
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
 
-                        pct = float(row.get('percent', row.get('ratio', 0.0)))
+                        pct = float(row.get('percent', row.get('ratio', pct)))
                         price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+                        price_str = f"{price:.2f}"
                         dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
                         dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
                         rank = int(row.get('Rank', row.get('rank', 0)))
@@ -316,17 +343,16 @@ class PRServiceGUI:
                             self._block_cache[code_str] = block
 
                         new_vals = list(old_vals)
-                        # 确保至少有 BASE_UPDATE_COUNT 列
                         while len(new_vals) < BASE_UPDATE_COUNT:
                             new_vals.append("")
 
                         new_vals[3] = f"{pct:.2f}"
-                        new_vals[4] = f"{price:.2f}"
+                        new_vals[4] = price_str
                         new_vals[5] = f"{dff2:.1f}"
                         new_vals[6] = f"{dff3:.1f}"
                         new_vals[7] = str(rank)
 
-                        # 更新自定义追加列（从 BASE_UPDATE_COUNT 索引开始）
+                        # 更新自定义追加列
                         for ei, ec in enumerate(_extra_cols):
                             idx_in_vals = BASE_UPDATE_COUNT + ei
                             while len(new_vals) <= idx_in_vals:
@@ -367,6 +393,21 @@ class PRServiceGUI:
                     except Exception:
                         pass
 
+                # 提取板块缓存（优先于 df 数据以支持离线自愈）
+                block_str = getattr(self, '_block_cache', {}).get(code_str, '--')
+                if block_str and block_str not in ('--', 'nan', 'None'):
+                    all_stocks_for_stats[code_str] = {
+                        "percent": pct,
+                        "category": block_str,
+                        "close": price_str,
+                        "ma5d": row.get('ma5d', 0.0) if row is not None else 0.0,
+                        "ma20d": row.get('ma20d', 0.0) if row is not None else 0.0,
+                        "ma60d": row.get('ma60d', 0.0) if row is not None else 0.0,
+                    }
+
+        # 实时根据推送的行情重新分析和更新板块排行展示
+        if all_stocks_for_stats:
+            self.update_concept_ranking(all_stocks_for_stats)
 
     def load_config_settings(self):
         if os.path.exists(CONFIG_FILE):
@@ -443,6 +484,8 @@ class PRServiceGUI:
                 
                 # 恢复缓存的共振代码
                 self.resonance_codes = [r['code'] for r in resonance_results]
+                # 恢复缓存的行业板块描述
+                self._block_cache = cache.get("block_cache", {})
                 
                 # 更新表格，主线程安全
                 self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results, quotes)
@@ -474,6 +517,56 @@ class PRServiceGUI:
                         "children": [("Vertical.Scrollbar.thumb",
                                       {"expand": "1", "sticky": "nswe"})]})])
         
+        # 顶部的概念显示与控制栏
+        self.top_concept_frame = tk.Frame(self.root)
+        self.top_concept_frame.pack(side="top", fill="x", padx=4, pady=2)
+
+        # 左侧概念文本显示容器 (模仿 tk 原版)
+        self.lbl_category_result = tk.Label(
+            self.top_concept_frame,
+            text="当前概念: 暂无板块数据",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="green",
+            bg=self.root.cget('bg'),
+            anchor="w",
+            justify="left",
+            cursor="hand2"
+        )
+        self.lbl_category_result.pack(side="left", fill="both", expand=True, padx=4)
+        self.lbl_category_result.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+
+        # 右侧小按钮控制容器
+        self.control_buttons_frame = tk.Frame(self.top_concept_frame)
+        self.control_buttons_frame.pack(side="right", fill="y")
+
+        # 查询刷新按钮（移到顶部右侧）
+        self.btn_refresh = tk.Button(
+            self.control_buttons_frame,
+            text="查询刷新",
+            font=("Microsoft YaHei", 9, "bold", "underline"),
+            fg="#E02020",
+            activeforeground="#A01010",
+            bg=self.root.cget('bg'),
+            relief="flat",
+            cursor="hand2",
+            command=self.run_once_async
+        )
+        self.btn_refresh.pack(side="left", padx=4)
+
+        # 写入板块按钮（移到顶部右侧）
+        self.btn_write = tk.Button(
+            self.control_buttons_frame,
+            text="写入板块",
+            font=("Microsoft YaHei", 9, "bold", "underline"),
+            fg="#E02020",
+            activeforeground="#A01010",
+            bg=self.root.cget('bg'),
+            relief="flat",
+            cursor="hand2",
+            command=self.write_block_async
+        )
+        self.btn_write.pack(side="left", padx=4)
+
         # 主显示区域 (左右分栏)
         main_pane = tk.Frame(self.root)
         main_pane.pack(fill="both", expand=True, padx=4, pady=2)
@@ -487,20 +580,6 @@ class PRServiceGUI:
         # 左分栏
         self.left_frame = tk.Frame(self.paned)
         self.paned.add(self.left_frame, minsize=200)
-
-        # 查询刷新按钮
-        self.btn_refresh = tk.Button(
-            self.left_frame,
-            text="查询刷新",
-            font=("Microsoft YaHei", 12, "bold", "underline"),
-            fg="#E02020",
-            activeforeground="#A01010",
-            bg=self.root.cget('bg'),
-            relief="flat",
-            cursor="hand2",
-            command=self.run_once_async
-        )
-        self.btn_refresh.pack(pady=4)
 
         # 东 (EastMoney) Table Frame (1px 窄边框模式)
         self.em_container = tk.Frame(self.left_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
@@ -516,20 +595,6 @@ class PRServiceGUI:
         # 右分栏
         self.right_frame = tk.Frame(self.paned)
         self.paned.add(self.right_frame, minsize=300)
-
-        # 写入板块按钮
-        self.btn_write = tk.Button(
-            self.right_frame,
-            text="写入板块",
-            font=("Microsoft YaHei", 12, "bold", "underline"),
-            fg="#E02020",
-            activeforeground="#A01010",
-            bg=self.root.cget('bg'),
-            relief="flat",
-            cursor="hand2",
-            command=self.write_block_async
-        )
-        self.btn_write.pack(pady=4)
 
         # 开 (LongHu) Table Frame (1px 窄边框模式)
         self.lh_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
@@ -1035,7 +1100,8 @@ class PRServiceGUI:
                         "lh_data": lh_data,
                         "resonance_results": resonance_results[:limit],
                         "quotes": all_quotes,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "block_cache": getattr(self, "_block_cache", {})
                     }
                     with open(cache_file, "w", encoding="utf-8") as f:
                         json.dump(cache_data, f, indent=4, ensure_ascii=False)
@@ -1054,7 +1120,20 @@ class PRServiceGUI:
             self.root.after(0, lambda: self.btn_refresh.config(state="normal", text="查询刷新"))
 
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):
+        # 缓存最新传入的数据，用于点击概念过滤时重新渲染
+        self._last_data_cache = {
+            "em_data": em_data,
+            "ths_data": ths_data,
+            "lh_data": lh_data,
+            "tgb_data": tgb_data,
+            "resonance_results": resonance_results,
+            "quotes": quotes
+        }
+
         self.clear_all_trees()
+
+        # 用于统计前 10 概念热度的个股信息收集字典
+        all_stocks_for_stats = {}
 
         # 1. 提取所有进入"合"表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
         resonance_set = {item["code"] for item in resonance_results}
@@ -1071,9 +1150,9 @@ class PRServiceGUI:
             fav_stocks = set()
 
         # 预计算本次的自定义追加列（全局统一，所有 tree 共享同一列结构）
-        _, _, _extra_cols = self._get_all_cols()
         # 板块信息缓存，不再存入 Treeview，双击时查询
-        self._block_cache = {}
+        if not hasattr(self, "_block_cache") or self._block_cache is None:
+            self._block_cache = {}
 
         def _read_extra_vals(row_obj) -> tuple:
             """从 df_cache 行中读取自定义列的值，找不到则返回 '--'"""
@@ -1143,6 +1222,10 @@ class PRServiceGUI:
                         except Exception:
                             row_obj = None
 
+                code_str = str(code).strip().zfill(6)
+                if block_str == '--' or not block_str:
+                    block_str = self._block_cache.get(code_str, '--')
+
                 tag = "flat"
                 if pct > 0:
                     tag = "up"
@@ -1159,6 +1242,22 @@ class PRServiceGUI:
                 # 板块写入缓存，不写入 Treeview
                 if block_str and block_str not in ('--', 'nan', 'None'):
                     self._block_cache[code_str] = block_str
+                    # 放入统计字典
+                    all_stocks_for_stats[code_str] = {
+                        "percent": pct,
+                        "category": block_str,
+                        "close": price_str,
+                        "ma5d": row_obj.get('ma5d', 0.0) if row_obj is not None else 0.0,
+                        "ma20d": row_obj.get('ma20d', 0.0) if row_obj is not None else 0.0,
+                        "ma60d": row_obj.get('ma60d', 0.0) if row_obj is not None else 0.0,
+                    }
+
+                # 概念过滤
+                if getattr(self, 'selected_concept', None) is not None:
+                    import re
+                    cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
+                    if self.selected_concept not in cats:
+                        continue
 
                 # 基础列 + 自定义追加列
                 extra_vals = _read_extra_vals(row_obj)
@@ -1210,6 +1309,10 @@ class PRServiceGUI:
                     except Exception:
                         row_obj_res = None
 
+            code_str = str(code).strip().zfill(6)
+            if block_str == '--' or not block_str:
+                block_str = self._block_cache.get(code_str, '--')
+
             tag = "flat"
             if pct > 0:
                 tag = "up"
@@ -1226,6 +1329,22 @@ class PRServiceGUI:
             # 板块写入缓存，不写入 Treeview
             if block_str and block_str not in ('--', 'nan', 'None'):
                 self._block_cache[code_str] = block_str
+                # 放入统计字典
+                all_stocks_for_stats[code_str] = {
+                    "percent": pct,
+                    "category": block_str,
+                    "close": price_str,
+                    "ma5d": row_obj_res.get('ma5d', 0.0) if row_obj_res is not None else 0.0,
+                    "ma20d": row_obj_res.get('ma20d', 0.0) if row_obj_res is not None else 0.0,
+                    "ma60d": row_obj_res.get('ma60d', 0.0) if row_obj_res is not None else 0.0,
+                }
+
+            # 概念过滤
+            if getattr(self, 'selected_concept', None) is not None:
+                import re
+                cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
+                if self.selected_concept not in cats:
+                    continue
 
             # 共振表同样追加自定义列
             extra_vals_res = _read_extra_vals(row_obj_res)
@@ -1246,6 +1365,9 @@ class PRServiceGUI:
         for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
             if getattr(tree, "sort_col", None) is not None:
                 self.sort_column(tree, tree.sort_col, getattr(tree, "sort_descending", False), auto_restore=True)
+
+        # 7. 更新顶部板块热点排名
+        self.update_concept_ranking(all_stocks_for_stats)
 
         self.lbl_status.config(text="更新完成", fg="blue")
 
@@ -1408,9 +1530,11 @@ class PRServiceGUI:
             import pandas as pd
             df = pd.read_csv(file_path, encoding="utf-8")
 
-            self.clear_all_trees()
-            # 重置板块缓存（历史数据也要支持双击查板块）
-            self._block_cache = {}
+            # 追加或保留板块缓存（历史数据也要支持双击查板块）
+            if not hasattr(self, "_block_cache") or self._block_cache is None:
+                self._block_cache = {}
+            # 用于统计前 10 概念热度的个股信息收集字典
+            all_stocks_for_stats = {}
 
             # 获取当前配置的自定义追加列
             _, _, _extra_cols = self._get_all_cols()
@@ -1451,6 +1575,18 @@ class PRServiceGUI:
                 # 写入板块缓存，供双击查询
                 if block and block != '--':
                     self._block_cache[code] = block
+                    try:
+                        pct_val = float(str(percent).replace('%', ''))
+                    except (ValueError, TypeError):
+                        pct_val = 0.0
+                    all_stocks_for_stats[code] = {
+                        "percent": pct_val,
+                        "category": block,
+                        "close": price,
+                        "ma5d": 0.0,
+                        "ma20d": 0.0,
+                        "ma60d": 0.0
+                    }
 
                 # 读取自定义列值（CSV 中有则取，否则 '--'）
                 extra_vals = tuple(safe_str(row.get(c)) for c in _extra_cols)
@@ -1555,6 +1691,9 @@ class PRServiceGUI:
             for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
                 if getattr(tree, "sort_col", None) is not None:
                     self.sort_column(tree, tree.sort_col, getattr(tree, "sort_descending", False), auto_restore=True)
+
+            # 更新顶部板块热点排名
+            self.update_concept_ranking(all_stocks_for_stats)
 
             self.lbl_status.config(text=f"已加载 {date_str} 历史数据", fg="darkgreen")
             return True
@@ -1795,6 +1934,562 @@ class PRServiceGUI:
                 self.root.after(1800000, self._check_auto_refresh_after_close)
             except Exception:
                 pass
+
+    def update_concept_ranking(self, all_stocks):
+        if not all_stocks:
+            if hasattr(self, 'lbl_category_result'):
+                self.lbl_category_result.config(text="当前概念: 暂无板块数据")
+            return
+
+        import re
+        concept_dict = {}
+        concept_is_bullish = {}
+        # 用来保存每个板块下的个股 data [(code, name, percent, volume, rank)]
+        temp_cat_stocks = {}
+
+        for code, info in all_stocks.items():
+            cat_str = info["category"]
+            if not cat_str or cat_str in ("--", "nan", "None"):
+                continue
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', cat_str) if c.strip()]
+            pct = info["percent"]
+            
+            # 获取个股的基本属性
+            name = info.get("name", "--")
+            if name == "--" and hasattr(self, '_last_data_cache') and self._last_data_cache:
+                q_data = self._last_data_cache.get("quotes", {})
+                if code in q_data:
+                    name = q_data[code].get("name", name)
+            
+            try:
+                close = float(info["close"])
+                ma5 = float(info["ma5d"])
+                ma20 = float(info["ma20d"])
+                ma6 = float(info["ma60d"])
+                is_bullish = (ma5 > ma20 > ma6) and (close > ma6)
+            except Exception:
+                is_bullish = False
+
+            # 获取 Rank 属性
+            rank_val = info.get("rank", info.get("Rank", 0))
+            
+            # 获取成交量 volume
+            volume_val = info.get("volume", info.get("vol", info.get("amount", 0.0)))
+
+            for cat in cats:
+                if cat in ('', '0', 'nan', 'None'):
+                    continue
+                if cat not in concept_dict:
+                    concept_dict[cat] = []
+                    concept_is_bullish[cat] = []
+                    temp_cat_stocks[cat] = []
+                concept_dict[cat].append(pct)
+                concept_is_bullish[cat].append(is_bullish)
+                temp_cat_stocks[cat].append((code, name, pct, volume_val, rank_val))
+
+        concept_score = []
+        for cat, percents in concept_dict.items():
+            if not percents:
+                continue
+            avg_pct = sum(percents) / len(percents)
+            bullish_list = concept_is_bullish.get(cat, [])
+            bullish_ratio = sum(bullish_list) / len(bullish_list) if bullish_list else 0.0
+            
+            # 使用和 tk 一致的得分算法并放大10倍
+            score = avg_pct * (1.0 + bullish_ratio) * 10.0
+            
+            concept_score.append({
+                "name": cat,
+                "score": round(score, 2),
+                "avg_percent": round(avg_pct, 2),
+                "count": len(percents),
+                "bullish_ratio": round(bullish_ratio, 2)
+            })
+
+        # 降序排序，取 count 最多的前 5 个概念用于顶部显示
+        concept_score.sort(key=lambda x: x["count"], reverse=True)
+        top5 = concept_score[:5]
+        
+        display_text = "  ".join([f"{item['name']}:{item['count']}" for item in top5])
+        if not display_text:
+            display_text = "暂无概念"
+        
+        if hasattr(self, 'lbl_category_result'):
+            self.lbl_category_result.config(text=f"当前概念: {display_text}")
+        
+        # 模仿 tk 保存当前的板块字典，个股按涨幅从大到小排序
+        self._last_categories = [item["name"] for item in top5]
+        self._last_cat_dict = {}
+        for cat in self._last_categories:
+            # 排序个股
+            stocks = temp_cat_stocks.get(cat, [])
+            stocks.sort(key=lambda x: x[2], reverse=True)
+            self._last_cat_dict[cat] = stocks
+
+    def show_concept_detail_window(self):
+        """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
+        if not hasattr(self, "_last_categories") or not self._last_categories:
+            messagebox.showinfo("提示", "暂无概念板块数据，请先执行查询或等待实时行情推送。")
+            return
+
+        # 检查窗口是否已存在
+        if getattr(self, "_concept_win", None):
+            try:
+                if self._concept_win.winfo_exists():
+                    win = self._concept_win
+                    win.deiconify()
+                    win.lift()
+                    # 仅清理旧内容区，不销毁窗口结构
+                    for widget in win._content_frame.winfo_children():
+                        widget.destroy()
+                    self.update_concept_detail_content()
+                    return
+                else:
+                    self._concept_win = None
+            except Exception:
+                self._concept_win = None
+
+        win = tk.Toplevel(self.root)
+        self._concept_win = win
+        win.title("概念板块统计详情")
+        
+        # 恢复窗口几何尺寸，默认 240x450
+        saved_geo = self.config.get("concept_detail_window_geometry", "240x450")
+        try:
+            win.geometry(saved_geo)
+        except Exception:
+            win.geometry("240x450")
+
+        # 监听大小与坐标变化以保存布局
+        def _save_concept_detail_win_geo(event):
+            if win.winfo_exists():
+                try:
+                    self.config["concept_detail_window_geometry"] = win.winfo_geometry()
+                except Exception:
+                    pass
+        win.bind("<Configure>", _save_concept_detail_win_geo)
+
+        # 主Frame + Canvas + 滚动
+        frame = tk.Frame(win, bg="white")
+        frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        canvas = tk.Canvas(frame, bg="white", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview, style="Slim.Vertical.TScrollbar")
+        scroll_frame = tk.Frame(canvas, bg="white")
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # 鼠标滚轮绑定
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        def unbind_mousewheel(event=None):
+            try:
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+
+        # 保存引用
+        win._canvas = canvas
+        win._content_frame = scroll_frame
+        win._unbind_mousewheel = unbind_mousewheel
+
+        # 键盘滚动与高亮初始化
+        self._label_widgets = []
+        self._selected_index = 0
+
+        win.bind("<Up>", self._on_detail_key)
+        win.bind("<Down>", self._on_detail_key)
+        win.bind("<Escape>", lambda e: on_close_detail_window())
+        
+        # 获取焦点
+        win.focus_set()
+
+        # 关闭窗口
+        def on_close_detail_window():
+            if win.winfo_exists():
+                try:
+                    self.config["concept_detail_window_geometry"] = win.winfo_geometry()
+                except Exception:
+                    pass
+            unbind_mousewheel()
+            win.destroy()
+            self._concept_win = None
+
+        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+        # 初始内容
+        self.update_concept_detail_content()
+
+    def update_concept_detail_content(self, limit=10):
+        """刷新概念详情窗口内容"""
+        if not hasattr(self, "_concept_win") or not self._concept_win:
+            return
+        if not self._concept_win.winfo_exists():
+            self._concept_win = None
+            return
+
+        scroll_frame = self._concept_win._content_frame
+        canvas = self._concept_win._canvas
+
+        # 清空旧内容
+        for widget in scroll_frame.winfo_children():
+            widget.destroy()
+        self._label_widgets = []
+
+        current_categories = getattr(self, "_last_categories", [])
+        cat_dict = getattr(self, "_last_cat_dict", {})
+
+        # 在顶部加一个小标题
+        title_lbl = tk.Label(
+            scroll_frame,
+            text="📊 概念异动板块详情 (前5)",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="#004D40",
+            bg="white",
+            anchor="w"
+        )
+        title_lbl.pack(anchor="w", pady=(2, 6), padx=4)
+
+        for c in current_categories[:5]:
+            # 每个概念的标题行，点击也可以弹出具体板块个股窗口
+            c_frame = tk.Frame(scroll_frame, bg="white")
+            c_frame.pack(anchor="w", fill="x", pady=(6, 2))
+            
+            c_lbl = tk.Label(
+                c_frame,
+                text=f"📂 {c} ({len(cat_dict.get(c, []))}只)",
+                fg="#1A237E",
+                bg="white",
+                font=("Microsoft YaHei", 9, "bold"),
+                cursor="hand2",
+                anchor="w"
+            )
+            c_lbl.pack(side="left", padx=4)
+            c_lbl.bind("<Button-1>", lambda e, name=c: self.show_concept_top10_window(name))
+            
+            # 展示这个板块下的前 limit 只股票
+            stocks = cat_dict.get(c, [])[:limit]
+            for code, name, percent, volume, rank in stocks:
+                # 仿照 tk 显示样式
+                disp_text = f"  {code} {name:<4} R:{rank:<3} {percent:>+6.2f}%"
+                
+                fg_color = "#E02020" if percent > 0 else ("#20A020" if percent < 0 else "black")
+                
+                lbl = tk.Label(
+                    scroll_frame,
+                    text=disp_text,
+                    fg=fg_color,
+                    bg="white",
+                    font=("Consolas", 9),
+                    cursor="hand2",
+                    anchor="w",
+                    takefocus=True
+                )
+                lbl.pack(anchor="w", padx=10, pady=1)
+                lbl._code = code
+                lbl._concept = c
+                
+                idx = len(self._label_widgets)
+                lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
+                lbl.bind("<Double-Button-1>", lambda e, cd=code, name=c: self._on_label_double_click(cd, name))
+                self._label_widgets.append(lbl)
+
+        # 默认选中第一条
+        if self._label_widgets:
+            self._selected_index = 0
+            self._label_widgets[0].configure(bg="#E0F7FA")
+
+        canvas.yview_moveto(0)
+
+    def _update_detail_selection(self, idx):
+        """更新选中高亮并滚动"""
+        if not hasattr(self, "_concept_win") or not self._concept_win:
+            return
+        canvas = self._concept_win._canvas
+        scroll_frame = self._concept_win._content_frame
+
+        for lbl in self._label_widgets:
+            lbl.configure(bg="white")
+        if 0 <= idx < len(self._label_widgets):
+            lbl = self._label_widgets[idx]
+            lbl.configure(bg="#E0F7FA")
+            self._selected_index = idx
+
+            canvas.update_idletasks()
+            scroll_frame.update_idletasks()
+            lbl_top = lbl.winfo_y()
+            lbl_bottom = lbl_top + lbl.winfo_height()
+            view_top = canvas.canvasy(0)
+            view_bottom = view_top + canvas.winfo_height()
+            if lbl_top < view_top:
+                canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
+            elif lbl_bottom > view_bottom:
+                canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
+
+    def _on_label_click(self, code, idx):
+        """点击详情中个股标签，实现联动"""
+        self._update_detail_selection(idx)
+        # 联动逻辑
+        is_tdx = self.link_tdx_var.get()
+        is_ths = self.link_ths_var.get()
+        if is_tdx or is_ths:
+            flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
+            if get_link_manager:
+                get_link_manager().push(code, flags=flags)
+            elif self.local_sender:
+                self.local_sender.send(code)
+        if self.link_vis_var.get():
+            threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
+        self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+
+    def _on_label_double_click(self, code, concept_name):
+        """双击详情个股，直接弹出具体板块列表窗口"""
+        self.show_concept_top10_window(concept_name)
+
+    def _on_detail_key(self, event):
+        """键盘上下键导航"""
+        if not self._label_widgets:
+            return
+        idx = self._selected_index
+        if event.keysym == "Up":
+            idx = max(0, idx - 1)
+        elif event.keysym == "Down":
+            idx = min(len(self._label_widgets) - 1, idx + 1)
+        self._update_detail_selection(idx)
+        # 同步联动
+        lbl = self._label_widgets[idx]
+        self._on_label_click(lbl._code, idx)
+
+    def show_concept_top10_window(self, concept_name):
+        """
+        [NEW] 复刻 tk 中的概念板块个股 Top10/Top50 幕口展示功能。
+        已优化：支持无行情数据时的本端个股匹配、窗口复用、Escape键关闭以及窗口位置记忆。
+        """
+        pure_name = concept_name.split('(')[0]
+
+        df_all = self.sync_manager.get_current_df()
+        
+        # 收集所有人气排行中包含此概念的个股
+        matched_stocks = []
+        import pandas as pd
+
+        for code_str, block_str in getattr(self, '_block_cache', {}).items():
+            import re
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
+            if pure_name in cats:
+                name = "--"
+                pct = 0.0
+                price = 0.0
+                rank_val = 0
+                dff = 0.0
+                volume = 0.0
+                red = 0
+                win_val = 0
+                
+                # 伜先从最新的实时 DataFrame 读数据
+                if df_all is not None and code_str in df_all.index:
+                    try:
+                        row = df_all.loc[code_str]
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        name = row.get("name", row.get("Name", "--"))
+                        pct = float(row.get('percent', row.get('ratio', 0.0)))
+                        price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+                        rank_val = int(row.get('Rank', row.get('rank', 0)))
+                        dff = row.get('dff', row.get('DFF', 0.0))
+                        volume = row.get('volume', row.get('vol', 0.0))
+                        red = row.get('red', 0)
+                        win_val = row.get('win', 0)
+                    except Exception:
+                        pass
+                
+                # 从人气排行本地缓存 quotes 读数据（兜底）
+                if name == "--" and hasattr(self, '_last_data_cache') and self._last_data_cache:
+                    q_data = self._last_data_cache.get("quotes", {})
+                    if code_str in q_data:
+                        name = q_data[code_str].get("name", name)
+                        pct = q_data[code_str].get("percent", pct)
+                        price = q_data[code_str].get("price", price)
+
+                matched_stocks.append({
+                    "code": code_str,
+                    "name": name,
+                    "percent": pct,
+                    "price": price,
+                    "rank": rank_val,
+                    "dff": dff,
+                    "volume": volume,
+                    "red": red,
+                    "win": win_val
+                })
+
+        if not matched_stocks:
+            messagebox.showinfo("信息", f"板块【{pure_name}】暂无匹配的人气个股", parent=self.root)
+            return
+
+        # 降序排列
+        matched_stocks.sort(key=lambda x: x["percent"], reverse=True)
+
+        # 3. 创庚/复用 Toplevel 窗口
+        if getattr(self, "concept_win", None) is None or not self.concept_win.winfo_exists():
+            win = tk.Toplevel(self.root)
+            self.concept_win = win
+            
+            # 恢复窗口几何尺寸，默认 560x360
+            saved_geo = self.config.get("concept_window_geometry", "560x360")
+            try:
+                win.geometry(saved_geo)
+            except Exception:
+                win.geometry("560x360")
+                
+            # 监听大小与坐标变化以保存布局
+            def _save_concept_win_geo(event):
+                if win.winfo_exists():
+                    try:
+                        self.config["concept_window_geometry"] = win.winfo_geometry()
+                    except Exception:
+                        pass
+            win.bind("<Configure>", _save_concept_win_geo)
+            win.bind("<Escape>", lambda e: win.destroy())
+            
+            # 4. 创庚内部布局 （包含 1px 边框与枅窄滚动条）
+            frame = tk.Frame(win, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
+            frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+            columns = ["code", "name", "rank", "percent", "dff", "volume", "red", "win"]
+            col_texts = {
+                "code": "代码",
+                "name": "名称",
+                "rank": "Rank",
+                "percent": "涨幅(%)",
+                "dff": "dff",
+                "volume": "成交量",
+                "red": "连阳",
+                "win": "主升"
+            }
+
+            tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="Treeview")
+            vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview, style="Slim.Vertical.TScrollbar")
+            tree.configure(yscrollcommand=vsb.set)
+            tree.pack(side="left", fill="both", expand=True)
+            vsb.pack(side="right", fill="y")
+
+            for col in columns:
+                tree.heading(col, text=col_texts.get(col, col), anchor="center")
+                width = 80 if col in ("name", "code") else 50
+                tree.column(col, anchor="center", width=width)
+
+            tree.tag_configure("up",       foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
+            tree.tag_configure("down",     foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
+            tree.tag_configure("flat",     foreground="#000000", font=("Microsoft YaHei", 9))
+
+            self.concept_tree = tree
+
+            # 单底和双底联动事件
+            def on_select_top10(event):
+                sel = tree.selection()
+                if sel:
+                    vals = tree.item(sel[0], "values")
+                    if vals and len(vals) >= 1:
+                        code = str(vals[0]).strip().zfill(6)
+                        # 联动
+                        is_tdx = self.link_tdx_var.get()
+                        is_ths = self.link_ths_var.get()
+                        if is_tdx or is_ths:
+                            flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
+                            if get_link_manager:
+                                get_link_manager().push(code, flags=flags)
+                            elif self.local_sender:
+                                self.local_sender.send(code)
+                        if self.link_vis_var.get():
+                            threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
+                        self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+
+            def on_double_click_top10(event):
+                sel = tree.selection()
+                if sel:
+                    vals = tree.item(sel[0], "values")
+                    if vals and len(vals) >= 2:
+                        code = str(vals[0]).strip().zfill(6)
+                        name = str(vals[1]).strip()
+                        if name.startswith("★ "):
+                            name = name[len("★ "):]
+                        
+                        block = getattr(self, '_block_cache', {}).get(code, '--')
+                        messagebox.showinfo("板块信息", f"个股: {name} ({code})\n所属行个板块: {block}", parent=self.concept_win)
+
+            tree.bind("<<TreeviewSelect>>", on_select_top10)
+            tree.bind("<Double-1>", on_double_click_top10)
+        else:
+            win = self.concept_win
+            tree = self.concept_tree
+            # 清空旧行
+            for child in tree.get_children():
+                tree.delete(child)
+
+        win.title(f"板块【{pure_name}】个股列表")
+        
+        # 插入匹配的股票行
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        for idx, item in enumerate(matched_stocks):
+            code_str = item["code"]
+            name = item["name"]
+            is_fav = code_str in fav_stocks
+            display_name = f"★ {name}" if is_fav else name
+
+            percent = item["percent"]
+            rank_val = item["rank"]
+            dff = item["dff"]
+            volume = item["volume"]
+            red = item["red"]
+            win_val = item["win"]
+
+            tag = "flat"
+            if percent > 0:
+                tag = "up"
+            elif percent < 0:
+                tag = "down"
+
+            row_values = (
+                code_str,
+                display_name,
+                rank_val,
+                f"{percent:.2f}",
+                f"{dff:.1f}" if isinstance(dff, (int, float)) else str(dff),
+                f"{volume:.1f}" if isinstance(volume, (int, float)) else str(volume),
+                red,
+                win_val
+            )
+            tree.insert("", "end", values=row_values, tags=(tag,))
+
+        win.deiconify()
+        win.lift()
+        win.focus_force()
 
 if __name__ == "__main__":
     # Windows/PyInstaller 多进程兼容性支持
