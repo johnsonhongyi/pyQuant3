@@ -22,6 +22,7 @@ a = Analysis(
     datas=[(csv_path, "a_trade_calendar"),
         ("MonitorTK.ico", "."),
         ("config/multi_period_help.md", "config"),
+        ("config/multi_period_strategies.json", "config"),
         ("window_config.json", "."),
         ("scale2_window_config.json", "."),
         ("monitor_category_list.json", "."),

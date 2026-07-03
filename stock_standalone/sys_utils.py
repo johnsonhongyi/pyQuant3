@@ -221,6 +221,11 @@ RESOURCE_MAP = {
     "multi_period_help.md": {
         "src": "config/multi_period_help.md",
         "dst": "config/multi_period_help.md"
+    },
+    "multi_period_strategies.json": {
+        "src": "config/multi_period_strategies.json",
+        "dst": "config/multi_period_strategies.json",
+        "delay_release": True
     }
 }
 
@@ -468,6 +473,8 @@ def ensure_all_configs_released():
 
     logger.info("📡 正在启动核心配置文件抢占式预加载自愈释放...")
     for fname in RESOURCE_MAP:
+        if RESOURCE_MAP[fname].get("delay_release", False):
+            continue
         try:
             get_conf_path(fname)
         except Exception as e:

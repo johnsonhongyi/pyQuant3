@@ -17,6 +17,59 @@ from sys_utils import get_app_root
 # 动态判定继承父类，当作为模块已存在主 Tk 窗口时继承 tk.Toplevel，否则继承 tk.Tk
 _parent_class = tk.Toplevel if tk._default_root else tk.Tk
 
+def show_toast(parent, message, duration=1800, bg="#E8F5E9", fg="#2E7D32"):
+    """弹出一个自动隐藏的 toast 提示窗口，定位在 parent 窗口中央"""
+    toast = tk.Toplevel(parent)
+    toast.wm_overrideredirect(True)
+    toast.attributes("-topmost", True)
+    
+    # 样式美化：绿色成功主题
+    lbl = tk.Label(
+        toast, text=message, bg=bg, fg=fg,
+        font=("Microsoft YaHei", 10, "bold"), relief="solid", bd=1,
+        padx=18, pady=10
+    )
+    lbl.pack()
+    
+    # 保证大小计算生效
+    toast.update_idletasks()
+    
+    try:
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        px = parent.winfo_x()
+        py = parent.winfo_y()
+        
+        tw = toast.winfo_width()
+        th = toast.winfo_height()
+        
+        x = px + (pw - tw) // 2
+        y = py + (ph - th) // 2
+        
+        x = max(0, x)
+        y = max(0, y)
+        toast.wm_geometry(f"+{x}+{y}")
+    except Exception:
+        try:
+            screen_w = toast.winfo_screenwidth()
+            screen_h = toast.winfo_screenheight()
+            tw = toast.winfo_width()
+            th = toast.winfo_height()
+            x = (screen_w - tw) // 2
+            y = (screen_h - th) // 2
+            toast.wm_geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+            
+    def destroy_toast():
+        try:
+            if toast.winfo_exists():
+                toast.destroy()
+        except Exception:
+            pass
+            
+    parent.after(duration, destroy_toast)
+
 class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
     def __init__(self, master=None):
         if _parent_class == tk.Toplevel:
@@ -1646,7 +1699,15 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         self._refresh_list()
         
         if self.strategies:
-            self.listbox.selection_set(0)
+            initial_idx = 0
+            current_strat_id = parent.ui_state.get('strategy_id', '')
+            if current_strat_id:
+                for idx, s in enumerate(self.strategies):
+                    if s['id'] == current_strat_id:
+                        initial_idx = idx
+                        break
+            self.listbox.selection_set(initial_idx)
+            self.listbox.see(initial_idx)
             self._on_select(None)
             
         # 绑定退出事件
@@ -2005,13 +2066,13 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         # 弹出粘贴 JSON 的窗口
         dialog = tk.Toplevel(self)
         dialog.title("粘贴 JSON 策略配置")
-        dialog.geometry("600x450")
+        dialog.geometry("650x480")
         dialog.transient(self)
         dialog.grab_set()
         
         # 居中显示
         dialog.update_idletasks()
-        w, h = 600, 450
+        w, h = 650, 480
         x = self.winfo_x() + (self.winfo_width() - w) // 2
         y = self.winfo_y() + (self.winfo_height() - h) // 2
         dialog.geometry(f"{w}x{h}+{x}+{y}")
@@ -2127,7 +2188,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
             self.listbox.see(new_idx)
             self._on_select(None)
             
-            messagebox.showinfo("成功", f"成功导入 {len(valid_strats)} 条策略！", parent=dialog)
+            show_toast(self, f"✅ 成功导入 {len(valid_strats)} 条策略！", duration=1500)
             dialog.destroy()
             
         btn_ok = tk.Button(btn_frame, text="✅ 解析并导入", command=do_import, bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9, "bold"))
@@ -2267,7 +2328,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         self.listbox.selection_clear(0, tk.END)
         self.listbox.selection_set(self.current_idx)
         self._on_select(None, sync=False)
-        messagebox.showinfo("应用成功", f"JSON 已成功解析并更新策略「{strat['name']}」！", parent=self)
+        show_toast(self, f"✅ JSON 已成功解析并更新策略「{strat['name']}」！", duration=1500)
 
     def _copy_json_to_clipboard(self):
         """复制 JSON 编辑器内容到系统剪贴板"""
@@ -2276,7 +2337,7 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         content = self.json_editor.get("1.0", tk.END).strip()
         self.clipboard_clear()
         self.clipboard_append(content)
-        messagebox.showinfo("已复制", "JSON 内容已复制到剪贴板！", parent=self)
+        show_toast(self, "📋 JSON 内容已复制到剪贴板！", duration=1200)
 
     def _reformat_json_editor(self):
         """格式化 JSON 编辑器中的内容（美化缩进）"""
@@ -2365,7 +2426,12 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         success = self.engine.save_strategies(self.strategies)
         if success:
             self.on_save_callback()
-            messagebox.showinfo("保存成功", "所有多周期策略已成功保存并重新加载！")
+            # 在主窗口(parent)上弹起 Toast，并同时更新其状态栏
+            parent_win = self.master
+            if parent_win:
+                show_toast(parent_win, "🌟 所有多周期策略已成功保存并重新加载！", duration=1800)
+                if hasattr(parent_win, "status_var"):
+                    parent_win.status_var.set("🌟 所有多周期策略已成功保存并重新加载！")
             self._on_close()
         else:
             messagebox.showerror("错误", "保存策略失败。")
