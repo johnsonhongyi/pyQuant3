@@ -521,6 +521,10 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_save.setStyleSheet("background-color: #f39c12; color: white; font-weight: bold;")
         self.btn_save.clicked.connect(self.on_save_changes)
 
+        self.btn_save_as = QPushButton("📤 Save As / Export")
+        self.btn_save_as.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
+        self.btn_save_as.clicked.connect(self.on_save_as)
+
         self.btn_read_table = QPushButton("📖 Read Table")
         self.btn_read_table.setStyleSheet("background-color: #34495e; color: white;")
         self.btn_read_table.clicked.connect(self.on_read_table)
@@ -562,6 +566,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         top_toolbar.addWidget(self.btn_add_row)
         top_toolbar.addWidget(self.btn_del_row)
         top_toolbar.addWidget(self.btn_save)
+        top_toolbar.addWidget(self.btn_save_as)
         top_toolbar.addWidget(self.btn_read_table)
         top_toolbar.addWidget(self.btn_del_table)
         top_toolbar.addStretch(1)
@@ -1069,12 +1074,34 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             ext = os.path.splitext(file_path)[1].lower()
 
             if ext == ".pkl":
-                try:
-                    # 优先尝试 zstd 压缩格式加载
-                    df = pd.read_pickle(file_path, compression='zstd')
-                except:
-                    # 兼容传统的未压缩 pkl 格式
-                    df = pd.read_pickle(file_path)
+                # 获取配置中的首选压缩方式
+                config_ini = cct.get_ramdisk_path('h5config.txt') if cct else None
+                if not config_ini:
+                    config_ini = os.path.join(os.getcwd(), 'h5config.txt')
+                cfg_compression = cct.get_config_value(config_ini, 'kline_viewer', xtype='compression', read=True) if cct else None
+                if not cfg_compression:
+                    cfg_compression = 'zstd'
+                if str(cfg_compression).lower() == 'none':
+                    cfg_compression = None
+
+                attempts = [cfg_compression, 'zstd', 'gzip', 'bz2', 'zip', 'xz', 'infer', None]
+                unique_attempts = []
+                for att in attempts:
+                    if att not in unique_attempts:
+                        unique_attempts.append(att)
+
+                df = None
+                last_err = None
+                for compression_mode in unique_attempts:
+                    try:
+                        df = pd.read_pickle(file_path, compression=compression_mode)
+                        break
+                    except Exception as e:
+                        last_err = e
+                        continue
+                
+                if df is None:
+                    raise last_err
 
             elif ext == ".csv":
                 try:
@@ -1121,8 +1148,8 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                             header_idx = i
                             break
                     
-                    # 3. 加载初始数据
-                    df = pd.read_csv(file_path, encoding=encoding, skiprows=header_idx, index_col=False)
+                    # 3. 加载初始数据 (添加 compression='infer' 支持自适应解压)
+                    df = pd.read_csv(file_path, encoding=encoding, skiprows=header_idx, index_col=False, compression='infer')
                     
                     # 4. 修复表头偏移与 Unnamed 列问题
                     if not df.empty:
@@ -1970,18 +1997,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                     self.statusBar().showMessage("File Mode: No file path.")
                     return
                 
-                # 🛡️ 拦截多数据表 HDF5 文件保存，防止覆盖损坏
                 ext = os.path.splitext(self.current_file)[1].lower()
-                if ext in ('.h5', '.hdf5', '.hdf'):
-                    QMessageBox.warning(
-                        self, 
-                        "保存被拦截", 
-                        f"检测到当前文件为 HDF5 格式：\n{os.path.basename(self.current_file)}\n\n"
-                        "⚠️ 该查看器暂不支持对多数据表 HDF5 文件直接保存更改（以防覆盖其他表或损坏文件）。\n"
-                        "系统已拦截本次保存操作！"
-                    )
-                    self.statusBar().showMessage("Save canceled: HDF5 save is disabled to prevent corruption.")
-                    return
                 
                 # 弹出保存确认框并显示保存路径
                 reply = QMessageBox.question(
@@ -1994,10 +2010,49 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 if reply != QMessageBox.StandardButton.Yes:
                     return
 
-                self.statusBar().showMessage(f"Saving to {self.current_file} (zstd compressed)...")
-                # 统一使用 zstd 压缩保存，保持简洁的文件体积
-                df.to_pickle(self.current_file, compression='zstd')
-                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} (Compressed)!")
+                # 从配置文件中读取指定的压缩格式 (compression)
+                config_ini = cct.get_ramdisk_path('h5config.txt') if cct else None
+                if not config_ini:
+                    config_ini = os.path.join(os.getcwd(), 'h5config.txt')
+                cfg_compression = cct.get_config_value(config_ini, 'kline_viewer', xtype='compression', read=True) if cct else None
+                if not cfg_compression:
+                    cfg_compression = 'zstd' # 默认使用 zstd
+                if str(cfg_compression).lower() == 'none':
+                    cfg_compression = None
+
+                if ext == ".pkl":
+                    self.statusBar().showMessage(f"Saving to {self.current_file} ({cfg_compression} compressed)...")
+                    df.to_pickle(self.current_file, compression=cfg_compression)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} ({cfg_compression})!")
+                elif ext == ".csv":
+                    # 支持 CSV 格式压缩存储，如果 cfg_compression 属于 pandas to_csv 支持的压缩格式 (gzip, bz2, zip, xz)
+                    csv_compression = cfg_compression if cfg_compression in ('gzip', 'bz2', 'zip', 'xz') else None
+                    if csv_compression:
+                        self.statusBar().showMessage(f"Saving to {self.current_file} ({csv_compression} compressed)...")
+                        df.to_csv(self.current_file, index=False, compression=csv_compression)
+                        self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} ({csv_compression})!")
+                    else:
+                        self.statusBar().showMessage(f"Saving to {self.current_file}...")
+                        df.to_csv(self.current_file, index=False)
+                        self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)}!")
+                elif ext in (".json", ".gz"):
+                    # 支持 JSON / gzip 压缩存储
+                    if ext == ".gz" or (cfg_compression in ('gzip', 'infer') and self.current_file.endswith('.gz')):
+                        self.statusBar().showMessage(f"Saving to {self.current_file} (gzip compressed)...")
+                        df.to_json(self.current_file, orient='records', force_ascii=False, indent=4, compression='gzip')
+                    else:
+                        self.statusBar().showMessage(f"Saving to {self.current_file}...")
+                        df.to_json(self.current_file, orient='records', force_ascii=False, indent=4)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)}!")
+                elif ext in (".h5", ".hdf5", ".hdf"):
+                    h5_key = self.current_key if self.current_key else 'df'
+                    self._save_and_repack_hdf5(self.current_file, df, h5_key)
+                else:
+                    # 兜底保存为 pickle
+                    self.statusBar().showMessage(f"Saving to {self.current_file} ({cfg_compression} compressed)...")
+                    df.to_pickle(self.current_file, compression=cfg_compression)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} ({cfg_compression})!")
+
                 QMessageBox.information(
                     self, 
                     "保存成功", 
@@ -2008,6 +2063,189 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self.statusBar().showMessage(f"Save Failed: {e}")
             print(f"DEBUG: Save General Error: {e}")
             QMessageBox.critical(self, "错误", f"保存失败: {e}")
+
+    def on_save_as(self):
+        """将数据转存为新文件"""
+        df = self.active_df
+        if df.empty:
+            self.statusBar().showMessage("Nothing to save.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "转存为新文件",
+            self.current_file if self.current_file else os.getcwd(),
+            "Pickle Files (*.pkl);;CSV Files (*.csv);;Session Files (*.json *.json.gz);;HDF5 Files (*.h5 *.hdf5 *.hdf);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+        # 如果保存为 HDF5，当原文件也是 HDF5 时，复制原文件以防丢失其他 table/key
+        if ext in ('.h5', '.hdf5', '.hdf'):
+            current_ext = os.path.splitext(self.current_file)[1].lower() if self.current_file else ''
+            if current_ext in ('.h5', '.hdf5', '.hdf') and self.current_file and os.path.exists(self.current_file):
+                import shutil
+                if os.path.abspath(self.current_file) != os.path.abspath(file_path):
+                    shutil.copy2(self.current_file, file_path)
+
+        reply = QMessageBox.question(
+            self, 
+            "确认转存", 
+            f"确定要将当前数据转存到以下路径吗？\n\n{file_path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            config_ini = cct.get_ramdisk_path('h5config.txt') if cct else None
+            if not config_ini:
+                config_ini = os.path.join(os.getcwd(), 'h5config.txt')
+            cfg_compression = cct.get_config_value(config_ini, 'kline_viewer', xtype='compression', read=True) if cct else None
+            if not cfg_compression:
+                cfg_compression = 'zstd'
+            if str(cfg_compression).lower() == 'none':
+                cfg_compression = None
+
+            if ext == ".pkl":
+                self.statusBar().showMessage(f"Saving to {file_path} ({cfg_compression} compressed)...")
+                df.to_pickle(file_path, compression=cfg_compression)
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)} ({cfg_compression})!")
+            elif ext == ".csv":
+                csv_compression = cfg_compression if cfg_compression in ('gzip', 'bz2', 'zip', 'xz') else None
+                if csv_compression:
+                    self.statusBar().showMessage(f"Saving to {file_path} ({csv_compression} compressed)...")
+                    df.to_csv(file_path, index=False, compression=csv_compression)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)} ({csv_compression})!")
+                else:
+                    self.statusBar().showMessage(f"Saving to {file_path}...")
+                    df.to_csv(file_path, index=False)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)}!")
+            elif ext in (".json", ".gz"):
+                if file_path.endswith('.gz') or (cfg_compression in ('gzip', 'infer') and file_path.endswith('.gz')):
+                    self.statusBar().showMessage(f"Saving to {file_path} (gzip compressed)...")
+                    df.to_json(file_path, orient='records', force_ascii=False, indent=4, compression='gzip')
+                else:
+                    self.statusBar().showMessage(f"Saving to {file_path}...")
+                    df.to_json(file_path, orient='records', force_ascii=False, indent=4)
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)}!")
+            elif ext in ('.h5', '.hdf5', '.hdf'):
+                h5_key = self.current_key if self.current_key else 'df'
+                self._save_and_repack_hdf5(file_path, df, h5_key)
+            else:
+                self.statusBar().showMessage(f"Saving to {file_path} ({cfg_compression} compressed)...")
+                df.to_pickle(file_path, compression=cfg_compression)
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)} ({cfg_compression})!")
+
+            QMessageBox.information(
+                self, 
+                "转存成功", 
+                f"更改已成功转存至新文件：\n{file_path}"
+            )
+            
+            # 转存成功后，把当前活跃文件更新为转存后的文件
+            self.current_file = file_path
+            self.setWindowTitle(f"K-Line Backup Viewer - {os.path.basename(file_path)}")
+            if file_path not in self.file_history:
+                self.file_history.insert(0, file_path)
+                self.save_history()
+
+        except Exception as e:
+            self.statusBar().showMessage(f"Save As Failed: {e}")
+            print(f"DEBUG: Save As General Error: {e}")
+            QMessageBox.critical(self, "错误", f"转存失败: {e}")
+
+    def _save_and_repack_hdf5(self, file_path, df, h5_key):
+        """
+        保存 DataFrame 到 HDF5 并运行 ptrepack 进行重新打包压缩与清理减肥
+        """
+        self.statusBar().showMessage(f"Writing dataset '{h5_key}' to HDF5...")
+        # 写入 HDF5 数据集
+        df.to_hdf(file_path, key=h5_key)
+
+        # 获取配置里的压缩格式信息
+        config_ini = cct.get_ramdisk_path('h5config.txt') if cct else None
+        if not config_ini:
+            config_ini = os.path.join(os.getcwd(), 'h5config.txt')
+        cfg_compression = cct.get_config_value(config_ini, 'kline_viewer', xtype='compression', read=True) if cct else None
+        
+        complib = 'zlib'
+        if cfg_compression and str(cfg_compression).lower() != 'none':
+            complib = str(cfg_compression).lower()
+
+        # 准备执行 ptrepack 重新打包压缩与整理减肥
+        temp_file = file_path + '_tmp'
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+
+        back_path = os.getcwd()
+        basedir = os.path.dirname(os.path.abspath(file_path))
+        fname_abs = os.path.abspath(file_path)
+        temp_abs = os.path.abspath(temp_file)
+
+        pt_success = False
+        pt_msg = ""
+        try:
+            # 1. 备份原文件到 temp
+            os.rename(fname_abs, temp_abs)
+
+            # 2. 切换路径，生成相对路径以避免命令行中文空格报错
+            os.chdir(basedir)
+            temp_rel = os.path.relpath(temp_abs, basedir)
+            fname_rel = os.path.relpath(fname_abs, basedir)
+
+            # 3. 构造与 tdx_hdf5_api 内部完全对齐的 ptrepack 指令
+            ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --alignment=1024 --complevel=9 --complib=%s %s %s"
+            pt_cmd = ptrepack_cmds % (complib, temp_rel, fname_rel)
+            self.statusBar().showMessage(f"Running HDF5 ptrepack compression ({complib})...")
+
+            import subprocess
+            p = subprocess.Popen(
+                pt_cmd, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            )
+            out = p.communicate()[0]
+            pt_msg = out.decode('gbk', errors='ignore')
+
+            # 如果首选的对齐对齐参数被当前 PyTables 报错（比如 unrecognized arguments: --alignment），则进行自动退避重试
+            if p.returncode != 0 and ("unrecognized arguments" in pt_msg and "alignment" in pt_msg):
+                self.statusBar().showMessage("ptrepack: '--alignment' unrecognized, retrying without alignment...")
+                ptrepack_cmds_fallback = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+                pt_cmd_fallback = ptrepack_cmds_fallback % (complib, temp_rel, fname_rel)
+                p = subprocess.Popen(
+                    pt_cmd_fallback, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                )
+                out = p.communicate()[0]
+                pt_msg = out.decode('gbk', errors='ignore')
+
+            if p.returncode == 0:
+                pt_success = True
+                if os.path.exists(temp_abs):
+                    os.remove(temp_abs)
+            else:
+                raise RuntimeError(f"ptrepack failed: {pt_msg}")
+        except Exception as e:
+            # 发生任何异常，自动回滚重命名原文件，保证数据安全
+            if os.path.exists(temp_abs) and not os.path.exists(fname_abs):
+                try:
+                    os.rename(temp_abs, fname_abs)
+                except Exception:
+                    pass
+            raise e
+        finally:
+            os.chdir(back_path)
+
+        if pt_success:
+            self.statusBar().showMessage(f"Successfully saved and compressed HDF5 ({complib})!")
+        else:
+            self.statusBar().showMessage(f"Saved HDF5 without compression.")
 
     def on_read_table(self):
         """读取/切换当前 HDF5 文件中的其他数据集 (Table)"""

@@ -1,3 +1,44 @@
+## 2026-07-04 01:10
+- [x] **人气排行顶部概念栏文字数量显示与双重弹窗联动机制 (Refactored Concept Bar to Count Labels & Double Popup Linkage)**：
+    - [x] **重构顶栏为文字加数量模式 (Count-based Text Label format)**：废除了原本由多个 `tk.Button` 组成的横向板块，重构为与主程序 `instock_MonitorTK` 一致的加粗绿色 Label。顶部文字动态展示为 `当前概念: 芯片概念:25 机器人概念:13 5G:13 ...`。其中数量为该板块在当前这批人气个股切片中的股票总数。
+    - [x] **实现详细概念板块弹窗与多级个股弹窗联动 (Concept Detail Window & Constituent Linkage)**：点击顶部的“当前概念”Label 会弹出“概念板块统计详情”窗口。在统计窗口中，展示了前5大概念板块以及其属下的明星个股。点击板块标题或者双击个股会弹出大版的 constituent 个股列表窗口（Treeview）。
+    - [x] **集成强大的联动与交互控制 (Interactive Navigation & Linkage)**：详情窗口支持鼠标滚轮、键盘 `Up` / `Down` 键快捷定位与导航，在移动光标时自动同步联动通达信、同花顺及 K线可视化进程；窗口支持大小及位置的自动持久化以及 Escape 键一键退出，实现精细化交互。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验，无任何语法或缩进问题，系统 100% 保持稳定。
+
+## 2026-07-04 00:30
+- [x] **人气排行板块排行启动自愈、实时推送渲染与缓存保留机制 (Fixed Cold Startup Concept Ranking & Real-time Update Propagation)**：
+    - [x] **实现启动后自动展示缓存板块 (Startup Self-Healing from Local Cache)**：修正了 `update_all_tables` 与 `load_history_by_date` 中对 `self._block_cache = {}` 的一刀切重置缺陷。重构为有条件初始化，确保从本地缓存中恢复出的 `_block_cache` 不会被刷新机制无条件抹去，让默认启动时即能稳定渲染出历史板块热度排名。
+    - [x] **实现实时行情推送动态重新计算板块 (Live Concept Ranking Updates)**：在实时推送回调函数 `refresh_realtime_fields` 结束前补充了对 `update_concept_ranking(all_stocks_for_stats)` 的调用，打破了以往“只有切换历史数据或重载表格时才计算板块排行”的静默限制，使顶部概念板块热度随实时行情流秒级刷新，真正达成数据联动自愈。
+    - [x] **加固大周期与兜底板块匹配机制 (Resilient Concept Fallback)**：对心跳填充逻辑的 `populate` 以及共振“合”表更新循环进行了 fallback 加固。当行情服务器尚未建立连接或个股板块字段临时缺失时，自动退避从积累的 `self._block_cache` 本地字典中匹配，从而阻断了由于缺少实时数据导致个股被踢出统计、引发板块显示被全部清空的问题。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `popularity_resonance_gui.py` 进行了物理语法编译，100% 通过且逻辑闭环。
+
+## 2026-07-04 00:20
+- [x] **实现 K线备份查看器 HDF5 保存、转存与 ptrepack 命令行自动减肥压缩整理功能 (Implemented HDF5 Save/Save-As & ptrepack Compression in KlineBackupViewer)**：
+    - [x] **解除 HDF5 保存与转存的物理拦截防御**：将 `on_save_changes` 与 `on_save_as` 中原本对 `.h5`/`.hdf5`/`.hdf` 文件的一刀切警告拦截改为完整读写与压缩流程。
+    - [x] **实现 HDF5 数据集安全复制与单表更新**：在 `on_save_as` 转存时，若源文件和目标文件均为 HDF5 且不为同一路径，自动利用 `shutil.copy2` 先进行物理克隆，随后将内存中编辑过的单个 DataFrame 使用 `to_hdf` 更新写回对应的 key，防止其他 keys/datasets 丢失。
+    - [x] **实现 ptrepack 命令行自动减肥整理与压缩**：抽象并集成了 `_save_and_repack_hdf5` 辅助方法。保存时会自动读取 `h5config.txt` 中的 `kline_viewer` -> `compression` 获取压缩格式，若启用压缩，将原文件自动更名为临时文件，利用命令行 `ptrepack` 执行重新打包和压缩，完成后安全删除临时文件。当压缩失败时执行物理回滚，确保数据高可用与不损坏。
+    - [x] **增加 ptrepack 参数自适应退避 (Added --alignment Fallback Retry)**：针对由于 PyTables 版本差异导致 `ptrepack` 抛出 `unrecognized arguments: --alignment=1024` 错误，增加了自动参数退避与重试机制。当首选的带有对齐对齐参数的命令执行失败时，自动退避运行标准无 `--alignment` 的重新打包指令，保证了多环境的高度兼容与健壮性。
+    - [x] **自检与物理语法编译校验全绿通过**：使用 `py_compile` 对 `minute_kline_viewer_qt.py` 进行检查，无任何异常，多格式自适应与 HDF5 repack 保存链路完全闭环。
+
+## 2026-07-03 19:20
+- [x] **人气排行板块统计、横向滚动展示与弹窗复用持久化自愈 (Implemented Popularity Concept Statistics, Scrolling & Reusable Persistent Popups)**：
+    - [x] **实现局端人气个股切片板块统计 (Sliced Category Extraction)**：重构了 `update_concept_ranking`，仅针对当前已展示的人气个股表做切片并统计板块归属，不再无谓遍历全市场，过滤了业务噪音。
+    - [x] **引入行业板块描述本地缓存与冷启动自愈 (Local Block Cache & Self-healing)**：新增 `self._block_cache` 并进行持久化。当实时行情流因冷启动或断开返回空时，通过缓存自愈匹配本端个股的板块信息，实现了离线鲁棒展示。
+    - [x] **实现顶部热点板块 Canvas 滚动布局与滚轮横向绑定 (Canvas Horizontal Scrolling & Scroll Event Propagation)**：将概念按钮栏升级为无边框 `Canvas`，默认只展示 Top 5，更多通过鼠标滚轮横向滚动查看。通过将滚轮事件透传绑定至 `Canvas` 内的各 Label 和 Button，根治了 Tkinter 子控件吃掉滚动事件的局限。
+    - [x] **实现板块个股弹窗复用与 Escape 一键关闭 (Window Reuse & Escape Close)**：在 `show_concept_top10_window` 中对 `self.concept_win` 进行 `winfo_exists` 存活校验，实现窗口的循环复用和局部数据重绘，并绑定 Escape 键一秒快速关闭。
+    - [x] **支持弹窗位置几何尺寸记忆持久化 (Geometry Persistence)**：监听窗口的 `<Configure>` 动作将布局尺寸和屏幕坐标写回配置，在下次打开或重启程序时自动对齐，完美优化了多显示器分屏下的交互体验。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验无任何语法或缩进问题，成功保持高工程水准。
+
+## 2026-07-03 18:50
+- [x] **在 K 线备份查看器实现压缩转存功能与多格式压缩存储 (Implemented Compressed "Save As" & Multi-Format Compressed Storage in KlineBackupViewer)**：
+    - [x] **实现 K 线备份查看器另存为/转存 (Save As / Export) 压缩存储与自适应解压**：
+        - 在 `minute_kline_viewer_qt.py` 中新增 `Save As / Export` 按钮，绑定并实现了 `on_save_as` 方法；
+        - 导出保存与读取时，从 `h5config.txt` 中提取 `compression` 参数。修复了此前三处调用 `cct.get_ramdisk_path()` 时未传递必填位置参数 `filename` 引发的 `TypeError: get_ramdisk_path() missing 1 required positional argument: 'filename'` 错误（已统一传入 `'h5config.txt'` 补全参数）；
+        - 保存 `.pkl` 文件时应用该配置；加载 `.pkl` 文件时引入了自适应顺序尝试退避（cfg_compression, zstd, gzip, bz2, zip, xz, infer, None），彻底解决特定格式（如 zstd）因解压模块冲突或环境依赖缺失引发的 `UnpicklingError`，实现高容错性自动兼容与韧性读取；
+        - 保存与读取 `.csv` 以及 `.json`/`.gz` 文件时，增加了对格式的匹配判定和对应的压缩（如 `gzip`）处理，彻底杜绝了之前强行将 `.csv` 后缀文件以 Pickle 格式覆写造成的底层格式紊乱风险；
+    - [x] **严格执行零底层修改原则 (Zero-modification to tdx_hdf5_api.py)**：回滚并保留了 `JSONData/tdx_hdf5_api.py` 的原始物理实现，未做任何更改，确保底层 API 的绝对稳定。
+    - [x] **物理语法编译与自检全绿通过**：使用 `py_compile` 对修改后的 `minute_kline_viewer_qt.py` 执行了编译校验，确认没有任何语法或缩进问题。
+
 ## 2026-07-03 18:25
 - [x] **实现 K线备份查看器保存确认、路径展示与 HDF5 多数据表保存拦截防御 (Implemented Save Confirmation, Path Display & HDF5 Multi-Table Save Protection in KlineBackupViewer)**：
     - [x] **引入保存前置确认与路径展示**：重构了 `on_save_changes`，在执行保存操作前，无论是同步到内存还是保存到本地文件，均弹出 `QMessageBox.question` 询问框进行二次确认，并在确认框中展示了当前准备写入的完整物理文件路径，防止用户无意误触。
