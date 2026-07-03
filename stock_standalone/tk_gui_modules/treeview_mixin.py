@@ -219,9 +219,57 @@ class TreeviewMixin:
         """多级排序发生改变时的保存状态分流处理器"""
         if tree != getattr(self, 'tree', None):
             self._last_active_concept_tree = tree
-        # ⚡ [OPTIMIZE] 全局所有的多级排序都不要点击排序就写盘，全部存在内存内，在退出/关闭窗口或程序时统一写盘。
-        # 这里不再主动调用 self.save_ui_states()以规避高频磁盘I/O。
-        pass
+            
+            # 同步多级排序状态到其他打开的概念板块 Treeview
+            concept_trees = []
+            if hasattr(self, "_concept_top10_win") and self._concept_top10_win and self._concept_top10_win.winfo_exists():
+                t = getattr(self._concept_top10_win, "_tree_top10", None)
+                if t and t not in concept_trees:
+                    concept_trees.append(t)
+            if hasattr(self, "_pg_top10_window_simple") and self._pg_top10_window_simple:
+                for item in self._pg_top10_window_simple.values():
+                    win = item.get("win") or item.get("toplevel")
+                    if win and win.winfo_exists():
+                        t = getattr(win, "_tree_top10", None)
+                        if t and t not in concept_trees:
+                            concept_trees.append(t)
+            if hasattr(self, "monitor_windows") and self.monitor_windows:
+                for item in self.monitor_windows.values():
+                    win = item.get("toplevel")
+                    if win and win.winfo_exists():
+                        t = item.get("monitor_tree") or getattr(win, "_tree_top10", None)
+                        if t and t not in concept_trees:
+                            concept_trees.append(t)
+            
+            if tree in concept_trees:
+                # 复制排序状态
+                sortby_col = getattr(tree, 'sortby_col', 'percent')
+                sortby_col_ascend = getattr(tree, 'sortby_col_ascend', False)
+                sort_level1_col = getattr(tree, 'sort_level1_col', None)
+                sort_level1_asc = getattr(tree, 'sort_level1_asc', True)
+                sort_level2_col = getattr(tree, 'sort_level2_col', None)
+                sort_level2_asc = getattr(tree, 'sort_level2_asc', True)
+                sort_level3_col = getattr(tree, 'sort_level3_col', None)
+                sort_level3_asc = getattr(tree, 'sort_level3_asc', True)
+                multi_sort_click_count = getattr(tree, 'multi_sort_click_count', 0)
+                
+                # 同步广播给其他打开的概念板块 Treeview 并更新表头和内容排序
+                for t in concept_trees:
+                    if t != tree:
+                        t.sortby_col = sortby_col
+                        t.sortby_col_ascend = sortby_col_ascend
+                        t.sort_level1_col = sort_level1_col
+                        t.sort_level1_asc = sort_level1_asc
+                        t.sort_level2_col = sort_level2_col
+                        t.sort_level2_asc = sort_level2_asc
+                        t.sort_level3_col = sort_level3_col
+                        t.sort_level3_asc = sort_level3_asc
+                        t.multi_sort_click_count = multi_sort_click_count
+                        try:
+                            self.update_mixin_tree_headers(t)
+                            self.trigger_mixin_multi_level_sort(t)
+                        except Exception as ex:
+                            logger.debug(f"Failed to sync sort for concept tree: {ex}")
 
     def _get_clean_header_text(self, tree: ttk.Treeview, col: str) -> str:
         """获取不含排序前缀的干净表头文字"""

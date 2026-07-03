@@ -1,8 +1,72 @@
+## 2026-07-04 05:50
+- [x] **实现左右两侧表格自适应列宽与无障碍拉伸 (Dynamic Adaptive Column Widths on Splitter Resize)**：
+    - [x] **实现通用自适应宽度算法**：在 `PRServiceGUI` 中新增了类成员方法 `self._adjust_tree_column_widths(tree)`。该方法在容器尺寸变化时，通过获取 Treeview 可视宽度并扣除滚动条占用，自动将剩余的可用宽度平均分配给所有 `stretch=True` 的可拉伸列，并同时将固定列（`idx`, `code`）设为固定宽度，保障了超窄尺寸下的最小可读限制（30px）。
+    - [x] **实现事件驱动的实时自适应联动**：为所有 5 个主 Treeview 均绑定了 `<Configure>` 事件。当用户拖动中间的垂直分隔栏（改变 sash 位置）或者拖动主窗口大小时，该事件会被瞬间捕捉并触发列宽重算。这彻底根治了旧版本中“左侧被拉窄时列宽无法自动收缩导致内容被截断”的 Tkinter 默认缺陷，保证了在任意拖动比例下所有主表列宽都能 100% 自动自适应填充。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 05:40
+- [x] **实现右键个股快捷直达最强概念板块个股详情及表头指示器加固 (Right-Click to Strongest Category Constituents & Robust Header Arrow Update)**：
+    - [x] **实现类级模块化概念名称标准化**：将原本嵌套定义在 `show_concept_top10_window` 内部的 `normalize_concept_name` 提取重构为 `PopularityResonanceGUI` 类的独立方法 `self._normalize_concept_name`。这消除了代码冗余，满足了 DRY 原则，使个股右键逻辑与双击逻辑能共用同一套标准化规则。
+    - [x] **实现类级模块化降噪板块过滤**：将本来在 `update_concept_ranking` 里的局部降噪机制及 `NOISE_CONCEPTS` 词典升级重构为 `PRServiceGUI` 类的通用成员方法 `self._is_noise_concept(name_str)`，提升了系统模块化和高内聚低耦合属性。
+    - [x] **实现展示前3个有实际意义最强板块的右键快捷入口**：在主表右键菜单 `show_context_menu` 中，获取个股所属的全部板块并以降噪优先、只数强弱降序进行排序。接着自动提取排在最前面的 **最多 3 个有实际分析价值的概念板块**，在右键菜单中动态生成多达 3 个独立的查看项（例如：`📂 查看最强板块个股 (共封装光学:17只)`），支持分别点击直达各自板块的 constituents 个股 Treeview 详情，极大地丰富了右键研判维度。
+    - [x] **根治 update_header_arrows 引起的 TclError: Invalid column index idx 异常**：重构了 `update_header_arrows` 的防护与自适应渲染逻辑。当对概念个股列表等不含 `"idx"`（序列号）列 of 自定义 Treeview 执行排序方向指示器更新时，自动进行安全校验。如果是主表，按原逻辑处理；如果不上主表，则采用通用表头字典并包裹了 `try...except` 忽略无效的列名，彻底杜绝了指示器刷新时的崩溃。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 05:30
+- [x] **根治排序同步时主表与二级列表列名不一致引起的 Invalid column index 崩溃 (Fixed TclError: Invalid Column Index during Multi-Window Sorting)**：
+    - [x] **实现 sort_column 数据提取安全保护**：在 `sort_column` 中，对提取某行数据的 `tree.set(k, col)` 操作包裹了 `try...except` 保护。若目标 Treeview 没有任何对应的列，方法将直接安全退出并返回，彻底防御了由于列名缺失引起的 `_tkinter.TclError: Invalid column index` 异常。
+    - [x] **限制主窗口同步范围与防止递归重入**：限制了主窗口 5 个 Treeview 的同步排序。只有当发起排序的 `tree` 本身是 5 个主表之一时，才会向其他主表广播；子窗口点击排序时，仅更新自身，杜绝了由于子窗口列名不一致而使主窗口排序报错的问题。
+    - [x] **实现业务一致性列名映射 (Business-Aware Column Mapping)**：在同步个股 constituent 列表时，引入了自动列名映射字典（映射 `val -> percent` 和 `dff2/dff3 -> dff`）。这实现了即使主窗口列名为 `"val"`（涨幅），二级列表也能智能对齐并成功以 `"percent"` 同步进行排序，大幅提升了联动一致性。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 05:20
+- [x] **实现概念异动与板块个股多级排序与主窗口联动同步 (Synchronized Sort to Detail and Constituent Windows from Main Rankings)**：
+    - [x] **实现手动点击列头同步个股列表排序**：在主表 `sort_column` 手动排序（`not auto_restore`）的逻辑中，增加了对已打开个股列表窗口（`self.concept_win`）的自动检测。如果个股 Treeview `self.concept_tree` 存在且包含当前的排序列（`col in columns`），则自动同步调用排序方法将其重新整理，实现了“主窗口排什么，个股列表瞬间跟着排什么”的统一交互。
+    - [x] **实现手动点击列头同步概念详情窗口排序**：同样在 `sort_column` 中，如果概念详情汇总窗口（`self._concept_win`）正处于打开状态，则自动触发 `self.update_concept_detail_content()` 重绘。
+    - [x] **实现无相同列时的排序过滤保护**：重构了 `update_concept_detail_content`，它会自适应主表的当前排序列（`percent`, `volume`, `rank` 等）。如果拥有该 col，则按该列规则和升降序进行各板块个股的渲染排序；如果主表排序列不存在于该列表中，则自动退避维持原有的涨幅降序，并静默忽略，绝不抛出异常。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 验证，100% 成功编译并通过导入加载测试。
+
+## 2026-07-04 05:00
+- [x] **修复 TK 概念前十多窗口点击列头排序同步失效问题 (Fixed Multi-Window Column Sort Synchronization in TK Concept Windows)**：
+    - [x] **实现实时内存多窗口排序广播同步**：在 `tk_gui_modules/treeview_mixin.py` 的 `_save_mixin_ui_states` 方法中增加概念前十窗口的多窗口检测与排序同步机制。当用户在任意概念前十 Treeview 窗口中点击列头进行多级或单列排序时，自动复制排序状态，实时广播给所有其他打开的且处于存活状态的概念窗口（涵盖复用窗口 `_concept_top10_win`、历史简单窗口 `_pg_top10_window_simple` 以及从监控追踪 `monitor_windows` 中收集的全部概念 Treeview），并调用 `update_mixin_tree_headers` 和 `trigger_mixin_multi_level_sort` 强制触发排序更新，达成与人气排行完全一致的联动效果。
+    - [x] **修复 UI 状态持久化中的变量名称 typo**：在 `instock_MonitorTK.py` 的 `save_ui_states` 方法中，修复了原先将概念前十 Treeview 挂载在 `self._concept_win` 导致的类型检测漏洞（实际应为 `self._concept_top10_win`），并补充了对 `self.monitor_windows` 的多维度存活检测与提取，确保退出或持久化时，所有打开的板块个股排序状态全部被正确写入本地磁盘。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验，两处文件均 100% 成功编译，无任何异常。
+
+## 2026-07-04 04:00
+- [x] **完美解决板块个股详情历史模式数据匹配、中英文括号标准化与排序同步机制 (Standardized Parentheses, Fixed Historical Matching, Synchronized Sorting, and Bottom Stats in Stock Details)**：
+    - [x] **实现中英文括号标准化防截断匹配**：废除了原先一刀切拆除括号导致“共封装光学(CPO)”被简化成“共封装光学”的粗暴做法。引入了 `normalize_concept_name` 辅助函数，将中英文括号标准化为英文括号并过滤数量后缀，实现了精确的概念比对，保留了板块完整的括号表述，使弹窗标题与左侧完全对齐。
+    - [x] **修复历史模式下个股代码正则匹配漏洞**：修复了在 `show_concept_top10_window` 中对历史 DataFrame 查询匹配个股时，正则表达式 `r'\\.0$'` 因双反斜杠导致无法剥离 `.0` 进而造成历史个股被过滤并错误加载实时行情的问题。将其修正为 `r'\.0$'`，彻底根治了历史模式数据丢失与污染的 bug。
+    - [x] **实现与人气主窗口一致的自选股优先多级排序及同步排序**：在板块个股 Treeview 表头绑定了与主窗口一模一样的 `sort_column` 排序命令，支持自选股优先及各列类型的自适应转换。在加载个股数据后，程序会自动获取人气主表当前的活跃排序列与升降序状态，如果存在同名列则瞬间自动同步排序，实现了丝滑的用户体验。
+    - [x] **新增底部上涨下跌只数与均幅统计栏**：在个股列表 Toplevel 窗口最底部新增了统计区 Frame，实时计算并醒目地展示板块内“上涨只数 (均幅 %)”与“下跌只数 (均幅 %)”及平盘只数，极大地提升了用户研判板块情绪的效率。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 和运行导入验证，一切 100% 正常。
+
+## 2026-07-04 03:00
+- [x] **优化监控主界面顶栏概念精细化点击与悬浮视觉动画 (Synchronized High-End Concept Top Bar Interaction & Visual Animation to TK Main Monitor)**：
+    - [x] **重构顶栏为多组件结构**：废除了 `instock_MonitorTK.py` 中原本一刀切绑定的单个 `self.lbl_category_result` 控件，重构为由一个引导词 Label（`self.lbl_category_title`，显示 `"当前概念:"`）和一个动态子面板（`self.dynamic_concepts_frame`）组成的多组件包装结构（`self.concept_wrapper_frame`）。
+    - [x] **实现引导词点击跳转大版详情**：点击引导词 `"当前概念:"`，直接调起原有的 `"概念板块统计详情"` 窗口（即 `show_concept_detail_window`），保持了大版汇总的快速入口。
+    - [x] **实现具体概念点击一步到位直达 constituents**：点击动态面板中的各个具体概念 Label（如 `"共封装光学:17"` 等），直接一步到位弹出该板块下的个股 Treeview constituent 列表弹窗（即 `show_concept_top10_window(name)`），极大地节省了盘中交互步骤，提升操作效率。
+    - [x] **新增悬浮动画与高亮反馈**：为各具体概念 Label 绑定了鼠标悬停（`<Enter>`/`<Leave>`）事件。悬浮时前景色会自动由绿色变为深绿色 (`#004D00`)，划出时恢复，提供 premium 级别的操作反馈与视觉暗示。
+    - [x] **保留底层兼容性与防重闪烁**：保留并重定向了 `self.lbl_category_result` 指向 `self.lbl_category_title` 确保与其它既有逻辑完全兼容，并重构了概念新增或消失时的“概念异动”闪烁警报逻辑。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验，无任何语法或缩进问题，系统 100% 保持稳定。
+
+## 2026-07-04 02:20
+- [x] **实现板块个股详情历史模式数据自适应与自定义列适配 (Implemented History-Aware Stock Details & Column Adaptability in Popularity Resonance GUI)**：
+    - [x] **实现历史复盘模式下的个股涨跌幅与价格等数据自适应**：在双击板块（如共封装光学）打开的个股 constituent 弹窗方法 `show_concept_top10_window` 中，新增了是否是历史模式的校验。在历史复盘模式下，不再去读取实时的 `df_all` DataFrame 行情数据，而是优先从已经缓存的历史数据 DataFrame `self._history_df` 中精确匹配出对应股票，提取出当天的涨跌幅（`percent`）、价格（`price`）、排名（`rank`）、dff、成交量（`volume`）、连阳（`red`）、主升（`win`）等数据，彻底根治了对历史模式下点击个股详情仍然显示实时数据的问题。
+    - [x] **实现自定义追加列的动态匹配与适配**：通过调用 `self._get_all_cols()` 获取系统配置 of 自定义追加列 `extra_cols`。并在 Treeview 渲染时，动态构建列集合，若处于历史模式且匹配到历史行数据，则自适应从中提取对应的自定义列值并渲染，保证了历史数据与主界面表格自定义列的高度对齐。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验，无任何语法或缩进问题，系统 100% 保持稳定。
+
 ## 2026-07-04 01:10
 - [x] **人气排行顶部概念栏文字数量显示与双重弹窗联动机制 (Refactored Concept Bar to Count Labels & Double Popup Linkage)**：
     - [x] **重构顶栏为文字加数量模式 (Count-based Text Label format)**：废除了原本由多个 `tk.Button` 组成的横向板块，重构为与主程序 `instock_MonitorTK` 一致的加粗绿色 Label。顶部文字动态展示为 `当前概念: 芯片概念:25 机器人概念:13 5G:13 ...`。其中数量为该板块在当前这批人气个股切片中的股票总数。
     - [x] **实现详细概念板块弹窗与多级个股弹窗联动 (Concept Detail Window & Constituent Linkage)**：点击顶部的“当前概念”Label 会弹出“概念板块统计详情”窗口。在统计窗口中，展示了前5大概念板块以及其属下的明星个股。点击板块标题或者双击个股会弹出大版的 constituent 个股列表窗口（Treeview）。
     - [x] **集成强大的联动与交互控制 (Interactive Navigation & Linkage)**：详情窗口支持鼠标滚轮、键盘 `Up` / `Down` 键快捷定位与导航，在移动光标时自动同步联动通达信、同花顺及 K线可视化进程；窗口支持大小及位置的自动持久化以及 Escape 键一键退出，实现精细化交互。
+    - [x] **修复 _extra_cols 未定义导致的 Tkinter callback 崩溃 (Fixed NameError on _extra_cols)**：在 `update_all_tables` 中，内嵌函数 `_read_extra_vals` 引用了 `_extra_cols`，但外层函数未定义。通过在 `update_all_tables` 开头执行 `_, _, _extra_cols = self._get_all_cols()`，彻底解决了查询刷新与启动缓存加载时的崩溃问题。
+    - [x] **实现启动无缓存时的历史数据自动兜底加载机制 (Startup Historical Fallback Loading)**：当启动时检测 to `popularity_resonance_cache.json` 缓存为空或加载失败时，程序将自动扫描 `datacsv` 目录并寻找最新一日的持久化文件（`.csv.gz` 或 `.csv`），自动完成静默载入并对齐日期输入框（`date_entry`），消除了冷启动无数据白屏的现象。
+    - [x] **实现历史复盘模式下的数据锁死与拦截机制 (Implemented Date Lock for Historical Review)**：在 `refresh_realtime_fields` 实时推送接口和后台自动刷新线程的回调中均引入了当前查看日期的校验。若当前正处于历史日期复盘模式（即当前日期不等于今天），则直接拦截并忽略 Socket 行情推送以及后台定时刷新对界面的重绘，确保加载历史数据时的板块热度排行、个股涨幅及价格信息全部完全锁死在历史 CSV 数据本身上，不受实时行情的干扰。
+    - [x] **修复由于中英文括号不一致导致概念板块下个股匹配失败的问题 (Fixed Concept Matching due to Parentheses Mismatch)**：在 `show_concept_top10_window` 过滤匹配个股时，对传入的 `concept_name` 以及个股所属 of `cats` 概念板块字符串，均执行中英文括号去除操作（`.split('(')[0].split('（')[0].strip()`）。这彻底解决了诸如“共封装光学(CPO)”这类因含有括号后缀而导致二级 constituent 弹窗提示“暂无匹配人气个股”的 bug。
+    - [x] **实现智能历史日期微调切换逻辑 (Smart Date Swapping via Arrow Buttons)**：重构了 `shift_date` 微调机制。点击底部的左/右方向箭头时，程序不再是死板地加减自然日一天，而是首先扫描 `datacsv` 目录下所有真实持有选股历史文件的日期，并融合今天形成有序有效日期列表。随后向左/右方向进行查找，智能跳转到前一个/后一个有数据的交易日，跳过了无数据的空白日与周末非交易日，极大优化了复盘切盘的流畅性。
+    - [x] **实现有价值明确概念的降噪优先排序逻辑 (Valuable Concept Priority Sorting & Noise Filtering)**：在 `update_concept_ranking` 排序中，针对“深股通”、“港股通”、“国企改革”、“融资融券”等非行业清晰、宏观概括的无实际个股分析价值的板块建立“降噪屏蔽池”与关键字规则判定。排序时强行将它们的优先级降至最低，优先保证具备具体实体属性和科技价值（如芯片、大飞机、共封装光学等）的概念排在 Top 5 概念栏中。
+    - [x] **重构顶栏概念点击交互机制 (Refactored Top Concept Interaction)**：将原本整体绑定的 `lbl_category_result` 重构拆分为独立的引导词 Label 与动态概念词 Label 组。点击引导词 `"当前概念:"` 可弹出“概念板块统计详情”大窗口；而直接点击后面的各个具体概念（如 `共封装光学:17` 等），程序会智能、直截了当地直接弹出对应的 constituent 个股 Treeview 列表小窗口，并增加了鼠标悬停深绿变色的 premium 视觉动效。
     - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 校验，无任何语法或缩进问题，系统 100% 保持稳定。
 
 ## 2026-07-04 00:30
