@@ -8256,17 +8256,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             concept_sort = None
             concept_trees = []
             
-            if hasattr(self, "_concept_win") and self._concept_win and self._concept_win.winfo_exists():
-                tree = getattr(self._concept_win, "_tree_top10", None)
+            if hasattr(self, "_concept_top10_win") and self._concept_top10_win and self._concept_top10_win.winfo_exists():
+                tree = getattr(self._concept_top10_win, "_tree_top10", None)
                 if tree:
                     concept_trees.append(tree)
             
             if hasattr(self, "_pg_top10_window_simple"):
                 for item in self._pg_top10_window_simple.values():
-                    win = item.get("win")
+                    win = item.get("win") or item.get("toplevel")
                     if win and win.winfo_exists():
                         tree = getattr(win, "_tree_top10", None)
-                        if tree:
+                        if tree and tree not in concept_trees:
+                            concept_trees.append(tree)
+
+            if hasattr(self, "monitor_windows") and self.monitor_windows:
+                for item in self.monitor_windows.values():
+                    win = item.get("toplevel")
+                    if win and win.winfo_exists():
+                        tree = item.get("monitor_tree") or getattr(win, "_tree_top10", None)
+                        if tree and tree not in concept_trees:
                             concept_trees.append(tree)
             
             if concept_trees:
@@ -17040,22 +17048,47 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             current_categories =  list(top5.keys())  #保持顺序
 
             # --- 标签初始化 ---
-            if not hasattr(self, "lbl_category_result"):
-                self.lbl_category_result = tk.Label(
+            if not hasattr(self, "concept_wrapper_frame"):
+                self.concept_wrapper_frame = tk.Frame(
                     self,
-                    text="",
+                    bg="#f7f7f7"
+                )
+                self.concept_wrapper_frame.pack(fill="x", padx=8, pady=(2, 4), before=self.children[list(self.children.keys())[0]])
+
+                self.lbl_category_title = tk.Label(
+                    self.concept_wrapper_frame,
+                    text="当前概念:",
                     font=self.default_font_bold,
                     fg="green",
                     bg="#f7f7f7",
-                    anchor="w",
-                    justify="left",
                     cursor="hand2"
                 )
-                self.lbl_category_result.pack(fill="x", padx=8, pady=(2, 4), before=self.children[list(self.children.keys())[0]])
-                self.lbl_category_result.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+                self.lbl_category_title.pack(side="left", padx=(0, 4))
+                self.lbl_category_title.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+
+                # 为了代码兼容性，定义 self.lbl_category_result 指向 lbl_category_title
+                self.lbl_category_result = self.lbl_category_title
+
+                self.dynamic_concepts_frame = tk.Frame(self.concept_wrapper_frame, bg="#f7f7f7")
+                self.dynamic_concepts_frame.pack(side="left", fill="both", expand=True)
+
                 self._last_categories = current_categories
                 self._last_cat_dict = cat_dict
-                self.lbl_category_result.config(text=f"当前概念：{display_text}")
+
+                # 动态生成各概念标签
+                for k, v in top5.items():
+                    lbl_c = tk.Label(
+                        self.dynamic_concepts_frame,
+                        text=f"{k}:{v}",
+                        font=self.default_font_bold,
+                        fg="green",
+                        bg="#f7f7f7",
+                        cursor="hand2"
+                    )
+                    lbl_c.pack(side="left", padx=6)
+                    lbl_c.bind("<Button-1>", lambda e, name=k: self.show_concept_top10_window(name))
+                    lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
+                    lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
                 return
 
             # --- 对比上次结果 ---
@@ -17063,38 +17096,49 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             added = [c for c in current_categories if c not in old_categories]
             removed = [c for c in old_categories if c not in current_categories]
 
+            # 清空并重新构建 dynamic_concepts_frame 里的内容
+            for widget in self.dynamic_concepts_frame.winfo_children():
+                widget.destroy()
+
+            for k, v in top5.items():
+                lbl_c = tk.Label(
+                    self.dynamic_concepts_frame,
+                    text=f"{k}:{v}",
+                    font=self.default_font_bold,
+                    fg="green",
+                    bg="#f7f7f7",
+                    cursor="hand2"
+                )
+                lbl_c.pack(side="left", padx=6)
+                lbl_c.bind("<Button-1>", lambda e, name=k: self.show_concept_top10_window(name))
+                lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
+                lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
 
             if added or removed:
-                diff_texts = []
-                if added:
-                    diff_texts.append(f"🆕 新增：{'、'.join(sorted(added))}")
-                if removed:
-                    diff_texts.append(f"❌ 消失：{'、'.join(sorted(removed))}")
-                diff_summary = "  ".join(diff_texts)
-                self.lbl_category_result.config(text=f"概念异动：{diff_summary}", fg="red")
+                self.lbl_category_title.config(text="概念异动:", fg="red")
 
                 # 💡 防止多重 overlapping 闪烁 loop
                 if not getattr(self, "_is_flashing_category", False):
                     self._is_flashing_category = True
                     def flash_label(count=0):
-                        if not hasattr(self, "lbl_category_result") or not self.lbl_category_result.winfo_exists():
+                        if not hasattr(self, "lbl_category_title") or not self.lbl_category_title.winfo_exists():
                             self._is_flashing_category = False
                             return
                         if count >= 6:
-                            self.lbl_category_result.config(fg="red")
+                            self.lbl_category_title.config(fg="red")
                             self._is_flashing_category = False
                             return
                         try:
-                            cur_color = self.lbl_category_result.cget("fg")
+                            cur_color = self.lbl_category_title.cget("fg")
                             new_color = "green" if cur_color == "red" else "red"
-                            self.lbl_category_result.config(fg=new_color)
-                            self.lbl_category_result.after(300, flash_label, count + 1)
+                            self.lbl_category_title.config(fg=new_color)
+                            self.lbl_category_title.after(300, flash_label, count + 1)
                         except Exception:
                             self._is_flashing_category = False
 
                     flash_label()
             else:
-                self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
+                self.lbl_category_title.config(text="当前概念:", fg="green")
 
             # 保存状态
             self._last_categories = current_categories
