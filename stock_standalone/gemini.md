@@ -1,3 +1,9 @@
+## 2026-07-03 05:40
+- [x] **修复 ATS / 人气共振客户端（PR）在冷启动或超时断开后无法自动重连与行情丢失的 Bug (Fixed Port Auto-Redetection & Reconnection for ATS/PR)**：
+    - [x] **设计并引入“30秒自动探测冷却与自动重新连接机制”**：在 `instock_MonitorTK.py` 中的 `send_df` 线程循环中，重构了对 26670 (ATS 终端) 和 26671 (人气共振终端) 活跃状态缓存的判断。当缓存的连接状态因为超时或被接收端关闭而变更为 `False` 时，系统将自动引入一个 30 秒的探测冷却时间。
+    - [x] **实现无阻塞自动重连**：当距离上一次探测尝试超过 30 秒时，线程会临时唤醒探测并尝试调用 `s2.connect` 重新与指定端口建立 Socket 物理连接。一旦接收端启动并连接成功，即可自动恢复活跃状态（`_pr_enabled_cache` / `_ats_enabled_cache` 重新置为 `True`）并进入高速行情传输，彻底实现了多进程系统的自愈与行情接收对齐。
+    - [x] **双重延迟重试与防卡死保护**：若外部接收端未开启，连接失败会自动重置 30 秒 the 探测冷却退避时间，避免在主线程循环中由于高频连接失败或超时引发阻塞或卡顿，保障了 UI 交互与行情同步的整体流畅性。
+
 ## 2026-07-02 11:35
 - [x] **根治人气共振客户端 tk.PanedWindow 选项 weight 报错与等比拉伸优化 (Fixed tk.PanedWindow Weight Option Error & Optimized Proportional Resizing)**：
     - [x] **修复 TclError: unknown option "-weight"**：定位并清除了在 `popularity_resonance_gui.py` 里的 `self.paned.add` 调用中传入的 `weight=1` 这一不支持参数，彻底消除了由于 tk.PanedWindow 和 ttk.Panedwindow 差异在 runtime 抛出的 `TclError`。
