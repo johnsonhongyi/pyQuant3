@@ -2136,6 +2136,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             label=f"🔍 运行 Re-entry 历史回测 ({code})",
             command=lambda: self._on_run_reentry_backtest_menu(code)
         )
+
+        if vals:
+            menu.add_separator()
+            menu.add_command(label="📋 复制代码", command=lambda: self.copy_code(code))
+            menu.add_command(label="📝 复制行信息", command=lambda: self.copy_row_info(tree, vals))
         
         # [🚀 NEW] GlobalFavoriteManager 设为重点个股和取消重点个股选项
         try:
@@ -2166,6 +2171,58 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
         if hasattr(self, '_history_track_win') and self._history_track_win.winfo_exists():
             if self._history_track_win.search_var.get() != concept:
                 self._history_track_win.search_var.set(concept)
+
+    def copy_code(self, code):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(code)
+            self.update()
+            status_lbl = getattr(self, 'status_lbl', None) or getattr(self.master, 'status_lbl', None)
+            if status_lbl:
+                try:
+                    status_lbl.config(text=f"📋 已复制代码: {code}", fg="#44ff88")
+                    self.after(2000, lambda: status_lbl.config(text="准备就绪", fg="#ff9900"))
+                except Exception:
+                    pass
+        except Exception as e:
+            messagebox.showerror("错误", f"复制代码失败: {e}", parent=self)
+
+    def copy_row_info(self, tree, values):
+        try:
+            cols = list(tree["columns"])
+            row_str_parts = []
+            for i, val in enumerate(values):
+                col_id = cols[i] if i < len(cols) else f"col_{i}"
+                col_name = tree.heading(col_id, "text") if i < len(cols) else col_id
+                val_str = str(val).strip()
+                if col_id == "name":
+                    if val_str.startswith("★ "):
+                        val_str = val_str[len("★ "):]
+                    if val_str.startswith("【重点】"):
+                        val_str = val_str[len("【重点】"):]
+                row_str_parts.append(f"{col_name}:{val_str}")
+            row_str = " | ".join(row_str_parts)
+            
+            self.clipboard_clear()
+            self.clipboard_append(row_str)
+            self.update()
+            
+            show_val = values[1] if len(values) > 1 else values[0]
+            show_val_str = str(show_val).strip()
+            if show_val_str.startswith("★ "):
+                show_val_str = show_val_str[len("★ "):]
+            if show_val_str.startswith("【重点】"):
+                show_val_str = show_val_str[len("【重点】"):]
+
+            status_lbl = getattr(self, 'status_lbl', None) or getattr(self.master, 'status_lbl', None)
+            if status_lbl:
+                try:
+                    status_lbl.config(text=f"📝 已复制行信息: {show_val_str}", fg="#44ff88")
+                    self.after(2000, lambda: status_lbl.config(text="准备就绪", fg="#ff9900"))
+                except Exception:
+                    pass
+        except Exception as e:
+            messagebox.showerror("错误", f"复制行信息失败: {e}", parent=self)
 
     def _get_active_tree(self):
         """🚀 [DNA-BATCH] 探测当前活跃（聚焦或页签内）的 Treeview"""
@@ -2635,6 +2692,11 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin, TreeviewMixin):
             command=lambda: self.parent_win._on_run_reentry_backtest_menu(code)
         )
 
+        if vals:
+            menu.add_separator()
+            menu.add_command(label="📋 复制代码", command=lambda: self.copy_code(code))
+            menu.add_command(label="📝 复制行信息", command=lambda: self.copy_row_info(tree, vals))
+
         menu.post(event.x_root, event.y_root)
 
     def _on_double_click(self, event):
@@ -2663,6 +2725,56 @@ class HistoricalSelectionTrackerDialog(tk.Toplevel, WindowMixin, TreeviewMixin):
         
         # 默认双击触发联动
         self._on_select(event, force_link=True)
+
+    def copy_code(self, code):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(code)
+            self.update()
+            if hasattr(self, 'status_lbl') and self.status_lbl:
+                try:
+                    self.status_lbl.config(text=f"📋 已复制代码: {code}", fg="#44ff88")
+                    self.after(2000, lambda: self.status_lbl.config(text=f"✅ 完成！共追踪 {len(self._all_results)} 只个股", fg="#00cc00"))
+                except Exception:
+                    pass
+        except Exception as e:
+            messagebox.showerror("错误", f"复制代码失败: {e}", parent=self)
+
+    def copy_row_info(self, tree, values):
+        try:
+            cols = list(tree["columns"])
+            row_str_parts = []
+            for i, val in enumerate(values):
+                col_id = cols[i] if i < len(cols) else f"col_{i}"
+                col_name = tree.heading(col_id, "text") if i < len(cols) else col_id
+                val_str = str(val).strip()
+                if col_id == "name":
+                    if val_str.startswith("★ "):
+                        val_str = val_str[len("★ "):]
+                    if val_str.startswith("【重点】"):
+                        val_str = val_str[len("【重点】"):]
+                row_str_parts.append(f"{col_name}:{val_str}")
+            row_str = " | ".join(row_str_parts)
+            
+            self.clipboard_clear()
+            self.clipboard_append(row_str)
+            self.update()
+            
+            show_val = values[1] if len(values) > 1 else values[0]
+            show_val_str = str(show_val).strip()
+            if show_val_str.startswith("★ "):
+                show_val_str = show_val_str[len("★ "):]
+            if show_val_str.startswith("【重点】"):
+                show_val_str = show_val_str[len("【重点】"):]
+
+            if hasattr(self, 'status_lbl') and self.status_lbl:
+                try:
+                    self.status_lbl.config(text=f"📝 已复制行信息: {show_val_str}", fg="#44ff88")
+                    self.after(2000, lambda: self.status_lbl.config(text=f"✅ 完成！共追踪 {len(self._all_results)} 只个股", fg="#00cc00"))
+                except Exception:
+                    pass
+        except Exception as e:
+            messagebox.showerror("错误", f"复制行信息失败: {e}", parent=self)
 
     def _quick_set_days(self, days: int):
         """快捷设置天数并启动分析"""
@@ -5739,6 +5851,13 @@ def _init_guidance_tab(self, parent: tk.Frame):
                 messagebox.showerror("错误", f"删除失败: {ex}", parent=self)
                 
         menu.add_command(label="🗑 删除此操作指南", command=_delete_selected_guidance)
+
+        vals = self._guidance_tree.item(item_id, "values")
+        if vals:
+            menu.add_separator()
+            menu.add_command(label="📋 复制代码", command=lambda: self.copy_code(item_id))
+            menu.add_command(label="📝 复制行信息", command=lambda: self.copy_row_info(self._guidance_tree, vals))
+
         menu.post(event.x_root, event.y_root)
 
     self._guidance_tree.bind("<<TreeviewSelect>>", _on_guidance_selected)

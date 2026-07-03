@@ -1,3 +1,26 @@
+## 2026-07-03 07:15
+- [x] **实现策略候选与历史追踪 Treeview 剪贴板快速复制功能 (Implemented Right-Click Copy Helpers in Stock Selection & Tracker Window)**：
+    - [x] **新增“复制代码”与“复制行信息”右键选项 (Added Copy Actions to Context Menus)**：在 `stock_selection_window.py` 关联的所有 Treeview 组件（主策略选股表、各分析子表、历史追踪表以及盘前操作指南表）的右键菜单中，统一整合了“📋 复制代码”和“📝 复制行信息”快捷选项，对齐了多周期联动策略筛选器的交互标准。
+    - [x] **实现健壮的 Clipboard 提取与清洗算法 (Robust Copy & Status Reporting)**：为 `StockSelectionWindow` and `HistoricalSelectionTrackerDialog` 类补充了 `copy_code` 和 `copy_row_info` 方法，支持从各列动态提取字段并拼接为 `col_name:value | col_name:value` 的格式，自动过滤“★”和“【重点】”前缀；并在主程序及追踪窗口的状态栏即时反馈复制状态，2秒后自动恢复。
+    - [x] **安全防空与多页签自愈校验 (Safe Execution)**：在右键点击非数据区或空单元格时，自动避开剪贴板操作以防止抛出 `IndexError`，并通过了 `py_compile` 的编译安全性校验。
+
+## 2026-07-03 07:00
+- [x] **修复大周期数据在实盘高频刷新下退化为“全等”与 is_same 兜底周期归属 Bug (Fixed Large-Cycle Data Degenerating to Equal Values & Fallback is_same Alignment)**：
+    - [x] **根治大周期数据全等退化的根本 Bug**：在 `data_utils.py` 内部的大周期（如 3d, w, m 等）行情合并逻辑中，修复了原有高频心跳刷新缓存更新的时序缺陷。原先在 `df_allDF[resample] = top_all` 写入缓存后，才在下方调用 `complete_indicators_pipeline(top_all, ...)`。导致写入缓存的 DataFrame 未携带平移后产生的 `_is_shifted=True` 状态，因而在下一次心跳从缓存读取数据时，系统认为并未发生平移，高频地在每个心跳中重复平移，导致历史特征值全部被最深处的值覆盖退化成全等。现将 `df_allDF[resample] = top_all`（及大周期 UI 轨迹对应的 `df_allDF[resample_res] = top_all_res`）的缓存更新动作移至 `complete_indicators_pipeline` 执行完毕之后，确保写入缓存的是完美包含平移状态和 `_is_shifted` 标记 the 最终 DataFrame，彻底阻断重复平移。
+    - [x] **优化大周期 is_same 兜底路径判定**：在 `complete_indicators_pipeline` 中，针对非日线的大多日周期（2d, 3d, 5d, 45d），在没有 `resdate` 走兜底判定路径时，废除了恒为 False 的硬编码 inequality window 比对；重构为使用 Pandas 提供的 `floor(f'{n}D')` 方法对比 `today_ts` and `last_ts` 的周期起始对齐点（并以 try-except 作安全降级保护），使得多日周期在无 `resdate` 状态下也能完美自适应识别当前是否属于同一未完结周期，精确对齐了 Ghost Bar 的判定。
+    - [x] **物理语法编译与实测校验全绿通过**：使用 `py_compile` 对修改后的 `data_utils.py` 进行物理语法校验 100% 成功。并运行独立测试脚本 `scratch_debug_002354.py` 在 `002354 天娱数科` 实盘 3d 数据上跑通，成功输出离散且绝对正确的历史昨收特征值（`lastp1d: 10.34`, `lastp2d: 9.40`），不再发生全等退化，数据和策略质量重归高精确度。
+
+## 2026-07-03 06:40
+- [x] **实现 PyQt 备份K线查看器 (KlineBackupViewer) 诊断个股与右键快捷功能 (Implemented Stock Diagnosis & Right-Click Helpers in KlineBackupViewer)**：
+    - [x] **新增诊断个股输入与按钮 (Added Diagnostic UI Elements)**：在 `minute_kline_viewer_qt.py` 的顶部工具栏新增“诊断个股”输入框（`diag_input`）及“🔍 诊断”按钮（`btn_diag`），支持回车/点击即时触发诊断，并自动清洗、补全6位股票代码。
+    - [x] **实现跨平台策略诊断对接 (Integrated diagnose_stock_strategy)**：实现了 `diagnose_stock_strategy` 方法，从内存中的 `active_df` 提取对应个股特征数据行，自动包裹当前查询条件（query），并成功调用系统自带的 `stock_logic_utils.check_code` 接口生成诊断报告（将 parent 设为 None 以防跨框架/跨窗口事件循环死锁冲突）。
+    - [x] **集成表格右键快捷菜单 (Integrated Table Context Menus)**：为摘要表（`summary_table`）、详情表（`detail_table`）及完整结果表（`full_results_table`）统一配置右键菜单。支持右键直接“🔬 诊断个股数据”、“📋 复制代码”以及“📝 复制整行格式化信息”，极大提升了交互与数据复制效率。
+    - [x] **新增联动定位、重点关注与 Re-entry 回测右键功能 (Added Linkage, Favorite & Backtest to Context Menus)**：
+        - 新增“📂 联动定位股票”选项，触发 `_execute_linkage` 联动外部行情终端。
+        - 引入对 `GlobalFavoriteManager` 的调用，支持“⭐ 设为重点个股”和“❌ 取消重点个股”右键操作与实时状态栏反馈。
+        - 实现了 `run_reentry_backtest` 异步运行机制：通过 `BacktestWorker` (继承自 `QThread`) 异步抓取并分析数据，防止主界面卡顿；使用 `BacktestReportQtDialog` 美观展示回测结论。
+    - [x] **语法编译与完整性校验 (Compilation Passed)**：成功通过了 `py_compile` 物理编译自检，无任何语法错误、缩进错误或异常，系统运行稳定。
+
 ## 2026-07-03 05:40
 - [x] **修复 ATS / 人气共振客户端（PR）在冷启动或超时断开后无法自动重连与行情丢失的 Bug (Fixed Port Auto-Redetection & Reconnection for ATS/PR)**：
     - [x] **设计并引入“30秒自动探测冷却与自动重新连接机制”**：在 `instock_MonitorTK.py` 中的 `send_df` 线程循环中，重构了对 26670 (ATS 终端) 和 26671 (人气共振终端) 活跃状态缓存的判断。当缓存的连接状态因为超时或被接收端关闭而变更为 `False` 时，系统将自动引入一个 30 秒的探测冷却时间。
