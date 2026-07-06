@@ -7012,23 +7012,32 @@ def save_column_widths():
 def load_window_positions():
     """从配置文件加载所有窗口的位置和列宽。"""
     global WINDOW_GEOMETRIES, COLUMN_WIDTHS
+    data = None
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            try:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, dict):
-                    if "window_geometries" in data or "column_widths" in data:
-                        WINDOW_GEOMETRIES = data.get("window_geometries", {})
-                        COLUMN_WIDTHS = data.get("column_widths", {})
-                    else:
-                        WINDOW_GEOMETRIES = data
-                        COLUMN_WIDTHS = {}
-                else:
-                    WINDOW_GEOMETRIES = {}
-                    COLUMN_WIDTHS = {}
-                logger.info("所有窗口配置已加载。")
-            except (json.JSONDecodeError, FileNotFoundError):
-                logger.info("配置文件损坏或不存在，使用默认窗口位置。")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            try:
+                with open(CONFIG_FILE, "r", encoding="gbk") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.info(f"配置文件损坏或解码失败(GBK/UTF-8): {e}，使用默认窗口位置。")
+        except Exception as e:
+            logger.info(f"读取配置文件出错: {e}，使用默认窗口位置。")
+
+        if data and isinstance(data, dict):
+            if "window_geometries" in data or "column_widths" in data:
+                WINDOW_GEOMETRIES = data.get("window_geometries", {})
+                COLUMN_WIDTHS = data.get("column_widths", {})
+            else:
+                WINDOW_GEOMETRIES = data
+                COLUMN_WIDTHS = {}
+            logger.info("所有窗口配置已加载。")
+        else:
+            WINDOW_GEOMETRIES = {}
+            COLUMN_WIDTHS = {}
+            logger.info("配置文件加载为空或非有效字典格式。")
     else:
         logger.info("未找到配置文件，使用默认位置。")
 
@@ -7049,8 +7058,8 @@ def save_window_positions():
             "window_geometries": WINDOW_GEOMETRIES,
             "column_widths": COLUMN_WIDTHS
         }
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config_data, f)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, ensure_ascii=False, indent=4)
         logger.info("所有窗口和列宽配置已保存。")
     except IOError as e:
         logger.info(f"写入配置文件时出错: {e}")

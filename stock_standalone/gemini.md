@@ -1,3 +1,8 @@
+## 2026-07-06 11:00
+- [x] **修复 `异动联动.py` 窗口配置文件 `window_config.json` 编码加载 Bug (Fixed UnicodeDecodeError in window_config.json)**：
+    - [x] **物理修复 `load_window_positions` 读取健壮性**：将对 `CONFIG_FILE`（`window_config.json`）的 `open` 动作统一修改为指定 `encoding="utf-8"`。引入分层备用解码机制（首先尝试 `utf-8`，若捕获 `UnicodeDecodeError` 或 `JSONDecodeError` 则退避尝试以 `gbk` 解码），若两者均解码失败则安全捕获异常，回退至初始化空状态字典，杜绝了由于 Windows 系统默认 locale 编码（GBK）导致的读取崩溃，实现了 100% 的容错性加载。
+    - [x] **物理修复 `save_window_positions` 保存规范性**：在写入 `CONFIG_FILE` 时指定 `encoding="utf-8"`，并设置 `ensure_ascii=False, indent=4`，确保中文字符不被转义且格式清晰美观，彻底规范了配置读写编码链路。
+
 ## 2026-07-04 06:20
 - [x] **实现板块个股详情列表与人气排行核心基础数据列完美对齐 (Aligned Category Stock Detail Columns with Main Popularity Rankings)**：
     - [x] **重构个股详情基础列名与结构**：将 `show_concept_top10_window` 表格的列名由 `percent`, `dff`, `rank` 重构并统一为与人气排行主表一致的 `val` (涨幅), `price` (最新价格), `dff2`, `dff3`, `rank`。消除了原先二级列表缺失最新价格、dff2、dff3 等关键指标以及主副表字段不同名造成的混乱。
