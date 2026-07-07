@@ -73,10 +73,10 @@ class SectorHeatmapWidget(QWidget):
         ]
         self.sort_sectors(self.sort_combo.currentIndex())
 
-    def load_live_sectors(self):
+    def load_live_sectors(self, force=False):
         import time
         now = time.time()
-        if hasattr(self, '_last_load_time') and now - self._last_load_time < 10.0:
+        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 10.0:
             return
         self._last_load_time = now
         
@@ -85,24 +85,30 @@ class SectorHeatmapWidget(QWidget):
         import re
         import zlib
         
-        # 1. Try to find the latest v_reversal_pool backup in logs/
-        base = get_app_root()
-        logs_dir = os.path.join(base, "logs")
-        pattern = os.path.join(logs_dir, "v_reversal_pool_*.json.gz")
-        files = sorted(glob.glob(pattern))
-        
-        v_reversal_data = None
-        fpath = files[-1] if files else None
-        
-        # Determine latest reversal path and check if changed
+        # 1. 优先尝试从 ramdisk 获取最实时的 v_reversal_pool.json
         ram_path = None
-        if not fpath:
-            try:
-                ram_path = cct.get_ramdisk_path("v_reversal_pool.json")
-            except Exception:
-                pass
-                
-        latest_reversal_path = fpath if fpath else ram_path
+        try:
+            ram_path = cct.get_ramdisk_path("v_reversal_pool.json")
+        except Exception:
+            pass
+            
+        latest_reversal_path = None
+        if ram_path and os.path.exists(ram_path):
+            latest_reversal_path = ram_path
+        else:
+            # 2. 如果 ramdisk 不存在，尝试获取 logs/ 下最新的备份 json/gz 文件
+            base = get_app_root()
+            logs_dir = os.path.join(base, "logs")
+            normal_path = os.path.join(logs_dir, "v_reversal_pool.json")
+            if os.path.exists(normal_path):
+                latest_reversal_path = normal_path
+            else:
+                pattern = os.path.join(logs_dir, "v_reversal_pool_*.json.gz")
+                files = sorted(glob.glob(pattern))
+                if files:
+                    latest_reversal_path = files[-1]
+                    
+        v_reversal_data = None
         latest_reversal_mtime = os.path.getmtime(latest_reversal_path) if latest_reversal_path and os.path.exists(latest_reversal_path) else 0
         
         if latest_reversal_path and os.path.exists(latest_reversal_path):
