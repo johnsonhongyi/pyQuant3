@@ -428,15 +428,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
         # 如果 df 存在且不为空，可以通过实际数据进行比对
         if df is not None and not df.empty and len(active_periods) > 1:
+            # ⚡ [PERF] 对大数据量进行头部采样比对（只取前 100 行），避免全表数千行进行 pandas series 向量化计算导致严重的 CPU 阻塞与 UI 卡顿
+            sample_df = df.head(100)
             p0 = active_periods[0]
             col0 = f"{col_name}_{p0}"
-            if col0 in df.columns:
+            if col0 in sample_df.columns:
                 is_all_same = True
                 for p in active_periods[1:]:
                     col_p = f"{col_name}_{p}"
-                    if col_p in df.columns:
-                        series0 = df[col0]
-                        series_p = df[col_p]
+                    if col_p in sample_df.columns:
+                        series0 = sample_df[col0]
+                        series_p = sample_df[col_p]
                         try:
                             diff = (series0 - series_p).abs().max()
                             if pd.isna(diff) or diff > 1e-5:
@@ -515,28 +517,12 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
     def _on_period_changed(self):
         self._save_state()
         self._update_tree_columns()
-        if self.last_result_df is not None and not self.last_result_df.empty:
-            active_periods = [p for p, var in self.period_vars.items() if var.get()]
-            if not active_periods:
-                for item in self.tree.get_children():
-                    self.tree.delete(item)
-                return
-            strat_name = self.strategy_var.get()
-            strat_config = next((s for s in self.strategies if s['name'] == strat_name), None)
-            if strat_config:
-                try:
-                    all_cached = all(p in self.engine._period_dfs and not self.engine._period_dfs[p].empty for p in active_periods)
-                    if all_cached:
-                        start_time = time.time()
-                        result_df = self.engine.evaluate_strategy(strat_config, active_periods)
-                        elapsed = time.time() - start_time
-                        self.last_result_df = result_df
-                        self.last_elapsed = elapsed
-                        self._show_results(result_df, elapsed)
-                    else:
-                        self.run_filter(force_reload=False)
-                except Exception as e:
-                    self.status_var.set(f"计算失败: {e}")
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        if not active_periods:
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            return
+        self.run_filter(force_reload=False)
 
     def _adjust_column_widths(self):
         for col in self.tree["columns"]:
@@ -554,7 +540,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 return int(w) + 8
 
             max_w = get_text_width(header_text)
-            for item in self.tree.get_children():
+            # ⚡ [PERF] 针对大数据量，限制只测量前 30 行，避免高频遍历数千行 item 导致主线程严重卡顿
+            measured_items = self.tree.get_children()[:10]
+            for item in measured_items:
                 val = self.tree.set(item, col)
                 max_w = max(max_w, get_text_width(val))
                 
@@ -792,19 +780,23 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.after(0, self._update_status, "🔍 正在执行跨周期交叉验证...")
             result_df = self.engine.evaluate_strategy(strat_config, active_periods)
             
+            # 在后台线程中生成 flat_df 缓存，彻底释放主线程
+            flat_df = self._build_flat_df(result_df)
+            
             elapsed = time.time() - start_time
             self.last_result_df = result_df
             self.last_elapsed = elapsed
-            self.after(0, self._show_results, result_df, elapsed)
+            self.after(0, self._show_results, result_df, elapsed, flat_df)
         except Exception as e:
             import traceback
             self.after(0, self._update_status, f"❌ 错误: {e}")
             print(f"[MultiPeriodTester] _worker exception:\n{traceback.format_exc()}")
             
-    def _show_results(self, df, elapsed):
+    def _show_results(self, df, elapsed, flat_df=None):
         self._last_selected_code = None
         # 同步给 query_manager 完整的宽表数据，以支持在 history 弹窗里进行“测试”或“双击”统计
-        flat_df = self._build_flat_df(df)
+        if flat_df is None:
+            flat_df = self._build_flat_df(df)
         self._last_flat_df = flat_df
         
         self._update_tree_columns()
@@ -868,6 +860,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         except Exception:
             fav_stocks = set()
             
+        # ⚡ [PERF] 预先计算每个自定义列需要展示的周期列表，避免在下面的 iterrows O(N) 循环中重复执行高成本的 _get_display_periods_for_custom_col 导致 O(N^2) 卡顿
+        custom_disp_periods = {}
+        for c in active_customs:
+            custom_disp_periods[c] = self._get_display_periods_for_custom_col(c, active_periods, filtered_df)
+            
         for code, row in filtered_df.iterrows():
             name = row.get('name', '--')
             price = round(row.get('close', 0), 2)
@@ -881,7 +878,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             values = [code, display_name, price, percent, vol, ratio]
             
             for c in active_customs:
-                disp_periods = self._get_display_periods_for_custom_col(c, active_periods, filtered_df)
+                disp_periods = custom_disp_periods[c]
                 for p in disp_periods:
                     val = '--'
                     col_name = f"{c}_{p}"
@@ -923,23 +920,23 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if df is None or df.empty:
             return df
         
-        flat_rows = []
         active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        flat_df = df.copy()
         
-        for code, row in df.iterrows():
-            item_row = row.to_dict()
-            for period in active_periods:
-                df_p = self.engine._period_dfs.get(period)
-                if df_p is not None and not df_p.empty and code in df_p.index:
-                    row_p = df_p.loc[code]
-                    if isinstance(row_p, pd.DataFrame):
-                        row_p = row_p.iloc[0]
-                    for k, val in row_p.to_dict().items():
-                        if k not in ('code', 'name'):
-                            item_row[f"{k}_{period}"] = val
-            flat_rows.append(item_row)
-            
-        flat_df = pd.DataFrame(flat_rows, index=df.index)
+        for period in active_periods:
+            df_p = self.engine._period_dfs.get(period)
+            if df_p is not None and not df_p.empty:
+                # 过滤掉 code, name 等主表已有的字段
+                cols_to_join = [c for c in df_p.columns if c not in ('code', 'name')]
+                if cols_to_join:
+                    # 去重保留首个，防止重复索引导致行数膨胀
+                    df_p_sub = df_p[cols_to_join]
+                    df_p_sub = df_p_sub[~df_p_sub.index.duplicated(keep='first')]
+                    # 重命名列加上后缀，例如 close -> close_d
+                    df_p_sub = df_p_sub.rename(columns={c: f"{c}_{period}" for c in cols_to_join})
+                    # 矢量化连接
+                    flat_df = flat_df.join(df_p_sub, how='left')
+                    
         flat_df.index.name = 'code'
         return flat_df
 
