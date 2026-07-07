@@ -1,3 +1,16 @@
+## 2026-07-07 20:50
+- [x] **升级 Alt+N 为系统级全局热键 (Upgraded Alt+N to System-Wide Global Hotkey)**：
+    - [x] **补全主程序全局热键字典与回调绑定**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 和 `_HOTKEY_INFO_MAP` 字典里，补齐了 `Alt+P`（偏移量 `13`）与 `Alt+N`（偏移量 `14`，键码为 `0x4E`）的注册与中文功能简介。在 `setup_global_hotkey` 的 `hotkey_callbacks` 映射中，绑定了 `14` 对应 `toggle_multi_period_tester`。
+    - [x] **同步独立热键子进程映射与 Named Pipe 分发**：在 `hotkey_rotator.py` 的 `HotkeyListener.hotkey_map` 字典中，添加了偏移量为 `14` 的 `Alt+N`。使得在非交易窗口焦点活动时，子进程也能通过 Windows 原生 API 物理捕获并在亚毫秒级内通过管道分发至主进程调度执行，完全避免了主线程 GIL 卡死，设计与系统内已有的 `Alt+H`, `Alt+L`, `Alt+P` 等全局热键机制完全对齐。
+    - [x] **重构智能显示/隐藏切换逻辑**：在 `instock_MonitorTK.py` 的 `toggle_multi_period_tester` 中，用 `focus_displayof() == self._multi_period_tester_win` 和 `state() != "withdrawn"` 对齐了策略白盒管理器等窗口的智能焦点切换逻辑。即当窗口存在但被其他窗口遮挡时，按 Alt+N 不会错误隐藏，而是将其拉回前台聚焦并置顶；仅当窗口已聚焦且未隐藏时按 Alt+N 才会将其隐藏（Withdraw），显著提升了操作体验的精确度。
+
+## 2026-07-07 20:45
+- [x] **优化多周期窗口生命周期与内存清理机制 (Optimized Multi-Period Window Lifecycle & Memory Cleanup)**：
+    - [x] **彻底销毁窗口替代隐藏逻辑**：重构了 `standalone_multi_period_tester.py` 中的 `on_close` 窗口关闭逻辑。废弃了原先的 `withdraw()` 隐藏机制，改为直接调用 `destroy()` 物理销毁 Tkinter 窗口，确保生命周期结束。
+    - [x] **引入 `_is_closing` 状态哨兵防护**：在 `__init__` 中初始化 `self._is_closing = False`，并在窗口关闭时置为 `True`。在 `_update_status`、`_show_results` 和 `_poll_favorites_loop` 等异步更新及定时器回调节点，引入了对 `self._is_closing` 的状态检测，自动短路退避，杜绝了由于访问已被物理销毁的 Tk 控件引发的 `TclError`。
+    - [x] **显式清除高内存 DataFrame 与引擎缓存**：在 `on_close` 中，显式清理了 `self.engine._period_dfs.clear()` 和 `self.engine._missing_periods.clear()` 缓存，并将 `self.top_now`、`self.last_result_df` 及 `self._last_flat_df` 等大宽表对象引用置为 `None`，同时物理关闭了未决的 `_link_after_id` 计时器和所有存活的二级子窗口（`detail_win`, `concept_win`）。
+    - [x] **手动触发垃圾回收**：在关闭逻辑的最后调用 `gc.collect()` 强制触发 Python 垃圾回收器，确保被释放的大内存 DataFrame 立刻归还至系统。
+
 ## 2026-07-07 20:30
 - [x] **全面修复孤立进程检测逻辑与性能瓶颈，并放宽强结构强度评分维持门槛 (Fully Fixed Orphaned Process Detection, Performance Bottlenecks & Relaxed strong_structure_score keep_alive Gate)**：
     - [x] **物理还原并优化 `sys_performance_analyzer.py` 孤立进程模块**：彻底清理了此前合并修改时在 `sys_performance_analyzer.py` 中意外造成的语法损坏、遗留重复代码以及无用查找逻辑；清除了 `check_process_association` 中的低效 `process_iter` 循环，将关联诊断性能提升至亚毫秒级，防止主线程在高频扫描诊断时发生 UI 挂起；
