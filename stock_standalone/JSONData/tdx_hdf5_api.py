@@ -2601,6 +2601,22 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     time_t = time.time()
     global RAMDISK_KEY, INIT_LOG_Error, _SINA_MI_CACHE, _SINA_MI_LOCK
 
+    def _standardize_code(x):
+        if isinstance(x, bytes):
+            try:
+                x = x.decode('utf-8')
+            except:
+                pass
+        s = str(x).strip()
+        if s.endswith('.0'):
+            s = s[:-2]
+        if s.isdigit() and len(s) < 6:
+            return s.zfill(6)
+        return s
+
+    if code_l is not None:
+        code_l = [_standardize_code(x) for x in code_l]
+
     # 与原逻辑一致：RAMDISK_KEY 非 0 时直接返回 None
     if not RAMDISK_KEY < 1:
         return None
@@ -2641,6 +2657,16 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             mask = cache_df.index.get_level_values('code').isin(code_l)
                             df_filtered = cache_df.loc[mask]
                     else:
+                        # 确保 cache_df 索引被正确提取并标准化
+                        if 'code' in cache_df.columns:
+                            try:
+                                cache_df = cache_df.set_index('code')
+                            except Exception:
+                                pass
+                        if not cache_df.empty:
+                            first_val = cache_df.index[0]
+                            if not isinstance(first_val, str) or (isinstance(first_val, str) and first_val.isdigit() and len(first_val) < 6):
+                                cache_df.index = [_standardize_code(x) for x in cache_df.index]
                         dif_index = cache_df.index.intersection(code_l)
                         df_filtered = cache_df.loc[dif_index]
                 except Exception as ex:
@@ -2725,6 +2751,18 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
 
         if dd is not None and len(dd) > 0:
             if not MultiIndex:
+                # 检查并标准化物理读出的 dd 结构
+                if 'code' in dd.columns:
+                    try:
+                        dd = dd.set_index('code')
+                    except Exception as e:
+                        log.error(f"Failed to set_index('code') for alignment: {e}")
+                # 标准化 dd.index 类型与格式
+                if not dd.empty:
+                    first_val = dd.index[0]
+                    if not isinstance(first_val, str) or (isinstance(first_val, str) and first_val.isdigit() and len(first_val) < 6):
+                        dd.index = [_standardize_code(x) for x in dd.index]
+
                 # 若 index 模式下需要映射 code（保持原行为）
                 if index:
                     code_l = list(map((lambda x: str(1000000 - int(x))

@@ -7204,6 +7204,12 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if tdx_index_code_list[0] in tdxdata.index:
                     cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
             tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
+            # 过滤掉价格为 0 或 NaN 的无效行，避免污染 H5 缓存
+            check_cols = ['llow', 'lastp', 'lopen', 'lhigh']
+            for c in check_cols:
+                if c in tdxdata.columns:
+                    tdxdata = tdxdata[tdxdata[c].notna() & (tdxdata[c] > 0.0)]
+
             # 🛡️ 写入前零值门禁：防止 TDX 文件不可用时全零 DataFrame 覆盖 h5 缓存
             _wchk_col = 'llow' if 'llow' in tdxdata.columns else ('lastp' if 'lastp' in tdxdata.columns else None)
             _wchk_ok = True
@@ -7215,9 +7221,10 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                                  "(Possible cause: TDX files unavailable / forced refresh during off-hours)"
                                  % (h5_fname, h5_table, _zero_ratio * 100, _wchk_col))
                     _wchk_ok = False
-            if _wchk_ok:
+            if _wchk_ok and not tdxdata.empty:
+                # 既然是重建分支，说明缓存不存在或损坏，必须以覆盖模式（append=False）写入，彻底清除损坏的垃圾零值数据
                 h5 = h5a.write_hdf_db(
-                    h5_fname, tdxdata, table=h5_table, append=True)
+                    h5_fname, tdxdata, table=h5_table, append=False)
 
         log.debug("TDX Col:%s" % tdxdata.columns.values[:10])
     else:
@@ -7225,7 +7232,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     log.debug("TdxLastP: %s %s" %
               (len(tdxdata), tdxdata.columns.values[:10]))
 
-    if checknew:
+    if checknew and not readonly:
         tdx_list = tdxdata.index.tolist()
         diff_code = list(set(codelist) - set(tdx_list))
         diff_code = [
@@ -7250,6 +7257,12 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
 
                 if newdays is None or newdays > 0:
+                    # 过滤掉价格为 0 或 NaN 的无效行，避免污染 H5 缓存
+                    check_cols2 = ['llow', 'lastp', 'lopen', 'lhigh']
+                    for c in check_cols2:
+                        if c in tdx_diff.columns:
+                            tdx_diff = tdx_diff[tdx_diff[c].notna() & (tdx_diff[c] > 0.0)]
+
                     # 🛡️ 写入前零值门禁：防止补差数据为全零时污染 h5
                     _wchk_col2 = 'llow' if 'llow' in tdx_diff.columns else ('lastp' if 'lastp' in tdx_diff.columns else None)
                     _wchk_ok2 = True
@@ -7259,9 +7272,10 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                             log.critical("🚨 [HDF-WRITE-BLOCKED] diff tdx_diff for %s/%s has %.0f%% zeros in '%s'. Skipping diff write."
                                          % (h5_fname, h5_table, _zero_ratio2 * 100, _wchk_col2))
                             _wchk_ok2 = False
-                    if _wchk_ok2:
+                    if _wchk_ok2 and not tdx_diff.empty:
                         h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
-                tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
+                if not tdx_diff.empty:
+                    tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
     if len(top_all) > 5:
         top_all = cct.combine_dataFrame(
             top_all, tdxdata, col=None, compare=None, append=False)
