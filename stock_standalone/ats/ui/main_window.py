@@ -347,7 +347,12 @@ class ATSMainWindow(QMainWindow):
         self.swing_tracker = SwingTracker()
         self.stock_history_cache = {}
         self.history_loading_codes = set()
-        self.history_failed_codes = set()
+        # Changed from a simple set to a {code: fail_timestamp} dict.
+        # Codes that failed will be retried after 5 minutes, and the entire
+        # blacklist is reset at the start of a new calendar day so that
+        # next-day ATS startup always re-attempts history loading.
+        self.history_failed_codes = {}   # {code: fail_time (float unix ts)}
+        self._history_failed_date = None  # tracks the date when failures were recorded
         self.prices_loading_codes = set()
         self.prices_failed_codes = set()
         self._is_closing = False
@@ -1251,8 +1256,23 @@ class ATSMainWindow(QMainWindow):
         if not codes:
             return
         
-        # Filter out codes that are already loading or failed
-        codes_to_load = [c for c in codes if c not in self.history_loading_codes and c not in self.history_failed_codes]
+        import time, datetime
+        now_ts = time.time()
+        today = datetime.date.today().isoformat()
+        
+        # Reset failed codes at the start of a new calendar day so that a fresh
+        # ATS launch always retries history loading (avoids permanent blacklist).
+        if self._history_failed_date != today:
+            self._history_failed_date = today
+            self.history_failed_codes.clear()
+        
+        # Filter out codes already loading or failed within the last 5 minutes
+        RETRY_INTERVAL = 300  # seconds
+        codes_to_load = [
+            c for c in codes
+            if c not in self.history_loading_codes
+            and (c not in self.history_failed_codes or now_ts - self.history_failed_codes[c] > RETRY_INTERVAL)
+        ]
         if not codes_to_load:
             return
             
@@ -1264,49 +1284,82 @@ class ATSMainWindow(QMainWindow):
                 
         import threading
         def worker():
-            try:
-                import pandas as pd
-                import os
-                path = 'g:\\sina_MultiIndex_data.h5'
-                if not os.path.exists(path):
-                    for code in codes_to_load:
-                        self.history_loading_codes.discard(code)
-                        self.history_failed_codes.add(code)
-                    return
-                with pd.HDFStore(path, mode='r') as store:
-                    code_query = ", ".join([f"'{c}'" for c in codes_to_load])
-                    df = store.select('/all_30', where=f"code in [{code_query}]")
-                
-                loaded_codes = set()
-                if not df.empty:
-                    dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
-                    grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
-                    
-                    for (code, d), val in grouped.items():
-                        d_str = d.strftime("%Y-%m-%d")
-                        hist = self.stock_history_cache.get(code, [])
-                        if not any(item[0] == d_str for item in hist):
-                            hist.append((d_str, float(val)))
-                        self.stock_history_cache[code] = hist
-                        loaded_codes.add(code)
-                        
-                    for code in codes_to_load:
-                        if code in self.stock_history_cache:
-                            self.stock_history_cache[code].sort(key=lambda x: x[0])
-                
-                # Update status of loading and failed codes
+            import time as _time
+            import pandas as pd
+            import os
+
+            path = r'g:\sina_MultiIndex_data.h5'
+            if not os.path.exists(path):
+                fail_ts = _time.time()
                 for code in codes_to_load:
                     self.history_loading_codes.discard(code)
-                    if code not in loaded_codes:
-                        self.history_failed_codes.add(code)
-                
-                # Trigger thread-safe UI update
-                QTimer.singleShot(0, self.refresh_realtime_ui)
-            except Exception as e:
-                print(f"[ATSMainWindow] Error loading history in background: {e}")
+                    self.history_failed_codes[code] = fail_ts
+                print(f"[ATSHistory] HDF5 文件不存在: {path}")
+                return
+
+            # ── 带重试的 HDF5 读取，对抗写锁冲突 ──────────────────────────────
+            MAX_RETRY = 3
+            RETRY_SLEEP = 0.5   # 每次重试间隔 0.5 秒
+            # IO 锁冲突时用较短重试间隔（60s），数据确实空时才用标准 RETRY_INTERVAL
+            IO_FAIL_COOLDOWN = 60
+
+            df = None
+            last_err = None
+            for attempt in range(MAX_RETRY):
+                try:
+                    with pd.HDFStore(path, mode='r') as store:
+                        code_query = ", ".join([f"'{c}'" for c in codes_to_load])
+                        df = store.select('/all_30', where=f"code in [{code_query}]")
+                    last_err = None
+                    break   # 成功则跳出重试
+                except Exception as e:
+                    last_err = e
+                    print(f"[ATSHistory] 读取 HDF5 失败 (attempt {attempt+1}/{MAX_RETRY}): {e}")
+                    if attempt < MAX_RETRY - 1:
+                        _time.sleep(RETRY_SLEEP)
+
+            if last_err is not None:
+                # 全部重试均失败 → IO/锁问题，用短冷却避免长时间黑名单
+                fail_ts = _time.time() - (300 - IO_FAIL_COOLDOWN)  # 只冷却 IO_FAIL_COOLDOWN 秒
                 for code in codes_to_load:
                     self.history_loading_codes.discard(code)
-                    self.history_failed_codes.add(code)
+                    self.history_failed_codes[code] = fail_ts
+                print(f"[ATSHistory] HDF5 读取彻底失败，{IO_FAIL_COOLDOWN}s 后重试: {last_err}")
+                return
+
+            # ── 清除成功读取的 code 的失败标记 ────────────────────────────────
+            for code in codes_to_load:
+                self.history_failed_codes.pop(code, None)
+
+            loaded_codes = set()
+            if df is not None and not df.empty:
+                dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
+                grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
+
+                for (code, d), val in grouped.items():
+                    d_str = d.strftime("%Y-%m-%d")
+                    hist = self.stock_history_cache.get(code, [])
+                    if not any(item[0] == d_str for item in hist):
+                        hist.append((d_str, float(val)))
+                    self.stock_history_cache[code] = hist
+                    loaded_codes.add(code)
+
+                for code in codes_to_load:
+                    if code in self.stock_history_cache:
+                        self.stock_history_cache[code].sort(key=lambda x: x[0])
+
+            # ── 数据为空的 code：正常标记失败（RETRY_INTERVAL=300s） ──────────
+            fail_ts = _time.time()
+            for code in codes_to_load:
+                self.history_loading_codes.discard(code)
+                if code not in loaded_codes:
+                    self.history_failed_codes[code] = fail_ts
+                    print(f"[ATSHistory] code={code} 在 /all_30 中无数据")
+
+            print(f"[ATSHistory] 加载完成: {len(loaded_codes)}/{len(codes_to_load)} 只有历史数据")
+
+            # 触发线程安全 UI 刷新
+            QTimer.singleShot(0, self.refresh_realtime_ui)
                 
         threading.Thread(target=worker, daemon=True).start()
 

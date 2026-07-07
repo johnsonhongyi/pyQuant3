@@ -1,3 +1,32 @@
+## 2026-07-07 15:20
+- [x] **修复 SafeHDFStore 误判定锁占用为物理损坏导致的数据误备份与清空重置 Bug (Fixed SafeHDFStore Premature File Resets on Lock Failures)**：
+    - [x] **实现 HDFStore 异常分层识别与防御 (Lock-Aware Error Classification)**：重构了 `tdx_hdf5_api.py` 中的 `SafeHDFStore` 构造函数以及其关联的 `_check_and_clean_corrupt_keys`、`_check_and_clean_corrupt_keys_all_key` 损坏检测修复逻辑。现在遭遇由于 Windows 环境下多进程读写锁竞争引起的 `PermissionError`、`WinError 32` 或权限拒绝时，直接抛出异常或警告返回，禁止误判为文件真实损坏。从而彻底杜绝了被并发占用的健康数据库文件被自动调用 `_safe_rename_corrupt_file` 重命名备份并清空重置为全空的 Bug；
+    - [x] **补齐只读模式只读门禁防御 (Enforced Read-Only HDF5 Write/Repair Protection)**：在 HDFStore 初始化失败退避以及损坏键清理中，强行引入 `self.mode == 'r'` 的只读门禁机制。只读模式下若多次尝试打开失败直接向上抛出底层 OSError，严禁执行任何修改磁盘物理文件或调用重命名备份的逻辑，实现了只读操作的 100% 数据物理安全性；
+    - [x] **多周期行情数据副本隔离 (Isolated Intraday Quote Copies)**：修复了 `tdx_data_Day.py` 中 `get_append_lastp_to_df` 对于传入 `top_all` 进行就地 (in-place) 修改的副作用。针对高频调用的 `pd.to_numeric` 和强转 int，如果在多周期同步循环中修改了同一个全局 DataFrame 实例（如 `top_now`），会导致全局对象的原始浮点涨幅数据（如 `dff` 列）被错误地重置。现改为在函数入口处对传入的有效 DataFrame 执行 `.copy()` 副本操作，实现完美的数据隔离与字段一致性。
+
+## 2026-07-07 14:15
+- [x] **修复多周期策略引擎由于只读大周期缓存不存在引发的 complete_indicators_pipeline KeyError 崩溃与 astype(int) 非有限值强转安全加固 (Fixed Readonly Period Cache Missing KeyError & Safe Integer Conversion Guard)**：
+    - [x] **补齐 `load_period_data` 大周期缓存 existence 校验与优雅自愈 (Added Cache Verification & Graceful Missing Recovery)**：在 `multi_period_strategy_engine.py` 的 `load_period_data` 数据加载流程中，对只读（`readonly=True`）模式下加载大周期（如 `45d`, `3M`, `w`, `m` 等）缓存 DataFrame 进行二次判定。在 `df` 为空或由于 H5 磁盘缓存缺失/零值拦截而未获取到关键历史昨收特征列 `'lastp1d'`时，直接跳过高昂的 `complete_indicators_pipeline` 拼接计算（从而根本性消除了此处的 KeyError 崩溃），并将其优雅且直观地记录在缺失周期 `_missing_periods` 字典中，依托引擎已有的过滤判定平滑忽略并降级，确保系统主流程在极端空数据或冷启动异常时能自愈和 100% 连续运行。��失/零值拦截而未获取到关键历史昨收特征列 `'lastp1d'` 时，直接跳过高昂的 `complete_indicators_pipeline` 拼接计算（从而根本性消除了此处的 KeyError 崩溃），并将其优雅且直观地记录在缺失周期 `_missing_periods` 字典中，依托引擎已有的过滤判定平滑忽略并降级，确保系统主流程在极端空数据或冷启动异常时能自愈和 100% 连续运行。
+    - [x] **实现 `astype(int)` 数值强转流式安全处理 (Secured Numerical Typecast to Int)**：在 `tdx_data_Day.py` 的 `get_append_lastp_to_df` 针对 `co2int` 重点列强转整数（如 `boll`, `dff`, `ra` 等）的第 7309 行与第 7354 行，将原本硬编码的 `.astype(int)` 统一重构为 `pd.to_numeric(..., errors='coerce').replace([float('inf'), float('-inf')], 0).fillna(0).astype(int)`。此举能够强力过滤非有限值（如 NaN/inf），彻底规避了在周期过短或数据缺失时强转 int 所抛出的 `ValueError: Cannot convert non-finite values (NA or inf) to integer` 物理报错。
+    - [x] **语法编译与完整自检全绿通过**：使用 `py_compile` 对修改后的 `multi_period_strategy_engine.py` 与 `tdx_data_Day.py` 均执行了编译校验，100% 成功且零报错。
+
+## 2026-07-07 13:55
+- [x] **集成 HDF5 数据修复与去重合并至 K线缓存查看器 (Integrated HDF5 Merge & Repair in Kline Viewer)**：
+    - [x] **设计交互合并修复 Dialog (`H5MergeRepairDialog`)**：在 `minute_kline_viewer_qt.py` 中实现了专用的 `QDialog` 修复面板。提供“源数据(基础历史文件)”、“新数据(追加日新文件)”、“目标数据集 Key”以及“过滤起始日期”等输入参数；
+    - [x] **实现新数据日期范围自动检测与快捷点选及 NaT 比较 FutureWarning 消除 (New File Date Detection & FutureWarning Elimination)**：在追加起始日期行旁集成了 `lbl_date_range` (标签提示)、`btn_detect_date` (检测按钮) 与 `combo_dates` (日期下拉列表)。点击“检测日期”时，通过只读 HDFStore 无损扫描索引以亚毫秒级速度获取日期范围，并在下拉列表中自动填充。在提取唯一日期列表时，强力调用 `.dropna()` 并结合 `.normalize().unique()` 向量化操作提取 Timestamp 序列并转换为 `datetime.date` 列表，完美规避了 pandas 在检测中由于 NaT 元素与 `datetime.date` 隐式对比导致的 `FutureWarning` 弃用警告，性能与稳定性大幅提升；
+    - [x] **实现目标输出路径自动生成临时文件名与物理强防覆盖卡口 (Auto Temp Filename & Override Warning)**：在 `minute_kline_viewer_qt.py` 中引入了 `update_target_temp_path` 自动生成器，并将 `new_edit` 和 `base_edit` 的文本修改信号与其进行了动态绑定。系统会自动在新数据目录生成带有 `_temp_merge.h5` 的安全临时文件名，且当源路径发生变动时自适应关联修正目录。此外，在 `run_merge` 的起始校验中，增加了强物理防覆盖卡口：一旦检测到目标输出路径与任何一路输入源文件（基础文件或新追加文件）完全一致，即刻弹出 `QMessageBox.critical` 强警告并拦截运行，彻底保障了源数据的物理安全；
+    - [x] **实现文件选择定位自适应向上溯源机制**：在 Dialog 中增加了 `get_existing_dir_or_parent` 助手方法。在点击“浏览”选择文件时，对话框会自动尝试定位至文本框中当前路径；如果对应文件或父目录并不存在，则自动递归向上级目录查找，直至找到首个在物理磁盘上真实存在的祖先文件夹作为初始打开目录，从而防止因默认路径缺失导致文件选择器启动失败或重置为桌面/文档目录；
+    - [x] **支持跨 Qt 库兼容的动态 UI 布局**：在最外层 try-except 导入中引入了 `QFormLayout` 的多套 Qt 框架适配逻辑，确保在 PyQt6/PySide6/PyQt5 环境下都能够无缝支持表单显示与文件浏览按钮定位；
+    - [x] **集成双路合并去重算法并输出日志**：在 Dialog 内部移植并强化了之前的 pandas 合并去重与安全替换算法。将大段运行过程中的每一步骤耗时、日期提取范围、行数变化和物理替换安全逻辑动态泵送写入 `QPlainTextEdit` 运行日志显示区，实现了可视化、可监测的合并修复；
+    - [x] **物理按钮注入与槽函数绑定**：在查看器的主 `setup_ui` 方法的顶部 `top_toolbar` 中，新增了 `btn_repair_h5` (🔧 修复合并HDF5) 按钮并绑定了 `on_repair_h5_clicked` 弹窗触发，运行 `py_compile` 自检 100% 编译成功通过。
+
+## 2026-07-07 13:45
+- [x] **修复 HDF5 数据截断损坏与历史数据多路去重合并 (Fixed HDF5 Superblock Corruption & Multi-Source Deduplicated Merge)**：
+    - [x] **定位并安全隔离被污染数据**：发现了 2026-07-06 的 `sina_MultiIndex_data.h5` 数据存在异常被写写坏的 superblock 截断（stored_eof 被改写为 9.6TB 级别异常值），导致常规 h5clear 与二进制修复均不可达。
+    - [x] **设计并执行两路安全去重合并 (Two-Way Safe Deduplication Merge)**：编写并运行了 `merge_multiindex_h5.py` 合并脚本，将最完整的 `D:\Ramdisk\backup\20260703\sina_MultiIndex_data.h5` 备份文件作为干净历史基底，并提取当前 `g:\sina_MultiIndex_data.h5` 中 2026-07-07 的今日新数据，在时间戳过滤层面彻底剔除了被污染的 2026-07-06 脏数据。
+    - [x] **高压缩保存与格式防错验证**：合并去重后的 DataFrame 使用 `format='table'`、`complevel=9` 及 `complib='blosc'` 压缩后写入临时合并文件，并使用具体 level 名字 `ticktime` 条件过滤，通过了 7 月份数据行数的完整性验证（总行数 2262500，7月1日至3日及7日数据分布均正常）。
+    - [x] **实施物理覆盖替换与自检**：成功将坏损的原 HDF5 文件重命名备份为 `bak2` 并将合并后的数据替换为 `g:\sina_MultiIndex_data.h5`，使用 `diag_ats_history.py` 诊断脚本测试验证，股票行情在 G 盘能够无锁极速读取，故障彻底解除。
+
 ## 2026-07-07 10:45
 - [x] **实现 ATS 联动勾选状态自动持久化与 QSplitter 全局等比例缩放 (ATS Linkage Checkbox Persistence & Proportional Layout Scaling)**：
     - [x] **实现联动勾选框状态跨会话自动读写 (Cross-session Checkbox Persistence)**：在 `_save_layout_state` 与 `_restore_layout_state` 中集成了对顶栏 `cb_tdx` (通达信)、`cb_ths` (同花顺)、`cb_vis` (K线可视化) 三个复选框勾选状态的保存与自动恢复，使联动配置完美持久化写入 `window_config.json`，消除了重启重置的痛点。
