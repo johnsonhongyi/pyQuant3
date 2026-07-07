@@ -248,7 +248,13 @@ def auto_fit_columns_once(table_or_tree, config_key, max_widths=None):
     import os
     import json
     from sys_utils import get_app_root, get_conf_path
+    from PyQt6.QtWidgets import QApplication
     
+    # If we are currently changing font size, do not auto-adjust
+    app = QApplication.instance()
+    if app and getattr(app, "_is_updating_font", False):
+        return
+        
     # If already auto-adjusted in this session, skip
     if getattr(table_or_tree, "_auto_adjusted", False):
         return
@@ -361,8 +367,6 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         except Exception as e:
             print(f"[HeaderPersistence] Failed to save state for {config_key}: {e}")
 
-    table_or_tree.save_header_state = save_action
-
     def apply_max_width_limits():
         if max_widths:
             for col, max_w in max_widths.items():
@@ -409,6 +413,9 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
         apply_max_width_limits()
 
+    table_or_tree.save_header_state = save_action
+    table_or_tree.restore_header_state = restore_action
+
     # Initialize _has_been_visible and _has_been_restored based on current visibility state
     table_or_tree._has_been_visible = table_or_tree.isVisible()
     table_or_tree._has_been_restored = False
@@ -427,6 +434,10 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         apply_max_width_limits()
 
     def on_section_resized(logical_index, old_size, new_size):
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and getattr(app, "_is_updating_font", False):
+            return
         table_or_tree._has_been_visible = True
         if max_widths and logical_index in max_widths:
             max_w = max_widths[logical_index]
