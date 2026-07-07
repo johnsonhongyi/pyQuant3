@@ -591,6 +591,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.tree.move(k, '', index)
             
         self.tree.heading(col, command=lambda c=col: self.sort_column(c, not reverse))
+        self.tree.yview_moveto(0)
 
     def _on_tree_select(self, event):
         if self._link_after_id:
@@ -900,6 +901,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
         self.perform_tree_multi_level_sort(self.tree)
         self._adjust_column_widths()
+        self.tree.yview_moveto(0)
 
     def _on_history_sync(self, **kwargs):
         source = kwargs.get("source", "")

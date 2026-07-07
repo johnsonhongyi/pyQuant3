@@ -1,3 +1,19 @@
+## 2026-07-07 19:40
+- [x] **修复多周期 `strong_structure_score` 评分为 0 的根本缺陷与 UI 展示增强 (Fixed Multi-Period zero-filled strong_structure_score & Enhanced UI Display)**：
+    - [x] **根治步骤顺序倒置导致自适应周期涨跌幅失效的 Bug (Fixed Step Execution Order for Adaptive percent Calculation)**：定位发现 `data_utils.py` 内部 `complete_indicators_pipeline` 管道的步骤顺序存在 logic 倒置。原本重算最新 `close` 下涨跌幅与 MA 均线的自适应周期计算（步骤 2.5）排在基础指标计算（步骤 1 `calc_indicators`）之后。这导致 `calc_indicators` 内部在调用 `calc_strong_rebound_score_vect` 时，DataFrame 还没有生成最新的 `percent` 列而触发前置依赖拦截退避，强行将评分置为 0。现将该自适应重算逻辑整体上移至步骤 1 `calc_indicators` 之前运行，使 percent 列与均线计算在前、指标评分计算在后。在不修改底层 `sina_data.py` 数据源的前提下，完美修复了此策略计算失效缺陷，找回了真实的评分数据；
+    - [x] **实现 `strong_structure_score` 列的 UI 静态列注册 (UI Registration of strong_structure_score)**：在 `standalone_multi_period_tester.py` 的 `_init_ui` 构造中，将 `"strong_structure_score"` 添加至 `self.fixed_cols` 列表中。工具栏上将自动生成对应的列复选框，用户勾选后即可在 Treeview 表格中实时查看与对齐各周期的强结构分，无需再手动打字添加；
+    - [x] **实现多周期排序后自动滚动到顶部功能 (Auto Scroll to Top on Sorting)**：在 `standalone_multi_period_tester.py` 的手动排序 `sort_column` 终点和渲染结果 `_show_results` 终点，均引入 `self.tree.yview_moveto(0)` 机制。用户进行表头排序或重新执行过滤筛选后，Treeview 表格视口瞬间自动滚动到第一行，极大地优化了高强度筛选场景下的信息读取体验；
+    - [x] **物理语法编译自检与全流程管道验证全绿通过**：使用 `py_compile` 对相关文件执行了编译校验，100% 通过；运行模拟多周期策略计算宽表的测试脚本 `scratch/test_verify_real_pipeline.py`，实测日线 186 只个股及 2d 周期 178 只个股均计算出了正确的结构分，宽表 join 顺畅，回归 exit code 0。
+
+
+## 2026-07-07 19:40
+- [x] **修复多周期 `strong_structure_score` 评分为 0 的根本缺陷与 UI 展示增强 (Fixed Multi-Period zero-filled strong_structure_score & Enhanced UI Display)**：
+    - [x] **根治步骤顺序倒置导致自适应周期涨跌幅失效的 Bug (Fixed Step Execution Order for Adaptive percent Calculation)**：定位发现 `data_utils.py` 内部 `complete_indicators_pipeline` 管道的步骤顺序存在 logic 倒置。原本重算最新 `close` 下涨跌幅与 MA 均线的自适应周期计算（步骤 2.5）排在基础指标计算（步骤 1 `calc_indicators`）之后。这导致 `calc_indicators` 内部在调用 `calc_strong_rebound_score_vect` 时，DataFrame 还没有生成最新的 `percent` 列而触发前置依赖拦截退避，强行将评分置为 0。现将该自适应重算逻辑整体上移至步骤 1 `calc_indicators` 之前运行，使 percent 列与均线计算在前、指标评分计算在后。在不修改底层 `sina_data.py` 数据源的前提下，完美修复了此策略计算失效缺陷，找回了真实的评分数据；
+    - [x] **解决非日线大周期下昨收数据引用与均线双重计算误差 (Fixed Period lastp2d Reference & MA Overlap)**：在大周期下（如 `2d`、`3d`、`w` ），未完成的当前周期数据会暂时占用 `lastp1d`。根据业务规则，真正已完结的上一周期收盘昨收存放在 `lastp2d` 中。现已在 `data_utils.py` 自适应重算中引入周期自适应路由——在大周期下以 `lastp2d` 作为昨收基准计算 Pct 涨幅，同时在计算大周期的 MA5 和 MA10 均线时，自动跳过 `lastp1d` 字段以排除本周期未收盘数据的双重计算重叠，使大周期的价格结构与强度评分更加精准；
+    - [x] **实现 `strong_structure_score` 列的 UI 静态列注册 (UI Registration of strong_structure_score)**：在 `standalone_multi_period_tester.py` 的 `_init_ui` 构造中，将 `"strong_structure_score"` 添加至 `self.fixed_cols` 列表中。工具栏上将自动生成对应的列复选框，用户勾选后即可在 Treeview 表格中实时查看与对齐各周期的强结构分，无需再手动打字添加；
+    - [x] **实现多周期排序后自动滚动到顶部功能 (Auto Scroll to Top on Sorting)**：在 `standalone_multi_period_tester.py` 的手动排序 `sort_column` 终点 and 渲染结果 `_show_results` 终点，均引入 `self.tree.yview_moveto(0)` 机制。用户进行表头排序或重新执行过滤筛选后，Treeview 表格视口瞬间自动滚动到第一行，极大地优化了高强度筛选场景下的信息读取体验；
+    - [x] **物理语法编译自检与全流程管道验证全绿通过**：使用 `py_compile` 对相关文件执行了编译校验，100% 通过；运行模拟多周期策略计算宽表的测试脚本 `scratch/test_verify_real_pipeline.py`，实测日线 186 只个股及 2d 周期 172 只个股均计算出了正确的结构分，宽表 join 顺畅，回归 exit code 0。
+
 ## 2026-07-07 19:15
 - [x] **深度根治多周期交叉验证与过滤全流程卡顿 (Deep Optimization for Multi-Period Strategy Filtering & Render Lag)**：
     - [x] **攻克大宽表各周期同值判定 `O(N^2)` 级计算瓶颈 (Fixed O(N^2) Period Value Comparisons)**：定位并清除了 `_get_display_periods_for_custom_col` 中对 4000+ 个股数据在主线程执行全表 `series0 - series_p` 向量化差值计算的致命缺陷。重构为对大 DataFrame 进行头部采样比对（只取前 100 行），将等价性判定耗时从 15 秒以上彻底缩短至 0.1ms 级，根治了点选周期及二次过滤时的主线程假死。

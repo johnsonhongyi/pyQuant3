@@ -416,22 +416,25 @@ def complete_indicators_pipeline(
                     # 新周期开始，重置平移标记，以便后续进入“同一周期”时能够再次进行平移
                     top_all.loc[valid_mask, '_is_shifted'] = False
                 
-    # 1. 基础指标计算
-    with timed_ctx("calc_indicators", warn_ms=1000):
-        top_all = calc_indicators(top_all, logger, resample)
+    # # 1. 基础指标计算
+    # with timed_ctx("calc_indicators", warn_ms=1000):
+    #     top_all = calc_indicators(top_all, logger, resample)
     
-    # 2. 补齐历史/实时成交量
-    with timed_ctx("sina_with_history", warn_ms=1000):
-        top_all = process_merged_sina_with_history(top_all)
-        
-    # 2.5 重新根据最新 close 实时计算当日涨跌幅及 MA5/MA10 均线覆写 (对所有时间周期 resample 生效)
+    # # 2. 补齐历史/实时成交量
+    # with timed_ctx("sina_with_history", warn_ms=1000):
+    #     top_all = process_merged_sina_with_history(top_all)
+    # 1. 重新根据最新 close 实时计算当日涨跌幅及 MA5/MA10 均线覆写 (对所有时间周期 resample 生效)
+    # 提前计算以保障后续基础指标计算 (calc_indicators) 和信号判定 (process_merged_sina_with_history) 的依赖就绪
     import numpy as np
     valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
     if valid_mask.any():
-        if 'lastp1d' in top_all.columns:
+        # 确定参考昨收列：在大周期(resample != 'd')中，未平移前 lastp1d 代表本周期未收盘的数据，真正的上期收盘昨收存放在 lastp2d
+        ref_lastp_col = 'lastp2d' if (resample != 'd' and 'lastp2d' in top_all.columns) else 'lastp1d'
+        
+        if ref_lastp_col in top_all.columns:
             raw_pct = (
-                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
-            ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
+                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, ref_lastp_col]
+            ) / top_all.loc[valid_mask, ref_lastp_col].replace(0, np.nan) * 100
             top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
             top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
         
@@ -451,6 +454,14 @@ def complete_indicators_pipeline(
             ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
             non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
             top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask].round(2)
+
+    # 2. 基础指标计算
+    with timed_ctx("calc_indicators", warn_ms=1000):
+        top_all = calc_indicators(top_all, logger, resample)
+    
+    # 3. 补齐历史/实时成交量
+    with timed_ctx("sina_with_history", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
     
     # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
     if 'now' in top_all.columns:
