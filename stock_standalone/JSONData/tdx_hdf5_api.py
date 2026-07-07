@@ -397,6 +397,7 @@ class SafeHDFStore(pd.HDFStore):
 
         opened = False
         need_repair = False
+        last_exception = None
 
         # [🚀 CROSS-PROCESS LOCK] 必须在打开 HDF5 文件之前先获取/等待文件锁
         # 否则 super().__init__ 在 Windows 下会因为共享冲突直接触发 PermissionError 或 HDF5ExtError
@@ -419,6 +420,7 @@ class SafeHDFStore(pd.HDFStore):
                 opened = True
                 break
             except (tables.exceptions.HDF5ExtError, OSError, ValueError, PermissionError) as e:
+                last_exception = e
                 self.log.error(f"[HDF] open failed (attempt {attempt+1}/{retry_count}): {e}")
                 if attempt < retry_count - 1:
                     self.log.warning(f"[HDF] Retrying in 3s... Releasing lock first.")
@@ -445,6 +447,23 @@ class SafeHDFStore(pd.HDFStore):
 
         # ========= 异常路径：才做清理 =========
         if not opened and need_repair:
+            if self.mode == 'r':
+                self.log.error(f"[HDF-READ-FAIL] Read-only mode failed to open file {self.fname} after all retries. Repair skipped.")
+                if last_exception:
+                    raise last_exception
+                else:
+                    raise OSError(f"Failed to open HDF5 file {self.fname} in read-only mode.")
+            
+            # 写模式下判定是否是锁问题或权限问题
+            err_msg = str(last_exception) if last_exception else ""
+            is_lock_error = "PermissionError" in err_msg or "WinError 32" in err_msg or "Permission denied" in err_msg
+            if is_lock_error:
+                self.log.warning(f"⚠️ [HDF-LOCKED] File {self.fname} is locked or lacks permission. Repair skipped to protect data.")
+                if last_exception:
+                    raise last_exception
+                else:
+                    raise OSError(f"Failed to open HDF5 file {self.fname} due to lock/permission.")
+            
             with timed_ctx("check_corrupt_keys"):
                 self._check_and_clean_corrupt_keys()
             with timed_ctx("reopen_hdf"):
@@ -476,6 +495,8 @@ class SafeHDFStore(pd.HDFStore):
         keys: 可选，只检查传入的 key，默认检查所有 key。
         延迟检查：只在访问或写入时才检查 key。
         """
+        if self.mode == 'r':
+            return
         corrupt_keys = []
         try:
             with timed_ctx("check_corrupt_keys read"):
@@ -488,10 +509,16 @@ class SafeHDFStore(pd.HDFStore):
                             self.log.error(f"Failed to read key {key}: {e}")
                             corrupt_keys.append(key)
         except Exception as e:
-            self.log.error(f"FATAL: Error opening HDF5 file {self.fname} for repair: {e}. Triggering safe backup.")
-            self._safe_rename_corrupt_file()
-            self.ensure_hdf_file()
-            return
+            err_msg = str(e)
+            is_lock_error = "PermissionError" in err_msg or "WinError 32" in err_msg or "Permission denied" in err_msg
+            if is_lock_error:
+                self.log.warning(f"⚠️ [HDF-LOCKED] Skip repair of {self.fname} due to lock/permission: {e}")
+                raise
+            else:
+                self.log.error(f"FATAL: Error opening HDF5 file {self.fname} for repair: {e}. Triggering safe backup.")
+                self._safe_rename_corrupt_file()
+                self.ensure_hdf_file()
+                return
 
         if corrupt_keys:
             self.log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
@@ -502,10 +529,18 @@ class SafeHDFStore(pd.HDFStore):
                             store.remove(key)
                         self.log.info(f"Removed corrupted key: {key}")
                     except Exception as e:
-                        self.log.error(f"Failed to remove key {key}: {e}")
-
+                        err_msg_remove = str(e)
+                        is_lock_remove = "PermissionError" in err_msg_remove or "WinError 32" in err_msg_remove or "Permission denied" in err_msg_remove
+                        if is_lock_remove:
+                            self.log.warning(f"⚠️ [HDF-LOCKED] Skip removal of key {key} due to lock: {e}")
+                            raise
+                        else:
+                            self.log.error(f"Failed to remove key {key}: {e}. Triggering safe backup.")
+                            self._safe_rename_corrupt_file()
 
     def _check_and_clean_corrupt_keys_all_key(self):
+            if self.mode == 'r':
+                return
             corrupt_keys = []
             try:
                 # 使用 with 打开 HDF5 文件，确保在操作完成后关闭文件
@@ -521,10 +556,15 @@ class SafeHDFStore(pd.HDFStore):
                                 corrupt_keys.append(key)
 
             except Exception as e:
+                err_msg = str(e)
+                is_lock_error = "PermissionError" in err_msg or "WinError 32" in err_msg or "Permission denied" in err_msg
+                if is_lock_error:
+                    log.warning(f"⚠️ [HDF-LOCKED] Skip all-key repair of {self.fname} due to lock: {e}")
+                    return
                 log.error(f"Error opening HDF5 file {self.fname}: {e}")
                 return
 
-            # 处理发现的损坏 keys
+            # 处理发现 of 损坏 keys
             if corrupt_keys:
                 log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
                 with timed_ctx("check_corrupt_keys remove"):
@@ -534,6 +574,11 @@ class SafeHDFStore(pd.HDFStore):
                                 store.remove(key)
                             log.info(f"Removed corrupted key: {key}")
                         except Exception as e:
+                            err_msg_remove = str(e)
+                            is_lock_remove = "PermissionError" in err_msg_remove or "WinError 32" in err_msg_remove or "Permission denied" in err_msg_remove
+                            if is_lock_remove:
+                                log.warning(f"⚠️ [HDF-LOCKED] Skip removal of key {key} due to lock: {e}")
+                                return
                             log.error(f"Failed to remove key {key}: {e}. Triggering safe backup.")
                             # 不再物理删除，改为安全重命名
                             self._safe_rename_corrupt_file()

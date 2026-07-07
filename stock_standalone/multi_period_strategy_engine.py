@@ -37,17 +37,18 @@ class MultiPeriodStrategyEngine:
             
             # 兼容 45d 和 3M 的 resample
             # readonly=True: 只读 h5 缓存，不允许触发 TDX 重建写入，防止全零数据覆盖 d/2d 表
-            df, _ = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period, readonly=True)
+            df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period, readonly=True)
             
-            # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
-            from data_utils import complete_indicators_pipeline
-            if df is not None and not df.empty:
+            # 只有当 df 不为空且包含 lastp1d 这一列时，才代表成功加载了大周期的历史缓存数据
+            if df is not None and not df.empty and 'lastp1d' in df.columns:
+                # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
+                from data_utils import complete_indicators_pipeline
                 df = complete_indicators_pipeline(df, logger, resample=period)
                 self._period_dfs[period] = df
                 return df
             else:
                 # h5 缓存不存在，标记为缺失
-                reason = f"h5缓存不存在(只读模式)"
+                reason = "h5缓存不存在(只读模式)" if 'lastp1d' not in (df.columns if df is not None else []) else "数据为空"
                 self._missing_periods[period] = reason
                 logger.warning(f"[READONLY] Period [{period}] data unavailable: {reason}")
                 return pd.DataFrame()

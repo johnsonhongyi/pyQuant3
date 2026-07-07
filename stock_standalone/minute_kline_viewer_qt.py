@@ -9,37 +9,36 @@ from datetime import datetime
 
 from typing import Optional, Any, Callable, Dict
 from tk_gui_modules.gui_config import (MINUTE_KLINE_VIEWER_HISTORY)
-# Handle multiple Qt bindings (PyQt6, PySide6, PyQt5)
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                  QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                 QInputDialog, QMessageBox, QMenu)
-    from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
+                                 QInputDialog, QMessageBox, QMenu, QFormLayout, QLayout)
+    from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect
     from PyQt6.QtGui import QIcon, QFont
 except ImportError:
     try:
         from PySide6.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                      QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                      QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                     QInputDialog, QMessageBox, QMenu)
-        from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
+                                     QInputDialog, QMessageBox, QMenu, QFormLayout, QLayout)
+        from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect
         from PySide6.QtGui import QIcon, QFont
     except ImportError:
         try:
             from PyQt5.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                          QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                          QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                         QInputDialog, QMessageBox, QMenu)
-            from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
+                                         QInputDialog, QMessageBox, QMenu, QFormLayout, QLayout)
+            from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect
             from PyQt5.QtGui import QIcon, QFont
         except ImportError:
             try:
                 from PySide2.QtWidgets import (QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, 
                                              QHBoxLayout, QPushButton, QLineEdit, QTableView, 
                                              QLabel, QFileDialog, QSplitter, QComboBox, QPlainTextEdit,
-                                             QInputDialog, QMessageBox, QMenu)
-                from PySide2.QtCore import Qt, QAbstractTableModel, QModelIndex
+                                             QInputDialog, QMessageBox, QMenu, QFormLayout, QLayout)
+                from PySide2.QtCore import Qt, QAbstractTableModel, QModelIndex, QPoint, QSize, QRect
                 from PySide2.QtGui import QIcon, QFont
             except ImportError:
                 print("Please install PyQt6, PySide6, PyQt5 or PySide2 to run this tool.")
@@ -87,6 +86,92 @@ except (ImportError, AttributeError):
         _SelectRows = QAbstractItemView.SelectionBehavior.SelectRows
     except (ImportError, AttributeError):
         _SelectRows = QTableView.SelectRows if hasattr(QTableView, "SelectRows") else 1
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=0, hspacing=5, vspacing=5):
+        super().__init__(parent)
+        self._item_list = []
+        self._h_spacing = hspacing
+        self._v_spacing = vspacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+
+    def addItem(self, item):
+        self._item_list.append(item)
+
+    def count(self):
+        return len(self._item_list)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list.pop(index)
+        return None
+
+    def expandingDirections(self):
+        try:
+            return Qt.Orientation(0)
+        except Exception:
+            return getattr(Qt, "Horizontal", 0x1) & 0
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._item_list:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        line_height = 0
+
+        for item in self._item_list:
+            wid = item.widget()
+            if not wid:
+                continue
+            
+            space_x = self._h_spacing
+            space_y = self._v_spacing
+
+            next_x = x + item.sizeHint().width() + space_x
+            if next_x - space_x > rect.right() - margins.right() and line_height > 0:
+                x = rect.x() + margins.left()
+                y = y + line_height + space_y
+                next_x = x + item.sizeHint().width() + space_x
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+
+            x = next_x
+            line_height = max(line_height, item.sizeHint().height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
 
 class DataFrameModel(QAbstractTableModel):
     def __init__(self, data=pd.DataFrame()):
@@ -533,6 +618,10 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_del_table.setStyleSheet("background-color: #607d8b; color: white;")
         self.btn_del_table.clicked.connect(self.on_delete_table)
 
+        self.btn_repair_h5 = QPushButton("🔧 修复合并HDF5")
+        self.btn_repair_h5.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
+        self.btn_repair_h5.clicked.connect(self.on_repair_h5_clicked)
+
         # Delete by Time Controls
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("UnixTS or Start, End")
@@ -556,34 +645,42 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_scan = QPushButton("Scan")
         self.btn_scan.clicked.connect(self.discover_internal_dfs)
 
-        # Toolbar - Row 1: Operations
-        top_toolbar = QHBoxLayout()
+        # Toolbar - Row 1: Operations (使用 FlowLayout 实现自适应流式排版)
+        top_toolbar = FlowLayout()
         top_toolbar.addWidget(self.btn_open)
         top_toolbar.addWidget(self.file_history_combo)
         top_toolbar.addWidget(self.btn_refresh)
         top_toolbar.addWidget(self.btn_mem)
-        top_toolbar.addSpacing(10)
+        
+        spacer1 = QWidget()
+        spacer1.setFixedWidth(10)
+        top_toolbar.addWidget(spacer1)
+        
         top_toolbar.addWidget(self.btn_add_row)
         top_toolbar.addWidget(self.btn_del_row)
         top_toolbar.addWidget(self.btn_save)
         top_toolbar.addWidget(self.btn_save_as)
         top_toolbar.addWidget(self.btn_read_table)
         top_toolbar.addWidget(self.btn_del_table)
-        top_toolbar.addStretch(1)
-        top_toolbar.addWidget(QLabel("Source:"))
+        top_toolbar.addWidget(self.btn_repair_h5)
+        
+        lbl_source = QLabel("Source:")
+        top_toolbar.addWidget(lbl_source)
         top_toolbar.addWidget(self.source_combo)
         top_toolbar.addWidget(self.btn_scan)
         main_layout.addLayout(top_toolbar)
 
         # Toolbar - Row 2: Filters
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Time Filter:"))
+        filter_layout = FlowLayout()
+        lbl_time_filter = QLabel("Time Filter:")
+        filter_layout.addWidget(lbl_time_filter)
         filter_layout.addWidget(self.time_input)
         filter_layout.addWidget(self.btn_del_time)
-        filter_layout.addStretch(1)
         
         # 诊断个股功能
-        filter_layout.addWidget(QLabel("诊断个股:"))
+        lbl_diag = QLabel("诊断个股:")
+        filter_layout.addWidget(lbl_diag)
+        
         self.diag_input = QLineEdit()
         self.diag_input.setPlaceholderText("Code...")
         self.diag_input.setFixedWidth(80)
@@ -594,9 +691,15 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.btn_diag.clicked.connect(self.on_diagnose_click)
         self.btn_diag.setStyleSheet("background-color: #0288D1; color: white; font-weight: bold;")
         filter_layout.addWidget(self.btn_diag)
-        filter_layout.addSpacing(10)
         
-        filter_layout.addWidget(QLabel("Search Code:"))
+        spacer2 = QWidget()
+        spacer2.setFixedWidth(10)
+        filter_layout.addWidget(spacer2)
+        
+        lbl_search = QLabel("Search Code:")
+        filter_layout.addWidget(lbl_search)
+        
+        self.search_input.setFixedWidth(120)
         filter_layout.addWidget(self.search_input)
         main_layout.addLayout(filter_layout)
         
@@ -2541,6 +2644,388 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self.save_history()
             self._update_history_combos()
             self.statusBar().showMessage("Query history item removed.", 3000)
+
+    def on_repair_h5_clicked(self):
+        """点击修复合并 HDF5 按钮"""
+        default_base = self.current_file if (self.current_file and self.current_file.endswith(('.h5', '.hdf5'))) else None
+        dialog = H5MergeRepairDialog(self, default_base_file=default_base)
+        dialog.exec()
+
+
+class H5MergeRepairDialog(QDialog):
+    def __init__(self, parent=None, default_base_file=None):
+        super().__init__(parent)
+        self.setWindowTitle("HDF5 数据修复与去重合并")
+        self.resize(650, 520)
+        self.init_ui(default_base_file)
+
+    def init_ui(self, default_base_file):
+        layout = QVBoxLayout(self)
+
+        # 提示信息
+        tip_label = QLabel("本工具用于将【干净的基础历史 HDF5 文件】与【今日追加的 HDF5 新数据】进行去重合并，并自动排除已损坏或被污染的数据（如 07-06）。")
+        tip_label.setWordWrap(True)
+        tip_label.setStyleSheet("color: #2980b9; font-weight: bold;")
+        layout.addWidget(tip_label)
+
+        # 表单布局
+        form = QFormLayout()
+
+        # 1. 基础历史数据文件
+        self.base_edit = QLineEdit()
+        # 默认填入
+        default_base = default_base_file or r"D:\Ramdisk\backup\20260703\sina_MultiIndex_data.h5"
+        if not os.path.exists(default_base):
+            # 自动退避尝试 20260702
+            alt_base = r"D:\Ramdisk\backup\20260702\sina_MultiIndex_data.h5"
+            if os.path.exists(alt_base):
+                default_base = alt_base
+        self.base_edit.setText(default_base)
+        
+        base_btn = QPushButton("浏览...")
+        base_btn.clicked.connect(self.browse_base)
+        base_row = QHBoxLayout()
+        base_row.addWidget(self.base_edit)
+        base_row.addWidget(base_btn)
+        form.addRow("源数据 (基础历史文件):", base_row)
+
+        # 2. 追加的新数据文件
+        self.new_edit = QLineEdit()
+        self.new_edit.setText(r"g:\sina_MultiIndex_data.h5")
+        new_btn = QPushButton("浏览...")
+        new_btn.clicked.connect(self.browse_new)
+        new_row = QHBoxLayout()
+        new_row.addWidget(self.new_edit)
+        new_row.addWidget(new_btn)
+        form.addRow("新数据 (追加日新文件):", new_row)
+
+        # 3. HDF5 Key
+        self.key_edit = QLineEdit()
+        self.key_edit.setText("/all_30")
+        form.addRow("目标数据集 Key:", self.key_edit)
+
+        # 4. 追加过滤起始时间
+        self.date_edit = QLineEdit()
+        # 默认使用今天日期
+        self.date_edit.setText(datetime.now().strftime("%Y-%m-%d"))
+        form.addRow("新数据追加起始日期 (含):", self.date_edit)
+
+        # 日期快捷选择与范围检测
+        self.lbl_date_range = QLabel("新数据日期范围: 未检测")
+        self.lbl_date_range.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        
+        self.btn_detect_date = QPushButton("检测日期")
+        self.btn_detect_date.setFixedWidth(80)
+        self.btn_detect_date.clicked.connect(self.detect_new_file_dates)
+        
+        self.combo_dates = QComboBox()
+        self.combo_dates.setFixedWidth(150)
+        self.combo_dates.addItem("-- 选择历史日期 --")
+        self.combo_dates.currentIndexChanged.connect(self.on_date_combo_changed)
+        
+        date_opt_layout = QHBoxLayout()
+        date_opt_layout.addWidget(self.lbl_date_range)
+        date_opt_layout.addWidget(self.btn_detect_date)
+        date_opt_layout.addWidget(self.combo_dates)
+        form.addRow("检测/选择新数据日期:", date_opt_layout)
+
+        # 5. 保存的目标文件路径
+        self.target_edit = QLineEdit()
+        # 自动关联更新临时输出文件名以防止覆盖源文件
+        self.new_edit.textChanged.connect(self.update_target_temp_path)
+        self.base_edit.textChanged.connect(self.update_target_temp_path)
+        self.update_target_temp_path()
+        
+        target_btn = QPushButton("浏览...")
+        target_btn.clicked.connect(self.browse_target)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target_edit)
+        target_row.addWidget(target_btn)
+        form.addRow("目标输出文件路径:", target_row)
+
+        layout.addLayout(form)
+
+        # 日志区
+        layout.addWidget(QLabel("合并运行日志:"))
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("background-color: #2c3e50; color: #ecf0f1; font-family: Consolas;")
+        layout.addWidget(self.log_text)
+
+        # 按钮区
+        btn_layout = QHBoxLayout()
+        self.run_btn = QPushButton("开始合并修复")
+        self.run_btn.setStyleSheet("background-color: #e74c3c; color: white; font-weight: bold; height: 30px;")
+        self.run_btn.clicked.connect(self.run_merge)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.reject)
+        close_btn.setStyleSheet("height: 30px;")
+        
+        btn_layout.addWidget(self.run_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+    def get_existing_dir_or_parent(self, path: str) -> str:
+        """从给定路径自动提取已存在的目录，若不存在则逐级向上查找直到找到存在的路径"""
+        if not path:
+            return ""
+        try:
+            path = os.path.abspath(path.strip())
+            # 如果是已存在的文件，取其目录
+            if os.path.exists(path) and os.path.isfile(path):
+                curr_dir = os.path.dirname(path)
+            else:
+                # 尝试看它是不是潜在文件路径（有后缀名）
+                _, ext = os.path.splitext(os.path.basename(path))
+                if ext:
+                    curr_dir = os.path.dirname(path)
+                else:
+                    curr_dir = path
+            
+            # 逐级向上查找直到目录真实存在
+            while curr_dir:
+                if os.path.exists(curr_dir) and os.path.isdir(curr_dir):
+                    return curr_dir
+                parent = os.path.dirname(curr_dir)
+                if parent == curr_dir: # 到达盘符根目录
+                    break
+                curr_dir = parent
+        except Exception:
+            pass
+        return ""
+
+    def browse_base(self):
+        init_path = self.base_edit.text().strip()
+        init_dir = self.get_existing_dir_or_parent(init_path)
+        f, _ = QFileDialog.getOpenFileName(self, "选择源数据 (基础历史文件)", init_dir, "HDF5 Files (*.h5 *.hdf5)")
+        if f:
+            self.base_edit.setText(f)
+
+    def browse_new(self):
+        init_path = self.new_edit.text().strip()
+        init_dir = self.get_existing_dir_or_parent(init_path)
+        f, _ = QFileDialog.getOpenFileName(self, "选择新数据 (追加文件)", init_dir, "HDF5 Files (*.h5 *.hdf5)")
+        if f:
+            self.new_edit.setText(f)
+
+    def browse_target(self):
+        init_path = self.target_edit.text().strip()
+        init_dir = self.get_existing_dir_or_parent(init_path)
+        
+        # 尽量保留文件名，若直接父目录不存在则回退至已存在的祖先目录
+        init_val = init_path
+        if init_path:
+            parent_dir = os.path.dirname(os.path.abspath(init_path))
+            if not os.path.exists(parent_dir):
+                init_val = init_dir
+                
+        f, _ = QFileDialog.getSaveFileName(self, "选择目标输出文件", init_val, "HDF5 Files (*.h5 *.hdf5)")
+        if f:
+            self.target_edit.setText(f)
+
+    def update_target_temp_path(self):
+        """当基础历史文件或追加新数据文件变化时，自动智能生成一个临时合并输出文件名以防止覆盖损坏源文件"""
+        new_path = self.new_edit.text().strip()
+        if new_path:
+            try:
+                dir_name = os.path.dirname(os.path.abspath(new_path))
+                base_name = os.path.basename(new_path)
+                name, ext = os.path.splitext(base_name)
+                temp_name = f"{name}_temp_merge{ext}"
+                target_val = os.path.join(dir_name, temp_name)
+                
+                curr_target = self.target_edit.text().strip()
+                # 只有当当前为空，或者直接指向源数据，或者本来就是一个临时名时，才动态更新以贴合新路径
+                if not curr_target or curr_target == new_path or curr_target == self.base_edit.text().strip() or "_temp_merge" in curr_target:
+                    self.target_edit.setText(target_val)
+            except Exception:
+                pass
+
+    def detect_new_file_dates(self):
+        new_path = self.new_edit.text().strip()
+        h5_key = self.key_edit.text().strip()
+        if not new_path or not os.path.exists(new_path):
+            QMessageBox.warning(self, "警告", "请先选择有效的新数据文件路径！")
+            return
+        if not h5_key:
+            QMessageBox.warning(self, "警告", "请先填写数据集 Key！")
+            return
+            
+        self.btn_detect_date.setEnabled(False)
+        self.btn_detect_date.setText("检测中...")
+        QApplication.processEvents()
+        
+        try:
+            # 使用只读模式加载索引，避免引起多进程死锁或大内存分配
+            with pd.HDFStore(new_path, mode='r') as store:
+                if h5_key not in store:
+                    QMessageBox.warning(self, "警告", f"新数据文件中不存在 Key: {h5_key}")
+                    return
+                # 仅选择索引加载
+                df_idx = store.select(h5_key, columns=[])
+                
+            times = pd.to_datetime(df_idx.index.get_level_values('ticktime')).dropna()
+            # 向量化去除时间分量并去重，转换为 Timestamp 序列
+            unique_ts = times.normalize().unique()
+            # 提取具体的 date 对象并完成排序，完美规避 NaT 比较的 FutureWarning
+            unique_dates = sorted([t.date() for t in unique_ts])
+            
+            if unique_dates:
+                min_date = unique_dates[0]
+                max_date = unique_dates[-1]
+                self.lbl_date_range.setText(f"范围: {min_date} 至 {max_date}")
+                
+                # 更新选择下拉框
+                self.combo_dates.blockSignals(True)
+                self.combo_dates.clear()
+                self.combo_dates.addItem("-- 选择历史日期 --")
+                for d in unique_dates:
+                    self.combo_dates.addItem(str(d))
+                self.combo_dates.blockSignals(False)
+                
+                # 默认设为最新的最后一天日期作为追加开始时间
+                self.date_edit.setText(str(max_date))
+                QMessageBox.information(self, "检测成功", f"成功检测到新数据日期范围:\n{min_date} 至 {max_date}\n共 {len(unique_dates)} 个交易日。")
+            else:
+                self.lbl_date_range.setText("范围: 无有效日期")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"检测新数据文件日期范围失败: {e}")
+        finally:
+            self.btn_detect_date.setEnabled(True)
+            self.btn_detect_date.setText("检测日期")
+
+    def on_date_combo_changed(self, idx):
+        if idx > 0:
+            date_str = self.combo_dates.currentText()
+            self.date_edit.setText(date_str)
+
+    def append_log(self, text):
+        self.log_text.appendPlainText(text)
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+        QApplication.processEvents() # 刷新UI界面，不阻塞
+
+    def run_merge(self):
+        import time
+        import shutil
+        
+        base_path = self.base_edit.text().strip()
+        new_path = self.new_edit.text().strip()
+        target_path = self.target_edit.text().strip()
+        h5_key = self.key_edit.text().strip()
+        start_date = self.date_edit.text().strip()
+
+        if not base_path or not os.path.exists(base_path):
+            QMessageBox.warning(self, "警告", "源数据基础文件路径无效或不存在！")
+            return
+        if not new_path or not os.path.exists(new_path):
+            QMessageBox.warning(self, "警告", "追加的新数据文件路径无效或不存在！")
+            return
+            
+        # 强防数据覆盖安全卡口
+        if target_path == base_path or target_path == new_path:
+            QMessageBox.critical(self, "安全警告", "目标输出文件路径与源数据（基础历史文件）或新数据（追加文件）相同！\n为防止重要历史数据被意外覆盖损坏，请指定一个不同的目标文件名（例如在原文件名后加上 _temp_merge.h5 后缀）。")
+            return
+        if not target_path:
+            QMessageBox.warning(self, "警告", "必须指定目标输出路径！")
+            return
+        if not h5_key:
+            QMessageBox.warning(self, "警告", "必须指定数据集 Key！")
+            return
+
+        self.run_btn.setEnabled(False)
+        self.log_text.clear()
+        
+        try:
+            self.append_log("=" * 60)
+            self.append_log("开始进行 HDF5 历史数据去重合并流程")
+            self.append_log("=" * 60)
+            
+            # Step 1: 读取基础文件
+            self.append_log(f"1. 正在读取基础历史文件: {base_path} ...")
+            t0 = time.time()
+            df_base = pd.read_hdf(base_path, key=h5_key)
+            self.append_log(f"   读取成功: {len(df_base)} 行, 耗时 {time.time()-t0:.1f} 秒")
+            
+            times_base = pd.to_datetime(df_base.index.get_level_values('ticktime'))
+            self.append_log(f"   基础历史日期范围: {times_base.min().date()} ~ {times_base.max().date()}")
+
+            # Step 2: 读取新追加文件
+            self.append_log(f"\n2. 正在读取新追加文件: {new_path} ...")
+            t0 = time.time()
+            df_new = pd.read_hdf(new_path, key=h5_key)
+            self.append_log(f"   读取成功: {len(df_new)} 行, 耗时 {time.time()-t0:.1f} 秒")
+
+            # Step 3: 进行过滤
+            self.append_log(f"\n3. 正在过滤数据，保留日期 >= {start_date} ...")
+            times_new = pd.to_datetime(df_new.index.get_level_values('ticktime'))
+            mask_keep = times_new >= pd.Timestamp(start_date)
+            df_new_clean = df_new[mask_keep]
+            
+            self.append_log(f"   追加数据中保留: {len(df_new_clean)} 行")
+            if not df_new_clean.empty:
+                t2 = pd.to_datetime(df_new_clean.index.get_level_values('ticktime'))
+                self.append_log(f"   保留的数据日期范围: {t2.min().date()} ~ {t2.max().date()}")
+
+            # Step 4: 合并与去重
+            self.append_log("\n4. 正在对合并的数据进行去重与索引排序 ...")
+            t0 = time.time()
+            combined = pd.concat([df_base, df_new_clean], axis=0)
+            before_len = len(combined)
+            combined = combined[~combined.index.duplicated(keep='last')]
+            combined = combined.sort_index()
+            after_len = len(combined)
+            self.append_log(f"   合并去重完成: 合并前 {before_len} 行 -> 合并后 {after_len} 行 (去重掉 {before_len-after_len} 行重复)")
+            self.append_log(f"   去重排序耗时 {time.time()-t0:.1f} 秒")
+
+            times_all = pd.to_datetime(combined.index.get_level_values('ticktime'))
+            self.append_log(f"   合并后总日期范围: {times_all.min().date()} ~ {times_all.max().date()}")
+
+            # Step 5: 写入目标输出文件
+            temp_target = target_path + ".tmp_merge"
+            if os.path.exists(temp_target):
+                os.remove(temp_target)
+            
+            self.append_log(f"\n5. 正在写入临时文件: {temp_target} ...")
+            t0 = time.time()
+            combined.to_hdf(temp_target, key=h5_key, mode='w', format='table', 
+                            complevel=9, complib='blosc', data_columns=True)
+            self.append_log(f"   写入成功! 大小: {os.path.getsize(temp_target)/1024/1024:.1f} MB, 耗时 {time.time()-t0:.1f} 秒")
+
+            # Step 6: 验证物理写入
+            self.append_log("\n6. 正在验证写入的 HDF5 文件 ...")
+            with pd.HDFStore(temp_target, mode='r') as store:
+                nrows = store.get_storer(h5_key).nrows
+                self.append_log(f"   已验证 Key '{h5_key}' 包含: {nrows} 行")
+
+            # Step 7: 安全替换
+            self.append_log(f"\n7. 执行安全物理替换 => {target_path}")
+            if os.path.exists(target_path):
+                backup_path = target_path + ".bak_repair_ts" + str(int(time.time()))
+                try:
+                    os.rename(target_path, backup_path)
+                    self.append_log(f"   成功备份旧文件至: {backup_path}")
+                except Exception as e:
+                    self.append_log(f"   [警告] 备份原目标文件失败 (可能正被占用): {e}")
+                    raise e
+            
+            shutil.copy2(temp_target, target_path)
+            if os.path.exists(temp_target):
+                os.remove(temp_target)
+                
+            self.append_log("\n" + "=" * 60)
+            self.append_log("恭喜！HDF5 数据合并修复流程全部成功完成！")
+            self.append_log("=" * 60)
+            QMessageBox.information(self, "成功", f"HDF5 合并修复成功！已替换目标文件:\n{target_path}")
+            
+        except Exception as e:
+            self.append_log(f"\n[错误] 合并修复流程中断: {e}")
+            QMessageBox.critical(self, "错误", f"合并修复失败，堆栈异常:\n{e}")
+        finally:
+            self.run_btn.setEnabled(True)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

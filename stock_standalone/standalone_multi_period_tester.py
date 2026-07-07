@@ -754,10 +754,18 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
     def _worker(self, strat_config, active_periods):
         try:
             start_time = time.time()
-            # ── 加载全市场行情 top_now ──────────────────────────
+            # ── 加载全市场行情 top_now（只读，不触发 DD 写回，防止损坏 MultiIndex HDF5）──
             if self.top_now is None:
                 self.after(0, self._update_status, "正在获取全市场实时行情...")
-                self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
+                # 使用只读路径直接获取 sina 全市场数据，完全跳过
+                # get_market_price_sina_dd_realTime 的 write_hdf_db 写回逻辑，
+                # 避免与主系统后台写进程竞争 g:\sina_MultiIndex_data.h5
+                from JSONData import sina_data
+                _sina = sina_data.Sina(readonly=True)
+                self.top_now = _sina.all
+                if self.top_now is None or self.top_now.empty:
+                    # fallback: 仍走 getSinaAlldf 但明确只读标志
+                    self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType, readonly=True)
                 self._top_now_cache_ts = time.time()
             # ── 逐周期加载 ─────────────────────────────────────
             for period in active_periods:
