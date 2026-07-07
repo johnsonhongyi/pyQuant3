@@ -20463,6 +20463,51 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             try:
                 import psutil
+                import pandas as pd
+                
+                # 递归探测对象持有的所有 DataFrame 内存占用总和 (MB)
+                def get_object_dfs_memory(obj):
+                    if obj is None:
+                        return 0.0
+                    total_bytes = 0
+                    seen_ids = set()
+                    
+                    def scan_item(item, depth=0):
+                        nonlocal total_bytes
+                        if depth > 2 or id(item) in seen_ids:
+                            return
+                        seen_ids.add(id(item))
+                        
+                        if isinstance(item, pd.DataFrame):
+                            try:
+                                total_bytes += item.memory_usage(deep=True).sum()
+                            except:
+                                pass
+                        elif isinstance(item, dict):
+                            for v in item.values():
+                                scan_item(v, depth + 1)
+                        elif isinstance(item, list):
+                            for v in item:
+                                scan_item(v, depth + 1)
+                        elif hasattr(item, '__dict__'):
+                            try:
+                                # 专门读取 _period_dfs，它是保存多周期大宽表的核心成员
+                                if hasattr(item, '_period_dfs'):
+                                    scan_item(item._period_dfs, depth + 1)
+                                for attr_name in dir(item):
+                                    if attr_name.startswith('_') and attr_name != '_period_dfs':
+                                        continue
+                                    try:
+                                        attr_val = getattr(item, attr_name)
+                                        scan_item(attr_val, depth + 1)
+                                    except:
+                                        pass
+                            except:
+                                pass
+                                
+                    scan_item(obj)
+                    return total_bytes / 1024 / 1024
+
                 current_process = psutil.Process()
                 children = current_process.children(recursive=True)
                 
@@ -20471,6 +20516,110 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     f"OS: {sys.platform} | Main PID: {current_process.pid}",
                     "-" * 88
                 ]
+                
+                # 动态提取 GUI 各大功能视窗的存活与显隐状态
+                gui_status = ["=== GUI Active Windows Status ==="]
+                
+                # 1. 多周期联动策略筛选器 (Tk)
+                mp_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+                    cache_mb = get_object_dfs_memory(self._multi_period_tester_win)
+                    total_mb = cache_mb + 30.0 # 30MB 基础 UI 框架开销
+                    state_str = "显示中 (Visible)" if self._multi_period_tester_win.winfo_viewable() else "隐藏中 (Hidden)"
+                    mp_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                gui_status.append(f"多周期联动策略筛选器 (Alt+N)   : {mp_status}")
+                
+                # 2. 策略白盒管理器 (Tk)
+                sm_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_strategy_manager_win') and self._strategy_manager_win and self._strategy_manager_win.winfo_exists():
+                    cache_mb = get_object_dfs_memory(self._strategy_manager_win)
+                    total_mb = cache_mb + 25.0 # 25MB 基础 UI 框架开销
+                    state_str = "显示中 (Visible)" if self._strategy_manager_win.winfo_viewable() else "隐藏中 (Hidden)"
+                    sm_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                gui_status.append(f"策略白盒管理器 (Alt+S)       : {sm_status}")
+                
+                # 3. 报警监理中心 (Tk)
+                vm_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_voice_monitor_win') and self._voice_monitor_win and self._voice_monitor_win.winfo_exists():
+                    cache_mb = get_object_dfs_memory(self._voice_monitor_win)
+                    total_mb = cache_mb + 20.0 # 20MB 基础 UI 框架开销
+                    state_str = "显示中 (Visible)" if self._voice_monitor_win.winfo_viewable() else "隐藏中 (Hidden)"
+                    vm_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                gui_status.append(f"报警预警监理中心 (Alt+E)     : {vm_status}")
+                
+                # 4. 大盘风口看板 (Tk)
+                ps_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_pulse_win') and self._pulse_win and self._pulse_win.winfo_exists():
+                    cache_mb = get_object_dfs_memory(self._pulse_win)
+                    total_mb = cache_mb + 25.0 # 25MB 基础 UI 框架开销
+                    state_str = "显示中 (Visible)" if self._pulse_win.winfo_viewable() else "隐藏中 (Hidden)"
+                    ps_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                gui_status.append(f"大盘温度风口看板 (Alt+K)     : {ps_status}")
+                
+                # 5. 竞价赛马监控面板 (PyQt6)
+                rc_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_racing_panel_win') and self._racing_panel_win is not None:
+                    try:
+                        if is_qt_win_alive(self._racing_panel_win):
+                            cache_mb = get_object_dfs_memory(self._racing_panel_win)
+                            total_mb = cache_mb + 35.0 # 35MB 基础 UI 框架开销
+                            state_str = "显示中 (Visible)" if self._racing_panel_win.isVisible() else "隐藏中 (Hidden)"
+                            rc_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                    except:
+                        rc_status = "异常 (Error)"
+                gui_status.append(f"竞价赛马与节奏面板 (Alt+M)   : {rc_status}")
+                
+                # 6. 实时信号仪表盘 (PyQt6)
+                sd_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_signal_dashboard_win') and self._signal_dashboard_win is not None:
+                    try:
+                        if is_qt_win_alive(self._signal_dashboard_win):
+                            cache_mb = get_object_dfs_memory(self._signal_dashboard_win)
+                            total_mb = cache_mb + 45.0 # 45MB 基础 UI 框架开销
+                            state_str = "显示中 (Visible)" if self._signal_dashboard_win.isVisible() else "隐藏中 (Hidden)"
+                            sd_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                    except:
+                        sd_status = "异常 (Error)"
+                gui_status.append(f"实时信号仪表盘 (Alt+L)       : {sd_status}")
+                
+                # 7. 决策流水分析看板 (PyQt6)
+                df_status = "未创建 (Not Created) | Memory:   0.0 MB [已完全释放]"
+                if hasattr(self, '_decision_flow_win') and self._decision_flow_win is not None:
+                    try:
+                        if is_qt_win_alive(self._decision_flow_win):
+                            cache_mb = get_object_dfs_memory(self._decision_flow_win)
+                            total_mb = cache_mb + 30.0 # 30MB 基础 UI 框架开销
+                            state_str = "显示中 (Visible)" if self._decision_flow_win.isVisible() else "隐藏中 (Hidden)"
+                            df_status = f"{state_str:<15} | Memory: {total_mb:>5.1f} MB (Cache: {cache_mb:.1f}MB)"
+                    except:
+                        df_status = "异常 (Error)"
+                gui_status.append(f"决策流水分析看板 (Alt+J)     : {df_status}")
+                
+                # 8. 智能操盘 ATS 终端 (Alt+P) (独立进程)
+                ats_status = "未运行 (Not Running) | Memory:   0.0 MB [已完全释放]"
+                try:
+                    import ctypes
+                    title = "🛡️ ATS v2 智能自治股票交易终端 (Autonomous Trading Terminal)"
+                    hwnd = ctypes.windll.user32.FindWindowW(None, title)
+                    if hwnd:
+                        is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                        state_str = "运行中 (Running)" if is_visible else "后台隐藏 (Hidden)"
+                        ats_mem_mb = 45.0
+                        try:
+                            for c in children:
+                                cmdline = " ".join(c.cmdline()).lower()
+                                if "ats_terminal" in cmdline or "run_ats" in cmdline:
+                                    ats_mem_mb = c.memory_full_info().uss / 1024 / 1024
+                                    break
+                        except:
+                            pass
+                        ats_status = f"{state_str:<15} | Memory: {ats_mem_mb:>5.1f} MB [独立进程]"
+                except:
+                    pass
+                gui_status.append(f"智能操盘 ATS 终端 (Alt+P)    : {ats_status}")
+                
+                gui_status.append("-" * 88)
+                report.extend(gui_status)
                 
                 # 动态提取已知大金刚子进程的 PID 进行精准绑定
                 qt_pid = getattr(self, 'qt_process', None)
