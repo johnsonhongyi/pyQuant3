@@ -1180,7 +1180,7 @@ class ATSMainWindow(QMainWindow):
                 }
                 
                 if len(counts) == 10:
-                    self.dist_chart.update_data(counts, stats_dict)
+                    self.dist_chart.update_data(counts, stats_dict, self.current_df)
             
             self.refresh_realtime_ui()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
@@ -1530,9 +1530,27 @@ class ATSMainWindow(QMainWindow):
 
     def apply_qss_with_font_size(self, size: int):
         import re
-        qss = DARK_THEME_QSS
-        qss = re.sub(r'font-size:\s*\d+(\.\d+)?pt;', f'font-size: {size}pt;', qss)
-        self.setStyleSheet(qss)
+        from PyQt6.QtWidgets import QApplication, QTableView, QTreeView
+        
+        app = QApplication.instance()
+        if app:
+            app._is_updating_font = True
+            
+        try:
+            qss = DARK_THEME_QSS
+            qss = re.sub(r'font-size:\s*\d+(\.\d+)?pt;', f'font-size: {size}pt;', qss)
+            self.setStyleSheet(qss)
+            
+            # Force restore column widths for all tables/trees with persistent headers
+            for table in self.findChildren(QTableView):
+                if hasattr(table, "restore_header_state"):
+                    table.restore_header_state()
+            for tree in self.findChildren(QTreeView):
+                if hasattr(tree, "restore_header_state"):
+                    tree.restore_header_state()
+        finally:
+            if app:
+                app._is_updating_font = False
 
     def decrease_font_size(self):
         if self.current_font_size > 7:
@@ -1794,6 +1812,13 @@ class ATSMainWindow(QMainWindow):
                     self.position_panel.table.save_column_widths()
         except Exception as e:
             print(f"[ATSMainWindow] Error saving column widths on close: {e}")
+            
+        # Close all orphaned detail dialogs (parent=None, so they don't close automatically)
+        try:
+            if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_close_all_dialogs'):
+                self.dist_chart._close_all_dialogs()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error closing dist chart dialogs: {e}")
             
         super().closeEvent(event)
 
