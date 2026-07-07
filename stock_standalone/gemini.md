@@ -2,7 +2,8 @@
 - [x] **升级 Alt+N 为系统级全局热键 (Upgraded Alt+N to System-Wide Global Hotkey)**：
     - [x] **补全主程序全局热键字典与回调绑定**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 和 `_HOTKEY_INFO_MAP` 字典里，补齐了 `Alt+P`（偏移量 `13`）与 `Alt+N`（偏移量 `14`，键码为 `0x4E`）的注册与中文功能简介。在 `setup_global_hotkey` 的 `hotkey_callbacks` 映射中，绑定了 `14` 对应 `toggle_multi_period_tester`。
     - [x] **同步独立热键子进程映射与 Named Pipe 分发**：在 `hotkey_rotator.py` 的 `HotkeyListener.hotkey_map` 字典中，添加了偏移量为 `14` 的 `Alt+N`。使得在非交易窗口焦点活动时，子进程也能通过 Windows 原生 API 物理捕获并在亚毫秒级内通过管道分发至主进程调度执行，完全避免了主线程 GIL 卡死，设计与系统内已有的 `Alt+H`, `Alt+L`, `Alt+P` 等全局热键机制完全对齐。
-    - [x] **重构智能显示/隐藏切换逻辑**：在 `instock_MonitorTK.py` 的 `toggle_multi_period_tester` 中，用 `focus_displayof() == self._multi_period_tester_win` 和 `state() != "withdrawn"` 对齐了策略白盒管理器等窗口的智能焦点切换逻辑。即当窗口存在但被其他窗口遮挡时，按 Alt+N 不会错误隐藏，而是将其拉回前台聚焦并置顶；仅当窗口已聚焦且未隐藏时按 Alt+N 才会将其隐藏（Withdraw），显著提升了操作体验的精确度。
+    - [x] **重构智能显示/隐藏切换逻辑**：在 `instock_MonitorTK.py` 的 `toggle_multi_period_tester` 中，用 `focus_displayof() == self._multi_period_tester_win` and `state() != "withdrawn"` 对齐了策略白盒管理器等窗口的智能焦点切换逻辑。即当窗口存在但被其他窗口遮挡时，按 Alt+N 不会错误隐藏，而是将其拉回前台聚焦并置顶；仅当窗口已聚焦且未隐藏时按 Alt+N 才会将其隐藏（Withdraw），显著提升了操作体验的精确度。
+    - [x] **升级系统资源与活跃视窗诊断面板并补全内存占用 (Upgraded System Resource Report & GUI Memory Footprints)**：在 `System Resource Report` 顶部追加了全新的 `=== GUI Active Windows Status ===` 诊断看板。将多周期联动策略筛选器 (Alt+N)、策略白盒 (Alt+S)、报警监理 (Alt+E)、大盘温度风口 (Alt+K)、竞价赛马面板 (Alt+M)、实时信号仪表盘 (Alt+L) 和决策流水 (Alt+J) 以及智能操盘 ATS 终端 (Alt+P) 8 大核心组件的存活、显隐状态和实时内存占用全量接入。内部集成了高精度、非阻塞的 DataFrame 数据缓存递归扫描函数 `get_object_dfs_memory`，能精准提取每个活跃视窗中占用堆内存（如多周期 DataFrame 缓存大宽表）的字节，与 UI 基础开销相结合，动态输出如 `Memory: 186.4 MB (Cache: 156.4MB)` 的内存明细，并在关闭时明示 `[已完全释放]`，为用户提供完全透明的内存和生命周期监控。
 
 ## 2026-07-07 20:45
 - [x] **优化多周期窗口生命周期与内存清理机制 (Optimized Multi-Period Window Lifecycle & Memory Cleanup)**：
