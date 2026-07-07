@@ -2879,6 +2879,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         10: (win32con.MOD_ALT | win32con.MOD_SHIFT, 0x52, "Alt+Shift+R"),  # Shift+R - 切换上一个窗口
         11: (win32con.MOD_ALT, 0x4A, "Alt+J"),  # J - 交易内核决策流水分析
         12: (win32con.MOD_ALT, 0x55, "Alt+U"),  # U - 突破跟单指挥所 HUD
+        13: (win32con.MOD_ALT, 0x50, "Alt+P"),  # P - 智能操盘 ATS
+        14: (win32con.MOD_ALT, 0x4E, "Alt+N"),  # N - 多周期筛选
     }
     _HOTKEY_INFO_MAP = {
         0: "一键静音 (关闭所有语音报警)",
@@ -2894,6 +2896,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         10: "视窗轮换 (向上轮转多屏窗口)",
         11: "决策流水 (成交与决策分析看板)",
         12: "突破跟单 (隐藏/显示跟单指挥所 HUD)",
+        13: "智能操盘 (隐藏/显示ATS自治交易终端)",
+        14: "多周期筛选 (隐藏/显示多周期联动策略筛选器)",
     }
     def _diagnose_hotkey_conflict(self, desc):
         """当热键注册失败时，自动通过系统进程快照扫描潜在的冲突来源进程"""
@@ -2958,6 +2962,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             11: lambda: self._schedule_after(0, self.open_decision_flow_panel),
             12: lambda: self._schedule_after(0, self.global_toggle_spatial_follow_hud),
             13: lambda: self._schedule_after(0, self.open_ats_panel),
+            14: lambda: self._schedule_after(0, self.toggle_multi_period_tester),
         }
         self._hotkey_callbacks = hotkey_callbacks
 
@@ -15504,14 +15509,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to open StandaloneMultiPeriodTester: {e}")
 
     def toggle_multi_period_tester(self):
-        """[NEW] 切换多周期联动策略筛选器的显示与隐藏"""
+        """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (对齐焦点判定机制)"""
         if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
-            if self._multi_period_tester_win.winfo_viewable():
-                self._multi_period_tester_win.withdraw()
-            else:
-                self._multi_period_tester_win.deiconify()
-                self._multi_period_tester_win.lift()
-                self._multi_period_tester_win.focus_force()
+            try:
+                # 若当前焦点在多周期窗口内且处于未隐藏状态，则将其隐藏 (withdraw)
+                if self._multi_period_tester_win.state() != "withdrawn" and self._multi_period_tester_win.focus_displayof() == self._multi_period_tester_win:
+                    self._multi_period_tester_win.withdraw()
+                else:
+                    self._multi_period_tester_win.deiconify()
+                    self._multi_period_tester_win.lift()
+                    self._multi_period_tester_win.focus_force()
+            except Exception:
+                # 异常容错处理
+                try:
+                    self._multi_period_tester_win.deiconify()
+                    self._multi_period_tester_win.lift()
+                    self._multi_period_tester_win.focus_force()
+                except Exception:
+                    pass
         else:
             self.open_multi_period_tester()
 

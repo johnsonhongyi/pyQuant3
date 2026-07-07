@@ -88,6 +88,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
         self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
         
+        self._is_closing = False
         self._last_selected_code = None
         self._link_after_id = None
         self.last_result_df = None
@@ -686,6 +687,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
     def _update_status(self, text):
         """线程安全的底部状态日志更新（由 after(0,...) 保证在主线程执行，不调用 update_idletasks）"""
+        if getattr(self, "_is_closing", False):
+            return
         self.status_var.set(text)
 
     # ── 缓存有效期常量 ──────────────────────────────────────────
@@ -794,6 +797,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             print(f"[MultiPeriodTester] _worker exception:\n{traceback.format_exc()}")
             
     def _show_results(self, df, elapsed, flat_df=None):
+        if getattr(self, "_is_closing", False):
+            return
         self._last_selected_code = None
         # 同步给 query_manager 完整的宽表数据，以支持在 history 弹窗里进行“测试”或“双击”统计
         if flat_df is None:
@@ -1192,16 +1197,57 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self._save_state()
 
     def on_close(self):
+        self._is_closing = True
         self._save_state()
         if getattr(self, "query_manager", None) is not None:
             try:
                 self.query_manager.save_search_history()
             except Exception as e:
                 print(f"Error saving query history on close: {e}")
-        if _parent_class == tk.Toplevel:
-            self.withdraw()
-        else:
+        
+        # 取消可能存在的 linkage 定时器
+        if getattr(self, "_link_after_id", None):
+            try:
+                self.after_cancel(self._link_after_id)
+            except Exception:
+                pass
+            self._link_after_id = None
+
+        # 清除板块概念详情窗口
+        if getattr(self, "detail_win", None) is not None:
+            try:
+                if self.detail_win.winfo_exists():
+                    self.detail_win.destroy()
+            except Exception:
+                pass
+            self.detail_win = None
+            self.txt_widget = None
+
+        # 清理多周期引擎中的 pandas 缓存与实例
+        if hasattr(self, "engine") and self.engine is not None:
+            try:
+                if hasattr(self.engine, "_period_dfs"):
+                    self.engine._period_dfs.clear()
+                if hasattr(self.engine, "_missing_periods"):
+                    self.engine._missing_periods.clear()
+            except Exception:
+                pass
+            self.engine = None
+
+        # 显式释放大 DataFrame 内存
+        self.top_now = None
+        self.last_result_df = None
+        self._last_flat_df = None
+
+        # 彻底销毁窗口，不管是 tk.Tk 还是 tk.Toplevel
+        try:
             self.destroy()
+        except Exception:
+            pass
+
+        # 强力触发垃圾回收
+        import gc
+        gc.collect()
 
     def show_help_documentation(self):
         """打开/显示系统多周期与信号指标使用说明文档，实时加载本地文件以支持动态互动更新，带搜索及编辑保存能力"""
@@ -1336,7 +1382,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             pass
         finally:
             try:
-                if self.winfo_exists():
+                if self.winfo_exists() and not getattr(self, "_is_closing", False):
                     self.after(500, self._poll_favorites_loop)
             except Exception:
                 pass

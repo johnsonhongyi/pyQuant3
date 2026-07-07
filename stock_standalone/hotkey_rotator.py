@@ -561,6 +561,7 @@ class HotkeyListener(threading.Thread):
             11: (win32con.MOD_ALT, 0x4A, "Alt+J [决策流水 (成交与决策分析看板)]"),  # J
             12: (win32con.MOD_ALT, 0x55, "Alt+U [突破跟单 (隐藏/显示跟单指挥所 HUD)]"),  # U
             13: (win32con.MOD_ALT, 0x50, "Alt+P [智能操盘 (隐藏/显示ATS自治交易终端)]"),  # P
+            14: (win32con.MOD_ALT, 0x4E, "Alt+N [多周期筛选 (隐藏/显示多周期联动策略筛选器)]"),  # N
         }
         self.registered_ids = []
 
