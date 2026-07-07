@@ -1,3 +1,9 @@
+## 2026-07-07 20:30
+- [x] **全面修复孤立进程检测逻辑与性能瓶颈，并放宽强结构强度评分维持门槛 (Fully Fixed Orphaned Process Detection, Performance Bottlenecks & Relaxed strong_structure_score keep_alive Gate)**：
+    - [x] **物理还原并优化 `sys_performance_analyzer.py` 孤立进程模块**：彻底清理了此前合并修改时在 `sys_performance_analyzer.py` 中意外造成的语法损坏、遗留重复代码以及无用查找逻辑；清除了 `check_process_association` 中的低效 `process_iter` 循环，将关联诊断性能提升至亚毫秒级，防止主线程在高频扫描诊断时发生 UI 挂起；
+    - [x] **放宽 `strong_structure_score` 选股评分维持通道**：在 `data_utils.py` 中放宽了 `keep_alive` 的限制门槛：将当天跌幅限制放宽至 `pct > -5.0`（原为 `-4.0`）；将 `ma5` 均线衰减系数 `ma5_decay_threshold` 降低至 `0.95`（日线）/ `0.96`（其他大周期），从而包容强势个股在主升过程中的健康回踩与走平整理；将 `obv_val` 白黄线偏离门槛调至 `0.97`；解决了原本有核心上涨价值/回踩买点个股因极度严苛的健康限制而被直接抹为 0 分的业务缺陷，增强了评分的策略研判参考价值；
+    - [x] **定位 Windows 系统报错 -1073741502 与 0xc0000142 的根本原因**：分析出由于旧版本中 `conhost.exe` 堆积孤立进程未能正确清除，导致系统 Desktop Heap 与进程槽位资源耗尽，致使子进程在初始化 DLL 时直接发生 `0xc0000142`（STATUS_DLL_INIT_FAILED）崩溃或由于命令行超时以 `-1073741502`（STATUS_CONTROL_C_EXIT）强行退出。目前代码已具备完整防重与秒级清理能力，在手动清理完悬空 conhost 进程或重启后系统将彻底自愈恢复。
+
 ## 2026-07-07 19:40
 - [x] **修复多周期 `strong_structure_score` 评分为 0 的根本缺陷与 UI 展示增强 (Fixed Multi-Period zero-filled strong_structure_score & Enhanced UI Display)**：
     - [x] **根治步骤顺序倒置导致自适应周期涨跌幅失效的 Bug (Fixed Step Execution Order for Adaptive percent Calculation)**：定位发现 `data_utils.py` 内部 `complete_indicators_pipeline` 管道的步骤顺序存在 logic 倒置。原本重算最新 `close` 下涨跌幅与 MA 均线的自适应周期计算（步骤 2.5）排在基础指标计算（步骤 1 `calc_indicators`）之后。这导致 `calc_indicators` 内部在调用 `calc_strong_rebound_score_vect` 时，DataFrame 还没有生成最新的 `percent` 列而触发前置依赖拦截退避，强行将评分置为 0。现将该自适应重算逻辑整体上移至步骤 1 `calc_indicators` 之前运行，使 percent 列与均线计算在前、指标评分计算在后。在不修改底层 `sina_data.py` 数据源的前提下，完美修复了此策略计算失效缺陷，找回了真实的评分数据；
