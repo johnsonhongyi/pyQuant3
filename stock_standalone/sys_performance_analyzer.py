@@ -183,24 +183,23 @@ class PerformanceEngine:
                     # 1. 判定父进程是否死亡/失效
                     parent_dead = False
                     try:
-                        parent = p_obj.parent()
-                        if parent is None:
+                        ppid = p_obj.ppid()
+                        if ppid not in active_pids or ppid <= 0:
                             parent_dead = True
                         else:
                             try:
-                                # 尝试获取父进程属性以确保其活在系统中，并比对创建时间防PID复用
-                                _ = parent.name()
+                                parent = psutil.Process(ppid)
+                                # 尝试获取父进程创建时间以判断是否是 PID 被复用
                                 if parent.create_time() > p_obj.create_time():
                                     parent_dead = True
+                                else:
+                                    parent_dead = False
                             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                                 parent_dead = True
-                    except psutil.NoSuchProcess:
-                        parent_dead = True
-                    except psutil.AccessDenied:
-                        # 权限拒绝说明父进程是高权限进程（如系统服务），一般仍在运行
-                        parent_dead = False
+                            except psutil.AccessDenied:
+                                parent_dead = False
                     except Exception:
-                        parent_dead = False
+                        parent_dead = True
 
                     # 2. 只有当父进程明确死亡时，再检查是否符合孤立进程的特征
                     if parent_dead:
@@ -231,9 +230,12 @@ class PerformanceEngine:
                             if app_dir in cmd_lower or "instock_monitortk" in cmd_lower:
                                 is_associated = True
                         
-                        # 孤立判定：对于 conhost.exe 而言，只要父进程死亡且无可见窗口，则必定是孤立进程；
-                        # 对于其他嫌疑进程（如 python.exe/cmd.exe 等），还需要额外确认其与当前量化系统存在关联，以避免误杀其他无关的后台进程
-                        if is_suspect and (is_associated or name_lower == "conhost.exe") and not PerformanceEngine.has_visible_window(pid):
+                        # 孤立判定：
+                        # 1. 对于 conhost.exe 而言，只要父进程死亡，则必定是孤立进程；
+                        # 2. 对于其他嫌疑进程（如 python.exe/cmd.exe/git.exe 等），还需要确认其与当前量化系统存在关联且无可见窗口，以避免误杀其他无关 wechat/cmd 进程
+                        if name_lower == "conhost.exe":
+                            is_orphaned = True
+                        elif is_suspect and is_associated and not PerformanceEngine.has_visible_window(pid):
                             is_orphaned = True
 
                 # 记录明细数据
@@ -293,54 +295,36 @@ class PerformanceEngine:
             if not p_obj:
                 p_obj = psutil.Process(pid)
             
-            # 1. 查找当前环境中所有主程序 PID 候选
-            main_pids = []
-            for p in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    name_p = p.info['name'] or ""
-                    cmd_p = p.info['cmdline'] or []
-                    cmd_str = " ".join(cmd_p).lower()
-                    if "instock_monitortk" in name_p.lower() or "instock_monitortk" in cmd_str:
-                        main_pids.append(p.pid)
-                except Exception:
-                    continue
-            
-            # 当前运行进程及其父进程
+            # 1. 检查当前进程 PID 是否是当前运行的进程或其父进程
             try:
                 curr_pid = os.getpid()
-                main_pids.append(curr_pid)
+                if p_obj.pid == curr_pid:
+                    return True, f"当前分析器主进程 (PID: {p_obj.pid})"
+                
                 curr_proc = psutil.Process(curr_pid)
                 parent_proc = curr_proc.parent()
-                if parent_proc:
-                    main_pids.append(parent_proc.pid)
-            except Exception:
-                pass
-            main_pids = list(set(main_pids))
-
-            # 2. 如果 PID 本身就在主程序候选列表中
-            if p_obj.pid in main_pids:
-                return True, f"主程序或其直接父/子进程 (PID: {p_obj.pid})"
-
-            # 3. 检查是否为这些主程序进程的子孙进程
-            try:
-                curr_parent = p_obj.parent()
-                while curr_parent is not None:
-                    if curr_parent.pid in main_pids:
-                        return True, f"主程序派生的子孙进程 (父 PID: {curr_parent.pid})"
-                    curr_parent = curr_parent.parent()
+                if parent_proc and p_obj.pid == parent_proc.pid:
+                    return True, f"主程序/启动父进程 (PID: {p_obj.pid})"
             except Exception:
                 pass
 
-            # 4. 检查物理目录关联
+            # 2. 检查物理目录关联
             app_dir = os.path.dirname(os.path.abspath(__file__)).lower()
             try:
                 exe = p_obj.exe().lower()
                 if app_dir in exe:
-                    return True, "运行程序位于主程序物理工作空间下"
+                    return True, "运行程序位于主程序工作空间目录下"
             except Exception:
                 pass
 
-            # 5. 检查命令行关键字关联
+            try:
+                cwd = p_obj.cwd().lower()
+                if app_dir in cwd:
+                    return True, "工作目录位于主程序工作空间下"
+            except Exception:
+                pass
+
+            # 3. 检查命令行关键字关联
             if not cmdline:
                 try:
                     cmdline = " ".join(p_obj.cmdline())

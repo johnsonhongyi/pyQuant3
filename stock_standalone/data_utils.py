@@ -428,15 +428,23 @@ def complete_indicators_pipeline(
     import numpy as np
     valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
     if valid_mask.any():
-        # 确定参考昨收列：在大周期(resample != 'd')中，未平移前 lastp1d 代表本周期未收盘的数据，真正的上期收盘昨收存放在 lastp2d
-        ref_lastp_col = 'lastp2d' if (resample != 'd' and 'lastp2d' in top_all.columns) else 'lastp1d'
-        
-        if ref_lastp_col in top_all.columns:
+
+        if 'lastp1d' in top_all.columns:
             raw_pct = (
-                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, ref_lastp_col]
-            ) / top_all.loc[valid_mask, ref_lastp_col].replace(0, np.nan) * 100
+                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
+            ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
             top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
             top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
+
+        # # 确定参考昨收列：在大周期(resample != 'd')中，未平移前 lastp1d 代表本周期未收盘的数据，真正的上期收盘昨收存放在 lastp2d
+        # ref_lastp_col = 'lastp2d' if (resample != 'd' and 'lastp2d' in top_all.columns) else 'lastp1d'
+        
+        # if ref_lastp_col in top_all.columns:
+        #     raw_pct = (
+        #         top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, ref_lastp_col]
+        #     ) / top_all.loc[valid_mask, ref_lastp_col].replace(0, np.nan) * 100
+        #     top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
+        #     top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
         
         # 计算 MA5
         ma5_cols = ['close'] + [f'lastp{i}d' for i in range(1, 5)]
@@ -786,17 +794,18 @@ def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series
     # 生命健康周期维持校验 (当天不能大跌，且股价不能大幅破位)
     # 使用今日的参考均线
     ma_ref_today = ma20 if resample == 'd' else ma5
-    keep_alive = (close >= ma_ref_today * 0.965) & (pct > -4.0)
+    keep_alive = (close >= ma_ref_today * 0.965) & (pct > -5.0)
     if resample == 'd' and 'ma60d' in df.columns:
         keep_alive = keep_alive & (close > df['ma60d'].fillna(0).values * 0.965)
 
-    # ma5d 的主升结构：ma5d 不能处于大跌趋势中
-    ma5_rising = ma5 >= ma5_last1 * 0.995
+    # ma5d 的主升结构：ma5d 不能处于严重大跌趋势中 (允许正常的波动与回踩)
+    ma5_decay_threshold = 0.95 if resample == 'd' else 0.96
+    ma5_rising = ma5 >= ma5_last1 * ma5_decay_threshold
     keep_alive = keep_alive & ma5_rising
 
-    # OBV 约束：白线必须在黄线之上运行
+    # OBV 约束：白线在黄线附近或之上运行
     if 'obv_val' in df.columns and 'maobv' in df.columns:
-        keep_alive = keep_alive & (df['obv_val'].fillna(0).values >= df['maobv'].fillna(0).values * 0.99)
+        keep_alive = keep_alive & (df['obv_val'].fillna(0).values >= df['maobv'].fillna(0).values * 0.97)
 
     final_score = np.zeros(n_rows, dtype=float)
     
@@ -811,6 +820,7 @@ def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series
             pct_d = pct
             
             ma5_d = ma5
+            ma10_d = df['ma10d'].fillna(0).values if 'ma10d' in df.columns else ma5
             ma20_d = ma20
             ma60_d = df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
             
@@ -827,6 +837,7 @@ def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series
             pct_d = df[f'per{d}d'].fillna(0).values if f'per{d}d' in df.columns else pct
             
             ma5_d = get_ma_shift(5, d)
+            ma10_d = get_ma_shift(10, d)
             ma20_d = get_ma_shift(20, d)
             ma60_d = get_ma_shift(60, d)
             
@@ -873,7 +884,12 @@ def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series
         # 评估第 d 天的阳线和反包启动条件
         is_yang_d = (c_d > o_d) & (pct_d > 0.5)
         
-        eligible_d = trend_ok_d & pullback_ok_d & is_yang_d & td_ok_d
+        # 强势上升通道/突破：价格在5日线之上，且5日线呈向上趋势，且价格在20日线之上，且当天收阳上涨
+        # 这样即使没有回踩或九转触发，也能识别并给予客观评分
+        strong_up_d = (c_d > ma5_d * 0.99) & (ma5_d > ma5_d_last1 * 0.998) & (c_d > ma20_d * 1.0)
+        breakout_ok_d = strong_up_d
+        
+        eligible_d = (trend_ok_d & pullback_ok_d & is_yang_d & td_ok_d) | (trend_ok_d & breakout_ok_d & is_yang_d)
         
         # 提取第 d 天的 OBV 和量能指标
         if 'obv_val' in df.columns and 'maobv' in df.columns:
@@ -934,12 +950,17 @@ def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series
         engulf_body_d = c_d > body_high_d1
         score_d[eligible_d] += np.where(engulf_high_d[eligible_d], 10.0, np.where(engulf_body_d[eligible_d], 5.0, 0.0))
         
-        # D. 结构时效加分
+        # D. 结构时效与趋势加分
         td_val_eligible = td_val_d[eligible_d] if d > 0 else td_setup[eligible_d]
         bonus_td = np.zeros_like(td_val_eligible, dtype=float)
         bonus_td[(td_val_eligible == 1) | (td_val_eligible == -1)] = 15.0
         bonus_td[(td_val_eligible == 2) | (td_val_eligible == -2)] = 10.0
         bonus_td[(td_val_eligible == -8) | (td_val_eligible == -9)] = 5.0
+        
+        # 对于突破/强势上升个股，如果其 td 计数不在特定反弹位，也应给予客观的趋势分保护 (不为0)
+        is_breakout_case = breakout_ok_d[eligible_d]
+        bonus_td[is_breakout_case] = np.maximum(bonus_td[is_breakout_case], 10.0)
+        
         score_d[eligible_d] += bonus_td
 
         
