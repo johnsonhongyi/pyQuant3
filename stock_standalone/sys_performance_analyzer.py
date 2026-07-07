@@ -170,6 +170,7 @@ class PerformanceEngine:
                     cpu_pct = 0.0
 
                 is_orphaned = False
+                is_associated = False
                 cmdline = ""
                 
                 # 仅在启用孤立检测时，执行高成本的父进程与可见窗口判断
@@ -230,9 +231,9 @@ class PerformanceEngine:
                             if app_dir in cmd_lower or "instock_monitortk" in cmd_lower:
                                 is_associated = True
                         
-                        # 孤立判定：必须是嫌疑类型（conhost/python等）且明确与当前主程序/工作区存在关联的进程
-                        # 且在 Windows 下没有任何可见的 GUI 窗口（若有可见窗口，说明是正常运行的交互主程序，非孤立残留）
-                        if is_suspect and is_associated and not PerformanceEngine.has_visible_window(pid):
+                        # 孤立判定：对于 conhost.exe 而言，只要父进程死亡且无可见窗口，则必定是孤立进程；
+                        # 对于其他嫌疑进程（如 python.exe/cmd.exe 等），还需要额外确认其与当前量化系统存在关联，以避免误杀其他无关的后台进程
+                        if is_suspect and (is_associated or name_lower == "conhost.exe") and not PerformanceEngine.has_visible_window(pid):
                             is_orphaned = True
 
                 # 记录明细数据
@@ -245,6 +246,7 @@ class PerformanceEngine:
                     "status": status,
                     "path": exe_path,
                     "is_orphaned": is_orphaned,
+                    "is_associated": is_associated,
                     "cmdline": cmdline
                 })
 
@@ -548,94 +550,18 @@ class PerformanceEngine:
                 "desc": f"微信相关进程当前累计占用内存达 {weixin_total_rss/1024:.2f} GB！强烈建议执行上方的一键优化引擎，彻底清理 WeChatAppEx 小程序，以释放这 100+ 线程及内存空间。"
             })
 
-        # 5. 孤立/残留进程分析 (支持所有孤立进程及主进程关联检测)
+        # 5. 孤立/残留进程分析 (直接复用后台线程的扫描结果，彻底消除主线程二次 psutil.process_iter() 与 Process 重复查询造成的性能阻塞)
         all_orphaned_procs = []
         high_cpu_orphaned_procs = []
         associated_orphaned_procs = []
 
-        # 获取当前主程序 PID 候选
-        main_pids = []
-        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                name_p = p.info['name'] or ""
-                cmd_p = p.info['cmdline'] or []
-                cmd_str = " ".join(cmd_p).lower()
-                if "instock_monitortk" in name_p.lower() or "instock_monitortk" in cmd_str:
-                    main_pids.append(p.pid)
-            except Exception:
-                continue
-        try:
-            curr_pid = os.getpid()
-            main_pids.append(curr_pid)
-            curr_proc = psutil.Process(curr_pid)
-            parent_proc = curr_proc.parent()
-            if parent_proc:
-                main_pids.append(parent_proc.pid)
-        except Exception:
-            pass
-        main_pids = list(set(main_pids))
-
-        app_dir = os.path.dirname(os.path.abspath(__file__)).lower()
-
         for r in raw_list:
             if r.get("is_orphaned", False):
-                pid = r["pid"]
-                cpu_pct = r.get("cpu_pct", 0.0)
-                name = r["name"]
-
-                # 二次验证父进程存活/有效性
-                parent_exists = True
-                try:
-                    p = psutil.Process(pid)
-                    parent = p.parent()
-                    if parent is None:
-                        parent_exists = False
-                    elif parent.create_time() > p.create_time():
-                        parent_exists = False
-                except Exception:
-                    parent_exists = False
-
-                if not parent_exists:
-                    # 检查是否关联主程序
-                    is_associated = False
-                    try:
-                        p = psutil.Process(pid)
-                        curr_parent = p.parent()
-                        while curr_parent is not None:
-                            if curr_parent.pid in main_pids:
-                                is_associated = True
-                                break
-                            curr_parent = curr_parent.parent()
-                    except Exception:
-                        pass
-
-                    if not is_associated:
-                        try:
-                            exe = p.exe().lower()
-                            if app_dir in exe:
-                                is_associated = True
-                        except Exception:
-                            pass
-
-                    if not is_associated:
-                        try:
-                            cwd = p.cwd().lower()
-                            if app_dir in cwd:
-                                is_associated = True
-                        except Exception:
-                            pass
-
-                    if not is_associated:
-                        cmdline_str = r.get("cmdline", "").lower()
-                        if app_dir in cmdline_str or "instock_monitortk" in cmdline_str:
-                            is_associated = True
-
-                    r["is_associated"] = is_associated
-                    all_orphaned_procs.append(r)
-                    if cpu_pct > 0.5:
-                        high_cpu_orphaned_procs.append(r)
-                    if is_associated:
-                        associated_orphaned_procs.append(r)
+                all_orphaned_procs.append(r)
+                if r.get("cpu_pct", 0.0) > 0.5:
+                    high_cpu_orphaned_procs.append(r)
+                if r.get("is_associated", False):
+                    associated_orphaned_procs.append(r)
 
         if all_orphaned_procs:
             count = len(all_orphaned_procs)
