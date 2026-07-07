@@ -5,7 +5,7 @@ Assembles the complete Autonomous Trading System UI dashboard.
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
@@ -352,6 +352,12 @@ class ATSMainWindow(QMainWindow):
         self.prices_failed_codes = set()
         self._is_closing = False
         
+        # Initialize ratios for equal proportional scaling
+        self._main_ratio = [0.24, 0.49, 0.27]
+        self._center_ratio = [0.5, 0.5]
+        self._right_ratio = [0.5, 0.5]
+        self._is_restoring_sizes = False
+        
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
         self.realtime_signal_signal.connect(self._handle_realtime_signal)
@@ -449,6 +455,27 @@ class ATSMainWindow(QMainWindow):
         btn_font_inc.clicked.connect(self.increase_font_size)
         toolbar.addWidget(btn_font_inc)
 
+        toolbar.addSeparator()
+        
+        lbl_link = QLabel(" 联动:")
+        lbl_link.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        toolbar.addWidget(lbl_link)
+        
+        self.cb_tdx = QCheckBox("TDX")
+        self.cb_tdx.setChecked(True)
+        self.cb_tdx.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        toolbar.addWidget(self.cb_tdx)
+        
+        self.cb_ths = QCheckBox("THS")
+        self.cb_ths.setChecked(True)
+        self.cb_ths.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        toolbar.addWidget(self.cb_ths)
+        
+        self.cb_vis = QCheckBox("VIS")
+        self.cb_vis.setChecked(True)
+        self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        toolbar.addWidget(self.cb_vis)
+
     def _init_ui(self):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
@@ -520,7 +547,27 @@ class ATSMainWindow(QMainWindow):
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 3)
         self.main_splitter.setStretchFactor(2, 2)
+        
+        # Enforce non-collapsible panels to prevent UI collapse to 0 size
+        self.main_splitter.setCollapsible(0, False)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setCollapsible(2, False)
+        self.center_splitter.setCollapsible(0, False)
+        self.center_splitter.setCollapsible(1, False)
+        self.right_splitter.setCollapsible(0, False)
+        self.right_splitter.setCollapsible(1, False)
+        
         self.main_splitter.setSizes([350, 700, 390])
+        
+        # Bind splitterMoved signals to track user-adjusted resize ratios
+        self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
+        self.center_splitter.splitterMoved.connect(self._on_center_splitter_moved)
+        self.right_splitter.splitterMoved.connect(self._on_right_splitter_moved)
+        
+        # Compute initial ratios
+        self._main_ratio = [350/1440, 700/1440, 390/1440]
+        self._center_ratio = [0.5, 0.5]
+        self._right_ratio = [0.5, 0.5]
 
         # Connect internal signal linkages
         # 1. 单击事件 -> 联动外部同花顺/通达信及可视化器 (link_stock)
@@ -569,27 +616,32 @@ class ATSMainWindow(QMainWindow):
         code_clean = str(code).strip()
         self.status_bar.showMessage(f"🔗 [联动] 推送股票 {code_clean} {name} (已同步可视化及外部交易终端)")
         
-        # 1. 异步向 26668 发送切换个股 socket 指令
-        import socket
-        import threading
-        
-        def send_switch():
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.1) # 极低超时，不阻塞 UI
-                    s.connect(('127.0.0.1', 26668))
-                    s.sendall(f"CODE|{code_clean}".encode("utf-8"))
-            except Exception:
-                pass # 可视化器可能未启动，静默失败即可
-                
-        threading.Thread(target=send_switch, daemon=True).start()
+        # 1. 异步向 26668 发送切换个股 socket 指令 (VIS 联动)
+        if hasattr(self, 'cb_vis') and self.cb_vis.isChecked():
+            import socket
+            import threading
+            
+            def send_switch():
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1) # 极低超时，不阻塞 UI
+                        s.connect(('127.0.0.1', 26668))
+                        s.sendall(f"CODE|{code_clean}".encode("utf-8"))
+                except Exception:
+                    pass # 可视化器可能未启动，静默失败即可
+                    
+            threading.Thread(target=send_switch, daemon=True).start()
 
         # 2. 向独立联动进程投递物理联动任务 (TDX/THS 物理联动机能)
-        try:
-            from linkage_service import get_link_manager
-            get_link_manager().push(code_clean, auto=False)
-        except Exception as e:
-            print(f"[Linkage] External linkage failed: {e}")
+        is_tdx = self.cb_tdx.isChecked() if hasattr(self, 'cb_tdx') else True
+        is_ths = self.cb_ths.isChecked() if hasattr(self, 'cb_ths') else True
+        if is_tdx or is_ths:
+            try:
+                from linkage_service import get_link_manager
+                flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
+                get_link_manager().push(code_clean, flags=flags, auto=False)
+            except Exception as e:
+                print(f"[Linkage] External linkage failed: {e}")
 
     def on_stock_clicked(self, code, name, context_info=None):
         self.status_bar.showMessage(f"双击详情: {code} {name}")
@@ -1110,8 +1162,25 @@ class ATSMainWindow(QMainWindow):
                 pcts = self.current_df['percent'].dropna()
                 bins = [-999, -8, -6, -4, -2, 0, 2, 4, 6, 8, 999]
                 counts = pd.cut(pcts, bins=bins).value_counts().sort_index().tolist()
+                
+                # 计算统计数据以更新市场温度与家数
+                up_count = int((pcts > 0).sum())
+                down_count = int((pcts < 0).sum())
+                flat_count = int((pcts == 0).sum())
+                total_count = up_count + down_count + flat_count
+                avg_pct = float(pcts.mean()) if total_count > 0 else 0.0
+                market_temp = (up_count / total_count * 100.0) if total_count > 0 else 0.0
+                
+                stats_dict = {
+                    "up": up_count,
+                    "down": down_count,
+                    "flat": flat_count,
+                    "avg": avg_pct,
+                    "temp": market_temp
+                }
+                
                 if len(counts) == 10:
-                    self.dist_chart.update_data(counts)
+                    self.dist_chart.update_data(counts, stats_dict)
             
             self.refresh_realtime_ui()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
@@ -1396,6 +1465,9 @@ class ATSMainWindow(QMainWindow):
             ))
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
+            
+        if hasattr(self, 'heatmap_widget'):
+            self.heatmap_widget.load_live_sectors()
 
     def _handle_realtime_signal(self, signal):
         if not signal:
@@ -1476,6 +1548,71 @@ class ATSMainWindow(QMainWindow):
             self.save_font_size(self.current_font_size)
             self.apply_qss_with_font_size(self.current_font_size)
 
+    def _on_main_splitter_moved(self, pos, index):
+        if getattr(self, '_is_restoring_sizes', False):
+            return
+        sizes = self.main_splitter.sizes()
+        total = sum(sizes)
+        if total > 0:
+            self._main_ratio = [s / total for s in sizes]
+
+    def _on_center_splitter_moved(self, pos, index):
+        if getattr(self, '_is_restoring_sizes', False):
+            return
+        sizes = self.center_splitter.sizes()
+        total = sum(sizes)
+        if total > 0:
+            self._center_ratio = [s / total for s in sizes]
+
+    def _on_right_splitter_moved(self, pos, index):
+        if getattr(self, '_is_restoring_sizes', False):
+            return
+        sizes = self.right_splitter.sizes()
+        total = sum(sizes)
+        if total > 0:
+            self._right_ratio = [s / total for s in sizes]
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_splitter_sizes_by_ratio()
+
+    def _adjust_splitter_sizes_by_ratio(self):
+        self._is_restoring_sizes = True
+        try:
+            # Adjust main horizontal splitter
+            main_width = self.main_splitter.width()
+            handle_count = self.main_splitter.count() - 1
+            handle_width = self.main_splitter.handleWidth()
+            available_width = main_width - (handle_count * handle_width)
+            if available_width > 0:
+                new_sizes = [int(available_width * r) for r in self._main_ratio]
+                new_sizes[-1] = available_width - sum(new_sizes[:-1])
+                self.main_splitter.setSizes(new_sizes)
+
+            # Adjust center vertical splitter
+            center_height = self.center_splitter.height()
+            handle_count = self.center_splitter.count() - 1
+            handle_width = self.center_splitter.handleWidth()
+            available_height = center_height - (handle_count * handle_width)
+            if available_height > 0:
+                new_sizes = [int(available_height * r) for r in self._center_ratio]
+                new_sizes[-1] = available_height - sum(new_sizes[:-1])
+                self.center_splitter.setSizes(new_sizes)
+
+            # Adjust right vertical splitter
+            right_height = self.right_splitter.height()
+            handle_count = self.right_splitter.count() - 1
+            handle_width = self.right_splitter.handleWidth()
+            available_height = right_height - (handle_count * handle_width)
+            if available_height > 0:
+                new_sizes = [int(available_height * r) for r in self._right_ratio]
+                new_sizes[-1] = available_height - sum(new_sizes[:-1])
+                self.right_splitter.setSizes(new_sizes)
+        except Exception as e:
+            print(f"[ATSMainWindow] Error adjusting splitter sizes: {e}")
+        finally:
+            self._is_restoring_sizes = False
+
     def _restore_layout_state(self):
         try:
             import json
@@ -1496,18 +1633,31 @@ class ATSMainWindow(QMainWindow):
                 self.restoreGeometry(QByteArray.fromHex(geom_hex.encode()))
                 
             # 2. Restore splitters
-            if hasattr(self, 'main_splitter'):
-                main_sizes = data.get("ats_main_splitter_sizes")
-                if main_sizes:
-                    self.main_splitter.setSizes(main_sizes)
-            if hasattr(self, 'center_splitter'):
-                center_sizes = data.get("ats_center_splitter_sizes")
-                if center_sizes:
-                    self.center_splitter.setSizes(center_sizes)
-            if hasattr(self, 'right_splitter'):
-                right_sizes = data.get("ats_right_splitter_sizes")
-                if right_sizes:
-                    self.right_splitter.setSizes(right_sizes)
+            self._is_restoring_sizes = True
+            try:
+                if hasattr(self, 'main_splitter'):
+                    main_sizes = data.get("ats_main_splitter_sizes")
+                    if main_sizes:
+                        self.main_splitter.setSizes(main_sizes)
+                        total = sum(main_sizes)
+                        if total > 0:
+                            self._main_ratio = [s / total for s in main_sizes]
+                if hasattr(self, 'center_splitter'):
+                    center_sizes = data.get("ats_center_splitter_sizes")
+                    if center_sizes:
+                        self.center_splitter.setSizes(center_sizes)
+                        total = sum(center_sizes)
+                        if total > 0:
+                            self._center_ratio = [s / total for s in center_sizes]
+                if hasattr(self, 'right_splitter'):
+                    right_sizes = data.get("ats_right_splitter_sizes")
+                    if right_sizes:
+                        self.right_splitter.setSizes(right_sizes)
+                        total = sum(right_sizes)
+                        if total > 0:
+                            self._right_ratio = [s / total for s in right_sizes]
+            finally:
+                self._is_restoring_sizes = False
             
             # 3. Restore tabs active indexes
             if hasattr(self, 'center_tabs'):
@@ -1518,6 +1668,20 @@ class ATSMainWindow(QMainWindow):
                 right_index = data.get("ats_right_tabs_index")
                 if right_index is not None:
                     self.right_tabs.setCurrentIndex(int(right_index))
+                    
+            # 4. Restore link checkboxes
+            if hasattr(self, 'cb_tdx'):
+                tdx_link = data.get("ats_link_tdx")
+                if tdx_link is not None:
+                    self.cb_tdx.setChecked(bool(tdx_link))
+            if hasattr(self, 'cb_ths'):
+                ths_link = data.get("ats_link_ths")
+                if ths_link is not None:
+                    self.cb_ths.setChecked(bool(ths_link))
+            if hasattr(self, 'cb_vis'):
+                vis_link = data.get("ats_link_vis")
+                if vis_link is not None:
+                    self.cb_vis.setChecked(bool(vis_link))
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
 
@@ -1554,6 +1718,14 @@ class ATSMainWindow(QMainWindow):
                     data["ats_center_tabs_index"] = self.center_tabs.currentIndex()
                 if hasattr(self, 'right_tabs'):
                     data["ats_right_tabs_index"] = self.right_tabs.currentIndex()
+                    
+                # Save link checkboxes
+                if hasattr(self, 'cb_tdx'):
+                    data["ats_link_tdx"] = self.cb_tdx.isChecked()
+                if hasattr(self, 'cb_ths'):
+                    data["ats_link_ths"] = self.cb_ths.isChecked()
+                if hasattr(self, 'cb_vis'):
+                    data["ats_link_vis"] = self.cb_vis.isChecked()
                 
                 temp_dir = os.path.dirname(config_path) or "."
                 fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)

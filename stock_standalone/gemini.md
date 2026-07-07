@@ -1,3 +1,23 @@
+## 2026-07-07 10:45
+- [x] **实现 ATS 联动勾选状态自动持久化与 QSplitter 全局等比例缩放 (ATS Linkage Checkbox Persistence & Proportional Layout Scaling)**：
+    - [x] **实现联动勾选框状态跨会话自动读写 (Cross-session Checkbox Persistence)**：在 `_save_layout_state` 与 `_restore_layout_state` 中集成了对顶栏 `cb_tdx` (通达信)、`cb_ths` (同花顺)、`cb_vis` (K线可视化) 三个复选框勾选状态的保存与自动恢复，使联动配置完美持久化写入 `window_config.json`，消除了重启重置的痛点。
+    - [x] **实现窗口无损等比例缩放与 QSplitter 限制防折叠 (Proportional Scaling & Non-collapsible Splitter Guard)**：
+        - 为主界面的 `main_splitter` (横向)、`center_splitter` (纵向) 和 `right_splitter` (纵向) 所有子面板强制执行 `setCollapsible(i, False)` 防折叠设定，彻底防止了当窗口被极度收缩时某块区域直接塌陷为 0 像素宽高的缺陷；
+        - 初始化并维护 `self._main_ratio`、`self._center_ratio` 与 `self._right_ratio` 分割比率变量。重载了 `resizeEvent` 方法，在窗口大小拉伸或缩小时，实时获取当前 Splitter 物理总长宽，扣除 handle 占用的物理像素后，按原比例自适应动态调配重算 `sizes()`，达成真正的全局无损等比例缩放；
+        - 绑定了三个 Splitter 的 `splitterMoved` 信号。当用户在界面上手动拖拽改变分割栏位置时，在 `_on_splitter_moved` 槽函数中实时计算新的无量纲分割比例并缓存，使后续的放大/缩小在此基础上继续以新分割比例等比自适应拉伸。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `main_window.py` 执行了校验，100% 成功编译。
+
+## 2026-07-07 02:40
+- [x] **优化 ATS 联动选择控制、板块热力图 24x7 缓存加载漏洞与市场分布自动更新 (Optimized ATS Linkage Checks, 24x7 Heatmap Cache Loading & Market Distribution Auto-Updates)**：
+    - [x] **ATS 顶部集成 VIS, TDX, THS 独立联动选择勾选框 (Integrated VIS/TDX/THS Linkage Controls)**：在主界面顶栏合并添加了 "TDX"、"THS"、"VIS" 三个勾选框。重构了个股双击 `link_stock` 触发逻辑，让这三个复选框真正控制对应的联动子模块（如 VIS 复选框控制是否发起 TCP 26668 的行情可视化联动，TDX/THS 勾选框控制是否分发给物理联动服务），实现高灵活度联动切换。
+    - [x] **根治右侧行业板块热力图 24x7 跨天运行不更新 Bug (Fixed 24x7 Heatmap Update Lag)**：修复了 `heatmap_widget.py` 中 `load_live_sectors` 加载数据路径的逻辑漏洞。原代码在 logs 目录下存在历史压缩备份文件时，其 `fpath` 永不为空，导致 24x7 运行下系统永远读取昨天的备份而忽略实时的 `v_reversal_pool.json`。现重构为优先读取并验证 ramdisk 内存盘中的实时 JSON，不存在时才退避至 logs 下的备份 json 或 json.gz 归档。
+    - [x] **实现板块热力图心跳同步与 force 刷新支持 (Heatmap Sync and Force Refresh)**：在主窗口 `refresh_realtime_ui` 的行情更新回调中补充了板块热力图的同步刷新，并在 `load_live_sectors` 中增加了 `force=False` 控制参数，提升界面展现的时效性。
+    - [x] **实现底栏全市场分布图的数据更新、温度统计与 Tooltip 浮窗提示 (Market Distribution Stats, Temperature Label & Hover Tooltips)**：
+        - 升级了 `DistributionBarChart`，在图表正下方嵌入 `stats_label` 以直观展现上涨、下跌、平盘只数、均幅以及全市场温度（上涨家数占比）；
+        - 在 `main_window.py` 行情分发时增加了市场情绪多维矢量化统计计算，跟随数据更新周期向直方图同步灌入并实时刷新；
+        - 为直方图绑定 `sigMouseMoved` 信号，在鼠标 Hover 悬停在柱子上方时调用 `QToolTip` 浮窗精准提示该柱子的具体涨幅区间、股票只数以及全市场占比。
+    - [x] **物理语法编译自检全绿通过**：使用 `py_compile` 对修改后的 `main_window.py`、`chart_widgets.py` 以及 `heatmap_widget.py` 均执行了校验，100% 成功编译。
+
 ## 2026-07-06 11:00
 - [x] **修复 `异动联动.py` 窗口配置文件 `window_config.json` 编码加载 Bug (Fixed UnicodeDecodeError in window_config.json)**：
     - [x] **物理修复 `load_window_positions` 读取健壮性**：将对 `CONFIG_FILE`（`window_config.json`）的 `open` 动作统一修改为指定 `encoding="utf-8"`。引入分层备用解码机制（首先尝试 `utf-8`，若捕获 `UnicodeDecodeError` 或 `JSONDecodeError` 则退避尝试以 `gbk` 解码），若两者均解码失败则安全捕获异常，回退至初始化空状态字典，杜绝了由于 Windows 系统默认 locale 编码（GBK）导致的读取崩溃，实现了 100% 的容错性加载。
