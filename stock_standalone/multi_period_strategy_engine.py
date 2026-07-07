@@ -12,6 +12,7 @@ class MultiPeriodStrategyEngine:
     def __init__(self):
         self._period_dfs: Dict[str, pd.DataFrame] = {}
         self._strategies: List[dict] = []
+        self._missing_periods: Dict[str, str] = {}  # period -> 缺失原因
         self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
         
@@ -26,21 +27,32 @@ class MultiPeriodStrategyEngine:
             logger.info(f"Reusing cached data for period {period}...")
             return self._period_dfs[period]
             
+        # 首次加载时清除对应周期的缺失标记
+        self._missing_periods.pop(period, None)
+        
         # 默认取 60 个 k 线，大周期可以多取
         dl = ct.Resample_LABELS_Days.get(period, 60)
         try:
             logger.info(f"Loading data for period {period}...")
             
             # 兼容 45d 和 3M 的 resample
-            df, _ = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period)
+            # readonly=True: 只读 h5 缓存，不允许触发 TDX 重建写入，防止全零数据覆盖 d/2d 表
+            df, _ = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period, readonly=True)
             
             # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
             from data_utils import complete_indicators_pipeline
             if df is not None and not df.empty:
                 df = complete_indicators_pipeline(df, logger, resample=period)
                 self._period_dfs[period] = df
-            return df
+                return df
+            else:
+                # h5 缓存不存在，标记为缺失
+                reason = f"h5缓存不存在(只读模式)"
+                self._missing_periods[period] = reason
+                logger.warning(f"[READONLY] Period [{period}] data unavailable: {reason}")
+                return pd.DataFrame()
         except Exception as e:
+            self._missing_periods[period] = str(e)
             logger.error(f"Failed to load period {period}: {e}")
             return pd.DataFrame()
             
@@ -56,10 +68,20 @@ class MultiPeriodStrategyEngine:
         cross_mode = strategy_config.get('cross_mode', 'intersection')
         self.last_stats = {
             "periods": {},
+            "missing": dict(self._missing_periods),  # 快zhao缺失周期快照
             "final": {"total": 0, "pass": 0, "ratio": 0.0, "mode": cross_mode}
         }
         
         for period in active_periods:
+            if period in self._missing_periods:
+                # 缺失数据的周期：自适应跳过过滤，但在 stats 中记录
+                self.last_stats["periods"][period] = {
+                    "total": 0, "pass": 0, "ratio": 0.0,
+                    "status": "NO_DATA",
+                    "reason": self._missing_periods[period]
+                }
+                logger.warning(f"[ADAPTIVE] Period [{period}] has no data (reason: {self._missing_periods[period]}), skipping filter for this period.")
+                continue
             if period not in self._period_dfs or self._period_dfs[period].empty:
                 logger.warning(f"Period {period} data not found or empty.")
                 continue

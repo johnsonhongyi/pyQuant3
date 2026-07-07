@@ -775,6 +775,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                     self.engine._period_dfs.pop(period, None)
                     self.engine.load_period_data(period, self.top_now)
                     self._period_cache_ts[period] = time.time()
+                    # 检查加载后是否为缺失周期，及时给用户提示
+                    if period in self.engine._missing_periods:
+                        reason = self.engine._missing_periods[period]
+                        self.after(0, self._update_status,
+                                   f"⚠️ [{period}] 数据不可用({reason})，策略将自适应跳过此周期过滤")
 
             self.after(0, self._update_status, "🔍 正在执行跨周期交叉验证...")
             result_df = self.engine.evaluate_strategy(strat_config, active_periods)
@@ -1107,29 +1112,30 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
     def _update_stats_ui(self):
         stats = getattr(self.engine, "last_stats", None)
         if not stats or not stats.get("periods"):
-            self.stats_lbl_periods.config(text="【单周期通过率】暂无数据")
-            self.stats_lbl_final.config(text="【最终筛选结果】暂无数据")
+            self.stats_lbl_periods.config(text="暂无数据")
+            self.stats_lbl_final.config(text="")
             return
-            
-        period_strs = []
-        for period in self.engine.SUPPORTED_PERIODS:
-            if period in stats["periods"]:
-                pdata = stats["periods"][period]
-                total = pdata["total"]
-                p_pass = pdata["pass"]
-                ratio = pdata["ratio"]
-                period_strs.append(f"{period}: {p_pass}/{total}({ratio:.2f}%)")
-                
-        if period_strs:
-            self.stats_lbl_periods.config(text="【单周期通过率】 " + "  |  ".join(period_strs))
-        else:
-            self.stats_lbl_periods.config(text="【单周期通过率】暂无数据")
-            
+
+        parts = []
+        missing = []
+        for p in self.engine.SUPPORTED_PERIODS:
+            if p not in stats["periods"]:
+                continue
+            d = stats["periods"][p]
+            if d.get("status") == "NO_DATA":
+                parts.append(f"⚠️{p}")
+                missing.append(p)
+            else:
+                parts.append(f"{p}:{d['pass']}/{d['total']}")
+
+        self.stats_lbl_periods.config(text="  ".join(parts) if parts else "")
+
         final = stats["final"]
-        mode_str = "交集" if final["mode"] == "intersection" else "并集"
-        self.stats_lbl_final.config(
-            text=f"【最终筛选结果 ({mode_str})】 共 {final['pass']} 只 / 市场 {final['total']} 只 ({final['ratio']:.3f}%)"
-        )
+        mode = "∩" if final["mode"] == "intersection" else "∪"
+        txt = f"{mode} {final['pass']}只/{final['total']} ({final['ratio']:.2f}%)"
+        if missing:
+            txt += f"  ⚠️{','.join(missing)}无数据"
+        self.stats_lbl_final.config(text=txt)
 
     def _recreate_custom_col_checkboxes(self):
         for widget in self.custom_col_widgets.values():

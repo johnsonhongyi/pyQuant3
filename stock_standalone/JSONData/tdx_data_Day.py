@@ -7141,7 +7141,7 @@ def select_codes_from_tdx(tdxdata: pd.DataFrame, tdx_index_code_list: list) -> p
     return tdxdata.loc[existing_codes]
 
 
-def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False):
+def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False,readonly=False):
     time_s = time.time()
     if top_all is None or top_all.empty:
         top_all = getSinaAlldf(market='all')
@@ -7180,6 +7180,12 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if tdx_index_code_list[0] in tdxdata.index:
                     cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
         else:
+            if readonly:
+                # 只读模式：缓存不存在时不触发重建，直接返回空结果以保护 h5 不被全零覆盖
+                log.warning("[READONLY] No h5 cache for %s/%s, returning empty (rebuild skipped to protect data)" % (h5_fname, h5_table))
+                if lastpTDX_DF is None:
+                    return top_all, pd.DataFrame()
+                return top_all
             log.info("no hdf data:%s %s" % (h5_fname, h5_table))
             print(f"TDD: {len(codelist)} resample:{resample}",end='')
             tdxdata = get_tdx_exp_all_LastDF_DL(
@@ -7198,8 +7204,20 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if tdx_index_code_list[0] in tdxdata.index:
                     cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
             tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
-            h5 = h5a.write_hdf_db(
-                h5_fname, tdxdata, table=h5_table, append=True)
+            # 🛡️ 写入前零值门禁：防止 TDX 文件不可用时全零 DataFrame 覆盖 h5 缓存
+            _wchk_col = 'llow' if 'llow' in tdxdata.columns else ('lastp' if 'lastp' in tdxdata.columns else None)
+            _wchk_ok = True
+            if _wchk_col is not None and len(tdxdata) > 10:
+                _zero_ratio = (tdxdata[_wchk_col] == 0).sum() / len(tdxdata)
+                if _zero_ratio > 0.5:
+                    log.critical("🚨 [HDF-WRITE-BLOCKED] New tdxdata for %s/%s has %.0f%% zeros in '%s'. "
+                                 "Skipping write to protect existing h5 cache. "
+                                 "(Possible cause: TDX files unavailable / forced refresh during off-hours)"
+                                 % (h5_fname, h5_table, _zero_ratio * 100, _wchk_col))
+                    _wchk_ok = False
+            if _wchk_ok:
+                h5 = h5a.write_hdf_db(
+                    h5_fname, tdxdata, table=h5_table, append=True)
 
         log.debug("TDX Col:%s" % tdxdata.columns.values[:10])
     else:
@@ -7232,7 +7250,17 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
 
                 if newdays is None or newdays > 0:
-                    h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
+                    # 🛡️ 写入前零值门禁：防止补差数据为全零时污染 h5
+                    _wchk_col2 = 'llow' if 'llow' in tdx_diff.columns else ('lastp' if 'lastp' in tdx_diff.columns else None)
+                    _wchk_ok2 = True
+                    if _wchk_col2 is not None and len(tdx_diff) > 5:
+                        _zero_ratio2 = (tdx_diff[_wchk_col2] == 0).sum() / len(tdx_diff)
+                        if _zero_ratio2 > 0.5:
+                            log.critical("🚨 [HDF-WRITE-BLOCKED] diff tdx_diff for %s/%s has %.0f%% zeros in '%s'. Skipping diff write."
+                                         % (h5_fname, h5_table, _zero_ratio2 * 100, _wchk_col2))
+                            _wchk_ok2 = False
+                    if _wchk_ok2:
+                        h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
     if len(top_all) > 5:
         top_all = cct.combine_dataFrame(

@@ -640,7 +640,15 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         return ''
 
     df_list = []
-    loop = asyncio.get_event_loop()
+    # Python 3.10+ 在非主线程中 get_event_loop() 不再自动创建 loop，
+    # 需手动创建并绑定，避免 RuntimeError: There is no current event loop in thread 'Thread-X'
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("event loop is closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     for i in range(0, len(url_list), batch_size):
         log.debug(f"Processing batch {i//batch_size + 1} / {len(url_list)//batch_size + 1}")
