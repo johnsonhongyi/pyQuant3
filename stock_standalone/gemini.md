@@ -1,3 +1,9 @@
+## 2026-07-08 10:30
+- [x] **修复多周期联动后台线程 asyncio 缺失引发的 RuntimeError 崩溃 (Fixed Asyncio Event Loop RuntimeError in Multi-Period Background Threads)**：
+    - [x] **加固 `get_sina_Market_json` 异步获取逻辑**：重构了 `JSONData/realdatajson.py`，将原本直接调用 `asyncio.get_event_loop()` 替换为带 `try-except` 保护的事件循环安全获取与绑定逻辑，消除了 Python 3.9 及以上环境中非主线程默认缺少事件循环引起的 `RuntimeError: There is no current event loop` 崩溃问题。
+    - [x] **主线程预加载 `StockCode` 单例防崩溃机制**：在 `standalone_multi_period_tester.py` 的主线程 `__init__` 初始化末尾，同步触发 `get_global_stock_code()`，将可能引发网络拉取及 I/O 读写的 `StockCode` 初始化工作全量置于主线程中提前完成，使得后台子线程能够直接从内存中读取该单例，不仅彻底避免了后台线程中重入该更新逻辑，还进一步优化了多周期联动筛选面板的冷启动性能。
+    - [x] **多周期联动后台子线程及静态编译 100% 成功验证**：使用 `py_compile` 对修改后的文件执行了语法检验，全部全绿通过；编写 `scratch/test_asyncio_loop_fix.py` 模拟非主线程调用数据拉取接口，实测已能自愈自动创建并绑定事件循环并返回抓取数据，无任何报错。
+
 ## 2026-07-07 20:50
 - [x] **升级 Alt+N 为系统级全局热键 (Upgraded Alt+N to System-Wide Global Hotkey)**：
     - [x] **补全主程序全局热键字典与回调绑定**：在 `instock_MonitorTK.py` 中的 `_HOTKEY_MAP` 和 `_HOTKEY_INFO_MAP` 字典里，补齐了 `Alt+P`（偏移量 `13`）与 `Alt+N`（偏移量 `14`，键码为 `0x4E`）的注册与中文功能简介。在 `setup_global_hotkey` 的 `hotkey_callbacks` 映射中，绑定了 `14` 对应 `toggle_multi_period_tester`。

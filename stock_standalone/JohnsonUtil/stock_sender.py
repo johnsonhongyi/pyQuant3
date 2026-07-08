@@ -80,9 +80,8 @@ class StockSender:
         # 缓存消息 ID (核心优化：避免高频系统调用)
         self._UWM_STOCK = win32api.RegisterWindowMessage('stock')
 
-        # 启动单实例工作线程 (核心优化：杜绝线程风暴)
-        self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
-        self._worker.start()
+        # [REFACTORED] 改为惰性启动线程，杜绝多窗口实例化导致的后台线程堆积泄露
+        self._worker = None
 
     def close(self):
         """[NEW] 停止工作线程并清理资源"""
@@ -94,6 +93,13 @@ class StockSender:
             self._task_queue.put_nowait(None)
         except:
             pass
+
+        # [UPGRADE] 对 Worker 线程进行优雅的同步等待，防滞留
+        if hasattr(self, '_worker') and self._worker is not None and self._worker.is_alive():
+            try:
+                self._worker.join(timeout=1.0)
+            except:
+                pass
 
     def _get_flag(self, var):
         """
@@ -139,6 +145,13 @@ class StockSender:
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
     # ----------------- 核心分发与工作循环 ----------------- #
+    def _ensure_worker_alive(self):
+        """确保物理发送工作线程在需要时存活"""
+        if self._worker is None or not self._worker.is_alive():
+            self._running = True
+            self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
+            self._worker.start()
+
     def send(self, stock_code, auto=False):
         """
         投递一个发送意图 (State Overwrite)
@@ -151,15 +164,16 @@ class StockSender:
             return
         StockSender._last_send_code_tk = stock_code
 
+        # 获取当前窗口设定的 flags 快照
+        flags = {
+            'tdx': self._get_flag(self.tdx_var),
+            'ths': self._get_flag(self.ths_var),
+            'dfcf': self._get_flag(self.dfcf_var)
+        }
+
         # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (Proxy)
         if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
             try:
-                # 在物理执行路径上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
-                flags = {
-                    'tdx': self._get_flag(self.tdx_var),
-                    'ths': self._get_flag(self.ths_var),
-                    'dfcf': self._get_flag(self.dfcf_var)
-                }
                 try:
                     from linkage_service import get_link_manager
                 except ImportError:
@@ -173,7 +187,7 @@ class StockSender:
                 get_link_manager().push(stock_code, flags=flags, auto=auto)
                 return
             except Exception as e:
-                # 记录报错到 linkage_err.log 以便分析
+                # 记录报错到 linkage_err.log，但允许降级 Fallback 到本地直接发送通道
                 try:
                     import traceback
                     log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "linkage_err.log")
@@ -184,12 +198,8 @@ class StockSender:
                 except:
                     pass
 
-        # [FIX] 在物理执行路径（或降级路径）上提取状态快照，防止多线程环境下访问 Tkinter 变量崩溃
-        flags = {
-            'tdx': self._get_flag(self.tdx_var),
-            'ths': self._get_flag(self.ths_var),
-            'dfcf': self._get_flag(self.dfcf_var)
-        }
+        # 如果是 Linkage 进程本身，或者代理推送失败/异常，则 Fallback 使用本地队列与物理发送通道
+        self._ensure_worker_alive()
 
         # 状态覆盖：如果队列满了，丢弃旧任务，确保时效性
         try:
@@ -210,9 +220,16 @@ class StockSender:
                 while True:
                     try:
                         task = self._task_queue.get_nowait()
+                        if task is None:  # [UPGRADE] 瞬间捕捉外部 close 投递的退出信号并重置状态
+                            self._running = False
+                            self._latest_task = None
+                            break
                     except queue.Empty:
                         break
                 
+                if not self._running:
+                    break
+
                 if task:
                     self._latest_task = task
 

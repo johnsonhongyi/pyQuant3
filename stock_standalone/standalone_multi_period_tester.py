@@ -151,8 +151,14 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.bind("<Alt-slash>", lambda e: self.show_help_documentation())
         self.bind("<Alt-question>", lambda e: self.show_help_documentation())
 
+        # ⚡ 预加载防崩溃加固：在主线程提前触发一次 get_global_stock_code() 初始化，
+        # 避免后续后台子线程 evaluate_strategy 时首次加载触发昂贵且无事件循环的网络拉取/更新
+        try:
+            from JSONData.sina_data import get_global_stock_code
+            get_global_stock_code()
+        except Exception as e:
+            print(f"[MultiPeriodTester] Pre-initializing stock codes failed: {e}")
 
-        
     def _load_state(self):
         default_state = {
             "strategy_id": "", 
