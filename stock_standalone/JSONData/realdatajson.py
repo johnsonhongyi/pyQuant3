@@ -1432,7 +1432,13 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         f"pause={pause_range} block={g_sina_blocked['count']}"
     )
     df_list = []
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("event loop is closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     total_batches = (len(url_list) + batch_size - 1) // batch_size
     fetch_success = True
 
