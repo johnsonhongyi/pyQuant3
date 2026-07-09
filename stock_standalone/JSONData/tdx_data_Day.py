@@ -7277,6 +7277,9 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if not tdx_diff.empty:
                     tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
     if len(top_all) > 5:
+        for col_to_drop in ['ratio', 'vol_ratio']:
+            if col_to_drop in tdxdata.columns:
+                tdxdata = tdxdata.drop(columns=[col_to_drop])
         top_all = cct.combine_dataFrame(
             top_all, tdxdata, col=None, compare=None, append=False)
         top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
