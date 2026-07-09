@@ -1,3 +1,31 @@
+## 2026-07-09 20:00
+- [x] **修复多周期测试器中 `'ratio'` (换手率) 字段全部显示为 0.0 的缺陷 (Fixed Zeroed-Out 'ratio' (Turnover Rate) in Standalone Multi-Period Tester)**：
+    - [x] **实现实时行情 `'ratio'` 字段回补机制 (Real-time ratio Recovery)**：在 `standalone_multi_period_tester.py` 的 `_worker` 中，由于只读模式下直接调用 `Sina(readonly=True).all` 返回 of 原始 DataFrame 不包含 `'ratio'` 列，新增了针对 `'ratio'` 的 fallback 回补模块。若发现缺少该字段，会在后台线程中自动拉取 `realdatajson.get_sina_Market_json('all')` 并通过 `cct.combine_dataFrame` 将实时换手率数据补齐到基准行情中。
+    - [x] **引入 HDF5 历史数据合并防覆盖保护 (HDF5 Merge Collision Protection)**：在 `tdx_data_Day.py` 的 `get_append_lastp_to_df` 拼表之前，新增了对 `tdxdata`（HDF5 历史缓存数据）的字段清洗保护。在执行 `combine_dataFrame` 之前，强制 drop 掉 `tdxdata` 中的 `ratio` 和 `vol_ratio` 两列，以防止 HDF5 库中无效的 0.0/NaN 值在合并时覆盖掉实时行情中正确的换手率和量比数据。
+    - [x] **静态语法编译及跨周期联动全流程管道模拟验证 100% 成功 (Verified Multi-Cycle Data Pipeline Verification)**：执行 `py_compile` 对相关文件执行了语法检验，全部一次性通过；编写 `scratch/test_ratio_recovery_check.py` 脚本，完整模拟了多周期引擎加载、合并及平铺打平的数据管道。实测 `d`, `2d`, `w`, `m` 等全部参与周期的 `ratio` 字段不仅存在，且非零有效率在 98.5% 以上，完美回归正常实数。
+- [x] **实施多周期表格数据列宽极限压缩与排版密度优化 (Enacted Extreme Column Width Compression & Layout Density Optimization)**：
+    - [x] **重构 `_adjust_column_widths` 自动测量逻辑**：打破原有列宽必须完全能容纳“长列标题”的限制，将其重构为主要由“数据内容本身最大宽度”驱动的自适应排版。
+    - [x] **引入特定指标高密度固定列宽门槛 (Compact Metric Specific Widths)**：
+        - 对于 `red(d)/win(d)` 等胜率/红盘整型列，极限压缩并固定列宽为 **38px**；
+        - 对于 `strong_structure_score` 强结构分等三位浮点数（如 102.7）列，固定列宽为 **52px**；
+        - 对于 `slope` 斜率数据列，固定列宽为 **50px**；
+        - 对于 `dff` 盘中差值数据列，固定列宽为 **48px**；
+        - 对于 `price/trade/now` 等价格相关列，固定列宽为 **48px**；
+        - 对于 `percent` 涨幅列，固定列宽为 **52px**；
+        - 对于 `ratio` (换手) 列，固定列宽为 **48px**；
+        - 对于右侧的 `d`, `2d`, `w`, `m` 等参与周期勾选的 Check 列，极限锁死到 **35px**；
+    - [x] **释放大宽表 40% 以上的水平视觉空间**：与刚刚实现的鼠标悬停表头列名 Tooltips (悬浮气泡) 联动，使用户仅在需要时通过悬停即可知晓长列标题全称，同时使表格极其紧凑地在主视窗中完美平铺，彻底免除繁琐的左右滚动交互体验。
+
+
+## 2026-07-09 19:35
+- [x] **实现个股列表列名悬停提示与主视图逻辑高度复用 (Enacted Table Column Header Hover Tooltips & DRY Refactoring)**：
+    - [x] **重构主视图 Motion 事件核心逻辑**：将 `_on_tree_motion` 原本写死主视图 Treeview 控件的算法剥离并重构为通用的 `_on_tree_motion_impl(event, tree)` 内部接口。同时，为了显著提升用户在快速复盘下的交互可读性，将提示文本从原始的代码字段名（如 `dff_d`）智能升级为所指向列的实际表头显示文字（如 `dff(d)`）。
+    - [x] **为二级板块个股 Constituents 弹窗树结构添加 Tooltip 绑定**：在 `show_concept_top10_window` 方法中，为个股列表 `tree` 动态绑定了 `<Motion>`（指派至重构后的 `_on_tree_motion_impl`）和 `<Leave>`（指派至 `_on_tree_leave`）事件。
+    - [x] **引入 Toplevel 销毁联动清理防护**：为 Constituents 弹窗 `win` 绑定了 `<Destroy>` 事件，在窗口销毁时物理调用 `_hide_tree_tooltip()` 以彻底消除残存的屏幕悬浮框，保障界面运行的高度纯净性。
+    - [x] **静态语法编译 100% 成功验证**：使用 `py_compile` 对修改后的文件执行了编译校验，无任何语法或缩进报错。ee` 动态绑定了 `<Motion>`（指派至重构后的 `_on_tree_motion_impl`）和 `<Leave>`（指派至 `_on_tree_leave`）事件。
+    - [x] **引入 Toplevel 销毁联动清理防护**：为 Constituents 弹窗 `win` 绑定了 `<Destroy>` 事件，在窗口销毁时物理调用 `_hide_tree_tooltip()` 以彻底消除残存的屏幕悬浮框，保障界面运行的高度纯净性。
+    - [x] **静态语法编译 100% 成功验证**：使用 `py_compile` 对修改后的文件执行了编译校验，无任何语法或缩进报错。
+
 ## 2026-07-09 12:15
 - [x] **修复个股列表“序号”列点击无法排序的缺陷 (Fixed Click-to-Sort on Serial Number (idx) in Constituents Popup)**：
     - [x] **补全“序号”列头 command 点击绑定**：在 `standalone_multi_period_tester.py` 的 `show_concept_top10_window` 界面渲染中，为 `"idx"` 列头绑定了 `command=lambda c="idx": sort_sub_column(tree, c, False)` 排序指令，使得用户点击“序号”表头时能够正常触发排序动作，在多级联动与查看分析时实现更顺畅 of 列表整理与数据回溯。

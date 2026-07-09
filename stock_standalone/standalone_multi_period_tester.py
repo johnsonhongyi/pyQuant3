@@ -519,7 +519,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             "price": "现价", 
             "percent": "涨幅%", 
             "volume": "成交量", 
-            "ratio": "量比"
+            "ratio": "换手"
         }
         for c in active_customs:
             disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df)
@@ -578,18 +578,44 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                         w += 6.5
                 return int(w) + 8
 
-            max_w = get_text_width(header_text)
-            # ⚡ [PERF] 针对大数据量，限制只测量前 30 行，避免高频遍历数千行 item 导致主线程严重卡顿
-            measured_items = self.tree.get_children()[:10]
+            # 极限优化数据列宽：不再受限于长列名，主要由单元格内容决定，配合鼠标悬停 Tooltip 查阅
+            data_max_w = 0
+            measured_items = self.tree.get_children()[:15]
             for item in measured_items:
                 val = self.tree.set(item, col)
-                max_w = max(max_w, get_text_width(val))
+                data_max_w = max(data_max_w, get_text_width(val))
                 
-            min_col_w = 32
+            header_w = get_text_width(header_text)
+            col_lower = col.lower()
+            
             if col == "name":
-                final_w = max(45, min(max_w, 75))
+                final_w = max(55, min(data_max_w, 80))
+            elif col == "code":
+                final_w = 50
+            elif any(x in col_lower for x in ["red", "win"]):
+                # 胜率、红盘数等短整型数据列，极限压缩
+                final_w = 38
+            elif "strong_struct" in col_lower:
+                # 强结构分数据一般为三位数值（如 102.7）
+                final_w = 52
+            elif "slope" in col_lower:
+                # 斜率数据
+                final_w = 50
+            elif "dff" in col_lower:
+                # 差值数据
+                final_w = 48
+            elif col_lower in ["price", "trade", "now"]:
+                final_w = 48
+            elif col_lower == "percent":
+                final_w = 52
+            elif col_lower == "ratio":
+                final_w = 48
+            elif col_lower in ["d", "2d", "w", "m", "d_chk", "2d_chk", "w_chk", "m_chk"] or "周期" in header_text:
+                # 参与勾选列
+                final_w = 35
             else:
-                final_w = max(min_col_w, min(max_w, 100))
+                # 默认列宽：取 数据最大宽+10 和 列头宽 的较小值，并限制在 32 ~ 80px 之间
+                final_w = max(32, min(data_max_w + 10, min(header_w, 80)))
                 
             self.tree.column(col, width=final_w, minwidth=20, stretch=True)
                 
@@ -638,17 +664,22 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self._link_after_id = self.after(100, self._do_linkage)
 
     def _on_tree_motion(self, event):
-        region = self.tree.identify_region(event.x, event.y)
+        self._on_tree_motion_impl(event, self.tree)
+
+    def _on_tree_motion_impl(self, event, tree):
+        region = tree.identify_region(event.x, event.y)
         if region == "heading":
-            col_id = self.tree.identify_column(event.x)
+            col_id = tree.identify_column(event.x)
             if col_id:
                 try:
                     col_idx = int(col_id.replace('#', '')) - 1
-                    columns = self.tree['columns']
+                    columns = tree['columns']
                     if 0 <= col_idx < len(columns):
                         col_name = columns[col_idx]
                         if getattr(self, 'current_tooltip_col', None) != col_name:
-                            self._show_tree_tooltip(event.x_root, event.y_root + 20, col_name)
+                            # 尝试获取友好的表头显示文字作为提示
+                            header_text = tree.heading(col_name, "text")
+                            self._show_tree_tooltip(event.x_root, event.y_root + 20, header_text)
                             self.current_tooltip_col = col_name
                         return
                 except ValueError:
@@ -797,6 +828,16 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 from JSONData import sina_data
                 _sina = sina_data.Sina(readonly=True)
                 self.top_now = _sina.all
+                if self.top_now is not None and not self.top_now.empty and 'ratio' not in self.top_now.columns:
+                    try:
+                        from JSONData import realdatajson as rl
+                        from JohnsonUtil import commonTips as cct
+                        dd = rl.get_sina_Market_json('all')
+                        if isinstance(dd, pd.DataFrame) and 'ratio' in dd.columns:
+                            self.top_now = cct.combine_dataFrame(self.top_now, dd.loc[:, ['name', 'ratio']])
+                    except Exception as e:
+                        print(f"[MultiPeriodTester] Fallback ratio recovery failed: {e}")
+                
                 if self.top_now is None or self.top_now.empty:
                     # fallback: 仍走 getSinaAlldf 但明确只读标志
                     self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType, readonly=True)
@@ -2136,6 +2177,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                     self._do_linkage(code=code)
 
         tree.bind("<<TreeviewSelect>>", on_select_sub)
+        tree.bind("<Motion>", lambda e: self._on_tree_motion_impl(e, tree))
+        tree.bind("<Leave>", self._on_tree_leave)
+        win.bind("<Destroy>", lambda e: self._hide_tree_tooltip())
 
         try:
             from global_favorites import GlobalFavoriteManager
