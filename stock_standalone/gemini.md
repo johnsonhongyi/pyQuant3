@@ -1,3 +1,16 @@
+## 2026-07-09 20:45
+- [x] **规划分析并物理实现实盘资金流与1小时dff/放量数据结合的快速定位能力 (Enacted & Implemented Real-time Fund Flow Positioning with 1-Hour DFF Slice & Volume Co-detection)**：
+    - [x] **剖析1小时dff周期切片的聚集特征 (Analyzed 1-Hour DFF Slice Dynamics)**：在 `realtime_fundflow_positioning_plan.md` 中，详细分析了1小时dff时间切片内的“优先出现”、“持续拉升”与“突然拉升”的聚集规律，以及在小时值切换时dff产生变动的特征。
+    - [x] **设计资金流入强度 (FFI) 动态过滤模型 (Designed FFI Dynamic Filter Model)**：通过结合dff、实时量比（VolumeRatio）和价格相对强度设计了 $\text{FFI} = \text{dff} \times \text{VolumeRatio} \times \text{PriceStrength}$ 计算公式，消除小时切片重置引起的信号衰减，实现资金流强度的平滑判断。
+    - [x] **落地免重构极简 UI 呈现与底层交易系统结合 (Zero-Code UI & System Integration)**：
+        - 更新了 `global.ini` 配置文件，在 `vol_up_details_col` 列表中追加了 `"流速状态"`。
+        - 重构了 `instock_MonitorTK.py` 中的 `_async_stats_aggregation` 后台定时统计聚合模块，在异动放量数据生成时，根据 1 小时滚动时间切片判定模型和兜底规则，实时计算并注入 `"流速状态"`（包括 `⚡优先`、`📈持续`、`🔥突发` 以及 `--`）。
+        - 在 `signal_dashboard_panel.py` 的 `VolumeDetailsDialog.update_data` 刷新逻辑中为 `"流速状态"` 增加了定制化的颜色渲染（亮红、亮青、明黄）和加粗字体样式，实现完全免去 UI 重构的高密度优质呈现。
+    - [x] **静态编译与自动化集成测试 100% 成功 (Static Compilation & Integration Tests Passed)**：
+        - 执行 `py_compile` 对相关文件执行语法检验全绿通过。
+        - 编写 `scratch/test_fund_flow_positioning.py` 成功验证了流速状态判定在各时间区间和共振兜底下的正确性。
+        - 编写 `scratch/test_ui_flow_status.py` 在 PyQt6 环境下完全模拟表格渲染及单元格样式分配，断言校验全部 100% 通过。
+
 ## 2026-07-09 20:00
 - [x] **修复多周期测试器中 `'ratio'` (换手率) 字段全部显示为 0.0 的缺陷 (Fixed Zeroed-Out 'ratio' (Turnover Rate) in Standalone Multi-Period Tester)**：
     - [x] **实现实时行情 `'ratio'` 字段回补机制 (Real-time ratio Recovery)**：在 `standalone_multi_period_tester.py` 的 `_worker` 中，由于只读模式下直接调用 `Sina(readonly=True).all` 返回 of 原始 DataFrame 不包含 `'ratio'` 列，新增了针对 `'ratio'` 的 fallback 回补模块。若发现缺少该字段，会在后台线程中自动拉取 `realdatajson.get_sina_Market_json('all')` 并通过 `cct.combine_dataFrame` 将实时换手率数据补齐到基准行情中。

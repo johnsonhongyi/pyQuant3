@@ -682,6 +682,21 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                         r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         r_item.setForeground(QBrush(QColor("#ffff00")))
                         self.table.setItem(i, col_idx, r_item)
+                    elif val_key == "流速状态":
+                        status_str = str(val)
+                        cell_item = QTableWidgetItem(status_str)
+                        cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        # 为流速状态应用定制化的颜色与加粗字体，突出实时盘中资金流速
+                        if "突发" in status_str:
+                            cell_item.setForeground(QBrush(QColor("#ff4444")))  # 亮红色
+                            cell_item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                        elif "优先" in status_str:
+                            cell_item.setForeground(QBrush(QColor("#00ffff")))  # 亮青色
+                            cell_item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                        elif "持续" in status_str:
+                            cell_item.setForeground(QBrush(QColor("#ffff00")))  # 明黄色
+                            cell_item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                        self.table.setItem(i, col_idx, cell_item)
                     else:
                         # 其它定制数值列 (如 dff, dff2, dff3)
                         try:
