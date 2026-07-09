@@ -157,6 +157,7 @@ class PRServiceGUI:
         # 自动同步收盘数据状态初始化与定时器注册
         self._auto_save_fail_count = 0
         self._last_auto_save_attempt_time = 0.0
+        self._final_post_market_saved_date = None
         if hasattr(self, 'root'):
             self.root.after(5000, self._check_auto_refresh_after_close)
 
@@ -1264,7 +1265,15 @@ class PRServiceGUI:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
             s.connect((IPC_HOST, IPC_PORT))
-            payload = f"CODE|{code}"
+            
+            # 检测是否处于历史数据模式 (self.current_date 与今日不同)
+            today = time.strftime("%Y-%m-%d")
+            view_date = getattr(self, "current_date", today)
+            if view_date != today:
+                payload = f"TIME_LINK|{code}|{view_date}"
+            else:
+                payload = f"CODE|{code}"
+                
             s.send(payload.encode('utf-8'))
             s.close()
         except Exception:
@@ -1324,6 +1333,31 @@ class PRServiceGUI:
 
     def _run_once_job(self, force_save=False):
         try:
+            # 💥 同步拉取并等待最新 IPC 数据，解决点击查询或自动刷新时使用旧行情的问题
+            if hasattr(self, "sync_manager") and self.sync_manager:
+                service_logger.info("正在通过 IPC 命名管道同步请求最新行情数据...")
+                self.sync_manager.request_full_sync()
+                # 延时 1.2 秒以等待数据接收并反序列化完成
+                time.sleep(1.2)
+
+            today = time.strftime("%Y-%m-%d")
+            # 💥 如果是自动刷新中，且跨天了，自动切换到今日日期
+            if self.is_running:
+                current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else self.current_date
+                if current_view_date != today:
+                    service_logger.info(f"自动刷新检测到日期已由 {current_view_date} 切换至今日 {today}，执行界面日期同步...")
+                    self.current_date = today
+                    def _update_ui_date():
+                        if hasattr(self, 'date_entry'):
+                            try:
+                                dt_today = datetime.strptime(today, "%Y-%m-%d")
+                                self.date_entry.set_date(dt_today)
+                            except Exception:
+                                pass
+                        elif hasattr(self, 'date_var'):
+                            self.date_var.set(today)
+                    self.root.after(0, _update_ui_date)
+
             em_data = {}
             ths_data = {}
             tgb_data = {}
@@ -2231,6 +2265,9 @@ class PRServiceGUI:
                 # 使用 gzip 压缩格式进行持久化
                 df.to_csv(csv_path, index=False, encoding="utf-8", compression="gzip")
                 service_logger.info(f"每日人气共振数据已安全持久化（GZ压缩）: {csv_path}")
+                # 如果是盘后，则标记今日盘后最终数据已成功持久化
+                if time.strftime("%H:%M") >= "15:15":
+                    self._final_post_market_saved_date = today
                 # 写入成功后刷新一下日历高亮
                 self.root.after(0, self._refresh_calendar_highlights)
         except Exception as e:
@@ -2248,29 +2285,31 @@ class PRServiceGUI:
             csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv")
             has_persisted = os.path.exists(gz_path) or os.path.exists(csv_path)
             
-            if not has_persisted:
-                # 2. 检查是否是交易日
-                is_trade_day = False
-                try:
-                    is_trade_day = cct.get_trade_date_status()
-                except Exception as e:
-                    service_logger.debug(f"检查交易日状态异常: {e}")
-                    
-                if is_trade_day:
-                    # 3. 检查时间是否在 15:15 之后
-                    now_time_str = time.strftime("%H:%M")
-                    if now_time_str >= "15:15":
-                        # 冷却时间：至少间隔 5 分钟（300秒）才重试一次，防止异常时高频请求
+            # 2. 检查是否是交易日
+            is_trade_day = False
+            try:
+                is_trade_day = cct.get_trade_date_status()
+            except Exception as e:
+                service_logger.debug(f"检查交易日状态异常: {e}")
+                
+            if is_trade_day:
+                # 3. 检查时间是否在 15:15 之后
+                now_time_str = time.strftime("%H:%M")
+                if now_time_str >= "15:15":
+                    last_saved_date = getattr(self, '_final_post_market_saved_date', None)
+                    # 如果今日尚未成功执行盘后最终保存（即使白天生成过部分数据文件），则强行触发最终的盘后刷新持久化
+                    if last_saved_date != today:
                         import time as t_mod
                         now_ts = t_mod.time()
                         last_attempt = getattr(self, '_last_auto_save_attempt_time', 0.0)
                         fail_count = getattr(self, '_auto_save_fail_count', 0)
                         
+                        # 冷却时间：至少间隔 5 分钟（300秒）才重试一次，防止异常时高频请求
                         if now_ts - last_attempt >= 300.0:
                             if not getattr(self, '_is_auto_saving_after_close', False):
                                 self._is_auto_saving_after_close = True
                                 self._last_auto_save_attempt_time = now_ts
-                                service_logger.info(f"检测到收盘（15:15后）且今日人气共振数据尚未持久化，启动自动刷新与持久化 (尝试次数: {fail_count + 1})...")
+                                service_logger.info(f"检测到收盘（15:15后）且今日最终盘后数据尚未持久化，启动自动刷新与持久化 (尝试次数: {fail_count + 1})...")
                                 
                                 def auto_job():
                                     try:
@@ -2281,6 +2320,7 @@ class PRServiceGUI:
                                         t_mod.sleep(5.0)
                                         if os.path.exists(gz_path) or os.path.exists(csv_path):
                                             self._auto_save_fail_count = 0
+                                            self._final_post_market_saved_date = today  # 标记今天已完成最终持久化
                                             service_logger.info("收盘后自动同步并持久化人气共振数据成功。")
                                             self.root.after(0, lambda: self.lbl_status.config(text="收盘自动持久化完成", fg="darkgreen"))
                                         else:
@@ -2299,8 +2339,8 @@ class PRServiceGUI:
             service_logger.error(f"收盘自动刷新检测异常: {e}")
         finally:
             try:
-                # 每 30 分钟轮询检测一次状态
-                self.root.after(1800000, self._check_auto_refresh_after_close)
+                # 每 5 分钟 (300000 ms) 轮询检测一次状态，提升响应及时性
+                self.root.after(300000, self._check_auto_refresh_after_close)
             except Exception:
                 pass
 
