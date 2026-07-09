@@ -6855,6 +6855,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             if col_name in ["代码", "名称", "涨幅%", "量比"]:
                                                 continue
                                             col_key = col_name.lower()
+                                            if col_name == "流速状态":
+                                                try:
+                                                    from datetime import datetime
+                                                    t_slice = datetime.now().minute
+                                                    dff_val = row.get('dff', 0.0)
+                                                    dff_val = 0.0 if (dff_val is None or pd.isna(dff_val)) else float(dff_val)
+                                                    dff2_val = row.get('dff2', 0.0)
+                                                    dff2_val = 0.0 if (dff2_val is None or pd.isna(dff2_val)) else float(dff2_val)
+                                                    ratio_val = float(vr[df.index.get_loc(idx)])
+                                                    
+                                                    status = "--"
+                                                    if 0 <= t_slice < 15:
+                                                        if dff_val >= 0.5 and ratio_val >= 2.0:
+                                                            status = "⚡优先"
+                                                    elif 15 <= t_slice < 45:
+                                                        if dff_val > dff2_val and ratio_val >= 1.8:
+                                                            status = "📈持续"
+                                                    elif 45 <= t_slice < 60:
+                                                        if (dff_val - dff2_val >= 0.5) and ratio_val >= 2.5:
+                                                            status = "🔥突发"
+                                                            
+                                                    # 兜底规则（全局高强度资金流共振判定）
+                                                    if status == "--":
+                                                        if dff_val >= 1.0 and ratio_val >= 2.5:
+                                                            status = "🔥突发"
+                                                        elif dff_val > dff2_val and ratio_val >= 1.8:
+                                                            status = "📈持续"
+                                                        elif dff_val >= 0.5 and ratio_val >= 2.0:
+                                                            status = "⚡优先"
+                                                    val = status
+                                                except Exception:
+                                                    val = "--"
+                                                item_data[col_key] = val
+                                                continue
+                                                
                                             val = row.get(col_key, 0.0)
                                             val = 0.0 if (val is None or pd.isna(val)) else float(val)
                                             item_data[col_key] = val
