@@ -121,6 +121,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.detail_win = None
         self.txt_widget = None
         
+        # 板块概念数据缓存与子窗口
+        self._block_cache = {}
+        self._concept_win = None
+        self.concept_win = None
+        
         try:
             from history_manager import QueryHistoryManager
             from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
@@ -341,6 +346,33 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             font=("Microsoft YaHei", 8), padx=6, pady=1
         )
         
+        # --- Concept Wrapper Frame ---
+        self.concept_wrapper_frame = tk.Frame(self, bg="#f7f7f7")
+        self.concept_wrapper_frame.pack(fill="x", padx=8, pady=(2, 4))
+        
+        self.lbl_category_title = tk.Label(
+            self.concept_wrapper_frame,
+            text="当前概念:",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="green",
+            bg="#f7f7f7",
+            cursor="hand2"
+        )
+        self.lbl_category_title.pack(side="left", padx=(0, 4))
+        self.lbl_category_title.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+        
+        self.dynamic_concepts_frame = tk.Frame(self.concept_wrapper_frame, bg="#f7f7f7")
+        self.dynamic_concepts_frame.pack(side="left", fill="both", expand=True)
+        
+        self.lbl_empty_concept = tk.Label(
+            self.dynamic_concepts_frame,
+            text="暂无板块数据",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="gray",
+            bg="#f7f7f7"
+        )
+        self.lbl_empty_concept.pack(side="left")
+
         # --- Results Treeview ---
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -643,17 +675,19 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
     def _on_tree_leave(self, event):
         self._hide_tree_tooltip()
 
-    def _do_linkage(self):
-        selection = self.tree.selection()
-        if not selection:
-            return
+    def _do_linkage(self, code=None):
+        if code is None:
+            selection = self.tree.selection()
+            if not selection:
+                return
+                
+            item = selection[0]
+            values = self.tree.item(item, "values")
+            if not values:
+                return
+                
+            code = str(values[0]).strip()
             
-        item = selection[0]
-        values = self.tree.item(item, "values")
-        if not values:
-            return
-            
-        code = str(values[0]).strip()
         if not code or code == self._last_selected_code:
             return
             
@@ -728,6 +762,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self._top_now_cache_ts = 0.0
             self.engine._period_dfs.clear()
             self._period_cache_ts.clear()
+            if hasattr(self, "_block_cache"):
+                self._block_cache.clear()
             self.status_var.set("🔄 强制刷新：正在重新获取全部数据...")
         else:
             # 智能缓存：检查 top_now 缓存是否过期
@@ -823,6 +859,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self.query_manager.df_all = df
             if hasattr(self, "btn_clear_history_filter"):
                 self.btn_clear_history_filter.pack_forget()
+            self.update_concept_ranking(None)
             return
             
         if getattr(self, "query_manager", None) is not None:
@@ -843,6 +880,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self.status_var.set(f"⚠️ {self._history_filter_error} (耗时 {elapsed:.1f}s)")
             else:
                 self.status_var.set(f"完成，未找到符合二次过滤条件的标的。(二次过滤前 {len(df)} 只，耗时 {elapsed:.1f}s)")
+            self.update_concept_ranking(None)
             return
             
         # 更新 stats_lbl_final 显示二次过滤状态
@@ -884,6 +922,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             vol = round(row.get('volume', 0), 2)
             ratio = round(row.get('ratio', 0), 2)
             
+            # 顺便填充概念缓存
+            category_str = row.get('category', row.get('block', ''))
+            if not category_str or str(category_str).strip() == 'nan':
+                if self.top_now is not None and code in self.top_now.index:
+                    r = self.top_now.loc[code]
+                    if isinstance(r, pd.DataFrame):
+                        r = r.iloc[0]
+                    category_str = r.get('category', r.get('block', ''))
+            if pd.notna(category_str) and str(category_str).strip() not in ('', 'nan', '--'):
+                self._block_cache[code] = str(category_str).strip()
+            
             is_fav = code in fav_stocks
             display_name = f"★ {name}" if is_fav else name
             
@@ -913,6 +962,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.perform_tree_multi_level_sort(self.tree)
         self._adjust_column_widths()
         self.tree.yview_moveto(0)
+        
+        # 统计并刷新“当前概念”
+        self.update_concept_ranking(filtered_df)
 
     def _on_history_sync(self, **kwargs):
         source = kwargs.get("source", "")
@@ -1228,6 +1280,22 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 pass
             self.detail_win = None
             self.txt_widget = None
+
+        if getattr(self, "_concept_win", None) is not None:
+            try:
+                if self._concept_win.winfo_exists():
+                    self._concept_win.destroy()
+            except Exception:
+                pass
+            self._concept_win = None
+
+        if getattr(self, "concept_win", None) is not None:
+            try:
+                if self.concept_win.winfo_exists():
+                    self.concept_win.destroy()
+            except Exception:
+                pass
+            self.concept_win = None
 
         # 清理多周期引擎中的 pandas 缓存与实例
         if hasattr(self, "engine") and self.engine is not None:
@@ -1705,6 +1773,428 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self.strategy_var.set(self.strategies[0]['name'])
             self.ui_state['strategy_id'] = self.strategies[0]['id']
             self._save_state()
+
+    def _normalize_concept_name(self, name):
+        """标准化板块概念名称"""
+        if not name:
+            return ""
+        import re
+        # 将中文括号标准化为英文括号并移除两侧空白
+        n = str(name).replace('（', '(').replace('）', ')').strip()
+        # 去除诸如 " (15只)" 或 " (15)" 的数量后缀
+        n = re.sub(r'\s*\(\d+只?\)\s*$', '', n)
+        return n
+
+    def _is_noise_concept(self, name_str):
+        """识别噪音板块概念并进行过滤"""
+        NOISE_CONCEPTS = {
+            "深股通", "港股通", "沪股通", "国企改革", "央企国企改革", "融资融券", "标普道琼斯A股", 
+            "富时罗素概念股", "MSCI概念", "转融券标的", "机构重仓", "证金持股", "汇金持股", 
+            "预盈预增", "破净股", "ST板块", "参股新三板", "创业板设", "科创板", "地方国企改革", 
+            "央企改革", "壳资源", "新股与次新股", "昨日涨停", "昨日连板", "百元股", "中字头",
+            "低价股", "破发股", "外资背景", "QFII重仓", "社保重仓", "核心资产", "新三板",
+            "深成指股", "沪深300股", "上证180股", "上证50股", "创业300股", "中证500", "成分股",
+            "高送转", "含可转债", "国家队持股", "地方政府平台", "央企控股", "军工改革",
+            "中报", "中报送转", "季报", "年报", "一季报", "三季报", "业绩预增", "预增", "预亏",
+            "预降预亏", "送转股份", "业绩补偿"
+        }
+        if name_str in NOISE_CONCEPTS:
+            return True
+        for keyword in ("改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏"):
+            if keyword in name_str:
+                return True
+        return False
+
+    def _get_stock_category(self, code, row=None):
+        """获取个股的板块概念，优先使用传入的 row 字段，其次从 _block_cache 中获取"""
+        if row is not None:
+            if 'category' in row and pd.notna(row['category']):
+                val = str(row['category']).strip()
+                if val and val != "nan" and val != "--":
+                    return val
+            if 'block' in row and pd.notna(row['block']):
+                val = str(row['block']).strip()
+                if val and val != "nan" and val != "--":
+                    return val
+
+        if not hasattr(self, "_block_cache") or not self._block_cache:
+            self._block_cache = {}
+            active_periods = [p for p, var in self.period_vars.items() if var.get()]
+            for p in active_periods:
+                df_p = self.engine._period_dfs.get(p)
+                if df_p is not None and not df_p.empty:
+                    for c, r in df_p.iterrows():
+                        cat = r.get('category', r.get('block', ''))
+                        if pd.notna(cat) and str(cat).strip() not in ('', 'nan', '--'):
+                            self._block_cache[c] = str(cat).strip()
+
+        val = self._block_cache.get(code, '')
+        if val and val != "nan" and val != "--":
+            return val
+            
+        if self.top_now is not None and code in self.top_now.index:
+            r = self.top_now.loc[code]
+            if isinstance(r, pd.DataFrame):
+                r = r.iloc[0]
+            cat = r.get('category', r.get('block', ''))
+            if pd.notna(cat) and str(cat).strip() not in ('', 'nan', '--'):
+                self._block_cache[code] = str(cat).strip()
+                return str(cat).strip()
+
+        return ""
+
+    def update_concept_ranking(self, df_filtered):
+        """统计最终过滤后的数据中板块概念的频次与分布，并更新顶部‘当前概念’显示区"""
+        for widget in self.dynamic_concepts_frame.winfo_children():
+            widget.destroy()
+
+        if df_filtered is None or df_filtered.empty:
+            self.lbl_empty_concept.pack(side="left")
+            return
+
+        import re
+        from collections import Counter
+        
+        concept_counter = Counter()
+        for code, row in df_filtered.iterrows():
+            category = self._get_stock_category(code, row)
+            if not category:
+                continue
+            
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
+            for cat in cats:
+                norm_cat = self._normalize_concept_name(cat)
+                if not norm_cat:
+                    continue
+                if self._is_noise_concept(norm_cat):
+                    continue
+                try:
+                    from stock_logic_utils import is_generic_concept
+                    if is_generic_concept(norm_cat):
+                        continue
+                except Exception:
+                    pass
+                concept_counter[norm_cat] += 1
+
+        top_concepts = concept_counter.most_common(10)
+        
+        if not top_concepts:
+            self.lbl_empty_concept.pack(side="left")
+            return
+
+        self.lbl_empty_concept.pack_forget()
+
+        for cat_name, count in top_concepts:
+            lbl_text = f"{cat_name}({count})"
+            lbl = tk.Label(
+                self.dynamic_concepts_frame,
+                text=lbl_text,
+                font=("Microsoft YaHei", 9, "bold"),
+                fg="#1A73E8",
+                bg="#E8F0FE",
+                padx=6,
+                pady=2,
+                cursor="hand2"
+            )
+            lbl.pack(side="left", padx=3)
+            lbl.bind("<Button-1>", lambda e, name=cat_name: self.show_concept_top10_window(name))
+
+    def show_concept_detail_window(self):
+        """弹出详细概念异动窗口"""
+        if self._last_flat_df is None or self._last_flat_df.empty:
+            messagebox.showinfo("提示", "当前无筛选数据，请先执行筛选。")
+            return
+
+        import re
+        from collections import Counter
+        
+        concept_counter = Counter()
+        for code, row in self._last_flat_df.iterrows():
+            category = self._get_stock_category(code, row)
+            if not category:
+                continue
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
+            for cat in cats:
+                norm_cat = self._normalize_concept_name(cat)
+                if not norm_cat:
+                    continue
+                if self._is_noise_concept(norm_cat):
+                    continue
+                try:
+                    from stock_logic_utils import is_generic_concept
+                    if is_generic_concept(norm_cat):
+                        continue
+                except Exception:
+                    pass
+                concept_counter[norm_cat] += 1
+
+        all_concepts = concept_counter.most_common()
+        if not all_concepts:
+            messagebox.showinfo("提示", "当前筛选结果中没有包含板块概念信息。")
+            return
+
+        if getattr(self, "_concept_win", None):
+            try:
+                if self._concept_win.winfo_exists():
+                    self._concept_win.lift()
+                    self._concept_win.focus_force()
+                    self.update_concept_detail_content(all_concepts)
+                    return
+            except Exception:
+                pass
+            self._concept_win = None
+
+        win = tk.Toplevel(self)
+        self._concept_win = win
+        win.title("概念板块统计详情")
+        
+        saved_geo = self.ui_state.get('concept_detail_window_geometry', '300x500')
+        win.geometry(saved_geo)
+
+        def _save_concept_detail_win_geo(event):
+            if win.winfo_exists():
+                try:
+                    self.ui_state["concept_detail_window_geometry"] = win.winfo_geometry()
+                    self._save_state()
+                except Exception:
+                    pass
+        win.bind("<Configure>", _save_concept_detail_win_geo)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        frame = tk.Frame(win, bg="white")
+        frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        canvas = tk.Canvas(frame, bg="white", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg="white")
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", on_mousewheel)
+
+        win._content_frame = scroll_frame
+        
+        self.update_concept_detail_content(all_concepts)
+
+    def update_concept_detail_content(self, all_concepts):
+        if not getattr(self, "_concept_win", None) or not self._concept_win.winfo_exists():
+            return
+            
+        scroll_frame = self._concept_win._content_frame
+        for widget in scroll_frame.winfo_children():
+            widget.destroy()
+
+        title_lbl = tk.Label(
+            scroll_frame,
+            text=f"📊 概念板块统计详情 (共 {len(all_concepts)} 个)",
+            font=("Microsoft YaHei", 10, "bold"),
+            fg="#004D40",
+            bg="white",
+            anchor="w"
+        )
+        title_lbl.pack(anchor="w", pady=(4, 8), padx=6)
+
+        for idx, (cat_name, count) in enumerate(all_concepts, 1):
+            item_frame = tk.Frame(scroll_frame, bg="white")
+            item_frame.pack(fill="x", anchor="w", pady=2, padx=6)
+            
+            lbl_idx = tk.Label(
+                item_frame,
+                text=f"{idx:02d}.",
+                font=("Consolas", 9),
+                fg="gray",
+                bg="white"
+            )
+            lbl_idx.pack(side="left")
+            
+            lbl_name = tk.Label(
+                item_frame,
+                text=f"{cat_name}",
+                font=("Microsoft YaHei", 9, "bold"),
+                fg="#1A73E8",
+                bg="white",
+                cursor="hand2"
+            )
+            lbl_name.pack(side="left", padx=4)
+            lbl_name.bind("<Button-1>", lambda e, name=cat_name: self.show_concept_top10_window(name))
+            
+            lbl_count = tk.Label(
+                item_frame,
+                text=f"({count}只)",
+                font=("Microsoft YaHei", 9),
+                fg="gray",
+                bg="white"
+            )
+            lbl_count.pack(side="left")
+
+    def show_concept_top10_window(self, concept_name):
+        """展示此概念的个股列表"""
+        import re
+        target_concept = self._normalize_concept_name(concept_name)
+        if not target_concept:
+            return
+
+        if self._last_flat_df is None or self._last_flat_df.empty:
+            messagebox.showinfo("信息", "当前无筛选数据，无法查看个股列表", parent=self)
+            return
+
+        matched_stocks = []
+        for code, row in self._last_flat_df.iterrows():
+            category = self._get_stock_category(code, row)
+            if not category:
+                continue
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
+            cats_normalized = [self._normalize_concept_name(c) for c in cats]
+            if target_concept in cats_normalized:
+                matched_stocks.append((code, row))
+
+        if not matched_stocks:
+            messagebox.showinfo("信息", f"当前筛选结果中暂无属于【{target_concept}】的个股", parent=self)
+            return
+
+        if hasattr(self, "concept_win") and self.concept_win and self.concept_win.winfo_exists():
+            try:
+                self.concept_win.destroy()
+            except Exception:
+                pass
+        self.concept_win = None
+
+        win = tk.Toplevel(self)
+        self.concept_win = win
+        win.title(f"板块【{target_concept}】个股列表")
+        
+        saved_geom = self.ui_state.get('concept_window_geometry', '750x400')
+        win.geometry(saved_geom)
+
+        def _save_concept_win_geo(event):
+            if win.winfo_exists():
+                try:
+                    self.ui_state["concept_window_geometry"] = win.winfo_geometry()
+                    self._save_state()
+                except Exception:
+                    pass
+        win.bind("<Configure>", _save_concept_win_geo)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        frame = tk.Frame(win, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
+        frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        columns = ["idx"] + list(self.tree["columns"])
+        
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="Treeview")
+        
+        vsb = tk.Scrollbar(frame, orient="vertical", command=tree.yview,
+                           width=8, bd=0, relief="flat",
+                           bg="#B0BEC5", troughcolor="#ECEFF1",
+                           activebackground="#78909C",
+                           highlightthickness=0)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        def sort_sub_column(t, col, reverse):
+            data = [(t.set(k, col), k) for k in t.get_children('')]
+            def safe_float(x):
+                try:
+                    return float(str(x).replace('%', '').strip())
+                except ValueError:
+                    if '✅' in str(x): return 1.0
+                    if '--' in str(x): return -999.0
+                    return -999.0
+            try:
+                [safe_float(x[0]) for x in data if x[0]]
+                data.sort(key=lambda x: safe_float(x[0]), reverse=reverse)
+            except Exception:
+                data.sort(key=lambda x: str(x[0]), reverse=reverse)
+            for index, (val, k) in enumerate(data):
+                t.move(k, '', index)
+            t.heading(col, command=lambda c=col: sort_sub_column(t, c, not reverse))
+
+        tree.heading("idx", text="序号", command=lambda c="idx": sort_sub_column(tree, c, False))
+        tree.column("idx", width=36, anchor="center")
+        for col in self.tree["columns"]:
+            tree.heading(col, text=self.tree.heading(col, "text"), command=lambda c=col: sort_sub_column(tree, c, False))
+            tree.column(col, width=self.tree.column(col, "width"), anchor=self.tree.column(col, "anchor"))
+
+        def on_select_sub(event):
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], "values")
+                if vals and len(vals) >= 2:
+                    code = str(vals[1]).strip().zfill(6)
+                    self._do_linkage(code=code)
+
+        tree.bind("<<TreeviewSelect>>", on_select_sub)
+
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        for idx, (code, row) in enumerate(matched_stocks):
+            name = row.get('name', '--')
+            is_fav = code in fav_stocks
+            display_name = f"★ {name}" if is_fav else name
+            
+            values = [idx + 1]
+            
+            for col in self.tree["columns"]:
+                if col == "code":
+                    values.append(code)
+                elif col == "name":
+                    values.append(display_name)
+                elif col == "price":
+                    values.append(round(row.get('close', 0), 2))
+                elif col == "percent":
+                    values.append(round(row.get('percent', 0), 2))
+                elif col == "volume":
+                    values.append(round(row.get('volume', 0), 2))
+                elif col == "ratio":
+                    values.append(round(row.get('ratio', 0), 2))
+                else:
+                    val = '--'
+                    if col in row:
+                        raw_val = row.get(col)
+                        if pd.notna(raw_val):
+                            if col.startswith("pass_"):
+                                val = '✅' if raw_val else '--'
+                            elif isinstance(raw_val, (int, float)):
+                                val = round(raw_val, 2)
+                            else:
+                                val = str(raw_val)
+                    values.append(val)
+            
+            tree.insert("", "end", values=values)
+
+        stat_frame = tk.Frame(win, bg="#F9F9F9", height=24)
+        stat_frame.pack(side="bottom", fill="x", padx=4, pady=2)
+
+        up_stocks = [r for c, r in matched_stocks if r.get('percent', 0) > 0]
+        down_stocks = [r for c, r in matched_stocks if r.get('percent', 0) < 0]
+        flat_stocks = [r for c, r in matched_stocks if r.get('percent', 0) == 0]
+
+        avg_up = sum(r.get('percent', 0) for r in up_stocks) / len(up_stocks) if up_stocks else 0.0
+        avg_down = sum(r.get('percent', 0) for r in down_stocks) / len(down_stocks) if down_stocks else 0.0
+
+        stat_text = f" 统计: 上涨 {len(up_stocks)}只 (均幅 {avg_up:+.2f}%) | 下跌 {len(down_stocks)}只 (均幅 {avg_down:+.2f}%) | 平盘 {len(flat_stocks)}只"
+        lbl_stat = tk.Label(stat_frame, text=stat_text, font=("Microsoft YaHei", 9, "bold"), fg="#333333", bg="#F9F9F9", anchor="w")
+        lbl_stat.pack(side="left", padx=6, pady=2)
+
+        win.deiconify()
+        win.lift()
+        win.focus_force()
 
 
 class MultiPeriodStrategyEditor(tk.Toplevel):

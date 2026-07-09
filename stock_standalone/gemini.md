@@ -1,3 +1,12 @@
+## 2026-07-09 12:15
+- [x] **修复个股列表“序号”列点击无法排序的缺陷 (Fixed Click-to-Sort on Serial Number (idx) in Constituents Popup)**：
+    - [x] **补全“序号”列头 command 点击绑定**：在 `standalone_multi_period_tester.py` 的 `show_concept_top10_window` 界面渲染中，为 `"idx"` 列头绑定了 `command=lambda c="idx": sort_sub_column(tree, c, False)` 排序指令，使得用户点击“序号”表头时能够正常触发排序动作，在多级联动与查看分析时实现更顺畅 of 列表整理与数据回溯。
+- [x] **优化个股列表点击联动，移除了多周期主视图中不必要的跳转定位 (Optimized Popup Stock Selection Linkage, Removed Unwanted Focus/Jump in Main View)**：
+    - [x] **重构 `_do_linkage` 接口以支持显式参数**：为 `_do_linkage` 增加了可选的 `code=None` 参数。当传入具体代码时直接执行联动逻辑，而当其为空时再降级从主 Treeview 的当前选中行中读取，提高了方法的复用性。
+    - [x] **解耦个股 Constituents 列表选中与主视图的强制选中行为**：在个股列表 `on_select_sub` 选中事件回调中，彻底废除了向多周期主 Treeview 执行 `selection_set`、`focus` 和 `see` 的滚动定位操作，改为直接向 `_do_linkage(code=code)` 投递个股代码进行通道分发。实现了点击详情个股触发外部看盘图表联动、同时多周期主面板数据视口和选中项完全保持静止不跳动的极佳交互体验。
+    - [x] **静态语法编译 100% 成功验证**：执行 `py_compile` 对修改后的文件执行了编译校验，无任何语法或缩进报错。
+
+
 ## 2026-07-08 10:30
 - [x] **修复多周期联动后台线程 asyncio 缺失引发的 RuntimeError 崩溃 (Fixed Asyncio Event Loop RuntimeError in Multi-Period Background Threads)**：
     - [x] **加固 `get_sina_Market_json` 异步获取逻辑**：重构了 `JSONData/realdatajson.py`，将原本直接调用 `asyncio.get_event_loop()` 替换为带 `try-except` 保护的事件循环安全获取与绑定逻辑，消除了 Python 3.9 及以上环境中非主线程默认缺少事件循环引起的 `RuntimeError: There is no current event loop` 崩溃问题。
