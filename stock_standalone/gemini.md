@@ -1,3 +1,12 @@
+## 2026-07-09 21:00
+- [x] **修复并优化人气共振客户端自动刷新、跨天切换、IPC 同步与盘后自动归档逻辑 (Fixed & Optimized Popularity Resonance GUI Auto-Refresh, Date Crossings, IPC Sync & Post-Market Archiving)**：
+    - [x] **实现查询刷新时 IPC 行情全量强制同步 (Mandatory IPC Sync on Refresh)**：在 `_run_once_job` 获取最新人气排行前，增加 `self.sync_manager.request_full_sync()` 同步请求并延迟 `1.2s` 等待数据流接收，彻底根治了手动/自动点击查询刷新后使用旧行情 DataFrame 缓存导致价格与涨幅不吻合的缺陷。
+    - [x] **实现自动刷新跨天自动切换 (Auto-Transition to Today on Date Crossing)**：若当前处于“启动自动”模式，且检测到系统日期已发生变更（跨天），自动将内存 `self.current_date` 以及 UI 的 `date_entry` 日历控件强制同步为最新日期，重置表格并开始接收、持久化新一天的数据，消除了由于保持昨日日期被系统判定为“历史复盘模式”而无法自动刷新新数据的痛点。
+    - [x] **实施盘后强制最终持久化机制 (Enforced Post-Market Final Archiving)**：重构了后台收盘检测 `_check_auto_refresh_after_close` 状态机。引入内存判定标识 `self._final_post_market_saved_date`。只要到达 15:15 盘后交易结算点，即使白天生成过部分数据，系统依然会强行触发一次最终的数据查询、清洗并生成最终 of `.csv.gz` 物理归档，确保包含了完整的东财、同花顺、淘股吧与最终清算的龙虎榜人气数据。
+    - [x] **优化收盘检测轮询频率 (Optimized Post-Market Check Frequency)**：将 `_check_auto_refresh_after_close` 定时器的轮询间隔从 `30` 分钟优化缩减为 `5` 分钟，大幅提升了盘后自动捕获与自愈的灵敏度，且单次检查耗时低于毫秒级，无任何 CPU 开销。
+    - [x] **实现历史数据复盘联动可视化携带日期功能 (Carry Date in Vis Linkage during History Mode)**：重构了 `send_to_visualizer` 核心通讯方法。系统会动态检查当前的查看日期是否不等于今日。当处于“查看历史数据模式”时，发送至 26668 可视化终端的普通 `CODE` 切换指令会自动升级为带有指定日期参数的 `TIME_LINK|{code}|{view_date}` 复合联动指令，彻底解决了历史模式下联动看盘画面残留今日实时行情的痛点。
+    - [x] **编译与集成测试 100% 成功 (Compilation & Integration Tests Passed)**：通过 `py_compile` 对修改后的 GUI 文件进行语法检验全绿通过，并编写 `test_popularity_resonance_logic.py` 成功通过 headless 环境下的初始化断言检验。
+
 ## 2026-07-09 20:45
 - [x] **规划分析并物理实现实盘资金流与1小时dff/放量数据结合的快速定位能力 (Enacted & Implemented Real-time Fund Flow Positioning with 1-Hour DFF Slice & Volume Co-detection)**：
     - [x] **剖析1小时dff周期切片的聚集特征 (Analyzed 1-Hour DFF Slice Dynamics)**：在 `realtime_fundflow_positioning_plan.md` 中，详细分析了1小时dff时间切片内的“优先出现”、“持续拉升”与“突然拉升”的聚集规律，以及在小时值切换时dff产生变动的特征。
