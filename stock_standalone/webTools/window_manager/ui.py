@@ -515,6 +515,11 @@ class EditPathDialog(QDialog):
         layout.addSpacing(10)
         
         btn_layout = QHBoxLayout()
+        # 清空按钮放左侧，方便快速清除错误路径
+        self.btn_clear = QPushButton("🗑 清空路径")
+        self.btn_clear.setToolTip("清空路径（留空表示不自动启动）")
+        self.btn_clear.clicked.connect(lambda: self.txt_path.clear())
+        btn_layout.addWidget(self.btn_clear)
         btn_layout.addStretch()
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.clicked.connect(self.reject)
@@ -1506,8 +1511,9 @@ class WindowPosManagerUI(QMainWindow):
                 old_pos = pos_item.text().strip() if pos_item else ""
                 old_exe_path = pos_item.data(QtCore.Qt.ItemDataRole.UserRole) if pos_item else ""
                 
-                # 若缺失路径则顺便自愈
-                if pos_item and not old_exe_path and found_exe_path:
+                # 只有当前配置中 exe_path 为空时，才自动填入
+                # （已有配置的路径不覆盖，防止把自定义命令行覆盖为系统可执行文件）
+                if pos_item and found_exe_path and not old_exe_path:
                     pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
                     self.request_save_config_debounced()
                 
@@ -1577,8 +1583,10 @@ class WindowPosManagerUI(QMainWindow):
             cur_item.setFlags(cur_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             
             if found_hwnd:
-                # 若原来没有 exe_path，但现在程序运行了，自动自愈补齐并保存到单元格
-                if not pos_item.data(QtCore.Qt.ItemDataRole.UserRole) and found_exe_path:
+                # 只有当前配置中 exe_path 为空时，才自动填入探测到的进程路径
+                # （已有配置的路径不覆盖，防止把 'start cmd /k ...' 这类自定义命令行覆盖为 cmd.exe）
+                old_exe_path_cur = pos_item.data(QtCore.Qt.ItemDataRole.UserRole) if pos_item else ""
+                if found_exe_path and not old_exe_path_cur:
                     pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, found_exe_path)
                     self.request_save_config_debounced()
                     
@@ -1610,14 +1618,29 @@ class WindowPosManagerUI(QMainWindow):
         try:
             if rebuild:
                 # 搜集所有方案中去重后的 candidates 程序 (title -> exe_path)
+                # 优先级：当前激活方案 > 其他方案（防止旧方案路径覆盖当前正确路径）
                 candidates = {}
+                
+                # Step1: 先从非当前方案收集（作为 fallback）
+                current_res = self.get_current_selected_resolution()
                 for cat_name in self.config_manager.get_categories():
                     for res_name in self.config_manager.get_resolutions_by_category(cat_name):
+                        if res_name == current_res:
+                            continue  # 跳过当前方案，留到最后以最高优先级覆盖
                         mapping = self.config_manager.get_resolution_mapping(res_name)
                         for title, raw_pos_str in mapping.items():
                             parts = str(raw_pos_str).split('|')
                             if len(parts) > 1 and parts[1].strip():
-                                candidates[title] = parts[1].strip()
+                                if title not in candidates:  # 非当前方案只写入一次（fallback）
+                                    candidates[title] = parts[1].strip()
+                
+                # Step2: 当前激活方案的 exe_path 以最高优先级写入（强制覆盖）
+                if current_res:
+                    current_mapping = self.config_manager.get_resolution_mapping(current_res)
+                    for title, raw_pos_str in current_mapping.items():
+                        parts = str(raw_pos_str).split('|')
+                        if len(parts) > 1 and parts[1].strip():
+                            candidates[title] = parts[1].strip()  # 强制覆盖，确保当前方案路径最优先
                 
                 # 如果没有候选程序，显示占位提示
                 if not candidates:
@@ -1668,7 +1691,20 @@ class WindowPosManagerUI(QMainWindow):
                         display_title = display_title[:14] + "..."
                         
                     btn = QPushButton(display_title)
-                    btn.setToolTip(f"程序: {title}\n路径: {exe_path}\n点击次数: {hotness.get(title, 0)}")
+                    click_count = hotness.get(title, 0)
+                    import textwrap, html as _html
+                    path_str = exe_path or '(未配置)'
+                    # 按 50 字符折行，转义 HTML 特殊字符，用 <br> 分隔
+                    path_html = '<br>&nbsp;&nbsp;&nbsp;&nbsp;'.join(
+                        _html.escape(p) for p in textwrap.wrap(path_str, width=50)
+                    ) or _html.escape(path_str)
+                    tooltip_text = (
+                        f"<b style='color:#ffffff;'>{_html.escape(title)}</b><br>"
+                        f"<span style='color:#10b981;'>启动路径:</span> "
+                        f"<span style='color:#d1d5db;'>{path_html}</span><br>"
+                        f"<span style='color:#6b7280;'>点击次数: {click_count} 次</span>"
+                    )
+                    btn.setToolTip(tooltip_text)
                     btn.setMinimumHeight(42)
                     btn.setMaximumHeight(42)
                     
@@ -1973,15 +2009,20 @@ class WindowPosManagerUI(QMainWindow):
         elif action == edit_action:
             self.table_widget.editItem(item)
         elif action == edit_path_action:
-            dialog = EditPathDialog(title, exe_path, self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                new_path = dialog.final_path
-                if pos_item:
-                    pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, new_path)
-                    self.save_current_table_to_memory()
-                    self.request_save_config_debounced()
-                    self.log(f"🎯 已更新程序 '{title}' 的启动路径 ➡ {new_path}")
-                    self.on_resolution_changed()
+            # 标记正在编辑路径，防止 wait_and_apply 定时器因模糊匹配对话框标题而误移位
+            self._editing_path = True
+            try:
+                dialog = EditPathDialog(title, exe_path, self)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    new_path = dialog.final_path
+                    if pos_item:
+                        pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, new_path)
+                        self.save_current_table_to_memory()
+                        self.request_save_config_debounced()
+                        self.log(f"🎯 已更新程序 '{title}' 的启动路径 ➡ {new_path}")
+                        self.on_resolution_changed()
+            finally:
+                self._editing_path = False
 
     def _setup_post_launch_layout_timer(self, title, pos_item):
         """程序启动后启动定时器，高频轮询检测窗口创建并应用坐标"""
@@ -1989,6 +2030,11 @@ class WindowPosManagerUI(QMainWindow):
         def wait_and_apply(attempts=0):
             if attempts > 30: # 尝试30次，共15秒
                 self.log(f"⚠️ 启动程序 '{title}' 等待窗口创建超时，放弃自动应用布局。")
+                return
+            
+            # 若正在编辑路径对话框，跳过本轮（防止模糊标题匹配误移对话框）
+            if getattr(self, '_editing_path', False):
+                QtCore.QTimer.singleShot(500, lambda: wait_and_apply(attempts + 1))
                 return
                 
             titles_to_try = [title]
@@ -2363,8 +2409,8 @@ def main():
     dark_palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#e0e0e0"))
     dark_palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#16161a"))
     dark_palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#1e1e24"))
-    dark_palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor("#ffffff"))
-    dark_palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor("#ffffff"))
+    dark_palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor("#1e1e24"))
+    dark_palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor("#e0e0e0"))
     dark_palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#e0e0e0"))
     dark_palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor("#2e2e38"))
     dark_palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#ffffff"))
