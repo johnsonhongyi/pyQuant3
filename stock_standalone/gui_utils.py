@@ -176,16 +176,48 @@ def clamp_window_to_screens(x: int, y: int, w: int, h: int) -> Tuple[int, int]:
         init_monitors()
     monitors = MONITORS or [(0, 0, 1920, 1080)]
     
-    # 逻辑判断：只要窗口左上角在任意屏幕内，就根据该屏幕 clamp
+    # 1. 寻找与窗口重叠面积最大的屏幕
+    best_monitor = None
+    max_overlap = -1
     for left, top, right, bottom in monitors:
-        if left <= x < right and top <= y < bottom:
-            x = max(left, min(x, right - w))
-            y = max(top, min(y, bottom - h))
-            return x, y
+        overlap_left = max(x, left)
+        overlap_right = min(x + w, right)
+        overlap_top = max(y, top)
+        overlap_bottom = min(y + h, bottom)
+        
+        if overlap_right > overlap_left and overlap_bottom > overlap_top:
+            overlap_area = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
+            if overlap_area > max_overlap:
+                max_overlap = overlap_area
+                best_monitor = (left, top, right, bottom)
+                
+    if best_monitor:
+        left, top, right, bottom = best_monitor
+        x = max(left, min(x, right - w))
+        # 允许窗口标题栏稍微往上拖动（最多高出屏幕 30px），保证标题栏不完全出界
+        y = max(top - 30, min(y, bottom - h))
+        return x, y
+
+    # 2. 如果没有任何重叠，寻找离窗口中心最近的屏幕
+    win_cx = x + w // 2
+    win_cy = y + h // 2
+    min_dist = float('inf')
+    closest_monitor = monitors[0]
+    
+    for left, top, right, bottom in monitors:
+        scr_cx = (left + right) // 2
+        scr_cy = (top + bottom) // 2
+        dist = (win_cx - scr_cx) ** 2 + (win_cy - scr_cy) ** 2
+        if dist < min_dist:
+            min_dist = dist
+            closest_monitor = (left, top, right, bottom)
             
-    # 如果左上角不在任何屏幕，寻找最近屏幕或默认回主屏
-    left, top, right, bottom = monitors[0]
-    return left + 100, top + 100
+    left, top, right, bottom = closest_monitor
+    x = left + (right - left - w) // 2
+    y = top + (bottom - top - h) // 2
+    x = max(left, min(x, right - w))
+    y = max(top, min(y, bottom - h))
+    return x, y
 
 def get_centered_window_position_mainWin(parent: Union[tk.Tk, tk.Toplevel], win_width: int, win_height: int, x_root: Optional[int] = None, y_root: Optional[int] = None, parent_win: Optional[Union[tk.Tk, tk.Toplevel]] = None) -> Tuple[int, int]:
     """计算相对于父窗口居中的位置"""

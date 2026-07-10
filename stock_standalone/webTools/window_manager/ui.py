@@ -13,7 +13,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
-    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon
+    QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
+    QSizePolicy
 )
 from PyQt6.QtGui import QAction, QIcon
 
@@ -22,6 +23,24 @@ try:
     from . import core
 except ImportError:
     import core
+
+import sys
+# 动态将工作空间根目录及当前目录加入路径，保证 tk_gui_modules 等模块可以被顺利导入
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from tk_gui_modules.window_mixin import WindowMixin
+except ImportError:
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from tk_gui_modules.window_mixin import WindowMixin
+    except ImportError:
+        # 兜底定义 WindowMixin，防止导入失败导致崩溃
+        class WindowMixin:
+            def load_window_position_qt(self, win, name, file_path=None, default_width=500, default_height=500, offset_step=100):
+                win.resize(default_width, default_height)
+                return default_width, default_height, None, None
+            def save_window_position_qt_visual(self, *args, **kwargs): pass
+            def save_window_position_qt(self, *args, **kwargs): pass
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -63,8 +82,93 @@ class HotkeyLineEdit(QLineEdit):
         if key_name:
             key_str.append(key_name)
             self.setText("+".join(key_str))
+class FlowLayout(QtWidgets.QLayout):
+    """
+    流式自适应折行布局管理器 (PyQt6)
+    用于自动根据可用宽度折行排列按钮与控件，解决窗口缩小时按钮溢出或遮挡的痛点。
+    """
+    def __init__(self, parent=None, margin=0, hspacing=5, vspacing=5):
+        super().__init__(parent)
+        self._item_list = []
+        self._h_spacing = hspacing
+        self._v_spacing = vspacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+
+    def addItem(self, item):
+        self._item_list.append(item)
+
+    def count(self):
+        return len(self._item_list)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QtCore.QSize()
+        for item in self._item_list:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QtCore.QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        line_height = 0
+
+        for item in self._item_list:
+            wid = item.widget()
+            if not wid:
+                continue
             
-            
+            space_x = self._h_spacing
+            space_y = self._v_spacing
+
+            next_x = x + item.sizeHint().width() + space_x
+            if next_x - space_x > rect.right() - margins.right() and line_height > 0:
+                x = rect.x() + margins.left()
+                y = y + line_height + space_y
+                next_x = x + item.sizeHint().width() + space_x
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), item.sizeHint()))
+
+            x = next_x
+            line_height = max(line_height, item.sizeHint().height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
 class NewResolutionDialog(QDialog):
     """
     新建配置方案对话框
@@ -534,8 +638,12 @@ class EditPathDialog(QDialog):
         from PyQt6.QtWidgets import QFileDialog
         import os
         initial_dir = ""
-        if self.txt_path.text().strip():
-            dir_name = os.path.dirname(self.txt_path.text().strip())
+        path_text = self.txt_path.text().strip()
+        # 剥离可能存在的外层引号以找到正确的目录
+        if (path_text.startswith('"') and path_text.endswith('"')) or (path_text.startswith("'") and path_text.endswith("'")):
+            path_text = path_text[1:-1]
+        if path_text:
+            dir_name = os.path.dirname(path_text)
             if os.path.exists(dir_name):
                 initial_dir = dir_name
         file_path, _ = QFileDialog.getOpenFileName(
@@ -544,25 +652,46 @@ class EditPathDialog(QDialog):
             "可执行文件 (*.exe *.bat *.cmd *.py);;所有文件 (*.*)"
         )
         if file_path:
-            self.txt_path.setText(os.path.normpath(file_path))
+            norm_path = os.path.normpath(file_path)
+            # 如果路径中含有空格，且没有被引号包裹，则自动包裹双引号
+            if " " in norm_path:
+                if not ((norm_path.startswith('"') and norm_path.endswith('"')) or (norm_path.startswith("'") and norm_path.endswith("'"))):
+                    norm_path = f'"{norm_path}"'
+            self.txt_path.setText(norm_path)
 
     def accept_path(self):
-        self.final_path = self.txt_path.text().strip()
+        path = self.txt_path.text().strip()
+        # 如果路径中含有空格，且没有被包裹，则自动加上双引号
+        if path and " " in path:
+            if not ((path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'"))):
+                path = f'"{path}"'
+        self.final_path = path
         self.accept()
 
 
-class WindowPosManagerUI(QMainWindow):
+class WindowPosManagerUI(QMainWindow, WindowMixin):
     """主窗口：窗口坐标及分布管理器"""
     toggle_ui_signal = QtCore.pyqtSignal()
     
     def __init__(self):
         super().__init__()
         self.setWindowTitle("股票交易终端 - 窗口坐标分类管理器")
-        self.resize(980, 700)
+        
+        # 获取系统 DPI 缩放并设置，供 WindowMixin 自动识别适配
+        try:
+            from dpi_utils import get_windows_dpi_scale_factor
+            self.scale_factor = get_windows_dpi_scale_factor()
+        except:
+            self.scale_factor = 1.0
+            
         self._hotkey_hook = None
         self.config_manager = core.ConfigManager()
         self.current_bound_hotkey = self.config_manager.config_data.get("global_hotkey", "ctrl+alt+w")
         self.init_ui()
+        
+        # 恢复上次保存的窗口位置与尺寸
+        self.load_window_position_qt(self, "WindowPosManagerUI", default_width=980, default_height=700)
+        
         self.load_screen_info()
         self.refresh_resolutions_combo()
         self.setup_tray_icon()
@@ -588,6 +717,12 @@ class WindowPosManagerUI(QMainWindow):
         
     def force_quit(self):
         try:
+            if hasattr(self, "_window_save_debounce"):
+                self._window_save_debounce.clear()
+            self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+        except Exception as e:
+            print(f"[WARN] Failed to save position on force_quit: {e}")
+        try:
             if getattr(self, '_hotkey_hook', None):
                 keyboard.remove_hotkey(self._hotkey_hook)
         except:
@@ -599,6 +734,12 @@ class WindowPosManagerUI(QMainWindow):
             self.toggle_visibility()
             
     def closeEvent(self, event):
+        try:
+            if hasattr(self, "_window_save_debounce"):
+                self._window_save_debounce.clear()
+            self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+        except Exception as e:
+            print(f"[WARN] Failed to save position on closeEvent: {e}")
         if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
             self.hide()
             self.log("界面已隐藏至状态栏。")
@@ -610,6 +751,20 @@ class WindowPosManagerUI(QMainWindow):
             except:
                 pass
             event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+        except:
+            pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        try:
+            self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+        except:
+            pass
 
     def detect_and_refresh_state(self):
         """自动检测物理屏幕拓扑结构并刷新当前桌面各窗口的实际坐标位置"""
@@ -727,7 +882,7 @@ class WindowPosManagerUI(QMainWindow):
                 border-radius: 4px;
                 padding: 5px;
                 color: #ffffff;
-                min-width: 280px;
+                min-width: 150px;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
@@ -827,6 +982,7 @@ class WindowPosManagerUI(QMainWindow):
         main_widget = QWidget()
         main_widget.setObjectName("mainWidget")
         self.setCentralWidget(main_widget)
+        self.setMinimumSize(450, 420)
         
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -854,7 +1010,7 @@ class WindowPosManagerUI(QMainWindow):
         gb_display_layout.addWidget(self.lbl_display_details)
         
         # 增加显示器物理布局保存/恢复按钮栏
-        screen_btn_bar = QHBoxLayout()
+        screen_btn_bar = FlowLayout(hspacing=6, vspacing=6)
         self.btn_save_screen_layout = QPushButton("💾 保存显示器物理拓扑")
         self.btn_save_screen_layout.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-weight: bold;")
         self.btn_save_screen_layout.clicked.connect(self.save_physical_screen_layout)
@@ -865,49 +1021,89 @@ class WindowPosManagerUI(QMainWindow):
         
         screen_btn_bar.addWidget(self.btn_save_screen_layout)
         screen_btn_bar.addWidget(self.btn_restore_screen_layout)
-        screen_btn_bar.addStretch()
         gb_display_layout.addLayout(screen_btn_bar)
 
         main_layout.addWidget(self.gb_display_info)
 
-        # 常用程序快捷启动面板
-        self.gb_app_shortcuts = QGroupBox("常用程序快捷启动 (根据使用热度自动排序)")
-        self.shortcuts_grid_layout = QtWidgets.QGridLayout(self.gb_app_shortcuts)
-        self.shortcuts_grid_layout.setContentsMargins(15, 15, 15, 15)
-        self.shortcuts_grid_layout.setSpacing(10)
+        # 常用程序快捷启动面板（横向滚动，固定/运行中优先，可容纳更多程序）
+        self.gb_app_shortcuts = QGroupBox("常用程序快捷启动 (⭐固定优先 · ▶运行次之 · 滚轮切换更多)")
+        gb_shortcuts_outer = QVBoxLayout(self.gb_app_shortcuts)
+        gb_shortcuts_outer.setContentsMargins(8, 15, 8, 8)
+        gb_shortcuts_outer.setSpacing(0)
+
+        self._shortcuts_scroll = QtWidgets.QScrollArea()
+        self._shortcuts_scroll.setWidgetResizable(True)
+        self._shortcuts_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._shortcuts_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._shortcuts_scroll.setFixedHeight(62)
+        self._shortcuts_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollBar:horizontal { height: 5px; background: #1e1e24; border-radius: 3px; }"
+            "QScrollBar::handle:horizontal { background: #4b5563; border-radius: 3px; min-width: 30px; }"
+            "QScrollBar::handle:horizontal:hover { background: #6b7280; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+        )
+
+        self._shortcuts_inner = QWidget()
+        self._shortcuts_inner.setStyleSheet("background: transparent;")
+        self.shortcuts_grid_layout = QHBoxLayout(self._shortcuts_inner)
+        self.shortcuts_grid_layout.setContentsMargins(5, 2, 5, 2)
+        self.shortcuts_grid_layout.setSpacing(8)
+        self.shortcuts_grid_layout.addStretch()
+        self._shortcuts_scroll.setWidget(self._shortcuts_inner)
+        gb_shortcuts_outer.addWidget(self._shortcuts_scroll)
+
+        def _on_shortcuts_wheel(event):
+            sb = self._shortcuts_scroll.horizontalScrollBar()
+            delta = event.angleDelta().y()
+            sb.setValue(sb.value() - delta // 3)
+        self._shortcuts_scroll.wheelEvent = _on_shortcuts_wheel
+
         self.shortcut_buttons = {}
-        
-        self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置‘程序路径’。")
+        self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置'程序路径'。")
         self.lbl_shortcuts_tip.setStyleSheet("color: #6b7280; font-style: italic;")
-        self.shortcuts_grid_layout.addWidget(self.lbl_shortcuts_tip, 0, 0)
-        
+        self.shortcuts_grid_layout.insertWidget(0, self.lbl_shortcuts_tip)
+
         main_layout.addWidget(self.gb_app_shortcuts)
 
         # 配置管理控制栏
         config_bar = QHBoxLayout()
-        config_bar.addWidget(QLabel("分类选择方案:"))
+        config_bar.setSpacing(6)
+        config_bar.setContentsMargins(0, 0, 0, 0)
+        
+        lbl_res = QLabel("分类选择方案:")
+        lbl_res.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        config_bar.addWidget(lbl_res)
         
         self.cb_resolutions = QComboBox()
         self.cb_resolutions.currentIndexChanged.connect(self.on_resolution_changed)
+        self.cb_resolutions.setMinimumWidth(120)
+        self.cb_resolutions.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_bar.addWidget(self.cb_resolutions)
 
         self.btn_new_res = QPushButton("➕ 新建方案")
         self.btn_new_res.clicked.connect(self.new_resolution)
+        self.btn_new_res.setMinimumWidth(60)
+        self.btn_new_res.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_bar.addWidget(self.btn_new_res)
         
         self.btn_copy_res = QPushButton("📋 复制方案")
         self.btn_copy_res.clicked.connect(self.copy_resolution)
+        self.btn_copy_res.setMinimumWidth(60)
+        self.btn_copy_res.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_bar.addWidget(self.btn_copy_res)
 
         self.btn_delete_res = QPushButton("🗑️ 删除方案")
         self.btn_delete_res.setObjectName("btnDeleteRes")
         self.btn_delete_res.clicked.connect(self.delete_resolution)
+        self.btn_delete_res.setMinimumWidth(60)
+        self.btn_delete_res.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_bar.addWidget(self.btn_delete_res)
-        
-        config_bar.addStretch()
         
         self.btn_auto_detect = QPushButton("🔍 自动匹配当前屏幕")
         self.btn_auto_detect.clicked.connect(self.auto_detect_and_set)
+        self.btn_auto_detect.setMinimumWidth(100)
+        self.btn_auto_detect.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_bar.addWidget(self.btn_auto_detect)
         
         main_layout.addLayout(config_bar)
@@ -979,7 +1175,7 @@ class WindowPosManagerUI(QMainWindow):
         main_layout.addWidget(log_group)
 
         # 底部应用栏
-        bottom_bar = QHBoxLayout()
+        bottom_bar = FlowLayout(hspacing=6, vspacing=6)
         
         # --- 全局热键配置 ---
         self.lbl_hotkey = QLabel("全局热键:")
@@ -993,8 +1189,6 @@ class WindowPosManagerUI(QMainWindow):
         self.btn_bind_hotkey = QPushButton("绑定")
         self.btn_bind_hotkey.clicked.connect(self.on_bind_hotkey_clicked)
         bottom_bar.addWidget(self.btn_bind_hotkey)
-        
-        bottom_bar.addStretch()
         
         self.btn_open_perf = QPushButton("📐 性能分析")
         self.btn_open_perf.setObjectName("btnPerf")
@@ -1612,26 +1806,26 @@ class WindowPosManagerUI(QMainWindow):
     def refresh_app_shortcuts(self, rebuild=True):
         """
         刷新快捷启动程序格子面板
-        rebuild=True: 重新根据热度排序并构建按钮控件 (点击、初始化、切换方案时)
-        rebuild=False: 仅刷新每个按钮的运行状态与颜色 (定时、刷新位置时)
+        rebuild=True: 重新根据排序规则构建按钮控件
+        rebuild=False: 仅刷新每个按钮的运行状态与颜色
         """
         try:
             if rebuild:
                 # 搜集所有方案中去重后的 candidates 程序 (title -> exe_path)
-                # 优先级：当前激活方案 > 其他方案（防止旧方案路径覆盖当前正确路径）
+                # 优先级：当前激活方案 > 其他方案
                 candidates = {}
                 
-                # Step1: 先从非当前方案收集（作为 fallback）
+                # Step1: 先从非当前方案收集
                 current_res = self.get_current_selected_resolution()
                 for cat_name in self.config_manager.get_categories():
                     for res_name in self.config_manager.get_resolutions_by_category(cat_name):
                         if res_name == current_res:
-                            continue  # 跳过当前方案，留到最后以最高优先级覆盖
+                            continue
                         mapping = self.config_manager.get_resolution_mapping(res_name)
                         for title, raw_pos_str in mapping.items():
                             parts = str(raw_pos_str).split('|')
                             if len(parts) > 1 and parts[1].strip():
-                                if title not in candidates:  # 非当前方案只写入一次（fallback）
+                                if title not in candidates:
                                     candidates[title] = parts[1].strip()
                 
                 # Step2: 当前激活方案的 exe_path 以最高优先级写入（强制覆盖）
@@ -1640,17 +1834,17 @@ class WindowPosManagerUI(QMainWindow):
                     for title, raw_pos_str in current_mapping.items():
                         parts = str(raw_pos_str).split('|')
                         if len(parts) > 1 and parts[1].strip():
-                            candidates[title] = parts[1].strip()  # 强制覆盖，确保当前方案路径最优先
+                            candidates[title] = parts[1].strip()
                 
                 # 如果没有候选程序，显示占位提示
                 if not candidates:
-                    while self.shortcuts_grid_layout.count():
+                    while self.shortcuts_grid_layout.count() > 1:
                         child = self.shortcuts_grid_layout.takeAt(0)
                         if child.widget():
                             child.widget().deleteLater()
-                    self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置‘程序路径’。")
+                    self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置'程序路径'。")
                     self.lbl_shortcuts_tip.setStyleSheet("color: #6b7280; font-style: italic;")
-                    self.shortcuts_grid_layout.addWidget(self.lbl_shortcuts_tip, 0, 0)
+                    self.shortcuts_grid_layout.insertWidget(0, self.lbl_shortcuts_tip)
                     self.shortcut_buttons = {}
                     return
                 
@@ -1662,61 +1856,72 @@ class WindowPosManagerUI(QMainWindow):
                         pass
                     self.lbl_shortcuts_tip = None
                 
-                # 获取点击热度
+                # 获取点击热度与固定列表
                 hotness = self.config_manager.config_data.setdefault("app_click_counts", {})
+                pinned = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
                 
-                # 按照点击热度降序排序
-                sorted_candidates = sorted(
-                    candidates.items(),
-                    key=lambda x: hotness.get(x[0], 0),
-                    reverse=True
-                )
+                # 检测候选程序是否正在运行
+                def _is_running(t):
+                    ttry = [t]
+                    if t.endswith('.py') and not t.startswith('py'):
+                        ttry.append(t.replace('.py', '.exe'))
+                    elif t.endswith('.exe'):
+                        ttry.append(t.replace('.exe', '.py'))
+                    for x in ttry:
+                        if core.find_windows_by_title_safe(x):
+                            return True
+                    return False
                 
-                # 改为一行，保留 6 个
-                top_candidates = sorted_candidates[:6]
+                # 排序：⭐固定优先（按固定顺序）> ▶运行中优先 > 热度次之
+                def _sort_key(item):
+                    t = item[0]
+                    if t in pinned:
+                        return (0, pinned.index(t), 0)
+                    running_status = 0 if _is_running(t) else 1
+                    return (1, running_status, -hotness.get(t, 0))
                 
-                # 清除旧按钮
-                for btn in list(self.shortcut_buttons.values()):
-                    try:
-                        btn.deleteLater()
-                    except:
-                        pass
+                sorted_candidates = sorted(candidates.items(), key=_sort_key)
+                top_candidates = sorted_candidates
+                
+                # 清除旧按钮（保留末尾的 addStretch 弹簧）
+                while self.shortcuts_grid_layout.count() > 1:
+                    child = self.shortcuts_grid_layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
                 self.shortcut_buttons = {}
                 
-                # 重新构建网格布局
+                # 重新构建按钮并插入到布局
                 for i, (title, exe_path) in enumerate(top_candidates):
-                    # 为了美观，增加截断上限至 16 字符，避免难看的截断
-                    display_title = title
-                    if len(display_title) > 16:
-                        display_title = display_title[:14] + "..."
+                    is_pinned = title in pinned
+                    prefix = "⭐ " if is_pinned else ""
+                    display_title = prefix + title
+                    if len(display_title) > 18:
+                        display_title = display_title[:16] + "..."
                         
                     btn = QPushButton(display_title)
+                    btn.setMinimumWidth(110)
                     click_count = hotness.get(title, 0)
                     import textwrap, html as _html
                     path_str = exe_path or '(未配置)'
-                    # 按 50 字符折行，转义 HTML 特殊字符，用 <br> 分隔
                     path_html = '<br>&nbsp;&nbsp;&nbsp;&nbsp;'.join(
                         _html.escape(p) for p in textwrap.wrap(path_str, width=50)
                     ) or _html.escape(path_str)
+                    pin_hint = "已固定" if is_pinned else "右键可固定到常用"
                     tooltip_text = (
                         f"<b style='color:#ffffff;'>{_html.escape(title)}</b><br>"
                         f"<span style='color:#10b981;'>启动路径:</span> "
                         f"<span style='color:#d1d5db;'>{path_html}</span><br>"
-                        f"<span style='color:#6b7280;'>点击次数: {click_count} 次</span>"
+                        f"<span style='color:#6b7280;'>点击次数: {click_count} 次 · {pin_hint}</span>"
                     )
                     btn.setToolTip(tooltip_text)
                     btn.setMinimumHeight(42)
                     btn.setMaximumHeight(42)
                     
-                    # 绑定事件
                     btn.clicked.connect(lambda checked, t=title, p=exe_path: self.on_shortcut_clicked(t, p))
-                    
                     self.shortcut_buttons[title] = btn
-                    
-                    # 改为单行排列，列坐标就是索引位置
-                    self.shortcuts_grid_layout.addWidget(btn, 0, i)
+                    self.shortcuts_grid_layout.insertWidget(i, btn)
             
-            # 不论是否 rebuild，都刷新状态和样式
+            # 刷新状态与颜色样式
             for title, btn in self.shortcut_buttons.items():
                 titles_to_try = [title]
                 if title.endswith('.py') and not title.startswith('py'):
@@ -1726,8 +1931,7 @@ class WindowPosManagerUI(QMainWindow):
                 
                 is_running = False
                 for t in titles_to_try:
-                    found = core.find_windows_by_title_safe(t)
-                    if found:
+                    if core.find_windows_by_title_safe(t):
                         is_running = True
                         break
                 
@@ -1992,6 +2196,15 @@ class WindowPosManagerUI(QMainWindow):
             start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({display_name})")
             menu.addSeparator()
 
+        menu.addSeparator()
+        pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
+        is_pinned = title in pinned_list
+        add_action = None
+        if is_pinned:
+            pin_action = menu.addAction("✖ 从常用移除")
+        else:
+            pin_action = menu.addAction("⭐ 固定到常用")
+            add_action = menu.addAction("➕ 添加到常用")
         activate_action = menu.addAction("📌 窗口置顶并激活")
         center_action = menu.addAction("📺 居中显示于程序所在屏幕")
         edit_action = menu.addAction("✏️ 编辑该单元格")
@@ -2002,6 +2215,37 @@ class WindowPosManagerUI(QMainWindow):
             self._launch_program(exe_path, title, pos_item)
         elif start_admin_action and action == start_admin_action:
             self._launch_as_admin(exe_path, title, pos_item)
+        elif action == pin_action or (add_action and action == add_action):
+            # 如果未配置启动路径，先引导配置路径，配置完自动拉入常用
+            if not exe_path:
+                self.log(f"⚠️ 无法添加，程序 '{title}' 的启动路径为空，正在打开路径配置对话框...")
+                self._editing_path = True
+                try:
+                    dialog = EditPathDialog(title, "", self)
+                    if dialog.exec() == QDialog.DialogCode.Accepted:
+                        new_path = dialog.final_path
+                        if pos_item:
+                            pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, new_path)
+                            self.save_current_table_to_memory()
+                            self.request_save_config_debounced()
+                            self.log(f"🎯 已成功设置程序 '{title}' 的启动路径 ➡ {new_path}")
+                            self.on_resolution_changed()
+                            exe_path = new_path
+                finally:
+                    self._editing_path = False
+
+            if exe_path:
+                if is_pinned:
+                    pinned_list.remove(title)
+                    self.log(f"✖ 已从常用移除: '{title}'")
+                else:
+                    if title not in pinned_list:
+                        pinned_list.append(title)
+                    action_name = "添加" if action == add_action else "固定"
+                    self.log(f"⭐ 已成功将 '{title}' {action_name}到常用。")
+                self.config_manager.config_data["pinned_shortcuts"] = pinned_list
+                self.config_manager.save()
+                self.refresh_app_shortcuts(rebuild=True)
         elif action == activate_action:
             self.on_table_cell_double_clicked(row, 0)
         elif action == center_action:
@@ -2048,6 +2292,7 @@ class WindowPosManagerUI(QMainWindow):
                 if core.set_window_pos_by_title(t, pos_str):
                     self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}]")
                     self.refresh_current_positions()
+                    self.refresh_app_shortcuts(rebuild=True)
                     moved = True
                     break
                     
@@ -2075,6 +2320,11 @@ class WindowPosManagerUI(QMainWindow):
         if not cmd_str:
             return False, "", "", False, "路径配置为空"
 
+        # 首先检查：如果整个字符串作为一个物理路径存在，直接通过并返回
+        # 这对 Windows 上包含空格但未包裹双引号的完整可执行路径提供了直接支持
+        if os.path.exists(cmd_str) and not os.path.isdir(cmd_str):
+            return True, cmd_str, [], False, ""
+
         # 如果包含 cd，或者包含多条命令连接符如 ;, &&, ||，则是复杂的 shell 命令
         if any(marker in cmd_str for marker in (";", "&&", "||")) or cmd_str.startswith("cd ") or cmd_str.startswith("cd/"):
             return True, "", cmd_str, True, ""
@@ -2088,13 +2338,39 @@ class WindowPosManagerUI(QMainWindow):
             
         if not parts:
             return False, "", "", False, "解析命令行失败"
+
+        # 贪婪地拼合前面的 parts 块，以支持 Windows 上未包裹引号但包含空格的物理路径
+        found_exe = None
+        args_list = []
+        for i in range(len(parts)):
+            candidate = " ".join(parts[:i+1])
+            # 去除首尾的多余引号
+            if (candidate.startswith('"') and candidate.endswith('"')) or (candidate.startswith("'") and candidate.endswith("'")):
+                candidate_clean = candidate[1:-1]
+            else:
+                candidate_clean = candidate
             
+            if os.path.isfile(candidate_clean):
+                found_exe = candidate_clean
+                args_list = parts[i+1:]
+                break
+                
+        if found_exe:
+            # 清理剩余参数的多余引号
+            cleaned_args = []
+            for arg in args_list:
+                if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
+                    cleaned_args.append(arg[1:-1])
+                else:
+                    cleaned_args.append(arg)
+            return True, found_exe, cleaned_args, False, ""
+
+        # 如果没有通过物理贪婪拼接找到，回退到 parts[0] 的标准校验逻辑
         first_part = parts[0]
         # 去除首尾的引号
         if (first_part.startswith('"') and first_part.endswith('"')) or (first_part.startswith("'") and first_part.endswith("'")):
             first_part = first_part[1:-1]
             
-        # 校验第一个部分（可执行程序）是否存在
         # 1. 物理路径存在
         if os.path.exists(first_part):
             return True, first_part, parts[1:], False, ""
@@ -2115,6 +2391,33 @@ class WindowPosManagerUI(QMainWindow):
             return True, first_part, parts[1:], True, ""
             
         return False, "", "", False, f"找不到可执行程序: '{first_part}'"
+
+    def _get_quoted_cmd(self, final_exe, final_args, raw_exe_path):
+        """
+        根据解析出来的 final_exe 和 final_args，重新构建带双引号保护的命令行。
+        防止包含空格的物理路径在 Windows cmd.exe 环境下解析执行出错。
+        """
+        if not final_exe:
+            return raw_exe_path
+            
+        # 如果是复杂的 shell 连接命令，直接返回原始的
+        if any(marker in raw_exe_path for marker in (";", "&&", "||")) or raw_exe_path.strip().startswith("cd ") or raw_exe_path.strip().startswith("cd/"):
+            return raw_exe_path
+            
+        exe_quoted = final_exe
+        if " " in final_exe and not (final_exe.startswith('"') and final_exe.endswith('"')):
+            exe_quoted = f'"{final_exe}"'
+            
+        if isinstance(final_args, list):
+            quoted_args = []
+            for arg in final_args:
+                if " " in arg and not (arg.startswith('"') and arg.endswith('"')) and not (arg.startswith("'") and arg.endswith("'")):
+                    quoted_args.append(f'"{arg}"')
+                else:
+                    quoted_args.append(arg)
+            return " ".join([exe_quoted] + quoted_args)
+        else:
+            return exe_quoted
 
     def _launch_program(self, exe_path, title, pos_item):
         """智能解析并拉起普通程序（支持命令行与多段脚本），若需权限则自动提权"""
@@ -2144,10 +2447,11 @@ class WindowPosManagerUI(QMainWindow):
             if target_dir and os.path.exists(target_dir):
                 os.chdir(target_dir)
 
-            self.log(f"正在拉起进程: {exe_path} (工作目录: {target_dir})")
+            # 使用安全拼装后的 cmd_run，解决带有空格的路径在 Windows cmd.exe 下无法被正确解析运行的 Bug
+            cmd_run = self._get_quoted_cmd(final_exe, final_args, exe_path)
+            self.log(f"正在拉起进程: {cmd_run} (工作目录: {target_dir})")
             
             # 格式化命令（主要是 windows 上的分号连接和 cd 问题）
-            cmd_run = exe_path
             if sys.platform == 'win32':
                 # 将分号替换为 &&
                 cmd_run = cmd_run.replace(";", " && ")
@@ -2202,7 +2506,7 @@ class WindowPosManagerUI(QMainWindow):
                 target_dir = old_cwd
                 
             # Windows 平台替换
-            cmd_run = exe_path
+            cmd_run = self._get_quoted_cmd(final_exe, final_args, exe_path)
             if sys.platform == 'win32':
                 cmd_run = cmd_run.replace(";", " && ")
                 cmd_run = re.sub(r'\bcd\s+([a-zA-Z]:)', r'cd /d \1', cmd_run)
@@ -2214,7 +2518,14 @@ class WindowPosManagerUI(QMainWindow):
             else:
                 file_to_run = final_exe if final_exe else "cmd.exe"
                 if isinstance(final_args, list):
-                    params = " ".join(final_args)
+                    # 将参数拼回字符串，并保证带空格的参数被包裹
+                    quoted_args = []
+                    for arg in final_args:
+                        if " " in arg and not (arg.startswith('"') and arg.endswith('"')) and not (arg.startswith("'") and arg.endswith("'")):
+                            quoted_args.append(f'"{arg}"')
+                        else:
+                            quoted_args.append(arg)
+                    params = " ".join(quoted_args)
                 else:
                     params = final_args
             

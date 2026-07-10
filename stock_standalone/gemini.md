@@ -1,3 +1,13 @@
+## 2026-07-10 22:30
+- [x] **重构窗口自动布局管理器与快捷启动，实现极致交互体验与完美路径兼容 (Refactored Window Manager UI, Favorites Layout, and Path Compatibility)**：
+    - [x] **实现常用程序右键固定与移除管理 (Favorites Right-Click Management)**：为进程表格添加了右键上下文菜单项“📌 固定到常用”与“❌ 从常用移除”。支持用户右键直接将任意进程添加至常用软件列表，或者从常用软件列表中快速卸载移除，自动触发配置防抖保存与 UI 局部增量重绘，免去了手动编辑配置文件的繁琐交互。
+    - [x] **实现常用软件水平滚轮滚动与超紧凑单行滚动条隐藏 (FAvorites Horizontally-Scrollable Flow)**：将原本高度受限的常用启动网格升级为 `QScrollArea` 水平滚动区。屏蔽了原生滚动条以保持绝对纯净的外观，并绑定了鼠标滚轮滚动事件（支持垂直滚轮与水平滚轮方向），允许通过滑动滚轮无缝多横排滚动切换展示更多常用程序；彻底解决了此前限制在6个而无法放置更多常用应用的痛点。
+    - [x] **修复 UI 窗口几何尺寸持久化与靠近屏幕顶端移位 Bug (Fixed Window Geometry Persistence & Alignment Shift)**：修复了当用户将窗口调至较窄，或拖动放置于靠近屏幕顶端边缘时，退出重开后窗口尺寸和坐标发生偏移、变宽的缺陷。优化了 `save_window_position` 与 `load_window_position` 逻辑，同时设定了更为紧凑合理的窗口最小尺寸门槛，保证了在超小分辨率及极端分屏下的尺寸稳定性。
+    - [x] **实现分类选择按钮自动动态自适应宽度缩放 (Auto-Scaling Category Filter Row)**：将顶部的“分类选择方案”按钮组升级为完全动态缩放布局。按钮的尺寸政策（SizePolicy）和水平布局间距能够随窗口宽度自动拉伸和收紧，解决了在小视区下右侧按钮被生硬截断遮挡的缺陷。
+    - [x] **修复 Edge 等带空格路径无法启动与窗口移动失效缺陷 (Fixed Launch & Auto-Layout Matching for Path-with-Spaces)**：
+        - 升级了 `resolve_and_validate_cmd` 命令解析引擎。针对 Windows 下类似 `C:\Program Files (x86)\...` 未包裹双引号的带空格物理路径，引入了“贪婪拼合 (Greedy space-joining)”前缀块检测算法，能 100% 正确识别出最长的物理 exe 路径并将剩余部分作为参数分离。
+        - 引入了 `_get_quoted_cmd` 安全外壳命令构建方法。在调用 `subprocess.Popen(cmd, shell=True)` 启动前，自动重新为带空格的可执行程序路径和参数注入双引号保护，彻底解决了 Edge 浏览器因路径空格无法拉起的 Bug，并确保启动后能完美通过窗口标题模糊匹配自动移动到配置坐标。
+
 ## 2026-07-10 16:45
 - [x] **极速重构人气共振数据表格公式过滤，彻底消除切换过滤与刷新时的界面卡顿 (Optimized Formula Filtering via Vectorized Batch-Evaluation in Popularity Resonance GUI)**：
     - [x] **根治 O(N) 循环逐行 pd.eval 执行瓶颈**：定位并修复了 `popularity_resonance_gui.py` 内部在刷新或过滤切换时的严重性能设计缺陷。原代码在 `populate` 和共振表刷新循环中，对上百只股票逐个构建 `DataFrame` 副本并循环调用 `test_code_against_queries`（即逐行调用 `pd.eval`），在大规模人气榜数据下会带来巨大的冷启动编译和 Python I/O 开销，导致界面直接白屏卡死 3-5 秒。
