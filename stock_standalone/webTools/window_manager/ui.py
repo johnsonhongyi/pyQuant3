@@ -865,6 +865,19 @@ class WindowPosManagerUI(QMainWindow):
 
         main_layout.addWidget(self.gb_display_info)
 
+        # 常用程序快捷启动面板
+        self.gb_app_shortcuts = QGroupBox("常用程序快捷启动 (根据使用热度自动排序)")
+        self.shortcuts_grid_layout = QtWidgets.QGridLayout(self.gb_app_shortcuts)
+        self.shortcuts_grid_layout.setContentsMargins(15, 15, 15, 15)
+        self.shortcuts_grid_layout.setSpacing(10)
+        self.shortcut_buttons = {}
+        
+        self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置‘程序路径’。")
+        self.lbl_shortcuts_tip.setStyleSheet("color: #6b7280; font-style: italic;")
+        self.shortcuts_grid_layout.addWidget(self.lbl_shortcuts_tip, 0, 0)
+        
+        main_layout.addWidget(self.gb_app_shortcuts)
+
         # 配置管理控制栏
         config_bar = QHBoxLayout()
         config_bar.addWidget(QLabel("分类选择方案:"))
@@ -1230,6 +1243,7 @@ class WindowPosManagerUI(QMainWindow):
             
         self.table_widget.blockSignals(False)
         self.refresh_current_positions()
+        self.refresh_app_shortcuts(rebuild=True)
         self.log(f"已载入配置方案: {res_name} (含 {len(mapping)} 条窗口移动规则)")
 
     def get_table_data(self) -> dict:
@@ -1585,6 +1599,189 @@ class WindowPosManagerUI(QMainWindow):
                 cur_item.setForeground(QtGui.QColor("#6b7280")) # 灰色，未检测到
                 
         self.table_widget.blockSignals(False)
+        self.refresh_app_shortcuts(rebuild=False)
+
+    def refresh_app_shortcuts(self, rebuild=True):
+        """
+        刷新快捷启动程序格子面板
+        rebuild=True: 重新根据热度排序并构建按钮控件 (点击、初始化、切换方案时)
+        rebuild=False: 仅刷新每个按钮的运行状态与颜色 (定时、刷新位置时)
+        """
+        try:
+            if rebuild:
+                # 搜集所有方案中去重后的 candidates 程序 (title -> exe_path)
+                candidates = {}
+                for cat_name in self.config_manager.get_categories():
+                    for res_name in self.config_manager.get_resolutions_by_category(cat_name):
+                        mapping = self.config_manager.get_resolution_mapping(res_name)
+                        for title, raw_pos_str in mapping.items():
+                            parts = str(raw_pos_str).split('|')
+                            if len(parts) > 1 and parts[1].strip():
+                                candidates[title] = parts[1].strip()
+                
+                # 如果没有候选程序，显示占位提示
+                if not candidates:
+                    while self.shortcuts_grid_layout.count():
+                        child = self.shortcuts_grid_layout.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+                    self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置‘程序路径’。")
+                    self.lbl_shortcuts_tip.setStyleSheet("color: #6b7280; font-style: italic;")
+                    self.shortcuts_grid_layout.addWidget(self.lbl_shortcuts_tip, 0, 0)
+                    self.shortcut_buttons = {}
+                    return
+                
+                # 存在候选程序，移除提示
+                if hasattr(self, 'lbl_shortcuts_tip') and self.lbl_shortcuts_tip:
+                    try:
+                        self.lbl_shortcuts_tip.deleteLater()
+                    except:
+                        pass
+                    self.lbl_shortcuts_tip = None
+                
+                # 获取点击热度
+                hotness = self.config_manager.config_data.setdefault("app_click_counts", {})
+                
+                # 按照点击热度降序排序
+                sorted_candidates = sorted(
+                    candidates.items(),
+                    key=lambda x: hotness.get(x[0], 0),
+                    reverse=True
+                )
+                
+                # 改为一行，保留 6 个
+                top_candidates = sorted_candidates[:6]
+                
+                # 清除旧按钮
+                for btn in list(self.shortcut_buttons.values()):
+                    try:
+                        btn.deleteLater()
+                    except:
+                        pass
+                self.shortcut_buttons = {}
+                
+                # 重新构建网格布局
+                for i, (title, exe_path) in enumerate(top_candidates):
+                    # 为了美观，增加截断上限至 16 字符，避免难看的截断
+                    display_title = title
+                    if len(display_title) > 16:
+                        display_title = display_title[:14] + "..."
+                        
+                    btn = QPushButton(display_title)
+                    btn.setToolTip(f"程序: {title}\n路径: {exe_path}\n点击次数: {hotness.get(title, 0)}")
+                    btn.setMinimumHeight(42)
+                    btn.setMaximumHeight(42)
+                    
+                    # 绑定事件
+                    btn.clicked.connect(lambda checked, t=title, p=exe_path: self.on_shortcut_clicked(t, p))
+                    
+                    self.shortcut_buttons[title] = btn
+                    
+                    # 改为单行排列，列坐标就是索引位置
+                    self.shortcuts_grid_layout.addWidget(btn, 0, i)
+            
+            # 不论是否 rebuild，都刷新状态和样式
+            for title, btn in self.shortcut_buttons.items():
+                titles_to_try = [title]
+                if title.endswith('.py') and not title.startswith('py'):
+                    titles_to_try.append(title.replace('.py', '.exe'))
+                elif title.endswith('.exe'):
+                    titles_to_try.append(title.replace('.exe', '.py'))
+                
+                is_running = False
+                for t in titles_to_try:
+                    found = core.find_windows_by_title_safe(t)
+                    if found:
+                        is_running = True
+                        break
+                
+                if is_running:
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #0284c7;
+                            border: 1px solid #0ea5e9;
+                            border-radius: 4px;
+                            color: #ffffff;
+                            font-weight: bold;
+                            font-size: 12px;
+                        }
+                        QPushButton:hover {
+                            background-color: #0ea5e9;
+                            border-color: #38bdf8;
+                        }
+                        QPushButton:pressed {
+                            background-color: #0369a1;
+                        }
+                    """)
+                else:
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #1e1e24;
+                            border: 1px dashed #4b5563;
+                            border-radius: 4px;
+                            color: #9ca3af;
+                            font-size: 12px;
+                        }
+                        QPushButton:hover {
+                            background-color: #2d2d39;
+                            border-color: #9ca3af;
+                            color: #ffffff;
+                        }
+                        QPushButton:pressed {
+                            background-color: #15151a;
+                        }
+                    """)
+        except Exception as e:
+            self.log(f"⚠️ 刷新快捷启动区出错: {e}")
+
+    def on_shortcut_clicked(self, title, exe_path):
+        """快捷键点击事件：增加热度，判断运行状态，激活或启动"""
+        try:
+            hotness = self.config_manager.config_data.setdefault("app_click_counts", {})
+            hotness[title] = hotness.get(title, 0) + 1
+            self.config_manager.save()
+            
+            # 判断是否运行
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+            
+            is_running = False
+            for t in titles_to_try:
+                found = core.find_windows_by_title_safe(t)
+                if found:
+                    is_running = True
+                    break
+            
+            if is_running:
+                self.log(f"正在切换至前台激活窗口: '{title}'...")
+                success = core.bring_window_to_top_by_title(title)
+                if success:
+                    self.log(f"✅ 已激活窗口: '{title}'")
+                else:
+                    self.log(f"⚠️ 激活窗口 '{title}' 失败")
+            else:
+                # 探测并在窗口出现后自动对齐
+                pos_str = "0,0,800,600"
+                current_res = self.get_current_selected_resolution()
+                if current_res:
+                    mapping = self.config_manager.get_resolution_mapping(current_res)
+                    if title in mapping:
+                        pos_str = mapping[title].split('|')[0]
+                
+                class DummyPosItem:
+                    def text(self):
+                        return pos_str
+                
+                self._launch_program(exe_path, title, DummyPosItem())
+            
+            # 重新根据热度排版
+            self.refresh_app_shortcuts(rebuild=True)
+        except Exception as e:
+            QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
+            self.log(f"启动程序失败: {e}")
 
     def on_table_cell_clicked(self, row, column):
         """点击单元格触发快速交互：保留接口备用，原本的第2列单击回填已移至双击触发"""
@@ -1745,9 +1942,18 @@ class WindowPosManagerUI(QMainWindow):
         
         start_action = None
         start_admin_action = None
-        if exe_path and os.path.exists(exe_path):
-            start_action = menu.addAction(f"🚀 启动程序 ({os.path.basename(exe_path)})")
-            start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({os.path.basename(exe_path)})")
+        is_valid = False
+        if exe_path:
+            is_valid, _, _, _, _ = self.resolve_and_validate_cmd(exe_path)
+            
+        if is_valid:
+            display_name = os.path.basename(exe_path)
+            if not display_name:
+                display_name = exe_path
+            if len(display_name) > 30:
+                display_name = display_name[:27] + "..."
+            start_action = menu.addAction(f"🚀 启动程序 ({display_name})")
+            start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({display_name})")
             menu.addSeparator()
 
         activate_action = menu.addAction("📌 窗口置顶并激活")
@@ -1757,32 +1963,8 @@ class WindowPosManagerUI(QMainWindow):
         action = menu.exec(self.table_widget.mapToGlobal(pos))
         
         if start_action and action == start_action:
-            self.log(f"正在启动程序: {exe_path}")
-            try:
-                import subprocess
-                # 切换工作目录后再执行，确保任何通用程序都在其自身的物理文件夹中加载资源与配置文件
-                old_cwd = os.getcwd()
-                try:
-                    target_dir = os.path.dirname(exe_path)
-                    if target_dir and os.path.exists(target_dir):
-                        os.chdir(target_dir)
-                    subprocess.Popen(exe_path, cwd=target_dir)
-                finally:
-                    os.chdir(old_cwd)
-                self._setup_post_launch_layout_timer(title, pos_item)
-            except OSError as e:
-                # 针对 WinError 740 (需要管理员权限) 进行自适应提权启动
-                if getattr(e, 'winerror', None) == 740 or "740" in str(e):
-                    self.log(f"⚠️ 检测到启动需要权限 (WinError 740)，尝试以管理员身份提权启动...")
-                    self._launch_as_admin(exe_path, title, pos_item)
-                else:
-                    QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
-                    self.log(f"启动程序失败: {e}")
-            except Exception as e:
-                QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
-                self.log(f"启动程序失败: {e}")
+            self._launch_program(exe_path, title, pos_item)
         elif start_admin_action and action == start_admin_action:
-            self.log(f"正在以管理员身份启动程序: {exe_path}")
             self._launch_as_admin(exe_path, title, pos_item)
         elif action == activate_action:
             self.on_table_cell_double_clicked(row, 0)
@@ -1829,30 +2011,195 @@ class WindowPosManagerUI(QMainWindow):
         # 给予进程初始创建时间 1.5 秒后开始高频轮询探测
         QtCore.QTimer.singleShot(1500, wait_and_apply)
 
-    def _launch_as_admin(self, exe_path, title, pos_item):
-        """通过 os.startfile(..., 'runas') 提权以管理员身份启动程序"""
+    def resolve_and_validate_cmd(self, cmd_str):
+        """
+        智能解析并校验命令行字符串。
+        返回元组 (is_valid, final_exe, final_args, is_shell, error_msg)
+        - is_valid: 是否校验通过
+        - final_exe: 解析出的可执行程序路径或命令
+        - final_args: 参数列表或参数字符串
+        - is_shell: 是否需要 shell=True 模式运行
+        - error_msg: 校验失败时的提示
+        """
+        import shutil
+        import os
+        import shlex
+        
+        cmd_str = cmd_str.strip()
+        if not cmd_str:
+            return False, "", "", False, "路径配置为空"
+
+        # 如果包含 cd，或者包含多条命令连接符如 ;, &&, ||，则是复杂的 shell 命令
+        if any(marker in cmd_str for marker in (";", "&&", "||")) or cmd_str.startswith("cd ") or cmd_str.startswith("cd/"):
+            return True, "", cmd_str, True, ""
+            
+        # 用简单方式分割命令行（考虑带引号的路径）
         try:
-            import os
-            # 提权启动前临时切换工作目录，确保提权子进程正常定位其物理目录
-            old_cwd = os.getcwd()
-            try:
-                target_dir = os.path.dirname(exe_path)
-                if target_dir and os.path.exists(target_dir):
-                    os.chdir(target_dir)
-                os.startfile(exe_path, 'runas')
-            finally:
-                os.chdir(old_cwd)
+            # 在 Windows 上可以使用 posix=False 防止反斜杠被转义
+            parts = shlex.split(cmd_str, posix=False)
+        except Exception:
+            parts = cmd_str.split()
+            
+        if not parts:
+            return False, "", "", False, "解析命令行失败"
+            
+        first_part = parts[0]
+        # 去除首尾的引号
+        if (first_part.startswith('"') and first_part.endswith('"')) or (first_part.startswith("'") and first_part.endswith("'")):
+            first_part = first_part[1:-1]
+            
+        # 校验第一个部分（可执行程序）是否存在
+        # 1. 物理路径存在
+        if os.path.exists(first_part):
+            return True, first_part, parts[1:], False, ""
+            
+        # 2. 系统 Path 中存在 (如 python, cmd 等)
+        which_path = shutil.which(first_part)
+        if which_path:
+            return True, which_path, parts[1:], False, ""
+            
+        # 3. 兼容没有后缀名的系统命令
+        for ext in ('.exe', '.bat', '.cmd'):
+            which_path = shutil.which(first_part + ext)
+            if which_path:
+                return True, which_path, parts[1:], False, ""
+                
+        # 4. 如果是 python 开头，有可能在 path 里，也可能是特殊的 python 别名，做宽松通过
+        if first_part.lower() in ("python", "python3", "py", "cmd", "cmd.exe", "powershell", "powershell.exe"):
+            return True, first_part, parts[1:], True, ""
+            
+        return False, "", "", False, f"找不到可执行程序: '{first_part}'"
+
+    def _launch_program(self, exe_path, title, pos_item):
+        """智能解析并拉起普通程序（支持命令行与多段脚本），若需权限则自动提权"""
+        is_valid, final_exe, final_args, is_shell, error_msg = self.resolve_and_validate_cmd(exe_path)
+        if not is_valid:
+            QMessageBox.warning(self, "启动失败", f"无效的启动配置：\n{error_msg}")
+            return False
+            
+        import subprocess
+        import sys
+        import re
+        old_cwd = os.getcwd()
+        try:
+            target_dir = ""
+            if final_exe and os.path.isabs(final_exe):
+                target_dir = os.path.dirname(final_exe)
+            if not target_dir:
+                if isinstance(final_args, list) and final_args:
+                    for arg in final_args:
+                        arg_clean = arg.strip('"').strip("'")
+                        if os.path.isabs(arg_clean) and os.path.exists(os.path.dirname(arg_clean)):
+                            target_dir = os.path.dirname(arg_clean)
+                            break
+            if not target_dir:
+                target_dir = old_cwd
+
+            if target_dir and os.path.exists(target_dir):
+                os.chdir(target_dir)
+
+            self.log(f"正在拉起进程: {exe_path} (工作目录: {target_dir})")
+            
+            # 格式化命令（主要是 windows 上的分号连接和 cd 问题）
+            cmd_run = exe_path
+            if sys.platform == 'win32':
+                # 将分号替换为 &&
+                cmd_run = cmd_run.replace(";", " && ")
+                # 自动将 cd D:\ 替换为 cd /d D:\ 以支持跨盘符切换
+                cmd_run = re.sub(r'\bcd\s+([a-zA-Z]:)', r'cd /d \1', cmd_run)
+
+            # 在 windows 上，使用 shell=True 启动任何脚本或命令最稳妥
+            subprocess.Popen(cmd_run, shell=True, cwd=target_dir)
             self._setup_post_launch_layout_timer(title, pos_item)
+            return True
         except OSError as e:
-            # WinError 1223 表示用户取消了 UAC 提权
+            # 针对 WinError 740 (需要管理员权限) 进行自适应提权启动
+            if getattr(e, 'winerror', None) == 740 or "740" in str(e):
+                self.log(f"⚠️ 检测到启动需要权限 (WinError 740)，尝试以管理员身份提权启动...")
+                return self._launch_as_admin(exe_path, title, pos_item)
+            else:
+                QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
+                self.log(f"启动程序失败: {e}")
+                return False
+        except Exception as e:
+            QMessageBox.warning(self, "启动失败", f"无法启动程序: {e}")
+            self.log(f"启动程序失败: {e}")
+            return False
+        finally:
+            os.chdir(old_cwd)
+
+    def _launch_as_admin(self, exe_path, title, pos_item):
+        """通过 ctypes.windll.shell32.ShellExecuteW 提权以管理员身份启动程序，支持复杂命令行与参数"""
+        try:
+            import ctypes
+            import os
+            import sys
+            import re
+            
+            is_valid, final_exe, final_args, is_shell, error_msg = self.resolve_and_validate_cmd(exe_path)
+            if not is_valid:
+                QMessageBox.warning(self, "启动失败", f"无效的启动配置：\n{error_msg}")
+                return False
+                
+            old_cwd = os.getcwd()
+            target_dir = ""
+            if final_exe and os.path.isabs(final_exe):
+                target_dir = os.path.dirname(final_exe)
+            if not target_dir:
+                if isinstance(final_args, list) and final_args:
+                    for arg in final_args:
+                        arg_clean = arg.strip('"').strip("'")
+                        if os.path.isabs(arg_clean) and os.path.exists(os.path.dirname(arg_clean)):
+                            target_dir = os.path.dirname(arg_clean)
+                            break
+            if not target_dir:
+                target_dir = old_cwd
+                
+            # Windows 平台替换
+            cmd_run = exe_path
+            if sys.platform == 'win32':
+                cmd_run = cmd_run.replace(";", " && ")
+                cmd_run = re.sub(r'\bcd\s+([a-zA-Z]:)', r'cd /d \1', cmd_run)
+                
+            # 执行提权启动
+            if is_shell or ";" in exe_path or "&&" in exe_path:
+                file_to_run = "cmd.exe"
+                params = f'/c "{cmd_run}"'
+            else:
+                file_to_run = final_exe if final_exe else "cmd.exe"
+                if isinstance(final_args, list):
+                    params = " ".join(final_args)
+                else:
+                    params = final_args
+            
+            self.log(f"正在以管理员身份启动: {file_to_run} {params} (工作目录: {target_dir})")
+            
+            # 使用 ShellExecuteW 提权启动
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None,          # hwnd
+                "runas",       # lpOperation
+                file_to_run,   # lpFile
+                params,        # lpParameters
+                target_dir if target_dir else None, # lpDirectory
+                1              # nShowCmd (SW_SHOWNORMAL)
+            )
+            
+            if ret <= 32:
+                raise OSError(f"ShellExecuteW 返回错误代码: {ret}")
+                
+            self._setup_post_launch_layout_timer(title, pos_item)
+            return True
+        except OSError as e:
             if getattr(e, 'winerror', None) == 1223 or "1223" in str(e):
                 self.log(f"ℹ️ 用户取消了 UAC 权限请求，放弃以管理员身份启动。")
             else:
                 QMessageBox.warning(self, "启动失败", f"无法以管理员身份启动程序: {e}")
                 self.log(f"以管理员身份启动程序失败: {e}")
+            return False
         except Exception as e:
             QMessageBox.warning(self, "启动失败", f"无法以管理员身份启动程序: {e}")
             self.log(f"以管理员身份启动程序失败: {e}")
+            return False
 
     def on_table_cell_double_clicked(self, row, column):
         """双击单元格动作：
