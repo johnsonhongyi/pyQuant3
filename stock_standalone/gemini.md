@@ -1,3 +1,21 @@
+## 2026-07-10 16:35
+- [x] **重构人气共振历史记录命中数计算，解决启动加载缓存期间缺失指标警告风暴 (Resolved startup-cache NameError warnings via test_code_against_queries integration)**：
+    - [x] **完全复用防爆与自适应补齐接口**：重构了 `popularity_resonance_gui.py` 中的 `calculate_history_hits_ui` 方法。废除了原本直接在潜在残损或未就绪的 DataFrame (`test_df`) 上调用 `query_engine.execute` 的设计，升级为直接调用已在 `stock_logic_utils.py` 中被物理验证的 `test_code_against_queries` 安全接口。
+    - [x] **根治启动与冷启动时的 NameError 警告风暴**：这使得在程序启动、首次从 `popularity_resonance_cache.json` 加载缓存或行情同步尚未完成（缺失高级衍生指标列如 `lastl1d`、`td_sell`、`amount`、`ma5d` 等）的临界点上，系统能够自动分析出公式中缺少的列并秒级无感补全为默认值，彻底消除了后台日志中每秒刷出的一万条 `WARNING:query_engine_util.py(execute:250): Query Error` 崩溃与 NameError 警告。
+    - [x] **物理语法编译与集成测试 100% 成功通过**：通过了 `py_compile` 的物理语法编译；同时，端到端 GUI 缓存集成测试 `test_pr_gui_history_integration.py` 成功绿灯通过，验证了状态机和数据流动在极速切换时的纯净与高效。
+
+## 2026-07-10 16:30
+- [x] **实现程序快捷启动的多格式命令行、参数、及 Shell 串联兼容，并统一 UAC 提权自愈 (Implemented Flexible CLI Command, Parameter & Shell Chaining for App Launcher with Unified UAC Auto-Elevation)**：
+    - [x] **研发高适应性的命令行解析校验引擎 (Developed Flexible CLI Resolver)**：新增 `resolve_and_validate_cmd` 成员函数，针对输入的启动路径，利用 `shlex.split` 和系统环境感知进行三段式智能检测。不仅完美支持物理 exe 绝对路径，还能自动识别并定位包含参数的命令行（如带有 `-param`、`/k`）、全局系统命令（如 `python`、`cmd`），以及使用连接符的多段 Shell 脚本串联命令（如 `cd D:\xxx; python yy`），彻底解决了对非标准物理文件报错“路径不存在”的痛点。
+    - [x] **重构统一拉起接口并对齐 Windows 平台习惯 (Refactored Launchers to Handle Platform Quirks)**：
+        - 实现了统一的 `_launch_program` 方法。在普通模式启动时，对于复杂的多段命令，自动将分号 `;` 替换为 `&&` 并通过 shell 启动；同时智能地为 `cd D:\` 等切换命令注入 `/d` 参数，保证 Windows 系统下跨盘符工作的绝对正确。
+        - 重构了 `_launch_as_admin` 提权启动方法。废弃了原本无法携带命令行参数的 `os.startfile`，升级为调用 Windows 底层 `ctypes.windll.shell32.ShellExecuteW` API 运行 `"runas"`。这使得即使被拉起的是复杂的脚本或串联命令行，也能以管理员身份且带齐所有参数正常提权运行。
+    - [x] **对齐快捷按钮与表格右键菜单**：全面接入 `_launch_program` 与提权逻辑。在 `subprocess` 拉起抛出 `WinError 740`（请求权限）时，自适应跳转到 `_launch_as_admin` 进行无缝提权，实现了零冗余和逻辑闭环。
+    - [x] **重构快捷启动栏布局为单行高密度样式 (Refactored Shortcuts Grid to Single-Row 6-Item Layout)**：
+        - 限制常用快捷启动的最大候选数量为 6 个，并重构了网格布局定位（把 `row=i//4, col=i%4` 修改为单行 `row=0, col=i`），实现 6 个快捷按钮在顶部水平一字排开，彻底消除两行布局对页面纵向空间的占用。
+        - 提升按钮文本显示的字符截断上限至 16 个字符（之前是 12），对于“通达信金融终端”等长中文命名的应用可以显示出更丰富完整的文件名，有效避免了生硬或不美观的 `...` 截断。
+    - [x] **物理回归验证**：用 `py_compile` 对相关 UI 及主脚本执行语法校验，全部 100% 成功编译。编写专用命令行测试用例全面验证了 `python D:\...` 以及 `cd D:\...; python ...` 等各种命令表达式的解构通过率。
+
 ## 2026-07-10 15:45
 - [x] **统一搜索历史文件路径，解决人气共振数据未与 Tk/赛马 通用及打包后读取失败的缺陷 (Unified Search History Path to datacsv/search_history.json)**：
     - [x] **物理对齐共享配置文件**：定位发现人气共振原先写死了可执行目录下的 `query_history.json`，而 Tk 主程序与赛马面板等所有其他组件均使用 `datacsv/search_history.json`，导致打包运行或目录分流时历史数据根本无法互通。现将 `popularity_resonance_gui.py` 中的 `SEARCH_HISTORY_FILE` 重构为优先从 `tk_gui_modules.gui_config` 导入，失败时 fallback 自动寻找 `datacsv/search_history.json`，彻底消除了隔离孤岛，实现了跨模块、跨面板的 100% 数据互通。
