@@ -1,12 +1,16 @@
 ## 2026-07-10 22:30
 - [x] **重构窗口自动布局管理器与快捷启动，实现极致交互体验与完美路径兼容 (Refactored Window Manager UI, Favorites Layout, and Path Compatibility)**：
     - [x] **实现常用程序右键固定与移除管理 (Favorites Right-Click Management)**：为进程表格添加了右键上下文菜单项“📌 固定到常用”与“❌ 从常用移除”。支持用户右键直接将任意进程添加至常用软件列表，或者从常用软件列表中快速卸载移除，自动触发配置防抖保存与 UI 局部增量重绘，免去了手动编辑配置文件的繁琐交互。
+    - [x] **实现常用快捷按钮直接右键移除与运行功能 (Right-Click Context Menu for Shortcuts)**：为顶部的“常用程序快捷按钮”增加了独立的右键上下文菜单，支持直接右键选择“❌ 从常用移除”、“🚀 启动程序”和“🛡️ 以管理员身份启动”，极大提升了常用栏的管理与运行效率。
+    - [x] **清理表格右键菜单中的重复冗余项 (Cleaned Up Duplicate Menu Items)**：合并并剔除了原本表格右键菜单中含义重复的“添加到常用”与“固定到常用”两个冗余动作，统一使用更清晰的“📌 固定到常用”与“❌ 从常用移除”，彻底消除了选项名重叠/重复的歧义。
     - [x] **实现常用软件水平滚轮滚动与超紧凑单行滚动条隐藏 (FAvorites Horizontally-Scrollable Flow)**：将原本高度受限的常用启动网格升级为 `QScrollArea` 水平滚动区。屏蔽了原生滚动条以保持绝对纯净的外观，并绑定了鼠标滚轮滚动事件（支持垂直滚轮与水平滚轮方向），允许通过滑动滚轮无缝多横排滚动切换展示更多常用程序；彻底解决了此前限制在6个而无法放置更多常用应用的痛点。
-    - [x] **修复 UI 窗口几何尺寸持久化与靠近屏幕顶端移位 Bug (Fixed Window Geometry Persistence & Alignment Shift)**：修复了当用户将窗口调至较窄，或拖动放置于靠近屏幕顶端边缘时，退出重开后窗口尺寸和坐标发生偏移、变宽的缺陷。优化了 `save_window_position` 与 `load_window_position` 逻辑，同时设定了更为紧凑合理的窗口最小尺寸门槛，保证了在超小分辨率及极端分屏下的尺寸稳定性。
+    - [x] **过滤常用程序中的冗余项并即时刷新 (Filtered Out Excess Unpinned & Non-running Shortcuts)**：重构了 `refresh_app_shortcuts`，对快捷候选列表进行了过滤，只显示显式添加到常用（已固定）或当前正在运行的程序，过滤掉未运行且未固定的多余配置项目。优化了 `update_process_status` 期间的 `rebuild` 条件，检测到显示集合变化时立刻重绘以保证删除操作后瞬间消失，无需重启软件。
+    - [x] **默认进入程序目录再执行程序 (Enforced Directory Navigation Prior to Execution)**：在 `_launch_program` 与 `_launch_as_admin` 的命令行构建中，默认在拉起指令的最前侧物理包裹并执行 `cd /d "target_dir" && `。确保无论是普通模式还是提权运行复杂命令行脚本，都物理优先跳转到执行文件所在的程序目录下，满足了绝对运行环境一致性的要求。
+    - [x] **修复 UI 窗口几何尺寸持久化与靠近屏幕顶端移位 Bug (Fixed Window Geometry Persistence & Alignment Shift)**：修复了当用户将窗口调至较窄，或拖动放置于靠近屏幕顶端边缘时，退出重开后窗口尺寸和坐标发生偏移、变宽 of 缺陷。优化了 `save_window_position` 与 `load_window_position` 逻辑，同时设定了更为紧凑合理的窗口最小尺寸门槛，保证了在超小分辨率及极端分屏下的尺寸稳定性。
     - [x] **实现分类选择按钮自动动态自适应宽度缩放 (Auto-Scaling Category Filter Row)**：将顶部的“分类选择方案”按钮组升级为完全动态缩放布局。按钮的尺寸政策（SizePolicy）和水平布局间距能够随窗口宽度自动拉伸和收紧，解决了在小视区下右侧按钮被生硬截断遮挡的缺陷。
     - [x] **修复 Edge 等带空格路径无法启动与窗口移动失效缺陷 (Fixed Launch & Auto-Layout Matching for Path-with-Spaces)**：
-        - 升级了 `resolve_and_validate_cmd` 命令解析引擎。针对 Windows 下类似 `C:\Program Files (x86)\...` 未包裹双引号的带空格物理路径，引入了“贪婪拼合 (Greedy space-joining)”前缀块检测算法，能 100% 正确识别出最长的物理 exe 路径并将剩余部分作为参数分离。
-        - 引入了 `_get_quoted_cmd` 安全外壳命令构建方法。在调用 `subprocess.Popen(cmd, shell=True)` 启动前，自动重新为带空格的可执行程序路径和参数注入双引号保护，彻底解决了 Edge 浏览器因路径空格无法拉起的 Bug，并确保启动后能完美通过窗口标题模糊匹配自动移动到配置坐标。
+        - 升级了 `resolve_and_validate_cmd` 命令解析引擎。针对 Windows 下类似 `C:\Program Files (x86)\...` 未包裹双引号 of 带空格物理路径，引入了“贪婪拼合 (Greedy space-joining)”前缀块检测算法，能 100% 正确识别出最长的物理 exe 路径并将剩余部分作为参数分离。
+        - 引入了 `_get_quoted_cmd` 安全外壳命令构建方法。在调用 `subprocess.Popen(cmd, shell=True)` 启动前，自动重新为带空格的可执行程序路径和参数注入 double quotes 保护，彻底解决了 Edge 浏览器因路径空格无法拉起的 Bug，并确保启动后能完美通过窗口标题模糊匹配自动移动到配置坐标。
 
 ## 2026-07-10 16:45
 - [x] **极速重构人气共振数据表格公式过滤，彻底消除切换过滤与刷新时的界面卡顿 (Optimized Formula Filtering via Vectorized Batch-Evaluation in Popularity Resonance GUI)**：

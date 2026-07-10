@@ -1114,7 +1114,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.table_widget.setHorizontalHeaderLabels([
             "窗口匹配标识/关键字 (模糊匹配)", 
             "配置坐标 (X,Y,Width,Height)", 
-            "当前桌面实际位置 (不一致标红/点击可单项回填)"
+            "当前桌面实际位置 (不一致标红)"
         ])
         self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -1807,48 +1807,72 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         """
         刷新快捷启动程序格子面板
         rebuild=True: 重新根据排序规则构建按钮控件
-        rebuild=False: 仅刷新每个按钮的运行状态与颜色
+        rebuild=False: 仅刷新每个按钮的运行状态与颜色，但如果发现有新运行或停止运行的未固定程序，会自动升级为 rebuild=True
         """
         try:
-            if rebuild:
-                # 搜集所有方案中去重后的 candidates 程序 (title -> exe_path)
-                # 优先级：当前激活方案 > 其他方案
-                candidates = {}
-                
-                # Step1: 先从非当前方案收集
-                current_res = self.get_current_selected_resolution()
-                for cat_name in self.config_manager.get_categories():
-                    for res_name in self.config_manager.get_resolutions_by_category(cat_name):
-                        if res_name == current_res:
-                            continue
-                        mapping = self.config_manager.get_resolution_mapping(res_name)
-                        for title, raw_pos_str in mapping.items():
-                            parts = str(raw_pos_str).split('|')
-                            if len(parts) > 1 and parts[1].strip():
-                                if title not in candidates:
-                                    candidates[title] = parts[1].strip()
-                
-                # Step2: 当前激活方案的 exe_path 以最高优先级写入（强制覆盖）
-                if current_res:
-                    current_mapping = self.config_manager.get_resolution_mapping(current_res)
-                    for title, raw_pos_str in current_mapping.items():
+            # 获取点击热度与固定列表
+            hotness = self.config_manager.config_data.setdefault("app_click_counts", {})
+            pinned = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
+            
+            # 检测候选程序是否正在运行
+            def _is_running(t):
+                ttry = [t]
+                if t.endswith('.py') and not t.startswith('py'):
+                    ttry.append(t.replace('.py', '.exe'))
+                elif t.endswith('.exe'):
+                    ttry.append(t.replace('.exe', '.py'))
+                for x in ttry:
+                    if core.find_windows_by_title_safe(x):
+                        return True
+                return False
+
+            # 搜集所有方案中去重后的 candidates 程序 (title -> exe_path)
+            candidates = {}
+            current_res = self.get_current_selected_resolution()
+            for cat_name in self.config_manager.get_categories():
+                for res_name in self.config_manager.get_resolutions_by_category(cat_name):
+                    if res_name == current_res:
+                        continue
+                    mapping = self.config_manager.get_resolution_mapping(res_name)
+                    for title, raw_pos_str in mapping.items():
                         parts = str(raw_pos_str).split('|')
                         if len(parts) > 1 and parts[1].strip():
-                            candidates[title] = parts[1].strip()
-                
-                # 如果没有候选程序，显示占位提示
-                if not candidates:
+                            if title not in candidates:
+                                candidates[title] = parts[1].strip()
+            
+            if current_res:
+                current_mapping = self.config_manager.get_resolution_mapping(current_res)
+                for title, raw_pos_str in current_mapping.items():
+                    parts = str(raw_pos_str).split('|')
+                    if len(parts) > 1 and parts[1].strip():
+                        candidates[title] = parts[1].strip()
+
+            # 过滤：仅保留已固定（常用）或正在运行的程序，默认不自动显示其他多余的未运行未固定程序
+            expected_visible_items = [
+                (title, exe_path) for title, exe_path in candidates.items()
+                if title in pinned or _is_running(title)
+            ]
+            expected_visible_titles = {item[0] for item in expected_visible_items}
+            current_visible_titles = set(self.shortcut_buttons.keys())
+
+            # 如果检测到当前显示的按钮集合与期望显示的不一致（比如有未固定的程序启动或退出），强制 rebuild
+            if not rebuild and expected_visible_titles != current_visible_titles:
+                rebuild = True
+
+            if rebuild:
+                # 如果没有任何需要显示的程序，显示占位提示
+                if not expected_visible_items:
                     while self.shortcuts_grid_layout.count() > 1:
                         child = self.shortcuts_grid_layout.takeAt(0)
                         if child.widget():
                             child.widget().deleteLater()
-                    self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置'程序路径'。")
+                    self.lbl_shortcuts_tip = QLabel("暂无快捷启动程序配置，请先在下方表格中为窗口配置'程序路径'并添加到常用。")
                     self.lbl_shortcuts_tip.setStyleSheet("color: #6b7280; font-style: italic;")
                     self.shortcuts_grid_layout.insertWidget(0, self.lbl_shortcuts_tip)
                     self.shortcut_buttons = {}
                     return
                 
-                # 存在候选程序，移除提示
+                # 存在显示程序，移除提示
                 if hasattr(self, 'lbl_shortcuts_tip') and self.lbl_shortcuts_tip:
                     try:
                         self.lbl_shortcuts_tip.deleteLater()
@@ -1856,23 +1880,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         pass
                     self.lbl_shortcuts_tip = None
                 
-                # 获取点击热度与固定列表
-                hotness = self.config_manager.config_data.setdefault("app_click_counts", {})
-                pinned = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
-                
-                # 检测候选程序是否正在运行
-                def _is_running(t):
-                    ttry = [t]
-                    if t.endswith('.py') and not t.startswith('py'):
-                        ttry.append(t.replace('.py', '.exe'))
-                    elif t.endswith('.exe'):
-                        ttry.append(t.replace('.exe', '.py'))
-                    for x in ttry:
-                        if core.find_windows_by_title_safe(x):
-                            return True
-                    return False
-                
-                # 排序：⭐固定优先（按固定顺序）> ▶运行中优先 > 热度次之
+                # 排序规则：⭐固定优先（按固定顺序）> ▶运行中优先 > 热度次之
                 def _sort_key(item):
                     t = item[0]
                     if t in pinned:
@@ -1880,8 +1888,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     running_status = 0 if _is_running(t) else 1
                     return (1, running_status, -hotness.get(t, 0))
                 
-                sorted_candidates = sorted(candidates.items(), key=_sort_key)
-                top_candidates = sorted_candidates
+                sorted_candidates = sorted(expected_visible_items, key=_sort_key)
                 
                 # 清除旧按钮（保留末尾的 addStretch 弹簧）
                 while self.shortcuts_grid_layout.count() > 1:
@@ -1891,7 +1898,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 self.shortcut_buttons = {}
                 
                 # 重新构建按钮并插入到布局
-                for i, (title, exe_path) in enumerate(top_candidates):
+                for i, (title, exe_path) in enumerate(sorted_candidates):
                     is_pinned = title in pinned
                     prefix = "⭐ " if is_pinned else ""
                     display_title = prefix + title
@@ -1917,6 +1924,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     btn.setMinimumHeight(42)
                     btn.setMaximumHeight(42)
                     
+                    btn.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+                    btn.customContextMenuRequested.connect(
+                        lambda pos, t=title, p=exe_path: self.show_shortcut_context_menu(pos, t, p)
+                    )
                     btn.clicked.connect(lambda checked, t=title, p=exe_path: self.on_shortcut_clicked(t, p))
                     self.shortcut_buttons[title] = btn
                     self.shortcuts_grid_layout.insertWidget(i, btn)
@@ -1973,6 +1984,56 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     """)
         except Exception as e:
             self.log(f"⚠️ 刷新快捷启动区出错: {e}")
+
+    def show_shortcut_context_menu(self, pos, title, exe_path):
+        """常用程序快捷按钮的右键上下文菜单"""
+        btn = self.sender()
+        if not btn:
+            return
+            
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #1e1e24; color: #ffffff; border: 1px solid #4b5563; } QMenu::item:selected { background-color: #374151; }")
+        
+        # 1. 启动选项
+        if exe_path:
+            display_name = os.path.basename(exe_path)
+            if not display_name:
+                display_name = exe_path
+            if len(display_name) > 30:
+                display_name = display_name[:27] + "..."
+            start_action = menu.addAction(f"🚀 启动程序 ({display_name})")
+            start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({display_name})")
+            menu.addSeparator()
+        else:
+            start_action = None
+            start_admin_action = None
+
+        # 2. 移除常用选项
+        pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
+        is_pinned = title in pinned_list
+        
+        if is_pinned:
+            pin_action = menu.addAction("✖ 从常用移除")
+        else:
+            pin_action = menu.addAction("📌 固定到常用")
+            
+        action = menu.exec(btn.mapToGlobal(pos))
+        
+        if start_action and action == start_action:
+            self._launch_program(exe_path, title, None)
+        elif start_admin_action and action == start_admin_action:
+            self._launch_as_admin(exe_path, title, None)
+        elif action == pin_action:
+            if is_pinned:
+                pinned_list.remove(title)
+                self.log(f"✖ 已从常用移除: '{title}'")
+            else:
+                if title not in pinned_list:
+                    pinned_list.append(title)
+                self.log(f"📌 已成功将 '{title}' 固定到常用。")
+            self.config_manager.config_data["pinned_shortcuts"] = pinned_list
+            self.config_manager.save()
+            self.refresh_app_shortcuts(rebuild=True)
 
     def on_shortcut_clicked(self, title, exe_path):
         """快捷键点击事件：增加热度，判断运行状态，激活或启动"""
@@ -2199,12 +2260,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         menu.addSeparator()
         pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
         is_pinned = title in pinned_list
-        add_action = None
         if is_pinned:
             pin_action = menu.addAction("✖ 从常用移除")
         else:
-            pin_action = menu.addAction("⭐ 固定到常用")
-            add_action = menu.addAction("➕ 添加到常用")
+            pin_action = menu.addAction("📌 固定到常用")
         activate_action = menu.addAction("📌 窗口置顶并激活")
         center_action = menu.addAction("📺 居中显示于程序所在屏幕")
         edit_action = menu.addAction("✏️ 编辑该单元格")
@@ -2215,7 +2274,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_program(exe_path, title, pos_item)
         elif start_admin_action and action == start_admin_action:
             self._launch_as_admin(exe_path, title, pos_item)
-        elif action == pin_action or (add_action and action == add_action):
+        elif action == pin_action:
             # 如果未配置启动路径，先引导配置路径，配置完自动拉入常用
             if not exe_path:
                 self.log(f"⚠️ 无法添加，程序 '{title}' 的启动路径为空，正在打开路径配置对话框...")
@@ -2241,8 +2300,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 else:
                     if title not in pinned_list:
                         pinned_list.append(title)
-                    action_name = "添加" if action == add_action else "固定"
-                    self.log(f"⭐ 已成功将 '{title}' {action_name}到常用。")
+                    self.log(f"📌 已成功将 '{title}' 固定到常用。")
                 self.config_manager.config_data["pinned_shortcuts"] = pinned_list
                 self.config_manager.save()
                 self.refresh_app_shortcuts(rebuild=True)
@@ -2447,9 +2505,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if target_dir and os.path.exists(target_dir):
                 os.chdir(target_dir)
 
-            # 使用安全拼装后的 cmd_run，解决带有空格的路径在 Windows cmd.exe 下无法被正确解析运行的 Bug
+            # 使用安全拼装后的 cmd_run，解决带有空格的路径在 Windows cmd.exe 下无法被正确解析运行 of Bug
             cmd_run = self._get_quoted_cmd(final_exe, final_args, exe_path)
-            self.log(f"正在拉起进程: {cmd_run} (工作目录: {target_dir})")
             
             # 格式化命令（主要是 windows 上的分号连接和 cd 问题）
             if sys.platform == 'win32':
@@ -2457,6 +2514,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 cmd_run = cmd_run.replace(";", " && ")
                 # 自动将 cd D:\ 替换为 cd /d D:\ 以支持跨盘符切换
                 cmd_run = re.sub(r'\bcd\s+([a-zA-Z]:)', r'cd /d \1', cmd_run)
+
+            # 默认进入程序目录再执行程序
+            if target_dir and os.path.exists(target_dir):
+                cmd_clean_lower = cmd_run.lower().strip()
+                if not (cmd_clean_lower.startswith('cd ') or cmd_clean_lower.startswith('cd/d')):
+                    cmd_run = f'cd /d "{target_dir}" && {cmd_run}'
+
+            self.log(f"正在拉起进程: {cmd_run} (工作目录: {target_dir})")
 
             # 在 windows 上，使用 shell=True 启动任何脚本或命令最稳妥
             subprocess.Popen(cmd_run, shell=True, cwd=target_dir)
@@ -2510,6 +2575,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if sys.platform == 'win32':
                 cmd_run = cmd_run.replace(";", " && ")
                 cmd_run = re.sub(r'\bcd\s+([a-zA-Z]:)', r'cd /d \1', cmd_run)
+                
+            # 默认进入程序目录再执行程序
+            if target_dir and os.path.exists(target_dir):
+                cmd_clean_lower = cmd_run.lower().strip()
+                if not (cmd_clean_lower.startswith('cd ') or cmd_clean_lower.startswith('cd/d')):
+                    cmd_run = f'cd /d "{target_dir}" && {cmd_run}'
                 
             # 执行提权启动
             if is_shell or ";" in exe_path or "&&" in exe_path:
