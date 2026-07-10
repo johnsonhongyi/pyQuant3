@@ -112,6 +112,7 @@ class PRServiceGUI:
         self.resonance_codes = []  # 缓存当前的共振股票代码
         self.selected_concept = None  # 用于保存当前选中的概念过滤条件
         self._block_cache = {}        # 行业板块特征缓存
+        self._last_test_df_hits = None  # 缓存的用于 Hit 测试的 DataFrame
         self.current_date = time.strftime("%Y-%m-%d")
         
         # 联动选择项变量
@@ -203,6 +204,136 @@ class PRServiceGUI:
         if hasattr(self, 'root'):
             self.root.after(5000, self._check_auto_refresh_after_close)
 
+    def _format_history_item_local(self, item):
+        """人气共振专用格式化：备注 | [Hit: N] | 逻辑"""
+        if not isinstance(item, dict): 
+            return str(item)
+        q = item.get("query", "").strip()
+        q = " ".join(q.split())  # 压缩空白
+        note = item.get("note", "").strip()
+        hit = item.get("hit", "")
+        parts = []
+        if note: 
+            parts.append(note)
+        if hit != "" and hit is not None: 
+            parts.append(f"[Hit: {hit}]")
+        parts.append(q)
+        return "  |  ".join(parts)
+
+    def get_test_df_for_hits(self):
+        # 优先复用刚刚在 update_all_tables 里或者其它地方已经构建好的 test_df 缓存
+        if hasattr(self, '_last_test_df_hits') and self._last_test_df_hits is not None and not self._last_test_df_hits.empty:
+            return self._last_test_df_hits
+            
+        import pandas as pd
+        # 1. 收集当前五个 Treeview 表格中所有的人气榜股票代码
+        all_codes = set()
+        for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if vals and len(vals) > 1:
+                    all_codes.add(str(vals[1]).strip().zfill(6))
+                     
+        # 2. 从全量行情中筛选出属于当前人气榜个股的切片
+        test_df = pd.DataFrame()
+        if hasattr(self, "sync_manager") and all_codes:
+            full_df = self.sync_manager.get_current_df()
+            if full_df is not None and not full_df.empty:
+                valid_codes = [c for c in all_codes if c in full_df.index]
+                if valid_codes:
+                    test_df = full_df.loc[valid_codes].copy()
+                     
+        # 3. Fallback 退避机制
+        if test_df.empty and all_codes:
+            test_df = pd.DataFrame(index=list(all_codes))
+            test_df['name'] = ""
+            test_df['percent'] = 0.0
+            test_df['trade'] = 0.0
+            test_df['dff2'] = 0.0
+            test_df['dff3'] = 0.0
+            test_df['Rank'] = 0
+            test_df['category'] = ""
+            for code_str in test_df.index:
+                block_str = self._block_cache.get(code_str, '--')
+                test_df.at[code_str, 'category'] = block_str
+                
+        # 4. 兼容异动字段别名
+        if not test_df.empty:
+            mapping = {
+                '价格': 'close', '最新价': 'close', '现价': 'close', 
+                '涨幅': 'pct', 
+                '量': 'volume', '成交量': 'volume',
+                '成交额': 'turnover',
+                '最高': 'high', '最低': 'low', '开盘': 'open',
+                '板块': 'category', '异动类型': 'category', 'hy': 'category'
+            }
+            for cn, en in mapping.items():
+                if cn in test_df.columns and en not in test_df.columns:
+                    test_df[en] = test_df[cn]
+            # OHLC 字段兜底
+            if 'close' in test_df.columns:
+                for col in ['open', 'high', 'low']:
+                    if col not in test_df.columns:
+                        test_df[col] = test_df['close']
+                        
+        self._last_test_df_hits = test_df
+        return test_df
+
+    def calculate_history_hits_ui(self):
+        """计算当前历史记录的命中数并更新下拉列表"""
+        if not hasattr(self, 'query_manager'):
+            from stock_logic_utils import toast_message
+            toast_message(self.root, "⚠️ 历史管理器未初始化")
+            return
+            
+        test_df = self.get_test_df_for_hits()
+        if test_df.empty:
+            from stock_logic_utils import toast_message
+            toast_message(self.root, "⚠️ 数据未就绪或未加载人气榜")
+            return
+
+        group = self.history_selector.get()
+        target = getattr(self.query_manager, group, [])
+        if not target: 
+            return
+
+        from stock_logic_utils import test_code_against_queries, toast_message
+        
+        # 调用具备缺失列自愈与防爆设计的 test_code_against_queries 进行批量测评
+        enriched_results = test_code_against_queries(test_df, target)
+        
+        new_values = []
+        for i, item in enumerate(target):
+            hit_count = 0
+            if i < len(enriched_results):
+                hit_count = enriched_results[i].get("hit", 0)
+            # 保存命中数到内存
+            item["hit"] = hit_count
+            
+            # 采用统一的显示格式化逻辑
+            display = self._format_history_item_local(item)
+            new_values.append(display)
+            
+        self.query_combo['values'] = new_values
+        
+        # 自动刷新当前选中的显示（以反映最新的命中数）
+        current_val = self.query_var.get()
+        if current_val:
+            # 提取当前纯 query
+            raw_q = self._get_real_query()
+            # 在新列表中寻找对应的记录
+            for idx, item in enumerate(target):
+                if item.get("query") == raw_q:
+                    new_display = self._format_history_item_local(item)
+                    self.query_var.set(new_display)
+                    break
+
+        toast_message(self.root, f"✅ 策略命中统计完成 (n={len(target)})")
+        
+        # 同步更新编辑器里的 Treeview（如果打开了）
+        if self.query_manager:
+            self.query_manager.refresh_tree()
+
     def _on_history_group_changed(self, event=None):
         group = self.history_selector.get()
         if hasattr(self, 'query_manager'):
@@ -218,15 +349,9 @@ class PRServiceGUI:
             
         formatted_list = []
         for item in h_list:
-            if isinstance(item, dict):
-                q = item.get("query", "")
-                note = item.get("note", "")
-                display_text = f"{note}  |  {q}" if note else q
-                if q:
-                    formatted_list.append(display_text)
-            elif isinstance(item, str):
-                if item:
-                    formatted_list.append(item)
+            display_text = self._format_history_item_local(item)
+            if display_text:
+                formatted_list.append(display_text)
         self.query_combo['values'] = formatted_list
         if formatted_list:
             self.query_combo.set(formatted_list[0])
@@ -236,7 +361,7 @@ class PRServiceGUI:
     def _get_real_query(self):
         text = self.query_var.get().strip()
         if "  |  " in text:
-            return text.split("  |  ", 1)[1].strip()
+            return text.split("  |  ")[-1].strip()
         return text
 
     def apply_filter(self, event=None):
@@ -316,41 +441,9 @@ class PRServiceGUI:
             self.apply_filter()
 
     def on_test_code(self, query=None, onclick=False):
-        import pandas as pd
-        
-        # 1. 收集当前五个 Treeview 表格中所有的人气榜股票代码
-        all_codes = set()
-        for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
-            for iid in tree.get_children():
-                vals = tree.item(iid, "values")
-                if vals and len(vals) > 1:
-                    all_codes.add(str(vals[1]).strip().zfill(6))
-                    
-        df_cache = None
-        # 2. 从全量行情中筛选出属于当前人气榜个股的切片
-        if hasattr(self, "sync_manager") and all_codes:
-            full_df = self.sync_manager.get_current_df()
-            if full_df is not None and not full_df.empty:
-                valid_codes = [c for c in all_codes if c in full_df.index]
-                if valid_codes:
-                    df_cache = full_df.loc[valid_codes].copy()
-                    
-        # 3. Fallback 退避机制
-        if df_cache is None or df_cache.empty:
-            if all_codes:
-                df_cache = pd.DataFrame(index=list(all_codes))
-                df_cache['name'] = ""
-                df_cache['percent'] = 0.0
-                df_cache['trade'] = 0.0
-                df_cache['dff2'] = 0.0
-                df_cache['dff3'] = 0.0
-                df_cache['Rank'] = 0
-                df_cache['category'] = ""
-                for code_str in df_cache.index:
-                    block_str = self._block_cache.get(code_str, '--')
-                    df_cache.at[code_str, 'category'] = block_str
-            else:
-                return []
+        df_cache = self.get_test_df_for_hits()
+        if df_cache.empty:
+            return []
         
         # 将过滤后的人气榜个股专属数据集同步给 query_manager，供其内部使用
         if hasattr(self, 'query_manager'):
@@ -363,12 +456,14 @@ class PRServiceGUI:
                 self.query_manager.test_callback = None
                 try:
                     self.query_manager.on_test_code(onclick=True)
+                    self.calculate_history_hits_ui()
                 finally:
                     self.query_manager.test_callback = old_cb
             return []
 
         from stock_logic_utils import test_code_against_queries
         return test_code_against_queries(df_cache, [{"query": query}])
+
 
     def on_close(self):
         try:
@@ -905,6 +1000,18 @@ class PRServiceGUI:
         )
         self.history_selector.pack(side="left", padx=2)
         self.history_selector.bind("<<ComboboxSelected>>", self._on_history_group_changed)
+        
+        # 添加 Hit 按钮
+        self.btn_hit = tk.Button(
+            self.filter_frame,
+            text="Hit",
+            command=self.calculate_history_hits_ui,
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#fff9c4",
+            padx=2,
+            pady=0
+        )
+        self.btn_hit.pack(side="left", padx=(6, 2))
         
         lbl_flt = tk.Label(self.filter_frame, text="过滤:", font=("Microsoft YaHei", 9, "bold"))
         lbl_flt.pack(side="left", padx=(10, 4))
@@ -1696,6 +1803,7 @@ class PRServiceGUI:
 
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):
         import pandas as pd
+        self._last_test_df_hits = None
         # 缓存最新传入的数据，用于点击概念过滤时重新渲染
         self._last_data_cache = {
             "em_data": em_data,
@@ -1732,6 +1840,91 @@ class PRServiceGUI:
             fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
         except Exception:
             fav_stocks = set()
+
+        # 批量计算公式过滤匹配结果，彻底根治循环逐行 pd.eval 导致的几秒卡顿
+        matched_codes = set()
+        has_query = bool(getattr(self, 'query_expr', None))
+        if has_query:
+            # 收集所有涉及到的股票代码
+            all_involved_codes = set()
+            if em_data: all_involved_codes.update(em_data.keys())
+            if ths_data: all_involved_codes.update(ths_data.keys())
+            if lh_data: all_involved_codes.update(lh_data.keys())
+            if tgb_data: all_involved_codes.update(tgb_data.keys())
+            if resonance_results:
+                all_involved_codes.update(item["code"] for item in resonance_results if "code" in item)
+            
+            if all_involved_codes:
+                import numpy as np
+                involved_list = list(all_involved_codes)
+                
+                # 1. 尝试从 df_cache 提取已有行
+                df_parts = []
+                missing_codes = []
+                if df_cache is not None and not df_cache.empty:
+                    existing_codes = [c for c in involved_list if c in df_cache.index]
+                    missing_codes = [c for c in involved_list if c not in df_cache.index]
+                    if existing_codes:
+                        df_parts.append(df_cache.loc[existing_codes].copy())
+                else:
+                    missing_codes = involved_list
+                    
+                # 2. 对缺失的股票，构建基础属性的 fallback DataFrame
+                if missing_codes:
+                    fallback_rows = []
+                    for c in missing_codes:
+                        code_str = str(c).strip().zfill(6)
+                        quote = quotes.get(c, {"name": "--", "percent": 0.0})
+                        fallback_rows.append({
+                            "code": code_str,
+                            "name": quote.get("name", "--"),
+                            "percent": quote.get("percent", 0.0),
+                            "ratio": quote.get("percent", 0.0),
+                            "price": quote.get("price", 0.0),
+                            "close": quote.get("price", 0.0),
+                            "trade": quote.get("price", 0.0),
+                            "dff2": 0.0,
+                            "dff3": 0.0,
+                            "rank": 0,
+                            "category": self._block_cache.get(code_str, "--"),
+                            "hy": self._block_cache.get(code_str, "--"),
+                        })
+                    df_fallback = pd.DataFrame(fallback_rows)
+                    df_fallback.set_index("code", drop=False, inplace=True)
+                    df_parts.append(df_fallback)
+                    
+                # 3. 合并成完整的待测大宽表
+                df_to_test = pd.concat(df_parts) if df_parts else pd.DataFrame()
+                
+                if not df_to_test.empty:
+                    # 4. 自动补全可能缺失的指标列，防止 eval 抛 NameError 警告
+                    try:
+                         from query_engine_util import extract_columns
+                         expr_cols = extract_columns(self.query_expr)
+                         for col in expr_cols:
+                             if col not in df_to_test.columns:
+                                 if col in ('category', 'hy', 'blockname', 'name', 'block', 'details'):
+                                     df_to_test[col] = ""
+                                 else:
+                                     df_to_test[col] = 0.0
+                    except Exception:
+                         pass
+                    
+                    # 5. 调用 query_engine.execute 一次性批量运行公式
+                    try:
+                        from query_engine_util import query_engine
+                        res = query_engine.execute(df_to_test, self.query_expr)
+                        
+                        # 6. 收集匹配成功的代码集合
+                        if isinstance(res, pd.DataFrame):
+                            matched_codes = set(res.index.astype(str))
+                        elif isinstance(res, (pd.Series, np.ndarray, list)):
+                            matched_codes = set(str(x) for x in res)
+                        elif isinstance(res, (bool, np.bool_)):
+                            if res:
+                                matched_codes = set(df_to_test.index.astype(str))
+                    except Exception as e:
+                        service_logger.error(f"批量过滤公式执行失败: {e}")
 
         # 预计算本次的自定义追加列（全局统一，所有 tree 共享同一列结构）
         # 板块信息缓存，不再存入 Treeview，双击时查询
@@ -1840,26 +2033,8 @@ class PRServiceGUI:
                     }
 
                 # 历史公式过滤
-                if getattr(self, 'query_expr', None):
-                    if df_cache is not None and code_str in df_cache.index:
-                        df_code = df_cache.loc[[code_str]]
-                    else:
-                        df_code = pd.DataFrame([{
-                            "code": code_str,
-                            "name": name,
-                            "percent": pct,
-                            "ratio": pct,
-                            "price": float(price_str) if price_str != "--" else 0.0,
-                            "close": float(price_str) if price_str != "--" else 0.0,
-                            "trade": float(price_str) if price_str != "--" else 0.0,
-                            "dff2": float(dff2_str) if dff2_str != "--" else 0.0,
-                            "dff3": float(dff3_str) if dff3_str != "--" else 0.0,
-                            "rank": int(rank_str) if (rank_str != "--" and rank_str.isdigit()) else 0,
-                            "category": block_str,
-                            "hy": block_str,
-                        }], index=[code_str])
-                    test_res = test_code_against_queries(df_code, [{"query": self.query_expr}])
-                    if test_res and test_res[0].get("hit", 0) <= 0:
+                if has_query:
+                    if code_str not in matched_codes:
                         continue
 
                 # 概念过滤
@@ -1950,26 +2125,8 @@ class PRServiceGUI:
                 }
 
             # 历史公式过滤
-            if getattr(self, 'query_expr', None):
-                if df_cache is not None and code_str in df_cache.index:
-                    df_code = df_cache.loc[[code_str]]
-                else:
-                    df_code = pd.DataFrame([{
-                        "code": code_str,
-                        "name": name,
-                        "percent": pct,
-                        "ratio": pct,
-                        "price": float(price_str) if price_str != "--" else 0.0,
-                        "close": float(price_str) if price_str != "--" else 0.0,
-                        "trade": float(price_str) if price_str != "--" else 0.0,
-                        "dff2": float(dff2_str) if dff2_str != "--" else 0.0,
-                        "dff3": float(dff3_str) if dff3_str != "--" else 0.0,
-                        "rank": int(rank_str) if (rank_str != "--" and rank_str.isdigit()) else 0,
-                        "category": block_str,
-                        "hy": block_str,
-                    }], index=[code_str])
-                test_res = test_code_against_queries(df_code, [{"query": self.query_expr}])
-                if test_res and test_res[0].get("hit", 0) <= 0:
+            if has_query:
+                if code_str not in matched_codes:
                     continue
 
             # 概念过滤
@@ -2003,6 +2160,12 @@ class PRServiceGUI:
         self.update_concept_ranking(all_stocks_for_stats)
 
         self.lbl_status.config(text="更新完成", fg="blue")
+
+        # 8. 自动更新当前下拉框中历史公式的策略命中统计数
+        try:
+            self.calculate_history_hits_ui()
+        except Exception as e:
+            service_logger.debug(f"Auto calculate hits failed: {e}")
 
     def write_block_async(self):
         if not self.resonance_codes:
