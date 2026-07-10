@@ -673,7 +673,7 @@ class GlobalConfig:
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
         self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=180, value_type="int")
         self.livestrategy_max_workers = self.get_with_writeback("general", "livestrategy_max_workers", fallback=6, value_type="int")
-        self.live_MAX_FETCH = self.get_with_writeback("general", "live_MAX_FETCH", fallback=20, value_type="int")
+        self.live_MAX_FETCH = self.get_with_writeback("general", "live_MAX_FETCH", fallback=60, value_type="int")
         self.stock_select_limit = self.get_with_writeback("general", "stock_select_limit", fallback=300, value_type="int")
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
         self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=180, value_type="int")
@@ -717,7 +717,7 @@ class GlobalConfig:
         self.dump_all_monitor = self.get_with_writeback("general", "dump_all_monitor", fallback=0, value_type="int")
         self.hud_sector_cooldown = self.get_with_writeback("general", "hud_sector_cooldown", fallback=900, value_type="int")
         self.hud_global_suppression = self.get_with_writeback("general", "hud_global_suppression", fallback=90, value_type="int")
-        self.vol_up_details_col = self.get_with_writeback("general", "vol_up_details_col", fallback=["代码", "名称", "涨幅%", "量比", "DFF", "DFF2", "DFF3"], value_type="list")
+        self.vol_up_details_col = self.get_with_writeback("general", "vol_up_details_col", fallback=["代码", "名称", "涨幅%", "量比","流速状态", "DFF", "DFF2", "DFF3"], value_type="list")
         self.v_reversal_pool_col = self.get_with_writeback("general", "v_reversal_pool_col", fallback=["code", "name", "phase", "structure","win", "dff", "Rank", "red", "slope", "dff3", "dff2", "entry_date", "anchor_low", "vol_ratio"], value_type="list")
         # [NEW] 人气共振面板追加自定义列，空列表则不追加。例如 ["win", "dff", "red"]
         self.popularity_col = self.get_with_writeback("general", "popularity_col", fallback=['win'], value_type="list")

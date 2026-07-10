@@ -1,3 +1,19 @@
+## 2026-07-10 15:45
+- [x] **统一搜索历史文件路径，解决人气共振数据未与 Tk/赛马 通用及打包后读取失败的缺陷 (Unified Search History Path to datacsv/search_history.json)**：
+    - [x] **物理对齐共享配置文件**：定位发现人气共振原先写死了可执行目录下的 `query_history.json`，而 Tk 主程序与赛马面板等所有其他组件均使用 `datacsv/search_history.json`，导致打包运行或目录分流时历史数据根本无法互通。现将 `popularity_resonance_gui.py` 中的 `SEARCH_HISTORY_FILE` 重构为优先从 `tk_gui_modules.gui_config` 导入，失败时 fallback 自动寻找 `datacsv/search_history.json`，彻底消除了隔离孤岛，实现了跨模块、跨面板的 100% 数据互通。
+    - [x] **物理回归验证**：运行 `test_pr_gui_history_integration.py` 集成单元测试，全部测试均成功通过。
+
+## 2026-07-10 15:30
+- [x] **修复历史管理器点击“测试”引发的 `TypeError: on_test_code() got an unexpected keyword argument 'onclick'` 崩溃并实现人气股数据集过滤 (Fixed test_callback TypeError & Implemented Hotlist-based df_all Slicing)**：
+    - [x] **兼容 `onclick` 回调接口签名**：重构了 `popularity_resonance_gui.py` 中的 `on_test_code` 接口签名，使其支持 `query=None` 以及 `onclick=False`。当被点击触发（`onclick=True`）时，自动解绑并委托调用 `QueryHistoryManager` 默认的测试与 UI 状态更新方法，完美消除 TypeError 崩溃。
+    - [x] **严格限制测试范围为当前人气榜个股**：在 `on_test_code` 中增加了股票范围收集，先通过汇总当前 EM、THS、LH、TGB 等 5 张表中的活跃股票代码，再以此为 Index 从 `sync_manager` 的全局行情中做 DataFrame 切片截取，最终拼装出专属的人气股行情子集并同步赋给 `query_manager.df_all`。这使得点击“测试”计算出的匹配率不再受全市场 5000 只无关股票的污染，只精准针对人气板块个股计算匹配率，使其具备极高策略指导意义。
+    - [x] **集成测试 100% 通过验证**：通过 `py_compile` 及 `test_pr_gui_history_integration.py` 物理单元测试，成功涵盖并验证了 `on_test_code(onclick=True)` 调用，验证一切正常且状态同步无误。
+
+## 2026-07-10 15:00
+- [x] **完美修复人气共振历史过滤 `UnboundLocalError: local variable 'pd' referenced before assignment` 漏洞与集成测试全绿通过 (Fixed pd Name Scoping UnboundLocalError & Validated PR History Integration)**：
+    - [x] **在数据过滤更新入口 `update_all_tables` 进行 pandas 安全导入**：在 `popularity_resonance_gui.py` 中的 `update_all_tables` 方法的入口作用域显式增加 `import pandas as pd`。这确保了在二级嵌套的 `populate` 数据遍历与过滤引擎中，以及当进行点击切换或概念筛选时，在任何局部作用域或闭包内部，引用的 `pd` 对象均保持非空且有效，彻底消除了由于外部 pandas 导入被作用域遮蔽而在调用 `test_code_against_queries` 进行历史选股表达式校验时引发的 `UnboundLocalError`。
+    - [x] **物理语法编译与端到端集成测试 100% 成功验证**：执行 `py_compile` 对修改后的 GUI 模块执行物理语法校验无任何报错；编写并运行 `test_pr_gui_history_integration.py` 集成单元测试，成功模拟了从冷启动加载缓存、数据拼装、调用 `update_all_tables` 完成过滤的全部数据管道。断言判定全数通过且测试运行结果为 `OK`，彻底验证了系统级 query expression 在人气共振客户端的稳定落地。
+
 ## 2026-07-09 21:00
 - [x] **修复并优化人气共振客户端自动刷新、跨天切换、IPC 同步与盘后自动归档逻辑 (Fixed & Optimized Popularity Resonance GUI Auto-Refresh, Date Crossings, IPC Sync & Post-Market Archiving)**：
     - [x] **实现查询刷新时 IPC 行情全量强制同步 (Mandatory IPC Sync on Refresh)**：在 `_run_once_job` 获取最新人气排行前，增加 `self.sync_manager.request_full_sync()` 同步请求并延迟 `1.2s` 等待数据流接收，彻底根治了手动/自动点击查询刷新后使用旧行情 DataFrame 缓存导致价格与涨幅不吻合的缺陷。

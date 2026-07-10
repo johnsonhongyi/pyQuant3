@@ -8,6 +8,9 @@ import os
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
+import pandas as pd
+from history_manager import QueryHistoryManager
+from stock_logic_utils import test_code_against_queries
 import threading
 import time
 import json
@@ -124,8 +127,47 @@ class PRServiceGUI:
                 self.local_sender = None
         else:
             self.local_sender = None
+        # 初始化过滤公式表达式
+        self.query_expr = ""
             
         self.create_widgets()
+
+        # 实例化 QueryHistoryManager 和独立 Toplevel 窗口
+        self.history_win = tk.Toplevel(self.root)
+        self.history_win.title("人气过滤公式历史管理器")
+        self.history_win.geometry("800x480")
+        self.history_win.withdraw()  # 默认隐藏
+        
+        def on_history_win_close():
+            self.history_win.withdraw()
+            if hasattr(self, 'query_manager') and self.query_manager._history_changed:
+                self.query_manager.save_search_history()
+                self.query_manager._history_changed = False
+                
+        self.history_win.protocol("WM_DELETE_WINDOW", on_history_win_close)
+
+        # 兼容打包环境，统一使用与主程序完全一致的 search_history.json 路径
+        try:
+            from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+        except ImportError:
+            SEARCH_HISTORY_FILE = os.path.join(get_app_root(), "datacsv", "search_history.json")
+        self.query_manager = QueryHistoryManager(
+            root=self.history_win,
+            search_var5=self.query_var,
+            search_combo5=self.query_combo,
+            auto_run=False,
+            history_file=SEARCH_HISTORY_FILE,
+            sync_history_callback=self.sync_history_from_QM,
+            test_callback=self.on_test_code
+        )
+        
+        # 刚初始化完，将编辑器内置 Frame 放置到 Toplevel 容器中
+        if hasattr(self.query_manager, 'editor_frame'):
+            self.query_manager.editor_frame.pack(fill="both", expand=True)
+            
+        # 默认选中并加载 history5 分组
+        self.history_selector.set("history5")
+        self._on_history_group_changed()
 
         # 初始化通用 IPC 行情同步管理器 (通用框架)
         self.sync_manager = IPCSyncManager(
@@ -161,6 +203,173 @@ class PRServiceGUI:
         if hasattr(self, 'root'):
             self.root.after(5000, self._check_auto_refresh_after_close)
 
+    def _on_history_group_changed(self, event=None):
+        group = self.history_selector.get()
+        if hasattr(self, 'query_manager'):
+            self.query_manager.current_key = group
+            self.query_manager.current_history = getattr(self.query_manager, group)
+            if hasattr(self.query_manager, 'combo_group') and self.query_manager.combo_group.winfo_exists():
+                self.query_manager.combo_group.set(group)
+                self.query_manager.refresh_tree()
+                
+        h_list = []
+        if hasattr(self, 'query_manager'):
+            h_list = getattr(self.query_manager, group, [])
+            
+        formatted_list = []
+        for item in h_list:
+            if isinstance(item, dict):
+                q = item.get("query", "")
+                note = item.get("note", "")
+                display_text = f"{note}  |  {q}" if note else q
+                if q:
+                    formatted_list.append(display_text)
+            elif isinstance(item, str):
+                if item:
+                    formatted_list.append(item)
+        self.query_combo['values'] = formatted_list
+        if formatted_list:
+            self.query_combo.set(formatted_list[0])
+        else:
+            self.query_combo.set("")
+
+    def _get_real_query(self):
+        text = self.query_var.get().strip()
+        if "  |  " in text:
+            return text.split("  |  ", 1)[1].strip()
+        return text
+
+    def apply_filter(self, event=None):
+        query = self._get_real_query()
+        self.query_expr = query
+        
+        if query and hasattr(self, 'query_manager'):
+            group = self.history_selector.get()
+            h_list = getattr(self.query_manager, group)
+            
+            exists = False
+            for item in h_list:
+                if isinstance(item, dict) and item.get("query") == query:
+                    exists = True
+                    break
+                elif isinstance(item, str) and item == query:
+                    exists = True
+                    break
+                    
+            if not exists:
+                h_list.insert(0, {"query": query, "starred": 0, "note": ""})
+                if len(h_list) > self.query_manager.MAX_HISTORY:
+                    h_list.pop()
+                self.query_manager.save_search_history()
+                self._on_history_group_changed()
+                    
+        if hasattr(self, '_last_data_cache') and self._last_data_cache:
+            c = self._last_data_cache
+            self.update_all_tables(
+                c["em_data"],
+                c["ths_data"],
+                c["lh_data"],
+                c["tgb_data"],
+                c["resonance_results"],
+                c["quotes"]
+            )
+        else:
+            self.run_once_async()
+
+    def clear_filter(self):
+        self.query_var.set("")
+        self.query_expr = ""
+        if hasattr(self, '_last_data_cache') and self._last_data_cache:
+            c = self._last_data_cache
+            self.update_all_tables(
+                c["em_data"],
+                c["ths_data"],
+                c["lh_data"],
+                c["tgb_data"],
+                c["resonance_results"],
+                c["quotes"]
+            )
+        else:
+            self.run_once_async()
+
+    def manage_history(self):
+        if hasattr(self, 'history_win'):
+            self.history_win.deiconify()
+            self.history_win.lift()
+            self.history_win.focus_force()
+            if hasattr(self, 'query_manager'):
+                self.query_manager.refresh_tree()
+
+    def sync_history_from_QM(self, **kwargs):
+        self._on_history_group_changed()
+        source = kwargs.get("source", "")
+        selected_query = kwargs.get("selected_query")
+        if source == "use" and selected_query:
+            found = False
+            for val in self.query_combo['values']:
+                if val == selected_query or val.endswith(f"|  {selected_query}"):
+                    self.query_combo.set(val)
+                    found = True
+                    break
+            if not found:
+                self.query_combo.set(selected_query)
+            self.apply_filter()
+
+    def on_test_code(self, query=None, onclick=False):
+        import pandas as pd
+        
+        # 1. 收集当前五个 Treeview 表格中所有的人气榜股票代码
+        all_codes = set()
+        for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if vals and len(vals) > 1:
+                    all_codes.add(str(vals[1]).strip().zfill(6))
+                    
+        df_cache = None
+        # 2. 从全量行情中筛选出属于当前人气榜个股的切片
+        if hasattr(self, "sync_manager") and all_codes:
+            full_df = self.sync_manager.get_current_df()
+            if full_df is not None and not full_df.empty:
+                valid_codes = [c for c in all_codes if c in full_df.index]
+                if valid_codes:
+                    df_cache = full_df.loc[valid_codes].copy()
+                    
+        # 3. Fallback 退避机制
+        if df_cache is None or df_cache.empty:
+            if all_codes:
+                df_cache = pd.DataFrame(index=list(all_codes))
+                df_cache['name'] = ""
+                df_cache['percent'] = 0.0
+                df_cache['trade'] = 0.0
+                df_cache['dff2'] = 0.0
+                df_cache['dff3'] = 0.0
+                df_cache['Rank'] = 0
+                df_cache['category'] = ""
+                for code_str in df_cache.index:
+                    block_str = self._block_cache.get(code_str, '--')
+                    df_cache.at[code_str, 'category'] = block_str
+            else:
+                return []
+        
+        # 将过滤后的人气榜个股专属数据集同步给 query_manager，供其内部使用
+        if hasattr(self, 'query_manager'):
+            self.query_manager.df_all = df_cache
+
+        if onclick:
+            # 临时解绑 test_callback 避免无限递归，然后调用默认测试逻辑
+            if hasattr(self, 'query_manager'):
+                old_cb = self.query_manager.test_callback
+                self.query_manager.test_callback = None
+                try:
+                    self.query_manager.on_test_code(onclick=True)
+                finally:
+                    self.query_manager.test_callback = old_cb
+            return []
+
+        from stock_logic_utils import test_code_against_queries
+        return test_code_against_queries(df_cache, [{"query": query}])
+
     def on_close(self):
         try:
             self.sync_manager.stop()
@@ -168,6 +377,18 @@ class PRServiceGUI:
             pass
         self.save_config_settings()
         
+        # 保存历史记录
+        if hasattr(self, 'query_manager'):
+            try:
+                self.query_manager.save_search_history()
+            except Exception:
+                pass
+        if hasattr(self, 'history_win') and self.history_win.winfo_exists():
+            try:
+                self.history_win.destroy()
+            except Exception:
+                pass
+
         # 在退出时同步保存一次最新的 block_cache
         cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
         if os.path.exists(cache_file):
@@ -669,6 +890,44 @@ class PRServiceGUI:
                         "children": [("Vertical.Scrollbar.thumb",
                                       {"expand": "1", "sticky": "nswe"})]})])
         
+        # [NEW] 顶部的历史过滤公式条 (History Filter Frame)
+        self.filter_frame = tk.Frame(self.root)
+        self.filter_frame.pack(side="top", fill="x", padx=4, pady=2)
+        
+        lbl_grp = tk.Label(self.filter_frame, text="历史组:", font=("Microsoft YaHei", 9, "bold"))
+        lbl_grp.pack(side="left", padx=(2, 4))
+        
+        self.history_selector = ttk.Combobox(
+            self.filter_frame,
+            values=["history1", "history2", "history3", "history4", "history5"],
+            state="readonly",
+            width=9
+        )
+        self.history_selector.pack(side="left", padx=2)
+        self.history_selector.bind("<<ComboboxSelected>>", self._on_history_group_changed)
+        
+        lbl_flt = tk.Label(self.filter_frame, text="过滤:", font=("Microsoft YaHei", 9, "bold"))
+        lbl_flt.pack(side="left", padx=(10, 4))
+        
+        self.query_var = tk.StringVar()
+        self.query_combo = ttk.Combobox(
+            self.filter_frame,
+            textvariable=self.query_var,
+            width=30
+        )
+        self.query_combo.pack(side="left", padx=2, fill="x", expand=True)
+        self.query_combo.bind("<Return>", lambda e: self.apply_filter())
+        self.query_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
+        
+        self.btn_query_exec = ttk.Button(self.filter_frame, text="过滤", command=self.apply_filter, width=6)
+        self.btn_query_exec.pack(side="left", padx=2)
+        
+        self.btn_query_clear = ttk.Button(self.filter_frame, text="清空", command=self.clear_filter, width=6)
+        self.btn_query_clear.pack(side="left", padx=2)
+        
+        self.btn_query_manage = ttk.Button(self.filter_frame, text="管理", command=self.manage_history, width=6)
+        self.btn_query_manage.pack(side="left", padx=2)
+
         # 顶部的概念显示与控制栏
         self.top_concept_frame = tk.Frame(self.root)
         self.top_concept_frame.pack(side="top", fill="x", padx=4, pady=2)
@@ -1436,6 +1695,7 @@ class PRServiceGUI:
             self.root.after(0, lambda: self.btn_refresh.config(state="normal", text="查询刷新"))
 
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):
+        import pandas as pd
         # 缓存最新传入的数据，用于点击概念过滤时重新渲染
         self._last_data_cache = {
             "em_data": em_data,
@@ -1508,6 +1768,7 @@ class PRServiceGUI:
 
         # 2. 定义带去重功能的单个表格填充辅助函数
         def populate(tree, data_dict):
+            import pandas as pd
             sorted_items = sorted(
                 data_dict.items(),
                 key=lambda x: (0 if str(x[0]).strip().zfill(6) in fav_stocks else 1, x[1])
@@ -1577,6 +1838,29 @@ class PRServiceGUI:
                         "ma20d": row_obj.get('ma20d', 0.0) if row_obj is not None else 0.0,
                         "ma60d": row_obj.get('ma60d', 0.0) if row_obj is not None else 0.0,
                     }
+
+                # 历史公式过滤
+                if getattr(self, 'query_expr', None):
+                    if df_cache is not None and code_str in df_cache.index:
+                        df_code = df_cache.loc[[code_str]]
+                    else:
+                        df_code = pd.DataFrame([{
+                            "code": code_str,
+                            "name": name,
+                            "percent": pct,
+                            "ratio": pct,
+                            "price": float(price_str) if price_str != "--" else 0.0,
+                            "close": float(price_str) if price_str != "--" else 0.0,
+                            "trade": float(price_str) if price_str != "--" else 0.0,
+                            "dff2": float(dff2_str) if dff2_str != "--" else 0.0,
+                            "dff3": float(dff3_str) if dff3_str != "--" else 0.0,
+                            "rank": int(rank_str) if (rank_str != "--" and rank_str.isdigit()) else 0,
+                            "category": block_str,
+                            "hy": block_str,
+                        }], index=[code_str])
+                    test_res = test_code_against_queries(df_code, [{"query": self.query_expr}])
+                    if test_res and test_res[0].get("hit", 0) <= 0:
+                        continue
 
                 # 概念过滤
                 if getattr(self, 'selected_concept', None) is not None:
@@ -1664,6 +1948,29 @@ class PRServiceGUI:
                     "ma20d": row_obj_res.get('ma20d', 0.0) if row_obj_res is not None else 0.0,
                     "ma60d": row_obj_res.get('ma60d', 0.0) if row_obj_res is not None else 0.0,
                 }
+
+            # 历史公式过滤
+            if getattr(self, 'query_expr', None):
+                if df_cache is not None and code_str in df_cache.index:
+                    df_code = df_cache.loc[[code_str]]
+                else:
+                    df_code = pd.DataFrame([{
+                        "code": code_str,
+                        "name": name,
+                        "percent": pct,
+                        "ratio": pct,
+                        "price": float(price_str) if price_str != "--" else 0.0,
+                        "close": float(price_str) if price_str != "--" else 0.0,
+                        "trade": float(price_str) if price_str != "--" else 0.0,
+                        "dff2": float(dff2_str) if dff2_str != "--" else 0.0,
+                        "dff3": float(dff3_str) if dff3_str != "--" else 0.0,
+                        "rank": int(rank_str) if (rank_str != "--" and rank_str.isdigit()) else 0,
+                        "category": block_str,
+                        "hy": block_str,
+                    }], index=[code_str])
+                test_res = test_code_against_queries(df_code, [{"query": self.query_expr}])
+                if test_res and test_res[0].get("hit", 0) <= 0:
+                    continue
 
             # 概念过滤
             if getattr(self, 'selected_concept', None) is not None:
