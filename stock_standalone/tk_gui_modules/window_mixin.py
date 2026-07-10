@@ -309,8 +309,8 @@ class WindowMixin:
             scale = self._get_dpi_scale_factor()
 
             geom = win.geometry()
-            width = max(130, min(int(geom.width() / scale), 500))
-            height = max(150, min(int(geom.height() / scale), 450))
+            width = max(130, int(geom.width() / scale))
+            height = max(150, int(geom.height() / scale))
             pos = {
                 "x": int(geom.x() / scale),
                 "y": int(geom.y() / scale),
