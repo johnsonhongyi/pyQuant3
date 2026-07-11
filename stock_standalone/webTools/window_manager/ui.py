@@ -7,6 +7,7 @@
 import sys
 import os
 import re
+import json
 import keyboard
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtWidgets import (
@@ -19,28 +20,161 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction, QIcon
 
 # 导入核心模块
-try:
-    from . import core
-except ImportError:
-    import core
+from . import core
 
 import sys
 # 动态将工作空间根目录及当前目录加入路径，保证 tk_gui_modules 等模块可以被顺利导入
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-try:
-    from tk_gui_modules.window_mixin import WindowMixin
-except ImportError:
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+class WindowMixin:
+    def _get_dpi_scale_factor(self) -> float:
+        """获取当前系统的物理 DPI 缩放比例"""
+        try:
+            from PyQt6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                screen = app.primaryScreen()
+                if screen:
+                    dpi = screen.logicalDotsPerInch()
+                    scale = dpi / 96.0
+                    if scale > 0:
+                        return float(scale)
+        except Exception:
+            pass
+        try:
+            import ctypes
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX = 88
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            scale = dpi_x / 96.0
+            if scale <= 0:
+                scale = 1.0
+            return scale
+        except Exception:
+            return 1.0
+
+    def _get_config_file_path(self, base_file_path: str, scale: float) -> str:
+        """根据缩放因子获取配置文件路径"""
+        from . import core
+        app_root = core.get_app_root()
+        filename = base_file_path
+        if scale > 1.5:
+            filename = f"scale{int(scale)}_window_config.json"
+        else:
+            filename = "window_config.json"
+        return os.path.join(app_root, filename)
+
+    def load_window_position_qt(self, win, window_name: str, file_path: str = "window_config.json", 
+                                default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple:
+        try:
+            window_name = str(window_name)
+            scale = self._get_dpi_scale_factor()
+            config_file_path = self._get_config_file_path(file_path, scale)
+
+            x = None
+            y = None
+            width = default_width
+            height = default_height
+
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if window_name in data:
+                    pos = data[window_name]
+                    width = int(pos.get("width", default_width) * scale)
+                    height = int(pos.get("height", default_height) * scale)
+                    x = int(pos.get("x", 0) * scale)
+                    y = int(pos.get("y", 0) * scale)
+
+            if x is None or y is None:
+                x, y = 100, 100
+
+            win.setGeometry(x, y, width, height)
+            logger.debug(f"[load_window_position_qt] 成功加载 {config_file_path} {window_name}: {width}x{height} {x}+{y}")
+            return width, height, x, y
+        except Exception as e:
+            logger.error(f"[load_window_position_qt] 失败: {e}")
+            win.resize(default_width, default_height)
+            return default_width, default_height, None, None
+
+    def save_window_position_qt_visual(self, win, window_name: str, file_path: str = "window_config.json") -> None:
+        import time
+        if not hasattr(self, "_window_save_debounce"):
+            self._window_save_debounce = {}
+        current_time = time.time()
+        last_time = self._window_save_debounce.get(window_name, 0)
+        if current_time - last_time < 5:
+            return
+        self._window_save_debounce[window_name] = current_time
+
+        try:
+            window_name = str(window_name)
+            scale = self._get_dpi_scale_factor()
+            geom = win.geometry()
+            pos = {
+                "x": int(geom.x() / scale),
+                "y": int(geom.y() / scale),
+                "width": int(geom.width() / scale),
+                "height": int(geom.height() / scale)
+            }
+
+            config_file_path = self._get_config_file_path(file_path, scale)
+            data = {}
+            data_changed = True
+            
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if window_name in data:
+                        old_pos = data[window_name]
+                        if (old_pos.get('x') == pos['x'] and 
+                            old_pos.get('y') == pos['y'] and 
+                            old_pos.get('width') == pos['width'] and 
+                            old_pos.get('height') == pos['height']):
+                            data_changed = False
+                except Exception as e:
+                    logger.error(f"[save_window_position_qt] 读取失败: {e}")
+
+            if data_changed:
+                data[window_name] = pos
+                tmp_file = config_file_path + ".tmp"
+                try:
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    os.replace(tmp_file, config_file_path)
+                    logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
+                except Exception as e:
+                    logger.error(f"[save_window_position_qt] 写入失败: {e}")
+                    if os.path.exists(tmp_file): os.remove(tmp_file)
+            else:
+                logger.debug(f"[save_window_position_qt] {config_file_path} 跳过保存 {window_name}: 数据未变化")
+        except Exception as e:
+            logger.error(f"[save_window_position_qt] 失败: {e}")
+
+
+import logging
+
+# 初始化标准日志记录器
+logger = logging.getLogger("WindowManager")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    
+    # 控制台 Handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)d): %(message)s', datefmt='%m-%d %H:%M:%S')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # 文件 Handler (写入当前目录下的 window_layout.log)
     try:
-        from tk_gui_modules.window_mixin import WindowMixin
-    except ImportError:
-        # 兜底定义 WindowMixin，防止导入失败导致崩溃
-        class WindowMixin:
-            def load_window_position_qt(self, win, name, file_path=None, default_width=500, default_height=500, offset_step=100):
-                win.resize(default_width, default_height)
-                return default_width, default_height, None, None
-            def save_window_position_qt_visual(self, *args, **kwargs): pass
-            def save_window_position_qt(self, *args, **kwargs): pass
+        from . import core
+        log_dir = core.get_app_root()
+        log_file = os.path.join(log_dir, "window_layout.log")
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except Exception as e:
+        print(f"[WARN] Failed to setup file handler for window_layout.log: {e}", file=sys.stderr)
+
 
 
 class HotkeyLineEdit(QLineEdit):
@@ -677,12 +811,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         super().__init__()
         self.setWindowTitle("股票交易终端 - 窗口坐标分类管理器")
         
-        # 获取系统 DPI 缩放并设置，供 WindowMixin 自动识别适配
-        try:
-            from dpi_utils import get_windows_dpi_scale_factor
-            self.scale_factor = get_windows_dpi_scale_factor()
-        except:
-            self.scale_factor = 1.0
+        self.scale_factor = self._get_dpi_scale_factor()
             
         self._hotkey_hook = None
         self.config_manager = core.ConfigManager()
@@ -986,7 +1115,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(12)
+        main_layout.setSpacing(4)
 
         # 顶部标题与显示器检测面板
         top_bar = QHBoxLayout()
@@ -1002,8 +1131,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         # 显示器详情显示区 (GroupBox)
         self.gb_display_info = QGroupBox("当前物理显示器拓扑结构")
+        self.gb_display_info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         gb_display_layout = QVBoxLayout(self.gb_display_info)
-        gb_display_layout.setContentsMargins(10, 15, 10, 10)
+        gb_display_layout.setContentsMargins(10, 10, 10, 8)
         self.lbl_display_details = QLabel("无显示器数据")
         self.lbl_display_details.setWordWrap(True)
         self.lbl_display_details.setStyleSheet("color: #d1d5db; line-height: 1.4;")
@@ -1027,8 +1157,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         # 常用程序快捷启动面板（横向滚动，固定/运行中优先，可容纳更多程序）
         self.gb_app_shortcuts = QGroupBox("常用程序快捷启动 (⭐固定优先 · ▶运行次之 · 滚轮切换更多)")
+        self.gb_app_shortcuts.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         gb_shortcuts_outer = QVBoxLayout(self.gb_app_shortcuts)
-        gb_shortcuts_outer.setContentsMargins(8, 15, 8, 8)
+        gb_shortcuts_outer.setContentsMargins(8, 10, 8, 6)
         gb_shortcuts_outer.setSpacing(0)
 
         self._shortcuts_scroll = QtWidgets.QScrollArea()
@@ -1131,31 +1262,36 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         mid_layout.addWidget(self.table_widget, stretch=4)
         
         table_op_layout = QVBoxLayout()
+        table_op_layout.setSpacing(10)
+        table_op_layout.setContentsMargins(0, 0, 0, 0)
+
         self.btn_add_row = QPushButton("➕ 添加映射行")
+        self.btn_add_row.setFixedHeight(32)
         self.btn_add_row.clicked.connect(self.add_table_row)
         table_op_layout.addWidget(self.btn_add_row)
         
         self.btn_delete_row = QPushButton("➖ 删除选中行")
+        self.btn_delete_row.setFixedHeight(32)
         self.btn_delete_row.clicked.connect(self.delete_table_row)
         table_op_layout.addWidget(self.btn_delete_row)
         
-        table_op_layout.addSpacing(20)
+        # 两组按钮之间的自适应大间隔弹簧，空间富余时拉开 15px，空间紧张时压缩至 0
+        table_op_layout.addSpacerItem(QtWidgets.QSpacerItem(0, 15, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Maximum))
         
         self.btn_refresh_pos = QPushButton("🔄 刷新当前位置")
+        self.btn_refresh_pos.setFixedHeight(32)
         self.btn_refresh_pos.setStyleSheet("background-color: #0891b2; border: none; font-weight: bold;")
         self.btn_refresh_pos.clicked.connect(self.on_refresh_pos_clicked)
         table_op_layout.addWidget(self.btn_refresh_pos)
         
-        table_op_layout.addSpacing(10)
-        
         self.btn_capture_wins = QPushButton("📸 捕获桌面窗口")
+        self.btn_capture_wins.setFixedHeight(32)
         self.btn_capture_wins.setStyleSheet("background-color: #4f46e5; border: none; font-weight: bold;")
         self.btn_capture_wins.clicked.connect(self.capture_desktop_windows)
         table_op_layout.addWidget(self.btn_capture_wins)
         
-        table_op_layout.addSpacing(10)
-        
         self.btn_update_existing = QPushButton("🔄 更新已有窗口坐标")
+        self.btn_update_existing.setFixedHeight(32)
         self.btn_update_existing.setStyleSheet("background-color: #059669; border: none; font-weight: bold;")
         self.btn_update_existing.clicked.connect(self.update_existing_windows_pos)
         table_op_layout.addWidget(self.btn_update_existing)
@@ -1164,15 +1300,23 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         mid_layout.addLayout(table_op_layout, stretch=1)
         main_layout.addLayout(mid_layout)
 
+        # 自适应纵向弹簧，空间充足时留出 15px 间隔，空间局促时自动缩减至 0
+        spacer1 = QtWidgets.QSpacerItem(0, 15, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Maximum)
+        main_layout.addItem(spacer1)
+
         # 日志控制台
         log_group = QGroupBox("执行状态日志")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(8, 12, 8, 8)
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setFixedHeight(110)
+        self.log_output.setMinimumHeight(110)
         log_layout.addWidget(self.log_output)
         main_layout.addWidget(log_group)
+
+        # 自适应纵向弹簧，空间充足时留出 10px 间隔，空间局促时自动缩减至 0
+        spacer2 = QtWidgets.QSpacerItem(0, 10, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Maximum)
+        main_layout.addItem(spacer2)
 
         # 底部应用栏
         bottom_bar = FlowLayout(hspacing=6, vspacing=6)
@@ -1217,6 +1361,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def log(self, text: str):
         """输出一条日志"""
         self.log_output.append(f"[{QtCore.QTime.currentTime().toString('hh:mm:ss')}] {text}")
+        try:
+            logger.info(text)
+        except Exception:
+            pass
 
     def open_performance_analyzer(self):
         """以独立多进程/子进程形式拉起系统性能与内存诊断分析器"""
@@ -2783,6 +2931,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
 
 def main():
+    # 动态根据环境变量调整日志级别
+    app_debug = os.environ.get("APP_DEBUG")
+    if app_debug:
+        import logging
+        level_val = getattr(logging, app_debug.upper(), None)
+        if level_val is not None:
+            logger.setLevel(level_val)
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     

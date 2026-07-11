@@ -12,7 +12,12 @@ import sys
 import os
 
 def get_app_root() -> str:
-    """获取程序物理根目录。独立于 sys_utils，避免加载无关依赖。"""
+    """获取程序物理根目录。"""
+    current_dir = os.path.dirname(os.path.abspath(__file__)) # webTools
+    parent_dir = os.path.dirname(current_dir) # stock_standalone
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+        
     env_root = os.environ.get("INSTOCK_APP_ROOT")
     if env_root and os.path.exists(env_root):
         try:
@@ -22,11 +27,12 @@ def get_app_root() -> str:
         return env_root
 
     is_frozen = getattr(sys, "frozen", False)
-    if is_frozen:
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    if is_frozen or is_nuitka:
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
     else:
         # 开发环境下，项目根目录是 webTools 的上级目录
-        calculated_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        calculated_root = parent_dir
 
     # 强制将当前进程的工作目录切换为定位到的绝对物理根目录，防止通过右键快捷菜单或计划任务等启动时导致的 CWD 不对
     try:
@@ -34,7 +40,6 @@ def get_app_root() -> str:
     except Exception:
         pass
 
-    # 作为通用桌面管理器，不再向全局 os.environ 写入 INSTOCK_APP_ROOT，防止污染拉起的子进程环境变量
     return calculated_root
 
 

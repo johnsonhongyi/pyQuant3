@@ -23,7 +23,6 @@ a = Analysis(
         ("webTools/window_manager/window_layout_config.json", "webTools/window_manager"),
     ] + [(f, ".") for f in glob.glob("*monitordisplay_config.json")],
     hiddenimports=[
-        'sys_utils',
         'webTools.window_manager.core', 
         'webTools.window_manager.ui',
         'screeninfo', 

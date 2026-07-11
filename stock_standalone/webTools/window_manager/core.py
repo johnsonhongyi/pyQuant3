@@ -319,19 +319,21 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
 
 
 def get_app_root() -> str:
-    """获取程序物理根目录。独立于 sys_utils，避免加载无关依赖。"""
+    """获取程序物理根目录。"""
+
     env_root = os.environ.get("INSTOCK_APP_ROOT")
     if env_root and os.path.exists(env_root):
         return env_root
 
     is_frozen = getattr(sys, "frozen", False)
-    if is_frozen:
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    
+    if is_frozen or is_nuitka:
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
     else:
         # 对应本地开发环境项目根目录 (webTools/window_manager 的上上级)
         calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    # 作为通用桌面管理器，不再向全局 os.environ 写入 INSTOCK_APP_ROOT，防止污染拉起的子进程环境变量
     return calculated_root
 
 
@@ -343,8 +345,10 @@ def get_conf_path(fname: str) -> str:
     dst_path = os.path.join(app_root, fname)
 
     if not os.path.exists(dst_path):
-        # 找到内置释放目录
         base = getattr(sys, "_MEIPASS", None)
+
+        if not base:
+            base = getattr(sys, "_MEIPASS", None)
         if not base and "NUITKA_ONEFILE_DIRECTORY" in os.environ:
             base = os.environ["NUITKA_ONEFILE_DIRECTORY"]
         if not base:
@@ -354,6 +358,10 @@ def get_conf_path(fname: str) -> str:
         src_path = os.path.join(base, "webTools", "window_manager", fname)
         if not os.path.exists(src_path):
             src_path = os.path.join(base, fname)
+        
+        # 💥 额外自愈探测候选：兼容 Nuitka 在不同环境下可能发生平铺释放的极端情况
+        if not os.path.exists(src_path):
+            src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
 
         if os.path.exists(src_path):
             try:
