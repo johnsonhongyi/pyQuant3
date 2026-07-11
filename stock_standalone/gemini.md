@@ -1,3 +1,7 @@
+## 2026-07-11 23:42
+- [x] **优化窗口坐标管理器日志输出框布局自适应 (Optimized Window Pos Manager Log Output Layout Autostretch)**：
+    - [x] **消除窗口拉伸时的日志空白区域 (Fixed Log Area Dead Space on Stretch)**：将 `ui.py` 中 `log_output` 的高度从固定高度限制（`setFixedHeight(110)`）重构为最小高度限制（`setMinimumHeight(110)`），消除了窗口被纵向拉伸时在执行状态日志上下两侧留出的多余闲置空白，使日志框随容器大小平滑扩展，能显示更多日志行。
+
 ## 2026-07-10 22:30
 - [x] **重构窗口自动布局管理器与快捷启动，实现极致交互体验与完美路径兼容 (Refactored Window Manager UI, Favorites Layout, and Path Compatibility)**：
     - [x] **实现常用程序右键固定与移除管理 (Favorites Right-Click Management)**：为进程表格添加了右键上下文菜单项“📌 固定到常用”与“❌ 从常用移除”。支持用户右键直接将任意进程添加至常用软件列表，或者从常用软件列表中快速卸载移除，自动触发配置防抖保存与 UI 局部增量重绘，免去了手动编辑配置文件的繁琐交互。
