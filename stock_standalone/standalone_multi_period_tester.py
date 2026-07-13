@@ -76,8 +76,18 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             super().__init__(master)
         else:
             super().__init__()
+            
+        # 统一计算 DPI 缩放比例
+        if hasattr(self, 'master') and self.master and hasattr(self.master, 'scale_factor'):
+            self.scale_factor = self.master.scale_factor
+        else:
+            from dpi_utils import get_windows_dpi_scale_factor
+            self.scale_factor = get_windows_dpi_scale_factor()
+            
         self.title("多周期联动策略筛选器")
-        self.geometry("1100x700")
+        w = int(1100 * self.scale_factor)
+        h = int(700 * self.scale_factor)
+        self.geometry(f"{w}x{h}")
         
         self.engine = MultiPeriodStrategyEngine()
         self.strategies = self.engine.load_strategies()
@@ -381,9 +391,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
         style = ttk.Style()
-        style.configure("Treeview", rowheight=25)
+        # 避免污染全局样式，使用专用样式名，并根据缩放因子动态设置行高
+        style_name = "MultiPeriod.Treeview"
+        style.configure(style_name, rowheight=int(25 * self.scale_factor))
         
-        self.tree = ttk.Treeview(tree_frame, show="headings")
+        self.tree = ttk.Treeview(tree_frame, show="headings", style=style_name)
         
         # 极窄垂直滚动条：用 tk.Scrollbar 直接设置 width=8，
         # ttk.Scrollbar 在 Windows 主题下 width 参数无效
@@ -567,6 +579,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.run_filter(force_reload=False)
 
     def _adjust_column_widths(self):
+        scale = getattr(self, "scale_factor", 1.0)
         for col in self.tree["columns"]:
             header_text = self.tree.heading(col, "text")
             
@@ -576,10 +589,10 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 w = 0
                 for char in str(text):
                     if '\u4e00' <= char <= '\u9fff':
-                        w += 12
+                        w += 12 * scale
                     else:
-                        w += 6.5
-                return int(w) + 8
+                        w += 6.5 * scale
+                return int(w) + int(8 * scale)
 
             # 极限优化数据列宽：不再受限于长列名，主要由单元格内容决定，配合鼠标悬停 Tooltip 查阅
             data_max_w = 0
@@ -592,35 +605,35 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             col_lower = col.lower()
             
             if col == "name":
-                final_w = max(55, min(data_max_w, 80))
+                final_w = max(60 * scale, min(data_max_w, 95 * scale))
             elif col == "code":
-                final_w = 50
+                final_w = 55 * scale
             elif any(x in col_lower for x in ["red", "win"]):
                 # 胜率、红盘数等短整型数据列，极限压缩
-                final_w = 38
+                final_w = 40 * scale
             elif "strong_struct" in col_lower:
                 # 强结构分数据一般为三位数值（如 102.7）
-                final_w = 52
+                final_w = 55 * scale
             elif "slope" in col_lower:
                 # 斜率数据
-                final_w = 50
+                final_w = 52 * scale
             elif "dff" in col_lower:
                 # 差值数据
-                final_w = 48
+                final_w = 50 * scale
             elif col_lower in ["price", "trade", "now"]:
-                final_w = 48
+                final_w = 50 * scale
             elif col_lower == "percent":
-                final_w = 52
+                final_w = 55 * scale
             elif col_lower == "ratio":
-                final_w = 48
+                final_w = 50 * scale
             elif col_lower in ["d", "2d", "w", "m", "d_chk", "2d_chk", "w_chk", "m_chk"] or "周期" in header_text:
                 # 参与勾选列
-                final_w = 35
+                final_w = 38 * scale
             else:
                 # 默认列宽：取 数据最大宽+10 和 列头宽 的较小值，并限制在 32 ~ 80px 之间
-                final_w = max(32, min(data_max_w + 10, min(header_w, 80)))
+                final_w = max(35 * scale, min(data_max_w + 10 * scale, min(header_w, 85 * scale)))
                 
-            self.tree.column(col, width=final_w, minwidth=20, stretch=True)
+            self.tree.column(col, width=int(final_w), minwidth=int(20 * scale), stretch=True)
                 
     def _on_strategy_selected(self):
         """切换策略时：保存状态，不改变周期的勾选，并立即触发筛选展示数据"""
@@ -2373,7 +2386,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
         columns = ["idx"] + list(self.tree["columns"])
         
-        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="Treeview")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", style="MultiPeriod.Treeview")
         
         vsb = tk.Scrollbar(frame, orient="vertical", command=tree.yview,
                            width=8, bd=0, relief="flat",
@@ -2383,7 +2396,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-
+ 
         def sort_sub_column(t, col, reverse):
             data = [(t.set(k, col), k) for k in t.get_children('')]
             def safe_float(x):
@@ -2401,9 +2414,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             for index, (val, k) in enumerate(data):
                 t.move(k, '', index)
             t.heading(col, command=lambda c=col: sort_sub_column(t, c, not reverse))
-
+ 
         tree.heading("idx", text="序号", command=lambda c="idx": sort_sub_column(tree, c, False))
-        tree.column("idx", width=36, anchor="center")
+        tree.column("idx", width=int(36 * self.scale_factor), anchor="center")
         for col in self.tree["columns"]:
             tree.heading(col, text=self.tree.heading(col, "text"), command=lambda c=col: sort_sub_column(tree, c, False))
             tree.column(col, width=self.tree.column(col, "width"), anchor=self.tree.column(col, "anchor"))
@@ -2554,14 +2567,26 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         super().__init__(parent)
         self.title("多周期过滤策略编辑器")
         
+        # 统一计算 DPI 缩放比例
+        if hasattr(parent, 'scale_factor'):
+            self.scale_factor = parent.scale_factor
+        else:
+            from dpi_utils import get_windows_dpi_scale_factor
+            self.scale_factor = get_windows_dpi_scale_factor()
+            
+        default_w = int(850 * self.scale_factor)
+        default_h = int(580 * self.scale_factor)
+        
         # 尝试从配置文件读取上次保存的窗口位置与大小
         config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
-        editor_geom = "850x580"
+        editor_geom = f"{default_w}x{default_h}"
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
-                    editor_geom = cfg.get("editor_geometry", "850x580")
+                    geom_saved = cfg.get("editor_geometry")
+                    if geom_saved:
+                        editor_geom = geom_saved
             except Exception:
                 pass
                 
@@ -2569,8 +2594,10 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         if "+" not in editor_geom:
             try:
                 w, h = map(int, editor_geom.split("x"))
+                if w == 850 and h == 580:
+                    w, h = default_w, default_h
             except Exception:
-                w, h = 850, 580
+                w, h = default_w, default_h
                 
             # 优先计算居中于父窗口
             parent_w = parent.winfo_width()

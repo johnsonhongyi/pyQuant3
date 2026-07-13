@@ -1,3 +1,10 @@
+## 2026-07-13 19:30
+- [x] **隔离多周期 Treeview 样式与彻底重构高 DPI 缩放适配 (Isolated Treeview Style & Refactored High-DPI Adaptation in Multi-Period Tester)**：
+    - [x] **根治主 TK 监控窗口 Treeview 样式被污染变形缺陷**：重构了 `standalone_multi_period_tester.py` 中的 `_init_ui` 方法。废除了原本直接修改全局默认样式的 `style.configure("Treeview", rowheight=25)` 操作，隔离并声明了多周期专属的继承样式 `"MultiPeriod.Treeview"`，并根据高 DPI 缩放因子动态计算专有行高；同时将主结果 Treeview 和二级板块个股列表的 `style` 均指定为 `"MultiPeriod.Treeview"`，彻底消除了同一进程中子窗口对主监控窗口默认 Treeview 样式的覆盖和干扰。
+    - [x] **实现窗口几何尺寸高 DPI 自适应缩放**：在多周期筛选器主窗口与策略编辑器的 `__init__` 初始化中，自适应获取父窗口的 `scale_factor` 或通过底层的 `get_windows_dpi_scale_factor()` 实时乘算 DPI 比例，将默认的 `1100x700` 和 `850x580` 窗口长宽以及居中偏移位置等物理像素进行了动态缩放计算，彻底解决了在高分辨率屏幕下窗口过小、组件溢出和错位的问题。
+    - [x] **重构列宽与字符宽度矢量化缩放估算算法**：重构了 `_adjust_column_widths` 中的列宽自动调整模块。将字符像素估计（`get_text_width` 内部的 `12` 和 `6.5`）以及所有的内置指标固定列宽和默认限界（如名称、代码、涨幅、昨收等）均乘以了 `self.scale_factor` 并进行了取整转换；为子板块 constituents 列表的 `"idx"` 序号列硬编码像素宽 `36` 也追加了 `self.scale_factor` 乘算。在高 DPI 环境下完全杜绝了字符堆叠、文本重合与显示受限等界面 Bug。
+    - [x] **物理语法编译自检 100% 成功通过**：对修改后的主模块 `standalone_multi_period_tester.py` 均执行了 `py_compile` 编译校验，全数绿灯通过，无任何语法或缩进报错。
+
 ## 2026-07-13 19:00
 - [x] **人气排行界面集成 DNA 专项审计与双向联动 (Integrated DNA Audit & Linkage in Popularity Resonance GUI)**：
     - [x] **实现点击审计按钮提取最新操作视图个股列表**：在 `on_tree_select` 和 `on_select_top10` 中增加了 `self._last_active_tree = tree` 的动态活动焦点记录。在工具栏点击 `🧬 DNA审计` 按钮时，优先从最后发生点击或互动的排行表（最新视图）中获取当前选定个股及其随后的 20 只个股进行批量审计，保证了与当前浏览进度的一致性。
