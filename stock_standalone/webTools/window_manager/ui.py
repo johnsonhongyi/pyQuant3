@@ -797,8 +797,15 @@ class EditPathDialog(QDialog):
         path = self.txt_path.text().strip()
         # 如果路径中含有空格，且没有被包裹，则自动加上双引号
         if path and " " in path:
-            if not ((path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'"))):
-                path = f'"{path}"'
+            # 排除复杂的 shell 命令或带有内部引号的命令，避免破坏其命令格式
+            is_shell_cmd = (
+                any(marker in path for marker in (";", "&&", "||", "|")) or
+                path.strip().lower().startswith(("start ", "cmd ", "powershell ", "python ", "py ", "cd ", "cd/")) or
+                '"' in path or "'" in path
+            )
+            if not is_shell_cmd:
+                if not ((path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'"))):
+                    path = f'"{path}"'
         self.final_path = path
         self.accept()
 
@@ -2523,6 +2530,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         import shlex
         
         cmd_str = cmd_str.strip()
+        # 💥 自适应清理可能被错误包裹的外部整体引号 (例如 "start cmd /k ..." 或 "D:\My Path\App.exe -arg")
+        if (cmd_str.startswith('"') and cmd_str.endswith('"')) or (cmd_str.startswith("'") and cmd_str.endswith("'")):
+            inner = cmd_str[1:-1].strip()
+            if " " in inner or any(marker in inner for marker in (";", "&&", "||", "|", '"', "'")):
+                cmd_str = inner
+
         if not cmd_str:
             return False, "", "", False, "路径配置为空"
 
@@ -2627,6 +2640,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def _launch_program(self, exe_path, title, pos_item):
         """智能解析并拉起普通程序（支持命令行与多段脚本），若需权限则自动提权"""
+        exe_path = exe_path.strip()
+        if (exe_path.startswith('"') and exe_path.endswith('"')) or (exe_path.startswith("'") and exe_path.endswith("'")):
+            inner = exe_path[1:-1].strip()
+            if " " in inner or any(marker in inner for marker in (";", "&&", "||", "|", '"', "'")):
+                exe_path = inner
+
         is_valid, final_exe, final_args, is_shell, error_msg = self.resolve_and_validate_cmd(exe_path)
         if not is_valid:
             QMessageBox.warning(self, "启动失败", f"无效的启动配置：\n{error_msg}")
@@ -2693,6 +2712,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def _launch_as_admin(self, exe_path, title, pos_item):
         """通过 ctypes.windll.shell32.ShellExecuteW 提权以管理员身份启动程序，支持复杂命令行与参数"""
+        exe_path = exe_path.strip()
+        if (exe_path.startswith('"') and exe_path.endswith('"')) or (exe_path.startswith("'") and exe_path.endswith("'")):
+            inner = exe_path[1:-1].strip()
+            if " " in inner or any(marker in inner for marker in (";", "&&", "||", "|", '"', "'")):
+                exe_path = inner
+
         try:
             import ctypes
             import os
