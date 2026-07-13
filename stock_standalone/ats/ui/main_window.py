@@ -1131,6 +1131,15 @@ class ATSMainWindow(QMainWindow):
         if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
             try:
                 df_diff = df_payload
+                # 💥 支持 MultiIndex 格式列 (如由 df.compare 产出)
+                if isinstance(df_diff.columns, pd.MultiIndex):
+                    new_cols = {}
+                    for col in df_diff.columns:
+                        if isinstance(col, tuple) and len(col) >= 2:
+                            base_col, val_type = col[0], col[1]
+                            if val_type == 'self':
+                                new_cols[base_col] = df_diff[col]
+                    df_diff = pd.DataFrame(new_cols, index=df_diff.index)
                 # 取两边股票代码的交集
                 common_idx = self.current_df.index.intersection(df_diff.index)
                 if len(common_idx) > 0:

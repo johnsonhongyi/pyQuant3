@@ -1,3 +1,8 @@
+## 2026-07-13 10:30
+- [x] **修复 IPC 联动格式兼容性与 UI 代码排布微调 (Fixed IPC Linkage Format Compatibility & UI Code Layout Tweak)**：
+    - [x] **处理 MultiIndex 格式列的数据更新兼容**：在 `ats/ui/main_window.py` 的数据增量更新处理逻辑中，补充了对 MultiIndex 格式列（例如 `df.compare` 产出）的自适应转换与降维处理，仅提取标识为 `'self'` 的有效列构建新 DataFrame 进行交集更新，并修正了该转换块内部的缩进格式。
+    - [x] **物理语法编译自检 100% 成功通过**：对修改后的 `popularity_resonance_gui.py`、`ipc_sync_manager.py`、`trade_visualizer_qt6.py` 和 `ats/ui/main_window.py` 均执行了 `py_compile` 编译校验，全数绿灯通过，无任何语法或缩进报错。
+
 ## 2026-07-11 23:42
 - [x] **优化窗口坐标管理器日志输出框布局自适应 (Optimized Window Pos Manager Log Output Layout Autostretch)**：
     - [x] **消除窗口拉伸时的日志空白区域 (Fixed Log Area Dead Space on Stretch)**：将 `ui.py` 中 `log_output` 的高度从固定高度限制（`setFixedHeight(110)`）重构为最小高度限制（`setMinimumHeight(110)`），消除了窗口被纵向拉伸时在执行状态日志上下两侧留出的多余闲置空白，使日志框随容器大小平滑扩展，能显示更多日志行。
