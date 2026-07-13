@@ -462,7 +462,10 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
 
 class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
     def __init__(self, summaries, parent=None, end_date=None, resample='d'):
-        tk.Toplevel.__init__(self, parent)
+        master_win = parent
+        if parent is not None and not hasattr(parent, 'tk') and hasattr(parent, 'root'):
+            master_win = getattr(parent, 'root')
+        tk.Toplevel.__init__(self, master_win)
         self.withdraw()  # 🚀 [CRITICAL] 立即隐藏，配合 alpha=0 彻底杜绝初始化瞬间的默认小窗口
         self.attributes("-alpha", 0.0)
         
