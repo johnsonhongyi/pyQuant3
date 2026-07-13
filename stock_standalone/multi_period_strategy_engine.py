@@ -104,7 +104,20 @@ class MultiPeriodStrategyEngine:
                 
             try:
                 filtered_df = df_clean.query(cond['filter'])
-                pass_codes_dict[period] = set(filtered_df.index)
+                passed_in_period = set(filtered_df.index)
+                
+                # 获取底表（通常为 'd' 周期）的全量股票，用以对比提取出该周期缺失数据的股票
+                base_period = 'd'
+                if base_period not in self._period_dfs:
+                    base_period = list(self._period_dfs.keys())[0] if self._period_dfs else None
+                
+                missing_codes = set()
+                if base_period and base_period in self._period_dfs:
+                    base_codes = set(self._period_dfs[base_period].index)
+                    missing_codes = base_codes - set(df_clean.index)
+                
+                # 缺失数据的股票在交集过滤时默认免检通过，防止误杀
+                pass_codes_dict[period] = passed_in_period | missing_codes
                 
                 total_cnt = len(df_clean)
                 pass_cnt = len(filtered_df)
@@ -114,7 +127,7 @@ class MultiPeriodStrategyEngine:
                     "pass": pass_cnt,
                     "ratio": ratio
                 }
-                logger.info(f"Period {period} pass count: {pass_cnt}")
+                logger.info(f"Period {period} pass count: {pass_cnt}, missing(exempt): {len(missing_codes)}")
             except Exception as e:
                 logger.error(f"Error evaluating period {period} condition: {e}")
                 

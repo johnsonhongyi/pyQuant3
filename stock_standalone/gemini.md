@@ -1,3 +1,42 @@
+## 2026-07-13 18:30
+- [x] **修复大周期 DNA 审计指标演进日期显示为 '<12' 的 Bug (Fixed '<12' Date Formatting Bug in Large-Period DNA Audit)**：
+    - [x] **根治 Python f-string 针对 Timestamp 类型的解析冲突**：定位并分析了在 `backtest_feature_auditor.py` 中，周线、月线或大周期重采样后的 DataFrame 索引（index）不再是字符串类型，而是 pandas `Timestamp` 对象。在对其使用 `f"{h['date']:<12}"` 做字符串左对齐 12 字符宽度的格式化时，Python 解释器会将冒号右侧的 `:<12` 错误当作 `strftime` 时间格式指令进行解析，最终因格式不合法而回退原样输出 `"<12"`。
+    - [x] **实施审计源头日期字符串标准化**：在 `backtest_feature_auditor.py` 中向 `audit_rows` 写入日期前，增加了对 `dt` 的安全探测。若检测到为 `Timestamp`（包含 `strftime` 属性），自动通过 `.strftime('%Y-%m-%d')` 转换为 10 位标准日期字符串；若为带时间的字符串则自动提取前 10 位。
+    - [x] **消除各类输出渠道日期混乱**：不仅修复了 UI 面板在渲染大周期演进数据时的格式混乱，也彻底根治了控制台、日志输出等所有格式化输出渠道中的这一顽固 Bug，保持了各周期数据的一致性与美观度。
+    - [x] **通过自动化集成单元测试**：编写了 `test_dna_resample_days_and_date.py` 自动化测试脚本，对周线重采样下的 DNA 审计日期类型、格式以及 UI 对齐拼接进行了回归验证，断言测试通过率 100%。
+
+## 2026-07-13 18:20
+- [x] **修复大周期筛选数据由于缓存只读缺失导致交集误杀暴减的问题 (Fixed Mass Discard in Multi-Period Intersection due to Missing Large-Period Cache)**：
+    - [x] **设计缺失股票免检通过机制**：重构了 `multi_period_strategy_engine.py` 的 `evaluate_strategy` 方法。在进行多周期 query 过滤时，提取当前评估周期中缺失数据的股票集合（`missing_codes`），并将它们与 query 过滤通过的股票（`passed_in_period`）取并集，默认在此大周期上“免检通过”。
+    - [x] **消除交集误杀瓶颈**：由于大周期（如 3M、45d 等）在只读加载时极易因为 HDF5 缓存不全而缺失大量个股数据，在此前的 `intersection` 交集过滤算法中会导致即使个股在日线、周线全数通过，也因大周期缺失而被直接物理过滤剔除。引入免检机制后，仅对“有大周期数据但数据不达标”的股票实施强力拦截，数据缺失的个股能平滑越过大周期瓶颈，彻底解决了切换大周期后筛选结果大面积被“误杀”丢弃的系统级痛点。
+    - [x] **通过自动化集成单元测试**：编写了 `test_multi_period_missing_exempt.py` 测试脚本，通过构造包含完整通过、部分缺失、及条件不达标的混合股票数据集，验证了免检合并过滤逻辑，断言测试通过率 100%。
+
+## 2026-07-13 18:10
+- [x] **主界面底部 DNA 审计按钮升级为默认选中股 + 后续 20 只批量审计与智能降级模式 (Upgraded Main Toolbar DNA Audit Button to Default to Selected + Next 20 Batch Mode with Fallback)**：
+    - [x] **实现定位切片批量提取**：重构了 `standalone_multi_period_tester.py` 中的 `_on_diagnose_dna_click` 回调方法。现在当用户点击底部的 `🧬 DNA审计` 按钮时，系统会首先根据输入框代码在主 Treeview 表格中遍历搜索该股。若存在该股，将自动定位其所在位置并获取该股以及其排在后面的最多 20 个个股（共计最多 21 只）一并进行批量 DNA 审计。
+    - [x] **实现超限或孤立个股的平滑降级**：若用户在输入框手动键入了主表格中不存在的代码（例如不在当前筛选结果里的代码），系统会自动识别并平滑降级（Fallback）为对该单只股票本身执行 DNA 专项审计，消除了批量处理的冲突隐患。
+    - [x] **升级回归集成测试**：在 `test_ui_audit_diagnose.py` 自动化 GUI 模拟集成测试中补充了批量定位切片截取、首尾边界提取、以及列表外个股平滑降级的单元测试断言，仿真验证通过率 100%。
+
+## 2026-07-13 18:00
+- [x] **在多周期诊断控制栏与个股列表弹窗集成 DNA 专项审计与联动自填充功能 (Integrated DNA Audit Buttons in Diagnose Toolbar & Constituents Popup with Linkage Auto-fill)**：
+    - [x] **主界面诊断控制栏添加 DNA 审计按钮**：在 `standalone_multi_period_tester.py` 的底部“诊断个股”控制区域，在原有 `🔍 诊断` 按钮右侧新增 `🧬 DNA审计` 按钮（`btn_dna`）。点击时会提取当前输入框的代码并默认以所选参与周期的最小周期执行后台异步 DNA 特征专项审计，具备完善的异常拦截保护。
+    - [x] **实现个股列表选择与诊断输入框的联动自动填充**：重构了 `_do_linkage` 方法。当用户在主 Treeview 表格中单击、键盘上下浏览个股，或是在子概念板块列表中选择个股触发联动时，自动捕获当前选中的 6 位股票代码并无感填充至底部 `self.diag_entry` 诊断输入框中，大幅减少用户的手动输入成本。
+    - [x] **概念成分个股子窗口集成诊断与审计操作栏**：在 `show_concept_top10_window` 弹出的个股列表窗口底部新增 `action_bar`，集成 `🔍 诊断所选个股` 与 `🧬 DNA审计所选` 两个高频控制按钮。其中，DNA 审计所选按钮完美复用了“自动审计当前所选个股及其后最多 20 个个股”的业务逻辑，极佳地提升了操盘分析的便利性。
+    - [x] **加固大盘个股列表弹窗防御保护**：在 `show_concept_top10_window` 入口引入 `getattr(self, "_last_flat_df", None)` 属性保护，规避了由于主表未运行前或测试未注入时，强制点击概念个股产生 `AttributeError` 崩溃。
+    - [x] **通过自动化 GUI 集成回归测试**：编写并成功运行了 `test_ui_audit_diagnose.py` 自动化测试，对多周期主界面、输入框模拟值填充、联动回填、DNA审计按钮触发及弹窗进行了全链路仿真测试，断言通过率 100%。
+
+## 2026-07-13 17:40
+- [x] **优化 DNA 审计不同周期的数据加载数量为自适应 Resample_LABELS_Days (Adaptive Data Loading Lengths for DNA Audit via Resample_LABELS_Days)**：
+    - [x] 废除了 `backtest_feature_auditor.py` 中用于加载个股及大盘指数 K 线历史数据时写死的 `dl=800` 行数限制。
+    - [x] 导入了 `JohnsonUtil.johnson_cons` 中的 `Resample_LABELS_Days` 周期天数限制字典，并使用 `Resample_LABELS_Days.get(resample, 800)` 作为数据加载数量。
+    - [x] 解决了在 `3M` 等大周期下，写死 `dl=800` 导致重采样后由于 K 线行数不足 20 根而直接拦截并报出“数据量不够”/返回 `None` 审计失败的缺陷，测试 3M 周期成功通过。
+
+## 2026-07-13 17:30
+- [x] **支持在多周期筛选器和个股列表中右键 DNA 审计默认执行所选股票及其后 20 个个股 (Default to Auditing Selected Stock + Next 20 Items)**：
+    - [x] 在 `standalone_multi_period_tester.py` 的右键菜单函数 `show_context_menu` 中，获取当前 Treeview 表格中被右键选择的 `item_id`。
+    - [x] 引入 `children.index(item_id)` 位置检索并使用 `children[curr_idx:curr_idx + 21]` 切片定位，动态获取所选股票及其后的最多 20 个股票，拼装成 `code_to_name`。
+    - [x] 在右键菜单项和指定周期二级菜单项中均追加显示待审计的股票数（如 `🧬 运行 DNA 审计 (21只, 周期: D)` ），使用户能一目了然所审计的股票范围。
+
 ## 2026-07-13 15:00
 - [x] **在多周期策略筛选器和板块个股列表中集成多周期 DNA 专项审计报告功能 (Integrated Multi-Period DNA Audit in Standalone Tester & Constituents Popup)**：
     - [x] **重构 DNA 审计核心接口以适配多周期选择 (Refactored DNA Auditor for Multi-Period Support)**：

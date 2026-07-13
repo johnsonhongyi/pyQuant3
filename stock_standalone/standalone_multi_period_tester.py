@@ -330,6 +330,9 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
         btn_diag = tk.Button(diagnose_frame, text="🔍 诊断", command=self._on_diagnose_click, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9), padx=5, pady=1)
         btn_diag.pack(side="left", padx=2)
+        
+        btn_dna = tk.Button(diagnose_frame, text="🧬 DNA审计", command=self._on_diagnose_dna_click, bg="#2E7D32", fg="white", font=("Microsoft YaHei", 9), padx=5, pady=1)
+        btn_dna.pack(side="left", padx=2)
 
         self.stats_lbl_final = tk.Label(self.stats_frame, text="【最终筛选结果】暂无数据", font=("Microsoft YaHei", 9, "bold"), bg="#f0f0f0", fg="#2E7D32")
         self.stats_lbl_final.pack(side="right", padx=20, pady=4)
@@ -724,6 +727,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
         self._last_selected_code = code
         
+        # 同步填入底部的诊断输入框
+        if hasattr(self, "diag_entry") and self.diag_entry.winfo_exists():
+            self.diag_entry.delete(0, tk.END)
+            self.diag_entry.insert(0, code)
+        
         status_msg_parts = []
         
         # 1. IPC 联动到主程序的 Visualizer (Port 26668)
@@ -755,6 +763,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 
         if status_msg_parts:
             self.status_var.set(f"✅ 已触发联动: {code} ({', '.join(status_msg_parts)})")
+
+    def on_code_click(self, code, date=None):
+        """DNA 审计窗口点击个股时，回传多周期主界面以触发 TDX、Visualizer 联动与诊断输入框填充"""
+        if not code:
+            return
+        code = str(code).strip().zfill(6)
+        self._do_linkage(code)
 
     def _update_status(self, text):
         """线程安全的底部状态日志更新（由 after(0,...) 保证在主线程执行，不调用 update_idletasks）"""
@@ -1717,11 +1732,28 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         min_period = sorted_periods[0] if sorted_periods else 'd'
         
         dna_menu = tk.Menu(menu, tearoff=0)
-        code_to_name = {code: name}
+        
+        # 🚀 获取当前选择个股以及在Treeview列表中排在其后面的前20个个股（总共最多21个）
+        children = tree.get_children()
+        try:
+            curr_idx = children.index(item_id)
+            target_items = children[curr_idx:curr_idx + 21]
+        except ValueError:
+            target_items = [item_id]
+            
+        code_to_name = {}
+        for t_item in target_items:
+            t_values = tree.item(t_item, "values")
+            if t_values and len(t_values) > max(code_idx, name_idx):
+                t_code = str(t_values[code_idx]).strip().zfill(6)
+                t_name = str(t_values[name_idx]).strip()
+                if t_name.startswith("★ "):
+                    t_name = t_name[len("★ "):]
+                code_to_name[t_code] = t_name
         
         # 默认最小周期审计
         dna_menu.add_command(
-            label=f"🧬 运行 DNA 审计 (当前最小: {min_period.upper()})",
+            label=f"🧬 运行 DNA 审计 ({len(code_to_name)}只, 周期: {min_period.upper()})",
             command=lambda: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=min_period)
         )
         
@@ -1729,7 +1761,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             dna_menu.add_separator()
             for p in sorted_periods:
                 dna_menu.add_command(
-                    label=f"指定周期: {p.upper()}",
+                    label=f"指定周期: {p.upper()} ({len(code_to_name)}只)",
                     command=lambda period=p: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=period)
                 )
         else:
@@ -1738,7 +1770,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             all_supported = ['d', '2d', '3d', 'w', 'm', '45d', '3M']
             for p in all_supported:
                 dna_menu.add_command(
-                    label=f"指定周期: {p.upper()}",
+                    label=f"指定周期: {p.upper()} ({len(code_to_name)}只)",
                     command=lambda period=p: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=period)
                 )
         
@@ -1810,9 +1842,64 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self.status_var.set(f"⚠️ 右键粘贴失败：剪贴板中未找到6位数字代码")
         return "break"
 
+    def _on_diagnose_dna_click(self):
+        code = self.diag_entry.get().strip()
+        if not code:
+            from tkinter import messagebox
+            messagebox.showwarning("警告", "请输入要审计的股票代码！")
+            return
+        code = "".join(x for x in code if x.isdigit()).zfill(6)
+        
+        # 尝试在主 Treeview 里面查找该股票所在的 index 并执行 "所选 + 后续最多20只" 批量审计
+        children = self.tree.get_children()
+        
+        # 确定代码列和名称列在 Treeview 中的具体位置
+        cols = list(self.tree["columns"])
+        code_idx = cols.index("code") if "code" in cols else 0
+        name_idx = cols.index("name") if "name" in cols else 1
+        
+        found_idx = -1
+        for idx, item_id in enumerate(children):
+            vals = self.tree.item(item_id, "values")
+            if vals and len(vals) > code_idx:
+                c = str(vals[code_idx]).strip().zfill(6)
+                if c == code:
+                    found_idx = idx
+                    break
+                    
+        code_to_name = {}
+        if found_idx != -1:
+            # 找到了，切片获取该股及在其后面的前 20 个个股（共计最多 21 只）
+            selected_items = children[found_idx:found_idx + 21]
+            for item_id in selected_items:
+                vals = self.tree.item(item_id, "values")
+                if vals and len(vals) > max(code_idx, name_idx):
+                    c = str(vals[code_idx]).strip().zfill(6)
+                    n = str(vals[name_idx]).strip()
+                    if n.startswith("★ "):
+                        n = n[len("★ "):]
+                    code_to_name[c] = n
+        else:
+            # 列表未包含该代码（手动输入列表外的个股），降级仅审计当前个股本身
+            name = None
+            if self.top_now is not None and code in self.top_now.index:
+                name = self.top_now.loc[code, 'name']
+            else:
+                from backtest_feature_auditor import NAME_CACHE
+                name = NAME_CACHE.get(code, code)
+            code_to_name[code] = name
+            
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
+        sorted_periods = sorted(active_periods, key=lambda x: PERIOD_ORDER.get(x, 99))
+        min_period = sorted_periods[0] if sorted_periods else 'd'
+        
+        self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=min_period)
+
     def _on_diagnose_click(self):
         code = self.diag_entry.get().strip()
         if not code:
+            from tkinter import messagebox
             messagebox.showwarning("警告", "请输入要诊断的股票代码！")
             return
         # 提取并补全6位代码
@@ -2238,12 +2325,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if not target_concept:
             return
 
-        if self._last_flat_df is None or self._last_flat_df.empty:
+        last_flat_df = getattr(self, "_last_flat_df", None)
+        if last_flat_df is None or last_flat_df.empty:
             messagebox.showinfo("信息", "当前无筛选数据，无法查看个股列表", parent=self)
             return
 
         matched_stocks = []
-        for code, row in self._last_flat_df.iterrows():
+        for code, row in last_flat_df.iterrows():
             category = self._get_stock_category(code, row)
             if not category:
                 continue
@@ -2329,6 +2417,73 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                     self._do_linkage(code=code)
 
         tree.bind("<<TreeviewSelect>>", on_select_sub)
+
+        # 底部操作栏，内置诊断与DNA审计功能
+        action_bar = tk.Frame(win, bg="#f7f7f7", bd=1, relief="groove")
+        action_bar.pack(fill="x", side="bottom", padx=4, pady=2)
+
+        def do_diagnose():
+            sel = tree.selection()
+            if not sel:
+                from tkinter import messagebox
+                messagebox.showwarning("警告", "请在个股列表中选择一只股票！", parent=win)
+                return
+            vals = tree.item(sel[0], "values")
+            if vals and len(vals) >= 3:
+                code = str(vals[1]).strip().zfill(6)
+                name = str(vals[2]).strip()
+                if name.startswith("★ "):
+                    name = name[len("★ "):]
+                self.diagnose_stock_strategy(code, name)
+            elif vals and len(vals) >= 2:
+                code = str(vals[1]).strip().zfill(6)
+                self.diagnose_stock_strategy(code, code)
+
+        def do_dna_audit():
+            sel = tree.selection()
+            if not sel:
+                from tkinter import messagebox
+                messagebox.showwarning("警告", "请在个股列表中选择一只股票！", parent=win)
+                return
+            
+            curr_item = sel[0]
+            children = tree.get_children()
+            try:
+                curr_idx = children.index(curr_item)
+            except ValueError:
+                curr_idx = 0
+            
+            selected_items = children[curr_idx:curr_idx + 21]
+            code_to_name = {}
+            for item in selected_items:
+                vals = tree.item(item, "values")
+                if vals and len(vals) >= 3:
+                    c = str(vals[1]).strip().zfill(6)
+                    n = str(vals[2]).strip()
+                    if n.startswith("★ "):
+                        n = n[len("★ "):]
+                    code_to_name[c] = n
+                elif vals and len(vals) >= 2:
+                    c = str(vals[1]).strip().zfill(6)
+                    code_to_name[c] = c
+            
+            if not code_to_name:
+                from tkinter import messagebox
+                messagebox.showwarning("警告", "未获取到有效的股票数据！", parent=win)
+                return
+                
+            active_periods = [p for p, var in self.period_vars.items() if var.get()]
+            PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
+            sorted_periods = sorted(active_periods, key=lambda x: PERIOD_ORDER.get(x, 99))
+            min_period = sorted_periods[0] if sorted_periods else 'd'
+            
+            self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=min_period)
+
+        btn_sub_diag = tk.Button(action_bar, text="🔍 诊断所选个股", command=do_diagnose, bg="#0288D1", fg="white", font=("Microsoft YaHei", 9), padx=8, pady=2)
+        btn_sub_diag.pack(side="left", padx=5, pady=3)
+
+        btn_sub_dna = tk.Button(action_bar, text="🧬 DNA审计所选", command=do_dna_audit, bg="#2E7D32", fg="white", font=("Microsoft YaHei", 9), padx=8, pady=2)
+        btn_sub_dna.pack(side="left", padx=5, pady=3)
         tree.bind("<Button-3>", self.show_context_menu)
         tree.bind("<Motion>", lambda e: self._on_tree_motion_impl(e, tree))
         tree.bind("<Leave>", self._on_tree_leave)
