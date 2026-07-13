@@ -1,7 +1,8 @@
 ## 2026-07-13 19:00
 - [x] **人气排行界面集成 DNA 专项审计与双向联动 (Integrated DNA Audit & Linkage in Popularity Resonance GUI)**：
+    - [x] **实现点击审计按钮提取最新操作视图个股列表**：在 `on_tree_select` 和 `on_select_top10` 中增加了 `self._last_active_tree = tree` 的动态活动焦点记录。在工具栏点击 `🧬 DNA审计` 按钮时，优先从最后发生点击或互动的排行表（最新视图）中获取当前选定个股及其随后的 20 只个股进行批量审计，保证了与当前浏览进度的一致性。
     - [x] **在查询/过滤刷新前集成 🧬 DNA审计 按钮**：在 `popularity_resonance_gui.py` 顶部的“查询/过滤”控制栏中，于“过滤”按钮左侧新增了 `🧬 DNA审计` 按钮（`btn_query_dna`）。点击时优先截取当前选中的个股及其后 20 个进行批量审计；若无个股选中，则自动对当前可见且有数据的排行榜（如共振表）中的前 21 个个股执行一键审计，极大地提升了操作效率。
-    - [x] **根治 parent 非 Widget 时的 AttributeError 崩溃**：定位并修复了当传入的 `parent`（如 `PRServiceGUI` 实例）本身不具备 Tkinter `.tk` 物理属性但拥有 `.root` 时，调用 `Toplevel` 初始化导致崩溃的问题。在 `DnaAuditReportWindow` 的构造函数中增加了自适应 `master_win` 探测，若 `parent` 没有 `tk` 且有 `root`，则自动提取使用 `parent.root` 作为物理父窗口，彻底消除了崩溃。
+    - [x] **根治 parent 非 Widget 时的 AttributeError 崩溃**：定位并修复了当传入的 `parent`（如 `PRServiceGUI` 实例）本身不具备 Tkinter `.tk` 物理属性但拥有 `.root` 时，调用 `Toplevel` 初始化导致崩溃的问题。在 `DnaAuditReportWindow` 的构造函数中增加了自适应 `master_win` 探测，若 `parent`没有 `tk` 且有 `root`，则自动提取使用 `parent.root` 作为物理父窗口，彻底消除了崩溃。
     - [x] **实现右键批量个股截取与 DNA 审计**：重构了 `popularity_resonance_gui.py` 中的 `show_context_menu` 方法。当用户在任一人气排行榜（东财、同花顺、龙虎榜、淘股吧、共振表）右键点击个股时，系统会自动获取当前个股以及在其排列后面的最多 20 只个股（共计最多 21 只），组装成待审计股票的 `code_to_name` 字典，并在菜单项展示相应的只数（如：`🧬 DNA 专项审计 (21只, 默认: D)` ）。
     - [x] **实现概念个股 Constituent 子窗口右键功能完全对齐**：在 `show_concept_top10_window` 中为 Constituent 板块个股 Treeview 表格追加绑定 `Button-3` 右键事件，调起相同的右键逻辑。引入了 `cols.index("code")` 与 `cols.index("name")` 列索引自适应提取算法，完美适配了首列为 `idx` 的个股子表结构，杜绝了因列偏移产生的取值错位与崩溃异常。
     - [x] **支持 DNA 审计窗口到人气排行界面的双向联动**：在 `PRServiceGUI` 类中新增了 `on_code_click(self, code, date=None)` 回调方法。当用户在 DNA 审计报告窗口中单击 any 一行代码时，会自动向人气排行窗口发送回调。人气排行界面在接收到回调后，能无缝触发 TDX / THS 及可视化终端的联动，并在界面五个排行榜中自动寻找该个股并高亮选中，提升了多系统联调下的闭环操盘体验。
