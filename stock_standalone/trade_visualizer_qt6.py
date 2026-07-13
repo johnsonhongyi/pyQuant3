@@ -6855,6 +6855,16 @@ class MainWindow(QMainWindow, WindowMixin):
             if df_diff is None or df_diff.empty or self.df_all is None or self.df_all.empty:
                 return
             
+            # 💥 支持 MultiIndex 格式列 (如由 df.compare 产出)
+            if isinstance(df_diff.columns, pd.MultiIndex):
+                new_cols = {}
+                for col in df_diff.columns:
+                    if isinstance(col, tuple) and len(col) >= 2:
+                        base_col, val_type = col[0], col[1]
+                        if val_type == 'self':
+                            new_cols[base_col] = df_diff[col]
+                df_diff = pd.DataFrame(new_cols, index=df_diff.index)
+
             # 获取两个 DataFrame 共有的索引
             common_idx = self.df_all.index.intersection(df_diff.index)
             if len(common_idx) == 0:

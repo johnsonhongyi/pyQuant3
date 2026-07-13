@@ -114,6 +114,7 @@ class PRServiceGUI:
         self._block_cache = {}        # 行业板块特征缓存
         self._last_test_df_hits = None  # 缓存的用于 Hit 测试的 DataFrame
         self.current_date = time.strftime("%Y-%m-%d")
+        self._last_realtime_today = self.current_date
         
         # 联动选择项变量
         self.link_tdx_var = tk.BooleanVar(value=self.config.get("link_tdx", True))
@@ -720,11 +721,35 @@ class PRServiceGUI:
         self.root.after(0, lambda: self.refresh_realtime_fields(df))
 
     def refresh_realtime_fields(self, df=None):
-        # 核心防御：若当前查看的并非今天的数据（处于历史复盘状态），直接拦截并忽略实时行情的渲染和板块统计更新，防止历史数据被覆盖
         today = time.strftime("%Y-%m-%d")
         current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else today
+        
+        # 💥 [NEW] 24/7 运行支持：如果系统日期已跨天（即今天不同于上一次 the 系统日期），且前态仍处于上一个同步日，自动切换界面日期至今日，防止拦截更新
+        if current_view_date != today:
+            last_realtime_today = getattr(self, "_last_realtime_today", None)
+            if last_realtime_today and last_realtime_today != today:
+                if current_view_date == last_realtime_today:
+                    service_logger.info(f"检测到系统跨天(由 {last_realtime_today} 跨至 {today})，自动同步界面日期为今日，避免实时行情被拦截。")
+                    self.current_date = today
+                    self._last_realtime_today = today
+                    def _update_ui_date():
+                        if hasattr(self, 'date_entry'):
+                            try:
+                                dt_today = datetime.strptime(today, "%Y-%m-%d")
+                                self.date_entry.set_date(dt_today)
+                            except Exception:
+                                pass
+                        elif hasattr(self, 'date_var'):
+                            self.date_var.set(today)
+                    self.root.after(0, _update_ui_date)
+                    current_view_date = today
+
+        # 核心防御：若当前查看的并非今天的数据（处于历史复盘状态），直接拦截并忽略实时行情的渲染和板块统计更新，防止历史数据被覆盖
         if current_view_date != today:
             return
+
+        # 成功更新今日实时行情，同步更新 last_realtime_today
+        self._last_realtime_today = today
 
         if df is None:
             df = self.sync_manager.get_current_df()
@@ -1707,12 +1732,13 @@ class PRServiceGUI:
                 time.sleep(1.2)
 
             today = time.strftime("%Y-%m-%d")
-            # 💥 如果是自动刷新中，且跨天了，自动切换到今日日期
-            if self.is_running:
+            # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期
+            if self.is_running or force_save:
                 current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else self.current_date
                 if current_view_date != today:
-                    service_logger.info(f"自动刷新检测到日期已由 {current_view_date} 切换至今日 {today}，执行界面日期同步...")
+                    service_logger.info(f"检测到日期已由 {current_view_date} 切换至今日 {today}，执行界面日期同步...")
                     self.current_date = today
+                    self._last_realtime_today = today
                     def _update_ui_date():
                         if hasattr(self, 'date_entry'):
                             try:
@@ -1792,6 +1818,7 @@ class PRServiceGUI:
             today = time.strftime("%Y-%m-%d")
             current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else today
             if current_view_date == today:
+                self._last_realtime_today = today
                 self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
             else:
                 service_logger.info(f"后台自动更新了今日数据，因当前正处于历史数据({current_view_date})复盘模式，跳过界面重绘。")
