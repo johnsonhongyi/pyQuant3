@@ -1,6 +1,12 @@
+## 2026-07-13 11:30
+- [x] **修复窗口坐标管理器命令行启动自愈与双引号包裹 Bug (Fixed Shell Command Auto-Quoting & Self-Healing Launcher in Window Manager)**：
+    - [x] **根治复杂 shell 命令行被错误包裹外部双引号的 Bug**：重构了 `EditPathDialog.accept_path` 的自动包裹双引号机制。增加 `is_shell_cmd` 判断，对于以 `start `, `cmd `, `powershell `, `python `, `py `, `cd `, `cd/` 开头，或者包含连接符（`;`, `&&`, `||`, `|`）或内部已有引号的复杂命令行，开发了防错排除策略，禁止自动在外部包裹多余的双引号，从源头上消除了路径格式被破坏的隐患。
+    - [x] **实现启动与校验时的自适应引号剥离与自愈机制**：在 `resolve_and_validate_cmd`、`_launch_program` 和 `_launch_as_admin` 中增加自适应防错自愈处理。在解析和执行前，若检测到传入路径整体被多余的外层引号（如 `"start cmd /k "cd ...""`）错误包裹，将自动识别并完成物理剥离，使历史已保存的损坏配置能够自动恢复为正确的原生命令，彻底解决了 cmd.exe 报出“找不到可执行程序”和因 launch 失败导致误移动其他不相干编辑器窗口的 Bug。
+    - [x] **物理语法编译自检与全管道模拟测试 100% 成功通过**：执行 `py_compile` 编译校验完美通过；编写并运行 `test_quote_resolver.py` 自动化测试脚本，全面覆盖了复杂命令行、正常命令、常规带空格路径的解析与重新拼接逻辑，断言校验全部成功绿灯。
+
 ## 2026-07-13 10:30
 - [x] **修复 IPC 联动格式兼容性与 UI 代码排布微调 (Fixed IPC Linkage Format Compatibility & UI Code Layout Tweak)**：
-    - [x] **处理 MultiIndex 格式列的数据更新兼容**：在 `ats/ui/main_window.py` 的数据增量更新处理逻辑中，补充了对 MultiIndex 格式列（例如 `df.compare` 产出）的自适应转换与降维处理，仅提取标识为 `'self'` 的有效列构建新 DataFrame 进行交集更新，并修正了该转换块内部的缩进格式。
+    - [x] **处理 MultiIndex 格式列的数据更新兼容**：在 `ats/ui/main_window.py` 的数据增量更新处理逻辑中，补充了对 MultiIndex 格式列（例如 `df.compare` 产出）的自适应转换与降维处理，仅提取标识为 `'self'` 的有效列构建新 DataFrame 进行交集更新，并修正了该转换块内部 of 缩进格式。
     - [x] **物理语法编译自检 100% 成功通过**：对修改后的 `popularity_resonance_gui.py`、`ipc_sync_manager.py`、`trade_visualizer_qt6.py` 和 `ats/ui/main_window.py` 均执行了 `py_compile` 编译校验，全数绿灯通过，无任何语法或缩进报错。
 
 ## 2026-07-11 23:42
