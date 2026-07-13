@@ -366,33 +366,58 @@ class PRServiceGUI:
         return text
 
     def on_toolbar_dna_click(self):
-        """点击工具栏 🧬 DNA 审计 按钮：优先获取当前有焦点/选中个股的 Treeview 及随后的 20 个，否则从共振表或东财表中拉取前 21 个个股"""
-        # 1. 查找当前有选中项的 Treeview
-        target_tree = None
+        """点击工具栏 🧬 DNA 审计 按钮：优先获取最新处于活动/点击焦点的 Treeview 实例及其后的 20 只个股"""
+        # 1. 优先获取最近处于活动/点击焦点的 Treeview 实例
+        target_tree = getattr(self, '_last_active_tree', None)
         selected_item = None
-        all_trees = (self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb)
-        for tree in all_trees:
-            sel = tree.selection()
+        
+        # 2. 如果 target_tree 有选中项，我们优先使用它
+        if target_tree and target_tree.winfo_exists():
+            sel = target_tree.selection()
             if sel:
-                target_tree = tree
                 selected_item = sel[0]
-                break
                 
-        # 2. 如果没有任何 Treeview 选中，我们默认取可见的、且有数据的第一个 Treeview
-        if not target_tree:
+        # 3. 如果没找到选中项或 target_tree 不存在，我们重新在所有 treeview 中寻找当前有选中项的表格
+        if not target_tree or not selected_item:
+            all_trees = []
+            # 如果主界面有 concept_tree (板块个股弹窗) 且处于打开/可见状态，优先检查它
+            concept_tree = getattr(self, 'concept_tree', None)
+            if concept_tree and concept_tree.winfo_exists() and concept_tree.winfo_viewable():
+                all_trees.append(concept_tree)
+            all_trees.extend([self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb])
+            
             for tree in all_trees:
-                if tree.winfo_viewable() and tree.get_children():
+                if tree and tree.winfo_exists():
+                    sel = tree.selection()
+                    if sel:
+                        target_tree = tree
+                        selected_item = sel[0]
+                        # 更新为最近活动
+                        self._last_active_tree = tree
+                        break
+                        
+        # 4. 如果依然没有任何 Treeview 选中，我们默认取可见的、且有数据的第一个 Treeview 的首只股票
+        if not target_tree or not selected_item:
+            all_trees = []
+            concept_tree = getattr(self, 'concept_tree', None)
+            if concept_tree and concept_tree.winfo_exists() and concept_tree.winfo_viewable():
+                all_trees.append(concept_tree)
+            all_trees.extend([self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb])
+            
+            for tree in all_trees:
+                if tree and tree.winfo_exists() and tree.winfo_viewable() and tree.get_children():
                     target_tree = tree
                     selected_item = tree.get_children()[0]
+                    self._last_active_tree = tree
                     break
                     
-        # 3. 如果还是没有，我们直接提示并退出
+        # 5. 如果实在没有任何数据，直接提示并退出
         if not target_tree or not selected_item:
             from tkinter import messagebox
             messagebox.showinfo("信息", "当前无可用的人气个股进行 DNA 审计", parent=self.root)
             return
             
-        # 4. 获取所选个股及其后面的最多 20 个个股（共计最多 21 个个股）
+        # 6. 获取所选个股及其后面的最多 20 个个股（共计最多 21 个个股）
         children = target_tree.get_children()
         try:
             curr_idx = children.index(selected_item)
@@ -1707,6 +1732,7 @@ class PRServiceGUI:
 
     def on_tree_select(self, event):
         tree = event.widget
+        self._last_active_tree = tree
         selection = tree.selection()
         if selection:
             item = tree.item(selection[0])
@@ -3750,6 +3776,7 @@ class PRServiceGUI:
 
         # 单击与双击联动事件
         def on_select_top10(event):
+            self._last_active_tree = tree
             sel = tree.selection()
             if sel:
                 vals = tree.item(sel[0], "values")
