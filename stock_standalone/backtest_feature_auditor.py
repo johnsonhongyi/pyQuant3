@@ -248,9 +248,9 @@ class AuditSummary:
         if self.divergence_days >= 2 and self.anti_drop_count == 0:
              self.suggestions.append(f"- 存在 {self.divergence_days} 天抗跌背离，符合泥沙俱下中的种子特征")
 
-def run_optimized_audit(code, start_date, end_date):
+def run_optimized_audit(code, start_date, end_date, resample='d'):
     # [🚀 CACHE CHECK] 极致性能：同一天 30 分钟内共用结果
-    cache_key = (code, start_date, end_date)
+    cache_key = (code, start_date, end_date, resample)
     # [🚀 UI-SAFE] 极致优化：先尝试不加锁读取
     cached_val = DNA_CALC_CACHE.get(cache_key)
     if cached_val:
@@ -277,7 +277,7 @@ def run_optimized_audit(code, start_date, end_date):
                 return DNA_CALC_CACHE[cache_key][0]
 
         # [🚀 LIGHTWEIGHT LOAD] 使用 fastohlc=True 跳过不使用的 MACD/OBV 等重型指标计算
-        df_raw = get_tdx_Exp_day_to_df(code, dl=800, fastohlc=True)
+        df_raw = get_tdx_Exp_day_to_df(code, dl=800, fastohlc=True, resample=resample)
         
         if df_raw is None or df_raw.empty: return None
         
@@ -289,17 +289,18 @@ def run_optimized_audit(code, start_date, end_date):
         if df is None: return None
         
         idx_code = get_corresponding_index(code)
+        idx_cache_key = (idx_code, resample)
         
         # 尝试从缓存读取指数
-        df_idx = INDEX_DATA_CACHE.get(idx_code)
+        df_idx = INDEX_DATA_CACHE.get(idx_cache_key)
         
         if df_idx is None:
             # 🚀 [FIX] 加载指数数据（完全脱离锁环境进行 IO）
-            df_idx_raw = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
+            df_idx_raw = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True, resample=resample)
             if df_idx_raw is not None and not df_idx_raw.empty:
                 df_idx_raw['idx_pct'] = df_idx_raw['close'].pct_change() * 100
                 with CACHE_LOCK:
-                    INDEX_DATA_CACHE[idx_code] = df_idx_raw
+                    INDEX_DATA_CACHE[idx_cache_key] = df_idx_raw
                 df_idx = df_idx_raw
         
         # 🚀 [FIX] 增强日期格式鲁棒性：支持 YYYYMMDD 和 YYYY-MM-DD
@@ -366,7 +367,7 @@ def run_optimized_audit(code, start_date, end_date):
             DNA_CALC_CACHE[cache_key] = (summary, time.time())
         return summary
 
-def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None, progress_callback=None):
+def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None, progress_callback=None, resample='d'):
     """
     供外部调用的批量审计接口
     :param progress_callback: 进度回调函数 f(current, total, msg)
@@ -403,13 +404,14 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
     # [🚀 PERF] 统一预加载指数数据（修正：IO 必须在锁外）
     unique_indices = set(get_corresponding_index(c) for c in codes)
     for idx_code in unique_indices:
-        if idx_code not in INDEX_DATA_CACHE:
+        idx_cache_key = (idx_code, resample)
+        if idx_cache_key not in INDEX_DATA_CACHE:
             # 预读指数 (IO 在锁外执行)
-            df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True)
+            df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True, resample=resample)
             if df_idx is not None and not df_idx.empty:
                 df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
                 with CACHE_LOCK:
-                    INDEX_DATA_CACHE[idx_code] = df_idx
+                    INDEX_DATA_CACHE[idx_cache_key] = df_idx
 
     with timed_ctx("Batch Execution", warn_ms=10000):
         # 🚀 [UI-SAFE] 降低并发数至 2-3，极大缓解 GIL 竞争引发的 UI 粘滞感
@@ -419,7 +421,7 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
         cpu_count = int(os.cpu_count()/2) + 2 or 4
         max_workers = min(cpu_count, cct.livestrategy_max_workers) if total > 5 else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date): code for code in codes}
+            future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date, resample): code for code in codes}
             
             res_dict = {}
             count = 0
@@ -446,7 +448,7 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
     return summaries
 
 class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
-    def __init__(self, summaries, parent=None, end_date=None):
+    def __init__(self, summaries, parent=None, end_date=None, resample='d'):
         tk.Toplevel.__init__(self, parent)
         self.withdraw()  # 🚀 [CRITICAL] 立即隐藏，配合 alpha=0 彻底杜绝初始化瞬间的默认小窗口
         self.attributes("-alpha", 0.0)
@@ -454,6 +456,7 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self.summaries = summaries
         self.monitor_app = parent
         self.end_date = end_date
+        self.resample = resample
         
         # 🚀 [NEW] 核心逻辑：如果没有外部强制焦点，默认取审计列表第一个作为焦点
         self.focus_code = summaries[0].code if summaries else None
@@ -461,7 +464,7 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self.window_name = "dna_audit_report_v2"
         self.scale_factor = getattr(parent, 'scale_factor', 1.0) if parent else 1.0
         
-        title_suffix = f" (截止: {self.end_date})" if self.end_date else ""
+        title_suffix = f" (截止: {self.end_date}, 周期: {self.resample.upper()})" if self.end_date else f" (周期: {self.resample.upper()})"
         self.title(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只{title_suffix}")
         
         self._setup_ui()
@@ -602,12 +605,13 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 自动调整列宽
         self._adjust_column_widths()
 
-    def update_report(self, new_summaries, end_date=None):
+    def update_report(self, new_summaries, end_date=None, resample='d'):
         """[🚀 NEW] 动态更新报告内容，支持窗口复用"""
         if not new_summaries: return
         
         self.summaries = new_summaries
         if end_date: self.end_date = end_date
+        self.resample = resample
         
         # 1. 清空表格
         for item in self.tree.get_children():
@@ -617,7 +621,7 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self._fill_data()
         
         # 3. 更新标题
-        title_suffix = f" (截止: {self.end_date})" if self.end_date else ""
+        title_suffix = f" (截止: {self.end_date}, 周期: {self.resample.upper()})" if self.end_date else f" (周期: {self.resample.upper()})"
         self.title(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(self.summaries)}只{title_suffix}")
         
         # 4. 激活并置顶
@@ -787,14 +791,14 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self._save_sash_position()
         self.destroy()
 
-def show_dna_audit_report_window(summaries, parent=None, end_date=None):
+def show_dna_audit_report_window(summaries, parent=None, end_date=None, resample='d'):
     if not summaries:
         from tkinter import messagebox
         messagebox.showinfo("DNA 审计", "没有产生足够的历史数据，或没有命中任何结论。", parent=parent)
         return
     
     # 使用新定义的类
-    return DnaAuditReportWindow(summaries, parent=parent, end_date=end_date)
+    return DnaAuditReportWindow(summaries, parent=parent, end_date=end_date, resample=resample)
 
 def main():
     parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")

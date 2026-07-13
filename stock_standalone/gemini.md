@@ -1,8 +1,31 @@
+## 2026-07-13 15:00
+- [x] **在多周期策略筛选器和板块个股列表中集成多周期 DNA 专项审计报告功能 (Integrated Multi-Period DNA Audit in Standalone Tester & Constituents Popup)**：
+    - [x] **重构 DNA 审计核心接口以适配多周期选择 (Refactored DNA Auditor for Multi-Period Support)**：
+        - 修改了 `backtest_feature_auditor.py` 中的 `run_optimized_audit`、`audit_multiple_codes` 接口和 `DnaAuditReportWindow` 的构造函数及 `update_report` 方法，支持传入并在 UI 和数据层显示特定的 `resample` 周期参数（默认 `'d'`）。
+        - 在 `DnaAuditReportWindow` 的标题栏追加了当前参与审计的周期（如 `(周期: WEEK)` ），使用户对数据的周期维度具有直观的感知。
+    - [x] **在多周期筛选器主表集成右键 DNA 审计 (Integrated Right-Click DNA Audit in Standalone Tester)**：
+        - 重构了 `standalone_multi_period_tester.py` 中的 `show_context_menu` 右键菜单。获取当前所有已被勾选的参与周期（`self.period_vars`），计算出最小的参与周期作为“默认运行周期”，并在“🧬 DNA 专项审计”子菜单中将其他的参与周期（或者全部支持的周期）作为备选选项动态列出。
+        - 实现了 `_run_dna_audit_batch` 批量审计方法与 `_get_audit_end_date` 日期获取方法。支持以非阻塞的 `threading.Thread` 多线程模式后台计算，通过 `self.after(0, ...)` 异步安全回传 UI 进度条与结果呈现，支持窗口复用和动态热更新。
+    - [x] **板块个股列表右键菜单对齐与自适应列解析 (Constituents Popup Menu Alignment & Adaptive Column Parser)**：
+        - 在板块个股 Constituent 弹出列表 `show_concept_top10_window` 中同样绑定了右键菜单，并完全对齐了主表的 DNA 审计、重点关注、复制代码等右键功能。
+        - 针对二级列表相比主表多出了首列 `"idx"` 序号的问题，在 `show_context_menu` 中引入了 `columns.index("code")` 和 `columns.index("name")` 自适应列索引提取算法，彻底杜绝了因列名偏移读取到序号而非个股代码的逻辑缺陷。
+    - [x] **物理语法编译自检与功能单元测试 100% 成功通过**：
+        - 执行了 `py_compile` 对所有修改后的 Python 文件进行了物理语法校验，全数绿灯通过。
+        - 编写并运行了测试用例，在 UTF-8 编码防爆保护下完整测试了日线与周线下的 DNA 特征审计计算和批量审计，测试 100% 成功。
+
 ## 2026-07-13 11:30
+- [x] **修复人气共振和智能操盘终端打包在 clean 缓存时因环境缺少 tk 导致运行报错 ModuleNotFoundError (Fixed tkinter Missing in Clean Build due to Missing tk Package in Conda Env)**：
+    - [x] **定位缓存依赖死角**：排查发现使用 `pyinstaller --clean` 编译时，PyInstaller 会彻底清除之前的缓存目录。因为当前的 `py_stock_build` conda 环境中本来并没有安装 Python `tk` 库依赖，导致 PyInstaller 重新构建时无法检测、引入 `_tkinter` runtime hook 和相关的 Tcl/Tk DLL，使得最终生成的 `.exe` 运行闪退并抛出 `ModuleNotFoundError: No module named 'tkinter'`。
+    - [x] **安装 tk 环境物理依赖**：在 `py_stock_build` 环境中执行了 `conda install -y tk` 成功安装补齐了 Python 物理 GUI toolkit 核心支持。
+    - [x] **重新编译并通过验证**：在纠正的环境下重新运行 `pyinstaller --clean -y PopularityResonanceSync.spec` 和 `pyinstaller --clean -y ats.spec` 进行编译。打包 100% 成功，程序成功捕获并编译 `pyi_rth__tkinter.py` 运行时 hook，生成完整的 `dist\人气共振2.22.exe` 和 `dist\ATS_Terminal.exe`，彻底解决了 tkinter 缺失的打包隐患。经实测运行验证，双击运行正常，无任何 tkinter 缺失报错。
+- [x] **修复 base 物理环境中的 win32api DLL 加载失败异常 (Fixed DLL Load Failure for win32api in Base Conda Env)**：
+    - [x] **定位 win32api DLL 冲突根源**：定位发现 base 环境下运行 `singleAnalyseUtil.py` 时由于 `pywin32` 在 Windows 系统中的 DLL 查找顺序发生冲突，加载到了其他环境或系统路径中的不兼容 `pywintypes39.dll` 或 `pythoncom39.dll`，导致 `ImportError: DLL load failed` 找不到指定的程序。
+    - [x] **实施物理放置自愈**：将 `C:\Users\Johnson\anaconda3\Library\bin\` 下正确的 `pywintypes39.dll` 和 `pythoncom39.dll` 物理拷贝至 `C:\Users\Johnson\anaconda3\`（Python 根目录）下，使 Python 优先、且正确加载对应版本的 DLL，彻底恢复了 base 环境下的 win32api 正常工作，运行测试 100% 绿灯。
 - [x] **修复窗口坐标管理器命令行启动自愈与双引号包裹 Bug (Fixed Shell Command Auto-Quoting & Self-Healing Launcher in Window Manager)**：
     - [x] **根治复杂 shell 命令行被错误包裹外部双引号的 Bug**：重构了 `EditPathDialog.accept_path` 的自动包裹双引号机制。增加 `is_shell_cmd` 判断，对于以 `start `, `cmd `, `powershell `, `python `, `py `, `cd `, `cd/` 开头，或者包含连接符（`;`, `&&`, `||`, `|`）或内部已有引号的复杂命令行，开发了防错排除策略，禁止自动在外部包裹多余的双引号，从源头上消除了路径格式被破坏的隐患。
-    - [x] **实现启动与校验时的自适应引号剥离与自愈机制**：在 `resolve_and_validate_cmd`、`_launch_program` 和 `_launch_as_admin` 中增加自适应防错自愈处理。在解析和执行前，若检测到传入路径整体被多余的外层引号（如 `"start cmd /k "cd ...""`）错误包裹，将自动识别并完成物理剥离，使历史已保存的损坏配置能够自动恢复为正确的原生命令，彻底解决了 cmd.exe 报出“找不到可执行程序”和因 launch 失败导致误移动其他不相干编辑器窗口的 Bug。
+    - [x] **实现启动与校验时的自适应引号剥离与自愈机制**：在 `resolve_and_validate_cmd`、`_launch_program` 和 `_launch_as_admin` 中增加自适应防错自愈处理。在解析和执行前，若检测到传入路径整体被多余的外层引号（如 `"start cmd /k "cd ...""`）错误包裹，将自动识别并完成物理剥离，使历史已保存的损坏配置能够自动恢复为正确的原生命令，彻底解决了 cmd.exe 报出“找不到可执行程序”和因 launch 失败导致误移动其他不相干编辑器窗口 of Bug。
     - [x] **物理语法编译自检与全管道模拟测试 100% 成功通过**：执行 `py_compile` 编译校验完美通过；编写并运行 `test_quote_resolver.py` 自动化测试脚本，全面覆盖了复杂命令行、正常命令、常规带空格路径的解析与重新拼接逻辑，断言校验全部成功绿灯。
+
 
 ## 2026-07-13 10:30
 - [x] **修复 IPC 联动格式兼容性与 UI 代码排布微调 (Fixed IPC Linkage Format Compatibility & UI Code Layout Tweak)**：
