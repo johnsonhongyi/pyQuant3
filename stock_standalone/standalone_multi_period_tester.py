@@ -1552,6 +1552,111 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         """多级排序更改时的回调保存动作，自动执行持久化写盘"""
         self._save_state()
 
+    def _get_audit_end_date(self):
+        """尝试获取审计的截止日期，对齐主窗口"""
+        if hasattr(self, 'master') and self.master:
+            if hasattr(self.master, '_get_audit_end_date'):
+                try:
+                    return self.master._get_audit_end_date()
+                except Exception:
+                    pass
+            if hasattr(self.master, 'current_date'):
+                t_str = getattr(self.master, 'current_date', None)
+                if t_str:
+                    return str(t_str).replace("-", "")
+        return None
+
+    def _run_dna_audit_batch(self, code_to_name, end_date=None, resample='d'):
+        from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+        from tkinter import messagebox
+        import threading
+        
+        # 🚀 [NEW] 防重入保护
+        if getattr(self, '_dna_audit_running', False):
+            return
+        self._dna_audit_running = True
+        
+        codes = list(code_to_name.keys())
+        if not codes:
+            self._dna_audit_running = False
+            return
+        
+        # 弹一个带进度条的提示
+        top = tk.Toplevel(self)
+        top.withdraw() 
+        top.attributes("-alpha", 0.0) 
+        top.title("🧬 DNA 审计中...")
+        
+        # 界面美化
+        top.configure(bg='#f8f9fa')
+        content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
+        content_frame.pack(expand=True, fill='both')
+        
+        msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
+                            font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
+        msg_label.pack(pady=(0, 10))
+        
+        # 进度条
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(content_frame, variable=progress_var, maximum=len(codes), mode='determinate', length=280)
+        progress_bar.pack(pady=5)
+        
+        status_label = tk.Label(content_frame, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
+        status_label.pack()
+        
+        # 初始化展示位置
+        w, h = 320, 140
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x, y = (sw - w) // 2, (sh - h) // 2
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        top.attributes("-topmost", True)
+        top.deiconify() # 直接显示
+        
+        def progress_cb(curr, total, msg):
+            """跨线程进度回调"""
+            def _update():
+                try:
+                    # 🛡️ [GUARD] 若窗口已被用户关闭，静默退出，防止 TclError: invalid command name
+                    if not top.winfo_exists(): return
+                    progress_var.set(curr)
+                    status_label.config(text=msg)
+                    if curr >= total:
+                        status_label.config(text="✅ 正在呼出报告...")
+                except tk.TclError:
+                    pass # 窗体已销毁
+                    
+            self.after(0, _update)
+
+        def run_task():
+            try:
+                # 调用批量接口
+                summaries = audit_multiple_codes(codes, 
+                                               end_date=end_date, 
+                                               code_to_name=code_to_name,
+                                               progress_callback=progress_cb,
+                                               resample=resample)
+                # 切回主线程展示
+                def _show_report():
+                    if top.winfo_exists():
+                        top.destroy()
+                    
+                    # 🚀 [NEW] 支持窗口复用
+                    if hasattr(self, '_dna_audit_win') and self._dna_audit_win and self._dna_audit_win.winfo_exists():
+                        self._dna_audit_win.update_report(summaries, end_date=end_date, resample=resample)
+                    else:
+                        self._dna_audit_win = show_dna_audit_report_window(summaries, parent=self, end_date=end_date, resample=resample)
+                
+                self.after(0, _show_report)
+            except Exception as e:
+                import traceback
+                print(traceback.format_exc())
+                self.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self)])
+            finally:
+                self._dna_audit_running = False
+                
+        threading.Thread(target=run_task, daemon=True).start()
+
     def show_context_menu(self, event):
         tree = event.widget
         # 1. 优先尝试响应表头的多级排序右键菜单
@@ -1572,8 +1677,19 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if not values or len(values) < 2:
             return
             
-        code = str(values[0]).strip().zfill(6)
-        name = str(values[1]).strip()
+        columns = tree["columns"]
+        try:
+            code_idx = columns.index("code")
+            name_idx = columns.index("name")
+        except ValueError:
+            code_idx = 0
+            name_idx = 1
+            
+        if len(values) <= max(code_idx, name_idx):
+            return
+
+        code = str(values[code_idx]).strip().zfill(6)
+        name = str(values[name_idx]).strip()
         if name.startswith("★ "):
             name = name[len("★ "):]
             
@@ -1593,6 +1709,42 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         menu.add_command(label="📋 复制代码", command=lambda: self.copy_code(code))
         menu.add_command(label="📝 复制行信息", command=lambda: self.copy_row_info(values))
         menu.add_separator()
+        
+        # DNA 审计子菜单
+        active_periods = [p for p, var in self.period_vars.items() if var.get()]
+        PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
+        sorted_periods = sorted(active_periods, key=lambda x: PERIOD_ORDER.get(x, 99))
+        min_period = sorted_periods[0] if sorted_periods else 'd'
+        
+        dna_menu = tk.Menu(menu, tearoff=0)
+        code_to_name = {code: name}
+        
+        # 默认最小周期审计
+        dna_menu.add_command(
+            label=f"🧬 运行 DNA 审计 (当前最小: {min_period.upper()})",
+            command=lambda: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=min_period)
+        )
+        
+        if len(sorted_periods) > 1:
+            dna_menu.add_separator()
+            for p in sorted_periods:
+                dna_menu.add_command(
+                    label=f"指定周期: {p.upper()}",
+                    command=lambda period=p: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=period)
+                )
+        else:
+            # 如果没勾选其他，列出所有可用周期
+            dna_menu.add_separator()
+            all_supported = ['d', '2d', '3d', 'w', 'm', '45d', '3M']
+            for p in all_supported:
+                dna_menu.add_command(
+                    label=f"指定周期: {p.upper()}",
+                    command=lambda period=p: self._run_dna_audit_batch(code_to_name, end_date=self._get_audit_end_date(), resample=period)
+                )
+        
+        menu.add_cascade(label=f"🧬 DNA 专项审计 (默认: {min_period.upper()})", menu=dna_menu)
+        menu.add_separator()
+        
         menu.add_command(label=f"🔬 诊断个股策略通过情况 ({name})", command=lambda: self.diagnose_stock_strategy(code, name))
             
         menu.post(event.x_root, event.y_root)
@@ -2177,6 +2329,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                     self._do_linkage(code=code)
 
         tree.bind("<<TreeviewSelect>>", on_select_sub)
+        tree.bind("<Button-3>", self.show_context_menu)
         tree.bind("<Motion>", lambda e: self._on_tree_motion_impl(e, tree))
         tree.bind("<Leave>", self._on_tree_leave)
         win.bind("<Destroy>", lambda e: self._hide_tree_tooltip())
