@@ -722,7 +722,7 @@ class PRServiceGUI:
 
     def refresh_realtime_fields(self, df=None):
         today = time.strftime("%Y-%m-%d")
-        current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else today
+        current_view_date = self.current_date
         
         # 💥 [NEW] 24/7 运行支持：如果系统日期已跨天（即今天不同于上一次 the 系统日期），且前态仍处于上一个同步日，自动切换界面日期至今日，防止拦截更新
         if current_view_date != today:
@@ -1734,7 +1734,7 @@ class PRServiceGUI:
             today = time.strftime("%Y-%m-%d")
             # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期
             if self.is_running or force_save:
-                current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else self.current_date
+                current_view_date = self.current_date
                 if current_view_date != today:
                     service_logger.info(f"检测到日期已由 {current_view_date} 切换至今日 {today}，执行界面日期同步...")
                     self.current_date = today
@@ -1814,9 +1814,8 @@ class PRServiceGUI:
             # 每日数据持久化更新当日数据 (在 save_daily_resonance_csv 内部自适应校验交易日)
             self.save_daily_resonance_csv(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes, force_save=force_save)
             
-            # 5. 在主线程中安全地更新所有表（仅在当前查看的是今天的数据时更新界面，防止覆盖历史复盘视图）
             today = time.strftime("%Y-%m-%d")
-            current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else today
+            current_view_date = self.current_date
             if current_view_date == today:
                 self._last_realtime_today = today
                 self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
