@@ -23,8 +23,10 @@ sys.path.append(os.path.join(BASE_DIR, 'JSONData'))
 
 try:
     from JohnsonUtil import commonTips as cct
+    from JohnsonUtil.johnson_cons import Resample_LABELS_Days
 except ImportError:
     cct = None
+    Resample_LABELS_Days = {}
 
 # [🚀 UI IMPORTS]
 try:
@@ -276,8 +278,9 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
             if cache_key in DNA_CALC_CACHE:
                 return DNA_CALC_CACHE[cache_key][0]
 
+        dl_len = Resample_LABELS_Days.get(resample, 800)
         # [🚀 LIGHTWEIGHT LOAD] 使用 fastohlc=True 跳过不使用的 MACD/OBV 等重型指标计算
-        df_raw = get_tdx_Exp_day_to_df(code, dl=800, fastohlc=True, resample=resample)
+        df_raw = get_tdx_Exp_day_to_df(code, dl=dl_len, fastohlc=True, resample=resample)
         
         if df_raw is None or df_raw.empty: return None
         
@@ -296,7 +299,8 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
         
         if df_idx is None:
             # 🚀 [FIX] 加载指数数据（完全脱离锁环境进行 IO）
-            df_idx_raw = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True, resample=resample)
+            dl_len = Resample_LABELS_Days.get(resample, 800)
+            df_idx_raw = get_tdx_Exp_day_to_df(idx_code, dl=dl_len, fastohlc=True, resample=resample)
             if df_idx_raw is not None and not df_idx_raw.empty:
                 df_idx_raw['idx_pct'] = df_idx_raw['close'].pct_change() * 100
                 with CACHE_LOCK:
@@ -348,8 +352,16 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
                 p = row.get('pct', 0)
                 prev_close = row['close'] / (1 + p/100.0) if p != -100 else row['close']
 
+            # 统一将日期标准化为 YYYY-MM-DD 格式字符串，防止 Timestamp 传入 f-string :<12 导致格式化指令解析冲突
+            if hasattr(dt, 'strftime'):
+                dt_str = dt.strftime('%Y-%m-%d')
+            else:
+                dt_str = normalize_dt(dt)
+                if isinstance(dt_str, str) and len(dt_str) > 10:
+                    dt_str = dt_str[:10]
+
             audit_rows.append({
-                'date': dt,
+                'date': dt_str,
                 'alpha': alpha, 
                 'idx_pct': idx_p, 
                 'pct': row['pct'], 
@@ -407,7 +419,8 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
         idx_cache_key = (idx_code, resample)
         if idx_cache_key not in INDEX_DATA_CACHE:
             # 预读指数 (IO 在锁外执行)
-            df_idx = get_tdx_Exp_day_to_df(idx_code, dl=800, fastohlc=True, resample=resample)
+            dl_len = Resample_LABELS_Days.get(resample, 800)
+            df_idx = get_tdx_Exp_day_to_df(idx_code, dl=dl_len, fastohlc=True, resample=resample)
             if df_idx is not None and not df_idx.empty:
                 df_idx['idx_pct'] = df_idx['close'].pct_change() * 100
                 with CACHE_LOCK:
