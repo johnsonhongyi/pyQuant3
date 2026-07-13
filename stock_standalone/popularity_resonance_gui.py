@@ -365,6 +365,58 @@ class PRServiceGUI:
             return text.split("  |  ")[-1].strip()
         return text
 
+    def on_toolbar_dna_click(self):
+        """点击工具栏 🧬 DNA 审计 按钮：优先获取当前有焦点/选中个股的 Treeview 及随后的 20 个，否则从共振表或东财表中拉取前 21 个个股"""
+        # 1. 查找当前有选中项的 Treeview
+        target_tree = None
+        selected_item = None
+        all_trees = (self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb)
+        for tree in all_trees:
+            sel = tree.selection()
+            if sel:
+                target_tree = tree
+                selected_item = sel[0]
+                break
+                
+        # 2. 如果没有任何 Treeview 选中，我们默认取可见的、且有数据的第一个 Treeview
+        if not target_tree:
+            for tree in all_trees:
+                if tree.winfo_viewable() and tree.get_children():
+                    target_tree = tree
+                    selected_item = tree.get_children()[0]
+                    break
+                    
+        # 3. 如果还是没有，我们直接提示并退出
+        if not target_tree or not selected_item:
+            from tkinter import messagebox
+            messagebox.showinfo("信息", "当前无可用的人气个股进行 DNA 审计", parent=self.root)
+            return
+            
+        # 4. 获取所选个股及其后面的最多 20 个个股（共计最多 21 个个股）
+        children = target_tree.get_children()
+        try:
+            curr_idx = children.index(selected_item)
+            target_items = children[curr_idx:curr_idx + 21]
+        except ValueError:
+            target_items = [selected_item]
+            
+        cols = list(target_tree["columns"])
+        code_idx = cols.index("code") if "code" in cols else 1
+        name_idx = cols.index("name") if "name" in cols else 2
+        
+        code_to_name = {}
+        for t_item in target_items:
+            t_values = target_tree.item(t_item, "values")
+            if t_values and len(t_values) > max(code_idx, name_idx):
+                t_code = str(t_values[code_idx]).strip().zfill(6)
+                t_name = str(t_values[name_idx]).strip()
+                if t_name.startswith("★ "):
+                    t_name = t_name[len("★ "):]
+                code_to_name[t_code] = t_name
+                
+        if code_to_name:
+            self._run_dna_audit_batch(code_to_name, resample='d')
+
     def apply_filter(self, event=None):
         query = self._get_real_query()
         self.query_expr = query
@@ -644,11 +696,18 @@ class PRServiceGUI:
         tree.focus(item_id)
         
         values = tree.item(item_id, "values")
-        if not values or len(values) < 3:
+        if not values or len(values) < 2:
             return
             
-        code = str(values[1]).strip().zfill(6)
-        name = str(values[2]).strip()
+        cols = list(tree["columns"])
+        code_idx = cols.index("code") if "code" in cols else 1
+        name_idx = cols.index("name") if "name" in cols else 2
+
+        if len(values) <= max(code_idx, name_idx):
+            return
+
+        code = str(values[code_idx]).strip().zfill(6)
+        name = str(values[name_idx]).strip()
         if name.startswith("★ "):
             name = name[len("★ "):]
             
@@ -692,6 +751,33 @@ class PRServiceGUI:
                         command=lambda name=strongest_cat: self.show_concept_top10_window(name)
                     )
                 menu.add_separator()
+
+        # ====================
+        # [🚀 NEW] DNA 专项审计 (默认选中 code 的前 20)
+        # ====================
+        children = tree.get_children()
+        try:
+            curr_idx = children.index(item_id)
+            target_items = children[curr_idx:curr_idx + 21]
+        except ValueError:
+            target_items = [item_id]
+            
+        code_to_name = {}
+        for t_item in target_items:
+            t_values = tree.item(t_item, "values")
+            if t_values and len(t_values) > max(code_idx, name_idx):
+                t_code = str(t_values[code_idx]).strip().zfill(6)
+                t_name = str(t_values[name_idx]).strip()
+                if t_name.startswith("★ "):
+                    t_name = t_name[len("★ "):]
+                code_to_name[t_code] = t_name
+
+        if code_to_name:
+            menu.add_command(
+                label=f"🧬 DNA 专项审计 ({len(code_to_name)}只, 默认: D)",
+                command=lambda: self._run_dna_audit_batch(code_to_name, resample='d')
+            )
+            menu.add_separator()
 
         if not is_fav:
             menu.add_command(label=f"★ 添加重点关注 ({name})", command=lambda: self.add_to_favorites(code))
@@ -1050,6 +1136,19 @@ class PRServiceGUI:
         self.query_combo.pack(side="left", padx=2, fill="x", expand=True)
         self.query_combo.bind("<Return>", lambda e: self.apply_filter())
         self.query_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
+        
+        # 添加 🧬 DNA审计 按钮
+        self.btn_query_dna = tk.Button(
+            self.filter_frame,
+            text="🧬 DNA审计",
+            command=self.on_toolbar_dna_click,
+            font=("Microsoft YaHei", 9, "bold"),
+            bg="#e3f2fd",
+            fg="#0d47a1",
+            padx=4,
+            pady=0
+        )
+        self.btn_query_dna.pack(side="left", padx=(10, 2))
         
         self.btn_query_exec = ttk.Button(self.filter_frame, text="过滤", command=self.apply_filter, width=6)
         self.btn_query_exec.pack(side="left", padx=2)
@@ -1669,6 +1768,136 @@ class PRServiceGUI:
             s.close()
         except Exception:
             pass
+
+    def on_code_click(self, code, date=None):
+        """DNA 审计窗口点击个股时，回传人气排行界面以触发 TDX、Visualizer 联动以及高亮该个股"""
+        if not code:
+            return
+        code = str(code).strip().zfill(6)
+        
+        # 联动 TDX / THS 及可视化
+        is_tdx = self.link_tdx_var.get()
+        is_ths = self.link_ths_var.get()
+        if is_tdx or is_ths:
+            flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
+            if get_link_manager:
+                get_link_manager().push(code, flags=flags)
+            elif self.local_sender:
+                self.local_sender.send(code)
+                
+        if self.link_vis_var.get():
+            threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
+            
+        self.lbl_status.config(text=f"已通过DNA审计联动: {code}", fg="darkgreen")
+        
+        # 尝试在界面五个 Treeview 里面查找该股票并高亮选中
+        all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
+        for tree in all_trees:
+            # 只有在此 Treeview 实际展示且包含该个股时才选中它
+            if not tree.winfo_viewable():
+                continue
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if vals and len(vals) >= 2:
+                    c = str(vals[1]).strip().zfill(6)
+                    if c == code:
+                        tree.selection_set(iid)
+                        tree.focus(iid)
+                        tree.see(iid)
+                        break
+
+    def _run_dna_audit_batch(self, code_to_name, end_date=None, resample='d'):
+        from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+        from tkinter import messagebox
+        import threading
+        
+        # 🚀 防重入保护
+        if getattr(self, '_dna_audit_running', False):
+            return
+        self._dna_audit_running = True
+        
+        codes = list(code_to_name.keys())
+        if not codes:
+            self._dna_audit_running = False
+            return
+            
+        if not end_date:
+            end_date = self.current_date.replace("-", "")
+            
+        # 弹一个带进度条的提示
+        top = tk.Toplevel(self.root)
+        top.withdraw() 
+        top.attributes("-alpha", 0.0) 
+        top.title("🧬 DNA 审计中...")
+        
+        # 界面美化
+        top.configure(bg='#f8f9fa')
+        content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
+        content_frame.pack(expand=True, fill='both')
+        
+        msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
+                            font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
+        msg_label.pack(pady=(0, 10))
+        
+        # 进度条
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(content_frame, variable=progress_var, maximum=len(codes), mode='determinate', length=280)
+        progress_bar.pack(pady=5)
+        
+        status_label = tk.Label(content_frame, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
+        status_label.pack()
+        
+        # 初始化展示位置
+        w, h = 320, 140
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x, y = (sw - w) // 2, (sh - h) // 2
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        top.attributes("-topmost", True)
+        top.deiconify() 
+        
+        def progress_cb(curr, total, msg):
+            """跨线程进度回调"""
+            def _update():
+                try:
+                    if not top.winfo_exists(): return
+                    progress_var.set(curr)
+                    status_label.config(text=msg)
+                    if curr >= total:
+                        status_label.config(text="✅ 正在呼出报告...")
+                except tk.TclError:
+                    pass 
+                    
+            self.root.after(0, _update)
+            
+        def run_task():
+            try:
+                # 调用批量接口
+                summaries = audit_multiple_codes(codes, 
+                                               end_date=end_date, 
+                                               code_to_name=code_to_name,
+                                               progress_callback=progress_cb,
+                                               resample=resample)
+                # 切回主线程展示
+                def _show_report():
+                    if top.winfo_exists():
+                        top.destroy()
+                    
+                    # 支持窗口复用
+                    if hasattr(self, '_dna_audit_win') and self._dna_audit_win and self._dna_audit_win.winfo_exists():
+                        self._dna_audit_win.update_report(summaries, end_date=end_date, resample=resample)
+                    else:
+                        self._dna_audit_win = show_dna_audit_report_window(summaries, parent=self, end_date=end_date, resample=resample)
+                
+                self.root.after(0, _show_report)
+            except Exception as e:
+                import traceback
+                print(traceback.format_exc())
+                self.root.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self.root)])
+            finally:
+                self._dna_audit_running = False
+                
+        threading.Thread(target=run_task, daemon=True).start()
 
     def refresh_layout(self, em_empty, ths_empty, lh_empty, res_empty, tgb_empty):
         """动态控制无数据板块的隐藏/显示"""
@@ -3554,6 +3783,7 @@ class PRServiceGUI:
 
         tree.bind("<<TreeviewSelect>>", on_select_top10)
         tree.bind("<Double-1>", on_double_click_top10)
+        tree.bind("<Button-3>", self.show_context_menu)
 
         win.title(f"板块【{target_concept}】个股列表")
         
