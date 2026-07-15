@@ -201,6 +201,19 @@ class HotkeyLineEdit(QLineEdit):
         # 设置为只读模式以防止传统输入字符，改由事件拦截处理
         self.setReadOnly(True)
         self.setPlaceholderText("点击后直接按下快捷键...")
+        self.textChanged.connect(self.adjust_width)
+        self.adjust_width()
+
+    def adjust_width(self):
+        text = self.text()
+        if not text:
+            self.setFixedWidth(90)  # 初始没有绑定快捷键时，宽度保持收缩紧凑状态
+            return
+        fm = self.fontMetrics()
+        w = fm.horizontalAdvance(text)
+        padding = 16  # 给两侧边界与光标等预留适度间距
+        self.setFixedWidth(max(90, w + padding))
+
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -237,12 +250,14 @@ class FlowLayout(QtWidgets.QLayout):
     """
     流式自适应折行布局管理器 (PyQt6)
     用于自动根据可用宽度折行排列按钮与控件，解决窗口缩小时按钮溢出或遮挡的痛点。
+    支持指定索引之后的元素在有剩余宽度时自动右对齐。
     """
-    def __init__(self, parent=None, margin=0, hspacing=5, vspacing=5):
+    def __init__(self, parent=None, margin=0, hspacing=5, vspacing=5, align_right_from_index=-1):
         super().__init__(parent)
         self._item_list = []
         self._h_spacing = hspacing
         self._v_spacing = vspacing
+        self._align_right_from_index = align_right_from_index
         self.setContentsMargins(margin, margin, margin, margin)
 
     def __del__(self):
@@ -292,32 +307,89 @@ class FlowLayout(QtWidgets.QLayout):
 
     def _do_layout(self, rect, test_only):
         margins = self.contentsMargins()
-        x = rect.x() + margins.left()
+        start_x = rect.x() + margins.left()
         y = rect.y() + margins.top()
+        space_x = self._h_spacing
+        space_y = self._v_spacing
+
+        # 1. 按照原版的换行规则，将 items 划分到不同的行 (rows)
+        rows = []
+        current_row = []
+        x = start_x
         line_height = 0
 
-        for item in self._item_list:
-            wid = item.widget()
-            if not wid:
-                continue
-            
-            space_x = self._h_spacing
-            space_y = self._v_spacing
+        # 过滤出有效的 items 及其原始索引
+        valid_items_with_idx = []
+        for idx, item in enumerate(self._item_list):
+            if item.widget():
+                valid_items_with_idx.append((idx, item))
 
-            next_x = x + item.sizeHint().width() + space_x
+        for idx, item in valid_items_with_idx:
+            item_width = item.sizeHint().width()
+            item_height = item.sizeHint().height()
+
+            # 检查换行条件
+            next_x = x + item_width + space_x
             if next_x - space_x > rect.right() - margins.right() and line_height > 0:
-                x = rect.x() + margins.left()
-                y = y + line_height + space_y
-                next_x = x + item.sizeHint().width() + space_x
+                rows.append((current_row, line_height))
+                current_row = []
+                x = start_x
                 line_height = 0
 
-            if not test_only:
-                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), item.sizeHint()))
+            current_row.append((idx, item))
+            x = x + item_width + space_x
+            line_height = max(line_height, item_height)
 
-            x = next_x
-            line_height = max(line_height, item.sizeHint().height())
+        if current_row:
+            rows.append((current_row, line_height))
 
-        return y + line_height - rect.y() + margins.bottom()
+        # 2. 依次布局每一行
+        for row_items, row_height in rows:
+            # 计算这一行的总宽度
+            row_widths = [item.sizeHint().width() for _, item in row_items]
+            total_items_width = sum(row_widths)
+            total_spacing = space_x * (len(row_items) - 1)
+            row_total_width = total_items_width + total_spacing
+
+            # 计算剩余宽度
+            avail_width = rect.right() - margins.right() - start_x
+            extra_space = avail_width - row_total_width
+
+            # 确定是否需要应用右对齐偏移
+            offset_at_index = -1
+            apply_offset_to_all = False
+
+            if self._align_right_from_index >= 0 and extra_space > 0:
+                row_indices = [idx for idx, _ in row_items]
+                has_left = any(idx < self._align_right_from_index for idx in row_indices)
+                has_right = any(idx >= self._align_right_from_index for idx in row_indices)
+
+                if has_left and has_right:
+                    # 混合行：在第一个右侧 item 处应用偏移
+                    offset_at_index = self._align_right_from_index
+                elif has_right and not has_left:
+                    # 纯右侧行：整行向右偏移
+                    apply_offset_to_all = True
+
+            # 摆放这一行的 items
+            curr_x = start_x
+            for idx, item in row_items:
+                if offset_at_index >= 0 and idx >= offset_at_index:
+                    curr_x += extra_space
+                    offset_at_index = -1  # 确保只在分水岭加一次
+                elif apply_offset_to_all:
+                    curr_x += extra_space
+                    apply_offset_to_all = False  # 确保整行偏移只在起点加一次
+
+                if not test_only:
+                    item.setGeometry(QtCore.QRect(QtCore.QPoint(curr_x, y), item.sizeHint()))
+
+                curr_x += item.sizeHint().width() + space_x
+
+            y += row_height + space_y
+
+        return y - space_y - rect.y() + margins.bottom()
+
 
 
 class NewResolutionDialog(QDialog):
@@ -1659,14 +1731,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         main_layout.addItem(spacer2)
 
         # 底部应用栏
-        bottom_bar = FlowLayout(hspacing=6, vspacing=6)
+        bottom_bar = FlowLayout(hspacing=6, vspacing=6, align_right_from_index=3)
         
         # --- 全局热键配置 ---
         self.lbl_hotkey = QLabel("全局热键:")
         bottom_bar.addWidget(self.lbl_hotkey)
         
         self.le_hotkey = HotkeyLineEdit()
-        self.le_hotkey.setFixedWidth(150)
         self.le_hotkey.setText(getattr(self, 'current_bound_hotkey', ''))
         bottom_bar.addWidget(self.le_hotkey)
         
@@ -1688,12 +1759,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_save_config.clicked.connect(self.save_all_config)
         bottom_bar.addWidget(self.btn_save_config)
         
-        self.btn_apply_layout = QPushButton("🚀 立即应用布局")
+        self.btn_apply_layout = QPushButton("🚀应用布局")
         self.btn_apply_layout.setObjectName("btnApply")
         self.btn_apply_layout.clicked.connect(self.apply_current_layout)
         bottom_bar.addWidget(self.btn_apply_layout)
         
-        self.btn_full_exit = QPushButton("❌ 完全退出")
+        self.btn_full_exit = QPushButton("❌退出")
         self.btn_full_exit.setObjectName("btnDeleteRes") # 复用红色的删除按钮样式
         self.btn_full_exit.clicked.connect(self.force_quit)
         bottom_bar.addWidget(self.btn_full_exit)

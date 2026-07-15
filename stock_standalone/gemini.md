@@ -1,3 +1,13 @@
+## 2026-07-15 19:50
+- [x] **优化窗口坐标管理器底部布局折行自适应与右对齐 (Optimized Window Manager Bottom Bar FlowLayout Autowrap & Right Alignment)**：
+    - [x] **支持 `FlowLayout` 指定索引后的元素在有剩余宽度时自动右对齐**：在 `FlowLayout` 的 `_do_layout` 逻辑中，计算出每行的可用剩余空间 `extra_space`。根据 `self._align_right_from_index` 判断当前行是否属于需要右对齐的行。如果是混合行（既有左侧元素又有右侧元素），则在第一个右侧元素前应用全部 `extra_space`；如果是纯右侧元素行，则在整行起点前应用全部 `extra_space`。
+    - [x] **为底部工具栏应用右对齐参数**：在 `WindowPosManagerUI.init_ui` 中，实例化 `bottom_bar = FlowLayout(hspacing=6, vspacing=6, align_right_from_index=3)`。这确保了左侧的“全局热键”及其输入框、绑定按钮靠左对齐，而右侧的“📐 性能分析”、“⚡ 路由设置”、“💾 保存配置”、“🚀 立即应用布局”和“❌ 完全退出”按钮在窗口较宽时自动右对齐，并在窗口收缩折行时保持一致的响应式流式布局。
+    - [x] **实现全局热键输入框宽度动态自适应且初始状态收缩 (Implemented Dynamic Adaptive Width for Hotkey Input Box with Compact Initial State)**：
+        - [x] 在 `HotkeyLineEdit` 中将 `textChanged` 信号与 `adjust_width()` 槽函数连接，动态通过 `horizontalAdvance()` 测量当前快捷键字符串的像素宽度并调整输入框宽度。
+        - [x] 限制最小宽度为 `90px` 且不再测量超长占位符文本（"点击后直接按下快捷键..."），确保当未绑定热键（或清空）及绑定了类似 `ctrl+alt+f` 等短快捷键时，输入框保持极致的收缩紧凑状态，解决了宽度过剩问题。
+        - [x] 在 `WindowPosManagerUI.init_ui` 中，彻底移除原本硬编码的 `setFixedWidth(150)` 尺寸限制，交由输入框类自身按文字自愈动态计算。
+
+
 ## 2026-07-15 19:40
 - [x] **实现自动申请 Windows 管理员权限添加静态路由功能 (Implemented Automatic Windows Admin Privilege Elevation for Routing Check)**：
     - [x] **检测并判断管理员权限**：在 `core.check_and_add_route` 中通过 `ctypes.windll.shell32.IsUserAnAdmin()` 进行判断。若当前用户已经以管理员身份运行，则直接运行 `route add` 命令。
