@@ -85,6 +85,22 @@ class WindowMixin:
                     x = int(pos.get("x", 0) * scale)
                     y = int(pos.get("y", 0) * scale)
 
+                    # [SAFE-GUARD] 物理超大窗口上限防护自愈
+                    try:
+                        app = QApplication.instance()
+                        if app:
+                            screen = app.screenAt(QtCore.QPoint(x if x is not None else 100, y if y is not None else 100))
+                            if not screen:
+                                screen = app.primaryScreen()
+                            if screen:
+                                geom = screen.availableGeometry()
+                                if width > geom.width() or height > geom.height():
+                                    logger.warning(f"[load_window_position_qt] 检测到窗口尺寸 [{width}x{height}] 溢出显示器 [{geom.width()}x{geom.height()}]，已自动重置为默认尺寸。")
+                                    width = default_width
+                                    height = default_height
+                    except Exception as ex:
+                        logger.error(f"[load_window_position_qt] 溢出防护检查异常: {ex}")
+
             if x is None or y is None:
                 x, y = 100, 100
 
@@ -1644,11 +1660,85 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     break
             if matched_index >= 0:
                 self.cb_resolutions.setCurrentIndex(matched_index)
-            elif self.cb_resolutions.count() > 0:
-                self.cb_resolutions.setCurrentIndex(0)
+            else:
+                # 💥 自动创建匹配当前显示器的推荐配置方案，避免 Fallback 到错乱的方案中导致保存覆盖
+                self.log(f"⚡ 发现新屏幕拓扑，自动创建并配置新方案: {rec_name}...")
+                info = core.get_screen_resolution_summary()
+                cat = "single_display" if info["display_num"] <= 1 else "multi_display"
+                
+                # 融合当前已存所有方案中的窗口规则列表，并探测当前桌面上实际位置作为初始位置
+                initial_mapping = self.create_merged_initial_mapping()
+                self.config_manager.set_resolution_mapping(rec_name, initial_mapping, cat)
+                self.config_manager.save()
+                
+                # 递归重新刷新一次下拉框，此时就能找到这个新创建的方案
+                self.cb_resolutions.blockSignals(False)
+                self.refresh_resolutions_combo(rec_name)
+                return
                 
         self.cb_resolutions.blockSignals(False)
         self.on_resolution_changed()
+
+    def create_merged_initial_mapping(self) -> dict:
+        """
+        融合所有已配置方案的窗口规则并自动探测当前桌面窗口坐标，
+        生成用于新分辨率方案的初始窗口坐标映射字典。
+        """
+        # 1. 搜集所有方案中定义过的窗口 title 及其 exe_path 的并集
+        all_titles = {}
+        for cat_name in self.config_manager.get_categories():
+            for res_name in self.config_manager.get_resolutions_by_category(cat_name):
+                mapping = self.config_manager.get_resolution_mapping(res_name)
+                for title, raw_pos_str in mapping.items():
+                    parts = str(raw_pos_str).split('|')
+                    pos_str = parts[0]
+                    exe_path = parts[1] if len(parts) > 1 else ""
+                    if title not in all_titles or exe_path:
+                        all_titles[title] = exe_path
+                        
+        # 2. 对于每一个 title，检查其当前是否在桌面上运行并获取坐标
+        initial_mapping = {}
+        for title, exe_path in all_titles.items():
+            titles_to_try = [title]
+            if title.endswith('.py') and not title.startswith('py'):
+                titles_to_try.append(title.replace('.py', '.exe'))
+            elif title.endswith('.exe'):
+                titles_to_try.append(title.replace('.exe', '.py'))
+                
+            found_hwnd = None
+            for t in titles_to_try:
+                found = core.find_windows_by_title_safe(t)
+                if found:
+                    found_hwnd = found[0][0]
+                    break
+                    
+            if found_hwnd:
+                left, top, w, h = core.get_window_rect(found_hwnd)
+                # 只有在非最小化并且大小有效的窗口下才采信实际坐标
+                if not (left < -10000 and top < -10000) and w > 50 and h > 50:
+                    pos_str = f"{left},{top},{w},{h}"
+                else:
+                    pos_str = "100,100,800,600" # 最小化时使用默认安全大小
+            else:
+                # 没在运行，则找该窗口在已有配置中的任意坐标作为默认
+                pos_str = "100,100,800,600"
+                for cat_name in self.config_manager.get_categories():
+                    for res_name in self.config_manager.get_resolutions_by_category(cat_name):
+                        mapping = self.config_manager.get_resolution_mapping(res_name)
+                        if title in mapping:
+                            p_str = mapping[title].split('|')[0]
+                            if re.match(r"^-?\d+,-?\d+,\d+,\d+$", p_str):
+                                pos_str = p_str
+                                break
+                    if pos_str != "100,100,800,600":
+                        break
+                        
+            if exe_path:
+                initial_mapping[title] = f"{pos_str}|{exe_path}"
+            else:
+                initial_mapping[title] = pos_str
+                
+        return initial_mapping
 
     def get_current_selected_resolution(self) -> str:
         """获取当前下拉选中的方案名称 (解包后的真实 res_name)"""
@@ -3093,6 +3183,16 @@ def main():
         level_val = getattr(logging, app_debug.upper(), None)
         if level_val is not None:
             logger.setLevel(level_val)
+
+    # 💥 在实例化 QApplication 前，强制声明高 DPI 意识，彻底避免高 DPI/多屏拓扑切换下坐标放大级联Bug
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
