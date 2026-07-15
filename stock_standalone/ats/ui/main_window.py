@@ -1912,5 +1912,15 @@ class ATSMainWindow(QMainWindow):
             # Refresh heatmap widget
             if hasattr(self, 'heatmap_widget'):
                 self.heatmap_widget.load_live_sectors()
+                
+            # Refresh active distribution details dialogs if open
+            if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
+                from PyQt6.sip import isdeleted
+                for d in self.dist_chart._active_dialogs:
+                    try:
+                        if not isdeleted(d) and d.isVisible() and hasattr(d, 'refresh_favorites_display'):
+                            d.refresh_favorites_display()
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
