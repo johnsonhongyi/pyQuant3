@@ -8,6 +8,7 @@ import sys
 import os
 import re
 import json
+import threading
 import keyboard
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtWidgets import (
@@ -796,18 +797,74 @@ class EditPathDialog(QDialog):
     def accept_path(self):
         path = self.txt_path.text().strip()
         # 如果路径中含有空格，且没有被包裹，则自动加上双引号
-        if path and " " in path:
-            # 排除复杂的 shell 命令或带有内部引号的命令，避免破坏其命令格式
-            is_shell_cmd = (
-                any(marker in path for marker in (";", "&&", "||", "|")) or
-                path.strip().lower().startswith(("start ", "cmd ", "powershell ", "python ", "py ", "cd ", "cd/")) or
-                '"' in path or "'" in path
-            )
-            if not is_shell_cmd:
+        # 但对于复杂 shell 命令（含分隔符、引号或特殊前缀），不做自动包裹
+        is_shell_cmd = (
+            any(marker in path for marker in (";", "&&", "||", "|")) or
+            path.strip().lower().startswith(("start ", "cmd ", "powershell ", "python ", "py ", "cd ", "cd/")) or
+            '"' in path or "'" in path
+        )
+        if not is_shell_cmd:
+            if " " in path:
                 if not ((path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'"))):
                     path = f'"{path}"'
         self.final_path = path
         self.accept()
+
+
+class ManagerHotkeyThread(threading.Thread):
+    """
+    独立子线程：通过 RegisterHotKey(None, ...) 将热键注册到本线程消息队列。
+    使用 PeekMessageW 非阻塞轮询，捕获 WM_HOTKEY 后通过 Qt 信号线程安全地通知主 UI。
+    彻底避免在 nativeEvent 中操作原始指针导致的 Access Violation 崩溃。
+    """
+    WM_HOTKEY = 0x0312
+    HOTKEY_ID = 0xAFC0
+
+    def __init__(self, toggle_callback):
+        super().__init__(daemon=True)
+        self._toggle_callback = toggle_callback
+        self._running = False
+        self._modifiers = 0
+        self._vk = 0
+        self._registered = False
+
+    def set_hotkey(self, modifiers, vk):
+        self._modifiers = modifiers
+        self._vk = vk
+
+    def run(self):
+        import ctypes
+        import ctypes.wintypes
+        self._running = True
+        # RegisterHotKey(None, id, mod, vk) -> 注册到本线程消息队列
+        res = ctypes.windll.user32.RegisterHotKey(
+            None, self.HOTKEY_ID, self._modifiers, self._vk
+        )
+        self._registered = bool(res)
+        if not self._registered:
+            return  # 注册失败直接退出
+
+        msg = ctypes.wintypes.MSG()
+        while self._running:
+            # PeekMessageW 非阻塞，无需 GetMessage 阻塞等待
+            if ctypes.windll.user32.PeekMessageW(
+                ctypes.byref(msg), None, 0, 0, 1  # PM_REMOVE=1
+            ):
+                if msg.message == self.WM_HOTKEY and msg.wParam == self.HOTKEY_ID:
+                    try:
+                        self._toggle_callback()
+                    except Exception:
+                        pass
+            else:
+                import time
+                time.sleep(0.05)  # 空闲时降低 CPU 占用
+
+        if self._registered:
+            ctypes.windll.user32.UnregisterHotKey(None, self.HOTKEY_ID)
+            self._registered = False
+
+    def stop(self):
+        self._running = False
 
 
 class WindowPosManagerUI(QMainWindow, WindowMixin):
@@ -859,8 +916,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             print(f"[WARN] Failed to save position on force_quit: {e}")
         try:
-            if getattr(self, '_hotkey_hook', None):
-                keyboard.remove_hotkey(self._hotkey_hook)
+            if getattr(self, '_hotkey_thread', None):
+                self._hotkey_thread.stop()
+                self._hotkey_thread = None
+                self._hotkey_hook = None
         except:
             pass
         QApplication.instance().quit()
@@ -882,8 +941,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             event.ignore()
         else:
             try:
-                if getattr(self, '_hotkey_hook', None):
-                    keyboard.remove_hotkey(self._hotkey_hook)
+                if getattr(self, '_hotkey_thread', None):
+                    self._hotkey_thread.stop()
+                    self._hotkey_thread = None
+                    self._hotkey_hook = None
             except:
                 pass
             event.accept()
@@ -953,16 +1014,85 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         # 激活前台后自动同步检测桌面位置状态
         self.detect_and_refresh_state()
             
+    def parse_hotkey_string(self, hotkey_str: str) -> tuple:
+        """
+        将热键字符串如 'ctrl+alt+w' 解析为 (modifiers, vk)
+        """
+        parts = hotkey_str.lower().split('+')
+        modifiers = 0
+        vk = 0
+        
+        # 常见的修饰键映射
+        mod_map = {
+            'ctrl': 0x0002,  # MOD_CONTROL
+            'alt': 0x0001,   # MOD_ALT
+            'shift': 0x0004, # MOD_SHIFT
+            'win': 0x0008,   # MOD_WIN
+        }
+        
+        for part in parts:
+            part = part.strip()
+            if part in mod_map:
+                modifiers |= mod_map[part]
+            else:
+                # 尝试解析普通字符键或特殊功能键
+                if len(part) == 1:
+                    vk = ord(part.upper())
+                else:
+                    special_keys = {
+                        'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73,
+                        'f5': 0x74, 'f6': 0x75, 'f7': 0x76, 'f8': 0x77,
+                        'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+                        'enter': 0x0D, 'return': 0x0D, 'space': 0x20,
+                        'tab': 0x09, 'backspace': 0x08, 'delete': 0x2E,
+                        'insert': 0x2D, 'home': 0x24, 'end': 0x23,
+                        'pageup': 0x21, 'pagedown': 0x22,
+                        'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+                        'escape': 0x1B, 'esc': 0x1B
+                    }
+                    if part in special_keys:
+                        vk = special_keys[part]
+        return modifiers, vk
+
+
     def bind_hotkey(self, hotkey_str):
+        """
+        使用 ManagerHotkeyThread 独立子线程注册全局热键。
+        RegisterHotKey(None,...) 将热键绑定到子线程消息队列，
+        彻底避免在 nativeEvent 中操作裸指针导致 Access Violation 崩溃。
+        """
         if not hotkey_str:
             return False
         try:
-            if getattr(self, '_hotkey_hook', None):
-                keyboard.remove_hotkey(self._hotkey_hook)
-                self._hotkey_hook = None
-            self._hotkey_hook = keyboard.add_hotkey(hotkey_str, self.toggle_ui_signal.emit)
+            modifiers, vk = self.parse_hotkey_string(hotkey_str)
+            if not vk:
+                self.log(f"解析热键失败或无效按键组合: {hotkey_str}")
+                return False
+
+            # 停止旧线程（会自动 UnregisterHotKey）
+            old_thread = getattr(self, '_hotkey_thread', None)
+            if old_thread and old_thread.is_alive():
+                old_thread.stop()
+                old_thread.join(timeout=1.0)
+            self._hotkey_thread = None
+
+            # 创建并启动新的热键监听子线程
+            thread = ManagerHotkeyThread(self.toggle_ui_signal.emit)
+            thread.set_hotkey(modifiers, vk)
+            thread.start()
+
+            # 等待短暂时间确认注册成功
+            import time
+            time.sleep(0.15)
+            if not thread._registered:
+                self.log(f"RegisterHotKey 注册热键失败: {hotkey_str} (可能已被其他程序抢占)")
+                thread.stop()
+                return False
+
+            self._hotkey_thread = thread
             self.current_bound_hotkey = hotkey_str
-            self.log(f"已绑定全局热键: {hotkey_str}")
+            self._hotkey_hook = hotkey_str
+            self.log(f"[OK] 已绑定全局热键 (独立线程): {hotkey_str}")
             return True
         except Exception as e:
             self.log(f"绑定热键失败: {e}")
