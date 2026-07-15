@@ -3173,9 +3173,20 @@ class PRServiceGUI:
                 "bullish_ratio": round(bullish_ratio, 2)
             })
 
-        # 双重关键字排序：有价值明确概念的（is_noise为0）排前面，非清晰宏观概念（is_noise为1）排后面；同分类内按 count 只数降序排列
-        concept_score.sort(key=lambda x: (1 if self._is_noise_concept(x["name"]) else 0, -x["count"]))
-        top5 = concept_score[:5]
+        # ── 跟 tk 一致的底层过滤与排序逻辑 ──
+        # 1. 过滤成员数不足 2 的概念 (过滤杂音)
+        filtered_scores = [x for x in concept_score if x["count"] >= 2]
+        if not filtered_scores:
+            # 降级保留全部 (当所有板块 count 都为 1 时)
+            filtered_scores = concept_score
+
+        # 2. 在非噪声（_is_noise_concept）内，以 score 降序为主关键字排序，若 score 相同则按 count 降序
+        filtered_scores.sort(key=lambda x: (
+            1 if self._is_noise_concept(x["name"]) else 0,
+            -x["score"],
+            -x["count"]
+        ))
+        top5 = filtered_scores[:5]
 
         if not top5:
             lbl_empty = tk.Label(self.dynamic_concepts_frame, text="暂无板块数据", font=("Microsoft YaHei", 9, "bold"), fg="gray")
@@ -3185,10 +3196,11 @@ class PRServiceGUI:
             for item in top5:
                 c_name = item['name']
                 c_count = item['count']
+                c_avg_pct = item['avg_percent']
                 
                 lbl_c = tk.Label(
                     self.dynamic_concepts_frame,
-                    text=f"{c_name}:{c_count}",
+                    text=f"{c_name}:{c_count}只({c_avg_pct:+.1f}%)",
                     font=("Microsoft YaHei", 9, "bold", "underline"),
                     fg="green",
                     cursor="hand2"
