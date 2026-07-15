@@ -15,7 +15,8 @@ from .core import (
     get_screen_resolution_summary,
     save_display_configuration,
     restore_display_configuration,
-    bring_window_to_top_by_title
+    bring_window_to_top_by_title,
+    check_and_add_route
 )
 
 from .ui import (
@@ -35,6 +36,7 @@ __all__ = [
     'save_display_configuration',
     'restore_display_configuration',
     'bring_window_to_top_by_title',
+    'check_and_add_route',
     'WindowPosManagerUI',
     'run_ui'
 ]

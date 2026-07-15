@@ -58,7 +58,7 @@ if __name__ == '__main__':
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
 
-    from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name
+    from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name, check_and_add_route
 
     # 默认启动 UI，可以通过 --cli / -cli / --noui / --apply 等参数取消 UI 直接在后台执行排版
     use_ui = True
@@ -89,6 +89,9 @@ if __name__ == '__main__':
 
     if use_ui:
         print("正在启动桌面窗口坐标布局配置管理器 UI...")
+        config_mgr = ConfigManager()
+        success, route_msg = check_and_add_route(config_mgr)
+        print(f"[Route Check] {route_msg}")
         run_ui()
     else:
         print("检测到无 UI 参数，正在后台自动探测并应用窗口对齐...")
@@ -100,6 +103,8 @@ if __name__ == '__main__':
         
         # 2. 实例化配置并探测推荐的分辨率方案名
         config_mgr = ConfigManager()
+        success, route_msg = check_and_add_route(config_mgr)
+        print(f"[Route Check] {route_msg}")
         rec_name = detect_display_config_name()
         print(f"当前系统匹配的最佳配置方案为: {rec_name}")
         

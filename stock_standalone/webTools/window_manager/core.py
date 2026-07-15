@@ -760,3 +760,89 @@ def bring_window_to_top_by_title(title: str) -> bool:
     except Exception as e:
         print(f"Failed to bring window to top: {e}")
         return False
+
+
+def check_and_add_route(config_manager) -> tuple:
+    """
+    检查并自动添加静态路由配置。
+    返回 (success: bool, message: str)
+    """
+    routing_cfg = config_manager.config_data.get("routing_config")
+    if not routing_cfg:
+        # 默认值初始化
+        routing_cfg = {
+            "enabled": True,
+            "destination": "192.168.50.0",
+            "mask": "255.255.255.0",
+            "gateway": "192.168.1.2"
+        }
+        config_manager.config_data["routing_config"] = routing_cfg
+        config_manager.save()
+
+    if not routing_cfg.get("enabled", True):
+        return True, "自动路由功能未启用。"
+
+    dest = routing_cfg.get("destination", "192.168.50.0")
+    mask = routing_cfg.get("mask", "255.255.255.0")
+    gw = routing_cfg.get("gateway", "192.168.1.2")
+
+    import subprocess
+    try:
+        # 在 Windows 上，检测是否存在该网段的路由
+        check_cmd = "route print -4"
+        res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
+        
+        # 精确正则匹配网络目标和网关，以防误判
+        pattern = rf"\b{re.escape(dest)}\b"
+        if re.search(pattern, res.stdout):
+            if gw in res.stdout:
+                return True, f"到 {dest} via {gw} 的静态路由已存在，无需添加。"
+                
+        # 路由不存在或网关不同，尝试添加。首先检测当前是否已具有管理员权限
+        is_admin = False
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            pass
+
+        if is_admin:
+            add_cmd = f"route add {dest} mask {mask} {gw}"
+            add_res = subprocess.run(add_cmd, shell=True, capture_output=True, text=True, encoding='gbk', errors='ignore')
+            if add_res.returncode == 0:
+                return True, f"已成功自动添加静态路由: {dest} mask {mask} {gw}"
+            else:
+                err_msg = add_res.stderr.strip() or add_res.stdout.strip()
+                return False, f"添加路由失败 (返回码 {add_res.returncode}): {err_msg}"
+        else:
+            # 没有管理员权限，通过 ShellExecuteW "runas" 弹出 UAC 请求提权运行
+            try:
+                params = f"/c route add {dest} mask {mask} {gw}"
+                # SW_HIDE = 0 隐藏弹出的黑窗口
+                ret = ctypes.windll.shell32.ShellExecuteW(
+                    None,
+                    "runas",
+                    "cmd.exe",
+                    params,
+                    None,
+                    0
+                )
+                # ShellExecuteW 成功返回值大于 32
+                if ret > 32:
+                    # 稍微等待 0.5s 让系统完成路由表写入，然后重新用 route print 检测
+                    time.sleep(0.5)
+                    check_cmd = "route print -4"
+                    res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
+                    if re.search(pattern, res.stdout) and gw in res.stdout:
+                        return True, f"已通过管理员权限自动添加静态路由: {dest} mask {mask} {gw}"
+                    else:
+                        return False, f"管理员权限请求已批准，但路由添加未生效，请检查网关或网卡是否正常。"
+                elif ret == 1223:
+                    return False, "添加路由失败: 用户取消了 UAC 管理员权限授权申请。"
+                else:
+                    return False, f"添加路由失败: 申请管理员权限失败 (错误码 {ret})。"
+            except Exception as e:
+                return False, f"尝试申请管理员权限添加路由时发生异常: {e}"
+            
+    except Exception as e:
+        return False, f"自动路由检测/添加异常: {e}"
+
