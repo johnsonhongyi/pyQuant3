@@ -10420,6 +10420,25 @@ class MainWindow(QMainWindow, WindowMixin):
              has_reset_linkage = True
              logger.debug(f"[Linkage] Explicitly reset due to reset_history=True")
 
+        # [NEW] 针对重点关注股，自动注入其关注日作为 active_time_linkage 联动日期
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            if code in fav_mgr.get_favorite_stocks():
+                add_date = fav_mgr.get_favorite_stock_date(code)
+                if add_date and not kwargs.get('timestamp') and not kwargs.get('signal_date'):
+                    self.active_time_linkage = {
+                        'code': code,
+                        'timestamp': add_date,
+                        'label': '重点关注',
+                        'price': None,
+                        'auto_scroll': True
+                    }
+                    has_reset_linkage = False
+                    logger.debug(f"[Linkage] Favorited stock {code} automatically mapped to its add_date: {add_date}")
+        except Exception as e:
+            logger.debug(f"Failed to auto-apply favorite add_date: {e}")
+
         if not has_reset_linkage and hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('timestamp'):
             t_str = str(self.active_time_linkage.get('timestamp')).replace("-", "")
             last_td = str(cct.get_last_trade_date()).replace("-", "")

@@ -7015,6 +7015,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not code:
             return
 
+        # 如果没有指定时间戳，自适应检查是否为重点关注股票并获取其添加日期
+        if timestamp is None:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                if code in fav_mgr.get_favorite_stocks():
+                    add_date = fav_mgr.get_favorite_stock_date(code)
+                    if add_date:
+                        timestamp = add_date
+            except Exception:
+                pass
+
         now = time.time()
         is_linkage = timestamp is not None
 

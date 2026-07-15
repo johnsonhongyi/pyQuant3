@@ -1,3 +1,11 @@
+## 2026-07-15 16:30
+- [x] **实现重点关注个股添加日期记录与可视化联动涨跌幅功能 (Implemented Favorite Stock Addition Dates & Visualizer Linkage Return)**：
+    - [x] **重构 `GlobalFavoriteManager` 实现日期的持久化存储 (Favorite Stock Date Persistence)**：重构了 `global_favorites.py` 内部 of JSON 读写流程，新增 `favorite_stocks_dates` 字典用来以 `{"code": "YYYY-MM-DD"}` 格式存储每个自选股的重点关注日期。升级了 `add_favorite_stock` 和 `toggle_favorite_stock` 方法，支持自动捕获当前日期（`YYYY-MM-DD`）或外部参数写入。在读取与写入 `window_config.json` 时，自动进行双向兼容性校验，若检测到无添加日期的旧自选股则自动补齐为 3 天前的交易日期（便于测试，通过 `cct.get_lastdays_trade_date(3)` 智能前溯），并实施无用僵尸数据清理。
+    - [x] **重构可视化端 `load_stock_by_code` 自动获取关注日联动 (Visualizer Auto-Date Detection)**：在 `trade_visualizer_qt6.py` 中，当用户手动切换股票且没有外部指定时间戳时，自适应调用 `GlobalFavoriteManager` 查询该股是否为重点关注股。若是，则自动将其关注日期赋值为 K 线的 `active_time_linkage`。由此在加载 K 线时会自动绘制黄色虚线以展示该关注日，并在左上角或右上角的提示气泡中动态计算、高亮显示“距今涨跌”（包含基准价格与联动相对天数），无需任何手动操作。
+    - [x] **重构 ATS 终端 `link_stock` 物理分发逻辑 (ATS Terminal Linkage Upgrade)**：在 `ats/ui/main_window.py` 联动发送前增加自选股日期判定。若目标联动代码属于重点关注股票且存有关注日期，自适应将普通的 `CODE` 指令升级为 `TIME_LINK|{code}|{add_date}` 格式发送，从而确保点击 ATS 中的重点关注股能自动在可视化终端高亮显示关注日及累计收益率。
+    - [x] **重构监控主程序 `open_visualizer` 自适应时间戳填充 (Main Monitor Visualizer Call Optimization)**：在 `instock_MonitorTK.py` 的 `open_visualizer` 方法中注入前置检查，当 `timestamp` 参数为空时，自动查找并回补该股在 `GlobalFavoriteManager` 中的添加日期，保证从主程序的自选表或其它联动触发点切往可视化时，数据流同样携带有重点关注日期。
+    - [x] **物理语法编译自检 100% 通过**：通过 `python -m py_compile` 对修改后的 4 个核心文件执行编译验证，全数绿灯无任何语法错误。
+
 ## 2026-07-15 15:16
 - [x] **ATS 全部 Tree 及个股明细右键添加「发送到异动联动」功能 (Implemented Right-Click Send-to-Linkage in All ATS Trees & Detail Views)**：
     - [x] **设计并实现公用推送函数 `send_to_linkage` (Shared Pipe Push Utility)**：在 `ats/ui/base_table.py` 中新增模块级 `send_to_linkage(code, name, parent_widget)` 函数。该函数自动从父组件链（`parent_widget → .window()`）向上追溯 `current_df` 实时行情缓存，补全 `high`、`lastp1d`、`percent`、`price`、`volume` 等字段，再序列化为 JSON 通过 `send_code_via_pipe` 推送到 `\\.\pipe\my_named_pipe`（异动联动命名管道）。当 `current_df` 不可用时降级为默认值安全兜底，全链路带异常捕获，不影响主流程。
