@@ -1,3 +1,11 @@
+## 2026-07-15 14:40
+- [x] **重构并修复窗口坐标管理器全局热键莫名失效与重新绑定失败缺陷 (Refactored & Fixed Global Hotkey Freeze in Window Layout Manager)**：
+    - [x] **弃用 keyboard 库低级全局键盘钩子 (Deprecated keyboard Low-Level Hooks)**：移除了对底层全局键盘钩子的直接依赖，避开了由于 Windows 主线程卡顿超时剥离钩子，以及提权环境下焦点丢失导致的全局热键静默失效。
+    - [x] **重构为 Windows 原生 RegisterHotKey API 机制 (Rebuilt via Win32 RegisterHotKey)**：在 `WindowPosManagerUI` 类中，将热键绑定改为原生的 `RegisterHotKey` 系统调用，绑定在窗口本身的句柄（HWND）上，由操作系统底层消息队列直接负责派发 `WM_HOTKEY` (0x0312) 消息。
+    - [x] **重构 PyQt6 nativeEvent 底层消息拦截 (Implemented nativeEvent Message Interception)**：重写了 `WindowPosManagerUI.nativeEvent`，安全解析 `ctypes.wintypes.MSG`，在捕获到热键事件时完美呼出或隐藏主界面，并引入了 `parse_hotkey_string` 保证热键字符串到修饰键掩码和物理键码的自动转换。
+    - [x] **实现 100% 稳定的热键重新绑定与卸载清理 (Stabilized Rebinding & Unregistration Cleanup)**：重构了 `bind_hotkey`、`closeEvent` 和 `force_quit` 方法，在修改热键或完全退出时调用 Win32 的 `UnregisterHotKey` 彻底清理状态，消除了无法重新绑定、必须重启程序的严重体验 Bug。
+    - [x] **物理语法编译自检 100% 成功通过 (Passed 100% Compile Self-Test)**：对修改后的文件执行了 `py_compile` 编译与启动测试，全数绿灯通过，未引入任何新依赖和冗余框架。
+
 ## 2026-07-15 15:30
 - [x] **实现涨跌分布个股明细右键重点关注与全局状态同步 (Implemented Right-Click Focus & Status Synchronization in Price Rise/Fall Distribution Stock Details)**：
     - [x] **在涨跌分布个股明细中集成右键重点关注/取消关注菜单 (Integrated Right-Click Focus Menu)**：重构了 `ats/ui/chart_widgets.py` 中的 `DistributionDetailsDialog._show_context_menu` 方法。在原有“选中联动”和“复制”功能的基础上，增加了“⭐ 设为重点关注”和“❌ 取消重点关注”的功能。
