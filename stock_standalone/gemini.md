@@ -1,3 +1,16 @@
+## 2026-07-15 19:40
+- [x] **实现自动申请 Windows 管理员权限添加静态路由功能 (Implemented Automatic Windows Admin Privilege Elevation for Routing Check)**：
+    - [x] **检测并判断管理员权限**：在 `core.check_and_add_route` 中通过 `ctypes.windll.shell32.IsUserAnAdmin()` 进行判断。若当前用户已经以管理员身份运行，则直接运行 `route add` 命令。
+    - [x] **引入 UAC 弹窗提权申请 (UAC Privilege Elevation Request)**：对于以普通用户权限运行的环境，利用 Windows 原生 `ctypes.windll.shell32.ShellExecuteW` API 并使用 `runas` 谓词，静默调起 UAC 提权提示，请求运行 `cmd.exe /c route add ...` 命令，成功自动越权添加路由。
+    - [x] **优雅异常处理与结果校验 (Graceful Exception & Validation)**：添加了 `ret == 1223`（用户取消 UAC 授权）等安全状态分支的拦截与处理，且在提权添加指令执行后，延迟 0.5 秒重新以 `route print` 进行二次核实校验，完全打通了自动提权添加的闭环自愈体验。
+
+## 2026-07-15 19:30
+- [x] **实现静态路由自动配置与管理功能 (Implemented Automated Static Route Configuration & Management)**：
+    - [x] **实现 WindowPosManagerUI 启动时自动运行检测 (Automated Startup Network Route Check)**：在 `WindowPosManagerUI.__init__` 构造中，当配置管理器 `ConfigManager` 加载完毕后，在初始化前置阶段异步/安全调用 `core.check_and_add_route(self.config_manager)` 执行静态路由检测，并将结果暂存，待主窗口 UI 的各种文本日志组件初始化完毕后，安全回灌并输出到状态日志区。如果遇到权限不足等报错，优雅捕获不阻断正常窗口定位流程，满足 KISS 与“不中断主流程”的核心开发原则。
+    - [x] **`manage_window_layout.py` 命令行/后台对齐模式下同步支持路由自愈 (Integrated Route Healing in CLI/Background Mode)**：无论是通过 `--ui` 参数启动图形管理界面，还是在后台以 `--cli` / `-noui` 模式进行静默窗口定位与多屏拓扑对齐，在启动时均注入了 `check_and_add_route` 检测逻辑，确保在非 UI 场景下系统同样能主动维护 192.168.50.0/24 网段的静态路由，达到“即开即用、无感连通”。
+    - [x] **UI 底部状态栏集成“⚡ 路由设置”快速入口 (Integrated Route Settings Shortcut Button)**：在 `WindowPosManagerUI.init_ui` 底部工具栏的“📐 性能分析”旁，新增了“⚡ 路由设置”按钮，绑定 `open_route_settings` 槽函数。点击即可呼出专门设计的 `RouteConfigDialog`，支持实时查看参数、定义规则、直接执行“🔍 立即检测/应用”测试，以及保存自定义路由规则跨会话持久化。
+    - [x] **物理语法编译自检 100% 成功通过 (Passed 100% Compile Self-Test)**：通过 `python -m py_compile` 对修改的 `manage_window_layout.py` 与 `ui.py` 执行了编译验证，全数绿灯无任何语法错误；并在普通用户环境下模拟启动验证，日志输出正常、路由权限拒绝提示符合预期、主界面加载流程完好无损。
+
 ## 2026-07-15 16:30
 - [x] **实现重点关注个股添加日期记录与可视化联动涨跌幅功能 (Implemented Favorite Stock Addition Dates & Visualizer Linkage Return)**：
     - [x] **重构 `GlobalFavoriteManager` 实现日期的持久化存储 (Favorite Stock Date Persistence)**：重构了 `global_favorites.py` 内部 of JSON 读写流程，新增 `favorite_stocks_dates` 字典用来以 `{"code": "YYYY-MM-DD"}` 格式存储每个自选股的重点关注日期。升级了 `add_favorite_stock` 和 `toggle_favorite_stock` 方法，支持自动捕获当前日期（`YYYY-MM-DD`）或外部参数写入。在读取与写入 `window_config.json` 时，自动进行双向兼容性校验，若检测到无添加日期的旧自选股则自动补齐为 3 天前的交易日期（便于测试，通过 `cct.get_lastdays_trade_date(3)` 智能前溯），并实施无用僵尸数据清理。

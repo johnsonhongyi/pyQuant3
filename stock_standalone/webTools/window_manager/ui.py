@@ -827,6 +827,182 @@ class EditPathDialog(QDialog):
         self.accept()
 
 
+class RouteConfigDialog(QDialog):
+    """
+    静态路由网关配置对话框
+    """
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.setWindowTitle("静态路由网关配置")
+        self.resize(400, 240)
+        self.init_ui()
+
+    def init_ui(self):
+        # 统一使用暗黑色调
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e24;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QLineEdit {
+                background-color: #15151a;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QPushButton {
+                background-color: #2e2e38;
+                border: 1px solid #4a4a56;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+            }
+            QPushButton#btnConfirm {
+                background-color: #0ea5e9;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnConfirm:hover {
+                background-color: #0284c7;
+            }
+            QPushButton#btnTest {
+                background-color: #10b981;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnTest:hover {
+                background-color: #059669;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        
+        # 启用开关
+        self.chk_enabled = QtWidgets.QCheckBox("启用启动时自动检测/添加此静态路由")
+        layout.addWidget(self.chk_enabled)
+        
+        routing_cfg = self.config_manager.config_data.get("routing_config", {})
+        enabled = routing_cfg.get("enabled", True)
+        dest = routing_cfg.get("destination", "192.168.50.0")
+        mask = routing_cfg.get("mask", "255.255.255.0")
+        gw = routing_cfg.get("gateway", "192.168.1.2")
+        
+        self.chk_enabled.setChecked(enabled)
+        
+        # 目标网段
+        row_dest = QHBoxLayout()
+        lbl_dest = QLabel("目标网段:")
+        lbl_dest.setFixedWidth(80)
+        self.txt_dest = QLineEdit(dest)
+        row_dest.addWidget(lbl_dest)
+        row_dest.addWidget(self.txt_dest)
+        layout.addLayout(row_dest)
+        
+        # 子网掩码
+        row_mask = QHBoxLayout()
+        lbl_mask = QLabel("子网掩码:")
+        lbl_mask.setFixedWidth(80)
+        self.txt_mask = QLineEdit(mask)
+        row_mask.addWidget(lbl_mask)
+        row_mask.addWidget(self.txt_mask)
+        layout.addLayout(row_mask)
+        
+        # 默认网关
+        row_gw = QHBoxLayout()
+        lbl_gw = QLabel("默认网关:")
+        lbl_gw.setFixedWidth(80)
+        self.txt_gw = QLineEdit(gw)
+        row_gw.addWidget(lbl_gw)
+        row_gw.addWidget(self.txt_gw)
+        layout.addLayout(row_gw)
+        
+        layout.addSpacing(10)
+        
+        # 按钮栏
+        btn_layout = QHBoxLayout()
+        
+        # 立即检测/测试按钮
+        self.btn_test = QPushButton("🔍 立即检测/应用")
+        self.btn_test.setObjectName("btnTest")
+        self.btn_test.clicked.connect(self.test_and_apply_route)
+        btn_layout.addWidget(self.btn_test)
+        
+        btn_layout.addStretch()
+        
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("保存设置")
+        self.btn_confirm.setObjectName("btnConfirm")
+        self.btn_confirm.clicked.connect(self.save_settings)
+        
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_confirm)
+        layout.addLayout(btn_layout)
+        
+    def save_settings(self):
+        dest = self.txt_dest.text().strip()
+        mask = self.txt_mask.text().strip()
+        gw = self.txt_gw.text().strip()
+        
+        ip_pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
+        if not re.match(ip_pattern, dest) or not re.match(ip_pattern, mask) or not re.match(ip_pattern, gw):
+            QMessageBox.warning(self, "格式错误", "请输入有效的IP地址或子网掩码格式！")
+            return
+            
+        routing_cfg = {
+            "enabled": self.chk_enabled.isChecked(),
+            "destination": dest,
+            "mask": mask,
+            "gateway": gw
+        }
+        self.config_manager.config_data["routing_config"] = routing_cfg
+        self.config_manager.save()
+        self.accept()
+        
+    def test_and_apply_route(self):
+        dest = self.txt_dest.text().strip()
+        mask = self.txt_mask.text().strip()
+        gw = self.txt_gw.text().strip()
+        
+        ip_pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
+        if not re.match(ip_pattern, dest) or not re.match(ip_pattern, mask) or not re.match(ip_pattern, gw):
+            QMessageBox.warning(self, "格式错误", "请输入有效的IP地址或子网掩码格式！")
+            return
+
+        old_cfg = self.config_manager.config_data.get("routing_config", {})
+        self.config_manager.config_data["routing_config"] = {
+            "enabled": self.chk_enabled.isChecked(),
+            "destination": dest,
+            "mask": mask,
+            "gateway": gw
+        }
+        
+        from .core import check_and_add_route
+        success, msg = check_and_add_route(self.config_manager)
+        
+        if success:
+            QMessageBox.information(self, "检测成功", msg)
+        else:
+            QMessageBox.warning(self, "检测失败", msg)
+            
+        self.config_manager.config_data["routing_config"] = old_cfg
+
+
 class ManagerHotkeyThread(threading.Thread):
     """
     独立子线程：通过 RegisterHotKey(None, ...) 将热键注册到本线程消息队列。
@@ -896,6 +1072,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self._hotkey_hook = None
         self.config_manager = core.ConfigManager()
         self.current_bound_hotkey = self.config_manager.config_data.get("global_hotkey", "ctrl+alt+w")
+        
+        # 自动检测/添加静态路由，并保存结果以在 UI 准备好后输出日志
+        try:
+            success, route_msg = core.check_and_add_route(self.config_manager)
+            self.startup_route_msg = route_msg
+        except Exception as e:
+            self.startup_route_msg = f"检测静态路由异常: {e}"
+
         self.init_ui()
         
         # 恢复上次保存的窗口位置与尺寸
@@ -907,6 +1091,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.bind_hotkey(self.current_bound_hotkey)
         self.toggle_ui_signal.connect(self.toggle_visibility)
         
+        if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
+            self.log(f"[Route Startup] {self.startup_route_msg}")
+            
         # 允许驻留后台
         QApplication.instance().setQuitOnLastWindowClosed(False)
 
@@ -1492,6 +1679,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_open_perf.clicked.connect(self.open_performance_analyzer)
         bottom_bar.addWidget(self.btn_open_perf)
         
+        self.btn_route_settings = QPushButton("⚡ 路由设置")
+        self.btn_route_settings.clicked.connect(self.open_route_settings)
+        bottom_bar.addWidget(self.btn_route_settings)
+        
         self.btn_save_config = QPushButton("💾 保存配置")
         self.btn_save_config.setObjectName("btnSave")
         self.btn_save_config.clicked.connect(self.save_all_config)
@@ -1575,6 +1766,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             except Exception as ex:
                 self.log(f"❌ Fallback 启动也失败: {ex}")
                 QMessageBox.critical(self, "启动失败", f"无法启动系统性能分析器:\n{ex}")
+
+    def open_route_settings(self):
+        """打开静态路由网关配置对话框"""
+        dialog = RouteConfigDialog(self.config_manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.log("🎯 静态路由配置保存成功！")
+            success, msg = core.check_and_add_route(self.config_manager)
+            self.log(f"[Route Settings] {msg}")
 
     def save_physical_screen_layout(self):
         """保存当前多显示器的物理排布与相对坐标到磁盘"""
