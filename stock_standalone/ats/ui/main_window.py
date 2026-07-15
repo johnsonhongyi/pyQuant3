@@ -626,16 +626,32 @@ class ATSMainWindow(QMainWindow):
             import socket
             import threading
             
-            def send_switch():
+            # Check if this stock is in favorites and retrieve its add date
+            add_date = None
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                if code_clean in fav_mgr.get_favorite_stocks():
+                    add_date = fav_mgr.get_favorite_stock_date(code_clean)
+            except Exception:
+                pass
+            
+            # If add_date is available, format as TIME_LINK; otherwise CODE
+            if add_date:
+                cmd_str = f"TIME_LINK|{code_clean}|{add_date}|label=重点关注"
+            else:
+                cmd_str = f"CODE|{code_clean}"
+            
+            def send_switch(msg):
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                         s.settimeout(0.1) # 极低超时，不阻塞 UI
                         s.connect(('127.0.0.1', 26668))
-                        s.sendall(f"CODE|{code_clean}".encode("utf-8"))
+                        s.sendall(msg.encode("utf-8"))
                 except Exception:
                     pass # 可视化器可能未启动，静默失败即可
                     
-            threading.Thread(target=send_switch, daemon=True).start()
+            threading.Thread(target=send_switch, args=(cmd_str,), daemon=True).start()
 
         # 2. 向独立联动进程投递物理联动任务 (TDX/THS 物理联动机能)
         is_tdx = self.cb_tdx.isChecked() if hasattr(self, 'cb_tdx') else True

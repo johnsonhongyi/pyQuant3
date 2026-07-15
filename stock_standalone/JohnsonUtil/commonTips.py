@@ -8589,6 +8589,8 @@ if __name__ == '__main__':
     mdf.shape
     '''
     # rzrq['all']='nan'
+    print(get_lastdays_trade_date(3))
+
     print(get_last_trade_date())
     print(get_last_trade_date('2025-06-01'))
     print(f"get_day_istrade_date('2026-03-01'): {get_day_istrade_date('2026-03-01')}")
@@ -8611,7 +8613,6 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     query_rule = read_ini(inifile='filter.ini',category='sina_Monitor')
     print(get_today(''))
-    get_lastdays_trade_date(1)
     print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(f'is_trade_date():{is_trade_date()}')
