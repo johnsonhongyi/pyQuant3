@@ -1,3 +1,10 @@
+## 2026-07-15 15:30
+- [x] **实现涨跌分布个股明细右键重点关注与全局状态同步 (Implemented Right-Click Focus & Status Synchronization in Price Rise/Fall Distribution Stock Details)**：
+    - [x] **在涨跌分布个股明细中集成右键重点关注/取消关注菜单 (Integrated Right-Click Focus Menu)**：重构了 `ats/ui/chart_widgets.py` 中的 `DistributionDetailsDialog._show_context_menu` 方法。在原有“选中联动”和“复制”功能的基础上，增加了“⭐ 设为重点关注”和“❌ 取消重点关注”的功能。
+    - [x] **实现重点关注个股的高密度视觉渲染 (Highlighted Focus Stock Aesthetics)**：重构了数据加载 `update_data` 和更新渲染 `refresh_favorites_display` 的逻辑。对于重点关注的个股，其名字会自动加上 `⭐ ` 前缀，前景色渲染为精美的绿通道高亮色 `#00FF88`（代码和名称均对齐），整行背景色渲染为护眼暗绿色 `#1A2A1A`。
+    - [x] **实现多窗口多进程全局状态自愈与心跳式联动刷新 (Real-time Broadcast Sync)**：重构了 `ats/ui/main_window.py` 中的 `_safe_favorites_changed` 监听器，每次当主窗口或其他策略面板发生重点关注状态变更时，自动定位当前打开的 `DistributionDetailsDialog` 窗口并触发 `refresh_favorites_display()` 进行秒级数据状态同步与重写，彻底杜绝了状态不同步的交互痛点。
+    - [x] **物理语法编译自检 100% 成功通过**：对修改后的 `ats/ui/chart_widgets.py` 和 `ats/ui/main_window.py` 均执行了 `py_compile` 编译校验，全数绿灯通过，无任何语法或缩进报错。
+
 ## 2026-07-13 19:30
 - [x] **隔离多周期 Treeview 样式与彻底重构高 DPI 缩放适配 (Isolated Treeview Style & Refactored High-DPI Adaptation in Multi-Period Tester)**：
     - [x] **根治主 TK 监控窗口 Treeview 样式被污染变形缺陷**：重构了 `standalone_multi_period_tester.py` 中的 `_init_ui` 方法。废除了原本直接修改全局默认样式的 `style.configure("Treeview", rowheight=25)` 操作，隔离并声明了多周期专属的继承样式 `"MultiPeriod.Treeview"`，并根据高 DPI 缩放因子动态计算专有行高；同时将主结果 Treeview 和二级板块个股列表的 `style` 均指定为 `"MultiPeriod.Treeview"`，彻底消除了同一进程中子窗口对主监控窗口默认 Treeview 样式的覆盖和干扰。

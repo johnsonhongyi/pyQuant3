@@ -359,22 +359,127 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if not item: return
         
         row = item.row()
-        code = self.table.item(row, 0).text()
+        raw_code = self.table.item(row, 0).text()
+        code = "".join(c for c in raw_code if c.isalnum())
         name = self.table.item(row, 1).text()
         
+        # Clean star prefix from name if present
+        name_clean = name
+        if name_clean.startswith("⭐ "):
+            name_clean = name_clean[2:]
+        elif name_clean.startswith("⭐"):
+            name_clean = name_clean[1:]
+            
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        from global_favorites import GlobalFavoriteManager
+        
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = code in fav_mgr.get_favorite_stocks()
+        
         menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
         
         # Link action
         link_act = menu.addAction(f"⚡ 选中联动 ({code})")
-        link_act.triggered.connect(lambda: self.code_clicked.emit(code, name))
+        link_act.triggered.connect(lambda: self.code_clicked.emit(code, name_clean))
+        
+        menu.addSeparator()
         
         # Copy actions
         copy_code = menu.addAction("复制代码")
         copy_code.triggered.connect(lambda: QApplication.clipboard().setText(code))
         copy_name = menu.addAction("复制名称")
-        copy_name.triggered.connect(lambda: QApplication.clipboard().setText(name))
+        copy_name.triggered.connect(lambda: QApplication.clipboard().setText(name_clean))
+        
+        menu.addSeparator()
+        
+        # Favorite action
+        if is_fav:
+            fav_act = menu.addAction(f"❌ 取消重点关注 {code}")
+        else:
+            fav_act = menu.addAction(f"⭐ 设为重点关注 {code}")
+        fav_act.triggered.connect(lambda: self._toggle_favorite(row, code, name_clean))
         
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _toggle_favorite(self, row, code, name_clean):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_mgr.toggle_favorite_stock(code)
+            self.refresh_favorites_display()
+        except Exception as e:
+            print(f"[DistributionDetailsDialog] Toggle favorite error: {e}")
+
+    def refresh_favorites_display(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            
+            self.table.setSortingEnabled(False)
+            for row in range(self.table.rowCount()):
+                code_item = self.table.item(row, 0)
+                name_item = self.table.item(row, 1)
+                if not code_item or not name_item:
+                    continue
+                raw_code = code_item.text()
+                code = "".join(c for c in raw_code if c.isalnum())
+                
+                is_fav = code in fav_stocks
+                
+                # Update code foreground
+                if is_fav:
+                    code_item.setForeground(QBrush(QColor("#00FF88")))
+                else:
+                    code_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
+                
+                # Update name text & foreground
+                raw_name = name_item.text()
+                name_clean = raw_name
+                if name_clean.startswith("⭐ "):
+                    name_clean = name_clean[2:]
+                elif name_clean.startswith("⭐"):
+                    name_clean = name_clean[1:]
+                
+                new_name_text = f"⭐ {name_clean}" if is_fav else name_clean
+                if raw_name != new_name_text:
+                    name_item.setText(new_name_text)
+                    
+                if is_fav:
+                    name_item.setForeground(QBrush(QColor("#00FF88")))
+                else:
+                    name_item.setForeground(QBrush(QColor("#ffffff")))
+                
+                # Update row backgrounds
+                for col in range(self.table.columnCount()):
+                    item = self.table.item(row, col)
+                    if item:
+                        if is_fav:
+                            item.setBackground(QBrush(QColor("#1A2A1A")))
+                        else:
+                            item.setBackground(QBrush())
+                            
+            self.table.setSortingEnabled(True)
+        except Exception as e:
+            print(f"[DistributionDetailsDialog] Error refreshing favorites display: {e}")
+
 
     def _run_dna_audit_selected(self):
         items = []
@@ -423,6 +528,11 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         try:
             if df_filtered is None or df_filtered.empty:
                 return
+                
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            
             self.table.setRowCount(len(df_filtered))
             for i, (code, row) in enumerate(df_filtered.iterrows()):
                 name = str(row.get('name', '--'))
@@ -434,15 +544,25 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 dff3 = safe_float(row.get('dff3', 0.0))
                 sector = str(row.get('category', row.get('sector', '--')))
                 
+                is_fav = code in fav_stocks
+                if is_fav:
+                    if not name.startswith("⭐"):
+                        name = f"⭐ {name}"
+                
                 # 0: 代码
                 c_item = QTableWidgetItem(code)
-                c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
+                if is_fav:
+                    c_item.setForeground(QBrush(QColor("#00FF88")))
+                else:
+                    c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
                 c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(i, 0, c_item)
                 
                 # 1: 名称
                 n_item = QTableWidgetItem(name)
                 n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if is_fav:
+                    n_item.setForeground(QBrush(QColor("#00FF88")))
                 self.table.setItem(i, 1, n_item)
                 
                 # 2: 涨幅%
@@ -495,6 +615,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 sec_item = QTableWidgetItem(sector)
                 sec_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(i, 8, sec_item)
+                
+                if is_fav:
+                    for item in (c_item, n_item, ch_item, p_item, r_item, d_item, d2_item, d3_item, sec_item):
+                        item.setBackground(QBrush(QColor("#1A2A1A")))
                 
         finally:
             # Auto fit columns once if no custom widths saved
