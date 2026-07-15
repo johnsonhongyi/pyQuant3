@@ -14,6 +14,81 @@ from PyQt6.QtGui import QColor, QFont, QBrush, QAction
 from ats.ui.styles import NumericTableWidgetItem, auto_fit_columns_once, setup_header_persistence, CONFIG_FILE_LOCK
 from sys_utils import get_app_root, get_conf_path
 
+def send_to_linkage(code, name=None, parent_widget=None):
+    """
+    发送到异动联动功能 (named pipe)
+    """
+    try:
+        from data_utils import send_code_via_pipe
+        import json
+        import pandas as pd
+        from JohnsonUtil import LoggerFactory
+        local_logger = LoggerFactory.getLogger()
+        
+        # Clean stock code to digits
+        stock_code = "".join(c for c in str(code) if c.isdigit())
+        if not stock_code:
+            return False
+        stock_code = stock_code.zfill(6)
+        
+        # Fallbacks
+        stock_name = name if name else ""
+        high_val = "0.0"
+        lastp1d_val = "0.0"
+        percent_val = 0.0
+        price_val = 0.0
+        volume_val = 0
+        
+        # Try to find current_df
+        current_df = None
+        if parent_widget:
+            if hasattr(parent_widget, "current_df") and parent_widget.current_df is not None:
+                current_df = parent_widget.current_df
+            elif hasattr(parent_widget, "table") and hasattr(parent_widget.table, "current_df") and parent_widget.table.current_df is not None:
+                current_df = parent_widget.table.current_df
+            else:
+                win = parent_widget.window()
+                if win and hasattr(win, "current_df") and win.current_df is not None:
+                    current_df = win.current_df
+                    
+        if current_df is not None:
+            try:
+                if stock_code in current_df.index:
+                    row = current_df.loc[stock_code]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    # Map fields safely
+                    stock_name = str(row.get("name", stock_name))
+                    high_val = str(row.get("high", "0.0"))
+                    lastp1d_val = str(row.get("lastp1d", row.get("llastp", "0.0")))
+                    percent_val = float(row.get("percent", row.get("dff", 0.0)))
+                    price_val = float(row.get("close", row.get("now", row.get("buy", 0.0))))
+                    volume_val = int(row.get("volume", row.get("vol", 0)))
+            except Exception as e:
+                local_logger.error(f"[send_to_linkage] current_df extraction error: {e}")
+                
+        stock_info = {
+            "code": str(stock_code),
+            "name": str(stock_name),
+            "high": str(high_val),
+            "lastp1d": str(lastp1d_val),
+            "percent": float(percent_val),
+            "price": float(price_val),
+            "volume": int(volume_val)
+        }
+        payload = json.dumps(stock_info, ensure_ascii=False)
+        send_code_via_pipe(payload, logger=local_logger)
+        local_logger.info(f"推送异动联动: {stock_info}")
+        return True
+    except Exception as e:
+        try:
+            from JohnsonUtil import LoggerFactory
+            LoggerFactory.getLogger().error(f"发送到异动联动出错: {e}")
+        except Exception:
+            print(f"发送到异动联动出错: {e}")
+        return False
+
+
 class BaseATSTableWidget(QTableWidget):
     """
     ATS Base Table Widget.
@@ -139,6 +214,13 @@ class BaseATSTableWidget(QTableWidget):
         copy_action = QAction(copy_label, self)
         copy_action.triggered.connect(lambda: self._copy_to_clipboard(code_clean))
         menu.addAction(copy_action)
+        
+        menu.addSeparator()
+        
+        # ⚡ 发送到异动联动
+        linkage_action = QAction(f"⚡ 发送到异动联动 {code_clean}", self)
+        linkage_action.triggered.connect(lambda: send_to_linkage(code_clean, name, self))
+        menu.addAction(linkage_action)
         
         menu.addSeparator()
         
