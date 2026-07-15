@@ -399,6 +399,11 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         link_act = menu.addAction(f"⚡ 选中联动 ({code})")
         link_act.triggered.connect(lambda: self.code_clicked.emit(code, name_clean))
         
+        # ⚡ 发送到异动联动
+        from ats.ui.base_table import send_to_linkage
+        linkage_act = menu.addAction(f"⚡ 发送到异动联动 ({code})")
+        linkage_act.triggered.connect(lambda: send_to_linkage(code, name_clean, self))
+        
         menu.addSeparator()
         
         # Copy actions

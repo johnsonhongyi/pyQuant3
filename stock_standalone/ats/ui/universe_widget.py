@@ -511,6 +511,12 @@ class UniverseTreeWidget(QWidget):
         copy_action.triggered.connect(lambda: self._copy_to_clipboard(code))
         menu.addAction(copy_action)
         
+        # ⚡ 发送到异动联动
+        from ats.ui.base_table import send_to_linkage
+        linkage_action = QAction(f"⚡ 发送到异动联动 {code}", self)
+        linkage_action.triggered.connect(lambda: send_to_linkage(code, name, self))
+        menu.addAction(linkage_action)
+        
         menu.addSeparator()
         
         if is_fav:

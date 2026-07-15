@@ -97,6 +97,8 @@ class ATSSectorDetailDialog(QDialog):
         self.table.itemClicked.connect(self.on_item_clicked)
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.table.currentItemChanged.connect(self.on_current_item_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.table)
         
@@ -365,6 +367,60 @@ class ATSSectorDetailDialog(QDialog):
         name_item = self.table.item(row, 1)
         if code_item and name_item and self.double_click_cb:
             self.double_click_cb(code_item.text(), name_item.text())
+
+    def _show_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if not code_item:
+            return
+        code = code_item.text().strip()
+        name = name_item.text().strip() if name_item else ""
+        if not code:
+            return
+
+        from PyQt6.QtWidgets import QMenu, QApplication
+        from PyQt6.QtGui import QAction
+        from ats.ui.base_table import send_to_linkage
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
+
+        # 选中联动
+        if self.linkage_cb:
+            link_act = menu.addAction(f"⚡ 选中联动 ({code})")
+            link_act.triggered.connect(lambda: self.linkage_cb(code, name))
+
+        # 发送到异动联动
+        pipe_act = menu.addAction(f"⚡ 发送到异动联动 ({code})")
+        pipe_act.triggered.connect(lambda: send_to_linkage(code, name, self))
+
+        menu.addSeparator()
+
+        copy_code_act = menu.addAction("📋 复制代码")
+        copy_code_act.triggered.connect(lambda: QApplication.clipboard().setText(code))
+        copy_name_act = menu.addAction("📋 复制名称")
+        copy_name_act.triggered.connect(lambda: QApplication.clipboard().setText(name))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def closeEvent(self, event):
         # Save header state of the table

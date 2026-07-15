@@ -1,3 +1,22 @@
+## 2026-07-15 15:16
+- [x] **ATS 全部 Tree 及个股明细右键添加「发送到异动联动」功能 (Implemented Right-Click Send-to-Linkage in All ATS Trees & Detail Views)**：
+    - [x] **设计并实现公用推送函数 `send_to_linkage` (Shared Pipe Push Utility)**：在 `ats/ui/base_table.py` 中新增模块级 `send_to_linkage(code, name, parent_widget)` 函数。该函数自动从父组件链（`parent_widget → .window()`）向上追溯 `current_df` 实时行情缓存，补全 `high`、`lastp1d`、`percent`、`price`、`volume` 等字段，再序列化为 JSON 通过 `send_code_via_pipe` 推送到 `\\.\pipe\my_named_pipe`（异动联动命名管道）。当 `current_df` 不可用时降级为默认值安全兜底，全链路带异常捕获，不影响主流程。
+    - [x] **`BaseATSTableWidget` 右键菜单集成「⚡ 发送到异动联动」(BaseATSTableWidget Context Menu)**：在 `_show_context_menu` 中"复制代码"与"重点关注"之间插入联动菜单项，绑定 `send_to_linkage`，覆盖所有继承 `BaseATSTableWidget` 的策略表、异动表、自选表（含 `TradeFlowWidget`、`SwingTable`、`KernelTracePanel` 等）。
+    - [x] **`UniverseTreeWidget` 右键菜单集成 (Universe Pool Tree Linkage)**：在 `ats/ui/universe_widget.py` 的 `_show_context_menu` 中，"复制代码"后即插入「⚡ 发送到异动联动」菜单项，涵盖候选雷达池、精选观察池、实盘交易池三个策略股票池的 TreeView。
+    - [x] **`DistributionDetailsDialog` 右键菜单集成 (Distribution Detail Dialog Linkage)**：在 `ats/ui/chart_widgets.py` 的 `_show_context_menu` 中，在"⚡ 选中联动"后增加「⚡ 发送到异动联动」菜单项，覆盖涨跌分布个股明细弹窗。
+    - [x] **`ATSSectorDetailDialog` 右键菜单新增 (Sector Detail Dialog Linkage)**：在 `ats/ui/sector_detail_dialog.py` 中为板块成员明细表格新增 `_show_context_menu`，包含「⚡ 选中联动」（调 `linkage_cb`）、「⚡ 发送到异动联动」（调管道推送）、「📋 复制代码/名称」四个功能项，并在 `_init_ui` 中完成右键信号绑定。
+    - [x] **物理语法编译自检 100% 通过**：对 `base_table.py`、`chart_widgets.py`、`universe_widget.py`、`sector_detail_dialog.py` 均执行 `py_compile` 编译校验，全数绿灯通过，无任何语法或缩进报错。
+
+## 2026-07-15 15:13
+
+- [x] **彻底修复窗口坐标管理器全局热键 Access Violation 崩溃与语法残留 (Fixed Access Violation Crash & Orphaned Code Residue in Window Layout Manager Hotkey)**：
+    - [x] **修复 `accept_path` 方法缩进错误 (Fixed IndentationError in accept_path)**：修复了 `EditPathDialog.accept_path` 方法中由于上次编辑操作意外引入的多余缩进，导致 `is_shell_cmd` 代码块变成了无父级 `if` 的非法悬空代码块，产生 `IndentationError: unexpected indent` 语法错误。恢复为正确的方法体内平级缩进，并同步完善了"空格路径且非复杂命令时才自动包裹引号"的判断逻辑。
+    - [x] **清除孤立的 nativeEvent 死代码残留 (Removed Orphaned nativeEvent Dead Code)**：发现并删除了 `parse_hotkey_string` 方法结束后（原 L998-L1002）残留的孤立片段（`hotkey_id = msg.wParam`、`self.toggle_ui_signal.emit()`、`return super().nativeEvent(...)`）。这些代码是上轮重构中 `nativeEvent` 方法未被彻底清除留下的断章残存，放置在方法外会产生 `IndentationError`，是导致启动闪退的直接原因之一。
+    - [x] **引入 `ManagerHotkeyThread` 独立守护线程类 (Introduced ManagerHotkeyThread Daemon)**：在 `WindowPosManagerUI` 类定义前，新增 `ManagerHotkeyThread(threading.Thread)` 类。利用 `RegisterHotKey(None, ...)` 将热键注册到**子线程自身**的消息队列（而非主窗口 HWND），通过 `PeekMessageW` 非阻塞轮询捕获 `WM_HOTKEY`，再经 `toggle_ui_signal.emit()` 线程安全地回调主 UI 切换可见性。彻底避免了在 PyQt6 `nativeEvent` 中对 `sip.voidptr` 进行 ctypes 内存反序列化时导致的 Access Violation (c0000005) 崩溃。
+    - [x] **重写 `bind_hotkey` 使用子线程方案 (Rebuilt bind_hotkey via Thread)**：废弃了旧方案（绑定到主窗口 HWND + `nativeEvent` 拦截），重写为：停止并 join 旧热键线程 → 创建新 `ManagerHotkeyThread` → 等待 0.15s 确认注册成功 → 保存线程句柄至 `self._hotkey_thread`。重新绑定时无需重启程序，直接 stop 旧线程再 start 新线程即可，从根本上解决了"重新绑定无法生效"的痛点。
+    - [x] **补全 `import threading` 缺失导入 (Fixed Missing threading Import)**：在 `ui.py` 顶部补齐了 `import threading`，消除了 `NameError: name 'threading' is not defined` 运行时错误。
+    - [x] **物理语法编译与运行测试 100% 通过**：`py_compile` 编译绿灯；程序启动后稳定保持 RUNNING 状态，不再出现 "Python 已停止工作" Access Violation 闪退，热键日志正常输出已绑定信息。
+
 ## 2026-07-15 14:40
 - [x] **重构并修复窗口坐标管理器全局热键莫名失效与重新绑定失败缺陷 (Refactored & Fixed Global Hotkey Freeze in Window Layout Manager)**：
     - [x] **弃用 keyboard 库低级全局键盘钩子 (Deprecated keyboard Low-Level Hooks)**：移除了对底层全局键盘钩子的直接依赖，避开了由于 Windows 主线程卡顿超时剥离钩子，以及提权环境下焦点丢失导致的全局热键静默失效。
