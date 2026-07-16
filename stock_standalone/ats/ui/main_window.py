@@ -5,7 +5,7 @@ Assembles the complete Autonomous Trading System UI dashboard.
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
@@ -22,6 +22,9 @@ from JohnsonUtil import commonTips as cct
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None):
         super().__init__(parent)
+        self.code = code
+        self.name = name
+        self.df_row = df_row
         
         # 0. 明确设置为独立窗口类型，从而使磁吸、贴边隐藏和多显示器移动在 Windows 下完美执行
         flags = self.windowFlags()
@@ -98,6 +101,9 @@ class StockDetailDialog(QDialog):
             
         self._init_ui(code, name, df_row, context_info)
         
+        # Initialize dynamic data & filter results
+        self.update_data(df_row)
+        
         # 1. 自动删除属性以防非模态显示内存泄露
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
@@ -129,43 +135,14 @@ class StockDetailDialog(QDialog):
         
         # 1. Title and header info
         header_layout = QHBoxLayout()
-        title_label = QLabel(f"📊 {code}  {name}")
-        title_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #ffffff;")
-        header_layout.addWidget(title_label)
+        self.title_label = QLabel(f"📊 {code}  {name}")
+        self.title_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #ffffff;")
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         
-        price_str = "--"
-        pct_str = "--"
-        color_hex = "#8e8e93"
-        
-        if df_row is not None:
-            # Resolve price
-            for p_col in ['close', 'trade', 'price']:
-                if p_col in df_row and df_row[p_col] is not None and df_row[p_col] != '':
-                    try:
-                        price_str = f"{float(df_row[p_col]):.2f}"
-                        break
-                    except:
-                        pass
-            # Resolve percent
-            if 'percent' in df_row and df_row['percent'] is not None and df_row['percent'] != '':
-                try:
-                    pct_val = float(df_row['percent'])
-                    pct_str = f"{pct_val:+.2f}%"
-                    if pct_val > 0:
-                        color_hex = "#ff4444"
-                    elif pct_val < 0:
-                        color_hex = "#33cc5a"
-                except:
-                    pct_str = str(df_row['percent'])
-                    if pct_str.startswith("+"):
-                        color_hex = "#ff4444"
-                    elif pct_str.startswith("-"):
-                        color_hex = "#33cc5a"
-                        
-        price_pct_label = QLabel(f"{price_str}  ({pct_str})")
-        price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
-        header_layout.addWidget(price_pct_label)
+        self.price_pct_label = QLabel("--  (--)")
+        self.price_pct_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #8e8e93;")
+        header_layout.addWidget(self.price_pct_label)
         layout.addLayout(header_layout)
         
         # 1.5 Context Info Block (If provided)
@@ -221,14 +198,24 @@ class StockDetailDialog(QDialog):
             layout.addWidget(ctx_group)
             
         # 2. Source indicator
-        hint_label = QLabel()
-        if df_row is not None:
-            hint_label.setText("🟢 已成功对接实盘行情快照核心特征:")
-            hint_label.setStyleSheet("color: #00ff88; font-size: 9.5pt; font-weight: bold;")
-        else:
-            hint_label.setText("⚠️ 暂无当前个股实盘快照特征数据（等待行情推送中）:")
-            hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
-        layout.addWidget(hint_label)
+        self.hint_label = QLabel("⏳ 正在等待数据同步...")
+        self.hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
+        layout.addWidget(self.hint_label)
+        
+        # 2.5 过滤公式匹配状态
+        self.filter_status_layout = QHBoxLayout()
+        self.lbl_filter_title = QLabel("🔍 过滤测试: ")
+        self.lbl_filter_title.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        self.lbl_filter_expr = QLabel("无")
+        self.lbl_filter_expr.setStyleSheet("color: #8e8e93; font-style: italic;")
+        self.lbl_filter_result = QLabel("")
+        self.lbl_filter_result.setStyleSheet("font-weight: bold;")
+        
+        self.filter_status_layout.addWidget(self.lbl_filter_title)
+        self.filter_status_layout.addWidget(self.lbl_filter_expr)
+        self.filter_status_layout.addStretch()
+        self.filter_status_layout.addWidget(self.lbl_filter_result)
+        layout.addLayout(self.filter_status_layout)
         
         # 3. Main feature table
         self.table = QTableWidget()
@@ -238,7 +225,60 @@ class StockDetailDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table)
         
+        # 4. Button close
+        btn_close = QPushButton("关闭窗口")
+        btn_close.clicked.connect(self.accept)
+        
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(btn_close)
+        layout.addLayout(bottom_layout)
+
+    def update_data(self, df_row):
+        self.df_row = df_row
+        
+        # 1. Update price pct header labels
+        price_str = "--"
+        pct_str = "--"
+        color_hex = "#8e8e93"
+        
+        if df_row is not None:
+            self.hint_label.setText("🟢 已成功对接实盘行情快照核心特征:")
+            self.hint_label.setStyleSheet("color: #00ff88; font-size: 9.5pt; font-weight: bold;")
+            
+            # Resolve price
+            for p_col in ['close', 'trade', 'price']:
+                if p_col in df_row and df_row[p_col] is not None and df_row[p_col] != '':
+                    try:
+                        price_str = f"{float(df_row[p_col]):.2f}"
+                        break
+                    except:
+                        pass
+            # Resolve percent
+            if 'percent' in df_row and df_row['percent'] is not None and df_row['percent'] != '':
+                try:
+                    pct_val = float(df_row['percent'])
+                    pct_str = f"{pct_val:+.2f}%"
+                    if pct_val > 0:
+                        color_hex = "#ff4444"
+                    elif pct_val < 0:
+                        color_hex = "#33cc5a"
+                except:
+                    pct_str = str(df_row['percent'])
+                    if pct_str.startswith("+"):
+                        color_hex = "#ff4444"
+                    elif pct_str.startswith("-"):
+                        color_hex = "#33cc5a"
+        else:
+            self.hint_label.setText("⚠️ 暂无当前个股实盘快照特征数据（等待行情推送中）:")
+            self.hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
+            
+        self.price_pct_label.setText(f"{price_str}  ({pct_str})")
+        self.price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
+        
+        # 2. Update feature list
         features = []
         if df_row is not None:
             main_keys = {
@@ -279,8 +319,8 @@ class StockDetailDialog(QDialog):
                         val_str = str(val)
                     features.append((label, val_str))
         else:
-            features.append(("证券代码", code))
-            features.append(("证券名称", name))
+            features.append(("证券代码", self.code))
+            features.append(("证券名称", self.name))
             
         # Add trading kernel trace features if available
         if hasattr(self, 'kernel_info') and self.kernel_info:
@@ -326,8 +366,8 @@ class StockDetailDialog(QDialog):
                 
         if len(features) <= 2:
             features = [
-                ("证券代码", code),
-                ("证券名称", name),
+                ("证券代码", self.code),
+                ("证券名称", self.name),
                 ("日内价格", "加载中..."),
                 ("实盘状态", "等待主进程推送行情"),
                 ("说明", "双击可实现实盘特征一屏清，当前暂未收到主进程行情推送")
@@ -348,16 +388,73 @@ class StockDetailDialog(QDialog):
                     item_val.setForeground(QColor("#33cc5a"))
             self.table.setItem(row, 1, item_val)
             
-        layout.addWidget(self.table)
+        # 3. Update filter evaluation
+        self.update_filter_status()
+
+    def update_filter_status(self, query_expr=None):
+        if query_expr is None:
+            if self.parent() and hasattr(self.parent(), 'query_expr'):
+                query_expr = self.parent().query_expr
+            else:
+                query_expr = ""
+                
+        self.query_expr = query_expr
+        if not query_expr:
+            self.lbl_filter_expr.setText("无")
+            self.lbl_filter_expr.setStyleSheet("color: #8e8e93; font-style: italic;")
+            self.lbl_filter_result.setText("")
+            return
+            
+        disp_expr = query_expr
+        if len(disp_expr) > 40:
+            disp_expr = disp_expr[:37] + "..."
+        self.lbl_filter_expr.setText(disp_expr)
+        self.lbl_filter_expr.setStyleSheet("color: #e2e2e5; font-style: normal;")
         
-        # 4. Button close
-        btn_close = QPushButton("关闭窗口")
-        btn_close.clicked.connect(self.accept)
+        import pandas as pd
+        if self.df_row is None:
+            self.lbl_filter_result.setText("⏳ 等待数据...")
+            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
+            return
+            
+        row_dict = self.df_row.to_dict() if hasattr(self.df_row, 'to_dict') else dict(self.df_row)
+        row_dict['code'] = self.code
+        row_dict['name'] = self.name
         
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addStretch()
-        bottom_layout.addWidget(btn_close)
-        layout.addLayout(bottom_layout)
+        mapping = {
+            '价格': 'close', '最新价': 'close', '现价': 'close', 
+            '涨幅': 'pct', 
+            '量': 'volume', '成交量': 'volume',
+            '成交额': 'turnover',
+            '最高': 'high', '最低': 'low', '开盘': 'open',
+            '板块': 'category', '异动类型': 'category', 'hy': 'category'
+        }
+        for cn, en in mapping.items():
+            if cn in row_dict and en not in row_dict:
+                row_dict[en] = row_dict[cn]
+                
+        if 'close' in row_dict:
+            for col in ['open', 'high', 'low']:
+                if col not in row_dict or row_dict[col] is None or row_dict[col] == '':
+                    row_dict[col] = row_dict['close']
+                    
+        df_code = pd.DataFrame([row_dict])
+        df_code.set_index('code', inplace=True, drop=False)
+        
+        from stock_logic_utils import test_code_against_queries
+        try:
+            res = test_code_against_queries(df_code, [{"query": query_expr}])
+            hit = res[0].get("hit", 0) if res else 0
+            if hit > 0:
+                self.lbl_filter_result.setText("✅ 命中")
+                self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
+            else:
+                self.lbl_filter_result.setText("❌ 未命中")
+                self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
+        except Exception as e:
+            self.lbl_filter_result.setText("⚠️ 评估出错")
+            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
+            print(f"Error testing query in detail dialog: {e}")
 
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
         """
@@ -592,7 +689,12 @@ class ATSMainWindow(QMainWindow):
         self._favorites_poll_timer.setInterval(500)
         self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
         self._favorites_poll_timer.start()
-            
+        
+        # 初始化过滤公式表达式和搜索历史数据缓存 (History Filter Integration)
+        self.query_expr = ""
+        self.search_histories = {"history1": [], "history2": [], "history3": [], "history4": [], "history5": []}
+        self._load_search_history_data()
+        
         self._init_toolbar()
         self._init_ui()
         self._restore_layout_state()
@@ -630,6 +732,82 @@ class ATSMainWindow(QMainWindow):
                     print(f"[ATSMainWindow] Prepopulate cache query failed: {e}")
         except Exception as e:
             print(f"[ATSMainWindow] Prepopulate cache failed: {e}")
+
+
+
+    def _get_search_history_filepath(self):
+        try:
+            from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+            return SEARCH_HISTORY_FILE
+        except ImportError:
+            import os
+            from sys_utils import get_app_root
+            return os.path.join(get_app_root(), "datacsv", "search_history.json")
+
+    def _load_search_history_data(self):
+        import os
+        filepath = self._get_search_history_filepath()
+        h1, h2, h3, h4, h5 = [], [], [], [], []
+        if os.path.exists(filepath):
+            try:
+                import json
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                def _normalize_record(r):
+                    if isinstance(r, dict):
+                        q = r.get("query", "")
+                        try:
+                            q_dict = eval(q)
+                            if isinstance(q_dict, dict) and "query" in q_dict:
+                                q = q_dict["query"]
+                        except:
+                            pass
+                        note = r.get("note", "")
+                        starred = r.get("starred", 0)
+                    elif isinstance(r, str):
+                        q = r
+                        note = ""
+                        starred = 0
+                    else:
+                        q = str(r)
+                        note = ""
+                        starred = 0
+                    
+                    q = q.strip()
+                    note = note.strip()
+                    if isinstance(starred, bool):
+                        starred = 1 if starred else 0
+                    elif not isinstance(starred, int):
+                        starred = 0
+                    return {"query": q, "starred": starred, "note": note}
+                
+                h1 = [_normalize_record(r) for r in data.get("history1", [])]
+                h2 = [_normalize_record(r) for r in data.get("history2", [])]
+                h3 = [_normalize_record(r) for r in data.get("history3", [])]
+                h4 = [_normalize_record(r) for r in data.get("history4", [])]
+                h5 = [_normalize_record(r) for r in data.get("history5", [])]
+            except Exception as e:
+                print(f"[ATSMainWindow] Direct history load failed: {e}")
+        
+        self.search_histories = {
+            "history1": h1,
+            "history2": h2,
+            "history3": h3,
+            "history4": h4,
+            "history5": h5
+        }
+
+    def _save_search_history_data(self):
+        filepath = self._get_search_history_filepath()
+        try:
+            import json
+            import os
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(self.search_histories, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[ATSMainWindow] Direct history save failed: {e}")
 
 
     def _init_toolbar(self):
@@ -694,6 +872,50 @@ class ATSMainWindow(QMainWindow):
         self.cb_vis.setChecked(True)
         self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
         toolbar.addWidget(self.cb_vis)
+        
+        toolbar.addSeparator()
+        
+        lbl_his_grp = QLabel("")
+        lbl_his_grp.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        toolbar.addWidget(lbl_his_grp)
+        
+        self.history_selector = QComboBox()
+        self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
+        self.history_selector.setCurrentText("history5")
+        self.history_selector.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 60px; max-width: 65px; }")
+        self.history_selector.currentTextChanged.connect(self._on_history_group_changed)
+        toolbar.addWidget(self.history_selector)
+                
+        lbl_filter = QLabel(" 过滤:")
+        lbl_filter.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        toolbar.addWidget(lbl_filter)
+        
+        self.query_combo = QComboBox()
+        self.query_combo.setEditable(True)
+        self.query_combo.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 120px; max-width: 150px; }")
+        self.query_combo.view().setMinimumWidth(450) # 展开下拉菜单时，宽度自适应为最少 450px，防止长公式截断
+        self.query_combo.lineEdit().returnPressed.connect(self.apply_filter)
+        self.query_combo.currentIndexChanged.connect(self.apply_filter)
+        toolbar.addWidget(self.query_combo)
+        
+        self.btn_filter = QPushButton("过滤")
+        self.btn_filter.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #3e3e4a; border-color: #aad4ff; }")
+        self.btn_filter.clicked.connect(self.apply_filter)
+        toolbar.addWidget(self.btn_filter)
+        
+        self.btn_clear = QPushButton("清空")
+        self.btn_clear.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #3e3e4a; border-color: #ff4444; }")
+        self.btn_clear.clicked.connect(self.clear_filter)
+        toolbar.addWidget(self.btn_clear)
+
+        self.btn_hit = QPushButton("Hit")
+        self.btn_hit.setToolTip("计算当前组所有历史公式的命中数")
+        self.btn_hit.setStyleSheet("QPushButton { background-color: #fff9c4; color: #000000; font-weight: bold; border: 1px solid #ffeb3b; border-radius: 3px; padding: 2px 4px; min-width: 25px; } QPushButton:hover { background-color: #fdd835; }")
+        self.btn_hit.clicked.connect(self.calculate_history_hits_ui)
+        toolbar.addWidget(self.btn_hit)
+        
+        # 载入默认的公式数据
+        self._on_history_group_changed()
 
     def _init_ui(self):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -806,6 +1028,161 @@ class ATSMainWindow(QMainWindow):
         self.heatmap_widget.sector_selected.connect(self.on_sector_clicked)
         self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
+
+    def _on_history_group_changed(self):
+        group = self.history_selector.currentText()
+        h_list = self.search_histories.get(group, [])
+            
+        formatted_list = []
+        for item in h_list:
+            display_text = self._format_history_item_local(item)
+            if display_text:
+                formatted_list.append(display_text)
+                
+        self.query_combo.blockSignals(True)
+        self.query_combo.clear()
+        self.query_combo.addItems(formatted_list)
+        if formatted_list:
+            self.query_combo.setCurrentIndex(0)
+        else:
+            self.query_combo.setCurrentText("")
+        self.query_combo.blockSignals(False)
+        if self.query_combo.lineEdit():
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
+        
+        # 默认应用并加载最前面的（最新一条）历史过滤公式
+        self.apply_filter()
+
+    def _format_history_item_local(self, item):
+        if not isinstance(item, dict): 
+            return str(item)
+        q = item.get("query", "").strip()
+        q = " ".join(q.split())
+        note = item.get("note", "").strip()
+        hit = item.get("hit", "")
+        parts = []
+        if note: 
+            parts.append(note)
+        if hit != "" and hit is not None: 
+            parts.append(f"[Hit: {hit}]")
+        parts.append(q)
+        return "  |  ".join(parts)
+
+    def _get_real_query(self):
+        text = self.query_combo.currentText().strip()
+        if "  |  " in text:
+            return text.split("  |  ")[-1].strip()
+        return text
+
+    def calculate_history_hits_ui(self):
+        test_df = self.get_test_df_for_hits()
+        if test_df.empty:
+            from stock_logic_utils import toast_messageQT
+            toast_messageQT(self, "⚠️ 实盘数据未就绪")
+            return
+            
+        group = self.history_selector.currentText()
+        target = self.search_histories.get(group, [])
+        if not target: 
+            from stock_logic_utils import toast_messageQT
+            toast_messageQT(self, "⚠️ 当前历史组为空")
+            return
+            
+        from stock_logic_utils import test_code_against_queries, toast_messageQT
+        
+        enriched_results = test_code_against_queries(test_df, target)
+        
+        new_values = []
+        for i, item in enumerate(target):
+            hit_count = 0
+            if i < len(enriched_results):
+                hit_count = enriched_results[i].get("hit", 0)
+            item["hit"] = hit_count
+            display = self._format_history_item_local(item)
+            new_values.append(display)
+            
+        current_val = self.query_combo.currentText()
+        self.query_combo.clear()
+        self.query_combo.addItems(new_values)
+        
+        if current_val:
+            raw_q = self._get_real_query()
+            for idx, item in enumerate(target):
+                if item.get("query") == raw_q:
+                    new_display = self._format_history_item_local(item)
+                    self.query_combo.setCurrentText(new_display)
+                    break
+                    
+        if self.query_combo.lineEdit():
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
+                    
+        toast_messageQT(self, f"✅ 策略命中统计完成 (n={len(target)})")
+
+    def get_test_df_for_hits(self):
+        import pandas as pd
+        if self.current_df is not None and not self.current_df.empty:
+            test_df = self.current_df.copy()
+            mapping = {
+                '价格': 'close', '最新价': 'close', '现价': 'close', 
+                '涨幅': 'pct', 
+                '量': 'volume', '成交量': 'volume',
+                '成交额': 'turnover',
+                '最高': 'high', '最低': 'low', '开盘': 'open',
+                '板块': 'category', '异动类型': 'category', 'hy': 'category'
+            }
+            for cn, en in mapping.items():
+                if cn in test_df.columns and en not in test_df.columns:
+                    test_df[en] = test_df[cn]
+            if 'close' in test_df.columns:
+                for col in ['open', 'high', 'low']:
+                    if col not in test_df.columns:
+                        test_df[col] = test_df['close']
+            return test_df
+        return pd.DataFrame()
+
+    def apply_filter(self):
+        query = self._get_real_query()
+        self.query_expr = query
+        
+        if query:
+            group = self.history_selector.currentText()
+            h_list = self.search_histories.get(group, [])
+            
+            exists = False
+            for item in h_list:
+                if isinstance(item, dict) and item.get("query") == query:
+                    exists = True
+                    break
+                elif isinstance(item, str) and item == query:
+                    exists = True
+                    break
+                    
+            if not exists:
+                h_list.insert(0, {"query": query, "starred": 0, "note": ""})
+                if len(h_list) > 500: # MAX_HISTORY
+                    h_list.pop()
+                
+                # 同步回写保存
+                self._save_search_history_data()
+                
+                self._on_history_group_changed()
+                
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, StockDetailDialog) and widget.isVisible():
+                widget.update_filter_status(self.query_expr)
+                
+        if self.query_combo.lineEdit():
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
+
+    def clear_filter(self):
+        self.query_combo.setCurrentText("")
+        self.query_expr = ""
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, StockDetailDialog) and widget.isVisible():
+                widget.update_filter_status("")
 
     def _init_statusbar(self):
         self.status_bar = QStatusBar()
@@ -1767,6 +2144,18 @@ class ATSMainWindow(QMainWindow):
             
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
+            
+        # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
+        if has_df:
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, StockDetailDialog) and widget.isVisible():
+                    code = widget.code
+                    if code in self.current_df.index:
+                        row = self.current_df.loc[code]
+                        import pandas as pd
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        widget.update_data(row)
 
     def _handle_realtime_signal(self, signal):
         if not signal:
@@ -2118,6 +2507,9 @@ class ATSMainWindow(QMainWindow):
                 self.dist_chart._close_all_dialogs()
         except Exception as e:
             print(f"[ATSMainWindow] Error closing dist chart dialogs: {e}")
+            
+        # Save search history on close
+        self._save_search_history_data()
             
         super().closeEvent(event)
 

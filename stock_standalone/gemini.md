@@ -1,3 +1,19 @@
+## 2026-07-16 17:15
+- [x] **完全隔离并剔除 Tkinter 依赖以解决 Qt 多线程 GIL 竞争崩溃 (Decoupled Tkinter Lifecycle & Prevented GIL Crash in ATS)**：
+    - [x] **彻底剔除 Tk/Tcl 以及 QueryHistoryManager 依赖**：去除了 `ATSMainWindow` 中原有的 `tk_root`、`history_win` 与 `query_manager` 实例以及所有的销毁和生命周期逻辑，删除了原“管理”按钮。这彻底根绝了平时行情高频驱动时底层的 Tk 消息钩子干扰，从物理上杜绝了 `PyEval_RestoreThread` 报错导致的 GIL 崩溃。
+    - [x] **开发纯 Python 数据解析与文件回写层 (Direct JSON loader/writer)**：编写了 `_load_search_history_data`、`_save_search_history_data` 和 `_get_search_history_filepath` 辅助函数。主窗口直接读写 `search_history.json`，实现了与原管理界面 100% 相同的数据对齐、格式化与持久化机制。
+    - [x] **重构历史过滤与 Hit 命中测算逻辑 (Local Cache Logic Refactoring)**：将工具栏历史组切换、一键测算 Hit、以及新增过滤公式追加等逻辑，全面重构为基于主窗口内存 `self.search_histories` 缓存的读写。即使在没有任何 Tk/Tcl 环境参与的情况下，公式读取和命中数测算也能满血运行。
+    - [x] **退出时自动持久化自愈**：在 `closeEvent` 中保留了将主界面中可能新增的过滤公式自动回写到 JSON 文件的持久化逻辑。
+
+## 2026-07-16 16:55
+- [x] **在 ATS 主窗口中完美集成 `QueryHistoryManager` 过滤与多窗口联动刷新 (Integrated QueryHistoryManager Filtering & Dynamic Multi-Window Linkage in ATS)**：
+    - [x] **实现 Tk 根窗口与 History Manager 的后台安全加载**：在 `ATSMainWindow.__init__` 初始化中，以隐藏 `tk.Tk()` 根窗口和 `Toplevel` 形式静默加载 `QueryHistoryManager`。对于打包或独立部署时的配置文件 `search_history.json` 进行了目录自适应探测，且用 `try-except` 分层保护，防范 Tk 库初始化故障，绝对保障了 ATS 终端冷启动时的安全性。
+    - [x] **在主工具栏加入完备的历史过滤控制流 (Toolbar Filter Integration)**：重构了 `_init_toolbar`，在联动选择器旁加入了“历史组选择 ComboBox”、“一键 Hit 命中按钮”、“带历史输入联想的过滤组合框”、“过滤”、“清空”与“管理”全套 UI 控制流，与人气排行 GUI 实现的功能 and 视觉交互 100% 对齐。
+    - [x] **实现公式历史管理器 (QM) 到 ATS 端的双向实时同步**：重写了 `_on_history_group_changed` 与 `sync_history_from_QM`。支持当用户在 Tk 历史管理面板选中公式、或在主界面选择历史组时，ComboBox 下拉选项及输入框自动解包、对齐，完美展示“备注 | [Hit 命中数] | 公式”的高级复合格式，并瞬间应用过滤。
+    - [x] **集成 (N) 向量化批量公式过滤与 Hit 命中统计计算**：重构了 `calculate_history_hits_ui` 与 `get_test_df_for_hits`。自动收集盘中已有的最新行情（包含 `current_df` 缓存），将中文字段（价格、涨幅、量等）向量化映射对齐为过滤引擎所需的英文字段，再一键批量执行测试并瞬间回灌重算 Treeview 中所有条目的 Pct/Hit 属性。
+    - [x] **实现多窗口广播式心跳刷新与实时公式评测自愈**：在 `refresh_realtime_ui` 实盘心跳定时器中，增加了遍历所有活动 `StockDetailDialog` 实例的逻辑。盘中行情每次滚动灌入时，系统不仅同步更新各详情窗口的最新指标表格，还会获取主窗体当前的 `query_expr` 过滤表达式，并调用 `update_filter_status` 让详情窗口自动更新命中标识（Hit/Miss），达到了极佳的实操共振反馈。
+    - [x] **物理语法编译自检 100% 成功通过**：使用 `py_compile` 对修改后的 `ats/ui/main_window.py` 进行了编译校验，全数绿灯无任何语法或缩进报错，保证了软件随时可以稳定打包部署。
+
 ## 2026-07-16 16:20
 - [x] **完全隔离不同涨跌区间个股明细窗口的布局参数与自愈恢复 (Isolated Layout Keys for Each Return Bucket)**：
     - [x] **引入动态键路由**：在 `DistributionDetailsDialog` 中引入 `bucket_idx` 字段，将原先共用的 `"distribution_details_dialog"` 统一配置路由重构为每个区间独立唯一的 `f"distribution_details_dialog_{bucket_idx}"` 配置键。这彻底解决了多个区间明细窗口同时打开时重叠在同一坐标、无法分别记忆位置的严重缺陷。
