@@ -1,7 +1,13 @@
 ## 2026-07-16 16:20
 - [x] **完全隔离不同涨跌区间个股明细窗口的布局参数与自愈恢复 (Isolated Layout Keys for Each Return Bucket)**：
     - [x] **引入动态键路由**：在 `DistributionDetailsDialog` 中引入 `bucket_idx` 字段，将原先共用的 `"distribution_details_dialog"` 统一配置路由重构为每个区间独立唯一的 `f"distribution_details_dialog_{bucket_idx}"` 配置键。这彻底解决了多个区间明细窗口同时打开时重叠在同一坐标、无法分别记忆位置的严重缺陷。
-    - [x] **并发多窗口启动自愈**：在 `_restore_details_dialog_if_saved` 中升级为对 0-9 共 10 个区间进行轮询，凡是记录为 `is_open=True` 的窗口，都会各自以正确的坐标和隐藏状态被自动恢复重建，彻底消除了相互覆盖或无法恢复的体验漏洞。
+    - [x] **并发多窗口启动自愈**：在 `_restore_details_dialog_if_saved` 中升级为对 0-9 共 10 个区间进行轮询，凡是记录为 `is_open=True` 的窗口，都会各自以正确的坐标 and 隐藏状态被自动恢复重建，彻底消除了相互覆盖或无法恢复的体验漏洞。
+- [x] **实现冷启动无数据时明细窗口即时恢复与广播式心跳刷新 (Cold-start Detached Recovery & Broadcast Refresh)**：
+    - [x] **无视行情延时即时恢复**：在 `DistributionBarChart` 的构造函数中追加了 800 毫秒延时的冷启动自愈指令。即使系统冷启动行情数据还没有拉取同步完毕，也能无视行情数据立刻按照之前的折叠与定位状态将窗口画在桌面（表格置空并显示 `⏳ 正在等待数据同步...` 提示），彻底消除了“启动好久才突然弹窗”的断档与突兀感。
+    - [x] **自适应心跳广播更新**：在行情接收端的 `update_data` 入口重写了行情流分发逻辑。一旦接收到最新全市场行情包 `UPDATE_DF_ALL`，自动向下游所有当前处于活动状态的明细窗口广播增量个股数据，刷新列表和标题计数，实现了毫秒级“有数据即满血，实时跳动”的高频同步。
+    - [x] **实现跨窗口多重双击去重**：在 `open_details_dialog` 注入检测层，双击相同直方图柱子时，直接将其已有窗口呼出并恢复展开（`show_normal_position`），避免了重复创建同区间窗口导致的资源泄露。
+- [x] **修复由于 `isVisible()` 过滤导致多窗口启动自动恢复时被 GC 销毁的缺陷 (Fixed Restoration GC Bug)**：
+    - [x] 在 `open_details_dialog` 的活动窗口清理逻辑中，移除对 `d.isVisible()` 的冗余过滤。原先在启动时依次恢复多个明细窗口，由于前几个窗口尚未被 Qt 事件循环标记为可见（`isVisible() == False`），会被从 `_active_dialogs` 强引用列表中错误剔除，导致其在瞬间被 Python 垃圾回收器（GC）静默回收销毁。修改为仅通过 `not isdeleted(d)` 判断窗口是否在 C++ 层面真实存在，从而保障了所有被恢复的窗口均能稳定展示。
 - [x] **修复手动拖离边缘时未重置磁吸状态导致反复被拉回的 Bug (Fixed Infinite Snapping Loop on Manual Drag)**：
     - [x] **手动移动状态强行中断**：在 `DistributionDetailsDialog` 和 `StockDetailDialog` 的 `moveEvent` 拦截中，如果检测到当前的移动操作不是由于动画产生的，说明用户正在执行“将窗口拖离屏幕边缘”的操作，此时在瞬间强行将 `self.anchor_edge` 置为 `None`。这打断了之前的磁吸判定，防止在拖拽至屏幕中央时，由于鼠标瞬移出边界导致被 hover 定时器误判为“离开窗口”进而触发 `hide_to_edge` 强行拉回隐藏状态的恶性循环。
 
