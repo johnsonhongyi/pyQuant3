@@ -243,6 +243,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.leave_ticks = 0
         self._in_snap_action = False
         self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
         
         # 悬停与离开监控定时器
         self.hover_timer = QTimer(self)
@@ -391,6 +394,12 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if self.is_hidden_state:
             return
             
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.snap_timer.start()
+            return
+            
         screen = self.screen()
         if not screen:
             screen = QApplication.primaryScreen()
@@ -417,6 +426,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             target_x = screen_geo.right() - win_geo.width()
             snapped = True
             
+        self._is_dragging = False
         if snapped:
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
@@ -457,12 +467,14 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
     def show_normal_position(self):
-        if not self.is_hidden_state or not self.normal_geometry:
-            return
-            
-        self.is_hidden_state = False
-        self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+        if self.is_hidden_state and self.normal_geometry:
+            self.is_hidden_state = False
+            import time
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
         
+        self.show()
         self.raise_()
         self.activateWindow()
 
@@ -470,10 +482,20 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if not self.isVisible():
             return
             
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+            
         from PyQt6.QtGui import QCursor
         mouse_pos = QCursor.pos()
-        in_window = self.geometry().contains(mouse_pos)
+        in_window = self.frameGeometry().contains(mouse_pos)
         
+        if in_window:
+            self._has_hovered_since_show = True
+            
         if self.is_hidden_state:
             if in_window:
                 self.hover_ticks += 1
@@ -485,6 +507,14 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         else:
             if self.anchor_edge is not None:
                 if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    import time
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+                        
                     self.leave_ticks += 1
                     if self.leave_ticks >= 4:  # 100ms * 4 = 400ms 离开防抖
                         self.hide_to_edge()
@@ -495,6 +525,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
     def moveEvent(self, event):
         super().moveEvent(event)
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            self._is_dragging = True
             # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
             self.anchor_edge = None
             self.snap_timer.start()
@@ -1051,26 +1082,52 @@ class DistributionBarChart(QWidget):
         if df_filtered is not None and not df_filtered.empty:
             dialog.update_data(df_filtered)
         else:
-            # 尚未同步行情数据，表格置空并显示同步提示
             dialog.table.setRowCount(0)
-            dialog.header_label.setText("📊 涨跌分布个股明细 | ⏳ 正在等待数据同步...")
+            if idx == 999:
+                dialog.header_label.setText("🔍 过滤数据查看 | ⏳ 正在等待数据或公式输入...")
+            else:
+                dialog.header_label.setText("📊 涨跌分布个股明细 | ⏳ 正在等待数据同步...")
         
-        bucket_names = [
-            "跌幅超 8% (<-8%)",
-            "跌幅 6% 至 8% (-8% ~ -6%)",
-            "跌幅 4% 至 6% (-6% ~ -4%)",
-            "跌幅 2% 至 4% (-4% ~ -2%)",
-            "跌幅 0% 至 2% (-2% ~ 0%)",
-            "涨幅 0% 至 2% (0% ~ +2%)",
-            "涨幅 2% 至 4% (+2% ~ +4%)",
-            "涨幅 4% 至 6% (+4% ~ +6%)",
-            "涨幅 6% 至 8% (+6% ~ +8%)",
-            "涨幅超 8% (>+8%)"
-        ]
-        title = f"📊 涨跌分布个股明细 | {bucket_names[idx]} (共 {len(df_filtered) if df_filtered is not None else 0} 只)"
-        dialog.setWindowTitle(title)
-        if df_filtered is not None and not df_filtered.empty:
-            dialog.header_label.setText(f"📊 涨跌分布 ({bucket_names[idx]}) | 双击行切换/联动")
+        if idx == 999:
+            main_win = self.window()
+            combo_text = ""
+            if main_win and hasattr(main_win, 'query_combo'):
+                combo_text = main_win.query_combo.currentText().strip()
+            q_expr = main_win.query_expr if (main_win and hasattr(main_win, 'query_expr')) else ""
+            if not combo_text:
+                combo_text = q_expr
+                
+            match_count = len(df_filtered) if df_filtered is not None else 0
+            if "  |  " in combo_text:
+                parts = [p.strip() for p in combo_text.split("  |  ")]
+                notes_and_hits = parts[:-1]
+                formula = parts[-1]
+                short_formula = formula[:18] + "..." if len(formula) > 22 else formula
+                display_text = f"{' | '.join(notes_and_hits)} | {short_formula}"
+            else:
+                display_text = combo_text[:28] + "..." if len(combo_text) > 32 else combo_text
+                
+            title = f"🔍 过滤数据查看 | {display_text} (共 {match_count} 只)"
+            dialog.setWindowTitle(title)
+            if df_filtered is not None and not df_filtered.empty:
+                dialog.header_label.setText(f"🔍 过滤数据查看 | {display_text}")
+        else:
+            bucket_names = [
+                "跌幅超 8% (<-8%)",
+                "跌幅 6% 至 8% (-8% ~ -6%)",
+                "跌幅 4% 至 6% (-6% ~ -4%)",
+                "跌幅 2% 至 4% (-4% ~ -2%)",
+                "跌幅 0% 至 2% (-2% ~ 0%)",
+                "涨幅 0% 至 2% (0% ~ +2%)",
+                "涨幅 2% 至 4% (+2% ~ +4%)",
+                "涨幅 4% 至 6% (+4% ~ +6%)",
+                "涨幅 6% 至 8% (+6% ~ +8%)",
+                "涨幅超 8% (>+8%)"
+            ]
+            title = f"📊 涨跌分布个股明细 | {bucket_names[idx]} (共 {len(df_filtered) if df_filtered is not None else 0} 只)"
+            dialog.setWindowTitle(title)
+            if df_filtered is not None and not df_filtered.empty:
+                dialog.header_label.setText(f"📊 涨跌分布 ({bucket_names[idx]}) | 双击行切换/联动")
         
         # 如果有保存的磁吸和隐藏状态，在 show 前进行恢复
         if restore_state:
@@ -1163,8 +1220,8 @@ class DistributionBarChart(QWidget):
                     with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                 
-                # 遍历所有可能的 10 个区间，如果是 is_open=True 则逐个恢复
-                for idx in range(10):
+                # 遍历恢复 10 个涨跌区间以及 999 公式过滤窗口
+                for idx in list(range(10)) + [999]:
                     key = f"distribution_details_dialog_{idx}"
                     config = data.get(key, {})
                     if config.get("is_open", False):
@@ -1175,6 +1232,45 @@ class DistributionBarChart(QWidget):
     def _filter_df_by_bucket(self, df, idx):
         if df is None or df.empty or 'percent' not in df.columns:
             return None
+            
+        if idx == 999:
+            query_expr = ""
+            main_win = self.window()
+            if main_win and hasattr(main_win, 'query_expr'):
+                query_expr = main_win.query_expr
+            if not query_expr:
+                return pd.DataFrame()
+                
+            try:
+                from stock_logic_utils import query_engine
+                test_df = df.copy()
+                mapping = {
+                    '价格': 'close', '最新价': 'close', '现价': 'close', 
+                    '涨幅': 'pct', 
+                    '量': 'volume', '成交量': 'volume',
+                    '成交额': 'turnover',
+                    '最高': 'high', '最低': 'low', '开盘': 'open',
+                    '板块': 'category', '异动类型': 'category', 'hy': 'category'
+                }
+                for cn, en in mapping.items():
+                    if cn in test_df.columns and en not in test_df.columns:
+                        test_df[en] = test_df[cn]
+                if 'close' in test_df.columns:
+                    for col in ['open', 'high', 'low']:
+                        if col not in test_df.columns:
+                            test_df[col] = test_df['close']
+                            
+                res = query_engine.execute(test_df, query_expr)
+                if isinstance(res, pd.DataFrame):
+                    return df.loc[df.index.intersection(res.index)]
+                elif isinstance(res, (pd.Series, np.ndarray, list)):
+                    if len(res) == len(df):
+                        return df[res]
+                return pd.DataFrame()
+            except Exception as e:
+                print(f"[_filter_df_by_bucket] Error evaluating query_expr: {e}")
+                return pd.DataFrame()
+                
         pcts = df['percent']
         if idx == 0:
             return df[pcts <= -8]
@@ -1212,21 +1308,44 @@ class DistributionBarChart(QWidget):
                     df_filtered = self._filter_df_by_bucket(df_all, d.bucket_idx)
                     if df_filtered is not None:
                         d.update_data(df_filtered)
-                        bucket_names = [
-                            "跌幅超 8% (<-8%)",
-                            "跌幅 6% 至 8% (-8% ~ -6%)",
-                            "跌幅 4% 至 6% (-6% ~ -4%)",
-                            "跌幅 2% 至 4% (-4% ~ -2%)",
-                            "跌幅 0% 至 2% (-2% ~ 0%)",
-                            "涨幅 0% 至 2% (0% ~ +2%)",
-                            "涨幅 2% 至 4% (+2% ~ +4%)",
-                            "涨幅 4% 至 6% (+4% ~ +6%)",
-                            "涨幅 6% 至 8% (+6% ~ +8%)",
-                            "涨幅超 8% (>+8%)"
-                        ]
-                        title = f"📊 涨跌分布个股明细 | {bucket_names[d.bucket_idx]} (共 {len(df_filtered)} 只)"
-                        d.setWindowTitle(title)
-                        d.header_label.setText(f"📊 涨跌分布 ({bucket_names[d.bucket_idx]}) | 双击行切换/联动")
+                        if d.bucket_idx == 999:
+                            main_win = self.window()
+                            combo_text = ""
+                            if main_win and hasattr(main_win, 'query_combo'):
+                                combo_text = main_win.query_combo.currentText().strip()
+                            q_expr = main_win.query_expr if (main_win and hasattr(main_win, 'query_expr')) else ""
+                            if not combo_text:
+                                combo_text = q_expr
+                                
+                            match_count = len(df_filtered)
+                            if "  |  " in combo_text:
+                                parts = [p.strip() for p in combo_text.split("  |  ")]
+                                notes_and_hits = parts[:-1]
+                                formula = parts[-1]
+                                short_formula = formula[:18] + "..." if len(formula) > 22 else formula
+                                display_text = f"{' | '.join(notes_and_hits)} | {short_formula}"
+                            else:
+                                display_text = combo_text[:28] + "..." if len(combo_text) > 32 else combo_text
+                                
+                            title = f"🔍 过滤数据查看 | {display_text} (共 {match_count} 只)"
+                            d.setWindowTitle(title)
+                            d.header_label.setText(f"🔍 过滤数据查看 | {display_text}")
+                        else:
+                            bucket_names = [
+                                "跌幅超 8% (<-8%)",
+                                "跌幅 6% 至 8% (-8% ~ -6%)",
+                                "跌幅 4% 至 6% (-6% ~ -4%)",
+                                "跌幅 2% 至 4% (-4% ~ -2%)",
+                                "跌幅 0% 至 2% (-2% ~ 0%)",
+                                "涨幅 0% 至 2% (0% ~ +2%)",
+                                "涨幅 2% 至 4% (+2% ~ +4%)",
+                                "涨幅 4% 至 6% (+4% ~ +6%)",
+                                "涨幅 6% 至 8% (+6% ~ +8%)",
+                                "涨幅超 8% (>+8%)"
+                            ]
+                            title = f"📊 涨跌分布个股明细 | {bucket_names[d.bucket_idx]} (共 {len(df_filtered)} 只)"
+                            d.setWindowTitle(title)
+                            d.header_label.setText(f"📊 涨跌分布 ({bucket_names[d.bucket_idx]}) | 双击行切换/联动")
             except Exception as e:
                 print(f"[DistributionBarChart] Broadcast update error: {e}")
                 
