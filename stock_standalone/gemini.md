@@ -1,3 +1,35 @@
+## 2026-07-16 16:20
+- [x] **完全隔离不同涨跌区间个股明细窗口的布局参数与自愈恢复 (Isolated Layout Keys for Each Return Bucket)**：
+    - [x] **引入动态键路由**：在 `DistributionDetailsDialog` 中引入 `bucket_idx` 字段，将原先共用的 `"distribution_details_dialog"` 统一配置路由重构为每个区间独立唯一的 `f"distribution_details_dialog_{bucket_idx}"` 配置键。这彻底解决了多个区间明细窗口同时打开时重叠在同一坐标、无法分别记忆位置的严重缺陷。
+    - [x] **并发多窗口启动自愈**：在 `_restore_details_dialog_if_saved` 中升级为对 0-9 共 10 个区间进行轮询，凡是记录为 `is_open=True` 的窗口，都会各自以正确的坐标和隐藏状态被自动恢复重建，彻底消除了相互覆盖或无法恢复的体验漏洞。
+- [x] **修复手动拖离边缘时未重置磁吸状态导致反复被拉回的 Bug (Fixed Infinite Snapping Loop on Manual Drag)**：
+    - [x] **手动移动状态强行中断**：在 `DistributionDetailsDialog` 和 `StockDetailDialog` 的 `moveEvent` 拦截中，如果检测到当前的移动操作不是由于动画产生的，说明用户正在执行“将窗口拖离屏幕边缘”的操作，此时在瞬间强行将 `self.anchor_edge` 置为 `None`。这打断了之前的磁吸判定，防止在拖拽至屏幕中央时，由于鼠标瞬移出边界导致被 hover 定时器误判为“离开窗口”进而触发 `hide_to_edge` 强行拉回隐藏状态的恶性循环。
+
+## 2026-07-16 16:10
+- [x] **实现个股明细窗口（DistributionDetailsDialog）生命周期与状态自动持久化及静默自愈恢复 (Automated Snap/State Persistence & Seamless Restoration)**：
+    - [x] **状态实时与退出序列化 (Atomic State Serialization)**：重构了 `_save_window_states(is_open=...)`，使窗口在拖拽磁吸发生、隐藏折叠、正常展开或关闭时，都能实时或在退出时将当前是否打开 (`is_open`)、代表区间 (`bucket_idx`)、吸附边界 (`anchor_edge`)、是否隐藏 (`is_hidden_state`) 和展开坐标尺寸 (`normal_geometry`) 写入 `window_layout_config.json`。
+    - [x] **智能退出意图识别 (Exit vs Manual Close Detection)**：在 `closeEvent` 和 `hideEvent` 中引入了主程序生存判定。当检测到主应用程序正在退出或已不可见时，系统能智能识别出“非用户手动关闭”的意图，从而将 `is_open` 记录为 `True` 保护其生命周期，防止因主程序关闭导致下次启动无法恢复。
+    - [x] **异步无感重绘恢复 (Async Restoration Flow)**：在 `DistributionBarChart` 的 `update_data` 行情分发器中增加了数据就绪判定与 `QTimer.singleShot` 非阻塞延迟。当盘中行情首次灌入时，自动解析状态并调用带 `restore_state` 参数的 `open_details_dialog`，在窗口显示前静默还原其磁吸状态、不透明度和位置，实现了完全的交互闭环。
+
+## 2026-07-16 16:00
+- [x] **个股详情与个股明细列表双窗口磁吸隐藏架构完全对齐 (Fully Snapped & Animated Snapping/Hiding across Details & List Views)**：
+    - [x] **`DistributionDetailsDialog`（涨跌分布个股明细窗口）实现完全一致的磁吸折叠功能**：在 `ats/ui/chart_widgets.py` 中，为 `DistributionDetailsDialog` 注册拖拽与悬停检测定时器，完整移植了 `start_slide_animation`、磁吸、隐藏与悬浮唤醒等全部平滑滑动和呼吸闪烁特效。
+    - [x] **根治有 Parent 的 QDialog 磁吸位移失效缺陷**：在 `StockDetailDialog` 构造函数中，通过强制清除 `Qt.WindowType.Dialog` 并加入 `Qt.WindowType.Window` 窗口标志，将其提升为完全独立的顶层窗口。这解除了 Windows DWM 对子窗口的父级依附性位移限制，确保在多显示器或自由拖拽到屏幕顶部、左侧或右侧边缘时磁吸隐藏 100% 成功。
+    - [x] **主窗口防误触静默设计**：主工作终端（`ATSMainWindow`）作为全局交互中枢，在设计上保持静态，防止因盘中高频移动而产生误触折叠。
+
+## 2026-07-16 15:50
+- [x] **实现个股明细窗口磁吸与隐藏的平滑动画与视觉闪烁提示 (Implemented Smooth Slide Animations and Snapping Opacity Flash Feedback)**：
+    - [x] **实现统一的滑动动画控制器 `start_slide_animation`**：通过集成 `QPropertyAnimation` 和 `QParallelAnimationGroup`，对窗口的 `geometry` 和 `windowOpacity` 属性同时进行多轨联合控制，并应用了非线性的 `QEasingCurve.Type.OutCubic` 缓动曲线，替换原本生硬的瞬移定位。
+    - [x] **实现贴边磁吸成功时的呼吸提示反馈 (Snapping Visual Feedback)**：在窗口发生磁吸对齐时，使用带有轻微弹性回弹的曲线（`OutQuad`），并使用 `setKeyValueAt(0.5, 0.4)` 在动画中途将不透明度快速闪烁（呼吸淡化到 0.4 再恢复），给用户极佳的“已触发磁吸及自动隐藏机制”的动态暗示（类似 QQ 窗口效果）。
+    - [x] **实现流畅的滑入与滑出动画 (Slide In/Out Transition)**：鼠标离开 400ms 后，窗口会以 300ms 的平滑滑动动画优雅缩进边缘，不透明度平滑过渡至 `0.35`；鼠标移回 5px 感应条 200ms 后，窗口会以 200ms 的动画快速从边缘平滑拉出，不透明度恢复至 `1.0`，整体交互极其连贯、高雅。
+
+## 2026-07-16 07:50
+- [x] **实现个股明细窗口贴边自动隐藏、磁吸与悬停弹出功能 (Implemented Individual Stock Detail Auto-Hide, Edge-Snapping, and Hover-triggered Reveal)**：
+    - [x] **实现非模态个股详情窗口**：将 `ATSMainWindow.on_stock_clicked` 启动 `StockDetailDialog` 的模式从模态 `dialog.exec()` 重构为非模态 `dialog.show()`，并在每次弹出新窗口前先安全关闭已有的详情窗口，同时为 `StockDetailDialog` 注册 `WA_DeleteOnClose` 属性，防止多次弹出及内存泄漏。
+    - [x] **实现屏幕三边贴边自动磁吸 (Edge-Snapping)**：在 `StockDetailDialog` 中添加 `snap_timer` 防抖触发机制。当用户拖动窗口至距离屏幕顶部、左侧或右侧边缘 35 像素以内时，自动计算并对齐磁吸至屏幕边界，同时锁定该边界作为隐藏基准方向（`anchor_edge`），排除了底部任务栏的干扰。
+    - [x] **实现延迟离开贴边自动隐藏 (Auto-Hide to Edge)**：当窗口已完成边缘磁吸对齐，鼠标移出窗口范围并保持 400ms 时，窗口将自动收缩至仅保留 5 像素宽度的感应/观察窄条留在屏幕内，并自动将窗口不透明度降低至 `0.35`，从而维持桌面空间的纯净性。
+    - [x] **实现延迟悬停自动弹出与恢复 (Hover-triggered Reveal)**：当鼠标移入贴边隐藏状态下的感应窄条并保持 200ms 以上时，窗口将自动滑动复原至原有的位置与尺寸（`normal_geometry`），并将不透明度恢复至 `1.0`，同时拉回前台聚焦，支持流畅的实盘交互体验。
+
 ## 2026-07-15 19:50
 - [x] **优化窗口坐标管理器底部布局折行自适应与右对齐 (Optimized Window Manager Bottom Bar FlowLayout Autowrap & Right Alignment)**：
     - [x] **支持 `FlowLayout` 指定索引后的元素在有剩余宽度时自动右对齐**：在 `FlowLayout` 的 `_do_layout` 逻辑中，计算出每行的可用剩余空间 `extra_space`。根据 `self._align_right_from_index` 判断当前行是否属于需要右对齐的行。如果是混合行（既有左侧元素又有右侧元素），则在第一个右侧元素前应用全部 `extra_space`；如果是纯右侧元素行，则在整行起点前应用全部 `extra_space`。

@@ -6,7 +6,7 @@ Assembles the complete Autonomous Trading System UI dashboard.
 
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.styles import DARK_THEME_QSS
@@ -22,6 +22,13 @@ from JohnsonUtil import commonTips as cct
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None):
         super().__init__(parent)
+        
+        # 0. 明确设置为独立窗口类型，从而使磁吸、贴边隐藏和多显示器移动在 Windows 下完美执行
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags |= Qt.WindowType.Window
+        self.setWindowFlags(flags)
+        
         self.setWindowTitle(f"📈 实时实盘个股详情 - {code} {name}")
         self.resize(550, 650)
         self.setMinimumSize(450, 550)
@@ -90,6 +97,30 @@ class StockDetailDialog(QDialog):
             """)
             
         self._init_ui(code, name, df_row, context_info)
+        
+        # 1. 自动删除属性以防非模态显示内存泄露
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        # 2. 磁吸与隐藏状态初始化
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        
+        # 悬停与离开监控定时器
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+        
+        # 拖拽结束防抖定时器
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
         
     def _init_ui(self, code, name, df_row, context_info):
         layout = QVBoxLayout(self)
@@ -327,6 +358,189 @@ class StockDetailDialog(QDialog):
         bottom_layout.addStretch()
         bottom_layout.addWidget(btn_close)
         layout.addLayout(bottom_layout)
+
+    def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
+        """
+        统一的滑动与透明度动画控制器，提供流畅的 QQ 窗口滑动和呼吸反馈效果
+        """
+        if hasattr(self, 'anim_group') and self.anim_group is not None:
+            try:
+                if self.anim_group.state() == QParallelAnimationGroup.State.Running:
+                    self.anim_group.stop()
+            except Exception:
+                pass
+                
+        self.anim_group = QParallelAnimationGroup(self)
+        
+        # 1. 窗口位置大小动画 (Geometry)
+        self.geom_anim = QPropertyAnimation(self, b"geometry")
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_rect)
+        if is_snap_feedback:
+            # 磁吸成功时采用微弹插值，让贴边动作更具弹性物理质感
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        else:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+        # 2. 窗口不透明度动画 (Opacity)
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            # 磁吸动态提示：透明度从 1.0 快速淡化到 0.4 左右再恢复，模拟“吸附上”的视觉脉冲
+            self.opacity_anim.setKeyValueAt(0.5, 0.4)
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        
+        self._in_snap_action = True
+        
+        def on_finished():
+            self._in_snap_action = False
+            # 动画结束时做状态对齐安全保护
+            if self.is_hidden_state:
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(1.0)
+                
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
+    def _detect_and_snap(self):
+        if self.is_hidden_state:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 35  # 磁吸检测门槛像素
+        
+        snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
+        
+        # 排除底边（即任务栏所在方向，通常不磁吸底边）。我们磁吸顶边、左边、右边。
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
+            snapped = True
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
+            snapped = True
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
+            snapped = True
+            
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            
+            # 使用带有呼吸闪烁反馈的滑动动画平滑移动到磁吸位置
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+
+    def hide_to_edge(self):
+        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        
+        strip_size = 5  # 隐藏后在屏幕内留出的极窄感应/观察条像素宽度
+        
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+            
+        self.is_hidden_state = True
+        # 启动滑入贴边隐藏的平滑过渡动画
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        if not self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        self.is_hidden_state = False
+        # 启动滑出恢复的平滑过渡动画
+        self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+        
+        self.raise_()
+        self.activateWindow()
+
+    def _check_hover(self):
+        if not self.isVisible():
+            return
+            
+        from PyQt6.QtGui import QCursor
+        mouse_pos = QCursor.pos()
+        in_window = self.geometry().contains(mouse_pos)
+        
+        if self.is_hidden_state:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:  # 100ms * 2 = 200ms 停留防误触
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:  # 100ms * 4 = 400ms 离开防抖
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
+            self.anchor_edge = None
+            self.snap_timer.start()
+            
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            if self.anchor_edge:
+                self.normal_geometry = self.geometry()
+                
+    def closeEvent(self, event):
+        self.hover_timer.stop()
+        self.snap_timer.stop()
+        super().closeEvent(event)
+        
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange:
+            if self.isActiveWindow() and self.is_hidden_state:
+                self.show_normal_position()
 
 class ATSMainWindow(QMainWindow):
     realtime_data_signal = pyqtSignal(object)
@@ -706,9 +920,16 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error auto-retrieving Sina tick for {code_clean}: {e}")
                     
-        # Launch detail dialog
-        dialog = StockDetailDialog(code, name, df_row, context_info, parent=self)
-        dialog.exec()
+        # Close existing details dialog to prevent multiple non-modal windows
+        if hasattr(self, '_detail_dialog') and self._detail_dialog is not None:
+            try:
+                self._detail_dialog.close()
+            except Exception:
+                pass
+                
+        # Launch detail dialog as non-modal so it can snap and auto-hide
+        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self)
+        self._detail_dialog.show()
 
     def on_sector_clicked(self, name):
         self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")

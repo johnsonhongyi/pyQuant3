@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox, 
     QPushButton, QFrame, QMenu, QApplication
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QByteArray
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QByteArray, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QBrush, QColor
 import pyqtgraph as pg
 import numpy as np
@@ -51,8 +51,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
     """
     code_clicked = pyqtSignal(str, str) # Emitted when double-clicked or selected (linkage)
     
-    def __init__(self, parent=None):
+    def __init__(self, bucket_idx=0, parent=None):
         super().__init__(parent)
+        self.bucket_idx = bucket_idx
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("📊 涨跌分布个股明细")
         self.setMinimumWidth(650)
@@ -73,7 +74,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.setWindowFlags(flags)
         
         # Load window position and size
-        self.load_window_position_qt(self, "distribution_details_dialog", default_width=750, default_height=550)
+        self.load_window_position_qt(self, f"distribution_details_dialog_{bucket_idx}", default_width=750, default_height=550)
         self._is_updating = True
         self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
         
@@ -233,6 +234,27 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         
         # End initialization lock protection
         QTimer.singleShot(200, lambda: setattr(self, '_is_updating', False))
+        
+        # 3. 磁吸与隐藏状态初始化
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        
+        # 悬停与离开监控定时器
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+        
+        # 拖拽结束防抖定时器
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
 
     def _get_main_app(self):
         # Traverse up parents or check QApplication instance
@@ -249,12 +271,19 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                     return widget
         return None
 
-    def _save_window_states(self) -> None:
+    def _save_window_states(self, is_open=None) -> None:
         try:
-            # Use WindowMixin's DPI-aware save method
-            self.save_window_position_qt(self, "distribution_details_dialog")
+            scale = self._get_dpi_scale_factor()
+            # 如果处于隐藏状态，我们保存 normal_geometry，否则保存当前 geometry
+            geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
+            width = max(130, int(geom.width() / scale))
+            height = max(150, int(geom.height() / scale))
+            x = int(geom.x() / scale)
+            y = int(geom.y() / scale)
             
-            # Append stays_on_top
+            if is_open is None:
+                is_open = self.isVisible()
+                
             config_file = WINDOW_CONFIG_FILE
             with _CONFIG_FILE_LOCK:
                 data = {}
@@ -264,9 +293,20 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                             data = json.load(f)
                     except:
                         pass
-                if "distribution_details_dialog" not in data:
-                    data["distribution_details_dialog"] = {}
-                data["distribution_details_dialog"]["stays_on_top"] = self.stays_on_top
+                
+                # 保存为每个 bucket 独立的项
+                key = f"distribution_details_dialog_{self.bucket_idx}"
+                data[key] = {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "stays_on_top": self.stays_on_top,
+                    "anchor_edge": self.anchor_edge,
+                    "is_hidden_state": self.is_hidden_state,
+                    "bucket_idx": self.bucket_idx,
+                    "is_open": is_open
+                }
                 
                 tmp = config_file + f".tmp_dist_states_{id(self)}"
                 with open(tmp, 'w', encoding='utf-8') as f:
@@ -281,7 +321,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 with _CONFIG_FILE_LOCK:
                     with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        dialog_config = data.get("distribution_details_dialog", {})
+                        key = f"distribution_details_dialog_{getattr(self, 'bucket_idx', 0)}"
+                        dialog_config = data.get(key, {})
                         if "stays_on_top" in dialog_config:
                             return dialog_config["stays_on_top"]
         except Exception:
@@ -298,12 +339,201 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.setWindowFlags(flags)
         self.show()
 
+    def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
+        """
+        统一的滑动与透明度动画控制器，提供流畅的 QQ 窗口滑动和呼吸反馈效果
+        """
+        if hasattr(self, 'anim_group') and self.anim_group is not None:
+            try:
+                if self.anim_group.state() == QParallelAnimationGroup.State.Running:
+                    self.anim_group.stop()
+            except Exception:
+                pass
+                
+        self.anim_group = QParallelAnimationGroup(self)
+        
+        # 1. 窗口位置大小动画 (Geometry)
+        self.geom_anim = QPropertyAnimation(self, b"geometry")
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_rect)
+        if is_snap_feedback:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        else:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+        # 2. 窗口不透明度动画 (Opacity)
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            self.opacity_anim.setKeyValueAt(0.5, 0.4)
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        
+        self._in_snap_action = True
+        
+        def on_finished():
+            self._in_snap_action = False
+            if self.is_hidden_state:
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(1.0)
+            self._save_window_states(is_open=True)
+                
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
+    def _detect_and_snap(self):
+        if self.is_hidden_state:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 35  # 磁吸检测门槛像素
+        
+        snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
+        
+        # 排除底边（即任务栏所在方向，通常不磁吸底边）。我们磁吸顶边、左边、右边。
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
+            snapped = True
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
+            snapped = True
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
+            snapped = True
+            
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+
+    def hide_to_edge(self):
+        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        
+        strip_size = 5  # 隐藏后在屏幕内留出的极窄感应/观察条像素宽度
+        
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+            
+        self.is_hidden_state = True
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        if not self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        self.is_hidden_state = False
+        self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+        
+        self.raise_()
+        self.activateWindow()
+
+    def _check_hover(self):
+        if not self.isVisible():
+            return
+            
+        from PyQt6.QtGui import QCursor
+        mouse_pos = QCursor.pos()
+        in_window = self.geometry().contains(mouse_pos)
+        
+        if self.is_hidden_state:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:  # 100ms * 2 = 200ms 停留防误触
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:  # 100ms * 4 = 400ms 离开防抖
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
+            self.anchor_edge = None
+            self.snap_timer.start()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange:
+            if self.isActiveWindow() and self.is_hidden_state:
+                self.show_normal_position()
+
     def closeEvent(self, event):
-        self._save_window_states()
+        self.hover_timer.stop()
+        self.snap_timer.stop()
+        
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting:
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
+            
         event.accept()
 
     def hideEvent(self, event):
-        self._save_window_states()
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting:
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
+            
         super().hideEvent(event)
 
     def showEvent(self, event):
@@ -315,6 +545,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         super().resizeEvent(event)
         if self.layout():
             self.layout().setGeometry(self.rect())
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            if self.anchor_edge:
+                self.normal_geometry = self.geometry()
 
     def _link_current_row(self, row):
         if getattr(self, '_is_updating', False):
@@ -784,7 +1017,7 @@ class DistributionBarChart(QWidget):
         except Exception as e:
             print(f"[DistributionBarChart] Double click error: {e}")
 
-    def open_details_dialog(self, idx):
+    def open_details_dialog(self, idx, restore_state=None):
         if not hasattr(self, 'current_df') or self.current_df is None or self.current_df.empty:
             return
         
@@ -796,7 +1029,7 @@ class DistributionBarChart(QWidget):
         # always keeps child windows in front of their parent on Windows).
         # We keep a strong Python reference in _active_dialogs to prevent GC deletion,
         # and monitor main window destroyed signal to close dialogs when ATS exits.
-        dialog = DistributionDetailsDialog(None)
+        dialog = DistributionDetailsDialog(idx, None)
         dialog.update_data(df_filtered)
         
         bucket_names = [
@@ -815,6 +1048,54 @@ class DistributionBarChart(QWidget):
         dialog.setWindowTitle(title)
         dialog.header_label.setText(f"📊 涨跌分布 ({bucket_names[idx]}) | 双击行切换/联动")
         
+        # 如果有保存的磁吸和隐藏状态，在 show 前进行恢复
+        if restore_state:
+            try:
+                scale = dialog._get_dpi_scale_factor()
+                # 恢复位置和大小
+                rx = int(restore_state.get("x", 100) * scale)
+                ry = int(restore_state.get("y", 100) * scale)
+                rw = int(restore_state.get("width", 750) * scale)
+                rh = int(restore_state.get("height", 550) * scale)
+                
+                # 限制坐标在可用屏幕范围内，防止移出屏幕
+                from gui_utils import clamp_window_to_screens
+                rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
+                
+                # 恢复 normal_geometry
+                dialog.normal_geometry = QRect(rx, ry, rw, rh)
+                dialog.anchor_edge = restore_state.get("anchor_edge")
+                
+                # 恢复隐藏状态
+                is_hidden = restore_state.get("is_hidden_state", False)
+                if is_hidden and dialog.anchor_edge:
+                    dialog.is_hidden_state = True
+                    # 计算收缩隐藏后的临时坐标
+                    strip_size = 5
+                    screen = dialog.screen() or QApplication.primaryScreen()
+                    screen_geo = screen.availableGeometry()
+                    
+                    if dialog.anchor_edge == "left":
+                        hx = screen_geo.left() - rw + strip_size
+                        hy = ry
+                    elif dialog.anchor_edge == "right":
+                        hx = screen_geo.right() - strip_size
+                        hy = ry
+                    elif dialog.anchor_edge == "top":
+                        hx = rx
+                        hy = screen_geo.top() - rh + strip_size
+                    else:
+                        hx, hy = rx, ry
+                        dialog.is_hidden_state = False
+                        
+                    dialog.setGeometry(hx, hy, rw, rh)
+                    dialog.setWindowOpacity(0.35)
+                else:
+                    dialog.setGeometry(rx, ry, rw, rh)
+                    dialog.setWindowOpacity(1.0)
+            except Exception as e:
+                print(f"[DistributionBarChart] Error restoring window geometry: {e}")
+                
         dialog.show()
         
         if not hasattr(self, '_active_dialogs'):
@@ -851,6 +1132,22 @@ class DistributionBarChart(QWidget):
                 pass
         self._active_dialogs = []
 
+    def _restore_details_dialog_if_saved(self):
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                
+                # 遍历所有可能的 10 个区间，如果是 is_open=True 则逐个恢复
+                for idx in range(10):
+                    key = f"distribution_details_dialog_{idx}"
+                    config = data.get(key, {})
+                    if config.get("is_open", False):
+                        self.open_details_dialog(idx, restore_state=config)
+        except Exception as e:
+            print(f"[DistributionBarChart] Restore details dialog error: {e}")
+
     def _filter_df_by_bucket(self, df, idx):
         if df is None or df.empty or 'percent' not in df.columns:
             return None
@@ -882,6 +1179,13 @@ class DistributionBarChart(QWidget):
         Expects a list of 10 values representing the counts for each bucket.
         """
         self.current_df = df_all
+        
+        # 自动恢复已保存的个股明细窗口状态
+        if not getattr(self, '_details_restored', False) and df_all is not None and not df_all.empty:
+            self._details_restored = True
+            # 使用单shot QTimer，等待图表主UI完全呈现后再非阻塞恢复
+            QTimer.singleShot(500, self._restore_details_dialog_if_saved)
+            
         if len(bucket_counts) != 10:
             return
         self.current_counts = list(bucket_counts)
