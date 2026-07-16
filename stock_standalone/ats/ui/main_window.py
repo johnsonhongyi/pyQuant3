@@ -115,6 +115,9 @@ class StockDetailDialog(QDialog):
         self.leave_ticks = 0
         self._in_snap_action = False
         self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
         
         # 悬停与离开监控定时器
         self.hover_timer = QTimer(self)
@@ -510,6 +513,12 @@ class StockDetailDialog(QDialog):
         if self.is_hidden_state:
             return
             
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.snap_timer.start()
+            return
+            
         screen = self.screen()
         if not screen:
             screen = QApplication.primaryScreen()
@@ -536,6 +545,7 @@ class StockDetailDialog(QDialog):
             target_x = screen_geo.right() - win_geo.width()
             snapped = True
             
+        self._is_dragging = False
         if snapped:
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
@@ -583,6 +593,9 @@ class StockDetailDialog(QDialog):
             return
             
         self.is_hidden_state = False
+        import time
+        self._last_show_time = time.time()
+        self._has_hovered_since_show = False
         # 启动滑出恢复的平滑过渡动画
         self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
         
@@ -593,10 +606,20 @@ class StockDetailDialog(QDialog):
         if not self.isVisible():
             return
             
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+            
         from PyQt6.QtGui import QCursor
         mouse_pos = QCursor.pos()
-        in_window = self.geometry().contains(mouse_pos)
+        in_window = self.frameGeometry().contains(mouse_pos)
         
+        if in_window:
+            self._has_hovered_since_show = True
+            
         if self.is_hidden_state:
             if in_window:
                 self.hover_ticks += 1
@@ -608,6 +631,14 @@ class StockDetailDialog(QDialog):
         else:
             if self.anchor_edge is not None:
                 if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    import time
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+                        
                     self.leave_ticks += 1
                     if self.leave_ticks >= 4:  # 100ms * 4 = 400ms 离开防抖
                         self.hide_to_edge()
@@ -618,6 +649,7 @@ class StockDetailDialog(QDialog):
     def moveEvent(self, event):
         super().moveEvent(event)
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            self._is_dragging = True
             # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
             self.anchor_edge = None
             self.snap_timer.start()
@@ -914,6 +946,12 @@ class ATSMainWindow(QMainWindow):
         self.btn_hit.clicked.connect(self.calculate_history_hits_ui)
         toolbar.addWidget(self.btn_hit)
         
+        self.btn_view_filtered = QPushButton("查看")
+        self.btn_view_filtered.setToolTip("查看当前过滤条件命中的个股明细")
+        self.btn_view_filtered.setStyleSheet("QPushButton { background-color: #2e2e36; color: #00ffcc; font-weight: bold; border: 1px solid #00ffcc; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #00ffcc; color: #000000; }")
+        self.btn_view_filtered.clicked.connect(self.view_filtered_stocks_dialog)
+        toolbar.addWidget(self.btn_view_filtered)
+        
         # 载入默认的公式数据
         self._on_history_group_changed()
 
@@ -1173,6 +1211,11 @@ class ATSMainWindow(QMainWindow):
             if isinstance(widget, StockDetailDialog) and widget.isVisible():
                 widget.update_filter_status(self.query_expr)
                 
+        # 广播更新过滤后的个股明细窗口
+        if hasattr(self, 'dist_chart'):
+            df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
+            self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
+                
         if self.query_combo.lineEdit():
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
@@ -1183,6 +1226,34 @@ class ATSMainWindow(QMainWindow):
         for widget in QApplication.topLevelWidgets():
             if isinstance(widget, StockDetailDialog) and widget.isVisible():
                 widget.update_filter_status("")
+                
+        # 广播清空过滤明细窗口
+        if hasattr(self, 'dist_chart'):
+            df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
+            self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
+
+    def view_filtered_stocks_dialog(self):
+        query = self._get_real_query()
+        self.query_expr = query
+        
+        if hasattr(self, 'dist_chart'):
+            config = {}
+            try:
+                import os
+                import json
+                from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        config = data.get("distribution_details_dialog_999", {})
+            except Exception:
+                pass
+                
+            self.dist_chart.open_details_dialog(999, restore_state=config, cold_start=True)
+            
+            # 刷新最新数据
+            df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
+            self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
 
     def _init_statusbar(self):
         self.status_bar = QStatusBar()
@@ -2341,6 +2412,7 @@ class ATSMainWindow(QMainWindow):
             # 2. Restore splitters
             self._is_restoring_sizes = True
             try:
+                from PyQt6.QtCore import QTimer
                 if hasattr(self, 'main_splitter'):
                     main_sizes = data.get("ats_main_splitter_sizes")
                     if main_sizes:
@@ -2348,6 +2420,8 @@ class ATSMainWindow(QMainWindow):
                         total = sum(main_sizes)
                         if total > 0:
                             self._main_ratio = [s / total for s in main_sizes]
+                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('main_splitter', main_sizes))
+                        
                 if hasattr(self, 'center_splitter'):
                     center_sizes = data.get("ats_center_splitter_sizes")
                     if center_sizes:
@@ -2355,6 +2429,8 @@ class ATSMainWindow(QMainWindow):
                         total = sum(center_sizes)
                         if total > 0:
                             self._center_ratio = [s / total for s in center_sizes]
+                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('center_splitter', center_sizes))
+                        
                 if hasattr(self, 'right_splitter'):
                     right_sizes = data.get("ats_right_splitter_sizes")
                     if right_sizes:
@@ -2362,6 +2438,7 @@ class ATSMainWindow(QMainWindow):
                         total = sum(right_sizes)
                         if total > 0:
                             self._right_ratio = [s / total for s in right_sizes]
+                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('right_splitter', right_sizes))
             finally:
                 self._is_restoring_sizes = False
             
@@ -2390,6 +2467,26 @@ class ATSMainWindow(QMainWindow):
                     self.cb_vis.setChecked(bool(vis_link))
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
+
+    def _force_set_splitter_sizes(self, splitter_name, target_sizes):
+        if getattr(self, '_is_closing', False):
+            return
+        splitter = getattr(self, splitter_name, None)
+        if splitter:
+            self._is_restoring_sizes = True
+            try:
+                splitter.setSizes(target_sizes)
+                total = sum(target_sizes)
+                if total > 0:
+                    ratio = [s / total for s in target_sizes]
+                    if splitter_name == 'main_splitter':
+                        self._main_ratio = ratio
+                    elif splitter_name == 'center_splitter':
+                        self._center_ratio = ratio
+                    elif splitter_name == 'right_splitter':
+                        self._right_ratio = ratio
+            finally:
+                self._is_restoring_sizes = False
 
     def _save_layout_state(self):
         try:
