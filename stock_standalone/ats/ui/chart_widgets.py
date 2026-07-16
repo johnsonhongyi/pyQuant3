@@ -875,6 +875,8 @@ class DistributionBarChart(QWidget):
         super().__init__(parent)
         self.current_df = None
         self._init_ui()
+        # 冷启动时，延迟一小会儿，在主 UI 呈现后自动拉起历史记录的明细窗口
+        QTimer.singleShot(800, lambda: self._restore_details_dialog_if_saved(cold_start=True))
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1017,12 +1019,28 @@ class DistributionBarChart(QWidget):
         except Exception as e:
             print(f"[DistributionBarChart] Double click error: {e}")
 
-    def open_details_dialog(self, idx, restore_state=None):
-        if not hasattr(self, 'current_df') or self.current_df is None or self.current_df.empty:
-            return
+    def open_details_dialog(self, idx, restore_state=None, cold_start=False):
+        # 1. 查找去重，防止双击或恢复时重复创建相同的区间窗口
+        from PyQt6.sip import isdeleted
+        for d in getattr(self, '_active_dialogs', []):
+            try:
+                if d and not isdeleted(d) and getattr(d, 'bucket_idx', None) == idx:
+                    if hasattr(d, 'show_normal_position'):
+                        d.show_normal_position()
+                    else:
+                        d.show()
+                        d.raise_()
+                        d.activateWindow()
+                    return
+            except Exception:
+                pass
+
+        df_filtered = None
+        if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+            df_filtered = self._filter_df_by_bucket(self.current_df, idx)
         
-        df_filtered = self._filter_df_by_bucket(self.current_df, idx)
-        if df_filtered is None or df_filtered.empty:
+        # 如果是非冷启动，且没有有效数据，直接返回不创建
+        if not cold_start and (df_filtered is None or df_filtered.empty):
             return
             
         # parent=None: allows dialog to go behind the main window (OS window manager
@@ -1030,7 +1048,12 @@ class DistributionBarChart(QWidget):
         # We keep a strong Python reference in _active_dialogs to prevent GC deletion,
         # and monitor main window destroyed signal to close dialogs when ATS exits.
         dialog = DistributionDetailsDialog(idx, None)
-        dialog.update_data(df_filtered)
+        if df_filtered is not None and not df_filtered.empty:
+            dialog.update_data(df_filtered)
+        else:
+            # 尚未同步行情数据，表格置空并显示同步提示
+            dialog.table.setRowCount(0)
+            dialog.header_label.setText("📊 涨跌分布个股明细 | ⏳ 正在等待数据同步...")
         
         bucket_names = [
             "跌幅超 8% (<-8%)",
@@ -1044,9 +1067,10 @@ class DistributionBarChart(QWidget):
             "涨幅 6% 至 8% (+6% ~ +8%)",
             "涨幅超 8% (>+8%)"
         ]
-        title = f"📊 涨跌分布个股明细 | {bucket_names[idx]} (共 {len(df_filtered)} 只)"
+        title = f"📊 涨跌分布个股明细 | {bucket_names[idx]} (共 {len(df_filtered) if df_filtered is not None else 0} 只)"
         dialog.setWindowTitle(title)
-        dialog.header_label.setText(f"📊 涨跌分布 ({bucket_names[idx]}) | 双击行切换/联动")
+        if df_filtered is not None and not df_filtered.empty:
+            dialog.header_label.setText(f"📊 涨跌分布 ({bucket_names[idx]}) | 双击行切换/联动")
         
         # 如果有保存的磁吸和隐藏状态，在 show 前进行恢复
         if restore_state:
@@ -1114,7 +1138,7 @@ class DistributionBarChart(QWidget):
         active_dialogs = []
         for d in self._active_dialogs:
             try:
-                if not isdeleted(d) and d.isVisible():
+                if not isdeleted(d):
                     active_dialogs.append(d)
             except Exception:
                 pass
@@ -1132,7 +1156,7 @@ class DistributionBarChart(QWidget):
                 pass
         self._active_dialogs = []
 
-    def _restore_details_dialog_if_saved(self):
+    def _restore_details_dialog_if_saved(self, cold_start=False):
         try:
             if os.path.exists(WINDOW_CONFIG_FILE):
                 with _CONFIG_FILE_LOCK:
@@ -1144,7 +1168,7 @@ class DistributionBarChart(QWidget):
                     key = f"distribution_details_dialog_{idx}"
                     config = data.get(key, {})
                     if config.get("is_open", False):
-                        self.open_details_dialog(idx, restore_state=config)
+                        self.open_details_dialog(idx, restore_state=config, cold_start=cold_start)
         except Exception as e:
             print(f"[DistributionBarChart] Restore details dialog error: {e}")
 
@@ -1180,11 +1204,33 @@ class DistributionBarChart(QWidget):
         """
         self.current_df = df_all
         
-        # 自动恢复已保存的个股明细窗口状态
-        if not getattr(self, '_details_restored', False) and df_all is not None and not df_all.empty:
-            self._details_restored = True
-            # 使用单shot QTimer，等待图表主UI完全呈现后再非阻塞恢复
-            QTimer.singleShot(500, self._restore_details_dialog_if_saved)
+        # 1. 广播数据更新到所有当前活跃/已经打开的明细窗口！
+        from PyQt6.sip import isdeleted
+        for d in getattr(self, '_active_dialogs', []):
+            try:
+                if d and not isdeleted(d) and hasattr(d, 'bucket_idx'):
+                    df_filtered = self._filter_df_by_bucket(df_all, d.bucket_idx)
+                    if df_filtered is not None:
+                        d.update_data(df_filtered)
+                        bucket_names = [
+                            "跌幅超 8% (<-8%)",
+                            "跌幅 6% 至 8% (-8% ~ -6%)",
+                            "跌幅 4% 至 6% (-6% ~ -4%)",
+                            "跌幅 2% 至 4% (-4% ~ -2%)",
+                            "跌幅 0% 至 2% (-2% ~ 0%)",
+                            "涨幅 0% 至 2% (0% ~ +2%)",
+                            "涨幅 2% 至 4% (+2% ~ +4%)",
+                            "涨幅 4% 至 6% (+4% ~ +6%)",
+                            "涨幅 6% 至 8% (+6% ~ +8%)",
+                            "涨幅超 8% (>+8%)"
+                        ]
+                        title = f"📊 涨跌分布个股明细 | {bucket_names[d.bucket_idx]} (共 {len(df_filtered)} 只)"
+                        d.setWindowTitle(title)
+                        d.header_label.setText(f"📊 涨跌分布 ({bucket_names[d.bucket_idx]}) | 双击行切换/联动")
+            except Exception as e:
+                print(f"[DistributionBarChart] Broadcast update error: {e}")
+                
+        self._details_restored = True
             
         if len(bucket_counts) != 10:
             return
