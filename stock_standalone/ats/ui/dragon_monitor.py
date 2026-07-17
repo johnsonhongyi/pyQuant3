@@ -53,9 +53,21 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._is_updating = False
         
         # 1. Load config path and data files
-        self.data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+        from sys_utils import get_app_root
+        self.data_dir = os.path.join(get_app_root(), "datacsv")
         os.makedirs(self.data_dir, exist_ok=True)
         self.db_path = os.path.join(self.data_dir, "ats_dragon_leaders.json")
+        
+        # Auto-migrate old data from the root data directory if present
+        old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+        old_db_path = os.path.join(old_data_dir, "ats_dragon_leaders.json")
+        if os.path.exists(old_db_path) and not os.path.exists(self.db_path):
+            try:
+                import shutil
+                shutil.copy2(old_db_path, self.db_path)
+                logger.info(f"Successfully migrated old data from {old_db_path} to {self.db_path}")
+            except Exception as e:
+                logger.warning(f"Failed to migrate old data folder: {e}")
         
         self.manual_codes = self._load_manual_codes()
         self.auto_codes = []
