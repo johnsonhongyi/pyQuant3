@@ -2720,6 +2720,14 @@ class ATSMainWindow(QMainWindow):
             
         # Save search history on close
         self._save_search_history_data()
+        
+        # Close dragon monitor if open
+        from PyQt6.sip import isdeleted
+        if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog):
+            try:
+                self.dragon_monitor_dialog.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing dragon monitor on close: {e}")
             
         super().closeEvent(event)
 
