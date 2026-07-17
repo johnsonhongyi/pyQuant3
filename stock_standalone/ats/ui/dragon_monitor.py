@@ -28,6 +28,16 @@ logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
 
 
+def safe_float(val, default=0.0):
+    try:
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return default
+        return float(val)
+    except Exception:
+        return default
+
+
+
 class DragonLeaderMonitorDialog(QDialog, WindowMixin):
     """
     Super strong 2D/3D dragon leader monitor window.
@@ -49,6 +59,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         
         self.manual_codes = self._load_manual_codes()
         self.auto_codes = []
+        self._last_row_count = 0
         
         # 2. Stays on top
         self.stays_on_top = self._load_stays_on_top()
@@ -229,11 +240,21 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
     def _save_manual_codes(self):
         try:
+            import tempfile
             data = {"manual": list(self.manual_codes)}
-            with open(self.db_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.data_dir, prefix="ats_dragon_tmp_")
+            try:
+                with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, self.db_path)
+            except Exception as e:
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+                raise e
         except Exception as e:
-            logger.warning(f"Error saving manual codes: {e}")
+            logger.warning(f"Error saving manual codes atomically: {e}")
 
     def _load_stays_on_top(self) -> bool:
         try:
@@ -305,6 +326,14 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             
         self._is_updating = True
         
+        # 0. 锁定当前选中的股票代码以防止刷新时焦点丢失
+        selected_code = None
+        curr_row = self.table.currentRow()
+        if curr_row >= 0:
+            c_item = self.table.item(curr_row, 0)
+            if c_item:
+                selected_code = c_item.text()
+        
         # 1. 每日自动替换更新潜力股 (2D/3D加速多头完美结构挖掘)
         new_auto_list = []
         import pandas as pd
@@ -317,17 +346,13 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if code_str in self.manual_codes:
                 continue # 已在手动监控中
                 
-            dff = float(row.get('dff', 0.0))
-            dff2 = float(row.get('dff2', 0.0))
-            dff3 = float(row.get('dff3', 0.0))
-            pct = float(row.get('percent', 0.0))
+            dff = safe_float(row.get('dff', 0.0))
+            dff2 = safe_float(row.get('dff2', 0.0))
+            dff3 = safe_float(row.get('dff3', 0.0))
+            pct = safe_float(row.get('percent', 0.0))
             rs_val = pct - sh_pct
             
-            # Super Strong 2D/3D 加速多头条件过滤 (例如甘咨询与万邦医药的多周期共振形态):
-            # A) 2D与3D核心趋势全面转为正向共振 (dff2 > 0 and dff3 > 0)
-            # B) DFF主力加速度处于明显冲刺段 (dff > dff2 或 dff2 > dff3)
-            # C) 大盘偏离度超强偏离 (rs_val >= 2.0%)
-            # D) 或者是个股逆市大涨/多头加速共振
+            # Super Strong 2D/3D 加速多头条件过滤
             is_accel = dff > 0.0 and dff2 > 0.0 and dff3 > 0.0
             is_strong_rs = rs_val >= 2.0 and pct > 1.5
             
@@ -365,12 +390,12 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 row = current_df.loc[code]
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
-                price = float(row.get('close', row.get('price', 0.0)))
-                pct = float(row.get('percent', 0.0))
+                price = safe_float(row.get('close', row.get('price', 0.0)))
+                pct = safe_float(row.get('percent', 0.0))
                 state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
-                dff = float(row.get('dff', 0.0))
-                dff2 = float(row.get('dff2', 0.0))
-                dff3 = float(row.get('dff3', 0.0))
+                dff = safe_float(row.get('dff', 0.0))
+                dff2 = safe_float(row.get('dff2', 0.0))
+                dff3 = safe_float(row.get('dff3', 0.0))
                 rs_val = pct - sh_pct
                 
                 # 共振类型判定
@@ -480,8 +505,20 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                     if item:
                         item.setBackground(QBrush(QColor("#152a1a")))
                         
-        auto_fit_columns_once(self.table, "dragon_leader_monitor_header_v1")
+        if len(rows_data) != getattr(self, '_last_row_count', 0):
+            self._last_row_count = len(rows_data)
+            auto_fit_columns_once(self.table, "dragon_leader_monitor_header_v1")
+            
         self.table.setSortingEnabled(True)
+        
+        # 恢复先前选中的个股焦点
+        if selected_code:
+            for r in range(self.table.rowCount()):
+                c_item = self.table.item(r, 0)
+                if c_item and c_item.text() == selected_code:
+                    self.table.setCurrentCell(r, 0)
+                    break
+                    
         self._is_updating = False
 
     def _get_main_app(self):
