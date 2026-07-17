@@ -14,6 +14,7 @@ from ats.ui.base_table import BaseATSTableWidget
 class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
+    dragon_monitor_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,6 +32,15 @@ class SwingStateTable(QWidget):
         title.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
         header.addWidget(title)
         header.addStretch()
+        
+        self.btn_dragon = QPushButton("🐉 监控加速龙头")
+        self.btn_dragon.setStyleSheet("""
+            QPushButton { background-color: #2a1b1b; color: #ff5555; font-weight: bold; border: 1px solid #ff5555; border-radius: 3px; padding: 2px 6px; }
+            QPushButton:hover { background-color: #ff5555; color: #000000; }
+        """)
+        self.btn_dragon.clicked.connect(self.dragon_monitor_requested.emit)
+        header.addWidget(self.btn_dragon)
+        header.addSpacing(10)
         
         self.btn_refresh = QPushButton("🔄 刷新状态")
         header.addWidget(self.btn_refresh)

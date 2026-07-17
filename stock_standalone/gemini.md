@@ -1,3 +1,12 @@
+## 2026-07-17 18:25
+- [x] **实现 2D/3D 加速强势龙头股追踪器 (Implemented 2D/3D Acceleration Dragon Leader Tracker)**：
+    - [x] **新建独立窗口 `DragonLeaderMonitorDialog`**：在 `ats/ui/dragon_monitor.py` 中实现了全新、可独立悬浮的龙头追踪看板。支持展示代码、名称、现价、涨幅、DFF/DFF2/DFF3、大盘偏离、共振状态及来源等 11 个关键属性。
+    - [x] **内置 2D/3D 完美多周期加速过滤算法**：在盘中行情高频刷新时，通过评估 `dff > 0 and dff2 > 0 and dff3 > 0` 的核心多头加速，结合大盘偏离度 `rs_val >= 2.0%` 或强共振状态，自动在盘中筛选并挖掘出潜力龙头（如“甘咨询”、“万邦医药”等），最多保留前 15 只以进行“每日实时自动更新替换”。
+    - [x] **支持手动添加及 JSON 跨会话持久化**：用户可通过 “➕ 添加股票” 按钮或右键菜单中“转为重点手动跟踪”直接加入重点监控，此部分持久化存储至 `data/ats_dragon_leaders.json` 并标记为特殊背景色，不会被自动挖掘覆盖。
+    - [x] **高度融合磁吸与生命周期联动**：完美复刻了 `WindowMixin` 磁吸算法，支持贴边自动隐藏、鼠标移入滑出，并在 `main_window.py` 退出或关闭时持久化其位置 and 状态；双击或右键选中龙头能瞬间联动到主程序的行情分析视口中。
+    - [x] **重构 Swing Pullback Tracker 顶栏控制**：在 `SwingStateTable` 标题栏上添加了 “🐉 监控加速龙头” 按钮并建立信号槽，点击即可优雅呼出此磁吸看板，实现了极佳的交互便捷性。
+    - [x] **修复销毁指针导致的二次打开崩溃 (Fixed RuntimeError of Deleted Dialog Pointer)**：由于在 `DragonLeaderMonitorDialog` 中设置了 `WA_DeleteOnClose` 释放标记，当用户关闭窗口后 C++ 对象已销毁但 Python 悬挂指针未清除。通过在 `open_dragon_monitor` 及主更新周期 `refresh_realtime_ui` 中引入 `from PyQt6.sip import isdeleted` 进行防护，安全过滤并重新创建被销毁的实例，彻底解决了该崩溃。
+
 ## 2026-07-17 18:10
 - [x] **解除持仓及底部 Tab 窗口的高度与宽度自由拖动限制 (Unlocked Holding/Bottom Tabs Resize Constraints)**：
     - [x] **强制解除 `center_tabs` 的最小尺寸限制**：在 `ats/ui/main_window.py` 中为 `self.center_tabs` (包含持仓、订单、回测和内核轨迹 Tab 页) 设置了 `setMinimumWidth(100)` 和 `setMinimumHeight(80)`。打破了由于回测卡片布局或订单表等子组件过大导致 `minimumSizeHint()` 撑满分割器，无法横向和纵向自由拖扁拉窄的物理锁定。

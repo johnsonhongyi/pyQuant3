@@ -16,6 +16,7 @@ from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
 from ats.ui.swing_table import SwingStateTable
 from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
 from ats.ui.kernel_trace_panel import KernelTracePanel
+from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
 from JohnsonUtil import commonTips as cct
@@ -695,6 +696,7 @@ class ATSMainWindow(QMainWindow):
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
         self.stock_history_cache = {}
+        self.dragon_monitor_dialog = None
         self.history_loading_codes = set()
         # Changed from a simple set to a {code: fail_timestamp} dict.
         # Codes that failed will be retried after 5 minutes, and the entire
@@ -979,6 +981,7 @@ class ATSMainWindow(QMainWindow):
         self.center_splitter = QSplitter(Qt.Orientation.Vertical)
         
         self.swing_table = SwingStateTable()
+        self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.center_splitter.addWidget(self.swing_table)
         
         # Bottom Tabs in center panel
@@ -2256,6 +2259,13 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
             
+        from PyQt6.sip import isdeleted
+        if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
+            try:
+                self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error updating dragon monitor: {e}")
+            
         # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
         if has_df:
             for widget in QApplication.topLevelWidgets():
@@ -2753,3 +2763,27 @@ class ATSMainWindow(QMainWindow):
                         pass
         except Exception as e:
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
+
+    def open_dragon_monitor(self):
+        if getattr(self, '_is_closing', False):
+            return
+        from PyQt6.sip import isdeleted
+        if self.dragon_monitor_dialog is None or isdeleted(self.dragon_monitor_dialog):
+            self.dragon_monitor_dialog = DragonLeaderMonitorDialog(self)
+            self.dragon_monitor_dialog.code_clicked.connect(self.link_stock)
+        self.dragon_monitor_dialog.show_normal_position()
+        
+        has_df = self.current_df is not None and not self.current_df.empty
+        sh_pct = 0.0
+        if has_df:
+            if 'sh000001' in self.current_df.index:
+                sh_pct = float(self.current_df.loc['sh000001'].get('percent', 0.0))
+            elif '000001' in self.current_df.index and 'sh' in str(self.current_df.loc['000001'].get('code', '')):
+                sh_pct = float(self.current_df.loc['000001'].get('percent', 0.0))
+            else:
+                if 'percent' in self.current_df.columns:
+                    sh_pct = float(self.current_df['percent'].mean())
+        try:
+            self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
+        except Exception as e:
+            print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
