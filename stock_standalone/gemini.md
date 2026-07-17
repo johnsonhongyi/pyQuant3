@@ -1,3 +1,31 @@
+## 2026-07-17 18:10
+- [x] **解除持仓及底部 Tab 窗口的高度与宽度自由拖动限制 (Unlocked Holding/Bottom Tabs Resize Constraints)**：
+    - [x] **强制解除 `center_tabs` 的最小尺寸限制**：在 `ats/ui/main_window.py` 中为 `self.center_tabs` (包含持仓、订单、回测和内核轨迹 Tab 页) 设置了 `setMinimumWidth(100)` 和 `setMinimumHeight(80)`。打破了由于回测卡片布局或订单表等子组件过大导致 `minimumSizeHint()` 撑满分割器，无法横向和纵向自由拖扁拉窄的物理锁定。
+    - [x] **优化 `right_tabs` 水平与垂直伸缩度**：为右侧市场分布及资金曲线的 `self.right_tabs` 设置了同样的 `setMinimumWidth(100)` 和 `setMinimumHeight(80)` 保护，全系统拉伸体验更为流畅。
+    - [x] **压缩 `PositionPanel` 资产面板尺寸因子**：对 `ats/ui/trade_flow.py` 中持仓明细顶部的总资产、可用资金、总盈亏信息概要栏进行了重构，调小了各 Label 字体（降为 10pt），并将间隔 Spacing 从 30 缩减至 10。从根本上消除了此处多列横向组件撑起的多余最小宽度，使中间面板能无限极地向窄微调。
+
+## 2026-07-17 18:05
+- [x] **实现 DFF2/DFF3 与大盘偏离度、同步/反向共振指标的共存展示 (Coexistence of DFF2/DFF3 with Relative Strength & Resonance)**：
+    - [x] **拓展 `SwingStateTable` 至 14 列展示架构**：恢复了先前被移除的 `DFF2` 和 `DFF3` 列，将列数拓展为 14 列。在大盘偏离和大盘共振并存的前提下，依然保留了 DFF 家族三个主要因子的直观跟踪。
+    - [x] **对齐多列单元格的高亮样式与索引**：更新了 `NumericTableWidgetItem` 的渲染分支，恢复了 7、9、10 列作为 DFF 家族的颜色渲染，并将 11、12 列分别对齐为大盘偏离和大盘共振的高亮及加粗判定。
+    - [x] **同步重构实时数据泵元组映射与双击行为**：修改了主窗口 `refresh_realtime_ui` 方法中 `swing_rows.append` 拼装元组的结构，将 `dff2_val` 和 `dff3_val` 变量值同步推送至数据表，同时确保双击行时解析上下文的列索引安全递增。
+
+## 2026-07-17 18:00
+- [x] **实现大盘强弱偏离度与同步/反向共振状态实时跟踪 (Implemented Relative Strength Deviation & Resonance Tracking)**：
+    - [x] **升级 `SwingStateTable` 核心列表展示指标**：摒弃了原本冗余且相似的 `DFF2` 和 `DFF3` 列，将其重构为“大盘偏离 (Relative Strength)”与“大盘共振 (Resonance)”指标。这让高波段回调的强势个股或逆市抗跌龙头一目了然，无需在数以千计的模糊信号中翻找。
+    - [x] **实现大盘参考值及相对偏离度实时计算 (Realtime Relative Strength Calc)**：在 `refresh_realtime_ui` 中，引入了上证指数与个股等权均值的混合大盘指数代理。实时计算 `Relative Strength = 个股日内涨幅 - 大盘涨幅`。对大于 `+2.0%` 的超额偏离，实施亮红色并加粗高亮；对负偏离个股以绿色表示。
+    - [x] **内置多维度同步/反向共振状态判决 (Resonance Rules Engine)**：定义了四种经典的市场与个股共振状态：
+        - `逆市抗跌`：当大盘下跌且个股逆市大涨时触发，以亮珊瑚橘色并加粗高亮呈现（反向能力）；
+        - `大盘共振`：大盘处于上行周期而个股处于多头加速共振阶段时触发，以亮红色并加粗高亮呈现（同步涨能力）；
+        - `同步走弱` 与 `同步整理`：适配常态个股走势。
+    - [x] **实现每日 Alpha 强势股捕获与持久化日志 (Daily Alpha JSON Logger)**：在主窗口新增 `_record_alpha_signal` 持久化机制。当检测到个股触发 `大盘共振` 或 `逆市抗跌` 状态时，自动以 JSON 格式归档至 `data/ats_alpha_tracker_YYYY-MM-DD.json` 文件中，并通过 5 分钟（300秒）防抖去重机制，保护磁盘 I/O，提供了每日复盘与高级实时跟踪数据基础。
+
+## 2026-07-17 15:30
+- [x] **优化风控止损技术破位与多周期共振龙头开仓逻辑 (Optimized Risk Stop-Loss & Multi-Period Leader Entry)**：
+    - [x] **彻底重构 `_stop_check` 破位止损判断**：剥离了原先对 `cost_price <= 0` 的硬编码前置限制，仅保留在百分比盈亏和移动止盈相关计算中。同时引入 2D/3D 多周期重心下移、MA20 核心支撑破位、极速日内大跌等多维度纯技术面强制止损判断。这确保了即使用户在实盘中没有录入成本价，系统仍然可以通过视觉和语音爆红高亮强势止损，彻底杜绝类似 `688766` 的深套风险。
+    - [x] **实现 `_realtime_priority_check` 多周期共振领涨龙头拦截开仓**：在 `evaluate` 前置检查中，通过 2D/3D 重心上行、均线多头、板块强度分、55188 人气和主力资金的综合判定，识别出高胜率的加速共振龙头个股。在日内站稳均价线且不属于派发结构时，强制触发最高优先级买入信号，并标记为 `🚀[多周期2D/3D加速共振]` 且配置 0.5-0.55 的重仓比，解决在繁杂的信号中抓不住主线领涨龙头的痛点。
+    - [x] **强化 Dashboard 致命风控信号的深红霸屏高亮与语音强力播报**：在 `signal_dashboard_panel.py` 的 `_insert_row` 渲染路径中，对包含“止损/平仓/崩溃/破位”等致命信号的行，强制渲染为深红底色白字，并在 `_flash_row` 中引入自愈笔刷，使得闪烁结束后能够平滑回退到深红/重点高亮背景而非还原成常规透明。同时在 `_show_alert_banner` 中，对这部分极高危风控信号实行强制紧急的大声语音播报，大幅提升实盘中的听觉与视觉震慑效果。
+
 ## 2026-07-17 12:00
 - [x] **实现分时图红色受压杀跌段实时渲染与买入防御拦截 (Implemented Realtime VWAP Pressure Render & Defensive Buy Blocking)**：
     - [x] **实现分时图红色压制线绘制**：在 `trade_visualizer_qt6.py` 中接入后台最新决策结果中的 `vwap_break_ts` 时间戳。通过将分时图时间序列动态转换为当前交易日 Unix 时间戳，精准过滤出跌破 VWAP 均线后的所有分时节点，并用亮红色笔宽 `pen=pg.mkPen('#FF3333', width=2.5)` 在分时图上叠加重绘该段曲线，使得“杀跌浪反弹不上均线”特征在视觉上极其醒目。

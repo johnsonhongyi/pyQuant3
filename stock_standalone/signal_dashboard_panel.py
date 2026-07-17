@@ -3766,9 +3766,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.alert_banner.setVisible(True)
         self._banner_timer.start(10000) # 10秒后消失
         
-        # [NEW] 语音预警
+        # [NEW] 语音预警 - 针对止损破位类高风险预警，实行强制紧急大声提醒
         try:
-            get_alert_manager().speak(msg)
+            if any(kw in msg for kw in ["止损", "平仓", "破位", "跌破", "崩溃", "极速离场"]):
+                get_alert_manager().speak(f"警告！{msg}！请立即果断卖出止损离场！", force=True)
+            else:
+                get_alert_manager().speak(msg)
         except Exception as e:
             logger.debug(f"Speak failed: {e}")
 
@@ -4192,18 +4195,42 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     it.setForeground(color)
                     if is_alerted: it.setBackground(alert_bg)
             
-            # [NEW] 重点信号行高亮
-            if "[重点]" in detail or "[重点]" in pattern:
+            # [NEW] 重点信号行高亮与致命风控止损行特殊高亮
+            is_risk_stop = False
+            if any(kw in pattern or kw in detail for kw in ["止损", "平仓", "崩塌", "破位", "极速离场", "大周期崩溃", "跌破"]):
+                is_risk_stop = True
+                
+            is_priority_bg = False
+            priority_bg_brush = None
+            
+            if is_risk_stop:
+                risk_bg = self._brushes.get("risk_bg", QBrush(QColor("#8B0000"))) # 深红底
+                is_priority_bg = True
+                priority_bg_brush = risk_bg
+                for i in range(table.columnCount()):
+                    it = table.item(new_row, i)
+                    if it:
+                        it.setBackground(risk_bg)
+                        # 白字高亮加粗
+                        it.setForeground(QColor("#ffffff"))
+                        f = it.font()
+                        f.setBold(True)
+                        it.setFont(f)
+            elif "[重点]" in detail or "[重点]" in pattern:
                 highlight_bg = self._brushes.get("highlight_bg", QBrush(QColor(255, 127, 80, 50)))
+                is_priority_bg = True
+                priority_bg_brush = highlight_bg
                 for i in range(table.columnCount()):
                     it = table.item(new_row, i)
                     if it: 
                         it.setBackground(highlight_bg)
                         if i in [2, 3]:
-                            f = it.font(); f.setBold(True); it.setFont(f)
+                            f = it.font()
+                            f.setBold(True)
+                            it.setFont(f)
 
             # [A4] 修复重复调用，闪烁新插入行
-            self._flash_row(table, new_row)
+            self._flash_row(table, new_row, is_priority_bg, priority_bg_brush)
             
             # [FIX] 不要在这里执行 sortByColumn，这会导致每一行插入都重排一次
             # 如果是批量插入，排序会在 _process_batch_signals 恢复时进行一次全局排序
@@ -4215,7 +4242,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if insert_dur > 20:
                  logger.debug(f"⚠️ [DASHBOARD_PERF] _insert_row cost {insert_dur:.1f}ms for {name}({code})")
 
-    def _flash_row(self, table, row):
+    def _flash_row(self, table, row, is_priority_bg=False, priority_bg_brush=None):
         try:
             items = [table.item(row, i) for i in range(table.columnCount())]
             if not items or not items[0]: return
@@ -4224,10 +4251,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 if item: item.setBackground(flash_bg)
             
             def reset_bg():
-                transparent = self._brushes.get("transparent", QBrush(QColor(0, 0, 0, 0)))
+                bg_brush = priority_bg_brush if is_priority_bg else self._brushes.get("transparent", QBrush(QColor(0, 0, 0, 0)))
                 for it in items:
                     try:
-                        if it: it.setBackground(transparent)
+                        if it: it.setBackground(bg_brush)
                     except RuntimeError:
                         pass # Item was deleted from C++ side
             QTimer.singleShot(800, reset_bg)
