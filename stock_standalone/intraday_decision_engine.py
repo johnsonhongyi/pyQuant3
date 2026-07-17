@@ -941,171 +941,165 @@ class IntradayDecisionEngine:
         cost_price = float(snapshot.get("cost_price", 0))
         highest_since_buy = float(snapshot.get("highest_since_buy", 0))
         
-        if cost_price <= 0 or price <= 0:
+        if price <= 0:
             return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
-        
-        pnl_pct = (price - cost_price) / cost_price
-        debug["盈亏比例"] = pnl_pct
-        
-        # 1. 基础百分比止损 (分批)
-        if pnl_pct < -self.stop_loss_pct:
-            # 达到硬止损线，全清
-            return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
-        
-        # ⭐ [NEW] 开盘 15 分钟高敏感止损 (针对 T+1)
-        now_time = dt.datetime.now().time()
-        is_t1 = snapshot.get("buy_date", "") != dt.datetime.now().strftime("%Y-%m-%d")
-        if is_t1 and now_time <= dt.datetime.strptime("09:45", "%H:%M").time():
-            # 早盘如果亏损超过 2.5% 且反弹无力（在均线下方）
-            if pnl_pct < -0.025 and price < nclose:
-                return {"triggered": True, "action": "开盘止损", "position": 0.0, "reason": f"早盘弱势且亏损达{abs(pnl_pct):.1%}"}
-        
-        # --- [New] 🚨 提前预警与主动防守 (Early Detection Sell Logic) 🚨 ---
-        # 目标：在达到 2.5% 的硬性预警前，通过结构、均线、流动性特征提前识别风险。
-        vwap_trend_score = self._vwap_trend_check(row, snapshot, debug)
-        structure = debug.get("structure", "UNKNOWN")
-        
-        # A. 均线下移严重 (VWAP Downtrend) + 破位
-        if vwap_trend_score < -0.3 and price < nclose and pnl_pct < -0.01:
-            return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": f"均线下移明显且亏损{abs(pnl_pct):.1%}"}
             
-        # B. 反弹无力与拒绝 (Failed Rebounds)
-        # 记录的日内高点
-        highest_today = float(snapshot.get('highest_today', high))
-        highest_since_buy = float(snapshot.get('highest_since_buy', high))
+        # 提取均线和历史收盘价数据用于跨周期破位决策
+        ma5 = float(row.get("ma5d", 0))
+        ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        ma60 = float(row.get("ma60d", 0))
+        last_close = float(snapshot.get("last_close", snapshot.get("lastp1d", 0)))
         
-        if nclose > 0 and price < nclose:
-            # 高点下移 (Lower Highs): 日内最高点无法突破，且当前价又跌回均线之下
-            if highest_since_buy > 0 and high < highest_since_buy * 0.985 and pnl_pct < -0.015:
-                # 已经是第二次/第三次冲高失败
-                return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
-                
-            # 强拒绝 (Strong Rejection): 反弹触及均价线附近即被打回
-            distance_to_vwap = (nclose - high) / nclose if nclose > 0 else 1.0
-            if 0 < distance_to_vwap < 0.005 and high > 0 and (high - price) / high > 0.015 and pnl_pct < -0.01:
-                return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
-                
-            # 极弱反弹 (Weak Rejection): 远离均线的小幅反弹，随后继续下跌
-            if distance_to_vwap > 0.015 and high > 0 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
-                # 缩量且离均线很远的反弹失败
-                return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
-                
-        # C. 流动性衰竭 (Liquidity Drain)
-        # 连续上涨后量能不足导致的阴跌
-        if structure == "派发" and volume < 0.5 and pnl_pct < -0.015:
-             return {"triggered": True, "action": "流动性预警", "position": 0.4, "reason": "派发结构伴随量能枯竭"}
-
-        # 2. 传统预警止损 (-2.5%)
-        if pnl_pct < -0.025: # 预警止损收紧到 2.5%
-            # 检查是否有反弹无力迹象（低于均价）或结构走弱
-            if (nclose > 0 and price < nclose) or structure in ["派发", "走弱"]:
-                # 如果是派发，直接全清，不再减半
-                target_pos = 0.0 if structure == "派发" else 0.4
-                return {"triggered": True, "action": "预警止损", "position": target_pos, "reason": f"结构{structure}且亏损{abs(pnl_pct):.1%}"}
-
-        # --- 每日中轴趋势止损 (Daily Midline Stop-Loss) ---
-        # 依赖于 StockLiveStrategy 注入的 snapshot 数据
-        mid_rising = snapshot.get('midline_rising', False)
-        mid_falling = snapshot.get('midline_falling', False)
+        lastp1 = float(row.get('lastp1d', snapshot.get('lastp1d', 0)))
+        lastp2 = float(row.get('lastp2d', snapshot.get('lastp2d', 0)))
+        lastp3 = float(row.get('lastp3d', snapshot.get('lastp3d', 0)))
+        lastp4 = float(row.get('lastp4d', snapshot.get('lastp4d', 0)))
+        lastp5 = float(row.get('lastp5d', snapshot.get('lastp5d', 0)))
         
-        # 3. 趋势止损：中轴连跌且今日价格在均价之下 (Weakening Trend)
-        if mid_falling and price < nclose and pnl_pct < -0.015:
-            return {"triggered": True, "action": "趋势止损", "position": 0.3, "reason": "日线中轴重心下移且弱于均价"}
-
-        # 4. 也是趋势止损：如果中轴没有上升，且今日高开低走(或冲高回落)跌破均价
-        if not mid_rising:
-             # 检查是否大幅回撤
-             if high > 0 and (high - price) / high > 0.02 and price < nclose:
-                 return {"triggered": True, "action": "回撤止损", "position": 0.3, "reason": "中轴未升+日内冲高回落破均价"}
-
-        # 3. 均值回归止损 (Mean Reversion Stop)
-        # 低开低走，且被均线压制，且中轴下移 -> 极弱，不做反弹幻想
-        if mid_falling:
-            open_p = float(row.get("open", 0))
-            ma5 = float(row.get("ma5d", 0))
-            if open_p > 0 and price < open_p and ma5 > 0 and price < ma5:
-                 return {"triggered": True, "action": "极弱止损", "position": 0.0, "reason": "极弱形态(中轴降+被均线压制)"}
-
-
-        # 2. 基础百分比止盈 (分三步)
-        if pnl_pct >= self.take_profit_pct:
-            return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
+        # ----------------- 💥 跨周期技术趋势崩溃止损 (跨越成本，强制判定) -----------------
         
-        if 0.05 <= pnl_pct < self.take_profit_pct:
-            # 盈利 5% 减 30% 保护利润
-            debug["分步止盈"] = "第一目标已达"
-            # 保持盈利 5% 的减仓建议可以通过实时判断后续给出
-            
-        # 3. 分级移动止盈 (回撤保护，根据盈利幅度动态调整回撤容忍度)
-        if highest_since_buy > 0 and highest_since_buy > cost_price:
-            drawdown = (highest_since_buy - price) / highest_since_buy
-            
-            # 分级回撤阈值：盈利越高，容忍度越大
-            if pnl_pct >= 0.08:
-                # 盈利 > 8%：容忍 5% 回撤
-                trailing_threshold = 0.05
-                debug["移动止盈档位"] = "高盈利档(8%+)"
-            elif pnl_pct >= 0.05:
-                # 盈利 5-8%：容忍 4% 回撤
-                trailing_threshold = 0.04
-                debug["移动止盈档位"] = "中盈利档(5-8%)"
-            elif pnl_pct >= 0.03:
-                # 盈利 3-5%：容忍 3% 回撤
-                trailing_threshold = 0.03
-                debug["移动止盈档位"] = "低盈利档(3-5%)"
-            else:
-                trailing_threshold = self.trailing_stop_pct  # 默认阈值
+        # A. 2D/3D 重心下移且跌破 MA5（多周期趋势共振崩塌）
+        is_multi_period_breakdown = False
+        if lastp1 > 0 and lastp2 > 0 and lastp3 > 0:
+            is_2d_down = (price < lastp2) and (lastp1 < lastp3)
+            is_3d_down = (price < lastp3) and (lastp2 < lastp5) if lastp5 > 0 else False
+            if (is_2d_down or is_3d_down) and (ma5 > 0 and price < ma5 * 0.985):
+                is_multi_period_breakdown = True
                 
-            if pnl_pct > 0.03 and drawdown > trailing_threshold:
-                # 保留部分仓位让利润继续奔跑
-                retain_pos = 0.2 if pnl_pct >= 0.05 else 0.3
-                return {"triggered": True, "action": "移动止盈", "position": retain_pos, "reason": f"最高回撤{drawdown:.1%}(阈值{trailing_threshold:.1%})"}
+        if is_multi_period_breakdown:
+            return {"triggered": True, "action": "趋势崩塌", "position": 0.0, "reason": "⚠️[多周期趋势崩塌-重心下移且跌破五日线]"}
 
-        # 4. 技术位破位检测 (大开大合)
-        low10 = float(snapshot.get("low10", 0))
+        # B. 跌破中期核心支撑 (MA20) 且趋势空头排列
+        ma_bearish = (ma5 < ma10 < ma20) if (ma5 > 0 and ma10 > 0 and ma20 > 0) else False
+        if ma20 > 0 and price < ma20 * 0.98:
+            if ma_bearish or (ma10 > 0 and price < ma10 * 0.985):
+                return {"triggered": True, "action": "趋势止损", "position": 0.0, "reason": "⚠️[跌破中线支撑-跌破MA20且中期均线走空]"}
+
+        # C. 极速日内大跌趋势破位 (比如 688766 急剧杀跌)
+        percent_now = float(row.get('percent', 0))
+        if percent_now < -4.5 and ma10 > 0 and price < ma10 * 0.985:
+            return {"triggered": True, "action": "极速离场", "position": 0.0, "reason": f"⚠️[极速杀跌破位-日内大跌{percent_now:.1f}%且下破MA10]"}
+
+        # D. 60日大底大周期底线物理砸穿
         low60 = float(snapshot.get("low60", 0))
+        if low60 > 0 and price < low60 * 0.975:
+            return {"triggered": True, "action": "强制清仓", "position": 0.0, "reason": "⚠️[大周期崩溃-物理砸穿60日大底保护线]"}
+
+        # ----------------- 💥 百分比盈亏止损止盈及回撤逻辑 (要求 cost_price > 0) -----------------
+        if cost_price > 0:
+            pnl_pct = (price - cost_price) / cost_price
+            debug["盈亏比例"] = pnl_pct
+            
+            # 1. 基础百分比硬止损 (亏损超限，全清)
+            if pnl_pct < -self.stop_loss_pct:
+                return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
+            
+            # 2. 开盘 15 分钟高敏感止损 (针对 T+1)
+            now_time = dt.datetime.now().time()
+            is_t1 = snapshot.get("buy_date", "") != dt.datetime.now().strftime("%Y-%m-%d")
+            if is_t1 and now_time <= dt.datetime.strptime("09:45", "%H:%M").time():
+                if pnl_pct < -0.025 and price < nclose:
+                    return {"triggered": True, "action": "开盘止损", "position": 0.0, "reason": f"早盘弱势且亏损达{abs(pnl_pct):.1%}"}
+            
+            # 3. 提前预警与主动防守
+            vwap_trend_score = self._vwap_trend_check(row, snapshot, debug)
+            structure = debug.get("structure", "UNKNOWN")
+            
+            if vwap_trend_score < -0.3 and price < nclose and pnl_pct < -0.01:
+                return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": f"均线下移明显且亏损{abs(pnl_pct):.1%}"}
+                
+            highest_today = float(snapshot.get('highest_today', high))
+            highest_since_buy = float(snapshot.get('highest_since_buy', high))
+            
+            if nclose > 0 and price < nclose:
+                # 高点下移 (Lower Highs)
+                if highest_since_buy > 0 and high < highest_since_buy * 0.985 and pnl_pct < -0.015:
+                    return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
+                    
+                # 强拒绝 (Strong Rejection)
+                distance_to_vwap = (nclose - high) / nclose if nclose > 0 else 1.0
+                if 0 < distance_to_vwap < 0.005 and high > 0 and (high - price) / high > 0.015 and pnl_pct < -0.01:
+                    return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
+                    
+                # 极弱反弹 (Weak Rejection)
+                if distance_to_vwap > 0.015 and high > 0 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
+                    return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
+                    
+            if structure == "派发" and volume < 0.5 and pnl_pct < -0.015:
+                 return {"triggered": True, "action": "流动性预警", "position": 0.4, "reason": "派发结构伴随量能枯竭"}
+    
+            # 4. 传统预警止损 (-2.5%)
+            if pnl_pct < -0.025:
+                if (nclose > 0 and price < nclose) or structure in ["派发", "走弱"]:
+                    target_pos = 0.0 if structure == "派发" else 0.4
+                    return {"triggered": True, "action": "预警止损", "position": target_pos, "reason": f"结构{structure}且亏损{abs(pnl_pct):.1%}"}
+    
+            # 5. 每日中轴重心向下止损
+            mid_falling = snapshot.get('midline_falling', False)
+            if mid_falling and price < nclose and pnl_pct < -0.015:
+                return {"triggered": True, "action": "趋势止损", "position": 0.3, "reason": "日线中轴重心下移且弱于均价"}
+    
+            # 6. 分步止盈与移动止盈
+            if pnl_pct >= self.take_profit_pct:
+                return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
+                
+            if highest_since_buy > 0 and highest_since_buy > cost_price:
+                drawdown = (highest_since_buy - price) / highest_since_buy
+                if pnl_pct >= 0.08:
+                    trailing_threshold = 0.05
+                    debug["移动止盈档位"] = "高盈利档(8%+)"
+                elif pnl_pct >= 0.05:
+                    trailing_threshold = 0.04
+                    debug["移动止盈档位"] = "中盈利档(5-8%)"
+                elif pnl_pct >= 0.03:
+                    trailing_threshold = 0.03
+                    debug["移动止盈档位"] = "低盈利档(3-5%)"
+                else:
+                    trailing_threshold = self.trailing_stop_pct
+                    
+                if pnl_pct > 0.03 and drawdown > trailing_threshold:
+                    retain_pos = 0.2 if pnl_pct >= 0.05 else 0.3
+                    return {"triggered": True, "action": "移动止盈", "position": retain_pos, "reason": f"最高回撤{drawdown:.1%}(阈值{trailing_threshold:.1%})"}
+
+        # ----------------- 💥 其他技术性支撑/阻力止损 -----------------
+        low10 = float(snapshot.get("low10", 0))
         hmax = float(snapshot.get("hmax", 0))
         lower = float(snapshot.get("lower", 0))
         
-        # 平台破位/关键支撑
         break_reason = ""
         if lower > 0 and price < lower:
             break_reason = "跌破布林下轨"
         elif low10 > 0 and price < low10 * 0.995:
             break_reason = "跌破10日低点"
-        elif hmax > 0 and price < hmax * 0.985: # 原高点转支撑失效
+        elif hmax > 0 and price < hmax * 0.985:
             break_reason = f"跌破平台支撑({hmax:.2f})"
-        
-        if low60 > 0 and price < low60 * 0.98: # 60日大底破位
-            break_reason = "跌破60日底线"
             
         if break_reason:
-            # 如果是带量破位（量比 > 2）
             if volume > 2.0:
                 return {"triggered": True, "action": "强制清仓", "position": 0.0, "reason": f"放量破位: {break_reason}"}
             else:
                 return {"triggered": True, "action": "破位减仓", "position": 0.3, "reason": break_reason}
 
-        # 5. 布林压力位逻辑 (upper1-5)
-        uppers = [snapshot.get(f'upper{i}', 0) for i in range(1, 6)]
-        for i, up in enumerate(reversed(uppers)):
-            level = 5 - i
-            if up > 0 and price >= up:
-                # 触及 upper4/5 时检查盘中结构
-                structure = debug.get("structure", "中性")
-                if level >= 4:
-                    if structure in ["派发", "走弱"] or (volume > 2.5 and price < nclose):
-                        return {"triggered": True, "action": "高位止盈", "position": 0.3 if level == 5 else 0.5, "reason": f"触及布林{level}轨压力+盘中走弱"}
-                    debug["布林压力"] = f"触及{level}轨，观察中"
-                break
+        # 7. 布林压力位高位止盈 (要求有 cost_price 仓位)
+        if cost_price > 0:
+            uppers = [snapshot.get(f'upper{i}', 0) for i in range(1, 6)]
+            for i, up in enumerate(reversed(uppers)):
+                level = 5 - i
+                if up > 0 and price >= up:
+                    structure = debug.get("structure", "中性")
+                    if level >= 4:
+                        if structure in ["派发", "走弱"] or (volume > 2.5 and price < nclose):
+                            return {"triggered": True, "action": "高位止盈", "position": 0.3 if level == 5 else 0.5, "reason": f"触及布林{level}轨压力+盘中走弱"}
+                        debug["布林压力"] = f"触及{level}轨，观察中"
+                    break
 
-        # 6. 大开大合逻辑 (大幅振幅且回落)
-        if nclose > 0:
-            daily_amplitude = (high - low) / nclose
-            if daily_amplitude > 0.08: # 振幅超过 8%
-                # 如果从高位回撤显著且低于均价
-                if high > 0 and (high - price) / high > 0.04 and price < nclose:
-                    return {"triggered": True, "action": "振幅减仓", "position": 0.2, "reason": f"大开大合(振幅{daily_amplitude:.1%})且回落"}
+            # 大开大合振幅止损
+            if nclose > 0:
+                daily_amplitude = (high - low) / nclose
+                if daily_amplitude > 0.08:
+                    if high > 0 and (high - price) / high > 0.04 and price < nclose:
+                        return {"triggered": True, "action": "振幅减仓", "position": 0.2, "reason": f"大开大合(振幅{daily_amplitude:.1%})且回落"}
 
         return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
 
@@ -1771,6 +1765,74 @@ class IntradayDecisionEngine:
                     "action": "买入",
                     "position": 0.4, # 初始仓位不错
                     "reason": "V型反转确立+趋势向上",
+                    "debug": debug
+                }
+
+        # ========== [NEW] Priority 0.5. 多周期 2D/3D 强势加速共振与领涨风口龙头介入 ==========
+        # 整合 2D/3D 多周期强势排列、板块热度分、选股底分、55188 人气主力，进行高胜率狙击
+        is_multi_period_accelerating = False
+        is_hot_sector = False
+        
+        lastp1 = float(row.get('lastp1d', snapshot.get('lastp1d', 0)))
+        lastp2 = float(row.get('lastp2d', snapshot.get('lastp2d', 0)))
+        lastp3 = float(row.get('lastp3d', snapshot.get('lastp3d', 0)))
+        lastp4 = float(row.get('lastp4d', snapshot.get('lastp4d', 0)))
+        lastp5 = float(row.get('lastp5d', snapshot.get('lastp5d', 0)))
+        
+        # 1. 均线多头排列且站稳均线
+        ma5 = float(row.get("ma5d", 0))
+        ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        ma_bullish = (ma5 > 0 and ma10 > 0 and ma20 > 0) and (ma5 > ma10 > ma20)
+        
+        # 2. 多周期重心持续上行 (2D, 3D 周期加速)
+        is_2d_rising = False
+        is_3d_rising = False
+        if lastp1 > 0 and lastp2 > 0:
+            is_2d_rising = price > lastp1 > lastp2
+        if lastp2 > 0 and lastp4 > 0:
+            is_3d_rising = price > lastp2 > lastp4
+            
+        # 3. 选股与底分评估
+        selection_score = float(snapshot.get("score", 0))
+        structure_base_score = float(snapshot.get("structure_base_score", 50.0))
+        good_base = (selection_score >= 45 or structure_base_score >= 65)
+        
+        # 4. 板块共振评估
+        theme_name = snapshot.get("theme_name", "")
+        sector_score = float(snapshot.get("sector_score", 0.0))
+        if theme_name and (sector_score >= 1.0 or any(kw in theme_name for kw in ["核心", "龙头", "强势", "半导体", "光模块", "CPO", "机器人"])):
+            is_hot_sector = True
+            
+        # 5. 55188 情绪与主力资金
+        hot_rank = int(snapshot.get('hot_rank', 999))
+        zhuli_rank = int(snapshot.get('zhuli_rank', 999))
+        is_pop_leader = (1 <= hot_rank <= 50) or (1 <= zhuli_rank <= 50)
+        
+        if ma_bullish and is_2d_rising and is_3d_rising and good_base:
+            is_multi_period_accelerating = True
+            
+        if mode in ("full", "buy_only") and is_multi_period_accelerating:
+            structure = debug.get("structure", "UNKNOWN")
+            # 强势加速股，允许小幅回落但不属于“派发”出逃，且必须站稳日内均线 (VWAP 均线上方)
+            if structure != "派发" and price > nclose:
+                base_position = 0.4
+                lead_tag = ""
+                if is_hot_sector:
+                    base_position = 0.5
+                    lead_tag += "[风口领涨]"
+                if is_pop_leader:
+                    base_position = 0.55
+                    lead_tag += "[人气主力龙头]"
+                    
+                debug["is_priority"] = True
+                debug["realtime_reason"] = f"🚀 [多周期2D/3D加速共振]{lead_tag}"
+                
+                return {
+                    "triggered": True,
+                    "action": "买入",
+                    "position": base_position,
+                    "reason": f"🚀 [多周期2D/3D加速共振]{lead_tag} 价格:{price:.2f} 选股分:{selection_score:.1f}",
                     "debug": debug
                 }
 

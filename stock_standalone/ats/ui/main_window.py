@@ -983,6 +983,8 @@ class ATSMainWindow(QMainWindow):
         
         # Bottom Tabs in center panel
         self.center_tabs = QTabWidget()
+        self.center_tabs.setMinimumWidth(100)
+        self.center_tabs.setMinimumHeight(80)
         
         self.position_panel = PositionPanel()
         self.center_tabs.addTab(self.position_panel, "💰 当前持仓 (Holdings)")
@@ -1015,6 +1017,8 @@ class ATSMainWindow(QMainWindow):
         
         # Right charts tab
         self.right_tabs = QTabWidget()
+        self.right_tabs.setMinimumWidth(100)
+        self.right_tabs.setMinimumHeight(80)
         
         self.dist_chart = DistributionBarChart()
         self.right_tabs.addTab(self.dist_chart, "📊 市场分布 (Dist)")
@@ -2112,10 +2116,23 @@ class ATSMainWindow(QMainWindow):
             self._async_load_stock_history(missing_history_codes)
             
         swing_rows = []
+        
+        # 计算大盘参考涨幅 (优先使用上证指数，回退到个股等权均值)
+        sh_pct = 0.0
+        if has_df:
+            if 'sh000001' in self.current_df.index:
+                sh_pct = float(self.current_df.loc['sh000001'].get('percent', 0.0))
+            elif '000001' in self.current_df.index and 'sh' in str(self.current_df.loc['000001'].get('code', '')):
+                sh_pct = float(self.current_df.loc['000001'].get('percent', 0.0))
+            else:
+                if 'percent' in self.current_df.columns:
+                    sh_pct = float(self.current_df['percent'].mean())
+                    
         import datetime
         today_str = datetime.date.today().strftime("%Y-%m-%d")
         for code in all_codes:
             latest_close = 0.0
+            pct_val = 0.0
             dff_val = 0.0
             rank_val = 0
             dff2_val = 0.0
@@ -2127,20 +2144,33 @@ class ATSMainWindow(QMainWindow):
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
                 latest_close = float(row.get('close', row.get('price', 0.0)))
+                pct_val = float(row.get('percent', 0.0))
                 try: dff_val = float(row.get('dff', 0.0))
                 except: pass
                 try: rank_val = int(row.get('Rank', row.get('rank', 0)))
                 except: pass
-                try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
+                try: dff2_val = float(row.get('dff2', 0.0))
                 except: pass
-                try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
+                try: dff3_val = float(row.get('dff3', 0.0))
                 except: pass
             elif code in self.price_pct_cache:
                 latest_close = self.price_pct_cache[code][0]
+                pct_val = self.price_pct_cache[code][1]
             elif code in self.stock_history_cache and self.stock_history_cache[code]:
                 latest_close = float(self.stock_history_cache[code][-1][1])
+                pct_val = 0.0
                 
             name = self.get_stock_name(code)
+            
+            # 计算大盘偏离度和共振状态
+            rs_val = pct_val - sh_pct
+            resonance = "同步整理"
+            if sh_pct < -0.3 and pct_val > 1.5:
+                resonance = "逆市抗跌"
+            elif sh_pct > 0.3 and pct_val > 3.0 and dff_val > 2.0:
+                resonance = "大盘共振"
+            elif pct_val < -3.0 and rs_val < -2.0:
+                resonance = "同步走弱"
             
             # Try to use database history first
             has_history = (code in self.stock_history_cache and self.stock_history_cache[code])
@@ -2214,8 +2244,12 @@ class ATSMainWindow(QMainWindow):
             
             swing_rows.append((
                 code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
-                f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", reason
+                f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", f"{rs_val:+.2f}%", resonance, reason
             ))
+            
+            # 记录逆市/共振个股，提供每日跟踪与高级反馈能力
+            self._record_alpha_signal(code, name, pct_val, sh_pct, rs_val, resonance)
+            
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
             
@@ -2233,6 +2267,69 @@ class ATSMainWindow(QMainWindow):
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
                         widget.update_data(row)
+
+    def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
+        """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪"""
+        import os
+        import json
+        import time
+        
+        # 仅在有意义的信号时才记录
+        if resonance not in ("逆市抗跌", "大盘共振"):
+            return
+            
+        try:
+            today_date = time.strftime("%Y-%m-%d")
+            # 存放在 workspace 下的 data 目录中
+            data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir, exist_ok=True)
+                
+            log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
+            
+            # 使用内存去重，避免对同一个股票每秒行情刷新都重复写文件
+            if not hasattr(self, "_recorded_alpha_stocks"):
+                self._recorded_alpha_stocks = {}
+                
+            last_recorded_time = self._recorded_alpha_stocks.get(code, 0)
+            now = time.time()
+            # 针对同一只股票，同一状态，在 5 分钟（300秒）内只记录一次
+            if now - last_recorded_time < 300:
+                return
+                
+            self._recorded_alpha_stocks[code] = now
+            
+            # 读取已有的
+            records = []
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, 'r', encoding='utf-8') as f:
+                        records = json.load(f)
+                except Exception:
+                    records = []
+                    
+            # 追加新纪录
+            time_str = time.strftime("%H:%M:%S")
+            records.append({
+                "time": time_str,
+                "code": code,
+                "name": name,
+                "pct": f"{pct_val:+.2f}%",
+                "index_pct": f"{sh_pct:+.2f}%",
+                "relative_strength": f"{rs_val:+.2f}%",
+                "type": resonance
+            })
+            
+            # 限制大小，最多保留 1000 条
+            if len(records) > 1000:
+                records = records[-1000:]
+                
+            with open(log_path, 'w', encoding='utf-8') as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+                
+            print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {resonance} 偏离度: {rs_val:+.2f}%")
+        except Exception as e:
+            print(f"[ATSAlphaTracker] 记录信号失败: {e}")
 
     def _handle_realtime_signal(self, signal):
         if not signal:

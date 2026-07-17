@@ -115,28 +115,28 @@ class PositionPanel(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(10)
+        layout.setSpacing(6)
 
         # Portfolio Summary Header
         self.summary_widget = QWidget()
         self.summary_widget.setStyleSheet("background-color: #1a1a24; border: 1px solid #2e2e36; border-radius: 6px;")
         summary_layout = QHBoxLayout(self.summary_widget)
-        summary_layout.setContentsMargins(15, 10, 15, 10)
+        summary_layout.setContentsMargins(10, 5, 10, 5)
         
         self.lbl_total_assets = QLabel("总资产: 1,000,000.00")
-        self.lbl_total_assets.setStyleSheet("font-weight: bold; font-size: 13pt; color: #ffffff;")
+        self.lbl_total_assets.setStyleSheet("font-weight: bold; font-size: 10pt; color: #ffffff;")
         self.lbl_total_assets.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         
         self.lbl_cash = QLabel("可用资金: 1,000,000.00")
-        self.lbl_cash.setStyleSheet("font-weight: bold; font-size: 12pt; color: #aad4ff;")
+        self.lbl_cash.setStyleSheet("font-weight: bold; font-size: 10pt; color: #aad4ff;")
         
         self.lbl_pnl = QLabel("总盈亏: +0.00 (+0.00%)")
-        self.lbl_pnl.setStyleSheet("font-weight: bold; font-size: 12pt; color: #e2e2e5;")
+        self.lbl_pnl.setStyleSheet("font-weight: bold; font-size: 10pt; color: #e2e2e5;")
 
         summary_layout.addWidget(self.lbl_total_assets)
-        summary_layout.addSpacing(30)
+        summary_layout.addSpacing(10)
         summary_layout.addWidget(self.lbl_cash)
-        summary_layout.addSpacing(30)
+        summary_layout.addSpacing(10)
         summary_layout.addWidget(self.lbl_pnl)
         summary_layout.addStretch()
         
