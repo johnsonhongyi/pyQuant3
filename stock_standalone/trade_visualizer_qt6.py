@@ -12709,6 +12709,56 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.avg_curve.setData(x_ticks, avg_prices)
                 self.avg_curve.setPen(pg.mkPen(tick_avg_color, width=1.5))
 
+            # ----- ⚡ [NEW] 绘制反弹不上 VWAP 红色压制段 -----
+            vwap_break_ts = 0.0
+            if 'shadow_decision' in locals() and shadow_decision:
+                vwap_break_ts = shadow_decision.get('debug', {}).get('vwap_break_ts', 0.0)
+
+            # 如果有跌破均线的时间戳，且最新价低于今日均线
+            if vwap_break_ts > 0 and len(prices) > 0 and prices[-1] < avg_prices[-1]:
+                try:
+                    # 1. 提取时间序列
+                    if hasattr(self, 'tick_times') and self.tick_times:
+                        raw_t = self.tick_times
+                    elif 'ticktime' in tick_df.index.names:
+                        raw_t = tick_df.index.get_level_values('ticktime').tolist()
+                    else:
+                        raw_t = tick_df.index.tolist()
+
+                    # 2. 对齐 Unix 时间戳 (处理带时分秒或 Timestamp 格式)
+                    today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+                    ts_list = []
+                    for t in raw_t:
+                        t_str = str(t)
+                        if len(t_str) <= 8 and ":" in t_str:
+                            full_dt_str = f"{today_str} {t_str}"
+                        else:
+                            full_dt_str = t_str
+                        ts_list.append(pd.to_datetime(full_dt_str).timestamp())
+                    ts_arr = np.array(ts_list)
+
+                    # 3. 筛选并重叠绘制受均线压制下跌的价格线
+                    press_mask = ts_arr >= vwap_break_ts
+                    if np.any(press_mask):
+                        press_x = x_ticks[press_mask]
+                        press_y = prices[press_mask]
+                        if not hasattr(self, 'vwap_press_curve') or self.vwap_press_curve not in self.tick_plot.items:
+                            self.vwap_press_curve = self.tick_plot.plot(press_x, press_y, pen=pg.mkPen('#FF3333', width=2.5))
+                        else:
+                            self.vwap_press_curve.setData(press_x, press_y)
+                            self.vwap_press_curve.setPen(pg.mkPen('#FF3333', width=2.5))
+                        self.vwap_press_curve.setVisible(True)
+                    else:
+                        if hasattr(self, 'vwap_press_curve'):
+                            self.vwap_press_curve.hide()
+                except Exception as ex:
+                    logger.debug(f"Draw vwap_press_curve failed: {ex}")
+                    if hasattr(self, 'vwap_press_curve'):
+                        self.vwap_press_curve.hide()
+            else:
+                if hasattr(self, 'vwap_press_curve'):
+                    self.vwap_press_curve.hide()
+
             # ⭐ 保存分时数据供十字光标使用 (1.2)
             self.tick_prices = prices
             self.tick_avg_prices = avg_prices
@@ -12763,6 +12813,12 @@ class MainWindow(QMainWindow, WindowMixin):
             low_pct = (y_min - pre_close) / pre_close * 100 if pre_close > 0 else 0
             
             tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:+.2f}%)  H:{y_max:.2f} ({high_pct:+.2f}%) L:{y_min:.2f} ({low_pct:+.2f}%)"
+            
+            # [NEW] 追加反弹不上均线压制提示到标题上
+            if vwap_break_ts > 0 and prices[-1] < avg_prices[-1]:
+                duration_sec = int(time.time() - vwap_break_ts)
+                if duration_sec > 0:
+                    tick_title += f"  |  <span style='color: #FF3333; font-weight: bold;'>⚠️ 均线压制杀跌中 ({duration_sec}s)</span>"
 
             # 追加监理看板信息
             if not self.df_all.empty:

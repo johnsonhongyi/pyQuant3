@@ -509,6 +509,24 @@ class IntradayDecisionEngine:
                 base_pos += capital_bonus
                 base_pos += sector_bonus
                 
+                # 💥 [NEW] 强力日内杀跌浪与弱势拦截 (防飞刀/防抄底) 💥
+                # 用户痛点：股价正在快速杀跌、或者高位杀跌下来时，容易盲目抄底被砸。在此硬性熔断拦截。
+                highest_today_val = float(snapshot.get("highest_today", price))
+                open_p = float(row.get("open", price))
+                if highest_today_val > 0:
+                    fall_from_high = (highest_today_val - price) / highest_today_val
+                    # 1. 冲高回落杀跌浪拦截：回落幅度超过 3.0% 视为处于杀跌浪或派发阶段，坚决拦截（除非策略评级极强，即 selection_score >= 65）
+                    if fall_from_high > 0.03 and selection_score < 65:
+                        debug["refuse_buy"] = f"高位回落杀跌浪({fall_from_high:.1%})"
+                        return self._hold(f"高位回落杀跌浪({fall_from_high:.1%})禁买", debug)
+                
+                # 2. 开盘 15 分钟后，如果股价连今日开盘价都无法站上，说明整体极弱，拒绝开仓
+                now_time_obj = dt.datetime.now().time()
+                if now_time_obj > dt.datetime.strptime("09:45", "%H:%M").time():
+                    if price < open_p:
+                        debug["refuse_buy"] = f"跌破开盘价(当前{price:.2f}<开盘{open_p:.2f})"
+                        return self._hold("低于开盘价禁买", debug)
+                
                 # 如果价格在今日今日成交均价（nclose）下方，【硬性拒绝】买入
                 # User Rule: 不允许任何低于分时均线（VWAP）的买入
                 if nclose > 0 and price < nclose:
@@ -1725,10 +1743,23 @@ class IntradayDecisionEngine:
         # 数据有效性检查
         if price <= 0 or open_p <= 0 or last_close <= 0:
             debug["realtime_skip"] = "数据无效"
-        # 数据有效性检查
-        if price <= 0 or open_p <= 0 or last_close <= 0:
-            debug["realtime_skip"] = "数据无效"
             return result
+
+        # ---------- 均价跌破状态跟踪 (VWAP Breakout Tracking) ----------
+        import time
+        now_ts = time.time()
+        if nclose > 0 and price < nclose:
+            if not snapshot.get('vwap_break_ts'):
+                snapshot['vwap_break_ts'] = now_ts
+                snapshot['vwap_break_max_price'] = price
+            else:
+                snapshot['vwap_break_max_price'] = max(snapshot.get('vwap_break_max_price', price), price)
+        else:
+            snapshot['vwap_break_ts'] = 0.0
+            snapshot['vwap_break_max_price'] = 0.0
+
+        # 将状态回写到 debug 中供画图渲染读取
+        debug['vwap_break_ts'] = snapshot.get('vwap_break_ts', 0.0)
 
         # ========== Priority 0. V型反转直接介入 Check ==========
         # 如果出现 V型反转信号，且当前不是下跌趋势(MACD>0 或 价格>均价)，立即买入
@@ -2093,6 +2124,54 @@ class IntradayDecisionEngine:
 
         # ========== 2. 跌破均价卖出策略 (具备记忆与诱多识别) ==========
         if mode in ("full", "sell_only") and not _is_t1_restricted:
+            # A. [NEW] 开盘直接下杀平仓机制 (Opening Sharp Drop Exit, 09:30 - 09:45)
+            # 用户痛点：下跌两天后建仓，次日开盘直接下杀被深套。此处实现开盘若极弱且跌幅扩大则果断止损离场
+            now_time_obj = dt.datetime.now().time()
+            is_opening_stage = now_time_obj <= dt.datetime.strptime("09:45", "%H:%M").time()
+            if is_opening_stage:
+                drop_from_open = (open_p - price) / open_p if open_p > 0 else 0.0
+                drop_from_last_close = (last_close - price) / last_close if last_close > 0 else 0.0
+                # 如果开盘低于开盘价且低于昨日收盘价，说明单边走弱；若任意跌幅达到 1.5% 以上，果断平仓
+                if price < open_p and price < last_close:
+                    if drop_from_open >= 0.015 or drop_from_last_close >= 0.015:
+                        return {
+                            "triggered": True,
+                            "action": "卖出",
+                            "position": 0.0,  # 彻底平仓出局
+                            "reason": f"[实时风控] 开盘下杀破位(跌破开盘{drop_from_open:.1%}/昨收{drop_from_last_close:.1%})，果断止损离场",
+                            "debug": debug
+                        }
+
+            # B. [NEW] 反弹不上 VWAP 均价线平仓策略 (VWAP Rebound Failure Exit)
+            # 解决用户痛点：跌破均线后，反弹无力重新站回，受均线严重压制，应果断在反弹受阻时清仓，防止陷入连环杀跌浪
+            vwap_break_ts = snapshot.get('vwap_break_ts', 0.0)
+            if vwap_break_ts > 0:
+                duration = time.time() - vwap_break_ts
+                max_rebound = snapshot.get('vwap_break_max_price', price)
+                # 偏离度检测
+                deviation_from_vwap = (nclose - price) / nclose if nclose > 0 else 0.0
+                
+                # 判定条件：
+                # 1) 跌破均线持续时间超过 150 秒，且期间的反弹最高价未曾触碰或突破 VWAP (允许 0.2% 容差，即 max_rebound < nclose * 0.998)
+                is_rebound_failure = (duration >= 150 and max_rebound < nclose * 0.998)
+                # 2) 跌破均线后单边极速下杀，无任何反弹（如偏离均价线直接超过 2.2%）
+                is_sharp_drop_below_vwap = (deviation_from_vwap >= 0.022)
+                
+                if is_rebound_failure or is_sharp_drop_below_vwap:
+                    reason_msg = ""
+                    if is_rebound_failure:
+                        reason_msg = f"反弹受阻于VWAP均线(跌破均线已{int(duration)}秒，最高反弹{max_rebound:.2f}/{nclose:.2f}无力站回)"
+                    else:
+                        reason_msg = f"跌破分时均线后快速杀跌(偏离均线达到{deviation_from_vwap:.1%})"
+                        
+                    return {
+                        "triggered": True,
+                        "action": "卖出",
+                        "position": 0.0,  # 彻底平仓出局，拒绝保留底仓
+                        "reason": f"[实时风控] {reason_msg}，果断清仓出局",
+                        "debug": debug
+                    }
+
             # 【新热点板块龙头保护】识别 连阳、主升、核心 标签
             reason_str = str(snapshot.get('reason', '')).lower()
             is_main_wave = any(tag in reason_str for tag in ["连阳", "主升", "核心", "热门", "龙头"])

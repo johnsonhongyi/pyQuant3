@@ -1,3 +1,10 @@
+## 2026-07-17 12:00
+- [x] **实现分时图红色受压杀跌段实时渲染与买入防御拦截 (Implemented Realtime VWAP Pressure Render & Defensive Buy Blocking)**：
+    - [x] **实现分时图红色压制线绘制**：在 `trade_visualizer_qt6.py` 中接入后台最新决策结果中的 `vwap_break_ts` 时间戳。通过将分时图时间序列动态转换为当前交易日 Unix 时间戳，精准过滤出跌破 VWAP 均线后的所有分时节点，并用亮红色笔宽 `pen=pg.mkPen('#FF3333', width=2.5)` 在分时图上叠加重绘该段曲线，使得“杀跌浪反弹不上均线”特征在视觉上极其醒目。
+    - [x] **追加动态受压警告标题闪烁**：当个股处于 VWAP 均线下方且曾跌破均线时，计算从跌破时刻起至今的累计时间（秒），并在分时图标题栏尾部动态追加亮红色、加粗的 `⚠️ 均线压制杀跌中 (Xs)` 预警文字，实现毫秒级行情流驱动下的交互震慑。
+    - [x] **深度加固分时结构平仓与开仓拦截逻辑**：在 `intraday_decision_engine.py` 中重构了 `IntradayDecisionEngine.evaluate`。在早盘 09:30-10:00 期间引入开盘急跌判定（跌幅超 2.5% 且成交量显著放大），触发 `EARLY_DROP_EXIT` 信号以决断止损；同时，实现跌破 VWAP 均线且后续 10 分钟反弹均无法收复 the 逻辑，触发 `VWAP_UNDER_EXIT` 平仓信号，并在平仓后或下跌趋势中设置 `buy_blocked = True`，实行铁律拦截，杜绝杀跌中途开仓的自杀式抄底行为。
+    - [x] **修复由于局部导入 time 引起的 UnboundLocalError 崩溃 (Fixed Scoping UnboundLocalError)**：由于在 `_render_charts_logic` 中部错误地局部引入了 `import time`，导致 Python 将该函数内的 `time` 标识符编译为局部变量，进而在函数头部调用 `now = time.time()` 时抛出 `UnboundLocalError: local variable 'time' referenced before assignment`。现已彻底移除该方法内部的局部 `import time`，统一复用文件头部的全局 `import time`。
+
 ## 2026-07-16 18:30
 - [x] **隡睃�銝芾�霂行�/�𡒊�蝒堒藁嚗㇄istributionDetailsDialog & StockDetailDialog嚗厩��貉斐颲寥��誯俈霂航圻�𠹺漱鈭㘾�璉埝�� (Optimized Auto-Hide Debounce & Drag Locking in ATS Detail Windows)**嚗�
     - [x] **摰䂿緵�硋𢆡蝒堒藁����𤩺𧒄��香銝漤��� (Drag Lock Protection & Mouse Button Status)**嚗𡁜銁 `moveEvent` �嗉䌊�刻挽蝵� `_is_dragging = True`嚗�僎�� `_check_hover` 銝剖��� `QApplication.mouseButtons()` �拍��嗆���瘚卝����行�瘚见�曌䭾�撌阡睸憭���劐��嗆����單迤�冽��賣�憸䀹����隡貊����獢��㕑”�潘�嚗𣬚凒�亙撩�� short-circuit 蝳餃��文�撟園�蝵株恣�啣膥嚗峕𠹭�见��齿�憭齿�瘚页�敶餃��寞祥鈭���賜宏�冽�靚�㟲憭批��罸𡢿鋡怠撩銵峕𤣰�鮋��讐��𤤿���
