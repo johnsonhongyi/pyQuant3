@@ -118,6 +118,7 @@ class StockDetailDialog(QDialog):
         self._is_dragging = False
         self._last_show_time = 0.0
         self._has_hovered_since_show = False
+        self._is_auto_popping = False
         
         # 悬停与离开监控定时器
         self.hover_timer = QTimer(self)
@@ -592,6 +593,9 @@ class StockDetailDialog(QDialog):
         if not self.is_hidden_state or not self.normal_geometry:
             return
             
+        self._is_auto_popping = True
+        QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            
         self.is_hidden_state = False
         import time
         self._last_show_time = time.time()
@@ -669,6 +673,8 @@ class StockDetailDialog(QDialog):
         super().changeEvent(event)
         if event.type() == event.Type.ActivationChange:
             if self.isActiveWindow() and self.is_hidden_state:
+                self._is_auto_popping = True
+                QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
                 self.show_normal_position()
 
 class ATSMainWindow(QMainWindow):

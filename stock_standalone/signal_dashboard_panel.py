@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QApplication, QDialog, QTextEdit, QLineEdit,
     QProgressBar, QGridLayout, QComboBox, QMenu, QCheckBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QModelIndex
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QModelIndex, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 import threading
 import time
 from PyQt6.QtGui import QColor, QFont, QBrush
@@ -1157,6 +1157,30 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             }
         """)
 
+        # 3. 磁吸与隐藏状态初始化
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
+        
+        # 悬停与离开监控定时器
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+        
+        # 拖拽结束防抖定时器
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
+
     def stop(self):
         """停止所有计时器 and 订阅，释放资源"""
         if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
@@ -1221,10 +1245,268 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 退出前显式停止 pending 延迟保存定时器，防止冲突与重复写盘
         if hasattr(self, '_save_ui_timer') and self._save_ui_timer:
             self._save_ui_timer.stop()
-        self.save_window_position_qt_visual(self, "signal_dashboard_panel")
+        
+        self.hover_timer.stop()
+        self.snap_timer.stop()
+        
+        self._save_window_states(is_open=False)
         self._save_ui_state()
         self.stop()
         event.accept()
+
+    def hideEvent(self, event):
+        self._save_window_states(is_open=False)
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        import time
+        self._last_show_time = time.time()
+        self._has_hovered_since_show = False
+        self.leave_ticks = 0
+        self.hover_ticks = 0
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange:
+            if self.isActiveWindow() and self.is_hidden_state:
+                self.show_normal_position()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            self._is_dragging = True
+            self.anchor_edge = None
+            self.snap_timer.start()
+
+    def _save_window_states(self, is_open=None) -> None:
+        try:
+            scale = self._get_dpi_scale_factor()
+            # 如果处于隐藏状态，我们保存 normal_geometry，否则保存当前 geometry
+            geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
+            width = max(130, int(geom.width() / scale))
+            height = max(150, int(geom.height() / scale))
+            x = int(geom.x() / scale)
+            y = int(geom.y() / scale)
+            
+            if is_open is None:
+                is_open = self.isVisible()
+                
+            config_file = WINDOW_CONFIG_FILE
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except:
+                        pass
+                
+                key = "signal_dashboard_panel"
+                data[key] = {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "anchor_edge": self.anchor_edge,
+                    "is_hidden_state": self.is_hidden_state,
+                    "is_open": is_open
+                }
+                
+                tmp = config_file + f".tmp_sig_states_{id(self)}"
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp, config_file)
+        except Exception as e:
+            logger.error(f"[SignalDashboardPanel] Error saving window states: {e}")
+
+    def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
+        """
+        统一的滑动与透明度动画控制器，提供流畅的 QQ 窗口滑动和呼吸反馈效果
+        """
+        if hasattr(self, 'anim_group') and self.anim_group is not None:
+            try:
+                if self.anim_group.state() == QParallelAnimationGroup.State.Running:
+                    self.anim_group.stop()
+            except Exception:
+                pass
+                
+        self.anim_group = QParallelAnimationGroup(self)
+        
+        # 1. 窗口位置大小动画 (Geometry)
+        self.geom_anim = QPropertyAnimation(self, b"geometry")
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_rect)
+        if is_snap_feedback:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        else:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+        # 2. 窗口不透明度动画 (Opacity)
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            self.opacity_anim.setKeyValueAt(0.5, 0.4)
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        
+        self._in_snap_action = True
+        
+        def on_finished():
+            self._in_snap_action = False
+            if self.is_hidden_state:
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(1.0)
+            self._save_window_states(is_open=True)
+                
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
+    def _detect_and_snap(self):
+        if self.is_hidden_state:
+            return
+            
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt, QRect
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.snap_timer.start()
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 35  # 磁吸检测门槛像素
+        
+        snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
+        
+        # 排除底边（即任务栏所在方向，通常不磁吸底边）。我们磁吸顶边、左边、右边。
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
+            snapped = True
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
+            snapped = True
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
+            snapped = True
+            
+        self._is_dragging = False
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+
+    def hide_to_edge(self):
+        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        
+        strip_size = 5  # 隐藏后在屏幕内留出的极窄感应/观察条像素宽度
+        
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+            
+        self.is_hidden_state = True
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        if self.is_hidden_state and self.normal_geometry:
+            self.is_hidden_state = False
+            import time
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+        
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _check_hover(self):
+        if not self.isVisible():
+            return
+            
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+            
+        from PyQt6.QtGui import QCursor
+        mouse_pos = QCursor.pos()
+        in_window = self.frameGeometry().contains(mouse_pos)
+        
+        if in_window:
+            self._has_hovered_since_show = True
+            
+        if self.is_hidden_state:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:  # 100ms * 2 = 200ms 停留防误触
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    import time
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+                        
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:  # 100ms * 4 = 400ms 离开防抖
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.layout():
+            self.layout().setGeometry(self.rect())
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            if self.anchor_edge:
+                self.normal_geometry = self.geometry()
 
     def _on_favorites_changed(self):
         """[GlobalFavorites] 全局重点关注状态变更回调：线程安全地派发到 Qt 主线程执行 UI 刷新"""
@@ -1407,6 +1689,26 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             # [NEW] 恢复配置后触发一次全表刷新，确保折叠状态正确渲染
             self._refresh_all_tables()
+            
+            # [NEW] 恢复磁吸状态
+            try:
+                pos = full_data.get("signal_dashboard_panel", {})
+                self.anchor_edge = pos.get("anchor_edge")
+                should_hide = pos.get("is_hidden_state", False)
+                # 初始状态设为 False，直到 200ms 后真正执行 hide_to_edge 收缩时再置为 True，防止启动延迟期内被 _check_hover 误判
+                self.is_hidden_state = False
+                scale = self._get_dpi_scale_factor()
+                if "x" in pos and "y" in pos and "width" in pos and "height" in pos:
+                    self.normal_geometry = QRect(
+                        int(pos["x"] * scale),
+                        int(pos["y"] * scale),
+                        int(pos["width"] * scale),
+                        int(pos["height"] * scale)
+                    )
+                if should_hide and self.anchor_edge and self.normal_geometry:
+                    QTimer.singleShot(200, self.hide_to_edge)
+            except Exception as snap_err:
+                logger.error(f"[SignalDashboardPanel] Failed to restore snap state: {snap_err}")
             
             # 恢复完成后，采集当前快照作为 dirty-check 基准
             QTimer.singleShot(200, self._finalize_restore)
