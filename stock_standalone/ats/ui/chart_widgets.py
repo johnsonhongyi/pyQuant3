@@ -246,6 +246,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self._is_dragging = False
         self._last_show_time = 0.0
         self._has_hovered_since_show = False
+        self._is_auto_popping = False
         
         # 悬停与离开监控定时器
         self.hover_timer = QTimer(self)
@@ -468,6 +469,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
 
     def show_normal_position(self):
         if self.is_hidden_state and self.normal_geometry:
+            self._is_auto_popping = True
+            QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            
             self.is_hidden_state = False
             import time
             self._last_show_time = time.time()
@@ -534,6 +538,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         super().changeEvent(event)
         if event.type() == event.Type.ActivationChange:
             if self.isActiveWindow() and self.is_hidden_state:
+                self._is_auto_popping = True
+                QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
                 self.show_normal_position()
 
     def closeEvent(self, event):
@@ -581,7 +587,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 self.normal_geometry = self.geometry()
 
     def _link_current_row(self, row):
-        if getattr(self, '_is_updating', False):
+        if getattr(self, '_is_updating', False) or getattr(self, '_is_auto_popping', False):
             return
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
