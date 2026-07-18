@@ -15579,25 +15579,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.error(f"Failed to launch standalone_multi_period_tester.py: {e}")
 
         # 如果外部不存在，则回退执行内部调用
-        from PyQt6 import QtWidgets
-        from PyQt6.sip import isdeleted
-        import sys
-        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and not isdeleted(self._multi_period_tester_win):
+        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
             try:
-                self._multi_period_tester_win.showNormal()
-                self._multi_period_tester_win.raise_()
-                self._multi_period_tester_win.activateWindow()
+                if not self._multi_period_tester_win.winfo_viewable():
+                    self._multi_period_tester_win.deiconify()
+                self._multi_period_tester_win.lift()
+                self._multi_period_tester_win.focus_force()
                 return
             except Exception:
                 pass
         
         try:
-            if not QtWidgets.QApplication.instance():
-                self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-            from ats.ui.multi_period_dialog import open_multi_period_tester as qt_open
-            self._multi_period_tester_win = qt_open(parent_window=self)
+            from standalone_multi_period_tester import StandaloneMultiPeriodTester
+            self._multi_period_tester_win = StandaloneMultiPeriodTester(master=self)
+            self._multi_period_tester_win.lift()
+            self._multi_period_tester_win.focus_force()
         except Exception as e:
-            logger.error(f"Failed to open MultiPeriodDialog: {e}")
+            logger.error(f"Failed to open StandaloneMultiPeriodTester: {e}")
 
     def toggle_multi_period_tester(self):
         """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (支持外部窗口与内部Dialog对齐判定)"""
@@ -15628,17 +15626,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.warning(f"FindWindowW error in toggle: {e}")
 
         # 如果没有外部窗口，切换内部窗口
-        from PyQt6.sip import isdeleted
-        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and not isdeleted(self._multi_period_tester_win):
+        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
             try:
-                if self._multi_period_tester_win.isVisible() and self._multi_period_tester_win.isActiveWindow():
-                    self._multi_period_tester_win.hide()
+                # 若当前焦点在多周期窗口内且处于未隐藏状态，则将其隐藏 (withdraw)
+                if self._multi_period_tester_win.state() != "withdrawn" and self._multi_period_tester_win.focus_displayof() == self._multi_period_tester_win:
+                    self._multi_period_tester_win.withdraw()
                 else:
-                    self._multi_period_tester_win.showNormal()
-                    self._multi_period_tester_win.raise_()
-                    self._multi_period_tester_win.activateWindow()
-            except Exception as e:
-                logger.error(f"Failed to toggle MultiPeriodDialog: {e}")
+                    self._multi_period_tester_win.deiconify()
+                    self._multi_period_tester_win.lift()
+                    self._multi_period_tester_win.focus_force()
+            except Exception:
+                # 异常容错处理
+                try:
+                    self._multi_period_tester_win.deiconify()
+                    self._multi_period_tester_win.lift()
+                    self._multi_period_tester_win.focus_force()
+                except Exception:
+                    pass
         else:
             self.open_multi_period_tester()
 

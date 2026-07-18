@@ -3563,9 +3563,19 @@ class TkDragonLeaderMonitor(tk.Toplevel):
     def __init__(self, master):
         if getattr(master, "_debug_mode", False):
             print("[DragonMonitor] __init__ starting...")
-        super().__init__(master)
+        super().__init__()
         self.master = master
         self.title("🐉 2D/3D 加速龙头追踪器")
+        
+        # 绑定销毁事件，使得当主窗口被销毁时，本磁吸窗口也会自动跟着销毁
+        if self.master:
+            def _on_master_destroy(event):
+                if event.widget == self.master:
+                    try:
+                        self.destroy()
+                    except Exception:
+                        pass
+            self.master.bind("<Destroy>", _on_master_destroy, add="+")
         
         # 1. 样式设置：无边框 & 保持最前
         self.overrideredirect(True)
