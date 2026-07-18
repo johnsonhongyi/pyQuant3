@@ -1,3 +1,17 @@
+## 2026-07-18 16:15
+- [x] **优化主可视化图左侧个股列表名称列自适应宽度限制 (Optimized Left Stock Table Name Column Width Limit & Auto-Resize Mode)**：
+    - [x] **实现 `get_compact_width` 默认 65px 紧凑预设**：将 `get_compact_width` 重构，对 `'name'` 列默认指定 `65` px 紧凑宽度。当没有手动调整数据时，默认以此为基准进行强制紧凑化布局，杜绝了异常超长个股名撑大列宽的问题。
+    - [x] **支持手动调整列宽的实时内存同步与持久化尊重**：重构 `_limit_table_column_widths` 逻辑，若 `saved_col_widths` 中已存在该列的手动调整值，则完全尊重手动设定的宽度，跳过默认紧凑限制。
+    - [x] **加固列宽变动瞬间同步机制**：在 `_on_column_resized_debounced` 中引入了内存缓存即时更新，在手动拉伸/压缩列宽的瞬间立刻更新 `saved_col_widths` 内存字典。同时，重构事件接收逻辑，能够精准识别事件源是“主表格 (`stock_table`)”还是“筛选树 (`filter_tree`)”，从而实现所有手动调整列的即时内存更新和 2 秒防抖本地 `config.json` 磁盘持久化，保证了在行情高频刷新和数据加载时手动调整始终拥有最高优先级，不再被自动重置。
+
+## 2026-07-18 16:00
+- [ ] **重构多周期测试器至 PyQt6 (Refactoring Standalone Multi-Period Tester to PyQt6)**：
+    - [ ] **开发 PyQt6 版多周期对话框 `MultiPeriodDialog`**：在 `ats/ui/multi_period_dialog.py` 中实现新的 `QDialog` 窗口，集成 `WindowMixin` 实现磁吸贴边与位置保存。
+    - [ ] **开发 `MultiPeriodWorker` (QThread)**：将原 `_worker` 行情加载过滤逻辑改写为基于 `QThread` 的异步工作线程，并通过 Qt 信号槽将进度、错误、完成结果 df 安全投递至 UI 线程，彻底避免 Tk 时代的多线程 UI 刷新死锁与卡顿。
+    - [ ] **开发 PyQt6 版策略编辑器 `MultiPeriodStrategyEditorDialog`**：将原本的 `MultiPeriodStrategyEditor` (Toplevel) 转换为 PyQt6 实现，集成 `QListWidget` 和 `QPlainTextEdit` 实现 JSON 快速编辑与表单的双向同步及语法验证。
+    - [ ] **适配/开发 Qt 版历史过滤管理器 `QtQueryHistoryManager`**：将 Tkinter 版的 `QueryHistoryManager` 进行 Qt 化适配或用纯 Qt 弹窗重写，实现过滤历史组加载、修改、一键回填与命中测试。
+    - [ ] **建立兼容过渡接口与主程序调用微调**：重构 `standalone_multi_period_tester.py` 提供兼容入口 `open_multi_period_tester`，同时微调 `instock_MonitorTK.py` 的调用，实现平滑无缝切换。
+
 ## 2026-07-18 11:25
 - [x] **修复 ATS 重复联动与通达信 (TDX) 频繁闪烁 Bug (Fixed Duplicate Linkage & TDX Window Flicker)**：
     - [x] **实现高层 link_stock 500毫秒 物理防抖 (Deduplicated link_stock with 500ms Cooldown)**：在 `ATSMainWindow.link_stock` 顶层入口中引入了基于内存时间戳的物理防抖保护。当在 500ms 内对同一个股票代码重复调用联动时，系统将自动短路并忽略多余请求。
