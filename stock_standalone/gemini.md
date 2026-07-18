@@ -1,4 +1,14 @@
+## 2026-07-18 23:00
+- [x] **修复多周期缓存功能未生效与已知缺失周期重复读取 Bug (Fixed Multi-Period Caching Not Taking Effect & Repeated Missing Period Reloads)**：
+    - [x] **修复后台线程参数引用丢失 (Fixed Parameter Reference Loss)**：修复了 `ats/ui/multi_period_dialog.py` 的 `MultiPeriodWorker` 构造函数中由于使用 `or` 运算符导致的引用断裂（传入空字典 `{}` 表达式被求值为 `falsy` 从而赋了全新字典实例），正确改用 `is not None` 判断，确保后台线程更新的时间戳字典能够回传并同步至主界面实例的缓存中。
+    - [x] **实现已知缺失周期的缓存短路冷却机制 (Implemented Missing Period Cache Short-Circuit)**：在 `MultiPeriodWorker.run` 和 `standalone_multi_period_tester.py` 的后台 `_worker` 中，对缓存命中判定 (`cached`) 引入了缺失周期 `_missing_periods` 兼容。只要缺失周期在 TTL 缓存有效期内，即判定为已缓存 (`cached=True`) 并跳过重复的磁盘读取，彻底消除了切换周期或过滤时对无效数据高频、无谓的 I/O 加载。
+    - [x] **完全对齐 PyQt6 与 Tkinter 数据引擎与缓存行为 (Aligned PyQt6 & Tkinter Backend Cache Behavior)**：拉平了两个平台的多周期数据加载与验证流程，确保策略引擎与状态反馈的表现 100% 对齐一致。
+
 ## 2026-07-18 22:00
+- [x] **适配打包与独立运行环境下的 DNA 审计功能 (Adapted DNA Audit Feature for Packaged & Standalone Environments)**：
+    - [x] **引入跨模块通用的异步 Tkinter DNA 审计启动器 (Generic Tkinter DNA Audit Starter)**：在 `backtest_feature_auditor.py` 中实现并导出了 `run_dna_audit_batch_tkinter` 辅助函数。该函数完全对齐主监控程序的异步线程与进度条交互逻辑，支持在没有 `main_app` 挂载或独立运行的 Tk 窗口中全自动拉起 DNA 审计与结果展示。
+    - [x] **实现 PyQt6 环境下的原生本地 DNA 审计降级自愈 (Native PyQt6 DNA Audit Fallback)**：在 `ats/ui/chart_widgets.py` 的个股分布列表中，当无法访问主程序的 `_run_dna_audit_batch` 时，直接在本地 Qt 主线程中拉起异步审计并通过 `QtDnaAuditReportWindow` 进行结果展示，彻底根治了打包后右键点击“DNA审计”无响应或控制台报错的缺陷。
+    - [x] **为 Tkinter 历史选股与实时数据看板适配自愈审计 (Adapted Tkinter Dialogs for Standalone DNA Audit)**：在 `stock_selection_window.py` 与 `ext_data_viewer.py` 中接入了 `run_dna_audit_batch_tkinter` 兜底机制。当 `self.master` 缺失主程序接口时自动执行本地降级审计，确保在各种打包、分块独立运行或 Conda 裸机调试环境下，均能流畅、正常地呼出 DNA 审计专家面板。
 - [x] **重构多周期联动以使用 linkage_service 后台队列 (Optimized Linkage to use linkage_service queue)**：
     - [x] 废除了在 Python 线程中高频、同步执行 `StockSender()._do_send` 的极慢方式。此前的实现每次键盘快速上下移动或切换个股时都会创建多个线程去执行 heavy win32 GUI 任务，引发线程竞争和显著的联动卡顿。
     - [x] 现已重构 `MultiPeriodDialog.link_stock` 并完全对齐 `ATSMainWindow` 的高性能架构：对于 TDX/THS 的外部终端联动，将任务推入后台独立多进程服务 `linkage_service` 的单例队列中处理，利用其内置的**去重、50ms节流与状态覆盖**机制，达到即时零延迟的反应体验。

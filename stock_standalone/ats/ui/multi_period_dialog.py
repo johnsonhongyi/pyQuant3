@@ -118,8 +118,8 @@ class MultiPeriodWorker(QThread):
         self.active_periods = active_periods
         self.top_now = top_now
         self.force_reload = force_reload
-        self.period_cache_ts = period_cache_ts or {}
-        self.top_now_cache_ts = top_now_cache_ts or [0.0]
+        self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
+        self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
 
     def _is_cache_valid(self, ts):
         if ts == 0.0:
@@ -167,21 +167,20 @@ class MultiPeriodWorker(QThread):
                 cached = False
                 if hasattr(self.engine, "lock"):
                     with self.engine.lock:
-                        cached = (
-                            period in self.engine._period_dfs
-                            and not self.engine._period_dfs[period].empty
-                            and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
-                        )
+                        has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+                        is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
+                        cached = (has_df or is_missing_cached) and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
                 else:
-                    cached = (
-                        period in self.engine._period_dfs
-                        and not self.engine._period_dfs[period].empty
-                        and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
-                    )
+                    has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+                    is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
+                    cached = (has_df or is_missing_cached) and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
 
                 if cached:
                     age = int(time.time() - self.period_cache_ts.get(period, 0.0))
-                    self.progress.emit(f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
+                    if period in self.engine._missing_periods:
+                        self.progress.emit(f"⚡ [{period}] 命中缓存(已知无数据，跳过) (已存在 {age}s)，跳过重新加载")
+                    else:
+                        self.progress.emit(f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
                 else:
                     self.progress.emit(f"📥 [{period}] 首次加载或缓存过期，正在读取计算...")
                     if hasattr(self.engine, "lock"):
@@ -2921,7 +2920,26 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self._fill_data()
         self.table.setSortingEnabled(True)
         
-        self.table.stock_activated.connect(self.monitor_app.link_stock)
+        # 寻找可用的 link_stock
+        self.link_target = None
+        if self.monitor_app and hasattr(self.monitor_app, 'link_stock'):
+            self.link_target = self.monitor_app
+        else:
+            p = parent
+            while p:
+                if hasattr(p, 'link_stock'):
+                    self.link_target = p
+                    break
+                if hasattr(p, 'parent') and p.parent():
+                    p = p.parent()
+                elif hasattr(p, 'window') and p.window() and p.window() != p:
+                    p = p.window()
+                else:
+                    break
+
+        if self.link_target:
+            self.table.stock_activated.connect(self.link_target.link_stock)
+        
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.table.cellClicked.connect(self._on_cell_clicked)
@@ -3007,19 +3025,52 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         code = self.table.item(item.row(), 0).text()
         name_item = self.table.item(item.row(), 1)
         name = name_item.text().strip() if name_item else ""
-        if self.monitor_app and hasattr(self.monitor_app, 'link_stock'):
-            self.monitor_app.link_stock(code, name)
+        if self.link_target and hasattr(self.link_target, 'link_stock'):
+            self.link_target.link_stock(code, name)
 
     def _on_cell_clicked(self, row, column):
         if column == 0:  # 点击代码列
             code_item = self.table.item(row, 0)
             if code_item:
                 code = code_item.text().strip()
-                if self.monitor_app:
-                    if hasattr(self.monitor_app, 'diag_edit'):
-                        self.monitor_app.diag_edit.setText(code)
-                    if hasattr(self.monitor_app, 'diagnose_stock_strategy'):
-                        self.monitor_app.diagnose_stock_strategy(code)
+                
+                # 级联寻找可以回填的 diag_edit/diag_entry 或是 诊断方法
+                diag_target = None
+                p = self.monitor_app
+                while p:
+                    if hasattr(p, 'diag_edit') or hasattr(p, 'diag_entry') or hasattr(p, 'diagnose_stock_strategy'):
+                        diag_target = p
+                        break
+                    if hasattr(p, 'parent') and p.parent():
+                        p = p.parent()
+                    elif hasattr(p, 'window') and p.window() and p.window() != p:
+                        p = p.window()
+                    else:
+                        break
+                
+                if diag_target:
+                    if hasattr(diag_target, 'diag_edit') and diag_target.diag_edit:
+                        # QLineEdit 或者 Tk Entry
+                        if hasattr(diag_target.diag_edit, 'setText'):
+                            diag_target.diag_edit.setText(code)
+                        else:
+                            try:
+                                diag_target.diag_edit.delete(0, 'end')
+                                diag_target.diag_edit.insert(0, code)
+                            except:
+                                pass
+                    elif hasattr(diag_target, 'diag_entry') and diag_target.diag_entry:
+                        if hasattr(diag_target.diag_entry, 'setText'):
+                            diag_target.diag_entry.setText(code)
+                        else:
+                            try:
+                                diag_target.diag_entry.delete(0, 'end')
+                                diag_target.diag_entry.insert(0, code)
+                            except:
+                                pass
+                                
+                    if hasattr(diag_target, 'diagnose_stock_strategy'):
+                        diag_target.diagnose_stock_strategy(code)
             
     def closeEvent(self, event):
         if hasattr(self, "save_window_position_qt_visual"):
