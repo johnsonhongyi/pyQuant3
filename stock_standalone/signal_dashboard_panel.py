@@ -757,7 +757,39 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                 else:
                     main_app._run_dna_audit_batch(code_to_name)
             else:
-                logger.error("No access to main monitor app for DNA audit.")
+                logger.info("📍 [VolumeDetailsDialog] Main monitor app DNA audit not available. Falling back to local Qt DNA Audit...")
+                try:
+                    from PyQt6.QtWidgets import QMessageBox
+                    from PyQt6.QtCore import Qt
+                    from backtest_feature_auditor import audit_multiple_codes
+                    from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
+                    
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    QApplication.processEvents()
+                    
+                    summaries = audit_multiple_codes(
+                        list(code_to_name.keys()),
+                        end_date=None,
+                        code_to_name=code_to_name,
+                        progress_callback=None,
+                        resample='d'
+                    )
+                    
+                    if summaries:
+                        # 挂载到 self 实例上，防止被 GC 释放窗口
+                        self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self, end_date=None, resample='d')
+                        self._dna_audit_win.show()
+                    else:
+                        QMessageBox.warning(self, "DNA 审计", "没有找到符合审计要求的个股数据。")
+                except Exception as ex:
+                    logger.error(f"Failed to run local DNA audit from VolumeDetailsDialog: {ex}", exc_info=True)
+                    QMessageBox.critical(self, "错误", f"调起 DNA 报告窗口失败: {ex}")
+                finally:
+                    QApplication.restoreOverrideCursor()
+
+    def link_stock(self, code, name=None):
+        """DNA 审计列表点击个股时，回传以触发联动"""
+        self.code_clicked.emit(code, name or "")
 
     def _load_stays_on_top(self) -> bool:
         """从 window_config.json 加载置顶状态 (优先从 volume_details_dialog 中提取)"""
@@ -5023,7 +5055,39 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     # 兜底：直接调用 (仅在缺失队列时)
                     main_app._run_dna_audit_batch(code_to_name)
             else:
-                logger.error("No access to main monitor app for DNA audit.")
+                logger.info("📍 [SignalDashboardPanel] Main monitor app DNA audit not available. Falling back to local Qt DNA Audit...")
+                try:
+                    from PyQt6.QtWidgets import QMessageBox
+                    from PyQt6.QtCore import Qt
+                    from backtest_feature_auditor import audit_multiple_codes
+                    from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
+                    
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    QApplication.processEvents()
+                    
+                    summaries = audit_multiple_codes(
+                        list(code_to_name.keys()),
+                        end_date=None,
+                        code_to_name=code_to_name,
+                        progress_callback=None,
+                        resample='d'
+                    )
+                    
+                    if summaries:
+                        # 挂载到 self 实例上，防止被 GC 释放窗口
+                        self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self, end_date=None, resample='d')
+                        self._dna_audit_win.show()
+                    else:
+                        QMessageBox.warning(self, "DNA 审计", "没有找到符合审计要求的个股数据。")
+                except Exception as ex:
+                    logger.error(f"Failed to run local DNA audit from SignalDashboardPanel: {ex}", exc_info=True)
+                    QMessageBox.critical(self, "错误", f"调起 DNA 报告窗口失败: {ex}")
+                finally:
+                    QApplication.restoreOverrideCursor()
+
+    def link_stock(self, code, name=None):
+        """DNA 审计列表点击个股时，回传以触发联动"""
+        self.code_clicked.emit(code, name or "")
 
     def _on_cell_double_clicked(self, row, col):
         table = self.sender()

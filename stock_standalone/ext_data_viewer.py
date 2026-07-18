@@ -295,7 +295,13 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
                 else:
                     self.master._run_dna_audit_batch(code_to_name)
             else:
-                logger.error("No access to main monitor app for DNA audit.")
+                # 🚀 [NEW] Packaged Tkinter Fallback
+                try:
+                    from backtest_feature_auditor import run_dna_audit_batch_tkinter
+                    tk_dispatch_queue = getattr(self.master, 'tk_dispatch_queue', None)
+                    run_dna_audit_batch_tkinter(self, code_to_name, end_date=None, tk_dispatch_queue=tk_dispatch_queue)
+                except Exception as e:
+                    logger.error(f"Failed to run fallback DNA audit: {e}", exc_info=True)
 
     def _on_double_click(self, event, tree):
         """双击打开详情窗口"""
