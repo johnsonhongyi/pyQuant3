@@ -3589,6 +3589,9 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.leave_ticks = 0
         self.is_dragging = False
         self._last_show_time = 0.0
+        self._is_animating = False      # 动画互斥锁：动画进行中禁止触发折叠/展开
+        self._hover_enter_time = None   # 鼠标移入时间戳（用于展开防抖）
+        self._hover_leave_time = None   # 鼠标移出时间戳（用于折叠防抖）
         
         # 3. 初始化UI与事件绑定
         self._init_ui()
@@ -3637,10 +3640,22 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.grip.create_line(12, 2, 2, 12, fill="#8e90a6", width=1)
         self.grip.create_line(12, 5, 5, 12, fill="#8e90a6", width=1)
         self.grip.create_line(12, 8, 8, 12, fill="#8e90a6", width=1)
-        
         self.grip.bind("<Button-1>", self._start_resize)
         self.grip.bind("<B1-Motion>", self._on_resize)
         self.grip.bind("<ButtonRelease-1>", self._stop_resize)
+        
+        # 折叠态可见状态条（高亮发光边框，科技感强）
+        self.collapsed_bar = tk.Frame(self, bg="#1a1e2e", highlightbackground="#00FFCC", highlightcolor="#00FFCC", highlightthickness=1, cursor="hand2")
+        # 状态条内容：龙头图标 + 提示文字
+        self._collapsed_label = tk.Label(
+            self.collapsed_bar, text="🐉  龙头盘中，悬停展开", 
+            bg="#1a1e2e", fg="#00FFCC", font=("Microsoft YaHei", 9, "bold")
+        )
+        self._collapsed_label.pack(fill="both", expand=True)
+        self.collapsed_bar.bind("<Enter>", self._on_collapsed_bar_enter)
+        self._collapsed_label.bind("<Enter>", self._on_collapsed_bar_enter)
+        self.collapsed_bar.bind("<Button-1>", lambda e: self._expand())
+        self._collapsed_label.bind("<Button-1>", lambda e: self._expand())
         
         # 表格区
         table_frame = tk.Frame(self.main_container, bg="#0c0d14")
@@ -3691,9 +3706,11 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         
         # 上下键键盘导航联动：TreeviewSelect 覆盖鼠标点击与键盘两种场景
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-        # 额外绑定 Up/Down KeyRelease 兜底，确保快速按键也能触发
         self.tree.bind("<KeyRelease-Up>", self._on_tree_select)
         self.tree.bind("<KeyRelease-Down>", self._on_tree_select)
+        
+        # 展开态下鼠标移入主窗口区域时重置离开计时
+        self.bind("<Enter>", self._on_main_window_enter)
                 
     def _start_drag(self, event):
         self.is_dragging = True
@@ -3709,6 +3726,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
     def _stop_drag(self, event):
         self.is_dragging = False
         self._detect_and_snap()
+        self._last_show_time = 0.0  # 拖拽释放吸附后，重置冷却以允许立刻折叠
         
     def _detect_and_snap(self):
         if self.collapsed:
@@ -3768,15 +3786,18 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             
     def _animate_geometry(self, start_w, start_h, start_x, start_y, end_w, end_h, end_x, end_y, steps=8, current_step=0, callback=None):
         if not self.winfo_exists():
+            self._is_animating = False
             return
         if current_step > steps:
             self.geometry(f"{end_w}x{end_h}+{end_x}+{end_y}")
+            self._is_animating = False
+            self.update_idletasks()
             if callback:
                 callback()
             return
         
         t = current_step / steps
-        t_ease = 1 - (1 - t) * (1 - t) # Ease Out Quad
+        t_ease = 1 - (1 - t) * (1 - t)  # Ease Out Quad
         
         curr_w = int(start_w + (end_w - start_w) * t_ease)
         curr_h = int(start_h + (end_h - start_h) * t_ease)
@@ -3784,48 +3805,82 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         curr_y = int(start_y + (end_y - start_y) * t_ease)
         
         self.geometry(f"{curr_w}x{curr_h}+{curr_x}+{curr_y}")
+        self.update_idletasks()
         self.after(12, lambda: self._animate_geometry(
-            start_w, start_h, start_x, start_y, 
-            end_w, end_h, end_x, end_y, 
+            start_w, start_h, start_x, start_y,
+            end_w, end_h, end_x, end_y,
             steps, current_step + 1, callback
         ))
+
+    def _on_collapsed_bar_enter(self, event=None):
+        """鼠标移入折叠状态条时立即展开"""
+        if self.collapsed and not self._is_animating:
+            self._expand()
+
+    def _on_main_window_enter(self, event=None):
+        """鼠标移入展开态主窗口时重置离开计时器"""
+        self._hover_leave_time = None
 
     def _collapse(self):
         if not self.anchor_edge or self.collapsed or not self.normal_geom:
             return
+        if self._is_animating:
+            return
         win_x, win_y, win_w, win_h = self.normal_geom
+        
+        # 根据磁吸边确定折叠条的大小和位置
+        bar_size = int(24 * self.scale_factor)
+        if self.anchor_edge == "top":
+            bar_w, bar_h, bar_x, bar_y = win_w, bar_size, win_x, win_y
+            bar_orient = "horizontal"
+        elif self.anchor_edge == "bottom":
+            bar_w, bar_h, bar_x, bar_y = win_w, bar_size, win_x, win_y + win_h - bar_size
+            bar_orient = "horizontal"
+        elif self.anchor_edge == "left":
+            bar_w, bar_h, bar_x, bar_y = bar_size, win_h, win_x, win_y
+            bar_orient = "vertical"
+        elif self.anchor_edge == "right":
+            bar_w, bar_h, bar_x, bar_y = bar_size, win_h, win_x + win_w - bar_size, win_y
+            bar_orient = "vertical"
+        else:
+            return
+        
         self.main_container.pack_forget()
         
-        if self.anchor_edge == "top":
-            target_w, target_h, target_x, target_y = win_w, 4, win_x, win_y
-        elif self.anchor_edge == "bottom":
-            target_w, target_h, target_x, target_y = win_w, 4, win_x, win_y + win_h - 4
-        elif self.anchor_edge == "left":
-            target_w, target_h, target_x, target_y = 4, win_h, win_x, win_y
-        elif self.anchor_edge == "right":
-            target_w, target_h, target_x, target_y = 4, win_h, win_x + win_w - 4, win_y
-            
-        self.collapsed = True
-        self.attributes("-alpha", 0.4)
+        # 更新折叠条文字方向
+        if bar_orient == "vertical":
+            self._collapsed_label.config(text="🐉")
+        else:
+            self._collapsed_label.config(text="🐉  龙头盘中，悬停展开")
         
-        # 渐进平滑滑出折叠动画
-        self._animate_geometry(win_w, win_h, win_x, win_y, target_w, target_h, target_x, target_y, steps=8)
+        # 先显示折叠条再做动画
+        self.collapsed_bar.pack(fill="both", expand=True)
+        self.collapsed = True
+        self._is_animating = True
+        self._hover_enter_time = None
+        self._hover_leave_time = None
+        self.attributes("-alpha", 1.0)
+        self._animate_geometry(win_w, win_h, win_x, win_y, bar_w, bar_h, bar_x, bar_y, steps=7)
         
     def _expand(self):
         if not self.collapsed or not self.normal_geom:
             return
+        if self._is_animating:
+            return
         win_x, win_y, win_w, win_h = self.normal_geom
         
-        # 获取折叠状态下的当前几何坐标作为动画起点
         start_w = self.winfo_width()
         start_h = self.winfo_height()
         start_x = self.winfo_x()
         start_y = self.winfo_y()
         
-        # 先恢复内容区再开始动画，避免内容在动画结束才突然出现
+        self.collapsed_bar.pack_forget()
         self.main_container.pack(fill="both", expand=True)
         self.collapsed = False
         self._last_show_time = time.time()
+        self._is_animating = True
+        self._hover_enter_time = None
+        self._hover_leave_time = None
         
         # 淡入 + 展开双轨动画
         self.attributes("-alpha", 0.0)
@@ -3833,8 +3888,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         def _fade_in(step=0, total=8):
             if not self.winfo_exists():
                 return
-            alpha = step / total
-            self.attributes("-alpha", min(1.0, alpha))
+            self.attributes("-alpha", min(1.0, step / total))
             if step < total:
                 self.after(18, lambda: _fade_in(step + 1, total))
                 
@@ -3872,43 +3926,59 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 return
         except Exception:
             return
-            
-        if self.is_dragging:
-            self.hover_ticks = 0
-            self.leave_ticks = 0
-            self.after(300, self._check_hover_loop)
+        
+        # 拖拽中跳过所有判断，重置所有防抖时间戳
+        if self.is_dragging or self._is_animating:
+            self._hover_enter_time = None
+            self._hover_leave_time = None
+            self.after(200, self._check_hover_loop)
             return
-            
+        
         pointer_x, pointer_y = self.winfo_pointerxy()
         win_x = self.winfo_x()
         win_y = self.winfo_y()
         win_w = self.winfo_width()
         win_h = self.winfo_height()
-        
-        in_window = (win_x <= pointer_x <= win_x + win_w) and (win_y <= pointer_y <= win_y + win_h)
+        # 扩大 12px 热区防止边界抖动，并且折叠状态下更容易唤醒
+        margin = 12
+        in_window = (
+            win_x - margin <= pointer_x <= win_x + win_w + margin and
+            win_y - margin <= pointer_y <= win_y + win_h + margin
+        )
+        now = time.time()
         
         if self.collapsed:
+            # === 折叠态：鼠标持续悬停 0.2s 后展开 ===
             if in_window:
-                self.hover_ticks += 1
-                if self.hover_ticks >= 2:
+                if self._hover_enter_time is None:
+                    self._hover_enter_time = now
+                self._hover_leave_time = None
+                if now - self._hover_enter_time >= 0.2:
                     self._expand()
-                    self.hover_ticks = 0
+                    return  # expand 后 loop 由下一轮 after 续上
             else:
-                self.hover_ticks = 0
+                self._hover_enter_time = None
         else:
+            # === 展开态：只有已磁吸时才自动折叠 ===
             if self.anchor_edge is not None:
+                # 展开后 0.8s 冷却期内不折叠，防止刚展开又立即收起
+                if now - self._last_show_time < 0.8:
+                    self._hover_leave_time = None
+                    self.after(150, self._check_hover_loop)
+                    return
+                
                 if not in_window:
-                    if time.time() - self._last_show_time < 1.2:
-                        self.leave_ticks = 0
-                    else:
-                        self.leave_ticks += 1
-                        if self.leave_ticks >= 4:
-                            self._collapse()
-                            self.leave_ticks = 0
+                    if self._hover_leave_time is None:
+                        self._hover_leave_time = now
+                    self._hover_enter_time = None
+                    # 离开超过 0.4s 才折叠，防止鼠标路过误触，同时保证足够灵敏
+                    if now - self._hover_leave_time >= 0.4:
+                        self._collapse()
+                        return  # collapse 后 loop 由下一轮 after 续上
                 else:
-                    self.leave_ticks = 0
-                    
-        self.after(300, self._check_hover_loop)
+                    self._hover_leave_time = None
+        
+        self.after(150, self._check_hover_loop)
         
     def _load_manual_codes(self):
         try:
@@ -4053,7 +4123,19 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self.update_data()
             
     def _on_tree_select(self, event=None):
-        """键盘上下键 / TreeviewSelect 统一联动入口"""
+        """键盘上下键 / TreeviewSelect 统一联动入口，带防抖避免 update_data 行更新触发风暴"""
+        if getattr(self, '_select_locked', False):
+            return
+        # 200ms 防抖：避免快速连续按键触发多次联动
+        if hasattr(self, '_select_after_id') and self._select_after_id:
+            try:
+                self.after_cancel(self._select_after_id)
+            except Exception:
+                pass
+        self._select_after_id = self.after(200, self._do_tree_select)
+
+    def _do_tree_select(self):
+        self._select_after_id = None
         sel = self.tree.selection()
         if sel:
             self._link_code(sel[0])
@@ -4168,66 +4250,45 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             else:
                 sh_pct = 0.0
                 
-            # 🚀 [NEW] 提取主程序已加载的多周期特征数据缓存为 O(1) 字典，复用数据防止极其卡顿
+            # ── 一次加锁读取全部三个周期数据，避免多次竞争锁 ──
             dff_dict = {}
             dff2_dict = {}
             dff3_dict = {}
             
             if hasattr(main_app, "engine") and hasattr(main_app.engine, "_period_dfs"):
                 lock = getattr(main_app.engine, "lock", None)
-                
-                # ── 日线特征 ──
-                df_d = None
+                period_snapshots = {}
                 if lock:
                     with lock:
-                        raw_df = main_app.engine._period_dfs.get('d')
-                        if raw_df is not None and not raw_df.empty:
-                            df_d = raw_df.copy()
+                        for p in ('d', 'w', 'm'):
+                            raw = main_app.engine._period_dfs.get(p)
+                            if raw is not None and not raw.empty:
+                                period_snapshots[p] = raw.copy()
                 else:
-                    raw_df = main_app.engine._period_dfs.get('d')
-                    if raw_df is not None and not raw_df.empty:
-                        df_d = raw_df.copy()
-                        
+                    for p in ('d', 'w', 'm'):
+                        raw = main_app.engine._period_dfs.get(p)
+                        if raw is not None and not raw.empty:
+                            period_snapshots[p] = raw.copy()
+                            
+                df_d = period_snapshots.get('d')
                 if df_d is not None:
                     col = 'dff' if 'dff' in df_d.columns else ('dff_d' if 'dff_d' in df_d.columns else None)
                     if col:
                         dff_dict = {str(k).zfill(6): v for k, v in df_d[col].to_dict().items() if k}
                         
-                # ── 周线特征 ──
-                df_w = None
-                if lock:
-                    with lock:
-                        raw_df = main_app.engine._period_dfs.get('w')
-                        if raw_df is not None and not raw_df.empty:
-                            df_w = raw_df.copy()
-                else:
-                    raw_df = main_app.engine._period_dfs.get('w')
-                    if raw_df is not None and not raw_df.empty:
-                        df_w = raw_df.copy()
-                        
+                df_w = period_snapshots.get('w')
                 if df_w is not None:
                     col = 'dff2' if 'dff2' in df_w.columns else ('dff' if 'dff' in df_w.columns else ('dff_w' if 'dff_w' in df_w.columns else None))
                     if col:
                         dff2_dict = {str(k).zfill(6): v for k, v in df_w[col].to_dict().items() if k}
                         
-                # ── 月线特征 ──
-                df_m = None
-                if lock:
-                    with lock:
-                        raw_df = main_app.engine._period_dfs.get('m')
-                        if raw_df is not None and not raw_df.empty:
-                            df_m = raw_df.copy()
-                else:
-                    raw_df = main_app.engine._period_dfs.get('m')
-                    if raw_df is not None and not raw_df.empty:
-                        df_m = raw_df.copy()
-                        
+                df_m = period_snapshots.get('m')
                 if df_m is not None:
                     col = 'dff3' if 'dff3' in df_m.columns else ('dff' if 'dff' in df_m.columns else ('dff_m' if 'dff_m' in df_m.columns else None))
                     if col:
                         dff3_dict = {str(k).zfill(6): v for k, v in df_m[col].to_dict().items() if k}
             
-            # 1. 自动挖掘加速个股 (复用周期缓存数据)
+            # 1. 自动挖掘加速个股
             new_auto_list = []
             for code, row in df.iterrows():
                 code_str = str(code).zfill(6)
@@ -4239,26 +4300,25 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
                 rs_val = pct - sh_pct
                 
-                is_accel = dff > 0.0 and dff2 > 0.0 and dff3 > 0.0
-                is_strong_rs = rs_val >= 2.0 and pct > 1.5
-                
-                if is_accel and is_strong_rs:
+                if dff > 0.0 and dff2 > 0.0 and dff3 > 0.0 and rs_val >= 2.0 and pct > 1.5:
                     new_auto_list.append((code_str, rs_val))
                     
             new_auto_list.sort(key=lambda x: x[1], reverse=True)
             self.auto_codes = [c[0] for c in new_auto_list[:15]]
             
-            # 2. 组装展示行数据 (包含手动与自动，进行保序去重以防御 Treeview 插入重复 iid 崩溃)
+            # 2. 组装展示行数据（惰性名称缓存，避免每次都做 I/O）
+            if not hasattr(self, '_name_cache'):
+                self._name_cache = {}
+            from sys_utils import resolve_stock_name
+            
             seen = set()
             all_codes = [x for x in (list(self.manual_codes) + [c for c in self.auto_codes if c not in self.manual_codes]) if not (x in seen or seen.add(x))]
             rows_data = []
             for code in all_codes:
-                name = "未知个股"
                 price = 0.0
                 pct = 0.0
                 state = "平稳期"
                 
-                # 读取 2D/3D 多周期缓存指标
                 dff = safe_float(dff_dict.get(code, 0.0))
                 dff2 = safe_float(dff2_dict.get(code, 0.0))
                 dff3 = safe_float(dff3_dict.get(code, 0.0))
@@ -4266,8 +4326,10 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 resonance = "同步整理"
                 source = "手动添加" if code in self.manual_codes else "🔥自动挖掘"
                 
-                from sys_utils import resolve_stock_name
-                name = resolve_stock_name(code)
+                # 惰性名称缓存：已解析过的不重复查
+                if code not in self._name_cache:
+                    self._name_cache[code] = resolve_stock_name(code) or code
+                name = self._name_cache[code]
                     
                 df_code_idx = int(code) if code.isdigit() else code
                 row_found = None
@@ -4279,6 +4341,11 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 if row_found is not None:
                     if isinstance(row_found, pd.DataFrame):
                         row_found = row_found.iloc[0]
+                    # 优先从行情数据中取名字（更准确）
+                    row_name = str(row_found.get('name', '') or '').strip()
+                    if row_name and row_name not in ('nan', '--', '0', ''):
+                        name = row_name
+                        self._name_cache[code] = name
                     price = safe_float(row_found.get('close', row_found.get('price', 0.0)))
                     pct = safe_float(row_found.get('ratio', row_found.get('percent', 0.0)))
                     state = str(row_found.get('state', '持股中' if pct > 0 else '回踩中'))
@@ -4295,18 +4362,21 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                     code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source
                 ))
                 
-            existing_iids = set(self.tree.get_children())
-            for data in rows_data:
-                code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source = data
-                disp_name = f"⭐ {name}" if source.startswith("手动") else name
-                disp_pct = f"{pct:+.2f}%"
-                disp_rs = f"{rs_val:+.2f}%"
-                vals = (code, disp_name, f"{price:.2f}", disp_pct, state, f"{dff:.2f}", f"{dff2:.2f}", f"{dff3:.2f}", disp_rs, resonance, source)
-                
-                if source.startswith("手动"):
-                    tag = "manual"
-                else:
-                    if resonance == "逆市抗跌":
+            # 3. 更新 Treeview：锁定 TreeviewSelect 防止行更新触发联动风暴
+            self._select_locked = True
+            try:
+                existing_iids = set(self.tree.get_children())
+                for data in rows_data:
+                    code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source = data
+                    disp_name = f"⭐ {name}" if source.startswith("手动") else name
+                    disp_pct = f"{pct:+.2f}%"
+                    disp_rs = f"{rs_val:+.2f}%"
+                    vals = (code, disp_name, f"{price:.2f}", disp_pct, state,
+                            f"{dff:.2f}", f"{dff2:.2f}", f"{dff3:.2f}", disp_rs, resonance, source)
+                    
+                    if source.startswith("手动"):
+                        tag = "manual"
+                    elif resonance == "逆市抗跌":
                         tag = "resonance_warm"
                     elif resonance == "大盘共振":
                         tag = "auto_up"
@@ -4315,18 +4385,24 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                     else:
                         tag = "auto_normal"
                         
-                if code in existing_iids:
-                    self.tree.item(code, values=vals, tags=(tag,))
-                    existing_iids.remove(code)
-                else:
-                    self.tree.insert("", "end", iid=code, values=vals, tags=(tag,))
+                    if code in existing_iids:
+                        # 脏检查：只有数据变化才刷新，避免无效 set 触发重绘
+                        old_vals = self.tree.item(code, 'values')
+                        if old_vals != vals:
+                            self.tree.item(code, values=vals, tags=(tag,))
+                        existing_iids.remove(code)
+                    else:
+                        self.tree.insert("", "end", iid=code, values=vals, tags=(tag,))
+                        
+                for old_id in existing_iids:
+                    self.tree.delete(old_id)
                     
-            for old_id in existing_iids:
-                self.tree.delete(old_id)
-                
-            if selected_code and self.tree.exists(selected_code):
-                self.tree.selection_set(selected_code)
-                self.tree.focus(selected_code)
+                if selected_code and self.tree.exists(selected_code):
+                    self.tree.selection_set(selected_code)
+                    self.tree.focus(selected_code)
+            finally:
+                self._select_locked = False
+
         except Exception as e:
             print(f"[DragonMonitor] Error in update_data: {e}")
             
