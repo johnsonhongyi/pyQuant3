@@ -1164,7 +1164,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self._initializing = True
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("⏱️ 多周期交叉筛选与诊断系统")
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(800, 500)
+
+        # Config File Setup
+        self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
 
         self._is_updating = False
         self._last_flat_df = None
@@ -1184,6 +1187,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         flags &= ~Qt.WindowType.Dialog
         flags &= ~Qt.WindowType.Tool
         flags |= Qt.WindowType.Window
+        flags |= Qt.WindowType.WindowMinimizeButtonHint
+        flags |= Qt.WindowType.WindowMaximizeButtonHint
+        flags |= Qt.WindowType.WindowCloseButtonHint
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -1206,8 +1212,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.strategies = self.engine.load_strategies()
         self.manual_col_pool = []
 
-        # Config File Setup
-        self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
         self.ui_state = self._load_state()
 
         self._in_adjust_widths = False
@@ -1243,14 +1247,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
 
     def _load_stays_on_top(self):
-        # Default stays on top state
-        return True
+        self.ui_state = self._load_state()
+        return self.ui_state.get("stays_on_top", False)
 
     def _load_state(self):
         default_state = {
             "strategy_id": "",
             "periods": ["d", "w", "m"],
             "custom_cols": [],
+            "stays_on_top": False,
             "manual_col_pool": [],
             "link_vis": True,
             "link_tdx": False,
@@ -1274,6 +1279,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         return default_state
 
     def _save_state(self):
+        if getattr(self, "_initializing", False):
+            return
         try:
             strat_name = self.strategy_combo.currentText()
             strat_id = ""
@@ -1289,6 +1296,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['link_vis'] = self.link_vis_chk.isChecked()
             self.ui_state['link_tdx'] = self.link_tdx_chk.isChecked()
             self.ui_state['link_ths'] = self.link_ths_chk.isChecked()
+            self.ui_state['stays_on_top'] = self.on_top_chk.isChecked()
             self.ui_state['current_history_query'] = self._current_history_query
 
             cfg = {}
@@ -1305,6 +1313,17 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save state: {e}")
+
+    def _on_top_toggled(self, checked):
+        self.stays_on_top = checked
+        self._save_state()
+        flags = self.windowFlags()
+        if checked:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1448,6 +1467,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_ths_chk = QCheckBox("Ths", self)
         self.link_ths_chk.toggled.connect(self._save_state)
         status_bar_layout.addWidget(self.link_ths_chk)
+
+        self.on_top_chk = QCheckBox("置顶", self)
+        self.on_top_chk.setChecked(self.stays_on_top)
+        self.on_top_chk.toggled.connect(self._on_top_toggled)
+        status_bar_layout.addWidget(self.on_top_chk)
 
         # Diagnostics
         status_bar_layout.addWidget(QLabel(" 诊断个股:", self))
@@ -1730,12 +1754,32 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                         pass
             except RuntimeError:
                 pass
+        try:
+            self.save_window_position_qt(self, "multi_period_dialog")
+        except Exception:
+            pass
         self._save_state()
+        
+        # 让龙头监控跟主窗口一起关闭
+        if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
+            try:
+                if not isdeleted(self.dragon_monitor_dialog):
+                    self.dragon_monitor_dialog.close()
+            except Exception:
+                pass
+
         super().closeEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_column_widths()
+        if not getattr(self, "_initializing", False):
+            self.save_window_position_qt_visual(self, "multi_period_dialog")
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not getattr(self, "_initializing", False):
+            self.save_window_position_qt_visual(self, "multi_period_dialog")
 
     def _adjust_column_widths(self):
         """

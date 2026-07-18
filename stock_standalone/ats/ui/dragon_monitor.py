@@ -340,7 +340,17 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 tmp = WINDOW_CONFIG_FILE + f".tmp_dragon_states_{id(self)}"
                 with open(tmp, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=4, ensure_ascii=False)
-                os.replace(tmp, WINDOW_CONFIG_FILE)
+                
+                # Windows 多进程并发写入重试退避机制，防止 WinError 5 拒绝访问
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp, WINDOW_CONFIG_FILE)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        import time
+                        time.sleep(0.05 * (attempt + 1))
         except Exception as e:
             logger.warning(f"Error saving window states: {e}")
 
@@ -392,12 +402,75 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             except Exception:
                 return 999.0
 
-        dff_cols = [c for c in current_df.columns if 'dff' in str(c).lower()]
-        dff_cols.sort(key=get_period_weight)
+        # ── 一次加锁读取全部三个周期数据，避免多次竞争锁 ──
+        dff_dict = {}
+        dff2_dict = {}
+        dff3_dict = {}
         
-        dff_col = dff_cols[0] if len(dff_cols) > 0 else 'dff'
-        dff2_col = dff_cols[1] if len(dff_cols) > 1 else 'dff2'
-        dff3_col = dff_cols[2] if len(dff_cols) > 2 else 'dff3'
+        main_app = self._get_main_app()
+        if main_app and hasattr(main_app, "engine") and hasattr(main_app.engine, "_period_dfs"):
+            lock = getattr(main_app.engine, "lock", None)
+            period_snapshots = {}
+            if lock:
+                with lock:
+                    active_periods = list(main_app.engine._period_dfs.keys())
+                    for p in active_periods:
+                        raw = main_app.engine._period_dfs.get(p)
+                        if raw is not None and not raw.empty:
+                            period_snapshots[p] = raw.copy()
+            else:
+                active_periods = list(main_app.engine._period_dfs.keys())
+                for p in active_periods:
+                    raw = main_app.engine._period_dfs.get(p)
+                    if raw is not None and not raw.empty:
+                        period_snapshots[p] = raw.copy()
+                        
+            # 按顺序从已加载的周期中匹配：第1个周期为短周期，第2个为中周期，第3个为长周期
+            sorted_periods = list(period_snapshots.keys())
+            df_d = period_snapshots.get(sorted_periods[0]) if len(sorted_periods) > 0 else None
+            df_w = period_snapshots.get(sorted_periods[1]) if len(sorted_periods) > 1 else None
+            df_m = period_snapshots.get(sorted_periods[2]) if len(sorted_periods) > 2 else None
+
+            def get_dff_col(df_p, preferred):
+                if df_p is None:
+                    return None
+                for col_name in preferred:
+                    if col_name in df_p.columns:
+                        return col_name
+                # 模糊匹配
+                for col_name in df_p.columns:
+                    if 'dff' in str(col_name).lower():
+                        return col_name
+                return None
+
+            col_d = get_dff_col(df_d, ['dff', 'dff_d'])
+            if col_d and df_d is not None:
+                dff_dict = {str(k).zfill(6): v for k, v in df_d[col_d].to_dict().items() if k}
+                    
+            col_w = get_dff_col(df_w, ['dff2', 'dff', 'dff_w'])
+            if col_w and df_w is not None:
+                dff2_dict = {str(k).zfill(6): v for k, v in df_w[col_w].to_dict().items() if k}
+                    
+            col_m = get_dff_col(df_m, ['dff3', 'dff', 'dff_m'])
+            if col_m and df_m is not None:
+                dff3_dict = {str(k).zfill(6): v for k, v in df_m[col_m].to_dict().items() if k}
+        
+        # ── 降级兜底：如果无法从 engine 加载，且 current_df 自身有加速特征列，则直接提取 ──
+        if not dff_dict and not dff2_dict and not dff3_dict:
+            dff_cols = [c for c in current_df.columns if 'dff' in str(c).lower()]
+            dff_cols.sort(key=get_period_weight)
+            
+            dff_col = dff_cols[0] if len(dff_cols) > 0 else 'dff'
+            dff2_col = dff_cols[1] if len(dff_cols) > 1 else 'dff2'
+            dff3_col = dff_cols[2] if len(dff_cols) > 2 else 'dff3'
+            
+            for c, r in current_df.iterrows():
+                if isinstance(r, pd.DataFrame):
+                    r = r.iloc[0]
+                c_str = str(c).zfill(6)
+                dff_dict[c_str] = safe_float(r.get(dff_col, 0.0))
+                dff2_dict[c_str] = safe_float(r.get(dff2_col, 0.0))
+                dff3_dict[c_str] = safe_float(r.get(dff3_col, 0.0))
         
         # 1. 每日自动替换更新潜力股 (2D/3D加速多头完美结构挖掘)
         new_auto_list = []
@@ -413,9 +486,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if code_str in self.blacklist_codes:
                 continue # 已在黑名单中，不予挖掘
                 
-            dff = safe_float(row.get(dff_col, 0.0))
-            dff2 = safe_float(row.get(dff2_col, 0.0))
-            dff3 = safe_float(row.get(dff3_col, 0.0))
+            dff = safe_float(dff_dict.get(code_str, 0.0))
+            dff2 = safe_float(dff2_dict.get(code_str, 0.0))
+            dff3 = safe_float(dff3_dict.get(code_str, 0.0))
             pct = safe_float(row.get('percent', 0.0))
             rs_val = pct - sh_pct
             
@@ -466,9 +539,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 price = safe_float(row.get('close', row.get('price', 0.0)))
                 pct = safe_float(row.get('percent', 0.0))
                 state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
-                dff = safe_float(row.get(dff_col, 0.0))
-                dff2 = safe_float(row.get(dff2_col, 0.0))
-                dff3 = safe_float(row.get(dff3_col, 0.0))
+                dff = safe_float(dff_dict.get(code, 0.0))
+                dff2 = safe_float(dff2_dict.get(code, 0.0))
+                dff3 = safe_float(dff3_dict.get(code, 0.0))
                 rs_val = pct - sh_pct
                 
                 # 共振类型判定
