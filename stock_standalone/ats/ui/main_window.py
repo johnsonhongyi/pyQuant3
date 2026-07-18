@@ -1338,6 +1338,19 @@ class ATSMainWindow(QMainWindow):
         2. 调用 get_link_manager().push() 执行外部通达信/同花顺终端物理联动。
         """
         code_clean = str(code).strip()
+        if not code_clean:
+            return
+            
+        import time
+        now = time.time()
+        last_code = getattr(self, "_last_linked_code", None)
+        last_time = getattr(self, "_last_linked_time", 0)
+        if last_code == code_clean and (now - last_time) < 0.2:
+            # 500ms 内重复对同一代码发起联动，直接短路忽略，防止多重绑定信号引起重复联动导致 TDX/THS 闪烁
+            return
+        self._last_linked_code = code_clean
+        self._last_linked_time = now
+        
         self.status_bar.showMessage(f"🔗 [联动] 推送股票 {code_clean} {name} (已同步可视化及外部交易终端)")
         
         # 1. 异步向 26668 发送切换个股 socket 指令 (VIS 联动)
