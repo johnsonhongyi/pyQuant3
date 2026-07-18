@@ -1,3 +1,10 @@
+## 2026-07-18 17:30
+- [x] **根治龙头监控副显示器磁吸失灵与调整大小白框闪烁 Bug (Fixed Multi-Monitor Snapping & White Border on Resize)**：
+    - [x] **实现 `get_monitor_info` DPI 缩放比例一致性对齐**：由于 Tkinter 逻辑坐标系是根据全局应用启动时决定的（即主窗口的 `scale_factor`），而在副屏幕获取 `GetDpiForMonitor` 的当前 DPI 比例通常与全局不符，导致物理坐标转为逻辑坐标时计算越界或偏差。现通过将 `get_monitor_info(hwnd)` 重构为支持可选 `scale` 传入。在龙头窗口调用时，传入统一的全局 `self.scale_factor`，完美对齐了屏幕的逻辑工作区几何边界与窗口逻辑位置边界，实现了无论主窗口在哪个屏幕、龙头窗口被拖到哪个副屏，都可以完美磁吸和折叠。
+    - [x] **启用 `clam` 风格主题解决 `fieldbackground` 失效导致的大白框**：因 Windows 默认原生主题（`vista`等）通过 `uxtheme` 强力接管 `ttk.Treeview` 忽略了自定义的空余背景色配置，导致数据行不足时表格下半段呈现系统大面积白色。现通过在初始化时强制为 Treeview 实例启用局部的 `clam` 主题以解锁其背景限制，并在 `style.configure` 中显式清空 Heading 与 row 的 `borderwidth` / `relief`。
+    - [x] **屏蔽滚动条及组件亮边**：在 `vsb`（滚动条）及 Checkbutton 等底色渲染处强制指定 `highlightthickness=0`，并将 `main_container` 底色对齐为最深暗色 `#0c0d14`。
+    - [x] **强刷排版重绘**：在 `_on_resize` 中同步调用 `self.update_idletasks()`，消除拉伸时的渲染延迟。
+
 ## 2026-07-18 16:55
 - [x] **根治龙头监控多屏磁吸折叠失效与开机状态还原 Bug (Fixed Dragon Monitor Multi-Screen Snap & State Restoration)**：
     - [x] **实现高精度窗口相对坐标 hover 检测**：将 PyQt6 版的 `_check_hover` 的物理坐标包含检测重构为基于窗口相对坐标 `mapFromGlobal(QCursor.pos())`。在展开和折叠隐藏态下，通过相对坐标判定鼠标是否滑过屏幕边缘露出的 5px 热区，彻底免除了多显示器、不同 DPI 缩放比例下由于全局坐标计算偏差导致的鼠标移入无响应或卡顿 Bug。
