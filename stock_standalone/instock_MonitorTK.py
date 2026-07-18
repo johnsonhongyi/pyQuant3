@@ -15545,93 +15545,67 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", f"打开选股窗口失败: {e}")
             
     def open_multi_period_tester(self):
-        """[NEW] 打开多周期联动策略筛选器 (优先检测外部 MultiPeriodTester.exe/脚本，否则执行内部调用)"""
+        """[NEW] 打开/切换多周期联动策略筛选器 (优先检测内部调用，其次检测外部进程，若无则全新拉起)"""
         import time
+        import os
         now = time.time()
         
-        # 1. 启动防重入冷却锁：若在 5 秒内已经触发启动命令，且外部窗口尚未创建成功，直接 bypass 重复触发
+        # 1. 启动防重入冷却锁
         starting_t = getattr(self, "_multi_period_starting_t", 0.0)
-        if now - starting_t < 5.0:
-            logger.info("[MultiPeriod] Already launching/starting within 5s, bypassing duplicate launch.")
-            toast_message(self, "多周期筛选器启动中，请稍候...")
+        if now - starting_t < 0.3:
             return
+        self._multi_period_starting_t = now
 
-        title = "多周期联动策略筛选器"
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, title)
-            if hwnd:
-                if ctypes.windll.user32.IsIconic(hwnd):
-                    ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
-                else:
-                    ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-                logger.info("[MultiPeriod] External tester window found, bringing to foreground.")
-                toast_message(self, "多周期筛选器已置顶")
-                return
-        except Exception as e:
-            logger.warning(f"FindWindowW error: {e}")
-
-        # 检测独立打包程序（仅在打包 EXE 存在时才以子进程启动，本地开发直接走内部 dialog）
-        base_path = get_app_root()
-        exe_path = os.path.join(base_path, "MultiPeriodTester.exe")
-
-        if os.path.exists(exe_path):
+        # 2. 优先检测并切换内部 PyQt6 Dialog 的打开/显示/隐藏状态
+        from ats.ui.multi_period_dialog import is_qt_win_alive
+        internal_win = getattr(self, '_multi_period_tester_win', None)
+        if is_qt_win_alive(internal_win):
             try:
-                logger.info(f"🚀 [MultiPeriod] Running packaged exe: {exe_path}")
-                import subprocess
-                self._multi_period_starting_t = now
-                subprocess.Popen([exe_path], cwd=base_path)
-                toast_message(self, "多周期筛选器启动中...")
-                return
-            except Exception as e:
-                logger.error(f"Failed to launch MultiPeriodTester.exe: {e}")
-
-        # 如果外部打包程序不存在，直接回退执行内部 PyQt6 dialog 调用
-        if is_qt_win_alive(getattr(self, '_multi_period_tester_win', None)):
-            try:
-                self._multi_period_tester_win.showNormal()
-                self._multi_period_tester_win.raise_()
-                self._multi_period_tester_win.activateWindow()
-                return
-            except Exception:
-                pass
-        
-        try:
-            if not QtWidgets.QApplication.instance():
-                self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-            from ats.ui.multi_period_dialog import open_multi_period_tester as qt_open
-            self._multi_period_tester_win = qt_open(parent_window=self)
-        except Exception as e:
-            logger.error(f"Failed to open MultiPeriodDialog: {e}")
-
-    def toggle_multi_period_tester(self):
-        """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (支持外部窗口与内部Dialog对齐判定)"""
-        # 防重入防抖：限制 300ms 内的连续按键或重复触发
-        import time
-        now = time.time()
-        last_t = getattr(self, "_last_multi_period_trigger_t", 0.0)
-        if now - last_t < 0.3:
-            logger.info("[MultiPeriod] Trigger too frequent (<0.3s), bypassing duplicate event.")
-            return
-        self._last_multi_period_trigger_t = now
-
-        title = "多周期联动策略筛选器"
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.FindWindowW(None, title)
-            if hwnd:
-                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
-                foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
-                
-                if is_visible and foreground_hwnd == hwnd:
-                    # 如果窗口当前可见且处于前台（即当前活动窗口），再次按快捷键则隐藏它
-                    ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE = 0
-                    logger.info("[MultiPeriod] External window is already active, hiding it.")
+                if internal_win.isVisible() and not internal_win.isMinimized():
+                    internal_win.hide()
+                    logger.info("[MultiPeriod] Internal dialog is visible, hiding it.")
                     toast_message(self, "多周期筛选器已隐藏")
                 else:
-                    # 如果窗口不可见，或者在后台，则将其唤醒、恢复并置顶聚焦
-                    if ctypes.windll.user32.IsIconic(hwnd):
+                    if internal_win.isMinimized():
+                        internal_win.showNormal()
+                    else:
+                        internal_win.show()
+                    internal_win.raise_()
+                    internal_win.activateWindow()
+                    logger.info("[MultiPeriod] Internal dialog shown and activated.")
+                    toast_message(self, "多周期筛选器已置顶")
+                return
+            except Exception as e:
+                logger.error(f"Toggle internal dialog failed: {e}")
+                self._multi_period_tester_win = None
+
+        # 3. 检测并切换外部独立进程窗口
+        titles = ["多周期联动策略筛选器", "⏱️ 多周期交叉筛选与诊断系统"]
+        hwnd = None
+        try:
+            import ctypes
+            for t in titles:
+                found_hwnd = ctypes.windll.user32.FindWindowW(None, t)
+                if found_hwnd:
+                    # 排除本进程的窗口，防止误判
+                    pid = ctypes.c_ulong()
+                    ctypes.windll.user32.GetWindowThreadProcessId(found_hwnd, ctypes.byref(pid))
+                    if pid.value != os.getpid():
+                        hwnd = found_hwnd
+                        break
+            
+            if hwnd:
+                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                is_iconic = ctypes.windll.user32.IsIconic(hwnd)
+                
+                if is_visible and not is_iconic:
+                    # 如果外部窗口当前可见且未最小化，再次点击则隐藏它
+                    ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE = 0
+                    logger.info("[MultiPeriod] External window is visible, hiding it.")
+                    toast_message(self, "多周期筛选器已隐藏")
+                else:
+                    # 如果外部窗口不可见，或者在后台，则将其唤醒、恢复并置顶聚焦
+                    if is_iconic:
                         ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
                     else:
                         ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
@@ -15640,21 +15614,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     toast_message(self, "多周期筛选器已置顶")
                 return
         except Exception as e:
-            logger.warning(f"FindWindowW error in toggle: {e}")
+            logger.warning(f"FindWindowW error in open_multi_period_tester: {e}")
 
-        # 如果没有外部窗口，切换内部窗口
-        if is_qt_win_alive(getattr(self, '_multi_period_tester_win', None)):
+        # 4. 否则，全新拉起（若存在外部打包程序则启动子进程，否则启动内部 Qt）
+        base_path = get_app_root()
+        exe_path = os.path.join(base_path, "MultiPeriodTester.exe")
+
+        if os.path.exists(exe_path):
             try:
-                if self._multi_period_tester_win.isVisible() and self._multi_period_tester_win.isActiveWindow():
-                    self._multi_period_tester_win.hide()
-                else:
-                    self._multi_period_tester_win.showNormal()
-                    self._multi_period_tester_win.raise_()
-                    self._multi_period_tester_win.activateWindow()
+                logger.info(f"🚀 [MultiPeriod] Running packaged exe: {exe_path}")
+                import subprocess
+                # 针对外部程序冷启动拉起设置 5 秒防重入冷却
+                self._multi_period_starting_t = now + 4.7  # 相当于 5s 冷却锁
+                subprocess.Popen([exe_path], cwd=base_path)
+                toast_message(self, "多周期筛选器启动中...")
+                return
             except Exception as e:
-                logger.error(f"Failed to toggle MultiPeriodDialog: {e}")
-        else:
-            self.open_multi_period_tester()
+                logger.error(f"Failed to launch MultiPeriodTester.exe: {e}")
+
+        # 如果外部打包程序不存在，回退执行内部 PyQt6 dialog 唤起
+        try:
+            from PyQt6 import QtWidgets
+            import sys
+            if not QtWidgets.QApplication.instance():
+                self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+            from ats.ui.multi_period_dialog import open_multi_period_tester as qt_open
+            self._multi_period_tester_win = qt_open(parent_window=self)
+            toast_message(self, "多周期筛选器已启动")
+        except Exception as e:
+            logger.error(f"Failed to open MultiPeriodDialog internally: {e}")
+
+    def toggle_multi_period_tester(self):
+        """[NEW] 切换多周期联动策略筛选器的显示与隐藏"""
+        self.open_multi_period_tester()
 
     def open_guidance_window(self):
         """直接打开每日操作指南选项卡"""

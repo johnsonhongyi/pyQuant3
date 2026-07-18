@@ -1,8 +1,27 @@
+## 2026-07-19 01:15
+- [x] **重构并彻底修复多周期策略筛选器内外部切换与隐藏失效的 Bug (Refactored & Fixed Multi-Period Tester Toggle Visibility & Active Window Issues)**：
+    - [x] **实现进程级 PID 过滤排除 (Implemented Process ID Filtering)**：在 `main_window.py` 和 `instock_MonitorTK.py` 的 Win32 窗口查找中，通过 `GetWindowThreadProcessId` 获取 `hwnd` 所属的 Process ID。若发现其所属进程与当前进程 ID 一致（即检测到的是内部运行的 PyQt6 QDialog），则强行在外部判定中将其排除。这彻底根治了由于窗口标题统一导致 `FindWindowW` 把内部窗口误判为外部进程并拦截后续内部 Dialog 动作的逻辑闭环漏洞。
+    - [x] **完美解决鼠标点击主窗口时外部与内部窗口无法隐藏的 Bug (Resolved Click-to-Hide Focus Loss Bug)**：由于鼠标点击主窗口按钮时前台焦点会瞬间从多周期窗口夺走，导致 `foreground_hwnd == hwnd` 永远为 False 且 `isActiveWindow()` 失效，此前不论怎么点击都只会被置顶而无法隐藏。现已将内外部窗口的 Toggle 判定条件重构为 `isVisible() and not isMinimized()`。这确保了在鼠标点击或快捷键触发时都能实现完美的“显示/隐藏”轮流切换。
+    - [x] **对齐并精炼主监控程序调用逻辑 (Aligned MonitorTK Implementations & DRY)**：将 `instock_MonitorTK.py` 中的 `open_multi_period_tester` 与 `toggle_multi_period_tester` 核心逻辑完全统一，消除代码冗余，确保无论点击界面上的“多周期🎯”按钮还是按下 `Alt+N` 快捷键，其运行表现均 100% 对齐一致。
+
+## 2026-07-19 00:15
+- [x] **根治 Windows 打包环境下一键调起多周期与龙头监控时多开子进程的 Bug (Fixed Double Main Window Spawning in Packaged Environment)**：
+    - [x] **实施顶层 freeze_support() 拦截防御 (Implemented Top-level freeze_support() Interception)**：将 `ats/ui/multi_period_dialog.py` 入口文件中的 `multiprocessing.freeze_support()` 移至文件的最顶部（即在所有其它大型依赖库如 PyQt6、pandas 导入之前）。这确保了当 PyInstaller 打包环境下的子进程（如 `LinkageProcess` 联动进程等）以 `spawn` 机制再次被拉起时，能在加载顶层复杂模块或触发导入副作用前瞬间被 `freeze_support()` 捕获并退出，从而彻底根治了双击或开启监控时出现多个多周期主窗口、界面假死的故障。
+- [x] **对齐多周期筛选器专属 spec配置与主程序配置 (Aligned Multi-Period Spec with Main ATS Spec)**：
+    - [x] **同步 Analysis 依赖与排除项**：根据 `ats.spec` 修改了 `MultiPeriodDialog.spec`。同步合并了 `hiddenimports` 和 `excludes` 排除项（如彻底排除 PyQt6 的 QtWebEngine, QtQml, QtBluetooth 等大体量闲置库），保证了两边打包时隐藏依赖导入的一致性。
+    - [x] **同步数据文件与图标资源**：同步补齐了打包时需内置的数据及配置文件映射（包括 `MonitorTK.ico`, `window_config.json`, `global.ini` 等），并在 `EXE` 阶段添加了 `icon="MonitorTK32.ico"`，使得输出的 `MultiPeriodTester.exe` 具有完全一致的外观与资源环境。
+
 ## 2026-07-18 23:55
 - [x] **加固 Alt+N 与 Alt+P 快捷键冷启动防重入与后台加载防多开机制 (Hardened Cooldown Launch Lock for Alt+N & Alt+P Hotkeys)**：
     - [x] **实现多周期联动策略筛选器冷启动 5秒 冷却锁 (Implemented 5s Cooldown Lock for Multi-Period Tester Launch)**：在 `open_multi_period_tester` 方法中引入 `self._multi_period_starting_t` 时间戳。当用户按下 `Alt+N` 触发冷启动时，若在 5 秒的窗口期内外部进程尚未创建成功（`FindWindowW` 未能查找到句柄），系统将自动短路拦截并跳过重复拉起 `subprocess.Popen`，防止因启动缓慢高频触发导致的进程多开。
-    - [x] **实现智能操盘终端 (ATS) 冷启动 5秒 冷却锁 (Implemented 5s Cooldown Lock for ATS Terminal Launch)**：在 `open_ats_panel` 方法中引入 `self._ats_starting_t` 时间戳。对于冷启动的 `ATS_Terminal.exe` / `run_ats.py` 外部进程，5 秒内限制重复启动调用，确保在后台加载过慢时快捷键也不会造成多次实例唤起。
+    - [x] **实现智能操盘终端 (ATS) 冷启动 5秒 5秒冷却锁 (Implemented 5s Cooldown Lock for ATS Terminal Launch)**：在 `open_ats_panel` 方法中引入 `self._ats_starting_t` 时间戳。对于冷启动的 `ATS_Terminal.exe` / `run_ats.py` 外部进程，5 秒内限制重复启动调用，确保在后台加载过慢时快捷键也不会造成多次实例唤起。
     - [x] **修复多周期切换中的 isdeleted 遗留签名与增加防重入 (Replaced isdeleted with is_qt_win_alive & Added Toggle Debounce)**：在 `toggle_multi_period_tester` 方法中，将先前可能导致异常的 PyQt6 遗留 `from PyQt6.sip import isdeleted` 判定机制彻底重构成使用项目标准的 `is_qt_win_alive` 安全封装。同时为 `toggle_multi_period_tester` 补齐 300ms 物理防重入判断，避免键盘极速双击产生的信号风暴。
+- [x] **为 PyQt6 智能多周期对话框新建专属打包配置文件 (Created Dedicated Spec for PyQt6 Multi-Period Dialog)**：
+    - [x] **新建专属打包配置文件**：新建了 `MultiPeriodDialog.spec` 打包配置文件，将打包源文件设置为 `ats/ui/multi_period_dialog.py`，并将生成的输出可执行文件名称依旧保持为 `MultiPeriodTester`。这确保了新旧架构在 spec 级别上彻底隔离。
+    - [x] **解除 PyQt6 和 pyqtgraph 排查过滤**：在 `MultiPeriodDialog.spec` 的 `excludes` 排除库列表中移除了 `'PyQt6'` 与 `'pyqtgraph'` 选项，使得打包工具可以自动跟踪分析这两个库的依赖，避免运行打包程序时因缺少图形库依赖崩溃。
+    - [x] **恢复老版 spec 配置文件**：将原先修改过的 `MultiPeriodTester.spec` 回滚恢复，保持老版 Tkinter 界面的 `standalone_multi_period_tester.py` 打包逻辑不变。
+    - [x] **修复打包后执行 CWD 改变导致加载配置失败 Bug (Fixed Working Directory Deviation in Packaged Environment)**：在 `ats/ui/multi_period_dialog.py` 的入口检测块中，增加了打包状态判断。当程序在打包环境（PyInstaller 等）下运行作为主入口启动时，自动跳过 `os.chdir` 工作目录重定向，避免临时解压缩目录破坏系统的当前工作路径，彻底解决打包后由于相对路径加载配置文件失败 of 故障。
+    - [x] **修复打包后子进程拉起重复创建主窗口 Bug (Fixed Double Main Window Spawning in Packaged Environment)**：在 `ats/ui/multi_period_dialog.py` 的 `if __name__ == "__main__":` 入口块中补充调用了 `multiprocessing.freeze_support()`，防止 Windows 打包环境下多进程的子进程加载主模块时重新创建 QApplication 并展示多余主窗口的故障。
 
 ## 2026-07-18 23:30
 - [x] **优化龙头监控窗口宽度调节、添加多周期筛选器主窗口入口与修复 DNA 审计个股定位 Bug (Fixed Dragon Monitor Width Resize, Added Multi-Period Entrance & Fixed DNA Audit Selected Row Bug)**：

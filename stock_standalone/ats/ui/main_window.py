@@ -2888,7 +2888,79 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
 
     def open_multi_period_tester(self):
+        """[NEW] 打开/切换多周期联动策略筛选器 (优先检测内部调用，其次检测外部 MultiPeriodTester.exe/脚本)"""
         if getattr(self, '_is_closing', False):
             return
-        from ats.ui.multi_period_dialog import open_multi_period_tester
-        open_multi_period_tester()
+
+        import time
+        now = time.time()
+        last_t = getattr(self, "_last_multi_period_trigger_t", 0.0)
+        if now - last_t < 0.3:
+            return
+        self._last_multi_period_trigger_t = now
+
+        # 1. 优先检测并切换内部 PyQt6 Dialog 的打开/显示/隐藏状态
+        from PyQt6.sip import isdeleted
+        import ats.ui.multi_period_dialog as mpd
+        
+        dialog = mpd._dialog_instance
+        if dialog is not None and not isdeleted(dialog):
+            try:
+                if dialog.isVisible() and not dialog.isMinimized():
+                    dialog.hide()
+                    print("[MultiPeriod] Internal dialog is visible, hiding it.")
+                else:
+                    if dialog.isMinimized():
+                        dialog.showNormal()
+                    else:
+                        dialog.show()
+                    dialog.raise_()
+                    dialog.activateWindow()
+                    print("[MultiPeriod] Internal dialog shown and activated.")
+                return
+            except Exception as e:
+                print(f"[MultiPeriod] Toggle internal dialog error: {e}")
+                mpd._dialog_instance = None
+
+        # 2. 如果内部窗口不存在，检测并切换外部独立进程窗口
+        titles = ["多周期联动策略筛选器", "⏱️ 多周期交叉筛选与诊断系统"]
+        hwnd = None
+        try:
+            import ctypes
+            import os
+            for t in titles:
+                found_hwnd = ctypes.windll.user32.FindWindowW(None, t)
+                if found_hwnd:
+                    # 排除本进程的窗口，防止标题一致时误判内部窗口为外部窗口
+                    pid = ctypes.c_ulong()
+                    ctypes.windll.user32.GetWindowThreadProcessId(found_hwnd, ctypes.byref(pid))
+                    if pid.value != os.getpid():
+                        hwnd = found_hwnd
+                        break
+            
+            if hwnd:
+                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                is_iconic = ctypes.windll.user32.IsIconic(hwnd)
+                
+                if is_visible and not is_iconic:
+                    # 如果外部窗口当前可见且未最小化，再次点击则隐藏它
+                    ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE = 0
+                    print("[MultiPeriod] External window is visible, hiding it.")
+                else:
+                    # 如果外部窗口不可见，或者在后台，则将其唤醒、恢复并置顶聚焦
+                    if is_iconic:
+                        ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                    else:
+                        ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    print("[MultiPeriod] External window is background/hidden, restoring and bringing to foreground.")
+                return
+        except Exception as e:
+            print(f"[MultiPeriod] FindWindowW error: {e}")
+
+        # 3. 否则，全新打开内部多周期窗口
+        try:
+            print("🚀 [MultiPeriod] Opening internal PyQt6 MultiPeriodDialog...")
+            mpd.open_multi_period_tester(parent_window=self)
+        except Exception as e:
+            print(f"[MultiPeriod] Failed to open internal MultiPeriodDialog: {e}")
