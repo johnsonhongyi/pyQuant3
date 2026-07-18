@@ -403,8 +403,21 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 header.blockSignals(True)
                 if isinstance(default_widths, dict):
                     for col, width in default_widths.items():
-                        if col < col_count:
-                            table_or_tree.setColumnWidth(col, width)
+                        col_idx = None
+                        if isinstance(col, int):
+                            col_idx = col
+                        elif isinstance(col, str):
+                            if col.isdigit():
+                                col_idx = int(col)
+                            else:
+                                # Look up by matching header name text
+                                for i in range(col_count):
+                                    item = table_or_tree.horizontalHeaderItem(i) if hasattr(table_or_tree, "horizontalHeaderItem") else None
+                                    if item and item.text() == col:
+                                        col_idx = i
+                                        break
+                        if col_idx is not None and col_idx < col_count:
+                            table_or_tree.setColumnWidth(col_idx, width)
                 elif isinstance(default_widths, list):
                     for col, width in enumerate(default_widths):
                         if col < col_count:
@@ -446,9 +459,19 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 table_or_tree.setColumnWidth(logical_index, max_w)
                 header.blockSignals(False)
 
-        timer = globals()['_save_timers'].get(config_key)
-        if timer is not None:
-            timer.stop()
+        # 防止 Tk/Qt 混用时 QTimer C++ 对象被提前析构导致 RuntimeError
+        old_timer = globals()['_save_timers'].get(config_key)
+        if old_timer is not None:
+            try:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(old_timer):
+                        old_timer.stop()
+                except ImportError:
+                    old_timer.stop()
+            except RuntimeError:
+                pass  # C++ object already deleted, ignore
+            globals()['_save_timers'].pop(config_key, None)
 
         timer = QTimer()
         timer.setSingleShot(True)
