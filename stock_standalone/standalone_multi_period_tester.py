@@ -3996,17 +3996,17 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         if self.collapsed:
             # 折叠态：精确根据吸附边缘，用相对坐标检测鼠标是否在屏幕内露出的 5px 热区中
             if self.anchor_edge == "left":
-                in_window = (-tolerance <= rel_x <= 5 + tolerance) and \
+                in_window = (win_w - 5 - tolerance <= rel_x <= win_w + tolerance) and \
                             (-tolerance <= rel_y <= win_h + tolerance)
             elif self.anchor_edge == "right":
-                in_window = (win_w - 5 - tolerance <= rel_x <= win_w + tolerance) and \
+                in_window = (-tolerance <= rel_x <= 5 + tolerance) and \
                             (-tolerance <= rel_y <= win_h + tolerance)
             elif self.anchor_edge == "top":
                 in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
-                            (-tolerance <= rel_y <= 5 + tolerance)
+                            (win_h - 5 - tolerance <= rel_y <= win_h + tolerance)
             elif self.anchor_edge == "bottom":
                 in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
-                            (win_h - 5 - tolerance <= rel_y <= win_h + tolerance)
+                            (-tolerance <= rel_y <= 5 + tolerance)
         else:
             # 展开态：常规窗口全包围盒检测
             in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
