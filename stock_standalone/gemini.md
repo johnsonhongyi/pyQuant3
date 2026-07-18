@@ -1,3 +1,22 @@
+## 2026-07-18 21:25
+- [x] **实现 DNA 专项审计报告列表表头点击排序功能 (Enabled Column Sorting in DNA Audit Table)**：
+    - [x] **实现支持数值与百分比排序的 NumericWidgetItem (Numeric & Percent Sorting)**：自定义开发了 `NumericWidgetItem(QTableWidgetItem)`。通过在 `__lt__` 运算符重载中提取纯数值并自动剔除 `%` 后缀，支持了 `代码` (如 600000)、`意图分` (如 136.7) 以及带有百分号的 `波段涨幅%` (如 105.4%) 等混合数值型单元格的精确升序/降序数字排序，避免了默认字符排序导致的逻辑错乱。
+    - [x] **启用表头点击排序联动机制 (Header Click-to-Sort)**：在 `QtDnaAuditReportWindow` 初始化和数据重载流程中加入了对 `setSortingEnabled(True)` 的联动，允许用户在专项审计中点击任意列的表头进行升序或降序实时排列。在数据填充期间安全暂时锁定排序，确保了填充性能与正确性。
+
+## 2026-07-18 21:20
+- [x] **优化 DNA 专项审计多股批量审计与一键自动诊断联动 (Optimized DNA Audit Batching & One-Click Auto-Diagnosis)**：
+    - [x] **实现默认向下批量选择 20 只个股审计 (Batch Selection of 20 Stocks)**：重构了个股列表的 `_on_diagnose_dna_click` 逻辑。现在当用户在主筛选结果表中选择任一个股并点击“DNA审计”时，系统将自发提取该行及后继最多 20 行个股（合计最多 21 只）的完整代码与名称映射关系，并将其批量送入 `audit_multiple_codes`。大幅提升了审计的流水线分析效率，告别了单一排队的低效流程。
+    - [x] **实现点击代码单元格回填并自动诊断触发 (One-Click Cell-Clicked Auto-Diagnosis)**：在 `QtDnaAuditReportWindow` 的 table 上连接了 `cellClicked` 信号到新实现的 `_on_cell_clicked` 槽函数。当用户单击报告表格的第 0 列（即股票“代码”列）时，系统会自动将该代码回填至主终端的“诊断个股”输入框中，并同步瞬间触发 `diagnose_stock_strategy` 精准诊断，极大地精简了跨窗体数据复制的冗长交互路径。
+    - [x] **根治 DNA 审计报告窗口行号大白边及列表排版缺陷 (Hided Line Numbers & Column Stretching)**：在 `QtDnaAuditReportWindow` 内部移除了多余 of 垂直表头显示（调用 `verticalHeader().setVisible(False)`），彻底切除了由于 Qt 默认样式背景穿透产生的白色行号列；将表格的列自适应机制调整为：前四列自适应内容，最后一列拉伸填充（`Stretch`），既保证了关键分数的紧凑对齐，也避免了最后一列内容被截断的难看空白。
+    - [x] **优化对话框最小尺寸比例与分割条排版 (Optimized Window Scaling & Splitter Sizes)**：将 DNA 专项审计窗口的最小尺寸从硬性锁死的 `850x600` 放宽缩减至更合理的 `600x400`，允许在极小分屏或副屏幕上做紧凑化随动显示；同时为 `QSplitter` 初始设定了科学的 `[180, 320]` 分割比例，防止当数据量极少时表格空白空洞区过度撑高抢占下方诊断说明文字。
+
+## 2026-07-18 21:00
+- [x] **修复 DNA 审计与诊断弹窗 WindowMixin 调用签名不匹配导致的崩溃 (Fixed WindowMixin Parameter Crash in Diagnostics)**：
+    - [x] **补齐 load/save 调用的 self 参数**：修复了 `QtDnaAuditReportWindow` 与 `QtCheckCodeDialog` 内部中，四处 `load_window_position_qt` 和 `save_window_position_qt_visual` 缺失传入当前实例指针（第一个参数 `self`）的严重缺陷，彻底根止了打开诊断或 DNA 审计时的报错。
+    - [x] **实现状态栏联动选择（Tdx/Ths/Vis）与置顶复选框持久化防覆写 (Fixed Status Bar Linkage Selection Persistence Override)**：将状态栏选择组件的 `toggled` 信号连接推迟到 `__init__` 构造函数的尾部（即 `_apply_state()` 之后，`_initializing = False` 之前）统一绑定。这成功阻断了首屏初始化与配置回填组件状态时由于级联触发 `_save_state()` 用临时默认值瞬间覆盖掉真实持久化配置文件的经典 Bug，保证了各状态的完美读取和保存。
+    - [x] **实现防御性 mock tkinter 以根治非 Tk 打包环境下的导入崩溃 (Added Defensive tkinter Mocking)**：在 `multi_period_dialog.py` 的顶部首要位置，通过 `sys.modules` 动态注入了一套虚拟 mock 版本的 `tkinter` 伪模块。使得当系统处于无 `tk` 软件包或干净的 Conda 运行环境时，导入 `backtest_feature_auditor` 依然可以安全越过 `ImportError` 并启动无损诊断，保障了新 Qt 诊断在任何打包或裸机环境下的 100% 独立稳定可用性。
+    - [x] **精准局限于单一目标文件修改以防止引流风险**：本迭代所有的重构与加固均绝对且严格地控制在 `ats/ui/multi_period_dialog.py` 一个文件内，绝不触碰任何主程序或其它周边系统文件，实现了极强的隔离性与高稳定性。
+
 ## 2026-07-18 20:00
 - [x] **修复由于初始化时属性未定义引发的 AttributeError 崩溃及窗口标准控件缺失问题 (Fixed AttributeError on Load & Added Window Buttons)**：
     - [x] **重排构造函数初始化顺序**：将 `self.config_file` 的定义从构造函数尾部移至最前，确保在 `_load_stays_on_top` 与 `_load_state` 触发加载配置文件时，`config_file` 属性已完全就绪，彻底解决了 `'MultiPeriodDialog' object has no attribute 'config_file'` 崩溃。
