@@ -49,7 +49,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("🐉 2D/3D 加速龙头追踪器")
-        self.setMinimumWidth(750)
+        self.setMinimumWidth(250)
         self._is_updating = False
         
         # 1. Load config path and data files
@@ -86,6 +86,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         flags &= ~Qt.WindowType.Dialog
         flags &= ~Qt.WindowType.Tool
         flags |= Qt.WindowType.Window
+        flags |= Qt.WindowType.WindowMinimizeButtonHint
+        flags |= Qt.WindowType.WindowMaximizeButtonHint
+        flags |= Qt.WindowType.WindowCloseButtonHint
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         else:
@@ -488,7 +491,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             dff = safe_float(dff_dict.get(code_str, 0.0))
             dff2 = safe_float(dff2_dict.get(code_str, 0.0))
             dff3 = safe_float(dff3_dict.get(code_str, 0.0))
-            pct = safe_float(row.get('percent', 0.0))
+            pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
             rs_val = pct - sh_pct
             
             # Super Strong 2D/3D 加速多头条件过滤
@@ -536,7 +539,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 if row_name and row_name not in ('nan', '--', '0', ''):
                     name = row_name
                 price = safe_float(row.get('close', row.get('price', 0.0)))
-                pct = safe_float(row.get('percent', 0.0))
+                pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
                 state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
                 dff = safe_float(dff_dict.get(code, 0.0))
                 dff2 = safe_float(dff2_dict.get(code, 0.0))
@@ -667,14 +670,42 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._is_updating = False
 
     def _get_main_app(self):
+        # 1. Prioritize parent widgets possessing engine & _period_dfs
+        curr = self.parent()
+        while curr:
+            if hasattr(curr, 'engine') and hasattr(curr.engine, '_period_dfs'):
+                return curr
+            curr = curr.parent()
+            
+        # 2. Check general parent linkage-capable widgets
         curr = self.parent()
         while curr:
             if hasattr(curr, 'link_stock') or hasattr(curr, 'on_stock_clicked'):
                 return curr
             curr = curr.parent()
+
+        # 3. Check top-level widgets, prioritize MultiPeriodDialog (possessing engine)
         app = QApplication.instance()
         if app:
-            for widget in app.topLevelWidgets():
+            widgets = app.topLevelWidgets()
+            for widget in widgets:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if isdeleted(widget):
+                        continue
+                except:
+                    pass
+                if widget.__class__.__name__ == 'MultiPeriodDialog' or (hasattr(widget, 'engine') and hasattr(widget.engine, '_period_dfs')):
+                    return widget
+            
+            # Fallback to ATSMainWindow or other windows with linkage capability
+            for widget in widgets:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if isdeleted(widget):
+                        continue
+                except:
+                    pass
                 if hasattr(widget, 'link_stock') or hasattr(widget, 'on_stock_clicked'):
                     return widget
         return None
