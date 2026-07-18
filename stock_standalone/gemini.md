@@ -1,3 +1,25 @@
+## 2026-07-18 16:55
+- [x] **根治龙头监控多屏磁吸折叠失效与开机状态还原 Bug (Fixed Dragon Monitor Multi-Screen Snap & State Restoration)**：
+    - [x] **实现高精度窗口相对坐标 hover 检测**：将 PyQt6 版的 `_check_hover` 的物理坐标包含检测重构为基于窗口相对坐标 `mapFromGlobal(QCursor.pos())`。在展开和折叠隐藏态下，通过相对坐标判定鼠标是否滑过屏幕边缘露出的 5px 热区，彻底免除了多显示器、不同 DPI 缩放比例下由于全局坐标计算偏差导致的鼠标移入无响应或卡顿 Bug。
+    - [x] **锁定吸附屏幕工作区几何 (Lock Snap Screen Geometry)**：在 `_detect_and_snap` 成功吸附时，利用 `anchor_screen_geo` 锁定当前吸附显示器的 `availableGeometry`，并在折叠/展开动画计算时直接复用，杜绝了拖拽贴靠到副屏幕边缘时，折叠计算误回退至主屏幕（导致窗口在副屏幕消失并在主屏幕半透明显露）的问题。
+    - [x] **还原磁吸折叠状态并执行静默延迟隐藏 (Restore Collapsed States & Silent Hide)**：修复了由于初始化时未读取 `WINDOW_CONFIG_FILE` 中 `is_hidden_state` 和 `anchor_edge`，导致上次折叠的窗口开机卡在屏幕外 5px 边缘无法展开的 bug。在 `__init__` 中新增磁吸折叠状态判定，并配合单次定时器触发 `_set_initial_hidden_position` 执行无动画的静默定位与半透明处理。
+    - [x] **增大磁吸敏感范围 (Increased Magnetic Margin)**：将吸附贴边阈值由 35 像素调大至 50 像素，使得在不同多屏配置、高 DPI 偏移、窗口阴影等系统环境下更容易且稳健地磁吸吸附。
+
+## 2026-07-18 16:45
+- [x] **修复龙头监控磁吸与多屏幕 DPI 适配 Bug (Fixed Dragon Monitor Snapping & Multi-Monitor DPI Adaptation)**：
+    - [x] **实现物理鼠标左键防抖拦截**：在 PyQt6 版本的 `_check_hover` 与 Tkinter 版本的 `_check_hover_loop` 轮询检测中引入 Windows 原生 `GetAsyncKeyState(0x01)` 物理左键状态判断。物理左键按住拖拽窗口时直接短路折叠隐藏逻辑，并重置所有离开计数 ticks，彻底消除了在标题栏拖动窗口或拉伸边缘时，窗口中途被强行折叠半透明隐藏的 Bug。
+    - [x] **引入松手后冷却防抖与重新移入保护**：在释放拖拽（`_stop_drag` / `_detect_and_snap` 成功吸附）后，将 `_last_show_time` 更新为当前时间并强制置 `_has_hovered_since_show = False`。保证在用户释放鼠标后，如果不再次把鼠标移动到窗口上并移开，窗口绝对保持展开状态，不再会因为吸附位移导致误判定为“出界”而立刻收回。
+    - [x] **实现 PyQt6 版底部（bottom）磁吸及隐藏支持**：在 `ats/ui/dragon_monitor.py` 中增加了对 "bottom" 边界的吸附判定（`min_diff == diff_bottom`），并补充了隐藏折叠至底部（`target_y = screen_geo.bottom() - strip_size`）的逻辑。
+    - [x] **增强 PyQt6 多屏幕动态自适应**：在吸附与隐藏时，使用 `QApplication.screenAt(self.geometry().center())` 动态确定当前窗口中心所在的物理屏幕，取代原有的局限主屏 the `self.screen()`，实现跨多屏的完美工作区定位。
+    - [x] **根治 Tkinter 版多屏幕不同 DPI 下坐标偏移无法吸附 Bug**：在 `standalone_multi_period_tester.py` 中，重构 `get_monitor_info`，使用 `GetDpiForMonitor` 动态获取物理屏幕的 DPI 缩放系数，并将 `rcWork` 物理像素坐标转换为逻辑坐标返回，与 Tkinter 窗口坐标系完美对齐，根治了由于多屏 DPI 缩放差异导致的上下/左右边缘无法吸附的痛点。
+
+## 2026-07-18 16:30
+- [x] **捕获桌面窗口列表中添加右键居中显示于程序所在屏幕功能 (Added Context Menu Option to Center Captured Windows on Dialog's Screen)**：
+    - [x] **实现 `CustomContextMenu` 右键菜单与动作绑定**：为 `CaptureWindowsDialog` 中的 `self.list_widget` 开启了 `CustomContextMenu` 策略，并将其 `customContextMenuRequested` 信号绑定至新实现的 `show_context_menu` 方法，提供了精美的深色风格菜单与“居中显示于程序所在屏幕”动作。
+    - [x] **支持单窗口/多窗口批量居中操作**：在 `show_context_menu` 中智能检测选中状态，若用户右键点击了多个选中的窗口，则提供“居中所有选中窗口”的批量处理动作；若仅单个，则提供单窗口居中，极大地丰富了用户体验。
+    - [x] **根治跨 DPI 屏幕与物理像素坐标计算偏差**：在 `center_windows_on_current_screen` 中，利用 Windows 原生 API `MonitorFromWindow` (通过 `win32api` 和 `win32con` 库) 根据当前对话框所在的物理屏幕动态获取其实际的物理 `Work`（工作区）边界，结合 `core.get_window_rect` 和 `core.set_window_hwnd_pos` 统一在物理像素级别执行精确居中计算，彻底杜绝了在高 DPI 缩放比例下坐标计算越界或偏差。
+    - [x] **集成最小化窗口自动恢复及数据缓存双向同步**：当检测到目标窗口处于最小化状态时，自动触发 `ShowWindow(found_hwnd, 1)` 对其进行还原并引入 50ms 缓冲后再执行移动。移动成功后自动刷新 QListWidget Item 文本、UserRole 数据缓存、`self.all_windows` 缓存和 `self.selected_set`，确保搜索筛选与数据流百分百对齐。
+
 ## 2026-07-18 16:15
 - [x] **优化主可视化图左侧个股列表名称列自适应宽度限制 (Optimized Left Stock Table Name Column Width Limit & Auto-Resize Mode)**：
     - [x] **实现 `get_compact_width` 默认 65px 紧凑预设**：将 `get_compact_width` 重构，对 `'name'` 列默认指定 `65` px 紧凑宽度。当没有手动调整数据时，默认以此为基准进行强制紧凑化布局，杜绝了异常超长个股名撑大列宽的问题。
