@@ -1459,11 +1459,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if hasattr(self, "dragon_monitor") and self.dragon_monitor is not None:
             try:
                 exists = self.dragon_monitor.winfo_exists()
-                if getattr(self, "_debug_mode", False):
-                    print(f"[MultiPeriodTester] dragon_monitor exists in master: {exists}")
                 if exists:
-                    if getattr(self, "_debug_mode", False):
-                        print(f"[MultiPeriodTester] Destroying existing dragon_monitor instance.")
+                    # 折叠态：弹出窗口而非关闭
+                    if getattr(self.dragon_monitor, 'collapsed', False):
+                        self.dragon_monitor._expand()
+                        self.dragon_monitor.lift()
+                        return
+                    # 展开态：再次点击才关闭
                     self.dragon_monitor.destroy()
                     self.dragon_monitor = None
                     return
@@ -3587,6 +3589,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.normal_geom = None
         self._hover_enter_timer_id = None
         self._hover_leave_timer_id = None
+        self._hover_enter_time = None   # 鼠标进入时间戳（事件驱动 + 轮询共用）
+        self._hover_leave_time = None   # 鼠标离开时间戳（事件驱动 + 轮询共用）
         self.is_dragging = False
         self._last_show_time = 0.0
         self._is_animating = False      # 动画互斥锁：动画进行中禁止触发折叠/展开
@@ -3599,6 +3603,9 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         
         # 4. 数据刷新
         self.update_data()
+        # 5. 启动磁吸悬停轮询（延迟 1500ms：给窗口足够的冷却期，防止刚打开就自动折叠）
+        self._last_show_time = time.time()  # 重置冷却时间戳
+        self.after(1500, self._check_hover_loop)
         if getattr(self.master, "_debug_mode", False):
             print(f"[DragonMonitor] Initialization complete. db_path={self.db_path}, layout_path={self.layout_path}")
         
@@ -3701,6 +3708,26 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.main_container.bind("<Enter>", self._on_mouse_enter)
         self.main_container.bind("<Leave>", self._on_mouse_leave)
         
+    def _on_mouse_enter(self, event):
+        """鼠标进入窗口时的事件回调：辅助 _check_hover_loop，更新进入时间戳。
+        注意：折叠态下不设置 _has_hovered_since_show，防止初始化伪 Enter 事件触发立即折叠。"""
+        if self.is_dragging or self._is_animating:
+            return
+        # 折叠态下只更新进入时间戳（用于触发 expand），不标记 _has_hovered_since_show
+        if not self.collapsed:
+            self._has_hovered_since_show = True
+        self._hover_leave_time = None
+        if self._hover_enter_time is None:
+            self._hover_enter_time = time.time()
+
+    def _on_mouse_leave(self, event):
+        """鼠标离开窗口时的事件回调：辅助 _check_hover_loop，更新离开时间戳。"""
+        if self.is_dragging or self._is_animating:
+            return
+        self._hover_enter_time = None
+        if self._hover_leave_time is None and self._has_hovered_since_show:
+            self._hover_leave_time = time.time()
+
     def _start_drag(self, event):
         self.is_dragging = True
         self.drag_x = event.x
@@ -3866,7 +3893,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self._animate_geometry(
             win_w, win_h, win_x, win_y,
             win_w, win_h, end_x, end_y,
-            steps=10
+            steps=10,
+            callback=lambda: self.after(150, self._check_hover_loop)  # 动画结束后重启轮询
         )
         
     def _expand(self):
@@ -3904,7 +3932,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self._animate_geometry(
             start_w, start_h, start_x, start_y,
             win_w, win_h, win_x, win_y,
-            steps=10
+            steps=10,
+            callback=lambda: self.after(150, self._check_hover_loop)  # 动画结束后重启轮询
         )
 
     def _start_resize(self, event):
