@@ -1,3 +1,30 @@
+## 2026-07-18 20:00
+- [x] **修复由于多周期重命名与后缀列匹配导致龙头监控自动挖掘数据大量缺失/为空的 Bug (Fixed Missing Dragon Monitor Auto-Discovery Data)**：
+    - [x] **实现 PyQt6 龙头监控列名自适应与周期排序权重匹配**：在 `ats/ui/dragon_monitor.py` 的 `update_data` 刚开始，引入了 `get_period_weight` 周期物理长度权重分析算法，动态识别带有后缀的如 `dff_d`, `dff_3d`, `dff_3M` 等动态多周期列，取代之前硬编码 `'dff'`, `'dff2'`, `'dff3'` 从而彻底修复在非 `d, w, m` 周期下由于列名不匹配导致 `dff` 返回为 0、龙头个股自动挖掘条件被完全过滤的严重缺陷。
+    - [x] **实现独立 Tkinter 龙头监控多周期动态键获取与模糊对齐**：在 `standalone_multi_period_tester.py` 的 `update_data` 方法中，获取 `_period_dfs` 时改用自适应 `list(main_app.engine._period_dfs.keys())` 获取所有已加载的动态周期，并使用模糊对齐函数 `get_dff_col` 在各周期宽表中定位 `dff` 数据，彻底根治了多周期测试器开启不同周期（如 3d, 3M）时，龙头磁吸窗口中自动挖掘的超级潜力个股数骤减或为空的工程 bug。
+
+## 2026-07-18 19:40
+- [x] **修复主窗口最小化时 Tk 磁吸龙头窗口无法弹出的 Bug (Fixed Snap Window Pop-up Issue on Master Minimized)**：
+    - [x] **切断 Tk 子窗口与主窗口的从属从属关系**：在 `TkDragonLeaderMonitor` 的 `__init__` 中将原 `super().__init__(master)` 修正为 `super().__init__()`。这使得在主窗口最小化时，边缘磁吸窗口依然在桌面侧边保持正常状态，使用户可以将鼠标划过边缘 5px 热区唤醒悬浮窗。
+    - [x] **绑定 master 销毁事件维持自愈回收 (Lifecycle Destruction Alignment)**：通过在 `__init__` 中为 `self.master` 绑定 `<Destroy>` 事件，确保在主窗口正常关闭销毁时，能够自动同步触发 `self.destroy()` 完成物理销毁与内存回收，避免窗口悬空挂起。
+
+## 2026-07-18 18:50
+- [x] **完成多周期策略联动筛选器 (Multi-Period Tester) PyQt6 全面对齐与功能加固 (Completed PyQt6 Migration & Feature Alignment for Multi-Period Tester)**：
+    - [x] **实现 initial_run 自动化执行与 UI 首屏数据即时加载 (Immediate Data Loading)**：在 `MultiPeriodDialog` 构造中追加 `QTimer.singleShot(100, self._on_initial_loaded_logic)`，使得打开窗口后自动后台触发首轮多周期过滤，消除“打开空白”的冷启动空白，保证首屏行情秒显。
+    - [x] **实现列宽自适应伸缩布局与列宽持久化门槛保护 (Adaptive Columns & Saved Widths Preservation)**：
+        - 编写了 `_adjust_column_widths` 核心布局器。基于 60D、120D 视口物理宽度占比，自动计算并分配各列像素值。
+        - 自动伸缩填充：当窗口被拉宽时，若总分配宽度小于视口宽度，自动按比例拉伸所有列使其填满界面，杜绝“右侧大片白边”或内容受压挤作一团。
+        - 锁死列宽记忆：若用户在界面手动拉伸过某列，内存的 `saved_col_widths` 会在 `sectionResized` 事件触发的 2 秒防抖期内同步更新。在自动拉伸和高频数据刷新时，该手动设定值将被绝对优先尊重且不被覆盖，实现了“自适应填充”与“手动列宽记忆”的完美共存。
+    - [x] **全面恢复个股列表与多周期详情数据字段 (Restored Missing Table Fields)**：在 `_show_results` 表格数据填充管道中，彻底补齐并对齐了旧 Tk 系统的所有缺失列数据（包含板块评分 `sb_score`、均线方向 `ma_dir`、重心多头数 `up_count`、个股强度 `score`、分时破位状态等），保证了 PyQt6 列表信息熵与原版 100% 对齐。
+    - [x] **实现双向行情与大盘偏离数据流的实时安全灌入 (Bi-directional Data Flow Sync)**：在 `MultiPeriodWorker` 过滤计算结束的 `_on_worker_finished` 中，自动提取 `top_now` 行情及上证指数等权混合大盘数据。一旦数据产出，不仅更新自身 UI，更自动通过信号槽与直接实例调用将最新的行情截面与大盘偏离度安全同步灌入 `DragonLeaderMonitorDialog` (龙头监控器)，打通了多窗口间的行情与偏离指标生命线。
+    - [x] **实现界面过滤下拉历史与 Hit 命中统计测试联动加固 (History Persistence & Block Signals Protection)**：
+        - 过滤条件记忆：每次退出或关闭时，自动持久化最后一次选择的过滤条件至 `search_history.json`，在下次重新打开时自动回填并应用过滤。
+        - 拦截 Hit 回调重置：针对点击“Hit 命中率测试”时由于下拉菜单清空与重建高频触发 `currentIndexChanged`从而误重置过滤条件文本的 bug，在重建阶段引入 `blockSignals(True) / blockSignals(False)` 物理拦截，加固了过滤状态机的完整性。
+    - [x] **根治后台工作线程回收与窗口关闭引发的 QThread 析构崩溃 (Resolved QThread Lifetime & Deletion Crash)**：修复了在启动、高频点击强制刷新或关闭 `MultiPeriodDialog` 时，由于 Python 的垃圾回收（GC）机制将仍在运行的后台 `MultiPeriodWorker` (QThread) 析构，导致 Qt 运行时抛出 `QThread: Destroyed while thread is still running` 致命崩溃。
+        - 引入模块全局 `_active_workers` 活跃线程集合锁定 Python 引用计数，使后台线程在运行中绝对不会被提前 GC，直到跑完后由内置的 `cleanup` 闭包安全从集合剔除并自我回收（`deleteLater`）。
+        - 在 `btn_run_filter_worker` 开启新线程前增加 `isRunning()` 检测，屏蔽并阻断高频重入与实例覆盖。
+        - 显式重写 `closeEvent`，在窗口关闭时强行切断当前 Worker 对应的 `progress`、`finished`、`error` 信号连接，杜绝了由于后台线程跑完试图回调已被销毁的 Dialog C++ 实例导致 `RuntimeError: wrapped C/C++ object has been deleted` 的二次崩溃。
+
 ## 2026-07-18 17:45
 - [x] **优化多周期策略测试器启动与激活逻辑 (Optimized Multi-Period Tester Launch & Activation)**：
     - [x] **实现外部进程优先检测与唤醒 (Prioritized External Process Detection)**：重构了 `instock_MonitorTK.py` 中的 `open_multi_period_tester`。优先使用 Windows API (`FindWindowW`) 检测是否已存在标题为 `"多周期联动策略筛选器"` 的外部窗口。如果已存在，则根据其当前状态（如最小化时恢复，隐藏时显示）自动将其置顶、聚焦并唤醒，避免重复启动。
