@@ -1,3 +1,10 @@
+## 2026-07-18 17:45
+- [x] **优化多周期策略测试器启动与激活逻辑 (Optimized Multi-Period Tester Launch & Activation)**：
+    - [x] **实现外部进程优先检测与唤醒 (Prioritized External Process Detection)**：重构了 `instock_MonitorTK.py` 中的 `open_multi_period_tester`。优先使用 Windows API (`FindWindowW`) 检测是否已存在标题为 `"多周期联动策略筛选器"` 的外部窗口。如果已存在，则根据其当前状态（如最小化时恢复，隐藏时显示）自动将其置顶、聚焦并唤醒，避免重复启动。
+    - [x] **实现外部/本地程序与开发脚本的自动检测与冷启动 (Auto-detect & Launch for Packaged Exe/Dev Script)**：如果未检测到已运行 the 外部窗口，系统会优先查找本地是否存在 `MultiPeriodTester.exe`（打包环境）或 `standalone_multi_period_tester.py`（开发环境）。若存在，则通过 `subprocess.Popen` 后台异步启动外部进程，实现一键调起。
+    - [x] **完备的内部 PyQt6 弹窗降级回退机制 (PyQt6 Fallback Graceful Degradation)**：若外部可执行文件及开发脚本均不存在，系统会自动回退至内部 PyQt6 的 `MultiPeriodDialog` 弹窗调用，确保了功能在任何环境下的 100% 可用性。
+    - [x] **对齐快捷键显示/隐藏切换控制 (Aligned Toggle Action)**：重构了 `toggle_multi_period_tester`，支持对已检测到的外部窗口进行前台活动判定。若外部窗口已是当前活动窗口，再次按快捷键会自动将其最小化或隐藏；若在后台，则将其置顶，与 ATS 智能终端的快捷键切换逻辑完美对齐。
+
 ## 2026-07-18 17:30
 - [x] **根治龙头监控副显示器磁吸失灵与调整大小白框闪烁 Bug (Fixed Multi-Monitor Snapping & White Border on Resize)**：
     - [x] **实现 `get_monitor_info` DPI 缩放比例一致性对齐**：由于 Tkinter 逻辑坐标系是根据全局应用启动时决定的（即主窗口的 `scale_factor`），而在副屏幕获取 `GetDpiForMonitor` 的当前 DPI 比例通常与全局不符，导致物理坐标转为逻辑坐标时计算越界或偏差。现通过将 `get_monitor_info(hwnd)` 重构为支持可选 `scale` 传入。在龙头窗口调用时，传入统一的全局 `self.scale_factor`，完美对齐了屏幕的逻辑工作区几何边界与窗口逻辑位置边界，实现了无论主窗口在哪个屏幕、龙头窗口被拖到哪个副屏，都可以完美磁吸和折叠。

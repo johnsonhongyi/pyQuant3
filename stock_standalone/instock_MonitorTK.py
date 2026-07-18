@@ -15536,7 +15536,49 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", f"打开选股窗口失败: {e}")
             
     def open_multi_period_tester(self):
-        """[NEW] 打开多周期联动策略筛选器 (支持窗口复用和隐藏/显示切换)"""
+        """[NEW] 打开多周期联动策略筛选器 (优先检测外部 MultiPeriodTester.exe/脚本，否则执行内部调用)"""
+        title = "多周期联动策略筛选器"
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, title)
+            if hwnd:
+                if ctypes.windll.user32.IsIconic(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                else:
+                    ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                logger.info("[MultiPeriod] External tester window found, bringing to foreground.")
+                toast_message(self, "多周期筛选器已置顶")
+                return
+        except Exception as e:
+            logger.warning(f"FindWindowW error: {e}")
+
+        # 检测本地程序/脚本
+        base_path = get_app_root()
+        exe_path = os.path.join(base_path, "MultiPeriodTester.exe")
+        dev_path = os.path.join(base_path, "standalone_multi_period_tester.py")
+
+        if os.path.exists(exe_path):
+            try:
+                logger.info(f"🚀 [MultiPeriod] Running packaged exe: {exe_path}")
+                import subprocess
+                subprocess.Popen([exe_path], cwd=base_path)
+                toast_message(self, "多周期筛选器启动中...")
+                return
+            except Exception as e:
+                logger.error(f"Failed to launch MultiPeriodTester.exe: {e}")
+        elif os.path.exists(dev_path):
+            try:
+                logger.info(f"🚀 [MultiPeriod] Running development script: {dev_path}")
+                import subprocess
+                import sys
+                subprocess.Popen([sys.executable, dev_path], cwd=base_path)
+                toast_message(self, "多周期筛选器启动中...")
+                return
+            except Exception as e:
+                logger.error(f"Failed to launch standalone_multi_period_tester.py: {e}")
+
+        # 如果外部不存在，则回退执行内部调用
         from PyQt6 import QtWidgets
         from PyQt6.sip import isdeleted
         import sys
@@ -15558,7 +15600,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to open MultiPeriodDialog: {e}")
 
     def toggle_multi_period_tester(self):
-        """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (对齐焦点判定机制)"""
+        """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (支持外部窗口与内部Dialog对齐判定)"""
+        title = "多周期联动策略筛选器"
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, title)
+            if hwnd:
+                is_visible = ctypes.windll.user32.IsWindowVisible(hwnd)
+                foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+                
+                if is_visible and foreground_hwnd == hwnd:
+                    # 如果窗口当前可见且处于前台（即当前活动窗口），再次按快捷键则隐藏它
+                    ctypes.windll.user32.ShowWindow(hwnd, 0) # SW_HIDE = 0
+                    logger.info("[MultiPeriod] External window is already active, hiding it.")
+                    toast_message(self, "多周期筛选器已隐藏")
+                else:
+                    # 如果窗口不可见，或者在后台，则将其唤醒、恢复并置顶聚焦
+                    if ctypes.windll.user32.IsIconic(hwnd):
+                        ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE = 9
+                    else:
+                        ctypes.windll.user32.ShowWindow(hwnd, 5) # SW_SHOW = 5
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    logger.info("[MultiPeriod] External window is background/hidden, restoring and bringing to foreground.")
+                    toast_message(self, "多周期筛选器已置顶")
+                return
+        except Exception as e:
+            logger.warning(f"FindWindowW error in toggle: {e}")
+
+        # 如果没有外部窗口，切换内部窗口
         from PyQt6.sip import isdeleted
         if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and not isdeleted(self._multi_period_tester_win):
             try:
