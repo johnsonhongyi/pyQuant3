@@ -106,6 +106,19 @@ class BaseATSTableWidget(QTableWidget):
         self._is_updating = False
         self._config_key = None
         self._max_widths = None
+        # Cache column indices to avoid O(N) header scans on every click
+        self._code_col_cached = 0
+        self._name_col_cached = 1
+        self._col_cache_valid = False
+        # Track last emitted code to prevent double-fire from click+selection signals
+        self._last_emitted_code = ""
+        # Debounce timer: collapses rapid keyboard-repeat navigation into a single signal.
+        # 20ms is imperceptible for single clicks but still merges key-repeat bursts.
+        self._linkage_timer = QTimer(self)
+        self._linkage_timer.setSingleShot(True)
+        self._linkage_timer.setInterval(20)  # 20ms — imperceptible for clicks, effective for key-repeat
+        self._pending_linkage_row = -1
+        self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
         
         # Default styling matching high-end dark theme
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -114,9 +127,9 @@ class BaseATSTableWidget(QTableWidget):
         self.setSortingEnabled(True)
         self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
-        # Connect signals
-        self.itemClicked.connect(self._on_item_clicked)
-        self.itemSelectionChanged.connect(self._on_selection_changed)
+        # Use only currentCellChanged (covers both mouse click and keyboard navigation)
+        # This single signal replaces itemClicked + itemSelectionChanged (which caused double-fire lag)
+        self.currentCellChanged.connect(self._on_current_cell_changed)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         
@@ -130,6 +143,9 @@ class BaseATSTableWidget(QTableWidget):
         )
 
     def _get_code_name_cols(self):
+        """Return (code_col, name_col) with cache to avoid O(N) header scan on every interaction."""
+        if self._col_cache_valid:
+            return self._code_col_cached, self._name_col_cached
         code_col = 0
         name_col = 1
         for col in range(self.columnCount()):
@@ -140,30 +156,50 @@ class BaseATSTableWidget(QTableWidget):
                     code_col = col
                 elif "名称" in text or "name" in text.lower():
                     name_col = col
+        self._code_col_cached = code_col
+        self._name_col_cached = name_col
+        self._col_cache_valid = True
         return code_col, name_col
 
-    def _on_item_clicked(self, item):
-        if item and not self._is_updating:
-            self._trigger_linkage(item.row())
+    def setColumnCount(self, count):
+        """Invalidate column cache when column count changes."""
+        self._col_cache_valid = False
+        super().setColumnCount(count)
 
-    def _on_selection_changed(self):
-        if self._is_updating:
-            return
-        selected_items = self.selectedItems()
-        if not selected_items:
-            return
-        row = selected_items[0].row()
-        self._trigger_linkage(row)
+    def setHorizontalHeaderLabels(self, labels):
+        """Invalidate column cache when headers are reset."""
+        self._col_cache_valid = False
+        super().setHorizontalHeaderLabels(labels)
 
-    def _trigger_linkage(self, row):
+    def _on_current_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
+        """Single entry point for both mouse click and keyboard navigation."""
+        if self._is_updating or currentRow < 0:
+            return
+        # Only re-queue if row actually changed
+        if currentRow == self._pending_linkage_row:
+            return
+        self._pending_linkage_row = currentRow
+        # Restart debounce timer to coalesce rapid navigation
+        self._linkage_timer.start()
+
+    def _fire_linkage_debounced(self):
+        row = self._pending_linkage_row
+        if row < 0 or self._is_updating:
+            return
         code_col, name_col = self._get_code_name_cols()
         code_item = self.item(row, code_col)
         name_item = self.item(row, name_col)
-        if code_item and name_item:
+        if code_item:
             code = code_item.text().strip()
-            name = name_item.text().strip()
-            if code and code != "N/A":
+            name = name_item.text().strip() if name_item else ""
+            if code and code != "N/A" and code != self._last_emitted_code:
+                self._last_emitted_code = code
                 self.stock_activated.emit(code, name)
+
+    def _trigger_linkage(self, row):
+        """Legacy compatibility method – routes through the debounce path."""
+        self._pending_linkage_row = row
+        self._linkage_timer.start()
 
     def _show_context_menu(self, pos):
         item = self.itemAt(pos)
