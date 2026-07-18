@@ -1450,10 +1450,16 @@ class ATSMainWindow(QMainWindow):
         self._detail_dialog.show()
 
     def on_sector_clicked(self, name):
-        self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
-        from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-        dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, parent=self)
-        dialog.exec()
+        if getattr(self, "_showing_sector_detail", False):
+            return
+        self._showing_sector_detail = True
+        try:
+            self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
+            from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
+            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, parent=self)
+            dialog.exec()
+        finally:
+            self._showing_sector_detail = False
 
     def on_heartbeat(self):
         # 1. Periodically load and update DB data

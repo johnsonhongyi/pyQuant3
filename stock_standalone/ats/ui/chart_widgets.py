@@ -585,6 +585,39 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             if self.anchor_edge:
                 self.normal_geometry = self.geometry()
+    def link_stock(self, code, name=None):
+        """Linkage method called by sub-dialogs like DNA audit window."""
+        if not name:
+            main_app = self._get_main_app()
+            if main_app and hasattr(main_app, 'get_stock_name'):
+                name = main_app.get_stock_name(code)
+            else:
+                name = ""
+        self.code_clicked.emit(code, name)
+        main_app = self._get_main_app()
+        if main_app and hasattr(main_app, 'link_stock'):
+            main_app.link_stock(code, name)
+
+    def diagnose_stock_strategy(self, code):
+        """Forward diagnostic requests from DNA audit window to main application."""
+        main_app = self._get_main_app()
+        if not main_app:
+            return
+        if hasattr(main_app, 'diagnose_stock_strategy'):
+            main_app.diagnose_stock_strategy(code)
+            return
+        diag_edit = getattr(main_app, 'diag_edit', None) or getattr(main_app, 'diag_entry', None)
+        if diag_edit:
+            if hasattr(diag_edit, 'setText'):
+                diag_edit.setText(code)
+            else:
+                try:
+                    diag_edit.delete(0, 'end')
+                    diag_edit.insert(0, code)
+                except:
+                    pass
+            if hasattr(main_app, 'diagnose_stock_strategy'):
+                main_app.diagnose_stock_strategy(code)
 
     def _link_current_row(self, row):
         if getattr(self, '_is_updating', False) or getattr(self, '_is_auto_popping', False):

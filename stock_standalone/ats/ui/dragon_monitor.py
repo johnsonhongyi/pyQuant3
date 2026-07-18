@@ -474,7 +474,6 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         
         # 1. 每日自动替换更新潜力股 (2D/3D加速多头完美结构挖掘)
         new_auto_list = []
-        import pandas as pd
         
         for code, row in current_df.iterrows():
             if isinstance(row, pd.DataFrame):

@@ -1,8 +1,14 @@
+## 2026-07-18 23:15
+- [x] **修复个股分布详情窗口中 DNA 审计联动与策略诊断缺失 Bug (Fixed DNA Audit Linkage & Strategy Diagnostics in Distribution Details Dialog)**：
+    - [x] **实现 DistributionDetailsDialog 行动联动方法 (Implemented link_stock for DistributionDetailsDialog)**：在 `ats/ui/chart_widgets.py` 的 `DistributionDetailsDialog` 中新增了 `link_stock` 方法，在子窗口（如 DNA 审计报告窗口）激活联动时，获取主程序的股票名字，透传发射 `code_clicked` 信号并向主程序的 `link_stock` 进行广播发送，实现多窗口行情完全同步。
+    - [x] **实现策略诊断诊断方法透传 (Implemented diagnose_stock_strategy for DistributionDetailsDialog)**：在 `DistributionDetailsDialog` 中新增了 `diagnose_stock_strategy` 方法。当 DNA 审计报告中双击或点击代码触发诊断时，能够自动识别并透传调用主程序（PyQt6 或 Tkinter 兼容）的个股诊断逻辑（包含对 `diag_edit`/`diag_entry` 输入框的自动回填与执行），打通了从个股分布图到专项审计、再到自动化策略诊断的完整闭环流程。
+
 ## 2026-07-18 23:00
 - [x] **修复多周期缓存功能未生效与已知缺失周期重复读取 Bug (Fixed Multi-Period Caching Not Taking Effect & Repeated Missing Period Reloads)**：
-    - [x] **修复后台线程参数引用丢失 (Fixed Parameter Reference Loss)**：修复了 `ats/ui/multi_period_dialog.py` 的 `MultiPeriodWorker` 构造函数中由于使用 `or` 运算符导致的引用断裂（传入空字典 `{}` 表达式被求值为 `falsy` 从而赋了全新字典实例），正确改用 `is not None` 判断，确保后台线程更新的时间戳字典能够回传并同步至主界面实例的缓存中。
+    - [x] **修复后台线程参数引用丢失 (Fixed Parameter Reference Loss)**：修复了 `ats/ui/multi_period_dialog.py` of `MultiPeriodWorker` 构造函数中由于使用 `or` 运算符导致的引用断裂（传入空字典 `{}` 表达式被求值为 `falsy` 从而赋了全新字典实例），正确改用 `is not None` 判断，确保后台线程更新的时间戳字典能够回传并同步至主界面实例的缓存中。
     - [x] **实现已知缺失周期的缓存短路冷却机制 (Implemented Missing Period Cache Short-Circuit)**：在 `MultiPeriodWorker.run` 和 `standalone_multi_period_tester.py` 的后台 `_worker` 中，对缓存命中判定 (`cached`) 引入了缺失周期 `_missing_periods` 兼容。只要缺失周期在 TTL 缓存有效期内，即判定为已缓存 (`cached=True`) 并跳过重复的磁盘读取，彻底消除了切换周期或过滤时对无效数据高频、无谓的 I/O 加载。
     - [x] **完全对齐 PyQt6 与 Tkinter 数据引擎与缓存行为 (Aligned PyQt6 & Tkinter Backend Cache Behavior)**：拉平了两个平台的多周期数据加载与验证流程，确保策略引擎与状态反馈的表现 100% 对齐一致。
+    - [x] **修复龙头监控打开时 pandas 作用域遮蔽导致的 UnboundLocalError 崩溃 (Fixed pandas UnboundLocalError on Opening Dragon Monitor)**：移除了 `ats/ui/dragon_monitor.py` 内 `update_data` 方法中冗余的局部 `import pandas as pd`，消除了其对模块级别全局 `pd` 引用的阴影覆盖（shadowing），彻底根治了在执行 `isinstance(row, pd.DataFrame)` 时抛出的 `local variable 'pd' referenced before assignment` 运行时异常，恢复了龙头监控窗体盘中高频更新的稳定性。
 
 ## 2026-07-18 22:00
 - [x] **适配打包与独立运行环境下的 DNA 审计功能 (Adapted DNA Audit Feature for Packaged & Standalone Environments)**：
