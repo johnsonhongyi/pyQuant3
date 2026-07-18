@@ -988,6 +988,9 @@ class ConceptStocksDialog(QDialog):
         self.table = BaseATSTableWidget(self)
         self.table.setColumnCount(len(self.columns) + 1)
         self.table.setHorizontalHeaderLabels(["序号"] + [self.headers.get(col, col) for col in self.columns])
+        p = self.parent()
+        if p and hasattr(p, 'link_stock'):
+            self.table.stock_activated.connect(p.link_stock)
         layout.addWidget(self.table)
 
         # Populate
@@ -1015,10 +1018,30 @@ class ConceptStocksDialog(QDialog):
                     else:
                         val_str = str(val)
                     item = NumericTableWidgetItem(val_str)
+                    
+                    # Color A-share涨跌幅
+                    if col == 'percent':
+                        if val > 0:
+                            item.setForeground(QBrush(QColor("#ff4444")))
+                        elif val < 0:
+                            item.setForeground(QBrush(QColor("#33cc5a")))
                 else:
                     item = QTableWidgetItem(str(val))
+                    if col == 'percent' and val != '--':
+                        try:
+                            f_val = float(str(val).replace('%', ''))
+                            if f_val > 0:
+                                item.setForeground(QBrush(QColor("#ff4444")))
+                            elif f_val < 0:
+                                item.setForeground(QBrush(QColor("#33cc5a")))
+                        except Exception:
+                            pass
                 
                 self.table.setItem(idx, c_idx, item)
+
+        if len(self.matched_stocks) > 0:
+            self.table.setCurrentCell(0, 1)
+            self.table.setFocus()
 
         # Apply persistence and interactive resizing
         default_widths = {0: 35}
@@ -1207,6 +1230,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     Subclasses BaseATSTableWidget and implements WindowMixin snapping.
     """
     code_clicked = pyqtSignal(str, str)  # Linkage emission
+    status_message_signal = pyqtSignal(str) # Thread-safe status message updater
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1267,6 +1291,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self._init_ui()
         self._apply_state()
 
+        # Thread-safe status update connection
+        self.status_message_signal.connect(self.lbl_status.setText)
+
         # Connect signals after state application to avoid redundant triggers
         self.strategy_combo.currentIndexChanged.connect(self._on_strategy_selected)
         self.table.horizontalHeader().sectionResized.connect(self._on_section_resized)
@@ -1275,23 +1302,21 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_ths_chk.toggled.connect(self._save_state)
         self.on_top_chk.toggled.connect(self._on_top_toggled)
 
-        # Linkage debounce timer setup to eliminate high-frequency lag & repeated linkages
-        self._link_timer = QTimer(self)
-        self._link_timer.setSingleShot(True)
-        self._link_timer.timeout.connect(self._do_link_stock_debounced)
+        # Linkage: BaseATSTableWidget's internal 80ms debounce handles the
+        # coalescing; link_stock just needs a same-code guard to skip redundant IPC calls
         self._pending_link_code = None
         self._pending_link_name = None
 
         # Enable strong keyboard focus policy for base table to capture Up/Down arrow keys
         self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Startup Polling Favorites
+        # Favorites poll: 3s interval — low-frequency to avoid constant allocation
         try:
             from global_favorites import GlobalFavoriteManager
             self._last_favorites_version = GlobalFavoriteManager().version
             self.favorites_timer = QTimer(self)
             self.favorites_timer.timeout.connect(self._poll_favorites_loop)
-            self.favorites_timer.start(500)
+            self.favorites_timer.start(3000)
         except Exception:
             pass
 
@@ -1341,7 +1366,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 pass
         return default_state
 
-    def _save_state(self):
+    def _save_state(self, write_to_disk=False):
         if getattr(self, "_initializing", False):
             return
         try:
@@ -1362,18 +1387,19 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['stays_on_top'] = self.on_top_chk.isChecked()
             self.ui_state['current_history_query'] = self._current_history_query
 
-            cfg = {}
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    cfg = json.load(f)
+            if write_to_disk == "FORCE_WRITE":
+                cfg = {}
+                if os.path.exists(self.config_file):
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
 
-            for k, v in self.ui_state.items():
-                if k != "editor_geometry_qt":
-                    cfg[k] = v
+                for k, v in self.ui_state.items():
+                    if k != "editor_geometry_qt":
+                        cfg[k] = v
 
-            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save state: {e}")
 
@@ -1502,10 +1528,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         main_layout.addLayout(concept_layout)
 
         # ── Results Data Table (BaseATSTableWidget) ──
+        # BaseATSTableWidget already handles currentCellChanged + debounce internally
+        # and emits stock_activated → we just connect to link_stock
         self.table = BaseATSTableWidget(self)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.stock_activated.connect(self.link_stock)
-        self.table.currentCellChanged.connect(self._on_table_current_cell_changed)
         main_layout.addWidget(self.table)
 
         # ── Bottom Status Bar ──
@@ -1626,11 +1653,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.run_filter(force_reload=False)
 
     def _on_section_resized(self, logicalIndex, oldSize, newSize):
+        # Only update in-memory cache; NO disk write here
         if getattr(self, "_in_adjust_widths", False):
             return
         if hasattr(self.table, "_base_widths") and logicalIndex < len(self.table._base_widths):
             self.table._base_widths[logicalIndex] = newSize
-            QTimer.singleShot(50, self._adjust_column_widths)
 
     def _on_custom_col_changed(self):
         self._save_state()
@@ -1795,32 +1822,36 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.run_filter(force_reload=False)
 
     def closeEvent(self, event):
-        # Disconnect worker signals on close to prevent runtime crash if Dialog is deleted
+        """
+        唯一写盘时机：窗口关闭时一次性保存窗口位置、状态和列宽。
+        运行期间 resizeEvent / moveEvent / sectionResized 均不写盘。
+        """
         from PyQt6.sip import isdeleted
+
+        # Stop all timers
+        if hasattr(self, "favorites_timer"):
+            self.favorites_timer.stop()
+
+        # Disconnect worker signals to prevent crash after Dialog is deleted
         if hasattr(self, "worker") and self.worker is not None:
             try:
                 if not isdeleted(self.worker):
-                    try:
-                        self.worker.progress.disconnect(self.update_status)
-                    except Exception:
-                        pass
-                    try:
-                        self.worker.finished.disconnect(self._on_worker_finished)
-                    except Exception:
-                        pass
-                    try:
-                        self.worker.error.disconnect(self._on_worker_error)
-                    except Exception:
-                        pass
+                    for sig in (self.worker.progress, self.worker.finished, self.worker.error):
+                        try:
+                            sig.disconnect()
+                        except Exception:
+                            pass
             except RuntimeError:
                 pass
+
+        # ── ONE-TIME disk write: position + state + column widths ──
         try:
             self.save_window_position_qt(self, "multi_period_dialog")
         except Exception:
             pass
         self._save_state()
-        
-        # 让龙头监控跟主窗口一起关闭
+
+        # Cascade-close Dragon Monitor
         if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
             try:
                 if not isdeleted(self.dragon_monitor_dialog):
@@ -1831,15 +1862,13 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         super().closeEvent(event)
 
     def resizeEvent(self, event):
+        # NO disk write on resize — only update UI layout in memory
         super().resizeEvent(event)
         self._adjust_column_widths()
-        if not getattr(self, "_initializing", False):
-            self.save_window_position_qt_visual(self, "multi_period_dialog")
 
     def moveEvent(self, event):
+        # NO disk write on move — position saved once on closeEvent
         super().moveEvent(event)
-        if not getattr(self, "_initializing", False):
-            self.save_window_position_qt_visual(self, "multi_period_dialog")
 
     def _adjust_column_widths(self):
         """
@@ -2067,7 +2096,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 n_item = QTableWidgetItem(display_name)
                 if is_fav:
                     n_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
-                    n_item.setForeground(QBrush(QColor("#ef5350")))
+                    n_item.setForeground(QBrush(QColor("#ff4444")))
                 self.table.setItem(idx, 1, n_item)
 
                 # Price, Percent, Volume, Ratio
@@ -2076,9 +2105,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
                 pct_item = NumericTableWidgetItem(f"{percent:.2f}")
                 if percent > 0:
-                    pct_item.setForeground(QBrush(QColor("#ef5350")))
+                    pct_item.setForeground(QBrush(QColor("#ff4444")))
                 elif percent < 0:
-                    pct_item.setForeground(QBrush(QColor("#26a69a")))
+                    pct_item.setForeground(QBrush(QColor("#33cc5a")))
                 self.table.setItem(idx, 3, pct_item)
 
                 v_item = NumericTableWidgetItem(f"{vol:.0f}" if vol > 1000 else f"{vol:.2f}")
@@ -2425,78 +2454,87 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
 
-    def _on_table_current_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
-        if currentRow < 0:
-            return
-        code_item = self.table.item(currentRow, 0)
-        name_item = self.table.item(currentRow, 1)
-        if code_item:
-            code = code_item.text().strip()
-            name = name_item.text().strip() if name_item else code
-            if name.startswith("★ "):
-                name = name[2:]
-            self.link_stock(code, name)
-
     def link_stock(self, code, name):
         """
-        Emits linkage signals with 150ms debounce cooldown to prevent
-        high-frequency IO blockage and duplicated code linkages.
+        接收来自 BaseATSTableWidget.stock_activated 信号的联动请求。
+        彻底实现与主窗口一致的极速无阻塞联动：
+        1. 异步发送 Socket 指令切换 K线可视化器 (Vis)。
+        2. 向独立 LinkageProcess 后台进程投递物理联动任务 (Tdx/Ths)，彻底消除 UI 线程卡顿和延迟。
         """
         code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
         if not code:
             return
 
+        # Same-code guard: skip if exactly the same code was just linked
         if code == getattr(self, "_last_link_code", ""):
-            return  # Filter duplicate linkage to the same code
-
-        if code == getattr(self, "_pending_link_code", ""):
-            return  # Already pending
-
-        self._pending_link_code = code
-        self._pending_link_name = name
-
-        self._link_timer.stop()
-        self._link_timer.start(150)  # 150ms debounce
-
-    def _do_link_stock_debounced(self):
-        code = self._pending_link_code
-        if not code or code == getattr(self, "_last_link_code", ""):
             return
-
         self._last_link_code = code
-        self._pending_link_code = None
+
+        # Reset base_table's emitted-code tracker so switching to another window
+        # and coming back can re-trigger the same code
+        try:
+            self.table._last_emitted_code = ""
+        except Exception:
+            pass
+
+        # Prepare parameters
+        do_vis = self.link_vis_chk.isChecked()
+        do_tdx = self.link_tdx_chk.isChecked()
+        do_ths = self.link_ths_chk.isChecked()
+
+        if not (do_vis or do_tdx or do_ths):
+            return
 
         status_msg_parts = []
 
-        # 1. Vis linkage
-        if self.link_vis_chk.isChecked():
+        # 1. 异步向 26668 发送 K线可视化联动指令
+        if do_vis:
+            import socket
+            import threading
+            
+            # Check if this stock is in favorites and retrieve its add date
+            add_date = None
             try:
-                import socket
-                IPC_PORT = 26668
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.2)
-                    s.connect(('127.0.0.1', IPC_PORT))
-                    msg = f"CODE|{code}\n"
-                    s.sendall(msg.encode('utf-8'))
-                    status_msg_parts.append("Vis")
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                if code in fav_mgr.get_favorite_stocks():
+                    add_date = fav_mgr.get_favorite_stock_date(code)
             except Exception:
-                status_msg_parts.append("Vis(失败)")
+                pass
+            
+            # If add_date is available, format as TIME_LINK; otherwise CODE
+            if add_date:
+                cmd_str = f"TIME_LINK|{code}|{add_date}|label=重点关注"
+            else:
+                cmd_str = f"CODE|{code}"
+            
+            def send_switch(msg):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1) # 极低超时，不阻塞 UI
+                        s.connect(('127.0.0.1', 26668))
+                        s.sendall(msg.encode("utf-8"))
+                except Exception:
+                    pass # 可视化器可能未启动，静默失败即可
+                    
+            threading.Thread(target=send_switch, args=(cmd_str,), daemon=True).start()
+            status_msg_parts.append("Vis")
 
-        # 2. TDX / THS linkage
-        do_tdx = self.link_tdx_chk.isChecked()
-        do_ths = self.link_ths_chk.isChecked()
+        # 2. 向独立联动进程投递物理联动任务 (TDX/THS 物理联动机能)
         if do_tdx or do_ths:
             try:
-                from JohnsonUtil.stock_sender import StockSender
-                sender = StockSender()
-                sender._do_send(code, {'tdx': do_tdx, 'ths': do_ths, 'dfcf': False})
+                from linkage_service import get_link_manager
+                flags = {'tdx': do_tdx, 'ths': do_ths, 'dfcf': False}
+                get_link_manager().push(code, flags=flags, auto=False)
                 if do_tdx: status_msg_parts.append("Tdx")
                 if do_ths: status_msg_parts.append("Ths")
             except Exception as e:
-                status_msg_parts.append(f"Tdx/Ths(失败: {e})")
+                logger.error(f"[Linkage] External linkage failed: {e}")
+                status_msg_parts.append("Tdx/Ths(失败)")
 
         if status_msg_parts:
-            self.lbl_status.setText(f"✅ 已触发联动: {code} ({', '.join(status_msg_parts)})")
+            msg = f"✅ 联动: {code} ({', '.join(status_msg_parts)})"
+            self.status_message_signal.emit(msg)
 
     def _open_history_dialog(self):
         from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
@@ -2744,28 +2782,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         except Exception:
             pass
 
-    def closeEvent(self, event):
-        if hasattr(self, "_link_timer"):
-            self._link_timer.stop()
-        if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
-            try:
-                from PyQt6.sip import isdeleted
-                if not isdeleted(self.dragon_monitor_dialog):
-                    self.dragon_monitor_dialog.close()
-            except Exception:
-                pass
-            self.dragon_monitor_dialog = None
-        try:
-            for w in list(_active_workers):
-                try:
-                    w.progress.disconnect()
-                    w.finished.disconnect()
-                    w.error.disconnect()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        super().closeEvent(event)
+
 
 
 # ── Global Shim Functions ──
@@ -2874,15 +2891,10 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         main_layout.addWidget(splitter)
         
-        self.table = QTableWidget(self)
+        self.table = BaseATSTableWidget(self)
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["代码", "名称", "DNA意图分", "波段涨幅%", "极限判定"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        
-        # 隐藏垂直表头以切除左边惹眼的白色行号框
-        self.table.verticalHeader().setVisible(False)
         
         # 自适应列宽，前四列根据内容，极限判定拉满
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -2909,6 +2921,7 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self._fill_data()
         self.table.setSortingEnabled(True)
         
+        self.table.stock_activated.connect(self.monitor_app.link_stock)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.table.cellClicked.connect(self._on_cell_clicked)
@@ -2921,7 +2934,8 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
             self.load_window_position_qt(self, self.window_name, default_width=800, default_height=500)
             
         if self.table.rowCount() > 0:
-            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+            self.table.setFocus()
             
     def _fill_data(self):
         sorted_sums = sorted(self.summaries, key=lambda x: x.intent_score, reverse=True)
@@ -2942,6 +2956,10 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
             
             gain_item = NumericWidgetItem(f"{s.total_pct:.1f}%")
             gain_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if s.total_pct > 0:
+                gain_item.setForeground(QBrush(QColor("#ff4444")))
+            elif s.total_pct < 0:
+                gain_item.setForeground(QBrush(QColor("#33cc5a")))
             self.table.setItem(idx, 3, gain_item)
             
             verdict_item = QTableWidgetItem(s.verdict)
@@ -2952,11 +2970,11 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         if not selected_ranges:
             return
         row = selected_ranges[0].topRow()
-        code = self.table.item(row, 0).text()
+        code_item = self.table.item(row, 0)
+        if not code_item:
+            return
+        code = code_item.text()
         
-        if self.monitor_app and hasattr(self.monitor_app, 'on_code_click'):
-            self.monitor_app.on_code_click(code, date=self.end_date)
-            
         target_s = next((x for x in self.summaries if str(x.code).zfill(6) == code), None)
         if target_s:
             html_content = f"""
@@ -2987,8 +3005,10 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
             
     def _on_item_double_clicked(self, item):
         code = self.table.item(item.row(), 0).text()
-        if self.monitor_app and hasattr(self.monitor_app, 'on_code_click'):
-            self.monitor_app.on_code_click(code)
+        name_item = self.table.item(item.row(), 1)
+        name = name_item.text().strip() if name_item else ""
+        if self.monitor_app and hasattr(self.monitor_app, 'link_stock'):
+            self.monitor_app.link_stock(code, name)
 
     def _on_cell_clicked(self, row, column):
         if column == 0:  # 点击代码列
@@ -3234,6 +3254,7 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             QMessageBox.warning(self, "执行测试失败", f"表达式执行出错: {e}")
             
     def closeEvent(self, event):
+        self._save_state("FORCE_WRITE")
         if hasattr(self, "save_window_position_qt_visual"):
             self.save_window_position_qt_visual(self, self.window_name)
         super().closeEvent(event)
