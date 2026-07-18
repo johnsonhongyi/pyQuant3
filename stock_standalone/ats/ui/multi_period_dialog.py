@@ -15,6 +15,55 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
     os.chdir(project_root)
 
+# ---------------------------------------------
+# 防御性 MOCK：当环境没有 tk 时，动态注入 Dummy 模块，防止导入 auditor 和 utils 崩溃
+# ---------------------------------------------
+try:
+    import tkinter
+    import tkinter.font
+    import tkinter.messagebox
+    import tkinter.ttk
+    import tkinter.scrolledtext
+except ImportError:
+    from types import ModuleType
+    mock_tk = ModuleType("tkinter")
+    mock_tk.Toplevel = object
+    mock_tk.Tk = object
+    mock_tk.Frame = object
+    mock_tk.Label = object
+    mock_tk.Button = object
+    mock_tk.Entry = object
+    mock_tk.StringVar = object
+    mock_tk.WORD = None
+    mock_tk.END = None
+    mock_tk.BOTH = None
+    mock_tk.Y = None
+    mock_tk.LEFT = None
+    mock_tk.RIGHT = None
+    mock_tk.W = None
+    mock_tk.CENTER = None
+    mock_tk.VERTICAL = None
+    
+    mock_font = ModuleType("tkinter.font")
+    mock_font.Font = object
+    
+    mock_msg = ModuleType("tkinter.messagebox")
+    mock_ttk = ModuleType("tkinter.ttk")
+    mock_ttk.Style = object
+    mock_ttk.Panedwindow = object
+    mock_ttk.Treeview = object
+    mock_ttk.Scrollbar = object
+    
+    mock_scroll = ModuleType("tkinter.scrolledtext")
+    mock_scroll.ScrolledText = object
+    
+    sys.modules["tkinter"] = mock_tk
+    sys.modules["tkinter.font"] = mock_font
+    sys.modules["tkinter.messagebox"] = mock_msg
+    sys.modules["tkinter.ttk"] = mock_ttk
+    sys.modules["tkinter.scrolledtext"] = mock_scroll
+# ---------------------------------------------
+
 import json
 import time
 import re
@@ -1221,6 +1270,20 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         # Connect signals after state application to avoid redundant triggers
         self.strategy_combo.currentIndexChanged.connect(self._on_strategy_selected)
         self.table.horizontalHeader().sectionResized.connect(self._on_section_resized)
+        self.link_vis_chk.toggled.connect(self._save_state)
+        self.link_tdx_chk.toggled.connect(self._save_state)
+        self.link_ths_chk.toggled.connect(self._save_state)
+        self.on_top_chk.toggled.connect(self._on_top_toggled)
+
+        # Linkage debounce timer setup to eliminate high-frequency lag & repeated linkages
+        self._link_timer = QTimer(self)
+        self._link_timer.setSingleShot(True)
+        self._link_timer.timeout.connect(self._do_link_stock_debounced)
+        self._pending_link_code = None
+        self._pending_link_name = None
+
+        # Enable strong keyboard focus policy for base table to capture Up/Down arrow keys
+        self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Startup Polling Favorites
         try:
@@ -1442,6 +1505,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.table = BaseATSTableWidget(self)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.stock_activated.connect(self.link_stock)
+        self.table.currentCellChanged.connect(self._on_table_current_cell_changed)
         main_layout.addWidget(self.table)
 
         # ── Bottom Status Bar ──
@@ -1457,20 +1521,16 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         status_bar_layout.addWidget(QLabel("联动方式:", self))
         self.link_vis_chk = QCheckBox("Vis", self)
         self.link_vis_chk.setChecked(True)
-        self.link_vis_chk.toggled.connect(self._save_state)
         status_bar_layout.addWidget(self.link_vis_chk)
 
         self.link_tdx_chk = QCheckBox("Tdx", self)
-        self.link_tdx_chk.toggled.connect(self._save_state)
         status_bar_layout.addWidget(self.link_tdx_chk)
 
         self.link_ths_chk = QCheckBox("Ths", self)
-        self.link_ths_chk.toggled.connect(self._save_state)
         status_bar_layout.addWidget(self.link_ths_chk)
 
         self.on_top_chk = QCheckBox("置顶", self)
         self.on_top_chk.setChecked(self.stays_on_top)
-        self.on_top_chk.toggled.connect(self._on_top_toggled)
         status_bar_layout.addWidget(self.on_top_chk)
 
         # Diagnostics
@@ -1872,6 +1932,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         return active_periods
 
     def _show_results(self, df, elapsed, flat_df=None):
+        self._is_updating = True
+        self.table._is_updating = True
         try:
             logger.debug(f"[MultiPeriodDialog] _show_results called. df empty: {df.empty if df is not None else True}, len(df): {len(df) if df is not None else 0}")
             
@@ -2106,6 +2168,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             import traceback
             err_stack = traceback.format_exc()
             logger.error(f"[MultiPeriodDialog] Crashed in _show_results: {ex}\n{err_stack}")
+        finally:
+            self._is_updating = False
+            self.table._is_updating = False
 
     def _build_flat_df(self, df):
         if df is None or df.empty:
@@ -2210,15 +2275,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QMessageBox.warning(self, "警告", "请在个股列表中选择一只股票！")
             return
         
-        code_item = self.table.item(row, 0)
-        name_item = self.table.item(row, 1)
-        if code_item:
-            code = code_item.text().strip()
-            name = name_item.text().strip() if name_item else code
-            if name.startswith("★ "):
-                name = name[2:]
-            code_to_name = {code: name}
-            
+        code_to_name = {}
+        for r in range(row, min(self.table.rowCount(), row + 21)):
+            c_item = self.table.item(r, 0)
+            n_item = self.table.item(r, 1)
+            if c_item:
+                c = c_item.text().strip()
+                n = n_item.text().strip() if n_item else c
+                if n.startswith("★ "):
+                    n = n[2:]
+                code_to_name[c] = n
+                
+        if code_to_name:
             # Reconstruct resample from active periods
             active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
             PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
@@ -2243,10 +2311,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 resample=resample
             )
             
-            # Use external audit report window if available
+            # Use Qt-native DNA audit window to completely avoid Tkinter runtime and missing tk dependency issues
             try:
-                from backtest_feature_auditor import show_dna_audit_report_window
-                self._dna_audit_win = show_dna_audit_report_window(summaries, parent=self, end_date=end_date, resample=resample)
+                self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self, end_date=end_date, resample=resample)
+                self._dna_audit_win.show()
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"调起 DNA 报告窗口失败: {e}")
         except Exception as e:
@@ -2350,32 +2418,54 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         df_flat = pd.DataFrame([merged_row], index=[code])
         df_flat.index.name = 'code'
 
+        # Use Qt-native check code dialog to completely avoid Tkinter dependency
         try:
-            from stock_logic_utils import check_code
-            check_code(df_flat, code, queries, parent=self)
+            dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self)
+            dialog.exec()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
 
+    def _on_table_current_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
+        if currentRow < 0:
+            return
+        code_item = self.table.item(currentRow, 0)
+        name_item = self.table.item(currentRow, 1)
+        if code_item:
+            code = code_item.text().strip()
+            name = name_item.text().strip() if name_item else code
+            if name.startswith("★ "):
+                name = name[2:]
+            self.link_stock(code, name)
+
     def link_stock(self, code, name):
         """
-        Emits linkage signals to external terminals (Visualizer port, TDX, THS)
-        with 500ms physical deduplication cooldown.
+        Emits linkage signals with 150ms debounce cooldown to prevent
+        high-frequency IO blockage and duplicated code linkages.
         """
         code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
         if not code:
             return
 
-        now_ms = int(time.time() * 1000)
-        last_link_time = getattr(self, "_last_link_time", 0)
-        last_link_code = getattr(self, "_last_link_code", "")
+        if code == getattr(self, "_last_link_code", ""):
+            return  # Filter duplicate linkage to the same code
 
-        if code == last_link_code and (now_ms - last_link_time) < 500:
-            return  # Physical deduplication cooldown
+        if code == getattr(self, "_pending_link_code", ""):
+            return  # Already pending
 
-        self._last_link_time = now_ms
+        self._pending_link_code = code
+        self._pending_link_name = name
+
+        self._link_timer.stop()
+        self._link_timer.start(150)  # 150ms debounce
+
+    def _do_link_stock_debounced(self):
+        code = self._pending_link_code
+        if not code or code == getattr(self, "_last_link_code", ""):
+            return
+
         self._last_link_code = code
+        self._pending_link_code = None
 
-        # Synced visual status
         status_msg_parts = []
 
         # 1. Vis linkage
@@ -2384,7 +2474,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 import socket
                 IPC_PORT = 26668
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.3)
+                    s.settimeout(0.2)
                     s.connect(('127.0.0.1', IPC_PORT))
                     msg = f"CODE|{code}\n"
                     s.sendall(msg.encode('utf-8'))
@@ -2654,6 +2744,29 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         except Exception:
             pass
 
+    def closeEvent(self, event):
+        if hasattr(self, "_link_timer"):
+            self._link_timer.stop()
+        if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(self.dragon_monitor_dialog):
+                    self.dragon_monitor_dialog.close()
+            except Exception:
+                pass
+            self.dragon_monitor_dialog = None
+        try:
+            for w in list(_active_workers):
+                try:
+                    w.progress.disconnect()
+                    w.finished.disconnect()
+                    w.error.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        super().closeEvent(event)
+
 
 # ── Global Shim Functions ──
 _dialog_instance = None
@@ -2689,6 +2802,441 @@ def open_multi_period_tester(parent_window=None):
     except Exception as e:
         logger.error(f"Failed to open MultiPeriodDialog: {e}")
         return None
+
+
+class NumericWidgetItem(QTableWidgetItem):
+    def __lt__(self, other):
+        if not isinstance(other, QTableWidgetItem):
+            return super().__lt__(other)
+        try:
+            s1 = self.text().replace('%', '').strip()
+            s2 = other.text().replace('%', '').strip()
+            return float(s1) < float(s2)
+        except Exception:
+            return super().__lt__(other)
+
+
+class QtDnaAuditReportWindow(QDialog, WindowMixin):
+    def __init__(self, summaries, parent=None, end_date=None, resample='d'):
+        super().__init__(parent)
+        self.summaries = summaries
+        self.monitor_app = parent
+        self.end_date = end_date
+        self.resample = resample
+        
+        self.setWindowTitle(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只 (周期: {resample.upper()})")
+        self.setMinimumSize(600, 400)
+        
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c0d14;
+                color: #e2e2e5;
+            }
+            QTableWidget {
+                background-color: #12131a;
+                color: #e2e2e5;
+                gridline-color: #23242e;
+                border: 1px solid #23242e;
+            }
+            QHeaderView::section {
+                background-color: #1a1b24;
+                color: #a9abb6;
+                padding: 6px;
+                border: 1px solid #23242e;
+                font-weight: bold;
+            }
+            QTableWidget::item:selected {
+                background-color: #2c2d3a;
+                color: #ffffff;
+            }
+            QTextEdit {
+                background-color: #12131a;
+                color: #e2e2e5;
+                border: 1px solid #23242e;
+                font-family: "Consolas", "Microsoft YaHei";
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #23242e;
+                color: #e2e2e5;
+                border: 1px solid #323340;
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #2d2e3b;
+            }
+        """)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        main_layout.addWidget(splitter)
+        
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "DNA意图分", "波段涨幅%", "极限判定"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # 隐藏垂直表头以切除左边惹眼的白色行号框
+        self.table.verticalHeader().setVisible(False)
+        
+        # 自适应列宽，前四列根据内容，极限判定拉满
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        
+        splitter.addWidget(self.table)
+        
+        self.detail_text = QTextEdit(self)
+        self.detail_text.setReadOnly(True)
+        splitter.addWidget(self.detail_text)
+        
+        btn_layout = QHBoxLayout()
+        btn_close = QPushButton("关闭报告", self)
+        btn_close.clicked.connect(self.close)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_close)
+        main_layout.addLayout(btn_layout)
+        
+        self.table.setSortingEnabled(False)
+        self._fill_data()
+        self.table.setSortingEnabled(True)
+        
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.table.cellClicked.connect(self._on_cell_clicked)
+        
+        # 智能设定初始上下分割大小比例，防止空表格过度撑高
+        splitter.setSizes([180, 320])
+        
+        self.window_name = "qt_dna_audit_report"
+        if hasattr(self, "load_window_position_qt"):
+            self.load_window_position_qt(self, self.window_name, default_width=800, default_height=500)
+            
+        if self.table.rowCount() > 0:
+            self.table.selectRow(0)
+            
+    def _fill_data(self):
+        sorted_sums = sorted(self.summaries, key=lambda x: x.intent_score, reverse=True)
+        self.table.setRowCount(len(sorted_sums))
+        
+        for idx, s in enumerate(sorted_sums):
+            code_item = NumericWidgetItem(str(s.code).zfill(6))
+            code_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(idx, 0, code_item)
+            
+            name_item = QTableWidgetItem(s.name)
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(idx, 1, name_item)
+            
+            score_item = NumericWidgetItem(f"{s.intent_score:.1f}")
+            score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(idx, 2, score_item)
+            
+            gain_item = NumericWidgetItem(f"{s.total_pct:.1f}%")
+            gain_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(idx, 3, gain_item)
+            
+            verdict_item = QTableWidgetItem(s.verdict)
+            self.table.setItem(idx, 4, verdict_item)
+            
+    def _on_selection_changed(self):
+        selected_ranges = self.table.selectedRanges()
+        if not selected_ranges:
+            return
+        row = selected_ranges[0].topRow()
+        code = self.table.item(row, 0).text()
+        
+        if self.monitor_app and hasattr(self.monitor_app, 'on_code_click'):
+            self.monitor_app.on_code_click(code, date=self.end_date)
+            
+        target_s = next((x for x in self.summaries if str(x.code).zfill(6) == code), None)
+        if target_s:
+            html_content = f"""
+            <h2 style='color:#5cb85c;'>【基因解剖】 {target_s.name} ({target_s.code})</h2>
+            <p><b>意图评分:</b> <span style='color:#ffc107; font-size:14px; font-weight:bold;'>{target_s.intent_score:.1f} 分</span></p>
+            <p><b>极限判定:</b> <span style='color:#00bcff; font-weight:bold;'>{target_s.verdict}</span></p>
+            <p><b>波段涨幅:</b> {target_s.total_pct:.1f} %</p>
+            <hr style='border: 1px solid #23242e;' />
+            <h3 style='color:#a9abb6;'>[ 审计专家洞察 ]</h3>
+            <ul>
+            """
+            for sug in target_s.suggestions:
+                html_content += f"<li style='margin-bottom:6px;'>{sug}</li>"
+            html_content += "</ul>"
+            
+            html_content += """
+            <h3 style='color:#a9abb6;'>[ 指标演进提炼 (Indicator Evolution) ]</h3>
+            <pre style='font-family: "Consolas", monospace; font-size:11px; line-height: 1.4; color:#d1d2d6;'>
+"""
+            header = f"{'日期':<12} {'Alpha':>8} {'涨幅%':>8} {'指数%':>8} {'Bol-U':>8} {'量比':>8}\n"
+            html_content += header
+            html_content += "-" * 60 + "\n"
+            for h in target_s.history[-15:]:
+                html_content += f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}\n"
+            
+            html_content += "</pre>"
+            self.detail_text.setHtml(html_content)
+            
+    def _on_item_double_clicked(self, item):
+        code = self.table.item(item.row(), 0).text()
+        if self.monitor_app and hasattr(self.monitor_app, 'on_code_click'):
+            self.monitor_app.on_code_click(code)
+
+    def _on_cell_clicked(self, row, column):
+        if column == 0:  # 点击代码列
+            code_item = self.table.item(row, 0)
+            if code_item:
+                code = code_item.text().strip()
+                if self.monitor_app:
+                    if hasattr(self.monitor_app, 'diag_edit'):
+                        self.monitor_app.diag_edit.setText(code)
+                    if hasattr(self.monitor_app, 'diagnose_stock_strategy'):
+                        self.monitor_app.diagnose_stock_strategy(code)
+            
+    def closeEvent(self, event):
+        if hasattr(self, "save_window_position_qt_visual"):
+            self.save_window_position_qt_visual(self, self.window_name)
+        super().closeEvent(event)
+
+
+class QtCheckCodeDialog(QDialog, WindowMixin):
+    def __init__(self, df, code, queries, parent=None):
+        super().__init__(parent)
+        self.df = df
+        self.code = code
+        self.queries = queries
+        self.name = df.at[code, 'name'] if 'name' in df.columns else ""
+        
+        self.setWindowTitle(f"股票检查报告 - {code} {self.name}")
+        self.setMinimumSize(700, 500)
+        
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c0d14;
+                color: #e2e2e5;
+            }
+            QTextEdit {
+                background-color: #12131a;
+                color: #e2e2e5;
+                border: 1px solid #23242e;
+                font-family: "Consolas", "Microsoft YaHei";
+                font-size: 12px;
+            }
+            QListWidget {
+                background-color: #12131a;
+                color: #e2e2e5;
+                border: 1px solid #23242e;
+                font-family: "Consolas", "Microsoft YaHei";
+                font-size: 11px;
+            }
+            QLineEdit {
+                background-color: #12131a;
+                color: #ffffff;
+                border: 1px solid #23242e;
+                padding: 4px;
+                border-radius: 3px;
+            }
+            QPushButton {
+                background-color: #23242e;
+                color: #e2e2e5;
+                border: 1px solid #323340;
+                padding: 6px 16px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #2d2e3b;
+            }
+            QComboBox {
+                background-color: #12131a;
+                color: #e2e2e5;
+                border: 1px solid #23242e;
+                border-radius: 3px;
+                padding: 4px;
+            }
+        """)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        main_layout.addWidget(self.splitter)
+        
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        left_layout.addWidget(QLabel("[ 检查结果摘要 ]", self))
+        self.summary_text = QTextEdit(self)
+        self.summary_text.setReadOnly(True)
+        left_layout.addWidget(self.summary_text)
+        
+        self.splitter.addWidget(left_widget)
+        
+        self.right_widget = QWidget(self)
+        right_layout = QVBoxLayout(self.right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        right_layout.addWidget(QLabel(">>> 所有数据字段详情", self))
+        
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("过滤字段:", self))
+        self.filter_edit = QLineEdit(self)
+        self.filter_edit.textChanged.connect(self._on_filter_changed)
+        filter_layout.addWidget(self.filter_edit)
+        right_layout.addLayout(filter_layout)
+        
+        self.details_list = QListWidget(self)
+        right_layout.addWidget(self.details_list)
+        
+        self.splitter.addWidget(self.right_widget)
+        self.right_widget.hide()
+        
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.addWidget(QLabel("历史:", self))
+        self.history_combo = QComboBox(self)
+        self.history_combo.addItem("选择历史...")
+        
+        _queries_list = queries if isinstance(queries, list) else [queries]
+        self.history_queries = []
+        for i, q in enumerate(_queries_list):
+            if isinstance(q, dict):
+                expr = q.get("expr", "")
+                q_name = q.get("name") or expr[:15]
+                self.history_combo.addItem(f"H{i+1}: {q_name}")
+                self.history_queries.append(expr)
+            elif isinstance(q, str):
+                self.history_combo.addItem(f"H{i+1}: {q[:15]}")
+                self.history_queries.append(q)
+                
+        self.history_combo.currentIndexChanged.connect(self._on_history_changed)
+        ctrl_layout.addWidget(self.history_combo)
+        
+        ctrl_layout.addWidget(QLabel("手动测试:", self))
+        self.manual_edit = QLineEdit(self)
+        self.manual_edit.setPlaceholderText("输入测试表达式，回车执行...")
+        self.manual_edit.returnPressed.connect(self._run_manual_test)
+        ctrl_layout.addWidget(self.manual_edit)
+        
+        btn_test = QPushButton("执行测试", self)
+        btn_test.clicked.connect(self._run_manual_test)
+        ctrl_layout.addWidget(btn_test)
+        
+        main_layout.addLayout(ctrl_layout)
+        
+        btn_bar = QHBoxLayout()
+        self.btn_toggle_details = QPushButton("显示数据详情", self)
+        self.btn_toggle_details.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; }")
+        self.btn_toggle_details.clicked.connect(self._toggle_details)
+        btn_bar.addWidget(self.btn_toggle_details)
+        btn_bar.addStretch()
+        
+        btn_close = QPushButton("关闭窗口", self)
+        btn_close.clicked.connect(self.close)
+        btn_bar.addWidget(btn_close)
+        main_layout.addLayout(btn_bar)
+        
+        self.df_code = df.loc[[code]]
+        try:
+            from stock_logic_utils import test_code_query, format_check_result
+            self.report_data = test_code_query(self.df_code, queries)
+            header_str = f"股票: {code} {self.name}\n" + "="*40 + "\n"
+            self.summary_text.setPlainText(header_str + format_check_result(self.report_data))
+        except Exception as e:
+            self.summary_text.setPlainText(f"诊断逻辑执行失败: {e}")
+            
+        self._init_all_fields()
+        
+        self.window_name = "qt_check_code_dialog"
+        if hasattr(self, "load_window_position_qt"):
+            self.load_window_position_qt(self, self.window_name, default_width=750, default_height=550)
+            
+    def _init_all_fields(self):
+        self.raw_fields_lines = []
+        try:
+            row_dict = self.df.loc[self.code].to_dict()
+            used_cols = set()
+            from stock_logic_utils import extract_columns
+            for r in self.report_data:
+                if 'expr' in r:
+                    used_cols.update(extract_columns(r['expr']))
+            
+            if used_cols:
+                self.raw_fields_lines.append(">>> 查询涉及的关键字段:")
+                for c in sorted(list(used_cols)):
+                    self.raw_fields_lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
+                self.raw_fields_lines.append("-" * 40)
+                
+            self.raw_fields_lines.append(">>> 所有字段列表:")
+            for c in self.df.columns:
+                self.raw_fields_lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
+        except Exception as e:
+            self.raw_fields_lines.append(f"提取字段信息失败: {e}")
+            
+        self._render_fields(self.raw_fields_lines)
+        
+    def _render_fields(self, lines):
+        self.details_list.clear()
+        for line in lines:
+            self.details_list.addItem(line)
+            
+    def _on_filter_changed(self, text):
+        query = text.lower().strip()
+        if not query:
+            self._render_fields(self.raw_fields_lines)
+            return
+        filtered = [l for l in self.raw_fields_lines if query in l.lower()]
+        self._render_fields(filtered)
+        
+    def _toggle_details(self):
+        if self.right_widget.isVisible():
+            self.right_widget.hide()
+            self.btn_toggle_details.setText("显示数据详情")
+        else:
+            self.right_widget.show()
+            self.btn_toggle_details.setText("隐藏数据详情")
+            self.splitter.setSizes([450, 250])
+            self.filter_edit.setFocus()
+            
+    def _on_history_changed(self, index):
+        if index <= 0:
+            return
+        try:
+            expr = self.history_queries[index - 1]
+            self.manual_edit.setText(expr)
+            self._run_manual_test(expr)
+        except Exception:
+            pass
+            
+    def _run_manual_test(self, expr=None):
+        from datetime import datetime
+        target_expr = expr or self.manual_edit.text().strip()
+        if not target_expr or target_expr == "选择历史...":
+            return
+            
+        try:
+            from stock_logic_utils import test_code_query, format_check_result
+            res = test_code_query(self.df_code, [{"expr": target_expr}])
+            summary = format_check_result(res)
+            
+            curr_text = self.summary_text.toPlainText()
+            new_text = curr_text + f"\n{'='*20} 手动测试: {datetime.now().strftime('%H:%M:%S')} {'='*20}\n" + summary
+            self.summary_text.setPlainText(new_text)
+            self.summary_text.moveCursor(self.summary_text.textCursor().MoveOperation.End)
+        except Exception as e:
+            QMessageBox.warning(self, "执行测试失败", f"表达式执行出错: {e}")
+            
+    def closeEvent(self, event):
+        if hasattr(self, "save_window_position_qt_visual"):
+            self.save_window_position_qt_visual(self, self.window_name)
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":
