@@ -9,7 +9,7 @@ import json
 import zlib
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton, QApplication
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
@@ -102,8 +102,18 @@ class ATSSectorDetailDialog(QDialog):
         
         layout.addWidget(self.table)
         
-        # Close button block
+        # Bottom action bar
         btn_layout = QHBoxLayout()
+
+        btn_dna = QPushButton("🧬 DNA审计")
+        btn_dna.setStyleSheet("""
+            QPushButton { background-color: #1b5e20; color: #a5d6a7; border: 1px solid #388e3c;
+                          border-radius: 4px; padding: 4px 10px; font-weight: bold; }
+            QPushButton:hover { background-color: #2e7d32; }
+        """)
+        btn_dna.clicked.connect(self._run_dna_audit)
+        btn_layout.addWidget(btn_dna)
+
         btn_layout.addStretch()
         btn_close = QPushButton("关闭")
         btn_close.clicked.connect(self.accept)
@@ -421,6 +431,92 @@ class ATSSectorDetailDialog(QDialog):
         copy_name_act.triggered.connect(lambda: QApplication.clipboard().setText(name))
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _run_dna_audit(self):
+        """对板块内所有成员股（按表格顺序，最多20只）执行 DNA 审计。
+        优先通过主程序 parent_app._run_dna_audit_batch，降级到本地 QtDnaAuditReportWindow。
+        """
+        rows = self.table.rowCount()
+        if rows == 0:
+            return
+
+        # Collect all member stocks from the table (code in col 0, name in col 1)
+        items = []
+        for r in range(rows):
+            c_it = self.table.item(r, 0)
+            n_it = self.table.item(r, 1)
+            if c_it and n_it:
+                items.append((c_it.text().strip(), n_it.text().strip()))
+
+        # Align with chart_widgets.py selection logic:
+        #   multi-select  → all selected rows (up to 50)
+        #   single-select → current row + next 19 rows (total ≤ 20)
+        #   no selection  → first 20 rows of the table
+        sel_rows = sorted(set(i.row() for i in self.table.selectedItems()))
+        if len(sel_rows) > 1:
+            target = [(self.table.item(r, 0).text().strip(),
+                       self.table.item(r, 1).text().strip()) for r in sel_rows[:50]
+                      if self.table.item(r, 0) and self.table.item(r, 1)]
+        elif len(sel_rows) == 1:
+            start = sel_rows[0]
+            target = [(self.table.item(r, 0).text().strip(),
+                       self.table.item(r, 1).text().strip())
+                      for r in range(start, min(start + 20, rows))
+                      if self.table.item(r, 0) and self.table.item(r, 1)]
+        else:
+            target = items[:20]
+
+        code_to_name = {c: n for c, n in target if c}
+        if not code_to_name:
+            return
+
+        # Try main app first
+        main_app = getattr(self.parent(), 'parent_app', None)
+        if not main_app:
+            main_app = getattr(self.window(), 'parent_app', None)
+        if not main_app:
+            main_app = getattr(QApplication.instance(), 'parent_app', None)
+
+        if main_app and hasattr(main_app, '_run_dna_audit_batch'):
+            if hasattr(main_app, 'tk_dispatch_queue'):
+                _cn = dict(code_to_name)
+                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
+            else:
+                main_app._run_dna_audit_batch(code_to_name)
+            return
+
+        # ATSMainWindow or any Qt window with _run_dna_audit_batch
+        win = self.window()
+        if hasattr(win, '_run_dna_audit_batch'):
+            win._run_dna_audit_batch(code_to_name)
+            return
+
+        # Local PyQt6 fallback (packaged env)
+        try:
+            from backtest_feature_auditor import audit_multiple_codes
+            from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
+            from PyQt6.QtCore import Qt as _Qt
+            QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+            QApplication.processEvents()
+            summaries = audit_multiple_codes(
+                list(code_to_name.keys()),
+                end_date=None,
+                code_to_name=code_to_name,
+                progress_callback=None,
+                resample='d'
+            )
+            if summaries:
+                self._dna_audit_win = QtDnaAuditReportWindow(
+                    summaries, parent=self.window(), end_date=None, resample='d'
+                )
+                self._dna_audit_win.show()
+            else:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "DNA 审计", "没有产生审计数据或结论。")
+        except Exception as e:
+            print(f"[ATSSectorDetailDialog] DNA audit local fallback failed: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def closeEvent(self, event):
         # Save header state of the table
