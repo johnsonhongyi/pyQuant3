@@ -581,6 +581,8 @@ class CaptureWindowsDialog(QDialog):
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.list_widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.list_widget)
 
         # 按钮栏
@@ -776,6 +778,163 @@ class CaptureWindowsDialog(QDialog):
         if item_data:
             title, pos_str, exe_path = item_data
             core.bring_window_to_top_by_title(title)
+
+    def show_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if not item:
+            return
+            
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e1e24;
+                color: #e0e0e0;
+                border: 1px solid #3a3a42;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #0ea5e9;
+                color: #ffffff;
+            }
+        """)
+        
+        selected_items = self.list_widget.selectedItems()
+        
+        center_this = menu.addAction("居中显示于程序所在屏幕")
+        center_all = None
+        if len(selected_items) > 1 and item in selected_items:
+            center_all = menu.addAction(f"居中所有选中窗口 ({len(selected_items)}个) 于程序所在屏幕")
+            
+        action = menu.exec(self.list_widget.mapToGlobal(pos))
+        if action == center_this:
+            self.center_windows_on_current_screen([item])
+        elif center_all and action == center_all:
+            self.center_windows_on_current_screen(selected_items)
+
+    def center_windows_on_current_screen(self, items):
+        if not items:
+            return
+            
+        import win32api
+        import win32con
+        
+        # 1. 获取当前对话框所在物理屏幕的工作区坐标
+        hwnd_dialog = int(self.winId())
+        try:
+            hmonitor = win32api.MonitorFromWindow(hwnd_dialog, win32con.MONITOR_DEFAULTTONEAREST)
+            monitor_info = win32api.GetMonitorInfo(hmonitor)
+            left, top, right, bottom = monitor_info["Work"]
+            screen_x = left
+            screen_y = top
+            screen_w = right - left
+            screen_h = bottom - top
+        except Exception as e:
+            screen_x = 0
+            screen_y = 0
+            screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+            screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+            
+        success_count = 0
+        fail_count = 0
+        
+        # 暂时断开信号，避免批量修改列表时频繁触发 list_widget 相关的信号或事件
+        self.list_widget.blockSignals(True)
+        try:
+            try:
+                self.list_widget.itemSelectionChanged.disconnect(self.on_selection_changed)
+            except (TypeError, RuntimeError):
+                pass
+                
+            for item in items:
+                item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if not item_data:
+                    continue
+                title, pos_str, exe_path = item_data
+                
+                # 2. 查找窗口 HWND
+                titles_to_try = [title]
+                if title.endswith('.py') and not title.startswith('py'):
+                    titles_to_try.append(title.replace('.py', '.exe'))
+                elif title.endswith('.exe'):
+                    titles_to_try.append(title.replace('.exe', '.py'))
+                    
+                found_hwnd = None
+                for t in titles_to_try:
+                    found = core.find_windows_by_title_safe(t)
+                    if found:
+                        found_hwnd, _ = found[0]
+                        break
+                        
+                if not found_hwnd:
+                    fail_count += 1
+                    continue
+                    
+                # 3. 获取目标窗口的宽高
+                w_left, w_top, width, height = core.get_window_rect(found_hwnd)
+                # 兜底
+                if width <= 0 or height <= 0:
+                    try:
+                        parts = [int(p.strip()) for p in pos_str.split(',')]
+                        if len(parts) == 4:
+                            width = parts[2]
+                            height = parts[3]
+                    except Exception:
+                        width, height = 800, 600
+                        
+                # 4. 计算居中坐标
+                new_x = screen_x + (screen_w - width) // 2
+                new_y = screen_y + (screen_h - height) // 2
+                new_pos_str = f"{new_x},{new_y},{width},{height}"
+                
+                # 5. 移动窗口 (如果是最小化状态，先还原)
+                if w_left < -10000 and w_top < -10000:
+                    # 最小化时还原
+                    core.user32.ShowWindow(found_hwnd, 1) # SW_SHOWNORMAL = 1
+                    import time
+                    time.sleep(0.05)
+                    
+                moved = core.set_window_pos_by_title(title, new_pos_str)
+                if not moved:
+                    moved = core.set_window_hwnd_pos(found_hwnd, new_pos_str)
+                    
+                if moved:
+                    # 6. 更新 UI 数据
+                    item.setText(f"{title}  [{new_pos_str}]")
+                    new_item_data = (title, new_pos_str, exe_path)
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, new_item_data)
+                    
+                    # 更新所有窗口列表缓存
+                    for idx, (t_all, p_all, e_all) in enumerate(self.all_windows):
+                        if t_all == title:
+                            self.all_windows[idx] = (title, new_pos_str, exe_path)
+                            break
+                            
+                    # 更新已选择的集合数据
+                    if item_data in self.selected_set:
+                        self.selected_set.discard(item_data)
+                        self.selected_set.add(new_item_data)
+                        
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    
+        finally:
+            self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+            self.list_widget.blockSignals(False)
+            
+        if len(items) == 1:
+            if success_count > 0:
+                logger.info(f"窗口 [{items[0].data(QtCore.Qt.ItemDataRole.UserRole)[0]}] 已成功居中")
+            else:
+                QMessageBox.warning(self, "错误", "无法移动目标窗口，请检查窗口是否已被关闭或权限不足。")
+        else:
+            QMessageBox.information(
+                self, 
+                "操作完成", 
+                f"批量居中处理完毕：\n成功移动: {success_count} 个窗口\n失败: {fail_count} 个窗口"
+            )
 
 
 class EditPathDialog(QDialog):
