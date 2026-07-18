@@ -1,3 +1,22 @@
+## 2026-07-18 23:30
+- [x] **优化龙头监控窗口宽度调节、添加多周期筛选器主窗口入口与修复 DNA 审计个股定位 Bug (Fixed Dragon Monitor Width Resize, Added Multi-Period Entrance & Fixed DNA Audit Selected Row Bug)**：
+    - [x] **解除龙头监控窗口宽度限制 (Removed Dragon Monitor Minimum Width Constraint)**：将 `ats/ui/dragon_monitor.py` 中的 `self.setMinimumWidth(750)` 调整为 `250`。这解除了在极端分屏或副屏显示下无法将龙头监控窗口调节成较窄条状的限制，允许用户根据桌面空间自由收缩和调节左右宽度。
+    - [x] **在主窗口工具栏中新增“多周期🎯”入口 (Added Multi-Period Entrance to Main Toolbar)**：在 `ats/ui/main_window.py` 中，在“启动 24x7 自动旋转”按钮后方新增了“多周期🎯”控制按钮，并设置了相配的深紫色调（Purple Hue QSS）悬浮样式。点击按钮将直接触发 `open_multi_period_tester()` 唤起 PyQt6 多周期策略筛选器，实现了跨窗口入口闭环。
+    - [x] **修复 DNA 审计在个股列表/文本框定位不匹配的 Bug (Fixed DNA Audit Row Alignment & Text Box Input Support)**：重构了 `ats/ui/multi_period_dialog.py` 的 `_on_diagnose_dna_click` 逻辑。现在，当用户在诊断输入框 (`self.diag_edit`) 中输入代码后，系统将优先在表格中查找匹配行，取其本身与后继最多 20 只个股打包执行 DNA 审计；若输入框为空，则自发定位到当前选中的表格行及后续 20 只个股；若输入代码不在列表中，则降级进行该单股审计，恢复了对文本框输入的检索联动能力。同时，为板块个股列表窗口 (`ConceptStocksDialog`) 内的个股列表 DNA 审计（`_dna_audit_stock` 方法）也同步补齐了选取“所选个股及其后续 20 只个股”（共 21 只）的默认批量审计逻辑，彻底拉平了多周期个股看板 of 诊断表现。
+    - [x] **实现 DNA 审计窗口自动激活与多周期主窗口屏蔽 ESC 自动关闭逻辑 (Implemented DNA Window Auto-Focus & Multi-Period Dialog ESC Bypass)**：
+        - 针对所有 `QtDnaAuditReportWindow` 弹出实例，在 `showEvent` 钩子中新增了 `self.raise_()` 和 `self.activateWindow()`，并在有可用行数据时强行对表格调用 `self.table.setFocus()`，确保诊断弹窗打开后能够自动夺取输入焦点并置于最前。
+        - 针对从具有模态属性的板块个股列表窗口 (`ConceptStocksDialog`) 唤起 DNA 审计时由于模态阻断导致其无法获取焦点且不可交互的问题，在 `QtDnaAuditReportWindow` 的构造函数中加入了对全局活跃模态窗口的检查与适配。若存在活跃的模态对话框，则自发将该模态窗口设为 DNA 审计报告窗口的父窗口（parent），从而将 DNA 窗口纳入相同的模态链，彻底解除了交互屏蔽，使其能够正常获取焦点并进行键盘/鼠标操作。
+        - 针对 `MultiPeriodDialog` 主窗口，重写了 `keyPressEvent`，阻断了 `Qt.Key.Key_Escape` 导致 QDialog 默认调用 reject 关闭窗口的行为，避免了用户误触 ESC 导致主窗口闪退。
+
+## 2026-07-18 23:50
+- [x] **修复多周期筛选器策略持久化失效、加固大盘偏离指标与龙头监控窗口对齐 (Fixed Multi-Period Tester Strategy Persistence, Aligned Alpha Deviations & Dragon Monitor Columns)**：
+    - [x] **修复策略与状态无法持久化保存 Bug (Fixed Strategy and Configuration Persistence)**：修复了主窗口退出时未对 `MultiPeriodDialog` 级联关闭，导致其 `closeEvent` 无法被触发的缺陷；在 `ATSMainWindow.closeEvent` 中补全了检测与 `dialog.close()` 调用。同时，修复了 `closeEvent` 中仅调用不带参数的 `self._save_state()` 导致无法触发物理磁盘写入的漏洞，将其更正为 `self._save_state("FORCE_WRITE")` 并清空全局 `_dialog_instance` 指针，确保策略和各项配置跨会话保存 100% 生效。
+    - [x] **修复龙头监控窗口无法缩放/装饰缺失问题 (Enabled Dragon Monitor Window Resizing & Control Buttons)**：在 `ats/ui/dragon_monitor.py` 的 `DragonLeaderMonitorDialog` 构造函数中，通过修改 windowFlags 补齐了 `WindowMinimizeButtonHint`、`WindowMaximizeButtonHint` 和 `WindowCloseButtonHint` 窗口标志，还原了标准窗口的标题栏装饰和边框拉伸功能，支持用户自由缩放和层级控制。
+    - [x] **修复龙头监控数据与筛选器不一致、自动挖掘大量缺失 Bug (Fixed Dragon Monitor Discrepancy & Missing Auto-Discovery)**：
+        - 修复了 `_get_main_app` 在多周期 dialog 下查找顶级 widget 时的定位偏差，使其能正确将 `MultiPeriodDialog` 识别为主程序实例，并在具有 active snapshots 的 `engine` 内精准回填 DFF2/DFF3 等核心多周期特征，解决了指标全为 `0.0` 导致自动挖掘结果被完全过滤的致命缺陷。
+        - 为 A 股个股涨跌幅增加 `'ratio'` 字段兼容（解决在特定行情模式下个股 `'percent'` 为空的问题），并通过 `row.get('ratio', row.get('percent', 0.0))` 自动对齐日内收益率。
+        - 对齐了多周期筛选器主表中的大盘收益率（`sh_pct`）计算方法：当早盘大盘指数数据缺失时，自动回退到 A 股全部个股日内涨幅均值，消除了极端情况下分时数据偏离度计算不准的痛点。
+
 ## 2026-07-18 23:15
 - [x] **修复个股分布详情窗口中 DNA 审计联动与策略诊断缺失 Bug (Fixed DNA Audit Linkage & Strategy Diagnostics in Distribution Details Dialog)**：
     - [x] **实现 DistributionDetailsDialog 行动联动方法 (Implemented link_stock for DistributionDetailsDialog)**：在 `ats/ui/chart_widgets.py` 的 `DistributionDetailsDialog` 中新增了 `link_stock` 方法，在子窗口（如 DNA 审计报告窗口）激活联动时，获取主程序的股票名字，透传发射 `code_clicked` 信号并向主程序的 `link_stock` 进行广播发送，实现多窗口行情完全同步。

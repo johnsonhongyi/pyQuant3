@@ -1107,13 +1107,17 @@ class ConceptStocksDialog(QDialog):
             QMessageBox.warning(self, "警告", "请在个股列表中选择一只股票！")
             return
         
-        code_item = self.table.item(row, 1)
-        name_item = self.table.item(row, 2)
-        if code_item:
-            code = code_item.text().strip()
-            name = name_item.text().strip() if name_item else code
-            code_to_name = {code: name}
+        code_to_name = {}
+        for r in range(row, min(self.table.rowCount(), row + 21)):
+            code_item = self.table.item(r, 1)
+            name_item = self.table.item(r, 2)
+            if code_item:
+                c = code_item.text().strip().zfill(6)
+                n = name_item.text().strip() if name_item else c
+                n = n.replace("★ ", "").strip()
+                code_to_name[c] = n
             
+        if code_to_name:
             # Reconstruct resample from active periods
             active_periods = [p for p, chk in self.parent().period_checkboxes.items() if chk.isChecked()]
             PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
@@ -1810,8 +1814,14 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 if not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
                     sh_pct = 0.0
                     if self.top_now is not None and not self.top_now.empty:
-                        if 'sh000001' in self.top_now.index:
+                        if 'ratio' in self.top_now.columns:
+                            sh_pct = float(self.top_now['ratio'].mean())
+                        elif 'percent' in self.top_now.columns:
+                            sh_pct = float(self.top_now['percent'].mean())
+                        elif 'sh000001' in self.top_now.index:
                             sh_pct = float(self.top_now.loc['sh000001'].get('percent', 0.0))
+                        elif '000001' in self.top_now.index and 'sh' in str(self.top_now.loc['000001'].get('code', '')):
+                            sh_pct = float(self.top_now.loc['000001'].get('percent', 0.0))
                         self.dragon_monitor_dialog.update_data(self.top_now, sh_pct)
             except Exception as e:
                 logger.warning(f"Failed to auto-update dragon monitor: {e}")
@@ -1819,6 +1829,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def refresh_realtime_ui(self):
         """Called externally to re-run filtering and update all charts/displays."""
         self.run_filter(force_reload=False)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            event.ignore()
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         """
@@ -1848,7 +1864,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.save_window_position_qt(self, "multi_period_dialog")
         except Exception:
             pass
-        self._save_state()
+        self._save_state("FORCE_WRITE")
+
+        # Clear global _dialog_instance reference
+        global _dialog_instance
+        _dialog_instance = None
 
         # Cascade-close Dragon Monitor
         if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
@@ -2298,22 +2318,51 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.diagnose_stock_strategy(code)
 
     def _on_diagnose_dna_click(self):
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, "警告", "请在个股列表中选择一只股票！")
-            return
+        code = self.diag_edit.text().strip()
+        code = "".join(x for x in code if x.isdigit()).zfill(6) if code else ""
         
+        found_row = -1
+        if code:
+            # Try to find the code in the table
+            for r in range(self.table.rowCount()):
+                c_item = self.table.item(r, 0)
+                if c_item and c_item.text().strip().zfill(6) == code:
+                    found_row = r
+                    break
+        else:
+            # If no code in edit box, use current selected row
+            found_row = self.table.currentRow()
+            if found_row >= 0:
+                c_item = self.table.item(found_row, 0)
+                if c_item:
+                    code = c_item.text().strip().zfill(6)
+            
+        if not code:
+            QMessageBox.warning(self, "警告", "请输入或在表格中选择要诊断的个股代码！")
+            return
+            
         code_to_name = {}
-        for r in range(row, min(self.table.rowCount(), row + 21)):
-            c_item = self.table.item(r, 0)
-            n_item = self.table.item(r, 1)
-            if c_item:
-                c = c_item.text().strip()
-                n = n_item.text().strip() if n_item else c
-                if n.startswith("★ "):
-                    n = n[2:]
-                code_to_name[c] = n
-                
+        if found_row != -1:
+            # Found the row: take this row and the next 20 rows (total 21 max)
+            for r in range(found_row, min(self.table.rowCount(), found_row + 21)):
+                c_item = self.table.item(r, 0)
+                n_item = self.table.item(r, 1)
+                if c_item:
+                    c = c_item.text().strip().zfill(6)
+                    n = n_item.text().strip() if n_item else c
+                    n = n.replace("★ ", "").strip()
+                    code_to_name[c] = n
+        else:
+            # Not in table (manual entry not in list), fallback to auditing just this stock
+            name = None
+            if self.top_now is not None and code in self.top_now.index:
+                name = self.top_now.loc[code, 'name']
+            if not name:
+                from backtest_feature_auditor import NAME_CACHE
+                name = NAME_CACHE.get(code, code)
+            name = name.replace("★ ", "").strip()
+            code_to_name[code] = name
+
         if code_to_name:
             # Reconstruct resample from active periods
             active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
@@ -2745,8 +2794,14 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.dragon_monitor_dialog.show_normal_position()
             if self.top_now is not None and not self.top_now.empty:
                 sh_pct = 0.0
-                if 'sh000001' in self.top_now.index:
+                if 'ratio' in self.top_now.columns:
+                    sh_pct = float(self.top_now['ratio'].mean())
+                elif 'percent' in self.top_now.columns:
+                    sh_pct = float(self.top_now['percent'].mean())
+                elif 'sh000001' in self.top_now.index:
                     sh_pct = float(self.top_now.loc['sh000001'].get('percent', 0.0))
+                elif '000001' in self.top_now.index and 'sh' in str(self.top_now.loc['000001'].get('code', '')):
+                    sh_pct = float(self.top_now.loc['000001'].get('percent', 0.0))
                 self.dragon_monitor_dialog.update_data(self.top_now, sh_pct)
         except Exception as e:
             logger.error(f"Failed to open dragon monitor: {e}")
@@ -2834,9 +2889,12 @@ class NumericWidgetItem(QTableWidgetItem):
 
 class QtDnaAuditReportWindow(QDialog, WindowMixin):
     def __init__(self, summaries, parent=None, end_date=None, resample='d'):
+        self.monitor_app = parent
+        active_modal = QApplication.activeModalWidget()
+        if active_modal and parent is not active_modal:
+            parent = active_modal
         super().__init__(parent)
         self.summaries = summaries
-        self.monitor_app = parent
         self.end_date = end_date
         self.resample = resample
         
@@ -3072,6 +3130,13 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
                     if hasattr(diag_target, 'diagnose_stock_strategy'):
                         diag_target.diagnose_stock_strategy(code)
             
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
+        if self.table.rowCount() > 0:
+            self.table.setFocus()
+
     def closeEvent(self, event):
         if hasattr(self, "save_window_position_qt_visual"):
             self.save_window_position_qt_visual(self, self.window_name)

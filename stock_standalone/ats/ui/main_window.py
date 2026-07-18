@@ -874,6 +874,11 @@ class ATSMainWindow(QMainWindow):
         self.btn_toggle_rotation.clicked.connect(self.toggle_rotation)
         toolbar.addWidget(self.btn_toggle_rotation)
         
+        self.btn_multi_period = QPushButton("多周期🎯")
+        self.btn_multi_period.setStyleSheet("QPushButton { background-color: #2b1f3c; color: #e0b0ff; font-weight: bold; border: 1px solid #c8a2c8; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #3d2f54; border-color: #e0b0ff; }")
+        self.btn_multi_period.clicked.connect(self.open_multi_period_tester)
+        toolbar.addWidget(self.btn_multi_period)
+        
         toolbar.addSeparator()
         
         self.lbl_ipc_status = QLabel("  IPC 通道: 🔌 已连接  |  ")
@@ -2806,6 +2811,14 @@ class ATSMainWindow(QMainWindow):
                 self.dragon_monitor_dialog.close()
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing dragon monitor on close: {e}")
+                
+        # Close multi period tester dialog if open to ensure state is saved
+        try:
+            import ats.ui.multi_period_dialog as mpd
+            if mpd._dialog_instance and not isdeleted(mpd._dialog_instance):
+                mpd._dialog_instance.close()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error closing multi period dialog on close: {e}")
             
         super().closeEvent(event)
 
@@ -2873,3 +2886,9 @@ class ATSMainWindow(QMainWindow):
             self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
         except Exception as e:
             print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
+
+    def open_multi_period_tester(self):
+        if getattr(self, '_is_closing', False):
+            return
+        from ats.ui.multi_period_dialog import open_multi_period_tester
+        open_multi_period_tester()
