@@ -2290,11 +2290,26 @@ class ATSMainWindow(QMainWindow):
             
         try:
             today_date = time.strftime("%Y-%m-%d")
-            # 存放在 workspace 下的 data 目录中
-            data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+            from sys_utils import get_app_root
+            data_dir = os.path.join(get_app_root(), "datacsv")
             if not os.path.exists(data_dir):
                 os.makedirs(data_dir, exist_ok=True)
                 
+            # 自动迁移旧路径下的所有 ats_alpha_tracker_*.json 文件到新的 datacsv 目录下
+            old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+            if os.path.exists(old_data_dir) and old_data_dir != data_dir:
+                try:
+                    import shutil
+                    for fname in os.listdir(old_data_dir):
+                        if fname.startswith("ats_alpha_tracker_") and fname.endswith(".json"):
+                            old_filepath = os.path.join(old_data_dir, fname)
+                            new_filepath = os.path.join(data_dir, fname)
+                            if os.path.exists(old_filepath) and not os.path.exists(new_filepath):
+                                shutil.copy2(old_filepath, new_filepath)
+                                print(f"[ATSAlphaTracker] Migrated old alpha tracker data: {fname}")
+                except Exception as e:
+                    print(f"[ATSAlphaTracker] Failed to migrate old alpha tracker data: {e}")
+                    
             log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
             
             # 使用内存去重，避免对同一个股票每秒行情刷新都重复写文件

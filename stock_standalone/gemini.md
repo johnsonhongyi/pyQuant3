@@ -1,3 +1,47 @@
+## 2026-07-18 10:15
+- [x] **实现龙头监控自动挖掘黑名单拉黑与右键一键屏蔽 (Implemented Blacklist for Dragon Leader Monitor & Right-Click Mute)**：
+    - [x] **升级配置数据结构并引入 blacklist_codes**：将 `ats_dragon_leaders.json` 数据结构扩展为支持并集保存 `manual` 和 `blacklist` 二元字段。重构了 `_load_dragon_data` 与 `_save_manual_codes` 以在保证原有手动监控配置无损的基础上，同步读写拉黑股票名单。
+    - [x] **实现自动挖掘黑名单短路过滤**：在 `update_data` 周期中引入 `blacklist_codes` 动态过滤。如果在当前行情大偏离中检测到黑名单代码，自动将其跳过，从而根本性消除了像“国华退”、“恒久退”等退市整理股因超常规波动被频繁误挖掘上榜的痛点。
+    - [x] **新增右键“移除并加入黑名单”交互动作**：在表格右键菜单中增加 `🚫 移除并加入黑名单` (对于自动挖掘股票) 和 `🚫 移出并加入黑名单` (对于手动股票) 选项。触发后自动将目标个股移出手动列表、灌入黑名单中，并瞬间联动通知主程序刷新行情与重新布局。
+    - [x] **增强手动添加逻辑的自愈释放**：在手动点击“➕ 添加股票”并保存成功时，自动检索该股票是否曾位于黑名单中；如果是，则自动将该股票从黑名单中抹除并重新释放，提升了自愈交互流畅度。
+
+## 2026-07-18 10:05
+- [x] **统一大盘偏离共振信号日志存储路径至 datacsv (Standardized Alpha Tracker Log Path to datacsv)**：
+    - [x] **引入 get_app_root() 标准化路径**：重构了 `ats/ui/main_window.py` 中 `_record_alpha_signal` 持久化大盘偏离信号（`ats_alpha_tracker_*.json`）的存储逻辑，由易被打包环境报错的相对 `data/` 目录获取，规范为基于系统 `get_app_root()` 指向的 `datacsv/`。
+    - [x] **实现旧版本追踪日志物理自动迁移**：为避免旧版复盘和统计日志流失，在写入前新增了对原 `data/` 目录的扫描与安全拷贝逻辑，自动将所有符合 `ats_alpha_tracker_*.json` 的老数据迁移至新规划的 `datacsv/` 目录下。
+
+## 2026-07-18 09:45
+- [x] **超级加固龙头监控器初始化生命周期与防崩溃自愈 (Hardened Dragon Monitor Initialization Lifecycle & Crash Prevention)**：
+    - [x] **防御性路径与配置加载异常保护**：将 `TkDragonLeaderMonitor` 内部和 `DragonLeaderMonitorDialog` (PyQt6) 内部的路径初始化、目录创建（`os.makedirs`）及旧数据迁移逻辑全部用 `try-except` 包络。若在 Windows 打包或写保护的临时环境下发生 I/O、权限异常（如 `PermissionError`），系统将优雅回退至内存/临时目录模式，绝不让实例化中途崩溃导致主程序闪退。
+    - [x] **防区异常包络呼出机制**：在主多周期筛选器 `open_dragon_monitor` 的实例化调用处增加了顶层 `try-except` 异常拦截。如果龙头监控窗体实例化因为底层 Tcl 状态或资源问题失败，会在日志打印 traceback 并弹出友好的 tkinter messagebox 错误提示框，避免静默闪退，极大提升实盘下的容错水准。
+    - [x] **全表数据刷新保序去重**：在 `update_data` 遍历 `all_codes` 渲染 Treeview 前，对其进行“保序去重”处理（使用 `seen` 集合进行过滤）。这 100% 杜绝了由于脏数据导致列表生成重复的个股代码，在 Treeview 重新插入行时引发 `_tkinter.TclError: Item already exists` 的致命崩溃隐患。
+    - [x] **销毁与状态保存生命周期防护**：在 `_save_window_states` 方法中，在通过 `winfo_x()` 等方法获取窗口坐标前，显式引入了 `self.winfo_exists()` 状态验证。有效避免了在窗口已经被销毁（如主程序关闭回调）的过程中，高频或滞后的定时器触发读取已经失效 of Tcl 窗口状态导致 `bad window path` 崩溃。
+
+## 2026-07-17 21:15
+- [x] **规范化龙头监控数据目录与自动迁移 (Standardized Dragon Monitor Data Directory & Auto-Migration)**：
+    - [x] **引入 get_app_root() 获取标准路径**：重构了 `ats/ui/dragon_monitor.py` 的 `data_dir` 初始化逻辑，废除了脆弱的基于 `__file__` 相对路径的设置，统一改为使用 `os.path.join(get_app_root(), "datacsv")` 规范路径，彻底解决 Nuitka / PyInstaller 打包环境下的路径偏移与数据丢失隐患。
+    - [x] **实现旧数据自愈式自动迁移**：在初始化过程中加入了旧目录的自愈检测。若老版本的 `data/ats_dragon_leaders.json` 文件存在，且标准路径下的文件尚不存在，系统会自动执行 `shutil.copy2` 进行数据物理搬迁，无缝保障用户已保存的手动监控股票名单在软件升级后依然有效。
+    - [x] **修复 Tkinter 龙头监控路径初始化写保护引发的闪退崩溃 (Fixed Tester Dragon Monitor Write-Protection Startup Crash)**：重构了 `standalone_multi_period_tester.py` 中的 `TkDragonLeaderMonitor` 路径初始化逻辑。将基于 `__file__` 相对路径指向打包后只读临时解压目录 `_MEIPASS` 的高危配置，统一改写为使用系统自带的 `get_app_root()` 并在 `datacsv` 下面创建目录与保存配置。彻底规避了 Windows 环境下写入临时目录引发的 `PermissionError` (WinError 5)，从根本上消除了“点击龙头监控就闪退”的致命缺陷，实现了打包环境下的完美运行与数据持久化。
+    - [x] **应用 O(1) 字典特征缓存优化刷新频率与流畅度 (Optimized Tester Refresh with O(1) Dictionary Cache)**：在 `update_data` 方法中，正式加入了基于 `_period_dfs` 特征数据预处理与哈希检索。利用 O(1) 复杂度的字典比对代替低效遍历，彻底消除了界面高频刷新时的 I/O 与 CPU 尖峰，保证行情流畅响应。
+
+## 2026-07-17 21:00
+- [x] **修复龙头监控配置文件读写锁冲突与安全性加固 (Fixed File Lock Permission Bug & Enhanced Crash Protection)**：
+    - [x] **实现 Windows 友好退避重试安全替换 (Safe Atomic File Replacement with Retries)**：引入了 `_safe_replace` 辅助方法，并在 `_save_manual_codes` 与 `_save_window_states` 中应用。在 Windows 环境下如遇临时锁定导致 `PermissionError` (WinError 5)，系统会执行 5 次退避重试（每次休眠 50ms），有效化解了高频状态保存下的文件写入权限冲突。
+    - [x] **消除窗口初始化阶段的文件写竞争与坐标覆写 (Eliminated Initialization File Write Competition)**：重构了 `_restore_window_position` 里的置顶状态加载与界面渲染逻辑。废除了初始化时对 `_on_top_toggled` 的直接调用（直接设置 topmost 属性并正确配置 normal_geom），彻底消存在窗口未 Map 时将 1x1 坏数据覆写到 layout 配置的 Bug，切断了初始化的读写竞争。
+    - [x] **加固主表格数据刷新与空行情容错机制 (Wrapped Table Refresh in Safe Exception Catch)**：对 `update_data` 刷新逻辑的主体块进行了全面的 `try-except` 异常包络防护，并在数据读取时对 `main_app.top_now` 进行安全性与 `empty` 属性验证，确保在行情数据格式异常或初始化冷启动时界面绝对不闪退。
+
+## 2026-07-17 20:00
+- [x] **重构多周期测试工具栏，自定义列改为下拉选择菜单 (Dropdown Menu for Custom Columns in Multi-Period Tester Toolbar)**：
+    - [x] **调整布局顺序保护输入框可用性 (Re-ordered Toolbar Widgets)**：将手动添加自定义列相关的输入框 `manual_col_entry`、`+` 和 `-` 按钮移到最前面，紧跟在“🐉 龙头监控”按钮后面。避免了自定义列选择框过多时将后续关键功能推回或撑开导致无法点击。
+    - [x] **引入极简下拉菜单选择 (Implemented tk.Menubutton Dropdown)**：使用 `tk.Menubutton` 与 `tk.Menu` 级联，将所有列复选框（Checkbuttons）完美融入下拉选单中（默认显示为 "⚙️ 自定义列 ▼"）。用户点击时弹出菜单进行勾选，极大地节省了工具栏右侧有限的横向空间。
+    - [x] **优化交互与联动逻辑 (Optimized Interaction & Update Flow)**：新增或删除手动分析列时，自动重构下拉菜单项，并在新增列后直接通过 BooleanVar 绑定默认选中，实现了即时计算和过滤生效。
+
+## 2026-07-17 19:40
+- [x] **优化 Tkinter 龙头监控窗口防抖与选中行恢复 (Optimized Tkinter Dragon Monitor Refresh & Focus Preservation)**：
+    - [x] **实现行焦点与选中状态精准恢复 (Row Focus & Selection Preservation)**：重构了 `standalone_multi_period_tester.py` 中的 `TkDragonLeaderMonitor.update_data` 刷新逻辑。在清空 Treeview 前自动获取当前选中的股票代码，并在插入行时使用 `iid=code` 显式标识每行，最后在数据重建完成后自动重新设置该股票行的 `selection` 和 `focus`。这彻底解决了高频行情刷新时表格丢失选中高亮与滚动状态的痛点。
+    - [x] **加固原子写入与安全机制**：进一步验证了手动监控代码与窗口位置的跨会话保存（`tester_dragon_leaders.json` 和 `tester_dragon_monitor_layout.json`）均已全面使用 `tempfile` 以及 `os.replace` 的原子级文件写入，确保极端异常退出时绝不损坏配置文件。
+
+
 ## 2026-07-17 18:25
 - [x] **实现 2D/3D 加速强势龙头股追踪器 (Implemented 2D/3D Acceleration Dragon Leader Tracker)**：
     - [x] **新建独立窗口 `DragonLeaderMonitorDialog`**：在 `ats/ui/dragon_monitor.py` 中实现了全新、可独立悬浮的龙头追踪看板。支持展示代码、名称、现价、涨幅、DFF/DFF2/DFF3、大盘偏离、共振状态及来源等 11 个关键属性。
