@@ -3740,6 +3740,9 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self._hover_leave_time = time.time()
 
     def _start_drag(self, event):
+        # 仅当事件源在标题栏本身或标题栏内部子组件时，才允许拖动，彻底避免子区域（如表格点击）误判定
+        if event.widget != self.title_bar and getattr(event.widget, 'master', None) != self.title_bar:
+            return
         self.is_dragging = True
         self.drag_x = event.x
         self.drag_y = event.y
@@ -3753,11 +3756,15 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self._hover_leave_timer_id = None
         
     def _on_drag(self, event):
+        if not getattr(self, 'is_dragging', False):
+            return
         x = self.winfo_x() + (event.x - self.drag_x)
         y = self.winfo_y() + (event.y - self.drag_y)
         self.geometry(f"+{x}+{y}")
         
     def _stop_drag(self, event):
+        if not getattr(self, 'is_dragging', False):
+            return
         self.is_dragging = False
         self._detect_and_snap()
         self._last_show_time = time.time()  # 拖拽释放吸附后，重置冷却保护，防止立刻折叠
@@ -3813,11 +3820,9 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self.anchor_edge = edge
             self.geometry(f"{win_w}x{win_h}+{target_x}+{target_y}")
             self.normal_geom = (target_x, target_y, win_w, win_h)
-            self._save_window_states()
         else:
             self.anchor_edge = None
             self.normal_geom = (win_x, win_y, win_w, win_h)
-            self._save_window_states()
             
     def _animate_geometry(self, start_w, start_h, start_x, start_y, end_w, end_h, end_x, end_y, steps=10, current_step=0, callback=None):
         if not self.winfo_exists():
@@ -3830,7 +3835,6 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self._is_animating = False
             if callback:
                 callback()
-            self._save_window_states()
             return
             
         progress = current_step / steps
@@ -3967,7 +3971,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.normal_geom = (x, y, new_w, new_h)
         
     def _stop_resize(self, event):
-        self._save_window_states()
+        pass
         
     def _check_hover_loop(self):
         try:
@@ -4149,6 +4153,37 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.geometry(f"{w}x{h}+100+100")
         self.normal_geom = (100, 100, w, h)
         self._last_show_time = time.time()
+
+    def _set_initial_hidden_position_tk(self):
+        if not self.collapsed or not self.anchor_edge or not self.normal_geom:
+            return
+        monitor = get_monitor_info(self.winfo_id())
+        if monitor:
+            m_x, m_y, m_w, m_h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+        else:
+            m_x, m_y = 0, 0
+            m_w = self.winfo_screenwidth()
+            m_h = self.winfo_screenheight()
+            
+        win_x, win_y, win_w, win_h = self.normal_geom
+        strip_size = 5
+        if self.anchor_edge == "left":
+            target_x = m_x - win_w + strip_size
+            target_y = win_y
+        elif self.anchor_edge == "right":
+            target_x = m_x + m_w - strip_size
+            target_y = win_y
+        elif self.anchor_edge == "top":
+            target_x = win_x
+            target_y = m_y - win_h + strip_size
+        elif self.anchor_edge == "bottom":
+            target_x = win_x
+            target_y = m_y + m_h - strip_size
+        else:
+            return
+            
+        self.geometry(f"{win_w}x{win_h}+{target_x}+{target_y}")
+        self.attributes("-alpha", 0.45)
         
     def _save_window_states(self):
         if not self.layout_path or not self.data_dir:
@@ -4157,7 +4192,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             if not self.winfo_exists():
                 return
             import tempfile
-            if self.collapsed and self.normal_geom:
+            # 确保存储的位置绝对是展开态/非隐藏态的位置，防止磁吸折叠状态的偏移坐标污染配置文件
+            if self.normal_geom:
                 x, y, w, h = self.normal_geom
             else:
                 x = self.winfo_x()
@@ -4197,7 +4233,6 @@ class TkDragonLeaderMonitor(tk.Toplevel):
     def _on_top_toggled(self):
         top = self.on_top_var.get()
         self.attributes("-topmost", top)
-        self._save_window_states()
         
     def _on_add_manual_clicked(self):
         from tkinter import simpledialog
