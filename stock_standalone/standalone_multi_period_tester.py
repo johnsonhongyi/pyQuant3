@@ -3557,7 +3557,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         # 1. 样式设置：无边框 & 保持最前
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(bg="#161822")
+        self.configure(bg="#161822", highlightbackground="#00FFCC", highlightcolor="#00FFCC", highlightthickness=1)
         
         self.scale_factor = getattr(master, "scale_factor", 1.0)
         
@@ -3585,22 +3585,20 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.anchor_edge = None
         self.collapsed = False
         self.normal_geom = None
-        self.hover_ticks = 0
-        self.leave_ticks = 0
+        self._hover_enter_timer_id = None
+        self._hover_leave_timer_id = None
         self.is_dragging = False
         self._last_show_time = 0.0
         self._is_animating = False      # 动画互斥锁：动画进行中禁止触发折叠/展开
-        self._hover_enter_time = None   # 鼠标移入时间戳（用于展开防抖）
-        self._hover_leave_time = None   # 鼠标移出时间戳（用于折叠防抖）
+        self._has_hovered_since_show = False  # first-hover 冷却保护：只有鼠标进过一次才允许自动折叠
         
         # 3. 初始化UI与事件绑定
         self._init_ui()
         self._restore_window_position()
         self._bind_events()
         
-        # 4. 数据刷新与鼠标悬停监测
+        # 4. 数据刷新
         self.update_data()
-        self._check_hover_loop()
         if getattr(self.master, "_debug_mode", False):
             print(f"[DragonMonitor] Initialization complete. db_path={self.db_path}, layout_path={self.layout_path}")
         
@@ -3644,18 +3642,6 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.grip.bind("<B1-Motion>", self._on_resize)
         self.grip.bind("<ButtonRelease-1>", self._stop_resize)
         
-        # 折叠态可见状态条（高亮发光边框，科技感强）
-        self.collapsed_bar = tk.Frame(self, bg="#1a1e2e", highlightbackground="#00FFCC", highlightcolor="#00FFCC", highlightthickness=1, cursor="hand2")
-        # 状态条内容：龙头图标 + 提示文字
-        self._collapsed_label = tk.Label(
-            self.collapsed_bar, text="🐉  龙头盘中，悬停展开", 
-            bg="#1a1e2e", fg="#00FFCC", font=("Microsoft YaHei", 9, "bold")
-        )
-        self._collapsed_label.pack(fill="both", expand=True)
-        self.collapsed_bar.bind("<Enter>", self._on_collapsed_bar_enter)
-        self._collapsed_label.bind("<Enter>", self._on_collapsed_bar_enter)
-        self.collapsed_bar.bind("<Button-1>", lambda e: self._expand())
-        self._collapsed_label.bind("<Button-1>", lambda e: self._expand())
         
         # 表格区
         table_frame = tk.Frame(self.main_container, bg="#0c0d14")
@@ -3709,14 +3695,24 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.tree.bind("<KeyRelease-Up>", self._on_tree_select)
         self.tree.bind("<KeyRelease-Down>", self._on_tree_select)
         
-        # 展开态下鼠标移入主窗口区域时重置离开计时
-        self.bind("<Enter>", self._on_main_window_enter)
-                
+        # 绑定鼠标移入/移出事件，实现 100% 自适应的事件驱动吸附弹出
+        self.bind("<Enter>", self._on_mouse_enter)
+        self.bind("<Leave>", self._on_mouse_leave)
+        self.main_container.bind("<Enter>", self._on_mouse_enter)
+        self.main_container.bind("<Leave>", self._on_mouse_leave)
+        
     def _start_drag(self, event):
         self.is_dragging = True
         self.drag_x = event.x
         self.drag_y = event.y
         self.anchor_edge = None
+        # 拖拽开始时清空定时器，防抖防意外折叠
+        if self._hover_enter_timer_id:
+            self.after_cancel(self._hover_enter_timer_id)
+            self._hover_enter_timer_id = None
+        if self._hover_leave_timer_id:
+            self.after_cancel(self._hover_leave_timer_id)
+            self._hover_leave_timer_id = None
         
     def _on_drag(self, event):
         x = self.winfo_x() + (event.x - self.drag_x)
@@ -3784,42 +3780,38 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self.normal_geom = (win_x, win_y, win_w, win_h)
             self._save_window_states()
             
-    def _animate_geometry(self, start_w, start_h, start_x, start_y, end_w, end_h, end_x, end_y, steps=8, current_step=0, callback=None):
+    def _animate_geometry(self, start_w, start_h, start_x, start_y, end_w, end_h, end_x, end_y, steps=10, current_step=0, callback=None):
         if not self.winfo_exists():
             self._is_animating = False
             return
-        if current_step > steps:
+        if current_step >= steps:
             self.geometry(f"{end_w}x{end_h}+{end_x}+{end_y}")
+            self.attributes("-topmost", True)
+            self.lift()
             self._is_animating = False
-            self.update_idletasks()
             if callback:
                 callback()
+            self._save_window_states()
             return
+            
+        progress = current_step / steps
+        # Easing curve: easeOutCubic
+        progress = 1 - (1 - progress) ** 3
         
-        t = current_step / steps
-        t_ease = 1 - (1 - t) * (1 - t)  # Ease Out Quad
-        
-        curr_w = int(start_w + (end_w - start_w) * t_ease)
-        curr_h = int(start_h + (end_h - start_h) * t_ease)
-        curr_x = int(start_x + (end_x - start_x) * t_ease)
-        curr_y = int(start_y + (end_y - start_y) * t_ease)
+        curr_w = int(start_w + (end_w - start_w) * progress)
+        curr_h = int(start_h + (end_h - start_h) * progress)
+        curr_x = int(start_x + (end_x - start_x) * progress)
+        curr_y = int(start_y + (end_y - start_y) * progress)
         
         self.geometry(f"{curr_w}x{curr_h}+{curr_x}+{curr_y}")
+        self.attributes("-topmost", True)
+        self.lift()
         self.update_idletasks()
         self.after(12, lambda: self._animate_geometry(
             start_w, start_h, start_x, start_y,
             end_w, end_h, end_x, end_y,
             steps, current_step + 1, callback
         ))
-
-    def _on_collapsed_bar_enter(self, event=None):
-        """鼠标移入折叠状态条时立即展开"""
-        if self.collapsed and not self._is_animating:
-            self._expand()
-
-    def _on_main_window_enter(self, event=None):
-        """鼠标移入展开态主窗口时重置离开计时器"""
-        self._hover_leave_time = None
 
     def _collapse(self):
         if not self.anchor_edge or self.collapsed or not self.normal_geom:
@@ -3828,39 +3820,54 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             return
         win_x, win_y, win_w, win_h = self.normal_geom
         
-        # 根据磁吸边确定折叠条的大小和位置
-        bar_size = int(24 * self.scale_factor)
-        if self.anchor_edge == "top":
-            bar_w, bar_h, bar_x, bar_y = win_w, bar_size, win_x, win_y
-            bar_orient = "horizontal"
-        elif self.anchor_edge == "bottom":
-            bar_w, bar_h, bar_x, bar_y = win_w, bar_size, win_x, win_y + win_h - bar_size
-            bar_orient = "horizontal"
-        elif self.anchor_edge == "left":
-            bar_w, bar_h, bar_x, bar_y = bar_size, win_h, win_x, win_y
-            bar_orient = "vertical"
+        monitor = get_monitor_info(self.winfo_id())
+        if monitor:
+            m_x, m_y, m_w, m_h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+        else:
+            m_x, m_y = 0, 0
+            m_w = self.winfo_screenwidth()
+            m_h = self.winfo_screenheight()
+            
+        strip_size = 5
+        if self.anchor_edge == "left":
+            end_x = m_x - win_w + strip_size
+            end_y = win_y
         elif self.anchor_edge == "right":
-            bar_w, bar_h, bar_x, bar_y = bar_size, win_h, win_x + win_w - bar_size, win_y
-            bar_orient = "vertical"
+            end_x = m_x + m_w - strip_size
+            end_y = win_y
+        elif self.anchor_edge == "top":
+            end_x = win_x
+            end_y = m_y - win_h + strip_size
+        elif self.anchor_edge == "bottom":
+            end_x = win_x
+            end_y = m_y + m_h - strip_size
         else:
             return
-        
-        self.main_container.pack_forget()
-        
-        # 更新折叠条文字方向
-        if bar_orient == "vertical":
-            self._collapsed_label.config(text="🐉")
-        else:
-            self._collapsed_label.config(text="🐉  龙头盘中，悬停展开")
-        
-        # 先显示折叠条再做动画
-        self.collapsed_bar.pack(fill="both", expand=True)
+            
         self.collapsed = True
         self._is_animating = True
         self._hover_enter_time = None
         self._hover_leave_time = None
-        self.attributes("-alpha", 1.0)
-        self._animate_geometry(win_w, win_h, win_x, win_y, bar_w, bar_h, bar_x, bar_y, steps=7)
+        
+        # 强力置顶
+        self.attributes("-topmost", True)
+        self.lift()
+        
+        # 渐变淡出至 0.45
+        def _fade_out(step=0, total=8):
+            if not self.winfo_exists() or not self.collapsed:
+                return
+            self.attributes("-alpha", max(0.45, 1.0 - (step / total) * 0.55))
+            if step < total:
+                self.after(18, lambda: _fade_out(step + 1, total))
+                
+        _fade_out()
+        
+        self._animate_geometry(
+            win_w, win_h, win_x, win_y,
+            win_w, win_h, end_x, end_y,
+            steps=10
+        )
         
     def _expand(self):
         if not self.collapsed or not self.normal_geom:
@@ -3874,21 +3881,22 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         start_x = self.winfo_x()
         start_y = self.winfo_y()
         
-        self.collapsed_bar.pack_forget()
-        self.main_container.pack(fill="both", expand=True)
         self.collapsed = False
         self._last_show_time = time.time()
+        self._has_hovered_since_show = False
         self._is_animating = True
         self._hover_enter_time = None
         self._hover_leave_time = None
         
-        # 淡入 + 展开双轨动画
-        self.attributes("-alpha", 0.0)
+        # 强力置顶
+        self.attributes("-topmost", True)
+        self.lift()
         
+        # 淡入到 1.0
         def _fade_in(step=0, total=8):
-            if not self.winfo_exists():
+            if not self.winfo_exists() or self.collapsed:
                 return
-            self.attributes("-alpha", min(1.0, step / total))
+            self.attributes("-alpha", min(1.0, 0.45 + (step / total) * 0.55))
             if step < total:
                 self.after(18, lambda: _fade_in(step + 1, total))
                 
@@ -3896,7 +3904,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self._animate_geometry(
             start_w, start_h, start_x, start_y,
             win_w, win_h, win_x, win_y,
-            steps=8
+            steps=10
         )
 
     def _start_resize(self, event):
@@ -3933,18 +3941,51 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self._hover_leave_time = None
             self.after(200, self._check_hover_loop)
             return
+            
+        # 折叠态强力自愈 topmost 层级，防止被通达信等盖住
+        if self.collapsed and not self._is_animating:
+            self.attributes("-topmost", True)
+            self.lift()
         
         pointer_x, pointer_y = self.winfo_pointerxy()
-        win_x = self.winfo_x()
-        win_y = self.winfo_y()
+        root_x = self.winfo_rootx()
+        root_y = self.winfo_rooty()
         win_w = self.winfo_width()
         win_h = self.winfo_height()
-        # 扩大 12px 热区防止边界抖动，并且折叠状态下更容易唤醒
-        margin = 12
-        in_window = (
-            win_x - margin <= pointer_x <= win_x + win_w + margin and
-            win_y - margin <= pointer_y <= win_y + win_h + margin
-        )
+        
+        # 使用 Tkinter 同比例坐标系绝对差值计算相对坐标，天然免疫任何高 DPI 缩放偏差！
+        rel_x = pointer_x - root_x
+        rel_y = pointer_y - root_y
+        
+        tolerance = 12
+        if self.collapsed:
+            # 折叠态下让热区稍微向屏幕内延伸，提升滑入灵敏度，吸附手感更好
+            tolerance = 18
+            
+        in_window = False
+        
+        if self.collapsed:
+            # 折叠态：精确根据吸附边缘，用相对坐标检测鼠标是否在屏幕内露出的 5px 热区中
+            if self.anchor_edge == "left":
+                in_window = (-tolerance <= rel_x <= 5 + tolerance) and \
+                            (-tolerance <= rel_y <= win_h + tolerance)
+            elif self.anchor_edge == "right":
+                in_window = (win_w - 5 - tolerance <= rel_x <= win_w + tolerance) and \
+                            (-tolerance <= rel_y <= win_h + tolerance)
+            elif self.anchor_edge == "top":
+                in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
+                            (-tolerance <= rel_y <= 5 + tolerance)
+            elif self.anchor_edge == "bottom":
+                in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
+                            (win_h - 5 - tolerance <= rel_y <= win_h + tolerance)
+        else:
+            # 展开态：常规窗口全包围盒检测
+            in_window = (-tolerance <= rel_x <= win_w + tolerance) and \
+                        (-tolerance <= rel_y <= win_h + tolerance)
+                    
+        if in_window:
+            self._has_hovered_since_show = True  # 鼠标首次移入，允许之后触发自动收起
+            
         now = time.time()
         
         if self.collapsed:
@@ -3959,8 +4000,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             else:
                 self._hover_enter_time = None
         else:
-            # === 展开态：只有已磁吸时才自动折叠 ===
-            if self.anchor_edge is not None:
+            # === 展开态：已吸附且鼠标曾移入过窗口，才自动折叠 ===
+            if self.anchor_edge is not None and getattr(self, '_has_hovered_since_show', False):
                 # 展开后 0.8s 冷却期内不折叠，防止刚展开又立即收起
                 if now - self._last_show_time < 0.8:
                     self._hover_leave_time = None
@@ -3971,7 +4012,7 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                     if self._hover_leave_time is None:
                         self._hover_leave_time = now
                     self._hover_enter_time = None
-                    # 离开超过 0.4s 才折叠，防止鼠标路过误触，同时保证足够灵敏
+                    # 离开超过 0.4s 才折叠，防止鼠标路过误触
                     if now - self._hover_leave_time >= 0.4:
                         self._collapse()
                         return  # collapse 后 loop 由下一轮 after 续上
