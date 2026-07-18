@@ -93,6 +93,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.strategies = self.engine.load_strategies()
         self.top_now = None
         self.dragon_monitor = None
+        self._debug_mode = ("-log" in sys.argv and "debug" in sys.argv) or os.environ.get("APP_DEBUG") == "True"
         # 缓存时间戳：记录 top_now 和各周期数据的最后加载时间
         self._top_now_cache_ts = 0.0          # top_now 全市场数据缓存时间戳
         self._period_cache_ts: dict = {}      # {period: timestamp} 各周期数据缓存时间
@@ -1388,25 +1389,6 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 pass
             self.dragon_monitor = None
 
-    def open_dragon_monitor(self):
-        if hasattr(self, "dragon_monitor") and self.dragon_monitor is not None:
-            try:
-                if self.dragon_monitor.winfo_exists():
-                    self.dragon_monitor.destroy()
-                    self.dragon_monitor = None
-                    return
-            except Exception:
-                self.dragon_monitor = None
-
-        try:
-            self.dragon_monitor = TkDragonLeaderMonitor(self)
-        except Exception as e:
-            print(f"[MultiPeriodTester] Error opening dragon monitor: {e}")
-            import traceback
-            traceback.print_exc()
-            from tkinter import messagebox
-            messagebox.showerror("错误", f"无法启动龙头监控器:\n{e}")
-        
         # 取消可能存在的 linkage 定时器
         if getattr(self, "_link_after_id", None):
             try:
@@ -1470,6 +1452,38 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         # 强力触发垃圾回收
         import gc
         gc.collect()
+
+    def open_dragon_monitor(self):
+        if getattr(self, "_debug_mode", False):
+            print(f"[MultiPeriodTester] open_dragon_monitor() triggered. Current self.dragon_monitor: {getattr(self, 'dragon_monitor', None)}")
+        if hasattr(self, "dragon_monitor") and self.dragon_monitor is not None:
+            try:
+                exists = self.dragon_monitor.winfo_exists()
+                if getattr(self, "_debug_mode", False):
+                    print(f"[MultiPeriodTester] dragon_monitor exists in master: {exists}")
+                if exists:
+                    if getattr(self, "_debug_mode", False):
+                        print(f"[MultiPeriodTester] Destroying existing dragon_monitor instance.")
+                    self.dragon_monitor.destroy()
+                    self.dragon_monitor = None
+                    return
+            except Exception as e:
+                if getattr(self, "_debug_mode", False):
+                    print(f"[MultiPeriodTester] Error checking/destroying existing dragon_monitor: {e}")
+                self.dragon_monitor = None
+
+        if getattr(self, "_debug_mode", False):
+            print(f"[MultiPeriodTester] Creating new TkDragonLeaderMonitor instance.")
+        try:
+            self.dragon_monitor = TkDragonLeaderMonitor(self)
+            if getattr(self, "_debug_mode", False):
+                print(f"[MultiPeriodTester] Successfully created TkDragonLeaderMonitor.")
+        except Exception as e:
+            print(f"[MultiPeriodTester] Error opening dragon monitor: {e}")
+            import traceback
+            traceback.print_exc()
+            from tkinter import messagebox
+            messagebox.showerror("错误", f"无法启动龙头监控器:\n{e}")
 
     def show_help_documentation(self):
         """打开/显示系统多周期与信号指标使用说明文档，实时加载本地文件以支持动态互动更新，带搜索及编辑保存能力"""
@@ -2401,7 +2415,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         )
         title_lbl.pack(anchor="w", pady=(4, 8), padx=6)
 
-        for idx, (cat_name, count) in enumerate(all_concepts, 1):
+        for idx, (cat_name, count) in enumerate(all_concepts[:20], 1):
             item_frame = tk.Frame(scroll_frame, bg="white")
             item_frame.pack(fill="x", anchor="w", pady=2, padx=6)
             
@@ -3514,6 +3528,8 @@ def get_monitor_info(hwnd):
 
 class TkDragonLeaderMonitor(tk.Toplevel):
     def __init__(self, master):
+        if getattr(master, "_debug_mode", False):
+            print("[DragonMonitor] __init__ starting...")
         super().__init__(master)
         self.master = master
         self.title("🐉 2D/3D 加速龙头追踪器")
@@ -3558,6 +3574,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         # 4. 数据刷新与鼠标悬停监测
         self.update_data()
         self._check_hover_loop()
+        if getattr(self.master, "_debug_mode", False):
+            print(f"[DragonMonitor] Initialization complete. db_path={self.db_path}, layout_path={self.layout_path}")
         
     def _init_ui(self):
         self.main_container = tk.Frame(self, bg="#161822", bd=1, relief="solid", highlightbackground="#2E2E36", highlightcolor="#2E2E36", highlightthickness=1)
@@ -4185,7 +4203,15 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.after(3000, self.update_data)
         
     def destroy(self):
-        self._save_window_states()
+        if getattr(self.master, "_debug_mode", False):
+            print(f"[DragonMonitor] destroy() called. Setting master.dragon_monitor = None")
+        try:
+            self._save_window_states()
+        except Exception as e:
+            if getattr(self.master, "_debug_mode", False):
+                print(f"[DragonMonitor] Error saving window states during destroy: {e}")
+        if hasattr(self.master, "dragon_monitor"):
+            self.master.dragon_monitor = None
         super().destroy()
 
 if __name__ == "__main__":
