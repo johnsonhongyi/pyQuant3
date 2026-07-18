@@ -185,6 +185,7 @@ def get_compact_width(col_name: str):
 
     base_map = {
         'code': 60,
+        'name': 65,  # 名称列默认紧凑宽度为 65
         'rank': 40,
         'win': 20,
         'percent': 45,
@@ -8835,13 +8836,26 @@ class MainWindow(QMainWindow, WindowMixin):
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
         headers = self.stock_table.horizontalHeader()
+        saved_widths = getattr(self, 'saved_col_widths', {}).get('stock_table', {})
         try:
             for i, h in enumerate(self.headers):
                 h_low = h.lower()
+                
+                # 获取列头文本，用于匹配用户手动调整并持久化的宽度
+                col_name = ""
+                h_item = self.stock_table.horizontalHeaderItem(i)
+                if h_item:
+                    col_name = h_item.text()
+                
+                # 如果用户手动调整过且有持久化数据，则完全尊重手动数据，不再自动限制宽度
+                if col_name in saved_widths:
+                    cw = saved_widths[col_name]
+                    headers.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+                    self.stock_table.setColumnWidth(i, cw)
+                    continue
+
                 # 1. 尝试使用 get_compact_width 获取紧凑预设
                 cw = get_compact_width(h_low)
-                if h_low == 'name': 
-                    cw = 65 # 名称列特殊兜底
                 
                 # 2. 如果当前列宽超过预设或特定大文本列超过上限
                 if cw and self.stock_table.columnWidth(i) > cw:
@@ -9117,7 +9131,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 for i in range(self.stock_table.columnCount()):
                     # [PERF] 极致优化：不要启动 ResizeToContents，这会引发 Qt 全量布局计算。
                     # 保持 Interactive，让 _limit_table_column_widths 处理即可。
-                    if i in [0,1]:
+                    # 只有 code 采用 ResizeToContents 自适应；name 列和其他列都采用 Interactive，
+                    # 避免个别长名称导致整列无限撑宽，其列宽由 _limit_table_column_widths 智能限制。
+                    h_low = self.headers[i].lower() if i < len(self.headers) else ""
+                    if h_low == 'code':
                         _h.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
                     else: 
                         _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
@@ -9569,6 +9586,28 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_column_resized_debounced(self, index, old_size, new_size):
         """列宽变动防抖保存"""
         if abs(new_size - old_size) <= 2: return # 忽略微小变动
+        
+        # 确定哪个控件触发了该事件，以区分主表和筛选树分别持久化
+        is_tree = False
+        if hasattr(self, 'filter_tree'):
+            is_tree = True
+            
+        if not hasattr(self, 'saved_col_widths') or self.saved_col_widths is None:
+            self.saved_col_widths = {}
+            
+        if is_tree:
+            tree_widths = self.saved_col_widths.setdefault('filter_tree', {})
+            h_item = self.filter_tree.headerItem()
+            if h_item:
+                col_name = h_item.text(index)
+                if col_name:
+                    tree_widths[col_name] = new_size
+        else:
+            stock_widths = self.saved_col_widths.setdefault('stock_table', {})
+            h_item = self.stock_table.horizontalHeaderItem(index)
+            if h_item:
+                stock_widths[h_item.text()] = new_size
+            
         if hasattr(self, '_resize_timer'):
             self._resize_timer.start(2000) # 2秒后执行 _save_visualizer_config
 
