@@ -1491,6 +1491,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         self._last_ats_panel_trigger_t = now
 
+        # 启动防重入冷却锁：若在 5 秒内已经触发启动命令，且外部窗口尚未创建成功，直接 bypass 重复触发
+        starting_t = getattr(self, "_ats_starting_t", 0.0)
+        if now - starting_t < 5.0:
+            logger.info("[ATS] Already launching/starting within 5s, bypassing duplicate launch.")
+            toast_message(self, "ATS 智能终端启动中，请稍候...")
+            return
+
         try:
             import ctypes
             # 1. 在操作系统级别查找已运行的 ATS 终端窗口
@@ -1526,6 +1533,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 path = os.path.join(base_path, "ATS_Terminal.exe")
                 if os.path.exists(path):
                     logger.info(f"🚀 [ATS] Running packaged exe: {path}")
+                    self._ats_starting_t = now
                     subprocess.Popen([path], cwd=base_path)
                     toast_message(self, "ATS智能终端启动中...")
                 else:
@@ -1535,6 +1543,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 path = os.path.join(base_path, "run_ats.py")
                 if os.path.exists(path):
                     logger.info(f"🚀 [ATS] Running development script: {path}")
+                    self._ats_starting_t = now
                     subprocess.Popen([sys.executable, path], cwd=base_path)
                     toast_message(self, "ATS智能终端启动中...")
                 else:
@@ -15537,6 +15546,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
     def open_multi_period_tester(self):
         """[NEW] 打开多周期联动策略筛选器 (优先检测外部 MultiPeriodTester.exe/脚本，否则执行内部调用)"""
+        import time
+        now = time.time()
+        
+        # 1. 启动防重入冷却锁：若在 5 秒内已经触发启动命令，且外部窗口尚未创建成功，直接 bypass 重复触发
+        starting_t = getattr(self, "_multi_period_starting_t", 0.0)
+        if now - starting_t < 5.0:
+            logger.info("[MultiPeriod] Already launching/starting within 5s, bypassing duplicate launch.")
+            toast_message(self, "多周期筛选器启动中，请稍候...")
+            return
+
         title = "多周期联动策略筛选器"
         try:
             import ctypes
@@ -15553,52 +15572,50 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.warning(f"FindWindowW error: {e}")
 
-        # 检测本地程序/脚本
+        # 检测独立打包程序（仅在打包 EXE 存在时才以子进程启动，本地开发直接走内部 dialog）
         base_path = get_app_root()
         exe_path = os.path.join(base_path, "MultiPeriodTester.exe")
-        dev_path = os.path.join(base_path, "standalone_multi_period_tester.py")
 
         if os.path.exists(exe_path):
             try:
                 logger.info(f"🚀 [MultiPeriod] Running packaged exe: {exe_path}")
                 import subprocess
+                self._multi_period_starting_t = now
                 subprocess.Popen([exe_path], cwd=base_path)
                 toast_message(self, "多周期筛选器启动中...")
                 return
             except Exception as e:
                 logger.error(f"Failed to launch MultiPeriodTester.exe: {e}")
-        elif os.path.exists(dev_path):
-            try:
-                logger.info(f"🚀 [MultiPeriod] Running development script: {dev_path}")
-                import subprocess
-                import sys
-                subprocess.Popen([sys.executable, dev_path], cwd=base_path)
-                toast_message(self, "多周期筛选器启动中...")
-                return
-            except Exception as e:
-                logger.error(f"Failed to launch standalone_multi_period_tester.py: {e}")
 
-        # 如果外部不存在，则回退执行内部调用
-        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+        # 如果外部打包程序不存在，直接回退执行内部 PyQt6 dialog 调用
+        if is_qt_win_alive(getattr(self, '_multi_period_tester_win', None)):
             try:
-                if not self._multi_period_tester_win.winfo_viewable():
-                    self._multi_period_tester_win.deiconify()
-                self._multi_period_tester_win.lift()
-                self._multi_period_tester_win.focus_force()
+                self._multi_period_tester_win.showNormal()
+                self._multi_period_tester_win.raise_()
+                self._multi_period_tester_win.activateWindow()
                 return
             except Exception:
                 pass
         
         try:
-            from standalone_multi_period_tester import StandaloneMultiPeriodTester
-            self._multi_period_tester_win = StandaloneMultiPeriodTester(master=self)
-            self._multi_period_tester_win.lift()
-            self._multi_period_tester_win.focus_force()
+            if not QtWidgets.QApplication.instance():
+                self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+            from ats.ui.multi_period_dialog import open_multi_period_tester as qt_open
+            self._multi_period_tester_win = qt_open(parent_window=self)
         except Exception as e:
-            logger.error(f"Failed to open StandaloneMultiPeriodTester: {e}")
+            logger.error(f"Failed to open MultiPeriodDialog: {e}")
 
     def toggle_multi_period_tester(self):
         """[NEW] 切换多周期联动策略筛选器的显示与隐藏 (支持外部窗口与内部Dialog对齐判定)"""
+        # 防重入防抖：限制 300ms 内的连续按键或重复触发
+        import time
+        now = time.time()
+        last_t = getattr(self, "_last_multi_period_trigger_t", 0.0)
+        if now - last_t < 0.3:
+            logger.info("[MultiPeriod] Trigger too frequent (<0.3s), bypassing duplicate event.")
+            return
+        self._last_multi_period_trigger_t = now
+
         title = "多周期联动策略筛选器"
         try:
             import ctypes
@@ -15626,23 +15643,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.warning(f"FindWindowW error in toggle: {e}")
 
         # 如果没有外部窗口，切换内部窗口
-        if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win and self._multi_period_tester_win.winfo_exists():
+        if is_qt_win_alive(getattr(self, '_multi_period_tester_win', None)):
             try:
-                # 若当前焦点在多周期窗口内且处于未隐藏状态，则将其隐藏 (withdraw)
-                if self._multi_period_tester_win.state() != "withdrawn" and self._multi_period_tester_win.focus_displayof() == self._multi_period_tester_win:
-                    self._multi_period_tester_win.withdraw()
+                if self._multi_period_tester_win.isVisible() and self._multi_period_tester_win.isActiveWindow():
+                    self._multi_period_tester_win.hide()
                 else:
-                    self._multi_period_tester_win.deiconify()
-                    self._multi_period_tester_win.lift()
-                    self._multi_period_tester_win.focus_force()
-            except Exception:
-                # 异常容错处理
-                try:
-                    self._multi_period_tester_win.deiconify()
-                    self._multi_period_tester_win.lift()
-                    self._multi_period_tester_win.focus_force()
-                except Exception:
-                    pass
+                    self._multi_period_tester_win.showNormal()
+                    self._multi_period_tester_win.raise_()
+                    self._multi_period_tester_win.activateWindow()
+            except Exception as e:
+                logger.error(f"Failed to toggle MultiPeriodDialog: {e}")
         else:
             self.open_multi_period_tester()
 
