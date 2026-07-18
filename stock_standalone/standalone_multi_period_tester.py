@@ -4394,33 +4394,47 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 period_snapshots = {}
                 if lock:
                     with lock:
-                        for p in ('d', 'w', 'm'):
+                        active_periods = list(main_app.engine._period_dfs.keys())
+                        for p in active_periods:
                             raw = main_app.engine._period_dfs.get(p)
                             if raw is not None and not raw.empty:
                                 period_snapshots[p] = raw.copy()
                 else:
-                    for p in ('d', 'w', 'm'):
+                    active_periods = list(main_app.engine._period_dfs.keys())
+                    for p in active_periods:
                         raw = main_app.engine._period_dfs.get(p)
                         if raw is not None and not raw.empty:
                             period_snapshots[p] = raw.copy()
                             
-                df_d = period_snapshots.get('d')
-                if df_d is not None:
-                    col = 'dff' if 'dff' in df_d.columns else ('dff_d' if 'dff_d' in df_d.columns else None)
-                    if col:
-                        dff_dict = {str(k).zfill(6): v for k, v in df_d[col].to_dict().items() if k}
+                # 按顺序从已加载的周期中匹配：第1个周期为短周期，第2个为中周期，第3个为长周期
+                sorted_periods = list(period_snapshots.keys())
+                df_d = period_snapshots.get(sorted_periods[0]) if len(sorted_periods) > 0 else None
+                df_w = period_snapshots.get(sorted_periods[1]) if len(sorted_periods) > 1 else None
+                df_m = period_snapshots.get(sorted_periods[2]) if len(sorted_periods) > 2 else None
+
+                def get_dff_col(df_p, preferred):
+                    if df_p is None:
+                        return None
+                    for col_name in preferred:
+                        if col_name in df_p.columns:
+                            return col_name
+                    # 模糊匹配
+                    for col_name in df_p.columns:
+                        if 'dff' in str(col_name).lower():
+                            return col_name
+                    return None
+
+                col_d = get_dff_col(df_d, ['dff', 'dff_d'])
+                if col_d and df_d is not None:
+                    dff_dict = {str(k).zfill(6): v for k, v in df_d[col_d].to_dict().items() if k}
                         
-                df_w = period_snapshots.get('w')
-                if df_w is not None:
-                    col = 'dff2' if 'dff2' in df_w.columns else ('dff' if 'dff' in df_w.columns else ('dff_w' if 'dff_w' in df_w.columns else None))
-                    if col:
-                        dff2_dict = {str(k).zfill(6): v for k, v in df_w[col].to_dict().items() if k}
+                col_w = get_dff_col(df_w, ['dff2', 'dff', 'dff_w'])
+                if col_w and df_w is not None:
+                    dff2_dict = {str(k).zfill(6): v for k, v in df_w[col_w].to_dict().items() if k}
                         
-                df_m = period_snapshots.get('m')
-                if df_m is not None:
-                    col = 'dff3' if 'dff3' in df_m.columns else ('dff' if 'dff' in df_m.columns else ('dff_m' if 'dff_m' in df_m.columns else None))
-                    if col:
-                        dff3_dict = {str(k).zfill(6): v for k, v in df_m[col].to_dict().items() if k}
+                col_m = get_dff_col(df_m, ['dff3', 'dff', 'dff_m'])
+                if col_m and df_m is not None:
+                    dff3_dict = {str(k).zfill(6): v for k, v in df_m[col_m].to_dict().items() if k}
             
             # 1. 自动挖掘加速个股
             new_auto_list = []
