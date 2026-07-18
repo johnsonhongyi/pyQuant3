@@ -1,4 +1,8 @@
 ## 2026-07-18 20:00
+- [x] **修复由于初始化时属性未定义引发的 AttributeError 崩溃及窗口标准控件缺失问题 (Fixed AttributeError on Load & Added Window Buttons)**：
+    - [x] **重排构造函数初始化顺序**：将 `self.config_file` 的定义从构造函数尾部移至最前，确保在 `_load_stays_on_top` 与 `_load_state` 触发加载配置文件时，`config_file` 属性已完全就绪，彻底解决了 `'MultiPeriodDialog' object has no attribute 'config_file'` 崩溃。
+    - [x] **添加标准窗口最大/最小化及关闭按钮**：修改 `flags` 设置，除了设置 `Qt.WindowType.Window` 外，显式增加了 `WindowMinimizeButtonHint`, `WindowMaximizeButtonHint` 以及 `WindowCloseButtonHint` 窗口标志，还原了标准窗口的最大化、最小化和关闭按钮。
+    - [x] **实现龙头监控窗口随动关闭 (Cascade Close)**：在 `closeEvent` 中引入检测，当 `MultiPeriodDialog` 触发关闭销毁时，自动关闭已拉起的 `dragon_monitor_dialog`（若存在且可见），避免主窗体关闭后磁吸边缘的龙头监控窗口依然遗留在桌面上悬挂。
 - [x] **修复由于多周期重命名与后缀列匹配导致龙头监控自动挖掘数据大量缺失/为空的 Bug (Fixed Missing Dragon Monitor Auto-Discovery Data)**：
     - [x] **实现 PyQt6 龙头监控列名自适应与周期排序权重匹配**：在 `ats/ui/dragon_monitor.py` 的 `update_data` 刚开始，引入了 `get_period_weight` 周期物理长度权重分析算法，动态识别带有后缀的如 `dff_d`, `dff_3d`, `dff_3M` 等动态多周期列，取代之前硬编码 `'dff'`, `'dff2'`, `'dff3'` 从而彻底修复在非 `d, w, m` 周期下由于列名不匹配导致 `dff` 返回为 0、龙头个股自动挖掘条件被完全过滤的严重缺陷。
     - [x] **实现独立 Tkinter 龙头监控多周期动态键获取与模糊对齐**：在 `standalone_multi_period_tester.py` 的 `update_data` 方法中，获取 `_period_dfs` 时改用自适应 `list(main_app.engine._period_dfs.keys())` 获取所有已加载的动态周期，并使用模糊对齐函数 `get_dff_col` 在各周期宽表中定位 `dff` 数据，彻底根治了多周期测试器开启不同周期（如 3d, 3M）时，龙头磁吸窗口中自动挖掘的超级潜力个股数骤减或为空 of 工程 bug。
@@ -10,8 +14,13 @@
         - 在线程完成后的 `cleanup()` 闭包函数中，主动判定当前活跃的 `self.worker` 并将其指针清空（置为 `None`），彻底切断已销毁 C++ 对象的生命线，恢复数据检索循环的绝对稳定性。
     - [x] **完全对齐多周期筛选器 (Multi-Period Tester) PyQt6 与独立 Tk 版的缓存和启动行为**：
         - 引入 `self._initializing` 状态屏蔽机制，移除了 `MultiPeriodDialog` 初始化构造以及控件初始回填状态时由于信号联动导致自动运行策略过滤的逻辑，实现“启动不要自动运行”。
+        - **修复状态栏联动选择（Tdx/Ths/Vis）与过滤状态持久化失效的经典信号级联 Bug**：在 `_save_state` 入口处增加了对 `self._initializing` 状态的判断。在首屏初始化与数据应用（`_apply_state`）期间，屏蔽由组件 `setChecked()` 状态回填触发的 toggled 信号，防止提前调用 `_save_state` 用默认值覆盖掉未完成回填的各组件持久化状态。
         - 在 `MultiPeriodDialog.run_filter` 中完整对齐了智能缓存判断，涵盖 `top_now` 行情缓存有效性验证、各周期数据缓存过期判定，并支持强制刷新（`force_reload`）时物理清空所有缓存和时间戳。
         - 引入状态栏的多维动态缓存命中提示（如：`⚡ 使用内存缓存 (交易时段，缓存已存在 X s)`），实现状态反馈流向的完美对齐。
+    - [x] **实现多周期筛选器窗口整体缩放与大小位置自动持久化**：将 `MultiPeriodDialog` 的最小尺寸限制由 `1100x700` 放宽至更适合各分屏大小的 `800x500`，允许更自由的拖拽拉伸。在 `resizeEvent` 与 `moveEvent` 中增加了基于 5秒 防抖的高效率 `save_window_position_qt_visual` 本地持久化更新，并在 `closeEvent` 中实现同步写盘双保险，彻底实现高宽位置的跨会话保存。
+    - [x] **彻底修复龙头监控自动挖掘结果与独立测试器不一致的致命 Bug**：纠正了 PyQt6 版龙头监控在 `update_data` 时错误地从缺乏加速指标的 `current_df` 行情快照里提取 DFF 的缺陷。通过 `_get_main_app()` 动态获取主实例，并像 `standalone_multi_period_tester.py` 一样，在安全加锁保护下从 `main_app.engine._period_dfs` 各周期的 DataFrame 真实宽表中读取 DFF 加速特征。同时针对主程序 `MainWindow` 无 `engine` 的非多周期测试环境，实现了自动智能降级至 `current_df` 行情列匹配的第二通道兜底机制，彻底根治了主环境龙头监控无自动挖掘个股的问题。
+    - [x] **实现多周期筛选器（MultiPeriodDialog）“总在最前”置顶状态可配置化**：废除了原有硬编码始终强制置顶的机制，在状态配置文件中加入了 `stays_on_top` 属性并默认为 `False`。在底部工具状态栏中增加了 “置顶” 复选框，支持用户根据需要动态切换“总在最前”窗口标志，提升窗口层级管理的灵活性。
+    - [x] **修复 Windows 多进程并发写入 window_config.json 时的文件占用拒绝访问 Bug**：针对多进程（如主终端与多周期独立进程）并发保存状态可能引发的 Windows `WinError 5` 权限拒绝异常，在 `_save_window_states` 中重命名临时文件时引入了 5 步递增退避式物理重试自愈机制，消除并发竞争崩溃隐患。
 
 ## 2026-07-18 19:40
 - [x] **修复主窗口最小化时 Tk 磁吸龙头窗口无法弹出的 Bug (Fixed Snap Window Pop-up Issue on Master Minimized)**：
