@@ -53,23 +53,30 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._is_updating = False
         
         # 1. Load config path and data files
-        from sys_utils import get_app_root
-        self.data_dir = os.path.join(get_app_root(), "datacsv")
-        os.makedirs(self.data_dir, exist_ok=True)
-        self.db_path = os.path.join(self.data_dir, "ats_dragon_leaders.json")
+        try:
+            from sys_utils import get_app_root
+            self.data_dir = os.path.join(get_app_root(), "datacsv")
+            os.makedirs(self.data_dir, exist_ok=True)
+            self.db_path = os.path.join(self.data_dir, "ats_dragon_leaders.json")
+            
+            # Auto-migrate old data from the root data directory if present
+            old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+            old_db_path = os.path.join(old_data_dir, "ats_dragon_leaders.json")
+            if os.path.exists(old_db_path) and not os.path.exists(self.db_path):
+                try:
+                    import shutil
+                    shutil.copy2(old_db_path, self.db_path)
+                    logger.info(f"Successfully migrated old data from {old_db_path} to {self.db_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to migrate old data folder: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize data directories: {e}")
+            self.data_dir = None
+            self.db_path = None
         
-        # Auto-migrate old data from the root data directory if present
-        old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
-        old_db_path = os.path.join(old_data_dir, "ats_dragon_leaders.json")
-        if os.path.exists(old_db_path) and not os.path.exists(self.db_path):
-            try:
-                import shutil
-                shutil.copy2(old_db_path, self.db_path)
-                logger.info(f"Successfully migrated old data from {old_db_path} to {self.db_path}")
-            except Exception as e:
-                logger.warning(f"Failed to migrate old data folder: {e}")
-        
-        self.manual_codes = self._load_manual_codes()
+        self.manual_codes = []
+        self.blacklist_codes = []
+        self._load_dragon_data()
         self.auto_codes = []
         self._last_row_count = 0
         
@@ -239,21 +246,29 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.snap_timer.setInterval(200)
         self.snap_timer.timeout.connect(self._detect_and_snap)
 
-    def _load_manual_codes(self):
+    def _load_dragon_data(self):
         try:
-            if os.path.exists(self.db_path):
+            if self.db_path and os.path.exists(self.db_path):
                 with open(self.db_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    return data.get("manual", [])
+                    self.manual_codes = data.get("manual", ["000779", "301528"])
+                    self.blacklist_codes = data.get("blacklist", [])
+                    return
         except Exception as e:
-            logger.warning(f"Error loading manual codes: {e}")
+            logger.warning(f"Error loading dragon leader data: {e}")
         # Default mock codes showing acceleration structure as default placeholders
-        return ["000779", "301528"]
+        self.manual_codes = ["000779", "301528"]
+        self.blacklist_codes = []
 
     def _save_manual_codes(self):
+        if not self.db_path or not self.data_dir:
+            return
         try:
             import tempfile
-            data = {"manual": list(self.manual_codes)}
+            data = {
+                "manual": list(self.manual_codes),
+                "blacklist": list(self.blacklist_codes)
+            }
             tmp_fd, tmp_path = tempfile.mkstemp(dir=self.data_dir, prefix="ats_dragon_tmp_")
             try:
                 with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
@@ -357,6 +372,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             code_str = str(code).zfill(6)
             if code_str in self.manual_codes:
                 continue # 已在手动监控中
+            if code_str in self.blacklist_codes:
+                continue # 已在黑名单中，不予挖掘
                 
             dff = safe_float(row.get('dff', 0.0))
             dff2 = safe_float(row.get('dff2', 0.0))
@@ -553,6 +570,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if code_str in self.manual_codes:
                 QMessageBox.information(self, "提示", f"代码 {code_str} 已在追踪列表中。")
                 return
+            if code_str in self.blacklist_codes:
+                self.blacklist_codes.remove(code_str)
             self.manual_codes.append(code_str)
             self._save_manual_codes()
             # 立即触发主程序重绘
@@ -626,9 +645,15 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if source.startswith("手动"):
             rm_act = menu.addAction("❌ 移出手动跟踪列表")
             rm_act.triggered.connect(lambda: self._remove_from_manual(code))
+            
+            black_act = menu.addAction("🚫 移出并加入黑名单")
+            black_act.triggered.connect(lambda: self._add_to_blacklist(code))
         else:
             add_act = menu.addAction("⭐ 转为重点手动跟踪")
             add_act.triggered.connect(lambda: self._convert_to_manual(code))
+            
+            black_act = menu.addAction("🚫 移除并加入黑名单")
+            black_act.triggered.connect(lambda: self._add_to_blacklist(code))
             
         menu.addSeparator()
         
@@ -655,6 +680,16 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             main_app = self._get_main_app()
             if main_app and hasattr(main_app, 'refresh_realtime_ui'):
                 main_app.refresh_realtime_ui()
+
+    def _add_to_blacklist(self, code):
+        if code in self.manual_codes:
+            self.manual_codes.remove(code)
+        if code not in self.blacklist_codes:
+            self.blacklist_codes.append(code)
+        self._save_manual_codes()
+        main_app = self._get_main_app()
+        if main_app and hasattr(main_app, 'refresh_realtime_ui'):
+            main_app.refresh_realtime_ui()
 
     # --- Magnetic Snap Implementation ---
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
