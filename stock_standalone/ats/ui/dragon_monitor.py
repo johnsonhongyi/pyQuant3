@@ -361,6 +361,44 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if c_item:
                 selected_code = c_item.text()
         
+        # 智能匹配短、中、长周期的 DFF 列，应对带有周期后缀（如 dff_d, dff_3d, dff_3M）或动态配置列
+        def get_period_weight(col_name):
+            col_lower = str(col_name).lower()
+            if col_lower == 'dff':
+                return 1.0
+            if col_lower == 'dff2':
+                return 5.0
+            if col_lower == 'dff3':
+                return 20.0
+            if '_' in col_lower:
+                suffix = col_lower.split('_')[-1]
+            else:
+                suffix = col_lower.replace('dff', '')
+            if not suffix:
+                return 1.0
+            try:
+                import re
+                num_part = re.findall(r'\d+', suffix)
+                num = int(num_part[0]) if num_part else 1
+                if 'y' in suffix:
+                    return num * 240.0
+                elif 'm' in suffix:
+                    return num * 20.0
+                elif 'w' in suffix:
+                    return num * 5.0
+                elif 'd' in suffix:
+                    return num * 1.0
+                return float(num)
+            except Exception:
+                return 999.0
+
+        dff_cols = [c for c in current_df.columns if 'dff' in str(c).lower()]
+        dff_cols.sort(key=get_period_weight)
+        
+        dff_col = dff_cols[0] if len(dff_cols) > 0 else 'dff'
+        dff2_col = dff_cols[1] if len(dff_cols) > 1 else 'dff2'
+        dff3_col = dff_cols[2] if len(dff_cols) > 2 else 'dff3'
+        
         # 1. 每日自动替换更新潜力股 (2D/3D加速多头完美结构挖掘)
         new_auto_list = []
         import pandas as pd
@@ -375,9 +413,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if code_str in self.blacklist_codes:
                 continue # 已在黑名单中，不予挖掘
                 
-            dff = safe_float(row.get('dff', 0.0))
-            dff2 = safe_float(row.get('dff2', 0.0))
-            dff3 = safe_float(row.get('dff3', 0.0))
+            dff = safe_float(row.get(dff_col, 0.0))
+            dff2 = safe_float(row.get(dff2_col, 0.0))
+            dff3 = safe_float(row.get(dff3_col, 0.0))
             pct = safe_float(row.get('percent', 0.0))
             rs_val = pct - sh_pct
             
@@ -412,19 +450,25 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             
             # 从主窗口传递的个股信息库解析
             main_app = self._get_main_app()
-            if main_app:
+            if main_app and hasattr(main_app, 'get_stock_name'):
                 name = main_app.get_stock_name(code)
+            else:
+                from sys_utils import resolve_stock_name
+                name = resolve_stock_name(code) or "未知个股"
                 
             if code in current_df.index:
                 row = current_df.loc[code]
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
+                row_name = str(row.get('name', '') or '').strip()
+                if row_name and row_name not in ('nan', '--', '0', ''):
+                    name = row_name
                 price = safe_float(row.get('close', row.get('price', 0.0)))
                 pct = safe_float(row.get('percent', 0.0))
                 state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
-                dff = safe_float(row.get('dff', 0.0))
-                dff2 = safe_float(row.get('dff2', 0.0))
-                dff3 = safe_float(row.get('dff3', 0.0))
+                dff = safe_float(row.get(dff_col, 0.0))
+                dff2 = safe_float(row.get(dff2_col, 0.0))
+                dff3 = safe_float(row.get(dff3_col, 0.0))
                 rs_val = pct - sh_pct
                 
                 # 共振类型判定

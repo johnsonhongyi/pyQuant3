@@ -42,6 +42,7 @@ from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
+_active_workers = set()
 
 
 def safe_float(val, default=0.0):
@@ -1160,6 +1161,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._initializing = True
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("⏱️ 多周期交叉筛选与诊断系统")
         self.setMinimumSize(1100, 700)
@@ -1208,8 +1210,13 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
         self.ui_state = self._load_state()
 
+        self._in_adjust_widths = False
         self._init_ui()
         self._apply_state()
+
+        # Connect signals after state application to avoid redundant triggers
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_selected)
+        self.table.horizontalHeader().sectionResized.connect(self._on_section_resized)
 
         # Startup Polling Favorites
         try:
@@ -1220,6 +1227,20 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.favorites_timer.start(500)
         except Exception:
             pass
+
+        self._initializing = False
+
+    def get_stock_name(self, code):
+        from sys_utils import resolve_stock_name
+        return resolve_stock_name(code) or "未知个股"
+
+    def _is_cache_valid(self, ts):
+        if ts == 0.0:
+            return False
+        is_trade = cct.get_work_time_duration()
+        if not is_trade:
+            return True
+        return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
 
     def _load_stays_on_top(self):
         # Default stays on top state
@@ -1508,8 +1529,24 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.custom_cols_menu.addAction(act)
             self.custom_col_actions[c] = act
 
-    def _on_period_changed(self):
+    def _on_strategy_selected(self):
+        if getattr(self, "_initializing", False):
+            return
         self._save_state()
+        self.run_filter(force_reload=False)
+
+    def _on_period_changed(self):
+        if getattr(self, "_initializing", False):
+            return
+        self._save_state()
+        self.run_filter(force_reload=False)
+
+    def _on_section_resized(self, logicalIndex, oldSize, newSize):
+        if getattr(self, "_in_adjust_widths", False):
+            return
+        if hasattr(self.table, "_base_widths") and logicalIndex < len(self.table._base_widths):
+            self.table._base_widths[logicalIndex] = newSize
+            QTimer.singleShot(50, self._adjust_column_widths)
 
     def _on_custom_col_changed(self):
         self._save_state()
@@ -1564,20 +1601,81 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if not strat_config:
             return
 
-        self.lbl_status.setText("🔄 正在加载筛选数据，请稍后...")
+        if force_reload:
+            # 强制刷新：清空所有缓存和时间戳
+            self.top_now = None
+            self._top_now_cache_ts[0] = 0.0
+            if hasattr(self.engine, "lock"):
+                with self.engine.lock:
+                    self.engine._period_dfs.clear()
+            else:
+                self.engine._period_dfs.clear()
+            self._period_cache_ts.clear()
+            if hasattr(self, "_block_cache"):
+                self._block_cache.clear()
+            self.lbl_status.setText("🔄 强制刷新：正在重新获取全部数据...")
+        else:
+            # 智能缓存：检查 top_now 缓存是否过期
+            if not self._is_cache_valid(self._top_now_cache_ts[0]):
+                self.top_now = None
+                self._top_now_cache_ts[0] = 0.0
+            # 检查各周期缓存是否过期，过期则清除
+            for p in list(self._period_cache_ts.keys()):
+                if not self._is_cache_valid(self._period_cache_ts.get(p, 0.0)):
+                    self._period_cache_ts.pop(p, None)
+                    if hasattr(self.engine, "lock"):
+                        with self.engine.lock:
+                            self.engine._period_dfs.pop(p, None)
+                    else:
+                        self.engine._period_dfs.pop(p, None)
+            
+            if self.top_now is None:
+                self.lbl_status.setText("正在获取基础全市场数据...")
+            else:
+                is_trade = cct.get_work_time_duration()
+                age = int(time.time() - self._top_now_cache_ts[0])
+                trade_hint = "交易时段" if is_trade else "非交易时段"
+                self.lbl_status.setText(f"⚡ 使用内存缓存 ({trade_hint}，缓存已存在 {age}s)，开始筛选...")
+
         self.btn_run_filter_worker(strat_config, active_periods, force_reload)
 
     def btn_run_filter_worker(self, strat_config, active_periods, force_reload):
+        # Prevent starting a new thread if the previous one is still active
+        from PyQt6.sip import isdeleted
+        if hasattr(self, "worker") and self.worker is not None:
+            try:
+                if not isdeleted(self.worker) and self.worker.isRunning():
+                    logger.info("Previous worker thread is still running. Ignoring new filter request.")
+                    return
+            except RuntimeError:
+                self.worker = None
+
         # Run standard QThread worker
-        self.worker = MultiPeriodWorker(
+        worker = MultiPeriodWorker(
             self.engine, strat_config, active_periods,
             top_now=self.top_now, force_reload=force_reload,
             period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts
         )
-        self.worker.progress.connect(self.update_status)
-        self.worker.finished.connect(self._on_worker_finished)
-        self.worker.error.connect(self._on_worker_error)
-        self.worker.start()
+        self.worker = worker
+        _active_workers.add(worker)
+
+        worker.progress.connect(self.update_status)
+        worker.finished.connect(self._on_worker_finished)
+        worker.error.connect(self._on_worker_error)
+
+        def cleanup():
+            _active_workers.discard(worker)
+            if getattr(self, "worker", None) == worker:
+                self.worker = None
+            try:
+                if not isdeleted(worker):
+                    worker.deleteLater()
+            except RuntimeError:
+                pass
+
+        worker.finished.connect(cleanup)
+        worker.error.connect(cleanup)
+        worker.start()
 
     def update_status(self, text):
         self.lbl_status.setText(text)
@@ -1586,7 +1684,111 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.last_result_df = result_df
         self.last_elapsed = elapsed
         self._last_flat_df = flat_df
+        if self.worker is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(self.worker):
+                    self.top_now = self.worker.top_now  # Synchronize back top_now from background thread
+            except RuntimeError:
+                pass
         self._show_results(result_df, elapsed, flat_df)
+
+        # Automatically update Dragon Monitor if it is currently open and visible
+        if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
+            from PyQt6.sip import isdeleted
+            try:
+                if not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
+                    sh_pct = 0.0
+                    if self.top_now is not None and not self.top_now.empty:
+                        if 'sh000001' in self.top_now.index:
+                            sh_pct = float(self.top_now.loc['sh000001'].get('percent', 0.0))
+                        self.dragon_monitor_dialog.update_data(self.top_now, sh_pct)
+            except Exception as e:
+                logger.warning(f"Failed to auto-update dragon monitor: {e}")
+
+    def refresh_realtime_ui(self):
+        """Called externally to re-run filtering and update all charts/displays."""
+        self.run_filter(force_reload=False)
+
+    def closeEvent(self, event):
+        # Disconnect worker signals on close to prevent runtime crash if Dialog is deleted
+        from PyQt6.sip import isdeleted
+        if hasattr(self, "worker") and self.worker is not None:
+            try:
+                if not isdeleted(self.worker):
+                    try:
+                        self.worker.progress.disconnect(self.update_status)
+                    except Exception:
+                        pass
+                    try:
+                        self.worker.finished.disconnect(self._on_worker_finished)
+                    except Exception:
+                        pass
+                    try:
+                        self.worker.error.disconnect(self._on_worker_error)
+                    except Exception:
+                        pass
+            except RuntimeError:
+                pass
+        self._save_state()
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_column_widths()
+
+    def _adjust_column_widths(self):
+        """
+        Dynamically stretches columns to fit the viewport width when the window gets wider,
+        preserving a compact layout and user manually adjusted column widths as baseline.
+        """
+        if getattr(self, "_in_adjust_widths", False):
+            return
+        self._in_adjust_widths = True
+        try:
+            viewport_w = self.table.viewport().width()
+            col_count = self.table.columnCount()
+            if col_count <= 0 or viewport_w <= 100:
+                return
+
+            if not hasattr(self.table, "_base_widths") or len(self.table._base_widths) != col_count:
+                base_widths = []
+                for i in range(col_count):
+                    w = self.table.columnWidth(i)
+                    if w <= 0:
+                        w = 50
+                    if i == 1: # Name column default compact width
+                        w = 65
+                    base_widths.append(w)
+                self.table._base_widths = base_widths
+
+            total_base_w = sum(self.table._base_widths)
+
+            if viewport_w > total_base_w:
+                extra_w = viewport_w - total_base_w
+                # Distribute extra width to columns other than Code and Name
+                distribute_cols = []
+                for i in range(col_count):
+                    header_item = self.table.horizontalHeaderItem(i)
+                    if header_item:
+                        col_text = header_item.text()
+                        if col_text not in ("代码", "名称"):
+                            distribute_cols.append(i)
+
+                if not distribute_cols:
+                    distribute_cols = list(range(col_count))
+
+                add_w_per_col = extra_w // len(distribute_cols)
+                rem_w = extra_w % len(distribute_cols)
+
+                for idx, col_idx in enumerate(distribute_cols):
+                    add_val = add_w_per_col + (1 if idx < rem_w else 0)
+                    self.table.setColumnWidth(col_idx, self.table._base_widths[col_idx] + add_val)
+            else:
+                for i in range(col_count):
+                    self.table.setColumnWidth(i, self.table._base_widths[i])
+        finally:
+            self._in_adjust_widths = False
 
     def _on_worker_error(self, err_msg):
         self.lbl_status.setText(f"❌ 错误: {err_msg}")
@@ -1628,6 +1830,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _show_results(self, df, elapsed, flat_df=None):
         try:
             logger.debug(f"[MultiPeriodDialog] _show_results called. df empty: {df.empty if df is not None else True}, len(df): {len(df) if df is not None else 0}")
+            
+            # Backup current selection before updating the table
+            selected_code = None
+            curr_row = self.table.currentRow()
+            if curr_row >= 0:
+                c_item = self.table.item(curr_row, 0)
+                if c_item:
+                    selected_code = c_item.text().strip()
+
             self._last_selected_code = None
             if flat_df is None:
                 flat_df = self._build_flat_df(df)
@@ -1826,6 +2037,26 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self.table._first_width_applied = True
                 for idx, w in default_widths.items():
                     self.table.setColumnWidth(idx, w)
+            
+            # Read back real column widths into _base_widths cache
+            base_widths = []
+            for i in range(self.table.columnCount()):
+                w = self.table.columnWidth(i)
+                base_widths.append(w if w > 0 else default_widths.get(i, 50))
+            self.table._base_widths = base_widths
+
+            # Automatically stretch columns to utilize viewport width
+            self._adjust_column_widths()
+
+            # Restore previous row selection and prevent redundant linkage refresh
+            if selected_code:
+                for r in range(self.table.rowCount()):
+                    c_item = self.table.item(r, 0)
+                    if c_item and c_item.text().strip() == selected_code:
+                        self.table.setCurrentCell(r, 0)
+                        self._last_selected_code = selected_code
+                        break
+
             self.update_concept_ranking(filtered_df)
         except Exception as ex:
             import traceback

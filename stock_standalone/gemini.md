@@ -1,7 +1,17 @@
 ## 2026-07-18 20:00
 - [x] **修复由于多周期重命名与后缀列匹配导致龙头监控自动挖掘数据大量缺失/为空的 Bug (Fixed Missing Dragon Monitor Auto-Discovery Data)**：
     - [x] **实现 PyQt6 龙头监控列名自适应与周期排序权重匹配**：在 `ats/ui/dragon_monitor.py` 的 `update_data` 刚开始，引入了 `get_period_weight` 周期物理长度权重分析算法，动态识别带有后缀的如 `dff_d`, `dff_3d`, `dff_3M` 等动态多周期列，取代之前硬编码 `'dff'`, `'dff2'`, `'dff3'` 从而彻底修复在非 `d, w, m` 周期下由于列名不匹配导致 `dff` 返回为 0、龙头个股自动挖掘条件被完全过滤的严重缺陷。
-    - [x] **实现独立 Tkinter 龙头监控多周期动态键获取与模糊对齐**：在 `standalone_multi_period_tester.py` 的 `update_data` 方法中，获取 `_period_dfs` 时改用自适应 `list(main_app.engine._period_dfs.keys())` 获取所有已加载的动态周期，并使用模糊对齐函数 `get_dff_col` 在各周期宽表中定位 `dff` 数据，彻底根治了多周期测试器开启不同周期（如 3d, 3M）时，龙头磁吸窗口中自动挖掘的超级潜力个股数骤减或为空的工程 bug。
+    - [x] **实现独立 Tkinter 龙头监控多周期动态键获取与模糊对齐**：在 `standalone_multi_period_tester.py` 的 `update_data` 方法中，获取 `_period_dfs` 时改用自适应 `list(main_app.engine._period_dfs.keys())` 获取所有已加载的动态周期，并使用模糊对齐函数 `get_dff_col` 在各周期宽表中定位 `dff` 数据，彻底根治了多周期测试器开启不同周期（如 3d, 3M）时，龙头磁吸窗口中自动挖掘的超级潜力个股数骤减或为空 of 工程 bug。
+    - [x] **修复多周期对话框调起龙头监控时因缺失 get_stock_name 导致 AttributeError 崩溃的 Bug (Fixed Dialog Open Dragon AttributeError Crash)**：
+        - 修复了 `ats/ui/dragon_monitor.py` 中的 `_get_main_app()` 绑定 to `MultiPeriodDialog` 时直接调用 `get_stock_name` 会抛出 `AttributeError` 异常导致看板无法打开的问题。为获取名字逻辑增加了 `hasattr` 检查，并完美引入 `sys_utils.resolve_stock_name` 作为降级兜底方案，在未命中时使用 `current_df` 缓存进一步匹配。
+        - 在 `ats/ui/multi_period_dialog.py` 内部为 `MultiPeriodDialog` 补充实现了标准的 `get_stock_name` 实例方法，从源头上提供组件式的名称服务，全面消除了组件间的不良耦合和崩溃隐患。
+    - [x] **根治后台工作线程回收与窗口关闭引发的 QThread 析构崩溃 (Resolved QThread Lifetime & Deletion Crash)**：
+        - 引入 `from PyQt6.sip import isdeleted` 和 `try-except RuntimeError` 全面包裹对后台工作线程 `self.worker` 的状态检测（如 `isRunning()`）以及信号释放动作，杜绝 Python 端引用已失效壳对象的经典 Bug。
+        - 在线程完成后的 `cleanup()` 闭包函数中，主动判定当前活跃的 `self.worker` 并将其指针清空（置为 `None`），彻底切断已销毁 C++ 对象的生命线，恢复数据检索循环的绝对稳定性。
+    - [x] **完全对齐多周期筛选器 (Multi-Period Tester) PyQt6 与独立 Tk 版的缓存和启动行为**：
+        - 引入 `self._initializing` 状态屏蔽机制，移除了 `MultiPeriodDialog` 初始化构造以及控件初始回填状态时由于信号联动导致自动运行策略过滤的逻辑，实现“启动不要自动运行”。
+        - 在 `MultiPeriodDialog.run_filter` 中完整对齐了智能缓存判断，涵盖 `top_now` 行情缓存有效性验证、各周期数据缓存过期判定，并支持强制刷新（`force_reload`）时物理清空所有缓存和时间戳。
+        - 引入状态栏的多维动态缓存命中提示（如：`⚡ 使用内存缓存 (交易时段，缓存已存在 X s)`），实现状态反馈流向的完美对齐。
 
 ## 2026-07-18 19:40
 - [x] **修复主窗口最小化时 Tk 磁吸龙头窗口无法弹出的 Bug (Fixed Snap Window Pop-up Issue on Master Minimized)**：
