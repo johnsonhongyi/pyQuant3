@@ -1,3 +1,8 @@
+## 2026-07-18 11:25
+- [x] **修复 ATS 重复联动与通达信 (TDX) 频繁闪烁 Bug (Fixed Duplicate Linkage & TDX Window Flicker)**：
+    - [x] **实现高层 link_stock 500毫秒 物理防抖 (Deduplicated link_stock with 500ms Cooldown)**：在 `ATSMainWindow.link_stock` 顶层入口中引入了基于内存时间戳的物理防抖保护。当在 500ms 内对同一个股票代码重复调用联动时，系统将自动短路并忽略多余请求。
+    - [x] **根治 itemClicked 与 itemSelectionChanged 并发重复联动 (Resolved Signal Duplication)**：有效过滤了由于 Qt 基础表格中同时绑定点击事件与选中变更事件所引发的并发双重信号，从根本上消除了物理联动进程被瞬间连续调用导致的外部通达信 (TDX)/同花顺 (THS) 频繁闪烁、输入按键冲突的底层痛点。
+
 ## 2026-07-18 11:05
 - [x] **实现 ATS 过滤条件与历史分组持久化及防止 Hit 测试重置 (Implemented ATS Filter Persistence & Hit Reset Prevention)**：
     - [x] **实现过滤状态本地持久化**：重构了 `_load_search_history_data` 和 `_save_search_history_data`，将最后一次选择的过滤条件 `last_query` 与历史组 `last_group` 一起写入并持久化至 `search_history.json` 配置文件。

@@ -2343,6 +2343,19 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             messagebox.showinfo("提示", "当前筛选结果中没有包含板块概念信息。")
             return
 
+        # 预构建 板块->代码列表 索引，供点击板块时 O(1) 查找（避免重复遍历卡顿）
+        concept_to_codes = {}
+        for code, row in self._last_flat_df.iterrows():
+            category = self._get_stock_category(code, row)
+            if not category:
+                continue
+            cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
+            for cat in cats:
+                norm_cat = self._normalize_concept_name(cat)
+                if norm_cat:
+                    concept_to_codes.setdefault(norm_cat, []).append(code)
+        self._concept_index = concept_to_codes
+
         if getattr(self, "_concept_win", None):
             try:
                 if self._concept_win.winfo_exists():
@@ -2460,19 +2473,26 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             messagebox.showinfo("信息", "当前无筛选数据，无法查看个股列表", parent=self)
             return
 
-        matched_stocks = []
-        for code, row in last_flat_df.iterrows():
-            category = self._get_stock_category(code, row)
-            if not category:
-                continue
-            cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
-            cats_normalized = [self._normalize_concept_name(c) for c in cats]
-            if target_concept in cats_normalized:
-                matched_stocks.append((code, row))
+        # 优先使用预构建索引（O(1)），否则回退到遍历（兜底）
+        concept_index = getattr(self, "_concept_index", None)
+        if concept_index is not None:
+            matched_codes = concept_index.get(target_concept, [])
+            matched_stocks = [(code, last_flat_df.loc[code]) for code in matched_codes if code in last_flat_df.index]
+        else:
+            matched_stocks = []
+            for code, row in last_flat_df.iterrows():
+                category = self._get_stock_category(code, row)
+                if not category:
+                    continue
+                cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
+                cats_normalized = [self._normalize_concept_name(c) for c in cats]
+                if target_concept in cats_normalized:
+                    matched_stocks.append((code, row))
 
         if not matched_stocks:
             messagebox.showinfo("信息", f"当前筛选结果中暂无属于【{target_concept}】的个股", parent=self)
             return
+
 
         if hasattr(self, "concept_win") and self.concept_win and self.concept_win.winfo_exists():
             try:
@@ -3853,23 +3873,30 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                     y = cfg.get("y", 100)
                     w = cfg.get("width", 800)
                     h = cfg.get("height", 500)
-                    self.anchor_edge = cfg.get("anchor_edge", None)
-                    self.collapsed = cfg.get("is_hidden_state", False)
-                    self.geometry(f"{w}x{h}+{x}+{y}")
-                    self.normal_geom = (x, y, w, h)
-                    topmost = cfg.get("stays_on_top", True)
-                    self.on_top_var.set(topmost)
-                    self.attributes("-topmost", topmost)
-                    if self.collapsed:
-                        self.after(500, self._collapse)
-                    return
+                    # 防御无效/未渲染/被销毁时的坏数据尺寸（例如 1x1 或极小）
+                    if w > 50 and h > 50:
+                        self.anchor_edge = cfg.get("anchor_edge", None)
+                        # 始终以展开态启动，防止因保存时折叠态导致窗口不可见
+                        self.collapsed = False
+                        self.geometry(f"{w}x{h}+{x}+{y}")
+                        self.normal_geom = (x, y, w, h)
+                        topmost = cfg.get("stays_on_top", True)
+                        self.on_top_var.set(topmost)
+                        self.attributes("-topmost", topmost)
+                        self._last_show_time = time.time()
+                        return
+                    else:
+                        if getattr(self.master, "_debug_mode", False):
+                            print(f"[DragonMonitor] Skip restoring configuration due to invalid size: {w}x{h}")
         except Exception as e:
-            print(f"[DragonMonitor] Error restoring geometry: {e}")
+            if getattr(self.master, "_debug_mode", False):
+                print(f"[DragonMonitor] Error restoring geometry: {e}")
             
         w = int(800 * self.scale_factor)
         h = int(500 * self.scale_factor)
         self.geometry(f"{w}x{h}+100+100")
         self.normal_geom = (100, 100, w, h)
+        self._last_show_time = time.time()
         
     def _save_window_states(self):
         if not self.layout_path or not self.data_dir:
@@ -3885,6 +3912,13 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 y = self.winfo_y()
                 w = self.winfo_width()
                 h = self.winfo_height()
+                
+            # 防御无效/未加载完全的 1x1 坏数据尺寸写入
+            if w <= 50 or h <= 50:
+                if getattr(self.master, "_debug_mode", False):
+                    print(f"[DragonMonitor] Skip saving due to invalid size: {w}x{h}")
+                return
+
             data = {
                 "x": x,
                 "y": y,
