@@ -1,3 +1,9 @@
+## 2026-07-18 23:55
+- [x] **加固 Alt+N 与 Alt+P 快捷键冷启动防重入与后台加载防多开机制 (Hardened Cooldown Launch Lock for Alt+N & Alt+P Hotkeys)**：
+    - [x] **实现多周期联动策略筛选器冷启动 5秒 冷却锁 (Implemented 5s Cooldown Lock for Multi-Period Tester Launch)**：在 `open_multi_period_tester` 方法中引入 `self._multi_period_starting_t` 时间戳。当用户按下 `Alt+N` 触发冷启动时，若在 5 秒的窗口期内外部进程尚未创建成功（`FindWindowW` 未能查找到句柄），系统将自动短路拦截并跳过重复拉起 `subprocess.Popen`，防止因启动缓慢高频触发导致的进程多开。
+    - [x] **实现智能操盘终端 (ATS) 冷启动 5秒 冷却锁 (Implemented 5s Cooldown Lock for ATS Terminal Launch)**：在 `open_ats_panel` 方法中引入 `self._ats_starting_t` 时间戳。对于冷启动的 `ATS_Terminal.exe` / `run_ats.py` 外部进程，5 秒内限制重复启动调用，确保在后台加载过慢时快捷键也不会造成多次实例唤起。
+    - [x] **修复多周期切换中的 isdeleted 遗留签名与增加防重入 (Replaced isdeleted with is_qt_win_alive & Added Toggle Debounce)**：在 `toggle_multi_period_tester` 方法中，将先前可能导致异常的 PyQt6 遗留 `from PyQt6.sip import isdeleted` 判定机制彻底重构成使用项目标准的 `is_qt_win_alive` 安全封装。同时为 `toggle_multi_period_tester` 补齐 300ms 物理防重入判断，避免键盘极速双击产生的信号风暴。
+
 ## 2026-07-18 23:30
 - [x] **优化龙头监控窗口宽度调节、添加多周期筛选器主窗口入口与修复 DNA 审计个股定位 Bug (Fixed Dragon Monitor Width Resize, Added Multi-Period Entrance & Fixed DNA Audit Selected Row Bug)**：
     - [x] **解除龙头监控窗口宽度限制 (Removed Dragon Monitor Minimum Width Constraint)**：将 `ats/ui/dragon_monitor.py` 中的 `self.setMinimumWidth(750)` 调整为 `250`。这解除了在极端分屏或副屏显示下无法将龙头监控窗口调节成较窄条状的限制，允许用户根据桌面空间自由收缩和调节左右宽度。
