@@ -3561,6 +3561,10 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         
         self.scale_factor = getattr(master, "scale_factor", 1.0)
         
+        # 最小尺寸：标题栏(28) + 控制栏(32) + 3行数据(75) + padding(12) = ~147px
+        _min_h = int(max(147, (28 + 32 + 75 + 12) * self.scale_factor))
+        self.minsize(400, _min_h)
+        
         # 2. 跨会话数据和布局路径 (使用统一 app_root 规避打包临时目录写保护)
         try:
             app_root = get_app_root()
@@ -3627,6 +3631,17 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         btn_add = tk.Button(control_frame, text="➕ 添加股票", command=self._on_add_manual_clicked, bg="#1a3a30", fg="#00ffaa", activebackground="#00ffaa", activeforeground="#000", font=("Microsoft YaHei", 9, "bold"), relief="flat", bd=0, padx=6)
         btn_add.pack(side="right", padx=8, pady=4)
         
+        # 右下角手把手拉伸手柄
+        self.grip = tk.Canvas(control_frame, width=14, height=14, bg="#1b1e2a", highlightthickness=0, cursor="size_nw_se")
+        self.grip.pack(side="right", anchor="se", padx=2, pady=2)
+        self.grip.create_line(12, 2, 2, 12, fill="#8e90a6", width=1)
+        self.grip.create_line(12, 5, 5, 12, fill="#8e90a6", width=1)
+        self.grip.create_line(12, 8, 8, 12, fill="#8e90a6", width=1)
+        
+        self.grip.bind("<Button-1>", self._start_resize)
+        self.grip.bind("<B1-Motion>", self._on_resize)
+        self.grip.bind("<ButtonRelease-1>", self._stop_resize)
+        
         # 表格区
         table_frame = tk.Frame(self.main_container, bg="#0c0d14")
         table_frame.pack(fill="both", expand=True, padx=4, pady=4)
@@ -3634,9 +3649,11 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.cols = ["代码", "名称", "现价", "涨幅%", "波段状态", "DFF", "DFF2", "DFF3", "大盘偏离", "共振状态", "来源"]
         
         style = ttk.Style()
+        # 仅配置 Dragon 命名空间样式，不修改全局 theme，避免影响主程序其他 ttk 控件
         style.configure("Dragon.Treeview", background="#0c0d14", fieldbackground="#0c0d14", foreground="#ffffff", rowheight=int(25 * self.scale_factor), font=("Microsoft YaHei", 9))
         style.map("Dragon.Treeview", background=[("selected", "#24293e")], foreground=[("selected", "#00ffaa")])
-        style.configure("Dragon.Treeview.Heading", background="#141622", foreground="#8e90a6", font=("Microsoft YaHei", 9, "bold"))
+        style.configure("Dragon.Treeview.Heading", background="#1b1e2a", foreground="#8e90a6", font=("Microsoft YaHei", 9, "bold"))
+        style.map("Dragon.Treeview.Heading", background=[("active", "#24293e")], foreground=[("active", "#00ffaa")])
         
         self.tree = ttk.Treeview(table_frame, columns=self.cols, show="headings", style="Dragon.Treeview")
         
@@ -3671,6 +3688,12 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 child.bind("<Button-1>", self._start_drag)
                 child.bind("<B1-Motion>", self._on_drag)
                 child.bind("<ButtonRelease-1>", self._stop_drag)
+        
+        # 上下键键盘导航联动：TreeviewSelect 覆盖鼠标点击与键盘两种场景
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        # 额外绑定 Up/Down KeyRelease 兜底，确保快速按键也能触发
+        self.tree.bind("<KeyRelease-Up>", self._on_tree_select)
+        self.tree.bind("<KeyRelease-Down>", self._on_tree_select)
                 
     def _start_drag(self, event):
         self.is_dragging = True
@@ -3743,6 +3766,30 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self.normal_geom = (win_x, win_y, win_w, win_h)
             self._save_window_states()
             
+    def _animate_geometry(self, start_w, start_h, start_x, start_y, end_w, end_h, end_x, end_y, steps=8, current_step=0, callback=None):
+        if not self.winfo_exists():
+            return
+        if current_step > steps:
+            self.geometry(f"{end_w}x{end_h}+{end_x}+{end_y}")
+            if callback:
+                callback()
+            return
+        
+        t = current_step / steps
+        t_ease = 1 - (1 - t) * (1 - t) # Ease Out Quad
+        
+        curr_w = int(start_w + (end_w - start_w) * t_ease)
+        curr_h = int(start_h + (end_h - start_h) * t_ease)
+        curr_x = int(start_x + (end_x - start_x) * t_ease)
+        curr_y = int(start_y + (end_y - start_y) * t_ease)
+        
+        self.geometry(f"{curr_w}x{curr_h}+{curr_x}+{curr_y}")
+        self.after(12, lambda: self._animate_geometry(
+            start_w, start_h, start_x, start_y, 
+            end_w, end_h, end_x, end_y, 
+            steps, current_step + 1, callback
+        ))
+
     def _collapse(self):
         if not self.anchor_edge or self.collapsed or not self.normal_geom:
             return
@@ -3750,28 +3797,74 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         self.main_container.pack_forget()
         
         if self.anchor_edge == "top":
-            self.geometry(f"{win_w}x4+{win_x}+{win_y}")
+            target_w, target_h, target_x, target_y = win_w, 4, win_x, win_y
         elif self.anchor_edge == "bottom":
-            target_y = win_y + win_h - 4
-            self.geometry(f"{win_w}x4+{win_x}+{target_y}")
+            target_w, target_h, target_x, target_y = win_w, 4, win_x, win_y + win_h - 4
         elif self.anchor_edge == "left":
-            self.geometry(f"4x{win_h}+{win_x}+{win_y}")
+            target_w, target_h, target_x, target_y = 4, win_h, win_x, win_y
         elif self.anchor_edge == "right":
-            target_x = win_x + win_w - 4
-            self.geometry(f"4x{win_h}+{target_x}+{win_y}")
+            target_w, target_h, target_x, target_y = 4, win_h, win_x + win_w - 4, win_y
             
         self.collapsed = True
         self.attributes("-alpha", 0.4)
+        
+        # 渐进平滑滑出折叠动画
+        self._animate_geometry(win_w, win_h, win_x, win_y, target_w, target_h, target_x, target_y, steps=8)
         
     def _expand(self):
         if not self.collapsed or not self.normal_geom:
             return
         win_x, win_y, win_w, win_h = self.normal_geom
-        self.attributes("-alpha", 1.0)
-        self.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
+        
+        # 获取折叠状态下的当前几何坐标作为动画起点
+        start_w = self.winfo_width()
+        start_h = self.winfo_height()
+        start_x = self.winfo_x()
+        start_y = self.winfo_y()
+        
+        # 先恢复内容区再开始动画，避免内容在动画结束才突然出现
         self.main_container.pack(fill="both", expand=True)
         self.collapsed = False
         self._last_show_time = time.time()
+        
+        # 淡入 + 展开双轨动画
+        self.attributes("-alpha", 0.0)
+        
+        def _fade_in(step=0, total=8):
+            if not self.winfo_exists():
+                return
+            alpha = step / total
+            self.attributes("-alpha", min(1.0, alpha))
+            if step < total:
+                self.after(18, lambda: _fade_in(step + 1, total))
+                
+        _fade_in()
+        self._animate_geometry(
+            start_w, start_h, start_x, start_y,
+            win_w, win_h, win_x, win_y,
+            steps=8
+        )
+
+    def _start_resize(self, event):
+        self._resize_start_w = self.winfo_width()
+        self._resize_start_h = self.winfo_height()
+        self._resize_start_x = self.winfo_pointerx()
+        self._resize_start_y = self.winfo_pointery()
+        
+    def _on_resize(self, event):
+        dx = self.winfo_pointerx() - self._resize_start_x
+        dy = self.winfo_pointery() - self._resize_start_y
+        # 最小高度：标题栏 + 控制栏 + 3行数据 + padding
+        _min_h = int(max(147, (28 + 32 + 75 + 12) * self.scale_factor))
+        new_w = max(400, self._resize_start_w + dx)
+        new_h = max(_min_h, self._resize_start_h + dy)
+        x = self.winfo_x()
+        y = self.winfo_y()
+        self.geometry(f"{new_w}x{new_h}+{x}+{y}")
+        self.normal_geom = (x, y, new_w, new_h)
+        
+    def _stop_resize(self, event):
+        self._save_window_states()
         
     def _check_hover_loop(self):
         try:
@@ -3959,6 +4052,12 @@ class TkDragonLeaderMonitor(tk.Toplevel):
             self._save_manual_codes()
             self.update_data()
             
+    def _on_tree_select(self, event=None):
+        """键盘上下键 / TreeviewSelect 统一联动入口"""
+        sel = self.tree.selection()
+        if sel:
+            self._link_code(sel[0])
+
     def _on_item_clicked(self, event):
         item = self.tree.identify_row(event.y)
         if item:
@@ -4167,11 +4266,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
                 resonance = "同步整理"
                 source = "手动添加" if code in self.manual_codes else "🔥自动挖掘"
                 
-                name = getattr(main_app, "get_stock_name", lambda c: "未知个股")(code)
-                if name == "未知个股" and hasattr(main_app, "engine") and hasattr(main_app.engine, "get_stock_name"):
-                    name = main_app.engine.get_stock_name(code)
-                if name == "未知个股" and hasattr(main_app, "engine") and hasattr(main_app.engine, "code_to_name"):
-                    name = main_app.engine.code_to_name.get(code, "未知个股")
+                from sys_utils import resolve_stock_name
+                name = resolve_stock_name(code)
                     
                 df_code_idx = int(code) if code.isdigit() else code
                 row_found = None
