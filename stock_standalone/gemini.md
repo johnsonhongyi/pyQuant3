@@ -1,3 +1,9 @@
+## 2026-07-18 11:05
+- [x] **实现 ATS 过滤条件与历史分组持久化及防止 Hit 测试重置 (Implemented ATS Filter Persistence & Hit Reset Prevention)**：
+    - [x] **实现过滤状态本地持久化**：重构了 `_load_search_history_data` 和 `_save_search_history_data`，将最后一次选择的过滤条件 `last_query` 与历史组 `last_group` 一起写入并持久化至 `search_history.json` 配置文件。
+    - [x] **实现打开自适应状态对齐恢复**：在工具栏加载和切换历史组 `_on_history_group_changed` 时，系统会自动从持久化数据中提取并比对上次退出前（或最近一次）设置的过滤条件，自动设回为当前选中的展示文本并应用过滤（`apply_filter`），彻底保证了打开和关闭前的过滤状态完全一致。
+    - [x] **根治 Hit 命中统计测试导致过滤重置的 Bug**：修复了在点击 "Hit" 按钮调用 `calculate_history_hits_ui` 重建下拉框选项时，由于直接清空 combo 数据触发 `currentIndexChanged` 信号导致 `apply_filter` 被自动误回调清空过滤的缺陷。通过引入 `blockSignals(True)` / `blockSignals(False)` 信号临时拦截机制，配合提前抓取并恢复当前活跃的 `raw_q` 文字，保证计算完命中率后过滤绝对不被重置。
+
 ## 2026-07-18 10:15
 - [x] **实现龙头监控自动挖掘黑名单拉黑与右键一键屏蔽 (Implemented Blacklist for Dragon Leader Monitor & Right-Click Mute)**：
     - [x] **升级配置数据结构并引入 blacklist_codes**：将 `ats_dragon_leaders.json` 数据结构扩展为支持并集保存 `manual` 和 `blacklist` 二元字段。重构了 `_load_dragon_data` 与 `_save_manual_codes` 以在保证原有手动监控配置无损的基础上，同步读写拉黑股票名单。

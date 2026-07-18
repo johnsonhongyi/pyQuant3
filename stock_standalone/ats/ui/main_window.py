@@ -788,6 +788,8 @@ class ATSMainWindow(QMainWindow):
         import os
         filepath = self._get_search_history_filepath()
         h1, h2, h3, h4, h5 = [], [], [], [], []
+        self.last_query = ""
+        self.last_group = "history5"
         if os.path.exists(filepath):
             try:
                 import json
@@ -827,6 +829,8 @@ class ATSMainWindow(QMainWindow):
                 h3 = [_normalize_record(r) for r in data.get("history3", [])]
                 h4 = [_normalize_record(r) for r in data.get("history4", [])]
                 h5 = [_normalize_record(r) for r in data.get("history5", [])]
+                self.last_query = data.get("last_query", "")
+                self.last_group = data.get("last_group", "history5")
             except Exception as e:
                 print(f"[ATSMainWindow] Direct history load failed: {e}")
         
@@ -844,8 +848,18 @@ class ATSMainWindow(QMainWindow):
             import json
             import os
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            
+            data = {
+                "history1": self.search_histories.get("history1", []),
+                "history2": self.search_histories.get("history2", []),
+                "history3": self.search_histories.get("history3", []),
+                "history4": self.search_histories.get("history4", []),
+                "history5": self.search_histories.get("history5", []),
+                "last_query": getattr(self, "query_expr", ""),
+                "last_group": self.history_selector.currentText() if hasattr(self, "history_selector") else "history5"
+            }
             with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(self.search_histories, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[ATSMainWindow] Direct history save failed: {e}")
 
@@ -921,7 +935,7 @@ class ATSMainWindow(QMainWindow):
         
         self.history_selector = QComboBox()
         self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
-        self.history_selector.setCurrentText("history5")
+        self.history_selector.setCurrentText(getattr(self, "last_group", "history5"))
         self.history_selector.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 60px; max-width: 65px; }")
         self.history_selector.currentTextChanged.connect(self._on_history_group_changed)
         toolbar.addWidget(self.history_selector)
@@ -1093,10 +1107,30 @@ class ATSMainWindow(QMainWindow):
         self.query_combo.blockSignals(True)
         self.query_combo.clear()
         self.query_combo.addItems(formatted_list)
-        if formatted_list:
-            self.query_combo.setCurrentIndex(0)
-        else:
-            self.query_combo.setCurrentText("")
+        
+        restored = False
+        last_q = getattr(self, "last_query", "")
+        if last_q:
+            for display_text in formatted_list:
+                real_q = ""
+                if "  |  " in display_text:
+                    real_q = display_text.split("  |  ")[-1].strip()
+                else:
+                    real_q = display_text.strip()
+                if real_q == last_q:
+                    self.query_combo.setCurrentText(display_text)
+                    restored = True
+                    break
+            if not restored:
+                self.query_combo.setEditText(last_q)
+                restored = True
+                
+        if not restored:
+            if formatted_list:
+                self.query_combo.setCurrentIndex(0)
+            else:
+                self.query_combo.setCurrentText("")
+                
         self.query_combo.blockSignals(False)
         if self.query_combo.lineEdit():
             from PyQt6.QtCore import QTimer
@@ -1154,16 +1188,26 @@ class ATSMainWindow(QMainWindow):
             new_values.append(display)
             
         current_val = self.query_combo.currentText()
+        raw_q = self._get_real_query()
+        
+        self.query_combo.blockSignals(True)
         self.query_combo.clear()
         self.query_combo.addItems(new_values)
         
-        if current_val:
-            raw_q = self._get_real_query()
+        if raw_q:
+            matched_display = None
             for idx, item in enumerate(target):
                 if item.get("query") == raw_q:
-                    new_display = self._format_history_item_local(item)
-                    self.query_combo.setCurrentText(new_display)
+                    matched_display = self._format_history_item_local(item)
                     break
+            if matched_display:
+                self.query_combo.setCurrentText(matched_display)
+            else:
+                self.query_combo.setCurrentText(current_val)
+        elif current_val:
+            self.query_combo.setCurrentText(current_val)
+            
+        self.query_combo.blockSignals(False)
                     
         if self.query_combo.lineEdit():
             from PyQt6.QtCore import QTimer
