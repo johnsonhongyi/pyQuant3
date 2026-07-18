@@ -794,7 +794,32 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 if hasattr(self.window(), '_run_dna_audit_batch'):
                     self.window()._run_dna_audit_batch(code_to_name)
                 else:
-                    print("No access to main monitor app for DNA audit:", code_to_name)
+                    # 🚀 [NEW] Packaged PyQt6 Fallback
+                    try:
+                        from backtest_feature_auditor import audit_multiple_codes
+                        from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
+                        from PyQt6.QtCore import Qt
+                        from PyQt6.QtWidgets import QMessageBox
+                        
+                        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                        QApplication.processEvents()
+                        
+                        summaries = audit_multiple_codes(
+                            list(code_to_name.keys()),
+                            end_date=None,
+                            code_to_name=code_to_name,
+                            progress_callback=None,
+                            resample='d'
+                        )
+                        if summaries:
+                            self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self.window(), end_date=None, resample='d')
+                            self._dna_audit_win.show()
+                        else:
+                            QMessageBox.warning(self, "DNA 审计", "没有产生审计数据或结论。")
+                    except Exception as e:
+                        print("No access to main monitor app for DNA audit and local fallback failed:", code_to_name, e)
+                    finally:
+                        QApplication.restoreOverrideCursor()
 
     def update_data(self, df_filtered):
         self._is_updating = True

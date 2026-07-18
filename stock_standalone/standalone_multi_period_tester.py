@@ -894,20 +894,20 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 cached = False
                 if hasattr(self.engine, "lock"):
                     with self.engine.lock:
-                        cached = (
-                            period in self.engine._period_dfs
-                            and not self.engine._period_dfs[period].empty
-                            and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
-                        )
+                        has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+                        is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+                        cached = (has_df or is_missing_cached) and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
                 else:
-                    cached = (
-                        period in self.engine._period_dfs
-                        and not self.engine._period_dfs[period].empty
-                        and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
-                    )
+                    has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+                    is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+                    cached = (has_df or is_missing_cached) and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+
                 if cached:
                     age = int(time.time() - self._period_cache_ts.get(period, 0.0))
-                    self.after(0, self._update_status, f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
+                    if period in self.engine._missing_periods:
+                        self.after(0, self._update_status, f"⚡ [{period}] 命中缓存(已知无数据，跳过) (已存在 {age}s)，跳过重新加载")
+                    else:
+                        self.after(0, self._update_status, f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
                 else:
                     self.after(0, self._update_status, f"📥 [{period}] 首次加载或缓存过期，正在读取计算...")
                     # 清除旧缓存，保证 engine 重新加载

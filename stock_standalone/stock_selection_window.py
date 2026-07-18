@@ -2306,14 +2306,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
                     code_to_name[c] = n
                     
         if code_to_name:
-            if hasattr(self.master, '_run_dna_audit_batch'):
-                # 🚀 [NEW] 支持历史截止日期审计
-                end_date = None
-                # last_td = str(cct.get_last_trade_date()).replace("-", "")
-                last_td = str(cct.get_last_trade_date())
-                if self.current_date < last_td:
-                    end_date = self.current_date
+            # 🚀 [NEW] 支持历史截止日期审计
+            end_date = None
+            last_td = str(cct.get_last_trade_date())
+            if hasattr(self, 'current_date') and self.current_date < last_td:
+                end_date = self.current_date
                 
+            if hasattr(self.master, '_run_dna_audit_batch'):
                 if hasattr(self.master, 'tk_dispatch_queue'):
                     # 🚀 [THREAD-SAFE] 通过 Tk 调度队列执行
                     _cn = dict(code_to_name)
@@ -2321,7 +2320,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
                 else:
                     self.master._run_dna_audit_batch(code_to_name, end_date=end_date)
             else:
-                logger.error("No access to main monitor app for DNA audit.")
+                # 🚀 [NEW] Packaged Tkinter Fallback
+                try:
+                    from backtest_feature_auditor import run_dna_audit_batch_tkinter
+                    tk_dispatch_queue = getattr(self.master, 'tk_dispatch_queue', None)
+                    run_dna_audit_batch_tkinter(self, code_to_name, end_date=end_date, tk_dispatch_queue=tk_dispatch_queue)
+                except Exception as e:
+                    logger.error(f"Failed to run fallback DNA audit: {e}", exc_info=True)
     
 
 

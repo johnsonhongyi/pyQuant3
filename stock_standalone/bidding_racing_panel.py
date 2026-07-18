@@ -76,6 +76,7 @@ SEARCH_HISTORY_GROUP = "bidding_racing"
 # [🚀 DNA Process Management] 全局审计进程句柄，用于窗口复用
 _DNA_AUDIT_PROCESS = None
 _DNA_AUDIT_QUEUE = None
+_QT_DNA_WIN_PERSIST = None
 
 def _get_df_all_cascading(widget) -> Optional[pd.DataFrame]:
     """
@@ -549,7 +550,50 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
         return
 
     # =========================
-    # 2. 独立进程模式（Qt fallback）
+    # 2. 本地 Qt 模式 (如果在 Qt 运行环境中)
+    # =========================
+    # 既然已经有了 QtDnaAuditReportWindow，且在 Qt 主线程中，我们可以直接在主线程中加载/显示，无需启动独立 Tk 进程！
+    from PyQt6.QtWidgets import QApplication
+    if QApplication.instance():
+        global _QT_DNA_WIN_PERSIST
+        try:
+            from backtest_feature_auditor import audit_multiple_codes
+            from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
+            from PyQt6.QtCore import Qt
+            from PyQt6.QtWidgets import QMessageBox
+
+            # 设置等待光标
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            QApplication.processEvents()
+
+            summaries = audit_multiple_codes(
+                list(code_to_name.keys()),
+                end_date=None,
+                code_to_name=code_to_name,
+                progress_callback=None,
+                resample='d'
+            )
+
+            if summaries:
+                # 寻找或者绑定窗口到 parent_widget 上，防止被 GC
+                win_parent = parent_widget if parent_widget else QApplication.activeWindow()
+                
+                # 为了防止窗口对象被垃圾回收，挂载到全局
+                _QT_DNA_WIN_PERSIST = QtDnaAuditReportWindow(summaries, parent=win_parent, end_date=None, resample='d')
+                _QT_DNA_WIN_PERSIST.show()
+                logger.info(f"🧬 Created native Qt DNA Audit Window for {len(summaries)} stocks")
+                return None
+            else:
+                QMessageBox.warning(parent_widget, "DNA 审计", "没有产生审计数据或结论。")
+                return None
+        except Exception as e:
+            logger.error(f"❌ [Racing] 本地 Qt DNA 审计执行失败: {e}", exc_info=True)
+            # 失败则不返回，继续执行下面的独立进程降级逻辑
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # =========================
+    # 3. 独立进程模式（Qt fallback）
     # =========================
     global _DNA_AUDIT_PROCESS, _DNA_AUDIT_QUEUE
     

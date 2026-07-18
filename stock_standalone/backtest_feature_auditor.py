@@ -816,6 +816,122 @@ def show_dna_audit_report_window(summaries, parent=None, end_date=None, resample
     # 使用新定义的类
     return DnaAuditReportWindow(summaries, parent=parent, end_date=end_date, resample=resample)
 
+def run_dna_audit_batch_tkinter(parent, code_to_name, end_date=None, tk_dispatch_queue=None):
+    """
+    [🚀 NEW] 跨模块通用的 Tkinter Asynchronous DNA 审计启动器
+    支持在没有 main_app 挂载或打包环境下的全自动独立自愈运行
+    """
+    from tkinter import messagebox
+    import tkinter as tk
+    from tkinter import ttk
+    import threading
+
+    # 防重入保护
+    if getattr(parent, '_dna_audit_running', False):
+        return
+    parent._dna_audit_running = True
+
+    codes = list(code_to_name.keys())
+    if not codes:
+        parent._dna_audit_running = False
+        return
+    
+    # 弹一个带进度条的提示
+    top = tk.Toplevel(parent)
+    top.withdraw() 
+    top.attributes("-alpha", 0.0) 
+    top.title("🧬 DNA 审计中...")
+    
+    # 界面美化
+    top.configure(bg='#f8f9fa')
+    content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
+    content_frame.pack(expand=True, fill='both')
+    
+    msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
+                       font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
+    msg_label.pack(pady=(0, 10))
+    
+    # 进度条
+    progress_var = tk.DoubleVar()
+    progress_bar = ttk.Progressbar(content_frame, variable=progress_var, maximum=len(codes), mode='determinate', length=280)
+    progress_bar.pack(pady=5)
+    
+    status_label = tk.Label(content_frame, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
+    status_label.pack()
+    
+    # 初始化展示位置
+    w, h = 320, 140
+    try:
+        sw = parent.winfo_screenwidth()
+        sh = parent.winfo_screenheight()
+    except Exception:
+        sw = 1920
+        sh = 1080
+    x, y = (sw - w) // 2, (sh - h) // 2
+    top.geometry(f"{w}x{h}+{x}+{y}")
+    top.attributes("-topmost", True)
+    top.deiconify() # 直接显示
+    
+    def progress_cb(curr, total, msg):
+        """跨线程进度回调"""
+        def _update():
+            try:
+                if not top.winfo_exists(): return
+                progress_var.set(curr)
+                status_label.config(text=msg)
+                if curr >= total:
+                    status_label.config(text="✅ 正在呼出报告...")
+            except tk.TclError:
+                pass # 窗体已销毁
+                
+        # 通过 dispatch 队列回传 UI 更新
+        if tk_dispatch_queue:
+            try:
+                tk_dispatch_queue.put(_update)
+            except Exception:
+                try:
+                    parent.after(0, _update)
+                except Exception:
+                    pass
+        else:
+            try:
+                parent.after(0, _update)
+            except Exception:
+                pass
+
+    def run_task():
+        try:
+            summaries = audit_multiple_codes(codes, 
+                                           end_date=end_date, 
+                                           code_to_name=code_to_name,
+                                           progress_callback=progress_cb)
+            def _show_report():
+                try:
+                    if top.winfo_exists():
+                        top.destroy()
+                except Exception:
+                    pass
+                
+                # 检查窗口是否存在且未被销毁以实现复用
+                if hasattr(parent, '_dna_audit_win') and parent._dna_audit_win and parent._dna_audit_win.winfo_exists():
+                    parent._dna_audit_win.update_report(summaries, end_date=end_date)
+                else:
+                    parent._dna_audit_win = show_dna_audit_report_window(summaries, parent=parent, end_date=end_date)
+            
+            try:
+                parent.after(0, _show_report)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                parent.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=parent)])
+            except Exception:
+                pass
+        finally:
+            parent._dna_audit_running = False
+            
+    threading.Thread(target=run_task, daemon=True).start()
+
 def main():
     parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")
     parser.add_argument("-c", "--code", type=str, help="指定股票代码，用逗号分隔 (如 000001,600000)")
