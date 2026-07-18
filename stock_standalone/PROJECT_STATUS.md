@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-> This file is the single source of truth for project progress.
+> This file is the surplus source of truth for project progress.
 > Every AI agent MUST update this file after completing a meaningful change.
 
 ---
@@ -13,28 +13,32 @@
 - [x] Added type hints to `get_today`, `to_bool` in `JohnsonUtil/commonTips.py`
 - [x] Applied comprehensive type hints to `stock_logic_utils.py`, modernizing to Python 3.9+ syntax (PEP 585)
 - [x] Fixed type hint application errors for `write_to_blkdfcf` and `counterCategory` in `JohnsonUtil/commonTips.py`
+- [x] Created `tk_gui_modules` and refactored `instock_MonitorTK.py` with modular Mixins
+- [x] Stabilized `DragonLeaderMonitorDialog` (PyQt6) and `TkDragonLeaderMonitor` (Tkinter) multi-period deviation mining filter and lifecycle management
+- [x] Implemented row focus and selection preservation in `TkDragonLeaderMonitor.update_data` to eliminate UI flickering during high-frequency refreshes
+- [x] Redesigned custom column selection checkboxes in `standalone_multi_period_tester.py` to be a dropdown Menubutton menu (⚙️ 自定义列 ▼), resolving horizontal space constraints in the toolbar.
 
 ---
 
 ## Current Focus
-- Files: `instock_MonitorTK.py`
-- Goal: 对 `instock_MonitorTK.py` 进行拆分重构，简化主文件结构。
+- Files: `standalone_multi_period_tester.py`, `ats/ui/dragon_monitor.py`
+- Goal: Maintain stability, performance, and robustness of the stock analysis and real-time monitoring terminals.
 - Tasks:
-  - [ ] 提取顶级工具函数到独立模块
-  - [ ] 将 `StockMonitorApp` 拆分为多个 Mixin 类（DPI, Window, Treeview, Data, Interaction 等）
-  - [ ] 优化导入关系，减少冗余代码
+  - [x] Optimize 2D/3D multi-period relative strength mining filter (Daily: rs_d > 0.0 + Cumulative: rs_sum >= 5.0)
+  - [x] Fix `AttributeError` by redirecting name lookup to `self.get_stock_name`
+  - [x] Implement selection preservation during Treeview refresh ticks
+  - [x] Verify atomic cross-session persistence via tempfile/replace for leaders config
 - Constraints:
-  - 保持现有功能不变 (Behavior Neutral)
-  - 尽量减少对公共接口的改动
-  - 确保模块化后的可读性与可维护性
+  - Behavior neutral on core strategy decisions, focus on reliability, latency reduction, and seamless UI response
+  - Multi-process and file locking protection under Windows
 
 ---
 
 ## Known Risks / Notes
-- `multi_replace_file_content` failed for `write_to_blkdfcf` and `counterCategory` due to content mismatch; requires careful re-targeting.
-- Linter warnings in `stock_logic_utils.py` regarding `Any` usage and deprecated types have been largely addressed, but some `pd.Series` generic type errors persist due to pandas version limitations or stub issues.
+- Avoid raising unhandled exceptions in data reload/refresh pump threads; maintain fallback values or short-circuits.
+- Treeview updates require iid mapping to preserve selection correctly across resets.
 
 ---
 
 ## Next Step (ONLY ONE)
-1. 创建 `tk_gui_modules` 目录并初步提取 DPI 和窗口管理相关的 Mixin。
+1. Monitor performance during active trading hours to ensure PyQt6 and Tkinter detail windows do not introduce frame drops or locking when handling high-volume concurrent IPC.

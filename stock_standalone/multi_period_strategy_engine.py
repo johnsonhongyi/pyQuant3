@@ -10,6 +10,8 @@ class MultiPeriodStrategyEngine:
     SUPPORTED_PERIODS = ['d', '2d', '3d', 'w', 'm', '45d', '3M']
     
     def __init__(self):
+        import threading
+        self.lock = threading.Lock()
         self._period_dfs: Dict[str, pd.DataFrame] = {}
         self._strategies: List[dict] = []
         self._missing_periods: Dict[str, str] = {}  # period -> 缺失原因
@@ -23,9 +25,10 @@ class MultiPeriodStrategyEngine:
         from JohnsonUtil import commonTips as cct
         
         # 如果已经加载过该周期，直接复用缓存
-        if period in self._period_dfs and not self._period_dfs[period].empty:
-            logger.info(f"Reusing cached data for period {period}...")
-            return self._period_dfs[period]
+        with self.lock:
+            if period in self._period_dfs and not self._period_dfs[period].empty:
+                logger.info(f"Reusing cached data for period {period}...")
+                return self._period_dfs[period]
             
         # 首次加载时清除对应周期的缺失标记
         self._missing_periods.pop(period, None)
@@ -44,7 +47,8 @@ class MultiPeriodStrategyEngine:
                 # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
                 from data_utils import complete_indicators_pipeline
                 df = complete_indicators_pipeline(df, logger, resample=period)
-                self._period_dfs[period] = df
+                with self.lock:
+                    self._period_dfs[period] = df
                 return df
             else:
                 # h5 缓存不存在，标记为缺失
@@ -58,7 +62,8 @@ class MultiPeriodStrategyEngine:
             return pd.DataFrame()
             
     def set_period_df(self, period: str, df: pd.DataFrame):
-        self._period_dfs[period] = df
+        with self.lock:
+            self._period_dfs[period] = df
         
     def evaluate_strategy(self, strategy_config: dict, active_periods: List[str] = None) -> pd.DataFrame:
         if active_periods is None:

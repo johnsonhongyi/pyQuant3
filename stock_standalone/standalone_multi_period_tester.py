@@ -92,6 +92,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.engine = MultiPeriodStrategyEngine()
         self.strategies = self.engine.load_strategies()
         self.top_now = None
+        self.dragon_monitor = None
         # 缓存时间戳：记录 top_now 和各周期数据的最后加载时间
         self._top_now_cache_ts = 0.0          # top_now 全市场数据缓存时间戳
         self._period_cache_ts: dict = {}      # {period: timestamp} 各周期数据缓存时间
@@ -166,13 +167,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.bind("<Alt-slash>", lambda e: self.show_help_documentation())
         self.bind("<Alt-question>", lambda e: self.show_help_documentation())
 
-        # ⚡ 预加载防崩溃加固：在主线程提前触发一次 get_global_stock_code() 初始化，
-        # 避免后续后台子线程 evaluate_strategy 时首次加载触发昂贵且无事件循环的网络拉取/更新
         try:
             from JSONData.sina_data import get_global_stock_code
             get_global_stock_code()
         except Exception as e:
             print(f"[MultiPeriodTester] Pre-initializing stock codes failed: {e}")
+
+
 
     def _load_state(self):
         default_state = {
@@ -287,14 +288,19 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         tk.Button(toolbar, text="▶ 运行筛选", command=lambda: self.run_filter(force_reload=False), bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
         tk.Button(toolbar, text="🔄 强制刷新", command=lambda: self.run_filter(force_reload=True), bg="#FF6F00", fg="white", font=("Arial", 9)).pack(side="left", padx=5)
             
-        self.custom_col_frame = tk.Frame(toolbar)
-        self.custom_col_frame.pack(side="left")
-        
         self.custom_col_vars = {}
         self.custom_col_widgets = {}
         self.fixed_cols = ["Rank", "dff", "dff2", "dff3"]
         self.manual_col_pool = []
         
+        # 🐉 龙头监控按钮
+        self.btn_dragon_monitor = tk.Button(
+            toolbar, text="🐉 龙头监控", 
+            command=self.open_dragon_monitor,
+            bg="#37474F", fg="white", font=("Microsoft YaHei", 9, "bold")
+        )
+        self.btn_dragon_monitor.pack(side="left", padx=5)
+
         tk.Label(toolbar, text="手动:").pack(side="left", padx=(10, 2))
         self.manual_col_entry = tk.Entry(toolbar, width=8)
         self.manual_col_entry.pack(side="left", padx=2)
@@ -304,6 +310,10 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         btn_add.pack(side="left", padx=1)
         btn_remove = tk.Button(toolbar, text="-", width=2, command=self._remove_manual_col, bg="#FFEBEE", fg="#C62828", relief="groove")
         btn_remove.pack(side="left", padx=1)
+
+        # 自定义列下拉菜单
+        self.custom_col_mbtn = tk.Menubutton(toolbar, text="⚙️ 自定义列 ▼", relief="raised", bd=1, bg="#ECEFF1")
+        self.custom_col_mbtn.pack(side="left", padx=5)
         
         # --- Bottom Statistics Bar ---
         self.stats_frame = tk.Frame(self, bd=1, relief="sunken", bg="#f0f0f0")
@@ -819,7 +829,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             # 强制刷新：清空所有缓存和时间戳
             self.top_now = None
             self._top_now_cache_ts = 0.0
-            self.engine._period_dfs.clear()
+            if hasattr(self.engine, "lock"):
+                with self.engine.lock:
+                    self.engine._period_dfs.clear()
+            else:
+                self.engine._period_dfs.clear()
             self._period_cache_ts.clear()
             if hasattr(self, "_block_cache"):
                 self._block_cache.clear()
@@ -833,7 +847,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             for p in list(self._period_cache_ts.keys()):
                 if not self._is_cache_valid(self._period_cache_ts.get(p, 0.0)):
                     self._period_cache_ts.pop(p, None)
-                    self.engine._period_dfs.pop(p, None)
+                    if hasattr(self.engine, "lock"):
+                        with self.engine.lock:
+                            self.engine._period_dfs.pop(p, None)
+                    else:
+                        self.engine._period_dfs.pop(p, None)
             if self.top_now is None:
                 self.status_var.set("正在获取基础全市场数据...")
             else:
@@ -872,18 +890,31 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self._top_now_cache_ts = time.time()
             # ── 逐周期加载 ─────────────────────────────────────
             for period in active_periods:
-                cached = (
-                    period in self.engine._period_dfs
-                    and not self.engine._period_dfs[period].empty
-                    and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
-                )
+                cached = False
+                if hasattr(self.engine, "lock"):
+                    with self.engine.lock:
+                        cached = (
+                            period in self.engine._period_dfs
+                            and not self.engine._period_dfs[period].empty
+                            and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+                        )
+                else:
+                    cached = (
+                        period in self.engine._period_dfs
+                        and not self.engine._period_dfs[period].empty
+                        and self._is_cache_valid(self._period_cache_ts.get(period, 0.0))
+                    )
                 if cached:
                     age = int(time.time() - self._period_cache_ts.get(period, 0.0))
                     self.after(0, self._update_status, f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
                 else:
                     self.after(0, self._update_status, f"📥 [{period}] 首次加载或缓存过期，正在读取计算...")
                     # 清除旧缓存，保证 engine 重新加载
-                    self.engine._period_dfs.pop(period, None)
+                    if hasattr(self.engine, "lock"):
+                        with self.engine.lock:
+                            self.engine._period_dfs.pop(period, None)
+                    else:
+                        self.engine._period_dfs.pop(period, None)
                     self.engine.load_period_data(period, self.top_now)
                     self._period_cache_ts[period] = time.time()
                     # 检查加载后是否为缺失周期，及时给用户提示
@@ -1159,8 +1190,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if not category_str:
             active_periods = [p for p, var in self.period_vars.items() if var.get()]
             for p in active_periods:
-                df_p = self.engine._period_dfs.get(p)
-                if df_p is not None and not df_p.empty and code in df_p.index:
+                df_p = None
+                if hasattr(self.engine, "lock"):
+                    with self.engine.lock:
+                        raw_df = self.engine._period_dfs.get(p)
+                        if raw_df is not None and not raw_df.empty:
+                            df_p = raw_df.copy()
+                else:
+                    raw_df = self.engine._period_dfs.get(p)
+                    if raw_df is not None and not raw_df.empty:
+                        df_p = raw_df.copy()
+                if df_p is not None and code in df_p.index:
                     row_p = df_p.loc[code]
                     if isinstance(row_p, pd.DataFrame):
                         row_p = row_p.iloc[0]
@@ -1277,12 +1317,18 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         self.stats_lbl_final.config(text=txt)
 
     def _recreate_custom_col_checkboxes(self):
-        for widget in self.custom_col_widgets.values():
-            widget.destroy()
-        self.custom_col_widgets.clear()
+        if hasattr(self, "custom_col_menu"):
+            try:
+                self.custom_col_menu.destroy()
+            except Exception:
+                pass
+        
+        self.custom_col_menu = tk.Menu(self.custom_col_mbtn, tearoff=False)
+        self.custom_col_mbtn.config(menu=self.custom_col_menu)
         
         old_vars = self.custom_col_vars.copy()
         self.custom_col_vars.clear()
+        self.custom_col_widgets.clear()
         
         all_cols = self.fixed_cols + [c for c in self.manual_col_pool if c not in self.fixed_cols]
         for c in all_cols:
@@ -1290,10 +1336,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 var = old_vars[c]
             else:
                 var = tk.BooleanVar(value=False)
-            chk = tk.Checkbutton(self.custom_col_frame, text=c, variable=var, command=self._on_custom_col_changed)
-            chk.pack(side="left", padx=1)
+            
+            self.custom_col_menu.add_checkbutton(
+                label=c,
+                variable=var,
+                command=self._on_custom_col_changed
+            )
             self.custom_col_vars[c] = var
-            self.custom_col_widgets[c] = chk
 
     def _add_manual_col(self):
         col_name = self.manual_col_entry.get().strip()
@@ -1331,6 +1380,32 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 self.query_manager.save_search_history()
             except Exception as e:
                 print(f"Error saving query history on close: {e}")
+                
+        if hasattr(self, "dragon_monitor") and self.dragon_monitor is not None:
+            try:
+                self.dragon_monitor.destroy()
+            except Exception:
+                pass
+            self.dragon_monitor = None
+
+    def open_dragon_monitor(self):
+        if hasattr(self, "dragon_monitor") and self.dragon_monitor is not None:
+            try:
+                if self.dragon_monitor.winfo_exists():
+                    self.dragon_monitor.destroy()
+                    self.dragon_monitor = None
+                    return
+            except Exception:
+                self.dragon_monitor = None
+
+        try:
+            self.dragon_monitor = TkDragonLeaderMonitor(self)
+        except Exception as e:
+            print(f"[MultiPeriodTester] Error opening dragon monitor: {e}")
+            import traceback
+            traceback.print_exc()
+            from tkinter import messagebox
+            messagebox.showerror("错误", f"无法启动龙头监控器:\n{e}")
         
         # 取消可能存在的 linkage 定时器
         if getattr(self, "_link_after_id", None):
@@ -1370,7 +1445,11 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         if hasattr(self, "engine") and self.engine is not None:
             try:
                 if hasattr(self.engine, "_period_dfs"):
-                    self.engine._period_dfs.clear()
+                    if hasattr(self.engine, "lock"):
+                        with self.engine.lock:
+                            self.engine._period_dfs.clear()
+                    else:
+                        self.engine._period_dfs.clear()
                 if hasattr(self.engine, "_missing_periods"):
                     self.engine._missing_periods.clear()
             except Exception:
@@ -1967,7 +2046,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                 
         # 同步加载未就绪的周期数据
         for period in active_periods:
-            if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
+            has_period = False
+            if hasattr(self.engine, "lock"):
+                with self.engine.lock:
+                    has_period = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+            else:
+                has_period = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+            if not has_period:
                 self.status_var.set(f"正在加载 {period} 周期特征数据...")
                 self.update_idletasks()
                 try:
@@ -1991,8 +2076,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             
         queries = []
         for period in active_periods:
-            df_p = self.engine._period_dfs.get(period)
-            if df_p is not None and not df_p.empty:
+            df_p = None
+            if hasattr(self.engine, "lock"):
+                with self.engine.lock:
+                    raw_df = self.engine._period_dfs.get(period)
+                    if raw_df is not None and not raw_df.empty:
+                        df_p = raw_df.copy()
+            else:
+                raw_df = self.engine._period_dfs.get(period)
+                if raw_df is not None and not raw_df.empty:
+                    df_p = raw_df.copy()
+            if df_p is not None:
                 # 获取该周期的指标列
                 valid_cols = set(df_p.columns)
                 if code in df_p.index:
@@ -2114,8 +2208,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             self._block_cache = {}
             active_periods = [p for p, var in self.period_vars.items() if var.get()]
             for p in active_periods:
-                df_p = self.engine._period_dfs.get(p)
-                if df_p is not None and not df_p.empty:
+                df_p = None
+                if hasattr(self.engine, "lock"):
+                    with self.engine.lock:
+                        raw_df = self.engine._period_dfs.get(p)
+                        if raw_df is not None and not raw_df.empty:
+                            df_p = raw_df.copy()
+                else:
+                    raw_df = self.engine._period_dfs.get(p)
+                    if raw_df is not None and not raw_df.empty:
+                        df_p = raw_df.copy()
+                if df_p is not None:
                     for c, r in df_p.iterrows():
                         cat = r.get('category', r.get('block', ''))
                         if pd.notna(cat) and str(cat).strip() not in ('', 'nan', '--'):
@@ -3370,6 +3473,720 @@ class MultiPeriodStrategyEditor(tk.Toplevel):
         else:
             messagebox.showerror("错误", "保存策略失败。")
 
+
+# ===== 🐉 2D/3D 加速龙头追踪器 (Tkinter版磁吸暗色高颜值) =====
+
+def safe_float(val, default=0.0):
+    try:
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return default
+        return float(val)
+    except Exception:
+        return default
+
+def get_monitor_info(hwnd):
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        monitor = user32.MonitorFromWindow(hwnd, 2) # MONITOR_DEFAULTTONEAREST = 2
+        
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD)
+            ]
+        
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return {
+                "x": info.rcWork.left,
+                "y": info.rcWork.top,
+                "width": info.rcWork.right - info.rcWork.left,
+                "height": info.rcWork.bottom - info.rcWork.top
+            }
+    except Exception as e:
+        print(f"Failed to get monitor info: {e}")
+    return None
+
+class TkDragonLeaderMonitor(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.master = master
+        self.title("🐉 2D/3D 加速龙头追踪器")
+        
+        # 1. 样式设置：无边框 & 保持最前
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg="#161822")
+        
+        self.scale_factor = getattr(master, "scale_factor", 1.0)
+        
+        # 2. 跨会话数据和布局路径 (使用统一 app_root 规避打包临时目录写保护)
+        try:
+            app_root = get_app_root()
+            self.data_dir = os.path.join(app_root, "datacsv")
+            os.makedirs(self.data_dir, exist_ok=True)
+            self.db_path = os.path.join(self.data_dir, "tester_dragon_leaders.json")
+            self.layout_path = os.path.join(self.data_dir, "tester_dragon_monitor_layout.json")
+        except Exception as e:
+            print(f"[DragonMonitor] Failed to initialize data paths: {e}")
+            self.data_dir = None
+            self.db_path = None
+            self.layout_path = None
+        
+        self.manual_codes = self._load_manual_codes()
+        self.auto_codes = []
+        self._last_row_count = 0
+        
+        self.anchor_edge = None
+        self.collapsed = False
+        self.normal_geom = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self.is_dragging = False
+        self._last_show_time = 0.0
+        
+        # 3. 初始化UI与事件绑定
+        self._init_ui()
+        self._restore_window_position()
+        self._bind_events()
+        
+        # 4. 数据刷新与鼠标悬停监测
+        self.update_data()
+        self._check_hover_loop()
+        
+    def _init_ui(self):
+        self.main_container = tk.Frame(self, bg="#161822", bd=1, relief="solid", highlightbackground="#2E2E36", highlightcolor="#2E2E36", highlightthickness=1)
+        self.main_container.pack(fill="both", expand=True)
+        
+        # 自定义标题栏
+        self.title_bar = tk.Frame(self.main_container, bg="#1b1e2a", height=int(28 * self.scale_factor))
+        self.title_bar.pack(fill="x", side="top")
+        self.title_bar.pack_propagate(False)
+        
+        title_lbl = tk.Label(self.title_bar, text="🐉 2D/3D 加速龙头追踪器 | 每日自动挖掘 + 手动跟踪", bg="#1b1e2a", fg="#00FFCC", font=("Microsoft YaHei", 9, "bold"))
+        title_lbl.pack(side="left", padx=8)
+        
+        btn_close = tk.Label(self.title_bar, text="✕", bg="#1b1e2a", fg="#8e90a6", font=("Microsoft YaHei", 10, "bold"), cursor="hand2", width=3)
+        btn_close.pack(side="right", fill="y")
+        btn_close.bind("<Enter>", lambda e: btn_close.config(bg="#E53935", fg="white"))
+        btn_close.bind("<Leave>", lambda e: btn_close.config(bg="#1b1e2a", fg="#8e90a6"))
+        btn_close.bind("<Button-1>", lambda e: self.destroy())
+        
+        # 底部控制区
+        control_frame = tk.Frame(self.main_container, bg="#1b1e2a", height=int(32 * self.scale_factor))
+        control_frame.pack(fill="x", side="bottom")
+        control_frame.pack_propagate(False)
+        
+        self.on_top_var = tk.BooleanVar(value=True)
+        chk_on_top = tk.Checkbutton(control_frame, text="置顶", variable=self.on_top_var, command=self._on_top_toggled, bg="#1b1e2a", fg="#00FFCC", selectcolor="#161822", font=("Microsoft YaHei", 9, "bold"), activebackground="#1b1e2a", activeforeground="#00FFCC")
+        chk_on_top.pack(side="left", padx=8)
+        
+        btn_add = tk.Button(control_frame, text="➕ 添加股票", command=self._on_add_manual_clicked, bg="#1a3a30", fg="#00ffaa", activebackground="#00ffaa", activeforeground="#000", font=("Microsoft YaHei", 9, "bold"), relief="flat", bd=0, padx=6)
+        btn_add.pack(side="right", padx=8, pady=4)
+        
+        # 表格区
+        table_frame = tk.Frame(self.main_container, bg="#0c0d14")
+        table_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        
+        self.cols = ["代码", "名称", "现价", "涨幅%", "波段状态", "DFF", "DFF2", "DFF3", "大盘偏离", "共振状态", "来源"]
+        
+        style = ttk.Style()
+        style.configure("Dragon.Treeview", background="#0c0d14", fieldbackground="#0c0d14", foreground="#ffffff", rowheight=int(25 * self.scale_factor), font=("Microsoft YaHei", 9))
+        style.map("Dragon.Treeview", background=[("selected", "#24293e")], foreground=[("selected", "#00ffaa")])
+        style.configure("Dragon.Treeview.Heading", background="#141622", foreground="#8e90a6", font=("Microsoft YaHei", 9, "bold"))
+        
+        self.tree = ttk.Treeview(table_frame, columns=self.cols, show="headings", style="Dragon.Treeview")
+        
+        widths = [75, 85, 70, 70, 80, 65, 65, 65, 85, 100, 80]
+        for idx, col in enumerate(self.cols):
+            self.tree.heading(col, text=col, command=lambda c=col: self._sort_column(c, False))
+            self.tree.column(col, width=int(widths[idx] * self.scale_factor), anchor="center")
+            
+        vsb = tk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview, width=8, bd=0, relief="flat", bg="#141622", troughcolor="#0c0d14")
+        self.tree.configure(yscrollcommand=vsb.set)
+        
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        
+        self.tree.bind("<Double-1>", self._on_item_double_clicked)
+        self.tree.bind("<Button-1>", self._on_item_clicked)
+        self.tree.bind("<Button-3>", self._show_context_menu)
+        
+        self.tree.tag_configure("manual", background="#122518", foreground="#00FF88")
+        self.tree.tag_configure("auto_up", background="#0c0d14", foreground="#FF3333")
+        self.tree.tag_configure("auto_down", background="#0c0d14", foreground="#00E676")
+        self.tree.tag_configure("auto_normal", background="#0c0d14", foreground="#D4D4D4")
+        self.tree.tag_configure("resonance_warm", background="#1A1813", foreground="#FF8C00") # 逆市抗跌
+
+    def _bind_events(self):
+        self.title_bar.bind("<Button-1>", self._start_drag)
+        self.title_bar.bind("<B1-Motion>", self._on_drag)
+        self.title_bar.bind("<ButtonRelease-1>", self._stop_drag)
+        
+        for child in self.title_bar.winfo_children():
+            if child.cget("text") != "✕":
+                child.bind("<Button-1>", self._start_drag)
+                child.bind("<B1-Motion>", self._on_drag)
+                child.bind("<ButtonRelease-1>", self._stop_drag)
+                
+    def _start_drag(self, event):
+        self.is_dragging = True
+        self.drag_x = event.x
+        self.drag_y = event.y
+        self.anchor_edge = None
+        
+    def _on_drag(self, event):
+        x = self.winfo_x() + (event.x - self.drag_x)
+        y = self.winfo_y() + (event.y - self.drag_y)
+        self.geometry(f"+{x}+{y}")
+        
+    def _stop_drag(self, event):
+        self.is_dragging = False
+        self._detect_and_snap()
+        
+    def _detect_and_snap(self):
+        if self.collapsed:
+            return
+        monitor = get_monitor_info(self.winfo_id())
+        if monitor:
+            m_x, m_y, m_w, m_h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+        else:
+            m_x, m_y = 0, 0
+            m_w = self.winfo_screenwidth()
+            m_h = self.winfo_screenheight()
+            
+        win_x = self.winfo_x()
+        win_y = self.winfo_y()
+        win_w = self.winfo_width()
+        win_h = self.winfo_height()
+        
+        margin = 40
+        snapped = False
+        edge = None
+        target_x = win_x
+        target_y = win_y
+        
+        diff_top = abs(win_y - m_y)
+        diff_bottom = abs((win_y + win_h) - (m_y + m_h))
+        diff_left = abs(win_x - m_x)
+        diff_right = abs((win_x + win_w) - (m_x + m_w))
+        
+        min_diff = min(diff_top, diff_bottom, diff_left, diff_right)
+        if min_diff < margin:
+            if min_diff == diff_top:
+                edge = "top"
+                target_y = m_y
+                snapped = True
+            elif min_diff == diff_bottom:
+                edge = "bottom"
+                target_y = m_y + m_h - win_h
+                snapped = True
+            elif min_diff == diff_left:
+                edge = "left"
+                target_x = m_x
+                snapped = True
+            elif min_diff == diff_right:
+                edge = "right"
+                target_x = m_x + m_w - win_w
+                snapped = True
+                
+        if snapped:
+            self.anchor_edge = edge
+            self.geometry(f"{win_w}x{win_h}+{target_x}+{target_y}")
+            self.normal_geom = (target_x, target_y, win_w, win_h)
+            self._save_window_states()
+        else:
+            self.anchor_edge = None
+            self.normal_geom = (win_x, win_y, win_w, win_h)
+            self._save_window_states()
+            
+    def _collapse(self):
+        if not self.anchor_edge or self.collapsed or not self.normal_geom:
+            return
+        win_x, win_y, win_w, win_h = self.normal_geom
+        self.main_container.pack_forget()
+        
+        if self.anchor_edge == "top":
+            self.geometry(f"{win_w}x4+{win_x}+{win_y}")
+        elif self.anchor_edge == "bottom":
+            target_y = win_y + win_h - 4
+            self.geometry(f"{win_w}x4+{win_x}+{target_y}")
+        elif self.anchor_edge == "left":
+            self.geometry(f"4x{win_h}+{win_x}+{win_y}")
+        elif self.anchor_edge == "right":
+            target_x = win_x + win_w - 4
+            self.geometry(f"4x{win_h}+{target_x}+{win_y}")
+            
+        self.collapsed = True
+        self.attributes("-alpha", 0.4)
+        
+    def _expand(self):
+        if not self.collapsed or not self.normal_geom:
+            return
+        win_x, win_y, win_w, win_h = self.normal_geom
+        self.attributes("-alpha", 1.0)
+        self.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
+        self.main_container.pack(fill="both", expand=True)
+        self.collapsed = False
+        self._last_show_time = time.time()
+        
+    def _check_hover_loop(self):
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+            
+        if self.is_dragging:
+            self.hover_ticks = 0
+            self.leave_ticks = 0
+            self.after(300, self._check_hover_loop)
+            return
+            
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        win_x = self.winfo_x()
+        win_y = self.winfo_y()
+        win_w = self.winfo_width()
+        win_h = self.winfo_height()
+        
+        in_window = (win_x <= pointer_x <= win_x + win_w) and (win_y <= pointer_y <= win_y + win_h)
+        
+        if self.collapsed:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:
+                    self._expand()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    if time.time() - self._last_show_time < 1.2:
+                        self.leave_ticks = 0
+                    else:
+                        self.leave_ticks += 1
+                        if self.leave_ticks >= 4:
+                            self._collapse()
+                            self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+                    
+        self.after(300, self._check_hover_loop)
+        
+    def _load_manual_codes(self):
+        try:
+            if self.db_path and os.path.exists(self.db_path):
+                with open(self.db_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return [str(x).zfill(6) for x in data if x]
+                    elif isinstance(data, dict):
+                        raw_list = data.get("manual", [])
+                        if isinstance(raw_list, list):
+                            return [str(x).zfill(6) for x in raw_list if x]
+        except Exception as e:
+            print(f"[DragonMonitor] Error loading manual codes: {e}")
+        return ["000779", "301528"]
+        
+    def _safe_replace(self, src, dst):
+        import time
+        for i in range(5):
+            try:
+                os.replace(src, dst)
+                return True
+            except PermissionError:
+                time.sleep(0.05)
+            except Exception as e:
+                raise e
+        os.replace(src, dst)
+
+    def _save_manual_codes(self):
+        if not self.db_path or not self.data_dir:
+            return
+        try:
+            import tempfile
+            data = {"manual": list(self.manual_codes)}
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.data_dir, prefix="ats_dragon_tmp_")
+            try:
+                with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                self._safe_replace(tmp_path, self.db_path)
+            except Exception as e:
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+                raise e
+        except Exception as e:
+            print(f"[DragonMonitor] Error saving manual codes atomically: {e}")
+            
+    def _restore_window_position(self):
+        try:
+            if self.layout_path and os.path.exists(self.layout_path):
+                with open(self.layout_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    x = cfg.get("x", 100)
+                    y = cfg.get("y", 100)
+                    w = cfg.get("width", 800)
+                    h = cfg.get("height", 500)
+                    self.anchor_edge = cfg.get("anchor_edge", None)
+                    self.collapsed = cfg.get("is_hidden_state", False)
+                    self.geometry(f"{w}x{h}+{x}+{y}")
+                    self.normal_geom = (x, y, w, h)
+                    topmost = cfg.get("stays_on_top", True)
+                    self.on_top_var.set(topmost)
+                    self.attributes("-topmost", topmost)
+                    if self.collapsed:
+                        self.after(500, self._collapse)
+                    return
+        except Exception as e:
+            print(f"[DragonMonitor] Error restoring geometry: {e}")
+            
+        w = int(800 * self.scale_factor)
+        h = int(500 * self.scale_factor)
+        self.geometry(f"{w}x{h}+100+100")
+        self.normal_geom = (100, 100, w, h)
+        
+    def _save_window_states(self):
+        if not self.layout_path or not self.data_dir:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            import tempfile
+            if self.collapsed and self.normal_geom:
+                x, y, w, h = self.normal_geom
+            else:
+                x = self.winfo_x()
+                y = self.winfo_y()
+                w = self.winfo_width()
+                h = self.winfo_height()
+            data = {
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "anchor_edge": self.anchor_edge,
+                "is_hidden_state": self.collapsed,
+                "stays_on_top": self.on_top_var.get()
+            }
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.data_dir, prefix="ats_layout_tmp_")
+            try:
+                with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                self._safe_replace(tmp_path, self.layout_path)
+            except Exception as e:
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+                raise e
+        except Exception as e:
+            print(f"[DragonMonitor] Error saving layout: {e}")
+            
+    def _on_top_toggled(self):
+        top = self.on_top_var.get()
+        self.attributes("-topmost", top)
+        self._save_window_states()
+        
+    def _on_add_manual_clicked(self):
+        from tkinter import simpledialog
+        code = simpledialog.askstring("添加龙头追踪个股", "请输入6位股票代码:", parent=self)
+        if code and code.strip():
+            code_str = code.strip().zfill(6)
+            if code_str in self.manual_codes:
+                messagebox.showinfo("提示", f"代码 {code_str} 已在追踪列表中。", parent=self)
+                return
+            self.manual_codes.append(code_str)
+            self._save_manual_codes()
+            self.update_data()
+            
+    def _on_item_clicked(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self._link_code(item)
+            
+    def _on_item_double_clicked(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self._link_code(item)
+            main_app = self.master
+            if hasattr(main_app, "diagnose_stock_strategy"):
+                main_app.diagnose_stock_strategy(item)
+                
+    def _link_code(self, code):
+        if not code or not str(code).isdigit() or len(str(code)) != 6:
+            return
+        main_app = self.master
+        if hasattr(main_app, "on_code_click"):
+            main_app.on_code_click(code)
+        elif hasattr(main_app, "_do_linkage"):
+            main_app._do_linkage(code)
+            
+    def _show_context_menu(self, event):
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        vals = self.tree.item(row_id, "values")
+        if not vals or not vals[0] or not str(vals[0]).isdigit() or len(str(vals[0])) != 6:
+            return
+        self.tree.selection_set(row_id)
+        self.tree.focus(row_id)
+        code = vals[0]
+        name = vals[1].replace("⭐ ", "")
+        source = vals[10]
+        
+        menu = tk.Menu(self, tearoff=0, bg="#1a1a24", fg="#e2e2e5", activebackground="#2c2c35", activeforeground="#ffffff")
+        menu.add_command(label=f"⚡ 选中联动 ({code})", command=lambda: self._link_code(code))
+        if hasattr(self.master, "_do_linkage"):
+            menu.add_command(label=f"⚡ 发送到异动联动 ({code})", command=lambda: self.master._do_linkage(code))
+        menu.add_separator()
+        if source.startswith("手动"):
+            menu.add_command(label="❌ 移出手动跟踪列表", command=lambda: self._remove_from_manual(code))
+        else:
+            menu.add_command(label="⭐ 转为重点手动跟踪", command=lambda: self._convert_to_manual(code))
+        menu.add_separator()
+        menu.add_command(label="复制代码", command=lambda: self._copy_to_clipboard(code))
+        menu.add_command(label="复制名称", command=lambda: self._copy_to_clipboard(name))
+        menu.post(event.x_root, event.y_root)
+        
+    def _convert_to_manual(self, code):
+        if code not in self.manual_codes:
+            self.manual_codes.append(code)
+            self._save_manual_codes()
+            self.update_data()
+            
+    def _remove_from_manual(self, code):
+        if code in self.manual_codes:
+            self.manual_codes.remove(code)
+            self._save_manual_codes()
+            self.update_data()
+            
+    def _copy_to_clipboard(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        
+    def _sort_column(self, col, reverse):
+        l = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
+        def safe_sort_val(val):
+            v = val.replace("%", "").replace("+", "").strip()
+            return safe_float(v)
+        is_num = col in ("现价", "涨幅%", "DFF", "DFF2", "DFF3", "大盘偏离")
+        if is_num:
+            l.sort(key=lambda t: safe_sort_val(t[0]), reverse=reverse)
+        else:
+            l.sort(key=lambda t: t[0], reverse=reverse)
+        for index, (val, k) in enumerate(l):
+            self.tree.move(k, "", index)
+        self.tree.heading(col, command=lambda: self._sort_column(col, not reverse))
+        
+    def _show_placeholder_msg(self, msg):
+        self.tree.delete(*self.tree.get_children())
+        self.tree.insert("", "end", values=(msg, "", "", "", "", "", "", "", "", "", ""))
+        
+    def update_data(self):
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+            
+        try:
+            main_app = self.master
+            if main_app.top_now is None or not hasattr(main_app.top_now, "empty") or main_app.top_now.empty:
+                self._show_placeholder_msg("正在等待主程序行情数据加载...")
+                self.after(3000, self.update_data)
+                return
+                
+            selected_code = None
+            sel_items = self.tree.selection()
+            if sel_items:
+                selected_code = sel_items[0]
+                
+            df = main_app.top_now
+            if 'ratio' in df.columns:
+                sh_pct = df['ratio'].mean()
+            elif 'percent' in df.columns:
+                sh_pct = df['percent'].mean()
+            else:
+                sh_pct = 0.0
+                
+            # 🚀 [NEW] 提取主程序已加载的多周期特征数据缓存为 O(1) 字典，复用数据防止极其卡顿
+            dff_dict = {}
+            dff2_dict = {}
+            dff3_dict = {}
+            
+            if hasattr(main_app, "engine") and hasattr(main_app.engine, "_period_dfs"):
+                lock = getattr(main_app.engine, "lock", None)
+                
+                # ── 日线特征 ──
+                df_d = None
+                if lock:
+                    with lock:
+                        raw_df = main_app.engine._period_dfs.get('d')
+                        if raw_df is not None and not raw_df.empty:
+                            df_d = raw_df.copy()
+                else:
+                    raw_df = main_app.engine._period_dfs.get('d')
+                    if raw_df is not None and not raw_df.empty:
+                        df_d = raw_df.copy()
+                        
+                if df_d is not None:
+                    col = 'dff' if 'dff' in df_d.columns else ('dff_d' if 'dff_d' in df_d.columns else None)
+                    if col:
+                        dff_dict = {str(k).zfill(6): v for k, v in df_d[col].to_dict().items() if k}
+                        
+                # ── 周线特征 ──
+                df_w = None
+                if lock:
+                    with lock:
+                        raw_df = main_app.engine._period_dfs.get('w')
+                        if raw_df is not None and not raw_df.empty:
+                            df_w = raw_df.copy()
+                else:
+                    raw_df = main_app.engine._period_dfs.get('w')
+                    if raw_df is not None and not raw_df.empty:
+                        df_w = raw_df.copy()
+                        
+                if df_w is not None:
+                    col = 'dff2' if 'dff2' in df_w.columns else ('dff' if 'dff' in df_w.columns else ('dff_w' if 'dff_w' in df_w.columns else None))
+                    if col:
+                        dff2_dict = {str(k).zfill(6): v for k, v in df_w[col].to_dict().items() if k}
+                        
+                # ── 月线特征 ──
+                df_m = None
+                if lock:
+                    with lock:
+                        raw_df = main_app.engine._period_dfs.get('m')
+                        if raw_df is not None and not raw_df.empty:
+                            df_m = raw_df.copy()
+                else:
+                    raw_df = main_app.engine._period_dfs.get('m')
+                    if raw_df is not None and not raw_df.empty:
+                        df_m = raw_df.copy()
+                        
+                if df_m is not None:
+                    col = 'dff3' if 'dff3' in df_m.columns else ('dff' if 'dff' in df_m.columns else ('dff_m' if 'dff_m' in df_m.columns else None))
+                    if col:
+                        dff3_dict = {str(k).zfill(6): v for k, v in df_m[col].to_dict().items() if k}
+            
+            # 1. 自动挖掘加速个股 (复用周期缓存数据)
+            new_auto_list = []
+            for code, row in df.iterrows():
+                code_str = str(code).zfill(6)
+                if code_str in self.manual_codes:
+                    continue
+                dff = safe_float(dff_dict.get(code_str, 0.0))
+                dff2 = safe_float(dff2_dict.get(code_str, 0.0))
+                dff3 = safe_float(dff3_dict.get(code_str, 0.0))
+                pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
+                rs_val = pct - sh_pct
+                
+                is_accel = dff > 0.0 and dff2 > 0.0 and dff3 > 0.0
+                is_strong_rs = rs_val >= 2.0 and pct > 1.5
+                
+                if is_accel and is_strong_rs:
+                    new_auto_list.append((code_str, rs_val))
+                    
+            new_auto_list.sort(key=lambda x: x[1], reverse=True)
+            self.auto_codes = [c[0] for c in new_auto_list[:15]]
+            
+            # 2. 组装展示行数据 (包含手动与自动，进行保序去重以防御 Treeview 插入重复 iid 崩溃)
+            seen = set()
+            all_codes = [x for x in (list(self.manual_codes) + [c for c in self.auto_codes if c not in self.manual_codes]) if not (x in seen or seen.add(x))]
+            rows_data = []
+            for code in all_codes:
+                name = "未知个股"
+                price = 0.0
+                pct = 0.0
+                state = "平稳期"
+                
+                # 读取 2D/3D 多周期缓存指标
+                dff = safe_float(dff_dict.get(code, 0.0))
+                dff2 = safe_float(dff2_dict.get(code, 0.0))
+                dff3 = safe_float(dff3_dict.get(code, 0.0))
+                rs_val = 0.0
+                resonance = "同步整理"
+                source = "手动添加" if code in self.manual_codes else "🔥自动挖掘"
+                
+                name = getattr(main_app, "get_stock_name", lambda c: "未知个股")(code)
+                if name == "未知个股" and hasattr(main_app, "engine") and hasattr(main_app.engine, "get_stock_name"):
+                    name = main_app.engine.get_stock_name(code)
+                if name == "未知个股" and hasattr(main_app, "engine") and hasattr(main_app.engine, "code_to_name"):
+                    name = main_app.engine.code_to_name.get(code, "未知个股")
+                    
+                df_code_idx = int(code) if code.isdigit() else code
+                row_found = None
+                if code in df.index:
+                    row_found = df.loc[code]
+                elif df_code_idx in df.index:
+                    row_found = df.loc[df_code_idx]
+                    
+                if row_found is not None:
+                    if isinstance(row_found, pd.DataFrame):
+                        row_found = row_found.iloc[0]
+                    price = safe_float(row_found.get('close', row_found.get('price', 0.0)))
+                    pct = safe_float(row_found.get('ratio', row_found.get('percent', 0.0)))
+                    state = str(row_found.get('state', '持股中' if pct > 0 else '回踩中'))
+                    rs_val = pct - sh_pct
+                    
+                    if sh_pct < -0.5 and pct > 1.5 and rs_val > 2.0:
+                        resonance = "逆市抗跌"
+                    elif sh_pct > 0.5 and pct > 3.0 and dff > 1.0:
+                        resonance = "大盘共振"
+                    elif sh_pct < -1.0 and pct < -1.5:
+                        resonance = "同步走弱"
+                        
+                rows_data.append((
+                    code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source
+                ))
+                
+            existing_iids = set(self.tree.get_children())
+            for data in rows_data:
+                code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source = data
+                disp_name = f"⭐ {name}" if source.startswith("手动") else name
+                disp_pct = f"{pct:+.2f}%"
+                disp_rs = f"{rs_val:+.2f}%"
+                vals = (code, disp_name, f"{price:.2f}", disp_pct, state, f"{dff:.2f}", f"{dff2:.2f}", f"{dff3:.2f}", disp_rs, resonance, source)
+                
+                if source.startswith("手动"):
+                    tag = "manual"
+                else:
+                    if resonance == "逆市抗跌":
+                        tag = "resonance_warm"
+                    elif resonance == "大盘共振":
+                        tag = "auto_up"
+                    elif pct < 0:
+                        tag = "auto_down"
+                    else:
+                        tag = "auto_normal"
+                        
+                if code in existing_iids:
+                    self.tree.item(code, values=vals, tags=(tag,))
+                    existing_iids.remove(code)
+                else:
+                    self.tree.insert("", "end", iid=code, values=vals, tags=(tag,))
+                    
+            for old_id in existing_iids:
+                self.tree.delete(old_id)
+                
+            if selected_code and self.tree.exists(selected_code):
+                self.tree.selection_set(selected_code)
+                self.tree.focus(selected_code)
+        except Exception as e:
+            print(f"[DragonMonitor] Error in update_data: {e}")
+            
+        self.after(3000, self.update_data)
+        
+    def destroy(self):
+        self._save_window_states()
+        super().destroy()
 
 if __name__ == "__main__":
     import multiprocessing
