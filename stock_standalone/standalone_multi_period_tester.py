@@ -3538,11 +3538,22 @@ def get_monitor_info(hwnd):
         info = MONITORINFO()
         info.cbSize = ctypes.sizeof(MONITORINFO)
         if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            scale = 1.0
+            try:
+                shcore = ctypes.windll.shcore
+                dpi_x = ctypes.c_uint()
+                dpi_y = ctypes.c_uint()
+                # MDT_EFFECTIVE_DPI = 0
+                shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                scale = dpi_x.value / 96.0
+            except Exception:
+                pass
+                
             return {
-                "x": info.rcWork.left,
-                "y": info.rcWork.top,
-                "width": info.rcWork.right - info.rcWork.left,
-                "height": info.rcWork.bottom - info.rcWork.top
+                "x": int(info.rcWork.left / scale),
+                "y": int(info.rcWork.top / scale),
+                "width": int((info.rcWork.right - info.rcWork.left) / scale),
+                "height": int((info.rcWork.bottom - info.rcWork.top) / scale)
             }
     except Exception as e:
         print(f"Failed to get monitor info: {e}")
@@ -3749,7 +3760,8 @@ class TkDragonLeaderMonitor(tk.Toplevel):
     def _stop_drag(self, event):
         self.is_dragging = False
         self._detect_and_snap()
-        self._last_show_time = 0.0  # 拖拽释放吸附后，重置冷却以允许立刻折叠
+        self._last_show_time = time.time()  # 拖拽释放吸附后，重置冷却保护，防止立刻折叠
+        self._has_hovered_since_show = False  # 必须重新移入一次才允许再次折叠
         
     def _detect_and_snap(self):
         if self.collapsed:
@@ -3964,8 +3976,15 @@ class TkDragonLeaderMonitor(tk.Toplevel):
         except Exception:
             return
         
-        # 拖拽中跳过所有判断，重置所有防抖时间戳
-        if self.is_dragging or self._is_animating:
+        is_pressed = False
+        try:
+            import ctypes
+            is_pressed = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        except Exception:
+            pass
+
+        # 拖拽中或鼠标物理左键按下时跳过所有判断，重置所有防抖时间戳
+        if self.is_dragging or self._is_animating or is_pressed:
             self._hover_enter_time = None
             self._hover_leave_time = None
             self.after(200, self._check_hover_loop)
