@@ -8,12 +8,14 @@ and linkage with external terminals.
 import sys
 import os
 
-# 允许单独运行此脚本，将项目根目录加入 sys.path
+# 允许单独运行此脚本，将项目根目录加入 sys.path（打包环境下跳过工作目录切换，由 get_app_root 统一接管）
 if __name__ == "__main__":
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    os.chdir(project_root)
+    is_packaged = getattr(sys, 'frozen', False) or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, 'nuitka_version')
+    if not is_packaged:
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        os.chdir(project_root)
 
 # ---------------------------------------------
 # 防御性 MOCK：当环境没有 tk 时，动态注入 Dummy 模块，防止导入 auditor 和 utils 崩溃
@@ -1239,7 +1241,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         super().__init__(parent)
         self._initializing = True
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowTitle("⏱️ 多周期交叉筛选与诊断系统")
+        self.setWindowTitle("多周期联动策略筛选器")
         self.setMinimumSize(800, 500)
 
         # Config File Setup
@@ -3378,6 +3380,9 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
 
 if __name__ == "__main__":
     import sys
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
