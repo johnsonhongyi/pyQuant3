@@ -12,7 +12,10 @@ except ImportError:
 
 import LoggerFactory
 import sys
-from gui_utils import askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin
+from gui_utils import (
+    askstring_at_parent_single, clamp_window_to_screens, get_centered_window_position_mainWin,
+    load_window_position_simple, save_window_position_simple
+)
 from stock_logic_utils import test_code_against_queries,toast_message
 
 logger = LoggerFactory.getLogger('QueryHistoryManager')
@@ -62,7 +65,7 @@ class QueryHistoryManager:
         self.search_combo5 = search_combo5
         self.deleted_stack = []  # 保存被删除的 query 记录
         self._history_changed = False  # 追踪本次打开期间是否有过修改
-        self._after_ids = []  # [NEW] 记录待处理的 after 任务 ID
+        self._after_ids = []  # [NEW] 记录待处理 of after 任务 ID
         
         # [NEW] 状态展示变量，与主程序保持一致
         self.status_var = tk.StringVar(value="准备就绪")
@@ -175,32 +178,32 @@ class QueryHistoryManager:
             
         self.editor_frame = tk.Frame(self.root)
 
-        # [NEW] 全局搜索框
-        frame_global_search = tk.Frame(self.editor_frame)
-        frame_global_search.pack(fill="x", padx=5, pady=(5, 1))
+        # [NEW] 全局搜索框 (默认隐藏)
+        self.frame_global_search = tk.Frame(self.editor_frame)
         
-        tk.Label(frame_global_search, text="🔍 全局搜索:").pack(side="left")
-        self.entry_global_search = tk.Entry(frame_global_search)
+        tk.Label(self.frame_global_search, text="🔍 全局搜索:").pack(side="left")
+        self.entry_global_search = tk.Entry(self.frame_global_search)
         self.entry_global_search.pack(side="left", padx=5, fill="x", expand=True)
         self.entry_global_search.bind("<Return>", lambda e: self.do_global_search())
-        tk.Button(frame_global_search, text="搜索所有历史", command=self.do_global_search).pack(side="left", padx=5)
+        tk.Button(self.frame_global_search, text="搜索所有历史", command=self.do_global_search).pack(side="left", padx=5)
 
-        frame_input = tk.Frame(self.editor_frame)
-        frame_input.pack(fill="x", padx=5, pady=1, expand=True)
+        self.frame_input = tk.Frame(self.editor_frame)
+        self.frame_input.pack(fill="x", padx=5, pady=1, expand=True)
 
-        tk.Label(frame_input, text="Query:").pack(side="left")
-        self.entry_query = tk.Entry(frame_input)
+        tk.Label(self.frame_input, text="Query:").pack(side="left")
+        self.entry_query = tk.Entry(self.frame_input)
         self.entry_query.pack(side="left", padx=5, fill="x", expand=True)
 
-        tk.Button(frame_input, text="测试", command=self.on_test_click).pack(side="left", padx=2)
-        tk.Button(frame_input, text="添加", command=self.add_query).pack(side="left", padx=5)
-        tk.Button(frame_input, text="使用选中", command=self.use_query).pack(side="left", padx=5)
-        tk.Button(frame_input, text="保存", command=self.save_search_history).pack(side="right", padx=5)
+        tk.Button(self.frame_input, text="测试", command=self.on_test_click).pack(side="left", padx=2)
+        tk.Button(self.frame_input, text="添加", command=self.add_query).pack(side="left", padx=5)
+        tk.Button(self.frame_input, text="使用选中", command=self.use_query).pack(side="left", padx=5)
+        tk.Button(self.frame_input, text="全局", command=self.toggle_global_search).pack(side="right", padx=5)
+        tk.Button(self.frame_input, text="保存", command=self.save_search_history).pack(side="right", padx=5)
 
         self.entry_query.bind("<Button-3>", self.on_right_click)
 
         self.combo_group = ttk.Combobox(
-            frame_input,
+            self.frame_input,
             values=["history1", "history2", "history3", "history4", "history5"],
             state="readonly", width=10
         )
@@ -298,6 +301,14 @@ class QueryHistoryManager:
         for index, (val, k) in enumerate(data_list):
             tv.move(k, '', index)
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
+
+    def toggle_global_search(self):
+        if hasattr(self, "frame_global_search") and self.frame_global_search.winfo_exists():
+            if self.frame_global_search.winfo_ismapped():
+                self.frame_global_search.pack_forget()
+            else:
+                self.frame_global_search.pack(fill="x", padx=5, pady=(5, 1), before=self.frame_input)
+                self.entry_global_search.focus_set()
 
     def do_global_search(self):
         if not hasattr(self, "entry_global_search"):

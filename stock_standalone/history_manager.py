@@ -149,31 +149,32 @@ class QueryHistoryManager:
         self.editor_frame = tk.Frame(self.root)
 
         # [NEW] 全局搜索框
-        frame_global_search = tk.Frame(self.editor_frame)
-        frame_global_search.pack(fill="x", padx=5, pady=(5, 1))
+        self.frame_global_search = tk.Frame(self.editor_frame)
+        # 默认不 pack 显示，点击“全局”按钮时向上展开
         
-        tk.Label(frame_global_search, text="🔍 全局搜索:").pack(side="left")
-        self.entry_global_search = tk.Entry(frame_global_search)
+        tk.Label(self.frame_global_search, text="🔍 全局搜索:").pack(side="left")
+        self.entry_global_search = tk.Entry(self.frame_global_search)
         self.entry_global_search.pack(side="left", padx=5, fill="x", expand=True)
         self.entry_global_search.bind("<Return>", lambda e: self.do_global_search())
-        tk.Button(frame_global_search, text="搜索所有历史", command=self.do_global_search).pack(side="left", padx=5)
+        tk.Button(self.frame_global_search, text="搜索所有历史", command=self.do_global_search).pack(side="left", padx=5)
 
-        frame_input = tk.Frame(self.editor_frame)
-        frame_input.pack(fill="x", padx=5, pady=1, expand=True)
+        self.frame_input = tk.Frame(self.editor_frame)
+        self.frame_input.pack(fill="x", padx=5, pady=1, expand=True)
 
-        tk.Label(frame_input, text="Query:").pack(side="left")
-        self.entry_query = tk.Entry(frame_input)
+        tk.Label(self.frame_input, text="Query:").pack(side="left")
+        self.entry_query = tk.Entry(self.frame_input)
         self.entry_query.pack(side="left", padx=5, fill="x", expand=True)
 
-        tk.Button(frame_input, text="测试", command=self.on_test_click).pack(side="left", padx=2)
-        tk.Button(frame_input, text="添加", command=self.add_query).pack(side="left", padx=5)
-        tk.Button(frame_input, text="使用选中", command=self.use_query).pack(side="left", padx=5)
-        tk.Button(frame_input, text="保存", command=self.save_search_history).pack(side="right", padx=5)
+        tk.Button(self.frame_input, text="测试", command=self.on_test_click).pack(side="left", padx=2)
+        tk.Button(self.frame_input, text="添加", command=self.add_query).pack(side="left", padx=5)
+        tk.Button(self.frame_input, text="使用选中", command=self.use_query).pack(side="left", padx=5)
+        tk.Button(self.frame_input, text="全局", command=self.toggle_global_search).pack(side="right", padx=5)
+        tk.Button(self.frame_input, text="保存", command=self.save_search_history).pack(side="right", padx=5)
 
         self.entry_query.bind("<Button-3>", self.on_right_click)
 
         self.combo_group = ttk.Combobox(
-            frame_input,
+            self.frame_input,
             values=["history1", "history2", "history3", "history4", "history5"],
             state="readonly", width=10
         )
@@ -265,6 +266,14 @@ class QueryHistoryManager:
             tv.move(k, '', index)
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
 
+    def toggle_global_search(self):
+        if hasattr(self, "frame_global_search") and self.frame_global_search.winfo_exists():
+            if self.frame_global_search.winfo_ismapped():
+                self.frame_global_search.pack_forget()
+            else:
+                self.frame_global_search.pack(fill="x", padx=5, pady=(5, 1), before=self.frame_input)
+                self.entry_global_search.focus_set()
+
     def do_global_search(self):
         if not hasattr(self, "entry_global_search"):
             return
@@ -305,9 +314,18 @@ class QueryHistoryManager:
         
         if x_saved is not None and y_saved is not None:
             top.geometry(f"{w}x{h}+{x_saved}+{y_saved}")
+            top._last_valid_geo = (w, h, x_saved, y_saved)
         else:
             x, y = get_centered_window_position_mainWin(self.root, w, h)
             top.geometry(f"{w}x{h}+{x}+{y}")
+            top._last_valid_geo = (w, h, x, y)
+        
+        # 监听窗口几何改变，防 1x1 脏数据，在内存中始终保持最新的 valid geometry 状态
+        def record_geometry(event):
+            if event.widget == top:
+                if event.width > 200 and event.height > 100:
+                    top._last_valid_geo = (event.width, event.height, top.winfo_x(), top.winfo_y())
+        top.bind("<Configure>", record_geometry, add="+")
         
         # 使用 ttk 样式增强
         main_frame = ttk.Frame(top, padding=5)
@@ -336,21 +354,34 @@ class QueryHistoryManager:
         tree.heading("note", text="备注", command=lambda: self.treeview_sort_column(tree, "note"))
         
         # 初始宽度与对齐
-        tree.column("id", width=int(w * 0.05), minwidth=40, anchor="center", stretch=False)
-        tree.column("group", width=int(w * 0.08), minwidth=60, anchor="center", stretch=False)
+        tree.column("id", width=int(w * 0.05), minwidth=40, anchor="center", stretch=True)
+        tree.column("group", width=int(w * 0.08), minwidth=60, anchor="center", stretch=True)
         tree.column("query", width=int(w * 0.67), minwidth=400, stretch=True)
         tree.column("note", width=int(w * 0.20), minwidth=100, stretch=True)
         
         # 💡 响应式自适应
-        def adjust_search_cols(event):
-            tw = event.width - 25
+        def adjust_search_cols(event=None):
+            if not tree.winfo_exists():
+                return
+            total_width = tree.winfo_width()
+            if total_width <= 1:
+                tree.after(50, adjust_search_cols)
+                return
+            tw = total_width - 25
             if tw > 200:
-                tree.column("id", width=int(tw * 0.05))
-                tree.column("group", width=int(tw * 0.08))
+                tree.column("id", width=int(tw * 0.05), anchor="center")
+                tree.column("group", width=int(tw * 0.08), anchor="center")
                 tree.column("query", width=int(tw * 0.67))
                 tree.column("note", width=int(tw * 0.20))
         
-        top.bind("<Configure>", adjust_search_cols)
+        # 延迟触发初始宽度计算，确保能获取到渲染后的实际物理宽度
+        tree.after(50, adjust_search_cols)
+        
+        # 绑定到 main_frame 的大小变动事件，只在主容器发生尺寸缩放时重新调整列宽
+        def on_frame_resize(event):
+            if event.widget == main_frame:
+                adjust_search_cols()
+        main_frame.bind("<Configure>", on_frame_resize)
 
         # 滚动条
         vsb = ttk.Scrollbar(main_frame, orient="vertical", command=tree.yview)
