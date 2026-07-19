@@ -1,3 +1,8 @@
+## 2026-07-19 17:25
+- [x] **修复诊断/审计弹出窗口关闭时导致主窗口和进程级联崩溃退出的严重 Bug (Fixed Sub-Dialog Close Event Crash & AttributeError)**：
+    - [x] **移除未定义方法调用**：彻底修复了个股策略诊断报告窗口 `QtCheckCodeDialog` 的 `closeEvent` 中错误地调用了 `self._save_state("FORCE_WRITE")` 这一根本不存在的方法的 Bug。该错误在关闭窗口或点击“关闭窗口”按钮时，会触发 `AttributeError: 'QtCheckCodeDialog' object has no attribute '_save_state'` 运行期未捕获异常，进而导致整个 PyQt6 事件循环和多周期联动主窗口（主进程）闪退。现已将此冗余调用安全移除。
+    - [x] **全局扫描防范隐藏隐患**：对所有 PyQt6 子 Dialog（包含 `ConceptStocksDialog`、`QueryHistoryDialog`、`QtDnaAuditReportWindow` 等）的 `closeEvent` 及关闭相关信号槽进行了全面排查，确保其不包含任何未定义的 API 或潜在崩溃点，加固了多周期独立打包及实盘运行时的环境稳定性。
+
 ## 2026-07-19 01:15
 - [x] **重构并彻底修复多周期策略筛选器内外部切换与隐藏失效的 Bug (Refactored & Fixed Multi-Period Tester Toggle Visibility & Active Window Issues)**：
     - [x] **实现进程级 PID 过滤排除 (Implemented Process ID Filtering)**：在 `main_window.py` 和 `instock_MonitorTK.py` 的 Win32 窗口查找中，通过 `GetWindowThreadProcessId` 获取 `hwnd` 所属的 Process ID。若发现其所属进程与当前进程 ID 一致（即检测到的是内部运行的 PyQt6 QDialog），则强行在外部判定中将其排除。这彻底根治了由于窗口标题统一导致 `FindWindowW` 把内部窗口误判为外部进程并拦截后续内部 Dialog 动作的逻辑闭环漏洞。
