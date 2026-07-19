@@ -3372,7 +3372,6 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             QMessageBox.warning(self, "执行测试失败", f"表达式执行出错: {e}")
             
     def closeEvent(self, event):
-        self._save_state("FORCE_WRITE")
         if hasattr(self, "save_window_position_qt_visual"):
             self.save_window_position_qt_visual(self, self.window_name)
         super().closeEvent(event)
