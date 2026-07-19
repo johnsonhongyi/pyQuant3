@@ -1,3 +1,10 @@
+## 2026-07-19 22:00
+- [x] **修复 DNA 审计无法获取最小周期自定义数据 (dff2, dff3, Rank) 以及 Tk 闭包造成的 NameError 闪退 (Fixed DNA Audit Custom Columns Retrieval from Minimum Period & Tkinter NameError)**：
+    - [x] **实现多周期 Dialog 优先从最小周期 DataFrame 获取自定义列数据**：在 `ats/ui/multi_period_dialog.py` 的 `_run_dna_audit_batch` 中，重构了 `df_active` 检索优先级。在安全加锁保护下优先从 `self.engine._period_dfs` 中匹配勾选的最小周期（如 `resample`）DataFrame。若未命中，则再自适应 fallback 遍历其它可用周期或成员变量，解决了在多周期面板下执行 DNA 审计时无法准确获取最小周期自定义特征的缺陷。
+    - [x] **修复独立多周期测试器中的 NameError 闪退并同步最小周期数据获取**：重构了 `standalone_multi_period_tester.py` 中的 `_run_dna_audit_batch` 方法。将多层嵌套异步子线程闭包中的 `top` 局部变量变更为实例变量 `self._dna_audit_top`，彻底解决了关闭提示框或子线程进度回调时引发的 `NameError: free variable 'top' referenced before assignment in enclosing scope` 异常。同步引入相同的 `self.engine._period_dfs.get(resample)` 优先加锁提取机制，保证了自定义列的高效与正确提取。
+    - [x] **修复个股明细图表中的 DNA 审计自适应周期与本地降级获取**：在 `ats/ui/chart_widgets.py` 的 `_run_dna_audit_selected` 中，重构了周期 `resample` 的自适应提取。通过主界面 checkboxes 或 `resample` 属性智能判定当前勾选的最小活跃周期并向审计引擎透传。同步优化了本地降级 fallback 获取逻辑，同样在 `self.window().engine._period_dfs[resample_period]` 锁保护下进行优先提炼，保证了从个股明细图表调起 DNA 审计时自定义列的 100% 对齐。
+    - [x] **完整通过自检测试**：重新运行了 `test_dna_audit_custom_cols.py` 与 `test_dna_audit_gc_recovery.py` 测试脚本，100% 确认多股批量 O(1) 字典化以及垃圾回收自愈兜底机制测试通过。
+
 ## 2026-07-19 21:35
 - [x] **修复主图自适应列宽防抖回调中的 sender() 属性遮蔽引发的类型错误 (Fixed TypeError: 'StockSender' object is not callable in _on_column_resized_debounced)**：
     - [x] **引入父类 sender() 方法调用绕过**：修复了在 `trade_visualizer_qt6.py` 中由于 MainWindow 实例属性 `self.sender` 被绑定到 `StockSender` 实例从而覆盖了原有 `QObject.sender()` 方法的缺陷。将 `_on_column_resized_debounced` 内部对 `self.sender()` 的调用修改为 `super(MainWindow, self).sender()`，从而正确获取信号发送方，彻底解决了双击或调整列宽时触发的 `TypeError: 'StockSender' object is not callable` 未捕获异常。

@@ -503,7 +503,7 @@ class ATSSectorDetailDialog(QDialog):
             try:
                 p = self.parent() or self.window()
                 while p:
-                    for attr in ('flat_df', 'result_df', 'df_all', 'current_df'):
+                    for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
                         df_cand = getattr(p, attr, None)
                         if df_cand is not None and not df_cand.empty:
                             _period_data = df_cand

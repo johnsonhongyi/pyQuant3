@@ -813,6 +813,19 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 
         code_to_name = {c: n for c, n in target_items if c and c != "N/A"}
         if code_to_name:
+            # Determine the resample period (default to 'd')
+            resample_period = 'd'
+            win = self.window()
+            if win:
+                if hasattr(win, 'period_checkboxes') and win.period_checkboxes:
+                    active_periods = [p for p, chk in win.period_checkboxes.items() if chk.isChecked()]
+                    PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
+                    sorted_periods = sorted(active_periods, key=lambda x: PERIOD_ORDER.get(x, 99))
+                    if sorted_periods:
+                        resample_period = sorted_periods[0]
+                elif hasattr(win, 'resample'):
+                    resample_period = win.resample
+
             main_app = getattr(self.parent(), 'parent_app', None)
             if not main_app: main_app = getattr(self.window(), 'parent_app', None)
             if not main_app: main_app = getattr(QApplication.instance(), 'parent_app', None)
@@ -820,12 +833,12 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             if main_app and hasattr(main_app, '_run_dna_audit_batch'):
                 if hasattr(main_app, 'tk_dispatch_queue'):
                     _cn = dict(code_to_name)
-                    main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
+                    main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn, resample=resample_period))
                 else:
-                    main_app._run_dna_audit_batch(code_to_name)
+                    main_app._run_dna_audit_batch(code_to_name, resample=resample_period)
             else:
                 if hasattr(self.window(), '_run_dna_audit_batch'):
-                    self.window()._run_dna_audit_batch(code_to_name)
+                    self.window()._run_dna_audit_batch(code_to_name, resample=resample_period)
                 else:
                     # 🚀 [NEW] Packaged PyQt6 Fallback
                     try:
@@ -843,17 +856,49 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                             custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
                         except:
                             custom_cols = ['dff2', 'dff3', 'Rank']
+ 
+                        # 尝试从当前窗体的 current_df 或 parent/window 链获取 period_data
+                        _period_data = None
+                        
+                        # 优先从 engine._period_dfs[resample_period] 获取数据
+                        if win and hasattr(win, 'engine') and win.engine:
+                            with win.engine.lock:
+                                cand = win.engine._period_dfs.get(resample_period)
+                                if _has_custom(cand, custom_cols):
+                                    _period_data = cand
+                                
+                                if _period_data is None:
+                                    for p_key, cand in win.engine._period_dfs.items():
+                                        if _has_custom(cand, custom_cols):
+                                            _period_data = cand
+                                            break
+                                            
+                        if _period_data is None:
+                            _period_data = getattr(self, 'current_df', None)
+                            
+                        if _period_data is None or _period_data.empty:
+                            p = self.parent() or self.window()
+                            while p:
+                                for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df'):
+                                    df_cand = getattr(p, attr, None)
+                                    if df_cand is not None and not df_cand.empty:
+                                        _period_data = df_cand
+                                        break
+                                if _period_data is not None:
+                                    break
+                                p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
 
                         summaries = audit_multiple_codes(
                             list(code_to_name.keys()),
                             end_date=None,
                             code_to_name=code_to_name,
                             progress_callback=None,
-                            resample='d',
+                            resample=resample_period,
+                            period_data=_period_data,
                             custom_cols=custom_cols
                         )
                         if summaries:
-                            self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self.window(), end_date=None, resample='d')
+                            self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self.window(), end_date=None, resample=resample_period)
                             self._dna_audit_win.show()
                         else:
                             QMessageBox.warning(self, "DNA 审计", "没有产生审计数据或结论。")
@@ -863,6 +908,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                         QApplication.restoreOverrideCursor()
 
     def update_data(self, df_filtered):
+        self.current_df = df_filtered
         self._is_updating = True
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)

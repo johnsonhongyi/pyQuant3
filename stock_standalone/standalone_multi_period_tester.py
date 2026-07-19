@@ -1707,14 +1707,14 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             return
         
         # 弹一个带进度条的提示
-        top = tk.Toplevel(self)
-        top.withdraw() 
-        top.attributes("-alpha", 0.0) 
-        top.title("🧬 DNA 审计中...")
+        self._dna_audit_top = tk.Toplevel(self)
+        self._dna_audit_top.withdraw() 
+        self._dna_audit_top.attributes("-alpha", 0.0) 
+        self._dna_audit_top.title("🧬 DNA 审计中...")
         
         # 界面美化
-        top.configure(bg='#f8f9fa')
-        content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
+        self._dna_audit_top.configure(bg='#f8f9fa')
+        content_frame = tk.Frame(self._dna_audit_top, bg='#f8f9fa', padx=15, pady=15)
         content_frame.pack(expand=True, fill='both')
         
         msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
@@ -1734,16 +1734,16 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         x, y = (sw - w) // 2, (sh - h) // 2
-        top.geometry(f"{w}x{h}+{x}+{y}")
-        top.attributes("-topmost", True)
-        top.deiconify() # 直接显示
+        self._dna_audit_top.geometry(f"{w}x{h}+{x}+{y}")
+        self._dna_audit_top.attributes("-topmost", True)
+        self._dna_audit_top.deiconify() # 直接显示
         
         def progress_cb(curr, total, msg):
             """跨线程进度回调"""
             def _update():
                 try:
                     # 🛡️ [GUARD] 若窗口已被用户关闭，静默退出，防止 TclError: invalid command name
-                    if not top.winfo_exists(): return
+                    if not self._dna_audit_top.winfo_exists(): return
                     progress_var.set(curr)
                     status_label.config(text=msg)
                     if curr >= total:
@@ -1768,13 +1768,29 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                     return any(str(c).lower() in [x.lower() for x in df.columns] for c in cols)
 
                 df_active = None
-                for attr in ('_last_flat_df', 'last_result_df'):
-                    cand = getattr(self, attr, None)
-                    if _has_custom(cand, custom_cols):
-                        df_active = cand
-                        break
-                
-                # 兜底：top_now 是实时行情 df，必然含有自定义列
+                # 1. 优先从 engine 对应最小周期获取数据
+                if hasattr(self, 'engine') and self.engine:
+                    with self.engine.lock:
+                        cand = self.engine._period_dfs.get(resample)
+                        if _has_custom(cand, custom_cols):
+                            df_active = cand
+                        
+                        if df_active is None:
+                            # 遍历其它存在的周期 DataFrame
+                            for p_key, cand in self.engine._period_dfs.items():
+                                if _has_custom(cand, custom_cols):
+                                    df_active = cand
+                                    break
+                                    
+                # 2. 其次从成员变量中找
+                if df_active is None:
+                    for attr in ('_last_flat_df', 'last_result_df'):
+                        cand = getattr(self, attr, None)
+                        if _has_custom(cand, custom_cols):
+                            df_active = cand
+                            break
+                            
+                # 3. 兜底：top_now 是实时行情 df，必然含有自定义列
                 if df_active is None:
                     top_now_df = getattr(self, 'top_now', None)
                     if top_now_df is not None and not top_now_df.empty:
@@ -1790,8 +1806,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
                                                 custom_cols=custom_cols)
                 # 切回主线程展示
                 def _show_report():
-                    if top.winfo_exists():
-                        top.destroy()
+                    if self._dna_audit_top.winfo_exists():
+                        self._dna_audit_top.destroy()
                     
                     # 🚀 [NEW] 支持窗口复用
                     if hasattr(self, '_dna_audit_win') and self._dna_audit_win and self._dna_audit_win.winfo_exists():
@@ -1803,7 +1819,7 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
             except Exception as e:
                 import traceback
                 print(traceback.format_exc())
-                self.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self)])
+                self.after(0, lambda: [self._dna_audit_top.destroy() if self._dna_audit_top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self)])
             finally:
                 self._dna_audit_running = False
                 
