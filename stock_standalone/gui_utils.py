@@ -351,16 +351,24 @@ def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str
             filename = f"scale{int(scale)}_window_config.json"
         config_file = get_conf_path(filename, base_dir)
         
-        win.update_idletasks()
-        geom = win.geometry().split('+')
-        if len(geom) < 3: return
-        size = geom[0].split('x')
-        if len(size) < 2: return
-        
-        width = int(int(size[0]) / scale)
-        height = int(int(size[1]) / scale)
-        x = int(int(geom[1]) / scale)
-        y = int(int(geom[2]) / scale)
+        # 💡 [防脏数据机制] 优先读取窗口绑定的有效几何缓存，避免在销毁时刻 win.geometry() 返回 1x1 脏数据
+        if hasattr(win, "_last_valid_geo") and getattr(win, "_last_valid_geo") is not None:
+            w_curr, h_curr, x_curr, y_curr = getattr(win, "_last_valid_geo")
+            width = int(w_curr / scale)
+            height = int(h_curr / scale)
+            x = int(x_curr / scale)
+            y = int(y_curr / scale)
+        else:
+            win.update_idletasks()
+            geom = win.geometry().split('+')
+            if len(geom) < 3: return
+            size = geom[0].split('x')
+            if len(size) < 2: return
+            
+            width = int(int(size[0]) / scale)
+            height = int(int(size[1]) / scale)
+            x = int(int(geom[1]) / scale)
+            y = int(int(geom[2]) / scale)
         
         pos = {"x": x, "y": y, "width": width, "height": height}
         
