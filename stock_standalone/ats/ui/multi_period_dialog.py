@@ -1326,6 +1326,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             pass
 
         self._initializing = False
+        
+        # 打开后自动用默认选中的最小周期触发一次筛选
+        QTimer.singleShot(6000, lambda: self.run_filter(force_reload=False))
 
     def get_stock_name(self, code):
         from sys_utils import resolve_stock_name
@@ -2382,12 +2385,39 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.lbl_status.setText("🧬 正在执行 DNA 审计，请稍后...")
             QApplication.processEvents()
             
+            # 1. 动态加载自定义列配置
+            try:
+                from JohnsonUtil import commonTips as cct
+                custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+            except:
+                custom_cols = ['dff2', 'dff3', 'Rank']
+                
+            # 2. 直接获取当前包含自定义列的 DataFrame
+            # 优先级: flat_df > result_df > df_all > top_now (实时行情，必含自定义列)
+            def _has_custom(df, cols):
+                if df is None or df.empty: return False
+                return any(str(c).lower() in [x.lower() for x in df.columns] for c in cols)
+
+            df_active = None
+            for attr in ('_last_flat_df', 'last_result_df'):
+                cand = getattr(self, attr, None)
+                if _has_custom(cand, custom_cols):
+                    df_active = cand
+                    break
+            # 兜底：top_now 是实时行情 df，必然含有自定义列
+            if df_active is None:
+                top = getattr(self, 'top_now', None)
+                if top is not None and not top.empty:
+                    df_active = top
+                
             summaries = audit_multiple_codes(
                 list(code_to_name.keys()),
                 end_date=end_date,
                 code_to_name=code_to_name,
                 progress_callback=None,
-                resample=resample
+                resample=resample,
+                period_data=df_active,
+                custom_cols=custom_cols
             )
             
             # Use Qt-native DNA audit window to completely avoid Tkinter runtime and missing tk dependency issues
@@ -2899,6 +2929,11 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self.summaries = summaries
         self.end_date = end_date
         self.resample = resample
+        try:
+            from JohnsonUtil import commonTips as cct
+            self.custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+        except:
+            self.custom_cols = ['dff2', 'dff3', 'Rank']
         
         self.setWindowTitle(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只 (周期: {resample.upper()})")
         self.setMinimumSize(600, 400)
@@ -2950,18 +2985,21 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         main_layout.addWidget(splitter)
         
+        columns = ["代码", "名称", "DNA意图分", "波段涨幅%"]
+        for col in self.custom_cols:
+            columns.append(col)
+        columns.append("极限判定")
+        
         self.table = BaseATSTableWidget(self)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "DNA意图分", "波段涨幅%", "极限判定"])
+        self.table.setColumnCount(len(columns))
+        self.table.setHorizontalHeaderLabels(columns)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         
-        # 自适应列宽，前四列根据内容，极限判定拉满
+        # 自适应列宽，除最后一列极限判定拉满外，前几列均根据内容自适应
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        for i in range(len(columns) - 1):
+            self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(len(columns) - 1, QHeaderView.ResizeMode.Stretch)
         
         splitter.addWidget(self.table)
         
@@ -3019,6 +3057,9 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         sorted_sums = sorted(self.summaries, key=lambda x: x.intent_score, reverse=True)
         self.table.setRowCount(len(sorted_sums))
         
+        # 填充数据时暂时禁用排序，避免插入过程混乱
+        self.table.setSortingEnabled(False)
+        
         for idx, s in enumerate(sorted_sums):
             code_item = NumericWidgetItem(str(s.code).zfill(6))
             code_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3040,8 +3081,18 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
                 gain_item.setForeground(QBrush(QColor("#33cc5a")))
             self.table.setItem(idx, 3, gain_item)
             
+            # 动态填充自定义列
+            latest_bar = s.history[-1] if s.history else {}
+            col_offset = 4
+            for col in self.custom_cols:
+                val = latest_bar.get(col, 0)
+                custom_item = NumericWidgetItem(str(int(val)))
+                custom_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(idx, col_offset, custom_item)
+                col_offset += 1
+                
             verdict_item = QTableWidgetItem(s.verdict)
-            self.table.setItem(idx, 4, verdict_item)
+            self.table.setItem(idx, col_offset, verdict_item)
             
     def _on_selection_changed(self):
         selected_ranges = self.table.selectedRanges()
@@ -3072,11 +3123,28 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
             <h3 style='color:#a9abb6;'>[ 指标演进提炼 (Indicator Evolution) ]</h3>
             <pre style='font-family: "Consolas", monospace; font-size:11px; line-height: 1.4; color:#d1d2d6;'>
 """
-            header = f"{'日期':<12} {'Alpha':>8} {'涨幅%':>8} {'指数%':>8} {'Bol-U':>8} {'量比':>8}\n"
+            def _cjk_w(s):
+                """计算字符串视觉宽度（CJK字符占2格）"""
+                return sum(2 if '\u4e00' <= c <= '\u9fff' or '\uff00' <= c <= '\uffef' or '\u3000' <= c <= '\u303f' else 1 for c in str(s))
+            def _rjust(s, w):
+                s = str(s); pad = w - _cjk_w(s); return ' ' * max(0, pad) + s
+            def _ljust(s, w):
+                s = str(s); pad = w - _cjk_w(s); return s + ' ' * max(0, pad)
+
+            header = _ljust('日期', 12) + ' ' + _rjust('Alpha', 8) + ' ' + _rjust('涨幅%', 8) + ' ' + _rjust('指数%', 8) + ' ' + _rjust('Bol-U', 8) + ' ' + _rjust('量比', 8)
+            for col in self.custom_cols:
+                header += ' ' + _rjust(col, 8)
+            header += "\n"
+
             html_content += header
-            html_content += "-" * 60 + "\n"
+            html_content += "-" * (60 + len(self.custom_cols) * 9) + "\n"
             for h in target_s.history[-15:]:
-                html_content += f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}\n"
+                row_str = f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}"
+                for col in self.custom_cols:
+                    val = h.get(col, 0)
+                    row_str += f" {int(val):>8}"
+                row_str += "\n"
+                html_content += row_str
             
             html_content += "</pre>"
             self.detail_text.setHtml(html_content)

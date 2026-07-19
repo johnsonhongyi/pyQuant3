@@ -250,7 +250,7 @@ class AuditSummary:
         if self.divergence_days >= 2 and self.anti_drop_count == 0:
              self.suggestions.append(f"- 存在 {self.divergence_days} 天抗跌背离，符合泥沙俱下中的种子特征")
 
-def run_optimized_audit(code, start_date, end_date, resample='d'):
+def run_optimized_audit(code, start_date, end_date, resample='d', custom_dicts=None, custom_cols=None):
     # [🚀 CACHE CHECK] 极致性能：同一天 30 分钟内共用结果
     cache_key = (code, start_date, end_date, resample)
     # [🚀 UI-SAFE] 极致优化：先尝试不加锁读取
@@ -264,10 +264,19 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
             try: is_trading = cct.get_work_time()
             except: pass
             
-        if not is_trading:
-            return summary
-            
-        if time.time() - ts < 1800:
+        cache_hit = (not is_trading) or (time.time() - ts < 1800)
+        
+        if cache_hit:
+            # [FIX] 即使命中缓存，也要将最新传入的 custom_dicts 重新注入到最后一行 history
+            # 否则缓存的 summary 永远是 custom_vals=0 的旧数据
+            if custom_dicts and custom_cols and summary.history:
+                code_str = str(code).zfill(6)
+                for col in custom_cols:
+                    d = custom_dicts.get(col)
+                    if d:
+                        fresh_val = d.get(code_str, 0)
+                        if fresh_val != 0:  # 只在有真实数据时才回填
+                            summary.history[-1][col] = fresh_val
             return summary
 
     # [🚀 EXTREME SPEED] 极速模式：不再进行微睡，全力压榨 IO 与 CPU
@@ -326,11 +335,19 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
         summary = AuditSummary(code, name)
         audit_rows = []
         
+        # 预先获取当前代码在各个配置列中的数值，准备进行动态装填
+        custom_vals = {}
+        if custom_cols:
+            code_str = str(code).zfill(6)
+            for col in custom_cols:
+                d = custom_dicts.get(col) if custom_dicts else None
+                custom_vals[col] = d.get(code_str, 0) if d else 0
+        
         for idx in locs:
             dt = df.index[idx]
             row = df.iloc[idx]
             
-            # 获取 idx_pct，考虑指数缺失或 duplicates
+            # 获取 idx_pct，考虑指数缺失 or duplicates
             idx_p = 0
             if df_idx is not None and dt in df_idx.index:
                 try:
@@ -351,7 +368,7 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
                 # 处于 df 边界，通过 pct 反算
                 p = row.get('pct', 0)
                 prev_close = row['close'] / (1 + p/100.0) if p != -100 else row['close']
-
+ 
             # 统一将日期标准化为 YYYY-MM-DD 格式字符串，防止 Timestamp 传入 f-string :<12 导致格式化指令解析冲突
             if hasattr(dt, 'strftime'):
                 dt_str = dt.strftime('%Y-%m-%d')
@@ -359,8 +376,8 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
                 dt_str = normalize_dt(dt)
                 if isinstance(dt_str, str) and len(dt_str) > 10:
                     dt_str = dt_str[:10]
-
-            audit_rows.append({
+ 
+            row_data = {
                 'date': dt_str,
                 'alpha': alpha, 
                 'idx_pct': idx_p, 
@@ -371,7 +388,14 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
                 'v_ratio': row['v_ratio'], 
                 'close': row['close'], 
                 'prev_close': prev_close
-            })
+            }
+            
+            if custom_cols:
+                for col in custom_cols:
+                    # 动态装填自定义列，仅对最新一天(最后一个bar)进行真实赋值，历史回溯默认进行数据防崩安全映射
+                    row_data[col] = custom_vals[col] if idx == locs[-1] else 0
+            
+            audit_rows.append(row_data)
             
         summary.finalize(audit_rows)
         # 存入缓存
@@ -379,12 +403,84 @@ def run_optimized_audit(code, start_date, end_date, resample='d'):
             DNA_CALC_CACHE[cache_key] = (summary, time.time())
         return summary
 
-def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None, progress_callback=None, resample='d'):
+def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=None, progress_callback=None, resample='d', period_data=None, custom_cols=None):
     """
     供外部调用的批量审计接口
     :param progress_callback: 进度回调函数 f(current, total, msg)
     """
     if not codes: return []
+    
+    if custom_cols is None:
+        custom_cols = ['dff2', 'dff3', 'Rank']
+        
+    # ── [🚀 AUTO-RECOVERY] 自愈机制：如果 period_data 为空，尝试从当前活动实例中获取 ──
+    if period_data is None or (isinstance(period_data, dict) and not period_data):
+        try:
+            import gc
+            main_app = None
+            for obj in gc.get_objects():
+                obj_name = type(obj).__name__
+                if obj_name in ('StockMonitorApp', 'MultiPeriodDialog', 'StandaloneMultiPeriodTester', 'BiddingRacingRhythmPanel'):
+                    main_app = obj
+                    break
+            
+            if main_app:
+                if hasattr(main_app, 'df_all'):
+                    cur_resample = 'd'
+                    if hasattr(main_app, 'global_values'):
+                        try: cur_resample = str(main_app.global_values.getkey("resample") or 'd').lower().strip()
+                        except: pass
+                    df_active = getattr(main_app, 'df_all_res', None) if cur_resample != 'd' else getattr(main_app, 'df_all', None)
+                    if df_active is None:
+                        df_active = getattr(main_app, 'df_all', None)
+                    if df_active is not None and not df_active.empty:
+                        period_data = df_active
+                elif hasattr(main_app, 'flat_df') and main_app.flat_df is not None and not main_app.flat_df.empty:
+                    period_data = main_app.flat_df
+                elif hasattr(main_app, 'result_df') and main_app.result_df is not None and not main_app.result_df.empty:
+                    period_data = main_app.result_df
+        except Exception:
+            pass
+
+    # ── [LIMIT PERFORMANCE & DYNAMIC] 动态构建 O(1) 原生字典映射 ──
+    def _conv_val(v):
+        try:
+            if isinstance(v, (int, np.integer)):
+                return int(v)
+            f_val = float(v)
+            if f_val.is_integer():
+                return int(f_val)
+            return f_val
+        except:
+            return v
+
+    custom_dicts = {}
+    if period_data is not None:
+        if isinstance(period_data, pd.DataFrame):
+            for col in custom_cols:
+                # 模糊不区分大小写匹配列名
+                col_name = None
+                for c in period_data.columns:
+                    if str(c).lower() == col.lower():
+                        col_name = c
+                        break
+                if col_name is not None:
+                    custom_dicts[col] = {
+                        str(k).zfill(6): _conv_val(v)
+                        for k, v in period_data[col_name].to_dict().items()
+                        if k and not pd.isna(v)
+                    }
+        elif isinstance(period_data, dict):
+            # 兼容字典结构以防历史兼容问题
+            for col in custom_cols:
+                if col in period_data:
+                    df_period, col_name = period_data[col]
+                    if df_period is not None and col_name in df_period.columns:
+                        custom_dicts[col] = {
+                            str(k).zfill(6): _conv_val(v)
+                            for k, v in df_period[col_name].to_dict().items()
+                            if k and not pd.isna(v)
+                        }
     
     if start_date is None:
         # 🚀 [FIX] 起点动态对齐截止日期前25天
@@ -434,7 +530,7 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
         cpu_count = int(os.cpu_count()/2) + 2 or 4
         max_workers = min(cpu_count, cct.livestrategy_max_workers) if total > 5 else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date, resample): code for code in codes}
+            future_to_code = {executor.submit(run_optimized_audit, code, start_date, end_date, resample, custom_dicts, custom_cols): code for code in codes}
             
             res_dict = {}
             count = 0
@@ -473,6 +569,7 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         self.monitor_app = parent
         self.end_date = end_date
         self.resample = resample
+        self.custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
         
         # 🚀 [NEW] 核心逻辑：如果没有外部强制焦点，默认取审计列表第一个作为焦点
         self.focus_code = summaries[0].code if summaries else None
@@ -578,17 +675,26 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         top_frame = tk.Frame(self.paned)
         self.paned.add(top_frame, weight=2)
 
-        columns = ("code", "name", "score", "gain", "verdict")
+        columns = ["code", "name", "score", "gain"]
+        for col in self.custom_cols:
+            columns.append(col)
+        columns.append("verdict")
+        
         # 🚀 使用指定的 "Dna.Treeview" 样式
-        self.tree = ttk.Treeview(top_frame, columns=columns, show="headings", style="Dna.Treeview")
+        self.tree = ttk.Treeview(top_frame, columns=tuple(columns), show="headings", style="Dna.Treeview")
         
         # 设置表头与排序
         headers = {"code": "代码", "name": "名称", "score": "DNA意图分", "gain": "波段涨幅%", "verdict": "极限判定"}
-        for col, text in headers.items():
+        for col in self.custom_cols:
+            headers[col] = col
+            
+        for col in columns:
+            text = headers.get(col, col)
             self.tree.heading(col, text=text, command=lambda _c=col: self._sort_column(_c, False))
-            self.tree.column(col, anchor=tk.CENTER, width=int(100 * self.scale_factor))
-        
-        self.tree.column("verdict", anchor=tk.W, width=int(300 * self.scale_factor))
+            if col == "verdict":
+                self.tree.column(col, anchor=tk.W, width=int(300 * self.scale_factor))
+            else:
+                self.tree.column(col, anchor=tk.CENTER, width=int(100 * self.scale_factor))
 
         scroll_y = ttk.Scrollbar(top_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll_y.set)
@@ -611,13 +717,20 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
         # 初始按分数排序
         sorted_sums = sorted(self.summaries, key=lambda x: x.intent_score, reverse=True)
         for s in sorted_sums:
-            self.tree.insert("", tk.END, values=(
+            row_vals = [
                 str(s.code).zfill(6),
                 s.name,
                 f"{s.intent_score:.1f}",
                 f"{s.total_pct:.1f}",
-                s.verdict
-            ))
+            ]
+            # 动态插入自定义列的值，从最新的一天获取
+            latest_bar = s.history[-1] if s.history else {}
+            for col in self.custom_cols:
+                val = latest_bar.get(col, 0)
+                row_vals.append(str(int(val)))
+                
+            row_vals.append(s.verdict)
+            self.tree.insert("", tk.END, values=tuple(row_vals))
         # 自动调整列宽
         self._adjust_column_widths()
 
@@ -718,10 +831,25 @@ class DnaAuditReportWindow(tk.Toplevel, WindowMixin):
             
             # [🚀 NEW] 指标演进提炼表格
             self.txt_detail.insert(tk.END, "\n[ 指标演进提炼 (Indicator Evolution) ]\n", "title_small")
-            header = f"{'日期':<12} {'Alpha':>8} {'涨幅%':>8} {'指数%':>8} {'Bol-U':>8} {'量比':>8}\n"
+            def _cjk_w(s):
+                return sum(2 if '\u4e00' <= c <= '\u9fff' or '\uff00' <= c <= '\uffef' or '\u3000' <= c <= '\u303f' else 1 for c in str(s))
+            def _rjust(s, w):
+                s = str(s); pad = w - _cjk_w(s); return ' ' * max(0, pad) + s
+            def _ljust(s, w):
+                s = str(s); pad = w - _cjk_w(s); return s + ' ' * max(0, pad)
+
+            header = _ljust('日期', 12) + ' ' + _rjust('Alpha', 8) + ' ' + _rjust('涨幅%', 8) + ' ' + _rjust('指数%', 8) + ' ' + _rjust('Bol-U', 8) + ' ' + _rjust('量比', 8)
+            for col in self.custom_cols:
+                header += ' ' + _rjust(col, 8)
+            header += "\n"
+            
             self.txt_detail.insert(tk.END, header, "header")
             for h in target_s.history[-15:]: # 显示最近 15 天
-                row_str = f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}\n"
+                row_str = f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}"
+                for col in self.custom_cols:
+                    val = h.get(col, 0)
+                    row_str += f" {int(val):>8}"
+                row_str += "\n"
                 self.txt_detail.insert(tk.END, row_str, "row")
                 
             self.txt_detail.insert(tk.END, "\n" + "="*48 + "\n")

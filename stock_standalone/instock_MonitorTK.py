@@ -10132,11 +10132,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         def run_task():
             try:
-                # 调用批量接口
+                # 1. 动态加载自定义列配置
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+                except:
+                    custom_cols = ['dff2', 'dff3', 'Rank']
+                
+                # 2. 直接获取主监控当前最活跃的包含自定义列的 DataFrame
+                cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+                df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
+                
+                # 调用批量接口并透传当前 DataFrame 作为 period_data
                 summaries = audit_multiple_codes(codes, 
                                                end_date=end_date, 
                                                code_to_name=code_to_name,
-                                               progress_callback=progress_cb)
+                                               progress_callback=progress_cb,
+                                               resample=cur_resample,
+                                               period_data=df_active,
+                                               custom_cols=custom_cols)
                 # 切回主线程展示
                 def _show_report():
                     if top.winfo_exists():
@@ -15557,7 +15571,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._multi_period_starting_t = now
 
         # 2. 优先检测并切换内部 PyQt6 Dialog 的打开/显示/隐藏状态
-        from ats.ui.multi_period_dialog import is_qt_win_alive
         internal_win = getattr(self, '_multi_period_tester_win', None)
         if is_qt_win_alive(internal_win):
             try:
