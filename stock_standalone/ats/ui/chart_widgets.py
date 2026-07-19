@@ -837,12 +837,20 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                         QApplication.processEvents()
                         
+                        # 1. 动态加载自定义列配置
+                        try:
+                            from JohnsonUtil import commonTips as cct
+                            custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+                        except:
+                            custom_cols = ['dff2', 'dff3', 'Rank']
+
                         summaries = audit_multiple_codes(
                             list(code_to_name.keys()),
                             end_date=None,
                             code_to_name=code_to_name,
                             progress_callback=None,
-                            resample='d'
+                            resample='d',
+                            custom_cols=custom_cols
                         )
                         if summaries:
                             self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self.window(), end_date=None, resample='d')

@@ -498,12 +498,28 @@ class ATSSectorDetailDialog(QDialog):
             from PyQt6.QtCore import Qt as _Qt
             QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
             QApplication.processEvents()
+            # 尝试从 parent 链或活跃窗口中获取包含自定义列的 DataFrame
+            _period_data = None
+            try:
+                p = self.parent() or self.window()
+                while p:
+                    for attr in ('flat_df', 'result_df', 'df_all', 'current_df'):
+                        df_cand = getattr(p, attr, None)
+                        if df_cand is not None and not df_cand.empty:
+                            _period_data = df_cand
+                            break
+                    if _period_data is not None:
+                        break
+                    p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+            except Exception:
+                pass
             summaries = audit_multiple_codes(
                 list(code_to_name.keys()),
                 end_date=None,
                 code_to_name=code_to_name,
                 progress_callback=None,
-                resample='d'
+                resample='d',
+                period_data=_period_data
             )
             if summaries:
                 self._dna_audit_win = QtDnaAuditReportWindow(

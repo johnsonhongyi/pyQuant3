@@ -9155,6 +9155,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # self.stock_table.resizeColumnsToContents()  # [PERF] 移除全量测量耗时
                 self._limit_table_column_widths()
+
+                # [FIX] 冷启动首次数据加载后，_limit_table_column_widths 使用紧凑预设覆盖了
+                # 用户已持久化的 name/code 列宽（因为 saved_col_widths 此时刚刚被修复）。
+                # 在 _finalize 末尾额外调用一次持久化恢复，确保用户设定的列宽优先生效。
+                saved_sw = getattr(self, 'saved_col_widths', {}).get('stock_table', {})
+                if saved_sw:
+                    self._apply_saved_column_widths(self.stock_table, saved_sw)
+
                 self.stock_table.blockSignals(False)
                 
                 # 最后一次性精准应用板块过滤
@@ -9585,16 +9593,21 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_column_resized_debounced(self, index, old_size, new_size):
         """列宽变动防抖保存"""
-        if abs(new_size - old_size) <= 2: return # 忽略微小变动
-        
-        # 确定哪个控件触发了该事件，以区分主表和筛选树分别持久化
-        is_tree = False
-        if hasattr(self, 'filter_tree'):
-            is_tree = True
-            
+        if abs(new_size - old_size) <= 2: return  # 忽略微小变动
+
+        # [FIX] 通过 sender() 精确区分事件来源，而不是凭 filter_tree 是否存在来猜测
+        # 原代码只要 filter_tree 存在就把所有 resize 事件都写进 filter_tree，导致
+        # stock_table 的 name/code 列宽永远无法正确持久化。
+        sender_obj = super(MainWindow, self).sender()
+        is_tree = (
+            hasattr(self, 'filter_tree')
+            and sender_obj is not None
+            and sender_obj is self.filter_tree.header()
+        )
+
         if not hasattr(self, 'saved_col_widths') or self.saved_col_widths is None:
             self.saved_col_widths = {}
-            
+
         if is_tree:
             tree_widths = self.saved_col_widths.setdefault('filter_tree', {})
             h_item = self.filter_tree.headerItem()
@@ -9607,9 +9620,9 @@ class MainWindow(QMainWindow, WindowMixin):
             h_item = self.stock_table.horizontalHeaderItem(index)
             if h_item:
                 stock_widths[h_item.text()] = new_size
-            
+
         if hasattr(self, '_resize_timer'):
-            self._resize_timer.start(2000) # 2秒后执行 _save_visualizer_config
+            self._resize_timer.start(2000)  # 2秒后执行 _save_visualizer_config
 
     def on_table_cell_clicked(self, row, column):
         code_item = self.stock_table.item(row, 0)

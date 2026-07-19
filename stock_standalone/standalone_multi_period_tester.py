@@ -174,6 +174,8 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         except Exception as e:
             print(f"[MultiPeriodTester] Pre-initializing stock codes failed: {e}")
 
+        # 打开后自动用默认选中的最小周期触发一次筛选
+        self.after(6000, lambda: self.run_filter(force_reload=False))
 
 
     def _load_state(self):
@@ -1753,12 +1755,39 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
         def run_task():
             try:
-                # 调用批量接口
+                # 1. 动态加载自定义列配置
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+                except:
+                    custom_cols = ['dff2', 'dff3', 'Rank']
+                    
+                # 2. 直接获取当前包含自定义列的 DataFrame
+                def _has_custom(df, cols):
+                    if df is None or df.empty: return False
+                    return any(str(c).lower() in [x.lower() for x in df.columns] for c in cols)
+
+                df_active = None
+                for attr in ('_last_flat_df', 'last_result_df'):
+                    cand = getattr(self, attr, None)
+                    if _has_custom(cand, custom_cols):
+                        df_active = cand
+                        break
+                
+                # 兜底：top_now 是实时行情 df，必然含有自定义列
+                if df_active is None:
+                    top_now_df = getattr(self, 'top_now', None)
+                    if top_now_df is not None and not top_now_df.empty:
+                        df_active = top_now_df
+                    
+                # 调用批量接口，透传自定义数据
                 summaries = audit_multiple_codes(codes, 
-                                               end_date=end_date, 
-                                               code_to_name=code_to_name,
-                                               progress_callback=progress_cb,
-                                               resample=resample)
+                                                end_date=end_date, 
+                                                code_to_name=code_to_name,
+                                                progress_callback=progress_cb,
+                                                resample=resample,
+                                                period_data=df_active,
+                                                custom_cols=custom_cols)
                 # 切回主线程展示
                 def _show_report():
                     if top.winfo_exists():

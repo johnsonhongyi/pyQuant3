@@ -721,6 +721,8 @@ class GlobalConfig:
         self.v_reversal_pool_col = self.get_with_writeback("general", "v_reversal_pool_col", fallback=["code", "name", "phase", "structure","win", "dff", "Rank", "red", "slope", "dff3", "dff2", "entry_date", "anchor_low", "vol_ratio"], value_type="list")
         # [NEW] 人气共振面板追加自定义列，空列表则不追加。例如 ["win", "dff", "red"]
         self.popularity_col = self.get_with_writeback("general", "popularity_col", fallback=['win'], value_type="list")
+        # [NEW] DNA 审计追加自定义列配置，供 UI 与后台引擎使用，统一通过缓存 df_all 直接获取
+        self.dna_audit_custom_cols = self.get_with_writeback("general", "dna_audit_custom_cols", fallback=['dff2', 'dff3', 'Rank'], value_type="list")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",

@@ -1,3 +1,54 @@
+## 2026-07-19 21:35
+- [x] **修复主图自适应列宽防抖回调中的 sender() 属性遮蔽引发的类型错误 (Fixed TypeError: 'StockSender' object is not callable in _on_column_resized_debounced)**：
+    - [x] **引入父类 sender() 方法调用绕过**：修复了在 `trade_visualizer_qt6.py` 中由于 MainWindow 实例属性 `self.sender` 被绑定到 `StockSender` 实例从而覆盖了原有 `QObject.sender()` 方法的缺陷。将 `_on_column_resized_debounced` 内部对 `self.sender()` 的调用修改为 `super(MainWindow, self).sender()`，从而正确获取信号发送方，彻底解决了双击或调整列宽时触发的 `TypeError: 'StockSender' object is not callable` 未捕获异常。
+
+## 2026-07-19 20:58
+- [x] **修复异动联动下历史管理器主编辑窗口与全局搜索弹窗的位置持久化失效与自动列宽 (Fixed Window Position Persistence & Column Adaptation in Alert Linkage Manager)**：
+    - [x] **实现异动联动主编辑窗口位置持久化 (Alert Linkage Manager Window Persistence)**：重构了 `异动联动.py` 中的 `open_history_manager_standalone` 方法，不再硬编码 900x500 尺寸和鼠标位置。局部导入并调用了 `load_window_position_simple` 统一加载位置与坐标。同时，针对 `history_manager_window` （`Toplevel` 窗口）接入了 `<Configure>` 监听以防 `1x1` 几何退化脏数据，并在 `WM_DELETE_WINDOW` 销毁前通过 `save_window_position_simple` 执行位置保存。
+    - [x] **同步更新全局搜索结果位置与自动列宽 (Synchronized Global Search Window Persistence & Column Auto-adaptation)**：全面同步了 `tdxgui\history_manager.py` 内部的 `do_global_search` 逻辑，集成了防 `1x1` 退化的 `_last_valid_geo` 记忆缓存与延迟 50ms 列宽自适应重测，确保异动联动调起的全局搜索窗口能完美适配大小且对齐列宽。
+
+## 2026-07-19 20:56
+- [x] **优化自定义列类型自动适配，保留整型数据 (Optimized Custom Column Type Auto-Adaptation to Preserve Integers)**：
+    - [x] **自适应整型转换与保留 (Adaptive Integer Conversion & Retention)**：在 `backtest_feature_auditor.py` 中的 `_conv_val` 转换逻辑中，若字段原始值原本就是整型（或者是 float 类型但实际代表一个整数，如 `5.0`），则自适应将其保留并转换为 Python 内置的 `int`；若包含有效小数，则才转换为 `float`。这避免了强制将 `Rank` 等整型字段转换为带小数点的 `float` 形式。
+    - [x] **下沉兜底默认值为整型 0 (Downcasted Default Fallback to Integer 0)**：将 `run_optimized_audit` 中自定义列的未命中兜底默认值 and 历史 Bar 填充值由 `0.0` 修正为整型 `0`。从而彻底保证当列属性默认是 `int` 时，在审计报告的各行各处都不会产生被强制转为浮点类型的缺陷，提升了数据表现的一致性。
+    - [x] **修复 instock_MonitorTK 中 is_qt_win_alive 导入报错 (Fixed is_qt_win_alive ImportError)**：修复了在 `open_multi_period_tester` 方法中错误从 `ats.ui.multi_period_dialog` 导入 `is_qt_win_alive` 导致运行时报 `ImportError` 并崩溃的 Bug。移除了无效的外部导入，直接复用 `instock_MonitorTK.py` 内预置的全局 `is_qt_win_alive` 函数。
+    - [x] **实现自定义列 UI 与指标演进日志动态格式化 (Implemented Dynamic UI & Evolution Log Custom Column Formatting)**：重构了 `DnaAuditReportWindow` (Tk) 与 `QtDnaAuditReportWindow` (Qt) 中的数据填充方法 `_fill_data` 及选中切换详情更新逻辑。通过判定字段值是否为整型（或无小数的浮点数），动态决定是以整数 (`str(int(val))`) 还是以两位浮点 (`{val:.2f}`) 的格式渲染并在指标演进列表中输出，彻底解决了 `rank`, `red` 等整型列在 UI 界面和详情文本中仍被强转为 `.2f` 小数展示的缺陷。
+
+
+
+## 2026-07-19 20:55
+- [x] **极简重构 DNA 审计自定义列数据提取逻辑，废除冗余的多周期偏好映射 (Simplified DNA Audit Custom Columns Logic & Removed Multi-Period Preferences)**：
+    - [x] **实现直传 DataFrame 解析自定义列 (Direct DataFrame Support)**：重构了 `backtest_feature_auditor.py` 中的 `audit_multiple_codes` 接口，使 `period_data` 参数能够直接接收并解析包含自定义列的单体 `pd.DataFrame`。支持不区分大小写模糊匹配 `dff2`, `dff3`, `Rank` 等列名并建立股票代码到数值的哈希缓存，同时也保留了对旧版 `dict` 结构的安全兼容。
+    - [x] **废除冗余的跨周期偏好映射逻辑 (Removed Redundant Preferences)**：彻底移除在 `instock_MonitorTK.py`、`standalone_multi_period_tester.py` 以及 `ats/ui/multi_period_dialog.py` 的 `_run_dna_audit_batch` 审计入口中繁杂的“多周期偏好过滤与 DataFrame 拷贝”设计。不论在单周期还是多周期筛选中，均直接将当前视口中已加载自定义列的活跃 DataFrame （如 `df_all`、`result_df`、`flat_df`）传给审计引擎，做到了数据同源、随调随取。
+    - [x] **对齐 GC 自愈兜底逻辑 (Aligned GC Recovery)**：更新了 `audit_multiple_codes` 内部的垃圾回收器自愈探测，使其在 `period_data=None` 时能够直接捕获对应主窗口实例下的活跃 DataFrame（而不再是通过 `_period_dfs` 遍历），确保即使外部漏传数据也能一键自愈。
+    - [x] **测试通过 (Self-Tests Passed)**：修改并重跑了 `test_dna_audit_gc_recovery.py`，成功验证了 DataFrame 直接传参解析和 `StockMonitorApp` 类名的 GC 探测，断言全部通过。
+
+## 2026-07-19 20:45
+- [x] **修复 Tk 监控主程序中 DNA 审计自定义列（dff2, dff3, Rank）全为 0 的数据加载缺陷与 GC 自愈兜底 (Fixed Missing DNA Audit Custom Columns Data in Tk Monitor & Implemented GC-based Auto-Recovery Fallback)**：
+    - [x] **实现 Tk 监控主程序多周期缓存提取与映射透传**：在 `instock_MonitorTK.py` 中的 `_run_dna_audit_batch` 批量审计接口中，重构了数据提取流程。在进入后台分析子线程前，自动从可能存活的内部多周期 PyQt6 窗口（`_multi_period_tester_win`）中提取各周期 DataFrame，或者在未启动多周期窗口时自动将主窗口的 `df_all` 作为当前周期的 DataFrame 进行 fallback 注入。接着根据偏好映射关系将 `dff2`, `dff3`, `Rank` 的最佳匹配周期 DataFrame 组装成 $O(1)$ 哈希字典传递给 `audit_multiple_codes` 引擎，彻底解决了在单周期 Tk 面板下执行 DNA 审计时自定义列无数据并退化为 `0.0` 的重大工程缺陷。
+    - [x] **实现审计引擎基于 GC 探测的内存缓存自愈兜底机制 (Double-Insurance GC Fallback)**：在 `backtest_feature_auditor.py` 的批量审计入口 `audit_multiple_codes` 中加入了极具健壮性的自愈兜底。当 `period_data` 缺失或为空时，通过 `gc.get_objects()` 反射探测当前进程中活跃的主窗体或 Dialog 实例（如 `StockMonitorApp`, `MultiPeriodDialog`, `StandaloneMultiPeriodTester` 等），自动在主内存中安全提炼对应的 DataFrame 缓存并动态补全自定义列映射。这实现了双重保险防错，保证了即便未来子面板或其它外部界面在调用审计时漏传 `period_data`，也能完全实现 $O(1)$ 字典化提取，杜绝了数值零化。
+    - [x] **自测自检测通过 (Self-Tests Passed)**：编写并成功运行了 `test_dna_audit_gc_recovery.py` 测试脚本，充分验证了在 `period_data=None` 情况下，审计引擎可精准在垃圾回收器中探测到模拟的 `MockMonitor.df_all`，并 100% 正确回填各项自定义列数据。
+
+## 2026-07-19 20:15
+- [x] **优化 Tkinter 历史管理器默认界面全局搜索框折叠与一键呼出交互 (Optimized Tkinter Search History Manager Global Search Collapsing & Toggle Button)**：
+    - [x] **实现全局搜索区域默认隐藏**：重构了 `history_manager.py` 中的 `_build_ui`，将 `frame_global_search` 在初始化时默认使用 `pack_forget()` 隐藏，优化首屏空间，避免非必要展示导致的界面凌乱。
+    - [x] **新增 Query 表达式行“全局”联动按钮**：在 `self.frame_input` （即 Query 表达式输入框及测试、添加、使用选中按钮所在的同一行）的“保存”按钮左侧，新增了“全局”按钮。
+    - [x] **实现完美的向上展开/收起 Toggle 机制**：实现了 `toggle_global_search` 方法。当点击“全局”按钮时，利用 `pack(fill="x", padx=5, pady=2, before=self.frame_input)` 将全局搜索框动态插入到 Query 表达式行的正上方，实现视觉上完美的“向上展开/隐藏”的双向切换。
+    - [x] **修复 NameError 运行时报错**：在重构将 `frame_input` 提升为实例属性 `self.frame_input` 后，同步修复了下方 `self.combo_group` 引用未定义局部变量 `frame_input` 的 `NameError` 缺陷，确保系统冷启动及独立运行的绝对稳定性。
+    - [x] **重构全局搜索弹窗列宽自适应 (Refactored Column Auto-adaptation in Global Search Dialog)**：解决了原本直接绑定在 `top` 控件上的 `<Configure>` 事件在窗口初次打开或非尺寸变动时自适应失效的 Bug。将事件重新绑定至主布局容器 `main_frame`，并引入 50ms `after` 延迟首次测量机制，保证弹窗开启及大小变化时列宽均能精准填充整个界面。
+    - [x] **实现全局搜索弹窗位置持久化防脏数据 (Implemented Search Window Position Persistence with Anti-corruption)**：在弹窗中监听 `top` 控件的 `<Configure>` 并实时记录大于 $200 \times 100$ 的有效物理坐标（写入 `top._last_valid_geo` 变量）。当关闭窗口（通过 ESC、关闭按钮或右上角红叉）时，从内存变量中读取最后的有效坐标逆向除以 DPI 缩放比例，并原子化写入 `window_config.json` 磁盘配置，完美规避了在销毁临界期可能读取到 `1x1` 脏数据导致持久化失败的经典缺陷。
+    - [x] **下沉防脏数据机制，消除冗余重复代码 (Decoupled Anti-corruption Logic & DRY)**：放弃了在历史管理器中单独重新编写写盘配置的冗余方案。将 `_last_valid_geo` 拦截与自愈逻辑直接下沉集成至全局工具函数 `save_window_position_simple`（`gui_utils.py`）中。如此，历史管理器只需一行代码调用原生方法即可完成保存，且令全系统所有 Tkinter 窗口都能通过绑定该属性来无缝获得 1x1 脏数据防护功能，符合 DRY 与 SOLID 设计原则。
+
+## 2026-07-19 18:20
+- [x] **实现全系统 DNA 审计自定义列 (dff2, dff3, Rank) 升级与极速性能优化 (Upgraded System-wide DNA Audit Custom Columns & Optimized Execution Performance)**：
+    - [x] **实现配置加载与持久化扩展 (Configuration & Persistence Expansion)**：在 `JohnsonUtil/commonTips.py` 中初始化 `dna_audit_custom_cols` 并持久化至 `global.ini`，支持用户根据需要跨会话自定义和添加新的审计分析列。
+    - [x] **重构底层审计计算与 O(1) 检索引擎 (Refactored Audit Engine with O(1) Hash Map)**：重构了 `backtest_feature_auditor.py` 中的 `audit_multiple_codes` 与 `run_optimized_audit`。在子线程循环执行前，对各周期 `period_data` 批量提取并转换成哈希字典，使多股并发审计时能以 $O(1)$ 复杂度直接读取内存中当前代码对应的自定义指标数值。对于历史 Bar 进行了安全的 `0.0` 默认兜底以防报错，对于最新一天则注入真实值，彻底排除了分析时高频读取 HDF5 或二次盘中计算的性能开销（完全免于写盘和多余 I/O）。
+    - [x] **实现 Tkinter UI 报告自适应渲染 (Adaptive Tkinter UI Audit Report)**：重构了 `backtest_feature_auditor.py` 内 `DnaAuditReportWindow` 的 Treeview 属性表头与数据填充逻辑。根据 `custom_cols` 自适应设定列宽度与多级排序，并在底部个股演进提炼大文本中自动加入自定义列的名称和最新天数值变迁，展现直观。
+    - [x] **实现 PyQt6 UI 报告自适应渲染 (Adaptive PyQt6 UI Audit Report)**：重构了 `ats/ui/multi_period_dialog.py` 内 `QtDnaAuditReportWindow` 的 QTableWidget 列结构与 `_fill_data` 逻辑。动态对齐列宽持久化，并将自定义字段的值无缝写入底部的 HTML 详细网页模板中动态渲染。
+    - [x] **重构多周期主控制中心与独立测试器映射机制 (Refactored Multi-Period Engine Data Binding)**：在 `ats/ui/multi_period_dialog.py` 与 `standalone_multi_period_tester.py` 的 `_run_dna_audit_batch` 核心接口中，增加了在安全加锁保护下从 `self.engine._period_dfs` 提取内存缓存的操作。建立自定义列与周期的映射偏好表（如 `dff2 -> 3d`、`dff3 -> w`、`Rank -> d`），若偏好未命中则在全周期中自适应 Fallback 回退检索，零计算开销拼装 `period_data` 并透传至审计入口。
+    - [x] **个股分布详情降级自愈对齐 (Aligned Local Selection Audit Fallback)**：在 `ats/ui/chart_widgets.py` 的 `_run_dna_audit_selected` 中对齐了 `custom_cols` 加载配置与降级传参，拉平了跨窗体审计时的字段表现。
+    - [x] **自测自检完美通过 (Self-Test Passed)**：创建并运行了 `test_dna_audit_custom_cols.py` 诊断脚本，测试结果表明自定义字段在大表提取、传递、多股批量并发 O(1) 字典化以及最新一天 Bar 数据覆盖及历史 0.0 安全防崩过滤上 100% 运行正常。
+
 ## 2026-07-19 17:25
 - [x] **修复诊断/审计弹出窗口关闭时导致主窗口和进程级联崩溃退出的严重 Bug (Fixed Sub-Dialog Close Event Crash & AttributeError)**：
     - [x] **移除未定义方法调用**：彻底修复了个股策略诊断报告窗口 `QtCheckCodeDialog` 的 `closeEvent` 中错误地调用了 `self._save_state("FORCE_WRITE")` 这一根本不存在的方法的 Bug。该错误在关闭窗口或点击“关闭窗口”按钮时，会触发 `AttributeError: 'QtCheckCodeDialog' object has no attribute '_save_state'` 运行期未捕获异常，进而导致整个 PyQt6 事件循环和多周期联动主窗口（主进程）闪退。现已将此冗余调用安全移除。
