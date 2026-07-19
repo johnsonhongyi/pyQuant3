@@ -2393,17 +2393,33 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 custom_cols = ['dff2', 'dff3', 'Rank']
                 
             # 2. 直接获取当前包含自定义列的 DataFrame
-            # 优先级: flat_df > result_df > df_all > top_now (实时行情，必含自定义列)
+            # 优先级: engine._period_dfs[resample] > engine._period_dfs other > flat_df > result_df > top_now (实时行情，必含自定义列)
             def _has_custom(df, cols):
                 if df is None or df.empty: return False
                 return any(str(c).lower() in [x.lower() for x in df.columns] for c in cols)
 
             df_active = None
-            for attr in ('_last_flat_df', 'last_result_df'):
-                cand = getattr(self, attr, None)
-                if _has_custom(cand, custom_cols):
-                    df_active = cand
-                    break
+            # 1. 优先从 engine 对应最小周期获取数据
+            if hasattr(self, 'engine') and self.engine:
+                with self.engine.lock:
+                    cand = self.engine._period_dfs.get(resample)
+                    if _has_custom(cand, custom_cols):
+                        df_active = cand
+                    
+                    if df_active is None:
+                        # 遍历其它存在的周期 DataFrame
+                        for p_key, cand in self.engine._period_dfs.items():
+                            if _has_custom(cand, custom_cols):
+                                df_active = cand
+                                break
+
+            # 2. 其次从成员变量中找
+            if df_active is None:
+                for attr in ('_last_flat_df', 'last_result_df'):
+                    cand = getattr(self, attr, None)
+                    if _has_custom(cand, custom_cols):
+                        df_active = cand
+                        break
             # 兜底：top_now 是实时行情 df，必然含有自定义列
             if df_active is None:
                 top = getattr(self, 'top_now', None)

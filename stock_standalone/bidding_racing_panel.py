@@ -566,12 +566,25 @@ def dispatch_dna_audit(code_to_name, parent_widget=None):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             QApplication.processEvents()
 
+            _period_data = None
+            p = parent_widget if parent_widget else QApplication.activeWindow()
+            while p:
+                for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
+                    df_cand = getattr(p, attr, None)
+                    if df_cand is not None and not df_cand.empty:
+                        _period_data = df_cand
+                        break
+                if _period_data is not None:
+                    break
+                p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+
             summaries = audit_multiple_codes(
                 list(code_to_name.keys()),
                 end_date=None,
                 code_to_name=code_to_name,
                 progress_callback=None,
-                resample='d'
+                resample='d',
+                period_data=_period_data
             )
 
             if summaries:

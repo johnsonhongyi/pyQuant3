@@ -767,12 +767,28 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
                     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                     QApplication.processEvents()
                     
+                    _period_data = None
+                    try:
+                        p = self.parent() or self.window()
+                        while p:
+                            for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
+                                df_cand = getattr(p, attr, None)
+                                if df_cand is not None and not df_cand.empty:
+                                    _period_data = df_cand
+                                    break
+                            if _period_data is not None:
+                                break
+                            p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+                    except Exception:
+                        pass
+
                     summaries = audit_multiple_codes(
                         list(code_to_name.keys()),
                         end_date=None,
                         code_to_name=code_to_name,
                         progress_callback=None,
-                        resample='d'
+                        resample='d',
+                        period_data=_period_data
                     )
                     
                     if summaries:
@@ -5065,12 +5081,28 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                     QApplication.processEvents()
                     
+                    _period_data = None
+                    try:
+                        p = self.parent() or self.window()
+                        while p:
+                            for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
+                                df_cand = getattr(p, attr, None)
+                                if df_cand is not None and not df_cand.empty:
+                                    _period_data = df_cand
+                                    break
+                            if _period_data is not None:
+                                break
+                            p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+                    except Exception:
+                        pass
+
                     summaries = audit_multiple_codes(
                         list(code_to_name.keys()),
                         end_date=None,
                         code_to_name=code_to_name,
                         progress_callback=None,
-                        resample='d'
+                        resample='d',
+                        period_data=_period_data
                     )
                     
                     if summaries:
