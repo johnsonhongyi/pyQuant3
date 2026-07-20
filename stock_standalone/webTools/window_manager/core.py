@@ -142,15 +142,34 @@ def get_screen_resolution_summary() -> dict:
     return summary
 
 
-def detect_display_config_name() -> str:
+def detect_display_config_name(config_manager=None) -> str:
     """
-    使用内置与外部逻辑探测出当前系统应匹配的配置名(如: tdx_ths_position1920)
+    使用内置与外部逻辑探测出当前系统应匹配的配置名(如: tdx_ths_position1920, tdx_ths_position3840)
     """
+    existing_keys = set()
+    if config_manager:
+        try:
+            existing_keys = set(config_manager.get_resolutions())
+        except Exception:
+            pass
+    if not existing_keys:
+        try:
+            cfg_path = get_conf_path("window_layout_config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    for cat in d.values():
+                        if isinstance(cat, dict):
+                            existing_keys.update(cat.keys())
+        except Exception:
+            pass
+
     if Display_Detection is not None:
         try:
             displaySet = Display_Detection()
             displayNum = displaySet[0]
             displayMainRes = displaySet[1][0]
+            rawMainRes = displayMainRes
             
             # 获取当前系统的物理 DPI 缩放比例
             try:
@@ -165,7 +184,6 @@ def detect_display_config_name() -> str:
                 displayRes = 0 
                 for i in range(1, displayNum + 1):
                     val = displaySet[i][0]
-                    # displaySet[2] 为主屏幕，受 DPI 缩放影响，因此在高 DPI-aware 进程下需要缩放折合
                     if i == 2 and scale > 1.0:
                         val = int(val / scale)
                     displayRes += val
@@ -174,12 +192,21 @@ def detect_display_config_name() -> str:
                     displayRes = 4644
                 elif displayRes >= 4700:
                     displayRes = 5376
-                return f'tdx_ths_position{displayRes}'
+                target_key = f'tdx_ths_position{displayRes}'
+                return target_key
             else:
-                # 单屏也支持逻辑像素折合，使 UI 与 CLI 保持一致
+                # 优先匹配无缩放折合的物理分辨率名称（如 3840 对应 tdx_ths_position3840）
+                raw_key = f'tdx_ths_position{rawMainRes}'
+                if raw_key in existing_keys:
+                    return raw_key
+                
+                # 如果没有精确物理方案，再尝试逻辑像素折合
                 if scale > 1.0:
-                    displayMainRes = int(displayMainRes / scale)
-                return f'tdx_ths_position{displayMainRes}'
+                    scaled_res = int(displayMainRes / scale)
+                    scaled_key = f'tdx_ths_position{scaled_res}'
+                    if scaled_key in existing_keys:
+                        return scaled_key
+                return raw_key
         except Exception:
             pass
 
@@ -192,7 +219,6 @@ def detect_display_config_name() -> str:
             total_w = 4644
         elif total_w > 4700:
             total_w = 5376
-        # 如果总宽度不是典型值，可默认回退到 Double 或者是总宽度
         if total_w in [4644, 5376]:
             return f'tdx_ths_position{total_w}'
         else:
@@ -201,7 +227,9 @@ def detect_display_config_name() -> str:
         # 单屏
         mon = summary["monitors"][0] if summary["monitors"] else None
         res_w = mon["width"] if mon else 1920
-        # 兼容一些非标 DPI 的主分辨率名称
+        raw_key = f'tdx_ths_position{res_w}'
+        if raw_key in existing_keys or not existing_keys:
+            return raw_key
         return f'tdx_ths_position{res_w}'
 
 

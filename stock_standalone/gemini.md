@@ -1,3 +1,10 @@
+## 2026-07-20 18:10
+- [x] **优化桌面窗口捕获选择体验与重构高 DPI/多分辨率桌面切换自适应 (Optimized Window Layout Capture & Resolution Switch Auto-Adaptation)**：
+    - [x] **修改捕获桌面窗口默认点击单选、按住 Ctrl 为多选**：在 `webTools/window_manager/ui.py` 中，将 `CaptureWindowsDialog` 的列表选择模式由 `MultiSelection` 重构为 `ExtendedSelection`。点击默认单选选中，只有按住 `Ctrl` 键点击才进行多选/反选，完全对齐 Windows 桌面及资源管理器的原生选择交互习惯。
+    - [x] **重构 WindowMixin 尺寸/坐标存取与物理越界防护**：彻底移除了 `load_window_position_qt` 和 `save_window_position_qt_visual` 中由于乘以/除以 `scale` 导致的倍率重复计算 Bug，统一使用 Qt6 逻辑像素。同时在 `load_window_position_qt` 中接入自适应上限防护：当检测到加载尺寸溢出当前显示器可用区域 90% 或坐标在屏外时，自适应收缩至 85% 并在屏幕中心放置，消除了历史配置与多 DPI 切换导致的巨大窗口。
+    - [x] **实现主窗口唤醒与打开时的屏边界自适应 (`_ensure_window_fits_screen`)**：在 `WindowPosManagerUI` 中新增 `_ensure_window_fits_screen()` 自适应适配器，并在 `detect_and_refresh_state`、`showEvent` 以及快捷键/托盘唤醒 (`_force_show_and_top`) 时自动触发。当桌面分辨率从 1920 切换到 3840 或 3840 切换到 1920 时，唤醒窗口能自动收缩并居中在当前屏幕可视区域，彻底解决了从 1920 切换到 3840 后唤醒打开窗口巨大的 Bug。
+    - [x] **优化方案名自动探测与唤醒即时刷新**：重构了 `core.py` 中的 `detect_display_config_name`，优先匹配配置文件中已有的物理分辨率方案（如 `tdx_ths_position3840`），避免高 DPI 物理 3840 屏幕被误判定为 1920 方案。在 `detect_and_refresh_state` 中同步补齐 `self.refresh_resolutions_combo()` 刷新，确保唤醒后下拉框自动切至当前最新的 3840 或 1920 分辨率方案。
+
 ## 2026-07-20 11:41
 - [x] **修复 Alt+R 轮转视图中列表项由于 QSS margin 导致高度重叠/堆叠的 Bug (Fixed Alt+R Window Rotator Item Overlapping Bug)**：
     - [x] **移除 QSS 中易引发高 DPI 缩放重叠 Bug 的 margin 属性**：在 `hotkey_rotator.py` 与 `instock_MonitorTK.py` 的 `WindowRotatorDialog` 类样式表中，彻底移除了 `QListWidget::item` 的 `margin-bottom: 6px`。这避免了在高 DPI（如 1.25x/1.5x 等）缩放或高分辨率显示下，Qt 的样式引擎由于计算 margin 偏差导致除最后一个 item 之外所有列表项坐标在 top 处发生重合堆叠的经典缺陷。
