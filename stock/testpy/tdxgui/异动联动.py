@@ -8473,41 +8473,61 @@ def toast_message2(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
 
 
 def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
-    """在主窗口右下角显示一条提示信息，自动淡出"""
-    # 如果仍然没有 parent，则使用 root
-    if parent is None:
-        # parent = root
-        parent = tk.Tk()
-        parent.withdraw()
-    win = tk.Toplevel(parent)
-    win.overrideredirect(True)
-    win.config(bg=bg)
+    """在主窗口右下角显示一条提示信息，自动淡出（线程安全版）"""
+    global root
 
-    # 文本标签
-    label = tk.Label(win, text=text, bg=bg, fg=fg, font=("Microsoft YaHei", 11))
-    label.pack(ipadx=15, ipady=8)
+    def _show():
+        nonlocal parent
+        # 如果没有传入 parent，尝试使用全局 root
+        if parent is None:
+            if 'root' in globals() and globals()['root'] is not None:
+                parent = globals()['root']
+        if parent is None:
+            try:
+                parent = tk.Tk()
+                parent.withdraw()
+            except:
+                return
 
-    # 放在主窗口右下角
-    parent.update_idletasks()
-    x = parent.winfo_x() + parent.winfo_width() - win.winfo_reqwidth() - 20
-    y = parent.winfo_y() + parent.winfo_height() - win.winfo_reqheight() - 40
-    win.geometry(f"+{x}+{y}")
+        win = tk.Toplevel(parent)
+        win.overrideredirect(True)
+        win.config(bg=bg)
 
-    # 窗口置顶
-    win.attributes("-topmost", True)
-    win.update()
-    win.attributes("-topmost", False)
+        # 文本标签
+        label = tk.Label(win, text=text, bg=bg, fg=fg, font=("Microsoft YaHei", 11))
+        label.pack(ipadx=15, ipady=8)
 
-    # 自动淡出（用 after 循环，主线程安全）
-    def fade(alpha=1.0):
-        if alpha <= 0:
-            win.destroy()
-        else:
-            win.attributes("-alpha", alpha)
-            win.after(50, fade, alpha - 0.05)
+        # 放在主窗口右下角
+        parent.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() - win.winfo_reqwidth() - 20
+        y = parent.winfo_y() + parent.winfo_height() - win.winfo_reqheight() - 40
+        win.geometry(f"+{x}+{y}")
 
-    # 延迟 duration 毫秒后开始淡出
-    win.after(duration, fade)
+        # 窗口置顶
+        win.attributes("-topmost", True)
+        win.update()
+        win.attributes("-topmost", False)
+
+        # 自动淡出（用 after 循环，主线程安全）
+        def fade(alpha=1.0):
+            if alpha <= 0:
+                win.destroy()
+            else:
+                win.attributes("-alpha", alpha)
+                win.after(50, fade, alpha - 0.05)
+
+        # 延迟 duration 毫秒后开始淡出
+        win.after(duration, fade)
+
+    # 线程安全：后台线程调用时用 root.after 调回主线程
+    if threading.current_thread() == threading.main_thread():
+        _show()
+    else:
+        if 'root' in globals() and globals()['root'] is not None:
+            try:
+                globals()['root'].after(0, _show)
+            except:
+                pass
 
 
 def auto_close_message(title, message, timeout=2000):
@@ -11335,6 +11355,20 @@ if __name__ == "__main__":
     history_frame.pack(fill=tk.X, padx=10)
 
     # global history_filter_enabled, history_filter_var, query_history_mgr
+    def _get_current_active_dataframe():
+        """获取当前处于激活/显示状态的最新数据源 DataFrame"""
+        global _global_enriched_cache, realdatadf, loaded_df
+        # 优先使用存档数据 (如果用户加载了历史存档)
+        if loaded_df is not None and not loaded_df.empty:
+            return loaded_df
+        # 其次使用增强后的实时数据
+        if _global_enriched_cache is not None and not _global_enriched_cache.empty:
+            return _global_enriched_cache
+        # 最后使用基础实时数据
+        if realdatadf is not None and not realdatadf.empty:
+            return realdatadf
+        return None
+
     def open_history_manager_standalone():
         """
         以多线程（Toplevel 弹窗）方式打开历史管理器。
@@ -11347,6 +11381,13 @@ if __name__ == "__main__":
             # --- 1. 优先尝试查找并置顶现有 Toplevel 窗口 ---
             if history_manager_window and history_manager_window.winfo_exists():
                 logger.info("History Manager window already exists, bringing to front.")
+                try:
+                    active_df = _get_current_active_dataframe()
+                    if active_df is not None and hasattr(history_manager_window, "_manager_instance"):
+                        history_manager_window._manager_instance.df_all = active_df.copy()
+                        logger.info("🔗 已向已有 history_manager 注入最新数据源")
+                except Exception as e:
+                    logger.warning(f"Failed to inject to existing manager: {e}")
                 history_manager_window.deiconify() # 取消最小化
                 history_manager_window.lift()      # 置顶
                 history_manager_window.focus_force() # 强制焦点
@@ -11366,19 +11407,81 @@ if __name__ == "__main__":
             except:
                 pass
 
-            # [🚀 修复] 设置较大的默认尺寸并放置在鼠标附近，防止尺寸乱跳
-            w, h = 900, 500
-            mx = root.winfo_pointerx()
-            my = root.winfo_pointery()
-            # 偏移一点防止挡住鼠标点击点，y轴尽量居中
-            history_manager_window.geometry(f"{w}x{h}+{mx + 20}+{max(0, my - h // 2)}")
-            history_manager_window.minsize(900, 500) # 物理限制最小尺寸，防止乱变
-            # 直接在当前进程创建实例，共享内存，无需序列化
+            # --- 🚀 修复：使用主程序原生的全局位置配置与缓存管理，彻底解决 window_config.json 重写冲突引起的冷启动失效 ---
+            window_id = "QueryHistoryManagerWindow"
+            geom = WINDOW_GEOMETRIES.get(window_id, "")
+            
+            if geom:
+                try:
+                    # 根据几何字符串初始化 _last_valid_geo
+                    size_pos = geom.split("+")
+                    w_h = size_pos[0].split("x")
+                    history_manager_window.geometry(geom)
+                    history_manager_window._last_valid_geo = (int(w_h[0]), int(w_h[1]), int(size_pos[1]), int(size_pos[2]))
+                except Exception:
+                    geom = ""
+            
+            if not geom:
+                w, h = 900, 500
+                mx = root.winfo_pointerx()
+                my = root.winfo_pointery()
+                # 偏移一点防止挡住鼠标点击点，y轴尽量居中
+                history_manager_window.geometry(f"{w}x{h}+{mx + 20}+{max(0, my - h // 2)}")
+                history_manager_window._last_valid_geo = (w, h, mx + 20, max(0, my - h // 2))
+                
+            history_manager_window.minsize(800, 450) # 物理限制最小尺寸
+            
+            # 监听窗口几何改变，在内存中始终保持最新的 valid geometry 状态
+            def record_manager_geometry(event):
+                if event.widget == history_manager_window:
+                    if event.width > 200 and event.height > 100:
+                        history_manager_window._last_valid_geo = (
+                            event.width, event.height, 
+                            history_manager_window.winfo_x(), history_manager_window.winfo_y()
+                        )
+            history_manager_window.bind("<Configure>", record_manager_geometry, add="+")
+            
+            # 将管理器注册到主窗口位置管理器中，使主程序退出时也支持联动自动保存
+            WINDOWS_BY_ID[window_id] = history_manager_window
+            
+            # 获取最新的数据源并作为 df_all 传入
+            active_df = _get_current_active_dataframe()
             manager = QueryHistoryManager(
                 root=history_manager_window, 
                 auto_run=True, 
-                history_file=SEARCH_HISTORY_FILE
+                history_file=SEARCH_HISTORY_FILE,
+                df_all=active_df.copy() if active_df is not None else None
             )
+            # 挂载到窗口句柄上方便后续注入
+            history_manager_window._manager_instance = manager
+            
+            # --- 🚀 修复：绑定窗口关闭协议，保存位置到主程序配置并销毁 ---
+            def on_manager_close():
+                try:
+                    if history_manager_window.winfo_exists():
+                        # 从内存缓存中读取最近一次的有效位置，防止关闭瞬间的 1x1 脏数据
+                        if hasattr(history_manager_window, "_last_valid_geo") and getattr(history_manager_window, "_last_valid_geo") is not None:
+                            w_curr, h_curr, x_curr, y_curr = getattr(history_manager_window, "_last_valid_geo")
+                            WINDOW_GEOMETRIES[window_id] = f"{w_curr}x{h_curr}+{x_curr}+{y_curr}"
+                        else:
+                            WINDOW_GEOMETRIES[window_id] = history_manager_window.geometry()
+                    
+                    # 安排一次保存（触发主程序的 schedule_save_positions 异步写盘）
+                    schedule_save_positions()
+                    manager.close()
+                except Exception as e:
+                    logger.error(f"Error during manager close position saving: {e}")
+                finally:
+                    try:
+                        history_manager_window.destroy()
+                    except:
+                        pass
+                    # 从全局 WINDOWS_BY_ID 移除，避免主程序退出重复处理已销毁窗口
+                    if window_id in WINDOWS_BY_ID:
+                        del WINDOWS_BY_ID[window_id]
+            
+            history_manager_window.protocol("WM_DELETE_WINDOW", on_manager_close)
+            history_manager_window.bind("<Escape>", lambda event: on_manager_close())
             
             logger.info("History Manager (Toplevel) opened successfully.")
             
@@ -11612,7 +11715,12 @@ if __name__ == "__main__":
     # 在管理器初始化后刷新列表
 
     def open_history_editor():
+        global query_history_mgr
         if query_history_mgr:
+            active_df = _get_current_active_dataframe()
+            if active_df is not None:
+                query_history_mgr.df_all = active_df.copy()
+                logger.info(f"🔗 已成功为 query_history_mgr 注入当前数据源 (len={len(active_df)})")
             query_history_mgr.open_editor()
 
     tk.Button(history_frame, text="⚙️ 策略编辑", command=open_history_editor, 

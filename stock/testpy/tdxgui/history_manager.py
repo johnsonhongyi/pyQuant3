@@ -73,11 +73,11 @@ class QueryHistoryManager:
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback
+        self.MAX_HISTORY = 500
         # 读取历史
         self.history1, self.history2, self.history3, self.history4, self.history5 = self.load_search_history()
         self.current_history = self.history1
         self.current_key = "history1"
-        self.MAX_HISTORY = 500
         
         # [NEW] 初始化 DPI 缩放因子
         try:
@@ -261,7 +261,7 @@ class QueryHistoryManager:
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         self.root.bind("<Control-z>", self.undo_delete)
-        # [🚀 修复] 区分嵌入式与独立窗口模式下的 Esc 键行为
+        # [🚀 修复] 区分嵌入式与独立窗口模式下的 Esc 键行为，在 Toplevel 下优先触发关闭协议（以持久化保存窗口位置）
         if isinstance(self.root, tk.Toplevel):
             self.root.bind("<Escape>", lambda event: self.root.destroy())
         else:
@@ -560,6 +560,31 @@ class QueryHistoryManager:
     def load_search_history(self):
         h1, h2, h3, h4, h5 = [], [], [], [], []
         upgraded = False
+        # [🚀 修复] 冷启动兜底：若文件不存在，则写入并初始化默认的历史策略模板数据
+        if not os.path.exists(self.history_file):
+            try:
+                default_data = {
+                    "history1": [
+                        {"query": "close > upper and red > 3", "starred": 0, "note": "红三兵突破"},
+                        {"query": "close > lastp1d and high > high4 and close > ma60d and SWL > SWS", "starred": 0, "note": "多头突破"},
+                        {"query": "open > high4 and low >= nlow and close > lasth1d and open > lastp1d", "starred": 0, "note": "回踩支撑"},
+                        {"query": "low < ma10d and ma5d > ma10d and close > lastp1d", "starred": 0, "note": "均线多头"}
+                    ],
+                    "history2": [],
+                    "history3": [],
+                    "history4": [],
+                    "history5": []
+                }
+                # 确保父目录存在
+                parent_dir = os.path.dirname(self.history_file)
+                if parent_dir and not os.path.exists(parent_dir):
+                    os.makedirs(parent_dir, exist_ok=True)
+                with open(self.history_file, "w", encoding="utf-8") as f:
+                    json.dump(default_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"✨ 首次运行，已自动初始化默认历史策略模版: {self.history_file}")
+            except Exception as e:
+                logger.error(f"初始化默认历史策略模版失败: {e}")
+
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, "r", encoding="utf-8") as f:
@@ -589,11 +614,11 @@ class QueryHistoryManager:
                 normalize_starred_field(raw_h4)
                 normalize_starred_field(raw_h5)
 
-                h1 = list(raw_h1[:self.his_limit])
-                h2 = list(raw_h2[:self.his_limit])
-                h3 = list(raw_h3[:self.his_limit])
-                h4 = list(raw_h4[:self.his_limit])
-                h5 = list(raw_h5[:self.his_limit])
+                h1 = list(raw_h1[:self.MAX_HISTORY])
+                h2 = list(raw_h2[:self.MAX_HISTORY])
+                h3 = list(raw_h3[:self.MAX_HISTORY])
+                h4 = list(raw_h4[:self.MAX_HISTORY])
+                h5 = list(raw_h5[:self.MAX_HISTORY])
 
                 if upgraded:
                     with open(self.history_file, "w", encoding="utf-8") as f:
