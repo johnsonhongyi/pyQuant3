@@ -80,24 +80,34 @@ class WindowMixin:
                     data = json.load(f)
                 if window_name in data:
                     pos = data[window_name]
-                    width = int(pos.get("width", default_width) * scale)
-                    height = int(pos.get("height", default_height) * scale)
-                    x = int(pos.get("x", 0) * scale)
-                    y = int(pos.get("y", 0) * scale)
+                    # Qt6 中 win.geometry() 原生使用 Logical Pixels，无需二次乘以 scale
+                    width = int(pos.get("width", default_width))
+                    height = int(pos.get("height", default_height))
+                    x = int(pos.get("x", 100))
+                    y = int(pos.get("y", 100))
 
-                    # [SAFE-GUARD] 物理超大窗口上限防护自愈
+                    # [SAFE-GUARD] 物理超大/越界窗口自适应防护与边界修正
                     try:
                         app = QApplication.instance()
                         if app:
-                            screen = app.screenAt(QtCore.QPoint(x if x is not None else 100, y if y is not None else 100))
+                            screen = app.screenAt(QtCore.QPoint(x, y))
                             if not screen:
                                 screen = app.primaryScreen()
                             if screen:
                                 geom = screen.availableGeometry()
-                                if width > geom.width() or height > geom.height():
-                                    logger.warning(f"[load_window_position_qt] 检测到窗口尺寸 [{width}x{height}] 溢出显示器 [{geom.width()}x{geom.height()}]，已自动重置为默认尺寸。")
-                                    width = default_width
-                                    height = default_height
+                                # 如果尺寸超过当前屏幕可用区域 90%，自适应收缩至屏宽高的 85%
+                                if width > geom.width() * 0.9 or height > geom.height() * 0.9:
+                                    logger.warning(f"[load_window_position_qt] 检测到窗口尺寸 [{width}x{height}] 溢出显示器 [{geom.width()}x{geom.height()}]，已自动调整为自适应比例。")
+                                    width = min(width, int(geom.width() * 0.85))
+                                    height = min(height, int(geom.height() * 0.85))
+                                    if width > geom.width() or height > geom.height():
+                                        width = min(default_width, geom.width())
+                                        height = min(default_height, geom.height())
+                                
+                                # 坐标越界修正：若窗口中心脱离屏幕可用区域，自动重置到屏中心
+                                if x < geom.left() or x > geom.right() - 100 or y < geom.top() or y > geom.bottom() - 100:
+                                    x = geom.left() + max(0, (geom.width() - width) // 2)
+                                    y = geom.top() + max(0, (geom.height() - height) // 2)
                     except Exception as ex:
                         logger.error(f"[load_window_position_qt] 溢出防护检查异常: {ex}")
 
@@ -126,11 +136,12 @@ class WindowMixin:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
             geom = win.geometry()
+            # Qt6 逻辑像素直接记录，避免除以 scale 导致的精度退化与混淆
             pos = {
-                "x": int(geom.x() / scale),
-                "y": int(geom.y() / scale),
-                "width": int(geom.width() / scale),
-                "height": int(geom.height() / scale)
+                "x": int(geom.x()),
+                "y": int(geom.y()),
+                "width": int(geom.width()),
+                "height": int(geom.height())
             }
 
             config_file_path = self._get_config_file_path(file_path, scale)
@@ -574,12 +585,12 @@ class CaptureWindowsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         
-        info_label = QLabel("勾选或多选你想要捕获并记录当前位置的桌面窗口：")
+        info_label = QLabel("选择你想要捕获并记录当前位置的桌面窗口 (默认点击单选，按住 Ctrl 多选 / Shift 连选)：")
         layout.addWidget(info_label)
 
         # 窗口列表
         self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.list_widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self.show_context_menu)
@@ -1397,9 +1408,54 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except:
             pass
 
+    def _ensure_window_fits_screen(self):
+        """唤醒/打开窗口时自适应适配当前屏幕分辨率与DPI，防止分辨率切换后窗口变巨大或脱离可见屏幕"""
+        try:
+            app = QApplication.instance()
+            if not app:
+                return
+            screen = app.screenAt(self.geometry().center())
+            if not screen:
+                screen = app.primaryScreen()
+            if not screen:
+                return
+            
+            avail = screen.availableGeometry()
+            win_geom = self.geometry()
+            
+            need_adjust = False
+            w = win_geom.width()
+            h = win_geom.height()
+            x = win_geom.x()
+            y = win_geom.y()
+            
+            # 如果尺寸超过屏幕可用区域 90%，自适应调整为不超过屏宽高的 85%
+            if w > avail.width() * 0.9:
+                w = int(avail.width() * 0.85)
+                need_adjust = True
+            if h > avail.height() * 0.9:
+                h = int(avail.height() * 0.85)
+                need_adjust = True
+                
+            w = max(w, 800)
+            h = max(h, 550)
+            
+            # 如果坐标超出屏幕可见范围，置于屏幕中心
+            if x < avail.left() or x + w > avail.right() or y < avail.top() or y + h > avail.bottom():
+                x = avail.left() + max(0, (avail.width() - w) // 2)
+                y = avail.top() + max(0, (avail.height() - h) // 2)
+                need_adjust = True
+                
+            if need_adjust:
+                self.setGeometry(x, y, w, h)
+        except Exception as e:
+            logger.error(f"[_ensure_window_fits_screen] 自适应调整失败: {e}")
+
     def detect_and_refresh_state(self):
         """自动检测物理屏幕拓扑结构并刷新当前桌面各窗口的实际坐标位置"""
+        self._ensure_window_fits_screen()
         self.load_screen_info()
+        self.refresh_resolutions_combo()
         self.refresh_current_positions()
 
     def on_refresh_pos_clicked(self):
