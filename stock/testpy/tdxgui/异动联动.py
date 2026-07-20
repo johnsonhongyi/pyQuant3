@@ -3040,7 +3040,7 @@ def run_daily_init_steps():
     start_init = 0
     last_updated_time = None
     last_update_time = 0
-    today_tdx_df = pd.DataFrame()
+    today_tdx_df = None
     # --- 2️⃣ 恢复日期控件 ---
     try:
         if date_entry.winfo_exists():
@@ -4931,28 +4931,59 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
     global loaded_df
     global date_write_is_processed
     
-    current_time = datetime.now()
-    start_time=time.time()
-    if loaded_df is None  and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
-        if len(realdatadf) > 0 and (selected_type is not None or selected_type != ''):
-            temp_df = filter_stocks(realdatadf,selected_type)
+    # 统一处理 selected_type: None 或 "" 都代表全选 (显示全部数据)
+    is_all_selected = (selected_type is None or selected_type == '')
+
+    # 1. 优先使用已加载的历史/存档数据 (如果存在)
+    if loaded_df is not None and not loaded_df.empty:
+        temp_df = loaded_df.copy()
+        if not is_all_selected:
+            temp_df = filter_stocks(temp_df, selected_type)
+        if stock_code:
+            stock_code = stock_code.zfill(6)
+            temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
+        return temp_df
+
+    # 2. 如果是交易时间段，或者是需要更新的情况
+    if loaded_df is None and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
+        # 如果不是全选，且内存数据存在，则在内存数据中进行类型过滤
+        if not is_all_selected and len(realdatadf) > 0:
+            temp_df = filter_stocks(realdatadf, selected_type)
             if stock_code:
                 stock_code = stock_code.zfill(6)
                 temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
-
-        elif selected_type is not None and selected_type != '' or stock_code is not None or  realdatadf.empty:
-            temp_df = get_stock_changes(selected_type=selected_type)
-
+        # 如果是全选，但内存数据不为空，直接返回全部内存数据
+        elif is_all_selected and len(realdatadf) > 0:
+            temp_df = realdatadf.copy()
+            if stock_code:
+                stock_code = stock_code.zfill(6)
+                temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
+        # 否则 (内存数据为空，或者是要获取特定类型但内存没有)，再去请求网络
         else:
+            temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
+
+        # 盘后非工作时间段，避免高频请求导致的异常，如果内存有数据且全选，直接复用内存
+        if not get_work_time() and (get_now_time_int() > 1530 or get_now_time_int() < 923):
+            if is_all_selected and not realdatadf.empty:
+                temp_df = realdatadf.copy()
+
+    # 3. 盘后或非工作时间段 (且 loaded_df 和大 if 条件不成立)
+    else:
+        # 如果是全选，直接使用已有的内存数据
+        if is_all_selected:
             if not realdatadf.empty:
                 temp_df = realdatadf.copy()
             else:
-                temp_df = get_stock_changes()
+                temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
+        # 如果是特定类型，在内存中过滤
+        elif not realdatadf.empty:
+            temp_df = filter_stocks(realdatadf, selected_type)
+        else:
+            temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
 
-        if not get_work_time() and (get_now_time_int() >1530  or get_now_time_int() < 923):
-            temp_df = get_stock_changes(selected_type=selected_type)
-    else:
-        temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
+        if stock_code:
+            stock_code = stock_code.zfill(6)
+            temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
 
     return temp_df
 
@@ -6396,6 +6427,13 @@ def add_selected_stock_popup_window():
 #     except Exception:
 #         pass
 
+def add_to_code_query(stock_code):
+    """将选中的股票代码添加到代码查询框并触发搜索"""
+    if 'code_entry' in globals() and code_entry:
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, stock_code)
+        search_by_code()
+
 def show_context_menu(event):
     """显示右键菜单"""
     parent_win = event.widget.winfo_toplevel()
@@ -6413,6 +6451,7 @@ def show_context_menu(event):
         stock_info = values[1:]
 
         context_menu = tk.Menu(root, tearoff=0)
+        context_menu.add_command(label="添加到代码查询", command=lambda: add_to_code_query(stock_code))
         context_menu.add_command(label="添加到监控", command=add_selected_stock)
         context_menu.add_command(label="打开报警中心", command=open_alert_center)
         context_menu.add_command(label="添加报警规则",
