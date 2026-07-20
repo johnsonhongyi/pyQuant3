@@ -149,7 +149,6 @@ class WindowRotatorDialog(QDialog):
                 color: #ffffff;
                 border-radius: 6px;
                 padding: 10px;
-                margin-bottom: 6px;
                 font-size: 13px;
                 font-weight: bold;
             }
@@ -169,6 +168,7 @@ class WindowRotatorDialog(QDialog):
         layout.addWidget(title)
         
         self.list_widget = QListWidget(self)
+        self.list_widget.setSpacing(6)
         self.list_widget.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.list_widget)
         

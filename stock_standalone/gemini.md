@@ -1,3 +1,12 @@
+## 2026-07-20 11:41
+- [x] **修复 Alt+R 轮转视图中列表项由于 QSS margin 导致高度重叠/堆叠的 Bug (Fixed Alt+R Window Rotator Item Overlapping Bug)**：
+    - [x] **移除 QSS 中易引发高 DPI 缩放重叠 Bug 的 margin 属性**：在 `hotkey_rotator.py` 与 `instock_MonitorTK.py` 的 `WindowRotatorDialog` 类样式表中，彻底移除了 `QListWidget::item` 的 `margin-bottom: 6px`。这避免了在高 DPI（如 1.25x/1.5x 等）缩放或高分辨率显示下，Qt 的样式引擎由于计算 margin 偏差导致除最后一个 item 之外所有列表项坐标在 top 处发生重合堆叠的经典缺陷。
+    - [x] **引入标准布局间距控制替代**：在两个文件创建 `QListWidget` 实例之后，均补充调用了 `self.list_widget.setSpacing(6)`。这不仅恢复了优雅的 item 间距，更由 Qt 内置布局管理器在底层原生处理 DPI 比例伸缩，彻底消除了界面条目堆叠重合问题。
+
+## 2026-07-20 11:34
+- [x] **优化通达信通道线走势画K线颜色画法 (Optimized TDX Channel Line K-Line Coloring)**：
+    - [x] **实现最后5个K线按涨跌标记红绿并保留深红色反包K**：在公式最末尾（[GG通道线走势2.txt](file:///C:/Users/Johnson/Documents/TDX/GG%E9%80%9A%E9%81%93%E7%BA%BF%E8%B5%B0%E5%8A%BF2.txt)）追加了 `STICKLINE` 覆盖逻辑。当 `CURRBARSCOUNT <= 5` 时，对于上涨阳线（`C >= O`）绘制红色空心K线，对于下跌阴线（`C < O`）绘制绿色实心K线。同时，引入了 `NOT(SJ)` 排除条件，保证在倒数 5 根K线内如果出现了代表反包的深红色粗体K线（`SJ` 信号），依旧保持原有深红色反包K线的渲染状态，屏蔽普通红绿K线的遮蔽。
+
 ## 2026-07-19 22:00
 - [x] **修复 DNA 审计无法获取最小周期自定义数据 (dff2, dff3, Rank) 以及 Tk 闭包造成的 NameError 闪退 (Fixed DNA Audit Custom Columns Retrieval from Minimum Period & Tkinter NameError)**：
     - [x] **实现多周期 Dialog 优先从最小周期 DataFrame 获取自定义列数据**：在 `ats/ui/multi_period_dialog.py` 的 `_run_dna_audit_batch` 中，重构了 `df_active` 检索优先级。在安全加锁保护下优先从 `self.engine._period_dfs` 中匹配勾选的最小周期（如 `resample`）DataFrame。若未命中，则再自适应 fallback 遍历其它可用周期或成员变量，解决了在多周期面板下执行 DNA 审计时无法准确获取最小周期自定义特征的缺陷。
