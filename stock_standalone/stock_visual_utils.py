@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import pyqtgraph as pg
-from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QPushButton, QLabel
+from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QHBoxLayout, QPushButton, QLabel, QDialog, QTextEdit
 from PyQt6.QtGui import QColor, QPicture, QPainter
 from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer
 # WindowMixin is used for saving/loading window position
@@ -362,7 +362,109 @@ class PercentAxisItem(pg.AxisItem):
         if self.base_price != base_price:
             self.base_price = base_price
             self.picture = None 
-            self.update()
+class BacktestResultDialog(QDialog, WindowMixin):
+    """
+    分时信号回测结果弹窗。
+    支持：
+    1. 窗口位置与大小的跨会话持久化保存与恢复 (load_window_position_qt / save_window_position_qt_visual)
+    2. 非模态展示 (NonModal)，取消强行置顶，允许拖拽避开 SBC 等主分析窗口
+    3. 5 秒倒计时自动关闭与倒计时显示，按钮手动点击立即关闭
+    """
+    def __init__(self, summary_text="", parent=None):
+        super().__init__(parent)
+        self.window_name = "backtest_result_dialog"
+        self.setWindowTitle("⏱️ 分时信号回测结果")
+
+        # 1. 窗口 Flags：非模态、不抢焦点、不强制置顶
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags &= ~Qt.WindowType.Tool
+        flags |= Qt.WindowType.Window
+        flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+
+        # 2. 整体深色主题风格
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #161823;
+                color: #e2e2e5;
+            }
+            QTextEdit {
+                background-color: #0f1017;
+                color: #00ff88;
+                border: 1px solid #2e2e38;
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 9.5pt;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #2c2d3a;
+                color: #ffffff;
+                border: 1px solid #454659;
+                border-radius: 4px;
+                padding: 4px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3b3c4f;
+                border-color: #00ff88;
+            }
+        """)
+
+        # 3. 布局设置
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # 文本框展示明细
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setPlainText(summary_text)
+        layout.addWidget(self.text_edit)
+
+        # 底部控制条
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.remaining_seconds = 5
+        self.btn_close = QPushButton(f"关闭 ({self.remaining_seconds}s)")
+        self.btn_close.clicked.connect(self.close)
+        btn_layout.addWidget(self.btn_close)
+
+        layout.addLayout(btn_layout)
+
+        # 4. 加载持久化位置（默认 450 x 300）
+        self.load_window_position_qt(self, self.window_name, default_width=450, default_height=300)
+
+        # 5. 5 秒自动关闭倒计时
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._on_timer_tick)
+        self.timer.start()
+
+    def _on_timer_tick(self):
+        self.remaining_seconds -= 1
+        if self.remaining_seconds <= 0:
+            self.timer.stop()
+            self.close()
+        else:
+            self.btn_close.setText(f"关闭 ({self.remaining_seconds}s)")
+
+    def closeEvent(self, event):
+        if hasattr(self, 'timer') and self.timer:
+            self.timer.stop()
+        self.save_window_position_qt_visual(self, self.window_name)
+        super().closeEvent(event)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.save_window_position_qt_visual(self, self.window_name)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.save_window_position_qt_visual(self, self.window_name)
+
 
 class StandaloneKlineChart(QMainWindow, WindowMixin):
     """Simple chart window for visualization."""
@@ -669,14 +771,25 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         # SBC 回测场景：门槛降至 0.30，覆盖多日震荡企稳 + 均线加速启动结构
         engine = IntradayDecisionEngine(buy_threshold=0.30, stop_loss_pct=0.03, take_profit_pct=0.08)
 
-        from unittest.mock import patch
         import datetime as dt
+        from contextlib import contextmanager
 
         class MockDateTime(dt.datetime):
             _mock_now = dt.datetime.now()
             @classmethod
             def now(cls, tz=None):
                 return cls._mock_now
+
+        @contextmanager
+        def _patch_dt(module, attr, replacement):
+            """Nuitka 兼容的轻量属性替换，等价于 unittest.mock.patch。"""
+            original = getattr(module, attr, None)
+            setattr(module, attr, replacement)
+            try:
+                yield
+            finally:
+                if original is not None:
+                    setattr(module, attr, original)
 
         cost_price   = 0.0
         buy_date_str = ""
@@ -795,7 +908,8 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                 eval_mode = "full" if (holding and not is_t1_restricted) else "buy_only"
 
                 MockDateTime._mock_now = pd.Timestamp(tick_time).to_pydatetime()
-                with patch('intraday_decision_engine.dt.datetime', MockDateTime):
+                import intraday_decision_engine as _ide_mod
+                with _patch_dt(_ide_mod.dt, 'datetime', MockDateTime):
                     res = engine.evaluate(row, snapshot, mode=eval_mode)
 
                 action = res.get('action')
@@ -899,36 +1013,17 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         if trade_details:
             summary_lines.append("\n模拟交易明细:")
             summary_lines.extend(trade_details)
-            
-        from PyQt6.QtWidgets import QMessageBox
-        from PyQt6.QtCore import QTimer, Qt
 
         # 清理可能存在的旧弹窗
-        if hasattr(self, '_backtest_msg_box') and self._backtest_msg_box is not None:
+        if hasattr(self, '_backtest_dialog') and self._backtest_dialog is not None:
             try:
-                self._backtest_msg_box.close()
+                self._backtest_dialog.close()
             except Exception:
                 pass
 
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("分时信号回测结果")
-        msg_box.setText("\n".join(summary_lines))
-        msg_box.setIcon(QMessageBox.Icon.Information)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-
-        # [FIX] 改为非模态窗口，取消强制置顶
-        msg_box.setWindowModality(Qt.WindowModality.NonModal)
-        flags = msg_box.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint
-        msg_box.setWindowFlags(flags)
-
-        # [FIX] 5秒自动平滑关闭
-        timer = QTimer(msg_box)
-        timer.setSingleShot(True)
-        timer.timeout.connect(msg_box.close)
-        timer.start(5000)
-
-        self._backtest_msg_box = msg_box
-        msg_box.show()
+        dialog = BacktestResultDialog(summary_text="\n".join(summary_lines), parent=self)
+        self._backtest_dialog = dialog
+        dialog.show()
 
     # --- 统一方法管理 (移除冗余重复定义) ---
 

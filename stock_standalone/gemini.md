@@ -1,3 +1,13 @@
+## 2026-07-21 22:11
+- [x] **修复 StandaloneKlineChart 缺少 _on_rearrange_clicked 引起的 AttributeError 崩溃 (Fixed AttributeError: 'StandaloneKlineChart' object has no attribute '_on_rearrange_clicked')**：
+    - [x] **重构类定义作用域与层级结构**：修复了 `stock_visual_utils.py` 中 `BacktestResultDialog` 类误插入 `StandaloneKlineChart` 方法内部导致后者作用域断层及方法丢失的问题。将 `BacktestResultDialog` 提取移至 `StandaloneKlineChart` 外部顶层作用域，完美恢复了 `StandaloneKlineChart` 类的完整方法链路。
+
+## 2026-07-21 22:08
+- [x] **实现分时回测结果弹窗位置与尺寸跨会话持久化记忆 (Implemented Window Geometry Persistence for BacktestResultDialog)**：
+    - [x] **打造专用 `BacktestResultDialog` 对话框 (WindowMixin 集成)**：在 `stock_visual_utils.py` 中创建了继承自 `QDialog` 与 `WindowMixin` 的 `BacktestResultDialog` 类。重构了 `closeEvent`、`moveEvent` 和 `resizeEvent` 事件句柄，自动调用 `save_window_position_qt_visual` 将拖拽调整后的窗口坐标与高宽实时持久化保存至 `config.json`。
+    - [x] **完美避让 SBC 等主分析窗口**：初始化时自动恢复 `load_window_position_qt(self, "backtest_result_dialog", default_width=450, default_height=300)` 上次记忆位置。用户可将回测弹窗任意拖放至屏幕边缘或副屏，不再遮挡 central 的 SBC 核心分时走势与图表。
+    - [x] **升级富文本等宽等距视觉展现与动态 5 秒倒计时按钮**：将纯文本改为只读 `QTextEdit`，使用 Consolas 等宽字体排版交易明细，并在底部放置带有动态倒计时数字的 `关闭 (5s)` 按钮，兼顾了手动即刻关闭与 5 秒无感平滑淡出。
+
 ## 2026-07-21 21:42
 - [x] **修复 pyqtgraph.TextItem setPen 属性不存在导致的 AttributeError 崩溃 (Fixed AttributeError: 'TextItem' object has no attribute 'setPen')**：
     - [x] **修正 pyqtgraph 渲染属性绑定**：修复了 `trade_visualizer_qt6.py` 中 `SignalOverlay` 在渲染分时图 `target='tick'` 富文本信号气泡时，误调用 `txt.setPen(...)` / `txt.setBrush(...)` 导致的 `AttributeError` 崩溃。按 `pyqtgraph.TextItem` 的标准 API 规范修正为 `txt.border = border_pen` 与 `txt.fill = bg_brush`，彻底根治了分时信号渲染崩停。
