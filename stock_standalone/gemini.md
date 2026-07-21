@@ -1,3 +1,37 @@
+## 2026-07-21 21:42
+- [x] **修复 pyqtgraph.TextItem setPen 属性不存在导致的 AttributeError 崩溃 (Fixed AttributeError: 'TextItem' object has no attribute 'setPen')**：
+    - [x] **修正 pyqtgraph 渲染属性绑定**：修复了 `trade_visualizer_qt6.py` 中 `SignalOverlay` 在渲染分时图 `target='tick'` 富文本信号气泡时，误调用 `txt.setPen(...)` / `txt.setBrush(...)` 导致的 `AttributeError` 崩溃。按 `pyqtgraph.TextItem` 的标准 API 规范修正为 `txt.border = border_pen` 与 `txt.fill = bg_brush`，彻底根治了分时信号渲染崩停。
+
+## 2026-07-21 21:40
+- [x] **优化分时信号回测结果弹窗为非模态且 5 秒自动平滑关闭 (Non-Modal & 5s Auto-Close Backtest Result Dialog)**：
+    - [x] **废除模态阻塞与强行置顶**：重构了 `stock_visual_utils.py` 中 `_on_backtest_clicked` 的回测结果弹窗。将原先阻塞 UI 的 `QMessageBox.information` 重构为 `msg_box.setWindowModality(Qt.WindowModality.NonModal)`，并显式移除了 `Qt.WindowType.WindowStaysOnTopHint` 强行置顶标志，弹窗不再遮挡关键图表与抢占输入焦点。
+    - [x] **集成 5 秒自动倒计时平滑关闭 (`QTimer`)**：引入 `QTimer(msg_box)` 倒计时计时器，在窗口显示 5000ms（5秒）后自动触发 `msg_box.close()`，无需人工点击 OK 按钮即可自动消失。
+    - [x] **强引用保护与重复弹窗自愈管理**：将 `msg_box` 绑定至 `self._backtest_msg_box` 避免被 Python 垃圾回收提前释放，并在多次连续点击回测时自动清理上一次的遗留弹窗。
+
+## 2026-07-21 21:35
+- [x] **重构并升级分时图 SBC 买卖点信号渲染与坐标系自动对齐 (Refactored Intraday SBC Tick Signal Overlay & Timestamp Alignment)**：
+    - [x] **升级主可视化终端分时图信号气泡渲染 (Rich Text Signal Overlay in Visualizer)**：重构了 `trade_visualizer_qt6.py` 中 `SignalOverlay` 对 `target='tick'` 的渲染逻辑，废除了原先仅包含单薄价格数字的文本展示。移植了包含 Emoji 动作图标（🚀/🔥/🎯/B/S）、买卖动作名称、缩写决策原因以及半透明深色背景框与高对比度边框的精致富文本气泡，使主界面视图底部分时图上的买卖点信号一目了然。
+    - [x] **实现毫秒级 `timestamp` -> `bar_index` 时间自适应对齐 (Intraday Timestamp Index Alignment)**：在 `trade_visualizer_qt6.py` 和 `stock_visual_utils.py` 中分别引入了时间索引字典映射器。在渲染分时 Tick 信号前，自动将 `SignalPoint.timestamp`（如 `2026-07-21 09:36:00`）按分钟/秒与当前分时图 `tick_df` 的真实 Tick 时间进行精确反查匹配并修正 `bar_index`，彻底消除了多日分时图或不同采样率下信号位置横向错位的顽疾。
+    - [x] **严格过滤 K线层投影信号 (`is_kline=True`)**：在分时图 `target='tick'` 渲染逻辑中强制校验并剔除所有 `is_kline=True` 的日线级信号，防止日线 K 线序号（如 `360`）映射到分时图上产生飘在最右侧屏外或压在尾盘边界上的“幽灵错位标记”。
+    - [x] **加固分时图价格上下限降级校验**：在 `stock_visual_utils.py` 的 `update_plot` 中强化了 `min_p` 与 `max_p` 价格边界检查，增加了当 `df` 缺少 `high`/`low` 列时对 `close` / `trade` 列的降级兼容，防止异常价格信号导致图表纵向轴退化。
+
+## 2026-07-21 20:35
+- [x] **在 SBC 验证窗口集成分时信号回测系统（按日独立基准+信号坐标修正）**：
+    - [x] **实现按日分组 Replay 逻辑（每日独立基准）**：重构 `_on_backtest_clicked` 回放循环，按 `ticktime` 日期分组，每个交易日独立重置 `last_close/last_nclose/nclose2d/lastv1d/highest/lowest`，彻底根治多日图中所有 Tick 共用同一历史日期基准（固定在第一日）导致 `action=观望 score=0.00` 全天无信号的根本缺陷。
+    - [x] **修复全局 volume cumsum 跨日不重置的 vol_ratio 异常（从 20-90 恢复正常）**：将 `df_ticks['volume']` 从全局 `.cumsum()` 改为保留**原始增量**（`.clip(0)`），每日循环内独立执行 `.cumsum()` 以生成当日累积量，消除每日首 tick 因 `fillna` 填入全局累积量导致的超高 vol_ratio（20-90+）。
+    - [x] **过滤 K线层投影信号（is_kline=True）防止坐标系不兼容错位**：重构信号合并逻辑，过滤 `is_kline=True`（K线层投影，bar_index=日线序号，price=日收盘价），防止其被画在分时图坐标系下错位到错误价格/时间位置（如 148.95/126.61/44.29 等幻影三角）。
+    - [x] **窗口级日线数据缓存 `_bt_daily_cache`**：首次加载后将 `(code, df_daily)` 缓存在窗口实例上，后续点击「分时回测」直接复用，避免每次重读 HDF5 磁盘。
+    - [x] **df_all_row 模式下优先加载真实 tdd 日线**：修复 `verify_with_real_data` 中 `df_all_row` 模式固定使用 4 行假 DataFrame 导致 SBC 核心分析 0 信号的问题，改为优先加载 tdd 真实日线（含完整 MA/历史），仅在 tdd 不可用时 fallback 到假数据。
+    - [x] **回测验证结果（920438）**：多日走势图中在 2026-07-20 09:35 正确触发「实时高走买入」B 信号（103.40，score=0.40），vol_ratio 正常（0.12→1.52 早盘爬升），B 标记在图上位置精确。
+
+## 2026-07-21 18:30
+
+- [x] **打造通用分时回测与信号参数网格寻优工具 (Universal Intraday Backtesting & Signal Parameter Grid Search Tool)**：
+    - [x] **整合分时回放与特定节点验证**：将 `verify_multiday_rebound_688689.py` 和 `test_tick_replay_688689.py` 整合为通用的 `intraday_backtest_tool.py`，支持 `replay`（完整分时回放）、`points`（特定历史节点静态验证）以及 `optimize`（网格参数寻优）三种回测模式。
+    - [x] **根治 static 节点验证的未来数据泄露缺陷**：在 `points` 评估模式中，丢弃直接从日线获取的最终 `high/low/nclose` 等未来数据，改为动态截取当前评估时间戳之前的 Tick 分时行情，并根据成交额增量递推计算前置 `high`（历史最高）、`low`（历史最低）、`nclose`（均价 VWAP）以及实时量比，还原实盘真实决策环境。
+    - [x] **支持毫秒级时间戳节点比对**：重构了 `run_points_test` 的时间解析和 MockTime 设置，支持 `HH:MM:SS` 格式，精确定位到 Node 3 的 `11:03:18` 关键反弹点，成功触发了 `[底部分时放量强反弹]` 买入信号，且与实盘回放结果 100% 对齐。
+    - [x] **支持网格参数寻优并自动输出 Markdown 优化报告**：在 `optimize` 模式中支持对 `buy_threshold`、`stop_loss_pct`、`take_profit_pct` 等决策引擎与交易风控参数进行自动网格交叉评测，统计总交易次数、均分期望、收盘胜率、日内最大冲高以及次日开仓盈亏期望，并自动将结果导出为结构化报告文件 `backtest_optimization_report.md`。
+
 ## 2026-07-21 18:15
 - [x] **进一步优化分时放量强反弹买入决策与偏离约束豁免 (Further Optimized Intraday Strong Rebound Buy Decision & Deviation Penalties Exemption)**：
     - [x] **实现分时强反弹结构派发禁买豁免**：在 `evaluate()` 决策链中，当股价处于昨收上方、日内从最高点回落 (`fall_from_high`) 在 `5%` 以内且确认为 `is_strong_rebound` 时，豁免 `structure == "派发"` 带来的早盘/盘中硬性禁买熔断限制，允许在洗盘强反弹且回落受控时正常开仓。

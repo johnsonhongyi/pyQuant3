@@ -893,26 +893,45 @@ class SignalOverlay:
                     txt.setPos(x_pos, y_pos)
                     self.text_items[target].append(txt)
             else:
-                is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+                # [UPGRADE] 分时图信号高质感富文本气泡展示
+                if getattr(sig, 'is_kline', False):
+                    continue # 过滤 K 线层投影信号，防止错位到分时图
+
+                sig_type_str = str(getattr(sig, 'signal_type', '')).upper()
+                is_buy = any(kw in sig_type_str for kw in ["BUY", "FOLLOW", "买入", "加仓"]) and "EXIT" not in sig_type_str
+                label_color = QColor(255, 120, 120) if is_buy else QColor(120, 255, 120)
+                anchor_val = (0.5, -0.4) if is_buy else (0.5, 1.4)
                 
-                if sig.signal_type == SignalType.FOLLOW:
-                    text_color = (255, 215, 0)
-                    anchor = (0.5, -0.8)
-                elif sig.signal_type == SignalType.EXIT_FOLLOW:
-                    text_color = (255, 69, 0)
-                    anchor = (0.5, 1.5)
-                else:
-                    anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
-                    text_color = (255, 120, 120) if is_buy else (120, 255, 120)
+                reason = str(getattr(sig, 'reason', ''))
+                symbol = getattr(sig, 'symbol_override', None) or getattr(sig, 'symbol', 'o')
+                if symbol not in ('B', 'S') and symbol == 'o':
+                    if "🔥" in reason or "趋势加速" in reason: symbol = "🔥"
+                    elif "🚀" in reason or "强势结构" in reason: symbol = "🚀"
+                    elif "🎯" in reason or "买入" in reason: symbol = "🎯"
+                
+                action_name = "买" if is_buy else "卖"
+                if symbol in ('B', 'S'):
+                    action_name = symbol
+                
+                reason_clean = reason.replace("强势结构", "强势").replace("趋势加速", "加速") \
+                                     .replace("超跌企稳", "企稳").replace("买入", "").replace("卖出", "") \
+                                     .replace("引擎", "").replace("[", "").replace("]", "").strip()
+                if len(reason_clean) > 8:
+                    reason_clean = reason_clean[:8]
+                
+                symbol_disp = f"{symbol} " if symbol in ("🚀", "🔥", "🎯", "B", "S") else ""
+                reason_disp = f" {reason_clean}" if reason_clean else ""
+                
+                bg_brush = pg.mkBrush(20, 20, 20, 220)
+                border_pen = pg.mkPen(label_color, width=1)
                 
                 txt = self._get_text_item(target)
-                font = QFont('Arial', 9)
-                font.setBold(False)
+                txt.setAnchor(anchor_val)
+                txt.border = border_pen
+                txt.fill = bg_brush
                 
-                txt.setText(f"{sig.price:.2f}")
-                txt.setAnchor(anchor)
-                txt.setColor(text_color)
-                txt.setFont(font)
+                html_text = f'<div style="color: {label_color.name()}; font-size: 9pt; font-weight: bold; padding: 2px;">{symbol_disp}{action_name}:{y_pos:.2f}{reason_disp}</div>'
+                txt.setHtml(html_text)
                 txt.setPos(x_pos, y_pos)
                 self.text_items[target].append(txt)
 
@@ -13391,13 +13410,35 @@ class MainWindow(QMainWindow, WindowMixin):
                         debug_info=shadow_decision.get('debug', {})
                     ))
                 
-                # [NEW] 提取 SBC 实时信号展示在分时图
-                # 直接从专门的列表中获取 (已避免在 kline_signals 中污染日线图)
+                # [NEW] 提取 SBC 实时信号展示在分时图，并进行 timestamp 精确对齐
                 if hasattr(self, 'all_today_sbc_signals') and getattr(self, 'all_today_sbc_signals'):
                     import copy
+                    # 建立分时图 timestamp -> index 索引映射
+                    time_to_idx = {}
+                    if tick_df is not None and not tick_df.empty:
+                        t_col = 'ticktime' if 'ticktime' in tick_df.columns else ('time' if 'time' in tick_df.columns else None)
+                        if t_col:
+                            for idx_i, t_val in enumerate(tick_df[t_col]):
+                                ts_str = str(t_val)
+                                time_to_idx[ts_str] = idx_i
+                                if len(ts_str) >= 16: time_to_idx[ts_str[:16]] = idx_i
+                                if len(ts_str) >= 19: time_to_idx[ts_str[11:19]] = idx_i
+                                if len(ts_str) >= 16 and ' ' in ts_str: time_to_idx[ts_str.split(' ')[1][:5]] = idx_i
+
                     for sig in getattr(self, 'all_today_sbc_signals'):
+                        if getattr(sig, 'is_kline', False):
+                            continue # 避开 K线层投影信号
                         tick_sig = copy.deepcopy(sig)
-                        # tick_sig.bar_index 已经是分时图中的 index, 不需再赋值
+                        s_ts = str(getattr(tick_sig, 'timestamp', ''))
+                        matched_idx = -1
+                        if s_ts in time_to_idx: matched_idx = time_to_idx[s_ts]
+                        elif len(s_ts) >= 16 and s_ts[:16] in time_to_idx: matched_idx = time_to_idx[s_ts[:16]]
+                        elif len(s_ts) >= 19 and s_ts[11:19] in time_to_idx: matched_idx = time_to_idx[s_ts[11:19]]
+                        elif ' ' in s_ts and s_ts.split(' ')[1][:5] in time_to_idx: matched_idx = time_to_idx[s_ts.split(' ')[1][:5]]
+
+                        if matched_idx != -1:
+                            tick_sig.bar_index = matched_idx
+
                         tick_signals_to_draw.append(tick_sig)
 
                 if tick_signals_to_draw:
