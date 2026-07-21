@@ -1,3 +1,11 @@
+## 2026-07-21 12:00
+- [x] **在主可视化终端 (trade_visualizer_qt6.py) 实现通达信自动画通道指标绘制与顶栏交互 (Implemented TDX Auto-Channel Regression Indicator & Legend Interaction)**：
+    - [x] **实现 Python 级最小二乘法回归预测自动画通道算法 (calc_auto_channel)**：在主程序中新增 `calc_auto_channel(day_df, ur=6, lr=6)` 函数，完全依照用户给定的通达信公式算法，精确计算过去 36 周期（即 $6 \times UR$ 和 $6 \times LR$）的最大高点与最小低点跨度，进行线性回归外推，并以区间的最大正负偏离值来绘制上轨、中轨和下轨的自动通道，同时依据 HHV/LLV 的 100 天极限价格的 1.1x 与 0.9x 进行截断溢出 clip 过滤。
+    - [x] **新增工具栏控制 Action 与状态栏槽函数 (Toolbar Action & Toggle Slot)**：在 `MainWindow` 初始化中追加 `self.show_auto_channel = True`，在主工具栏上新增 `“通道”` 切换按钮（Action），并在 `on_toggle_auto_channel` 槽函数中实现图形的显隐更新与实时图表重绘。
+    - [x] **实现 PyQtGraph 多通道线平滑绘制与 finite 剔除 (PyQtGraph connect='finite')**：在 `_render_charts_logic` 中调用 `calc_auto_channel`，并将其得到的 `chan_mid`, `chan_up`, `chan_dn` 回填到 `day_df` 缓存中以支持十字光标。使用 `connect='finite'` 来规避 `NaN` 值的连接，使得曲线在远点之前的历史区间不画出多余的线条，完美还原了通达信在近点外推的画图效果。
+    - [x] **实现顶栏 legend 数据实时与十字光标随动显示 (Legend Metric Display & Crosshair Sync)**：重构了 `_update_ma_legend` 逻辑。当开启通道显示时，在 K 线图上方的 legend 背景面板中追加 `通道: MID:x.xx UP:x.xx DN:x.xx` 指标状态显示，支持在鼠标移动或键盘左右导航时实时同步获取当前 K 线的通道位置数据。
+    - [x] **通过 Python 静态编译自检**：对修改后的 `trade_visualizer_qt6.py` 文件执行了编译校验，确保 100% 无任何 IndentationError 或 SyntaxError，完全对齐系统工程质量要求。
+
 ## 2026-07-21 11:30
 - [x] **修复 trade_visualizer_qt6.py 启动和数据加载时无法正确恢复持久化列宽的顽疾 (Fixed Saved Column Widths Restoration Failure in trade_visualizer_qt6.py)**：
     - [x] **根治 QTableWidget 获取 header 属性为 None 的 Bug**：修复了在 `_save_h_scroll_state`、`_restore_h_scroll_state`、`_resize_columns_tightly` 和 `_apply_saved_column_widths` 方法中，错误使用 `getattr(widget, 'header', None)` 导致对 `QTableWidget` 类型的 `stock_table` （主行情表）永远返回 `None` 从而直接 return 忽略了所有列宽恢复和自适应行为的缺陷。设计并引入了 `_get_widget_header(self, widget)` 兼容 Helper，自动适配并获取 `QTableWidget` 的 `horizontalHeader()` 以及 `QTreeWidget` 的 `header()`。

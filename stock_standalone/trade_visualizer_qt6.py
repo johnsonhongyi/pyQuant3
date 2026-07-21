@@ -1627,6 +1627,102 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
 
     print("[IPC] realtime_worker_process exited cleanly")
 
+def calc_auto_channel(day_df, ur=6, lr=6):
+    """
+    计算自动画通道指标：
+    TC1:=IF(H=HHV(H,6*UR),H,DRAWNULL);
+    TC2:=CONST(BARSLAST(TC1=H))+1;
+    BC1:=IF(L=LLV(L,6*LR),L,DRAWNULL);
+    BC2:=CONST(BARSLAST(BC1=L))+1;
+    """
+    n = len(day_df)
+    mid = np.full(n, np.nan)
+    up = np.full(n, np.nan)
+    dn = np.full(n, np.nan)
+    
+    if n < 20: # 基础数据量太少时直接返回 NaN
+        return mid, up, dn
+        
+    highs = day_df['high'].values
+    lows = day_df['low'].values
+    closes = day_df['close'].values
+    
+    # 1. 寻找最后一个符合 H = HHV(H, 36) 的高点
+    w_high = 6 * ur
+    hhv = day_df['high'].rolling(w_high, min_periods=1).max().values
+    high_matches = np.where(highs == hhv)[0]
+    if len(high_matches) == 0:
+        return mid, up, dn
+    idx_high = high_matches[-1]
+    
+    # 2. 寻找最后一个符合 L = LLV(L, 36) 的低点
+    w_low = 6 * lr
+    llv = day_df['low'].rolling(w_low, min_periods=1).min().values
+    low_matches = np.where(lows == llv)[0]
+    if len(low_matches) == 0:
+        return mid, up, dn
+    idx_low = low_matches[-1]
+    
+    # 远点和近点
+    idx_far = min(idx_high, idx_low)
+    idx_near = max(idx_high, idx_low)
+    nod = idx_near - idx_far
+    
+    if nod < 2: # 跨度太小，无法做有效的线性回归
+        return mid, up, dn
+        
+    # 3. 线性回归
+    x = np.arange(nod + 1)
+    y = closes[idx_far : idx_near + 1]
+    
+    # 计算斜率 K 和截距 C
+    # y = K * x + C
+    # 最小二乘公式
+    sum_x = np.sum(x)
+    sum_y = np.sum(y)
+    sum_xx = np.sum(x ** 2)
+    sum_xy = np.sum(x * y)
+    m = nod + 1
+    
+    denom = m * sum_xx - sum_x ** 2
+    if denom == 0:
+        return mid, up, dn
+        
+    k = (m * sum_xy - sum_x * sum_y) / denom
+    c = (sum_y - k * sum_x) / m
+    
+    # 中线拟合值
+    # LRL(i) = k * (i - idx_far) + c
+    lrl = k * np.arange(n - idx_far) + c # 从 idx_far 到 n-1 的直线值
+    
+    # 4. 计算偏差 AT5 和 UT5 (在区间 [idx_far, idx_near] 内)
+    lrl_segment = lrl[:nod + 1]
+    high_segment = highs[idx_far : idx_near + 1]
+    low_segment = lows[idx_far : idx_near + 1]
+    
+    at5 = np.max(high_segment - lrl_segment)
+    ut5 = np.max(lrl_segment - low_segment)
+    
+    at5 = max(0.0, at5)
+    ut5 = max(0.0, ut5)
+    
+    # 5. 生成结果线段 (只画 idx_far 之后的线)
+    limit_high = np.max(highs[-100:]) * 1.10 if n >= 100 else np.max(highs) * 1.10
+    limit_low = np.min(lows[-100:]) * 0.90 if n >= 100 else np.min(lows) * 0.90
+    
+    mid_vals = lrl
+    up_vals = lrl + at5
+    dn_vals = lrl - ut5
+    
+    # 过滤限制范围
+    valid_mask = (mid_vals >= limit_low) & (mid_vals <= limit_high)
+    
+    mid[idx_far:] = np.where(valid_mask, mid_vals, np.nan)
+    up[idx_far:] = np.where(valid_mask, np.clip(up_vals, limit_low, limit_high), np.nan)
+    dn[idx_far:] = np.where(valid_mask, np.clip(dn_vals, limit_low, limit_high), np.nan)
+    
+    return mid, up, dn
+
 def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFrame:
     """
     统一 DataFrame 结构（最终稳定版）：
@@ -3230,6 +3326,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- ⚡ [NEW] 缠论分析状态与渲染对象 ---
         self.show_chan = True
+        self.show_auto_channel = True
         self.chan_bi_pen = pg.mkPen(color='#00FFFF', width=1.5)  # 青色分笔
         # self.chan_bi_curve = pg.PlotDataItem(pen=self.chan_bi_pen, connect='finite', zValue=80)
         # self.kline_plot.addItem(self.chan_bi_curve)
@@ -5028,6 +5125,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.chan_action.triggered.connect(self.on_toggle_chan)
         self.toolbar.addAction(self.chan_action)
 
+        # [NEW] 自动通道 Action
+        self.auto_channel_action = QAction("通道", self)
+        self.auto_channel_action.setCheckable(True)
+        self.auto_channel_action.setChecked(self.show_auto_channel)
+        self.auto_channel_action.setToolTip("显示/隐藏自动画通道指标")
+        self.auto_channel_action.triggered.connect(self.on_toggle_auto_channel)
+        self.toolbar.addAction(self.auto_channel_action)
+
         # [NEW] SBC 回放 Action
         self.sbc_replay_action = QAction("SBC", self)
         self.sbc_replay_action.setToolTip("使用本地缓存/日线数据执行SBC逻辑验证 (跟随全局实时开关)")
@@ -5229,6 +5334,20 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'chan_zs_pool'):
                 for item in self.chan_zs_pool:
                     item.hide()
+        
+        if self.current_code:
+            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def on_toggle_auto_channel(self, checked):
+        """切换自动画通道显示"""
+        self.show_auto_channel = checked
+        if not checked:
+            if hasattr(self, 'mid_curve'):
+                self.mid_curve.hide()
+            if hasattr(self, 'up_curve'):
+                self.up_curve.hide()
+            if hasattr(self, 'dn_curve'):
+                self.dn_curve.hide()
         
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
@@ -7423,12 +7542,32 @@ class MainWindow(QMainWindow, WindowMixin):
             f"<span style='color:{c_dn}; font-weight:bold;'>DN:{dn_str}</span>"
         )
         
-        # ⚡ [NEW] 如果翻转线 (Reversal Line) 当前处于显示状态，动态把数值也绘制在顶部
+        # ⚡ [NEW] 如果翻转线 (Reversal Line) 当前处于显示状态，动态把数值也绘制 in 顶部
         if hasattr(self, 'reversal_line_curve') and self.reversal_line_curve.isVisible():
             rev_v = row.get('reversal_line', np.nan)
             rev_str = format_indicator_with_icon(rev_v)
             html_text += f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 翻转线: </span>" \
                          f"<span style='color:#FFFF00; font-weight:bold;'>REV:{rev_str}</span>"
+
+        # ⚡ [NEW] 如果自动画通道当前处于显示状态，动态把数值也绘制在顶部
+        if getattr(self, 'show_auto_channel', True):
+            chan_mid_v = row.get('chan_mid', np.nan)
+            chan_up_v = row.get('chan_up', np.nan)
+            chan_dn_v = row.get('chan_dn', np.nan)
+            
+            mid_str = format_indicator_with_icon(chan_mid_v)
+            up_str = format_indicator_with_icon(chan_up_v)
+            dn_str = format_indicator_with_icon(chan_dn_v)
+            
+            c_mid = "#FFFFFF" if is_dark else "#000000"
+            c_up_dn = "#C8C8C8" if is_dark else "#646464"
+            
+            html_text += (
+                f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 通道: </span>"
+                f"<span style='color:{c_mid}; font-weight:bold;'>MID:{mid_str}</span>&nbsp;&nbsp;"
+                f"<span style='color:{c_up_dn}; font-weight:bold;'>UP:{up_str}</span>&nbsp;&nbsp;"
+                f"<span style='color:{c_up_dn}; font-weight:bold;'>DN:{dn_str}</span>"
+            )
 
         # 👑 [NEW] 如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在均线下方新起一行展示
         if hasattr(self, 'current_code') and self.current_code:
@@ -12130,6 +12269,54 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⚡ [NEW] 绘制平台突破的顶底和天数 (Platform Breakout)
         self._draw_platform_breakout(x_axis, day_df)
+
+        # --- ⚡ [NEW] 自动画通道绘制 ---
+        if getattr(self, 'show_auto_channel', True):
+            try:
+                mid_data, up_data, dn_data = calc_auto_channel(day_df)
+                
+                # 写入 day_df 以便十字光标获取值 (跟通达信一致)
+                day_df['chan_mid'] = mid_data
+                day_df['chan_up'] = up_data
+                day_df['chan_dn'] = dn_data
+                
+                # 确定画线颜色和宽度
+                is_dark = self.qt_theme == 'dark'
+                mid_color = QColor(255, 255, 255) if is_dark else QColor(0, 0, 0)
+                up_dn_color = QColor(200, 200, 200) if is_dark else QColor(100, 100, 100)
+                
+                mid_pen = pg.mkPen(mid_color, width=2)
+                up_dn_pen = pg.mkPen(up_dn_color, width=1)
+                
+                # 绘制或更新中轨线
+                if not hasattr(self, 'mid_curve') or self.mid_curve not in self.kline_plot.items:
+                    self.mid_curve = self.kline_plot.plot(x_axis, mid_data, pen=mid_pen, name="Channel_Mid", connect='finite')
+                else:
+                    self.mid_curve.setData(x_axis, mid_data)
+                    self.mid_curve.setPen(mid_pen)
+                    self.mid_curve.show()
+                    
+                # 绘制或更新上轨线
+                if not hasattr(self, 'up_curve') or self.up_curve not in self.kline_plot.items:
+                    self.up_curve = self.kline_plot.plot(x_axis, up_data, pen=up_dn_pen, name="Channel_Up", connect='finite')
+                else:
+                    self.up_curve.setData(x_axis, up_data)
+                    self.up_curve.setPen(up_dn_pen)
+                    self.up_curve.show()
+                    
+                # 绘制或更新下轨线
+                if not hasattr(self, 'dn_curve') or self.dn_curve not in self.kline_plot.items:
+                    self.dn_curve = self.kline_plot.plot(x_axis, dn_data, pen=up_dn_pen, name="Channel_Dn", connect='finite')
+                else:
+                    self.dn_curve.setData(x_axis, dn_data)
+                    self.dn_curve.setPen(up_dn_pen)
+                    self.dn_curve.show()
+            except Exception as e:
+                logger.error(f"[AutoChannel] 绘制失败: {e}")
+        else:
+            if hasattr(self, 'mid_curve'): self.mid_curve.hide()
+            if hasattr(self, 'up_curve'): self.up_curve.hide()
+            if hasattr(self, 'dn_curve'): self.dn_curve.hide()
 
         # --- ⚡ [NEW] 缠论分析展示 ---
         if getattr(self, 'show_chan', True):
