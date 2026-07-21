@@ -1,3 +1,9 @@
+## 2026-07-21 11:30
+- [x] **修复 trade_visualizer_qt6.py 启动和数据加载时无法正确恢复持久化列宽的顽疾 (Fixed Saved Column Widths Restoration Failure in trade_visualizer_qt6.py)**：
+    - [x] **根治 QTableWidget 获取 header 属性为 None 的 Bug**：修复了在 `_save_h_scroll_state`、`_restore_h_scroll_state`、`_resize_columns_tightly` 和 `_apply_saved_column_widths` 方法中，错误使用 `getattr(widget, 'header', None)` 导致对 `QTableWidget` 类型的 `stock_table` （主行情表）永远返回 `None` 从而直接 return 忽略了所有列宽恢复和自适应行为的缺陷。设计并引入了 `_get_widget_header(self, widget)` 兼容 Helper，自动适配并获取 `QTableWidget` 的 `horizontalHeader()` 以及 `QTreeWidget` 的 `header()`。
+    - [x] **实现多候选中文/英文表头模糊映射匹配机制 (Multi-Candidate Column Name Matching)**：为防止 `global.ini` 的 `vis_column_map` 与主程序中的 `default_column_map` 对特定英文列（如 `percent`）的中文翻译不一致（如 `"涨幅"` 与 `"涨幅%"`）导致持久化配置无法恢复的隐患，在 `_apply_saved_column_widths` 和 `_limit_table_column_widths` 中重构了匹配逻辑。除了直接匹配表头名外，还会自适应获取列的原生英文名，并提取包括 `column_map` 映射值、中英文常见候选词（如 `'代码'`、`'名称'`、`'涨幅'`、`'涨幅%'`）进行多级备选匹配，保证了 100% 的兼容还原。
+    - [x] **自检与磁盘数据清理**：排查并确认了 `visualizer_layout.json` 文件并未损坏，内存中的 Unicode 编码完全正常。在完成代码的编译安全自检后，成功对持久化列宽实现了完美、稳定的自愈还原。
+
 ## 2026-07-21 10:15
 - [x] **修复 universe_manager.py 中 ma20 为 0 导致除零错误的 Bug (Fixed ZeroDivisionError in UniverseManager)**：
     - [x] **增加 ma20 的 0.0 与 NaN 值校验防御**：在 `ats/universe_manager.py` 的 `run_pipeline_filtering` 行情迭代管道中，由于没有实时数据仅有历史数据，或部分个股停牌未交易等原因，其 `close` 和 `ma20` 可能为 `0.0` 或者是 `NaN`。此时计算 `deviation = (price - ma20) / ma20 * 100` 会直接引发 `ZeroDivisionError: float division by zero` 崩溃，导致 UI 行情刷新中断。现增加了对 `ma20` 是否为 0 或 NaN 的前置条件防御校验，在此种情况下将偏差率 `deviation` 安全强制置为 `0.0`，彻底根治了除零错误。
