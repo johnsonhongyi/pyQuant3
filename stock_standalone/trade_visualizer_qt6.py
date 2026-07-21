@@ -1641,7 +1641,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     dn = np.full(n, np.nan)
     
     if n < 20: # 基础数据量太少时直接返回 NaN
-        return mid, up, dn, 0.0
+        return mid, up, dn, 0.0, 0
         
     highs = day_df['high'].values
     lows = day_df['low'].values
@@ -1652,7 +1652,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     hhv = day_df['high'].rolling(w_high, min_periods=1).max().values
     high_matches = np.where(highs == hhv)[0]
     if len(high_matches) == 0:
-        return mid, up, dn, 0.0
+        return mid, up, dn, 0.0, 0
     idx_high = high_matches[-1]
     
     # 2. 寻找最后一个符合 L = LLV(L, 36) 的低点
@@ -1660,7 +1660,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     llv = day_df['low'].rolling(w_low, min_periods=1).min().values
     low_matches = np.where(lows == llv)[0]
     if len(low_matches) == 0:
-        return mid, up, dn, 0.0
+        return mid, up, dn, 0.0, 0
     idx_low = low_matches[-1]
     
     # 远点和近点
@@ -1669,7 +1669,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     nod = idx_near - idx_far
     
     if nod < 2: # 跨度太小，无法做有效的线性回归
-        return mid, up, dn, 0.0
+        return mid, up, dn, 0.0, 0
         
     # 3. 线性回归
     x = np.arange(nod + 1)
@@ -1686,7 +1686,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     
     denom = m * sum_xx - sum_x ** 2
     if denom == 0:
-        return mid, up, dn, 0.0
+        return mid, up, dn, 0.0, 0
         
     k = (m * sum_xy - sum_x * sum_y) / denom
     c = (sum_y - k * sum_x) / m
@@ -1721,7 +1721,113 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     up[idx_far:] = np.where(valid_mask, np.clip(up_vals, limit_low, limit_high), np.nan)
     dn[idx_far:] = np.where(valid_mask, np.clip(dn_vals, limit_low, limit_high), np.nan)
     
-    return mid, up, dn, k
+    return mid, up, dn, k, idx_far
+
+def calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far=0):
+    """
+    独立计算每条 KX 趋势线数据：
+    KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);
+    各条趋势线相互独立，若跌破趋势线则只多画3周期。
+    """
+    n = len(day_df)
+    lines_data = []
+    if n < 20:
+        return lines_data
+        
+    lows = day_df['low'].values
+    highs = day_df['high'].values
+    closes = day_df['close'].values
+    
+    # 1. 计算条件
+    llv20 = day_df['low'].rolling(20, min_periods=1).min().values
+    cond1 = lows <= llv20
+    
+    hhv20 = day_df['high'].rolling(20, min_periods=1).max().values
+    cond2 = highs >= hhv20
+    
+    llv4 = day_df['low'].rolling(4, min_periods=1).min().values
+    
+    # 2. 匹配线段 (DRAWLINE 配对逻辑)
+    pairs = []
+    i = 0
+    while i < n:
+        if cond1[i]:
+            i_A = i
+            price_A = lows[i]
+            i_B = -1
+            for j in range(i_A + 1, n):
+                if cond1[j]:
+                    # 遇到新的起点，废弃旧起点，覆盖更新为最新起点
+                    i_A = j
+                    price_A = lows[j]
+                elif cond2[j]:
+                    # 遇到终点，配对成功
+                    i_B = j
+                    price_B = llv4[j]
+                    break
+            if i_B != -1:
+                pairs.append((i_A, price_A, i_B, price_B))
+                i = i_B + 1
+            else:
+                break
+        else:
+            i += 1
+            
+    # 3. 独立计算每一条线的数据并进行跌破截断判定
+    start_draw_idx = max(0, idx_far - 10)
+    
+    for idx, (i_A, price_A, i_B, price_B) in enumerate(pairs):
+        # 长度限制：如果起点太靠前，跳过不画
+        if i_A < start_draw_idx:
+            continue
+            
+        k_val = (price_B - price_A) / (i_B - i_A)
+        
+        # 趋势线默认延伸范围
+        max_end = n
+        
+        # 计算整条曲线的延伸数据
+        segment_len = max_end - i_A
+        x_indices = np.arange(i_A, max_end)
+        y_vals = k_val * (x_indices - i_A) + price_A
+        
+        # 判定跌破/突破截断点：从 i_B 之后（外推区）开始检测
+        cut_idx = max_end
+        for j in range(i_B + 1, max_end):
+            val = y_vals[j - i_A]
+            
+            # 价格溢出过滤
+            if val < limit_low or val > limit_high:
+                cut_idx = j
+                break
+                
+            # 支撑线跌破（k > 0 且收盘价低于趋势线）
+            if k_val > 0:
+                if closes[j] < val:
+                    # 跌破后最多画3天
+                    cut_idx = min(max_end, j + 3)
+                    break
+            # 压力线突破（k < 0 且收盘价突破趋势线）
+            elif k_val < 0:
+                if closes[j] > val:
+                    # 突破后最多画3天
+                    cut_idx = min(max_end, j + 3)
+                    break
+                    
+        # 截断数据，确保至少画到终点 i_B
+        actual_len = max(i_B - i_A + 1, cut_idx - i_A)
+        x_draw = x_indices[:actual_len]
+        y_draw = y_vals[:actual_len]
+        
+        # 过滤最低限制和最高限制
+        valid_mask = (y_draw >= limit_low) & (y_draw <= limit_high)
+        x_draw = x_draw[valid_mask]
+        y_draw = y_draw[valid_mask]
+        
+        if len(x_draw) > 1:
+            lines_data.append({'x': x_draw, 'y': y_draw})
+            
+    return lines_data
 
 def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFrame:
     """
@@ -7554,13 +7660,16 @@ class MainWindow(QMainWindow, WindowMixin):
             chan_mid_v = row.get('chan_mid', np.nan)
             chan_up_v = row.get('chan_up', np.nan)
             chan_dn_v = row.get('chan_dn', np.nan)
+            chan_kx_v = row.get('chan_kx', np.nan)
             
             mid_str = format_indicator_with_icon(chan_mid_v)
             up_str = format_indicator_with_icon(chan_up_v)
             dn_str = format_indicator_with_icon(chan_dn_v)
+            kx_str = format_indicator_with_icon(chan_kx_v)
             
             c_mid = "#FFFFFF" if is_dark else "#000000"
             c_up_dn = "#C8C8C8" if is_dark else "#646464"
+            c_kx = "#FFFFFF" if is_dark else "#000000"
             
             html_text += (
                 f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 通道: </span>"
@@ -7568,6 +7677,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>UP:{up_str}</span>&nbsp;&nbsp;"
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>DN:{dn_str}</span>"
             )
+            if not pd.isna(chan_kx_v):
+                html_text += f"&nbsp;&nbsp;<span style='color:{c_kx}; font-weight:bold;'>KX:{kx_str}</span>"
 
         # 👑 [NEW] 如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在均线下方新起一行展示
         if hasattr(self, 'current_code') and self.current_code:
@@ -12273,12 +12384,36 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- ⚡ [NEW] 自动画通道绘制 ---
         if getattr(self, 'show_auto_channel', True):
             try:
-                mid_data, up_data, dn_data, chan_k = calc_auto_channel(day_df)
+                mid_data, up_data, dn_data, chan_k, idx_far = calc_auto_channel(day_df)
                 
                 # 写入 day_df 以便十字光标获取值 (跟通达信一致)
                 day_df['chan_mid'] = mid_data
                 day_df['chan_up'] = up_data
                 day_df['chan_dn'] = dn_data
+                
+                # 计算最高与最低限制
+                n = len(day_df)
+                highs = day_df['high'].values
+                lows = day_df['low'].values
+                limit_high = np.max(highs[-100:]) * 1.10 if n >= 100 else np.max(highs) * 1.10
+                limit_low = np.min(lows[-100:]) * 0.90 if n >= 100 else np.min(lows) * 0.90
+                
+                # 清除旧的多条 KX 曲线从主图
+                if hasattr(self, 'kx_curves'):
+                    for curve in self.kx_curves:
+                        self.kline_plot.removeItem(curve)
+                self.kx_curves = []
+                
+                # 计算多条独立的 KX 趋势线
+                kx_lines_data = calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far)
+                
+                # 回填 day_df 叠加缓存以便十字光标能读取数值
+                kx_combined = np.full(n, np.nan)
+                for item in kx_lines_data:
+                    x_idx = item['x']
+                    y_val = item['y']
+                    kx_combined[x_idx] = y_val
+                day_df['chan_kx'] = kx_combined
                 
                 # 确定画线颜色和宽度
                 is_dark = self.qt_theme == 'dark'
@@ -12300,6 +12435,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 mid_pen = pg.mkPen(mid_color, width=2)
                 up_pen = pg.mkPen(up_color, width=2)
                 dn_pen = pg.mkPen(dn_color, width=2)
+                
+                # KX 趋势线画笔：粗线亮白色
+                kx_color = QColor(255, 255, 255)
+                kx_pen = pg.mkPen(kx_color, width=3.0)
                 
                 # 绘制或更新中轨线
                 if not hasattr(self, 'mid_curve') or self.mid_curve not in self.kline_plot.items:
@@ -12324,12 +12463,22 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.dn_curve.setData(x_axis, dn_data)
                     self.dn_curve.setPen(dn_pen)
                     self.dn_curve.show()
+                    
+                # 依次绘制每一条独立的 KX 趋势线
+                for item in kx_lines_data:
+                    x_coords = x_axis[item['x']]
+                    y_coords = item['y']
+                    curve = self.kline_plot.plot(x_coords, y_coords, pen=kx_pen, connect='finite')
+                    self.kx_curves.append(curve)
             except Exception as e:
                 logger.error(f"[AutoChannel] 绘制失败: {e}")
         else:
             if hasattr(self, 'mid_curve'): self.mid_curve.hide()
             if hasattr(self, 'up_curve'): self.up_curve.hide()
             if hasattr(self, 'dn_curve'): self.dn_curve.hide()
+            if hasattr(self, 'kx_curves'):
+                for curve in self.kx_curves:
+                    curve.hide()
 
         # --- ⚡ [NEW] 缠论分析展示 ---
         if getattr(self, 'show_chan', True):

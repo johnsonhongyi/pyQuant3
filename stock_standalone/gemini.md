@@ -5,6 +5,7 @@
     - [x] **实现 PyQtGraph 多通道线平滑绘制与 finite 剔除 (PyQtGraph connect='finite')**：在 `_render_charts_logic` 中调用 `calc_auto_channel`，并将其得到的 `chan_mid`, `chan_up`, `chan_dn` 回填到 `day_df` 缓存中以支持十字光标。使用 `connect='finite'` 来规避 `NaN` 值的连接，使得曲线在远点之前的历史区间不画出多余的线条，完美还原了通达信在近点外推的画图效果。
     - [x] **实现顶栏 legend 数据实时与十字光标随动显示 (Legend Metric Display & Crosshair Sync)**：重构了 `_update_ma_legend` 逻辑。当开启通道显示时，在 K 线图上方的 legend 背景面板中追加 `通道: MID:x.xx UP:x.xx DN:x.xx` 指标状态显示，支持在鼠标移动或键盘左右导航时实时同步获取当前 K 线的通道位置数据。
     - [x] **优化通道轨道线动态配色与线宽可观察性 (Optimized Channel Line Dynamic Coloring & Visibility)**：重构了 `calc_auto_channel` 以返回回归斜率 $k$。并在 `_render_charts_logic` 中，当斜率 $k > 0$（上升通道）时，将下轨（支撑买入线）染为高对比度的暖橙色，上轨（压力线）染为青蓝色；当斜率 $k < 0$（下降通道）时反之，上轨染为暖橙色，下轨染为青蓝色，平盘时保持灰色。同时，将上轨与下轨曲线线宽由 1px 统一调粗至 2px，规避了与 K 线红绿色泽的混淆，极大提升了图表形态上的物理识别效率。
+    - [x] **实现 KX 趋势线指标独立多轨绘制、跌破截断与顶栏随动 (Implemented KX Independent Multi-Trendline Drawing, Breakout Truncation & Legend Sync)**：将趋势线绘制逻辑由原来的单条一维数组形式重构为独立管理多条 `pg.PlotDataItem` 曲线。当不同趋势线在时间上相邻或重合时，通过各自独立绘制物理消除了由于共享一维数组引发的“垂直下折连线”Bug。实现了实盘跌破自适应截止机制：从终点 $i_B$ 之后的外推区开始，当上升趋势线（支撑线）被收盘价跌破或下降趋势线（压力线）被收盘价向上突破时，趋势线最多再延伸 3 周期即物理截断，防止了盘面线条过长和凌乱，完美满足“跌破后不要画得太长”的交易诉求。同时，将多条独立曲线的值叠加回填至 `day_df['chan_kx']` 缓存，兼容了顶栏 Legend 在鼠标移动或方向键操作时的游标随动展示。
     - [x] **通过 Python 静态编译自检**：对修改后的 `trade_visualizer_qt6.py` 文件执行了编译校验，确保 100% 无任何 IndentationError 或 SyntaxError，完全对齐系统工程质量要求。
 
 ## 2026-07-21 11:30
