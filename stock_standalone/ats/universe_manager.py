@@ -120,7 +120,8 @@ class UniverseManager:
         
         # Only evaluate tracked codes or pre-filtered data with real ma20 column to avoid mock flooding
         if 'ma20' in df_all.columns:
-            dev = (df_all['close'] - df_all['ma20']) / df_all['ma20'] * 100
+            safe_ma20 = df_all['ma20'].replace(0, float('nan'))
+            dev = (df_all['close'] - safe_ma20) / safe_ma20 * 100
             valid_mask = (dev >= -1.0) & (dev <= 2.0)
             target_df = df_all[valid_mask | df_all.index.isin(tracked_codes)]
         else:
@@ -135,7 +136,10 @@ class UniverseManager:
             
             # Use real ma20 if present in row, otherwise default to slightly below price for tracked codes
             ma20 = row.get('ma20', price * 0.99)
-            deviation = (price - ma20) / ma20 * 100
+            if pd.isna(ma20) or ma20 == 0:
+                deviation = 0.0
+            else:
+                deviation = (price - ma20) / ma20 * 100
             
             # Funnel Condition 1: Radar (deviation within -1% and +2%)
             if -1.0 <= deviation <= 2.0:

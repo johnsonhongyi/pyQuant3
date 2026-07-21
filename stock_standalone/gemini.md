@@ -1,3 +1,8 @@
+## 2026-07-21 10:15
+- [x] **修复 universe_manager.py 中 ma20 为 0 导致除零错误的 Bug (Fixed ZeroDivisionError in UniverseManager)**：
+    - [x] **增加 ma20 的 0.0 与 NaN 值校验防御**：在 `ats/universe_manager.py` 的 `run_pipeline_filtering` 行情迭代管道中，由于没有实时数据仅有历史数据，或部分个股停牌未交易等原因，其 `close` 和 `ma20` 可能为 `0.0` 或者是 `NaN`。此时计算 `deviation = (price - ma20) / ma20 * 100` 会直接引发 `ZeroDivisionError: float division by zero` 崩溃，导致 UI 行情刷新中断。现增加了对 `ma20` 是否为 0 或 NaN 的前置条件防御校验，在此种情况下将偏差率 `deviation` 安全强制置为 `0.0`，彻底根治了除零错误。
+    - [x] **防范 pandas vector 除零产生无效值**：同步对第 123 行 pandas 的 Series 矢量除法操作进行了安全防范，利用 `df_all['ma20'].replace(0, float('nan'))` 在除法前把 0 替换为 `nan`，防止生成 `inf` 偏离度导致后续股票过滤和 tracked 股票匹配状态被污染。
+
 ## 2026-07-20 18:10
 - [x] **优化桌面窗口捕获选择体验与重构高 DPI/多分辨率桌面切换自适应 (Optimized Window Layout Capture & Resolution Switch Auto-Adaptation)**：
     - [x] **修改捕获桌面窗口默认点击单选、按住 Ctrl 为多选**：在 `webTools/window_manager/ui.py` 中，将 `CaptureWindowsDialog` 的列表选择模式由 `MultiSelection` 重构为 `ExtendedSelection`。点击默认单选选中，只有按住 `Ctrl` 键点击才进行多选/反选，完全对齐 Windows 桌面及资源管理器的原生选择交互习惯。
