@@ -257,16 +257,18 @@ class SignalOverlay:
                 x_pos = getattr(sig, 'bar_index', 0)
                 y_pos = getattr(sig, 'price', 0)
                 reason = str(getattr(sig, 'reason', ''))
-                symbol = getattr(sig, 'symbol', 'o')
-                if symbol == 'o' or symbol == '🎯': 
-                    if "🔥" in reason or "趋势加速" in reason: symbol = "🔥"
-                    elif "🚀" in reason or "强势结构" in reason: symbol = "🚀"
-                    elif "🎯" in reason or "买入" in reason: symbol = "🎯"
+                # [NEW] 优先取 symbol_override（支持回测 B/S 标记）
+                symbol = getattr(sig, 'symbol_override', None) or getattr(sig, 'symbol', 'o')
+                if symbol not in ('B', 'S'):
+                    if symbol == 'o' or symbol == '🎯': 
+                        if "🔥" in reason or "趋势加速" in reason: symbol = "🔥"
+                        elif "🚀" in reason or "强势结构" in reason: symbol = "🚀"
+                        elif "🎯" in reason or "买入" in reason: symbol = "🎯"
                 color = getattr(sig, 'color', (255, 255, 0))
                 size = getattr(sig, 'size', 12)
                 sig_type_str = str(getattr(sig, 'signal_type', '')).upper()
             
-            is_emoji = symbol in ('🎯', '🚀', '🔥')
+            is_emoji = symbol in ('🎯', '🚀', '🔥', 'B', 'S')
             xs.append(x_pos)
             ys.append(y_pos)
             brushes.append(pg.mkBrush(color))
@@ -336,7 +338,8 @@ class SignalOverlay:
             
             if is_emoji:
                 emoji = pg.TextItem(symbol, anchor=(0.5, 0.5))
-                emoji.setHtml(f'<div style="font-size: 16pt;">{symbol}</div>')
+                color_name = label_color.name()
+                emoji.setHtml(f'<div style="font-size: 16pt; color: {color_name}; font-weight: bold;">{symbol}</div>')
                 emoji.setPos(x_pos, y_pos)
                 self.plot_item.addItem(emoji)
                 self.text_items.append(emoji)
@@ -400,6 +403,13 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         self.btn_link.setStyleSheet("background-color: #AA4444; color: white; border: 1px solid #FF8888; font-weight: bold;")
         self.btn_link.clicked.connect(self._on_linkage_clicked)
         btn_layout.addWidget(self.btn_link)
+        
+        # [NEW] Backtest button
+        self.btn_backtest = QPushButton("分时回测")
+        self.btn_backtest.setFixedWidth(80)
+        self.btn_backtest.setStyleSheet("background-color: #2b5c8f; color: white; border: 1px solid #3d78b8; font-weight: bold;")
+        self.btn_backtest.clicked.connect(self._on_backtest_clicked)
+        btn_layout.addWidget(self.btn_backtest)
         
         # [NEW] Status label for refresh time
         self.lbl_status = QLabel("")
@@ -523,9 +533,411 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
             self.pw.autoRange()
             print("📊 视图已重置为自动自适应范围")
 
+    def _on_backtest_clicked(self):
+        """
+        [NEW] 针对当前个股分时数据执行盘中策略回测，并绘制买卖点 B, S
+        """
+        import re
+        title = self.windowTitle()
+        match = re.search(r'(?:\[|\b)(\d{6})(?:\]|\b)', title)
+        if not match:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "错误", "未在窗口标题中找到有效的6位股票代码！")
+            return
+        code = match.group(1)
+        
+        if self.df_ref is None or self.df_ref.empty:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "无数据", "当前窗口内无有效的分时行情数据！")
+            return
+            
+        # 1. 确定日期
+        target_date = None
+        if isinstance(self.df_ref.index, pd.DatetimeIndex) and len(self.df_ref) > 0:
+            target_date = self.df_ref.index[0].strftime('%Y-%m-%d')
+        
+        # 2. 如果 df_ref 的 index 不是 DatetimeIndex，尝试从 time_labels_ref 中提取
+        if not target_date or not isinstance(self.df_ref.index, pd.DatetimeIndex):
+            try:
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                except ImportError:
+                    from stock_standalone.JSONData import tdx_data_Day as tdd
+                df_daily = tdd.get_tdx_append_now_df_api(code)
+                if df_daily is not None and not df_daily.empty:
+                    target_date = str(df_daily.index[-1])[:10]
+            except Exception:
+                pass
+                
+            if not target_date:
+                target_date = datetime.now().strftime('%Y-%m-%d')
+                
+            if self.time_labels_ref:
+                try:
+                    dts = []
+                    for tl in self.time_labels_ref:
+                        if " " in tl:
+                            parts = tl.split()
+                            dts.append(pd.to_datetime(f"{target_date[:8]}{parts[0]} {parts[1]}"))
+                        else:
+                            dts.append(pd.to_datetime(f"{target_date} {tl}"))
+                    self.df_ref.index = dts
+                    target_date = self.df_ref.index[0].strftime('%Y-%m-%d')
+                except Exception as e:
+                    print(f"重构 DatetimeIndex 失败: {e}")
+                    
+        if not target_date:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "日期缺失", "无法确定该分时行情对应的日期！")
+            return
+            
+        print(f"🎬 开始针对 {code} 进行 {target_date} 分时信号回测...")
+        
+        # 3. 加载日线数据（窗口级缓存，避免每次点击重读 HDF5）
+        cached = getattr(self, '_bt_daily_cache', None)
+        if cached and cached[0] == code:
+            df_daily = cached[1]
+            print(f"  [BT] 复用日线缓存 {code} ({len(df_daily)} 行)")
+        else:
+            try:
+                try:
+                    from JSONData import tdx_data_Day as tdd
+                except ImportError:
+                    from stock_standalone.JSONData import tdx_data_Day as tdd
+                df_daily = tdd.get_tdx_append_now_df_api(code)
+                if df_daily is None or df_daily.empty:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.critical(self, "错误", f"加载股票 {code} 的日K线数据失败，无法进行回测！")
+                    return
+                df_daily = df_daily.sort_index()
+                df_daily.index = [str(x)[:10] for x in df_daily.index]
+                self._bt_daily_cache = (code, df_daily)
+            except Exception as e:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "错误", f"加载日K数据异常: {e}")
+                return
+
+            
+        if target_date not in df_daily.index:
+            print(f"Warning: {target_date} not in daily index. Using latest date in database instead.")
+            target_date = df_daily.index[-1]
+            
+        idx_loc = df_daily.index.get_loc(target_date)
+        if idx_loc < 2:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "错误", "历史日线数据不足（少于 2 日），无法计算前置基准！")
+            return
+            
+        curr_daily = df_daily.iloc[idx_loc].to_dict()
+        prev_daily = df_daily.iloc[idx_loc - 1].to_dict()
+        prev2_daily = df_daily.iloc[idx_loc - 2].to_dict()
+        
+        # 4. 计算基准参考指标
+        last_close = float(prev_daily["close"])
+        nclose2d = float(prev2_daily.get("amount", 0) / prev2_daily.get("vol", 1.0)) if prev2_daily.get("vol", 0) > 0 else float(prev2_daily["close"])
+        last_nclose = float(prev_daily.get("amount", 0) / prev_daily.get("vol", 1.0)) if prev_daily.get("vol", 0) > 0 else float(prev_daily["close"])
+        
+        if last_nclose > last_close * 1.5 or last_nclose < last_close * 0.5:
+            last_nclose = last_close
+        if nclose2d > last_close * 1.5 or nclose2d < last_close * 0.5:
+            nclose2d = last_close
+            
+        lastv1d = float(prev_daily.get("vol", 0))
+        if lastv1d <= 0:
+            lastv1d = 1.0
+            
+        # 5. 重构分时 Tick 序列（volume 保持增量，每日在循环内独立 cumsum）
+        df_ticks = pd.DataFrame({
+            'ticktime': self.df_ref.index,
+            'close':  self.df_ref['close'].values,
+            'open':   self.df_ref['open'].values  if 'open'  in self.df_ref.columns else self.df_ref['close'].values,
+            'high':   self.df_ref['high'].values  if 'high'  in self.df_ref.columns else self.df_ref['close'].values,
+            'low':    self.df_ref['low'].values   if 'low'   in self.df_ref.columns else self.df_ref['close'].values,
+            'volume': self.df_ref['volume'].values.clip(0),  # 增量，非 cumsum
+        })
+        
+        # 6. 初始化决策引擎 + 依赖导入（移至循环外）
+        try:
+            from intraday_decision_engine import IntradayDecisionEngine
+        except ImportError:
+            from stock_standalone.intraday_decision_engine import IntradayDecisionEngine
+        try:
+            from JohnsonUtil import commonTips as cct
+        except ImportError:
+            from stock_standalone.JohnsonUtil import commonTips as cct
+            
+        # SBC 回测场景：门槛降至 0.30，覆盖多日震荡企稳 + 均线加速启动结构
+        engine = IntradayDecisionEngine(buy_threshold=0.30, stop_loss_pct=0.03, take_profit_pct=0.08)
+
+        from unittest.mock import patch
+        import datetime as dt
+
+        class MockDateTime(dt.datetime):
+            _mock_now = dt.datetime.now()
+            @classmethod
+            def now(cls, tz=None):
+                return cls._mock_now
+
+        cost_price   = 0.0
+        buy_date_str = ""
+        holding      = False
+        backtest_signals = []
+
+        try:
+            from signal_types import SignalPoint, SignalType
+        except ImportError:
+            from stock_standalone.signal_types import SignalPoint, SignalType
+
+        # --- 7. 按日分组 Replay：每日独立基准，彻底解决多日图基准错位问题 ---
+        df_ticks['_date'] = pd.to_datetime(df_ticks['ticktime']).dt.strftime('%Y-%m-%d')
+        dates_in_data = df_ticks['_date'].unique().tolist()
+        print(f"  [BT] 共 {len(dates_in_data)} 个交易日: {dates_in_data}")
+
+        bar_offset = 0
+
+        for day_str in dates_in_data:
+            day_ticks_all = df_ticks[df_ticks['_date'] == day_str]
+
+            if day_str not in df_daily.index:
+                bar_offset += len(day_ticks_all)
+                print(f"  [BT] {day_str} 不在日线索引，跳过")
+                continue
+
+            day_idx = df_daily.index.get_loc(day_str)
+            if day_idx < 1:
+                bar_offset += len(day_ticks_all)
+                continue
+
+            d_curr  = df_daily.iloc[day_idx].to_dict()
+            d_prev  = df_daily.iloc[day_idx - 1].to_dict()
+            d_prev2 = df_daily.iloc[max(0, day_idx - 2)].to_dict()
+
+            day_last_close  = float(d_prev["close"])
+            day_last_nclose = (float(d_prev.get("amount", 0)) / float(d_prev.get("vol", 1.0))
+                               if float(d_prev.get("vol", 0)) > 0 else day_last_close)
+            day_nclose2d    = (float(d_prev2.get("amount", 0)) / float(d_prev2.get("vol", 1.0))
+                               if float(d_prev2.get("vol", 0)) > 0 else day_last_close)
+            if not (day_last_close * 0.5 < day_last_nclose < day_last_close * 1.5):
+                day_last_nclose = day_last_close
+            if not (day_last_close * 0.5 < day_nclose2d < day_last_close * 1.5):
+                day_nclose2d = day_last_close
+            day_lastv1d = max(float(d_prev.get("vol", 1.0)), 1.0)
+
+            # 每日重置日内状态
+            day_cum_amount = 0.0
+            day_last_vol   = 0.0
+            day_highest    = day_last_close
+            day_lowest     = day_last_close
+
+            # volume 列已是增量，直接在当日内 cumsum → 当日累积成交量
+            day_ticks = day_ticks_all.copy()
+            day_ticks['volume'] = day_ticks['volume'].clip(lower=0).cumsum().values
+
+            print(f"  [BT] {day_str} last_close={day_last_close:.2f} ticks={len(day_ticks)}")
+
+            for local_i, (abs_i, tick) in enumerate(day_ticks.iterrows()):
+                global_bar = bar_offset + local_i
+                tick_time  = tick['ticktime']
+                price      = float(tick['close'])
+                curr_vol   = float(tick['volume'])
+
+                vol_increment   = curr_vol - day_last_vol if day_last_vol > 0 else curr_vol
+                day_last_vol    = curr_vol
+                day_cum_amount += price * vol_increment
+                running_nclose  = day_cum_amount / curr_vol if curr_vol > 0 else price
+
+                try:
+                    time_ratio = cct.get_work_time_ratio_sbc(now_time=tick_time)
+                except Exception:
+                    time_ratio = 0.5
+                if time_ratio <= 0:
+                    time_ratio = 0.001
+                vol_ratio = curr_vol / (day_lastv1d * time_ratio)
+
+                tick_high = float(tick.get('high', price))
+                tick_low  = float(tick.get('low',  price))
+                if tick_high > day_highest: day_highest = tick_high
+                if tick_low  < day_lowest:  day_lowest  = tick_low
+
+                snapshot = {
+                    "code":          code,
+                    "name":          d_curr.get("name", ""),
+                    "last_close":    day_last_close,
+                    "lastp1d":       day_last_close,
+                    "nclose":        day_last_nclose,
+                    "last_nclose":   day_last_nclose,
+                    "nclose2d":      day_nclose2d,
+                    "highest_today": day_highest,
+                    "lowest_today":  day_lowest,
+                    "low10":  float(d_curr.get("low10", 0)),
+                    "low60":  float(d_curr.get("low60", 0)),
+                    "vol":    day_lastv1d,
+                    "loss_streak": 0,
+                    "day_df": df_daily.iloc[:day_idx + 1],
+                    "cost_price": cost_price   if holding else 0.0,
+                    "buy_date":   buy_date_str if holding else "",
+                }
+
+                row = d_curr.copy()
+                row["code"]    = code
+                row["name"]    = d_curr.get("name", "")
+                row["trade"]   = price
+                row["open"]    = float(tick.get("open", d_curr.get("open", price)))
+                row["high"]    = tick_high
+                row["low"]     = tick_low
+                row["volume"]  = vol_ratio
+                row["ratio"]   = vol_ratio
+                row["nclose"]  = running_nclose
+                row["percent"] = (price - day_last_close) / day_last_close * 100 if day_last_close > 0 else 0.0
+
+                # T+1 规则限制：若持仓日期等于当前交易日，则当日锁定无法卖出
+                is_t1_restricted = holding and (buy_date_str == day_str)
+                eval_mode = "full" if (holding and not is_t1_restricted) else "buy_only"
+
+                MockDateTime._mock_now = pd.Timestamp(tick_time).to_pydatetime()
+                with patch('intraday_decision_engine.dt.datetime', MockDateTime):
+                    res = engine.evaluate(row, snapshot, mode=eval_mode)
+
+                action = res.get('action')
+                score  = res.get('position', 0.0)
+
+                # 显式风控保底：仅在非 T+1 限制（即次日及以后）时，若价格较成本跌幅 >= 3.0% 或崩塌，强行触发止损平仓
+                is_stop_loss = False
+                if holding and not is_t1_restricted and cost_price > 0 and price <= cost_price * 0.97:
+                    is_stop_loss = True
+                    if action not in ("卖出", "止损", "止盈"):
+                        action = "止损"
+                        res["reason"] = f"触及 3.0% 止损保护 (成本:{cost_price:.2f} -> 现价:{price:.2f})"
+
+                if local_i < 2:
+                    print(f"    [DBG] {day_str} {pd.Timestamp(tick_time).strftime('%H:%M')} "
+                          f"price={price:.2f} pct={row['percent']:+.2f}% "
+                          f"vol_ratio={vol_ratio:.2f} action={action} score={score:.2f}")
+
+                if not holding and action == "买入":
+                    holding      = True
+                    cost_price   = price
+                    buy_date_str = day_str
+                    sig = SignalPoint(
+                        code=code,
+                        timestamp=pd.Timestamp(tick_time).strftime('%Y-%m-%d %H:%M:%S'),
+                        bar_index=global_bar,
+                        price=price,
+                        signal_type=SignalType.BUY,
+                        reason=res.get("reason", "分时回测买入"),
+                        debug_info={"buy_score": score}
+                    )
+                    sig.symbol_override = "B"
+                    sig.is_backtest = True
+                    backtest_signals.append(sig)
+                    print(f"  ✅ [B] {day_str} {pd.Timestamp(tick_time).strftime('%H:%M')} "
+                          f"买入 {price:.2f} score={score:.2f} | {res.get('reason','')}")
+
+                elif holding and not is_t1_restricted and (action in ("卖出", "止损", "止盈", "极速离场", "趋势崩塌", "强制清仓") or is_stop_loss):
+                    holding      = False
+                    pnl_pct      = (price - cost_price) / cost_price * 100 if cost_price > 0 else 0.0
+                    cost_price   = 0.0
+                    buy_date_str = ""
+                    sig = SignalPoint(
+                        code=code,
+                        timestamp=pd.Timestamp(tick_time).strftime('%Y-%m-%d %H:%M:%S'),
+                        bar_index=global_bar,
+                        price=price,
+                        signal_type=SignalType.SELL,
+                        reason=res.get("reason", "分时回测卖出"),
+                        debug_info={"sell_score": score}
+                    )
+                    sig.symbol_override = "S"
+                    sig.is_backtest = True
+                    backtest_signals.append(sig)
+                    print(f"  🔻 [S] {day_str} {pd.Timestamp(tick_time).strftime('%H:%M')} "
+                          f"卖出 {price:.2f} (盈亏: {pnl_pct:+.2f}%) | {res.get('reason','')}")
+
+            bar_offset += len(day_ticks)
+
+
+                    
+        # 8. 合并并重新绘制
+        # [KEY FIX] 过滤 is_kline=True（K线层投影信号，bar_index=日线序号/price=日收盘价）
+        # 这类信号坐标系与分时图不兼容，画上去会错位到错误价格位置
+        combined_signals = []
+        if hasattr(self, 'signals_ref') and self.signals_ref:
+            intraday_only = [
+                s for s in self.signals_ref
+                if not getattr(s, 'is_backtest', False)   # 去掉上次回测标记
+                and not getattr(s, 'is_kline', False)     # 去掉 K线层投影
+            ]
+            combined_signals.extend(intraday_only)
+
+        combined_signals.extend(backtest_signals)
+        
+        is_compact = self.width() < 800 or getattr(self, 'concise', False)
+        if hasattr(self, 'overlay') and self.overlay:
+            self.overlay.update_signals(combined_signals, is_compact=is_compact, concise=getattr(self, 'concise', False))
+            
+        # 9. 弹窗显示结果
+        summary_lines = [
+            f"股票代码: {code} ({curr_daily.get('name', 'Unknown')})",
+            f"回测日期: {target_date}",
+            f"回测信号总数: {len(backtest_signals)}",
+        ]
+        buys = [s for s in backtest_signals if s.symbol_override == "B"]
+        sells = [s for s in backtest_signals if s.symbol_override == "S"]
+        summary_lines.append(f"买点 (B) 数量: {len(buys)}")
+        summary_lines.append(f"卖点 (S) 数量: {len(sells)}")
+        
+        trade_details = []
+        for b in buys:
+            matching_sells = [s for s in sells if s.bar_index > b.bar_index]
+            if matching_sells:
+                s = matching_sells[0]
+                pnl = (s.price - b.price) / b.price * 100
+                trade_details.append(f"  - 买入: {b.price:.2f} ({b.timestamp[11:19]}) -> 卖出: {s.price:.2f} ({s.timestamp[11:19]}) | 收益: {pnl:+.2f}%")
+            else:
+                trade_details.append(f"  - 买入: {b.price:.2f} ({b.timestamp[11:19]}) -> 收盘未平仓")
+                
+        if trade_details:
+            summary_lines.append("\n模拟交易明细:")
+            summary_lines.extend(trade_details)
+            
+        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtCore import QTimer, Qt
+
+        # 清理可能存在的旧弹窗
+        if hasattr(self, '_backtest_msg_box') and self._backtest_msg_box is not None:
+            try:
+                self._backtest_msg_box.close()
+            except Exception:
+                pass
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("分时信号回测结果")
+        msg_box.setText("\n".join(summary_lines))
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+
+        # [FIX] 改为非模态窗口，取消强制置顶
+        msg_box.setWindowModality(Qt.WindowModality.NonModal)
+        flags = msg_box.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint
+        msg_box.setWindowFlags(flags)
+
+        # [FIX] 5秒自动平滑关闭
+        timer = QTimer(msg_box)
+        timer.setSingleShot(True)
+        timer.timeout.connect(msg_box.close)
+        timer.start(5000)
+
+        self._backtest_msg_box = msg_box
+        msg_box.show()
+
     # --- 统一方法管理 (移除冗余重复定义) ---
 
     def update_plot(self, df, signals=None, title="SBC Pattern Chart", avg_series=None, time_labels=None, use_line=False, extra_lines=None, init=False, concise=None):
+        self.df_ref = df
+        self.signals_ref = list(signals) if signals else []
+        self.time_labels_ref = time_labels
+        self.use_line_ref = use_line
+        self.extra_lines_ref = extra_lines
         if signals is not None and "SBC" not in title:
             title = f"SBC Pattern - {title}"
         self.setWindowTitle(title)
@@ -700,6 +1112,44 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
         if not use_line and signals and len(signals) > self.max_signals:
             signals = signals[-self.max_signals:]
 
+        # [FIX] 分时图视图 (use_line=True)：只渲染分时结构信号，过滤掉 is_kline=True 的 K线层投影/历史日线信号
+        # 规避日线序号(0,1,2..)和历史日收盘价被错误映射到分时 Tick 坐标系导致的错位阶梯标记
+        if use_line and signals:
+            valid_signals = []
+            min_p = df['low'].min() * 0.8 if df is not None and 'low' in df.columns else (df['close'].min() * 0.8 if df is not None and 'close' in df.columns else 0)
+            max_p = df['high'].max() * 1.2 if df is not None and 'high' in df.columns else (df['close'].max() * 1.2 if df is not None and 'close' in df.columns else 99999)
+            
+            # 建立 timestamp -> idx 映射
+            time_to_idx = {}
+            if df is not None and not df.empty:
+                t_col = 'ticktime' if 'ticktime' in df.columns else ('time' if 'time' in df.columns else None)
+                if t_col:
+                    for idx_i, t_val in enumerate(df[t_col]):
+                        ts_str = str(t_val)
+                        time_to_idx[ts_str] = idx_i
+                        if len(ts_str) >= 16: time_to_idx[ts_str[:16]] = idx_i
+                        if len(ts_str) >= 19: time_to_idx[ts_str[11:19]] = idx_i
+                        if len(ts_str) >= 16 and ' ' in ts_str: time_to_idx[ts_str.split(' ')[1][:5]] = idx_i
+
+            for s in signals:
+                if getattr(s, 'is_kline', False):
+                    continue
+                p = getattr(s, 'price', 0) if not isinstance(s, dict) else s.get('price', 0)
+                if min_p <= p <= max_p or p == 0:
+                    s_ts = str(getattr(s, 'timestamp', '')) if not isinstance(s, dict) else str(s.get('timestamp', ''))
+                    matched = -1
+                    if s_ts in time_to_idx: matched = time_to_idx[s_ts]
+                    elif len(s_ts) >= 16 and s_ts[:16] in time_to_idx: matched = time_to_idx[s_ts[:16]]
+                    elif len(s_ts) >= 19 and s_ts[11:19] in time_to_idx: matched = time_to_idx[s_ts[11:19]]
+                    elif ' ' in s_ts and s_ts.split(' ')[1][:5] in time_to_idx: matched = time_to_idx[s_ts.split(' ')[1][:5]]
+
+                    if matched != -1:
+                        if isinstance(s, dict): s['bar_index'] = matched
+                        else: s.bar_index = matched
+                        
+                    valid_signals.append(s)
+            signals = valid_signals
+
         self.overlay = SignalOverlay(self.pw)
         if signals: self.overlay.update_signals(signals, is_compact=is_compact, concise=getattr(self, 'concise', False))
             
@@ -750,8 +1200,7 @@ class StandaloneKlineChart(QMainWindow, WindowMixin):
                 self.pw.setXRange(-total * 0.04, total * 1.02, padding=0)
             
         # Re-attach Crosshair
-        self.df_ref = df
-        self.time_labels_ref = time_labels
+        # (df_ref / time_labels_ref already set at the top of update_plot)
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=(150, 150, 150, 180), style=Qt.PenStyle.DashLine))
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color=(150, 150, 150, 180), style=Qt.PenStyle.DashLine))
         self.pw.addItem(self.v_line, ignoreBounds=True)

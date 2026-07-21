@@ -39,7 +39,8 @@ class IntradayDecisionEngine:
                  stop_loss_pct: float = 0.05,
                  take_profit_pct: float = 0.10,
                  trailing_stop_pct: float = 0.03,
-                 max_position: float = 0.4):
+                 max_position: float = 0.4,
+                 buy_threshold: float = 0.40):
         """
         初始化决策引擎
         
@@ -48,17 +49,19 @@ class IntradayDecisionEngine:
             take_profit_pct: 止盈百分比，高于成本价此比例触发止盈
             trailing_stop_pct: 移动止盈回撤百分比
             max_position: 单只股票最大仓位比例
+            buy_threshold: 触发买入的评分门槛
         """
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.trailing_stop_pct = trailing_stop_pct
         self.max_position = max_position
+        self.buy_threshold = buy_threshold
         self.cycle_stage = 2  # 默认周期阶段: 主升
         self._racing_state: dict[str, dict[str, Any]] = {} # [NEW] 赛马状态持续追踪: {code: {start_ts, last_stable_ts, ...}}
         
         logger.info(f"IntradayDecisionEngine 初始化: stop_loss={stop_loss_pct:.1%}, " +
                    f"take_profit={take_profit_pct:.1%}, trailing={trailing_stop_pct:.1%}, " +
-                   f"max_pos={max_position:.1%}")
+                   f"max_pos={max_position:.1%}, buy_threshold={buy_threshold:.2f}")
 
     def evaluate(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str = "full") -> dict[str, Any]:
         """
@@ -346,6 +349,17 @@ class IntradayDecisionEngine:
         if ma5 <= 0 or ma10 <= 0:
             return self._hold("均线数据无效", debug)
 
+        # ---------- 止损止盈风控检测 (Stop Loss Check - 严格遵守 T+1 规则) ----------
+        if not is_t1_restricted and (mode in ("full", "sell_only") or float(snapshot.get("cost_price", 0)) > 0):
+            stop_res = self._stop_check(row, snapshot, debug)
+            if stop_res and stop_res.get("triggered", False):
+                return {
+                    "action": "止损",
+                    "position": stop_res.get("position", 0.0),
+                    "reason": stop_res.get("reason", "触发生态止损"),
+                    "debug": debug
+                }
+
         # ---------- 卖出信号检测 ----------
         if mode in ("full", "sell_only"):
             if is_t1_restricted:
@@ -620,14 +634,14 @@ class IntradayDecisionEngine:
                 is_chase, chase_penalty, chase_reason = self._intercept_60f_chasing(row, snapshot, debug)
                 if is_chase:
                     base_pos += chase_penalty
-                    if base_pos < 0.40:
+                    if base_pos < self.buy_threshold:
                         return self._hold(chase_reason, debug)
 
                 # 💥 [NEW] 尾盘建仓防范拦截器 (Anti Tail-End Positioning Trap)
                 is_tail_trap, tail_penalty, tail_reason = self._intercept_tail_position_building(row, snapshot, debug)
                 if is_tail_trap:
                     base_pos += tail_penalty
-                    if base_pos < 0.40:
+                    if base_pos < self.buy_threshold:
                         return self._hold(tail_reason, debug)
 
                 # 💥 [NEW] 早盘 60F 杀跌后强弱反弹鉴定器 (Rebound Quality Filter)
@@ -668,8 +682,8 @@ class IntradayDecisionEngine:
                 # ==============================================================================
                 debug["实时买入分"] = round(base_pos, 2)
                 
-                if base_pos < 0.40:  # Hard Threshold
-                    return self._hold(f"评分不足({base_pos:.2f}<0.4)", debug)
+                if base_pos < self.buy_threshold:  # Hard Threshold
+                    return self._hold(f"评分不足({base_pos:.2f}<{self.buy_threshold})", debug)
 
                 final_pos = max(min(base_pos, self.max_position * 1.2), 0)
                 # Double check to ensure non-zero if we passed the threshold (though logically 0.4 > 0)
@@ -1909,8 +1923,8 @@ class IntradayDecisionEngine:
     def _eval_60f_drop_rebound(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
         """
         [早盘 60F 杀跌后强弱反弹鉴定器]
-        解决痛点：早盘 60 分钟放量杀跌后再开启的反弹，如果是弱反弹/诱多，次日易直接遭大阴杀跌。
-                  如果是底部放量反弹结构（如半导体个股早盘急跌后大长腿拉升），应精准识别并赋予加分。
+        解决痛点：整体处于连续杀跌结构时，只有在早盘急杀放量探底（跌幅>3%）后放量拉升并成功站上今日分时均线，
+                 才属于合规的小级别强反弹买点。普通的小幅微动不能误判为强反弹。
         """
         price = float(row.get("trade", 0))
         high = float(row.get("high", price))
@@ -1918,9 +1932,9 @@ class IntradayDecisionEngine:
         last_nclose = float(snapshot.get("last_nclose", snapshot.get("nclose", 0)))
         last_close = float(snapshot.get("last_close", last_nclose))
         volume = float(row.get("volume", 1.0))
+        ratio = float(row.get("ratio", 1.0))
         
         now_time = dt.datetime.now().time()
-        # 扩大时间窗口：早盘急跌反弹往往在 09:35 - 11:30 之间发生，下午 13:00 - 14:30 也可能出现
         is_valid_time = (dt.datetime.strptime("09:35", "%H:%M").time() <= now_time <= dt.datetime.strptime("11:30", "%H:%M").time()) or \
                          (dt.datetime.strptime("13:00", "%H:%M").time() <= now_time <= dt.datetime.strptime("14:30", "%H:%M").time())
                          
@@ -1928,24 +1942,30 @@ class IntradayDecisionEngine:
             highest_today = float(snapshot.get("highest_today", high))
             lowest_today = float(snapshot.get("lowest_today", price))
             
-            # 如果今日内高低点落差大于 2.5%，或者今日最低价相对于昨收跌幅超过 2.5%
-            has_shakeout = (highest_today > 0 and (highest_today - lowest_today) / highest_today > 0.025) or \
-                           (last_close > 0 and (last_close - lowest_today) / last_close > 0.025)
+            # 真正的急杀探底判定：日内最低价较昨收跌幅 >= 3.0%，或日内急杀振幅 >= 3.5%
+            drop_from_close = (last_close - lowest_today) / last_close if last_close > 0 else 0.0
+            drop_intraday = (highest_today - lowest_today) / highest_today if highest_today > 0 else 0.0
+            
+            has_deep_drop = (drop_from_close >= 0.030) or (drop_intraday >= 0.035)
                            
-            if has_shakeout:
+            if has_deep_drop:
                 rebound_ratio = (price - lowest_today) / (highest_today - lowest_today) if (highest_today > lowest_today) else 0.0
                 
-                # 1. 优先判断强反弹与弱反弹企稳状态 (不以低于昨均价作为否定强反弹的前提)
-                if volume >= 1.15 and rebound_ratio >= 0.5 and price >= nclose:
-                    debug["60F反弹鉴定"] = "强反弹/洗盘企稳(站回分时VWAP)"
-                    return 0.30
-                elif volume >= 1.1 and rebound_ratio >= 0.4 and price >= nclose:
+                # 只有真正放量(vol>=1.2/ratio>=1.15)、大幅从低位反弹(rebound>=55%) 且成功强力站回今日分时均线上方，才认定为【早上急杀放量小级别强反弹】
+                if (volume >= 1.20 or ratio >= 1.15) and rebound_ratio >= 0.55 and price >= nclose * 1.001:
+                    debug["60F反弹鉴定"] = "急杀放量强反弹(站回分时VWAP)"
+                    return 0.35
+                elif volume >= 1.10 and rebound_ratio >= 0.40 and price >= nclose:
                     debug["60F反弹鉴定"] = "弱反弹企稳"
                     return 0.10
-                # 2. 否则，如果价格在均线下方，或者量能/反弹比例不足，判定为弱反弹/诱多
-                elif price < nclose or (last_nclose > 0 and price < last_nclose) or volume < 1.15 or rebound_ratio < 0.5:
+                elif price < nclose or volume < 1.15 or rebound_ratio < 0.5:
                     debug["60F反弹鉴定"] = "弱反弹/诱多(量能萎缩且受压于均价)"
                     return -0.30
+            else:
+                # 若日内没有真正急杀探底，处于阴跌横盘且股价在均价下方时，判定为弱势受压
+                if price < nclose:
+                    debug["60F反弹鉴定"] = "受压于分时均线"
+                    return -0.15
         return 0.0
 
     def _intercept_tail_position_building(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, float, str]:

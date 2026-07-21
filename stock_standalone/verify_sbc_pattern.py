@@ -109,42 +109,15 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
     # 1. 日线数据
     try:
         resample = 'd'
-        
-        # [OPT] 如果传入了 TK 的整行 df_all 数据，则利用其伪造一个 day_df，节省本地读取
-        if extra_lines and extra_lines.get('df_all_row'):
-            print("🚀 使用 TK df_all_row 构建基准常数，跳过本地 tdd 读取...")
-            r = extra_lines['df_all_row']
-            val_h1  = r.get('lasth1d', r.get('high', 0))
-            val_l1  = r.get('lastl1d', r.get('low', 0))
-            val_c1  = r.get('lastp1d', r.get('close', 0))
-            val_h2  = r.get('lasth2d', val_h1)
-            val_c2  = r.get('lastp2d', val_c1)
-            
-            # 构建一个具有兼容时序的 4 行 DataFrame（采用极老的硬编码日期确保一定被视为 history）
-            fake_dates = ['2000-01-01', '2000-01-02', '2000-01-03', '2000-01-04']
-            records = [
-                {'high': val_h1, 'close': val_c1, 'low': val_l1},  # prev3
-                {'high': val_h1, 'close': val_c1, 'low': val_l1},  # prev2
-                {'high': val_h2, 'close': val_c2, 'low': val_l1},  # prev1
-                r.copy()  # prev (最终将作为 baseline 取用)
-            ]
-            
-            # 对基准行对齐必须的字段名称
-            records[-1]['close'] = val_c1
-            records[-1]['high'] = val_h1
-            records[-1]['low'] = val_l1
-            records[-1]['ma5d'] = r.get('ma51d', val_c1)
-            records[-1]['ma10d'] = r.get('ma101d', val_c1)
-            records[-1]['ma20d'] = r.get('ma201d', val_c1)
-            records[-1]['ma60d'] = r.get('ma601d', val_c1)
-            records[-1]['last_close'] = val_c1
-            records[-1]['last_high']  = val_h1
-            records[-1]['last_low']   = val_l1
-            records[-1]['lasth4d']    = r.get('high4', val_h1)
 
-            day_df = pd.DataFrame(records, index=fake_dates)
-        else:
-            # [ALIGN] 强制对齐线上加载方式：开启 fastohlc 确保指标列名与线上一致
+        # [FIX] df_all_row 模式：优先加载真实 tdd 日线（含完整 MA/历史），
+        #        仅在 tdd 失败时才 fallback 到 df_all_row 构建的基准常数。
+        #        解决：SBC 分析拿不到真实均线导致 0 信号的根本问题。
+        df_all_row_data = extra_lines.get('df_all_row') if extra_lines else None
+        day_df = None  # 先置 None，下方按优先级填充
+
+        # 优先：尝试 tdd 真实日线（无论是否有 df_all_row）
+        try:
             if hdf5_lock:
                 from PyQt6.QtCore import QMutexLocker
                 with QMutexLocker(hdf5_lock):
@@ -152,25 +125,61 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
             else:
                 raw = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=False)
 
-            if raw is None or raw.empty:
+            if raw is not None and not raw.empty:
+                # 统一索引为日期字符串
+                try:
+                    dts = pd.to_datetime(raw.index)
+                    raw.index = [d.strftime('%Y-%m-%d') for d in dts]
+                except Exception:
+                    for col in ('date', 'trade_date'):
+                        if col in raw.columns:
+                            raw.index = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in raw[col]]
+                            break
+                day_df = _prepare_day_df(raw)
+                if df_all_row_data:
+                    print("✅ [SBC] df_all_row 模式：成功加载真实 tdd 日线，SBC 分析将使用完整 MA 历史")
+        except Exception as e_tdd:
+            print(f"⚠️ tdd 日线加载失败，将 fallback 到 df_all_row 基准常数: {e_tdd}")
+
+        # Fallback：tdd 失败 or 返回空 → 用 df_all_row 构造假 day_df
+        if day_df is None or day_df.empty:
+            if df_all_row_data:
+                print("🚀 使用 TK df_all_row 构建基准常数（tdd 不可用）...")
+                r = df_all_row_data
+                val_h1 = r.get('lasth1d', r.get('high', 0))
+                val_l1 = r.get('lastl1d', r.get('low', 0))
+                val_c1 = r.get('lastp1d', r.get('close', 0))
+                val_h2 = r.get('lasth2d', val_h1)
+                val_c2 = r.get('lastp2d', val_c1)
+
+                fake_dates = ['2000-01-01', '2000-01-02', '2000-01-03', '2000-01-04']
+                records = [
+                    {'high': val_h1, 'close': val_c1, 'low': val_l1},
+                    {'high': val_h1, 'close': val_c1, 'low': val_l1},
+                    {'high': val_h2, 'close': val_c2, 'low': val_l1},
+                    r.copy()
+                ]
+                records[-1]['close']      = val_c1
+                records[-1]['high']       = val_h1
+                records[-1]['low']        = val_l1
+                records[-1]['ma5d']       = r.get('ma51d', val_c1)
+                records[-1]['ma10d']      = r.get('ma101d', val_c1)
+                records[-1]['ma20d']      = r.get('ma201d', val_c1)
+                records[-1]['ma60d']      = r.get('ma601d', val_c1)
+                records[-1]['last_close'] = val_c1
+                records[-1]['last_high']  = val_h1
+                records[-1]['last_low']   = val_l1
+                records[-1]['lasth4d']    = r.get('high4', val_h1)
+                day_df = pd.DataFrame(records, index=fake_dates)
+            else:
                 print(f"❌ 无法获取 {code} 日线数据"); return None
-            
-            # [FIX] 统一索引为日期字符串 (解决 AttributeError)
-            try:
-                # 使用更稳健的转换链：to_datetime -> 检查是否为日期类型 -> 格式化
-                dts = pd.to_datetime(raw.index)
-                raw.index = [d.strftime('%Y-%m-%d') for d in dts]
-            except Exception:
-                # 兜底：从列中提取
-                for col in ('date', 'trade_date'):
-                    if col in raw.columns:
-                        raw.index = [pd.to_datetime(d).strftime('%Y-%m-%d') for d in raw[col]]
-                        break
-            
-            day_df = _prepare_day_df(raw)
+
     except Exception as e:
         import traceback
         print(f"❌ 日线加载失败: {e}"); traceback.print_exc(); return
+
+
+
     # 2. 获取 Tick 数据源 (使用 sbc_core 统筹加载与补全逻辑)
     try:
         # 支持多日显示：如果 days > 1，尝试获取更多历史分钟线 (all_10000)
@@ -340,6 +349,12 @@ def verify_with_real_data(code: str = '688787', use_live: bool = False, show_viz
         'close':  c_arr,
         'volume': v_arr_vwap,
     })
+    # [NEW] 注入 DatetimeIndex，供 SBC 窗口分时回测功能识别时间截面
+    if 'ts_objs' in dir() and ts_objs is not None and len(ts_objs) == len(viz_df):
+        try:
+            viz_df.index = ts_objs
+        except Exception as e_idx:
+            print(f"⚠️ viz_df 注入 DatetimeIndex 失败: {e_idx}")
 
     # 提取昨日价格参考线数据
     auto_extra = {
