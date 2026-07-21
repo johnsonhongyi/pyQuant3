@@ -14796,15 +14796,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
-        # 9.3. 多周期联动策略筛选器窗口 (Tk - _multi_period_tester_win)
+        # 9.3. 多周期联动策略筛选器窗口 (PyQt6 或 Tk 双路兼容)
         if hasattr(self, '_multi_period_tester_win') and self._multi_period_tester_win is not None:
             try:
-                if self._multi_period_tester_win.winfo_exists() and self._multi_period_tester_win.winfo_viewable():
-                    h = self._get_toplevel_hwnd(self._multi_period_tester_win.winfo_id())
-                    current_visible_hwnds.append(h)
-                    name_map[h] = "🎯 多周期策略筛选器 (MultiPeriodTester)"
+                win = self._multi_period_tester_win
+                # [ROOT-FIX] 优先用 PyQt6 方式检测（qt_open() 返回的是 PyQt6 Dialog）
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
+                    if h not in current_visible_hwnds:
+                        current_visible_hwnds.append(h)
+                        name_map[h] = "🎯 多周期联动策略筛选器 (MultiPeriodTester)"
+                # Fallback：Tkinter 窗口（历史兼容）
+                elif hasattr(win, 'winfo_exists') and win.winfo_exists() and win.winfo_viewable():
+                    h = self._get_toplevel_hwnd(win.winfo_id())
+                    if h not in current_visible_hwnds:
+                        current_visible_hwnds.append(h)
+                        name_map[h] = "🎯 多周期联动策略筛选器 (MultiPeriodTester)"
             except Exception:
                 pass
+
+        # 9.3.1. 多周期筛选器外部独立进程兜底 (MultiPeriodTester.exe)
+        try:
+            import ctypes as _ctypes
+            for _ext_title in ("多周期联动策略筛选器", "⏱️ 多周期交叉筛选与诊断系统"):
+                _ext_hwnd = _ctypes.windll.user32.FindWindowW(None, _ext_title)
+                if _ext_hwnd:
+                    _ext_pid = _ctypes.c_ulong()
+                    _ctypes.windll.user32.GetWindowThreadProcessId(_ext_hwnd, _ctypes.byref(_ext_pid))
+                    if _ext_pid.value != os.getpid():  # 排除本进程误判
+                        if _ctypes.windll.user32.IsWindow(_ext_hwnd) and _ctypes.windll.user32.IsWindowVisible(_ext_hwnd):
+                            if _ext_hwnd not in current_visible_hwnds:
+                                current_visible_hwnds.append(_ext_hwnd)
+                                name_map[_ext_hwnd] = "🎯 多周期联动策略筛选器 (MultiPeriodTester)"
+                    break
+        except Exception:
+            pass
 
         # 10. 概念放量监控子窗口 (Tk - self.monitor_windows 中的所有有效 toplevel 窗口)
         if hasattr(self, 'monitor_windows') and self.monitor_windows:

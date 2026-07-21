@@ -1,3 +1,9 @@
+## 2026-07-21 14:30
+- [x] **修复多周期联动策略筛选器在 Alt+R 视窗轮换器中无法出现的 Bug (Fixed MultiPeriodTester Window Not Appearing in Alt+R Rotator)**：
+    - [x] **根因定位**：`open_multi_period_tester()` 在没有外部 exe 时，会调用 `qt_open()` 并将返回的 **PyQt6 QDialog** 赋值给 `self._multi_period_tester_win`。但 `_get_all_open_trade_windows()` 中对该窗口的检测逻辑仍调用了 Tkinter 专属的 `winfo_exists()` / `winfo_viewable()` 方法，这对 PyQt6 对象会立即抛出 `AttributeError`，被 `except` 静默吃掉，导致该窗口永远不出现在 Alt+R 轮换列表中。
+    - [x] **实现 PyQt6/Tkinter 双路兼容检测**：在 `instock_MonitorTK.py` 的 `_get_all_open_trade_windows` 方法中，将原先纯 Tkinter 检测逻辑重构为双路兼容：**优先**使用 `is_qt_win_alive(win) and win.isVisible()` + `int(win.winId())` 检测 PyQt6 窗口，**Fallback** 保留原有 `hasattr(win, 'winfo_exists') and win.winfo_exists()` 检测 Tkinter 窗口（历史兼容）。
+    - [x] **新增外部进程独立兜底扫描**：追加了第三路兜底：通过 `FindWindowW` 逐一扫描 `"多周期联动策略筛选器"` 和 `"⏱️ 多周期交叉筛选与诊断系统"` 两个窗口标题，同时过滤当前进程（防止误判内部 Dialog），从而覆盖 `MultiPeriodTester.exe` 作为独立外部进程运行时的场景。
+
 ## 2026-07-21 15:00
 - [x] **修复区间个股分布详情窗口 (DistributionDetailsDialog) 在冷启动 800ms 自动恢复加载时联动失效与误认主窗口的 Bug (Fixed Cold-Start Detached Linkage Failure & Window Misidentification in DistributionDetailsDialog)**：
     - [x] **实现 PyQt6 信号槽的稳固连接 (Robust Qt Signal/Slot Connection)**：重构了 `open_details_dialog` 数据恢复流程。在拉起 `DistributionDetailsDialog` 窗口时，通过精确搜寻当前进程中真正且有效的 `ATSMainWindow` 实例，在对话框创建后将 `dialog.code_clicked` 信号槽物理绑定到主窗口的 `link_stock` 方法上，与板块明细的信号槽机制同构，在 Qt 底层自动安全分发。
