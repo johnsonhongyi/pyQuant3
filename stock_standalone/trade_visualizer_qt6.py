@@ -8847,11 +8847,32 @@ class MainWindow(QMainWindow, WindowMixin):
                 if h_item:
                     col_name = h_item.text()
                 
-                # 如果用户手动调整过且有持久化数据，则完全尊重手动数据，不再自动限制宽度
+                # 寻找最匹配的 saved_widths 宽度
+                target_w = None
                 if col_name in saved_widths:
-                    cw = saved_widths[col_name]
+                    target_w = saved_widths[col_name]
+                else:
+                    candidates = [h]
+                    if hasattr(self, 'column_map') and h in self.column_map:
+                        candidates.append(self.column_map[h])
+                    if h_low == 'percent':
+                        candidates.extend(['涨幅', '涨幅%'])
+                    elif h_low == 'code':
+                        candidates.append('代码')
+                    elif h_low == 'name':
+                        candidates.append('名称')
+                    elif h_low == 'rank':
+                        candidates.append('排名')
+                        
+                    for cand in candidates:
+                        if cand in saved_widths:
+                            target_w = saved_widths[cand]
+                            break
+                
+                # 如果用户手动调整过且有持久化数据，则完全尊重手动数据，不再自动限制宽度
+                if target_w is not None:
                     headers.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
-                    self.stock_table.setColumnWidth(i, cw)
+                    self.stock_table.setColumnWidth(i, target_w)
                     continue
 
                 # 1. 尝试使用 get_compact_width 获取紧凑预设
@@ -14666,6 +14687,15 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.exception("Failed to save visualizer config")
 
+    def _get_widget_header(self, widget):
+        """兼容 QTableWidget 和 QTreeWidget 物理获取 header 对象的 Helper 方法"""
+        if not widget: return None
+        if hasattr(widget, 'horizontalHeader'):
+            return widget.horizontalHeader()
+        header = getattr(widget, 'header', None)
+        if callable(header): header = header()
+        return header
+
     def _save_h_scroll_state(self, widget):
         """保存水平滚动状态：记录最左侧可见列及其像素偏移"""
         if not widget: return None
@@ -14678,8 +14708,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if first_col < 0: return None
             
             # 检查是否有 header 对象
-            header = getattr(widget, 'header', None)
-            if callable(header): header = header()
+            header = self._get_widget_header(widget)
             if not header: return None
             
             col_pos = header.sectionPosition(first_col)
@@ -14700,8 +14729,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 widget.scrollToColumn(first_col)
             
             # header 对象获取
-            header = getattr(widget, 'header', None)
-            if callable(header): header = header()
+            header = self._get_widget_header(widget)
             if not header: return
 
             # 延时一点等待渲染完成
@@ -14722,8 +14750,7 @@ class MainWindow(QMainWindow, WindowMixin):
         h_state = self._save_h_scroll_state(widget)
         
         # 关键：暂时关闭列宽变动的信号捕获，防止触发配置保存覆盖用户手动微调
-        header = getattr(widget, 'header', None)
-        if callable(header): header = header()
+        header = self._get_widget_header(widget)
         if header: header.blockSignals(True)
         
         try:
@@ -14741,8 +14768,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def _apply_saved_column_widths(self, widget, widths_dict):
         """应用保存过的列宽配置"""
         if not widget or not widths_dict: return
-        header = getattr(widget, 'header', None)
-        if callable(header): header = header()
+        header = self._get_widget_header(widget)
         if not header: return
         
         # 阻塞信号，防止恢复过程触发冗余保存
