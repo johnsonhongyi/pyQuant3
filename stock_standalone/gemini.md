@@ -1,3 +1,9 @@
+## 2026-07-21 15:16
+- [x] **修复 singleAnalyseUtil.py 中 rzrq (两融数据) 次日跨天无法自动刷新及手动刷新失效的 Bug (Fixed Next-Day RZRQ Auto/Manual Refresh Failure)**：
+    - [x] **根因定位**：在 `singleAnalyseUtil.py` 的 `while 1:` 主循环内部，缺少了 `today_str = cct.get_today()` 的实时更新，导致 `today_str` 一直停留在程序启动时的日期。因而跨夜/跨天运行时 `if today_str != rzrq_date:` 永远为 `False`，无法触发自动重新拉取。同时 `st.lower() == 'c'` (Clear) 分支被设置为 `pass`，致使终端按 `c` 也无法手动刷新。
+    - [x] **实施实时日期感知与自动刷新 (Realtime Date Sensing & Auto Re-fetch)**：在 `while 1:` 循环顶部直接增加 `today_str = cct.get_today()`，使系统跨夜或到次日时能在亚毫秒级感知到日期变更，第一时间自动触发 `rzrq = ffu.get_dfcfw_rzrq_SHSZ()` 并更新 `rzrq_date`。
+    - [x] **恢复手动一键刷新 (Manual One-Key Refresh via 'c')**：在控制台输入指令处理分支中，将 `st == 'c'` 分支重构为主动调用 `ffu.get_dfcfw_rzrq_SHSZ()` 并同步 `rzrq_date`，使盘中或任意时刻按 `c` 即可手动强制刷新最新两融数据，无需重启程序。
+
 ## 2026-07-21 14:30
 - [x] **修复多周期联动策略筛选器在 Alt+R 视窗轮换器中无法出现的 Bug (Fixed MultiPeriodTester Window Not Appearing in Alt+R Rotator)**：
     - [x] **根因定位**：`open_multi_period_tester()` 在没有外部 exe 时，会调用 `qt_open()` 并将返回的 **PyQt6 QDialog** 赋值给 `self._multi_period_tester_win`。但 `_get_all_open_trade_windows()` 中对该窗口的检测逻辑仍调用了 Tkinter 专属的 `winfo_exists()` / `winfo_viewable()` 方法，这对 PyQt6 对象会立即抛出 `AttributeError`，被 `except` 静默吃掉，导致该窗口永远不出现在 Alt+R 轮换列表中。
