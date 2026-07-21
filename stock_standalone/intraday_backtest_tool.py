@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import argparse
 import itertools
-from unittest.mock import patch
+from contextlib import contextmanager
 from typing import Any, List, Dict
 
 # Ensure stdout uses UTF-8 to prevent encoding gibberish on Windows terminal
@@ -28,6 +28,20 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from JSONData import tdx_data_Day as tdd
 from intraday_decision_engine import IntradayDecisionEngine
 from JohnsonUtil import commonTips as cct
+import intraday_decision_engine as _ide_mod
+
+
+@contextmanager
+def _patch_dt(replacement):
+    """Nuitka 兼容的轻量时间替换，等价于 unittest.mock.patch('…dt.datetime', replacement)。"""
+    original = getattr(_ide_mod.dt, 'datetime', None)
+    _ide_mod.dt.datetime = replacement
+    try:
+        yield
+    finally:
+        if original is not None:
+            _ide_mod.dt.datetime = original
+
 
 # Mock DateTime for time-sensitive decision logic
 class MockDateTime(dt.datetime):
@@ -193,7 +207,7 @@ class IntradayBacktester:
             
             # 设定 Mock 时间并计算决策
             MockDateTime._mock_now = tick_time
-            with patch('intraday_decision_engine.dt.datetime', MockDateTime):
+            with _patch_dt(MockDateTime):
                 res = engine.evaluate(row, snapshot, mode="buy_only")
                 
             action = res.get('action')
@@ -353,7 +367,7 @@ class IntradayBacktester:
             y, m, d = map(int, target_date.split("-"))
             MockDateTime._mock_now = dt.datetime(y, m, d, hour, minute, second)
             
-            with patch('intraday_decision_engine.dt.datetime', MockDateTime):
+            with _patch_dt(MockDateTime):
                 result = engine.evaluate(row, snapshot, mode="buy_only")
                 
             out = {
