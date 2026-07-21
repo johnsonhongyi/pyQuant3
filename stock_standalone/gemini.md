@@ -4,6 +4,7 @@
     - [x] **新增工具栏控制 Action 与状态栏槽函数 (Toolbar Action & Toggle Slot)**：在 `MainWindow` 初始化中追加 `self.show_auto_channel = True`，在主工具栏上新增 `“通道”` 切换按钮（Action），并在 `on_toggle_auto_channel` 槽函数中实现图形的显隐更新与实时图表重绘。
     - [x] **实现 PyQtGraph 多通道线平滑绘制与 finite 剔除 (PyQtGraph connect='finite')**：在 `_render_charts_logic` 中调用 `calc_auto_channel`，并将其得到的 `chan_mid`, `chan_up`, `chan_dn` 回填到 `day_df` 缓存中以支持十字光标。使用 `connect='finite'` 来规避 `NaN` 值的连接，使得曲线在远点之前的历史区间不画出多余的线条，完美还原了通达信在近点外推的画图效果。
     - [x] **实现顶栏 legend 数据实时与十字光标随动显示 (Legend Metric Display & Crosshair Sync)**：重构了 `_update_ma_legend` 逻辑。当开启通道显示时，在 K 线图上方的 legend 背景面板中追加 `通道: MID:x.xx UP:x.xx DN:x.xx` 指标状态显示，支持在鼠标移动或键盘左右导航时实时同步获取当前 K 线的通道位置数据。
+    - [x] **优化通道轨道线动态配色与线宽可观察性 (Optimized Channel Line Dynamic Coloring & Visibility)**：重构了 `calc_auto_channel` 以返回回归斜率 $k$。并在 `_render_charts_logic` 中，当斜率 $k > 0$（上升通道）时，将下轨（支撑买入线）染为高对比度的暖橙色，上轨（压力线）染为青蓝色；当斜率 $k < 0$（下降通道）时反之，上轨染为暖橙色，下轨染为青蓝色，平盘时保持灰色。同时，将上轨与下轨曲线线宽由 1px 统一调粗至 2px，规避了与 K 线红绿色泽的混淆，极大提升了图表形态上的物理识别效率。
     - [x] **通过 Python 静态编译自检**：对修改后的 `trade_visualizer_qt6.py` 文件执行了编译校验，确保 100% 无任何 IndentationError 或 SyntaxError，完全对齐系统工程质量要求。
 
 ## 2026-07-21 11:30
