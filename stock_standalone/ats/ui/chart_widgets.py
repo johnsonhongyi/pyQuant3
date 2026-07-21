@@ -51,9 +51,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
     """
     code_clicked = pyqtSignal(str, str) # Emitted when double-clicked or selected (linkage)
     
-    def __init__(self, bucket_idx=0, parent=None):
+    def __init__(self, bucket_idx=0, parent=None, main_app=None):
         super().__init__(parent)
         self.bucket_idx = bucket_idx
+        self.main_app = main_app
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("📊 涨跌分布个股明细")
         self.setMinimumWidth(650)
@@ -261,18 +262,47 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.snap_timer.timeout.connect(self._detect_and_snap)
 
     def _get_main_app(self):
-        # Traverse up parents or check QApplication instance
-        curr = self.parent()
-        while curr:
-            if hasattr(curr, 'link_stock') or hasattr(curr, 'on_stock_clicked'):
-                return curr
-            curr = curr.parent()
-        
+        from PyQt6.sip import isdeleted
+        # 1. 验证已存的 main_app 是否依然有效，且是否为真正的主窗口 (有 link_stock 且类名为 ATSMainWindow)
+        if getattr(self, 'main_app', None) is not None:
+            try:
+                if not isdeleted(self.main_app) and hasattr(self.main_app, 'link_stock') and self.main_app.__class__.__name__ == 'ATSMainWindow':
+                    return self.main_app
+            except Exception:
+                pass
+            self.main_app = None # 否则清除错误引用
+            
         app = QApplication.instance()
+        if app and getattr(app, 'main_window', None) is not None:
+            try:
+                mw = app.main_window
+                if not isdeleted(mw) and hasattr(mw, 'link_stock') and mw.__class__.__name__ == 'ATSMainWindow':
+                    self.main_app = mw
+                    return mw
+            except Exception:
+                pass
+                
+        # Traverse up parents to find the true ATSMainWindow
+        try:
+            curr = self.parent()
+            while curr:
+                if not isdeleted(curr) and curr.__class__.__name__ == 'ATSMainWindow':
+                    self.main_app = curr
+                    return curr
+                curr = curr.parent() if hasattr(curr, 'parent') else None
+        except Exception:
+            pass
+            
+        # Traverse top level widgets to find ATSMainWindow
         if app:
-            for widget in app.topLevelWidgets():
-                if hasattr(widget, 'link_stock') or hasattr(widget, 'on_stock_clicked'):
-                    return widget
+            try:
+                for widget in app.topLevelWidgets():
+                    if not isdeleted(widget) and widget.__class__.__name__ == 'ATSMainWindow':
+                        self.main_app = widget
+                        return widget
+            except Exception:
+                pass
+                
         return None
 
     def _save_window_states(self, is_open=None) -> None:
@@ -585,6 +615,45 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             if self.anchor_edge:
                 self.normal_geometry = self.geometry()
+    def _fallback_linkage(self, code, name=None):
+        """物理与可视化联动兜底 (在 main_app 未加载完或找错时自愈)"""
+        try:
+            import socket
+            import threading
+            from linkage_service import get_link_manager
+            
+            code_clean = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+            if code_clean:
+                # 1. 异步切换 K线可视化器 (TCP 端口 26668)
+                add_date = None
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    fav_mgr = GlobalFavoriteManager()
+                    if code_clean in fav_mgr.get_favorite_stocks():
+                        add_date = fav_mgr.get_favorite_stock_date(code_clean)
+                except Exception:
+                    pass
+                
+                if add_date:
+                    cmd_str = f"TIME_LINK|{code_clean}|{add_date}|label=重点关注"
+                else:
+                    cmd_str = f"CODE|{code_clean}"
+                    
+                def send_switch(msg):
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.settimeout(0.1) # 极小超时不影响UI
+                            s.connect(('127.0.0.1', 26668))
+                            s.sendall(msg.encode("utf-8"))
+                    except:
+                        pass
+                threading.Thread(target=send_switch, args=(cmd_str,), daemon=True).start()
+                
+                # 2. 物理联动投递 (通达信/同花顺)
+                get_link_manager().push(code_clean, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)
+        except Exception as e:
+            print(f"[DistributionDetailsDialog] Fallback linkage failed: {e}")
+
     def link_stock(self, code, name=None):
         """Linkage method called by sub-dialogs like DNA audit window."""
         if not name:
@@ -597,6 +666,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         main_app = self._get_main_app()
         if main_app and hasattr(main_app, 'link_stock'):
             main_app.link_stock(code, name)
+        else:
+            self._fallback_linkage(code, name)
 
     def diagnose_stock_strategy(self, code):
         """Forward diagnostic requests from DNA audit window to main application."""
@@ -625,13 +696,15 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
         if code_item and name_item:
-            code = code_item.text()
-            name = name_item.text()
+            code = code_item.text().strip()
+            name = name_item.text().strip()
             self.code_clicked.emit(code, name)
             
             main_app = self._get_main_app()
             if main_app and hasattr(main_app, 'link_stock'):
                 main_app.link_stock(code, name)
+            else:
+                self._fallback_linkage(code, name)
 
     def _on_item_clicked(self, item):
         if item:
@@ -647,15 +720,25 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             code_item = self.table.item(row, 0)
             name_item = self.table.item(row, 1)
             if code_item and name_item:
-                code = code_item.text()
-                name = name_item.text()
+                code = code_item.text().strip()
+                name = name_item.text().strip()
                 
+                # Fetch name safely if it was empty/N/A
+                if not name or name == "N/A" or name == "-":
+                    main_app = self._get_main_app()
+                    if main_app and hasattr(main_app, 'get_stock_name'):
+                        name = main_app.get_stock_name(code)
+                    else:
+                        name = ""
+                self.code_clicked.emit(code, name)
                 main_app = self._get_main_app()
                 if main_app:
                     if hasattr(main_app, 'link_stock'):
                         main_app.link_stock(code, name)
                     if hasattr(main_app, 'on_stock_clicked'):
                         main_app.on_stock_clicked(code, name)
+                else:
+                    self._fallback_linkage(code, name)
 
     def _show_context_menu(self, pos):
         item = self.table.itemAt(pos)
@@ -1196,7 +1279,43 @@ class DistributionBarChart(QWidget):
         # always keeps child windows in front of their parent on Windows).
         # We keep a strong Python reference in _active_dialogs to prevent GC deletion,
         # and monitor main window destroyed signal to close dialogs when ATS exits.
-        dialog = DistributionDetailsDialog(idx, None)
+        main_app = None
+        curr = self
+        from PyQt6.sip import isdeleted
+        try:
+            while curr:
+                if not isdeleted(curr) and curr.__class__.__name__ == 'ATSMainWindow':
+                    main_app = curr
+                    break
+                curr = curr.parent() if hasattr(curr, 'parent') else None
+        except Exception:
+            pass
+            
+        if main_app is None:
+            app = QApplication.instance()
+            if app:
+                if getattr(app, 'main_window', None) is not None:
+                    try:
+                        mw = app.main_window
+                        if not isdeleted(mw) and mw.__class__.__name__ == 'ATSMainWindow':
+                            main_app = mw
+                    except Exception:
+                        pass
+                if main_app is None:
+                    try:
+                        for widget in app.topLevelWidgets():
+                            if not isdeleted(widget) and widget.__class__.__name__ == 'ATSMainWindow':
+                                main_app = widget
+                                break
+                    except Exception:
+                        pass
+        dialog = DistributionDetailsDialog(idx, None, main_app=main_app)
+        # 绑定双击/单击选择代码的信号联动 (与板块明细同构，实现稳定联动)
+        if main_app and hasattr(main_app, 'link_stock'):
+            try:
+                dialog.code_clicked.connect(main_app.link_stock)
+            except Exception:
+                pass
         if df_filtered is not None and not df_filtered.empty:
             dialog.update_data(df_filtered)
         else:

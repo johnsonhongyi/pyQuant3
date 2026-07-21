@@ -684,6 +684,9 @@ class ATSMainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        app = QApplication.instance()
+        if app:
+            app.main_window = self
         self.setWindowTitle("🛡️ ATS v2 智能自治股票交易终端 (Autonomous Trading Terminal)")
         self.resize(1440, 900)
         self.current_font_size = self.load_font_size()
