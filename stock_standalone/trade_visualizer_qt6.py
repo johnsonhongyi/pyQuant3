@@ -1641,7 +1641,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     dn = np.full(n, np.nan)
     
     if n < 20: # 基础数据量太少时直接返回 NaN
-        return mid, up, dn
+        return mid, up, dn, 0.0
         
     highs = day_df['high'].values
     lows = day_df['low'].values
@@ -1652,7 +1652,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     hhv = day_df['high'].rolling(w_high, min_periods=1).max().values
     high_matches = np.where(highs == hhv)[0]
     if len(high_matches) == 0:
-        return mid, up, dn
+        return mid, up, dn, 0.0
     idx_high = high_matches[-1]
     
     # 2. 寻找最后一个符合 L = LLV(L, 36) 的低点
@@ -1660,7 +1660,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     llv = day_df['low'].rolling(w_low, min_periods=1).min().values
     low_matches = np.where(lows == llv)[0]
     if len(low_matches) == 0:
-        return mid, up, dn
+        return mid, up, dn, 0.0
     idx_low = low_matches[-1]
     
     # 远点和近点
@@ -1669,7 +1669,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     nod = idx_near - idx_far
     
     if nod < 2: # 跨度太小，无法做有效的线性回归
-        return mid, up, dn
+        return mid, up, dn, 0.0
         
     # 3. 线性回归
     x = np.arange(nod + 1)
@@ -1686,7 +1686,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     
     denom = m * sum_xx - sum_x ** 2
     if denom == 0:
-        return mid, up, dn
+        return mid, up, dn, 0.0
         
     k = (m * sum_xy - sum_x * sum_y) / denom
     c = (sum_y - k * sum_x) / m
@@ -1721,7 +1721,7 @@ def calc_auto_channel(day_df, ur=6, lr=6):
     up[idx_far:] = np.where(valid_mask, np.clip(up_vals, limit_low, limit_high), np.nan)
     dn[idx_far:] = np.where(valid_mask, np.clip(dn_vals, limit_low, limit_high), np.nan)
     
-    return mid, up, dn
+    return mid, up, dn, k
 
 def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFrame:
     """
@@ -12273,7 +12273,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- ⚡ [NEW] 自动画通道绘制 ---
         if getattr(self, 'show_auto_channel', True):
             try:
-                mid_data, up_data, dn_data = calc_auto_channel(day_df)
+                mid_data, up_data, dn_data, chan_k = calc_auto_channel(day_df)
                 
                 # 写入 day_df 以便十字光标获取值 (跟通达信一致)
                 day_df['chan_mid'] = mid_data
@@ -12283,10 +12283,23 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 确定画线颜色和宽度
                 is_dark = self.qt_theme == 'dark'
                 mid_color = QColor(255, 255, 255) if is_dark else QColor(0, 0, 0)
-                up_dn_color = QColor(200, 200, 200) if is_dark else QColor(100, 100, 100)
                 
+                # 默认颜色
+                up_color = QColor(200, 200, 200) if is_dark else QColor(100, 100, 100)
+                dn_color = QColor(200, 200, 200) if is_dark else QColor(100, 100, 100)
+                
+                if chan_k > 0:
+                    # 上升通道：下轨用明橙（买），上轨用亮青（压力）
+                    dn_color = QColor(255, 150, 0) if is_dark else QColor(210, 80, 0)
+                    up_color = QColor(0, 210, 255) if is_dark else QColor(0, 110, 220)
+                elif chan_k < 0:
+                    # 下降通道：上轨用明橙（压力），下轨用亮青
+                    up_color = QColor(255, 150, 0) if is_dark else QColor(210, 80, 0)
+                    dn_color = QColor(0, 210, 255) if is_dark else QColor(0, 110, 220)
+                    
                 mid_pen = pg.mkPen(mid_color, width=2)
-                up_dn_pen = pg.mkPen(up_dn_color, width=1)
+                up_pen = pg.mkPen(up_color, width=2)
+                dn_pen = pg.mkPen(dn_color, width=2)
                 
                 # 绘制或更新中轨线
                 if not hasattr(self, 'mid_curve') or self.mid_curve not in self.kline_plot.items:
@@ -12298,18 +12311,18 @@ class MainWindow(QMainWindow, WindowMixin):
                     
                 # 绘制或更新上轨线
                 if not hasattr(self, 'up_curve') or self.up_curve not in self.kline_plot.items:
-                    self.up_curve = self.kline_plot.plot(x_axis, up_data, pen=up_dn_pen, name="Channel_Up", connect='finite')
+                    self.up_curve = self.kline_plot.plot(x_axis, up_data, pen=up_pen, name="Channel_Up", connect='finite')
                 else:
                     self.up_curve.setData(x_axis, up_data)
-                    self.up_curve.setPen(up_dn_pen)
+                    self.up_curve.setPen(up_pen)
                     self.up_curve.show()
                     
                 # 绘制或更新下轨线
                 if not hasattr(self, 'dn_curve') or self.dn_curve not in self.kline_plot.items:
-                    self.dn_curve = self.kline_plot.plot(x_axis, dn_data, pen=up_dn_pen, name="Channel_Dn", connect='finite')
+                    self.dn_curve = self.kline_plot.plot(x_axis, dn_data, pen=dn_pen, name="Channel_Dn", connect='finite')
                 else:
                     self.dn_curve.setData(x_axis, dn_data)
-                    self.dn_curve.setPen(up_dn_pen)
+                    self.dn_curve.setPen(dn_pen)
                     self.dn_curve.show()
             except Exception as e:
                 logger.error(f"[AutoChannel] 绘制失败: {e}")
