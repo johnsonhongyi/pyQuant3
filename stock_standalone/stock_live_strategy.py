@@ -2967,6 +2967,36 @@ class StockLiveStrategy:
             # check if sector leader is pulling back (follow-on risk)
             if stock_sector and p_sector == stock_sector:
                 snap['sector_leader_pullback'] = p_drop
+
+        # --- 💥 注入多日分时 VWAP 锚点与板块批量攻击状态 ---
+        snap['last_nclose'] = float(row.get('nclose1d') or row.get('last_nclose') or row.get('lastp1d') or 0)
+        snap['nclose2d'] = float(row.get('nclose2d') or row.get('lastp2d') or 0)
+
+        rally_signals = sector_status.get('rally_signals', [])
+        sector_stats = sector_status.get('sector_stats', {})
+        is_sector_attacking = False
+        rally_ratio = 0.0
+        
+        if stock_sector and isinstance(sector_stats, dict) and stock_sector in sector_stats:
+            sec_info = sector_stats[stock_sector]
+            avg_pct = sec_info.get('avg_pct', 0.0)
+            if avg_pct > 2.0:
+                is_sector_attacking = True
+                rally_ratio = min(max(avg_pct / 5.0, 0.20), 0.80)
+        else:
+            for s_name, avg_p, l_code in rally_signals:
+                if stock_sector and s_name in stock_sector:
+                    is_sector_attacking = True
+                    rally_ratio = min(max(avg_p / 5.0, 0.35), 0.90)
+                    break
+
+        snap['sector_batch_attack'] = {
+            'is_attacking': is_sector_attacking,
+            'rally_ratio': rally_ratio,
+            'stock_sector': stock_sector
+        }
+        if stock_sector and isinstance(sector_stats, dict):
+            snap['sector_stats'] = sector_stats.get(stock_sector, {})
         
         # --- 注入日线中轴趋势数据 (Daily Midline Trend) ---
         try:

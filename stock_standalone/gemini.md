@@ -1,3 +1,12 @@
+## 2026-07-21 16:10
+- [x] **全面进化分时交易结构引擎与 60F 迟滞追涨/早盘急跌风控 (Evoluted Intraday Structure Engine & Anti-60F-Chase Risk Control)**：
+    - [x] **实现多日分时 VWAP (成交均价) 交易结构引擎 (`_eval_multiday_intraday_structure`)**：结合今日/昨日/前日分时成交均价 (nclose/last_nclose/nclose2d) 重心连续抬升与偏离分析，解决单日分时盲区导致的高位接盘与多日结构破位无法识别的痛点。
+    - [x] **落地 60F 迟滞追涨硬拦截器 (`_intercept_60f_chasing`)**：针对 60F 脉冲拉升完成、偏离多日分时均线 (vwap_bias > 2.8%, multi_bias > 5.0%) 及顶端放量滞涨/缩量杀跌的迟滞追涨形态，实施隐性惩罚并硬性拦截买入，彻底杜绝次日开盘遭遇冲高杀跌破分时结构的陷阱。
+    - [x] **落地早盘 60F 杀跌后强弱反弹鉴定器 (`_eval_60f_drop_rebound`)**：针对早盘 60F 放量杀跌后的反弹，精准分辨“弱反弹/诱多”(量能萎缩且受压于均价，扣分禁买) 与 “强反弹/洗盘企稳”(量能放量且重新站回分时 VWAP，加分跟进)。
+    - [x] **实现板块批量资金共振攻击识别 (`_eval_batch_sector_attack`)**：识别板块/概念内部批量资金共振攻击状态 (rally_ratio >= 35%)，为共振拉升个股提供权重加成 (+0.20)，对拉升无板块跟随的孤狼诱多个股惩罚 (-0.20)，强化主力资金跟随胜率。
+    - [x] **落地早盘冲高杀跌破分时结构极速止损 (`_morning_structure_breakdown_stop`)**：在 `_stop_check` 中新增早盘 (09:30-10:20) 极速风控。持仓股若早盘冲高诱多后快速砸破开盘价、今日分时 VWAP 及昨日均价线，立即触发 `⚡[早盘冲高杀跌破日内/多日分时结构-极速止损避险]` 物理清仓，解决迟滞止损来不及的问题。
+    - [x] **扩展 TradingAnalyzer 交易分析日志提取**：在 `trading_analyzer.py` 的 `expand_indicators` 中补齐 `multiday_structure`, `chase_intercept`, `rebound_eval`, `batch_attack` 四大结构特征列，支持反向优化与信号回溯。
+
 ## 2026-07-21 15:16
 - [x] **修复 singleAnalyseUtil.py 中 rzrq (两融数据) 次日跨天无法自动刷新及手动刷新失效的 Bug (Fixed Next-Day RZRQ Auto/Manual Refresh Failure)**：
     - [x] **根因定位**：在 `singleAnalyseUtil.py` 的 `while 1:` 主循环内部，缺少了 `today_str = cct.get_today()` 的实时更新，导致 `today_str` 一直停留在程序启动时的日期。因而跨夜/跨天运行时 `if today_str != rzrq_date:` 永远为 `False`，无法触发自动重新拉取。同时 `st.lower() == 'c'` (Clear) 分支被设置为 `pass`，致使终端按 `c` 也无法手动刷新。

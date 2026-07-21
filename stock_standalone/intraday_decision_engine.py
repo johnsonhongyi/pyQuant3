@@ -564,6 +564,29 @@ class IntradayDecisionEngine:
                 if vwap_score < -0.2 and support_score < 0.15:
                     return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
 
+                # 💥 [NEW] 多日分时交易结构评估 (Multi-day VWAP Structure)
+                multiday_vwap_score = self._eval_multiday_intraday_structure(row, snapshot, debug)
+                base_pos += multiday_vwap_score
+                if multiday_vwap_score < -0.2 and support_score < 0.15:
+                    return self._hold(f"多日分时破位({debug.get('多日分时结构', '')})", debug)
+
+                # 💥 [NEW] 60F 迟滞追涨硬拦截器 (Anti 60F Chase Trap)
+                is_chase, chase_penalty, chase_reason = self._intercept_60f_chasing(row, snapshot, debug)
+                if is_chase:
+                    base_pos += chase_penalty
+                    if base_pos < 0.40:
+                        return self._hold(chase_reason, debug)
+
+                # 💥 [NEW] 早盘 60F 杀跌后强弱反弹鉴定器 (Rebound Quality Filter)
+                rebound_score = self._eval_60f_drop_rebound(row, snapshot, debug)
+                base_pos += rebound_score
+                if debug.get("60F反弹鉴定") == "弱反弹/诱多(量能萎缩且受压于均价)":
+                    return self._hold("60F弱反弹/诱多(防次日杀跌)禁买", debug)
+
+                # 💥 [NEW] 板块批量资金攻击方向评估 (Batch Sector Volume Attack)
+                batch_attack_score = self._eval_batch_sector_attack(row, snapshot, debug)
+                base_pos += batch_attack_score
+
                 # --- [新增] 智能加仓逻辑 (Smart Positioning) ---
                 # 如果当前已经是持仓状态，则判定是否符合加仓条件
                 is_holding = float(snapshot.get("cost_price", 0)) > 0
@@ -943,6 +966,11 @@ class IntradayDecisionEngine:
         
         if price <= 0:
             return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
+            
+        # 💥 [NEW] 早盘冲高杀跌破分时结构极速止损 (优先级最高)
+        morning_stop = self._morning_structure_breakdown_stop(row, snapshot, debug)
+        if morning_stop["triggered"]:
+            return morning_stop
             
         # 提取均线和历史收盘价数据用于跨周期破位决策
         ma5 = float(row.get("ma5d", 0))
@@ -1698,6 +1726,151 @@ class IntradayDecisionEngine:
                 debug["VWAP趋势"] += "|爆发"
 
         return score
+
+    # ==================== 多日分时交易结构 & 批量攻击评估 ====================
+
+    def _eval_multiday_intraday_structure(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+        """
+        [多日分时交易结构引擎]
+        结合今日/昨日/前日分时 VWAP (成交均价) 重心线及日内平台，对多日分时结构进行综合评估。
+        """
+        price = float(row.get("trade", 0))
+        nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+        last_nclose = float(snapshot.get("last_nclose", snapshot.get("nclose", 0)))
+        nclose2d = float(snapshot.get("nclose2d", 0))
+        
+        score = 0.0
+        status_list = []
+        
+        if nclose > 0 and last_nclose > 0:
+            # 1. 均价重心多日连续抬升 (Multi-day VWAP Uptrend)
+            if nclose >= last_nclose * 0.998 and (nclose2d == 0 or last_nclose >= nclose2d * 0.995):
+                if price >= nclose:
+                    score += 0.15
+                    status_list.append(f"多日VWAP重心上移(今{nclose:.2f}>昨{last_nclose:.2f})")
+                else:
+                    score += 0.05
+                    status_list.append("多日VWAP上移但价回踩均线")
+            elif nclose < last_nclose * 0.985 or price < last_nclose * 0.98:
+                # 2. 多日分时重心崩塌/破位
+                score -= 0.25
+                status_list.append(f"⚠️多日VWAP破位(今{nclose:.2f}<昨{last_nclose:.2f})")
+        
+        if last_nclose > 0:
+            multi_bias = (price - last_nclose) / last_nclose
+            debug["multi_vwap_bias"] = round(multi_bias, 4)
+            
+        debug["多日分时结构"] = " | ".join(status_list) if status_list else "平稳"
+        return score
+
+    def _intercept_60f_chasing(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, float, str]:
+        """
+        [60F 迟滞追涨硬拦截器]
+        解决痛点：在 60F 连续大涨拉升完成、偏离分时均线且处于高位时追涨，次日易遭遇冲高杀跌破分时结构。
+        """
+        price = float(row.get("trade", 0))
+        high = float(row.get("high", price))
+        pct_now = float(row.get("percent", 0))
+        nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+        last_nclose = float(snapshot.get("last_nclose", snapshot.get("nclose", 0)))
+        
+        vwap_bias = (price - nclose) / nclose if nclose > 0 else 0.0
+        multi_bias = (price - last_nclose) / last_nclose if last_nclose > 0 else 0.0
+        
+        highest_today = float(snapshot.get("highest_today", high))
+        fall_from_high = (highest_today - price) / highest_today if highest_today > 0 else 0.0
+        
+        if pct_now > 3.8 and (vwap_bias > 0.028 or multi_bias > 0.050):
+            now_time = dt.datetime.now().time()
+            if now_time > dt.datetime.strptime("09:42", "%H:%M").time():
+                debug["60F追涨拦截"] = f"偏离均价过远(日内偏离{vwap_bias:.1%},多日偏离{multi_bias:.1%})"
+                return True, -0.35, "⚠️[拦截60F迟滞追高-偏离多日分时均线过远]"
+                
+        if fall_from_high > 0.022 and pct_now > 2.5 and vwap_bias > 0.015:
+            debug["60F追涨拦截"] = f"60F顶端冲高回落({fall_from_high:.1%})"
+            return True, -0.30, "⚠️[拦截60F迟滞追高-高位回落无量跟进]"
+            
+        return False, 0.0, ""
+
+    def _eval_60f_drop_rebound(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+        """
+        [早盘 60F 杀跌后强弱反弹鉴定器]
+        解决痛点：早盘 60 分钟放量杀跌后再开启的反弹，如果是弱反弹/诱多，次日易直接遭大阴杀跌。
+        """
+        price = float(row.get("trade", 0))
+        high = float(row.get("high", price))
+        nclose = float(row.get("nclose", snapshot.get("nclose", price)))
+        last_nclose = float(snapshot.get("last_nclose", snapshot.get("nclose", 0)))
+        volume = float(row.get("volume", 1.0))
+        
+        now_time = dt.datetime.now().time()
+        if dt.datetime.strptime("10:00", "%H:%M").time() <= now_time <= dt.datetime.strptime("11:30", "%H:%M").time():
+            highest_today = float(snapshot.get("highest_today", high))
+            lowest_today = float(snapshot.get("lowest_today", price))
+            
+            if highest_today > 0 and (highest_today - lowest_today) / highest_today > 0.025:
+                rebound_ratio = (price - lowest_today) / (highest_today - lowest_today) if (highest_today > lowest_today) else 0.0
+                
+                if price < nclose or (last_nclose > 0 and price < last_nclose):
+                    if volume < 1.15 or rebound_ratio < 0.5:
+                        debug["60F反弹鉴定"] = "弱反弹/诱多(量能萎缩且受压于均价)"
+                        return -0.30
+                else:
+                    if volume >= 1.2 and rebound_ratio >= 0.6:
+                        debug["60F反弹鉴定"] = "强反弹/洗盘企稳(站回分时VWAP)"
+                        return 0.15
+        return 0.0
+
+    def _eval_batch_sector_attack(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+        """
+        [板块批量资金攻击方向交易模式]
+        识别板块/概念内部批量资金共振攻击。
+        """
+        batch_attack = snapshot.get("sector_batch_attack", {})
+        if not batch_attack and isinstance(snapshot.get("sector_stats"), dict):
+            stats = snapshot.get("sector_stats", {})
+            avg_pct = stats.get("avg_pct", 0)
+            if avg_pct > 2.5:
+                batch_attack = {"is_attacking": True, "rally_ratio": 0.40, "reason": "板块均涨>2.5%"}
+        
+        score = 0.0
+        if batch_attack:
+            is_attacking = batch_attack.get("is_attacking", False)
+            rally_ratio = batch_attack.get("rally_ratio", 0.0)
+            if is_attacking or rally_ratio >= 0.35:
+                score += 0.20
+                debug["批量资金攻击"] = f"板块集群共振(攻击比{rally_ratio:.0%})"
+            elif rally_ratio < 0.10 and float(row.get("percent", 0)) > 3.0:
+                score -= 0.20
+                debug["批量资金攻击"] = f"⚠️孤狼诱多(板块攻击比仅{rally_ratio:.0%})"
+                
+        return score
+
+    def _morning_structure_breakdown_stop(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+        """
+        [早盘冲高杀跌破分时结构-极速止损避险]
+        解决痛点：次日早盘冲高诱多后快速杀跌砸破日内/多日分时结构，避免传统硬止损滞后。
+        """
+        price = float(row.get("trade", 0))
+        open_p = float(row.get("open", price))
+        high = float(row.get("high", price))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", price)))
+        last_nclose = float(snapshot.get("last_nclose", snapshot.get("nclose", 0)))
+        
+        now_time = dt.datetime.now().time()
+        if dt.datetime.strptime("09:30", "%H:%M").time() <= now_time <= dt.datetime.strptime("10:20", "%H:%M").time():
+            highest_today = float(snapshot.get("highest_today", high))
+            if highest_today > open_p * 1.012 or highest_today > last_nclose * 1.015:
+                drop_from_high = (highest_today - price) / highest_today
+                if drop_from_high > 0.020:
+                    if price < open_p and price < nclose and (last_nclose == 0 or price < last_nclose * 0.997):
+                        return {
+                            "triggered": True,
+                            "action": "极速止损",
+                            "position": 0.0,
+                            "reason": f"⚡[早盘冲高杀跌破日内/多日分时结构-极速止损避险](高点回落{drop_from_high:.1%})"
+                        }
+        return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
 
     # ==================== 实时行情高优先级决策 ====================
     
