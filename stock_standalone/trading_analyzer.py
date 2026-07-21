@@ -69,6 +69,11 @@ class TradingAnalyzer:
                     'time_msg': d.get('时间窗口说明', ''),
                     'buy_reason': d.get('buy_reason', ''),
                     'sell_reason': d.get('sell_reason', ''),
+                    # 💥 多日分时与 60F 进化判定字段
+                    'multiday_structure': d.get('多日分时结构', ''),
+                    'chase_intercept': d.get('60F追涨拦截', ''),
+                    'rebound_eval': d.get('60F反弹鉴定', ''),
+                    'batch_attack': d.get('批量资金攻击', ''),
                     # 影子策略比对字段
                     'shadow_action': d.get('shadow_action', ''),
                     'shadow_reason': d.get('shadow_reason', ''),
@@ -81,7 +86,8 @@ class TradingAnalyzer:
                     'high': 0, 'low': 0, 'open': 0,
                     'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0,
                     'hvolume': 0, 'lvolume': 0, 'time_msg': '',
-                    'buy_reason': '', 'sell_reason': ''
+                    'buy_reason': '', 'sell_reason': '',
+                    'multiday_structure': '', 'chase_intercept': '', 'rebound_eval': '', 'batch_attack': ''
                 })
 
         expanded = df['indicators'].apply(expand_indicators)
