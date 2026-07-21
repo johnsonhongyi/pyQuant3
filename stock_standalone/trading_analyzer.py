@@ -74,6 +74,7 @@ class TradingAnalyzer:
                     'chase_intercept': d.get('60F追涨拦截', ''),
                     'rebound_eval': d.get('60F反弹鉴定', ''),
                     'batch_attack': d.get('批量资金攻击', ''),
+                    'tail_intercept': d.get('尾盘拦截', ''),
                     # 影子策略比对字段
                     'shadow_action': d.get('shadow_action', ''),
                     'shadow_reason': d.get('shadow_reason', ''),
@@ -87,7 +88,7 @@ class TradingAnalyzer:
                     'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0,
                     'hvolume': 0, 'lvolume': 0, 'time_msg': '',
                     'buy_reason': '', 'sell_reason': '',
-                    'multiday_structure': '', 'chase_intercept': '', 'rebound_eval': '', 'batch_attack': ''
+                    'multiday_structure': '', 'chase_intercept': '', 'rebound_eval': '', 'batch_attack': '', 'tail_intercept': ''
                 })
 
         expanded = df['indicators'].apply(expand_indicators)
