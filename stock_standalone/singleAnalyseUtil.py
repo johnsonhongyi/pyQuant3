@@ -389,25 +389,39 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             cyb = df[df.index.str.startswith('30')]
             kcb = df[df.index.str.startswith('68')]
             top = df[df['percent'] > changepercent]
-            
-            if market == 'cyb':
-                # topTen = df[df['percent'] > 19.8 ]    
-                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')    
-            else:
-                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 9')    
-                # topTen = df[df['percent'] > 9.9 ]
             st = df[df.name.str.contains('ST')]
-            topTen_st = st[(st.b1_v > st.a1_v) & (st.a1_v == 0)]
 
-            # dropcode = [ x for x in topTen.index.tolist() if x not in top_Ten_Dropcxg]
-            # if len(dropcode) >0:
-            #     topT_l = tdd.get_tdx_exp_all_LastDF_DL(dropcode, dt=ct.duration_date_day,newdays=10,showRunTime=False)
-            #     if isinstance(topT_l, pd.DataFrame):
-            #         top_Ten_Dropcxg.extend(topT_l.index.tolist())
-            # crashTen = df[df['percent'] < -9.8]
-            crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -9')    
+            # 按市场规则独立计算涨跌停：创业板(30)/科创板(68) ±20%，主板/ST ±10%
+            if market == 'cyb':
+                # 创业板整体 ±20%（含300/301开头），科创板(68开头)同规则
+                # cyb数据源包含创业板全体，科创板在sz市场内，此处仅创业板市场
+                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')
+                crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -19')
+            else:
+                # sh/sz 主板：区分科创板(68开头)用20%，普通主板用10%
+                kcb_mask = df.index.str.startswith('68')
+                normal_mask = ~kcb_mask
+                # 科创板涨停
+                topTen_kcb = df[kcb_mask].query('b1_v > a1_v and b1_v > 0 and percent > 19') if kcb_mask.any() else df.iloc[0:0]
+                # 普通主板涨停
+                topTen_normal = df[normal_mask].query('b1_v > a1_v and b1_v > 0 and percent > 9') if normal_mask.any() else df.iloc[0:0]
+                topTen = pd.concat([topTen_kcb, topTen_normal])
+                # 科创板跌停
+                crashTen_kcb = df[kcb_mask].query('b1_v < a1_v and a1_v > 0 and percent < -19') if kcb_mask.any() else df.iloc[0:0]
+                # 普通主板跌停
+                crashTen_normal = df[normal_mask].query('b1_v < a1_v and a1_v > 0 and percent < -9') if normal_mask.any() else df.iloc[0:0]
+                crashTen = pd.concat([crashTen_kcb, crashTen_normal])
+
+            # ST股新规：涨跌停改为±10%（与主板一致），废弃旧无量法
+            if market == 'cyb':
+                # cyb市场ST股仍为±10%（非创业板±20%），需单独用percent±9%抓取
+                topTen_st = st.query('b1_v > a1_v and b1_v > 0 and percent > 9') if len(st) > 0 else df.iloc[0:0]
+                crashTen_st = st.query('b1_v < a1_v and a1_v > 0 and percent < -9') if len(st) > 0 else df.iloc[0:0]
+            else:
+                # sh/sz市场：ST股±10%已被normal_mask的 percent>9/<-9 规则捕获，置空避免重复计数
+                topTen_st = df.iloc[0:0]
+                crashTen_st = df.iloc[0:0]
             crash = df[df['percent'] < -changepercent]
-            crashTen_st = st[(st.a1_v > st.b1_v) & (st.b1_v == 0)]
         else:
             log.info("market No Percent:%s" % df[:1])
             top = '0'
@@ -424,11 +438,9 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
         # print("\033[1;31;40m您输入的帐号或密码错误！\033[0m")
         print((
             "%s topT: %s top>%s: %s" % (
-                f_print(4, market), f_print(3, len(topTen)), changepercent, f_print(4, len(top)))), end=' ')
-        # url = ct.DFCFW_FUND_FLOW_URL % ct.SINA_Market_KEY_TO_DFCFW[market]
-        # log.debug("ffurl:%s" % url)
+                f_print(4, market), f_print(3, len(topTen)+len(topTen_st)), changepercent, f_print(4, len(top)))), end=' ')
         print(("crashT:%s crash<-%s:%s" %
-              (f_print(4, len(crashTen)), changepercent, f_print(4, len(crash)))), end=' ')
+              (f_print(4, len(crashTen)+len(crashTen_st)), changepercent, f_print(4, len(crash)))), end=' ')
         # print(u"-5:%s" %
         #       (f_print(4, len(crash[crash < -5])))),
         ff = ffindex[market]
@@ -692,6 +704,7 @@ if __name__ == '__main__':
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     while 1:
         try:
+            today_str = cct.get_today()
             if today_str != rzrq_date:
                 log.info("Trading day changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
@@ -845,8 +858,9 @@ if __name__ == '__main__':
                 ave = None
                 code = ''
             elif st.lower() == 'c' or st.lower() == 'C':
-                # rzrq = {}
-                pass
+                log.info("Manually re-fetching rzrq data...")
+                rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                rzrq_date = cct.get_today()
             # elif st.startswith('w') or st.startswith('a'):
             #     args = cct.writeArgmain().parse_args(st.split())
             #     top_temp = cct.GlobalValues().getkey('top_max')
