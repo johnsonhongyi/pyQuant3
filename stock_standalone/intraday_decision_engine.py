@@ -93,6 +93,10 @@ class IntradayDecisionEngine:
         nclose = float(row.get("nclose", snapshot.get("nclose", price)))
         last_close = float(snapshot.get("last_close", snapshot.get("lastp1d", 0)))
         
+        # 💥 [NEW] 提前评估早盘 60F 杀跌强反弹结构，用于后续风控与豁免
+        rebound_score = self._eval_60f_drop_rebound(row, snapshot, debug)
+        is_strong_rebound = (rebound_score >= 0.30)
+        
         # 调试信息基础
         debug.update({
             "nclose": nclose,
@@ -164,16 +168,18 @@ class IntradayDecisionEngine:
         # ==============================================================================
         # 💥 [NEW] P0.9 主升浪持仓保护与顶部信号拦截 (High Priority)
         # ==============================================================================
-        hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info, 
-                                                 is_stabilizing=is_stabilizing, acc_info=acc_info, is_main_wave=is_main_wave)
-        if hold_decision:
-            # 如果主升浪逻辑接管，直接返回
-            return {
-                "action": hold_decision["action"],
-                "position": round(hold_decision["position"], 2),
-                "reason": hold_decision["reason"],
-                "debug": hold_decision.get("debug", debug)
-            }
+        cost_price = float(snapshot.get("cost_price", 0))
+        if cost_price > 0:
+            hold_decision = self._main_wave_hold_check(row, snapshot, debug, top_info=top_info, 
+                                                     is_stabilizing=is_stabilizing, acc_info=acc_info, is_main_wave=is_main_wave)
+            if hold_decision:
+                # 如果主升浪逻辑接管，直接返回
+                return {
+                    "action": hold_decision["action"],
+                    "position": round(hold_decision["position"], 2),
+                    "reason": hold_decision["reason"],
+                    "debug": hold_decision.get("debug", debug)
+                }
         
         # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
         # 0. 基础过滤：时间窗口与涨跌停 (Basic Filters)
@@ -193,16 +199,19 @@ class IntradayDecisionEngine:
 
         # 💥 [New] 严格追高限制 (Anti-Chasing)
         # 如果日内涨幅超过 7%，且当前不是为了卖出，则坚决不追
+        # [豁免] 如果是洗盘低位放量强反弹（即早盘急跌后的大长腿拉升），不硬性拦截
         pct_now = float(row.get('percent', 0))
         if pct_now > 7.0 and mode != "sell_only":
-            # 唯一的例外：如果有极强的题材或外部加分 (可配置)
-            # 但为了安全起见，默认禁止
-            debug["refuse_reason"] = f"涨幅{pct_now:.2f}%过高"
-            return self._hold(f"禁止追高(>{pct_now:.1f}%)", debug)
+            if not is_strong_rebound:
+                debug["refuse_reason"] = f"涨幅{pct_now:.2f}%过高"
+                return self._hold(f"禁止追高(>{pct_now:.1f}%)", debug)
+            else:
+                debug["追高豁免"] = f"强反弹豁免(涨幅{pct_now:.1f}%)"
         elif pct_now > 5.0 and mode != "sell_only":
             # 5-7% 之间，扣分惩罚
-            base_pos -= 0.15
-            debug["追高惩罚"] = -0.15
+            if not is_strong_rebound:
+                base_pos -= 0.15
+                debug["追高惩罚"] = -0.15
 
         # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
         streak_val = snapshot.get("loss_streak", 0)
@@ -353,11 +362,8 @@ class IntradayDecisionEngine:
                     }
 
         # ---------- 买入信号检测 ----------
-        rebound_score = 0.0
-        is_strong_rebound = False
         if mode in ("full", "buy_only"):
-            # 💥 [NEW] 早盘 60F 杀跌后强弱反弹鉴定器 (Rebound Quality Filter)
-            rebound_score = self._eval_60f_drop_rebound(row, snapshot, debug)
+            # rebound_score and is_strong_rebound have been pre-calculated at the top of evaluate()
             
             # 💥 [NEW] 赛马模式起爆集成 (Horse Racing Model Integration)
             racing_result = self._check_horse_racing_breakout(row, snapshot, debug)
@@ -365,7 +371,6 @@ class IntradayDecisionEngine:
             action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
             
             # 如果是强反弹，则强制开仓买入
-            is_strong_rebound = (rebound_score >= 0.30)
             if is_strong_rebound:
                 action = "买入"
                 base_pos = max(base_pos, 0.40)
@@ -451,22 +456,30 @@ class IntradayDecisionEngine:
                 # 💥 核心修正：结构性熔断机制 💥
                 # 如果盘中结构判定为"派发"(冲高大幅回落)，坚决禁止开仓，无论其他指标多好
                 if structure == "派发":
-                    debug["refuse_buy"] = "结构为派发(冲高回落)"
-                    return self._hold(f"结构{structure}禁买", debug)
+                    # [优化] 如果是强反弹且价格在昨收上方，且日内回落未超过 5%，则豁免结构派发禁买
+                    highest_today_val = float(snapshot.get("highest_today", price))
+                    fall_from_high = (highest_today_val - price) / highest_today_val if highest_today_val > 0 else 0.0
+                    is_exempt = is_strong_rebound and last_close > 0 and price > last_close and fall_from_high <= 0.05
+                    if not is_exempt:
+                        debug["refuse_buy"] = "结构为派发(冲高回落)"
+                        return self._hold(f"结构{structure}禁买", debug)
+                    else:
+                        debug["结构派发豁免"] = f"回落{fall_from_high:.1%}在限额内"
                 
                 # (模式识别已移至上方)
 
                 # 1. 应用基础过滤器
-                base_pos += self._yesterday_anchor(price, snapshot, debug)
-                base_pos += self._structure_filter(row, debug)
-                base_pos += self._extreme_filter(row, debug)
+                base_pos += self._yesterday_anchor(price, snapshot, debug, is_strong_rebound)
+                base_pos += self._structure_filter(row, debug, is_strong_rebound)
+                base_pos += self._extreme_filter(row, debug, is_strong_rebound)
                 
                 # 2. 趋势强度与多日情绪加成
                 multiday_score = self._multiday_trend_score(row, debug)
                 if trend_strength > 0.5 or multiday_score > 0.3:
                     base_pos += 0.1
                 elif trend_strength < -0.3:
-                    base_pos -= 0.1
+                    if not is_strong_rebound:
+                        base_pos -= 0.1
                 
                 # 【新增】单阳惩罚 (One-Day Wonder Penalty)
                 # 统计发现 win=1 时买入胜率为 0%，需连续确认
@@ -565,8 +578,16 @@ class IntradayDecisionEngine:
                     if support_score > 0.2:
                         base_pos -= 0.05
                     else:
-                        base_pos -= 0.15
-                        debug["昨日锚点约束"] = "低于昨均价"
+                        if not is_strong_rebound:
+                            base_pos -= 0.15
+                            debug["昨日锚点约束"] = "低于昨均价"
+                        else:
+                            # 强反弹且价格站在昨日收盘价上方，豁免该扣分
+                            if last_close > 0 and price >= last_close:
+                                debug["昨日锚点约束"] = "低于昨均价(强反弹豁免)"
+                            else:
+                                base_pos -= 0.10
+                                debug["昨日锚点约束"] = "低于昨均价(强反弹折扣)"
 
                 # 6. 低位大仓位逻辑 (靠近 low10/low60 加成)
                 low10 = float(snapshot.get("low10", 0))
@@ -579,7 +600,7 @@ class IntradayDecisionEngine:
                 # 【新增】VWAP (成交均价) 趋势判定：过滤无效震荡单
                 # 逻辑：均价线代表当日/昨日的市场平均成本。成本下移说明趋势走弱。
                 # 只有在 "重心上移" 或 "低位企稳" 时才开仓。
-                vwap_score = self._vwap_trend_check(row, snapshot, debug)
+                vwap_score = self._vwap_trend_check(row, snapshot, debug, is_strong_rebound)
                 base_pos += vwap_score
                 
                 # 如果 VWAP 趋势严重走坏 (score < -0.2) 且没有强支撑豁免，直接熔断
@@ -587,7 +608,7 @@ class IntradayDecisionEngine:
                     return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
 
                 # 💥 [NEW] 多日分时交易结构评估 (Multi-day VWAP Structure)
-                multiday_vwap_score = self._eval_multiday_intraday_structure(row, snapshot, debug)
+                multiday_vwap_score = self._eval_multiday_intraday_structure(row, snapshot, debug, is_strong_rebound)
                 base_pos += multiday_vwap_score
                 if multiday_vwap_score < -0.2:
                     # [优化] 如果是强反弹结构且已站上今日 VWAP，豁免多日分时重心崩塌/下移的硬熔断
@@ -1447,15 +1468,27 @@ class IntradayDecisionEngine:
 
     def _limit_price_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, str]:
         """
-        价格限制过滤器：防止在涨停板或跌停板错误交易
+        价格限制过滤器：防止在涨停板或跌停板错误交易 (适配科创板/创业板20%、ST板5%、主板10%)
         """
         percent = float(row.get('percent', 0))
-        # 涨停板判定 (通常 > 9.8% 且买一量大)
-        if percent > 9.85:
+        code = str(row.get('code', ''))
+        name = str(row.get('name', ''))
+        
+        limit_pct = 10.0
+        if code.startswith('300') or code.startswith('301') or code.startswith('688') or code.startswith('689'):
+            limit_pct = 20.0
+        elif 'ST' in name or 'st' in name or '*ST' in name:
+            limit_pct = 5.0
+            
+        limit_up_threshold = limit_pct - 0.15
+        limit_down_threshold = - (limit_pct - 0.15)
+        
+        # 涨停板判定
+        if percent > limit_up_threshold:
             return True, "涨停板禁止追高"
         
         # 跌停板判定
-        if percent < -9.85:
+        if percent < limit_down_threshold:
             return True, "跌停板禁止抄底"
             
         return False, ""
@@ -1501,7 +1534,7 @@ class IntradayDecisionEngine:
             return "持仓", 0, "远离MA5，追高风险"
         return "持仓", 0, "均线结构中性"
 
-    def _yesterday_anchor(self, price: float, snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+    def _yesterday_anchor(self, price: float, snapshot: dict[str, Any], debug: dict[str, Any], is_strong_rebound: bool = False) -> float:
         """昨日锚点惩罚"""
         penalty = 0.0
         last_close = float(snapshot.get("last_close", 0))
@@ -1509,11 +1542,18 @@ class IntradayDecisionEngine:
         if last_close > 0 and price < last_close:
             penalty -= 0.1
         if last_nclose > 0 and price < last_nclose:
-            penalty -= 0.15
+            if not is_strong_rebound:
+                penalty -= 0.15
+            elif last_close > 0 and price < last_close:
+                # 强反弹但价格低于昨收，折扣惩罚
+                penalty -= 0.10
+            else:
+                # 强反弹且站稳昨收，豁免昨均偏离惩罚
+                pass
         debug["昨日约束"] = penalty
         return penalty
 
-    def _structure_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
+    def _structure_filter(self, row: dict[str, Any], debug: dict[str, Any], is_strong_rebound: bool = False) -> float:
         """结构过滤"""
         penalty = 0.0
         price = float(row.get("trade", 0))
@@ -1521,7 +1561,8 @@ class IntradayDecisionEngine:
         max5 = float(row.get("max5", 0))
         high4 = float(row.get("high4", 0))
         if ma60 > 0 and price < ma60:
-            penalty -= 0.2
+            if not is_strong_rebound:
+                penalty -= 0.2
         if max5 > 0 and price > max5 * 0.98:
             penalty -= 0.1
         if high4 > 0 and price > high4 * 0.98:
@@ -1529,7 +1570,7 @@ class IntradayDecisionEngine:
         debug["结构约束"] = penalty
         return penalty
 
-    def _extreme_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
+    def _extreme_filter(self, row: dict[str, Any], debug: dict[str, Any], is_strong_rebound: bool = False) -> float:
         """极端指标过滤"""
         penalty = 0.0
         kdj_j = float(row.get("kdj_j", 0))
@@ -1545,7 +1586,8 @@ class IntradayDecisionEngine:
         if upper > 0 and price > upper:
             penalty -= 0.1
         if lower > 0 and price < lower:
-            penalty -= 0.1
+            if not is_strong_rebound:
+                penalty -= 0.1
         debug["指标约束"] = penalty
         return penalty
 
@@ -1714,7 +1756,7 @@ class IntradayDecisionEngine:
                 
         return result
 
-    def _vwap_trend_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+    def _vwap_trend_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any], is_strong_rebound: bool = False) -> float:
         """
         VWAP (均价) 趋势过滤器
         User Requirement: 通过实时数据的均价线和昨天的均价来判定小趋势走高还是小转大
@@ -1747,8 +1789,12 @@ class IntradayDecisionEngine:
                     debug["VWAP趋势"] += "+价弱"
                 else:
                     # 价格在均价之上，可能是反抽，需谨慎
-                    score -= 0.1
-                    debug["VWAP趋势"] += "+反抽"
+                    if is_strong_rebound:
+                        score -= 0.05
+                        debug["VWAP趋势"] += "+反抽(强反弹折扣)"
+                    else:
+                        score -= 0.1
+                        debug["VWAP趋势"] += "+反抽"
                     
             # 3. 小转大判定 (Small turning Big)
             # 如果昨日均价和前日均价接近(震荡)，今日突然大幅拉离昨日均价
@@ -1761,7 +1807,7 @@ class IntradayDecisionEngine:
 
     # ==================== 多日分时交易结构 & 批量攻击评估 ====================
 
-    def _eval_multiday_intraday_structure(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
+    def _eval_multiday_intraday_structure(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any], is_strong_rebound: bool = False) -> float:
         """
         [多日分时交易结构引擎]
         结合今日/昨日/前日分时 VWAP (成交均价) 重心线及日内平台，对多日分时结构进行综合评估。
@@ -1778,24 +1824,36 @@ class IntradayDecisionEngine:
             # 1. 均价重心多日连续抬升 (Multi-day VWAP Uptrend)
             if nclose >= last_nclose * 0.998 and (nclose2d == 0 or last_nclose >= nclose2d * 0.995):
                 if price >= nclose:
-                    score += 0.15
-                    status_list.append(f"多日VWAP重心上移(今{nclose:.2f}>昨{last_nclose:.2f})")
+                     score += 0.15
+                     status_list.append(f"多日VWAP重心上移(今{nclose:.2f}>昨{last_nclose:.2f})")
                 else:
-                    score += 0.05
-                    status_list.append("多日VWAP上移但价回踩均线")
+                     score += 0.05
+                     status_list.append("多日VWAP上移但价回踩均线")
             # 2. 均价重心连续多日下移 (阴跌/杀跌模型)
             elif nclose < last_nclose * 0.995 and nclose2d > 0 and last_nclose < nclose2d * 0.995:
                 # 重心连续下移，如果价格没有强势站回昨日均价，说明仍然处于阴跌通道
                 if price < last_nclose:
-                    score -= 0.35
-                    status_list.append(f"⚠️多日VWAP重心连续下移(今{nclose:.2f}<昨{last_nclose:.2f}<前{nclose2d:.2f})")
+                    last_close = float(snapshot.get("last_close", 0))
+                    if is_strong_rebound and last_close > 0 and price >= last_close:
+                        # 针对强反弹已站回昨收的形态，豁免重心连续下移的大额扣分，仅扣 -0.05
+                        score -= 0.05
+                        status_list.append(f"多日VWAP下移且低于昨均，但强反弹站回昨收豁免")
+                    else:
+                        score -= 0.35
+                        status_list.append(f"⚠️多日VWAP重心连续下移(今{nclose:.2f}<昨{last_nclose:.2f}<前{nclose2d:.2f})")
                 else:
-                    score -= 0.10
+                    if not is_strong_rebound:
+                        score -= 0.10
                     status_list.append("多日VWAP下移但股价反抽")
             # 3. 单日均价重心明显崩塌或破位
             elif nclose < last_nclose * 0.985 or price < last_nclose * 0.98:
-                score -= 0.25
-                status_list.append(f"⚠️多日VWAP破位(今{nclose:.2f}<昨{last_nclose:.2f})")
+                last_close = float(snapshot.get("last_close", 0))
+                if is_strong_rebound and last_close > 0 and price >= last_close:
+                    score -= 0.05
+                    status_list.append(f"多日VWAP破位，但强反弹站回昨收豁免")
+                else:
+                    score -= 0.25
+                    status_list.append(f"⚠️多日VWAP破位(今{nclose:.2f}<昨{last_nclose:.2f})")
         
         if last_nclose > 0:
             multi_bias = (price - last_nclose) / last_nclose
@@ -1877,19 +1935,17 @@ class IntradayDecisionEngine:
             if has_shakeout:
                 rebound_ratio = (price - lowest_today) / (highest_today - lowest_today) if (highest_today > lowest_today) else 0.0
                 
-                # 1. 弱反弹/诱多：价格在今日均价之下，且量能萎缩或反弹幅度太弱
-                if price < nclose or (last_nclose > 0 and price < last_nclose):
-                    if volume < 1.15 or rebound_ratio < 0.5:
-                        debug["60F反弹鉴定"] = "弱反弹/诱多(量能萎缩且受压于均价)"
-                        return -0.30
-                # 2. 强反弹/洗盘企稳：放量且重新站回今日均价(VWAP)之上，或者接近昨收且大长腿确立
-                else:
-                    if volume >= 1.15 and rebound_ratio >= 0.5:
-                        debug["60F反弹鉴定"] = "强反弹/洗盘企稳(站回分时VWAP)"
-                        return 0.30
-                    elif volume >= 1.1 and rebound_ratio >= 0.4:
-                        debug["60F反弹鉴定"] = "弱反弹企稳"
-                        return 0.10
+                # 1. 优先判断强反弹与弱反弹企稳状态 (不以低于昨均价作为否定强反弹的前提)
+                if volume >= 1.15 and rebound_ratio >= 0.5 and price >= nclose:
+                    debug["60F反弹鉴定"] = "强反弹/洗盘企稳(站回分时VWAP)"
+                    return 0.30
+                elif volume >= 1.1 and rebound_ratio >= 0.4 and price >= nclose:
+                    debug["60F反弹鉴定"] = "弱反弹企稳"
+                    return 0.10
+                # 2. 否则，如果价格在均线下方，或者量能/反弹比例不足，判定为弱反弹/诱多
+                elif price < nclose or (last_nclose > 0 and price < last_nclose) or volume < 1.15 or rebound_ratio < 0.5:
+                    debug["60F反弹鉴定"] = "弱反弹/诱多(量能萎缩且受压于均价)"
+                    return -0.30
         return 0.0
 
     def _intercept_tail_position_building(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, float, str]:
