@@ -29,8 +29,9 @@ os.environ["IN_LINKAGE_PROCESS_MARK"] = "1"
 logger = LoggerFactory.getLogger("LinkageService")
 
 class LinkageService:
-    def __init__(self, task_queue):
+    def __init__(self, task_queue, last_active_val=None):
         self.task_queue = task_queue
+        self.last_active_val = last_active_val
         self.latest_cmd = None
         self.last_exec_ts = 0
         self.throttle_interval = 0.05  # 50ms 强制节流
@@ -61,6 +62,13 @@ class LinkageService:
         
         while self._running:
             try:
+                # 0. 更新共享的活跃时间戳，表明本子进程没有挂起
+                if self.last_active_val is not None:
+                    try:
+                        self.last_active_val.value = time.time()
+                    except Exception:
+                        pass
+                        
                 # 1. 计算阻塞超时时间 (Dynamic Timeout)
                 now = time.time()
                 timeout = 1.0 # 默认长超时，防止空转
@@ -127,9 +135,9 @@ class LinkageService:
         except Exception as e:
             logger.error(f"Execution error for {code}: {e}")
 
-def _start_linkage_worker(q):
+def _start_linkage_worker(q, last_active_val):
     try:
-        service = LinkageService(q)
+        service = LinkageService(q, last_active_val)
         service.run()
     except KeyboardInterrupt:
         # 子进程静默退出
@@ -148,10 +156,11 @@ class LinkageManagerProxy:
     def _init(self):
         _multiprocessingQueue = getattr(cct, "multiprocessingQueue", 300) if cct is not None else 300
         self.queue = multiprocessing.Queue(maxsize=_multiprocessingQueue)
+        self.last_active_val = multiprocessing.Value('d', time.time()) # 心跳监视
         self._last_pushed_code = None # [NEW] 记录上一次成功投递的代码，用于极速去重
         self.process = multiprocessing.Process(
             target=_start_linkage_worker,
-            args=(self.queue,),
+            args=(self.queue, self.last_active_val),
             name="LinkageProcess",
             daemon=True
         )
@@ -160,12 +169,25 @@ class LinkageManagerProxy:
         logger.info(f"Linkage process launched. PID: {self.process.pid}")
 
     def _ensure_alive(self):
-        """确保后台进程存活，若死亡则拉起"""
-        if self.process is None or not self.process.is_alive():
-            now = time.time()
+        """确保后台进程存活且未卡死，若死亡或挂起则拉起"""
+        now = time.time()
+        is_dead = self.process is None or not self.process.is_alive()
+        is_hung = False
+        
+        if not is_dead and hasattr(self, 'last_active_val') and self.last_active_val is not None:
+            # 如果活跃心跳滞后超过 15 秒，视为子进程已卡死在外部物理接口或 DLL 锁中
+            if now - self.last_active_val.value > 15.0:
+                is_hung = True
+                
+        if is_dead or is_hung:
             if now - getattr(self, '_last_revive_ts', 0) > 5: # 5秒冷却
-                logger.warning("🚨 [Linkage] Process detected DEAD. Attempting to revive...")
+                if is_hung:
+                    logger.warning("🚨 [Linkage] Process detected HUNG (no heartbeat for 15s). Terminating and reviving...")
+                    self.stop()
+                else:
+                    logger.warning("🚨 [Linkage] Process detected DEAD. Attempting to revive...")
                 self._init()
+                self._last_revive_ts = now
                 return True
         return self.process is not None and self.process.is_alive()
 
@@ -216,9 +238,10 @@ class LinkageManagerProxy:
     def stop(self):
         try:
             self.queue.put("EXIT")
-            self.process.join(timeout=1)
+            self.process.join(timeout=0.5)
             if self.process.is_alive():
                 self.process.terminate()
+                self.process.join(timeout=0.2)
         except: pass
 
 global_manager = None

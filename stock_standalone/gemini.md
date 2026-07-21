@@ -1,3 +1,10 @@
+## 2026-07-21 15:00
+- [x] **修复区间个股分布详情窗口 (DistributionDetailsDialog) 在冷启动 800ms 自动恢复加载时联动失效与误认主窗口的 Bug (Fixed Cold-Start Detached Linkage Failure & Window Misidentification in DistributionDetailsDialog)**：
+    - [x] **实现 PyQt6 信号槽的稳固连接 (Robust Qt Signal/Slot Connection)**：重构了 `open_details_dialog` 数据恢复流程。在拉起 `DistributionDetailsDialog` 窗口时，通过精确搜寻当前进程中真正且有效的 `ATSMainWindow` 实例，在对话框创建后将 `dialog.code_clicked` 信号槽物理绑定到主窗口的 `link_stock` 方法上，与板块明细的信号槽机制同构，在 Qt 底层自动安全分发。
+    - [x] **重构 `_get_main_app` 并增加 isdeleted 与强类型检验 (Refactored _get_main_app with sip.isdeleted & Type Enforcement)**：根治了由于 cold-start 阶段父子层级关系未完全建立，导致 `topLevelWidgets()` 遍历时将其他正在创建或已失效的 Dialog 误认作 `main_app` 从而覆写并污染为错误引用的 Bug。新引入了 `isdeleted` 状态防御，并在此基础上严格匹配类名是否为 `'ATSMainWindow'`，确保仅认准真正的 PyQt6 主窗口，同时支持运行时动态重新搜寻与自愈更新。
+    - [x] **引入本地极速物理与可视化联动三层防线兜底 (Implemented Asynchronous Fallback Linkage Pathway)**：为了实现极致的健壮性，新实现了 `_fallback_linkage` 模块。当在冷启动极其微秒的瞬间主窗口未加载好或为空时，用户点击/双击行操作会自动进入第三道防线：异步建立 TCP socket 连结向本地 `26668` 端口投递可视化行情切换指令，并调用后台 `linkage_service.get_link_manager().push` 异步投递物理终端联动（通达信/同花顺），完全不依赖 `ATSMainWindow` 实例是否存在，确保百分百联动通畅。
+    - [x] **重构双击诊断与联动共享逻辑 (DRY-aligned Double-Click & Diagnosis Routing)**：同步加固了 `_on_item_double_clicked` 和 `link_stock` 接口，使双击行也接入 `_fallback_linkage` 兜底，并提取公共逻辑封装为 `_fallback_linkage`，完全对齐系统的 DRY 与 SOLID 设计原则。
+
 ## 2026-07-21 12:00
 - [x] **在主可视化终端 (trade_visualizer_qt6.py) 实现通达信自动画通道指标绘制与顶栏交互 (Implemented TDX Auto-Channel Regression Indicator & Legend Interaction)**：
     - [x] **实现 Python 级最小二乘法回归预测自动画通道算法 (calc_auto_channel)**：在主程序中新增 `calc_auto_channel(day_df, ur=6, lr=6)` 函数，完全依照用户给定的通达信公式算法，精确计算过去 36 周期（即 $6 \times UR$ 和 $6 \times LR$）的最大高点与最小低点跨度，进行线性回归外推，并以区间的最大正负偏离值来绘制上轨、中轨和下轨的自动通道，同时依据 HHV/LLV 的 100 天极限价格的 1.1x 与 0.9x 进行截断溢出 clip 过滤。

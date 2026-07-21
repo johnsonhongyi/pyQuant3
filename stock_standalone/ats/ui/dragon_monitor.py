@@ -670,6 +670,11 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._is_updating = False
 
     def _get_main_app(self):
+        # 0. Prioritize QApplication.instance().main_window directly
+        app = QApplication.instance()
+        if app and getattr(app, 'main_window', None) is not None:
+            return app.main_window
+
         # 1. Prioritize parent widgets possessing engine & _period_dfs
         curr = self.parent()
         while curr:
