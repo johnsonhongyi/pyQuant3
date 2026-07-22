@@ -1,3 +1,26 @@
+## 2026-07-22 11:15
+- [x] **应用户要求彻底撤销按键缩放重排代码 (Reverted Modifier Key Scaling Feature as Requested)**：
+    - [x] **`qt_window_utils.py` / `trade_visualizer_qt6.py` / `stock_visual_utils.py` / `sector_bidding_panel.py`**：彻底移除 `scale_factor` 等比例放大/缩小的分支逻辑，完全恢复为干净、稳定的标准平铺重排功能。
+    - [x] **保留底层 DWM 物理尺寸修补**：保留了基于 `GetWindowRect` 物理外框测量的高可靠修补，确保点击重排时物理大小 100% 保持固定，彻底消除窗口缩窄打扰。
+
+## 2026-07-22 11:02
+- [x] **实现窗口重排按键修饰符交互 (Implemented Rearrange Modifier Key Scaling Interactions)**：
+    - [x] **默认鼠标点击（无修饰键）**：保留纯平铺重排 (scale_factor = 1.0) 功能，窗口物理大小保持 100% 原样不变，仅在屏幕按网格重排。
+    - [x] **Alt + 鼠标点击**：触发**等比例缩小** (scale_factor = 0.85) 并自动平铺重排，防过度收缩最小保护为 350x220px。
+    - [x] **Ctrl + 鼠标点击**：触发**等比例放大** (scale_factor = 1.15) 并自动平铺重排，最大防护不超过当前屏幕工作区。
+
+## 2026-07-22 10:46
+- [x] **根治窗口重排时每次点击窗口物理尺寸被蚕食缩小的 Bug (Fixed MoveWindow DWM Shadow Outer Bounds Shrinking Bug)**：
+    - [x] **`qt_window_utils.py` 修正窗口尺寸测算接口**：定位并修复了 `find_app_hwnds` 误将 DWM 视觉裁剪矩形 (`dwm_rect`) 作为 `MoveWindow` 宽高参数的坑。在 Windows 10/11 上 `MoveWindow` 期望接收包含不可见阴影框的物理全矩形 (`GetWindowRect`)；原代码用 `dwm_rect` 导致每次 `MoveWindow` 重排都会让窗口丢失 16px 边框并越来越小。现修正为统一采用 `GetWindowRect` 物理外框宽高，彻底消除了点击“窗口重排”时窗口自动发窄、变小的严重体验缺陷。
+    - [x] **扩展 `tile_all_windows` 与 `rearrange_sbc_windows` 匹配范围**：全面覆盖 `SBC Pattern`、`StandaloneKlineChart` 与 `Stock Chart` 等全套图表窗口，确保多视图分析时平铺对齐稳定、严丝合缝且物理尺寸 100% 保持不变。
+
+## 2026-07-22 10:35
+- [x] **修复 SBC 基础数据加载逻辑 Bug 与分时回测完全解耦 (Fixed SBC Base Data Loading Bug & Decoupled Intraday Backtest)**：
+    - [x] **sbc_core.py 增加高可靠 Fallback 降级机制**：在 load_tick_data 的 use_live=True 分支中，当实时 HDF5 (sina.get_real_time_tick) 返回 None 或数据为空时，自动安全降级调用 load_tick_data(code, use_live=False, ...) 从本地缓存 (minute_kline_cache.pkl) 或 TDX 载入分时轨迹，彻底消除了由此引发的 ❌ 无法获取 300149 实时数据 致命错误。
+    - [x] **恢复 SBC 基础数据加载与 realtime 绑定解耦**：在 	rade_visualizer_qt6.py 中将 _run_sbc_test 与 _start_sbc_realtime_refresh 的数据加载模式解耦 self.realtime 的全局强绑定，恢复默认 use_live=False 基础模式，确保 SBC 启动与查看时秒级加载 240 分钟完整轨迹。
+    - [x] **弱化后台刷新的阻塞式报错**：修改 _on_sbc_test_error 与 _refresh_sbc_data 的错误回调。后台自动刷新失败时仅在日志与状态栏记录 warning，不再弹出阻塞 GUI 的 QMessageBox.critical 对话框，保持界面平滑流畅。
+    - [x] **彻底隔离分时回测逻辑**：分时回测重放算法仅在用户点击「分时回测」按钮时对当前图表数据生效，不干涉也不污染 SBC 的基础数据管道。
+
 ## 2026-07-21 22:11
 - [x] **修复 StandaloneKlineChart 缺少 _on_rearrange_clicked 引起的 AttributeError 崩溃 (Fixed AttributeError: 'StandaloneKlineChart' object has no attribute '_on_rearrange_clicked')**：
     - [x] **重构类定义作用域与层级结构**：修复了 `stock_visual_utils.py` 中 `BacktestResultDialog` 类误插入 `StandaloneKlineChart` 方法内部导致后者作用域断层及方法丢失的问题。将 `BacktestResultDialog` 提取移至 `StandaloneKlineChart` 外部顶层作用域，完美恢复了 `StandaloneKlineChart` 类的完整方法链路。

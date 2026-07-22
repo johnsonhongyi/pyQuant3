@@ -1,3 +1,16 @@
+## 2026-07-22 11:02
+- [x] **实现窗口重排按键修饰符交互 (Implemented Rearrange Modifier Key Scaling Interactions)**：
+    - [x] **默认鼠标点击（无修饰键）**：保留纯平铺重排 (scale_factor = 1.0) 功能，窗口物理大小保持 100% 原样不变，仅在屏幕按网格重排。
+    - [x] **Alt + 鼠标点击**：触发**等比例缩小** (scale_factor = 0.85) 并自动平铺重排，防过度收缩最小保护为 350x220px。
+    - [x] **Ctrl + 鼠标点击**：触发**等比例放大** (scale_factor = 1.15) 并自动平铺重排，最大防护不超过当前屏幕工作区。
+
+## 2026-07-22 10:35
+- [x] **修复 SBC 基础数据加载逻辑 Bug 与分时回测完全解耦 (Fixed SBC Base Data Loading Bug & Decoupled Intraday Backtest)**：
+    - [x] **sbc_core.py 增加高可靠 Fallback 降级机制**：在 load_tick_data 的 use_live=True 分支中，当实时 HDF5 (sina.get_real_time_tick) 返回 None 或数据为空时，自动安全降级调用 load_tick_data(code, use_live=False, ...) 从本地缓存 (minute_kline_cache.pkl) 或 TDX 载入分时轨迹，彻底消除了由此引发的 ❌ 无法获取 300149 实时数据 致命错误。
+    - [x] **恢复 SBC 基础数据加载与 realtime 绑定解耦**：在 	rade_visualizer_qt6.py 中将 _run_sbc_test 与 _start_sbc_realtime_refresh 的数据加载模式解耦 self.realtime 的全局强绑定，恢复默认 use_live=False 基础模式，确保 SBC 启动与查看时秒级加载 240 分钟完整轨迹。
+    - [x] **弱化后台刷新的阻塞式报错**：修改 _on_sbc_test_error 与 _refresh_sbc_data 的错误回调。后台自动刷新失败时仅在日志与状态栏记录 warning，不再弹出阻塞 GUI 的 QMessageBox.critical 对话框，保持界面平滑流畅。
+    - [x] **彻底隔离分时回测逻辑**：分时回测重放算法仅在用户点击「分时回测」按钮时对当前图表数据生效，不干涉也不污染 SBC 的基础数据管道。
+
 ## 2026-06-12 15:00
 - [x] **优化 HDF5 读写性能与防卡死保护 (Optimized HDF5 Read Performance & Anti-Freeze Protection)**：
     - [x] **实现 TDX 每日一次性读取缓存 (Once-a-Day TDX Caching)**：重构了 `_get_tdx_data_df`，在 `today_tdx_df` 缓存有效且日期未发生变更时，直接复用内存数据，避免了在盘中或打开报警中心等交互时高频、重复地读取 HDF5 磁盘文件，从根本上消除了由此引发的主线程 I/O 阻塞与假死。
@@ -90,12 +103,15 @@
     - [x] **加固 Truncate 触发逻辑与参数优先级**：维持了用户要求的 **1.1 倍** 触发门槛（150MB 在 165MB 触发）以及 **外部传参优先级**，确保 write_hdf_db 逻辑不越权。如果 sina_data 显式传递了 sizelimit，系统将完全尊重该数值。
     - [x] **配置项命名对齐 (Case-Sensitivity Alignment)**：将 global.ini 中的键名统一修改为 sina_MultiIndex_limit，解决了由于此前键名大小写不一致（小写 vs 驼峰）导致的配置加载失效（Fallback 到 200MB）的问题。
     - [x] **具备正则 Fallback 的鲁棒读取器**：在 	dx_hdf5_api.py 中实现了 _load_sina_multiindex_limit，支持大小写自适应和正则提取。即使配置文件的其他部分存在语法错误，也能确保限额参数被正确加载。
-    - [x] **清理 Global 配置语法隐患**：修复了 global.ini 中 eal_time_cols 字段的多余引号。
+    - [x] **清理 Global 配置语法隐患**：修复了 global.ini 中 
+eal_time_cols 字段的多余引号。
 
 ## 2026-04-14 18:55
 - [x] **深度修复 sina_MultiIndex_data.h5 数据质量与架构**：
-  - [x] **物理清理无效 open 列 (Clean corrupted data)**：执行了 epair_sina_multiindex_file 任务，彻底剔除了 g:\sina_MultiIndex_data.h5 中全为 NaN 的 open 列。清理后数据行数从 ~222万 优化至 ~218万（去重），文件结构更加紧凑。
-  - [x] **集成专用修复接口 (Dedicated Repair Function)**：在 	dx_hdf5_api.py 中新增了 epair_sina_multiindex_file() 和 clean_nan_columns() 接口。该接口支持自动化扫描所有 ll_ 开头的表格，并按标准 SCHEMA 执行规范化、去重和排序，提升了系统的自愈能力。
+  - [x] **物理清理无效 open 列 (Clean corrupted data)**：执行了 
+epair_sina_multiindex_file 任务，彻底剔除了 g:\sina_MultiIndex_data.h5 中全为 NaN 的 open 列。清理后数据行数从 ~222万 优化至 ~218万（去重），文件结构更加紧凑。
+  - [x] **集成专用修复接口 (Dedicated Repair Function)**：在 	dx_hdf5_api.py 中新增了 
+epair_sina_multiindex_file() 和 clean_nan_columns() 接口。该接口支持自动化扫描所有 ll_ 开头的表格，并按标准 SCHEMA 执行规范化、去重和排序，提升了系统的自愈能力。
   - [x] **同步 Schema 安全加固 (Schema Hardening)**：从 sina_MultiIndex_SCHEMA 中正式移除了 open 字段，配合 
 ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来写入时再次产生 ll-NaN 脏列的可能。
 
@@ -110,7 +126,8 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
   - [x] **HotlistPanel 渲染架构升级**：
     - [x] **资源预加载 (UI Caching)**：预先缓存常用的 QColor 与 QFont 对象，避开了每 500ms 刷新循环中成千上万个 Qt 对象的瞬时分配与 GC 压力。
     - [x] **高频脏检查局部更新 (Dirty Check Update)**：在 _update_item 中引入了内容与颜色双重脏位检测。仅在单元格数据或状态真实变动时才调用底层 Qt 重绘接口，将观察池刷新成本降低了 80% 以上。
-    - [x] **布局排版保护 (Layout Protection)**：从实时刷新循环中剥离并禁用了 esizeColumnsToContents() 这一致命的性能杀手，由静态预设宽度与防抖测量接管，确保护航监控时的 CPU 负载极低。
+    - [x] **布局排版保护 (Layout Protection)**：从实时刷新循环中剥离并禁用了 
+esizeColumnsToContents() 这一致命的性能杀手，由静态预设宽度与防抖测量接管，确保护航监控时的 CPU 负载极低。
 
 ## 2026-04-13 17:10
 - [x] 深度优化 SectorBiddingPanel UI 响应式架构：
@@ -156,7 +173,8 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
 
 ## 2026-04-05 23:55
 - [x] 深度修复 signal_dashboard_panel.py UI 显示及联动相关问题：
-  - [x] **修复数据与卡片统计数量不匹配**：使用去重后表格的 owCount() （如 self.tables["跟单信号"].rowCount()）直接提取显示数据总数，替换原先提取总历史事件池的方法。彻底解决了顶部计数卡片、下拉栏以及底部分类信息（如 跟单:，突破: 等）数字与用户实际点击列表时所能看到数据行数不一致的问题。
+  - [x] **修复数据与卡片统计数量不匹配**：使用去重后表格的 
+owCount() （如 self.tables["跟单信号"].rowCount()）直接提取显示数据总数，替换原先提取总历史事件池的方法。彻底解决了顶部计数卡片、下拉栏以及底部分类信息（如 跟单:，突破: 等）数字与用户实际点击列表时所能看到数据行数不一致的问题。
   - [x] **修复由于下拉列表与类型卡片交叉过滤引发的“无数据展示”异常**：在用户点击“现跟单、风险卖出”等类型卡片进行点击跳转时，自动检测并清空下拉过滤框中的限定关键字（切换至 "ALL" 状态），防止先前的选择隐性过滤掉所有的行使得新页面白屏。
   - [x] **提升下拉过滤项精准度**：下拉过滤列表 ComboxBox 选项卡中分类显示的数量，修改为依托“全部信号”实体表迭代精准盘查动态构建，使得下拉显示的类型数字和可视 UI 列队100%严密吻合。
   - [x] **防全屏皆空优化**：在使用下拉过滤器且当前状态驻留在毫无干系的其他子标签夹层时（可能引发匹配无任何重叠导致列表皆空），自动触发判定并平滑切回至“全部信号”基础页，避免给用户产生系统卡死或没数据反应的交互错觉。
@@ -178,7 +196,8 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
 
 ## 2026-04-08 11:50
 - [x] 深度优化表格排序与滚动回顶交互：
-  - [x] **强制手动排序回顶**：修改了板块表、个股表、重点表的表头点击回调，移除之前仅在焦点切换时回顶的动态逻辑。现在任何手动点击表头排序的操作都将触发 eset_to_top=True，确保立即展示最强/最弱的极值个股。
+  - [x] **强制手动排序回顶**：修改了板块表、个股表、重点表的表头点击回调，移除之前仅在焦点切换时回顶的动态逻辑。现在任何手动点击表头排序的操作都将触发 
+eset_to_top=True，确保立即展示最强/最弱的极值个股。
   - [x] **新增板块切换自动回顶**：在 _on_sector_table_selection_changed 中增加了板块变更判定。当用户点击并切换到不同板块时，即使未手动排序，也将个股表自动滚动至顶部，彻底解决了跨板块浏览时的滚动位置残留问题。
   - [x] **背景刷新位置保护**：区分了手动操作与背景行情刷新（Worker Heartbeat），行情自动更新时依然保留用户的当前选择 and 滚动位置，平衡了“强力回顶”与“平滑浏览”的需求。
 
@@ -231,13 +250,15 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
     - [x] **新增手动重置交互**：集成工具栏“🔄 重置今日”红色按钮，支持用户在不重启程序的情况下平滑清理历史残留。
 
 ## 2026-04-09 14:10
-- [x] 修复 ealtime_data_service.py 中的 NameError: name 'List' is not defined：
+- [x] 修复 
+ealtime_data_service.py 中的 NameError: name 'List' is not defined：
     - [x] **补齐 typing 导入**：在文件头部导入中添加了缺失的 List。
     - [x] **统一风格优化**：将 ackfill_gaps_from_hdf5 等新增方法的类型提示从 List[str] 转换为 PEP 585 风格的 list[str]，以与该文件现有的 dict[...] 和 list[...] 风格保持一致，提升了代码的兼容性与现代感。
 
 ## 2026-04-09 15:30
 - [x] 深度重构 RealtimeDataService 的 HDF5 数据恢复机制：
-    - [x] **废弃直接 HDF5 访问**：在 ecover_from_hdf5_by_codes 中移除对 	dx_hdf5_api.load_hdf_db 的直接调用，转而使用 sina_data.Sina 提供的统一接口 get_sina_MultiIndex_data。
+    - [x] **废弃直接 HDF5 访问**：在 
+ecover_from_hdf5_by_codes 中移除对 	dx_hdf5_api.load_hdf_db 的直接调用，转而使用 sina_data.Sina 提供的统一接口 get_sina_MultiIndex_data。
     - [x] **接入 SingleFlight 缓存引擎**：通过 sina_data.Sina 实例，自动共享架构级的 HDF5 内存缓存与 SingleFlight 加载保护，消除了并发恢复时的冗余磁盘 IO。
     - [x] **优化 MultiIndex 精准过滤**：利用 Pandas MultiIndex 特性对 code_list 进行向量化求交集过滤，将数百个品种的恢复定位延迟从百毫秒级降低至微秒级。
     - [x] **保持聚合逻辑一致性**：确保恢复的数据流管道化进入 _aggregate_hdf5_df，实现 Tick 到 1分钟 K 线的标准转换。
@@ -261,17 +282,21 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
 
 ## 2026-04-09 17:45
 - [x] 修复 intraday_decision_engine.py 中的 TypeError: cannot unpack non-iterable NoneType object：
-    - [x] **补齐函数返回值**：修复了 _time_structure_filter 在非预设时间段内缺失默认 eturn 的问题，确保其始终返回 	uple[float, str]。
+    - [x] **补齐函数返回值**：修复了 _time_structure_filter 在非预设时间段内缺失默认 
+eturn 的问题，确保其始终返回 	uple[float, str]。
     - [x] **清理错位逻辑代码**：将意外飘移到 _opening_sell_check 下方的尾盘风险过滤逻辑重新归位至 _time_structure_filter 内部，并移除了不可达的冗余代码块，增强了决策引擎的运行稳定性。
 
 ## 2026-04-09 17:55
 - [x] 修复 sina_data.py 中的 NameError: name 'work_time_now' is not defined：
-    - [x] **补齐变量定义**：在 market 函数内部补齐了缺失的 work_time_now = cct.get_work_time() 定义，解决了在执行收盘后任务（un_15_30_task）时由于缓存校验逻辑引发的程序崩溃。
+    - [x] **补齐变量定义**：在 market 函数内部补齐了缺失的 work_time_now = cct.get_work_time() 定义，解决了在执行收盘后任务（
+un_15_30_task）时由于缓存校验逻辑引发的程序崩溃。
 
 ## 2026-04-09 18:05
 - [x] 修复 intraday_decision_engine.py 中的 NameError: name 'row' is not defined：
-    - [x] **修正函数签名**：将缺失的 ow 参数补全至 _sell_decision 方法中。
-    - [x] **同步更新调用链**：在 evaluate 方法中调用 _sell_decision 时正确传递当前行情 ow 字典，确保 9:30-9:50 期间的开盘弱势检测逻辑能够正常执行。
+    - [x] **修正函数签名**：将缺失的 
+ow 参数补全至 _sell_decision 方法中。
+    - [x] **同步更新调用链**：在 evaluate 方法中调用 _sell_decision 时正确传递当前行情 
+ow 字典，确保 9:30-9:50 期间的开盘弱势检测逻辑能够正常执行。
 
 ## 2026-04-10 13:20
 - [x] 修复 sector_bidding_panel.py 当日重点表 (Watchlist) 联动失效问题：
@@ -281,6 +306,8 @@ ormalize_SCHEMA 的“只保留已有列”原则，从源头上杜绝了未来�
 - [x] 深度修复 	dx_hdf5_api.py 写入结构匹配异常 (ValueError: cannot match existing table structure)：
   - [x] **安全化类型转换逻辑 (Object to Numeric)**：废弃了盲目将所有 object 列转为 str 的行为。现在会优先尝试通过 pd.to_numeric 将包含 None 但本质是数值的 object 列恢复为 loat64。这保护了 close, high 等核心数值列的 Block 结构，防止由于混合类型导致的追加失败。
   - [x] **Data Columns 智能继承 (Inherit from Storer)**：在 put_table_safe 的追加模式下，实现了从现有 HDF5 存储器自动读取并使用 data_columns 的功能。解决了由于 index_col 默认值与文件已有结构不符导致的 schema 冲突。
-  - [x] **修正 MultiIndex 参数透传**：修正了 write_hdf_db 中 ppend 参数对 MultiIndex 模式失效的问题，确保 ewrite/append 指令能准确到达底层存储。
+  - [x] **修正 MultiIndex 参数透传**：修正了 write_hdf_db 中 ppend 参数对 MultiIndex 模式失效的问题，确保 
+ewrite/append 指令能准确到达底层存储。
   - [x] **实现临时文件残留自愈**：通过 PID + ThreadID 命名隔离，并配合验证脚本确认了在新逻辑下 .tmp 文件在成功写入后的可靠替换与清理。
-- [x] **彻底重构 HDF5 写入逻辑稳定性**：针对此前编辑引入的 IndentationError 和代码碎片进行了全量审计与重写。恢复了 epack_hdf_db 和 load_hdf_db_timed_ctx 的完整定义，并加固了 os.replace 原子替换的 6 次退避重试机制，确保高频读写场景下的数据一致性与系统稳定性。
+- [x] **彻底重构 HDF5 写入逻辑稳定性**：针对此前编辑引入的 IndentationError 和代码碎片进行了全量审计与重写。恢复了 
+epack_hdf_db 和 load_hdf_db_timed_ctx 的完整定义，并加固了 os.replace 原子替换的 6 次退避重试机制，确保高频读写场景下的数据一致性与系统稳定性。
