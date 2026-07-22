@@ -5511,7 +5511,7 @@ class MainWindow(QMainWindow, WindowMixin):
             "extra_lines": data.get("extra_lines"),
             "timer": timer,
             "thread": None,
-            "use_live": data.get("_use_live", True),
+            "use_live": data.get("_use_live", False),
             "realtime": data.get("_realtime", True),
             "concise": data.get("concise", True)
         }
@@ -5534,7 +5534,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             thread = SBCTestThread(
                 state['code'],
-                use_live=state.get('use_live', True),
+                use_live=state.get('use_live', False),
                 hdf5_lock=getattr(self, "hdf5_mutex", None),
                 extra_lines=state['extra_lines'],
                 realtime=state.get('realtime', True),
@@ -5543,7 +5543,7 @@ class MainWindow(QMainWindow, WindowMixin):
             )
 
             thread.finished_data.connect(self._on_sbc_test_finished)
-            thread.error_occurred.connect(self._on_sbc_test_error)
+            thread.error_occurred.connect(partial(self._on_sbc_test_error, win_ref=win))
             state['thread'] = thread
             thread.start()
 
@@ -5610,15 +5610,11 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.warning(f"Failed to extract extra_lines for SBC test in GUI: {e}")
 
-        # [FIX] 统一 SBC 实时与回放：根据全局 realtime 状态决定是否自动刷新与数据源
+        # [FIX] 解耦 SBC 基础数据加载与 realtime 强绑定：
+        # SBC 查看与定时刷新使用稳定基础/缓存数据源 (use_live=False)，保证秒开 240 分钟完整轨迹；
+        # 只有在显式指定 use_live=True 时才走实时库。
         is_realtime_req = self.realtime
-        use_live_req = self.realtime if use_live is None else use_live
-        
-        # 允许通过传参强制指定 (如菜单调用)，否则跟随全局开关
-        if use_live is None:
-            use_live_req = self.realtime
-        else:
-            use_live_req = use_live
+        use_live_req = False if use_live is None else bool(use_live)
         
         # 创建并启动后台线程 (使用独立属性避免阻塞)
         # [MODIFIED] 默认极简模式 (True)
@@ -5698,12 +5694,14 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             import traceback
             logger.error(f"SBC 可视化显示失败: {e}\n{traceback.format_exc()}")
-            self._on_sbc_test_error(f"渲染图表失败: {str(e)}")
+            self._on_sbc_test_error(f"渲染图表失败: {str(e)}", win_ref=win_ref)
 
-    def _on_sbc_test_error(self, err_msg: str):
+    def _on_sbc_test_error(self, err_msg: str, win_ref=None):
         """线程出错回调"""
         logger.error(f"❌ SBC 测试线程出错: {err_msg}")
-        QMessageBox.critical(self, "SBC 测试错误", err_msg)
+        # 如果是后台自动刷新发起的，仅输出 log 不弹出阻塞对话框，防止打断用户
+        if not win_ref:
+            QMessageBox.critical(self, "SBC 测试错误", err_msg)
 
 
 

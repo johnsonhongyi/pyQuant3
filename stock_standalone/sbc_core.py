@@ -209,8 +209,8 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                 logger.info(f"📡 正在从 Sina 获取 {code} 实时数据 (limit_time={limit_time})...")
                 stock_df = sina.get_real_time_tick(code, l_limit_time=limit_time, enrich_data=True)
                 if stock_df is None or stock_df.empty:
-                    logger.error(f"❌ 无法获取 {code} 实时数据")
-                    return None
+                    logger.warning(f"⚠️ 无法获取 {code} 实时 HDF5 数据，自动降级从本地缓存/TDX 加载...")
+                    return load_tick_data(code, use_live=False, cache_path=cache_path, limit_time=limit_time)
                 
                 stock_df = stock_df.copy()
 
@@ -238,8 +238,8 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                 logger.info(f"✅ 成功获取 {len(stock_df)} 条实时数据")
                 return stock_df
             except Exception as e:
-                logger.error(f"❌ 获取实时数据失败: {e}")
-                return None
+                logger.warning(f"⚠️ 获取实时数据失败: {e}，自动降级从本地缓存/TDX 加载...")
+                return load_tick_data(code, use_live=False, cache_path=cache_path, limit_time=limit_time)
     else:
         # [HEALING] 自动探测缓存路径，优先当前目录，其次 G: 盘
         target_path = cache_path
