@@ -1,7 +1,6 @@
 ## 2026-07-23 12:45
-- [x] **根治 `manage_window_layout` 打包后闪退与磁吸窗口卡边无法弹出 Bug (Fixed Packaging Crash & Edge-Docked Window Snap Reset)**：
-    - [x] **零侵入第三方程序，布局管理器内核双向强力自适应磁吸窗口**：在 `webTools/window_manager/core.py` 中实现了**抓取/录入**与**应用/设置 (`set_window_hwnd_pos`)** 阶段的双向自动归一化 (`normalize_docked_window_rect`)。即使配置中历史上保存的是侧边隐藏折叠超界坐标（如 `x=1915`），在应用布局时也能自动反向修正为**磁吸前的正常显示视口坐标 (如 `x=1320`)**，彻底消除了当窗口拉出正常显示后被应用布局强行丢到屏幕最外侧卡边悬空的问题。
-    - [x] **实现应用布局精准恢复至磁吸前正常位置**：在 `core.py` 的 `list_visible_windows` 提取与 `set_window_pos_by_title` 应用阶段，当检测到窗口处于磁吸折叠状态时，先调用 `ShowWindow(hwnd, SW_RESTORE)` 还原其正常展开视角，并应用磁吸前的标准物理 Geometry，随后允许窗口自身原有的磁吸逻辑自发触发贴边隐藏。多次应用布局均能精准自愈，彻底杜绝卡边悬空现象。
+- [x] **根治 `SignalDashboardPanel` 关闭后再打开磁吸定时器失灵与闪退 Bug (Fixed Signal Dashboard Reopen Docking Timer Freeze)**：
+    - [x] **在 `showEvent` 中强力重启 `hover_timer` 轮询与复位锁**：修复了 `SignalDashboardPanel` 手动关闭【X】时在 `closeEvent` 中调用 `stop()` 停止了 `hover_timer` 和 `snap_timer`，但再次在 TK 中点击【打开信号面板】时因复用旧实例导致 `hover_timer` 始终处于停止（Stopped）状态，进而引发放置在磁吸位置闪烁卡死无法折叠隐藏的硬 Bug。在 `showEvent` 恢复了 `hover_timer.start(100)` 和 `_in_snap_action = False` 状态解开，确保每次重开均能秒级触发磁吸。
     - [x] **修复打包 `Qt6Network` 被误剔除与 `ImportError` 崩溃**：在 `manage_window_layout.spec` 中将 `'Qt6Network'` 从垃圾剔除列表 `trash_list` 中移出，并在 `hiddenimports` 中追加 `'PyQt6.QtNetwork'`，解决了 PyInstaller / Nuitka 打包产物导入 `QLocalSocket` / `QLocalServer` 时报 `DLL load failed while importing QtNetwork` 导致的闪退。
     - [x] **解决 `psutil` 扫描进程误判父进程与无 HWND 僵尸强退**：重构了 `webTools/window_manager/core.py` 中的 `check_and_activate_existing_instance`。在进程扫描中显式排除父进程 PID (`os.getppid()`)，并严格限制仅在**成功连上 IPC 本地管道 或 成功找到并唤醒前台窗口 HWND** 时才返回 `True` 阻止重复启动，彻底根除刚双击打包 EXE 即静默 `sys.exit(0)` 闪退的问题。
 
