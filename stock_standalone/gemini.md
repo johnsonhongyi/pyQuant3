@@ -1,3 +1,10 @@
+## 2026-07-23 11:50
+- [x] **实现 `manage_window_layout` 启动单实例检查与后台窗口自动唤醒显示 (Single-Instance Check & Auto Window Activation)**：
+    - [x] **实现多通道已有进程/窗口检测机制 (`check_and_activate_existing_instance`)**：在 `window_manager/core.py` 中新增单实例扫描接口。合并了 Win32 `EnumWindows` 桌面标题（`"窗口坐标分类管理器"` / `"桌面窗口坐标布局"`）句柄精确查找与 `psutil` 进程特征（`manage_window_layout.exe` 或命令行 `manage_window_layout.py`）精准定位，彻底防止多实例重复拉起。
+    - [x] **架构级 Qt `QLocalServer` & `QLocalSocket` 本地 IPC 唤醒**：在 `ui.py` 中监听 `ManageWindowLayout_SingleInstance_Server` 管道服务。再次启动时通过 `QLocalSocket` 跨进程发送 `WAKEUP` 指令，触发目标进程在 Qt 主线程优雅执行 `self.show()` + `self.showNormal()` + `self.repaint()`，彻底根除从托盘/任务栏唤醒时出现的“白板”或无内容无响应Bug。
+    - [x] **彻底根除 `nativeEvent` 野指针访问导致的崩溃**：彻底废除了 `nativeEvent` 中 `wintypes.MSG.from_address` 内存指针解引用，消除 Access Violation / Segfault（0xc0000005）导致的 "Python 已停止工作" 崩溃，改用 Qt 标准原生事件通道驱动。
+    - [x] **彻底根除唤醒白屏与界面无响应**：在 `showEvent` 与 `changeEvent` 原生事件中加入 `self.repaint()` 与 `QApplication.processEvents()` 绘图泵强刷新，确保从托盘或后台拉起时瞬间渲染完整 UI 界面。
+
 ## 2026-07-22 11:15
 - [x] **应用户要求彻底撤销按键缩放重排代码 (Reverted Modifier Key Scaling Feature as Requested)**：
     - [x] **`qt_window_utils.py` / `trade_visualizer_qt6.py` / `stock_visual_utils.py` / `sector_bidding_panel.py`**：彻底移除 `scale_factor` 等比例放大/缩小的分支逻辑，完全恢复为干净、稳定的标准平铺重排功能。

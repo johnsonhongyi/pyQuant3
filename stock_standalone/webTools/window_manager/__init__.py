@@ -16,7 +16,9 @@ from .core import (
     save_display_configuration,
     restore_display_configuration,
     bring_window_to_top_by_title,
-    check_and_add_route
+    check_and_add_route,
+    get_wm_show_msg_id,
+    check_and_activate_existing_instance
 )
 
 from .ui import (
@@ -37,6 +39,9 @@ __all__ = [
     'restore_display_configuration',
     'bring_window_to_top_by_title',
     'check_and_add_route',
+    'get_wm_show_msg_id',
+    'check_and_activate_existing_instance',
     'WindowPosManagerUI',
     'run_ui'
 ]
+
