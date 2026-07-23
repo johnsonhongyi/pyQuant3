@@ -14,7 +14,6 @@ import pandas as pd
 import numpy as np
 import argparse
 import itertools
-from contextlib import contextmanager
 from typing import Any, List, Dict
 
 # Ensure stdout uses UTF-8 to prevent encoding gibberish on Windows terminal
@@ -28,28 +27,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from JSONData import tdx_data_Day as tdd
 from intraday_decision_engine import IntradayDecisionEngine
 from JohnsonUtil import commonTips as cct
-import intraday_decision_engine as _ide_mod
-
-
-@contextmanager
-def _patch_dt(replacement):
-    """Nuitka 兼容的轻量时间替换，等价于 unittest.mock.patch('…dt.datetime', replacement)。"""
-    original = getattr(_ide_mod.dt, 'datetime', None)
-    _ide_mod.dt.datetime = replacement
-    try:
-        yield
-    finally:
-        if original is not None:
-            _ide_mod.dt.datetime = original
-
-
-# Mock DateTime for time-sensitive decision logic
-class MockDateTime(dt.datetime):
-    _mock_now = dt.datetime(2026, 7, 21, 10, 0, 0)
-    
-    @classmethod
-    def now(cls, tz=None):
-        return cls._mock_now
 
 class IntradayBacktester:
     def __init__(self, h5_path: str = r"g:\sina_MultiIndex_data.h5"):

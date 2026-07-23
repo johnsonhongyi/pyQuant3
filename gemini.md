@@ -1,3 +1,9 @@
+## 2026-07-22 14:20
+- [x] **全面清理 `intraday_backtest_tool.py` 中的冗余导入与废弃函数 (Cleaned Unused Imports & Obsolete Functions)**：
+    - [x] **移除废弃时间 Patch 逻辑**：彻底清理了 `intraday_backtest_tool.py` 内部残存的 `from contextlib import contextmanager` 依赖、`_patch_dt` 上下文管理器函数以及 `MockDateTime` 废弃 Mock 类。
+    - [x] **精简模块导入依赖**：移除了不必要的隐式标准库引用，保持核心 `IntradayBacktester` 行情回放与网格寻优功能的纯粹与高效。
+    - [x] **配置打包脚本排除项 (`--nofollow-import-to`)**：在 `nuitka_build_console_onlyClang.bat`、`nuitka_build_console.bat` 及 `nuitka_instockMonitor.bat` 打包配置文件中显式追加了 `--nofollow-import-to=babel`、`--nofollow-import-to=cryptography`剔除参数，避免 Nuitka 依赖分析器将隐式庞大扩展库误抓取进包。
+
 ## 2026-07-22 11:02
 - [x] **实现窗口重排按键修饰符交互 (Implemented Rearrange Modifier Key Scaling Interactions)**：
     - [x] **默认鼠标点击（无修饰键）**：保留纯平铺重排 (scale_factor = 1.0) 功能，窗口物理大小保持 100% 原样不变，仅在屏幕按网格重排。
