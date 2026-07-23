@@ -43,6 +43,25 @@ def get_app_root() -> str:
     return calculated_root
 
 
+def attach_to_parent_console() -> bool:
+    """
+    针对 Windows 下无控制台 (noconsole / GUI 模式) 打包的 EXE，
+    当用户通过 CMD / PowerShell 运行并带 -h 或 -cli 参数时，
+    自动附加到调用者的控制台，确保 print 输出能在终端窗口中清晰可见。
+    """
+    try:
+        ATTACH_PARENT_PROCESS = -1
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            # 重定向 sys.stdout / sys.stderr 到终端标准输出设备
+            sys.stdout = open('CONOUT$', 'w', encoding='utf-8', buffering=1)
+            sys.stderr = open('CONOUT$', 'w', encoding='utf-8', buffering=1)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 if __name__ == '__main__':
     import multiprocessing as mp
     mp.freeze_support()
@@ -52,6 +71,43 @@ if __name__ == '__main__':
         pass
 
     app_root = get_app_root()
+
+    # 1. 前置解析命令行参数
+    use_ui = True
+    is_help = False
+    debug_mode = False
+
+    for i, arg in enumerate(sys.argv[1:], 1):
+        arg_lower = arg.lower()
+        if arg_lower in ['-h', '--help', '/?', '-help']:
+            is_help = True
+        elif arg_lower in ['--noui', '-noui', '--cli', '-cli', '--apply', '-apply', '-c']:
+            use_ui = False
+        elif arg_lower == '-log':
+            debug_mode = True
+            if i + 1 < len(sys.argv):
+                os.environ["APP_DEBUG"] = sys.argv[i + 1]
+
+    # 2. 如果是命令行模式、帮助说明或调试模式，强制附加到父进程终端控制台以输出文字
+    if not use_ui or is_help or debug_mode:
+        attach_to_parent_console()
+
+    # 3. 如果是请求 -h 帮助，输出帮助信息后立即退出
+    if is_help:
+        print("\n==== 桌面窗口坐标布局配置管理器 ====")
+        print("用法: manage_window_layout.exe [参数]")
+        print("\n默认行为:")
+        print("  不加任何参数双击运行时，启动完整的图形化操作界面 (UI)。")
+        print("\n可选参数:")
+        print("  -h, --help            显示此帮助信息并退出。")
+        print("  -cli, -noui, -apply   静默命令行模式。不启动 UI 界面，直接在后台自动探测屏幕并应用窗口对齐。")
+        print("  -log <level>          开启调试模式并指定级别 (例如: -log debug)。\n")
+        sys.exit(0)
+
+    if debug_mode:
+        print(f"[DEBUG] App root resolved to: {app_root}")
+        print(f"[DEBUG] sys.path: {sys.path}")
+        print(f"[DEBUG] Environment APP_DEBUG set to: {os.environ.get('APP_DEBUG')}")
 
     # 确保 webTools 目录在 sys.path 中，以便可以作为 package 导入 window_manager
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -63,47 +119,20 @@ if __name__ == '__main__':
         check_and_add_route, check_and_activate_existing_instance
     )
 
-    # 默认启动 UI，可以通过 --cli / -cli / --noui / --apply 等参数取消 UI 直接在后台执行排版
-    use_ui = True
-    debug_mode = False
-    
-    for i, arg in enumerate(sys.argv):
-        if arg.lower() in ['-h', '--help']:
-            print("==== 桌面窗口坐标布局配置管理器 ====")
-            print("用法: manage_window_layout.exe [参数]")
-            print("\n默认行为:")
-            print("  不加任何参数时，将启动完整的图形化操作界面 (UI)。")
-            print("\n可选参数:")
-            print("  -h, --help    显示此帮助信息并退出。")
-            print("  -noui, -cli, -apply\n                静默模式。不启动 UI 界面，直接在后台自动探测屏幕并应用布局。")
-            print("  -log <level>  开启调试模式并指定级别 (例如: -log debug)。")
-            sys.exit(0)
-        elif arg.lower() in ['--noui', '-noui', '--cli', '-cli', '--apply', '-apply']:
-            use_ui = False
-        elif arg.lower() == '-log':
-            debug_mode = True
-            if i + 1 < len(sys.argv):
-                os.environ["APP_DEBUG"] = sys.argv[i + 1]
-                
-    if debug_mode:
-        print(f"[DEBUG] App root resolved to: {app_root}")
-        print(f"[DEBUG] sys.path: {sys.path}")
-        print(f"[DEBUG] Environment APP_DEBUG set to: {os.environ.get('APP_DEBUG')}")
-
-    # 单实例控制：启动前检查 manage_window_layout.exe 或 manage_window_layout.py 是否已经在运行
-    # 如果已有实例运行，唤醒并打开后台/隐藏窗口到前台显示，防止同时运行多个实例
-    if check_and_activate_existing_instance():
-        print("[SingleInstance] 成功唤醒已运行程序的窗口视窗到前台，阻止重复启动多实例。")
-        sys.exit(0)
-
+    # 4. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；
+    # 纯命令行 CLI 模式 (-cli) 绝对不去唤醒/打开 UI 窗口！
     if use_ui:
+        if check_and_activate_existing_instance():
+            print("[SingleInstance] 成功唤醒已运行程序的窗口视窗到前台，阻止重复启动多实例。")
+            sys.exit(0)
+
         print("正在启动桌面窗口坐标布局配置管理器 UI...")
         config_mgr = ConfigManager()
         success, route_msg = check_and_add_route(config_mgr)
         print(f"[Route Check] {route_msg}")
         run_ui()
     else:
-        print("检测到无 UI 参数，正在后台自动探测并应用窗口对齐...")
+        print("\n检测到 -cli 命令行参数，正在后台自动探测并应用窗口对齐...")
         
         # 1. 尝试自适应恢复已存的多屏幕物理拓扑布局
         from window_manager import restore_display_configuration
@@ -120,7 +149,7 @@ if __name__ == '__main__':
         # 3. 尝试应用窗口布局位置
         success = apply_layout_config(config_mgr, rec_name)
         if success:
-            print("[OK] 窗口坐标布局自动对齐应用完成！")
+            print("[OK] 窗口坐标布局自动对齐应用完成！\n")
         else:
             print(f"[Tips] 提示: 方案 '{rec_name}' 暂无任何窗口移动规则。")
-            print("如需添加新窗口或录入屏幕，请直接双击运行本程序（或不在命令行加任何参数）。")
+            print("如需添加新窗口或录入屏幕，请直接双击运行本程序（或不在命令行加任何参数）。\n")

@@ -233,11 +233,66 @@ def detect_display_config_name(config_manager=None) -> str:
         return f'tdx_ths_position{res_w}'
 
 
-def normalize_docked_window_rect(left: int, top: int, width: int, height: int) -> tuple:
+_MAGNETIC_KEYWORDS_CACHE = None
+_MAGNETIC_CACHE_TIME = 0.0
+
+def get_magnetic_keywords() -> list:
     """
-    检查窗口矩形是否处于磁吸贴边隐藏折叠状态。
-    如果是折叠隐藏状态（大部分在屏幕外，只露出一小条感应边框），自动反向推算出其展开时的标准正常矩形 (left, top, width, height)。
+    获取所有的磁吸窗口匹配关键字。
+    包含内置默认列表 + 从配置文件 (window_layout_config.json) 中读取的用户手动添加的自定义关键字。
     """
+    global _MAGNETIC_KEYWORDS_CACHE, _MAGNETIC_CACHE_TIME
+    now = time.time()
+    if _MAGNETIC_KEYWORDS_CACHE is not None and (now - _MAGNETIC_CACHE_TIME < 5.0):
+        return _MAGNETIC_KEYWORDS_CACHE
+
+    default_keywords = [
+        "SignalDashboardPanel", "SignalDashboard", "策略信号分类仪表盘", 
+        "信号仪表盘", "Signal_Dashboard", "涨跌分布个股明细",
+        "预警个股异动明细", "异动明细", "加速龙头跟踪器", "龙头跟踪器"
+    ]
+    try:
+        cfg_path = get_conf_path("window_layout_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                custom_kws = data.get("magnetic_keywords", [])
+                if isinstance(custom_kws, list):
+                    for kw in custom_kws:
+                        if kw and str(kw) not in default_keywords:
+                            default_keywords.append(str(kw))
+    except Exception:
+        pass
+
+    _MAGNETIC_KEYWORDS_CACHE = default_keywords
+    _MAGNETIC_CACHE_TIME = now
+    return default_keywords
+
+
+def is_magnetic_dock_window(title: str) -> bool:
+    """
+    判断指定窗口标题是否属于具备贴边隐藏/磁吸功能的专属面板窗口。
+    支持动态读取内置与用户自定义添加的磁吸关键字。
+    日常常规软件 (东方财富、通达信、同花顺、Chrome 等) 返回 False，保留 100% 原始物理坐标不篡改。
+    """
+    if not title:
+        return False
+    keywords = get_magnetic_keywords()
+    t_lower = str(title).lower()
+    for kw in keywords:
+        if kw.lower() in t_lower:
+            return True
+    return False
+
+
+def normalize_docked_window_rect(left: int, top: int, width: int, height: int, title: str = "") -> tuple:
+    """
+    只有当明确指定了 title 且属于专属磁吸面板时，才进行贴边隐藏展开坐标反算。
+    对于非磁吸窗口 (东方财富、同花顺等所有常规日常软件)，直接原封不动返回原生坐标。
+    """
+    if not title or not is_magnetic_dock_window(title):
+        return left, top, width, height
+
     try:
         monitors_info = get_monitor_details_all_with_scale()
         monitors = monitors_info.get("monitors", [])
@@ -252,27 +307,20 @@ def normalize_docked_window_rect(left: int, top: int, width: int, height: int) -
             m_right = mx + mw
             m_bottom = my + mh
 
-            # 判断当前窗口大部分是否处于这个显示器的边缘折叠
-            # 1. 右侧贴边隐藏 (left 贴近右边界，大部分在屏幕外)
-            if left > m_right - 50 and left < m_right + 50:
-                right = left + width
-                if right > m_right:
-                    norm_left = m_right - width
-                    return norm_left, top, width, height
+            # 判断磁吸面板是否处于屏幕外的折叠状态
+            if left > m_right - 40 and (left + width) > m_right + 20:
+                norm_left = m_right - width
+                return norm_left, top, width, height
 
-            # 2. 左侧贴边隐藏 (right 贴近左边界，大部分在屏幕外)
             right = left + width
-            if right > mx - 50 and right < mx + 50:
-                if left < mx:
-                    norm_left = mx
-                    return norm_left, top, width, height
+            if right > mx - 40 and right < mx + 40 and left < mx - 20:
+                norm_left = mx
+                return norm_left, top, width, height
 
-            # 3. 顶部贴边隐藏 (bottom 贴近上边界，大部分在屏幕外)
             bottom = top + height
-            if bottom > my - 50 and bottom < my + 50:
-                if top < my:
-                    norm_top = my
-                    return left, norm_top, width, height
+            if bottom > my - 40 and bottom < my + 40 and top < my - 20:
+                norm_top = my
+                return left, norm_top, width, height
     except Exception:
         pass
 
@@ -296,8 +344,8 @@ def list_visible_windows(fuzzy_title="") -> list:
                 if title:
                     if not fuzzy_title or re.search(re.escape(fuzzy_title), title, re.IGNORECASE):
                         raw_left, raw_top, width, height = get_window_rect(hWnd)
-                        # 核心修复：如果是磁吸贴边隐藏窗口，自动反向推算出其展开状态时的真实 Geometry
-                        left, top, width, height = normalize_docked_window_rect(raw_left, raw_top, width, height)
+                        # 仅对专属磁吸折叠窗口做展开规范化，常规日常软件 (如东方财富) 保持 100% 真实的物理坐标
+                        left, top, width, height = normalize_docked_window_rect(raw_left, raw_top, width, height, title=title)
                         exe_path = ""
                         try:
                             proc = psutil.Process(pid.value)
@@ -349,7 +397,7 @@ def get_exe_path(hwnd) -> str:
     return ""
 
 
-def set_window_hwnd_pos(hwnd, pos_str: str):
+def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
     """
     通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小
     """
@@ -358,9 +406,8 @@ def set_window_hwnd_pos(hwnd, pos_str: str):
         if len(parts) == 4:
             x, y, width, height = parts
             
-            # 核心自适应：反向推算与自动纠偏！如果传入的 pos_str 本身是记录的侧边折叠隐藏超界坐标 (如 1915)，
-            # 自动将其归一化为磁吸前的正常显示物理坐标 (如 1320)，彻底杜绝应用布局时把窗口扔进屏幕外悬空！
-            x, y, width, height = normalize_docked_window_rect(x, y, width, height)
+            # 仅对专属磁吸折叠窗口做反向纠偏；常规日常软件直接按精准坐标设定
+            x, y, width, height = normalize_docked_window_rect(x, y, width, height, title=title)
 
             # 先重置为普通窗口，以防窗口处于最小化或最大化状态导致无法移动
             # 并移动位置
@@ -376,7 +423,8 @@ def set_window_hwnd_pos(hwnd, pos_str: str):
 def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNORMAL) -> bool:
     """
     模糊匹配窗口标题，并将其移动到指定位置。
-    如果窗口处于最小化或磁吸隐藏状态，会自动先执行显示/还原，确保应用布局到磁吸前的正常位置，之后允许窗口自发触发磁吸。
+    如果是专属磁吸窗口且处于隐藏收缩状态，会自动先执行显示/还原；
+    对东方财富等常规日常软件，只在最小化时还原，靠边放置不触发误判。
     """
     found = find_windows_by_title_safe(target_title)
     if not found:
@@ -387,18 +435,19 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
         # 提取当前物理坐标
         left, top, width, height = get_window_rect(hwnd)
         
-        # 1. 检测窗口是否处于最小化 (left/top < -10000) 或 贴边折叠隐藏状态 (主体超界到屏幕外侧)
         is_docked_hidden = False
         if left < -10000 and top < -10000:
+            # 最小化状态，需要SW_RESTORE
             is_docked_hidden = True
-        else:
+        elif is_magnetic_dock_window(title):
+            # 只有专属磁吸折叠窗口才检测是否超界贴边收缩
             try:
                 monitors_info = get_monitor_details_all_with_scale()
                 for mon in monitors_info.get("monitors", []):
                     mx = mon.get("x", 0)
                     mw = mon.get("logical_width", mon.get("width", 1920))
                     m_right = mx + mw
-                    if (left > m_right - 40 and left < m_right + 50) or (left + width > mx - 50 and left + width < mx + 40):
+                    if (left > m_right - 40 and (left + width) > m_right + 20) or (left + width > mx - 40 and left < mx - 20):
                         is_docked_hidden = True
                         break
             except Exception:
@@ -408,7 +457,7 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE 强制恢复显示展开态
             time.sleep(0.05)
             
-        if set_window_hwnd_pos(hwnd, pos_str):
+        if set_window_hwnd_pos(hwnd, pos_str, title=title):
             success = True
             
         if show_cmd != SW_SHOWNORMAL:
