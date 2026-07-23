@@ -1313,6 +1313,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._has_hovered_since_show = False
         self.leave_ticks = 0
         self.hover_ticks = 0
+        self._in_snap_action = False
+
+        # ⭐ [KEY FIX] 手动关闭重新打开窗口时，必须恢复 hover_timer 运行，防止磁吸贴边检测卡死失灵
+        if hasattr(self, 'hover_timer') and self.hover_timer:
+            if not self.hover_timer.isActive():
+                self.hover_timer.start(100)
 
     def changeEvent(self, event):
         super().changeEvent(event)
