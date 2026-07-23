@@ -874,3 +874,142 @@ def check_and_add_route(config_manager) -> tuple:
     except Exception as e:
         return False, f"自动路由检测/添加异常: {e}"
 
+
+WM_SHOW_MANAGE_WINDOW_LAYOUT_NAME = "WM_SHOW_MANAGE_WINDOW_LAYOUT_EVENT"
+
+def get_wm_show_msg_id() -> int:
+    """注册全局唯一的 Windows 消息 ID 用于单实例唤醒跨进程通信"""
+    try:
+        return user32.RegisterWindowMessageW(WM_SHOW_MANAGE_WINDOW_LAYOUT_NAME)
+    except Exception:
+        return 0xC000 + 888
+
+
+SINGLE_INSTANCE_SERVER_NAME = "ManageWindowLayout_SingleInstance_Server"
+
+def check_and_activate_existing_instance() -> bool:
+    """
+    检查 manage_window_layout.exe 或 manage_window_layout.py 是否已经在运行。
+    如果已经运行，通过 QLocalSocket 管道发送 WAKEUP 消息并结合 Win32 接口唤醒已有窗口到前台显示，并返回 True（指示调用方退出）；
+    如果未在运行，返回 False（指示可以继续正常启动新实例）。
+    """
+    current_pid = os.getpid()
+    ipc_connected = False
+
+    # 1. 尝试使用 Qt 的 QLocalSocket 连接已存主 UI 的 IPC 本地命名管道服务
+    try:
+        from PyQt6.QtNetwork import QLocalSocket
+        socket = QLocalSocket()
+        socket.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
+        if socket.waitForConnected(400):
+            print("[SingleInstance] 成功连接至已有实例的 IPC 服务，发送 WAKEUP 指令...")
+            socket.write(b"WAKEUP\n")
+            socket.flush()
+            socket.waitForBytesWritten(500)
+            socket.disconnectFromServer()
+            ipc_connected = True
+    except Exception as e:
+        print(f"[SingleInstance] QLocalSocket IPC 握手异常: {e}")
+
+    target_hwnds = []
+
+    # 2. 枚举桌面所有窗口，寻找目标标题的 HWND 句柄
+    def enum_windows_callback(hwnd, lparam):
+        if not user32.IsWindow(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == current_pid or pid.value == 0:
+            return True
+
+        try:
+            title = win32gui.GetWindowText(hwnd)
+            if title:
+                if "窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title:
+                    target_hwnds.append((hwnd, pid.value, title))
+        except Exception:
+            pass
+        return True
+
+    try:
+        proc = WNDENUMPROC(enum_windows_callback)
+        user32.EnumWindows(proc, 0)
+    except Exception as e:
+        print(f"[SingleInstance] EnumWindows 扫描异常: {e}")
+
+    # 3. 扫描后台进程是否存在已存的 manage_window_layout 实例
+    found_other_process = False
+    other_pids = set()
+
+    if not target_hwnds:
+        try:
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    p_pid = p.info['pid']
+                    if p_pid == current_pid or p_pid == 0:
+                        continue
+
+                    p_name = (p.info['name'] or '').lower()
+                    cmd_str = ''
+                    try:
+                        p_cmdline = p.cmdline() or []
+                        cmd_str = ' '.join(p_cmdline).lower()
+                    except Exception:
+                        pass
+
+                    is_target_proc = False
+                    if p_name == 'manage_window_layout.exe':
+                        is_target_proc = True
+                    elif 'manage_window_layout.py' in cmd_str or 'manage_window_layout.exe' in cmd_str:
+                        is_target_proc = True
+
+                    if is_target_proc:
+                        found_other_process = True
+                        other_pids.add(p_pid)
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[SingleInstance] psutil 进程扫描异常: {e}")
+
+        if other_pids:
+            def enum_pid_windows_callback(hwnd, lparam):
+                if not user32.IsWindow(hwnd):
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in other_pids:
+                    target_hwnds.append((hwnd, pid.value, win32gui.GetWindowText(hwnd)))
+                return True
+
+            try:
+                proc_pid = WNDENUMPROC(enum_pid_windows_callback)
+                user32.EnumWindows(proc_pid, 0)
+            except Exception:
+                pass
+
+    # 4. 如果连上了 IPC 管道或检测到了已有 HWND/进程
+    if ipc_connected or target_hwnds or found_other_process:
+        print("[SingleInstance] 检测到 manage_window_layout 已有实例运行，正在唤醒并打开窗口视窗...")
+
+        for hwnd, pid, title in target_hwnds:
+            try:
+                if user32.IsWindow(hwnd):
+                    if user32.IsIconic(hwnd):
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    else:
+                        user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+                    user32.keybd_event(0x12, 0, 0, 0)  # Alt down
+                    user32.SetForegroundWindow(hwnd)
+                    user32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
+                    user32.BringWindowToTop(hwnd)
+            except Exception as e:
+                print(f"[SingleInstance] 唤醒窗口 HWND {hwnd} 异常: {e}")
+
+        return True
+
+    return False
+
+
+
+

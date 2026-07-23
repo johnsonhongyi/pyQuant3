@@ -58,7 +58,10 @@ if __name__ == '__main__':
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
 
-    from window_manager import run_ui, ConfigManager, apply_layout_config, detect_display_config_name, check_and_add_route
+    from window_manager import (
+        run_ui, ConfigManager, apply_layout_config, detect_display_config_name, 
+        check_and_add_route, check_and_activate_existing_instance
+    )
 
     # 默认启动 UI，可以通过 --cli / -cli / --noui / --apply 等参数取消 UI 直接在后台执行排版
     use_ui = True
@@ -86,6 +89,12 @@ if __name__ == '__main__':
         print(f"[DEBUG] App root resolved to: {app_root}")
         print(f"[DEBUG] sys.path: {sys.path}")
         print(f"[DEBUG] Environment APP_DEBUG set to: {os.environ.get('APP_DEBUG')}")
+
+    # 单实例控制：启动前检查 manage_window_layout.exe 或 manage_window_layout.py 是否已经在运行
+    # 如果已有实例运行，唤醒并打开后台/隐藏窗口到前台显示，防止同时运行多个实例
+    if check_and_activate_existing_instance():
+        print("[SingleInstance] 成功唤醒已运行程序的窗口视窗到前台，阻止重复启动多实例。")
+        sys.exit(0)
 
     if use_ui:
         print("正在启动桌面窗口坐标布局配置管理器 UI...")

@@ -9,6 +9,8 @@ import os
 import re
 import json
 import threading
+import ctypes
+from ctypes import wintypes
 import keyboard
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtWidgets import (
@@ -1304,10 +1306,12 @@ class ManagerHotkeyThread(threading.Thread):
 class WindowPosManagerUI(QMainWindow, WindowMixin):
     """主窗口：窗口坐标及分布管理器"""
     toggle_ui_signal = QtCore.pyqtSignal()
+    show_ui_signal = QtCore.pyqtSignal()
     
     def __init__(self):
         super().__init__()
         self.setWindowTitle("股票交易终端 - 窗口坐标分类管理器")
+        self._wm_show_msg_id = core.get_wm_show_msg_id()
         
         self.scale_factor = self._get_dpi_scale_factor()
             
@@ -1332,12 +1336,47 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.setup_tray_icon()
         self.bind_hotkey(self.current_bound_hotkey)
         self.toggle_ui_signal.connect(self.toggle_visibility)
+        self.show_ui_signal.connect(self._force_show_and_top)
+        self.setup_single_instance_server()
         
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
             self.log(f"[Route Startup] {self.startup_route_msg}")
             
         # 允许驻留后台
         QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def setup_single_instance_server(self):
+        """建立 Qt QLocalServer 单实例 IPC 本地命名管道服务"""
+        try:
+            from PyQt6.QtNetwork import QLocalServer
+            server_name = core.SINGLE_INSTANCE_SERVER_NAME
+            
+            # 清理残留的命名管道
+            QLocalServer.removeServer(server_name)
+            
+            self.single_instance_server = QLocalServer(self)
+            self.single_instance_server.newConnection.connect(self._on_single_instance_connection)
+            if self.single_instance_server.listen(server_name):
+                self.log(f"[SingleInstance] 单实例本地 IPC 服务已成功监听: {server_name}")
+            else:
+                self.log(f"[SingleInstance] 单实例 IPC 监听失败: {self.single_instance_server.errorString()}")
+        except Exception as e:
+            self.log(f"[SingleInstance] setup_single_instance_server 异常: {e}")
+
+    def _on_single_instance_connection(self):
+        client_socket = self.single_instance_server.nextPendingConnection()
+        if client_socket:
+            client_socket.readyRead.connect(lambda: self._handle_single_instance_data(client_socket))
+
+    def _handle_single_instance_data(self, client_socket):
+        try:
+            data = client_socket.readAll().data().decode('utf-8', errors='ignore')
+            if "WAKEUP" in data:
+                self.log("[SingleInstance] 收到跨进程唤醒消息 WAKEUP，正在打开/置顶界面...")
+                self.show_ui_signal.emit()
+            client_socket.disconnectFromServer()
+        except Exception as e:
+            self.log(f"[SingleInstance] 管道数据解析异常: {e}")
 
     def setup_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -1463,8 +1502,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.log("已手动刷新当前桌面各窗口的实际坐标位置与显示器拓扑。")
 
     def showEvent(self, event):
-        """窗口被显示时自动刷新位置检测"""
+        """窗口被显示时自动刷新位置检测与绘图重整"""
         super().showEvent(event)
+        try:
+            self.update()
+            self.repaint()
+        except Exception:
+            pass
         self.detect_and_refresh_state()
 
     def changeEvent(self, event):
@@ -1472,6 +1516,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
             if not self.isMinimized():
+                try:
+                    self.update()
+                    self.repaint()
+                except Exception:
+                    pass
                 self.detect_and_refresh_state()
             
     def toggle_visibility(self):
@@ -1484,13 +1533,26 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._force_show_and_top()
             
     def _force_show_and_top(self):
-        # 取消永久置顶属性，改为正常显示状态
-        self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-        self.showNormal()
-        self.activateWindow()
+        # 1. 无论在托盘还是任务栏最小化，均强制拉起显示
+        self.show()
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.showNormal()
+
+        # 2. 提升视窗层级并抢占 Qt 激活焦点
         self.raise_()
-        
-        # 使用底层 API 强制夺取 Windows 前台焦点
+        self.activateWindow()
+
+        # 3. 强制 Qt 绘图引擎与事件队列立刻刷新并重绘界面，彻底消除白板无响应现象
+        try:
+            self.update()
+            self.repaint()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+        # 4. 使用底层 Win32 API 强制夺取 Windows 系统前台焦点
         try:
             import ctypes
             hwnd = int(self.winId())
@@ -1500,9 +1562,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0) # Alt Up
         except Exception:
             pass
-            
-        # 激活前台后自动同步检测桌面位置状态
+
+        # 5. 激活前台后自动同步检测桌面位置状态
         self.detect_and_refresh_state()
+
             
     def parse_hotkey_string(self, hotkey_str: str) -> tuple:
         """
