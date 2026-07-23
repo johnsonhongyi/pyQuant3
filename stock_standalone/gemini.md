@@ -1,3 +1,20 @@
+## 2026-07-23 23:58
+- [x] **在路由设置弹窗中集成 GUI 磁吸窗口关键字可视化编辑工具 (GUI Magnetic Keyword Manager in Route Dialog)**：
+    - [x] **重构 `RouteConfigDialog` 为高级配置双 Tab 对话框**：将原有静态路由设置弹窗升级为双 Tab 结构（`🌐 静态路由` 与 `🧲 磁吸窗口关键字`），提供极具科技感与实用性的图形化管理界面。
+    - [x] **可视化列表管理 (View/Add/Edit/Delete)**：支持完整展示当前所有内置与自定义磁吸关键字（如 `SignalDashboardPanel`、`涨跌分布个股明细`、`加速龙头跟踪器` 等），并提供单行选中即时编辑、`➕ 添加/修改` 与 `❌ 删除选中` 按钮交互。
+    - [x] **一键落盘与秒级缓存刷新**：点击【💾 保存设置】时，自动收集全量磁吸关键字同步保存到 `window_layout_config.json` 的 `magnetic_keywords` 配置节点，并自动清空 `core._MAGNETIC_KEYWORDS_CACHE` 缓存，实现修改即刻秒级生效。
+
+## 2026-07-23 23:55
+- [x] **支持磁吸窗口自定义匹配关键字与内置扩展 (Custom Magnetic Window Keywords Support)**：
+    - [x] **内置扩展磁吸面板关键字**：在磁吸检测引擎 `get_magnetic_keywords()` 中补全内置了 `涨跌分布个股明细`（`MarketAlertDetailDialog`）、`异动明细`、`加速龙头跟踪器`（`DragonLeaderTracker`）等具备贴边隐藏特性的系统面板。
+    - [x] **支持在配置文件物理物理维护自定义关键字 (`magnetic_keywords`)**：在 `window_layout_config.json` 根节点中加入了 `magnetic_keywords` 配置项，程序启动时会自动读取并合并该列表。用户可以随时手动在 JSON 中自由追加任何需要开启磁吸功能的特定窗口关键字，非列表中的日常常规软件（东方财富、同花顺等）依然 100% 保持纯粹原生的坐标逻辑。
+
+## 2026-07-23 23:50
+- [x] **隔离磁吸窗口与日常常规软件窗口对齐恢复逻辑 (Restricted Docking Normalization to Dedicated Magnetic Windows Only)**：
+    - [x] **新增专属磁吸窗口判定器 (`is_magnetic_dock_window`)**：在 `webTools/window_manager/core.py` 中新增 `is_magnetic_dock_window(title)` 校验，精确识别只有像 `SignalDashboardPanel` / 策略信号分类仪表盘等具有贴边收缩/隐藏特性的专属面板才触发磁吸几何反算。
+    - [x] **彻底解除对东方财富等日常软件的误判与坐标篡改**：改造了 `normalize_docked_window_rect`、`list_visible_windows`、`set_window_hwnd_pos` 和 `set_window_pos_by_title`。东方财富、同花顺、通达信、Chrome 等常规日常应用窗口 100% 保持原有的精准 HWND 物理坐标，不触发任何贴边超界归一化篡改或误判 `ShowWindow(hwnd, SW_RESTORE)`。
+    - [x] **修复日常软件调整后无法恢复持久化数据的 Bug**：解决了此前当东方财富窗口放置在屏幕边缘（如 `left > m_right - 40`）时，被误判为“磁吸折叠收缩”导致保存和重新应用布局时坐标被二次改写破坏的硬 Bug，恢复了用户拖拽调整后 100% 还原物理坐标的能力。
+
 ## 2026-07-23 18:30
 - [x] **重构 `ats/ui/multi_period_dialog.py` 概念数据流与双击分类/概念详情 (Multi-Period Dialog Concept Sync & Double-Click Category Popup)**：
     - [x] **数据源彻底同步与动态过滤 (`get_current_display_df`)**：修复了点击“当前概念”胶囊按钮（如 `DeepSeek(5)`）弹窗数据错位/旧版本全量数据的 Bug。重构了 `show_concept_top10_window` 与 `show_concept_detail_window`，统一从当前主表格呈现的筛选数据集 `get_current_display_df()`（包含二次过滤后的动态 DataFrame）中建立动态索引与提取个股，确保弹窗数据、数量、价格/涨幅/换手/通过列 100% 与主界面同步一致。

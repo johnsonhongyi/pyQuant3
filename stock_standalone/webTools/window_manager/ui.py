@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
-    QSizePolicy
+    QSizePolicy, QTabWidget
 )
 from PyQt6.QtGui import QAction, QIcon
 
@@ -910,7 +910,7 @@ class CaptureWindowsDialog(QDialog):
                     
                 moved = core.set_window_pos_by_title(title, new_pos_str)
                 if not moved:
-                    moved = core.set_window_hwnd_pos(found_hwnd, new_pos_str)
+                    moved = core.set_window_hwnd_pos(found_hwnd, new_pos_str, title=title)
                     
                 if moved:
                     # 6. 更新 UI 数据
@@ -1073,13 +1073,13 @@ class EditPathDialog(QDialog):
 
 class RouteConfigDialog(QDialog):
     """
-    静态路由网关配置对话框
+    高级系统配置对话框：支持静态路由网关配置 + 🧲 磁吸窗口关键字管理
     """
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
-        self.setWindowTitle("静态路由网关配置")
-        self.resize(400, 240)
+        self.setWindowTitle("🌐 静态路由与 🧲 磁吸窗口配置")
+        self.resize(540, 480)
         self.init_ui()
 
     def init_ui(self):
@@ -1089,6 +1089,24 @@ class RouteConfigDialog(QDialog):
                 background-color: #1e1e24;
                 color: #e0e0e0;
                 font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QTabWidget::pane {
+                border: 1px solid #3a3a42;
+                background-color: #1a1a20;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #2a2a32;
+                color: #a0a0a0;
+                padding: 8px 16px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0ea5e9;
+                color: #ffffff;
+                font-weight: bold;
             }
             QLabel {
                 color: #e0e0e0;
@@ -1100,6 +1118,20 @@ class RouteConfigDialog(QDialog):
                 border-radius: 4px;
                 color: #ffffff;
                 padding: 6px;
+            }
+            QListWidget {
+                background-color: #15151a;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #00ffcc;
+                font-size: 13px;
+            }
+            QListWidget::item {
+                padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
             }
             QCheckBox {
                 color: #e0e0e0;
@@ -1131,14 +1163,32 @@ class RouteConfigDialog(QDialog):
             QPushButton#btnTest:hover {
                 background-color: #059669;
             }
+            QPushButton#btnAddKw {
+                background-color: #0284c7;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnDeleteKw {
+                background-color: #ef4444;
+                border: none;
+                font-weight: bold;
+            }
         """)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
         
-        # 启用开关
+        self.tab_widget = QTabWidget(self)
+        
+        # ==========================================
+        # Tab 1: 🌐 静态路由配置
+        # ==========================================
+        tab_route = QWidget()
+        route_layout = QVBoxLayout(tab_route)
+        route_layout.setSpacing(12)
+        
         self.chk_enabled = QtWidgets.QCheckBox("启用启动时自动检测/添加此静态路由")
-        layout.addWidget(self.chk_enabled)
+        route_layout.addWidget(self.chk_enabled)
         
         routing_cfg = self.config_manager.config_data.get("routing_config", {})
         enabled = routing_cfg.get("enabled", True)
@@ -1155,7 +1205,7 @@ class RouteConfigDialog(QDialog):
         self.txt_dest = QLineEdit(dest)
         row_dest.addWidget(lbl_dest)
         row_dest.addWidget(self.txt_dest)
-        layout.addLayout(row_dest)
+        route_layout.addLayout(row_dest)
         
         # 子网掩码
         row_mask = QHBoxLayout()
@@ -1164,7 +1214,7 @@ class RouteConfigDialog(QDialog):
         self.txt_mask = QLineEdit(mask)
         row_mask.addWidget(lbl_mask)
         row_mask.addWidget(self.txt_mask)
-        layout.addLayout(row_mask)
+        route_layout.addLayout(row_mask)
         
         # 默认网关
         row_gw = QHBoxLayout()
@@ -1173,32 +1223,109 @@ class RouteConfigDialog(QDialog):
         self.txt_gw = QLineEdit(gw)
         row_gw.addWidget(lbl_gw)
         row_gw.addWidget(self.txt_gw)
-        layout.addLayout(row_gw)
+        route_layout.addLayout(row_gw)
         
-        layout.addSpacing(10)
+        route_layout.addSpacing(10)
         
-        # 按钮栏
-        btn_layout = QHBoxLayout()
-        
-        # 立即检测/测试按钮
-        self.btn_test = QPushButton("🔍 立即检测/应用")
+        self.btn_test = QPushButton("🔍 立即检测/应用路由")
         self.btn_test.setObjectName("btnTest")
         self.btn_test.clicked.connect(self.test_and_apply_route)
-        btn_layout.addWidget(self.btn_test)
+        route_layout.addWidget(self.btn_test)
+        route_layout.addStretch()
         
+        # ==========================================
+        # Tab 2: 🧲 磁吸窗口关键字管理
+        # ==========================================
+        tab_magnetic = QWidget()
+        mag_layout = QVBoxLayout(tab_magnetic)
+        mag_layout.setSpacing(8)
+        
+        lbl_tip = QLabel("💡 提示：包含以下关键字的窗口才会触发贴边隐藏，常规日常软件不受干涉。")
+        lbl_tip.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        mag_layout.addWidget(lbl_tip)
+        
+        self.list_kw = QListWidget()
+        self.list_kw.itemClicked.connect(self._on_kw_item_clicked)
+        mag_layout.addWidget(self.list_kw)
+        
+        # 输入与编辑行
+        edit_layout = QHBoxLayout()
+        self.txt_kw_input = QLineEdit()
+        self.txt_kw_input.setPlaceholderText("输入关键字 (如: 涨跌分布个股明细, 加速龙头跟踪器)...")
+        
+        self.btn_add_kw = QPushButton("➕ 添加/修改")
+        self.btn_add_kw.setObjectName("btnAddKw")
+        self.btn_add_kw.clicked.connect(self._add_or_update_kw)
+        
+        self.btn_del_kw = QPushButton("❌ 删除选中")
+        self.btn_del_kw.setObjectName("btnDeleteKw")
+        self.btn_del_kw.clicked.connect(self._delete_selected_kw)
+        
+        edit_layout.addWidget(self.txt_kw_input)
+        edit_layout.addWidget(self.btn_add_kw)
+        edit_layout.addWidget(self.btn_del_kw)
+        mag_layout.addLayout(edit_layout)
+        
+        # 加载初始关键字列表
+        self._load_magnetic_keywords()
+        
+        self.tab_widget.addTab(tab_route, "🌐 静态路由")
+        self.tab_widget.addTab(tab_magnetic, "🧲 磁吸窗口关键字")
+        layout.addWidget(self.tab_widget)
+        
+        # 底部确认/取消按钮
+        btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.clicked.connect(self.reject)
-        self.btn_confirm = QPushButton("保存设置")
+        self.btn_confirm = QPushButton("💾 保存设置")
         self.btn_confirm.setObjectName("btnConfirm")
         self.btn_confirm.clicked.connect(self.save_settings)
         
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_confirm)
         layout.addLayout(btn_layout)
-        
+
+    def _load_magnetic_keywords(self):
+        """加载已保存的所有磁吸关键字到 ListWidget"""
+        self.list_kw.clear()
+        kws = core.get_magnetic_keywords()
+        for kw in kws:
+            item = QListWidgetItem(str(kw))
+            self.list_kw.addItem(item)
+
+    def _on_kw_item_clicked(self, item):
+        if item:
+            self.txt_kw_input.setText(item.text())
+
+    def _add_or_update_kw(self):
+        text = self.txt_kw_input.text().strip()
+        if not text:
+            return
+            
+        current_item = self.list_kw.currentItem()
+        existing = [self.list_kw.item(i).text() for i in range(self.list_kw.count())]
+
+        if current_item and current_item.isSelected():
+            current_item.setText(text)
+        else:
+            if text in existing:
+                QMessageBox.information(self, "提示", f"关键字 '{text}' 已在列表中！")
+                return
+            item = QListWidgetItem(text)
+            self.list_kw.addItem(item)
+            
+        self.txt_kw_input.clear()
+
+    def _delete_selected_kw(self):
+        row = self.list_kw.currentRow()
+        if row >= 0:
+            self.list_kw.takeItem(row)
+            self.txt_kw_input.clear()
+
     def save_settings(self):
+        # 1. 保存静态路由配置
         dest = self.txt_dest.text().strip()
         mask = self.txt_mask.text().strip()
         gw = self.txt_gw.text().strip()
@@ -1215,9 +1342,19 @@ class RouteConfigDialog(QDialog):
             "gateway": gw
         }
         self.config_manager.config_data["routing_config"] = routing_cfg
-        self.config_manager.save()
-        self.accept()
         
+        # 2. 保存磁吸关键字配置
+        new_kws = [self.list_kw.item(i).text() for i in range(self.list_kw.count())]
+        self.config_manager.config_data["magnetic_keywords"] = new_kws
+        
+        if self.config_manager.save():
+            # 刷新内存中的磁吸关键字缓存
+            core._MAGNETIC_KEYWORDS_CACHE = None
+            QMessageBox.information(self, "成功", "静态路由与磁吸关键字配置已成功保存落盘！")
+            self.accept()
+        else:
+            QMessageBox.critical(self, "错误", "配置文件写盘失败，请检查文件写权限！")
+
     def test_and_apply_route(self):
         dest = self.txt_dest.text().strip()
         mask = self.txt_mask.text().strip()
@@ -3102,7 +3239,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 core.user32.ShowWindow(found_hwnd, core.SW_SHOWNORMAL)
                 time.sleep(0.1)
                 
-            if core.set_window_hwnd_pos(found_hwnd, new_pos_str):
+            if core.set_window_hwnd_pos(found_hwnd, new_pos_str, title=title):
                 self.log(f"📺 居中显示: 成功将窗口 '{title}' 移动到其屏幕居中位置: [{new_pos_str}]")
             else:
                 self.log(f"⚠️ 物理移动窗口 '{title}' 失败")
@@ -3703,7 +3840,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                                 core.user32.ShowWindow(hwnd, core.SW_SHOWNORMAL)
                                 import time
                                 time.sleep(0.1)
-                            if core.set_window_hwnd_pos(hwnd, pos_str):
+                            if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
                                 self.log(f"✅ 成功设置窗口: '{actual_title}' -> [{pos_str}]")
                                 moved_any = True
                         else:
