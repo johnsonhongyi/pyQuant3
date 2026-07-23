@@ -1498,6 +1498,33 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             import time
             self._last_show_time = time.time()
             self._has_hovered_since_show = False
+
+            # 核心自愈修复：检测 normal_geometry 是否落在了侧边隐藏的超界坐标
+            try:
+                screen = self.screen() or QApplication.primaryScreen()
+                if screen:
+                    screen_geo = screen.availableGeometry()
+                    w = max(300, self.normal_geometry.width())
+                    h = max(200, self.normal_geometry.height())
+                    nx = self.normal_geometry.x()
+                    ny = self.normal_geometry.y()
+                    need_fix = False
+
+                    if self.anchor_edge == "right" and nx > screen_geo.right() - 50:
+                        nx = screen_geo.right() - w
+                        need_fix = True
+                    elif self.anchor_edge == "left" and nx < screen_geo.left() - 50:
+                        nx = screen_geo.left()
+                        need_fix = True
+                    elif self.anchor_edge == "top" and ny < screen_geo.top() - 50:
+                        ny = screen_geo.top()
+                        need_fix = True
+
+                    if need_fix or nx < screen_geo.left() - 100 or nx > screen_geo.right() + 100:
+                        self.normal_geometry = QRect(nx, ny, w, h)
+            except Exception:
+                pass
+
             self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
         
         self.show()

@@ -233,6 +233,52 @@ def detect_display_config_name(config_manager=None) -> str:
         return f'tdx_ths_position{res_w}'
 
 
+def normalize_docked_window_rect(left: int, top: int, width: int, height: int) -> tuple:
+    """
+    检查窗口矩形是否处于磁吸贴边隐藏折叠状态。
+    如果是折叠隐藏状态（大部分在屏幕外，只露出一小条感应边框），自动反向推算出其展开时的标准正常矩形 (left, top, width, height)。
+    """
+    try:
+        monitors_info = get_monitor_details_all_with_scale()
+        monitors = monitors_info.get("monitors", [])
+        if not monitors:
+            return left, top, width, height
+
+        for mon in monitors:
+            mx = mon.get("x", 0)
+            my = mon.get("y", 0)
+            mw = mon.get("logical_width", mon.get("width", 1920))
+            mh = mon.get("logical_height", mon.get("height", 1080))
+            m_right = mx + mw
+            m_bottom = my + mh
+
+            # 判断当前窗口大部分是否处于这个显示器的边缘折叠
+            # 1. 右侧贴边隐藏 (left 贴近右边界，大部分在屏幕外)
+            if left > m_right - 50 and left < m_right + 50:
+                right = left + width
+                if right > m_right:
+                    norm_left = m_right - width
+                    return norm_left, top, width, height
+
+            # 2. 左侧贴边隐藏 (right 贴近左边界，大部分在屏幕外)
+            right = left + width
+            if right > mx - 50 and right < mx + 50:
+                if left < mx:
+                    norm_left = mx
+                    return norm_left, top, width, height
+
+            # 3. 顶部贴边隐藏 (bottom 贴近上边界，大部分在屏幕外)
+            bottom = top + height
+            if bottom > my - 50 and bottom < my + 50:
+                if top < my:
+                    norm_top = my
+                    return left, norm_top, width, height
+    except Exception:
+        pass
+
+    return left, top, width, height
+
+
 def list_visible_windows(fuzzy_title="") -> list:
     """列出当前所有可见的顶层窗口，如果指定了 fuzzy_title 则过滤"""
     result = []
@@ -249,7 +295,9 @@ def list_visible_windows(fuzzy_title="") -> list:
                 title = title_buf.value.strip()
                 if title:
                     if not fuzzy_title or re.search(re.escape(fuzzy_title), title, re.IGNORECASE):
-                        left, top, width, height = get_window_rect(hWnd)
+                        raw_left, raw_top, width, height = get_window_rect(hWnd)
+                        # 核心修复：如果是磁吸贴边隐藏窗口，自动反向推算出其展开状态时的真实 Geometry
+                        left, top, width, height = normalize_docked_window_rect(raw_left, raw_top, width, height)
                         exe_path = ""
                         try:
                             proc = psutil.Process(pid.value)
@@ -309,6 +357,11 @@ def set_window_hwnd_pos(hwnd, pos_str: str):
         parts = [int(p.strip()) for p in pos_str.split(',')]
         if len(parts) == 4:
             x, y, width, height = parts
+            
+            # 核心自适应：反向推算与自动纠偏！如果传入的 pos_str 本身是记录的侧边折叠隐藏超界坐标 (如 1915)，
+            # 自动将其归一化为磁吸前的正常显示物理坐标 (如 1320)，彻底杜绝应用布局时把窗口扔进屏幕外悬空！
+            x, y, width, height = normalize_docked_window_rect(x, y, width, height)
+
             # 先重置为普通窗口，以防窗口处于最小化或最大化状态导致无法移动
             # 并移动位置
             ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 1) # SWP_NOSIZE = 1
@@ -323,7 +376,7 @@ def set_window_hwnd_pos(hwnd, pos_str: str):
 def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNORMAL) -> bool:
     """
     模糊匹配窗口标题，并将其移动到指定位置。
-    如果窗口处于最小化状态，则会自动执行 show_cmd 还原窗口。
+    如果窗口处于最小化或磁吸隐藏状态，会自动先执行显示/还原，确保应用布局到磁吸前的正常位置，之后允许窗口自发触发磁吸。
     """
     found = find_windows_by_title_safe(target_title)
     if not found:
@@ -331,11 +384,29 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
         
     success = False
     for hwnd, title in found:
-        # 检测窗口是否被隐藏或最小化
+        # 提取当前物理坐标
         left, top, width, height = get_window_rect(hwnd)
+        
+        # 1. 检测窗口是否处于最小化 (left/top < -10000) 或 贴边折叠隐藏状态 (主体超界到屏幕外侧)
+        is_docked_hidden = False
         if left < -10000 and top < -10000:
-            user32.ShowWindow(hwnd, show_cmd)
-            time.sleep(0.1)
+            is_docked_hidden = True
+        else:
+            try:
+                monitors_info = get_monitor_details_all_with_scale()
+                for mon in monitors_info.get("monitors", []):
+                    mx = mon.get("x", 0)
+                    mw = mon.get("logical_width", mon.get("width", 1920))
+                    m_right = mx + mw
+                    if (left > m_right - 40 and left < m_right + 50) or (left + width > mx - 50 and left + width < mx + 40):
+                        is_docked_hidden = True
+                        break
+            except Exception:
+                pass
+
+        if is_docked_hidden:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE 强制恢复显示展开态
+            time.sleep(0.05)
             
         if set_window_hwnd_pos(hwnd, pos_str):
             success = True
@@ -894,6 +965,7 @@ def check_and_activate_existing_instance() -> bool:
     如果未在运行，返回 False（指示可以继续正常启动新实例）。
     """
     current_pid = os.getpid()
+    parent_pid = os.getppid() if hasattr(os, 'getppid') else None
     ipc_connected = False
 
     # 1. 尝试使用 Qt 的 QLocalSocket 连接已存主 UI 的 IPC 本地命名管道服务
@@ -901,11 +973,11 @@ def check_and_activate_existing_instance() -> bool:
         from PyQt6.QtNetwork import QLocalSocket
         socket = QLocalSocket()
         socket.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
-        if socket.waitForConnected(400):
+        if socket.waitForConnected(300):
             print("[SingleInstance] 成功连接至已有实例的 IPC 服务，发送 WAKEUP 指令...")
             socket.write(b"WAKEUP\n")
             socket.flush()
-            socket.waitForBytesWritten(500)
+            socket.waitForBytesWritten(300)
             socket.disconnectFromServer()
             ipc_connected = True
     except Exception as e:
@@ -919,7 +991,7 @@ def check_and_activate_existing_instance() -> bool:
             return True
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value == current_pid or pid.value == 0:
+        if pid.value == current_pid or (parent_pid and pid.value == parent_pid) or pid.value == 0:
             return True
 
         try:
@@ -938,7 +1010,6 @@ def check_and_activate_existing_instance() -> bool:
         print(f"[SingleInstance] EnumWindows 扫描异常: {e}")
 
     # 3. 扫描后台进程是否存在已存的 manage_window_layout 实例
-    found_other_process = False
     other_pids = set()
 
     if not target_hwnds:
@@ -946,7 +1017,7 @@ def check_and_activate_existing_instance() -> bool:
             for p in psutil.process_iter(['pid', 'name']):
                 try:
                     p_pid = p.info['pid']
-                    if p_pid == current_pid or p_pid == 0:
+                    if p_pid == current_pid or (parent_pid and p_pid == parent_pid) or p_pid == 0:
                         continue
 
                     p_name = (p.info['name'] or '').lower()
@@ -960,11 +1031,10 @@ def check_and_activate_existing_instance() -> bool:
                     is_target_proc = False
                     if p_name == 'manage_window_layout.exe':
                         is_target_proc = True
-                    elif 'manage_window_layout.py' in cmd_str or 'manage_window_layout.exe' in cmd_str:
+                    elif 'manage_window_layout.py' in cmd_str:
                         is_target_proc = True
 
                     if is_target_proc:
-                        found_other_process = True
                         other_pids.add(p_pid)
                 except Exception:
                     continue
@@ -978,7 +1048,9 @@ def check_and_activate_existing_instance() -> bool:
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 if pid.value in other_pids:
-                    target_hwnds.append((hwnd, pid.value, win32gui.GetWindowText(hwnd)))
+                    title = win32gui.GetWindowText(hwnd)
+                    if title:
+                        target_hwnds.append((hwnd, pid.value, title))
                 return True
 
             try:
@@ -987,13 +1059,19 @@ def check_and_activate_existing_instance() -> bool:
             except Exception:
                 pass
 
-    # 4. 如果连上了 IPC 管道或检测到了已有 HWND/进程
-    if ipc_connected or target_hwnds or found_other_process:
-        print("[SingleInstance] 检测到 manage_window_layout 已有实例运行，正在唤醒并打开窗口视窗...")
+    # 4. 如果成功通过 IPC 连接或找到了真实运行中的 UI 窗口句柄
+    activated = False
+    wm_msg_id = get_wm_show_msg_id()
 
+    if target_hwnds:
+        print("[SingleInstance] 检测到 manage_window_layout 已有 UI 实例运行，正在唤醒并拉起窗口到前台...")
         for hwnd, pid, title in target_hwnds:
             try:
                 if user32.IsWindow(hwnd):
+                    # 通过 Win32 API 广播/发送唤醒注册消息
+                    if wm_msg_id:
+                        user32.PostMessageW(hwnd, wm_msg_id, 0, 0)
+
                     if user32.IsIconic(hwnd):
                         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                     else:
@@ -1003,9 +1081,13 @@ def check_and_activate_existing_instance() -> bool:
                     user32.SetForegroundWindow(hwnd)
                     user32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
                     user32.BringWindowToTop(hwnd)
+                    activated = True
             except Exception as e:
                 print(f"[SingleInstance] 唤醒窗口 HWND {hwnd} 异常: {e}")
 
+    # 仅当成功通过 IPC 唤醒 或 成功拉起前台 UI 窗口时，才指示调用方退出；避免无界面的僵尸进程死锁导致闪退
+    if ipc_connected or activated:
+        print("[SingleInstance] 成功唤醒已有主 UI 实例，阻止重复启动新实例。")
         return True
 
     return False
