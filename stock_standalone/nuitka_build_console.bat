@@ -213,6 +213,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=unittest ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
+    --nofollow-import-to=cryptography ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
     --noinclude-dlls=Qt6WebEngineWidgets.dll ^
     --noinclude-dlls=Qt6Pdf.dll ^
