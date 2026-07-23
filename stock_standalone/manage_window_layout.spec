@@ -9,7 +9,7 @@ block_cipher = None
 trash_list = [
     'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf', 
     'Qt6Quick', 'Qt6Qml', 'Qt6VirtualKeyboard', 
-    'Qt6Multimedia', 'Qt6Bluetooth', 'Qt6Network',
+    'Qt6Multimedia', 'Qt6Bluetooth',
     'Qt6Svg', 'Qt6Sql', 'Qt6Test', 'Qt6Xml',
     'opengl32sw'
 ]
@@ -29,6 +29,7 @@ a = Analysis(
         'win32gui', 
         'win32con', 
         'PyQt6',
+        'PyQt6.QtNetwork',
         'configobj',
         'JohnsonUtil.johnson_cons',
         'JohnsonUtil.LoggerFactory',
