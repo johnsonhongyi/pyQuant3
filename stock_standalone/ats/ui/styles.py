@@ -364,8 +364,11 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(config_data, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, config_path)
+        except RuntimeError:
+            pass
         except Exception as e:
-            print(f"[HeaderPersistence] Failed to save state for {config_key}: {e}")
+            if "has been deleted" not in str(e):
+                print(f"[HeaderPersistence] Failed to save state for {config_key}: {e}")
 
     def apply_max_width_limits():
         if max_widths:

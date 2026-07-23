@@ -736,11 +736,12 @@ class QueryHistoryDialog(QDialog):
                                 q = r.get("query", "").strip()
                                 note = r.get("note", "").strip()
                                 starred = r.get("starred", 0)
+                                hit = str(r.get("hit", "--"))
                                 if isinstance(starred, bool):
                                     starred = 1 if starred else 0
-                                normalized.append({"query": q, "note": note, "starred": starred})
+                                normalized.append({"query": q, "note": note, "starred": starred, "hit": hit})
                             elif isinstance(r, str):
-                                normalized.append({"query": r.strip(), "note": "", "starred": 0})
+                                normalized.append({"query": r.strip(), "note": "", "starred": 0, "hit": "--"})
                         self.history_groups[grp] = normalized[:self.his_limit]
             except Exception as e:
                 logger.error(f"Failed to load search history: {e}")
@@ -768,31 +769,37 @@ class QueryHistoryDialog(QDialog):
         search_layout.addWidget(btn_search)
         layout.addLayout(search_layout)
 
-        # Input & Controls
+        # Input & Controls: Matching baseline order: [Expression Input] [Test] [Add] [Use Selected] [Group Combo]
         input_layout = QHBoxLayout()
         input_layout.addWidget(QLabel("表达式:", self))
         self.query_edit = QLineEdit(self)
         input_layout.addWidget(self.query_edit)
 
-        self.grp_combo = QComboBox(self)
-        self.grp_combo.addItems(["history1", "history2", "history3", "history4", "history5"])
-        self.grp_combo.currentIndexChanged.connect(self._on_group_changed)
-        input_layout.addWidget(self.grp_combo)
+        btn_test = QPushButton("🧪 测试", self)
+        btn_test.setStyleSheet("background-color: #0288d1; color: #ffffff;")
+        btn_test.setToolTip("测试当前表达式及列表中各条件在筛选数据集中的 Hit 命中股票数")
+        btn_test.clicked.connect(self._test_query)
+        input_layout.addWidget(btn_test)
 
         btn_add = QPushButton("添加", self)
         btn_add.clicked.connect(self._add_query)
         input_layout.addWidget(btn_add)
 
         btn_apply = QPushButton("使用选中", self)
-        btn_apply.setStyleSheet("background-color: #2e7d32;")
+        btn_apply.setStyleSheet("background-color: #2e7d32; color: #ffffff;")
         btn_apply.clicked.connect(self._use_selected)
         input_layout.addWidget(btn_apply)
+
+        self.grp_combo = QComboBox(self)
+        self.grp_combo.addItems(["history1", "history2", "history3", "history4", "history5"])
+        self.grp_combo.currentIndexChanged.connect(self._on_group_changed)
+        input_layout.addWidget(self.grp_combo)
         layout.addLayout(input_layout)
 
-        # Table Widget
+        # Table Widget (5 Columns: Query 表达式, ⭐, 备注说明, Hit 命中数, Group 组别)
         self.table = QTableWidget(self)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Query 表达式", "⭐", "备注说明", "Group 组别"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Query 表达式", "⭐", "备注说明", "Hit", "Group 组别"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -806,9 +813,11 @@ class QueryHistoryDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(1, 40)
-        self.table.setColumnWidth(2, 200)
-        self.table.setColumnWidth(3, 100)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(1, 35)
+        self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(3, 60)
+        self.table.setColumnWidth(4, 85)
 
         # Bottom Bar
         bottom_layout = QHBoxLayout()
@@ -824,6 +833,79 @@ class QueryHistoryDialog(QDialog):
         btn_close.clicked.connect(self.close)
         bottom_layout.addWidget(btn_close)
         layout.addLayout(bottom_layout)
+
+    def _calc_expr_hit(self, expr):
+        if not expr:
+            return "--"
+        p = self.parent()
+        if not p:
+            return "--"
+        try:
+            if hasattr(p, 'get_current_display_df'):
+                df = p.get_current_display_df()
+            elif hasattr(p, '_last_flat_df') and p._last_flat_df is not None:
+                df = p._last_flat_df
+            elif hasattr(p, 'last_result_df') and p.last_result_df is not None:
+                df = p.last_result_df
+            else:
+                return "--"
+
+            if df is None or df.empty:
+                return "0"
+
+            if hasattr(p, '_suffix_query'):
+                active_periods = [per for per, chk in p.period_checkboxes.items() if chk.isChecked()]
+                p_suffix = active_periods[0] if active_periods else 'd'
+                conv_query = p._suffix_query(expr, p_suffix)
+            else:
+                conv_query = expr
+
+            try:
+                m_df = df.query(conv_query)
+                return str(len(m_df))
+            except Exception:
+                try:
+                    m_df = df.query(expr)
+                    return str(len(m_df))
+                except Exception:
+                    return "Err"
+        except Exception:
+            return "--"
+
+    def _test_query(self):
+        # 1. Test current edit text
+        q_text = self.query_edit.text().strip()
+        edit_hit_msg = ""
+        if q_text:
+            h_val = self._calc_expr_hit(q_text)
+            edit_hit_msg = f"表达式【{q_text}】在当前结果集中命中 {h_val} 只股票；"
+
+        # 2. Batch test all items in current table
+        grp = self.grp_combo.currentText()
+        items = self.history_groups.get(grp, [])
+        for idx in range(self.table.rowCount()):
+            q_item = self.table.item(idx, 0)
+            if q_item:
+                expr = q_item.text().strip()
+                hit_cnt = self._calc_expr_hit(expr)
+                
+                # Update table Hit cell
+                hit_cell = NumericTableWidgetItem(hit_cnt)
+                hit_cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if hit_cnt.isdigit() and int(hit_cnt) > 0:
+                    hit_cell.setForeground(QBrush(QColor("#66bb6a")))
+                    hit_cell.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+                elif hit_cnt == "Err":
+                    hit_cell.setForeground(QBrush(QColor("#ef5350")))
+                else:
+                    hit_cell.setForeground(QBrush(QColor("#b0bec5")))
+                self.table.setItem(idx, 3, hit_cell)
+
+                # Update memory
+                if idx < len(items) and items[idx].get("query") == expr:
+                    items[idx]["hit"] = hit_cnt
+
+        self.lbl_status.setText(f"✅ {edit_hit_msg}列表中各条目 Hit 命中测试完成！")
 
     def _refresh_table(self):
         grp = self.grp_combo.currentText()
@@ -845,10 +927,23 @@ class QueryHistoryDialog(QDialog):
             note_item = QTableWidgetItem(item.get("note", ""))
             self.table.setItem(idx, 2, note_item)
 
+            # Hit
+            hit_val = str(item.get("hit", "--"))
+            hit_item = NumericTableWidgetItem(hit_val)
+            hit_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if hit_val.isdigit() and int(hit_val) > 0:
+                hit_item.setForeground(QBrush(QColor("#66bb6a")))
+                hit_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            elif hit_val == "Err":
+                hit_item.setForeground(QBrush(QColor("#ef5350")))
+            else:
+                hit_item.setForeground(QBrush(QColor("#b0bec5")))
+            self.table.setItem(idx, 3, hit_item)
+
             # Group
             grp_item = QTableWidgetItem(grp)
             grp_item.setFlags(grp_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(idx, 3, grp_item)
+            self.table.setItem(idx, 4, grp_item)
 
     def _on_group_changed(self):
         self._refresh_table()
@@ -884,7 +979,7 @@ class QueryHistoryDialog(QDialog):
                 QMessageBox.information(self, "提示", "该过滤条件已存在于当前组中。")
                 return
 
-        items.insert(0, {"query": q, "note": "", "starred": 0})
+        items.insert(0, {"query": q, "note": "", "starred": 0, "hit": "--"})
         self.history_groups[grp] = items[:self.his_limit]
         self._save_history()
         self._refresh_table()
@@ -921,9 +1016,21 @@ class QueryHistoryDialog(QDialog):
             note_item = QTableWidgetItem(item.get("note", ""))
             self.table.setItem(idx, 2, note_item)
 
+            hit_val = str(item.get("hit", "--"))
+            hit_item = NumericTableWidgetItem(hit_val)
+            hit_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if hit_val.isdigit() and int(hit_val) > 0:
+                hit_item.setForeground(QBrush(QColor("#66bb6a")))
+                hit_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            elif hit_val == "Err":
+                hit_item.setForeground(QBrush(QColor("#ef5350")))
+            else:
+                hit_item.setForeground(QBrush(QColor("#b0bec5")))
+            self.table.setItem(idx, 3, hit_item)
+
             grp_item = QTableWidgetItem(grp)
             grp_item.setFlags(grp_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(idx, 3, grp_item)
+            self.table.setItem(idx, 4, grp_item)
 
     def _use_selected(self):
         row = self.table.currentRow()
@@ -944,31 +1051,43 @@ class QueryHistoryDialog(QDialog):
             # Safe safeguard in case of searched table
             q_item = self.table.item(row, 0)
             note_item = self.table.item(row, 2)
-            grp_item = self.table.item(row, 3)
+            hit_item = self.table.item(row, 3)
+            grp_item = self.table.item(row, 4)
             
             if q_item and note_item and grp_item:
                 target_grp = grp_item.text()
                 target_q = q_item.text()
                 target_note = note_item.text()
+                target_hit = hit_item.text() if hit_item else "--"
                 
                 target_items = self.history_groups.get(target_grp, [])
                 for item in target_items:
                     if item.get("query") == target_q:
                         item["note"] = target_note
+                        item["hit"] = target_hit
                         break
         
         self._save_history()
         self.lbl_status.setText("✅ 历史记录备注已保存！")
 
 
-class ConceptStocksDialog(QDialog):
+class ConceptStocksDialog(QDialog, WindowMixin):
     """
-    Sub dialog showing all stocks matching a selected concept.
+    Sub dialog showing all stocks matching a selected concept, with window size/position persistence.
     """
     def __init__(self, parent, concept_name, matched_stocks, columns, headers):
-        super().__init__(parent)
-        self.setWindowTitle(f"板块【{concept_name}】个股列表")
-        self.setMinimumSize(800, 450)
+        super().__init__(None)  # 传入 None 彻底切断物理属主关系，绝不强行置顶遮挡
+        self._real_parent = parent
+        self.setWindowTitle(f"板块【{concept_name}】个股列表 ({len(matched_stocks)}只)")
+
+        # 允许自由拉伸、最大化、最小化，可以放置在多周期主窗口后面，不再强行在父窗口前方遮挡
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setSizeGripEnabled(True)
+
+        self.setMinimumSize(600, 350)
+        self.load_window_position_qt(self, "concept_stocks_dialog", default_width=850, default_height=480)
+
         self.matched_stocks = matched_stocks
         self.columns = columns
         self.headers = headers
@@ -982,6 +1101,30 @@ class ConceptStocksDialog(QDialog):
 
         self._init_ui()
 
+    def parent(self):
+        return getattr(self, "_real_parent", None)
+
+    def closeEvent(self, event):
+        try:
+            self.save_window_position_qt(self, "concept_stocks_dialog")
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self.save_window_position_qt(self, "concept_stocks_dialog")
+        except Exception:
+            pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        try:
+            self.save_window_position_qt(self, "concept_stocks_dialog")
+        except Exception:
+            pass
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
@@ -989,9 +1132,11 @@ class ConceptStocksDialog(QDialog):
         self.table = BaseATSTableWidget(self)
         self.table.setColumnCount(len(self.columns) + 1)
         self.table.setHorizontalHeaderLabels(["序号"] + [self.headers.get(col, col) for col in self.columns])
+        
         p = self.parent()
         if p and hasattr(p, 'link_stock'):
             self.table.stock_activated.connect(p.link_stock)
+        self.table.doubleClicked.connect(self._on_table_double_clicked)
         layout.addWidget(self.table)
 
         # Populate
@@ -1004,6 +1149,8 @@ class ConceptStocksDialog(QDialog):
             for c_idx, col in enumerate(self.columns, 1):
                 if col == 'code':
                     val = code
+                elif col == 'name':
+                    val = row.get('name', '--')
                 elif col == 'price':
                     val = row.get('close', row.get('price', '--'))
                 else:
@@ -1012,23 +1159,39 @@ class ConceptStocksDialog(QDialog):
                 if pd.isna(val):
                     val = '--'
                 
-                # Check for float formatting
+                # Format numbers & badges
                 if isinstance(val, (int, float)):
-                    if col in ('price', 'percent', 'volume', 'ratio') or col.startswith('pass_'):
+                    if col == 'price':
                         val_str = f"{val:.2f}"
+                    elif col == 'percent':
+                        val_str = f"{val:.2f}"
+                    elif col == 'volume':
+                        val_str = f"{val:.0f}" if val > 1000 else f"{val:.2f}"
+                    elif col == 'ratio':
+                        val_str = f"{val:.2f}"
+                    elif col.startswith('pass_'):
+                        val_str = '✅' if bool(val) else '--'
                     else:
-                        val_str = str(val)
-                    item = NumericTableWidgetItem(val_str)
+                        val_str = f"{val:.2f}" if isinstance(val, float) else str(val)
                     
-                    # Color A-share涨跌幅
-                    if col == 'percent':
+                    item = NumericTableWidgetItem(val_str)
+                    if col.startswith('pass_'):
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        if bool(val):
+                            item.setForeground(QBrush(QColor("#66bb6a")))
+                    elif col == 'percent':
                         if val > 0:
                             item.setForeground(QBrush(QColor("#ff4444")))
                         elif val < 0:
                             item.setForeground(QBrush(QColor("#33cc5a")))
                 else:
                     item = QTableWidgetItem(str(val))
-                    if col == 'percent' and val != '--':
+                    if col.startswith('pass_'):
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        if str(val) in ('True', '1', '✅'):
+                            item.setText('✅')
+                            item.setForeground(QBrush(QColor("#66bb6a")))
+                    elif col == 'percent' and val != '--':
                         try:
                             f_val = float(str(val).replace('%', ''))
                             if f_val > 0:
@@ -1073,6 +1236,11 @@ class ConceptStocksDialog(QDialog):
 
         # Action Buttons
         action_layout = QHBoxLayout()
+        btn_cat = QPushButton("🏷️ 查看所选板块分类", self)
+        btn_cat.setStyleSheet("background-color: #00796b;")
+        btn_cat.clicked.connect(self._show_selected_category)
+        action_layout.addWidget(btn_cat)
+
         btn_diag = QPushButton("🔍 诊断所选个股", self)
         btn_diag.setStyleSheet("background-color: #0288d1;")
         btn_diag.clicked.connect(self._diagnose_stock)
@@ -1089,18 +1257,48 @@ class ConceptStocksDialog(QDialog):
         action_layout.addWidget(btn_close)
         layout.addLayout(action_layout)
 
+    def _on_table_double_clicked(self, index):
+        row = index.row()
+        code_item = self.table.item(row, 1)
+        name_item = self.table.item(row, 2)
+        if code_item:
+            code = code_item.text().strip()
+            name = name_item.text().strip() if name_item else code
+            if name.startswith("★ "):
+                name = name[2:]
+            p = self.parent()
+            if p and hasattr(p, '_show_stock_category_dialog'):
+                p._show_stock_category_dialog(code, name)
+
+    def _show_selected_category(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "警告", "请在个股列表中选择一只股票！")
+            return
+        code_item = self.table.item(row, 1)
+        name_item = self.table.item(row, 2)
+        if code_item:
+            code = code_item.text().strip()
+            name = name_item.text().strip() if name_item else code
+            if name.startswith("★ "):
+                name = name[2:]
+            p = self.parent()
+            if p and hasattr(p, '_show_stock_category_dialog'):
+                p._show_stock_category_dialog(code, name)
+
     def _diagnose_stock(self):
         row = self.table.currentRow()
         if row < 0:
             QMessageBox.warning(self, "警告", "请在个股列表中选择一只股票！")
             return
         
-        # Code is in column 1 (index 1)
         code_item = self.table.item(row, 1)
         name_item = self.table.item(row, 2)
         if code_item:
             code = code_item.text().strip()
             name = name_item.text().strip() if name_item else code
+            if name.startswith("★ "):
+                name = name[2:]
             self.parent().diagnose_stock_strategy(code, name)
 
     def _dna_audit_stock(self):
@@ -1120,23 +1318,30 @@ class ConceptStocksDialog(QDialog):
                 code_to_name[c] = n
             
         if code_to_name:
-            # Reconstruct resample from active periods
             active_periods = [p for p, chk in self.parent().period_checkboxes.items() if chk.isChecked()]
             PERIOD_ORDER = {'d': 1, '2d': 2, '3d': 3, 'w': 4, 'm': 5, '45d': 6, '3M': 7}
             sorted_periods = sorted(active_periods, key=lambda x: PERIOD_ORDER.get(x, 99))
             min_period = sorted_periods[0] if sorted_periods else 'd'
-            
             self.parent()._run_dna_audit_batch(code_to_name, resample=min_period)
 
 
-class ConceptDetailDialog(QDialog):
+class ConceptDetailDialog(QDialog, WindowMixin):
     """
-    Sub dialog displaying detailed frequency statistics of concept sectors.
+    Sub dialog displaying detailed frequency statistics of concept sectors, with window size/position persistence.
     """
     def __init__(self, parent, all_concepts, concept_to_codes):
-        super().__init__(parent)
+        super().__init__(None)  # 传入 None 彻底切断物理属主关系，绝不强行置顶遮挡
+        self._real_parent = parent
         self.setWindowTitle("📊 概念板块统计详情")
-        self.setMinimumSize(450, 550)
+
+        # 允许自由拉伸、最大化、最小化，可独立在主窗口身后与前台间自由切换层级
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setSizeGripEnabled(True)
+
+        self.setMinimumSize(380, 400)
+        self.load_window_position_qt(self, "concept_detail_dialog", default_width=480, default_height=550)
+
         self.all_concepts = all_concepts
         self.concept_to_codes = concept_to_codes
 
@@ -1147,16 +1352,40 @@ class ConceptDetailDialog(QDialog):
 
         self._init_ui()
 
+    def parent(self):
+        return getattr(self, "_real_parent", None)
+
+    def closeEvent(self, event):
+        try:
+            self.save_window_position_qt(self, "concept_detail_dialog")
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self.save_window_position_qt(self, "concept_detail_dialog")
+        except Exception:
+            pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        try:
+            self.save_window_position_qt(self, "concept_detail_dialog")
+        except Exception:
+            pass
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        lbl = QLabel(f"📊 概念板块统计详情 (共 {len(self.all_concepts)} 个)", self)
-        lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #00b0ff;")
+        lbl = QLabel(f"📊 当前筛选结果概念板块分布 (共包含 {len(self.all_concepts)} 个概念板块)", self)
+        lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #00b0ff; margin-bottom: 4px;")
         layout.addWidget(lbl)
 
         self.table = QTableWidget(self)
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["序号", "概念板块名称", "股票只数"])
+        self.table.setHorizontalHeaderLabels(["序号", "概念板块名称", "符合条件只数"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -1168,8 +1397,8 @@ class ConceptDetailDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 35)
-        self.table.setColumnWidth(2, 65)
+        self.table.setColumnWidth(0, 45)
+        self.table.setColumnWidth(2, 90)
 
         # Populate
         self.table.setRowCount(len(self.all_concepts))
@@ -1178,12 +1407,14 @@ class ConceptDetailDialog(QDialog):
             idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(idx, 0, idx_item)
 
-            name_item = QTableWidgetItem(cat_name)
+            name_item = QTableWidgetItem(f"{cat_name} 概念" if not cat_name.endswith(("概念", "板块")) else cat_name)
             name_item.setForeground(QBrush(QColor("#80d8ff")))
+            name_item.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
             self.table.setItem(idx, 1, name_item)
 
-            count_item = NumericTableWidgetItem(str(count))
+            count_item = NumericTableWidgetItem(f"{count} 只")
             count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            count_item.setForeground(QBrush(QColor("#ffb74d")))
             self.table.setItem(idx, 2, count_item)
 
     def _on_double_click(self):
@@ -1191,42 +1422,106 @@ class ConceptDetailDialog(QDialog):
         if row < 0:
             return
         
-        name_item = self.table.item(row, 1)
-        if name_item:
-            concept_name = name_item.text().strip()
-            self.parent().show_concept_top10_window(concept_name)
+        if row < len(self.all_concepts):
+            cat_name, _ = self.all_concepts[row]
+            self.parent().show_concept_top10_window(cat_name)
 
 
-class StockCategoryDetailDialog(QDialog):
+class StockCategoryDetailDialog(QDialog, WindowMixin):
     """
-    Sub dialog displaying detailed category details for a specific stock.
+    Sub dialog displaying detailed category details for a specific stock, with window size/position persistence.
     """
     def __init__(self, parent, code, name, category_str):
-        super().__init__(parent)
+        super().__init__(None)  # 传入 None 彻底切断物理属主关系，绝不强行置顶遮挡
+        self._real_parent = parent
         self.setWindowTitle(f"🏷️ 个股分类详情: {name}({code})")
-        self.setMinimumSize(400, 250)
+        
+        # 允许自由拉伸、最大化、最小化，可独立在主窗口身后与前台间自由切换层级
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setSizeGripEnabled(True)
+
+        self.setMinimumSize(380, 240)
+        self.load_window_position_qt(self, "stock_category_detail_dialog", default_width=480, default_height=340)
+
+        self.code = code
+        self.name = name
+        self.category_str = category_str
 
         self.setStyleSheet("""
             QDialog { background-color: #161822; color: #ffffff; }
-            QTextEdit { background-color: #212130; color: #ffffff; border: 1px solid #2e2e3e; font-size: 13px; }
-            QPushButton { background-color: #2e3b4e; color: #ffffff; border: 1px solid #3d4d65; border-radius: 4px; padding: 6px 12px; }
+            QTextEdit { background-color: #212130; color: #81d4fa; border: 1px solid #2e2e3e; font-size: 13px; border-radius: 4px; padding: 8px; }
+            QPushButton { background-color: #2e3b4e; color: #ffffff; border: 1px solid #3d4d65; border-radius: 4px; padding: 6px 12px; font-weight: bold; }
             QPushButton:hover { background-color: #3f51b5; }
         """)
 
         layout = QVBoxLayout(self)
 
-        lbl = QLabel(f"个股: {name} ({code}) 分类与概念标签列表:", self)
-        lbl.setStyleSheet("font-weight: bold; color: #00b0ff;")
+        lbl = QLabel(f"🏷️ 个股【{name}】({code}) 完整分类与所属概念标签:", self)
+        lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #00b0ff;")
         layout.addWidget(lbl)
 
         self.text_area = QTextEdit(self)
         self.text_area.setReadOnly(True)
+        self.text_area.setFont(QFont("Consolas", 10))
         self.text_area.setPlainText(category_str)
         layout.addWidget(self.text_area)
 
+        btn_layout = QHBoxLayout()
+        btn_copy = QPushButton("📋 复制分类信息", self)
+        btn_copy.clicked.connect(self._copy_category)
+        btn_layout.addWidget(btn_copy)
+
+        btn_diag = QPushButton("🔍 诊断该股", self)
+        btn_diag.setStyleSheet("background-color: #0288d1;")
+        btn_diag.clicked.connect(self._diagnose_stock)
+        btn_layout.addWidget(btn_diag)
+
+        btn_layout.addStretch()
         btn_close = QPushButton("关闭", self)
         btn_close.clicked.connect(self.close)
-        layout.addWidget(btn_close)
+        btn_layout.addWidget(btn_close)
+
+        layout.addLayout(btn_layout)
+
+    def parent(self):
+        return getattr(self, "_real_parent", None)
+
+    def closeEvent(self, event):
+        try:
+            self.save_window_position_qt(self, "stock_category_detail_dialog")
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            self.save_window_position_qt(self, "stock_category_detail_dialog")
+        except Exception:
+            pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        try:
+            self.save_window_position_qt(self, "stock_category_detail_dialog")
+        except Exception:
+            pass
+
+    def _copy_category(self):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.category_str)
+        QMessageBox.information(self, "提示", "板块概念分类信息已成功复制到剪贴板！")
+
+    def _diagnose_stock(self):
+        p = self.parent()
+        if p and hasattr(p, 'diagnose_stock_strategy'):
+            p.diagnose_stock_strategy(self.code, self.name)
+
+    def _diagnose_stock(self):
+        p = self.parent()
+        if p and hasattr(p, 'diagnose_stock_strategy'):
+            p.diagnose_stock_strategy(self.code, self.name)
 
 
 class MultiPeriodDialog(QDialog, WindowMixin):
@@ -1360,7 +1655,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             "sort_level1_asc": True,
             "sortby_col": None,
             "sortby_col_ascend": False,
-            "current_history_query": ""
+            "current_history_query": "",
+            "recent_secondary_filters": []
         }
         if os.path.exists(self.config_file):
             try:
@@ -1394,6 +1690,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['link_ths'] = self.link_ths_chk.isChecked()
             self.ui_state['stays_on_top'] = self.on_top_chk.isChecked()
             self.ui_state['current_history_query'] = self._current_history_query
+            self.ui_state['recent_secondary_filters'] = list(getattr(self, 'recent_secondary_filters', []))
 
             if write_to_disk == "FORCE_WRITE":
                 cfg = {}
@@ -1499,17 +1796,35 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         tb2_layout.addStretch()
 
         # Secondary Filter Query
+        # Secondary Filter Query (Integrated Editable QComboBox with 8 History Entries)
         tb2_layout.addWidget(QLabel("🔍 历史/二次过滤:", self))
-        self.filter_edit = QLineEdit(self)
-        self.filter_edit.setPlaceholderText("例如: dff > 2.0 and close > 10")
-        self.filter_edit.setFixedWidth(250)
-        self.filter_edit.returnPressed.connect(self._apply_secondary_filter_from_edit)
+        self.filter_edit = QComboBox(self)
+        self.filter_edit.setEditable(True)
+        self.filter_edit.setFixedWidth(320)
+        self.filter_edit.setToolTip("输入二次过滤表达式或点击下拉菜单选择最近8条历史记录")
+        if self.filter_edit.lineEdit():
+            self.filter_edit.lineEdit().setPlaceholderText("例如: dff > 2.0 and close > 10")
+            self.filter_edit.lineEdit().returnPressed.connect(self._apply_secondary_filter_from_edit)
+        self.filter_edit.activated.connect(self._on_quick_history_combo_selected)
+        self.filter_edit.currentIndexChanged.connect(lambda: self.filter_edit.lineEdit() and self.filter_edit.lineEdit().setCursorPosition(0))
+        
+        self.filter_edit.setStyleSheet("""
+            QComboBox {
+                background-color: #161822;
+                color: #81d4fa;
+                border: 1px solid #37474f;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a24;
+                color: #ffffff;
+                selection-background-color: #293952;
+                border: 1px solid #37474f;
+            }
+        """)
         tb2_layout.addWidget(self.filter_edit)
-
-        btn_clear_filter = QPushButton("❌", self)
-        btn_clear_filter.setFixedWidth(30)
-        btn_clear_filter.clicked.connect(self._clear_secondary_filter)
-        tb2_layout.addWidget(btn_clear_filter)
 
         btn_history = QPushButton("📜 历史管理", self)
         btn_history.clicked.connect(self._open_history_dialog)
@@ -1519,9 +1834,27 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         # ── Plate/Concept Display Bar ──
         concept_layout = QHBoxLayout()
-        lbl_concept_title = QLabel("当前概念:", self)
-        lbl_concept_title.setStyleSheet("font-weight: bold; color: #4caf50; font-size: 13px;")
-        concept_layout.addWidget(lbl_concept_title)
+        self.btn_concept_title = QPushButton("当前概念:", self)
+        self.btn_concept_title.setFlat(True)
+        self.btn_concept_title.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_concept_title.setToolTip("📊 点击查看当前筛选结果的完整概念板块统计详情")
+        self.btn_concept_title.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                color: #4caf50;
+                font-size: 13px;
+                background: transparent;
+                border: none;
+                padding: 0px 4px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                color: #81c784;
+                text-decoration: underline;
+            }
+        """)
+        self.btn_concept_title.clicked.connect(self.show_concept_detail_window)
+        concept_layout.addWidget(self.btn_concept_title)
 
         self.concept_flow_widget = QWidget(self)
         self.concept_flow_layout = QHBoxLayout(self.concept_flow_widget)
@@ -1536,11 +1869,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         main_layout.addLayout(concept_layout)
 
         # ── Results Data Table (BaseATSTableWidget) ──
-        # BaseATSTableWidget already handles currentCellChanged + debounce internally
-        # and emits stock_activated → we just connect to link_stock
         self.table = BaseATSTableWidget(self)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.stock_activated.connect(self.link_stock)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_context_menu)
         main_layout.addWidget(self.table)
 
         # ── Bottom Status Bar ──
@@ -1627,7 +1960,21 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         # 6. Apply secondary filter query
         self._current_history_query = self.ui_state.get('current_history_query', '')
-        self.filter_edit.setText(self._current_history_query)
+        self.filter_edit.setCurrentText(self._current_history_query)
+
+        # 7. Apply recent secondary filters with strict deduplication
+        raw_recent = self.ui_state.get('recent_secondary_filters', [])
+        seen_norm = set()
+        cleaned_recent = []
+        for q in raw_recent:
+            norm = self._normalize_filter_query(q)
+            if norm and norm not in seen_norm:
+                seen_norm.add(norm)
+                cleaned_recent.append(norm)
+                if len(cleaned_recent) >= 8:
+                    break
+        self.recent_secondary_filters = cleaned_recent
+        self._rebuild_quick_history_menu()
 
     def _rebuild_custom_cols_menu(self):
         self.custom_cols_menu.clear()
@@ -2011,6 +2358,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             if df.empty:
                 logger.debug("[MultiPeriodDialog] df is empty, returning early.")
                 self.lbl_status.setText(f"完成，未找到符合条件的标的。(耗时 {elapsed:.1f}s)")
+                self._current_displayed_df = None
+                self._concept_index = None
                 self.update_concept_ranking(None)
                 return
 
@@ -2018,6 +2367,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             filtered_df = flat_df
             if self._current_history_query:
                 filtered_df = self._apply_secondary_filter(flat_df, self._current_history_query)
+
+            self._current_displayed_df = filtered_df
+            self._concept_index = None
 
             if filtered_df.empty:
                 if self._history_filter_error:
@@ -2281,17 +2633,97 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self._history_filter_error = f"过滤语法错误: {e2}"
                 return df
 
-    def _apply_secondary_filter_from_edit(self):
-        query = self.filter_edit.text().strip()
-        self._current_history_query = query
+    def _normalize_filter_query(self, query):
+        if not query:
+            return ""
+        return " ".join(str(query).strip().split())
+
+    def _set_filter_edit_text(self, text):
+        if not hasattr(self, "filter_edit") or not isinstance(self.filter_edit, QComboBox):
+            return
+        self.filter_edit.setCurrentText(text)
+        line_edit = self.filter_edit.lineEdit()
+        if line_edit:
+            line_edit.setCursorPosition(0)
+
+    def _rebuild_quick_history_menu(self):
+        if not hasattr(self, "filter_edit") or not isinstance(self.filter_edit, QComboBox):
+            return
+        
+        self.filter_edit.blockSignals(True)
+        curr_text = self._normalize_filter_query(self.filter_edit.currentText())
+        self.filter_edit.clear()
+
+        recent = getattr(self, "recent_secondary_filters", [])
+        seen_norm = set()
+        unique_items = []
+        for expr in recent:
+            norm = self._normalize_filter_query(expr)
+            if norm and norm not in seen_norm:
+                seen_norm.add(norm)
+                unique_items.append(norm)
+                if len(unique_items) >= 8:
+                    break
+
+        self.recent_secondary_filters = unique_items
+        for expr in unique_items:
+            self.filter_edit.addItem(expr)
+
+        if curr_text:
+            self._set_filter_edit_text(curr_text)
+        elif getattr(self, "_current_history_query", ""):
+            self._set_filter_edit_text(self._current_history_query)
+        else:
+            self.filter_edit.setCurrentIndex(-1)
+            self._set_filter_edit_text("")
+
+        self.filter_edit.blockSignals(False)
+
+    def _record_secondary_filter_history(self, query):
+        norm_query = self._normalize_filter_query(query)
+        if not norm_query:
+            return
+
+        if not hasattr(self, "recent_secondary_filters"):
+            self.recent_secondary_filters = []
+
+        # Deduplicate strictly based on normalized string comparison
+        self.recent_secondary_filters = [
+            q for q in self.recent_secondary_filters 
+            if self._normalize_filter_query(q) != norm_query
+        ]
+
+        self.recent_secondary_filters.insert(0, norm_query)
+        self.recent_secondary_filters = self.recent_secondary_filters[:8]  # 保持 8 个
         self._save_state()
+        self._rebuild_quick_history_menu()
+
+    def _on_quick_history_combo_selected(self, index):
+        query = self.filter_edit.itemText(index).strip()
+        if query:
+            self._current_history_query = query
+            self._set_filter_edit_text(query)
+            self._record_secondary_filter_history(query)
+            if self.last_result_df is not None:
+                self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
+
+    def _clear_quick_history(self):
+        self.recent_secondary_filters = []
+        self._save_state()
+        self._rebuild_quick_history_menu()
+
+    def _apply_secondary_filter_from_edit(self):
+        query = self.filter_edit.currentText().strip()
+        self._current_history_query = query
+        self._set_filter_edit_text(query)
+        self._record_secondary_filter_history(query)
         if self.last_result_df is not None:
             self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
 
     def _clear_secondary_filter(self):
         self._current_history_query = ""
         self._history_filter_error = None
-        self.filter_edit.clear()
+        self._set_filter_edit_text("")
         self._save_state()
         if self.last_result_df is not None:
             self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
@@ -2305,7 +2737,42 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             name = name_item.text().strip() if name_item else code
             if name.startswith("★ "):
                 name = name[2:]
-            self.diagnose_stock_strategy(code, name)
+            self._show_stock_category_dialog(code, name)
+
+    def _show_table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if not code_item:
+            return
+        code = code_item.text().strip()
+        name = name_item.text().strip() if name_item else code
+        if name.startswith("★ "):
+            name = name[2:]
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1a1a24; color: #ffffff; border: 1px solid #37474f; }
+            QMenu::item:selected { background-color: #293952; }
+        """)
+
+        act_cat = menu.addAction("🏷️ 查看板块行业详情")
+        act_cat.triggered.connect(lambda: self._show_stock_category_dialog(code, name))
+
+        act_diag = menu.addAction("🔍 诊断所选个股")
+        act_diag.triggered.connect(lambda: self.diagnose_stock_strategy(code, name))
+
+        act_dna = menu.addAction("🧬 DNA 审计所选")
+        act_dna.triggered.connect(self._on_diagnose_dna_click)
+
+        menu.addSeparator()
+        act_copy = menu.addAction("📋 复制股票代码")
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _on_diagnose_click(self):
         code = self.diag_edit.text().strip()
@@ -2550,6 +3017,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
 
+    def _open_history_dialog(self):
+        dlg = QueryHistoryDialog(self)
+        dlg.applied.connect(self._on_history_query_applied)
+        dlg.exec()
+
+    def _on_history_query_applied(self, query):
+        self._current_history_query = query
+        self.filter_edit.setCurrentText(query)
+        self._record_secondary_filter_history(query)
+        if self.last_result_df is not None:
+            self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
+
     def link_stock(self, code, name):
         """
         接收来自 BaseATSTableWidget.stock_activated 信号的联动请求。
@@ -2640,8 +3119,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
     def _on_history_query_applied(self, query):
         self._current_history_query = query
-        self.filter_edit.setText(query)
-        self._save_state()
+        self.filter_edit.setCurrentText(query)
+        self._record_secondary_filter_history(query)
         if self.last_result_df is not None:
             self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
 
@@ -2662,25 +3141,106 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             # We can print it to standard text
             self.lbl_status.setText(f"【单周期通过率】 " + "  ".join(parts))
 
+    def get_current_display_df(self):
+        if hasattr(self, "_current_displayed_df") and self._current_displayed_df is not None and not self._current_displayed_df.empty:
+            return self._current_displayed_df
+        return getattr(self, "_last_flat_df", None)
+
     def _get_stock_category(self, code, row):
         category = row.get('category', row.get('block', ''))
-        if not category or str(category).strip() == 'nan':
+        if not category or str(category).strip() in ('nan', ''):
             category = self._block_cache.get(code, '')
         return category
+
+    def _format_category_details(self, code, name, category_str):
+        if not category_str or str(category_str).strip() in ('nan', '--'):
+            return f"股票代码: {code}\n股票名称: {name}\n\n暂无详细板块概念分类数据。"
+
+        cats = [c.strip() for c in re.split(r'[;；,，/|]', str(category_str)) if c.strip()]
+        lines = [
+            f"股票代码: {code}",
+            f"股票名称: {name}",
+            f"关联概念板块数量: 共 {len(cats)} 个",
+            "-" * 45,
+            "所属分类与概念标签列表:"
+        ]
+        for idx, cat in enumerate(cats, 1):
+            lines.append(f"  {idx:02d}. {cat}")
+            
+        return "\n".join(lines)
+
+    def _show_stock_category_dialog(self, code, name=None):
+        code = str(code).strip().zfill(6)
+        if not name or name == code or name == "未知股票":
+            name = self.get_stock_name(code)
+            
+        category_str = ""
+        df_curr = self.get_current_display_df()
+        if df_curr is not None and code in df_curr.index:
+            row = df_curr.loc[code]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            category_str = self._get_stock_category(code, row)
+            
+        if not category_str:
+            category_str = self._block_cache.get(code, '')
+        if not category_str and self.top_now is not None and code in self.top_now.index:
+            r = self.top_now.loc[code]
+            if isinstance(r, pd.DataFrame):
+                r = r.iloc[0]
+            category_str = r.get('category', r.get('block', ''))
+            
+        formatted_cat = self._format_category_details(code, name, category_str)
+        if not hasattr(self, "_stock_category_wins"):
+            self._stock_category_wins = {}
+
+        win_key = f"{code}_{name}"
+        if win_key in self._stock_category_wins:
+            win = self._stock_category_wins[win_key]
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(win):
+                    win.showNormal()
+                    win.raise_()
+                    win.activateWindow()
+                    return
+            except Exception:
+                pass
+
+        dialog = StockCategoryDetailDialog(self, code, name, formatted_cat)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self._stock_category_wins[win_key] = dialog
+        dialog.show()
 
     def _normalize_concept_name(self, name):
         if not name:
             return ""
         name = name.strip()
-        # Remove common suffixes like '概念', '板块'
         for suff in ("概念", "板块", "行业"):
             if name.endswith(suff) and len(name) > len(suff):
                 name = name[:-len(suff)]
         return name
 
     def _is_noise_concept(self, name):
-        # Ignore noisy generic concepts
-        return name in ("昨日涨停", "昨日触板", "深股通", "沪股通", "融资融券", "标普道琼斯A股", "MSCI中国")
+        if not name:
+            return True
+        name = name.strip()
+        noise_keywords = (
+            "昨日涨停", "昨日触板", "深股通", "沪股通", "融资融券", "标普道琼斯A股", "MSCI中国",
+            "富时罗素", "标准普尔", "破净股", "证监会行业", "地方国企改革", "央企国企改革",
+            "转融通扣券", "注册制", "同花顺", "东方财富", "含可转债", "高送转", "机构重仓",
+            "富时概念", "沪企改革", "百元股"
+        )
+        if name in noise_keywords:
+            return True
+            
+        # 过滤财报/业绩预增/年份预增（如 2025中报预增、2024三季报预增、中报预增、年报预增、季报预增、业绩预增、预盈预增等）
+        if re.search(r'(\d{4})?(中报|年报|季报|一季报|三季报)?(预增|预盈|业绩预增|预降|亏损|递增)', name):
+            return True
+        if re.search(r'\d{4}(中报|年报|季报|一季报|三季报)', name):
+            return True
+
+        return False
 
     def update_concept_ranking(self, df_filtered):
         # Clear flow widget layout
@@ -2734,14 +3294,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.concept_flow_layout.addWidget(btn)
 
     def show_concept_detail_window(self):
-        if self._last_flat_df is None or self._last_flat_df.empty:
+        df_curr = self.get_current_display_df()
+        if df_curr is None or df_curr.empty:
             QMessageBox.information(self, "提示", "当前无筛选数据，请先执行筛选。")
             return
 
         from collections import Counter
         concept_counter = Counter()
         concept_to_codes = {}
-        for code, row in self._last_flat_df.iterrows():
+        for code, row in df_curr.iterrows():
             category = self._get_stock_category(code, row)
             if not category:
                 continue
@@ -2773,28 +3334,28 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if not target_concept:
             return
 
-        if self._last_flat_df is None or self._last_flat_df.empty:
+        df_curr = self.get_current_display_df()
+        if df_curr is None or df_curr.empty:
             QMessageBox.information(self, "信息", "当前无筛选数据，无法查看个股列表")
             return
 
-        # Try indexed lookup
+        # Rebuild index dynamically for current active display dataframe
         concept_index = getattr(self, "_concept_index", None)
         if concept_index is None:
-            # Lazy rebuild
             concept_index = {}
-            for code, row in self._last_flat_df.iterrows():
+            for code, row in df_curr.iterrows():
                 category = self._get_stock_category(code, row)
                 if not category:
                     continue
                 cats = [c.strip() for c in re.split(r'[;；,，/|]', category) if c.strip()]
                 for cat in cats:
                     norm_cat = self._normalize_concept_name(cat)
-                    if norm_cat:
+                    if norm_cat and not self._is_noise_concept(norm_cat):
                         concept_index.setdefault(norm_cat, []).append(code)
             self._concept_index = concept_index
 
         matched_codes = concept_index.get(target_concept, [])
-        matched_stocks = [(code, self._last_flat_df.loc[code]) for code in matched_codes if code in self._last_flat_df.index]
+        matched_stocks = [(code, df_curr.loc[code]) for code in matched_codes if code in df_curr.index]
 
         if not matched_stocks:
             QMessageBox.information(self, "信息", f"当前筛选结果中暂无属于【{target_concept}】的个股")
@@ -2805,7 +3366,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         custom_cols = []
         for c in active_customs:
-            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, self._last_flat_df)
+            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df_curr)
             for p in disp_periods:
                 custom_cols.append(f"{c}_{p}")
         pass_cols = [f"pass_{p}" for p in active_periods]
@@ -2822,14 +3383,32 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             "ratio": "换手"
         }
         for c in active_customs:
-            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, self._last_flat_df)
+            disp_periods = self._get_display_periods_for_custom_col(c, active_periods, df_curr)
             for p in disp_periods:
                 headers[f"{c}_{p}"] = f"{c}({p})"
         for p in active_periods:
             headers[f"pass_{p}"] = f"{p}通过"
 
+        # 使用非模态 (Non-Modal) 方式打开，管理与维护句柄字典避免重复或被 GC 提前释放，且不阻塞主窗口及其他板块操作
+        if not hasattr(self, "_concept_stocks_wins"):
+            self._concept_stocks_wins = {}
+
+        if target_concept in self._concept_stocks_wins:
+            win = self._concept_stocks_wins[target_concept]
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(win):
+                    win.showNormal()
+                    win.raise_()
+                    win.activateWindow()
+                    return
+            except Exception:
+                pass
+
         dialog = ConceptStocksDialog(self, target_concept, matched_stocks, columns, headers)
-        dialog.exec()
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        self._concept_stocks_wins[target_concept] = dialog
+        dialog.show()
 
     def open_dragon_monitor(self):
         try:
