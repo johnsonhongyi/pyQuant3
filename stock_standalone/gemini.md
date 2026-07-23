@@ -1,3 +1,13 @@
+## 2026-07-23 18:30
+- [x] **重构 `ats/ui/multi_period_dialog.py` 概念数据流与双击分类/概念详情 (Multi-Period Dialog Concept Sync & Double-Click Category Popup)**：
+    - [x] **数据源彻底同步与动态过滤 (`get_current_display_df`)**：修复了点击“当前概念”胶囊按钮（如 `DeepSeek(5)`）弹窗数据错位/旧版本全量数据的 Bug。重构了 `show_concept_top10_window` 与 `show_concept_detail_window`，统一从当前主表格呈现的筛选数据集 `get_current_display_df()`（包含二次过滤后的动态 DataFrame）中建立动态索引与提取个股，确保弹窗数据、数量、价格/涨幅/换手/通过列 100% 与主界面同步一致。
+    - [x] **恢复双击表格行弹出板块行业分类详情 (`StockCategoryDetailDialog`)**：修复了原代码双击表格行直接触发“诊断”的逻辑偏离。恢复为双击任何表格股票行即调起 `StockCategoryDetailDialog` 对话框，清晰呈现该股票的所有关联板块、行业与概念标签列表，并提供一键复制与联动；同时在右键菜单及底部保留诊断入口。
+    - [x] **恢复点击【当前概念:】弹窗全量板块统计详情 (`ConceptDetailDialog`)**：将“当前概念:”标签重构为支持手型光标与悬停下划线的可点击控件。点击后即时调起【概念板块统计详情】对话框，按符合条件股票数从高到低呈现当前筛选结果的全量概念分布梯队，双击其中任意概念条目均可无缝穿透查阅个股明细。
+    - [x] **过滤财报/业绩预增/中报预增等无价值噪声标签 (`_is_noise_concept`)**：扩展了概念名称正则与关键字过滤器，自动识别并剔除如 `2025中报预增`、`年报预增`、`业绩预增`、`季报预增` 等无实用题材价值的财务与分析标签，大幅提升板块监控和题材凝聚度分析的高熵价值。
+    - [x] **彻底切断底层 Win32 Owner 物理置顶死锁与修复渲染中断 (`super().__init__(None)`)**：定位并解除了 Windows DWM 的强制物理属主关系。将 `ConceptStocksDialog`（个股列表）、`ConceptDetailDialog`（板块统计详情）和 `StockCategoryDetailDialog`（个股分类详情）构造函数中的底层父类初始化统一修改为 `super().__init__(None)` 配合逻辑 `self._real_parent` 引用，并修复了先前缩进导致 `__init__` 提前返回产生灰白空白框的缺陷。界面控件 100% 完整加载填充，且摆脱了 Win32 强行置顶特性，支持个股列表 100% 置于主窗口身后，双向层级自由无缝排布。
+    - [x] **一体化整合二次过滤输入框与历史下拉菜单 (Integrated Editable QComboBox, Top 8 History)**：将“二次过滤输入框”与“历史下拉”重构成兼具键盘自由输入与下拉列表点选的可编辑 `QComboBox`。移除了多余的独立外挂按钮，点击右侧 `▼` 下拉箭头可瞬间展现并一键切换**最近查询的 8 个**历史过滤表达式（支持智能去重、最新置顶与持久化记忆）。
+    - [x] **实现二次过滤显示框默认滚动聚焦最前面 (`_set_filter_edit_text`)**：针对超长二次过滤表达式，封装了 `_set_filter_edit_text` 与 `setCursorPosition(0)` 光标重置机制。在初始化、下拉项切换、历史记录应用及回车筛选时，自动将 `QLineEdit` 的文本滚动位置定位在最左侧开头（索引 0），确保最重要、最前面的条件核心逻辑优先完整展现在视线中央。
+
 ## 2026-07-23 12:45
 - [x] **根治 `SignalDashboardPanel` 关闭后再打开磁吸定时器失灵与闪退 Bug (Fixed Signal Dashboard Reopen Docking Timer Freeze)**：
     - [x] **在 `showEvent` 中强力重启 `hover_timer` 轮询与复位锁**：修复了 `SignalDashboardPanel` 手动关闭【X】时在 `closeEvent` 中调用 `stop()` 停止了 `hover_timer` 和 `snap_timer`，但再次在 TK 中点击【打开信号面板】时因复用旧实例导致 `hover_timer` 始终处于停止（Stopped）状态，进而引发放置在磁吸位置闪烁卡死无法折叠隐藏的硬 Bug。在 `showEvent` 恢复了 `hover_timer.start(100)` 和 `_in_snap_action = False` 状态解开，确保每次重开均能秒级触发磁吸。
