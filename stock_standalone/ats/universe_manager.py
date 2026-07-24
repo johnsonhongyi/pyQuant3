@@ -56,7 +56,7 @@ class UniverseManager:
 
         return radar_list, watch_list, trade_list
 
-    def add_to_radar(self, code, name, price, pct, strategy="MA20支撑", reason="大级别支撑偏离度低"):
+    def add_to_radar(self, code, name, price, pct, deviation=0.0, strategy="MA20支撑", reason="大级别支撑偏离度低"):
         """
         Adds a stock to the Radar Pool.
         """
@@ -64,6 +64,7 @@ class UniverseManager:
             "name": name,
             "price": price,
             "pct": pct,
+            "deviation": deviation,
             "strategy": strategy,
             "reason": reason,
             "timestamp": time.time()
@@ -110,50 +111,106 @@ class UniverseManager:
     def run_pipeline_filtering(self, df_all, ma20_series=None):
         """
         Evaluates df_all (real-time/historical snapshot) and automatically funnels
-        stocks into the respective pools based on criteria.
+        stocks into the respective pools based on criteria. Also performs eviction
+        of broken/out-of-range stocks for dynamic universe rotation.
         """
         if df_all is None or df_all.empty:
             return
 
+        # 1. Adaptively locate real MA20 column name ('ma20d', 'ma20', 'MA20')
+        ma20_col = None
+        for col_name in ['ma20d', 'ma20', 'MA20', 'ma20_series']:
+            if col_name in df_all.columns:
+                ma20_col = col_name
+                break
+
         # Get currently tracked codes
         tracked_codes = set(self.radar_pool.keys()) | set(self.watch_pool.keys()) | set(self.trade_pool.keys())
         
-        # Only evaluate tracked codes or pre-filtered data with real ma20 column to avoid mock flooding
-        if 'ma20' in df_all.columns:
-            safe_ma20 = df_all['ma20'].replace(0, float('nan'))
-            dev = (df_all['close'] - safe_ma20) / safe_ma20 * 100
-            valid_mask = (dev >= -1.0) & (dev <= 2.0)
-            target_df = df_all[valid_mask | df_all.index.isin(tracked_codes)]
+        # 2. Select target dataframe for evaluation
+        if ma20_col:
+            close_s = df_all['close'] if 'close' in df_all.columns else df_all.get('price', df_all.iloc[:, 0])
+            safe_ma20 = df_all[ma20_col].replace(0, float('nan'))
+            dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
+            
+            # Select stocks that are either near MA20 (-1.5% to +2.5%) OR currently in tracked pools
+            valid_mask = ((dev_series >= -1.5) & (dev_series <= 2.5)) | df_all.index.isin(tracked_codes)
+            target_df = df_all[valid_mask]
         else:
             common_codes = [c for c in tracked_codes if c in df_all.index]
             target_df = df_all.loc[common_codes]
 
-        # Iterating through target dataframe
+        # 3. Iterating through target dataframe to update state & promote
         for code, row in target_df.iterrows():
+            code_str = str(code).strip()
             name = row.get('name', '个股')
-            price = row.get('close', row.get('price', 0.0))
-            pct = row.get('percent', 0.0)
+            price = float(row.get('close', row.get('price', 0.0)))
+            pct = float(row.get('percent', 0.0))
             
-            # Use real ma20 if present in row, otherwise default to slightly below price for tracked codes
-            ma20 = row.get('ma20', price * 0.99)
-            if pd.isna(ma20) or ma20 == 0:
-                deviation = 0.0
-            else:
-                deviation = (price - ma20) / ma20 * 100
-            
-            # Funnel Condition 1: Radar (deviation within -1% and +2%)
-            if -1.0 <= deviation <= 2.0:
-                if code not in self.radar_pool and code not in self.watch_pool and code not in self.trade_pool:
-                    self.add_to_radar(code, name, price, pct, reason=f"偏离MA20度: {deviation:.2f}%")
-            
-            # Funnel Condition 2: Watchlist (if it's in Radar, and volume ratio is high)
-            if code in self.radar_pool:
-                vol_ratio = row.get('volume_ratio', 1.0)
-                if vol_ratio >= 1.2 and pct >= -1.0:
-                    self.promote_to_watch(code, reason=f"量比: {vol_ratio:.1f} | 涨幅: {pct:.2f}%")
+            # Compute MA20 deviation
+            ma20_val = price * 0.99
+            if ma20_col and ma20_col in row.index:
+                try:
+                    v = float(row[ma20_col])
+                    if v > 0:
+                        ma20_val = v
+                except Exception:
+                    pass
                     
-            # Funnel Condition 3: Trade (if it is in Watch, and price is above VWAP)
-            if code in self.watch_pool:
-                vwap = row.get('vwap', price * 0.99)
+            if price > 0 and ma20_val > 0:
+                deviation = (price - ma20_val) / ma20_val * 100.0
+            else:
+                deviation = 0.0
+
+            # --- Eviction / Degradation Check ---
+            # If stock drops sharply below MA20 (< -5.0%) or skyrockets far above (> 15.0%),
+            # evict it from Radar and Watch pools to allow fresh pool rotation.
+            if code_str not in self.trade_pool:
+                if deviation < -5.0 or deviation > 15.0:
+                    self.evict(code_str)
+                    continue
+
+            # --- Funnel Condition 1: Radar (deviation within -1.5% and +2.5%) ---
+            if -1.5 <= deviation <= 2.5:
+                if code_str not in self.radar_pool and code_str not in self.watch_pool and code_str not in self.trade_pool:
+                    self.add_to_radar(code_str, name, price, pct, deviation=deviation, reason=f"偏离MA20度: {deviation:+.2f}%")
+
+            # --- Funnel Condition 2: Watchlist (if it's in Radar, volume surge or positive momentum) ---
+            if code_str in self.radar_pool:
+                vol_ratio = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)))
+                dff_val = float(row.get('dff', 0.0))
+                if (vol_ratio >= 1.2 and pct >= -1.0) or (pct >= 1.5 and dff_val > 1.0):
+                    self.promote_to_watch(code_str, reason=f"量比: {vol_ratio:.1f} | 涨幅: {pct:+.2f}%")
+
+            # --- Funnel Condition 3: Trade (if it's in Watch, price above VWAP & strong momentum) ---
+            if code_str in self.watch_pool:
+                vwap = float(row.get('vwap', row.get('avg_price', price * 0.99)))
                 if price >= vwap and pct >= 1.0:
-                    self.promote_to_trade(code, alloc_pct=15.0, reason="突破均线且量能持续放量")
+                    self.promote_to_trade(code_str, alloc_pct=15.0, reason="突破均线且量能持续放量")
+
+        # 4. Limit Radar Pool size to Top 50 to maintain UI responsiveness and high entropy
+        if len(self.radar_pool) > 50:
+            def _safe_get_dev(meta):
+                if 'deviation' in meta:
+                    try:
+                        return abs(float(meta['deviation']))
+                    except Exception:
+                        pass
+                reason_str = str(meta.get('reason', ''))
+                if '偏离MA20度:' in reason_str:
+                    try:
+                        return abs(float(reason_str.split('偏离MA20度:')[-1].replace('%', '').strip()))
+                    except Exception:
+                        pass
+                return 0.0
+
+            # Keep trade/watch pools untouched, trim radar_pool by absolute deviation closeness
+            sorted_radar = sorted(
+                self.radar_pool.items(),
+                key=lambda x: (
+                    _safe_get_dev(x[1]),
+                    -x[1].get('timestamp', 0)
+                )
+            )
+            self.radar_pool = dict(sorted_radar[:50])
+
