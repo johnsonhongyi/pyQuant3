@@ -1109,7 +1109,13 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         return flat_df
 
     def _suffix_query(self, expr, period_suffix):
+        if not expr:
+            return ""
         import re
+        from query_engine_util import query_engine
+        if query_engine:
+            expr = query_engine._preprocess_query(expr)
+
         cols_set = set()
         df_p = self.engine._period_dfs.get(period_suffix)
         if df_p is not None and not df_p.empty:
@@ -1132,13 +1138,20 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         
         converted_query = self._suffix_query(query_expr, target_period)
         
+        from query_engine_util import query_engine
         try:
-            filtered_df = df.query(converted_query)
+            if query_engine:
+                filtered_df = query_engine.execute(df, converted_query)
+            else:
+                filtered_df = df.query(converted_query)
             self._history_filter_error = None
             return filtered_df
         except Exception as e1:
             try:
-                filtered_df = df.query(query_expr)
+                if query_engine:
+                    filtered_df = query_engine.execute(df, query_expr)
+                else:
+                    filtered_df = df.query(query_expr)
                 self._history_filter_error = None
                 return filtered_df
             except Exception as e2:

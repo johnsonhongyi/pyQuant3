@@ -61,8 +61,8 @@ class TestQueryHistoryManager(unittest.TestCase):
         # Actually my merge_history currently appends EVERYTHING from disk not in memory.
         # This is expected for multi-process safety, but let's see if it preserves notes and duplicates.
         
-        # Test dedup
-        self.assertEqual(len(h2), 2) # It will have 000003 (from memory) and 000002 (from disk)
+        # Test dedup: 000003 replaced 000002 without resurrection
+        self.assertEqual(len(h2), 1)
         
     def test_no_cross_pollution_on_save(self):
         """Test that saving doesn't accidentally make historyX point to the same object."""

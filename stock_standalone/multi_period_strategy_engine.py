@@ -108,7 +108,11 @@ class MultiPeriodStrategyEngine:
                 continue
                 
             try:
-                filtered_df = df_clean.query(cond['filter'])
+                from query_engine_util import query_engine
+                if query_engine:
+                    filtered_df = query_engine.execute(df_clean, cond['filter'])
+                else:
+                    filtered_df = df_clean.query(cond['filter'])
                 passed_in_period = set(filtered_df.index)
                 
                 # 获取底表（通常为 'd' 周期）的全量股票，用以对比提取出该周期缺失数据的股票
@@ -285,13 +289,20 @@ class MultiPeriodStrategyEngine:
             return False
 
     def validate_condition(self, filter_str: str, period: str) -> tuple[bool, str]:
-        """验证过滤表达式的合法性"""
+        """验证过滤表达式的合法性 (集成 query_engine 自适应语法展开与动态补齐)"""
         if not filter_str.strip():
             return True, "表达式为空"
             
-        # 1. 如果当前内存中已有对应周期的数据，直接使用其进行 query 校验
+        import re
+        from query_engine_util import query_engine
+        cleaned_expr = query_engine._preprocess_query(filter_str) if query_engine else filter_str.strip()
+
+        if query_engine and not query_engine._is_balanced(cleaned_expr):
+            return False, "❌ 语法错误: 括号或大括号未成对闭合"
+
+        # 1. 如果当前内存中已有对应周期的数据，拷贝以防修改
         if period in self._period_dfs and not self._period_dfs[period].empty:
-            df = self._period_dfs[period]
+            df = self._period_dfs[period].copy()
         else:
             # 2. 否则，构造一个包含常用字段的 Dummy DataFrame 进行语法验证
             dummy_cols = [
@@ -301,15 +312,22 @@ class MultiPeriodStrategyEngine:
                 'upper', 'lower', 'upper1', 'lower1', 'hmax', 'hmin',
                 'ptop', 'pbottom', 'pbreak', 'pdays', 'Rank', 'dff', 'dff2', 'dff3'
             ]
-            # 填充一两行数值，避免 query 因数据类型问题报错
             data = {col: [1.0, 2.0] for col in dummy_cols}
             df = pd.DataFrame(data, index=['000001', '000002'])
-            
+
+        # 为验证自动补充表达式中引用的未知变量列，防止校验报错
+        mentioned = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned_expr))
+        py_keywords = {'and', 'or', 'not', 'in', 'is', 'if', 'else', 'True', 'False', 'None', 'df', 'pd', 'np', 'abs', 'max', 'min', 'GREATEST', 'LEAST', 'ABS', 'MAX', 'MIN'}
+        for var in (mentioned - py_keywords):
+            if var not in df.columns:
+                df[var] = 1.0
+
         try:
-            # 尝试 query 试运行
-            df.query(filter_str)
+            if query_engine:
+                query_engine.execute(df, cleaned_expr)
+            else:
+                df.query(cleaned_expr)
             return True, "✅ 语法验证通过"
         except Exception as e:
-            # 移除错误提示中过长的调用堆栈，仅保留异常描述
             err_msg = str(e).split('\n')[0]
             return False, f"❌ 语法错误: {err_msg}"
