@@ -756,27 +756,83 @@ class StrategyRouter:
         return TrendMA60Branch
 
 
+SETUP_CHINESE_MAP = {
+    "MINED_MA5_BREAKOUT_BUY": "🚀[牛股起爆] 5日线放量突破买入",
+    "MA5_BREAKOUT_BUY": "🚀[突破买入] 5日线平台突破买入",
+    "MA5_SUPER_TREND": "📈[主升浪持仓] 5日线超级趋势持有",
+    "MINED_MA5_SUPER_TREND": "🚀[牛股主升] 5日线深度牛股主升狂飙",
+    "MA10_REVERSAL_BUY": "🎯[十日线反攻] 10日线支撑黄金坑买入",
+    "MINED_MA10_REVERSAL_BUY": "🚀[牛股反攻] 10日线主力支撑深度牛股",
+    "SWS_COLLECT_PULLBACK": "🛡️[筹码收集] 强支撑缩量回踩低吸",
+    "MINED_SWS_COLLECT_PULLBACK": "🚀[牛股收集] 强支撑深度牛股回踩",
+    "MA60_LIFELINE_BUY": "💎[生命线起爆] 60日线大周期底座买入",
+    "MINED_MA60_LIFELINE_BUY": "🚀[牛股生命线] 60日大周期底座牛股",
+    "VWAP_ESCAPE_SELL": "🎯[分时逃荒] 跌破VWAP均价线急逃平仓",
+    "VWAP_ESCAPE": "🎯[分时逃荒] 跌破VWAP均价线急逃平仓",
+    "CAPITAL_RELEASE_SELL": "💡[资金解封] 强砍弱势烂仓释放资金",
+    "HIGH_RELAY_FROZEN_VETO": "⚠️[接力崩溃] 高位股无人接力拦截",
+    "NON_MINED_IGNORE": "🛡️[资质未达] 未达牛股挖掘门槛观望",
+    "MA5_BREAKDOWN_STOP": "🎯[五日线破位] 跌破5日线防守止盈平仓",
+    "VOL_COLLAPSE_平仓": "🎯[爆量崩盘] 异常砸盘崩盘急逃平仓",
+    "T+2_EXPECTATION_FAIL": "⏳[T+2时间风控] 动能停滞时间保护平仓",
+    "TRAP_VETO_REJECT": "🚫[诱多拦截] 下行通道/长上影诱多拦截",
+    "STRATEGY_BLACKLISTED": "⛔[胜率熔断] 历史低胜率黑名单熔断",
+    "UPPER_VOL_TP": "🎯[触顶止盈] 突破上轨放量见顶止盈",
+    "BREAKOUT_TAKE_PROFIT": "🎯[突破止盈] 突破阻力带止盈锁定收益",
+    "ST_DEMOTION_TP": "🎯[结构降级] 主升结构证伪降级止盈"
+}
+
+_published_alert_cache: dict[str, float] = {}
+
+def get_setup_chinese_name(setup_raw: str) -> str:
+    """将英文策略名称/Setup解析映射为清晰直观的中文表达"""
+    if not setup_raw:
+        return "未知策略"
+    if setup_raw in SETUP_CHINESE_MAP:
+        return SETUP_CHINESE_MAP[setup_raw]
+    # 支持模糊前缀匹配
+    for k, v in SETUP_CHINESE_MAP.items():
+        if k in setup_raw:
+            return v
+    return f"【{setup_raw}】"
+
+
 def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: dict) -> None:
     """
     自动向全系统信号总线(SignalBus)及报警中心(AlertCenter)推送高价值提示
+    包含自动防抖去重与英文策略名全量中文映射
     """
-    print(f"🔍 [SignalBus Trace] Code={signal.code} | Action={getattr(intent, 'action', '')} | Setup={getattr(getattr(intent, 'reason', None), 'setup', '')}")
+    import time
+    action = getattr(intent, "action", "HOLD")
+    # 🛡️ 观望无动作信号直接短路跳过，彻底杜绝无意义的高频滚屏日志与总线洪泛
+    if action == "HOLD":
+        return
+
     try:
         from signal_bus import publish_standard_signal, SignalBus
         from signal_standard import StandardSignal
         from datetime import datetime
 
+        code = signal.code
+        now_ts = time.time()
+        
+        # 60秒内同代码同动作防抖去重
+        cache_key = f"{code}_{action}"
+        last_ts = _published_alert_cache.get(cache_key, 0.0)
+        if now_ts - last_ts < 60.0:
+            return
+        _published_alert_cache[cache_key] = now_ts
+
         now_str = datetime.now().strftime("%H:%M:%S")
-        action = getattr(intent, "action", "HOLD")
         reason_obj = getattr(intent, "reason", None)
         if isinstance(reason_obj, str):
-            setup = reason_obj
+            setup_raw = reason_obj
         else:
-            setup = getattr(reason_obj, "setup", "") if reason_obj else ""
+            setup_raw = getattr(reason_obj, "setup", "") if reason_obj else ""
 
+        setup_zh = get_setup_chinese_name(setup_raw)
         confidence = float(getattr(intent, "confidence", 0.8))
         score = float(ctx.get("mining_score", confidence * 100.0))
-        code = signal.code
         name = signal.name
         price = signal.price
 
@@ -789,17 +845,16 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
                 price=price,
                 timestamp=now_str,
                 score=score / 100.0,
-                detail=f"🚀[牛股爆发] {name}({code}) 触发牛股深度挖掘起爆! 得分:{score:.1f} | 理由:{setup}",
+                detail=f"{setup_zh} | {name}({code}) | 挖掘得分:{score:.1f}分 | 建议价:{price:.2f}元",
                 grade="S" if score >= 90.0 else "A",
                 source="DeepStockMiningEngine",
                 is_high_priority=True,
-                metadata={"action": "BUY", "mining_score": score, "setup": setup}
+                metadata={"action": "BUY", "mining_score": score, "setup": setup_raw, "setup_zh": setup_zh}
             )
             publish_standard_signal(sig_obj)
 
         elif action == "SELL":
-            is_escape = "VWAP_ESCAPE" in setup or "BREAKDOWN" in setup
-            detail_msg = f"🎯[分时逃荒] {name}({code}) 跌破VWAP/破位! 触发急逃平仓! 理由:{setup}" if is_escape else f"🎯[止盈离场] {name}({code}) 锁定收益平仓! 理由:{setup}"
+            is_escape = "VWAP_ESCAPE" in setup_raw or "BREAKDOWN" in setup_raw
             sig_obj = StandardSignal(
                 code=code,
                 name=name,
@@ -808,11 +863,11 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
                 price=price,
                 timestamp=now_str,
                 score=0.95,
-                detail=detail_msg,
+                detail=f"{setup_zh} | {name}({code}) | 现价:{price:.2f}元 | 离场风控平仓",
                 grade="S" if is_escape else "A",
                 source="DecisionEngine",
                 is_high_priority=True,
-                metadata={"action": "SELL", "setup": setup}
+                metadata={"action": "SELL", "setup": setup_raw, "setup_zh": setup_zh}
             )
             publish_standard_signal(sig_obj)
 
@@ -825,11 +880,11 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
                 price=price,
                 timestamp=now_str,
                 score=0.88,
-                detail=f"🔥[二次加仓] {name}({code}) 异动回踩VWAP支撑不破,二次放量加仓! 理由:{setup}",
+                detail=f"{setup_zh} | {name}({code}) | 现价:{price:.2f}元 | 支撑确认二次加仓",
                 grade="A",
                 source="DecisionEngine",
                 is_high_priority=True,
-                metadata={"action": "ADD", "setup": setup}
+                metadata={"action": "ADD", "setup": setup_raw, "setup_zh": setup_zh}
             )
             publish_standard_signal(sig_obj)
 
