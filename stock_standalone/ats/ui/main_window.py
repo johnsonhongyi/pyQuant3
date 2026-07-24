@@ -1099,6 +1099,7 @@ class ATSMainWindow(QMainWindow):
         self.kernel_trace_panel.stock_double_clicked.connect(self.on_stock_clicked)
         
         self.heatmap_widget.sector_selected.connect(self.on_sector_clicked)
+        self.heatmap_widget.sector_selected_with_codes.connect(lambda name, codes: self.on_sector_clicked(name, member_codes=codes))
         self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
 
@@ -1457,14 +1458,14 @@ class ATSMainWindow(QMainWindow):
         self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self)
         self._detail_dialog.show()
 
-    def on_sector_clicked(self, name):
+    def on_sector_clicked(self, name, member_codes=None):
         if getattr(self, "_showing_sector_detail", False):
             return
         self._showing_sector_detail = True
         try:
             self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, parent=self)
+            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=self)
             dialog.exec()
         finally:
             self._showing_sector_detail = False

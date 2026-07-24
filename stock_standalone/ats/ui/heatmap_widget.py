@@ -16,6 +16,7 @@ from JohnsonUtil import commonTips as cct
 
 class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
+    sector_selected_with_codes = pyqtSignal(str, list) # sector name, member codes list
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -296,7 +297,7 @@ class SectorHeatmapWidget(QWidget):
                             for sec_name, info in sector_data.items():
                                 self.sector_to_codes[sec_name] = []
                                 score = info.get('score', 0.0)
-                                avg_pct = info.get('avg_pct_diff') or info.get('avg_pct') or 0.0
+                                avg_pct = info.get('avg_pct') or info.get('avg_pct_diff') or 0.0
                                 count = info.get('count') or len(info.get('followers', []))
                                 change_pct_str = f"{avg_pct:+.2f}%"
                                 leader_code = info.get('leader', '')
@@ -422,7 +423,12 @@ class SectorHeatmapWidget(QWidget):
             card_layout.addWidget(info_lbl)
             card_layout.addWidget(count_lbl)
             
-            card.clicked.connect(lambda checked, n=name: self.sector_selected.emit(n))
+            def _on_card_clicked(checked=False, n=name):
+                codes = getattr(self, 'sector_to_codes', {}).get(n, [])
+                self.sector_selected.emit(n)
+                self.sector_selected_with_codes.emit(n, list(codes))
+
+            card.clicked.connect(_on_card_clicked)
             self.grid_layout.addWidget(card, row, col)
 
     def sort_sectors(self, index):
