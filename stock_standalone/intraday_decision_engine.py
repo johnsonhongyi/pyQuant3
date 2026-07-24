@@ -10,6 +10,7 @@ import datetime as dt
 from typing import Any
 from daily_top_detector import detect_top_signals
 import pandas as pd
+from trading_kernel.engine.deep_stock_mining_engine import DeepStockMiningEngine
 # from JohnsonUtil.commonTips import timed_ctx
 logger = LoggerFactory.getLogger(__name__)
 
@@ -239,6 +240,14 @@ class IntradayDecisionEngine:
         
         # 将防御等级存入 snapshot/debug 供后续买入逻辑扣减
         debug["defense_level"] = defense_level
+
+        # 💎 深度牛股挖掘门槛校验 (Deep Stock Mining Check)
+        if mode != "sell_only":
+            is_mined, mining_score, mining_details = DeepStockMiningEngine.evaluate_stock_mining(row)
+            debug["mining_score"] = mining_score
+            debug["is_mined_target"] = is_mined
+            if not is_mined:
+                return self._hold(f"未达牛股挖掘门槛({mining_score:.1f}<78.0)", debug)
 
         # 3. 实时情绪感知 (Realtime Emotion & Pattern)
         # rt_emotion: 0-100, >60 偏强, <40 偏弱

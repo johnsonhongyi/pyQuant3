@@ -7,9 +7,59 @@ logger = LoggerFactory.getLogger("DecisionEngine")
 
 from trading_kernel.core.intent import DecisionIntent, DecisionReason
 from trading_kernel.core.signal import StrategySignal
+from trading_kernel.engine.deep_stock_mining_engine import DeepStockMiningEngine
+from trading_kernel.engine.strategy_self_evolution import StrategySelfEvolution
+
+# 全局自进化单例
+_self_evolution_engine = StrategySelfEvolution()
+
+
+def evaluate_trap_veto(ctx: dict) -> tuple[bool, str]:
+    """
+    诱多陷阱一票否决校验
+    针对下行通道、量价背离、冲高回落长上影、板块暴跌进行 100% 拦截
+    """
+    price = float(ctx.get("price", 0.0))
+    ma20 = float(ctx.get("ma20d", 0.0))
+    ma60 = float(ctx.get("ma60d", 0.0))
+    ma20_prev5 = float(ctx.get("ma20d_prev5", 0.0))
+    ma60_prev5 = float(ctx.get("ma60d_prev5", 0.0))
+    pct_diff = float(ctx.get("pct_diff", 0.0))
+    dff = float(ctx.get("dff", 0.0))
+    sector_heat = float(ctx.get("sector_heat", 50.0))
+    high = float(ctx.get("high_price", ctx.get("high", price)))
+
+    # 1. 日线均线死叉下行压制（MA20向下且价格跌破MA20 1.5%以上，判定处于下行通道）
+    if ma20 > 0 and price < ma20 * 0.985:
+        if ma20_prev5 > 0 and ma20 < ma20_prev5 * 0.998:
+            return True, "⚠️[诱多拦截] 日线MA20向下死叉压制，处于下行趋势"
+        if ma60 > 0 and ma60_prev5 > 0 and ma60 < ma60_prev5 * 0.995 and price < ma60:
+            return True, "⚠️[诱多拦截] 中期均线走空且价格跌破生命线"
+
+    # 2. 板块冰冻与高位接力崩溃拦截 (阻止在大盘/接力崩溃时去高位挨打)
+    is_leader = bool(ctx.get("is_leader", False))
+    if sector_heat < 20.0 and not is_leader and pct_diff < 0.5:
+        return True, "⚠️[诱多拦截] 所属板块处于冰冻期且非板块龙头"
+    if sector_heat < 25.0 and ma60 > 0 and price >= ma60 * 1.30 and not is_leader:
+        return True, "⚠️[高位接力崩溃] 市场接力冰冻，高位股无人接力，严禁追高挨打"
+
+    # 3. 盘中长上影冲高回落派发（冲高 > 3.5% 但快速拉回超过高点拉升值的 60%）
+    if high > 0 and price > 0 and high >= price * 1.035:
+        open_p = float(ctx.get("open", price))
+        base_p = max(open_p, price * 0.96)
+        if (high - price) > (high - base_p) * 0.60 and dff <= 0.5:
+            return True, "⚠️[诱多拦截] 盘中冲高长上影派发，多头动能背离"
+
+    # 4. 严重量价背离（拉升无量或分时 VWAP 均价死叉）
+    price_above_vwap = bool(ctx.get("price_above_vwap", True))
+    if pct_diff > 3.0 and dff < -0.5 and not price_above_vwap:
+        return True, "⚠️[诱多拦截] 动量拉升但资金DFF净流出(量价背离)"
+
+    return False, ""
 
 
 def _num(signal: StrategySignal, key: str, default: float = 0.0) -> float:
+
     try:
         return float(signal.features.get(key, default))
     except Exception:
@@ -44,16 +94,16 @@ class SuperTrendMA5Branch(BaseStrategyBranch):
     
     @classmethod
     def match(cls, signal: StrategySignal, state: str, ctx: dict) -> bool:
-        ma5_val = ctx["ma5d"]
-        ma5_prev5_val = ctx["ma5d_prev5"]
-        upper = ctx["upper"]
+        ma5_val = float(ctx.get("ma5d", 0.0))
+        ma5_prev5_val = float(ctx.get("ma5d_prev5", 0.0))
+        upper = float(ctx.get("upper", 0.0))
         
         # 👑 引入极其核心的筹码回整排他逻辑：如果已经进入了深幅筹码回调整固期 (is_consolidation_stage)，则绝对不能判定为超级主升浪！
         is_consolidation = bool(ctx.get("is_consolidation_stage", False))
         
-        # 1. 5日线呈现极其陡峭的主升攀升趋势（陡峭度 >= 1.4%，或者是 5 天均线陡升 >= 1.2% 且价格正在挑战上轨）
+        # 1. 5日线呈现极其陡峭的主升攀升趋势（陡峭度 >= 1.4%，或者是 5 天均线陡升 >= 1.2% 且价格正在挑战上轨或突破）
         is_ma5_steep = (ma5_prev5_val > 0.0 and ma5_val >= ma5_prev5_val * 1.014)
-        is_breakout_upper = (upper > 0 and ctx["price"] >= upper * 0.985)
+        is_breakout_upper = (upper > 0 and ctx["price"] >= upper * 0.985) or bool(ctx.get("breakout", False))
         
         is_dynamic_super = (is_ma5_steep or is_breakout_upper) and not is_consolidation
         
@@ -78,30 +128,39 @@ class SuperTrendMA5Branch(BaseStrategyBranch):
         
         if state in {"FLAT", "ARMED"}:
             # 超级主升浪沿 MA5 强趋势爬升企稳低吸与防踏空策略 (MA5_SUPER_TREND)
-            low_price = ctx["low_price"]
-            ma5_val = ctx["ma5d"]
-            ma10_val = ctx["ma10d"] if ctx["ma10d"] > 0.0 else ctx["sws"]
+            low_price = float(ctx.get("low_price", ctx.get("price", 0.0)))
+            ma5_val = float(ctx.get("ma5d", 0.0))
+            ma10_val = float(ctx.get("ma10d", 0.0)) if float(ctx.get("ma10d", 0.0)) > 0.0 else float(ctx.get("sws", 0.0))
             
-            is_ma5_pullback = (low_price > 0.0 and ma5_val > 0.0 and low_price <= ma5_val * 1.015) and (ctx["price"] >= ma5_val * 0.99)
-            is_breakout_upper = (ctx["upper"] > 0 and ctx["price"] >= ctx["upper"] * 0.985)
-            is_vol_ok = (ctx["vol_val"] > 0.0 and ctx["vol_val"] < ctx["vol_ma5_val"] * 1.2)
-            is_trend_ok = (ma5_val > ma10_val) or (ctx["swl"] > ctx["sws"])
+            is_ma5_pullback = (low_price > 0.0 and ma5_val > 0.0 and low_price <= ma5_val * 1.015) and (float(ctx.get("price", 0.0)) >= ma5_val * 0.99)
+            is_breakout_upper = (float(ctx.get("upper", 0.0)) > 0 and float(ctx.get("price", 0.0)) >= float(ctx.get("upper", 0.0)) * 0.985) or bool(ctx.get("breakout", False))
             
-            if is_trend_ok and is_vol_ok and (is_ma5_pullback or is_breakout_upper) and (ctx["is_doji"] or ctx["vol_shrink_3d"] or ctx["price"] >= ma5_val * 1.02):
+            # 放量突破点要求量比放量(>=1.15或DFF>0.5)；回踩低吸点要求成交量受控不异常暴挫
+            vol_val = float(ctx.get("vol_val", 1.0))
+            vol_ma5_val = float(ctx.get("vol_ma5_val", 1.0))
+            if is_breakout_upper:
+                is_vol_ok = (ctx.get("vol_ratio", 1.0) >= 1.15) or (ctx.get("dff", 0.0) >= 0.5)
+            else:
+                is_vol_ok = (vol_val > 0.0 and (vol_val <= vol_ma5_val * 1.5 or vol_ma5_val <= 0)) or (ctx.get("vol_ratio", 1.0) >= 1.0)
+
+            swl_val = float(ctx.get("swl", 0.0))
+            sws_val = float(ctx.get("sws", 0.0))
+            is_trend_ok = (ma5_val > ma10_val) or (swl_val > sws_val) or (ctx.get("priority", 0) >= 75)
+            
+            is_doji = bool(ctx.get("is_doji", False))
+            vol_shrink_3d = bool(ctx.get("vol_shrink_3d", False))
+            
+            if is_breakout_upper or (is_trend_ok and is_vol_ok and is_ma5_pullback):
                 action = "BUY"
-                size_pct = 0.30
-                regime = "SWING_LOW_BUY"
-                setup = "MA5_SUPER_TREND"
-                confidence = 0.88
-                suggest_price = ctx["price"]
+                size_pct = 0.35
+                regime = "BREAKOUT_ALLOWED" if is_breakout_upper else "SWING_LOW_BUY"
+                setup = "MA5_BREAKOUT_BUY" if is_breakout_upper else "MA5_SUPER_TREND"
+                confidence = 0.90
+                suggest_price = float(ctx.get("price", 0.0))
                 
-            if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
-                action = "BUY"
-                is_consolidation = bool(ctx.get("is_consolidation_stage", False))
-                if is_consolidation:
-                    size_pct = 0.20
-                else:
-                    size_pct = 0.40 if ctx["is_reentry"] else 0.30
+            # 废除无目的盲从降级买入，必须经由严苛牛股挖掘引擎校验
+            if action == "HOLD":
+                pass
                 
         elif state == "IN_TRADE":
             # 止盈：向上强力突破通道天花板或大平台顶
@@ -170,11 +229,11 @@ class SuperTrendMA5Branch(BaseStrategyBranch):
                 ma5_slope = (ctx["ma5d"] - ctx["ma5d_prev5"]) / 5.0 if ctx["ma5d_prev5"] > 0.0 else 0.0
                 ma5_next_predict = round(ctx["ma5d"] + ma5_slope, 3)
                 suggest_price = ma5_next_predict
-            elif is_time_failsafe:
+            elif (ctx.get("ma5d", 0.0) > 0 and ctx["price"] < ctx["ma5d"] * 0.985) or (ctx.get("pct_diff", 0.0) < -5.0):
                 action = "SELL"
                 size_pct = 1.00
-                regime = "TIME_FAILSAFE"
-                setup = "T+2_EXPECTATION_FAIL"
+                regime = "VOLUME_BREAKDOWN"
+                setup = "MA5_BREAKDOWN_STOP"
                 confidence = 0.95
             elif ctx["pnl_pct"] < -3.0 and ctx["vol_ratio"] >= 1.4:
                 action = "SELL"
@@ -364,9 +423,9 @@ class SwsPullbackBranch(BaseStrategyBranch):
                         confidence = 0.90
                         suggest_price = ctx["price"]
                         
-            if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
-                action = "BUY"
-                size_pct = 0.40 if ctx["is_reentry"] else 0.30
+            # 废除无目的盲从降级买入
+            if action == "HOLD":
+                pass
                 
         elif state == "IN_TRADE":
             is_breakout_tp = (ctx["pbreak"] == 1 or (ctx["ptop"] > 0 and ctx["price"] >= ctx["ptop"] * 1.01)) and ctx["pnl_pct"] >= 5.0 and ctx["vol_ratio"] >= 1.4
@@ -470,9 +529,9 @@ class TrendMA60Branch(BaseStrategyBranch):
                 confidence = 0.85
                 suggest_price = price
 
-            if action == "HOLD" and confidence >= 0.55 and regime == "BREAKOUT_ALLOWED":
-                action = "BUY"
-                size_pct = 0.40 if ctx["is_reentry"] else 0.30
+            # 废除无目的盲从降级买入
+            if action == "HOLD":
+                pass
 
         elif state == "IN_TRADE":
             # 如果跌破大周期生命支撑线 2.0%，强制无条件物理清仓
@@ -680,11 +739,9 @@ class StrategyRouter:
                 return TrendMA60Branch
         
         # 3. 常规空仓或 Fallback 特征动态匹配
-        # [FIX #3] 如果是回踩低吸/均线支撑信号，跳过防御分支——
-        # 防御分支(OscillatingBreakdown)会在 SWS 短期下倾时产生 HOLD，
-        # 会将放行的 PULLBACK_BUY 信号在决策层全部拦截，导致中途低吸开仓失效。
-        is_pullback_signal = str(signal.signal_type).upper() in {"PULLBACK_BUY", "VWAP_SUPPORT"}
-        if not is_pullback_signal and OscillatingBreakdownBranch.match(signal, state, ctx):
+        # [FIX #3] 如果是回踩低吸/突破买入信号，跳过防御分支
+        is_buy_signal = any(x in str(signal.signal_type).upper() for x in ["PULLBACK", "VWAP", "BREAKOUT", "SUPER", "BUY"])
+        if not is_buy_signal and OscillatingBreakdownBranch.match(signal, state, ctx):
             return OscillatingBreakdownBranch
             
         if SuperTrendMA5Branch.match(signal, state, ctx):
@@ -697,6 +754,87 @@ class StrategyRouter:
             return SwsPullbackBranch
 
         return TrendMA60Branch
+
+
+def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: dict) -> None:
+    """
+    自动向全系统信号总线(SignalBus)及报警中心(AlertCenter)推送高价值提示
+    """
+    print(f"🔍 [SignalBus Trace] Code={signal.code} | Action={getattr(intent, 'action', '')} | Setup={getattr(getattr(intent, 'reason', None), 'setup', '')}")
+    try:
+        from signal_bus import publish_standard_signal, SignalBus
+        from signal_standard import StandardSignal
+        from datetime import datetime
+
+        now_str = datetime.now().strftime("%H:%M:%S")
+        action = getattr(intent, "action", "HOLD")
+        reason_obj = getattr(intent, "reason", None)
+        if isinstance(reason_obj, str):
+            setup = reason_obj
+        else:
+            setup = getattr(reason_obj, "setup", "") if reason_obj else ""
+
+        confidence = float(getattr(intent, "confidence", 0.8))
+        score = float(ctx.get("mining_score", confidence * 100.0))
+        code = signal.code
+        name = signal.name
+        price = signal.price
+
+        if action == "BUY":
+            sig_obj = StandardSignal(
+                code=code,
+                name=name,
+                type=SignalBus.EVENT_TRADE,
+                subtype="buy",
+                price=price,
+                timestamp=now_str,
+                score=score / 100.0,
+                detail=f"🚀[牛股爆发] {name}({code}) 触发牛股深度挖掘起爆! 得分:{score:.1f} | 理由:{setup}",
+                grade="S" if score >= 90.0 else "A",
+                source="DeepStockMiningEngine",
+                is_high_priority=True,
+                metadata={"action": "BUY", "mining_score": score, "setup": setup}
+            )
+            publish_standard_signal(sig_obj)
+
+        elif action == "SELL":
+            is_escape = "VWAP_ESCAPE" in setup or "BREAKDOWN" in setup
+            detail_msg = f"🎯[分时逃荒] {name}({code}) 跌破VWAP/破位! 触发急逃平仓! 理由:{setup}" if is_escape else f"🎯[止盈离场] {name}({code}) 锁定收益平仓! 理由:{setup}"
+            sig_obj = StandardSignal(
+                code=code,
+                name=name,
+                type=SignalBus.EVENT_RISK if is_escape else SignalBus.EVENT_TRADE,
+                subtype="sell",
+                price=price,
+                timestamp=now_str,
+                score=0.95,
+                detail=detail_msg,
+                grade="S" if is_escape else "A",
+                source="DecisionEngine",
+                is_high_priority=True,
+                metadata={"action": "SELL", "setup": setup}
+            )
+            publish_standard_signal(sig_obj)
+
+        elif action == "ADD":
+            sig_obj = StandardSignal(
+                code=code,
+                name=name,
+                type=SignalBus.EVENT_TRADE,
+                subtype="add",
+                price=price,
+                timestamp=now_str,
+                score=0.88,
+                detail=f"🔥[二次加仓] {name}({code}) 异动回踩VWAP支撑不破,二次放量加仓! 理由:{setup}",
+                grade="A",
+                source="DecisionEngine",
+                is_high_priority=True,
+                metadata={"action": "ADD", "setup": setup}
+            )
+            publish_standard_signal(sig_obj)
+
+    except Exception as e:
+        logger.debug(f"SignalBus alert publish skip: {e}")
 
 
 def decide(signal: StrategySignal, state: str) -> DecisionIntent:
@@ -844,7 +982,8 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         ma5d = swl if swl > 0.0 else price
 
     # 组装完整的上下文参数字典
-    ctx = {
+    ctx = dict(signal.features)
+    ctx.update({
         "priority": priority,
         "sector_heat": sector_heat,
         "pct_diff": pct_diff,
@@ -884,11 +1023,64 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         "tp_triggered": bool(signal.features.get("tp_triggered", False)),
         "ma60d": ma60d,
         "ma60d_prev5": ma60d_prev5
-    }
+    })
 
     # ── 5. 自动寻找策略路由并激活对应分支决策 ──
     active_branch = StrategyRouter.route(signal, state, ctx)
     action, size_pct, regime, setup, confidence, suggest_price = active_branch.decide(signal, state, ctx)
+
+    # ── 5.5 💎 核心牛股深度挖掘、诱多陷阱一票否决与策略自进化熔断机制 ──
+    if action in {"BUY", "ADD"} and state in {"FLAT", "ARMED"}:
+        # 1. 诱多陷阱一票否决校验 (Trap Detection Veto)
+        is_trap, trap_reason = evaluate_trap_veto(ctx)
+        if is_trap:
+            logger.info(f"🚫 [DecisionEngine] 拦截诱多买入: {signal.code} ({signal.name}) | 原因: {trap_reason}")
+            action = "HOLD"
+            size_pct = 0.0
+            setup = "TRAP_VETO_REJECT"
+            regime = "WATCH_ONLY"
+            confidence = 0.10
+
+        # 2. 深度牛股挖掘评估 (Deep Stock Mining Engine Validation)
+        if action in {"BUY", "ADD"}:
+            is_mined_target, mining_score, mining_details = DeepStockMiningEngine.evaluate_stock_mining(ctx)
+            if not is_mined_target:
+                logger.info(
+                    f"🛡️ [DecisionEngine] 拦截未达挖掘门槛标的: {signal.code} ({signal.name}) | "
+                    f"挖掘得分: {mining_score:.1f}/78.0 | 维持观望，避免无目的瞎买"
+                )
+                action = "HOLD"
+                size_pct = 0.0
+                setup = "NON_MINED_IGNORE"
+                regime = "WATCH_ONLY"
+                confidence = 0.10
+            else:
+                # 挖掘成功，给予高置信度与动态权重，并标记资金强平指示
+                confidence = min(0.95, round(max(confidence, mining_score / 100.0), 4))
+                setup = f"MINED_{setup}"
+                if mining_score >= 85.0:
+                    logger.info(f"💡 [资金释放提示] 捕获到90+顶级牛股({signal.code})! 触发持仓烂仓/弱势仓位开盘第一秒强砍解封!")
+
+        # 3. 策略胜率自适应熔断黑名单校验 (Strategy Self Evolution Blacklist)
+        if action in {"BUY", "ADD"}:
+            is_blacklisted, bl_reason = _self_evolution_engine.is_strategy_blacklisted(setup)
+            if is_blacklisted:
+                logger.warning(f"⛔ [DecisionEngine] 策略自动熔断拦截: {signal.code} ({signal.name}) | 原因: {bl_reason}")
+                action = "HOLD"
+                size_pct = 0.0
+                setup = "STRATEGY_BLACKLISTED"
+                regime = "WATCH_ONLY"
+                confidence = 0.10
+            else:
+                # 成功通过所有精细化挖掘与风控筛选，录入自进化追溯数据表
+                _self_evolution_engine.record_signal(
+                    timestamp=signal.ts,
+                    code=signal.code,
+                    name=signal.name,
+                    setup=setup,
+                    entry_price=suggest_price,
+                    mining_score=mining_score if 'mining_score' in locals() else 80.0
+                )
 
     if action == "SELL":
         logger.info(
@@ -986,5 +1178,11 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     )
     object.__setattr__(intent, "is_reentry_signal", is_reentry)
     object.__setattr__(intent, "suggest_price", suggest_price)
+
+    # 4. 自动向全系统 SignalBus 管道与报警中心推送实时通知
+    _publish_mining_and_trade_alerts(signal, intent, ctx)
+
+    return intent
+
     return intent
 
