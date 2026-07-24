@@ -22,6 +22,149 @@ class PandasQueryEngine:
         self.logger = logger
 
     @staticmethod
+    def _parse_placeholder_items(content: str) -> Optional[list[str]]:
+        """解析占位符内容: 支持范围 {1-5}, {1..5}, 步长 {1-10:2}, 倒序 {5-1}, 列表 {5,10,20}"""
+        content = content.strip()
+        if not content: return None
+        
+        # 1. 范围与步长匹配: {start-end} 或 {start-end:step} 或 {start..end} 或 {start~end}
+        m_range = re.match(r'^(-?\d+)\s*(?:[\-~]|\.\.)\s*(-?\d+)(?:\s*[:]\s*(-?\d+))?$', content)
+        if m_range:
+            start = int(m_range.group(1))
+            end = int(m_range.group(2))
+            step_group = m_range.group(3)
+            step = int(step_group) if step_group else (1 if start <= end else -1)
+            if step == 0: step = 1
+            if start <= end:
+                if step < 0: step = abs(step)
+                nums = list(range(start, end + 1, step))
+            else:
+                if step > 0: step = -step
+                nums = list(range(start, end - 1, step))
+            return [str(x) for x in nums]
+        
+        # 2. 列表匹配: {val1,val2,val3}
+        if ',' in content:
+            items = [x.strip() for x in content.split(',') if x.strip()]
+            if items: return items
+            
+        return None
+
+    @classmethod
+    def _expand_logical_blocks(cls, query_str: str) -> str:
+        """解析并优先展开嵌套的 {or: ...} 与 {and: ...} 显式逻辑块"""
+        if not query_str or '{' not in query_str: return query_str
+
+        pattern_start = re.compile(r'\{\s*(or|and)\s*:', re.IGNORECASE)
+        res_str = query_str
+        
+        while True:
+            match = pattern_start.search(res_str)
+            if not match: break
+                
+            start_idx = match.start()
+            op = match.group(1).lower()
+            colon_idx = match.end()
+            
+            # 向后进行 {} 大括号深度平衡扫描
+            depth = 1
+            end_idx = -1
+            for i in range(start_idx + 1, len(res_str)):
+                char = res_str[i]
+                if char == '{': depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+            
+            if end_idx == -1: break
+                
+            inner_content = res_str[colon_idx:end_idx].strip()
+            expanded_inner = cls._expand_simple_placeholders(inner_content, default_op=op)
+            res_str = res_str[:start_idx] + expanded_inner + res_str[end_idx+1:]
+            
+        return res_str
+
+    @classmethod
+    def _expand_simple_placeholders(cls, clause: str, default_op: str = 'and') -> str:
+        """对单个条件片段中的简单 {} 占位符进行自适应展开与组合"""
+        clause_str = clause.strip()
+        if not clause_str or '{' not in clause_str: return clause
+        
+        op = default_op
+        m_op = re.match(r'^\{\s*(or|and)\s*:\s*(.*?)\s*\}$', clause_str, re.IGNORECASE)
+        if m_op:
+            op = m_op.group(1).lower()
+            clause_str = m_op.group(2).strip()
+
+        pattern = r'\{([^{}]+)\}'
+        matches = list(re.finditer(pattern, clause_str))
+        if not matches: return clause
+
+        parsed_placeholders = []
+        for m in matches:
+            p_text = m.group(1)
+            items = cls._parse_placeholder_items(p_text)
+            if items is not None:
+                parsed_placeholders.append((m.start(), m.end(), items))
+            else:
+                return clause
+
+        if not parsed_placeholders: return clause
+
+        item_lists = [p[2] for p in parsed_placeholders]
+        lengths = [len(l) for l in item_lists]
+        max_len = max(lengths)
+        
+        if all(l == max_len or l == 1 for l in lengths):
+            count = max_len
+            combined_series = []
+            for i in range(count):
+                cur_vals = [l[i if len(l) == count else 0] for l in item_lists]
+                combined_series.append(cur_vals)
+        else:
+            import itertools
+            combined_series = list(itertools.product(*item_lists))
+
+        expanded_clauses = []
+        for combination in combined_series:
+            temp_clause = clause_str
+            for (start, end, _), val in zip(reversed(parsed_placeholders), reversed(combination)):
+                temp_clause = temp_clause[:start] + str(val) + temp_clause[end:]
+            expanded_clauses.append(temp_clause)
+
+        if not expanded_clauses: return clause
+        if len(expanded_clauses) == 1: return expanded_clauses[0]
+
+        join_str = f" {op} "
+        return f"({join_str.join(expanded_clauses)})"
+
+    def _expand_special_syntax(self, query_str: str) -> str:
+        """自适应展开表达式中的重复与区间语法，例如: lastp{1-5}d > ma60{1-5}d 与 {or: per{1-3}d > 3.0}"""
+        if not query_str or '{' not in query_str: return query_str
+        
+        # 1. 优先解构并替换所有 {or: ...} / {and: ...} 逻辑块
+        expanded_blocks = self._expand_logical_blocks(query_str)
+        if '{' not in expanded_blocks: return expanded_blocks
+
+        # 2. 对剩余按逻辑分隔符(and, or, 括号)拆分后的 token 块提取包含 {} 的子句并独立展开
+        tokens = re.split(r'(\b(?:and|or)\b|[\(\)\#\n])', expanded_blocks, flags=re.IGNORECASE)
+        new_tokens = []
+        for i, token in enumerate(tokens):
+            if '{' in token and '}' in token:
+                expanded = self._expand_simple_placeholders(token)
+                if expanded.startswith('(') and new_tokens and not new_tokens[-1].endswith(' ') and not new_tokens[-1].endswith('('):
+                    expanded = ' ' + expanded
+                if expanded.endswith(')') and i + 1 < len(tokens) and not tokens[i+1].startswith(' ') and not tokens[i+1].startswith(')'):
+                    expanded = expanded + ' '
+                new_tokens.append(expanded)
+            else:
+                new_tokens.append(token)
+        return "".join(new_tokens)
+
+
+    @staticmethod
     def split_sub_conditions(expr: str) -> list[str]:
         if not expr: return []
         def _get_top_level_parts(s: str, delimiters: list[str]) -> list[str]:
@@ -142,9 +285,13 @@ class PandasQueryEngine:
         return ctx
 
     def _preprocess_query(self, query_str: str) -> str:
-        """精准预处理：解构隐式字符串连接的同时，保护函数内部合法的引号"""
+        """精准预处理：解构隐式字符串连接的同时，保护函数内部合法的引号，并自动展开自适应重复语法"""
         raw_input = query_str.strip()
         if not raw_input: return ""
+
+        # Step 0: 自动展开自适应重复与区间语法 (例如: lastp{1-5}d > ma60{1-5}d)
+        if '{' in raw_input and '}' in raw_input:
+            raw_input = self._expand_special_syntax(raw_input)
 
         # Step 1: 逐行扫描与智能脱敏
         processed_lines = []

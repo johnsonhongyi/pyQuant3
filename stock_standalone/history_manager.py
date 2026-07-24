@@ -66,8 +66,12 @@ class QueryHistoryManager:
         self._history_changed = False  # 追踪本次打开期间是否有过修改
         
         # [NEW] 状态展示变量，与主程序保持一致
-        self.status_var = tk.StringVar(value="准备就绪")
-        self.status_var2 = tk.StringVar(value="")
+        if self.root:
+            self.status_var = tk.StringVar(master=self.root, value="准备就绪")
+            self.status_var2 = tk.StringVar(master=self.root, value="")
+        else:
+            self.status_var = None
+            self.status_var2 = None
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback

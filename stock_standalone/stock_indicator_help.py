@@ -155,6 +155,24 @@ class IndicatorHelpWindow:
             ("fib / fibl", "主升连贯性", "计算逻辑：((high > high.shift(1)*0.998) | (close > close.shift(1))).sum()\n衡量自近期低点以来股价维持强势运作的连贯次数。"),
             ("op", "区间累计涨幅", "((close / base_price) * 100 - 100)。相对于 30 天内最低价格的累计涨跌幅百分比。"),
             ("alert_info", "【系统】🔔 实时报警标注", "逻辑说明：\n当前个股在本会话中触发了实盘报警（语音播报或日志预警）。\n其背景将变为深紫色 (#4B0082)，名称前缀增加 🔔，便于在全系统中快速定位与追踪。"),
+            ("QUERY: 重复/区间自适应展开", "【高级简洁语法】支持 {1-5} 区间与列表展开",
+             "【使用说明与详细示例】\n"
+             "针对连续多日对比或多指标重复公式，支持使用 {} 自适应展开简洁写法：\n\n"
+             "1. 区间同步展开 (Range Sync):\n"
+             "   写法: SWL > SWS and ma20d > ma60d and lastp{1-5}d > ma60{1-5}d\n"
+             "   展开为: SWL > SWS and ma20d > ma60d and (lastp1d > ma601d and lastp2d > ma602d and lastp3d > ma603d and lastp4d > ma604d and lastp5d > ma605d)\n\n"
+             "2. 固定右端区间展开:\n"
+             "   写法: lastp{1-5}d > ma60d\n"
+             "   展开为: (lastp1d > ma60d and lastp2d > ma60d and lastp3d > ma60d and lastp4d > ma60d and lastp5d > ma60d)\n\n"
+             "3. 列表多列展开 (List Expansion):\n"
+             "   写法: close > ma{5,10,20}d\n"
+             "   展开为: (close > ma5d and close > ma10d and close > ma20d)\n\n"
+             "4. 步长与倒序 (Step & Reverse):\n"
+             "   写法: lastp{1-5:2}d > 10.0\n"
+             "   展开为: (lastp1d > 10.0 and lastp3d > 10.0 and lastp5d > 10.0)\n\n"
+             "5. OR 关系与括号嵌套组合 (OR Prefix & Nested Groups):\n"
+             "   写法: (SWL > SWS and ma20d > ma60d and lastp{1-5}d > ma60{1-5}d and {or: per{1-3}d > 3.0}) and (close > 0)\n"
+             "   展开为: (SWL > SWS and ma20d > ma60d and (lastp1d > ma601d and lastp2d > ma602d and lastp3d > ma603d and lastp4d > ma604d and lastp5d > ma605d) and (per1d > 3.0 or per2d > 3.0 or per3d > 3.0)) and (close > 0)\n"),
         ]
 
         # [NEW] 绑定退出事件以保存位置
@@ -181,17 +199,41 @@ class IndicatorHelpWindow:
             self.show_detail(match[0], match[1], detail_text)
 
     def show_detail(self, title, summary, detail):
-        """弹出详细说明小窗口"""
+        """弹出详细说明小窗口（支持位置与尺寸持久化，Esc 仅关闭自身）"""
         detail_win = tk.Toplevel(self.window)
         detail_win.title(f"详情: {title}")
-        detail_win.geometry("500x400")
-        detail_win.attributes('-topmost', True)
         
-        # 居中显示
-        detail_win.update_idletasks()
-        x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (detail_win.winfo_width() // 2)
-        y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (detail_win.winfo_height() // 2)
-        detail_win.geometry(f"+{x}+{y}")
+        # 恢复持久化位置与尺寸
+        if hasattr(self.parent, 'load_window_position'):
+            self.parent.load_window_position(detail_win, "indicator_help_detail", default_width=580, default_height=450)
+        else:
+            try:
+                from gui_utils import load_window_position_simple
+                load_window_position_simple(detail_win, "indicator_help_detail", default_width=580, default_height=450)
+            except Exception:
+                detail_win.geometry("580x450")
+                detail_win.update_idletasks()
+                x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (detail_win.winfo_width() // 2)
+                y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (detail_win.winfo_height() // 2)
+                detail_win.geometry(f"+{x}+{y}")
+
+        detail_win.attributes('-topmost', True)
+
+        def close_detail(event=None):
+            """关闭详情窗口并保存坐标，阻止 Esc 事件向上传播"""
+            if hasattr(self.parent, 'save_window_position'):
+                self.parent.save_window_position(detail_win, "indicator_help_detail")
+            else:
+                try:
+                    from gui_utils import save_window_position_simple
+                    save_window_position_simple(detail_win, "indicator_help_detail")
+                except Exception:
+                    pass
+            detail_win.destroy()
+            return "break"
+
+        detail_win.protocol("WM_DELETE_WINDOW", close_detail)
+        detail_win.bind("<Escape>", close_detail)
 
         # 内容区域
         main_frame = ttk.Frame(detail_win, padding=15)
@@ -206,7 +248,7 @@ class IndicatorHelpWindow:
         text_area.configure(state='disabled') # 只读
         text_area.pack(fill='both', expand=True)
 
-        ttk.Button(main_frame, text="关闭", command=detail_win.destroy).pack(pady=10)
+        ttk.Button(main_frame, text="关闭", command=close_detail).pack(pady=10)
 
     def on_close(self):
         """关闭窗口并保存位置"""

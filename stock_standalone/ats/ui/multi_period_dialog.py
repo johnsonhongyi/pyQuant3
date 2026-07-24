@@ -639,23 +639,26 @@ class MultiPeriodStrategyEditorDialog(QDialog):
             widgets['status_lbl'].setStyleSheet("color: red;")
             return False
 
-        # Load period mock dataframe schema validation
-        df_p = self.engine._period_dfs.get(period)
-        if df_p is None or df_p.empty:
-            # Load mock layout to validate columns
-            try:
-                self.engine.load_period_data(period, None)
-                df_p = self.engine._period_dfs.get(period)
-            except Exception:
-                pass
+        if hasattr(self.engine, 'validate_condition'):
+            success, msg = self.engine.validate_condition(expr, period)
+            if success:
+                widgets['status_lbl'].setText("✅ 语法正确")
+                widgets['status_lbl'].setStyleSheet("color: #4caf50;")
+                widgets['status_lbl'].setToolTip(msg)
+                return True
+            else:
+                widgets['status_lbl'].setText("❌ 语法错误")
+                widgets['status_lbl'].setStyleSheet("color: #f44336;")
+                widgets['status_lbl'].setToolTip(msg)
+                return False
 
-        if df_p is None or df_p.empty:
-            widgets['status_lbl'].setText("⚠️ 无法载入周期数据验证")
-            widgets['status_lbl'].setStyleSheet("color: #ff9100;")
-            return True
-
+        # Fallback if engine has no validate_condition
         try:
-            df_p.query(expr)
+            from query_engine_util import query_engine
+            if query_engine:
+                query_engine.execute(df_p, expr)
+            else:
+                df_p.query(expr)
             widgets['status_lbl'].setText("✅ 语法正确")
             widgets['status_lbl'].setStyleSheet("color: #4caf50;")
             return True
@@ -860,12 +863,19 @@ class QueryHistoryDialog(QDialog):
             else:
                 conv_query = expr
 
+            from query_engine_util import query_engine
             try:
-                m_df = df.query(conv_query)
+                if query_engine:
+                    m_df = query_engine.execute(df, conv_query)
+                else:
+                    m_df = df.query(conv_query)
                 return str(len(m_df))
             except Exception:
                 try:
-                    m_df = df.query(expr)
+                    if query_engine:
+                        m_df = query_engine.execute(df, expr)
+                    else:
+                        m_df = df.query(expr)
                     return str(len(m_df))
                 except Exception:
                     return "Err"
@@ -2598,6 +2608,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         return flat_df
 
     def _suffix_query(self, expr, period_suffix):
+        if not expr:
+            return ""
+        from query_engine_util import query_engine
+        if query_engine:
+            expr = query_engine._preprocess_query(expr)
+
         cols_set = set()
         df_p = self.engine._period_dfs.get(period_suffix)
         if df_p is not None and not df_p.empty:
@@ -2620,13 +2636,20 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         
         converted_query = self._suffix_query(query_expr, target_period)
         
+        from query_engine_util import query_engine
         try:
-            filtered_df = df.query(converted_query)
+            if query_engine:
+                filtered_df = query_engine.execute(df, converted_query)
+            else:
+                filtered_df = df.query(converted_query)
             self._history_filter_error = None
             return filtered_df
         except Exception as e1:
             try:
-                filtered_df = df.query(query_expr)
+                if query_engine:
+                    filtered_df = query_engine.execute(df, query_expr)
+                else:
+                    filtered_df = df.query(query_expr)
                 self._history_filter_error = None
                 return filtered_df
             except Exception as e2:
