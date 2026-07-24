@@ -1,3 +1,8 @@
+## 2026-07-24 23:35
+- [x] **升级多周期策略引擎与全列高级查询支持 (Upgraded Multi-Period Strategy Engine & Comprehensive Col Query Support)**：
+    - [x] **实现 `PandasQueryEngine` 全列动态别名与多级历史字段映射 (`query_engine_util.py`)**：在 `_prepare_context` 中完美扩展并集成 `1-9` 级历史指标的映射通道（包括 `macd1d`..`macd6d` <-> `macdlast1`..`macdlast6`、`dif` / `dif1d`..`dif6d` <-> `macddif` / `macddif1`..`macddif6`、`dea` / `dea1d`..`dea6d` <-> `macddea` / `macddea1`..`macddea6`，对于 7-9 级超界自动平滑降级兼容 `6` 级；`k` / `d` / `j` <-> `kdj_k` / `kdj_d` / `kdj_j`；`upper1d`..`upper9d` <-> `upper1`..`upper9`；`lastv1d`..`lastv9d` / `lvol`；`per1d`..`per9d` / `perc1d` 等），全方位保障了 `lastv{1-9}d`、`ma20{1-9}d`、`ma60{1-9}d`、`macd{1-9}d`、`upper{1-9}d` 等所有列在真实股票数据（如 688796 包含的 6 阶 MACD 历史）中的极速自适应解析与评估。
+    - [x] **升级多周期预置策略模板库与语法校验管道 (`multi_period_strategy_engine.py`)**：重构并新增了 7 套高胜率多周期高级策略预置模板（覆盖均线多级展开共振 `ma20{1-9}d` / `ma60{1-9}d`、成交量连续推升 `lastv{1-9}d`、BOLL与均线通道突破 `upper{1-9}d`、多周期 MACD/KDJ 金叉 `dif > dea` 和 `k > d` 等），并在 `validate_condition` 中注入完整的 Dummy 列全集，实现秒级语法校验与自适应增量保存。
+
 ## 2026-07-23 23:58
 - [x] **在路由设置弹窗中集成 GUI 磁吸窗口关键字可视化编辑工具 (GUI Magnetic Keyword Manager in Route Dialog)**：
     - [x] **重构 `RouteConfigDialog` 为高级配置双 Tab 对话框**：将原有静态路由设置弹窗升级为双 Tab 结构（`🌐 静态路由` 与 `🧲 磁吸窗口关键字`），提供极具科技感与实用性的图形化管理界面。
