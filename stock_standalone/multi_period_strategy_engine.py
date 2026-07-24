@@ -210,15 +210,55 @@ class MultiPeriodStrategyEngine:
             except Exception as e:
                 logger.error(f"Failed to load strategies config: {e}")
                 
-        # 预置模板列表
+        # 预置高级多周期策略模板列表
         presets = [
             {
                 "id": "tpl_strong_pullback_rebound",
-                "name": "强势结构回踩反包启动",
+                "name": "强势结构回踩反包与放量启动",
                 "conditions": {
-                    "2d": {"filter": "strong_structure_score > 60", "weight": 1.5, "enabled": True},
+                    "2d": {"filter": "strong_structure_score > 60 and {or: lastv{1-2}d > lastv{2-3}d}", "weight": 1.5, "enabled": True},
                     "3d": {"filter": "strong_structure_score > 55", "weight": 1.2, "enabled": True},
-                    "d": {"filter": "strong_structure_score > 65", "weight": 1.0, "enabled": True}
+                    "d": {"filter": "strong_structure_score > 65 and close > ma5d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_ma_resonance_advanced",
+                "name": "多周期均线共振多头 [MA20/MA60多级展开]",
+                "conditions": {
+                    "m": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "ma5d > ma10d and ma20{1-2}d > ma60{1-2}d and close > ma5d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "ma5d > ma10d and ma10d > ma20d and ma20{1-3}d > ma60{1-3}d and close > ma201d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_volume_ma_breakout",
+                "name": "成交量推升+MA60突破 [lastv+MA列]",
+                "conditions": {
+                    "w": {"filter": "close > ma60d and lastv1d > lastv2d", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "close > ma201d and {or: lastv{1-2}d > 1.2 * lastv{2-3}d}", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "close > ma60d and lastv1d > lastv2d and close > lastp1d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_boll_ma_resonance",
+                "name": "BOLL与均线共振突破 [upper+MA列]",
+                "conditions": {
+                    "45d": {"filter": "close > upper1 or close > hmax", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "close > upper1 and ma201d > ma601d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "close > lastp1d and (close > upper or close > upper1)", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_macd_kdj_resonance",
+                "name": "多周期MACD与KDJ低位金叉/共振",
+                "conditions": {
+                    "w": {"filter": "dif > dea and {or: macd{1-3}d > 0}", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "dif > dea and k > d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "dif > dea and k > d and j > 0", "weight": 1.0, "enabled": True}
                 },
                 "cross_mode": "intersection"
             },
@@ -229,16 +269,6 @@ class MultiPeriodStrategyEngine:
                     "m": {"filter": "close > ma10d and close > lastp1d", "weight": 1.5, "enabled": True},
                     "w": {"filter": "close > lastp1d and lastp1d > lastp2d and close > ma5d", "weight": 1.2, "enabled": True},
                     "d": {"filter": "close > ma10d", "weight": 1.0, "enabled": True}
-                },
-                "cross_mode": "intersection"
-            },
-            {
-                "id": "tpl_ma_resonance",
-                "name": "均线共振多头",
-                "conditions": {
-                    "m": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.5, "enabled": True},
-                    "w": {"filter": "ma5d > ma10d and close > ma5d", "weight": 1.2, "enabled": True},
-                    "d": {"filter": "ma5d > ma10d and ma10d > ma20d and close > ma5d", "weight": 1.0, "enabled": True}
                 },
                 "cross_mode": "intersection"
             },
@@ -259,11 +289,12 @@ class MultiPeriodStrategyEngine:
             self._strategies = presets
             write_needed = True
         else:
-            # 如果加载了文件，检查是否缺少强势结构模板，缺少时自动增量合入
-            has_strong_tpl = any(s.get('id') == 'tpl_strong_pullback_rebound' for s in self._strategies)
-            if not has_strong_tpl:
-                # 插入到最前面
-                self._strategies.insert(0, presets[0])
+            # 自动增量检查并补齐缺失的高级模板
+            existing_ids = {s.get('id') for s in self._strategies if isinstance(s, dict)}
+            new_templates = [p for p in presets if p['id'] not in existing_ids]
+            if new_templates:
+                for tpl in reversed(new_templates):
+                    self._strategies.insert(0, tpl)
                 write_needed = True
 
         if write_needed:
@@ -306,11 +337,17 @@ class MultiPeriodStrategyEngine:
         else:
             # 2. 否则，构造一个包含常用字段的 Dummy DataFrame 进行语法验证
             dummy_cols = [
-                'open', 'close', 'high', 'low', 'volume', 'percent', 'ratio',
+                'open', 'close', 'high', 'low', 'volume', 'percent', 'ratio', 'lvol',
                 'ma5d', 'ma10d', 'ma20d', 'ma30d', 'ma60d', 'ma120d', 'ma250d',
                 'lastp1d', 'lastp2d', 'lastp3d', 'lasth1d', 'lasth2d', 'lasth3d',
-                'upper', 'lower', 'upper1', 'lower1', 'hmax', 'hmin',
-                'ptop', 'pbottom', 'pbreak', 'pdays', 'Rank', 'dff', 'dff2', 'dff3'
+                'lastv1d', 'lastv2d', 'lastv3d', 'lastv4d', 'lastv5d', 'lastv6d', 'lastv7d', 'lastv8d', 'lastv9d',
+                'macd', 'macd1d', 'macd2d', 'macdlast1', 'macdlast2', 'macdlast3', 'macdlast4', 'macdlast5', 'macdlast6',
+                'dif', 'dif1d', 'macddif', 'macddif1', 'macddif2', 'macddif3', 'macddif4', 'macddif5', 'macddif6',
+                'dea', 'dea1d', 'macddea', 'macddea1', 'macddea2', 'macddea3', 'macddea4', 'macddea5', 'macddea6',
+                'k', 'k1d', 'd', 'd1d', 'j', 'j1d', 'kdj_k', 'kdj_d', 'kdj_j', 'rsi',
+                'upper', 'lower', 'upper1', 'lower1', 'upper2', 'lower2', 'upper3', 'lower3',
+                'ma201d', 'ma202d', 'ma601d', 'ma602d', 'ma603d', 'ma604d', 'ma605d', 'per1d', 'per2d', 'per3d', 'per4d', 'per5d',
+                'hmax', 'hmin', 'ptop', 'pbottom', 'pbreak', 'pdays', 'Rank', 'SWL', 'SWS', 'dff', 'dff2', 'dff3'
             ]
             data = {col: [1.0, 2.0] for col in dummy_cols}
             df = pd.DataFrame(data, index=['000001', '000002'])

@@ -242,13 +242,52 @@ class PandasQueryEngine:
             'max': self._greatest, 'min': self._least, 'abs': np.abs
         }
         col_map = {
-            'lastp0d': ['close', 'trade', 'now', 'lastp0d'], 'lastp1d': ['lastp1d', 'lastp'], 'lastp2d': ['lastp2d'],
-            'close': ['close', 'trade', 'now', 'lastp0d'], 'now': ['now', 'trade', 'close', 'lastp0d'],
-            'percent': ['percent', 'pct', 'per1d'], 'pct': ['pct', 'percent', 'per1d'],
+            'lastp0d': ['close', 'trade', 'now', 'lastp', 'lastp0d'],
+            'lastp1d': ['lastp1d', 'lastp'], 'lastp2d': ['lastp2d'],
+            'close': ['close', 'trade', 'now', 'lastp', 'lastp0d'],
+            'now': ['now', 'trade', 'close', 'lastp0d'],
+            'percent': ['perd', 'per1d', 'perc1d', 'percent', 'pct'],
+            'pct': ['perd', 'per1d', 'perc1d', 'pct', 'percent'],
+            'lastv0d': ['lvol', 'vol', 'volume', 'lastv0d'],
+            'lastv1d': ['lastv1d', 'lastv', 'lvol'], 'lastv2d': ['lastv2d'],
+            'upper0d': ['upper', 'upper0d'], 'upper1d': ['upper1', 'upper1d'], 'upper2d': ['upper2', 'upper2d'],
+            'lower0d': ['lower', 'lower0d'], 'lower1d': ['lower1', 'lower1d'], 'lower2d': ['lower2', 'lower2d'],
+            'macd0d': ['macd', 'macd0d'], 'dif0d': ['macddif', 'dif', 'dif0d'], 'dea0d': ['macddea', 'dea', 'dea0d'],
+            'macd': ['macd', 'macdlast1'],
+            'dif': ['macddif', 'dif'], 'dea': ['macddea', 'dea'],
+            'k': ['kdj_k', 'k'], 'd': ['kdj_d', 'd'], 'j': ['kdj_j', 'j'],
+            'k0d': ['kdj_k', 'k'], 'd0d': ['kdj_d', 'd'], 'j0d': ['kdj_j', 'j'],
+            'ma50d': ['ma5d', 'ma5'], 'ma100d': ['ma10d', 'ma10'], 'ma200d': ['ma20d', 'ma20'],
+            'ma300d': ['ma30d', 'ma30'], 'ma600d': ['ma60d', 'ma60'], 'ma1200d': ['ma120d', 'ma120'], 'ma2500d': ['ma250d', 'ma250'],
             'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
             'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
             'green': ['gren', 'green'], 'red': ['red']
         }
+        for i in range(1, 10):
+            last_macd_idx = min(i, 6)
+            col_map[f'macd{i}d'] = [f'macdlast{i}', f'macd{i}d', f'macd{i}', f'macdlast{last_macd_idx}']
+            col_map[f'macd{i}'] = [f'macdlast{i}', f'macd{i}d', f'macd{i}', f'macdlast{last_macd_idx}']
+            col_map[f'dif{i}d'] = [f'macddif{i}', f'dif{i}d', f'dif{i}', f'macddif{last_macd_idx}']
+            col_map[f'dif{i}'] = [f'macddif{i}', f'dif{i}d', f'dif{i}', f'macddif{last_macd_idx}']
+            col_map[f'dea{i}d'] = [f'macddea{i}', f'dea{i}d', f'dea{i}', f'macddea{last_macd_idx}']
+            col_map[f'dea{i}'] = [f'macddea{i}', f'dea{i}d', f'dea{i}', f'macddea{last_macd_idx}']
+            col_map[f'upper{i}d'] = [f'upper{i}', f'upper{i}d']
+            col_map[f'upper{i}'] = [f'upper{i}', f'upper{i}d']
+            col_map[f'lower{i}d'] = [f'lower{i}', f'lower{i}d']
+            col_map[f'lower{i}'] = [f'lower{i}', f'lower{i}d']
+            col_map[f'per{i}d'] = [f'per{i}d', f'perc{i}d', f'percent{i}d']
+            col_map[f'perc{i}d'] = [f'perc{i}d', f'per{i}d', f'percent{i}d']
+            col_map[f'ma5{i}d'] = [f'ma5{i}d', 'ma51d', 'ma5d']
+            col_map[f'ma10{i}d'] = [f'ma10{i}d', 'ma101d', 'ma10d']
+            col_map[f'ma20{i}d'] = [f'ma20{i}d', 'ma201d', 'ma20d']
+            col_map[f'ma60{i}d'] = [f'ma60{i}d', 'ma601d', 'ma60d']
+            col_map[f'ma120{i}d'] = [f'ma120{i}d', 'ma1201d', 'ma120d']
+            col_map[f'ma250{i}d'] = [f'ma250{i}d', 'ma2501d', 'ma250d']
+            col_map[f'lastv{i}d'] = [f'lastv{i}d', 'lastv1d', 'lvol', 'vol', 'volume']
+            col_map[f'lastp{i}d'] = [f'lastp{i}d', 'lastp1d', 'close']
+            col_map[f'lasth{i}d'] = [f'lasth{i}d', 'lasth1d', 'high']
+            col_map[f'lastl{i}d'] = [f'lastl{i}d', 'lastl1d', 'low']
+            col_map[f'lasto{i}d'] = [f'lasto{i}d', 'lasto1d', 'open']
         is_multi = isinstance(df.columns, pd.MultiIndex)
         if is_multi:
             for (period, metric) in df.columns:
