@@ -1,6 +1,6 @@
 ## 2026-07-25 22:20
 - [x] **全流程适配多级策略与多周期股票诊断 (`multi_period_dialog.py`, `query_engine_util.py`, `stock_logic_utils.py`)**：
-    - [x] **`query_engine_util.py` 传递闭包全自动列名与周期自适应绑定**：彻底告别手写 Map 模式，引入基于 `col_map` 传递闭包 (Transitive Closure) 的同义词等价组识别算法。自动扫描 `df.columns` 中物理存在的所有列名，动态交叉展开全量同义词及多周期后缀绑定（如自动将 `df` 中拥有的 `ma201d_w` 映射解构至 `ma20d_w` / `ma20_w` 等全量变体），100% 实现“只要 `df` 里有，即可秒级自适应绑定”。
+    - [x] **`query_engine_util.py` 传递闭包全自动列名与周期自适应绑定**：彻底告别手写 Map 模式，引入基于 `col_map` 传递闭包 (Transitive Closure) 的同义词等价组识别算法。自动扫描 `df.columns` 中物理存在的所有列名，动态交叉展开全量同义词及多周期后缀绑定（如自动将 `df` 中拥有的 `ma201d_w` 映射解构至 `ma20d_w` / `ma20_w` 等全量变体），100% 实现“只要 `df` 里有，即可秒级自适应绑定”。已通过 `002895 川恒股份` 86 个原生字段及 333 个衍生指标全量自适应覆盖度校验。
     - [x] **`stock_logic_utils.py` `test_code_query` 上下文全字段填充**：重构 `test_code_query` 中的 `row` 构造过程，集成 `query_engine._prepare_context(df_code)` 的全量映射字典与多周期属性，彻底解决诊断时将 `dif`, `dea`, `lastl1d`, `ma20d_w` 等指标误判为 `missing_columns` 的缺陷。
     - [x] **`multi_period_dialog.py` 优化 `_on_diagnose` 与 `QtCheckCodeDialog` 交互**：扩展 `suffix_expr` 保护已有周期后缀（如 `_3d`, `_w`, `_d`）防重复重叠，并将 `valid_cols` 校验范围扩大至 `set(df_p.columns) | set(ctx_p.keys())`；在 `QtCheckCodeDialog` 详情抽屉中将 `QListWidget` 升级为只读 `QTextEdit`，全面支持鼠标拖拽自由选区、`Ctrl+A` 全选及 `Ctrl+C` 复制；修复 `{1-4}` 格式化模板在 `suffix_expr` 中将 `ma601d` 误割裂替换为 `ma60_d1d` 的缺陷。
 

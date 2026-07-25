@@ -257,8 +257,8 @@ class PandasQueryEngine:
             'macd0d': ['macd', 'macd0d'], 'dif0d': ['macddif', 'dif', 'dif0d'], 'dea0d': ['macddea', 'dea', 'dea0d'],
             'macd': ['macd', 'macdlast1'],
             'dif': ['macddif', 'dif'], 'dea': ['macddea', 'dea'],
-            'k': ['kdj_k', 'k'], 'd': ['kdj_d', 'd'], 'j': ['kdj_j', 'j'],
-            'k0d': ['kdj_k', 'k'], 'd0d': ['kdj_d', 'd'], 'j0d': ['kdj_j', 'j'],
+            'k': ['kdj_k', 'k', 'k0d'], 'd': ['kdj_d', 'd', 'd0d'], 'j': ['kdj_j', 'j', 'j0d'],
+            'k0d': ['kdj_k', 'k', 'k0d'], 'd0d': ['kdj_d', 'd', 'd0d'], 'j0d': ['kdj_j', 'j', 'j0d'],
             'ma5d': ['ma5d', 'ma5', 'ma50d'], 'ma5': ['ma5d', 'ma5', 'ma50d'],
             'ma10d': ['ma10d', 'ma10', 'ma100d'], 'ma10': ['ma10d', 'ma10', 'ma100d'],
             'ma20d': ['ma20d', 'ma20', 'ma200d'], 'ma20': ['ma20d', 'ma20', 'ma200d'],
@@ -336,11 +336,12 @@ class PandasQueryEngine:
                 if not isinstance(col, str): continue
                 period_suf = ""
                 base_m = col
-                for p in supported_periods:
-                    if col.endswith(f"_{p}"):
-                        period_suf = f"_{p}"
-                        base_m = col[:-len(p)-1]
-                        break
+                if col not in metric_to_group:
+                    for p in supported_periods:
+                        if col.endswith(f"_{p}"):
+                            period_suf = f"_{p}"
+                            base_m = col[:-len(p)-1]
+                            break
                 
                 equiv_group = metric_to_group.get(base_m, {base_m})
                 for eq in equiv_group:
