@@ -399,20 +399,48 @@ def check_code(
         details_win.lift()
         details_win.focus_force()
         row_dict = df.loc[code].to_dict()
+        from query_engine_util import query_engine
+        ctx = query_engine._prepare_context(df)
+        full_row_dict = dict(row_dict)
+        for k, v in ctx.items():
+            if k in ('df', 'pd', 'np', 'result', 'signal') or callable(v):
+                continue
+            if isinstance(v, pd.Series) and code in v.index:
+                val = v.loc[code]
+                full_row_dict[k] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+
         # 提取查询中涉及的列以便高亮或优先显示
         used_cols = set()
         for r in report:
             if 'expr' in r:
                 used_cols.update(extract_columns(r['expr']))
+
+        total_queries = len(report) if report else 0
+        pass_queries = sum(1 for r in report if r.get('ok')) if total_queries > 0 else 0
+        pass_ratio = (pass_queries / total_queries * 100) if total_queries > 0 else 0.0
+        all_ok = (pass_queries == total_queries) if total_queries > 0 else False
+        total_fields_cnt = len(df.columns)
+
         lines = []
+        lines.append("==================================================")
+        lines.append("📊 诊断与字段统计摘要")
+        lines.append("--------------------------------------------------")
+        lines.append(f"  • 检查股票: {code} {name}")
+        lines.append(f"  • 综合结果: {'✅ 全部通过' if all_ok else '❌ 未能完全通过'}")
+        lines.append(f"  • 条件通过率: {pass_queries} / {total_queries} ({pass_ratio:.1f}%)")
+        lines.append(f"  • 查询涉及关键字段: {len(used_cols)} 个")
+        lines.append(f"  • 全量数据字段总数: {total_fields_cnt} 个")
+        lines.append("==================================================")
+        lines.append("")
+
         if used_cols:
             lines.append(">>> 查询涉及的关键字段:")
             for c in sorted(list(used_cols)):
-                lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
+                lines.append(f"  {c}: {full_row_dict.get(c, 'N/A')}")
             lines.append("-" * 40)
         lines.append(">>> 所有字段列表 (DataFrame 顺序):")
         for c in df.columns:
-            lines.append(f"{c}: {row_dict.get(c, 'N/A')}")
+            lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
         detail_text = "\n".join(lines)
         dst = scrolledtext.ScrolledText(details_win, wrap=tk.WORD)
         dst.pack(fill="both", expand=True, padx=10, pady=10)
