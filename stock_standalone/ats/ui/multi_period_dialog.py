@@ -667,31 +667,54 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         if hasattr(self.engine, 'validate_condition'):
             success, msg = self.engine.validate_condition(expr, period)
             if success:
-                # 🎯 尝试计算实际命中数据 Hit Count
+                # 🎯 自动加载/求解实际命中数据 Hit Count
                 hit_cnt = None
                 try:
                     df_p = None
+                    # 1. 尝试从引擎已有的周期缓存中提取
                     if hasattr(self.engine, "_period_dfs") and period in self.engine._period_dfs:
                         df_p = self.engine._period_dfs[period]
-                    elif hasattr(self, "parent") and self.parent is not None and hasattr(self.parent, "top_now") and self.parent.top_now is not None:
-                        if period == 'd':
-                            df_p = self.parent.top_now
 
+                    # 2. 获取基准 top_now 数据（主窗口缓存 > 全局数据）
+                    top_now = None
+                    if hasattr(self, "parent") and self.parent is not None and getattr(self.parent, "top_now", None) is not None:
+                        top_now = self.parent.top_now
+
+                    # 3. 若当前周期 DataFrame 尚未加载，自动触发 load_period_data 动态装载
+                    if (df_p is None or df_p.empty) and hasattr(self.engine, "load_period_data"):
+                        if top_now is None or top_now.empty:
+                            try:
+                                from JSONData import sina_data
+                                _sina = sina_data.Sina(readonly=True)
+                                top_now = _sina.all
+                            except Exception as ex:
+                                logger.debug(f"Sina fallback failed: {ex}")
+                        if top_now is not None and not top_now.empty:
+                            df_p = self.engine.load_period_data(period, top_now)
+
+                    if (df_p is None or df_p.empty) and period == 'd' and top_now is not None and not top_now.empty:
+                        df_p = top_now
+
+                    # 4. 执行 query_engine.execute 高级花括号宏与全Col过滤求值
                     if df_p is not None and not df_p.empty:
                         from query_engine_util import query_engine
-                        matched = query_engine.query(df_p, expr) if query_engine else df_p.query(expr)
+                        df_clean = df_p.fillna(0)
+                        if query_engine:
+                            matched = query_engine.execute(df_clean, expr)
+                        else:
+                            matched = df_clean.query(expr)
                         hit_cnt = len(matched) if matched is not None else 0
                 except Exception as ex:
-                    logger.debug(f"Hit calculation error for {period}: {ex}")
+                    logger.warning(f"Hit calculation error for {period}: {ex}")
 
                 if hit_cnt is not None:
-                    widgets['status_lbl'].setText(f"✅ 语法正确 (🎯 Hit: {hit_cnt})")
+                    widgets['status_lbl'].setText(f"✅ 语法正确 (🎯{hit_cnt})")
                     widgets['status_lbl'].setStyleSheet("color: #4caf50; font-weight: bold;")
                     widgets['status_lbl'].setToolTip(f"{msg}\n\n🎯 命中测试: 当前【{period}】周期筛选出 {hit_cnt} 只股票")
                 else:
                     widgets['status_lbl'].setText("✅ 语法正确")
                     widgets['status_lbl'].setStyleSheet("color: #4caf50;")
-                    widgets['status_lbl'].setToolTip(msg)
+                    widgets['status_lbl'].setToolTip(f"{msg}\n\n(提示: 正在准备基础行情数据)")
                 return True, hit_cnt
             else:
                 widgets['status_lbl'].setText("❌ 语法错误")
@@ -3086,11 +3109,24 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         # Build merged row flat DF
         merged_row = {"name": name}
 
+        known_period_suffixes = tuple(f"_{p}" for p in ['d', '2d', '3d', 'w', 'm', '45d', '3M'])
+        from query_engine_util import query_engine
+        from stock_logic_utils import extract_columns, RESERVED_SQL_FUNCS
+
+        def norm_col(w):
+            return re.sub(r'([a-zA-Z]+)(\d*)_(\d+[a-zA-Z]*)', r'\1\2\3', w)
+
         def suffix_expr(expr, period_suffix, cols_set):
             def repl(match):
                 word = match.group(0)
-                if word in cols_set:
-                    return f"{word}_{period_suffix}"
+                if word in RESERVED_SQL_FUNCS or word in {"and", "or", "not", "True", "False"}:
+                    return word
+                if any(word.endswith(suf) for suf in known_period_suffixes):
+                    return word
+                n_word = norm_col(word)
+                if word in cols_set or n_word in cols_set:
+                    target_w = word if word in cols_set else n_word
+                    return f"{target_w}_{period_suffix}"
                 return word
             return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', repl, expr)
 
@@ -3098,14 +3134,23 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         for period in active_periods:
             df_p = self.engine._period_dfs.get(period)
             if df_p is not None and not df_p.empty:
-                valid_cols = set(df_p.columns)
+                ctx_p = query_engine._prepare_context(df_p)
+                valid_cols = set(df_p.columns) | set(ctx_p.keys())
                 if code in df_p.index:
-                    row_p = df_p.loc[code]
-                    if isinstance(row_p, pd.DataFrame):
-                        row_p = row_p.iloc[0]
-                    for k, val in row_p.to_dict().items():
-                        if k not in ('code', 'name'):
-                            merged_row[f"{k}_{period}"] = val
+                    row_p_df = df_p.loc[[code]]
+                    ctx_row = query_engine._prepare_context(row_p_df)
+                    for k, val in ctx_row.items():
+                        if k in ('df', 'pd', 'np', 'result', 'signal') or callable(val):
+                            continue
+                        if isinstance(val, pd.Series):
+                            v = val.iloc[-1] if not val.empty else None
+                        else:
+                            v = val
+                        if v is not None:
+                            v_clean = v.item() if hasattr(v, 'item') and not isinstance(v, (str, bytes)) else v
+                            merged_row[f"{k}_{period}"] = v_clean
+                            if period == 'd':
+                                merged_row[k] = v_clean
                 
                 cond = strat_config['conditions'].get(period)
                 if cond:
@@ -4014,8 +4059,10 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         filter_layout.addWidget(self.filter_edit)
         right_layout.addLayout(filter_layout)
         
-        self.details_list = QListWidget(self)
-        right_layout.addWidget(self.details_list)
+        self.details_text = QTextEdit(self)
+        self.details_text.setReadOnly(True)
+        self.details_text.setFont(QFont("Consolas", 10))
+        right_layout.addWidget(self.details_text)
         
         self.splitter.addWidget(self.right_widget)
         self.right_widget.hide()
@@ -4083,6 +4130,16 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         self.raw_fields_lines = []
         try:
             row_dict = self.df.loc[self.code].to_dict()
+            from query_engine_util import query_engine
+            ctx = query_engine._prepare_context(self.df)
+            full_row_dict = dict(row_dict)
+            for k, v in ctx.items():
+                if k in ('df', 'pd', 'np', 'result', 'signal') or callable(v):
+                    continue
+                if isinstance(v, pd.Series) and self.code in v.index:
+                    val = v.loc[self.code]
+                    full_row_dict[k] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+
             used_cols = set()
             from stock_logic_utils import extract_columns
             for r in self.report_data:
@@ -4092,7 +4149,7 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             if used_cols:
                 self.raw_fields_lines.append(">>> 查询涉及的关键字段:")
                 for c in sorted(list(used_cols)):
-                    self.raw_fields_lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
+                    self.raw_fields_lines.append(f"  {c}: {full_row_dict.get(c, 'N/A')}")
                 self.raw_fields_lines.append("-" * 40)
                 
             self.raw_fields_lines.append(">>> 所有字段列表:")
@@ -4104,9 +4161,7 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         self._render_fields(self.raw_fields_lines)
         
     def _render_fields(self, lines):
-        self.details_list.clear()
-        for line in lines:
-            self.details_list.addItem(line)
+        self.details_text.setPlainText("\n".join(lines))
             
     def _on_filter_changed(self, text):
         query = text.lower().strip()

@@ -259,8 +259,13 @@ class PandasQueryEngine:
             'dif': ['macddif', 'dif'], 'dea': ['macddea', 'dea'],
             'k': ['kdj_k', 'k'], 'd': ['kdj_d', 'd'], 'j': ['kdj_j', 'j'],
             'k0d': ['kdj_k', 'k'], 'd0d': ['kdj_d', 'd'], 'j0d': ['kdj_j', 'j'],
-            'ma50d': ['ma5d', 'ma5'], 'ma100d': ['ma10d', 'ma10'], 'ma200d': ['ma20d', 'ma20'],
-            'ma300d': ['ma30d', 'ma30'], 'ma600d': ['ma60d', 'ma60'], 'ma1200d': ['ma120d', 'ma120'], 'ma2500d': ['ma250d', 'ma250'],
+            'ma5d': ['ma5d', 'ma5', 'ma50d'], 'ma5': ['ma5d', 'ma5', 'ma50d'],
+            'ma10d': ['ma10d', 'ma10', 'ma100d'], 'ma10': ['ma10d', 'ma10', 'ma100d'],
+            'ma20d': ['ma20d', 'ma20', 'ma200d'], 'ma20': ['ma20d', 'ma20', 'ma200d'],
+            'ma30d': ['ma30d', 'ma30', 'ma300d'], 'ma30': ['ma30d', 'ma30', 'ma300d'],
+            'ma60d': ['ma60d', 'ma60', 'ma600d'], 'ma60': ['ma60d', 'ma60', 'ma600d'],
+            'ma120d': ['ma120d', 'ma120', 'ma1200d'], 'ma120': ['ma120d', 'ma120', 'ma1200d'],
+            'ma250d': ['ma250d', 'ma250', 'ma2500d'], 'ma250': ['ma250d', 'ma250', 'ma2500d'],
             'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
             'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
             'green': ['gren', 'green'], 'red': ['red']
@@ -279,36 +284,75 @@ class PandasQueryEngine:
             col_map[f'lower{i}'] = [f'lower{i}', f'lower{i}d']
             col_map[f'per{i}d'] = [f'per{i}d', f'perc{i}d', f'percent{i}d']
             col_map[f'perc{i}d'] = [f'perc{i}d', f'per{i}d', f'percent{i}d']
-            col_map[f'ma5{i}d'] = [f'ma5{i}d', 'ma51d', 'ma5d']
-            col_map[f'ma10{i}d'] = [f'ma10{i}d', 'ma101d', 'ma10d']
-            col_map[f'ma20{i}d'] = [f'ma20{i}d', 'ma201d', 'ma20d']
-            col_map[f'ma60{i}d'] = [f'ma60{i}d', 'ma601d', 'ma60d']
-            col_map[f'ma120{i}d'] = [f'ma120{i}d', 'ma1201d', 'ma120d']
-            col_map[f'ma250{i}d'] = [f'ma250{i}d', 'ma2501d', 'ma250d']
+            col_map[f'ma5{i}d'] = [f'ma5{i}d', f'ma5_{i}d', f'ma5_d{i}d', 'ma51d', 'ma5d']
+            col_map[f'ma10{i}d'] = [f'ma10{i}d', f'ma10_{i}d', f'ma10_d{i}d', 'ma101d', 'ma10d']
+            col_map[f'ma20{i}d'] = [f'ma20{i}d', f'ma20_{i}d', f'ma20_d{i}d', 'ma201d', 'ma20d']
+            col_map[f'ma60{i}d'] = [f'ma60{i}d', f'ma60_{i}d', f'ma60_d{i}d', 'ma601d', 'ma60d']
+            col_map[f'ma120{i}d'] = [f'ma120{i}d', f'ma120_{i}d', f'ma120_d{i}d', 'ma1201d', 'ma120d']
+            col_map[f'ma250{i}d'] = [f'ma250{i}d', f'ma250_{i}d', f'ma250_d{i}d', 'ma2501d', 'ma250d']
+            col_map[f'ma60_{i}d'] = [f'ma60{i}d', f'ma60_{i}d', f'ma60_d{i}d', 'ma601d', 'ma60d']
+            col_map[f'ma60_d{i}d'] = [f'ma60{i}d', f'ma60_{i}d', f'ma60_d{i}d', 'ma601d', 'ma60d']
             col_map[f'lastv{i}d'] = [f'lastv{i}d', 'lastv1d', 'lvol', 'vol', 'volume']
             col_map[f'lastp{i}d'] = [f'lastp{i}d', 'lastp1d', 'close']
             col_map[f'lasth{i}d'] = [f'lasth{i}d', 'lasth1d', 'high']
             col_map[f'lastl{i}d'] = [f'lastl{i}d', 'lastl1d', 'low']
             col_map[f'lasto{i}d'] = [f'lasto{i}d', 'lasto1d', 'open']
+        # 构建全量指标同义词等价组 (Transitive Closure of Metric Synonyms)
+        alias_groups = []
+        for alias, targets in col_map.items():
+            t_list = [targets] if isinstance(targets, str) else targets
+            group = {alias} | set(t_list)
+            merged = False
+            for existing in alias_groups:
+                if existing & group:
+                    existing.update(group)
+                    merged = True
+                    break
+            if not merged:
+                alias_groups.append(group)
+        metric_to_group = {}
+        for g in alias_groups:
+            for m in g:
+                metric_to_group[m] = g
+
+        supported_periods = ('d', '2d', '3d', 'w', 'm', '45d', '3M')
         is_multi = isinstance(df.columns, pd.MultiIndex)
+
+        # 1. 优先物理列与 MultiIndex 直接挂载
         if is_multi:
             for (period, metric) in df.columns:
-                alias = f"{period}_{metric}"
-                if alias not in ctx: ctx[alias] = df[(period, metric)]
-        for alias, targets in col_map.items():
-            if not is_multi and alias in df.columns and (alias not in ctx or ctx[alias] is None):
-                ctx[alias] = df[alias]
-                continue
-            for target in ([targets] if isinstance(targets, str) else targets):
-                if is_multi:
-                    found = False
-                    for period in df.columns.levels[0]:
-                        if (period, target) in df.columns:
-                            ctx[alias] = df[(period, target)]
-                            found = True; break
-                    if found: break
-                else:
-                    if target in df.columns: ctx[alias] = df[target]; break
+                alias1 = f"{period}_{metric}"
+                alias2 = f"{metric}_{period}"
+                if alias1 not in ctx: ctx[alias1] = df[(period, metric)]
+                if alias2 not in ctx: ctx[alias2] = df[(period, metric)]
+        else:
+            for col in df.columns:
+                if isinstance(col, str) and col not in ctx:
+                    ctx[col] = df[col]
+
+        # 2. 基于 df.columns 中真实拥有的所有列名，自适应交叉展开同义词及多周期后缀
+        if not is_multi:
+            for col in list(df.columns):
+                if not isinstance(col, str): continue
+                period_suf = ""
+                base_m = col
+                for p in supported_periods:
+                    if col.endswith(f"_{p}"):
+                        period_suf = f"_{p}"
+                        base_m = col[:-len(p)-1]
+                        break
+                
+                equiv_group = metric_to_group.get(base_m, {base_m})
+                for eq in equiv_group:
+                    if period_suf:
+                        eq_with_suf = f"{eq}{period_suf}"
+                        if eq_with_suf not in ctx or ctx[eq_with_suf] is None:
+                            ctx[eq_with_suf] = df[col]
+                        if period_suf == "_d" and (eq not in ctx or ctx[eq] is None):
+                            ctx[eq] = df[col]
+                    else:
+                        if eq not in ctx or ctx[eq] is None:
+                            ctx[eq] = df[col]
 
         # 动态标记补齐
         if 'green' not in ctx or ctx.get('green') is None:

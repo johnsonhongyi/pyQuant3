@@ -171,7 +171,28 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
     if df_code.empty:
         return [{"error": "df_code is empty"}]
 
-    row = df_code.iloc[-1].to_dict()
+    ctx = query_engine._prepare_context(df_code)
+    row = {}
+    for k, v in ctx.items():
+        if isinstance(v, pd.Series):
+            if not v.empty:
+                val = v.iloc[-1]
+                row[k] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+        elif isinstance(v, pd.DataFrame):
+            if not v.empty:
+                val = v.iloc[-1, 0]
+                row[k] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+        else:
+            row[k] = v
+
+    for col in df_code.columns:
+        val = df_code[col].iloc[-1]
+        val_clean = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+        row[str(col)] = val_clean
+        if isinstance(col, tuple):
+            row[f"{col[0]}_{col[1]}"] = val_clean
+            row[f"{col[1]}_{col[0]}"] = val_clean
+
     if isinstance(queries, str):
         queries = [{"expr": queries}]
     for que in queries:
