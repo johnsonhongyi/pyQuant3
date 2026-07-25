@@ -4146,13 +4146,31 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
                 if 'expr' in r:
                     used_cols.update(extract_columns(r['expr']))
             
+            # 计算统计数据
+            total_queries = len(self.report_data) if hasattr(self, 'report_data') and self.report_data else 0
+            pass_queries = sum(1 for r in self.report_data if r.get('ok')) if total_queries > 0 else 0
+            pass_ratio = (pass_queries / total_queries * 100) if total_queries > 0 else 0.0
+            all_ok = (pass_queries == total_queries) if total_queries > 0 else False
+            total_fields_cnt = len(self.df.columns)
+
+            self.raw_fields_lines.append("==================================================")
+            self.raw_fields_lines.append("📊 诊断与字段统计摘要")
+            self.raw_fields_lines.append("--------------------------------------------------")
+            self.raw_fields_lines.append(f"  • 检查股票: {self.code} {self.name}")
+            self.raw_fields_lines.append(f"  • 综合结果: {'✅ 全部通过' if all_ok else '❌ 未能完全通过'}")
+            self.raw_fields_lines.append(f"  • 条件通过率: {pass_queries} / {total_queries} ({pass_ratio:.1f}%)")
+            self.raw_fields_lines.append(f"  • 查询涉及关键字段: {len(used_cols)} 个")
+            self.raw_fields_lines.append(f"  • 全量数据字段总数: {total_fields_cnt} 个")
+            self.raw_fields_lines.append("==================================================")
+            self.raw_fields_lines.append("")
+
             if used_cols:
                 self.raw_fields_lines.append(">>> 查询涉及的关键字段:")
                 for c in sorted(list(used_cols)):
                     self.raw_fields_lines.append(f"  {c}: {full_row_dict.get(c, 'N/A')}")
                 self.raw_fields_lines.append("-" * 40)
                 
-            self.raw_fields_lines.append(">>> 所有字段列表:")
+            self.raw_fields_lines.append(">>> 所有字段列表 (DataFrame 顺序):")
             for c in self.df.columns:
                 self.raw_fields_lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
         except Exception as e:
