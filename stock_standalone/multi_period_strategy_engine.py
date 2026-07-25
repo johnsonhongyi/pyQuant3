@@ -213,6 +213,55 @@ class MultiPeriodStrategyEngine:
         # 预置高级多周期策略模板列表
         presets = [
             {
+                "id": "tpl_macro_trend_ma60_rebound_launch",
+                "name": "★ 大周期启动+回踩MA60d企稳次日加速 [日科化学模式]",
+                "conditions": {
+                    "w": {"filter": "dif > 0 or dif > dea or close > ma20d", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "close > ma201d or dif > dea", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "{or: lastl{1-4}d <= 1.06 * ma60{1-4}d and lastl{1-4}d >= 0.94 * ma60{1-4}d} and percent > 2.5 and close > open and (lastv0d > 1.3 * lastv1d or volume > 1.3 * lastv1d) and close > lastp1d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_bottom_oversold_wash_breakout",
+                "name": "★ 底部超跌洗盘+缩量企稳+放量拉升 [反转启动]",
+                "conditions": {
+                    "w": {"filter": "close > lower1 or dif > dea or close > ma5d", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "close > ma5d and (dif > dea or macd > macdlast1) and close < 1.3 * ma60d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "percent > 1.5 and close > open and close > ma5d and (lastv0d > 1.3 * lastv1d or volume > 1.3 * lastv1d) and (lastv1d < lastv2d or lastv2d < lastv3d) and close < 1.25 * ma20d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_trend_ma20_ma60_pullback_launch",
+                "name": "★ 趋势股MA20/MA60整固+低开高走启动 [趋势启动]",
+                "conditions": {
+                    "w": {"filter": "close > ma20d and (dif > dea or ma5d > ma10d)", "weight": 1.5, "enabled": True},
+                    "3d": {"filter": "close > ma201d and close > lastp1d and ma20{1-2}d >= ma60{1-2}d", "weight": 1.2, "enabled": True},
+                    "d": {"filter": "ma20d >= ma60d and close >= 0.98 * ma20d and percent > 1.0 and close > open and (lastv0d > 1.2 * lastv1d or volume > lastv1d) and lastv1d <= 1.15 * lastv2d and percent < 7.5", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_multi_day_vol_shrink_rebound",
+                "name": "9日多级地量洗盘+低位爆发放量 [全Col多级低吸]",
+                "conditions": {
+                    "3d": {"filter": "close > ma10d", "weight": 1.2, "enabled": True},
+                    "2d": {"filter": "close > ma5d and (dif > dea or k > d)", "weight": 1.1, "enabled": True},
+                    "d": {"filter": "{or: lastv{1-3}d < 0.65 * lastv{4-7}d} and lastv0d > 1.35 * lastv1d and percent > 2.0 and close > open and close > ma5d and close < 1.2 * ma20d", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
+                "id": "tpl_ma_step_resonance_launch",
+                "name": "MA20/MA60多级阶梯整固+主力起跳 [多级均线启动]",
+                "conditions": {
+                    "w": {"filter": "close > ma5d and close > ma20d and dif > dea", "weight": 1.5, "enabled": True},
+                    "d": {"filter": "ma20{1-2}d > ma60{1-2}d and {and: abs(per{1-3}d) < 3.5} and lastv0d > 1.4 * lastv1d and percent > 1.8 and close > open and close > lastp1d and percent < 8.0", "weight": 1.0, "enabled": True}
+                },
+                "cross_mode": "intersection"
+            },
+            {
                 "id": "tpl_strong_pullback_rebound",
                 "name": "强势结构回踩反包与放量启动",
                 "conditions": {
