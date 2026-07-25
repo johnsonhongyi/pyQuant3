@@ -1,3 +1,38 @@
+## 2026-07-25 17:36
+- [x] **实现多周期策略 Hit 命中测试能力与编辑器分周期 Hit 命中数据同步高亮 (`multi_period_dialog.py`)**：
+    - [x] **主面板策略右侧集成 `🎯 Hit: N只` 胶囊显示框 (`lbl_hit_status`)**：在策略下拉框右侧成功接入 Hit 命中计数看板。显示当前策略筛选出的最终符合股票总数（如 `🎯 Hit: 24只`），且支持鼠标悬停弹出分周期 Hit 衰减列表，点击胶囊框可即时快速触发策略 Hit 命中测试。
+    - [x] **策略编辑器“验证”功能升级分周期 Hit 命中测试 (`_validate_single` & `_validate_all`)**：点击编辑器中的“🔍 验证”按钮时，系统在校验语法正确性的同时，会基于实时/样本行情数据自动求值过滤，在状态栏直接高亮呈现 `✅ 语法正确 (🎯 Hit: 158)`，并在悬停提示中显示详细命中条数；“🔍 验证全部条件”可自动生成全周期 Hit 命中分布列表弹窗。
+
+## 2026-07-25 17:25
+- [x] **优化多周期策略面板自适应宽度与编辑器 Splitter 拖拽持久化 (`multi_period_dialog.py`)**：
+    - [x] **策略下拉框动态自适应弹性拉伸**：废除主窗口顶部工具栏 `strategy_combo` 固定 200px 宽度限制。修改为 `QSizePolicy.Policy.Expanding` 配合最小宽度 280px，当窗口最大化或横向拉宽时策略下拉框可自适应延伸展示包含 `[2026-07-25]` 日期后缀在内的完整策略全名；同时补充悬停 ToolTip，提升可读性。
+    - [x] **策略编辑器 Splitter 分隔栏拖拽持久化**：在 `MultiPeriodStrategyEditorDialog` 中为 `self.splitter` 引入 `saveState()` 和 `restoreState()`持久化，拖动左右栏分割线后下次打开自动恢复。
+    - [x] **策略说明框空间放大**：将 `desc_edit` 说明文本框最小高度提高至 85px、最大高度提高至 125px，提供充裕的空间清晰展示买点逻辑与防追高规则。
+
+## 2026-07-25 17:02
+- [x] **实现 `multi_period_strategies.json` 自动归档备份功能 (`instock_MonitorTK.py` & `monitor_utils.py`)**：
+    - [x] **退出物理归档集成 (`instock_MonitorTK.py` `on_close`)**：在系统退出 Phase 2.6/物理存档阶段，与 `trading_signals`、`signal_strategy`、`window_config` 等核心配置文件同级集成了 `archive_file_tools` 自动备份通道。
+    - [x] **监控与定时备份增强 (`monitor_utils.py` `archive_search_history_list`)**：在 `archive_search_history_list` 函数中补齐了 `multi_period_strategies.json` 自动存档逻辑，确保在定时与手动保存时自动将策略备份至 `archives/` 归档目录（如 `multi_period_strategies_YYYY-MM-DD_HH.json`）。
+    - [x] **增量比对与自动清理**：完美复用了内容 Hash 增量比对与最近 15 份快照自动滚动清理机制，防止重复与异常损坏丢失。
+
+## 2026-07-25 16:43
+- [x] **实现多周期策略 JSON 文件 `description` 详细说明扩展与可视化编辑器联动 (`multi_period_strategies.json` & `multi_period_dialog.py`)**：
+    - [x] **策略 JSON 增加 `description` 详细文档说明**：为全量多周期策略（包括日科化学模式 `tpl_macro_trend_ma60_rebound_launch`、反转启动 `tpl_bottom_oversold_wash_breakout`、趋势启动 `tpl_trend_ma20_ma60_pullback_launch` 等）注入了极其详尽的【买点与形态逻辑】、【支撑位特征】与【防追高规则】文字说明。
+    - [x] **GUI 编辑器可视化呈现与修改 (`MultiPeriodStrategyEditorDialog`)**：在 `ats/ui/multi_period_dialog.py` 中新增 `desc_edit` 策略说明文本框控件，支持可视化查阅策略逻辑与实时修改落盘。
+    - [x] **双物理配置文件同步更新落盘**：完成对 `D:\JohnsonProgram\instockMonitorTK\config\multi_period_strategies.json` 与 `stock_standalone\config\multi_period_strategies.json` 的全量说明更新，提升了后续策略快速迭代与跟进维护效率。
+
+## 2026-07-25 16:23
+- [x] **提炼并新增“日科化学 (300214)”类型策略（`tpl_macro_trend_ma60_rebound_launch`）**：
+    - [x] **大周期趋势保持 (`w` / `3d`)**：周线 MACD 在 0 轴上方 (`dif > 0` 或 `dif > dea`) 保持大周期主升浪，防止陷入阴跌死熊股。
+    - [x] **小级别回调 MA60d 支撑企稳 (`{or: lastl{1-4}d <= 1.06 * ma60{1-4}d}`)**：精准匹配前 1-4 天低点触及/踩在 MA60d 均线附近 6% 支撑区间的支撑止跌特征。
+    - [x] **次日放量大阳线加速 (`d`)**：以 `percent > 2.5`、`close > open`（低开高走/高开高走）、`lastv0d / volume > 1.3 * lastv1d`（较昨日明显放量 30%+）与 `close > lastp1d` 捕获企稳次日的加速起爆点。
+
+## 2026-07-25 16:16
+- [x] **设计并内置多周期防追涨与双模式启动精细化策略 (`multi_period_strategy_engine.py` & `query_engine_util.py`)**：
+    - [x] **设计模式一（底部超跌洗盘+缩量企稳+放量拉升启动 [反转启动]）**：融合 `lastv{1-9}d` 多级量能萎缩、`lasth{2-5}d - lastl{2-5}d` 历史振幅洗盘放大、`lastv0d / volume` 当日突破放量、低开高走/高开高走（`close > open`）与 `close < 1.25 * ma20d` 防追高限制，精准寻找跌无可跌企稳后的爆发点。
+    - [x] **设计模式二（趋势股 MA20/MA60 整固+低开/高开高走启动 [趋势低吸]）**：结合多级 `ma20{1-9}d` 与 `ma60{1-9}d` 均线阶梯多头结构，配合 1-2 天缩量整理企稳、站稳 MA20/MA60 均线，在实盘放量向上脱离整固平台（`percent > 1.0` 且 `percent < 7.5`）时精准捕获启动信号。
+    - [x] **扩展多周期全 Col 指令集与自动补齐保存**：在 `presets` 中新增 4 套高级策略模板，并在 `query_engine_util.py` 中补齐 `open` 与 `volume` 的自适应别名通道。策略加载时自动执行增量补齐与持久化落盘，并在 `validate_condition` 语法校验测试中实现 100% 验证通过。
+
 ## 2026-07-24 23:35
 - [x] **升级多周期策略引擎与全列高级查询支持 (Upgraded Multi-Period Strategy Engine & Comprehensive Col Query Support)**：
     - [x] **实现 `PandasQueryEngine` 全列动态别名与多级历史字段映射 (`query_engine_util.py`)**：在 `_prepare_context` 中完美扩展并集成 `1-9` 级历史指标的映射通道（包括 `macd1d`..`macd6d` <-> `macdlast1`..`macdlast6`、`dif` / `dif1d`..`dif6d` <-> `macddif` / `macddif1`..`macddif6`、`dea` / `dea1d`..`dea6d` <-> `macddea` / `macddea1`..`macddea6`，对于 7-9 级超界自动平滑降级兼容 `6` 级；`k` / `d` / `j` <-> `kdj_k` / `kdj_d` / `kdj_j`；`upper1d`..`upper9d` <-> `upper1`..`upper9`；`lastv1d`..`lastv9d` / `lvol`；`per1d`..`per9d` / `perc1d` 等），全方位保障了 `lastv{1-9}d`、`ma20{1-9}d`、`ma60{1-9}d`、`macd{1-9}d`、`upper{1-9}d` 等所有列在真实股票数据（如 688796 包含的 6 阶 MACD 历史）中的极速自适应解析与评估。

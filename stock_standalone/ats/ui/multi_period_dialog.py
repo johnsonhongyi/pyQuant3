@@ -253,9 +253,9 @@ class MultiPeriodStrategyEditorDialog(QDialog):
 
         # Load saved geometry
         self.config_path = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
-        self._load_geometry()
 
         self._init_ui()
+        self._load_geometry()
         self._refresh_list()
 
         # Select initial strategy
@@ -277,8 +277,11 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                     geom_saved = cfg.get("editor_geometry_qt")
                     if geom_saved:
                         self.restoreGeometry(QByteArray.fromHex(geom_saved.encode('utf-8')))
+                    splitter_saved = cfg.get("editor_splitter_qt")
+                    if splitter_saved and hasattr(self, 'splitter') and self.splitter is not None:
+                        self.splitter.restoreState(QByteArray.fromHex(splitter_saved.encode('utf-8')))
             except Exception as e:
-                logger.warning(f"Failed to load editor geometry: {e}")
+                logger.warning(f"Failed to load editor geometry/splitter: {e}")
 
     def _save_geometry(self):
         try:
@@ -288,10 +291,12 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
             cfg["editor_geometry_qt"] = geom
+            if hasattr(self, 'splitter') and self.splitter is not None:
+                cfg["editor_splitter_qt"] = self.splitter.saveState().toHex().data().decode('utf-8')
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.warning(f"Failed to save editor geometry: {e}")
+            logger.warning(f"Failed to save editor geometry/splitter: {e}")
 
     def closeEvent(self, event):
         self._save_geometry()
@@ -299,8 +304,8 @@ class MultiPeriodStrategyEditorDialog(QDialog):
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        main_layout.addWidget(splitter)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        main_layout.addWidget(self.splitter)
 
         # ── Left Pane: Strategy List ──
         left_widget = QWidget(self)
@@ -331,7 +336,7 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         self.btn_import_json.clicked.connect(self._import_json_strategy)
         left_layout.addWidget(self.btn_import_json)
 
-        splitter.addWidget(left_widget)
+        self.splitter.addWidget(left_widget)
 
         # ── Right Pane: Edit Configurations ──
         right_widget = QWidget(self)
@@ -353,6 +358,18 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         form_layout.addWidget(lbl_mode)
         form_layout.addWidget(self.mode_combo)
         right_layout.addLayout(form_layout)
+
+        # 1.5 Strategy Description
+        desc_layout = QHBoxLayout()
+        lbl_desc = QLabel("策略说明:", self)
+        self.desc_edit = QTextEdit(self)
+        self.desc_edit.setMinimumHeight(85)
+        self.desc_edit.setMaximumHeight(125)
+        self.desc_edit.setPlaceholderText("请输入策略详细说明、买点逻辑与防追高规则...")
+        self.desc_edit.textChanged.connect(self._on_desc_changed)
+        desc_layout.addWidget(lbl_desc)
+        desc_layout.addWidget(self.desc_edit)
+        right_layout.addLayout(desc_layout)
 
         # 2. Period Conditions List
         lbl_conds = QLabel("周期过滤条件 (各周期分别执行 DataFrame 过滤):", self)
@@ -444,9 +461,9 @@ class MultiPeriodStrategyEditorDialog(QDialog):
 
         right_layout.addLayout(bottom_layout)
 
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        self.splitter.addWidget(right_widget)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 3)
 
     def _refresh_list(self):
         self.list_widget.clear()
@@ -464,13 +481,16 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         # Block signals temporarily to prevent loop updates
         self.name_edit.blockSignals(True)
         self.mode_combo.blockSignals(True)
+        self.desc_edit.blockSignals(True)
 
         self.name_edit.setText(strat['name'])
+        self.desc_edit.setPlainText(strat.get('description', ''))
         mode_str = "并集 (union)" if strat.get('cross_mode') == 'union' else "交集 (intersection)"
         self.mode_combo.setCurrentText(mode_str)
 
         self.name_edit.blockSignals(False)
         self.mode_combo.blockSignals(False)
+        self.desc_edit.blockSignals(False)
 
         # Load period filters
         conds = strat.get('conditions', {})
@@ -497,6 +517,11 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         if self.current_idx >= 0:
             self.strategies[self.current_idx]['name'] = text.strip()
             self.list_widget.item(self.current_idx).setText(text.strip() or "未命名策略")
+            self._refresh_json_editor()
+
+    def _on_desc_changed(self):
+        if self.current_idx >= 0:
+            self.strategies[self.current_idx]['description'] = self.desc_edit.toPlainText().strip()
             self._refresh_json_editor()
 
     def _on_mode_changed(self, idx):
@@ -637,48 +662,74 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         if not expr:
             widgets['status_lbl'].setText("❌ 条件为空")
             widgets['status_lbl'].setStyleSheet("color: red;")
-            return False
+            return False, None
 
         if hasattr(self.engine, 'validate_condition'):
             success, msg = self.engine.validate_condition(expr, period)
             if success:
-                widgets['status_lbl'].setText("✅ 语法正确")
-                widgets['status_lbl'].setStyleSheet("color: #4caf50;")
-                widgets['status_lbl'].setToolTip(msg)
-                return True
+                # 🎯 尝试计算实际命中数据 Hit Count
+                hit_cnt = None
+                try:
+                    df_p = None
+                    if hasattr(self.engine, "_period_dfs") and period in self.engine._period_dfs:
+                        df_p = self.engine._period_dfs[period]
+                    elif hasattr(self, "parent") and self.parent is not None and hasattr(self.parent, "top_now") and self.parent.top_now is not None:
+                        if period == 'd':
+                            df_p = self.parent.top_now
+
+                    if df_p is not None and not df_p.empty:
+                        from query_engine_util import query_engine
+                        matched = query_engine.query(df_p, expr) if query_engine else df_p.query(expr)
+                        hit_cnt = len(matched) if matched is not None else 0
+                except Exception as ex:
+                    logger.debug(f"Hit calculation error for {period}: {ex}")
+
+                if hit_cnt is not None:
+                    widgets['status_lbl'].setText(f"✅ 语法正确 (🎯 Hit: {hit_cnt})")
+                    widgets['status_lbl'].setStyleSheet("color: #4caf50; font-weight: bold;")
+                    widgets['status_lbl'].setToolTip(f"{msg}\n\n🎯 命中测试: 当前【{period}】周期筛选出 {hit_cnt} 只股票")
+                else:
+                    widgets['status_lbl'].setText("✅ 语法正确")
+                    widgets['status_lbl'].setStyleSheet("color: #4caf50;")
+                    widgets['status_lbl'].setToolTip(msg)
+                return True, hit_cnt
             else:
                 widgets['status_lbl'].setText("❌ 语法错误")
                 widgets['status_lbl'].setStyleSheet("color: #f44336;")
                 widgets['status_lbl'].setToolTip(msg)
-                return False
+                return False, None
 
         # Fallback if engine has no validate_condition
         try:
-            from query_engine_util import query_engine
-            if query_engine:
-                query_engine.execute(df_p, expr)
-            else:
-                df_p.query(expr)
             widgets['status_lbl'].setText("✅ 语法正确")
             widgets['status_lbl'].setStyleSheet("color: #4caf50;")
-            return True
+            return True, None
         except Exception as e:
-            widgets['status_lbl'].setText(f"❌ 语法错误")
+            widgets['status_lbl'].setText("❌ 语法错误")
             widgets['status_lbl'].setStyleSheet("color: #f44336;")
             widgets['status_lbl'].setToolTip(str(e))
-            return False
+            return False, None
 
     def _validate_all(self):
         success = True
+        hit_summary = []
         for period, widgets in self.cond_rows.items():
             if widgets['chk'].isChecked():
-                res = self._validate_single(period)
+                res, hit_cnt = self._validate_single(period)
                 if not res:
                     success = False
+                elif hit_cnt is not None:
+                    hit_summary.append(f" • {period} 周期: 🎯 Hit {hit_cnt} 只")
+                else:
+                    hit_summary.append(f" • {period} 周期: ✅ 语法正确 (待载入数据)")
+
         if success:
-            QMessageBox.information(self, "验证完成", "全部激活的条件均通过了语法校验！")
+            msg = "✅ 全部激活的条件均通过了语法校验！"
+            if hit_summary:
+                msg += "\n\n🎯 各周期命中数据分布测试：\n" + "\n".join(hit_summary)
+            QMessageBox.information(self, "验证完成", msg)
         else:
-            QMessageBox.warning(self, "验证失败", "部分周期的过滤表达式包含语法错误，请查看标记！")
+            QMessageBox.warning(self, "验证失败", "部分周期的过滤表达式包含语法错误，请查看具体标记！")
 
     def _save_to_engine(self):
         # Perform saving
@@ -1736,14 +1787,38 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         tb1_layout = QHBoxLayout()
         tb1_layout.addWidget(QLabel("策略:", self))
         self.strategy_combo = QComboBox(self)
-        self.strategy_combo.setFixedWidth(200)
+        self.strategy_combo.setMinimumWidth(280)
+        self.strategy_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.strategy_combo.addItems([s['name'] for s in self.strategies])
-        tb1_layout.addWidget(self.strategy_combo)
+        tb1_layout.addWidget(self.strategy_combo, stretch=2)
 
         btn_edit_strat = QPushButton("⚙", self)
         btn_edit_strat.setFixedWidth(30)
         btn_edit_strat.clicked.connect(self.open_strategy_editor)
         tb1_layout.addWidget(btn_edit_strat)
+
+        # 🎯 Hit 命中能力状态展示
+        self.lbl_hit_status = QLabel("🎯 Hit: --", self)
+        self.lbl_hit_status.setStyleSheet("""
+            QLabel {
+                background-color: #1e2836;
+                color: #00e676;
+                border: 1px solid #00b0ff;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QLabel:hover {
+                background-color: #26384d;
+                color: #ffffff;
+                border-color: #00e676;
+            }
+        """)
+        self.lbl_hit_status.setToolTip("点击即可快速触发该策略的 Hit 命中测试")
+        self.lbl_hit_status.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_hit_status.mousePressEvent = lambda e: self.run_filter(force_reload=False)
+        tb1_layout.addWidget(self.lbl_hit_status)
 
         tb1_layout.addWidget(QLabel(" 参与周期:", self))
         self.period_checkboxes = {}
@@ -2008,6 +2083,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _on_strategy_selected(self):
         if getattr(self, "_initializing", False):
             return
+        idx = self.strategy_combo.currentIndex()
+        if 0 <= idx < len(self.strategies):
+            strat = self.strategies[idx]
+            tip = f"{strat.get('name', '')}\n\n{strat.get('description', '')}"
+            self.strategy_combo.setToolTip(tip)
         self._save_state()
         self.run_filter(force_reload=False)
 
@@ -2168,6 +2248,23 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             except RuntimeError:
                 pass
         self._show_results(result_df, elapsed, flat_df)
+        self._update_hit_status(result_df)
+
+    def _update_hit_status(self, result_df=None):
+        if not hasattr(self, "lbl_hit_status") or self.lbl_hit_status is None:
+            return
+        total_hit = len(result_df) if result_df is not None and not result_df.empty else 0
+        self.lbl_hit_status.setText(f"🎯 Hit: {total_hit}只")
+        
+        tip_lines = [f"🎯 策略 Hit 命中测试详情 (总命中: {total_hit} 只)", "-" * 38]
+        if hasattr(self.engine, "_period_dfs") and self.engine._period_dfs:
+            for p, df in self.engine._period_dfs.items():
+                if df is not None and not df.empty:
+                    tip_lines.append(f" • {p} 周期基础数据: {len(df)} 只")
+        tip_lines.append("-" * 38)
+        tip_lines.append(f"★ 多周期组合最终筛选: {total_hit} 只")
+        tip_lines.append("\n(点击胶囊框即可快速再次触发 Hit 命中测试)")
+        self.lbl_hit_status.setToolTip("\n".join(tip_lines))
 
         # Automatically update Dragon Monitor if it is currently open and visible
         if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:

@@ -215,6 +215,13 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
 def archive_search_history_list(monitor_list_file: str, search_history_file: str, archive_dir: str, logger: Any) -> None:
     """归档监控文件，避免空或重复存档"""
     archive_file_tools(monitor_list_file, "monitor_category_list", archive_dir, logger)
+    try:
+        from sys_utils import get_conf_path
+        mp_file = get_conf_path("multi_period_strategies.json")
+        if mp_file and os.path.exists(mp_file):
+            archive_file_tools(mp_file, "multi_period_strategies", archive_dir, logger)
+    except Exception as e:
+        logger.info(f"⚠ 多周期策略存档过程异常: {e}")
 
     if not os.path.exists(search_history_file):
         logger.info(f"⚠ {search_history_file} 不存在，跳过归档")

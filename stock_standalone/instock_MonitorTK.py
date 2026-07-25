@@ -4027,6 +4027,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger
                 )
 
+                try:
+                    from sys_utils import get_conf_path
+                    mp_strat_file = get_conf_path("multi_period_strategies.json")
+                    if mp_strat_file and os.path.exists(mp_strat_file):
+                        archive_file_tools(
+                            mp_strat_file,
+                            "multi_period_strategies",
+                            ARCHIVE_DIR,
+                            logger
+                        )
+                except Exception as e:
+                    logger.warning(f"多周期策略归档异常: {e}")
+
                 archive_search_history_list(
                     monitor_list_file=MONITOR_LIST_FILE,
                     search_history_file=SEARCH_HISTORY_FILE,
