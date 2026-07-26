@@ -203,12 +203,18 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
         missing_cols = [c for c in cols if c not in row]
 
         if missing_cols:
-            results.append({
+            res_item = {
                 "expr": expr,
                 "ok": False,
                 "reason": "missing_columns",
                 "missing": missing_cols
-            })
+            }
+            if isinstance(que, dict):
+                if "name" in que:
+                    res_item["name"] = que["name"]
+                if "period" in que:
+                    res_item["period"] = que["period"]
+            results.append(res_item)
             continue
 
         # 逐子条件拆分 (使用 query_engine 统一的智慧拆分逻辑，确保括号嵌套与 OR 分支能平铺展示)
@@ -226,20 +232,27 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
                 "values": {c: row[c] for c in extract_columns(cond)}
             })
 
-        results.append({
+        res_item = {
             "expr": expr,
             "ok": all_ok,
             "reason": "pass" if all_ok else "condition_failed",
             "sub_conditions": sub_results,
             "full_data": row
-        })
+        }
+        if isinstance(que, dict):
+            if "name" in que:
+                res_item["name"] = que["name"]
+            if "period" in que:
+                res_item["period"] = que["period"]
+        results.append(res_item)
 
     return results
 
 def format_check_result(results: List[Dict[str, Any]]) -> str:
     lines = []
     for i, r in enumerate(results, 1):
-        lines.append(f"[条件 {i}]")
+        period_tag = f" - {r['period']}" if r.get('period') else (f" - {r['name']}" if r.get('name') else "")
+        lines.append(f"[条件 {i}{period_tag}]")
         lines.append(f"  表达式: {r['expr']}")
         lines.append(f"  是否通过: {'✅ 是' if r['ok'] else '❌ 否'}")
 
