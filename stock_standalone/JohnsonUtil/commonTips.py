@@ -1032,6 +1032,9 @@ hud_global_suppression: int = CFG.hud_global_suppression
 vol_up_details_col: List[str] = CFG.vol_up_details_col
 v_reversal_pool_col: List[str] = CFG.v_reversal_pool_col
 popularity_col: List[str] = CFG.popularity_col
+dna_audit_custom_cols: List[str] = CFG.dna_audit_custom_cols
+co2float: List[str] = CFG.co2float
+
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep

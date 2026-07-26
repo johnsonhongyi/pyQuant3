@@ -2994,7 +2994,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             self.lbl_status.setText("🧬 正在执行 DNA 审计，请稍后...")
             QApplication.processEvents()
-            
             # 1. 动态加载自定义列配置
             try:
                 from JohnsonUtil import commonTips as cct
@@ -3119,7 +3118,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         def suffix_expr(expr, period_suffix, cols_set):
             def repl(match):
                 word = match.group(0)
-                if word in RESERVED_SQL_FUNCS or word in {"and", "or", "not", "True", "False"}:
+                if word.isdigit() or word in RESERVED_SQL_FUNCS or word in {"and", "or", "not", "True", "False"}:
                     return word
                 if any(word.endswith(suf) for suf in known_period_suffixes):
                     return word
@@ -3127,7 +3126,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 if word in cols_set or n_word in cols_set:
                     target_w = word if word in cols_set else n_word
                     return f"{target_w}_{period_suffix}"
-                return word
+                # 其它没有周期后缀的变量名（如 macdlast1, dif, dea 等），自动追加当前周期后缀
+                return f"{word}_{period_suffix}"
             return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', repl, expr)
 
         queries = []
@@ -3155,17 +3155,22 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 cond = strat_config['conditions'].get(period)
                 if cond:
                     raw_filter = cond['filter']
-                    suffixed_filter = suffix_expr(raw_filter, period, valid_cols)
+                    expanded_filter = query_engine._preprocess_query(raw_filter)
+                    suffixed_filter = suffix_expr(expanded_filter, period, valid_cols)
                     queries.append({
                         "name": f"{period.upper()}周期条件",
+                        "period": period.upper(),
                         "expr": suffixed_filter
                     })
             else:
                 cond = strat_config['conditions'].get(period)
                 if cond:
+                    raw_filter = cond['filter']
+                    expanded_filter = query_engine._preprocess_query(raw_filter)
                     queries.append({
                         "name": f"{period.upper()}周期条件",
-                        "expr": cond['filter']
+                        "period": period.upper(),
+                        "expr": expanded_filter
                     })
 
         if not queries:
@@ -3177,8 +3182,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         # Use Qt-native check code dialog to completely avoid Tkinter dependency
         try:
-            dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self)
-            dialog.exec()
+            self._check_code_dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self)
+            self._check_code_dialog.show()
+            self._check_code_dialog.raise_()
+            self._check_code_dialog.activateWindow()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
 
@@ -3682,10 +3689,11 @@ class NumericWidgetItem(QTableWidgetItem):
 class QtDnaAuditReportWindow(QDialog, WindowMixin):
     def __init__(self, summaries, parent=None, end_date=None, resample='d'):
         self.monitor_app = parent
+        self._real_parent = parent
         active_modal = QApplication.activeModalWidget()
         if active_modal and parent is not active_modal:
             parent = active_modal
-        super().__init__(parent)
+        super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许多周期主窗口点击时置顶盖在前面
         self.summaries = summaries
         self.end_date = end_date
         self.resample = resample
@@ -3975,7 +3983,8 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
 
 class QtCheckCodeDialog(QDialog, WindowMixin):
     def __init__(self, df, code, queries, parent=None):
-        super().__init__(parent)
+        self._real_parent = parent
+        super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许窗口自由移至主窗口身后
         self.df = df
         self.code = code
         self.queries = queries
@@ -3988,6 +3997,10 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             QDialog {
                 background-color: #0c0d14;
                 color: #e2e2e5;
+            }
+            QLabel {
+                color: #e2e2e5;
+                font-weight: bold;
             }
             QTextEdit {
                 background-color: #12131a;
@@ -4048,7 +4061,8 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         
         self.right_widget = QWidget(self)
         right_layout = QVBoxLayout(self.right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(4, 4, 4, 4)
+        right_layout.setSpacing(6)
         
         right_layout.addWidget(QLabel(">>> 所有数据字段详情", self))
         

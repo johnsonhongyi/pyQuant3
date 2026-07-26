@@ -1,3 +1,23 @@
+## 2026-07-26 10:22
+- [x] **修复 `QtCheckCodeDialog` 顶部标签对比度与高亮显示 (`multi_period_dialog.py`)**：
+    - [x] 在 `QtCheckCodeDialog` QSS 样式表中显式补充了 `QLabel { color: #e2e2e5; font-weight: bold; }` 规则，彻底消除了顶部 `[ 检查结果摘要 ]`、`>>> 所有数据字段详情` 及 `过滤字段:` 标签在深色暗背景下前景色过暗、无法清晰识别的问题。
+
+## 2026-07-26 10:15
+- [x] **全流程自适应架构修复多周期模板展开与周期后缀自适应绑定 (`multi_period_dialog.py`, `stock_logic_utils.py`)**：
+    - [x] **解耦硬编码回退，实现自适应模板预处理与后缀展开 (`multi_period_dialog.py`)**：彻底撤销硬编码字典回退逻辑。在诊断构建查询条件前引入 `query_engine._preprocess_query(raw_filter)` 引擎自适应预处理，先将 `{or: macdlast{1-6} > 0}` 等格式化表达式自动展开解构为包含具体变量名的全量子子条件 (`macdlast1`..`6`)，再交由 `suffix_expr` 精准自适应挂载对应周期后缀。
+    - [x] **多周期变量隔离自适应绑定**：2D 周期条件自动转换为 `macdlast1_2d`..`6_2d`，3D 周期条件自动转换为 `macdlast1_3d`..`6_3d`，W 周期条件自动转换为 `macdlast1_w`..`6_w`。彻底解决了此前 2D/3D/W 多周期条件展开后全部混存、指向日线 `macdlast1` 全为日数据的问题，实现多周期数据的严格隔离与全自动化精准适配。
+
+## 2026-07-26 10:05
+- [x] **全流程修复多周期股票诊断中跨周期指标/衍生字段缺失与诊断报告界面显示优化 (`multi_period_dialog.py`, `stock_logic_utils.py`)**：
+    - [x] **修复多周期合并行 `merged_row` 缺失字段 Bug (`multi_period_dialog.py`)**：在 `_diagnose_stock` 构建单股 `merged_row` 时，解除了此前仅对 `d` (日线) 周期写入无后缀键名（如 `macdlast1`）的硬性限制。通过 `if period == 'd' or k not in merged_row:` 动态回退填充，确保如 `2d`/`3d`/`w`/`m` 等多周期下的通用/衍生指标（如 `macdlast1`, `macdlast2`, `ma20d` 等）在单周期或多周期组合策略诊断时，均能自动获得数值填充，彻底消除了 `002293 罗莱生活`、`603259 药明康德` 等股票诊断时误报 `missing_columns` (如 `macdlast1..6: N/A`) 的硬 Bug。
+    - [x] **诊断报告增设周期定位 Tag 标识 (`stock_logic_utils.py`)**：在 `test_code_query` 与 `format_check_result` 中透传并渲染 `period` / `name` 标记。诊断结果中的条件标题自动升级为 `[条件 1 - 2D周期]`、`[条件 2 - 3D周期]`、`[条件 3 - W周期]`，精准清晰地标识各个条件所对应的周期，极大地方便了策略调试与快速定位。
+    - [x] **修复诊断抽屉右侧“过滤字段”搜索框顶部遮挡问题 (`QtCheckCodeDialog`)**：优化了 `QtCheckCodeDialog` 抽屉右侧 `right_layout` 的边距 (`setContentsMargins(4, 4, 4, 4)`) 与控件间距 (`setSpacing(6)`)，彻底消除了之前顶部“过滤字段:”搜索框贴边紧挨、标签缺角的界面美观缺陷。
+
+## 2026-07-26 09:47
+- [x] **解绑多周期诊断窗口与 DNA 审计窗口 physical parent 属主关系 (`multi_period_dialog.py`)**：
+    - [x] **彻底切断底层 Windows DWM 强制置顶属主关系 (`QtCheckCodeDialog` & `QtDnaAuditReportWindow`)**：在 `QtCheckCodeDialog.__init__` 和 `QtDnaAuditReportWindow.__init__` 中将底层父类初始化由 `super().__init__(parent)` 改为 `super().__init__(None)`，彻底消除了 Win32/DWM Owned Window 的强制置顶枷锁，诊断窗口与 DNA 专项审计报告窗口调起后可自由摆放，点击多周期主窗口即可即时置顶遮盖在窗口身后。
+    - [x] **升级为非模态异步调起 (`diagnose_stock_strategy`)**：将 `dialog.exec()` 模态阻塞调用重构成 `self._check_code_dialog.show()` 配合 `raise_()` 与 `activateWindow()`，并将窗口实例持久化挂载至主窗口实例属性 `self._check_code_dialog` 防止 Python 垃圾回收；彻底解决诊断窗口打开后锁死主界面、影响多周期选择与操作的痛点。
+
 ## 2026-07-25 17:36
 - [x] **实现多周期策略 Hit 命中测试能力与编辑器分周期 Hit 命中数据同步高亮 (`multi_period_dialog.py`)**：
     - [x] **主面板策略右侧集成 `🎯 Hit: N只` 胶囊显示框 (`lbl_hit_status`)**：在策略下拉框右侧成功接入 Hit 命中计数看板。显示当前策略筛选出的最终符合股票总数（如 `🎯 Hit: 24只`），且支持鼠标悬停弹出分周期 Hit 衰减列表，点击胶囊框可即时快速触发策略 Hit 命中测试。
