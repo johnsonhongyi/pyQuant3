@@ -76,9 +76,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QCheckBox, QComboBox, QSplitter, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
     QApplication, QMessageBox, QTextEdit, QListWidget, QFrame,
-    QDialogButtonBox, QSizePolicy
+    QDialogButtonBox, QSizePolicy, QCompleter
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray, QStringListModel
 from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 
 from tk_gui_modules.window_mixin import WindowMixin
@@ -1668,6 +1668,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.engine = MultiPeriodStrategyEngine()
         self.strategies = self.engine.load_strategies()
         self.manual_col_pool = []
+        self._current_table_columns = []
 
         self.ui_state = self._load_state()
 
@@ -1737,6 +1738,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             "link_ths": False,
             "sort_level1_col": None,
             "sort_level1_asc": True,
+            "sort_level2_col": None,
+            "sort_level2_asc": True,
+            "sort_level3_col": None,
+            "sort_level3_asc": True,
             "sortby_col": None,
             "sortby_col_ascend": False,
             "current_history_query": "",
@@ -1754,7 +1759,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 pass
         return default_state
 
-    def _save_state(self, write_to_disk=False):
+    def _save_state(self, write_to_disk=True):
         if getattr(self, "_initializing", False):
             return
         try:
@@ -1773,10 +1778,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['link_tdx'] = self.link_tdx_chk.isChecked()
             self.ui_state['link_ths'] = self.link_ths_chk.isChecked()
             self.ui_state['stays_on_top'] = self.on_top_chk.isChecked()
+            self.ui_state['sort_level1_col'] = getattr(self, 'sort_level1_col', None)
+            self.ui_state['sort_level1_asc'] = getattr(self, 'sort_level1_asc', True)
+            self.ui_state['sort_level2_col'] = getattr(self, 'sort_level2_col', None)
+            self.ui_state['sort_level2_asc'] = getattr(self, 'sort_level2_asc', True)
+            self.ui_state['sort_level3_col'] = getattr(self, 'sort_level3_col', None)
+            self.ui_state['sort_level3_asc'] = getattr(self, 'sort_level3_asc', True)
+            self.ui_state['sortby_col'] = getattr(self, 'sortby_col', None)
+            self.ui_state['sortby_col_ascend'] = getattr(self, 'sortby_col_ascend', False)
             self.ui_state['current_history_query'] = self._current_history_query
             self.ui_state['recent_secondary_filters'] = list(getattr(self, 'recent_secondary_filters', []))
 
-            if write_to_disk == "FORCE_WRITE":
+            if write_to_disk:
                 cfg = {}
                 if os.path.exists(self.config_file):
                     with open(self.config_file, 'r', encoding='utf-8') as f:
@@ -1876,7 +1889,17 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.manual_col_edit = QLineEdit(self)
         self.manual_col_edit.setPlaceholderText("自定义列名称")
         self.manual_col_edit.setFixedWidth(120)
+        self.manual_col_edit.setToolTip("💡 输入纯列名(如 dff3, ma20, dif, upper)，系统会自动补齐智能匹配且不会带 _d 后缀")
         self.manual_col_edit.returnPressed.connect(self._add_manual_col)
+        
+        # 自动补全 QCompleter
+        self._col_completer_model = QStringListModel(self)
+        self._col_completer = QCompleter(self._col_completer_model, self)
+        self._col_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._col_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.manual_col_edit.setCompleter(self._col_completer)
+        self._update_manual_col_completer()
+
         tb2_layout.addWidget(self.manual_col_edit)
 
         btn_add_col = QPushButton("+", self)
@@ -1892,7 +1915,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         tb2_layout.addWidget(btn_remove_col)
 
         # Dropdown selection menu for custom columns
-        self.btn_custom_cols_menu = QPushButton("⚙️ 自定义列 ▼", self)
+        self.btn_custom_cols_menu = QPushButton("⚙️ 自定义列", self)
         self.custom_cols_menu = QMenu(self)
         self.custom_cols_menu.setStyleSheet("""
             QMenu { background-color: #1a1a24; color: #ffffff; border: 1px solid #37474f; }
@@ -1978,10 +2001,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         # ── Results Data Table (BaseATSTableWidget) ──
         self.table = BaseATSTableWidget(self)
+        self.table.setSortingEnabled(False)
         self.table.doubleClicked.connect(self._on_table_double_clicked)
         self.table.stock_activated.connect(self.link_stock)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_table_context_menu)
+        
+        # 绑定表头点击和右键多级排序
+        header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self._on_header_clicked)
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._on_header_context_menu)
         main_layout.addWidget(self.table)
 
         # ── Bottom Status Bar ──
@@ -2084,6 +2115,70 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.recent_secondary_filters = cleaned_recent
         self._rebuild_quick_history_menu()
 
+        # 8. Apply multi-level sort state
+        self.sort_level1_col = self.ui_state.get('sort_level1_col', None)
+        self.sort_level1_asc = self.ui_state.get('sort_level1_asc', True)
+        self.sort_level2_col = self.ui_state.get('sort_level2_col', None)
+        self.sort_level2_asc = self.ui_state.get('sort_level2_asc', True)
+        self.sort_level3_col = self.ui_state.get('sort_level3_col', None)
+        self.sort_level3_asc = self.ui_state.get('sort_level3_asc', True)
+        self.sortby_col = self.ui_state.get('sortby_col', None)
+        self.sortby_col_ascend = self.ui_state.get('sortby_col_ascend', False)
+
+    def _update_manual_col_completer(self, force_refresh=False):
+        if not hasattr(self, "_col_completer_model"):
+            return
+            
+        # 如果已有缓存候选且非强制刷新，直接复用
+        if getattr(self, "_cached_completer_candidates", None) and not force_refresh:
+            return
+
+        candidates = set()
+        
+        # 1. 动态确定当前勾选参与周期中的最小周期（优先级: d > 2d > 3d > w > m > 45d > 3M）
+        active_periods = []
+        if hasattr(self, "period_checkboxes"):
+            active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
+            
+        min_period = active_periods[0] if active_periods else 'd'
+        
+        # 2. 从选中的最小周期基础数据集 (self.engine._period_dfs[min_period]) 提取原始物理列名
+        try:
+            if hasattr(self, "engine") and hasattr(self.engine, "_period_dfs"):
+                df_min = self.engine._period_dfs.get(min_period)
+                if df_min is None or df_min.empty:
+                    # 降级尝试已有任意周期的 DF
+                    for p_df in self.engine._period_dfs.values():
+                        if p_df is not None and not p_df.empty:
+                            df_min = p_df
+                            break
+                            
+                if df_min is not None and not df_min.empty:
+                    for c in df_min.columns:
+                        c_str = str(c).strip()
+                        if c_str and c_str not in ("code", "name", "index"):
+                            candidates.add(c_str)
+        except Exception:
+            pass
+
+        # 3. 若引擎尚未加载，从 query_engine_util 别名定义短路兜底
+        if not candidates:
+            try:
+                from query_engine_util import query_engine
+                if query_engine and hasattr(query_engine, 'col_map'):
+                    for k in query_engine.col_map.keys():
+                        if k not in ("code", "name"):
+                            candidates.add(k)
+            except Exception:
+                pass
+
+        if hasattr(self, 'manual_col_pool'):
+            candidates.update(self.manual_col_pool)
+
+        sorted_candidates = sorted(list(candidates))
+        self._cached_completer_candidates = sorted_candidates
+        self._col_completer_model.setStringList(sorted_candidates)
+
     def _rebuild_custom_cols_menu(self):
         self.custom_cols_menu.clear()
         
@@ -2102,6 +2197,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             act.triggered.connect(self._on_custom_col_changed)
             self.custom_cols_menu.addAction(act)
             self.custom_col_actions[c] = act
+
+        self._update_manual_col_completer()
 
     def _on_strategy_selected(self):
         if getattr(self, "_initializing", False):
@@ -2431,6 +2528,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _get_display_periods_for_custom_col(self, col_name, active_periods, df=None):
         if not active_periods:
             return []
+        
+        # 针对带明确周期后缀的自定义列 (如 strong_structure_d, red_2d)
+        for p in active_periods:
+            if col_name.endswith(f"_{p}"):
+                return [p]
+
         if col_name.lower() in ("dff", "dff2", "dff3", "rank"):
             return [active_periods[0]]
         if df is not None and not df.empty and len(active_periods) > 1:
@@ -2493,6 +2596,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self.update_concept_ranking(None)
                 return
 
+            self._update_manual_col_completer(force_refresh=True)
+
             # Apply secondary filtering
             filtered_df = flat_df
             if self._current_history_query:
@@ -2540,6 +2645,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
             base_cols = ["code", "name", "price", "percent", "volume", "ratio"]
             columns = base_cols + custom_cols + pass_cols
+            self._current_table_columns = columns
+
+            # 向前兼容：若历史保存的排序参数为物理列索引 (int)，则在数据首次就绪后智能翻译并重写为当前的英文列名 (str)
+            cols = self._current_table_columns
+            if hasattr(self, "sort_level1_col") and isinstance(self.sort_level1_col, int) and 0 <= self.sort_level1_col < len(cols):
+                self.sort_level1_col = cols[self.sort_level1_col]
+            if hasattr(self, "sort_level2_col") and isinstance(self.sort_level2_col, int) and 0 <= self.sort_level2_col < len(cols):
+                self.sort_level2_col = cols[self.sort_level2_col]
+            if hasattr(self, "sort_level3_col") and isinstance(self.sort_level3_col, int) and 0 <= self.sort_level3_col < len(cols):
+                self.sort_level3_col = cols[self.sort_level3_col]
+            if hasattr(self, "sortby_col") and isinstance(self.sortby_col, int) and 0 <= self.sortby_col < len(cols):
+                self.sortby_col = cols[self.sortby_col]
             
             headers = {
                 "code": "代码", 
@@ -2557,7 +2674,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 headers[f"pass_{p}"] = f"{p}通过"
 
             self.table.setColumnCount(len(columns))
-            self.table.setHorizontalHeaderLabels([headers.get(col, col) for col in columns])
+            for col_i, col in enumerate(columns):
+                header_text = headers.get(col, col)
+                h_item = QTableWidgetItem(header_text)
+                h_item.setData(Qt.ItemDataRole.UserRole, header_text)
+                h_item.setToolTip(col)
+                self.table.setHorizontalHeaderItem(col_i, h_item)
 
             try:
                 from global_favorites import GlobalFavoriteManager
@@ -2591,7 +2713,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 if pd.notna(category_str) and str(category_str).strip() not in ('', 'nan', '--'):
                     self._block_cache[code] = str(category_str).strip()
 
-                is_fav = code in fav_stocks
+                is_fav = str(code).strip().zfill(6) in fav_stocks
                 display_name = f"★ {name}" if is_fav else name
 
                 # Code
@@ -2607,9 +2729,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
                 # Price, Percent, Volume, Ratio
                 p_item = NumericTableWidgetItem(f"{price:.2f}")
+                p_item.setData(Qt.ItemDataRole.UserRole, price)
                 self.table.setItem(idx, 2, p_item)
 
                 pct_item = NumericTableWidgetItem(f"{percent:.2f}")
+                pct_item.setData(Qt.ItemDataRole.UserRole, percent)
                 if percent > 0:
                     pct_item.setForeground(QBrush(QColor("#ff4444")))
                 elif percent < 0:
@@ -2617,9 +2741,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self.table.setItem(idx, 3, pct_item)
 
                 v_item = NumericTableWidgetItem(f"{vol:.0f}" if vol > 1000 else f"{vol:.2f}")
+                v_item.setData(Qt.ItemDataRole.UserRole, vol)
                 self.table.setItem(idx, 4, v_item)
 
                 r_item = NumericTableWidgetItem(f"{ratio:.2f}")
+                r_item.setData(Qt.ItemDataRole.UserRole, ratio)
                 self.table.setItem(idx, 5, r_item)
 
                 c_idx = 6
@@ -2628,15 +2754,24 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     for p in disp_periods:
                         val = '--'
                         col_name = f"{c}_{p}"
+                        raw_val = None
                         if col_name in filtered_df.columns:
                             raw_val = row.get(col_name)
-                            if pd.notna(raw_val):
-                                if isinstance(raw_val, (int, float)):
-                                    val = f"{raw_val:.2f}"
-                                else:
-                                    val = str(raw_val)
+                        elif c in filtered_df.columns:
+                            raw_val = row.get(c)
+
+                        if raw_val is not None and pd.notna(raw_val):
+                            if isinstance(raw_val, (int, float)):
+                                val = f"{raw_val:.2f}" if isinstance(raw_val, float) else str(raw_val)
+                            else:
+                                val = str(raw_val)
                         
-                        item = NumericTableWidgetItem(val) if val != '--' else QTableWidgetItem(val)
+                        if val != '--':
+                            item = NumericTableWidgetItem(val)
+                            item.setData(Qt.ItemDataRole.UserRole, raw_val)
+                        else:
+                            item = QTableWidgetItem(val)
+                            item.setData(Qt.ItemDataRole.UserRole, -999999.0)
                         self.table.setItem(idx, c_idx, item)
                         c_idx += 1
 
@@ -2649,7 +2784,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     self.table.setItem(idx, c_idx, item)
                     c_idx += 1
 
-            self.table.setSortingEnabled(True)
+            self.table.setSortingEnabled(False)
             logger.info(f"[MultiPeriodDialog] Table populated successfully. Column count: {self.table.columnCount()}, Row count: {self.table.rowCount()}")
             
             # Setup narrow default widths configuration
@@ -2662,19 +2797,22 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 elif col == "price":
                     w = 50
                 elif col == "percent":
-                    w = 55
+                    w = 50
                 elif col == "volume":
-                    w = 60
+                    w = 55
                 elif col == "ratio":
                     w = 45
                 elif col.startswith("pass_"):
-                    w = 55
+                    w = 45
                 else:
-                    w = 50
+                    # 自定义指标默认极窄紧凑宽度 48px
+                    w = 48
                 default_widths[idx] = w
             
             self.table.setup_persistence("multi_period_table", default_widths=default_widths)
-            if not getattr(self.table, "_first_width_applied", False):
+            
+            # 当动态新增/减少列导致列数变化时，自动强制重置 setColumnWidth 并更新 _base_widths
+            if not getattr(self.table, "_first_width_applied", False) or len(getattr(self.table, "_base_widths", [])) != len(columns):
                 self.table._first_width_applied = True
                 for idx, w in default_widths.items():
                     self.table.setColumnWidth(idx, w)
@@ -2683,7 +2821,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             base_widths = []
             for i in range(self.table.columnCount()):
                 w = self.table.columnWidth(i)
-                base_widths.append(w if w > 0 else default_widths.get(i, 50))
+                base_widths.append(w if w > 0 else default_widths.get(i, 48))
             self.table._base_widths = base_widths
 
             # Automatically stretch columns to utilize viewport width
@@ -2698,6 +2836,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                         self._last_selected_code = selected_code
                         break
 
+            self._update_header_labels()
+            self._perform_multi_level_sort()
             self.update_concept_ranking(filtered_df)
         except Exception as ex:
             import traceback
@@ -2706,6 +2846,299 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         finally:
             self._is_updating = False
             self.table._is_updating = False
+
+    def _on_header_clicked(self, logical_index):
+        cols = getattr(self, "_current_table_columns", [])
+        if not cols or logical_index >= len(cols):
+            return
+        col_name = cols[logical_index]
+
+        # 1. 检查当前是否点击了多级排序列之一 (L1-L3)
+        is_multi_clicked = False
+        if col_name == getattr(self, "sort_level1_col", None):
+            self.sort_level1_asc = not self.sort_level1_asc
+            is_multi_clicked = True
+        elif col_name == getattr(self, "sort_level2_col", None):
+            self.sort_level2_asc = not self.sort_level2_asc
+            is_multi_clicked = True
+        elif col_name == getattr(self, "sort_level3_col", None):
+            self.sort_level3_asc = not self.sort_level3_asc
+            is_multi_clicked = True
+            
+        if is_multi_clicked:
+            self._update_header_labels()
+            self._perform_multi_level_sort()
+            self._save_state()
+            return
+            
+        # 2. 如果当前有 L1 主排序，点击全新列时，设为临时从/次排序后缀（保持主排序不动！）
+        if getattr(self, "sort_level1_col", None) is not None:
+            if getattr(self, "sortby_col", None) == col_name:
+                self.sortby_col_ascend = not self.sortby_col_ascend
+            else:
+                self.sortby_col = col_name
+                self.sortby_col_ascend = False
+        else:
+            # 一键自动解除所有多级排序，切回单列排序
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
+            if getattr(self, "sortby_col", None) == col_name:
+                self.sortby_col_ascend = not self.sortby_col_ascend
+            else:
+                self.sortby_col = col_name
+                self.sortby_col_ascend = False
+            
+        self._update_header_labels()
+        self._perform_multi_level_sort()
+        self._save_state()
+
+    def _on_header_context_menu(self, pos):
+        header = self.table.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+        if logical_index < 0:
+            return
+            
+        cols = getattr(self, "_current_table_columns", [])
+        if not cols or logical_index >= len(cols):
+            return
+        col_name = cols[logical_index]
+            
+        header_item = self.table.horizontalHeaderItem(logical_index)
+        raw_col_name = header_item.text() if header_item else f"第{logical_index+1}列"
+        for prefix in ["🔴[主] ", "🟡[从] ", "🟢[次] ", "↓ ", "↑ "]:
+            raw_col_name = raw_col_name.replace(prefix, "")
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1a1a24; border: 1px solid #2e2e36; color: #e2e2e5; padding: 4px; }
+            QMenu::item { padding: 6px 20px; border-radius: 4px; }
+            QMenu::item:selected { background-color: #2c2c35; color: #ffffff; }
+        """)
+        
+        action_l1 = QAction(f"🔴 设为 【主排序】 ({raw_col_name})", self)
+        action_l2 = QAction(f"🟡 设为 【从排序】 ({raw_col_name})", self)
+        action_l3 = QAction(f"🟢 设为 【次排序】 ({raw_col_name})", self)
+        
+        menu.addAction(action_l1)
+        menu.addAction(action_l2)
+        menu.addAction(action_l3)
+        menu.addSeparator()
+        
+        action_clear_col = QAction("❌ 取消此列的排序设置", self)
+        action_clear_all = QAction("🚫 清空所有多级排序", self)
+        menu.addAction(action_clear_col)
+        menu.addAction(action_clear_all)
+        
+        global_pos = header.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        if not selected_action:
+            return
+            
+        if selected_action == action_l1:
+            self.sort_level1_col = col_name
+            self.sort_level1_asc = True
+        elif selected_action == action_l2:
+            self.sort_level2_col = col_name
+            self.sort_level2_asc = True
+        elif selected_action == action_l3:
+            self.sort_level3_col = col_name
+            self.sort_level3_asc = True
+        elif selected_action == action_clear_col:
+            if getattr(self, "sort_level1_col", None) == col_name: self.sort_level1_col = None
+            if getattr(self, "sort_level2_col", None) == col_name: self.sort_level2_col = None
+            if getattr(self, "sort_level3_col", None) == col_name: self.sort_level3_col = None
+            if getattr(self, "sortby_col", None) == col_name: self.sortby_col = None
+        elif selected_action == action_clear_all:
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
+            self.sortby_col = None
+            self.sortby_col_ascend = False
+            
+        self._update_header_labels()
+        self._perform_multi_level_sort()
+        self._save_state()
+
+    def _update_header_labels(self):
+        col_count = self.table.columnCount()
+        def get_col_idx_by_name(val):
+            if val is None:
+                return None
+            if isinstance(val, int):
+                return val if 0 <= val < col_count else None
+            if isinstance(val, str):
+                cols = getattr(self, "_current_table_columns", [])
+                if val in cols:
+                    return cols.index(val)
+            return None
+
+        bound_cols = set()
+        l1 = get_col_idx_by_name(getattr(self, "sort_level1_col", None))
+        l2 = get_col_idx_by_name(getattr(self, "sort_level2_col", None))
+        l3 = get_col_idx_by_name(getattr(self, "sort_level3_col", None))
+        sb = get_col_idx_by_name(getattr(self, "sortby_col", None))
+        sb_asc = getattr(self, "sortby_col_ascend", False)
+        
+        if l1 is not None: bound_cols.add(l1)
+        if l2 is not None: bound_cols.add(l2)
+        if l3 is not None: bound_cols.add(l3)
+        
+        for col_idx in range(self.table.columnCount()):
+            item = self.table.horizontalHeaderItem(col_idx)
+            if not item:
+                continue
+                
+            clean_text = item.data(Qt.ItemDataRole.UserRole)
+            if not clean_text:
+                clean_text = item.text()
+                for prefix in ["🔴[主]", "🟡[从]", "🟢[次]", "↓", "↑", "[主]", "[从]", "[次]"]:
+                    clean_text = clean_text.replace(prefix, "")
+                clean_text = clean_text.strip()
+                item.setData(Qt.ItemDataRole.UserRole, clean_text)
+                
+            text = clean_text
+            prefix = ""
+            asc = True
+            is_sorted = False
+            
+            if l1 == col_idx:
+                prefix = "🔴[主] "
+                asc = getattr(self, "sort_level1_asc", True)
+                is_sorted = True
+            elif l2 == col_idx:
+                prefix = "🟡[从] "
+                asc = getattr(self, "sort_level2_asc", True)
+                is_sorted = True
+            elif l3 == col_idx:
+                prefix = "🟢[次] "
+                asc = getattr(self, "sort_level3_asc", True)
+                is_sorted = True
+                
+            if l1 is not None and col_idx not in bound_cols:
+                if sb == col_idx:
+                    cnt = len(bound_cols)
+                    if cnt == 1:
+                        prefix = "🟡[从] "
+                    elif cnt >= 2:
+                        prefix = "🟢[次] "
+                    asc = sb_asc
+                    is_sorted = True
+            elif l1 is None:
+                if sb == col_idx:
+                    asc = sb_asc
+                    is_sorted = True
+                    
+            if is_sorted:
+                arrow = "↑ " if asc else "↓ "
+                item.setText(f"{arrow}{prefix}{text}")
+            else:
+                item.setText(text)
+
+    def _perform_multi_level_sort(self):
+        row_count = self.table.rowCount()
+        col_count = self.table.columnCount()
+        if row_count <= 1 or col_count == 0:
+            return
+
+        def get_col_idx_by_name(val):
+            if val is None:
+                return None
+            if isinstance(val, int):
+                return val if 0 <= val < col_count else None
+            if isinstance(val, str):
+                cols = getattr(self, "_current_table_columns", [])
+                if val in cols:
+                    return cols.index(val)
+            return None
+
+        bound_cols = set()
+        active_levels = []
+
+        l1 = get_col_idx_by_name(getattr(self, "sort_level1_col", None))
+        l2 = get_col_idx_by_name(getattr(self, "sort_level2_col", None))
+        l3 = get_col_idx_by_name(getattr(self, "sort_level3_col", None))
+        sb = get_col_idx_by_name(getattr(self, "sortby_col", None))
+        sb_asc = getattr(self, "sortby_col_ascend", False)
+
+        if l1 is not None:
+            active_levels.append((l1, not getattr(self, "sort_level1_asc", True)))
+            bound_cols.add(l1)
+        if l2 is not None:
+            active_levels.append((l2, not getattr(self, "sort_level2_asc", True)))
+            bound_cols.add(l2)
+        if l3 is not None:
+            active_levels.append((l3, not getattr(self, "sort_level3_asc", True)))
+            bound_cols.add(l3)
+
+        # 100% 对齐 bidding_racing_panel.py 中的多级稳定级联排序算法
+        # 构建从低到高的层级列表 sort_levels: [最底层 (sb 临时列), L3 (次), L2 (从), L1 (主)]
+        sort_levels = []
+        
+        if l1 is None and l2 is None and l3 is None and sb is None:
+            # 兜底默认按涨幅% (第 3 列) 降序排列
+            sb = 3
+            sb_asc = False
+            
+        if sb is not None and sb not in bound_cols:
+            sort_levels.append((sb, not sb_asc))
+            
+        if l3 is not None:
+            sort_levels.append((l3, not getattr(self, "sort_level3_asc", True)))
+        if l2 is not None:
+            sort_levels.append((l2, not getattr(self, "sort_level2_asc", True)))
+        if l1 is not None:
+            sort_levels.append((l1, not getattr(self, "sort_level1_asc", True)))
+
+        # 备份每一行的单元格 item 并根据多级 key 稳定排序
+        rows_data = []
+        for r in range(row_count):
+            items = [self.table.takeItem(r, c) for c in range(col_count)]
+            rows_data.append((r, items))
+            
+        def get_val_for_sort(items, col_idx, is_descending):
+            if col_idx >= len(items) or items[col_idx] is None:
+                return -999999.0 if is_descending else 999999.0
+            
+            item = items[col_idx]
+            raw = item.data(Qt.ItemDataRole.UserRole)
+            if raw is not None and isinstance(raw, (int, float)):
+                return float(raw)
+
+            txt = item.text().strip()
+            if not txt or txt == '--':
+                return -999999.0 if is_descending else 999999.0
+            txt_clean = txt.replace('%', '').replace('+', '').replace('★ ', '')
+            try:
+                return float(txt_clean)
+            except ValueError:
+                return txt_clean.lower()
+                
+        # 1. 逐级依次对数据执行稳定排序 (Python sort 是 stable sort，倒序依次执行可保证高层级绝对覆盖并保留次层级相对位置)
+        for col_idx, is_descending in sort_levels:
+            try:
+                rows_data.sort(key=lambda pair: get_val_for_sort(pair[1], col_idx, is_descending), reverse=is_descending)
+            except TypeError:
+                rows_data.sort(key=lambda pair: str(get_val_for_sort(pair[1], col_idx, is_descending)), reverse=is_descending)
+
+        # 2. 100% 对齐竞价赛马板块最顶层：重点关注★ 优先级置顶排序 (稳定排序)
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+            def prio_key(pair):
+                items = pair[1]
+                code = str(items[0].text()).strip().zfill(6) if items and items[0] else ""
+                return 1 if code in fav_stocks else 0
+            rows_data.sort(key=prio_key, reverse=True)
+        except Exception:
+            pass
+            
+        self.table.setSortingEnabled(False)
+        for new_r, (old_r, items) in enumerate(rows_data):
+            for c_idx, item in enumerate(items):
+                if item:
+                    self.table.setItem(new_r, c_idx, item)
+        self.table.setSortingEnabled(False)
 
     def _build_flat_df(self, df):
         if df is None or df.empty:
