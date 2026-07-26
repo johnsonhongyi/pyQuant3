@@ -226,7 +226,7 @@ class MultiPeriodStrategyEngine:
                 "id": "tpl_bottom_oversold_wash_breakout",
                 "name": "★ 底部超跌洗盘+缩量企稳+放量拉升 [反转启动]",
                 "conditions": {
-                    "w": {"filter": "close > lower1 or dif > dea or close > ma5d", "weight": 1.5, "enabled": True},
+                    "w": {"filter": "close > lower or dif > dea or close > ma5d", "weight": 1.5, "enabled": True},
                     "3d": {"filter": "close > ma5d and (dif > dea or macd > macdlast1) and close < 1.3 * ma60d", "weight": 1.2, "enabled": True},
                     "d": {"filter": "percent > 1.5 and close > open and close > ma5d and (lastv0d > 1.3 * lastv1d or volume > 1.3 * lastv1d) and (lastv1d < lastv2d or lastv2d < lastv3d) and close < 1.25 * ma20d", "weight": 1.0, "enabled": True}
                 },

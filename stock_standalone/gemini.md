@@ -1,3 +1,7 @@
+## 2026-07-26 10:29
+- [x] **实现 TreeView 表头右键动态复制列名 (`instock_MonitorTK.py`)**：
+    - [x] 在 `on_tree_right_click` 表头右键菜单顶部新增 `📋 复制列名 ({col_name})` 指令。右键点击 TreeView 表头任意列时，菜单会根据点击列动态展示列名，点击即可一键将该列名复制到系统剪贴板并给出状态栏提示。
+
 ## 2026-07-26 10:22
 - [x] **修复 `QtCheckCodeDialog` 顶部标签对比度与高亮显示 (`multi_period_dialog.py`)**：
     - [x] 在 `QtCheckCodeDialog` QSS 样式表中显式补充了 `QLabel { color: #e2e2e5; font-weight: bold; }` 规则，彻底消除了顶部 `[ 检查结果摘要 ]`、`>>> 所有数据字段详情` 及 `过滤字段:` 标签在深色暗背景下前景色过暗、无法清晰识别的问题。
