@@ -9743,6 +9743,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             menu.add_separator()
             menu.add_command(label=f"❌ 取消此列的排序设置", command=lambda: self.clear_multi_sort_level(col_name))
             menu.add_command(label=f"🚫 清空所有多级排序", command=lambda: self.clear_all_multi_sort())
+            menu.add_separator()
+            menu.add_command(
+                label=f"📋 复制列名 ({col_name})",
+                command=lambda: [pyperclip.copy(col_name), self.status_var2.set(f"已复制列名 {col_name}")]
+            )
             
             menu.post(event.x_root, event.y_root)
             return
