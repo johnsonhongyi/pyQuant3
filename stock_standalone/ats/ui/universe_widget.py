@@ -340,6 +340,19 @@ class UniverseTreeWidget(QWidget):
                 item.setForeground(4, QColor("#e2e2e5"))
                 item.setForeground(5, QColor("#e2e2e5"))
             
+            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
+            strategy_str = str(strategy)
+            if '🔔' in strategy_str or '竞价' in strategy_str:
+                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥇' in strategy_str or '黄金' in strategy_str:
+                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥈' in strategy_str:
+                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
+            elif not is_fav:
+                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+
             # Respect A-share red/green convention for percentage column
             if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
                 item.setForeground(3, QColor(COLOR_UP))
@@ -372,6 +385,19 @@ class UniverseTreeWidget(QWidget):
                 item.setForeground(4, QColor("#e2e2e5"))
                 item.setForeground(5, QColor("#e2e2e5"))
             
+            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
+            strategy_str = str(strategy)
+            if '🔔' in strategy_str or '竞价' in strategy_str:
+                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥇' in strategy_str or '黄金' in strategy_str:
+                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥈' in strategy_str:
+                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
+            elif not is_fav:
+                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+
             # Respect A-share red/green convention for percentage column
             if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
                 item.setForeground(3, QColor(COLOR_UP))
@@ -404,6 +430,19 @@ class UniverseTreeWidget(QWidget):
                 item.setForeground(4, QColor("#e2e2e5"))
                 item.setForeground(5, QColor("#e2e2e5"))
             
+            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
+            strategy_str = str(strategy)
+            if '🔔' in strategy_str or '竞价' in strategy_str:
+                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥇' in strategy_str or '黄金' in strategy_str:
+                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
+                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+            elif '🥈' in strategy_str:
+                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
+            elif not is_fav:
+                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+
             # Respect A-share red/green convention for percentage column
             if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
                 item.setForeground(3, QColor(COLOR_UP))

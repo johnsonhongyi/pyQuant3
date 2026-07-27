@@ -19,6 +19,9 @@ from ats.ui.kernel_trace_panel import KernelTracePanel
 from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
+from ats.signal_ledger import SignalLedger
+from ats.volume_profiler import VolumeProfiler
+from ats.session_snapshot import SessionSnapshot
 from JohnsonUtil import commonTips as cct
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None):
@@ -698,6 +701,9 @@ class ATSMainWindow(QMainWindow):
         
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
+        self.signal_ledger = SignalLedger()
+        self.volume_profiler = VolumeProfiler()
+        self.session_snapshot = SessionSnapshot()
         self.stock_history_cache = {}
         self.dragon_monitor_dialog = None
         self.history_loading_codes = set()
@@ -2177,13 +2183,11 @@ class ATSMainWindow(QMainWindow):
                 self._last_price_fetch_time = now
                 self._async_load_stock_prices(missing_realtime_codes)
                 
-        # 2. Run pipeline filtering
+        # 2. 增量更新信号账本（替代全量重算，信号只增不删）
         if has_df:
-            self.universe_manager.run_pipeline_filtering(self.current_df)
-            
-        # 3. Update universe tree widget
-        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
-        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+            self._update_signal_ledger(self.current_df)
+            # 从信号账本同步到三级池（稳定展示，不快速流动）
+            self.universe_manager.sync_from_ledger(self.signal_ledger)
         
         # 4. Update swing state table
         missing_history_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
@@ -2317,8 +2321,21 @@ class ATSMainWindow(QMainWindow):
                     else:
                         break
             
+            # 从信号账本提取首次发现和优先级评分，提供回退值
+            entry = self.signal_ledger.entries.get(code)
+            if entry:
+                from ats.signal_ledger import PHASE_LABELS
+                phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
+                first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
+                first_seen = f"{phase_label} [{first_time}]"
+                priority_val = f"{entry.priority_score:.1f}"
+            else:
+                first_seen = "⏳ 初始/持仓"
+                priority_val = "0.0"
+                
             swing_rows.append((
                 code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
+                first_seen, priority_val,
                 f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", f"{rs_val:+.2f}%", resonance, reason
             ))
             
@@ -2327,6 +2344,10 @@ class ATSMainWindow(QMainWindow):
             
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
+
+        # 7. 更新三级池 UI 展示
+        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
             
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
@@ -2349,6 +2370,115 @@ class ATSMainWindow(QMainWindow):
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
                         widget.update_data(row)
+
+    def _update_signal_ledger(self, df_all):
+        """增量更新信号账本（核心方法 — 替代全量 run_pipeline_filtering）
+
+        核心逻辑:
+        1. 扫描全市场 DataFrame，计算 MA20 偏离度
+        2. 偏离度在范围内的标的 → 写入 SignalLedger
+        3. 已存在的信号 → 仅更新最新价格，不改变首次发现时间
+        4. 更新 VolumeProfiler 量能画像
+        5. 定时执行 SessionSnapshot 快照持久化
+
+        时间复杂度: O(候选数) 而非 O(全市场), 大幅降低 UI 开销
+        """
+        import pandas as pd
+
+        if df_all is None or df_all.empty:
+            return
+
+        # 1. 更新大盘量能环境上下文
+        self.volume_profiler.update_market_context(df_all)
+
+        # 2. 定位 MA20 列
+        ma20_col = None
+        for col_name in ['ma20d', 'ma20', 'MA20', 'ma20_series']:
+            if col_name in df_all.columns:
+                ma20_col = col_name
+                break
+
+        if not ma20_col:
+            return
+
+        # 3. 计算全市场偏离度（向量化计算，极速）
+        close_col = 'close' if 'close' in df_all.columns else 'price'
+        if close_col not in df_all.columns:
+            return
+
+        close_s = pd.to_numeric(df_all[close_col], errors='coerce')
+        safe_ma20 = pd.to_numeric(df_all[ma20_col], errors='coerce').replace(0, float('nan'))
+        dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
+
+        # 4. 筛选偏离度在目标范围内 OR 已在 ledger 中的标的
+        tracked_codes = set(self.signal_ledger.entries.keys())
+        valid_mask = (
+            ((dev_series >= self.signal_ledger.DEVIATION_MIN) &
+             (dev_series <= self.signal_ledger.DEVIATION_MAX)) |
+            df_all.index.isin(tracked_codes)
+        )
+        target_df = df_all[valid_mask]
+
+        # 5. 增量写入信号账本
+        for code, row in target_df.iterrows():
+            code_str = str(code).strip()
+            if not code_str or code_str in ('sh000001', 'sz399001', 'sz399006', '000001.SH', '399001.SZ', '399006.SZ'):
+                continue  # 跳过指数
+
+            try:
+                name = str(row.get('name', ''))
+                price = float(row.get(close_col, 0.0))
+                pct = float(row.get('percent', 0.0))
+
+                ma20_val = 0.0
+                try:
+                    ma20_val = float(row.get(ma20_col, 0.0))
+                except (TypeError, ValueError):
+                    pass
+
+                if price <= 0 or ma20_val <= 0:
+                    continue
+
+                deviation = (price - ma20_val) / ma20_val * 100.0
+
+                # 更新量能画像
+                self.volume_profiler.update_profile(code_str, row)
+                vol_score = self.volume_profiler.get_volume_score(code_str)
+
+                # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
+                self.signal_ledger.record_signal(
+                    code=code_str,
+                    name=name,
+                    price=price,
+                    pct=pct,
+                    deviation=deviation,
+                    row=row,
+                    volume_score=vol_score,
+                )
+            except Exception:
+                continue  # 单只股票异常不中断主流程
+
+        # 6. 定时快照持久化
+        if self.session_snapshot.should_snapshot():
+            self.session_snapshot.save_snapshot(self.signal_ledger)
+            self.session_snapshot.cleanup_old_snapshots()
+
+        # 7. 状态栏显示信号统计
+        stats = self.signal_ledger.get_stats()
+        tier_info = stats.get('tiers', {})
+        radar_n = tier_info.get('RADAR', 0)
+        watch_n = tier_info.get('WATCH', 0)
+        trade_n = tier_info.get('TRADE', 0)
+
+        # 大盘环境标签
+        env_label = ''
+        if self.volume_profiler.market_context.is_rebound_from_shrink:
+            env_label = f' | 🔥 缩量{self.volume_profiler.market_context.consecutive_market_shrink_days}日后反弹'
+
+        self.status_bar.showMessage(
+            f"📊 信号池: 候选 {radar_n} | 精选 {watch_n} | 实盘 {trade_n} | "
+            f"今日新发现: {stats.get('today_new', 0)}{env_label}"
+        )
 
     def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
         """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪"""

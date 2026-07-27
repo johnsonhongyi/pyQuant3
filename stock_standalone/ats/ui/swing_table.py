@@ -48,16 +48,16 @@ class SwingStateTable(QWidget):
 
         # Table
         self.table = BaseATSTableWidget()
-        self.table.setColumnCount(14)
+        self.table.setColumnCount(16)
         self.table.setHorizontalHeaderLabels([
-            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振", "推荐理由"
+            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振", "推荐理由"
         ])
         
         # Table configuration using base widget's persistence
         self.table.setup_persistence(
-            config_key="ats_swing_table_state",
-            default_widths=[90, 100, 90, 110, 110, 90, 100, 60, 50, 60, 60, 75, 75, 250],
-            max_widths={13: 350}
+            config_key="ats_swing_table_state_v2",
+            default_widths=[90, 100, 90, 110, 110, 90, 100, 110, 75, 60, 50, 60, 60, 75, 75, 250],
+            max_widths={15: 350}
         )
         
         self.table.setAlternatingRowColors(True)
@@ -71,14 +71,14 @@ class SwingStateTable(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         
-        # Mock data: code, name, price, state, ma20_dist, limit_ups, position, dff, rank, dff2, dff3, relative_strength, resonance, reason
+        # Mock data: code, name, price, state, ma20_dist, limit_ups, position, first_seen, priority, dff, rank, dff2, dff3, relative_strength, resonance, reason
         mock_data = [
-            ("600519", "贵州茅台", "1650.00", "回踩中", "-0.85%", "0", "0%", "1.2", "15", "0.8", "0.5", "+0.35%", "同步整理", "日线缩量向20日均线靠拢"),
-            ("002415", "海康威视", "32.40", "回踩企稳", "+0.15%", "1", "15%", "2.5", "8", "1.5", "1.0", "+1.25%", "逆市抗跌", "MA20强支撑处出现十字星K线"),
-            ("300750", "宁电时代", "185.50", "持股中", "+3.20%", "0", "20%", "4.2", "3", "2.8", "2.1", "+4.50%", "大盘共振", "回踩确认后阳线收回，多头排列"),
-            ("600111", "北方稀土", "19.25", "持股中", "+4.85%", "2", "30%", "5.5", "1", "3.5", "2.8", "+6.20%", "大盘共振", "放量冲出平台，强势上涨波段"),
-            ("000001", "平安银行", "10.45", "已平仓", "-1.50%", "0", "0%", "-1.0", "88", "-0.5", "-0.8", "-1.20%", "同步走弱", "跌破20日均线离场信号触发"),
-            ("002594", "比亚迪", "245.00", "回踩企稳", "+0.05%", "0", "10%", "1.8", "12", "1.2", "0.9", "+0.80%", "同步整理", "前期大涨后回踩MA20量能极度萎缩")
+            ("600519", "贵州茅台", "1650.00", "回踩中", "-0.85%", "0", "0%", "🥈 盘中跟进 [10:15]", "75.5", "1.2", "15", "0.8", "0.5", "+0.35%", "同步整理", "日线缩量向20日均线靠拢"),
+            ("002415", "海康威视", "32.40", "回踩企稳", "+0.15%", "1", "15%", "🔔 竞价先手 [09:25]", "92.0", "2.5", "8", "1.5", "1.0", "+1.25%", "逆市抗跌", "MA20强支撑处出现十字星K线"),
+            ("300750", "宁德时代", "185.50", "持股中", "+3.20%", "0", "20%", "🥇 黄金早盘 [09:35]", "88.5", "4.2", "3", "2.8", "2.1", "+4.50%", "大盘共振", "回踩确认后阳线收回，多头排列"),
+            ("600111", "北方稀土", "19.25", "持股中", "+4.85%", "2", "30%", "🥇 黄金早盘 [09:42]", "84.2", "5.5", "1", "3.5", "2.8", "+6.20%", "大盘共振", "放量冲出平台，强势上涨波段"),
+            ("000001", "平安银行", "10.45", "已平仓", "-1.50%", "0", "0%", "🥈 盘中跟进 [11:10]", "45.0", "-1.0", "88", "-0.5", "-0.8", "-1.20%", "同步走弱", "跌破20日均线离场信号触发"),
+            ("002594", "比亚迪", "245.00", "回踩企稳", "+0.05%", "0", "10%", "🔔 竞价先手 [09:20]", "95.5", "1.8", "12", "1.2", "0.9", "+0.80%", "同步整理", "前期大涨后回踩MA20量能极度萎缩")
         ]
 
         from global_favorites import GlobalFavoriteManager
@@ -128,7 +128,19 @@ class SwingStateTable(QWidget):
                     if text != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
-                elif col_idx in (7, 9, 10): # DFF, DFF2, DFF3
+                elif col_idx == 7: # 首次发现 (时段时间)
+                    # 早期先手信号高亮
+                    strategy_str = str(text)
+                    if '🔔' in strategy_str or '竞价' in strategy_str:
+                        item.setForeground(QColor("#FF4444"))
+                        item.setFont(self._get_bold_font())
+                    elif '🥇' in strategy_str or '黄金' in strategy_str:
+                        item.setForeground(QColor("#FFD700"))
+                        item.setFont(self._get_bold_font())
+                elif col_idx == 8: # 优先级评分
+                    item.setForeground(QColor(COLOR_ACCENT))
+                    item.setFont(self._get_bold_font())
+                elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3 (以前是 7, 9, 10)
                     try:
                         val = float(text)
                         if val > 0:
@@ -139,7 +151,7 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 11: # 大盘偏离 (Relative Strength)
+                elif col_idx == 13: # 大盘偏离 (以前是 11)
                     try:
                         clean_text = text.replace("%", "").replace("+", "")
                         val = float(clean_text)
@@ -153,22 +165,22 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 12: # 大盘共振 (Resonance)
+                elif col_idx == 14: # 大盘共振 (以前是 12)
                     if text == "逆市抗跌":
-                        item.setForeground(QColor("#FF7F50")) # 亮橘色珊瑚色
+                        item.setForeground(QColor("#FF7F50"))
                         item.setFont(self._get_bold_font())
                     elif text == "大盘共振":
-                        item.setForeground(QColor("#FF3333")) # 亮红色
+                        item.setForeground(QColor("#FF3333"))
                         item.setFont(self._get_bold_font())
                     elif text == "同步走弱":
-                        item.setForeground(QColor(COLOR_DOWN)) # 绿色
+                        item.setForeground(QColor(COLOR_DOWN))
                     else:
                         item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={13: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={15: 350})
         self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
@@ -223,7 +235,18 @@ class SwingStateTable(QWidget):
                     if str(text) != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
-                elif col_idx in (7, 9, 10): # DFF, DFF2, DFF3
+                elif col_idx == 7: # 首次发现 (时段时间)
+                    strategy_str = str(text)
+                    if '🔔' in strategy_str or '竞价' in strategy_str:
+                        item.setForeground(QColor("#FF4444"))
+                        item.setFont(self._get_bold_font())
+                    elif '🥇' in strategy_str or '黄金' in strategy_str:
+                        item.setForeground(QColor("#FFD700"))
+                        item.setFont(self._get_bold_font())
+                elif col_idx == 8: # 优先级评分
+                    item.setForeground(QColor(COLOR_ACCENT))
+                    item.setFont(self._get_bold_font())
+                elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3
                     try:
                         val = float(text)
                         if val > 0:
@@ -234,7 +257,7 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 11: # 大盘偏离 (Relative Strength)
+                elif col_idx == 13: # 大盘偏离 (Relative Strength)
                     try:
                         clean_text = text.replace("%", "").replace("+", "")
                         val = float(clean_text)
@@ -248,22 +271,22 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 12: # 大盘共振 (Resonance)
+                elif col_idx == 14: # 大盘共振 (Resonance)
                     if text == "逆市抗跌":
-                        item.setForeground(QColor("#FF7F50")) # 亮橘色珊瑚色
+                        item.setForeground(QColor("#FF7F50"))
                         item.setFont(self._get_bold_font())
                     elif text == "大盘共振":
-                        item.setForeground(QColor("#FF3333")) # 亮红色
+                        item.setForeground(QColor("#FF3333"))
                         item.setFont(self._get_bold_font())
                     elif text == "同步走弱":
-                        item.setForeground(QColor(COLOR_DOWN)) # 绿色
+                        item.setForeground(QColor(COLOR_DOWN))
                     else:
                         item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state", max_widths={13: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={15: 350})
         self.table.setSortingEnabled(True)
 
     def _get_bold_font(self):
@@ -281,16 +304,18 @@ class SwingStateTable(QWidget):
             ma20_dist = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
             limit_ups = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
             pos = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
-            dff = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
-            rank = self.table.item(row, 8).text() if self.table.item(row, 8) else ""
-            dff2 = self.table.item(row, 9).text() if self.table.item(row, 9) else ""
-            dff3 = self.table.item(row, 10).text() if self.table.item(row, 10) else ""
-            rs = self.table.item(row, 11).text() if self.table.item(row, 11) else ""
-            resonance = self.table.item(row, 12).text() if self.table.item(row, 12) else ""
-            reason = self.table.item(row, 13).text() if self.table.item(row, 13) else ""
+            first_seen = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            priority = self.table.item(row, 8).text() if self.table.item(row, 8) else ""
+            dff = self.table.item(row, 9).text() if self.table.item(row, 9) else ""
+            rank = self.table.item(row, 10).text() if self.table.item(row, 10) else ""
+            dff2 = self.table.item(row, 11).text() if self.table.item(row, 11) else ""
+            dff3 = self.table.item(row, 12).text() if self.table.item(row, 12) else ""
+            rs = self.table.item(row, 13).text() if self.table.item(row, 13) else ""
+            resonance = self.table.item(row, 14).text() if self.table.item(row, 14) else ""
+            reason = self.table.item(row, 15).text() if self.table.item(row, 15) else ""
             context_info = {
                 'position': '波段回调跟踪器 (Swing Pullback Tracker)',
                 'reason': reason,
-                'status': f"MA20偏离: {ma20_dist} | 连板/新高天数: {limit_ups} | 推荐仓位: {pos} | 当前状态: {state} | DFF: {dff} | Rank: {rank} | 大盘偏离: {rs} | 共振: {resonance}"
+                'status': f"MA20偏离: {ma20_dist} | 连板数: {limit_ups} | 首次发现: {first_seen} | 优先级: {priority} | DFF: {dff} | Rank: {rank} | 大盘偏离: {rs} | 共振: {resonance}"
             }
             self.stock_double_clicked.emit(code, name, context_info)
