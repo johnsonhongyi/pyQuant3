@@ -1683,7 +1683,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QComboBox { background-color: #212130; color: #ffffff; border: 1px solid #2e2e3e; border-radius: 4px; padding: 4px; }
             QCheckBox { color: #b0bec5; }
             QSplitter::handle { background-color: #2e2e3e; }
+            QTableView { selection-background-color: #1a8cff; selection-color: #ffffff; }
+            QTableView::item:selected { background-color: #1a8cff; color: #ffffff; }
+            QTableView::item:selected:!active { background-color: #3399ff; color: #ffffff; }
         """)
+
 
         # Initialize Strategy Engine
         self.engine = MultiPeriodStrategyEngine()
@@ -1785,9 +1789,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return
         try:
             strat_name = self.strategy_combo.currentText()
+            import re
+            clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
             strat_id = ""
             for s in self.strategies:
-                if s['name'] == strat_name:
+                if s['name'] == clean_strat_name:
                     strat_id = s['id']
                     break
             
@@ -1872,9 +1878,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 border-color: #00e676;
             }
         """)
-        self.lbl_hit_status.setToolTip("点击即可快速触发该策略的 Hit 命中测试")
+        self.lbl_hit_status.setToolTip("点击即可快速对全策略进行 Hit 命中测试")
         self.lbl_hit_status.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_hit_status.mousePressEvent = lambda e: self.run_filter(force_reload=False)
+        self.lbl_hit_status.mousePressEvent = lambda e: self._test_all_strategies_hit()
         tb1_layout.addWidget(self.lbl_hit_status)
 
         tb1_layout.addWidget(QLabel(" 参与周期:", self))
@@ -2294,7 +2300,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return
 
         strat_name = self.strategy_combo.currentText()
-        strat_config = next((s for s in self.strategies if s['name'] == strat_name), None)
+        import re
+        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
+        strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
         if not strat_config:
             return
 
@@ -2391,6 +2399,82 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         tip_lines.append(f"★ 多周期组合最终筛选: {total_hit} 只")
         tip_lines.append("\n(点击胶囊框即可快速再次触发 Hit 命中测试)")
         self.lbl_hit_status.setToolTip("\n".join(tip_lines))
+
+    def _test_all_strategies_hit(self):
+        # 确保基础行情数据已就绪
+        if self.top_now is None or self.top_now.empty:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.lbl_status.setText("正在获取全市场实时行情数据...")
+            QApplication.processEvents()
+            try:
+                self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.critical(self, "错误", f"初始化市场基础数据失败: {e}")
+                self.lbl_status.setText("准备就绪")
+                return
+            QApplication.restoreOverrideCursor()
+
+        # 确保当前选中的周期基础数据已载入
+        active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
+        if not active_periods:
+            QMessageBox.warning(self, "警告", "请至少选择一个参与周期！")
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.lbl_status.setText("正在同步各周期历史特征数据...")
+        QApplication.processEvents()
+        try:
+            for period in active_periods:
+                if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
+                    self.engine.load_period_data(period, self.top_now)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "错误", f"加载周期特征数据出错: {e}")
+            self.lbl_status.setText("准备就绪")
+            return
+
+        self.lbl_status.setText("正在测试全量策略 Hit 命中只数...")
+        QApplication.processEvents()
+
+        self.strategy_combo.blockSignals(True)
+        current_text = self.strategy_combo.currentText()
+        import re
+        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
+
+        try:
+            for idx, strat in enumerate(self.strategies):
+                try:
+                    res_df = self.engine.evaluate_strategy(strat, active_periods)
+                    hit_cnt = len(res_df) if res_df is not None else 0
+                except Exception as ex:
+                    logger.warning(f"Failed to evaluate strategy {strat['name']}: {ex}")
+                    hit_cnt = 0
+                
+                # 剥离原有的 Hit 后缀并追加新的
+                raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat['name'])
+                new_text = f"{raw_name} [Hit: {hit_cnt}]"
+                self.strategy_combo.setItemText(idx, new_text)
+
+            # 恢复之前选中的策略索引
+            matched_idx = 0
+            for i in range(self.strategy_combo.count()):
+                t = self.strategy_combo.itemText(i)
+                if re.sub(r'\s*\[Hit:\s*\d+\]$', '', t) == clean_current_text:
+                    matched_idx = i
+                    break
+            self.strategy_combo.setCurrentIndex(matched_idx)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.lbl_status.setText("✅ 全量策略 Hit 命中测试完成！")
+            self.strategy_combo.blockSignals(False)
+
+            # 手动同步刷新 lbl_hit_status
+            strat_name = self.strategy_combo.currentText()
+            match = re.search(r'\[Hit:\s*(\d+)\]$', strat_name)
+            if match:
+                curr_hit = int(match.group(1))
+                self.lbl_hit_status.setText(f"🎯 Hit: {curr_hit}只")
 
         # Automatically update Dragon Monitor if it is currently open and visible
         if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
@@ -3509,8 +3593,23 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             if not name or name == "未知股票":
                 name = "未知股票"
 
+        # 定位 tree 视图（表格）中的 code，若未找到则进行消息提示
+        found = False
+        for r in range(self.table.rowCount()):
+            c_item = self.table.item(r, 0)
+            if c_item and c_item.text().strip().zfill(6) == code:
+                self.table.setCurrentCell(r, 0)
+                self.table.scrollToItem(c_item)
+                found = True
+                break
+        if not found:
+            from stock_logic_utils import toast_messageQT
+            toast_messageQT(self, f"在当前列表中未找到股票 {code} {name}", duration=2500)
+
         strat_name = self.strategy_combo.currentText()
-        strat_config = next((s for s in self.strategies if s['name'] == strat_name), None)
+        import re
+        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
+        strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
         if not strat_config:
             QMessageBox.warning(self, "警告", "未选中任何有效策略！")
             return
@@ -4053,10 +4152,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.strategies = new_strategies
         self.strategy_combo.blockSignals(True)
         current_text = self.strategy_combo.currentText()
+        import re
+        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
         self.strategy_combo.clear()
         self.strategy_combo.addItems([s['name'] for s in self.strategies])
-        if current_text in [s['name'] for s in self.strategies]:
-            self.strategy_combo.setCurrentText(current_text)
+        
+        matched_idx = -1
+        for i in range(self.strategy_combo.count()):
+            if self.strategy_combo.itemText(i) == clean_current_text:
+                matched_idx = i
+                break
+        if matched_idx >= 0:
+            self.strategy_combo.setCurrentIndex(matched_idx)
         else:
             if self.strategies:
                 self.strategy_combo.setCurrentIndex(0)

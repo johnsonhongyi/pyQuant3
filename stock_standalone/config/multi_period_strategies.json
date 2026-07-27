@@ -1,6 +1,72 @@
 {
   "strategies": [
     {
+      "id": "tpl_rebound_staircase_breakout",
+      "name": "🔥 异动回调整固+4日高低点连续抬升+MACD多阶修复加速起爆 [倍益康/解套起爆模式] [2026-07-27]",
+      "conditions": {
+        "m": {
+          "filter": "close > ma5d and (dif > dea or close > lower or ma5d > ma10d)",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= lower and (dif > dea or macd > macdlast1 or close > ma5d)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "close >= 0.98 * ma5d and (dif > dea or macd > macdlast1 or {or: macdlast{1-3} > 0})",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "close >= lastl1d and (dif > dea or macd > macdlast1 or macdlast1 > macdlast2)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "{and: lastl{1-3}d >= lastl{2-4}d} and {and: lasth{1-3}d >= lasth{2-4}d} and dif > dea and (dif > dif1d or dif1d > dif2d) and (macd > macdlast1 or {or: macdlast{1-4} > 0}) and percent > 3.0 and close > open and close > lastp1d and (lastv0d > 1.2 * lastv1d or volume > 1.25 * lastv2d or volume > 1.3) and dff2 < 18.0",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【买点与形态逻辑 (倍益康 920199 / 4日阶梯抬升解套起爆模式)】\n1. 异动下杀后底座整固：前期经历异动冲高回调，近4个交易日走出高点和低点连续阶梯式抬升 (lasth1d>=lasth2d>=lasth3d>=lasth4d, lastl1d>=lastl2d>=lastl3d>=lastl4d) 的坚实底座。\n2. 底层 MACD 全阶 9 日信号修复：DIF 与 DEA 呈向上金叉/修复 (dif > dea, dif > dif1d)，MACD 绿柱持续收窄缩短或红柱剧烈放大伸长。\n3. 当日爆发加速买点：当日量能较地量洗盘大增 (volume > 1.25 * lastv2d)，放量大阳线 (percent > 3.0%, close > open) 向上突破前高起爆；贴近 MA10 均线 (dff2 < 18.0) 具备安全性价比。"
+    },
+    {
+      "id": "tpl_pre_breakout_staircase_layout",
+      "name": "🔥 异动回调整固+4日高低点抬升+MACD9阶拐点 [起爆前1-2天低吸潜伏] [2026-07-27]",
+      "conditions": {
+        "m": {
+          "filter": "close > ma5d and (dif > dea or close > lower or ma5d > ma10d or macd > 0)",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= 0.95 * lower and (dif > dea or macd > macdlast1 or close > ma5d)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "close >= 0.96 * lower and (dif > dea or macd > macdlast1 or {or: macdlast{1-3} > 0})",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "close >= lastl1d and (dif > dea or macd > macdlast1 or macdlast1 > macdlast2) and (lastv1d < lastv2d or lastv1d < 0.85 * lastv3d)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "{and: lastl{1-3}d >= lastl{2-4}d} and {and: lasth{1-3}d >= lasth{2-4}d} and {and: abs(per{1-2}d) < 4.5} and (lastv1d < lastv2d or lastv1d < 0.85 * lastv3d) and (dif > dea or dif > dif1d or macd > macdlast1) and (dif1d > dif2d or macdlast1 > macdlast2 or {or: macdlast{1-4} > 0}) and percent >= -2.0 and percent <= 3.8 and dff2 < 12.0",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【买点与形态逻辑 (起爆前1-2天低吸伏击模式/避免盘中追高)】\n1. 解决盘中暴涨无法跟单痛点：放弃在拉升大阳线当天追高，专门捕捉“异动下杀企稳后、爆发前1~2天”地量低吸买点。\n2. 4日高低点阶梯抬升+极缩地量：前1~4天低点与高点逐日抬高 (lastl1d>=lastl2d>=lastl3d, lasth1d>=lasth2d>=lasth3d)，前1~2天振幅极窄 (abs(per1d)<4.5%), 成交量萎缩极缩 (lastv1d<lastv2d)。\n3. MACD底层9阶动量修复拐点：MACD绿柱大幅缩短或DIF底层抬头 (dif>dif1d, macd>macdlast1)。\n4. 价格空间与防追高：限制当日涨幅 percent 在 -2.0% ~ +3.8% 且 dff2 < 12.0，在拉升前夕给出极其从容的安全低吸窗口。"
+    },
+    {
       "id": "tpl_macro_trend_ma60_rebound_launch",
       "name": "★ 大周期启动+回踩MA60d企稳次日加速 [日科化学模式] [2026-07-25]",
       "conditions": {
@@ -654,12 +720,12 @@
           "enabled": true
         },
         "3d": {
-          "filter": "close >= 0.95 * ma20d and (abs(per0d) < 4.5 or abs(per1d) < 4.5) and (lastv0d <= 1.2 * lastv1d or lastv1d <= lastv2d)",
+          "filter": "close >= 0.95 * ma20d and (abs(percent) < 4.5 or abs(per1d) < 4.5) and (lastv0d <= 1.2 * lastv1d or lastv1d <= lastv2d)",
           "weight": 1.2,
           "enabled": true
         },
         "2d": {
-          "filter": "(abs(per0d) < 3.8 or abs(per1d) < 3.8) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d) and close >= 0.95 * ma10d",
+          "filter": "(abs(percent) < 3.8 or abs(per1d) < 3.8) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d) and close >= 0.95 * ma10d",
           "weight": 1.1,
           "enabled": true
         },
@@ -682,12 +748,12 @@
           "enabled": true
         },
         "3d": {
-          "filter": "close >= 0.95 * ma20d and (abs(per0d) < 4.5 or abs(per1d) < 4.5) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d or {or: lastv{1-2}d < 0.72 * lastv{3-5}d})",
+          "filter": "close >= 0.95 * ma20d and (abs(percent) < 4.5 or abs(per1d) < 4.5) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d or {or: lastv{1-2}d < 0.72 * lastv{3-5}d})",
           "weight": 1.2,
           "enabled": true
         },
         "2d": {
-          "filter": "(abs(per0d) < 3.8 or abs(per1d) < 3.8) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d or lastv1d < lastv3d) and close >= 0.95 * ma10d",
+          "filter": "(abs(percent) < 3.8 or abs(per1d) < 3.8) and (lastv0d <= 1.15 * lastv1d or lastv1d <= 1.2 * lastv2d or lastv1d < lastv3d) and close >= 0.95 * ma10d",
           "weight": 1.1,
           "enabled": true
         },
