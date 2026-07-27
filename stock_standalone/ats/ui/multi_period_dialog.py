@@ -105,6 +105,77 @@ def safe_float(val, default=0.0):
         return default
 
 
+class AllStrategiesHitWorker(QThread):
+    """
+    QThread worker for evaluating hit counts for all strategies in the background.
+    """
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, engine, strategies, active_periods, top_now=None, period_cache_ts=None, top_now_cache_ts=None):
+        super().__init__()
+        self.engine = engine
+        self.strategies = strategies
+        self.active_periods = active_periods
+        self.top_now = top_now
+        self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
+        self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
+
+    def _is_cache_valid(self, ts):
+        if ts == 0.0:
+            return False
+        is_trade = cct.get_work_time_duration()
+        if not is_trade:
+            return True
+        return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
+
+    def run(self):
+        try:
+            # 1. 确保基础全市场行情数据
+            if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]):
+                self.progress.emit("正在获取全市场实时行情数据...")
+                from JSONData import sina_data
+                _sina = sina_data.Sina(readonly=True)
+                self.top_now = _sina.all
+                if self.top_now is not None and not self.top_now.empty:
+                    if 'ratio' not in self.top_now.columns:
+                        try:
+                            from sys_utils import get_ratio_from_percent
+                            self.top_now['ratio'] = get_ratio_from_percent(self.top_now['percent'].values)
+                        except Exception:
+                            pass
+                    self.top_now_cache_ts[0] = time.time()
+
+            if self.top_now is None or self.top_now.empty:
+                self.progress.emit("正在同步实时行情 (降级获取)...")
+                self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
+                self.top_now_cache_ts[0] = time.time()
+
+            # 2. 确保各个勾选周期的数据已载入
+            for period in self.active_periods:
+                if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
+                    self.progress.emit(f"正在同步 {period} 周期特征数据...")
+                    self.engine.load_period_data(period, self.top_now)
+
+            # 3. 开始评估各个策略
+            total = len(self.strategies)
+            results = {}
+            for idx, strat in enumerate(self.strategies, 1):
+                self.progress.emit(f"正在测试全量策略 Hit: {idx}/{total} ({strat['name']})...")
+                try:
+                    res_df = self.engine.evaluate_strategy(strat, self.active_periods)
+                    hit_cnt = len(res_df) if res_df is not None else 0
+                except Exception as ex:
+                    logger.warning(f"Failed to evaluate strategy {strat['name']}: {ex}")
+                    hit_cnt = 0
+                results[strat['name']] = hit_cnt
+
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MultiPeriodWorker(QThread):
     """
     QThread worker for running multi-period strategy evaluations in the background.
@@ -2401,80 +2472,95 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.lbl_hit_status.setToolTip("\n".join(tip_lines))
 
     def _test_all_strategies_hit(self):
-        # 确保基础行情数据已就绪
-        if self.top_now is None or self.top_now.empty:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.lbl_status.setText("正在获取全市场实时行情数据...")
-            QApplication.processEvents()
+        # 1. 检查是否有已有线程运行，防止重入
+        from PyQt6.sip import isdeleted
+        if hasattr(self, "_hit_worker") and self._hit_worker is not None:
             try:
-                self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
-            except Exception as e:
-                QApplication.restoreOverrideCursor()
-                QMessageBox.critical(self, "错误", f"初始化市场基础数据失败: {e}")
-                self.lbl_status.setText("准备就绪")
-                return
-            QApplication.restoreOverrideCursor()
+                if not isdeleted(self._hit_worker) and self._hit_worker.isRunning():
+                    logger.info("Previous hit test worker is still running. Ignoring request.")
+                    return
+            except RuntimeError:
+                self._hit_worker = None
 
-        # 确保当前选中的周期基础数据已载入
         active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
         if not active_periods:
             QMessageBox.warning(self, "警告", "请至少选择一个参与周期！")
             return
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.lbl_status.setText("正在同步各周期历史特征数据...")
-        QApplication.processEvents()
-        try:
-            for period in active_periods:
-                if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
-                    self.engine.load_period_data(period, self.top_now)
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "错误", f"加载周期特征数据出错: {e}")
-            self.lbl_status.setText("准备就绪")
-            return
+        self.lbl_hit_status.setEnabled(False)  # 暂时禁用以防止高频连续点击
+        self.lbl_status.setText("正在准备全策略测试线程...")
+        
+        # 2. 启动后台线程
+        worker = AllStrategiesHitWorker(
+            self.engine, self.strategies, active_periods,
+            top_now=self.top_now, period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts
+        )
+        self._hit_worker = worker
+        _active_workers.add(worker)
 
-        self.lbl_status.setText("正在测试全量策略 Hit 命中只数...")
-        QApplication.processEvents()
+        worker.progress.connect(self.update_status)
+        worker.finished.connect(self._on_hit_worker_finished)
+        worker.error.connect(self._on_hit_worker_error)
 
+        def cleanup():
+            _active_workers.discard(worker)
+            if getattr(self, "_hit_worker", None) == worker:
+                self._hit_worker = None
+            self.lbl_hit_status.setEnabled(True)
+            try:
+                if not isdeleted(worker):
+                    worker.deleteLater()
+            except RuntimeError:
+                pass
+
+        worker.finished.connect(cleanup)
+        worker.error.connect(cleanup)
+        worker.start()
+
+    def _on_hit_worker_finished(self, results):
+        if self._hit_worker is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(self._hit_worker):
+                    # 同步 top_now 缓存
+                    self.top_now = self._hit_worker.top_now
+            except RuntimeError:
+                pass
+
+        # 批量更新下拉框项
         self.strategy_combo.blockSignals(True)
         current_text = self.strategy_combo.currentText()
         import re
         clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
 
-        try:
-            for idx, strat in enumerate(self.strategies):
-                try:
-                    res_df = self.engine.evaluate_strategy(strat, active_periods)
-                    hit_cnt = len(res_df) if res_df is not None else 0
-                except Exception as ex:
-                    logger.warning(f"Failed to evaluate strategy {strat['name']}: {ex}")
-                    hit_cnt = 0
-                
-                # 剥离原有的 Hit 后缀并追加新的
-                raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat['name'])
-                new_text = f"{raw_name} [Hit: {hit_cnt}]"
-                self.strategy_combo.setItemText(idx, new_text)
+        for idx, strat in enumerate(self.strategies):
+            hit_cnt = results.get(strat['name'], 0)
+            raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat['name'])
+            new_text = f"{raw_name} [Hit: {hit_cnt}]"
+            self.strategy_combo.setItemText(idx, new_text)
 
-            # 恢复之前选中的策略索引
-            matched_idx = 0
-            for i in range(self.strategy_combo.count()):
-                t = self.strategy_combo.itemText(i)
-                if re.sub(r'\s*\[Hit:\s*\d+\]$', '', t) == clean_current_text:
-                    matched_idx = i
-                    break
-            self.strategy_combo.setCurrentIndex(matched_idx)
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.lbl_status.setText("✅ 全量策略 Hit 命中测试完成！")
-            self.strategy_combo.blockSignals(False)
+        # 恢复之前选中的策略索引
+        matched_idx = 0
+        for i in range(self.strategy_combo.count()):
+            t = self.strategy_combo.itemText(i)
+            if re.sub(r'\s*\[Hit:\s*\d+\]$', '', t) == clean_current_text:
+                matched_idx = i
+                break
+        self.strategy_combo.setCurrentIndex(matched_idx)
+        self.strategy_combo.blockSignals(False)
 
-            # 手动同步刷新 lbl_hit_status
-            strat_name = self.strategy_combo.currentText()
-            match = re.search(r'\[Hit:\s*(\d+)\]$', strat_name)
-            if match:
-                curr_hit = int(match.group(1))
-                self.lbl_hit_status.setText(f"🎯 Hit: {curr_hit}只")
+        self.lbl_status.setText("✅ 全量策略 Hit 命中率测试完成！")
+
+        # 手动同步刷新 lbl_hit_status
+        strat_name = self.strategy_combo.currentText()
+        match = re.search(r'\[Hit:\s*(\d+)\]$', strat_name)
+        if match:
+            curr_hit = int(match.group(1))
+            self.lbl_hit_status.setText(f"🎯 Hit: {curr_hit}只")
+
+    def _on_hit_worker_error(self, err_msg):
+        self.lbl_status.setText(f"❌ 全量策略 Hit 测试失败: {err_msg}")
+        QMessageBox.critical(self, "错误", f"全策略 Hit 命中率测试出错: {err_msg}")
 
         # Automatically update Dragon Monitor if it is currently open and visible
         if hasattr(self, "dragon_monitor_dialog") and self.dragon_monitor_dialog is not None:
