@@ -428,6 +428,25 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         self.btn_import_json.clicked.connect(self._import_json_strategy)
         left_layout.addWidget(self.btn_import_json)
 
+        # ── 排序控制按钮 ──
+        sort_row = QHBoxLayout()
+        self.btn_top = QPushButton("📍 置顶", self)
+        self.btn_top.setStyleSheet("background-color: #0d47a1; border-color: #0a357a;")
+        self.btn_top.clicked.connect(self._move_to_top)
+        
+        self.btn_up = QPushButton("⬆️ 上移", self)
+        self.btn_up.setStyleSheet("background-color: #2e3b4e; border-color: #3d4d65;")
+        self.btn_up.clicked.connect(self._move_up)
+        
+        self.btn_down = QPushButton("⬇️ 下移", self)
+        self.btn_down.setStyleSheet("background-color: #2e3b4e; border-color: #3d4d65;")
+        self.btn_down.clicked.connect(self._move_down)
+        
+        sort_row.addWidget(self.btn_top)
+        sort_row.addWidget(self.btn_up)
+        sort_row.addWidget(self.btn_down)
+        left_layout.addLayout(sort_row)
+
         self.splitter.addWidget(left_widget)
 
         # ── Right Pane: Edit Configurations ──
@@ -559,8 +578,47 @@ class MultiPeriodStrategyEditorDialog(QDialog):
 
     def _refresh_list(self):
         self.list_widget.clear()
+        # 建立主窗口下拉框中策略纯名字到含 Hit 文本的映射
+        hit_map = {}
+        p = self.parent()
+        if p and hasattr(p, 'strategy_combo'):
+            import re
+            for i in range(p.strategy_combo.count()):
+                t = p.strategy_combo.itemText(i)
+                raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t)
+                hit_map[raw_name] = t
+
         for s in self.strategies:
-            self.list_widget.addItem(s['name'])
+            display_name = s['name']
+            if display_name in hit_map:
+                display_name = hit_map[display_name]
+            self.list_widget.addItem(display_name)
+
+    def _move_to_top(self):
+        row = self.list_widget.currentRow()
+        if row <= 0 or row >= len(self.strategies):
+            return
+        strat = self.strategies.pop(row)
+        self.strategies.insert(0, strat)
+        self._refresh_list()
+        self.list_widget.setCurrentRow(0)
+
+    def _move_up(self):
+        row = self.list_widget.currentRow()
+        if row <= 0 or row >= len(self.strategies):
+            return
+        self.strategies[row], self.strategies[row - 1] = self.strategies[row - 1], self.strategies[row]
+        self._refresh_list()
+        self.list_widget.setCurrentRow(row - 1)
+
+    def _move_down(self):
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.strategies) - 1:
+            return
+        self.strategies[row], self.strategies[row + 1] = self.strategies[row + 1], self.strategies[row]
+        self._refresh_list()
+        self.list_widget.setCurrentRow(row + 1)
+
 
     def _on_select(self, row):
         if row < 0 or row >= len(self.strategies):
@@ -4237,15 +4295,33 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _on_strategies_saved(self, new_strategies):
         self.strategies = new_strategies
         self.strategy_combo.blockSignals(True)
-        current_text = self.strategy_combo.currentText()
+        
+        # 1. 抓取原本下拉框中包含 [Hit: N] 后缀的项名称
+        hit_names = {}
         import re
+        for i in range(self.strategy_combo.count()):
+            t = self.strategy_combo.itemText(i)
+            raw = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t)
+            hit_names[raw] = t
+
+        current_text = self.strategy_combo.currentText()
         clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
+        
         self.strategy_combo.clear()
-        self.strategy_combo.addItems([s['name'] for s in self.strategies])
+        
+        # 2. 根据新排序重构下拉列表
+        new_items = []
+        for s in self.strategies:
+            name = s['name']
+            if name in hit_names:
+                new_items.append(hit_names[name])
+            else:
+                new_items.append(name)
+        self.strategy_combo.addItems(new_items)
         
         matched_idx = -1
         for i in range(self.strategy_combo.count()):
-            if self.strategy_combo.itemText(i) == clean_current_text:
+            if re.sub(r'\s*\[Hit:\s*\d+\]$', '', self.strategy_combo.itemText(i)) == clean_current_text:
                 matched_idx = i
                 break
         if matched_idx >= 0:
