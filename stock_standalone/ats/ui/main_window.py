@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVB
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
+from ats.ui.favorite_panel import FavoritePanel
 from ats.ui.styles import DARK_THEME_QSS
 from ats.ui.universe_widget import UniverseTreeWidget
 from ats.ui.heatmap_widget import SectorHeatmapWidget
@@ -1016,11 +1017,25 @@ class ATSMainWindow(QMainWindow):
         
         self.center_splitter = QSplitter(Qt.Orientation.Vertical)
         
+        # 1. Top Tabs in center panel (顶部主看板 Tab: 重点关注 + 回调跟踪器)
+        self.top_tabs = QTabWidget()
+        self.top_tabs.setStyleSheet("""
+            QTabBar::tab { font-size: 10.5pt; font-weight: bold; padding: 6px 14px; min-width: 140px; }
+            QTabBar::tab:selected { background-color: #1a2a1a; color: #ffd700; border-bottom: 3px solid #ffd700; }
+        """)
+        
+        self.favorite_panel = FavoritePanel()
+        self.favorite_panel.stock_selected.connect(self.on_stock_clicked)
+        self.top_tabs.addTab(self.favorite_panel, "⭐ 重点关注 (基础重点)")
+
         self.swing_table = SwingStateTable()
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
-        self.center_splitter.addWidget(self.swing_table)
+        self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
         
-        # Bottom Tabs in center panel
+        self.top_tabs.setCurrentIndex(0)
+        self.center_splitter.addWidget(self.top_tabs)
+        
+        # 2. Bottom Tabs in center panel (底部从属 Tab: 持仓 + 订单 + 回测 + 轨迹)
         self.center_tabs = QTabWidget()
         self.center_tabs.setMinimumWidth(100)
         self.center_tabs.setMinimumHeight(80)
@@ -1101,6 +1116,7 @@ class ATSMainWindow(QMainWindow):
         # 1. 单击事件 -> 联动外部同花顺/通达信及可视化器 (link_stock)
         self.universe_widget.stock_clicked.connect(self.link_stock)
         self.swing_table.stock_clicked.connect(self.link_stock)
+        self.favorite_panel.table.stock_activated.connect(self.link_stock)
         self.position_panel.stock_clicked.connect(self.link_stock)
         self.trade_flow_table.stock_clicked.connect(self.link_stock)
         self.kernel_trace_panel.stock_clicked.connect(self.link_stock)
@@ -2162,13 +2178,36 @@ class ATSMainWindow(QMainWindow):
         has_df = self.current_df is not None and not self.current_df.empty
         
         # 1. Update prices/percents in universe_manager pools
-        all_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+        fav_stocks = set()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            pass
+
+        pool_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+        all_codes = list(dict.fromkeys(pool_codes + [c for c in fav_stocks if c]))
         missing_realtime_codes = []
         
+        # 2. 增量更新信号账本（替代全量重算，信号只增不删）
+        if has_df:
+            self._update_signal_ledger(self.current_df)
+            # 从信号账本同步到三级池（稳定展示，不快速流动）
+            self.universe_manager.sync_from_ledger(self.signal_ledger, df_realtime=self.current_df, price_pct_cache=self.price_pct_cache)
+        else:
+            self.universe_manager.sync_from_ledger(self.signal_ledger, price_pct_cache=self.price_pct_cache)
+
         for pool in [self.universe_manager.radar_pool, self.universe_manager.watch_pool, self.universe_manager.trade_pool]:
             for code in list(pool.keys()):
+                real_name = self.get_stock_name(code)
+                if real_name and real_name not in ('未知', '重点标的', ''):
+                    pool[code]['name'] = real_name
+
                 if has_df and code in self.current_df.index:
                     row = self.current_df.loc[code]
+                    import pandas as pd
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
                     pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
                     pool[code]['pct'] = float(row.get('percent', 0.0))
                 elif code in self.price_pct_cache:
@@ -2183,19 +2222,6 @@ class ATSMainWindow(QMainWindow):
                         pool[code]['price'] = 0.0
                         pool[code]['pct'] = 0.0
                     missing_realtime_codes.append(code)
-
-        if missing_realtime_codes:
-            import time
-            now = time.time()
-            if not hasattr(self, "_last_price_fetch_time") or now - self._last_price_fetch_time > 15:
-                self._last_price_fetch_time = now
-                self._async_load_stock_prices(missing_realtime_codes)
-                
-        # 2. 增量更新信号账本（替代全量重算，信号只增不删）
-        if has_df:
-            self._update_signal_ledger(self.current_df)
-            # 从信号账本同步到三级池（稳定展示，不快速流动）
-            self.universe_manager.sync_from_ledger(self.signal_ledger)
         
         # 4. Update swing state table
         missing_history_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
@@ -2248,6 +2274,13 @@ class ATSMainWindow(QMainWindow):
                 pct_val = 0.0
                 
             name = self.get_stock_name(code)
+            if not name or name in ('未知', '重点标的', ''):
+                try:
+                    n_str = cct.get_stock_name(code)
+                    if n_str and str(n_str).strip() and str(n_str).strip() != str(code):
+                        name = str(n_str).strip()
+                except Exception:
+                    pass
             
             # 计算大盘偏离度和共振状态
             rs_val = pct_val - sh_pct
@@ -2352,6 +2385,9 @@ class ATSMainWindow(QMainWindow):
             
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
+            if hasattr(self, 'favorite_panel'):
+                fav_rows = [r for r in swing_rows if str(r[0]).strip() in fav_stocks]
+                self.favorite_panel.update_favorite_rows(fav_rows)
 
         # 7. 更新三级池 UI 展示
         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
