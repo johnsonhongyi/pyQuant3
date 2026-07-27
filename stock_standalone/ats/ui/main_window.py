@@ -2419,30 +2419,42 @@ class ATSMainWindow(QMainWindow):
         )
         target_df = df_all[valid_mask]
 
-        # 5. 增量写入信号账本
+        # 5. 增量写入信号账本（第一步：更新各股票量能初分与形态）
+        valid_target_codes = []
         for code, row in target_df.iterrows():
             code_str = str(code).strip()
             if not code_str or code_str in ('sh000001', 'sz399001', 'sz399006', '000001.SH', '399001.SZ', '399006.SZ'):
                 continue  # 跳过指数
-
+                
             try:
-                name = str(row.get('name', ''))
+                # 预提取价格与均线值，确保合法性
                 price = float(row.get(close_col, 0.0))
-                pct = float(row.get('percent', 0.0))
-
                 ma20_val = 0.0
                 try:
                     ma20_val = float(row.get(ma20_col, 0.0))
                 except (TypeError, ValueError):
                     pass
-
+                    
                 if price <= 0 or ma20_val <= 0:
                     continue
-
-                deviation = (price - ma20_val) / ma20_val * 100.0
-
-                # 更新量能画像
+                    
                 self.volume_profiler.update_profile(code_str, row)
+                valid_target_codes.append((code_str, row, price, ma20_val))
+            except Exception:
+                continue
+
+        # 核心板块分析第二步: 运行板块动能与共振分析 (识别板块内谁是带队大哥, 谁是跟风小弟并提权评分)
+        active_codes_list = [item[0] for item in valid_target_codes]
+        self.volume_profiler.analyze_sector_resonance(active_codes=active_codes_list)
+
+        # 第三步: 将包含板块共振和连阳加权后的最终评分，正式录入信号账本
+        for code_str, row, price, ma20_val in valid_target_codes:
+            try:
+                name = str(row.get('name', ''))
+                pct = float(row.get('percent', 0.0))
+                deviation = (price - ma20_val) / ma20_val * 100.0
+                
+                # 获取经过板块共振和多日连阳加成修正后的最终 vol_score
                 vol_score = self.volume_profiler.get_volume_score(code_str)
 
                 # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
@@ -2456,7 +2468,7 @@ class ATSMainWindow(QMainWindow):
                     volume_score=vol_score,
                 )
             except Exception:
-                continue  # 单只股票异常不中断主流程
+                continue
 
         # 6. 定时快照持久化
         if self.session_snapshot.should_snapshot():
