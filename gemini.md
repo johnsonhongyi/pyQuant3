@@ -1,3 +1,11 @@
+## 2026-07-27 22:15
+- [x] **完善 24x7 挂机跨日自动继承恢复与全量架构设计落盘 (`ats/signal_ledger.py`, `ats/session_snapshot.py`, `ats/ui/main_window.py`, `tests/test_signal_ledger.py`, `design/大级别 MA20D回调跟踪器_高性能_后台统计沉淀 + 前台龙头捕捉_架构重构.md`)**：
+    - [x] **实现 SignalLedger 跨日信号磁盘恢复 (load_previous_signals)**：在 SignalLedger 中补齐历史快照自动装载恢复机制，系统启动或每日跨日重置时，自动从 SessionSnapshot 的 `daily_summary_YYYYMMDD.json` 中读取恢复昨日 `WATCH` 与 `TRADE` 精选标的，并重置时间戳为盘前 `PHASE_PREMARKET` 以便今天无缝接力跟单。
+    - [x] **自动日切与收盘总结 15:00 自动触发**：在 `SessionSnapshot` 中补充 daily summary 日期去重，并在 `main_window.py` 行情刷新逻辑中增加 15:00 盘后自动导出当日总结报告的触发点，确保 24x7 不间断挂机状态下的零干预运行。
+    - [x] **修复 Pandas Series 属性获取 API 兼容性缺陷**：修复在 `_check_auto_promote` 与 `VolumeProfiler.update_profile` 中由于 `row.get('volume_ratio', ...)` 对 Pandas Series 返回 `None` 导致量比未正确提取的隐形 Bug。
+    - [x] **扩展单元测试覆盖度至 8 大模块**：在 `tests/test_signal_ledger.py` 中新增 `test_cross_day_signal_restoration` 用例，验证跨日信号继承恢复与盘中放量再次自动晋级全流程，测试 100% 成功通过。
+    - [x] **全量更新落地设计规划文档**：将包含连阳/多阳特征回溯、板块动能共振、24x7 跨日继承恢复、新老龙头生命周期接力及全量测试覆盖等全部最新架构成果，100% 同步更新落盘至 `design/大级别 MA20D回调跟踪器_高性能_后台统计沉淀 + 前台龙头捕捉_架构重构.md`。
+
 ## 2026-07-27 21:15
 - [x] **重构大级别 MA20D 回调跟踪器为高性能「后台统计沉淀+前台龙头捕捉」架构 (`ats/signal_ledger.py`, `ats/volume_profiler.py`, `ats/session_snapshot.py`, `ats/universe_manager.py`, `ats/ui/main_window.py`, `ats/ui/swing_table.py`, `ats/ui/universe_widget.py`)**：
     - [x] **引入 SignalLedger（信号账本）核心增量写入逻辑**：彻底废除每 3 秒全量重算全市场 5000+ 个股导致的池子走马灯剧烈流动痛点；新信号一旦捕获录入即物理锁定首次发现价格与时间戳（只增不删、仅标 inactive 状态），保证如长城军工、立新能源等早期开盘/竞价起爆股信号永远被沉淀锁定，不被后续大批普通反弹个股冲掉。

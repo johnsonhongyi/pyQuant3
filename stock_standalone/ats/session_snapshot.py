@@ -84,7 +84,7 @@ class SessionSnapshot:
             return False
     
     def save_daily_summary(self, signal_ledger):
-        """生成当日信号总结报告 (收盘后调用)
+        """生成当日信号总结报告 (收盘后调用，自动覆盖更新为最新终盘总结)
         
         Args:
             signal_ledger: SignalLedger 实例
@@ -131,6 +131,7 @@ class SessionSnapshot:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(summary, f, ensure_ascii=False, indent=2)
             
+            self._last_summary_date = today_str
             print(f"[SessionSnapshot] Daily summary saved: {filepath}")
             return True
             

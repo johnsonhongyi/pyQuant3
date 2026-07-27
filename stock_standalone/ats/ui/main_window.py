@@ -704,6 +704,14 @@ class ATSMainWindow(QMainWindow):
         self.signal_ledger = SignalLedger()
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
+        
+        # 自动加载昨日快照，恢复跨日 WATCH/TRADE 精选标的以实现跨日持续跟进
+        try:
+            prev_signals = self.session_snapshot.load_previous_day_signals()
+            if prev_signals:
+                self.signal_ledger.load_previous_signals(prev_signals)
+        except Exception as e:
+            print(f"[MainWindow] 跨日快照加载异常: {e}")
         self.stock_history_cache = {}
         self.dragon_monitor_dialog = None
         self.history_loading_codes = set()
@@ -2474,6 +2482,15 @@ class ATSMainWindow(QMainWindow):
         if self.session_snapshot.should_snapshot():
             self.session_snapshot.save_snapshot(self.signal_ledger)
             self.session_snapshot.cleanup_old_snapshots()
+
+        # 6.5 收盘盘后自动生成当日总结快照 (15:00 之后)
+        import datetime
+        now_dt = datetime.datetime.now()
+        if now_dt.hour >= 15:
+            self.session_snapshot.save_daily_summary(self.signal_ledger)
+
+        # 6.6 清理不再追踪的旧股票量能画像 (防 24x7 内存累积)
+        self.volume_profiler.cleanup_stale(self.signal_ledger.get_all_tracked_codes())
 
         # 7. 状态栏显示信号统计
         stats = self.signal_ledger.get_stats()
