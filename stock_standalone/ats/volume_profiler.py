@@ -207,10 +207,12 @@ class VolumeProfiler:
         
         # 3. 获取当前量比
         vol_ratio = 1.0
-        try:
-            vol_ratio = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)))
-        except (TypeError, ValueError):
-            pass
+        v_val = row.get('volume_ratio') if 'volume_ratio' in row else row.get('vol_ratio')
+        if v_val is not None:
+            try:
+                vol_ratio = float(v_val)
+            except (TypeError, ValueError):
+                pass
         
         # 4. 记录首次放量时间点
         if profile.first_surge_ts is None and vol_ratio >= self.SURGE_THRESHOLD:

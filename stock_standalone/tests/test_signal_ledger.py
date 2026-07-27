@@ -180,6 +180,45 @@ class TestSignalLedger(unittest.TestCase):
         # 初始评分若排除板块共振，应该较低；加分后，其 vol_score 显著拉升，有助于在池中排前
         self.assertTrue(profile_bfcl.volume_score > 25.0)
 
+    def test_cross_day_signal_restoration(self):
+        """测试跨日信号恢复 (load_previous_signals)"""
+        # 模拟昨日快照字典
+        prev_snapshot = {
+            '601606': {
+                'code': '601606',
+                'name': '长城军工',
+                'latest_price': 12.8,
+                'latest_pct': 3.5,
+                'latest_deviation': 1.2,
+                'tier': 'WATCH'
+            },
+            '001254': {
+                'code': '001254',
+                'name': '立新能源',
+                'latest_price': 5.60,
+                'latest_pct': 2.1,
+                'latest_deviation': 0.8,
+                'tier': 'TRADE'
+            }
+        }
+        
+        # 载入昨日快照
+        self.ledger.load_previous_signals(prev_snapshot)
+        
+        # 验证: 账本恢复了 2 只信号
+        self.assertEqual(len(self.ledger.entries), 2)
+        self.assertIn('601606', self.ledger.entries)
+        self.assertIn('001254', self.ledger.entries)
+        
+        # 验证: 恢复的信号层级重置为 RADAR，时间段重置为 PREMARKET (盘前)
+        entry_601606 = self.ledger.entries['601606']
+        self.assertEqual(entry_601606.tier, 'RADAR')
+        self.assertEqual(entry_601606.first_seen_phase, 'PREMARKET')
+        
+        # 验证: 恢复信号后若今日出现放量异动，依然可以被正常更新并自动晋级
+        self.ledger.record_signal('601606', '长城军工', 13.5, 5.2, 2.1, row={'vol_ratio': 1.8})
+        self.assertEqual(entry_601606.tier, 'WATCH')  # 再次自动晋级为 WATCH
+
 
 if __name__ == '__main__':
     unittest.main()

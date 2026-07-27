@@ -257,6 +257,50 @@ class SignalLedger:
         if old_count > 0:
             print(f"[SignalLedger] 每日重置: {old_count} → {len(preserved)} (保留 WATCH/TRADE 跨日追踪)")
 
+    def load_previous_signals(self, prev_signals_dict):
+        """从昨日盘中快照/总结载入历史信号 (用于跨日恢复与追踪)
+
+        Args:
+            prev_signals_dict: {code: entry_dict} 来自 SessionSnapshot
+        """
+        self._ensure_daily_reset()
+        if not prev_signals_dict:
+            return
+
+        loaded_count = 0
+        now = time.time()
+        for code, data in prev_signals_dict.items():
+            if code in self.entries:
+                continue
+
+            name = data.get('name', '未知')
+            price = float(data.get('latest_price', data.get('first_seen_price', 0.0)))
+            pct = float(data.get('latest_pct', data.get('first_seen_pct', 0.0)))
+            deviation = float(data.get('latest_deviation', 0.0))
+
+            # 跨日继承载入为 RADAR 层级重新观察，时间戳重置为当前盘前时间
+            entry = SignalEntry(
+                code=code,
+                name=name,
+                price=price,
+                pct=pct,
+                deviation=deviation,
+                phase=PHASE_PREMARKET,
+                ts=now
+            )
+            entry.tier = 'RADAR'
+            entry.state_history.append({
+                'ts': now,
+                'action': 'RESTORED_FROM_PREVIOUS_DAY',
+                'reason': f"从昨日快照继承 ({data.get('tier', 'WATCH')}级别)",
+            })
+            entry.priority_score = self._compute_priority(entry)
+            self.entries[code] = entry
+            loaded_count += 1
+
+        if loaded_count > 0:
+            print(f"[SignalLedger] 跨日继承: 成功恢复 {loaded_count} 只昨日 WATCH/TRADE 精选标的")
+
     def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0):
         """发现新信号或更新已有信号
 
@@ -373,14 +417,20 @@ class SignalLedger:
         vol_ratio = 1.0
         dff_val = 0.0
 
-        try:
-            vol_ratio = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)))
-        except (TypeError, ValueError):
-            pass
-        try:
-            dff_val = float(row.get('dff', 0.0))
-        except (TypeError, ValueError):
-            pass
+        if row is not None:
+            v_val = row.get('volume_ratio') if 'volume_ratio' in row else row.get('vol_ratio')
+            if v_val is not None:
+                try:
+                    vol_ratio = float(v_val)
+                except (TypeError, ValueError):
+                    pass
+
+            d_val = row.get('dff')
+            if d_val is not None:
+                try:
+                    dff_val = float(d_val)
+                except (TypeError, ValueError):
+                    pass
 
         pct = entry.latest_pct
 
