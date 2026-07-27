@@ -70,7 +70,19 @@ class DeepStockMiningEngine:
         }
 
         if is_mined_target:
-            logger.info(f"💎 成功挖掘出牛股标的! 得分={total_score} | 明细={mining_details}")
+            import time
+            now_ts = time.time()
+            code = ctx.get("code", ctx.get("symbol", ""))
+            name = ctx.get("name", "")
+            
+            if not hasattr(cls, "_mined_alert_cache"):
+                cls._mined_alert_cache = {}
+                
+            cache_key = f"{code}_mined" if code else f"{total_score}_mined"
+            last_ts = cls._mined_alert_cache.get(cache_key, 0.0)
+            if now_ts - last_ts >= 1800.0:  # 30分钟防抖
+                cls._mined_alert_cache[cache_key] = now_ts
+                logger.info(f"💎 成功挖掘出牛股标的! 代码={code} 名称={name} 得分={total_score} | 明细={mining_details}")
 
         return is_mined_target, total_score, mining_details
 

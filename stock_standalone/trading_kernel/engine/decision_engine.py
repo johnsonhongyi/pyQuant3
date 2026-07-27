@@ -1111,6 +1111,10 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
 
         # 2. 深度牛股挖掘评估 (Deep Stock Mining Engine Validation)
         if action in {"BUY", "ADD"}:
+            if "code" not in ctx:
+                ctx["code"] = signal.code
+            if "name" not in ctx:
+                ctx["name"] = signal.name
             is_mined_target, mining_score, mining_details = DeepStockMiningEngine.evaluate_stock_mining(ctx)
             if not is_mined_target:
                 logger.debug(
