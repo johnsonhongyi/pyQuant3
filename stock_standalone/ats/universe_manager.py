@@ -1,14 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-ATS Universe Manager
-Implements the 3-tier stock universe filtering funnel:
-1. Radar Pool (🌌 候选雷达池): Pullback candidates near MA20d.
-2. Watchlist Pool (📌 精选观察池): Active breakout or volume surge candidates.
-3. Trading Pool (💰 实盘交易池): Formally recommended/active trading targets.
+ATS Universe Manager (Refactored)
+从「全量重算」改为「从 SignalLedger 同步」的三级股票池管理器。
+
+原有逻辑 (已废除):
+    每 3 秒 run_pipeline_filtering() 全量扫描 5000+ 只股票 → 池子快速流动
+
+新逻辑:
+    从 SignalLedger 读取已沉淀信号 → 三级池稳定展示，不快速流动
+    信号一旦写入账本即锁定，不因行情波动被冲掉
+
+三级池:
+    1. Radar Pool (🌌 候选雷达池): SignalLedger 中 tier=RADAR 的信号
+    2. Watchlist Pool (📌 精选观察池): SignalLedger 中 tier=WATCH 的信号
+    3. Trading Pool (💰 实盘交易池): SignalLedger 中 tier=TRADE 的信号 + 真实持仓
 """
 
 import time
 import pandas as pd
+
 
 class UniverseManager:
     def __init__(self):
@@ -108,109 +118,100 @@ class UniverseManager:
         self.watch_pool.pop(code, None)
         self.trade_pool.pop(code, None)
 
+    # ==================================================================
+    # 新增: 从 SignalLedger 同步数据（替代全量重算）
+    # ==================================================================
+
+    def sync_from_ledger(self, signal_ledger):
+        """从信号账本同步已沉淀信号到三级池
+
+        核心改进:
+        - 不做全量重算，只读取 SignalLedger 中已确认的信号
+        - 保留 trade_pool 中的真实持仓（不受 ledger 影响）
+        - 池子内容稳定，不会因行情波动而快速流动
+        
+        Args:
+            signal_ledger: SignalLedger 实例
+        """
+        from ats.signal_ledger import PHASE_LABELS
+        import datetime
+
+        # 保留 trade_pool 中非来自 ledger 的持仓项（真实持仓）
+        real_positions = {}
+        for code, meta in self.trade_pool.items():
+            if meta.get('_from_ledger') is not True:
+                real_positions[code] = meta
+
+        # 从 SignalLedger 读取展示数据
+        radar_entries = signal_ledger.get_sorted_pool('RADAR', limit=signal_ledger.RADAR_DISPLAY_LIMIT)
+        watch_entries = signal_ledger.get_sorted_pool('WATCH', limit=signal_ledger.WATCH_DISPLAY_LIMIT)
+        trade_entries = signal_ledger.get_sorted_pool('TRADE')
+
+        # 重建 radar_pool
+        new_radar = {}
+        for entry in radar_entries:
+            phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
+            first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
+            new_radar[entry.code] = {
+                'name': entry.name or '未知',
+                'price': entry.latest_price,
+                'pct': entry.latest_pct,
+                'deviation': entry.latest_deviation,
+                'strategy': f'{phase_label} [{first_time}]',
+                'reason': f'优先级: {entry.priority_score:.0f} | 偏离: {entry.latest_deviation:+.1f}%',
+                'timestamp': entry.first_seen_ts,
+                '_from_ledger': True,
+            }
+        self.radar_pool = new_radar
+
+        # 重建 watch_pool
+        new_watch = {}
+        for entry in watch_entries:
+            phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
+            first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
+            # 获取晋级原因
+            promote_reason = ''
+            for hist in reversed(entry.state_history):
+                if 'PROMOTED' in hist.get('action', ''):
+                    promote_reason = hist.get('reason', '')
+                    break
+            new_watch[entry.code] = {
+                'name': entry.name or '未知',
+                'price': entry.latest_price,
+                'pct': entry.latest_pct,
+                'deviation': entry.latest_deviation,
+                'strategy': f'{phase_label} [{first_time}]',
+                'reason': promote_reason or f'优先级: {entry.priority_score:.0f}',
+                'timestamp': entry.first_seen_ts,
+                '_from_ledger': True,
+            }
+        self.watch_pool = new_watch
+
+        # 重建 trade_pool（合并 ledger 信号与真实持仓）
+        new_trade = dict(real_positions)  # 保留真实持仓
+        for entry in trade_entries:
+            if entry.code not in new_trade:
+                phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
+                first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
+                new_trade[entry.code] = {
+                    'name': entry.name or '未知',
+                    'price': entry.latest_price,
+                    'pct': entry.latest_pct,
+                    'strategy': f'{phase_label} [{first_time}]',
+                    'reason': f'优先级: {entry.priority_score:.0f} | 持仓追踪',
+                    'timestamp': entry.first_seen_ts,
+                    '_from_ledger': True,
+                }
+        self.trade_pool = new_trade
+
+    # ==================================================================
+    # 原有全量重算逻辑（保留兼容，已不推荐使用）
+    # ==================================================================
+
     def run_pipeline_filtering(self, df_all, ma20_series=None):
         """
-        Evaluates df_all (real-time/historical snapshot) and automatically funnels
-        stocks into the respective pools based on criteria. Also performs eviction
-        of broken/out-of-range stocks for dynamic universe rotation.
+        [DEPRECATED] 全量重算管道 — 已被 sync_from_ledger() 替代。
+        保留此方法以兼容旧调用路径，但内部不再执行全量扫描。
+        实际过滤逻辑已转移至 SignalLedger.record_signal()。
         """
-        if df_all is None or df_all.empty:
-            return
-
-        # 1. Adaptively locate real MA20 column name ('ma20d', 'ma20', 'MA20')
-        ma20_col = None
-        for col_name in ['ma20d', 'ma20', 'MA20', 'ma20_series']:
-            if col_name in df_all.columns:
-                ma20_col = col_name
-                break
-
-        # Get currently tracked codes
-        tracked_codes = set(self.radar_pool.keys()) | set(self.watch_pool.keys()) | set(self.trade_pool.keys())
-        
-        # 2. Select target dataframe for evaluation
-        if ma20_col:
-            close_s = df_all['close'] if 'close' in df_all.columns else df_all.get('price', df_all.iloc[:, 0])
-            safe_ma20 = df_all[ma20_col].replace(0, float('nan'))
-            dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
-            
-            # Select stocks that are either near MA20 (-1.5% to +2.5%) OR currently in tracked pools
-            valid_mask = ((dev_series >= -1.5) & (dev_series <= 2.5)) | df_all.index.isin(tracked_codes)
-            target_df = df_all[valid_mask]
-        else:
-            common_codes = [c for c in tracked_codes if c in df_all.index]
-            target_df = df_all.loc[common_codes]
-
-        # 3. Iterating through target dataframe to update state & promote
-        for code, row in target_df.iterrows():
-            code_str = str(code).strip()
-            name = row.get('name', '个股')
-            price = float(row.get('close', row.get('price', 0.0)))
-            pct = float(row.get('percent', 0.0))
-            
-            # Compute MA20 deviation
-            ma20_val = price * 0.99
-            if ma20_col and ma20_col in row.index:
-                try:
-                    v = float(row[ma20_col])
-                    if v > 0:
-                        ma20_val = v
-                except Exception:
-                    pass
-                    
-            if price > 0 and ma20_val > 0:
-                deviation = (price - ma20_val) / ma20_val * 100.0
-            else:
-                deviation = 0.0
-
-            # --- Eviction / Degradation Check ---
-            # If stock drops sharply below MA20 (< -5.0%) or skyrockets far above (> 15.0%),
-            # evict it from Radar and Watch pools to allow fresh pool rotation.
-            if code_str not in self.trade_pool:
-                if deviation < -5.0 or deviation > 15.0:
-                    self.evict(code_str)
-                    continue
-
-            # --- Funnel Condition 1: Radar (deviation within -1.5% and +2.5%) ---
-            if -1.5 <= deviation <= 2.5:
-                if code_str not in self.radar_pool and code_str not in self.watch_pool and code_str not in self.trade_pool:
-                    self.add_to_radar(code_str, name, price, pct, deviation=deviation, reason=f"偏离MA20度: {deviation:+.2f}%")
-
-            # --- Funnel Condition 2: Watchlist (if it's in Radar, volume surge or positive momentum) ---
-            if code_str in self.radar_pool:
-                vol_ratio = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)))
-                dff_val = float(row.get('dff', 0.0))
-                if (vol_ratio >= 1.2 and pct >= -1.0) or (pct >= 1.5 and dff_val > 1.0):
-                    self.promote_to_watch(code_str, reason=f"量比: {vol_ratio:.1f} | 涨幅: {pct:+.2f}%")
-
-            # --- Funnel Condition 3: Trade (if it's in Watch, price above VWAP & strong momentum) ---
-            if code_str in self.watch_pool:
-                vwap = float(row.get('vwap', row.get('avg_price', price * 0.99)))
-                if price >= vwap and pct >= 1.0:
-                    self.promote_to_trade(code_str, alloc_pct=15.0, reason="突破均线且量能持续放量")
-
-        # 4. Limit Radar Pool size to Top 50 to maintain UI responsiveness and high entropy
-        if len(self.radar_pool) > 50:
-            def _safe_get_dev(meta):
-                if 'deviation' in meta:
-                    try:
-                        return abs(float(meta['deviation']))
-                    except Exception:
-                        pass
-                reason_str = str(meta.get('reason', ''))
-                if '偏离MA20度:' in reason_str:
-                    try:
-                        return abs(float(reason_str.split('偏离MA20度:')[-1].replace('%', '').strip()))
-                    except Exception:
-                        pass
-                return 0.0
-
-            # Keep trade/watch pools untouched, trim radar_pool by absolute deviation closeness
-            sorted_radar = sorted(
-                self.radar_pool.items(),
-                key=lambda x: (
-                    _safe_get_dev(x[1]),
-                    -x[1].get('timestamp', 0)
-                )
-            )
-            self.radar_pool = dict(sorted_radar[:50])
-
+        pass  # 不再执行全量重算，由 SignalLedger 增量处理
