@@ -1,6 +1,39 @@
 {
   "strategies": [
     {
+      "id": "custom_strat_1782792072",
+      "name": "大周期触底 + 小周期启动Base",
+      "conditions": {
+        "d": {
+          "filter": "close > ma10d and amount > 2e8",
+          "weight": 1.0,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "red > 1 and lastp1d > lastp2d  and lastl1d > lastl2d and (low < ma5d*1.01 or lastl1d < ma51d*1.01)",
+          "weight": 1.0,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "close > ma5d",
+          "weight": 1.0,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close > lastp1d and lastp1d > lastp2d and close > ma5d",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "m": {
+          "filter": "close > ma10d and close > lastp2d and ma5d > ma10d  and (high > hmax  or high > high4)",
+          "weight": 1.5,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【策略说明】自定义多周期策略 (大周期触底 + 小周期启动Base)"
+    },
+    {
       "id": "tpl_rebound_staircase_breakout",
       "name": "🔥 异动回调整固+4日高低点连续抬升+MACD多阶修复加速起爆 [倍益康/解套起爆模式] [2026-07-27]",
       "conditions": {
@@ -528,39 +561,6 @@
       },
       "cross_mode": "intersection",
       "description": "【策略说明】自定义多周期策略 (多级别量变到质变共振策略)"
-    },
-    {
-      "id": "custom_strat_1782792072",
-      "name": "大周期触底 + 小周期启动Base",
-      "conditions": {
-        "d": {
-          "filter": "close > ma10d and amount > 2e8",
-          "weight": 1.0,
-          "enabled": true
-        },
-        "2d": {
-          "filter": "red > 1 and lastp1d > lastp2d  and lastl1d > lastl2d and (low < ma5d*1.01 or lastl1d < ma51d*1.01)",
-          "weight": 1.0,
-          "enabled": true
-        },
-        "3d": {
-          "filter": "close > ma5d",
-          "weight": 1.0,
-          "enabled": true
-        },
-        "w": {
-          "filter": "close > lastp1d and lastp1d > lastp2d and close > ma5d",
-          "weight": 1.2,
-          "enabled": true
-        },
-        "m": {
-          "filter": "close > ma10d and close > lastp2d and ma5d > ma10d  and (high > hmax  or high > high4)",
-          "weight": 1.5,
-          "enabled": true
-        }
-      },
-      "cross_mode": "intersection",
-      "description": "【策略说明】自定义多周期策略 (大周期触底 + 小周期启动Base)"
     },
     {
       "id": "1785035907353",
