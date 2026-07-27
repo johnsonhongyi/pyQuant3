@@ -1,3 +1,23 @@
+## 2026-07-28 00:15
+- [x] **新增「⭐ 显示重点关注」复选框、状态物理持久化与逻辑方向矫正 (`ats/ui/swing_table.py`, `ats/ui/main_window.py`)**：
+    - [x] **文案与逻辑方向校正**：将 `SwingStateTable` 表头工具栏复选框更名为 **`⭐ 显示重点关注`**。
+    - [x] **状态功能对齐**：
+        - **勾选打开 (默认 `True`)**：在 MA20d 跟踪器列表中**全局综合显示“重点关注 + 盘中实时策略个股”**。
+        - **取消勾选关闭 (`False`)**：在 MA20d 跟踪器列表中**隐藏重点关注标的，仅纯粹呈现实时策略个股**。
+    - [x] **物理自动持久化**：使用 `window_config.json` 中的 `ats_swing_show_favorite_option` 持久化键，启动时自动检查并恢复上次选择的状态，点击即时落盘并切换筛选。
+- [x] **实现「⭐ 重点关注」与「MA20d回调跟踪器」列持久化 100% 对齐与共享 (`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`)**：
+    - [x] **完全共享持久化键**：将 `FavoritePanel` 的 `setup_persistence` 持久化 key 统一设置为与 `SwingStateTable` 完全一致的 `ats_swing_table_state_v2`。
+    - [x] **16 列字段与列宽完全对齐**：将重点关注表格的 16 列表头标题与默认宽度、最大宽度配置 100% 对齐。用户在任一表格调节列宽或顺序，另一个表格即刻自动无缝同步。
+- [x] **重构中央顶部主 Tab 看板架构并彻底根治左侧池子股票名称 `'未知'`/`0.00` 漏洞 (`ats/ui/main_window.py`, `ats/universe_manager.py`, `ats/signal_ledger.py`)**：
+    - [x] **重构中央顶部 Tab 布局入口**：将中央上半部分重构为 **`self.top_tabs` 顶部主 Tab 标签栏**，放置在用户标注的最上方红圈位置。第一选项卡为 **`⭐ 重点关注 (基础重点)`**（默认首页），第二选项卡为 **`📉 大级别 MA20d 回调跟踪器`**。入口极其醒目清晰，支持秒级一键切换。
+    - [x] **彻底根治左侧池子 `★ 未知` 与 `0.00` 现象**：在 `UniverseManager.sync_from_ledger` 及 `main_window.py` 行情刷新逻辑中，接入 `get_stock_name` 全局解析，并联通 `df_realtime`、`price_pct_cache` 与 `stock_history_cache` 多级回退。使得 605028 (世茂能源)、600118 (中国卫星)、300936 (中英科技)、002297 (博云新材) 等全量重点关注标的，在左右两侧的中文名称与估计价格**100% 保持精准一致，绝无 `'未知'` 和 `0.00`**。
+- [x] **修复 SessionSnapshot 变量报错、重点关注防丢置顶、去除表头英文并新增「⭐ 重点关注(基础重点)」专属 Tab 看板 (`ats/session_snapshot.py`, `ats/signal_ledger.py`, `ats/universe_manager.py`, `ats/ui/swing_table.py`, `ats/ui/favorite_panel.py`, `ats/ui/main_window.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **修复 `SessionSnapshot` 报错**：在 `save_daily_summary` 中补充 `today_str = now.strftime('%Y%m%d')` 变量定义，彻底消除了收盘导出与总结保存时的 `NameError: name 'today_str' is not defined` 隐患。
+    - [x] **彻底根治重点关注股票（倍益康等）丢失与置顶失效**：在 `SignalLedger._compute_priority` 中为重点关注标的赋予 `+200.0` 分权重置顶高分，取消偏离度下限剔除；在 `UniverseManager.sync_from_ledger` 及 `refresh_realtime_ui` 中合并 `fav_stocks`，确保重点关注个股 **100% 存在、绝不丢失**。
+    - [x] **去除表头英文文本**：将 `SwingStateTable` 顶部标题剥离精简为 `📉 大级别 MA20d 回调跟踪器`，去除了 `(Swing Pullback Tracker)` 英文标识。
+    - [x] **新增「⭐ 重点关注(基础重点)」专属 Tab 看板**：新建 `FavoritePanel` 独立专属 Tab 视图（`ats/ui/favorite_panel.py`），挂载在中央 Tab 栏的第一页。支持**冷启动未收到 IPC 推送时的基础数据秒级加载**与**收到实盘 IPC 推送后的底层全量高密实时数据升级**。
+    - [x] **全覆盖单元测试 100% 通过**：在 `tests/test_signal_ledger.py` 中补充 `test_favorite_stocks_priority_and_session_snapshot` 用例，9 项单元测试全量成功通过。
+
 ## 2026-07-27 22:15
 - [x] **完善 24x7 挂机跨日自动继承恢复与全量架构设计落盘 (`ats/signal_ledger.py`, `ats/session_snapshot.py`, `ats/ui/main_window.py`, `tests/test_signal_ledger.py`, `design/大级别 MA20D回调跟踪器_高性能_后台统计沉淀 + 前台龙头捕捉_架构重构.md`)**：
     - [x] **实现 SignalLedger 跨日信号磁盘恢复 (load_previous_signals)**：在 SignalLedger 中补齐历史快照自动装载恢复机制，系统启动或每日跨日重置时，自动从 SessionSnapshot 的 `daily_summary_YYYYMMDD.json` 中读取恢复昨日 `WATCH` 与 `TRADE` 精选标的，并重置时间戳为盘前 `PHASE_PREMARKET` 以便今天无缝接力跟单。

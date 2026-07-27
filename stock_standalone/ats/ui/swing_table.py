@@ -8,9 +8,10 @@ Lifecycle stages: 回踩中 (Pulling back), 回踩企稳 (Pullback stabilized), 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHeaderView, QLabel, QHBoxLayout, QPushButton
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
+import os
+import json
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_WARN, COLOR_INFO, COLOR_ACCENT, auto_fit_columns_once, NumericTableWidgetItem
 from ats.ui.base_table import BaseATSTableWidget
-
 class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
@@ -28,11 +29,22 @@ class SwingStateTable(QWidget):
 
         # Header
         header = QHBoxLayout()
-        title = QLabel("📉 大级别 MA20d 回调跟踪器 (Swing Pullback Tracker)")
+        title = QLabel("📉 大级别 MA20d 回调跟踪器")
         title.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
         header.addWidget(title)
         header.addStretch()
         
+        from PyQt6.QtWidgets import QCheckBox
+        self.chk_favorite_show = QCheckBox("⭐ 重点")
+        self.chk_favorite_show.setChecked(self._load_show_favorite_config())  # 重点默认打开，并自动持久化
+        self.chk_favorite_show.setStyleSheet("""
+            QCheckBox { color: #ffd700; font-weight: bold; font-size: 9.5pt; margin-right: 5px; }
+            QCheckBox::indicator { width: 14px; height: 14px; }
+        """)
+        self.chk_favorite_show.stateChanged.connect(self._on_favorite_checkbox_changed)
+        header.addWidget(self.chk_favorite_show)
+        header.addSpacing(6)
+
         self.btn_dragon = QPushButton("🐉 监控加速龙头")
         self.btn_dragon.setStyleSheet("""
             QPushButton { background-color: #2a1b1b; color: #ff5555; font-weight: bold; border: 1px solid #ff5555; border-radius: 3px; padding: 2px 6px; }
@@ -288,6 +300,59 @@ class SwingStateTable(QWidget):
                 self.table.setItem(row_idx, col_idx, item)
         auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={15: 350})
         self.table.setSortingEnabled(True)
+        self._apply_favorite_filter()
+
+    def _load_show_favorite_config(self):
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get("ats_swing_show_favorite_option", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_show_favorite_config(self, val):
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            data = {}
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data["ats_swing_show_favorite_option"] = bool(val)
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SwingStateTable] Save show_favorite config error: {e}")
+
+    def _on_favorite_checkbox_changed(self, state):
+        is_checked = (state == 2 or state is True or state == Qt.CheckState.Checked.value)
+        self._save_show_favorite_config(is_checked)
+        self._apply_favorite_filter()
+
+    def _apply_favorite_filter(self):
+        show_fav = getattr(self, 'chk_favorite_show', None) and self.chk_favorite_show.isChecked()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 0)
+            name_item = self.table.item(row, 1)
+            code_str = code_item.text().strip() if code_item else ""
+            name_str = name_item.text().strip() if name_item else ""
+
+            is_fav = (code_str in fav_stocks) or ("⭐" in name_str) or ("★" in name_str)
+            # 如果关闭重点关注 (show_fav 为 False)，则隐藏重点关注的股票，仅显示纯实时策略个股
+            if not show_fav and is_fav:
+                self.table.setRowHidden(row, True)
+            else:
+                self.table.setRowHidden(row, False)
 
     def _get_bold_font(self):
         font = self.table.font()

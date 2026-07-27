@@ -322,9 +322,27 @@ class SignalLedger:
         """
         self._ensure_daily_reset()
 
-        # 偏离度筛选
-        if deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX:
-            # 已存在的信号如果严重破位，标记为 INACTIVE
+        # 获取重点关注集合
+        fav_stocks = set()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            pass
+        is_fav = str(code).strip() in fav_stocks
+
+        if not name or name in ('未知', '重点标的', ''):
+            try:
+                from JohnsonUtil import commonTips as cct
+                n_str = cct.get_stock_name(code)
+                if n_str and str(n_str).strip() and str(n_str).strip() != str(code):
+                    name = str(n_str).strip()
+            except Exception:
+                pass
+
+        # 偏离度筛选（重点关注股票不受此限制，防止消失）
+        if not is_fav and (deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX):
+            # 已存在的非关注信号如果严重破位，标记为 INACTIVE
             if code in self.entries and deviation < self.DEVIATION_EVICT:
                 entry = self.entries[code]
                 if entry.tier not in ('TRADE',):  # TRADE 级别不自动降级
@@ -337,14 +355,16 @@ class SignalLedger:
             entry.update_latest(price, pct, deviation)
             entry.volume_score = volume_score
 
-            # 如果之前是 INACTIVE 但现在回到范围内，恢复为 RADAR
+            # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注，恢复为 RADAR/WATCH
             if entry.tier == 'INACTIVE':
-                entry.tier = 'RADAR'
+                entry.tier = 'WATCH' if is_fav else 'RADAR'
                 entry.state_history.append({
                     'ts': time.time(),
                     'action': 'REACTIVATED',
-                    'reason': f'偏离度回到范围: {deviation:.2f}%',
+                    'reason': f'重点关注或偏离度回到范围: {deviation:.2f}%',
                 })
+            elif is_fav and entry.tier == 'RADAR':
+                entry.promote('WATCH', reason='⭐ 设为重点关注自动晋级')
 
             # 重新计算优先级评分（使用首次发现时间，确保早期信号优先级不变）
             entry.priority_score = self._compute_priority(entry)
@@ -358,6 +378,8 @@ class SignalLedger:
             # 新信号 → 写入账本
             phase = _detect_phase()
             entry = SignalEntry(code, name, price, pct, deviation, phase)
+            if is_fav:
+                entry.tier = 'WATCH'
             entry.volume_score = volume_score
             entry.priority_score = self._compute_priority(entry)
 
@@ -365,7 +387,7 @@ class SignalLedger:
             self._signal_count += 1
 
             # 检查自动晋级
-            if row is not None:
+            if row is not None and entry.tier == 'RADAR':
                 self._check_auto_promote(entry, row)
 
             return entry
@@ -375,9 +397,10 @@ class SignalLedger:
 
         priority = time_score × 0.45 + volume_score × 0.30
                  + deviation_score × 0.15 + momentum_score × 0.10
+                 + (is_fav ? 200.0 : 0.0)
 
         Returns:
-            float: 0-100 的优先级评分
+            float: 优先级评分 (重点关注股票可突破 100)
         """
         # 时间分 (0-100)
         time_score = _compute_time_score(entry.first_seen_phase, entry.first_seen_ts)
@@ -393,15 +416,25 @@ class SignalLedger:
         pct = entry.latest_pct if entry.latest_pct else 0.0
         momentum_score = min(100.0, max(0.0, pct * 15.0))
 
+        # 重点关注置顶加权
+        fav_boost = 0.0
+        try:
+            from global_favorites import GlobalFavoriteManager
+            if str(entry.code).strip() in GlobalFavoriteManager().get_favorite_stocks():
+                fav_boost = 200.0
+        except Exception:
+            pass
+
         # 加权求和
         priority = (
             time_score * 0.45 +
             vol_score * 0.30 +
             deviation_score * 0.15 +
-            momentum_score * 0.10
+            momentum_score * 0.10 +
+            fav_boost
         )
 
-        return round(min(100.0, max(0.0, priority)), 2)
+        return round(priority, 2)
 
     def _check_auto_promote(self, entry, row):
         """检查是否满足从 RADAR 自动晋级到 WATCH 的条件

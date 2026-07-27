@@ -131,6 +131,7 @@ class SessionSnapshot:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(summary, f, ensure_ascii=False, indent=2)
             
+            today_str = now.strftime('%Y%m%d')
             self._last_summary_date = today_str
             print(f"[SessionSnapshot] Daily summary saved: {filepath}")
             return True

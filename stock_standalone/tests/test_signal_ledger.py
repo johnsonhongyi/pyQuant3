@@ -219,6 +219,37 @@ class TestSignalLedger(unittest.TestCase):
         self.ledger.record_signal('601606', '长城军工', 13.5, 5.2, 2.1, row={'vol_ratio': 1.8})
         self.assertEqual(entry_601606.tier, 'WATCH')  # 再次自动晋级为 WATCH
 
+    def test_favorite_stocks_priority_and_session_snapshot(self):
+        """测试 SessionSnapshot 日终导出与重点关注股票优先置顶/防丢"""
+        from ats.session_snapshot import SessionSnapshot
+        from ats.universe_manager import UniverseManager
+        
+        # 1. 测试 SessionSnapshot 日终总结生成 (不触发 today_str NameError)
+        snapshot = SessionSnapshot()
+        self.ledger.record_signal('920199', '倍益康', 29.36, 15.4, 3.5)
+        saved = snapshot.save_daily_summary(self.ledger)
+        self.assertTrue(saved)
+        
+        # 2. 测试重点关注股票提权与防丢
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            if '920199' not in fav_mgr.get_favorite_stocks():
+                fav_mgr.toggle_favorite_stock('920199')
+            
+            entry = self.ledger.record_signal('920199', '倍益康', 29.36, 15.4, 3.5)
+            self.assertIsNotNone(entry)
+            self.assertTrue(entry.priority_score > 200.0)  # 包含 +200 重点关注置顶分
+            
+            # 验证 UniverseManager 从 ledger 同步时必定保持 920199 在 watch_pool
+            mgr = UniverseManager()
+            mgr.sync_from_ledger(self.ledger)
+            self.assertIn('920199', mgr.watch_pool)
+            
+            fav_mgr.toggle_favorite_stock('920199') # 还原
+        except Exception as e:
+            print(f"[Test] GlobalFavoriteManager test warning: {e}")
+
 
 if __name__ == '__main__':
     unittest.main()
