@@ -136,14 +136,9 @@ class MultiPeriodWorker(QThread):
             start_time = time.time()
 
             if self.force_reload:
+                # 盘中强制刷新：仅更新 top_now 实时行情，不清空内存中已载入的多周期历史特征数据
                 self.top_now = None
                 self.top_now_cache_ts[0] = 0.0
-                if hasattr(self.engine, "lock"):
-                    with self.engine.lock:
-                        self.engine._period_dfs.clear()
-                else:
-                    self.engine._period_dfs.clear()
-                self.period_cache_ts.clear()
 
             # 1. Load market snapshots (top_now)
             if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]):
@@ -164,27 +159,53 @@ class MultiPeriodWorker(QThread):
                     self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType, readonly=True)
                 self.top_now_cache_ts[0] = time.time()
 
+            # 用最新的 top_now 盘中快照列极速覆盖日线内存 df 的实时价格与成交量
+            if self.top_now is not None and not self.top_now.empty:
+                with self.engine.lock if hasattr(self.engine, "lock") else threading.RLock():
+                    df_d = self.engine._period_dfs.get('d')
+                    if df_d is not None and not df_d.empty:
+                        # 排除 'volume'，因为它在 df_d 中是计算出的虚拟量比，而 top_now 中的是原始成交量
+                        realtime_cols = [c for c in ['trade', 'price', 'percent', 'ratio', 'turnover', 'amount', 'high', 'low', 'open','close','nclose','nhigh'] if c in self.top_now.columns and c != 'volume']
+                        common_idx = df_d.index.intersection(self.top_now.index)
+                        if not common_idx.empty:
+                            if realtime_cols:
+                                df_d.loc[common_idx, realtime_cols] = self.top_now.loc[common_idx, realtime_cols]
+                            
+                            # 将原始成交量 (top_now.volume) 同步更新至 df_d 的原始量字段中
+                            raw_vol_cols = [c for c in ['vol', 'nvol', 'lvol', 'nvolume'] if c in df_d.columns]
+                            if raw_vol_cols:
+                                # 注意：top_now['volume'] 存储的是新浪最新原始成交量（股）
+                                for col in raw_vol_cols:
+                                    df_d.loc[common_idx, col] = self.top_now.loc[common_idx, 'volume']
+                                    
+                            # 对 df_d 重新调用 calc_compute_volume 重新计算量比，保证 volume 字段与修改前一致且具备量比属性
+                            from data_utils import calc_compute_volume
+                            df_d['volume'] = calc_compute_volume(df_d, logger, resample='d', virtual=True)
+                            
+                            # 同步更新 0d 的实时成交量字段 (lastv0d)
+                            if 'lastv0d' in df_d.columns:
+                                df_d['lastv0d'] = df_d['vol']
+
             # 2. Load active periods
             for period in self.active_periods:
                 cached = False
                 if hasattr(self.engine, "lock"):
                     with self.engine.lock:
                         has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
-                        is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
-                        cached = (has_df or is_missing_cached) and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
+                        is_missing_cached = period in self.engine._missing_periods
+                        cached = has_df or is_missing_cached
                 else:
                     has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
-                    is_missing_cached = period in self.engine._missing_periods and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
-                    cached = (has_df or is_missing_cached) and self._is_cache_valid(self.period_cache_ts.get(period, 0.0))
+                    is_missing_cached = period in self.engine._missing_periods
+                    cached = has_df or is_missing_cached
 
                 if cached:
-                    age = int(time.time() - self.period_cache_ts.get(period, 0.0))
                     if period in self.engine._missing_periods:
-                        self.progress.emit(f"⚡ [{period}] 命中缓存(已知无数据，跳过) (已存在 {age}s)，跳过重新加载")
+                        self.progress.emit(f"⚡ [{period}] 命中内存缓存(已知无数据，跳过)")
                     else:
-                        self.progress.emit(f"⚡ [{period}] 命中缓存 (已存在 {age}s)，跳过重新加载")
+                        self.progress.emit(f"⚡ [{period}] 命中内存缓存，极速复用已有特征数据")
                 else:
-                    self.progress.emit(f"📥 [{period}] 首次加载或缓存过期，正在读取计算...")
+                    self.progress.emit(f"📥 [{period}] 首次加载特征数据，正在读取计算...")
                     if hasattr(self.engine, "lock"):
                         with self.engine.lock:
                             self.engine._period_dfs.pop(period, None)
@@ -2278,32 +2299,17 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return
 
         if force_reload:
-            # 强制刷新：清空所有缓存和时间戳
+            # 盘中强制刷新：仅清空 top_now 实时行情以强行更新最新盘中数据，持久复用内存中多周期历史特征数据 (_period_dfs)
             self.top_now = None
             self._top_now_cache_ts[0] = 0.0
-            if hasattr(self.engine, "lock"):
-                with self.engine.lock:
-                    self.engine._period_dfs.clear()
-            else:
-                self.engine._period_dfs.clear()
-            self._period_cache_ts.clear()
             if hasattr(self, "_block_cache"):
                 self._block_cache.clear()
-            self.lbl_status.setText("🔄 强制刷新：正在重新获取全部数据...")
+            self.lbl_status.setText("🔄 盘中强制刷新：正在更新全市场实时行情数据...")
         else:
             # 智能缓存：检查 top_now 缓存是否过期
             if not self._is_cache_valid(self._top_now_cache_ts[0]):
                 self.top_now = None
                 self._top_now_cache_ts[0] = 0.0
-            # 检查各周期缓存是否过期，过期则清除
-            for p in list(self._period_cache_ts.keys()):
-                if not self._is_cache_valid(self._period_cache_ts.get(p, 0.0)):
-                    self._period_cache_ts.pop(p, None)
-                    if hasattr(self.engine, "lock"):
-                        with self.engine.lock:
-                            self.engine._period_dfs.pop(p, None)
-                    else:
-                        self.engine._period_dfs.pop(p, None)
             
             if self.top_now is None:
                 self.lbl_status.setText("正在获取基础全市场数据...")
