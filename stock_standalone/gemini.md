@@ -1,3 +1,9 @@
+## 2026-07-27 10:46
+- [x] **设计并内置异动回调整固+4日高低点连续抬升+MACD多阶修复起爆策略 (`tpl_rebound_staircase_breakout`)**：
+    - [x] **解构倍益康 (920199) 等战例走势**：精准匹配“0716 集合竞价异动高开未封涨停 -> 次日低开被套杀跌企稳 -> 前4天高点和低点连续阶梯式抬升 (`lastl1d>=lastl2d>=lastl3d>=lastl4d`, `lasth1d>=lasth2d>=lasth3d>=lasth4d`) -> 今日爆起大阳线加速突破”的高胜率起爆解套模型。
+    - [x] **结合底层 MACD 全阶 9 日信号**：引入 `dif > dea` 水上/底部金叉、`dif > dif1d or dif1d > dif2d` DIF 向上抬升倾角及 `macd > macdlast1 or {or: macdlast{1-4} > 0}` 多级绿柱收缩/红柱伸长修复。
+    - [x] **三方物理副本同步**：完成配置文件落盘并同步至 `stock_standalone/config`、`dist/config` 及 `instockMonitorTK/config` 目录，且通过全周期语法求值校验。
+
 ## 2026-07-27 10:36
 - [x] **重构盘中强制刷新机制，仅更新 `top_now` 实时行情并极速复用多周期历史特征数据 (`multi_period_dialog.py`)**：
     - [x] **取消强制刷新清空 `_period_dfs` 的低效行为**：废除 `run_filter(force_reload=True)` 及 `MultiPeriodWorker.run` 中对 `self.engine._period_dfs.clear()` 和 `self.period_cache_ts.clear()` 的全量重置；盘中强制刷新仅重置 `top_now = None` 强行拉取全市场最新实时行情快照。

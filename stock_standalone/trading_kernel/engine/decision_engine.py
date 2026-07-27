@@ -816,10 +816,10 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
         code = signal.code
         now_ts = time.time()
         
-        # 60秒内同代码同动作防抖去重
+        # 30分钟(1800秒)内同代码同动作防抖去重，防止高频滚屏和播报
         cache_key = f"{code}_{action}"
         last_ts = _published_alert_cache.get(cache_key, 0.0)
-        if now_ts - last_ts < 60.0:
+        if now_ts - last_ts < 1800.0:
             return
         _published_alert_cache[cache_key] = now_ts
 
@@ -855,6 +855,19 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
 
         elif action == "SELL":
             is_escape = "VWAP_ESCAPE" in setup_raw or "BREAKDOWN" in setup_raw
+            # 只有通过了防抖检查，才正式打印平仓日志
+            routed_branch = getattr(reason_obj, "routed_branch", "Unknown") if hasattr(reason_obj, "routed_branch") else "Unknown"
+            regime = getattr(reason_obj, "regime", "Unknown") if hasattr(reason_obj, "regime") else "Unknown"
+            logger.info(
+                f"📉 [DecisionEngine] 触发平仓/止损信号: {code} ({name}) | "
+                f"策略分支: {routed_branch} | "
+                f"形态原因 (Setup): {setup_raw} | "
+                f"运行模式: {regime} | "
+                f"持仓天数: {ctx.get('days_held', 0)}天 | "
+                f"盈亏比例 (PnL): {ctx.get('pnl_pct', 0.0):.2f}% | "
+                f"今日放量比 (VolRatio): {ctx.get('vol_ratio', 1.0):.2f} | "
+                f"当前股价: {price:.2f} 元"
+            )
             sig_obj = StandardSignal(
                 code=code,
                 name=name,
@@ -1137,17 +1150,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
                     mining_score=mining_score if 'mining_score' in locals() else 80.0
                 )
 
-    if action == "SELL":
-        logger.info(
-            f"📉 [DecisionEngine] 触发平仓/止损信号: {signal.code} ({signal.name}) | "
-            f"策略分支: {active_branch.name} | "
-            f"形态原因 (Setup): {setup} | "
-            f"运行模式: {regime} | "
-            f"持仓天数: {ctx.get('days_held', 0)}天 | "
-            f"盈亏比例 (PnL): {ctx.get('pnl_pct', 0.0):.2f}% | "
-            f"今日放量比 (VolRatio): {ctx.get('vol_ratio', 1.0):.2f} | "
-            f"当前股价: {ctx.get('price', 0.0):.2f} 元"
-        )
+
 
     # ── 6. 统一动态止损价格设定 ──
     stop_price = None

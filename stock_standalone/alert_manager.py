@@ -340,6 +340,7 @@ class AlertManager:
         
         self.process: Optional[threading.Thread] = None 
         self.cooldowns: Dict[str, float] = {}
+        self.message_cooldowns: Dict[str, float] = {}
         self.global_last_alert: float = 0
         
         # [NEW] 会话中已报警代码列表 (Session-based highlights)
@@ -433,6 +434,8 @@ class AlertManager:
                 self.session_alerted_codes.clear()
             if hasattr(self, 'cooldowns'):
                 self.cooldowns.clear() # [FIX] 同时也清空冷却记录，允许复位后立即重报
+            if hasattr(self, 'message_cooldowns'):
+                self.message_cooldowns.clear()
             logger.debug("✅ AlertManager: 全局报警历史及冷却记录已清空")
 
     def speak(self, message: str, priority: int = 0, interrupt: bool = False):
@@ -545,6 +548,17 @@ class AlertManager:
             except Exception as e:
                 logger.error(f"Flush Alert Error for {key}: {e}")
 
+    def _get_message_fingerprint(self, message: str) -> str:
+        """提取消息内容的指纹，用于防抖比对 (消除价格、涨幅、时间等动态数字干扰)"""
+        if not message:
+            return ""
+        # 替换所有的价格、涨幅等浮点数和百分比 (如 13.23%, 5.8%, +3.5%, 负2点5)
+        text = re.sub(r'\d+(\.\d+)?%', '*', message)
+        text = re.sub(r'[-+]?\d+(\.\d+)?', '*', text)
+        text = text.replace('百分之', '').replace('点', '').replace('正', '').replace('负', '')
+        text = re.sub(r'\s+', '', text)
+        return text
+
     def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
         """发送报警 (支持合并)"""
         # ⚡ [NEW] 即使在全局报警禁用的情况下，也进行会话追踪 (用于同步赛马面板等可视化组件)
@@ -552,15 +566,24 @@ class AlertManager:
 
         if not self.enabled: return
         
-        # 1. 冷却检查
         now = time.time()
+        
+        # 1. 30分钟相同信息防抖过滤
+        fingerprint = self._get_message_fingerprint(message)
+        if fingerprint:
+            last_time = self.message_cooldowns.get(fingerprint, 0)
+            if now - last_time < 1800:  # 30分钟防抖
+                logger.debug(f"🔇 [Debounced] Ignored duplicate alert within 30m: {message} (Fingerprint: {fingerprint})")
+                return
+            self.message_cooldowns[fingerprint] = now
+            
+        # 2. 冷却检查
         if key and cooldown > 0:
             if now - self.cooldowns.get(key, 0) < cooldown:
                 return
-            # 注意：此处不立即更新 cooldown，因为消息还在 batch 缓冲区
-            # 如果 flush 成功，由 _do_send_alert 决定是否再检查
+            self.cooldowns[key] = now
         
-        # 2. 如果提供了 Key (股票代码)，进入聚合缓冲
+        # 3. 如果提供了 Key (股票代码)，进入聚合缓冲
         if key and len(str(key)) == 6:
             with self._batch_lock:
                 if key not in self._batch_data:
@@ -573,7 +596,7 @@ class AlertManager:
                     self._batch_timer.start()
             return
         
-        # 3. 全局/无 Key 消息：直接即时发送
+        # 4. 全局/无 Key 消息：直接即时发送
         self._do_send_alert(message, priority, key, cooldown)
 
     def _track_session_code(self, message: str, key: Optional[str] = None):
