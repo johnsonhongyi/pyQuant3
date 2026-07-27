@@ -1089,7 +1089,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         # 1. 诱多陷阱一票否决校验 (Trap Detection Veto)
         is_trap, trap_reason = evaluate_trap_veto(ctx)
         if is_trap:
-            logger.info(f"🚫 [DecisionEngine] 拦截诱多买入: {signal.code} ({signal.name}) | 原因: {trap_reason}")
+            logger.debug(f"🚫 [DecisionEngine] 拦截诱多买入: {signal.code} ({signal.name}) | 原因: {trap_reason}")
             action = "HOLD"
             size_pct = 0.0
             setup = "TRAP_VETO_REJECT"
@@ -1100,7 +1100,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         if action in {"BUY", "ADD"}:
             is_mined_target, mining_score, mining_details = DeepStockMiningEngine.evaluate_stock_mining(ctx)
             if not is_mined_target:
-                logger.info(
+                logger.debug(
                     f"🛡️ [DecisionEngine] 拦截未达挖掘门槛标的: {signal.code} ({signal.name}) | "
                     f"挖掘得分: {mining_score:.1f}/78.0 | 维持观望，避免无目的瞎买"
                 )
