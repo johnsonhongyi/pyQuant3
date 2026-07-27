@@ -1,3 +1,9 @@
+## 2026-07-27 10:46
+- [x] **设计并内置异动回调整固+4日高低点连续抬升+MACD多阶修复起爆策略 (`tpl_rebound_staircase_breakout`)**：
+    - [x] **解构倍益康 (920199) 等战例走势**：精准匹配“0716 集合竞价异动高开未封涨停 -> 次日低开被套杀跌企稳 -> 前4天高点和低点连续阶梯式抬升 (`lastl1d>=lastl2d>=lastl3d>=lastl4d`, `lasth1d>=lasth2d>=lasth3d>=lasth4d`) -> 今日爆起大阳线加速突破”的高胜率起爆解套模型。
+    - [x] **结合底层 MACD 全阶 9 日信号**：引入 `dif > dea` 水上/底部金叉、`dif > dif1d or dif1d > dif2d` DIF 向上抬升倾角及 `macd > macdlast1 or {or: macdlast{1-4} > 0}` 多级绿柱收缩/红柱伸长修复。
+    - [x] **三方物理副本同步**：完成配置文件落盘并同步至 `stock_standalone/config`、`dist/config` 及 `instockMonitorTK/config` 目录，且通过全周期语法求值校验。
+
 ## 2026-07-25 22:20
 - [x] **全流程适配多级策略与多周期股票诊断 (`multi_period_dialog.py`, `query_engine_util.py`, `stock_logic_utils.py`)**：
     - [x] **`query_engine_util.py` 传递闭包全自动列名与周期自适应绑定**：彻底告别手写 Map 模式，引入基于 `col_map` 传递闭包 (Transitive Closure) 的同义词等价组识别算法。自动扫描 `df.columns` 中物理存在的所有列名，动态交叉展开全量同义词及多周期后缀绑定（如自动将 `df` 中拥有的 `ma201d_w` 映射解构至 `ma20d_w` / `ma20_w` 等全量变体），100% 实现“只要 `df` 里有，即可秒级自适应绑定”。已通过 `002895 川恒股份` 86 个原生字段及 333 个衍生指标全量自适应覆盖度校验。
