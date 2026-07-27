@@ -106,7 +106,7 @@ class MarketVolumeContext:
 
 
 class StockVolumeProfile:
-    """单只股票的量能画像"""
+    """单只股票的量能与形态画像"""
     
     def __init__(self, code):
         self.code = code
@@ -116,6 +116,14 @@ class StockVolumeProfile:
         self.intraday_vol_snapshots = []     # 盘中量能快照 [(timestamp, vol_ratio)]
         self.volume_score = 0.0              # 综合量能评分
         self._last_calc_date = None
+        
+        # 连涨与板块联动新增属性
+        self.recent_up_days_3d = 0           # 近3日收涨天数 (前三天连阳度)
+        self.consecutive_up_days = 0         # 连涨天数
+        self.sector = None                  # 所属主板块
+        self.is_sector_leader = False        # 是否是板块领涨龙头
+        self.is_sector_follower = False      # 是否是板块跟风者
+        self.sector_leader_code = None       # 板块龙头股票代码
     
     def to_dict(self):
         return {
@@ -124,11 +132,28 @@ class StockVolumeProfile:
             'first_surge_ts': self.first_surge_ts,
             'first_surge_vol_ratio': self.first_surge_vol_ratio,
             'volume_score': self.volume_score,
+            'recent_up_days_3d': self.recent_up_days_3d,
+            'consecutive_up_days': self.consecutive_up_days,
+            'sector': self.sector,
+            'is_sector_leader': self.is_sector_leader,
+            'is_sector_follower': self.is_sector_follower,
+            'sector_leader_code': self.sector_leader_code,
         }
 
 
+class SectorMomentum:
+    """板块动能画像 — 维护板块龙头与跟风联动的状态"""
+    
+    def __init__(self, name):
+        self.name = name
+        self.leader_code = None            # 板块内的带队龙头代码
+        self.leader_score = 0.0            # 龙头的量能评分
+        self.leader_first_seen_ts = None   # 龙头首次放量突破时间
+        self.active_count = 0              # 板块当日活跃的信号标的数
+
+
 class VolumeProfiler:
-    """量能画像器 — 后台静默积累股票量能时序统计"""
+    """量能画像器 — 后台静默积累股票量能时序与板块联动统计"""
     
     SURGE_THRESHOLD = 1.3   # 量比超过此值视为放量
     MAX_SNAPSHOTS = 240     # 最多保留 240 个分钟级快照 (4小时交易时间)
@@ -136,6 +161,7 @@ class VolumeProfiler:
     def __init__(self):
         self.profiles = {}  # {code: StockVolumeProfile}
         self.market_context = MarketVolumeContext()
+        self.sectors = {}   # {sector_name: SectorMomentum}
     
     def update_market_context(self, df_all):
         """更新大盘量能环境上下文"""
@@ -143,7 +169,7 @@ class VolumeProfiler:
             self.market_context.update(df_all)
     
     def update_profile(self, code, row):
-        """更新单只股票的量能画像
+        """更新单只股票的量能与历史形态画像
         
         Args:
             code: 股票代码
@@ -158,7 +184,14 @@ class VolumeProfiler:
         profile = self.profiles[code]
         now = time.time()
         
-        # 每日首次更新时重新计算连续缩量天数
+        # 1. 提取板块名称 (解析 category 列，如 "国防军工;地面兵装;..." -> "国防军工")
+        sector_name = None
+        category = row.get('category', row.get('hy', row.get('sector')))
+        if category and isinstance(category, str) and category.strip():
+            sector_name = category.split(';')[0].split('-')[0].strip()
+        profile.sector = sector_name
+        
+        # 2. 每日首次更新时计算多天历史形态
         if profile._last_calc_date != today_str:
             profile._last_calc_date = today_str
             profile.first_surge_ts = None
@@ -167,15 +200,19 @@ class VolumeProfiler:
             
             # 计算连续缩量天数
             profile.consecutive_shrink_days = self._calc_consecutive_shrink_days(row)
+            
+            # 计算前三天连阳收涨度与连涨天数
+            profile.recent_up_days_3d = self._calc_recent_up_days_3d(row)
+            profile.consecutive_up_days = self._calc_consecutive_up_days(row)
         
-        # 获取当前量比
+        # 3. 获取当前量比
         vol_ratio = 1.0
         try:
             vol_ratio = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)))
         except (TypeError, ValueError):
             pass
         
-        # 记录首次放量时间点
+        # 4. 记录首次放量时间点
         if profile.first_surge_ts is None and vol_ratio >= self.SURGE_THRESHOLD:
             profile.first_surge_ts = now
             profile.first_surge_vol_ratio = vol_ratio
@@ -186,15 +223,11 @@ class VolumeProfiler:
             if not profile.intraday_vol_snapshots or (now - profile.intraday_vol_snapshots[-1][0]) >= 30:
                 profile.intraday_vol_snapshots.append((now, vol_ratio))
         
-        # 计算综合量能评分
+        # 5. 计算综合量能评分 (后面再进行板块分析修正)
         profile.volume_score = self._compute_volume_score(profile, vol_ratio)
     
     def _calc_consecutive_shrink_days(self, row):
-        """计算连续缩量天数 (基于 lastv1d..lastv9d)
-        
-        lastv1d = 昨日成交量, lastv2d = 前日成交量, ...
-        如果 lastv1d < lastv2d < lastv3d, 则连续缩量 2 天
-        """
+        """计算连续缩量天数 (基于 lastv1d..lastv9d)"""
         volumes = []
         for i in range(1, 10):
             col = f'lastv{i}d'
@@ -215,47 +248,180 @@ class VolumeProfiler:
                 shrink_count += 1
             else:
                 break
-        
         return shrink_count
+
+    def _calc_recent_up_days_3d(self, row):
+        """计算前 3 个交易日中收阳（收涨）的天数 (连阳度)"""
+        prices = []
+        for i in range(1, 5):
+            col = f'lastp{i}d'
+            try:
+                p = float(row.get(col, 0))
+                if p > 0:
+                    prices.append(p)
+            except (TypeError, ValueError):
+                break
+        if len(prices) < 2:
+            return 0
+        
+        up_count = 0
+        if prices[0] > prices[1]: up_count += 1
+        if len(prices) >= 3 and prices[1] > prices[2]: up_count += 1
+        if len(prices) >= 4 and prices[2] > prices[3]: up_count += 1
+        return up_count
+
+    def _calc_consecutive_up_days(self, row):
+        """计算连涨天数"""
+        prices = []
+        for i in range(1, 10):
+            col = f'lastp{i}d'
+            try:
+                p = float(row.get(col, 0))
+                if p > 0:
+                    prices.append(p)
+            except (TypeError, ValueError):
+                break
+        if not prices:
+            return 0
+        
+        yesterday_ups = 0
+        for i in range(len(prices) - 1):
+            if prices[i] > prices[i+1]:
+                yesterday_ups += 1
+            else:
+                break
+                
+        # 结合今日当前涨幅 (当前价是否大于昨天收盘价)
+        try:
+            current_close = float(row.get('close', row.get('price', 0.0)))
+            if current_close > prices[0]:
+                return yesterday_ups + 1
+        except:
+            pass
+        return yesterday_ups
+    
+    def analyze_sector_resonance(self, active_codes=None):
+        """核心重构: 板块联动分析，标记龙头与跟风关系"""
+        self.sectors.clear()
+        
+        # 1. 聚合个股到板块
+        for code, profile in self.profiles.items():
+            if active_codes is not None and code not in active_codes:
+                continue
+            sec = profile.sector
+            if not sec:
+                continue
+                
+            if sec not in self.sectors:
+                self.sectors[sec] = SectorMomentum(sec)
+            
+            sec_momentum = self.sectors[sec]
+            sec_momentum.active_count += 1
+            
+            # 认领板块内首发最强（首次放量最早且量能分最高）的股票为带队龙头
+            vol_score = profile.volume_score
+            t_self = profile.first_surge_ts
+            
+            if sec_momentum.leader_code is None:
+                sec_momentum.leader_code = code
+                sec_momentum.leader_score = vol_score
+                sec_momentum.leader_first_seen_ts = t_self
+            else:
+                t_leader = sec_momentum.leader_first_seen_ts
+                is_better = False
+                
+                if t_self is not None and t_leader is not None:
+                    if t_self < t_leader - 30:  # 提前 30 秒以上启动为优
+                        is_better = True
+                    elif abs(t_self - t_leader) <= 120 and vol_score > sec_momentum.leader_score:
+                        # 2分钟内同时启动，看量能分强弱
+                        is_better = True
+                elif t_self is not None:
+                    is_better = True
+                    
+                if is_better:
+                    sec_momentum.leader_code = code
+                    sec_momentum.leader_score = vol_score
+                    sec_momentum.leader_first_seen_ts = t_self
+                    
+        # 2. 标记跟风与龙头的加权关系
+        for code, profile in self.profiles.items():
+            sec = profile.sector
+            if not sec or sec not in self.sectors:
+                profile.is_sector_leader = False
+                profile.is_sector_follower = False
+                profile.sector_leader_code = None
+                continue
+                
+            sec_momentum = self.sectors[sec]
+            profile.sector_leader_code = sec_momentum.leader_code
+            
+            if sec_momentum.leader_code == code:
+                profile.is_sector_leader = True
+                profile.is_sector_follower = False
+            else:
+                profile.is_sector_leader = False
+                # 如果板块有龙头已经率先启动，且此股票自己也启动了，启动时间在大哥之后，视为跟风者
+                if (sec_momentum.active_count > 1 and 
+                    sec_momentum.leader_first_seen_ts is not None and 
+                    profile.first_surge_ts is not None and 
+                    profile.first_surge_ts > sec_momentum.leader_first_seen_ts + 5):  # 滞后5秒以上启动为跟风
+                    profile.is_sector_follower = True
+                else:
+                    profile.is_sector_follower = False
+                    
+            # 重新计算经过板块加权修正的量能评分
+            profile.volume_score = self._compute_volume_score(profile, profile.first_surge_vol_ratio or 1.0)
     
     def _compute_volume_score(self, profile, current_vol_ratio):
-        """综合量能评分 (0-100)
-        
-        评分因子:
-        1. 连续缩量天数越多，说明洗盘越充分 → 高分
-        2. 当日首次放量越早 → 高分 (早盘放量优于午后放量)
-        3. 放量幅度越大 → 高分
-        4. 大盘环境加成 (缩量后反弹)
-        """
+        """综合量能评分 (0-100)"""
         score = 0.0
         
-        # 因子 1: 连续缩量天数 (最多贡献 40 分)
-        score += min(40.0, profile.consecutive_shrink_days * 10.0)
+        # 因子 1: 连续缩量天数 (最多贡献 35 分)
+        score += min(35.0, profile.consecutive_shrink_days * 8.0)
         
-        # 因子 2: 首次放量时间 (最多贡献 25 分)
+        # 因子 2: 首次放量时间 (最多贡献 20 分)
         if profile.first_surge_ts:
             import datetime
             surge_time = datetime.datetime.fromtimestamp(profile.first_surge_ts)
             hour, minute = surge_time.hour, surge_time.minute
-            time_minutes = hour * 60 + minute  # 转为分钟
+            time_minutes = hour * 60 + minute
             
-            if time_minutes <= 570:    # 09:30 之前 (竞价)
-                score += 25.0
+            if time_minutes <= 570:    # 09:30 前
+                score += 20.0
             elif time_minutes <= 600:  # 09:30-10:00 (黄金半小时)
-                score += 25.0 - (time_minutes - 570) * 0.5
+                score += 20.0 - (time_minutes - 570) * 0.4
             elif time_minutes <= 690:  # 10:00-11:30
-                score += 10.0 - (time_minutes - 600) * 0.1
-            else:                      # 午后
-                score += 5.0
+                score += 8.0 - (time_minutes - 600) * 0.08
+            else:
+                score += 4.0
         
-        # 因子 3: 放量幅度 (最多贡献 20 分)
+        # 因子 3: 放量幅度 (最多贡献 15 分)
         surge_ratio = max(current_vol_ratio, profile.first_surge_vol_ratio)
         if surge_ratio > 1.0:
-            score += min(20.0, (surge_ratio - 1.0) * 15.0)
+            score += min(15.0, (surge_ratio - 1.0) * 10.0)
         
-        # 因子 4: 大盘环境加成 (最多贡献 15 分)
+        # 因子 4: 大盘量能环境加成 (最多贡献 10 分)
         if self.market_context.is_rebound_from_shrink:
-            score += min(15.0, self.market_context.rebound_quality * 0.15)
+            score += min(10.0, self.market_context.rebound_quality * 0.10)
+            
+        # ==============================================================
+        # 核心新增: 板块联动共振加成与多涨多阳抗跌加成 (最高可提升至 100 分上限)
+        # ==============================================================
+        
+        # 连阳抗跌加分 (长城军工启动前连阳抗跌多阳): 3连阳/多日收涨 贡献最多 10 分
+        score += min(10.0, profile.recent_up_days_3d * 3.3)
+        if profile.consecutive_up_days >= 3:
+            score += 2.0  # 3天以上连涨额外加分
+            
+        # 板块联动提权
+        if profile.is_sector_leader:
+            # 领涨龙头且板块有多个成员活跃 (带队龙头): 额外加 10 分
+            if self.sectors.get(profile.sector) and self.sectors[profile.sector].active_count > 1:
+                score += 10.0
+        elif profile.is_sector_follower:
+            # 小弟被大哥带队加速跟风启动: 额外加 8 分共振分，防止小弟在池中因微弱分差滑落
+            score += 8.0
         
         return min(100.0, max(0.0, score))
     
