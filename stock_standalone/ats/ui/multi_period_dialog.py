@@ -580,18 +580,37 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         self.list_widget.clear()
         # 建立主窗口下拉框中策略纯名字到含 Hit 文本的映射
         hit_map = {}
+        recent_ids = []
         p = self.parent()
-        if p and hasattr(p, 'strategy_combo'):
-            import re
-            for i in range(p.strategy_combo.count()):
-                t = p.strategy_combo.itemText(i)
-                raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t)
-                hit_map[raw_name] = t
+        if p:
+            if hasattr(p, 'strategy_combo'):
+                import re
+                for i in range(p.strategy_combo.count()):
+                    t = p.strategy_combo.itemText(i)
+                    raw_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+                    raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', raw_name)
+                    hit_map[raw_name] = t
+            if hasattr(p, 'ui_state'):
+                recent_ids = p.ui_state.get('recent_strategy_ids', [])
 
+        # 对 recent_ids 中的有效策略进行编号
+        valid_strat_ids = {s['id'] for s in self.strategies}
+        recent_ids = [rid for rid in recent_ids if rid in valid_strat_ids]
+        recent_ids = recent_ids[:10]
+
+        prefixes = ["❶ ", "❷ ", "❸ ", "❹ ", "❺ ", "❻ ", "❼ ", "❽ ", "❾ ", "❿ "]
         for s in self.strategies:
             display_name = s['name']
             if display_name in hit_map:
                 display_name = hit_map[display_name]
+            
+            # 补漏保障
+            import re
+            has_pref = re.match(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]', display_name)
+            if not has_pref and s['id'] in recent_ids:
+                idx = recent_ids.index(s['id'])
+                if idx < len(prefixes):
+                    display_name = f"{prefixes[idx]}{display_name}"
             self.list_widget.addItem(display_name)
 
     def _move_to_top(self):
@@ -1883,6 +1902,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _load_state(self):
         default_state = {
             "strategy_id": "",
+            "recent_strategy_ids": [],
             "periods": ["d", "w", "m"],
             "custom_cols": [],
             "stays_on_top": False,
@@ -1919,7 +1939,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         try:
             strat_name = self.strategy_combo.currentText()
             import re
-            clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
+            clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
+            clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
             strat_id = ""
             for s in self.strategies:
                 if s['name'] == clean_strat_name:
@@ -1927,6 +1948,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     break
             
             self.ui_state['strategy_id'] = strat_id
+            self.ui_state['recent_strategy_ids'] = self.ui_state.get('recent_strategy_ids', [])
             self.ui_state['periods'] = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
             self.ui_state['custom_cols'] = [c for c, act in self.custom_col_actions.items() if act.isChecked()]
             self.ui_state['manual_col_pool'] = list(self.manual_col_pool)
@@ -2224,15 +2246,117 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.custom_col_actions = {}
         self._rebuild_custom_cols_menu()
 
+    def _rebuild_strategy_combo(self):
+        self.strategy_combo.blockSignals(True)
+        
+        # 1. 抓取当前下拉框中各策略纯名字的 [Hit: N] 后缀映射
+        hit_names = {}
+        import re
+        for i in range(self.strategy_combo.count()):
+            t = self.strategy_combo.itemText(i)
+            # 清洗前缀和后缀
+            raw = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+            raw = re.sub(r'\s*\[Hit:\s*\d+\]$', '', raw)
+            hit_names[raw] = t
+
+        current_text = self.strategy_combo.currentText()
+        clean_current_text = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', current_text)
+        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_current_text)
+
+        self.strategy_combo.clear()
+        
+        # 2. 根据 recent_strategy_ids 重新组织 strategies 的渲染顺序
+        recent_ids = self.ui_state.get('recent_strategy_ids', [])
+        valid_strat_ids = {s['id'] for s in self.strategies}
+        recent_ids = [rid for rid in recent_ids if rid in valid_strat_ids]
+        self.ui_state['recent_strategy_ids'] = recent_ids[:10]
+        recent_ids = recent_ids[:10]
+        
+        recent_strats = []
+        other_strats = []
+        for rid in recent_ids:
+            s = next(x for x in self.strategies if x['id'] == rid)
+            recent_strats.append(s)
+            
+        recent_ids_set = set(recent_ids)
+        for s in self.strategies:
+            if s['id'] not in recent_ids_set:
+                other_strats.append(s)
+                
+        # 3. 拼接并添加 Items
+        prefixes = ["❶ ", "❷ ", "❸ ", "❹ ", "❺ ", "❻ ", "❼ ", "❽ ", "❾ ", "❿ "]
+        new_items = []
+        
+        # 优先从计算出的 self._last_hit_results 中读取，备选从原本的文本中读取
+        hit_results = getattr(self, "_last_hit_results", {})
+        
+        for idx, s in enumerate(recent_strats):
+            prefix = prefixes[idx] if idx < len(prefixes) else ""
+            raw_name = s['name']
+            
+            hit_cnt = None
+            if raw_name in hit_results:
+                hit_cnt = hit_results[raw_name]
+            elif raw_name in hit_names:
+                prev_full = hit_names[raw_name]
+                prev_hit = re.search(r'\[Hit:\s*(\d+)\]$', prev_full)
+                if prev_hit:
+                    hit_cnt = int(prev_hit.group(1))
+                    
+            hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
+            new_items.append(f"{prefix}{raw_name}{hit_suffix}")
+                
+        for s in other_strats:
+            raw_name = s['name']
+            
+            hit_cnt = None
+            if raw_name in hit_results:
+                hit_cnt = hit_results[raw_name]
+            elif raw_name in hit_names:
+                prev_full = hit_names[raw_name]
+                prev_hit = re.search(r'\[Hit:\s*(\d+)\]$', prev_full)
+                if prev_hit:
+                    hit_cnt = int(prev_hit.group(1))
+                    
+            hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
+            new_items.append(f"{raw_name}{hit_suffix}")
+                
+        self.strategy_combo.addItems(new_items)
+        
+        # 4. 恢复之前选中的策略
+        matched_idx = -1
+        for i in range(self.strategy_combo.count()):
+            t = self.strategy_combo.itemText(i)
+            t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+            t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
+            if t_clean == clean_current_text:
+                matched_idx = i
+                break
+        if matched_idx >= 0:
+            self.strategy_combo.setCurrentIndex(matched_idx)
+        else:
+            if self.strategy_combo.count() > 0:
+                self.strategy_combo.setCurrentIndex(0)
+                
+        self.strategy_combo.blockSignals(False)
+
     def _apply_state(self):
         # 1. Apply active strategy
+        # 先根据最近使用历史重构下拉列表
+        self._rebuild_strategy_combo()
+
         if self.strategies:
-            strat_name = self.strategies[0]['name']
-            for s in self.strategies:
-                if s['id'] == self.ui_state.get('strategy_id'):
-                    strat_name = s['name']
-                    break
-            self.strategy_combo.setCurrentText(strat_name)
+            target_id = self.ui_state.get('strategy_id')
+            strat = next((s for s in self.strategies if s['id'] == target_id), None)
+            if strat:
+                import re
+                for i in range(self.strategy_combo.count()):
+                    t = self.strategy_combo.itemText(i)
+                    t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+                    t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
+                    if t_clean == strat['name']:
+                        self.strategy_combo.setCurrentIndex(i)
+                        break
 
         # 2. Apply active periods
         for p in self.ui_state.get('periods', []):
@@ -2430,10 +2554,21 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         strat_name = self.strategy_combo.currentText()
         import re
-        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
+        clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
+        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
         strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
         if not strat_config:
             return
+
+        # 记录到最近使用的 10 个策略中并重构列表
+        strat_id = strat_config['id']
+        recent_ids = self.ui_state.get('recent_strategy_ids', [])
+        if strat_id in recent_ids:
+            recent_ids.remove(strat_id)
+        recent_ids.insert(0, strat_id)
+        self.ui_state['recent_strategy_ids'] = recent_ids[:10]
+        self._save_state(write_to_disk=True)
+        self._rebuild_strategy_combo()
 
         if force_reload:
             # 盘中强制刷新：仅清空 top_now 实时行情以强行更新最新盘中数据，持久复用内存中多周期历史特征数据 (_period_dfs)
@@ -2585,27 +2720,16 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             except RuntimeError:
                 pass
 
-        # 批量更新下拉框项
-        self.strategy_combo.blockSignals(True)
-        current_text = self.strategy_combo.currentText()
+        # 缓存计算结果，注意去除原有的前缀和后缀
         import re
-        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
+        self._last_hit_results = {}
+        for name, hit_cnt in results.items():
+            clean_name = re.sub(r'^[❶❷❸❹❺①②③④⑤\d\s\.\-\[\]]+', '', name)
+            clean_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_name)
+            self._last_hit_results[clean_name] = hit_cnt
 
-        for idx, strat in enumerate(self.strategies):
-            hit_cnt = results.get(strat['name'], 0)
-            raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat['name'])
-            new_text = f"{raw_name} [Hit: {hit_cnt}]"
-            self.strategy_combo.setItemText(idx, new_text)
-
-        # 恢复之前选中的策略索引
-        matched_idx = 0
-        for i in range(self.strategy_combo.count()):
-            t = self.strategy_combo.itemText(i)
-            if re.sub(r'\s*\[Hit:\s*\d+\]$', '', t) == clean_current_text:
-                matched_idx = i
-                break
-        self.strategy_combo.setCurrentIndex(matched_idx)
-        self.strategy_combo.blockSignals(False)
+        # 统一使用 _rebuild_strategy_combo 重构下拉列表，避免前置序号丢失！
+        self._rebuild_strategy_combo()
 
         self.lbl_status.setText("✅ 全量策略 Hit 命中率测试完成！")
 
@@ -3752,11 +3876,22 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         strat_name = self.strategy_combo.currentText()
         import re
-        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', strat_name)
+        clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
+        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
         strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
         if not strat_config:
             QMessageBox.warning(self, "警告", "未选中任何有效策略！")
             return
+
+        # 记录到最近使用的 10 个策略中并重构列表
+        strat_id = strat_config['id']
+        recent_ids = self.ui_state.get('recent_strategy_ids', [])
+        if strat_id in recent_ids:
+            recent_ids.remove(strat_id)
+        recent_ids.insert(0, strat_id)
+        self.ui_state['recent_strategy_ids'] = recent_ids[:10]
+        self._save_state(write_to_disk=True)
+        self._rebuild_strategy_combo()
             
         active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
         if not active_periods:
@@ -4294,42 +4429,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
     def _on_strategies_saved(self, new_strategies):
         self.strategies = new_strategies
-        self.strategy_combo.blockSignals(True)
-        
-        # 1. 抓取原本下拉框中包含 [Hit: N] 后缀的项名称
-        hit_names = {}
-        import re
-        for i in range(self.strategy_combo.count()):
-            t = self.strategy_combo.itemText(i)
-            raw = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t)
-            hit_names[raw] = t
-
-        current_text = self.strategy_combo.currentText()
-        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', current_text)
-        
-        self.strategy_combo.clear()
-        
-        # 2. 根据新排序重构下拉列表
-        new_items = []
-        for s in self.strategies:
-            name = s['name']
-            if name in hit_names:
-                new_items.append(hit_names[name])
-            else:
-                new_items.append(name)
-        self.strategy_combo.addItems(new_items)
-        
-        matched_idx = -1
-        for i in range(self.strategy_combo.count()):
-            if re.sub(r'\s*\[Hit:\s*\d+\]$', '', self.strategy_combo.itemText(i)) == clean_current_text:
-                matched_idx = i
-                break
-        if matched_idx >= 0:
-            self.strategy_combo.setCurrentIndex(matched_idx)
-        else:
-            if self.strategies:
-                self.strategy_combo.setCurrentIndex(0)
-        self.strategy_combo.blockSignals(False)
+        self._rebuild_strategy_combo()
 
     def _poll_favorites_loop(self):
         try:
