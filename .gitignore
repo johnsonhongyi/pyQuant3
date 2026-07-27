@@ -175,3 +175,6 @@ stock_standalone/scratch/obsolete/*
 stock_standalone/scratch/test_*
 stock_standalone/logs/*
 stock_standalone/datacsv/*
+
+# Allow multi_period_strategies.json to be tracked
+!stock_standalone/config/multi_period_strategies.json
