@@ -1,5 +1,5 @@
 @echo off
-title Nuitka Smart Compiler Assistant - Console Mode
+title Nuitka Smart Compiler Assistant - MultiPeriodTester (Clang Mode)
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
@@ -12,7 +12,7 @@ echo [INFO] Build started at: %START_TIME_STR%
 echo.
 
 echo ==========================================
-echo 🧠 Nuitka Smart Compiler Assistant (Console Mode)
+echo 🧠 Nuitka Smart Compiler Assistant - MultiPeriodTester
 echo ==========================================
 echo.
 
@@ -37,8 +37,8 @@ if /I "%BUILD_MODE_ARG%"=="onefile_spec" (
 ) else (
     echo Choose Build Target:
     echo [1] Standalone Folder (highly recommended for debugging/development)
-    echo [2] Onefile Executable with fixed Temp Dir (Default, Single file distribution, custom unpack path)
-    echo [3] Onefile Executable (Standard, Single file distribution, standard unpack path)
+    echo [2] Onefile Executable with fixed Temp Dir (Default, Single file distribution)
+    echo [3] Onefile Executable (Standard, Single file distribution)
     echo.
     
     choice /C 123 /T 5 /D 2 /M "Enter your choice (auto-select [2] in 5 seconds): "
@@ -54,7 +54,7 @@ if /I "%BUILD_MODE_ARG%"=="onefile_spec" (
 
 if "%BUILD_MODE%"=="onefile_spec" (
     echo [MODE] Building ONEFILE executable with fixed unpack tempdir...
-    set "NUITKA_MODE_OPT=--onefile --onefile-tempdir-spec="{TEMP}\instock_Nuitka""
+    set "NUITKA_MODE_OPT=--onefile --onefile-tempdir-spec="{TEMP}\MultiPeriodTester_Nuitka""
 ) else if "%BUILD_MODE%"=="onefile" (
     echo [MODE] Building ONEFILE executable...
     set "NUITKA_MODE_OPT=--onefile"
@@ -163,7 +163,6 @@ if "!USE_CLANG!"=="1" (
     set "PATH=!PATH:D:\mingw64=!"
 
     rem Let Nuitka Scons automatically detect and use the native MSVC clang-cl
-    rem DO NOT override CC/CXX here, as it breaks Scons Windows parsing.
     set "CC="
     set "CXX="
 
@@ -210,20 +209,17 @@ if not errorlevel 1 (
 echo.
 
 :: ===== Configuration =====
-set MAIN_SCRIPT=instock_MonitorTK.py
-set OUTPUT_NAME=instock_MonitorTK_Nuita.exe
+set MAIN_SCRIPT=ats\ui\multi_period_dialog.py
+set OUTPUT_NAME=MultiPeriodTester.exe
 set OUTPUT_DIR=build
-set ICON_FILE=MonitorTK.ico
+set ICON_FILE=MonitorTK32.ico
+if not exist "%ICON_FILE%" set ICON_FILE=MonitorTK.ico
 set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
 
 echo Checking Python environment...
-:: Check if virtual environment is active
 if defined VIRTUAL_ENV (
     echo [SUCCESS] Virtual environment detected: %VIRTUAL_ENV%
     set PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe
-@REM ) else if defined CONDA_PREFIX (
-@REM     echo [SUCCESS] Conda environment detected: %CONDA_PREFIX%
-@REM     set PYTHON_EXEC=%CONDA_PREFIX%\python.exe
 ) else (
     echo [WARNING] No virtual environment detected, using system Python
     set PYTHON_EXEC=python
@@ -249,12 +245,11 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
-    --enable-plugin=tk-inter ^
     --enable-plugin=pyqt6 ^
-    --windows-console-mode=force ^
+    --windows-console-mode=disable ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
-    --windows-product-name="instock_MonitorTK" ^
+    --windows-product-name="MultiPeriodTester" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
@@ -270,6 +265,27 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=tables.tests ^
     --nofollow-import-to=tables.nodes.tests ^
     --nofollow-import-to=numpy.tests ^
+    --nofollow-import-to=IPython ^
+    --nofollow-import-to=notebook ^
+    --nofollow-import-to=jedi ^
+    --nofollow-import-to=unittest ^
+    --nofollow-import-to=numba ^
+    --nofollow-import-to=llvmlite ^
+    --nofollow-import-to=cryptography ^
+    --nofollow-import-to=lxml ^
+    --nofollow-import-to=botocore ^
+    --nofollow-import-to=boto3 ^
+    --nofollow-import-to=bokeh ^
+    --nofollow-import-to=seaborn ^
+    --nofollow-import-to=flask ^
+    --nofollow-import-to=django ^
+    --nofollow-import-to=sqlalchemy ^
+    --nofollow-import-to=pyecharts ^
+    --nofollow-import-to=zmq ^
+    --nofollow-import-to=tornado ^
+    --nofollow-import-to=PyQt5 ^
+    --nofollow-import-to=PySide2 ^
+    --nofollow-import-to=PySide6 ^
     --nofollow-import-to=PyQt6.QtWebEngineCore ^
     --nofollow-import-to=PyQt6.QtWebEngineWidgets ^
     --nofollow-import-to=PyQt6.QtQuick ^
@@ -278,16 +294,18 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=PyQt6.QtVirtualKeyboard ^
     --nofollow-import-to=PyQt6.QtMultimedia ^
     --nofollow-import-to=PyQt6.QtBluetooth ^
+    --nofollow-import-to=PyQt6.QtPositioning ^
+    --nofollow-import-to=PyQt6.QtSensors ^
+    --nofollow-import-to=PyQt6.QtWebChannel ^
+    --nofollow-import-to=PyQt6.QtWebSockets ^
     --nofollow-import-to=PyQt6.QtNetwork ^
     --nofollow-import-to=PyQt6.QtSvg ^
     --nofollow-import-to=PyQt6.QtSql ^
     --nofollow-import-to=PyQt6.QtTest ^
     --nofollow-import-to=PyQt6.QtXml ^
-    --nofollow-import-to=IPython ^
-    --nofollow-import-to=unittest ^
-    --nofollow-import-to=numba ^
-    --nofollow-import-to=llvmlite ^
-    --nofollow-import-to=cryptography ^
+    --nofollow-import-to=PyQt6.QtQuickWidgets ^
+    --nofollow-import-to=PyQt6.QtQuick3D ^
+    --nofollow-import-to=PyQt6.QtRemoteObjects ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
     --noinclude-dlls=Qt6WebEngineWidgets.dll ^
     --noinclude-dlls=Qt6Pdf.dll ^
@@ -301,71 +319,29 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=Qt6Sql.dll ^
     --noinclude-dlls=Qt6Test.dll ^
     --noinclude-dlls=Qt6Xml.dll ^
+    --noinclude-dlls=opengl32sw.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
-    --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
-    --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
-    --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^
-    --include-data-file=global.ini=global.ini ^
-    --include-data-file=scale2_window_config.json=scale2_window_config.json ^
-    --include-data-file=monitor_category_list.json=monitor_category_list.json ^
-    --include-data-file=visualizer_layout.json=visualizer_layout.json ^
-    --include-data-file=voice_alert_config.json=voice_alert_config.json ^
-    --include-data-file=macro_trends.json=macro_trends.json ^
-    --include-data-file=display_cols.json=display_cols.json ^
-    --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
-    --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
-    --include-data-file=datacsv\minute_kline_viewer_history.json=datacsv\minute_kline_viewer_history.json ^
+    --include-data-file=strategy_config.json=strategy_config.json ^
     --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
     --include-data-file=JSONData\count.ini=JSONData\count.ini ^
     --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
-    --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
-    --include-package=a_trade_calendar ^
-    --include-package=pyttsx3 ^
+    --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
+    --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
+    --include-package=ats ^
+    --include-package=JSONData ^
     --include-package=tables ^
-    --include-package=tk_gui_modules ^
-    --include-module=JSONData.tdx_hdf5_api ^
-    --include-module=JSONData.wencaiData ^
-    --include-module=JSONData.sina_data ^
-    --include-module=JohnsonUtil.johnson_cons ^
+    --include-package=a_trade_calendar ^
+    --include-package=talib ^
+    --include-module=global_favorites ^
+    --include-module=stock_logic_utils ^
+    --include-module=sys_utils ^
+    --include-module=db_utils ^
+    --include-module=tdx_utils ^
     --include-module=configobj ^
     --include-module=tushare ^
-    --include-module=pandas_ta ^
-    --include-module=talib.stream ^
-    --include-module=talib.abstract ^
-    --include-module=stock_live_strategy ^
-    --include-module=realtime_data_service ^
-    --include-module=market_pulse_engine ^
-    --include-module=signal_dashboard_panel ^
-    --include-module=tables._comp_lzo ^
-    --include-module=tables._comp_bzip2 ^
-    --include-module=bidding_racing_panel ^
-    --include-module=bidding_momentum_detector ^
-    --include-module=market_pulse_viewer ^
-    --include-module=sector_bidding_panel ^
-    --include-module=stock_selector ^
-    --include-module=trading_hub ^
-    --include-module=signal_grading_hub ^
-    --include-module=sector_focus_engine ^
-    --include-module=scraper_55188 ^
-    --include-module=backtest_feature_auditor ^
-    --include-module=intraday_decision_engine ^
-    --include-module=position_phase_engine ^
-    --include-module=daily_top_detector ^
-    --include-module=trading_analyzerQt6 ^
-    --include-module=minute_kline_viewer_qt ^
-    --include-module=live_signal_viewer ^
-    --include-module=stock_selection_window ^
-    --include-module=kline_monitor ^
-    --include-module=db_repair_tool ^
-    --include-module=cleanup_non_trading_signals ^
-    --include-module=test_bidding_replay ^
-    --include-module=signal_bus ^
-    --include-module=keyboard ^
-    --include-module=tkcalendar ^
-    --include-module=psutil ^
-    --include-module=tk_gil_monitor
+    --include-module=pandas_ta
 
 
 :: ===== Execute compilation =====
@@ -393,10 +369,14 @@ echo.
 
 :: ===== Verification =====
 if "%BUILD_MODE%"=="standalone" (
-    if exist "%OUTPUT_DIR%\instock_MonitorTK.dist\%OUTPUT_NAME%" (
+    if exist "%OUTPUT_DIR%\multi_period_dialog.dist\%OUTPUT_NAME%" (
         echo.
         echo [SUCCESS] Standalone compilation completed successfully!
-        echo [SUCCESS] Output directory: %OUTPUT_DIR%\instock_MonitorTK.dist
+        echo [SUCCESS] Output directory: %OUTPUT_DIR%\multi_period_dialog.dist
+    ) else if exist "%OUTPUT_DIR%\MultiPeriodTester.dist\%OUTPUT_NAME%" (
+        echo.
+        echo [SUCCESS] Standalone compilation completed successfully!
+        echo [SUCCESS] Output directory: %OUTPUT_DIR%\MultiPeriodTester.dist
     ) else (
         echo [ERROR] Standalone compilation failed. Please check the error logs.
     )
@@ -427,6 +407,7 @@ echo ==========================================
 (
 echo ==========================================
 echo Build Date:    %START_TIME_STR%
+echo Target:        MultiPeriodTester (Nuitka)
 echo Start Time:    %START_TIME_STR%
 echo End Time:      %END_TIME_STR%
 echo Elapsed Time:  %ELAPSED_TIME%

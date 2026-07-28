@@ -1,3 +1,9 @@
+## 2026-07-28 22:00
+- [x] **参照 `nuitka_build_console_onlyClang.bat` 方式制作 `MultiPeriodDialog.spec` 的 Nuitka 打包配置文件 (`nuitka_build_multi_period_dialog_onlyClang.bat`)**：
+    - [x] **全量 Spec 依赖与参数对齐**：完整解构 `MultiPeriodDialog.spec` 的 `datas` 数据资源、`hiddenimports` 隐藏导入包/模块（包含 `ats`, `JSONData`, `tables`, `a_trade_calendar`, `talib`, `pyqtgraph`, `h5py` 等）、`excludes` 排除模块（排除 PyQt6 闲置组件、scipy、matplotlib、numba、cryptography 等）与 `trash_list` 垃圾 DLL 过滤规则。
+    - [x] **高可靠编译环境与一键模式集成**：完全继承 `nuitka_build_console_onlyClang.bat` 的 MSVC 2019 Clang-CL 编译器自动激活、sccache 加速、TEMP/TMP 隔离保护、GCC 泄露硬拦截、动态获取 `a_trade_calendar.csv` 路径以及 Standalone / Onefile 打包模式选择机制。
+    - [x] **配置文件落盘**：新建 `nuitka_build_multi_period_dialog_onlyClang.bat` 文件，生成 target executable 为 `MultiPeriodTester.exe`，100% 对齐 `MultiPeriodDialog.spec` 打包配置。
+
 ## 2026-07-28 21:30
 - [x] **实现多周期管理器「📅 截止日期」选项控制与指定 end 日期预处理 (`ats/ui/multi_period_dialog.py`, `multi_period_strategy_engine.py`, `tests/test_multi_period_auto_init.py`)**：
     - [x] **UI 控件组合植入与开关联动**：在工具栏【自定义列】与【只读模式】之间精确植入 `self.chk_end_date`（`📅 截止日期:` 复选框）与 `self.date_edit`（`QDateEdit` 预处理日期选择控件）。`chk_end_date` 默认处于未勾选关闭状态 (`False`)，`date_edit` 默认置灰禁用 (`setEnabled(False)`) 并使用默认日期 `QDate.currentDate()`，严格遵循 KISS 与安全防护原则。
