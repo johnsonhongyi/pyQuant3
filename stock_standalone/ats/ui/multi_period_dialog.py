@@ -360,8 +360,9 @@ class MultiPeriodWorker(QThread):
                         self.engine._period_dfs.pop(period, None)
                     
                     bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
+                    is_readonly = not self.allow_auto_init
                     with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
-                        self.engine.load_period_data(period, self.top_now, force_reload=load_force, end=self.end)
+                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload, end=self.end, readonly=is_readonly)
 
                     self.period_cache_ts[period] = time.time()
 

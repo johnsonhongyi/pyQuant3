@@ -18,8 +18,8 @@ class MultiPeriodStrategyEngine:
         self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
         
-    def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None) -> pd.DataFrame:
-        """加载指定周期数据（支持大小写规范化；force_reload=False 只读，force_reload=True 自动全周期初始化与写入，end=截止日期）"""
+    def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None, readonly: bool = True) -> pd.DataFrame:
+        """加载指定周期数据（支持大小写规范化；readonly 为直接传递的界面选择状态，end=截止日期）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
         from JohnsonUtil import commonTips as cct
@@ -52,7 +52,7 @@ class MultiPeriodStrategyEngine:
         if not force_reload:
             try:
                 logger.info(f"Loading data for period {res_period} (readonly, dl={dl})...")
-                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=True, end=end)
+                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=readonly, end=end)
             except Exception as e:
                 logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
                 df = None
@@ -68,14 +68,14 @@ class MultiPeriodStrategyEngine:
                             top_now,
                             dl=dl,
                             resample=res_period,
-                            readonly=False,
+                            readonly=readonly,
                             end=end
                         )
                 except Exception as e:
                     logger.error(f"Failed to initialize period [{res_period}]: {e}")
                     df = None
 
-        # 4. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
+        # 3. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
         if df is not None and not df.empty and 'lastp1d' in df.columns:
             df = complete_indicators_pipeline(df, logger, resample=res_period)
             with self.lock:
@@ -86,7 +86,7 @@ class MultiPeriodStrategyEngine:
                 self._missing_periods.pop(period, None)
             return df
         else:
-            reason = "h5缓存不存在(只读模式)" if not force_reload else "数据初始化失败/为空"
+            reason = "h5缓存不存在(只读模式)" if readonly else "数据初始化失败/为空"
             with self.lock:
                 self._missing_periods[res_period] = reason
                 if period != res_period:
