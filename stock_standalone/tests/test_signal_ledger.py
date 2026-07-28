@@ -246,10 +246,43 @@ class TestSignalLedger(unittest.TestCase):
             mgr.sync_from_ledger(self.ledger)
             self.assertIn('920199', mgr.watch_pool)
             
-            fav_mgr.toggle_favorite_stock('920199') # 还原
         except Exception as e:
             print(f"[Test] GlobalFavoriteManager test warning: {e}")
+
+    def test_secondary_filter_note_handling(self):
+        """测试多周期二次过滤 note 信息前置显示与智能解包"""
+        from ats.ui.multi_period_dialog import MultiPeriodDialog
+        
+        # 1. 验证解包逻辑 _extract_real_query
+        # 纯表达式直接原样返回
+        self.assertEqual(MultiPeriodDialog._extract_real_query("lastl1d < ma601d"), "lastl1d < ma601d")
+        
+        # 包含 UI note 标签的格式，智能解包出纯表达式
+        labeled_query = "60调整启动 (lastl1d < ma601d)"
+        self.assertEqual(MultiPeriodDialog._extract_real_query(labeled_query), "lastl1d < ma601d")
+        
+        complex_labeled_query = "强势起爆 (percent > 3.0 and (dff3 > 8.0 or close > ma20d))"
+        self.assertEqual(MultiPeriodDialog._extract_real_query(complex_labeled_query), "percent > 3.0 and (dff3 > 8.0 or close > ma20d)")
+        
+        # 2. 验证 note 格式化 _format_filter_item_with_note
+        label, pure = MultiPeriodDialog._format_filter_item_with_note(labeled_query)
+        self.assertEqual(label, "60调整启动 (lastl1d < ma601d)")
+        self.assertEqual(pure, "lastl1d < ma601d")
+
+        # 3. 验证通过 _get_note_for_query 检索与规整空格匹配
+        from unittest.mock import patch, mock_open
+        mock_history_json = '{"history1": [{"query": "lastl1d < ma601d", "note": "60调整启动"}]}'
+        with patch("os.path.exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=mock_history_json)):
+                # 即使传入多余或不同缩进的 query 字符串，也能成功匹配出 note
+                note_found = MultiPeriodDialog._get_note_for_query("  lastl1d   <   ma601d  ")
+                self.assertEqual(note_found, "60调整启动")
+
+                fmt_label, fmt_pure = MultiPeriodDialog._format_filter_item_with_note("  lastl1d   <   ma601d  ")
+                self.assertEqual(fmt_label, "60调整启动 (lastl1d   <   ma601d)")
+                self.assertEqual(fmt_pure, "lastl1d   <   ma601d")
 
 
 if __name__ == '__main__':
     unittest.main()
+

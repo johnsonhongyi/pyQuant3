@@ -268,7 +268,32 @@ class PandasQueryEngine:
             'ma250d': ['ma250d', 'ma250', 'ma2500d'], 'ma250': ['ma250d', 'ma250', 'ma2500d'],
             'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
             'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
-            'green': ['gren', 'green'], 'red': ['red']
+            'green': ['gren', 'green'], 'red': ['red'],
+            # ===== 趋势通道指标 (calc_trend_channel) =====
+            'ch_upper': ['ch_upper', 'channel_upper', 'ch_up'],
+            'ch_mid': ['ch_mid', 'channel_mid', 'ch_middle'],
+            'ch_lower': ['ch_lower', 'channel_lower', 'ch_dn'],
+            'ch_slope': ['ch_slope', 'channel_slope'],
+            'ch_slope_deg': ['ch_slope_deg', 'slope_deg', 'slope_angle'],
+            'ch_pos': ['ch_pos', 'channel_pos', 'ch_pct'],
+            'ch_dir': ['ch_dir', 'channel_dir'],
+            'ch_width': ['ch_width', 'channel_width'],
+            # ===== Fibonacci 动态支撑阻力 =====
+            'fib_high': ['fib_high', 'fib_top'],
+            'fib_low': ['fib_low', 'fib_bottom'],
+            'fib_19': ['fib_19', 'fib19'],
+            'fib_38': ['fib_38', 'fib38'],
+            'fib_50': ['fib_50', 'fib50', 'fib_mid'],
+            'fib_61': ['fib_61', 'fib61'],
+            'fib_80': ['fib_80', 'fib80'],
+            # ===== 趋势信号 =====
+            'trend_dir': ['trend_dir', 'trend_direction'],
+            'sig_bottom': ['sig_bottom', 'bottom_signal'],
+            'sig_top': ['sig_top', 'top_signal'],
+            'sig_launch': ['sig_launch', 'launch_signal'],
+            'sig_escape': ['sig_escape', 'escape_signal'],
+            'sig_start': ['sig_start', 'start_signal'],
+            'sk_val': ['sk_val'], 'sd_val': ['sd_val'], 'rsi6': ['rsi6'],
         }
         for i in range(1, 10):
             last_macd_idx = min(i, 6)
