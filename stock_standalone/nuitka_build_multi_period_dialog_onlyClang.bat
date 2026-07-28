@@ -272,7 +272,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
     --nofollow-import-to=cryptography ^
-    --nofollow-import-to=lxml ^
     --nofollow-import-to=botocore ^
     --nofollow-import-to=boto3 ^
     --nofollow-import-to=bokeh ^

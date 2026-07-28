@@ -86,7 +86,7 @@ class WindowMixin:
             return os.path.join(base, f"scale{int(scale)}_{filename}")
         return base_file_path
 
-    def load_window_position(self, win: Union[tk.Tk, tk.Toplevel], window_name: str, file_path: Optional[str] = None, 
+    def load_window_position(self, win: Any, window_name: str, file_path: Optional[str] = None, 
                              default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple[int, int, Optional[int], Optional[int]]:
         """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
         if file_path is None:
@@ -135,7 +135,7 @@ class WindowMixin:
             self.center_window(win, int(default_width * self._get_dpi_scale_factor()), int(default_height * self._get_dpi_scale_factor()))
             return default_width, default_height, None, None
 
-    def save_window_position(self, win: Union[tk.Tk, tk.Toplevel], window_name: str, file_path: Optional[str] = None) -> None:
+    def save_window_position(self, win: Any, window_name: str, file_path: Optional[str] = None) -> None:
         """保存窗口位置到统一配置文件（自动移除当前 DPI 缩放）"""
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
@@ -426,7 +426,7 @@ class WindowMixin:
             logger.error(f"[save_window_position_qt] 失败: {e}")
 
 
-    def center_window(self, win: Union[tk.Tk, tk.Toplevel], width: int, height: int) -> None:
+    def center_window(self, win: Any, width: int, height: int) -> None:
         """将指定窗口居中显示"""
         win.update_idletasks()
         screen_width = win.winfo_screenwidth()
@@ -435,7 +435,7 @@ class WindowMixin:
         y = (screen_height - height) // 2
         win.geometry(f"{width}x{height}+{x}+{y}")
 
-    def update_status_bar_width(self, pw: tk.PanedWindow, left_frame: tk.Frame, right_frame: tk.Frame) -> None:
+    def update_status_bar_width(self, pw: Any, left_frame: Any, right_frame: Any) -> None:
         """ 根据 DPI 缩放调整左右面板的宽度比例，使用 paneconfig 避免重新构造 """
         sf = self._get_dpi_scale_factor()
         left_width = int(900 * sf)

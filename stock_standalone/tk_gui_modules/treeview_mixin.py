@@ -16,7 +16,7 @@ class TreeviewAppProtocol(Protocol):
     tree: ttk.Treeview
     current_cols: list[str]
     DISPLAY_COLS: list[str]
-    dfcf_var: tk.BooleanVar
+    dfcf_var: Any
     _name_col_width: int
     _pending_cols: list[str]
     def get_scaled_value(self) -> float: ...
@@ -31,7 +31,7 @@ class TreeviewMixin:
         tree: ttk.Treeview
         current_cols: list[str]
         DISPLAY_COLS: list[str]
-        dfcf_var: tk.BooleanVar
+        dfcf_var: Any
         _name_col_width: int
         _pending_cols: list[str]
         def get_scaled_value(self) -> float: ...
@@ -661,7 +661,7 @@ class TreeviewMixin:
             
         return [k for _, k in l]
 
-    def show_header_context_menu(self, tree: ttk.Treeview, event: tk.Event) -> bool:
+    def show_header_context_menu(self, tree: Any, event: Any) -> bool:
         """通用表头右键多级排序上下文菜单。返回 True 表示事件已被处理，False 表示由行右键菜单继续处理"""
         region = tree.identify_region(event.x, event.y)
         if region != "heading":
