@@ -1,3 +1,9 @@
+## 2026-07-28 17:45
+- [x] **实现通达信「自动通道」与趋势定位算法向量化引擎 (`JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_trend_channel.py`)**：
+    - [x] **完整算法解构与向量化 Python 翻译**：成功将通达信「自动通道」及趋势定位源码解构翻译为 6 大纯 NumPy/Pandas 向量化模块（包含 MA9 趋势方向、8日/3日 Fibonacci 动态 5 阶支撑阻力、A1X 变速率与 MACD 见底/见顶信号、SK/SD 启动检测、FORCAST/SLOPE 自动回归通道以及 RSI6 逃顶/低位启动）。
+    - [x] **22 项新特征与多周期策略无缝接入**：在 `calc_trend_channel(df)` 中预计算 `ch_upper`, `ch_mid`, `ch_lower`, `ch_slope`, `ch_slope_deg`, `ch_pos`, `ch_dir`, `fib_50`, `sig_bottom`, `sig_launch` 等 22 项核心字段，并在 `get_tdx_macd` 末尾一次性集成调起。同时在 `query_engine_util.py` 中注册同义词映射，全自动兼容多周期筛选与历史求值。
+    - [x] **单元测试 100% 覆盖验证**：新建 `tests/test_trend_channel.py`，结合 `tests/test_signal_ledger.py` 全量 14 项单元测试 100% 成功通过。
+
 ## 2026-07-28 15:50
 - [x] **实现多周期二次过滤 Note 前置显示与智能解包 100% 对齐竞价面板 (`ats/ui/multi_period_dialog.py`, `tests/test_signal_ledger.py`)**：
     - [x] **Note 前置格式化与优先展示**：在 `MultiPeriodDialog` 中引入 `_get_note_for_query` 与 `_format_filter_item_with_note`，自动关联 `SEARCH_HISTORY_FILE` 历史字典中的备注并统一格式化为 `f"{note} ({pure_q})"`（例如：`60调整启动 (lastl1d < ma601d)`），使二次过滤下拉框及历史记录中 `note` 描述 100% 显示在最前面。
