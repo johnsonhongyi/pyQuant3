@@ -1,3 +1,9 @@
+## 2026-07-28 10:15
+- [x] **彻底根治多线程并发 select 读取 HDF5 历史数据时引起的 Tables/C 库 Access Violation 致命硬崩溃 (`ats/ui/main_window.py`)**：
+    - [x] **引入 `hdf5_history_lock` 互斥锁保护机制**：在类构造方法中新增 HDF5 历史数据读取专属的线程互斥锁。在 `_async_load_stock_history` 的 `worker` 中，采取 `blocking=False` 的非阻塞式抢占。
+    - [x] **自适应降级重试与死锁防范**：当已有加载线程读取 HDF5 时，当前线程主动放弃获取锁，并安全退回当前待加载股票的代码列表，交由下一次 UI 刷新自动触发。这 100% 杜绝了多线程对于底层非线程安全 PyTables/HDF5 C库的并发冲突；同时使用 `try...finally` 结构强制锁定，确保任何退出分支必然安全解锁，无死锁隐患。并且放弃或读取失败后退回的冷却重试周期采用 `cct.duration_sleep_time` + 随机 `(1,10)` 秒的动态机制，避免 3 秒刷新时频繁重试撞锁冲击底库。
+    - [x] **通过 9 大单元测试验证**：扩展 `tests/test_signal_ledger.py` 覆盖 9 大类核心逻辑，测试全部 100% 成功通过。
+
 ## 2026-07-27 21:15
 - [x] **重构大级别 MA20D 回调跟踪器为高性能「后台统计沉淀+前台龙头捕捉」架构 (`ats/signal_ledger.py`, `ats/volume_profiler.py`, `ats/session_snapshot.py`, `ats/universe_manager.py`, `ats/ui/main_window.py`, `ats/ui/swing_table.py`, `ats/ui/universe_widget.py`)**：
     - [x] **引入 SignalLedger（信号账本）核心增量写入逻辑**：彻底废除每 3 秒全量重算全市场 5000+ 个股导致的池子走马灯剧烈流动痛点；新信号一旦捕获录入即物理锁定首次发现价格与时间戳（只增不删、仅标 inactive 状态），保证如长城军工、立新能源等早期开盘/竞价起爆股信号永远被沉淀锁定，不被后续大批普通反弹个股冲掉。
@@ -35,6 +41,22 @@
     - [x] **取消强制刷新清空 `_period_dfs` 的低效行为**：废除 `run_filter(force_reload=True)` 及 `MultiPeriodWorker.run` 中对 `self.engine._period_dfs.clear()` 和 `self.period_cache_ts.clear()` 的全量重置；盘中强制刷新仅重置 `top_now = None` 强行拉取全市场最新实时行情快照。
     - [x] **毫秒级增量更新日线实时指标**：在新拉取到 `top_now` 实时数据后，极速利用 `top_now` 中的最新价格 (`trade`/`price`)、涨跌幅 (`percent`/`ratio`)、成交量 (`volume`/`turnover`) 增量更新已载入的内存日线 `_period_dfs['d']`；对于 `2d`/`3d`/`w`/`m` 等已载入的多周期历史特征直接 100% 内存复用。
     - [x] **盘中刷新耗时压缩 95%+**：将盘中点击【🔄 强制刷新】的响应耗时由重新解构磁盘 HDF5/TDX 文件的 3~8 秒大幅缩短至 0.1~0.3 秒，实现真正的秒级盘中实时无感刷新。
+
+## 2026-07-28 15:18
+- [x] **彻底根治多周期策略编辑器 QSplitter 分割线自定义比例恢复失效与丢失 Bug (`ats/ui/multi_period_dialog.py`)**：
+    - [x] **根治调用时机过早被初次绘制冲掉隐患**：将分割线 `restoreState` 的恢复时机转移至 `showEvent` 触发后 50ms (`QTimer.singleShot(50, self._restore_splitter_state)`) 延迟执行。彻底杜绝了之前在 `__init__` 未渲染阶段恢复状态被随后 Qt 初始 Layout 强制重置平分的工程痛点。
+    - [x] **实现双重存盘与退出全面拦截**：在 `_save_geometry` 中新增 `saveState()` 二进制 Hex + `setSizes([w1, w2])` 真实像素尺寸的双重备份机制，并在 `done(r)`（拦截确定/取消/Esc等全部退出途径）与 `closeEvent` 中同步覆盖存盘，100% 保证用户拖动出的左右比例在任何打包或多屏幕分辨率下均能无缝复原。
+
+## 2026-07-28 13:25
+- [x] **多周期策略编辑器与诊断面板全量植入「竞价赛马风格 6px 极窄精美 QScrollBar 滚动条」 (`ats/ui/multi_period_dialog.py`)**：
+    - [x] **完全替换原生粗糙滚动条**：针对用户截图圈出的“策略列表”、“策略说明”、“周期条件区域”以及“JSON 预览编辑器”四大滑动轨道，引入深色透明背景 (`#12121a`)、6px 极窄轨道 (`width: 6px`, `height: 6px`) 与 3px 柔和圆角滑块。
+    - [x] **极佳交互高亮**：滑块日常呈暗紫灰色 (`#3a3f58`)，鼠标悬停即时高亮为醒目 Indigo 亮紫色 (`#6366f1`)，彻底消除了粗糙滚动条对高密 UI 空间的遮挡，呈现高对比度工程级 UI 视觉提升。
+
+## 2026-07-28 12:30
+- [x] **优化 `tpl_bottom_oversold_wash_breakout` 策略兼容浩淼科技 (920856) 等超跌地量均线粘合爆量突破形态 (`multi_period_strategies.json`)**：
+    - [x] **解构浩淼科技 (920856) 形态**：7.94 元探底结束深度阴跌 -> 8.39 元附近均线密集粘合与极度缩量地量整固 -> 今日突破 BOLL 上轨 (10.09) 放量拉升 (+8.60%)，GAOCJZJ 强度指数显示红色满格。
+    - [x] **优化 `2d`/`3d` 周期水下 MACD 绿柱缩短与均线贴合度**：将 `2d`/`3d` 周期条件调整为 `close >= 0.94 * ma5d and (dif > dea or macd > macdlast1 or macd > 0)`，完美覆盖浩淼科技等水下绿柱变红与贴紧 MA5 企稳起爆形态。
+    - [x] **三方物理副本同步**：完成配置文件落盘并同步至 build 与 dist 目录。
 
 ## 2026-07-26 21:38
 - [x] **拓展企稳策略至周线(w)/3D/2D大周期成交量极缩数据流 (`multi_period_strategies.json`)**：
