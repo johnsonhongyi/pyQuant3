@@ -341,6 +341,61 @@ class MultiPeriodStrategyEditorDialog(QDialog):
             QPushButton:hover { background-color: #3f51b5; }
             QComboBox { background-color: #263238; color: #ffffff; border: 1px solid #37474f; border-radius: 4px; padding: 4px; }
             QCheckBox { color: #b0bec5; }
+            
+            /* 赛马视觉：极窄精美滚动条 */
+            QScrollBar:vertical {
+                border: none;
+                background: #12121a;
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3a3f58;
+                min-height: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #6366f1;
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: #818cf8;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+
+            QScrollBar:horizontal {
+                border: none;
+                background: #12121a;
+                height: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #3a3f58;
+                min-width: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #6366f1;
+            }
+            QScrollBar::handle:horizontal:pressed {
+                background: #818cf8;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                border: none;
+                background: none;
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
+            }
         """)
 
         # Load saved geometry
@@ -361,6 +416,11 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                         break
             self.list_widget.setCurrentRow(initial_idx)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 布局完成 50ms 后精确恢复 Splitter 分割线尺寸与比例，防止被初次窗口绘制初始化布局重置冲掉
+        QTimer.singleShot(50, self._restore_splitter_state)
+
     def _load_geometry(self):
         if os.path.exists(self.config_path):
             try:
@@ -369,11 +429,25 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                     geom_saved = cfg.get("editor_geometry_qt")
                     if geom_saved:
                         self.restoreGeometry(QByteArray.fromHex(geom_saved.encode('utf-8')))
-                    splitter_saved = cfg.get("editor_splitter_qt")
-                    if splitter_saved and hasattr(self, 'splitter') and self.splitter is not None:
-                        self.splitter.restoreState(QByteArray.fromHex(splitter_saved.encode('utf-8')))
             except Exception as e:
-                logger.warning(f"Failed to load editor geometry/splitter: {e}")
+                logger.warning(f"Failed to load editor geometry: {e}")
+
+    def _restore_splitter_state(self):
+        if not hasattr(self, 'splitter') or self.splitter is None:
+            return
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    splitter_saved = cfg.get("editor_splitter_qt")
+                    if splitter_saved:
+                        self.splitter.restoreState(QByteArray.fromHex(splitter_saved.encode('utf-8')))
+                    if "editor_splitter_sizes" in cfg:
+                        sizes = cfg["editor_splitter_sizes"]
+                        if isinstance(sizes, list) and len(sizes) == 2 and sum(sizes) > 0:
+                            self.splitter.setSizes(sizes)
+            except Exception as e:
+                logger.warning(f"Failed to restore editor splitter state: {e}")
 
     def _save_geometry(self):
         try:
@@ -385,10 +459,15 @@ class MultiPeriodStrategyEditorDialog(QDialog):
             cfg["editor_geometry_qt"] = geom
             if hasattr(self, 'splitter') and self.splitter is not None:
                 cfg["editor_splitter_qt"] = self.splitter.saveState().toHex().data().decode('utf-8')
+                cfg["editor_splitter_sizes"] = self.splitter.sizes()
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save editor geometry/splitter: {e}")
+
+    def done(self, r):
+        self._save_geometry()
+        super().done(r)
 
     def closeEvent(self, event):
         self._save_geometry()

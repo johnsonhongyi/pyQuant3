@@ -543,6 +543,44 @@
       "description": "【买点与形态逻辑】大周期与日线放量向上突破布林上轨或前期高点压力区。"
     },
     {
+      "id": "tpl_pre_layout_swl_bottom_rebound",
+      "name": "★ 大周期SWL/MA20支撑+2D地量整固企稳 [提前低吸布局] [2026-07-26]",
+      "conditions": {
+        "3M": {
+          "filter": "close >= 0.92 * SWL or close > lower or close > ma5d",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "45d": {
+          "filter": "close >= 0.94 * ma20d or close >= lower or close >= SWL",
+          "weight": 1.3,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= lower or close >= 0.95 * ma20d or close >= SWL or dif > dea",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "close >= 0.96 * ma5d and (dif > dea or macd > macdlast1 or close >= lower)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "(lastv0d <= 1.25 * lastv1d or lastv1d <= 1.25 * lastv2d or lastv1d < lastv3d) and (abs(per0d) < 5.5 or abs(per1d) < 5.5) and close >= 0.94 * ma5d",
+          "weight": 1.0,
+          "enabled": true
+        },
+        "d": {
+          "filter": "close > ma5d and percent > -2.0 and percent < 5.5 and (lastv0d >= 0.85 * lastv1d or volume > 0.9) and (lastv1d < lastv2d or lastv2d < lastv3d or lastv1d < 0.8 * lastv0d or {or: lastv{1-4}d < 0.75 * lastv{4-8}d})",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【买点与形态逻辑 (长城军工/倍益康提前低吸模式)】\n1. 大周期支撑 (3M/45D/周线)：跌至 SWL 上沿支撑或 MA20d/下轨，大结构获利带完好，具备极强止跌垫弹效应。\n2. 2D 极度地量地平线整固：2 日线连续地量 (lastv1d < lastv3d 或量能压缩)，振幅收窄 (abs(per) < 5.5%，兼容北交所/创业板)，筹码抛压干涸。\n3. 日线企稳微阳 (提前布局买点)：在前几日极致地量后，当日在 MA5 上方缩量整固 (percent < 5.5%)，在秒板拉升前 1-2 天提前低吸潜伏。"
+    },
+    {
       "id": "custom_strat_1782702921_0",
       "name": "多级别量变到质变共振策略",
       "conditions": {
