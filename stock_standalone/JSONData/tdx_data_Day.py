@@ -7400,6 +7400,8 @@ def select_codes_from_tdx(tdxdata: pd.DataFrame, tdx_index_code_list: list) -> p
 
 def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False,readonly=False):
     time_s = time.time()
+    if end is not None:
+        end = cct.day8_to_day10(end)
     if top_all is None or top_all.empty:
         top_all = getSinaAlldf(market='all')
     codelist = top_all.index.tolist()
@@ -7407,11 +7409,13 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     codelist = list(set(codelist))
     log.info('toTDXlist:%s dl=%s end=%s ptype=%s' % (len(codelist), dl, end, ptype))
     h5_fname = 'tdx_last_df'
-    if end is not None:
-        h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + \
-            '_' + end.replace('-', '') + '_' + 'all'
-    else:
-        h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
+    # if end is not None:
+    #     h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + \
+    #         '_' + end.replace('-', '') + '_' + 'all'
+    # else:
+    #     h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
+    
+    h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
 
     log.debug('h5_table:%s' % (h5_table))
 

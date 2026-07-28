@@ -77,9 +77,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QCheckBox, QComboBox, QSplitter, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
     QApplication, QMessageBox, QTextEdit, QListWidget, QFrame,
-    QDialogButtonBox, QSizePolicy, QCompleter
+    QDialogButtonBox, QSizePolicy, QCompleter, QDateEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray, QStringListModel
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray, QStringListModel, QDate
 from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 
 from tk_gui_modules.window_mixin import WindowMixin
@@ -184,7 +184,7 @@ class AllStrategiesHitWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, engine, strategies, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None):
+    def __init__(self, engine, strategies, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None, end=None):
         super().__init__()
         self.engine = engine
         self.strategies = strategies
@@ -193,6 +193,7 @@ class AllStrategiesHitWorker(QThread):
         self.force_reload = force_reload
         self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
         self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
+        self.end = end
 
     def _is_cache_valid(self, ts):
         if ts == 0.0:
@@ -231,7 +232,7 @@ class AllStrategiesHitWorker(QThread):
                     self.progress.emit(f"正在同步 {period} 周期特征数据...")
                     bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
                     with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
-                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload)
+                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload, end=self.end)
 
             # 3. 开始评估各个策略
             total = len(self.strategies)
@@ -259,7 +260,7 @@ class MultiPeriodWorker(QThread):
     finished = pyqtSignal(object, float, object)  # result_df, elapsed, flat_df
     error = pyqtSignal(str)
 
-    def __init__(self, engine, strat_config, active_periods, top_now=None, force_reload=False, allow_auto_init=False, period_cache_ts=None, top_now_cache_ts=None):
+    def __init__(self, engine, strat_config, active_periods, top_now=None, force_reload=False, allow_auto_init=False, period_cache_ts=None, top_now_cache_ts=None, end=None):
         super().__init__()
         self.engine = engine
         self.strat_config = strat_config
@@ -269,6 +270,7 @@ class MultiPeriodWorker(QThread):
         self.allow_auto_init = allow_auto_init
         self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
         self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
+        self.end = end
 
     def _is_cache_valid(self, ts):
         if ts == 0.0:
@@ -369,7 +371,7 @@ class MultiPeriodWorker(QThread):
                     
                     bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
                     with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
-                        self.engine.load_period_data(period, self.top_now, force_reload=load_force)
+                        self.engine.load_period_data(period, self.top_now, force_reload=load_force, end=self.end)
 
                     self.period_cache_ts[period] = time.time()
 
@@ -2274,6 +2276,69 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.btn_custom_cols_menu.setMenu(self.custom_cols_menu)
         tb2_layout.addWidget(self.btn_custom_cols_menu)
 
+        # 📅 预处理截止日期选项 (默认关闭，关闭时传递 end=None；勾选后启用 date_edit，当只读模式关闭时生效)
+        self.chk_end_date = QCheckBox("📅 截止日期:", self)
+        self.chk_end_date.setChecked(False)
+        self.chk_end_date.setToolTip("默认关闭(使用最新数据)。勾选打开后可选择指定 end 截止日期，配合取消[只读模式]进行盘前/历史预处理。")
+        self.chk_end_date.setStyleSheet("""
+            QCheckBox {
+                color: #81c784;
+                font-weight: bold;
+                font-size: 12px;
+                margin-left: 8px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+            QCheckBox:hover {
+                color: #a5d6a7;
+            }
+        """)
+
+        self.date_edit = QDateEdit(self)
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setFixedWidth(110)
+        self.date_edit.setEnabled(False)  # 默认禁用，只有勾选 chk_end_date 后方可操作
+        self.date_edit.setToolTip("预处理/回溯截止日期。仅在勾选[截止日期]并取消[只读模式]时生效。")
+        self.date_edit.setStyleSheet("""
+            QDateEdit {
+                background-color: #1a1a24;
+                color: #00e676;
+                border: 1px solid #37474f;
+                border-radius: 4px;
+                padding: 2px 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QDateEdit:disabled {
+                background-color: #12121a;
+                color: #5c6bc0;
+                border-color: #212130;
+            }
+            QDateEdit::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #37474f;
+            }
+            QDateEdit:hover {
+                border-color: #6366f1;
+            }
+            QCalendarWidget QWidget {
+                background-color: #1e1e2d;
+                color: #e0e0e0;
+            }
+        """)
+
+        # 联动：勾选 chk_end_date 动态控制 date_edit 的可编辑状态
+        self.chk_end_date.toggled.connect(self.date_edit.setEnabled)
+
+        tb2_layout.addWidget(self.chk_end_date)
+        tb2_layout.addWidget(self.date_edit)
+
         tb2_layout.addStretch()
 
         # 只读模式复选框（默认勾选为只读；取消勾选后点击【强制刷新】方可初始化底层缺失的周期数据）
@@ -2790,6 +2855,31 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         self.btn_run_filter_worker(strat_config, active_periods, force_reload)
 
+    def _get_effective_end_date(self):
+        """
+        获取有效的 end 截止日期。
+        规则：
+        1. 若未勾选 chk_end_date 选项（默认关闭），返回 None；
+        2. 若处于【只读模式】(chk_readonly 勾选)，返回 None；
+        3. 仅当勾选了 chk_end_date 且取消了【只读模式】时，返回所选日期的 'YYYY-MM-DD' 格式字符串。
+        """
+        if not hasattr(self, "chk_end_date") or not self.chk_end_date.isChecked():
+            return None
+
+        if hasattr(self, "chk_readonly") and self.chk_readonly.isChecked():
+            return None
+
+        if not hasattr(self, "date_edit"):
+            return None
+
+        selected_date_str = self.date_edit.date().toString("yyyy-MM-dd")
+        today_str = cct.get_today()
+
+        if selected_date_str == today_str:
+            return None
+
+        return selected_date_str
+
     def btn_run_filter_worker(self, strat_config, active_periods, force_reload):
         # Prevent starting a new thread if the previous one is still active
         from PyQt6.sip import isdeleted
@@ -2802,11 +2892,14 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self.worker = None
 
         allow_auto_init = not self.chk_readonly.isChecked() if hasattr(self, 'chk_readonly') else False
+        end_date = self._get_effective_end_date()
+
         # Run standard QThread worker
         worker = MultiPeriodWorker(
             self.engine, strat_config, active_periods,
             top_now=self.top_now, force_reload=force_reload, allow_auto_init=allow_auto_init,
-            period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts
+            period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts,
+            end=end_date
         )
         self.worker = worker
         _active_workers.add(worker)
@@ -2883,10 +2976,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.lbl_hit_status.setEnabled(False)  # 暂时禁用以防止高频连续点击
         self.lbl_status.setText("正在准备全策略测试线程...")
         
+        end_date = self._get_effective_end_date()
         # 2. 启动后台线程
         worker = AllStrategiesHitWorker(
             self.engine, self.strategies, active_periods,
-            top_now=self.top_now, period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts
+            top_now=self.top_now, period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts,
+            end=end_date
         )
         self._hit_worker = worker
         _active_workers.add(worker)
