@@ -25,7 +25,7 @@ logger = LoggerFactory.getLogger("instock_TK.GUI")
 # 全局缓存显示器信息
 MONITORS: List[Tuple[int, int, int, int]] = []
 
-def bind_mouse_scroll(widget: tk.Widget, speed: int = 3) -> None:
+def bind_mouse_scroll(widget: Any, speed: int = 3) -> None:
     """支持 Alt/Shift + 滚轮及直接水平滚动的通用鼠标滚轮绑定"""
     system = platform.system()
 
@@ -67,7 +67,7 @@ def enable_native_horizontal_scroll(tree: ttk.Treeview, speed: int = 5) -> None:
         tree.bind("<Button-6>", on_button_scroll)
         tree.bind("<Button-7>", on_button_scroll)
 
-def get_monitor_index_for_window(window: tk.Toplevel) -> int:
+def get_monitor_index_for_window(window: Any) -> int:
     """根据窗口位置找到所属显示器索引"""
     global MONITORS
     if not MONITORS:
@@ -140,7 +140,7 @@ def init_monitors() -> List[Tuple[int, int, int, int]]:
         MONITORS = [(0, 0, screen_width, screen_height)]
     return MONITORS
 
-def tk_geometry_to_rect(tk_win: Union[tk.Tk, tk.Toplevel]) -> Tuple[int, int, int, int]:
+def tk_geometry_to_rect(tk_win: Any) -> Tuple[int, int, int, int]:
     """把 Tk geometry 字符串转换为 QRect 或简单坐标"""
     geom = tk_win.geometry()
     try:
@@ -150,7 +150,7 @@ def tk_geometry_to_rect(tk_win: Union[tk.Tk, tk.Toplevel]) -> Tuple[int, int, in
     except:
         return 0, 0, 0, 0
 
-def is_window_covered_pg(win_pg: Union[tk.Tk, tk.Toplevel], win_main: Union[tk.Tk, tk.Toplevel], cover_ratio: float = 0.4) -> bool:
+def is_window_covered_pg(win_pg: Any, win_main: Any, cover_ratio: float = 0.4) -> bool:
     """判断窗口是否被另一个窗口覆盖超过一定比例"""
     try:
         x1, y1, w1, h1 = tk_geometry_to_rect(win_pg)
@@ -219,7 +219,7 @@ def clamp_window_to_screens(x: int, y: int, w: int, h: int) -> Tuple[int, int]:
     y = max(top, min(y, bottom - h))
     return x, y
 
-def get_centered_window_position_mainWin(parent: Union[tk.Tk, tk.Toplevel], win_width: int, win_height: int, x_root: Optional[int] = None, y_root: Optional[int] = None, parent_win: Optional[Union[tk.Tk, tk.Toplevel]] = None) -> Tuple[int, int]:
+def get_centered_window_position_mainWin(parent: Any, win_width: int, win_height: int, x_root: Optional[int] = None, y_root: Optional[int] = None, parent_win: Optional[Any] = None) -> Tuple[int, int]:
     """计算相对于父窗口居中的位置"""
     if x_root is None:
         if parent_win:
@@ -339,7 +339,7 @@ def load_window_position_simple(window_name: str, default_width: int, default_he
             
     return default_width, default_height, None, None
 
-def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str):
+def save_window_position_simple(win: Any, window_name: str):
     """保存窗口位置到统一配置文件（简化版，支持 DPI 缩放）"""
     try:
         scale = get_windows_dpi_scale_factor()
@@ -401,7 +401,7 @@ def save_window_position_simple(win: Union[tk.Tk, tk.Toplevel], window_name: str
         logger.error(f"[save_window_position_simple] 失败: {e}")
 
 # def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
-def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "", window_name: Optional[str] = None) -> Optional[str]:
+def askstring_at_parent_single(parent: Any, title: str, prompt: str, initialvalue: str = "", window_name: Optional[str] = None) -> Optional[str]:
     dlg = tk.Toplevel(parent)
     dlg.transient(parent)
     dlg.title(title)
@@ -508,7 +508,7 @@ def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, pr
     parent.wait_window(dlg)
     return result["value"]
 
-def rearrange_monitors_per_screen(align: str = "left", sort_by: str = "id", layout: str = "horizontal", monitor_list: Optional[dict] = None, win_var: Optional[tk.BooleanVar] = None) -> None:
+def rearrange_monitors_per_screen(align: str = "left", sort_by: str = "id", layout: str = "horizontal", monitor_list: Optional[dict] = None, win_var: Any = None) -> None:
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
     

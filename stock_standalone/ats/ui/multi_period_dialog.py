@@ -29,41 +29,31 @@ try:
 except ImportError:
     from types import ModuleType
     mock_tk = ModuleType("tkinter")
-    mock_tk.Toplevel = object
-    mock_tk.Tk = object
-    mock_tk.Frame = object
-    mock_tk.Label = object
-    mock_tk.Button = object
-    mock_tk.Entry = object
-    mock_tk.StringVar = object
-    mock_tk.WORD = None
-    mock_tk.END = None
-    mock_tk.BOTH = None
-    mock_tk.Y = None
-    mock_tk.LEFT = None
-    mock_tk.RIGHT = None
-    mock_tk.W = None
-    mock_tk.CENTER = None
-    mock_tk.VERTICAL = None
-    
     mock_font = ModuleType("tkinter.font")
-    mock_font.Font = object
-    
     mock_msg = ModuleType("tkinter.messagebox")
     mock_ttk = ModuleType("tkinter.ttk")
-    mock_ttk.Style = object
-    mock_ttk.Panedwindow = object
-    mock_ttk.Treeview = object
-    mock_ttk.Scrollbar = object
-    
     mock_scroll = ModuleType("tkinter.scrolledtext")
-    mock_scroll.ScrolledText = object
     
     sys.modules["tkinter"] = mock_tk
     sys.modules["tkinter.font"] = mock_font
     sys.modules["tkinter.messagebox"] = mock_msg
     sys.modules["tkinter.ttk"] = mock_ttk
     sys.modules["tkinter.scrolledtext"] = mock_scroll
+
+# 🚀 [防弹属性补全] 无论是否真实导入了 tkinter，确保关键组件属性绝对存在
+import tkinter
+for _attr in ["Toplevel", "Tk", "Frame", "Label", "Button", "Entry", "StringVar", 
+              "BooleanVar", "IntVar", "DoubleVar", "Widget", "PanedWindow", "Event"]:
+    if not hasattr(tkinter, _attr):
+        setattr(tkinter, _attr, object)
+
+try:
+    import tkinter.ttk as _ttk
+    for _attr in ["Style", "PanedWindow", "Panedwindow", "Treeview", "Scrollbar"]:
+        if not hasattr(_ttk, _attr):
+            setattr(_ttk, _attr, object)
+except Exception:
+    pass
 # ---------------------------------------------
 
 import json
