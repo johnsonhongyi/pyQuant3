@@ -2003,6 +2003,250 @@ def td_sequential_slow(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
     return df
 
 
+def _barslast_vec(cond):
+    """通达信 BARSLAST(COND) 向量化: 每个位置距上次 cond=True 的bar数"""
+    n = len(cond)
+    result = np.full(n, n, dtype=np.int32)
+    last_true = -1
+    for i in range(n):
+        if cond[i]:
+            last_true = i
+        if last_true >= 0:
+            result[i] = i - last_true
+    return result
+
+
+def _cross_vec(a, b):
+    """通达信 CROSS(A, B) 向量化: A 从下方穿越 B"""
+    if np.isscalar(b):
+        b_arr = np.full_like(a, b, dtype=np.float64)
+    else:
+        b_arr = np.asarray(b, dtype=np.float64)
+    a_arr = np.asarray(a, dtype=np.float64)
+    prev_a = np.roll(a_arr, 1)
+    prev_b = np.roll(b_arr, 1)
+    result = (prev_a < prev_b) & (a_arr >= b_arr)
+    result[0] = False
+    return result
+
+
+def calc_trend_channel(df, ur=6, lr=6):
+    """
+    趋势通道综合计算引擎 — 通达信"自动通道"Python 翻译
+    
+    一次性向量化预计算以下指标写入 df:
+    
+    【通道核心】ch_upper/ch_mid/ch_lower/ch_slope/ch_slope_deg/ch_width/ch_pos/ch_dir
+    【Fibonacci】fib_high/fib_low/fib_19/fib_38/fib_50/fib_61/fib_80
+    【拐点信号】sig_bottom/sig_top/sig_launch/sig_escape/sig_start/trend_dir
+    【振子值】sk_val/sd_val/rsi6
+    """
+    close = df['close'].values.astype(np.float64)
+    high = df['high'].values.astype(np.float64)
+    low = df['low'].values.astype(np.float64)
+    openv = df['open'].values.astype(np.float64) if 'open' in df.columns else close.copy()
+    vol = df['vol'].values.astype(np.float64) if 'vol' in df.columns else np.ones(len(close))
+    n = len(close)
+    if n < 10:
+        return df
+
+    # ======== 模块 1: 均线趋势方向 ========
+    ma9 = pd.Series(close).rolling(9, min_periods=1).mean().values
+    trend_dir = np.sign(ma9 - np.roll(ma9, 1)).astype(np.int8)
+    trend_dir[0] = 0
+    df['trend_dir'] = trend_dir
+
+    # ======== 模块 2: Fibonacci 动态支撑阻力 ========
+    N_fib, M_fib = 8, 3
+    s_high = pd.Series(high)
+    s_low = pd.Series(low)
+    fib_high = s_high.rolling(N_fib, min_periods=1).max().shift(M_fib).values
+    fib_low = s_low.rolling(N_fib, min_periods=1).min().shift(M_fib).values
+    # 前 M_fib 个 bar 无 shift 数据，回退到当前窗口值
+    for i in range(M_fib):
+        fib_high[i] = np.max(high[:max(i+1, 1)])
+        fib_low[i] = np.min(low[:max(i+1, 1)])
+    fib_range = fib_high - fib_low
+    fib_range = np.where(fib_range < 1e-6, 1e-6, fib_range)  # 防除零
+
+    df['fib_high'] = fib_high
+    df['fib_low'] = fib_low
+    df['fib_19'] = fib_high - fib_range * 0.191
+    df['fib_38'] = fib_high - fib_range * 0.382
+    df['fib_50'] = fib_high - fib_range * 0.500
+    df['fib_61'] = fib_high - fib_range * 0.618
+    df['fib_80'] = fib_high - fib_range * 0.809
+
+    # ======== 模块 3: 见底/见顶信号 ========
+    a0 = (low + high + close * 2) / 4.0
+    s_a0 = pd.Series(a0)
+    aa = s_a0.ewm(span=14, adjust=False).mean().values
+    # a1x: 短周期变速率
+    aa_prev = np.roll(aa, 1)
+    aa_prev[0] = aa[0]
+    a1x = np.where(np.abs(aa_prev) > 1e-8, (aa - aa_prev) / aa_prev * 100, 0.0)
+
+    # MACD 用于底部检测
+    s_close = pd.Series(close)
+    ema12 = s_close.ewm(span=12, adjust=False).mean().values
+    ema26 = s_close.ewm(span=26, adjust=False).mean().values
+    a5 = ema12 - ema26  # DIFF
+    a6 = pd.Series(a5).ewm(span=9, adjust=False).mean().values  # DEA
+    sig_bottom = ((a5 < -0.1) & (a5 > a6)).astype(np.int8)
+    bottom_price = np.where(sig_bottom, pd.Series(low).rolling(21, min_periods=1).min().values, np.nan)
+
+    # BARSLAST(CROSS(A1X, 0)) — 距上次变速率上穿零的bar数
+    cross_zero = _cross_vec(a1x, 0.0)
+    g = _barslast_vec(cross_zero)
+    # 见顶: 价格涨超上次变速穿零时基准价的 30%
+    a0_at_cross = np.array([a0[max(0, i - g[i])] for i in range(n)])
+    top_threshold = a0_at_cross * 1.3
+    sig_top = (high >= top_threshold).astype(np.int8)
+
+    df['sig_bottom'] = sig_bottom
+    df['sig_top'] = sig_top
+    df['bottom_price'] = bottom_price
+    df['top_price'] = top_threshold
+
+    # ======== 模块 4: 启动信号 (SK/SD) ========
+    var1 = (close * 2 + high + low) / 4.0
+    s_var1 = pd.Series(var1)
+    sk = (s_var1.ewm(span=13, adjust=False).mean() - s_var1.ewm(span=73, adjust=False).mean()).values
+    sd = pd.Series(sk).ewm(span=2, adjust=False).mean().values
+    cross_sk_sd = _cross_vec(sk, sd)
+
+    pct_chg = np.zeros(n)
+    pct_chg[1:] = (close[1:] - close[:-1]) / np.where(np.abs(close[:-1]) > 1e-8, close[:-1], 1.0)
+    vol_ma5 = pd.Series(vol).rolling(5, min_periods=1).mean().values
+    vol_ratio = np.where(vol_ma5 > 0, vol / vol_ma5, 1.0)
+
+    sig_launch = (
+        (cross_sk_sd & (sk < -0.04) & (pct_chg >= 0.03))
+        | (cross_sk_sd & (sk <= -0.14))
+        | (cross_sk_sd & (sk <= 0.05) & ((vol_ratio > 2) | (pct_chg > 0.035)))
+    ).astype(np.int8)
+
+    df['sig_launch'] = sig_launch
+    df['sk_val'] = sk
+    df['sd_val'] = sd
+
+    # ======== 模块 5: 自动回归通道 (FORCAST/SLOPE) ========
+    hhv_win = 6 * ur  # 36 bars
+    llv_win = 6 * lr  # 36 bars
+
+    # 定位最近极值点 (倒序扫描)
+    tc2 = 1  # 最近高点距今bar数(1-indexed)
+    bc2 = 1  # 最近低点距今bar数(1-indexed)
+
+    for i in range(n - 1, max(n - 1 - hhv_win, -1), -1):
+        ws = max(0, i - hhv_win + 1)
+        if high[i] >= np.max(high[ws:i + 1]):
+            tc2 = n - i
+            break
+
+    for i in range(n - 1, max(n - 1 - llv_win, -1), -1):
+        ws = max(0, i - llv_win + 1)
+        if low[i] <= np.min(low[ws:i + 1]):
+            bc2 = n - i
+            break
+
+    nod = abs(tc2 - bc2)
+    if nod < 2:
+        nod = max(tc2, bc2, 5)
+
+    reg_len = nod + 1
+    anchor = min(tc2, bc2)
+    anchor_idx = n - anchor
+    reg_start = max(0, anchor_idx - reg_len + 1)
+    reg_slice = close[reg_start:anchor_idx + 1]
+
+    if len(reg_slice) >= 3:
+        x = np.arange(len(reg_slice), dtype=np.float64)
+        slope, intercept = np.polyfit(x, reg_slice, 1)
+    else:
+        slope = 0.0
+        intercept = close[-1]
+
+    np_val = slope * (len(reg_slice) - 1) + intercept  # FORCAST 锚定值
+
+    # 中轨: 从锚定点按斜率延伸
+    currbarscount = np.arange(n, 0, -1)  # [n, n-1, ..., 1]
+    mid = np_val - slope * (currbarscount - anchor)
+
+    # 上下偏离 (通道宽度)
+    ch_start_idx = n - max(tc2, bc2)
+    ch_end_idx = n - min(tc2, bc2)
+    if ch_start_idx < 0: ch_start_idx = 0
+    if ch_end_idx >= n: ch_end_idx = n - 1
+
+    region_high = high[ch_start_idx:ch_end_idx + 1]
+    region_mid = mid[ch_start_idx:ch_end_idx + 1]
+    region_low = low[ch_start_idx:ch_end_idx + 1]
+
+    at5 = np.max(region_high - region_mid) if len(region_high) > 0 else 0.0
+    ut5 = np.max(region_mid - region_low) if len(region_low) > 0 else 0.0
+    if at5 < 0: at5 = 0.0
+    if ut5 < 0: ut5 = 0.0
+
+    upper = mid + at5
+    lower = mid - ut5
+
+    # 安全边界
+    tail = min(100, n)
+    max_limit = np.max(high[-tail:]) * 1.10
+    min_limit = np.min(low[-tail:]) * 0.90
+    mid = np.clip(mid, min_limit, max_limit)
+    upper = np.clip(upper, min_limit, max_limit)
+    lower = np.clip(lower, min_limit, max_limit)
+
+    ch_width = upper - lower
+    ch_width_safe = np.where(ch_width > 1e-8, ch_width, 1e-8)
+    ch_pos = (close - lower) / ch_width_safe * 100.0
+    ch_dir = 1 if slope > 1e-8 else (-1 if slope < -1e-8 else 0)
+
+    # 斜率角度: 标准化为百分比再转度
+    mid_last = mid[-1] if mid[-1] > 1e-8 else 1.0
+    ch_slope_pct = slope / mid_last * 100.0
+    ch_slope_deg = np.degrees(np.arctan(ch_slope_pct))
+
+    df['ch_upper'] = upper
+    df['ch_mid'] = mid
+    df['ch_lower'] = lower
+    df['ch_slope'] = round(slope, 6)
+    df['ch_slope_deg'] = round(ch_slope_deg, 2)
+    df['ch_width'] = ch_width
+    df['ch_pos'] = np.round(ch_pos, 2)
+    df['ch_dir'] = ch_dir
+
+    # ======== 模块 6: RSI 逃顶 + 低位启动 ========
+    lc = np.roll(close, 1)
+    lc[0] = close[0]
+    gain = np.maximum(close - lc, 0.0)
+    loss = np.abs(close - lc)
+    sma_gain = pd.Series(gain).ewm(alpha=1.0 / 6.0, adjust=False).mean().values
+    sma_loss = pd.Series(loss).ewm(alpha=1.0 / 6.0, adjust=False).mean().values
+    sma_loss_safe = np.where(sma_loss > 1e-10, sma_loss, 1e-10)
+    rsi6 = sma_gain / sma_loss_safe * 100.0
+
+    sig_escape = _cross_vec(84.0 * np.ones(n), rsi6).astype(np.int8)  # CROSS(84, RSI) = RSI跌破84
+
+    # 启动信号 VAR52 上穿 3
+    llv27 = pd.Series(low).rolling(27, min_periods=1).min().values
+    hhv27 = pd.Series(high).rolling(27, min_periods=1).max().values
+    hhv_llv_diff = hhv27 - llv27
+    hhv_llv_safe = np.where(hhv_llv_diff > 1e-8, hhv_llv_diff, 1e-8)
+    stoch = (close - llv27) / hhv_llv_safe * 100.0
+    sma1 = pd.Series(stoch).ewm(alpha=1.0 / 5.0, adjust=False).mean().values
+    sma2 = pd.Series(sma1).ewm(alpha=1.0 / 3.0, adjust=False).mean().values
+    var52 = 3.0 * sma1 - 2.0 * sma2
+    sig_start = _cross_vec(var52, 3.0).astype(np.int8)
+
+    df['sig_escape'] = sig_escape
+    df['sig_start'] = sig_start
+    df['rsi6'] = np.round(rsi6, 2)
+
+    return df
+
 
 def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9 ,detect_calc_support=False) -> pd.DataFrame:
     """
@@ -2154,6 +2398,14 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     # with timed_ctx("td_sequential_fast", warn_ms=50):
     #     td_sig2 = td_sequential_fast(df)
     df[['td_buy', 'td_sell']] = td_sig
+
+    # ========== 趋势通道综合指标 ==========
+    if len(df) >= 20:
+        try:
+            df = calc_trend_channel(df)
+        except Exception:
+            pass
+
     return df
 
 tdx_max_int = ct.tdx_max_int
