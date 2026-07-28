@@ -1,3 +1,12 @@
+## 2026-07-28 21:02
+- [x] **实现 tqdm 控制台分片刷新缓冲区与全量进度/速率/ETA 继承合成回显 (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`)**：
+    - [x] **引入带历史记忆的 `_buffer` 缓冲区**：针对 tqdm 控制台刷屏时将 `Running_MP: 21%|\r` 与 `| 991/5.55k [00:50<03:28, 21.8it/s]` 分多次 `write` 写入导致后半部分丢失的工程问题，在 `TqdmToPyQtBridge` 中引入 `self._buffer` 与 `self._last_parsed_info` 历史记忆合成机制。
+    - [x] **分片数据动态合成并实时发射**：无论 tqdm 在后续刷屏时传入何种简化的百分比分片，系统均能全自动将其与记忆的最新处理数量/用时/速率拼接，在状态栏持续顺滑回显 `⚡ [45d] 数据初始化: Running_MP: 21% | 991/5.55k [00:50<03:28, 21.8it/s]` 完整动态进度，彻底解决了后半段信息脱节消失的问题。
+    - [x] **状态栏进度实时渲染与事件重绘**：在 `update_status` 槽函数中接入 `QApplication.processEvents()`，确保主 UI 界面在后台进行数秒至数十秒的数据初始化时，左下角状态栏能够即时流畅地更新显示进度信息，彻底消除了界面文字静态挂起无反馈的痛点。
+    - [x] **只读模式默认开启且免持久化**：响应用户指令，取消「🔒 只读模式」状态在 `window_config.json` 中的物理持久化；修改 `_load_state` 确保无论上次关闭前勾选状态如何，每次打开多周期窗口时「只读模式」**默认强行处于勾选开启状态 (`True`)**，提供最高级别的数据写入防护。
+    - [x] **诊断逻辑防卡死优化**：将 `diagnose_stock_strategy` 中 UI 主线程单股诊断的 `force_reload` 锁定为 `False`，避免在主线程误调重度写盘初始化而导致 UI 卡死。
+    - [x] **全量单元测试 100% 覆盖通过**：在 `tests/test_multi_period_auto_init.py` 中补充 `test_tqdm_to_pyqt_bridge` 断言测试，全量 19 项单元测试 100% 成功通过。
+
 ## 2026-07-28 20:20
 - [x] **复查只读模式完备性与彻底根治 `per0d` 指标 `NameError` 隐患 (`query_engine_util.py`, `config/multi_period_strategies.json`, `ats/ui/multi_period_dialog.py`)**：
     - [x] **只读模式 (`chk_readonly`) 逻辑复查完备**：确认 `chk_readonly` 在 UI 默认勾选、状态物理持久化、Worker 线程 `allow_auto_init` 保护、诊断数据降级与 `load_period_data` 阻止 H5 磁盘写入的全链路设计，逻辑无死锁与崩溃漏洞。

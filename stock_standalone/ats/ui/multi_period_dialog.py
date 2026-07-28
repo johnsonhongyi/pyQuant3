@@ -69,6 +69,7 @@ except ImportError:
 import json
 import time
 import re
+import io
 import threading
 import pandas as pd
 from PyQt6.QtWidgets import (
@@ -103,6 +104,76 @@ def safe_float(val, default=0.0):
         return float(val)
     except Exception:
         return default
+
+
+class TqdmToPyQtBridge(io.TextIOBase):
+    """
+    捕获底层 tqdm 控制台输出（如 Running_MP: 38%|... | 361/5.55k [00:21<04:23, 19.7it/s]）并实时发射为 PyQt 状态栏进度信号
+    """
+    def __init__(self, original_stream, progress_signal=None, prefix=""):
+        super().__init__()
+        self.original_stream = original_stream
+        self.progress_signal = progress_signal
+        self.prefix = prefix
+        self._last_emit_ts = 0.0
+        self._buffer = ""
+        self._last_parsed_info = ""
+
+    def write(self, s):
+        if self.original_stream:
+            try:
+                self.original_stream.write(s)
+            except Exception:
+                pass
+
+        if not self.progress_signal or not s:
+            return len(s)
+
+        self._buffer += s
+        if '\r' in self._buffer or '\n' in self._buffer:
+            lines = re.split(r'[\r\n]+', self._buffer)
+            latest_chunk = ""
+            for line in reversed(lines):
+                if line.strip():
+                    latest_chunk = line.strip()
+                    break
+            self._buffer = lines[-1]
+
+            if latest_chunk:
+                # 抓取数量/用时/速率细节，如 "991/5.55k [00:50<03:28, 21.8it/s]"
+                m_detail = re.search(r'([\d\.]+[kMGT]?/[\d\.]+[kMGT]?\s*\[[^\]]+\])', latest_chunk)
+                if m_detail:
+                    self._last_parsed_info = m_detail.group(1).strip()
+
+                # 抓取百分比/描述前缀，如 "Running_MP: 21%" 或 "21%"
+                m_pct = re.search(r'((?:[\w_-]+:\s*)?\d+%)', latest_chunk)
+                m_h5 = re.search(r'(st_df is not find [^\r\n]+)', latest_chunk)
+
+                msg = ""
+                if m_h5:
+                    tbl = m_h5.group(1).split()[-1] if len(m_h5.group(1).split()) > 0 else ""
+                    msg = f"⚡ {self.prefix} 正在自动拆分解构 H5 表 ({tbl})..."
+                elif m_pct:
+                    pct_str = m_pct.group(1).strip()
+                    if self._last_parsed_info:
+                        msg = f"⚡ {self.prefix} 数据初始化: {pct_str} | {self._last_parsed_info}"
+                    else:
+                        msg = f"⚡ {self.prefix} 数据初始化: {pct_str}"
+
+                if msg:
+                    now = time.time()
+                    if now - self._last_emit_ts >= 0.08:
+                        self._last_emit_ts = now
+                        self.progress_signal.emit(msg)
+
+        return len(s)
+
+    def flush(self):
+        if self.original_stream:
+            try:
+                self.original_stream.flush()
+            except Exception:
+                pass
 
 
 class AllStrategiesHitWorker(QThread):
@@ -154,10 +225,13 @@ class AllStrategiesHitWorker(QThread):
                 self.top_now_cache_ts[0] = time.time()
 
             # 2. 确保各个勾选周期的数据已载入
+            import contextlib
             for period in self.active_periods:
                 if self.force_reload or period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
                     self.progress.emit(f"正在同步 {period} 周期特征数据...")
-                    self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload)
+                    bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
+                    with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
+                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload)
 
             # 3. 开始评估各个策略
             total = len(self.strategies)
@@ -260,6 +334,7 @@ class MultiPeriodWorker(QThread):
                                 df_d['lastv0d'] = df_d['vol']
 
             # 2. Load active periods
+            import contextlib
             for period in self.active_periods:
                 cached = False
                 # 只有在非强制刷新，或只读模式且没有要强行初始化的请求时，才复用内存/只读缓存
@@ -292,7 +367,10 @@ class MultiPeriodWorker(QThread):
                     else:
                         self.engine._period_dfs.pop(period, None)
                     
-                    self.engine.load_period_data(period, self.top_now, force_reload=load_force)
+                    bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
+                    with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
+                        self.engine.load_period_data(period, self.top_now, force_reload=load_force)
+
                     self.period_cache_ts[period] = time.time()
 
                     if period in self.engine._missing_periods:
@@ -2492,7 +2570,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_tdx_chk.setChecked(self.ui_state.get('link_tdx', False))
         self.link_ths_chk.setChecked(self.ui_state.get('link_ths', False))
         if hasattr(self, 'chk_readonly'):
-            self.chk_readonly.setChecked(self.ui_state.get('readonly_mode', True))
+            self.chk_readonly.setChecked(True)  # 只读模式不持久化，默认始终直接处于勾选开启状态
 
         # 6. Apply secondary filter query
         raw_curr = self.ui_state.get('current_history_query', '')
@@ -2752,7 +2830,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         worker.start()
 
     def update_status(self, text):
-        self.lbl_status.setText(text)
+        if hasattr(self, 'lbl_status') and self.lbl_status is not None:
+            self.lbl_status.setText(text)
+            QApplication.processEvents()
 
     def _on_worker_finished(self, result_df, elapsed, flat_df):
         self.last_result_df = result_df
@@ -4108,16 +4188,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 QMessageBox.critical(self, "错误", f"初始化市场基础数据失败: {e}")
                 return
 
-        # Load missing period data synchronously (honoring chk_readonly mode)
-        allow_init = not self.chk_readonly.isChecked() if hasattr(self, 'chk_readonly') else False
+        # 诊断单股时在 UI 主线程进行只读装载 (force_reload=False)，避免在主线程发起重度写盘初始化导致的界面卡死
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for period in active_periods:
                 p_norm = str(period).lower().strip()
                 if p_norm not in self.engine._period_dfs or self.engine._period_dfs[p_norm].empty:
-                    self.lbl_status.setText(f"正在同步/初始化 {period} 周期特征数据...")
+                    self.lbl_status.setText(f"正在读取 {period} 周期特征数据...")
                     QApplication.processEvents()
-                    self.engine.load_period_data(p_norm, self.top_now, force_reload=allow_init)
+                    self.engine.load_period_data(p_norm, self.top_now, force_reload=False)
         finally:
             QApplication.restoreOverrideCursor()
 
