@@ -1,3 +1,10 @@
+## 2026-07-28 21:30
+- [x] **实现多周期管理器「📅 截止日期」选项控制与指定 end 日期预处理 (`ats/ui/multi_period_dialog.py`, `multi_period_strategy_engine.py`, `tests/test_multi_period_auto_init.py`)**：
+    - [x] **UI 控件组合植入与开关联动**：在工具栏【自定义列】与【只读模式】之间精确植入 `self.chk_end_date`（`📅 截止日期:` 复选框）与 `self.date_edit`（`QDateEdit` 预处理日期选择控件）。`chk_end_date` 默认处于未勾选关闭状态 (`False`)，`date_edit` 默认置灰禁用 (`setEnabled(False)`) 并使用默认日期 `QDate.currentDate()`，严格遵循 KISS 与安全防护原则。
+    - [x] **精准启用与 end 参数计算 (`_get_effective_end_date`)**：仅当用户手动点击勾选 `chk_end_date` 且取消勾选 `chk_readonly`（关闭只读保护模式）时，系统才提取 `date_edit` 选择的非今天日期字符串（如 `'2026-07-27'`）作为 `end` 参数；在未勾选或只读开启状态下，全流程极速返回 `end = None`，保证日常实时选股 100% 不受干扰。
+    - [x] **全链路参数无损透传与盘前预处理**：在 `MultiPeriodWorker` 与 `AllStrategiesHitWorker` 线程以及 `MultiPeriodStrategyEngine.load_period_data` 中，全量透传 `end` 参数给底层 `tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=readonly, end=end)`，完美支持收盘后对历史指定日期的盘前静态预处理。
+    - [x] **单元测试全量验证通过**：在 `tests/test_multi_period_auto_init.py` 中补充 `test_end_date_pass_through` 单元测试断言，确保全流程参数无损。
+
 ## 2026-07-28 21:02
 - [x] **实现 tqdm 控制台分片刷新缓冲区与全量进度/速率/ETA 继承合成回显 (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`)**：
     - [x] **引入带历史记忆的 `_buffer` 缓冲区**：针对 tqdm 控制台刷屏时将 `Running_MP: 21%|\r` 与 `| 991/5.55k [00:50<03:28, 21.8it/s]` 分多次 `write` 写入导致后半部分丢失的工程问题，在 `TqdmToPyQtBridge` 中引入 `self._buffer` 与 `self._last_parsed_info` 历史记忆合成机制。

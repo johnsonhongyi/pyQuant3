@@ -18,8 +18,8 @@ class MultiPeriodStrategyEngine:
         self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
         
-    def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False) -> pd.DataFrame:
-        """加载指定周期数据（支持大小写规范化；force_reload=False 只读，force_reload=True 自动全周期初始化与写入）"""
+    def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None) -> pd.DataFrame:
+        """加载指定周期数据（支持大小写规范化；force_reload=False 只读，force_reload=True 自动全周期初始化与写入，end=截止日期）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
         from JohnsonUtil import commonTips as cct
@@ -52,7 +52,7 @@ class MultiPeriodStrategyEngine:
         if not force_reload:
             try:
                 logger.info(f"Loading data for period {res_period} (readonly, dl={dl})...")
-                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=True)
+                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=True, end=end)
             except Exception as e:
                 logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
                 df = None
@@ -62,13 +62,14 @@ class MultiPeriodStrategyEngine:
         if force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else [])):
             if force_reload:
                 try:
-                    logger.info(f"⚡ [INIT] 强制刷新/自动初始化底层 [{res_period}] 数据 (dl={dl})...")
+                    logger.info(f"⚡ [INIT] 强制刷新/自动初始化底层 [{res_period}] 数据 (dl={dl}, end={end})...")
                     with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
                         df, lastp_df = tdd.get_append_lastp_to_df(
                             top_now,
                             dl=dl,
                             resample=res_period,
-                            readonly=False
+                            readonly=False,
+                            end=end
                         )
                 except Exception as e:
                     logger.error(f"Failed to initialize period [{res_period}]: {e}")

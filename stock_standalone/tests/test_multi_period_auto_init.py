@@ -97,6 +97,18 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
         self.assertIn('M', self.engine._period_dfs)
 
 
+    @patch('data_utils.complete_indicators_pipeline')
+    @patch('JSONData.tdx_data_Day.get_append_lastp_to_df')
+    def test_end_date_pass_through(self, mock_get_append, mock_pipeline):
+        """测试 load_period_data 能够将 end 日期参数无损透传至 get_append_lastp_to_df"""
+        valid_df = pd.DataFrame({'lastp1d': [10.0, 15.0]}, index=['000001', '000002'])
+        mock_get_append.return_value = (valid_df, None)
+        mock_pipeline.side_effect = lambda df, log, resample: df
+
+        res_df = self.engine.load_period_data('3d', self.top_now_mock, force_reload=True, end='2026-07-27')
+        mock_get_append.assert_called_once_with(self.top_now_mock, dl=200, resample='3d', readonly=False, end='2026-07-27')
+        self.assertFalse(res_df.empty)
+
     def test_tqdm_to_pyqt_bridge(self):
         """测试 TqdmToPyQtBridge 能否在 tqdm 分片刷新时成功保留并拼接数量/用时/速率信号"""
         from ats.ui.multi_period_dialog import TqdmToPyQtBridge
