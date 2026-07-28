@@ -1,3 +1,9 @@
+## 2026-07-28 17:45
+- [x] **实现通达信「自动通道」与趋势定位算法向量化引擎 (`JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_trend_channel.py`)**：
+    - [x] **完整算法解构与向量化 Python 翻译**：成功将通达信「自动通道」及趋势定位源码解构翻译为 6 大纯 NumPy/Pandas 向量化模块（包含 MA9 趋势方向、8日/3日 Fibonacci 动态 5 阶支撑阻力、A1X 变速率与 MACD 见底/见顶信号、SK/SD 启动检测、FORCAST/SLOPE 自动回归通道以及 RSI6 逃顶/低位启动）。
+    - [x] **22 项新特征与多周期策略无缝接入**：在 `calc_trend_channel(df)` 中预计算 `ch_upper`, `ch_mid`, `ch_lower`, `ch_slope`, `ch_slope_deg`, `ch_pos`, `ch_dir`, `fib_50`, `sig_bottom`, `sig_launch` 等 22 项核心字段，并在 `get_tdx_macd` 末尾一次性集成调起。同时在 `query_engine_util.py` 中注册同义词映射，全自动兼容多周期筛选与历史求值。
+    - [x] **单元测试 100% 覆盖验证**：新建 `tests/test_trend_channel.py`，结合 `tests/test_signal_ledger.py` 全量 14 项单元测试 100% 成功通过。
+
 ## 2026-07-28 10:15
 - [x] **彻底根治多线程并发 select 读取 HDF5 历史数据时引起的 Tables/C 库 Access Violation 致命硬崩溃 (`ats/ui/main_window.py`)**：
     - [x] **引入 `hdf5_history_lock` 互斥锁保护机制**：在类构造方法中新增 HDF5 历史数据读取专属的线程互斥锁。在 `_async_load_stock_history` 的 `worker` 中，采取 `blocking=False` 的非阻塞式抢占。
