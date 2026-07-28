@@ -119,6 +119,8 @@ set SCCACHE_DIR=D:\sccache
 set SCCACHE_CACHE_SIZE=50G
 
 set "PATH=<USER_HOME>\scoop\apps\sccache\current;%PATH%"
+sccache --start-server >nul 2>&1
+set NUITKA_SCONS_CCACHE=sccache
 
 set "CLANG_EXE="
 set "USE_CLANG=0"
