@@ -1,3 +1,10 @@
+## 2026-07-28 15:50
+- [x] **实现多周期二次过滤 Note 前置显示与智能解包 100% 对齐竞价面板 (`ats/ui/multi_period_dialog.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **Note 前置格式化与优先展示**：在 `MultiPeriodDialog` 中引入 `_get_note_for_query` 与 `_format_filter_item_with_note`，自动关联 `SEARCH_HISTORY_FILE` 历史字典中的备注并统一格式化为 `f"{note} ({pure_q})"`（例如：`60调整启动 (lastl1d < ma601d)`），使二次过滤下拉框及历史记录中 `note` 描述 100% 显示在最前面。
+    - [x] **历史管理与输入框同步前置显示**：重构 `QueryHistoryDialog._use_selected` 与 `_on_history_query_applied`，当用户在“历史管理”弹窗中选择并使用某条策略时，自动附带 Note 备注并经过 `_set_filter_edit_text` 写入文本框，解决之前选完后主框未同步显示 Note 的缺陷。
+    - [x] **智能解包与安全过滤计算**：在 `_extract_real_query` 中接入对齐竞价面板的 `_RE_QUERY_BRACKET` 正则解包逻辑，自动剥离 UI 前置 note 标签，只把 pure query 传递给 `_suffix_query` 及 `query_engine.execute` 计算，彻底防范中文 note 导致的 Python 表达式 `NameError` 或语法报错。
+    - [x] **单元测试 100% 成功通过**：在 `tests/test_signal_ledger.py` 中补充 `test_secondary_filter_note_handling` 静态解包与格式化断言测试，10 项单元测试全量成功通过。
+
 ## 2026-07-28 00:15
 - [x] **新增「⭐ 显示重点关注」复选框、状态物理持久化与逻辑方向矫正 (`ats/ui/swing_table.py`, `ats/ui/main_window.py`)**：
     - [x] **文案与逻辑方向校正**：将 `SwingStateTable` 表头工具栏复选框更名为 **`⭐ 显示重点关注`**。
