@@ -246,7 +246,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
     --enable-plugin=pyqt6 ^
-    --windows-console-mode=disable ^
+    --windows-console-mode=force ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
     --windows-product-name="MultiPeriodTester" ^
@@ -326,6 +326,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
     --include-data-file=JSONData\count.ini=JSONData\count.ini ^
     --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
+    --include-data-dir=JohnsonUtil\wencai=JohnsonUtil\wencai ^
+    --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=同花顺板块行业.xlsx ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
     --include-package=ats ^

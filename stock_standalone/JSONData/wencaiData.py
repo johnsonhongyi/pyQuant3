@@ -1365,22 +1365,22 @@ def get_conf_path(fname,BASE_DIR=None,spec=''):
 def search_ths_data(code,category=False):
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
-        # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
-        # root_cwd = cct.get_run_path_stock()
-        # fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xlsx'.replace('\\',cct.get_os_path_sep())
-        # print(f'fpath:{fpath}')
-        fpath= get_conf_path('同花顺板块行业.xlsx',BASE_DIR=cct.get_base_path(),spec='wencai')
-        if not fpath:
-            log.critical("同花顺板块行业.xlsx 加载失败，程序无法继续运行")
-        df_ths = pd.read_excel(fpath)
-        df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
-        df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
-        df_ths.rename(columns={'所属概念': 'category'}, inplace=True)
-        df_ths.rename(columns={'所属同花顺行业': 'hangye'}, inplace=True)
-        # df_ths['category'] = df_ths['category'].apply(lambda x:str(x)[:15])
-        df_ths = df_ths.set_index('code')
-        cct.GlobalValues().setkey('df_ths',df_ths)
-        df = df_ths
+        try:
+            fpath = get_conf_path('同花顺板块行业.xlsx', BASE_DIR=cct.get_base_path(), spec='wencai')
+            if not fpath or not os.path.exists(fpath):
+                log.warning("同花顺板块行业.xlsx 加载失败，跳过同花顺概念挂载")
+                return pd.DataFrame()
+            df_ths = pd.read_excel(fpath)
+            df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
+            df_ths["code"] = df_ths["股票代码"].map(lambda x: str(x).split('.')[0])
+            df_ths.rename(columns={'所属概念': 'category'}, inplace=True)
+            df_ths.rename(columns={'所属同花顺行业': 'hangye'}, inplace=True)
+            df_ths = df_ths.set_index('code')
+            cct.GlobalValues().setkey('df_ths', df_ths)
+            df = df_ths
+        except Exception as e:
+            log.warning(f"解析同花顺板块行业.xlsx 发生异常: {e}，优雅降级跳过")
+            return pd.DataFrame()
     else:
         df = df_ths
     # df = df.reset_index().set_index('股票代码')

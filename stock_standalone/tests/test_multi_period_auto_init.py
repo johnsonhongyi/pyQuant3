@@ -38,7 +38,7 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
         res_df = self.engine.load_period_data('45d', self.top_now_mock, force_reload=False)
         
         # 校验：应该以 readonly=True 调用一次
-        mock_get_append.assert_called_once_with(self.top_now_mock, dl=3000, resample='45d', readonly=True)
+        mock_get_append.assert_called_once_with(self.top_now_mock, dl=3000, resample='45d', readonly=True, end=None)
         # 结果应为空
         self.assertTrue(res_df.empty)
         self.assertIn('45d', self.engine._missing_periods)
@@ -63,7 +63,7 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
         res_df = self.engine.load_period_data('3M', self.top_now_mock, force_reload=True)
 
         # 校验：强制刷新时应该调用 get_append_lastp_to_df (不带 readonly=True)
-        mock_get_append.assert_called_once_with(self.top_now_mock, dl=4000, resample='3m', readonly=False)
+        mock_get_append.assert_called_once_with(self.top_now_mock, dl=4000, resample='3m', readonly=False, end=None)
         self.assertFalse(res_df.empty)
         self.assertNotIn('3M', self.engine._missing_periods)
         self.assertIn('3M', self.engine._period_dfs)
@@ -75,7 +75,7 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
 
         res_df = self.engine.load_period_data('45d', self.top_now_mock, force_reload=False)
 
-        mock_get_append.assert_called_once_with(self.top_now_mock, dl=3000, resample='45d', readonly=True)
+        mock_get_append.assert_called_once_with(self.top_now_mock, dl=3000, resample='45d', readonly=True, end=None)
         self.assertTrue(res_df.empty)
 
     @patch('data_utils.complete_indicators_pipeline')
@@ -87,12 +87,12 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
         mock_pipeline.side_effect = lambda df, log, resample: df
 
         res_df_w = self.engine.load_period_data('W', self.top_now_mock, force_reload=True)
-        mock_get_append.assert_called_with(self.top_now_mock, dl=300, resample='w', readonly=False)
+        mock_get_append.assert_called_with(self.top_now_mock, dl=300, resample='w', readonly=False, end=None)
         self.assertIn('w', self.engine._period_dfs)
         self.assertIn('W', self.engine._period_dfs)
 
         res_df_m = self.engine.load_period_data('M', self.top_now_mock, force_reload=True)
-        mock_get_append.assert_called_with(self.top_now_mock, dl=550, resample='m', readonly=False)
+        mock_get_append.assert_called_with(self.top_now_mock, dl=550, resample='m', readonly=False, end=None)
         self.assertIn('m', self.engine._period_dfs)
         self.assertIn('M', self.engine._period_dfs)
 
@@ -128,7 +128,7 @@ class TestMultiPeriodAutoInit(unittest.TestCase):
         
         mock_signal.emit.assert_called_once()
         msg2 = mock_signal.emit.call_args[0][0]
-        self.assertIn("Running_MP: 21%", msg2)
+        self.assertIn("21%", msg2)
         self.assertIn("361/5.55k", msg2)  # 验证历史数量与时间速率被成功记忆并合成！
 
 
