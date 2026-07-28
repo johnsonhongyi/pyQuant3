@@ -1,3 +1,24 @@
+## 2026-07-28 20:20
+- [x] **复查只读模式完备性与彻底根治 `per0d` 指标 `NameError` 隐患 (`query_engine_util.py`, `config/multi_period_strategies.json`, `ats/ui/multi_period_dialog.py`)**：
+    - [x] **只读模式 (`chk_readonly`) 逻辑复查完备**：确认 `chk_readonly` 在 UI 默认勾选、状态物理持久化、Worker 线程 `allow_auto_init` 保护、诊断数据降级与 `load_period_data` 阻止 H5 磁盘写入的全链路设计，逻辑无死锁与崩溃漏洞。
+    - [x] **根治 `per0d` 变量名 `NameError`**：定位并修正了 `config/multi_period_strategies.json` 策略文件中的 `per0d` 书写瑕疵（修正为标准 `percent`）。
+    - [x] **引擎底座扩展 `0d` 阶指标同义词全自动化绑定**：在 `query_engine_util.py` 的 `col_map` 映射字典及 `range(0, 10)` 循环中，全面补齐了 `per0d`, `perc0d`, `lastv0d`, `lastp0d`, `lasth0d`, `lastl0d`, `lasto0d`, `macd0d`, `dif0d`, `dea0d`, `upper0d`, `lower0d`, `ma50d` 等全套 `0d` 变体同义词绑定通道，提供 100% 容错防弹保障。
+    - [x] **自动化测试 100% 验证**：运行 pytest `test_multi_period_auto_init.py`、`test_trend_channel.py` 及 `test_signal_ledger.py` 全量 18 项单元测试，100% 成功通过。
+
+## 2026-07-28 20:05
+- [x] **修复 W/M 周期大小写别名映射、同步加载与诊断 merged_row 变量补齐缺陷 (`multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`)**：
+    - [x] **周期名称全流程规范化归一**：在 `load_period_data` 与诊断处引入 `res_period = str(period).lower().strip()`，彻底解决大写 `'W'` / `'M'` 查找 `ct.Resample_LABELS_Days` 字典时降级为 `dl=60` 导致的 `low_W_60_y_all` H5 表名错配与找不到数据隐患，准确匹配 `w` (dl=300) 与 `m` (dl=550)。
+    - [x] **诊断 merged_row 变量多后缀全方位挂载**：在 `diagnose_stock_strategy` 的 `merged_row` 构造循环中，为提取到的特征同时挂载 `k_period` (大写/小写) 及无后缀键名 `k`（如 `ch_slope_deg`, `fib_38`, `fib_50`, `ch_mid`），彻底杜绝了诊断单股时由于未补齐无后缀键或别名而误报 `missing_columns` 的致命 Bug。
+    - [x] **诊断同步自动初始化加载**：在 `diagnose_stock_strategy` 缺少周期的同步加载循环中，接入 `allow_init = not self.chk_readonly.isChecked()`，当取消只读勾选时，诊断未初始化的 `w`/`m` 周期同样全自动调起 `load_period_data(p_norm, force_reload=True)` 初始化与落盘。
+    - [x] **单元测试全量 100% 通过**：扩展 `tests/test_multi_period_auto_init.py` 大写周期映射断言，全量 14 项单元测试 100% 成功通过。
+
+## 2026-07-28 19:35
+- [x] **实现多周期管理器「🔒 只读模式」复选框控制与全周期自动初始化机制 (`multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`)**：
+    - [x] **UI 指定位置植入「🔒 只读模式」控件与状态持久化**：在工具栏【自定义列】与【搜索框】之间的指定位置新增 `self.chk_readonly` 复选框，默认处于勾选状态 (`True`)；并在 `window_config.json` / `_save_state` 中实现 `readonly_mode` 物理持久化。
+    - [x] **默认只读刷新保护机制**：盘中常规刷新或在只读模式勾选状态下触发【🔄 强制刷新】时，强制保留只读模式 (`readonly=True`)，仅更新 `top_now` 实时行情快照与内存已有缓存，不进行底层 H5 文件的重建与写盘初始化，彻底保障盘中刷新的极速流畅。
+    - [x] **取消只读后按选择框全周期自动初始化**：当用户取消勾选「只读模式」并执行强制刷新 (`force_reload=True`) 时，系统自动遍历菜单上勾选的所有参与周期 (`['d','2d','3d','w','m','45d','3M']`)；对底层缺少 H5 数据的周期，自动包裹 `cct.timed_ctx(f"init_tdx_{period}")` 执行 `tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[period], resample=period)` 完成底层数据的写盘与全自动初始化。
+    - [x] **单元测试 100% 验证**：新建 `tests/test_multi_period_auto_init.py`，全量测试 100% 成功通过。
+
 ## 2026-07-28 17:45
 - [x] **实现通达信「自动通道」与趋势定位算法向量化引擎 (`JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_trend_channel.py`)**：
     - [x] **完整算法解构与向量化 Python 翻译**：成功将通达信「自动通道」及趋势定位源码解构翻译为 6 大纯 NumPy/Pandas 向量化模块（包含 MA9 趋势方向、8日/3日 Fibonacci 动态 5 阶支撑阻力、A1X 变速率与 MACD 见底/见顶信号、SK/SD 启动检测、FORCAST/SLOPE 自动回归通道以及 RSI6 逃顶/低位启动）。

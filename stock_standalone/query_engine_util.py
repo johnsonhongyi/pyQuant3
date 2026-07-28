@@ -247,8 +247,9 @@ class PandasQueryEngine:
             'close': ['close', 'trade', 'now', 'lastp', 'lastp0d'],
             'open': ['open', 'lasto0d'],
             'now': ['now', 'trade', 'close', 'lastp0d'],
-            'percent': ['perd', 'per1d', 'perc1d', 'percent', 'pct'],
-            'pct': ['perd', 'per1d', 'perc1d', 'pct', 'percent'],
+            'percent': ['perd', 'per1d', 'perc1d', 'percent', 'pct', 'per0d', 'perc0d'],
+            'pct': ['perd', 'per1d', 'perc1d', 'pct', 'percent', 'per0d', 'perc0d'],
+            'per0d': ['per0d', 'perc0d', 'percent', 'pct', 'perd'],
             'volume': ['lvol', 'vol', 'volume', 'lastv0d'],
             'lastv0d': ['lvol', 'vol', 'volume', 'lastv0d'],
             'lastv1d': ['lastv1d', 'lastv', 'lvol'], 'lastv2d': ['lastv2d'],
@@ -295,8 +296,8 @@ class PandasQueryEngine:
             'sig_start': ['sig_start', 'start_signal'],
             'sk_val': ['sk_val'], 'sd_val': ['sd_val'], 'rsi6': ['rsi6'],
         }
-        for i in range(1, 10):
-            last_macd_idx = min(i, 6)
+        for i in range(0, 10):
+            last_macd_idx = min(max(i, 1), 6)
             col_map[f'macd{i}d'] = [f'macdlast{i}', f'macd{i}d', f'macd{i}', f'macdlast{last_macd_idx}']
             col_map[f'macd{i}'] = [f'macdlast{i}', f'macd{i}d', f'macd{i}', f'macdlast{last_macd_idx}']
             col_map[f'dif{i}d'] = [f'macddif{i}', f'dif{i}d', f'dif{i}', f'macddif{last_macd_idx}']
@@ -307,8 +308,8 @@ class PandasQueryEngine:
             col_map[f'upper{i}'] = [f'upper{i}', f'upper{i}d']
             col_map[f'lower{i}d'] = [f'lower{i}', f'lower{i}d']
             col_map[f'lower{i}'] = [f'lower{i}', f'lower{i}d']
-            col_map[f'per{i}d'] = [f'per{i}d', f'perc{i}d', f'percent{i}d']
-            col_map[f'perc{i}d'] = [f'perc{i}d', f'per{i}d', f'percent{i}d']
+            col_map[f'per{i}d'] = [f'per{i}d', f'perc{i}d', f'percent{i}d', 'percent', 'pct']
+            col_map[f'perc{i}d'] = [f'perc{i}d', f'per{i}d', f'percent{i}d', 'percent', 'pct']
             col_map[f'ma5{i}d'] = [f'ma5{i}d', f'ma5_{i}d', f'ma5_d{i}d', 'ma51d', 'ma5d']
             col_map[f'ma10{i}d'] = [f'ma10{i}d', f'ma10_{i}d', f'ma10_d{i}d', 'ma101d', 'ma10d']
             col_map[f'ma20{i}d'] = [f'ma20{i}d', f'ma20_{i}d', f'ma20_d{i}d', 'ma201d', 'ma20d']

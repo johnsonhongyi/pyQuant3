@@ -18,47 +18,79 @@ class MultiPeriodStrategyEngine:
         self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
         
-    def load_period_data(self, period: str, top_now: pd.DataFrame) -> pd.DataFrame:
-        """加载指定周期数据（复用 tdd.get_append_lastp_to_df）"""
+    def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False) -> pd.DataFrame:
+        """加载指定周期数据（支持大小写规范化；force_reload=False 只读，force_reload=True 自动全周期初始化与写入）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
         from JohnsonUtil import commonTips as cct
+        from data_utils import complete_indicators_pipeline
         
-        # 如果已经加载过该周期，直接复用缓存
+        # 1. 周期字符串规范化处理 (支持 'W'->'w', 'M'->'m', '3M'->'3m' 等)
+        res_period = str(period).lower().strip() if period else 'd'
+        
+        # 兼容 Resample 天数映射，确保大写小写均能准确匹配 dl
+        dl_map = {
+            'd': 120, '2d': 200, '3d': 200, '5d': 300, 
+            'w': 300, 'm': 550, '45d': 3000, '3m': 4000
+        }
+        dl = dl_map.get(res_period, ct.Resample_LABELS_Days.get(res_period, 300))
+        
         with self.lock:
-            if period in self._period_dfs and not self._period_dfs[period].empty:
-                logger.info(f"Reusing cached data for period {period}...")
-                return self._period_dfs[period]
+            if not force_reload and res_period in self._period_dfs and not self._period_dfs[res_period].empty:
+                logger.info(f"Reusing cached data for period {res_period}...")
+                return self._period_dfs[res_period]
             
-        # 首次加载时清除对应周期的缺失标记
-        self._missing_periods.pop(period, None)
+            if force_reload:
+                self._period_dfs.pop(res_period, None)
+                self._period_dfs.pop(period, None)
+                self._missing_periods.pop(res_period, None)
+                self._missing_periods.pop(period, None)
+
+        df = None
         
-        # 默认取 60 个 k 线，大周期可以多取
-        dl = ct.Resample_LABELS_Days.get(period, 60)
-        try:
-            logger.info(f"Loading data for period {period}...")
-            
-            # 兼容 45d 和 3M 的 resample
-            # readonly=True: 只读 h5 缓存，不允许触发 TDX 重建写入，防止全零数据覆盖 d/2d 表
-            df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=period, readonly=True)
-            
-            # 只有当 df 不为空且包含 lastp1d 这一列时，才代表成功加载了大周期的历史缓存数据
-            if df is not None and not df.empty and 'lastp1d' in df.columns:
-                # 使用 complete_indicators_pipeline 确保所有均线 and 计算指标齐全
-                from data_utils import complete_indicators_pipeline
-                df = complete_indicators_pipeline(df, logger, resample=period)
-                with self.lock:
+        # 2. 如果不是强制刷新，首先尝试只读模式加载
+        if not force_reload:
+            try:
+                logger.info(f"Loading data for period {res_period} (readonly, dl={dl})...")
+                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=True)
+            except Exception as e:
+                logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
+                df = None
+
+        # 3. 如果处于强制刷新模式 (force_reload=True) 或只读未命中且允许初始化：
+        #    自动调用 tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period) 不加 readonly 选项进行初始化
+        if force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else [])):
+            if force_reload:
+                try:
+                    logger.info(f"⚡ [INIT] 强制刷新/自动初始化底层 [{res_period}] 数据 (dl={dl})...")
+                    with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
+                        df, lastp_df = tdd.get_append_lastp_to_df(
+                            top_now,
+                            dl=dl,
+                            resample=res_period,
+                            readonly=False
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to initialize period [{res_period}]: {e}")
+                    df = None
+
+        # 4. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
+        if df is not None and not df.empty and 'lastp1d' in df.columns:
+            df = complete_indicators_pipeline(df, logger, resample=res_period)
+            with self.lock:
+                self._period_dfs[res_period] = df
+                if period != res_period:
                     self._period_dfs[period] = df
-                return df
-            else:
-                # h5 缓存不存在，标记为缺失
-                reason = "h5缓存不存在(只读模式)" if 'lastp1d' not in (df.columns if df is not None else []) else "数据为空"
-                self._missing_periods[period] = reason
-                logger.warning(f"[READONLY] Period [{period}] data unavailable: {reason}")
-                return pd.DataFrame()
-        except Exception as e:
-            self._missing_periods[period] = str(e)
-            logger.error(f"Failed to load period {period}: {e}")
+                self._missing_periods.pop(res_period, None)
+                self._missing_periods.pop(period, None)
+            return df
+        else:
+            reason = "h5缓存不存在(只读模式)" if not force_reload else "数据初始化失败/为空"
+            with self.lock:
+                self._missing_periods[res_period] = reason
+                if period != res_period:
+                    self._missing_periods[period] = reason
+            logger.warning(f"Period [{res_period}] data unavailable: {reason}")
             return pd.DataFrame()
             
     def set_period_df(self, period: str, df: pd.DataFrame):
