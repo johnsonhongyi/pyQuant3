@@ -1370,9 +1370,12 @@ class QueryHistoryDialog(QDialog):
             return
         
         q_item = self.table.item(row, 0)
+        note_item = self.table.item(row, 2)
         if q_item:
             query = q_item.text().strip()
-            self.applied.emit(query)
+            note = note_item.text().strip() if note_item else ""
+            display_text = f"{note} ({query})" if note else query
+            self.applied.emit(display_text)
             self.accept()
 
     def _save_and_toast(self):
@@ -2457,8 +2460,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_ths_chk.setChecked(self.ui_state.get('link_ths', False))
 
         # 6. Apply secondary filter query
-        self._current_history_query = self.ui_state.get('current_history_query', '')
-        self.filter_edit.setCurrentText(self._current_history_query)
+        raw_curr = self.ui_state.get('current_history_query', '')
+        label, pure = self._format_filter_item_with_note(raw_curr)
+        self._current_history_query = label if label else raw_curr
+        self._set_filter_edit_text(self._current_history_query)
 
         # 7. Apply recent secondary filters with strict deduplication
         raw_recent = self.ui_state.get('recent_secondary_filters', [])
@@ -3616,7 +3621,70 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return word
         return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', repl, expr)
 
+    @staticmethod
+    def _extract_real_query(query: str) -> str:
+        """对齐竞价面板：拆分'备注 (逻辑)'格式(来自 UI 组合框显示)，优先提取核心逻辑以防 NameError"""
+        if not query or not isinstance(query, str):
+            return ""
+        q = query.strip()
+        if '(' in q and q.endswith(')'):
+            m = re.match(r'^(.*?)\s*\((.*)\)$', q)
+            if m:
+                p1, p2 = m.groups()
+                # 判定为 UI 标签格式：左侧含中文/破折号，右侧含逻辑符
+                if re.search(r'[\u4e00-\u9fa5]|--', p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
+                    return p2.strip()
+        return q
+
+    @staticmethod
+    def _get_note_for_query(raw_query: str) -> str:
+        """从 SEARCH_HISTORY_FILE 中搜索匹配 query 的 note 备注"""
+        pure_q = MultiPeriodDialog._extract_real_query(raw_query)
+        if not pure_q:
+            return ""
+        norm_pure = MultiPeriodDialog._normalize_filter_query(pure_q)
+        try:
+            from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+            if os.path.exists(SEARCH_HISTORY_FILE):
+                with open(SEARCH_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for grp, items in data.items():
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    item_q = item.get("query", "").strip()
+                                    pure_item = MultiPeriodDialog._extract_real_query(item_q)
+                                    if MultiPeriodDialog._normalize_filter_query(pure_item) == norm_pure:
+                                        note = item.get("note", "").strip()
+                                        if note:
+                                            return note
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _format_filter_item_with_note(expr: str) -> tuple:
+        """对齐竞价面板：格式化显示标签，返回 (display_label, pure_query)"""
+        pure_q = MultiPeriodDialog._extract_real_query(expr)
+        if not pure_q:
+            return "", ""
+        
+        note = ""
+        if '(' in expr and expr.endswith(')'):
+            m = re.match(r'^(.*?)\s*\((.*)\)$', expr.strip())
+            if m:
+                p1, p2 = m.groups()
+                if re.search(r'[\u4e00-\u9fa5]|--', p1) and any(op in p2.lower() for op in ['>', '<', '=', '&', '|', 'and', 'or']):
+                    note = p1.strip()
+        
+        if not note:
+            note = MultiPeriodDialog._get_note_for_query(pure_q)
+
+        label = f"{note} ({pure_q})" if note else pure_q
+        return label, pure_q
+
     def _apply_secondary_filter(self, df, query_expr):
+        query_expr = self._extract_real_query(query_expr)
         if not query_expr or df is None or df.empty:
             self._history_filter_error = None
             return df
@@ -3646,7 +3714,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 self._history_filter_error = f"过滤语法错误: {e2}"
                 return df
 
-    def _normalize_filter_query(self, query):
+    @staticmethod
+    def _normalize_filter_query(query):
         if not query:
             return ""
         return " ".join(str(query).strip().split())
@@ -3654,33 +3723,39 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _set_filter_edit_text(self, text):
         if not hasattr(self, "filter_edit") or not isinstance(self.filter_edit, QComboBox):
             return
-        self.filter_edit.setCurrentText(text)
+        label, pure = self._format_filter_item_with_note(text)
+        display_text = label if label else text
+        self.filter_edit.blockSignals(True)
+        self.filter_edit.setCurrentText(display_text)
         line_edit = self.filter_edit.lineEdit()
         if line_edit:
             line_edit.setCursorPosition(0)
+        self.filter_edit.blockSignals(False)
 
     def _rebuild_quick_history_menu(self):
         if not hasattr(self, "filter_edit") or not isinstance(self.filter_edit, QComboBox):
             return
         
         self.filter_edit.blockSignals(True)
-        curr_text = self._normalize_filter_query(self.filter_edit.currentText())
+        curr_text = self.filter_edit.currentText().strip()
         self.filter_edit.clear()
 
         recent = getattr(self, "recent_secondary_filters", [])
         seen_norm = set()
         unique_items = []
         for expr in recent:
-            norm = self._normalize_filter_query(expr)
+            pure_q = self._extract_real_query(expr)
+            norm = self._normalize_filter_query(pure_q)
             if norm and norm not in seen_norm:
                 seen_norm.add(norm)
-                unique_items.append(norm)
-                if len(unique_items) >= 8:
-                    break
+                label, pure = self._format_filter_item_with_note(expr)
+                if label and pure:
+                    unique_items.append((label, pure))
+                    if len(unique_items) >= 8:
+                        break
 
-        self.recent_secondary_filters = unique_items
-        for expr in unique_items:
-            self.filter_edit.addItem(expr)
+        for label, pure in unique_items:
+            self.filter_edit.addItem(label, userData=pure)
 
         if curr_text:
             self._set_filter_edit_text(curr_text)
@@ -3693,30 +3768,37 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.filter_edit.blockSignals(False)
 
     def _record_secondary_filter_history(self, query):
-        norm_query = self._normalize_filter_query(query)
+        pure_q = self._extract_real_query(query)
+        norm_query = self._normalize_filter_query(pure_q)
         if not norm_query:
             return
+
+        label, pure = self._format_filter_item_with_note(query)
+        record_text = label if label else query
 
         if not hasattr(self, "recent_secondary_filters"):
             self.recent_secondary_filters = []
 
-        # Deduplicate strictly based on normalized string comparison
+        # Deduplicate strictly based on normalized pure query comparison
         self.recent_secondary_filters = [
             q for q in self.recent_secondary_filters 
-            if self._normalize_filter_query(q) != norm_query
+            if self._normalize_filter_query(self._extract_real_query(q)) != norm_query
         ]
 
-        self.recent_secondary_filters.insert(0, norm_query)
+        self.recent_secondary_filters.insert(0, record_text)
         self.recent_secondary_filters = self.recent_secondary_filters[:8]  # 保持 8 个
         self._save_state()
         self._rebuild_quick_history_menu()
 
     def _on_quick_history_combo_selected(self, index):
-        query = self.filter_edit.itemText(index).strip()
-        if query:
-            self._current_history_query = query
-            self._set_filter_edit_text(query)
-            self._record_secondary_filter_history(query)
+        pure_query = self.filter_edit.itemData(index)
+        display_text = self.filter_edit.itemText(index).strip()
+        if not pure_query:
+            pure_query = self._extract_real_query(display_text)
+        if display_text:
+            self._current_history_query = display_text
+            self._set_filter_edit_text(display_text)
+            self._record_secondary_filter_history(display_text)
             if self.last_result_df is not None:
                 self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
 
@@ -3727,9 +3809,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
     def _apply_secondary_filter_from_edit(self):
         query = self.filter_edit.currentText().strip()
-        self._current_history_query = query
-        self._set_filter_edit_text(query)
-        self._record_secondary_filter_history(query)
+        label, pure_q = self._format_filter_item_with_note(query)
+        display_text = label if label else query
+        self._current_history_query = display_text
+        self._set_filter_edit_text(display_text)
+        self._record_secondary_filter_history(display_text)
         if self.last_result_df is not None:
             self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
 
