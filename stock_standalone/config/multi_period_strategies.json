@@ -600,7 +600,7 @@
           "enabled": true
         },
         "2d": {
-          "filter": "(lastv0d <= 1.25 * lastv1d or lastv1d <= 1.25 * lastv2d or lastv1d < lastv3d) and (abs(per0d) < 5.5 or abs(per1d) < 5.5) and close >= 0.94 * ma5d",
+          "filter": "(lastv0d <= 1.25 * lastv1d or lastv1d <= 1.25 * lastv2d or lastv1d < lastv3d) and (abs(percent) < 5.5 or abs(per1d) < 5.5) and close >= 0.94 * ma5d",
           "weight": 1.0,
           "enabled": true
         },

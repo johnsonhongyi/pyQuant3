@@ -113,12 +113,13 @@ class AllStrategiesHitWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, engine, strategies, active_periods, top_now=None, period_cache_ts=None, top_now_cache_ts=None):
+    def __init__(self, engine, strategies, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None):
         super().__init__()
         self.engine = engine
         self.strategies = strategies
         self.active_periods = active_periods
         self.top_now = top_now
+        self.force_reload = force_reload
         self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
         self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
 
@@ -154,9 +155,9 @@ class AllStrategiesHitWorker(QThread):
 
             # 2. 确保各个勾选周期的数据已载入
             for period in self.active_periods:
-                if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
+                if self.force_reload or period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
                     self.progress.emit(f"正在同步 {period} 周期特征数据...")
-                    self.engine.load_period_data(period, self.top_now)
+                    self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload)
 
             # 3. 开始评估各个策略
             total = len(self.strategies)
@@ -184,13 +185,14 @@ class MultiPeriodWorker(QThread):
     finished = pyqtSignal(object, float, object)  # result_df, elapsed, flat_df
     error = pyqtSignal(str)
 
-    def __init__(self, engine, strat_config, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None):
+    def __init__(self, engine, strat_config, active_periods, top_now=None, force_reload=False, allow_auto_init=False, period_cache_ts=None, top_now_cache_ts=None):
         super().__init__()
         self.engine = engine
         self.strat_config = strat_config
         self.active_periods = active_periods
         self.top_now = top_now
         self.force_reload = force_reload
+        self.allow_auto_init = allow_auto_init
         self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
         self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
 
@@ -260,15 +262,17 @@ class MultiPeriodWorker(QThread):
             # 2. Load active periods
             for period in self.active_periods:
                 cached = False
-                if hasattr(self.engine, "lock"):
-                    with self.engine.lock:
+                # 只有在非强制刷新，或只读模式且没有要强行初始化的请求时，才复用内存/只读缓存
+                if not (self.force_reload and self.allow_auto_init):
+                    if hasattr(self.engine, "lock"):
+                        with self.engine.lock:
+                            has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
+                            is_missing_cached = period in self.engine._missing_periods
+                            cached = has_df or is_missing_cached
+                    else:
                         has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
                         is_missing_cached = period in self.engine._missing_periods
                         cached = has_df or is_missing_cached
-                else:
-                    has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
-                    is_missing_cached = period in self.engine._missing_periods
-                    cached = has_df or is_missing_cached
 
                 if cached:
                     if period in self.engine._missing_periods:
@@ -276,13 +280,19 @@ class MultiPeriodWorker(QThread):
                     else:
                         self.progress.emit(f"⚡ [{period}] 命中内存缓存，极速复用已有特征数据")
                 else:
-                    self.progress.emit(f"📥 [{period}] 首次加载特征数据，正在读取计算...")
+                    load_force = self.force_reload and self.allow_auto_init
+                    if load_force:
+                        self.progress.emit(f"⚡ [{period}] 正在强制刷新并全自动初始化底层 [{period}] 数据...")
+                    else:
+                        self.progress.emit(f"📥 [{period}] 首次/只读加载特征数据，正在读取计算...")
+
                     if hasattr(self.engine, "lock"):
                         with self.engine.lock:
                             self.engine._period_dfs.pop(period, None)
                     else:
                         self.engine._period_dfs.pop(period, None)
-                    self.engine.load_period_data(period, self.top_now)
+                    
+                    self.engine.load_period_data(period, self.top_now, force_reload=load_force)
                     self.period_cache_ts[period] = time.time()
 
                     if period in self.engine._missing_periods:
@@ -2037,6 +2047,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['link_vis'] = self.link_vis_chk.isChecked()
             self.ui_state['link_tdx'] = self.link_tdx_chk.isChecked()
             self.ui_state['link_ths'] = self.link_ths_chk.isChecked()
+            if hasattr(self, 'chk_readonly'):
+                self.ui_state['readonly_mode'] = self.chk_readonly.isChecked()
             self.ui_state['stays_on_top'] = self.on_top_chk.isChecked()
             self.ui_state['sort_level1_col'] = getattr(self, 'sort_level1_col', None)
             self.ui_state['sort_level1_asc'] = getattr(self, 'sort_level1_asc', True)
@@ -2185,6 +2197,27 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         tb2_layout.addWidget(self.btn_custom_cols_menu)
 
         tb2_layout.addStretch()
+
+        # 只读模式复选框（默认勾选为只读；取消勾选后点击【强制刷新】方可初始化底层缺失的周期数据）
+        self.chk_readonly = QCheckBox("🔒 只读模式", self)
+        self.chk_readonly.setChecked(True)
+        self.chk_readonly.setToolTip("默认勾选为纯只读模式（不触发底层H5数据写盘与初始化）；\n取消勾选后点击【🔄 强制刷新】可全自动初始化并落盘缺失的周期数据。")
+        self.chk_readonly.setStyleSheet("""
+            QCheckBox {
+                color: #81c784;
+                font-weight: bold;
+                font-size: 12px;
+                margin-right: 12px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+            QCheckBox:hover {
+                color: #a5d6a7;
+            }
+        """)
+        tb2_layout.addWidget(self.chk_readonly)
 
         # Secondary Filter Query
         # Secondary Filter Query (Integrated Editable QComboBox with 8 History Entries)
@@ -2458,6 +2491,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_vis_chk.setChecked(self.ui_state.get('link_vis', True))
         self.link_tdx_chk.setChecked(self.ui_state.get('link_tdx', False))
         self.link_ths_chk.setChecked(self.ui_state.get('link_ths', False))
+        if hasattr(self, 'chk_readonly'):
+            self.chk_readonly.setChecked(self.ui_state.get('readonly_mode', True))
 
         # 6. Apply secondary filter query
         raw_curr = self.ui_state.get('current_history_query', '')
@@ -2688,10 +2723,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             except RuntimeError:
                 self.worker = None
 
+        allow_auto_init = not self.chk_readonly.isChecked() if hasattr(self, 'chk_readonly') else False
         # Run standard QThread worker
         worker = MultiPeriodWorker(
             self.engine, strat_config, active_periods,
-            top_now=self.top_now, force_reload=force_reload,
+            top_now=self.top_now, force_reload=force_reload, allow_auto_init=allow_auto_init,
             period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts
         )
         self.worker = worker
@@ -4072,14 +4108,16 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 QMessageBox.critical(self, "错误", f"初始化市场基础数据失败: {e}")
                 return
 
-        # Load missing period data synchronously
+        # Load missing period data synchronously (honoring chk_readonly mode)
+        allow_init = not self.chk_readonly.isChecked() if hasattr(self, 'chk_readonly') else False
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for period in active_periods:
-                if period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
-                    self.lbl_status.setText(f"正在加载 {period} 周期特征数据...")
+                p_norm = str(period).lower().strip()
+                if p_norm not in self.engine._period_dfs or self.engine._period_dfs[p_norm].empty:
+                    self.lbl_status.setText(f"正在同步/初始化 {period} 周期特征数据...")
                     QApplication.processEvents()
-                    self.engine.load_period_data(period, self.top_now)
+                    self.engine.load_period_data(p_norm, self.top_now, force_reload=allow_init)
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -4088,7 +4126,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         # Build merged row flat DF
         merged_row = {"name": name}
 
-        known_period_suffixes = tuple(f"_{p}" for p in ['d', '2d', '3d', 'w', 'm', '45d', '3M'])
+        known_period_suffixes = tuple(f"_{p}" for p in ['d', '2d', '3d', 'w', 'm', '45d', '3M', 'W', 'M', '3m'])
         from query_engine_util import query_engine
         from stock_logic_utils import extract_columns, RESERVED_SQL_FUNCS
 
@@ -4112,7 +4150,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         queries = []
         for period in active_periods:
-            df_p = self.engine._period_dfs.get(period)
+            p_norm = str(period).lower().strip()
+            df_p = self.engine._period_dfs.get(p_norm)
+            if df_p is None or df_p.empty:
+                df_p = self.engine._period_dfs.get(period)
+
             if df_p is not None and not df_p.empty:
                 ctx_p = query_engine._prepare_context(df_p)
                 valid_cols = set(df_p.columns) | set(ctx_p.keys())
@@ -4129,10 +4171,17 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                         if v is not None:
                             v_clean = v.item() if hasattr(v, 'item') and not isinstance(v, (str, bytes)) else v
                             merged_row[f"{k}_{period}"] = v_clean
-                            if period == 'd':
+                            merged_row[f"{k}_{p_norm}"] = v_clean
+                            merged_row[f"{k}_{period.upper()}"] = v_clean
+                            if k not in merged_row or period == 'd' or p_norm == 'd':
                                 merged_row[k] = v_clean
                 
                 cond = strat_config['conditions'].get(period)
+                if not cond:
+                    cond = strat_config['conditions'].get(p_norm)
+                if not cond:
+                    cond = strat_config['conditions'].get(period.upper())
+
                 if cond:
                     raw_filter = cond['filter']
                     expanded_filter = query_engine._preprocess_query(raw_filter)
@@ -4144,6 +4193,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     })
             else:
                 cond = strat_config['conditions'].get(period)
+                if not cond:
+                    cond = strat_config['conditions'].get(p_norm)
+                if not cond:
+                    cond = strat_config['conditions'].get(period.upper())
                 if cond:
                     raw_filter = cond['filter']
                     expanded_filter = query_engine._preprocess_query(raw_filter)
