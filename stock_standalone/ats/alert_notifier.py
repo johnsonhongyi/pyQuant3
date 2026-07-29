@@ -283,9 +283,40 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             except Exception as e:
                 logger.warning(f"ShowMessage failed: {e}")
                 
-        # 3. 触发 TTS 语音播报
-        try:
-            from voice_alert import VoiceAlertManager
-            VoiceAlertManager().speak(f"特异买点 {name}，{reason}")
-        except Exception:
-            pass
+        # 3. 触发 TTS 语音播报 (绝对禁用 pyttsx3，基于项目标准 AlertManager 或 SAPI.SpVoice 独立 safe 子线程)
+        voice_text = f"特异买点 {name}，{reason}"
+        self._speak_text(voice_text)
+
+    def _speak_text(self, text: str):
+        """标准 safe 子线程语音播报：基于 AlertManager / SAPI.SpVoice，绝对不与 Tk/Qt/Vis 冲突"""
+        if not text:
+            return
+
+        def _worker():
+            # 1. 优先使用项目标准的 alert_manager (无缝集成队列与全系统配置)
+            try:
+                from alert_manager import get_alert_manager
+                mgr = get_alert_manager()
+                if hasattr(mgr, 'speak'):
+                    mgr.speak(text)
+                    return
+            except Exception:
+                pass
+
+            # 2. Fallback: 独立 CoInitialize() 的 Win32 SAPI.SpVoice 线程直连 (绝不上锁、不冲突 pyttsx3)
+            try:
+                import pythoncom
+                import win32com.client
+                pythoncom.CoInitialize()
+                speaker = win32com.client.Dispatch("SAPI.SpVoice")
+                speaker.Rate = 1
+                speaker.Volume = 100
+                speaker.Speak(str(text), 0)
+                del speaker
+                pythoncom.CoUninitialize()
+            except Exception as e:
+                logger.warning(f"Fallback SAPI.SpVoice speak error: {e}")
+
+        import threading
+        t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
+        t.start()
