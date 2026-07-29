@@ -25,11 +25,11 @@ class MultiPeriodStrategyEngine:
         from JohnsonUtil import commonTips as cct
         from data_utils import complete_indicators_pipeline
         
-        # 直接使用传入的 period 匹配天数映射 dl
+        # 保持原样 period 传入（严格支持 3M 大写与月线/多月区别）
         res_period = period if period else 'd'
         dl_map = {
             'd': 120, '2d': 200, '3d': 200, '5d': 300, 
-            'w': 300, 'm': 550, '45d': 3000, '3M': 4000, '3m': 4000
+            'w': 300, 'W': 300, 'm': 550, 'M': 550, '45d': 3000, '3M': 4000, '3m': 4000
         }
         dl = dl_map.get(res_period, ct.Resample_LABELS_Days.get(res_period, 300))
         
@@ -77,7 +77,9 @@ class MultiPeriodStrategyEngine:
             df = complete_indicators_pipeline(df, logger, resample=res_period)
             with self.lock:
                 self._period_dfs[res_period] = df
+                self._period_dfs[period] = df
                 self._missing_periods.pop(res_period, None)
+                self._missing_periods.pop(period, None)
             return df
         else:
             reason = "h5缓存不存在(只读模式)" if readonly else "数据初始化失败/为空"

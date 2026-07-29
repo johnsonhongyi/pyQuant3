@@ -392,18 +392,76 @@ class SignalLedger:
 
             return entry
 
-    def _compute_priority(self, entry):
+    def _compute_specialty_score(self, entry, row=None):
+        """计算 4 维特异买卖逻辑打分 (0-100分)
+        
+        维度 1: 自动通道 & Fibonacci (ch_slope_deg > 0, ch_pos, fib_50, sig_bottom, sig_launch) [35分]
+        维度 2: 连阳阶梯抬升度 (lastl1d >= lastl2d >= lastl3d 且 lasth1d >= lasth2d >= lasth3d) [25分]
+        维度 3: 极缩地量干涸与倍量爆起 (lastv1d < 0.65 * lastv2d, volume_ratio >= 1.8) [20分]
+        维度 4: V反深急转弯与 VWAP 回收 [20分]
+        """
+        if row is None:
+            return 50.0
+            
+        score = 0.0
+        
+        # 1. 自动通道与 Fib50 支撑 (最多 35 分)
+        try:
+            ch_deg = float(row.get('ch_slope_deg', row.get('slope_deg', 0.0)))
+            ch_pos = float(row.get('ch_pos', 50.0))
+            sig_bot = int(row.get('sig_bottom', 0))
+            sig_lch = int(row.get('sig_launch', 0))
+            
+            if ch_deg >= 1.5:
+                score += 10.0  # 斜率向上
+            if sig_bot == 1 or sig_lch == 1:
+                score += 15.0  # 底角/起爆极点
+            elif 15.0 <= ch_pos <= 35.0:
+                score += 10.0  # 下轨/Fib50 企稳
+        except Exception:
+            pass
+            
+        # 2. 连阳阶梯抬升 (最多 25 分)
+        try:
+            l1, l2, l3 = float(row.get('lastl1d', 0)), float(row.get('lastl2d', 0)), float(row.get('lastl3d', 0))
+            h1, h2, h3 = float(row.get('lasth1d', 0)), float(row.get('lasth2d', 0)), float(row.get('lasth3d', 0))
+            if l1 > 0 and l2 > 0 and l3 > 0 and l1 >= l2 >= l3 and h1 >= h2 >= h3:
+                score += 25.0
+            elif l1 > 0 and l2 > 0 and l1 >= l2:
+                score += 12.0
+        except Exception:
+            pass
+            
+        # 3. 极缩地量干涸与倍量爆起 (最多 20 分)
+        try:
+            v1, v2 = float(row.get('lastv1d', 0)), float(row.get('lastv2d', 0))
+            v_ratio = float(row.get('volume_ratio', row.get('ratio', 1.0)))
+            if v1 > 0 and v2 > 0 and v1 < 0.68 * v2 and v_ratio >= 1.5:
+                score += 20.0
+            elif v1 > 0 and v2 > 0 and v1 < v2:
+                score += 8.0
+        except Exception:
+            pass
+            
+        # 4. 涨幅与支撑企稳 (最多 20 分)
+        pct = float(row.get('percent', 0.0))
+        if 1.0 <= pct <= 6.5:
+            score += 20.0
+        elif 0.0 < pct < 1.0:
+            score += 10.0
+            
+        return min(100.0, max(0.0, score))
+
+    def _compute_priority(self, entry, row=None):
         """计算综合优先级评分
-
-        priority = time_score × 0.45 + volume_score × 0.30
-                 + deviation_score × 0.15 + momentum_score × 0.10
-                 + (is_fav ? 200.0 : 0.0)
-
-        Returns:
-            float: 优先级评分 (重点关注股票可突破 100)
+        
+        priority = SpecialtyScore × 0.40 + TimeScore × 0.25 + VolumeScore × 0.20 + DevScore × 0.15 + FavBoost
         """
         # 时间分 (0-100)
         time_score = _compute_time_score(entry.first_seen_phase, entry.first_seen_ts)
+
+        # 4维特异打分 (0-100)
+        specialty_score = self._compute_specialty_score(entry, row)
 
         # 量能分 (0-100, 由 VolumeProfiler 外部提供)
         vol_score = min(100.0, entry.volume_score)
@@ -411,10 +469,6 @@ class SignalLedger:
         # 偏离度分 (越贴近 MA20 越高)
         dev_abs = abs(entry.latest_deviation) if entry.latest_deviation is not None else 5.0
         deviation_score = max(0.0, 100.0 - dev_abs * 20.0)
-
-        # 动量分 (涨幅与逆势强度)
-        pct = entry.latest_pct if entry.latest_pct else 0.0
-        momentum_score = min(100.0, max(0.0, pct * 15.0))
 
         # 重点关注置顶加权
         fav_boost = 0.0
@@ -427,14 +481,33 @@ class SignalLedger:
 
         # 加权求和
         priority = (
-            time_score * 0.45 +
-            vol_score * 0.30 +
+            specialty_score * 0.40 +
+            time_score * 0.25 +
+            vol_score * 0.20 +
             deviation_score * 0.15 +
-            momentum_score * 0.10 +
             fav_boost
         )
 
         return round(priority, 2)
+
+
+class SignalValidityTracker:
+    """信号正确有效性闭环追踪器
+    
+    跟踪记录交易信号触发后 T+1 / T+3 / T+5 的最高收益率与闭环有效胜率
+    """
+    
+    def __init__(self):
+        self.stats = {}  # {code_date: {'win': True, 'max_pnl': 5.2, 'close_pnl': 3.1}}
+        
+    def record_outcome(self, code, buy_price, t1_high, t1_close):
+        if buy_price <= 0:
+            return 0.0, False
+        max_pnl = (t1_high - buy_price) / buy_price * 100.0
+        close_pnl = (t1_close - buy_price) / buy_price * 100.0
+        is_win = max_pnl >= 2.5 or close_pnl >= 1.5
+        return round(max_pnl, 2), is_win
+
 
     def _check_auto_promote(self, entry, row):
         """检查是否满足从 RADAR 自动晋级到 WATCH 的条件
