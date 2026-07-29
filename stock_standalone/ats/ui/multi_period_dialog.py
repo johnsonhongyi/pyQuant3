@@ -331,45 +331,57 @@ class MultiPeriodWorker(QThread):
                                   p_norm in self.engine._missing_periods)
 
                 has_cache = df_cached is not None and not df_cached.empty
-                use_cache = has_cache and not is_force_init
+                cache_ts = self.period_cache_ts.get(period) or self.period_cache_ts.get(p_norm) or 0.0
+                if has_cache and cache_ts == 0.0:
+                    cache_ts = time.time()
+                    self.period_cache_ts[period] = cache_ts
+                    self.period_cache_ts[p_norm] = cache_ts
+
+                is_cache_valid = self._is_cache_valid(cache_ts)
 
                 if is_missing and not is_force_init:
                     # 已知无数据，跳过（历史 _missing_periods 记录保持原语义）
                     self.progress.emit(f"⚡ [{period}] 命中内存缓存(已知无数据，跳过)")
                     continue
 
-                if use_cache and self.top_now is not None and not self.top_now.empty:
-                    # ── 命中缓存路径：对齐 data_utils.py L3545-3558 ──
-                    # 1) combine_dataFrame 合并最新 top_now 实时行情
-                    # 2) complete_indicators_pipeline 重算全量衍生指标
-                    self.progress.emit(f"⚡ [{period}] 命中缓存，合并实时行情并重算衍生指标...")
+                if has_cache and is_cache_valid and not self.force_reload:
+                    # ── 1. 内存缓存有效且未超时（<15分钟）：直接极速复用，不重新计算 ──
+                    self.progress.emit(f"⚡ [{period}] 命中内存缓存 (极速复用)")
+                    continue
+
+                elif has_cache and not is_force_init:
+                    # ── 2. 内存有缓存，但已超时（>15分钟或强制刷新）：增量合并 top_now 并重算衍生指标 ──
+                    self.progress.emit(f"⚡ [{period}] 缓存已超时(>15分钟)，合并实时行情并重算衍生指标...")
                     try:
-                        if p_norm != 'd':
-                            # 非日线大周期：只合并 OHLCV + name，与 data_utils.py L3547-3549 一致
-                            core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
-                            top_now_filtered = self.top_now[[c for c in core_cols
-                                                              if c in self.top_now.columns]].copy()
-                        else:
-                            # 日线：全量合并（与 data_utils.py L3550-3551 一致）
-                            top_now_filtered = self.top_now
+                        if self.top_now is not None and not self.top_now.empty:
+                            if p_norm != 'd':
+                                # 非日线大周期：只合并 OHLCV + name，与 data_utils.py L3547-3549 一致
+                                core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                                top_now_filtered = self.top_now[[c for c in core_cols
+                                                                  if c in self.top_now.columns]].copy()
+                            else:
+                                # 日线：全量合并（与 data_utils.py L3550-3551 一致）
+                                top_now_filtered = self.top_now
 
-                        # combine_dataFrame：用 top_now 更新 df_cached，保留历史特征列不丢
-                        top_all = cct.combine_dataFrame(df_cached, top_now_filtered,
-                                                        col="couts", compare="dff")
+                            # combine_dataFrame：用 top_now 更新 df_cached，保留历史特征列不丢
+                            top_all = cct.combine_dataFrame(df_cached, top_now_filtered,
+                                                            col="couts", compare="dff")
 
-                        # complete_indicators_pipeline：重算全量衍生指标
-                        top_all = complete_indicators_pipeline(top_all, logger, resample=p_norm)
+                            # complete_indicators_pipeline：重算全量衍生指标
+                            top_all = complete_indicators_pipeline(top_all, logger, resample=p_norm)
 
-                        # 写回 engine 缓存
-                        _lock = self.engine.lock if hasattr(self.engine, "lock") else threading.RLock()
-                        with _lock:
-                            self.engine._period_dfs[period] = top_all
-                            self.engine._period_dfs[p_norm] = top_all
+                            # 写回 engine 缓存
+                            _lock = self.engine.lock if hasattr(self.engine, "lock") else threading.RLock()
+                            with _lock:
+                                self.engine._period_dfs[period] = top_all
+                                self.engine._period_dfs[p_norm] = top_all
+                            self.period_cache_ts[period] = time.time()
+                            self.period_cache_ts[p_norm] = time.time()
                     except Exception as e:
                         logger.warning(f"[{period}] combine+pipeline 刷新异常，降级复用旧缓存: {e}")
 
                 else:
-                    # ── 未缓存/强制初始化路径：走完整 load_period_data ──
+                    # ── 3. 未缓存/强制初始化路径：走完整 load_period_data ──
                     if is_force_init:
                         self.progress.emit(f"⚡ [{period}] 正在强制刷新并全自动初始化底层 [{period}] 数据...")
                     else:
@@ -388,6 +400,7 @@ class MultiPeriodWorker(QThread):
                                                      end=self.end, readonly=is_readonly)
 
                     self.period_cache_ts[period] = time.time()
+                    self.period_cache_ts[p_norm] = time.time()
 
                     if period in self.engine._missing_periods:
                         reason = self.engine._missing_periods[period]
@@ -2069,6 +2082,14 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         # 打开后自动用默认选中的最小周期触发一次筛选
         QTimer.singleShot(6000, lambda: self.run_filter(force_reload=False))
 
+        # ── 后台定时自动刷新 ──
+        # 每 15 分钟检查一次：若缓存过期（盘中 >15min / 盘后 >30min）则自动刷新 top_now 并重算指标
+        # 非交易时段定时器静默不触发实际拉取（_is_cache_valid 返回 True 时 run_filter 复用缓存不重拉）
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.timeout.connect(self._on_auto_refresh_tick)
+        self._auto_refresh_timer.start(900_000)  # 每 900 秒 (15 分钟) tick 一次
+
+
     def get_stock_name(self, code):
         from sys_utils import resolve_stock_name
         return resolve_stock_name(code) or "未知个股"
@@ -2080,6 +2101,37 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if not is_trade:
             return (time.time() - ts) < 1800
         return (time.time() - ts) < 900  # 盘中交易时段 15 分钟 (900s) TTL 自动刷新
+
+    def _on_auto_refresh_tick(self):
+        """
+        后台定时自动刷新回调（每 15 分钟由 _auto_refresh_timer 触发）。
+        规则：
+          - 仅在交易时段（09:15~15:05）执行，盘后/盘前静默跳过；
+          - 若 worker 仍在运行（上次刷新未完成），跳过本次避免堆叠；
+          - 调用 run_filter(force_reload=False)，top_now 缓存 TTL 过期时自动重拉，
+            否则复用缓存直接重算衍生指标。
+        """
+        try:
+            if not cct.get_work_time_duration():
+                # 非交易时段，静默跳过，不产生任何网络请求
+                return
+
+            # 若上次 worker 仍在运行，本次跳过（防止堆叠）
+            try:
+                from PyQt6.sip import isdeleted
+                if hasattr(self, "worker") and self.worker is not None:
+                    if not isdeleted(self.worker) and self.worker.isRunning():
+                        logger.debug("[AutoRefresh] worker 仍在运行，跳过本次定时刷新")
+                        return
+            except Exception:
+                pass
+
+            logger.info("[AutoRefresh] 定时 15min 自动刷新触发 run_filter")
+            self.run_filter(force_reload=False)
+        except Exception as e:
+            logger.warning(f"[AutoRefresh] 定时刷新异常: {e}")
+
+
 
     def _load_stays_on_top(self):
         self.ui_state = self._load_state()
