@@ -1,3 +1,8 @@
+## 2026-07-29 12:48
+- [x] **优化多周期策略筛选器 Worker 内存缓存 TTL 校验机制 (`ats/ui/multi_period_dialog.py`)**：
+    - [x] **恢复未超时零重算复用（<15分钟）**：彻底修复 `MultiPeriodWorker` 中对于已载入内存 `engine._period_dfs` 数据的 `cache_ts` 判定逻辑。当内存中已有周期 DataFrame 时，系统自动归属/补齐建立时间戳；在盘中 15 分钟（900s）或非交易时段 30 分钟（1800s）TTL 阈值内且未手动【强制刷新】时，100% 极速复用内存缓存，直接跳过 `combine_dataFrame` 与 `complete_indicators_pipeline` 密集计算，零 CPU 额外消耗。
+    - [x] **精准区分常规策略评估与超时增量刷新**：仅当数据建立超越 15 分钟或用户显式触发 `force_reload=True` 时，才执行增量合并 `top_now` 与管道重算，完全对齐并恢复原有高效、高响应的筛选体验。
+
 ## 2026-07-28 22:00
 - [x] **参照 `nuitka_build_console_onlyClang.bat` 方式制作 `MultiPeriodDialog.spec` 的 Nuitka 打包配置文件 (`nuitka_build_multi_period_dialog_onlyClang.bat`)**：
     - [x] **全量 Spec 依赖与参数对齐**：完整解构 `MultiPeriodDialog.spec` 的 `datas` 数据资源、`hiddenimports` 隐藏导入包/模块（包含 `ats`, `JSONData`, `tables`, `a_trade_calendar`, `talib`, `pyqtgraph`, `h5py` 等）、`excludes` 排除模块（排除 PyQt6 闲置组件、scipy、matplotlib、numba、cryptography 等）与 `trash_list` 垃圾 DLL 过滤规则。
