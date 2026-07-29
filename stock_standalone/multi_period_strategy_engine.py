@@ -25,13 +25,11 @@ class MultiPeriodStrategyEngine:
         from JohnsonUtil import commonTips as cct
         from data_utils import complete_indicators_pipeline
         
-        # 1. 周期字符串规范化处理 (支持 'W'->'w', 'M'->'m', '3M'->'3m' 等)
-        res_period = str(period).lower().strip() if period else 'd'
-        
-        # 兼容 Resample 天数映射，确保大写小写均能准确匹配 dl
+        # 直接使用传入的 period 匹配天数映射 dl
+        res_period = period if period else 'd'
         dl_map = {
             'd': 120, '2d': 200, '3d': 200, '5d': 300, 
-            'w': 300, 'm': 550, '45d': 3000, '3m': 4000
+            'w': 300, 'm': 550, '45d': 3000, '3M': 4000, '3m': 4000
         }
         dl = dl_map.get(res_period, ct.Resample_LABELS_Days.get(res_period, 300))
         
@@ -58,7 +56,6 @@ class MultiPeriodStrategyEngine:
                 df = None
 
         # 3. 如果处于强制刷新模式 (force_reload=True) 或只读未命中且允许初始化：
-        #    自动调用 tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period) 不加 readonly 选项进行初始化
         if force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else [])):
             if force_reload:
                 try:
@@ -68,7 +65,7 @@ class MultiPeriodStrategyEngine:
                             top_now,
                             dl=dl,
                             resample=res_period,
-                            readonly=readonly,
+                            readonly=False,
                             end=end
                         )
                 except Exception as e:
@@ -80,17 +77,12 @@ class MultiPeriodStrategyEngine:
             df = complete_indicators_pipeline(df, logger, resample=res_period)
             with self.lock:
                 self._period_dfs[res_period] = df
-                if period != res_period:
-                    self._period_dfs[period] = df
                 self._missing_periods.pop(res_period, None)
-                self._missing_periods.pop(period, None)
             return df
         else:
             reason = "h5缓存不存在(只读模式)" if readonly else "数据初始化失败/为空"
             with self.lock:
                 self._missing_periods[res_period] = reason
-                if period != res_period:
-                    self._missing_periods[period] = reason
             logger.warning(f"Period [{res_period}] data unavailable: {reason}")
             return pd.DataFrame()
             
@@ -112,21 +104,24 @@ class MultiPeriodStrategyEngine:
         }
         
         for period in active_periods:
-            if period in self._missing_periods:
+            p_norm = str(period).lower().strip()
+            if p_norm in self._missing_periods or period in self._missing_periods:
+                reason = self._missing_periods.get(p_norm, self._missing_periods.get(period))
                 # 缺失数据的周期：自适应跳过过滤，但在 stats 中记录
                 self.last_stats["periods"][period] = {
                     "total": 0, "pass": 0, "ratio": 0.0,
                     "status": "NO_DATA",
-                    "reason": self._missing_periods[period]
+                    "reason": reason
                 }
-                logger.warning(f"[ADAPTIVE] Period [{period}] has no data (reason: {self._missing_periods[period]}), skipping filter for this period.")
+                logger.warning(f"[ADAPTIVE] Period [{period}] has no data (reason: {reason}), skipping filter for this period.")
                 continue
-            if period not in self._period_dfs or self._period_dfs[period].empty:
-                logger.warning(f"Period {period} data not found or empty.")
+
+            df = self._period_dfs.get(p_norm, self._period_dfs.get(period))
+            if df is None or df.empty:
+                logger.warning(f"Period {period} (norm: {p_norm}) data not found or empty.")
                 continue
                 
-            cond = strategy_config['conditions'].get(period)
-            df = self._period_dfs[period]
+            cond = strategy_config['conditions'].get(period, strategy_config['conditions'].get(p_norm))
             df_clean = df.fillna(0)
             
             if not cond or not cond.get('enabled', True):

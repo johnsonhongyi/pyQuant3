@@ -190,8 +190,8 @@ class AllStrategiesHitWorker(QThread):
             return False
         is_trade = cct.get_work_time_duration()
         if not is_trade:
-            return True
-        return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
+            return (time.time() - ts) < 1800
+        return (time.time() - ts) < 900  # 盘中交易时段 15 分钟 (900s) TTL 自动刷新
 
     def run(self):
         try:
@@ -267,8 +267,8 @@ class MultiPeriodWorker(QThread):
             return False
         is_trade = cct.get_work_time_duration()
         if not is_trade:
-            return True
-        return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
+            return (time.time() - ts) < 1800
+        return (time.time() - ts) < 900  # 盘中交易时段 15 分钟 (900s) TTL 自动刷新
 
     def run(self):
         try:
@@ -280,11 +280,16 @@ class MultiPeriodWorker(QThread):
                 self.top_now_cache_ts[0] = 0.0
 
             # 1. Load market snapshots (top_now)
-            if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]):
-                self.progress.emit("正在获取全市场实时行情...")
+            if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]) or self.force_reload:
+                self.progress.emit("正在获取全市场实时行情数据...")
                 from JSONData import sina_data
-                _sina = sina_data.Sina(readonly=True)
-                self.top_now = _sina.all
+                try:
+                    _sina = sina_data.Sina(readonly=True)
+                    self.top_now = _sina.all
+                except Exception as e:
+                    logger.warning(f"Sina fetch error: {e}")
+                    self.top_now = None
+
                 if self.top_now is not None and not self.top_now.empty and 'ratio' not in self.top_now.columns:
                     try:
                         from JSONData import realdatajson as rl
@@ -298,71 +303,89 @@ class MultiPeriodWorker(QThread):
                     self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType, readonly=True)
                 self.top_now_cache_ts[0] = time.time()
 
-            # 用最新的 top_now 盘中快照列极速覆盖日线内存 df 的实时价格与成交量
-            if self.top_now is not None and not self.top_now.empty:
-                with self.engine.lock if hasattr(self.engine, "lock") else threading.RLock():
-                    df_d = self.engine._period_dfs.get('d')
-                    if df_d is not None and not df_d.empty:
-                        # 排除 'volume'，因为它在 df_d 中是计算出的虚拟量比，而 top_now 中的是原始成交量
-                        realtime_cols = [c for c in ['trade', 'price', 'percent', 'ratio', 'turnover', 'amount', 'high', 'low', 'open','close','nclose','nhigh'] if c in self.top_now.columns and c != 'volume']
-                        common_idx = df_d.index.intersection(self.top_now.index)
-                        if not common_idx.empty:
-                            if realtime_cols:
-                                df_d.loc[common_idx, realtime_cols] = self.top_now.loc[common_idx, realtime_cols]
-                            
-                            # 将原始成交量 (top_now.volume) 同步更新至 df_d 的原始量字段中
-                            raw_vol_cols = [c for c in ['vol', 'nvol', 'lvol', 'nvolume'] if c in df_d.columns]
-                            if raw_vol_cols:
-                                # 注意：top_now['volume'] 存储的是新浪最新原始成交量（股）
-                                for col in raw_vol_cols:
-                                    df_d.loc[common_idx, col] = self.top_now.loc[common_idx, 'volume']
-                                    
-                            # 对 df_d 重新调用 calc_compute_volume 重新计算量比，保证 volume 字段与修改前一致且具备量比属性
-                            from data_utils import calc_compute_volume
-                            df_d['volume'] = calc_compute_volume(df_d, logger, resample='d', virtual=True)
-                            
-                            # 同步更新 0d 的实时成交量字段 (lastv0d)
-                            if 'lastv0d' in df_d.columns:
-                                df_d['lastv0d'] = df_d['vol']
-
-            # 2. Load active periods
+            # ── 2. 各周期数据同步与衍生指标重算 ──
+            # 设计对齐 data_utils.py L3531-3558：
+            #   - 已缓存周期：combine_dataFrame(top_all, top_now_filtered) + complete_indicators_pipeline
+            #   - 未缓存/强制初始化：走 load_period_data（内部已包含完整 pipeline）
+            # 保证 dff/dff2/dff3/percent/Rank/win 等全部衍生指标每次刷新都被重算，不再静默跳过。
+            from data_utils import complete_indicators_pipeline
             import contextlib
-            for period in self.active_periods:
-                cached = False
-                # 只有在非强制刷新，或只读模式且没有要强行初始化的请求时，才复用内存/只读缓存
-                if not (self.force_reload and self.allow_auto_init):
-                    if hasattr(self.engine, "lock"):
-                        with self.engine.lock:
-                            has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
-                            is_missing_cached = period in self.engine._missing_periods
-                            cached = has_df or is_missing_cached
-                    else:
-                        has_df = period in self.engine._period_dfs and not self.engine._period_dfs[period].empty
-                        is_missing_cached = period in self.engine._missing_periods
-                        cached = has_df or is_missing_cached
 
-                if cached:
-                    if period in self.engine._missing_periods:
-                        self.progress.emit(f"⚡ [{period}] 命中内存缓存(已知无数据，跳过)")
-                    else:
-                        self.progress.emit(f"⚡ [{period}] 命中内存缓存，极速复用已有特征数据")
+            for period in self.active_periods:
+                p_norm = str(period).lower().strip()
+                is_force_init = self.force_reload and self.allow_auto_init
+
+                # 读取缓存状态（在锁内）—— 使用显式 None 判断，避免 DataFrame 布尔歧义
+                if hasattr(self.engine, "lock"):
+                    with self.engine.lock:
+                        df_cached = self.engine._period_dfs.get(period)
+                        if df_cached is None:
+                            df_cached = self.engine._period_dfs.get(p_norm)
+                        is_missing = (period in self.engine._missing_periods or
+                                      p_norm in self.engine._missing_periods)
                 else:
-                    load_force = self.force_reload and self.allow_auto_init
-                    if load_force:
+                    df_cached = self.engine._period_dfs.get(period)
+                    if df_cached is None:
+                        df_cached = self.engine._period_dfs.get(p_norm)
+                    is_missing = (period in self.engine._missing_periods or
+                                  p_norm in self.engine._missing_periods)
+
+                has_cache = df_cached is not None and not df_cached.empty
+                use_cache = has_cache and not is_force_init
+
+                if is_missing and not is_force_init:
+                    # 已知无数据，跳过（历史 _missing_periods 记录保持原语义）
+                    self.progress.emit(f"⚡ [{period}] 命中内存缓存(已知无数据，跳过)")
+                    continue
+
+                if use_cache and self.top_now is not None and not self.top_now.empty:
+                    # ── 命中缓存路径：对齐 data_utils.py L3545-3558 ──
+                    # 1) combine_dataFrame 合并最新 top_now 实时行情
+                    # 2) complete_indicators_pipeline 重算全量衍生指标
+                    self.progress.emit(f"⚡ [{period}] 命中缓存，合并实时行情并重算衍生指标...")
+                    try:
+                        if p_norm != 'd':
+                            # 非日线大周期：只合并 OHLCV + name，与 data_utils.py L3547-3549 一致
+                            core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                            top_now_filtered = self.top_now[[c for c in core_cols
+                                                              if c in self.top_now.columns]].copy()
+                        else:
+                            # 日线：全量合并（与 data_utils.py L3550-3551 一致）
+                            top_now_filtered = self.top_now
+
+                        # combine_dataFrame：用 top_now 更新 df_cached，保留历史特征列不丢
+                        top_all = cct.combine_dataFrame(df_cached, top_now_filtered,
+                                                        col="couts", compare="dff")
+
+                        # complete_indicators_pipeline：重算全量衍生指标
+                        top_all = complete_indicators_pipeline(top_all, logger, resample=p_norm)
+
+                        # 写回 engine 缓存
+                        _lock = self.engine.lock if hasattr(self.engine, "lock") else threading.RLock()
+                        with _lock:
+                            self.engine._period_dfs[period] = top_all
+                            self.engine._period_dfs[p_norm] = top_all
+                    except Exception as e:
+                        logger.warning(f"[{period}] combine+pipeline 刷新异常，降级复用旧缓存: {e}")
+
+                else:
+                    # ── 未缓存/强制初始化路径：走完整 load_period_data ──
+                    if is_force_init:
                         self.progress.emit(f"⚡ [{period}] 正在强制刷新并全自动初始化底层 [{period}] 数据...")
                     else:
                         self.progress.emit(f"📥 [{period}] 首次/只读加载特征数据，正在读取计算...")
 
-                    if hasattr(self.engine, "lock"):
-                        with self.engine.lock:
-                            self.engine._period_dfs.pop(period, None)
-                    else:
+                    _lock = self.engine.lock if hasattr(self.engine, "lock") else threading.RLock()
+                    with _lock:
                         self.engine._period_dfs.pop(period, None)
-                    
+                        self.engine._period_dfs.pop(p_norm, None)
+
                     bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
                     is_readonly = not self.allow_auto_init
                     with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
-                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload, end=self.end, readonly=is_readonly)
+                        self.engine.load_period_data(period, self.top_now,
+                                                     force_reload=self.force_reload,
+                                                     end=self.end, readonly=is_readonly)
 
                     self.period_cache_ts[period] = time.time()
 
@@ -2055,8 +2078,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return False
         is_trade = cct.get_work_time_duration()
         if not is_trade:
-            return True
-        return (time.time() - ts) < 3600  # 1 hour TTL during trading hours
+            return (time.time() - ts) < 1800
+        return (time.time() - ts) < 900  # 盘中交易时段 15 分钟 (900s) TTL 自动刷新
 
     def _load_stays_on_top(self):
         self.ui_state = self._load_state()
@@ -4336,9 +4359,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                         if v is not None:
                             v_clean = v.item() if hasattr(v, 'item') and not isinstance(v, (str, bytes)) else v
                             merged_row[f"{k}_{period}"] = v_clean
-                            merged_row[f"{k}_{p_norm}"] = v_clean
-                            merged_row[f"{k}_{period.upper()}"] = v_clean
-                            if k not in merged_row or period == 'd' or p_norm == 'd':
+                            if k not in merged_row or period == 'd':
                                 merged_row[k] = v_clean
                 
                 cond = strat_config['conditions'].get(period)
