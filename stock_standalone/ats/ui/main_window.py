@@ -5,7 +5,14 @@ Assembles the complete Autonomous Trading System UI dashboard.
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox
+import os
+
+# 必须在导入任何 PyQt6 UI 元素前确保 HighDPI 高分屏自适应生效
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
+
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox, QAbstractItemView
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
@@ -24,12 +31,93 @@ from ats.signal_ledger import SignalLedger
 from ats.volume_profiler import VolumeProfiler
 from ats.session_snapshot import SessionSnapshot
 from JohnsonUtil import commonTips as cct
-class StockDetailDialog(QDialog):
-    def __init__(self, code, name, df_row=None, context_info=None, parent=None):
+
+class QtVarProxy:
+    """包装 QCheckBox 或 Callable 为带 .get() 方法的 Var 对象，用于兼容全系统 StockSender 标准单例"""
+    def __init__(self, getter_func):
+        self.getter_func = getter_func
+    def get(self):
+        try:
+            return bool(self.getter_func())
+        except Exception:
+            return True
+
+class EquityPopDialog(QDialog):
+    """资金曲线与大盘走势独立放大查看窗口"""
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.code = code
+        self.setWindowTitle("📈 资金收益率曲线与全市场走势独立放大看板")
+        self.resize(960, 640)
+        self.setMinimumSize(720, 480)
+        
+        # 设置为独立 Window 模式，支持最大化、最小化和关闭按钮
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags |= Qt.WindowType.Window
+        flags |= Qt.WindowType.WindowMinMaxButtonsHint
+        self.setWindowFlags(flags)
+
+        if parent and hasattr(parent, 'styleSheet'):
+            self.setStyleSheet(parent.styleSheet())
+            
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(12)
+
+        # 1. 顶部工具栏
+        top_bar = QHBoxLayout()
+        title_lbl = QLabel("📈 资金收益率曲线与全市场走势独立放大看板")
+        title_lbl.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 13pt;")
+        
+        btn_refresh = QPushButton("🔄 刷新收益曲线")
+        btn_refresh.setStyleSheet("background-color: #1f1f2e; color: #aad4ff; font-weight: bold; padding: 4px 12px; border: 1px solid #3a3a48; border-radius: 4px;")
+        btn_refresh.clicked.connect(self._on_refresh)
+
+        btn_close = QPushButton("关闭窗口")
+        btn_close.setStyleSheet("background-color: #2b2b36; color: #d1d5db; padding: 4px 12px; border-radius: 4px;")
+        btn_close.clicked.connect(self.close)
+
+        top_bar.addWidget(title_lbl)
+        top_bar.addStretch()
+        top_bar.addWidget(btn_refresh)
+        top_bar.addWidget(btn_close)
+        layout.addLayout(top_bar)
+
+        # 2. TabWidget
+        self.pop_tabs = QTabWidget()
+        self.pop_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #303042; background: #121216; }
+            QTabBar::tab { background: #1a1a24; color: #a0a0b0; padding: 8px 16px; font-weight: bold; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+            QTabBar::tab:selected { background: #252538; color: #38bdf8; border-bottom: 2px solid #38bdf8; }
+        """)
+
+        self.equity_chart = EquityCurveChart()
+        self.dist_chart = DistributionBarChart()
+
+        self.pop_tabs.addTab(self.equity_chart, "📈 策略资金收益曲线 (Equity Curve)")
+        self.pop_tabs.addTab(self.dist_chart, "📊 全市场涨跌分布 (Market Distribution)")
+
+        layout.addWidget(self.pop_tabs, 1)
+
+    def _on_refresh(self):
+        if hasattr(self.equity_chart, 'draw_mock_curve'):
+            self.equity_chart.draw_mock_curve()
+
+    def update_data(self, df_realtime=None):
+        if hasattr(self.dist_chart, 'update_data') and df_realtime is not None:
+            self.dist_chart.update_data(df_realtime)
+
+class StockDetailDialog(QDialog):
+    def __init__(self, code, name, df_row=None, context_info=None, parent=None, batch_codes=None):
+        super().__init__(parent)
+        self.code = str(code).strip()
         self.name = name
         self.df_row = df_row
+        self.context_info = context_info
+        self.batch_codes = batch_codes
         
         # 0. 明确设置为独立窗口类型，从而使磁吸、贴边隐藏和多显示器移动在 Windows 下完美执行
         flags = self.windowFlags()
@@ -37,7 +125,7 @@ class StockDetailDialog(QDialog):
         flags |= Qt.WindowType.Window
         self.setWindowFlags(flags)
         
-        self.setWindowTitle(f"📈 实时实盘个股详情 - {code} {name}")
+        self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name}")
         self.resize(550, 650)
         self.setMinimumSize(450, 550)
         
@@ -58,7 +146,7 @@ class StockDetailDialog(QDialog):
                                 signal_data = data.get("signal", {})
                                 intent_data = data.get("intent", {})
                                 trace_code = signal_data.get("code") or intent_data.get("code") or ""
-                                if str(trace_code).strip() == str(code).strip():
+                                if str(trace_code).strip() == str(self.code).strip():
                                     self.kernel_info = data
                             except Exception:
                                 pass
@@ -104,7 +192,7 @@ class StockDetailDialog(QDialog):
                 }
             """)
             
-        self._init_ui(code, name, df_row, context_info)
+        self._init_ui(self.code, self.name, df_row, context_info)
         
         # Initialize dynamic data & filter results
         self.update_data(df_row)
@@ -124,6 +212,7 @@ class StockDetailDialog(QDialog):
         self._last_show_time = 0.0
         self._has_hovered_since_show = False
         self._is_auto_popping = False
+        self._switching = False
         
         # 悬停与离开监控定时器
         self.hover_timer = QTimer(self)
@@ -136,12 +225,191 @@ class StockDetailDialog(QDialog):
         self.snap_timer.setSingleShot(True)
         self.snap_timer.setInterval(200)
         self.snap_timer.timeout.connect(self._detect_and_snap)
+
+    def update_batch_codes(self, new_batch_codes=None, current_code=None):
+        """【关键机制】动态实时更新弹窗顶部的 [本轮强势信号] 下拉框列表，并 100% 自动高亮选中当前 code"""
+        if new_batch_codes is not None:
+            self.batch_codes = new_batch_codes
+            
+        parent_mw = self.parent()
+        signal_list = self.batch_codes
+        if not signal_list and parent_mw and hasattr(parent_mw, "_last_batch_signal_codes") and parent_mw._last_batch_signal_codes:
+            signal_list = parent_mw._last_batch_signal_codes
+
+        if not hasattr(self, 'combo_signals') or self.combo_signals is None:
+            return
+
+        target_code = str(current_code or self.code).strip()
+        
+        parsed_list = []
+        seen = set()
+        if signal_list:
+            for item in signal_list:
+                if isinstance(item, (tuple, list)):
+                    c, n = str(item[0]).strip(), str(item[1]).strip()
+                else:
+                    c, n = str(item).strip(), str(item).strip()
+                if c and c not in seen:
+                    seen.add(c)
+                    parsed_list.append((c, n))
+                    
+        # 确保当前被查看的股票 (如 601567) 绝对不会在下拉框中漏掉
+        if target_code and target_code not in seen:
+            t_name = target_code
+            if parent_mw and hasattr(parent_mw, "get_stock_name"):
+                t_name = parent_mw.get_stock_name(target_code)
+            parsed_list.insert(0, (target_code, t_name))
+
+        if not parsed_list:
+            return
+
+        self.combo_signals.blockSignals(True)
+        try:
+            self.combo_signals.clear()
+            cur_idx = 0
+            for idx, (c, n) in enumerate(parsed_list):
+                self.combo_signals.addItem(f"{c} {n}", c)
+                if c == target_code:
+                    cur_idx = idx
+            self.combo_signals.setCurrentIndex(cur_idx)
+        finally:
+            self.combo_signals.blockSignals(False)
+
+    def switch_to_code(self, target_c: str, target_n: str = "", batch_codes=None):
+        """【核心机制】窗口原地无缝复用刷新，包含磁吸恢复唤醒与下拉框实时更新"""
+        if not target_c:
+            return
+        if getattr(self, '_switching', False):
+            return
+            
+        self._switching = True
+        try:
+            self.code = str(target_c).strip()
+            parent_mw = self.parent()
+            if parent_mw:
+                if not target_n and hasattr(parent_mw, "get_stock_name"):
+                    self.name = parent_mw.get_stock_name(self.code)
+                elif target_n:
+                    self.name = target_n
+                else:
+                    self.name = self.code
+
+                # 1. 若处于贴边磁吸隐藏状态，强制滑出展平唤醒；若普通隐蔽则置顶
+                if getattr(self, 'is_hidden_state', False):
+                    if hasattr(self, 'show_normal_position'):
+                        self.show_normal_position()
+                    else:
+                        self.show()
+                        self.raise_()
+                        self.activateWindow()
+                else:
+                    self.show()
+                    self.raise_()
+                    self.activateWindow()
+
+                # 2. 动态更新下拉框，确保新推流批次 (如 601567) 100% 存在并高亮
+                effective_batch = batch_codes or (parent_mw._last_batch_signal_codes if hasattr(parent_mw, "_last_batch_signal_codes") else None)
+                self.update_batch_codes(new_batch_codes=effective_batch, current_code=self.code)
+
+                # 3. 内存极速提取最新 df_row 行情
+                df_row = None
+                if hasattr(parent_mw, 'current_df') and parent_mw.current_df is not None and not parent_mw.current_df.empty:
+                    if self.code in parent_mw.current_df.index:
+                        df_row = parent_mw.current_df.loc[self.code].to_dict()
+                    elif 'code' in parent_mw.current_df.columns:
+                        m = parent_mw.current_df[parent_mw.current_df['code'] == self.code]
+                        if not m.empty:
+                            df_row = m.iloc[0].to_dict()
+
+                # 4. 补齐策略上下文
+                if hasattr(parent_mw, "_ensure_context_info"):
+                    self.context_info = parent_mw._ensure_context_info(self.code, self.name, {})
+
+                # 5. 【极速 UI 优先渲染】瞬间重绘窗口标题、策略上下文与特征表格 (0 毫秒肉眼无感反馈)
+                self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name}")
+                if hasattr(self, 'title_label'):
+                    self.title_label.setText(f"📊 {self.code}  {self.name}")
+                    
+                if hasattr(self, 'lbl_pos_val') and self.lbl_pos_val and self.context_info:
+                    self.lbl_pos_val.setText(self.context_info.get('position', '--'))
+                if hasattr(self, 'lbl_reason_val') and self.lbl_reason_val and self.context_info:
+                    self.lbl_reason_val.setText(self.context_info.get('reason', '--'))
+                if hasattr(self, 'lbl_status_val') and self.lbl_status_val and self.context_info:
+                    self.lbl_status_val.setText(self.context_info.get('status', '--'))
+
+                self.update_data(df_row)
+
+                # 6. 【异步解耦】将 UI 之外的 Tree 寻找与 Win32 通达信 (TDX) 联动投递至下一帧执行，彻底杜绝界面卡顿
+                if hasattr(parent_mw, "locate_stock_in_tree"):
+                    target_code = self.code
+                    QTimer.singleShot(0, lambda: parent_mw.locate_stock_in_tree(target_code, auto_popup=False))
+        finally:
+            self._switching = False
         
     def _init_ui(self, code, name, df_row, context_info):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(12)
-        
+
+        # 0.5 仅加载【本轮输出的强势信号列表】(例如本轮 2 只或 6 只，绝不上百只堆叠)
+        parent_mw = self.parent()
+        signal_list = self.batch_codes
+        if not signal_list and parent_mw and hasattr(parent_mw, "_last_batch_signal_codes") and parent_mw._last_batch_signal_codes:
+            signal_list = parent_mw._last_batch_signal_codes
+
+        if signal_list and len(signal_list) > 1:
+            nav_layout = QHBoxLayout()
+            nav_label = QLabel("📋 本轮强势信号:")
+            nav_label.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 10pt;")
+            
+            self.btn_prev = QPushButton("◀ 上一只")
+            self.btn_next = QPushButton("下一只 ▶")
+            self.combo_signals = QComboBox()
+            self.combo_signals.setStyleSheet("background-color: #1f1f26; color: #aad4ff; font-weight: bold; padding: 3px 8px; border: 1px solid #3a3a48;")
+            
+            cur_idx = 0
+            for idx, item in enumerate(signal_list):
+                if isinstance(item, (tuple, list)):
+                    c, n = item[0], item[1]
+                else:
+                    c, n = str(item), str(item)
+                self.combo_signals.addItem(f"{c} {n}", c)
+                if str(c).strip() == str(code).strip():
+                    cur_idx = idx
+            self.combo_signals.setCurrentIndex(cur_idx)
+            
+            def _on_signal_changed(idx):
+                if idx >= 0 and hasattr(self, 'combo_signals'):
+                    target_c = self.combo_signals.itemData(idx)
+                    if target_c and str(target_c).strip() != str(self.code).strip():
+                        target_text = self.combo_signals.itemText(idx)
+                        target_n = target_text.split(" ")[-1] if " " in target_text else target_c
+                        self.switch_to_code(target_c, target_n)
+            
+            def _on_prev_clicked():
+                count = self.combo_signals.count()
+                if count > 0:
+                    c_idx = self.combo_signals.currentIndex()
+                    next_idx = (c_idx - 1 + count) % count
+                    self.combo_signals.setCurrentIndex(next_idx)
+                    
+            def _on_next_clicked():
+                count = self.combo_signals.count()
+                if count > 0:
+                    c_idx = self.combo_signals.currentIndex()
+                    next_idx = (c_idx + 1) % count
+                    self.combo_signals.setCurrentIndex(next_idx)
+
+            self.combo_signals.currentIndexChanged.connect(_on_signal_changed)
+            self.btn_prev.clicked.connect(_on_prev_clicked)
+            self.btn_next.clicked.connect(_on_next_clicked)
+            
+            nav_layout.addWidget(nav_label)
+            nav_layout.addWidget(self.btn_prev)
+            nav_layout.addWidget(self.combo_signals, 1)
+            nav_layout.addWidget(self.btn_next)
+            layout.addLayout(nav_layout)
+
         # 1. Title and header info
         header_layout = QHBoxLayout()
         self.title_label = QLabel(f"📊 {code}  {name}")
@@ -154,57 +422,57 @@ class StockDetailDialog(QDialog):
         header_layout.addWidget(self.price_pct_label)
         layout.addLayout(header_layout)
         
-        # 1.5 Context Info Block (If provided)
-        if context_info:
-            ctx_group = QGroupBox("📍 策略特征上下文 (Context Info)")
-            ctx_group.setStyleSheet("""
-                QGroupBox {
-                    border: 1px solid #2e2e36;
-                    border-radius: 6px;
-                    margin-top: 10px;
-                    font-weight: bold;
-                    color: #aad4ff;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    left: 10px;
-                    padding: 0 3px 0 3px;
-                }
-            """)
-            ctx_layout = QGridLayout(ctx_group)
-            ctx_layout.setContentsMargins(12, 18, 12, 12)
-            ctx_layout.setSpacing(10)
-            
-            # Position
-            lbl_pos_title = QLabel("触发位置:")
-            lbl_pos_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
-            lbl_pos_val = QLabel(context_info.get('position', '--'))
-            lbl_pos_val.setStyleSheet("color: #ffffff; font-weight: bold;")
-            lbl_pos_val.setWordWrap(True)
-            
-            # Reason
-            lbl_reason_title = QLabel("推荐理由:")
-            lbl_reason_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
-            lbl_reason_val = QLabel(context_info.get('reason', '--'))
-            lbl_reason_val.setStyleSheet("color: #ffaa44; font-weight: bold;")
-            lbl_reason_val.setWordWrap(True)
-            
-            # Status
-            lbl_status_title = QLabel("追涨/特征状态:")
-            lbl_status_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
-            lbl_status_val = QLabel(context_info.get('status', '--'))
-            lbl_status_val.setStyleSheet("color: #00ff88; font-weight: bold;")
-            lbl_status_val.setWordWrap(True)
-            
-            ctx_layout.addWidget(lbl_pos_title, 0, 0)
-            ctx_layout.addWidget(lbl_pos_val, 0, 1)
-            ctx_layout.addWidget(lbl_reason_title, 1, 0)
-            ctx_layout.addWidget(lbl_reason_val, 1, 1)
-            ctx_layout.addWidget(lbl_status_title, 2, 0)
-            ctx_layout.addWidget(lbl_status_val, 2, 1)
-            
-            ctx_layout.setColumnStretch(1, 1)
-            layout.addWidget(ctx_group)
+        # 1.5 Context Info Block (策略特征上下文)
+        ctx_info_safe = context_info if context_info else {}
+        ctx_group = QGroupBox("📍 策略特征上下文 (Context Info)")
+        ctx_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #2e2e36;
+                border-radius: 6px;
+                margin-top: 10px;
+                font-weight: bold;
+                color: #aad4ff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        ctx_layout = QGridLayout(ctx_group)
+        ctx_layout.setContentsMargins(12, 18, 12, 12)
+        ctx_layout.setSpacing(10)
+        
+        # Position
+        lbl_pos_title = QLabel("触发位置:")
+        lbl_pos_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+        self.lbl_pos_val = QLabel(ctx_info_safe.get('position', '--'))
+        self.lbl_pos_val.setStyleSheet("color: #ffffff; font-weight: bold;")
+        self.lbl_pos_val.setWordWrap(True)
+        
+        # Reason
+        lbl_reason_title = QLabel("推荐理由:")
+        lbl_reason_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+        self.lbl_reason_val = QLabel(ctx_info_safe.get('reason', '--'))
+        self.lbl_reason_val.setStyleSheet("color: #ffaa44; font-weight: bold;")
+        self.lbl_reason_val.setWordWrap(True)
+        
+        # Status
+        lbl_status_title = QLabel("追涨/特征状态:")
+        lbl_status_title.setStyleSheet("color: #8e8e93; font-weight: bold;")
+        self.lbl_status_val = QLabel(ctx_info_safe.get('status', '--'))
+        self.lbl_status_val.setStyleSheet("color: #00ff88; font-weight: bold;")
+        self.lbl_status_val.setWordWrap(True)
+        
+        ctx_layout.addWidget(lbl_pos_title, 0, 0)
+        ctx_layout.addWidget(self.lbl_pos_val, 0, 1)
+        ctx_layout.addWidget(lbl_reason_title, 1, 0)
+        ctx_layout.addWidget(self.lbl_reason_val, 1, 1)
+        ctx_layout.addWidget(lbl_status_title, 2, 0)
+        ctx_layout.addWidget(self.lbl_status_val, 2, 1)
+        
+        ctx_layout.setColumnStretch(1, 1)
+        layout.addWidget(ctx_group)
             
         # 2. Source indicator
         self.hint_label = QLabel("⏳ 正在等待数据同步...")
@@ -672,6 +940,9 @@ class StockDetailDialog(QDialog):
     def closeEvent(self, event):
         self.hover_timer.stop()
         self.snap_timer.stop()
+        parent_mw = self.parent()
+        if parent_mw and hasattr(parent_mw, '_detail_dialog') and parent_mw._detail_dialog is self:
+            parent_mw._detail_dialog = None
         super().closeEvent(event)
         
     def changeEvent(self, event):
@@ -792,6 +1063,19 @@ class ATSMainWindow(QMainWindow):
                     print(f"[ATSMainWindow] Prepopulate cache query failed: {e}")
         except Exception as e:
             print(f"[ATSMainWindow] Prepopulate cache failed: {e}")
+
+        # 尝试初始化全系统标准的 StockSender 通道 (动态绑定 UI checkbox 勾选与持久化状态)
+        self.sender = None
+        try:
+            from JohnsonUtil.stock_sender import StockSender
+            self.sender = StockSender(
+                tdx_var=QtVarProxy(lambda: self.cb_tdx.isChecked() if hasattr(self, 'cb_tdx') else True),
+                ths_var=QtVarProxy(lambda: self.cb_ths.isChecked() if hasattr(self, 'cb_ths') else True),
+                dfcf_var=False,
+                callback=None
+            )
+        except Exception as e:
+            print(f"[ATSMainWindow] Init standard StockSender failed: {e}")
 
 
 
@@ -1034,7 +1318,11 @@ class ATSMainWindow(QMainWindow):
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
         
-        self.top_tabs.setCurrentIndex(0)
+        # 将 [🔄 刷新状态] 按钮上移放置到 top_tabs 的右上角 CornerWidget
+        if hasattr(self.swing_table, "btn_refresh"):
+            self.top_tabs.setCornerWidget(self.swing_table.btn_refresh, Qt.Corner.TopRightCorner)
+
+        self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         self.center_splitter.addWidget(self.top_tabs)
         
         # 2. Bottom Tabs in center panel (底部从属 Tab: 持仓 + 订单 + 回测 + 轨迹)
@@ -1081,6 +1369,54 @@ class ATSMainWindow(QMainWindow):
         
         self.equity_chart = EquityCurveChart()
         self.right_tabs.addTab(self.equity_chart, "📈 资金曲线 (Equity)")
+        
+        # 资金曲线 / 右侧 Tab 右上角添加【📋 强势黑马详情】(图2) 与【🗔 独立放大窗口】组合入口
+        corner_container = QWidget()
+        corner_layout = QHBoxLayout(corner_container)
+        corner_layout.setContentsMargins(0, 0, 0, 0)
+        corner_layout.setSpacing(6)
+
+        self.btn_pop_signal_detail = QPushButton("📋 强势黑马详情")
+        self.btn_pop_signal_detail.setToolTip("弹出/唤醒本轮强势黑马信号个股详情看板 (支持上一只/下一只轮转与特征分析)")
+        self.btn_pop_signal_detail.setStyleSheet("""
+            QPushButton {
+                background-color: #1a261a;
+                color: #4ade80;
+                border: 1px solid #4ade80;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #4ade80;
+                color: #0f172a;
+            }
+        """)
+        self.btn_pop_signal_detail.clicked.connect(self._open_signal_detail_dialog)
+
+        self.btn_pop_equity_window = QPushButton("🗔 独立放大窗口")
+        self.btn_pop_equity_window.setToolTip("在独立放大窗口中查看资金收益率曲线及全市场分布图表")
+        self.btn_pop_equity_window.setStyleSheet("""
+            QPushButton {
+                background-color: #1a1a26;
+                color: #38bdf8;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #38bdf8;
+                color: #0f172a;
+            }
+        """)
+        self.btn_pop_equity_window.clicked.connect(self._open_equity_pop_dialog)
+
+        corner_layout.addWidget(self.btn_pop_signal_detail)
+        corner_layout.addWidget(self.btn_pop_equity_window)
+        self.right_tabs.setCornerWidget(corner_container, Qt.Corner.TopRightCorner)
         
         self.right_splitter.addWidget(self.right_tabs)
         self.right_splitter.setSizes([450, 450])
@@ -1437,12 +1773,102 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Linkage] External linkage failed: {e}")
 
-    def on_stock_clicked(self, code, name, context_info=None):
+    def _get_today_signal_codes(self):
+        """归纳今日所有已发现/记录的特异与共振强势股票代码列表 (供弹窗左右导航联动)"""
+        codes = []
+        seen = set()
+        
+        # 1. 优先从 SignalLedger 提取
+        if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries'):
+            for c, entry in self.signal_ledger.entries.items():
+                c_clean = str(c).strip()
+                if c_clean and c_clean not in seen:
+                    seen.add(c_clean)
+                    name = getattr(entry, 'name', c_clean)
+                    if hasattr(self, 'get_stock_name'):
+                        name = self.get_stock_name(c_clean)
+                    codes.append((c_clean, name))
+                    
+        # 2. 补充从 SwingStateTable 提取
+        if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
+            tbl = self.swing_table.table
+            for r in range(tbl.rowCount()):
+                c_item = tbl.item(r, 0)
+                n_item = tbl.item(r, 1)
+                if c_item:
+                    c_clean = c_item.text().strip()
+                    if c_clean and c_clean not in seen:
+                        seen.add(c_clean)
+                        n_str = n_item.text().strip() if n_item else c_clean
+                        codes.append((c_clean, n_str))
+        return codes
+
+    def _ensure_context_info(self, code, name, context_info):
+        """保证弹窗必定包含完整的 [📍 策略特征上下文 (Context Info)] 面板 (100% 对齐图 2 样式)"""
+        code_clean = str(code).strip()
+        res = context_info.copy() if context_info else {}
+
+        # 1. 尝试从 swing_table 匹配 (优先获取 MA20d 回调跟踪器上下文)
+        if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
+            tbl = self.swing_table.table
+            for row in range(tbl.rowCount()):
+                c_item = tbl.item(row, 0)
+                if c_item and c_item.text().strip() == code_clean:
+                    res['position'] = "波段回调跟踪器 (Swing Pullback Tracker)"
+                    res['reason'] = "股价缩量向大级别MA20均线回调靠拢中"
+                    parts = []
+                    for col in [3, 4, 5, 6, 7]:
+                        h = tbl.horizontalHeaderItem(col)
+                        v = tbl.item(row, col)
+                        if h and v and v.text().strip():
+                            parts.append(f"{h.text()}: {v.text().strip()}")
+                    res['status'] = " | ".join(parts) if parts else "MA20均线回调企稳中"
+                    return res
+
+        # 2. 尝试从 signal_ledger 匹配
+        if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries'):
+            entry = self.signal_ledger.entries.get(code_clean)
+            if entry:
+                res['position'] = f"SignalLedger {getattr(entry, 'tier', 'RADAR')} 信号池"
+                res['reason'] = getattr(entry, 'promote_reason', '黄金特异高分跟进信号')
+                res['status'] = (
+                    f"MA20偏离: {getattr(entry, 'latest_deviation', 0.0):+.2f}% | "
+                    f"优先级: {getattr(entry, 'priority_score', 0.0):.0f} | "
+                    f"特异打分: {getattr(entry, 'specialty_score', 90.0):.0f}"
+                )
+                return res
+
+        # 3. 兜底默认补齐
+        if not res.get('position'):
+            res['position'] = "大级别波段跟踪与实盘监控热点"
+            res['reason'] = "大盘共振/相对大盘强偏离拉升买点"
+            res['status'] = f"代码: {code_clean} | 已成功对接实盘行情快照核心特征"
+
+        return res
+
+    def on_stock_clicked(self, code, name, context_info=None, batch_codes=None):
         self.status_bar.showMessage(f"双击详情: {code} {name}")
+        context_info = self._ensure_context_info(code, name, context_info)
+        code_clean = str(code).strip()
+
+        # 【核心机制】若详情弹窗实例存在且有效（不论处于悬浮显示还是磁吸贴边隐藏），直接复用唤醒展现；若已被 C++ 销毁则清空重新创建
+        from PyQt6.sip import isdeleted
+        if hasattr(self, '_detail_dialog') and self._detail_dialog is not None:
+            if isdeleted(self._detail_dialog):
+                self._detail_dialog = None
+            else:
+                try:
+                    effective_batch = batch_codes or getattr(self, "_last_batch_signal_codes", None)
+                    self._detail_dialog.switch_to_code(code_clean, name, batch_codes=effective_batch)
+                    return
+                except RuntimeError:
+                    self._detail_dialog = None
+                except Exception as e:
+                    print(f"[ATSMainWindow] Error reusing detail dialog: {e}")
+                    self._detail_dialog = None
         
         # Fetch real-time row data from the live streaming DataFrame (df_row)
         df_row = None
-        code_clean = str(code).strip()
         if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
             # Match code either in index or 'code' column
             if code_clean in self.current_df.index:
@@ -1479,15 +1905,17 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error auto-retrieving Sina tick for {code_clean}: {e}")
                     
-        # Close existing details dialog to prevent multiple non-modal windows
+        # 安全清理已存在的详情弹窗旧实例
         if hasattr(self, '_detail_dialog') and self._detail_dialog is not None:
-            try:
-                self._detail_dialog.close()
-            except Exception:
-                pass
+            if not isdeleted(self._detail_dialog):
+                try:
+                    self._detail_dialog.close()
+                except Exception:
+                    pass
+            self._detail_dialog = None
                 
         # Launch detail dialog as non-modal so it can snap and auto-hide
-        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self)
+        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self, batch_codes=batch_codes)
         self._detail_dialog.show()
 
     def on_sector_clicked(self, name, member_codes=None):
@@ -2251,6 +2679,7 @@ class ATSMainWindow(QMainWindow):
             self._async_load_stock_history(missing_history_codes)
             
         swing_rows = []
+        current_batch_alpha = []
         
         # 计算大盘参考涨幅 (优先使用上证指数，回退到个股等权均值)
         sh_pct = 0.0
@@ -2403,8 +2832,13 @@ class ATSMainWindow(QMainWindow):
             ))
             
             # 记录逆市/共振个股，提供每日跟踪与高级反馈能力
-            self._record_alpha_signal(code, name, pct_val, sh_pct, rs_val, resonance)
+            if resonance in ("逆市抗跌", "大盘共振"):
+                current_batch_alpha.append((code, name))
+                self._record_alpha_signal(code, name, pct_val, sh_pct, rs_val, resonance)
             
+        if current_batch_alpha:
+            self._last_batch_signal_codes = current_batch_alpha
+
         if swing_rows:
             self.swing_table.update_data_list(swing_rows)
             if hasattr(self, 'favorite_panel'):
@@ -2424,6 +2858,12 @@ class ATSMainWindow(QMainWindow):
                 self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating dragon monitor: {e}")
+
+        if hasattr(self, '_equity_pop_dialog') and self._equity_pop_dialog is not None and not isdeleted(self._equity_pop_dialog) and self._equity_pop_dialog.isVisible():
+            try:
+                self._equity_pop_dialog.update_data(self.current_df)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error updating equity pop dialog: {e}")
             
         # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
         if has_df:
@@ -2548,10 +2988,31 @@ class ATSMainWindow(QMainWindow):
             self.session_snapshot.save_daily_summary(self.signal_ledger)
 
         # 6.6 清理不再追踪的旧股票量能画像 (防 24x7 内存累积)
-        self.volume_profiler.cleanup_stale(self.signal_ledger.get_all_tracked_codes())
+        if hasattr(self.signal_ledger, "get_all_tracked_codes"):
+            tracked_codes = self.signal_ledger.get_all_tracked_codes()
+        elif hasattr(self.signal_ledger, "entries") and isinstance(self.signal_ledger.entries, dict):
+            tracked_codes = [code for code, entry in self.signal_ledger.entries.items()
+                             if getattr(entry, 'tier', '') in ('RADAR', 'WATCH', 'TRADE')]
+        else:
+            tracked_codes = []
+
+        if hasattr(self, "volume_profiler") and hasattr(self.volume_profiler, "cleanup_stale"):
+            self.volume_profiler.cleanup_stale(tracked_codes)
 
         # 7. 状态栏显示信号统计
-        stats = self.signal_ledger.get_stats()
+        if hasattr(self.signal_ledger, "get_stats"):
+            stats = self.signal_ledger.get_stats()
+        elif hasattr(self.signal_ledger, "entries") and isinstance(self.signal_ledger.entries, dict):
+            tier_counts = {}
+            for entry in self.signal_ledger.entries.values():
+                t = getattr(entry, 'tier', 'RADAR')
+                tier_counts[t] = tier_counts.get(t, 0) + 1
+            stats = {
+                'tiers': tier_counts,
+                'today_new': getattr(self.signal_ledger, '_signal_count', len(self.signal_ledger.entries))
+            }
+        else:
+            stats = {'tiers': {}, 'today_new': 0}
         tier_info = stats.get('tiers', {})
         radar_n = tier_info.get('RADAR', 0)
         watch_n = tier_info.get('WATCH', 0)
@@ -2567,15 +3028,136 @@ class ATSMainWindow(QMainWindow):
             f"今日新发现: {stats.get('today_new', 0)}{env_label}"
         )
 
+    def _open_signal_detail_dialog(self):
+        """点击按钮直接弹出/唤醒 [实时实盘个股详情] 提示窗口 (图 2)"""
+        signal_list = getattr(self, "_last_batch_signal_codes", None)
+        target_code = "000039"
+        target_name = "中集集团"
+        if signal_list and len(signal_list) > 0:
+            first_item = signal_list[0]
+            if isinstance(first_item, (tuple, list)):
+                target_code, target_name = first_item[0], first_item[1]
+            else:
+                target_code = str(first_item)
+                target_name = self.get_stock_name(target_code)
+                
+        self.on_stock_clicked(target_code, target_name, batch_codes=signal_list)
+
+    def _open_equity_pop_dialog(self):
+        """打开/唤醒资金收益曲线及全市场走势独立放大查看窗口"""
+        from PyQt6.sip import isdeleted
+        if not hasattr(self, '_equity_pop_dialog') or self._equity_pop_dialog is None or isdeleted(self._equity_pop_dialog):
+            self._equity_pop_dialog = EquityPopDialog(parent=self)
+            
+        if hasattr(self, 'current_df') and self.current_df is not None:
+            self._equity_pop_dialog.update_data(self.current_df)
+
+        self._equity_pop_dialog.show()
+        self._equity_pop_dialog.raise_()
+        self._equity_pop_dialog.activateWindow()
+
+    def broadcast_code_link(self, code: str, bring_tdx_to_top: bool = False):
+        """全系统统一标准的 StockSender 广播引擎：支持 TDX/THS 的零卡顿高可靠联动"""
+        if not code:
+            return
+        code_clean = "".join(x for x in str(code) if x.isdigit()).zfill(6)
+        if not code_clean:
+            return
+
+        # 优先使用项目标准的 StockSender 发送通道 (基于句柄消息投递与进程 Proxy 防卡死)
+        if hasattr(self, 'sender') and self.sender is not None:
+            try:
+                self.sender.send(code_clean)
+                return
+            except Exception as e:
+                print(f"[ATSMainWindow] Standard StockSender send failed: {e}")
+
+        # 兜底静默剪贴板注入
+        try:
+            from PyQt6.QtWidgets import QApplication
+            cb = QApplication.clipboard()
+            if cb:
+                cb.setText(code_clean)
+        except Exception:
+            pass
+
+    def locate_stock_in_tree(self, code: str, auto_popup: bool = False, bring_tdx_to_top: bool = False):
+        """自动在 Universe 树、MA20d回调跟踪器表格与重点关注列表中高亮定位显示行，并自动广播联动 TDX 通达信"""
+        if not code:
+            return
+        target_code = str(code).strip()
+
+        # 1. 树定位高亮 (UniverseTree)
+        if hasattr(self, "universe_tree") and self.universe_tree is not None:
+            try:
+                self.universe_tree.select_code(target_code)
+            except Exception:
+                pass
+
+        # 2. 大级别 MA20d 回调跟踪器表格 (SwingStateTable) 自动定位高亮显示行
+        if hasattr(self, "swing_table") and hasattr(self.swing_table, "table"):
+            try:
+                tbl = self.swing_table.table
+                for row in range(tbl.rowCount()):
+                    item = tbl.item(row, 0)
+                    if item and item.text().strip() == target_code:
+                        tbl.setCurrentCell(row, 0)
+                        tbl.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                        break
+            except Exception:
+                pass
+
+        # 3. 重点关注面板表格 (FavoritePanel) 自动定位高亮显示行
+        if hasattr(self, "favorite_panel") and hasattr(self.favorite_panel, "table"):
+            try:
+                tbl_fav = self.favorite_panel.table
+                for row in range(tbl_fav.rowCount()):
+                    item = tbl_fav.item(row, 0)
+                    if item and item.text().strip() == target_code:
+                        tbl_fav.setCurrentCell(row, 0)
+                        tbl_fav.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                        break
+            except Exception:
+                pass
+
+        # 4. 秒级自动联动 TDX 通达信 (仅在显式请求时置顶通达信)
+        self.broadcast_code_link(target_code, bring_tdx_to_top=bring_tdx_to_top)
+
+        # 5. 仅在用户手动点击 Toast 时 (auto_popup=True) 自动弹出个股详情小窗口
+        if auto_popup:
+            try:
+                name_str = target_code
+                if hasattr(self, "get_stock_name"):
+                    name_str = self.get_stock_name(target_code)
+                batch_list = getattr(self, "_last_batch_signal_codes", None)
+                self.on_stock_clicked(target_code, name_str, batch_codes=batch_list)
+            except Exception:
+                pass
+
     def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
         """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪"""
         import os
         import json
         import time
         
-        # 仅在有意义的信号时才记录
+        # 仅在有意义的逆市/共振强信号时记录；对符合条件的所有信号均纳入本轮批次列表
         if resonance not in ("逆市抗跌", "大盘共振"):
-            return
+            return False
+
+        recorded = True
+        
+        # 仅对暴拉偏离>=4.0%的排头黑马才触发系统 Toast 弹窗与语音 (杜绝刷屏)
+        if pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0:
+            try:
+                from ats.alert_notifier import AlertNotifier
+                AlertNotifier().notify_special_signal(
+                    code, name,
+                    reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
+                    score=90.0,
+                    parent=self
+                )
+            except Exception:
+                pass
             
         try:
             today_date = time.strftime("%Y-%m-%d")
@@ -2644,6 +3226,7 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {resonance} 偏离度: {rs_val:+.2f}%")
         except Exception as e:
             print(f"[ATSAlphaTracker] 记录信号失败: {e}")
+        return recorded
 
     def _handle_realtime_signal(self, signal):
         if not signal:
@@ -2860,6 +3443,10 @@ class ATSMainWindow(QMainWindow):
                 self._is_restoring_sizes = False
             
             # 3. Restore tabs active indexes
+            if hasattr(self, 'top_tabs'):
+                top_index = data.get("ats_top_tab_index")
+                if top_index is not None and 0 <= int(top_index) < self.top_tabs.count():
+                    self.top_tabs.setCurrentIndex(int(top_index))
             if hasattr(self, 'center_tabs'):
                 center_index = data.get("ats_center_tabs_index")
                 if center_index is not None:
@@ -2934,11 +3521,13 @@ class ATSMainWindow(QMainWindow):
                     data["ats_right_splitter_sizes"] = self.right_splitter.sizes()
                     
                 # Save tabs index
+                if hasattr(self, 'top_tabs'):
+                    data["ats_top_tab_index"] = self.top_tabs.currentIndex()
                 if hasattr(self, 'center_tabs'):
                     data["ats_center_tabs_index"] = self.center_tabs.currentIndex()
                 if hasattr(self, 'right_tabs'):
                     data["ats_right_tabs_index"] = self.right_tabs.currentIndex()
-                    
+
                 # Save link checkboxes
                 if hasattr(self, 'cb_tdx'):
                     data["ats_link_tdx"] = self.cb_tdx.isChecked()
@@ -2962,6 +3551,11 @@ class ATSMainWindow(QMainWindow):
                     raise e
         except Exception as e:
             print(f"[ATSMainWindow] Error saving layout state: {e}")
+
+    def _on_top_tab_changed(self, index: int):
+        """自动持久化记忆当前打开的是【重点关注】还是【大级别回调跟踪器】Tab 选项卡"""
+        if not getattr(self, '_is_restoring_sizes', False):
+            self._save_layout_state()
 
     def closeEvent(self, event):
         self._is_closing = True

@@ -452,3 +452,65 @@ class VolumeProfiler:
         stale = [c for c in self.profiles if c not in active_set]
         for c in stale:
             del self.profiles[c]
+
+
+class MarketContextGuard:
+    """大盘整体安全度大闸引擎
+    
+    实时感知全市场温度、涨跌家数比与大盘均线状态，划分大盘三阶状态:
+    - FREEZING (冰点杀跌期): 大盘极度下挫, 跌家数 > 3200 或大盘大幅下杀
+    - REBOUND  (企稳反弹期): 大盘企稳或平稳震荡
+    - BULL     (顺风多头期): 大盘大涨放量
+    """
+    
+    STAGE_FREEZING = 'FREEZING'
+    STAGE_REBOUND  = 'REBOUND'
+    STAGE_BULL     = 'BULL'
+    
+    def __init__(self):
+        self.stage = self.STAGE_REBOUND
+        self.market_temperature = 50.0
+        self.up_ratio = 0.5
+        self.guard_factor = 1.0
+        
+    def update_context(self, df_all):
+        if df_all is None or df_all.empty:
+            return
+            
+        up_count = 0
+        total_count = len(df_all)
+        if 'percent' in df_all.columns:
+            up_count = (df_all['percent'] > 0).sum()
+            self.up_ratio = up_count / max(1, total_count)
+            
+        sh_pct = 0.0
+        for idx_code in ['sh000001', '1.000001', '000001.SH']:
+            if idx_code in df_all.index:
+                try:
+                    sh_pct = float(df_all.loc[idx_code, 'percent'])
+                except (TypeError, ValueError):
+                    pass
+                break
+                
+        # 判定大盘阶段
+        if self.up_ratio < 0.28 or sh_pct < -1.2:
+            self.stage = self.STAGE_FREEZING
+            self.guard_factor = 0.0  # 硬性拦截
+        elif self.up_ratio > 0.65 or sh_pct > 1.0:
+            self.stage = self.STAGE_BULL
+            self.guard_factor = 1.25 # 提权放行
+        else:
+            self.stage = self.STAGE_REBOUND
+            self.guard_factor = 0.90
+            
+        self.market_temperature = round(self.up_ratio * 100.0, 1)
+
+    def allow_trade(self, specialty_score=0.0, is_fav=False):
+        """判断是否允许交易买入信号"""
+        if is_fav:
+            return True
+        if self.stage == self.STAGE_FREEZING:
+            # 冰点杀跌期只允许特异性打分极其优异 (>= 85 分) 的顶级标的
+            return specialty_score >= 85.0
+        return True
+

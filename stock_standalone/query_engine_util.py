@@ -408,41 +408,31 @@ class PandasQueryEngine:
         # Step 1: 逐行扫描与智能脱敏
         processed_lines = []
         for line in raw_input.splitlines():
-            # 1. 物理移除行首赋值: var = 
-            line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=\s*', '', line)
+            # 1. 物理移除行首赋值: var = (注意排除双等号 ==)
+            line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=(?!=)\s*', '', line)
             
             # 2. 剥离行内注释
             code = line_no_assign.split('#')[0].rstrip()
             if not code.strip(): continue
             
             # 3. [KEY FIX] 精准识别 Implicit Concatenation 特征
-            # 如果全行被引号包裹（允许首尾有括号），则执行解构
-            # 模式：^ (可选括号) "内容" "内容" (可选括号) $
             if re.match(r'^\s*[\(\s]*(["\']).*\1[\)\s]*$', code):
-                # 提取所有引号内的字面量
                 quotes = re.findall(r'(["\'])(.*?)\1', code)
                 if quotes:
-                    # 将引号内的内容取出，并保留引号外的括号
                     inner_merged = "".join([q[1] for q in quotes])
-                    # 恢复该行原本的括号结构 (简单处理：提取 code 中所有非引号内容)
                     shell = re.sub(r'(["\']).*?\1', ' {} ', code)
                     reconstructed = shell.format(inner_merged)
                     processed_lines.append(reconstructed)
                 else:
                     processed_lines.append(code)
             else:
-                # 含有函数调用（如 contains("X")）或原始逻辑的行，保持原样（保护引号）
                 processed_lines.append(code)
         
         # Step 2: 空间转换与备注过滤
         res = " ".join(processed_lines).replace('df_all', 'df').strip()
-        # 情况 A: (中文字符标签) (逻辑) -> (逻辑)
         res = re.sub(r'^\s*\(([\u4e00-\u9fa5\-]+)\)\s*(?=\()', '', res) 
-        # 情况 B: 中文字符标签 (逻辑) -> (逻辑)
         res = re.sub(r'^\s*[\u4e00-\u9fa5\-]+\s*(?=\()', '', res)
         
-        # [ROBUSTNESS] 智能为 contains 注入 case=False, na=False
-        # 根据匹配内容是否包含正则元字符，决定 regex 是 True 还是 False，以兼顾带括号中文与强大正则过滤
         if '.str.contains(' in res:
             def _contains_repl(match):
                 quote = match.group(1)
@@ -465,7 +455,7 @@ class PandasQueryEngine:
         cleaned_expr = self._preprocess_query(query_str)
         if not cleaned_expr: return df
         
-        # 快捷拦截：平衡括号判定，防止 SyntaxError 警告刷屏 (例如：未闭合的括号)
+        # 快捷拦截：平衡括号判定
         if not self._is_balanced(cleaned_expr):
             self.last_error = "Parentheses are not balanced"
             return df
@@ -485,32 +475,37 @@ class PandasQueryEngine:
             for col in df.columns:
                 if str(col) in mentioned: local_scope[str(col)] = df[col]
             
-            # 使用 @ 前缀保护关键字
+            # 使用 @ 前缀保护 Python 关键字与内置函数冲突
             pd_expr = cleaned_expr
-            py_restricted = {'open', 'id', 'type', 'dir', 'sum', 'abs', 'max', 'min'}
+            py_restricted = {'open', 'id', 'type', 'dir', 'sum', 'abs', 'max', 'min', 'in', 'is', 'from', 'import', 'as', 'with'}
             for var in py_restricted:
-                if var in mentioned and var in local_scope:
+                if var in mentioned and var in local_scope and f"@{var}" not in pd_expr:
                     pd_expr = re.sub(r'\b' + var + r'\b', f'@{var}', pd_expr)
 
             try:
                 if not has_sql:
                     try: return df.query(pd_expr, local_dict=local_scope, engine='python')
-                    except: pass
+                    except Exception: pass
                 # pd.eval 向量化执行
                 res = pd.eval(cleaned_expr, engine='python', local_dict=local_scope)
                 return self._wrap_result(df, res)
-            except:
+            except Exception:
                 exec_expr = re.sub(r'\band\b', '&', cleaned_expr, flags=re.IGNORECASE)
                 exec_expr = re.sub(r'\bor\b', '|', exec_expr, flags=re.IGNORECASE)
                 res = pd.eval(exec_expr, engine='python', local_dict=local_scope)
                 return self._wrap_result(df, res)
         except Exception as e:
-            self.last_error = str(e)
-            self.logger.warning(f"Query Error: {e}")
+            self.last_error = f"Query [{query_str}] parsing error: {e}"
+            self.logger.warning(f"[QueryEngine] 表达式解析告警: {e} | 触发Query原句: '{query_str}' | 转换后Expr: '{cleaned_expr}'")
             try:
-                exec(re.sub(r'\bdf_all\b', 'df', query_str), context)
-                return self._extract_result(df, context)
-            except: return df
+                # 完善 Fallback: 自动转换 and/or 为 &/| 避免 Series 条件歧义报错
+                vec_expr = re.sub(r'\band\b', '&', cleaned_expr, flags=re.IGNORECASE)
+                vec_expr = re.sub(r'\bor\b', '|', vec_expr, flags=re.IGNORECASE)
+                res_series = eval(vec_expr, globals(), context)
+                return self._wrap_result(df, res_series)
+            except Exception as ex_fb:
+                self.logger.warning(f"[QueryEngine] Fallback 回退执行告警: {ex_fb} | 触发Query原句: '{query_str}'")
+                return df
 
     def _wrap_result(self, df: pd.DataFrame, res: Any) -> pd.DataFrame:
         if res is None: return df

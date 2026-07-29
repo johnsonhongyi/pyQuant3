@@ -1679,9 +1679,21 @@ class EquityCurveChart(QWidget):
     def update_curve(self, x, strat_equity, bench_equity=None):
         self.plot_widget.clear()
         
+        # 异常数据清洗与尾部悬崖死线截断
+        if strat_equity is not None and len(strat_equity) > 0:
+            arr_s = np.array(strat_equity, dtype=float)
+            valid_mask = np.isfinite(arr_s) & (arr_s > 0.01)
+            if np.any(valid_mask):
+                last_valid_idx = np.where(valid_mask)[0][-1]
+                x = list(x[:last_valid_idx + 1])
+                strat_equity = list(arr_s[:last_valid_idx + 1])
+                if bench_equity is not None:
+                    bench_equity = list(np.array(bench_equity, dtype=float)[:last_valid_idx + 1])
+        
         # Safely re-create legend
         try:
-            self.plot_widget.legend.close()
+            if hasattr(self.plot_widget, 'legend') and self.plot_widget.legend is not None:
+                self.plot_widget.legend.close()
         except Exception:
             pass
             

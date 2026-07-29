@@ -175,10 +175,26 @@ class UniverseManager:
             if meta.get('_from_ledger') is not True:
                 real_positions[code] = meta
 
-        # 从 SignalLedger 读取展示数据
-        radar_entries = signal_ledger.get_sorted_pool('RADAR', limit=signal_ledger.RADAR_DISPLAY_LIMIT)
-        watch_entries = signal_ledger.get_sorted_pool('WATCH', limit=signal_ledger.WATCH_DISPLAY_LIMIT)
-        trade_entries = signal_ledger.get_sorted_pool('TRADE')
+        # 从 SignalLedger 读取展示数据 (具备 hasattr 防弹自愈保护)
+        radar_limit = getattr(signal_ledger, 'RADAR_DISPLAY_LIMIT', 30)
+        watch_limit = getattr(signal_ledger, 'WATCH_DISPLAY_LIMIT', 15)
+
+        if hasattr(signal_ledger, 'get_sorted_pool'):
+            radar_entries = signal_ledger.get_sorted_pool('RADAR', limit=radar_limit)
+            watch_entries = signal_ledger.get_sorted_pool('WATCH', limit=watch_limit)
+            trade_entries = signal_ledger.get_sorted_pool('TRADE')
+        elif hasattr(signal_ledger, 'entries') and isinstance(signal_ledger.entries, dict):
+            entries_list = list(signal_ledger.entries.values())
+            def _get_tier_entries(tier_name, limit_num=None):
+                sub = [e for e in entries_list if getattr(e, 'tier', '') == tier_name]
+                sub.sort(key=lambda x: getattr(x, 'priority_score', 0.0), reverse=True)
+                return sub[:limit_num] if limit_num else sub
+
+            radar_entries = _get_tier_entries('RADAR', radar_limit)
+            watch_entries = _get_tier_entries('WATCH', watch_limit)
+            trade_entries = _get_tier_entries('TRADE')
+        else:
+            radar_entries, watch_entries, trade_entries = [], [], []
 
         # 重建 radar_pool
         new_radar = {}

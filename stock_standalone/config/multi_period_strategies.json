@@ -10,28 +10,28 @@
           "enabled": true
         },
         "w": {
-          "filter": "ch_dir == 1 and ch_slope_deg > 2.0 and close > fib_38",
+          "filter": "ch_dir == 1 and ch_slope_deg > 1.5 and close > fib_38",
           "weight": 1.4,
           "enabled": true
         },
         "3d": {
-          "filter": "close >= ch_lower and (trend_dir >= 0 or ch_pos > 25)",
+          "filter": "ch_slope_deg >= 0 and close >= ch_lower and (trend_dir >= 0 or ch_pos > 20 or sig_bottom == 1)",
           "weight": 1.2,
           "enabled": true
         },
         "2d": {
-          "filter": "close > ch_lower and (ch_pos > 20 or sig_launch == 1 or sig_bottom == 1)",
+          "filter": "ch_slope_deg >= 0 and (ch_pos > 15 or sig_launch == 1 or sig_bottom == 1 or close > fib_50)",
           "weight": 1.1,
           "enabled": true
         },
         "d": {
-          "filter": "percent > 1.2 and close > open and (sig_launch == 1 or (ch_pos < 45 and trend_dir == 1) or (close > ch_upper and volume > 1.2 * lastv1d)) and (close - ma10d < 0.15 * ma10d and close - ma10d > -0.15 * ma10d)",
+          "filter": "percent > 1.0 and close > open and (sig_launch == 1 or sig_bottom == 1 or (ch_pos < 45 and trend_dir == 1) or (close > ch_upper and volume > 1.2 * lastv1d)) and (close - ma10d < 0.15 * ma10d and close - ma10d > -0.15 * ma10d)",
           "weight": 1.0,
           "enabled": true
         }
       },
       "cross_mode": "intersection",
-      "description": "【策略说明】基于自动通道(ch_upper/mid/lower/slope/pos)、Fibonacci(fib_38/50)与趋势方向(trend_dir)等多维定位引擎。周线要求正向斜率通道与Fib支撑，日线精准捕捉通道下轨低吸企稳与带量上轨突破，有效过滤假异动噪音与追高风险。"
+      "description": "【策略说明】基于自动通道(ch_upper/mid/lower/slope/pos)、Fibonacci(fib_38/50)与趋势方向(trend_dir)等多维定位引擎。周线要求正向斜率通道与Fib支撑，日线/2D/3D精准捕捉通道下轨低吸企稳与带量上轨突破，有效过滤假异动噪音与追高风险。"
     },
     {
       "id": "custom_strat_1782792072",

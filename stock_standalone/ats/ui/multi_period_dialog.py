@@ -82,6 +82,16 @@ from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 
+class QtVarProxy:
+    """包装 QCheckBox 或 Callable 为带 .get() 方法的 Var 对象，用于兼容全系统 StockSender 标准单例"""
+    def __init__(self, getter_func):
+        self.getter_func = getter_func
+    def get(self):
+        try:
+            return bool(self.getter_func())
+        except Exception:
+            return True
+
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
 _active_workers = set()
@@ -2006,6 +2016,19 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.last_elapsed = 0.0
         self._block_cache = {}
 
+        # 初始化项目全系统标准的 StockSender 通道 (动态绑定界面 linkage checkbox 勾选与持久化状态)
+        self.sender = None
+        try:
+            from JohnsonUtil.stock_sender import StockSender
+            self.sender = StockSender(
+                tdx_var=QtVarProxy(lambda: self.link_tdx_chk.isChecked() if hasattr(self, 'link_tdx_chk') else True),
+                ths_var=QtVarProxy(lambda: self.link_ths_chk.isChecked() if hasattr(self, 'link_ths_chk') else False),
+                dfcf_var=False,
+                callback=None
+            )
+        except Exception as e:
+            print(f"[MultiPeriodDialog] Init standard StockSender failed: {e}")
+
         # Snapping setup
         self.stays_on_top = self._load_stays_on_top()
         flags = self.windowFlags()
@@ -2131,7 +2154,92 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         except Exception as e:
             logger.warning(f"[AutoRefresh] 定时刷新异常: {e}")
 
+    def _on_focus_mode_changed(self, index):
+        """专注能力模式切换回调:
+        0: ⭐ 当日买卖特异个股 (专注精选)
+        1: ⚡ 自动通道强企稳 (Fib50/下轨)
+        2: 👑 板块共振龙头 (大哥带队)
+        3: 🌐 全量多周期大结构 (全景)
+        """
+        if getattr(self, '_initializing', False):
+            return
+        mode_names = ["⭐ 当日特异", "⚡ 自动通道企稳", "👑 板块共振", "🌐 全量大结构"]
+        curr_name = mode_names[index] if index < len(mode_names) else "全量"
+        logger.info(f"🔥 [FOCUS_MODE] 切换至专注能力模式: {curr_name}")
+        self.lbl_status.setText(f"🔥 已切换专注能力模式: {curr_name}，正在重新计算过滤...")
+        if self.last_result_df is not None and not self.last_result_df.empty:
+            self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
+        else:
+            self.run_filter(force_reload=False)
 
+    def _apply_focus_mode_filter(self, df, focus_idx):
+        """执行专注能力模式的数据切片过滤:
+        0: ⭐ 当日买卖特异个股 (交集精选顶级特异买点)
+        1: ⚡ 自动通道强企稳 (Fib50/下轨/底角)
+        2: 👑 板块共振龙头 (大哥带队/大幅领涨)
+        3: 🌐 全量多周期大结构 (全景放行)
+        """
+        if df is None or df.empty or focus_idx == 3:
+            return df
+
+        import pandas as pd
+        filtered = df.copy()
+
+        if focus_idx == 0:  # ⭐ 仅看当日买卖特异个股 (极致精选特异异动买点)
+            cond_bottom = pd.Series(False, index=filtered.index)
+            cond_support = pd.Series(False, index=filtered.index)
+            cond_momentum = pd.Series(False, index=filtered.index)
+
+            # 1. 见底/起爆信号
+            for col in ['sig_bottom_d', 'sig_launch_d', 'sig_bottom_2d', 'sig_bottom']:
+                if col in filtered.columns:
+                    cond_bottom |= (filtered[col] == 1)
+
+            # 2. 支撑位与上升斜率
+            for col in ['ch_pos_d', 'ch_pos_2d', 'ch_pos']:
+                if col in filtered.columns:
+                    cond_support |= ((filtered[col] >= 5.0) & (filtered[col] <= 38.0))
+            for col in ['ch_slope_deg_d', 'slope_deg_d', 'ch_slope_deg']:
+                if col in filtered.columns:
+                    cond_support |= (filtered[col] >= 1.5)
+
+            # 3. 强动量抬升
+            for col in ['percent_d', 'percent']:
+                if col in filtered.columns:
+                    cond_momentum |= (filtered[col] >= 2.5)
+            for col in ['win_d', 'win']:
+                if col in filtered.columns:
+                    cond_momentum |= (filtered[col] >= 2.0)
+
+            # 要求: 满足见底信号 OR 支撑位，且同时具备强动量
+            final_cond = (cond_bottom | cond_support) & cond_momentum
+            if final_cond.any():
+                filtered = filtered[final_cond]
+
+        elif focus_idx == 1:  # ⚡ 仅看自动通道强企稳 (Fib50/下轨)
+            cond = pd.Series(False, index=filtered.index)
+            for col in ['sig_bottom_d', 'sig_bottom_2d', 'sig_bottom']:
+                if col in filtered.columns:
+                    cond |= (filtered[col] == 1)
+            for col in ['ch_pos_d', 'ch_pos_2d', 'ch_pos']:
+                if col in filtered.columns:
+                    cond |= ((filtered[col] >= 5.0) & (filtered[col] <= 30.0))
+            if cond.any():
+                filtered = filtered[cond]
+
+        elif focus_idx == 2:  # 👑 仅看板块共振龙头 (大哥带队)
+            cond = pd.Series(False, index=filtered.index)
+            for col in ['is_leader', 'is_sector_leader', 'sector_leader']:
+                if col in filtered.columns:
+                    cond |= (filtered[col] == 1)
+            for col in ['percent_d', 'percent']:
+                if col in filtered.columns:
+                    cond |= (filtered[col] >= 5.5)  # 强放量拉升带队
+            if cond.any():
+                filtered = filtered[cond]
+
+        logger.info(f"🔥 [FOCUS_MODE] 专注过滤(模式 {focus_idx}): {len(df)} -> {len(filtered)} 只标的")
+        return filtered
 
     def _load_stays_on_top(self):
         self.ui_state = self._load_state()
@@ -2301,7 +2409,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
         main_layout.addLayout(tb1_layout)
 
-        # ── Toolbar 2: Custom Columns ──
+        # ── Toolbar 2: Custom Columns & Focus Mode & End Date ──
         tb2_layout = QHBoxLayout()
         tb2_layout.addWidget(QLabel("手动列:", self))
         self.manual_col_edit = QLineEdit(self)
@@ -2341,6 +2449,40 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         """)
         self.btn_custom_cols_menu.setMenu(self.custom_cols_menu)
         tb2_layout.addWidget(self.btn_custom_cols_menu)
+
+        # 🔥 专注能力极简控件 (放置于截止日期前面，极简宽度占用)
+        lbl_focus = QLabel(" 🔥 专注:", self)
+        lbl_focus.setStyleSheet("color: #ffca28; font-weight: bold; margin-left: 6px;")
+        tb2_layout.addWidget(lbl_focus)
+
+        self.focus_mode_combo = QComboBox(self)
+        self.focus_mode_combo.setFixedWidth(125)
+        self.focus_mode_combo.addItems([
+            "⭐ 当日特异",
+            "⚡ 通道企稳",
+            "👑 板块共振",
+            "🌐 全量大结构"
+        ])
+        self.focus_mode_combo.setToolTip("🔥 专注能力选择: 切换精选特异/通道企稳/板块龙头或全量模式")
+        self.focus_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #1a237e;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid #3d5aff;
+                border-radius: 3px;
+                padding: 2px 4px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 15px;
+                border-left-width: 0px;
+            }
+        """)
+        self.focus_mode_combo.currentIndexChanged.connect(self._on_focus_mode_changed)
+        tb2_layout.addWidget(self.focus_mode_combo)
 
         # 📅 预处理截止日期选项 (默认关闭，关闭时传递 end=None；勾选后启用 date_edit，当只读模式关闭时生效)
         self.chk_end_date = QCheckBox("📅 截止日期:", self)
@@ -3011,16 +3153,58 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if not hasattr(self, "lbl_hit_status") or self.lbl_hit_status is None:
             return
         total_hit = len(result_df) if result_df is not None and not result_df.empty else 0
-        self.lbl_hit_status.setText(f"🎯 Hit: {total_hit}只")
-        
-        tip_lines = [f"🎯 策略 Hit 命中测试详情 (总命中: {total_hit} 只)", "-" * 38]
+
+        # 极速计算 4 种专注能力模式在当前 result_df / _last_flat_df 下的真实 Hit 数量
+        flat_target = getattr(self, '_last_flat_df', None)
+        if flat_target is None or flat_target.empty:
+            flat_target = result_df
+
+        cnt_0, cnt_1, cnt_2, cnt_3 = 0, 0, 0, total_hit
+        if flat_target is not None and not flat_target.empty:
+            cnt_0 = len(self._apply_focus_mode_filter(flat_target, 0))  # ⭐ 当日特异
+            cnt_1 = len(self._apply_focus_mode_filter(flat_target, 1))  # ⚡ 通道企稳
+            cnt_2 = len(self._apply_focus_mode_filter(flat_target, 2))  # 👑 板块共振
+            cnt_3 = len(flat_target)                                    # 🌐 全量大结构
+
+        # 1. 胶囊框保持与原样一模一样的极简显示 (只显示总 Hit 只数)
+        self.lbl_hit_status.setText(f"🎯 Hit: {cnt_3}只")
+
+        # 2. 同步更新 focus_mode_combo 下拉框选项后面的 Hit 命中显示
+        if hasattr(self, "focus_mode_combo") and self.focus_mode_combo is not None:
+            old_idx = self.focus_mode_combo.currentIndex()
+            self.focus_mode_combo.blockSignals(True)
+            self.focus_mode_combo.setItemText(0, f"⭐ 当日特异 [{cnt_0}]")
+            self.focus_mode_combo.setItemText(1, f"⚡ 通道企稳 [{cnt_1}]")
+            self.focus_mode_combo.setItemText(2, f"👑 板块共振 [{cnt_2}]")
+            self.focus_mode_combo.setItemText(3, f"🌐 全量大结构 [{cnt_3}]")
+
+            # 设置悬停对比 ToolTip
+            tooltips = [
+                f"⭐ 当日特异买卖逻辑 (交集精选顶级特异买点，Hit: {cnt_0} 只)",
+                f"⚡ 自动通道 & Fib50 支撑定位 (强企稳，Hit: {cnt_1} 只)",
+                f"👑 热点主线与领头羊 (板块共振/带队，Hit: {cnt_2} 只)",
+                f"🌐 全量多周期大结构 (全景放行，Hit: {cnt_3} 只)"
+            ]
+            for i, tt in enumerate(tooltips):
+                self.focus_mode_combo.setItemData(i, tt, Qt.ItemDataRole.ToolTipRole)
+            self.focus_mode_combo.setCurrentIndex(old_idx)
+            self.focus_mode_combo.blockSignals(False)
+
+        # 3. 悬停气泡对比
+        tip_lines = [
+            f"🎯 策略 Hit 命中测试详情 (全量: {cnt_3} 只)",
+            "-" * 38,
+            f"  🔥 ⭐ 当日买卖特异: {cnt_0} 只 (高胜率/强确定性)",
+            f"  🔥 ⚡ 自动通道企稳: {cnt_1} 只 (Fib50%/下轨支撑)",
+            f"  🔥 👑 板块共振龙头: {cnt_2} 只 (热点主线/大哥带队)",
+            f"  🔥 🌐 全量多周期大结构: {cnt_3} 只 (全景放行)",
+            "-" * 38
+        ]
         if hasattr(self.engine, "_period_dfs") and self.engine._period_dfs:
             for p, df in self.engine._period_dfs.items():
                 if df is not None and not df.empty:
                     tip_lines.append(f" • {p} 周期基础数据: {len(df)} 只")
-        tip_lines.append("-" * 38)
-        tip_lines.append(f"★ 多周期组合最终筛选: {total_hit} 只")
-        tip_lines.append("\n(点击胶囊框即可快速再次触发 Hit 命中测试)")
+        tip_lines.append("\n(点击胶囊框即可快速对全策略及专注模式再次触发 Hit 测试)")
         self.lbl_hit_status.setToolTip("\n".join(tip_lines))
 
     def _test_all_strategies_hit(self):
@@ -3183,6 +3367,64 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         super().resizeEvent(event)
         self._adjust_column_widths()
 
+    def broadcast_code_link(self, code: str, bring_tdx_to_top: bool = False):
+        """全系统统一标准的 StockSender 广播引擎：支持 TDX/THS 的零卡顿高可靠联动"""
+        if not code:
+            return
+        code_clean = "".join(x for x in str(code) if x.isdigit()).zfill(6)
+        if not code_clean:
+            return
+
+        # 优先使用项目标准的 StockSender 发送通道 (基于句柄消息投递与进程 Proxy 防卡死)
+        if hasattr(self, 'sender') and self.sender is not None:
+            try:
+                self.sender.send(code_clean)
+                return
+            except Exception as e:
+                print(f"[MultiPeriodDialog] Standard StockSender send failed: {e}")
+
+        # 兜底静默剪贴板注入
+        try:
+            cb = QApplication.clipboard()
+            if cb:
+                cb.setText(code_clean)
+        except Exception:
+            pass
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = False):
+        """自动在表格中高亮定位并滚动对齐指定股票代码 (点击 Toast 打开详情窗口，绝不触发诊断窗口)"""
+        if not code or not hasattr(self, "table") or self.table is None:
+            return
+
+        target_code = str(code).strip()
+        found = False
+        name_val = target_code
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.text().strip() == target_code:
+                self.table.setCurrentCell(row, 0)
+                self.table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
+                n_item = self.table.item(row, 1)
+                if n_item:
+                    name_val = n_item.text().strip()
+                self.lbl_status.setText(f"🎯 已自动定位高亮联动标的: {target_code}")
+                found = True
+                break
+
+        # 自动触发秒级通达信 (TDX) 行情联动
+        self.broadcast_code_link(target_code)
+
+        if not found:
+            self.lbl_status.setText(f"⚠️ 当前表格结果中未包含标的 [{target_code}]")
+
+        # 仅在用户手动点击 Toast 提醒卡片时 (auto_popup=True) 打开【详情窗口】，绝对不联动诊断窗口
+        if auto_popup and found:
+            try:
+                if hasattr(self, "_show_stock_category_dialog"):
+                    self._show_stock_category_dialog(target_code, name_val)
+            except Exception:
+                pass
+
     def moveEvent(self, event):
         # NO disk write on move — position saved once on closeEvent
         super().moveEvent(event)
@@ -3317,13 +3559,34 @@ class MultiPeriodDialog(QDialog, WindowMixin):
 
             self._update_manual_col_completer(force_refresh=True)
 
-            # Apply secondary filtering
+            # Apply focus mode & secondary filtering
             filtered_df = flat_df
+            focus_idx = self.focus_mode_combo.currentIndex() if hasattr(self, "focus_mode_combo") else 3
+            if focus_idx != 3:
+                filtered_df = self._apply_focus_mode_filter(filtered_df, focus_idx)
+
             if self._current_history_query:
-                filtered_df = self._apply_secondary_filter(flat_df, self._current_history_query)
+                filtered_df = self._apply_secondary_filter(filtered_df, self._current_history_query)
 
             self._current_displayed_df = filtered_df
             self._concept_index = None
+
+
+            # 当模式为 ⭐ 当日特异 (focus_idx == 0) 且筛选出结果时，自动推送 Top 1 黄金特异黑马弹窗与语音
+            if focus_idx == 0 and filtered_df is not None and not filtered_df.empty:
+                try:
+                    top_row = filtered_df.iloc[0]
+                    code_val = str(top_row.name) if hasattr(top_row, 'name') else str(top_row.get('code', ''))
+                    name_val = str(top_row.get('name', '特异精选'))
+                    from ats.alert_notifier import AlertNotifier
+                    AlertNotifier().notify_special_signal(
+                        code_val, name_val,
+                        reason="多周期自动通道企稳 / 阶梯抬升交集特异买点",
+                        score=92.0,
+                        parent=self
+                    )
+                except Exception as ex_alert:
+                    logger.warning(f"Focus alert trigger failed: {ex_alert}")
 
             if filtered_df.empty:
                 if self._history_filter_error:
@@ -3339,8 +3602,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 final = stats["final"]
                 mode_str = "交集" if final["mode"] == "intersection" else "并集"
                 if self._current_history_query:
+                    safe_total = max(final.get('total', 0), 1)
                     self.lbl_final_stats.setText(
-                        f"【最终 ({mode_str})】 共 {len(filtered_df)} / 二次前 {len(df)} 只 ({len(filtered_df)/final['total']*100:.3f}%)"
+                        f"【最终 ({mode_str})】 共 {len(filtered_df)} / 二次前 {len(df)} 只 ({len(filtered_df)/safe_total*100:.3f}%)"
                     )
 
             if self._current_history_query:
@@ -3350,6 +3614,31 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     self.lbl_status.setText(f"完成，共筛选出 {len(filtered_df)} 只 (二次前 {len(df)} 只，耗时 {elapsed:.1f}s)")
             else:
                 self.lbl_status.setText(f"完成，共筛选出 {len(filtered_df)} 只标的。(耗时 {elapsed:.1f}s)")
+
+            # 触发应用内与系统托盘 Toast 提醒卡片
+            if len(filtered_df) > 0:
+                try:
+                    first_row = filtered_df.iloc[0]
+                    top_code = str(first_row.get('code', '') if 'code' in first_row else filtered_df.index[0]).strip()
+                    top_name = str(first_row.get('name', top_code) if 'name' in first_row else top_code).strip()
+                    pct_val = 0.0
+                    try:
+                        pct_val = float(first_row.get('percent', 0.0))
+                    except:
+                        pass
+                    
+                    from ats.alert_notifier import AlertNotifier
+                    notifier = AlertNotifier()
+                    if notifier:
+                        notifier.notify(
+                            title=f"🎯 多周期策略选股完成 (共命中 {len(filtered_df)} 只)",
+                            message=f"排头标的: {top_code} {top_name} ({pct_val:+.2f}%)\n点击自动高亮定位并联动通达信看盘",
+                            code=top_code,
+                            score=95.0,
+                            level="GOLD"
+                        )
+                except Exception as e:
+                    logger.warning(f"MultiPeriod notification trigger failed: {e}")
 
             # Columns configuration
             active_periods = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
