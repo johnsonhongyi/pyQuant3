@@ -184,7 +184,7 @@ class AllStrategiesHitWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, engine, strategies, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None, end=None):
+    def __init__(self, engine, strategies, active_periods, top_now=None, force_reload=False, period_cache_ts=None, top_now_cache_ts=None, end=None, allow_auto_init=False):
         super().__init__()
         self.engine = engine
         self.strategies = strategies
@@ -194,6 +194,7 @@ class AllStrategiesHitWorker(QThread):
         self.period_cache_ts = period_cache_ts if period_cache_ts is not None else {}
         self.top_now_cache_ts = top_now_cache_ts if top_now_cache_ts is not None else [0.0]
         self.end = end
+        self.allow_auto_init = allow_auto_init
 
     def _is_cache_valid(self, ts):
         if ts == 0.0:
@@ -229,12 +230,13 @@ class AllStrategiesHitWorker(QThread):
             import contextlib
             with self.engine.lock:
                 self.engine._missing_periods.clear()
+            is_readonly = not self.allow_auto_init
             for period in self.active_periods:
                 if self.force_reload or period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
                     self.progress.emit(f"正在同步 {period} 周期特征数据...")
                     bridge = TqdmToPyQtBridge(sys.stderr, self.progress, prefix=f"[{period}]")
                     with contextlib.redirect_stderr(bridge), contextlib.redirect_stdout(bridge):
-                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload, end=self.end)
+                        self.engine.load_period_data(period, self.top_now, force_reload=self.force_reload, end=self.end, readonly=is_readonly)
 
             # 3. 开始评估各个策略
             total = len(self.strategies)
@@ -247,6 +249,9 @@ class AllStrategiesHitWorker(QThread):
                 except Exception as ex:
                     logger.warning(f"Failed to evaluate strategy {strat['name']}: {ex}")
                     hit_cnt = 0
+                strat_id = strat.get('id')
+                if strat_id:
+                    results[strat_id] = hit_cnt
                 results[strat['name']] = hit_cnt
 
             self.finished.emit(results)
@@ -2284,20 +2289,30 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 pass
         return default_state
 
+    def _get_current_selected_strategy(self):
+        if not hasattr(self, 'strategy_combo') or self.strategy_combo is None:
+            return None
+        import re
+        strat_id = self.strategy_combo.currentData()
+        if strat_id and hasattr(self, 'strategies') and self.strategies:
+            strat = next((s for s in self.strategies if s.get('id') == strat_id), None)
+            if strat:
+                return strat
+        strat_name = self.strategy_combo.currentText()
+        if not strat_name:
+            return None
+        clean_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
+        clean_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_name)
+        if hasattr(self, 'strategies') and self.strategies:
+            return next((s for s in self.strategies if s.get('name') == clean_name), None)
+        return None
+
     def _save_state(self, write_to_disk=True):
         if getattr(self, "_initializing", False):
             return
         try:
-            strat_name = self.strategy_combo.currentText()
-            import re
-            clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
-            clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
-            strat_id = ""
-            for s in self.strategies:
-                if s['name'] == clean_strat_name:
-                    strat_id = s['id']
-                    break
-            
+            strat = self._get_current_selected_strategy()
+            strat_id = strat.get('id', '') if strat else ''
             self.ui_state['strategy_id'] = strat_id
             self.ui_state['recent_strategy_ids'] = self.ui_state.get('recent_strategy_ids', [])
             self.ui_state['periods'] = [p for p, chk in self.period_checkboxes.items() if chk.isChecked()]
@@ -2756,7 +2771,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 
         # 3. 拼接并添加 Items
         prefixes = ["❶ ", "❷ ", "❸ ", "❹ ", "❺ ", "❻ ", "❼ ", "❽ ", "❾ ", "❿ "]
-        new_items = []
         
         # 优先从计算出的 self._last_hit_results 中读取，备选从原本的文本中读取
         hit_results = getattr(self, "_last_hit_results", {})
@@ -2764,9 +2778,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         for idx, s in enumerate(recent_strats):
             prefix = prefixes[idx] if idx < len(prefixes) else ""
             raw_name = s['name']
+            s_id = s.get('id', '')
             
             hit_cnt = None
-            if raw_name in hit_results:
+            if s_id and s_id in hit_results:
+                hit_cnt = hit_results[s_id]
+            elif raw_name in hit_results:
                 hit_cnt = hit_results[raw_name]
             elif raw_name in hit_names:
                 prev_full = hit_names[raw_name]
@@ -2775,13 +2792,17 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     hit_cnt = int(prev_hit.group(1))
                     
             hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
-            new_items.append(f"{prefix}{raw_name}{hit_suffix}")
+            item_text = f"{prefix}{raw_name}{hit_suffix}"
+            self.strategy_combo.addItem(item_text, userData=s_id)
                 
         for s in other_strats:
             raw_name = s['name']
+            s_id = s.get('id', '')
             
             hit_cnt = None
-            if raw_name in hit_results:
+            if s_id and s_id in hit_results:
+                hit_cnt = hit_results[s_id]
+            elif raw_name in hit_results:
                 hit_cnt = hit_results[raw_name]
             elif raw_name in hit_names:
                 prev_full = hit_names[raw_name]
@@ -2790,19 +2811,25 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     hit_cnt = int(prev_hit.group(1))
                     
             hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
-            new_items.append(f"{raw_name}{hit_suffix}")
-                
-        self.strategy_combo.addItems(new_items)
+            item_text = f"{raw_name}{hit_suffix}"
+            self.strategy_combo.addItem(item_text, userData=s_id)
         
         # 4. 恢复之前选中的策略
         matched_idx = -1
-        for i in range(self.strategy_combo.count()):
-            t = self.strategy_combo.itemText(i)
-            t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-            t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
-            if t_clean == clean_current_text:
-                matched_idx = i
-                break
+        target_id = self.ui_state.get('strategy_id')
+        if target_id:
+            for i in range(self.strategy_combo.count()):
+                if self.strategy_combo.itemData(i) == target_id:
+                    matched_idx = i
+                    break
+        if matched_idx < 0:
+            for i in range(self.strategy_combo.count()):
+                t = self.strategy_combo.itemText(i)
+                t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+                t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
+                if t_clean == clean_current_text:
+                    matched_idx = i
+                    break
         if matched_idx >= 0:
             self.strategy_combo.setCurrentIndex(matched_idx)
         else:
@@ -2958,9 +2985,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _on_strategy_selected(self):
         if getattr(self, "_initializing", False):
             return
-        idx = self.strategy_combo.currentIndex()
-        if 0 <= idx < len(self.strategies):
-            strat = self.strategies[idx]
+        strat = self._get_current_selected_strategy()
+        if strat:
             tip = f"{strat.get('name', '')}\n\n{strat.get('description', '')}"
             self.strategy_combo.setToolTip(tip)
         self._save_state()
@@ -3027,15 +3053,11 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QMessageBox.warning(self, "警告", "请至少选择一个参与周期！")
             return
 
-        strat_name = self.strategy_combo.currentText()
-        import re
-        clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
-        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
-        strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
+        strat_config = self._get_current_selected_strategy()
         if not strat_config:
             return
 
-        # 记录到最近使用的 10 个策略中并重构列表
+        # 记录到最近使用的 10 个策略中（保持持久化，但在此处切勿重构列表以防按上下键浏览时列表顺序动态重排破坏键盘焦点）
         strat_id = strat_config['id']
         recent_ids = self.ui_state.get('recent_strategy_ids', [])
         if strat_id in recent_ids:
@@ -3043,7 +3065,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         recent_ids.insert(0, strat_id)
         self.ui_state['recent_strategy_ids'] = recent_ids[:10]
         self._save_state(write_to_disk=True)
-        self._rebuild_strategy_combo()
 
         if force_reload:
             # 盘中强制刷新：仅清空 top_now 实时行情以强行更新最新盘中数据，持久复用内存中多周期历史特征数据 (_period_dfs)
@@ -3174,6 +3195,27 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         # 1. 胶囊框保持与原样一模一样的极简显示 (只显示总 Hit 只数)
         self.lbl_hit_status.setText(f"🎯 Hit: {cnt_3}只")
 
+        # 1.5 实时同步当前选中策略在 self._last_hit_results 及 strategy_combo 下拉框项中的 Hit 命中
+        strat = self._get_current_selected_strategy()
+        if strat:
+            s_id = strat.get('id')
+            s_name = strat.get('name')
+            if not hasattr(self, '_last_hit_results'):
+                self._last_hit_results = {}
+            if s_id:
+                self._last_hit_results[s_id] = cnt_3
+            if s_name:
+                self._last_hit_results[s_name] = cnt_3
+            if hasattr(self, 'strategy_combo') and self.strategy_combo is not None:
+                curr_idx = self.strategy_combo.currentIndex()
+                if curr_idx >= 0:
+                    import re
+                    item_text = self.strategy_combo.itemText(curr_idx)
+                    new_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', item_text) + f" [Hit: {cnt_3}]"
+                    self.strategy_combo.blockSignals(True)
+                    self.strategy_combo.setItemText(curr_idx, new_text)
+                    self.strategy_combo.blockSignals(False)
+
         # 2. 同步更新 focus_mode_combo 下拉框选项后面的 Hit 命中显示
         if hasattr(self, "focus_mode_combo") and self.focus_mode_combo is not None:
             old_idx = self.focus_mode_combo.currentIndex()
@@ -3232,11 +3274,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.lbl_status.setText("正在准备全策略测试线程...")
         
         end_date = self._get_effective_end_date()
+        allow_auto_init = not self.chk_readonly.isChecked() if hasattr(self, 'chk_readonly') else False
         # 2. 启动后台线程
         worker = AllStrategiesHitWorker(
             self.engine, self.strategies, active_periods,
             top_now=self.top_now, period_cache_ts=self._period_cache_ts, top_now_cache_ts=self._top_now_cache_ts,
-            end=end_date
+            end=end_date, allow_auto_init=allow_auto_init
         )
         self._hit_worker = worker
         _active_workers.add(worker)
@@ -3270,11 +3313,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             except RuntimeError:
                 pass
 
-        # 缓存计算结果，注意去除原有的前缀和后缀
+        # 缓存计算结果，注意保存 ID 和清洗后的名称后缀
         import re
         self._last_hit_results = {}
-        for name, hit_cnt in results.items():
-            clean_name = re.sub(r'^[❶❷❸❹❺①②③④⑤\d\s\.\-\[\]]+', '', name)
+        for key, hit_cnt in results.items():
+            self._last_hit_results[str(key)] = hit_cnt
+            clean_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩\d\s\.\-\[\]]+', '', str(key))
             clean_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_name)
             self._last_hit_results[clean_name] = hit_cnt
 
@@ -3840,18 +3884,29 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             # Automatically stretch columns to utilize viewport width
             self._adjust_column_widths()
 
-            # Restore previous row selection and prevent redundant linkage refresh
+            # ── 记录刷新前的垂直滚动位置，用于恢复视口位置 ──
+            pre_sort_scroll_val = self.table.verticalScrollBar().value()
+
+            self._update_header_labels()
+            self._perform_multi_level_sort()
+            self.update_concept_ranking(filtered_df)
+
+            # ── 恢复选中行并确保滚动到可见区域 ──
             if selected_code:
+                # 排序完成后，重新定位选中 code 的行并滚动到可见区域
                 for r in range(self.table.rowCount()):
                     c_item = self.table.item(r, 0)
                     if c_item and c_item.text().strip() == selected_code:
                         self.table.setCurrentCell(r, 0)
                         self._last_selected_code = selected_code
+                        self.table.scrollToItem(
+                            self.table.item(r, 0),
+                            QAbstractItemView.ScrollHint.PositionAtCenter
+                        )
                         break
-
-            self._update_header_labels()
-            self._perform_multi_level_sort()
-            self.update_concept_ranking(filtered_df)
+            else:
+                # 无选中行时：恢复刷新前的滚动条位置，避免跑到底部
+                self.table.verticalScrollBar().setValue(pre_sort_scroll_val)
         except Exception as ex:
             import traceback
             err_stack = traceback.format_exc()
@@ -3882,6 +3937,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self._update_header_labels()
             self._perform_multi_level_sort()
             self._save_state()
+            # 点击排序后自动滚到顶部
+            self.table.scrollToTop()
             return
             
         # 2. 如果当前有 L1 主排序，点击全新列时，设为临时从/次排序后缀（保持主排序不动！）
@@ -3905,6 +3962,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self._update_header_labels()
         self._perform_multi_level_sort()
         self._save_state()
+        # 点击排序后自动滚到顶部
+        self.table.scrollToTop()
 
     def _on_header_context_menu(self, pos):
         header = self.table.horizontalHeader()
@@ -3972,6 +4031,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self._update_header_labels()
         self._perform_multi_level_sort()
         self._save_state()
+        # 右键菜单设置排序后也自动滚到顶部
+        self.table.scrollToTop()
 
     def _update_header_labels(self):
         col_count = self.table.columnCount()
@@ -4147,10 +4208,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             pass
             
         self.table.setSortingEnabled(False)
+        # 回写前记录当前滚动位置，防止 takeItem/setItem 序列触发 Qt 自动滚到最后一行
+        _scroll_bar = self.table.verticalScrollBar()
+        _saved_scroll = _scroll_bar.value()
         for new_r, (old_r, items) in enumerate(rows_data):
             for c_idx, item in enumerate(items):
                 if item:
                     self.table.setItem(new_r, c_idx, item)
+        # 恢复滚动位置（调用者在此之后可按需再次覆盖）
+        _scroll_bar.setValue(_saved_scroll)
         self.table.setSortingEnabled(False)
 
     def _build_flat_df(self, df):
@@ -4608,11 +4674,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             from stock_logic_utils import toast_messageQT
             toast_messageQT(self, f"在当前列表中未找到股票 {code} {name}", duration=2500)
 
-        strat_name = self.strategy_combo.currentText()
-        import re
-        clean_strat_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
-        clean_strat_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_strat_name)
-        strat_config = next((s for s in self.strategies if s['name'] == clean_strat_name), None)
+        strat_config = self._get_current_selected_strategy()
         if not strat_config:
             QMessageBox.warning(self, "警告", "未选中任何有效策略！")
             return
