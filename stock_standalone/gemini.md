@@ -1,3 +1,19 @@
+## 2026-07-30 23:05
+- [x] **根治非交易日日期导致的图表可视化隐形问题 (`global_favorites.py`)**：
+    - [x] **精准交易日对齐 (`normalize_to_trade_date`)**：在 `GlobalFavoriteManager` 中植入轻量级 `normalize_to_trade_date` 校验器，若 `add_date` 传入或文件中记录的是非交易日（如周末 `2026-07-26`），底层自动调用 `cct.get_last_trade_date` 对齐修正为有效交易日（`2026-07-24`），确保可视化图表和 K 线分析能 100% 匹配到交易日 K 线 Bar 并渲染显示。
+    - [x] **自动回补磁盘写回 (`load_from_config`)**：在 `load_from_config` 中植入写回保护，当检测并纠偏磁盘文件中缺失或非交易日日期时，立刻自动调用 `save_to_config()` 物理落盘，实现一次修复永久生效。
+    - [x] **全前端 0 侵入透明对接**：无需修改任何 UI 模块，保持单参数 `(code)` 或原生 API 签名极简对接。
+
+## 2026-07-30 17:45
+- [x] **实现突破下跌通道上轨压制+底座上升支撑+底部MACD>0+温和量能+OBV金叉战术策略 (`config/multi_period_strategies.json`)**：
+    - [x] **全流程 Python 代码 0 变更 (彻底保持既有底层与引擎代码不变)**：确认 `query_engine_util.py` 与 `tdx_data_Day.py` 无需进行任何修改！`PandasQueryEngine` 引擎内部天然支持把行情 `df` 物理存在的原生列 (`obv_val`, `maobv`, `obv`) 自动填充至表达式求值上下文。
+    - [x] **解构图形特征并优化多周期战术策略 (`config/multi_period_strategies.json`)**：
+        - **突破下跌通道上轨压制**：通过 `close >= ch_upper` 或 `ch_pos > 80.0` 或 `ch_dir == 1` 定位脱离下降通道压制。
+        - **底座上升支撑线**：使用 `lastl1d >= lastl2d` 与 `fib_38` 支撑，要求低点抬升形成向上倾斜的底座。
+        - **底部 MACD 修复大于 0**：要求 `dif > dea` 或 `dif > 0` 或 `macd > 0` 或 `macd > macdlast1` 修复。
+        - **量能温和**：要求 `0.8 * lastv1d < lastv0d < 3.2 * lastv1d` 或 `volume > 0.9`，过滤疯狂拉爆或无量洗盘。
+        - **OBV 多头表现**：直接在 JSON 策略中精准约束 `obv_val > maobv` (OBV 白线在黄线上方) 或 `obv > 0` (金叉天数大于 0)。
+
 ## 2026-07-30 17:15
 - [x] **解决策略上下键浏览卡死在 1、2 轮动的问题 (`ats/ui/multi_period_dialog.py`, `GEMINI.md`)**：
     - [x] **定位死循环根因**：定位到旧代码在 `run_filter()` 中每次切换策略时，均会强行把当前策略插回 `recent_strategy_ids` 的首位并调用 `_rebuild_strategy_combo()` 清空并重新构建下拉列表。重构后列表将选中策略移至 0 号位（`❶` 标记），并将 `currentIndex` 强制重置为 0，导致按 Down 键选择 1 号位时再次触发重排并重置回 0，引发 0 号位和 1 号位（`❶` 与 `❷`）无线交替死循环。

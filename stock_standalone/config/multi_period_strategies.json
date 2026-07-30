@@ -1,6 +1,39 @@
 {
   "strategies": [
     {
+      "id": "tpl_trend_channel_breakout_obv_macd",
+      "name": "🔥 突破下跌通道上轨压制+底座上升支撑+底部MACD>0+温和量能+OBV金叉 [自动通道战术引擎] [2026-07-30]",
+      "conditions": {
+        "m": {
+          "filter": "close > fib_38 or trend_dir >= 0 or close > ch_mid or obv_val > maobv or obv > 0",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= ch_lower and (dif > dea or macd > 0 or obv_val > maobv or obv > 0 or close > ma20d)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "ch_slope_deg >= -2.0 and close >= fib_38 and (dif > dea or macd > macdlast1 or obv_val > maobv or obv > 0)",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "close >= lastl1d and (ch_pos > 20 or sig_launch == 1 or sig_bottom == 1 or close > fib_50) and (obv_val > maobv or obv > 0)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "(close >= ch_upper or ch_pos > 80.0 or ch_dir == 1 or (close > ch_mid and ch_slope_deg > -1.0)) and lastl1d >= lastl2d and (dif > dea or dif > 0 or macd > 0 or macd > macdlast1) and (lastv0d > 0.8 * lastv1d and lastv0d < 3.2 * lastv1d or volume > 0.9) and (obv_val > maobv or obv > 0) and percent > 0.5 and close > open",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【买点与形态逻辑 (脱离下跌通道+上升支撑线+底部MACD>0+温和量能+OBV白线大于黄线)】\n1. 突破下跌通道上轨压制：利用 ch_upper/ch_pos/ch_dir 定位已成功脱离/突破下跌通道压制的走势。(close >= ch_upper 或 ch_pos > 80%)\n2. 上升支撑线与底座抬升：近两日低点抬高 (lastl1d >= lastl2d)，形成向上倾斜的坚实底座支撑线。\n3. 底部 MACD 修复大于0：底层 MACD 柱状图 > 0 或 DIF 金叉向上 (dif > dea 或 macd > 0)。\n4. 量能温和：成交量放量适中不暴起爆冲 (lastv0d 在 0.8~3.2 倍 lastv1d 之间)，筹码换手平缓。\n5. OBV 能量潮多头：OBV 白线在 30 日 OBV 均线黄线上方 (obv_val > maobv 或 obv > 0)。"
+    },
+    {
       "id": "tpl_trend_channel_breakout_and_rebound",
       "name": "🎯 多周期通道共振+斜率支撑定位+下轨企稳/突破起爆 [自动通道牛股引擎]",
       "conditions": {
@@ -836,6 +869,39 @@
       },
       "cross_mode": "intersection",
       "description": "【买点与形态逻辑 (多周期大级别缩量振幅收窄模式)】\n1. 大周期大级别缩量 (周线/3D)：在周线 (lastv1d < lastv3d) 与 3D 周期上引入大级别成交量萎缩比对，捕捉经历数周地量极缩洗盘的股票。\n2. 2D/日线地量地平线：2D 与日线保持多级量能萎缩 ({or: lastv{1-4}d < 0.72 * lastv{4-8}d})，卖盘彻底枯竭。\n3. 振幅收窄与企稳：近 1-3 天振幅极度收窄 ({and: abs(per{1-3}d) < 3.8})，收盘在支撑位之上，提供风险极低的企稳潜伏买点。"
+    },
+    {
+      "id": "1785405721555",
+      "name": "🔥 突破下跌通道上轨压制+底座上升支撑+底部MACD>0+温和量能+OBV金叉 [自动通道战术引擎] [2026-07-30]",
+      "conditions": {
+        "m": {
+          "filter": "close > fib_38 or trend_dir >= 0 or close > ch_mid or obv_val > maobv or obv > 0",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= ch_lower and (dif > dea or macd > 0 or obv_val > maobv or obv > 0 or close > ma20d)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "ch_slope_deg >= -2.0 and close >= fib_38 and (dif > dea or macd > macdlast1 or obv_val > maobv or obv > 0)",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "close >= lastl1d and (ch_pos > 20 or sig_launch == 1 or sig_bottom == 1 or close > fib_50) and (obv_val > maobv or obv > 0)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "(close >= ch_upper or ch_pos > 80.0 or ch_dir == 1 or (close > ch_mid and ch_slope_deg > -1.0)) and lastl1d >= lastl2d and (dif > dea or dif > 0 or macd > 0 or macd > macdlast1) and (lastv0d > 0.8 * lastv1d and lastv0d < 3.2 * lastv1d or volume > 0.9) and (obv_val > maobv or obv > 0) and percent > 0.5 and close > open",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【买点与形态逻辑 (脱离下跌通道+上升支撑线+底部MACD>0+温和量能+OBV白线大于黄线)】\n1. 突破下跌通道上轨压制：利用 ch_upper/ch_pos/ch_dir 定位已成功脱离/突破下跌通道压制的走势。(close >= ch_upper 或 ch_pos > 80%)\n2. 上升支撑线与底座抬升：近两日低点抬高 (lastl1d >= lastl2d)，形成向上倾斜的坚实底座支撑线。\n3. 底部 MACD 修复大于0：底层 MACD 柱状图 > 0 或 DIF 金叉向上 (dif > dea 或 macd > 0)。\n4. 量能温和：成交量放量适中不暴起爆冲 (lastv0d 在 0.8~3.2 倍 lastv1d 之间)，筹码换手平缓。\n5. OBV 能量潮多头：OBV 白线在 30 日 OBV 均线黄线上方 (obv_val > maobv 或 obv > 0)。"
     }
   ]
 }

@@ -144,15 +144,7 @@ class GlobalFavoriteManager:
         
         if migrated_stocks or migrated_sectors:
             logger.info(f"🚚 [GlobalFavorites] Migrating {len(migrated_stocks)} stocks and {len(migrated_sectors)} sectors to favorite_stocks.json")
-            default_date = None
-            try:
-                from JohnsonUtil import commonTips as cct
-                default_date = cct.get_lastdays_trade_date(3)
-            except Exception:
-                pass
-            if not default_date:
-                import datetime
-                default_date = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+            default_date = self._get_default_trade_date()
             
             for code in migrated_stocks:
                 if code not in migrated_dates:
@@ -190,25 +182,19 @@ class GlobalFavoriteManager:
                 ui_state = full_data
                 
             changed = False
+            auto_filled = False
             if ui_state:
                 new_sectors = set(ui_state.get('favorite_sectors', []))
                 new_stocks = set(ui_state.get('favorite_stocks', []))
                 new_stocks_dates = ui_state.get('favorite_stocks_dates', {})
                 
-                # Check compatibility/integrity: populate missing dates with 3 trading days ago for testing
-                default_date = None
-                try:
-                    from JohnsonUtil import commonTips as cct
-                    default_date = cct.get_lastdays_trade_date(3)
-                except Exception:
-                    pass
-                if not default_date:
-                    import datetime
-                    default_date = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y-%m-%d")
-
+                default_date = self._get_default_trade_date()
                 for code in new_stocks:
-                    if code not in new_stocks_dates:
-                        new_stocks_dates[code] = default_date
+                    cur_d = new_stocks_dates.get(code)
+                    norm_d = self._get_default_trade_date(cur_d) if cur_d else default_date
+                    if cur_d != norm_d:
+                        new_stocks_dates[code] = norm_d
+                        auto_filled = True
                 # Clean up orphaned keys
                 for code in list(new_stocks_dates.keys()):
                     if code not in new_stocks:
@@ -227,6 +213,9 @@ class GlobalFavoriteManager:
                 if changed:
                     with self._lock:
                         self._version += 1
+                if auto_filled:
+                    # 自动回补缺失日期后，立刻同步落盘持久化至 favorite_stocks.json
+                    self.save_to_config()
             else:
                 with self._lock:
                     self._last_config_mtime = mtime
@@ -267,6 +256,18 @@ class GlobalFavoriteManager:
         except Exception as e:
             logger.error(f"Failed to save favorites to config: {e}")
 
+    def _get_default_trade_date(self, add_date: str = None) -> str:
+        """获取有效交易日 (%Y-%m-%d)，若传入非交易日或为空则自动对齐转换为有效交易日"""
+        try:
+            from JohnsonUtil import commonTips as cct
+            target = str(add_date).strip()[:10] if (add_date and str(add_date).strip()) else None
+            dt = cct.get_last_trade_date(target) if target else cct.get_last_trade_date()
+            if dt:
+                return str(dt).strip()[:10]
+        except Exception:
+            pass
+        return time.strftime("%Y-%m-%d")
+
     def add_favorite_sector(self, sector: str):
         with self._lock:
             self.favorite_sectors.add(sector)
@@ -293,15 +294,53 @@ class GlobalFavoriteManager:
         return action
 
     def add_favorite_stock(self, code: str, add_date: str = None):
-        if not add_date:
-            add_date = time.strftime("%Y-%m-%d")
+        code = str(code).strip().zfill(6)
+        if not code or code == '000000':
+            return
+            
         with self._lock:
+            existing_date = self.favorite_stocks_dates.get(code)
+            final_date = add_date if add_date else existing_date
+            final_date = self._get_default_trade_date(final_date)
+
             self.favorite_stocks.add(code)
-            self.favorite_stocks_dates[code] = add_date
+            self.favorite_stocks_dates[code] = final_date
             self._version += 1
+
+        self.save_to_config()
+
+    def add_favorites_batch(self, items, add_date: str = None):
+        """批量添加重点关注，支持 code 列表"""
+        if not items:
+            return
+
+        with self._lock:
+            for item in items:
+                code = None
+                item_date = add_date
+                if isinstance(item, str):
+                    code = item.strip().zfill(6)
+                elif isinstance(item, (tuple, list)) and len(item) >= 1:
+                    code = str(item[0]).strip().zfill(6)
+                    if len(item) >= 2 and item[1]:
+                        item_date = str(item[1])
+
+                if not code or code == '000000':
+                    continue
+
+                existing_date = self.favorite_stocks_dates.get(code)
+                final_date = item_date if item_date else existing_date
+                final_date = self._get_default_trade_date(final_date)
+
+                self.favorite_stocks.add(code)
+                self.favorite_stocks_dates[code] = final_date
+
+            self._version += 1
+
         self.save_to_config()
 
     def remove_favorite_stock(self, code: str):
+        code = str(code).strip().zfill(6)
         with self._lock:
             if code in self.favorite_stocks:
                 self.favorite_stocks.remove(code)
@@ -311,8 +350,7 @@ class GlobalFavoriteManager:
         self.save_to_config()
 
     def toggle_favorite_stock(self, code: str, add_date: str = None):
-        if not add_date:
-            add_date = time.strftime("%Y-%m-%d")
+        code = str(code).strip().zfill(6)
         with self._lock:
             if code in self.favorite_stocks:
                 self.favorite_stocks.remove(code)
@@ -320,20 +358,58 @@ class GlobalFavoriteManager:
                     del self.favorite_stocks_dates[code]
                 action = "removed"
             else:
+                existing_date = self.favorite_stocks_dates.get(code)
+                final_date = add_date if add_date else existing_date
+                final_date = self._get_default_trade_date(final_date)
+
                 self.favorite_stocks.add(code)
-                self.favorite_stocks_dates[code] = add_date
+                self.favorite_stocks_dates[code] = final_date
                 action = "added"
             self._version += 1
+
         self.save_to_config()
         return action
 
     def get_favorite_stock_date(self, code: str) -> str:
+        code = str(code).strip().zfill(6)
+        should_save = False
         with self._lock:
-            return self.favorite_stocks_dates.get(code, "")
+            date_str = self.favorite_stocks_dates.get(code, "")
+            if date_str:
+                norm_d = self._get_default_trade_date(date_str)
+                if norm_d != date_str:
+                    date_str = norm_d
+                    self.favorite_stocks_dates[code] = date_str
+                    self._version += 1
+                    should_save = True
+            elif code in self.favorite_stocks:
+                # 自动补全为最近交易日保底，确保可视化联动 100% 能找到添加日期
+                date_str = self._get_default_trade_date()
+                self.favorite_stocks_dates[code] = date_str
+                self._version += 1
+                should_save = True
+
+        if should_save:
+            self.save_to_config()
+        return date_str
 
     def get_favorite_stocks_dates(self) -> dict:
+        should_save = False
         with self._lock:
-            return dict(self.favorite_stocks_dates)
+            default_date = self._get_default_trade_date()
+            for code in self.favorite_stocks:
+                cur_d = self.favorite_stocks_dates.get(code)
+                norm_d = self._get_default_trade_date(cur_d) if cur_d else default_date
+                if cur_d != norm_d:
+                    self.favorite_stocks_dates[code] = norm_d
+                    should_save = True
+            if should_save:
+                self._version += 1
+            res = dict(self.favorite_stocks_dates)
+
+        if should_save:
+            self.save_to_config()
+        return res
 
     def get_favorite_sectors(self) -> Set[str]:
         with self._lock:
@@ -342,3 +418,4 @@ class GlobalFavoriteManager:
     def get_favorite_stocks(self) -> Set[str]:
         with self._lock:
             return set(self.favorite_stocks)
+
