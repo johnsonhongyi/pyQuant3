@@ -1,3 +1,16 @@
+## 2026-07-30 17:15
+- [x] **解决策略上下键浏览卡死在 1、2 轮动的问题 (`ats/ui/multi_period_dialog.py`, `GEMINI.md`)**：
+    - [x] **定位死循环根因**：定位到旧代码在 `run_filter()` 中每次切换策略时，均会强行把当前策略插回 `recent_strategy_ids` 的首位并调用 `_rebuild_strategy_combo()` 清空并重新构建下拉列表。重构后列表将选中策略移至 0 号位（`❶` 标记），并将 `currentIndex` 强制重置为 0，导致按 Down 键选择 1 号位时再次触发重排并重置回 0，引发 0 号位和 1 号位（`❶` 与 `❷`）无线交替死循环。
+    - [x] **解耦动态重排与保持列表物理稳定**：在 `run_filter()` 中保留对 `ui_state['recent_strategy_ids']` 的持久化写入，但**彻底移除 `self._rebuild_strategy_combo()` 的调用**。使得在键盘上下方向键或鼠标滚动浏览策略时，下拉框项的物理位置保持绝对稳定不变，用户可丝滑地按上下键连续浏览全量 25+ 套策略。
+
+## 2026-07-30 17:05
+- [x] **彻底根治多周期策略筛选器 Hit 命中只数不一致、重复策略名冲突与全量 Hit 测算联动 (`ats/ui/multi_period_dialog.py`, `config/multi_period_strategies.json`, `tests/test_multi_period_auto_init.py`, `GEMINI.md`)**：
+    - [x] **重构 Strategy ID 唯一锚定机制**：在 `strategy_combo` 下拉框中通过 `setItemData(idx, strategy_id)` 绑定策略唯一 ID；新增 `_get_current_selected_strategy()` 统一通过 `userData` 字典解构匹配策略，彻底解耦手写正则清洗名称逻辑，消除因策略名包含重复前后缀导致 Lookup 失效或错配的隐患。
+    - [x] **优化 `AllStrategiesHitWorker` 按 ID / Clean Name 双映射存取**：后台 Hit 评估线程完成全策略求值后，在 `_last_hit_results` 中同时以 `strategy_id` 和清洗后的 `name` 作为 Key 缓存命中结果；`_rebuild_strategy_combo` 自动按 `strategy_id` 优先精准反查，确保 25 套策略在下拉菜单与界面各处 Hit 只数 100% 保持一致。
+    - [x] **透传 `allow_auto_init` 保护只读模式**：在 `_test_all_strategies_hit` 实例化 `AllStrategiesHitWorker` 时，透传 `allow_auto_init = not self.chk_readonly.isChecked()`，防止全量测试在只读开启状态下误写盘初始化。
+    - [x] **实现 `_update_hit_status` 实时回写同步**：在常规筛选完成后，`_update_hit_status` 自动将当前筛选结果 `cnt_3` 实时更新写入 `_last_hit_results` 映射字典及 `strategy_combo` 下拉菜单文本，实现单策略筛选与全策略 Hit 测试的数据无缝对齐。
+    - [x] **单元测试全量验证通过**：在 `tests/test_multi_period_auto_init.py` 中补充 `test_strategy_id_lookup_and_hit_alignment` 唯一 ID 命中测试用例，全量单元测试 100% 成功通过。
+
 ## 2026-07-30 16:31
 - [x] **捕获并彻底摧毁 1748ms `tbl_render` 全量特征 DOM 渲染终极元凶 (`ats/ui/main_window.py`, `GEMINI.md`)**：
     - [x] **分段耗时铁证剖析**：借助植入的 `PERF-BREAKDOWN` 打点，发现 `hdr` (0.39ms)、`title` (0.15ms)、`feat_build` (0.37ms)、`combo_pct` (6.72ms)、`filter_status` (0.39ms) 均已压缩至 0 毫秒级，而唯独 **`tbl_render` 狂占 1748.36ms**！

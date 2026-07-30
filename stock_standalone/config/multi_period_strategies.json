@@ -697,7 +697,7 @@
     },
     {
       "id": "1785043647041",
-      "name": "★ 大周期SWL/MA20支撑+2D地量整固企稳 [提前低吸布局] [2026-07-26]",
+      "name": "★ 大周期SWL/MA20支撑+2D地量整固企稳 [提前低吸布局] (月线增强) [2026-07-26]",
       "conditions": {
         "3M": {
           "filter": "close >= 0.95 * SWL or close > lower or close > ma5d",
