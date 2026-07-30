@@ -227,6 +227,8 @@ class AllStrategiesHitWorker(QThread):
 
             # 2. 确保各个勾选周期的数据已载入
             import contextlib
+            with self.engine.lock:
+                self.engine._missing_periods.clear()
             for period in self.active_periods:
                 if self.force_reload or period not in self.engine._period_dfs or self.engine._period_dfs[period].empty:
                     self.progress.emit(f"正在同步 {period} 周期特征数据...")
@@ -347,20 +349,23 @@ class MultiPeriodWorker(QThread):
                     self.period_cache_ts[period] = cache_ts
                     self.period_cache_ts[p_norm] = cache_ts
 
-                is_cache_valid = self._is_cache_valid(cache_ts)
+                # 🛡️ [全周期防死锁自愈机制]
+                # 若某周期 (d, 2d, 3d, w, m 等) 曾因开盘瞬间/临时波动被划入 _missing_periods，
+                # 在后台刷新时全自动解除 missing 锁定，给予其重新加载的机会，彻底根治开盘 hit 信号丢失死锁！
+                if is_missing:
+                    _lock = self.engine.lock if hasattr(self.engine, "lock") else threading.RLock()
+                    with _lock:
+                        self.engine._missing_periods.pop(period, None)
+                        self.engine._missing_periods.pop(p_norm, None)
+                    is_missing = False
 
-                if is_missing and not is_force_init:
-                    # 已知无数据，跳过（历史 _missing_periods 记录保持原语义）
-                    self.progress.emit(f"⚡ [{period}] 命中内存缓存(已知无数据，跳过)")
-                    continue
-
-                if has_cache and is_cache_valid and not self.force_reload:
+                if has_cache and self._is_cache_valid(cache_ts) and not self.force_reload:
                     # ── 1. 内存缓存有效且未超时（<15分钟）：直接极速复用，不重新计算 ──
                     self.progress.emit(f"⚡ [{period}] 命中内存缓存 (极速复用)")
                     continue
 
-                elif has_cache and not is_force_init:
-                    # ── 2. 内存有缓存，但已超时（>15分钟或强制刷新）：增量合并 top_now 并重算衍生指标 ──
+                elif has_cache and not is_force_init and not self.force_reload:
+                    # ── 2. 内存有缓存，但已超时（>15分钟）：增量合并 top_now 并重算衍生指标 ──
                     self.progress.emit(f"⚡ [{period}] 缓存已超时(>15分钟)，合并实时行情并重算衍生指标...")
                     try:
                         if self.top_now is not None and not self.top_now.empty:

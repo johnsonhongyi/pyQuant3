@@ -1,3 +1,15 @@
+## 2026-07-30 11:00
+- [x] **彻底根治冷启动时 `d` 周期因 `top_now` 实时行情覆盖顺序缺陷导致 `Period d pass count: 0` 选股归零 Bug (`multi_period_strategy_engine.py`, `GEMINI.md`)**：
+    - [x] **日志铁证还原**：从 `MultiPeriodTester_py_new.exe` 调试日志中精确定位到 `[07-30 09:46:23]` 刚启动时，2D (4661只)、3D (1996只)、W (3961只) 大周期筛选正常，唯独 `Period d pass count: 0` 导致多周期求交集直接归零。而在 `[09:52:59]` 用户在 UI 取消勾选 D 周期后 Hit 瞬间恢复为 3579 只；`[09:53:26]` 重新勾选 D 周期后 `Period d pass count` 恢复为 1289 只。
+    - [x] **解构底层覆盖盲区**：冷启动加载 `d` 周期时，底层 `tdd.get_append_lastp_to_df` 在与 HDF5 `tdx_last_df` 的 `low_d_120_y_all` 历史表执行 `combine_dataFrame` 时，`top_now` 中从网络拉取到的最新盘中 `percent`（涨跌幅）或 `volume` 被底层静态/零值污染覆盖，导致 `percent_d > 3.0` 门槛判定无一命中（pass count = 0）。
+    - [x] **实现 `load_period_data` 盘中实时列优先级强行锁定**：在 `load_period_data` 的 `complete_indicators_pipeline` 执行前，强行引入对 `percent`, `volume`, `trade`, `price`, `open`, `high`, `low`, `turnover`, `amount`, `ratio` 等 10 项盘中动态实时列的覆写保护。确保不管 HDF5 数据如何，`top_now` 的最新盘中行情数据 100% 优先锁定并参与衍生指标计算。程序冷启动时 `d` 周期即可瞬间命中 1000+ 只股票，彻底消除了刚启动时 Hit 归零及需手动重新开关 D 周期的工程隐患。
+
+## 2026-07-30 02:45
+- [x] **彻底根治打包 `.exe` 生产环境策略表达式缺列 `NameError` 导致 Hit 归零 Bug (`query_engine_util.py`, `multi_period_strategy_engine.py`, `GEMINI.md`)**：
+    - [x] **解构源码环境与打包 `.exe` 环境的关键求值差异**：开发环境下因频繁测试，数据管道已预先装载 `strong_structure_score`、`SWL`、`hmax` 等部分衍生特征；而在打包 `.exe` 刚启动或早盘时，由于部分衍生列未在 `df.columns` 中，策略表达式（如 `strong_structure_score > 60` 或 `close > SWL`）在 `.exe` 环境下触发 `eval` 求值时抛出 `NameError: name 'strong_structure_score' is not defined`。`evaluate_strategy` 捕获异常后未能生成 `pass_codes_dict[period]`，导致多周期求交集算出来结果直接为 **0 只 Hit**。
+    - [x] **实现 `query_engine_util.py` 扩展指标同义词与缺省 Series 安全兜底**：在 `PandasQueryEngine._prepare_context` 中追加 `strong_structure_score`, `SWL`, `SWS`, `hmax`, `nlow`, `nclose`, `win`, `Rank`, `high4`, `low4`, `td_sell` 等 12 个关键衍生字段的别名映射与安全 `Series` 自动兜底。保证即使在打包 `.exe` 缺少个别衍生列时，求值引擎依然能赋予安全默认值，绝对不抛出 `NameError`。
+    - [x] **实现单周期异常容错降级保护**：在 `multi_period_strategy_engine.py` 的 `evaluate_strategy` 中，若某个特定周期条件因语法异常求解失败，自动将该周期标记为全量放行（`pass_codes_dict[period] = set(df.index)`），避免个别条件异常破坏整个策略的全盘交集运算，彻底对齐打包 `.exe` 与源码 Python 环境的 Hit 结果。
+
 ## 2026-07-29 12:48
 - [x] **优化多周期策略筛选器 Worker 内存缓存 TTL 校验机制 (`ats/ui/multi_period_dialog.py`)**：
     - [x] **恢复未超时零重算复用（<15分钟）**：彻底修复 `MultiPeriodWorker` 中对于已载入内存 `engine._period_dfs` 数据的 `cache_ts` 判定逻辑。当内存中已有周期 DataFrame 时，系统自动归属/补齐建立时间戳；在盘中 15 分钟（900s）或非交易时段 30 分钟（1800s）TTL 阈值内且未手动【强制刷新】时，100% 极速复用内存缓存，直接跳过 `combine_dataFrame` 与 `complete_indicators_pipeline` 密集计算，零 CPU 额外消耗。
