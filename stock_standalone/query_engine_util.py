@@ -270,7 +270,7 @@ class PandasQueryEngine:
             'lastdu': ['lastdu4', 'lastdu1', 'lastdu'], 'lastld': ['lastld4', 'lastl1d', 'lastld1', 'lastld'],
             'resist': ['upper', 'high4', 'max5', 'resist'], 'support': ['lower', 'low4', 'min5', 'support'],
             'green': ['gren', 'green'], 'red': ['red'],
-            # ===== 趋势通道指标 (calc_trend_channel) =====
+            # ===== 扩展趋势与结构定位指标安全映射 =====
             'ch_upper': ['ch_upper', 'channel_upper', 'ch_up'],
             'ch_mid': ['ch_mid', 'channel_mid', 'ch_middle'],
             'ch_lower': ['ch_lower', 'channel_lower', 'ch_dn'],
@@ -279,7 +279,6 @@ class PandasQueryEngine:
             'ch_pos': ['ch_pos', 'channel_pos', 'ch_pct'],
             'ch_dir': ['ch_dir', 'channel_dir'],
             'ch_width': ['ch_width', 'channel_width'],
-            # ===== Fibonacci 动态支撑阻力 =====
             'fib_high': ['fib_high', 'fib_top'],
             'fib_low': ['fib_low', 'fib_bottom'],
             'fib_19': ['fib_19', 'fib19'],
@@ -287,7 +286,6 @@ class PandasQueryEngine:
             'fib_50': ['fib_50', 'fib50', 'fib_mid'],
             'fib_61': ['fib_61', 'fib61'],
             'fib_80': ['fib_80', 'fib80'],
-            # ===== 趋势信号 =====
             'trend_dir': ['trend_dir', 'trend_direction'],
             'sig_bottom': ['sig_bottom', 'bottom_signal'],
             'sig_top': ['sig_top', 'top_signal'],
@@ -295,6 +293,12 @@ class PandasQueryEngine:
             'sig_escape': ['sig_escape', 'escape_signal'],
             'sig_start': ['sig_start', 'start_signal'],
             'sk_val': ['sk_val'], 'sd_val': ['sd_val'], 'rsi6': ['rsi6'],
+            'strong_structure_score': ['strong_structure_score', 'structure_score', 'score'],
+            'SWL': ['SWL', 'swl', 'ma5d'], 'SWS': ['SWS', 'sws', 'ma10d'],
+            'hmax': ['hmax', 'lasth1d', 'high'], 'nlow': ['nlow', 'lastl1d', 'low'],
+            'nclose': ['nclose', 'lastp1d', 'close'], 'win': ['win', 'win_score'],
+            'Rank': ['Rank', 'rank'], 'high4': ['high4', 'lasth1d', 'high'],
+            'low4': ['low4', 'lastl1d', 'low'], 'td_sell': ['td_sell'], 'td_buy': ['td_buy'],
         }
         for i in range(0, 10):
             last_macd_idx = min(max(i, 1), 6)
@@ -381,7 +385,46 @@ class PandasQueryEngine:
                         if eq not in ctx or ctx[eq] is None:
                             ctx[eq] = df[col]
 
-        # 动态标记补齐
+        # 动态标记与缺省指标兜底补全 (防止 exe 环境由于缺列抛出 NameError 导致 Hit 归零)
+        default_fallbacks = {
+            'strong_structure_score': 50.0,
+            'win': 1, 'Rank': 100, 'td_sell': 0, 'td_buy': 0,
+            'SWL': ctx.get('ma5d'), 'SWS': ctx.get('ma10d'),
+            'hmax': ctx.get('high'), 'nlow': ctx.get('low'),
+            'nclose': ctx.get('close'), 'high4': ctx.get('high'),
+            'low4': ctx.get('low'), 'dff2': 0.0, 'dff3': 0.0
+        }
+        for fb_key, fb_val in default_fallbacks.items():
+            if fb_key not in ctx or ctx.get(fb_key) is None:
+                if isinstance(fb_val, pd.Series):
+                    ctx[fb_key] = fb_val
+                elif fb_val is not None:
+                    ctx[fb_key] = pd.Series(fb_val, index=df.index)
+                else:
+                    ctx[fb_key] = pd.Series(0, index=df.index)
+
+        # 📌 _d 后缀别名兜底：将策略中 close_d / open_d / high_d 等写法自动映射至实际列
+        # 消除二次过滤条件中因带 _d 后缀书写习惯导致的 NameError / Fallback 告警
+        _d_suffix_map = {
+            'close_d':   ctx.get('close'),
+            'open_d':    ctx.get('open'),
+            'high_d':    ctx.get('high'),
+            'low_d':     ctx.get('low'),
+            'volume_d':  ctx.get('volume'),
+            'percent_d': ctx.get('percent'),
+            'trade_d':   ctx.get('trade') if ctx.get('trade') is not None else ctx.get('close'),
+            'ratio_d':   ctx.get('ratio'),
+            'amount_d':  ctx.get('amount'),
+            'turnover_d':ctx.get('turnover'),
+            'price_d':   ctx.get('trade') if ctx.get('trade') is not None else ctx.get('close'),
+        }
+        for alias, src in _d_suffix_map.items():
+            if alias not in ctx or ctx.get(alias) is None:
+                if isinstance(src, pd.Series):
+                    ctx[alias] = src
+                else:
+                    ctx[alias] = pd.Series(0, index=df.index)
+
         if 'green' not in ctx or ctx.get('green') is None:
             if is_multi:
                 p0 = df.columns.levels[0][0]

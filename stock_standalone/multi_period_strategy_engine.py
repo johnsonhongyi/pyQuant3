@@ -55,25 +55,40 @@ class MultiPeriodStrategyEngine:
                 logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
                 df = None
 
-        # 3. 如果处于强制刷新模式 (force_reload=True) 或只读未命中且允许初始化：
+        # 3. 如果处于强制刷新模式 (force_reload=True) 或只读未命中/缺少历史底库 ('lastp1d' 缺失)：
         if force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else [])):
-            if force_reload:
-                try:
-                    logger.info(f"⚡ [INIT] 强制刷新/自动初始化底层 [{res_period}] 数据 (dl={dl}, end={end})...")
-                    with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
-                        df, lastp_df = tdd.get_append_lastp_to_df(
-                            top_now,
-                            dl=dl,
-                            resample=res_period,
-                            readonly=False,
-                            end=end
-                        )
-                except Exception as e:
-                    logger.error(f"Failed to initialize period [{res_period}]: {e}")
+            # 🛡️ 线上/冷启动无 HDF5 底库保护：当缺失 lastp1d 历史表时，全自动允许一次写盘初始化，确保建立 120 天历史 K 线库
+            try:
+                logger.info(f"⚡ [AUTO-INIT] 底层 HDF5 历史库缺失/初始化 [{res_period}]，全自动补全写盘 (dl={dl}, end={end})...")
+                with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
+                    df, lastp_df = tdd.get_append_lastp_to_df(
+                        top_now,
+                        dl=dl,
+                        resample=res_period,
+                        readonly=False,
+                        end=end
+                    )
+            except Exception as e:
+                logger.error(f"Failed to initialize period [{res_period}]: {e}")
+                if res_period == 'd' and top_now is not None and not top_now.empty:
+                    logger.info("🛡️ [READONLY-FALLBACK] HDF5 init failed, falling back to top_now snapshot...")
+                    df = top_now.copy()
+                else:
                     df = None
 
-        # 3. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
-        if df is not None and not df.empty and 'lastp1d' in df.columns:
+        # 4. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
+        if df is not None and not df.empty and ('lastp1d' in df.columns or res_period == 'd'):
+            # 🛡️ 盘中动态实时数据优先级强行锁定：防止 HDF5 历史旧值（如静态 percent=0）覆盖最新实时行情
+            if top_now is not None and not top_now.empty:
+                rt_cols = ['percent', 'volume', 'trade', 'price', 'open', 'high', 'low', 'turnover', 'amount', 'ratio']
+                for col in rt_cols:
+                    if col in top_now.columns:
+                        top_series = top_now[col].reindex(df.index)
+                        if col in df.columns:
+                            df[col] = top_series.fillna(df[col])
+                        else:
+                            df[col] = top_series
+
             df = complete_indicators_pipeline(df, logger, resample=res_period)
             with self.lock:
                 self._period_dfs[res_period] = df
@@ -107,7 +122,14 @@ class MultiPeriodStrategyEngine:
         
         for period in active_periods:
             p_norm = str(period).lower().strip()
-            if p_norm in self._missing_periods or period in self._missing_periods:
+            
+            # 🛡️ 优先检查内存中是否已有有效 DataFrame，若有则自动清理过期的 missing 标记
+            df = self._period_dfs.get(p_norm, self._period_dfs.get(period))
+            if df is not None and not df.empty:
+                with self.lock:
+                    self._missing_periods.pop(p_norm, None)
+                    self._missing_periods.pop(period, None)
+            elif p_norm in self._missing_periods or period in self._missing_periods:
                 reason = self._missing_periods.get(p_norm, self._missing_periods.get(period))
                 # 缺失数据的周期：自适应跳过过滤，但在 stats 中记录
                 self.last_stats["periods"][period] = {
@@ -118,7 +140,6 @@ class MultiPeriodStrategyEngine:
                 logger.warning(f"[ADAPTIVE] Period [{period}] has no data (reason: {reason}), skipping filter for this period.")
                 continue
 
-            df = self._period_dfs.get(p_norm, self._period_dfs.get(period))
             if df is None or df.empty:
                 logger.warning(f"Period {period} (norm: {p_norm}) data not found or empty.")
                 continue
@@ -169,6 +190,9 @@ class MultiPeriodStrategyEngine:
                 logger.info(f"Period {period} pass count: {pass_cnt}, missing(exempt): {len(missing_codes)}")
             except Exception as e:
                 logger.error(f"Error evaluating period {period} condition: {e}")
+                # 出现个别条件语法或求解异常时降级放行全量，防止误剔除导致全盘 Hit 归零
+                if df_clean is not None and not df_clean.empty:
+                    pass_codes_dict[period] = set(df_clean.index)
                 
         if not pass_codes_dict:
             # 如果所有勾选的周期在策略中都没有配置过滤规则，默认返回全市场股票且结果中这些周期通过列设为 True
