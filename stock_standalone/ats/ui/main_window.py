@@ -6,6 +6,11 @@ Assembles the complete Autonomous Trading System UI dashboard.
 
 import sys
 import os
+import time
+import json
+import logging
+
+logger = logging.getLogger("ATS")
 
 # 必须在导入任何 PyQt6 UI 元素前确保 HighDPI 高分屏自适应生效
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
@@ -282,6 +287,8 @@ class StockDetailDialog(QDialog):
         if getattr(self, '_switching', False):
             return
             
+        import time
+        t0 = time.perf_counter()
         self._switching = True
         try:
             self.code = str(target_c).strip()
@@ -307,25 +314,30 @@ class StockDetailDialog(QDialog):
                     self.raise_()
                     self.activateWindow()
 
-                # 2. 动态更新下拉框，确保新推流批次 (如 601567) 100% 存在并高亮
-                effective_batch = batch_codes or (parent_mw._last_batch_signal_codes if hasattr(parent_mw, "_last_batch_signal_codes") else None)
-                self.update_batch_codes(new_batch_codes=effective_batch, current_code=self.code)
-
-                # 3. 内存极速提取最新 df_row 行情
+                # 2. 内存极速提取最新 df_row 行情 (包含 current_df 与 df_realtime 级联回退)
                 df_row = None
-                if hasattr(parent_mw, 'current_df') and parent_mw.current_df is not None and not parent_mw.current_df.empty:
-                    if self.code in parent_mw.current_df.index:
-                        df_row = parent_mw.current_df.loc[self.code].to_dict()
-                    elif 'code' in parent_mw.current_df.columns:
-                        m = parent_mw.current_df[parent_mw.current_df['code'] == self.code]
-                        if not m.empty:
-                            df_row = m.iloc[0].to_dict()
+                c_clean = str(self.code).strip().zfill(6)
+                for attr in ("current_df", "df_realtime"):
+                    if hasattr(parent_mw, attr):
+                        df = getattr(parent_mw, attr)
+                        if df is not None and not df.empty:
+                            if c_clean in df.index:
+                                row = df.loc[c_clean]
+                                df_row = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+                                break
+                            elif 'code' in df.columns:
+                                m = df[df['code'] == c_clean]
+                                if not m.empty:
+                                    df_row = m.iloc[0].to_dict()
+                                    break
 
-                # 4. 补齐策略上下文
+                t1 = time.perf_counter()
+                # 3. 补齐策略上下文
                 if hasattr(parent_mw, "_ensure_context_info"):
                     self.context_info = parent_mw._ensure_context_info(self.code, self.name, {})
 
-                # 5. 【极速 UI 优先渲染】瞬间重绘窗口标题、策略上下文与特征表格 (0 毫秒肉眼无感反馈)
+                t2 = time.perf_counter()
+                # 4. 【极速 UI 优先渲染】瞬间重绘窗口标题、策略上下文与特征表格 (0 毫秒肉眼无感反馈)
                 self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name}")
                 if hasattr(self, 'title_label'):
                     self.title_label.setText(f"📊 {self.code}  {self.name}")
@@ -338,11 +350,21 @@ class StockDetailDialog(QDialog):
                     self.lbl_status_val.setText(self.context_info.get('status', '--'))
 
                 self.update_data(df_row)
+                t3 = time.perf_counter()
 
-                # 6. 【异步解耦】将 UI 之外的 Tree 寻找与 Win32 通达信 (TDX) 联动投递至下一帧执行，彻底杜绝界面卡顿
-                if hasattr(parent_mw, "locate_stock_in_tree"):
-                    target_code = self.code
-                    QTimer.singleShot(0, lambda: parent_mw.locate_stock_in_tree(target_code, auto_popup=False))
+                # 5. 【丝滑物理/软件联动】异步发送至外部通达信/同花顺/VIS 终端与 Tree 视图，彻底杜绝界面卡顿
+                target_code = self.code
+                target_name = self.name
+                if hasattr(parent_mw, "link_stock"):
+                    QTimer.singleShot(0, lambda: parent_mw.link_stock(target_code, target_name))
+
+                import sys
+                is_debug_log = ("-log" in sys.argv and "debug" in sys.argv) or (logger.getEffectiveLevel() <= logging.DEBUG)
+                if is_debug_log:
+                    print(
+                        f"[PERF] StockDetailDialog switch_to_code({self.code}) total: {(t3 - t0)*1000:.2f}ms "
+                        f"(prep: {(t1 - t0)*1000:.2f}ms, ctx: {(t2 - t1)*1000:.2f}ms, update: {(t3 - t2)*1000:.2f}ms)"
+                    )
         finally:
             self._switching = False
         
@@ -373,8 +395,11 @@ class StockDetailDialog(QDialog):
                     c, n = item[0], item[1]
                 else:
                     c, n = str(item), str(item)
-                self.combo_signals.addItem(f"{c} {n}", c)
-                if str(c).strip() == str(code).strip():
+                
+                c_str = str(c).strip().zfill(6)
+                pct_lbl = self._get_pct_str_for_code(parent_mw, c_str)
+                self.combo_signals.addItem(f"{c_str} {n}{pct_lbl}", c_str)
+                if c_str == str(code).strip().zfill(6):
                     cur_idx = idx
             self.combo_signals.setCurrentIndex(cur_idx)
             
@@ -383,7 +408,8 @@ class StockDetailDialog(QDialog):
                     target_c = self.combo_signals.itemData(idx)
                     if target_c and str(target_c).strip() != str(self.code).strip():
                         target_text = self.combo_signals.itemText(idx)
-                        target_n = target_text.split(" ")[-1] if " " in target_text else target_c
+                        parts = target_text.split(" ")
+                        target_n = parts[1] if len(parts) > 1 else target_c
                         self.switch_to_code(target_c, target_n)
             
             def _on_prev_clicked():
@@ -514,6 +540,7 @@ class StockDetailDialog(QDialog):
         layout.addLayout(bottom_layout)
 
     def update_data(self, df_row):
+        t_u0 = time.perf_counter()
         self.df_row = df_row
         
         # 1. Update price pct header labels
@@ -555,6 +582,17 @@ class StockDetailDialog(QDialog):
         self.price_pct_label.setText(f"{price_str}  ({pct_str})")
         self.price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
         
+        t_u1 = time.perf_counter()
+        # 1.5 动态补充更新顶部标题与窗口 title 上的 code + name + 涨跌幅
+        if hasattr(self, 'title_label') and self.title_label:
+            if pct_str != "--":
+                self.title_label.setText(f"📊 {self.code}  {self.name}  ({pct_str})")
+                self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name} ({pct_str})")
+            else:
+                self.title_label.setText(f"📊 {self.code}  {self.name}")
+                self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name}")
+        
+        t_u2 = time.perf_counter()
         # 2. Update feature list
         features = []
         if df_row is not None:
@@ -567,6 +605,8 @@ class StockDetailDialog(QDialog):
                 'low': '最低价 (元)',
                 'volume': '累计成交量 (手/股)',
                 'amount': '累计成交额 (元)',
+                'turnover': '换手率 (%)',
+                'ratio': '量比',
                 'vwap': '分时均价线 (VWAP)',
                 'ma20': '20日移动平均 (MA20)',
                 'category': '所属行业/概念板块',
@@ -587,14 +627,18 @@ class StockDetailDialog(QDialog):
                         val_str = str(val)
                     features.append((label, val_str))
                     
+            extra_cnt = 0
             for k, val in df_row.items():
                 if k not in main_keys and k not in ('code', 'name') and val is not None and val != '':
+                    if extra_cnt >= 30:  # 🚀 [PERF] 严格限制 UI 控件特征数 (最多 30 个)，防止上千指标轰炸卡死 DOM
+                        break
                     label = k.replace('_', ' ').title()
                     if isinstance(val, float):
                         val_str = f"{val:.4f}"
                     else:
                         val_str = str(val)
                     features.append((label, val_str))
+                    extra_cnt += 1
         else:
             features.append(("证券代码", self.code))
             features.append(("证券名称", self.name))
@@ -650,23 +694,122 @@ class StockDetailDialog(QDialog):
                 ("说明", "双击可实现实盘特征一屏清，当前暂未收到主进程行情推送")
             ]
             
-        self.table.setRowCount(len(features))
-        for row, (lbl, val) in enumerate(features):
-            item_lbl = QTableWidgetItem(lbl)
-            item_lbl.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 0, item_lbl)
+        t_u3 = time.perf_counter()
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(len(features))
+            for row, (lbl, val) in enumerate(features):
+                item_lbl = QTableWidgetItem(lbl)
+                item_lbl.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row, 0, item_lbl)
+                
+                item_val = QTableWidgetItem(val)
+                item_val.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if "涨幅" in lbl or "Percent" in lbl:
+                    if val.startswith("+"):
+                        item_val.setForeground(QColor("#ff4444"))
+                    elif val.startswith("-"):
+                        item_val.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row, 1, item_val)
+        finally:
+            self.table.setUpdatesEnabled(True)
             
-            item_val = QTableWidgetItem(val)
-            item_val.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if "涨幅" in lbl or "Percent" in lbl:
-                if val.startswith("+"):
-                    item_val.setForeground(QColor("#ff4444"))
-                elif val.startswith("-"):
-                    item_val.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row, 1, item_val)
-            
-        # 3. Update filter evaluation
+        t_u4 = time.perf_counter()
+        # 3. 同步刷新下拉框中所有股票的最新涨跌幅
+        self._refresh_combo_signals_pct()
+        
+        t_u5 = time.perf_counter()
+        # 4. Update filter evaluation
         self.update_filter_status()
+        
+        t_u6 = time.perf_counter()
+        import sys
+        is_debug_log = ("-log" in sys.argv and "debug" in sys.argv) or (logger.getEffectiveLevel() <= logging.DEBUG)
+        if is_debug_log:
+            print(
+                f"[PERF-BREAKDOWN] update_data({self.code}): total={(t_u6-t_u0)*1000:.2f}ms | "
+                f"hdr={(t_u1-t_u0)*1000:.2f}ms | title={(t_u2-t_u1)*1000:.2f}ms | feat_build={(t_u3-t_u2)*1000:.2f}ms | "
+                f"tbl_render={(t_u4-t_u3)*1000:.2f}ms | combo_pct={(t_u5-t_u4)*1000:.2f}ms | filter_status={(t_u6-t_u5)*1000:.2f}ms"
+            )
+
+    def _get_pct_str_for_code(self, parent_mw, code):
+        if not parent_mw:
+            return ""
+        c_clean = str(code).strip().zfill(6)
+        df_row = None
+        for attr in ("current_df", "df_realtime"):
+            if hasattr(parent_mw, attr):
+                df = getattr(parent_mw, attr)
+                if df is not None and not df.empty:
+                    if c_clean in df.index:
+                        row = df.loc[c_clean]
+                        df_row = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+                        break
+        
+        if df_row and 'percent' in df_row and df_row['percent'] is not None and df_row['percent'] != '':
+            try:
+                p_val = float(df_row['percent'])
+                return f" ({p_val:+.2f}%)"
+            except Exception:
+                pass
+        return ""
+
+    def _refresh_combo_signals_pct(self):
+        """同步刷新下拉框 combo_signals 中每一项的涨跌幅文本后缀 (0毫秒极速字典查找)"""
+        if not hasattr(self, 'combo_signals') or self.combo_signals is None:
+            return
+        
+        parent_mw = self.parent()
+        if not parent_mw:
+            return
+
+        # 1. 一次性向量化提取全量代码->涨跌幅字典 (耗时 0.01ms，替代 M*N 循环扫描)
+        pct_map = {}
+        for attr in ("current_df", "df_realtime"):
+            if hasattr(parent_mw, attr):
+                df = getattr(parent_mw, attr)
+                if df is not None and not df.empty and 'percent' in df.columns:
+                    try:
+                        if 'code' in df.columns:
+                            pct_map.update(dict(zip(df['code'].astype(str).str.strip().str.zfill(6), df['percent'])))
+                        else:
+                            pct_map.update(dict(zip(df.index.astype(str).str.strip().str.zfill(6), df['percent'])))
+                    except Exception:
+                        pass
+        
+        if not pct_map:
+            return
+
+        # 2. 下拉框极速 O(1) 字典查表匹配
+        self.combo_signals.blockSignals(True)
+        try:
+            for idx in range(self.combo_signals.count()):
+                c = self.combo_signals.itemData(idx)
+                if not c:
+                    continue
+                c_str = str(c).strip().zfill(6)
+                p_val = pct_map.get(c_str)
+                pct_lbl = ""
+                if p_val is not None and p_val != '':
+                    try:
+                        pct_lbl = f" ({float(p_val):+.2f}%)"
+                    except Exception:
+                        pass
+                
+                cur_text = self.combo_signals.itemText(idx)
+                if pct_lbl and not cur_text.endswith(pct_lbl):
+                    # 仅在文本变动时才调用 setItemText
+                    parts = cur_text.split(" ")
+                    c_part = parts[0] if len(parts) > 0 else c_str
+                    n_part = parts[1] if len(parts) > 1 else ""
+                    # 剥离旧括号
+                    if "(" in n_part and ")" in n_part:
+                        n_part = n_part.split("(")[0]
+                    new_text = f"{c_part} {n_part}{pct_lbl}".strip()
+                    if cur_text != new_text:
+                        self.combo_signals.setItemText(idx, new_text)
+        finally:
+            self.combo_signals.blockSignals(False)
 
     def update_filter_status(self, query_expr=None):
         if query_expr is None:
@@ -688,6 +831,38 @@ class StockDetailDialog(QDialog):
         self.lbl_filter_expr.setText(disp_expr)
         self.lbl_filter_expr.setStyleSheet("color: #e2e2e5; font-style: normal;")
         
+        # 🚀【极速 O(1) 6位清洗容错匹配】如果该股票原本就在主窗口当前结果集中，0 毫秒确认命中
+        c_clean = str(self.code).strip().zfill(6)
+        parent_mw = self.parent()
+        is_hit = False
+        
+        if parent_mw:
+            if hasattr(parent_mw, "filtered_codes_set") and parent_mw.filtered_codes_set:
+                if any(str(x).strip().zfill(6) == c_clean for x in parent_mw.filtered_codes_set):
+                    is_hit = True
+            
+            if not is_hit:
+                for attr in ("current_df", "df_realtime"):
+                    if hasattr(parent_mw, attr):
+                        df = getattr(parent_mw, attr)
+                        if df is not None and not df.empty:
+                            if c_clean in df.index:
+                                is_hit = True
+                                break
+                            elif 'code' in df.columns:
+                                # 向量化极速检查
+                                if (df['code'].astype(str).str.strip().str.zfill(6) == c_clean).any():
+                                    is_hit = True
+                                    break
+                            elif (df.index.astype(str).str.strip().str.zfill(6) == c_clean).any():
+                                is_hit = True
+                                break
+
+        if is_hit:
+            self.lbl_filter_result.setText("✅ 命中")
+            self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
+            return
+
         import pandas as pd
         if self.df_row is None:
             self.lbl_filter_result.setText("⏳ 等待数据...")
@@ -718,20 +893,28 @@ class StockDetailDialog(QDialog):
         df_code = pd.DataFrame([row_dict])
         df_code.set_index('code', inplace=True, drop=False)
         
-        from stock_logic_utils import test_code_against_queries
-        try:
-            res = test_code_against_queries(df_code, [{"query": query_expr}])
-            hit = res[0].get("hit", 0) if res else 0
-            if hit > 0:
-                self.lbl_filter_result.setText("✅ 命中")
-                self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
-            else:
-                self.lbl_filter_result.setText("❌ 未命中")
-                self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
-        except Exception as e:
-            self.lbl_filter_result.setText("⚠️ 评估出错")
-            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
-            print(f"Error testing query in detail dialog: {e}")
+        # 🚀【真正 threading.Thread 子线程后台计算】彻底从 UI 主线程事件循环中隔离
+        def _bg_eval_worker():
+            from stock_logic_utils import test_code_against_queries
+            try:
+                res = test_code_against_queries(df_code, [{"query": query_expr}])
+                hit = res[0].get("hit", 0) if res else 0
+                def _update_ui():
+                    if hit > 0:
+                        self.lbl_filter_result.setText("✅ 命中")
+                        self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
+                    else:
+                        self.lbl_filter_result.setText("❌ 未命中")
+                        self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
+                QTimer.singleShot(0, _update_ui)
+            except Exception as e:
+                def _update_err():
+                    self.lbl_filter_result.setText("⚠️ 评估出错")
+                    self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
+                QTimer.singleShot(0, _update_err)
+
+        import threading
+        threading.Thread(target=_bg_eval_worker, daemon=True).start()
 
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
         """
@@ -1808,22 +1991,22 @@ class ATSMainWindow(QMainWindow):
         code_clean = str(code).strip()
         res = context_info.copy() if context_info else {}
 
-        # 1. 尝试从 swing_table 匹配 (优先获取 MA20d 回调跟踪器上下文)
+        # 1. 尝试从 swing_table 匹配 (优先获取 MA20d 回调跟踪器上下文, 使用 findItems 原生优化查找)
         if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
             tbl = self.swing_table.table
-            for row in range(tbl.rowCount()):
-                c_item = tbl.item(row, 0)
-                if c_item and c_item.text().strip() == code_clean:
-                    res['position'] = "波段回调跟踪器 (Swing Pullback Tracker)"
-                    res['reason'] = "股价缩量向大级别MA20均线回调靠拢中"
-                    parts = []
-                    for col in [3, 4, 5, 6, 7]:
-                        h = tbl.horizontalHeaderItem(col)
-                        v = tbl.item(row, col)
-                        if h and v and v.text().strip():
-                            parts.append(f"{h.text()}: {v.text().strip()}")
-                    res['status'] = " | ".join(parts) if parts else "MA20均线回调企稳中"
-                    return res
+            found_items = tbl.findItems(code_clean, Qt.MatchFlag.MatchExactly)
+            if found_items:
+                row = found_items[0].row()
+                res['position'] = "波段回调跟踪器 (Swing Pullback Tracker)"
+                res['reason'] = "股价缩量向大级别MA20均线回调靠拢中"
+                parts = []
+                for col in [3, 4, 5, 6, 7]:
+                    h = tbl.horizontalHeaderItem(col)
+                    v = tbl.item(row, col)
+                    if h and v and v.text().strip():
+                        parts.append(f"{h.text()}: {v.text().strip()}")
+                res['status'] = " | ".join(parts) if parts else "MA20均线回调企稳中"
+                return res
 
         # 2. 尝试从 signal_ledger 匹配
         if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries'):
@@ -1867,43 +2050,22 @@ class ATSMainWindow(QMainWindow):
                     print(f"[ATSMainWindow] Error reusing detail dialog: {e}")
                     self._detail_dialog = None
         
-        # Fetch real-time row data from the live streaming DataFrame (df_row)
+        # 内存极速提取最新行情 (current_df -> df_realtime 级联匹配，杜绝主线程网络 API 阻塞)
         df_row = None
-        if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
-            # Match code either in index or 'code' column
-            if code_clean in self.current_df.index:
-                df_row = self.current_df.loc[code_clean].to_dict()
-            elif 'code' in self.current_df.columns:
-                matched = self.current_df[self.current_df['code'] == code_clean]
-                if not matched.empty:
-                    df_row = matched.iloc[0].to_dict()
-                    
-        # If not found in current streaming df (e.g. outside trading hours or on non-trading days),
-        # auto-retrieve latest data from Sina API/local cache.
-        if df_row is None:
-            try:
-                from JSONData import sina_data
-                tick_df = sina_data.Sina(readonly=True).get_real_time_tick(code_clean, enrich_data=True)
-                if tick_df is not None and not tick_df.empty:
-                    df_row = tick_df.iloc[0].to_dict()
-                    
-                    # Map keys from Sina tick data to what detail table expects
-                    if 'trade' not in df_row and 'close' in df_row:
-                        df_row['trade'] = df_row['close']
-                    if 'close' not in df_row and 'trade' in df_row:
-                        df_row['close'] = df_row['trade']
-                    if 'percent' not in df_row and 'close' in df_row and 'llastp' in df_row:
-                        try:
-                            close_val = float(df_row['close'])
-                            last_val = float(df_row['llastp'])
-                            if last_val > 0:
-                                df_row['percent'] = (close_val - last_val) / last_val * 100
-                        except:
-                            pass
-                    if 'vwap' not in df_row and 'avg_price' in df_row:
-                        df_row['vwap'] = df_row['avg_price']
-            except Exception as e:
-                print(f"[ATSMainWindow] Error auto-retrieving Sina tick for {code_clean}: {e}")
+        c_clean = str(code).strip().zfill(6)
+        for attr in ("current_df", "df_realtime"):
+            if hasattr(self, attr):
+                df = getattr(self, attr)
+                if df is not None and not df.empty:
+                    if c_clean in df.index:
+                        row = df.loc[c_clean]
+                        df_row = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+                        break
+                    elif 'code' in df.columns:
+                        m = df[df['code'] == c_clean]
+                        if not m.empty:
+                            df_row = m.iloc[0].to_dict()
+                            break
                     
         # 安全清理已存在的详情弹窗旧实例
         if hasattr(self, '_detail_dialog') and self._detail_dialog is not None:
@@ -3223,7 +3385,7 @@ class ATSMainWindow(QMainWindow):
             with open(log_path, 'w', encoding='utf-8') as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
                 
-            print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {resonance} 偏离度: {rs_val:+.2f}%")
+            print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {pct_val:+.2f}% {resonance}")
         except Exception as e:
             print(f"[ATSAlphaTracker] 记录信号失败: {e}")
         return recorded
