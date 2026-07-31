@@ -329,7 +329,7 @@ class MultiPeriodWorker(QThread):
             import contextlib
 
             for period in self.active_periods:
-                p_norm = str(period).lower().strip()
+                p_norm = str(period).strip()
                 is_force_init = self.force_reload and self.allow_auto_init
 
                 # 读取缓存状态（在锁内）—— 使用显式 None 判断，避免 DataFrame 布尔歧义
@@ -804,7 +804,7 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                 for i in range(p.strategy_combo.count()):
                     t = p.strategy_combo.itemText(i)
                     raw_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-                    raw_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', raw_name)
+                    raw_name = re.sub(r'\s*\[Hit:[^\]]+\]$', '', raw_name)
                     hit_map[raw_name] = t
             if hasattr(p, 'ui_state'):
                 recent_ids = p.ui_state.get('recent_strategy_ids', [])
@@ -2302,7 +2302,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if not strat_name:
             return None
         clean_name = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', strat_name)
-        clean_name = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_name)
+        clean_name = re.sub(r'\s*\[Hit:[^\]]+\]$', '', clean_name)
         if hasattr(self, 'strategies') and self.strategies:
             return next((s for s in self.strategies if s.get('name') == clean_name), None)
         return None
@@ -2742,12 +2742,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             t = self.strategy_combo.itemText(i)
             # 清洗前缀和后缀
             raw = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-            raw = re.sub(r'\s*\[Hit:\s*\d+\]$', '', raw)
+            raw = re.sub(r'\s*\[Hit:[^\]]+\]$', '', raw)
             hit_names[raw] = t
 
         current_text = self.strategy_combo.currentText()
         clean_current_text = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', current_text)
-        clean_current_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', clean_current_text)
+        clean_current_text = re.sub(r'\s*\[Hit:[^\]]+\]$', '', clean_current_text)
 
         self.strategy_combo.clear()
         
@@ -2774,43 +2774,50 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         
         # 优先从计算出的 self._last_hit_results 中读取，备选从原本的文本中读取
         hit_results = getattr(self, "_last_hit_results", {})
-        
-        for idx, s in enumerate(recent_strats):
-            prefix = prefixes[idx] if idx < len(prefixes) else ""
-            raw_name = s['name']
-            s_id = s.get('id', '')
-            
+        single_code_results = getattr(self, "_single_code_hit_results", {})
+
+        def _build_hit_suffix(s_id, raw_name, prev_full=None):
             hit_cnt = None
             if s_id and s_id in hit_results:
                 hit_cnt = hit_results[s_id]
             elif raw_name in hit_results:
                 hit_cnt = hit_results[raw_name]
-            elif raw_name in hit_names:
-                prev_full = hit_names[raw_name]
-                prev_hit = re.search(r'\[Hit:\s*(\d+)\]$', prev_full)
+            elif prev_full:
+                prev_hit = re.search(r'\[Hit:\s*(\d+)', prev_full)
                 if prev_hit:
                     hit_cnt = int(prev_hit.group(1))
-                    
-            hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
+
+            single_hit = None
+            if single_code_results:
+                if s_id and s_id in single_code_results:
+                    single_hit = single_code_results[s_id]
+                elif raw_name in single_code_results:
+                    single_hit = single_code_results[raw_name]
+
+            if hit_cnt is not None and single_hit is not None:
+                hit_tag = "✅命中" if single_hit else "❌未命中"
+                return f" [Hit: {hit_cnt} | {hit_tag}]"
+            elif hit_cnt is not None:
+                return f" [Hit: {hit_cnt}]"
+            elif single_hit is not None:
+                hit_tag = "✅命中" if single_hit else "❌未命中"
+                return f" [Hit: {hit_tag}]"
+            return ""
+
+        for idx, s in enumerate(recent_strats):
+            prefix = prefixes[idx] if idx < len(prefixes) else ""
+            raw_name = s['name']
+            s_id = s.get('id', '')
+            prev_full = hit_names.get(raw_name)
+            hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
             item_text = f"{prefix}{raw_name}{hit_suffix}"
             self.strategy_combo.addItem(item_text, userData=s_id)
                 
         for s in other_strats:
             raw_name = s['name']
             s_id = s.get('id', '')
-            
-            hit_cnt = None
-            if s_id and s_id in hit_results:
-                hit_cnt = hit_results[s_id]
-            elif raw_name in hit_results:
-                hit_cnt = hit_results[raw_name]
-            elif raw_name in hit_names:
-                prev_full = hit_names[raw_name]
-                prev_hit = re.search(r'\[Hit:\s*(\d+)\]$', prev_full)
-                if prev_hit:
-                    hit_cnt = int(prev_hit.group(1))
-                    
-            hit_suffix = f" [Hit: {hit_cnt}]" if hit_cnt is not None else ""
+            prev_full = hit_names.get(raw_name)
+            hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
             item_text = f"{raw_name}{hit_suffix}"
             self.strategy_combo.addItem(item_text, userData=s_id)
         
@@ -2826,7 +2833,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             for i in range(self.strategy_combo.count()):
                 t = self.strategy_combo.itemText(i)
                 t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-                t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
+                t_clean = re.sub(r'\s*\[Hit:[^\]]+\]$', '', t_clean)
                 if t_clean == clean_current_text:
                     matched_idx = i
                     break
@@ -2851,7 +2858,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 for i in range(self.strategy_combo.count()):
                     t = self.strategy_combo.itemText(i)
                     t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-                    t_clean = re.sub(r'\s*\[Hit:\s*\d+\]$', '', t_clean)
+                    t_clean = re.sub(r'\s*\[Hit:[^\]]+\]$', '', t_clean)
                     if t_clean == strat['name']:
                         self.strategy_combo.setCurrentIndex(i)
                         break
@@ -3211,7 +3218,16 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 if curr_idx >= 0:
                     import re
                     item_text = self.strategy_combo.itemText(curr_idx)
-                    new_text = re.sub(r'\s*\[Hit:\s*\d+\]$', '', item_text) + f" [Hit: {cnt_3}]"
+                    single_code_results = getattr(self, "_single_code_hit_results", {})
+                    s_id = strat.get('id', '')
+                    s_name = strat.get('name', '')
+                    single_hit = single_code_results.get(s_id, single_code_results.get(s_name))
+                    if single_hit is not None:
+                        hit_tag = "✅命中" if single_hit else "❌未命中"
+                        hit_suffix_str = f" [Hit: {cnt_3} | {hit_tag}]"
+                    else:
+                        hit_suffix_str = f" [Hit: {cnt_3}]"
+                    new_text = re.sub(r'\s*\[Hit:[^\]]+\]$', '', item_text) + hit_suffix_str
                     self.strategy_combo.blockSignals(True)
                     self.strategy_combo.setItemText(curr_idx, new_text)
                     self.strategy_combo.blockSignals(False)
@@ -4706,14 +4722,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 return
 
         # 诊断单股时在 UI 主线程进行只读装载 (force_reload=False)，避免在主线程发起重度写盘初始化导致的界面卡死
+        is_readonly = self.chk_readonly.isChecked()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for period in active_periods:
-                p_norm = str(period).lower().strip()
+                p_norm = str(period).strip()
                 if p_norm not in self.engine._period_dfs or self.engine._period_dfs[p_norm].empty:
                     self.lbl_status.setText(f"正在读取 {period} 周期特征数据...")
                     QApplication.processEvents()
-                    self.engine.load_period_data(p_norm, self.top_now, force_reload=False)
+                    self.engine.load_period_data(period, self.top_now, force_reload=False, readonly=is_readonly)
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -4807,9 +4824,35 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         df_flat = pd.DataFrame([merged_row], index=[code])
         df_flat.index.name = 'code'
 
+        # 在全量策略库中测试当前股票 code 是否命中，记录结果并在 strategy_combo 下拉框中追加 [Hit: X | ✅命中 / ❌未命中] 标记
+        single_code_hit_results = {}
+        all_strategy_reports = []
+        if hasattr(self, 'strategies') and self.strategies:
+            for strat in self.strategies:
+                s_id = strat.get('id', strat.get('name'))
+                s_name = strat.get('name', '未命名策略')
+                try:
+                    res_df = self.engine.evaluate_strategy(strat, active_periods)
+                    is_hit = (res_df is not None and not res_df.empty and code in res_df.index)
+                except Exception:
+                    is_hit = False
+                
+                single_code_hit_results[s_id] = is_hit
+                single_code_hit_results[s_name] = is_hit
+                all_strategy_reports.append({
+                    'id': s_id,
+                    'name': s_name,
+                    'hit': is_hit,
+                    'strategy': strat
+                })
+
+        self._single_code_hit_results = single_code_hit_results
+        self._diagnosed_code = code
+        self._rebuild_strategy_combo()
+
         # Use Qt-native check code dialog to completely avoid Tkinter dependency
         try:
-            self._check_code_dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self)
+            self._check_code_dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self, all_strategy_reports=all_strategy_reports)
             self._check_code_dialog.show()
             self._check_code_dialog.raise_()
             self._check_code_dialog.activateWindow()
@@ -5600,12 +5643,13 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
 
 
 class QtCheckCodeDialog(QDialog, WindowMixin):
-    def __init__(self, df, code, queries, parent=None):
+    def __init__(self, df, code, queries, parent=None, all_strategy_reports=None):
         self._real_parent = parent
         super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许窗口自由移至主窗口身后
         self.df = df
-        self.code = code
+        self.code = str(code).strip().zfill(6)
         self.queries = queries
+        self.all_strategy_reports = all_strategy_reports or []
         self.name = df.at[code, 'name'] if 'name' in df.columns else ""
         
         self.setWindowTitle(f"股票检查报告 - {code} {self.name}")
@@ -5700,9 +5744,9 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         self.right_widget.hide()
         
         ctrl_layout = QHBoxLayout()
-        ctrl_layout.addWidget(QLabel("历史:", self))
+        ctrl_layout.addWidget(QLabel("历史/策略:", self))
         self.history_combo = QComboBox(self)
-        self.history_combo.addItem("选择历史...")
+        self.history_combo.addItem("选择历史/策略...")
         
         _queries_list = queries if isinstance(queries, list) else [queries]
         self.history_queries = []
@@ -5715,6 +5759,20 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             elif isinstance(q, str):
                 self.history_combo.addItem(f"H{i+1}: {q[:15]}")
                 self.history_queries.append(q)
+
+        # 关联添加全策略诊断报告到下拉菜单中
+        if self.all_strategy_reports:
+            main_hit_results = getattr(self._real_parent, '_last_hit_results', {}) if self._real_parent else {}
+            self.history_combo.addItem("--- 🎯 全策略命中测试列表 ---")
+            self.history_queries.append(None)
+            for i, r in enumerate(self.all_strategy_reports, 1):
+                status_tag = "✅" if r.get('hit') else "❌"
+                s_id = r.get('id', '')
+                s_name = r.get('name', '')
+                h_cnt = main_hit_results.get(s_id, main_hit_results.get(s_name))
+                h_cnt_str = f" [{h_cnt}只]" if h_cnt is not None else ""
+                self.history_combo.addItem(f"S{i:02d}: {status_tag} {s_name}{h_cnt_str}")
+                self.history_queries.append(r)
                 
         self.history_combo.currentIndexChanged.connect(self._on_history_changed)
         ctrl_layout.addWidget(self.history_combo)
@@ -5748,7 +5806,30 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             from stock_logic_utils import test_code_query, format_check_result
             self.report_data = test_code_query(self.df_code, queries)
             header_str = f"股票: {code} {self.name}\n" + "="*40 + "\n"
-            self.summary_text.setPlainText(header_str + format_check_result(self.report_data))
+            summary_content = header_str + format_check_result(self.report_data)
+
+            if self.all_strategy_reports:
+                main_hit_results = getattr(self._real_parent, '_last_hit_results', {}) if self._real_parent else {}
+                hit_cnt_total = sum(1 for r in self.all_strategy_reports if r.get('hit'))
+                total_strats = len(self.all_strategy_reports)
+                
+                summary_lines = [
+                    "\n" + "="*40,
+                    f"📊 全策略命中诊断汇总 [ 股票: {code} {self.name} ]",
+                    f"🎯 总计测试 {total_strats} 套策略 | 共命中 {hit_cnt_total} 套策略",
+                    "-"*40
+                ]
+                for i, r in enumerate(self.all_strategy_reports, 1):
+                    status_tag = "✅ 命中" if r.get('hit') else "❌ 未命中"
+                    s_id = r.get('id', '')
+                    s_name = r.get('name', '')
+                    h_cnt = main_hit_results.get(s_id, main_hit_results.get(s_name))
+                    h_cnt_str = f" [Hit: {h_cnt}只]" if h_cnt is not None else ""
+                    summary_lines.append(f"  {status_tag} | {s_name}{h_cnt_str}")
+                summary_lines.append("="*40)
+                summary_content += "\n" + "\n".join(summary_lines)
+
+            self.summary_text.setPlainText(summary_content)
         except Exception as e:
             self.summary_text.setPlainText(f"诊断逻辑执行失败: {e}")
             
@@ -5832,12 +5913,28 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
             self.filter_edit.setFocus()
             
     def _on_history_changed(self, index):
-        if index <= 0:
+        if index <= 0 or index - 1 >= len(self.history_queries):
             return
         try:
-            expr = self.history_queries[index - 1]
-            self.manual_edit.setText(expr)
-            self._run_manual_test(expr)
+            item = self.history_queries[index - 1]
+            if item is None:
+                return
+            if isinstance(item, str):
+                self.manual_edit.setText(item)
+                self._run_manual_test(item)
+            elif isinstance(item, dict) and 'strategy' in item:
+                strat = item['strategy']
+                conds = strat.get('conditions', {})
+                expr_parts = []
+                for p_name, cond_info in conds.items():
+                    if cond_info and cond_info.get('enabled', True):
+                        f_expr = cond_info.get('filter', '')
+                        if f_expr:
+                            expr_parts.append(f"({f_expr})")
+                combined_expr = " and ".join(expr_parts) if expr_parts else ""
+                if combined_expr:
+                    self.manual_edit.setText(combined_expr)
+                    self._run_manual_test(combined_expr)
         except Exception:
             pass
             
