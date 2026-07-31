@@ -4077,3 +4077,52 @@ class ATSMainWindow(QMainWindow):
             mpd.open_multi_period_tester(parent_window=self)
         except Exception as e:
             print(f"[MultiPeriod] Failed to open internal MultiPeriodDialog: {e}")
+
+    def closeEvent(self, event):
+        """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框及后台线程"""
+        self._is_closing = True
+
+        # 1. 停止定时器与后台 Watcher
+        if hasattr(self, "update_timer") and self.update_timer.isActive():
+            self.update_timer.stop()
+            
+        if hasattr(self, "tdx_watcher") and self.tdx_watcher is not None:
+            try:
+                self.tdx_watcher.stop()
+                self.tdx_watcher.wait(1000)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error stopping tdx_watcher: {e}")
+
+        # 2. 遍历并关闭多周期主窗口及全局 Shim 实例
+        try:
+            import ats.ui.multi_period_dialog as mpd
+            if mpd._dialog_instance is not None:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(mpd._dialog_instance):
+                    mpd._dialog_instance.close()
+                mpd._dialog_instance = None
+        except Exception as e:
+            print(f"[ATSMainWindow] Error closing mpd._dialog_instance: {e}")
+
+        # 3. 遍历关闭所有活动的顶级 TopLevelWidgets（如个股分类详情弹窗、检查报告弹窗、DNA审计窗口等）
+        try:
+            from PyQt6.QtWidgets import QApplication
+            for widget in list(QApplication.topLevelWidgets()):
+                if widget != self:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(widget):
+                        try:
+                            widget.close()
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[ATSMainWindow] Error closing topLevelWidgets: {e}")
+
+        # 4. 保存物理窗口布局
+        try:
+            if hasattr(self, "save_window_position_qt_visual"):
+                self.save_window_position_qt_visual(self, getattr(self, "window_name", "ats_main_window"))
+        except Exception:
+            pass
+
+        super().closeEvent(event)
