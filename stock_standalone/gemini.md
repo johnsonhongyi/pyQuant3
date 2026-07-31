@@ -1,3 +1,23 @@
+## 2026-07-31 13:45
+- [x] **完美修复 `closeEvent` 重复定义与「📋 强势黑马详情」全量信号/通达信信号自动归纳导航 (`ats/ui/main_window.py`, `ats/tdx_signal_watcher.py`, `GEMINI.md`)**：
+    - [x] **合并 `ATSMainWindow` 冗余 `closeEvent` 重复声明**：将此前分散在两处的 `closeEvent` 逻辑无缝统一融合为单一定义，确保应用退出时不仅安全停止 `update_timer`、`bridge` 监听器与 `tdx_watcher` 后台线程，还能同步保存窗口布局、表格列宽与历史搜索记录，彻底杜绝 PySide/PyQt 事件覆盖与资源泄露缺陷。
+    - [x] **重构 `_open_signal_detail_dialog` 强势黑马信号聚合算法**：在点击「📋 强势黑马详情」按钮时，全自动检索并归纳 `SignalLedger` 中按 priority_score 与 TDX 标签排序的所有已锁定黑马标的、`_last_batch_signal_codes` 逆市/共振标的以及 `SwingStateTable` 跟踪器个股。解决之前历史数据与通达信实时信号在错失弹窗后无法在详情中翻阅和浏览的痛点。
+    - [x] **`TdxSignalWatcher` OrderMon.ini 多编码与文本逐行容错解析**：在 `load_ordermon_flag_map` 中引入 `GBK`/`utf-8-sig`/`utf-8`/`ansi` 多编码及逐行文本降级解析，防止非标准 INI 结构输出 `Error parsing OrderMon.ini flag map` 报警日志。
+    - [x] **`_on_tdx_signal_detected` 实时注册信号批次**：新到达的通达信/OrderMon 实盘信号在触发时自动置顶注册入 `_last_batch_signal_codes`，确保详情弹窗导航栏第一时间同步更新并秒级联动。
+    - [x] **恢复默认模式并仅对 TDX 通达信信号单独增加 `🔔` 标记**：移除了普通/重点关注信号多余的标签后缀与图标，将全部常规信号恢复为 100% 干净原生的默认显示模式（如：`000065 北方国际`）；仅对来自通达信 (`TDX`) 的触发信号单独冠以极简 `🔔` 前缀（如：`🔔 300134 大富科技`），彻底解决文本截断问题并保持视觉极致纯粹。
+
+## 2026-07-31 13:31
+- [x] **修复 `ATSMainWindow` 缺少 `def closeEvent` 函数头引发的 `NameError: name 'event' is not defined` 异常 (`ats/ui/main_window.py`)**：
+    - [x] **恢复缺失的方法签名**：重新补齐在合并 `_on_tdx_signal_detected` 逻辑时意外丢失的 `def closeEvent(self, event):` 声明，使得在通达信信号触发切股及收盘退出保存布局时不再抛出 `NameError: name 'event' is not defined` 错误。
+
+## 2026-07-31 13:05
+- [x] **实现通达信 / OrderMon 信号文件实时监听器 (`TdxSignalWatcher`) 与 ATS 系统全链路无缝联动 (`JohnsonUtil/commonTips.py`, `ats/tdx_signal_watcher.py`, `ats/signal_ledger.py`, `ats/ui/main_window.py`, `tests/test_tdx_signal_watcher.py`)**：
+    - [x] **`commonTips.py` 移除硬编码变量并全面接入 GlobalConfig**：彻底清理硬编码路径变量 `TDX_SIGNAL_DEFAULT_FILE` 与 `ORDER_MONITOR_INI_FILE`；在 `GlobalConfig.__init__` 中统一使用 `self.get_with_writeback("general", "tdx_signal_path", fallback=r"D:\TdxSignal.txt")` 与 `self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini")`，实现 `global.ini` 文件的物理落盘写回与安全读取；提供 `get_ordermon_ini_path` 与 `set_ordermon_ini_path` 接口供全局调用。
+    - [x] **独立非阻塞后台轮询监听模块 (`ats/tdx_signal_watcher.py`)**：基于 `QThread` 打造 `TdxSignalWatcher`，利用文件 Seek 指针增量极速轮询 `D:\TdxSignal.txt` 信号文本，自动解析 `OrderMon.ini` 标志代码映射（如 `11` -> `5上10`，`1` -> `KDJ金叉`），自动剔除非当日或重复信号并触发 `signal_detected(dict)` PyQt 信号。
+    - [x] **`SignalLedger` 自动提权 (+150分) 与置顶**：在 `SignalLedger` 中增加 `record_tdx_signal` 接口，捕获通达信信号后自动赋予 `🔔 TDX 5上10` 标签与 +150.0 分高额优先分提权，自动提升至 `WATCH` 监控池并在界面表格中置顶靠前。
+    - [x] **ATS UI 秒级切股与外部终端联动**：在 `ATSMainWindow` 中集成 `TdxSignalWatcher` 线程，当捕获信号时自动刷新 UI 表格与状态栏提示，并同步调用 `self.link_stock(code, name)` 一键联动物理通达信 / 同花顺 / VIS 交易终端显示。
+    - [x] **单元测试全覆盖**：新建 `tests/test_tdx_signal_watcher.py`，完整覆盖配置路径读写、信号行解析、OrderMon.ini 标志映射以及 SignalLedger 信号记录与提权置顶逻辑。
+
 ## 2026-07-31 12:33
 - [x] **实现 `data_utils.py` 核心 `lastv0d` 动态时间因子缩放与「量比」列保护 (完全隔离 `lastv0d` 与 `volume`)** (`data_utils.py`, `multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `GEMINI.md`)：
     - [x] **单点注入 `lastv0d` 动态放大**：在 `data_utils.py` 的 `complete_indicators_pipeline` 注入 0d 虚拟列处，直接对 `top_all['lastv0d']` 应用 `ratio_t = cct.get_work_time_ratio(resample)` 缩放（`lastv0d = (lastv0d / ratio_t).round(1)`），解决早盘 (9:30-9:50) 策略放量条件匹配失效问题。

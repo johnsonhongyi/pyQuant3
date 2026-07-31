@@ -282,6 +282,30 @@ class TestSignalLedger(unittest.TestCase):
                 self.assertEqual(fmt_label, "60调整启动 (lastl1d   <   ma601d)")
                 self.assertEqual(fmt_pure, "lastl1d   <   ma601d")
 
+    def test_signal_ledger_singleton_and_deduplication(self):
+        """测试 SignalLedger 单例共享与通知去重机制 (解决多周期和 ATS 重复提示)"""
+        from ats.signal_ledger import get_signal_ledger
+        
+        # 1. 验证 get_signal_ledger 获取单例
+        s1 = get_signal_ledger()
+        s2 = get_signal_ledger()
+        self.assertIs(s1, s2)
+
+        # 2. 验证 notification 去重
+        code = "600519"
+        reason = "TDX 5上10"
+        
+        self.assertFalse(s1.is_notified_today(code, reason))
+        
+        # 标记已通知
+        s1.mark_notified_today(code, reason)
+        self.assertTrue(s1.is_notified_today(code, reason))
+        self.assertTrue(s2.is_notified_today(code, reason))  # 共享单例验证
+
+        # 验证未带 tag 时的通用查重
+        self.assertTrue(s1.is_notified_today(code))
+        self.assertFalse(s1.is_notified_today("000001"))
+
 
 if __name__ == '__main__':
     unittest.main()

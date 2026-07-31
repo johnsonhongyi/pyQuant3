@@ -723,6 +723,9 @@ class GlobalConfig:
         self.popularity_col = self.get_with_writeback("general", "popularity_col", fallback=['win'], value_type="list")
         # [NEW] DNA 审计追加自定义列配置，供 UI 与后台引擎使用，统一通过缓存 df_all 直接获取
         self.dna_audit_custom_cols = self.get_with_writeback("general", "dna_audit_custom_cols", fallback=['dff2', 'dff3', 'Rank'], value_type="list")
+        # [NEW] 通达信 / OrderMon 信号文件路径与配置文件路径，自动写回与读取 global.ini
+        self.tdx_signal_path = self.get_with_writeback("general", "tdx_signal_path", fallback=r"D:\TdxSignal.txt", value_type="str")
+        self.ordermon_ini_path = self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini", value_type="str")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
@@ -5420,8 +5423,56 @@ def get_config_value_ramfile(fname: str, currvalue: Any = 0, xtype: str = 'time'
             if xtype == 'time':
                 config[classtype]['otime'] = currvalue
                 # time.strftime("%H:%M:%S",time.localtime(now))
-            config.write()
         return int(currvalue)
+
+
+def get_tdx_signal_path() -> str:
+    """获取通达信信号文件路径（纯通过 GlobalConfig 机制配置并读写 global.ini）"""
+    try:
+        cfg = GlobalConfig()
+        path = getattr(cfg, 'tdx_signal_path', None)
+        if path and str(path).strip():
+            return str(path).strip()
+    except Exception:
+        pass
+    return r"D:\TdxSignal.txt"
+
+
+def set_tdx_signal_path(path_str: str) -> bool:
+    """设置并保存通达信信号文件路径到 global.ini 物理配置"""
+    try:
+        cfg = GlobalConfig()
+        cfg.set_value("general", "tdx_signal_path", str(path_str).strip())
+        cfg.save()
+        return True
+    except Exception as e:
+        log.error(f"Failed to set_tdx_signal_path: {e}")
+        return False
+
+
+def get_ordermon_ini_path() -> str:
+    """获取 OrderMon.ini 配置文件路径（纯通过 GlobalConfig 机制配置并读写 global.ini）"""
+    try:
+        cfg = GlobalConfig()
+        path = getattr(cfg, 'ordermon_ini_path', None)
+        if path and str(path).strip():
+            return str(path).strip()
+    except Exception:
+        pass
+    return r"D:\MacTools\OrderMonitor\OrderMon.ini"
+
+
+def set_ordermon_ini_path(path_str: str) -> bool:
+    """设置并保存 OrderMon.ini 配置文件路径到 global.ini 物理配置"""
+    try:
+        cfg = GlobalConfig()
+        cfg.set_value("general", "ordermon_ini_path", str(path_str).strip())
+        cfg.save()
+        return True
+    except Exception as e:
+        log.error(f"Failed to set_ordermon_ini_path: {e}")
+        return False
+
 
 
 def get_config_value_wencai(fname, classtype, currvalue=0, xtype='limit', update=False):

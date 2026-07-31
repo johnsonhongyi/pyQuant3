@@ -140,12 +140,17 @@ class UniverseManager:
         import datetime
 
         def _get_name(code_str, current_name=None):
-            if current_name and current_name not in ('未知', '重点标的', ''):
+            if current_name and current_name not in ('未知', '重点标的', '') and current_name != code_str and not str(current_name).isdigit():
                 return current_name
+            if df_realtime is not None and not df_realtime.empty and code_str in df_realtime.index:
+                row = df_realtime.loc[code_str]
+                n_df = str(row.get('name', '') if hasattr(row, 'get') else row['name']).strip()
+                if n_df and n_df != code_str and not n_df.isdigit() and n_df != "未知":
+                    return n_df
             try:
-                from JohnsonUtil import commonTips as cct
-                n = cct.get_stock_name(code_str)
-                if n and str(n).strip() and str(n).strip() != code_str:
+                from sys_utils import resolve_stock_name
+                n = resolve_stock_name(code_str)
+                if n and str(n).strip() and str(n).strip() != code_str and not str(n).strip().isdigit():
                     return str(n).strip()
             except Exception:
                 pass

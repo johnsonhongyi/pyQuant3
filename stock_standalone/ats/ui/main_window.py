@@ -1156,12 +1156,22 @@ class ATSMainWindow(QMainWindow):
         
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
-        self.signal_ledger = SignalLedger()
+        from ats.signal_ledger import get_signal_ledger
+        self.signal_ledger = get_signal_ledger()
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
         import threading
         self.hdf5_history_lock = threading.Lock()
         
+        # 通达信 / OrderMon 信号文件后台监听器
+        try:
+            from ats.tdx_signal_watcher import TdxSignalWatcher
+            self.tdx_watcher = TdxSignalWatcher(parent=self)
+            self.tdx_watcher.signal_detected.connect(self._on_tdx_signal_detected)
+            self.tdx_watcher.start()
+        except Exception as e:
+            print(f"[ATSMainWindow] 初始化 TdxSignalWatcher 异常: {e}")
+
         # 自动加载昨日快照，恢复跨日 WATCH/TRADE 精选标的以实现跨日持续跟进
         try:
             prev_signals = self.session_snapshot.load_previous_day_signals()
@@ -2136,9 +2146,13 @@ class ATSMainWindow(QMainWindow):
     def _update_name_cache_from_df(self, df):
         if df is not None and not df.empty and 'name' in df.columns:
             try:
-                # Fast vectorized extraction of code -> name
+                # 向量化快速提取 IPC 推送的 DataFrame 中的 code -> name 关联字典
                 temp_dict = df['name'].dropna().to_dict()
-                cleaned_dict = {str(k).strip(): str(v).strip() for k, v in temp_dict.items() if str(v).strip()}
+                cleaned_dict = {
+                    str(k).strip().zfill(6): str(v).strip() 
+                    for k, v in temp_dict.items() 
+                    if str(v).strip() and str(v).strip() != str(k).strip().zfill(6) and not str(v).strip().isdigit() and str(v).strip() != "未知"
+                }
                 self.name_cache.update(cleaned_dict)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating name cache from df: {e}")
@@ -2146,31 +2160,37 @@ class ATSMainWindow(QMainWindow):
     def get_stock_name(self, code):
         if not code:
             return "未知"
-        code_str = str(code).strip()
-        # 1. Try name_cache
+        code_str = str(code).strip().zfill(6)
+        
+        # 1. 直接从 IPC 推送的核心 memory 数据集 (current_df / df_realtime) 中查找 (无需舍近求远)
+        for attr_name in ('current_df', 'df_realtime'):
+            df_obj = getattr(self, attr_name, None)
+            if df_obj is not None and not df_obj.empty and code_str in df_obj.index:
+                try:
+                    row_val = df_obj.loc[code_str]
+                    name_val = str(row_val.get('name', '') if hasattr(row_val, 'get') else row_val['name']).strip()
+                    if name_val and name_val != code_str and not name_val.isdigit() and name_val != "未知":
+                        self.name_cache[code_str] = name_val
+                        return name_val
+                except Exception:
+                    pass
+
+        # 2. 检查 name_cache (排除与 code_str 相同或全数字的纯代码名称)
         name = self.name_cache.get(code_str)
-        if name and name != "未知" and not name.startswith("个股_"):
+        if name and name != "未知" and name != code_str and not name.isdigit() and not name.startswith("个股_"):
             return name
-            
-        # 2. Use system-wide authoritative and robust resolver with networking and file self-healing fallbacks
+
+        # 3. 调起全局权威解析器 sys_utils
         try:
             from sys_utils import resolve_stock_name
             res_name = resolve_stock_name(code_str)
-            if res_name and not res_name.startswith("个股_"):
+            if res_name and res_name != code_str and not res_name.isdigit() and not res_name.startswith("个股_"):
                 self.name_cache[code_str] = res_name
                 return res_name
-            name = res_name
         except Exception:
             pass
-            
-        # 3. Try current_df
-        if self.current_df is not None and code_str in self.current_df.index:
-            name_df = str(self.current_df.loc[code_str].get('name', '')).strip()
-            if name_df:
-                self.name_cache[code_str] = name_df
-                return name_df
-                
-        return name if name else "未知"
+
+        return name if (name and name != code_str and not name.isdigit()) else code_str
 
     def load_db_data(self, force=False):
         try:
@@ -2887,13 +2907,6 @@ class ATSMainWindow(QMainWindow):
                 pct_val = 0.0
                 
             name = self.get_stock_name(code)
-            if not name or name in ('未知', '重点标的', ''):
-                try:
-                    n_str = cct.get_stock_name(code)
-                    if n_str and str(n_str).strip() and str(n_str).strip() != str(code):
-                        name = str(n_str).strip()
-                except Exception:
-                    pass
             
             # 计算大盘偏离度和共振状态
             rs_val = pct_val - sh_pct
@@ -3191,18 +3204,67 @@ class ATSMainWindow(QMainWindow):
         )
 
     def _open_signal_detail_dialog(self):
-        """点击按钮直接弹出/唤醒 [实时实盘个股详情] 提示窗口 (图 2)"""
-        signal_list = getattr(self, "_last_batch_signal_codes", None)
+        """点击按钮直接弹出/唤醒 [实时实盘个股详情] 提示窗口 (自动归纳 SignalLedger、TDX 信号及历史精选)"""
+        signal_list = []
+        seen = set()
+
+        # 1. 优先从 SignalLedger 按 priority_score 降序与 TDX 标签提取全量已被锁定/提醒的强势个股
+        if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries') and self.signal_ledger.entries:
+            sorted_entries = sorted(
+                self.signal_ledger.entries.values(),
+                key=lambda e: (
+                    1 if getattr(e, 'tdx_label', '') else 0,
+                    getattr(e, 'priority_score', 0.0),
+                    getattr(e, 'first_seen_ts', 0.0)
+                ),
+                reverse=True
+            )
+            for entry in sorted_entries:
+                c_str = str(getattr(entry, 'code', '')).strip().zfill(6)
+                if c_str and c_str not in seen:
+                    seen.add(c_str)
+                    n_str = getattr(entry, 'name', '')
+                    if not n_str or n_str == c_str or n_str.isdigit():
+                        n_str = self.get_stock_name(c_str)
+                    
+                    # 恢复默认模式，仅对通达信 (TDX) 信号单独增加 🔔 标记
+                    if getattr(entry, 'tdx_label', '') or getattr(entry, 'signal_source', '') == 'TDX':
+                        if not n_str.startswith('🔔'):
+                            n_str = f"🔔 {n_str}"
+                    signal_list.append((c_str, n_str))
+
+        # 2. 补充 _last_batch_signal_codes 逆市/共振及 TDX 最新信号
+        last_batch = getattr(self, "_last_batch_signal_codes", None) or []
+        for item in last_batch:
+            if isinstance(item, (tuple, list)):
+                c_clean, n_clean = str(item[0]).strip().zfill(6), item[1]
+            else:
+                c_clean = str(item).strip().zfill(6)
+                n_clean = self.get_stock_name(c_clean)
+            if not n_clean or n_clean == c_clean or str(n_clean).isdigit():
+                n_clean = self.get_stock_name(c_clean)
+            if c_clean and c_clean not in seen:
+                seen.add(c_clean)
+                signal_list.append((c_clean, n_clean))
+
+        # 3. 补充 SwingStateTable 大级别回调跟踪器中的个股
+        if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
+            tbl = self.swing_table.table
+            for r in range(tbl.rowCount()):
+                c_item = tbl.item(r, 0)
+                n_item = tbl.item(r, 1)
+                if c_item:
+                    c_clean = c_item.text().strip().zfill(6)
+                    if c_clean and c_clean not in seen:
+                        seen.add(c_clean)
+                        n_str = n_item.text().strip() if n_item else self.get_stock_name(c_clean)
+                        signal_list.append((c_clean, n_str))
+
         target_code = "000039"
         target_name = "中集集团"
-        if signal_list and len(signal_list) > 0:
-            first_item = signal_list[0]
-            if isinstance(first_item, (tuple, list)):
-                target_code, target_name = first_item[0], first_item[1]
-            else:
-                target_code = str(first_item)
-                target_name = self.get_stock_name(target_code)
-                
+        if signal_list:
+            target_code, target_name = signal_list[0][0], signal_list[0][1]
+
         self.on_stock_clicked(target_code, target_name, batch_codes=signal_list)
 
     def _open_equity_pop_dialog(self):
@@ -3719,6 +3781,73 @@ class ATSMainWindow(QMainWindow):
         if not getattr(self, '_is_restoring_sizes', False):
             self._save_layout_state()
 
+    def _on_tdx_signal_detected(self, sig_dict):
+        """当后台 TdxSignalWatcher 捕获到通达信 / OrderMon 信号时的全逻辑联动处理"""
+        if not sig_dict or not isinstance(sig_dict, dict):
+            return
+
+        code = sig_dict.get('code')
+        if not code:
+            return
+
+        name = sig_dict.get('name', code)
+        flag_label = sig_dict.get('flag_label', 'TDX信号')
+        direction_cn = sig_dict.get('direction_cn', '买入')
+        price = sig_dict.get('price', 0.0)
+        time_str = sig_dict.get('time_str', '')
+
+        # 1. 查找内存行情数据行并由 current_df 精确定位真实中文名称 (df 数据获取 name)
+        df_row = None
+        c_clean = str(code).zfill(6)
+        if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+            if c_clean in self.current_df.index:
+                df_row = self.current_df.loc[c_clean]
+
+        name = sig_dict.get('name', '')
+        if df_row is not None and 'name' in df_row and str(df_row['name']).strip() and str(df_row['name']).strip() != c_clean:
+            name = str(df_row['name']).strip()
+        elif not name or name == c_clean or str(name).isdigit():
+            name = self.get_stock_name(c_clean)
+
+        sig_dict['name'] = name
+
+        # 2. 写入 SignalLedger 并自动提权置顶
+        if hasattr(self, 'signal_ledger'):
+            entry = self.signal_ledger.record_tdx_signal(sig_dict, row=df_row)
+
+        # 3. 将新捕获的通达信信号直接注册到 _last_batch_signal_codes 顶部
+        if not hasattr(self, "_last_batch_signal_codes") or self._last_batch_signal_codes is None:
+            self._last_batch_signal_codes = []
+        self._last_batch_signal_codes = [x for x in self._last_batch_signal_codes if (x[0] if isinstance(x, (tuple, list)) else x) != c_clean]
+        self._last_batch_signal_codes.insert(0, (c_clean, name))
+
+        # 4. 实时更新并刷新 UI
+        if hasattr(self, 'refresh_realtime_ui'):
+            self.refresh_realtime_ui()
+
+        # 5. 状态栏与控制台提醒 (带 AlertNotifier 去重语音与 Toast 提示)
+        msg = f"🔔 [通达信信号] {code} {name} [{flag_label}] ({direction_cn}) 价格:{price:.2f} [{time_str}]"
+        if hasattr(self, 'statusBar') and self.statusBar():
+            self.statusBar().showMessage(msg, 10000)
+
+        print(f"[ATS] {msg}")
+
+        try:
+            from ats.alert_notifier import AlertNotifier
+            AlertNotifier().notify_special_signal(
+                code=code,
+                name=name,
+                reason=f"通达信实盘信号: {flag_label} ({direction_cn})",
+                score=95.0,
+                parent=self
+            )
+        except Exception as e_notify:
+            print(f"[ATS] TDX signal alert notification error: {e_notify}")
+
+        # 6. 自动切股并联动外部通达信/同花顺终端
+        if hasattr(self, 'link_stock'):
+            self.link_stock(code, name)
+
     def closeEvent(self, event):
         self._is_closing = True
         
@@ -3726,6 +3855,10 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'update_timer') and self.update_timer.isActive():
             self.update_timer.stop()
             
+        # Stop favorites poll timer
+        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
+            self._favorites_poll_timer.stop()
+
         # Stop favorites watcher thread
         try:
             from global_favorites import GlobalFavoriteManager
@@ -3740,12 +3873,15 @@ class ATSMainWindow(QMainWindow):
             except Exception as ex:
                 print(f"[ATSMainWindow] Error stopping IPC listener: {ex}")
 
+        # Stop TDX signal watcher thread
+        if hasattr(self, 'tdx_watcher') and self.tdx_watcher is not None:
+            try:
+                self.tdx_watcher.stop()
+            except Exception as ex:
+                print(f"[ATSMainWindow] Error stopping TDX signal watcher: {ex}")
+
         # Synchronously save all layout configurations and column widths on application exit
         try:
-            # Stop favorites poll timer
-            if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
-                self._favorites_poll_timer.stop()
-
             # First, save geometry and splitter layouts
             self._save_layout_state()
             
@@ -3771,7 +3907,7 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error saving column widths on close: {e}")
             
-        # Close all orphaned detail dialogs (parent=None, so they don't close automatically)
+        # Close all orphaned detail dialogs
         try:
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_close_all_dialogs'):
                 self.dist_chart._close_all_dialogs()
