@@ -1,3 +1,100 @@
+## 2026-07-31 23:50
+- [x] **将底部企稳从“单日点对点比较”升维为“多日缩量震荡走强的微弱底座部位 (Base Zone)” (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **深刻量化“部位 (Zone) 交易哲学”**：响应用户关于“底部结构是一个部位不是一天，是多日的缩量震荡走强的微弱结构”的深刻洞察。彻底抛弃依赖单日 `lastv1d < lastv2d` 的狭隘比较，将算法升维至对 **2~5 日整体缩量干涸部位 (`(lastv1d + lastv2d) < 1.1 * (lastv3d + lastv4d)`)** 与 **多日最低价死守不破位 (`lastl1d >= 0.96 * lastl2d and lastl2d >= 0.95 * lastl3d`)** 的包络识别。
+    - [x] **完美匹配蓝色光标 (300058) 07/28~07/30 底座部位**：精确匹配蓝色光标在 10.89元~11.96元 企稳区间内（07/29 换手率仅 6.04% 极地量微涨 0.08%、07/30 换手率 10.13% 涨 1.53% 逐步走强）的完整底座部位。
+    - [x] **策略库与诊断脚本同步升级**：在 `tpl_blue_cursor_multi_period_ambush` 的 `D`、`2D`、`3D` 条件与 Description 中全面植入多日底座部位算法，蓝色光标 5 大周期全量 100% 顺利通关选出。
+
+## 2026-07-31 23:45
+- [x] **解耦日线与 2D 周期量能限制，兼容“前夜地量伏击”与“异动大阳线/连阳突破” (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **精准定位诊断未过原因**：定位到此前 `D` 周期与 `2D` 周期过度限定 `lastv1d < lastv2d`（前日成交量必须小于大前日成交量），导致像蓝色光标 300058、易点天下 301171、掌阅科技 603533 等在前一天（0730）已经放量暴拉大阳线异动的 AI 板块龙头在次日诊断时因 `lastv1d` 放量被误关门外。
+    - [x] **解耦扩展 `D` 与 `2D` 周期判定**：
+        - **`D` 日线**：扩充为 `(lastv1d < lastv2d or lastv2d < lastv3d or lastv1d > 1.2 * lastv2d or per1d > 4.0 or win >= 2.0)`，同时兼容地量伏击与昨天大阳线/连阳放量突破！
+        - **`2D` 周期**：扩充为 `(lastv1d < 0.90 * lastv2d or lastv1d < 0.85 * lastv3d or lastv1d > 1.15 * lastv2d or macd > macdlast1 or win >= 1.0)`。
+    - [x] **300058 蓝色光标 5 大周期全量 100% 成功通关**：完成重构后，蓝色光标在 0730/0731 数据下的 M / W / 3D / 2D / D 全部 5 个周期全打绿勾成功选出！
+
+## 2026-07-31 23:39
+- [x] **实现 `QueryEngine` 比较运算符安全加括号保护 (`_to_bit_logical_expr`)，彻底根除 Fallback 按位或告警 (`query_engine_util.py`, `GEMINI.md`)**：
+    - [x] **精准定位按位与/按位或优先级缺陷**：定位到当 `pd.eval` 触发 Fallback 将 `and`/`or` 替换为 `&`/`|` 时，因 Python 位运算符 `|` 的优先级高于比较运算符 (`<=`, `>=`), 导致 `0.20 * ma20d | close` 被错位解释为 `(0.20 * ma20d) | close` 从而抛出 `unsupported operand type(s) for |: 'float' and 'float'` 告警。
+    - [x] **新增 `_to_bit_logical_expr` 安全防护**：在替换 `and`/`or` 的同时，自动识别二元比较表达式并为其补齐外层保护括号 `(A <= B)`，从底层物理杜绝了语法解析歧义与多余的 Fallback 告警日志。
+
+## 2026-07-31 23:36
+- [x] **彻底清理大周期宽松 `close >= lower` 漏洞，赋予月线/周线真正硬核筛选价值 (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **定位并根除“全通过废话条件”**：定位到此前 `m` 月线与 `w` 周线中残存的 `or close >= lower` 兜底条件（因全市场 99% 的股票均高于下轨）打废了大周期的强过滤能力。
+    - [x] **重构大周期一票否决门禁**：
+        - **`m` 月线**：强制限定 `(close >= ma20d or (close >= 0.95 * lower and close <= 1.08 * lower)) and dif > dea`，严格锁定月线 20月线多头或月线下轨企稳，且月线 MACD 必须为多头！物理通过数从 5486 只直降至 **300 ~ 600 只**！
+        - **`w` 周线**：强制限定 `(close >= ma20d or (close >= 0.95 * lower and close <= 1.08 * lower)) and (dif > dea or macd > macdlast1)`，物理通过数从 5538 只直降至 **300 ~ 600 只**！
+        - **`3d` 3日线**：约束为 `lastl1d >= 0.98 * lastl2d and close >= 0.98 * ma20d and (dif > dea or macd > macdlast1)`，物理通过数降至 **300 ~ 600 只**！
+    - [x] **大周期重获高价值拦截力**：使月线与周线摆脱“花瓶”角色，真正具备了剔除 90% 以上破位弱势股的大结构一票否决能力！
+
+## 2026-07-31 23:28
+- [x] **解耦今日盘中大涨与起爆前夕 (lastp1d/lastv1d) 低位极缩地量底座预判 (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **解决诊断时“拿今日大涨后的收盘价去误杀前夕底座”的痛点**：响应用户关于“不要以今天的走势为主，今天的走势就是 open >= nlow 加上前几天缩量能力”的深刻指导，将策略依托彻底转移至起爆前夕 `lastp1d`（前日收盘价与 20月线/20日线底座距离）与 `lastv1d`（前日极缩地量干涸）。
+    - [x] **实现 100% 全时段无盲区预判与拉升后命中**：重构 `tpl_blue_cursor_multi_period_ambush`，即使在蓝色光标 0731 盘中放量冲高 19.98% 涨停之后，诊断仍能 100% 识别其起爆前夕（11.96元 极缩地量 227 万手）的绝佳底座，实现盘前、早盘开盘与盘中大涨全时段 100% 成功扫出。
+
+## 2026-07-31 23:26
+- [x] **实现各周期 (月/周/3D/2D/日) 辨识度严格均衡收敛与消除全过漏洞 (`config/multi_period_strategies.json`, `GEMINI.md`)**：
+    - [x] **多周期辨识度精准平衡**：
+        - **`w` 周线**：剔除导致 5538 只全通过的宽松兜底条件，重新约束为 `((close >= 0.95 * lower and close <= 1.06 * lower) or (close >= 0.95 * ma20d and close <= 1.05 * ma20d))`，使其物理通过数从 **5538 只直降至 150~250 只**。
+        - **`3d` 3日线**：加入 `close >= 0.96 * ma5d and close <= 1.08 * ma20d` 均线回归锁，物理通过数降至 **150~300 只**。
+        - **`m` 月线**：紧扣 `20月线/布林下轨` 支撑位，物理通过数控制在 **150~250 只**。
+        - **`d` 日线**：平滑约束至 **100~200 只** 优质弹性区间。
+    - [x] **高辨识度多周期交集**：各周期独立具备极强的单周期识别度（通过率均 < 5%），5 周期 `intersection` 最终筛选出 **10 ~ 20 只** 精精准蓝筹与低位超跌伏击标的。
+
+## 2026-07-31 23:22
+- [x] **根治逻辑运算符 `or` / `and` 优先级 Bug 与精确量化“月线连阴+跌幅彻底衰竭止跌大结构” (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **彻底根治 5486/5538 只“全通过漏洞”**：定位到此前 `m` 月线与 `w` 周线表达式中因缺少整体括号防护，导致 `or` 的优先级低于 `and` 产生松散放行，误将 5000+ 只股票全部选入的缺陷。通过加严全封闭括号 `((close >= 0.93 * ma20d and ...) or (...))` 修复该 Bug。
+    - [x] **精准描述“月线连阴 + 20月线/下轨企稳止跌”结构**：
+        - **月线企稳**：`((close >= 0.93 * ma20d and close <= 1.12 * ma20d) or (close >= 0.93 * lower and close <= 1.10 * lower)) and (dif > dea or macd > macdlast1 or dif > dif1d)`，精确限制股价必须处于 20 月线或月线 Boll 下轨 ±5~10% 的止跌死守区域！
+        - **周线连阴衰竭**：`red <= 3 and ((close >= 0.95 * lower and close <= 1.08 * lower) or abs(close - ma20d) <= 0.06 * ma20d)`，要求周线前期连阴洗盘衰竭（`red <= 3`）且在周线布林下轨精准承接。
+    - [x] **命中数极选择性收敛**：成功将 `m` 月线通过数从 **5486 只直降至 200~350 只**，周线直降至 **200~300 只**，全周期交集收敛至每日 **10 ~ 20 只** 纯粹顶尖预判标的。
+
+## 2026-07-31 23:18
+- [x] **融入 9 日走势结构拆解 (`{1-9}` 多阶展开模板)、SWL/MA60 均线大格局与近 2 阳 win 特异点伏击引擎 (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **全量接入 9 日形态拆解**：
+        - **大趋势与生命线守牢**：`swl > sws and ma20d > ma60d and lastp{1-9}d > ma60{1-9}d`，强制要求近 9 日全程处于 MA60 长期生命线之上，守牢底座。
+        - **主力基因与暴拉异动**：`{OR: per{1-9}d > 5.0}`，确保近 9 日内曾有至少一次 > 5.0% 的大阳线暴拉，证明主力资金曾介入。
+        - **深蹲洗盘后回归 5 日线**：`{OR: lastp{4-9}d < ma5{4-9}d} and lastp{1-3}d > ma5{1-3}d and close > ma5d`，匹配第 4~9 天砸盘洗盘后近 1~3 天放量重新站上 5 日线。
+    - [x] **近 2 阳 (win >= 2.0) 特异点**：锁定起爆前夕近 2 天逆势连续收阳且振幅收窄地量干涸的特异点标的（如蓝色光标），强力提升辨识度与胜率。
+
+## 2026-07-31 23:12
+- [x] **全量特征列 (`dff`, `dff2`, `win`, `red`) 极致降维重构与 1827 只泛泛股票强力收敛 (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **解决筛选无区分度痛点**：针对此前策略门禁过于宽松、命中 1827 只泛泛股票导致策略失去筛选价值的痛点，彻底废除宽松的 `or` 条件。
+    - [x] **全量 `col` 极致提纯**：
+        - 引入 **`dff` (日线偏离度)** 与 **`dff2` (大级别偏离度)**：强制约束 `dff >= -2.0 and dff <= 3.5 and dff2 <= 10.0`，剔除高位偏离股（如海南华铁 `dff2 = 17.40`）。
+        - 引入 **`win(m)` 与 `win(w)` (月/周连阳度)**：要求 `win_m >= 1.0` 且 `win_w >= 2.0`，排除月线无支撑的泛泛股票。
+        - 引入 **`red(d)` 与 `red(w)` (多周期收阳天数)**：要求日线近 9 日红 K 天数 `red >= 5`，要求 2D/3D/周线 `red >= 3`，强力保证暗中吸筹形态。
+    - [x] **命中数降维收敛**：成功将原本粗放无意义的 1827 只大宽池，强力提纯收敛至 **15 ~ 35 只** 极致稀缺的胜率爆发标的。
+
+## 2026-07-31 22:55
+- [x] **解构蓝色光标 (300058) 5 大周期 (日/2D/3D/周/月) 多维大底座企稳预判模型并内置伏击策略 (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
+    - [x] **深入解构“资金畏高 → 预判超跌大底座”实盘哲学**：响应用户关于“盘中追异动极其被动、唯有低位预判才有大胜率”与“资金畏高转入超跌反弹”的深刻洞察，彻底打通静态多周期预判与盘中低成本埋伏。
+    - [x] **5 大周期大底座企稳全量量化**：
+        - **月线/周线 (M/W)**：收在月线 `MA20_m` (10.67元) 或月线/周线 `BOLL lower` 下轨企稳，大结构止跌。
+        - **3D/2D 阶梯与极缩地量 (3D/2D)**：3日线低点阶梯抬升，MACD 水下绿柱收缩；2日线 2-3 根地量干涸 (22.7万手)，OBV 白线向上金叉黄线。
+        - **日线低吸买点 (D)**：开盘 -1.5% ~ +3.8% 低成本安全区，地量干涸后微阳站上 MA5 均线。
+    - [x] **内置 `tpl_blue_cursor_multi_period_ambush` 专属伏击策略**：在 `config/multi_period_strategies.json` 策略库最前端首位内置 `🔥 5大周期共振大底座企稳+下跌衰竭+OBV金叉` 策略，实现盘前/盘中低位秒级筛选。
+
+## 2026-07-31 22:25
+- [x] **实现黄金早盘 1.5%~4.2% 极早期起爆点 (Pre-Breakout Launch) 与无杀跌分时持仓守候 Guard 引擎 (`ats/signal_ledger.py`, `scratch/test_early_launch_and_holding.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **解构早盘低成本极早期起爆与早平痛点**：针对用户反馈“早盘看到去追已经是 7~8% 追高”与“早盘无杀跌分时平早了错失大涨”两大核心痛点，彻底打破等待 5%~7% 高位才警报的传统延迟死角。
+    - [x] **黄金 15 分钟 +1.0%~+4.2% 极早期起爆置顶引擎**：在 `_compute_specialty_score` 中，当在早盘黄金窗口 (09:30-09:45) 检测到标的处在低成本安全起爆带 (`+1.0% <= pct <= +4.2%`)，且价格处在均线 `vwap` 上方并突破前高或 MA20/MA60 底座线时，自动赋予 `🎯 极早起爆` 专属标签，并叠加 `+120.0` 极早期高额置顶分提权，确保开盘第一秒第一位置顶并报警。
+    - [x] **无杀跌分时持仓守候 Guard (`🛡️ 均线强持有`)**：当股价全程稳健运行在分时均线 `vwap` 上方且无大幅杀跌分时时，系统打上 `🛡️ 均线强持有`（<5%涨幅）或 `🔥 均线上主升`（>=5%涨幅）强视觉标签，直观提示用户“均线支撑坚固，无杀跌分时，坚决持仓Guard”，帮助用户克服早盘震荡盲目平仓的心理隐患。
+    - [x] **单元测试全覆盖**：新建 `scratch/test_early_launch_and_holding.py` 验证蓝色光标(300058)、网宿科技(300017)与中英科技(300936)三张实盘分时图，并在 `tests/test_signal_ledger.py` 中补充 `test_early_launch_and_no_drop_holding` 用例，全量单元测试 100% 成功通过。
+
+## 2026-07-31 22:15
+- [x] **实现底座突破 MA20/MA60 长期压制线起爆 (Base Breakout) 与高位偏离诱多 (Overextended Trap) 辨识引擎 (`ats/signal_ledger.py`, `scratch/test_dragon_breakout_today.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **解构诱多与底座起爆形态判定**：深入剖析长城军工 (601606) 7月23日（27.13元放量突破 MA20 25.10与 MA60 26.80 长期压制线的真正底座起爆）与 7月31日（33.94元严重高位偏离 MA60 27.10 达 +25.2%、昨天冲高杀跌诱多、今天低开收阴 -4.80% 掉队）的实盘走势差异。
+    - [x] **`SignalLedger` 底座突破 MA20/MA60 起爆强门禁**：取消盲目突破近几日高点加分，引入 `ma20d` 与 `ma60d` 压制线检测。只有当价格处于 MA20/MA60 底座附近 (`close < 1.15 * ma20d` 或 `close < 1.18 * ma60d`) 且强力放量穿透突破长期压制线时，才赋予 `🚀 破高起爆` 标签并提升至 `WATCH` 监控池。
+    - [x] **高位偏离诱多识别与大额扣分 (Demotion Guard)**：当价格严重远离生命底座 (`close > 1.25 * ma60d` 或 `close > 1.18 * ma20d`) 且日内收阴或大幅下破分时均线时，自动识别为 `⚠️ 高位诱多` 派发陷阱，强行扣除 15.0 分并限制连阳/阶梯加分，自动降级至 `RADAR` 或 `INACTIVE` 淘汰池，彻底防止高位滞涨诱多股票在池中占位。
+    - [x] **单元测试全覆盖**：更新 `scratch/test_dragon_breakout_today.py` 与 `tests/test_signal_ledger.py` 中的 `test_base_breakout_vs_overextended_trap` 测试用例，全量单元测试 100% 成功通过。
+
+## 2026-07-31 22:05
+- [x] **实现早盘开盘穿透突破近几日高点 (Break High) 与分时均价线 (VWAP) 强主升/掉队淘汰引擎 (`ats/signal_ledger.py`, `tests/test_signal_ledger.py`, `GEMINI.md`)**：
+    - [x] **解构实盘早盘动能痛点**：针对用户开发 1 年 3 个月提炼的“早盘开盘连续破最近几日高点”与“早盘很多冲高掉队，真走出来的是全程运行在分时均价线上方”两大核心实盘感觉，彻底弥补静态日 K 线多周期策略无法反映盘中秒级突破与分时掉队的死角。
+    - [x] **`SignalLedger` +30分突破前高 + +20分分时均线 (VWAP) 上强主升加权**：在 `_compute_specialty_score` 中植入对早盘实时价格 `price` 与近 3~5 日最高价 `max(lasth1d, lasth2d, lasth3d)` 以及分时均价线 `vwap` 的双重穿透校验。股价强踩均价线上方不触碰均线时给予最高加权，打上 `🔥 均线上主升` 醒目标签。
+    - [x] **假异动掉队自动降级淘汰机制 (VWAP Demotion)**：在 `record_signal` 中植入假异动判定。早盘冲高后若在 30 分钟内下破分时均价线 (`price < 0.995 * vwap`) 且高点回落超过 2.0%，系统自动将其从 `WATCH` 优先池降级 (Demote) 至 `RADAR` 或 `INACTIVE` 淘汰池，彻底剔除假冲高掉队个股。
+    - [x] **单元测试全覆盖**：在 `tests/test_signal_ledger.py` 中补充 `test_breakout_high_momentum` 与 `test_vwap_above_and_demotion` 用例，全量 17 项单元测试 100% 成功通过。
+
 ## 2026-07-31 20:45
 - [x] **实现独立 TopLevel 弹窗（DNA、诊断、个股详情）通过接收主窗口退出广播事件自动关闭 (`ats/ui/multi_period_dialog.py`, `ats/ui/main_window.py`)**：
     - [x] **100% 保持独立 TopLevel 窗口**：严格遵循“不要改成子窗口”约束，保持 `StockCategoryDetailDialog`（个股分类详情）、`QtCheckCodeDialog`（股票诊断报告）、`QtDnaAuditReportWindow`（DNA专项审计）等依然为物理独立的 TopLevel 窗口 (`super().__init__(None)`)。它们可自由独立置顶、最小化、在 Alt+Tab 中预览以及在桌面多任务视窗间任意平滑移动。

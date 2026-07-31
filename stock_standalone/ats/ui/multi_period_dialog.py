@@ -69,7 +69,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMessageBox, QTextEdit, QListWidget, QFrame,
     QDialogButtonBox, QSizePolicy, QCompleter, QDateEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray, QStringListModel, QDate
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect, QByteArray, QStringListModel, QDate, QEvent
 from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 
 from tk_gui_modules.window_mixin import WindowMixin
@@ -520,6 +520,12 @@ class MultiPeriodStrategyEditorDialog(QDialog):
     def __init__(self, parent, engine, on_save_callback):
         super().__init__(parent)
         self.setWindowTitle("⚙️ 多周期过滤策略编辑器")
+        
+        # 🚀 开启标准窗口标志：允许标题栏双击/点击最大化与还原、最小化与尺寸拖拽
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setSizeGripEnabled(True)
+
         self.setMinimumSize(950, 650)
         self.engine = engine
         self.on_save_callback = on_save_callback
@@ -610,6 +616,23 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                         break
             self.list_widget.setCurrentRow(initial_idx)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, 'btn_toggle_max') and self.btn_toggle_max is not None:
+                if self.isMaximized():
+                    self.btn_toggle_max.setText("🗗 还原窗口")
+                    self.btn_toggle_max.setToolTip("还原为常规窗口尺寸")
+                else:
+                    self.btn_toggle_max.setText("🗖 快速放大")
+                    self.btn_toggle_max.setToolTip("全屏最大化显示策略编辑器")
+        super().changeEvent(event)
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
     def showEvent(self, event):
         super().showEvent(event)
         # 布局完成 50ms 后精确恢复 Splitter 分割线尺寸与比例，防止被初次窗口绘制初始化布局重置冲掉
@@ -623,6 +646,8 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                     geom_saved = cfg.get("editor_geometry_qt")
                     if geom_saved:
                         self.restoreGeometry(QByteArray.fromHex(geom_saved.encode('utf-8')))
+                    if cfg.get("editor_is_maximized", False):
+                        QTimer.singleShot(0, self.showMaximized)
             except Exception as e:
                 logger.warning(f"Failed to load editor geometry: {e}")
 
@@ -651,6 +676,7 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
             cfg["editor_geometry_qt"] = geom
+            cfg["editor_is_maximized"] = self.isMaximized()
             if hasattr(self, 'splitter') and self.splitter is not None:
                 cfg["editor_splitter_qt"] = self.splitter.saveState().toHex().data().decode('utf-8')
                 cfg["editor_splitter_sizes"] = self.splitter.sizes()
@@ -832,10 +858,16 @@ class MultiPeriodStrategyEditorDialog(QDialog):
         self.btn_validate_all.clicked.connect(self._validate_all)
         bottom_layout.addWidget(self.btn_validate_all)
 
+        self.btn_toggle_max = QPushButton("🗖 快速放大", self)
+        self.btn_toggle_max.setToolTip("全屏最大化/还原策略编辑器窗口")
+        self.btn_toggle_max.setStyleSheet("background-color: #37474f; color: #81d4fa; border: 1px solid #455a64;")
+        self.btn_toggle_max.clicked.connect(self._toggle_maximize)
+        bottom_layout.addWidget(self.btn_toggle_max)
+
         bottom_layout.addStretch()
 
-        self.btn_save = QPushButton("💾 保存并应用", self)
-        self.btn_save.setStyleSheet("background-color: #2e7d32;")
+        self.btn_save = QPushButton("✅ 先应用并保存", self)
+        self.btn_save.setStyleSheet("background-color: #2e7d32; font-weight: bold;")
         self.btn_save.clicked.connect(self._save_to_engine)
         bottom_layout.addWidget(self.btn_save)
 
@@ -1027,7 +1059,12 @@ class MultiPeriodStrategyEditorDialog(QDialog):
             
             self.strategies[self.current_idx] = data
             self._on_select(self.current_idx)
-            QMessageBox.information(self, "成功", "JSON 配置应用成功！")
+            
+            # 🚀 [3秒自动关闭弹窗模式] 不卡顿用户交互
+            msg_box = QMessageBox(QMessageBox.Icon.Information, "成功", "✅ JSON 配置应用成功！(3秒后自动关闭)", parent=self)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            QTimer.singleShot(3000, msg_box.accept)
+            msg_box.exec()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"解析/应用 JSON 失败: {e}")
 
@@ -1197,8 +1234,18 @@ class MultiPeriodStrategyEditorDialog(QDialog):
             QMessageBox.warning(self, "验证失败", "部分周期的过滤表达式包含语法错误，请查看具体标记！")
 
     def _save_to_engine(self):
-        # Perform saving
+        # 🚀 [先应用，后保存]
         try:
+            if self.current_idx >= 0 and hasattr(self, 'json_editor') and self.json_editor.toPlainText().strip():
+                try:
+                    raw_js = self.json_editor.toPlainText().strip()
+                    data = json.loads(raw_js)
+                    if 'name' in data and 'conditions' in data:
+                        data['id'] = self.strategies[self.current_idx].get('id', data.get('id', str(int(time.time() * 1000))))
+                        self.strategies[self.current_idx] = data
+                except Exception as ex:
+                    logger.warning(f"Auto-apply JSON before saving warning: {ex}")
+
             self.engine.save_strategies(self.strategies)
             self.on_save_callback(self.strategies)
             self.accept()

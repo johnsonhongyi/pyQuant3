@@ -533,22 +533,39 @@ class PandasQueryEngine:
                 res = pd.eval(cleaned_expr, engine='python', local_dict=local_scope)
                 return self._wrap_result(df, res)
             except Exception:
-                exec_expr = re.sub(r'\band\b', '&', cleaned_expr, flags=re.IGNORECASE)
-                exec_expr = re.sub(r'\bor\b', '|', exec_expr, flags=re.IGNORECASE)
+                exec_expr = self._to_bit_logical_expr(cleaned_expr)
                 res = pd.eval(exec_expr, engine='python', local_dict=local_scope)
                 return self._wrap_result(df, res)
         except Exception as e:
             self.last_error = f"Query [{query_str}] parsing error: {e}"
-            self.logger.warning(f"[QueryEngine] 表达式解析告警: {e} | 触发Query原句: '{query_str}' | 转换后Expr: '{cleaned_expr}'")
             try:
-                # 完善 Fallback: 自动转换 and/or 为 &/| 避免 Series 条件歧义报错
-                vec_expr = re.sub(r'\band\b', '&', cleaned_expr, flags=re.IGNORECASE)
-                vec_expr = re.sub(r'\bor\b', '|', vec_expr, flags=re.IGNORECASE)
+                # 完善 Fallback: 自动使用 _to_bit_logical_expr 安全转换 and/or 为 &/|
+                vec_expr = self._to_bit_logical_expr(cleaned_expr)
                 res_series = eval(vec_expr, globals(), context)
                 return self._wrap_result(df, res_series)
             except Exception as ex_fb:
                 self.logger.warning(f"[QueryEngine] Fallback 回退执行告警: {ex_fb} | 触发Query原句: '{query_str}'")
                 return df
+
+    @staticmethod
+    def _to_bit_logical_expr(expr_str: str) -> str:
+        """安全将 and/or 替换为 &/|，同时保护二元比较运算两端的优先级，彻底防范 float | float 语法告警"""
+        if not expr_str: return expr_str
+        tokens = re.split(r'(\b(?:and|or)\b)', expr_str, flags=re.IGNORECASE)
+        new_tokens = []
+        for t in tokens:
+            t_lower = t.lower()
+            if t_lower == 'and':
+                new_tokens.append('&')
+            elif t_lower == 'or':
+                new_tokens.append('|')
+            else:
+                sub = t.strip()
+                if re.search(r'[><!]=?|==', sub) and not (sub.startswith('(') and sub.endswith(')')):
+                    new_tokens.append(f"({sub})")
+                else:
+                    new_tokens.append(t)
+        return "".join(new_tokens)
 
     def _wrap_result(self, df: pd.DataFrame, res: Any) -> pd.DataFrame:
         if res is None: return df
