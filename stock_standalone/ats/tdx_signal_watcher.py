@@ -182,9 +182,13 @@ class TdxSignalWatcher(QThread):
         self._file_offset = 0
 
     def stop(self):
-        """停止轮询监听"""
+        """停止轮询监听 (安全等待线程退出，避免 QThread: Destroyed while still running)"""
         self.running = False
-        self.wait(1000)
+        self.requestInterruption()
+        if not self.wait(3000):  # 最多等 3 秒 (超过 interval_sec=2s，保证 sleep 能结束)
+            logger.warning("[TdxSignalWatcher] stop() wait timeout, forcing termination.")
+            self.terminate()
+            self.wait(1000)
 
     def run(self):
         """线程轮询主循环"""

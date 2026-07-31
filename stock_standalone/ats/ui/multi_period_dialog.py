@@ -3765,7 +3765,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 custom_disp_periods[c] = self._get_display_periods_for_custom_col(c, active_periods, filtered_df)
 
             self.table.setRowCount(len(filtered_df))
-            print(f"[DEBUG] setRowCount to {len(filtered_df)}. Disabling sorting during population.")
             self.table.setSortingEnabled(False)
             
             for idx, (code, row) in enumerate(filtered_df.iterrows()):

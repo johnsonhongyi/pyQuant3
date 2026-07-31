@@ -247,9 +247,21 @@ class GlobalFavoriteManager:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(full_data, f, ensure_ascii=False, indent=2)
             
-            if os.path.exists(path):
-                os.remove(path)
-            os.rename(tmp_path, path)
+            # Windows 下另一进程可能暂时占用文件，重试最多 3 次
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                    os.rename(tmp_path, path)
+                    break
+                except OSError as win_err:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.1)
+                    else:
+                        # 所有重试均失败：tmp 文件保留，以备人工处理
+                        raise win_err
+
             with self._lock:
                 self._last_config_mtime = os.path.getmtime(path)
             logger.debug(f"Saved favorites to {path}")
