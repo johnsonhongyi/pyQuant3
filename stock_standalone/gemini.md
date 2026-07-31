@@ -1,3 +1,16 @@
+## 2026-07-31 11:28
+- [x] **彻底根治 3M 周期大小写不一致导致的 `low_3m_4000_y_all` 误读与只读模式下误触 5 分钟初始化 Bug (`multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`, `GEMINI.md`)**：
+    - [x] **取消 `.lower()` 转换，保留 `3M` 原始大小写**：在 `load_period_data`、`evaluate_strategy` 及 UI 线程 Worker (`p_norm`) 中全面废除 `.lower()` 强制小写转换，精确保留 `'3M'` 原生大写格式。使得底层 HDF5 API 能 100% 精准读取到 `tdx_last_df.h5` 中的 `low_3M_4000_y_all` 数据表，彻底消除 `is not find low_3m_4000_y_all` 的匹配错误。
+    - [x] **严密捍卫 `readonly=True` 只读模式**：在 `load_period_data` 的 Step 3 写盘初始化分支前增加 `if not readonly:` 门禁校验。当用户勾选【只读模式】（`readonly=True`）且 HDF5 缓存缺失时，绝对禁止调起 `readonly=False` 底层写盘重构，立刻安全返回空 DataFrame 并标记自适应跳过，彻底避免只读模式下触发 5 分钟全市场 5540 只股票的写盘扫描。
+    - [x] **单元测试全量同步加固**：更新 `tests/test_multi_period_auto_init.py` 中 resample 断言为 `'3M'`，测试逻辑 100% 成功通过。
+
+## 2026-07-31 03:20
+- [x] **实现单股诊断时全策略 Hit 命中评估与 [Hit: X | ✅/❌] 实时修饰 (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`, `GEMINI.md`)**：
+    - [x] **全策略并发单股求值**：在 `diagnose_stock_strategy` 中输入或在选区点击股票代码执行诊断时，系统全自动在 `self.strategies` 全部 25+ 套策略中评估该股票 `code` 的命中状态，记录 `_single_code_hit_results` 并渲染在 UI 下拉框。
+    - [x] **下拉框 [Hit: X | ✅命中 / ❌未命中] 格式化修饰**：升级 `_rebuild_strategy_combo` 与 `_update_hit_status`，将策略下拉框选项由原本单一的 `[Hit: 12]` 扩展升级为 `[Hit: 12 | ✅命中]` 或 `[Hit: 12 | ❌未命中]`，方便直观辨识哪些策略命中该股。
+    - [x] **诊断报告与下拉菜单集成全策略诊断表**：在 `QtCheckCodeDialog` 摘要报告底部增设 `📊 全策略命中诊断汇总` 列表，并在右下角 `历史/策略` 下拉菜单中追加 `--- 🎯 全策略命中测试列表 ---`；选中任意策略可自动构建并提取该策略表达式填入“手动测试”框执行一键测试。
+    - [x] **正则表达式容错加固与单元测试 100% 通过**：全面将正则清洗模式由 `\s*\[Hit:\s*\d+\]$` 加固升级为 `\s*\[Hit:[^\]]+\]$`，并补充 `test_single_code_strategy_diagnosis_hit_formatting` 单元测试断言，确保数据解析与格式化 100% 正确。
+
 ## 2026-07-30 23:05
 - [x] **根治非交易日日期导致的图表可视化隐形问题 (`global_favorites.py`)**：
     - [x] **精准交易日对齐 (`normalize_to_trade_date`)**：在 `GlobalFavoriteManager` 中植入轻量级 `normalize_to_trade_date` 校验器，若 `add_date` 传入或文件中记录的是非交易日（如周末 `2026-07-26`），底层自动调用 `cct.get_last_trade_date` 对齐修正为有效交易日（`2026-07-24`），确保可视化图表和 K 线分析能 100% 匹配到交易日 K 线 Bar 并渲染显示。

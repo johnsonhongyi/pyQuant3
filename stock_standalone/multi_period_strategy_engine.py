@@ -19,14 +19,14 @@ class MultiPeriodStrategyEngine:
         self.last_stats: dict = {}
         
     def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None, readonly: bool = True) -> pd.DataFrame:
-        """加载指定周期数据（支持大小写规范化；readonly 为直接传递的界面选择状态，end=截止日期）"""
+        """加载指定周期数据（保持周期原始大小写格式如 '3M'；readonly 为直接传递的界面选择状态，end=截止日期）"""
         from JSONData import tdx_data_Day as tdd
         from JohnsonUtil import johnson_cons as ct
         from JohnsonUtil import commonTips as cct
         from data_utils import complete_indicators_pipeline
         
-        # 保持原样 period 传入（严格支持 3M 大写与月线/多月区别）
-        res_period = period if period else 'd'
+        # 保持原样 period 传入（严格支持 3M 大写与月线/多月区别，不进行 .lower() 转换）
+        res_period = str(period).strip() if period else 'd'
         dl_map = {
             'd': 120, '2d': 200, '3d': 200, '5d': 300, 
             'w': 300, 'W': 300, 'm': 550, 'M': 550, '45d': 3000, '3M': 4000, '3m': 4000
@@ -49,15 +49,15 @@ class MultiPeriodStrategyEngine:
         # 2. 如果不是强制刷新，首先尝试只读模式加载
         if not force_reload:
             try:
-                logger.info(f"Loading data for period {res_period} (readonly, dl={dl})...")
+                logger.info(f"Loading data for period {res_period} (readonly={readonly}, dl={dl})...")
                 df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=readonly, end=end)
             except Exception as e:
                 logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
                 df = None
 
-        # 3. 如果处于强制刷新模式 (force_reload=True) 或只读未命中/缺少历史底库 ('lastp1d' 缺失)：
-        if force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else [])):
-            # 🛡️ 线上/冷启动无 HDF5 底库保护：当缺失 lastp1d 历史表时，全自动允许一次写盘初始化，确保建立 120 天历史 K 线库
+        # 3. 只有当 not readonly 且 (处于强制刷新模式 force_reload=True 或只读未命中/缺少历史底库 'lastp1d' 缺失) 时，才执行写盘初始化
+        if not readonly and (force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else []))):
+            # 🛡️ 线上/冷启动无 HDF5 底库保护：在非只读模式下缺少 lastp1d 历史表时，全自动允许一次写盘初始化
             try:
                 logger.info(f"⚡ [AUTO-INIT] 底层 HDF5 历史库缺失/初始化 [{res_period}]，全自动补全写盘 (dl={dl}, end={end})...")
                 with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
@@ -121,7 +121,7 @@ class MultiPeriodStrategyEngine:
         }
         
         for period in active_periods:
-            p_norm = str(period).lower().strip()
+            p_norm = str(period).strip()
             
             # 🛡️ 优先检查内存中是否已有有效 DataFrame，若有则自动清理过期的 missing 标记
             df = self._period_dfs.get(p_norm, self._period_dfs.get(period))
