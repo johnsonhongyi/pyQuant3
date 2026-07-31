@@ -111,7 +111,7 @@ class SignalEntry:
         'volume_score', 'priority_score',
         'tier', 'is_locked',
         'state_history',
-        'tdx_label', 'tdx_boost',
+        'tdx_label', 'tdx_boost', 'early_launch_boost',
         'signal_source', 'signal_tag',
         '_date_str',
     ]
@@ -134,6 +134,7 @@ class SignalEntry:
         # 评分
         self.volume_score = 0.0
         self.priority_score = 0.0
+        self.early_launch_boost = 0.0
 
         # 层级与锁定
         self.tier = 'RADAR'       # RADAR / WATCH / TRADE / INACTIVE
@@ -405,7 +406,26 @@ class SignalLedger:
                 entry.promote('WATCH', reason='⭐ 设为重点关注自动晋级')
 
             # 重新计算优先级评分（使用首次发现时间，确保早期信号优先级不变）
-            entry.priority_score = self._compute_priority(entry)
+            entry.priority_score = self._compute_priority(entry, row)
+
+            # 检查假异动掉队降级 (跌破 VWAP 且高点回落掉队)
+            if row is not None and entry.tier == 'WATCH' and not is_fav:
+                try:
+                    vwap = float(row.get('vwap', row.get('avprice', row.get('avg_p', row.get('mean_price', row.get('avg_price', 0.0))))))
+                    if vwap <= 0 and 'amount' in row and 'volume' in row:
+                        amt, vol = float(row['amount']), float(row['volume'])
+                        if amt > 0 and vol > 0:
+                            vwap = amt / (vol * 100.0) if vol < 1e7 else amt / vol
+
+                    if vwap > 0 and price < 0.995 * vwap and (entry.first_seen_pct - pct > 2.0 or pct < 0.2):
+                        entry.tier = 'RADAR'
+                        entry.state_history.append({
+                            'ts': time.time(),
+                            'action': 'DEMOTED_DUE_TO_VWAP_BREAK',
+                            'reason': f'跌破分时均价线 ({vwap:.2f}) 掉队降级至 RADAR',
+                        })
+                except Exception:
+                    pass
 
             # 检查自动晋级
             if entry.tier == 'RADAR':
@@ -421,7 +441,7 @@ class SignalLedger:
             if is_fav:
                 entry.tier = 'WATCH'
             entry.volume_score = volume_score
-            entry.priority_score = self._compute_priority(entry)
+            entry.priority_score = self._compute_priority(entry, row)
 
             self.entries[code] = entry
             self._signal_count += 1
@@ -461,12 +481,50 @@ class SignalLedger:
         except Exception:
             pass
             
-        # 2. 连阳阶梯抬升 (最多 25 分)
+        # 2. 连阳阶梯抬升与真正的 MA20/MA60 底座起爆结构 (最多 30 分)
         try:
             l1, l2, l3 = float(row.get('lastl1d', 0)), float(row.get('lastl2d', 0)), float(row.get('lastl3d', 0))
             h1, h2, h3 = float(row.get('lasth1d', 0)), float(row.get('lasth2d', 0)), float(row.get('lasth3d', 0))
-            if l1 > 0 and l2 > 0 and l3 > 0 and l1 >= l2 >= l3 and h1 >= h2 >= h3:
-                score += 25.0
+            curr_low = float(row.get('low', 0))
+            price = entry.latest_price or float(row.get('close', 0))
+            
+            ma20 = float(row.get('ma20d', row.get('ma20', 0.0)))
+            ma60 = float(row.get('ma60d', row.get('ma60', 0.0)))
+            close_1d = float(row.get('lastp1d', price))
+            
+            # 真正起爆结构: 调整后暴力突破 MA20 或 MA60 长期压制线
+            is_base_breakout = False
+            if ma20 > 0 or ma60 > 0:
+                break_ma20 = (ma20 > 0 and price >= ma20 and close_1d <= ma20 * 1.04)
+                break_ma60 = (ma60 > 0 and price >= ma60 and close_1d <= ma60 * 1.04)
+                near_base = (ma60 > 0 and price <= ma60 * 1.15) or (ma20 > 0 and price <= ma20 * 1.10)
+                if break_ma20 or break_ma60 or near_base:
+                    is_base_breakout = True
+            else:
+                is_base_breakout = True  # 数据缺失时默认允许
+                
+            # 高位偏离诱多防线: 严重偏离 MA60/MA20 (远离生命线 > 18%) 属于高位震荡派发，绝非起爆！
+            is_overextended = False
+            if ma60 > 0 and price > ma60 * 1.18 and ma20 > 0 and price > ma20 * 1.12:
+                is_overextended = True
+            
+            # 动能核心: 突破近 3 日最高点，且必须属于真正底座起爆结构，非高位偏离诱多
+            max_h3 = max(h1, h2, h3) if (h1 > 0 and h2 > 0 and h3 > 0) else h1
+            if max_h3 > 0 and price > max_h3:
+                if is_base_breakout and not is_overextended:
+                    score += 30.0  # 真正的突破 MA20/MA60 底座起爆
+                    if not entry.signal_tag:
+                        entry.signal_tag = '🚀 破高起爆'
+                elif is_overextended:
+                    score -= 15.0  # 高位偏离诱多冲高扣分
+                    entry.signal_tag = '⚠️ 高位诱多'
+                else:
+                    score += 15.0
+            elif (curr_low > 0 and l1 > 0 and l2 > 0 and curr_low >= l1 >= l2) or (l1 > 0 and l2 > 0 and l3 > 0 and l1 >= l2 >= l3 and h1 >= h2 >= h3):
+                if not is_overextended:
+                    score += 25.0  # 盘中低点与历史高低点双重连续阶梯抬升
+                else:
+                    score += 5.0
             elif l1 > 0 and l2 > 0 and l1 >= l2:
                 score += 12.0
         except Exception:
@@ -483,12 +541,44 @@ class SignalLedger:
         except Exception:
             pass
             
-        # 4. 涨幅与支撑企稳 (最多 20 分)
-        pct = float(row.get('percent', 0.0))
-        if 1.0 <= pct <= 6.5:
-            score += 20.0
-        elif 0.0 < pct < 1.0:
-            score += 10.0
+        # 4. 分时均价线 (VWAP) 强主升与无杀跌分时持仓 Guard (最多 25 分)
+        try:
+            vwap = float(row.get('vwap', row.get('avprice', row.get('avg_p', row.get('mean_price', row.get('avg_price', 0.0))))))
+            if vwap <= 0 and 'amount' in row and 'volume' in row:
+                try:
+                    amt, vol = float(row['amount']), float(row['volume'])
+                    if amt > 0 and vol > 0:
+                        vwap = amt / (vol * 100.0) if vol < 1e7 else amt / vol
+                except Exception:
+                    pass
+
+            price = entry.latest_price or float(row.get('close', 0.0))
+            pct = float(row.get('percent', 0.0))
+            
+            # 极早期黄金起爆点 (09:30-09:45 早盘前15分钟 / 盘前预备测试，1.0% <= 涨幅 <= 4.2%，站在均线上方且突破前高/底座)
+            is_early_golden_launch = False
+            if entry.first_seen_phase in (PHASE_AUCTION, PHASE_GOLDEN, PHASE_PREMARKET) and 1.0 <= pct <= 4.2:
+                if vwap > 0 and price >= vwap and is_base_breakout and not is_overextended:
+                    is_early_golden_launch = True
+                    score += 25.0
+                    entry.signal_tag = '🎯 极早起爆'
+                    entry.early_launch_boost = 120.0  # 给予极早期起爆高额置顶分
+
+            if vwap > 0 and price >= vwap:
+                # 强主升结构: 全程在分时均线上方运行，无杀跌分时，防早平
+                score += 20.0
+                if not is_early_golden_launch and entry.signal_tag in ('', '🚀 破高起爆'):
+                    entry.signal_tag = '🛡️ 均线强持有' if pct < 5.0 else '🔥 均线上主升'
+            elif 1.0 <= pct <= 6.5:
+                score += 15.0
+            elif 0.0 < pct < 1.0:
+                score += 8.0
+        except Exception:
+            pct = float(row.get('percent', 0.0))
+            if 1.0 <= pct <= 6.5:
+                score += 15.0
+            elif 0.0 < pct < 1.0:
+                score += 8.0
             
         return min(100.0, max(0.0, score))
 
@@ -526,7 +616,8 @@ class SignalLedger:
             vol_score * 0.20 +
             deviation_score * 0.15 +
             fav_boost +
-            getattr(entry, 'tdx_boost', 0.0)
+            getattr(entry, 'tdx_boost', 0.0) +
+            getattr(entry, 'early_launch_boost', 0.0)
         )
 
         return round(priority, 2)
@@ -578,26 +669,6 @@ class SignalLedger:
 
         return entry
 
-
-
-class SignalValidityTracker:
-    """信号正确有效性闭环追踪器
-    
-    跟踪记录交易信号触发后 T+1 / T+3 / T+5 的最高收益率与闭环有效胜率
-    """
-    
-    def __init__(self):
-        self.stats = {}  # {code_date: {'win': True, 'max_pnl': 5.2, 'close_pnl': 3.1}}
-        
-    def record_outcome(self, code, buy_price, t1_high, t1_close):
-        if buy_price <= 0:
-            return 0.0, False
-        max_pnl = (t1_high - buy_price) / buy_price * 100.0
-        close_pnl = (t1_close - buy_price) / buy_price * 100.0
-        is_win = max_pnl >= 2.5 or close_pnl >= 1.5
-        return round(max_pnl, 2), is_win
-
-
     def _check_auto_promote(self, entry, row):
         """检查是否满足从 RADAR 自动晋级到 WATCH 的条件
 
@@ -647,8 +718,42 @@ class SignalValidityTracker:
             should_promote = True
             reason = f'{PHASE_LABELS[entry.first_seen_phase]} 首批信号 | 涨幅 {pct:+.2f}%'
 
+        # 条件 4: 早上开盘连续突破近几日高点 (Breakout Momentum)
+        if not should_promote and row is not None:
+            try:
+                h1 = float(row.get('lasth1d', 0))
+                h2 = float(row.get('lasth2d', 0))
+                h3 = float(row.get('lasth3d', 0))
+                max_h3 = max(h1, h2, h3) if (h1 > 0 and h2 > 0 and h3 > 0) else h1
+                price = entry.latest_price or float(row.get('close', 0))
+                if max_h3 > 0 and price > max_h3 and pct > 0.8:
+                    should_promote = True
+                    reason = f'🚀 早盘穿透突破近3日高点 ({max_h3:.2f}) | 现价 {price:.2f} ({pct:+.2f}%)'
+                    if not entry.signal_tag:
+                        entry.signal_tag = '🚀 破高起爆'
+            except Exception:
+                pass
+
         if should_promote:
             entry.promote('WATCH', reason=reason)
+
+
+class SignalValidityTracker:
+    """信号正确有效性闭环追踪器
+    
+    跟踪记录交易信号触发后 T+1 / T+3 / T+5 的最高收益率与闭环有效胜率
+    """
+    
+    def __init__(self):
+        self.stats = {}  # {code_date: {'win': True, 'max_pnl': 5.2, 'close_pnl': 3.1}}
+        
+    def record_outcome(self, code, buy_price, t1_high, t1_close):
+        if buy_price <= 0:
+            return 0.0, False
+        max_pnl = (t1_high - buy_price) / buy_price * 100.0
+        close_pnl = (t1_close - buy_price) / buy_price * 100.0
+        is_win = max_pnl >= 2.5 or close_pnl >= 1.5
+        return round(max_pnl, 2), is_win
 
     def get_sorted_pool(self, tier, limit=None):
         """获取指定层级的信号列表（按优先级降序排列）
