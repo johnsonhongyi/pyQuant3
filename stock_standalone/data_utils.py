@@ -498,7 +498,15 @@ def complete_indicators_pipeline(
             top_all['lastl0d'] = curr_low
             top_all['lastv0d'] = curr_vol
             
-        # 为压力位注入 0d (复用昨日压力位作为今日参考线)
+        # 🛡️ 接入 cct.get_work_time_ratio 动态因子，盘中将 0d 盘中累积量转换为虚拟预估全天成交量
+        try:
+            ratio_t = cct.get_work_time_ratio(resample=resample)
+            ratio_t = max(ratio_t if (isinstance(ratio_t, (int, float)) and ratio_t > 0) else 1.0, 0.01)
+            raw_v0d = top_all['lastv0d']
+            top_all['lastv0d'] = (raw_v0d / ratio_t).round(1)
+            top_all['virtual_vol'] = top_all['lastv0d']
+        except Exception as ex_ratio:
+            logger.warning(f"cct.get_work_time_ratio scaling failed: {ex_ratio}")
         if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
         if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
         if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']

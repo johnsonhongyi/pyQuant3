@@ -1,3 +1,9 @@
+## 2026-07-31 12:33
+- [x] **实现 `data_utils.py` 核心 `lastv0d` 动态时间因子缩放与「量比」列保护 (完全隔离 `lastv0d` 与 `volume`)** (`data_utils.py`, `multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `GEMINI.md`)：
+    - [x] **单点注入 `lastv0d` 动态放大**：在 `data_utils.py` 的 `complete_indicators_pipeline` 注入 0d 虚拟列处，直接对 `top_all['lastv0d']` 应用 `ratio_t = cct.get_work_time_ratio(resample)` 缩放（`lastv0d = (lastv0d / ratio_t).round(1)`），解决早盘 (9:30-9:50) 策略放量条件匹配失效问题。
+    - [x] **严格捍卫 UI「量比」列数据独立性**：绝对禁止将绝对成交量 `lastv0d` (如数万手) 覆盖到 `volume` 列；保留 `volume` 列作为 `calc_compute_volume` 算出的标准量比数值 (如 1.1, 0.6, 2.3)，确保界面表头「量比」正常显示。
+    - [x] **杜绝重复动态计算**：上层 `apply_intraday_volume_projection` 统一作为透传委托接口，不再重复计算量比或覆写数据。
+
 ## 2026-07-31 11:28
 - [x] **彻底根治 3M 周期大小写不一致导致的 `low_3m_4000_y_all` 误读与只读模式下误触 5 分钟初始化 Bug (`multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`, `tests/test_multi_period_auto_init.py`, `GEMINI.md`)**：
     - [x] **取消 `.lower()` 转换，保留 `3M` 原始大小写**：在 `load_period_data`、`evaluate_strategy` 及 UI 线程 Worker (`p_norm`) 中全面废除 `.lower()` 强制小写转换，精确保留 `'3M'` 原生大写格式。使得底层 HDF5 API 能 100% 精准读取到 `tdx_last_df.h5` 中的 `low_3M_4000_y_all` 数据表，彻底消除 `is not find low_3m_4000_y_all` 的匹配错误。
