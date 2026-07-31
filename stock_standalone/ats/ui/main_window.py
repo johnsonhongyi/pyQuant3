@@ -4093,7 +4093,15 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error stopping tdx_watcher: {e}")
 
-        # 2. 遍历并关闭多周期主窗口及全局 Shim 实例
+        # 2. 🚀【广播主窗口退出信号】：通知所有悬浮独立窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close()
+        try:
+            from ats.ui.multi_period_dialog import ui_event_hub
+            ui_event_hub.main_window_closing.emit()
+            ui_event_hub.multi_period_closing.emit()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error emitting closing signals: {e}")
+
+        # 遍历并关闭多周期主窗口及全局 Shim 实例
         try:
             import ats.ui.multi_period_dialog as mpd
             if mpd._dialog_instance is not None:

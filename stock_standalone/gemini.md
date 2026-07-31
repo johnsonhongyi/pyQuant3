@@ -1,6 +1,9 @@
-## 2026-07-31 19:35
-- [x] **实现多周期主程序退出关联子窗口 100% 连带跟随销毁与 `AttributeError` 高健壮性容错 (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_dialog_ui.py`)**：
-    - [x] **`AttributeError` 彻底消除与容错防护**：为 `_show_stock_category_dialog` 及 `diagnose_stock_strategy` 植入 `hasattr(self, "_register_child_dialog")` 门禁与直接 `_child_dialogs` 回退，彻底消除了表格双击或调起分类弹窗时的 `'MultiPeriodDialog' object has no attribute '_register_child_dialog'` 异常。
+## 2026-07-31 20:45
+- [x] **实现独立 TopLevel 弹窗（DNA、诊断、个股详情）通过接收主窗口退出广播事件自动关闭 (`ats/ui/multi_period_dialog.py`, `ats/ui/main_window.py`)**：
+    - [x] **100% 保持独立 TopLevel 窗口**：严格遵循“不要改成子窗口”约束，保持 `StockCategoryDetailDialog`（个股分类详情）、`QtCheckCodeDialog`（股票诊断报告）、`QtDnaAuditReportWindow`（DNA专项审计）等依然为物理独立的 TopLevel 窗口 (`super().__init__(None)`)。它们可自由独立置顶、最小化、在 Alt+Tab 中预览以及在桌面多任务视窗间任意平滑移动。
+    - [x] **定义全局退出事件广播中心 (`ui_event_hub`)**：在 `ats/ui/multi_period_dialog.py` 中引入 `ATSUIEventHub` 单例广播中心，提供 `multi_period_closing` 与 `main_window_closing` 退出事件信号。
+    - [x] **悬浮窗口主动接收退出事件**：在所有独立悬浮窗口（个股分类详情、股票诊断、DNA审计等）初始化构造时，自动订阅监听 `ui_event_hub.multi_period_closing` 与 `main_window_closing` 退出事件信号。当接收到主窗口或多周期窗口退出事件时，主动触发 `self.close()` 销毁。
+    - [x] **多周期与主程序 `closeEvent` 无缝广播**：在 `MultiPeriodDialog.closeEvent` 与 `ATSMainWindow.closeEvent` 触发时，自动向全局广播退出事件，确保所有悬浮在桌面的 DNA 审计、股票诊断和个股分类详情窗口在主窗口关闭时 100% 接收事件并无遗漏主动退出。
     - [x] **子弹窗自动注册与生命周期追踪 (`_register_child_dialog`)**：在 `MultiPeriodDialog` 中植入 `_child_dialogs` 跟踪集合与 `_register_child_dialog` 自动注册机制。无论是通过“诊断个股”调起的 `QtCheckCodeDialog` 诊断弹窗，还是通过双击/右键点击分类标签调起的 `StockCategoryDetailDialog` 个股分类详情弹窗，亦或是 DNA 审计弹窗，在打开时均全自动加入追踪注册。
     - [x] **`MultiPeriodDialog.closeEvent` 连带跟随强行销毁**：在多周期主窗口 `closeEvent` 触发时，自动遍历 `_child_dialogs` 与 `_stock_category_wins` 集合中的所有非 modal 独立 TopLevel 子窗口，强行调用 `dlg.close()` 连带销毁，彻底根治了多周期退出后个股分类详情弹窗与诊断报告弹窗依然残留停留在桌面的 Bug。
     - [x] **主程序与多周期窗口退出跟随联动 (`closeEvent`)**：在 `ATSMainWindow.closeEvent` 与 `MultiPeriodDialog.closeEvent` 中实现自动遍历并安全关闭所有的独立的 TopLevel 子窗口（如 `StockCategoryDetailDialog` 个股分类详情、`QtCheckCodeDialog` 股票检查报告、`QtDnaAuditReportWindow` DNA 审计弹窗），并在弹窗构造中设置 `WA_DeleteOnClose`，解决主程序关闭后子弹窗孤立存留于桌面的 Bug。
