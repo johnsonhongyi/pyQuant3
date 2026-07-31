@@ -3944,11 +3944,9 @@ def get_work_time_ratio_sbc(resample='d', now_time=None):
 
 def get_work_time_ratio(resample='d'):
     now = datetime.datetime.now()
-
-    # ---------- 交易日判断 ----------
     today = pd.Timestamp(now.date())
-
-    if not is_trade_date(today) == "True":
+    tr_val = is_trade_date(today)
+    if not (tr_val is True or str(tr_val).strip().lower() in ('true', '1')):
         # 非交易日 → 回退到最近一个交易日
         today -= pd.tseries.offsets.BDay(1)
         passed_ratio = 1.0
