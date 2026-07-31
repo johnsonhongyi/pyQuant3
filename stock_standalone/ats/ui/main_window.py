@@ -1417,16 +1417,19 @@ class ATSMainWindow(QMainWindow):
         self.cb_tdx = QCheckBox("TDX")
         self.cb_tdx.setChecked(True)
         self.cb_tdx.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_tdx.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_tdx)
         
         self.cb_ths = QCheckBox("THS")
         self.cb_ths.setChecked(True)
         self.cb_ths.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_ths.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_ths)
         
         self.cb_vis = QCheckBox("VIS")
         self.cb_vis.setChecked(True)
         self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_vis.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_vis)
         
         toolbar.addSeparator()
@@ -3849,43 +3852,61 @@ class ATSMainWindow(QMainWindow):
             self.link_stock(code, name)
 
     def closeEvent(self, event):
+        """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
         
-        # Stop main heartbeat timer
+        # 1. 停止定时器与后台 Watcher
         if hasattr(self, 'update_timer') and self.update_timer.isActive():
             self.update_timer.stop()
             
-        # Stop favorites poll timer
         if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
             self._favorites_poll_timer.stop()
 
-        # Stop favorites watcher thread
         try:
             from global_favorites import GlobalFavoriteManager
             GlobalFavoriteManager().shutdown()
         except Exception as ex:
             print(f"[ATSMainWindow] Error shutting down favorites: {ex}")
             
-        # Stop IPC listener socket server
         if hasattr(self, 'bridge') and self.bridge is not None:
             try:
                 self.bridge.stop_listener()
             except Exception as ex:
                 print(f"[ATSMainWindow] Error stopping IPC listener: {ex}")
 
-        # Stop TDX signal watcher thread
         if hasattr(self, 'tdx_watcher') and self.tdx_watcher is not None:
             try:
                 self.tdx_watcher.stop()
+                self.tdx_watcher.wait(1000)
             except Exception as ex:
                 print(f"[ATSMainWindow] Error stopping TDX signal watcher: {ex}")
 
-        # Synchronously save all layout configurations and column widths on application exit
+        # 2. 🚀【广播主窗口退出信号】：通知所有悬浮独立窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close()
         try:
-            # First, save geometry and splitter layouts
+            from ats.ui.multi_period_dialog import ui_event_hub
+            ui_event_hub.main_window_closing.emit()
+            ui_event_hub.multi_period_closing.emit()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error emitting closing signals: {e}")
+
+        # 3. 遍历关闭所有活动的顶级 TopLevelWidgets（如个股分类详情弹窗、检查报告弹窗、DNA审计窗口等）
+        try:
+            from PyQt6.QtWidgets import QApplication
+            for widget in list(QApplication.topLevelWidgets()):
+                if widget != self:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(widget):
+                        try:
+                            widget.close()
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[ATSMainWindow] Error closing topLevelWidgets: {e}")
+
+        # 4. 同步持久化保存所有物理窗口布局、Splitter 尺寸及 TDX/THS/VIS 联动勾选状态
+        try:
             self._save_layout_state()
             
-            # Next, save column widths of tables and trees
             if hasattr(self, 'universe_widget') and hasattr(self.universe_widget, 'tree'):
                 if hasattr(self.universe_widget.tree, 'save_header_state'):
                     self.universe_widget.tree.save_header_state()
@@ -3906,30 +3927,34 @@ class ATSMainWindow(QMainWindow):
                     self.position_panel.table.save_column_widths()
         except Exception as e:
             print(f"[ATSMainWindow] Error saving column widths on close: {e}")
-            
-        # Close all orphaned detail dialogs
+
+        try:
+            if hasattr(self, "save_window_position_qt_visual"):
+                self.save_window_position_qt_visual(self, getattr(self, "window_name", "ats_main_window"))
+        except Exception:
+            pass
+
+        # 5. 关闭散落的行情分布弹窗、搜索历史与辅助对话框
         try:
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_close_all_dialogs'):
                 self.dist_chart._close_all_dialogs()
         except Exception as e:
             print(f"[ATSMainWindow] Error closing dist chart dialogs: {e}")
             
-        # Save search history on close
         self._save_search_history_data()
         
-        # Close dragon monitor if open
         from PyQt6.sip import isdeleted
-        if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog):
+        if hasattr(self, 'dragon_monitor_dialog') and self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog):
             try:
                 self.dragon_monitor_dialog.close()
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing dragon monitor on close: {e}")
                 
-        # Close multi period tester dialog if open to ensure state is saved
         try:
             import ats.ui.multi_period_dialog as mpd
             if mpd._dialog_instance and not isdeleted(mpd._dialog_instance):
                 mpd._dialog_instance.close()
+            mpd._dialog_instance = None
         except Exception as e:
             print(f"[ATSMainWindow] Error closing multi period dialog on close: {e}")
             
@@ -4078,59 +4103,4 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[MultiPeriod] Failed to open internal MultiPeriodDialog: {e}")
 
-    def closeEvent(self, event):
-        """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框及后台线程"""
-        self._is_closing = True
 
-        # 1. 停止定时器与后台 Watcher
-        if hasattr(self, "update_timer") and self.update_timer.isActive():
-            self.update_timer.stop()
-            
-        if hasattr(self, "tdx_watcher") and self.tdx_watcher is not None:
-            try:
-                self.tdx_watcher.stop()
-                self.tdx_watcher.wait(1000)
-            except Exception as e:
-                print(f"[ATSMainWindow] Error stopping tdx_watcher: {e}")
-
-        # 2. 🚀【广播主窗口退出信号】：通知所有悬浮独立窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close()
-        try:
-            from ats.ui.multi_period_dialog import ui_event_hub
-            ui_event_hub.main_window_closing.emit()
-            ui_event_hub.multi_period_closing.emit()
-        except Exception as e:
-            print(f"[ATSMainWindow] Error emitting closing signals: {e}")
-
-        # 遍历并关闭多周期主窗口及全局 Shim 实例
-        try:
-            import ats.ui.multi_period_dialog as mpd
-            if mpd._dialog_instance is not None:
-                from PyQt6.sip import isdeleted
-                if not isdeleted(mpd._dialog_instance):
-                    mpd._dialog_instance.close()
-                mpd._dialog_instance = None
-        except Exception as e:
-            print(f"[ATSMainWindow] Error closing mpd._dialog_instance: {e}")
-
-        # 3. 遍历关闭所有活动的顶级 TopLevelWidgets（如个股分类详情弹窗、检查报告弹窗、DNA审计窗口等）
-        try:
-            from PyQt6.QtWidgets import QApplication
-            for widget in list(QApplication.topLevelWidgets()):
-                if widget != self:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(widget):
-                        try:
-                            widget.close()
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"[ATSMainWindow] Error closing topLevelWidgets: {e}")
-
-        # 4. 保存物理窗口布局
-        try:
-            if hasattr(self, "save_window_position_qt_visual"):
-                self.save_window_position_qt_visual(self, getattr(self, "window_name", "ats_main_window"))
-        except Exception:
-            pass
-
-        super().closeEvent(event)
