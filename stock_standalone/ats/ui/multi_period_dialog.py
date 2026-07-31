@@ -3785,7 +3785,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     if notifier:
                         notifier.notify(
                             title=f"🎯 多周期策略选股完成 (共命中 {len(filtered_df)} 只)",
-                            message=f"排头标的: {top_code} {top_name} ({pct_val:+.2f}%)\n点击自动高亮定位并联动通达信看盘",
+                            message=f"排头标的: {top_code} {top_name} ({pct_val:+.2f}%)",
                             code=top_code,
                             score=95.0,
                             level="GOLD"
