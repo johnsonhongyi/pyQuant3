@@ -93,6 +93,15 @@ class QtVarProxy:
             return True
 
 logger = LoggerFactory.getLogger(__name__)
+
+from PyQt6.QtCore import QObject
+
+class ATSUIEventHub(QObject):
+    """全局 UI 事件广播中心：当主窗口或多周期窗口退出时，向所有悬浮独立窗口 (DNA、诊断、个股详情等) 广播退出事件以主动关闭"""
+    multi_period_closing = pyqtSignal()
+    main_window_closing = pyqtSignal()
+
+ui_event_hub = ATSUIEventHub()
 _CONFIG_FILE_LOCK = threading.RLock()
 _active_workers = set()
 
@@ -1955,6 +1964,14 @@ class StockCategoryDetailDialog(QDialog, WindowMixin):
         super().__init__(None)  # 传入 None 彻底切断物理属主关系，绝不强行置顶遮挡
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._real_parent = parent
+
+        # 🚀【接收主窗口退出事件】：保持为独立悬浮窗口，收到主窗口/多周期退出信号时主动 close()
+        try:
+            ui_event_hub.multi_period_closing.connect(self.close)
+            ui_event_hub.main_window_closing.connect(self.close)
+        except Exception:
+            pass
+
         self.setWindowTitle(f"🏷️ 个股分类详情: {name}({code})")
         
         # 允许自由拉伸、最大化、最小化，可独立在主窗口身后与前台间自由切换层级
@@ -5450,6 +5467,15 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         if active_modal and parent is not active_modal:
             parent = active_modal
         super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许多周期主窗口点击时置顶盖在前面
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        # 🚀【接收主窗口退出事件】：保持为独立悬浮窗口，收到主窗口/多周期退出信号时主动 close()
+        try:
+            ui_event_hub.multi_period_closing.connect(self.close)
+            ui_event_hub.main_window_closing.connect(self.close)
+        except Exception:
+            pass
+
         self.summaries = summaries
         self.end_date = end_date
         self.resample = resample
@@ -5780,7 +5806,12 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         except Exception as e:
             logger.warning(f"[MultiPeriodDialog] Error stopping QTimers: {e}")
 
-        # 4. 遍历并强行跟随关闭由本窗口产生的所有关联子弹窗 (诊断窗口、个股分类详情窗口、DNA审计窗口等)
+        # 4. 🚀【广播多周期退出事件】：通知所有独立悬浮窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close() 销毁
+        try:
+            ui_event_hub.multi_period_closing.emit()
+        except Exception as e:
+            logger.warning(f"[MultiPeriodDialog] Error emitting multi_period_closing signal: {e}")
+
         if hasattr(self, "_child_dialogs") and self._child_dialogs:
             for dlg in list(self._child_dialogs):
                 try:
@@ -5831,6 +5862,14 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         self._real_parent = parent
         super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许窗口自由移至主窗口身后
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        # 🚀【接收主窗口退出事件】：保持为独立悬浮窗口，收到主窗口/多周期退出信号时主动 close()
+        try:
+            ui_event_hub.multi_period_closing.connect(self.close)
+            ui_event_hub.main_window_closing.connect(self.close)
+        except Exception:
+            pass
+
         self.df = df
         self.code = str(code).strip().zfill(6)
         self.queries = queries
