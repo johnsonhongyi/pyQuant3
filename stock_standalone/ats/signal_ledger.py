@@ -111,6 +111,8 @@ class SignalEntry:
         'volume_score', 'priority_score',
         'tier', 'is_locked',
         'state_history',
+        'tdx_label', 'tdx_boost',
+        'signal_source', 'signal_tag',
         '_date_str',
     ]
 
@@ -136,6 +138,12 @@ class SignalEntry:
         # 层级与锁定
         self.tier = 'RADAR'       # RADAR / WATCH / TRADE / INACTIVE
         self.is_locked = False
+
+        # TDX 与特殊分类信号标记
+        self.tdx_label = ''
+        self.tdx_boost = 0.0
+        self.signal_source = 'ATS'  # 'ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD'
+        self.signal_tag = ''        # 分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
 
         # 状态变更历史
         self.state_history = [{
@@ -191,8 +199,21 @@ class SignalEntry:
             'priority_score': self.priority_score,
             'tier': self.tier,
             'is_locked': self.is_locked,
+            'signal_source': getattr(self, 'signal_source', 'ATS'),
+            'signal_tag': getattr(self, 'signal_tag', ''),
+            'tdx_label': getattr(self, 'tdx_label', ''),
             'date': self._date_str,
         }
+
+
+_global_ledger_instance = None
+
+def get_signal_ledger() -> 'SignalLedger':
+    """获取全系统统一共享的 SignalLedger 信号账本单例 (多周期、ATS、TDX监听器全覆盖共享)"""
+    global _global_ledger_instance
+    if _global_ledger_instance is None:
+        _global_ledger_instance = SignalLedger()
+    return _global_ledger_instance
 
 
 # ======================================================================
@@ -228,6 +249,23 @@ class SignalLedger:
         self.entries = {}       # {code: SignalEntry}
         self._today_str = None
         self._signal_count = 0  # 当日发现信号总数
+        self._notified_keys = set()  # 当日已提醒通知的信号 key 集合，防止多周期/ATS/TDX重复播报
+
+    def is_notified_today(self, code: str, signal_tag: str = '') -> bool:
+        """检查指定股票或信号在今天是否已经进行过桌面/语音通知，防止多周期与 ATS 两个界面重复播报"""
+        self._ensure_daily_reset()
+        code_clean = str(code).strip().zfill(6)
+        if not signal_tag:
+            return any(k.startswith(f"{code_clean}_") for k in self._notified_keys)
+        tag_clean = str(signal_tag).strip()
+        return f"{code_clean}_{tag_clean}" in self._notified_keys
+
+    def mark_notified_today(self, code: str, signal_tag: str = ''):
+        """标记指定股票与信号类型为今日已通知，阻止后续模块重复发声弹窗"""
+        self._ensure_daily_reset()
+        code_clean = str(code).strip().zfill(6)
+        tag_clean = str(signal_tag).strip() or 'GENERAL'
+        self._notified_keys.add(f"{code_clean}_{tag_clean}")
 
     def _ensure_daily_reset(self):
         """每日自动重置（保留 WATCH 和 TRADE 信号用于跨日追踪）"""
@@ -253,6 +291,7 @@ class SignalLedger:
 
         self.entries = preserved
         self._signal_count = 0
+        self._notified_keys = set()
 
         if old_count > 0:
             print(f"[SignalLedger] 每日重置: {old_count} → {len(preserved)} (保留 WATCH/TRADE 跨日追踪)")
@@ -301,11 +340,11 @@ class SignalLedger:
         if loaded_count > 0:
             print(f"[SignalLedger] 跨日继承: 成功恢复 {loaded_count} 只昨日 WATCH/TRADE 精选标的")
 
-    def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0):
+    def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0, signal_source='ATS', signal_tag=''):
         """发现新信号或更新已有信号
 
         核心逻辑:
-        - 新信号 → 写入账本，锁定首次发现时间
+        - 新信号 → 写入账本，锁定首次发现时间并打上特殊分类标记
         - 已有信号 → 仅更新最新价格/涨幅，不改变首次发现时间
 
         Args:
@@ -316,6 +355,8 @@ class SignalLedger:
             deviation: MA20 偏离度
             row: 行情数据行（可选，用于提取量比等数据）
             volume_score: 量能评分（由 VolumeProfiler 计算）
+            signal_source: 信号来源 ('ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD')
+            signal_tag: 特殊分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
 
         Returns:
             SignalEntry or None
@@ -331,14 +372,8 @@ class SignalLedger:
             pass
         is_fav = str(code).strip() in fav_stocks
 
-        if not name or name in ('未知', '重点标的', ''):
-            try:
-                from JohnsonUtil import commonTips as cct
-                n_str = cct.get_stock_name(code)
-                if n_str and str(n_str).strip() and str(n_str).strip() != str(code):
-                    name = str(n_str).strip()
-            except Exception:
-                pass
+        if row is not None and 'name' in row and str(row['name']).strip():
+            name = str(row['name']).strip()
 
         # 偏离度筛选（重点关注股票不受此限制，防止消失）
         if not is_fav and (deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX):
@@ -354,6 +389,9 @@ class SignalLedger:
             entry = self.entries[code]
             entry.update_latest(price, pct, deviation)
             entry.volume_score = volume_score
+            entry.signal_source = signal_source or entry.signal_source
+            if signal_tag:
+                entry.signal_tag = signal_tag
 
             # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注，恢复为 RADAR/WATCH
             if entry.tier == 'INACTIVE':
@@ -378,6 +416,8 @@ class SignalLedger:
             # 新信号 → 写入账本
             phase = _detect_phase()
             entry = SignalEntry(code, name, price, pct, deviation, phase)
+            entry.signal_source = signal_source
+            entry.signal_tag = signal_tag
             if is_fav:
                 entry.tier = 'WATCH'
             entry.volume_score = volume_score
@@ -485,10 +525,59 @@ class SignalLedger:
             time_score * 0.25 +
             vol_score * 0.20 +
             deviation_score * 0.15 +
-            fav_boost
+            fav_boost +
+            getattr(entry, 'tdx_boost', 0.0)
         )
 
         return round(priority, 2)
+
+    def record_tdx_signal(self, sig_dict: dict, row=None):
+        """记录来自通达信 / OrderMon 的外部实时信号
+        
+        - 自动赋予 +150 分提权，在 WATCH / RADAR 池中自动靠前置顶
+        - 自动赋予 TDX 标签 (如 🔔 TDX 5上10)
+        - 自动提升至 WATCH 监控池
+        """
+        if not sig_dict or not isinstance(sig_dict, dict):
+            return None
+
+        code = sig_dict.get('code')
+        if not code:
+            return None
+
+        name = sig_dict.get('name', code)
+        price = sig_dict.get('price', 0.0)
+        flag_label = sig_dict.get('flag_label', 'TDX信号')
+        direction_cn = sig_dict.get('direction_cn', '买入')
+
+        # 偏离度回退计算
+        dev = 0.0
+        pct = 0.0
+        if row is not None:
+            pct = float(row.get('percent', 0.0)) if 'percent' in row else 0.0
+            dev = float(row.get('dff', 0.0)) if 'dff' in row else 0.0
+
+        tag_str = f"🔔 TDX {flag_label}"
+        entry = self.record_signal(
+            code=code,
+            name=name,
+            price=price,
+            pct=pct,
+            deviation=dev,
+            row=row,
+            signal_source='TDX',
+            signal_tag='🔔'
+        )
+        if entry:
+            entry.tdx_label = tag_str
+            entry.signal_tag = '🔔'
+            entry.tdx_boost = 150.0  # 通达信实盘信号提权 150 分
+            entry.promote('WATCH', reason=f'通达信实盘信号: {flag_label} ({direction_cn})')
+            entry.priority_score = self._compute_priority(entry, row)
+            print(f"[SignalLedger] 已锁定通达信信号: {code} ({name}) {entry.tdx_label} 提权至 {entry.priority_score:.1f}分")
+
+        return entry
+
 
 
 class SignalValidityTracker:

@@ -237,7 +237,17 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             return
 
         now = time.time()
-        code_str = str(code).strip()
+        code_str = str(code).strip().zfill(6)
+
+        # 0.1 通过共享 SignalLedger 校验是否今天已提示过相同的信号提示，防止 ATS 与多周期重复播报
+        try:
+            from ats.signal_ledger import get_signal_ledger
+            ledger = get_signal_ledger()
+            if ledger.is_notified_today(code_str, reason):
+                logger.info(f"🔇 [ALERT_NOTIFY] 该信号 [{code_str} | {reason}] 今日已播报提醒，自动去重跳过重复提示")
+                return
+        except Exception as e_check:
+            logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
 
         # 1. 全局限频：15 秒内最多推送 1 条，杜绝批量刷屏
         if (now - self._last_global_ts) < 15.0:
@@ -247,6 +257,13 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         last_ts = self._last_alert_ts.get(code_str, 0.0)
         if (now - last_ts) < 900.0:
             return
+
+        # 标记为已播报提醒
+        try:
+            from ats.signal_ledger import get_signal_ledger
+            get_signal_ledger().mark_notified_today(code_str, reason)
+        except Exception:
+            pass
 
         self._last_global_ts = now
         self._last_alert_ts[code_str] = now
