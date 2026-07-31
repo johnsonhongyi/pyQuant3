@@ -242,6 +242,9 @@ class AllStrategiesHitWorker(QThread):
             total = len(self.strategies)
             results = {}
             for idx, strat in enumerate(self.strategies, 1):
+                if self.isInterruptionRequested():
+                    logger.info("[AllStrategiesHitWorker] Interruption requested during evaluation loop, exiting thread.")
+                    return
                 self.progress.emit(f"正在测试全量策略 Hit: {idx}/{total} ({strat['name']})...")
                 try:
                     res_df = self.engine.evaluate_strategy(strat, self.active_periods)
@@ -257,6 +260,48 @@ class AllStrategiesHitWorker(QThread):
             self.finished.emit(results)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class SingleCodeAllHitWorker(QThread):
+    """
+    后台异步线程：评估全量策略库对单个诊断股票 code 的 Hit 状态，
+    彻底脱离 UI 主线程事件循环，绝对避免 UI 界面 (未响应) 冻结卡死。
+    """
+    finished_signal = pyqtSignal(str, dict, list)  # (code, single_code_hit_results, all_strategy_reports)
+
+    def __init__(self, engine, strategies, code, active_periods):
+        super().__init__()
+        self.engine = engine
+        self.strategies = strategies
+        self.code = code
+        self.active_periods = active_periods
+
+    def run(self):
+        single_code_hit_results = {}
+        all_strategy_reports = []
+        if self.strategies and self.engine:
+            for strat in self.strategies:
+                if self.isInterruptionRequested():
+                    break
+                s_id = strat.get('id', strat.get('name'))
+                s_name = strat.get('name', '未命名策略')
+                try:
+                    res_df = self.engine.evaluate_strategy(strat, self.active_periods)
+                    is_hit = (res_df is not None and not res_df.empty and self.code in res_df.index)
+                except Exception:
+                    is_hit = False
+
+                single_code_hit_results[s_id] = is_hit
+                single_code_hit_results[s_name] = is_hit
+                all_strategy_reports.append({
+                    'id': s_id,
+                    'name': s_name,
+                    'hit': is_hit,
+                    'strategy': strat
+                })
+
+        if not self.isInterruptionRequested():
+            self.finished_signal.emit(self.code, single_code_hit_results, all_strategy_reports)
 
 
 class MultiPeriodWorker(QThread):
@@ -329,6 +374,9 @@ class MultiPeriodWorker(QThread):
             import contextlib
 
             for period in self.active_periods:
+                if self.isInterruptionRequested():
+                    logger.info("[MultiPeriodWorker] Interruption requested during period loop, exiting thread.")
+                    return
                 p_norm = str(period).strip()
                 is_force_init = self.force_reload and self.allow_auto_init
 
@@ -1905,6 +1953,7 @@ class StockCategoryDetailDialog(QDialog, WindowMixin):
     """
     def __init__(self, parent, code, name, category_str):
         super().__init__(None)  # 传入 None 彻底切断物理属主关系，绝不强行置顶遮挡
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._real_parent = parent
         self.setWindowTitle(f"🏷️ 个股分类详情: {name}({code})")
         
@@ -2010,6 +2059,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("多周期联动策略筛选器")
         self.setMinimumSize(800, 500)
+
+        self._child_dialogs = set()
+        self._stock_category_wins = {}
 
         # Config File Setup
         self.config_file = os.path.join(get_app_root(), "config", "standalone_tester_config.json")
@@ -2334,6 +2386,8 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.ui_state['sortby_col_ascend'] = getattr(self, 'sortby_col_ascend', False)
             self.ui_state['current_history_query'] = self._current_history_query
             self.ui_state['recent_secondary_filters'] = list(getattr(self, 'recent_secondary_filters', []))
+            if hasattr(self, 'focus_mode_combo') and self.focus_mode_combo is not None:
+                self.ui_state['focus_mode_index'] = self.focus_mode_combo.currentIndex()
 
             if write_to_disk:
                 cfg = {}
@@ -2733,117 +2787,119 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self._rebuild_custom_cols_menu()
 
     def _rebuild_strategy_combo(self):
+        if not hasattr(self, 'strategy_combo') or self.strategy_combo is None:
+            return
         self.strategy_combo.blockSignals(True)
-        
-        # 1. 抓取当前下拉框中各策略纯名字的 [Hit: N] 后缀映射
-        hit_names = {}
-        import re
-        for i in range(self.strategy_combo.count()):
-            t = self.strategy_combo.itemText(i)
-            # 清洗前缀和后缀
-            raw = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-            raw = re.sub(r'\s*\[Hit:[^\]]+\]$', '', raw)
-            hit_names[raw] = t
-
-        current_text = self.strategy_combo.currentText()
-        clean_current_text = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', current_text)
-        clean_current_text = re.sub(r'\s*\[Hit:[^\]]+\]$', '', clean_current_text)
-
-        self.strategy_combo.clear()
-        
-        # 2. 根据 recent_strategy_ids 重新组织 strategies 的渲染顺序
-        recent_ids = self.ui_state.get('recent_strategy_ids', [])
-        valid_strat_ids = {s['id'] for s in self.strategies}
-        recent_ids = [rid for rid in recent_ids if rid in valid_strat_ids]
-        self.ui_state['recent_strategy_ids'] = recent_ids[:10]
-        recent_ids = recent_ids[:10]
-        
-        recent_strats = []
-        other_strats = []
-        for rid in recent_ids:
-            s = next(x for x in self.strategies if x['id'] == rid)
-            recent_strats.append(s)
-            
-        recent_ids_set = set(recent_ids)
-        for s in self.strategies:
-            if s['id'] not in recent_ids_set:
-                other_strats.append(s)
-                
-        # 3. 拼接并添加 Items
-        prefixes = ["❶ ", "❷ ", "❸ ", "❹ ", "❺ ", "❻ ", "❼ ", "❽ ", "❾ ", "❿ "]
-        
-        # 优先从计算出的 self._last_hit_results 中读取，备选从原本的文本中读取
-        hit_results = getattr(self, "_last_hit_results", {})
-        single_code_results = getattr(self, "_single_code_hit_results", {})
-
-        def _build_hit_suffix(s_id, raw_name, prev_full=None):
-            hit_cnt = None
-            if s_id and s_id in hit_results:
-                hit_cnt = hit_results[s_id]
-            elif raw_name in hit_results:
-                hit_cnt = hit_results[raw_name]
-            elif prev_full:
-                prev_hit = re.search(r'\[Hit:\s*(\d+)', prev_full)
-                if prev_hit:
-                    hit_cnt = int(prev_hit.group(1))
-
-            single_hit = None
-            if single_code_results:
-                if s_id and s_id in single_code_results:
-                    single_hit = single_code_results[s_id]
-                elif raw_name in single_code_results:
-                    single_hit = single_code_results[raw_name]
-
-            if hit_cnt is not None and single_hit is not None:
-                hit_tag = "✅命中" if single_hit else "❌未命中"
-                return f" [Hit: {hit_cnt} | {hit_tag}]"
-            elif hit_cnt is not None:
-                return f" [Hit: {hit_cnt}]"
-            elif single_hit is not None:
-                hit_tag = "✅命中" if single_hit else "❌未命中"
-                return f" [Hit: {hit_tag}]"
-            return ""
-
-        for idx, s in enumerate(recent_strats):
-            prefix = prefixes[idx] if idx < len(prefixes) else ""
-            raw_name = s['name']
-            s_id = s.get('id', '')
-            prev_full = hit_names.get(raw_name)
-            hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
-            item_text = f"{prefix}{raw_name}{hit_suffix}"
-            self.strategy_combo.addItem(item_text, userData=s_id)
-                
-        for s in other_strats:
-            raw_name = s['name']
-            s_id = s.get('id', '')
-            prev_full = hit_names.get(raw_name)
-            hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
-            item_text = f"{raw_name}{hit_suffix}"
-            self.strategy_combo.addItem(item_text, userData=s_id)
-        
-        # 4. 恢复之前选中的策略
-        matched_idx = -1
-        target_id = self.ui_state.get('strategy_id')
-        if target_id:
-            for i in range(self.strategy_combo.count()):
-                if self.strategy_combo.itemData(i) == target_id:
-                    matched_idx = i
-                    break
-        if matched_idx < 0:
+        try:
+            # 1. 抓取当前下拉框中各策略纯名字的 [Hit: N] 后缀映射
+            hit_names = {}
+            import re
             for i in range(self.strategy_combo.count()):
                 t = self.strategy_combo.itemText(i)
-                t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
-                t_clean = re.sub(r'\s*\[Hit:[^\]]+\]$', '', t_clean)
-                if t_clean == clean_current_text:
-                    matched_idx = i
-                    break
-        if matched_idx >= 0:
-            self.strategy_combo.setCurrentIndex(matched_idx)
-        else:
-            if self.strategy_combo.count() > 0:
-                self.strategy_combo.setCurrentIndex(0)
+                # 清洗前缀和后缀
+                raw = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+                raw = re.sub(r'\s*\[Hit:[^\]]+\]$', '', raw)
+                hit_names[raw] = t
+
+            current_text = self.strategy_combo.currentText()
+            clean_current_text = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', current_text)
+            clean_current_text = re.sub(r'\s*\[Hit:[^\]]+\]$', '', clean_current_text)
+
+            self.strategy_combo.clear()
+            
+            # 2. 根据 recent_strategy_ids 重新组织 strategies 的渲染顺序
+            recent_ids = self.ui_state.get('recent_strategy_ids', [])
+            valid_strat_ids = {s['id'] for s in self.strategies}
+            recent_ids = [rid for rid in recent_ids if rid in valid_strat_ids]
+            self.ui_state['recent_strategy_ids'] = recent_ids[:10]
+            recent_ids = recent_ids[:10]
+            
+            recent_strats = []
+            other_strats = []
+            for rid in recent_ids:
+                s = next(x for x in self.strategies if x['id'] == rid)
+                recent_strats.append(s)
                 
-        self.strategy_combo.blockSignals(False)
+            recent_ids_set = set(recent_ids)
+            for s in self.strategies:
+                if s['id'] not in recent_ids_set:
+                    other_strats.append(s)
+                    
+            # 3. 拼接并添加 Items
+            prefixes = ["❶ ", "❷ ", "❸ ", "❹ ", "❺ ", "❻ ", "❼ ", "❽ ", "❾ ", "❿ "]
+            
+            # 优先从计算出的 self._last_hit_results 中读取，备选从原本的文本中读取
+            hit_results = getattr(self, "_last_hit_results", {})
+            single_code_results = getattr(self, "_single_code_hit_results", {})
+
+            def _build_hit_suffix(s_id, raw_name, prev_full=None):
+                hit_cnt = None
+                if s_id and s_id in hit_results:
+                    hit_cnt = hit_results[s_id]
+                elif raw_name in hit_results:
+                    hit_cnt = hit_results[raw_name]
+                elif prev_full:
+                    prev_hit = re.search(r'\[Hit:\s*(\d+)', prev_full)
+                    if prev_hit:
+                        hit_cnt = int(prev_hit.group(1))
+
+                single_hit = None
+                if single_code_results:
+                    if s_id and s_id in single_code_results:
+                        single_hit = single_code_results[s_id]
+                    elif raw_name in single_code_results:
+                        single_hit = single_code_results[raw_name]
+
+                if hit_cnt is not None and single_hit is not None:
+                    hit_tag = "✅命中" if single_hit else "❌未命中"
+                    return f" [Hit: {hit_cnt} | {hit_tag}]"
+                elif hit_cnt is not None:
+                    return f" [Hit: {hit_cnt}]"
+                elif single_hit is not None:
+                    hit_tag = "✅命中" if single_hit else "❌未命中"
+                    return f" [Hit: {hit_tag}]"
+                return ""
+
+            for idx, s in enumerate(recent_strats):
+                prefix = prefixes[idx] if idx < len(prefixes) else ""
+                raw_name = s['name']
+                s_id = s.get('id', '')
+                prev_full = hit_names.get(raw_name)
+                hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
+                item_text = f"{prefix}{raw_name}{hit_suffix}"
+                self.strategy_combo.addItem(item_text, userData=s_id)
+                    
+            for s in other_strats:
+                raw_name = s['name']
+                s_id = s.get('id', '')
+                prev_full = hit_names.get(raw_name)
+                hit_suffix = _build_hit_suffix(s_id, raw_name, prev_full)
+                item_text = f"{raw_name}{hit_suffix}"
+                self.strategy_combo.addItem(item_text, userData=s_id)
+            
+            # 4. 恢复之前选中的策略
+            matched_idx = -1
+            target_id = self.ui_state.get('strategy_id')
+            if target_id:
+                for i in range(self.strategy_combo.count()):
+                    if self.strategy_combo.itemData(i) == target_id:
+                        matched_idx = i
+                        break
+            if matched_idx < 0:
+                for i in range(self.strategy_combo.count()):
+                    t = self.strategy_combo.itemText(i)
+                    t_clean = re.sub(r'^[❶❷❸❹❺❻❼❽❾❿①②③④⑤⑥⑦⑧⑨⑩]\s*', '', t)
+                    t_clean = re.sub(r'\s*\[Hit:[^\]]+\]$', '', t_clean)
+                    if t_clean == clean_current_text:
+                        matched_idx = i
+                        break
+            if matched_idx >= 0:
+                self.strategy_combo.setCurrentIndex(matched_idx)
+            else:
+                if self.strategy_combo.count() > 0:
+                    self.strategy_combo.setCurrentIndex(0)
+        finally:
+            self.strategy_combo.blockSignals(False)
 
     def _apply_state(self):
         # 1. Apply active strategy
@@ -2913,6 +2969,21 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.sort_level3_asc = self.ui_state.get('sort_level3_asc', True)
         self.sortby_col = self.ui_state.get('sortby_col', None)
         self.sortby_col_ascend = self.ui_state.get('sortby_col_ascend', False)
+
+        # 9. Apply focus mode selection
+        if hasattr(self, 'focus_mode_combo') and self.focus_mode_combo is not None:
+            focus_idx = self.ui_state.get('focus_mode_index', 3)
+            if 0 <= focus_idx < self.focus_mode_combo.count():
+                self.focus_mode_combo.blockSignals(True)
+                self.focus_mode_combo.setCurrentIndex(focus_idx)
+                self.focus_mode_combo.blockSignals(False)
+
+    def _on_focus_mode_changed(self, index):
+        if getattr(self, "_initializing", False):
+            return
+        self._save_state()
+        if self.last_result_df is not None:
+            self._show_results(self.last_result_df, self.last_elapsed, self._last_flat_df)
 
     def _update_manual_col_completer(self, force_refresh=False):
         if not hasattr(self, "_col_completer_model"):
@@ -4524,7 +4595,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _on_diagnose_click(self):
-        code = self.diag_edit.text().strip()
+        input_code = self.diag_edit.text().strip()
+        code = input_code
+        from_input_box = bool(input_code)
         if not code:
             row = self.table.currentRow()
             if row >= 0:
@@ -4536,7 +4609,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QMessageBox.warning(self, "警告", "请输入或在表格中选择要诊断的个股代码！")
             return
         
-        self.diagnose_stock_strategy(code)
+        self.diagnose_stock_strategy(code, from_input_box=from_input_box)
 
     def _on_diagnose_dna_click(self):
         code = self.diag_edit.text().strip()
@@ -4663,7 +4736,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QApplication.restoreOverrideCursor()
             self.lbl_status.setText("准备就绪")
 
-    def diagnose_stock_strategy(self, code, name=None):
+    def diagnose_stock_strategy(self, code, name=None, from_input_box=False):
         code = str(code).strip().zfill(6)
         if not name:
             if self.top_now is not None and code in self.top_now.index:
@@ -4823,40 +4896,64 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         df_flat = pd.DataFrame([merged_row], index=[code])
         df_flat.index.name = 'code'
 
-        # 在全量策略库中测试当前股票 code 是否命中，记录结果并在 strategy_combo 下拉框中追加 [Hit: X | ✅命中 / ❌未命中] 标记
-        single_code_hit_results = {}
-        all_strategy_reports = []
-        if hasattr(self, 'strategies') and self.strategies:
-            for strat in self.strategies:
-                s_id = strat.get('id', strat.get('name'))
-                s_name = strat.get('name', '未命名策略')
-                try:
-                    res_df = self.engine.evaluate_strategy(strat, active_periods)
-                    is_hit = (res_df is not None and not res_df.empty and code in res_df.index)
-                except Exception:
-                    is_hit = False
-                
-                single_code_hit_results[s_id] = is_hit
-                single_code_hit_results[s_name] = is_hit
-                all_strategy_reports.append({
-                    'id': s_id,
-                    'name': s_name,
-                    'hit': is_hit,
-                    'strategy': strat
-                })
+        # ⚡【优先/第1时间调起诊断弹窗】：先看诊断数据
+        last_hit_code = getattr(self, "_last_diagnosed_hit_code", None)
+        all_strategy_reports = getattr(self, "_last_all_strategy_reports", []) if code == last_hit_code else []
 
-        self._single_code_hit_results = single_code_hit_results
-        self._diagnosed_code = code
-        self._rebuild_strategy_combo()
-
-        # Use Qt-native check code dialog to completely avoid Tkinter dependency
         try:
             self._check_code_dialog = QtCheckCodeDialog(df_flat, code, queries, parent=self, all_strategy_reports=all_strategy_reports)
+            if hasattr(self, "_register_child_dialog"):
+                self._register_child_dialog(self._check_code_dialog)
+            else:
+                if not hasattr(self, "_child_dialogs"):
+                    self._child_dialogs = set()
+                self._child_dialogs.add(self._check_code_dialog)
             self._check_code_dialog.show()
             self._check_code_dialog.raise_()
             self._check_code_dialog.activateWindow()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起股票检查报告失败: {e}")
+
+        # ⚡【防重复 & 仅在诊断框中输入新 code 时才跑全策略 Hit】
+        should_eval_hit = from_input_box and (code != last_hit_code)
+        if should_eval_hit:
+            self._last_diagnosed_hit_code = code
+            QTimer.singleShot(50, lambda: self._eval_all_strategies_hit_for_code(code, active_periods))
+
+    def _eval_all_strategies_hit_for_code(self, code, active_periods):
+        """后/异步评估全量策略库对特定股票 code 的 Hit 状态 (使用独立 QThread 后台运行，绝不卡顿 UI)"""
+        if hasattr(self, "_single_hit_worker") and self._single_hit_worker is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(self._single_hit_worker) and self._single_hit_worker.isRunning():
+                    self._single_hit_worker.requestInterruption()
+                    self._single_hit_worker.quit()
+            except Exception:
+                pass
+            self._single_hit_worker = None
+
+        if not hasattr(self, 'strategies') or not self.strategies:
+            return
+
+        self._single_hit_worker = SingleCodeAllHitWorker(self.engine, self.strategies, code, active_periods)
+        self._single_hit_worker.finished_signal.connect(self._on_single_code_hit_worker_finished)
+        self._single_hit_worker.start()
+
+    def _on_single_code_hit_worker_finished(self, code, single_code_hit_results, all_strategy_reports):
+        """后台子线程完成单股全策略评估后的 UI 安全回调"""
+        self._single_code_hit_results = single_code_hit_results
+        self._diagnosed_code = code
+        self._last_all_strategy_reports = all_strategy_reports
+        self._rebuild_strategy_combo()
+
+        # 同步更新已打开的诊断窗口里的全策略报告列表
+        if hasattr(self, "_check_code_dialog") and self._check_code_dialog is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(self._check_code_dialog) and hasattr(self._check_code_dialog, "update_all_strategy_reports"):
+                    self._check_code_dialog.update_all_strategy_reports(all_strategy_reports)
+            except Exception:
+                pass
 
     def _open_history_dialog(self):
         dlg = QueryHistoryDialog(self)
@@ -4885,13 +4982,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         if code == getattr(self, "_last_link_code", ""):
             return
         self._last_link_code = code
-
-        # Reset base_table's emitted-code tracker so switching to another window
-        # and coming back can re-trigger the same code
-        try:
-            self.table._last_emitted_code = ""
-        except Exception:
-            pass
 
         # Prepare parameters
         do_vis = self.link_vis_chk.isChecked()
@@ -5051,6 +5141,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         dialog = StockCategoryDetailDialog(self, code, name, formatted_cat)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._stock_category_wins[win_key] = dialog
+        if hasattr(self, "_register_child_dialog"):
+            self._register_child_dialog(dialog)
+        else:
+            if not hasattr(self, "_child_dialogs"):
+                self._child_dialogs = set()
+            self._child_dialogs.add(dialog)
         dialog.show()
 
     def _normalize_concept_name(self, name):
@@ -5637,14 +5733,104 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
 
     def closeEvent(self, event):
         if hasattr(self, "save_window_position_qt_visual"):
-            self.save_window_position_qt_visual(self, self.window_name)
+            try:
+                self.save_window_position_qt_visual(self, self.window_name)
+            except Exception as e:
+                logger.warning(f"Error saving window position: {e}")
+
+        # 1. 停止并安全清理当前窗口持有的子线程 worker
+        for attr in ("worker", "_hit_worker"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(w) and w.isRunning():
+                        logger.info(f"[MultiPeriodDialog] Stopping background {attr} thread...")
+                        w.requestInterruption()
+                        w.quit()
+                        if not w.wait(1000):
+                            logger.warning(f"[MultiPeriodDialog] {attr} thread timed out, terminating...")
+                            w.terminate()
+                            w.wait(500)
+                except Exception as e:
+                    logger.warning(f"[MultiPeriodDialog] Exception stopping {attr}: {e}")
+                finally:
+                    setattr(self, attr, None)
+
+        # 2. 清理 _active_workers 全局集合中残留的活跃 Worker
+        global _active_workers
+        for w in list(_active_workers):
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(w) and w.isRunning():
+                    w.requestInterruption()
+                    w.quit()
+                    if not w.wait(800):
+                        w.terminate()
+                        w.wait(300)
+            except Exception:
+                pass
+        _active_workers.clear()
+
+        # 3. 停止对话框下的所有 QTimer 定时器
+        try:
+            for timer in self.findChildren(QTimer):
+                if timer.isActive():
+                    timer.stop()
+        except Exception as e:
+            logger.warning(f"[MultiPeriodDialog] Error stopping QTimers: {e}")
+
+        # 4. 遍历并强行跟随关闭由本窗口产生的所有关联子弹窗 (诊断窗口、个股分类详情窗口、DNA审计窗口等)
+        if hasattr(self, "_child_dialogs") and self._child_dialogs:
+            for dlg in list(self._child_dialogs):
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(dlg):
+                        dlg.close()
+                except Exception:
+                    pass
+            self._child_dialogs.clear()
+
+        if hasattr(self, "_stock_category_wins") and self._stock_category_wins:
+            for win in list(self._stock_category_wins.values()):
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(win):
+                        win.close()
+                except Exception:
+                    pass
+            self._stock_category_wins.clear()
+
+        for child_attr in ("_check_code_dialog", "_dna_audit_win", "_strategy_editor_win"):
+            child_win = getattr(self, child_attr, None)
+            if child_win is not None:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(child_win):
+                        child_win.close()
+                except Exception:
+                    pass
+                setattr(self, child_attr, None)
+
         super().closeEvent(event)
+
+    def _register_child_dialog(self, dlg):
+        """自动注册并跟踪由本多周期窗口发起的子弹窗 (个股详情、诊断报告等)，以便多周期退出时 100% 跟随关闭"""
+        if not hasattr(self, "_child_dialogs"):
+            self._child_dialogs = set()
+        if dlg is not None:
+            self._child_dialogs.add(dlg)
+            try:
+                dlg.destroyed.connect(lambda obj=None, d=dlg: self._child_dialogs.discard(d) if hasattr(self, "_child_dialogs") else None)
+            except Exception:
+                pass
 
 
 class QtCheckCodeDialog(QDialog, WindowMixin):
     def __init__(self, df, code, queries, parent=None, all_strategy_reports=None):
         self._real_parent = parent
         super().__init__(None)  # 彻底切断底层 Win32 Owner 物理置顶关系，允许窗口自由移至主窗口身后
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.df = df
         self.code = str(code).strip().zfill(6)
         self.queries = queries
@@ -5652,7 +5838,11 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         self.name = df.at[code, 'name'] if 'name' in df.columns else ""
         
         self.setWindowTitle(f"股票检查报告 - {code} {self.name}")
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(450, 320)
+        self.setSizeGripEnabled(True)
+        
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
         
         self.setStyleSheet("""
             QDialog {
@@ -5774,13 +5964,15 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
                 self.history_queries.append(r)
                 
         self.history_combo.currentIndexChanged.connect(self._on_history_changed)
+        self.history_combo.setMinimumWidth(120)
+        self.history_combo.setMaximumWidth(200)
         ctrl_layout.addWidget(self.history_combo)
         
         ctrl_layout.addWidget(QLabel("手动测试:", self))
         self.manual_edit = QLineEdit(self)
         self.manual_edit.setPlaceholderText("输入测试表达式，回车执行...")
         self.manual_edit.returnPressed.connect(self._run_manual_test)
-        ctrl_layout.addWidget(self.manual_edit)
+        ctrl_layout.addWidget(self.manual_edit, 1)
         
         btn_test = QPushButton("执行测试", self)
         btn_test.clicked.connect(self._run_manual_test)

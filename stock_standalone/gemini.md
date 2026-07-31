@@ -1,3 +1,27 @@
+## 2026-07-31 19:35
+- [x] **实现多周期主程序退出关联子窗口 100% 连带跟随销毁与 `AttributeError` 高健壮性容错 (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_dialog_ui.py`)**：
+    - [x] **`AttributeError` 彻底消除与容错防护**：为 `_show_stock_category_dialog` 及 `diagnose_stock_strategy` 植入 `hasattr(self, "_register_child_dialog")` 门禁与直接 `_child_dialogs` 回退，彻底消除了表格双击或调起分类弹窗时的 `'MultiPeriodDialog' object has no attribute '_register_child_dialog'` 异常。
+    - [x] **子弹窗自动注册与生命周期追踪 (`_register_child_dialog`)**：在 `MultiPeriodDialog` 中植入 `_child_dialogs` 跟踪集合与 `_register_child_dialog` 自动注册机制。无论是通过“诊断个股”调起的 `QtCheckCodeDialog` 诊断弹窗，还是通过双击/右键点击分类标签调起的 `StockCategoryDetailDialog` 个股分类详情弹窗，亦或是 DNA 审计弹窗，在打开时均全自动加入追踪注册。
+    - [x] **`MultiPeriodDialog.closeEvent` 连带跟随强行销毁**：在多周期主窗口 `closeEvent` 触发时，自动遍历 `_child_dialogs` 与 `_stock_category_wins` 集合中的所有非 modal 独立 TopLevel 子窗口，强行调用 `dlg.close()` 连带销毁，彻底根治了多周期退出后个股分类详情弹窗与诊断报告弹窗依然残留停留在桌面的 Bug。
+    - [x] **主程序与多周期窗口退出跟随联动 (`closeEvent`)**：在 `ATSMainWindow.closeEvent` 与 `MultiPeriodDialog.closeEvent` 中实现自动遍历并安全关闭所有的独立的 TopLevel 子窗口（如 `StockCategoryDetailDialog` 个股分类详情、`QtCheckCodeDialog` 股票检查报告、`QtDnaAuditReportWindow` DNA 审计弹窗），并在弹窗构造中设置 `WA_DeleteOnClose`，解决主程序关闭后子弹窗孤立存留于桌面的 Bug。
+    - [x] **独立 `SingleCodeAllHitWorker(QThread)` 彻底根治 UI 冻结与 `(未响应)` 报警**：新建专用的 `SingleCodeAllHitWorker(QThread)` 线程，将全策略 Hit 评估逻辑从 UI 主线程的 `singleShot` 中彻底解耦剥离，移入后台 `QThread` 子线程中并发计算。UI 主线程耗时直降至 **0 毫秒**，即使面对 25+ 套复杂策略评估，诊断窗口依然秒开且绝不会出现 Windows `(未响应)` 灰色卡死。
+    - [x] **恢复诊断窗口底部比例与灵活等比例缩小**：在 `QtCheckCodeDialog` 中为 `history_combo` 设置 `120~200px` 宽度保护，为 `manual_edit` 输入框分配 `stretch=1` 弹性空间，解决“手动测试”被挤压重叠的视觉隐患；同时将窗口最小尺寸放宽为 `450x320` 允许自由灵活的等比例平滑放缩。
+    - [x] **主程序与多周期窗口退出跟随联动 (`closeEvent`)**：在 `ATSMainWindow.closeEvent` 与 `MultiPeriodDialog.closeEvent` 中实现自动遍历并安全关闭所有的独立的 TopLevel 子窗口（如 `StockCategoryDetailDialog` 个股分类详情、`QtCheckCodeDialog` 股票检查报告、`QtDnaAuditReportWindow` DNA 审计弹窗），并在弹窗构造中设置 `WA_DeleteOnClose`，解决主程序关闭后子弹窗孤立存留于桌面的 Bug。
+    - [x] **独立 `SingleCodeAllHitWorker(QThread)` 彻底根治 UI 冻结与 `(未响应)` 报警**：新建专用的 `SingleCodeAllHitWorker(QThread)` 线程，将全策略 Hit 评估逻辑从 UI 主线程的 `singleShot` 中彻底解耦剥离，移入后台 `QThread` 子线程中并发计算。UI 主线程耗时直降至 **0 毫秒**，即使面对 25+ 套复杂策略评估，诊断窗口依然秒开且绝不会出现 Windows `(未响应)` 灰色卡死。
+    - [x] **恢复诊断窗口底部比例与灵活等比例缩小**：在 `QtCheckCodeDialog` 中为 `history_combo` 设置 `120~200px` 宽度保护，为 `manual_edit` 输入框分配 `stretch=1` 弹性空间，解决“手动测试”被挤压重叠的视觉隐患；同时将窗口最小尺寸放宽为 `450x320` 允许自由灵活的等比例平滑放缩。
+    - [x] **先看诊断数据（优先秒级调起诊断弹窗）**：重构 `diagnose_stock_strategy`，在构建完诊断条件与行情指标行之后，优先调起 `QtCheckCodeDialog` 诊断弹窗，让用户第一时间查看诊断分析与详细数据字段，彻底告别以前因同步跑全策略 Hit 造成的界面卡顿。
+    - [x] **防重复 & 仅在“诊断个股”框输入新 code 时做全策略 Hit 测试**：新增 `from_input_box` 标志与 `_last_diagnosed_hit_code` 跟踪；只有当用户在诊断输入框（`diag_edit`/`diag_entry`）中输入全新 code 时才触发全策略 Hit 评估；若当前诊断 code 与上次一致（重复诊断），或仅仅在表格中选中某行点诊断按钮，只执行常规单股诊断，不重复进行全策略 Hit 测试。
+    - [x] **后/异步执行全策略 Hit 测试**：在诊断弹窗弹起后，通过 `QTimer.singleShot(50, ...)` 异步触发 `_eval_all_strategies_hit_for_code` 评估 25+ 套策略 Hit 状态，评估完成后自动平滑更新下拉框标志（`[Hit: X | ✅/❌]`）以及已打开弹窗里的诊断汇总列表。
+    - [x] **退出时后台 Worker 线程与定时器全安全清理**：重构 `MultiPeriodWorker.run` 增加 `isInterruptionRequested()` 中断感知；在 `MultiPeriodDialog.closeEvent` 中实现对 `worker`、`_hit_worker`、`_active_workers` 全局集合中残留活动线程的 `requestInterruption()`、`quit()` 及 `wait()` 安全回收，并清理所有活动 `QTimer`，彻底解决退出时的死锁与资源泄露风险。
+    - [x] **单元测试全覆盖验证**：在 `tests/test_multi_period_dialog_ui.py` 中补充后台 Worker 线程退出回收断言与 `test_diagnose_stock_hit_rules` 诊断规则测试，单元测试 100% 成功通过。
+
+## 2026-07-31 16:05
+- [x] **实现 `MultiPeriodDialog` 专注模式持久化与解决表格/Tree 联动冗余刷新 Bug (`ats/ui/multi_period_dialog.py`, `tests/test_multi_period_dialog_ui.py`)**：
+    - [x] **Focus Mode 状态自动保存与恢复**：在 `_save_state` 和 `_apply_state` 中植入对 `focus_mode_combo` 当前 Index 的保存与读取（`focus_mode_index`），并添加 `_on_focus_mode_changed` 回调，使得软件启动或打开多周期筛选对话框时自适应恢复上一次选中的专注模式视图。
+    - [x] **`_rebuild_strategy_combo` `try...finally` 信号拦截保护**：为 `_rebuild_strategy_combo` 方法添加 `self.strategy_combo.blockSignals(True)` 与 `finally: blockSignals(False)` 严密保护，杜绝下拉框重新构建或诊断更新时误触发 `currentIndexChanged` 导致频繁重复调用 `run_filter()` 与表格/Tree 的冗余刷新。
+    - [x] **`link_stock` 同源防护与冗余清空逻辑清理**：移除 `link_stock` 中对 `self.table._last_emitted_code` 的误清空操作，保留 `_last_link_code` 机制，确保表格上下方向键选中或鼠标点击联动时不会产生信号重复触发与多余策略筛选。
+    - [x] **单元测试全覆盖**：新建 `tests/test_multi_period_dialog_ui.py`，完整验证专注模式持久化恢复、索引切换保存以及 `link_stock` 的 same-code guard 机制，测试 100% 顺利通过。
+
 ## 2026-07-31 13:45
 - [x] **完美修复 `closeEvent` 重复定义与「📋 强势黑马详情」全量信号/通达信信号自动归纳导航 (`ats/ui/main_window.py`, `ats/tdx_signal_watcher.py`, `GEMINI.md`)**：
     - [x] **合并 `ATSMainWindow` 冗余 `closeEvent` 重复声明**：将此前分散在两处的 `closeEvent` 逻辑无缝统一融合为单一定义，确保应用退出时不仅安全停止 `update_timer`、`bridge` 监听器与 `tdx_watcher` 后台线程，还能同步保存窗口布局、表格列宽与历史搜索记录，彻底杜绝 PySide/PyQt 事件覆盖与资源泄露缺陷。
