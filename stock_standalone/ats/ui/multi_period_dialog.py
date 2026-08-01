@@ -3235,9 +3235,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         """
         获取有效的 end 截止日期。
         规则：
-        1. 若未勾选 chk_end_date 选项（默认关闭），返回 None；
+        1. 若未勾选 chk_end_date 选项（默认关闭），返回 None（使用最新数据）；
         2. 若处于【只读模式】(chk_readonly 勾选)，返回 None；
-        3. 仅当勾选了 chk_end_date 且取消了【只读模式】时，返回所选日期的 'YYYY-MM-DD' 格式字符串。
+        3. 仅当勾选了 chk_end_date 且取消了【只读模式】时：
+           - 若选择的日期 >= 最近交易日，返回 None（等效于"使用最新数据"）；
+           - 否则返回所选日期的 'YYYY-MM-DD' 格式字符串。
+
+        关键修复: 使用「最近交易日」而非「日历今天」做基准比较，
+        确保同一截止日期在不同日历日运行（如 07-31 vs 08-01）
+        始终走完全相同的数据加载路径，回测 Hit 结果 100% 可复现。
         """
         if not hasattr(self, "chk_end_date") or not self.chk_end_date.isChecked():
             return None
@@ -3249,9 +3255,25 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             return None
 
         selected_date_str = self.date_edit.date().toString("yyyy-MM-dd")
-        today_str = cct.get_today()
 
-        if selected_date_str == today_str:
+        # 使用最近交易日做基准比较（而非日历 today），确保跨日回测可复现
+        try:
+            last_trade = cct.get_last_trade_date()
+            if last_trade is not None:
+                # get_last_trade_date 返回的可能是 datetime.date 或 str
+                if hasattr(last_trade, 'strftime'):
+                    last_trade_str = last_trade.strftime('%Y-%m-%d')
+                else:
+                    last_trade_str = str(last_trade)[:10]
+                # 如果选择的日期 >= 最近交易日，视为"使用最新数据"
+                if selected_date_str >= last_trade_str:
+                    return None
+        except Exception:
+            pass
+
+        # 兜底：若无法获取最近交易日，与今天比较
+        today_str = cct.get_today()
+        if selected_date_str >= today_str:
             return None
 
         return selected_date_str

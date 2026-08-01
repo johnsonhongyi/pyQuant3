@@ -738,23 +738,6 @@ class SignalLedger:
             entry.promote('WATCH', reason=reason)
 
 
-class SignalValidityTracker:
-    """信号正确有效性闭环追踪器
-    
-    跟踪记录交易信号触发后 T+1 / T+3 / T+5 的最高收益率与闭环有效胜率
-    """
-    
-    def __init__(self):
-        self.stats = {}  # {code_date: {'win': True, 'max_pnl': 5.2, 'close_pnl': 3.1}}
-        
-    def record_outcome(self, code, buy_price, t1_high, t1_close):
-        if buy_price <= 0:
-            return 0.0, False
-        max_pnl = (t1_high - buy_price) / buy_price * 100.0
-        close_pnl = (t1_close - buy_price) / buy_price * 100.0
-        is_win = max_pnl >= 2.5 or close_pnl >= 1.5
-        return round(max_pnl, 2), is_win
-
     def get_sorted_pool(self, tier, limit=None):
         """获取指定层级的信号列表（按优先级降序排列）
 
@@ -822,3 +805,22 @@ class SignalValidityTracker:
             'tiers': tier_counts,
             'phases': phase_counts,
         }
+
+
+class SignalValidityTracker:
+    """信号正确有效性闭环追踪器
+    
+    跟踪记录交易信号触发后 T+1 / T+3 / T+5 的最高收益率与闭环有效胜率
+    """
+    
+    def __init__(self):
+        self.stats = {}  # {code_date: {'win': True, 'max_pnl': 5.2, 'close_pnl': 3.1}}
+        
+    def record_outcome(self, code, buy_price, t1_high, t1_close):
+        if buy_price <= 0:
+            return 0.0, False
+        max_pnl = (t1_high - buy_price) / buy_price * 100.0
+        close_pnl = (t1_close - buy_price) / buy_price * 100.0
+        is_win = max_pnl >= 2.5 or close_pnl >= 1.5
+        return round(max_pnl, 2), is_win
+
