@@ -3949,38 +3949,39 @@ def get_work_time_ratio(resample='d'):
     now = datetime.datetime.now()
     today = pd.Timestamp(now.date())
     tr_val = is_trade_date(today)
-    if not (tr_val is True or str(tr_val).strip().lower() in ('true', '1')):
-        # 非交易日 → 回退到最近一个交易日
-        today -= pd.tseries.offsets.BDay(1)
-        passed_ratio = 1.0
+    is_tr_day = (tr_val is True or str(tr_val).strip().lower() in ('true', '1'))
+    
+    # 🛡️ 非交易日或盘后 (>=15:00) 数据处于完全静态完结状态，比例强制统一返回 1.0！
+    if (not is_tr_day) or (now.hour * 60 + now.minute >= 15 * 60):
+        return 1.0
+
+    # ---------- 日内进度 ----------
+    t = now.time()
+    minutes = t.hour * 60 + t.minute
+
+    segments = [
+        (9*60+30, 10*60, 0.35),   # 开盘 30 分钟权重提升到 35%
+        (10*60, 11*30, 0.65),   # 11:30 达到早盘总权重的 65%
+        (13*60, 14*00, 0.80),   # 14:00 达到 80% (午后量能相对较小)
+        (14*00, 15*00, 1.00),   # 15:00 收盘 100%
+    ]
+
+    prev_ratio = 0.0
+    passed_ratio = 0.0
+
+    for start, end, ratio in segments:
+        if minutes <= start:
+            passed_ratio = prev_ratio
+            break
+        elif start < minutes <= end:
+            p = (minutes - start) / (end - start)
+            passed_ratio = prev_ratio + (ratio - prev_ratio) * p
+            break
+        prev_ratio = ratio
     else:
-        # ---------- 日内进度 ----------
-        t = now.time()
-        minutes = t.hour * 60 + t.minute
+        passed_ratio = 1.0
 
-        segments = [
-            (9*60+30, 10*60, 0.35),   # 开盘 30 分钟权重提升到 35%
-            (10*60, 11*30, 0.65),   # 11:30 达到早盘总权重的 65%
-            (13*60, 14*00, 0.80),   # 14:00 达到 80% (午后量能相对较小)
-            (14*00, 15*00, 1.00),   # 15:00 收盘 100%
-        ]
-
-        prev_ratio = 0.0
-        passed_ratio = 0.0
-
-        for start, end, ratio in segments:
-            if minutes <= start:
-                passed_ratio = prev_ratio
-                break
-            elif start < minutes <= end:
-                p = (minutes - start) / (end - start)
-                passed_ratio = prev_ratio + (ratio - prev_ratio) * p
-                break
-            prev_ratio = ratio
-        else:
-            passed_ratio = 1.0
-
-        passed_ratio = max(passed_ratio, 0.05)
+    passed_ratio = max(passed_ratio, 0.05)
 
     # ---------- resample 处理 ----------
     if resample == 'd':

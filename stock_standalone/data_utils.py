@@ -279,16 +279,13 @@ def complete_indicators_pipeline(
     time_sum = time.time()
     
     # 0. 针对非日线大周期 (w, m, 3d, 45d, 3M) 执行实盘数据对齐与 Ghost Bar 合并
+    # 无论是盘中、盘后、夜间还是周末，只要数据包含当前最新行情，均执行一致的大周期平移与对齐
     if resample != 'd' and 'close' in top_all.columns:
         import numpy as np
         
-        
-
-        today = cct.get_today()
-        is_trade_day = cct.get_trade_date_status()
-        now_time = cct.get_now_time_int()
-        # 只有交易日且已开盘才需要对齐
-        if is_trade_day and now_time >= 915:
+        valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+        if valid_mask.any():
+            today = cct.get_today()
             is_same = False
             try:
                 today_ts = pd.to_datetime(today)
@@ -296,10 +293,8 @@ def complete_indicators_pipeline(
                 # 若 resdate >= today，说明当前未完结周期的 Ghost Bar 已经写入 top_all，
                 # 直接判定 is_same = True，无需做额外的周期归属运算。
                 if 'resdate' in top_all.columns:
-                    # resdate 列是 'YYYY-MM-DD' 字符串（由 latest.name.strftime 生成），直接 dropna 过滤
                     valid_resdates = top_all['resdate'].dropna()
                     if not valid_resdates.empty:
-                        # pd.to_datetime 统一化后比较：'2026-07-03' >= '2026-07-02' → is_same=True
                         last_resdate_ts = pd.to_datetime(valid_resdates.max())
                         if last_resdate_ts >= today_ts:
                             is_same = True
@@ -498,15 +493,22 @@ def complete_indicators_pipeline(
             top_all['lastl0d'] = curr_low
             top_all['lastv0d'] = curr_vol
             
-        # 🛡️ 接入 cct.get_work_time_ratio 动态因子，盘中将 0d 盘中累积量转换为虚拟预估全天成交量
+        # 🛡️ 动态成交量比例换算：仅在盘中交易时间内 (交易日 09:15-15:00) 才按照进度做全天量能折算
+        # 非交易日 (如周末/节假日) 或盘后收盘状态下，数据为未变动的静态已完结数据，比例强制固定为 1.0！
         try:
-            ratio_t = cct.get_work_time_ratio(resample=resample)
-            ratio_t = max(ratio_t if (isinstance(ratio_t, (int, float)) and ratio_t > 0) else 1.0, 0.01)
+            is_trading_hours = cct.get_trade_date_status() and (915 <= cct.get_now_time_int() <= 1500)
+            if is_trading_hours:
+                ratio_t = cct.get_work_time_ratio(resample=resample)
+                ratio_t = max(ratio_t if (isinstance(ratio_t, (int, float)) and ratio_t > 0) else 1.0, 0.01)
+            else:
+                ratio_t = 1.0
+
             raw_v0d = top_all['lastv0d']
             top_all['lastv0d'] = (raw_v0d / ratio_t).round(1)
             top_all['virtual_vol'] = top_all['lastv0d']
         except Exception as ex_ratio:
             logger.warning(f"cct.get_work_time_ratio scaling failed: {ex_ratio}")
+
         if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
         if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
         if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']
