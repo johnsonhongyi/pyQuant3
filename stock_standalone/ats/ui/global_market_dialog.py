@@ -83,6 +83,13 @@ class GlobalMarketDialog(QDialog):
         except Exception as e:
             print(f"[GlobalMarketDialog] Save geometry error: {e}")
 
+    def keyPressEvent(self, event):
+        """禁用 Esc 键关闭窗口"""
+        if event.key() == Qt.Key.Key_Escape:
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         self._save_dialog_geometry()
         super().closeEvent(event)
