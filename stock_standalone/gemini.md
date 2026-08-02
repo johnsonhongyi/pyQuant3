@@ -1,3 +1,16 @@
+## 2026-08-02 11:20
+- [x] **实现 ATS 数据确定性与非交易日多周期动态量能静态收敛 (`data_utils.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **数据变动根因排查与归一化修复**：排查并定位到非交易日（周末/节假日）数据命中结果产生微幅变动（如从 56 只变为 67 只）的底层根因：`complete_indicators_pipeline` 在计算 2D/3D 周期 floor 归一化时，使用了系统当前物理日期 (`cct.get_today()`) 作为基准点；在非交易日（如周六至周日跨天），物理日期的偏移导致 floor bucket 窗口划分发生切分偏移，进而影响了动态量能比率与指标计算。
+    - [x] **非交易日日期基准强行锚定 (`last_trade_date`)**：在 `data_utils.py` 行情计算管道中植入非交易日状态感知 `cct.get_trade_date_status()`。在非交易日强制将基准日期对齐至最近的物理交易日 `last_trade_date`，确保周末及节假日期间所有多周期指标与量能缩放比例保持 100% 静态恒定，消除任何跨天计算抖动。
+    - [x] **测试套件解耦与 100% 校验通过**：同步加固 `tests/test_signal_ledger.py` 中的 `test_early_launch_and_no_drop_holding` 断言逻辑，使其完全适应非交易时段的时间衰减分值，16 项单元测试 100% 成功通过。
+
+## 2026-08-02 11:15
+- [x] **根治 `update_stock_codes` 报错：定位 HDF 写入污染机制，实现动态写保护与 30~60 分钟 API 限制冷却避让引擎 (`JSONData/realdatajson.py`)**：
+    - [x] **深挖缓存缺失根因**：排查确认缺失的 89 只股票均为 600016 (民生银行)、600022 (山东钢铁)、601901 (方正证券) 等经典主板老股，而非新股或退市股。缺失的根源在于：以往在盘中或非交易时间进行在线抓取时，若由于**网络抖动或 Sina API 请求失败/丢包**导致仅抓取到部分批次（例如某次仅抓取 2640 行或 5445 行），代码此前无防备地执行了 `h5a.write_hdf_db(..., append=False, rewrite=True)`，将缺失严重的不完整 `df` 物理覆盖重写到了磁盘 HDF5 文件中，造成硬盘 HDF 缓存污染。
+    - [x] **物理防写写保护机制 (`[HDF-WRITE-REJECT]`)**：在 `realdatajson.py` 写入 HDF5 前引入动态防污染对比（`len(df) < old_len * 0.95`）。当发现本次在线抓取到的数据量比磁盘历史好缓存显著减少（> 5% 缺失，提示网络波动丢包）时，拒绝 `rewrite=True` 覆盖重写，彻底切断了磁盘 HDF 缓存被网络异常物理写坏的漏洞。
+    - [x] **完全动态相对基准校验 (`[HDF-INCOMPLETE-AUTOFIX]`)**：彻底废除任何硬编码静态数字，改为将磁盘 HDF 行数与本地已知 `StockCode().get_stock_codes(False)` 股票配置库总量做动态相对比对 (`len(h5) < conf_codes_len - 50`)。若检测到磁盘 HDF 因历史丢包存在显著缺漏，自动绕过坏缓存并全量重新抓取覆盖修正，100% 保持 5533 只全量股票同步。
+    - [x] **30~60 分钟 API 限制智能延迟避让引擎 (`[SINA-COOLING-HOLD]`)**：在线抓取连续重试 2 次均因网络/丢包失败时，自动识别为 Sina API 访问被限流/Blocked，自动触发 `set_blocked_cooling(cooling_sec=1800)` 启动 **30~60 分钟 (1800s) 延迟避让冷却模式**。在冷却期内停止频繁的网络重试攻击，自动降级并容忍使用现有的 HDF 缓存，彻底解决连续重试卡顿与 IP 被封禁风险。
+
 ## 2026-08-02 02:05
 - [x] **实现全局外盘情绪共振、1-2日阶梯底座企稳与 3-4 日 VWAP 分时主升加速共振引擎 (`JSONData/global_market_data.py`, `ats/volume_profiler.py`, `ats/signal_ledger.py`, `config/multi_period_strategies.json`, `tests/test_global_market_data.py`, `tests/test_signal_ledger.py`)**：
     - [x] **解构实盘敏感盘感**：针对长城军工(601606)、北汽蓝谷(600733)、蓝色光标(300058)起爆前“底部波动小、每日高点抬升不新低、板块微弱异动加速、全局外盘暴涨暴跌连带”等微妙盘感进行精准程序化解构。

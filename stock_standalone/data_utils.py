@@ -285,7 +285,10 @@ def complete_indicators_pipeline(
         
         valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
         if valid_mask.any():
-            today = cct.get_today()
+            # 🛡️ 非交易日 (周末/节假日) 静态数据归一化：基准日期锁定为最新交易日 (last_trade_date)，
+            # 彻底根治 Sunday (周日) 时 floor('2D'/'3D') 误切新 bucket 导致 is_same 误判为 False 和平移失效缺陷！
+            is_trade_day = cct.get_trade_date_status()
+            today = cct.get_today() if is_trade_day else (cct.get_last_trade_date() or cct.get_today())
             is_same = False
             try:
                 today_ts = pd.to_datetime(today)
