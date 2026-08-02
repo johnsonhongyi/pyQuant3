@@ -1,5 +1,6 @@
 import os
 import time
+import datetime
 import gc
 import traceback
 from typing import Any, Optional, Union, Dict, List, Callable
@@ -285,10 +286,14 @@ def complete_indicators_pipeline(
         
         valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
         if valid_mask.any():
-            # 🛡️ 非交易日 (周末/节假日) 静态数据归一化：基准日期锁定为最新交易日 (last_trade_date)，
-            # 彻底根治 Sunday (周日) 时 floor('2D'/'3D') 误切新 bucket 导致 is_same 误判为 False 和平移失效缺陷！
+            # 🛡️ 非交易日 (周末/节假日) 及 交易日开盘前 (09:20 竞价不可撤盘前) 静态数据归一化：
+            # 基准日期锁定为最新已完结交易日 (last_trade_date)，
+            # 彻底根治 Sunday (周日) 时 floor('2D'/'3D') 误切新 bucket 以及 交易日开盘前数据动态变化导致的 is_same 误判为 False 和平移失效缺陷！
             is_trade_day = cct.get_trade_date_status()
-            today = cct.get_today() if is_trade_day else (cct.get_last_trade_date() or cct.get_today())
+            now_dt = datetime.datetime.now()
+            # 盘前判定：如果今天是交易日，但当前时间在 09:20 盘前不可撤单竞价前 (hour*100 + minute < 920)，亦视为盘前未开盘静态状态！
+            is_before_market = (now_dt.hour * 100 + now_dt.minute < 920) if is_trade_day else True
+            today = cct.get_today() if (is_trade_day and not is_before_market) else (cct.get_last_trade_date() or cct.get_today())
             is_same = False
             try:
                 today_ts = pd.to_datetime(today)

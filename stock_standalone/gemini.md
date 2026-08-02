@@ -1,4 +1,12 @@
 ## 2026-08-03 04:15
+- [x] **统一全系统非交易日及交易日盘前 09:20（920）静态数据确定性冻结引擎 (`data_utils.py`, `JohnsonUtil/commonTips.py`, `bidding_momentum_detector.py`, `scratch/test_premarket_trade_date_lock.py`)**：
+    - [x] **09:20 盘前与竞价不可撤单切分点统一定位**：结合 A 股交易市场特征，全网统一将 **09:20**（`920` / `9*60+20` 不可撤单询价盘）作为盘前未开盘与盘中分水岭界限。
+    - [x] **`data_utils.py` 多周期基准日期静态锚定**：在 `complete_indicators_pipeline` 中，当在非交易日或交易日早盘 09:20 以前 (`hour * 100 + minute < 920`) 时，基准日期 `today` 强制锁定为上一完结交易日 `last_trade_date`，彻底根治 Sunday (周日) 或早盘开盘前 `floor('2D'/'3D')` 误切新 Bucket 导致 Ghost Bar 提前剥离、数据动态跳变与筛选只数从 56 只波动变 21 只的物理缺陷。
+    - [x] **`JohnsonUtil/commonTips.py` 动态量比 1.0 确定性冻结**：在 `get_work_time_ratio` 中植入 `now_minutes < 9 * 60 + 20` 盘前静态拦截，统一返回 `1.0` 缩放倍率，彻底保障盘前 09:20 前成交量折算数据维持 100% 完全静态确定性。
+    - [x] **`bidding_momentum_detector.py` 跨日防御点统一**：同步将竞价动能检测器的跨日守护时间统一修正为 `920`。
+    - [x] **自动化测试 100% 校验通过**：`scratch/test_premarket_trade_date_lock.py` 与 `tests/test_signal_ledger.py` 全量 14 项单元测试 100% 成功通过！
+
+## 2026-08-03 04:10
 - [x] **实现全量代理配置跨窗口 `GLOBAL_PROXY_EVENT_BRIDGE` 广播同步与财经资讯代理感知 (`ats/ui/proxy_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `JSONData/global_market_data.py`, `scratch/test_proxy_sync_full.py`)**：
     - [x] **全局代理信号广播 Bus (`GLOBAL_PROXY_EVENT_BRIDGE`)**：在 `ats/ui/proxy_dialog.py` 中建立全局 PySide6/PyQt6 `GlobalProxyEventBridge` 单例广播桥；在 `ProxySettingsDialog` 保存代理配置时发射 `proxy_changed_signal` 广播信号，彻底解除窗口间强解耦依赖。
     - [x] **主窗口与 K 线弹窗代理按键同步**：在 `GlobalMarketPanel` 与 `GlobalMarketKLineDialog` 构造中无缝订阅 `GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal`。当在任何弹窗修改保存代理（如 `127.0.0.1:7890` 开/关）时，主窗口与已打开的 K 线弹窗按钮文案（`🌐 代理: 开(7890)` / `🌐 代理: 关`）及 QSS 样式 100% 秒级绝对同步更新，并即时触发网络重载。

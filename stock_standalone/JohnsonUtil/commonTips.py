@@ -3951,8 +3951,9 @@ def get_work_time_ratio(resample='d'):
     tr_val = is_trade_date(today)
     is_tr_day = (tr_val is True or str(tr_val).strip().lower() in ('true', '1'))
     
-    # 🛡️ 非交易日或盘后 (>=15:00) 数据处于完全静态完结状态，比例强制统一返回 1.0！
-    if (not is_tr_day) or (now.hour * 60 + now.minute >= 15 * 60):
+    # 🛡️ 非交易日、盘后 (>=15:00) 或交易日开盘前 09:20 不可撤单竞价前 (<09:20) 数据处于完全静态完结状态，比例强制统一返回 1.0！
+    now_minutes = now.hour * 60 + now.minute
+    if (not is_tr_day) or (now_minutes >= 15 * 60) or (now_minutes < 9 * 60 + 20):
         return 1.0
 
     # ---------- 日内进度 ----------
