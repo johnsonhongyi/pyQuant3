@@ -1,3 +1,14 @@
+## 2026-08-02 02:05
+- [x] **实现全局外盘情绪共振、1-2日阶梯底座企稳与 3-4 日 VWAP 分时主升加速共振引擎 (`JSONData/global_market_data.py`, `ats/volume_profiler.py`, `ats/signal_ledger.py`, `config/multi_period_strategies.json`, `tests/test_global_market_data.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **解构实盘敏感盘感**：针对长城军工(601606)、北汽蓝谷(600733)、蓝色光标(300058)起爆前“底部波动小、每日高点抬升不新低、板块微弱异动加速、全局外盘暴涨暴跌连带”等微妙盘感进行精准程序化解构。
+    - [x] **外盘情绪感知与板块连带提权引擎 (`JSONData/global_market_data.py`)**：打造 `GlobalMarketEngine` 模块，抓取富时 A50、纳斯达克、标普500、离岸人民币与大宗商品走势，计算 `global_sentiment_score` 整体情绪得分，并针对军工、AI/传媒、汽车、半导体等板块计算 `sector_global_boost` 连带提权分，赋予 `🌐 外盘: A50/纳指共振` 专属醒目标签。
+    - [x] **1-2日阶梯底座与 3-4日主升生命周期识别 (`ats/volume_profiler.py`)**：在 `VolumeProfiler` 中引入 `_calc_staircase_base` 与生命周期追踪（`NORMAL` -> `1-2D_BASE` -> `3-4D_LAUNCH`）。识别 1-2 日底座企稳（缩量、低点抬升不破、死守部位）与 3-4 日加速突破阶段，并结合早盘板块微共振与大盘 VWAP 相对强度（`sh000001` / `sz399006`），实现去弱留强的龙头精选。
+    - [x] **`SignalLedger` 优先级提权与底层自动化晋级 (`ats/signal_ledger.py`)**：在 `_compute_priority` 中集成外盘连带提权 (`+25.0`)、阶梯底座提权 (`+35.0`)、板块微共振提权 (`+25.0`) 与生命周期加分，并在 `_check_auto_promote` 中新增底座企稳与主升加速阶段自动一键晋级 `WATCH` 监控池。
+    - [x] **策略库与单元测试全量验证落盘**：在 `config/multi_period_strategies.json` 中内置 `tpl_global_resonance_staircase_launch` 全局外盘+多日阶梯+VWAP分时共振起爆策略。全量单元测试 100% 一次性成功通过。
+    - [x] **30分钟/交易时段 Cache 保护与美股7巨头/存储芯片/AI自更新 (`JSONData/global_market_data.py`)**：响应用户关于“更新阈值调大避开大量网络请求卡顿”与“增加美股7巨头/存储/AI自更新能力”的需求。将 `CACHE_TTL` 提升至 30 分钟 (1800s)，并设计 `is_market_active_time()` 机制在非交易日/盘后强制 0 网络请求直接使用 Cache。引入物理磁盘 `config/global_market_cache.json` 持久化，冷启动秒级加载；抓取美光 (MU)、英伟达 (NVDA)、台积电 (TSM)、SOXX、苹果、特斯拉、微软等龙头标的，自动映射存储芯片、半导体、AI/软件、汽车/特斯拉连带 Boost 加成与 Tag 标签。
+    - [x] **系统打包环境路径兼容 (`sys_utils.py`, `JSONData/global_market_data.py`)**：在 `sys_utils.py` 的 `RESOURCE_MAP` 中注册 `global_market_cache.json` 规则，并在 `global_market_data.py` 中引入 `get_cache_file_path()` 动态调用 `sys_utils.get_conf_path('global_market_cache.json')`。物理兼容 Nuitka / PyInstaller 打包环境（EXE 运行态与 Onefile 解压态）与 Python 源码开发环境，解决硬编码相对路径无法准确定位的问题。
+
+
 ## 2026-07-31 23:50
 - [x] **将底部企稳从“单日点对点比较”升维为“多日缩量震荡走强的微弱底座部位 (Base Zone)” (`config/multi_period_strategies.json`, `scratch/diagnose_blue_cursor.py`, `GEMINI.md`)**：
     - [x] **深刻量化“部位 (Zone) 交易哲学”**：响应用户关于“底部结构是一个部位不是一天，是多日的缩量震荡走强的微弱结构”的深刻洞察。彻底抛弃依赖单日 `lastv1d < lastv2d` 的狭隘比较，将算法升维至对 **2~5 日整体缩量干涸部位 (`(lastv1d + lastv2d) < 1.1 * (lastv3d + lastv4d)`)** 与 **多日最低价死守不破位 (`lastl1d >= 0.96 * lastl2d and lastl2d >= 0.95 * lastl3d`)** 的包络识别。

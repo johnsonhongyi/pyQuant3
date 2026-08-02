@@ -609,6 +609,23 @@ class SignalLedger:
         except Exception:
             pass
 
+        # 外盘连带提权 (A50 / 纳指 / 大宗商品)
+        global_boost = 0.0
+        try:
+            sector_name = ''
+            if row is not None:
+                cat = row.get('category', row.get('hy', row.get('sector')))
+                if cat and isinstance(cat, str):
+                    sector_name = cat.split(';')[0].split('-')[0].strip()
+            if sector_name:
+                from JSONData.global_market_data import get_sector_global_boost
+                b_val, g_tag = get_sector_global_boost(sector_name)
+                global_boost = b_val
+                if g_tag and not entry.signal_tag:
+                    entry.signal_tag = g_tag
+        except Exception:
+            pass
+
         # 加权求和
         priority = (
             specialty_score * 0.40 +
@@ -616,6 +633,7 @@ class SignalLedger:
             vol_score * 0.20 +
             deviation_score * 0.15 +
             fav_boost +
+            global_boost +
             getattr(entry, 'tdx_boost', 0.0) +
             getattr(entry, 'early_launch_boost', 0.0)
         )
@@ -731,6 +749,26 @@ class SignalLedger:
                     reason = f'🚀 早盘穿透突破近3日高点 ({max_h3:.2f}) | 现价 {price:.2f} ({pct:+.2f}%)'
                     if not entry.signal_tag:
                         entry.signal_tag = '🚀 破高起爆'
+            except Exception:
+                pass
+
+        # 条件 5: 1-2日底座企稳与 3-4日分时主升演进
+        if not should_promote and row is not None:
+            try:
+                l1 = float(row.get('lastl1d', 0))
+                l2 = float(row.get('lastl2d', 0))
+                l3 = float(row.get('lastl3d', 0))
+                price = entry.latest_price or float(row.get('close', 0))
+                if l1 > 0 and l2 > 0 and l1 >= 0.98 * l2 and price >= l1 and 0.5 <= pct <= 4.5:
+                    should_promote = True
+                    if l3 > 0 and l2 >= 0.98 * l3:
+                        reason = f'🔥 3-4日分时主升加速 | 现价 {price:.2f} ({pct:+.2f}%)'
+                        entry.signal_tag = '🔥 3-4日分时主升'
+                        entry.early_launch_boost = 120.0
+                    else:
+                        reason = f'🌱 1-2日底座企稳 | 现价 {price:.2f} ({pct:+.2f}%)'
+                        if not entry.signal_tag:
+                            entry.signal_tag = '🌱 1-2日底座'
             except Exception:
                 pass
 

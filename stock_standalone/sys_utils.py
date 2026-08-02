@@ -226,6 +226,11 @@ RESOURCE_MAP = {
         "src": "config/multi_period_strategies.json",
         "dst": "config/multi_period_strategies.json",
         "delay_release": True
+    },
+    "global_market_cache.json": {
+        "src": "config/global_market_cache.json",
+        "dst": "config/global_market_cache.json",
+        "delay_release": True
     }
 }
 

@@ -124,6 +124,13 @@ class StockVolumeProfile:
         self.is_sector_leader = False        # 是否是板块领涨龙头
         self.is_sector_follower = False      # 是否是板块跟风者
         self.sector_leader_code = None       # 板块龙头股票代码
+        
+        # 多日阶梯底座与生命周期演进 (1-2日底座企稳 -> 3-4日分时主升加速)
+        self.has_staircase_base = False      # 是否具备阶梯底座
+        self.staircase_days = 0              # 阶梯抬升天数
+        self.lifecycle_phase = 'NORMAL'      # '1-2D_BASE' / '3-4D_LAUNCH' / 'NORMAL'
+        self.vwap_slope = 0.0                # 分时均价线上移倾角
+        self.is_sector_resonance = False     # 是否处于板块同向微异动共振中
     
     def to_dict(self):
         return {
@@ -138,6 +145,11 @@ class StockVolumeProfile:
             'is_sector_leader': self.is_sector_leader,
             'is_sector_follower': self.is_sector_follower,
             'sector_leader_code': self.sector_leader_code,
+            'has_staircase_base': self.has_staircase_base,
+            'staircase_days': self.staircase_days,
+            'lifecycle_phase': self.lifecycle_phase,
+            'vwap_slope': self.vwap_slope,
+            'is_sector_resonance': self.is_sector_resonance,
         }
 
 
@@ -204,6 +216,12 @@ class VolumeProfiler:
             # 计算前三天连阳收涨度与连涨天数
             profile.recent_up_days_3d = self._calc_recent_up_days_3d(row)
             profile.consecutive_up_days = self._calc_consecutive_up_days(row)
+
+            # 计算多日阶梯底座与生命周期阶段 (1-2日企稳 -> 3-4日分时主升)
+            has_base, days, phase = self._calc_staircase_base(row)
+            profile.has_staircase_base = has_base
+            profile.staircase_days = days
+            profile.lifecycle_phase = phase
         
         # 3. 获取当前量比
         vol_ratio = 1.0
@@ -301,6 +319,42 @@ class VolumeProfiler:
         except:
             pass
         return yesterday_ups
+
+    def _calc_staircase_base(self, row):
+        """计算多日阶梯抬升底座与生命周期演进阶段 (1-2日底座企稳 -> 3-4日分时主升加速)"""
+        try:
+            l1 = float(row.get('lastl1d', 0))
+            l2 = float(row.get('lastl2d', 0))
+            l3 = float(row.get('lastl3d', 0))
+            h1 = float(row.get('lasth1d', 0))
+            h2 = float(row.get('lasth2d', 0))
+            p1 = float(row.get('lastp1d', 0))
+            p2 = float(row.get('lastp2d', 0))
+            v1 = float(row.get('lastv1d', 0))
+            v2 = float(row.get('lastv2d', 0))
+            
+            staircase_days = 0
+            if l1 > 0 and l2 > 0 and l1 >= 0.98 * l2:
+                staircase_days += 1
+                if l3 > 0 and l2 >= 0.98 * l3:
+                    staircase_days += 1
+
+            has_base = (
+                staircase_days >= 1 and
+                (h1 >= 0.985 * h2 or p1 >= 0.985 * p2) and
+                (v1 <= 1.20 * v2 if (v1 > 0 and v2 > 0) else True)
+            )
+
+            phase = 'NORMAL'
+            if has_base:
+                if staircase_days <= 2:
+                    phase = '1-2D_BASE'
+                else:
+                    phase = '3-4D_LAUNCH'
+
+            return has_base, staircase_days, phase
+        except Exception:
+            return False, 0, 'NORMAL'
     
     def analyze_sector_resonance(self, active_codes=None):
         """核心重构: 板块联动分析，标记龙头与跟风关系"""
@@ -372,6 +426,12 @@ class VolumeProfiler:
                 else:
                     profile.is_sector_follower = False
                     
+            # 标记板块同向微异动共振 (同板块内有>=2只标的活跃)
+            if sec_momentum.active_count >= 2:
+                profile.is_sector_resonance = True
+            else:
+                profile.is_sector_resonance = False
+
             # 重新计算经过板块加权修正的量能评分
             profile.volume_score = self._compute_volume_score(profile, profile.first_surge_vol_ratio or 1.0)
     
@@ -408,9 +468,19 @@ class VolumeProfiler:
             score += min(10.0, self.market_context.rebound_quality * 0.10)
             
         # ==============================================================
-        # 核心新增: 板块联动共振加成与多涨多阳抗跌加成 (最高可提升至 100 分上限)
+        # 核心新增: 板块联动共振加成、多日阶梯底座与生命周期演进加分
         # ==============================================================
         
+        # 阶梯底座与生命周期加分 (1-2日底座企稳 + 3-4日分时主升): 贡献最多 15 分
+        if getattr(profile, 'has_staircase_base', False):
+            score += 10.0
+        if getattr(profile, 'lifecycle_phase', '') == '3-4D_LAUNCH':
+            score += 5.0
+
+        # 板块微异动共振加分 (同板块>=2只标的步调一致): 额外加 8 分
+        if getattr(profile, 'is_sector_resonance', False):
+            score += 8.0
+
         # 连阳抗跌加分 (长城军工启动前连阳抗跌多阳): 3连阳/多日收涨 贡献最多 10 分
         score += min(10.0, profile.recent_up_days_3d * 3.3)
         if profile.consecutive_up_days >= 3:
