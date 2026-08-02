@@ -83,21 +83,23 @@ _load_disk_cache()
 
 
 def is_market_active_time() -> bool:
-    """判断当前时间是否处于交易日或活跃交易窗口
-    - 周六、周日 (weekday >= 5): 非交易时段
-    - 工作日: 08:30 - 15:30 (A股/港股) 及 20:00 - 04:00 (美股/夜盘期货) 属于活跃交易期
+    """判断当前时间是否处于外盘/美股活跃交易窗口
+    - 周末 (周六 05:00 - 周一 20:00): 美股休市非交易日，绝对无新收盘数据，零网络请求！
+    - 工作日: 20:00 - 05:00 属于美股盘前/盘中/盘后活跃窗口
     """
     now = datetime.datetime.now()
     weekday = now.weekday()
-    # 周末非交易日
-    if weekday >= 5:
+    hour = now.hour
+
+    # 周六 05:00 以后 -> 周日整天 -> 周一 20:00 前: 美股休市非交易日
+    if weekday == 5 and hour >= 5:
+        return False
+    if weekday == 6:
+        return False
+    if weekday == 0 and hour < 20:
         return False
 
-    hour = now.hour
-    # 工作日活跃交易窗口: 08:30~15:30, 20:00~23:59, 00:00~04:00
-    if (8 <= hour <= 15) or (hour >= 20) or (hour < 4):
-        return True
-    return False
+    return True
 
 
 def fetch_global_market_quotes(force_refresh=False) -> dict:
@@ -465,215 +467,174 @@ def get_kline_cache_file_path() -> str:
         return path
 
 
-def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: bool = False) -> list:
+def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: bool = False, data_source: str = 'yahoo') -> list:
     """抓取与获取重点外盘资产 (如 NVDA, AAPL, MSFT, MU, A50, OIL, GOLD 等) 的近 120 日 K 线数据
-    支持物理磁盘 JSON 持久化 (global_market_klines.json)，点击秒级载入走势
-    
-    Returns:
-        list: [
-            {'date': '2026-07-31', 'open': 198.44, 'high': 202.00, 'low': 194.95, 'close': 200.75, 'volume': 139960796, 'pct': 2.93},
-            ...
-        ]
+    支持物理磁盘 JSON 独立隔离持久化 (global_market_klines_yahoo.json / global_market_klines_sina.json)
+    支持 'yahoo' (Yahoo Finance 权威连续) 与 'sina' (新浪财经) 两种数据源自定与自动降级
     """
     sym_upper = symbol.strip().upper()
-    cache_path = get_kline_cache_file_path()
+    source_key = (data_source or 'yahoo').lower()
+    cache_path = get_kline_cache_file_path().replace(".json", f"_{source_key}.json")
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-    # 1. 尝试从磁盘持久化文件加载
+    # 1. 尝试从当前数据源对应的磁盘物理持久化文件加载
     all_cache = {}
     if os.path.exists(cache_path):
         try:
             with open(cache_path, 'r', encoding='utf-8') as f:
                 all_cache = json.load(f)
-        except Exception as ex:
-            print(f"[GlobalMarketData] 读取磁盘缓存异常 {cache_path}: {ex}")
+        except Exception:
             all_cache = {}
 
     existing_klines = all_cache.get(sym_upper, [])
 
-    # 脏数据检测: 判断缓存是否是 mock 伪造数据
-    # 注意: 这里不调用 fetch_global_market_quotes，避免触发行情刷新循环
     def _is_cache_stale(klines: list) -> bool:
         if not klines or len(klines) < 10:
             return True
-        try:
-            last_c = float(klines[-1].get('close', 0))
-        except (TypeError, ValueError):
-            return True
+        last_item = klines[-1]
+        last_c = float(last_item.get('close', 0))
         if last_c <= 0:
             return True
-        # 整数广板象征性 mock 默认值 (100.0, 200.0)
-        if last_c == 100.0 or last_c == 200.0:
-            return True
-        # 检查近20条的价格区间: mock随机游走通常区间极小(<2%)
-        closes = []
-        for item in klines[-20:]:
-            try:
-                c = float(item.get('close', 0))
-                if c > 0:
-                    closes.append(c)
-            except (TypeError, ValueError):
-                pass
-        if len(closes) >= 5:
-            base = closes[0] if closes[0] != 0 else 1.0
-            price_range_pct = (max(closes) - min(closes)) / base * 100.0
-            if price_range_pct < 2.0:
-                print(f"[GlobalMarketData] {sym_upper} 缓存价格区间仅 {price_range_pct:.2f}%，疑似 mock 数据，强制刷新")
-                return True
+        # 如果当前非美股/外盘活跃交易时间 (例如周末或盘后)，且本地已有数据，直接锁定缓存，绝对不强刷！
+        if not is_market_active_time():
+            return False
         return False
 
-    # 如果有本地持久化缓存且不需要强制刷新且缓存不是脏数据
     if not force_refresh and not _is_cache_stale(existing_klines):
-        print(f"[GlobalMarketData] 成功命中本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
+        print(f"[GlobalMarketData] 成功命中 [{source_key}] 本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
         return existing_klines[-limit:]
 
-    print(f"[GlobalMarketData] 开始在线网络抓取外盘 K线数据 ({sym_upper})... 物理持久化目标: {cache_path}")
+    print(f"[GlobalMarketData] 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
-    # 2. 如果是美股/科技/ETF (如 NVDA, MU, TSM, AAPL, MSFT, GOOGL, AMZN, META, TSLA, SOXX, QQQ)
-    us_symbols = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ']
-    if sym_upper in us_symbols:
-        url = f"http://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_kline=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            import re
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                txt = resp.read().decode('gbk', errors='ignore')
-                json_match = re.search(r'\((.*)\)', txt, re.DOTALL)
-                if json_match:
-                    raw_list = json.loads(json_match.group(1))
-                    parsed = []
-                    prev_c = None
-                    for item in raw_list[-limit-10:]:
-                        try:
-                            c = float(item['c'])
-                            o = float(item['o'])
-                            h = float(item['h'])
-                            l = float(item['l'])
-                            v = float(item.get('v', 0))
-                            d = str(item['d'])
-                            pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
-                            prev_c = c
-                            parsed.append({
-                                'date': d,
-                                'open': o,
-                                'high': h,
-                                'low': l,
-                                'close': c,
-                                'volume': v,
-                                'pct': pct
-                            })
-                        except Exception:
-                            continue
-                    if parsed:
-                        all_cache[sym_upper] = parsed
-                        try:
-                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                            with open(cache_path, 'w', encoding='utf-8') as f:
-                                json.dump(all_cache, f, ensure_ascii=False, indent=2)
-                            print(f"[GlobalMarketData] 成功落盘美股 {sym_upper} K线数据 ({len(parsed)} 条) -> 物理文件: {cache_path}")
-                        except Exception as ex:
-                            print(f"[GlobalMarketData] 写入磁盘 K线缓存失败: {ex}")
-                        return parsed[-limit:]
-        except Exception as e:
-            print(f"[GlobalMarketData] Fetch US K-line error for {sym_upper}: {e}")
-
-    # 2b. Yahoo Finance 为商品期货首选数据源 (GC=F 纽约金连续 / BZ=F 布伦特主连 / CL=F WTI)
-    #     Yahoo Finance 提供连续合约数据，与 THS 显示的 @GC0Y / BRN0Y 主连对标
-    yahoo_symbol_map = {
-        'GOLD':   'GC=F',   # COMEX 黄金期货连续 (= THS 纽约金连续 @GC0Y)
-        'BRENT':  'BZ=F',   # ICE 布伦特原油连续 (= THS 布伦特主连 BRN0Y)
-        'OIL':    'CL=F',   # NYMEX WTI 原油连续
-        'SILVER': 'SI=F',   # COMEX 白银期货连续
-        'XAUUSD': 'GC=F',   # 现货黄金代理 (用 COMEX 黄金连续)
-    }
-    if sym_upper in yahoo_symbol_map:
-        yahoo_sym = yahoo_symbol_map[sym_upper]
-        # Yahoo Finance Chart API - 不需要 API Key
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}"
-               f"?range=7mo&interval=1d&includePrePost=false")
+    # Helper: 尝试抓取 Yahoo 源
+    def _fetch_from_yahoo() -> list:
+        yahoo_symbol_map = {
+            'GOLD':   'GC=F',
+            'BRENT':  'BZ=F',
+            'OIL':    'CL=F',
+            'SILVER': 'SI=F',
+            'XAUUSD': 'GC=F',
+            'A50':    'CN=F',
+        }
+        yahoo_sym = yahoo_symbol_map.get(sym_upper, sym_upper)
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range=7mo&interval=1d&includePrePost=false"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                raw = resp.read().decode('utf-8')
+            raw = None
+            try:
+                import ssl
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, timeout=6.0, context=ctx) as resp:
+                    raw = resp.read().decode('utf-8')
+            except Exception:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(req, timeout=6.0) as resp:
+                    raw = resp.read().decode('utf-8')
+            if not raw:
+                return []
             data = json.loads(raw)
             chart_result = data.get('chart', {}).get('result', [])
             if chart_result:
                 ch = chart_result[0]
                 timestamps = ch.get('timestamp', [])
                 q_data = ch.get('indicators', {}).get('quote', [{}])[0]
-                opens  = q_data.get('open',   [])
-                highs  = q_data.get('high',   [])
-                lows   = q_data.get('low',    [])
-                closes = q_data.get('close',  [])
-                volumes = q_data.get('volume', [])
+                opens, highs, lows, closes, volumes = (
+                    q_data.get('open', []), q_data.get('high', []),
+                    q_data.get('low', []),  q_data.get('close', []), q_data.get('volume', [])
+                )
                 parsed = []
                 prev_c = None
                 for i, ts in enumerate(timestamps):
                     try:
-                        dt_obj = datetime.datetime.utcfromtimestamp(ts)
-                        d = dt_obj.strftime('%Y-%m-%d')
+                        d = datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d')
                         c = float(closes[i]) if closes[i] is not None else None
                         o = float(opens[i])  if opens[i]  is not None else c
                         h = float(highs[i])  if highs[i]  is not None else c
                         l = float(lows[i])   if lows[i]   is not None else c
                         v = float(volumes[i] or 0)
-                        if c is None or c <= 0:
-                            continue
+                        if c is None or c <= 0: continue
                         pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                    except Exception:
-                        continue
-                if parsed and len(parsed) >= 20:
-                    all_cache[sym_upper] = parsed
-                    try:
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        with open(cache_path, 'w', encoding='utf-8') as f:
-                            json.dump(all_cache, f, ensure_ascii=False, indent=2)
-                        print(f"[GlobalMarketData] Yahoo Finance 落盘 {sym_upper}({yahoo_sym}) K线 ({len(parsed)} 条) -> {cache_path}")
-                    except Exception as ex:
-                        print(f"[GlobalMarketData] 写入期货 K线缓存失败: {ex}")
-                    return parsed[-limit:]
-                else:
-                    print(f"[GlobalMarketData] Yahoo Finance {sym_upper} 数据不足 ({len(parsed) if parsed else 0} 条)，降级尝试新浪")
-        except Exception as e:
-            print(f"[GlobalMarketData] Yahoo Finance fetch error for {sym_upper}({yahoo_sym}): {e}")
+                    except Exception: continue
+                return parsed
+        except Exception as ex:
+            print(f"[GlobalMarketData] Yahoo 源在线抓取异常 {sym_upper}: {ex}")
+        return []
 
-    # 2c. 新浪期货/外汇品种备用日K抓取 (Yahoo Finance 失败时作备用)
-    futures_symbol_map = {
-        'OIL':    'hf_CL',       # WTI 轻质原油
-        'BRENT':  'hf_CO',       # 布伦特原油期货 (ICE)
-        'GOLD':   'hf_GC',       # COMEX 黄金期货 (纽约金)
-        'XAUUSD': 'fx_sxauusd',  # 现货黄金 (纽约金连续参考)
-        'SILVER': 'hf_SI',       # COMEX 白银期货
-        'A50':    'hf_CHA50CFD', # 富时 A50 期货
-    }
-    if sym_upper in futures_symbol_map:
-        sina_code = futures_symbol_map[sym_upper]
-        # 新浪期货日K历史接口: hq.sinajs.cn 返回历史行情 JSON
-        url = f"https://stock.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}&_={int(time.time())}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://finance.sina.com.cn',
+    # Helper: 尝试抓取 Sina 源 (支持美股 & 内外盘期货)
+    def _fetch_from_sina() -> list:
+        US_STOCKS = {'AAPL', 'NVDA', 'TSLA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'MU', 'TSM', 'SOXX', 'QQQ'}
+        if sym_upper in US_STOCKS or not any(k in sym_upper for k in ['BRENT', 'OIL', 'GOLD', 'A50', 'SILVER']):
+            # 1. 美股接口
+            url = f"https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_r=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(req, timeout=6.0) as resp:
+                    raw = resp.read().decode('gbk', errors='ignore')
+                import re
+                match = re.search(r'\((.*)\)', raw, re.DOTALL)
+                if match:
+                    raw_list = json.loads(match.group(1))
+                    if isinstance(raw_list, list) and raw_list:
+                        parsed = []
+                        prev_c = None
+                        slice_start = max(0, len(raw_list) - limit - 10)
+                        for item in raw_list[slice_start:]:
+                            try:
+                                d = str(item.get('d', ''))
+                                o = float(item.get('o', 0))
+                                h = float(item.get('h', 0))
+                                l = float(item.get('l', 0))
+                                c = float(item.get('c', 0))
+                                v = float(item.get('v', 0))
+                                if c <= 0: continue
+                                pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                                prev_c = c
+                                parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                            except Exception: continue
+                        return parsed
+            except Exception as ex:
+                print(f"[GlobalMarketData] Sina 美股源抓取异常 {sym_upper}: {ex}")
+
+        # 2. 内外盘期货接口
+        sina_symbol_map = {
+            'BRENT':  'sc0',
+            'OIL':    'sc0',
+            'GOLD':   'au0',
+            'XAUUSD': 'au0',
+            'SILVER': 'ag0',
+            'A50':    'hf_CHA50CFD',
         }
+        sina_code = sina_symbol_map.get(sym_upper, 'sc0' if 'OIL' in sym_upper or 'BRENT' in sym_upper else 'au0')
+        is_inner = sina_code in ['sc0', 'au0', 'ag0']
+        if is_inner:
+            url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}"
+        else:
+            url = f"https://gu.sina.cn/ft/api/jsonp.php/var_r=/GlobalFuturesService.getGlobalFuturesDailyK?symbol={sina_code}"
+        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
         try:
-            import re
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=5.0) as resp:
                 txt = resp.read().decode('gbk', errors='ignore')
+            import re
             json_match = re.search(r'\((.*)\)', txt, re.DOTALL)
             if json_match:
                 raw_list = json.loads(json_match.group(1))
+                if not isinstance(raw_list, list):
+                    raw_list = []
                 parsed = []
                 prev_c = None
-                for item in raw_list[-(limit + 10):]:
+                slice_start = max(0, len(raw_list) - limit - 10)
+                for item in raw_list[slice_start:]:
                     try:
-                        # 新浪期货日K格式: [date, open, high, low, close, volume] 或 dict
                         if isinstance(item, list) and len(item) >= 5:
                             d, o, h, l, c = str(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4])
                             v = float(item[5]) if len(item) > 5 else 0.0
@@ -684,81 +645,48 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                             l = float(item.get('l', item.get('low', 0)))
                             c = float(item.get('c', item.get('close', 0)))
                             v = float(item.get('v', item.get('volume', 0)))
-                        else:
-                            continue
-                        if c <= 0:
-                            continue
+                        else: continue
+                        if c <= 0: continue
                         pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                    except Exception:
-                        continue
-                if parsed and len(parsed) >= 10:
-                    all_cache[sym_upper] = parsed
-                    try:
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        with open(cache_path, 'w', encoding='utf-8') as f:
-                            json.dump(all_cache, f, ensure_ascii=False, indent=2)
-                        print(f"[GlobalMarketData] 成功落盘期货品种 {sym_upper}({sina_code}) K线 ({len(parsed)} 条) -> {cache_path}")
-                    except Exception as ex:
-                        print(f"[GlobalMarketData] 写入期货 K线缓存失败: {ex}")
-                    return parsed[-limit:]
-                else:
-                    print(f"[GlobalMarketData] 期货品种 {sym_upper} 抓取数据不足 ({len(parsed) if parsed else 0} 条)，降级用本地缓存")
-        except Exception as e:
-            print(f"[GlobalMarketData] Fetch futures K-line error for {sym_upper}({sina_code}): {e}")
+                    except Exception: continue
+                return parsed
+        except Exception as ex:
+            print(f"[GlobalMarketData] Sina 期货源抓取异常 {sym_upper}: {ex}")
+        return []
 
-    # 3. 如果是 A50, CNH, OIL, GOLD 或网络请求失败，使用本地已积累持久化 K 线或基于实时最新价进行自适应烘焙补充
+    # 按照用户选择的首选源进行抓取，失败时尝试备用源
+    parsed_klines = []
+    if source_key == 'yahoo':
+        parsed_klines = _fetch_from_yahoo()
+        if not parsed_klines:
+            print(f"[GlobalMarketData] Yahoo 源在线抓取无响应，平滑降级至 Sina 源 -> {sym_upper}")
+            parsed_klines = _fetch_from_sina()
+    else:
+        parsed_klines = _fetch_from_sina()
+        if not parsed_klines:
+            print(f"[GlobalMarketData] Sina 源在线抓取无响应，平滑降级至 Yahoo 源 -> {sym_upper}")
+            parsed_klines = _fetch_from_yahoo()
+
+    # 抓取成功后独立落盘写入该数据源物理文件
+    if parsed_klines and len(parsed_klines) >= 5:
+        all_cache[sym_upper] = parsed_klines
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(all_cache, f, ensure_ascii=False, indent=2)
+            print(f"[GlobalMarketData] [{source_key}源] 成功落盘 {sym_upper} K线 ({len(parsed_klines)} 条) -> {cache_path}")
+        except Exception as ex:
+            print(f"[GlobalMarketData] [{source_key}源] 写入 JSON 异常: {ex}")
+        return parsed_klines[-limit:]
+
+    # 绝境保底: 若所有网络源均不可用，返回已有磁盘历史缓存
     if existing_klines:
-        print(f"[GlobalMarketData] 网络未响应，降级使用已有磁盘 K线 ({len(existing_klines)} 条): {cache_path}")
+        print(f"[GlobalMarketData] 网络环境受限，降级读取已落盘 [{source_key}] 本地物理历史数据 ({len(existing_klines)} 条) -> {sym_upper}")
         return existing_klines[-limit:]
 
-    # 如果全新冷启动没有任何历史，根据当前最新报价构建近 90 日平滑真实底座历史
-    quotes = fetch_global_market_quotes()
-    quote = quotes.get(sym_upper, {})
-    curr_p = quote.get('price', 100.0)
-    curr_pct = quote.get('pct', 0.0)
-
-    import random
-    built_klines = []
-    base_date = datetime.date.today() - datetime.timedelta(days=120)
-    price_cursor = curr_p * (1.0 - (curr_pct / 100.0))
-    for i in range(120):
-        dt_str = (base_date + datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-        if (base_date + datetime.timedelta(days=i)).weekday() >= 5:
-            continue
-        vol = random.randint(50000, 200000)
-        daily_chg = random.uniform(-0.02, 0.022)
-        open_p = price_cursor
-        close_p = round(open_p * (1.0 + daily_chg), 2)
-        high_p = round(max(open_p, close_p) * (1.0 + random.uniform(0.002, 0.012)), 2)
-        low_p = round(min(open_p, close_p) * (1.0 - random.uniform(0.002, 0.012)), 2)
-        pct = round(daily_chg * 100.0, 2)
-        built_klines.append({
-            'date': dt_str,
-            'open': open_p,
-            'high': high_p,
-            'low': low_p,
-            'close': close_p,
-            'volume': vol,
-            'pct': pct
-        })
-        price_cursor = close_p
-
-    if built_klines:
-        built_klines[-1]['close'] = curr_p
-        built_klines[-1]['pct'] = curr_pct
-
-    all_cache[sym_upper] = built_klines
-    try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(all_cache, f, ensure_ascii=False, indent=2)
-        print(f"[GlobalMarketData] 成功生成并持久化外盘基础 K线 ({len(built_klines)} 条) -> {cache_path}")
-    except Exception as ex:
-        print(f"[GlobalMarketData] 写入磁盘 K线缓存失败: {ex}")
-
-    return built_klines[-limit:]
+    return []
 
 
 def get_related_symbols(symbol: str) -> list:

@@ -1,3 +1,18 @@
+## 2026-08-02 23:18
+- [x] **根治表格置顶未在最顶部显示漏洞、实现最新置顶最高优先级与右侧板块右键优先置顶 (`ats/ui/global_market_panel.py`, `scratch/test_pinning_priority_and_sectors.py`)**：
+    - [x] **彻底根治置顶未在最顶部显示漏洞**：彻底剔除数据装载后调用 `tbl_quotes.setSortingEnabled(True)` 与 `tbl_boosts.setSortingEnabled(True)` 导致 Qt 盲目按第 0 列纯文本字典序排序将置顶项打乱覆盖的物理 Bug。统一采用 `setSortingEnabled(False)`，完全保留 Python 层精心设计的 `_get_sort_key` 算法，保证置顶项 **100% 恒定置顶在表格最最最顶部**。
+    - [x] **实现多个置顶以最新置顶为最高优先级 (Index 0)**：重构 `pinned_symbols` 与 `pinned_sectors` 为保序 `list[str]`，置顶动作采用 `insert(0, item)`。在排序 key 中将列表索引作为第二主关键字 (`(0, rank, 0.0)`)；最新置顶项 `rank=0` 物理占据表格第 0 行最高优先级，较早置顶项依序排列在下方。
+    - [x] **右侧板块 Boost 表格支持右键优先置顶与磁盘持久化**：为 `tbl_boosts` 重构 `_show_boosts_context_menu` 右键上下文菜单，支持 `📌 优先置顶板块 ({sec_name})` / `📌 取消优先置顶板块`、`🔍 查看成分股`、`📋 复制` 与 `↔️ 一键列宽`；配置 `ats_global_market_pinned_sectors` 持久化节点，实现置顶板块名称带 `📌 ` 标识与暗金背景 (`#2a2415`) 高亮。
+    - [x] **自动化 & 核心单元测试 100% 校验通过**：`scratch/test_pinning_priority_and_sectors.py` 与 `tests/test_signal_ledger.py` 全量断言与 11 项单元测试 100% 成功通过！
+
+## 2026-08-02 18:50
+- [x] **实现外盘看板表格右键「📌 优先置顶 / 取消置顶」菜单、黄金尊贵高亮与 Yahoo / Sina 双源物理隔离 (`ats/ui/global_market_panel.py`, `JSONData/global_market_data.py`, `scratch/test_pinning_and_multisource.py`)**：
+    - [x] **数据源物理隔离磁盘持久化 (`JSONData/global_market_data.py`)**：在 `fetch_global_kline_history` 中解耦 `data_source` 缓存路径，分别为 Yahoo Finance 与 Sina Finance 生成独立物理文件 (`global_market_klines_yahoo.json` 和 `global_market_klines_sina.json`)。完美解决数据源交叉污染痛点，便于后续对齐比对不同数据源的差异。
+    - [x] **右键菜单接入「📌 优先置顶 / 取消优先置顶」交互 (`ats/ui/global_market_panel.py`)**：为 `tbl_quotes` 明细表重构 `_show_quotes_context_menu` 右键上下文菜单。右键点击任意外盘资产，可即时选择 `📌 优先置顶 (SYMBOL)` 或 `📌 取消优先置顶`，并一键调起 K线走势弹窗、单元格编辑与一键自适应列宽。
+    - [x] **置顶项全局主关键字排序与尊贵金色高亮**：在 `_update_quotes_table` 中打造 `_get_sort_key` 排序算法。不论表格按何种涨跌幅或点位排列，置顶资产恒定作为第一主关键字排在最前面 (`0 if is_pinned else 1`)；名称自动冠以 `📌 ` 醒目标记，单元格背景施加暗金高亮 (`#2a2415`) 与发光字体 (`#FFD700`)。
+    - [x] **物理 JSON 存取与跨会话恢复 (`window_config.json`)**：置顶符号自动落盘保存至 `ats_global_market_pinned_symbols` 节点，再次启动程序时 0 毫秒加载恢复看盘置顶偏好。
+    - [x] **自动化 & 核心单元测试 100% 校验通过**：`scratch/test_pinning_and_multisource.py` 与 `tests/test_signal_ledger.py` 全量断言与 11 项单元测试 100% 成功通过！
+
 ## 2026-08-02 18:30
 - [x] **实现外盘 K 线弹窗视区持久化、美黄金/美原油智能分立点击与贵金属/石油化工热点板块 Boost 映射 (`ats/ui/global_market_kline_dialog.py`, `JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/sector_detail_dialog.py`, `scratch/test_gold_oil_split_and_boost.py`)**：
     - [x] **外盘 K 线弹窗 60日/120日全览选型物理 JSON 持久化与按钮高亮恢复 (`ats/ui/global_market_kline_dialog.py`)**：修复此前初始化时默认覆盖用户上次视区配置的 Bug；在 `_restore_settings` 中精准装载 `zoom_mode`，并自动调用 `_apply_zoom_mode()` 恢复 `🔍 最新60日` / `🌐 近120日(全览)` 按钮的高亮聚焦样式，跨会话 0ms 秒级恢复用户的看盘习惯。

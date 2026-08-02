@@ -63,6 +63,12 @@ class GlobalMarketPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
+        self.pinned_symbols = []
+        self.pinned_sectors = []
+        self._last_quotes = {}
+        self._last_boosts = {}
+        self._restore_pinned_symbols()
+        self._restore_pinned_sectors()
         self._init_ui()
         self._start_auto_refresh_timer()
         # 初始装载数据
@@ -151,9 +157,11 @@ class GlobalMarketPanel(QWidget):
         self.tbl_quotes.setHorizontalHeaderLabels(q_headers)
         self.tbl_quotes.setup_persistence(
             config_key="ats_global_quotes_table_state",
-            default_widths=[130, 85, 110, 105, 160, 180]
+            default_widths=[145, 85, 110, 110, 185, 220]
         )
         self.tbl_quotes.itemDoubleClicked.connect(self._on_quotes_table_double_clicked)
+        self.tbl_quotes.customContextMenuRequested.disconnect()
+        self.tbl_quotes.customContextMenuRequested.connect(self._show_quotes_context_menu)
         left_layout.addWidget(self.tbl_quotes)
         self.h_splitter.addWidget(left_widget)
 
@@ -196,9 +204,11 @@ class GlobalMarketPanel(QWidget):
         self.tbl_boosts.setHorizontalHeaderLabels(b_headers)
         self.tbl_boosts.setup_persistence(
             config_key="ats_global_boosts_table_state",
-            default_widths=[130, 160, 110, 200, 220]
+            default_widths=[145, 200, 110, 220, 280]
         )
         self.tbl_boosts.itemDoubleClicked.connect(self._on_boost_table_double_clicked)
+        self.tbl_boosts.customContextMenuRequested.disconnect()
+        self.tbl_boosts.customContextMenuRequested.connect(self._show_boosts_context_menu)
         right_layout.addWidget(self.tbl_boosts)
         self.h_splitter.addWidget(right_widget)
 
@@ -377,6 +387,7 @@ class GlobalMarketPanel(QWidget):
         self.card_commodity['sub'].setText("提权: 有色金属 / 石油化工 / 资源")
 
     def _update_quotes_table(self, quotes: dict):
+        self._last_quotes = quotes or {}
         self.tbl_quotes.setSortingEnabled(False)
         self.tbl_quotes.setRowCount(0)
 
@@ -398,14 +409,27 @@ class GlobalMarketPanel(QWidget):
             'QQQ': ('纳斯达克 100 ETF', '科技股整体 / 创业板指同向')
         }
 
-        self.tbl_quotes.setRowCount(len(quotes))
-        for row_idx, (symbol, info) in enumerate(quotes.items()):
+        # 优先排序逻辑: 1. 是否置顶 (0 排前面, 1 排后面); 2. 置顶 index (0 号位为最新置顶，最高优先级); 3. 涨跌幅降序 (-pct)
+        def _get_sort_key(item_tuple):
+            sym, info_dict = item_tuple
+            if sym in self.pinned_symbols:
+                rank = self.pinned_symbols.index(sym)
+                return (0, rank, 0.0)
+            else:
+                pct_val = float(info_dict.get('pct', 0.0))
+                return (1, 0, -pct_val)
+
+        sorted_quotes = sorted(quotes.items(), key=_get_sort_key)
+        self.tbl_quotes.setRowCount(len(sorted_quotes))
+
+        for row_idx, (symbol, info) in enumerate(sorted_quotes):
             name = info.get('name', symbol)
             price = info.get('price', 0.0)
             pct = info.get('pct', 0.0)
+            is_pinned = symbol in self.pinned_symbols
 
             c_info = mapping_info.get(symbol, (name, '科技 / 综合板块'))
-            c_name = c_info[0]
+            c_name = f"📌 {c_info[0]}" if is_pinned else c_info[0]
             c_sector = c_info[1]
 
             trend_str = "🔥 强劲拉升共振" if pct >= 3.0 else ("📈 稳步上行" if pct > 0.0 else ("📉 走弱回调" if pct < -2.0 else "➖ 横盘整理"))
@@ -419,18 +443,22 @@ class GlobalMarketPanel(QWidget):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (0, 4) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
+                # 置顶行单元格微暗金色专属尊贵背景高亮
+                if is_pinned:
+                    item.setBackground(QColor("#2a2415"))
+
                 # Color coding
                 if col_idx == 0:
-                    item.setForeground(QColor("#00E5FF"))
+                    item.setForeground(QColor("#FFD700" if is_pinned else "#00E5FF"))
                     item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                 elif col_idx == 3: # Pct
                     if pct > 0:
                         item.setForeground(QColor(COLOR_UP))
-                        if pct >= 3.0:
+                        if pct >= 3.0 or is_pinned:
                             item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                     elif pct < 0:
                         item.setForeground(QColor(COLOR_DOWN))
-                        if pct <= -3.0:
+                        if pct <= -3.0 or is_pinned:
                             item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                     else:
                         item.setForeground(QColor("#E2E2E5"))
@@ -444,10 +472,124 @@ class GlobalMarketPanel(QWidget):
 
                 self.tbl_quotes.setItem(row_idx, col_idx, item)
 
-        self.tbl_quotes.setSortingEnabled(True)
-        self.tbl_quotes.auto_fit_columns()
+        self.tbl_quotes.setSortingEnabled(False)
+
+    def _show_quotes_context_menu(self, pos):
+        """右键弹出外盘极速明细表专用菜单 (包含优先置顶、查看K线、编辑单元格、一键列宽)"""
+        item = self.tbl_quotes.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        sym_item = self.tbl_quotes.item(row, 1)
+        name_item = self.tbl_quotes.item(row, 0)
+        if not sym_item:
+            return
+        symbol = sym_item.text().strip().replace("📌 ", "")
+        name = name_item.text().strip().replace("📌 ", "")
+
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+
+        menu = QMenu(self.tbl_quotes)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
+
+        is_pinned = symbol in self.pinned_symbols
+        pin_label = f"📌 取消优先置顶 ({symbol})" if is_pinned else f"📌 优先置顶 ({symbol})"
+        pin_action = QAction(pin_label, self)
+        pin_action.triggered.connect(lambda: self._toggle_pin_symbol(symbol))
+        menu.addAction(pin_action)
+
+        menu.addSeparator()
+
+        kline_action = QAction(f"📈 查看 {name} ({symbol}) 120日 K线", self)
+        kline_action.triggered.connect(lambda: self._open_kline_dialog(symbol, name))
+        menu.addAction(kline_action)
+
+        menu.addSeparator()
+
+        copy_action = QAction(f"📋 复制资产代码 {symbol}", self)
+        copy_action.triggered.connect(lambda: self.tbl_quotes._copy_to_clipboard(symbol))
+        menu.addAction(copy_action)
+
+        edit_action = QAction("✏️ 编辑当前单元格内容", self)
+        edit_action.triggered.connect(lambda: self.tbl_quotes._edit_current_cell(item))
+        menu.addAction(edit_action)
+
+        fit_action = QAction("↔️ 一键自适应全列宽", self)
+        fit_action.triggered.connect(self.tbl_quotes.auto_fit_columns)
+        menu.addAction(fit_action)
+
+        menu.exec(self.tbl_quotes.viewport().mapToGlobal(pos))
+
+    def _toggle_pin_symbol(self, symbol: str):
+        """切换资产置顶状态并落盘持久化，保证最新置顶排在最上面 (最高优先级)"""
+        sym = symbol.strip().upper()
+        if sym in self.pinned_symbols:
+            self.pinned_symbols.remove(sym)
+            print(f"[GlobalMarketPanel] 取消优先置顶: {sym}")
+        else:
+            self.pinned_symbols.insert(0, sym) # 最新置顶插在 0 号位，拥有最高优先级
+            print(f"[GlobalMarketPanel] 设为优先置顶 (最高优先级): {sym}")
+        self._save_pinned_symbols()
+        if self._last_quotes:
+            self._update_quotes_table(self._last_quotes)
+
+    def _restore_pinned_symbols(self):
+        """从 window_config.json 恢复优先置顶的资产列表 (保持 list 顺序)"""
+        try:
+            import json, os
+            from sys_utils import get_app_root, get_conf_path
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                pins = data.get("ats_global_market_pinned_symbols", [])
+                if isinstance(pins, list):
+                    seen = set()
+                    self.pinned_symbols = [x for x in pins if not (x in seen or seen.add(x))]
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Restore pinned symbols error: {e}")
+
+    def _save_pinned_symbols(self):
+        """将优先置顶的资产列表持久化写入 window_config.json"""
+        try:
+            import json, os
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_global_market_pinned_symbols"] = list(self.pinned_symbols)
+                tmp_path = cfg_path + ".tmp_pins"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Save pinned symbols error: {e}")
 
     def _update_boosts_table(self, boosts: dict):
+        self._last_boosts = boosts or {}
         self.tbl_boosts.setSortingEnabled(False)
         self.tbl_boosts.setRowCount(0)
 
@@ -463,10 +605,24 @@ class GlobalMarketPanel(QWidget):
             "有色金属": "大宗商品 (美原油 / 美黄金)"
         }
 
-        self.tbl_boosts.setRowCount(len(boosts))
-        for row_idx, (sec_name, (b_val, g_tag)) in enumerate(boosts.items()):
+        # 板块置顶优先排序算法: 1. 是否置顶; 2. 板块置顶 index (最新置顶 index=0 排最前); 3. Boost 分数降序
+        def _get_boost_sort_key(item_tuple):
+            sec_name, info_tuple = item_tuple
+            if sec_name in self.pinned_sectors:
+                rank = self.pinned_sectors.index(sec_name)
+                return (0, rank, 0.0)
+            else:
+                b_score = float(info_tuple[0])
+                return (1, 0, -b_score)
+
+        sorted_boosts = sorted(boosts.items(), key=_get_boost_sort_key)
+        self.tbl_boosts.setRowCount(len(sorted_boosts))
+
+        for row_idx, (sec_name, (b_val, g_tag)) in enumerate(sorted_boosts):
             rel_symbols = sector_relations.get(sec_name, "纳斯达克 / 标普500")
             tag_display = g_tag if g_tag else "--"
+            is_pinned = sec_name in self.pinned_sectors
+            c_sec_name = f"📌 {sec_name}" if is_pinned else sec_name
 
             if b_val >= 25.0:
                 guide_str = "🚀 强力连带提权，优先精选置顶龙头"
@@ -478,15 +634,19 @@ class GlobalMarketPanel(QWidget):
                 guide_str = "➖ 外盘影响平淡，回归 A 股独立结构"
 
             col_values = [
-                sec_name, rel_symbols, f"{b_val:+.1f} 分", tag_display, guide_str
+                c_sec_name, rel_symbols, f"{b_val:+.1f} 分", tag_display, guide_str
             ]
 
             for col_idx, val in enumerate(col_values):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx in (0, 2) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
+                # 置顶行单元格微暗金色专属尊贵背景高亮
+                if is_pinned:
+                    item.setBackground(QColor("#2a2415"))
+
                 if col_idx == 0:
-                    item.setForeground(QColor("#FFD700"))
+                    item.setForeground(QColor("#FFD700" if is_pinned else "#00E5FF"))
                     item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                 elif col_idx == 2: # Boost score
                     if b_val > 0:
@@ -506,8 +666,115 @@ class GlobalMarketPanel(QWidget):
 
                 self.tbl_boosts.setItem(row_idx, col_idx, item)
 
-        self.tbl_boosts.setSortingEnabled(True)
-        self.tbl_boosts.auto_fit_columns()
+        self.tbl_boosts.setSortingEnabled(False)
+
+    def _show_boosts_context_menu(self, pos):
+        """右键弹出 A 股热点板块提权表专用菜单 (包含优先置顶、双击查看成分股、复制名称、一键列宽)"""
+        item = self.tbl_boosts.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        sec_item = self.tbl_boosts.item(row, 0)
+        if not sec_item:
+            return
+        sec_name = sec_item.text().strip().replace("📌 ", "")
+
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+
+        menu = QMenu(self.tbl_boosts)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
+
+        is_pinned = sec_name in self.pinned_sectors
+        pin_label = f"📌 取消优先置顶板块 ({sec_name})" if is_pinned else f"📌 优先置顶板块 ({sec_name})"
+        pin_action = QAction(pin_label, self)
+        pin_action.triggered.connect(lambda: self._toggle_pin_sector(sec_name))
+        menu.addAction(pin_action)
+
+        menu.addSeparator()
+
+        detail_action = QAction(f"🔍 查看 {sec_name} 板块成分股明细", self)
+        detail_action.triggered.connect(lambda: self.sector_selected.emit(sec_name))
+        menu.addAction(detail_action)
+
+        menu.addSeparator()
+
+        copy_action = QAction(f"📋 复制板块名称 {sec_name}", self)
+        copy_action.triggered.connect(lambda: self.tbl_boosts._copy_to_clipboard(sec_name))
+        menu.addAction(copy_action)
+
+        fit_action = QAction("↔️ 一键自适应全列宽", self)
+        fit_action.triggered.connect(self.tbl_boosts.auto_fit_columns)
+        menu.addAction(fit_action)
+
+        menu.exec(self.tbl_boosts.viewport().mapToGlobal(pos))
+
+    def _toggle_pin_sector(self, sector: str):
+        """切换板块置顶状态并落盘持久化，保证最新置顶排在最上面 (最高优先级)"""
+        sec = sector.strip()
+        if sec in self.pinned_sectors:
+            self.pinned_sectors.remove(sec)
+            print(f"[GlobalMarketPanel] 取消优先置顶板块: {sec}")
+        else:
+            self.pinned_sectors.insert(0, sec)
+            print(f"[GlobalMarketPanel] 设为优先置顶板块 (最高优先级): {sec}")
+        self._save_pinned_sectors()
+        if self._last_boosts:
+            self._update_boosts_table(self._last_boosts)
+
+    def _restore_pinned_sectors(self):
+        """从 window_config.json 恢复优先置顶的板块列表 (保持 list 顺序)"""
+        try:
+            import json, os
+            from sys_utils import get_app_root, get_conf_path
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                pins = data.get("ats_global_market_pinned_sectors", [])
+                if isinstance(pins, list):
+                    seen = set()
+                    self.pinned_sectors = [x for x in pins if not (x in seen or seen.add(x))]
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Restore pinned sectors error: {e}")
+
+    def _save_pinned_sectors(self):
+        """将优先置顶的板块列表持久化写入 window_config.json"""
+        try:
+            import json, os
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_global_market_pinned_sectors"] = list(self.pinned_sectors)
+                tmp_path = cfg_path + ".tmp_sec_pins"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Save pinned sectors error: {e}")
 
     def _on_quotes_table_double_clicked(self, item):
         """双击外盘明细表格行，直接调起该资产 120 日 K 线图"""
@@ -515,8 +782,8 @@ class GlobalMarketPanel(QWidget):
         sym_item = self.tbl_quotes.item(row, 1)
         name_item = self.tbl_quotes.item(row, 0)
         if sym_item and name_item:
-            symbol = sym_item.text().strip()
-            name = name_item.text().strip()
+            symbol = sym_item.text().strip().replace("📌 ", "")
+            name = name_item.text().strip().replace("📌 ", "")
             self._open_kline_dialog(symbol, name)
 
     def _open_kline_dialog(self, symbol: str, name: str = ""):
@@ -534,5 +801,5 @@ class GlobalMarketPanel(QWidget):
         row = item.row()
         sec_item = self.tbl_boosts.item(row, 0)
         if sec_item:
-            sec_name = sec_item.text().strip()
+            sec_name = sec_item.text().strip().replace("📌 ", "")
             self.sector_selected.emit(sec_name)
