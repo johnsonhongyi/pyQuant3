@@ -1,6 +1,39 @@
 {
   "strategies": [
     {
+      "id": "tpl_global_resonance_staircase_launch",
+      "name": "🌐 全局外盘情绪共振+1-2日阶梯底座企稳+3-4日VWAP分时主升加速 [长城军工/蓝色光标/北汽蓝谷模式] [2026-08-02]",
+      "conditions": {
+        "m": {
+          "filter": "(close >= ma20d or (close >= 0.95 * lower and close <= 1.08 * lower)) and dif > dea",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "(close >= ma20d or (close >= 0.95 * lower and close <= 1.08 * lower)) and (dif > dea or macd > macdlast1)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "lastl1d >= 0.98 * lastl2d and close >= 0.97 * ma20d and (dif > dea or macd > macdlast1)",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "(lastv1d < 0.90 * lastv2d or lastv1d < 0.85 * lastv3d or (lastv1d + lastv2d) < 1.15 * (lastv2d + lastv3d) or macd > macdlast1 or win >= 1.0) and (dif > dea or close > ma5d)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "lastl1d >= 0.98 * lastl2d and lasth1d >= 0.98 * lasth2d and percent >= -1.5 and percent <= 5.5 and close > ma5d and (lastv1d < 1.2 * lastv2d or lastv1d < 0.9 * lastv3d)",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【核心交易哲学：全局情绪共振 + 1-2日阶梯底座企稳 + 3-4日VWAP分时主升加速】\n1. 外盘情绪与板块共振 (Global Sentiment Boost)：整合富时 A50 期货、纳斯达克、美黄金/原油等全球联动信号，精准赋能军工、AI/传媒、汽车等板块龙头。\n2. 1-2日底座企稳 (1-2D Base)：微弱止跌部位，连续多日低点平头死守 (lastl1 >= 0.98 * lastl2)，高点阶梯抬升，量能地量干涸。\n3. 3-4日VWAP分时主升 (3-4D Launch)：开盘 VWAP 均价线上移，全天不破均价线，自动识别主升拉升浪并排除假异动掉队。"
+    },
+    {
       "id": "tpl_blue_cursor_multi_period_ambush",
       "name": "🔥 5大周期共振大底座企稳+多日缩量震荡走强部位+9日走势伏击 [蓝色光标模式] [2026-07-31]",
       "conditions": {
