@@ -172,7 +172,7 @@ def get_effective_trade_date(current_dt: Optional[datetime.datetime] = None) -> 
     
     is_before_market = False
     if cct.get_trade_date_status():
-        if current_dt.hour * 100 + current_dt.minute < 915:
+        if current_dt.hour * 100 + current_dt.minute < 920:
             is_before_market = True
 
     if cct.get_trade_date_status() and not is_before_market:
@@ -544,7 +544,7 @@ def _build_detector_state_process(simulation_mode: bool, cwd_path: str):
                 # 如果当前时间未到今日竞价开盘时间 (09:15之前)，我们阻断跨日重置判定，强行保留昨日盘后分析成果！
                 if is_cross_day:
                     now_dt_temp = datetime.datetime.now()
-                    if now_dt_temp.hour * 100 + now_dt_temp.minute < 915:
+                    if now_dt_temp.hour * 100 + now_dt_temp.minute < 920:
                         is_cross_day = False
 
                 result['active_sectors'] = data.get('sector_data', {})
