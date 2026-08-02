@@ -1,3 +1,10 @@
+## 2026-08-02 15:00
+- [x] **实现独立看盘弹窗 `GlobalMarketDialog` 与全量上下/左右 Splitter 及 Table 列宽 100% 物理持久化 (`ats/ui/global_market_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/main_window.py`)**：
+    - [x] **100% 解耦主界面布局**：从主界面 `top_tabs` 标签栏中移除外盘页，重构为点击工具栏 `外盘看板🌐` 按键调起独立极窄非阻塞弹窗 (`GlobalMarketDialog`)，完全不挤压或撑宽 ATS 主界面原有 TabBar 与 Splitter 布局。
+    - [x] **上下 (v_splitter) & 左右 (h_splitter) 垂直/水平双向分割线调节与落盘**：引入 `v_splitter` 垂直分割线，支持手动上下拖拽调节顶部 4 大卡片与下半部分双数据表的比例；`h_splitter` 支持左右水平拖拽调节明细表与 Boost 看板比例。分割线状态自动持久化至 `window_config.json` (`ats_global_market_v_splitter`, `ats_global_market_h_splitter`)。
+    - [x] **下半部分 Tree / Table 列宽物理自动持久化**：明细表 `tbl_quotes` 与提权看板 `tbl_boosts` 全量接入 `BaseATSTableWidget.setup_persistence`，所有列的鼠标拖拽拉伸宽度在 1 秒防抖后自动物理写入 `window_config.json` (`ats_global_quotes_table_state`, `ats_global_boosts_table_state`)，跨会话自动恢复。
+    - [x] **UI 自动化测试 100% 成功通过**：新建 `scratch/test_global_market_dialog_ui.py` 验证弹窗构建、双向 Splitter 联动、表格填充与物理持久化，11 项单元测试与 UI 测试全量 100% 成功通过。
+
 ## 2026-08-02 14:17
 - [x] **终极根治 `StockCode` 物理文件修改时间过旧引起的死循环刷屏 Bug (`JSONData/sina_data.py`, `tests/test_signal_ledger.py`)**：
     - [x] **终极死循环根因定位**：彻底捕获死循环刷屏的终极死穴——磁盘文件 `stock_codes.conf` 的物理修改时间 `creation_date_duration` 大于 5 天（计算结果恒为 >5 天）。导致在任何地方（如刷新界面、行情订阅或多线程计算）每次调用 `StockCode()` 实例化时，`StockCode.__init__` 中的 `if creation_date_duration > 5:` 分支恒成立！从而强制无限次调用 `get_stock_codes(True)` -> `update_stock_codes()` -> 喷涌 `update_stock_codes codes:5533` 红字 Log！

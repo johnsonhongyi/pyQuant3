@@ -1,0 +1,489 @@
+# -*- coding: utf-8 -*-
+"""
+ATS Global Market Panel ("🌐 全球外盘与热点情绪看板" 专属 Tab 页面)
+实时查看美股 7 巨头 (NVDA, AAPL, MSFT, GOOGL, AMZN, META, TSLA)、
+存储芯片 (美光 MU)、半导体 (TSM, SOXX)、富时 A50、大宗商品与 A 股热点板块连带提权分。
+
+核心功能:
+1. 顶部宏观与热点摘要卡片 (M7、存储芯片/半导体、A50/汇率、大宗商品)。
+2. 全球 15+ 核心外盘资产极速明细表 (含行情、涨跌幅、关联 A 股板块及趋势)。
+3. A 股热点板块连带 Boost 提权分与专属 Signal Tag 看板。
+4. 异步后台线程 (GlobalMarketWorker) 支持即时一键强制刷新与 30 分钟缓存自适应更新。
+"""
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QGridLayout, QHeaderView, QTableWidgetItem, QSplitter
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
+from PyQt6.QtGui import QColor, QFont
+import time
+import datetime
+
+from ats.ui.base_table import BaseATSTableWidget
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT
+
+
+class GlobalMarketWorker(QThread):
+    """后台异步抓取/更新外盘行情 worker"""
+    finished_signal = pyqtSignal(dict, float, str, dict) # quotes, score, label, sector_boosts
+
+    def __init__(self, force_refresh: bool = False, parent=None):
+        super().__init__(parent)
+        self.force_refresh = force_refresh
+
+    def run(self):
+        try:
+            from JSONData.global_market_data import (
+                fetch_global_market_quotes,
+                get_global_sentiment_score,
+                get_sector_global_boost
+            )
+
+            quotes = fetch_global_market_quotes(force_refresh=self.force_refresh)
+            score, label = get_global_sentiment_score()
+
+            sectors = ["存储芯片", "半导体", "传媒", "软件开发", "国防军工", "汽车整车", "有色金属"]
+            boosts = {}
+            for sec in sectors:
+                b_val, g_tag = get_sector_global_boost(sec)
+                boosts[sec] = (b_val, g_tag)
+
+            self.finished_signal.emit(quotes, score, label, boosts)
+        except Exception as e:
+            self.finished_signal.emit({}, 0.0, f"⚠️ 更新失败: {e}", {})
+
+
+class GlobalMarketPanel(QWidget):
+    """🌐 全球外盘与热点情绪看板页"""
+
+    sector_selected = pyqtSignal(str) # 选中板块信号
+    stock_selected = pyqtSignal(str, str, dict) # 选中股票联动信号
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._worker = None
+        self._init_ui()
+        self._start_auto_refresh_timer()
+        # 初始装载数据
+        self.refresh_data(force=False)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # ---------------- 1. 顶部 Header 与操作栏 (紧凑高性价比布局) ----------------
+        header_frame = QFrame()
+        header_frame.setStyleSheet("QFrame { background-color: #161a22; border-radius: 4px; padding: 2px; }")
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(6, 3, 6, 3)
+
+        title = QLabel("🌐 全球外盘情绪与热点板块连带看板")
+        title.setStyleSheet("font-weight: bold; color: #00e5ff; font-size: 10.5pt;")
+        header_layout.addWidget(title)
+
+        self.lbl_sentiment = QLabel("🌐 外盘整体情绪: --")
+        self.lbl_sentiment.setStyleSheet("font-weight: bold; color: #ffd700; font-size: 9.5pt; margin-left: 8px;")
+        header_layout.addWidget(self.lbl_sentiment)
+
+        self.lbl_status = QLabel("状态: 磁盘缓存模式")
+        self.lbl_status.setStyleSheet("color: #888888; font-size: 8.5pt; margin-left: 8px;")
+        header_layout.addWidget(self.lbl_status)
+
+        header_layout.addStretch()
+
+        self.lbl_update_time = QLabel("最后更新: --:--:--")
+        self.lbl_update_time.setStyleSheet("color: #aaa; font-size: 8.5pt; margin-right: 6px;")
+        header_layout.addWidget(self.lbl_update_time)
+
+        self.btn_refresh = QPushButton("🔄 强制实时刷新外盘")
+        self.btn_refresh.setStyleSheet("""
+            QPushButton {
+                background-color: #1e3a5f; color: #00e5ff; font-weight: bold;
+                border: 1px solid #00e5ff; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #00e5ff; color: #000; }
+            QPushButton:disabled { background-color: #2a2a33; color: #666; border: 1px solid #444; }
+        """)
+        self.btn_refresh.clicked.connect(lambda: self.refresh_data(force=True))
+        header_layout.addWidget(self.btn_refresh)
+
+        layout.addWidget(header_frame)
+
+        # ---------------- 2. 上下垂直主 Splitter (v_splitter) ----------------
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.v_splitter.setChildrenCollapsible(False)
+
+        # ---- 上部分: 紧凑外盘 4 大摘要卡片区域 ----
+        cards_widget = QWidget()
+        cards_layout = QHBoxLayout(cards_widget)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(4)
+
+        self.card_m7 = self._create_card("💻 美股7巨头 (M7/AI)", "--", "NVDA / AAPL / MSFT / GOOGL", "#00e5ff")
+        self.card_semi = self._create_card("💾 存储芯片 & 半导体", "--", "美光 MU / TSM / SOXX", "#ff007f")
+        self.card_macro = self._create_card("🏛️ 富时 A50 & 汇率", "--", "A50 期货 / 离岸 RMB", "#ffd700")
+        self.card_commodity = self._create_card("🛢️ 美原油 & 美黄金", "--", "美原油 / 美黄金", "#00ff88")
+
+        cards_layout.addWidget(self.card_m7['frame'])
+        cards_layout.addWidget(self.card_semi['frame'])
+        cards_layout.addWidget(self.card_macro['frame'])
+        cards_layout.addWidget(self.card_commodity['frame'])
+
+        self.v_splitter.addWidget(cards_widget)
+
+        # ---- 下部分: 左右水平 Splitter (h_splitter) 包含双数据表 ----
+        self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.h_splitter.setChildrenCollapsible(False)
+
+        # Left Widget: 外盘明细表
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_title = QLabel("📊 全球 15 大核心外盘资产极速明细")
+        left_title.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 9.5pt; margin-bottom: 2px;")
+        left_layout.addWidget(left_title)
+
+        self.tbl_quotes = BaseATSTableWidget(self)
+        q_headers = ["资产名称", "资产代码", "最新价格 / 点位", "涨跌幅 (%)", "关联 A 股热点", "外盘连带趋势"]
+        self.tbl_quotes.setColumnCount(len(q_headers))
+        self.tbl_quotes.setHorizontalHeaderLabels(q_headers)
+        self.tbl_quotes.setup_persistence(
+            config_key="ats_global_quotes_table_state",
+            default_widths=[110, 80, 100, 90, 130, 180]
+        )
+        left_layout.addWidget(self.tbl_quotes)
+        self.h_splitter.addWidget(left_widget)
+
+        # Right Widget: 板块 Boost 提权看板
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_title = QLabel("🎯 A 股热点板块外盘连带 Boost 提权与 Signal Tag 看板")
+        right_title.setStyleSheet("font-weight: bold; color: #ffd700; font-size: 9.5pt; margin-bottom: 2px;")
+        right_layout.addWidget(right_title)
+
+        self.tbl_boosts = BaseATSTableWidget(self)
+        b_headers = ["A 股核心热点板块", "关键关联外盘标的", "连带 Boost 提权分", "专属 Signal Tag 标签", "信号提权状态与指导"]
+        self.tbl_boosts.setColumnCount(len(b_headers))
+        self.tbl_boosts.setHorizontalHeaderLabels(b_headers)
+        self.tbl_boosts.setup_persistence(
+            config_key="ats_global_boosts_table_state",
+            default_widths=[120, 130, 100, 190, 200]
+        )
+        self.tbl_boosts.itemDoubleClicked.connect(self._on_boost_table_double_clicked)
+        right_layout.addWidget(self.tbl_boosts)
+        self.h_splitter.addWidget(right_widget)
+
+        # 将左右 h_splitter 放入上下 v_splitter 的下半部分
+        self.v_splitter.addWidget(self.h_splitter)
+        layout.addWidget(self.v_splitter)
+
+        # 恢复与绑定 Splitter 拖拽持久化
+        self._restore_splitter_states()
+        self.v_splitter.splitterMoved.connect(self._save_splitter_states)
+        self.h_splitter.splitterMoved.connect(self._save_splitter_states)
+
+    def _save_splitter_states(self):
+        """持久化落盘上下 (v_splitter) 与左右 (h_splitter) 分割线位置"""
+        try:
+            import json
+            import os
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            from PyQt6.QtCore import QByteArray
+
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                if hasattr(self, 'v_splitter'):
+                    data["ats_global_market_v_splitter"] = self.v_splitter.saveState().toHex().data().decode('utf-8')
+                if hasattr(self, 'h_splitter'):
+                    data["ats_global_market_h_splitter"] = self.h_splitter.saveState().toHex().data().decode('utf-8')
+                
+                tmp_path = cfg_path + ".tmp_gpanel"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Save splitter states error: {e}")
+
+    def _restore_splitter_states(self):
+        """恢复上下 (v_splitter) 与左右 (h_splitter) 分割线位置"""
+        try:
+            import json
+            import os
+            from sys_utils import get_app_root, get_conf_path
+            from PyQt6.QtCore import QByteArray
+
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                v_hex = data.get("ats_global_market_v_splitter")
+                if v_hex and hasattr(self, 'v_splitter'):
+                    self.v_splitter.restoreState(QByteArray.fromHex(v_hex.encode('utf-8')))
+                else:
+                    self.v_splitter.setSizes([85, 550]) # 默认顶部卡片紧凑 85px
+
+                h_hex = data.get("ats_global_market_h_splitter")
+                if h_hex and hasattr(self, 'h_splitter'):
+                    self.h_splitter.restoreState(QByteArray.fromHex(h_hex.encode('utf-8')))
+                else:
+                    self.h_splitter.setSizes([480, 520])
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Restore splitter states error: {e}")
+
+    def _create_card(self, title: str, main_val: str, sub_val: str, theme_color: str) -> dict:
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: #191d26;
+                border: 1px solid {theme_color};
+                border-radius: 6px;
+                padding: 6px;
+            }}
+        """)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+
+        lbl_t = QLabel(title)
+        lbl_t.setStyleSheet(f"font-size: 9pt; color: #aaa;")
+        layout.addWidget(lbl_t)
+
+        lbl_main = QLabel(main_val)
+        lbl_main.setStyleSheet(f"font-size: 11pt; font-weight: bold; color: {theme_color};")
+        layout.addWidget(lbl_main)
+
+        lbl_sub = QLabel(sub_val)
+        lbl_sub.setStyleSheet("font-size: 8.5pt; color: #888;")
+        layout.addWidget(lbl_sub)
+
+        return {'frame': frame, 'main': lbl_main, 'sub': lbl_sub}
+
+    def _start_auto_refresh_timer(self):
+        """启动定时刷新 (每 60 秒自动更新界面)"""
+        self._timer = QTimer(self)
+        self._timer.setInterval(60000)
+        self._timer.timeout.connect(lambda: self.refresh_data(force=False))
+        self._timer.start()
+
+    def refresh_data(self, force: bool = False):
+        """调起后台 worker 刷新数据"""
+        if self._worker and self._worker.isRunning():
+            return
+
+        self.btn_refresh.setEnabled(False)
+        self.btn_refresh.setText("⏳ 正在更新..." if force else "🔄 刷新中...")
+
+        self._worker = GlobalMarketWorker(force_refresh=force, parent=self)
+        self._worker.finished_signal.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _on_worker_finished(self, quotes: dict, score: float, label: str, boosts: dict):
+        self.btn_refresh.setEnabled(True)
+        self.btn_refresh.setText("🔄 强制实时刷新外盘")
+
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        self.lbl_update_time.setText(f"最后更新: {now_str}")
+
+        # 1. 更新顶部 Sentiment Label
+        score_color = COLOR_UP if score > 10.0 else (COLOR_DOWN if score < -10.0 else COLOR_ACCENT)
+        self.lbl_sentiment.setText(f"🌐 外盘整体情绪得分: {score:+.1f} ({label})")
+        self.lbl_sentiment.setStyleSheet(f"font-weight: bold; color: {score_color}; font-size: 10pt; margin-left: 10px;")
+
+        from JSONData.global_market_data import is_market_active_time
+        active_time = is_market_active_time()
+        status_str = "交易日活跃窗口 (实时更新)" if active_time else "盘后/非交易日 (30分钟/磁盘 Cache 模式)"
+        self.lbl_status.setText(f"状态: {status_str}")
+
+        # 2. 更新卡片
+        self._update_cards(quotes)
+
+        # 3. 更新外盘明细表
+        self._update_quotes_table(quotes)
+
+        # 4. 更新板块 Boost 看板
+        self._update_boosts_table(boosts)
+
+    def _update_cards(self, quotes: dict):
+        if not quotes:
+            return
+
+        # Card 1: M7 (英伟达/算力, 微软, 谷歌, 亚马逊, 特斯拉)
+        nvda_pct = quotes.get('NVDA', {}).get('pct', 0.0)
+        msft_pct = quotes.get('MSFT', {}).get('pct', 0.0)
+        googl_pct = quotes.get('GOOGL', {}).get('pct', 0.0)
+        amzn_pct = quotes.get('AMZN', {}).get('pct', 0.0)
+        m7_avg = (nvda_pct + msft_pct + googl_pct + amzn_pct) / 4.0
+        m7_str = f"M7均值 {m7_avg:+.2f}% | NVDA {nvda_pct:+.2f}%"
+        self.card_m7['main'].setText(m7_str)
+        self.card_m7['sub'].setText("提权: 传媒 / AI / 软件开发 / 计算机")
+
+        # Card 2: 存储与半导体 (美光 MU, 台积电 TSM, SOXX)
+        mu_pct = quotes.get('MU', {}).get('pct', 0.0)
+        soxx_pct = quotes.get('SOXX', {}).get('pct', 0.0)
+        semi_str = f"美光 MU {mu_pct:+.2f}% | SOXX {soxx_pct:+.2f}%"
+        self.card_semi['main'].setText(semi_str)
+        self.card_semi['sub'].setText("提权: 存储芯片 / 半导体 / 电子元件")
+
+        # Card 3: 富时 A50 & 汇率
+        a50_pct = quotes.get('A50', {}).get('pct', 0.0)
+        cnh_price = quotes.get('USDCNH', {}).get('price', 0.0)
+        macro_str = f"A50 {a50_pct:+.2f}% | CNH {cnh_price:.4f}"
+        self.card_macro['main'].setText(macro_str)
+        self.card_macro['sub'].setText("提权: 国防军工 / 金融 / 权重龙头")
+
+        # Card 4: 大宗商品 (原油 / 黄金)
+        oil_pct = quotes.get('OIL', {}).get('pct', 0.0)
+        gold_pct = quotes.get('GOLD', {}).get('pct', 0.0)
+        comm_str = f"原油 {oil_pct:+.2f}% | 黄金 {gold_pct:+.2f}%"
+        self.card_commodity['main'].setText(comm_str)
+        self.card_commodity['sub'].setText("提权: 有色金属 / 石油化工 / 资源")
+
+    def _update_quotes_table(self, quotes: dict):
+        self.tbl_quotes.setSortingEnabled(False)
+        self.tbl_quotes.setRowCount(0)
+
+        mapping_info = {
+            'A50': ('富时 A50 期货', '国防军工 / 金融 / 权重龙头'),
+            'USDCNH': ('离岸人民币', '整体北向/外资风险偏好'),
+            'OIL': ('美原油', '石油化工 / 基础化工 / 能源'),
+            'GOLD': ('美黄金', '贵金属 / 有色金属 / 避险板块'),
+            'NVDA': ('英伟达 / 算力', 'AI算力 / 传媒 / 算力服务器'),
+            'MU': ('美光 / 存储', '存储芯片 / 存储封测 / 半导体'),
+            'TSM': ('台积电 / 晶圆', '半导体代工 / 电子 / 芯片制造'),
+            'SOXX': ('费城半导体 ETF', '半导体 / 芯片 / 电子元件'),
+            'TSLA': ('特斯拉', '汽车整车 / 汽车零部件 / 智能驾驶'),
+            'AAPL': ('苹果', '消费电子 / 苹果概念 / 果链'),
+            'MSFT': ('微软', '软件开发 / AI应用 / 云计算'),
+            'GOOGL': ('谷歌', 'AI模型 / 互联网 / 传媒'),
+            'AMZN': ('亚马逊', '跨境电商 / 云计算 / AI应用'),
+            'META': ('Meta', '社交传媒 / 虚拟现实 / AI大模型'),
+            'QQQ': ('纳斯达克 100 ETF', '科技股整体 / 创业板指同向')
+        }
+
+        self.tbl_quotes.setRowCount(len(quotes))
+        for row_idx, (symbol, info) in enumerate(quotes.items()):
+            name = info.get('name', symbol)
+            price = info.get('price', 0.0)
+            pct = info.get('pct', 0.0)
+
+            c_info = mapping_info.get(symbol, (name, '科技 / 综合板块'))
+            c_name = c_info[0]
+            c_sector = c_info[1]
+
+            trend_str = "🔥 强劲拉升共振" if pct >= 3.0 else ("📈 稳步上行" if pct > 0.0 else ("📉 走弱回调" if pct < -2.0 else "➖ 横盘整理"))
+
+            col_values = [
+                c_name, symbol, f"{price:.2f}" if isinstance(price, (int, float)) else str(price),
+                f"{pct:+.2f}%", c_sector, trend_str
+            ]
+
+            for col_idx, val in enumerate(col_values):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (0, 4) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+
+                # Color coding
+                if col_idx == 0:
+                    item.setForeground(QColor("#00E5FF"))
+                    item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                elif col_idx == 3: # Pct
+                    if pct > 0:
+                        item.setForeground(QColor(COLOR_UP))
+                        if pct >= 3.0:
+                            item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    elif pct < 0:
+                        item.setForeground(QColor(COLOR_DOWN))
+                        if pct <= -3.0:
+                            item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    else:
+                        item.setForeground(QColor("#E2E2E5"))
+                elif col_idx == 5: # Trend
+                    if "强劲" in val or "上行" in val:
+                        item.setForeground(QColor(COLOR_UP))
+                    elif "走弱" in val:
+                        item.setForeground(QColor(COLOR_DOWN))
+                    else:
+                        item.setForeground(QColor("#AAA"))
+
+                self.tbl_quotes.setItem(row_idx, col_idx, item)
+
+        self.tbl_quotes.setSortingEnabled(True)
+
+    def _update_boosts_table(self, boosts: dict):
+        self.tbl_boosts.setSortingEnabled(False)
+        self.tbl_boosts.setRowCount(0)
+
+        sector_relations = {
+            "存储芯片": "美光 (MU) / 费城半导体 (SOXX)",
+            "半导体": "费城半导体 (SOXX) / 台积电 / 英伟达",
+            "传媒": "美股7巨头 (NVDA/MSFT/AMZN) / QQQ",
+            "软件开发": "微软 (MSFT) / 谷歌 / 亚马逊",
+            "国防军工": "富时 A50 期货 / 离岸 RMB",
+            "汽车整车": "特斯拉 (TSLA) / 富时 A50 期货",
+            "有色金属": "美原油 (OIL) / 美黄金 (GOLD)"
+        }
+
+        self.tbl_boosts.setRowCount(len(boosts))
+        for row_idx, (sec_name, (b_val, g_tag)) in enumerate(boosts.items()):
+            rel_symbols = sector_relations.get(sec_name, "纳斯达克 / 标普500")
+            tag_display = g_tag if g_tag else "--"
+
+            if b_val >= 25.0:
+                guide_str = "🚀 强力连带提权，优先精选置顶龙头"
+            elif b_val > 0.0:
+                guide_str = "📈 适度共振提权，偏正面支撑"
+            elif b_val < 0.0:
+                guide_str = "⚠️ 外盘走弱减分防护，谨防高开低走"
+            else:
+                guide_str = "➖ 外盘影响平淡，回归 A 股独立结构"
+
+            col_values = [
+                sec_name, rel_symbols, f"{b_val:+.1f} 分", tag_display, guide_str
+            ]
+
+            for col_idx, val in enumerate(col_values):
+                item = QTableWidgetItem(val)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx in (0, 2) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+
+                if col_idx == 0:
+                    item.setForeground(QColor("#FFD700"))
+                    item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                elif col_idx == 2: # Boost score
+                    if b_val > 0:
+                        item.setForeground(QColor(COLOR_UP))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    elif b_val < 0:
+                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    else:
+                        item.setForeground(QColor("#AAA"))
+                elif col_idx == 3: # Tag
+                    if "共振" in val or "强拉" in val:
+                        item.setForeground(QColor("#00FF88"))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    elif "回调" in val or "走弱" in val:
+                        item.setForeground(QColor("#FF5555"))
+
+                self.tbl_boosts.setItem(row_idx, col_idx, item)
+
+        self.tbl_boosts.setSortingEnabled(True)
+
+    def _on_boost_table_double_clicked(self, item):
+        if not item:
+            return
+        row = item.row()
+        sec_item = self.tbl_boosts.item(row, 0)
+        if sec_item:
+            sec_name = sec_item.text().strip()
+            self.sector_selected.emit(sec_name)

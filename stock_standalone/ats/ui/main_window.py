@@ -1375,6 +1375,11 @@ class ATSMainWindow(QMainWindow):
         self.btn_multi_period.setStyleSheet("QPushButton { background-color: #2b1f3c; color: #e0b0ff; font-weight: bold; border: 1px solid #c8a2c8; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #3d2f54; border-color: #e0b0ff; }")
         self.btn_multi_period.clicked.connect(self.open_multi_period_tester)
         toolbar.addWidget(self.btn_multi_period)
+
+        self.btn_global_market = QPushButton("外盘看板🌐")
+        self.btn_global_market.setStyleSheet("QPushButton { background-color: #1e3a5f; color: #00e5ff; font-weight: bold; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #00e5ff; color: #000; }")
+        self.btn_global_market.clicked.connect(self.open_global_market_dialog)
+        toolbar.addWidget(self.btn_global_market)
         
         toolbar.addSeparator()
         
@@ -4024,6 +4029,11 @@ class ATSMainWindow(QMainWindow):
             self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
         except Exception as e:
             print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
+
+    def open_global_market_dialog(self):
+        """打开/激活【🌐 全球外盘与热点情绪看板】独立自适应窗口 (不影响主界面原有布局)"""
+        from ats.ui.global_market_dialog import open_global_market_dialog
+        open_global_market_dialog(parent_window=self)
 
     def open_multi_period_tester(self):
         """[NEW] 打开/切换多周期联动策略筛选器 (优先检测内部调用，其次检测外部 MultiPeriodTester.exe/脚本)"""
