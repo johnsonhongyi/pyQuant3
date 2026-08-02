@@ -407,7 +407,7 @@ class GlobalMarketKLineDialog(QDialog):
     """外盘资产 120 日 K 线 / OHLC 走势弹窗 (TradingView 风格极简暗黑画板)"""
 
     def __init__(self, symbol: str, name: str = "", parent=None):
-        super().__init__(parent)
+        super().__init__(None)  # ⚡ 传入 None 使其成为完全独立的顶级 Window 窗口，支持多屏独立拖拽与全屏展宽
         self.symbol = symbol.strip().upper()
         self.name = name or self.symbol
         self.klines = []
@@ -432,16 +432,9 @@ class GlobalMarketKLineDialog(QDialog):
         )
         self.setMinimumSize(780, 480)
         self.resize(1120, 680)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #131722;
-                color: #d1d4dc;
-                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
-            }
-            QLabel {
-                color: #d1d4dc;
-            }
-        """)
+        from ats.ui.styles import apply_dark_theme
+        apply_dark_theme(self)
+
 
         self.chart_mode = "candlestick"
         self.show_boll = True
@@ -1494,36 +1487,25 @@ class GlobalMarketKLineDialog(QDialog):
     def _save_settings(self):
         """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、数据源、Splitter 分割比例与资讯面板显隐)"""
         try:
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_global_kline_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
-                data["ats_global_kline_dialog_mode"] = self.chart_mode
-                data["ats_global_kline_dialog_boll"] = self.show_boll
-                data["ats_global_kline_dialog_zoom"] = self.zoom_mode
-                data["ats_global_kline_default_source"] = self.data_source
-                if hasattr(self, 'news_panel'):
-                    data["ats_global_kline_news_visible"] = self.news_panel.isVisible()
-                # 保存 Splitter 分割比例
-                sizes = self.v_splitter.sizes()
-                if sizes and any(s > 0 for s in sizes):
-                    data["ats_global_kline_splitter_sizes"] = list(sizes)
-                if hasattr(self, 'h_splitter'):
-                    h_sizes = self.h_splitter.sizes()
-                    if h_sizes and any(s > 0 for s in h_sizes):
-                        data["ats_global_kline_h_splitter_sizes"] = list(h_sizes)
-                tmp_path = cfg_path + ".tmp_gkline"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
-        except Exception:
-            pass
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_global_kline_dialog_geom", self.saveGeometry().toHex().data().decode('utf-8'))
+            save_config_node("ats_global_kline_dialog_mode", self.chart_mode)
+            save_config_node("ats_global_kline_dialog_boll", self.show_boll)
+            save_config_node("ats_global_kline_dialog_zoom", self.zoom_mode)
+            save_config_node("ats_global_kline_default_source", self.data_source)
+            if hasattr(self, 'news_panel'):
+                save_config_node("ats_global_kline_news_visible", self.news_panel.isVisible())
+            # 保存 Splitter 分割比例
+            sizes = self.v_splitter.sizes()
+            if sizes and any(s > 0 for s in sizes):
+                save_config_node("ats_global_kline_splitter_sizes", list(sizes))
+            if hasattr(self, 'h_splitter'):
+                h_sizes = self.h_splitter.sizes()
+                if h_sizes and any(s > 0 for s in h_sizes):
+                    save_config_node("ats_global_kline_h_splitter_sizes", list(h_sizes))
+        except Exception as ex:
+            print(f"[GlobalMarketKLineDialog] Save settings error: {ex}")
+
 
     def _on_splitter_moved(self, pos: int, index: int):
         """Splitter 拖动时延迟 300ms 防抖后持久化分割比例。
@@ -1595,7 +1577,7 @@ class GlobalMarketKLineDialog(QDialog):
             if dlg.exec() == 1:
                 self._update_proxy_btn_style()
                 # 触发后台刷新
-                self._load_data(force=True)
+                self._load_fast_cached_or_async()
         except Exception as ex:
             print(f"[GlobalMarketKLineDialog] 调起代理弹窗异常: {ex}")
 

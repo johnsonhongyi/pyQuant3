@@ -317,6 +317,12 @@ def auto_fit_columns_once(table_or_tree, config_key, max_widths=None):
     table_or_tree._auto_adjusted = True
 
 
+def apply_dark_theme(widget):
+    """为指定 Widget/Dialog 应用与 ATS 100% 绝对一致的极致暗黑高质主题 QSS"""
+    if widget:
+        widget.setStyleSheet(DARK_THEME_QSS)
+
+
 def setup_header_persistence(table_or_tree, config_key, default_widths=None, max_widths=None):
     """
     为 QTableWidget 或 QTreeWidget 的水平 header 绑定跨会话自动保存与恢复状态，
@@ -339,31 +345,21 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
     # Enable interactive resizing for all columns
     col_count = table_or_tree.columnCount()
+    header.blockSignals(True)
     for col in range(col_count):
         header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+    header.blockSignals(False)
 
-    config_path = get_conf_path("window_config.json", get_app_root())
+    table_or_tree._is_restoring_header = True
 
     def save_action():
+        if getattr(table_or_tree, "_is_restoring_header", False) is True:
+            return
         if getattr(table_or_tree, "_has_been_visible", False) is False:
-            # Skip saving if the widget has never been shown/rendered in this session,
-            # to prevent overwriting with default (uninitialized) column widths.
             return
         try:
             state_hex = header.saveState().toHex().data().decode("utf-8")
-            with CONFIG_FILE_LOCK:
-                config_data = {}
-                if os.path.exists(config_path):
-                    try:
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            config_data = json.load(f)
-                    except:
-                        pass
-                config_data[config_key] = state_hex
-                tmp_path = config_path + f".tmp_{config_key}"
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, config_path)
+            save_config_node(config_key, state_hex)
         except RuntimeError:
             pass
         except Exception as e:
@@ -372,28 +368,26 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
     def apply_max_width_limits():
         if max_widths:
+            header.blockSignals(True)
             for col, max_w in max_widths.items():
                 if col < col_count:
                     curr_w = table_or_tree.columnWidth(col)
                     if curr_w > max_w:
-                        header.blockSignals(True)
                         table_or_tree.setColumnWidth(col, max_w)
-                        header.blockSignals(False)
+            header.blockSignals(False)
 
     def restore_action():
+        table_or_tree._is_restoring_header = True
         restored = False
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config_data = json.load(f)
-                    state_hex = config_data.get(config_key)
-                    if state_hex:
-                        header.blockSignals(True)
-                        header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
-                        header.blockSignals(False)
-                        restored = True
-            except Exception as e:
-                print(f"[HeaderPersistence] Failed to restore state for {config_key}: {e}")
+        try:
+            state_hex = load_config_node(config_key)
+            if state_hex and isinstance(state_hex, str):
+                header.blockSignals(True)
+                header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                header.blockSignals(False)
+                restored = True
+        except Exception as e:
+            print(f"[HeaderPersistence] Failed to restore state for {config_key}: {e}")
 
         # 无论是否恢复成功，强制把所有列设回 Interactive 拖拽模式，防止 restoreState 恢复了历史配置中其他非交互的 resizeMode
         header.blockSignals(True)
@@ -413,7 +407,6 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                             if col.isdigit():
                                 col_idx = int(col)
                             else:
-                                # Look up by matching header name text
                                 for i in range(col_count):
                                     item = table_or_tree.horizontalHeaderItem(i) if hasattr(table_or_tree, "horizontalHeaderItem") else None
                                     if item and item.text() == col:
@@ -428,32 +421,34 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 header.blockSignals(False)
 
         apply_max_width_limits()
+        table_or_tree._is_restoring_header = False
 
     table_or_tree.save_header_state = save_action
     table_or_tree.restore_header_state = restore_action
 
-    # Initialize _has_been_visible and _has_been_restored based on current visibility state
     table_or_tree._has_been_visible = table_or_tree.isVisible()
     table_or_tree._has_been_restored = False
     
-    # Install event filter to set visible flag when shown/painted, and trigger restore
     event_filter = ShowEventFilter(table_or_tree, restore_action)
     table_or_tree.installEventFilter(event_filter)
-    table_or_tree._show_event_filter = event_filter  # protect from GC
+    table_or_tree._show_event_filter = event_filter
 
-    # If it is already visible initially, restore immediately
     if table_or_tree._has_been_visible:
         table_or_tree._has_been_restored = True
         restore_action()
     else:
-        # If not visible yet, still apply max width limits to default sizes initially
         apply_max_width_limits()
+        table_or_tree._is_restoring_header = False
 
     def on_section_resized(logical_index, old_size, new_size):
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
         if app and getattr(app, "_is_updating_font", False):
             return
+        # 若当前正处于初始化/恢复过程，强行剥离 sectionResized 的落盘响应，防止重置配置！
+        if getattr(table_or_tree, "_is_restoring_header", False) is True:
+            return
+
         table_or_tree._has_been_visible = True
         if max_widths and logical_index in max_widths:
             max_w = max_widths[logical_index]
@@ -462,7 +457,6 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 table_or_tree.setColumnWidth(logical_index, max_w)
                 header.blockSignals(False)
 
-        # 防止 Tk/Qt 混用时 QTimer C++ 对象被提前析构导致 RuntimeError
         old_timer = globals()['_save_timers'].get(config_key)
         if old_timer is not None:
             try:
@@ -473,7 +467,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 except ImportError:
                     old_timer.stop()
             except RuntimeError:
-                pass  # C++ object already deleted, ignore
+                pass
             globals()['_save_timers'].pop(config_key, None)
 
         timer = QTimer()
@@ -485,7 +479,53 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
     header.sectionResized.connect(on_section_resized)
 
+
     # Protect callback reference from garbage collection
     if not hasattr(table_or_tree, "_persistence_callbacks"):
         table_or_tree._persistence_callbacks = {}
     table_or_tree._persistence_callbacks[config_key] = on_section_resized
+
+
+def load_config_node(key: str, default=None):
+    """线程安全从 window_config.json 读取指定 key 的持久化数据"""
+    import os
+    import json
+    from sys_utils import get_app_root, get_conf_path
+    try:
+        cfg_path = get_conf_path("window_config.json", get_app_root())
+        with CONFIG_FILE_LOCK:
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and key in data:
+                    return data[key]
+    except Exception as ex:
+        print(f"[ConfigHelper] 读取节点 {key} 异常: {ex}")
+    return default
+
+
+def save_config_node(key: str, val) -> bool:
+    """线程安全将指定 key 物理原子落盘保存至 window_config.json"""
+    import os
+    import json
+    from sys_utils import get_app_root, get_conf_path
+    try:
+        cfg_path = get_conf_path("window_config.json", get_app_root())
+        with CONFIG_FILE_LOCK:
+            data = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data[key] = val
+            tmp_path = cfg_path + f".tmp_{key}"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, cfg_path)
+            return True
+    except Exception as ex:
+        print(f"[ConfigHelper] 保存节点 {key} 异常: {ex}")
+        return False
+

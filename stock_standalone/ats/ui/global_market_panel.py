@@ -479,6 +479,9 @@ class GlobalMarketPanel(QWidget):
                 self.tbl_quotes.setItem(row_idx, col_idx, item)
 
         self.tbl_quotes.setSortingEnabled(False)
+        if hasattr(self.tbl_quotes, 'restore_header_state'):
+            self.tbl_quotes.restore_header_state()
+
 
     def _show_quotes_context_menu(self, pos):
         """右键弹出外盘极速明细表专用菜单 (包含优先置顶、查看K线、编辑单元格、一键列宽)"""
@@ -558,41 +561,22 @@ class GlobalMarketPanel(QWidget):
     def _restore_pinned_symbols(self):
         """从 window_config.json 恢复优先置顶的资产列表 (保持 list 顺序)"""
         try:
-            import json, os
-            from sys_utils import get_app_root, get_conf_path
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                pins = data.get("ats_global_market_pinned_symbols", [])
-                if isinstance(pins, list):
-                    seen = set()
-                    self.pinned_symbols = [x for x in pins if not (x in seen or seen.add(x))]
+            from ats.ui.styles import load_config_node
+            pins = load_config_node("ats_global_market_pinned_symbols", [])
+            if isinstance(pins, list):
+                seen = set()
+                self.pinned_symbols = [x for x in pins if not (x in seen or seen.add(x))]
         except Exception as e:
             print(f"[GlobalMarketPanel] Restore pinned symbols error: {e}")
 
     def _save_pinned_symbols(self):
         """将优先置顶的资产列表持久化写入 window_config.json"""
         try:
-            import json, os
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_global_market_pinned_symbols"] = list(self.pinned_symbols)
-                tmp_path = cfg_path + ".tmp_pins"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_global_market_pinned_symbols", list(self.pinned_symbols))
         except Exception as e:
             print(f"[GlobalMarketPanel] Save pinned symbols error: {e}")
+
 
     def _update_boosts_table(self, boosts: dict):
         self._last_boosts = boosts or {}
@@ -673,6 +657,9 @@ class GlobalMarketPanel(QWidget):
                 self.tbl_boosts.setItem(row_idx, col_idx, item)
 
         self.tbl_boosts.setSortingEnabled(False)
+        if hasattr(self.tbl_boosts, 'restore_header_state'):
+            self.tbl_boosts.restore_header_state()
+
 
     def _show_boosts_context_menu(self, pos):
         """右键弹出 A 股热点板块提权表专用菜单 (包含优先置顶、双击查看成分股、复制名称、一键列宽)"""
@@ -746,39 +733,19 @@ class GlobalMarketPanel(QWidget):
     def _restore_pinned_sectors(self):
         """从 window_config.json 恢复优先置顶的板块列表 (保持 list 顺序)"""
         try:
-            import json, os
-            from sys_utils import get_app_root, get_conf_path
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                pins = data.get("ats_global_market_pinned_sectors", [])
-                if isinstance(pins, list):
-                    seen = set()
-                    self.pinned_sectors = [x for x in pins if not (x in seen or seen.add(x))]
+            from ats.ui.styles import load_config_node
+            pins = load_config_node("ats_global_market_pinned_sectors", [])
+            if isinstance(pins, list):
+                seen = set()
+                self.pinned_sectors = [x for x in pins if not (x in seen or seen.add(x))]
         except Exception as e:
             print(f"[GlobalMarketPanel] Restore pinned sectors error: {e}")
 
     def _save_pinned_sectors(self):
         """将优先置顶的板块列表持久化写入 window_config.json"""
         try:
-            import json, os
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_global_market_pinned_sectors"] = list(self.pinned_sectors)
-                tmp_path = cfg_path + ".tmp_sec_pins"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_global_market_pinned_sectors", list(self.pinned_sectors))
         except Exception as e:
             print(f"[GlobalMarketPanel] Save pinned sectors error: {e}")
 
@@ -809,7 +776,9 @@ class GlobalMarketPanel(QWidget):
         if sec_item:
             sec_name = sec_item.text().strip().replace("📌 ", "")
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-            dlg = ATSSectorDetailDialog(sec_name, parent=self)
+            def _link_cb(code, name):
+                self.stock_selected.emit(code, name, {})
+            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_link_cb, parent=self)
             dlg.exec()
 
     def _update_proxy_btn_style(self):

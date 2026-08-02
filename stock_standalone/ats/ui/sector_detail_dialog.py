@@ -19,7 +19,7 @@ from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 
 class ATSSectorDetailDialog(QDialog):
-    def __init__(self, sector_name, linkage_cb, double_click_cb=None, member_codes=None, parent=None):
+    def __init__(self, sector_name, linkage_cb=None, double_click_cb=None, member_codes=None, parent=None):
         super().__init__(parent)
         self.sector_name = sector_name
         self.linkage_cb = linkage_cb

@@ -38,17 +38,13 @@ CACHE_TTL = 1800.0
 def get_proxy_config() -> dict:
     """读取物理 JSON 配置文件中的代理 Proxy 配置"""
     try:
-        from sys_utils import get_app_root, get_conf_path
-        cfg_path = get_conf_path("window_config.json", get_app_root())
-        if os.path.exists(cfg_path):
-            with open(cfg_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            cfg = data.get("ats_proxy_config", {})
-            if isinstance(cfg, dict):
-                return {
-                    "enabled": bool(cfg.get("enabled", False)),
-                    "proxy_url": str(cfg.get("proxy_url", "http://127.0.0.1:7890")).strip()
-                }
+        from ats.ui.styles import load_config_node
+        cfg = load_config_node("ats_proxy_config", None)
+        if isinstance(cfg, dict):
+            return {
+                "enabled": bool(cfg.get("enabled", False)),
+                "proxy_url": str(cfg.get("proxy_url", "http://127.0.0.1:7890")).strip()
+            }
     except Exception:
         pass
     return {"enabled": False, "proxy_url": "http://127.0.0.1:7890"}
@@ -57,34 +53,25 @@ def get_proxy_config() -> dict:
 def save_proxy_config(enabled: bool, proxy_url: str) -> bool:
     """物理落盘持久化保存代理 Proxy 配置至 window_config.json"""
     try:
-        from sys_utils import get_app_root, get_conf_path
-        from ats.ui.styles import CONFIG_FILE_LOCK
-        cfg_path = get_conf_path("window_config.json", get_app_root())
-        with CONFIG_FILE_LOCK:
-            data = {}
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
-            data["ats_proxy_config"] = {
-                "enabled": bool(enabled),
-                "proxy_url": str(proxy_url).strip()
-            }
-            tmp_path = cfg_path + ".tmp_proxy"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, cfg_path)
+        from ats.ui.styles import save_config_node
+        val = {
+            "enabled": bool(enabled),
+            "proxy_url": str(proxy_url).strip()
+        }
+        res = save_config_node("ats_proxy_config", val)
+        if res:
             print(f"[ProxyConfig] 物理落盘成功: enabled={enabled}, url={proxy_url}")
-            return True
+        return res
     except Exception as ex:
         print(f"[ProxyConfig] 保存代理配置失败: {ex}")
         return False
 
 
+
 def get_urllib_request_opener():
-    """获取应用代理设置的 urllib.request.OpenerDirector 实例 (若未开启代理则返回 None)"""
+    """获取应用代理设置的 urllib.request.OpenerDirector 实例 
+    (开启时使用配置代理，关闭时强制纯直连以彻底绕过 Windows 系统注册表残留代理)
+    """
     cfg = get_proxy_config()
     if cfg.get("enabled") and cfg.get("proxy_url"):
         p_url = cfg.get("proxy_url").strip()
@@ -97,7 +84,9 @@ def get_urllib_request_opener():
                 return urllib.request.build_opener(proxy_handler)
             except Exception as ex:
                 print(f"[ProxyConfig] 构建 ProxyHandler 失败 ({ex})")
-    return None
+    
+    # ⚡ 关键物理修复：代理关闭时，显式使用 ProxyHandler({}) 强行屏蔽并绕过 Windows 系统注册表/环境变量里的废弃代理
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def get_cache_file_path() -> str:
@@ -648,6 +637,44 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         print(f"[GlobalMarketData] Yahoo 源在线抓取异常 {sym_upper}: 所有 Host 节点无有效数据响应")
         return []
 
+    # Helper: 腾讯极速免代理直连源 (国内 10ms 零延迟免代理)
+    def _fetch_from_tencent() -> list:
+        tencent_sym = f"us{sym_upper}" if not sym_upper.startswith("us") else sym_upper
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_sym},day,,,{limit + 20},qfq"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://finance.qq.com'}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            opener = get_urllib_request_opener()
+            with opener.open(req, timeout=4.0) as resp:
+                raw = resp.read().decode('utf-8')
+            data = json.loads(raw)
+            sec_dict = data.get('data', {})
+            sec_data = sec_dict.get(tencent_sym, {}) or sec_dict.get(tencent_sym.lower(), {}) or sec_dict.get(sym_upper, {})
+            klines = sec_data.get('day', []) or sec_data.get('qfqday', [])
+            if klines:
+                parsed = []
+                prev_c = None
+                for item in klines:
+                    if isinstance(item, list) and len(item) >= 5:
+                        # 腾讯格式: [date, close, open, high, low, volume]
+                        d = str(item[0])
+                        c = float(item[1])
+                        o = float(item[2])
+                        h = float(item[3])
+                        l = float(item[4])
+                        v = float(item[5]) if len(item) > 5 else 0.0
+                        if c <= 0: continue
+                        pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                        prev_c = c
+                        parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                if parsed:
+                    return parsed
+            else:
+                print(f"[GlobalMarketData] Tencent sec_dict keys: {list(sec_dict.keys())}")
+        except Exception as ex:
+            print(f"[GlobalMarketData] Tencent 源抓取异常 {sym_upper}: {ex}")
+        return []
+
     # Helper: 尝试抓取 Sina 源 (支持美股 & 内外盘期货)
     def _fetch_from_sina() -> list:
         US_STOCKS = {'AAPL', 'NVDA', 'TSLA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'MU', 'TSM', 'SOXX', 'QQQ'}
@@ -657,30 +684,42 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             headers = {'User-Agent': 'Mozilla/5.0'}
             try:
                 req = urllib.request.Request(url, headers=headers)
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                opener = get_urllib_request_opener()
                 with opener.open(req, timeout=6.0) as resp:
                     raw = resp.read().decode('gbk', errors='ignore')
                 import re
-                match = re.search(r'\((.*)\)', raw, re.DOTALL)
+                raw_list = []
+                json_str = None
+                match = re.search(r'=\s*(\[.*\])\s*;?', raw, re.DOTALL) or re.search(r'\((.*)\)', raw, re.DOTALL)
                 if match:
-                    raw_list = json.loads(match.group(1))
-                    if isinstance(raw_list, list) and raw_list:
-                        parsed = []
-                        prev_c = None
-                        slice_start = max(0, len(raw_list) - limit - 10)
-                        for item in raw_list[slice_start:]:
-                            try:
-                                d = str(item.get('d', ''))
-                                o = float(item.get('o', 0))
-                                h = float(item.get('h', 0))
-                                l = float(item.get('l', 0))
-                                c = float(item.get('c', 0))
-                                v = float(item.get('v', 0))
-                                if c <= 0: continue
-                                pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
-                                prev_c = c
-                                parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                            except Exception: continue
+                    json_str = match.group(1).strip()
+                elif raw.strip().startswith('[') and raw.strip().endswith(']'):
+                    json_str = raw.strip()
+                
+                if json_str:
+                    try:
+                        raw_list = json.loads(json_str)
+                    except Exception:
+                        raw_list = []
+
+                if isinstance(raw_list, list) and raw_list:
+                    parsed = []
+                    prev_c = None
+                    slice_start = max(0, len(raw_list) - limit - 10)
+                    for item in raw_list[slice_start:]:
+                        try:
+                            d = str(item.get('d', ''))
+                            o = float(item.get('o', 0))
+                            h = float(item.get('h', 0))
+                            l = float(item.get('l', 0))
+                            c = float(item.get('c', 0))
+                            v = float(item.get('v', 0))
+                            if c <= 0: continue
+                            pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                            prev_c = c
+                            parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                        except Exception: continue
+                    if parsed:
                         return parsed
             except Exception as ex:
                 print(f"[GlobalMarketData] Sina 美股源抓取异常 {sym_upper}: {ex}")
@@ -703,15 +742,24 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
         try:
             req = urllib.request.Request(url, headers=headers)
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener = get_urllib_request_opener()
             with opener.open(req, timeout=5.0) as resp:
                 txt = resp.read().decode('gbk', errors='ignore')
             import re
-            json_match = re.search(r'\((.*)\)', txt, re.DOTALL)
+            json_match = re.search(r'=\s*(\[.*\])\s*;?', txt, re.DOTALL) or re.search(r'\((.*)\)', txt, re.DOTALL)
+            raw_list = []
             if json_match:
-                raw_list = json.loads(json_match.group(1))
-                if not isinstance(raw_list, list):
+                try:
+                    raw_list = json.loads(json_match.group(1).strip())
+                except Exception:
                     raw_list = []
+            elif txt.strip().startswith('[') and txt.strip().endswith(']'):
+                try:
+                    raw_list = json.loads(txt.strip())
+                except Exception:
+                    raw_list = []
+
+            if isinstance(raw_list, list) and raw_list:
                 parsed = []
                 prev_c = None
                 slice_start = max(0, len(raw_list) - limit - 10)
@@ -733,23 +781,37 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
                     except Exception: continue
-                return parsed
+                if parsed:
+                    return parsed
         except Exception as ex:
             print(f"[GlobalMarketData] Sina 期货源抓取异常 {sym_upper}: {ex}")
         return []
 
     # 按照用户选择的首选源进行抓取，失败时尝试备用源
     parsed_klines = []
-    if source_key == 'yahoo':
-        parsed_klines = _fetch_from_yahoo()
+    proxy_enabled = get_proxy_config().get("enabled", False)
+
+    # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Tencent / Sina 国内免代理直连源
+    if not proxy_enabled:
+        parsed_klines = _fetch_from_tencent()
         if not parsed_klines:
-            print(f"[GlobalMarketData] Yahoo 源在线抓取无响应，平滑降级至 Sina 源 -> {sym_upper}")
             parsed_klines = _fetch_from_sina()
-    else:
-        parsed_klines = _fetch_from_sina()
-        if not parsed_klines:
-            print(f"[GlobalMarketData] Sina 源在线抓取无响应，平滑降级至 Yahoo 源 -> {sym_upper}")
+        if not parsed_klines and source_key == 'yahoo':
             parsed_klines = _fetch_from_yahoo()
+    else:
+        # 2. 代理已开启模式
+        if source_key == 'yahoo':
+            parsed_klines = _fetch_from_yahoo()
+            if not parsed_klines:
+                parsed_klines = _fetch_from_tencent()
+            if not parsed_klines:
+                parsed_klines = _fetch_from_sina()
+        else:
+            parsed_klines = _fetch_from_sina()
+            if not parsed_klines:
+                parsed_klines = _fetch_from_tencent()
+            if not parsed_klines:
+                parsed_klines = _fetch_from_yahoo()
 
     # 抓取成功后独立落盘写入该数据源物理文件
     if parsed_klines and len(parsed_klines) >= 5:
