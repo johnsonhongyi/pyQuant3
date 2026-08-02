@@ -223,11 +223,24 @@ class IPCBridge:
         """
         closed_df = self.get_closed_positions()
         if closed_df.empty:
-            # Generate mock equity data if no historical trades exist yet
-            days = 30
+            # Generate mock equity data matching Image 1 classic ATS vs HS300 HD wave curve (60 days)
+            days = 60
             dates = pd.date_range(end=pd.Timestamp.now(), periods=days).strftime("%Y%m%d").tolist()
-            strat_equity = [initial_capital * (1 + 0.001 * i) for i in range(days)]
-            bench_equity = [initial_capital * (1 + 0.0005 * i) for i in range(days)]
+            np.random.seed(101)
+            p1 = np.linspace(100.8, 107.0, 11) + np.random.normal(0, 0.35, 11)
+            p2 = np.linspace(107.0, 98.8, 10) + np.random.normal(0, 0.45, 10)
+            p3 = np.linspace(98.8, 97.0, 10) + np.random.normal(0, 0.40, 10)
+            p4 = np.linspace(97.0, 94.0, 15) + np.random.normal(0, 0.45, 15)
+            p5 = np.linspace(94.0, 97.8, 14) + np.random.normal(0, 0.40, 14)
+            strat_equity = [float(v) * (initial_capital / 100.0) for v in np.concatenate([p1, p2[1:], p3[1:], p4[1:], p5[1:]])]
+
+            b1 = np.linspace(99.4, 102.5, 11) + np.random.normal(0, 0.40, 11)
+            b2 = np.linspace(102.5, 100.2, 10) + np.random.normal(0, 0.50, 10)
+            b3 = np.linspace(100.2, 97.5, 10) + np.random.normal(0, 0.45, 10)
+            b4 = np.linspace(97.5, 94.2, 15) + np.random.normal(0, 0.50, 15)
+            b5 = np.linspace(94.2, 100.5, 14) + np.random.normal(0, 0.45, 14)
+            bench_equity = [float(v) * (initial_capital / 100.0) for v in np.concatenate([b1, b2[1:], b3[1:], b4[1:], b5[1:]])]
+
             return dates, strat_equity, bench_equity
 
         # Sort by sell date to calculate running equity

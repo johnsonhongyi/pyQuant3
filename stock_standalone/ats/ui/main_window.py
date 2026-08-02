@@ -108,12 +108,30 @@ class EquityPopDialog(QDialog):
         layout.addWidget(self.pop_tabs, 1)
 
     def _on_refresh(self):
+        parent_mw = self.parent()
+        if parent_mw and hasattr(parent_mw, 'bridge') and parent_mw.bridge:
+            try:
+                dates, strat_equity, bench_equity = parent_mw.bridge.get_equity_curve_data()
+                x = list(range(len(dates)))
+                self.equity_chart.update_curve(x, strat_equity, bench_equity)
+                return
+            except Exception as e:
+                print(f"[EquityPopDialog] Refresh error: {e}")
         if hasattr(self.equity_chart, 'draw_mock_curve'):
             self.equity_chart.draw_mock_curve()
 
     def update_data(self, df_realtime=None):
         if hasattr(self.dist_chart, 'update_data') and df_realtime is not None:
             self.dist_chart.update_data(df_realtime)
+        parent_mw = self.parent()
+        if parent_mw and hasattr(parent_mw, 'bridge') and parent_mw.bridge:
+            try:
+                dates, strat_equity, bench_equity = parent_mw.bridge.get_equity_curve_data()
+                x = list(range(len(dates)))
+                self.equity_chart.update_curve(x, strat_equity, bench_equity)
+            except Exception:
+                pass
+
 
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None, batch_codes=None):
@@ -3283,6 +3301,14 @@ class ATSMainWindow(QMainWindow):
             
         if hasattr(self, 'current_df') and self.current_df is not None:
             self._equity_pop_dialog.update_data(self.current_df)
+
+        if hasattr(self, 'bridge') and self.bridge:
+            try:
+                dates, strat_equity, bench_equity = self.bridge.get_equity_curve_data()
+                x = list(range(len(dates)))
+                self._equity_pop_dialog.equity_chart.update_curve(x, strat_equity, bench_equity)
+            except Exception as e:
+                print(f"[ATSMainWindow] Sync equity curve error: {e}")
 
         self._equity_pop_dialog.show()
         self._equity_pop_dialog.raise_()

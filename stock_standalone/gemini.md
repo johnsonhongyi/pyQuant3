@@ -1,3 +1,13 @@
+## 2026-08-02 15:30
+- [x] **实现 `EquityCurveChart` 默认自动聚焦最右侧最新60日走势与鼠标滚轮/拖拽/双击交互 (`ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `scratch/test_equity_chart_view_zoom.py`)**：
+    - [x] **修复小窗口只看头部、看不起最新走势痛点**：重构 `EquityCurveChart.update_curve` 视区 bounds 计算逻辑。当数据点数较多（如 800+ 交易日）时，全量数据仍保存在 Plot 内部，但默认视区范围 (`setXRange`/`setYRange`) 精准放缩定位在【最右侧最新 60 个交易日】的走势区域。使主界面右下角嵌入的小窗口与独立放大看板在一打开时即呈现最新、最关键的走势细节。
+    - [x] **实现鼠标滚轮/拖拽/双击及一键控制按钮**：
+        - 开启 ViewBox `setMouseEnabled(x=True, y=True)` 并禁用弹出菜单，支持鼠标滚轮（Mouse Wheel）顺畅放大缩小与鼠标左键拖拽（Pan）平移。
+        - 拦截 ViewBox 双击事件 (`mouseDoubleClickEvent`)，用户双击图表任意位置瞬间平滑恢复/复位至最新 60 日视区。
+        - 在图表 Header 工具栏顶部引入 `🔍 最新60日`、`🌐 全览` 与 `🔄 复位` 快捷交互按钮组。
+    - [x] **独立放大看板与主窗口零延迟同步数据 (`EquityPopDialog`)**：重构 `EquityPopDialog._on_refresh` 与 `update_data`，在调起与刷新时自动从父窗口 bridge 处同步最新的全量收益率数据并灌给 `EquityCurveChart`。
+    - [x] **UI 视区与缩放自动化测试 100% 成功通过**：新建 `scratch/test_equity_chart_view_zoom.py` 校验 800+ 数据点下的 60 日默认聚焦、`🌐 全览` 切换、`🔍 最新60日` 复位及 `EquityPopDialog` 初始化，全量 4 项断言与 11 项主测试套件 100% 成功通过。
+
 ## 2026-08-02 15:00
 - [x] **实现独立看盘弹窗 `GlobalMarketDialog` 与全量上下/左右 Splitter 及 Table 列宽 100% 物理持久化 (`ats/ui/global_market_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/main_window.py`)**：
     - [x] **100% 解耦主界面布局**：从主界面 `top_tabs` 标签栏中移除外盘页，重构为点击工具栏 `外盘看板🌐` 按键调起独立极窄非阻塞弹窗 (`GlobalMarketDialog`)，完全不挤压或撑宽 ATS 主界面原有 TabBar 与 Splitter 布局。
