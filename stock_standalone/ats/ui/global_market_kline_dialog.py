@@ -10,15 +10,17 @@ MA5/MA20/MA60 动态均线、成交量 Subplot 柱状图、十字光标与磁盘
 import json
 import os
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter,
+    QListWidget, QListWidgetItem, QTextEdit, QWidget
 )
-from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QByteArray
-from PyQt6.QtGui import QColor, QPicture, QPainter, QPen, QBrush
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QByteArray, QTimer
+from PyQt6.QtGui import QColor, QPicture, QPainter, QPen, QBrush, QFont, QCursor
 
 import pyqtgraph as pg
 from JSONData.global_market_data import (
     fetch_global_kline_history, get_kline_cache_file_path,
-    get_related_symbols, fetch_global_market_quotes
+    get_related_symbols, fetch_global_market_quotes,
+    fetch_symbol_financial_news
 )
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
@@ -203,6 +205,204 @@ class OHLCItem(pg.GraphicsObject):
         return QRectF(self.picture.boundingRect())
 
 
+class GlobalMarketNewsDetailDialog(QDialog):
+    """关联财经资讯与要闻解读详情弹窗 (支持自由缩放、最大化/最小化与物理 JSON 持久化)"""
+
+    def __init__(self, news_item: dict, parent=None):
+        super().__init__(parent)
+        self.news_item = news_item or {}
+        title_text = self.news_item.get('title', '财经资讯详情')
+        self.setWindowTitle(f"📰 {title_text}")
+        
+        # 允许自由拉伸缩放，支持标准 Windows 最小化/最大化/关闭按键
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinMaxButtonsHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setMinimumSize(580, 420)
+        self.resize(760, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #131722;
+                color: #d1d4dc;
+                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            }
+            QLabel {
+                color: #d1d4dc;
+            }
+        """)
+        self._init_ui()
+        self._restore_settings()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        # ---------------- 1. 顶部 Header 控件 ----------------
+        header_frame = QFrame()
+        header_frame.setStyleSheet("""
+            QFrame {
+                background-color: #1e222d;
+                border: 1px solid #2a2e39;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        header_layout = QVBoxLayout(header_frame)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        header_layout.setSpacing(8)
+
+        # 标签 + 影响分 + 来源 + 时间 行
+        row1_layout = QHBoxLayout()
+        tag_str = self.news_item.get('tag', '🌐 财经要闻')
+        lbl_tag = QLabel(tag_str)
+        lbl_tag.setStyleSheet("""
+            background-color: #2962ff;
+            color: #ffffff;
+            font-size: 9pt;
+            font-weight: bold;
+            padding: 3px 8px;
+            border-radius: 4px;
+        """)
+        row1_layout.addWidget(lbl_tag)
+
+        score = float(self.news_item.get('impact_score', 0.0))
+        score_color = "#F6465D" if score >= 0 else "#089981"
+        lbl_score = QLabel(f"影响评级: {score:+.1f} 分")
+        lbl_score.setStyleSheet(f"""
+            background-color: #1a2233;
+            color: {score_color};
+            font-size: 9pt;
+            font-weight: bold;
+            padding: 3px 8px;
+            border: 1px solid {score_color};
+            border-radius: 4px;
+        """)
+        row1_layout.addWidget(lbl_score)
+
+        row1_layout.addStretch(1)
+
+        dt_str = self.news_item.get('datetime', '')
+        source_str = self.news_item.get('source', '')
+        lbl_meta = QLabel(f"⏱️ {dt_str}  |  📡 来源: {source_str}")
+        lbl_meta.setStyleSheet("color: #787b86; font-size: 9pt;")
+        row1_layout.addWidget(lbl_meta)
+
+        header_layout.addLayout(row1_layout)
+
+        # 新闻大标题
+        lbl_title = QLabel(self.news_item.get('title', ''))
+        lbl_title.setWordWrap(True)
+        lbl_title.setStyleSheet("font-size: 13pt; font-weight: bold; color: #00F0FF; margin-top: 4px;")
+        header_layout.addWidget(lbl_title)
+
+        layout.addWidget(header_frame)
+
+        # ---------------- 2. 新闻正文区域 (QTextEdit 支持选区复制) ----------------
+        self.txt_content = QTextEdit()
+        self.txt_content.setReadOnly(True)
+        self.txt_content.setStyleSheet("""
+            QTextEdit {
+                background-color: #1a1e2b;
+                color: #e1e4ec;
+                border: 1px solid #2a2e39;
+                border-radius: 6px;
+                padding: 12px;
+                font-size: 10.5pt;
+                line-height: 1.6;
+            }
+        """)
+        content_text = self.news_item.get('content', '') or self.news_item.get('summary', '')
+        self.txt_content.setPlainText(content_text)
+        layout.addWidget(self.txt_content)
+
+        # ---------------- 3. 底部关联标的与关闭按键 ----------------
+        bottom_layout = QHBoxLayout()
+        rel_symbols = self.news_item.get('related_symbols', [])
+        if rel_symbols:
+            lbl_rel_title = QLabel("🎯 关联影响标的:")
+            lbl_rel_title.setStyleSheet("color: #787b86; font-weight: bold; font-size: 9.5pt;")
+            bottom_layout.addWidget(lbl_rel_title)
+            for s in rel_symbols:
+                lbl_sym = QLabel(str(s))
+                lbl_sym.setStyleSheet("""
+                    background-color: #262b3e;
+                    color: #FFD700;
+                    border: 1px solid #363c4e;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    font-weight: bold;
+                    font-size: 9pt;
+                """)
+                bottom_layout.addWidget(lbl_sym)
+
+        bottom_layout.addStretch(1)
+
+        btn_close = QPushButton("关闭 (Close)")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2e39;
+                color: #ffffff;
+                border: 1px solid #363c4e;
+                border-radius: 4px;
+                padding: 5px 16px;
+                font-size: 9.5pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #363c4e;
+            }
+        """)
+        btn_close.clicked.connect(self.accept)
+        bottom_layout.addWidget(btn_close)
+
+        layout.addLayout(bottom_layout)
+
+    def _restore_settings(self):
+        """恢复物理窗口几何尺寸位置"""
+        try:
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                geom = data.get("ats_news_detail_dialog_geom")
+                if geom:
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+        except Exception:
+            pass
+
+    def _save_settings(self):
+        """物理落盘持久化配置至 window_config.json"""
+        try:
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_news_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
+                tmp_path = cfg_path + ".tmp_news_detail"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
+
+    def accept(self):
+        self._save_settings()
+        super().accept()
+
+
 class GlobalMarketKLineDialog(QDialog):
     """外盘资产 120 日 K 线 / OHLC 走势弹窗 (TradingView 风格极简暗黑画板)"""
 
@@ -220,15 +420,18 @@ class GlobalMarketKLineDialog(QDialog):
         self._related_klines_cache = {}   # {symbol: [kline_dict, ...]}
         self._related_workers = []        # RelatedKLineWorkerThread 列表 (防GC)
 
-        self.setWindowTitle(f"📈 [{self.symbol} · {self.name}] 近 120 日外盘 K 线走势图")
+        # 获取股票/外盘关联财经资讯
+        self.news_items = fetch_symbol_financial_news(self.symbol, self.name)
+
+        self.setWindowTitle(f"📈 [{self.symbol} · {self.name}] 近 120 日外盘 K 线走势图与关联资讯")
         # 允许自由拉伸缩放，支持标准 Windows 最小化/最大化/关闭按键
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinMaxButtonsHint |
             Qt.WindowType.WindowCloseButtonHint
         )
-        self.setMinimumSize(640, 420)
-        self.resize(960, 600)
+        self.setMinimumSize(780, 480)
+        self.resize(1120, 680)
         self.setStyleSheet("""
             QDialog {
                 background-color: #131722;
@@ -390,7 +593,37 @@ class GlobalMarketKLineDialog(QDialog):
         self.btn_focus_120.clicked.connect(self._focus_full_120)
         header_layout.addWidget(self.btn_focus_120)
 
+        # 📰 关联资讯展开/收起控制按键
+        self.btn_news_toggle = QPushButton(f"📰 资讯({len(self.news_items)}条): 收起")
+        self.btn_news_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_news_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2233;
+                color: #00F0FF;
+                border: 1px solid #00F0FF;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-width: 110px;
+            }
+            QPushButton:hover {
+                background-color: #2962ff;
+                color: #ffffff;
+            }
+        """)
+        self.btn_news_toggle.clicked.connect(self._toggle_news_panel)
+        header_layout.addWidget(self.btn_news_toggle)
+
+        # 🌐 代理设置按键
+        self.btn_proxy_toggle = QPushButton("🌐 代理")
+        self.btn_proxy_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_proxy_toggle.clicked.connect(self._open_proxy_dialog)
+        self._update_proxy_btn_style()
+        header_layout.addWidget(self.btn_proxy_toggle)
+
         layout.addWidget(header_frame)
+
 
         # ---------------- 2. 动态信息条 (Info Banner) ----------------
         self.lbl_info = QLabel("提示: 鼠标悬浮移入画板查看开高低收明细与指标数据")
@@ -406,8 +639,21 @@ class GlobalMarketKLineDialog(QDialog):
         """)
         layout.addWidget(self.lbl_info)
 
-        # ---------------- 3. 图表区域: QSplitter 包裹三个独立 GraphicsLayoutWidget ----------------
-        # 支持拖拽调整各子图高度比例并自动持久化
+        # ---------------- 3. 水平 QSplitter 容器 (包裹左侧 K线走势图 + 右侧关联财经资讯侧边栏) ----------------
+        self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.h_splitter.setHandleWidth(6)
+        self.h_splitter.setStyleSheet("""
+            QSplitter::handle {
+                background: #1e222d;
+                border-left: 1px solid #2a2e39;
+                border-right: 1px solid #2a2e39;
+            }
+            QSplitter::handle:hover {
+                background: #00F0FF;
+            }
+        """)
+
+        # 3.1 左侧垂直 QSplitter 包裹三个 GraphicsLayoutWidget
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
         self.v_splitter.setHandleWidth(5)
         self.v_splitter.setStyleSheet("""
@@ -426,7 +672,7 @@ class GlobalMarketKLineDialog(QDialog):
             }
         """)
 
-        # 3.1 主 K 线图窗口
+        # 主 K 线图窗口
         self.gw_kline = pg.GraphicsLayoutWidget()
         self.gw_kline.setBackground('#131722')
         self.date_axis = DateAxisItem(orientation='bottom')
@@ -440,7 +686,7 @@ class GlobalMarketKLineDialog(QDialog):
         self.gw_kline.setMinimumHeight(200)
         self.v_splitter.addWidget(self.gw_kline)
 
-        # 3.2 成交量 Subplot 窗口
+        # 成交量 Subplot 窗口
         self.gw_vol = pg.GraphicsLayoutWidget()
         self.gw_vol.setBackground('#131722')
         self.vol_axis = VolumeAxisItem(orientation='left')
@@ -458,8 +704,6 @@ class GlobalMarketKLineDialog(QDialog):
         self.gw_vol.setMinimumHeight(60)
         self.v_splitter.addWidget(self.gw_vol)
 
-        layout.addWidget(self.v_splitter)
-
         # 十字光标 Crosshair
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#787b86', style=Qt.PenStyle.DashLine, width=1))
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#787b86', style=Qt.PenStyle.DashLine, width=1))
@@ -467,7 +711,7 @@ class GlobalMarketKLineDialog(QDialog):
         self.p_kline.addItem(self.h_line, ignoreBounds=True)
         self.proxy = pg.SignalProxy(self.p_kline.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved)
 
-        # 3.3 关联走势对比子图窗口 (仅当有关联品种时创建)
+        # 关联走势对比子图窗口 (仅当有关联品种时创建)
         self.p_related = None
         self.gw_related = None
         if self.related_symbols:
@@ -488,14 +732,179 @@ class GlobalMarketKLineDialog(QDialog):
             self.gw_related.setMinimumHeight(80)
             self.v_splitter.addWidget(self.gw_related)
 
-        # 初始化默认分割比例: 主 K线:60% / 成交量:20% / 关联走势:20%
         if self.related_symbols:
             self.v_splitter.setSizes([360, 120, 120])
         else:
             self.v_splitter.setSizes([420, 140])
 
-        # Splitter 变化时实时持久化 (拖动完成后)
         self.v_splitter.splitterMoved.connect(self._on_splitter_moved)
+        self.h_splitter.addWidget(self.v_splitter)
+
+        # 3.2 右侧关联财经资讯/要闻侧边栏面板 (news_panel)
+        self._init_news_panel()
+        self.h_splitter.addWidget(self.news_panel)
+
+        # 设置水平 Splitter 默认比例: K线图70% / 资讯侧边栏30%
+        self.h_splitter.setSizes([770, 330])
+        self.h_splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        layout.addWidget(self.h_splitter)
+
+    def _init_news_panel(self):
+        """构建右侧关联财经资讯/要闻侧边栏面板"""
+        self.news_panel = QFrame()
+        self.news_panel.setStyleSheet("""
+            QFrame {
+                background-color: #181c27;
+                border: 1px solid #2a2e39;
+                border-radius: 6px;
+            }
+        """)
+        news_layout = QVBoxLayout(self.news_panel)
+        news_layout.setContentsMargins(8, 8, 8, 8)
+        news_layout.setSpacing(6)
+
+        # Header 标题栏
+        header_box = QHBoxLayout()
+        lbl_news_hdr = QLabel(f"📰 股票关联财经资讯 ({len(self.news_items)})")
+        lbl_news_hdr.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 10.5pt;")
+        header_box.addWidget(lbl_news_hdr)
+        header_box.addStretch(1)
+
+        lbl_tip = QLabel("双击条目看详情")
+        lbl_tip.setStyleSheet("color: #787b86; font-size: 8.5pt;")
+        header_box.addWidget(lbl_tip)
+
+        news_layout.addLayout(header_box)
+
+        # 资讯列表 QListWidget
+        self.lst_news = QListWidget()
+        self.lst_news.setStyleSheet("""
+            QListWidget {
+                background-color: #131722;
+                border: 1px solid #232733;
+                border-radius: 4px;
+                outline: none;
+                padding: 4px;
+            }
+            QListWidget::item {
+                background-color: #1e222d;
+                border: 1px solid #2a2e39;
+                border-radius: 4px;
+                margin-bottom: 6px;
+                padding: 6px;
+                color: #d1d4dc;
+            }
+            QListWidget::item:hover {
+                background-color: #262b3e;
+                border-color: #00F0FF;
+            }
+            QListWidget::item:selected {
+                background-color: #2a344a;
+                border-color: #2962ff;
+            }
+        """)
+        self.lst_news.itemDoubleClicked.connect(self._on_news_item_double_clicked)
+        self.lst_news.itemClicked.connect(self._on_news_item_clicked)
+
+        self._populate_news_list()
+        news_layout.addWidget(self.lst_news)
+
+    def _populate_news_list(self):
+        """填充资讯列表条目"""
+        self.lst_news.clear()
+        if not self.news_items:
+            item = QListWidgetItem("暂无相关财经资讯")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.lst_news.addItem(item)
+            return
+
+        for news in self.news_items:
+            title = news.get('title', '')
+            dt = news.get('datetime', '')
+            tag = news.get('tag', '🌐 资讯')
+            score = float(news.get('impact_score', 0.0))
+            score_color = "#F6465D" if score >= 0 else "#089981"
+            summary = news.get('summary', '')
+
+            # 简易多行格式化 HTML
+            item_text = (
+                f"<div style='font-size: 8.5pt; color: #787b86; margin-bottom: 3px;'>"
+                f"<b style='color: #2962ff;'>[{tag}]</b> &nbsp; ⏱️ {dt} &nbsp; "
+                f"<b style='color: {score_color};'>影响: {score:+.1f}</b>"
+                f"</div>"
+                f"<div style='font-size: 9.5pt; font-weight: bold; color: #00F0FF; line-height: 1.3;'>{title}</div>"
+                f"<div style='font-size: 8.5pt; color: #9db2c6; margin-top: 4px;'>{summary[:65]}...</div>"
+            )
+
+            item = QListWidgetItem()
+            # 存储数据对象
+            item.setData(Qt.ItemDataRole.UserRole, news)
+            
+            # 使用 QLabel 承载富文本
+            lbl = QLabel(item_text)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("background: transparent; padding: 2px;")
+
+            item.setSizeHint(lbl.sizeHint())
+            self.lst_news.addItem(item)
+            self.lst_news.setItemWidget(item, lbl)
+
+    def _on_news_item_clicked(self, item: QListWidgetItem):
+        """单击列表项更新 Banner 提示"""
+        news = item.data(Qt.ItemDataRole.UserRole)
+        if news and isinstance(news, dict):
+            self.lbl_info.setText(f"📰 双击查看要闻正文: 【{news.get('tag', '')}】{news.get('title', '')}")
+
+    def _on_news_item_double_clicked(self, item: QListWidgetItem):
+        """双击列表项瞬间弹出 GlobalMarketNewsDetailDialog 查看深度正文与评估"""
+        news = item.data(Qt.ItemDataRole.UserRole)
+        if news and isinstance(news, dict):
+            dlg = GlobalMarketNewsDetailDialog(news, self)
+            dlg.exec()
+
+    def _toggle_news_panel(self):
+        """切换右侧资讯侧边栏的展开与折叠 (收起)"""
+        is_vis = self.news_panel.isVisible()
+        if is_vis:
+            self.news_panel.hide()
+            self.btn_news_toggle.setText(f"📰 资讯({len(self.news_items)}条): 展开")
+            self.btn_news_toggle.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a2e39;
+                    color: #d1d4dc;
+                    border: 1px solid #363c4e;
+                    border-radius: 4px;
+                    padding: 4px 10px;
+                    font-size: 9pt;
+                    min-width: 110px;
+                }
+                QPushButton:hover {
+                    background-color: #363c4e;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.news_panel.show()
+            self.btn_news_toggle.setText(f"📰 资讯({len(self.news_items)}条): 收起")
+            self.btn_news_toggle.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a2233;
+                    color: #00F0FF;
+                    border: 1px solid #00F0FF;
+                    border-radius: 4px;
+                    padding: 4px 10px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                    min-width: 110px;
+                }
+                QPushButton:hover {
+                    background-color: #2962ff;
+                    color: #ffffff;
+                }
+            """)
+        self._on_splitter_moved(0, 0)
+
 
 
     def _update_data_source_btn_style(self):
@@ -1006,7 +1415,7 @@ class GlobalMarketKLineDialog(QDialog):
                 self._update_info_banner(x_idx)
 
     def _restore_settings(self):
-        """恢复物理窗口几何尺寸、模式、BOLL状态与视区"""
+        """恢复物理窗口几何尺寸、模式、BOLL状态、视区、h_splitter 水平比例及资讯面板显隐"""
         try:
             cfg_path = get_conf_path("window_config.json", get_app_root())
             if os.path.exists(cfg_path):
@@ -1052,16 +1461,38 @@ class GlobalMarketKLineDialog(QDialog):
                 if zoom in ['recent_60', 'full_120']:
                     self.zoom_mode = zoom
                     self._update_zoom_btn_style()
+                # 恢复资讯侧边栏显隐状态
+                news_vis = data.get("ats_global_kline_news_visible")
+                if news_vis is False and hasattr(self, 'news_panel'):
+                    self.news_panel.hide()
+                    self.btn_news_toggle.setText(f"📰 资讯({len(self.news_items)}条): 展开")
+                    self.btn_news_toggle.setStyleSheet("""
+                        QPushButton {
+                            background-color: #2a2e39;
+                            color: #d1d4dc;
+                            border: 1px solid #363c4e;
+                            border-radius: 4px;
+                            padding: 4px 10px;
+                            font-size: 9pt;
+                            min-width: 110px;
+                        }
+                        QPushButton:hover {
+                            background-color: #363c4e;
+                            color: #ffffff;
+                        }
+                    """)
                 # 恢复 Splitter 分割比例 (延迟到 Layout 展示完成后)
                 splitter_sizes = data.get("ats_global_kline_splitter_sizes")
                 if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
-                    from PyQt6.QtCore import QTimer
                     QTimer.singleShot(60, lambda s=list(splitter_sizes): self.v_splitter.setSizes(s))
+                h_splitter_sizes = data.get("ats_global_kline_h_splitter_sizes")
+                if h_splitter_sizes and isinstance(h_splitter_sizes, list) and len(h_splitter_sizes) >= 2:
+                    QTimer.singleShot(70, lambda s=list(h_splitter_sizes): self.h_splitter.setSizes(s))
         except Exception:
             pass
 
     def _save_settings(self):
-        """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、数据源、Splitter 分割比例)"""
+        """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、数据源、Splitter 分割比例与资讯面板显隐)"""
         try:
             cfg_path = get_conf_path("window_config.json", get_app_root())
             with CONFIG_FILE_LOCK:
@@ -1077,10 +1508,16 @@ class GlobalMarketKLineDialog(QDialog):
                 data["ats_global_kline_dialog_boll"] = self.show_boll
                 data["ats_global_kline_dialog_zoom"] = self.zoom_mode
                 data["ats_global_kline_default_source"] = self.data_source
+                if hasattr(self, 'news_panel'):
+                    data["ats_global_kline_news_visible"] = self.news_panel.isVisible()
                 # 保存 Splitter 分割比例
                 sizes = self.v_splitter.sizes()
                 if sizes and any(s > 0 for s in sizes):
                     data["ats_global_kline_splitter_sizes"] = list(sizes)
+                if hasattr(self, 'h_splitter'):
+                    h_sizes = self.h_splitter.sizes()
+                    if h_sizes and any(s > 0 for s in h_sizes):
+                        data["ats_global_kline_h_splitter_sizes"] = list(h_sizes)
                 tmp_path = cfg_path + ".tmp_gkline"
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1093,7 +1530,6 @@ class GlobalMarketKLineDialog(QDialog):
         splitterMoved 在拖动过程中高频触发，防抖避免频繁写盘。
         """
         if not hasattr(self, '_splitter_save_timer'):
-            from PyQt6.QtCore import QTimer
             self._splitter_save_timer = QTimer(self)
             self._splitter_save_timer.setSingleShot(True)
             self._splitter_save_timer.timeout.connect(self._save_settings)
@@ -1103,3 +1539,64 @@ class GlobalMarketKLineDialog(QDialog):
         """关闭事件，自动持久化配置与尺寸"""
         self._save_settings()
         super().closeEvent(event)
+
+    def _update_proxy_btn_style(self):
+        """更新 🌐 代理: 开/关 按键高亮与显示文本"""
+        try:
+            from JSONData.global_market_data import get_proxy_config
+            cfg = get_proxy_config()
+            enabled = cfg.get("enabled", False)
+            p_url = cfg.get("proxy_url", "")
+            port = p_url.split(":")[-1] if ":" in p_url else ""
+
+            if hasattr(self, 'btn_proxy_toggle'):
+                if enabled:
+                    btn_txt = f"🌐 代理: 开({port})" if port else "🌐 代理: 开"
+                    self.btn_proxy_toggle.setText(btn_txt)
+                    self.btn_proxy_toggle.setStyleSheet("""
+                        QPushButton {
+                            background-color: #00E5FF;
+                            color: #000000;
+                            font-weight: bold;
+                            border: 1px solid #00E5FF;
+                            border-radius: 4px;
+                            padding: 4px 10px;
+                            font-size: 9pt;
+                        }
+                        QPushButton:hover {
+                            background-color: #33ebff;
+                        }
+                    """)
+                else:
+                    self.btn_proxy_toggle.setText("🌐 代理: 关")
+                    self.btn_proxy_toggle.setStyleSheet("""
+                        QPushButton {
+                            background-color: #1e222d;
+                            color: #787b86;
+                            border: 1px solid #363c4e;
+                            border-radius: 4px;
+                            padding: 4px 10px;
+                            font-size: 9pt;
+                            font-weight: bold;
+                        }
+                        QPushButton:hover {
+                            background-color: #2a2e39;
+                            color: #d1d4dc;
+                        }
+                    """)
+        except Exception as ex:
+            print(f"[GlobalMarketKLineDialog] 更新代理按键状态异常: {ex}")
+
+    def _open_proxy_dialog(self):
+        """调起网络代理设置弹窗"""
+        try:
+            from ats.ui.proxy_dialog import ProxySettingsDialog
+            dlg = ProxySettingsDialog(parent=self)
+            if dlg.exec() == 1:
+                self._update_proxy_btn_style()
+                # 触发后台刷新
+                self._load_data(force=True)
+        except Exception as ex:
+            print(f"[GlobalMarketKLineDialog] 调起代理弹窗异常: {ex}")
+
+
