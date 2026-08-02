@@ -128,11 +128,13 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
 
     # 新浪外盘/美股/大宗/外汇接口
     # 核心代号说明:
-    # hf_CHA50CFD: A50期货, gb_$COMP: 纳指, gb_$SPX: 标普500, fx_susdcnh: 离岸RMB, hf_CL: 原油, hf_GC: 黄金
+    # hf_CHA50CFD: A50期货, gb_$COMP: 纳指, gb_$SPX: 标普500, fx_susdcnh: 离岸RMB
+    # hf_CL: WTI原油期货, hf_CO: 布伦特原油期货, hf_GC: COMEX黄金期货
+    # fx_sxauusd: 现货黄金(纽约金连续参考), hf_SI: COMEX白银
     # gb_nvda: 英伟达, gb_aapl: 苹果, gb_msft: 微软, gb_googl: 谷歌, gb_amzn: 亚马逊, gb_meta: Meta, gb_tsla: 特斯拉
     # gb_mu: 美光(存储芯片), gb_tsm: 台积电(晶圆/半导体), gb_soxx: 费城半导体, gb_qqq: 纳指100
     symbols = (
-        'hf_CHA50CFD,gb_$COMP,gb_$SPX,fx_susdcnh,hf_CL,hf_GC,'
+        'hf_CHA50CFD,gb_$COMP,gb_$SPX,fx_susdcnh,hf_CL,hf_CO,hf_GC,fx_sxauusd,hf_SI,'
         'gb_nvda,gb_aapl,gb_msft,gb_googl,gb_amzn,gb_meta,gb_tsla,'
         'gb_mu,gb_tsm,gb_soxx,gb_qqq'
     )
@@ -213,23 +215,56 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
                 except Exception:
                     pass
 
-            # 5. 国际原油 (hf_CL)
-            elif 'hf_CL' in var_name and len(parts) >= 8:
+            # 5. WTI 原油期货 (hf_CL)
+            elif 'hf_CL' in var_name and 'hf_CL,' not in var_name.replace('hf_CL,', '') and len(parts) >= 8:
                 try:
                     price = float(parts[0])
                     prev_close = float(parts[7]) if float(parts[7]) > 0 else float(parts[3])
                     pct = round(((price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
-                    quotes['OIL'] = {'price': price, 'pct': pct, 'name': '美原油'}
+                    quotes['OIL'] = {'price': price, 'pct': pct, 'name': 'WTI原油'}
                 except Exception:
                     pass
 
-            # 6. 国际黄金 (hf_GC)
+            # 5b. 布伦特原油期货 (hf_CO) - 国际基准油价
+            elif 'hf_CO' in var_name and len(parts) >= 8:
+                try:
+                    price = float(parts[0])
+                    prev_close = float(parts[7]) if float(parts[7]) > 0 else float(parts[3])
+                    pct = round(((price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
+                    quotes['BRENT'] = {'price': price, 'pct': pct, 'name': '布伦特原油'}
+                    # 布伦特作为首选国际原油参考 (更贴近THS布伦特主连)
+                    if 'OIL' not in quotes or price > 0:
+                        quotes['OIL_BRENT'] = {'price': price, 'pct': pct, 'name': '布伦特原油'}
+                except Exception:
+                    pass
+
+            # 6. COMEX 黄金期货 (hf_GC)
             elif 'hf_GC' in var_name and len(parts) >= 8:
                 try:
                     price = float(parts[0])
                     prev_close = float(parts[7]) if float(parts[7]) > 0 else float(parts[3])
                     pct = round(((price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
-                    quotes['GOLD'] = {'price': price, 'pct': pct, 'name': '美黄金'}
+                    quotes['GOLD'] = {'price': price, 'pct': pct, 'name': 'COMEX纽约金'}
+                except Exception:
+                    pass
+
+            # 6b. 现货黄金 (fx_sxauusd) - 纽约金连续参考
+            elif 'fx_sxauusd' in var_name and len(parts) >= 4:
+                try:
+                    price = float(parts[1])
+                    prev_close = float(parts[3]) if float(parts[3]) > 0 else price
+                    pct = round(((price - prev_close) / prev_close) * 100.0, 2)
+                    quotes['XAUUSD'] = {'price': price, 'pct': pct, 'name': '现货黄金(纽约金连续)'}
+                except Exception:
+                    pass
+
+            # 6c. COMEX 白银 (hf_SI)
+            elif 'hf_SI' in var_name and len(parts) >= 8:
+                try:
+                    price = float(parts[0])
+                    prev_close = float(parts[7]) if float(parts[7]) > 0 else float(parts[3])
+                    pct = round(((price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
+                    quotes['SILVER'] = {'price': price, 'pct': pct, 'name': 'COMEX白银'}
                 except Exception:
                     pass
 
@@ -380,9 +415,31 @@ def get_sector_global_boost(sector_name: str) -> tuple:
             boost += max(-25.0, a50_pct * 18.0)
             tag = f"⚠️ A50走弱 ({a50_pct:+.1f}%)"
 
-    # 5. 资源 / 有色 / 石油 / 化工 -> 关联 美原油/黄金
-    resource_keywords = ['有色', '黄金', '采掘', '石油', '化工', '煤炭', '钢铁', '小金属']
-    if any(k in sec_clean for k in resource_keywords) and not tag:
+    # 5. 贵金属 / 黄金 (紫金矿业、山东黄金、赤峰黄金) -> 关联 COMEX 纽约金 (GOLD)
+    precious_keywords = ['贵金属', '黄金', '珠宝']
+    if any(k in sec_clean for k in precious_keywords) and not tag:
+        gold_pct = quotes.get('GOLD', {}).get('pct', 0.0)
+        if gold_pct >= 1.0:
+            boost += min(35.0, gold_pct * 16.0)
+            tag = f"🌐 纽约金拉升共振 ({gold_pct:+.1f}%)"
+        elif gold_pct <= -1.2:
+            boost += max(-25.0, gold_pct * 14.0)
+            tag = f"⚠️ 纽约金回调走弱 ({gold_pct:+.1f}%)"
+
+    # 6. 石油化工 / 石油 / 采掘 (中国海油、中国石油、中海油服) -> 关联 布伦特/美原油 (OIL)
+    oil_keywords = ['石油', '油气', '炼化', '油服', '采掘']
+    if any(k in sec_clean for k in oil_keywords) and not tag:
+        oil_pct = quotes.get('OIL', {}).get('pct', 0.0)
+        if oil_pct >= 1.0:
+            boost += min(35.0, oil_pct * 16.0)
+            tag = f"🌐 原油暴涨联动 ({oil_pct:+.1f}%)"
+        elif oil_pct <= -1.2:
+            boost += max(-25.0, oil_pct * 14.0)
+            tag = f"⚠️ 原油走弱回调 ({oil_pct:+.1f}%)"
+
+    # 7. 有色金属 / 工业金属 / 小金属 -> 综合大宗商品 (美原油/美黄金)
+    metal_keywords = ['有色', '金属', '化工', '煤炭', '钢铁', '小金属']
+    if any(k in sec_clean for k in metal_keywords) and not tag:
         gold_pct = quotes.get('GOLD', {}).get('pct', 0.0)
         oil_pct = quotes.get('OIL', {}).get('pct', 0.0)
         comm_pct = max(gold_pct, oil_pct)
@@ -420,7 +477,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
     """
     sym_upper = symbol.strip().upper()
     cache_path = get_kline_cache_file_path()
-    
+
     # 1. 尝试从磁盘持久化文件加载
     all_cache = {}
     if os.path.exists(cache_path):
@@ -433,8 +490,39 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
 
     existing_klines = all_cache.get(sym_upper, [])
 
-    # 如果有本地持久化缓存且不需要强制刷新
-    if not force_refresh and len(existing_klines) >= 20:
+    # 脏数据检测: 判断缓存是否是 mock 伪造数据
+    # 注意: 这里不调用 fetch_global_market_quotes，避免触发行情刷新循环
+    def _is_cache_stale(klines: list) -> bool:
+        if not klines or len(klines) < 10:
+            return True
+        try:
+            last_c = float(klines[-1].get('close', 0))
+        except (TypeError, ValueError):
+            return True
+        if last_c <= 0:
+            return True
+        # 整数广板象征性 mock 默认值 (100.0, 200.0)
+        if last_c == 100.0 or last_c == 200.0:
+            return True
+        # 检查近20条的价格区间: mock随机游走通常区间极小(<2%)
+        closes = []
+        for item in klines[-20:]:
+            try:
+                c = float(item.get('close', 0))
+                if c > 0:
+                    closes.append(c)
+            except (TypeError, ValueError):
+                pass
+        if len(closes) >= 5:
+            base = closes[0] if closes[0] != 0 else 1.0
+            price_range_pct = (max(closes) - min(closes)) / base * 100.0
+            if price_range_pct < 2.0:
+                print(f"[GlobalMarketData] {sym_upper} 缓存价格区间仅 {price_range_pct:.2f}%，疑似 mock 数据，强制刷新")
+                return True
+        return False
+
+    # 如果有本地持久化缓存且不需要强制刷新且缓存不是脏数据
+    if not force_refresh and not _is_cache_stale(existing_klines):
         print(f"[GlobalMarketData] 成功命中本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
         return existing_klines[-limit:]
 
@@ -489,6 +577,137 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         except Exception as e:
             print(f"[GlobalMarketData] Fetch US K-line error for {sym_upper}: {e}")
 
+    # 2b. Yahoo Finance 为商品期货首选数据源 (GC=F 纽约金连续 / BZ=F 布伦特主连 / CL=F WTI)
+    #     Yahoo Finance 提供连续合约数据，与 THS 显示的 @GC0Y / BRN0Y 主连对标
+    yahoo_symbol_map = {
+        'GOLD':   'GC=F',   # COMEX 黄金期货连续 (= THS 纽约金连续 @GC0Y)
+        'BRENT':  'BZ=F',   # ICE 布伦特原油连续 (= THS 布伦特主连 BRN0Y)
+        'OIL':    'CL=F',   # NYMEX WTI 原油连续
+        'SILVER': 'SI=F',   # COMEX 白银期货连续
+        'XAUUSD': 'GC=F',   # 现货黄金代理 (用 COMEX 黄金连续)
+    }
+    if sym_upper in yahoo_symbol_map:
+        yahoo_sym = yahoo_symbol_map[sym_upper]
+        # Yahoo Finance Chart API - 不需要 API Key
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}"
+               f"?range=7mo&interval=1d&includePrePost=false")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
+                raw = resp.read().decode('utf-8')
+            data = json.loads(raw)
+            chart_result = data.get('chart', {}).get('result', [])
+            if chart_result:
+                ch = chart_result[0]
+                timestamps = ch.get('timestamp', [])
+                q_data = ch.get('indicators', {}).get('quote', [{}])[0]
+                opens  = q_data.get('open',   [])
+                highs  = q_data.get('high',   [])
+                lows   = q_data.get('low',    [])
+                closes = q_data.get('close',  [])
+                volumes = q_data.get('volume', [])
+                parsed = []
+                prev_c = None
+                for i, ts in enumerate(timestamps):
+                    try:
+                        dt_obj = datetime.datetime.utcfromtimestamp(ts)
+                        d = dt_obj.strftime('%Y-%m-%d')
+                        c = float(closes[i]) if closes[i] is not None else None
+                        o = float(opens[i])  if opens[i]  is not None else c
+                        h = float(highs[i])  if highs[i]  is not None else c
+                        l = float(lows[i])   if lows[i]   is not None else c
+                        v = float(volumes[i] or 0)
+                        if c is None or c <= 0:
+                            continue
+                        pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                        prev_c = c
+                        parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                    except Exception:
+                        continue
+                if parsed and len(parsed) >= 20:
+                    all_cache[sym_upper] = parsed
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with open(cache_path, 'w', encoding='utf-8') as f:
+                            json.dump(all_cache, f, ensure_ascii=False, indent=2)
+                        print(f"[GlobalMarketData] Yahoo Finance 落盘 {sym_upper}({yahoo_sym}) K线 ({len(parsed)} 条) -> {cache_path}")
+                    except Exception as ex:
+                        print(f"[GlobalMarketData] 写入期货 K线缓存失败: {ex}")
+                    return parsed[-limit:]
+                else:
+                    print(f"[GlobalMarketData] Yahoo Finance {sym_upper} 数据不足 ({len(parsed) if parsed else 0} 条)，降级尝试新浪")
+        except Exception as e:
+            print(f"[GlobalMarketData] Yahoo Finance fetch error for {sym_upper}({yahoo_sym}): {e}")
+
+    # 2c. 新浪期货/外汇品种备用日K抓取 (Yahoo Finance 失败时作备用)
+    futures_symbol_map = {
+        'OIL':    'hf_CL',       # WTI 轻质原油
+        'BRENT':  'hf_CO',       # 布伦特原油期货 (ICE)
+        'GOLD':   'hf_GC',       # COMEX 黄金期货 (纽约金)
+        'XAUUSD': 'fx_sxauusd',  # 现货黄金 (纽约金连续参考)
+        'SILVER': 'hf_SI',       # COMEX 白银期货
+        'A50':    'hf_CHA50CFD', # 富时 A50 期货
+    }
+    if sym_upper in futures_symbol_map:
+        sina_code = futures_symbol_map[sym_upper]
+        # 新浪期货日K历史接口: hq.sinajs.cn 返回历史行情 JSON
+        url = f"https://stock.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}&_={int(time.time())}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://finance.sina.com.cn',
+        }
+        try:
+            import re
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                txt = resp.read().decode('gbk', errors='ignore')
+            json_match = re.search(r'\((.*)\)', txt, re.DOTALL)
+            if json_match:
+                raw_list = json.loads(json_match.group(1))
+                parsed = []
+                prev_c = None
+                for item in raw_list[-(limit + 10):]:
+                    try:
+                        # 新浪期货日K格式: [date, open, high, low, close, volume] 或 dict
+                        if isinstance(item, list) and len(item) >= 5:
+                            d, o, h, l, c = str(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4])
+                            v = float(item[5]) if len(item) > 5 else 0.0
+                        elif isinstance(item, dict):
+                            d = str(item.get('d', item.get('date', '')))
+                            o = float(item.get('o', item.get('open', 0)))
+                            h = float(item.get('h', item.get('high', 0)))
+                            l = float(item.get('l', item.get('low', 0)))
+                            c = float(item.get('c', item.get('close', 0)))
+                            v = float(item.get('v', item.get('volume', 0)))
+                        else:
+                            continue
+                        if c <= 0:
+                            continue
+                        pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                        prev_c = c
+                        parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                    except Exception:
+                        continue
+                if parsed and len(parsed) >= 10:
+                    all_cache[sym_upper] = parsed
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        with open(cache_path, 'w', encoding='utf-8') as f:
+                            json.dump(all_cache, f, ensure_ascii=False, indent=2)
+                        print(f"[GlobalMarketData] 成功落盘期货品种 {sym_upper}({sina_code}) K线 ({len(parsed)} 条) -> {cache_path}")
+                    except Exception as ex:
+                        print(f"[GlobalMarketData] 写入期货 K线缓存失败: {ex}")
+                    return parsed[-limit:]
+                else:
+                    print(f"[GlobalMarketData] 期货品种 {sym_upper} 抓取数据不足 ({len(parsed) if parsed else 0} 条)，降级用本地缓存")
+        except Exception as e:
+            print(f"[GlobalMarketData] Fetch futures K-line error for {sym_upper}({sina_code}): {e}")
+
     # 3. 如果是 A50, CNH, OIL, GOLD 或网络请求失败，使用本地已积累持久化 K 线或基于实时最新价进行自适应烘焙补充
     if existing_klines:
         print(f"[GlobalMarketData] 网络未响应，降级使用已有磁盘 K线 ({len(existing_klines)} 条): {cache_path}")
@@ -542,6 +761,75 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
     return built_klines[-limit:]
 
 
+def get_related_symbols(symbol: str) -> list:
+    """获取指定品种的关联走势品种列表，供 K 线弹窗叠加对比图使用
+
+    Returns:
+        list of dict: [
+            {'symbol': 'BRENT', 'name': '布伦特原油', 'color': '#FFA500', 'inverse': False},
+            ...
+        ]
+        inverse=True 表示该品种通常与主品种负相关（如美元 vs 黄金）
+    """
+    sym_upper = symbol.strip().upper()
+
+    # 关联走势映射表
+    related_map = {
+        # OIL (WTI原油) - 关联: 布伦特原油 (国际主连), COMEX黄金 (大宗联动)
+        'OIL': [
+            {'symbol': 'BRENT', 'name': '布伦特主连', 'color': '#FFA040', 'inverse': False},
+            {'symbol': 'GOLD',  'name': 'COMEX纽约金', 'color': '#FFD700', 'inverse': False},
+        ],
+        # BRENT (布伦特原油) - 关联: WTI原油, 黄金
+        'BRENT': [
+            {'symbol': 'OIL',  'name': 'WTI原油', 'color': '#FF8C00', 'inverse': False},
+            {'symbol': 'GOLD', 'name': 'COMEX纽约金', 'color': '#FFD700', 'inverse': False},
+        ],
+        # GOLD (COMEX纽约金) - 关联: 现货黄金(纽约金连续), 白银(联动), 美元(负相关)
+        'GOLD': [
+            {'symbol': 'XAUUSD', 'name': '现货黄金(纽约金连续)', 'color': '#FFE066', 'inverse': False},
+            {'symbol': 'SILVER', 'name': 'COMEX白银', 'color': '#C0C0C0', 'inverse': False},
+            {'symbol': 'OIL',   'name': '布伦特/WTI原油',  'color': '#FFA040', 'inverse': False},
+        ],
+        # XAUUSD (现货黄金) - 关联: COMEX黄金, 白银
+        'XAUUSD': [
+            {'symbol': 'GOLD',   'name': 'COMEX纽约金期货', 'color': '#FFD700', 'inverse': False},
+            {'symbol': 'SILVER', 'name': 'COMEX白银',       'color': '#C0C0C0', 'inverse': False},
+        ],
+        # SILVER (白银) - 关联: 黄金(正相关), 黄金/白银比值参考
+        'SILVER': [
+            {'symbol': 'GOLD',   'name': 'COMEX纽约金', 'color': '#FFD700', 'inverse': False},
+            {'symbol': 'XAUUSD', 'name': '现货黄金',    'color': '#FFE066', 'inverse': False},
+        ],
+        # A50 - 关联: 纳指QQQ (外资流向参考), USDCNH (汇率风险)
+        'A50': [
+            {'symbol': 'QQQ',    'name': '纳指100 ETF', 'color': '#00BFFF', 'inverse': False},
+            {'symbol': 'USDCNH', 'name': '离岸人民币',  'color': '#FF6B6B', 'inverse': True},
+        ],
+        # NVDA - 关联: 费城半导体(SOXX), QQQ
+        'NVDA': [
+            {'symbol': 'SOXX', 'name': '费城半导体ETF', 'color': '#7FFF00', 'inverse': False},
+            {'symbol': 'QQQ',  'name': '纳指100 ETF',   'color': '#00BFFF', 'inverse': False},
+        ],
+        # MU - 关联: NVDA, SOXX
+        'MU': [
+            {'symbol': 'NVDA', 'name': '英伟达/算力',   'color': '#76FF03', 'inverse': False},
+            {'symbol': 'SOXX', 'name': '费城半导体ETF', 'color': '#7FFF00', 'inverse': False},
+        ],
+        # QQQ - 关联: NVDA, SOXX
+        'QQQ': [
+            {'symbol': 'NVDA', 'name': '英伟达/算力',   'color': '#76FF03', 'inverse': False},
+            {'symbol': 'SOXX', 'name': '费城半导体ETF', 'color': '#7FFF00', 'inverse': False},
+        ],
+        # SOXX - 关联: NVDA, MU
+        'SOXX': [
+            {'symbol': 'NVDA', 'name': '英伟达/算力',  'color': '#76FF03', 'inverse': False},
+            {'symbol': 'MU',   'name': '美光/存储芯片', 'color': '#00FFAB', 'inverse': False},
+        ],
+    }
+    return related_map.get(sym_upper, [])
+
+
 if __name__ == '__main__':
     print("Testing Global Market Data Fetcher...")
     print(f"Market Active Window: {is_market_active_time()}")
@@ -550,7 +838,7 @@ if __name__ == '__main__':
     print(f"Quotes fetched count: {len(q)}")
     print(f"Quotes summary: {q}")
     print(f"Sentiment: {score} ({label})")
-    
+
     # 测试各热门板块提权
     for sec in ["存储芯片", "半导体", "传媒", "国防军工", "汽车整车", "有色金属"]:
         b, t = get_sector_global_boost(sec)
@@ -559,3 +847,14 @@ if __name__ == '__main__':
     # 测试外盘 K 线抓取
     k = fetch_global_kline_history('NVDA', limit=10)
     print(f"NVDA Recent 10 K-lines: {len(k)} rows, Last: {k[-1] if k else None}")
+
+    # 测试期货品种 K 线
+    for sym in ['GOLD', 'OIL', 'BRENT']:
+        kl = fetch_global_kline_history(sym, limit=5, force_refresh=True)
+        print(f"{sym} K-lines: {len(kl)} rows, Last: {kl[-1] if kl else None}")
+
+    # 测试关联品种
+    for sym in ['GOLD', 'OIL', 'NVDA']:
+        related = get_related_symbols(sym)
+        print(f"Related for {sym}: {[r['symbol'] for r in related]}")
+
