@@ -974,25 +974,34 @@ def set_blocked(seconds, reason='', url=''):
     g_sina_blocked['reason'] = reason
     g_sina_blocked['last_url'] = url
 
-    penalty = min(seconds * (1 + g_sina_blocked['count'] * 0.5), 600)
+    # 🚀 连续失败 2 次以上说明确被限制/断网，自动升级为 30~60 分钟延迟避让
+    if g_sina_blocked['count'] >= 2:
+        penalty = min(1800 * (g_sina_blocked['count'] - 1), 3600)
+        g_sina_blocked['cooling'] = True
+    else:
+        penalty = min(seconds * (1 + g_sina_blocked['count'] * 0.5), 600)
+
     g_sina_blocked['blocked_until'] = now + penalty
 
     log.warning(
         f"[SINA-BLOCK] count={g_sina_blocked['count']} "
-        f"penalty={penalty:.1f}s reason={reason} url={url}"
+        f"penalty={penalty:.1f}s ({penalty/60.0:.1f}min) reason={reason} url={url}"
     )
 
-def set_blocked_cooling(reason='', factor=1.23, cooling_sec=300):
+def set_blocked_cooling(reason='', factor=1.23, cooling_sec=1800):
     """
     触发冷却模式：
     - limit_time 按 factor 放大
     - 当天禁止递减
-    - 冷却时间 cooling_sec 秒
+    - 冷却时间默认 1800 秒 (30 分钟) 到 3600 秒 (60 分钟)
     """
     now = time.time()
-    g_sina_blocked['blocked_until'] = now + cooling_sec
+    cnt = g_sina_blocked.get('count', 0) + 1
+    actual_cooling = min(cooling_sec * cnt, 3600)
+
+    g_sina_blocked['blocked_until'] = now + actual_cooling
     g_sina_blocked['reason'] = reason
-    g_sina_blocked['count'] += 1
+    g_sina_blocked['count'] = cnt
     g_sina_blocked['cooling'] = True
 
     # 调整 limit_time
@@ -1000,7 +1009,7 @@ def set_blocked_cooling(reason='', factor=1.23, cooling_sec=300):
         new_limit = int(cct.sina_dd_limit_time * factor)
         cct.sina_dd_limit_time = new_limit
         log.warning(f"[SINA-COOLING] Triggered due to {reason}, "
-                    f"limit_time increased: {new_limit}s, cooling for {cooling_sec}s")
+                    f"limit_time increased: {new_limit}s, cooling for {actual_cooling/60.0:.1f}min")
 
 
 # =========================
@@ -1361,7 +1370,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         # [DYNAMIC INTEGRITY CHECK] 相比系统已知股票库(stock_codes.conf)，动态检测 HDF 是否缺失过多股票
         try:
             from JSONData import sina_data as sd
-            conf_codes_len = len(sd.StockCode().get_stock_codes(False))
+            conf_codes_len = len(sd.get_global_stock_code().get_stock_codes(False))
         except Exception:
             conf_codes_len = 0
 
@@ -1370,10 +1379,16 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
 
         if conf_codes_len > 1000 and len(h5) < conf_codes_len - 50 and not is_cooling:
             log.warning(f"[HDF-INCOMPLETE-AUTOFIX] 磁盘 HDF 缓存 ({len(h5)} 行) 相比配置库 ({conf_codes_len} 只) 缺失 {conf_codes_len - len(h5)} 只股票, 忽略旧缓存强制在线重新抓取并修正 HDF...")
-        elif is_cooling:
-            remaining_min = (g_sina_blocked.get('blocked_until', 0) - now_ts) / 60.0
-            log.warning(f"[SINA-COOLING-HOLD] 当前处于 API 限制/网络异常冷却避让期中 (剩余 {remaining_min:.1f} 分钟), 容忍并继续使用现有 HDF 缓存")
-            force_cache = True
+        else:
+            if is_cooling:
+                remaining_min = (g_sina_blocked.get('blocked_until', 0) - now_ts) / 60.0
+                log.warning(f"[SINA-COOLING-HOLD] 当前处于 API 限制/网络异常冷却避让期中 (剩余 {remaining_min:.1f} 分钟), 容忍并继续使用现有 HDF 缓存")
+                force_cache = True
+
+            # 非交易时间或盘后，且 HDF 缓存数据量完备，直接使用缓存避开 50s 在线网络抓取
+            if not cct.get_work_time() and len(h5) >= max(1000, conf_codes_len - 50):
+                force_cache = True
+
             o_time = h5[h5.timel != 0].timel
             if len(o_time) > 0:
                 l_time = time.time() - o_time.iloc[0]
@@ -1508,6 +1523,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         if 'percent' in df.columns:
             df['percent'] = df['percent'].astype(float).round(2)
         df = df.drop_duplicates('code').set_index('code')
+        df['timel'] = int(time.time())  # 🚀 [FIX] 刷新更新 timel 时间戳为当前最新时刻，确保写入 HDF 后后续读取时 l_time < limit_time 精准命中 cache
 
         if df is not None and len(df) > 0:
             if market=='all':
