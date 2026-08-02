@@ -140,6 +140,7 @@ class StockCode:
     stock_code_path: str
     exceptCount: Optional[int]
     stock_codes: Optional[List[str]]
+    _has_updated_in_session: bool = False  # 🛡️ 进程会话防护：确保单次运行内底层数据仅查询更新 1 次
 
     def __init__(self) -> None:
         self.start_t = time.time()
@@ -154,12 +155,21 @@ class StockCode:
         self.stock_code_path = self.get_stock_code_path_func()
         self.exceptCount = cct.GlobalValues().getkey('exceptCount')
         log.info(f'stock_code_path: {os.path.getsize(self.stock_code_path)}')
-        # file_days = file_modified_days_ago(self.stock_code_path)
-        if  self.exceptCount is None and (not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500):
-            stock_codes = self.get_stock_codes(True)
-            log.info(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 5:
-            stock_codes = self.get_stock_codes(True)
+        
+        file_days = cct.creation_date_duration(self.stock_code_path) if os.path.exists(self.stock_code_path) else 999
+        if self.exceptCount is None and (not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500):
+            if not StockCode._has_updated_in_session:
+                StockCode._has_updated_in_session = True
+                stock_codes = self.get_stock_codes(True)
+                log.info(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
+            else:
+                stock_codes = self.get_stock_codes(False)
+        elif self.exceptCount is None and file_days > 5:
+            if not StockCode._has_updated_in_session:
+                StockCode._has_updated_in_session = True
+                stock_codes = self.get_stock_codes(True)
+            else:
+                stock_codes = self.get_stock_codes(False)
         log.info(("date_duration days:%s %s read stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(self.get_stock_codes()))))
 
         self.stock_codes = None
@@ -211,6 +221,7 @@ class StockCode:
         try:
             with open(self.stock_code_path, 'w') as f:
                 f.write(json.dumps(dict(stock=stock_codes)))
+            os.utime(self.stock_code_path, None)  # 🚀 [FIX] 物理刷新物理文件的最后修改时间，确保 creation_date_duration 归零为 0 天
             self.stock_codes = stock_codes
         except Exception as e:
             log.error(f"Failed to write stock codes to {self.stock_code_path}: {e}")
