@@ -23,7 +23,7 @@ class GlobalMarketDialog(QDialog):
     """🌐 ATS 全球外盘与热点情绪独立看板窗口"""
 
     def __init__(self, parent_window=None):
-        super().__init__(parent_window)
+        super().__init__(None)  # ⚡ 传入 None 使其成为完全独立的顶级 Window 窗口，不作为主窗口的子窗口受限
         self.parent_window = parent_window
         self.setWindowTitle("🌐 全球外盘与热点情绪看板")
         self.setWindowFlags(
@@ -33,13 +33,8 @@ class GlobalMarketDialog(QDialog):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         
-        # 极窄自适应风格暗黑 CSS
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #12151c;
-                color: #e2e2e5;
-            }
-        """)
+        from ats.ui.styles import apply_dark_theme
+        apply_dark_theme(self)
 
         self._init_ui()
         self._restore_dialog_geometry()
@@ -68,14 +63,11 @@ class GlobalMarketDialog(QDialog):
     def _restore_dialog_geometry(self):
         """恢复窗口物理尺寸与位置"""
         try:
-            cfg_path = self._get_config_path()
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                geom_hex = data.get("ats_global_market_dialog_geometry")
-                if geom_hex:
-                    self.restoreGeometry(QByteArray.fromHex(geom_hex.encode('utf-8')))
-                    return
+            from ats.ui.styles import load_config_node
+            geom_hex = load_config_node("ats_global_market_dialog_geometry", None)
+            if geom_hex:
+                self.restoreGeometry(QByteArray.fromHex(geom_hex.encode('utf-8')))
+                return
         except Exception as e:
             print(f"[GlobalMarketDialog] Restore geometry error: {e}")
 
@@ -85,18 +77,9 @@ class GlobalMarketDialog(QDialog):
     def _save_dialog_geometry(self):
         """物理持久化落盘窗口尺寸与位置"""
         try:
-            cfg_path = self._get_config_path()
-            data = {}
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
-
-            data["ats_global_market_dialog_geometry"] = self.saveGeometry().toHex().data().decode('utf-8')
-            with open(cfg_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
+            from ats.ui.styles import save_config_node
+            geom_hex = self.saveGeometry().toHex().data().decode('utf-8')
+            save_config_node("ats_global_market_dialog_geometry", geom_hex)
         except Exception as e:
             print(f"[GlobalMarketDialog] Save geometry error: {e}")
 

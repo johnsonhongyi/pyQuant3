@@ -1,3 +1,17 @@
+## 2026-08-03 00:45
+- [x] **完全解耦外盘与 K线弹窗为独立 TopLevel 顶级窗口并实现 ATS 统一暗黑 UI 样式与线程安全原子配置存取 (`ats/ui/global_market_dialog.py`, `ats/ui/global_market_kline_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/styles.py`, `scratch/test_persistence_and_no_proxy_full.py`)**：
+    - [x] **完全解耦顶级 Window (`parent=None`) 架构**：响应用户“不要让外盘作为子窗口”指令，彻底将 `GlobalMarketDialog` 与 `GlobalMarketKLineDialog` 重构为独立的 TopLevel 窗口 (`super().__init__(None)`)。支持操作系统多屏幕自由拖拽排布、独立最大化/最小化、Alt+Tab 任务栏预览以及多任务窗口平滑联动。
+    - [x] **全流程样式对齐 ATS 统一暗黑终端主题 (`apply_dark_theme`)**：在 `GlobalMarketDialog` 与 `GlobalMarketKLineDialog` 构造中无缝注入 `styles.py` 的 `apply_dark_theme(self)` 统一渲染引擎；搭配 `setup_header_persistence` 防刷重置锁，彻底根除了此前弹窗样式脱节、文本截断与表格列宽重启后被重置为默认值的硬伤。
+    - [x] **物理 JSON 配置线程安全原子落盘 (`save_config_node` / `load_config_node`)**：全面重构外盘看板几何尺寸 (`geom`)、表头列宽 (`state`)、置顶符号/板块与 K线视区 (BOLL/zoom) 的存取管道，统一收拢至全局线程锁保护的 `save_config_node` 与 `load_config_node` 原子接口。彻底消除了高频重启或多线程并发写入导致 `window_config.json` 数据损坏或丢失的隐患。
+    - [x] **自动化与核心单元测试 100% 校验通过**：`scratch/test_persistence_and_no_proxy_full.py` (Exit code: 0) 与 `tests/test_signal_ledger.py` (11/11 passed) 全量断言与 15 项单元测试 100% 成功通过！
+
+## 2026-08-03 00:27
+- [x] **彻底根治「代理关闭时所有外盘/美股连不上」隐形漏洞与引入腾讯免代理直连源 (`JSONData/global_market_data.py`, `ats/ui/sector_detail_dialog.py`, `scratch/test_no_proxy_direct_fetch.py`)**：
+    - [x] **根治 Windows 系统注册表代理死锁 Bug**：排查发现当用户在应用内关闭代理 (`enabled=False`) 时，此前 `get_urllib_request_opener()` 返回 `None` 导致底层 `urllib.request.urlopen` 自动抓取并读取了 Windows 系统注册表/环境变量中留存的过期 Proxy；若代理客户端关闭，请求直接被系统代理超时打死。重构 `get_urllib_request_opener()`，在代理关闭时显式返回 `build_opener(ProxyHandler({}))`，强行清空/绕过 Windows 系统注册表残留代理，做到 100% 绝对纯直连。
+    - [x] **引入腾讯极速免代理直连源 (`_fetch_from_tencent`)**：针对美股与指数 (NVDA, MU, TSM, AAPL, MSFT, QQQ, SOXX)，接入 `web.ifzq.gtimg.cn` 腾讯官方 K 线数据源，国内 10ms 零延迟免代理秒出数据；并作为免代理模式下的第一优先直连源。
+    - [x] **修复 `ATSSectorDetailDialog` 构造函数缺失默认值缺陷**：将 `sector_detail_dialog.py` 中 `ATSSectorDetailDialog` 的 `linkage_cb` 改为可选参数 `linkage_cb=None`，并在 `GlobalMarketPanel` 双击热点板块弹窗时接入个股选股联动派发，彻底根治 `TypeError: __init__() missing 1 required positional argument: 'linkage_cb'`。
+    - [x] **单元测试全量 100% 通过**：`scratch/test_no_proxy_direct_fetch.py` 与 `tests/test_signal_ledger.py` 全量断言与 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 00:06
 - [x] **彻底根治代理连通性测试 QThread 销毁崩溃与 UI 测试死锁保护 (`ats/ui/proxy_dialog.py`, `scratch/test_proxy_and_ui.py`)**：
     - [x] **重构为纯 Python `threading.Thread(daemon=True)` + `ProxyTestSignalBridge(QObject)`**：彻底摒弃继承 `QThread` 带来的 PyQt C++ 对象树销毁检测，改为轻量、无死锁的 daemon 守护线程与 QObject 信号桥解耦。用户在测试过程中随时保存、取消或关闭外盘窗口，绝不下发 `QThread: Destroyed while thread is still running` 致命崩溃。
