@@ -28,14 +28,15 @@ class KLineWorkerThread(QThread):
     """后台非阻塞异步 K 线抓取线程，彻底解决 UI 界面调起卡顿问题"""
     finished_signal = pyqtSignal(list, str)  # klines, error_msg
 
-    def __init__(self, symbol: str, force_refresh: bool = False):
+    def __init__(self, symbol: str, force_refresh: bool = False, data_source: str = 'yahoo'):
         super().__init__()
         self.symbol = symbol
         self.force_refresh = force_refresh
+        self.data_source = data_source
 
     def run(self):
         try:
-            klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=self.force_refresh)
+            klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=self.force_refresh, data_source=self.data_source)
             self.finished_signal.emit(klines or [], "")
         except Exception as e:
             self.finished_signal.emit([], str(e))
@@ -45,13 +46,14 @@ class RelatedKLineWorkerThread(QThread):
     """后台并行抓取关联品种 K 线数据，不阻塞主 K 线渲染"""
     finished_signal = pyqtSignal(str, list)  # symbol, klines
 
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, data_source: str = 'yahoo'):
         super().__init__()
         self.symbol = symbol
+        self.data_source = data_source
 
     def run(self):
         try:
-            klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=False)
+            klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=False, data_source=self.data_source)
             self.finished_signal.emit(self.symbol, klines or [])
         except Exception as e:
             self.finished_signal.emit(self.symbol, [])
@@ -238,6 +240,11 @@ class GlobalMarketKLineDialog(QDialog):
             }
         """)
 
+        self.chart_mode = "candlestick"
+        self.show_boll = True
+        self.zoom_mode = "recent_60"
+        self.data_source = "yahoo"
+
         self._init_ui()
         self._restore_settings()
         self._load_fast_cached_or_async()
@@ -287,6 +294,18 @@ class GlobalMarketKLineDialog(QDialog):
         self._refresh_related_info_label()  # 先展示缓存实时报价
 
         header_layout.addStretch(1)
+
+        # 数据源选择按钮组
+        self.btn_src_yahoo = QPushButton("🇺🇸 Yahoo(连续)")
+        self.btn_src_yahoo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_src_yahoo.clicked.connect(lambda: self._switch_data_source("yahoo"))
+        header_layout.addWidget(self.btn_src_yahoo)
+
+        self.btn_src_sina = QPushButton("📡 新浪财经")
+        self.btn_src_sina.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_src_sina.clicked.connect(lambda: self._switch_data_source("sina"))
+        header_layout.addWidget(self.btn_src_sina)
+        self._update_data_source_btn_style()
 
         # BOLL 线开关按键
         self.btn_boll_toggle = QPushButton("📈 BOLL(20,2): 开")
@@ -479,6 +498,54 @@ class GlobalMarketKLineDialog(QDialog):
         self.v_splitter.splitterMoved.connect(self._on_splitter_moved)
 
 
+    def _update_data_source_btn_style(self):
+        """根据当前的 data_source 动态更新数据源按键高亮样式"""
+        src = (self.data_source or 'yahoo').lower()
+        active_style = """
+            QPushButton {
+                background-color: #2962ff;
+                color: #ffffff;
+                border: 1px solid #00F0FF;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-width: 90px;
+            }
+        """
+        normal_style = """
+            QPushButton {
+                background-color: #1e222d;
+                color: #787b86;
+                border: 1px solid #363c4e;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 9pt;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #2a2e39;
+                color: #d1d4dc;
+            }
+        """
+        if src == 'yahoo':
+            self.btn_src_yahoo.setStyleSheet(active_style)
+            self.btn_src_sina.setStyleSheet(normal_style)
+        else:
+            self.btn_src_yahoo.setStyleSheet(normal_style)
+            self.btn_src_sina.setStyleSheet(active_style)
+
+    def _switch_data_source(self, new_source: str):
+        """用户点击数据源按键，实时切换数据源并持久化"""
+        if self.data_source == new_source and self.klines:
+            return
+        self.data_source = new_source
+        self._update_data_source_btn_style()
+        self._save_settings()
+        self.klines = []
+        self.lbl_info.setText(f"🌐 已切换至数据源: {'🇺🇸 Yahoo Finance (权威连续)' if new_source == 'yahoo' else '📡 新浪财经'}，正在刷新...")
+        self._load_fast_cached_or_async()
+
     def _toggle_boll(self):
         """切换 BOLL 布林线显示状态"""
         self.show_boll = not self.show_boll
@@ -524,8 +591,9 @@ class GlobalMarketKLineDialog(QDialog):
 
     def _load_fast_cached_or_async(self):
         """0 毫秒极速读取本地 JSON 缓存；若无缓存则触发后台异步线程"""
-        cache_path = get_kline_cache_file_path()
-        print(f"[GlobalMarketKLineDialog] 检查外盘 K线物理持久化文件路径: {cache_path}")
+        src_key = (self.data_source or 'yahoo').lower()
+        cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
+        print(f"[GlobalMarketKLineDialog] 检查 [{src_key}] 外盘 K线物理持久化文件路径: {cache_path}")
         cached_klines = []
         if os.path.exists(cache_path):
             try:
@@ -538,12 +606,18 @@ class GlobalMarketKLineDialog(QDialog):
 
         if cached_klines and len(cached_klines) >= 5:
             # 本地有缓存，瞬间秒载渲染，无任何卡顿！
-            print(f"[GlobalMarketKLineDialog] 0ms 瞬间秒载本地 K线缓存 ({len(cached_klines)} 条) -> {self.symbol}")
+            print(f"[GlobalMarketKLineDialog] 0ms 瞬间秒载 [{src_key}] 本地 K线缓存 ({len(cached_klines)} 条) -> {self.symbol}")
             self.klines = cached_klines
             self._draw_chart()
             self._apply_zoom_mode()
             # 异步加载关联品种 K 线
             self._trigger_related_loads()
+
+            # 非外盘交易窗口 (如周末/休市)，已有缓存直接锁定，绝对不触发异步网络请求！
+            from JSONData.global_market_data import is_market_active_time
+            if not is_market_active_time():
+                print(f"[GlobalMarketKLineDialog] 当前处于外盘休市/非交易时间，已命中本地物理 JSON 缓存，停止网络抓取 -> {self.symbol}")
+                return
 
         # 后台异步抓取最新或静默刷新
         self._trigger_async_load(force_refresh=False if (cached_klines and len(cached_klines) >= 5) else True)
@@ -553,9 +627,9 @@ class GlobalMarketKLineDialog(QDialog):
             return
 
         if not self.klines:
-            self.lbl_info.setText("🌐 正在后台异步加载最新外盘 K 线数据...")
+            self.lbl_info.setText(f"🌐 正在后台异步加载 [{self.data_source}] 最新外盘 K 线数据...")
 
-        self.worker = KLineWorkerThread(self.symbol, force_refresh=force_refresh)
+        self.worker = KLineWorkerThread(self.symbol, force_refresh=force_refresh, data_source=self.data_source)
         self.worker.finished_signal.connect(self._on_worker_finished)
         self.worker.start()
 
@@ -970,6 +1044,10 @@ class GlobalMarketKLineDialog(QDialog):
                                 color: #d1d4dc;
                             }
                         """)
+                src = data.get("ats_global_kline_default_source")
+                if src in ['yahoo', 'sina']:
+                    self.data_source = src
+                    self._update_data_source_btn_style()
                 zoom = data.get("ats_global_kline_dialog_zoom")
                 if zoom in ['recent_60', 'full_120']:
                     self.zoom_mode = zoom
@@ -983,7 +1061,7 @@ class GlobalMarketKLineDialog(QDialog):
             pass
 
     def _save_settings(self):
-        """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、Splitter 分割比例)"""
+        """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、数据源、Splitter 分割比例)"""
         try:
             cfg_path = get_conf_path("window_config.json", get_app_root())
             with CONFIG_FILE_LOCK:
@@ -998,6 +1076,7 @@ class GlobalMarketKLineDialog(QDialog):
                 data["ats_global_kline_dialog_mode"] = self.chart_mode
                 data["ats_global_kline_dialog_boll"] = self.show_boll
                 data["ats_global_kline_dialog_zoom"] = self.zoom_mode
+                data["ats_global_kline_default_source"] = self.data_source
                 # 保存 Splitter 分割比例
                 sizes = self.v_splitter.sizes()
                 if sizes and any(s > 0 for s in sizes):
