@@ -3182,10 +3182,10 @@ class ATSMainWindow(QMainWindow):
             self.session_snapshot.save_snapshot(self.signal_ledger)
             self.session_snapshot.cleanup_old_snapshots()
 
-        # 6.5 收盘盘后自动生成当日总结快照 (15:00 之后)
+        # 6.5 收盘盘后自动生成当日总结快照 (必须是真实交易日 且 15:00 之后)
         import datetime
         now_dt = datetime.datetime.now()
-        if now_dt.hour >= 15:
+        if cct.get_trade_date_status() and now_dt.hour >= 15:
             self.session_snapshot.save_daily_summary(self.signal_ledger)
 
         # 6.6 清理不再追踪的旧股票量能画像 (防 24x7 内存累积)

@@ -227,7 +227,7 @@ class TestSignalLedger(unittest.TestCase):
         # 1. 测试 SessionSnapshot 日终总结生成 (不触发 today_str NameError)
         snapshot = SessionSnapshot()
         self.ledger.record_signal('920199', '倍益康', 29.36, 15.4, 3.5)
-        saved = snapshot.save_daily_summary(self.ledger)
+        saved = snapshot.save_daily_summary(self.ledger, force=True)
         self.assertTrue(saved)
         
         # 2. 测试重点关注股票提权与防丢
