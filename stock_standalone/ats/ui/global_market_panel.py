@@ -153,8 +153,22 @@ class GlobalMarketPanel(QWidget):
             config_key="ats_global_quotes_table_state",
             default_widths=[110, 80, 100, 90, 130, 180]
         )
+        self.tbl_quotes.itemDoubleClicked.connect(self._on_quotes_table_double_clicked)
         left_layout.addWidget(self.tbl_quotes)
         self.h_splitter.addWidget(left_widget)
+
+        # 4 大卡片点击直接查看核心资产 K 线走势
+        self.card_m7['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_m7['frame'].mousePressEvent = lambda e: self._open_kline_dialog('NVDA', '英伟达/算力')
+        
+        self.card_semi['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_semi['frame'].mousePressEvent = lambda e: self._open_kline_dialog('MU', '美光/存储')
+
+        self.card_macro['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_macro['frame'].mousePressEvent = lambda e: self._open_kline_dialog('A50', '富时A50')
+
+        self.card_commodity['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_commodity['frame'].mousePressEvent = lambda e: self._open_kline_dialog('OIL', '美原油')
 
         # Right Widget: 板块 Boost 提权看板
         right_widget = QWidget()
@@ -478,6 +492,25 @@ class GlobalMarketPanel(QWidget):
                 self.tbl_boosts.setItem(row_idx, col_idx, item)
 
         self.tbl_boosts.setSortingEnabled(True)
+
+    def _on_quotes_table_double_clicked(self, item):
+        """双击外盘明细表格行，直接调起该资产 120 日 K 线图"""
+        row = item.row()
+        sym_item = self.tbl_quotes.item(row, 1)
+        name_item = self.tbl_quotes.item(row, 0)
+        if sym_item and name_item:
+            symbol = sym_item.text().strip()
+            name = name_item.text().strip()
+            self._open_kline_dialog(symbol, name)
+
+    def _open_kline_dialog(self, symbol: str, name: str = ""):
+        """打开外盘个股 / 指数 K 线走势图"""
+        try:
+            from ats.ui.global_market_kline_dialog import GlobalMarketKLineDialog
+            dlg = GlobalMarketKLineDialog(symbol, name, parent=self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Open KLine dialog error: {e}")
 
     def _on_boost_table_double_clicked(self, item):
         if not item:

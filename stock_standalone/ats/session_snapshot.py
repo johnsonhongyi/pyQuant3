@@ -37,6 +37,7 @@ class SessionSnapshot:
         
         self._last_snapshot_ts = 0
         self._last_cleanup_date = None
+        self._last_summary_date = None
     
     def should_snapshot(self):
         """判断是否到了快照时间"""
@@ -83,15 +84,31 @@ class SessionSnapshot:
             print(f"[SessionSnapshot] Error saving snapshot: {e}")
             return False
     
-    def save_daily_summary(self, signal_ledger):
+    def save_daily_summary(self, signal_ledger, force=False):
         """生成当日信号总结报告 (收盘后调用，自动覆盖更新为最新终盘总结)
         
         Args:
             signal_ledger: SignalLedger 实例
+            force: 是否强制覆盖重新生成
         """
         try:
+            # 非交易日拒绝触发（除非 force 强行指定）
+            if not force:
+                try:
+                    import JohnsonUtil.commonTips as cct
+                    if not cct.get_trade_date_status():
+                        return False
+                except Exception:
+                    pass
+
             now = datetime.datetime.now()
-            filename = f"daily_summary_{now.strftime('%Y%m%d')}.json"
+            today_str = now.strftime('%Y%m%d')
+            
+            # 单日防重复无谓写磁盘与刷屏 Log
+            if not force and getattr(self, '_last_summary_date', None) == today_str:
+                return True
+
+            filename = f"daily_summary_{today_str}.json"
             filepath = os.path.join(self.log_dir, filename)
             
             # 按时段分组统计
@@ -131,7 +148,6 @@ class SessionSnapshot:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(summary, f, ensure_ascii=False, indent=2)
             
-            today_str = now.strftime('%Y%m%d')
             self._last_summary_date = today_str
             print(f"[SessionSnapshot] Daily summary saved: {filepath}")
             return True

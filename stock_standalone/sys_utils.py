@@ -231,6 +231,11 @@ RESOURCE_MAP = {
         "src": "config/global_market_cache.json",
         "dst": "config/global_market_cache.json",
         "delay_release": True
+    },
+    "global_market_klines.json": {
+        "src": "config/global_market_klines.json",
+        "dst": "config/global_market_klines.json",
+        "delay_release": True
     }
 }
 
