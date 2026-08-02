@@ -19,6 +19,14 @@ from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from JSONData.global_market_data import get_proxy_config, save_proxy_config
 
 
+class GlobalProxyEventBridge(QObject):
+    """全局代理配置变更广播信号桥，实现主窗口与所有子窗口代理状态秒级同步"""
+    proxy_changed_signal = pyqtSignal(dict)
+
+
+GLOBAL_PROXY_EVENT_BRIDGE = GlobalProxyEventBridge()
+
+
 class ProxyTestSignalBridge(QObject):
     """用于异步子线程安全向 Qt 主 UI 线程派发结果信号的桥接器"""
     result_signal = pyqtSignal(bool, float, str)
@@ -280,6 +288,8 @@ class ProxySettingsDialog(QDialog):
 
         ok = save_proxy_config(enabled, proxy_url)
         if ok:
+            cfg = get_proxy_config()
+            GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal.emit(cfg)
             self.accept()
         else:
             QMessageBox.critical(self, "保存错误", "❌ 代理配置保存失败，请检查文件权限")

@@ -11,7 +11,7 @@ import json
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter,
-    QListWidget, QListWidgetItem, QTextEdit, QWidget
+    QListWidget, QListWidgetItem, QTextEdit, QWidget, QMenu
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QByteArray, QTimer
 from PyQt6.QtGui import QColor, QPicture, QPainter, QPen, QBrush, QFont, QCursor
@@ -20,7 +20,8 @@ import pyqtgraph as pg
 from JSONData.global_market_data import (
     fetch_global_kline_history, get_kline_cache_file_path,
     get_related_symbols, fetch_global_market_quotes,
-    fetch_symbol_financial_news, get_proxy_info_str
+    fetch_symbol_financial_news, get_proxy_info_str,
+    delete_news_item_by_id, save_news_hotlist_json
 )
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
@@ -443,6 +444,14 @@ class GlobalMarketKLineDialog(QDialog):
 
         self._init_ui()
         self._restore_settings()
+
+        # 连接全局代理变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
+        try:
+            from ats.ui.proxy_dialog import GLOBAL_PROXY_EVENT_BRIDGE
+            GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal.connect(self._on_global_proxy_changed)
+        except Exception as ex:
+            print(f"[GlobalMarketKLineDialog] 绑定全局代理信号失败: {ex}")
+
         self._load_fast_cached_or_async()
 
     def _init_ui(self):
@@ -744,7 +753,7 @@ class GlobalMarketKLineDialog(QDialog):
         layout.addWidget(self.h_splitter)
 
     def _init_news_panel(self):
-        """构建右侧关联财经资讯/要闻侧边栏面板"""
+        """构建右侧权威自选财经热榜侧边栏面板 (支持自动英译中、物理 JSON 持久化与右键删除)"""
         self.news_panel = QFrame()
         self.news_panel.setStyleSheet("""
             QFrame {
@@ -759,12 +768,31 @@ class GlobalMarketKLineDialog(QDialog):
 
         # Header 标题栏
         header_box = QHBoxLayout()
-        lbl_news_hdr = QLabel(f"📰 股票关联财经资讯 ({len(self.news_items)})")
-        lbl_news_hdr.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 10.5pt;")
-        header_box.addWidget(lbl_news_hdr)
+        self.lbl_news_hdr = QLabel(f"🔥 权威自选热榜 ({len(self.news_items)}/20)")
+        self.lbl_news_hdr.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 10.0pt;")
+        header_box.addWidget(self.lbl_news_hdr)
         header_box.addStretch(1)
 
-        lbl_tip = QLabel("双击条目看详情")
+        btn_refresh = QPushButton("🔄 刷新")
+        btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_refresh.setStyleSheet("""
+            QPushButton {
+                background-color: #1e222d;
+                color: #00F0FF;
+                border: 1px solid #2962ff;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2962ff;
+                color: #ffffff;
+            }
+        """)
+        btn_refresh.clicked.connect(self._on_refresh_news_clicked)
+        header_box.addWidget(btn_refresh)
+
+        lbl_tip = QLabel("右键可删除")
         lbl_tip.setStyleSheet("color: #787b86; font-size: 8.5pt;")
         header_box.addWidget(lbl_tip)
 
@@ -800,41 +828,48 @@ class GlobalMarketKLineDialog(QDialog):
         self.lst_news.itemDoubleClicked.connect(self._on_news_item_double_clicked)
         self.lst_news.itemClicked.connect(self._on_news_item_clicked)
 
+        # 启用右键上下文菜单
+        self.lst_news.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.lst_news.customContextMenuRequested.connect(self._show_news_context_menu)
+
         self._populate_news_list()
         news_layout.addWidget(self.lst_news)
 
     def _populate_news_list(self):
-        """填充资讯列表条目"""
+        """填充资讯列表条目 (限制显示不超过 20 条)"""
         self.lst_news.clear()
-        if not self.news_items:
-            item = QListWidgetItem("暂无相关财经资讯")
+
+        # 确保显示限制不超过 20 条
+        display_items = self.news_items[:20] if self.news_items else []
+        self.lbl_news_hdr.setText(f"🔥 权威自选热榜 ({len(display_items)}/20)")
+
+        if not display_items:
+            item = QListWidgetItem("暂无相关权威财经热榜")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.lst_news.addItem(item)
             return
 
-        for news in self.news_items:
+        for news in display_items:
             title = news.get('title', '')
             dt = news.get('datetime', '')
-            tag = news.get('tag', '🌐 资讯')
+            tag = news.get('tag', '🔥 热榜')
             score = float(news.get('impact_score', 0.0))
             score_color = "#F6465D" if score >= 0 else "#089981"
             summary = news.get('summary', '')
 
-            # 简易多行格式化 HTML
+            # 简易多行格式化 HTML (突出自动翻译后的中文字样)
             item_text = (
                 f"<div style='font-size: 8.5pt; color: #787b86; margin-bottom: 3px;'>"
                 f"<b style='color: #2962ff;'>[{tag}]</b> &nbsp; ⏱️ {dt} &nbsp; "
                 f"<b style='color: {score_color};'>影响: {score:+.1f}</b>"
                 f"</div>"
                 f"<div style='font-size: 9.5pt; font-weight: bold; color: #00F0FF; line-height: 1.3;'>{title}</div>"
-                f"<div style='font-size: 8.5pt; color: #9db2c6; margin-top: 4px;'>{summary[:65]}...</div>"
+                f"<div style='font-size: 8.5pt; color: #9db2c6; margin-top: 4px;'>{summary[:70]}...</div>"
             )
 
             item = QListWidgetItem()
-            # 存储数据对象
             item.setData(Qt.ItemDataRole.UserRole, news)
-            
-            # 使用 QLabel 承载富文本
+
             lbl = QLabel(item_text)
             lbl.setWordWrap(True)
             lbl.setStyleSheet("background: transparent; padding: 2px;")
@@ -853,6 +888,70 @@ class GlobalMarketKLineDialog(QDialog):
         """双击列表项瞬间弹出 GlobalMarketNewsDetailDialog 查看深度正文与评估"""
         news = item.data(Qt.ItemDataRole.UserRole)
         if news and isinstance(news, dict):
+            dlg = GlobalMarketNewsDetailDialog(news, self)
+            dlg.exec()
+
+    def _on_refresh_news_clicked(self):
+        """一键强制刷新全网权威财经热榜"""
+        self.news_items = fetch_symbol_financial_news(self.symbol, self.sec_name, force_refresh=True)
+        self._populate_news_list()
+        self.lbl_info.setText(f"✅ 已强制刷新权威自选热榜 ({len(self.news_items)} 条已载入)")
+
+    def _show_news_context_menu(self, pos):
+        """右键弹出资讯上下文菜单: 支持物理删除早期无用资讯、剪贴板复制与清空操作"""
+        item = self.lst_news.itemAt(pos)
+        if not item:
+            return
+
+        news = item.data(Qt.ItemDataRole.UserRole)
+        if not news or not isinstance(news, dict):
+            return
+
+        news_id = news.get('id', '')
+        news_title = news.get('title', '')
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e222d;
+                color: #d1d4dc;
+                border: 1px solid #2a2e39;
+            }
+            QMenu::item:selected {
+                background-color: #2962ff;
+                color: #ffffff;
+            }
+        """)
+
+        act_delete = menu.addAction(f"🗑️ 删除此条资讯 (物理持久化剔除)")
+        act_prune = menu.addAction("🧹 仅保留最新 10 条 (清理早期旧资讯)")
+        menu.addSeparator()
+        act_copy = menu.addAction("📋 复制标题与摘要内容")
+        act_detail = menu.addAction("🔍 查看深度正文解读")
+
+        action = menu.exec(self.lst_news.mapToGlobal(pos))
+        if action == act_delete:
+            if news_id:
+                delete_news_item_by_id(news_id)
+                self.news_items = [n for n in self.news_items if n.get('id') != news_id]
+                self._populate_news_list()
+                self.lbl_info.setText(f"🗑️ 已成功物理删除此条资讯: 【{news_title[:20]}...】")
+        elif action == act_prune:
+            if len(self.news_items) > 10:
+                removed_items = self.news_items[10:]
+                for rm in removed_items:
+                    rm_id = rm.get('id')
+                    if rm_id:
+                        delete_news_item_by_id(rm_id)
+                self.news_items = self.news_items[:10]
+                self._populate_news_list()
+                self.lbl_info.setText(f"🧹 已清理早期旧资讯，成功保留最新 10 条权威热榜")
+        elif action == act_copy:
+            summary = news.get('summary', '')
+            text_to_copy = f"{news_title}\n{summary}"
+            QApplication.clipboard().setText(text_to_copy)
+            self.lbl_info.setText(f"📋 已复制资讯标题与摘要至剪贴板")
+        elif action == act_detail:
             dlg = GlobalMarketNewsDetailDialog(news, self)
             dlg.exec()
 
@@ -1574,11 +1673,13 @@ class GlobalMarketKLineDialog(QDialog):
         try:
             from ats.ui.proxy_dialog import ProxySettingsDialog
             dlg = ProxySettingsDialog(parent=self)
-            if dlg.exec() == 1:
-                self._update_proxy_btn_style()
-                # 触发后台刷新
-                self._load_fast_cached_or_async()
+            dlg.exec()
         except Exception as ex:
             print(f"[GlobalMarketKLineDialog] 调起代理弹窗异常: {ex}")
+
+    def _on_global_proxy_changed(self, cfg: dict = None):
+        """响应全局代理变更广播，瞬间同步子窗口按钮状态并重载数据"""
+        self._update_proxy_btn_style()
+        self._load_fast_cached_or_async()
 
 
