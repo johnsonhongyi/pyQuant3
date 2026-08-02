@@ -71,6 +71,14 @@ class GlobalMarketPanel(QWidget):
         self._restore_pinned_sectors()
         self._init_ui()
         self._start_auto_refresh_timer()
+
+        # 连接全局代理变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
+        try:
+            from ats.ui.proxy_dialog import GLOBAL_PROXY_EVENT_BRIDGE
+            GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal.connect(self._on_global_proxy_changed)
+        except Exception as ex:
+            print(f"[GlobalMarketPanel] 绑定全局代理信号失败: {ex}")
+
         # 初始装载数据
         self.refresh_data(force=False)
 
@@ -832,10 +840,12 @@ class GlobalMarketPanel(QWidget):
         try:
             from ats.ui.proxy_dialog import ProxySettingsDialog
             dlg = ProxySettingsDialog(parent=self)
-            if dlg.exec() == 1:
-                self._update_proxy_btn_style()
-                # 重新强刷数据
-                self.refresh_data(force=True)
+            dlg.exec()
         except Exception as ex:
             print(f"[GlobalMarketPanel] 调起代理弹窗异常: {ex}")
+
+    def _on_global_proxy_changed(self, cfg: dict = None):
+        """响应全局代理变更广播，瞬间同步主窗口按钮状态并重载数据"""
+        self._update_proxy_btn_style()
+        self.refresh_data(force=True)
 

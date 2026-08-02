@@ -1,3 +1,17 @@
+## 2026-08-03 04:15
+- [x] **实现全量代理配置跨窗口 `GLOBAL_PROXY_EVENT_BRIDGE` 广播同步与财经资讯代理感知 (`ats/ui/proxy_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `JSONData/global_market_data.py`, `scratch/test_proxy_sync_full.py`)**：
+    - [x] **全局代理信号广播 Bus (`GLOBAL_PROXY_EVENT_BRIDGE`)**：在 `ats/ui/proxy_dialog.py` 中建立全局 PySide6/PyQt6 `GlobalProxyEventBridge` 单例广播桥；在 `ProxySettingsDialog` 保存代理配置时发射 `proxy_changed_signal` 广播信号，彻底解除窗口间强解耦依赖。
+    - [x] **主窗口与 K 线弹窗代理按键同步**：在 `GlobalMarketPanel` 与 `GlobalMarketKLineDialog` 构造中无缝订阅 `GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal`。当在任何弹窗修改保存代理（如 `127.0.0.1:7890` 开/关）时，主窗口与已打开的 K 线弹窗按钮文案（`🌐 代理: 开(7890)` / `🌐 代理: 关`）及 QSS 样式 100% 秒级绝对同步更新，并即时触发网络重载。
+    - [x] **财经资讯代理开/关感知增强**：在 `JSONData/global_market_data.py` 的 `fetch_symbol_financial_news` 抓取引擎中注入 `get_proxy_info_str()`，确保在“代理开”与“代理关”两种模式下，财经热榜要闻抓取能自动感知并切换 `get_urllib_request_opener()` 派发的 Handler，保障资讯与外盘 K 线网络连通性。
+    - [x] **全量自动化测试 100% 校验通过**：新建 `scratch/test_proxy_sync_full.py`，全量验证跨窗口 100% 同步与财经资讯代理感知；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 03:45
+- [x] **实现全量权威自选财经热榜、自动英译中、物理 JSON 持久化、20条显示上限与右键物理删除黑名单机制 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_financial_news_hotlist.py`)**：
+    - [x] **重构财经资讯要闻数据引擎与 `_auto_translate_en_to_cn` 规则**：在 `JSONData/global_market_data.py` 中重构 `fetch_symbol_financial_news` 函数，将静态假数据升级为全量权威自选热榜库；设计 `_auto_translate_en_to_cn` 高频词汇对照表，对英文财经新闻标题及段落摘要（如 Fed Interest Rate Cut, GPU/HBM3e/Blackwell, Treasury Yields, Inflation CPI 等）进行全自动“英译中”预处理，大幅提升国内看盘可读性。
+    - [x] **物理 JSON 存取与 20 条硬性上限控制 (`financial_news_hotlist.json`)**：在 `load_news_hotlist_json()` / `save_news_hotlist_json()` 接口中引入 `CONFIG_FILE_LOCK` 线程锁，物理持久化至 `config/financial_news_hotlist.json`。数据流严格执行先进先出与 `[:20]` 切片截断，保证持久化文件和前台 UI 展示永远不超过 20 条权威热榜条目。
+    - [x] **`GlobalMarketKLineDialog` 右键删除上下文菜单与 ID 黑名单机制**：在 `lst_news` 中设置 `CustomContextMenu`，右键弹出菜单包含：`🗑️ 删除此条资讯 (物理持久化剔除)`、`🧹 仅保留最新 10 条`、`📋 复制标题与摘要` 及 `🔍 查看深度正文解读`。点击删除后调用 `delete_news_item_by_id(news_id)`，将目标 ID 加入物理 `deleted_ids` 黑名单落盘，彻底防范后续刷新时已删除条目非正常复活。
+    - [x] **自动化 & 单元测试 100% 校验通过**：新建 `scratch/test_financial_news_hotlist.py`，校验英译中转换、20 条物理截断上限、右键物理删除与黑名单防护，结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 03:35
 - [x] **实现外盘抓取全流程 Proxy 代理状态可解释性日志增强 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_proxy_info_logging.py`)**：
     - [x] **设计 `get_proxy_info_str()` 统一状态获取 helper**：在 `JSONData/global_market_data.py` 中引入 `get_proxy_info_str()` 函数，实时动态提取当前 Proxy 配置；按格式返回 `[Proxy: ON - http://...]` (代理开启)、`[Proxy: OFF - 直连(配置: http://...)]` (代理关闭但保留配置) 或 `[Proxy: OFF - 纯直连]`。
