@@ -1,4 +1,19 @@
+## 2026-08-03 03:12
+- [x] **实现外盘主窗口 (`GlobalMarketDialog`) 禁用 Esc 键关闭功能 (`ats/ui/global_market_dialog.py`, `scratch/test_global_market_esc_disabled.py`)**：
+    - [x] **重写 keyPressEvent 阻断 Esc 关闭**：在 `GlobalMarketDialog` 中重写 `keyPressEvent`，精准阻断 `Qt.Key.Key_Escape` 快捷键（`event.ignore()` 并 return），物理防范因误触 Esc 键导致外盘主窗口误关隐藏。
+    - [x] **完整保留 X 按钮与 close() 正常关闭**：仅针对 `Key_Escape` 键实施屏蔽，绝对不干扰窗口右上角 X 关闭按钮和外部 `close()` / `hide()` 触发的常规 `closeEvent`，物理持久化几何配置落盘 (`saveGeometry`) 保持 100% 正常生效。
+    - [x] **单元测试全量 100% 成功通过**：新建 `scratch/test_global_market_esc_disabled.py` 验证 Esc 按键防护与 `close()` 关闭，结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 02:31
+- [x] **彻底根治 META/SOXX/QQQ 等 ETF 类美股外盘 K 线始终显示"加载失败"的三重 Bug (`JSONData/global_market_data.py`)**：
+    - [x] **根因 1: 腾讯源对 ETF/特殊品种只返回 1~2 条历史 K 线 → 假成功**：腾讯 `web.ifzq.gtimg.cn` 接口对于 `SOXX`/`QQQ`/`META` 等品种只返回最新 1~2 个交易日数据（无历史），`_fetch_from_tencent` 旧版代码在 `if parsed: return parsed` 时将 1~2 条视为"成功"直接 return，导致后续 Sina/Yahoo 优质数据源被完全跳过。修复：引入 `MIN_KLINES = 5` 守卫，仅当解析出 `>= 5` 条时视为成功，否则输出降级日志并继续尝试下一数据源。
+    - [x] **根因 2: 主调用层 `if not parsed_klines` 判断缺陷**：旧版主调用流程 `if not parsed_klines: 降级到 Sina` 使用 Python 真假判断，1~2 条非空列表被视为 `True`，Sina/Yahoo 永远不会被触发。修复：全量替换为 `if len(parsed_klines) < MIN_KLINES`，统一强制最小 5 条门槛判断。
+    - [x] **根因 3: `_fetch_from_sina` 符号分类逻辑硬编码不覆盖所有美股/ETF**：旧版用 `US_STOCKS = {hardcoded set}` 白名单，若某品种不在集合内（如临时新增品种）则走商品期货接口并返回错误数据。修复：改为基于 `COMMODITY_SYMBOLS` 黑名单逻辑 —— 只要不是商品期货（BRENT/OIL/GOLD/A50等），均走 `US_MinKService` 美股接口，完全避免遗漏。同时修正新浪 Sina US_MinKService 接口超时从 6s 提升至 8s，增加 `null` 响应检测（`gb_` 格式已失效，仅用纯小写符号）。
+    - [x] **全量 Debug 日志追加**：在 `_fetch_from_tencent` / `_fetch_from_sina` / `_fetch_from_yahoo` 每个分支均补充详细的 `[Tencent]/[Sina-US]/[Sina-Futures]` 前缀调试日志，包括 URL、条数、降级原因，便于后续快速诊断。
+    - [x] **自测验证 100% 通过**：`META` 成功落盘 20 条 K 线，`SOXX` 成功落盘 20 条 K 线，`tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 00:45
+
 - [x] **完全解耦外盘与 K线弹窗为独立 TopLevel 顶级窗口并实现 ATS 统一暗黑 UI 样式与线程安全原子配置存取 (`ats/ui/global_market_dialog.py`, `ats/ui/global_market_kline_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/styles.py`, `scratch/test_persistence_and_no_proxy_full.py`)**：
     - [x] **完全解耦顶级 Window (`parent=None`) 架构**：响应用户“不要让外盘作为子窗口”指令，彻底将 `GlobalMarketDialog` 与 `GlobalMarketKLineDialog` 重构为独立的 TopLevel 窗口 (`super().__init__(None)`)。支持操作系统多屏幕自由拖拽排布、独立最大化/最小化、Alt+Tab 任务栏预览以及多任务窗口平滑联动。
     - [x] **全流程样式对齐 ATS 统一暗黑终端主题 (`apply_dark_theme`)**：在 `GlobalMarketDialog` 与 `GlobalMarketKLineDialog` 构造中无缝注入 `styles.py` 的 `apply_dark_theme(self)` 统一渲染引擎；搭配 `setup_header_persistence` 防刷重置锁，彻底根除了此前弹窗样式脱节、文本截断与表格列宽重启后被重置为默认值的硬伤。

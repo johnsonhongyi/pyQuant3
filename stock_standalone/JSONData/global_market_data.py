@@ -638,6 +638,10 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         return []
 
     # Helper: 腾讯极速免代理直连源 (国内 10ms 零延迟免代理)
+    # 注意: 腾讯对部分 ETF/特殊品种 (如 SOXX/QQQ/META) 只返回 1~2 条最新数据，
+    #       不满足历史 K 线最低门槛，需用 >= 5 守卫防止假成功
+    MIN_KLINES = 5
+
     def _fetch_from_tencent() -> list:
         tencent_sym = f"us{sym_upper}" if not sym_upper.startswith("us") else sym_upper
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_sym},day,,,{limit + 20},qfq"
@@ -667,27 +671,38 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                if parsed:
+                # [BUGFIX] 腾讯对 ETF/部分品种只返回 1~2 条最新 K 线，不满足历史最低门槛
+                # 必须 >= MIN_KLINES 才视为成功，否则降级到 Sina/Yahoo
+                if len(parsed) >= MIN_KLINES:
+                    print(f"[GlobalMarketData] [Tencent] {sym_upper} 历史 K 线 {len(parsed)} 条")
                     return parsed
+                elif parsed:
+                    print(f"[GlobalMarketData] [Tencent] {sym_upper} 只有 {len(parsed)} 条历史数据（不足 {MIN_KLINES}），降级到 Sina/Yahoo")
             else:
-                print(f"[GlobalMarketData] Tencent sec_dict keys: {list(sec_dict.keys())}")
+                print(f"[GlobalMarketData] [Tencent] {sym_upper} 无历史 K 线数据, sec_dict keys: {list(sec_dict.keys())}")
         except Exception as ex:
-            print(f"[GlobalMarketData] Tencent 源抓取异常 {sym_upper}: {ex}")
+            print(f"[GlobalMarketData] [Tencent] 抓取异常 {sym_upper}: {ex}")
         return []
 
     # Helper: 尝试抓取 Sina 源 (支持美股 & 内外盘期货)
     def _fetch_from_sina() -> list:
-        US_STOCKS = {'AAPL', 'NVDA', 'TSLA', 'MSFT', 'GOOGL', 'AMZN', 'META', 'MU', 'TSM', 'SOXX', 'QQQ'}
-        if sym_upper in US_STOCKS or not any(k in sym_upper for k in ['BRENT', 'OIL', 'GOLD', 'A50', 'SILVER']):
-            # 1. 美股接口
+        import re
+        # 所有走美股 US_MinKService 接口的品种（包括 ETF 类 SOXX/QQQ）
+        # 注意: 新浪接口使用小写纯符号名，如 meta, soxx, qqq
+        # gb_ 前缀格式已不再返回数据（只返回 null），不使用
+        COMMODITY_SYMBOLS = {'BRENT', 'OIL', 'GOLD', 'A50', 'SILVER', 'XAUUSD', 'USDCNH'}
+        is_us_stock = sym_upper not in COMMODITY_SYMBOLS
+
+        if is_us_stock:
+            # 美股 / ETF 接口: 直接使用小写符号名（如 meta, soxx, nvda, qqq）
             url = f"https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_r=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            print(f"[GlobalMarketData] [Sina-US] 开始抓取 {sym_upper} -> {url}")
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             try:
                 req = urllib.request.Request(url, headers=headers)
                 opener = get_urllib_request_opener()
-                with opener.open(req, timeout=6.0) as resp:
+                with opener.open(req, timeout=8.0) as resp:
                     raw = resp.read().decode('gbk', errors='ignore')
-                import re
                 raw_list = []
                 json_str = None
                 match = re.search(r'=\s*(\[.*\])\s*;?', raw, re.DOTALL) or re.search(r'\((.*)\)', raw, re.DOTALL)
@@ -695,14 +710,14 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                     json_str = match.group(1).strip()
                 elif raw.strip().startswith('[') and raw.strip().endswith(']'):
                     json_str = raw.strip()
-                
-                if json_str:
+
+                if json_str and json_str.lower() not in ('null', 'undefined', ''):
                     try:
                         raw_list = json.loads(json_str)
                     except Exception:
                         raw_list = []
 
-                if isinstance(raw_list, list) and raw_list:
+                if isinstance(raw_list, list) and len(raw_list) > 0:
                     parsed = []
                     prev_c = None
                     slice_start = max(0, len(raw_list) - limit - 10)
@@ -718,99 +733,121 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                             pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
                             prev_c = c
                             parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                        except Exception: continue
-                    if parsed:
+                        except Exception:
+                            continue
+                    if len(parsed) >= MIN_KLINES:
+                        print(f"[GlobalMarketData] [Sina-US] {sym_upper} 历史 K 线 {len(parsed)} 条")
                         return parsed
+                    print(f"[GlobalMarketData] [Sina-US] {sym_upper} 解析只得 {len(parsed)} 条，响应前 200: {raw[:200]}")
+                else:
+                    print(f"[GlobalMarketData] [Sina-US] {sym_upper} 响应体无有效 JSON 列表，响应前 200: {raw[:200]}")
             except Exception as ex:
-                print(f"[GlobalMarketData] Sina 美股源抓取异常 {sym_upper}: {ex}")
+                print(f"[GlobalMarketData] [Sina-US] 抓取异常 {sym_upper}: {ex}")
 
-        # 2. 内外盘期货接口
-        sina_symbol_map = {
-            'BRENT':  'sc0',
-            'OIL':    'sc0',
-            'GOLD':   'au0',
-            'XAUUSD': 'au0',
-            'SILVER': 'ag0',
-            'A50':    'hf_CHA50CFD',
-        }
-        sina_code = sina_symbol_map.get(sym_upper, 'sc0' if 'OIL' in sym_upper or 'BRENT' in sym_upper else 'au0')
-        is_inner = sina_code in ['sc0', 'au0', 'ag0']
-        if is_inner:
-            url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}"
-        else:
-            url = f"https://gu.sina.cn/ft/api/jsonp.php/var_r=/GlobalFuturesService.getGlobalFuturesDailyK?symbol={sina_code}"
-        headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            opener = get_urllib_request_opener()
-            with opener.open(req, timeout=5.0) as resp:
-                txt = resp.read().decode('gbk', errors='ignore')
-            import re
-            json_match = re.search(r'=\s*(\[.*\])\s*;?', txt, re.DOTALL) or re.search(r'\((.*)\)', txt, re.DOTALL)
-            raw_list = []
-            if json_match:
-                try:
-                    raw_list = json.loads(json_match.group(1).strip())
-                except Exception:
-                    raw_list = []
-            elif txt.strip().startswith('[') and txt.strip().endswith(']'):
-                try:
-                    raw_list = json.loads(txt.strip())
-                except Exception:
-                    raw_list = []
-
-            if isinstance(raw_list, list) and raw_list:
-                parsed = []
-                prev_c = None
-                slice_start = max(0, len(raw_list) - limit - 10)
-                for item in raw_list[slice_start:]:
+        # 2. 商品期货 / 内外盘接口 (OIL/BRENT/GOLD/A50/SILVER)
+        if not is_us_stock or not True:  # 只对商品品种走期货接口
+            sina_symbol_map = {
+                'BRENT':  'sc0',
+                'OIL':    'sc0',
+                'GOLD':   'au0',
+                'XAUUSD': 'au0',
+                'SILVER': 'ag0',
+                'A50':    'hf_CHA50CFD',
+            }
+            if sym_upper not in sina_symbol_map and is_us_stock:
+                return []  # 美股品种已经在上面处理完了
+            sina_code = sina_symbol_map.get(sym_upper, 'sc0' if 'OIL' in sym_upper or 'BRENT' in sym_upper else 'au0')
+            is_inner = sina_code in ['sc0', 'au0', 'ag0']
+            if is_inner:
+                url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}"
+            else:
+                url = f"https://gu.sina.cn/ft/api/jsonp.php/var_r=/GlobalFuturesService.getGlobalFuturesDailyK?symbol={sina_code}"
+            print(f"[GlobalMarketData] [Sina-Futures] 开始抓取 {sym_upper} ({sina_code}) -> {url}")
+            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                opener = get_urllib_request_opener()
+                with opener.open(req, timeout=6.0) as resp:
+                    txt = resp.read().decode('gbk', errors='ignore')
+                json_match = re.search(r'=\s*(\[.*\])\s*;?', txt, re.DOTALL) or re.search(r'\((.*)\)', txt, re.DOTALL)
+                raw_list = []
+                if json_match:
                     try:
-                        if isinstance(item, list) and len(item) >= 5:
-                            d, o, h, l, c = str(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4])
-                            v = float(item[5]) if len(item) > 5 else 0.0
-                        elif isinstance(item, dict):
-                            d = str(item.get('d', item.get('date', '')))
-                            o = float(item.get('o', item.get('open', 0)))
-                            h = float(item.get('h', item.get('high', 0)))
-                            l = float(item.get('l', item.get('low', 0)))
-                            c = float(item.get('c', item.get('close', 0)))
-                            v = float(item.get('v', item.get('volume', 0)))
-                        else: continue
-                        if c <= 0: continue
-                        pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
-                        prev_c = c
-                        parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                    except Exception: continue
-                if parsed:
-                    return parsed
-        except Exception as ex:
-            print(f"[GlobalMarketData] Sina 期货源抓取异常 {sym_upper}: {ex}")
+                        raw_list = json.loads(json_match.group(1).strip())
+                    except Exception:
+                        raw_list = []
+                elif txt.strip().startswith('[') and txt.strip().endswith(']'):
+                    try:
+                        raw_list = json.loads(txt.strip())
+                    except Exception:
+                        raw_list = []
+
+                if isinstance(raw_list, list) and raw_list:
+                    parsed = []
+                    prev_c = None
+                    slice_start = max(0, len(raw_list) - limit - 10)
+                    for item in raw_list[slice_start:]:
+                        try:
+                            if isinstance(item, list) and len(item) >= 5:
+                                d, o, h, l, c = str(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4])
+                                v = float(item[5]) if len(item) > 5 else 0.0
+                            elif isinstance(item, dict):
+                                d = str(item.get('d', item.get('date', '')))
+                                o = float(item.get('o', item.get('open', 0)))
+                                h = float(item.get('h', item.get('high', 0)))
+                                l = float(item.get('l', item.get('low', 0)))
+                                c = float(item.get('c', item.get('close', 0)))
+                                v = float(item.get('v', item.get('volume', 0)))
+                            else:
+                                continue
+                            if c <= 0: continue
+                            pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
+                            prev_c = c
+                            parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
+                        except Exception:
+                            continue
+                    if len(parsed) >= MIN_KLINES:
+                        print(f"[GlobalMarketData] [Sina-Futures] {sym_upper} 历史 K 线 {len(parsed)} 条")
+                        return parsed
+                    print(f"[GlobalMarketData] [Sina-Futures] {sym_upper} 解析只得 {len(parsed)} 条")
+                else:
+                    print(f"[GlobalMarketData] [Sina-Futures] {sym_upper} 响应体无有效 JSON 列表，响应前 200: {txt[:200]}")
+            except Exception as ex:
+                print(f"[GlobalMarketData] [Sina-Futures] 抓取异常 {sym_upper}: {ex}")
         return []
 
     # 按照用户选择的首选源进行抓取，失败时尝试备用源
+    # [BUGFIX] 统一使用 >= MIN_KLINES 判断，防止 Tencent 只返回 1~2 条时假成功导致后续源被跳过
     parsed_klines = []
     proxy_enabled = get_proxy_config().get("enabled", False)
+    print(f"[GlobalMarketData] 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Tencent / Sina 国内免代理直连源
     if not proxy_enabled:
         parsed_klines = _fetch_from_tencent()
-        if not parsed_klines:
+        if len(parsed_klines) < MIN_KLINES:
+            print(f"[GlobalMarketData] Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
             parsed_klines = _fetch_from_sina()
-        if not parsed_klines and source_key == 'yahoo':
+        if len(parsed_klines) < MIN_KLINES:
+            print(f"[GlobalMarketData] Sina 不足 {MIN_KLINES} 条，降级到 Yahoo...")
             parsed_klines = _fetch_from_yahoo()
     else:
         # 2. 代理已开启模式
         if source_key == 'yahoo':
             parsed_klines = _fetch_from_yahoo()
-            if not parsed_klines:
+            if len(parsed_klines) < MIN_KLINES:
+                print(f"[GlobalMarketData] Yahoo 不足 {MIN_KLINES} 条，降级到 Tencent...")
                 parsed_klines = _fetch_from_tencent()
-            if not parsed_klines:
+            if len(parsed_klines) < MIN_KLINES:
+                print(f"[GlobalMarketData] Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
                 parsed_klines = _fetch_from_sina()
         else:
             parsed_klines = _fetch_from_sina()
-            if not parsed_klines:
+            if len(parsed_klines) < MIN_KLINES:
+                print(f"[GlobalMarketData] Sina 不足 {MIN_KLINES} 条，降级到 Tencent...")
                 parsed_klines = _fetch_from_tencent()
-            if not parsed_klines:
+            if len(parsed_klines) < MIN_KLINES:
+                print(f"[GlobalMarketData] Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
                 parsed_klines = _fetch_from_yahoo()
 
     # 抓取成功后独立落盘写入该数据源物理文件
