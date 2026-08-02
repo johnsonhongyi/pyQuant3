@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence
-from sys_utils import get_app_root
+from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, CONFIG_FILE_LOCK
+from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 
 class ATSSectorDetailDialog(QDialog):
@@ -54,6 +54,7 @@ class ATSSectorDetailDialog(QDialog):
         """)
         self._init_ui()
         self.load_data()
+        self._restore_geometry()
         
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -120,6 +121,50 @@ class ATSSectorDetailDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(btn_close)
         layout.addLayout(btn_layout)
+
+    def _restore_geometry(self):
+        """从 window_config.json 恢复弹窗位置与大小"""
+        try:
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                geom = data.get("ats_sector_detail_dialog_geom")
+                if geom:
+                    from PyQt6.QtCore import QByteArray
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+        except Exception:
+            pass
+
+    def _save_geometry(self):
+        """原子写盘持久化弹窗位置与大小至 window_config.json"""
+        try:
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_sector_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
+                tmp_path = cfg_path + ".tmp_sector"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """关闭时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        super().closeEvent(event)
+
+    def accept(self):
+        """OK/关闭按钮同样触发持久化"""
+        self._save_geometry()
+        super().accept()
         
     def load_data(self):
         # Resolve helper functions & streaming df from parent chain
@@ -219,7 +264,9 @@ class ATSSectorDetailDialog(QDialog):
             "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
             "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
             "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
-            "有色金属": ["有色金属", "有色", "小金属", "稀缺资源"],
+            "贵金属": ["贵金属", "黄金", "珠宝首饰"],
+            "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
+            "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
             "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发"],
             "金融/权重龙头": ["银行", "证券", "保险"],
             "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"]
@@ -232,7 +279,9 @@ class ATSSectorDetailDialog(QDialog):
             "软件开发": [("300496", "科大讯飞"), ("600588", "用友网络"), ("300033", "指南针"), ("688111", "金山办公"), ("300229", "拓尔思"), ("600570", "恒生电子")],
             "国防军工": [("601606", "长城军工"), ("600118", "中国卫星"), ("002179", "中航光电"), ("600760", "中航沈飞"), ("000768", "中航西飞"), ("600893", "航发动力")],
             "汽车整车": [("600733", "北汽蓝谷"), ("002594", "比亚迪"), ("601633", "长城汽车"), ("601127", "赛力斯"), ("600104", "上汽集团"), ("000625", "长安汽车")],
-            "有色金属": [("603993", "洛阳钼业"), ("601899", "紫金矿业"), ("002460", "赣锋锂业"), ("000792", "盐湖股份"), ("600111", "中国稀土"), ("601600", "中国铝业")],
+            "贵金属": [("601899", "紫金矿业"), ("600988", "赤峰黄金"), ("600547", "山东黄金"), ("600489", "中金黄金"), ("000975", "山金国际")],
+            "石油化工": [("600938", "中国海油"), ("601857", "中国石油"), ("600583", "中海油服"), ("600028", "中国石化"), ("600346", "恒力石化")],
+            "有色金属": [("603993", "洛阳钼业"), ("601899", "紫金矿业"), ("600362", "江西铜业"), ("601600", "中国铝业"), ("000630", "铜陵有色")],
             "AI/软件": [("300058", "蓝色光标"), ("300496", "科大讯飞"), ("688111", "金山办公"), ("300033", "指南针"), ("603533", "掌阅科技")],
             "金融/权重龙头": [("600036", "招商银行"), ("601318", "中国平安"), ("600030", "中信证券"), ("601688", "华泰证券")],
             "石油化工/资源": [("601857", "中国石油"), ("600028", "中国石化"), ("600938", "中国海油"), ("601088", "中国神华")]

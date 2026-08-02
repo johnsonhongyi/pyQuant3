@@ -1,3 +1,21 @@
+## 2026-08-02 18:30
+- [x] **实现外盘 K 线弹窗视区持久化、美黄金/美原油智能分立点击与贵金属/石油化工热点板块 Boost 映射 (`ats/ui/global_market_kline_dialog.py`, `JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/sector_detail_dialog.py`, `scratch/test_gold_oil_split_and_boost.py`)**：
+    - [x] **外盘 K 线弹窗 60日/120日全览选型物理 JSON 持久化与按钮高亮恢复 (`ats/ui/global_market_kline_dialog.py`)**：修复此前初始化时默认覆盖用户上次视区配置的 Bug；在 `_restore_settings` 中精准装载 `zoom_mode`，并自动调用 `_apply_zoom_mode()` 恢复 `🔍 最新60日` / `🌐 近120日(全览)` 按钮的高亮聚焦样式，跨会话 0ms 秒级恢复用户的看盘习惯。
+    - [x] **美黄金 (COMEX 纽约金) 与 美原油 (布伦特原油) 明确分立定位与顶卡左右半区智能点击分拆 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`)**：
+        - 在 `JSONData/global_market_data.py` 中将资源/大宗商品拆分为 **COMEX 纽约金 (`GOLD`)** 与 **布伦特/美原油 (`OIL`)** 两个独立的特征计算模块，生成对应的 `🌐 纽约金拉升共振` / `🌐 原油暴涨联动` 标签。
+        - 在 `GlobalMarketPanel` 中为 **Card 4 (原油/黄金)** 引入左右半区 X 坐标识别：点击左侧自动弹出 `OIL` (美原油/布伦特原油) K 线弹窗；点击右侧自动弹出 `GOLD` (COMEX 纽约金) K 线弹窗。同时为 Card 1 (NVDA/QQQ)、Card 2 (MU/SOXX)、Card 3 (A50/CNH) 均补充了左右半区区分点击！
+    - [x] **补充 `贵金属` 与 `石油化工` 热点板块 Boost 提权与双击成分股/国内知名行业龙头兜底 (`ats/ui/global_market_panel.py`, `ats/ui/sector_detail_dialog.py`)**：
+        - 在 `GlobalMarketWorker` 与 `GlobalMarketPanel._update_boosts_table` 中将 **`贵金属`** (纽约金) 与 **`石油化工`** (原油) 加入 9 大核心外盘联动提权板块，显示与 A 股对应关系。
+        - 在 `ATSSectorDetailDialog` 中补齐 `贵金属` 与 `石油化工` 同义词及国内知名行业龙头兜底池 (紫金矿业、赤峰黄金、山东黄金、中国海油、中国石油、中海油服等)，双击查看板块明细 100% 顺畅弹出并高亮呈现领涨龙头！
+    - [x] **UI & 业务自动化测试 100% 校验通过**：新建 `scratch/test_gold_oil_split_and_boost.py`，全量验证 Sector Boost 特征计算、贵金属与石油化工成分股明细提取、Card 左右分立点击与 KLineDialog 视区持久化，全量断言与 11 项单元测试 100% 成功通过！
+
+## 2026-08-02 17:40
+- [x] **实现外盘 K 线弹窗自由无限制自适应缩放、全选项持久化落盘与表格右键编辑/一键自适应列宽 (`ats/ui/global_market_kline_dialog.py`, `ats/ui/base_table.py`, `ats/ui/global_market_panel.py`, `scratch/test_kline_and_table_fit.py`)**：
+    - [x] **外盘 K 线弹窗无限制拉伸与 Windows 标准控制 (`GlobalMarketKLineDialog`)**：为弹窗解除物理尺寸封顶，设置 `Qt.WindowType.Window` 与 `WindowMinMaxButtonsHint` 标准控制标志（支持最小化、最大化、自由拖拽边缘缩放），最小保护尺寸设为 640x420；重构 Header 控件间距与按钮最小宽度，彻底杜绝小窗口下的文字重叠错位。
+    - [x] **全选项物理 JSON 持久化落盘与恢复 (`_save_settings` / `_restore_settings`)**：将窗口几何尺寸位置 (`geom`)、K线/OHLC视图模式 (`chart_mode`)、BOLL布林线显示开关 (`show_boll`) 与 60日/120日视区缩放模式 (`zoom_mode`) 统一落盘至 `window_config.json`，再次调起时 0 毫秒恢复用户的个性化看盘配置。
+    - [x] **表格单元格默认禁止直接编辑 & 右键上下文菜单支持编辑与列宽自适应 (`ats/ui/base_table.py`, `ats/ui/global_market_panel.py`)**：为 `BaseATSTableWidget` 设置 `EditTrigger.NoEditTriggers`，默认禁止双击/单击误修改单元格；在鼠标右键上下文菜单中新增 `✏️ 编辑当前单元格内容` (输入框弹窗) 与 `↔️ 一键自适应全列宽` (按实际文本长度 + 18px Padding 拓展)；在 `GlobalMarketPanel` 数据灌入后全自动触发 `auto_fit_columns()`，彻底根除“黄金避/有色金属/避险板块”、“+15.32%”及“富时 A50 期货”等文本截断与 `...` 缩略痛点。
+    - [x] **UI & 持久化自动化测试 100% 校验通过**：新建 `scratch/test_kline_and_table_fit.py`，校验 Table EditTriggers、`auto_fit_columns` 列宽自动展宽、KLineDialog WindowFlags 与全配置物理 JSON 存取，测试 100% 一次性成功通过！
+
 ## 2026-08-02 17:00
 - [x] **物理重构外盘 K 线/OHLC 像素级画笔渲染与 BOLL 布林线 (20,2) 集成 (`ats/ui/global_market_kline_dialog.py`, `walkthrough.md`)**：
     - [x] **根治 K线/OHLC 肥厚混在一起缺陷 (`setCosmetic(True)`)**：定位并彻底修复 `QPen` 缺失 `setCosmetic(True)` 导致 Qt 将 1.0 线宽误解析为 1 个 X 轴坐标单位（15 像素宽）的物理缺陷；为 `CandlestickItem` 和 `OHLCItem` 强行指定 1px/1.5px 屏幕像素级抗锯齿笔触，配合精确 `w=0.30` 缝隙控制，实现蜡烛图与美国线 High-Low 影线晶莹剔透、零重叠无模糊的高清画质。

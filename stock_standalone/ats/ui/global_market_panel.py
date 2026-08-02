@@ -43,7 +43,7 @@ class GlobalMarketWorker(QThread):
             quotes = fetch_global_market_quotes(force_refresh=self.force_refresh)
             score, label = get_global_sentiment_score()
 
-            sectors = ["存储芯片", "半导体", "传媒", "软件开发", "国防军工", "汽车整车", "有色金属"]
+            sectors = ["存储芯片", "半导体", "传媒", "软件开发", "国防军工", "汽车整车", "贵金属", "石油化工", "有色金属"]
             boosts = {}
             for sec in sectors:
                 b_val, g_tag = get_sector_global_boost(sec)
@@ -151,24 +151,36 @@ class GlobalMarketPanel(QWidget):
         self.tbl_quotes.setHorizontalHeaderLabels(q_headers)
         self.tbl_quotes.setup_persistence(
             config_key="ats_global_quotes_table_state",
-            default_widths=[110, 80, 100, 90, 130, 180]
+            default_widths=[130, 85, 110, 105, 160, 180]
         )
         self.tbl_quotes.itemDoubleClicked.connect(self._on_quotes_table_double_clicked)
         left_layout.addWidget(self.tbl_quotes)
         self.h_splitter.addWidget(left_widget)
 
-        # 4 大卡片点击直接查看核心资产 K 线走势
+        # 4 大卡片点击左右半区智能识别与分立外盘 K 线走势弹窗
         self.card_m7['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
-        self.card_m7['frame'].mousePressEvent = lambda e: self._open_kline_dialog('NVDA', '英伟达/算力')
+        self.card_m7['frame'].mousePressEvent = lambda e: self._open_kline_dialog(
+            'QQQ' if e.pos().x() > self.card_m7['frame'].width() / 2 else 'NVDA',
+            '纳斯达克100 ETF' if e.pos().x() > self.card_m7['frame'].width() / 2 else '英伟达/算力'
+        )
         
         self.card_semi['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
-        self.card_semi['frame'].mousePressEvent = lambda e: self._open_kline_dialog('MU', '美光/存储')
+        self.card_semi['frame'].mousePressEvent = lambda e: self._open_kline_dialog(
+            'SOXX' if e.pos().x() > self.card_semi['frame'].width() / 2 else 'MU',
+            '费城半导体 ETF' if e.pos().x() > self.card_semi['frame'].width() / 2 else '美光/存储'
+        )
 
         self.card_macro['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
-        self.card_macro['frame'].mousePressEvent = lambda e: self._open_kline_dialog('A50', '富时A50')
+        self.card_macro['frame'].mousePressEvent = lambda e: self._open_kline_dialog(
+            'USDCNH' if e.pos().x() > self.card_macro['frame'].width() / 2 else 'A50',
+            '离岸人民币' if e.pos().x() > self.card_macro['frame'].width() / 2 else '富时 A50 期货'
+        )
 
         self.card_commodity['frame'].setCursor(Qt.CursorShape.PointingHandCursor)
-        self.card_commodity['frame'].mousePressEvent = lambda e: self._open_kline_dialog('OIL', '美原油')
+        self.card_commodity['frame'].mousePressEvent = lambda e: self._open_kline_dialog(
+            'GOLD' if e.pos().x() > self.card_commodity['frame'].width() / 2 else 'BRENT',
+            'COMEX 纽约金 (黄金期货)' if e.pos().x() > self.card_commodity['frame'].width() / 2 else '布伦特原油主连 (ICE)'
+        )
 
         # Right Widget: 板块 Boost 提权看板
         right_widget = QWidget()
@@ -184,7 +196,7 @@ class GlobalMarketPanel(QWidget):
         self.tbl_boosts.setHorizontalHeaderLabels(b_headers)
         self.tbl_boosts.setup_persistence(
             config_key="ats_global_boosts_table_state",
-            default_widths=[120, 130, 100, 190, 200]
+            default_widths=[130, 160, 110, 200, 220]
         )
         self.tbl_boosts.itemDoubleClicked.connect(self._on_boost_table_double_clicked)
         right_layout.addWidget(self.tbl_boosts)
@@ -433,6 +445,7 @@ class GlobalMarketPanel(QWidget):
                 self.tbl_quotes.setItem(row_idx, col_idx, item)
 
         self.tbl_quotes.setSortingEnabled(True)
+        self.tbl_quotes.auto_fit_columns()
 
     def _update_boosts_table(self, boosts: dict):
         self.tbl_boosts.setSortingEnabled(False)
@@ -445,7 +458,9 @@ class GlobalMarketPanel(QWidget):
             "软件开发": "微软 (MSFT) / 谷歌 / 亚马逊",
             "国防军工": "富时 A50 期货 / 离岸 RMB",
             "汽车整车": "特斯拉 (TSLA) / 富时 A50 期货",
-            "有色金属": "美原油 (OIL) / 美黄金 (GOLD)"
+            "贵金属": "美黄金 (GOLD / COMEX 纽约金)",
+            "石油化工": "美原油 (OIL / 布伦特原油)",
+            "有色金属": "大宗商品 (美原油 / 美黄金)"
         }
 
         self.tbl_boosts.setRowCount(len(boosts))
@@ -492,6 +507,7 @@ class GlobalMarketPanel(QWidget):
                 self.tbl_boosts.setItem(row_idx, col_idx, item)
 
         self.tbl_boosts.setSortingEnabled(True)
+        self.tbl_boosts.auto_fit_columns()
 
     def _on_quotes_table_double_clicked(self, item):
         """双击外盘明细表格行，直接调起该资产 120 日 K 线图"""

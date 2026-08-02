@@ -10,13 +10,16 @@ MA5/MA20/MA60 动态均线、成交量 Subplot 柱状图、十字光标与磁盘
 import json
 import os
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter
 )
-from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QByteArray
 from PyQt6.QtGui import QColor, QPicture, QPainter, QPen, QBrush
 
 import pyqtgraph as pg
-from JSONData.global_market_data import fetch_global_kline_history, get_kline_cache_file_path
+from JSONData.global_market_data import (
+    fetch_global_kline_history, get_kline_cache_file_path,
+    get_related_symbols, fetch_global_market_quotes
+)
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
 
@@ -36,6 +39,23 @@ class KLineWorkerThread(QThread):
             self.finished_signal.emit(klines or [], "")
         except Exception as e:
             self.finished_signal.emit([], str(e))
+
+
+class RelatedKLineWorkerThread(QThread):
+    """后台并行抓取关联品种 K 线数据，不阻塞主 K 线渲染"""
+    finished_signal = pyqtSignal(str, list)  # symbol, klines
+
+    def __init__(self, symbol: str):
+        super().__init__()
+        self.symbol = symbol
+
+    def run(self):
+        try:
+            klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=False)
+            self.finished_signal.emit(self.symbol, klines or [])
+        except Exception as e:
+            self.finished_signal.emit(self.symbol, [])
+
 
 
 class DateAxisItem(pg.AxisItem):
@@ -192,9 +212,21 @@ class GlobalMarketKLineDialog(QDialog):
         self.worker = None
         self.chart_mode = 'candlestick'  # 'candlestick' 或 'ohlc'
         self.show_boll = True  # 布林线 BOLL 显示开关
+        self.zoom_mode = 'recent_60'  # 'recent_60' 或 'full_120'
+        # 关联走势: {symbol: klines}
+        self.related_symbols = get_related_symbols(self.symbol)
+        self._related_klines_cache = {}   # {symbol: [kline_dict, ...]}
+        self._related_workers = []        # RelatedKLineWorkerThread 列表 (防GC)
 
         self.setWindowTitle(f"📈 [{self.symbol} · {self.name}] 近 120 日外盘 K 线走势图")
-        self.resize(920, 580)
+        # 允许自由拉伸缩放，支持标准 Windows 最小化/最大化/关闭按键
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinMaxButtonsHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setMinimumSize(640, 420)
+        self.resize(960, 600)
         self.setStyleSheet("""
             QDialog {
                 background-color: #131722;
@@ -207,8 +239,8 @@ class GlobalMarketKLineDialog(QDialog):
         """)
 
         self._init_ui()
+        self._restore_settings()
         self._load_fast_cached_or_async()
-        self._restore_geometry()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -227,16 +259,34 @@ class GlobalMarketKLineDialog(QDialog):
         """)
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(10, 6, 10, 6)
+        header_layout.setSpacing(8)
 
         self.lbl_title = QLabel(f"🌐 {self.name} ({self.symbol})")
-        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 13pt;")
+        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 12.5pt;")
         header_layout.addWidget(self.lbl_title)
 
         self.lbl_price_info = QLabel("最新价: -- | 涨跌: --")
-        self.lbl_price_info.setStyleSheet("font-size: 11pt; font-weight: bold; margin-left: 15px;")
+        self.lbl_price_info.setStyleSheet("font-size: 10.5pt; font-weight: bold; margin-left: 10px;")
         header_layout.addWidget(self.lbl_price_info)
 
-        header_layout.addStretch()
+        # 关联品种实时涨跌标签 (仅当有关联品种时显示)
+        self.lbl_related_info = QLabel("")
+        self.lbl_related_info.setStyleSheet("""
+            QLabel {
+                font-size: 9pt;
+                color: #9db2c6;
+                margin-left: 8px;
+                padding: 2px 8px;
+                background: #1a1f2e;
+                border: 1px solid #2a2e39;
+                border-radius: 3px;
+            }
+        """)
+        if self.related_symbols:
+            header_layout.addWidget(self.lbl_related_info)
+        self._refresh_related_info_label()  # 先展示缓存实时报价
+
+        header_layout.addStretch(1)
 
         # BOLL 线开关按键
         self.btn_boll_toggle = QPushButton("📈 BOLL(20,2): 开")
@@ -250,6 +300,7 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 4px 10px;
                 font-size: 9pt;
                 font-weight: bold;
+                min-width: 105px;
             }
             QPushButton:hover {
                 background-color: #363c56;
@@ -270,6 +321,7 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 4px 10px;
                 font-size: 9pt;
                 font-weight: bold;
+                min-width: 110px;
             }
             QPushButton:hover {
                 background-color: #1e54b7;
@@ -279,9 +331,9 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_mode_toggle)
 
         # 视区快捷控制组
-        btn_focus_60 = QPushButton("🔍 最新60日")
-        btn_focus_60.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_focus_60.setStyleSheet("""
+        self.btn_focus_60 = QPushButton("🔍 最新60日")
+        self.btn_focus_60.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_focus_60.setStyleSheet("""
             QPushButton {
                 background-color: #2a2e39;
                 color: #d1d4dc;
@@ -289,18 +341,19 @@ class GlobalMarketKLineDialog(QDialog):
                 border-radius: 4px;
                 padding: 4px 8px;
                 font-size: 9pt;
+                min-width: 75px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
                 color: #ffffff;
             }
         """)
-        btn_focus_60.clicked.connect(self._focus_recent_60)
-        header_layout.addWidget(btn_focus_60)
+        self.btn_focus_60.clicked.connect(self._focus_recent_60)
+        header_layout.addWidget(self.btn_focus_60)
 
-        btn_focus_120 = QPushButton("🌐 120日全览")
-        btn_focus_120.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_focus_120.setStyleSheet("""
+        self.btn_focus_120 = QPushButton("🌐 120日全览")
+        self.btn_focus_120.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_focus_120.setStyleSheet("""
             QPushButton {
                 background-color: #2a2e39;
                 color: #d1d4dc;
@@ -308,14 +361,15 @@ class GlobalMarketKLineDialog(QDialog):
                 border-radius: 4px;
                 padding: 4px 8px;
                 font-size: 9pt;
+                min-width: 80px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
                 color: #ffffff;
             }
         """)
-        btn_focus_120.clicked.connect(self._focus_full_120)
-        header_layout.addWidget(btn_focus_120)
+        self.btn_focus_120.clicked.connect(self._focus_full_120)
+        header_layout.addWidget(self.btn_focus_120)
 
         layout.addWidget(header_frame)
 
@@ -333,44 +387,97 @@ class GlobalMarketKLineDialog(QDialog):
         """)
         layout.addWidget(self.lbl_info)
 
-        # ---------------- 3. pyqtgraph 图表区域 ----------------
-        self.graphics_widget = pg.GraphicsLayoutWidget()
-        self.graphics_widget.setBackground('#131722')
+        # ---------------- 3. 图表区域: QSplitter 包裹三个独立 GraphicsLayoutWidget ----------------
+        # 支持拖拽调整各子图高度比例并自动持久化
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.v_splitter.setHandleWidth(5)
+        self.v_splitter.setStyleSheet("""
+            QSplitter::handle {
+                background: #1e222d;
+                border-top: 1px solid #2a2e39;
+                border-bottom: 1px solid #2a2e39;
+            }
+            QSplitter::handle:hover {
+                background: #2962ff;
+                border-top: 1px solid #2962ff;
+                border-bottom: 1px solid #2962ff;
+            }
+            QSplitter::handle:pressed {
+                background: #1e54b7;
+            }
+        """)
 
-        # 构建自定义 DateAxis 与 VolumeAxis
+        # 3.1 主 K 线图窗口
+        self.gw_kline = pg.GraphicsLayoutWidget()
+        self.gw_kline.setBackground('#131722')
         self.date_axis = DateAxisItem(orientation='bottom')
         self.date_axis.setPen(pg.mkPen('#363c4e'))
         self.date_axis.setTextPen(pg.mkPen('#787b86'))
-
-        self.vol_axis = VolumeAxisItem(orientation='left')
-        self.vol_axis.setPen(pg.mkPen('#363c4e'))
-        self.vol_axis.setTextPen(pg.mkPen('#787b86'))
-
-        # 3.1 主 K 线 Plot (row 0)
-        self.p_kline = self.graphics_widget.addPlot(row=0, col=0, axisItems={'bottom': self.date_axis})
+        self.p_kline = self.gw_kline.addPlot(row=0, col=0, axisItems={'bottom': self.date_axis})
         self.p_kline.showGrid(x=True, y=True, alpha=0.18)
         self.p_kline.getAxis('left').setPen(pg.mkPen('#363c4e'))
         self.p_kline.getAxis('left').setTextPen(pg.mkPen('#787b86'))
-        self.p_kline.hideButtons()  # 隐藏左下角丑陋的 'A' 标按键
+        self.p_kline.hideButtons()
+        self.gw_kline.setMinimumHeight(200)
+        self.v_splitter.addWidget(self.gw_kline)
 
-        # 3.2 成交量 Subplot (row 1)
-        self.p_vol = self.graphics_widget.addPlot(row=1, col=0, axisItems={'left': self.vol_axis, 'bottom': DateAxisItem(orientation='bottom')})
+        # 3.2 成交量 Subplot 窗口
+        self.gw_vol = pg.GraphicsLayoutWidget()
+        self.gw_vol.setBackground('#131722')
+        self.vol_axis = VolumeAxisItem(orientation='left')
+        self.vol_axis.setPen(pg.mkPen('#363c4e'))
+        self.vol_axis.setTextPen(pg.mkPen('#787b86'))
+        self.p_vol = self.gw_vol.addPlot(
+            row=0, col=0,
+            axisItems={'left': self.vol_axis, 'bottom': DateAxisItem(orientation='bottom')}
+        )
         self.p_vol.showGrid(x=True, y=True, alpha=0.18)
-        self.p_vol.setMaximumHeight(125)
         self.p_vol.getAxis('bottom').setPen(pg.mkPen('#363c4e'))
         self.p_vol.getAxis('bottom').setTextPen(pg.mkPen('#787b86'))
         self.p_vol.hideButtons()
         self.p_vol.setXLink(self.p_kline)
+        self.gw_vol.setMinimumHeight(60)
+        self.v_splitter.addWidget(self.gw_vol)
 
-        layout.addWidget(self.graphics_widget)
+        layout.addWidget(self.v_splitter)
 
         # 十字光标 Crosshair
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#787b86', style=Qt.PenStyle.DashLine, width=1))
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('#787b86', style=Qt.PenStyle.DashLine, width=1))
         self.p_kline.addItem(self.v_line, ignoreBounds=True)
         self.p_kline.addItem(self.h_line, ignoreBounds=True)
-
         self.proxy = pg.SignalProxy(self.p_kline.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved)
+
+        # 3.3 关联走势对比子图窗口 (仅当有关联品种时创建)
+        self.p_related = None
+        self.gw_related = None
+        if self.related_symbols:
+            self.gw_related = pg.GraphicsLayoutWidget()
+            self.gw_related.setBackground('#131722')
+            rel_label = pg.AxisItem(orientation='left')
+            rel_label.setPen(pg.mkPen('#363c4e'))
+            rel_label.setTextPen(pg.mkPen('#787b86'))
+            self.p_related = self.gw_related.addPlot(
+                row=0, col=0,
+                axisItems={'left': rel_label, 'bottom': DateAxisItem(orientation='bottom')}
+            )
+            self.p_related.showGrid(x=True, y=True, alpha=0.15)
+            self.p_related.getAxis('bottom').setPen(pg.mkPen('#363c4e'))
+            self.p_related.getAxis('bottom').setTextPen(pg.mkPen('#787b86'))
+            self.p_related.hideButtons()
+            self.p_related.setXLink(self.p_kline)
+            self.gw_related.setMinimumHeight(80)
+            self.v_splitter.addWidget(self.gw_related)
+
+        # 初始化默认分割比例: 主 K线:60% / 成交量:20% / 关联走势:20%
+        if self.related_symbols:
+            self.v_splitter.setSizes([360, 120, 120])
+        else:
+            self.v_splitter.setSizes([420, 140])
+
+        # Splitter 变化时实时持久化 (拖动完成后)
+        self.v_splitter.splitterMoved.connect(self._on_splitter_moved)
+
 
     def _toggle_boll(self):
         """切换 BOLL 布林线显示状态"""
@@ -386,6 +493,7 @@ class GlobalMarketKLineDialog(QDialog):
                     padding: 4px 10px;
                     font-size: 9pt;
                     font-weight: bold;
+                    min-width: 105px;
                 }
                 QPushButton:hover {
                     background-color: #363c56;
@@ -401,11 +509,6 @@ class GlobalMarketKLineDialog(QDialog):
                     border-radius: 4px;
                     padding: 4px 10px;
                     font-size: 9pt;
-                }
-                QPushButton:hover {
-                    background-color: #2a2e39;
-                    color: #d1d4dc;
-                }
             """)
         self._draw_chart()
 
@@ -438,7 +541,9 @@ class GlobalMarketKLineDialog(QDialog):
             print(f"[GlobalMarketKLineDialog] 0ms 瞬间秒载本地 K线缓存 ({len(cached_klines)} 条) -> {self.symbol}")
             self.klines = cached_klines
             self._draw_chart()
-            self._focus_recent_60()
+            self._apply_zoom_mode()
+            # 异步加载关联品种 K 线
+            self._trigger_related_loads()
 
         # 后台异步抓取最新或静默刷新
         self._trigger_async_load(force_refresh=False if (cached_klines and len(cached_klines) >= 5) else True)
@@ -460,10 +565,159 @@ class GlobalMarketKLineDialog(QDialog):
             self.klines = klines
             print(f"[GlobalMarketKLineDialog] K线数据加载完成 ({len(klines)} 条)，物理文件: {cache_path}")
             self._draw_chart()
-            self._focus_recent_60()
+            self._apply_zoom_mode()
+            # 主 K 线数据就绪后再触发关联品种加载
+            self._trigger_related_loads()
         elif not self.klines:
             print(f"[GlobalMarketKLineDialog] K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
             self.lbl_info.setText(f"❌ K 线数据加载失败: {err_msg or '网络或解析异常'}")
+
+    def _refresh_related_info_label(self):
+        """刷新 Header 关联品种实时涨跌标签"""
+        if not self.related_symbols:
+            return
+        try:
+            quotes = fetch_global_market_quotes(force_refresh=False)
+            parts = []
+            for rel in self.related_symbols:
+                sym = rel['symbol']
+                name = rel['name']
+                q = quotes.get(sym, {})
+                if q and 'pct' in q:
+                    pct = float(q['pct'])
+                    color_tag = 'red' if pct >= 0 else 'green'
+                    parts.append(f"<font color='{color_tag}'>{name} {pct:+.2f}%</font>")
+                else:
+                    parts.append(f"{name} --")
+            if parts:
+                self.lbl_related_info.setText(' | '.join(parts))
+        except Exception:
+            pass
+
+    def _trigger_related_loads(self):
+        """后台异步加载各关联品种 K 线，不阻塞主图渲染"""
+        if not self.related_symbols or self.p_related is None:
+            return
+        # 先尝试从本地缓存块速加载
+        cache_path = get_kline_cache_file_path()
+        all_data = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    all_data = json.load(f)
+            except Exception:
+                pass
+
+        for rel in self.related_symbols:
+            sym = rel['symbol']
+            cached = all_data.get(sym, [])
+            if cached and len(cached) >= 10:
+                # 本地缓存存在，直接更新缓存并绘图
+                self._related_klines_cache[sym] = cached
+            else:
+                # 启动后台线程加载
+                w = RelatedKLineWorkerThread(sym)
+                w.finished_signal.connect(self._on_related_klines_loaded)
+                w.start()
+                self._related_workers.append(w)  # 防止被 GC
+
+        # 尝试即刻绘制已有缓存的关联走势
+        if self._related_klines_cache:
+            self._draw_related_chart()
+
+    def _on_related_klines_loaded(self, symbol: str, klines: list):
+        """关联品种 K 线后台成功回调"""
+        if klines and len(klines) >= 5:
+            self._related_klines_cache[symbol] = klines
+            self._draw_related_chart()
+
+    def _draw_related_chart(self):
+        """绘制关联走势对比子图 - 合并对齐日期后按特定起点归一化为百分比变化曲线"""
+        if not self.p_related or not self.klines:
+            return
+
+        self.p_related.clear()
+        n_main = len(self.klines)
+        main_dates = [item['date'] for item in self.klines]
+
+        # 主品种归一化基准线 (0% 基准线)
+        zero_line = pg.InfiniteLine(
+            angle=0, pos=0.0, movable=False,
+            pen=pg.mkPen('#363c4e', width=1, style=Qt.PenStyle.DashLine)
+        )
+        self.p_related.addItem(zero_line)
+
+        # 主品种归一化曲线
+        main_closes = [float(x['close']) for x in self.klines]
+        base0 = main_closes[0] if main_closes[0] != 0 else 1.0
+        main_pct = [(c / base0 - 1.0) * 100.0 for c in main_closes]
+        self.p_related.plot(
+            list(range(n_main)), main_pct,
+            pen=pg.mkPen('#00F0FF', width=2.0),
+            name=self.name
+        )
+
+        # 各关联品种归一化曲线
+        for rel in self.related_symbols:
+            sym = rel['symbol']
+            color = rel['color']
+            name = rel['name']
+            is_inverse = rel.get('inverse', False)
+
+            rel_klines = self._related_klines_cache.get(sym, [])
+            if not rel_klines:
+                continue
+
+            # 日期对齐: 找到与主 K 线对齐的起始日期
+            rel_dates = [item['date'] for item in rel_klines]
+            rel_closes_map = {item['date']: float(item['close']) for item in rel_klines}
+
+            # 按主 K 线日期对齐抗取关联品种收盘价
+            aligned_closes = []
+            aligned_x = []
+            for i, d in enumerate(main_dates):
+                c = rel_closes_map.get(d)
+                if c is not None and c > 0:
+                    aligned_closes.append(c)
+                    aligned_x.append(i)
+
+            if len(aligned_closes) < 5:
+                continue
+
+            base_c = aligned_closes[0]
+            if base_c == 0:
+                continue
+            rel_pct = [(c / base_c - 1.0) * 100.0 for c in aligned_closes]
+            if is_inverse:
+                rel_pct = [-v for v in rel_pct]
+
+            pen = pg.mkPen(color, width=1.5)
+            self.p_related.plot(aligned_x, rel_pct, pen=pen, name=f"{name}{'(反)' if is_inverse else ''}")
+
+            # 小标签显示最新百分比偷
+            if aligned_x and rel_pct:
+                last_x = aligned_x[-1]
+                last_y = rel_pct[-1]
+                inv_note = '[反相关]' if is_inverse else ''
+                label = pg.TextItem(
+                    text=f"{name}{inv_note} {last_y:+.1f}%",
+                    color=color,
+                    anchor=(0, 0.5)
+                )
+                self.p_related.addItem(label)
+                label.setPos(last_x + 0.5, last_y)
+
+        # 主品种标签
+        if main_pct:
+            main_label = pg.TextItem(
+                text=f"{self.name} {main_pct[-1]:+.1f}%",
+                color='#00F0FF',
+                anchor=(0, 0.5)
+            )
+            self.p_related.addItem(main_label)
+            main_label.setPos(n_main - 1 + 0.5, main_pct[-1])
+
+
 
     def _draw_chart(self):
         self.p_kline.clear()
@@ -581,18 +835,56 @@ class GlobalMarketKLineDialog(QDialog):
 
         self._update_info_banner(n - 1)
 
-    def _focus_recent_60(self):
+    def _apply_zoom_mode(self):
+        """根据 self.zoom_mode 自动应用视区并更新按键高亮"""
+        mode = getattr(self, 'zoom_mode', 'recent_60')
+        if mode == 'full_120':
+            self._focus_full_120(save=False)
+        else:
+            self._focus_recent_60(save=False)
+
+    def _focus_recent_60(self, save: bool = True):
         """缩放聚焦至最右侧最新 60 日"""
+        self.zoom_mode = 'recent_60'
         n = len(self.klines)
         if n > 0:
             start_x = max(0, n - 60)
             self.p_kline.setXRange(start_x, n, padding=0.02)
+        self._update_zoom_btn_style()
+        if save:
+            self._save_settings()
 
-    def _focus_full_120(self):
+    def _focus_full_120(self, save: bool = True):
         """全览近 120 日完整 K 线"""
+        self.zoom_mode = 'full_120'
         n = len(self.klines)
         if n > 0:
             self.p_kline.setXRange(0, n, padding=0.02)
+        self._update_zoom_btn_style()
+        if save:
+            self._save_settings()
+
+    def _update_zoom_btn_style(self):
+        """更新 60日 / 120日全览 按键的高亮对比状态"""
+        active_style = """
+            QPushButton {
+                background-color: #2962ff; color: #ffffff; font-weight: bold;
+                border: 1px solid #2962ff; border-radius: 4px; padding: 4px 10px; font-size: 8.5pt;
+            }
+        """
+        inactive_style = """
+            QPushButton {
+                background-color: #2a2e39; color: #d1d4dc;
+                border: 1px solid #363c4e; border-radius: 4px; padding: 4px 10px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #363c4e; color: #fff; }
+        """
+        if getattr(self, 'zoom_mode', 'recent_60') == 'full_120':
+            self.btn_focus_60.setStyleSheet(inactive_style)
+            self.btn_focus_120.setStyleSheet(active_style)
+        else:
+            self.btn_focus_60.setStyleSheet(active_style)
+            self.btn_focus_120.setStyleSheet(inactive_style)
 
     def _update_info_banner(self, idx: int):
         """更新顶部动态数据信息条"""
@@ -639,8 +931,8 @@ class GlobalMarketKLineDialog(QDialog):
                 self.h_line.setPos(mouse_point.y())
                 self._update_info_banner(x_idx)
 
-    def _restore_geometry(self):
-        """恢复物理窗口几何尺寸与位置"""
+    def _restore_settings(self):
+        """恢复物理窗口几何尺寸、模式、BOLL状态与视区"""
         try:
             cfg_path = get_conf_path("window_config.json", get_app_root())
             if os.path.exists(cfg_path):
@@ -655,11 +947,43 @@ class GlobalMarketKLineDialog(QDialog):
                     self.chart_mode = mode
                     if mode == 'ohlc':
                         self.btn_mode_toggle.setText("🕯️ 切换 蜡烛图(K线)")
+                    else:
+                        self.btn_mode_toggle.setText("📊 切换 OHLC(美国线)")
+                boll = data.get("ats_global_kline_dialog_boll")
+                if boll is not None:
+                    self.show_boll = bool(boll)
+                    if not self.show_boll:
+                        self.btn_boll_toggle.setText("📈 BOLL(20,2): 关")
+                        self.btn_boll_toggle.setStyleSheet("""
+                            QPushButton {
+                                background-color: #1e222d;
+                                color: #787b86;
+                                border: 1px solid #363c4e;
+                                border-radius: 4px;
+                                padding: 4px 10px;
+                                font-size: 9pt;
+                                font-weight: bold;
+                                min-width: 105px;
+                            }
+                            QPushButton:hover {
+                                background-color: #2a2e39;
+                                color: #d1d4dc;
+                            }
+                        """)
+                zoom = data.get("ats_global_kline_dialog_zoom")
+                if zoom in ['recent_60', 'full_120']:
+                    self.zoom_mode = zoom
+                    self._update_zoom_btn_style()
+                # 恢复 Splitter 分割比例 (延迟到 Layout 展示完成后)
+                splitter_sizes = data.get("ats_global_kline_splitter_sizes")
+                if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(60, lambda s=list(splitter_sizes): self.v_splitter.setSizes(s))
         except Exception:
             pass
 
-    def closeEvent(self, event):
-        """关闭事件，自动保存几何尺寸"""
+    def _save_settings(self):
+        """物理落盘持久化配置 (窗口几何、模式、BOLL、缩放状态、Splitter 分割比例)"""
         try:
             cfg_path = get_conf_path("window_config.json", get_app_root())
             with CONFIG_FILE_LOCK:
@@ -672,10 +996,31 @@ class GlobalMarketKLineDialog(QDialog):
                         data = {}
                 data["ats_global_kline_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
                 data["ats_global_kline_dialog_mode"] = self.chart_mode
+                data["ats_global_kline_dialog_boll"] = self.show_boll
+                data["ats_global_kline_dialog_zoom"] = self.zoom_mode
+                # 保存 Splitter 分割比例
+                sizes = self.v_splitter.sizes()
+                if sizes and any(s > 0 for s in sizes):
+                    data["ats_global_kline_splitter_sizes"] = list(sizes)
                 tmp_path = cfg_path + ".tmp_gkline"
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, cfg_path)
         except Exception:
             pass
+
+    def _on_splitter_moved(self, pos: int, index: int):
+        """Splitter 拖动时延迟 300ms 防抖后持久化分割比例。
+        splitterMoved 在拖动过程中高频触发，防抖避免频繁写盘。
+        """
+        if not hasattr(self, '_splitter_save_timer'):
+            from PyQt6.QtCore import QTimer
+            self._splitter_save_timer = QTimer(self)
+            self._splitter_save_timer.setSingleShot(True)
+            self._splitter_save_timer.timeout.connect(self._save_settings)
+        self._splitter_save_timer.start(300)
+
+    def closeEvent(self, event):
+        """关闭事件，自动持久化配置与尺寸"""
+        self._save_settings()
         super().closeEvent(event)

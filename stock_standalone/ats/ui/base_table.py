@@ -123,6 +123,7 @@ class BaseATSTableWidget(QTableWidget):
         # Default styling matching high-end dark theme
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)  # 默认单元格禁止编辑
         self.verticalHeader().setVisible(False)
         self.setSortingEnabled(True)
         self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -266,8 +267,45 @@ class BaseATSTableWidget(QTableWidget):
             fav_action = QAction(f"⭐ 设为重点关注 {code_clean}", self)
         fav_action.triggered.connect(lambda: self._toggle_favorite(code_clean))
         menu.addAction(fav_action)
-        
+
+        menu.addSeparator()
+
+        # ✏️ 右键编辑单元格选项
+        edit_action = QAction(f"✏️ 编辑当前单元格内容", self)
+        edit_action.triggered.connect(lambda: self._edit_current_cell(item))
+        menu.addAction(edit_action)
+
+        # ↔️ 右键一键自适应全列宽选项
+        fit_action = QAction("↔️ 一键自适应全列宽", self)
+        fit_action.triggered.connect(self.auto_fit_columns)
+        menu.addAction(fit_action)
+
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def auto_fit_columns(self, min_col_width: int = 75, extra_padding: int = 18):
+        """按列单元格真实文本长度自适应调整全列宽度"""
+        self.resizeColumnsToContents()
+        for col in range(self.columnCount()):
+            w = self.columnWidth(col)
+            self.setColumnWidth(col, max(w + extra_padding, min_col_width))
+        if hasattr(self, 'save_header_state'):
+            self.save_header_state()
+
+    def _edit_current_cell(self, item):
+        """右键弹出编辑当前单元格内容窗口并自适应列宽"""
+        if not item:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        current_text = item.text()
+        new_text, ok = QInputDialog.getText(
+            self,
+            "✏️ 编辑单元格内容",
+            f"修改第 {item.row()+1} 行第 {item.column()+1} 列内容:",
+            text=current_text
+        )
+        if ok and new_text is not None:
+            item.setText(new_text.strip())
+            self.auto_fit_columns()
 
     def _toggle_favorite(self, code):
         try:
