@@ -20,7 +20,7 @@ import pyqtgraph as pg
 from JSONData.global_market_data import (
     fetch_global_kline_history, get_kline_cache_file_path,
     get_related_symbols, fetch_global_market_quotes,
-    fetch_symbol_financial_news
+    fetch_symbol_financial_news, get_proxy_info_str
 )
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
@@ -995,7 +995,7 @@ class GlobalMarketKLineDialog(QDialog):
         """0 毫秒极速读取本地 JSON 缓存；若无缓存则触发后台异步线程"""
         src_key = (self.data_source or 'yahoo').lower()
         cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
-        print(f"[GlobalMarketKLineDialog] 检查 [{src_key}] 外盘 K线物理持久化文件路径: {cache_path}")
+        print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 检查 [{src_key}] 外盘 K线物理持久化文件路径: {cache_path}")
         cached_klines = []
         if os.path.exists(cache_path):
             try:
@@ -1003,12 +1003,12 @@ class GlobalMarketKLineDialog(QDialog):
                     all_data = json.load(f)
                     cached_klines = all_data.get(self.symbol, [])
             except Exception as ex:
-                print(f"[GlobalMarketKLineDialog] 读取本地 K线缓存文件异常: {ex}")
+                print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 读取本地 K线缓存文件异常: {ex}")
                 cached_klines = []
 
         if cached_klines and len(cached_klines) >= 5:
             # 本地有缓存，瞬间秒载渲染，无任何卡顿！
-            print(f"[GlobalMarketKLineDialog] 0ms 瞬间秒载 [{src_key}] 本地 K线缓存 ({len(cached_klines)} 条) -> {self.symbol}")
+            print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 0ms 瞬间秒载 [{src_key}] 本地 K线缓存 ({len(cached_klines)} 条) -> {self.symbol}")
             self.klines = cached_klines
             self._draw_chart()
             self._apply_zoom_mode()
@@ -1018,7 +1018,7 @@ class GlobalMarketKLineDialog(QDialog):
             # 非外盘交易窗口 (如周末/休市)，已有缓存直接锁定，绝对不触发异步网络请求！
             from JSONData.global_market_data import is_market_active_time
             if not is_market_active_time():
-                print(f"[GlobalMarketKLineDialog] 当前处于外盘休市/非交易时间，已命中本地物理 JSON 缓存，停止网络抓取 -> {self.symbol}")
+                print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 当前处于外盘休市/非交易时间，已命中本地物理 JSON 缓存，停止网络抓取 -> {self.symbol}")
                 return
 
         # 后台异步抓取最新或静默刷新
@@ -1039,13 +1039,13 @@ class GlobalMarketKLineDialog(QDialog):
         cache_path = get_kline_cache_file_path()
         if klines and len(klines) >= 5:
             self.klines = klines
-            print(f"[GlobalMarketKLineDialog] K线数据加载完成 ({len(klines)} 条)，物理文件: {cache_path}")
+            print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载完成 ({len(klines)} 条)，物理文件: {cache_path}")
             self._draw_chart()
             self._apply_zoom_mode()
             # 主 K 线数据就绪后再触发关联品种加载
             self._trigger_related_loads()
         elif not self.klines:
-            print(f"[GlobalMarketKLineDialog] K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
+            print(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
             self.lbl_info.setText(f"❌ K 线数据加载失败: {err_msg or '网络或解析异常'}")
 
     def _refresh_related_info_label(self):

@@ -1,3 +1,9 @@
+## 2026-08-03 03:35
+- [x] **实现外盘抓取全流程 Proxy 代理状态可解释性日志增强 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_proxy_info_logging.py`)**：
+    - [x] **设计 `get_proxy_info_str()` 统一状态获取 helper**：在 `JSONData/global_market_data.py` 中引入 `get_proxy_info_str()` 函数，实时动态提取当前 Proxy 配置；按格式返回 `[Proxy: ON - http://...]` (代理开启)、`[Proxy: OFF - 直连(配置: http://...)]` (代理关闭但保留配置) 或 `[Proxy: OFF - 纯直连]`。
+    - [x] **全流程数据抓取与 K 线弹窗日志注入**：在 `fetch_global_kline_history` 及其子模块 (`_fetch_from_tencent`, `_fetch_from_sina`, `_fetch_from_yahoo`) 和 `GlobalMarketKLineDialog` 的缓存判断/网络加载日志中全量注入 `get_proxy_info_str()`，让控制台与 log 100% 随时看清网络请求路径。
+    - [x] **单元测试全量 100% 成功通过**：新建 `scratch/test_proxy_info_logging.py` 校验 3 种 Proxy 状态格式化及网络抓取日志打印，结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 03:12
 - [x] **实现外盘主窗口 (`GlobalMarketDialog`) 禁用 Esc 键关闭功能 (`ats/ui/global_market_dialog.py`, `scratch/test_global_market_esc_disabled.py`)**：
     - [x] **重写 keyPressEvent 阻断 Esc 关闭**：在 `GlobalMarketDialog` 中重写 `keyPressEvent`，精准阻断 `Qt.Key.Key_Escape` 快捷键（`event.ignore()` 并 return），物理防范因误触 Esc 键导致外盘主窗口误关隐藏。
