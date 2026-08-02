@@ -99,8 +99,13 @@ class GlobalMarketPanel(QWidget):
 
         header_layout.addStretch()
 
+        self.btn_proxy_config = QPushButton("🌐 代理: 关")
+        self.btn_proxy_config.clicked.connect(self._open_proxy_dialog)
+        self._update_proxy_btn_style()
+        header_layout.addWidget(self.btn_proxy_config)
+
         self.lbl_update_time = QLabel("最后更新: --:--:--")
-        self.lbl_update_time.setStyleSheet("color: #aaa; font-size: 8.5pt; margin-right: 6px;")
+        self.lbl_update_time.setStyleSheet("color: #aaa; font-size: 8.5pt; margin-left: 4px; margin-right: 6px;")
         header_layout.addWidget(self.lbl_update_time)
 
         self.btn_refresh = QPushButton("🔄 强制实时刷新外盘")
@@ -116,6 +121,7 @@ class GlobalMarketPanel(QWidget):
         header_layout.addWidget(self.btn_refresh)
 
         layout.addWidget(header_frame)
+
 
         # ---------------- 2. 上下垂直主 Splitter (v_splitter) ----------------
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -802,4 +808,65 @@ class GlobalMarketPanel(QWidget):
         sec_item = self.tbl_boosts.item(row, 0)
         if sec_item:
             sec_name = sec_item.text().strip().replace("📌 ", "")
-            self.sector_selected.emit(sec_name)
+            from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
+            dlg = ATSSectorDetailDialog(sec_name, parent=self)
+            dlg.exec()
+
+    def _update_proxy_btn_style(self):
+        """更新 🌐 代理: 开/关 按键高亮与显示文本"""
+        try:
+            from JSONData.global_market_data import get_proxy_config
+            cfg = get_proxy_config()
+            enabled = cfg.get("enabled", False)
+            p_url = cfg.get("proxy_url", "")
+            port = p_url.split(":")[-1] if ":" in p_url else ""
+
+            if enabled:
+                btn_txt = f"🌐 代理: 开({port})" if port else "🌐 代理: 开"
+                self.btn_proxy_config.setText(btn_txt)
+                self.btn_proxy_config.setStyleSheet("""
+                    QPushButton {
+                        background-color: #00E5FF;
+                        color: #000000;
+                        font-weight: bold;
+                        border: 1px solid #00E5FF;
+                        border-radius: 3px;
+                        padding: 3px 8px;
+                        font-size: 8.5pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #33ebff;
+                    }
+                """)
+            else:
+                self.btn_proxy_config.setText("🌐 代理: 关")
+                self.btn_proxy_config.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1e222d;
+                        color: #787b86;
+                        font-weight: bold;
+                        border: 1px solid #363c4e;
+                        border-radius: 3px;
+                        padding: 3px 8px;
+                        font-size: 8.5pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #2a2e39;
+                        color: #d1d4dc;
+                    }
+                """)
+        except Exception as ex:
+            print(f"[GlobalMarketPanel] 更新代理按键状态异常: {ex}")
+
+    def _open_proxy_dialog(self):
+        """调起网络代理设置弹窗"""
+        try:
+            from ats.ui.proxy_dialog import ProxySettingsDialog
+            dlg = ProxySettingsDialog(parent=self)
+            if dlg.exec() == 1:
+                self._update_proxy_btn_style()
+                # 重新强刷数据
+                self.refresh_data(force=True)
+        except Exception as ex:
+            print(f"[GlobalMarketPanel] 调起代理弹窗异常: {ex}")
+

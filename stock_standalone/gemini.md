@@ -1,3 +1,16 @@
+## 2026-08-03 00:06
+- [x] **彻底根治代理连通性测试 QThread 销毁崩溃与 UI 测试死锁保护 (`ats/ui/proxy_dialog.py`, `scratch/test_proxy_and_ui.py`)**：
+    - [x] **重构为纯 Python `threading.Thread(daemon=True)` + `ProxyTestSignalBridge(QObject)`**：彻底摒弃继承 `QThread` 带来的 PyQt C++ 对象树销毁检测，改为轻量、无死锁的 daemon 守护线程与 QObject 信号桥解耦。用户在测试过程中随时保存、取消或关闭外盘窗口，绝不下发 `QThread: Destroyed while thread is still running` 致命崩溃。
+    - [x] **测试状态 UI 全防误触互锁锁定 (`_set_ui_testing_state`)**：在点击 `⚡ 测试连通性` 6 秒期间，自动防误触禁用“💾 保存配置”、“取消”、输入框与勾选框，并将测试按键设为 `⏳ 测试中...`；测试完成或弹窗关闭后瞬间安全恢复。
+    - [x] **自动化 & 单元测试 100% 校验通过**：`scratch/test_proxy_and_ui.py` (3/3 passed) 与 `tests/test_signal_ledger.py` (11/11 passed) 全量断言与 14 项单元测试 100% 成功通过！
+
+## 2026-08-02 23:55
+- [x] **实现外盘/全系统 Proxy 代理配置弹窗、物理 JSON 持久化与 Yahoo/Sina 抓取代理穿透 (`ats/ui/proxy_dialog.py`, `JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_proxy_and_ui.py`)**：
+    - [x] **网络代理 (Proxy) 设置弹窗 (`ProxySettingsDialog`)**：新建 `ats/ui/proxy_dialog.py`，支持一键开/关 HTTP / SOCKS5 代理、Server 地址修改与一键 `⚡ 测试连通性` (后台 `ProxyTestWorker` 线程 6 秒超时并发测试)。原生接入 `QMessageBox` 交互提示，干净高质。
+    - [x] **物理 JSON 原子持久化与 Opener 注入 (`JSONData/global_market_data.py`)**：在 `JSONData/global_market_data.py` 中引入 `get_proxy_config()`, `save_proxy_config()` 与 `get_urllib_request_opener()`；配置原子物理落盘至 `window_config.json` 中的 `ats_proxy_config` 节点。在 Yahoo 在线抓取管道 (`_fetch_from_yahoo`) 中自动注入 `urllib.request.ProxyHandler`，保障代理开启时数据流瞬间穿透获取。
+    - [x] **看板 Header 与 K 线走势弹窗双重 `🌐 代理: 开/关` 按键控制 (`ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`)**：在 `GlobalMarketPanel` 与 `GlobalMarketKLineDialog` 顶部 Header 控件组中各放置一个 `🌐 代理: 开(端口)` 高亮按键。点击可随时调起 `ProxySettingsDialog` 弹窗进行实时配置，保存后瞬间更新按键显示并自动触发数据重载。
+    - [x] **自动化 & 核心单元测试 100% 校验通过**：`scratch/test_proxy_and_ui.py` (3/3 passed) 与 `tests/test_signal_ledger.py` (11/11 passed) 全量断言与 14 项单元测试 100% 成功通过！
+
 ## 2026-08-02 23:18
 - [x] **根治表格置顶未在最顶部显示漏洞、实现最新置顶最高优先级与右侧板块右键优先置顶 (`ats/ui/global_market_panel.py`, `scratch/test_pinning_priority_and_sectors.py`)**：
     - [x] **彻底根治置顶未在最顶部显示漏洞**：彻底剔除数据装载后调用 `tbl_quotes.setSortingEnabled(True)` 与 `tbl_boosts.setSortingEnabled(True)` 导致 Qt 盲目按第 0 列纯文本字典序排序将置顶项打乱覆盖的物理 Bug。统一采用 `setSortingEnabled(False)`，完全保留 Python 层精心设计的 `_get_sort_key` 算法，保证置顶项 **100% 恒定置顶在表格最最最顶部**。
