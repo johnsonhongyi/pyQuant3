@@ -267,8 +267,8 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
                 val = last_c[col]
                 row[col] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
 
-    # 寻找包含有效通道数据的最小周期后缀 ('', 'd', '2d', '3d', 'w', 'm', '45d', '3m')
-    period_candidates = ['', 'd', '2d', '3d', 'w', 'm', '45d', '3M']
+    # 寻找包含有效通道数据的最小周期后缀 ('', 'd', '2d', '3d', 'w', 'm', '3m', '45d', '3M')
+    period_candidates = ['', 'd', '2d', '3d', 'w', 'm', '3m', '45d', '3M']
     selected_suffix = None
     
     for suf in period_candidates:
@@ -401,6 +401,79 @@ def format_check_result(results: List[Dict[str, Any]]) -> str:
 
 
 
+def apply_colored_text_tk(st_widget, text: str):
+    """
+    为 Tkinter ScrolledText 控件应用暗黑高对比度彩色高亮解析 (跟 PyQt6 界面 100% 精准对齐)
+    """
+    st_widget.config(state=tk.NORMAL)
+    st_widget.delete("1.0", tk.END)
+
+    # 1. 配置高对比度彩色 Style 标签
+    st_widget.tag_configure("title", foreground="#FFD54F", font=("Consolas", 10, "bold"))
+    st_widget.tag_configure("divider", foreground="#546E7A", font=("Consolas", 9))
+    st_widget.tag_configure("success", foreground="#00E676", font=("Consolas", 10, "bold"))
+    st_widget.tag_configure("danger", foreground="#FF5252", font=("Consolas", 10, "bold"))
+    st_widget.tag_configure("info_key", foreground="#FFB74D", font=("Consolas", 10, "bold"))
+    st_widget.tag_configure("sub_key", foreground="#81D4FA", font=("Consolas", 9, "bold"))
+    st_widget.tag_configure("val_highlight", foreground="#FFF176", font=("Consolas", 9, "bold"))
+    st_widget.tag_configure("normal", foreground="#E2E2E5", font=("Consolas", 9))
+
+    lines = text.split("\n")
+    for line in lines:
+        if line.startswith("===") or line.startswith("📊") or line.startswith("=== 🎯"):
+            st_widget.insert(tk.END, line + "\n", "title")
+        elif line.startswith("---") or line.startswith("=================="):
+            st_widget.insert(tk.END, line + "\n", "divider")
+        elif "✅ 是" in line or "✅ 全部通过" in line or "✅ 命中" in line:
+            parts = line.split("✅")
+            st_widget.insert(tk.END, parts[0], "normal")
+            st_widget.insert(tk.END, "✅" + parts[1], "success")
+            st_widget.insert(tk.END, "\n")
+        elif "❌ 否" in line or "❌ 未能" in line or "❌ 未命中" in line:
+            parts = line.split("❌")
+            st_widget.insert(tk.END, parts[0], "normal")
+            st_widget.insert(tk.END, "❌" + parts[1], "danger")
+            st_widget.insert(tk.END, "\n")
+        elif line.strip().startswith("【多空方向】"):
+            st_widget.insert(tk.END, "【多空方向】: ", "info_key")
+            rest = line.split("【多空方向】:", 1)[-1]
+            if "🔥" in rest or "🟢" in rest or "突破" in rest or "控盘" in rest:
+                st_widget.insert(tk.END, rest + "\n", "success")
+            elif "🔴" in rest or "空头" in rest or "避险" in rest:
+                st_widget.insert(tk.END, rest + "\n", "danger")
+            else:
+                st_widget.insert(tk.END, rest + "\n", "val_highlight")
+        elif line.strip().startswith("【操作选择】"):
+            st_widget.insert(tk.END, "【操作选择】: ", "info_key")
+            rest = line.split("【操作选择】:", 1)[-1]
+            st_widget.insert(tk.END, rest + "\n", "val_highlight")
+        elif line.strip().startswith("【实盘路线图指引】"):
+            st_widget.insert(tk.END, line + "\n", "info_key")
+        elif "🟢 ① 买入" in line or "买入 / 加仓" in line:
+            st_widget.insert(tk.END, line + "\n", "success")
+        elif "🔴 ② 止盈" in line or "止盈 / 卖出" in line or "止损" in line:
+            st_widget.insert(tk.END, line + "\n", "danger")
+        elif "  ├─ 低吸/买入" in line:
+            st_widget.insert(tk.END, line + "\n", "success")
+        elif "  ├─ 持股/观望" in line:
+            st_widget.insert(tk.END, line + "\n", "val_highlight")
+        elif "  └─ 止损/离场" in line:
+            st_widget.insert(tk.END, line + "\n", "danger")
+        elif "是否通过:" in line:
+            st_widget.insert(tk.END, "  是否通过: ", "sub_key")
+            rest = line.split("是否通过:", 1)[-1]
+            tag = "success" if "✅" in rest else ("danger" if "❌" in rest else "normal")
+            st_widget.insert(tk.END, rest + "\n", tag)
+        elif line.strip().startswith("- ") and ":" in line:
+            k_part, v_part = line.split(":", 1)
+            st_widget.insert(tk.END, k_part + ":", "sub_key")
+            st_widget.insert(tk.END, v_part + "\n", "val_highlight")
+        else:
+            st_widget.insert(tk.END, line + "\n", "normal")
+
+    st_widget.config(state=tk.DISABLED)
+
+
 def check_code(
     df: pd.DataFrame,
     code: str,
@@ -408,7 +481,7 @@ def check_code(
     parent=None
 ) -> Any:
     """
-    使用 Tk 自定义弹窗显示股票检查报告，并支持显示字段详情。
+    使用 Tk 自定义弹窗显示股票检查报告，并支持显示字段详情（暗黑彩色高亮主题）。
     """
     if code not in df.index:
         messagebox.showwarning(
@@ -426,7 +499,7 @@ def check_code(
     first_row = report[0].get("full_data", {}) if report else {}
     channel_strat_text = generate_channel_strategy_text(first_row, df_code)
     
-    summary_text = header + (channel_strat_text + "\n" if channel_strat_text else "") + format_check_result(report)
+    summary_text = header + (channel_strat_text + "\n\n" if channel_strat_text else "") + format_check_result(report)
     
     # 智能检查环境并做安全隔离。如果是在非 Tk (如 PyQt) 环境调用 check_code，
     # 我们创建一个隐藏的 tk.Tk() 主窗口，防止多出一个丑陋的空白小 Tk 窗口，
@@ -446,7 +519,7 @@ def check_code(
     else:
         win = tk.Toplevel(parent or current_root)
     win.title(f"股票检查报告 - {code} {name}")
-    bg_color = "#E3F2FD"  # 淡蓝色背景
+    bg_color = "#0c0d14"  # 暗黑专业主背景
     win.configure(bg=bg_color)
     report_win_name = "check_report_win"
     w_win, h_win = 750, 500
@@ -489,12 +562,11 @@ def check_code(
     win.bind("<Escape>", lambda e: on_close_report())
     win.lift()
     win.focus_force()
-    # 结果显示区域
-    tk.Label(win, text="[ 检查结果摘要 ]", font=("微软雅黑", 10, "bold"), bg=bg_color).pack(anchor="w", padx=10, pady=5)
-    st = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=15)
+    # 结果显示区域 (暗黑主题与彩色高亮)
+    tk.Label(win, text="[ 检查结果摘要 ]", font=("微软雅黑", 10, "bold"), bg=bg_color, fg="#e2e2e5").pack(anchor="w", padx=10, pady=5)
+    st = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=15, bg="#12131a", fg="#e2e2e5", insertbackground="#ffffff", selectbackground="#264f78")
     st.pack(fill="both", expand=True, padx=10, pady=5)
-    st.insert(tk.END, summary_text)
-    st.config(state=tk.DISABLED)
+    apply_colored_text_tk(st, summary_text)
     def show_all_details():
         """显示所有字段的值 (按顺序 col: 值)"""
         details_win = tk.Toplevel(win)
@@ -576,24 +648,20 @@ def check_code(
         for c in df.columns:
             lines.append(f"  {c}: {row_dict.get(c, 'N/A')}")
         detail_text = "\n".join(lines)
-        dst = scrolledtext.ScrolledText(details_win, wrap=tk.WORD)
+        dst = scrolledtext.ScrolledText(details_win, wrap=tk.WORD, bg="#12131a", fg="#e2e2e5", insertbackground="#ffffff", selectbackground="#264f78")
         dst.pack(fill="both", expand=True, padx=10, pady=10)
-        dst.insert(tk.END, detail_text)
-        dst.config(state=tk.DISABLED)
+        apply_colored_text_tk(dst, detail_text)
         # 增加一个简单的查找/过滤功能
         filter_frame = tk.Frame(details_win, bg=bg_color)
         filter_frame.pack(fill="x", padx=10, pady=5)
-        tk.Label(filter_frame, text="过滤字段:", bg=bg_color).pack(side="left")
+        tk.Label(filter_frame, text="过滤字段:", bg=bg_color, fg="#e2e2e5").pack(side="left")
         search_var = tk.StringVar()
-        search_entry = tk.Entry(filter_frame, textvariable=search_var)
+        search_entry = tk.Entry(filter_frame, textvariable=search_var, bg="#12131a", fg="#ffffff", insertbackground="#ffffff")
         search_entry.pack(side="left", fill="x", expand=True, padx=5)
         def on_search(*args):
             query = search_var.get().lower()
             filtered_lines = [line for line in lines if query in line.lower()]
-            dst.config(state=tk.NORMAL)
-            dst.delete("1.0", tk.END)
-            dst.insert(tk.END, "\n".join(filtered_lines))
-            dst.config(state=tk.DISABLED)
+            apply_colored_text_tk(dst, "\n".join(filtered_lines))
         search_var.trace_add("write", on_search)
         search_entry.focus_set()
     # 按钮栏
@@ -602,7 +670,7 @@ def check_code(
     btn_frame.pack(fill="x", pady=10, side="bottom") # 显式设置在底部
     
     # [NEW] 优先 pack 左右两端的固定按钮，确保它们可见
-    btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report)
+    btn_close = tk.Button(btn_frame, text="关闭窗口", command=on_close_report, bg="#2d2e3b", fg="#ffffff", font=("微软雅黑", 9))
     btn_close.pack(side="right", padx=20)
 
     btn_details = tk.Button(btn_frame, text="显示详情", command=show_all_details, 
@@ -613,7 +681,7 @@ def check_code(
     manual_frame = tk.Frame(btn_frame, bg=bg_color)
     manual_frame.pack(side="left", fill="x", expand=True)
 
-    tk.Label(manual_frame, text="历史:", bg=bg_color).pack(side="left")
+    tk.Label(manual_frame, text="历史:", bg=bg_color, fg="#e2e2e5").pack(side="left")
     
     # 构建历史选项列表
     history_options = []
@@ -644,12 +712,12 @@ def check_code(
             except: pass
 
     opt_menu = tk.OptionMenu(manual_frame, selected_hist, *history_options, command=on_history_change)
-    opt_menu.config(width=12)
+    opt_menu.config(width=12, bg="#12131a", fg="#e2e2e5", highlightthickness=0)
     opt_menu.pack(side="left", padx=5)
 
-    tk.Label(manual_frame, text="手动测试:", bg=bg_color).pack(side="left", padx=(10, 0))
+    tk.Label(manual_frame, text="手动测试:", bg=bg_color, fg="#e2e2e5").pack(side="left", padx=(10, 0))
     manual_expr_var = tk.StringVar()
-    manual_entry = tk.Entry(manual_frame, textvariable=manual_expr_var)
+    manual_entry = tk.Entry(manual_frame, textvariable=manual_expr_var, bg="#12131a", fg="#ffffff", insertbackground="#ffffff")
     manual_entry.pack(side="left", fill="x", expand=True, padx=5)
 
     def run_manual_test(expr=None):
@@ -661,10 +729,12 @@ def check_code(
         res = test_code_query(df_code, [{"expr": target_expr}])
         summary = format_check_result(res)
         
-        # 解锁 ScrolledText 并追加内容
+        # 追加彩文内容
+        append_header = f"\n{'='*20} 手动测试: {datetime.now().strftime('%H:%M:%S')} {'='*20}\n"
+        current_text = st.get("1.0", tk.END).rstrip("\n")
+        full_text_to_append = current_text + "\n" + append_header + summary
+        apply_colored_text_tk(st, full_text_to_append)
         st.config(state=tk.NORMAL)
-        st.insert(tk.END, f"\n{'='*20} 手动测试: {datetime.now().strftime('%H:%M:%S')} {'='*20}\n")
-        st.insert(tk.END, summary)
         st.see(tk.END) # 自动滚动到底部
         st.config(state=tk.DISABLED)
 
