@@ -26,7 +26,7 @@ from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_AC
 
 class GlobalMarketWorker(QThread):
     """后台异步抓取/更新外盘行情 worker"""
-    finished_signal = pyqtSignal(dict, float, str, dict) # quotes, score, label, sector_boosts
+    finished_signal = pyqtSignal(dict, float, str, dict, dict) # quotes, score, label, sector_boosts, metadata
 
     def __init__(self, force_refresh: bool = False, parent=None):
         super().__init__(parent)
@@ -37,11 +37,22 @@ class GlobalMarketWorker(QThread):
             from JSONData.global_market_data import (
                 fetch_global_market_quotes,
                 get_global_sentiment_score,
-                get_sector_global_boost
+                get_sector_global_boost,
+                get_global_market_quotes_metadata,
+                fetch_symbol_financial_news
             )
 
             quotes = fetch_global_market_quotes(force_refresh=self.force_refresh)
             score, label = get_global_sentiment_score()
+            meta = get_global_market_quotes_metadata()
+            meta['force_refresh'] = self.force_refresh
+
+            # 若强制刷新，同步预刷新自选热榜新闻
+            if self.force_refresh:
+                try:
+                    fetch_symbol_financial_news('A50', '富时A50', force_refresh=True)
+                except Exception:
+                    pass
 
             sectors = ["存储芯片", "半导体", "传媒", "软件开发", "国防军工", "汽车整车", "贵金属", "石油化工", "有色金属"]
             boosts = {}
@@ -49,9 +60,9 @@ class GlobalMarketWorker(QThread):
                 b_val, g_tag = get_sector_global_boost(sec)
                 boosts[sec] = (b_val, g_tag)
 
-            self.finished_signal.emit(quotes, score, label, boosts)
+            self.finished_signal.emit(quotes, score, label, boosts, meta)
         except Exception as e:
-            self.finished_signal.emit({}, 0.0, f"⚠️ 更新失败: {e}", {})
+            self.finished_signal.emit({}, 0.0, f"⚠️ 更新失败: {e}", {}, {'is_live_network': False, 'error': str(e)})
 
 
 class GlobalMarketPanel(QWidget):
@@ -328,11 +339,27 @@ class GlobalMarketPanel(QWidget):
         return {'frame': frame, 'main': lbl_main, 'sub': lbl_sub}
 
     def _start_auto_refresh_timer(self):
-        """启动定时刷新 (每 60 秒自动更新界面)"""
+        """启动定时刷新 (根据统一的交易期/非交易期阈值时间自动更新界面)"""
+        try:
+            from JSONData.global_market_data import get_global_market_cache_ttl
+            interval_sec = get_global_market_cache_ttl()
+        except Exception:
+            interval_sec = 60.0
+
         self._timer = QTimer(self)
-        self._timer.setInterval(60000)
-        self._timer.timeout.connect(lambda: self.refresh_data(force=False))
+        self._timer.setInterval(int(interval_sec * 1000))
+        self._timer.timeout.connect(self._on_auto_timer_timeout)
         self._timer.start()
+
+    def _on_auto_timer_timeout(self):
+        """定时器到期回调: 重新检测并动态调整轮询间隔，并触发无感增量刷新"""
+        try:
+            from JSONData.global_market_data import get_global_market_cache_ttl
+            interval_sec = get_global_market_cache_ttl()
+            self._timer.setInterval(int(interval_sec * 1000))
+        except Exception:
+            pass
+        self.refresh_data(force=False)
 
     def refresh_data(self, force: bool = False):
         """调起后台 worker 刷新数据"""
@@ -346,12 +373,22 @@ class GlobalMarketPanel(QWidget):
         self._worker.finished_signal.connect(self._on_worker_finished)
         self._worker.start()
 
-    def _on_worker_finished(self, quotes: dict, score: float, label: str, boosts: dict):
+    def _on_worker_finished(self, quotes: dict, score: float, label: str, boosts: dict, meta: dict = None):
         self.btn_refresh.setEnabled(True)
         self.btn_refresh.setText("🔄 强制实时刷新外盘")
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
-        self.lbl_update_time.setText(f"最后更新: {now_str}")
+        meta = meta or {}
+        is_live = meta.get('is_live_network', False)
+        is_force = meta.get('force_refresh', False)
+        q_count = len(quotes)
+
+        # 检查价格数据是否有变动
+        changed_syms = []
+        for sym, item in quotes.items():
+            old_item = self._last_quotes.get(sym, {})
+            if old_item and (old_item.get('price') != item.get('price') or old_item.get('pct') != item.get('pct')):
+                changed_syms.append(sym)
 
         # 1. 更新顶部 Sentiment Label
         score_color = COLOR_UP if score > 10.0 else (COLOR_DOWN if score < -10.0 else COLOR_ACCENT)
@@ -360,8 +397,21 @@ class GlobalMarketPanel(QWidget):
 
         from JSONData.global_market_data import is_market_active_time
         active_time = is_market_active_time()
-        status_str = "交易日活跃窗口 (实时更新)" if active_time else "盘后/非交易日 (30分钟/磁盘 Cache 模式)"
+
+        if is_live:
+            if changed_syms:
+                status_str = f"✅ 网络在线抓取成功 ({q_count} 项, {', '.join(changed_syms[:3])} 等最新价变动)"
+            elif is_force:
+                status_str = f"✅ 手动强制刷新完成 (已是最新 {q_count} 项数据)"
+            else:
+                status_str = f"✅ 网络在线更新 ({q_count} 项数据集)"
+            self.lbl_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; margin-left: 8px;")
+        else:
+            status_str = f"⚠️ 磁盘 Cache / 静态数据 ({q_count} 项数据集)"
+            self.lbl_status.setStyleSheet("color: #ffa500; font-size: 8.5pt; margin-left: 8px;")
+
         self.lbl_status.setText(f"状态: {status_str}")
+        self.lbl_update_time.setText(f"最后更新: {now_str}")
 
         # 2. 更新卡片
         self._update_cards(quotes)

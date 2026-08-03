@@ -196,6 +196,19 @@ def is_market_active_time() -> bool:
     return True
 
 
+# 统一系统更新阈值时间 (秒): 交易期 60 秒 (1分钟), 盘后/非交易期 600 秒 (10分钟)
+GLOBAL_MARKET_UPDATE_INTERVAL_ACTIVE = 60.0
+GLOBAL_MARKET_UPDATE_INTERVAL_INACTIVE = 600.0
+
+
+def get_global_market_cache_ttl() -> float:
+    """根据当前是否处于交易活跃窗口，统一返回更新阈值时间 (秒)
+    - 交易活跃窗口: 60.0 秒 (1 分钟)
+    - 盘后/非交易日: 600.0 秒 (10 分钟)
+    """
+    return GLOBAL_MARKET_UPDATE_INTERVAL_ACTIVE if is_market_active_time() else GLOBAL_MARKET_UPDATE_INTERVAL_INACTIVE
+
+
 def fetch_global_market_quotes(force_refresh=False) -> dict:
     """抓取主要外盘指数与美股7巨头/存储芯片/半导体实时/盘前数据
 
@@ -214,12 +227,12 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
     now = time.time()
     has_cache = bool(_global_cache['quotes'])
     active_trading = is_market_active_time()
+    cache_ttl = get_global_market_cache_ttl()
 
-    # 1. 强制无网络请求保护规则:
-    # - 非交易时段且已有缓存: 直接返回缓存，0 网络请求！
-    # - 未达到 30 分钟 (CACHE_TTL) 且非强制刷新: 直接返回缓存！
+    # 1. 自动更新保护规则:
+    # - 未达到统一阈值 (cache_ttl) 且非强制刷新: 直接返回缓存
     if not force_refresh and has_cache:
-        if not active_trading or (now - _global_cache['last_update_ts'] < CACHE_TTL):
+        if (now - _global_cache['last_update_ts'] < cache_ttl):
             return _global_cache['quotes']
 
     # 新浪外盘/美股/大宗/外汇接口
@@ -382,10 +395,22 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
     if quotes:
         _global_cache['quotes'] = quotes
         _global_cache['last_update_ts'] = now
+        _global_cache['is_live_network'] = True
         _update_sentiment_score(quotes)
         _save_disk_cache()
+    else:
+        _global_cache['is_live_network'] = False
 
     return _global_cache['quotes']
+
+
+def get_global_market_quotes_metadata() -> dict:
+    """获取最后一次外盘行情抓取的元数据 (包含 is_live_network, last_update_ts 等)"""
+    return {
+        'is_live_network': _global_cache.get('is_live_network', False),
+        'last_update_ts': _global_cache.get('last_update_ts', 0),
+        'quotes_count': len(_global_cache.get('quotes', {})),
+    }
 
 
 def _update_sentiment_score(quotes: dict):
@@ -1046,12 +1071,12 @@ def _auto_translate_en_to_cn(text: str) -> str:
 
 
 def load_news_hotlist_json() -> tuple:
-    """读取物理 JSON 持久化财经热榜文件，返回 (hotlist_list, deleted_ids_set)
+    """读取物理 JSON 持久化财经热榜文件，返回 (hotlist_list, deleted_ids_set, updated_at_str)
     显示与存储严格限制不超过 20 条权威热榜资讯。
     """
     path = get_news_cache_file_path()
     if not os.path.exists(path):
-        return [], set()
+        return [], set(), ""
 
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -1059,14 +1084,15 @@ def load_news_hotlist_json() -> tuple:
             if isinstance(data, dict):
                 hotlist = data.get('hotlist', [])
                 deleted_ids = set(data.get('deleted_ids', []))
+                updated_at = data.get('updated_at', '')
                 # 过滤已删除项并保证不超过 20 条
                 valid_list = [item for item in hotlist if isinstance(item, dict) and item.get('id') not in deleted_ids]
-                return valid_list[:20], deleted_ids
+                return valid_list[:20], deleted_ids, updated_at
             elif isinstance(data, list):
-                return data[:20], set()
+                return data[:20], set(), ""
     except Exception as ex:
         log_market_msg(f"[NewsEngine] 读取热榜持久化文件异常: {ex}")
-    return [], set()
+    return [], set(), ""
 
 
 def save_news_hotlist_json(hotlist: list, deleted_ids: set = None) -> bool:
@@ -1101,7 +1127,7 @@ def delete_news_item_by_id(news_id: str) -> bool:
     """右键删除指定的早期无用资讯，加入物理黑名单并从 JSON 持久化中彻底剔除"""
     if not news_id:
         return False
-    hotlist, deleted_ids = load_news_hotlist_json()
+    hotlist, deleted_ids, _ = load_news_hotlist_json()
     deleted_ids.add(str(news_id))
     new_hotlist = [item for item in hotlist if item.get('id') != news_id]
     return save_news_hotlist_json(new_hotlist, deleted_ids)
@@ -1109,7 +1135,7 @@ def delete_news_item_by_id(news_id: str) -> bool:
 
 def fetch_symbol_financial_news(symbol: str, name: str = "", force_refresh: bool = False) -> list:
     """自动获取权威自选热榜财经资讯与要闻解读
-    (自动英译中、物理 JSON 持久化，限制显示不超过 20 条，支持右键物理黑名单剔除)
+    (自动英译中、物理 JSON 持久化，限制显示不超过 20 条，支持 10 分钟 NEWS_CACHE_TTL 自动更新与黑名单自动重置防护)
     """
     sym = (symbol or "").strip().upper()
     sec_name = name or sym
@@ -1117,14 +1143,31 @@ def fetch_symbol_financial_news(symbol: str, name: str = "", force_refresh: bool
     p_info = get_proxy_info_str()
     log_market_msg(f"[FinancialNewsEngine] 抓取/更新权威自选财经热榜要闻 ({sym}) {p_info}")
 
-    # 1. 尝试优先读取本地物理 JSON 热榜持久化缓存
-    cached_hotlist, deleted_ids = load_news_hotlist_json()
-    if cached_hotlist and not force_refresh:
-        # 按关联品种优先 + 权威热榜全局，剔除已删除 ID，限制不超过 20 条
+    cache_ttl = get_global_market_cache_ttl()  # 统一系统更新阈值时间 (交易期 60s, 非交易期 600s)
+    cached_hotlist, deleted_ids, updated_at = load_news_hotlist_json()
+
+    # 1. 检查缓存是否在统一 TTL 有效期内
+    is_cache_fresh = False
+    if updated_at:
+        try:
+            cache_dt = datetime.datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
+            if (datetime.datetime.now() - cache_dt).total_seconds() < cache_ttl:
+                is_cache_fresh = True
+        except Exception:
+            is_cache_fresh = False
+
+    # 辅助定义按时间降序排序 (最新时间置顶在最上面)
+    def _sort_by_datetime_desc(items):
+        return sorted(
+            items,
+            key=lambda x: (str(x.get('datetime', '')), float(x.get('impact_score', 0.0))),
+            reverse=True
+        )
+
+    if cached_hotlist and not force_refresh and is_cache_fresh:
+        # 按时间降序排列（最新在最上面），剔除已删除 ID，限制不超过 20 条
         filtered = [item for item in cached_hotlist if item.get('id') not in deleted_ids]
-        matched = [item for item in filtered if sym in item.get('related_symbols', []) or sym in item.get('title', '')]
-        unmatched = [item for item in filtered if item not in matched]
-        res = (matched + unmatched)[:20]
+        res = _sort_by_datetime_desc(filtered)[:20]
         if res:
             return res
 
@@ -1256,12 +1299,11 @@ def fetch_symbol_financial_news(symbol: str, name: str = "", force_refresh: bool
         item_copy['content'] = _auto_translate_en_to_cn(item_copy.get('content', ''))
         processed_hotlist.append(item_copy)
 
-    # 3. 持久化落盘 (限制不超过 20 条，已剔除黑名单)
-    save_news_hotlist_json(processed_hotlist, deleted_ids)
+    # 3. 持久化落盘 (限制不超过 20 条，已剔除黑名单，按时间降序排列)
+    sorted_hotlist = _sort_by_datetime_desc(processed_hotlist)
+    save_news_hotlist_json(sorted_hotlist, deleted_ids)
 
-    # 4. 过滤并返回不超过 20 条
-    filtered = [item for item in processed_hotlist if item.get('id') not in deleted_ids]
-    matched = [item for item in filtered if sym in item.get('related_symbols', []) or sym in item.get('title', '')]
-    unmatched = [item for item in filtered if item not in matched]
-    return (matched + unmatched)[:20]
+    # 4. 过滤并返回不超过 20 条 (最新在最上面)
+    filtered = [item for item in sorted_hotlist if item.get('id') not in deleted_ids]
+    return filtered[:20]
 

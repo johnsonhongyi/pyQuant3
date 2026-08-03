@@ -1,3 +1,30 @@
+## 2026-08-03 15:10
+- [x] **实现权威自选财经热榜时间降序 (最新在最上方) 统一排序算法 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_verify_news_sorting.py`)**：
+    - [x] **后端抓取与落盘全流程统一降序**：在 `fetch_symbol_financial_news` 缓存读取与落盘存储中引入 `_sort_by_datetime_desc` 排序 helper，基于 `datetime` ISO/ANSI 年月日时分字符串与 `impact_score` 评分执行 `reverse=True` 降序排列，彻底根治此前 `matched + unmatched` 列表拼接导致老旧时间压在最新时间上方的缺陷。
+    - [x] **前端 UI 渲染二次置顶保障**：在 `GlobalMarketKLineDialog._populate_news_list` 渲染前施加二次降序排序保障，确保界面无论是冷启动加载还是点击 `🔄 刷新`，最新发表/生成的资讯（如 `2026-08-03 15:10`）100% 稳居列表第 1 条置顶显示。
+    - [x] **自动化测试 100% 校验通过**：新建 `scratch/test_verify_news_sorting.py` 自动化测试脚本验证时间单调递减，并结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 14:55
+- [x] **彻底根治 `GlobalMarketKLineDialog` 初始化缩进流断裂导致 `lbl_info`、`v_splitter` 及 `h_splitter` 属性缺失 AttributeErrors 漏洞 (`ats/ui/global_market_kline_dialog.py`, `scratch/test_verify_kline_dialog_attributes.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因分析**：在此前的代码重构中，`_start_auto_refresh_timer()` 方法定义插入位置偏前，误将 `_init_ui()` 方法体在中途给切断，导致后续的 `lbl_info`、`h_splitter` 和 `v_splitter` 等控件未能挂载到 `self` 实例上；当数据异步回调或 60ms/70ms 分割比例定时器到期时，调起 `self.v_splitter` 触发了 `AttributeError: 'GlobalMarketKLineDialog' object has no attribute 'v_splitter'` 堆栈。
+    - [x] **UI 控件流连续性还原**：将 `self._start_auto_refresh_timer()` 的调起位置统一移动回 `_init_ui()` 的最终结尾处（`news_layout.addWidget` 之后），恢复整个 UI 构建流的 100% 完整与连续性。
+    - [x] **全面植入 `hasattr` 卫士防护**：在 `_restore_settings`、`_save_settings` 及 `_on_worker_finished` 数据更新回调中为 `lbl_info`、`v_splitter` 与 `h_splitter` 增加 `hasattr(self, '...')` 卫士保护，彻底杜绝任何未完全初始化场景下的潜在 Traceback 隐患。
+    - [x] **自动化属性校验与单元测试 100% 成功通过**：新建 `scratch/test_verify_kline_dialog_attributes.py` Headless 脚本断言 `lbl_info`, `h_splitter`, `v_splitter`, `_news_timer` 属性均 100% 成功就绪；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 14:30
+- [x] **实现外盘窗口与自选财经要闻统一 60s/600s TTL 自动更新轮询、新数据集状态反馈与黑名单自愈恢复机制 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_global_market_news_auto_and_manual_refresh.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **统一 60s (交易期) / 600s (非交易期) TTL 轮询阈值 (`get_global_market_cache_ttl`)**：在 `JSONData/global_market_data.py` 中重构缓存失效机制，收口统一的 `get_global_market_cache_ttl()` 存取函数；交易时间段自动采用 60.0s 高频，非交易/盘后自动切换为 600.0s 低频，杜绝静态重复抓取。
+    - [x] **更新元数据追踪与 Quotes/News UI 数据集更新反馈**：在 `fetch_global_market_quotes` 与 `fetch_symbol_financial_news` 返回流中注入 `metadata` (`is_live_network`, `last_update_ts`, `quotes_count`)；`GlobalMarketPanel` 与 `GlobalMarketKLineDialog` 根据 metadata 判定网络在线还是磁盘 Cache 降级，并在 Header 及 Status 状态栏实时显示明确状态 (`✅ 手动刷新成功 (网络在线源)...` / `⚠️ 网络超时降级...` / K 线数据集切片数与更新条数)。
+    - [x] **黑名单全删边界自动重置与自愈恢复**：在 `fetch_symbol_financial_news` 强制刷新 (`force_refresh=True`) 且黑名单导致新闻 0 条的极端边界下，加入物理黑名单 `deleted_ids` 自愈重置清空机制，自动恢复权威财经热榜数据集。
+    - [x] **子窗口自动更新定时器与 K 线切片加载反馈**：在 `GlobalMarketKLineDialog` 构造中接入 `_news_timer`，依据系统统一 TTL 阈值自动定时同步自选要闻与关联报价；在 `_on_worker_finished` 中补充包含 K 线数据集源、数据切片条数、最新日期与点位涨跌幅的详细 UI 状态反馈。
+    - [x] **全量自动化测试与核心单元测试 100% 成功通过**：新建 `scratch/test_global_market_news_auto_and_manual_refresh.py` 验证 5 大核心机制全量通过；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 14:15
+- [x] **修改 `stock_standalone` 与 TK 路径下 `favorite_stocks.json` 错误的关注日期为上周随机交易日 (`favorite_stocks.json`, `tests/test_signal_ledger.py`)**：
+    - [x] **错误日期识别与解构**：全面查验 `D:\JohnsonProgram\instockMonitorTK\favorite_stocks.json` (77 个) 与 `stock_standalone\favorite_stocks.json` (45 个) 中根节点 `favorite_stocks_dates` 及子节点 `sector_bidding_panel_persistence_ui_state.favorite_stocks_dates` 存储的全量关注日期。识别出所有不在上周交易日（`2026-07-27` ~ `2026-07-31`）范围内的错误日期（包括被此前 Bug 批量误改成的今天 `2026-08-03` 以及 2023、2024、2026 年初历史异动日期）。
+    - [x] **随机分配与双节点物理 100% 同步落盘**：将两处配置文件中的错误日期从上周 5 个物理交易日（`2026-07-27` 周一、`2026-07-28` 周二、`2026-07-29` 周三、`2026-07-30` 周四、`2026-07-31` 周五）中随机生成离散替换（`stock_standalone`: `2026-07-31`: 13个, `2026-07-27`: 12个, `2026-07-28`: 8个, `2026-07-29`: 7个, `2026-07-30`: 5个），并同步物理写盘落盘，确保根节点与 `sector_bidding_panel_persistence_ui_state` 下的日期数据 100% 保持绝对一致。
+    - [x] **单元测试全量 100% 校验通过**：运行 `tests/test_signal_ledger.py` (11/11 passed) 全量单元测试 100% 成功通过。
+
 ## 2026-08-03 13:50
 - [x] **复盘 2024-11-06 关注日期异常修改 Bug 根因并接入 TK 退出/收盘归档与 `max_keep=15` 自动清理引擎 (`global_favorites.py`, `instock_MonitorTK.py`, `ats/session_snapshot.py`, `scratch/test_favorite_daily_backup.py`, `tests/test_signal_ledger.py`)**：
     - [x] **2024-11-06 日期误改根因解构**：之前在 `load_from_config()` 及 `get_favorite_stock_date()` 中误引入了校验逻辑，将历史自选股保存日期（如 `2023-12-28`）误与当前环境最新交易日做判等，导致每次加载时都被判定为“非有效交易日”而触发强制回补。而在离线或非交易时段，`cct.get_last_trade_date()` 退回到了本地历史数据集的最后日期（即 `2024-11-06`），随后的自动落盘将日期全量覆盖改写成了 `2024-11-06`。早前的修复已彻底剥离对历史已有日期的改写，仅在新建添加个股或物理日期缺失时才回补最新交易日。
