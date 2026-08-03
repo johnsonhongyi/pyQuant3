@@ -6102,10 +6102,18 @@ class QtCheckCodeDialog(QDialog, WindowMixin):
         
         self.df_code = df.loc[[code]]
         try:
-            from stock_logic_utils import test_code_query, format_check_result
+            from stock_logic_utils import test_code_query, format_check_result, generate_channel_strategy_text
             self.report_data = test_code_query(self.df_code, queries)
             header_str = f"股票: {code} {self.name}\n" + "="*40 + "\n"
-            summary_content = header_str + format_check_result(self.report_data)
+
+            # ⚡ 自动接入通道策略计划 (使用最小周期匹配，放在最上方，与 Tk 诊断 100% 对齐)
+            row_dict = self.df.loc[self.code].to_dict() if self.code in self.df.index else {}
+            channel_strat_text = generate_channel_strategy_text(row_dict, df_code=self.df_code)
+
+            summary_content = header_str
+            if channel_strat_text:
+                summary_content += channel_strat_text + "\n\n"
+            summary_content += format_check_result(self.report_data)
 
             if self.all_strategy_reports:
                 main_hit_results = getattr(self._real_parent, '_last_hit_results', {}) if self._real_parent else {}
