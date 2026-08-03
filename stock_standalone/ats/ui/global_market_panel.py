@@ -58,7 +58,8 @@ class GlobalMarketPanel(QWidget):
     """🌐 全球外盘与热点情绪看板页"""
 
     sector_selected = pyqtSignal(str) # 选中板块信号
-    stock_selected = pyqtSignal(str, str, dict) # 选中股票联动信号
+    stock_selected = pyqtSignal(str, str, dict) # 选中股票详情弹窗信号
+    stock_linked = pyqtSignal(str, str) # 单击个股轻量联动信号
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -791,8 +792,10 @@ class GlobalMarketPanel(QWidget):
             sec_name = sec_item.text().strip().replace("📌 ", "")
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
             def _link_cb(code, name):
+                self.stock_linked.emit(code, name)
+            def _double_click_cb(code, name):
                 self.stock_selected.emit(code, name, {})
-            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_link_cb, parent=self)
+            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_double_click_cb, parent=self)
             dlg.exec()
 
     def _update_proxy_btn_style(self):
