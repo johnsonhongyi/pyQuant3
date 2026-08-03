@@ -1,3 +1,10 @@
+## 2026-08-03 15:25
+- [x] **彻底根治 ATS 关闭退出时外盘窗口等配置持久化丢失与并发写盘全盘覆写漏洞 (`ats/ui/styles.py`, `ats/ui/main_window.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_config_persistence.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因分析 (物理全覆写漏洞)**：过去主窗口 (`ATSMainWindow`) 和各 TopLevel 子窗口 (`GlobalMarketDialog` / `GlobalMarketKLineDialog` / `MultiPeriodDialog`) 在退出写盘或 QSplitter 拖动时，各自独立执行 `load json` -> `修改内存 dict` -> `os.replace` 写盘。当主窗口关闭时，主窗口写盘逻辑与子窗口 `closeEvent` 的写盘逻辑产生毫秒级物理竞态；主窗口后一步写盘时内存里的字典未包含子窗口刚才写入的新配置，直接通过 `os.replace` 将子窗口写好的配置抹除覆盖。此外，若中途读取 JSON 遇到临时 IO 锁锁死返回 `{}`，写盘逻辑会直接将物理文件退化擦除为仅存几项。
+    - [x] **引入带重试与防覆写的 `save_config_nodes` 增量落盘引擎 (`ats/ui/styles.py`)**：在 `styles.py` 中重构 `save_config_node` 并新增 `save_config_nodes(dict)`，内置 3 次磁盘 IO 读写重试防护；当物理 JSON 读取解析失败且文件非空时，拒绝盲目覆盖；始终执行与磁盘现有配置的物理增量字典合并 (`data[k] = v`)，彻底封死了任何窗口覆写抹除其他窗口配置的漏洞。
+    - [x] **重构主窗口 `_save_layout_state` 与 `save_font_size` 接入增量引擎 (`ats/ui/main_window.py`, `ats/ui/global_market_kline_dialog.py`)**：将 `ATSMainWindow._save_layout_state`、`save_font_size` 以及 `GlobalMarketKLineDialog` 的写盘逻辑全面接入 `save_config_nodes`，彻底解决多窗口退出时的死锁覆盖与丢失问题。
+    - [x] **并发写入测试与核心单元测试 100% 校验通过**：新建 `scratch/test_config_persistence.py` 模拟 5 线程高频并发读写落盘，100% 验证节点完好不丢失；结合 `tests/test_signal_ledger.py` 全量 11 项核心单元测试 100% 成功通过！
+
 ## 2026-08-03 15:10
 - [x] **实现权威自选财经热榜时间降序 (最新在最上方) 统一排序算法 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_verify_news_sorting.py`)**：
     - [x] **后端抓取与落盘全流程统一降序**：在 `fetch_symbol_financial_news` 缓存读取与落盘存储中引入 `_sort_by_datetime_desc` 排序 helper，基于 `datetime` ISO/ANSI 年月日时分字符串与 `impact_score` 评分执行 `reverse=True` 降序排列，彻底根治此前 `matched + unmatched` 列表拼接导致老旧时间压在最新时间上方的缺陷。

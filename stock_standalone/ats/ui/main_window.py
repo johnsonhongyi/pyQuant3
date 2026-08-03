@@ -3517,35 +3517,8 @@ class ATSMainWindow(QMainWindow):
 
     def save_font_size(self, size: int):
         try:
-            import json
-            import os
-            import tempfile
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            config_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(config_path):
-                    try:
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                    except Exception:
-                        pass
-                data["ats_font_size"] = size
-                
-                temp_dir = os.path.dirname(config_path) or "."
-                fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)
-                try:
-                    with os.fdopen(fd, 'w', encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    os.replace(temp_path, config_path)
-                except Exception as e:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except:
-                            pass
-                    raise e
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_font_size", size)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving font size: {e}")
 
@@ -3756,61 +3729,36 @@ class ATSMainWindow(QMainWindow):
 
     def _save_layout_state(self):
         try:
-            import json
-            import os
-            import tempfile
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            config_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(config_path):
-                    try:
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                    except Exception:
-                        pass
+            from ats.ui.styles import save_config_nodes
+            updates = {}
+            # Save geometry
+            updates["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
+            
+            # Save splitters
+            if hasattr(self, 'main_splitter'):
+                updates["ats_main_splitter_sizes"] = self.main_splitter.sizes()
+            if hasattr(self, 'center_splitter'):
+                updates["ats_center_splitter_sizes"] = self.center_splitter.sizes()
+            if hasattr(self, 'right_splitter'):
+                updates["ats_right_splitter_sizes"] = self.right_splitter.sizes()
                 
-                # Save geometry
-                data["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
-                
-                # Save splitters
-                if hasattr(self, 'main_splitter'):
-                    data["ats_main_splitter_sizes"] = self.main_splitter.sizes()
-                if hasattr(self, 'center_splitter'):
-                    data["ats_center_splitter_sizes"] = self.center_splitter.sizes()
-                if hasattr(self, 'right_splitter'):
-                    data["ats_right_splitter_sizes"] = self.right_splitter.sizes()
-                    
-                # Save tabs index
-                if hasattr(self, 'top_tabs'):
-                    data["ats_top_tab_index"] = self.top_tabs.currentIndex()
-                if hasattr(self, 'center_tabs'):
-                    data["ats_center_tabs_index"] = self.center_tabs.currentIndex()
-                if hasattr(self, 'right_tabs'):
-                    data["ats_right_tabs_index"] = self.right_tabs.currentIndex()
+            # Save tabs index
+            if hasattr(self, 'top_tabs'):
+                updates["ats_top_tab_index"] = self.top_tabs.currentIndex()
+            if hasattr(self, 'center_tabs'):
+                updates["ats_center_tabs_index"] = self.center_tabs.currentIndex()
+            if hasattr(self, 'right_tabs'):
+                updates["ats_right_tabs_index"] = self.right_tabs.currentIndex()
 
-                # Save link checkboxes
-                if hasattr(self, 'cb_tdx'):
-                    data["ats_link_tdx"] = self.cb_tdx.isChecked()
-                if hasattr(self, 'cb_ths'):
-                    data["ats_link_ths"] = self.cb_ths.isChecked()
-                if hasattr(self, 'cb_vis'):
-                    data["ats_link_vis"] = self.cb_vis.isChecked()
-                
-                temp_dir = os.path.dirname(config_path) or "."
-                fd, temp_path = tempfile.mkstemp(dir=temp_dir, text=True)
-                try:
-                    with os.fdopen(fd, 'w', encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    os.replace(temp_path, config_path)
-                except Exception as e:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except:
-                            pass
-                    raise e
+            # Save link checkboxes
+            if hasattr(self, 'cb_tdx'):
+                updates["ats_link_tdx"] = self.cb_tdx.isChecked()
+            if hasattr(self, 'cb_ths'):
+                updates["ats_link_ths"] = self.cb_ths.isChecked()
+            if hasattr(self, 'cb_vis'):
+                updates["ats_link_vis"] = self.cb_vis.isChecked()
+            
+            save_config_nodes(updates)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving layout state: {e}")
 
