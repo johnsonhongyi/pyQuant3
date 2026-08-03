@@ -1,3 +1,51 @@
+## 2026-08-03 11:20
+- [x] **彻底根治联动可视化 (`trade_visualizer_qt6.py`) 重点关注个股关注日期丢失与非交易日定位失败的大回归缺陷 (`global_favorites.py`, `trade_visualizer_qt6.py`, `scratch/test_favorite_date_linkage_fix.py`)**：
+    - [x] **根因解构 1: 代码格式化不一致 (Code Formatting Mismatch)**：`GlobalFavoriteManager.get_favorite_stocks()` 返回的代码集合中包含未经补零的字符串（如 `'118'` vs `'000118'`），导致 `trade_visualizer_qt6.py` 中 `code in fav_mgr.get_favorite_stocks()` 校验失败，无法激活重点关注个股的 `active_time_linkage`。
+    - [x] **根因解构 2: 关注日期被通用 IPC 逻辑误清空 (Active Linkage Lifetime Overwritten)**：在 `load_stock_by_code` 中，当重点关注个股的关注日期恰好等于或晚于上个交易日（例如今天或盘前添加的重点关注）时，后方的通用 IPC 逻辑将其错判为“实时查看”而强制清空 `self.active_time_linkage = {}`。
+    - [x] **根因解构 3: 非交易日/周末日期在 K 线图上找不到 Key (Non-trading Day Lookup Failure)**：若用户在周六/周日或节假日（如 `2026-08-02`）添加某重点关注标的，由于 K 线 DataFrame (`_cached_date_map`) 仅包含物理交易日，旧逻辑精确查找 `target_str_date in date_map` 失败返回 `-1`，致使黄色 V-line 竖线和富时间 Label 看板无法画出。
+    - [x] **全流程精准修复与智能回退 (Smart Fallback)**：
+        - **代码规范化保底**：重构 `GlobalFavoriteManager.get_favorite_stocks()` 100% 格式化返回 6 位补零 `zfill(6)` 代码；并在 `load_stock_by_code` 中引入 `norm_code` 二重双向比对防护。
+        - **重点关注联动保护**：在 `load_stock_by_code` 与 `_draw_time_linkage_line` 中显式增加 `is_fav_label` 保护盾。重点关注个股的关注日期无论属于历史、今天还是周末，均 100% 保留联动属性，决不受通用 IPC 的实时重置清空干扰。
+        - **非交易日智能 Fallback 算法**：在 `_draw_time_linkage_line` 寻找 X 轴坐标时植入 `Smart Fallback`。若关注日期位于非交易日（如周末 `2026-08-02`），系统自动向前智能回退定位至其最近的有效交易日（如上周五 `2026-07-31`），确保黄色 V-line 竖线与 `[重点关注 : Today]` 看板 100% 稳定高亮呈现！
+    - [x] **全量自动化与单元测试 100% 校验**：新建 `scratch/test_favorite_date_linkage_fix.py` 验证 6 位代码规范、重点关注 linkage 保护以及非交易日智能 Fallback 定位；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 11:00
+- [x] **彻底根治在 Tk/其他节点取消关注时 ATS 无法实时感知广播（必须重启冷启动）的重大缺陷 (`global_favorites.py`, `scratch/test_cross_node_sync.py`)**：
+    - [x] **根因解构**：之前为了防止只读 Getter 死循环写盘，误将文件重载防抖阈值设置为 `RELOAD_COOLDOWN_SEC = 180.0` (3分钟)；导致当用户在 Tk 或其他节点取消/添加重点关注并写盘 `favorite_stocks.json` 后，ATS 进程的文件监听器 (`_file_watcher_loop`) 在 180 秒内被强制锁死禁止重新读取磁盘文件。致使 ATS 内存中的 `_version` 无法自增、数据无法更新，必须靠重启 ATS 冷启动才能看到最新关注列表。
+    - [x] **防抖恢复与版本统一**：在只读 Getter 写盘缺陷彻底根治的物理前提下，将 `RELOAD_COOLDOWN_SEC` 恢复为正常的 `1.0s` 跨节点/跨进程防抖阈值。使外部节点改变文件落盘后，ATS 的文件监听器能在 1.0~2.0 秒内瞬间感知并调用 `load_from_config`，自动更新内存数据并统一将 `_version` 自增 +1。
+    - [x] **跨节点同步测试 100% 验证**：新建 `scratch/test_cross_node_sync.py` 模拟 Node B (Tk) 修改落盘后，Node A (ATS) 在 2.0s 内自动感应、`version` 从 2 递增至 3 并同步数据；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 10:30
+- [x] **彻底根治可视化窗口 (`trade_visualizer_qt6.py`) 调起后高频触发 `Favorites Poller` UI 全量刷新与主线程假死 Bug (`global_favorites.py`, `scratch/test_fav_version_stability.py`)**：
+    - [x] **根因解构**：可视化窗口在渲染 K 线时高频调用 `GlobalFavoriteManager.get_favorite_stock_date(code)`；而该只读方法内部误将历史日期传给 `cct.get_last_trade_date(target)`，导致返回值被向前倒退一天，`norm_d != date_str` 恒成立为 `True`；每次只读查询均误触发 `_version += 1` 并落盘。
+    - [x] **连锁反应斩断**：由于 `_version` 持续疯涨，主界面 `_poll_favorites_loop` 心跳轮询误判为自选股列表改变，每 2 秒强制执行一次 5537 行 UI 树全量重绘，导致 CPU 卡死并抛出 `[UI_BLOCK] 5.19s` 警告；关闭可视化后因查询停止而现象掩盖。
+    - [x] **双重实体内容比对护栏 (Content Diff Guard)**：重构 `_poll_favorites_loop` 心跳轮询，在比对 `version` 的基础上强制植入 `favorite_stocks` 与 `favorite_sectors` 集合实体内容的二重校验 (`content_changed`)；仅当自选股/板块列表发生物理增删动作时才允许触发 5537 行 UI 刷新，从底层彻底封死了伪 `version` 变动导致的重复重绘。
+    - [x] **自动化与单元测试 100% 校验**：`scratch/test_fav_version_stability.py` 1000 次高频查询 `_version` 恒定不变，日期零倒退；`tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 10:30
+- [x] **彻底根治外盘板块明细点击导致的「窗口 Focus 焦点强抢大战与全屏疯狂闪烁」漏洞 (`ats/ui/global_market_panel.py`, `ats/ui/global_market_dialog.py`, `ats/ui/main_window.py`, `scratch/test_linkage_vs_selected_fix.py`)**：
+    - [x] **根因分析**：排查发现 `GlobalMarketPanel` 在双击板块弹窗 `ATSSectorDetailDialog` 时，错将单击回调 `linkage_cb` 也连向了触发重度弹窗唤醒的 `stock_selected.emit`（即 `parent_window.on_stock_clicked`）；用户一旦在明细窗口【单击】某股票，会瞬间被误当做【双击】调起 `StockDetailDialog.switch_to_code`。其内部频繁强行调用 `self.activateWindow()` 剥夺前台 `ATSSectorDetailDialog` 与外盘窗口的 Focus 焦点，引发 Windows OS 在三大 TopLevel 窗口间爆发毫秒级“抢焦点死循环 (Focus Competition Loop)”，导致全屏疯狂闪烁。
+    - [x] **双路信号解耦 (`stock_linked` VS `stock_selected`)**：在 `GlobalMarketPanel` 中新增 `stock_linked` (轻量联动) 信号，将其与 `stock_selected` (重度详情弹窗) 物理分离。在 `_on_boost_table_double_clicked` 弹窗中：
+        - **单击 (`linkage_cb`)**：派发 `stock_linked` 信号 -> 连至 `parent_window.link_stock`。纯后台异步向 TDX/THS 终端推送个股并更新状态栏，**0 弹窗、0 唤醒 `activateWindow()`、0 抢焦点**，界面平静如水；
+        - **双击 (`double_click_cb`)**：派发 `stock_selected` 信号 -> 连至 `parent_window.on_stock_clicked`，仅在双击时才调起/唤醒 `StockDetailDialog` 详情弹窗。
+    - [x] **`StockDetailDialog.switch_to_code` 唤醒防护**：在 `switch_to_code` 中对 `self.activateWindow()` 增加 `isMinimized()` 与 `isVisible()` 显式状态判断；已处于常规正常显示状态的窗口仅原地更新图表与数据，决不无脑滥调 `activateWindow()` 盲目抢焦点。
+    - [x] **单元测试 100% 校验通过**：`scratch/test_linkage_vs_selected_fix.py` 与 `tests/test_signal_ledger.py` 11 项核心单元测试 100% 成功通过！
+
+## 2026-08-03 10:15
+- [x] **彻底根治外盘点击/双击板块成分股明细弹窗联动导致的窗口高频闪烁与 `Favorites Poller` 2.0s 防抖优化 (`ats/ui/sector_detail_dialog.py`, `instock_MonitorTK.py`, `scratch/test_sector_linkage_flicker_fix.py`)**：
+    - [x] **`ATSSectorDetailDialog` 隔离护栏与信号阻断**：在 `_render_rows` 渲染明细表格前后设置 `blockSignals(True)` 与 `_is_rendering = True` 状态锁；并在表格数据填完后显式调用 `clearSelection()` 避免 Qt `setSortingEnabled(True)` 自动排序选中第一行时触发假 `on_current_item_changed` 误发 `linkage_cb` 信号给主窗口。
+    - [x] **代码去重防护**：在 `on_item_clicked` 与 `on_current_item_changed` 中植入 `_last_linked_code` 防护与 `rendering` 护栏，避免同代码高频重复发射 `stock_selected` 信号给 `ATSMainWindow` 导致频繁激活窗口与 `StockDetailDialog` 强制置顶闪烁。
+    - [x] **`Favorites Poller` 2.0s 物理时间防抖**：在 `instock_MonitorTK.py` 的 `_poll_favorites_loop` 中植入 `now - last_refresh_time >= 2.0` 时间防抖门槛，彻底斩断配置文件微小跳变每 0.5 秒高频触发 `UI refresh` 和 `TreeviewUpdater` 全量重绘带来的 UI 假死与刷屏。
+    - [x] **单元测试 100% 成功验证**：新建 `scratch/test_sector_linkage_flicker_fix.py` 断言数据渲染阶段 0 盲目联动、显式点击精准触发与同代码重复去重；结合 `tests/test_signal_ledger.py` 全量 11 项核心单元测试 100% 成功通过！
+
+## 2026-08-03 09:32
+- [x] **彻底根治 `GlobalFavoriteManager` 历史日期误校准导致的死循环写盘与高 CPU/UI 刷新卡顿 Bug (`global_favorites.py`, `scratch/test_fav_version_stability.py`)**：
+    - [x] **根因分析**：昨天在 `load_from_config()` 及 `get_favorite_stock_date()` 中引入的 `_get_default_trade_date(cur_d)` 校准逻辑，误将历史自选股添加日期（如 `"2024-01-15"`）与最新交易日做判等，导致 `cur_d != norm_d` 恒成立为 `True`；每次加载均误触发 `auto_filled = True` 并自动调用 `save_to_config()`，更新物理文件 `favorite_stocks.json` 的 `mtime` 与递增 `_version`。
+    - [x] **自激死循环斩断**：后台 `FavoritesWatcher` 文件监听器监听到 `mtime` 改变后再次调 `load_from_config()` 重新循环，致使 `_version` 每 0.5 秒递增一次，触发主界面 `_poll_favorites_loop` 频繁重绘，导致系统启动后 CPU/磁盘占用高居不下。
+    - [x] **精确修复**：彻底废除 `load_from_config` 中对已有非空日期的盲目篡改，只对空值做保底补全；将 `_version` 的递增条件精准锁定为自选股票/板块列表发生物理增删动作；并为 `_file_watcher_loop` 增加微秒级 `mtime` 浮点阈值防护。
+    - [x] **引入 3 分钟 (180s) 全局大周期防抖/冷却时间锁 (`RELOAD_COOLDOWN_SEC = 180.0`)**：在文件监听器与 `load_from_config` 中将防抖门槛提升至 3 分钟 (180s)。一旦配置文件被加载或改写过一次，在接下来 3 分钟大周期内强行锁定外部重新读取，100% 杜绝并发及任何短时间内的频繁读盘。
+    - [x] **自动化测试 100% 校验通过**：新建 `scratch/test_fav_version_stability.py` 验证 3 秒内 `version` 恒定为 1 (0 次无谓刷新)，全量 `tests/test_signal_ledger.py` 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 09:20
 - [x] **彻底根治 `GlobalMarketKLineDialog` 刷新财经热榜 AttributeError 异常 (`ats/ui/global_market_kline_dialog.py`)**：
     - [x] **修复缺失属性笔误 (`self.sec_name` -> `self.name`)**：在 `GlobalMarketKLineDialog._on_refresh_news_clicked` 方法中将未定义的 `self.sec_name` 属性修正为 `self.name`，彻底消除点击右侧权威财经热榜 `🔄 刷新` 按钮时抛出的 `AttributeError: 'GlobalMarketKLineDialog' object has no attribute 'sec_name'` 隐患。

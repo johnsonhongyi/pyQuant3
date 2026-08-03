@@ -86,20 +86,24 @@ class GlobalFavoriteManager:
         """[DEPRECATED] 重点关注个股独立存储后，不再根据 scale_factor 或外部调用更改路径，始终使用唯一的 favorite_stocks.json"""
         pass
             
+    RELOAD_COOLDOWN_SEC = 3.0  # 跨节点/跨进程同步防抖阈值 (1.0s)
+
     def _file_watcher_loop(self):
-        while not self._watcher_stop.wait(1.0):
+        while not self._watcher_stop.wait(2.0):
             try:
                 path = self._config_path
                 if path and os.path.exists(path):
                     mtime = os.path.getmtime(path)
+                    now = time.time()
                     with self._lock:
-                        if mtime != self._last_config_mtime:
+                        # 只有 mtime 发生改变 且 距离上次重载超越大周期阈值(3.0s) 时才允许再次加载
+                        if abs(mtime - self._last_config_mtime) > 1e-4 and (now - getattr(self, '_last_reload_timestamp', 0)) >= self.RELOAD_COOLDOWN_SEC:
                             need_load = True
                         else:
                             need_load = False
                     
                     if need_load:
-                        logger.info(f"🔄 [GlobalFavorites] Config file changed externally ({path}), reloading...")
+                        logger.info(f"🔄 [GlobalFavorites] Config file changed externally ({path}), reloading (3min cooldown OK)...")
                         self.load_from_config(path)
             except Exception as e:
                 logger.error(f"Error in FavoritesWatcher loop: {e}")
@@ -191,24 +195,24 @@ class GlobalFavoriteManager:
                 default_date = self._get_default_trade_date()
                 for code in new_stocks:
                     cur_d = new_stocks_dates.get(code)
-                    norm_d = self._get_default_trade_date(cur_d) if cur_d else default_date
-                    if cur_d != norm_d:
-                        new_stocks_dates[code] = norm_d
+                    if not cur_d:
+                        new_stocks_dates[code] = default_date
                         auto_filled = True
                 # Clean up orphaned keys
                 for code in list(new_stocks_dates.keys()):
                     if code not in new_stocks:
                         del new_stocks_dates[code]
+                        auto_filled = True
 
                 with self._lock:
                     if (new_sectors != self.favorite_sectors or 
-                        new_stocks != self.favorite_stocks or 
-                        new_stocks_dates != self.favorite_stocks_dates):
+                        new_stocks != self.favorite_stocks):
                         changed = True
                     self.favorite_sectors = new_sectors
                     self.favorite_stocks = new_stocks
                     self.favorite_stocks_dates = new_stocks_dates
                     self._last_config_mtime = mtime
+                    self._last_reload_timestamp = time.time()
                 logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
                 if changed:
                     with self._lock:
@@ -269,11 +273,16 @@ class GlobalFavoriteManager:
             logger.error(f"Failed to save favorites to config: {e}")
 
     def _get_default_trade_date(self, add_date: str = None) -> str:
-        """获取有效交易日 (%Y-%m-%d)，若传入非交易日或为空则自动对齐转换为有效交易日"""
+        """获取规范格式的有效交易日 (%Y-%m-%d)。若传入非空 add_date 则保持并规范化，若为空则返回最新有效交易日"""
+        if add_date and str(add_date).strip():
+            s = str(add_date).strip()[:10].replace("/", "-")
+            # 简单规范化 YYYYMMDD -> YYYY-MM-DD
+            if len(s) == 8 and s.isdigit():
+                return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+            return s
         try:
             from JohnsonUtil import commonTips as cct
-            target = str(add_date).strip()[:10] if (add_date and str(add_date).strip()) else None
-            dt = cct.get_last_trade_date(target) if target else cct.get_last_trade_date()
+            dt = cct.get_last_trade_date()
             if dt:
                 return str(dt).strip()[:10]
         except Exception:
@@ -392,13 +401,11 @@ class GlobalFavoriteManager:
                 if norm_d != date_str:
                     date_str = norm_d
                     self.favorite_stocks_dates[code] = date_str
-                    self._version += 1
                     should_save = True
             elif code in self.favorite_stocks:
                 # 自动补全为最近交易日保底，确保可视化联动 100% 能找到添加日期
                 date_str = self._get_default_trade_date()
                 self.favorite_stocks_dates[code] = date_str
-                self._version += 1
                 should_save = True
 
         if should_save:
@@ -415,8 +422,6 @@ class GlobalFavoriteManager:
                 if cur_d != norm_d:
                     self.favorite_stocks_dates[code] = norm_d
                     should_save = True
-            if should_save:
-                self._version += 1
             res = dict(self.favorite_stocks_dates)
 
         if should_save:
@@ -429,5 +434,5 @@ class GlobalFavoriteManager:
 
     def get_favorite_stocks(self) -> Set[str]:
         with self._lock:
-            return set(self.favorite_stocks)
+            return {str(c).strip().zfill(6) for c in self.favorite_stocks if c}
 

@@ -10022,16 +10022,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._favorites_dirty = True
 
     def _poll_favorites_loop(self):
-        """[Tkinter 主线程专属心跳轮询] 安全执行界面重绘加载与置顶"""
-        if self._is_closing:
+        """[Tkinter 主线程专属心跳轮询] 安全执行界面重绘加载与置顶 (2.0s 防抖保护)"""
+        if getattr(self, '_is_closing', False):
             return
         try:
             from global_favorites import GlobalFavoriteManager
+            import time
             current_version = GlobalFavoriteManager().version
-            if current_version != getattr(self, '_last_favorites_version', 0):
+            fav_mgr = GlobalFavoriteManager()
+            cur_stocks = fav_mgr.get_favorite_stocks()
+            cur_sectors = fav_mgr.get_favorite_sectors()
+            
+            last_ver = getattr(self, '_last_favorites_version', 0)
+            last_stocks = getattr(self, '_last_fav_stocks_set', None)
+            last_sectors = getattr(self, '_last_fav_sectors_set', None)
+            
+            now = time.time()
+            last_refresh_t = getattr(self, '_last_fav_refresh_time', 0.0)
+            
+            content_changed = (last_stocks is None or last_sectors is None or 
+                               cur_stocks != last_stocks or cur_sectors != last_sectors)
+            
+            if current_version != last_ver and content_changed:
+                if now - last_refresh_t >= 2.0 or last_ver == 0:
+                    self._last_favorites_version = current_version
+                    self._last_fav_stocks_set = cur_stocks
+                    self._last_fav_sectors_set = cur_sectors
+                    self._last_fav_refresh_time = now
+                    logger.info(f"🔑 [Favorites Poller] Favorites content ACTUALLY changed ({len(cur_stocks)} stocks, {len(cur_sectors)} sectors), triggering UI refresh...")
+                    self._refresh_ui_favorites()
+            elif current_version != last_ver and not content_changed:
+                # 纠正版本号但不触发 UI 重绘
                 self._last_favorites_version = current_version
-                logger.info("🔑 [Favorites Poller] Favorites version changed, triggering UI refresh...")
-                self._refresh_ui_favorites()
         except Exception as e:
             logger.warning(f"Error in poll_favorites_loop: {e}")
         finally:

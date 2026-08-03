@@ -10761,11 +10761,14 @@ class MainWindow(QMainWindow, WindowMixin):
              logger.debug(f"[Linkage] Explicitly reset due to reset_history=True")
 
         # [NEW] 针对重点关注股，自动注入其关注日作为 active_time_linkage 联动日期
+        is_fav_linkage = False
         try:
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
-            if code in fav_mgr.get_favorite_stocks():
-                add_date = fav_mgr.get_favorite_stock_date(code)
+            norm_code = str(code).strip().zfill(6) if code else ""
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            if norm_code in fav_stocks or str(code) in fav_stocks:
+                add_date = fav_mgr.get_favorite_stock_date(norm_code)
                 if add_date and not kwargs.get('timestamp') and not kwargs.get('signal_date'):
                     self.active_time_linkage = {
                         'code': code,
@@ -10775,32 +10778,38 @@ class MainWindow(QMainWindow, WindowMixin):
                         'auto_scroll': True
                     }
                     has_reset_linkage = False
+                    is_fav_linkage = True
                     logger.debug(f"[Linkage] Favorited stock {code} automatically mapped to its add_date: {add_date}")
         except Exception as e:
             logger.debug(f"Failed to auto-apply favorite add_date: {e}")
 
         if not has_reset_linkage and hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('timestamp'):
-            t_str = str(self.active_time_linkage.get('timestamp')).replace("-", "")
-            last_td = str(cct.get_last_trade_date()).replace("-", "")
-            
-            if t_str < last_td:
-                # 🚀 [HISTORY SESSION] 处于历史回放会话中
-                if self.active_time_linkage.get('code') != code:
-                    # 如果是普通代码切换（内部点击或搜索，未带新时间戳），则让历史会话“漂移”到新代码上
-                    if not kwargs.get('timestamp') and not kwargs.get('signal_date'):
-                        self.active_time_linkage['code'] = code
-                        # 重置 auto_scroll 以便于新图表能自动定位到该历史点
-                        self.active_time_linkage['auto_scroll'] = True 
-                        logger.debug(f"[Linkage] History session drifted to {code} at {self.active_time_linkage.get('timestamp')}")
-                elif not kwargs.get('timestamp') and not kwargs.get('signal_date'):
-                    # 🚀 [ALIGNED] 同代码重复点击时，保持当前历史会话，不再意外退出回归实时
-                    logger.debug(f"[Linkage] Staying in history session for {code}")
-            else:
-                # 🚀 [REALTIME] 如果是今天的联动（实时联动不具备“会话持续性”），代码不匹配时清理
-                if self.active_time_linkage.get('code') != code or (not kwargs.get('timestamp') and not kwargs.get('signal_date')):
-                    self.active_time_linkage = {}
-                    has_reset_linkage = True
-                    logger.debug(f"[Linkage] Realtime linkage reset due to code switch/refresh for {code}")
+            # 如果当前 linkage 是重点关注个股且代码匹配，则保留该联动属性，防范被下方通用 IPC 逻辑误清空
+            if not is_fav_linkage and self.active_time_linkage.get('label') == '重点关注' and self.active_time_linkage.get('code') == code:
+                is_fav_linkage = True
+
+            if not is_fav_linkage:
+                t_str = str(self.active_time_linkage.get('timestamp')).replace("-", "")
+                last_td = str(cct.get_last_trade_date()).replace("-", "")
+                
+                if t_str < last_td:
+                    # 🚀 [HISTORY SESSION] 处于历史回放会话中
+                    if self.active_time_linkage.get('code') != code:
+                        # 如果是普通代码切换（内部点击或搜索，未带新时间戳），则让历史会话“漂移”到新代码上
+                        if not kwargs.get('timestamp') and not kwargs.get('signal_date'):
+                            self.active_time_linkage['code'] = code
+                            # 重置 auto_scroll 以便于新图表能自动定位到该历史点
+                            self.active_time_linkage['auto_scroll'] = True 
+                            logger.debug(f"[Linkage] History session drifted to {code} at {self.active_time_linkage.get('timestamp')}")
+                    elif not kwargs.get('timestamp') and not kwargs.get('signal_date'):
+                        # 🚀 [ALIGNED] 同代码重复点击时，保持当前历史会话，不再意外退出回归实时
+                        logger.debug(f"[Linkage] Staying in history session for {code}")
+                else:
+                    # 🚀 [REALTIME] 如果是今天的联动（实时联动不具备“会话持续性”），代码不匹配时清理
+                    if self.active_time_linkage.get('code') != code or (not kwargs.get('timestamp') and not kwargs.get('signal_date')):
+                        self.active_time_linkage = {}
+                        has_reset_linkage = True
+                        logger.debug(f"[Linkage] Realtime linkage reset due to code switch/refresh for {code}")
 
         # --- 周期同步拦截 ---
         if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
@@ -12720,9 +12729,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ----------------- 🚀 [IPC/FIXED] 恢复联动信息富文本看板展示 -----------------
         has_valid_linkage = hasattr(self, 'active_time_linkage') and self.active_time_linkage.get('code') == code
+        is_fav_label = has_valid_linkage and self.active_time_linkage.get('label') == '重点关注'
         
-        # [🚀 NEW] 如果联动日期是最后一个交易日及以后，则判定为“实时查看”，不显示特殊的黄色竖线标记
-        if has_valid_linkage:
+        # [🚀 NEW] 如果联动日期是最后一个交易日及以后，且非重点关注，则判定为“实时查看”，不显示特殊的黄色竖线标记
+        if has_valid_linkage and not is_fav_label:
             t_ts = self.active_time_linkage.get('timestamp')
             if t_ts:
                 t_str = str(t_ts).replace("-", "")
@@ -12737,16 +12747,31 @@ class MainWindow(QMainWindow, WindowMixin):
             try:
                 target_ts = self.active_time_linkage.get('timestamp')
                 # 0. 格式标准化
-                if target_ts and len(str(target_ts)) == 8 and str(target_ts).isdigit():
-                    t_str = str(target_ts)
-                    target_ts = f"{t_str[:4]}-{t_str[4:6]}-{t_str[6:]}"
+                if target_ts:
+                    t_str_raw = str(target_ts).strip()[:10].replace("/", "-")
+                    if len(t_str_raw) == 8 and t_str_raw.isdigit():
+                        t_str_raw = f"{t_str_raw[:4]}-{t_str_raw[4:6]}-{t_str_raw[6:]}"
+                    target_ts = t_str_raw
                 
-                # 1. 寻找 X 轴坐标 (利用已缓存的 date_map)
+                # 1. 寻找 X 轴坐标 (利用已缓存的 date_map，并增加非交易日/假日智能 fallback 查找)
                 found_idx = -1
-                target_str_date = str(target_ts)[:10]
+                target_str_date = str(target_ts)[:10] if target_ts else ""
                 date_map = getattr(self, '_cached_date_map', {})
+                
                 if target_str_date in date_map:
                     found_idx = date_map[target_str_date]
+                elif day_df is not None and not day_df.empty:
+                    # 💡 [SMART FALLBACK] 如果日期是非交易日(如周末/节假日)或盘前，回退查找 <= target_str_date 的最近交易日
+                    dates_str_list = list(date_map.keys())
+                    if dates_str_list:
+                        if target_str_date >= dates_str_list[-1]:
+                            found_idx = len(day_df) - 1
+                        else:
+                            valid_past_dates = [d for d in dates_str_list if d <= target_str_date]
+                            if valid_past_dates:
+                                found_idx = date_map[valid_past_dates[-1]]
+                            else:
+                                found_idx = 0
 
                 if found_idx != -1:
                     # 🚀 [IPC/FIXED] 视角动态对齐：右侧紧贴最新行情，确保联动点可见且不出现大片空白
