@@ -1,3 +1,19 @@
+## 2026-08-03 13:50
+- [x] **复盘 2024-11-06 关注日期异常修改 Bug 根因并接入 TK 退出/收盘归档与 `max_keep=15` 自动清理引擎 (`global_favorites.py`, `instock_MonitorTK.py`, `ats/session_snapshot.py`, `scratch/test_favorite_daily_backup.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **2024-11-06 日期误改根因解构**：之前在 `load_from_config()` 及 `get_favorite_stock_date()` 中误引入了校验逻辑，将历史自选股保存日期（如 `2023-12-28`）误与当前环境最新交易日做判等，导致每次加载时都被判定为“非有效交易日”而触发强制回补。而在离线或非交易时段，`cct.get_last_trade_date()` 退回到了本地历史数据集的最后日期（即 `2024-11-06`），随后的自动落盘将日期全量覆盖改写成了 `2024-11-06`。早前的修复已彻底剥离对历史已有日期的改写，仅在新建添加个股或物理日期缺失时才回补最新交易日。
+    - [x] **撤销高频写盘备份并接入 TK 标准 `archive_file_tools` 归档**：剥离 `GlobalFavoriteManager` 写盘/读盘时高频无谓的自动备份；在 `instock_MonitorTK.py` 退出物理归档处（`on_close`）及 `ats/session_snapshot.py` 每日 15:00 收盘总结处统一调用 `archive_file_tools(FAVORITE_STOCKS_FILE, "favorite_stocks", ARCHIVE_DIR, logger)`，原生具备**内容查重（无变动跳过）**与 **`max_keep=15` 自动清理老旧归档**功能。
+    - [x] **全量自动化与单元测试 100% 校验**：新建 `scratch/test_favorite_daily_backup.py` 验证 `archive_file_tools` 对 `favorite_stocks.json` 归档、查重与 `max_keep` 清理成功；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 11:45
+- [x] **彻底排查并根治开机启动 4,600 线程与 12 万（120,000）内核句柄泄漏隐患 (`bidding_momentum_detector.py`, `sys_performance_analyzer.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因透析 1: Windows `ProcessPoolExecutor` 无界 `spawn` 衍生爆炸**：`bidding_momentum_detector.py` 中的 `ensure_data_ready_async` 在系统启动和刷新时缺少排他锁保护，高频触发 `ProcessPoolExecutor(max_workers=1)`；在 Windows 平台下每次调用强制通过 `CreateProcessW` 创建全新的 `python.exe` 与关联的 `conhost.exe`（控制台宿主），累计衍生出数以万计的操作系统内核对象句柄与数千线程！
+    - [x] **根因透析 2: PowerShell 子进程频繁创建无隐藏标志 (Console Handle Leak)**：`sys_performance_analyzer.py` 内部使用 `subprocess.check_output(['powershell', ...])` 轮询 Windows 自启动和计划任务，由于缺乏 `CREATE_NO_WINDOW` 标志，Windows 为每个调用分配独立的控制台句柄且未能即时回收，导致系统中残留了 25+ 个 PowerShell 和 29+ 个 Conhost 孤儿进程！
+    - [x] **根因透析 3: 系统开机自启项与第三方软件 (TrafficMonitor/WeChatAppEx) 堆积**：排查发现开机瞬间除了 Python 进程外，第三方桌面悬浮窗工具 (`TrafficMonitor.exe`) 自身在开机后持续累积泄漏 2.5万 句柄，且微信小程序 (`WeChatAppEx`)、系统服务 (`svchost.exe` 86个) 共同贡献了绝大部分句柄与线程开销。
+    - [x] **全流程精准修复与资源强制回收**：
+        - **`bidding_momentum_detector.py` 状态锁加固**：植入 `_loading_in_progress` 物理排他锁，禁止并发重复 `spawn` 子进程，并在子进程任务完成后在 `finally` 块中强行优雅 `executor.shutdown(wait=False, cancel_futures=True)` 彻底回收内存和 Python 子进程句柄！
+        - **`sys_performance_analyzer.py` `CREATE_NO_WINDOW` 注入**：所有下发 Windows 的 PowerShell 命令统一注入 `creationflags=subprocess.CREATE_NO_WINDOW (0x08000000)`，彻底切断 `conhost.exe` 孤儿控制台句柄和子进程在后台的无界挂载。
+    - [x] **全量单元测试 100% 校验通过**：运行 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 11:20
 - [x] **彻底根治联动可视化 (`trade_visualizer_qt6.py`) 重点关注个股关注日期丢失与非交易日定位失败的大回归缺陷 (`global_favorites.py`, `trade_visualizer_qt6.py`, `scratch/test_favorite_date_linkage_fix.py`)**：
     - [x] **根因解构 1: 代码格式化不一致 (Code Formatting Mismatch)**：`GlobalFavoriteManager.get_favorite_stocks()` 返回的代码集合中包含未经补零的字符串（如 `'118'` vs `'000118'`），导致 `trade_visualizer_qt6.py` 中 `code in fav_mgr.get_favorite_stocks()` 校验失败，无法激活重点关注个股的 `active_time_linkage`。

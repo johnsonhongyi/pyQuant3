@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 import time
-from typing import Set, Callable
+from typing import Set, Callable, Any
 import sys_utils
 
 _base_dir = sys_utils.get_app_root()
@@ -225,6 +225,21 @@ class GlobalFavoriteManager:
                     self._last_config_mtime = mtime
         except Exception as e:
             logger.error(f"Failed to load favorites from config: {e}")
+
+    def backup_to_archives(self, archive_dir: str = None, logger_obj: Any = None, max_keep: int = 15):
+        """
+        [BACKUP] 跟随系统的标准归档：使用 monitor_utils.archive_file_tools
+        自动备份 favorite_stocks.json 至 archives/ 目录，具备自动查重与 max_keep 清理功能。
+        """
+        try:
+            from monitor_utils import archive_file_tools
+            path = FAVORITE_STOCKS_FILE
+            if not archive_dir:
+                archive_dir = os.path.join(_base_dir, "archives")
+            log_target = logger_obj or logger
+            archive_file_tools(path, "favorite_stocks", archive_dir, log_target, max_keep=max_keep)
+        except Exception as e:
+            logger.error(f"[GlobalFavorites] Failed to backup favorite_stocks.json: {e}")
 
     def save_to_config(self, config_path: str = None):
         path = FAVORITE_STOCKS_FILE

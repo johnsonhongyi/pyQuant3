@@ -147,9 +147,16 @@ class SessionSnapshot:
             
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(summary, f, ensure_ascii=False, indent=2)
-            
+
             self._last_summary_date = today_str
-            print(f"[SessionSnapshot] Daily summary saved: {filepath}")
+            print(f"[SessionSnapshot] Daily summary saved to {filepath} ({len(summary.get('watchlist', []))} watch, {len(summary.get('tradelist', []))} trade)")
+            
+            try:
+                from global_favorites import GlobalFavoriteManager
+                GlobalFavoriteManager().backup_to_archives()
+            except Exception as e:
+                print(f"[SessionSnapshot] Auto archive backup error: {e}")
+
             return True
             
         except Exception as e:

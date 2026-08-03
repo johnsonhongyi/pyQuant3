@@ -112,6 +112,7 @@ from tk_gui_modules.gui_config import (
     WINDOW_CONFIG_FILE, MONITOR_LIST_FILE, WINDOW_CONFIG_FILE2,
     CONFIG_FILE, SEARCH_HISTORY_FILE,VOICE_ALERT_CONFIG_FILE, ICON_PATH as icon_path
 )
+from global_favorites import FAVORITE_STOCKS_FILE
 from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
 import hotkey_rotator
@@ -4023,6 +4024,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 archive_file_tools(
                     VOICE_ALERT_CONFIG_FILE,
                     "voice_alert_config",
+                    ARCHIVE_DIR,
+                    logger
+                )
+
+                archive_file_tools(
+                    FAVORITE_STOCKS_FILE,
+                    "favorite_stocks",
                     ARCHIVE_DIR,
                     logger
                 )

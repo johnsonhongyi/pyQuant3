@@ -1037,6 +1037,11 @@ class BiddingMomentumDetector:
                 on_ready_callback()
             return
 
+        if getattr(self, '_loading_in_progress', False):
+            logger.warning("📡 [Detector] Data loading is already in progress, skipping duplicate launch.")
+            return
+        self._loading_in_progress = True
+
         def _dispatch_ui(fn):
             """统一UI调度入口"""
             try:
@@ -1084,6 +1089,7 @@ class BiddingMomentumDetector:
                         logger.error(f"ProcessPool failed: {e}")
 
                     finally:
+                        self._loading_in_progress = False
                         try:
                             executor.shutdown(wait=False, cancel_futures=True)
                         except:
@@ -1092,6 +1098,7 @@ class BiddingMomentumDetector:
                 future.add_done_callback(_done)
 
             except Exception as e:
+                self._loading_in_progress = False
                 logger.error(f"_worker failed: {e}")
 
         if self._loading_thread is None or not self._loading_thread.is_alive():
