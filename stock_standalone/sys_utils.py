@@ -162,6 +162,10 @@ RESOURCE_MAP = {
         "src": "window_config.json",
         "dst": "window_config.json"
     },
+    "favorite_stocks.json": {
+        "src": "favorite_stocks.json",
+        "dst": "favorite_stocks.json"
+    },
     "scale2_window_config.json": {
         "src": "scale2_window_config.json",
         "dst": "scale2_window_config.json"
@@ -491,6 +495,20 @@ def ensure_all_configs_released():
             logger.error(f"预加载释放 {fname} 异常: {e}")
     logger.info("✅ 抢占式预加载自愈释放完成，全物理安全屏障已建立。")
 
+HISTORICAL_DELISTED_STOCKS = {
+    "600001": "邯郸钢铁",
+    "600002": "齐鲁石化",
+    "600003": "ST合金",
+    "600013": "华能国电",
+    "600024": "华能国际",
+    "600005": "武钢股份",
+    "600020": "中原高速",
+    "600087": "退市长油",
+    "000003": "PT金田A",
+    "000005": "ST星源",
+    "000018": "神州长城",
+}
+
 _resolved_name_cache = {}
 _name_cache_lock = threading.Lock()
 _SINA_ENGINE = None
@@ -506,7 +524,7 @@ def _load_name_cache():
                     for k, v in data.items():
                         v_str = str(v).strip()
                         k_str = str(k).strip().zfill(6)
-                        if v_str and not v_str.startswith("个股_") and not v_str.isdigit() and v_str != k_str:
+                        if v_str and not v_str.isdigit() and v_str != k_str:
                             _resolved_name_cache[k_str] = v_str
     except Exception as e:
         logger.error(f"Failed to load stock name cache: {e}")
@@ -578,7 +596,7 @@ def _load_name_cache():
             except Exception as e:
                 logger.error(f"Failed to save bootstrapped cache: {e}")
 
-def _save_to_name_cache(code: str, name: str):
+def _save_to_name_cache(code: str, name: str, allow_placeholder: bool = False):
     global _resolved_name_cache
     # 提取纯 6 位数字代码以保证缓存 key 的规范性
     import re
@@ -590,7 +608,7 @@ def _save_to_name_cache(code: str, name: str):
         code_clean = code_clean.zfill(6)
         
     name_clean = str(name).strip()
-    if not name_clean or name_clean.startswith("个股_") or name_clean.isdigit() or name_clean == code_clean:
+    if not name_clean or (not allow_placeholder and name_clean.startswith("个股_")) or name_clean.isdigit() or name_clean == code_clean:
         return
     
     with _name_cache_lock:
@@ -744,24 +762,27 @@ def resolve_stock_name(code_clean: str) -> str:
         except Exception as e:
             logger.warning(f"[resolve_stock_name] premarket_diagnose failed: {e}", exc_info=True)
 
-    # 4. 终极网络兜底：通过新浪 API 联网拉取 (仅限 6 位纯数字代码)
+    # 4. 终极网络兜底：通过新浪 API 联网拉取 (使用纯 HTTPConnection 避开 urllib proxy_bypass/socket.getfqdn 死锁卡顿)
     if code_clean.isdigit() and len(code_clean) == 6:
-        import urllib.request
+        import http.client
         import re
-        # 格式化 code 加上 sh/sz/bj 前缀
         prefix = "sh" if code_clean.startswith("6") else ("bj" if code_clean.startswith(("8", "4", "9")) else "sz")
-        url = f"http://hq.sinajs.cn/list={prefix}{code_clean}"
+        host = "hq.sinajs.cn"
+        path = f"/list={prefix}{code_clean}"
+        conn = None
         try:
-            req = urllib.request.Request(
-                url, 
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36',
-                    'Referer': 'http://finance.sina.com.cn'
-                }
-            )
-            with urllib.request.urlopen(req, timeout=3) as response:
-                html = response.read().decode('gbk', errors='ignore')
-                # 格式：var hq_str_sh600000="浦发银行,..."
+            conn = http.client.HTTPConnection(host, timeout=0.8)
+            conn.request("GET", path, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'http://finance.sina.com.cn'
+            })
+            resp = conn.getresponse()
+            if resp.status == 200:
+                content = resp.read()
+                try:
+                    html = content.decode('gbk', errors='ignore')
+                except Exception:
+                    html = content.decode('utf-8', errors='ignore')
                 match = re.search(r'="([^,"]+)', html)
                 if match:
                     name = match.group(1).strip()
@@ -770,10 +791,18 @@ def resolve_stock_name(code_clean: str) -> str:
                         _save_to_name_cache(code_clean, name)
                         return name
         except Exception as e:
-            logger.error(f"[resolve_stock_name] Failed to fetch name from Sina for {code_clean}: {e}")
+            logger.warning(f"[resolve_stock_name] HTTPConnection fetch failed for {code_clean}: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
+    fallback_name = f"个股_{code_clean}"
     logger.warning(f"[resolve_stock_name] All channels failed to resolve name for {code_clean}. Fallback to placeholder.")
-    return f"个股_{code_clean}"
+    _save_to_name_cache(code_clean, fallback_name, allow_placeholder=True)
+    return fallback_name
 
 
 def is_active_trading_hours(bypass: bool = False) -> bool:

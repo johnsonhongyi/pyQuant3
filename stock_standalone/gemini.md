@@ -1,3 +1,15 @@
+## 2026-08-03 09:20
+- [x] **彻底根治 `GlobalMarketKLineDialog` 刷新财经热榜 AttributeError 异常 (`ats/ui/global_market_kline_dialog.py`)**：
+    - [x] **修复缺失属性笔误 (`self.sec_name` -> `self.name`)**：在 `GlobalMarketKLineDialog._on_refresh_news_clicked` 方法中将未定义的 `self.sec_name` 属性修正为 `self.name`，彻底消除点击右侧权威财经热榜 `🔄 刷新` 按钮时抛出的 `AttributeError: 'GlobalMarketKLineDialog' object has no attribute 'sec_name'` 隐患。
+    - [x] **单元测试全量 100% 校验通过**：运行 `tests/test_signal_ledger.py` (11/11 passed) 及 `scratch/test_financial_news_hotlist.py` 验证全量通过。
+
+## 2026-08-03 04:45
+- [x] **实现应用级外盘数据网络日志开关 (默认关闭 `False`)、物理 JSON 持久化与跨窗口 `GLOBAL_LOG_EVENT_BRIDGE` 广播同步 (`JSONData/global_market_data.py`, `ats/ui/proxy_dialog.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_market_logging_toggle.py`)**：
+    - [x] **网络抓取诊断日志统一收口与默认静默 (`log_market_msg`)**：在 `JSONData/global_market_data.py` 中引入 `ats_global_market_log_enabled` (默认关闭 `False`) 开关存取接口 (`get_global_market_log_enabled()` / `save_global_market_log_enabled()`)；创建 `log_market_msg` 统一防护 helper，替代全部 `global_market_data.py` 内部的网络诊断 `print` 调用，彻底根治控制台乱码与日志刷屏。
+    - [x] **全局日志信号广播 Bus (`GLOBAL_LOG_EVENT_BRIDGE`)**：在 `ats/ui/proxy_dialog.py` 中建立全局 PySide6/PyQt6 `GlobalLogEventBridge` 单例广播桥 (`log_toggled_signal = pyqtSignal(bool)`)，实现主窗口与所有子窗口日志状态秒级同步。
+    - [x] **主窗口 Header 与 K 线弹窗 UI 按键集成**：在 `GlobalMarketPanel` 与 `GlobalMarketKLineDialog` 顶部 Header 操作栏中（紧邻 `🌐 代理: 关/开` 按键左侧）新增 `📜 日志: 关/开` 高亮控制按键；点击即可实时切换日志开启/关闭状态，并瞬间广播更新所有已打开界面的 UI 按键文案与 QSS 样式。
+    - [x] **全量自动化测试 100% 校验通过**：新建 `scratch/test_market_logging_toggle.py`，全量验证物理 JSON 存取、控制台 0 字符静默过滤与跨窗口 `GLOBAL_LOG_EVENT_BRIDGE` 广播信号；结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
 ## 2026-08-03 04:15
 - [x] **统一全系统非交易日及交易日盘前 09:20（920）静态数据确定性冻结引擎 (`data_utils.py`, `JohnsonUtil/commonTips.py`, `bidding_momentum_detector.py`, `scratch/test_premarket_trade_date_lock.py`)**：
     - [x] **09:20 盘前与竞价不可撤单切分点统一定位**：结合 A 股交易市场特征，全网统一将 **09:20**（`920` / `9*60+20` 不可撤单询价盘）作为盘前未开盘与盘中分水岭界限。

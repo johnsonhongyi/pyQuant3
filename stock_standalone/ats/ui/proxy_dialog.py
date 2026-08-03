@@ -27,6 +27,14 @@ class GlobalProxyEventBridge(QObject):
 GLOBAL_PROXY_EVENT_BRIDGE = GlobalProxyEventBridge()
 
 
+class GlobalLogEventBridge(QObject):
+    """全局外盘日志开关变更广播信号桥，实现主窗口与所有子窗口日志显示状态秒级同步"""
+    log_toggled_signal = pyqtSignal(bool)
+
+
+GLOBAL_LOG_EVENT_BRIDGE = GlobalLogEventBridge()
+
+
 class ProxyTestSignalBridge(QObject):
     """用于异步子线程安全向 Qt 主 UI 线程派发结果信号的桥接器"""
     result_signal = pyqtSignal(bool, float, str)
