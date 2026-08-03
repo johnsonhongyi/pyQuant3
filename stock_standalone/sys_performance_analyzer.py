@@ -752,10 +752,12 @@ class AutostartManager:
             
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
             
             out = subprocess.check_output(
                 ['powershell', '-NoProfile', '-Command', cmd],
                 startupinfo=startupinfo,
+                creationflags=creationflags,
                 stderr=subprocess.DEVNULL,
                 timeout=5.0
             )
