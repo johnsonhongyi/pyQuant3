@@ -504,28 +504,67 @@ def load_config_node(key: str, default=None):
     return default
 
 
-def save_config_node(key: str, val) -> bool:
-    """线程安全将指定 key 物理原子落盘保存至 window_config.json"""
+def save_config_nodes(key_val_dict: dict) -> bool:
+    """线程安全将多个 key-value 增量物理原子落盘保存至 window_config.json
+    具备重试与防覆盖保护，绝不使用空字典覆盖已有物理配置。
+    """
+    if not key_val_dict or not isinstance(key_val_dict, dict):
+        return False
+
     import os
     import json
+    import time
+    import tempfile
     from sys_utils import get_app_root, get_conf_path
-    try:
-        cfg_path = get_conf_path("window_config.json", get_app_root())
-        with CONFIG_FILE_LOCK:
+
+    cfg_path = get_conf_path("window_config.json", get_app_root())
+    
+    with CONFIG_FILE_LOCK:
+        for attempt in range(3):
             data = {}
+            file_existed_and_valid = False
             if os.path.exists(cfg_path):
                 try:
                     with open(cfg_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
-            data[key] = val
-            tmp_path = cfg_path + f".tmp_{key}"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, cfg_path)
-            return True
-    except Exception as ex:
-        print(f"[ConfigHelper] 保存节点 {key} 异常: {ex}")
-        return False
+                        loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            data = loaded
+                            file_existed_and_valid = True
+                except Exception as read_ex:
+                    time.sleep(0.05)
+                    continue
+            else:
+                file_existed_and_valid = True
+
+            # 如果文件存在但读取解析失败，避免直接用 {} 抹掉整盘配置，在第 3 次重试失败前不盲目覆写
+            if not file_existed_and_valid and os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0 and attempt < 2:
+                time.sleep(0.05)
+                continue
+
+            # 增量合并字典
+            for k, v in key_val_dict.items():
+                data[k] = v
+
+            try:
+                temp_dir = os.path.dirname(cfg_path) or "."
+                fd, tmp_path = tempfile.mkstemp(dir=temp_dir, prefix="win_cfg_", suffix=".tmp", text=True)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+                return True
+            except Exception as write_ex:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+                time.sleep(0.05)
+
+    print(f"[ConfigHelper] 警告: 写入节点 {list(key_val_dict.keys())} 失败")
+    return False
+
+
+def save_config_node(key: str, val) -> bool:
+    """线程安全将指定 key 物理原子落盘保存至 window_config.json (基于 safe save_config_nodes)"""
+    return save_config_nodes({key: val})
 

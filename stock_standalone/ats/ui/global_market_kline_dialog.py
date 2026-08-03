@@ -379,20 +379,8 @@ class GlobalMarketNewsDetailDialog(QDialog):
     def _save_settings(self):
         """物理落盘持久化配置至 window_config.json"""
         try:
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_news_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
-                tmp_path = cfg_path + ".tmp_news_detail"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_news_detail_dialog_geom", self.saveGeometry().toHex().data().decode('utf-8'))
         except Exception:
             pass
 
