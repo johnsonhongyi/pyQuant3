@@ -248,6 +248,124 @@ def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[st
 
     return results
 
+def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optional[pd.DataFrame] = None) -> str:
+    """
+    根据股票数据行的自动通道指标，自动生成实盘具体操作指引 (策略执行标准)
+    可以直接利用 df_all / row 中自带的全部通道数据切片进行读取与生成，无需重新计算。
+    【多周期支持】：优先按从小到大周期 ('d' -> '2d' -> '3d' -> 'w' -> 'm') 匹配有效通道数据（使用最小周期做通道策略）。
+    """
+    if isinstance(row, pd.Series):
+        row = row.to_dict()
+    elif not isinstance(row, dict):
+        row = {}
+
+    # 如果 row 里完全没有通道数据，尝试从 df_code 的最后一行中提取（无需重算）
+    if df_code is not None and not df_code.empty:
+        last_c = df_code.iloc[-1]
+        for col in ['close', 'ch_upper', 'ch_mid', 'ch_lower', 'ch_slope', 'ch_slope_deg', 'ch_pos', 'ch_pattern', 'ch_anchor_high_price', 'ch_anchor_low_price', 'ch_tc2', 'ch_bc2', 'ch_nod']:
+            if col in last_c and col not in row:
+                val = last_c[col]
+                row[col] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
+
+    # 寻找包含有效通道数据的最小周期后缀 ('', 'd', '2d', '3d', 'w', 'm', '45d', '3m')
+    period_candidates = ['', 'd', '2d', '3d', 'w', 'm', '45d', '3M']
+    selected_suffix = None
+    
+    for suf in period_candidates:
+        key = f"ch_upper_{suf}" if suf else "ch_upper"
+        val = row.get(key, 0.0)
+        try:
+            val_f = float(val) if val is not None else 0.0
+        except Exception:
+            val_f = 0.0
+        if val_f > 0:
+            selected_suffix = suf
+            break
+
+    if selected_suffix is None:
+        return ""
+
+    def get_val(base_col, default=0.0):
+        key = f"{base_col}_{selected_suffix}" if selected_suffix else base_col
+        v = row.get(key)
+        if v is None:
+            v = row.get(base_col, default)
+        try:
+            return float(v) if v is not None else float(default)
+        except Exception:
+            return float(default)
+
+    close_p = get_val('close', row.get('now', row.get('trade', 0.0)))
+    upper_p = get_val('ch_upper', 0.0)
+    mid_p = get_val('ch_mid', 0.0)
+    lower_p = get_val('ch_lower', 0.0)
+    pos = get_val('ch_pos', 0.0)
+    pattern = int(get_val('ch_pattern', 1))
+
+    if upper_p <= 0 or mid_p <= 0:
+        return ""
+
+    p_tag = selected_suffix.upper() if selected_suffix else "日线"
+    lines = []
+    lines.append("==================================================")
+    lines.append(f"=== 🎯 自动通道实战策略计划与操作指引 ({p_tag}最小周期) ===")
+    lines.append("==================================================")
+    lines.append(f"最新收盘价: {close_p:.2f} 元 (ch_pos = {pos:.1f}%)")
+    lines.append(f"通道三轨: 上轨 = {upper_p:.2f} 元 | 中轨 = {mid_p:.2f} 元 | 下轨 = {lower_p:.2f} 元")
+    lines.append("-" * 50)
+
+    if pos > 100.0:
+        lines.append("【多空方向】: 🔥 强多头 (突破上轨加速浪)")
+        lines.append("【操作选择】: 【做多 - 突破加速单 / 回踩上轨低吸】")
+        lines.append("\n【实盘路线图指引】:")
+        lines.append(f"  ├─ 低吸/买入: 回踩上轨 {upper_p:.2f} ~ {upper_p*1.02:.2f} 元附近企稳建仓")
+        lines.append(f"  ├─ 持股/观望: 上不设限，目标看前高 (ch_pos > 100%)")
+        lines.append(f"  └─ 止损/离场: 有效跌破上轨 {upper_p*0.98:.2f} 元 (跌幅>2%) 严格止损")
+        lines.append("\n🟢 ① 买入 / 加仓策略 (低吸/突破机会)")
+        lines.append(f"  • 上轨回踩买点：若盘中股价回调至通道上轨附近（{upper_p:.2f} 元 ~ {upper_p*1.02:.2f} 元）且呈现缩量企稳，是极佳的突破回踩低吸做多买点。")
+        lines.append(f"  • 突破追击买点：若后续放量大阳线强行冲高（即 ch_pos > 100%），表明开启主升浪爆起行情，可跟进打板/追击加速单。")
+        lines.append("\n🔴 ② 止盈 / 卖出策略 (减仓节点)")
+        lines.append(f"  • 阶段逢高止盈：当股价快速冲高远离上轨，若无强封涨停迹象，宜分批减仓落袋为安。")
+        lines.append(f"  • 上轨破位止损：若收盘价重新有效跌破上轨 {upper_p:.2f} 元（防守位 {upper_p*0.98:.2f} 元），说明突破假拉升，需严格止损离场观望。")
+    elif pattern == 1 and pos >= 50.0:
+        lines.append("【多空方向】: 🟢 多头控盘 (中轨上方安全上升通道)")
+        lines.append("【操作选择】: 【做多 - 中轨低吸 / 持股观望】")
+        lines.append("\n【实盘路线图指引】:")
+        lines.append(f"  ├─ 低吸/买入: 回踩中轨 {mid_p:.2f} ~ {mid_p*1.02:.2f} 元附近企稳建仓")
+        lines.append(f"  ├─ 持股/观望: 目标上看上轨 {upper_p:.2f} 元 (ch_pos -> 90%~100%)")
+        lines.append(f"  └─ 止损/离场: 有效跌破中轨 {mid_p*0.98:.2f} 元 (ch_pos < 50%) 严格止损")
+        lines.append("\n🟢 ① 买入 / 加仓策略 (低吸机会)")
+        lines.append(f"  • 中轨回踩买点：若盘中股价回调至通道中轨附近（{mid_p:.2f} 元 ~ {mid_p*1.02:.2f} 元）且呈现缩量企稳，是极佳的低吸做多买点。")
+        lines.append(f"  • 突破追击买点：若后续放量大阳线强行突破上轨 {upper_p:.2f} 元（即 ch_pos > 100%），表明开启主升浪爆起行情，可跟进打板/追击加速单。")
+        lines.append("\n🔴 ② 止盈 / 卖出策略 (减仓节点)")
+        lines.append(f"  • 上轨逢高止盈：当股价推升至通道上轨附近（{upper_p*0.96:.2f} 元 ~ {upper_p:.2f} 元，即 ch_pos 达到 90%~100%），若无强封涨停迹象，宜分批减仓落袋为安。")
+        lines.append(f"  • 中轨破位止损：若收盘价重新有效跌破中轨 {mid_p:.2f} 元（ch_pos < 50%），说明反弹受阻失败，需严格止损离场观望。")
+    elif pattern == 1 and pos < 50.0:
+        lines.append("【多空方向】: 🟡 多头蓄势 (低位企稳筑底)")
+        lines.append("【操作选择】: 【做多 - 下轨企稳试错 / 突破中轨跟进】")
+        lines.append("\n【实盘路线图指引】:")
+        lines.append(f"  ├─ 低吸/买入: 贴近下轨 {lower_p:.2f} ~ {lower_p*1.03:.2f} 元企稳试错建仓")
+        lines.append(f"  ├─ 持股/观望: 目标上看中轨 {mid_p:.2f} 元 (ch_pos -> 50%)")
+        lines.append(f"  └─ 止损/离场: 有效跌破下轨支撑 {lower_p*0.98:.2f} 元 严格止损")
+        lines.append("\n🟢 ① 买入 / 加仓策略 (企稳试错)")
+        lines.append(f"  • 下轨企稳买点：若盘中股价回调至通道下轨附近（{lower_p:.2f} 元 ~ {lower_p*1.03:.2f} 元）且极度缩量干涸，是逢低试错做多买点。")
+        lines.append(f"  • 站稳中轨加仓：若放量大阳线突破中轨 {mid_p:.2f} 元（ch_pos > 50%），确认突破成功，可跟进加仓。")
+        lines.append("\n🔴 ② 止盈 / 卖出策略 (减仓节点)")
+        lines.append(f"  • 中轨逢高止盈：当股价推升至通道中轨附近（{mid_p:.2f} 元），若跟随量能不足，先分批减仓落袋。")
+        lines.append(f"  • 创新低止损：若跌破下轨支撑 {lower_p*0.98:.2f} 元，说明筑底失败，需严格止损离场观望。")
+    else:
+        lines.append("【多空方向】: 🔴 空头占优 (触顶回落 / 阴跌通道)")
+        lines.append("【操作选择】: 【观望 - 严禁盲目抄底 / 离场避险】")
+        lines.append("\n【实盘路线图指引】:")
+        lines.append(f"  ├─ 观望/避险: 空头通道严禁盲目抄底")
+        lines.append(f"  └─ 止损/离场: 跌破下轨 {lower_p:.2f} 元 离场避险")
+        lines.append("\n🔴 空头避险与止损策略")
+        lines.append(f"  • 空头控盘中，价格整体受制于中轨 {mid_p:.2f} 元，不宜贸然做多；仅在回落至下轨 {lower_p:.2f} 元极度地量时考虑快进快出超跌反弹。")
+
+    lines.append("==================================================\n")
+    return "\n".join(lines)
+
+
 def format_check_result(results: List[Dict[str, Any]]) -> str:
     lines = []
     for i, r in enumerate(results, 1):
@@ -305,7 +423,10 @@ def check_code(
     report = test_code_query(df_code, queries)
     
     header = f"股票: {code} {name}\n" + "="*40 + "\n"
-    summary_text = header + format_check_result(report)
+    first_row = report[0].get("full_data", {}) if report else {}
+    channel_strat_text = generate_channel_strategy_text(first_row, df_code)
+    
+    summary_text = header + (channel_strat_text + "\n" if channel_strat_text else "") + format_check_result(report)
     
     # 智能检查环境并做安全隔离。如果是在非 Tk (如 PyQt) 环境调用 check_code，
     # 我们创建一个隐藏的 tk.Tk() 主窗口，防止多出一个丑陋的空白小 Tk 窗口，

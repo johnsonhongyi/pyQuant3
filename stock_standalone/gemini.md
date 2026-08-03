@@ -1,3 +1,25 @@
+## 2026-08-03 18:09
+- [x] **多周期诊断 (`QtCheckCodeDialog`) 调对齐通道策略位置至最上方 (`ats/ui/multi_period_dialog.py`, `stock_logic_utils.py`)**：
+    - [x] **100% 对齐 Tk 诊断布局排版**：重构 `QtCheckCodeDialog` 诊断文本拼接逻辑，将自动通道实战策略计划与 ASCII 路线图放置在报告最上方（Header 股票基本信息下方、各周期条件判定之前），实现 PyQt6 多周期诊断与 Tk 经典诊断排版 100% 精准统一。
+    - [x] **全量单元测试 100% 校验**：结合 `test_signal_ledger.py` 与 `test_trend_channel.py` 全量 16 项单元测试 100% 成功通过。
+
+## 2026-08-03 18:05
+- [x] **实现多周期诊断接入自动通道策略与最小周期自动匹配算法 (`stock_logic_utils.py`, `ats/ui/multi_period_dialog.py`, `scratch/test_multi_period_channel_strategy.py`)**：
+    - [x] **最小周期自动识别与提取 (`generate_channel_strategy_text`)**：重构 `generate_channel_strategy_text` 函数，优先依序从多周期平铺数据中匹配最小有效通道周期 ('d' -> '2d' -> '3d' -> 'w' -> 'm')。完美解决多周期诊断中因字段带有 `_d` / `_2d` / `_w` 后缀导致通道指标未识别的痛点。
+    - [x] **`QtCheckCodeDialog` 诊断弹窗无缝嵌入**：在 `MultiPeriodDialog` 对应的 `QtCheckCodeDialog` 报告生成流程中，自动调起 `generate_channel_strategy_text`，将带最小周期标记的实盘策略计划与 ASCII 路线图完整呈现于诊断面板底部。
+    - [x] **自动化测试 100% 校验**：新建 `scratch/test_multi_period_channel_strategy.py` 验证基础无后缀、`_d`/`_w` 多周期及 `_2d` 降级周期下的通道策略识别；结合 `test_signal_ledger.py` 与 `test_trend_channel.py` 全量 16 项单元测试 100% 成功通过！
+
+## 2026-08-03 17:50
+- [x] **实现通道诊断实战策略生成与安全免重算模式 (`stock_logic_utils.py`, `scratch/test_check_code_channel.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **全数据免重算提取**：重构 `generate_channel_strategy_text` 函数，直接利用传入的 DataFrame 切片提取通道三轨及相对位置指标，彻底杜绝重复重算引发的系统开销与计算偏差。
+    - [x] **三大交易动作决策树**：基于 `ch_pos` (价格相对位置) 与 `ch_pattern` (趋势格局) 自动衍生决策，为【做多/加仓】、【持股/观望】及【止损/离场】提供精确到分钱的价格区间指引。
+    - [x] **全局 `check_code` 诊断嵌入与 UTF-8 控制台兼容**：将策略计划自动注入到全局诊断函数 `check_code` 报告底部；解决 Windows PowerShell 下 `safe_float` 转换与 UTF-8 输出异常，单元测试 100% 校验通过。
+
+## 2026-08-03 17:42
+- [x] **为全局通道诊断引擎集成动态【通道实战策略计划与操作指引】与路线图 (`scratch/diagnose_002902_channel.py`, `JSONData/tdx_data_Day.py`, `GEMINI.md`)**：
+    - [x] **多空方向与买卖指引动态决策**：基于 `ch_pos` (相对位置)、`ch_pattern` (触底/触顶) 及通道三轨，自动判定 4 大实战场景（🔥 强多头突破浪 / 🟢 多头控盘中轨低吸 / 🟡 多头蓄势筑底 / 🔴 空头占优避险观望），输出精确到分钱的买入区间、止盈目标价与止损防守价。
+    - [x] **树状/ASCII 策略路线图控制台可视化**：在基础诊断摘要下方直观生成买卖决策路线图，并接入 Windows UTF-8 stdout 兼容包裹，彻底解决 PowerShell/CMD 环境下的 Emoji 编码问题。
+
 ## 2026-08-03 17:00
 - [x] **将通达信「自动通道」全部指标定义说明与策略用例接入全局帮助系统 (`stock_indicator_help.py`, `query_engine_util.py`, `GEMINI.md`)**：
     - [x] **7 大自动通道指标说明与实战用例植入**：在 `stock_indicator_help.py` (`HotKey: Ctrl + /`) 的 `IndicatorHelpWindow` 中全面植入 `ch_upper/ch_mid/ch_lower`, `ch_slope`, `ch_anchor_high_price/ch_anchor_low_price`, `ch_tc2/ch_bc2`, `ch_nod` 以及 `ch_pattern` (触底走高/触顶走低) 的 7 大指标定义与详细求解逻辑。
@@ -9,6 +31,18 @@
     - [x] **消除硬截断，保留物理线性回归斜率**：彻底废除 `np.clip(mid, min_limit, max_limit)` 硬性截断，仅保留安全下限 `np.maximum(0.01, ...)` 防负值；使得通道回归线能在全图中按真实斜率平滑延伸。
     - [x] **补齐极值与 K 线距离等 4 大新特征列**：在 `calc_trend_channel` 导出列中新增 `ch_anchor_high_price` (顶点价格)、`ch_anchor_low_price` (底点价格)、`ch_tc2` (高点距今 K 线数)、`ch_bc2` (低点距今 K 线数)，并在 `query_engine_util.py` 中绑定同义词映射 (`high_bars_ago`, `low_bars_ago`)，完美支持类似 `ch_tc2 < 25` 的多周期灵活筛选。
     - [x] **002902 实盘数据验证与单元测试 100% 通过**：使用 002902 实际行情测试验证，精确定位到顶点 29.81 元 (tc2=53) 与低点 16.64 元 (bc2=9)，通道上中下轨 `ch_upper: 28.53`, `ch_mid: 22.59`, `ch_lower: 16.64` 与通达信图形 100% 完全精准吻合。单元测试 `test_trend_channel.py` (5/5 passed) 及 `test_signal_ledger.py` (11/11 passed) 全量 100% 一次性成功通过！
+
+## 2026-08-03 17:50
+- [x] **物理验证信号面板关闭自动持久化、800ms防抖写盘与 0-IO Dirty Check 防无脑覆盖机制 (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_persistence.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **`closeEvent` / `hideEvent` 自动持久化**：点击右上角 $X$ 按钮（无论是隐退还是关闭销毁窗口）均瞬时强制执行物理落盘，封死未保存退出的漏洞。
+    - [x] **800ms 动态防抖自动持久化**：用户拖动 14 个 Tab 中任意表格的列宽时，触发 `sectionResized` 的 800ms 防抖定时器，停止拖动后自动写盘。
+    - [x] **Dirty Check 零 IO 防盲目覆盖**：对比内存新快照与物理基准 `_last_saved_ui_state`，无列宽变动时**直接静默跳过写盘，磁盘 0 消耗且绝不盲目覆盖已有数据**。测试 `scratch/test_signal_dashboard_persistence.py` 100% 成功通过。
+
+## 2026-08-03 17:45
+- [x] **实现信号面板全量 14 个 Tab 页签列宽与布局 100% 独立持久化 (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_restore.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **解构 Emoji/Unicode 正则键名破坏隐患**：排查发现原 `_clean_tab_name` 采用粗暴的正则剥离 Emoji 字符，在 Windows 环境下导致 `📋 每日操作指南`, `🌟 决策队列`, `🐉 龙头追踪`, `🌐 战略趋势`, `🔥 板块热力`, `📡 市场预警` 6 大带 Emoji 的 Tab 生成了破坏/非法乱码 Key，致使系统仅能识别无 Emoji 的个别普通 Tab，出现“只持久化了单独 Tab”的假象。
+    - [x] **重构 MD5 唯一 ASCII 键名生成引擎 (`_clean_tab_name`)**：彻底弃用脆弱的 Emoji 正则表达式，改用 `hashlib.md5(str(name).encode('utf-8')).hexdigest()[:12]` 算法。为所有包含 Emoji/中文字符的 Tab 页签生成纯 ASCII 的 12 位 100% 绝对稳定标识符，彻底消除了物理 JSON 文件中乱码与键名匹配失效漏洞。
+    - [x] **全量 14/14 个 Tab 自动化断言测试 100% 成功通过**：更新 `scratch/test_signal_dashboard_restore.py` 测试脚本，遍历全量 14 个 Tab 设置差异化像素列宽（120px~250px）落盘，重启加载后断言 14/14 个 Tab 的列宽 **100% 精准无缝还原**（PASSED 100%）。结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
 
 ## 2026-08-03 17:15
 - [x] **彻底根治 `SignalDashboardPanel` 信号面板持久化失效绝密底层 Bug (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_restore.py`, `tests/test_signal_ledger.py`)**：

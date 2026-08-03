@@ -1635,11 +1635,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     @staticmethod
     def _clean_tab_name(name: str) -> str:
-        """⭐ [KEY FIX] 用正则统一清除所有 emoji 和特殊前缀，确保 key 匹配一致"""
-        import re
-        # 清除 emoji（Unicode 扩展字符）及其后的空格
-        cleaned = re.sub(r'[\U00010000-\U0010ffff\U00002600-\U000027BF\U0001F300-\U0001FAFF]\s*', '', name)
-        return cleaned.strip()
+        """⭐ [KEY FIX] 使用 MD5 生成 100% 绝对安全的纯 ASCII 标识符，封死 Emoji 乱码与 14 个 Tab 键名失配漏洞"""
+        import hashlib
+        return hashlib.md5(str(name).encode('utf-8')).hexdigest()[:12]
 
     def _collect_ui_state(self) -> dict:
         """收集当前 UI 布局状态（纯内存，无副作用）"""
