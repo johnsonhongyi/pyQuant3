@@ -635,7 +635,6 @@ class GlobalMarketKLineDialog(QDialog):
 
         layout.addWidget(header_frame)
 
-
         # ---------------- 2. 动态信息条 (Info Banner) ----------------
         self.lbl_info = QLabel("提示: 鼠标悬浮移入画板查看开高低收明细与指标数据")
         self.lbl_info.setStyleSheet("""
@@ -843,13 +842,19 @@ class GlobalMarketKLineDialog(QDialog):
 
         self._populate_news_list()
         news_layout.addWidget(self.lst_news)
+        self._start_auto_refresh_timer()
 
     def _populate_news_list(self):
         """填充资讯列表条目 (限制显示不超过 20 条)"""
         self.lst_news.clear()
 
-        # 确保显示限制不超过 20 条
-        display_items = self.news_items[:20] if self.news_items else []
+        # 确保按时间降序排序（最新在最上面），限制显示不超过 20 条
+        sorted_items = sorted(
+            self.news_items or [],
+            key=lambda x: (str(x.get('datetime', '')), float(x.get('impact_score', 0.0))),
+            reverse=True
+        )
+        display_items = sorted_items[:20]
         self.lbl_news_hdr.setText(f"🔥 权威自选热榜 ({len(display_items)}/20)")
 
         if not display_items:
@@ -1005,6 +1010,38 @@ class GlobalMarketKLineDialog(QDialog):
                 }
             """)
         self._on_splitter_moved(0, 0)
+        self._start_auto_refresh_timer()
+
+    def _start_auto_refresh_timer(self):
+        """启动子窗口自动轮询定时器，依据统一系统更新阈值时间 (交易期 60s, 非交易期 600s) 定时同步关联行情与自选要闻"""
+        try:
+            from JSONData.global_market_data import get_global_market_cache_ttl
+            interval_sec = get_global_market_cache_ttl()
+        except Exception:
+            interval_sec = 60.0
+
+        self._news_timer = QTimer(self)
+        self._news_timer.setInterval(int(interval_sec * 1000))
+        self._news_timer.timeout.connect(self._on_auto_refresh_timer_timeout)
+        self._news_timer.start()
+
+    def _on_auto_refresh_timer_timeout(self):
+        """定时器到期回调: 重新检测并动态调整轮询间隔，自动无感更新关联实时数据与要闻"""
+        try:
+            from JSONData.global_market_data import get_global_market_cache_ttl
+            interval_sec = get_global_market_cache_ttl()
+            self._news_timer.setInterval(int(interval_sec * 1000))
+        except Exception:
+            pass
+
+        self._refresh_related_info_label()
+        try:
+            items = fetch_symbol_financial_news(self.symbol, self.name, force_refresh=False)
+            if items and len(items) != len(self.news_items):
+                self.news_items = items
+                self._populate_news_list()
+        except Exception:
+            pass
 
 
 
@@ -1136,7 +1173,7 @@ class GlobalMarketKLineDialog(QDialog):
         if self.worker and self.worker.isRunning():
             return
 
-        if not self.klines:
+        if not self.klines and hasattr(self, 'lbl_info'):
             self.lbl_info.setText(f"🌐 正在后台异步加载 [{self.data_source}] 最新外盘 K 线数据...")
 
         self.worker = KLineWorkerThread(self.symbol, force_refresh=force_refresh, data_source=self.data_source)
@@ -1152,9 +1189,15 @@ class GlobalMarketKLineDialog(QDialog):
             self._apply_zoom_mode()
             # 主 K 线数据就绪后再触发关联品种加载
             self._trigger_related_loads()
+            last_date = klines[-1].get('date', '') if klines else ''
+            last_close = float(klines[-1].get('close', 0.0)) if klines else 0.0
+            last_pct = float(klines[-1].get('pct', 0.0)) if klines else 0.0
+            if hasattr(self, 'lbl_info'):
+                self.lbl_info.setText(f"✅ [{self.data_source.upper()}源] K 线数据加载成功: {len(klines)} 条日K线 (最新切片: {last_date}, 点位: {last_close:.2f}, {last_pct:+.2f}%)")
         elif not self.klines:
             log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
-            self.lbl_info.setText(f"❌ K 线数据加载失败: {err_msg or '网络或解析异常'}")
+            if hasattr(self, 'lbl_info'):
+                self.lbl_info.setText(f"❌ K 线数据加载失败: {err_msg or '网络或解析异常'}")
 
     def _refresh_related_info_label(self):
         """刷新 Header 关联品种实时涨跌标签"""
@@ -1585,10 +1628,10 @@ class GlobalMarketKLineDialog(QDialog):
                 # 恢复 Splitter 分割比例 (延迟到 Layout 展示完成后)
                 splitter_sizes = data.get("ats_global_kline_splitter_sizes")
                 if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
-                    QTimer.singleShot(60, lambda s=list(splitter_sizes): self.v_splitter.setSizes(s))
+                    QTimer.singleShot(60, lambda s=list(splitter_sizes): hasattr(self, 'v_splitter') and self.v_splitter.setSizes(s))
                 h_splitter_sizes = data.get("ats_global_kline_h_splitter_sizes")
                 if h_splitter_sizes and isinstance(h_splitter_sizes, list) and len(h_splitter_sizes) >= 2:
-                    QTimer.singleShot(70, lambda s=list(h_splitter_sizes): self.h_splitter.setSizes(s))
+                    QTimer.singleShot(70, lambda s=list(h_splitter_sizes): hasattr(self, 'h_splitter') and self.h_splitter.setSizes(s))
         except Exception:
             pass
 
@@ -1604,9 +1647,10 @@ class GlobalMarketKLineDialog(QDialog):
             if hasattr(self, 'news_panel'):
                 save_config_node("ats_global_kline_news_visible", self.news_panel.isVisible())
             # 保存 Splitter 分割比例
-            sizes = self.v_splitter.sizes()
-            if sizes and any(s > 0 for s in sizes):
-                save_config_node("ats_global_kline_splitter_sizes", list(sizes))
+            if hasattr(self, 'v_splitter'):
+                sizes = self.v_splitter.sizes()
+                if sizes and any(s > 0 for s in sizes):
+                    save_config_node("ats_global_kline_splitter_sizes", list(sizes))
             if hasattr(self, 'h_splitter'):
                 h_sizes = self.h_splitter.sizes()
                 if h_sizes and any(s > 0 for s in h_sizes):
