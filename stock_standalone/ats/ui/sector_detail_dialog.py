@@ -513,122 +513,141 @@ class ATSSectorDetailDialog(QDialog):
         self.stats_lbl.setText("❌ 当前板块暂无成分股明细特征")
 
     def _render_rows(self, rows):
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(rows))
-        
-        for row_idx, r in enumerate(rows):
-            # 0. Code
-            code_item = QTableWidgetItem(str(r['code']))
-            code_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 0, code_item)
+        self._is_rendering = True
+        self.table.blockSignals(True)
+        try:
+            self.table.setSortingEnabled(False)
+            self.table.setRowCount(len(rows))
             
-            # 1. Name
-            name_item = QTableWidgetItem(str(r['name']))
-            name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 1, name_item)
+            for row_idx, r in enumerate(rows):
+                # 0. Code
+                code_item = QTableWidgetItem(str(r['code']))
+                code_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 0, code_item)
+                
+                # 1. Name
+                name_item = QTableWidgetItem(str(r['name']))
+                name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 1, name_item)
+                
+                # 2. Score
+                score_item = NumericTableWidgetItem(f"{r['score']:.1f}")
+                score_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 2, score_item)
+                
+                # 3. Type
+                type_item = QTableWidgetItem(str(r['type']))
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if '👑' in r['type']:
+                    type_item.setForeground(QColor("#ffcc00")) # gold
+                self.table.setItem(row_idx, 3, type_item)
+                
+                # 4. Pct
+                pct_val = r['pct']
+                pct_str = f"{pct_val:+.2f}%"
+                pct_item = NumericTableWidgetItem(pct_str)
+                pct_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if pct_val > 0.001:
+                    pct_item.setForeground(QColor("#ff4444"))
+                elif pct_val < -0.001:
+                    pct_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 4, pct_item)
+                
+                # 5. Start Pct
+                start_val = r['start_pct']
+                start_str = f"{start_val:+.2f}%"
+                start_item = NumericTableWidgetItem(start_str)
+                start_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if start_val > 0.001:
+                    start_item.setForeground(QColor("#ff4444"))
+                elif start_val < -0.001:
+                    start_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 5, start_item)
+                
+                # 6. DFF
+                dff_val = r['dff']
+                dff_str = f"{dff_val:+.2f}%"
+                dff_item = NumericTableWidgetItem(dff_str)
+                dff_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if dff_val > 0.001:
+                    dff_item.setForeground(QColor("#ff4444"))
+                elif dff_val < -0.001:
+                    dff_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 6, dff_item)
+                
+                # 7. Rank
+                rank_item = NumericTableWidgetItem(str(r['rank']))
+                rank_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 7, rank_item)
+                
+                # 8. DFF2
+                dff2_val = r['dff2']
+                dff2_item = NumericTableWidgetItem(f"{dff2_val:+.2f}%")
+                dff2_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if dff2_val > 0.001:
+                    dff2_item.setForeground(QColor("#ff4444"))
+                elif dff2_val < -0.001:
+                    dff2_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 8, dff2_item)
+                
+                # 9. DFF3
+                dff3_val = r['dff3']
+                dff3_item = NumericTableWidgetItem(f"{dff3_val:+.2f}%")
+                dff3_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if dff3_val > 0.001:
+                    dff3_item.setForeground(QColor("#ff4444"))
+                elif dff3_val < -0.001:
+                    dff3_item.setForeground(QColor("#33cc5a"))
+                self.table.setItem(row_idx, 9, dff3_item)
+                
+                # 10. Pattern
+                pat_item = QTableWidgetItem(str(r['pattern'] or '--'))
+                pat_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 10, pat_item)
+                
+            self.table.setSortingEnabled(True)
+            self.table.resizeColumnsToContents()
+            self.table.clearSelection()
             
-            # 2. Score
-            score_item = NumericTableWidgetItem(f"{r['score']:.1f}")
-            score_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 2, score_item)
-            
-            # 3. Type
-            type_item = QTableWidgetItem(str(r['type']))
-            type_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if '👑' in r['type']:
-                type_item.setForeground(QColor("#ffcc00")) # gold
-            self.table.setItem(row_idx, 3, type_item)
-            
-            # 4. Pct
-            pct_val = r['pct']
-            pct_str = f"{pct_val:+.2f}%"
-            pct_item = NumericTableWidgetItem(pct_str)
-            pct_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if pct_val > 0.001:
-                pct_item.setForeground(QColor("#ff4444"))
-            elif pct_val < -0.001:
-                pct_item.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row_idx, 4, pct_item)
-            
-            # 5. Start Pct
-            start_val = r['start_pct']
-            start_str = f"{start_val:+.2f}%"
-            start_item = NumericTableWidgetItem(start_str)
-            start_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if start_val > 0.001:
-                start_item.setForeground(QColor("#ff4444"))
-            elif start_val < -0.001:
-                start_item.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row_idx, 5, start_item)
-            
-            # 6. DFF
-            dff_val = r['dff']
-            dff_str = f"{dff_val:+.2f}%"
-            dff_item = NumericTableWidgetItem(dff_str)
-            dff_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if dff_val > 0.001:
-                dff_item.setForeground(QColor("#ff4444"))
-            elif dff_val < -0.001:
-                dff_item.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row_idx, 6, dff_item)
-            
-            # 7. Rank
-            rank_item = NumericTableWidgetItem(str(r['rank']))
-            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 7, rank_item)
-            
-            # 8. DFF2
-            dff2_val = r['dff2']
-            dff2_item = NumericTableWidgetItem(f"{dff2_val:+.2f}%")
-            dff2_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if dff2_val > 0.001:
-                dff2_item.setForeground(QColor("#ff4444"))
-            elif dff2_val < -0.001:
-                dff2_item.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row_idx, 8, dff2_item)
-            
-            # 9. DFF3
-            dff3_val = r['dff3']
-            dff3_item = NumericTableWidgetItem(f"{dff3_val:+.2f}%")
-            dff3_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if dff3_val > 0.001:
-                dff3_item.setForeground(QColor("#ff4444"))
-            elif dff3_val < -0.001:
-                dff3_item.setForeground(QColor("#33cc5a"))
-            self.table.setItem(row_idx, 9, dff3_item)
-            
-            # 10. Pattern
-            pat_item = QTableWidgetItem(str(r['pattern'] or '--'))
-            pat_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row_idx, 10, pat_item)
-            
-        self.table.setSortingEnabled(True)
-        self.table.resizeColumnsToContents()
-        
-        # Setup columns minimum widths or interactive persistence
-        setup_header_persistence(self.table, f"ats_sector_detail_table_{self.sector_name}")
+            # Setup columns minimum widths or interactive persistence
+            setup_header_persistence(self.table, f"ats_sector_detail_table_{self.sector_name}")
+        finally:
+            self.table.blockSignals(False)
+            self._is_rendering = False
             
     def on_item_clicked(self, item):
+        if getattr(self, '_is_rendering', False) or self.table.signalsBlocked():
+            return
         row = item.row()
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
         if code_item and name_item and self.linkage_cb:
-            self.linkage_cb(code_item.text(), name_item.text())
+            code = code_item.text().strip()
+            name = name_item.text().strip()
+            if getattr(self, '_last_linked_code', None) != code:
+                self._last_linked_code = code
+                self.linkage_cb(code, name)
             
     def on_current_item_changed(self, current, previous):
+        if getattr(self, '_is_rendering', False) or self.table.signalsBlocked():
+            return
         if current and self.linkage_cb:
             row = current.row()
             code_item = self.table.item(row, 0)
             name_item = self.table.item(row, 1)
             if code_item and name_item:
-                self.linkage_cb(code_item.text(), name_item.text())
+                code = code_item.text().strip()
+                name = name_item.text().strip()
+                if getattr(self, '_last_linked_code', None) != code:
+                    self._last_linked_code = code
+                    self.linkage_cb(code, name)
                 
     def on_item_double_clicked(self, item):
         row = item.row()
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
         if code_item and name_item and self.double_click_cb:
-            self.double_click_cb(code_item.text(), name_item.text())
+            self.double_click_cb(code_item.text().strip(), name_item.text().strip())
 
     def _show_context_menu(self, pos):
         item = self.table.itemAt(pos)

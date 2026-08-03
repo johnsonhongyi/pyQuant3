@@ -51,6 +51,8 @@ class GlobalMarketDialog(QDialog):
         if self.parent_window:
             if hasattr(self.parent_window, "on_sector_clicked"):
                 self.panel.sector_selected.connect(self.parent_window.on_sector_clicked)
+            if hasattr(self.parent_window, "link_stock"):
+                self.panel.stock_linked.connect(self.parent_window.link_stock)
             if hasattr(self.parent_window, "on_stock_clicked"):
                 self.panel.stock_selected.connect(self.parent_window.on_stock_clicked)
 

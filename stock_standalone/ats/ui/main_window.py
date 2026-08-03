@@ -319,7 +319,7 @@ class StockDetailDialog(QDialog):
                 else:
                     self.name = self.code
 
-                # 1. 若处于贴边磁吸隐藏状态，强制滑出展平唤醒；若普通隐蔽则置顶
+                # 1. 若处于贴边磁吸隐藏状态，强制滑出展平唤醒；若被最小化/隐藏则恢复显示并唤醒；正常显示中则仅原地更新数据
                 if getattr(self, 'is_hidden_state', False):
                     if hasattr(self, 'show_normal_position'):
                         self.show_normal_position()
@@ -327,7 +327,11 @@ class StockDetailDialog(QDialog):
                         self.show()
                         self.raise_()
                         self.activateWindow()
-                else:
+                elif self.isMinimized():
+                    self.showNormal()
+                    self.raise_()
+                    self.activateWindow()
+                elif not self.isVisible():
                     self.show()
                     self.raise_()
                     self.activateWindow()
