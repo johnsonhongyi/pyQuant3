@@ -1282,15 +1282,25 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._table_update_buffer.clear()
         
     def showEvent(self, event):
-        """⭐ [KEY FIX] 窗口首次显示后恢复列宽，确保 Qt 窗口有实际尺寸，restoreState 才能生效"""
+        """⭐ [KEY FIX] 窗口显示回调：同步磁吸状态 + 首次显示后延迟恢复表格列宽与布局"""
         super().showEvent(event)
-        if not self._columns_restored:
+        import time
+        self._last_show_time = time.time()
+        self._has_hovered_since_show = False
+        self.leave_ticks = 0
+        self.hover_ticks = 0
+        self._in_snap_action = False
+
+        if hasattr(self, 'hover_timer') and self.hover_timer:
+            if not self.hover_timer.isActive():
+                self.hover_timer.start(100)
+
+        if not getattr(self, '_columns_restored', False):
             self._columns_restored = True
-            # 延迟一个事件循环，确保布局已完成
+            # 延迟一个事件循环，确保 Qt 窗口与表格完成布局尺寸计算后恢复列宽
             QTimer.singleShot(50, self._restore_ui_state)
 
     def closeEvent(self, event):
-        # 退出前显式停止 pending 延迟保存定时器，防止冲突与重复写盘
         if hasattr(self, '_save_ui_timer') and self._save_ui_timer:
             self._save_ui_timer.stop()
         
@@ -1304,21 +1314,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def hideEvent(self, event):
         self._save_window_states(is_open=False)
+        self._save_ui_state()
         super().hideEvent(event)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        import time
-        self._last_show_time = time.time()
-        self._has_hovered_since_show = False
-        self.leave_ticks = 0
-        self.hover_ticks = 0
-        self._in_snap_action = False
-
-        # ⭐ [KEY FIX] 手动关闭重新打开窗口时，必须恢复 hover_timer 运行，防止磁吸贴边检测卡死失灵
-        if hasattr(self, 'hover_timer') and self.hover_timer:
-            if not self.hover_timer.isActive():
-                self.hover_timer.start(100)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -1651,9 +1648,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         data = {}
 
+    def _collect_ui_state(self):
+        """收集面板所有表格的列宽、顺序及 Tab 选择状态（导出 HeaderHex + 物理像素 Widths 双保险）"""
+        data = {}
+        if hasattr(self, 'tabs') and self.tabs:
+            data['active_tab_index'] = self.tabs.currentIndex()
+            data['active_tab_name'] = self._clean_tab_name(self.tabs.tabText(self.tabs.currentIndex()))
+
         for name, table in self.tables.items():
             try:
                 clean_name = self._clean_tab_name(name)
+                # 1. 导出二进制 Header State
                 data[f'table_state_{clean_name}'] = (
                     table.horizontalHeader()
                         .saveState()
@@ -1661,16 +1666,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         .data()
                         .decode()
                 )
+                # 2. 导出物理像素列宽数组 (双保险)
+                ncols = table.columnCount()
+                widths = [table.columnWidth(col) for col in range(ncols)]
+                data[f'col_widths_{clean_name}'] = widths
             except Exception:
                 continue
 
-        # [NEW] 保存折叠重复个股状态
         if hasattr(self, 'fold_check'):
             data['fold_duplicates'] = self.fold_check.isChecked()
 
         return data
+
     def _save_ui_state(self):
-        """高性能保存表格布局状态（Dirty Check + 防重复写盘）"""
+        """高性能保存表格布局状态（Dirty Check + 统一原子增量落盘引擎）"""
         if not hasattr(self, 'tables') or not self.tables:
             return
 
@@ -1680,54 +1689,15 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if not new_state:
                 return
 
-            # -----------------------------
-            # Dirty Check：无变化直接跳过
-            # -----------------------------
+            # Dirty Check：无变化直接跳过，零物理 IO 开销
             if new_state == getattr(self, '_last_saved_ui_state', None):
                 return
 
             self._last_saved_ui_state = dict(new_state)
 
-            config_file = WINDOW_CONFIG_FILE
-
-            # -----------------------------
-            # 读取旧配置（仅一次）
-            # -----------------------------
-            full_data = {}
-
-            if os.path.exists(config_file):
-                try:
-                    with open(config_file, "r", encoding="utf-8") as f:
-                        full_data = json.load(f)
-                except Exception:
-                    full_data = {}
-
-            # -----------------------------
-            # Merge 当前 Section
-            # -----------------------------
-            full_data[SETTINGS_SECTION] = new_state
-
-            # -----------------------------
-            # 原子写入（防止配置损坏）
-            # -----------------------------
-            with _CONFIG_FILE_LOCK:
-                # 重新读取一次以防在保存期间被其他组件更新了根级别的 key
-                if os.path.exists(config_file):
-                    try:
-                        with open(config_file, "r", encoding="utf-8") as f:
-                            current_all = json.load(f)
-                            # 仅更新我们负责的 Section，保留其他 root keys (如 market_alert_detail_header_v2)
-                            current_all[SETTINGS_SECTION] = new_state
-                            full_data = current_all
-                    except: pass
-
-                tmp_file = config_file + ".tmp"
-                with open(tmp_file, "w", encoding="utf-8") as f:
-                    json.dump(full_data, f, ensure_ascii=False, indent=2)
-
-                os.replace(tmp_file, config_file)
-
-            logger.debug("UI state saved.")
+            from ats.ui.styles import save_config_nodes
+            save_config_nodes({SETTINGS_SECTION: new_state})
+            logger.debug("UI state saved via save_config_nodes.")
 
         except Exception as e:
             logger.error(f"Failed to save UI state: {e}")
@@ -1735,16 +1705,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _restore_ui_state(self):
         """⭐ [KEY FIX] 恢复表格布局设置 — 必须在 showEvent 后调用，确保 Qt 窗口有实际尺寸"""
         try:
-            config_file = WINDOW_CONFIG_FILE
-            if not os.path.exists(config_file): return
+            from ats.ui.styles import load_config_node
+            ui_state = load_config_node(SETTINGS_SECTION, {})
+            pos = load_config_node("signal_dashboard_panel", {})
             
-            with _CONFIG_FILE_LOCK:
-                with open(config_file, "r", encoding="utf-8") as f:
-                    full_data = json.load(f)
-            
-            ui_state = full_data.get(SETTINGS_SECTION)
             if not ui_state:
-                # 无持久化配置时，直接放开初始化保护，让 sectionResized 可以正常保存
                 self._is_initializing = False
                 return
             
@@ -1758,36 +1723,59 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             for name, table in self.tables.items():
                 clean_name = self._clean_tab_name(name)
                 state_key = f'table_state_{clean_name}'
-                if state_key in ui_state:
+                widths_key = f'col_widths_{clean_name}'
+                
+                # 优先恢复 restoreState
+                if state_key in ui_state and ui_state[state_key]:
                     state_hex = ui_state[state_key]
                     ok = table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
-                    logger.debug(f"  [Restore] {clean_name}: {'✅ ok' if ok else '⚠️ failed'}")
-                    restored_count += 1
-                # ⭐ [KEY FIX] restoreState 会把 Stretch 模式覆盖为 Interactive，必须在 restore 后重新应用
+                    if ok:
+                        restored_count += 1
+                
+                # 显式使用物理像素列宽数组进行二重坚固覆盖 (防止 restoreState 失灵或拉伸覆盖)
+                if widths_key in ui_state and isinstance(ui_state[widths_key], list):
+                    widths = ui_state[widths_key]
+                    for col_idx, w in enumerate(widths):
+                        if col_idx < table.columnCount() and int(w) > 0:
+                            table.setColumnWidth(col_idx, int(w))
+                            
                 self._reapply_table_stretch_mode(name, table)
             
+            # 恢复上次选中的 Tab 页签
+            if hasattr(self, 'tabs') and self.tabs and self.tabs.count() > 0:
+                target_idx = ui_state.get('active_tab_index', 0)
+                target_name = ui_state.get('active_tab_name', '')
+                if target_name:
+                    for i in range(self.tabs.count()):
+                        if self._clean_tab_name(self.tabs.tabText(i)) == target_name:
+                            target_idx = i
+                            break
+                if 0 <= target_idx < self.tabs.count():
+                    self.tabs.blockSignals(True)
+                    self.tabs.setCurrentIndex(target_idx)
+                    self.tabs.blockSignals(False)
+
             logger.debug(f"✅ [Dashboard] UI state restored for {restored_count} tables.")
             
-            # [NEW] 恢复配置后触发一次全表刷新，确保折叠状态正确渲染
+            # 恢复配置后触发一次全表刷新
             self._refresh_all_tables()
             
-            # [NEW] 恢复磁吸状态
+            # 恢复磁吸与位置状态
             try:
-                pos = full_data.get("signal_dashboard_panel", {})
-                self.anchor_edge = pos.get("anchor_edge")
-                should_hide = pos.get("is_hidden_state", False)
-                # 初始状态设为 False，直到 200ms 后真正执行 hide_to_edge 收缩时再置为 True，防止启动延迟期内被 _check_hover 误判
-                self.is_hidden_state = False
-                scale = self._get_dpi_scale_factor()
-                if "x" in pos and "y" in pos and "width" in pos and "height" in pos:
-                    self.normal_geometry = QRect(
-                        int(pos["x"] * scale),
-                        int(pos["y"] * scale),
-                        int(pos["width"] * scale),
-                        int(pos["height"] * scale)
-                    )
-                if should_hide and self.anchor_edge and self.normal_geometry:
-                    QTimer.singleShot(200, self.hide_to_edge)
+                if pos:
+                    self.anchor_edge = pos.get("anchor_edge")
+                    should_hide = pos.get("is_hidden_state", False)
+                    self.is_hidden_state = False
+                    scale = self._get_dpi_scale_factor()
+                    if "x" in pos and "y" in pos and "width" in pos and "height" in pos:
+                        self.normal_geometry = QRect(
+                            int(pos["x"] * scale),
+                            int(pos["y"] * scale),
+                            int(pos["width"] * scale),
+                            int(pos["height"] * scale)
+                        )
+                    if should_hide and self.anchor_edge and self.normal_geometry:
+                        QTimer.singleShot(200, self.hide_to_edge)
             except Exception as snap_err:
                 logger.error(f"[SignalDashboardPanel] Failed to restore snap state: {snap_err}")
             

@@ -77,6 +77,37 @@ class IndicatorHelpWindow:
         self.all_data = [
             ("cycle_stage", "【新增】周期阶段判定。1:筑底/启动, 2:主升/健康, 3:脉冲/扩张, 4:见顶/回落", "判定规则：\n1: Bottoming - 低位放量或均线缠绕后初次抬头\n2: Healthy - 多头排列，支撑有效\n3: Expansion - 加速远离均线，波动率放大\n4: Topping - 高位滞涨，量价背离或跌破关键支撑"),
             
+            ("ch_upper / ch_mid / ch_lower", "通达信自动通道上轨、中轨(回归线)、下轨", 
+             "详细说明：基于通达信『自动画通道』算法，全图 BARSLAST 动态寻优极值顶点与底点拟合线性回归中轨(ch_mid)，上下延伸 5 阶动态斐波那契支撑/阻力通道(ch_upper, ch_lower)。\n\n"
+             "Query同义词: ch_upper, ch_mid, ch_lower"),
+
+            ("ch_slope / ch_slope_deg", "自动通道物理线性回归斜率与倾角 (°)", 
+             "详细说明：衡量通道整体倾斜度。斜率 > 0 (倾角 > 0°) 代表上升趋势通道；斜率 < 0 代表下降趋势通道。\n\n"
+             "Query同义词: ch_slope, slope, ch_slope_deg, slope_deg"),
+
+            ("ch_anchor_high_price / ch_anchor_low_price", "自动通道顶点最高价 / 底点最低价", 
+             "详细说明：自动通道拟合所锚定的全历史高点价格(upper_price)与低点价格(lower_price)。\n\n"
+             "Query同义词: ch_anchor_high_price (ch_high_price), ch_anchor_low_price (ch_low_price)"),
+
+            ("ch_tc2 / ch_bc2", "通道顶点距今 K 线数 (tc2) / 底点距今 K 线数 (bc2)", 
+             "详细说明：通达信 BARSLAST 动态寻优测得的顶点与底点距离当前交易日的 K 线根数。\n\n"
+             "Query同义词: ch_tc2 (tc2, high_bars_ago), ch_bc2 (bc2, low_bars_ago)"),
+
+            ("ch_nod", "极值高低点间隔天数 (nod = abs(tc2 - bc2))", 
+             "详细说明：统计股价从最高顶点下跌至最低底点（或从底点上涨至顶点）所经历的洗盘/拉升 K 线天数。\n\n"
+             "Query同义词: ch_nod, nod, extrema_bars"),
+
+            ("ch_pattern", "【核心】趋势格局判定 (1: 触底反弹/震荡走高, -1: 触顶回落/震荡下跌)", 
+             "详细逻辑：\n"
+             " 1 : bc2 < tc2，底点比顶点更靠近现在，代表低位见底后进入震荡走高/反弹格局。\n"
+             "-1 : tc2 < bc2，顶点比底点更靠近现在，代表高位见顶后进入回落/派发格局。\n\n"
+             "Query同义词: ch_pattern, trend_pattern, channel_pattern"),
+
+            ("STRATEGY: 通道触底反弹", "【策略用例】寻找近期探底企稳并震荡走高个股", 
+             "策略说明：结合自动通道极值，寻找近 15 天内刚见底企稳、股价守牢底部、且在通道内部向上爬升的低吸标的。\n\n"
+             "Query推荐组：\n"
+             "df.query('ch_pattern == 1 and ch_bc2 <= 15 and close > ch_anchor_low_price and ch_pos > 25.0')"),
+            
             ("【重要】强度排序优先级", "名称列图标(水印)强度权重说明", 
              "系统现支持按『名称列图标强度』智能排序，权重分值越高排序越靠前：\n\n"
              "🚀 [1000] 强势波段 (Bullish Trend)\n"

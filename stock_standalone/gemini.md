@@ -1,3 +1,46 @@
+## 2026-08-03 17:00
+- [x] **将通达信「自动通道」全部指标定义说明与策略用例接入全局帮助系统 (`stock_indicator_help.py`, `query_engine_util.py`, `GEMINI.md`)**：
+    - [x] **7 大自动通道指标说明与实战用例植入**：在 `stock_indicator_help.py` (`HotKey: Ctrl + /`) 的 `IndicatorHelpWindow` 中全面植入 `ch_upper/ch_mid/ch_lower`, `ch_slope`, `ch_anchor_high_price/ch_anchor_low_price`, `ch_tc2/ch_bc2`, `ch_nod` 以及 `ch_pattern` (触底走高/触顶走低) 的 7 大指标定义与详细求解逻辑。
+    - [x] **实战策略用例集成**：在说明窗口中内置 `STRATEGY: 通道触底反弹` 典型策略推荐写法 (`df.query('ch_pattern == 1 and ch_bc2 <= 15 and close > ch_anchor_low_price and ch_pos > 25.0')`)，支持在 UI 界面双击查看和复制。
+
+## 2026-08-03 16:45
+- [x] **实现通达信「自动通道」算法全图 BARSLAST 动态寻优、去掉硬截断并补齐极值特征 (`JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_trend_channel.py`, `scratch/diagnose_002902_channel.py`)**：
+    - [x] **全图 BARSLAST 动态寻优 (告别 36 天阻断限制)**：重构 `calc_trend_channel` 极值定位模块，将原本限制在 36 bars 内的 `np.argmax/argmin` 升级为 100% 遵照通达信源码的 `BARSLAST(TC1=H)` 与 `BARSLAST(BC1=L)` 动态寻优。在全历史 K 线范围内准确寻找上高点 `upper_price` (如 2026-05-15 的 29.81 元) 与下低点 `lower_price` (如 2026-07-21 的 16.64 元)，解决此前因 36 天硬回退导致的顶点定位偏移。
+    - [x] **消除硬截断，保留物理线性回归斜率**：彻底废除 `np.clip(mid, min_limit, max_limit)` 硬性截断，仅保留安全下限 `np.maximum(0.01, ...)` 防负值；使得通道回归线能在全图中按真实斜率平滑延伸。
+    - [x] **补齐极值与 K 线距离等 4 大新特征列**：在 `calc_trend_channel` 导出列中新增 `ch_anchor_high_price` (顶点价格)、`ch_anchor_low_price` (底点价格)、`ch_tc2` (高点距今 K 线数)、`ch_bc2` (低点距今 K 线数)，并在 `query_engine_util.py` 中绑定同义词映射 (`high_bars_ago`, `low_bars_ago`)，完美支持类似 `ch_tc2 < 25` 的多周期灵活筛选。
+    - [x] **002902 实盘数据验证与单元测试 100% 通过**：使用 002902 实际行情测试验证，精确定位到顶点 29.81 元 (tc2=53) 与低点 16.64 元 (bc2=9)，通道上中下轨 `ch_upper: 28.53`, `ch_mid: 22.59`, `ch_lower: 16.64` 与通达信图形 100% 完全精准吻合。单元测试 `test_trend_channel.py` (5/5 passed) 及 `test_signal_ledger.py` (11/11 passed) 全量 100% 一次性成功通过！
+
+## 2026-08-03 17:15
+- [x] **彻底根治 `SignalDashboardPanel` 信号面板持久化失效绝密底层 Bug (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_restore.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **底层根因 1 (同名 `showEvent` 重复定义覆写)**：排查发现 `SignalDashboardPanel` 内部在 Line 1284 与 Line 1309 定义了**两个同名的 `def showEvent(self, event):`**。后者在类加载时直接将前者带 `QTimer.singleShot(50, self._restore_ui_state)` 恢复逻辑的方法**彻底覆盖销毁**，导致窗口在 `showEvent` 显示时 `_restore_ui_state` 压根从未被调起！
+    - [x] **底层根因 2 (恢复模式覆写与手写 IO 竞态)**：恢复逻辑误走手写 `open json`，未接入 `ats.ui.styles` 的 `load_config_node` 与 `save_config_nodes` 统一增量落盘引擎，导致与其他子窗口发生物理文件覆盖。
+    - [x] **重构 1 (合并 `showEvent` 回调)**：将磁吸 hover 定时器、显示时间戳以及 `QTimer.singleShot(50, self._restore_ui_state)` 布局恢复统一收口合并在唯一的 `showEvent` 中。
+    - [x] **重构 2 (明文像素列宽数组 + 强制像素设置双保险)**：在 `_collect_ui_state` 中导出 `col_widths_...` 物理像素数组；在 `_restore_ui_state` 恢复时，对每一个 table 显式调用 `table.setColumnWidth(col_idx, w)` 进行像素级设置，封死 Qt `restoreState` 回退抹除的通道。
+    - [x] **全自动化测试 100% 成功通过**：新建 `scratch/test_signal_dashboard_restore.py` 自动化测试脚本，对实例 A 设置 275px/185px 列宽落盘后销毁，实例化 B 自动加载 `showEvent` 并精确定位还原 275px/185px (PASSED 100%)。结合 `tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-03 16:48
+- [x] **实现 `closeEvent` / `hideEvent` 零变动 Dirty Check 防盲目写盘机制 (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_persistence.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **Dirty Check 物理防护**：在 `_save_ui_state` 与 `_save_window_states` 中全面植入 Dirty Check；恢复界面后在 `_finalize_restore` 统一初始化 `_last_saved_ui_state` 与 `_last_saved_window_pos` 两大基准快照。
+    - [x] **拒绝盲目/无脑写盘**：当用户在无任何列宽/列位置/窗口尺寸及显示状态变动的情况下点击 $X$ 关闭或隐退窗口时，Dirty Check 识别出与物理基准 100% 一致，**直接静默跳过写盘，实现物理磁盘 0 IO 消耗**。仅在检测到数据真正变动时才执行原子写盘落盘。
+
+## 2026-08-03 16:42
+- [x] **彻底根治 `SignalDashboardPanel` 信号面板点击 X 按钮关闭及手动调整列宽持久化失灵根因 Bug (`signal_dashboard_panel.py`, `scratch/test_signal_dashboard_persistence.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因排查 1 (Unicode/Emoji 键名乱码隐患)**：旧版 `_clean_tab_name` 采用 `re.sub` 清理 Tab 标题 Emoji，在 Windows 编码下将 Tab 键名破坏改写成了乱码（如 `table_state_ÿղָ`）。在程序启动恢复时 `if state_key in ui_state` 恒判定为 `False`，导致系统误走 `else` 重置逻辑强制调起 `_reapply_table_stretch_mode`，将用户手动调整好的列宽抹掉重置为默认伸缩宽度。
+    - [x] **根因排查 2 (点击 X 按钮隐藏窗口未落盘)**：信号面板作为磁吸/工具窗口，点击右上角 X 按钮关闭时部分场景触发 `hideEvent`。旧逻辑仅在 `closeEvent` 中写盘，导致 `hideEvent` 未触发立即物理落盘。
+    - [x] **重构 MD5 唯一 ASCII 键名生成引擎 (`_clean_tab_name`)**：彻底弃用脆弱的 Emoji 正则表达式，改用 `hashlib.md5(str(name).encode('utf-8')).hexdigest()[:12]` 算法。为所有包含 Emoji/中文字符的 Tab 页签生成纯 ASCII 的 12 位 100% 绝对稳定标识符，彻底消除了物理 JSON 文件中乱码与键名匹配失效漏洞。
+    - [x] **`closeEvent` 与 `hideEvent` 双向秒级强制物理落盘**：在 `hideEvent` 与 `closeEvent` 中统一植入 `self._save_ui_state()`，确保用户点右上角 X 按钮（不管是隐藏还是销毁窗口）均瞬间强制执行物理增量写盘。
+    - [x] **全量自动化与单元测试 100% 校验通过**：清理乱码历史节点，运行 `scratch/test_signal_dashboard_persistence.py` 与 `tests/test_signal_ledger.py` 11 项核心单元测试 100% 成功通过！
+
+## 2026-08-03 15:40
+- [x] **彻底根治 `SignalDashboardPanel` 信号面板退出时 Tab 索引、列宽与列位置物理配置丢失 Bug (`signal_dashboard_panel.py`, `ats/ui/styles.py`, `scratch/test_signal_dashboard_persistence.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因分析 (全盘覆写与竞态数据丢失)**：旧版 `SignalDashboardPanel._save_ui_state` 与 `MarketAlertDetailDialog._save_column_widths` 采用手写 `load json -> dict.update -> json.dump` 全量覆盖落盘。在系统多窗口退出时，与主窗口 (`ATSMainWindow`) 或外盘窗口 (`GlobalMarketDialog`) 的写盘产生了毫秒级 IO 竞态，导致后写盘的窗口使用旧的内存字典覆写掉了子模块刚保存的节点数据。同时缺失 Tab 页签与列宽/列位置变更的防抖持久化监听。
+    - [x] **重构接入统一 `save_config_nodes` 原子增量落盘引擎 (`signal_dashboard_panel.py`)**：将 `SignalDashboardPanel` 及 `MarketAlertDetailDialog` 的写盘逻辑彻底重构，全面接入 `ats.ui.styles.save_config_nodes` API；仅以 key-value 节点形式提交需要更新的配置，底层自动执行 3 次 IO 重试与增量字典合并，封死死锁覆盖缺陷。
+    - [x] **引入 Tab 页签、列宽列位置 800ms 防抖监听与初始化保护**：
+        - 补充 `active_tab_index` 与 `active_tab_name` 状态保存与 `_restore_ui_state` 加载恢复。
+        - 增加 `_bind_table_header_persistence` 钩子，为所有表格挂载 `sectionResized` / `sectionMoved` 事件的 800ms 防抖保存定时器 (`_save_timer`)。
+        - 在恢复界面 `_restore_ui_state` 过程中挂载 `_is_initializing` 防误触锁，杜绝装载布局时引发无谓二次写盘。
+    - [x] **自动化测试与单元测试 100% 校验通过**：新建 `scratch/test_signal_dashboard_persistence.py` 验证多窗口增量节点合并保存，运行 `tests/test_signal_ledger.py` 全量 11 项单元测试与 `test_signal_dashboard_persistence.py` 100% 成功通过！
+
 ## 2026-08-03 15:25
 - [x] **彻底根治 ATS 关闭退出时外盘窗口等配置持久化丢失与并发写盘全盘覆写漏洞 (`ats/ui/styles.py`, `ats/ui/main_window.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_config_persistence.py`, `tests/test_signal_ledger.py`)**：
     - [x] **根因分析 (物理全覆写漏洞)**：过去主窗口 (`ATSMainWindow`) 和各 TopLevel 子窗口 (`GlobalMarketDialog` / `GlobalMarketKLineDialog` / `MultiPeriodDialog`) 在退出写盘或 QSplitter 拖动时，各自独立执行 `load json` -> `修改内存 dict` -> `os.replace` 写盘。当主窗口关闭时，主窗口写盘逻辑与子窗口 `closeEvent` 的写盘逻辑产生毫秒级物理竞态；主窗口后一步写盘时内存里的字典未包含子窗口刚才写入的新配置，直接通过 `os.replace` 将子窗口写好的配置抹除覆盖。此外，若中途读取 JSON 遇到临时 IO 锁锁死返回 `{}`，写盘逻辑会直接将物理文件退化擦除为仅存几项。
