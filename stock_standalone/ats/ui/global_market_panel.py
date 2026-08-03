@@ -72,12 +72,13 @@ class GlobalMarketPanel(QWidget):
         self._init_ui()
         self._start_auto_refresh_timer()
 
-        # 连接全局代理变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
+        # 连接全局代理与日志变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
         try:
-            from ats.ui.proxy_dialog import GLOBAL_PROXY_EVENT_BRIDGE
+            from ats.ui.proxy_dialog import GLOBAL_PROXY_EVENT_BRIDGE, GLOBAL_LOG_EVENT_BRIDGE
             GLOBAL_PROXY_EVENT_BRIDGE.proxy_changed_signal.connect(self._on_global_proxy_changed)
+            GLOBAL_LOG_EVENT_BRIDGE.log_toggled_signal.connect(self._on_global_log_changed)
         except Exception as ex:
-            print(f"[GlobalMarketPanel] 绑定全局代理信号失败: {ex}")
+            pass
 
         # 初始装载数据
         self.refresh_data(force=False)
@@ -106,6 +107,11 @@ class GlobalMarketPanel(QWidget):
         header_layout.addWidget(self.lbl_status)
 
         header_layout.addStretch()
+
+        self.btn_log_config = QPushButton("📜 日志: 关")
+        self.btn_log_config.clicked.connect(self._toggle_log_config)
+        self._update_log_btn_style()
+        header_layout.addWidget(self.btn_log_config)
 
         self.btn_proxy_config = QPushButton("🌐 代理: 关")
         self.btn_proxy_config.clicked.connect(self._open_proxy_dialog)
@@ -848,4 +854,60 @@ class GlobalMarketPanel(QWidget):
         """响应全局代理变更广播，瞬间同步主窗口按钮状态并重载数据"""
         self._update_proxy_btn_style()
         self.refresh_data(force=True)
+
+    def _update_log_btn_style(self):
+        """动态更新日志开关按键样式与文案"""
+        try:
+            from JSONData.global_market_data import get_global_market_log_enabled
+            enabled = get_global_market_log_enabled()
+            if enabled:
+                self.btn_log_config.setText("📜 日志: 开")
+                self.btn_log_config.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1a2233;
+                        color: #00F0FF;
+                        border: 1px solid #00F0FF;
+                        border-radius: 3px;
+                        padding: 3px 8px;
+                        font-size: 8.5pt;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #2962ff;
+                        color: #ffffff;
+                    }
+                """)
+            else:
+                self.btn_log_config.setText("📜 日志: 关")
+                self.btn_log_config.setStyleSheet("""
+                    QPushButton {
+                        background-color: #191d26;
+                        color: #787b86;
+                        border: 1px solid #363c4e;
+                        border-radius: 3px;
+                        padding: 3px 8px;
+                        font-size: 8.5pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #2a2e39;
+                        color: #d1d4dc;
+                    }
+                """)
+        except Exception:
+            pass
+
+    def _toggle_log_config(self):
+        """手动切换外盘数据日志开关"""
+        try:
+            from JSONData.global_market_data import get_global_market_log_enabled, save_global_market_log_enabled
+            from ats.ui.proxy_dialog import GLOBAL_LOG_EVENT_BRIDGE
+            new_state = not get_global_market_log_enabled()
+            save_global_market_log_enabled(new_state)
+            GLOBAL_LOG_EVENT_BRIDGE.log_toggled_signal.emit(new_state)
+        except Exception:
+            pass
+
+    def _on_global_log_changed(self, enabled: bool):
+        """响应全局日志开关变更广播信号，秒级更新 UI 按键状态"""
+        self._update_log_btn_style()
 

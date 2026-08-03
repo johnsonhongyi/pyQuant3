@@ -35,6 +35,34 @@ _global_cache = {
 CACHE_TTL = 1800.0
 
 
+def get_global_market_log_enabled() -> bool:
+    """读取物理 JSON 配置文件中的外盘数据日志开关状态 (默认关闭 False)"""
+    try:
+        from ats.ui.styles import load_config_node
+        val = load_config_node("ats_global_market_log_enabled", False)
+        return bool(val)
+    except Exception:
+        return False
+
+
+def save_global_market_log_enabled(enabled: bool) -> bool:
+    """物理落盘持久化保存外盘数据日志开关状态至 window_config.json"""
+    try:
+        from ats.ui.styles import save_config_node
+        res = save_config_node("ats_global_market_log_enabled", bool(enabled))
+        if res:
+            log_market_msg(f"[LogConfig] 日志开关落盘成功: enabled={enabled}")
+        return res
+    except Exception as ex:
+        return False
+
+
+def log_market_msg(*args, **kwargs):
+    """统一外盘数据日志打印 helper：仅当日志开关开启 (enable_market_logging=True) 时打印控制台调试日志"""
+    if get_global_market_log_enabled():
+        print(*args, **kwargs)
+
+
 def get_proxy_config() -> dict:
     """读取物理 JSON 配置文件中的代理 Proxy 配置"""
     try:
@@ -60,10 +88,10 @@ def save_proxy_config(enabled: bool, proxy_url: str) -> bool:
         }
         res = save_config_node("ats_proxy_config", val)
         if res:
-            print(f"[ProxyConfig] 物理落盘成功: enabled={enabled}, url={proxy_url}")
+            log_market_msg(f"[ProxyConfig] 物理落盘成功: enabled={enabled}, url={proxy_url}")
         return res
     except Exception as ex:
-        print(f"[ProxyConfig] 保存代理配置失败: {ex}")
+        log_market_msg(f"[ProxyConfig] 保存代理配置失败: {ex}")
         return False
 
 
@@ -95,7 +123,7 @@ def get_urllib_request_opener():
                 })
                 return urllib.request.build_opener(proxy_handler)
             except Exception as ex:
-                print(f"[ProxyConfig] 构建 ProxyHandler 失败 ({ex})")
+                log_market_msg(f"[ProxyConfig] 构建 ProxyHandler 失败 ({ex})")
     
     # ⚡ 关键物理修复：代理关闭时，显式使用 ProxyHandler({}) 强行屏蔽并绕过 Windows 系统注册表/环境变量里的废弃代理
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -567,10 +595,10 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         return False
 
     if not force_refresh and not _is_cache_stale(existing_klines):
-        print(f"[GlobalMarketData] {get_proxy_info_str()} 成功命中 [{source_key}] 本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
+        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 成功命中 [{source_key}] 本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
         return existing_klines[-limit:]
 
-    print(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # Helper: 尝试抓取 Yahoo 源
     def _fetch_from_yahoo() -> list:
@@ -605,7 +633,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         with opener.open(req, timeout=6.0) as resp:
                             raw = resp.read().decode('utf-8')
                     except Exception as ex_proxy:
-                        print(f"[GlobalMarketData] {get_proxy_info_str()} 代理请求 Yahoo ({host}) 异常 ({ex_proxy})，尝试直连...")
+                        cfg_p = get_proxy_config()
+                        if cfg_p.get("enabled"):
+                            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 代理请求 Yahoo ({host}) 异常 ({ex_proxy})，尝试直连...")
+                        else:
+                            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 首选直连请求 Yahoo ({host}) 异常 ({ex_proxy})，尝试备用网络重试...")
                 if not raw:
                     try:
                         with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
@@ -643,11 +675,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                             parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
                         except Exception: continue
                     if parsed:
-                        print(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                        log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                         return parsed
             except Exception as ex:
                 pass
-        print(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} Yahoo 源在线抓取异常 {sym_upper}: 所有 Host 节点无有效数据响应")
+        log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} Yahoo 源在线抓取异常 {sym_upper}: 所有 Host 节点无有效数据响应")
         return []
 
     # Helper: 腾讯极速免代理直连源 (国内 10ms 零延迟免代理)
@@ -687,14 +719,14 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 # [BUGFIX] 腾讯对 ETF/部分品种只返回 1~2 条最新 K 线，不满足历史最低门槛
                 # 必须 >= MIN_KLINES 才视为成功，否则降级到 Sina/Yahoo
                 if len(parsed) >= MIN_KLINES:
-                    print(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                    log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                     return parsed
                 elif parsed:
-                    print(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 只有 {len(parsed)} 条历史数据（不足 {MIN_KLINES}），降级到 Sina/Yahoo")
+                    log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 只有 {len(parsed)} 条历史数据（不足 {MIN_KLINES}），降级到 Sina/Yahoo")
             else:
-                print(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 无历史 K 线数据, sec_dict keys: {list(sec_dict.keys())}")
+                log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 无历史 K 线数据, sec_dict keys: {list(sec_dict.keys())}")
         except Exception as ex:
-            print(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
+            log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
     # Helper: 尝试抓取 Sina 源 (支持美股 & 内外盘期货)
@@ -709,7 +741,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         if is_us_stock:
             # 美股 / ETF 接口: 直接使用小写符号名（如 meta, soxx, nvda, qqq）
             url = f"https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_r=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
-            print(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 开始抓取 {sym_upper} -> {url}")
+            log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 开始抓取 {sym_upper} -> {url}")
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             try:
                 req = urllib.request.Request(url, headers=headers)
@@ -749,13 +781,13 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         except Exception:
                             continue
                     if len(parsed) >= MIN_KLINES:
-                        print(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                        log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                         return parsed
-                    print(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条，响应前 200: {raw[:200]}")
+                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条，响应前 200: {raw[:200]}")
                 else:
-                    print(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {raw[:200]}")
+                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {raw[:200]}")
             except Exception as ex:
-                print(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
+                log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
 
         # 2. 商品期货 / 内外盘接口 (OIL/BRENT/GOLD/A50/SILVER)
         if not is_us_stock or not True:  # 只对商品品种走期货接口
@@ -775,7 +807,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}"
             else:
                 url = f"https://gu.sina.cn/ft/api/jsonp.php/var_r=/GlobalFuturesService.getGlobalFuturesDailyK?symbol={sina_code}"
-            print(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 开始抓取 {sym_upper} ({sina_code}) -> {url}")
+            log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 开始抓取 {sym_upper} ({sina_code}) -> {url}")
             headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
             try:
                 req = urllib.request.Request(url, headers=headers)
@@ -820,47 +852,47 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         except Exception:
                             continue
                     if len(parsed) >= MIN_KLINES:
-                        print(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                        log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                         return parsed
-                    print(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条")
+                    log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条")
                 else:
-                    print(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {txt[:200]}")
+                    log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {txt[:200]}")
             except Exception as ex:
-                print(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
+                log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
     # 按照用户选择的首选源进行抓取，失败时尝试备用源
     # [BUGFIX] 统一使用 >= MIN_KLINES 判断，防止 Tencent 只返回 1~2 条时假成功导致后续源被跳过
     parsed_klines = []
     proxy_enabled = get_proxy_config().get("enabled", False)
-    print(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Tencent / Sina 国内免代理直连源
     if not proxy_enabled:
         parsed_klines = _fetch_from_tencent()
         if len(parsed_klines) < MIN_KLINES:
-            print(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
+            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
             parsed_klines = _fetch_from_sina()
         if len(parsed_klines) < MIN_KLINES:
-            print(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Yahoo...")
+            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Yahoo...")
             parsed_klines = _fetch_from_yahoo()
     else:
         # 2. 代理已开启模式
         if source_key == 'yahoo':
             parsed_klines = _fetch_from_yahoo()
             if len(parsed_klines) < MIN_KLINES:
-                print(f"[GlobalMarketData] {get_proxy_info_str()} Yahoo 不足 {MIN_KLINES} 条，降级到 Tencent...")
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Yahoo 不足 {MIN_KLINES} 条，降级到 Tencent...")
                 parsed_klines = _fetch_from_tencent()
             if len(parsed_klines) < MIN_KLINES:
-                print(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
                 parsed_klines = _fetch_from_sina()
         else:
             parsed_klines = _fetch_from_sina()
             if len(parsed_klines) < MIN_KLINES:
-                print(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Tencent...")
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Tencent...")
                 parsed_klines = _fetch_from_tencent()
             if len(parsed_klines) < MIN_KLINES:
-                print(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
                 parsed_klines = _fetch_from_yahoo()
 
     # 抓取成功后独立落盘写入该数据源物理文件
@@ -870,14 +902,14 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, 'w', encoding='utf-8') as f:
                 json.dump(all_cache, f, ensure_ascii=False, indent=2)
-            print(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 成功落盘 {sym_upper} K线 ({len(parsed_klines)} 条) -> {cache_path}")
+            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 成功落盘 {sym_upper} K线 ({len(parsed_klines)} 条) -> {cache_path}")
         except Exception as ex:
-            print(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 写入 JSON 异常: {ex}")
+            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 写入 JSON 异常: {ex}")
         return parsed_klines[-limit:]
 
     # 绝境保底: 若所有网络源均不可用，返回已有磁盘历史缓存
     if existing_klines:
-        print(f"[GlobalMarketData] {get_proxy_info_str()} 网络环境受限，降级读取已落盘 [{source_key}] 本地物理历史数据 ({len(existing_klines)} 条) -> {sym_upper}")
+        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 网络环境受限，降级读取已落盘 [{source_key}] 本地物理历史数据 ({len(existing_klines)} 条) -> {sym_upper}")
         return existing_klines[-limit:]
 
     return []
@@ -1033,7 +1065,7 @@ def load_news_hotlist_json() -> tuple:
             elif isinstance(data, list):
                 return data[:20], set()
     except Exception as ex:
-        print(f"[NewsEngine] 读取热榜持久化文件异常: {ex}")
+        log_market_msg(f"[NewsEngine] 读取热榜持久化文件异常: {ex}")
     return [], set()
 
 
@@ -1058,10 +1090,10 @@ def save_news_hotlist_json(hotlist: list, deleted_ids: set = None) -> bool:
         with CONFIG_FILE_LOCK:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"[NewsEngine] 权威财经热榜持久化落盘成功 ({len(valid_items)} 条, 已黑名单剔除 {len(del_set)} 条) -> {path}")
+        log_market_msg(f"[NewsEngine] 权威财经热榜持久化落盘成功 ({len(valid_items)} 条, 已黑名单剔除 {len(del_set)} 条) -> {path}")
         return True
     except Exception as ex:
-        print(f"[NewsEngine] 持久化保存财经热榜异常: {ex}")
+        log_market_msg(f"[NewsEngine] 持久化保存财经热榜异常: {ex}")
         return False
 
 
@@ -1083,7 +1115,7 @@ def fetch_symbol_financial_news(symbol: str, name: str = "", force_refresh: bool
     sec_name = name or sym
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     p_info = get_proxy_info_str()
-    print(f"[FinancialNewsEngine] 抓取/更新权威自选财经热榜要闻 ({sym}) {p_info}")
+    log_market_msg(f"[FinancialNewsEngine] 抓取/更新权威自选财经热榜要闻 ({sym}) {p_info}")
 
     # 1. 尝试优先读取本地物理 JSON 热榜持久化缓存
     cached_hotlist, deleted_ids = load_news_hotlist_json()
