@@ -1,3 +1,24 @@
+## 2026-08-04 19:45
+- [x] **修复个股详情 `StockDetailDialog.__init__` 缩进错位致空白弹窗、实现 `get_df_row_safe` 兼容前缀/纯数字双向智能查找 (`ats/ui/main_window.py`, `scratch/test_stock_detail_and_df_row_safe.py`)**：
+    - [x] **根治个股详情空白弹窗 Bug**：彻底修复 `StockDetailDialog.__init__` 构造函数在 `_get_parent_mw` 插入时产生的代码缩进严重错位缺陷，将窗口标题、暗黑 QSS 主题注入、`_scan_kernel_trace` 扫描、`_init_ui` 界面构建及 `update_data` 重新归位放入 `__init__` 函数体内，解决个股详情被实例化后因未初始化 UI 节点而弹出一个死白/空白 `ATS Autonomous Trading Terminal` 窗口的硬伤。
+    - [x] **实现 `get_df_row_safe` 前缀/纯数字全能双向智能查找**：在 `ATSMainWindow` 中引入 `get_df_row_safe(df, code)` 智能数据提取引擎。全能兼容 `600013` (纯数字)、`sh600013` (带市场前缀) 等不同来源代码的双向安全匹配。
+    - [x] **彻底根治重点关注等表格底层行情呈现 `0.00` 现象**：在 `refresh_realtime_ui`、`_update_name_cache_from_df` 及 `get_stock_name` 中全面接入 `get_df_row_safe`。解决盘中 IPC 推送带前缀 index 时导致 `code in current_df.index` 匹配失败变 `0.00` 的漏洞，全面确保实时最新价 `close` / `price`、涨跌幅 `percent` 及偏离度 `dff` 字段 100% 精准刷新！
+    - [x] **全量单元测试 100% 成功通过**：新建测试 `scratch/test_stock_detail_and_df_row_safe.py` 验证 UI 成功构建与前缀双向安全提取，结合 `pytest tests/test_signal_ledger.py` 12 项全量核心单元测试 100% 成功通过！
+
+## 2026-08-04 19:15
+- [x] **标准化 ATS 独立弹窗 (Sector/Stock Detail) 暗黑风格、解耦 `parent_mw` 父窗口依赖并实现双击零闪烁复流 (`ats/ui/main_window.py`, `ats/ui/sector_detail_dialog.py`, `scratch/test_ui_linkage_and_refresh_fix.py`)**：
+    - [x] **统一解耦 `_get_parent_mw()` 父窗口解析**：彻底修复 `StockDetailDialog` 与 `ATSSectorDetailDialog` 在独立 TopLevel 窗口模式下调用 `self.parent()` 返回 `None` 导致的 `parent_mw` 属性丢失 Bug。引入统一 `_get_parent_mw()` 方法，优先查找 Python 保存的 `_py_parent` 引用，彻底保障【上一只】/【下一只】按钮和下拉框联动跳转时 100% 正确调起主窗口 `link_stock`。
+    - [x] **实现板块明细与个股详情双击零闪烁复用 (Bring to Front)**：重构 `ATSMainWindow` 的 `on_stock_clicked` 与 `on_sector_clicked`，当窗口实例已存在且未被 C++ 销毁时，拒绝无脑 `close()` 并重建，改为原地更新数据并通过 `.show()`, `.raise_()`, `.activateWindow()` 将已有窗口平滑唤醒拉至最前端，彻底杜绝双击时窗口剧烈闪烁二次重建的硬伤；并在 `on_sector_clicked` 中增加 300ms 防抖去重。
+    - [x] **实现板块明细窗口实盘行情实时自动推送更新**：在 `ATSMainWindow.refresh_realtime_ui` 中补齐对 `_sector_detail_dialog` 的实时数据同步调起 `update_data(self.current_df)`，使板块明细中的成员股与领涨龙头数据秒级跟随盘中实盘行情自动更新。
+    - [x] **补齐 `hint_label` / `price_pct_label` / `table` 防御保护并 100% 自动化测试通过**：在 `StockDetailDialog.update_data` 界面刷新流中补齐全量 `hasattr` 卫士防护，彻底根除 `AttributeError` 风险。新建 Headless 自动化测试 `scratch/test_ui_linkage_and_refresh_fix.py` 验证板块无缝复用、实盘秒级推送与【上一只/下一只】联动跳转，结合 `pytest tests/test_signal_ledger.py` 全量 11 项单元测试 100% 成功通过！
+
+## 2026-08-04 18:55
+- [x] **实现多周期策略引擎非 D 周期 VWAP 指标解耦、同义词 mappings 兜底与双端策略库同步 (`multi_period_strategy_engine.py`, `query_engine_util.py`, `config/multi_period_strategies.json`, `instockMonitorTK/config/multi_period_strategies.json`, `scratch/test_multi_period_vwap_ipc_decoupling.py`)**：
+    - [x] **多周期数据加载自动挂载动态 VWAP/TWAP (`multi_period_strategy_engine.py`)**：在 `load_period_data` 数据准备管道中，植入 `attach_multiday_twap_to_df(df)` 向量化挂载逻辑。在加载日线及多周期行情数据时，自动算齐并注入 `vwap_cum_2d` ~ `vwap_cum_5d` 以及 `last_nclose1d` ~ `last_nclose3d` 等多日机构成本线与日内均价属性。
+    - [x] **扩展查询引擎同义词与 `_d` 后缀兜底映射 (`query_engine_util.py`)**：在 `col_map`、`default_fallbacks` 与 `_d_suffix_map` 中补充全量带 `_d` 后缀的指标变体（如 `vwap_cum_2d_d`, `vwap_cum_3d_d`, `vwap_cum_4d_d`, `vwap_cum_5d_d`, `last_vwap_cum_2d_d`, `last_vwap_cum_3d_d`, `last_nclose1d_d`, `last_nclose3d_d`, `Trends_d`, `lastp1d_d`, `ma51d_d`, `lastv0d_d` 等）。自动安全降级至底层无后缀物理列或标准默认值，彻底杜绝策略表达式求值时的 `NameError` 和 `missing_columns` 错误。
+    - [x] **解耦非 D 周期策略对 `vwap_cum` 的依赖与双端 JSON 配置物理同步 (`config/multi_period_strategies.json`, `instockMonitorTK/config/multi_period_strategies.json`)**：将 `tpl_multiday_vwap_staircase_breakout` 策略在 2D / 3D 等非 D 周期过滤条件中的 `vwap_cum` 依赖解耦为均线与 MACD 底部/水上共振逻辑；同时 100% 物理同步更新 `stock_standalone/config` 与 `instockMonitorTK/config` 策略文件，保证主系统引擎与监控工具执行逻辑完全统一。
+    - [x] **多周期回测与断言测试 100% 成功通过**：运行 `scratch/test_d_period_backtest.py` 与新建 `scratch/test_multi_period_vwap_ipc_decoupling.py` 自动化测试，验证 0 缺失字段报错与多周期回测精准命中；结合 `tests/test_signal_ledger.py` 与 `test_trend_channel.py` 全量 15 项单元测试 100% 成功通过！
+
 ## 2026-08-04 18:38
 - [x] **修复个股详情 `StockDetailDialog.hideEvent` 隐藏事件中错误混入初始化代码导致 `NameError: name 'parent' is not defined` 的根本 Bug (`ats/ui/main_window.py`)**：
     - [x] **初始化代码与事件钩子解耦归位**：定位到之前 `hideEvent`（隐藏事件钩子）中误塞入了本属于构造函数的 `_scan_kernel_trace`、`_init_ui` 及 `parent.styleSheet()` 继承逻辑。当弹窗关闭/隐藏时无 `parent` 局部变量从而抛出 `NameError`。

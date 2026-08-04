@@ -107,8 +107,11 @@ class EquityPopDialog(QDialog):
 
         layout.addWidget(self.pop_tabs, 1)
 
+    def _get_parent_mw(self):
+        return getattr(self, '_py_parent', None) or self.parent()
+
     def _on_refresh(self):
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         if parent_mw and hasattr(parent_mw, 'bridge') and parent_mw.bridge:
             try:
                 dates, strat_equity, bench_equity = parent_mw.bridge.get_equity_curve_data()
@@ -123,7 +126,7 @@ class EquityPopDialog(QDialog):
     def update_data(self, df_realtime=None):
         if hasattr(self.dist_chart, 'update_data') and df_realtime is not None:
             self.dist_chart.update_data(df_realtime)
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         if parent_mw and hasattr(parent_mw, 'bridge') and parent_mw.bridge:
             try:
                 dates, strat_equity, bench_equity = parent_mw.bridge.get_equity_curve_data()
@@ -146,7 +149,7 @@ class StockDetailDialog(QDialog):
         self.df_row = df_row
         self.context_info = context_info
         self.batch_codes = batch_codes
-        
+
         # 0. 明确设置为独立顶层窗口类型，并防止主应用退出
         flags = self.windowFlags()
         flags &= ~Qt.WindowType.Dialog
@@ -179,6 +182,9 @@ class StockDetailDialog(QDialog):
 
         # 4. 恢复物理位置与大小持久化
         self._restore_geometry()
+
+    def _get_parent_mw(self):
+        return getattr(self, '_py_parent', None) or self.parent()
 
     def _scan_kernel_trace(self):
         """扫描最新交易内核 Trace 记录"""
@@ -288,7 +294,7 @@ class StockDetailDialog(QDialog):
         if new_batch_codes is not None:
             self.batch_codes = new_batch_codes
             
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         signal_list = self.batch_codes
         if not signal_list and parent_mw and hasattr(parent_mw, "_last_batch_signal_codes") and parent_mw._last_batch_signal_codes:
             signal_list = parent_mw._last_batch_signal_codes
@@ -344,7 +350,7 @@ class StockDetailDialog(QDialog):
         self._switching = True
         try:
             self.code = str(target_c).strip()
-            parent_mw = self.parent()
+            parent_mw = self._get_parent_mw()
             if parent_mw:
                 if not target_n and hasattr(parent_mw, "get_stock_name"):
                     self.name = parent_mw.get_stock_name(self.code)
@@ -430,7 +436,7 @@ class StockDetailDialog(QDialog):
         layout.setSpacing(12)
 
         # 0.5 仅加载【本轮输出的强势信号列表】(例如本轮 2 只或 6 只，绝不上百只堆叠)
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         signal_list = self.batch_codes
         if not signal_list and parent_mw and hasattr(parent_mw, "_last_batch_signal_codes") and parent_mw._last_batch_signal_codes:
             signal_list = parent_mw._last_batch_signal_codes
@@ -605,8 +611,9 @@ class StockDetailDialog(QDialog):
         color_hex = "#8e8e93"
         
         if df_row is not None:
-            self.hint_label.setText("🟢 已成功对接实盘行情快照核心特征:")
-            self.hint_label.setStyleSheet("color: #00ff88; font-size: 9.5pt; font-weight: bold;")
+            if hasattr(self, 'hint_label') and self.hint_label:
+                self.hint_label.setText("🟢 已成功对接实盘行情快照核心特征:")
+                self.hint_label.setStyleSheet("color: #00ff88; font-size: 9.5pt; font-weight: bold;")
             
             # Resolve price
             for p_col in ['close', 'trade', 'price']:
@@ -632,11 +639,13 @@ class StockDetailDialog(QDialog):
                     elif pct_str.startswith("-"):
                         color_hex = "#33cc5a"
         else:
-            self.hint_label.setText("⚠️ 暂无当前个股实盘快照特征数据（等待行情推送中）:")
-            self.hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
+            if hasattr(self, 'hint_label') and self.hint_label:
+                self.hint_label.setText("⚠️ 暂无当前个股实盘快照特征数据（等待行情推送中）:")
+                self.hint_label.setStyleSheet("color: #ff9900; font-size: 9.5pt; font-weight: bold;")
             
-        self.price_pct_label.setText(f"{price_str}  ({pct_str})")
-        self.price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
+        if hasattr(self, 'price_pct_label') and self.price_pct_label:
+            self.price_pct_label.setText(f"{price_str}  ({pct_str})")
+            self.price_pct_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {color_hex};")
         
         t_u1 = time.perf_counter()
         # 1.5 动态补充更新顶部标题与窗口 title 上的 code + name + 涨跌幅
@@ -751,6 +760,8 @@ class StockDetailDialog(QDialog):
             ]
             
         t_u3 = time.perf_counter()
+        if not hasattr(self, 'table') or self.table is None:
+            return
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(len(features))
@@ -815,7 +826,7 @@ class StockDetailDialog(QDialog):
         if not hasattr(self, 'combo_signals') or self.combo_signals is None:
             return
         
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         if not parent_mw:
             return
 
@@ -868,9 +879,10 @@ class StockDetailDialog(QDialog):
             self.combo_signals.blockSignals(False)
 
     def update_filter_status(self, query_expr=None):
+        parent_mw = self._get_parent_mw()
         if query_expr is None:
-            if self.parent() and hasattr(self.parent(), 'query_expr'):
-                query_expr = self.parent().query_expr
+            if parent_mw and hasattr(parent_mw, 'query_expr'):
+                query_expr = parent_mw.query_expr
             else:
                 query_expr = ""
                 
@@ -889,7 +901,6 @@ class StockDetailDialog(QDialog):
         
         # 🚀【极速 O(1) 6位清洗容错匹配】如果该股票原本就在主窗口当前结果集中，0 毫秒确认命中
         c_clean = str(self.code).strip().zfill(6)
-        parent_mw = self.parent()
         is_hit = False
         
         if parent_mw:
@@ -1192,7 +1203,7 @@ class StockDetailDialog(QDialog):
             except Exception:
                 pass
         self._save_geometry()
-        parent_mw = self.parent()
+        parent_mw = self._get_parent_mw()
         if parent_mw and hasattr(parent_mw, '_detail_dialog') and parent_mw._detail_dialog is self:
             parent_mw._detail_dialog = None
         super().closeEvent(event)
@@ -2116,7 +2127,7 @@ class ATSMainWindow(QMainWindow):
         context_info = self._ensure_context_info(code, name, context_info)
         code_clean = str(code).strip()
 
-        # 【核心机制】若详情弹窗实例存在且有效（不论处于悬浮显示还是磁吸贴边隐藏），直接复用唤醒展现；若已被 C++ 销毁则清空重新创建
+        # 【核心机制】若详情弹窗实例存在且有效（不论处于悬浮显示还是磁吸贴边隐藏），直接复用、更新并拉至最前端唤醒
         from PyQt6.sip import isdeleted
         if hasattr(self, '_detail_dialog') and self._detail_dialog is not None:
             if isdeleted(self._detail_dialog):
@@ -2125,6 +2136,9 @@ class ATSMainWindow(QMainWindow):
                 try:
                     effective_batch = batch_codes or getattr(self, "_last_batch_signal_codes", None)
                     self._detail_dialog.switch_to_code(code_clean, name, batch_codes=effective_batch)
+                    self._detail_dialog.show()
+                    self._detail_dialog.raise_()
+                    self._detail_dialog.activateWindow()
                     return
                 except RuntimeError:
                     self._detail_dialog = None
@@ -2159,20 +2173,45 @@ class ATSMainWindow(QMainWindow):
             self._detail_dialog = None
                 
         # Launch detail dialog as non-modal so it can snap and auto-hide
-        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=None, batch_codes=batch_codes)
+        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self, batch_codes=batch_codes)
         self._detail_dialog.show()
+        self._detail_dialog.raise_()
+        self._detail_dialog.activateWindow()
 
     def on_sector_clicked(self, name, member_codes=None):
         try:
             self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
             from PyQt6.sip import isdeleted
+
+            # 【防抖去重】短时间内连续重复触发时自动抑制闪烁
+            import time
+            now_t = time.time()
+            if hasattr(self, '_last_sector_click_t') and self._last_sector_click_t:
+                if (now_t - self._last_sector_click_t < 0.3) and getattr(self, '_last_sector_click_name', '') == name:
+                    if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
+                        self._sector_detail_dialog.show()
+                        self._sector_detail_dialog.raise_()
+                        self._sector_detail_dialog.activateWindow()
+                    return
+            self._last_sector_click_t = now_t
+            self._last_sector_click_name = name
+
+            # 【无缝复用与置顶】如果板块详情弹窗实例已存在且有效，原地无缝更新数据并拉至最前端
             if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
-                try:
-                    self._sector_detail_dialog.close()
-                except Exception:
-                    pass
-            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=None)
+                dialog = self._sector_detail_dialog
+                dialog.sector_name = name
+                dialog.setWindowTitle(f"🔥 {name} 板块明细 (Real-time Sector Details)")
+                if member_codes:
+                    dialog.member_codes = member_codes
+                dialog.update_data(self.current_df if hasattr(self, 'current_df') else None)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+
+            # 若不存在旧实例则创建全新窗口
+            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=self)
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()
@@ -2229,49 +2268,100 @@ class ATSMainWindow(QMainWindow):
             try:
                 # 向量化快速提取 IPC 推送的 DataFrame 中的 code -> name 关联字典
                 temp_dict = df['name'].dropna().to_dict()
-                cleaned_dict = {
-                    str(k).strip().zfill(6): str(v).strip() 
-                    for k, v in temp_dict.items() 
-                    if str(v).strip() and str(v).strip() != str(k).strip().zfill(6) and not str(v).strip().isdigit() and str(v).strip() != "未知"
-                }
+                cleaned_dict = {}
+                for k, v in temp_dict.items():
+                    name_str = str(v).strip()
+                    if not name_str or name_str == "未知" or name_str.isdigit():
+                        continue
+                    k_str = str(k).strip()
+                    k_clean = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+                    if name_str != k_clean and name_str != k_str:
+                        cleaned_dict[k_clean] = name_str
+                        cleaned_dict[k_str] = name_str
                 self.name_cache.update(cleaned_dict)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating name cache from df: {e}")
 
+    def get_df_row_safe(self, df, code):
+        """鲁棒安全从 DataFrame 提取单股 DataRow (全能兼容 index 索引、code 列、纯数字代码 600013、带前缀 sh600013 等)"""
+        if df is None or df.empty or not code:
+            return None
+        code_str = str(code).strip()
+        code_digits = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
+
+        # 1. 精确与纯数字匹配 (检查 index)
+        if code_str in df.index:
+            res = df.loc[code_str]
+            return res.iloc[0] if hasattr(res, 'iloc') and len(res.shape) > 1 else res
+
+        if code_digits in df.index:
+            res = df.loc[code_digits]
+            return res.iloc[0] if hasattr(res, 'iloc') and len(res.shape) > 1 else res
+
+        # 2. 尝试匹配/剥离前缀 (sh/sz/bj) (检查 index)
+        for pfx in ('sh', 'sz', 'bj'):
+            pfx_code = f"{pfx}{code_digits}"
+            if pfx_code in df.index:
+                res = df.loc[pfx_code]
+                return res.iloc[0] if hasattr(res, 'iloc') and len(res.shape) > 1 else res
+
+        if len(code_str) > 6:
+            unpfx = "".join(c for c in code_str if c.isdigit()).zfill(6)
+            if unpfx in df.index:
+                res = df.loc[unpfx]
+                return res.iloc[0] if hasattr(res, 'iloc') and len(res.shape) > 1 else res
+
+        # 3. 💥 关键兜底防线：如果 df.index 是 RangeIndex (0, 1, 2...)，但在 df.columns 里面有 'code' 列！
+        if 'code' in df.columns:
+            try:
+                col_codes = df['code'].astype(str).str.strip()
+                mask = (col_codes == code_str) | (col_codes == code_digits)
+                if not mask.any() and code_digits:
+                    mask = col_codes.str.endswith(code_digits)
+                if mask.any():
+                    matched = df[mask]
+                    return matched.iloc[0]
+            except Exception:
+                pass
+
+        return None
+
     def get_stock_name(self, code):
         if not code:
             return "未知"
-        code_str = str(code).strip().zfill(6)
+        code_str = str(code).strip()
+        code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
         
-        # 1. 直接从 IPC 推送的核心 memory 数据集 (current_df / df_realtime) 中查找 (无需舍近求远)
+        # 1. 从 current_df / df_realtime 中安全匹配
         for attr_name in ('current_df', 'df_realtime'):
             df_obj = getattr(self, attr_name, None)
-            if df_obj is not None and not df_obj.empty and code_str in df_obj.index:
-                try:
-                    row_val = df_obj.loc[code_str]
-                    name_val = str(row_val.get('name', '') if hasattr(row_val, 'get') else row_val['name']).strip()
-                    if name_val and name_val != code_str and not name_val.isdigit() and name_val != "未知":
-                        self.name_cache[code_str] = name_val
-                        return name_val
-                except Exception:
-                    pass
+            if df_obj is not None and not df_obj.empty:
+                row_val = self.get_df_row_safe(df_obj, code_clean)
+                if row_val is not None:
+                    try:
+                        name_val = str(row_val.get('name', '') if hasattr(row_val, 'get') else row_val['name']).strip()
+                        if name_val and name_val != code_clean and not name_val.isdigit() and name_val != "未知":
+                            self.name_cache[code_clean] = name_val
+                            return name_val
+                    except Exception:
+                        pass
 
-        # 2. 检查 name_cache (排除与 code_str 相同或全数字的纯代码名称)
-        name = self.name_cache.get(code_str)
-        if name and name != "未知" and name != code_str and not name.isdigit() and not name.startswith("个股_"):
+        # 2. 检查 name_cache (支持 code_clean 与 code_str)
+        name = self.name_cache.get(code_clean) or self.name_cache.get(code_str)
+        if name and name != "未知" and name != code_clean and not name.isdigit() and not name.startswith("个股_"):
             return name
 
         # 3. 调起全局权威解析器 sys_utils
         try:
             from sys_utils import resolve_stock_name
-            res_name = resolve_stock_name(code_str)
-            if res_name and res_name != code_str and not res_name.isdigit() and not res_name.startswith("个股_"):
-                self.name_cache[code_str] = res_name
+            res_name = resolve_stock_name(code_clean)
+            if res_name and res_name != code_clean and not res_name.isdigit() and not res_name.startswith("个股_"):
+                self.name_cache[code_clean] = res_name
                 return res_name
         except Exception:
             pass
 
-        return name if (name and name != code_str and not name.isdigit()) else code_str
+        return name if (name and name != code_clean and not name.isdigit()) else code_clean
 
     def load_db_data(self, force=False):
         try:
@@ -2839,11 +2929,11 @@ class ATSMainWindow(QMainWindow):
 
                 if last_err is not None:
                     # 全部重试均失败 → IO/锁问题，用短冷却避免长时间黑名单
-                    fail_ts = _time.time() - (300 - IO_FAIL_COOLDOWN)  # 只冷却 IO_FAIL_COOLDOWN 秒
+                    fail_ts = _time.time() - (300 - 10)  # 只冷却 10 秒
                     for code in codes_to_load:
                         self.history_loading_codes.discard(code)
                         self.history_failed_codes[code] = fail_ts
-                    print(f"[ATSHistory] HDF5 读取彻底失败，{IO_FAIL_COOLDOWN}s 后重试: {last_err}")
+                    print(f"[ATSHistory] HDF5 读取彻底失败，{10}s 后重试: {last_err}")
                     return
 
                 # ── 清除成功读取的 code 的失败标记 ────────────────────────────────
@@ -2916,25 +3006,33 @@ class ATSMainWindow(QMainWindow):
                 if real_name and real_name not in ('未知', '重点标的', ''):
                     pool[code]['name'] = real_name
 
-                if has_df and code in self.current_df.index:
-                    row = self.current_df.loc[code]
-                    import pandas as pd
-                    if isinstance(row, pd.DataFrame):
-                        row = row.iloc[0]
+                row = self.get_df_row_safe(self.current_df, code) if has_df else None
+                code_clean = "".join(c for c in str(code) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
+                if row is not None:
                     pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
                     pool[code]['pct'] = float(row.get('percent', 0.0))
+                elif code_clean in self.price_pct_cache:
+                    price, pct = self.price_pct_cache[code_clean]
+                    pool[code]['price'] = price
+                    pool[code]['pct'] = pct
                 elif code in self.price_pct_cache:
                     price, pct = self.price_pct_cache[code]
                     pool[code]['price'] = price
                     pool[code]['pct'] = pct
                 else:
-                    if code in self.stock_history_cache and self.stock_history_cache[code]:
+                    if code_clean in self.stock_history_cache and self.stock_history_cache[code_clean]:
+                        pool[code]['price'] = float(self.stock_history_cache[code_clean][-1][1])
+                        pool[code]['pct'] = 0.0
+                    elif code in self.stock_history_cache and self.stock_history_cache[code]:
                         pool[code]['price'] = float(self.stock_history_cache[code][-1][1])
                         pool[code]['pct'] = 0.0
                     else:
                         pool[code]['price'] = 0.0
                         pool[code]['pct'] = 0.0
                     missing_realtime_codes.append(code)
+        
+        if missing_realtime_codes:
+            self._async_load_stock_prices(missing_realtime_codes)
         
         # 4. Update swing state table
         missing_history_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
@@ -2947,13 +3045,13 @@ class ATSMainWindow(QMainWindow):
         # 计算大盘参考涨幅 (优先使用上证指数，回退到个股等权均值)
         sh_pct = 0.0
         if has_df:
-            if 'sh000001' in self.current_df.index:
-                sh_pct = float(self.current_df.loc['sh000001'].get('percent', 0.0))
-            elif '000001' in self.current_df.index and 'sh' in str(self.current_df.loc['000001'].get('code', '')):
-                sh_pct = float(self.current_df.loc['000001'].get('percent', 0.0))
-            else:
-                if 'percent' in self.current_df.columns:
-                    sh_pct = float(self.current_df['percent'].mean())
+            sh_row = self.get_df_row_safe(self.current_df, 'sh000001')
+            if sh_row is None:
+                sh_row = self.get_df_row_safe(self.current_df, '000001')
+            if sh_row is not None:
+                sh_pct = float(sh_row.get('percent', 0.0))
+            elif 'percent' in self.current_df.columns:
+                sh_pct = float(self.current_df['percent'].mean())
                     
         import datetime
         today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -2965,11 +3063,9 @@ class ATSMainWindow(QMainWindow):
             dff2_val = 0.0
             dff3_val = 0.0
             
-            if has_df and code in self.current_df.index:
-                import pandas as pd
-                row = self.current_df.loc[code]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[0]
+            code_clean = "".join(c for c in str(code) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
+            row = self.get_df_row_safe(self.current_df, code) if has_df else None
+            if row is not None:
                 latest_close = float(row.get('close', row.get('price', 0.0)))
                 pct_val = float(row.get('percent', 0.0))
                 try: dff_val = float(row.get('dff', 0.0))
@@ -2980,9 +3076,15 @@ class ATSMainWindow(QMainWindow):
                 except: pass
                 try: dff3_val = float(row.get('dff3', 0.0))
                 except: pass
+            elif code_clean in self.price_pct_cache:
+                latest_close = self.price_pct_cache[code_clean][0]
+                pct_val = self.price_pct_cache[code_clean][1]
             elif code in self.price_pct_cache:
                 latest_close = self.price_pct_cache[code][0]
                 pct_val = self.price_pct_cache[code][1]
+            elif code_clean in self.stock_history_cache and self.stock_history_cache[code_clean]:
+                latest_close = float(self.stock_history_cache[code_clean][-1][1])
+                pct_val = 0.0
             elif code in self.stock_history_cache and self.stock_history_cache[code]:
                 latest_close = float(self.stock_history_cache[code][-1][1])
                 pct_val = 0.0
@@ -3120,6 +3222,12 @@ class ATSMainWindow(QMainWindow):
                 self._equity_pop_dialog.update_data(self.current_df)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating equity pop dialog: {e}")
+
+        if hasattr(self, '_sector_detail_dialog') and self._sector_detail_dialog is not None and not isdeleted(self._sector_detail_dialog):
+            try:
+                self._sector_detail_dialog.update_data(self.current_df)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
             
         # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
         if has_df:

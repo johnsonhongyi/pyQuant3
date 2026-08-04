@@ -226,19 +226,29 @@ class ATSSectorDetailDialog(QDialog):
         self._save_geometry()
         super().accept()
         
-    def load_data(self):
+    def _get_parent_mw(self):
+        return getattr(self, '_py_parent', None) or self.parent()
+
+    def update_data(self, df_realtime=None):
+        """实盘行情更新时调起的无缝刷新接口"""
+        try:
+            self.load_data(df_realtime=df_realtime)
+        except Exception:
+            pass
+
+    def load_data(self, df_realtime=None):
         # Resolve helper functions & streaming df from parent chain
         get_name_fn = None
-        current_df = None
-        p = self.parent()
+        current_df = df_realtime
+        p = self._get_parent_mw()
         while p:
             if hasattr(p, 'get_stock_name'):
                 get_name_fn = p.get_stock_name
-            if hasattr(p, 'current_df'):
+            if current_df is None and hasattr(p, 'current_df'):
                 current_df = p.current_df
             if get_name_fn and current_df is not None:
                 break
-            p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
+            p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
 
         # 1. 优先使用实时传入的 member_codes 渲染列表，实现与热力图 100% 对齐
         if self.member_codes:
