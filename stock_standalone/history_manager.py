@@ -86,9 +86,8 @@ class QueryHistoryManager:
             self.open_editor()
 
     def _dedup(self, history):
-        """通用去重逻辑 (基于 query 和 note)"""
+        """通用去重逻辑 (仅基于 query 去重)"""
         seen_q = set()
-        seen_n = set()
         result = []
         for r in history:
             if not isinstance(r, dict):
@@ -96,37 +95,29 @@ class QueryHistoryManager:
                 n = ""
                 r = {"query": q, "starred": 0, "note": ""}
             else:
-                q = r.get("query", "").strip()
-                n = r.get("note", "").strip()
+                q = str(r.get("query", "")).strip()
+                n = str(r.get("note", "")).strip()
             
             if not q or q in seen_q:
                 continue
-            if n and n in seen_n:
-                continue
             
             seen_q.add(q)
-            if n: seen_n.add(n)
             result.append(r)
         return result
 
     def _normalize_history(self, history):
-        """统一历史记录格式"""
+        """统一历史记录格式 (仅基于 query 去重)"""
         normalized = []
         seen_q = set()
-        seen_n = set()
         for r in history:
             if not isinstance(r, dict):
                 continue
-            q = r.get("query", "").strip()
+            q = str(r.get("query", "")).strip()
             if not q or q in seen_q:
                 continue
             
-            note = r.get("note", "").strip()
-            if note and note in seen_n:
-                continue
-
+            note = str(r.get("note", "")).strip()
             seen_q.add(q)
-            if note: seen_n.add(note)
 
             starred = r.get("starred", 0)
             if isinstance(starred, bool):
@@ -693,6 +684,14 @@ class QueryHistoryManager:
             record["query"] = new_query
             self._history_changed = True  # 标记已修改
             
+            # 对 current_history 强制按 query 去重，防止修改后的 new_query 与已存在的记录重复
+            self.current_history = self._dedup(self.current_history)
+            if self.current_key == "history1": self.history1 = self.current_history
+            elif self.current_key == "history2": self.history2 = self.current_history
+            elif self.current_key == "history3": self.history3 = self.current_history
+            elif self.current_key == "history4": self.history4 = self.current_history
+            elif self.current_key == "history5": self.history5 = self.current_history
+
             # 同步回调以更新关联的 UI
             if callable(self.sync_history_callback):
                 try:
@@ -1027,6 +1026,7 @@ class QueryHistoryManager:
 
     def refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
+        self.current_history = self._dedup(self.current_history)
         self.tree.tag_configure("hit", background="#d1ffd1")
         self.tree.tag_configure("miss", background="#ffd1d1")
         self.tree.tag_configure("normal", background="#ffffff")
