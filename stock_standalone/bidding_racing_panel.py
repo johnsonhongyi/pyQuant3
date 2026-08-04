@@ -1035,15 +1035,70 @@ class SectorDetailDialog(QDialog, WindowMixin):
         
         self.setWindowTitle(f"🔭 板块详情: {sector_name}")
         self.resize(850, 520)
-        # [🚀 视觉升级] 移除嵌入式半透明感，锁定专业实色深幕
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setStyleSheet("""
             QWidget { background-color: #060608; color: #E0E0E0; font-family: 'Segoe UI', 'Microsoft YaHei'; }
             QDialog { border: 1px solid #333; }
         """)
 
-        # 记忆位置
-        # self.load_window_position_qt(self, "SectorDetail_Unified")
+        # 恢复物理位置与大小持久化
+        self._restore_geometry()
+        
+    def _restore_geometry(self):
+        """从 window_config.json 恢复竞价板块详情弹窗位置与大小"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            import json, os
+            from PyQt6.QtCore import QByteArray
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                geom = data.get("ats_racing_sector_detail_dialog_geom")
+                if geom:
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+        except Exception:
+            pass
+
+    def _save_geometry(self):
+        """原子写盘持久化竞价板块详情弹窗位置与大小至 window_config.json"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            import json, os
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_racing_sector_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
+                tmp_path = cfg_path + ".tmp_racing_sector_detail"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """关闭时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        if self in _active_racing_detail_dialogs:
+            try: _active_racing_detail_dialogs.remove(self)
+            except: pass
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        """隐藏时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        super().hideEvent(event)
         
         self.setUpdatesEnabled(False)
         self._sort_col = 2 # 默认排序: 结构分

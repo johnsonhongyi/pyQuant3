@@ -14,13 +14,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
-from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, CONFIG_FILE_LOCK
+from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 
 class ATSSectorDetailDialog(QDialog):
     def __init__(self, sector_name, linkage_cb=None, double_click_cb=None, member_codes=None, parent=None):
-        super().__init__(parent)
+        super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，防止窗口在 OS 视角下被强制浮在 Parent 主窗口上方
+        self._py_parent = parent
         self.sector_name = sector_name
         self.linkage_cb = linkage_cb
         self.double_click_cb = double_click_cb
@@ -28,7 +29,11 @@ class ATSSectorDetailDialog(QDialog):
         
         self.setWindowTitle(f"🔥 {sector_name} 板块明细 (Real-time Sector Details)")
         self.resize(750, 480)
-        self.setStyleSheet("""
+        
+        # [🚀 经典黑金 Style] 继承统一的 ATS 暗黑 Mode QSS 风格
+        apply_dark_theme(self)
+        
+        self.setStyleSheet(self.styleSheet() + """
             QDialog {
                 background-color: #121214;
                 color: #e2e2e5;
@@ -39,22 +44,75 @@ class ATSSectorDetailDialog(QDialog):
                 color: #e2e2e5;
                 gridline-color: #2e2e36;
                 border: 1px solid #2e2e36;
+                selection-background-color: #2a3a4a;
+                selection-color: #00ff88;
             }
             QHeaderView::section {
-                background-color: #1c1c22;
-                color: #888899;
+                background-color: #1a1a1f;
+                color: #aad4ff;
                 font-weight: bold;
                 border: 1px solid #2e2e36;
-                padding: 2px 4px;
+                padding: 3px 6px;
             }
-            QTableWidget::item:selected {
-                background-color: #2a3a4a;
-                color: #00ff88;
+            QTableCornerButton::section {
+                background-color: #1a1a1f;
+                border: 1px solid #2e2e36;
             }
         """)
+        # 明确设置为独立顶层窗口类型，并防止主应用退出
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+
         self._init_ui()
         self.load_data()
         self._restore_geometry()
+        
+    def _restore_geometry(self):
+        """从 window_config.json 恢复板块详情弹窗位置与大小"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            import json, os
+            from PyQt6.QtCore import QByteArray
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                geom = data.get("ats_sector_detail_dialog_geom")
+                if geom:
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+        except Exception:
+            pass
+
+    def _save_geometry(self):
+        """原子写盘持久化板块详情弹窗位置与大小至 window_config.json"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            import json, os
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_sector_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
+                tmp_path = cfg_path + ".tmp_sector_detail"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        """隐藏时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        super().hideEvent(event)
         
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -89,8 +147,10 @@ class ATSSectorDetailDialog(QDialog):
         header_view = self.table.horizontalHeader()
         header_view.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header_view.setStretchLastSection(True)
         
         self.table.setAlternatingRowColors(True)
+        self.table.setCornerButtonEnabled(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -806,6 +866,7 @@ class ATSSectorDetailDialog(QDialog):
             QApplication.restoreOverrideCursor()
 
     def closeEvent(self, event):
+        self._save_geometry()
         # Save header state of the table
         if hasattr(self.table, 'save_column_widths'):
             try:

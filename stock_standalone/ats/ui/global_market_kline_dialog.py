@@ -11,7 +11,7 @@ import json
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter,
-    QListWidget, QListWidgetItem, QTextEdit, QWidget, QMenu
+    QListWidget, QListWidgetItem, QTextEdit, QTextBrowser, QWidget, QMenu
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QByteArray, QTimer
 from PyQt6.QtGui import QColor, QPicture, QPainter, QPen, QBrush, QFont, QCursor
@@ -22,10 +22,196 @@ from JSONData.global_market_data import (
     get_related_symbols, fetch_global_market_quotes,
     fetch_symbol_financial_news, get_proxy_info_str,
     delete_news_item_by_id, save_news_hotlist_json,
+    _auto_translate_en_text_to_cn,
     log_market_msg
 )
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
+
+
+class OnlineTranslateWorkerThread(QThread):
+    """后台非阻塞极速英译中线程，确保 UI 响应极速滑顺"""
+    translated_signal = pyqtSignal(str, str, str, str)  # (original_text, translated_text, mode, translated_title)
+
+    def __init__(self, text: str, mode: str = 'full', title: str = ''):
+        super().__init__()
+        self.text = text
+        self.mode = mode
+        self.title = title
+
+    def run(self):
+        try:
+            translated_text = _auto_translate_en_text_to_cn(self.text)
+            translated_title = _auto_translate_en_text_to_cn(self.title) if self.title else ""
+            self.translated_signal.emit(self.text, translated_text or self.text, self.mode, translated_title or "")
+        except Exception as ex:
+            self.translated_signal.emit(self.text, self.text, self.mode, "")
+
+
+# ---------------- 全局股票实体识别与联动工具集 ----------------
+_GLOBAL_STOCK_NAME_MAP_CACHE = None
+
+def get_global_stock_name_map(parent_dialog=None) -> tuple:
+    """
+    智能归纳全市场股票 code -> name 和 name -> code 映射表
+    """
+    global _GLOBAL_STOCK_NAME_MAP_CACHE
+    if _GLOBAL_STOCK_NAME_MAP_CACHE is not None:
+        return _GLOBAL_STOCK_NAME_MAP_CACHE
+
+    code_to_name = {}
+    name_to_code = {}
+
+    # 预置核心热门黑马/权重股映射字典
+    preset_map = {
+        '603259': '药明康德', '688981': '中芯国际', '601939': '建设银行', '300418': '智谱',
+        '688347': '华虹公司', '1347': '华虹半导体', '9868': '小鹏汽车', '9866': '蔚来',
+        '9618': '京东集团', '9988': '阿里巴巴', '0700': '腾讯控股', '3690': '美团',
+        '600519': '贵州茅台', '300750': '宁德时代', '002594': '比亚迪', '600036': '招商银行',
+        '601318': '中国平安', '601857': '中国石油', '600028': '中国石化', '601988': '中国银行',
+        '601398': '工商银行', '601288': '农业银行', '000001': '平安银行', '000651': '格力电器',
+        '000333': '美的集团', '688012': '中微公司', '688041': '海光信息', '600118': '中国卫星',
+        '300936': '中英科技', '002297': '博云新材', '600893': '航发动力', '600760': '中航沈飞',
+        'NVDA': '英伟达', 'TSLA': '特斯拉', 'AAPL': '苹果', 'MSFT': '微软', 'GOOGL': '谷歌',
+        'AMZN': '亚马逊', 'META': 'Meta', 'AMD': 'AMD', 'OIL': '原油', 'GOLD': '黄金'
+    }
+    for c, n in preset_map.items():
+        code_to_name[c] = n
+        name_to_code[n] = c
+
+    try:
+        main_app = None
+        curr = parent_dialog
+        while curr:
+            if hasattr(curr, 'main_app'):
+                main_app = curr.main_app
+                break
+            if hasattr(curr, 'parent') and callable(curr.parent):
+                curr = curr.parent()
+            else:
+                break
+
+        if not main_app:
+            from PyQt6.QtWidgets import QApplication
+            for top_w in QApplication.topLevelWidgets():
+                if hasattr(top_w, 'get_stock_name') or hasattr(top_w, 'current_df'):
+                    main_app = top_w
+                    break
+
+        if main_app:
+            for attr in ('current_df', 'df_realtime', 'df_all'):
+                if hasattr(main_app, attr):
+                    df = getattr(main_app, attr)
+                    if df is not None and not df.empty and 'name' in df.columns:
+                        for code, row in df.iterrows():
+                            c_str = str(code).zfill(6)
+                            n_str = str(row['name']).strip()
+                            if n_str and n_str != '未知' and len(n_str) >= 2:
+                                code_to_name[c_str] = n_str
+                                name_to_code[n_str] = c_str
+    except Exception:
+        pass
+
+    _GLOBAL_STOCK_NAME_MAP_CACHE = (code_to_name, name_to_code)
+    return _GLOBAL_STOCK_NAME_MAP_CACHE
+
+
+def extract_stock_entities_from_text(text: str, parent_dialog=None) -> list:
+    """
+    自动在新闻标题/正文中扫描匹配出现的股票名称与代码
+    返回 [{'code': '603259', 'name': '药明康德'}, ...]
+    """
+    if not text:
+        return []
+
+    code_to_name, name_to_code = get_global_stock_name_map(parent_dialog)
+    matched_entities = []
+    seen_codes = set()
+
+    import re
+    # 1. 匹配 6 位数字 A 股代码
+    digit_codes = re.findall(r'\b\d{6}\b', text)
+    for c in digit_codes:
+        if c not in seen_codes:
+            seen_codes.add(c)
+            n = code_to_name.get(c, c)
+            matched_entities.append({'code': c, 'name': n})
+
+    # 2. 匹配名字字典 (如 药明康德, 中芯国际, 智谱, 恒生指数, 建设银行)
+    # 按名字长度降序匹配，优先全称
+    sorted_names = sorted([n for n in name_to_code.keys() if len(n) >= 2], key=lambda x: len(x), reverse=True)
+    for name in sorted_names:
+        if name in text:
+            code = name_to_code[name]
+            if code not in seen_codes:
+                seen_codes.add(code)
+                matched_entities.append({'code': code, 'name': name})
+
+    return matched_entities
+
+
+def highlight_stock_names_in_html(text: str, parent_dialog=None) -> str:
+    """
+    将文本中识别出的股票名称打上 HTML 超链接标签 (stock://CODE|NAME)
+    直接在正文/标题标记位上支持鼠标点击联动，彻底解决底部按钮挤压折叠缺陷
+    """
+    if not text:
+        return text
+
+    entities = extract_stock_entities_from_text(text, parent_dialog)
+    if not entities:
+        return text
+
+    highlighted = text
+    for ent in entities:
+        name = ent['name']
+        code = ent['code']
+        if not name or name in ['原油', '黄金']:
+            continue
+        if f">{name}<" in highlighted or f"href=" in highlighted or f"style=" in highlighted:
+            # 避免对已被 HTML 标签修饰过的文本重复替换
+            continue
+        replacement = f"<a href='stock://{code}|{name}' style='color:#00ff88; text-decoration:underline; font-weight:bold; padding:0 2px;'>{name}</a>"
+        highlighted = highlighted.replace(name, replacement)
+
+    return highlighted
+
+
+def trigger_stock_linkage(code: str, name: str, parent_dialog=None):
+    """
+    通用极速触发股票 Code 联动：
+    1. 物理联动同花顺/通达信终端 (link_stock)
+    2. 主界面秒级定位高亮与调起 K 线图/详情弹窗 (on_stock_clicked)
+    """
+    if not code:
+        return
+
+    code_clean = str(code).strip()
+    from PyQt6.QtWidgets import QApplication
+    main_win = None
+    for top_w in QApplication.topLevelWidgets():
+        if hasattr(top_w, 'link_stock') or hasattr(top_w, 'on_stock_clicked'):
+            main_win = top_w
+            break
+
+    if main_win:
+        if hasattr(main_win, 'link_stock'):
+            try:
+                main_win.link_stock(code_clean, name)
+            except Exception:
+                pass
+        if hasattr(main_win, 'on_stock_clicked'):
+            try:
+                main_win.on_stock_clicked(code_clean, name)
+            except Exception:
+                pass
+    else:
+        try:
+            dlg = GlobalMarketKLineDialog(symbol=code_clean, name=name, parent=parent_dialog)
+            dlg.exec()
+        except Exception:
+            pass
+
 
 
 class KLineWorkerThread(QThread):
@@ -61,6 +247,25 @@ class RelatedKLineWorkerThread(QThread):
             self.finished_signal.emit(self.symbol, klines or [])
         except Exception as e:
             self.finished_signal.emit(self.symbol, [])
+
+
+class NewsWorkerThread(QThread):
+    """后台非阻塞异步新闻与要闻抓取线程，彻底消除主线程网络卡死(未响应) Bug"""
+    finished_signal = pyqtSignal(list, str)  # (news_items, err_msg)
+
+    def __init__(self, symbol: str, name: str, force_refresh: bool = False):
+        super().__init__()
+        self.symbol = symbol
+        self.name = name
+        self.force_refresh = force_refresh
+
+    def run(self):
+        try:
+            items = fetch_symbol_financial_news(self.symbol, self.name, force_refresh=self.force_refresh)
+            self.finished_signal.emit(items or [], "")
+        except Exception as e:
+            self.finished_signal.emit([], str(e))
+
 
 
 
@@ -203,8 +408,31 @@ class OHLCItem(pg.GraphicsObject):
     def paint(self, p, *args):
         p.drawPicture(0, 0, self.picture)
 
-    def boundingRect(self):
-        return QRectF(self.picture.boundingRect())
+class ClickableTextBrowser(QTextBrowser):
+    """能够强力穿透选区阻断、在鼠标释放瞬间精确探测 anchor 并发射 link 信号的专用浏览器控件"""
+    link_clicked_signal = pyqtSignal(str)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.pos()
+            # 1. 尝试直接获取点击位置处的 anchor url (强力穿透选区与微小拖拽)
+            anchor = self.anchorAt(pos)
+            if anchor:
+                self.link_clicked_signal.emit(anchor)
+                super().mouseReleaseEvent(event)
+                return
+
+            # 2. 若未精准点中 anchor 节点，探测光标处的词汇实体
+            try:
+                cursor = self.cursorForPosition(pos)
+                cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+                w_text = cursor.selectedText().strip()
+                if w_text:
+                    self.link_clicked_signal.emit(f"word://{w_text}")
+            except Exception:
+                pass
+
+        super().mouseReleaseEvent(event)
 
 
 class GlobalMarketNewsDetailDialog(QDialog):
@@ -294,19 +522,33 @@ class GlobalMarketNewsDetailDialog(QDialog):
 
         header_layout.addLayout(row1_layout)
 
-        # 新闻大标题
-        lbl_title = QLabel(self.news_item.get('title', ''))
-        lbl_title.setWordWrap(True)
-        lbl_title.setStyleSheet("font-size: 13pt; font-weight: bold; color: #00F0FF; margin-top: 4px;")
-        header_layout.addWidget(lbl_title)
+        # 新闻大标题 (支持点击标记位股票名称直接联动)
+        title_raw = self.news_item.get('title', '')
+        title_html = highlight_stock_names_in_html(title_raw, self)
+        self.lbl_title = QLabel()
+        self.lbl_title.setWordWrap(True)
+        self.lbl_title.setOpenExternalLinks(False)
+        self.lbl_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.lbl_title.linkActivated.connect(self._on_link_activated)
+        if title_html != title_raw:
+            self.lbl_title.setText(title_html)
+        else:
+            self.lbl_title.setText(title_raw)
+        self.lbl_title.setStyleSheet("font-size: 13pt; font-weight: bold; color: #00F0FF; margin-top: 4px;")
+        header_layout.addWidget(self.lbl_title)
 
         layout.addWidget(header_frame)
 
-        # ---------------- 2. 新闻正文区域 (QTextEdit 支持选区复制) ----------------
-        self.txt_content = QTextEdit()
+        # ---------------- 2. 新闻正文区域 (QTextBrowser 支持标记位高亮股票直接点击联动 & 右键智能翻译) ----------------
+        self.txt_content = ClickableTextBrowser()
         self.txt_content.setReadOnly(True)
+        self.txt_content.setOpenLinks(False)
+        self.txt_content.link_clicked_signal.connect(self._on_link_activated)
+        self.txt_content.anchorClicked.connect(self._on_anchor_clicked)
+        self.txt_content.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.txt_content.customContextMenuRequested.connect(self._show_context_menu)
         self.txt_content.setStyleSheet("""
-            QTextEdit {
+            QTextBrowser {
                 background-color: #1a1e2b;
                 color: #e1e4ec;
                 border: 1px solid #2a2e39;
@@ -317,10 +559,16 @@ class GlobalMarketNewsDetailDialog(QDialog):
             }
         """)
         content_text = self.news_item.get('content', '') or self.news_item.get('summary', '')
-        self.txt_content.setPlainText(content_text)
+        
+        # 自动识别新闻中的股票名称代码实体并转换为可点击的超链接 HTML 标记
+        content_html = highlight_stock_names_in_html(content_text, self)
+        if content_html != content_text:
+            self.txt_content.setHtml(f"<div style='font-family: sans-serif; line-height: 1.6;'>{content_html}</div>")
+        else:
+            self.txt_content.setPlainText(content_text)
         layout.addWidget(self.txt_content)
 
-        # ---------------- 3. 底部关联标的与关闭按键 ----------------
+        # ---------------- 3. 底部关联标的与翻译/关闭按键 ----------------
         bottom_layout = QHBoxLayout()
         rel_symbols = self.news_item.get('related_symbols', [])
         if rel_symbols:
@@ -342,6 +590,26 @@ class GlobalMarketNewsDetailDialog(QDialog):
 
         bottom_layout.addStretch(1)
 
+        # 🌐 一键在线英译中按键
+        self.btn_translate = QPushButton("🌐 在线英译中 (Translate)")
+        self.btn_translate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_translate.setStyleSheet("""
+            QPushButton {
+                background-color: #2962ff;
+                color: #ffffff;
+                border: 1px solid #3d71ff;
+                border-radius: 4px;
+                padding: 5px 14px;
+                font-size: 9.5pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1e53e5;
+            }
+        """)
+        self.btn_translate.clicked.connect(lambda: self._translate_text_async(self.txt_content.toPlainText(), mode='full'))
+        bottom_layout.addWidget(self.btn_translate)
+
         btn_close = QPushButton("关闭 (Close)")
         btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_close.setStyleSheet("""
@@ -362,6 +630,115 @@ class GlobalMarketNewsDetailDialog(QDialog):
         bottom_layout.addWidget(btn_close)
 
         layout.addLayout(bottom_layout)
+
+    def _on_anchor_clicked(self, url):
+        url_str = url.toString() if hasattr(url, 'toString') else str(url)
+        self._on_link_activated(url_str)
+
+    def _on_link_activated(self, link_str: str):
+        if not link_str:
+            return
+        import re
+        from urllib.parse import unquote
+        raw_str = unquote(str(link_str)).strip()
+        
+        code = ""
+        name = ""
+        if "stock://" in raw_str:
+            stock_part = raw_str.split("stock://")[-1]
+            parts = stock_part.split("|")
+            code = parts[0].strip()
+            name = parts[1].strip() if len(parts) > 1 else code
+        elif "word://" in raw_str:
+            w_name = raw_str.replace("word://", "").strip()
+            name_map = get_global_stock_name_map(self)
+            if w_name in name_map:
+                code = name_map[w_name]
+                name = w_name
+            else:
+                m_code = re.search(r'\b\d{6}\b', w_name)
+                if m_code:
+                    code = m_code.group(0)
+        else:
+            m_code = re.search(r'\b\d{6}\b', raw_str)
+            if m_code:
+                code = m_code.group(0)
+
+        if code:
+            trigger_stock_linkage(code, name, self)
+
+    def _show_context_menu(self, pos):
+        """右键弹出自定义极客翻译与复制上下文菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e222d;
+                color: #d1d4dc;
+                border: 1px solid #2a2e39;
+                padding: 4px;
+                font-size: 9.5pt;
+            }
+            QMenu::item {
+                padding: 6px 18px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #2962ff;
+                color: #ffffff;
+            }
+        """)
+
+        cursor = self.txt_content.textCursor()
+        sel_text = cursor.selectedText().strip()
+
+        if sel_text:
+            disp_txt = sel_text[:14] + "..." if len(sel_text) > 14 else sel_text
+            act_trans_sel = menu.addAction(f"🔤 翻译选中文本: [{disp_txt}]")
+            act_trans_sel.triggered.connect(lambda: self._translate_text_async(sel_text, mode='selection'))
+
+            act_copy = menu.addAction("📋 复制选中文本")
+            act_copy.triggered.connect(self.txt_content.copy)
+            menu.addSeparator()
+
+        act_trans_full = menu.addAction("🌐 全文在线英译中 (Full Translate)")
+        act_trans_full.triggered.connect(lambda: self._translate_text_async(self.txt_content.toPlainText(), mode='full'))
+
+        act_select_all = menu.addAction("全选 (Select All)")
+        act_select_all.triggered.connect(self.txt_content.selectAll)
+
+        menu.exec(self.txt_content.mapToGlobal(pos))
+
+    def _translate_text_async(self, text: str, mode: str = 'full'):
+        """非阻塞异步发起英译中网络请求"""
+        if not text or not text.strip():
+            return
+        
+        self.btn_translate.setText("⏳ 翻译中...")
+        self.btn_translate.setEnabled(False)
+
+        raw_title = self.news_item.get('title', '') if mode == 'full' else ''
+        self.trans_thread = OnlineTranslateWorkerThread(text, mode=mode, title=raw_title)
+        self.trans_thread.translated_signal.connect(self._on_translation_finished)
+        self.trans_thread.start()
+
+    def _on_translation_finished(self, orig_text: str, trans_text: str, mode: str, trans_title: str):
+        """翻译完成后的 UI 高亮与视图更新 handler (100% 纯 UI 渲染，零同步网络请求)"""
+        self.btn_translate.setText("🌐 在线英译中 (Translate)")
+        self.btn_translate.setEnabled(True)
+
+        if not trans_text:
+            return
+
+        if mode == 'selection':
+            # 在选选中区域下方插入醒目的中译注解
+            cursor = self.txt_content.textCursor()
+            insert_html = f'<br/><span style="color:#00E676; background-color:#14291f; font-weight:bold; padding:2px 6px; border-radius:3px;">👉【中文意译】: {trans_text}</span><br/>'
+            cursor.insertHtml(insert_html)
+        else:
+            if trans_title:
+                self.lbl_title.setText(trans_title)
+            self.txt_content.setPlainText(trans_text)
+
 
     def _restore_settings(self):
         """恢复物理窗口几何尺寸位置"""
@@ -410,8 +787,17 @@ class GlobalMarketKLineDialog(QDialog):
         self._related_klines_cache = {}   # {symbol: [kline_dict, ...]}
         self._related_workers = []        # RelatedKLineWorkerThread 列表 (防GC)
 
-        # 获取股票/外盘关联财经资讯
-        self.news_items = fetch_symbol_financial_news(self.symbol, self.name)
+        # 0ms 瞬间加载磁盘物理持久化 JSON 缓存 (消除开屏等待空框)
+        try:
+            from JSONData.global_market_data import load_news_hotlist_json
+            cached_hotlist, deleted_ids = load_news_hotlist_json()
+            if cached_hotlist:
+                self.news_items = [item for item in cached_hotlist if str(item.get('id')) not in deleted_ids]
+            else:
+                self.news_items = []
+        except Exception:
+            self.news_items = []
+        self._news_worker = None
 
         self.setWindowTitle(f"📈 [{self.symbol} · {self.name}] 近 120 日外盘 K 线走势图与关联资讯")
         # 允许自由拉伸缩放，支持标准 Windows 最小化/最大化/关闭按键
@@ -425,7 +811,6 @@ class GlobalMarketKLineDialog(QDialog):
         from ats.ui.styles import apply_dark_theme
         apply_dark_theme(self)
 
-
         self.chart_mode = "candlestick"
         self.show_boll = True
         self.zoom_mode = "recent_60"
@@ -433,6 +818,7 @@ class GlobalMarketKLineDialog(QDialog):
 
         self._init_ui()
         self._restore_settings()
+        self._populate_news_list()  # ⚡ 0ms 第一时间填充展现物理持久化缓存热榜
 
         # 连接全局代理与日志变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
         try:
@@ -442,6 +828,7 @@ class GlobalMarketKLineDialog(QDialog):
         except Exception as ex:
             pass
 
+        self._load_news_async(force_refresh=False)
         self._load_fast_cached_or_async()
 
     def _init_ui(self):
@@ -835,15 +1222,11 @@ class GlobalMarketKLineDialog(QDialog):
     def _populate_news_list(self):
         """填充资讯列表条目 (限制显示不超过 20 条)"""
         self.lst_news.clear()
-
-        # 确保按时间降序排序（最新在最上面），限制显示不超过 20 条
-        sorted_items = sorted(
-            self.news_items or [],
-            key=lambda x: (str(x.get('datetime', '')), float(x.get('impact_score', 0.0))),
-            reverse=True
-        )
-        display_items = sorted_items[:20]
+        display_items = (self.news_items or [])[:20]
         self.lbl_news_hdr.setText(f"🔥 权威自选热榜 ({len(display_items)}/20)")
+        if hasattr(self, 'btn_news_toggle'):
+            vis_str = "收起" if (hasattr(self, 'news_panel') and self.news_panel.isVisible()) else "展开"
+            self.btn_news_toggle.setText(f"📰 资讯({len(display_items)}条): {vis_str}")
 
         if not display_items:
             item = QListWidgetItem("暂无相关权威财经热榜")
@@ -859,14 +1242,23 @@ class GlobalMarketKLineDialog(QDialog):
             score_color = "#F6465D" if score >= 0 else "#089981"
             summary = news.get('summary', '')
 
-            # 简易多行格式化 HTML (突出自动翻译后的中文字样)
+            # 自动识别新闻中的股票名称代码实体
+            entities = extract_stock_entities_from_text(title + ' ' + summary, self)
+            entity_tag_html = ""
+            if entities:
+                ent_strs = [f"<b style='color:#00ff88; padding:0 3px;'>⚡ [{e['code']} {e['name']}]</b>" for e in entities[:3]]
+                entity_tag_html = f"<div style='margin-top: 4px; font-size: 8.5pt;'>{' '.join(ent_strs)}</div>"
+
+            # 简易多行格式化 HTML (突出自动翻译后的中文字样与识别到的股票实体)
+            title_highlighted = highlight_stock_names_in_html(title, self)
             item_text = (
                 f"<div style='font-size: 8.5pt; color: #787b86; margin-bottom: 3px;'>"
                 f"<b style='color: #2962ff;'>[{tag}]</b> &nbsp; ⏱️ {dt} &nbsp; "
                 f"<b style='color: {score_color};'>影响: {score:+.1f}</b>"
                 f"</div>"
-                f"<div style='font-size: 9.5pt; font-weight: bold; color: #00F0FF; line-height: 1.3;'>{title}</div>"
-                f"<div style='font-size: 8.5pt; color: #9db2c6; margin-top: 4px;'>{summary[:70]}...</div>"
+                f"<div style='font-size: 9.5pt; font-weight: bold; color: #00F0FF; line-height: 1.3;'>{title_highlighted}</div>"
+                f"<div style='font-size: 8.5pt; color: #9db2c6; margin-top: 4px;'>{summary[:65]}...</div>"
+                f"{entity_tag_html}"
             )
 
             item = QListWidgetItem()
@@ -894,10 +1286,35 @@ class GlobalMarketKLineDialog(QDialog):
             dlg.exec()
 
     def _on_refresh_news_clicked(self):
-        """一键强制刷新全网权威财经热榜"""
-        self.news_items = fetch_symbol_financial_news(self.symbol, self.name, force_refresh=True)
+        """一键强制刷新全网权威财经热榜 (后台异步极速加载，绝不卡死 UI)"""
+        if hasattr(self, 'lbl_info'):
+            self.lbl_info.setText("⏳ 正在后台极速刷新全网权威财经热榜...")
+        self._load_news_async(force_refresh=True)
+
+    def _load_news_async(self, force_refresh: bool = False):
+        """后台异步线程加载财经要闻，确保 UI 主线程绝不卡死挂起 (未响应 0 容忍)"""
+        if getattr(self, '_news_worker', None) and self._news_worker.isRunning():
+            return
+        
+        if hasattr(self, 'lbl_news_hdr'):
+            self.lbl_news_hdr.setText("🔥 权威自选热榜 (加载中...)")
+
+        self._news_worker = NewsWorkerThread(self.symbol, self.name, force_refresh=force_refresh)
+        self._news_worker.finished_signal.connect(self._on_news_loaded)
+        self._news_worker.start()
+
+    def _on_news_loaded(self, items: list, err_msg: str):
+        """新闻异步加载完成后的 UI 刷新槽函数"""
+        self.news_items = items or []
+        if hasattr(self, 'lbl_news_hdr'):
+            self.lbl_news_hdr.setText(f"🔥 权威自选热榜 ({len(self.news_items)}/20)")
+        if hasattr(self, 'btn_news_toggle'):
+            is_vis = self.news_panel.isVisible() if hasattr(self, 'news_panel') else True
+            state_str = "收起" if is_vis else "展开"
+            self.btn_news_toggle.setText(f"📰 资讯({len(self.news_items)}条): {state_str}")
         self._populate_news_list()
-        self.lbl_info.setText(f"✅ 已强制刷新权威自选热榜 ({len(self.news_items)} 条已载入)")
+        if hasattr(self, 'lbl_info'):
+            self.lbl_info.setText(f"✅ 已载入最新权威自选热榜资讯 ({len(self.news_items)} 条)")
 
     def _show_news_context_menu(self, pos):
         """右键弹出资讯上下文菜单: 支持物理删除早期无用资讯、剪贴板复制与清空操作"""
@@ -1014,7 +1431,7 @@ class GlobalMarketKLineDialog(QDialog):
         self._news_timer.start()
 
     def _on_auto_refresh_timer_timeout(self):
-        """定时器到期回调: 重新检测并动态调整轮询间隔，自动无感更新关联实时数据与要闻"""
+        """定时器到期回调: 重新检测并动态调整轮询间隔，自动无感更新关联实时数据与最新要闻"""
         try:
             from JSONData.global_market_data import get_global_market_cache_ttl
             interval_sec = get_global_market_cache_ttl()
@@ -1023,13 +1440,8 @@ class GlobalMarketKLineDialog(QDialog):
             pass
 
         self._refresh_related_info_label()
-        try:
-            items = fetch_symbol_financial_news(self.symbol, self.name, force_refresh=False)
-            if items and len(items) != len(self.news_items):
-                self.news_items = items
-                self._populate_news_list()
-        except Exception:
-            pass
+        # 异步加载新闻，绝对不能在定时器触发的主线程发起同步 HTTP 网络抓取！
+        self._load_news_async(force_refresh=True)
 
 
 
@@ -1192,7 +1604,8 @@ class GlobalMarketKLineDialog(QDialog):
         if not self.related_symbols:
             return
         try:
-            quotes = fetch_global_market_quotes(force_refresh=False)
+            from JSONData.global_market_data import _global_cache
+            quotes = _global_cache.get('quotes', {})
             parts = []
             for rel in self.related_symbols:
                 sym = rel['symbol']

@@ -10417,10 +10417,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if actual_key in monitors:
                     current_phase_obj = monitors[actual_key].get('trade_phase', "IDLE")
 
-            # 3. 注入快照
+            # 3. 注入快照 (优先提取 MinuteKlineCache 内存中保留的全量多日 TWAP/VWAP 均价)
+            if hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'kline_cache') and self.live_strategy.kline_cache:
+                twap_rel = self.live_strategy.kline_cache.get_daily_twap_relative(code)
+                for k, v in twap_rel.items():
+                    if v > 0:
+                        snapshot[k] = v
+
             if not day_df.empty:
                 snapshot['day_df'] = day_df
                 snapshot['td_setup'] = day_df.iloc[-1].get('td_setup', 0)
+                if 'last_nclose' not in snapshot:
+                    last_row = day_df.iloc[-1]
+                    snapshot['last_nclose'] = float(last_row.get('nclose', last_row.get('close', 0)))
+                if 'nclose2d' not in snapshot and len(day_df) >= 2:
+                    prev_row = day_df.iloc[-2]
+                    snapshot['nclose2d'] = float(prev_row.get('nclose', prev_row.get('close', 0)))
             snapshot['trade_phase'] = current_phase_obj
             
             # 4. 💥 执行决策评估 (必须在状态机预览之前执行)
@@ -10711,6 +10723,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 day_df = self.live_strategy.daily_history_cache.get(cache_key, pd.DataFrame())
                 if day_df.empty:
                     day_df = self.live_strategy.daily_history_cache.get(code, pd.DataFrame())
+                # 优先从 MinuteKlineCache 提取多日全量 TWAP 均价 (last_nclose, nclose2d, nclose3d...)
+                if hasattr(self.live_strategy, 'kline_cache') and self.live_strategy.kline_cache:
+                    twap_rel = self.live_strategy.kline_cache.get_daily_twap_relative(code)
+                    for k, v in twap_rel.items():
+                        if v > 0:
+                            snapshot[k] = v
+
+                # 从已加载 day_df 补齐缺失的分时均价注入快照
+                if not day_df.empty:
+                    if 'last_nclose' not in snapshot:
+                        last_row = day_df.iloc[-1]
+                        snapshot['last_nclose'] = float(last_row.get('nclose', last_row.get('close', 0)))
+                    if 'nclose2d' not in snapshot and len(day_df) >= 2:
+                        prev_row = day_df.iloc[-2]
+                        snapshot['nclose2d'] = float(prev_row.get('nclose', prev_row.get('close', 0)))
                 
                 # 2. 获取当前仓位状态
                 monitors = self.live_strategy.get_monitors()

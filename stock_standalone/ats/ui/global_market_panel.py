@@ -845,8 +845,17 @@ class GlobalMarketPanel(QWidget):
                 self.stock_linked.emit(code, name)
             def _double_click_cb(code, name):
                 self.stock_selected.emit(code, name, {})
-            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_double_click_cb, parent=self)
-            dlg.exec()
+            from PyQt6.sip import isdeleted
+            if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
+                try:
+                    self._sector_detail_dialog.close()
+                except Exception:
+                    pass
+            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_double_click_cb, parent=None)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            self._sector_detail_dialog = dlg
 
     def _update_proxy_btn_style(self):
         """更新 🌐 代理: 开/关 按键高亮与显示文本"""
