@@ -1,4 +1,13 @@
-## 2026-08-04 19:45
+## 2026-08-04 21:52
+- [x] **实现 ATS 历史数据内存 Cache 双 Key 彻底绑定与零重复 HDF5 加载 (`ats/ui/main_window.py`, `scratch/test_debounced_batch_loading.py`)**：
+    - [x] **实现带前缀与纯数字双向 Key Cache 强绑定**：
+        - 根治了由于 IPC 信号与通达信推送中股票代码形态不一致 (`sh688689` vs `688689`) 导致 `c not in stock_history_cache` 判定失效、重复调起 HDF5 的硬伤。
+        - 引入 `is_cached(c)` 同时探测带前缀 `c` 与纯数字 `c_clean`。
+    - [x] **空列表占位机制确保“每只股票终生仅读取 1 次”**：
+        - 对于在 HDF5 `/all_30` 表中无历史记录的股票（如北交所或新建代码），查询后自动在 `stock_history_cache[code] = []` 中注入空列表占位，后续 100% 命中 Cache 逻辑，彻底做到 **“读取一次，后续全用 Cache，零重复加载，零刷屏 log”**。
+    - [x] **引入 `QTimer` 批处理防抖队列 (`_pending_price_codes` & `_pending_history_codes`)**：
+        - 实现 `_flush_batch_stock_prices` (150ms 防抖) 与 `_flush_batch_stock_history` (250ms 防抖) 机制，并发信号自动合并为单次批量 select。
+    - [x] **单元测试 100% 成功通过**：新建 `scratch/test_debounced_batch_loading.py` 结合 `tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
 - [x] **修复个股详情 `StockDetailDialog.__init__` 缩进错位致空白弹窗、实现 `get_df_row_safe` 兼容前缀/纯数字双向智能查找 (`ats/ui/main_window.py`, `scratch/test_stock_detail_and_df_row_safe.py`)**：
     - [x] **根治个股详情空白弹窗 Bug**：彻底修复 `StockDetailDialog.__init__` 构造函数在 `_get_parent_mw` 插入时产生的代码缩进严重错位缺陷，将窗口标题、暗黑 QSS 主题注入、`_scan_kernel_trace` 扫描、`_init_ui` 界面构建及 `update_data` 重新归位放入 `__init__` 函数体内，解决个股详情被实例化后因未初始化 UI 节点而弹出一个死白/空白 `ATS Autonomous Trading Terminal` 窗口的硬伤。
     - [x] **实现 `get_df_row_safe` 前缀/纯数字全能双向智能查找**：在 `ATSMainWindow` 中引入 `get_df_row_safe(df, code)` 智能数据提取引擎。全能兼容 `600013` (纯数字)、`sh600013` (带市场前缀) 等不同来源代码的双向安全匹配。

@@ -174,7 +174,14 @@ class SectorHeatmapWidget(QWidget):
             if current_df is not None and not current_df.empty and 'category' in current_df.columns:
                 try:
                     cats = current_df['category'].dropna()
-                    temp_map = {str(k).strip(): str(v).split(';')[0].strip() for k, v in cats.to_dict().items() if str(v).strip()}
+                    temp_map = {}
+                    for k, v in cats.to_dict().items():
+                        v_str = str(v).split(';')[0].strip()
+                        if v_str:
+                            k_str = str(k).strip()
+                            temp_map[k_str] = v_str
+                            k_clean = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+                            temp_map[k_clean] = v_str
                     stock_to_sector.update(temp_map)
                 except Exception as e:
                     print(f"[SectorHeatmapWidget] Error extracting categories: {e}")
@@ -194,11 +201,17 @@ class SectorHeatmapWidget(QWidget):
                             data = json.loads(json_str)
                             sector_data = data.get('sector_data', {})
                             for sec_name, info in sector_data.items():
-                                if info.get('leader'):
-                                    self._bidding_stock_to_sector[str(info.get('leader')).strip()] = sec_name
+                                lcode = str(info.get('leader', '')).strip()
+                                if lcode:
+                                    self._bidding_stock_to_sector[lcode] = sec_name
+                                    lclean = "".join(c for c in lcode if c.isdigit()).zfill(6) if any(c.isdigit() for c in lcode) else lcode
+                                    self._bidding_stock_to_sector[lclean] = sec_name
                                 for fol in info.get('followers', []):
-                                    if fol.get('code'):
-                                        self._bidding_stock_to_sector[str(fol.get('code')).strip()] = sec_name
+                                    fcode = str(fol.get('code', '')).strip()
+                                    if fcode:
+                                        self._bidding_stock_to_sector[fcode] = sec_name
+                                        fclean = "".join(c for c in fcode if c.isdigit()).zfill(6) if any(c.isdigit() for c in fcode) else fcode
+                                        self._bidding_stock_to_sector[fclean] = sec_name
                         except Exception:
                             pass
                 except Exception:
@@ -226,7 +239,8 @@ class SectorHeatmapWidget(QWidget):
             
             for code in v_reversal_pool:
                 code_str = str(code).strip()
-                sec = stock_to_sector.get(code_str)
+                code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
+                sec = stock_to_sector.get(code_str) or stock_to_sector.get(code_clean)
                 if not sec:
                     continue
                     
@@ -234,7 +248,7 @@ class SectorHeatmapWidget(QWidget):
                     self.sector_to_codes[sec] = []
                 self.sector_to_codes[sec].append(code_str)
                 
-                flag_info = consolidation_flags.get(code_str, {})
+                flag_info = consolidation_flags.get(code_str, {}) or consolidation_flags.get(code_clean, {})
                 phase = flag_info.get('phase', 'INIT')
                 weight = phase_weights.get(phase, 20.0)
                 
@@ -243,13 +257,20 @@ class SectorHeatmapWidget(QWidget):
                 
                 pct_val = 0.0
                 stock_name = ""
-                if current_df is not None and code_str in current_df.index:
-                    row = current_df.loc[code_str]
-                    stock_name = str(row.get('name', ''))
-                    try:
-                        pct_val = float(row.get('percent', 0.0))
-                    except:
-                        pass
+                if current_df is not None:
+                    row = None
+                    if hasattr(main_win, 'get_df_row_safe'):
+                        row = main_win.get_df_row_safe(current_df, code_str)
+                    elif code_str in current_df.index:
+                        row = current_df.loc[code_str]
+                    elif code_clean in current_df.index:
+                        row = current_df.loc[code_clean]
+                    if row is not None:
+                        stock_name = str(row.get('name', ''))
+                        try:
+                            pct_val = float(row.get('percent', 0.0))
+                        except:
+                            pass
                         
                 if sec not in sector_changes:
                     sector_changes[sec] = []

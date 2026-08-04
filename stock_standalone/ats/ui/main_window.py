@@ -1272,6 +1272,18 @@ class ATSMainWindow(QMainWindow):
         self.prices_failed_codes = set()
         self._is_closing = False
         
+        # 🛡️【批处理防抖队列与定时器】：防止零散多次触发并发开闭 HDF5 / Sina API 引起的刷屏与界面卡顿
+        self._pending_price_codes = set()
+        self._pending_history_codes = set()
+        
+        self._batch_price_timer = QTimer(self)
+        self._batch_price_timer.setSingleShot(True)
+        self._batch_price_timer.timeout.connect(self._flush_batch_stock_prices)
+        
+        self._batch_history_timer = QTimer(self)
+        self._batch_history_timer.setSingleShot(True)
+        self._batch_history_timer.timeout.connect(self._flush_batch_stock_history)
+        
         # Initialize ratios for equal proportional scaling
         self._main_ratio = [0.24, 0.49, 0.27]
         self._center_ratio = [0.5, 0.5]
@@ -1742,8 +1754,7 @@ class ATSMainWindow(QMainWindow):
         self.trade_flow_table.stock_double_clicked.connect(self.on_stock_clicked)
         self.kernel_trace_panel.stock_double_clicked.connect(self.on_stock_clicked)
         
-        self.heatmap_widget.sector_selected.connect(self.on_sector_clicked)
-        self.heatmap_widget.sector_selected_with_codes.connect(lambda name, codes: self.on_sector_clicked(name, member_codes=codes))
+        self.heatmap_widget.sector_selected_with_codes.connect(lambda name, codes: self.on_sector_clicked(name, member_codes=codes if codes else None))
         self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
 
@@ -2184,33 +2195,21 @@ class ATSMainWindow(QMainWindow):
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
             from PyQt6.sip import isdeleted
 
-            # 【防抖去重】短时间内连续重复触发时自动抑制闪烁
-            import time
-            now_t = time.time()
-            if hasattr(self, '_last_sector_click_t') and self._last_sector_click_t:
-                if (now_t - self._last_sector_click_t < 0.3) and getattr(self, '_last_sector_click_name', '') == name:
-                    if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
-                        self._sector_detail_dialog.show()
-                        self._sector_detail_dialog.raise_()
-                        self._sector_detail_dialog.activateWindow()
-                    return
-            self._last_sector_click_t = now_t
-            self._last_sector_click_name = name
+            current_df = self.current_df if hasattr(self, 'current_df') else None
 
-            # 【无缝复用与置顶】如果板块详情弹窗实例已存在且有效，原地无缝更新数据并拉至最前端
+            # 【复用弹窗】如果板块详情弹窗实例已存在且有效，原地更新数据并拉至最前端
             if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
                 dialog = self._sector_detail_dialog
                 dialog.sector_name = name
                 dialog.setWindowTitle(f"🔥 {name} 板块明细 (Real-time Sector Details)")
-                if member_codes:
-                    dialog.member_codes = member_codes
-                dialog.update_data(self.current_df if hasattr(self, 'current_df') else None)
+                dialog.member_codes = member_codes or []
+                dialog.update_data(current_df)
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
                 return
 
-            # 若不存在旧实例则创建全新窗口
+            # 若不存在旧实例则创建全新窗口（parent=self 确保能拿到主窗口的 current_df）
             dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=self)
             dialog.show()
             dialog.raise_()
@@ -2744,7 +2743,22 @@ class ATSMainWindow(QMainWindow):
                 print(f"[ATS_Realtime] Apply diff error: {e}")
         else:
             # 全量更新或冷启动
+            if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+                # 🛡️【关键防丢失保护】：当收到 IPC 全量更新包且其缺少 category/industry/name 静态列时，从原 current_df 无缝继承！
+                for static_col in ['category', 'industry', 'concept', 'name']:
+                    if static_col in self.current_df.columns and static_col not in df_payload.columns:
+                        df_payload[static_col] = self.current_df[static_col].reindex(df_payload.index)
             self.current_df = df_payload
+
+        # 🛡️【自动缝合与补全静态分类列】：确保 current_df 永远保持完整的 category 板块分类数据
+        if self.current_df is not None and not self.current_df.empty and ('category' not in self.current_df.columns or self.current_df['category'].dropna().empty):
+            try:
+                if hasattr(self, 'heatmap_widget') and hasattr(self.heatmap_widget, '_bidding_stock_to_sector'):
+                    b_map = getattr(self.heatmap_widget, '_bidding_stock_to_sector', {})
+                    if b_map:
+                        self.current_df['category'] = [b_map.get(str(idx).strip(), '') or b_map.get("".join(c for c in str(idx) if c.isdigit()).zfill(6), '') for idx in self.current_df.index]
+            except Exception:
+                pass
 
         # Fast vectorized name cache update
         self._update_name_cache_from_df(self.current_df)
@@ -2789,16 +2803,27 @@ class ATSMainWindow(QMainWindow):
         if not codes:
             return
         
-        # Filter out codes already loading or failed
         codes_to_load = [c for c in codes if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
         if not codes_to_load:
             return
             
         for code in codes_to_load:
+            self._pending_price_codes.add(code)
             self.prices_loading_codes.add(code)
             
+        # 启动防抖定时器，凑齐 150ms 内的所有价格请求进行一次批处理
+        self._batch_price_timer.start(150)
+
+    def _flush_batch_stock_prices(self):
+        if not self._pending_price_codes:
+            return
+        codes_to_load = list(self._pending_price_codes)
+        self._pending_price_codes.clear()
+        
+        logger.debug(f"[ATSMainWindow] Debounce batching price load for {len(codes_to_load)} codes...")
         import threading
         def worker():
+            t0 = time.time()
             try:
                 from JSONData import sina_data
                 s = sina_data.Sina(readonly=True)
@@ -2810,34 +2835,27 @@ class ATSMainWindow(QMainWindow):
                         self.prices_failed_codes.add(code)
                     return
                     
-                # Direct online fetch using Sina's list data API to get real-time price and llastp
                 tick_df = s.get_stock_list_data(valid_codes)
-                        
                 loaded_codes = set()
                 if tick_df is not None and not tick_df.empty:
                     for idx, row in tick_df.iterrows():
                         code_str = str(idx).strip().zfill(6)
-                        price = float(row.get('close', 0.0))  # Current price is stored under 'close' after mapping
-                        llastp = float(row.get('llastp', 0.0))  # Yesterday's close is stored under 'llastp'
-                        
-                        if llastp > 0:
-                            pct = (price - llastp) / llastp * 100.0
-                        else:
-                            pct = 0.0
-                            
+                        price = float(row.get('close', 0.0))
+                        llastp = float(row.get('llastp', 0.0))
+                        pct = (price - llastp) / llastp * 100.0 if llastp > 0 else 0.0
                         self.price_pct_cache[code_str] = (price, pct)
                         loaded_codes.add(code_str)
                         
-                # Update loading/failed states
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     if code not in loaded_codes:
                         self.prices_failed_codes.add(code)
                         
-                from PyQt6.QtCore import QTimer
+                cost_ms = (time.time() - t0) * 1000.0
+                logger.debug(f"[ATSMainWindow] Batch prices loaded: {len(loaded_codes)}/{len(valid_codes)} in {cost_ms:.1f}ms")
                 QTimer.singleShot(0, self.refresh_realtime_ui)
             except Exception as e:
-                print(f"[ATSMainWindow] Error loading prices in background: {e}")
+                logger.debug(f"[ATSMainWindow] Error loading prices in background: {e}")
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
@@ -2852,7 +2870,6 @@ class ATSMainWindow(QMainWindow):
         now_ts = time.time()
         today = datetime.date.today().isoformat()
         
-        # 动态计算重试冷却时长：cct.duration_sleep_time + 随机(1,10)秒
         sleep_base = 10
         try:
             if hasattr(cct, 'duration_sleep_time'):
@@ -2861,41 +2878,52 @@ class ATSMainWindow(QMainWindow):
             pass
         cooldown_sec = sleep_base + random.randint(1, 10)
         
-        # Reset failed codes at the start of a new calendar day so that a fresh
-        # ATS launch always retries history loading (avoids permanent blacklist).
         if self._history_failed_date != today:
             self._history_failed_date = today
             self.history_failed_codes.clear()
         
-        # Filter out codes already loading or failed within the cooldown_sec
+        def is_cached(c):
+            c_clean = ''.join(filter(str.isdigit, str(c)))
+            return (c in self.stock_history_cache) or (c_clean in self.stock_history_cache)
+
+        # 只要已经在 self.stock_history_cache 中存过（无论是有数据还是空列表占位），一律判定已缓存，绝对不再重载！
         codes_to_load = [
             c for c in codes
-            if c not in self.history_loading_codes
+            if not is_cached(c)
+            and c not in self.history_loading_codes
             and (c not in self.history_failed_codes or now_ts - self.history_failed_codes[c] > cooldown_sec)
         ]
         if not codes_to_load:
             return
             
-        # Mark as loading
         for code in codes_to_load:
+            self._pending_history_codes.add(code)
             self.history_loading_codes.add(code)
-            if code not in self.stock_history_cache:
-                self.stock_history_cache[code] = []
                 
+        # 启动防抖定时器，凑齐 250ms 内的所有历史查询进行一次性 HDF5 批量 select
+        self._batch_history_timer.start(250)
+
+    def _flush_batch_stock_history(self):
+        if not self._pending_history_codes:
+            return
+        codes_to_load = list(self._pending_history_codes)
+        self._pending_history_codes.clear()
+        
+        logger.debug(f"[ATSHistory] Debounce batching history load for {len(codes_to_load)} codes...")
         import threading
         def worker():
             import time as _time
             import pandas as pd
             import os
+            t0 = _time.time()
 
-            # 尝试非阻塞式获取 HDF5 读写锁，防止多线程并发读取 HDF5 文件触发 PyTables 内存访问冲突崩溃 (Access Violation)
             acquired = self.hdf5_history_lock.acquire(blocking=False)
             if not acquired:
-                # 锁竞争失败：也加上 cooldown_sec 秒冷却，避免每 3 秒刷新时重复请求撞锁
                 fail_ts = _time.time()
                 for code in codes_to_load:
                     self.history_loading_codes.discard(code)
                     self.history_failed_codes[code] = fail_ts
+                logger.debug(f"[ATSHistory] HDF5 lock busy, postponed {len(codes_to_load)} codes.")
                 return
 
             try:
@@ -2905,38 +2933,42 @@ class ATSMainWindow(QMainWindow):
                     for code in codes_to_load:
                         self.history_loading_codes.discard(code)
                         self.history_failed_codes[code] = fail_ts
-                    print(f"[ATSHistory] HDF5 文件不存在: {path}")
+                    logger.debug(f"[ATSHistory] HDF5 File missing: {path}")
                     return
 
-                # ── 带重试的 HDF5 读取，对抗写锁冲突 ──────────────────────────────
                 MAX_RETRY = 3
-                RETRY_SLEEP = 0.5   # 每次重试间隔 0.5 秒
+                RETRY_SLEEP = 0.5
 
                 df = None
                 last_err = None
+                raw_code_map = {}
+                for c in codes_to_load:
+                    c_clean = ''.join(filter(str.isdigit, str(c)))
+                    if c_clean:
+                        raw_code_map[c_clean] = c
+
+                query_codes = list(raw_code_map.keys())
+
                 for attempt in range(MAX_RETRY):
                     try:
                         with pd.HDFStore(path, mode='r') as store:
-                            code_query = ", ".join([f"'{c}'" for c in codes_to_load])
+                            code_query = ", ".join([f"'{c}'" for c in query_codes])
                             df = store.select('/all_30', where=f"code in [{code_query}]")
                         last_err = None
-                        break   # 成功则跳出重试
+                        break
                     except Exception as e:
                         last_err = e
-                        print(f"[ATSHistory] 读取 HDF5 失败 (attempt {attempt+1}/{MAX_RETRY}): {e}")
                         if attempt < MAX_RETRY - 1:
                             _time.sleep(RETRY_SLEEP)
 
                 if last_err is not None:
-                    # 全部重试均失败 → IO/锁问题，用短冷却避免长时间黑名单
-                    fail_ts = _time.time() - (300 - 10)  # 只冷却 10 秒
+                    fail_ts = _time.time() - (300 - 10)
                     for code in codes_to_load:
                         self.history_loading_codes.discard(code)
                         self.history_failed_codes[code] = fail_ts
-                    print(f"[ATSHistory] HDF5 读取彻底失败，{10}s 后重试: {last_err}")
+                    logger.debug(f"[ATSHistory] HDF5 read error: {last_err}")
                     return
 
-                # ── 清除成功读取的 code 的失败标记 ────────────────────────────────
                 for code in codes_to_load:
                     self.history_failed_codes.pop(code, None)
 
@@ -2945,32 +2977,42 @@ class ATSMainWindow(QMainWindow):
                     dates = pd.to_datetime(df.index.get_level_values('ticktime')).date
                     grouped = df.groupby([df.index.get_level_values('code'), dates])['close'].last()
 
-                    for (code, d), val in grouped.items():
+                    for (c_clean, d), val in grouped.items():
+                        c_clean_str = str(c_clean).strip().zfill(6)
                         d_str = d.strftime("%Y-%m-%d")
-                        hist = self.stock_history_cache.get(code, [])
+                        orig_code = raw_code_map.get(c_clean_str, c_clean_str)
+                        
+                        hist = self.stock_history_cache.get(c_clean_str, [])
                         if not any(item[0] == d_str for item in hist):
                             hist.append((d_str, float(val)))
-                        self.stock_history_cache[code] = hist
-                        loaded_codes.add(code)
+                            
+                        self.stock_history_cache[c_clean_str] = hist
+                        self.stock_history_cache[orig_code] = hist
+                        loaded_codes.add(c_clean_str)
+                        loaded_codes.add(orig_code)
 
                     for code in codes_to_load:
+                        c_clean = ''.join(filter(str.isdigit, str(code)))
+                        if c_clean in self.stock_history_cache:
+                            self.stock_history_cache[c_clean].sort(key=lambda x: x[0])
                         if code in self.stock_history_cache:
                             self.stock_history_cache[code].sort(key=lambda x: x[0])
 
-                # ── 数据为空的 code：正常标记失败（RETRY_INTERVAL=300s） ──────────
+                # 无论是否有历史数据，查询结束后均建立 Cache 记录（无数据的存空列表占位），防二次轮询触发
                 fail_ts = _time.time()
                 for code in codes_to_load:
+                    c_clean = ''.join(filter(str.isdigit, str(code)))
                     self.history_loading_codes.discard(code)
-                    if code not in loaded_codes:
+                    if code not in loaded_codes and c_clean not in loaded_codes:
+                        self.stock_history_cache[code] = []
+                        self.stock_history_cache[c_clean] = []
                         self.history_failed_codes[code] = fail_ts
-                        print(f"[ATSHistory] code={code} 在 /all_30 中无数据")
 
-                print(f"[ATSHistory] 加载完成: {len(loaded_codes)}/{len(codes_to_load)} 只有历史数据")
+                cost_ms = (_time.time() - t0) * 1000.0
+                logger.debug(f"[ATSHistory] Batch history loaded: {len(loaded_codes)}/{len(codes_to_load)} in {cost_ms:.1f}ms")
 
-                # 触发线程安全 UI 刷新
                 QTimer.singleShot(0, self.refresh_realtime_ui)
             finally:
-                # 释放锁，确保任何退出分支均能安全解锁，防止死锁
                 self.hdf5_history_lock.release()
                 
         threading.Thread(target=worker, daemon=True).start()
@@ -2978,6 +3020,7 @@ class ATSMainWindow(QMainWindow):
     def refresh_realtime_ui(self):
         if getattr(self, '_is_closing', False):
             return
+        t_ui_start = time.time()
         has_df = self.current_df is not None and not self.current_df.empty
         
         # 1. Update prices/percents in universe_manager pools
@@ -3030,12 +3073,19 @@ class ATSMainWindow(QMainWindow):
                         pool[code]['price'] = 0.0
                         pool[code]['pct'] = 0.0
                     missing_realtime_codes.append(code)
-        
+                    
+        missing_realtime_codes = [c for c in missing_realtime_codes if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
         if missing_realtime_codes:
             self._async_load_stock_prices(missing_realtime_codes)
         
-        # 4. Update swing state table
-        missing_history_codes = [c for c in all_codes if c not in self.stock_history_cache or not self.stock_history_cache[c]]
+        # 4. Update swing state table (过滤掉正在加载及处于冷却期内的无数据代码，防范 3s 轮询重复查询)
+        now_ts = time.time()
+        missing_history_codes = [
+            c for c in all_codes
+            if c not in self.stock_history_cache
+            and c not in self.history_loading_codes
+            and (c not in self.history_failed_codes or now_ts - self.history_failed_codes[c] > 300)
+        ]
         if missing_history_codes:
             self._async_load_stock_history(missing_history_codes)
             
@@ -3223,11 +3273,14 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating equity pop dialog: {e}")
 
-        if hasattr(self, '_sector_detail_dialog') and self._sector_detail_dialog is not None and not isdeleted(self._sector_detail_dialog):
+        if hasattr(self, '_sector_detail_dialog') and self._sector_detail_dialog is not None and not isdeleted(self._sector_detail_dialog) and self._sector_detail_dialog.isVisible():
             try:
                 self._sector_detail_dialog.update_data(self.current_df)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
+                
+        ui_cost = (time.time() - t_ui_start) * 1000.0
+        logger.debug(f"[ATS_Realtime] refresh_realtime_ui completed in {ui_cost:.1f}ms")
             
         # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
         if has_df:
