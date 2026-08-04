@@ -15,12 +15,12 @@
           "enabled": true
         },
         "3d": {
-          "filter": "vwap_cum_3d >= 0.99 * vwap_cum_5d and (dif > dea or macd > macdlast1 or close > ma5d)",
+          "filter": "close > ma5d and (dif > dea or macd > macdlast1 or close > ma201d)",
           "weight": 1.2,
           "enabled": true
         },
         "2d": {
-          "filter": "vwap_cum_2d >= vwap_cum_3d and (nclose > last_nclose1d or lastl1d >= lastl2d or close > ma5d)",
+          "filter": "close > ma5d and (nclose > last_nclose1d or lastl1d >= lastl2d or dif > dea)",
           "weight": 1.1,
           "enabled": true
         },

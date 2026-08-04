@@ -5,7 +5,7 @@ Provides a visual grid of sector momentum scores.
 Colors range dynamically based on intensity of momentum.
 """
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QHBoxLayout, QPushButton, QComboBox, QScrollArea
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QHBoxLayout, QPushButton, QComboBox, QScrollArea, QSizePolicy
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
 import os
@@ -20,6 +20,7 @@ class SectorHeatmapWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_cols = 4
         self._init_ui()
         self.load_live_sectors()
 
@@ -45,7 +46,10 @@ class SectorHeatmapWidget(QWidget):
         # Scroll Area for Heatmap Grid
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(120)
         scroll.setStyleSheet("background-color: #121214; border: 1px solid #2e2e36;")
+        self.setMinimumWidth(120)
         
         self.grid_container = QWidget()
         self.grid_container.setStyleSheet("background-color: #121214;")
@@ -55,6 +59,15 @@ class SectorHeatmapWidget(QWidget):
         
         scroll.setWidget(self.grid_container)
         layout.addWidget(scroll)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width()
+        card_target_w = 92
+        calc_cols = max(2, min(5, (w - 20) // (card_target_w + 6)))
+        if getattr(self, '_current_cols', None) != calc_cols:
+            self._current_cols = calc_cols
+            self.render_grid()
 
     def load_mock_sectors(self):
         # Name, Score (0-100), Change %, Active Count
@@ -358,15 +371,23 @@ class SectorHeatmapWidget(QWidget):
         fav_stocks = fav_mgr.get_favorite_stocks()
         fav_sectors = fav_mgr.get_favorite_sectors()
 
-        cols = 4  # 4 columns grid
+        if not hasattr(self, 'sectors') or not self.sectors:
+            return
+
+        w = self.width() if self.width() > 20 else 360
+        card_target_w = 92
+        cols = max(2, min(5, (w - 20) // (card_target_w + 6)))
+        self._current_cols = cols
+
         for idx, item in enumerate(self.sectors):
             name, score, pct, count = item[:4]
             row = idx // cols
             col = idx % cols
 
-            # Card Widget
+            # Card Widget - 允许自适应拉伸与按网格折叠
             card = QPushButton()
-            card.setMinimumSize(120, 85)
+            card.setMinimumSize(65, 72)
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             
             # Check if this sector or any stock inside is favorite
             is_fav_sec = name in fav_sectors
@@ -404,15 +425,17 @@ class SectorHeatmapWidget(QWidget):
             card.customContextMenuRequested.connect(lambda pos, n=name: self._show_sector_context_menu(pos, n))
             
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(4, 4, 4, 4)
-            card_layout.setSpacing(2)
+            card_layout.setContentsMargins(3, 3, 3, 3)
+            card_layout.setSpacing(1)
             
             name_lbl = QLabel(display_name)
-            name_lbl.setStyleSheet("font-weight: bold; color: #ffffff; background: transparent; font-size: 11pt;")
+            name_lbl.setStyleSheet("font-weight: bold; color: #ffffff; background: transparent; font-size: 10pt;")
             name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setWordWrap(True)
             
-            info_lbl = QLabel(f"分: {score} | {pct}")
-            info_lbl.setStyleSheet("color: #e2e2e5; background: transparent; font-size: 9pt;")
+            # 精简分数与涨幅文案 (去掉多余前缀防止横向字符溢出)
+            info_lbl = QLabel(f"{score} | {pct}")
+            info_lbl.setStyleSheet("color: #e2e2e5; background: transparent; font-size: 8.5pt;")
             info_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
             count_lbl = QLabel(f"成员: {count}")
