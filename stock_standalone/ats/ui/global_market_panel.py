@@ -21,7 +21,7 @@ import time
 import datetime
 
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, NumericTableWidgetItem
 
 
 class GlobalMarketWorker(QThread):
@@ -511,7 +511,10 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                item = QTableWidgetItem(val)
+                if col_idx in (2, 3): # 价格与涨跌幅数值按数字精准排序
+                    item = NumericTableWidgetItem(val)
+                else:
+                    item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (0, 4) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮
@@ -543,7 +546,7 @@ class GlobalMarketPanel(QWidget):
 
                 self.tbl_quotes.setItem(row_idx, col_idx, item)
 
-        self.tbl_quotes.setSortingEnabled(False)
+        self.tbl_quotes.setSortingEnabled(True)
         if hasattr(self.tbl_quotes, 'restore_header_state'):
             self.tbl_quotes.restore_header_state()
 
@@ -693,7 +696,10 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                item = QTableWidgetItem(val)
+                if col_idx == 2: # Boost 分数按数字精准排序
+                    item = NumericTableWidgetItem(val)
+                else:
+                    item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx in (0, 2) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮
@@ -721,7 +727,7 @@ class GlobalMarketPanel(QWidget):
 
                 self.tbl_boosts.setItem(row_idx, col_idx, item)
 
-        self.tbl_boosts.setSortingEnabled(False)
+        self.tbl_boosts.setSortingEnabled(True)
         if hasattr(self.tbl_boosts, 'restore_header_state'):
             self.tbl_boosts.restore_header_state()
 

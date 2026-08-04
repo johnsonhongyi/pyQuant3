@@ -1,3 +1,16 @@
+## 2026-08-04 23:50
+- [x] **恢复外盘看板表格表头排序功能与实现 K 线黄金分割 (Fibonacci Ratios) 比例坐标系 (`ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_fibonacci_and_sorting.py`)**：
+    - [x] **根治外盘表格排序失效硬伤**：
+        - 彻底排查并定位到 `_update_quotes_table` 与 `_update_boosts_table` 中在 populate 数据末尾强行写死 `setSortingEnabled(False)` 导致的点击表头无法排序 Bug。
+        - 恢复 `self.tbl_quotes.setSortingEnabled(True)` 与 `self.tbl_boosts.setSortingEnabled(True)` 使能。
+        - 接入 `NumericTableWidgetItem` 对“最新价格”（第 2 列）、“涨跌幅 %”（第 3 列）与“Boost 分数”（第 2 列）做高精度数字/百分比升降序数值排序，解决普通字符串排序的乱序缺陷。
+    - [x] **画板全面植入黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系**：
+        - 在 `GlobalMarketKLineDialog` 的 K 线主画板 (`self.p_kline`) 上，基于视区动态最高价与最低价，极速算齐并绘制 **7 大黄金分割核心比率位 (0.0%, 23.6%, 38.2%, 50.0%, 61.8%, 80.9%, 100.0%)**。
+        - 采用专业半透明水平虚线与右侧边端动态价格浮动标签（如 `Fib 61.8% (黄金位): 704.12`）立体呈现在图表背景上。
+        - 工具栏追加 `FIB:开` / `FIB:关` 一键高亮控制开关按钮。
+    - [x] **单元测试 100% 成功通过**：
+        - 运行 `scratch/test_fibonacci_and_sorting.py` 验证排序使能与黄金分割坐标系，结合 `pytest tests/test_signal_ledger.py` 12 项核心单元测试 100% 成功通过！
+
 ## 2026-08-04 23:10
 - [x] **实现 5~30 分钟动态梯度延迟冷却锁、30s 密集防抖锁、时间戳日志与全量标的集中批量预热引擎 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_cooldown_and_batch_prewarm.py`)**：
     - [x] **日志全局格式化追加 `[HH:MM:SS]` 精准时间戳**：
@@ -13,6 +26,10 @@
     - [x] **顶部工具栏按钮文案极简重构与视区优化 (`ats/ui/global_market_kline_dialog.py`)**：
         - 彻底精简重构外盘 K 线画板顶部全量工具栏按钮文本（`Yahoo` / `新浪` / `BOLL:开` / `美国线` / `60日` / `120日` / `资讯:展开` / `日志:关` / `代理:7890`）。
         - 优化最小宽度 (min-width: 45px ~ 65px) 与 padding 内边距，使工具栏整体横向宽度压缩 50% 以上，排版清爽精致，彻底消除文字遮挡挤压现象。
+    - [x] **修复 OHLC 竹节线缺失 `boundingRect()` 报错与线形切换比例错乱缺陷 (`ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_dialog_autofit.py`)**：
+        - **彻底根除 `NotImplementedError`**：为 `OHLCItem` 与 `CandlestickItem` 重构并补齐了基于 `self.data` 数据动态极值计算的 `boundingRect(self)`，消除了重写线形或重绘时抛出的 `QGraphicsObject.boundingRect() is abstract` 底层 C++ 崩溃。
+        - **实现 100% 垂直居中与 5% 黄金比例 Padding 自适应**：新增 `_auto_fit_y_range()` 动态垂直适配算法，关闭原生 ViewBox 0 锚点强锁，自动探测视区内 visible K 线及 BOLL 上下轨最高/最低价，上下对称保留 5% 黄金留白 padding。
+        - **实现窗口打开与线形切换 100% 自动 Reset**：绑定 `p_kline.sigXRangeChanged` 信号，并在 `showEvent`、`_draw_chart`、`_focus_recent_60`、`_focus_full_120` 与 `_toggle_chart_mode` 中接入自动 Reset 适配调起。无论打开窗口、平移 X 轴还是切换美国线/蜡烛图，画板图形 100% 秒级自适应拉伸并精准居中！
     - [x] **全量单元测试 100% 成功通过**：
         - 运行 `scratch/test_cooldown_and_batch_prewarm.py` 验证梯度冷却、防抖拦截与集中批量预热功能正常，`pytest tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
 
