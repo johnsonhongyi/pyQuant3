@@ -306,6 +306,41 @@ class TestSignalLedger(unittest.TestCase):
         self.assertTrue(s1.is_notified_today(code))
         self.assertFalse(s1.is_notified_today("000001"))
 
+    def test_multi_period_fallback_and_ipc_decoupling(self):
+        """测试多周期策略引擎纯 IPC 获取机制"""
+        from multi_period_strategy_engine import MultiPeriodStrategyEngine
+        
+        codes = ['000001', '600000']
+        df_raw = pd.DataFrame({
+            'code': codes,
+            'open': [10.3, 8.1],
+            'high': [10.6, 8.3],
+            'low': [10.2, 8.0],
+            'close': [10.5, 8.2],
+            'trade': [10.5, 8.2],
+            'lastp1d': [10.2, 8.0],
+            'lastp2d': [10.0, 7.9],
+            'lastp3d': [9.8, 7.8],
+            'lastp4d': [9.5, 7.7],
+            'volume': [10000.0, 20000.0],
+            'lastv1d': [9000.0, 18000.0],
+            'lastv2d': [8500.0, 17000.0],
+            'lastv3d': [8000.0, 16000.0],
+            'lastv4d': [7500.0, 15000.0],
+            'percent': [2.94, 2.50],
+            'eval1d': [9, 9],
+            'eval2d': [9, 9],
+            'signal1d': [5, 5],
+            'ma5d': [10.2, 8.0],
+            'ma20d': [10.0, 7.9],
+            'ma60d': [9.5, 7.5]
+        }, index=codes)
+
+        engine = MultiPeriodStrategyEngine()
+        df_d = engine.load_period_data('d', df_raw, readonly=False)
+        self.assertIsNotNone(df_d)
+        self.assertFalse(df_d.empty)
+
 
 if __name__ == '__main__':
     unittest.main()

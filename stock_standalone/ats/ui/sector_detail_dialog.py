@@ -7,6 +7,7 @@ Displays all constituent stocks of a given sector from the bidding session data.
 import os
 import json
 import zlib
+import re
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton, QApplication
@@ -70,50 +71,8 @@ class ATSSectorDetailDialog(QDialog):
         self.load_data()
         self._restore_geometry()
         
-    def _restore_geometry(self):
-        """从 window_config.json 恢复板块详情弹窗位置与大小"""
-        try:
-            from sys_utils import get_app_root, get_conf_path
-            import json, os
-            from PyQt6.QtCore import QByteArray
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                geom = data.get("ats_sector_detail_dialog_geom")
-                if geom:
-                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
-        except Exception:
-            pass
 
-    def _save_geometry(self):
-        """原子写盘持久化板块详情弹窗位置与大小至 window_config.json"""
-        try:
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            import json, os
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_sector_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
-                tmp_path = cfg_path + ".tmp_sector_detail"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
-        except Exception:
-            pass
 
-    def hideEvent(self, event):
-        """隐藏时自动持久化窗口大小与位置"""
-        self._save_geometry()
-        super().hideEvent(event)
-        
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -231,6 +190,9 @@ class ATSSectorDetailDialog(QDialog):
 
     def update_data(self, df_realtime=None):
         """实盘行情更新时调起的无缝刷新接口"""
+        # 每次刷新前同步标题 Label，防止窗口复用后显示旧板块名
+        if hasattr(self, 'title_lbl'):
+            self.title_lbl.setText(f"板块名称: {self.sector_name}")
         try:
             self.load_data(df_realtime=df_realtime)
         except Exception:
@@ -239,28 +201,75 @@ class ATSSectorDetailDialog(QDialog):
     def load_data(self, df_realtime=None):
         # Resolve helper functions & streaming df from parent chain
         get_name_fn = None
+        get_row_fn = None
         current_df = df_realtime
         p = self._get_parent_mw()
         while p:
             if hasattr(p, 'get_stock_name'):
                 get_name_fn = p.get_stock_name
+            if hasattr(p, 'get_df_row_safe'):
+                get_row_fn = p.get_df_row_safe
             if current_df is None and hasattr(p, 'current_df'):
                 current_df = p.current_df
             if get_name_fn and current_df is not None:
                 break
             p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
 
-        # 1. 优先使用实时传入的 member_codes 渲染列表，实现与热力图 100% 对齐
+        def _get_row(df, code_str):
+            """双 Key 智能查找：先用父窗口安全接口，再降级子串匹配"""
+            if get_row_fn:
+                return get_row_fn(df, code_str)
+            if code_str in df.index:
+                return df.loc[code_str]
+            c_clean = ''.join(c for c in code_str if c.isdigit())
+            if c_clean and c_clean in df.index:
+                return df.loc[c_clean]
+            return None
+
+        SECTOR_SYNONYMS = {
+            "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
+            "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
+            "传媒": ["传媒娱乐", "文化传媒", "传媒", "互联网"],
+            "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
+            "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
+            "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
+            "贵金属": ["贵金属", "黄金", "珠宝首饰"],
+            "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
+            "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
+            "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发"],
+            "金融/权重龙头": ["银行", "证券", "保险"],
+            "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"]
+        }
+
+        # 1. 结合外部传入的 member_codes 与 current_df 中按 category 动态匹配的成分股
+        target_codes = set()
         if self.member_codes:
+            for c in self.member_codes:
+                if str(c).strip():
+                    target_codes.add(str(c).strip())
+
+        # 如果 current_df 存在且包含 category 列，自动进行板块关键词与同义词向量化匹配
+        if current_df is not None and not current_df.empty and 'category' in current_df.columns:
+            try:
+                synonyms = [self.sector_name] + SECTOR_SYNONYMS.get(self.sector_name, [])
+                pattern = '|'.join([re.escape(s) for s in synonyms if s])
+                matched_series = current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
+                df_matched = current_df[matched_series]
+                if not df_matched.empty:
+                    for code_idx in df_matched.index[:60]: # 最多抓取前 60 只活跃成分股
+                        target_codes.add(str(code_idx).strip())
+            except Exception as e:
+                print(f"[SectorDetailDialog] Error matching categories from current_df: {e}")
+
+        # 只要存在目标股票代码或 current_df 包含匹配数据，100% 走实时 IPC 数据渲染
+        if target_codes:
+            self.setWindowTitle(f"📡 {self.sector_name} 板块明细 (实时IPC)")
             rows = []
             leader_code = ""
             leader_name = ""
             max_pct = -999.0
             
-            for code in self.member_codes:
-                code_str = str(code).strip()
-                if not code_str:
-                    continue
+            for code_str in target_codes:
                 name = get_name_fn(code_str) if get_name_fn else "个股"
                 if not name or name == "未知":
                     name = code_str
@@ -273,24 +282,25 @@ class ATSSectorDetailDialog(QDialog):
                 dff3_val = 0.0
                 pattern_hint = "反转/板块成分"
                 
-                if current_df is not None and code_str in current_df.index:
+                if current_df is not None:
                     import pandas as pd
-                    row = current_df.loc[code_str]
-                    if isinstance(row, pd.DataFrame):
-                        row = row.iloc[0]
-                    name_df = str(row.get('name', '')).strip()
-                    if name_df and name_df != "未知":
-                        name = name_df
-                    try: pct_val = float(row.get('percent', 0.0))
-                    except: pass
-                    try: dff_val = float(row.get('dff', 0.0))
-                    except: pass
-                    try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                    except: pass
-                    try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
-                    except: pass
-                    try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
-                    except: pass
+                    row = _get_row(current_df, code_str)
+                    if row is not None:
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        name_df = str(row.get('name', '')).strip()
+                        if name_df and name_df != "未知":
+                            name = name_df
+                        try: pct_val = float(row.get('percent', 0.0))
+                        except: pass
+                        try: dff_val = float(row.get('dff', 0.0))
+                        except: pass
+                        try: rank_val = int(row.get('Rank', row.get('rank', 0)))
+                        except: pass
+                        try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
+                        except: pass
+                        try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
+                        except: pass
                 
                 if pct_val > max_pct:
                     max_pct = pct_val
@@ -326,7 +336,8 @@ class ATSSectorDetailDialog(QDialog):
             self._render_rows(rows)
             return
 
-        # 2. 板块同义词模糊匹配表与国内优质知名龙头股 Fallback 兜底池
+        # 2. 本地快照路径：从 bidding_session_data 读取
+        self.setWindowTitle(f"📁 {self.sector_name} 板块明细 (本地快照)")
         SECTOR_SYNONYMS = {
             "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
             "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
@@ -427,17 +438,18 @@ class ATSSectorDetailDialog(QDialog):
                 leader_rank = 0
                 leader_dff2 = 0.0
                 leader_dff3 = 0.0
-                if current_df is not None and leader_code and leader_code in current_df.index:
+                if current_df is not None and leader_code:
                     import pandas as pd
-                    l_row = current_df.loc[leader_code]
-                    if isinstance(l_row, pd.DataFrame):
-                        l_row = l_row.iloc[0]
-                    try: leader_rank = int(l_row.get('Rank', l_row.get('rank', 0)))
-                    except: pass
-                    try: leader_dff2 = float(l_row.get('DFF2', l_row.get('dff2', 0.0)))
-                    except: pass
-                    try: leader_dff3 = float(l_row.get('DFF3', l_row.get('dff3', 0.0)))
-                    except: pass
+                    l_row = _get_row(current_df, leader_code)
+                    if l_row is not None:
+                        if isinstance(l_row, pd.DataFrame):
+                            l_row = l_row.iloc[0]
+                        try: leader_rank = int(l_row.get('Rank', l_row.get('rank', 0)))
+                        except: pass
+                        try: leader_dff2 = float(l_row.get('DFF2', l_row.get('dff2', 0.0)))
+                        except: pass
+                        try: leader_dff3 = float(l_row.get('DFF3', l_row.get('dff3', 0.0)))
+                        except: pass
 
                 # Combine leader and followers into rows list
                 rows = []
@@ -470,17 +482,18 @@ class ATSSectorDetailDialog(QDialog):
                     f_rank = 0
                     f_dff2 = 0.0
                     f_dff3 = 0.0
-                    if current_df is not None and f_code in current_df.index:
+                    if current_df is not None:
                         import pandas as pd
-                        f_row = current_df.loc[f_code]
-                        if isinstance(f_row, pd.DataFrame):
-                            f_row = f_row.iloc[0]
-                        try: f_rank = int(f_row.get('Rank', f_row.get('rank', 0)))
-                        except: pass
-                        try: f_dff2 = float(f_row.get('DFF2', f_row.get('dff2', 0.0)))
-                        except: pass
-                        try: f_dff3 = float(f_row.get('DFF3', f_row.get('dff3', 0.0)))
-                        except: pass
+                        f_row = _get_row(current_df, f_code)
+                        if f_row is not None:
+                            if isinstance(f_row, pd.DataFrame):
+                                f_row = f_row.iloc[0]
+                            try: f_rank = int(f_row.get('Rank', f_row.get('rank', 0)))
+                            except: pass
+                            try: f_dff2 = float(f_row.get('DFF2', f_row.get('dff2', 0.0)))
+                            except: pass
+                            try: f_dff3 = float(f_row.get('DFF3', f_row.get('dff3', 0.0)))
+                            except: pass
                         
                     rows.append({
                         'code': f_code,
