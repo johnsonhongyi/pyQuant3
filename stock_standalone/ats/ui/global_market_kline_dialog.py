@@ -9,6 +9,7 @@ MA5/MA20/MA60 动态均线、成交量 Subplot 柱状图、十字光标与磁盘
 
 import json
 import os
+from math import floor, ceil
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QApplication, QSplitter,
     QListWidget, QListWidgetItem, QTextEdit, QTextBrowser, QWidget, QMenu
@@ -371,7 +372,19 @@ class CandlestickItem(pg.GraphicsObject):
         p.drawPicture(0, 0, self.picture)
 
     def boundingRect(self):
-        return QRectF(self.picture.boundingRect())
+        if not self.data:
+            return QRectF(0, 0, 0, 0)
+        if not hasattr(self, '_rect') or self._rect is None:
+            x_vals = [item[0] for item in self.data]
+            min_x = min(x_vals) - 0.5
+            max_x = max(x_vals) + 0.5
+            y_lows = [item[3] for item in self.data]
+            y_highs = [item[4] for item in self.data]
+            min_y = min(y_lows) if y_lows else 0
+            max_y = max(y_highs) if y_highs else 1
+            h = max(0.01, max_y - min_y)
+            self._rect = QRectF(min_x, min_y, max_x - min_x, h)
+        return self._rect
 
 
 class OHLCItem(pg.GraphicsObject):
@@ -380,6 +393,7 @@ class OHLCItem(pg.GraphicsObject):
     def __init__(self, data):
         super().__init__()
         self.data = data  # list of tuples: (i, open, close, low, high)
+        self._rect = None
         self.picture = QPicture()
         self.generate_picture()
 
@@ -413,6 +427,21 @@ class OHLCItem(pg.GraphicsObject):
 
     def paint(self, p, *args):
         p.drawPicture(0, 0, self.picture)
+
+    def boundingRect(self):
+        if not self.data:
+            return QRectF(0, 0, 0, 0)
+        if not hasattr(self, '_rect') or self._rect is None:
+            x_vals = [item[0] for item in self.data]
+            min_x = min(x_vals) - 0.5
+            max_x = max(x_vals) + 0.5
+            y_lows = [item[3] for item in self.data]
+            y_highs = [item[4] for item in self.data]
+            min_y = min(y_lows) if y_lows else 0
+            max_y = max(y_highs) if y_highs else 1
+            h = max(0.01, max_y - min_y)
+            self._rect = QRectF(min_x, min_y, max_x - min_x, h)
+        return self._rect
 
 class ClickableTextBrowser(QTextBrowser):
     """能够强力穿透选区阻断、在鼠标释放瞬间精确探测 anchor 并发射 link 信号的专用浏览器控件"""
@@ -1093,8 +1122,28 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #ffffff;
             }
         """)
-        self.btn_focus_120.clicked.connect(self._focus_full_120)
-        header_layout.addWidget(self.btn_focus_120)
+        # 📐 FIB 黄金分割坐标系开关按键
+        self.show_fib = True
+        self.btn_fib_toggle = QPushButton("FIB:开")
+        self.btn_fib_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fib_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: #2a2233;
+                color: #FFD700;
+                border: 1px solid #FFD700;
+                border-radius: 4px;
+                padding: 4px 6px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-width: 50px;
+            }
+            QPushButton:hover {
+                background-color: #3d2f4d;
+                color: #ffffff;
+            }
+        """)
+        self.btn_fib_toggle.clicked.connect(self._toggle_fib_mode)
+        header_layout.addWidget(self.btn_fib_toggle)
 
         # 📰 关联资讯展开/收起控制按键
         self.btn_news_toggle = QPushButton("资讯:收起")
@@ -1192,6 +1241,9 @@ class GlobalMarketKLineDialog(QDialog):
         self.p_kline.getAxis('left').setPen(pg.mkPen('#363c4e'))
         self.p_kline.getAxis('left').setTextPen(pg.mkPen('#787b86'))
         self.p_kline.hideButtons()
+        # 禁用原生 Y 轴 AutoRange，由 _auto_fit_y_range 自动实时居中拉伸自适应
+        self.p_kline.vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        self.p_kline.sigXRangeChanged.connect(lambda *args: self._auto_fit_y_range())
         self.gw_kline.setMinimumHeight(200)
         self.v_splitter.addWidget(self.gw_kline)
 
@@ -2000,7 +2052,159 @@ class GlobalMarketKLineDialog(QDialog):
         self.p_vol.addItem(bg_up)
         self.p_vol.addItem(bg_down)
 
+        # 4. 绘制黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系
+        if getattr(self, 'show_fib', True):
+            self._draw_fibonacci_levels(lows, highs, n)
+
         self._update_info_banner(n - 1)
+        self._auto_fit_y_range()
+
+    def _draw_fibonacci_levels(self, lows, highs, n):
+        """
+        在 K 线主画板背景上高精度绘制 0%, 23.6%, 38.2%, 50.0%, 61.8%, 80.9%, 100% 
+        黄金分割 (Fibonacci Ratios) 比例坐标系水平线与右侧动态价格标签
+        """
+        if not lows or not highs or n <= 0:
+            return
+
+        min_p = min(lows)
+        max_p = max(highs)
+        diff = max_p - min_p
+        if diff <= 0:
+            return
+
+        # 7 大黄金分割核心比率位
+        fib_ratios = [
+            (1.000, "100.0% (顶峰)", "#F6465D", Qt.PenStyle.DashLine),
+            (0.809, "80.9% (强阻)", "#FF7700", Qt.PenStyle.DotLine),
+            (0.618, "61.8% (黄金位)", "#FFD700", Qt.PenStyle.DashLine),
+            (0.500, "50.0% (中枢)", "#00E5FF", Qt.PenStyle.SolidLine),
+            (0.382, "38.2% (黄金位)", "#FFD700", Qt.PenStyle.DashLine),
+            (0.236, "23.6% (强撑)", "#00FF88", Qt.PenStyle.DotLine),
+            (0.000, "0.0% (谷底)", "#089981", Qt.PenStyle.DashLine)
+        ]
+
+        for ratio, ratio_label, color_hex, line_style in fib_ratios:
+            price_val = min_p + diff * ratio
+            
+            # 半透明专业交易水平网格线
+            pen = pg.mkPen(color_hex, width=1.0, style=line_style)
+            line = pg.InfiniteLine(
+                pos=price_val,
+                angle=0,
+                pen=pen,
+                movable=False
+            )
+            self.p_kline.addItem(line)
+
+            # 右侧边端悬浮黄金分割比例 + 价格标签
+            txt_item = pg.TextItem(
+                text=f" Fib {ratio_label}: {price_val:.2f}",
+                color=color_hex,
+                anchor=(1.0, 0.5) # 紧靠视区右侧对齐
+            )
+            font = QFont("Consolas", 8, QFont.Weight.Bold)
+            txt_item.setFont(font)
+            self.p_kline.addItem(txt_item)
+            txt_item.setPos(n - 0.5, price_val)
+
+    def _toggle_fib_mode(self):
+        """切换 FIB 黄金分割比例坐标系的显隐显示"""
+        self.show_fib = not getattr(self, 'show_fib', True)
+        if self.show_fib:
+            self.btn_fib_toggle.setText("FIB:开")
+            self.btn_fib_toggle.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a2233;
+                    color: #FFD700;
+                    border: 1px solid #FFD700;
+                    border-radius: 4px;
+                    padding: 4px 6px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                    min-width: 50px;
+                }
+                QPushButton:hover {
+                    background-color: #3d2f4d;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_fib_toggle.setText("FIB:关")
+            self.btn_fib_toggle.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e222d;
+                    color: #787b86;
+                    border: 1px solid #363c4e;
+                    border-radius: 4px;
+                    padding: 4px 6px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                    min-width: 50px;
+                }
+                QPushButton:hover {
+                    background-color: #2a2e39;
+                    color: #d1d4dc;
+                }
+            """)
+        self._draw_chart()
+        self._save_settings()
+
+    def _auto_fit_y_range(self):
+        """
+        根据当前 X 轴可见视区自动算齐最低价与最高价，
+        做 5% 黄金比例上下扩展 Padding，实现 100% 自动垂直居中自适应！
+        """
+        n = len(self.klines)
+        if n == 0 or not hasattr(self, 'p_kline'):
+            return
+
+        try:
+            view_range = self.p_kline.viewRange()
+            x_min, x_max = view_range[0]
+
+            # 视区索引边界精准提取
+            start_idx = max(0, min(n - 1, int(floor(x_min))))
+            end_idx = max(0, min(n - 1, int(ceil(x_max))))
+
+            if start_idx > end_idx:
+                start_idx, end_idx = 0, n - 1
+
+            visible_klines = self.klines[start_idx: end_idx + 1]
+            if not visible_klines:
+                visible_klines = self.klines
+
+            lows = [float(item['low']) for item in visible_klines if ('low' in item and float(item['low']) > 0)]
+            highs = [float(item['high']) for item in visible_klines if ('high' in item and float(item['high']) > 0)]
+
+            if not lows or not highs:
+                lows = [float(item['close']) for item in visible_klines if 'close' in item]
+                highs = [float(item['close']) for item in visible_klines if 'close' in item]
+
+            if not lows or not highs:
+                return
+
+            min_y = min(lows)
+            max_y = max(highs)
+
+            # 如果显示了 BOLL 或 均线，把 visible 范围内的 BOLL 计算在内
+            if getattr(self, 'show_boll', False) and hasattr(self, 'boll_upper'):
+                boll_up_sub = [self.boll_upper[i] for i in range(start_idx, min(n, end_idx + 1)) if (i < len(self.boll_upper) and self.boll_upper[i] is not None)]
+                boll_dn_sub = [self.boll_lower[i] for i in range(start_idx, min(n, end_idx + 1)) if (i < len(self.boll_lower) and self.boll_lower[i] is not None)]
+                if boll_up_sub:
+                    max_y = max(max_y, max(boll_up_sub))
+                if boll_dn_sub:
+                    min_y = min(min_y, min(boll_dn_sub))
+
+            h = max(0.5, max_y - min_y)
+            # 5% 上下黄金比例 padding 留白，防止顶格或塌陷为细线
+            padded_min_y = min_y - h * 0.05
+            padded_max_y = max_y + h * 0.05
+
+            self.p_kline.vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+            self.p_kline.setYRange(padded_min_y, padded_max_y, padding=0)
+        except Exception as ex:
+            print(f"[GlobalMarketKLineDialog] 自动 Y 轴居中适配异常: {ex}")
 
     def _apply_zoom_mode(self):
         """根据 self.zoom_mode 自动应用视区并更新按键高亮"""
@@ -2017,6 +2221,7 @@ class GlobalMarketKLineDialog(QDialog):
         if n > 0:
             start_x = max(0, n - 60)
             self.p_kline.setXRange(start_x, n, padding=0.02)
+        self._auto_fit_y_range()
         self._update_zoom_btn_style()
         if save:
             self._save_settings()
@@ -2027,6 +2232,7 @@ class GlobalMarketKLineDialog(QDialog):
         n = len(self.klines)
         if n > 0:
             self.p_kline.setXRange(0, n, padding=0.02)
+        self._auto_fit_y_range()
         self._update_zoom_btn_style()
         if save:
             self._save_settings()
@@ -2208,6 +2414,12 @@ class GlobalMarketKLineDialog(QDialog):
             self._splitter_save_timer.setSingleShot(True)
             self._splitter_save_timer.timeout.connect(self._save_settings)
         self._splitter_save_timer.start(300)
+
+    def showEvent(self, event):
+        """窗口打开/显示事件：强制执行 100% 自动 Reset 与 Y 轴垂直居中适配"""
+        super().showEvent(event)
+        QTimer.singleShot(30, self._apply_zoom_mode)
+        QTimer.singleShot(80, self._auto_fit_y_range)
 
     def closeEvent(self, event):
         """关闭事件，自动持久化配置与尺寸"""
