@@ -36,6 +36,10 @@ _global_cache = {
 CACHE_TTL = 1800.0
 
 
+# 记录每个 (symbol, source_key) 上次网络在线抓取的时间戳，防止短时间重复网络请求
+_kline_fetch_timestamps = {}
+
+
 def get_global_market_log_enabled() -> bool:
     """读取物理 JSON 配置文件中的外盘数据日志开关状态 (默认关闭 False)"""
     try:
@@ -59,9 +63,10 @@ def save_global_market_log_enabled(enabled: bool) -> bool:
 
 
 def log_market_msg(*args, **kwargs):
-    """统一外盘数据日志打印 helper：仅当日志开关开启 (enable_market_logging=True) 时打印控制台调试日志"""
+    """统一外盘数据日志打印 helper：仅当日志开关开启 (enable_market_logging=True) 时打印带 [HH:MM:SS] 时间戳的控制台调试日志"""
     if get_global_market_log_enabled():
-        print(*args, **kwargs)
+        now_str = datetime.datetime.now().strftime("[%H:%M:%S]")
+        print(now_str, *args, **kwargs)
 
 
 def get_proxy_config() -> dict:
@@ -197,17 +202,27 @@ def is_market_active_time() -> bool:
     return True
 
 
-# 统一系统更新阈值时间 (秒): 交易期 60 秒 (1分钟), 盘后/非交易期 600 秒 (10分钟)
-GLOBAL_MARKET_UPDATE_INTERVAL_ACTIVE = 60.0
-GLOBAL_MARKET_UPDATE_INTERVAL_INACTIVE = 600.0
+# 动态梯度延迟间隔阶梯 (单位: 分钟)
+# 梯度选项: 5分钟(300s), 10分钟(600s), 15分钟(900s), 20分钟(1200s), 25分钟(1500s), 30分钟(1800s)
+CACHE_TTL_GRADIENTS_MINUTES = [5, 10, 15, 20, 25, 30]
 
 
 def get_global_market_cache_ttl() -> float:
-    """根据当前是否处于交易活跃窗口，统一返回更新阈值时间 (秒)
-    - 交易活跃窗口: 60.0 秒 (1 分钟)
-    - 盘后/非交易日: 600.0 秒 (10 分钟)
+    """根据交易活跃期与用户梯度配置，返回 5/10/15/20/25/30 分钟动态梯度延迟冷却阈值 (秒)
+    - 交易活跃窗口: 默认 5 分钟 (300 秒) 阶梯防封锁
+    - 盘后/非交易日: 自动拓展至 15~30 分钟 (900~1800 秒) 阶梯延迟
     """
-    return GLOBAL_MARKET_UPDATE_INTERVAL_ACTIVE if is_market_active_time() else GLOBAL_MARKET_UPDATE_INTERVAL_INACTIVE
+    try:
+        from ats.ui.styles import load_config_node
+        custom_min = load_config_node("ats_global_market_ttl_minutes", None)
+        if custom_min is not None and int(custom_min) in CACHE_TTL_GRADIENTS_MINUTES:
+            base_sec = float(custom_min) * 60.0
+            return base_sec if is_market_active_time() else max(base_sec, 900.0)
+    except Exception:
+        pass
+
+    # 默认梯度: 交易期 5 分钟 (300s)，非交易期 15 分钟 (900s)
+    return 300.0 if is_market_active_time() else 900.0
 
 
 def fetch_global_market_quotes(force_refresh=False) -> dict:
@@ -608,22 +623,120 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
 
     existing_klines = all_cache.get(sym_upper, [])
 
-    def _is_cache_stale(klines: list) -> bool:
-        if not klines or len(klines) < 10:
-            return True
-        last_item = klines[-1]
-        last_c = float(last_item.get('close', 0))
-        if last_c <= 0:
-            return True
-        # 如果当前非美股/外盘活跃交易时间 (例如周末或盘后)，且本地已有数据，直接锁定缓存，绝对不强刷！
-        if not is_market_active_time():
-            return False
-        return False
+    def merge_kline_sequences(old_list: list, new_list: list) -> list:
+        """根据 'date' 唯一键将新老 K 线序列进行增量合并与去重，按日期升序重排，确保历史天数零丢失"""
+        if not old_list: return new_list or []
+        if not new_list: return old_list or []
+        merged = {k.get('date'): dict(k) for k in old_list if k.get('date')}
+        for k in new_list:
+            if k.get('date'):
+                merged[k.get('date')] = dict(k)
+        sorted_dates = sorted(merged.keys())
+        res = [merged[d] for d in sorted_dates]
+        prev_c = None
+        for item in res:
+            c = float(item.get('close', 0))
+            if prev_c and prev_c > 0 and c > 0:
+                item['pct'] = round(((c - prev_c) / prev_c) * 100.0, 2)
+            elif 'pct' not in item:
+                item['pct'] = 0.0
+            if c > 0:
+                prev_c = c
+        return res
 
-    if not force_refresh and not _is_cache_stale(existing_klines):
-        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 成功命中 [{source_key}] 本地磁盘 K线物理持久化缓存 ({len(existing_klines)} 条): {cache_path}")
-        return existing_klines[-limit:]
+    def append_realtime_bar_if_needed(sym_code: str, klines: list) -> list:
+        """在交易活跃期 (is_market_active_time) 自动融合最新的外盘实时行情切片，并自动插值补全缺失的工作日 K 线"""
+        if not klines:
+            return klines
+        
+        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        quotes = _global_cache.get('quotes', {})
+        if not quotes or sym_code not in quotes:
+            return klines
+        
+        rt = quotes[sym_code]
+        rt_price = float(rt.get('price', 0))
+        rt_pct = float(rt.get('pct', 0))
+        if rt_price <= 0:
+            return klines
+        
+        klines_copy = [dict(k) for k in klines]
+        last_item = klines_copy[-1]
+        last_date = last_item.get('date', '')
+        
+        if last_date == today_str:
+            # 今日 K 线已存在，实时更新最新 close、pct 及 high/low 极值
+            last_item['close'] = round(rt_price, 2)
+            last_item['pct'] = round(rt_pct, 2)
+            high_p = float(last_item.get('high', rt_price))
+            low_p = float(last_item.get('low', rt_price))
+            if rt_price > high_p:
+                last_item['high'] = round(rt_price, 2)
+            if rt_price < low_p and rt_price > 0:
+                last_item['low'] = round(rt_price, 2)
+            klines_copy[-1] = last_item
+        else:
+            # 检查从 last_date 到 today 之间是否有中间缺失的交易日 (周一至周五)
+            try:
+                dt_last = datetime.datetime.strptime(last_date, '%Y-%m-%d')
+                dt_today = datetime.datetime.strptime(today_str, '%Y-%m-%d')
+                curr_dt = dt_last + datetime.timedelta(days=1)
+                
+                # 遍历中间日期，安全插值补全缺失的交易日 (避开周六周日)
+                while curr_dt < dt_today:
+                    if curr_dt.weekday() < 5:  # 周一至周五
+                        mid_date_str = curr_dt.strftime('%Y-%m-%d')
+                        prev_close = float(klines_copy[-1].get('close', rt_price))
+                        mid_bar = {
+                            'date': mid_date_str,
+                            'open': round(prev_close, 2),
+                            'high': round(prev_close, 2),
+                            'low': round(prev_close, 2),
+                            'close': round(prev_close, 2),
+                            'volume': 0.0,
+                            'pct': 0.0
+                        }
+                        klines_copy.append(mid_bar)
+                    curr_dt += datetime.timedelta(days=1)
+            except Exception:
+                pass
+            
+            # 追加今日最新实时 Bar
+            prev_close = float(klines_copy[-1].get('close', rt_price))
+            open_p = prev_close * (1.0 + rt_pct / 100.0) if prev_close > 0 else rt_price
+            high_p = max(open_p, rt_price)
+            low_p = min(open_p, rt_price)
+            new_bar = {
+                'date': today_str,
+                'open': round(open_p, 2),
+                'high': round(high_p, 2),
+                'low': round(low_p, 2),
+                'close': round(rt_price, 2),
+                'volume': float(klines_copy[-1].get('volume', 0)),
+                'pct': round(rt_pct, 2)
+            }
+            klines_copy.append(new_bar)
+        
+        return klines_copy
 
+    fetch_key = (sym_upper, source_key)
+    now_ts = time.time()
+    last_fetch_ts = _kline_fetch_timestamps.get(fetch_key, 0.0)
+    elapsed = now_ts - last_fetch_ts
+
+    # 1. 显式 force_refresh 30 秒硬防抖，防止高频密集点击或切换 code 触发重复请求
+    if force_refresh and elapsed < 30.0 and existing_klines and len(existing_klines) >= 5:
+        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 触发 30s 密集刷新防抖锁 (上次抓取于 {elapsed:.1f}s 前): 复用 [{source_key}] 本地 K线缓存 -> {sym_upper}")
+        return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
+
+    # 2. 正常读取: 动态梯度冷却锁 (美股/外盘交易活跃期 300s/5min，非交易期 900s/15min)
+    cooldown_sec = 300.0 if is_market_active_time() else 900.0
+    if not force_refresh and elapsed < cooldown_sec and existing_klines and len(existing_klines) >= 5:
+        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 命中 {cooldown_sec:.0f}s 动态梯度冷却锁 ({elapsed:.1f}s < {cooldown_sec:.0f}s): 瞬间复用 [{source_key}] 本地物理 K线缓存 ({len(existing_klines)} 条) -> {sym_upper}")
+        return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
+
+    # 更新本次网络抓取时间戳锁
+    _kline_fetch_timestamps[fetch_key] = now_ts
     log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # Helper: 尝试抓取 Yahoo 源
@@ -921,22 +1034,25 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
                 parsed_klines = _fetch_from_yahoo()
 
-    # 抓取成功后独立落盘写入该数据源物理文件
+    # 抓取成功后独立落盘写入该数据源物理文件 (采用 merge_kline_sequences 增量去重合并，保证历史天数与缺失工作日 100% 完整补齐)
     if parsed_klines and len(parsed_klines) >= 5:
-        all_cache[sym_upper] = parsed_klines
+        merged_klines = merge_kline_sequences(existing_klines, parsed_klines)
+        all_cache[sym_upper] = merged_klines
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, 'w', encoding='utf-8') as f:
                 json.dump(all_cache, f, ensure_ascii=False, indent=2)
-            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 成功落盘 {sym_upper} K线 ({len(parsed_klines)} 条) -> {cache_path}")
+            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 成功落盘增量合并 {sym_upper} K线 ({len(merged_klines)} 条) -> {cache_path}")
         except Exception as ex:
             log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 写入 JSON 异常: {ex}")
-        return parsed_klines[-limit:]
+        res_klines = append_realtime_bar_if_needed(sym_upper, merged_klines)
+        return res_klines[-limit:]
 
     # 绝境保底: 若所有网络源均不可用，返回已有磁盘历史缓存
     if existing_klines:
         log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 网络环境受限，降级读取已落盘 [{source_key}] 本地物理历史数据 ({len(existing_klines)} 条) -> {sym_upper}")
-        return existing_klines[-limit:]
+        res_klines = append_realtime_bar_if_needed(sym_upper, existing_klines)
+        return res_klines[-limit:]
 
     return []
 
@@ -1811,5 +1927,27 @@ def fetch_symbol_financial_news(symbol: str = "", name: str = "", force_refresh:
     }
     save_news_hotlist_json([fallback_item], deleted_ids)
     return [fallback_item]
+
+
+# 核心集中批量预预热标的清单 (全量包含美股 7 巨头/半导体/大宗商品/外盘主要 ETF)
+GLOBAL_BATCH_KLINE_SYMBOLS = [
+    'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 
+    'MU', 'TSM', 'SOXX', 'QQQ', 'A50', 'GOLD', 'OIL', 'BRENT'
+]
+
+
+def fetch_global_klines_batch(data_source: str = 'yahoo', force_refresh: bool = False):
+    """一键集中批量预热更新全量核心外盘标的 K 线 (自动批量更新一次全部更新，彻底避免切换 code 时不停触发网络请求)"""
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 启动全量外盘标的一键集中批量预预热/更新引擎 ({len(GLOBAL_BATCH_KLINE_SYMBOLS)} 个核心标的)...")
+    success_cnt = 0
+    for sym in GLOBAL_BATCH_KLINE_SYMBOLS:
+        try:
+            res = fetch_global_kline_history(sym, limit=120, force_refresh=force_refresh, data_source=data_source)
+            if res:
+                success_cnt += 1
+        except Exception as ex:
+            log_market_msg(f"[GlobalMarketData] 批量预热标的 {sym} 异常: {ex}")
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 全量外盘标的一键集中批量更新完毕 ({success_cnt}/{len(GLOBAL_BATCH_KLINE_SYMBOLS)} 成功)")
+
 
 

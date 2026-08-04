@@ -53,7 +53,7 @@ _GLOBAL_STOCK_NAME_MAP_CACHE = None
 
 def get_global_stock_name_map(parent_dialog=None) -> tuple:
     """
-    智能归纳全市场股票 code -> name 和 name -> code 映射表
+    智能归纳全市场股票 code -> name, name -> code 映射表及 C 引擎编译大正则
     """
     global _GLOBAL_STOCK_NAME_MAP_CACHE
     if _GLOBAL_STOCK_NAME_MAP_CACHE is not None:
@@ -112,19 +112,26 @@ def get_global_stock_name_map(parent_dialog=None) -> tuple:
     except Exception:
         pass
 
-    _GLOBAL_STOCK_NAME_MAP_CACHE = (code_to_name, name_to_code)
+    import re
+    valid_names = sorted([n for n in name_to_code.keys() if len(n) >= 2], key=lambda x: len(x), reverse=True)
+    compiled_regex = None
+    if valid_names:
+        pattern = r'|'.join([re.escape(n) for n in valid_names])
+        compiled_regex = re.compile(pattern)
+
+    _GLOBAL_STOCK_NAME_MAP_CACHE = (code_to_name, name_to_code, compiled_regex)
     return _GLOBAL_STOCK_NAME_MAP_CACHE
 
 
 def extract_stock_entities_from_text(text: str, parent_dialog=None) -> list:
     """
-    自动在新闻标题/正文中扫描匹配出现的股票名称与代码
+    自动在新闻标题/正文中高效扫描匹配出现的股票名称与代码 (C 正则极速引擎)
     返回 [{'code': '603259', 'name': '药明康德'}, ...]
     """
     if not text:
         return []
 
-    code_to_name, name_to_code = get_global_stock_name_map(parent_dialog)
+    code_to_name, name_to_code, compiled_regex = get_global_stock_name_map(parent_dialog)
     matched_entities = []
     seen_codes = set()
 
@@ -137,13 +144,12 @@ def extract_stock_entities_from_text(text: str, parent_dialog=None) -> list:
             n = code_to_name.get(c, c)
             matched_entities.append({'code': c, 'name': n})
 
-    # 2. 匹配名字字典 (如 药明康德, 中芯国际, 智谱, 恒生指数, 建设银行)
-    # 按名字长度降序匹配，优先全称
-    sorted_names = sorted([n for n in name_to_code.keys() if len(n) >= 2], key=lambda x: len(x), reverse=True)
-    for name in sorted_names:
-        if name in text:
-            code = name_to_code[name]
-            if code not in seen_codes:
+    # 2. 正则极速全自动匹配股票名称实体 (从 5000 次 Python 遍历优化为 1 次 C 正则扫描)
+    if compiled_regex:
+        found_names = compiled_regex.findall(text)
+        for name in found_names:
+            code = name_to_code.get(name)
+            if code and code not in seen_codes:
                 seen_codes.add(code)
                 matched_entities.append({'code': code, 'name': name})
 
@@ -436,22 +442,32 @@ class ClickableTextBrowser(QTextBrowser):
 
 
 class GlobalMarketNewsDetailDialog(QDialog):
-    """关联财经资讯与要闻解读详情弹窗 (支持自由缩放、最大化/最小化与物理 JSON 持久化)"""
+    """关联财经资讯与要闻解读详情弹窗 (支持自由缩放、最大化/最小化、上一条/下一条无缝切换与物理 JSON 持久化)"""
 
-    def __init__(self, news_item: dict, parent=None):
+    def __init__(self, news_item: dict, parent=None, news_list: list = None, current_index: int = 0):
         super().__init__(parent)
-        self.news_item = news_item or {}
-        title_text = self.news_item.get('title', '财经资讯详情')
-        self.setWindowTitle(f"📰 {title_text}")
-        
+        self.news_list = news_list if news_list else ([news_item] if news_item else [])
+        if self.news_list:
+            # 若传入的 current_index 不合法，根据 news_item 动态匹配
+            if current_index < 0 or current_index >= len(self.news_list):
+                try:
+                    current_index = self.news_list.index(news_item)
+                except ValueError:
+                    current_index = 0
+            self.current_index = max(0, min(current_index, len(self.news_list) - 1))
+            self.news_item = self.news_list[self.current_index]
+        else:
+            self.current_index = 0
+            self.news_item = news_item or {}
+
         # 允许自由拉伸缩放，支持标准 Windows 最小化/最大化/关闭按键
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinMaxButtonsHint |
             Qt.WindowType.WindowCloseButtonHint
         )
-        self.setMinimumSize(580, 420)
-        self.resize(760, 520)
+        self.setMinimumSize(600, 440)
+        self.resize(780, 540)
         self.setStyleSheet("""
             QDialog {
                 background-color: #131722;
@@ -463,6 +479,7 @@ class GlobalMarketNewsDetailDialog(QDialog):
             }
         """)
         self._init_ui()
+        self._refresh_content_ui()
         self._restore_settings()
 
     def _init_ui(self):
@@ -486,9 +503,8 @@ class GlobalMarketNewsDetailDialog(QDialog):
 
         # 标签 + 影响分 + 来源 + 时间 行
         row1_layout = QHBoxLayout()
-        tag_str = self.news_item.get('tag', '🌐 财经要闻')
-        lbl_tag = QLabel(tag_str)
-        lbl_tag.setStyleSheet("""
+        self.lbl_tag = QLabel()
+        self.lbl_tag.setStyleSheet("""
             background-color: #2962ff;
             color: #ffffff;
             font-size: 9pt;
@@ -496,44 +512,25 @@ class GlobalMarketNewsDetailDialog(QDialog):
             padding: 3px 8px;
             border-radius: 4px;
         """)
-        row1_layout.addWidget(lbl_tag)
+        row1_layout.addWidget(self.lbl_tag)
 
-        score = float(self.news_item.get('impact_score', 0.0))
-        score_color = "#F6465D" if score >= 0 else "#089981"
-        lbl_score = QLabel(f"影响评级: {score:+.1f} 分")
-        lbl_score.setStyleSheet(f"""
-            background-color: #1a2233;
-            color: {score_color};
-            font-size: 9pt;
-            font-weight: bold;
-            padding: 3px 8px;
-            border: 1px solid {score_color};
-            border-radius: 4px;
-        """)
-        row1_layout.addWidget(lbl_score)
+        self.lbl_score = QLabel()
+        row1_layout.addWidget(self.lbl_score)
 
         row1_layout.addStretch(1)
 
-        dt_str = self.news_item.get('datetime', '')
-        source_str = self.news_item.get('source', '')
-        lbl_meta = QLabel(f"⏱️ {dt_str}  |  📡 来源: {source_str}")
-        lbl_meta.setStyleSheet("color: #787b86; font-size: 9pt;")
-        row1_layout.addWidget(lbl_meta)
+        self.lbl_meta = QLabel()
+        self.lbl_meta.setStyleSheet("color: #787b86; font-size: 9pt;")
+        row1_layout.addWidget(self.lbl_meta)
 
         header_layout.addLayout(row1_layout)
 
         # 新闻大标题 (支持点击标记位股票名称直接联动)
-        title_raw = self.news_item.get('title', '')
-        title_html = highlight_stock_names_in_html(title_raw, self)
         self.lbl_title = QLabel()
         self.lbl_title.setWordWrap(True)
         self.lbl_title.setOpenExternalLinks(False)
         self.lbl_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self.lbl_title.linkActivated.connect(self._on_link_activated)
-        if title_html != title_raw:
-            self.lbl_title.setText(title_html)
-        else:
-            self.lbl_title.setText(title_raw)
         self.lbl_title.setStyleSheet("font-size: 13pt; font-weight: bold; color: #00F0FF; margin-top: 4px;")
         header_layout.addWidget(self.lbl_title)
 
@@ -558,37 +555,46 @@ class GlobalMarketNewsDetailDialog(QDialog):
                 line-height: 1.6;
             }
         """)
-        content_text = self.news_item.get('content', '') or self.news_item.get('summary', '')
-        
-        # 自动识别新闻中的股票名称代码实体并转换为可点击的超链接 HTML 标记
-        content_html = highlight_stock_names_in_html(content_text, self)
-        if content_html != content_text:
-            self.txt_content.setHtml(f"<div style='font-family: sans-serif; line-height: 1.6;'>{content_html}</div>")
-        else:
-            self.txt_content.setPlainText(content_text)
         layout.addWidget(self.txt_content)
 
-        # ---------------- 3. 底部关联标的与翻译/关闭按键 ----------------
+        # ---------------- 3. 底部关联标的与 翻页 / 翻译 / 关闭按键 ----------------
         bottom_layout = QHBoxLayout()
-        rel_symbols = self.news_item.get('related_symbols', [])
-        if rel_symbols:
-            lbl_rel_title = QLabel("🎯 关联影响标的:")
-            lbl_rel_title.setStyleSheet("color: #787b86; font-weight: bold; font-size: 9.5pt;")
-            bottom_layout.addWidget(lbl_rel_title)
-            for s in rel_symbols:
-                lbl_sym = QLabel(str(s))
-                lbl_sym.setStyleSheet("""
-                    background-color: #262b3e;
-                    color: #FFD700;
-                    border: 1px solid #363c4e;
-                    border-radius: 3px;
-                    padding: 2px 6px;
-                    font-weight: bold;
-                    font-size: 9pt;
-                """)
-                bottom_layout.addWidget(lbl_sym)
+        
+        # 关联标的容器
+        self.rel_container = QWidget()
+        self.rel_layout = QHBoxLayout(self.rel_container)
+        self.rel_layout.setContentsMargins(0, 0, 0, 0)
+        self.rel_layout.setSpacing(6)
+        bottom_layout.addWidget(self.rel_container)
 
         bottom_layout.addStretch(1)
+
+        # ⬅️ 上一条 & ➡️ 下一条 无缝切页复用按键
+        self.btn_prev = QPushButton("⬅️ 上一条")
+        self.btn_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_prev.setStyleSheet("""
+            QPushButton {
+                background-color: #262b3e; color: #d1d4dc; border: 1px solid #363c4e;
+                border-radius: 4px; padding: 5px 12px; font-size: 9.5pt; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #363c4e; color: #ffffff; }
+            QPushButton:disabled { background-color: #191d26; color: #434651; border-color: #262933; }
+        """)
+        self.btn_prev.clicked.connect(lambda: self._switch_to_index(self.current_index - 1))
+        bottom_layout.addWidget(self.btn_prev)
+
+        self.btn_next = QPushButton("➡️ 下一条")
+        self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_next.setStyleSheet("""
+            QPushButton {
+                background-color: #262b3e; color: #d1d4dc; border: 1px solid #363c4e;
+                border-radius: 4px; padding: 5px 12px; font-size: 9.5pt; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #363c4e; color: #ffffff; }
+            QPushButton:disabled { background-color: #191d26; color: #434651; border-color: #262933; }
+        """)
+        self.btn_next.clicked.connect(lambda: self._switch_to_index(self.current_index + 1))
+        bottom_layout.addWidget(self.btn_next)
 
         # 🌐 一键在线英译中按键
         self.btn_translate = QPushButton("🌐 在线英译中 (Translate)")
@@ -630,6 +636,102 @@ class GlobalMarketNewsDetailDialog(QDialog):
         bottom_layout.addWidget(btn_close)
 
         layout.addLayout(bottom_layout)
+
+    def _refresh_content_ui(self):
+        """刷新新闻正文、 Header 与关联标的节点 (无缝全量更新)"""
+        if not self.news_item:
+            return
+
+        # 1. 窗口标题与页码指示
+        title_text = self.news_item.get('title', '财经资讯详情')
+        total_count = len(self.news_list) if self.news_list else 1
+        page_info = f"({self.current_index + 1}/{total_count})" if total_count > 1 else ""
+        self.setWindowTitle(f"📰 {title_text} {page_info}")
+
+        # 2. Tag & Header
+        tag_str = self.news_item.get('tag', '🌐 财经要闻')
+        self.lbl_tag.setText(tag_str)
+
+        score = float(self.news_item.get('impact_score', 0.0))
+        score_color = "#F6465D" if score >= 0 else "#089981"
+        self.lbl_score.setText(f"影响评级: {score:+.1f} 分")
+        self.lbl_score.setStyleSheet(f"""
+            background-color: #1a2233;
+            color: {score_color};
+            font-size: 9pt;
+            font-weight: bold;
+            padding: 3px 8px;
+            border: 1px solid {score_color};
+            border-radius: 4px;
+        """)
+
+        dt_str = self.news_item.get('datetime', '')
+        source_str = self.news_item.get('source', '')
+        self.lbl_meta.setText(f"⏱️ {dt_str}  |  📡 来源: {source_str}")
+
+        # 新闻大标题 (支持点击标记位股票名称直接联动)
+        title_raw = self.news_item.get('title', '')
+        title_html = highlight_stock_names_in_html(title_raw, self)
+        if title_html != title_raw:
+            self.lbl_title.setText(title_html)
+        else:
+            self.lbl_title.setText(title_raw)
+
+        # 3. 正文区域
+        content_text = self.news_item.get('content', '') or self.news_item.get('summary', '')
+        content_html = highlight_stock_names_in_html(content_text, self)
+        if content_html != content_text:
+            self.txt_content.setHtml(f"<div style='font-family: sans-serif; line-height: 1.6;'>{content_html}</div>")
+        else:
+            self.txt_content.setPlainText(content_text)
+
+        # 重置翻译按键状态
+        self.btn_translate.setText("🌐 在线英译中 (Translate)")
+        self.btn_translate.setEnabled(True)
+
+        # 4. 动态更新关联标的
+        # 清理旧节点
+        while self.rel_layout.count():
+            item = self.rel_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        rel_symbols = self.news_item.get('related_symbols', [])
+        if rel_symbols:
+            lbl_rel_title = QLabel("🎯 关联影响标的:")
+            lbl_rel_title.setStyleSheet("color: #787b86; font-weight: bold; font-size: 9.5pt;")
+            self.rel_layout.addWidget(lbl_rel_title)
+            for s in rel_symbols:
+                lbl_sym = QLabel(str(s))
+                lbl_sym.setStyleSheet("""
+                    background-color: #262b3e;
+                    color: #FFD700;
+                    border: 1px solid #363c4e;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    font-weight: bold;
+                    font-size: 9pt;
+                """)
+                self.rel_layout.addWidget(lbl_sym)
+
+        # 5. 更新【⬅️ 上一条】与【➡️ 下一条】的 Enable 状态
+        if self.news_list and len(self.news_list) > 1:
+            self.btn_prev.setEnabled(self.current_index > 0)
+            self.btn_next.setEnabled(self.current_index < len(self.news_list) - 1)
+            self.btn_prev.setText(f"⬅️ 上一条")
+            self.btn_next.setText(f"➡️ 下一条")
+        else:
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+
+    def _switch_to_index(self, new_idx: int):
+        """无缝切换至指定索引的新闻 (原地刷新复用)"""
+        if not self.news_list or new_idx < 0 or new_idx >= len(self.news_list):
+            return
+        self.current_index = new_idx
+        self.news_item = self.news_list[self.current_index]
+        self._refresh_content_ui()
 
     def _on_anchor_clicked(self, url):
         url_str = url.toString() if hasattr(url, 'toString') else str(url)
@@ -818,7 +920,8 @@ class GlobalMarketKLineDialog(QDialog):
 
         self._init_ui()
         self._restore_settings()
-        self._populate_news_list()  # ⚡ 0ms 第一时间填充展现物理持久化缓存热榜
+        # ⚡ 15ms 非阻塞延迟调度填充新闻热榜，让 K 线画板 0 毫秒极速瞬间呈现在用户面前
+        QTimer.singleShot(15, self._populate_news_list)
 
         # 连接全局代理与日志变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
         try:
@@ -829,6 +932,27 @@ class GlobalMarketKLineDialog(QDialog):
             pass
 
         self._load_news_async(force_refresh=False)
+        self._load_fast_cached_or_async()
+
+    def update_symbol(self, symbol: str, name: str = ""):
+        """平滑动态无缝更新展现的外盘资产 symbol 与名称 (零销毁重建、零白屏等待)"""
+        new_symbol = symbol.strip().upper()
+        if self.symbol == new_symbol:
+            return
+
+        self.symbol = new_symbol
+        self.name = name or self.symbol
+        self.klines = []
+        self.related_symbols = get_related_symbols(self.symbol)
+        self._related_klines_cache = {}
+
+        self.setWindowTitle(f"📈 [{self.symbol} · {self.name}] 近 120 日外盘 K 线走势图与关联资讯")
+        if hasattr(self, 'lbl_title'):
+            self.lbl_title.setText(f"🌐 {self.name} ({self.symbol})")
+        if hasattr(self, 'lbl_price_info'):
+            self.lbl_price_info.setText("最新价: -- | 涨跌: --")
+
+        self._refresh_related_info_label()
         self._load_fast_cached_or_async()
 
     def _init_ui(self):
@@ -878,19 +1002,19 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addStretch(1)
 
         # 数据源选择按钮组
-        self.btn_src_yahoo = QPushButton("🇺🇸 Yahoo(连续)")
+        self.btn_src_yahoo = QPushButton("Yahoo")
         self.btn_src_yahoo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_src_yahoo.clicked.connect(lambda: self._switch_data_source("yahoo"))
         header_layout.addWidget(self.btn_src_yahoo)
 
-        self.btn_src_sina = QPushButton("📡 新浪财经")
+        self.btn_src_sina = QPushButton("新浪")
         self.btn_src_sina.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_src_sina.clicked.connect(lambda: self._switch_data_source("sina"))
         header_layout.addWidget(self.btn_src_sina)
         self._update_data_source_btn_style()
 
         # BOLL 线开关按键
-        self.btn_boll_toggle = QPushButton("📈 BOLL(20,2): 开")
+        self.btn_boll_toggle = QPushButton("BOLL:开")
         self.btn_boll_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_boll_toggle.setStyleSheet("""
             QPushButton {
@@ -898,10 +1022,10 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #FF2A6D;
                 border: 1px solid #FF2A6D;
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 4px 8px;
                 font-size: 9pt;
                 font-weight: bold;
-                min-width: 105px;
+                min-width: 65px;
             }
             QPushButton:hover {
                 background-color: #363c56;
@@ -911,7 +1035,7 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_boll_toggle)
 
         # K线 / OHLC 模式切换按键
-        self.btn_mode_toggle = QPushButton("📊 切换 OHLC(美国线)")
+        self.btn_mode_toggle = QPushButton("美国线")
         self.btn_mode_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_mode_toggle.setStyleSheet("""
             QPushButton {
@@ -919,10 +1043,10 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #ffffff;
                 border: none;
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 4px 8px;
                 font-size: 9pt;
                 font-weight: bold;
-                min-width: 110px;
+                min-width: 55px;
             }
             QPushButton:hover {
                 background-color: #1e54b7;
@@ -932,7 +1056,7 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_mode_toggle)
 
         # 视区快捷控制组
-        self.btn_focus_60 = QPushButton("🔍 最新60日")
+        self.btn_focus_60 = QPushButton("60日")
         self.btn_focus_60.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_focus_60.setStyleSheet("""
             QPushButton {
@@ -940,9 +1064,9 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #d1d4dc;
                 border: 1px solid #363c4e;
                 border-radius: 4px;
-                padding: 4px 8px;
+                padding: 4px 6px;
                 font-size: 9pt;
-                min-width: 75px;
+                min-width: 45px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
@@ -952,7 +1076,7 @@ class GlobalMarketKLineDialog(QDialog):
         self.btn_focus_60.clicked.connect(self._focus_recent_60)
         header_layout.addWidget(self.btn_focus_60)
 
-        self.btn_focus_120 = QPushButton("🌐 120日全览")
+        self.btn_focus_120 = QPushButton("120日")
         self.btn_focus_120.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_focus_120.setStyleSheet("""
             QPushButton {
@@ -960,9 +1084,9 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #d1d4dc;
                 border: 1px solid #363c4e;
                 border-radius: 4px;
-                padding: 4px 8px;
+                padding: 4px 6px;
                 font-size: 9pt;
-                min-width: 80px;
+                min-width: 45px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
@@ -973,7 +1097,7 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_focus_120)
 
         # 📰 关联资讯展开/收起控制按键
-        self.btn_news_toggle = QPushButton(f"📰 资讯({len(self.news_items)}条): 收起")
+        self.btn_news_toggle = QPushButton("资讯:收起")
         self.btn_news_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_news_toggle.setStyleSheet("""
             QPushButton {
@@ -981,10 +1105,10 @@ class GlobalMarketKLineDialog(QDialog):
                 color: #00F0FF;
                 border: 1px solid #00F0FF;
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 4px 8px;
                 font-size: 9pt;
                 font-weight: bold;
-                min-width: 110px;
+                min-width: 65px;
             }
             QPushButton:hover {
                 background-color: #2962ff;
@@ -995,14 +1119,14 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_news_toggle)
 
         # 📜 日志开关按键
-        self.btn_log_config = QPushButton("📜 日志: 关")
+        self.btn_log_config = QPushButton("日志:关")
         self.btn_log_config.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_log_config.clicked.connect(self._toggle_log_config)
         self._update_log_btn_style()
         header_layout.addWidget(self.btn_log_config)
 
         # 🌐 代理设置按键
-        self.btn_proxy_toggle = QPushButton("🌐 代理")
+        self.btn_proxy_toggle = QPushButton("代理:关")
         self.btn_proxy_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_proxy_toggle.clicked.connect(self._open_proxy_dialog)
         self._update_proxy_btn_style()
@@ -1226,7 +1350,7 @@ class GlobalMarketKLineDialog(QDialog):
         self.lbl_news_hdr.setText(f"🔥 权威自选热榜 ({len(display_items)}/20)")
         if hasattr(self, 'btn_news_toggle'):
             vis_str = "收起" if (hasattr(self, 'news_panel') and self.news_panel.isVisible()) else "展开"
-            self.btn_news_toggle.setText(f"📰 资讯({len(display_items)}条): {vis_str}")
+            self.btn_news_toggle.setText(f"资讯:{vis_str}")
 
         if not display_items:
             item = QListWidgetItem("暂无相关权威财经热榜")
@@ -1282,7 +1406,8 @@ class GlobalMarketKLineDialog(QDialog):
         """双击列表项瞬间弹出 GlobalMarketNewsDetailDialog 查看深度正文与评估"""
         news = item.data(Qt.ItemDataRole.UserRole)
         if news and isinstance(news, dict):
-            dlg = GlobalMarketNewsDetailDialog(news, self)
+            idx = self.lst_news.row(item)
+            dlg = GlobalMarketNewsDetailDialog(news, self, news_list=self.news_items, current_index=idx)
             dlg.exec()
 
     def _on_refresh_news_clicked(self):
@@ -1371,7 +1496,8 @@ class GlobalMarketKLineDialog(QDialog):
             QApplication.clipboard().setText(text_to_copy)
             self.lbl_info.setText(f"📋 已复制资讯标题与摘要至剪贴板")
         elif action == act_detail:
-            dlg = GlobalMarketNewsDetailDialog(news, self)
+            idx = self.lst_news.row(item)
+            dlg = GlobalMarketNewsDetailDialog(news, self, news_list=self.news_items, current_index=idx)
             dlg.exec()
 
     def _toggle_news_panel(self):
@@ -1431,11 +1557,16 @@ class GlobalMarketKLineDialog(QDialog):
         self._news_timer.start()
 
     def _on_auto_refresh_timer_timeout(self):
-        """定时器到期回调: 重新检测并动态调整轮询间隔，自动无感更新关联实时数据与最新要闻"""
+        """定时器到期回调: 重新检测并动态调整轮询间隔，自动无感更新关联实时数据、最新K线与热榜要闻"""
         try:
-            from JSONData.global_market_data import get_global_market_cache_ttl
+            from JSONData.global_market_data import get_global_market_cache_ttl, is_market_active_time, fetch_global_market_quotes
             interval_sec = get_global_market_cache_ttl()
             self._news_timer.setInterval(int(interval_sec * 1000))
+
+            # 在美股/外盘活跃交易期，定时触发实时行情切片刷新与 K 线动态重绘 (受到 300s/900s 梯度冷却锁保护，绝不高频刷接口)
+            if is_market_active_time():
+                fetch_global_market_quotes(force_refresh=True)
+                self._trigger_async_load(force_refresh=False)
         except Exception:
             pass
 
@@ -1497,32 +1628,38 @@ class GlobalMarketKLineDialog(QDialog):
         """切换 BOLL 布林线显示状态"""
         self.show_boll = not self.show_boll
         if self.show_boll:
-            self.btn_boll_toggle.setText("📈 BOLL(20,2): 开")
+            self.btn_boll_toggle.setText("BOLL:开")
             self.btn_boll_toggle.setStyleSheet("""
                 QPushButton {
                     background-color: #262b3e;
                     color: #FF2A6D;
                     border: 1px solid #FF2A6D;
                     border-radius: 4px;
-                    padding: 4px 10px;
+                    padding: 4px 8px;
                     font-size: 9pt;
                     font-weight: bold;
-                    min-width: 105px;
+                    min-width: 65px;
                 }
                 QPushButton:hover {
                     background-color: #363c56;
                 }
             """)
         else:
-            self.btn_boll_toggle.setText("📈 BOLL(20,2): 关")
+            self.btn_boll_toggle.setText("BOLL:关")
             self.btn_boll_toggle.setStyleSheet("""
                 QPushButton {
                     background-color: #1e222d;
                     color: #787b86;
                     border: 1px solid #363c4e;
                     border-radius: 4px;
-                    padding: 4px 10px;
+                    padding: 4px 8px;
                     font-size: 9pt;
+                    min-width: 65px;
+                }
+                QPushButton:hover {
+                    background-color: #2a2e39;
+                    color: #d1d4dc;
+                }
             """)
         self._draw_chart()
 
@@ -1530,10 +1667,10 @@ class GlobalMarketKLineDialog(QDialog):
         """切换 🕯️ 蜡烛图 (Candlestick) 与 📊 竹节线 (OHLC)"""
         if self.chart_mode == 'candlestick':
             self.chart_mode = 'ohlc'
-            self.btn_mode_toggle.setText("🕯️ 切换 蜡烛图(K线)")
+            self.btn_mode_toggle.setText("蜡烛图")
         else:
             self.chart_mode = 'candlestick'
-            self.btn_mode_toggle.setText("📊 切换 OHLC(美国线)")
+            self.btn_mode_toggle.setText("美国线")
         self._draw_chart()
 
     def _load_fast_cached_or_async(self):
@@ -1567,7 +1704,9 @@ class GlobalMarketKLineDialog(QDialog):
                 return
 
         # 后台异步抓取最新或静默刷新
-        self._trigger_async_load(force_refresh=False if (cached_klines and len(cached_klines) >= 5) else True)
+        from JSONData.global_market_data import is_market_active_time
+        force_flag = True if is_market_active_time() else (False if (cached_klines and len(cached_klines) >= 5) else True)
+        self._trigger_async_load(force_refresh=force_flag)
 
     def _trigger_async_load(self, force_refresh: bool = False):
         if self.worker and self.worker.isRunning():
@@ -2086,7 +2225,7 @@ class GlobalMarketKLineDialog(QDialog):
 
             if hasattr(self, 'btn_proxy_toggle'):
                 if enabled:
-                    btn_txt = f"🌐 代理: 开({port})" if port else "🌐 代理: 开"
+                    btn_txt = f"代理:{port}" if port else "代理:开"
                     self.btn_proxy_toggle.setText(btn_txt)
                     self.btn_proxy_toggle.setStyleSheet("""
                         QPushButton {
@@ -2095,24 +2234,26 @@ class GlobalMarketKLineDialog(QDialog):
                             font-weight: bold;
                             border: 1px solid #00E5FF;
                             border-radius: 4px;
-                            padding: 4px 10px;
+                            padding: 4px 8px;
                             font-size: 9pt;
+                            min-width: 60px;
                         }
                         QPushButton:hover {
                             background-color: #33ebff;
                         }
                     """)
                 else:
-                    self.btn_proxy_toggle.setText("🌐 代理: 关")
+                    self.btn_proxy_toggle.setText("代理:关")
                     self.btn_proxy_toggle.setStyleSheet("""
                         QPushButton {
                             background-color: #1e222d;
                             color: #787b86;
                             border: 1px solid #363c4e;
                             border-radius: 4px;
-                            padding: 4px 10px;
+                            padding: 4px 8px;
                             font-size: 9pt;
                             font-weight: bold;
+                            min-width: 55px;
                         }
                         QPushButton:hover {
                             background-color: #2a2e39;
@@ -2142,16 +2283,17 @@ class GlobalMarketKLineDialog(QDialog):
             from JSONData.global_market_data import get_global_market_log_enabled
             enabled = get_global_market_log_enabled()
             if enabled:
-                self.btn_log_config.setText("📜 日志: 开")
+                self.btn_log_config.setText("日志:开")
                 self.btn_log_config.setStyleSheet("""
                     QPushButton {
                         background-color: #1a2233;
                         color: #00F0FF;
                         border: 1px solid #00F0FF;
                         border-radius: 4px;
-                        padding: 4px 10px;
+                        padding: 4px 8px;
                         font-size: 9pt;
                         font-weight: bold;
+                        min-width: 55px;
                     }
                     QPushButton:hover {
                         background-color: #2962ff;
@@ -2159,15 +2301,16 @@ class GlobalMarketKLineDialog(QDialog):
                     }
                 """)
             else:
-                self.btn_log_config.setText("📜 日志: 关")
+                self.btn_log_config.setText("日志:关")
                 self.btn_log_config.setStyleSheet("""
                     QPushButton {
                         background-color: #191d26;
                         color: #787b86;
                         border: 1px solid #363c4e;
                         border-radius: 4px;
-                        padding: 4px 10px;
+                        padding: 4px 8px;
                         font-size: 9pt;
+                        min-width: 55px;
                     }
                     QPushButton:hover {
                         background-color: #2a2e39;

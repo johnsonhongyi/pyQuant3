@@ -825,11 +825,26 @@ class GlobalMarketPanel(QWidget):
             self._open_kline_dialog(symbol, name)
 
     def _open_kline_dialog(self, symbol: str, name: str = ""):
-        """打开外盘个股 / 指数 K 线走势图"""
+        """打开/平滑复用外盘个股与指数 120 日 K 线走势图 (0 毫秒秒开，彻底告别阻塞卡顿)"""
         try:
             from ats.ui.global_market_kline_dialog import GlobalMarketKLineDialog
-            dlg = GlobalMarketKLineDialog(symbol, name, parent=self)
-            dlg.exec()
+            from PyQt6.sip import isdeleted
+
+            if hasattr(self, "_kline_dialog") and self._kline_dialog and not isdeleted(self._kline_dialog):
+                try:
+                    self._kline_dialog.update_symbol(symbol, name)
+                    self._kline_dialog.show()
+                    self._kline_dialog.raise_()
+                    self._kline_dialog.activateWindow()
+                    return
+                except Exception as ex:
+                    print(f"[GlobalMarketPanel] Reuse KLine dialog exception: {ex}")
+                    self._kline_dialog = None
+
+            self._kline_dialog = GlobalMarketKLineDialog(symbol, name, parent=self)
+            self._kline_dialog.show()
+            self._kline_dialog.raise_()
+            self._kline_dialog.activateWindow()
         except Exception as e:
             print(f"[GlobalMarketPanel] Open KLine dialog error: {e}")
 

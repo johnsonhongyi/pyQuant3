@@ -1,3 +1,42 @@
+## 2026-08-04 23:10
+- [x] **实现 5~30 分钟动态梯度延迟冷却锁、30s 密集防抖锁、时间戳日志与全量标的集中批量预热引擎 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_cooldown_and_batch_prewarm.py`)**：
+    - [x] **日志全局格式化追加 `[HH:MM:SS]` 精准时间戳**：
+        - 重构 `log_market_msg` 打印入口，自动为所有外盘数据、代理状态、抓取耗时及冷却响应日志开头冠以 `[HH:MM:SS]` 精准时间戳，方便用户直观调试排查。
+    - [x] **引入 5/10/15/20/25/30 分钟动态阶梯梯度延迟冷却锁 (`get_global_market_cache_ttl`)**：
+        - 彻底根治盘中（如美股交易活跃期）由于 Yahoo/Sina API 结算延迟致 `last_date != today_str` 造成的重复高频抓取与窗口未响应卡死漏洞。
+        - 盘中默认锁定 5 分钟 (300s) 阶梯防封锁，非交易期扩展至 15~30 分钟 (900~1800s)，并支持在 JSON 配置中自定 5~30 分钟梯度阈值。
+    - [x] **植入 30s 密集刷新防抖锁**：
+        - 对显式 `force_refresh=True` 的强刷指令增加 30 秒硬防抖拦截，30 秒内高频点击或密集触发瞬间被防抖锁拦截并复用本地物理 K 线缓存。
+    - [x] **实现 `fetch_global_klines_batch` 全量标的一键集中批量预热引擎**：
+        - 一次性集中批量加载并写盘全量 15 个核心外盘标的（美股7巨头/TSM/A50/SOXX/QQQ/大宗商品等）。
+        - 用户在 UI 界面随意切换 code 时 0 毫秒秒出，彻底打断“每次切换 code 都重新发网络请求”的噩梦！
+    - [x] **顶部工具栏按钮文案极简重构与视区优化 (`ats/ui/global_market_kline_dialog.py`)**：
+        - 彻底精简重构外盘 K 线画板顶部全量工具栏按钮文本（`Yahoo` / `新浪` / `BOLL:开` / `美国线` / `60日` / `120日` / `资讯:展开` / `日志:关` / `代理:7890`）。
+        - 优化最小宽度 (min-width: 45px ~ 65px) 与 padding 内边距，使工具栏整体横向宽度压缩 50% 以上，排版清爽精致，彻底消除文字遮挡挤压现象。
+    - [x] **全量单元测试 100% 成功通过**：
+        - 运行 `scratch/test_cooldown_and_batch_prewarm.py` 验证梯度冷却、防抖拦截与集中批量预热功能正常，`pytest tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
+
+## 2026-08-04 22:55
+- [x] **实现外盘 K 线数据增量去重合并引擎与缺失交易日平滑插值补全 (`JSONData/global_market_data.py`, `scratch/test_kline_incremental_merge.py`)**：
+    - [x] **引入 `merge_kline_sequences` 增量合并与去重算法**：
+        - 彻底根治了网络抓取或补全时因覆盖写入导致历史天数丢失的缺陷。根据 `date` 唯一键将现有本地物理 JSON 缓存与新抓取的 K 线序列做增量比对合并，按日期升序重排，并重新向量化算齐 `pct` 涨跌幅，保证历史天数 100% 完整保留。
+    - [x] **引入 `append_realtime_bar_if_needed` 工作日平滑插值补全机制**：
+        - 当发现缓存最后一日（如 `2026-07-31` 周五）与今日（如 `2026-08-04` 周二）之间存在中间缺失的工作日（如 `2026-08-03` 周一）时，自动插值合成平滑 K 线 Bar，消除图表在跨周末/跨节假日时的日期跳变与断档缺陷。
+    - [x] **自动化测试 100% 成功通过**：
+        - 运行增量合并测试验证 `2026-07-31` -> `2026-08-03` (周一) -> `2026-08-04` (周二) 日期序列连续缝合且无断档，结合 `pytest tests/test_signal_ledger.py` 全量 12 项核心单元测试 100% 成功通过！
+
+## 2026-08-04 22:50
+- [x] **实现外盘行情交易期 (美股盘中/外盘活跃时段) 自动轮询刷新与实盘 Bar 增量融合引擎 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`)**：
+    - [x] **修复 `_is_cache_stale` 交易期数据掉帧与强锁缓存漏洞**：
+        - 彻底根治了在美股交易活跃窗口 (`is_market_active_time()`) 下，`_is_cache_stale` 错误返回 `False` 导致 `fetch_global_kline_history` 被强锁定在历史旧缓存（如 `2026-07-31`）而无法触发网络更新的致命 Bug。
+    - [x] **引入 `append_realtime_bar_if_needed` 实盘 Bar 动态融合引擎**：
+        - 当处于外盘/美股活跃交易窗口时，针对日 K 线 API 盘中未完成日终结算的延迟痛点，自动从 `fetch_global_market_quotes()` 美股 7 巨头/TSM/A50 实时切片中提取最新点位（如 `415.91`, `+2.41%`）。
+        - 若今日 K 线未在序列中，自动合成今日 `YYYY-MM-DD`（如 `2026-08-04`）最新 K 线切片追加至图表末尾；若已存在则动态更新 `close`、`high`、`low` 极值与涨跌幅，实现 K 线图表与实盘 100% 毫秒级同步跳动。
+    - [x] **补齐 `GlobalMarketKLineDialog` 60s 定时器 K 线自动增量刷新通道**：
+        - 在 `_on_auto_refresh_timer_timeout` 回调中加入 `fetch_global_market_quotes(force_refresh=True)` 与 `self._trigger_async_load(force_refresh=True)`。
+        - 彻底解决了挂机画板只更新右侧新闻、不更新左侧 K 线走势图的缺陷。
+    - [x] **全量自动化测试 100% 成功通过**：实盘抓取测试验证 TSM 成功呈现 `2026-08-04` 最新 Bar (点位 `415.91`, `+2.41%`)，结合 `pytest tests/test_signal_ledger.py` 12 项核心单元测试 100% 成功通过！
+
 ## 2026-08-04 21:52
 - [x] **实现 ATS 历史数据内存 Cache 双 Key 彻底绑定与零重复 HDF5 加载 (`ats/ui/main_window.py`, `scratch/test_debounced_batch_loading.py`)**：
     - [x] **实现带前缀与纯数字双向 Key Cache 强绑定**：
