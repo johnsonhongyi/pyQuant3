@@ -135,24 +135,53 @@ class EquityPopDialog(QDialog):
 
 class StockDetailDialog(QDialog):
     def __init__(self, code, name, df_row=None, context_info=None, parent=None, batch_codes=None):
-        super().__init__(parent)
+        super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，防止窗口在 OS 视角下被强制浮在 Parent 主窗口上方
+        self._py_parent = parent
+        self.is_hidden_state = False
+        self.anchor_edge = None
+        self.hover_timer = None
+        self.snap_timer = None
         self.code = str(code).strip()
         self.name = name
         self.df_row = df_row
         self.context_info = context_info
         self.batch_codes = batch_codes
         
-        # 0. 明确设置为独立窗口类型，从而使磁吸、贴边隐藏和多显示器移动在 Windows 下完美执行
+        # 0. 明确设置为独立顶层窗口类型，并防止主应用退出
         flags = self.windowFlags()
         flags &= ~Qt.WindowType.Dialog
-        flags |= Qt.WindowType.Window
+        flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
         self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         
         self.setWindowTitle(f"📈 实时实盘个股详情 - {self.code} {self.name}")
         self.resize(550, 650)
         self.setMinimumSize(450, 550)
+
+        # 1. 继承/应用统一 ATS 暗黑风格
+        from ats.ui.styles import apply_dark_theme
+        apply_dark_theme(self)
+        p = self._py_parent or self.parent()
+        if p and hasattr(p, 'styleSheet') and callable(p.styleSheet):
+            try:
+                p_qss = p.styleSheet()
+                if p_qss:
+                    self.setStyleSheet(self.styleSheet() + "\n" + p_qss)
+            except Exception:
+                pass
         
-        # Auto-scan latest kernel trace
+        # 2. 自动扫描最新交易内核 Trace 记录
+        self._scan_kernel_trace()
+        
+        # 3. 初始化 UI 布局与填充数据
+        self._init_ui(self.code, self.name, self.df_row, self.context_info)
+        self.update_data(self.df_row)
+
+        # 4. 恢复物理位置与大小持久化
+        self._restore_geometry()
+
+    def _scan_kernel_trace(self):
+        """扫描最新交易内核 Trace 记录"""
         self.kernel_info = {}
         try:
             from sys_utils import get_app_root
@@ -175,50 +204,55 @@ class StockDetailDialog(QDialog):
                                 pass
         except Exception as e:
             print(f"Error scanning kernel trace in dialog: {e}")
-        
-        # Inherit parent stylesheet to match the high-end dark theme
-        if parent and hasattr(parent, 'styleSheet'):
-            self.setStyleSheet(parent.styleSheet())
-        else:
-            self.setStyleSheet("""
-                QDialog {
-                    background-color: #121214;
-                    color: #e2e2e5;
-                }
-                QLabel {
-                    color: #aad4ff;
-                }
-                QTableWidget {
-                    background-color: #18181c;
-                    alternate-background-color: #1f1f24;
-                    gridline-color: #2e2e36;
-                    border: 1px solid #2e2e36;
-                    color: #e2e2e5;
-                }
-                QHeaderView::section {
-                    background-color: #1a1a1f;
-                    color: #aad4ff;
-                    border: 1px solid #2e2e36;
-                    font-weight: bold;
-                }
-                QPushButton {
-                    background-color: #222228;
-                    border: 1px solid #3e3e4a;
-                    color: #e2e2e5;
-                    padding: 6px 15px;
-                    border-radius: 4px;
-                }
-                QPushButton:hover {
-                    background-color: #2c2c35;
-                    border-color: #aad4ff;
-                    color: #ffffff;
-                }
-            """)
-            
-        self._init_ui(self.code, self.name, df_row, context_info)
-        
-        # Initialize dynamic data & filter results
-        self.update_data(df_row)
+
+    def _restore_geometry(self):
+        """从 window_config.json 恢复个股详情弹窗位置与大小"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            import json, os
+            from PyQt6.QtCore import QByteArray
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                geom = data.get("ats_stock_detail_dialog_geom")
+                if geom:
+                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+        except Exception:
+            pass
+
+    def _save_geometry(self):
+        """原子写盘持久化个股详情弹窗位置与大小至 window_config.json"""
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            from ats.ui.styles import CONFIG_FILE_LOCK
+            import json, os
+            cfg_path = get_conf_path("window_config.json", get_app_root())
+            with CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                data["ats_stock_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
+                tmp_path = cfg_path + ".tmp_stock_detail"
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cfg_path)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """关闭时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        """隐藏时自动持久化窗口大小与位置"""
+        self._save_geometry()
+        super().hideEvent(event)
         
         # 1. 自动删除属性以防非模态显示内存泄露
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -1130,21 +1164,34 @@ class StockDetailDialog(QDialog):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+        if not getattr(self, "is_hidden_state", False) and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
             self.anchor_edge = None
-            self.snap_timer.start()
+            if hasattr(self, "snap_timer") and self.snap_timer is not None:
+                try:
+                    self.snap_timer.start()
+                except Exception:
+                    pass
             
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+        if not getattr(self, "is_hidden_state", False) and not getattr(self, "_in_snap_action", False):
             if self.anchor_edge:
                 self.normal_geometry = self.geometry()
                 
     def closeEvent(self, event):
-        self.hover_timer.stop()
-        self.snap_timer.stop()
+        if hasattr(self, "hover_timer") and self.hover_timer is not None:
+            try:
+                self.hover_timer.stop()
+            except Exception:
+                pass
+        if hasattr(self, "snap_timer") and self.snap_timer is not None:
+            try:
+                self.snap_timer.stop()
+            except Exception:
+                pass
+        self._save_geometry()
         parent_mw = self.parent()
         if parent_mw and hasattr(parent_mw, '_detail_dialog') and parent_mw._detail_dialog is self:
             parent_mw._detail_dialog = None
@@ -1647,10 +1694,10 @@ class ATSMainWindow(QMainWindow):
         right_layout.addWidget(self.right_splitter)
         self.main_splitter.addWidget(right_widget)
 
-        # Set stretch factors and initial sizes
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 3)
-        self.main_splitter.setStretchFactor(2, 2)
+        # Set stretch factors and initial sizes (左0、中1、右0：确保窗口resize时左右维持用户调好的固定宽度，中间面板吸收全量增量空间)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
         
         # Enforce non-collapsible panels to prevent UI collapse to 0 size
         self.main_splitter.setCollapsible(0, False)
@@ -1663,15 +1710,10 @@ class ATSMainWindow(QMainWindow):
         
         self.main_splitter.setSizes([350, 700, 390])
         
-        # Bind splitterMoved signals to track user-adjusted resize ratios
+        # Bind splitterMoved signals to track user-adjusted resize ratios & auto save layout
         self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
         self.center_splitter.splitterMoved.connect(self._on_center_splitter_moved)
         self.right_splitter.splitterMoved.connect(self._on_right_splitter_moved)
-        
-        # Compute initial ratios
-        self._main_ratio = [350/1440, 700/1440, 390/1440]
-        self._center_ratio = [0.5, 0.5]
-        self._right_ratio = [0.5, 0.5]
 
         # Connect internal signal linkages
         # 1. 单击事件 -> 联动外部同花顺/通达信及可视化器 (link_stock)
@@ -2117,20 +2159,29 @@ class ATSMainWindow(QMainWindow):
             self._detail_dialog = None
                 
         # Launch detail dialog as non-modal so it can snap and auto-hide
-        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=self, batch_codes=batch_codes)
+        self._detail_dialog = StockDetailDialog(code, name, df_row, context_info, parent=None, batch_codes=batch_codes)
         self._detail_dialog.show()
 
     def on_sector_clicked(self, name, member_codes=None):
-        if getattr(self, "_showing_sector_detail", False):
-            return
-        self._showing_sector_detail = True
         try:
             self.status_bar.showMessage(f"选中板块: {name} | 正在展示成分股明细...")
             from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=self)
-            dialog.exec()
-        finally:
-            self._showing_sector_detail = False
+            from PyQt6.sip import isdeleted
+            if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
+                try:
+                    self._sector_detail_dialog.close()
+                except Exception:
+                    pass
+            dialog = ATSSectorDetailDialog(name, self.link_stock, self.on_stock_clicked, member_codes=member_codes, parent=None)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            self._sector_detail_dialog = dialog
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.error(f"打开板块详情失败: {e}")
+            else:
+                print(f"打开板块详情失败: {e}")
 
     def on_heartbeat(self):
         # 1. Periodically load and update DB data
@@ -3563,67 +3614,43 @@ class ATSMainWindow(QMainWindow):
     def _on_main_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
             return
-        sizes = self.main_splitter.sizes()
-        total = sum(sizes)
-        if total > 0:
-            self._main_ratio = [s / total for s in sizes]
+        self._request_save_layout_debounced()
 
     def _on_center_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
             return
-        sizes = self.center_splitter.sizes()
-        total = sum(sizes)
-        if total > 0:
-            self._center_ratio = [s / total for s in sizes]
+        self._request_save_layout_debounced()
 
     def _on_right_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
             return
-        sizes = self.right_splitter.sizes()
-        total = sum(sizes)
-        if total > 0:
-            self._right_ratio = [s / total for s in sizes]
+        self._request_save_layout_debounced()
+
+    def _request_save_layout_debounced(self):
+        """用户拖动分隔线时 500ms 防抖自动持久化落盘"""
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_restoring_sizes', False):
+            return
+        if not hasattr(self, '_splitter_save_timer'):
+            from PyQt6.QtCore import QTimer
+            self._splitter_save_timer = QTimer(self)
+            self._splitter_save_timer.setSingleShot(True)
+            self._splitter_save_timer.setInterval(500)
+            self._splitter_save_timer.timeout.connect(self._save_layout_state)
+        self._splitter_save_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_layout_restored_on_show', False):
+            self._layout_restored_on_show = True
+            # 延时 60ms 在窗口完成 showMaximized/物理屏幕渲染后再强行精准对齐一次物理尺寸
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(60, self._restore_layout_state)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._adjust_splitter_sizes_by_ratio()
-
-    def _adjust_splitter_sizes_by_ratio(self):
-        self._is_restoring_sizes = True
-        try:
-            # Adjust main horizontal splitter
-            main_width = self.main_splitter.width()
-            handle_count = self.main_splitter.count() - 1
-            handle_width = self.main_splitter.handleWidth()
-            available_width = main_width - (handle_count * handle_width)
-            if available_width > 0:
-                new_sizes = [int(available_width * r) for r in self._main_ratio]
-                new_sizes[-1] = available_width - sum(new_sizes[:-1])
-                self.main_splitter.setSizes(new_sizes)
-
-            # Adjust center vertical splitter
-            center_height = self.center_splitter.height()
-            handle_count = self.center_splitter.count() - 1
-            handle_width = self.center_splitter.handleWidth()
-            available_height = center_height - (handle_count * handle_width)
-            if available_height > 0:
-                new_sizes = [int(available_height * r) for r in self._center_ratio]
-                new_sizes[-1] = available_height - sum(new_sizes[:-1])
-                self.center_splitter.setSizes(new_sizes)
-
-            # Adjust right vertical splitter
-            right_height = self.right_splitter.height()
-            handle_count = self.right_splitter.count() - 1
-            handle_width = self.right_splitter.handleWidth()
-            available_height = right_height - (handle_count * handle_width)
-            if available_height > 0:
-                new_sizes = [int(available_height * r) for r in self._right_ratio]
-                new_sizes[-1] = available_height - sum(new_sizes[:-1])
-                self.right_splitter.setSizes(new_sizes)
-        except Exception as e:
-            print(f"[ATSMainWindow] Error adjusting splitter sizes: {e}")
-        finally:
-            self._is_restoring_sizes = False
+        # 注意：Qt 原生 QSplitter 在已配置 setStretchFactor(0, 0), (1, 1), (2, 0) 时
+        # 会自动在 resize 时保持左右两栏物理宽度不变、中间主看板独占全量伸缩空间。
+        # 绝不在此处重新计算 ratio 覆盖 setSizes，彻底防范左右栏被无谓挤压!
 
     def _restore_layout_state(self):
         try:
@@ -3644,36 +3671,35 @@ class ATSMainWindow(QMainWindow):
             if geom_hex:
                 self.restoreGeometry(QByteArray.fromHex(geom_hex.encode()))
                 
-            # 2. Restore splitters
+            # 2. Restore splitters (优先使用二进制 state，降级使用像素 sizes 数组)
             self._is_restoring_sizes = True
             try:
-                from PyQt6.QtCore import QTimer
                 if hasattr(self, 'main_splitter'):
-                    main_sizes = data.get("ats_main_splitter_sizes")
-                    if main_sizes:
-                        self.main_splitter.setSizes(main_sizes)
-                        total = sum(main_sizes)
-                        if total > 0:
-                            self._main_ratio = [s / total for s in main_sizes]
-                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('main_splitter', main_sizes))
+                    main_state = data.get("ats_main_splitter_state")
+                    if main_state:
+                        self.main_splitter.restoreState(QByteArray.fromHex(main_state.encode()))
+                    else:
+                        main_sizes = data.get("ats_main_splitter_sizes")
+                        if main_sizes and isinstance(main_sizes, list) and len(main_sizes) == 3:
+                            self.main_splitter.setSizes(main_sizes)
                         
                 if hasattr(self, 'center_splitter'):
-                    center_sizes = data.get("ats_center_splitter_sizes")
-                    if center_sizes:
-                        self.center_splitter.setSizes(center_sizes)
-                        total = sum(center_sizes)
-                        if total > 0:
-                            self._center_ratio = [s / total for s in center_sizes]
-                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('center_splitter', center_sizes))
+                    center_state = data.get("ats_center_splitter_state")
+                    if center_state:
+                        self.center_splitter.restoreState(QByteArray.fromHex(center_state.encode()))
+                    else:
+                        center_sizes = data.get("ats_center_splitter_sizes")
+                        if center_sizes and isinstance(center_sizes, list) and len(center_sizes) == 2:
+                            self.center_splitter.setSizes(center_sizes)
                         
                 if hasattr(self, 'right_splitter'):
-                    right_sizes = data.get("ats_right_splitter_sizes")
-                    if right_sizes:
-                        self.right_splitter.setSizes(right_sizes)
-                        total = sum(right_sizes)
-                        if total > 0:
-                            self._right_ratio = [s / total for s in right_sizes]
-                        QTimer.singleShot(350, lambda: self._force_set_splitter_sizes('right_splitter', right_sizes))
+                    right_state = data.get("ats_right_splitter_state")
+                    if right_state:
+                        self.right_splitter.restoreState(QByteArray.fromHex(right_state.encode()))
+                    else:
+                        right_sizes = data.get("ats_right_splitter_sizes")
+                        if right_sizes and isinstance(right_sizes, list) and len(right_sizes) == 2:
+                            self.right_splitter.setSizes(right_sizes)
             finally:
                 self._is_restoring_sizes = False
             
@@ -3684,11 +3710,11 @@ class ATSMainWindow(QMainWindow):
                     self.top_tabs.setCurrentIndex(int(top_index))
             if hasattr(self, 'center_tabs'):
                 center_index = data.get("ats_center_tabs_index")
-                if center_index is not None:
+                if center_index is not None and 0 <= int(center_index) < self.center_tabs.count():
                     self.center_tabs.setCurrentIndex(int(center_index))
             if hasattr(self, 'right_tabs'):
                 right_index = data.get("ats_right_tabs_index")
-                if right_index is not None:
+                if right_index is not None and 0 <= int(right_index) < self.right_tabs.count():
                     self.right_tabs.setCurrentIndex(int(right_index))
                     
             # 4. Restore link checkboxes
@@ -3707,39 +3733,24 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
 
-    def _force_set_splitter_sizes(self, splitter_name, target_sizes):
-        if getattr(self, '_is_closing', False):
-            return
-        splitter = getattr(self, splitter_name, None)
-        if splitter:
-            self._is_restoring_sizes = True
-            try:
-                splitter.setSizes(target_sizes)
-                total = sum(target_sizes)
-                if total > 0:
-                    ratio = [s / total for s in target_sizes]
-                    if splitter_name == 'main_splitter':
-                        self._main_ratio = ratio
-                    elif splitter_name == 'center_splitter':
-                        self._center_ratio = ratio
-                    elif splitter_name == 'right_splitter':
-                        self._right_ratio = ratio
-            finally:
-                self._is_restoring_sizes = False
-
     def _save_layout_state(self):
+        if getattr(self, '_is_restoring_sizes', False):
+            return
         try:
             from ats.ui.styles import save_config_nodes
             updates = {}
             # Save geometry
             updates["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
             
-            # Save splitters
+            # Save splitters (同时以二进制 State 与 像素 Sizes 两种方式精准持久化)
             if hasattr(self, 'main_splitter'):
+                updates["ats_main_splitter_state"] = self.main_splitter.saveState().toHex().data().decode()
                 updates["ats_main_splitter_sizes"] = self.main_splitter.sizes()
             if hasattr(self, 'center_splitter'):
+                updates["ats_center_splitter_state"] = self.center_splitter.saveState().toHex().data().decode()
                 updates["ats_center_splitter_sizes"] = self.center_splitter.sizes()
             if hasattr(self, 'right_splitter'):
+                updates["ats_right_splitter_state"] = self.right_splitter.saveState().toHex().data().decode()
                 updates["ats_right_splitter_sizes"] = self.right_splitter.sizes()
                 
             # Save tabs index
@@ -3916,6 +3927,16 @@ class ATSMainWindow(QMainWindow):
                 self.save_window_position_qt_visual(self, getattr(self, "window_name", "ats_main_window"))
         except Exception:
             pass
+
+        # 4.5 程序优雅退出时触发唯一的终盘总结与最新快照原子保存 (彻底消除盘中刷屏生成冗余散落 JSON)
+        if hasattr(self, 'session_snapshot') and hasattr(self, 'signal_ledger'):
+            try:
+                self.session_snapshot.save_snapshot(self.signal_ledger, force=True)
+                self.session_snapshot.save_daily_summary(self.signal_ledger, force=True)
+                self.session_snapshot.cleanup_old_snapshots()
+                print("[ATSMainWindow] 程序退出关闭，已成功原子落盘保存终盘信号账本与总结快照!")
+            except Exception as ex:
+                print(f"[ATSMainWindow] 程序退出保存信号快照异常: {ex}")
 
         # 5. 关闭散落的行情分布弹窗、搜索历史与辅助对话框
         try:

@@ -555,6 +555,18 @@ class SignalLedger:
             price = entry.latest_price or float(row.get('close', 0.0))
             pct = float(row.get('percent', 0.0))
             
+            # 多日 VWAP 机构成本线抬升评价 (vwap_cum_2d, vwap_cum_3d, last_nclose1d)
+            vwap_2d = float(row.get('vwap_cum_2d', row.get('cum_vwap_2d', 0.0)))
+            vwap_3d = float(row.get('vwap_cum_3d', row.get('cum_vwap_3d', 0.0)))
+            nclose1d = float(row.get('last_nclose1d', row.get('nclose1d', 0.0)))
+            
+            if vwap_2d > 0 and price >= vwap_2d:
+                score += 8.0  # 股价站在 2 日机构成本线上方
+                if vwap_3d > 0 and vwap_2d >= vwap_3d:
+                    score += 7.0  # 2 日成本线高过 3 日成本线，属于多日抬升
+                    if not entry.signal_tag or entry.signal_tag in ('🌱 1-2日底座',):
+                        entry.signal_tag = '🚀 成本线抬升'
+            
             # 极早期黄金起爆点 (09:30-09:45 早盘前15分钟 / 盘前预备测试，1.0% <= 涨幅 <= 4.2%，站在均线上方且突破前高/底座)
             is_early_golden_launch = False
             if entry.first_seen_phase in (PHASE_AUCTION, PHASE_GOLDEN, PHASE_PREMARKET) and 1.0 <= pct <= 4.2:
@@ -567,7 +579,7 @@ class SignalLedger:
             if vwap > 0 and price >= vwap:
                 # 强主升结构: 全程在分时均线上方运行，无杀跌分时，防早平
                 score += 20.0
-                if not is_early_golden_launch and entry.signal_tag in ('', '🚀 破高起爆'):
+                if not is_early_golden_launch and entry.signal_tag in ('', '🚀 破高起爆', '🚀 成本线抬升'):
                     entry.signal_tag = '🛡️ 均线强持有' if pct < 5.0 else '🔥 均线上主升'
             elif 1.0 <= pct <= 6.5:
                 score += 15.0

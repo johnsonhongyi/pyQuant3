@@ -143,6 +143,7 @@ class MinuteKlineCache:
         
         # [NEW] 缓存与异步拉取队列，用于降低高频磁盘 I/O 和线程爆炸
         self._daily_indicators_cache = {} # {(code, date_str): metrics_dict}
+        self._twap_cache = {} # code -> (k_len, last_t, twap_dict)
         self._pending_sup_codes = set()
         self._sup_fetching_codes = set()
         self._sup_failed_codes = {} # code -> last_fail_ts
@@ -466,12 +467,10 @@ class MinuteKlineCache:
                 s_idx, e_idx = boundaries[i], boundaries[i+1]
                 code = str(codes[s_idx])
                 
-                # 动态计算此个股需要保留的最大长度 limit_len
+                # 保留满额 max_len K 线缓存，确保所有个股具备完整的多日 (2d-10d) 筹码成本数据
                 limit_len = max_len
-                if not self.is_active_stock(code, getattr(self, '_publisher', None)):
-                    limit_len = min(120, max_len)
                 
-                # numpy slicing 级物理截断，极限减少 KLineItem 实例化数量
+                # numpy slicing 级物理截断
                 if (e_idx - s_idx) > limit_len:
                     s_idx = e_idx - limit_len
                 
@@ -554,6 +553,8 @@ class MinuteKlineCache:
         with self._lock:
             self._shared_cache.clear()
             self._last_update_ts.clear()
+            if hasattr(self, '_twap_cache'):
+                self._twap_cache.clear()
             self._is_dirty = False
             self._bidding_pruned_today.clear()
 
@@ -565,6 +566,277 @@ class MinuteKlineCache:
             # Support dict-based access for existing strategy code
             return [node.as_dict() for node in nodes]
 
+    def _get_daily_stats(self, code: str) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+        """
+        返回按日期分组的 (twap_dict, day_vols, day_amt)。
+        内部具备 O(1) 高能缓存。
+        """
+        code_clean = str(code).strip().zfill(6)
+        with self._lock:
+            klines = self._shared_cache.get(code_clean)
+            if not klines:
+                return {}, {}, {}
+
+            last_t = klines[-1].time
+            k_len = len(klines)
+
+            if not hasattr(self, '_twap_stats_cache'):
+                self._twap_stats_cache = {}
+
+            cache_entry = self._twap_stats_cache.get(code_clean)
+            if cache_entry:
+                cached_len, cached_t, cached_tuple = cache_entry
+                if cached_len == k_len and cached_t == last_t:
+                    return cached_tuple
+
+            # --- A. 历史静态数据 (天 < 今日) 增量物理缓存：每个交易日仅算 1 次 ---
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            now_dt = datetime.now()
+            today_00_ts = datetime(now_dt.year, now_dt.month, now_dt.day).timestamp()
+            first_t = klines[0].time if klines else 0
+
+            if not hasattr(self, '_hist_daily_cache'):
+                self._hist_daily_cache = {}
+
+            hist_entry = self._hist_daily_cache.get(code_clean)
+            if hist_entry and hist_entry.get('today_str') == today_str and hist_entry.get('first_t') == first_t:
+                hist_twap, hist_vols, hist_amt = hist_entry['data']
+            else:
+                hist_vols = defaultdict(float)
+                hist_amt = defaultdict(float)
+                hist_closes = defaultdict(list)
+                day_date_memo = {}
+
+                for k in klines:
+                    t_sec = int(k.time // 1000) if k.time > 5e11 else int(k.time)
+                    if t_sec >= today_00_ts:
+                        continue
+                    day_idx = (t_sec + 28800) // 86400
+                    d_str = day_date_memo.get(day_idx)
+                    if d_str is None:
+                        d_str = datetime.fromtimestamp(t_sec).strftime('%Y-%m-%d')
+                        day_date_memo[day_idx] = d_str
+
+                    v = float(k.volume)
+                    c = float(k.close)
+                    hist_vols[d_str] += v
+                    hist_amt[d_str] += c * v
+                    hist_closes[d_str].append(c)
+
+                hist_twap = {}
+                for d_str in sorted(hist_vols.keys()):
+                    v_sum = hist_vols[d_str]
+                    if v_sum > 0:
+                        hist_twap[d_str] = round(float(hist_amt[d_str] / v_sum), 3)
+                    else:
+                        closes = hist_closes[d_str]
+                        hist_twap[d_str] = round(float(np.mean(closes)), 3) if closes else 0.0
+
+                hist_entry = {
+                    'today_str': today_str,
+                    'first_t': first_t,
+                    'data': (dict(hist_twap), dict(hist_vols), dict(hist_amt))
+                }
+                self._hist_daily_cache[code_clean] = hist_entry
+
+                hist_twap, hist_vols, hist_amt = hist_entry['data']
+
+            # --- B. 盘中动态增量只计算今日 (精确按时间戳 k.time >= today_00_ts 动态筛选) ---
+            today_vol = 0.0
+            today_amt = 0.0
+            today_closes = []
+
+            for k in reversed(klines):
+                t_sec = int(k.time // 1000) if k.time > 5e11 else int(k.time)
+                if t_sec < today_00_ts:
+                    break
+                v = float(k.volume)
+                c = float(k.close)
+                today_vol += v
+                today_amt += c * v
+                today_closes.append(c)
+
+            twap_dict = dict(hist_twap)
+            day_vols = dict(hist_vols)
+            day_amt = dict(hist_amt)
+
+            if today_closes:
+                day_vols[today_str] = today_vol
+                day_amt[today_str] = today_amt
+                if today_vol > 0:
+                    twap_dict[today_str] = round(float(today_amt / today_vol), 3)
+                else:
+                    twap_dict[today_str] = round(float(np.mean(today_closes)), 3)
+
+            res_tuple = (twap_dict, day_vols, day_amt)
+            self._twap_stats_cache[code_clean] = (k_len, last_t, res_tuple)
+            return res_tuple
+
+    def get_daily_twap(self, code: str) -> dict[str, float]:
+        """
+        根据 MinuteKlineCache 内存中保存的全部历史分钟 Bar 数据（涵盖保留的全部多日数据，不限天数），
+        按日期分组计算每日 TWAP/VWAP: TWAP = sum(close_i * volume_i) / sum(volume_i)
+        返回有序字典 {date_str: twap_val}，例如 {'2026-07-31': 15.2, '2026-08-01': 15.4, '2026-08-04': 15.8}
+        内置 O(1) 高性能缓存机制。
+        """
+        return self._get_daily_stats(code)[0]
+
+    def get_daily_twap_relative(self, code: str, today_str: Optional[str] = None) -> dict[str, float]:
+        """
+        返回按相对天数绑定的多日与单日 VWAP 均线字典。
+        包含:
+        1. 单日 VWAP (单日资金均价):
+           - nclose / vwap / nclose0d / vwap0d (今日单日VWAP)
+           - last_nclose / last_nclose1d / nclose1d / vwap1d (昨日单日VWAP)
+           - nclose2d / vwap2d (前日单日VWAP), nclose3d / vwap3d ...
+        2. 跨日加权累计 VWAP (多日整体筹码加权成本线/支撑线):
+           - vwap_cum_2d / cum_vwap_2d / vwap_2d_cum (近2日跨日加权总均价)
+           - vwap_cum_3d / cum_vwap_3d / vwap_3d_cum (近3日跨日加权总均价)
+           - vwap_cum_5d / cum_vwap_5d / vwap_5d_cum (近5日跨日加权总均价)
+           - vwap_cum_10d / cum_vwap_10d (近10日跨日加权总均价)
+           - last_vwap_cum_2d / last_cum_vwap_2d (截至昨日的近2日加权总均价)
+           - last_vwap_cum_3d / last_cum_vwap_3d (截至昨日的近3日加权总均价)
+        全面兼容并支持 query 表达式中的多日筹码成本线判断。
+        """
+        twap_dict, day_vols, day_amt = self._get_daily_stats(code)
+        if not twap_dict:
+            return {}
+
+        if today_str is None:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+
+        sorted_dates = sorted(twap_dict.keys())
+        res = {}
+
+        # --- A. 单日 VWAP 指标 ---
+        if sorted_dates[-1] == today_str:
+            val_today = twap_dict[sorted_dates[-1]]
+            res['nclose'] = val_today
+            res['nclose0d'] = val_today
+            res['vwap'] = val_today
+            res['vwap0d'] = val_today
+            hist_dates = sorted_dates[:-1]
+        else:
+            hist_dates = sorted_dates
+
+        num_hist = len(hist_dates)
+        oldest_hist_val = twap_dict[hist_dates[0]] if hist_dates else (val_today if 'val_today' in locals() else 0.0)
+
+        # 挂载已有历史天的单日 VWAP
+        for idx in range(1, num_hist + 1):
+            val = twap_dict[hist_dates[-idx]]
+            if idx == 1:
+                res['last_nclose'] = val
+                res['last_nclose1d'] = val
+                res['nclose1d'] = val
+                res['last_vwap'] = val
+                res['last_vwap1d'] = val
+                res['vwap1d'] = val
+            else:
+                res[f'nclose{idx}d'] = val
+                res[f'last_nclose{idx}d'] = val
+                res[f'vwap{idx}d'] = val
+                res[f'last_vwap{idx}d'] = val
+
+        # 降级补全缺失历史天 (防止 24*7 挂机内存历史天数不足时出现 NaN 导至 Query 评估失效)
+        for idx in range(num_hist + 1, 6):
+            res[f'nclose{idx}d'] = oldest_hist_val
+            res[f'last_nclose{idx}d'] = oldest_hist_val
+            res[f'vwap{idx}d'] = oldest_hist_val
+            res[f'last_vwap{idx}d'] = oldest_hist_val
+            if idx == 1:
+                res['last_nclose'] = oldest_hist_val
+                res['last_nclose1d'] = oldest_hist_val
+                res['nclose1d'] = oldest_hist_val
+                res['last_vwap'] = oldest_hist_val
+                res['last_vwap1d'] = oldest_hist_val
+                res['vwap1d'] = oldest_hist_val
+
+        # --- B. 跨日加权累计多日 VWAP (多日筹码成本均线与降级平滑) ---
+        num_all_dates = len(sorted_dates)
+        last_avail_cum = None
+        last_avail_hist_cum = oldest_hist_val
+
+        for window in (2, 3, 4, 5, 10):
+            if num_all_dates >= window:
+                w_dates = sorted_dates[-window:]
+                w_vol = sum(day_vols[d] for d in w_dates)
+                w_amt = sum(day_amt[d] for d in w_dates)
+                if w_vol > 0:
+                    c_vwap = round(float(w_amt / w_vol), 3)
+                    res[f'vwap_cum_{window}d'] = c_vwap
+                    res[f'cum_vwap_{window}d'] = c_vwap
+                    res[f'vwap_{window}d_cum'] = c_vwap
+                    res[f'm_vwap{window}d'] = c_vwap
+                    last_avail_cum = c_vwap
+            elif last_avail_cum is not None:
+                res[f'vwap_cum_{window}d'] = last_avail_cum
+                res[f'cum_vwap_{window}d'] = last_avail_cum
+                res[f'vwap_{window}d_cum'] = last_avail_cum
+                res[f'm_vwap{window}d'] = last_avail_cum
+            elif 'val_today' in locals():
+                res[f'vwap_cum_{window}d'] = val_today
+                res[f'cum_vwap_{window}d'] = val_today
+                res[f'vwap_{window}d_cum'] = val_today
+                res[f'm_vwap{window}d'] = val_today
+
+            if num_hist >= window:
+                h_w_dates = hist_dates[-window:]
+                h_w_vol = sum(day_vols[d] for d in h_w_dates)
+                h_w_amt = sum(day_amt[d] for d in h_w_dates)
+                if h_w_vol > 0:
+                    h_c_vwap = round(float(h_w_amt / h_w_vol), 3)
+                    res[f'last_vwap_cum_{window}d'] = h_c_vwap
+                    res[f'last_cum_vwap_{window}d'] = h_c_vwap
+                    last_avail_hist_cum = h_c_vwap
+            else:
+                res[f'last_vwap_cum_{window}d'] = last_avail_hist_cum
+                res[f'last_cum_vwap_{window}d'] = last_avail_hist_cum
+
+        return res
+
+    def attach_multiday_twap_to_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        [底层自动计算注入] 自动将 MinuteKlineCache 内存中计算出的多日 TWAP/VWAP 均线指标
+        (nclose, last_nclose, last_nclose1d, nclose1d, nclose2d, last_nclose2d, nclose3d...)
+        批量计算并直接写入 df 对象的列中，与系统其他动态分值/指标完全一致，原生支持 query 查询与 {1-9}d 模板。
+        """
+        if df is None or df.empty or 'code' not in df.columns:
+            return df
+
+        try:
+            unique_codes = df['code'].dropna().astype(str).str.strip().str.zfill(6).unique()
+            if len(unique_codes) == 0:
+                return df
+
+            twap_maps = {}
+            all_keys = set()
+            for code_str in unique_codes:
+                rel = self.get_daily_twap_relative(code_str)
+                if rel:
+                    twap_maps[code_str] = rel
+                    all_keys.update(rel.keys())
+
+            if not twap_maps or not all_keys:
+                return df
+
+            code_series = df['code'].astype(str).str.strip().str.zfill(6)
+
+            for key in sorted(all_keys):
+                key_dict = {c: m[key] for c, m in twap_maps.items() if key in m}
+                if key_dict:
+                    mapped_vals = code_series.map(key_dict)
+                    if key in df.columns:
+                        df[key] = mapped_vals.fillna(df[key])
+                    else:
+                        df[key] = mapped_vals
+
+        except Exception as e:
+            if hasattr(self, 'verbose') and self.verbose:
+                logger.warning(f"attach_multiday_twap_to_df error: {e}")
+
+        return df
+
     def update_batch(self, df: Optional[pd.DataFrame], subscribers: dict[str, list[Callable[..., Any]]]):
         """
         批量更新 K 线缓存并触发订阅 (每行独立时间戳处理)
@@ -572,7 +844,8 @@ class MinuteKlineCache:
         if df is None or df.empty:
             return
             
-        # 实时数据更新时，注入更新 _df_all_cache 内存辅助，保障后续指标与状态机计算直接使用内存快照
+        # 实时数据更新时，自动计算多日 TWAP/VWAP 指标写入 df 并更新 _df_all_cache
+        self.attach_multiday_twap_to_df(df)
         self.set_df_all_cache(df)
             
         # [REMOVED] Automatic supplemental fetch removed per user feedback.
@@ -1031,10 +1304,11 @@ class MinuteKlineCache:
             logger.error(f"❌ Supplemental fetch failed for {code}: {e}")
 
     def set_df_all_cache(self, df: pd.DataFrame) -> None:
-        """设置完整的 df_all 缓存快照，用于高频内存补齐 (集成指纹脏位检测以防内存/GC开销)"""
+        """设置完整的 df_all 缓存快照，用于高频内存补齐 (自动注入多日 VWAP/TWAP 列)"""
         if df is None or df.empty:
             return
         try:
+            self.attach_multiday_twap_to_df(df)
             fp_cols = [c for c in ['code', 'close', 'now', 'trade', 'ma20d', 'ma20', 'ma60d', 'ma60'] if c in df.columns]
             if not fp_cols:
                 fp_cols = ['code'] if 'code' in df.columns else list(df.columns)

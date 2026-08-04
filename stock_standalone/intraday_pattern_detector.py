@@ -246,6 +246,37 @@ class IntradayPatternDetector:
         if scores is not None:
             self.stock_scores = scores
 
+    def _get_vwap(self, day_row: pd.Series, curr_p: float = 0.0) -> float:
+        """
+        高精度 VWAP (nclose/均价) 提取器
+        优先读取 nclose / vwap 字段，无有效值时从 amount/volume 换算
+        针对成交量单位为手 (100股) 与股进行自适应量级校准
+        """
+        if curr_p <= 0:
+            curr_p = float(day_row.get('close', day_row.get('trade', 0)))
+
+        # 1. 优先提取显式 vwap_price / nclose / vwap / avg_price 字段
+        nclose_val = float(day_row.get('vwap_price', day_row.get('nclose', day_row.get('vwap', day_row.get('avg_price', 0)))))
+        if nclose_val > 0 and (curr_p <= 0 or 0.2 * curr_p <= nclose_val <= 5.0 * curr_p):
+            return nclose_val
+
+        # 2. 从 amount 与 volume 换算
+        amount = float(day_row.get('amount', 0))
+        volume = float(day_row.get('volume', 0))
+
+        if amount > 0 and volume > 0:
+            raw_vwap = amount / volume
+            if curr_p > 0 and raw_vwap > curr_p * 5.0:
+                # 说明 volume 单位为手 (1手 = 100股)，amount 单位为元
+                raw_vwap = raw_vwap / 100.0
+            if curr_p <= 0 or 0.2 * curr_p <= raw_vwap <= 5.0 * curr_p:
+                return raw_vwap
+
+        # 3. 兜底回退：当前价或开盘价
+        if curr_p > 0:
+            return curr_p
+        return float(day_row.get('open', 0))
+
     def update(self, code: str, name: str, tick_df: Optional[pd.DataFrame] = None, 
                day_row: pd.Series = None, prev_close: float = 0,
                current_time: Optional[dt_time] = None) -> List[PatternEvent]:
@@ -977,7 +1008,7 @@ class IntradayPatternDetector:
             return events
 
         # --- C. VWAP 核心逻辑：分时线上行且不破均线 ---
-        vwap = amount / volume if volume > 0 else 0
+        vwap = self._get_vwap(day_row, curr_p)
         if vwap <= 0:
             return events
             
@@ -1072,9 +1103,7 @@ class IntradayPatternDetector:
             return events
             
         # 3. 止跌确认：站稳均价线 且 处于低位横盘后的放量突破
-        amount = float(day_row.get('amount', 0))
-        vol_raw = float(day_row.get('volume', 0))
-        vwap = amount / vol_raw if vol_raw > 0 else 0
+        vwap = self._get_vwap(day_row, curr_p)
         
         # 核心：14:00 左右的尾盘买点
         now_time = datetime.now().time()
@@ -1123,35 +1152,24 @@ class IntradayPatternDetector:
         curr_p = float(day_row.get('close', day_row.get('trade', 0)))
         open_p = float(day_row.get('open', 0))
         high_p = float(day_row.get('high', 0))
-        amount = float(day_row.get('amount', 0))
-        volume = float(day_row.get('volume', 0))
-        vwap = amount / volume if volume > 0 else 0
+        vwap = self._get_vwap(day_row, curr_p)
         
         if curr_p <= 0 or open_p <= 0 or vwap <= 0:
             return events
 
         # 模式一：下午突然拉升后大幅回落 (14:00 后)
         if curr_min >= start_min:
-            # 找到 14:00 左右的价格作为基准
-            # tick_df 包含最近的分时数据
             t_col = 'ticktime' if 'ticktime' in tick_df.columns else 'time'
             p_col = 'price' if 'price' in tick_df.columns else 'close'
             
-            # 过滤 14:00 之后的数据进行分析
-            # 简单起见，对比当前价与最近 15-30 分钟的高点回落
-            # 如果曾经拉升过 > 1.5% 且现在回落了回落了涨幅的一半以上，或者破了 VWAP
-            
-            # 获取最近 30 个 tick (假设是 1 分钟线，约为 30 分钟)
             recent_high = tick_df[p_col].tail(30).max()
-            recent_low_before_high = tick_df[p_col].tail(60).head(30).min() # 之前一段时间的低点
+            recent_low_before_high = tick_df[p_col].tail(60).head(30).min()
             
             if recent_high > 0 and recent_low_before_high > 0:
                 pump_pct = (recent_high - recent_low_before_high) / recent_low_before_high * 100
                 drop_from_high = (recent_high - curr_p) / recent_high * 100
                 
-                # 如果拉升超过 1.5% 且回落超过拉升幅度的一半
                 if pump_pct > 1.5 and drop_from_high > (pump_pct * 0.5):
-                     # 如果破了 VWAP，风险更大
                      is_broken = curr_p < vwap * 0.998
                      if is_broken or drop_from_high > 1.5:
                         events.append(PatternEvent(
@@ -1162,16 +1180,14 @@ class IntradayPatternDetector:
                             score=35,
                             is_high_priority=True
                         ))
-                        return events # 触发一种即可
+                        return events
 
         # 模式二：早盘拉升后大幅回落 (全天视角)
-        # 如果早盘大涨 > 3%，下午跌破开盘价或破 VWAP 且偏离日高 > 4%
         morning_high = float(day_row.get('high', 0))
-        morning_gain = (morning_high - prev_close) / prev_close * 100
-        current_gain = (curr_p - prev_close) / prev_close * 100
+        morning_gain = (morning_high - prev_close) / prev_close * 100 if prev_close > 0 else 0
+        current_gain = (curr_p - prev_close) / prev_close * 100 if prev_close > 0 else 0
         
         if morning_gain > 3.0 and (morning_high - curr_p) / morning_high > 0.04:
-            # 如果当前价格已经弱于均线且在低位
             if curr_p < vwap * 0.995 or curr_p < open_p * 1.005:
                 events.append(PatternEvent(
                     code=code, name=name, pattern='tail_end_trap',
@@ -1196,16 +1212,15 @@ class IntradayPatternDetector:
         if open_p <= 0 or curr_p <= 0:
             return events
             
-        # 1. 判定开盘即低点 (允许 0.1% 误差)
         is_open_is_low = abs(open_p - low_p) / open_p < 0.001 if open_p > 0 else False
         
-        # 2. 判定上涨中
         if is_open_is_low and curr_p > open_p * 1.01:
+            gain_str = f"+{(curr_p-prev_close)/prev_close:+.1%}" if prev_close > 0 else ""
             events.append(PatternEvent(
                 code=code, name=name, pattern='open_low_retest',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=curr_p,
-                detail=f"开盘即低点, 稳步拉升至 +{(curr_p-prev_close)/prev_close:+.1%}"
+                detail=f"开盘即低点, 稳步拉升至 {gain_str}"
             ))
             
         return events
@@ -1213,43 +1228,62 @@ class IntradayPatternDetector:
     def _check_bull_trap_exit(self, code: str, name: str,
                               tick_df: Optional[pd.DataFrame],
                               day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """诱多跑路 (快速拉升后跌破均线)"""
+        """诱多跑路 (快速拉升后真实破位跌破均线与开盘价)"""
         events = []
         curr_p = float(day_row.get('close', day_row.get('trade', 0)))
         open_p = float(day_row.get('open', 0))
         high_p = float(day_row.get('high', 0))
-        amount = float(day_row.get('amount', 0))
-        volume = float(day_row.get('volume', 0))
-        vwap = amount / volume if volume > 0 else 0
+        low_p = float(day_row.get('low', 0))
+        vwap = self._get_vwap(day_row, curr_p)
         
         if open_p <= 0 or curr_p <= 0 or vwap <= 0:
             return events
 
-        # ⭐ [NEW] 结合过去两天的高点结构与底部分析
+        # ⭐ [NEW] 1. 结构性强能力校验 — 开盘即最低 / 强势冲高形态保护
+        # 如果开盘即最低 (low ≈ open) 且当前价保持在开盘价上方/附近 (>= open * 0.995)，属于强势拉升形态，不判定为诱多
+        is_open_low = (abs(open_p - low_p) / open_p < 0.003 if open_p > 0 else False) or (open_p - low_p <= 0.05)
+        if is_open_low and curr_p >= open_p * 0.995:
+            return events
+
+        # ⭐ [NEW] 2. 多日均线/支撑位过滤 (MA5d, MA10d, MA20d, SWL, SWS, nclose2d)
+        ma5d = float(day_row.get('ma5d', day_row.get('ma5', 0)))
+        ma10d = float(day_row.get('ma10d', day_row.get('ma10', 0)))
+        swl = float(day_row.get('SWL', 0))
+        nclose2d = float(day_row.get('nclose2d', 0))
+
+        # 若价格处在 5日线 / SWL 支撑上方 且 尚未跌破开盘价，多为遇到阻力位后的正常反弹震荡，不宜触发跑路警告
+        is_ma_supported = (ma5d > 0 and curr_p >= ma5d * 0.995) or (swl > 0 and curr_p >= swl * 0.995) or (nclose2d > 0 and curr_p >= nclose2d * 0.995)
+        if is_ma_supported and curr_p >= open_p * 0.995:
+            return events
+
+        # ⭐ [NEW] 3. 结合过去两天高低点结构
         lasth1d = float(day_row.get('lasth1d', 0))
         lasth2d = float(day_row.get('lasth2d', 0))
         lastl1d = float(day_row.get('lastl1d', 0)) # 昨日最低价
         max_h2 = max(lasth1d, lasth2d)
         is_rising_trend = lasth1d > lasth2d > 0
         
-        # 0. 结构性过滤 1：如果当前价格已经高于/持平前两天最高点，说明结构转强，不再视为诱多
+        # 如果当前价格已经高于/持平前两天最高点，说明结构突破转强，不再视为诱多
         if max_h2 > 0 and curr_p >= max_h2 * 0.998:
             return events
 
-        # 1. 结构性过滤 2：如果是上升趋势 (高点升高) 且今日最低点高于昨日最低点 (底部分数升高)
-        # 这种情况下的回落多为洗盘，除非跌破开盘价，否则不轻易报诱多
-        is_ascending_base = is_rising_trend and (day_row.get('low', 0) >= lastl1d * 0.998)
+        # 如果是上升趋势 (高点升高) 且今日最低点高于昨日最低点
+        is_ascending_base = is_rising_trend and (low_p >= lastl1d * 0.998)
         if is_ascending_base and curr_p >= open_p * 0.998:
             return events
 
-        # 2. 检测是否曾经“诱多”：开盘后快速大涨
-        # ⚡ 趋势性修正：如果是连板或高点升高结构，判定門檻从 3.0% 提高到 3.8%，以减少洗盘干扰
+        # 4. 检测是否曾经“大涨拉升”
+        # 趋势性修正：如果是连板或高点升高结构，判定门槛提高到 3.8%，普通判定门槛 3.0%
         trap_threshold = 3.8 if is_rising_trend else 3.0
-        rising_pct = (high_p - open_p) / open_p * 100
+        rising_pct = (high_p - open_p) / open_p * 100 if open_p > 0 else 0
         if rising_pct < trap_threshold:
             return events
+
+        # 5. 校验冲高回落幅度：距离当日高点回落需超过 2.5% 且显著回吐振幅
+        drop_from_peak = (high_p - curr_p) / high_p * 100 if high_p > 0 else 0
+        if drop_from_peak < 2.5:
+            return events
             
-        # 注意：此处 state 与 master_momentum 无关，独立判断
         key = f"{code}_bull_trap_state"
         if key not in self._cache:
             self._cache[key] = {'trap_triggered': False}
@@ -1258,64 +1292,15 @@ class IntradayPatternDetector:
         if state['trap_triggered']:
             return events
             
-        # 3. 破位逻辑：大涨后跌破 VWAP 或 跌破开盘价
-        # ⚡ 趋势修正：上升结构要求的跌破深度更深 (vwap * 0.995 而非 0.997)
+        # 6. 真实破位确认：早盘大涨后，同时跌破 VWAP 均价线 且 跌破开盘价或前低
         vwap_tolerance = 0.995 if is_ascending_base else 0.997
-        if curr_p < vwap * vwap_tolerance or curr_p < open_p * 0.992:
+        if (curr_p < vwap * vwap_tolerance) and (curr_p < open_p * 0.995 or curr_p < low_p * 1.002):
             state['trap_triggered'] = True
             events.append(PatternEvent(
                 code=code, name=name, pattern='bull_trap_exit',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=curr_p,
-                detail=f"诱多跑路: 早盘大涨{rising_pct:.1f}%后跌破均线/开盘价",
-                is_high_priority=True
-            ))
-            
-        return events
-
-    def _check_bear_trap_reversal(self, code: str, name: str,
-                                  tick_df: Optional[pd.DataFrame],
-                                  day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """诱空反转 (早盘低开下杀，尾盘拉升突破前高)"""
-        events = []
-        curr_p = float(day_row.get('close', day_row.get('trade', 0)))
-        open_p = float(day_row.get('open', 0))
-        low_p = float(day_row.get('low', 0))
-        amount = float(day_row.get('amount', 0))
-        volume = float(day_row.get('volume', 0))
-        vwap = amount / volume if volume > 0 else 0
-        
-        if open_p <= 0 or curr_p <= 0 or vwap <= 0 or prev_close <= 0:
-            return events
-            
-        # 1. 结构基础：获取前两天最高价
-        lasth1d = float(day_row.get('lasth1d', 0))
-        lasth2d = float(day_row.get('lasth2d', 0))
-        max_h2 = max(lasth1d, lasth2d)
-        if max_h2 <= 0: return events
-
-        # 2. 诱空特征：早盘低开 或 开盘后显著下杀
-        open_gap = (open_p - prev_close) / prev_close * 100
-        kill_drop = (low_p - open_p) / open_p * 100
-        
-        # 诱空条件：低开 < -1.0% 或 盘中下杀 < -1.5%
-        is_bear_trap = open_gap < -1.0 or kill_drop < -1.5
-        if not is_bear_trap:
-            return events
-            
-        # 3. 反转确认：价格收复均线并突破前两天最高价
-        if curr_p > max_h2 and curr_p > vwap * 1.002:
-            # 时间过滤：倾向于 10:30 后的拉升 (002519 这种尾盘更明显)
-            now_time = datetime.now().time()
-            if now_time < dt_time(10, 30):
-                return events
-                
-            rebound_pct = (curr_p - low_p) / low_p * 100
-            events.append(PatternEvent(
-                code=code, name=name, pattern='bear_trap_reversal',
-                timestamp=datetime.now().strftime('%H:%M:%S'),
-                price=curr_p,
-                detail=f"🔥诱空反转: 下杀{kill_drop:.1f}%后强烈回升并突破前高({max_h2:.2f})",
+                detail=f"诱多跑路: 早盘冲高{rising_pct:.1f}%后回落{drop_from_peak:.1f}%, 破均线({vwap:.2f})与开盘价",
                 is_high_priority=True
             ))
             

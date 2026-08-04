@@ -302,9 +302,27 @@ class PandasQueryEngine:
             'strong_structure_score': ['strong_structure_score', 'structure_score', 'score'],
             'SWL': ['SWL', 'swl', 'ma5d'], 'SWS': ['SWS', 'sws', 'ma10d'],
             'hmax': ['hmax', 'lasth1d', 'high'], 'nlow': ['nlow', 'lastl1d', 'low'],
-            'nclose': ['nclose', 'lastp1d', 'close'], 'win': ['win', 'win_score'],
+            'vwap_price': ['vwap_price', 'vwap', 'nclose', 'avg_price'],
+            'nclose': ['nclose', 'vwap_price', 'vwap', 'lastp1d', 'close'], 'win': ['win', 'win_score'],
             'Rank': ['Rank', 'rank'], 'high4': ['high4', 'lasth1d', 'high'],
             'low4': ['low4', 'lastl1d', 'low'], 'td_sell': ['td_sell'], 'td_buy': ['td_buy'],
+            # ===== 扩展 5 日连续 VWAP 机构成本线同义词映射 =====
+            'vwap_cum_2d': ['vwap_cum_2d', 'cum_vwap_2d', 'vwap_2d_cum', 'm_vwap2d', 'vwap2d_cum'],
+            'vwap_cum_3d': ['vwap_cum_3d', 'cum_vwap_3d', 'vwap_3d_cum', 'm_vwap3d', 'vwap3d_cum'],
+            'vwap_cum_4d': ['vwap_cum_4d', 'cum_vwap_4d', 'vwap_4d_cum', 'm_vwap4d', 'vwap4d_cum'],
+            'vwap_cum_5d': ['vwap_cum_5d', 'cum_vwap_5d', 'vwap_5d_cum', 'm_vwap5d', 'vwap5d_cum'],
+            'vwap_cum_10d': ['vwap_cum_10d', 'cum_vwap_10d', 'vwap_10d_cum', 'm_vwap10d', 'vwap10d_cum'],
+            'last_vwap': ['last_vwap', 'last_vwap1d', 'last_nclose', 'last_nclose1d'],
+            'last_nclose1d': ['last_nclose1d', 'last_nclose', 'last_vwap1d', 'last_vwap'],
+            'last_nclose2d': ['last_nclose2d', 'last_vwap2d', 'nclose2d'],
+            'last_nclose3d': ['last_nclose3d', 'last_vwap3d', 'nclose3d'],
+            'last_nclose4d': ['last_nclose4d', 'last_vwap4d', 'nclose4d'],
+            'last_nclose5d': ['last_nclose5d', 'last_vwap5d', 'nclose5d'],
+            'nclose1d': ['nclose1d', 'last_nclose1d', 'last_vwap1d'],
+            'nclose2d': ['nclose2d', 'last_nclose2d', 'last_vwap2d'],
+            'nclose3d': ['nclose3d', 'last_nclose3d', 'last_vwap3d'],
+            'nclose4d': ['nclose4d', 'last_nclose4d', 'last_vwap4d'],
+            'nclose5d': ['nclose5d', 'last_nclose5d', 'last_vwap5d'],
         }
         for i in range(0, 10):
             last_macd_idx = min(max(i, 1), 6)
@@ -398,7 +416,12 @@ class PandasQueryEngine:
             'SWL': ctx.get('ma5d'), 'SWS': ctx.get('ma10d'),
             'hmax': ctx.get('high'), 'nlow': ctx.get('low'),
             'nclose': ctx.get('close'), 'high4': ctx.get('high'),
-            'low4': ctx.get('low'), 'dff2': 0.0, 'dff3': 0.0
+            'low4': ctx.get('low'), 'dff2': 0.0, 'dff3': 0.0,
+            'vwap_cum_2d': ctx.get('nclose'), 'vwap_cum_3d': ctx.get('nclose'),
+            'vwap_cum_4d': ctx.get('nclose'), 'vwap_cum_5d': ctx.get('nclose'),
+            'vwap_cum_10d': ctx.get('nclose'),
+            'last_nclose1d': ctx.get('close'), 'last_nclose2d': ctx.get('close'),
+            'last_nclose3d': ctx.get('close'), 'last_nclose4d': ctx.get('close'),
         }
         for fb_key, fb_val in default_fallbacks.items():
             if fb_key not in ctx or ctx.get(fb_key) is None:
