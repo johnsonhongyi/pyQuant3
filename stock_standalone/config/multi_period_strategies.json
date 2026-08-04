@@ -1,6 +1,39 @@
 {
   "strategies": [
     {
+      "id": "tpl_channel_upper_breakout_no_new_low_launch",
+      "name": "🎯 突破下跌通道上轨+底部缩量企稳+多日震荡无新低起爆 [天娱数科/通道突破模式] [2026-08-03]",
+      "conditions": {
+        "m": {
+          "filter": "close > lower or close > ma5d or dif > dea or close > 0.90 * ch_mid",
+          "weight": 1.5,
+          "enabled": true
+        },
+        "w": {
+          "filter": "close >= 0.95 * ch_lower and (dif > dea or macd > macdlast1 or close > ma5d or ch_pos > 20)",
+          "weight": 1.4,
+          "enabled": true
+        },
+        "3d": {
+          "filter": "ch_bc2 >= 3 and (lastl1d >= 0.96 * lastl2d or close >= ch_anchor_low_price) and (ch_pos > 30 or sig_bottom == 1 or sig_launch == 1 or close >= ch_mid)",
+          "weight": 1.2,
+          "enabled": true
+        },
+        "2d": {
+          "filter": "(lastv1d < lastv2d or lastv1d < 0.85 * lastv3d or (lastv1d + lastv2d) < 1.15 * (lastv2d + lastv3d) or macd > macdlast1) and (lastl1d >= 0.96 * lastl2d or close >= ch_anchor_low_price)",
+          "weight": 1.1,
+          "enabled": true
+        },
+        "d": {
+          "filter": "(close >= 0.98 * ch_upper or ch_pos >= 80 or (ch_pattern == 1 and close > ch_mid)) and (ch_bc2 >= 3 and ch_bc2 <= 60) and (lastl1d >= 0.96 * lastl2d or lastl1d >= ch_anchor_low_price) and (lastv1d < 1.1 * lastv2d or lastv1d < 0.85 * lastv3d or volume > 1.2 * lastv1d) and close > open and percent > 1.0 and (dif > dea or dif > dif1d or macd > macdlast1)",
+          "weight": 1.0,
+          "enabled": true
+        }
+      },
+      "cross_mode": "intersection",
+      "description": "【核心交易哲学：突破下跌通道上轨 + 底部缩量企稳 + 多日震荡无新低起爆 (天娱数科 002354 模式)】\n1. 突破下跌通道上轨 (Channel Upper Breakout)：股价经过长期下跌/震荡后，向上突破下降通道上轨或逼近上轨攻防点 (close >= 0.98 * ch_upper 或 ch_pos >= 80% 或 ch_pattern 触底转折走高)。\n2. 底部极缩地量企稳 (Bottom Volume Consolidation)：前 1-3 天成交量干涸萎缩 (lastv1d < lastv2d 或 lastv1d < 0.85 * lastv3d)，筹码洗盘充分、抛压彻底衰竭。\n3. 距离低点多日震荡 (Multi-day Base Alignment)：低点 (ch_anchor_low_price) 距今已有 3~60 天的充分横盘筑底 (ch_bc2 >= 3)，拒绝单一的 V 型尖顶急反弹，属于扎实的沉淀底盘。\n4. 没有新低启动 (No New Low & Launch)：最低价死守底座不创新低 (lastl1d >= 0.96 * lastl2d 或 lastl1d >= ch_anchor_low_price)，当日带量收阳起爆 (percent > 1.0%, dif > dea 或 macd 抬头)，确认为波段起爆点。"
+    },
+    {
       "id": "tpl_global_resonance_staircase_launch",
       "name": "🌐 全局外盘情绪共振+1-2日阶梯底座企稳+3-4日VWAP分时主升加速 [长城军工/蓝色光标/北汽蓝谷模式] [2026-08-02]",
       "conditions": {

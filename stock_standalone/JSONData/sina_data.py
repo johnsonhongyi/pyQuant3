@@ -621,9 +621,8 @@ class Sina:
                         self.agg_cache.setkey('last_mi_save_time', now_time)
                         log.debug("Saved MultiIndex history (sync) to %s (len: %d)" % (h5_mi_fname, len(mi_df)))
 
-            # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存
-            if not self.readonly:
-                self._MEM_CACHE[cache_key] = {'df': df_final.copy(), 'time': time.time()}
+            # 7. [INTERNAL-SYNC] 同步至 Sina 类属性共享缓存 (RAM 内存缓存无视 readonly 标志)
+            self._MEM_CACHE[cache_key] = {'df': df_final.copy(), 'time': time.time()}
             return df_final
 
     def _update_agg_cache(self, df_latest: pd.DataFrame,h5_hist: pd.DataFrame) -> None:
@@ -718,8 +717,8 @@ class Sina:
             
             agg_metrics = pd.concat([agg_metrics, new_df])
             
-        if not self.readonly:
-            self.agg_cache.setkey('agg_metrics', agg_metrics)
+        # 内存缓存更新不受 self.readonly 磁盘只读标记影响，确保 readonly 模式下内存指标依然正常迭代
+        self.agg_cache.setkey('agg_metrics', agg_metrics)
 
     def _rebuild_agg_cache(self, h5_hist: Optional[pd.DataFrame], df_current: pd.DataFrame) -> pd.DataFrame:
         """从历史 MultiIndex 数据中重建聚合缓存 (优化兼容日期前缀)"""
@@ -862,19 +861,18 @@ class Sina:
 
         mask_nclose_fix = rebuild_df['nclose'].fillna(0) <= 0
         if mask_nclose_fix.any():
-            fix_codes = rebuild_df.index[mask_nclose_fix].tolist()
-            log.debug(f"Targeting {len(fix_codes)} codes for nclose web-backfill...")
-            for i, code in enumerate(fix_codes):
-                if i > 50: break # 防止重启延迟过高
-                web_vwap = self._fetch_sina_intraday_kline(code)
-                if web_vwap is not None:
-                    rebuild_df.loc[code, 'nclose'] = web_vwap
+            # 早盘/盘中优先进行向量化零延迟快速兜底，避免 50 次单股 HTTP 访问卡死主线程
+            rebuild_df.loc[mask_nclose_fix, 'nclose'] = curr_stats['close'].reindex(rebuild_df.index)[mask_nclose_fix]
             
-            # 最后的彻底兜底
-            mask_final = rebuild_df['nclose'].fillna(0) <= 0
-            if mask_final.any():
-                rebuild_df.loc[mask_final, 'nclose'] = \
-                    curr_stats['close'].reindex(rebuild_df.index)[mask_final]
+            # 仅在非盘中且缺失少量时尝试个别单股 web 补全
+            if not cct.get_work_time():
+                fix_codes = rebuild_df.index[rebuild_df['nclose'].fillna(0) <= 0].tolist()
+                if 0 < len(fix_codes) <= 10:
+                    log.debug(f"Targeting {len(fix_codes)} codes for nclose web-backfill...")
+                    for code in fix_codes:
+                        web_vwap = self._fetch_sina_intraday_kline(code)
+                        if web_vwap is not None:
+                            rebuild_df.loc[code, 'nclose'] = web_vwap
 
 
         if 'nstd' in agg_df.columns:

@@ -1,3 +1,12 @@
+## 2026-08-03 20:05
+- [x] **实现突破下跌通道上轨+底部缩量企稳+多日震荡无新低起爆选股策略 (`config/multi_period_strategies.json`, `instockMonitorTK/config/multi_period_strategies.json`, `scratch/test_channel_breakout_strategy.py`)**：
+    - [x] **解构天娱数科 (002354) 通道突破与底部震荡无新低起爆模型 (`tpl_channel_upper_breakout_no_new_low_launch`)**：
+        - **通道突破 (Channel Upper Breakout)**：股价向上突破下降通道上轨或逼近上轨攻防点 (`close >= 0.98 * ch_upper` 或 `ch_pos >= 80%` 或 `ch_pattern == 1` 触底转折走高)。
+        - **底部极缩地量企稳 (Bottom Volume Consolidation)**：前 1-3 天成交量干涸萎缩 (`lastv1d < lastv2d` 或 `lastv1d < 0.85 * lastv3d`)，筹码洗盘充分、抛压彻底衰竭。
+        - **距离低点多日震荡 (Multi-day Base Alignment)**：低点 (`ch_anchor_low_price`) 距今已有 3~60 天的充分横盘筑底 (`ch_bc2 >= 3`)，拒绝单一的 V 型尖顶急反弹，属于扎实的沉淀底盘。
+        - **没有新低启动 (No New Low & Launch)**：最低价死守底座不创新低 (`lastl1d >= 0.96 * lastl2d` 或 `lastl1d >= ch_anchor_low_price`)，当日带量收阳起爆 (`percent > 1.0%`, `dif > dea` 或 `macd` 抬头)，确认为波段起爆点。
+    - [x] **主从策略库双向无缝同步与向量化求值校验**：成功将策略插入至主配置文件 `config/multi_period_strategies.json` 及监控客户端 `instockMonitorTK/config/multi_period_strategies.json` 最顶层，并编写 `scratch/test_channel_breakout_strategy.py` 完成向量化 PandasQueryEngine 表达式零语法错误验证。全量 16 项单元测试 100% 成功通过。
+
 ## 2026-08-03 18:18
 - [x] **实现 Tk 诊断窗口 (`check_code`) 暗黑专业主题与多色高对比度语法高亮引擎 (`stock_logic_utils.py`)**：
     - [x] **暗黑专业主题升级**：将原本淡蓝浅色背景（`#E3F2FD`）全量升级为酷炫暗黑高对比度主题（主背景 `#0c0d14`，`ScrolledText` 控件背景 `#12131a`，前景色 `#e2e2e5`）。
