@@ -820,11 +820,30 @@ class CaptureWindowsDialog(QDialog):
         if len(selected_items) > 1 and item in selected_items:
             center_all = menu.addAction(f"居中所有选中窗口 ({len(selected_items)}个) 于程序所在屏幕")
             
+        item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        open_dir_action = None
+        if item_data and len(item_data) > 2 and item_data[2]:
+            menu.addSeparator()
+            open_dir_action = menu.addAction("📂 打开程序目录")
+
         action = menu.exec(self.list_widget.mapToGlobal(pos))
         if action == center_this:
             self.center_windows_on_current_screen([item])
         elif center_all and action == center_all:
             self.center_windows_on_current_screen(selected_items)
+        elif open_dir_action and action == open_dir_action:
+            exe_path = item_data[2]
+            import subprocess
+            target_path = exe_path.strip().strip('"').strip("'")
+            if os.path.exists(target_path):
+                if os.path.isfile(target_path):
+                    subprocess.Popen(f'explorer /select,"{os.path.normpath(target_path)}"')
+                else:
+                    os.startfile(target_path)
+            else:
+                dir_name = os.path.dirname(target_path)
+                if dir_name and os.path.exists(dir_name):
+                    os.startfile(dir_name)
 
     def center_windows_on_current_screen(self, items):
         if not items:
@@ -3045,6 +3064,44 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             self.log(f"⚠️ 刷新快捷启动区出错: {e}")
 
+    def open_program_dir(self, exe_path: str):
+        """在 Windows 资源管理器中打开程序所在目录并定位物理文件"""
+        if not exe_path or not exe_path.strip():
+            self.log("⚠️ 无法打开目录：程序启动路径未配置或为空")
+            QMessageBox.information(self, "提示", "当前程序未配置启动路径，请先右键选择‘编辑程序启动路径’。")
+            return
+            
+        import os
+        import subprocess
+        
+        is_valid, final_exe, _, _, _ = self.resolve_and_validate_cmd(exe_path)
+        target_path = final_exe if (is_valid and final_exe) else exe_path.strip().strip('"').strip("'")
+        
+        if os.path.exists(target_path):
+            if os.path.isfile(target_path):
+                try:
+                    subprocess.Popen(f'explorer /select,"{os.path.normpath(target_path)}"')
+                    self.log(f"📂 已在资源管理器中定位并打开文件: {target_path}")
+                except Exception as e:
+                    self.log(f"❌ 打开程序目录失败: {e}")
+            else:
+                try:
+                    os.startfile(target_path)
+                    self.log(f"📂 已打开程序目录: {target_path}")
+                except Exception as e:
+                    self.log(f"❌ 打开程序目录失败: {e}")
+        else:
+            dir_name = os.path.dirname(target_path)
+            if dir_name and os.path.exists(dir_name):
+                try:
+                    os.startfile(dir_name)
+                    self.log(f"📂 目标文件不存在，已打开上级目录: {dir_name}")
+                except Exception as e:
+                    self.log(f"❌ 打开目录失败: {e}")
+            else:
+                self.log(f"⚠️ 打开目录失败：找不到物理路径 -> {target_path}")
+                QMessageBox.warning(self, "路径错误", f"无法打开程序目录，目标物理路径或目录不存在:\n{target_path}")
+
     def show_shortcut_context_menu(self, pos, title, exe_path):
         """常用程序快捷按钮的右键上下文菜单"""
         btn = self.sender()
@@ -3054,7 +3111,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #1e1e24; color: #ffffff; border: 1px solid #4b5563; } QMenu::item:selected { background-color: #374151; }")
         
-        # 1. 启动选项
+        # 1. 启动与目录选项
+        open_dir_action = None
         if exe_path:
             display_name = os.path.basename(exe_path)
             if not display_name:
@@ -3063,6 +3121,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 display_name = display_name[:27] + "..."
             start_action = menu.addAction(f"🚀 启动程序 ({display_name})")
             start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({display_name})")
+            open_dir_action = menu.addAction(f"📂 打开程序目录")
             menu.addSeparator()
         else:
             start_action = None
@@ -3083,6 +3142,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_program(exe_path, title, None)
         elif start_admin_action and action == start_admin_action:
             self._launch_as_admin(exe_path, title, None)
+        elif open_dir_action and action == open_dir_action:
+            self.open_program_dir(exe_path)
         elif action == pin_action:
             if is_pinned:
                 pinned_list.remove(title)
@@ -3303,6 +3364,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         start_action = None
         start_admin_action = None
+        open_dir_action = None
         is_valid = False
         if exe_path:
             is_valid, _, _, _, _ = self.resolve_and_validate_cmd(exe_path)
@@ -3315,6 +3377,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 display_name = display_name[:27] + "..."
             start_action = menu.addAction(f"🚀 启动程序 ({display_name})")
             start_admin_action = menu.addAction(f"🛡️ 以管理员身份启动 ({display_name})")
+            open_dir_action = menu.addAction("📂 打开程序目录")
+            menu.addSeparator()
+        elif exe_path:
+            open_dir_action = menu.addAction("📂 打开程序目录")
             menu.addSeparator()
 
         menu.addSeparator()
@@ -3334,6 +3400,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_program(exe_path, title, pos_item)
         elif start_admin_action and action == start_admin_action:
             self._launch_as_admin(exe_path, title, pos_item)
+        elif open_dir_action and action == open_dir_action:
+            self.open_program_dir(exe_path)
         elif action == pin_action:
             # 如果未配置启动路径，先引导配置路径，配置完自动拉入常用
             if not exe_path:

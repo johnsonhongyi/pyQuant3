@@ -1,3 +1,12 @@
+## 2026-08-04 11:00
+- [x] **实现窗口布局管理器右键菜单「📂 打开程序目录」与资源管理器选中定位功能 (`webTools/window_manager/ui.py`, `scratch/test_open_program_dir.py`)**：
+    - [x] **通用目录打开与智能文件定位 helper (`open_program_dir`)**：在 `WindowPosManagerUI` 中实现 `open_program_dir(self, exe_path)`。利用 `resolve_and_validate_cmd` 智能解析提取物理可执行文件路径，若文件存在直接通过 `explorer /select,"<path>"` 在 Windows 资源管理器中打开上级目录并自动选中高亮目标文件；若目标文件已移动但上级目录尚存则打开上级目录，若均不存在则弹出友好警示对话框。
+    - [x] **三大右键菜单全面集成**：
+        - **主表格右键菜单 (`show_context_menu`)**：追加 `📂 打开程序目录` 菜单选项，自动提取 `UserRole` 中的启动路径并支持自愈解析。
+        - **常用快捷启动按钮右键菜单 (`show_shortcut_context_menu`)**：在快捷按钮右键菜单顶部增加 `📂 打开程序目录`。
+        - **捕获窗口列表右键菜单 (`CaptureWindowsDialog.show_context_menu`)**：在捕获窗口列表中右键点击未保存/暂存项时，同步支持直接打开其程序目录。
+    - [x] **自动化测试 100% 成功通过**：新建 `scratch/test_open_program_dir.py` 验证 `WindowPosManagerUI` 模块无缝加载与 `open_program_dir` 接口，测试 100% 成功通过。
+
 ## 2026-08-03 20:05
 - [x] **实现突破下跌通道上轨+底部缩量企稳+多日震荡无新低起爆选股策略 (`config/multi_period_strategies.json`, `instockMonitorTK/config/multi_period_strategies.json`, `scratch/test_channel_breakout_strategy.py`)**：
     - [x] **解构天娱数科 (002354) 通道突破与底部震荡无新低起爆模型 (`tpl_channel_upper_breakout_no_new_low_launch`)**：
