@@ -81,8 +81,14 @@ class IPCSyncManager:
                 return self.current_df.copy()
             return None
 
-    def request_full_sync(self):
-        """通过 Windows 命名管道向主程序发送 REQ_FULL_SYNC，拉取全量行情快照"""
+    def request_full_sync(self, force=False, min_interval=10.0):
+        """通过 Windows 命名管道向主程序发送 REQ_FULL_SYNC，拉取全量行情快照 (带 10 秒防刷防挤占门控)"""
+        now = time.time()
+        last_req = getattr(self, '_last_req_full_sync_t', 0.0)
+        if not force and (now - last_req < min_interval):
+            return True
+        self._last_req_full_sync_t = now
+
         cmd_dict = {"cmd": "REQ_FULL_SYNC", "port": self.port}
         payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
         
@@ -123,8 +129,14 @@ class IPCSyncManager:
                 if now - last_request_t > 15:
                     should_sync = True
             else:
-                # 只有在有数据的情况下，若 10 分钟没有收到更新，且距离上次请求超过 60 秒
-                if now - self.last_recv_t > 600:
+                # 仅在交易时段内：若 10 分钟没有收到更新，且距离上次请求超过 60 秒，才自动续期请求
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    is_work_time = cct.get_work_time()
+                except Exception:
+                    is_work_time = False
+
+                if is_work_time and (now - self.last_recv_t > 600):
                     if now - last_request_t > 60:
                         should_sync = True
             

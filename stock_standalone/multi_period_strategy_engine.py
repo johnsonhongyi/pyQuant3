@@ -71,13 +71,13 @@ class MultiPeriodStrategyEngine:
                 expanded_cols.add(c[:-2])
         return expanded_cols
 
-    def ensure_strategy_ipc_columns(self, df: pd.DataFrame, strategy_expr: str = "", force_refresh: bool = False) -> pd.DataFrame:
+    def ensure_strategy_ipc_columns(self, df: pd.DataFrame, strategy_expr: str = "", force_refresh: bool = False, force_refresh_ipc: bool = False) -> pd.DataFrame:
         """
         通过 IPC 工厂模式按需抓取策略中所需但 df 中缺失或为初始缺省值的列。
-        规则:
-        1. 提取策略表达式中的变量列；
-        2. 仅向 IPC 提取 Missing 的列（多余列不抓取）；当 force_refresh=True 时强制重刷最新行情列；
-        3. 若 IPC 未连接或无该列，执行自动安全兜底。
+        性能与稳定性规则:
+        1. 向量化匹配 (Vectorized Reindex)，全面替代逐列 Python 循环与字典构建；
+        2. 一次性批量落盘并巩固 BlockManager (consolidate)，彻底防范 pandas BlockManager Gaps 碎片化异常；
+        3. 若列已存在且无需重刷，秒级跳过直接返回。
         """
         if df is None or df.empty:
             return df
@@ -91,98 +91,119 @@ class MultiPeriodStrategyEngine:
             'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
             'Trends', 'nclose', 'sig_bottom', 'sig_launch'
         }
-        default_core_cols = {
-            'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
-            'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
-            'Trends', 'nclose', 'sig_bottom', 'sig_launch'
-        }
         missing_cols.update(default_core_cols)
+
+        ipc_mgr = get_global_ipc_sync_manager()
+        last_recv = getattr(ipc_mgr, 'last_recv_t', 0.0) if ipc_mgr is not None else 0.0
+        df_ipc_ts = getattr(df, '_ipc_enriched_ts', 0.0)
+
+        # 判定是否需要向 df 注入/同步最新 IPC 数据（当 df 未同步最新包、含缺失列或请求强刷时）
+        cols_to_fill = [c for c in missing_cols if c not in df.columns or df[c].isna().all()]
+        needs_ipc_sync = (df_ipc_ts < last_recv) or (df_ipc_ts == 0.0) or len(cols_to_fill) > 0 or force_refresh
+
+        # 🚀 快速快照判定：若已是最新 IPC 数据，且无缺失列，且未强刷，秒级返回
+        if not needs_ipc_sync:
+            return df
 
         try:
             import time
             import re
             import numpy as np
-            ipc_mgr = get_global_ipc_sync_manager()
             if ipc_mgr is not None:
                 ipc_df = ipc_mgr.get_current_df()
                 now_ts = time.time()
-                last_recv = getattr(ipc_mgr, 'last_recv_t', 0.0)
-                cache_expired = (now_ts - last_recv > 900.0) # 15分钟对齐多周期缓存刷新周期
 
-                if (ipc_df is None or ipc_df.empty or cache_expired or force_refresh):
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    is_work_time = cct.get_work_time()
+                except Exception:
+                    is_work_time = False
+
+                cache_expired = (now_ts - last_recv > 900.0) if is_work_time else False
+                has_valid_ipc = (ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20)
+
+                need_socket_sync = (not has_valid_ipc or cache_expired or force_refresh_ipc)
+                if need_socket_sync:
                     ipc_mgr.request_full_sync()
-                    # 冷启动/无数据/强刷时，等待 Socket 大包 (5500行) 完成接收 (约 1.2s~1.8s)
                     for _ in range(25):
                         time.sleep(0.1)
                         ipc_df = ipc_mgr.get_current_df()
-                        if ipc_df is not None and not ipc_df.empty:
-                            logger.info(f"⚡ [IPC 工厂单例缓存] 成功完整获取 {len(ipc_df)} 行实时行情快照至策略引擎")
+                        if ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20:
+                            last_recv = getattr(ipc_mgr, 'last_recv_t', time.time())
+                            logger.info(f"⚡ [IPC 工厂单例缓存] 成功完整获取 {len(ipc_df)} 行 {len(ipc_df.columns)} 列实时行情快照至策略引擎")
                             break
 
                 if ipc_df is not None and not ipc_df.empty:
-                    # 构建包含 6 位 zfill 字符串、原始字符串和 int 键的容错 val_map 映射
+                    cols_to_sync = set(missing_cols)
+                    if force_refresh or needs_ipc_sync:
+                        cols_to_sync.update(ipc_df.columns)
+
+                    # ⚡ [向量化重排] 将 ipc_df 索引统一转换为 6 位补零 Code 格式
+                    ipc_df_indexed = ipc_df.copy()
+                    ipc_df_indexed.index = [str(c).strip().zfill(6) for c in ipc_df_indexed.index]
+                    
                     df_codes = df['code'] if 'code' in df.columns else df.index
                     df_code_strs = [str(c).strip().zfill(6) for c in df_codes]
 
-                    for col in missing_cols:
+                    ipc_sub = ipc_df_indexed.reindex(df_code_strs)
+                    ipc_sub.index = df.index
+
+                    new_series_dict = {}
+                    for col in cols_to_sync:
                         target_col = col
                         clean_col = re.sub(r'_(d|1d|2d|3d|4d|5d|w|m|45d|3m)$', '', col)
-                        if target_col not in ipc_df.columns:
-                            if clean_col in ipc_df.columns:
+                        if target_col not in ipc_sub.columns:
+                            if clean_col in ipc_sub.columns:
                                 target_col = clean_col
-                            elif target_col.endswith('_d') and target_col[:-2] in ipc_df.columns:
+                            elif target_col.endswith('_d') and target_col[:-2] in ipc_sub.columns:
                                 target_col = target_col[:-2]
 
-                        if target_col in ipc_df.columns:
-                            s_ipc = ipc_df[target_col]
-                            val_map = {}
-                            for k, v in s_ipc.items():
-                                sk = str(k).strip()
-                                val_map[sk] = v
-                                val_map[sk.zfill(6)] = v
-                                if sk.isdigit():
-                                    val_map[int(sk)] = v
-
-                            ipc_vals = [val_map.get(c_str, val_map.get(orig_c, np.nan)) for c_str, orig_c in zip(df_code_strs, df_codes)]
-                            ipc_series = pd.Series(ipc_vals, index=df.index)
-
-                            valid_mask = ipc_series.notna()
-                            if col not in df.columns or force_refresh:
-                                if col in df.columns:
-                                    df.loc[valid_mask, col] = ipc_series[valid_mask]
-                                else:
-                                    df[col] = ipc_series
-                            else:
-                                df.loc[valid_mask & df[col].isna(), col] = ipc_series[valid_mask & df[col].isna()]
-
+                        if target_col in ipc_sub.columns:
+                            s_ipc = ipc_sub[target_col]
+                            # 只要 IPC 中有真实高密值，优先覆盖已有的 fallback/估算缺省列
+                            new_series_dict[col] = s_ipc
                             base_alias = col[:-2] if col.endswith('_d') else f"{col}_d"
-                            if base_alias not in df.columns or force_refresh:
-                                df[base_alias] = df[col]
+                            if base_alias not in new_series_dict:
+                                new_series_dict[base_alias] = s_ipc
+
+                    if new_series_dict:
+                        new_cols_df = pd.DataFrame(new_series_dict, index=df.index)
+                        # ⚡ [100% 安全 BlockManager 巩固] 彻底消除 Gaps in blk ref_locs 内存碎片化异常
+                        keep_cols = [c for c in df.columns if c not in new_cols_df.columns]
+                        df = pd.concat([df[keep_cols], new_cols_df], axis=1).copy()
+                        setattr(df, '_ipc_enriched_ts', last_recv if last_recv > 0 else time.time())
+
         except Exception as ex_ipc:
             logger.debug(f"IPC fetch for missing strategy cols failed: {ex_ipc}")
 
         # 🛡️ 自动安全兜底：如果 IPC 依然没有获取到该列，先通过日线 OHLCV/多日量价估计计算 VWAP 成本列
         df = self.compute_daily_vwap_fallbacks(df)
 
+        fallback_cols_dict = {}
         for col in missing_cols:
             if col not in df.columns or df[col].isna().all():
                 c_low = col.lower()
                 if 'vwap' in c_low or 'nclose' in c_low or c_low.startswith('lastp') or c_low.startswith('close'):
-                    df[col] = df['close'] if 'close' in df.columns else 0.0
+                    fallback_cols_dict[col] = df['close'] if 'close' in df.columns else 0.0
                 elif c_low.startswith('lasth') or c_low.startswith('h'):
-                    df[col] = df['high'] if 'high' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
+                    fallback_cols_dict[col] = df['high'] if 'high' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
                 elif c_low.startswith('lastl') or (c_low.startswith('l') and not c_low.startswith('lastv')):
-                    df[col] = df['low'] if 'low' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
+                    fallback_cols_dict[col] = df['low'] if 'low' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
                 elif c_low.startswith('ma'):
-                    df[col] = df['close'] if 'close' in df.columns else 0.0
+                    fallback_cols_dict[col] = df['close'] if 'close' in df.columns else 0.0
                 elif 'trends' in c_low:
-                    df[col] = 60.0
+                    fallback_cols_dict[col] = 60
                 elif 'volume' in c_low or 'lastv' in c_low:
-                    df[col] = df['volume'] if 'volume' in df.columns else 0.0
+                    fallback_cols_dict[col] = df['volume'] if 'volume' in df.columns else 0.0
                 elif 'per' in c_low or 'percent' in c_low:
-                    df[col] = df['percent'] if 'percent' in df.columns else 0.0
+                    fallback_cols_dict[col] = df['percent'] if 'percent' in df.columns else 0.0
                 else:
-                    df[col] = 0.0
+                    fallback_cols_dict[col] = 0.0
+
+        if fallback_cols_dict:
+            fb_df = pd.DataFrame(fallback_cols_dict, index=df.index)
+            keep_cols = [c for c in df.columns if c not in fb_df.columns]
+            df = pd.concat([df[keep_cols], fb_df], axis=1).copy()
 
         return df
 
@@ -373,33 +394,29 @@ class MultiPeriodStrategyEngine:
                 continue
                 
             cond = strategy_config['conditions'].get(period, strategy_config['conditions'].get(p_norm))
-
-            # ⚡ [AUTOMATIC STRATEGY ENRICHMENT] 评估前按需全自动补齐该策略特有缺失列（如 VWAP/nclose/Trends 等）
-            if p_norm in ('d', '1d', 'day'):
-                filter_expr = cond.get('filter', '') if isinstance(cond, dict) else str(cond or '')
-                df = self.ensure_strategy_ipc_columns(df, strategy_expr=filter_expr, force_refresh=True)
-                with self.lock:
-                    self._period_dfs[p_norm] = df
-                    self._period_dfs[period] = df
-
-            df_clean = df.fillna(0)
-            
             if not cond or not cond.get('enabled', True):
                 # 周期已勾选但策略未配置该周期或该周期被关闭过滤 → 不作为限制条件参与筛选，仅做展示
                 logger.info(f"Period {period} has no condition or is disabled in strategy, skip filtering calculation.")
-                total_cnt = len(df_clean)
+                total_cnt = len(df)
                 self.last_stats["periods"][period] = {
                     "total": total_cnt,
                     "pass": total_cnt,
                     "ratio": 100.0
                 }
                 continue
-                
-            try:
-                filter_expr = cond.get('filter', '') if isinstance(cond, dict) else str(cond)
-                # 💥 只有策略中用到的、且当前 df 中 Missing 或 force_refresh 的列才通过 IPC 精准提取并自动补全，多余列不抓取；若无 IPC 数据则自动安全兜底
-                df_clean = self.ensure_strategy_ipc_columns(df_clean, filter_expr, force_refresh=force_refresh)
 
+            filter_expr = cond.get('filter', '') if isinstance(cond, dict) else str(cond)
+
+            # ⚡ [AUTOMATIC STRATEGY ENRICHMENT] 必须在 fillna(0) 前按需补齐该策略特有缺失列（如 VWAP/nclose/Trends 等）
+            if p_norm in ('d', '1d', 'day'):
+                df = self.ensure_strategy_ipc_columns(df, strategy_expr=filter_expr, force_refresh=force_refresh)
+                with self.lock:
+                    self._period_dfs[p_norm] = df
+                    self._period_dfs[period] = df
+
+            df_clean = df.fillna(0)
+
+            try:
                 from query_engine_util import query_engine
                 if query_engine:
                     filtered_df = query_engine.execute(df_clean, filter_expr)
@@ -677,7 +694,12 @@ class MultiPeriodStrategyEngine:
 
         # 1. 如果当前内存中已有对应周期的数据，拷贝以防修改
         if period in self._period_dfs and not self._period_dfs[period].empty:
-            df = self._period_dfs[period].copy()
+            try:
+                df = self._period_dfs[period].copy()
+            except Exception:
+                df = self._period_dfs[period]
+            if str(period).strip() in ('d', '1d', 'day'):
+                df = self.ensure_strategy_ipc_columns(df, strategy_expr=filter_str)
         else:
             # 2. 否则，构造一个包含常用字段的 Dummy DataFrame 进行语法验证
             dummy_cols = [
