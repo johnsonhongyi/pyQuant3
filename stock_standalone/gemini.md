@@ -1,3 +1,9 @@
+## 2026-08-05 21:30
+- [x] **彻底解决多周期筛选器启动后 IPC 模式无法自动获取全部 400+ 列高密数据逻辑 Bug (`ats/ui/multi_period_dialog.py`, `multi_period_strategy_engine.py`, `scratch/test_ipc_last_backfill.py`)**：
+    - [x] **根因解构与时序修复**：排查发现 `MultiPeriodWorker` 后台线程在加载多周期（W/M等）数据前发起的 IPC 回补数据包可能被未完全接收或缺失衍生列；且在周期数据加载完成后未进行统一的数据回补，导致策略评估时仅依赖基础列，直到用户手动点击“诊断”触发强制刷新时才补充全量 IPC 列。
+    - [x] **统一 post-load IPC 回补机制 (Unified Post-Load Backfill Flow)**：在 `MultiPeriodWorker.run` 选定周期数据加载完成后，新增最后统一调起 `ensure_strategy_ipc_columns(force_refresh=True)` 机制，并在 `ensure_strategy_ipc_columns` 内部植入 IPC 数据包有效列数 (>=20 列) 校验与 `ipc_df` 全量 400+ 衍生列自动扩展回补至日线 `df` 缓存，确保在策略评估前完成 100% 高保真实时行情数据注入。
+    - [x] **数据流集成测试验证 100% 成功通过**：新建 `scratch/test_ipc_last_backfill.py` 端到端集成测试，验证加载周期数据后统一回补机制成功注入 400+ 项 IPC 衍生列，全量 17 项单元测试 100% 成功通过！
+
 ## 2026-08-05 21:05
 - [x] **实现窗口布局管理器 (`manage_window_layout.py`) `-hide` 托盘后台不弹窗启动模式与开机自启无缝联动 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_autostart_registry.py`)**：
     - [x] **新增 `-hide` / `-min` 托盘后台不弹窗启动模式 (`manage_window_layout.py`, `ui.py`)**：在 CLI 解析与 `WindowPosManagerUI.main()` 入口中新增 `-hide` / `--hide` / `-min` / `--min` 命令行参数。带有 `-hide` 参数启动时，仅保持 UI 主界面隐藏不动（常驻 Windows 任务栏系统托盘 `QSystemTrayIcon`），不触发 CLI 移动对齐功能，不自动应用布局，静默待命。

@@ -29,7 +29,7 @@ def test_attach_multiday_twap_injects_full_columns():
     for col in expected_cols:
         assert col in res.columns, f"Missing derived column: {col}"
     
-    print("✅ attach_multiday_twap_to_df column injection verification PASSED!")
+    print("[OK] attach_multiday_twap_to_df column injection verification PASSED!")
 
 def test_ipc_send_package_contains_dynamic_twap():
     """验证在 MarketBus 与 send_df 发送流程中全量衍生列能够被保底挂载"""
@@ -45,7 +45,7 @@ def test_ipc_send_package_contains_dynamic_twap():
     cache.attach_multiday_twap_to_df(df_bus_all)
     assert 'vwap_cum_2d' in df_bus_all.columns
     assert 'nclose' in df_bus_all.columns
-    print("✅ IPC send package dynamic twap attachment PASSED!")
+    print("[OK] IPC send package dynamic twap attachment PASSED!")
 
 if __name__ == '__main__':
     pytest.main([__file__])

@@ -351,7 +351,8 @@ class MultiPeriodWorker(QThread):
             return False
         is_trade = cct.get_work_time_duration()
         if not is_trade:
-            return (time.time() - ts) < 1800
+            # 🛡️ 非交易时段 (非盘中/夜间/周末): 市场收盘状态，行情数据保持静态不变，Cache 始终有效
+            return True
         return (time.time() - ts) < 900  # 盘中交易时段 15 分钟 (900s) TTL 自动刷新
 
     def run(self):
@@ -370,10 +371,10 @@ class MultiPeriodWorker(QThread):
                     ipc_mgr = get_global_ipc_sync_manager()
                     if ipc_mgr is not None:
                         ipc_df = ipc_mgr.get_current_df()
-                        if ipc_df is not None and not ipc_df.empty and len(ipc_df) > 100:
+                        if ipc_df is not None and not ipc_df.empty and len(ipc_df) > 100 and len(ipc_df.columns) >= 20:
                             self.top_now = ipc_df
                             self.top_now_cache_ts[0] = time.time()
-                            logger.info(f"[MultiPeriodWorker] ⚡ 优先使用 IPC 实时行情数据 (共 {len(ipc_df)} 行)")
+                            logger.info(f"[MultiPeriodWorker] ⚡ 优先使用 IPC 实时行情数据 (共 {len(ipc_df)} 行, {len(ipc_df.columns)} 列)")
                 except Exception as e_ipc:
                     logger.debug(f"IPC top_now fetch failed: {e_ipc}")
 
@@ -389,6 +390,7 @@ class MultiPeriodWorker(QThread):
 
                 if self.top_now is not None and not self.top_now.empty and 'ratio' not in self.top_now.columns:
                     try:
+                        from JohnsonUtil import commonTips as cct
                         from JSONData import realdatajson as rl
                         dd = rl.get_sina_Market_json('all')
                         if isinstance(dd, pd.DataFrame) and 'ratio' in dd.columns:
@@ -508,6 +510,45 @@ class MultiPeriodWorker(QThread):
                     if period in self.engine._missing_periods:
                         reason = self.engine._missing_periods[period]
                         self.progress.emit(f"⚠️ [{period}] 数据不可用({reason})，策略将自适应跳过此周期过滤")
+
+            # ── 3. [最后数据回补] 所有周期选择加载完成后，最后统一全量回补高密 IPC 实时行情数据 ──
+            try:
+                from multi_period_strategy_engine import get_global_ipc_sync_manager
+                ipc_mgr = get_global_ipc_sync_manager()
+                if ipc_mgr is not None:
+                    ipc_df = ipc_mgr.get_current_df()
+                    try:
+                        from JohnsonUtil import commonTips as cct
+                        is_work_time = cct.get_work_time()
+                    except Exception:
+                        is_work_time = False
+
+                    last_recv = getattr(ipc_mgr, 'last_recv_t', 0.0)
+                    cache_expired = (time.time() - last_recv > 900.0) if is_work_time else False
+                    has_valid_ipc = (ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20)
+
+                    # 仅在内存无数据/数据不足/或交易期内 Cache 超时且 force_reload 时，才触发 Pipe 管道 request_full_sync
+                    if not has_valid_ipc or (cache_expired and self.force_reload):
+                        ipc_mgr.request_full_sync()
+                        for _ in range(25):
+                            time.sleep(0.1)
+                            ipc_df = ipc_mgr.get_current_df()
+                            if ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20:
+                                break
+
+                    if ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20:
+                        self.top_now = ipc_df
+                        self.top_now_cache_ts[0] = time.time()
+
+                        # 回补更新日线 'd' 周期的 IPC 策略与 400+ 高密衍生列（按需缓存，防范非交易时段与重复点击造成的卡顿）
+                        df_d = self.engine._period_dfs.get('d')
+                        if df_d is not None and not df_d.empty:
+                            df_d = self.engine.ensure_strategy_ipc_columns(df_d, force_refresh=self.force_reload)
+                            with self.engine.lock:
+                                self.engine._period_dfs['d'] = df_d
+                        logger.info(f"[MultiPeriodWorker] ⚡ [最后数据回补完成] 成功注入 IPC 高密实时行情 (共 {len(ipc_df)} 行, {len(ipc_df.columns)} 列)")
+            except Exception as e_backfill:
+                logger.warning(f"[MultiPeriodWorker] 最后 IPC 数据回补遇到异常: {e_backfill}")
 
             self.progress.emit("🔍 正在执行跨周期交叉验证...")
             result_df = self.engine.evaluate_strategy(self.strat_config, self.active_periods, force_refresh=self.force_reload)
@@ -1208,6 +1249,13 @@ class MultiPeriodStrategyEditorDialog(QDialog):
 
                     # 4. 执行 query_engine.execute 高级花括号宏与全Col过滤求值
                     if df_p is not None and not df_p.empty:
+                        if hasattr(self.engine, 'ensure_strategy_ipc_columns') and str(period).strip() in ('d', '1d', 'day'):
+                            df_p = self.engine.ensure_strategy_ipc_columns(df_p, strategy_expr=expr)
+                            if hasattr(self.engine, 'lock'):
+                                with self.engine.lock:
+                                    self.engine._period_dfs[period] = df_p
+                                    self.engine._period_dfs['d'] = df_p
+
                         from query_engine_util import query_engine
                         df_clean = df_p.fillna(0)
                         if query_engine:
@@ -4942,7 +4990,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                 else:
                     df_p = self.engine._period_dfs[p_norm]
                     if p_norm == 'd':
-                        self.engine.ensure_strategy_ipc_columns(df_p, force_refresh=True)
+                        self.engine.ensure_strategy_ipc_columns(df_p, force_refresh=False)
         finally:
             QApplication.restoreOverrideCursor()
 
