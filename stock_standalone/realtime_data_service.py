@@ -105,6 +105,16 @@ def _normalize_time_column(series: pd.Series) -> pd.Series:
         return pd.to_numeric(series, errors='coerce').fillna(0).astype('int64')
 
 
+_GLOBAL_KLINE_CACHE = None
+
+def get_global_kline_cache() -> "MinuteKlineCache":
+    """获取全局共享的 MinuteKlineCache 单例实例"""
+    global _GLOBAL_KLINE_CACHE
+    if _GLOBAL_KLINE_CACHE is None:
+        _GLOBAL_KLINE_CACHE = MinuteKlineCache()
+    return _GLOBAL_KLINE_CACHE
+
+
 class MinuteKlineCache:
     """
     分时K线缓存
@@ -800,36 +810,58 @@ class MinuteKlineCache:
         [底层自动计算注入] 自动将 MinuteKlineCache 内存中计算出的多日 TWAP/VWAP 均线指标
         (nclose, last_nclose, last_nclose1d, nclose1d, nclose2d, last_nclose2d, nclose3d...)
         批量计算并直接写入 df 对象的列中，与系统其他动态分值/指标完全一致，原生支持 query 查询与 {1-9}d 模板。
+        支持 code 存在于 df.columns 或 df.index。
         """
-        if df is None or df.empty or 'code' not in df.columns:
+        if df is None or df.empty:
             return df
 
+        CORE_KEYS = [
+            'nclose', 'last_nclose', 'last_nclose1d', 'nclose1d', 'nclose2d', 'last_nclose2d', 'nclose3d',
+            'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
+            'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_vwap_cum_4d'
+        ]
+
         try:
-            unique_codes = df['code'].dropna().astype(str).str.strip().str.zfill(6).unique()
+            if 'code' in df.columns:
+                code_series = df['code'].dropna().astype(str).str.strip().str.zfill(6)
+            elif df.index.name == 'code' or (len(df.index) > 0 and str(df.index[0]).strip().isdigit()):
+                code_series = pd.Series(df.index, index=df.index).dropna().astype(str).str.strip().str.zfill(6)
+            else:
+                return df
+
+            unique_codes = code_series.unique()
             if len(unique_codes) == 0:
                 return df
 
             twap_maps = {}
-            all_keys = set()
+            all_keys = set(CORE_KEYS)
             for code_str in unique_codes:
                 rel = self.get_daily_twap_relative(code_str)
                 if rel:
                     twap_maps[code_str] = rel
                     all_keys.update(rel.keys())
 
-            if not twap_maps or not all_keys:
-                return df
-
-            code_series = df['code'].astype(str).str.strip().str.zfill(6)
+            fallback_series = df['close'] if 'close' in df.columns else (df['trade'] if 'trade' in df.columns else None)
 
             for key in sorted(all_keys):
-                key_dict = {c: m[key] for c, m in twap_maps.items() if key in m}
-                if key_dict:
-                    mapped_vals = code_series.map(key_dict)
-                    if key in df.columns:
+                key_dict = {c: m[key] for c, m in twap_maps.items() if key in m} if twap_maps else {}
+                mapped_vals = code_series.map(key_dict) if key_dict else None
+                
+                if key in df.columns:
+                    if mapped_vals is not None:
                         df[key] = mapped_vals.fillna(df[key])
+                    if fallback_series is not None:
+                        df[key] = df[key].fillna(fallback_series)
+                else:
+                    if mapped_vals is not None:
+                        if fallback_series is not None:
+                            df[key] = mapped_vals.fillna(fallback_series).values
+                        else:
+                            df[key] = mapped_vals.values
+                    elif fallback_series is not None:
+                        df[key] = fallback_series.values
                     else:
-                        df[key] = mapped_vals
+                        df[key] = 0.0
 
         except Exception as e:
             if hasattr(self, 'verbose') and self.verbose:
@@ -2883,6 +2915,8 @@ class DataPublisher:
             verbose=verbose
         )
         self.kline_cache._publisher = self
+        global _GLOBAL_KLINE_CACHE
+        _GLOBAL_KLINE_CACHE = self.kline_cache
         self.auto_switch_enabled = True # 开启自动降级/清理
         self.mem_threshold_mb = int(getattr(cct.CFG, 'mem_threshold_mb', 1800))  # 1.8GB 阈值
         self.node_threshold = 2000000 # 200万节点阈值

@@ -271,7 +271,10 @@ class IPCTesterGUI(QMainWindow):
         self.log(f"正在建立 IPCSyncManager 句柄，绑定端口: {port}...")
         self.ipc_mgr = IPCSyncManager(port=port)
         self.ipc_mgr.start()
-        time.sleep(0.15)
+        if hasattr(self.ipc_mgr, '_bind_event'):
+            self.ipc_mgr._bind_event.wait(timeout=1.0)
+        else:
+            time.sleep(0.15)
 
         if getattr(self.ipc_mgr, 'is_bound', False):
             self.spn_port.setValue(port)
@@ -285,7 +288,10 @@ class IPCTesterGUI(QMainWindow):
             self.current_port = fallback_port
             self.ipc_mgr = IPCSyncManager(port=fallback_port)
             self.ipc_mgr.start()
-            time.sleep(0.15)
+            if hasattr(self.ipc_mgr, '_bind_event'):
+                self.ipc_mgr._bind_event.wait(timeout=1.0)
+            else:
+                time.sleep(0.15)
             self.spn_port.setValue(fallback_port)
             self.lbl_status.setText(f"状态: ✅ 智能切至备用端口 {fallback_port} 监听就绪")
             self.lbl_status.setStyleSheet("color: #0d6efd; font-weight: bold;")

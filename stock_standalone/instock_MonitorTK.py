@@ -5943,12 +5943,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         full_df = latest_p
                     
                     if full_df is not None:
-                        # 🚀 [CORE FIX] 在发布到 MarketStateBus 前，确保全量快照注入了动态均价与多日 VWAP 衍生列
-                        kline_cache = None
-                        if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
-                            kline_cache = self.realtime_service.kline_cache
-                        elif hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'kline_cache') and self.live_strategy.kline_cache:
-                            kline_cache = self.live_strategy.kline_cache
+                        try:
+                            from realtime_data_service import get_global_kline_cache
+                            kline_cache = get_global_kline_cache()
+                        except Exception:
+                            kline_cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
 
                         if kline_cache:
                             try:
@@ -6251,6 +6250,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if query:
                 from query_engine_util import query_engine
                 try:
+                    try:
+                        from realtime_data_service import get_global_kline_cache
+                        kline_cache = get_global_kline_cache()
+                    except Exception:
+                        kline_cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
+
+                    if kline_cache and target_full_df is not None and not target_full_df.empty:
+                        kline_cache.attach_multiday_twap_to_df(target_full_df)
+
                     df = query_engine.execute(target_full_df, query)
                 except Exception:
                     df = target_full_df
@@ -8777,6 +8785,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if df_bus_all is None or df_bus_all.empty:
                         time.sleep(0.5)
                         continue
+
+                    # ⚡ [CORE FIX] 确保推送给 26670 (ATS) 与 26671 (多周期引擎) 的全量快照包含算齐的 vwap_cum_2d 等衍生 col
+                    try:
+                        from realtime_data_service import get_global_kline_cache
+                        kline_cache = get_global_kline_cache()
+                    except Exception:
+                        kline_cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
+
+                    if kline_cache:
+                        try:
+                            if df_bus_all is not None and not df_bus_all.empty:
+                                kline_cache.attach_multiday_twap_to_df(df_bus_all)
+                            if df_bus_all_res is not None and not df_bus_all_res.empty and df_bus_all_res is not df_bus_all:
+                                kline_cache.attach_multiday_twap_to_df(df_bus_all_res)
+                        except Exception as ex_twap:
+                            logger.error(f"[send_df] Failed to attach dynamic twap: {ex_twap}")
 
                     # ⚡ [CORE] 采用总线快照进行可视化分发 (判断并同步跟界面显示轨 df_all_res 数据对齐)
                     if cur_resample != 'd' and df_bus_all_res is not None and not df_bus_all_res.empty:

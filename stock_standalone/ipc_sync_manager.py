@@ -27,6 +27,8 @@ class IPCSyncManager:
         self.df_lock = threading.Lock()
         
         self._listener_running = False
+        self.is_bound = False
+        self._bind_event = threading.Event()
         self.server_socket = None
         self._listener_thread = None
         self._heartbeat_thread = None
@@ -49,6 +51,8 @@ class IPCSyncManager:
     def start(self):
         """开启后台 TCP 监听服务，并向主进程请求初始数据"""
         self._listener_running = True
+        self.is_bound = False
+        self._bind_event.clear()
         self._listener_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listener_thread.start()
         
@@ -61,6 +65,8 @@ class IPCSyncManager:
     def stop(self):
         """安全停止监听"""
         self._listener_running = False
+        self.is_bound = False
+        self._bind_event.clear()
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -134,13 +140,24 @@ class IPCSyncManager:
 
     def _listen_loop(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            try:
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            except Exception:
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        else:
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         try:
             self.server_socket.bind(('127.0.0.1', self.port))
             self.server_socket.listen(5)
+            self.is_bound = True
         except Exception as e:
+            self.is_bound = False
             self.log_error(f"绑定端口 {self.port} 失败: {e}")
+            self._bind_event.set()
             return
+        self._bind_event.set()
 
         while self._listener_running:
             try:

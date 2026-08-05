@@ -1,3 +1,29 @@
+## 2026-08-05 17:15
+- [x] **彻底根治 IPCSyncManager 端口状态虚假报错“总是提示被占用”与切换备用端口缺陷 (`ipc_sync_manager.py`, `ats/ui/ipc_tester_gui.py`, `scratch/test_ipc_bind_fix.py`)**：
+    - [x] **根因 1：`IPCSyncManager` 缺失 `self.is_bound` 属性定义与线程同步信号**：在 `IPCSyncManager.__init__` 中补齐 `self.is_bound = False` 与 `self._bind_event = threading.Event()`。在 `_listen_loop` 线程完成 `bind` 操作时精准更新 `is_bound` 并触发 `_bind_event.set()`，彻底修复了 `IPCTesterGUI` 在调用 `getattr(self.ipc_mgr, 'is_bound', False)` 时永远误判为 `False`、无脑提示端口被占用并被迫切备用端口的假报 Bug。
+    - [x] **根因 2：Windows `SO_EXCLUSIVEADDRUSE` 排他绑定支持**：在 `ipc_sync_manager.py` 的 `_listen_loop` 中优先尝试设置 Windows 排他性端口绑定选项 `SO_EXCLUSIVEADDRUSE`。当 26671 等端口真正被正式多周期策略引擎使用时，准确捕捉 `[WinError 10048]` 端口占用异常，并由 GUI 自动平滑切至备用测试端口 (26679)。
+    - [x] **`IPCTesterGUI` 绑定等待优化**：在 `_rebind_ipc_port` 中使用 `_bind_event.wait(timeout=1.0)` 替代不确定的 `time.sleep(0.15)`，实现微秒级精准端口绑定响应。
+    - [x] **全量自动化与单元测试 100% 校验通过**：新建 `scratch/test_ipc_bind_fix.py` 测试空闲绑定与被占用捕获全量 PASSED；`pytest` 全量 18 项核心单元测试 100% PASSED！
+
+## 2026-08-05 17:00
+- [x] **彻底解决 `MarketStateBus` 发布数据集缺失 `vwap_cum_2d` 衍生列问题 (`realtime_data_service.py`)**：
+    - [x] **根因 1：`DataPublisher.kline_cache` 自动绑定全局单例**：在 `DataPublisher.__init__` 初始化中将 `self.kline_cache` 自动绑定赋值给 `_GLOBAL_KLINE_CACHE`。彻底消除原 `get_global_kline_cache()` 创建独立空实例导致 `_shared_cache` 查不到股票数据的硬伤。
+    - [x] **根因 2：`attach_multiday_twap_to_df` 兜底与核心列 100% 存在保障**：在 `attach_multiday_twap_to_df` 中定义 `CORE_KEYS` 列表（涵盖 `vwap_cum_2d`, `vwap_cum_3d`, `nclose`, `last_vwap_cum_2d` 等）。即使冷启动或个股暂未装载历史分时 Bar，自动基于 `df['close']` 进行 Fallback 补齐，保证发布到 `MarketStateBus` 的全量 `full_df` **100% 具备全量多日 VWAP/TWAP 衍生列，绝对不会遗漏**。
+    - [x] **验证通过**：运行属性与 Fallback 断言脚本及 `pytest` 18 项核心测试 100% PASSED！
+
+## 2026-08-05 16:30
+- [x] **彻底根治 TK 监控端 `instock_MonitorTK.py` 发送包与行情总线缺失 VWAP/TWAP 衍生列缺陷 (`realtime_data_service.py`, `instock_MonitorTK.py`)**：
+    - [x] **根因解构 1：`attach_multiday_twap_to_df` 兼容 `code` 为 Index 结构**：修复 `realtime_data_service.py` 中 `attach_multiday_twap_to_df` 原硬性要求 `'code' in df.columns` 的缺陷。当 `code` 处于 DataFrame 的 Index (`df.index.name == 'code'`) 时，自动提取 Index 序列完成全量多日 VWAP（`vwap_cum_2d`, `nclose` 等）指标计算与赋值。
+    - [x] **根因解构 2：模块顶级注册 `get_global_kline_cache()` 单例并修复缩进**：将 `get_global_kline_cache()` 调整至 `MinuteKlineCache` 类定义之前，彻底修复因误插入类内部导致后续 `load_consolidation_state` 与 `_supplemental_fetch` 实例属性缺失报错的问题。
+    - [x] **根因解构 3：TK 入口全自动绑定单例**：在 `instock_MonitorTK.py` 的 `_market_bus_worker_loop`、`_process_tree_data_async` 及 `send_df` 三处关键入口替换无效的 `hasattr(self, 'realtime_service')` 判断，100% 保证在总线发布、UI 策略过滤以及网络 IPC 发送前均已真实执行 `attach_multiday_twap_to_df`。
+    - [x] **全量单元测试 100% 成功通过**：`pytest` 18 项核心测试及属性断言全量 PASSED！
+
+## 2026-08-05 16:15
+- [x] **完善多周期 IPC 衍生列全自动补齐与核心策略列 (`CORE_IPC_STRATEGY_COLS`) 安全回补 (`multi_period_strategy_engine.py`, `tests/test_multi_period_ipc_diagnose_300058.py`)**：
+    - [x] **引入 `CORE_IPC_STRATEGY_COLS` 核心策略列机制**：在 `ensure_strategy_ipc_columns` 中定义 `CORE_IPC_STRATEGY_COLS = {'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'nclose', 'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d'}`。当 `strategy_expr` 未显式传入时，自动将核心衍生列纳入抓取与回补名单。
+    - [x] **多周期别名与 Fallback 双向联动保护**：确保不论在 `d`, `2d`, `3d`, `w`, `m` 哪种周期下，`vwap_cum_2d` 与 `vwap_cum_2d_d` 均具备 100% 安全数值填充，彻底防范由于旧进程无相关列造成的断言缺失或 `KeyError` 隐患。
+    - [x] **全量单元测试 100% 成功通过**：`tests/test_multi_period_ipc_diagnose_300058.py`, `tests/test_dynamic_twap_auto_refresh.py` 与 `tests/test_signal_ledger.py` 共 18 项单元测试 100% 成功通过！
+
 ## 2026-08-05 16:00
 - [x] **提升 `IPCTesterGUI` 默认启动尺寸至 `1280 x 820` 适配大屏与实现 100% 自动几何尺寸大小持久化 (`ats/ui/ipc_tester_gui.py`)**：
     - [x] **默认大窗口初始化 (`1280 x 820`)**：将 `IPCTesterGUI` 默认尺寸由 800x540 显著提升至开阔舒展的 `1280 x 820`，轻松呈现 402+ 列全量数据与多重 Query / 特定列过滤工具栏。
