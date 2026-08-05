@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
-    QSizePolicy, QTabWidget
+    QSizePolicy, QTabWidget, QCheckBox
 )
 from PyQt6.QtGui import QAction, QIcon
 
@@ -2179,6 +2179,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_bind_hotkey.clicked.connect(self.on_bind_hotkey_clicked)
         bottom_bar.addWidget(self.btn_bind_hotkey)
         
+        # --- 开机自启复选框 ---
+        self.chk_autostart = QCheckBox("开机自启")
+        self.chk_autostart.setToolTip("勾选后系统开机时将通过 Windows 注册表自动运行启动程序")
+        self.chk_autostart.setChecked(core.is_autostart_enabled())
+        self.chk_autostart.stateChanged.connect(self.on_autostart_changed)
+        bottom_bar.addWidget(self.chk_autostart)
+
         self.btn_open_perf = QPushButton("📐 性能分析")
         self.btn_open_perf.setObjectName("btnPerf")
         self.btn_open_perf.clicked.connect(self.open_performance_analyzer)
@@ -2206,6 +2213,20 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         main_layout.addLayout(bottom_bar)
 
         self.log("界面加载完毕。")
+
+    def on_autostart_changed(self, state):
+        """开机自启复选框勾选状态改变时的响应回调"""
+        enable = (state == QtCore.Qt.CheckState.Checked.value or state == 2)
+        success, msg = core.set_autostart_enabled(enable)
+        if success:
+            self.log(f"🎯 {msg}")
+        else:
+            self.log(f"❌ {msg}")
+            # 如果操作失败，还原复选框真实状态
+            self.chk_autostart.blockSignals(True)
+            self.chk_autostart.setChecked(core.is_autostart_enabled())
+            self.chk_autostart.blockSignals(False)
+            QMessageBox.warning(self, "开机自启注册表设置失败", msg)
 
     def log(self, text: str):
         """输出一条日志"""
