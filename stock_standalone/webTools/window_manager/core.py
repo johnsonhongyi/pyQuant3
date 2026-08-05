@@ -1142,5 +1142,129 @@ def check_and_activate_existing_instance() -> bool:
     return False
 
 
+# ==========================================
+# Windows 注册表开机自启动管理 API
+# ==========================================
+REG_AUTORUN_SUBKEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+REG_AUTORUN_NAME = "ManageWindowLayout"
+
+def get_autostart_command() -> str:
+    """
+    获取开机自启运行命令行，精准支持打包(PyInstaller/Nuitka/EXE)与源码运行两种场景。
+    """
+    is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    
+    if is_frozen or (sys.executable.lower().endswith(".exe") and "python" not in os.path.basename(sys.executable).lower()):
+        # 打包成 EXE 运行环境：直接使用 sys.executable 打包的 exe 绝对物理路径
+        exe_path = os.path.abspath(sys.executable)
+        return f'"{exe_path}"'
+    else:
+        # 开发源码运行环境：优先检查程序物理根目录或 dist 目录下是否存在已编译打包的 EXE 文件
+        app_root = get_app_root()
+        possible_exes = [
+            os.path.join(app_root, "manage_window_layout.exe"),
+            os.path.join(app_root, "dist", "manage_window_layout.exe"),
+            os.path.join(app_root, "webTools", "manage_window_layout.exe")
+        ]
+        for p in possible_exes:
+            if os.path.exists(p):
+                return f'"{os.path.abspath(p)}"'
+
+        # 否则使用当前 Python 解释器 + manage_window_layout.py 脚本绝对路径
+        script_path = os.path.join(app_root, "webTools", "manage_window_layout.py")
+        if not os.path.exists(script_path):
+            script_path = os.path.abspath(sys.argv[0])
+        python_exe = os.path.abspath(sys.executable)
+        return f'"{python_exe}" "{script_path}"'
+
+
+
+
+def is_autostart_enabled() -> bool:
+    """
+    检查 Windows 注册表中是否已设置开机自启
+    检查 HKCU 与 HKLM 的 SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                key = winreg.OpenKey(root_key, REG_AUTORUN_SUBKEY, 0, winreg.KEY_READ)
+                try:
+                    val, _ = winreg.QueryValueEx(key, REG_AUTORUN_NAME)
+                    if val:
+                        winreg.CloseKey(key)
+                        return True
+                except FileNotFoundError:
+                    pass
+                finally:
+                    winreg.CloseKey(key)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def set_autostart_enabled(enable: bool) -> tuple:
+    """
+    通过注册表开启或关闭开机自启
+    返回: (success: bool, message: str)
+    """
+    if sys.platform != "win32":
+        return False, "非 Windows 系统不支持注册表开机自启"
+
+    try:
+        import winreg
+        cmd = get_autostart_command()
+
+        if enable:
+            # 优先写入 HKCU (无需管理员权限)
+            written = False
+            err_msg = ""
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_AUTORUN_SUBKEY, 0, winreg.KEY_ALL_ACCESS)
+                winreg.SetValueEx(key, REG_AUTORUN_NAME, 0, winreg.REG_SZ, cmd)
+                winreg.CloseKey(key)
+                written = True
+            except Exception as e:
+                err_msg = str(e)
+                # 尝试 HKLM
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REG_AUTORUN_SUBKEY, 0, winreg.KEY_ALL_ACCESS)
+                    winreg.SetValueEx(key, REG_AUTORUN_NAME, 0, winreg.REG_SZ, cmd)
+                    winreg.CloseKey(key)
+                    written = True
+                except Exception as e2:
+                    err_msg = f"HKCU: {e}, HKLM: {e2}"
+
+            if written:
+                return True, f"开机自启已设置成功 (启动命令: {cmd})"
+            else:
+                return False, f"写入注册表自启动项失败 (可能需要管理员权限): {err_msg}"
+        else:
+            # 关闭：删除 HKCU 与 HKLM 中的启动项
+            deleted = False
+            for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    key = winreg.OpenKey(root_key, REG_AUTORUN_SUBKEY, 0, winreg.KEY_ALL_ACCESS)
+                    try:
+                        winreg.DeleteValue(key, REG_AUTORUN_NAME)
+                        deleted = True
+                    except FileNotFoundError:
+                        pass
+                    finally:
+                        winreg.CloseKey(key)
+                except Exception:
+                    pass
+
+            return True, "开机自启已在注册表中关闭"
+    except Exception as e:
+        return False, f"操作注册表异常: {e}"
+
+
+
 
 

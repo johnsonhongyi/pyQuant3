@@ -1,3 +1,10 @@
+## 2026-08-05 20:45
+- [x] **实现窗口布局管理器 (`manage_window_layout.py`) 注册表开机自启管理与命令行/UI 完整支持 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`, `tests/test_autostart_registry.py`)**：
+    - [x] **Core 层精准可执行文件路径提取与注册表 API (`core.py`)**：在 `window_manager/core.py` 中实现了 `get_autostart_command()`、`is_autostart_enabled()` 以及 `set_autostart_enabled(enable)`。通过 `sys.executable` 与 `get_app_root()` 智能识别 Nuitka/PyInstaller 编译打包后的可执行文件路径 (`manage_window_layout.exe`) 与开发源码环境路径，直接生成标准运行命令行（不含额外 `-cli`）。注册表优先操作 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（无需管理员权限），并做 HKLM 双重安全降级防护。
+    - [x] **图形化 UI 复选框开机自启切换 (`ui.py`)**：在 `WindowPosManagerUI` 的底部工具栏中无缝嵌入 `QCheckBox("开机自启")`。启动时自动读取注册表状态进行初始化勾选/取消勾选，用户点击时实时触发注册表开启或关闭，操作失败自动物理还原复选框状态并弹出错误提示。
+    - [x] **CLI 命令行开启/关闭/状态查询通道 (`manage_window_layout.py`)**：在主入口中扩展命令行参数 `--autostart-on`、`--autostart-off` 与 `--autostart-status`，支持全命令行无 UI 环境下对开机自启注册表项的管理与查询，并更新了 `-h` 帮助说明。
+    - [x] **单元测试 100% 校验通过**：新建 `tests/test_autostart_registry.py`，完整覆盖打包/源码路径提取、注册表项写入、读取与自动清理流程，全量测试 100% 成功通过！
+
 ## 2026-08-05 20:15
 - [x] **实现 `popularity_resonance_gui.py` 动态端口 IPC 按需获取与即时释放机制 (`popularity_resonance_gui.py`, `scratch/test_popularity_dynamic_ipc.py`)**：
     - [x] **废除长期常驻 Socket 端口监听**：彻底废除 `PRServiceGUI` 启动时无脑调用 `IPCSyncManager(port=26671).start()` 的资源锁死模式。设计 `_DynamicIPCSyncProxy` 适配器代理，仅在自动刷新或点击【查询刷新】时按需开启动态端口向主程序拉取行情。

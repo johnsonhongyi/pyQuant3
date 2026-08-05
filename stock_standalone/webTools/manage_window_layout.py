@@ -76,12 +76,22 @@ if __name__ == '__main__':
     use_ui = True
     is_help = False
     debug_mode = False
+    autostart_action = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         arg_lower = arg.lower()
         if arg_lower in ['-h', '--help', '/?', '-help']:
             is_help = True
         elif arg_lower in ['--noui', '-noui', '--cli', '-cli', '--apply', '-apply', '-c']:
+            use_ui = False
+        elif arg_lower in ['--autostart-on', '-autostart-on']:
+            autostart_action = 'on'
+            use_ui = False
+        elif arg_lower in ['--autostart-off', '-autostart-off']:
+            autostart_action = 'off'
+            use_ui = False
+        elif arg_lower in ['--autostart-status', '-autostart-status']:
+            autostart_action = 'status'
             use_ui = False
         elif arg_lower == '-log':
             debug_mode = True
@@ -101,6 +111,9 @@ if __name__ == '__main__':
         print("\n可选参数:")
         print("  -h, --help            显示此帮助信息并退出。")
         print("  -cli, -noui, -apply   静默命令行模式。不启动 UI 界面，直接在后台自动探测屏幕并应用窗口对齐。")
+        print("  --autostart-on        开启 Windows 注册表开机自启。")
+        print("  --autostart-off       关闭 Windows 注册表开机自启。")
+        print("  --autostart-status    查询当前 Windows 注册表开机自启状态。")
         print("  -log <level>          开启调试模式并指定级别 (例如: -log debug)。\n")
         sys.exit(0)
 
@@ -116,8 +129,23 @@ if __name__ == '__main__':
 
     from window_manager import (
         run_ui, ConfigManager, apply_layout_config, detect_display_config_name, 
-        check_and_add_route, check_and_activate_existing_instance
+        check_and_add_route, check_and_activate_existing_instance,
+        is_autostart_enabled, set_autostart_enabled
     )
+
+    # 4. 如果是处理开机自启命令行逻辑
+    if autostart_action == 'on':
+        success, msg = set_autostart_enabled(True)
+        print(f"[AutoStart] {'[OK] ' if success else '[FAIL] '}{msg}")
+        sys.exit(0 if success else 1)
+    elif autostart_action == 'off':
+        success, msg = set_autostart_enabled(False)
+        print(f"[AutoStart] {'[OK] ' if success else '[FAIL] '}{msg}")
+        sys.exit(0 if success else 1)
+    elif autostart_action == 'status':
+        enabled = is_autostart_enabled()
+        print(f"[AutoStart] 注册表开机自启状态: {'[开启]' if enabled else '[关闭]'}")
+        sys.exit(0)
 
     # 4. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；
     # 纯命令行 CLI 模式 (-cli) 绝对不去唤醒/打开 UI 窗口！

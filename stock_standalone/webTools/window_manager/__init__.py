@@ -18,7 +18,9 @@ from .core import (
     bring_window_to_top_by_title,
     check_and_add_route,
     get_wm_show_msg_id,
-    check_and_activate_existing_instance
+    check_and_activate_existing_instance,
+    is_autostart_enabled,
+    set_autostart_enabled
 )
 
 from .ui import (
@@ -41,7 +43,10 @@ __all__ = [
     'check_and_add_route',
     'get_wm_show_msg_id',
     'check_and_activate_existing_instance',
+    'is_autostart_enabled',
+    'set_autostart_enabled',
     'WindowPosManagerUI',
     'run_ui'
 ]
+
 
