@@ -223,6 +223,51 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return t1 < t2
 
 
+class PinnedNumericTableWidgetItem(NumericTableWidgetItem):
+    """
+    带优先置顶 (Pinned) 感知与内部排序保护的 QTableWidgetItem。
+    使得包含此 Item 的表格在开启 setSortingEnabled(True) 且 Header 触发排序时，
+    置顶行 (is_pinned=True) 绝对永远排序停留在表格的最顶端 (Row 0, Row 1...)。
+    """
+    def __init__(self, text, is_pinned=False, pin_rank=999, header_view=None):
+        super().__init__(text)
+        self.is_pinned = is_pinned
+        self.pin_rank = pin_rank
+        self.header_view = header_view
+
+    def __lt__(self, other):
+        if not isinstance(other, QTableWidgetItem):
+            return super().__lt__(other)
+
+        other_pinned = getattr(other, 'is_pinned', False)
+        other_rank = getattr(other, 'pin_rank', 999)
+
+        # 检查所属 Header 的当前排序方向 (AscendingOrder 或 DescendingOrder)
+        is_descending = False
+        if self.header_view and hasattr(self.header_view, 'sortIndicatorOrder'):
+            from PyQt6.QtCore import Qt
+            is_descending = (self.header_view.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+
+        # 1. 一个置顶，一个普通
+        if self.is_pinned != other_pinned:
+            if is_descending:
+                # 在降序模式下 (0号位最大)：置顶行必须 "大于" 普通行 (self > other => self < other 返回 False)
+                return not self.is_pinned
+            else:
+                # 在升序模式下 (0号位最小)：置顶行必须 "小于" 普通行 (self < other => self < other 返回 True)
+                return self.is_pinned
+
+        # 2. 两个都是置顶行：按照 pin_rank (0 > 1 > 2...)
+        if self.is_pinned and other_pinned:
+            if is_descending:
+                return self.pin_rank > other_rank
+            else:
+                return self.pin_rank < other_rank
+
+        # 3. 两个都是普通行：调用 NumericTableWidgetItem 的标准数值/文本比较
+        return super().__lt__(other)
+
+
 from PyQt6.QtCore import QObject, QEvent
 
 class ShowEventFilter(QObject):

@@ -21,7 +21,7 @@ import time
 import datetime
 
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, NumericTableWidgetItem
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, NumericTableWidgetItem, PinnedNumericTableWidgetItem
 
 
 class GlobalMarketWorker(QThread):
@@ -498,6 +498,7 @@ class GlobalMarketPanel(QWidget):
             price = info.get('price', 0.0)
             pct = info.get('pct', 0.0)
             is_pinned = symbol in self.pinned_symbols
+            pin_rank = self.pinned_symbols.index(symbol) if is_pinned else 999
 
             c_info = mapping_info.get(symbol, (name, '科技 / 综合板块'))
             c_name = f"📌 {c_info[0]}" if is_pinned else c_info[0]
@@ -511,10 +512,10 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                if col_idx in (2, 3): # 价格与涨跌幅数值按数字精准排序
-                    item = NumericTableWidgetItem(val)
-                else:
-                    item = QTableWidgetItem(val)
+                item = PinnedNumericTableWidgetItem(
+                    val, is_pinned=is_pinned, pin_rank=pin_rank,
+                    header_view=self.tbl_quotes.horizontalHeader()
+                )
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (0, 4) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮
@@ -680,6 +681,7 @@ class GlobalMarketPanel(QWidget):
             rel_symbols = sector_relations.get(sec_name, "纳斯达克 / 标普500")
             tag_display = g_tag if g_tag else "--"
             is_pinned = sec_name in self.pinned_sectors
+            pin_rank = self.pinned_sectors.index(sec_name) if is_pinned else 999
             c_sec_name = f"📌 {sec_name}" if is_pinned else sec_name
 
             if b_val >= 25.0:
@@ -696,10 +698,10 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                if col_idx == 2: # Boost 分数按数字精准排序
-                    item = NumericTableWidgetItem(val)
-                else:
-                    item = QTableWidgetItem(val)
+                item = PinnedNumericTableWidgetItem(
+                    val, is_pinned=is_pinned, pin_rank=pin_rank,
+                    header_view=self.tbl_boosts.horizontalHeader()
+                )
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx in (0, 2) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮

@@ -202,6 +202,168 @@ def is_market_active_time() -> bool:
     return True
 
 
+# ---------------- 跨时区与目标市场日历安全处理模块 ----------------
+
+def get_symbol_market_timezone(symbol: str) -> str:
+    """获取指定标的所属的目标市场时区
+    - 美股 7 巨头/半导体/大宗期货/美股指数 (NVDA, AAPL, MSFT, GOOGL, AMZN, META, TSLA, MU, TSM, SOXX, QQQ, NASDAQ, SP500, OIL, BRENT, GOLD, SILVER, XAUUSD 等): 'America/New_York'
+    - 富时 A50 期货 (A50) / 离岸人民币 (USDCNH): 'Asia/Shanghai'
+    """
+    if not symbol:
+        return 'Asia/Shanghai'
+    sym_upper = str(symbol).strip().upper()
+    US_SYMBOLS = {
+        'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ',
+        'NASDAQ', 'SP500', 'OIL', 'BRENT', 'GOLD', 'SILVER', 'XAUUSD'
+    }
+    if sym_upper in US_SYMBOLS or sym_upper.startswith('GB_') or sym_upper.startswith('US'):
+        return 'America/New_York'
+    return 'Asia/Shanghai'
+
+
+def get_target_market_datetime(symbol: str) -> datetime.datetime:
+    """获取指定标的所属目标市场的当前精确 datetime (兼容 Windows/PyInstaller 零依赖 timezone 计算)"""
+    tz_name = get_symbol_market_timezone(symbol)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    if tz_name == 'America/New_York':
+        # 计算美国东部夏令时 EDT (UTC-4) 与冬令时 EST (UTC-5)
+        # EDT: 3月第2个周日 02:00 UTC 至 11月第1个周日 02:00 UTC
+        year = now_utc.year
+        mar1 = datetime.datetime(year, 3, 1, tzinfo=datetime.timezone.utc)
+        first_sun_mar = 1 + (6 - mar1.weekday()) % 7
+        second_sun_mar = first_sun_mar + 7
+        edt_start = datetime.datetime(year, 3, second_sun_mar, 2, 0, tzinfo=datetime.timezone.utc)
+
+        nov1 = datetime.datetime(year, 11, 1, tzinfo=datetime.timezone.utc)
+        first_sun_nov = 1 + (6 - nov1.weekday()) % 7
+        edt_end = datetime.datetime(year, 11, first_sun_nov, 2, 0, tzinfo=datetime.timezone.utc)
+
+        is_edt = (edt_start <= now_utc < edt_end)
+        offset_hours = -4 if is_edt else -5
+        target_tz = datetime.timezone(datetime.timedelta(hours=offset_hours))
+        return now_utc.astimezone(target_tz)
+    else:
+        # 默认 Asia/Shanghai (UTC+8)
+        sh_tz = datetime.timezone(datetime.timedelta(hours=8))
+        return now_utc.astimezone(sh_tz)
+
+
+def get_target_market_date_str(symbol: str) -> str:
+    """获取指定标的在所属目标市场的当前物理日期 YYYY-MM-DD"""
+    dt_target = get_target_market_datetime(symbol)
+    return dt_target.strftime('%Y-%m-%d')
+
+
+def is_target_market_session_open(symbol: str) -> bool:
+    """判断指定标的所属目标市场当前是否处于【盘前/盘中/盘后】开盘活跃状态（即是否处于有动态 Bar 产生的交易窗口）
+    - 美股 (US/Eastern): 04:00 - 20:00 (EDT) 为盘前/盘中/盘后交易时段；20:00 - 次日 04:00 为完全闭市休市阶段
+    - A50 / 国内外汇 (Asia/Shanghai): 周一至周五 交易时间
+    """
+    dt_target = get_target_market_datetime(symbol)
+    tz_name = get_symbol_market_timezone(symbol)
+    weekday = dt_target.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    hour = dt_target.hour
+
+    if tz_name == 'America/New_York':
+        # 周末休市 (美东周五 20:00 后 至 周日 18:00 前)
+        if weekday == 5:  # 周六
+            return False
+        if weekday == 6 and hour < 18:  # 周日 18:00 前
+            return False
+        if weekday == 4 and hour >= 20:  # 周五 20:00 后
+            return False
+
+        # 工作日：美东时间 04:00 (盘前) 至 20:00 (盘后) 为开盘/活跃交易时段；20:00 ~ 04:00 闭市休盘
+        if 4 <= hour < 20:
+            return True
+        return False
+    else:
+        if weekday >= 5:
+            return False
+        return True
+
+
+def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
+    """安全清洗与校验 K 线序列，严格剥离剔除任何 > 目标市场当前日期的穿越/未来 Bar，确保历史天数与跨时区 100% 一致"""
+    if not klines:
+        return []
+
+    target_today = get_target_market_date_str(symbol)
+    sanitized = []
+    seen_dates = set()
+
+    for item in klines:
+        if not isinstance(item, dict):
+            continue
+        d_str = str(item.get('date', '')).strip()
+        if not d_str:
+            continue
+        if len(d_str) > 10:
+            d_str = d_str[:10]
+
+        # 防穿越：绝不允许 > 目标市场当前日期
+        if d_str > target_today:
+            continue
+
+        if d_str not in seen_dates:
+            seen_dates.add(d_str)
+            item_copy = dict(item)
+            item_copy['date'] = d_str
+            sanitized.append(item_copy)
+
+    # 按日期升序排列并算齐 pct
+    sanitized.sort(key=lambda x: x['date'])
+    prev_c = None
+    for item in sanitized:
+        c = float(item.get('close', 0))
+        if prev_c and prev_c > 0 and c > 0:
+            item['pct'] = round(((c - prev_c) / prev_c) * 100.0, 2)
+        elif 'pct' not in item:
+            item['pct'] = 0.0
+        if c > 0:
+            prev_c = c
+
+    return sanitized
+
+
+def clean_all_disk_kline_caches():
+    """扫描并物理清洗全量外盘 JSON 缓存文件，从磁盘上物理剥离排除所有超出目标市场日期的穿越 Bar"""
+    cache_files = []
+    try:
+        conf_path = get_kline_cache_file_path()
+        base_dir = os.path.dirname(conf_path)
+        for fname in ['global_market_klines_yahoo.json', 'global_market_klines_sina.json', 'global_market_klines.json']:
+            fpath = os.path.join(base_dir, fname)
+            if os.path.exists(fpath):
+                cache_files.append(fpath)
+    except Exception:
+        pass
+
+    cleaned_count = 0
+    for fpath in cache_files:
+        try:
+            with open(fpath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            modified = False
+            for sym, klines in list(data.items()):
+                if isinstance(klines, list) and klines:
+                    cleaned_klines = sanitize_klines_for_symbol(sym, klines)
+                    if len(cleaned_klines) != len(klines):
+                        data[sym] = cleaned_klines
+                        modified = True
+                        cleaned_count += (len(klines) - len(cleaned_klines))
+            if modified:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                log_market_msg(f"[GlobalMarketData] 物理落盘清洗磁盘文件 {os.path.basename(fpath)}: 剔除 {cleaned_count} 条穿越/未来数据")
+        except Exception as ex:
+            log_market_msg(f"[GlobalMarketData] 清洗磁盘缓存异常 {fpath}: {ex}")
+
+
+
 # 动态梯度延迟间隔阶梯 (单位: 分钟)
 # 梯度选项: 5分钟(300s), 10分钟(600s), 15分钟(900s), 20分钟(1200s), 25分钟(1500s), 30分钟(1800s)
 CACHE_TTL_GRADIENTS_MINUTES = [5, 10, 15, 20, 25, 30]
@@ -624,48 +786,50 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
     existing_klines = all_cache.get(sym_upper, [])
 
     def merge_kline_sequences(old_list: list, new_list: list) -> list:
-        """根据 'date' 唯一键将新老 K 线序列进行增量合并与去重，按日期升序重排，确保历史天数零丢失"""
-        if not old_list: return new_list or []
-        if not new_list: return old_list or []
-        merged = {k.get('date'): dict(k) for k in old_list if k.get('date')}
-        for k in new_list:
+        """根据 'date' 唯一键将新老 K 线序列进行增量合并与去重，按日期升序重排，严格防范跨时区穿越数据"""
+        if not old_list and not new_list: return []
+        old_clean = sanitize_klines_for_symbol(sym_upper, old_list or [])
+        new_clean = sanitize_klines_for_symbol(sym_upper, new_list or [])
+        if not old_clean: return new_clean
+        if not new_clean: return old_clean
+        
+        merged = {k.get('date'): dict(k) for k in old_clean if k.get('date')}
+        for k in new_clean:
             if k.get('date'):
                 merged[k.get('date')] = dict(k)
         sorted_dates = sorted(merged.keys())
-        res = [merged[d] for d in sorted_dates]
-        prev_c = None
-        for item in res:
-            c = float(item.get('close', 0))
-            if prev_c and prev_c > 0 and c > 0:
-                item['pct'] = round(((c - prev_c) / prev_c) * 100.0, 2)
-            elif 'pct' not in item:
-                item['pct'] = 0.0
-            if c > 0:
-                prev_c = c
-        return res
+        raw_res = [merged[d] for d in sorted_dates]
+        return sanitize_klines_for_symbol(sym_upper, raw_res)
 
     def append_realtime_bar_if_needed(sym_code: str, klines: list) -> list:
-        """在交易活跃期 (is_market_active_time) 自动融合最新的外盘实时行情切片，并自动插值补全缺失的工作日 K 线"""
+        """根据目标市场时区 (Target Market Date & Session) 动态融合实时行情，绝对防范跨时区穿越 Bar"""
         if not klines:
             return klines
         
-        today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        # 1. 率先清洗剥离超出目标市场当前日期的穿越 Bar
+        clean_klines = sanitize_klines_for_symbol(sym_code, klines)
+        if not clean_klines:
+            return klines
+
+        target_today_str = get_target_market_date_str(sym_code)
+        session_open = is_target_market_session_open(sym_code)
+        
         quotes = _global_cache.get('quotes', {})
         if not quotes or sym_code not in quotes:
-            return klines
+            return clean_klines
         
         rt = quotes[sym_code]
         rt_price = float(rt.get('price', 0))
         rt_pct = float(rt.get('pct', 0))
         if rt_price <= 0:
-            return klines
+            return clean_klines
         
-        klines_copy = [dict(k) for k in klines]
+        klines_copy = [dict(k) for k in clean_klines]
         last_item = klines_copy[-1]
         last_date = last_item.get('date', '')
         
-        if last_date == today_str:
-            # 今日 K 线已存在，实时更新最新 close、pct 及 high/low 极值
+        if last_date == target_today_str:
+            # 只有在目标市场今天已开盘且有最新点位时，更新今日 K 线
             last_item['close'] = round(rt_price, 2)
             last_item['pct'] = round(rt_pct, 2)
             high_p = float(last_item.get('high', rt_price))
@@ -676,15 +840,20 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 last_item['low'] = round(rt_price, 2)
             klines_copy[-1] = last_item
         else:
-            # 检查从 last_date 到 today 之间是否有中间缺失的交易日 (周一至周五)
+            # 当 last_date < target_today_str 时:
+            # 核心卫士：只有在【目标市场当前处于交易盘中/已开盘活跃期】时，才追加 target_today_str 实时 Bar！
+            # 若目标市场今天尚未开盘 (如美东夜间闭市时段，8月5日还没开盘)，绝对不追加 target_today_str 的虚假 Bar！
+            if not session_open:
+                return klines_copy
+            
+            # 检查从 last_date 到 target_today 之间是否有中间缺失的交易日 (周一至周五)
             try:
                 dt_last = datetime.datetime.strptime(last_date, '%Y-%m-%d')
-                dt_today = datetime.datetime.strptime(today_str, '%Y-%m-%d')
+                dt_today = datetime.datetime.strptime(target_today_str, '%Y-%m-%d')
                 curr_dt = dt_last + datetime.timedelta(days=1)
                 
-                # 遍历中间日期，安全插值补全缺失的交易日 (避开周六周日)
                 while curr_dt < dt_today:
-                    if curr_dt.weekday() < 5:  # 周一至周五
+                    if curr_dt.weekday() < 5:
                         mid_date_str = curr_dt.strftime('%Y-%m-%d')
                         prev_close = float(klines_copy[-1].get('close', rt_price))
                         mid_bar = {
@@ -701,13 +870,13 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             except Exception:
                 pass
             
-            # 追加今日最新实时 Bar
+            # 追加目标市场今日最新实时 Bar
             prev_close = float(klines_copy[-1].get('close', rt_price))
             open_p = prev_close * (1.0 + rt_pct / 100.0) if prev_close > 0 else rt_price
             high_p = max(open_p, rt_price)
             low_p = min(open_p, rt_price)
             new_bar = {
-                'date': today_str,
+                'date': target_today_str,
                 'open': round(open_p, 2),
                 'high': round(high_p, 2),
                 'low': round(low_p, 2),
