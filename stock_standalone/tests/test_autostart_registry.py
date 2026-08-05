@@ -22,7 +22,7 @@ def test_autostart_command_extraction():
     cmd = core.get_autostart_command()
     print(f"[TEST] Autostart Command: {cmd}")
     assert cmd is not None
-    assert len(cmd) > 0
+    assert "-hide" in cmd
 
 def test_autostart_registry_toggle():
     """测试注册表自启动开启与关闭功能"""

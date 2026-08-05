@@ -1,9 +1,8 @@
-## 2026-08-05 20:45
-- [x] **实现窗口布局管理器 (`manage_window_layout.py`) 注册表开机自启管理与命令行/UI 完整支持 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`, `tests/test_autostart_registry.py`)**：
-    - [x] **Core 层精准可执行文件路径提取与注册表 API (`core.py`)**：在 `window_manager/core.py` 中实现了 `get_autostart_command()`、`is_autostart_enabled()` 以及 `set_autostart_enabled(enable)`。通过 `sys.executable` 与 `get_app_root()` 智能识别 Nuitka/PyInstaller 编译打包后的可执行文件路径 (`manage_window_layout.exe`) 与开发源码环境路径，直接生成标准运行命令行（不含额外 `-cli`）。注册表优先操作 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（无需管理员权限），并做 HKLM 双重安全降级防护。
-    - [x] **图形化 UI 复选框开机自启切换 (`ui.py`)**：在 `WindowPosManagerUI` 的底部工具栏中无缝嵌入 `QCheckBox("开机自启")`。启动时自动读取注册表状态进行初始化勾选/取消勾选，用户点击时实时触发注册表开启或关闭，操作失败自动物理还原复选框状态并弹出错误提示。
-    - [x] **CLI 命令行开启/关闭/状态查询通道 (`manage_window_layout.py`)**：在主入口中扩展命令行参数 `--autostart-on`、`--autostart-off` 与 `--autostart-status`，支持全命令行无 UI 环境下对开机自启注册表项的管理与查询，并更新了 `-h` 帮助说明。
-    - [x] **单元测试 100% 校验通过**：新建 `tests/test_autostart_registry.py`，完整覆盖打包/源码路径提取、注册表项写入、读取与自动清理流程，全量测试 100% 成功通过！
+## 2026-08-05 21:05
+- [x] **实现窗口布局管理器 (`manage_window_layout.py`) `-hide` 托盘后台不弹窗启动模式与开机自启无缝联动 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_autostart_registry.py`)**：
+    - [x] **新增 `-hide` / `-min` 托盘后台不弹窗启动模式 (`manage_window_layout.py`, `ui.py`)**：在 CLI 解析与 `WindowPosManagerUI.main()` 入口中新增 `-hide` / `--hide` / `-min` / `--min` 命令行参数。带有 `-hide` 参数启动时，仅保持 UI 主界面隐藏不动（常驻 Windows 任务栏系统托盘 `QSystemTrayIcon`），不触发 CLI 移动对齐功能，不自动应用布局，静默待命。
+    - [x] **注册表开机自启采用 `-hide` 模式 (`core.py`)**：重构 `get_autostart_command()`，在生成的注册表自启动命令行末尾自动附带 `-hide` 参数（如 `"manage_window_layout.exe" -hide`）。用户电脑开机时程序将自动后台托盘静默启动常驻待命，随时可通过双击托盘图标显化 UI。
+    - [x] **单元测试 100% 校验通过**：更新 `tests/test_autostart_registry.py`，全量测试 100% 成功通过！
 
 ## 2026-08-05 20:15
 - [x] **实现 `popularity_resonance_gui.py` 动态端口 IPC 按需获取与即时释放机制 (`popularity_resonance_gui.py`, `scratch/test_popularity_dynamic_ipc.py`)**：

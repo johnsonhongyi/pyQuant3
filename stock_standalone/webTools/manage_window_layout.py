@@ -78,12 +78,17 @@ if __name__ == '__main__':
     debug_mode = False
     autostart_action = None
 
+    hide_mode = False
+
     for i, arg in enumerate(sys.argv[1:], 1):
         arg_lower = arg.lower()
         if arg_lower in ['-h', '--help', '/?', '-help']:
             is_help = True
         elif arg_lower in ['--noui', '-noui', '--cli', '-cli', '--apply', '-apply', '-c']:
             use_ui = False
+        elif arg_lower in ['-hide', '--hide', '-min', '--min', '-hidetray']:
+            hide_mode = True
+            use_ui = True
         elif arg_lower in ['--autostart-on', '-autostart-on']:
             autostart_action = 'on'
             use_ui = False
@@ -110,8 +115,9 @@ if __name__ == '__main__':
         print("  不加任何参数双击运行时，启动完整的图形化操作界面 (UI)。")
         print("\n可选参数:")
         print("  -h, --help            显示此帮助信息并退出。")
-        print("  -cli, -noui, -apply   静默命令行模式。不启动 UI 界面，直接在后台自动探测屏幕并应用窗口对齐。")
-        print("  --autostart-on        开启 Windows 注册表开机自启。")
+        print("  -hide, --hide, -min   托盘后台模式。以不弹出主窗口的形式后台启动 UI 并在任务栏托盘常驻待命（不自动应用布局）。")
+        print("  -cli, -noui, -apply   纯命令行模式。不启动 UI 界面与托盘，直接在后台自动探测屏幕并应用窗口对齐。")
+        print("  --autostart-on        开启 Windows 注册表开机自启（默认附带 -hide 不弹窗模式）。")
         print("  --autostart-off       关闭 Windows 注册表开机自启。")
         print("  --autostart-status    查询当前 Windows 注册表开机自启状态。")
         print("  -log <level>          开启调试模式并指定级别 (例如: -log debug)。\n")
@@ -154,11 +160,14 @@ if __name__ == '__main__':
             print("[SingleInstance] 成功唤醒已运行程序的窗口视窗到前台，阻止重复启动多实例。")
             sys.exit(0)
 
-        print("正在启动桌面窗口坐标布局配置管理器 UI...")
+        if hide_mode:
+            print("正在以 [后台托盘隐藏不弹窗模式] 启动桌面窗口布局管理器 UI...")
+        else:
+            print("正在启动桌面窗口坐标布局配置管理器 UI...")
         config_mgr = ConfigManager()
         success, route_msg = check_and_add_route(config_mgr)
         print(f"[Route Check] {route_msg}")
-        run_ui()
+        run_ui(hide_window=hide_mode)
     else:
         print("\n检测到 -cli 命令行参数，正在后台自动探测并应用窗口对齐...")
         

@@ -1151,13 +1151,14 @@ REG_AUTORUN_NAME = "ManageWindowLayout"
 def get_autostart_command() -> str:
     """
     获取开机自启运行命令行，精准支持打包(PyInstaller/Nuitka/EXE)与源码运行两种场景。
+    开机自启时默认附带 -hide 参数，以托盘隐藏不弹窗模式在后台启动并自动应用布局对齐。
     """
     is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
     
     if is_frozen or (sys.executable.lower().endswith(".exe") and "python" not in os.path.basename(sys.executable).lower()):
         # 打包成 EXE 运行环境：直接使用 sys.executable 打包的 exe 绝对物理路径
         exe_path = os.path.abspath(sys.executable)
-        return f'"{exe_path}"'
+        return f'"{exe_path}" -hide'
     else:
         # 开发源码运行环境：优先检查程序物理根目录或 dist 目录下是否存在已编译打包的 EXE 文件
         app_root = get_app_root()
@@ -1168,14 +1169,14 @@ def get_autostart_command() -> str:
         ]
         for p in possible_exes:
             if os.path.exists(p):
-                return f'"{os.path.abspath(p)}"'
+                return f'"{os.path.abspath(p)}" -hide'
 
         # 否则使用当前 Python 解释器 + manage_window_layout.py 脚本绝对路径
         script_path = os.path.join(app_root, "webTools", "manage_window_layout.py")
         if not os.path.exists(script_path):
             script_path = os.path.abspath(sys.argv[0])
         python_exe = os.path.abspath(sys.executable)
-        return f'"{python_exe}" "{script_path}"'
+        return f'"{python_exe}" "{script_path}" -hide'
 
 
 
