@@ -484,7 +484,7 @@ class MultiPeriodWorker(QThread):
                         self.progress.emit(f"⚠️ [{period}] 数据不可用({reason})，策略将自适应跳过此周期过滤")
 
             self.progress.emit("🔍 正在执行跨周期交叉验证...")
-            result_df = self.engine.evaluate_strategy(self.strat_config, self.active_periods)
+            result_df = self.engine.evaluate_strategy(self.strat_config, self.active_periods, force_refresh=self.force_reload)
 
             # Build flat data frame in background thread to avoid UI freeze
             flat_df = self._build_flat_df(result_df)

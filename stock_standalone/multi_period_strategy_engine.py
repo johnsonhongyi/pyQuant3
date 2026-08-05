@@ -6,6 +6,20 @@ from JohnsonUtil import LoggerFactory
 from sys_utils import get_app_root, get_conf_path
 logger = LoggerFactory.getLogger("MultiPeriodStrategyEngine")
 
+_global_ipc_manager = None
+
+def get_global_ipc_sync_manager():
+    """获取全局 IPCSyncManager 单例，用于跨进程获取 TK 监控端实时行情"""
+    global _global_ipc_manager
+    if _global_ipc_manager is None:
+        try:
+            from ipc_sync_manager import IPCSyncManager
+            _global_ipc_manager = IPCSyncManager(port=26671, logger=logger)
+            _global_ipc_manager.start()
+        except Exception as e:
+            logger.debug(f"Failed to initialize IPCSyncManager: {e}")
+    return _global_ipc_manager
+
 class MultiPeriodStrategyEngine:
     SUPPORTED_PERIODS = ['d', '2d', '3d', 'w', 'm', '45d', '3M']
     
@@ -17,97 +31,178 @@ class MultiPeriodStrategyEngine:
         self._missing_periods: Dict[str, str] = {}  # period -> 缺失原因
         self.config_path = get_conf_path("multi_period_strategies.json")
         self.last_stats: dict = {}
+
+    @staticmethod
+    def _extract_cols_from_expr(expr_str: str) -> set:
+        """从策略表达式中精准提取所有引用的变量列名（自动预处理展开模版语法如 {1-4}）"""
+        if not expr_str or not isinstance(expr_str, str):
+            return set()
+        import re
+        try:
+            from query_engine_util import query_engine
+            if query_engine:
+                expr_str = query_engine._preprocess_query(expr_str)
+        except Exception:
+            pass
+
+        tokens = set(re.findall(r'\b[a-zA-Z_]\w*\b', expr_str))
+        py_keywords = {
+            'and', 'or', 'not', 'in', 'is', 'if', 'else', 'True', 'False', 'None',
+            'df', 'pd', 'np', 'abs', 'max', 'min', 'GREATEST', 'LEAST', 'ABS', 'MAX', 'MIN',
+            'result', 'signal', 'case', 'regex', 'contains', 'str'
+        }
+        cols = tokens - py_keywords
+        expanded_cols = set(cols)
+        for c in cols:
+            if c.endswith('_d'):
+                expanded_cols.add(c[:-2])
+        return expanded_cols
+
+    def ensure_strategy_ipc_columns(self, df: pd.DataFrame, strategy_expr: str = "", force_refresh: bool = False) -> pd.DataFrame:
+        """
+        通过 IPC 工厂模式按需抓取策略中所需但 df 中缺失或为初始缺省值的列。
+        规则:
+        1. 提取策略表达式中的变量列；
+        2. 仅向 IPC 提取 Missing 的列（多余列不抓取）；当 force_refresh=True 时强制重刷最新行情列；
+        3. 若 IPC 未连接或无该列，执行自动安全兜底。
+        """
+        if df is None or df.empty:
+            return df
+
+        needed_cols = self._extract_cols_from_expr(strategy_expr)
+        
+        # 判定 df 中真正缺失或需要从 IPC 更新的列
+        missing_cols = set()
+        for col in needed_cols:
+            if force_refresh or col not in df.columns:
+                missing_cols.add(col)
+            else:
+                s = df[col]
+                if s.isna().all():
+                    missing_cols.add(col)
+
+        if not strategy_expr and not force_refresh:
+            missing_cols = {
+                'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
+                'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
+                'Trends', 'nclose', 'sig_bottom', 'sig_launch'
+            }
+
+        if not missing_cols:
+            return df
+
+        try:
+            import time
+            ipc_mgr = get_global_ipc_sync_manager()
+            if ipc_mgr is not None:
+                ipc_df = ipc_mgr.get_current_df()
+                if ipc_df is None or ipc_df.empty:
+                    ipc_mgr.request_full_sync()
+                    for _ in range(5):
+                        time.sleep(0.1)
+                        ipc_df = ipc_mgr.get_current_df()
+                        if ipc_df is not None and not ipc_df.empty:
+                            break
+
+                if ipc_df is not None and not ipc_df.empty:
+                    # 💥 仅抓取 missing_cols，多余的不抓取
+                    for col in missing_cols:
+                        target_col = col
+                        if target_col not in ipc_df.columns and target_col.endswith('_d'):
+                            base = target_col[:-2]
+                            if base in ipc_df.columns:
+                                target_col = base
+
+                        if target_col in ipc_df.columns:
+                            ipc_series = ipc_df[target_col].reindex(df.index)
+                            if col not in df.columns or force_refresh:
+                                df[col] = ipc_series.combine_first(df[col]) if col in df.columns else ipc_series
+                            else:
+                                df[col] = ipc_series.fillna(df[col])
+                            
+                            base_alias = col[:-2] if col.endswith('_d') else f"{col}_d"
+                            if base_alias not in df.columns or force_refresh:
+                                df[base_alias] = df[col]
+        except Exception as ex_ipc:
+            logger.debug(f"IPC fetch for missing strategy cols failed: {ex_ipc}")
+
+        # 🛡️ 自动安全兜底：如果 IPC 依然没有获取到该列，设置默认安全 fallback 值，防范 query/eval 崩溃
+        for col in missing_cols:
+            if col not in df.columns or df[col].isna().all():
+                c_low = col.lower()
+                if 'vwap' in c_low or 'nclose' in c_low or c_low.startswith('lastp') or c_low.startswith('close'):
+                    df[col] = df['close'] if 'close' in df.columns else 0.0
+                elif c_low.startswith('lasth') or c_low.startswith('h'):
+                    df[col] = df['high'] if 'high' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
+                elif c_low.startswith('lastl') or (c_low.startswith('l') and not c_low.startswith('lastv')):
+                    df[col] = df['low'] if 'low' in df.columns else (df['close'] if 'close' in df.columns else 0.0)
+                elif c_low.startswith('ma'):
+                    df[col] = df['close'] if 'close' in df.columns else 0.0
+                elif 'trends' in c_low:
+                    df[col] = 60.0
+                elif 'volume' in c_low or 'lastv' in c_low:
+                    df[col] = df['volume'] if 'volume' in df.columns else 0.0
+                elif 'per' in c_low or 'percent' in c_low:
+                    df[col] = df['percent'] if 'percent' in df.columns else 0.0
+                else:
+                    df[col] = 0.0
+
+        return df
         
     def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None, readonly: bool = True) -> pd.DataFrame:
         """加载指定周期数据（保持周期原始大小写格式如 '3M'；readonly 为直接传递的界面选择状态，end=截止日期）"""
         from JSONData import tdx_data_Day as tdd
-        from JohnsonUtil import johnson_cons as ct
-        from JohnsonUtil import commonTips as cct
-        from data_utils import complete_indicators_pipeline
-        
-        # 保持原样 period 传入（严格支持 3M 大写与月线/多月区别，不进行 .lower() 转换）
-        res_period = str(period).strip() if period else 'd'
-        dl_map = {
-            'd': 120, '2d': 200, '3d': 200, '5d': 300, 
-            'w': 300, 'W': 300, 'm': 550, 'M': 550, '45d': 3000, '3M': 4000, '3m': 4000
-        }
-        dl = dl_map.get(res_period, ct.Resample_LABELS_Days.get(res_period, 300))
-        
-        with self.lock:
-            if not force_reload and res_period in self._period_dfs and not self._period_dfs[res_period].empty:
-                logger.info(f"Reusing cached data for period {res_period}...")
-                return self._period_dfs[res_period]
-            
-            if force_reload:
+
+        res_period = str(period).strip()
+
+        # 如果强制重载，则从缓存字典中弹出
+        if force_reload:
+            with self.lock:
                 self._period_dfs.pop(res_period, None)
-                self._period_dfs.pop(period, None)
-                self._missing_periods.pop(res_period, None)
-                self._missing_periods.pop(period, None)
 
-        df = None
-        
-        # 2. 如果不是强制刷新，首先尝试只读模式加载
         if not force_reload:
-            try:
-                logger.info(f"Loading data for period {res_period} (readonly={readonly}, dl={dl})...")
-                df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=readonly, end=end)
-            except Exception as e:
-                logger.warning(f"[READONLY] Failed to load period [{res_period}]: {e}")
-                df = None
-
-        # 3. 只有当 not readonly 且 (处于强制刷新模式 force_reload=True 或只读未命中/缺少历史底库 'lastp1d' 缺失) 时，才执行写盘初始化
-        if not readonly and (force_reload or (df is None or df.empty or 'lastp1d' not in (df.columns if df is not None else []))):
-            # 🛡️ 线上/冷启动无 HDF5 底库保护：在非只读模式下缺少 lastp1d 历史表时，全自动允许一次写盘初始化
-            try:
-                logger.info(f"⚡ [AUTO-INIT] 底层 HDF5 历史库缺失/初始化 [{res_period}]，全自动补全写盘 (dl={dl}, end={end})...")
-                with cct.timed_ctx(f"init_tdx_{res_period}", warn_ms=1000):
-                    df, lastp_df = tdd.get_append_lastp_to_df(
-                        top_now,
-                        dl=dl,
-                        resample=res_period,
-                        readonly=False,
-                        end=end
-                    )
-            except Exception as e:
-                logger.error(f"Failed to initialize period [{res_period}]: {e}")
-                if res_period == 'd' and top_now is not None and not top_now.empty:
-                    logger.info("🛡️ [READONLY-FALLBACK] HDF5 init failed, falling back to top_now snapshot...")
-                    df = top_now.copy()
-                else:
-                    df = None
-
-        # 4. 校验并挂载 Pipeline 计算结果 (补齐通达信通道、指标等全量字段)
-        if df is not None and not df.empty and ('lastp1d' in df.columns or res_period == 'd'):
-            # 🛡️ 盘中动态实时数据优先级强行锁定：防止 HDF5 历史旧值（如静态 percent=0）覆盖最新实时行情
-            if top_now is not None and not top_now.empty:
-                rt_cols = ['percent', 'volume', 'trade', 'price', 'open', 'high', 'low', 'turnover', 'amount', 'ratio']
-                for col in rt_cols:
-                    if col in top_now.columns:
-                        top_series = top_now[col].reindex(df.index)
-                        if col in df.columns:
-                            df[col] = top_series.fillna(df[col])
-                        else:
-                            df[col] = top_series
-
-            df = complete_indicators_pipeline(df, logger, resample=res_period)
             with self.lock:
-                self._period_dfs[res_period] = df
-                self._period_dfs[period] = df
-                self._missing_periods.pop(res_period, None)
-                self._missing_periods.pop(period, None)
-            return df
-        else:
-            reason = "h5缓存不存在(只读模式)" if readonly else "数据初始化失败/为空"
+                if res_period in self._period_dfs:
+                    return self._period_dfs[res_period]
+
+        try:
+            logger.info(f"Loading period data for: {res_period} (readonly={readonly}, end={end})...")
+            from JohnsonUtil import johnson_cons as ct
+            from JohnsonUtil import commonTips as cct
+            from data_utils import complete_indicators_pipeline
+
+            dl_map = {
+                'd': 120, '2d': 200, '3d': 200, '5d': 300, 
+                'w': 300, 'W': 300, 'm': 550, 'M': 550, '45d': 3000, '3M': 4000, '3m': 4000
+            }
+            dl = dl_map.get(res_period, ct.Resample_LABELS_Days.get(res_period, 300))
+            df, lastp_df = tdd.get_append_lastp_to_df(top_now, dl=dl, resample=res_period, readonly=readonly, end=end)
+            
+            if df is not None and not df.empty:
+                if res_period == 'd':
+                    df = self.ensure_strategy_ipc_columns(df, force_refresh=force_reload)
+                df = complete_indicators_pipeline(df, logger, resample=res_period)
+                with self.lock:
+                    self._period_dfs[res_period] = df
+                    self._period_dfs[period] = df
+                    self._missing_periods.pop(res_period, None)
+                    self._missing_periods.pop(period, None)
+                return df
+            else:
+                with self.lock:
+                    self._missing_periods[res_period] = "获取数据为空"
+                return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Error loading period {res_period}: {e}")
             with self.lock:
-                self._missing_periods[res_period] = reason
-            logger.warning(f"Period [{res_period}] data unavailable: {reason}")
+                self._missing_periods[res_period] = str(e)
             return pd.DataFrame()
             
     def set_period_df(self, period: str, df: pd.DataFrame):
         with self.lock:
             self._period_dfs[period] = df
         
-    def evaluate_strategy(self, strategy_config: dict, active_periods: List[str] = None) -> pd.DataFrame:
+    def evaluate_strategy(self, strategy_config: dict, active_periods: List[str] = None, force_refresh: bool = False) -> pd.DataFrame:
         if active_periods is None:
             active_periods = list(strategy_config['conditions'].keys())
             
@@ -159,11 +254,15 @@ class MultiPeriodStrategyEngine:
                 continue
                 
             try:
+                filter_expr = cond.get('filter', '') if isinstance(cond, dict) else str(cond)
+                # 💥 只有策略中用到的、且当前 df 中 Missing 或 force_refresh 的列才通过 IPC 精准提取并自动补全，多余列不抓取；若无 IPC 数据则自动安全兜底
+                df_clean = self.ensure_strategy_ipc_columns(df_clean, filter_expr, force_refresh=force_refresh)
+
                 from query_engine_util import query_engine
                 if query_engine:
-                    filtered_df = query_engine.execute(df_clean, cond['filter'])
+                    filtered_df = query_engine.execute(df_clean, filter_expr)
                 else:
-                    filtered_df = df_clean.query(cond['filter'])
+                    filtered_df = df_clean.query(filter_expr)
                 passed_in_period = set(filtered_df.index)
                 
                 # 获取底表（通常为 'd' 周期）的全量股票，用以对比提取出该周期缺失数据的股票

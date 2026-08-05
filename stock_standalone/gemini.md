@@ -1,3 +1,35 @@
+## 2026-08-05 09:10
+- [x] **确认使用 `cct.get_work_time()` 严格管控交易时段数据推送 (`instock_MonitorTK.py`, `scratch/test_ipc_decoupling.py`)**：
+    - [x] **交易时段判定统一使用 `cct.get_work_time()`**：
+        - 按照用户明确规则要求，将 `send_df` 循环中的交易时段判定统一设定为 `cct.get_work_time()`。
+        - **门控效果**：非交易窗口（包含午休 11:30~13:00、盘前 <09:15 以及盘后 >15:05）且无 Pipe 明确 `REQ_FULL_SYNC` 请求时，系统硬锁定进入 10s/180s 休眠，绝对零自动盲推送。
+    - [x] **版本 Hash 控频 (`hash((version, len(df_daily)))`) + 按需解耦**：
+        - 数据推送严格绑定 MarketStateBus 的数据版本 Hash，仅在盘中交易期且有实质新数据变化时按目标端口精准推送。
+    - [x] **全量单元测试 100% 成功通过**：
+        - 运行 `scratch/test_ipc_decoupling.py`（3/3 PASSED）及 `pytest tests/test_signal_ledger.py`（12/12 PASSED）全量通过！
+
+## 2026-08-05 08:55
+- [x] **实现 IPC 端口按需分流、交易时段精准管控与解耦全量数据分发引擎 (`instock_MonitorTK.py`, `ats/ui/main_window.py`, `ats/ipc_bridge.py`, `scratch/test_ipc_decoupling.py`)**：
+    - [x] **实现 IPC 目标端口按需精准分流 (`port` 参数解耦)**：
+        - 彻底废除向 26670 (ATS 终端) 与 26671 (多周期引擎) 的广播式混杂推送。重构 `instock_MonitorTK.py` 中的 `PipeFeedbackListener` 监听器与 `send_df` 推送循环，向 Pipe 信令 (`REQ_FULL_SYNC` 与 `ATS_RECEIVED`) 注入 `port` 参数。
+        - 做到“哪个端口请求，只向哪个端口推送”，彻底消除了 ATS 终端因接收不属于自己的数据包导致的界面顿卡与冗余 socket 连接。
+    - [x] **交易时段 (09:15~15:00) 自动推送强锁管控**：
+        - 在 `send_df` 推送循环中嵌入 `cct.get_work_time()` 校验。非交易时段自动停止定时盲目推送，仅在收到目标端口明确的 `REQ_FULL_SYNC` 手动请求时才触发单次精准推送。
+    - [x] **客户端交互闭环与自动化测试 100% 校验**：
+        - 联动重构 `ATSMainWindow` 与 `ats/ipc_bridge.py` 传递目标端口号 26670；新建 `scratch/test_ipc_decoupling.py` 自动化测试，验证非交易时间段精准分流与 0 盲目推送，结合 `pytest tests/test_signal_ledger.py` 12 项核心单元测试 100% 成功通过！
+
+## 2026-08-05 08:50
+- [x] **实现 `ATSAlphaTracker` 当日精准去重、冷启动磁盘 Hash/Set 预载入与系统级日志刷屏彻底治理 (`ats/ui/main_window.py`, `scratch/test_alpha_tracker_dedup.py`)**：
+    - [x] **实现当日全天精准去重与冷加载预热 (`_record_alpha_signal`)**：
+        - 彻底根治了开机启动、多线程 Running_MP 或每隔 300s 批量重复打印已记录强势信号 (如 301047 义翘神州、300229 拓尔思等数十只股票) 导致的控制台剧烈刷屏和重复写盘漏洞。
+        - 在 `_record_alpha_signal` 中引入开机自动预读 `ats_alpha_tracker_{today_date}.json` 磁盘缓存存入 `_recorded_alpha_stocks` 集合，防止重启后重打旧信号。
+    - [x] **重大突破 (+2.0% 涨幅) 二次唤醒机制**：
+        - 针对已记录的个股，在涨幅未突破上次记录 2.0% 以上时 0ms 瞬间跳过去重；仅在股价发生重大向上突破拉升时精准追加 1 条记录，彻底杜绝无谓磁盘 IO 与日志冗余。
+    - [x] **无 GUI (Headless) 环境防崩保护**：
+        - 在 Toast 弹窗与语音通知接入 `if QApplication.instance():` 安全卫士，防范 Headless 模式或子线程中的崩溃。
+    - [x] **单元测试 100% 成功通过**：
+        - 新建 `scratch/test_alpha_tracker_dedup.py` 自动化测试，配合 `pytest tests/test_signal_ledger.py` 全量 12 项核心单元测试 100% 成功通过！
+
 ## 2026-08-04 23:50
 - [x] **恢复外盘看板表格表头排序功能与实现 K 线黄金分割 (Fibonacci Ratios) 比例坐标系 (`ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_fibonacci_and_sorting.py`)**：
     - [x] **根治外盘表格排序失效硬伤**：
