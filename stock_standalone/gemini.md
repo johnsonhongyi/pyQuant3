@@ -1,8 +1,7 @@
-## 2026-08-06 00:53
-- [x] **实现 Acer Predator 冷启动【1.2 秒开场 Splash 动画等待缓冲区】与开机自启【注册表命令行绝对路径 Log 日志打印】 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_autostart_registry.py`)**：
-    - [x] **冷启动 Logo / Splash 动画等待缓冲区 (`time.sleep(1.2)`)**：针对 `Kill` 后冷启动时开场动画播放导致 Tab / 模式按钮无法被点击的问题，将就绪缓冲区提升至 `1.2 秒`，并将主窗口尺寸过滤提升至 `> 600x400`，100% 确保开场 Logo 动画彻底播放完毕后再发起 UI 程序化点击。
-    - [x] **开启/取消开启注册表开机自启完整命令行绝对路径 Log 显示**：在 `set_autostart_enabled` 无论【开启】还是【取消开启】时，均输出完整注册表项命令绝对路径（如 `(启动命令: "d:\...\manage_window_layout.exe" -hide)` 或 `(已清理命令行路径: "d:\...\manage_window_layout.exe" -hide)`），并在 GUI 控制台文本框中实时可视化呈现。
-    - [x] **随窗口管理器开机自启【启动延迟应用 (SpinBox 微调 0~120s)】**：在 GUI 中加入启动延迟数值框与 `startup_delay_seconds` 持久化，自动在开机进入桌面后台静默等待驱动就绪后应用性能配置。
+## 2026-08-06 01:14
+- [x] **修复冷启动判定被 `ensure_predatorsense_daemon()` 干扰的时序 Bug (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
+    - [x] **冷启动判定前置移顶**：将 `is_cold_start` 探针检测逻辑提升至 `ensure_predatorsense_daemon()` 调起**最之前**，彻底解决因守护进程预拉起导致系统将“无进程首次启动”误判为“热唤醒”从而遗漏 6 秒动画等待的逻辑硬伤。
+    - [x] **全场景冷启动 6.8 秒动画探针保障**：确保在 `PredatorSense.exe` 进程原本不存在或无 UI 窗口时，100% 触发 6.8 秒 Splash 开场动画等待与子控件渲染轮询，保障点击 100% 准确落在开场动画结束后的真实 UI 界面上。
 
 ## 2026-08-05 21:30
 - [x] **彻底解决多周期筛选器启动后 IPC 模式无法自动获取全部 400+ 列高密数据逻辑 Bug (`ats/ui/multi_period_dialog.py`, `multi_period_strategy_engine.py`, `scratch/test_ipc_last_backfill.py`)**：

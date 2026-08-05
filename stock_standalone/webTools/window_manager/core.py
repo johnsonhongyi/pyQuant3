@@ -1672,18 +1672,34 @@ class AcerPerformanceController:
             import win32con
             import time
 
-            # 0. 先行确保底层 Acer 守护进程已拉起
+            # 0. 精准探测【唤起前系统是否存在 PredatorSense.exe 进程】
+            is_cold_start = False
+            try:
+                import psutil
+                ps_procs = [p for p in psutil.process_iter(['name']) if p.info['name'] and 'predatorsense' in p.info['name'].lower()]
+                if not ps_procs:
+                    is_cold_start = True
+            except Exception:
+                pass
+
+            # 1. 确保底层 Acer 守护进程已拉起
             self.ensure_predatorsense_daemon()
 
             app_aumid = r"shell:AppsFolder\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!CentenialConvert"
             main_hwnd = None
 
-            # 1. 针对开机延迟/系统卡顿的【3 轮重试 + 25 秒超长唤醒探针】
-            for retry_round in range(3):
+            # 2. 如果属于【无进程冷启动】，调起后先直接挂起 5.5 秒等待 6 秒 Splash 开场动画播完
+            if is_cold_start:
                 subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
+                time.sleep(5.5)
 
-                # 每轮等待最长 8 秒 (40 x 0.2s) 探查窗口
-                for _ in range(40):
+            # 3. 针对开机延迟/系统卡顿的【多轮探查与窗口捕获】
+            for retry_round in range(3):
+                if not is_cold_start or retry_round > 0:
+                    subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
+
+                # 每轮等待探查窗口 (最长 6 秒)
+                for _ in range(30):
                     def enum_cb(hwnd, extra):
                         nonlocal main_hwnd
                         title = win32gui.GetWindowText(hwnd)
@@ -1699,11 +1715,17 @@ class AcerPerformanceController:
                         # 找到真正的主界面窗口！强制恢复与置顶前台
                         win32gui.ShowWindow(main_hwnd, win32con.SW_RESTORE)
                         win32gui.SetForegroundWindow(main_hwnd)
-                        # 冷启动开场 Splash 动画与 3D UI 渲染等待缓冲区 (提升至 1.2s，确保动画彻底播放完成)
-                        time.sleep(1.2)
+                        if is_cold_start:
+                            time.sleep(0.8) # 冷启动最后 0.8s 界面平滑沉淀
+                        else:
+                            time.sleep(0.3) # 热唤醒 0.3s 极速响应
                         win32gui.SetForegroundWindow(main_hwnd)
                         break
                     time.sleep(0.2)
+
+                if main_hwnd:
+                    break
+                time.sleep(2.0)
 
                 if main_hwnd:
                     break
