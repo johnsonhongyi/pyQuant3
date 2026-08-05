@@ -1094,15 +1094,17 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
         for period in active_periods:
             df_p = self.engine._period_dfs.get(period)
             if df_p is not None and not df_p.empty:
-                # 过滤掉 code, name 等主表已有的字段
                 cols_to_join = [c for c in df_p.columns if c not in ('code', 'name')]
                 if cols_to_join:
-                    # 去重保留首个，防止重复索引导致行数膨胀
-                    df_p_sub = df_p[cols_to_join]
+                    renamed_dict = {c: (c if c.endswith(f"_{period}") else f"{c}_{period}") for c in cols_to_join}
+                    df_p_sub = df_p[cols_to_join].rename(columns=renamed_dict)
+                    df_p_sub = df_p_sub.loc[:, ~df_p_sub.columns.duplicated(keep='first')]
                     df_p_sub = df_p_sub[~df_p_sub.index.duplicated(keep='first')]
-                    # 重命名列加上后缀，例如 close -> close_d
-                    df_p_sub = df_p_sub.rename(columns={c: f"{c}_{period}" for c in cols_to_join})
-                    # 矢量化连接
+                    
+                    overlap_cols = [col for col in df_p_sub.columns if col in flat_df.columns]
+                    if overlap_cols:
+                        flat_df = flat_df.drop(columns=overlap_cols, errors='ignore')
+                    
                     flat_df = flat_df.join(df_p_sub, how='left')
                     
         flat_df.index.name = 'code'

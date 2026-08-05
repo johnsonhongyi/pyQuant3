@@ -206,12 +206,12 @@ def test_300058_real_tcp_ipc_socket_send_and_sync():
     else:
         row_300058 = pd.DataFrame()
 
-    assert not row_300058.empty, "[ERROR] 未能在系统 26671 端口 IPC 接收的 DF 中找到 300058 标的"
+    assert not row_300058.empty, f"[ERROR] 未能在系统 {ipc_mgr.port} 端口 IPC 接收的 DF 中找到 300058 标的"
     target_col = 'vwap_cum_2d' if 'vwap_cum_2d' in row_300058.columns else 'vwap_cum_2d_d'
     assert target_col in row_300058.columns, "[ERROR] 未能在 300058 中找到 vwap_cum_2d 衍生列"
 
     v_2d = row_300058[target_col].iloc[0]
-    print(f"\n[SUCCESS] [标准 26671 接口通信测试成功] 真实端口 26671 建立链接 -> 300058 行情包接收 -> 多周期自动补齐 {v_2d} 完美贯通！")
+    print(f"\n[SUCCESS] [标准 {ipc_mgr.port} 接口通信测试成功] 真实端口 {ipc_mgr.port} 建立链接 -> 300058 行情包接收 -> 多周期自动补齐 {v_2d} 完美贯通！")
 
 
 if __name__ == "__main__":

@@ -215,7 +215,20 @@ class AllStrategiesHitWorker(QThread):
 
     def run(self):
         try:
-            # 1. 确保基础全市场行情数据
+            # 1. 优先从 IPCSyncManager 获取实时行情 snapshot
+            if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]):
+                try:
+                    from multi_period_strategy_engine import get_global_ipc_sync_manager
+                    ipc_mgr = get_global_ipc_sync_manager()
+                    if ipc_mgr is not None:
+                        ipc_df = ipc_mgr.get_current_df()
+                        if ipc_df is not None and not ipc_df.empty and len(ipc_df) > 100:
+                            self.top_now = ipc_df
+                            self.top_now_cache_ts[0] = time.time()
+                            logger.info(f"[AllStrategiesHitWorker] ⚡ 优先使用 IPC 实时行情数据 (共 {len(ipc_df)} 行)")
+                except Exception as e_ipc:
+                    logger.debug(f"IPC top_now fetch failed: {e_ipc}")
+
             if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]):
                 self.progress.emit("正在获取全市场实时行情数据...")
                 from JSONData import sina_data
@@ -350,7 +363,20 @@ class MultiPeriodWorker(QThread):
                 self.top_now = None
                 self.top_now_cache_ts[0] = 0.0
 
-            # 1. Load market snapshots (top_now)
+            # 1. Load market snapshots (top_now) - 优先 IPC 高密实时行情
+            if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]) or self.force_reload:
+                try:
+                    from multi_period_strategy_engine import get_global_ipc_sync_manager
+                    ipc_mgr = get_global_ipc_sync_manager()
+                    if ipc_mgr is not None:
+                        ipc_df = ipc_mgr.get_current_df()
+                        if ipc_df is not None and not ipc_df.empty and len(ipc_df) > 100:
+                            self.top_now = ipc_df
+                            self.top_now_cache_ts[0] = time.time()
+                            logger.info(f"[MultiPeriodWorker] ⚡ 优先使用 IPC 实时行情数据 (共 {len(ipc_df)} 行)")
+                except Exception as e_ipc:
+                    logger.debug(f"IPC top_now fetch failed: {e_ipc}")
+
             if self.top_now is None or not self._is_cache_valid(self.top_now_cache_ts[0]) or self.force_reload:
                 self.progress.emit("正在获取全市场实时行情数据...")
                 from JSONData import sina_data
@@ -505,9 +531,15 @@ class MultiPeriodWorker(QThread):
             if df_p is not None and not df_p.empty:
                 cols_to_join = [c for c in df_p.columns if c not in ('code', 'name')]
                 if cols_to_join:
-                    df_p_sub = df_p[cols_to_join]
+                    renamed_dict = {c: (c if c.endswith(f"_{period}") else f"{c}_{period}") for c in cols_to_join}
+                    df_p_sub = df_p[cols_to_join].rename(columns=renamed_dict)
+                    df_p_sub = df_p_sub.loc[:, ~df_p_sub.columns.duplicated(keep='first')]
                     df_p_sub = df_p_sub[~df_p_sub.index.duplicated(keep='first')]
-                    df_p_sub = df_p_sub.rename(columns={c: f"{c}_{period}" for c in cols_to_join})
+                    
+                    overlap_cols = [col for col in df_p_sub.columns if col in flat_df.columns]
+                    if overlap_cols:
+                        flat_df = flat_df.drop(columns=overlap_cols, errors='ignore')
+                    
                     flat_df = flat_df.join(df_p_sub, how='left')
         flat_df.index.name = 'code'
         return flat_df
@@ -4403,9 +4435,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             if df_p is not None and not df_p.empty:
                 cols_to_join = [c for c in df_p.columns if c not in ('code', 'name')]
                 if cols_to_join:
-                    df_p_sub = df_p[cols_to_join]
+                    renamed_dict = {c: (c if c.endswith(f"_{period}") else f"{c}_{period}") for c in cols_to_join}
+                    df_p_sub = df_p[cols_to_join].rename(columns=renamed_dict)
+                    df_p_sub = df_p_sub.loc[:, ~df_p_sub.columns.duplicated(keep='first')]
                     df_p_sub = df_p_sub[~df_p_sub.index.duplicated(keep='first')]
-                    df_p_sub = df_p_sub.rename(columns={c: f"{c}_{period}" for c in cols_to_join})
+                    
+                    overlap_cols = [col for col in df_p_sub.columns if col in flat_df.columns]
+                    if overlap_cols:
+                        flat_df = flat_df.drop(columns=overlap_cols, errors='ignore')
+                    
                     flat_df = flat_df.join(df_p_sub, how='left')
                     
         flat_df.index.name = 'code'
@@ -4871,7 +4909,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.lbl_status.setText(f"正在诊断 {code} 的多周期指标...")
         QApplication.processEvents()
 
-        # Fetch top_now if missing
+        # Fetch top_now if missing (优先从 IPCSyncManager 读取)
+        if self.top_now is None:
+            try:
+                from multi_period_strategy_engine import get_global_ipc_sync_manager
+                ipc_mgr = get_global_ipc_sync_manager()
+                if ipc_mgr is not None:
+                    ipc_df = ipc_mgr.get_current_df()
+                    if ipc_df is not None and not ipc_df.empty:
+                        self.top_now = ipc_df
+            except Exception:
+                pass
+
         if self.top_now is None:
             try:
                 self.top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
@@ -4889,6 +4938,10 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     self.lbl_status.setText(f"正在读取 {period} 周期特征数据...")
                     QApplication.processEvents()
                     self.engine.load_period_data(period, self.top_now, force_reload=False, readonly=is_readonly)
+                else:
+                    df_p = self.engine._period_dfs[p_norm]
+                    if p_norm == 'd':
+                        self.engine.ensure_strategy_ipc_columns(df_p, force_refresh=True)
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -4929,8 +4982,18 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             if df_p is not None and not df_p.empty:
                 ctx_p = query_engine._prepare_context(df_p)
                 valid_cols = set(df_p.columns) | set(ctx_p.keys())
+                
+                row_p_df = pd.DataFrame()
                 if code in df_p.index:
                     row_p_df = df_p.loc[[code]]
+                elif 'code' in df_p.columns:
+                    row_p_df = df_p[df_p['code'].astype(str).str.strip().str.zfill(6) == code]
+                else:
+                    matched_idx = [idx for idx in df_p.index if str(idx).strip().zfill(6) == code]
+                    if matched_idx:
+                        row_p_df = df_p.loc[matched_idx]
+
+                if not row_p_df.empty:
                     ctx_row = query_engine._prepare_context(row_p_df)
                     for k, val in ctx_row.items():
                         if k in ('df', 'pd', 'np', 'result', 'signal') or callable(val):
