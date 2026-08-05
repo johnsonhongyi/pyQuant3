@@ -2181,7 +2181,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         # --- 开机自启复选框 ---
         self.chk_autostart = QCheckBox("开机自启")
-        self.chk_autostart.setToolTip("勾选后系统开机时将通过 Windows 注册表自动运行启动程序")
+        self.chk_autostart.setToolTip("勾选后系统开机时将通过 Windows 注册表以托盘后台隐藏不弹窗模式启动程序 (-hide)")
         self.chk_autostart.setChecked(core.is_autostart_enabled())
         self.chk_autostart.stateChanged.connect(self.on_autostart_changed)
         bottom_bar.addWidget(self.chk_autostart)
@@ -3949,7 +3949,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.refresh_current_positions()
 
 
-def main():
+def main(hide_window: bool = False):
     # 动态根据环境变量调整日志级别
     app_debug = os.environ.get("APP_DEBUG")
     if app_debug:
@@ -3988,7 +3988,15 @@ def main():
     app.setPalette(dark_palette)
 
     window = WindowPosManagerUI()
-    window.show()
+    
+    # 判读是否隐藏启动（开机自启、-hide、-min、-hidetray）
+    is_hide = hide_window or any(arg.lower() in ("-hide", "--hide", "-min", "--min", "-hidetray") for arg in sys.argv[1:])
+    if is_hide:
+        window.hide()
+        window.log("🙈 程序已以 [-hide 托盘后台不弹窗] 模式启动，常驻系统托盘，静默待命。")
+    else:
+        window.show()
+        
     sys.exit(app.exec())
 
 if __name__ == "__main__":
