@@ -1,3 +1,9 @@
+## 2026-08-05 20:15
+- [x] **实现 `popularity_resonance_gui.py` 动态端口 IPC 按需获取与即时释放机制 (`popularity_resonance_gui.py`, `scratch/test_popularity_dynamic_ipc.py`)**：
+    - [x] **废除长期常驻 Socket 端口监听**：彻底废除 `PRServiceGUI` 启动时无脑调用 `IPCSyncManager(port=26671).start()` 的资源锁死模式。设计 `_DynamicIPCSyncProxy` 适配器代理，仅在自动刷新或点击【查询刷新】时按需开启动态端口向主程序拉取行情。
+    - [x] **按需请求与用完即物理释放 (Fetch-and-Close Pattern)**：实现 `request_dynamic_ipc_sync(timeout=1.8)` 与 `_find_available_port()` 扫频绑定。通过 Windows 命名管道发送包含动态端口的 `REQ_FULL_SYNC` 信令；在完整接收 5000+ 行行情包解包并自动通知 UI 后，即刻物理调起 `temp_mgr.stop()` 关闭 Socket 监听并释放端口，杜绝无谓的系统资源与端口占用。
+    - [x] **端到端单元测试 100% 校验通过**：新建 `scratch/test_popularity_dynamic_ipc.py` 模拟动态端口申请、Socket 协议接收解包、GUI 数据安全更新以及用完即刻物理释放验证，全量测试 100% 成功通过！
+
 ## 2026-08-05 18:56
 - [x] **实现诊断默认股票 `300058` 自动回填与多周期 IPC 工厂模式统一回补 (`multi_period_strategy_engine.py`, `ats/ui/multi_period_dialog.py`)**：
     - [x] **诊断输入框 `300058` 默认回填**：在 `MultiPeriodDialog._on_diagnose_click` 与 `diagnose_stock_strategy` 中，当用户未选中或未在输入框中填入股票代码时，自动补全默认诊断股票 `300058` 并瞬间调起诊断看板。

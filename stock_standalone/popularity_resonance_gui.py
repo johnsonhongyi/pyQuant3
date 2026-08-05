@@ -92,6 +92,22 @@ def get_app_root():
 
 CONFIG_FILE = os.path.join(get_app_root(), "popularity_resonance_config.json")
 
+
+class _DynamicIPCSyncProxy:
+    """动态端口 IPC 行情代理类：无需长期占用固定端口，按需或自动刷新时开启动态端口拉取数据"""
+    def __init__(self, owner):
+        self.owner = owner
+
+    def get_current_df(self):
+        return self.owner.get_current_df()
+
+    def request_full_sync(self):
+        return self.owner.request_dynamic_ipc_sync()
+
+    def stop(self):
+        pass
+
+
 class PRServiceGUI:
     def __init__(self, root):
         self.root = root
@@ -171,13 +187,14 @@ class PRServiceGUI:
         self.history_selector.set("history5")
         self._on_history_group_changed()
 
-        # 初始化通用 IPC 行情同步管理器 (通用框架)
-        self.sync_manager = IPCSyncManager(
-            port=26671,
-            data_callback=self.on_realtime_data_updated,
-            logger=service_logger
-        )
-        self.sync_manager.start()
+        # 初始化动态 IPC 行情同步管理器与内存行情快照 (不用长期占用固定端口)
+        self.current_df = None
+        self.df_lock = threading.Lock()
+        self._ipc_sync_in_progress = False
+        self.sync_manager = _DynamicIPCSyncProxy(self)
+        
+        # 启动后后台延迟发起一次动态端口 IPC 数据同步 (按需获取且不常驻占用)
+        threading.Thread(target=self.request_dynamic_ipc_sync, kwargs={'timeout': 2.0}, daemon=True).start()
         
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
@@ -826,6 +843,84 @@ class PRServiceGUI:
             self.lbl_status.config(text=f"已取消重点关注: {code}", fg="blue")
         except Exception as e:
             messagebox.showerror("错误", f"取消重点关注失败: {e}")
+
+    def get_current_df(self):
+        """线程安全获取内存中最新已拉取的行情 DataFrame"""
+        with self.df_lock:
+            if self.current_df is not None and not self.current_df.empty:
+                return self.current_df.copy()
+        return None
+
+    def _find_available_port(self, candidate_ports=None):
+        import socket
+        if candidate_ports is None:
+            candidate_ports = [26685, 26686, 26687, 26688, 26689, 26690, 26691, 26692, 26693, 26694, 26695]
+        for p in candidate_ports:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                s.bind(('127.0.0.1', p))
+                s.close()
+                return p
+            except Exception:
+                continue
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(('127.0.0.1', 0))
+            assigned_port = s.getsockname()[1]
+            s.close()
+            return assigned_port
+        except Exception:
+            return 26685
+
+    def request_dynamic_ipc_sync(self, timeout=1.8):
+        """自动刷新或更新数据时，开启动态端口向主程序拉取全量行情数据包，接收解包完后即刻物理关闭释放端口"""
+        if getattr(self, '_ipc_sync_in_progress', False):
+            return self.get_current_df()
+        self._ipc_sync_in_progress = True
+
+        dyn_port = self._find_available_port()
+        service_logger.info(f"[IPC 动态端口] 自动开启临时动态端口 Port={dyn_port} 获取行情数据...")
+
+        received_container = []
+        def _dynamic_cb(df):
+            if df is not None and not df.empty:
+                received_container.append(df)
+                with self.df_lock:
+                    self.current_df = df
+                try:
+                    self.on_realtime_data_updated(df)
+                except Exception as e:
+                    service_logger.debug(f"实时数据更新回调异常: {e}")
+
+        temp_mgr = IPCSyncManager(port=dyn_port, data_callback=_dynamic_cb, logger=service_logger)
+        try:
+            temp_mgr.start()
+            if getattr(temp_mgr, '_bind_event', None):
+                temp_mgr._bind_event.wait(timeout=0.5)
+
+            # 通过命名管道向 TK 发送包含动态端口的 REQ_FULL_SYNC 指令
+            temp_mgr.request_full_sync()
+
+            start_t = time.time()
+            while time.time() - start_t < timeout:
+                if received_container or temp_mgr.get_current_df() is not None:
+                    df_got = temp_mgr.get_current_df()
+                    if df_got is not None and not df_got.empty:
+                        with self.df_lock:
+                            self.current_df = df_got
+                        service_logger.info(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据，即刻释放端口")
+                        break
+                time.sleep(0.1)
+        except Exception as e:
+            service_logger.error(f"动态端口获取 IPC 数据异常: {e}")
+        finally:
+            # 用完立即停止物理 Socket 监听并关闭释放端口！
+            temp_mgr.stop()
+            self._ipc_sync_in_progress = False
+
+        return self.get_current_df()
 
     def on_realtime_data_updated(self, df):
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
@@ -1979,12 +2074,9 @@ class PRServiceGUI:
 
     def _run_once_job(self, force_save=False):
         try:
-            # 💥 同步拉取并等待最新 IPC 数据，解决点击查询或自动刷新时使用旧行情的问题
-            if hasattr(self, "sync_manager") and self.sync_manager:
-                service_logger.info("正在通过 IPC 命名管道同步请求最新行情数据...")
-                self.sync_manager.request_full_sync()
-                # 延时 1.2 秒以等待数据接收并反序列化完成
-                time.sleep(1.2)
+            # 💥 自动使用 IPC 动态端口同步拉取最新行情数据包，完事即刻物理释放端口
+            service_logger.info("正在通过 IPC 动态端口同步请求最新行情数据...")
+            self.request_dynamic_ipc_sync(timeout=1.8)
 
             today = time.strftime("%Y-%m-%d")
             # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期
