@@ -84,31 +84,19 @@ class MultiPeriodStrategyEngine:
 
         needed_cols = self._extract_cols_from_expr(strategy_expr)
         
-        # 判定 df 中真正缺失或需要从 IPC 更新的列
-        missing_cols = set()
-        for col in needed_cols:
-            if force_refresh or col not in df.columns:
-                missing_cols.add(col)
-            else:
-                s = df[col]
-                if s.isna().all():
-                    missing_cols.add(col)
-
-        if not strategy_expr:
-            default_core_cols = {
-                'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
-                'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
-                'Trends', 'nclose', 'sig_bottom', 'sig_launch'
-            }
-            if force_refresh:
-                missing_cols.update(default_core_cols)
-            else:
-                for col in default_core_cols:
-                    if col not in df.columns or df[col].isna().all():
-                        missing_cols.add(col)
-
-        if not missing_cols:
-            return df
+        # 判定 df 中需要从 IPC 抓取/全自动回补的列
+        missing_cols = set(needed_cols)
+        default_core_cols = {
+            'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
+            'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
+            'Trends', 'nclose', 'sig_bottom', 'sig_launch'
+        }
+        default_core_cols = {
+            'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
+            'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
+            'Trends', 'nclose', 'sig_bottom', 'sig_launch'
+        }
+        missing_cols.update(default_core_cols)
 
         try:
             import time
@@ -117,12 +105,18 @@ class MultiPeriodStrategyEngine:
             ipc_mgr = get_global_ipc_sync_manager()
             if ipc_mgr is not None:
                 ipc_df = ipc_mgr.get_current_df()
-                if ipc_df is None or ipc_df.empty:
+                now_ts = time.time()
+                last_recv = getattr(ipc_mgr, 'last_recv_t', 0.0)
+                cache_expired = (now_ts - last_recv > 900.0) # 15分钟对齐多周期缓存刷新周期
+
+                if (ipc_df is None or ipc_df.empty or cache_expired or force_refresh):
                     ipc_mgr.request_full_sync()
-                    for _ in range(5):
+                    # 冷启动/无数据/强刷时，等待 Socket 大包 (5500行) 完成接收 (约 1.2s~1.8s)
+                    for _ in range(25):
                         time.sleep(0.1)
                         ipc_df = ipc_mgr.get_current_df()
                         if ipc_df is not None and not ipc_df.empty:
+                            logger.info(f"⚡ [IPC 工厂单例缓存] 成功完整获取 {len(ipc_df)} 行实时行情快照至策略引擎")
                             break
 
                 if ipc_df is not None and not ipc_df.empty:
@@ -167,7 +161,9 @@ class MultiPeriodStrategyEngine:
         except Exception as ex_ipc:
             logger.debug(f"IPC fetch for missing strategy cols failed: {ex_ipc}")
 
-        # 🛡️ 自动安全兜底：如果 IPC 依然没有获取到该列，设置默认安全 fallback 值，防范 query/eval 崩溃
+        # 🛡️ 自动安全兜底：如果 IPC 依然没有获取到该列，先通过日线 OHLCV/多日量价估计计算 VWAP 成本列
+        df = self.compute_daily_vwap_fallbacks(df)
+
         for col in missing_cols:
             if col not in df.columns or df[col].isna().all():
                 c_low = col.lower()
@@ -187,6 +183,102 @@ class MultiPeriodStrategyEngine:
                     df[col] = df['percent'] if 'percent' in df.columns else 0.0
                 else:
                     df[col] = 0.0
+
+        return df
+
+    @staticmethod
+    def compute_daily_vwap_fallbacks(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        当缺少分时/IPC 实时分钟 Bar 数据时，利用日线 OHLCV 与历史多日量价 (close, lastp1d, lastp2d, volume, lastv1d...)
+        动态估计计算跨日 VWAP/TWAP 机构成本线衍生列 (vwap_cum_2d, vwap_cum_3d, nclose, last_vwap_cum_2d 等)，
+        防止单纯将缺失列填充为 close 导致 nclose >= 1.005 * vwap_cum_2d 等条件 100% 误判为 0 命中。
+        """
+        if df is None or df.empty:
+            return df
+
+        p0 = df['close'] if 'close' in df.columns else (df['trade'] if 'trade' in df.columns else None)
+        if p0 is None:
+            return df
+
+        import numpy as np
+
+        v0 = df['volume'] if 'volume' in df.columns else (df['vol'] if 'vol' in df.columns else pd.Series(1.0, index=df.index))
+        
+        # 抽取历史多日收盘与成交量
+        p1 = df['lastp1d'] if 'lastp1d' in df.columns else p0
+        p2 = df['lastp2d'] if 'lastp2d' in df.columns else p1
+        p3 = df['lastp3d'] if 'lastp3d' in df.columns else p2
+        p4 = df['lastp4d'] if 'lastp4d' in df.columns else p3
+        p5 = df['lastp5d'] if 'lastp5d' in df.columns else p4
+
+        v1 = df['lastv1d'] if 'lastv1d' in df.columns else v0
+        v2 = df['lastv2d'] if 'lastv2d' in df.columns else v1
+        v3 = df['lastv3d'] if 'lastv3d' in df.columns else v2
+        v4 = df['lastv4d'] if 'lastv4d' in df.columns else v3
+        v5 = df['lastv5d'] if 'lastv5d' in df.columns else v4
+
+        # 估计 nclose (今日分时 VWAP)
+        if 'nclose' not in df.columns or df['nclose'].isna().all():
+            if 'amount' in df.columns and 'volume' in df.columns:
+                amt = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+                vol = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
+                mask = (vol > 0) & (amt > 0)
+                nclose_series = p0.copy()
+                ratio = amt[mask] / (vol[mask] * 100.0)
+                valid_ratio = (ratio > 0.3 * p0[mask]) & (ratio < 3.0 * p0[mask])
+                nclose_series[mask & valid_ratio] = ratio[valid_ratio]
+                df['nclose'] = nclose_series
+            elif 'open' in df.columns and 'high' in df.columns and 'low' in df.columns:
+                df['nclose'] = (df['open'] + df['high'] + df['low'] + df['close'] * 2.0) / 5.0
+            else:
+                df['nclose'] = p0
+
+        if 'last_nclose1d' not in df.columns or df['last_nclose1d'].isna().all():
+            df['last_nclose1d'] = p1
+            df['last_nclose'] = p1
+        if 'last_nclose2d' not in df.columns or df['last_nclose2d'].isna().all():
+            df['last_nclose2d'] = p2
+        if 'last_nclose3d' not in df.columns or df['last_nclose3d'].isna().all():
+            df['last_nclose3d'] = p3
+
+        # 估计 跨日加权累计 VWAP (vwap_cum_2d, vwap_cum_3d, vwap_cum_4d, vwap_cum_5d)
+        w_sum_2d = np.maximum(1.0, v0 + v1)
+        w_sum_3d = np.maximum(1.0, v0 + v1 + v2)
+        w_sum_4d = np.maximum(1.0, v0 + v1 + v2 + v3)
+        w_sum_5d = np.maximum(1.0, v0 + v1 + v2 + v3 + v4)
+
+        last_w_sum_2d = np.maximum(1.0, v1 + v2)
+        last_w_sum_3d = np.maximum(1.0, v1 + v2 + v3)
+
+        if 'vwap_cum_2d' not in df.columns or df['vwap_cum_2d'].isna().all():
+            c_val = (p0 * v0 + p1 * v1) / w_sum_2d
+            df['vwap_cum_2d'] = c_val
+            df['vwap_cum_2d_d'] = c_val
+
+        if 'vwap_cum_3d' not in df.columns or df['vwap_cum_3d'].isna().all():
+            c_val = (p0 * v0 + p1 * v1 + p2 * v2) / w_sum_3d
+            df['vwap_cum_3d'] = c_val
+            df['vwap_cum_3d_d'] = c_val
+
+        if 'vwap_cum_4d' not in df.columns or df['vwap_cum_4d'].isna().all():
+            c_val = (p0 * v0 + p1 * v1 + p2 * v2 + p3 * v3) / w_sum_4d
+            df['vwap_cum_4d'] = c_val
+            df['vwap_cum_4d_d'] = c_val
+
+        if 'vwap_cum_5d' not in df.columns or df['vwap_cum_5d'].isna().all():
+            c_val = (p0 * v0 + p1 * v1 + p2 * v2 + p3 * v3 + p4 * v4) / w_sum_5d
+            df['vwap_cum_5d'] = c_val
+            df['vwap_cum_5d_d'] = c_val
+
+        if 'last_vwap_cum_2d' not in df.columns or df['last_vwap_cum_2d'].isna().all():
+            c_val = (p1 * v1 + p2 * v2) / last_w_sum_2d
+            df['last_vwap_cum_2d'] = c_val
+            df['last_vwap_cum_2d_d'] = c_val
+
+        if 'last_vwap_cum_3d' not in df.columns or df['last_vwap_cum_3d'].isna().all():
+            c_val = (p1 * v1 + p2 * v2 + p3 * v3) / last_w_sum_3d
+            df['last_vwap_cum_3d'] = c_val
+            df['last_vwap_cum_3d_d'] = c_val
 
         return df
         
@@ -281,6 +373,15 @@ class MultiPeriodStrategyEngine:
                 continue
                 
             cond = strategy_config['conditions'].get(period, strategy_config['conditions'].get(p_norm))
+
+            # ⚡ [AUTOMATIC STRATEGY ENRICHMENT] 评估前按需全自动补齐该策略特有缺失列（如 VWAP/nclose/Trends 等）
+            if p_norm in ('d', '1d', 'day'):
+                filter_expr = cond.get('filter', '') if isinstance(cond, dict) else str(cond or '')
+                df = self.ensure_strategy_ipc_columns(df, strategy_expr=filter_expr, force_refresh=True)
+                with self.lock:
+                    self._period_dfs[p_norm] = df
+                    self._period_dfs[period] = df
+
             df_clean = df.fillna(0)
             
             if not cond or not cond.get('enabled', True):

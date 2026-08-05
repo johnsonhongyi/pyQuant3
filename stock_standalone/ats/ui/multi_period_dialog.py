@@ -4730,8 +4730,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     code = code_item.text().strip()
         
         if not code:
-            QMessageBox.warning(self, "警告", "请输入或在表格中选择要诊断的个股代码！")
-            return
+            code = "300058"
         
         self.diagnose_stock_strategy(code, from_input_box=from_input_box)
 
@@ -4860,7 +4859,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QApplication.restoreOverrideCursor()
             self.lbl_status.setText("准备就绪")
 
-    def diagnose_stock_strategy(self, code, name=None, from_input_box=False):
+    def diagnose_stock_strategy(self, code=None, name=None, from_input_box=False):
+        if not code or not str(code).strip() or str(code).strip() == "000000":
+            code = "300058"
         code = str(code).strip().zfill(6)
         if not name:
             if self.top_now is not None and code in self.top_now.index:

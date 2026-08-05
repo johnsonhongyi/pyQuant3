@@ -25,7 +25,7 @@
           "enabled": true
         },
         "d": {
-          "filter": "nclose >= 1.005 * vwap_cum_2d and vwap_cum_2d >= 1.002 * vwap_cum_3d and vwap_cum_3d >= vwap_cum_4d and percent >= 2.0 and percent <= 19.8 and close > open and (lastp1d >= ma51d or last_vwap_cum_2d > last_vwap_cum_3d or last_nclose1d > last_nclose3d) and (lastv0d > 1.15 * lastv1d or volume > 1.3 * lastv2d or lastv1d > 0.95 * lastv2d) and Trends >= 60",
+          "filter": "nclose >= 1.005 * vwap_cum_2d and vwap_cum_2d >= 1.002 * vwap_cum_3d and vwap_cum_3d >= vwap_cum_4d and close > open and (lastp1d >= ma51d or last_vwap_cum_2d > last_vwap_cum_3d or last_nclose1d > last_nclose3d) and (lastv0d * volume > lastv1d or lastv1d > 0.95 * lastv2d) and close > nclose*0.995",
           "weight": 1.0,
           "enabled": true
         }

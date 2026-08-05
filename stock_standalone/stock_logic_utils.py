@@ -772,21 +772,8 @@ def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any
             continue
         hit_count: int = 0
         try:
-            # 自动补齐公式中缺失的指标列，防止 Query Engine 报 NameError 并输出大量日志
-            expr_cols = extract_columns(expr)
-            missing_cols = [col for col in expr_cols if col not in df_code.columns]
-            if missing_cols:
-                df_to_test = df_code.copy()
-                for col in missing_cols:
-                    if col in ('category', 'hy', 'blockname', 'name', 'block', 'details'):
-                        df_to_test[col] = ""
-                    else:
-                        df_to_test[col] = 0.0
-            else:
-                df_to_test = df_code
-
-            # 使用 PandasQueryEngine 执行引擎，它会自动处理 columns 注入和 eval/exec 降级
-            res = query_engine.execute(df_to_test, expr)
+            # 使用 PandasQueryEngine 执行引擎，它会自动处理 columns 注入、同义词映射与 eval/exec 降级
+            res = query_engine.execute(df_code, expr)
             # 统计命中结果
             if isinstance(res, pd.DataFrame):
                 hit_count = len(res)
