@@ -1287,9 +1287,130 @@ class RouteConfigDialog(QDialog):
         
         # 加载初始关键字列表
         self._load_magnetic_keywords()
+
+        # ==========================================
+        # Tab 3: 🚀 Acer 性能与风扇控制
+        # ==========================================
+        tab_acer = QWidget()
+        acer_layout = QVBoxLayout(tab_acer)
+        acer_layout.setSpacing(12)
+
+        self.acer_controller = core.AcerPerformanceController()
+        status = self.acer_controller.get_current_status()
+        is_supported = status.get("supported", False)
+
+        # 硬件支持 Badge 指示
+        lbl_badge = QLabel()
+        if is_supported:
+            lbl_badge.setText("✅ 已检测到 Acer 硬件控制驱动 (WMI 支持已就绪)")
+            lbl_badge.setStyleSheet("color: #10b981; font-weight: bold; font-size: 13px;")
+        else:
+            lbl_badge.setText("⚠️ 未检测到 Acer WMI 接口 (非 Acer 设备或缺少 PredatorSense 服务)")
+            lbl_badge.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
+        acer_layout.addWidget(lbl_badge)
+
+        # 读取保存的配置
+        acer_cfg = self.config_manager.get_acer_performance_config()
+
+        # 1. 超频模式分组框
+        grp_oc = QGroupBox("超频模式 (Overclocking Mode)")
+        oc_layout = QHBoxLayout(grp_oc)
+        self.rad_oc_default = QtWidgets.QRadioButton("普通 / 默认 (Default)")
+        self.rad_oc_fast = QtWidgets.QRadioButton("⚡ 快速 (Fast)")
+        self.rad_oc_extreme = QtWidgets.QRadioButton("🔥 极速 (Extreme)")
+
+        oc_mode_saved = str(acer_cfg.get("overclock_mode", "Fast")).upper()
+        if oc_mode_saved in ["DEFAULT", "NORMAL", "0"]:
+            self.rad_oc_default.setChecked(True)
+        elif oc_mode_saved in ["EXTREME", "2"]:
+            self.rad_oc_extreme.setChecked(True)
+        else:
+            self.rad_oc_fast.setChecked(True)
+
+        oc_layout.addWidget(self.rad_oc_default)
+        oc_layout.addWidget(self.rad_oc_fast)
+        oc_layout.addWidget(self.rad_oc_extreme)
+        acer_layout.addWidget(grp_oc)
+
+        # 2. 风扇与 CoolBoost 分组框
+        grp_fan = QGroupBox("散热与风扇控制 (Fan & CoolBoost)")
+        fan_layout = QVBoxLayout(grp_fan)
+        
+        self.chk_coolboost = QCheckBox("开启 CoolBoost™ 动态加压散热辅助")
+        self.chk_coolboost.setChecked(acer_cfg.get("coolboost", True))
+        fan_layout.addWidget(self.chk_coolboost)
+
+        row_fan_mode = QHBoxLayout()
+        row_fan_mode.addWidget(QLabel("风扇转速模式: "))
+        self.rad_fan_auto = QtWidgets.QRadioButton("自动 (Auto)")
+        self.rad_fan_max = QtWidgets.QRadioButton("最大 (Max)")
+        self.rad_fan_custom = QtWidgets.QRadioButton("自定义 (Custom)")
+        
+        fan_mode_saved = str(acer_cfg.get("fan_mode", "Auto")).upper()
+        if fan_mode_saved in ["MAX", "1"]:
+            self.rad_fan_max.setChecked(True)
+        elif fan_mode_saved in ["CUSTOM", "2"]:
+            self.rad_fan_custom.setChecked(True)
+        else:
+            self.rad_fan_auto.setChecked(True)
+
+        row_fan_mode.addWidget(self.rad_fan_auto)
+        row_fan_mode.addWidget(self.rad_fan_max)
+        row_fan_mode.addWidget(self.rad_fan_custom)
+        row_fan_mode.addStretch()
+        fan_layout.addLayout(row_fan_mode)
+        acer_layout.addWidget(grp_fan)
+
+        # 3. 完成后的窗口处理方式 (Post Action Mode)
+        grp_post = QGroupBox("执行完成后控制面板处理方式")
+        post_layout = QHBoxLayout(grp_post)
+        self.rad_post_hide = QtWidgets.QRadioButton("🙈 静默隐藏至后台 (Hide，推荐)")
+        self.rad_post_close = QtWidgets.QRadioButton("❌ 关闭控制窗口 (Close，测试唤起)")
+        self.rad_post_kill = QtWidgets.QRadioButton("💀 彻底杀掉前台进程 (Kill，测试冷启动)")
+
+        post_action_saved = str(acer_cfg.get("post_action", "hide")).lower()
+        if post_action_saved in ["close", "关闭"]:
+            self.rad_post_close.setChecked(True)
+        elif post_action_saved in ["kill", "杀掉"]:
+            self.rad_post_kill.setChecked(True)
+        else:
+            self.rad_post_hide.setChecked(True)
+
+        post_layout.addWidget(self.rad_post_hide)
+        post_layout.addWidget(self.rad_post_close)
+        post_layout.addWidget(self.rad_post_kill)
+        post_layout.addStretch()
+        acer_layout.addWidget(grp_post)
+
+        # 4. 自动化开机/启动设置 (带秒数微调)
+        row_autostart = QHBoxLayout()
+        self.chk_acer_autostart = QCheckBox(" 随窗口管理器启动时，自动在后台应用此 Acer 性能设置")
+        self.chk_acer_autostart.setChecked(acer_cfg.get("auto_apply_on_startup", True))
+        
+        row_autostart.addWidget(self.chk_acer_autostart)
+        row_autostart.addWidget(QLabel("   ⏳ 启动延迟应用: "))
+        
+        self.spn_startup_delay = QtWidgets.QSpinBox()
+        self.spn_startup_delay.setRange(0, 120)
+        self.spn_startup_delay.setValue(int(acer_cfg.get("startup_delay_seconds", 10)))
+        self.spn_startup_delay.setSuffix(" 秒")
+        self.spn_startup_delay.setToolTip("开机启动后静默等待此秒数，待 Windows 后台驱动服务彻底到位后再自动应用设置")
+        
+        row_autostart.addWidget(self.spn_startup_delay)
+        row_autostart.addStretch()
+        acer_layout.addLayout(row_autostart)
+
+        # 5. 立即应用按钮
+        btn_apply_acer = QPushButton("⚡ 立即应用 Acer 性能设置")
+        btn_apply_acer.setObjectName("btnApplyAcer")
+        btn_apply_acer.clicked.connect(self._apply_acer_performance_now)
+        acer_layout.addWidget(btn_apply_acer)
+
+        acer_layout.addStretch()
         
         self.tab_widget.addTab(tab_route, "🌐 静态路由")
-        self.tab_widget.addTab(tab_magnetic, "🧲 磁吸窗口关键字")
+        self.tab_widget.addTab(tab_magnetic, "🧲 磁吸窗口")
+        self.tab_widget.addTab(tab_acer, "🚀 Acer 性能控制")
         layout.addWidget(self.tab_widget)
         
         # 底部确认/取消按钮
@@ -1305,6 +1426,37 @@ class RouteConfigDialog(QDialog):
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_confirm)
         layout.addLayout(btn_layout)
+
+    def _apply_acer_performance_now(self):
+        selected_oc = "Fast"
+        if self.rad_oc_default.isChecked():
+            selected_oc = "Default"
+        elif self.rad_oc_extreme.isChecked():
+            selected_oc = "Extreme"
+
+        selected_fan = "Auto"
+        if self.rad_fan_max.isChecked():
+            selected_fan = "Max"
+        elif self.rad_fan_custom.isChecked():
+            selected_fan = "Custom"
+
+        selected_post = "hide"
+        if self.rad_post_close.isChecked():
+            selected_post = "close"
+        elif self.rad_post_kill.isChecked():
+            selected_post = "kill"
+
+        profile = {
+            "overclock_mode": selected_oc,
+            "coolboost": self.chk_coolboost.isChecked(),
+            "fan_mode": selected_fan,
+            "post_action": selected_post
+        }
+        success, msg = self.acer_controller.apply_performance_profile(profile)
+        if success:
+            QMessageBox.information(self, "应用成功", f"Acer 性能模式配置已生效：\n{msg}")
+        else:
+            QMessageBox.warning(self, "应用提示", f"Acer 性能设置结果：\n{msg}")
 
     def _load_magnetic_keywords(self):
         """加载已保存的所有磁吸关键字到 ListWidget"""
@@ -1365,11 +1517,64 @@ class RouteConfigDialog(QDialog):
         # 2. 保存磁吸关键字配置
         new_kws = [self.list_kw.item(i).text() for i in range(self.list_kw.count())]
         self.config_manager.config_data["magnetic_keywords"] = new_kws
+
+        # 3. 保存 Acer 性能模式配置
+        selected_oc = "Fast"
+        if self.rad_oc_default.isChecked():
+            selected_oc = "Default"
+        elif self.rad_oc_extreme.isChecked():
+            selected_oc = "Extreme"
+
+        selected_fan = "Auto"
+        if self.rad_fan_max.isChecked():
+            selected_fan = "Max"
+        elif self.rad_fan_custom.isChecked():
+            selected_fan = "Custom"
+
+        selected_post = "hide"
+        if self.rad_post_close.isChecked():
+            selected_post = "close"
+        elif self.rad_post_kill.isChecked():
+            selected_post = "kill"
+
+        acer_cfg = {
+            "overclock_mode": selected_oc,
+            "coolboost": self.chk_coolboost.isChecked(),
+            "fan_mode": selected_fan,
+            "post_action": selected_post,
+            "auto_apply_on_startup": self.chk_acer_autostart.isChecked(),
+            "startup_delay_seconds": self.spn_startup_delay.value()
+        }
+        self.config_manager.save_acer_performance_config(acer_cfg)
         
         if self.config_manager.save():
             # 刷新内存中的磁吸关键字缓存
             core._MAGNETIC_KEYWORDS_CACHE = None
-            QMessageBox.information(self, "成功", "静态路由与磁吸关键字配置已成功保存落盘！")
+            
+            # 1. 同步设置 Windows 注册表开机自启状态并获取官方路径日志
+            is_autostart_checked = self.chk_acer_autostart.isChecked()
+            auto_ok, auto_msg = core.set_autostart_enabled(is_autostart_checked)
+            
+            # 2. 在主窗口日志文本框输出结构化通知
+            autostart_str = "已开启" if is_autostart_checked else "已关闭"
+            delay_str = f"{self.spn_startup_delay.value()} 秒"
+            
+            main_win = getattr(self, 'parent_ui', None) or self.parent()
+            if main_win and hasattr(main_win, 'log'):
+                main_win.log(f"🚀 Acer 性能模式配置已保存: 超频={selected_oc}, 风扇={selected_fan}, CoolBoost={self.chk_coolboost.isChecked()}, 处理方式={selected_post}")
+                main_win.log(f"⏳ [AutoStart] {auto_msg} (启动延迟应用: {delay_str})")
+
+            QMessageBox.information(
+                self, 
+                "保存成功", 
+                f"静态路由、磁吸关键字及 Acer 性能配置已成功落盘！\n\n"
+                f"• 超频模式: {selected_oc}\n"
+                f"• 风扇模式: {selected_fan}\n"
+                f"• 后置处理: {selected_post}\n"
+                f"• 开机后台自启: {autostart_str}\n"
+                f"• 自启路径/日志: {auto_msg}\n"
+                f"• 启动延迟应用: {delay_str}"
+            )
             self.accept()
         else:
             QMessageBox.critical(self, "错误", "配置文件写盘失败，请检查文件写权限！")
@@ -1401,6 +1606,7 @@ class RouteConfigDialog(QDialog):
             QMessageBox.warning(self, "检测失败", msg)
             
         self.config_manager.config_data["routing_config"] = old_cfg
+
 
 
 class ManagerHotkeyThread(threading.Thread):
@@ -1497,6 +1703,20 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
             self.log(f"[Route Startup] {self.startup_route_msg}")
+            
+        # 自动探测与在后台应用 Acer 硬件性能模式配置
+        try:
+            acer_cfg = self.config_manager.get_acer_performance_config()
+            if acer_cfg.get("auto_apply_on_startup", True):
+                controller = core.AcerPerformanceController()
+                if controller.is_supported():
+                    ok, acer_msg = controller.apply_performance_profile(acer_cfg)
+                    self.log(f"[Acer Hardware] 启动自动调度性能模式: {acer_msg}")
+                else:
+                    self.log("[Acer Hardware] 设备无 Acer WMI 支持，静默跳过性能调优")
+        except Exception as e:
+            logger.error(f"启动自动应用 Acer 性能模式异常: {e}")
+
             
         # 允许驻留后台
         QApplication.instance().setQuitOnLastWindowClosed(False)
