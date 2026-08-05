@@ -5943,6 +5943,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         full_df = latest_p
                     
                     if full_df is not None:
+                        # 🚀 [CORE FIX] 在发布到 MarketStateBus 前，确保全量快照注入了动态均价与多日 VWAP 衍生列
+                        kline_cache = None
+                        if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                            kline_cache = self.realtime_service.kline_cache
+                        elif hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'kline_cache') and self.live_strategy.kline_cache:
+                            kline_cache = self.live_strategy.kline_cache
+
+                        if kline_cache:
+                            try:
+                                if full_df is not None and not full_df.empty:
+                                    kline_cache.attach_multiday_twap_to_df(full_df)
+                                if full_df_res is not None and not full_df_res.empty and full_df_res is not full_df:
+                                    kline_cache.attach_multiday_twap_to_df(full_df_res)
+                            except Exception as ex:
+                                logger.error(f"[Bus] Failed to attach dynamic twap: {ex}")
+
                         self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
                         self._last_snapshot_recv_time = time.time()  # 🌟 成功收到并发布快照，更新时间戳
                         # logger.debug("📡 [Bus] Published latest snapshot with resampled track.")
@@ -6231,6 +6247,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 4. 过滤/查询 (轻量)
             target_full_df = full_df_res if (full_df_res is not None and not full_df_res.empty) else full_df
             target_df_raw = df_raw_res if df_raw_res is not None else df_raw
+
             if query:
                 from query_engine_util import query_engine
                 try:
@@ -6552,6 +6569,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.realtime_service.kline_cache.set_df_all_cache(full_df)
                     except Exception as ex:
                         logger.error(f"[Sync] Failed to set df_all_cache: {ex}")
+
+                # 🚀 [CORE FIX] 策略动态均线与 TWAP/VWAP 挂载完成后自动刷新策略显示 (防止显示为空及免去手动点击筛选)
+                current_query = getattr(self, '_last_value', "")
+                if current_query and (ui_df is None or ui_df.empty) and (full_df is not None and not full_df.empty):
+                    try:
+                        from query_engine_util import query_engine
+                        if query_engine:
+                            refreshed_df = query_engine.execute(full_df, current_query)
+                            if refreshed_df is not None and not refreshed_df.empty:
+                                ui_df = refreshed_df
+                                logger.info(f"🔄 [Sync] 策略动态均价挂载后自动刷新策略显示，重算命中结果: {len(ui_df)} 行")
+                    except Exception as ex:
+                        logger.warning(f"[Sync] Auto refresh strategy after dynamic TWAP error: {ex}")
                 
                 # ⚡ [NEW] 主动强力注入交易内核特征预加载温热 (移至 compute_executor 异步执行以彻底释放主线程)
                 try:

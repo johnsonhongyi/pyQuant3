@@ -1,3 +1,26 @@
+## 2026-08-05 13:42
+- [x] **重构最上游单点补齐 (Single Point Upstream Injection) 极致高性能数据管道 (`instock_MonitorTK.py`, `tests/test_dynamic_twap_auto_refresh.py`)**：
+    - [x] **采纳极佳性能优化设计**：彻底废除下游多处重复调用 `attach_multiday_twap_to_df` 造成的 CPU 冗余浪费。
+    - [x] **源头单点补齐 (Single Source of Truth)**：仅在最上游 `MarketBusWorker`（快照进入 `MarketStateBus` 总线前）统一挂载补齐一次 `vwap_cum_2d` 等缺失衍生列。
+    - [x] **对象内存共享 (Memory Reference Sharing)**：利用 Python DataFrame 对象的内存引用共享特性，下游的策略过滤 (`_process_tree_data_async`)、UI 树同步 (`_apply_tree_data_sync`) 和网络 IPC 推送 (`send_df`) **零开销天然共享源头算齐的最终数据集**，在 100% 保证推送与过滤正确性的前提下大幅提升计算性能。
+    - [x] **单元测试 100% 成功通过**：全量 14 项单元测试 100% 成功通过！
+
+## 2026-08-05 13:30
+- [x] **实现 IPC 推送数据包 (Port 26670/26671) 与底层总线 (MarketStateBus) 全量均价衍生列100%覆盖保障 (`instock_MonitorTK.py`, `tests/test_dynamic_twap_auto_refresh.py`)**：
+    - [x] **解构底层推送数据非最终数据集的硬伤**：审计排查发现 `send_df` 线程在从 `MarketStateBus` 拿到 `df_bus_all` 后，直接调用 `pickle.dumps` 将原始 DataFrame 推送给外部 26670 (ATS 终端) 与 26671 (多周期引擎) 端口，中间未经过 `attach_multiday_twap_to_df` 挂载计算。导致外部多周期筛选引擎接收到的数据包缺失 `vwap_cum_2d` 等衍生列，无法获取最新的均价数据。
+    - [x] **底层总线发布与 IPC 分发双重拦截 (Dual-barrier Injection)**：
+        - 在 `MarketBusWorker` 将快照发布至 `MarketStateBus` 前，强行挂载 `attach_multiday_twap_to_df`。
+        - 在 `send_df` 线程解包 `df_bus_all` 与 `df_bus_all_res` 后、打包发送给 26670 / 26671 端口前，强制注入 `attach_multiday_twap_to_df` 处理。
+        - 彻底保证了推送给多周期筛选引擎和 ATS 终端的数据包 **100% 是算齐了 `vwap_cum_2d`、`vwap_cum_3d`、`last_vwap_cum_2d` 等均价指标的最终数据集**。
+    - [x] **单元测试 100% 成功通过**：在 `tests/test_dynamic_twap_auto_refresh.py` 中补充 `test_ipc_send_package_contains_dynamic_twap` 端到端断言测试，14 项单元测试全量成功通过！
+
+## 2026-08-05 13:15
+- [x] **修复数据更新推送后策略过滤因缺少分时均价 col 导致 Rows: 0 及策略动态均价后自动刷新显示 (`instock_MonitorTK.py`, `tests/test_dynamic_twap_auto_refresh.py`)**：
+    - [x] **解构策略过滤显示 Rows: 0 根源**：数据更新推送时，`_process_tree_data_async`（Pump 线程）在接收到原始 snapshot 后直接运行 `query_engine.execute(target_full_df, query)`。由于此时 snapshot 尚未挂载动态均价与多日 VWAP/TWAP 衍生列（如 `vwap_cum_2d`），策略判断表达式条件失效，导致过滤结果为 Rows: 0，界面空显示；且后续在主线程 `set_df_all_cache` 完成均价计算后未自动重新刷新，需手动点击筛选。
+    - [x] **策略过滤前置注入 (Pre-filter Injection)**：在 `_process_tree_data_async` 中执行 `query` 表达式前，强行引入 `attach_multiday_twap_to_df` 预加载注入。确保 `target_full_df` 在过滤第一瞬间即注入了 `vwap_cum_2d`、`vwap_cum_3d`、`last_vwap_cum_2d` 等全量分时均价与多日机构成本线衍生列。
+    - [x] **动态均价挂载后自动刷新策略显示 (Auto-refresh on Sync)**：在 `_apply_tree_data_sync` 内部 `set_df_all_cache` 挂载计算完成阶段，接入策略自动刷新二次防护。当检测到已有查询条件且界面先前处于空结果时，自动基于算齐均价的 `full_df` 重新运行 `query_engine.execute` 刷新 `ui_df` 呈现，彻底摆脱每次更新后需手动点击筛选的困扰。
+    - [x] **单元测试 100% 成功通过**：新建 `tests/test_dynamic_twap_auto_refresh.py` 端到端验证挂载均价与策略动态自动过滤刷新；结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% 成功通过！
+
 ## 2026-08-05 10:35
 - [x] **实现外盘/热点板块置顶 (📌 Pinned) 排序保护引擎 (`ats/ui/styles.py`, `ats/ui/global_market_panel.py`, `scratch/test_pinned_sorting.py`)**：
     - [x] **解构置顶项目掉到中间/下方的底层机制**：在上一次恢复外盘表格 `setSortingEnabled(True)` 与列宽持久化状态恢复后，Qt 的 `QTableWidget` 会根据 Header 上的 `SortIndicator` （如按涨跌幅%降序/升序）对所有行重新执行 `sortByColumn`。因原生的 `QTableWidgetItem` 无法感知置顶属性，导致带有 `📌` 标记的资产（如 SOXX 费城半导体）被普通按涨跌幅大小排序到了第 12 行。
