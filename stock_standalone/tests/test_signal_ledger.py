@@ -341,7 +341,49 @@ class TestSignalLedger(unittest.TestCase):
         self.assertIsNotNone(df_d)
         self.assertFalse(df_d.empty)
 
+    def test_test_code_against_queries_hit_accuracy(self):
+        """验证 test_code_against_queries 对 Trends 与复杂衍生列求值的精准 Hit 计算"""
+        from stock_logic_utils import test_code_against_queries
+        from query_engine_util import query_engine
+
+        df_mock = pd.DataFrame({
+            'code': ['000001', '600000'],
+            'name': ['平安银行', '浦发银行'],
+            'close': [15.5, 10.2],
+            'open': [15.0, 10.0],
+            'high': [15.8, 10.5],
+            'low': [14.9, 9.8],
+            'volume': [100000, 50000],
+            'lastp1d': [15.1, 9.9],
+            'lastv1d': [90000, 48000],
+            'lastv2d': [85000, 45000],
+            'lastv0d': [1.1, 1.05],
+            'ma51d': [14.8, 9.5],
+            'TrendS': [75.0, 80.0],
+            'nclose': [15.4, 10.1],
+            'vwap_cum_2d': [15.2, 10.0],
+            'vwap_cum_3d': [15.0, 9.9],
+            'vwap_cum_4d': [14.8, 9.7],
+            'last_vwap_cum_2d': [15.1, 9.95],
+            'last_vwap_cum_3d': [14.9, 9.85],
+            'last_nclose1d': [15.2, 10.05],
+            'last_nclose3d': [14.8, 9.8]
+        }, index=['000001', '600000'])
+
+        query_str = (
+            "nclose >= 1.005 * vwap_cum_2d and vwap_cum_2d >= 1.002 * vwap_cum_3d "
+            "and vwap_cum_3d >= vwap_cum_4d and close > open "
+            "and (lastp1d >= ma51d or last_vwap_cum_2d > last_vwap_cum_3d or last_nclose1d > last_nclose3d) "
+            "and (lastv0d * volume > lastv1d or lastv1d > 0.95 * lastv2d) "
+            "and close > nclose and Trends > 60"
+        )
+
+        results = test_code_against_queries(df_mock, [{"query": query_str}])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["hit"], 2)
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
