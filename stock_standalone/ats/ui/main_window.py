@@ -1431,6 +1431,19 @@ class ATSMainWindow(QMainWindow):
             "history5": h5
         }
 
+        # 逐级异步 UI 刷新定时器 (Staggered Async Tier Timers for zero UI freezing)
+        self._async_tier2_timer = QTimer(self)
+        self._async_tier2_timer.setSingleShot(True)
+        self._async_tier2_timer.timeout.connect(self._async_refresh_tier2)
+
+        self._async_tier3_timer = QTimer(self)
+        self._async_tier3_timer.setSingleShot(True)
+        self._async_tier3_timer.timeout.connect(self._async_refresh_tier3)
+        
+        self._pending_swing_rows = []
+        self._pending_fav_rows = []
+        self._pending_sh_pct = 0.0
+
     def _save_search_history_data(self):
         filepath = self._get_search_history_filepath()
         try:
@@ -3247,20 +3260,74 @@ class ATSMainWindow(QMainWindow):
         if current_batch_alpha:
             self._last_batch_signal_codes = current_batch_alpha
 
-        if swing_rows:
-            self.swing_table.update_data_list(swing_rows)
-            if hasattr(self, 'favorite_panel'):
-                fav_rows = [r for r in swing_rows if str(r[0]).strip() in fav_stocks]
-                self.favorite_panel.update_favorite_rows(fav_rows)
+        fav_rows = []
+        if swing_rows and hasattr(self, 'favorite_panel'):
+            fav_rows = [r for r in swing_rows if str(r[0]).strip() in fav_stocks]
 
-        # 7. 更新三级池 UI 展示
+        # ⚡ Tier 1 (0ms - 瞬间高优先/前台响应): 优先渲染用户当前正在查看的 Top Tab 视图
+        active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
+        if active_tab_idx == 0:
+            if hasattr(self, 'favorite_panel') and fav_rows:
+                self.favorite_panel.update_favorite_rows(fav_rows)
+        else:
+            if swing_rows:
+                self.swing_table.update_data_list(swing_rows)
+
+        # ⚡ 0ms 瞬间更新已打开且 Visible 的个股详情弹窗
+        if has_df:
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, StockDetailDialog) and widget.isVisible():
+                    code = widget.code
+                    if code in self.current_df.index:
+                        row = self.current_df.loc[code]
+                        import pandas as pd
+                        if isinstance(row, pd.DataFrame):
+                            row = row.iloc[0]
+                        widget.update_data(row)
+
+        # 缓存数据供 Tier 2 / Tier 3 异步排队使用
+        self._pending_swing_rows = swing_rows
+        self._pending_fav_rows = fav_rows
+        self._pending_sh_pct = sh_pct
+
+        # 🚀 启动 10ms 后的 Tier 2 异步定时器 (渲染非激活 Tab + 三级池 tree)
+        if hasattr(self, '_async_tier2_timer'):
+            self._async_tier2_timer.start(10)
+            
+        # 🚀 启动 30ms 后的 Tier 3 异步定时器 (渲染右侧板块热力图 + 独立副弹窗)
+        if hasattr(self, '_async_tier3_timer'):
+            self._async_tier3_timer.start(30)
+
+        ui_cost = (time.time() - t_ui_start) * 1000.0
+        logger.debug(f"[ATS_Realtime] refresh_realtime_ui (Tier 1 core) completed in {ui_cost:.1f}ms")
+
+    def _async_refresh_tier2(self):
+        """Tier 2 (10ms 延迟): 异步渲染未在激活态的副 Tab 看板与左侧三级池视图"""
+        if getattr(self, '_is_closing', False):
+            return
+        active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
+        if active_tab_idx == 0:
+            # 补齐更新未在激活态的 MA20d 跟踪器
+            if self._pending_swing_rows:
+                self.swing_table.update_data_list(self._pending_swing_rows)
+        else:
+            # 补齐更新未在激活态的重点关注
+            if hasattr(self, 'favorite_panel') and self._pending_fav_rows:
+                self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+
+        # 刷新左侧 UniverseTreeWidget
         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
         self.universe_widget.update_pools(radar_list, watch_list, trade_list)
-            
+
+    def _async_refresh_tier3(self):
+        """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗"""
+        if getattr(self, '_is_closing', False):
+            return
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
-            
+
         from PyQt6.sip import isdeleted
+        sh_pct = getattr(self, '_pending_sh_pct', 0.0)
         if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
             try:
                 self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
@@ -3278,21 +3345,7 @@ class ATSMainWindow(QMainWindow):
                 self._sector_detail_dialog.update_data(self.current_df)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
-                
-        ui_cost = (time.time() - t_ui_start) * 1000.0
-        logger.debug(f"[ATS_Realtime] refresh_realtime_ui completed in {ui_cost:.1f}ms")
-            
-        # 实时高频更新所有打开的个股明细窗口的实盘特征和过滤状态 (Live update details & filter status)
-        if has_df:
-            for widget in QApplication.topLevelWidgets():
-                if isinstance(widget, StockDetailDialog) and widget.isVisible():
-                    code = widget.code
-                    if code in self.current_df.index:
-                        row = self.current_df.loc[code]
-                        import pandas as pd
-                        if isinstance(row, pd.DataFrame):
-                            row = row.iloc[0]
-                        widget.update_data(row)
+
 
     def _update_signal_ledger(self, df_all):
         """增量更新信号账本（核心方法 — 替代全量 run_pipeline_filtering）
