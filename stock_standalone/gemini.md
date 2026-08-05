@@ -1,3 +1,42 @@
+## 2026-08-05 16:00
+- [x] **提升 `IPCTesterGUI` 默认启动尺寸至 `1280 x 820` 适配大屏与实现 100% 自动几何尺寸大小持久化 (`ats/ui/ipc_tester_gui.py`)**：
+    - [x] **默认大窗口初始化 (`1280 x 820`)**：将 `IPCTesterGUI` 默认尺寸由 800x540 显著提升至开阔舒展的 `1280 x 820`，轻松呈现 402+ 列全量数据与多重 Query / 特定列过滤工具栏。
+    - [x] **彻底剔除强制缩小截断逻辑**：移除了原 `_restore_window_state` 中把大于 900px 的窗口强行裁剪缩小的硬编码，让用户自定义拉大的尺寸能够 100% 保持。
+    - [x] **500ms 防抖与退出双重自动持久化**：重写 `resizeEvent` 与 `closeEvent`，当用户手动拖拽调整窗口物理大小或位置后，自动通过 500ms 防抖与退出机制将 Geometry 字节码物理保存至 `window_config.json`，下次启动时 100% 精准无缝恢复！
+
+## 2026-08-05 15:58
+- [x] **实现 `ipc_tester_gui.py` 图形化控制台【Query 表达式查询】与【特定列模糊匹配显隐】工具栏 (`ats/ui/ipc_tester_gui.py`)**：
+    - [x] **新增 `⚡ Query 表达式` 查询引擎**：在顶部工具栏精准嵌入 Query 查询输入框 (`txt_query`)、`▶ 运行 Query` 按钮及常用 Query 预设下拉框（包含 `percent > 5.0`, `close > nclose`, `nclose >= 1.005 * vwap_cum_2d` 等常用起爆与机构成本线公式）。
+    - [x] **实现 `📌 特定列` 多词模糊匹配算法**：输入特定列关键词（如 `vwap`, `nclose`, `dif` 等）或多词组合（如 `vwap 2d`），系统自动进行不区分大小写的模糊匹配，精准隐藏其他无关列、瞬间展现目标特定列，并自动保留 `code` / `name` 基础主键列。
+    - [x] **三合一无缝联动与重置引擎**：代码/名称过滤、Query 表达式过滤与特定列模糊过滤可三合一叠加生效，并提供 `🧹 重置` 按钮一键恢复 5000+ 行与 402+ 列的完整呈现。
+
+## 2026-08-05 14:32
+- [x] **实现 300058 战例【IPC 真实数据对齐】与 TCP Socket 全流程端到端测试 (`tests/test_multi_period_ipc_diagnose_300058.py`)**：
+    - [x] **零静态手写硬编码（直接基于 IPC 真正数据包比对）**：响应用户指令“不要去改静态，直接对比对齐数据”，测试脚本直接由 IPC 接收线程/管理中心拉取 300058 真实的行情数据包（`nclose`: 15.796, `vwap_cum_2d`: 15.526, `close`: 15.73 等），经 `MultiPeriodStrategyEngine` 统一补齐后再与 [条件 1] 进行全精细比对求值。
+    - [x] **包含真实 TCP Socket 监听与发送接收等待集成测试 (`test_300058_real_tcp_ipc_socket_send_and_sync`)**：真实绑定 TCP 端口 26679 启动 `IPCSyncManager` 后台监听线程，模拟监控端（TK）建立 TCP 链接并打包发送 `b"DATA"` 协议头 + Pickle 格式的 300058 行情包，验证主线程等待接收、成功解包以及多周期引擎 100% 精准同步的全流程。
+    - [x] **精细化 [条件 1] 子条件对比打印**：全量输出 `nclose >= 1.005 * vwap_cum_2d` 等 10 项子条件的真实值对比，验证 `close > nclose` (15.73 > 15.796) 为 `[FAIL] (否)` 导致整体条件 1 判定为 `[NO] 否`。
+    - [x] **4 大测试项与系统全量 12 项单元测试 100% 成功通过**：300058 专属测试集全量 PASSED！
+
+## 2026-08-05 14:18
+- [x] **实现 300058 战例测试用例与全动态 IPC 多周期衍生列自动回补 (`multi_period_strategy_engine.py`, `tests/test_multi_period_ipc_diagnose_300058.py`, `stock_logic_utils.py`)**：
+    - [x] **遵循用户精确强约束 (零静态硬编码 & 单一获取中心)**：遵循用户指令“自动补齐 ipc 中有的、多周期 d 周期没有的 col 不用静态指定动态回补”以及“统一在多周期获取不要在其他任何地方去回补”。彻底废除静态写死 `core_ipc_cols` 列表与在其他非多周期模块中杂乱回补做法。
+    - [x] **全动态自动对比与容错字典映射 (`MultiPeriodStrategyEngine.ensure_strategy_ipc_columns`)**：自动提取 `ipc_code_df.columns` 所有有效实时列，与当前 DataFrame 全自动动态求差计算 `missing_cols`。构建包含 `str`、`int` 及 6 位 `zfill` 多重 Key 的容错 `val_map`，结合底层 `.values` 向量化给 `df[col]` 及 `df[f"{col}_d"]` 赋值，完美解决了 pandas 索引不符导致的 NaN 退化为 `close` 的死坑。
+    - [x] **实现 300058 战例测试用例 (`tests/test_multi_period_ipc_diagnose_300058.py`)**：构建包含 300058 真实战例数据（`vwap_cum_2d`: 15.523, `vwap_cum_3d`: 15.198, `vwap_cum_4d`: 14.826, `last_vwap_cum_2d`: 14.978, `last_vwap_cum_3d`: 14.572 等）的专属测试集，验证 [条件 1] 全量 9 项子条件断言判定为 `✅ 是` (True)；验证在 `d`, `2d`, `3d`, `w`, `m` 所有多周期下 `vwap_cum_2d` 等列 100% 精准获取为 15.523。
+    - [x] **单元测试全量 100% 成功通过**：300058 专属 3 大测试项与系统全量 12 项核心单元测试 100% 成功通过！
+
+## 2026-08-05 13:58
+- [x] **实现多周期适配 IPC 缺失策略列多级周期后缀智能剥离与精准映射（仅作用于 TK 与多周期引擎） (`instock_MonitorTK.py`, `multi_period_strategy_engine.py`, `tests/test_dynamic_twap_auto_refresh.py`)**：
+    - [x] **解构多周期诊断中 `vwap_cum_2d_2d` 退化为 `39.74` / `40.87` 根本原因**：排查发现当策略或诊断抽屉请求带周期后缀的列名（如 `vwap_cum_2d_2d`、`last_vwap_cum_2d_3d`）时，原 IPC 提取逻辑仅匹配 `_d` 结尾，无法识别 `_2d` 或 `_3d` 末尾后缀，导致在 IPC `ipc_df` 检索失败并误入 Fallback 兜底（把 `close` / `lastp1d` 39.74 / 40.87 填给衍生列）。
+    - [x] **多级周期后缀智能剥离与 code 键映射 (Multi-level Suffix Stripping & Code Indexing)**：在 `multi_period_strategy_engine.py` 的 `ensure_strategy_ipc_columns` 中植入正则表达式 `re.sub(r'_(d|1d|2d|3d|4d|5d|w|m|45d|3m)$', '', cur_name)`。支持自动多级剥离末尾 `_2d`, `_3d`, `_d` 周期后缀还原至基础列名 `vwap_cum_2d`，并通过 `code` 主键字典精确将真实机构成本线数值填入 `vwap_cum_2d_2d` 等属性列中。
+    - [x] **严格限制修改范围**：完全遵循用户约束，“只改动 TK 端与多周期适配”两处核心模块，零侵入其他组件。
+    - [x] **单元测试 100% 成功通过**：在 `tests/test_dynamic_twap_auto_refresh.py` 中补充 `test_ensure_strategy_ipc_columns_strip_period_suffixes` 验证测试，全量 15 项单元测试 100% 成功通过！
+
+## 2026-08-05 13:55
+- [x] **实现多周期 IPC 获取策略缺失列精准适配（严格限定仅在 `d` 周期补齐） (`instock_MonitorTK.py`, `multi_period_strategy_engine.py`, `data_utils.py`)**：
+    - [x] **`d` 周期硬锁定补齐 (d-Period Scope Enforcement)**：响应用户精确强约束，在 `MarketBusWorker` 与 `MultiPeriodStrategyEngine.load_period_data` 中统一加固 `str(res_period).lower().strip() in ('d', '1d', 'day')`。只在 `d` 周期（日线快照/日线 DataFrame）通过 IPC 补齐 `vwap_cum_2d`、`sig_bottom` 等缺失策略列，剥离对周/月及非日线重采样轨的冗余处理。
+    - [x] **`data_utils.py` 防护强化**：修复 `complete_indicators_pipeline` 中 `logger.info` 的空指针隐患。
+    - [x] **单元测试全量 100% 成功通过**：21 项单元测试全量一次性成功通过！
+
 ## 2026-08-05 13:42
 - [x] **重构最上游单点补齐 (Single Point Upstream Injection) 极致高性能数据管道 (`instock_MonitorTK.py`, `tests/test_dynamic_twap_auto_refresh.py`)**：
     - [x] **采纳极佳性能优化设计**：彻底废除下游多处重复调用 `attach_multiday_twap_to_df` 造成的 CPU 冗余浪费。

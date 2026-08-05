@@ -637,6 +637,8 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         
         # Source Selection
         self.source_combo = QComboBox()
+        self.source_combo.setMinimumWidth(180)  # 默认变宽
+        self.source_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.source_combo.addItem("File")
         if self.service_proxy:
             self.source_combo.addItem("Memory Service")
@@ -1052,52 +1054,121 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
 
     def discover_internal_dfs(self):
-        """扫描 main_app 中的所有 pandas DataFrame"""
+        """扫描 main_app 及其子模块中后来添加的所有 pandas DataFrame"""
         if not self.main_app:
             self.statusBar().showMessage("Main app not connected.")
             return
 
         self.internal_dfs = {}
-        seen_shapes = set() # 用来根据 shape 去重
 
-        # 扫描主对象
-        for attr_name in dir(self.main_app):
-            if attr_name.startswith('_'):
-                continue
+        def _scan_obj(obj, prefix="", depth=0, visited=None):
+            if depth > 3:  # 防止递归过深
+                return
+            if visited is None:
+                visited = set()
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+
             try:
-                attr = getattr(self.main_app, attr_name)
-                if isinstance(attr, pd.DataFrame) and not attr.empty:
-                    shape = attr.shape
-                    if shape not in seen_shapes:
-                        self.internal_dfs[f"app.{attr_name}"] = attr
-                        seen_shapes.add(shape)
+                attr_names = dir(obj)
             except Exception:
-                continue
+                return
 
-        # 扫描一些已知的子对象
-        for sub_obj_name in ['live_strategy', 'realtime_service']:
-            sub_obj = getattr(self.main_app, sub_obj_name, None)
-            if sub_obj:
-                for attr_name in dir(sub_obj):
-                    if attr_name.startswith('_'):
-                        continue
-                    try:
-                        attr = getattr(sub_obj, attr_name)
-                        if isinstance(attr, pd.DataFrame) and not attr.empty:
-                            shape = attr.shape
-                            if shape not in seen_shapes:
-                                self.internal_dfs[f"{sub_obj_name}.{attr_name}"] = attr
-                                seen_shapes.add(shape)
-                    except Exception:
-                        continue
+            for attr_name in attr_names:
+                if attr_name.startswith('_'):
+                    continue
+                # 过滤掉冗余的 live_strategy 历史缓存字典等庞大碎片
+                if attr_name in ('daily_history_cache', 'history_cache', 'stock_history_cache'):
+                    continue
+                try:
+                    attr = getattr(obj, attr_name)
+                    full_name = f"{prefix}.{attr_name}" if prefix else attr_name
 
-        # 更新下拉框
-        current_sources = [self.source_combo.itemText(i) for i in range(self.source_combo.count())]
-        for name in self.internal_dfs:
-            if name not in current_sources:
-                self.source_combo.addItem(name)
+                    # 1. 直接是 DataFrame
+                    if isinstance(attr, pd.DataFrame) and not attr.empty:
+                        self.internal_dfs[full_name] = attr
+                    # 2. 是 dict 字典容器，遍历内部的 DataFrame（跳过某些特定名字）
+                    elif isinstance(attr, dict) and attr_name not in ('daily_history_cache', 'history_cache', 'stock_history_cache'):
+                        for k, v in attr.items():
+                            if isinstance(v, pd.DataFrame) and not v.empty:
+                                self.internal_dfs[f"{full_name}[{k}]"] = v
+                    # 3. 是 list/tuple 列表容器
+                    elif isinstance(attr, (list, tuple)):
+                        for idx, item in enumerate(attr):
+                            if isinstance(item, pd.DataFrame) and not item.empty:
+                                self.internal_dfs[f"{full_name}[{idx}]"] = item
+                    # 4. 是自定义子对象（避免扫描基本模块和常见标准库）
+                    elif hasattr(attr, '__dict__') and not isinstance(attr, (str, int, float, bool, bytes, type)):
+                        _scan_obj(attr, prefix=full_name, depth=depth+1, visited=visited)
+                except Exception:
+                    continue
+
+        # 开始扫描 main_app 根对象
+        _scan_obj(self.main_app, prefix="app")
+
+        # 显式抓取 market_bus 行情状态总线中的 DataFrame 数据集
+        market_bus = getattr(self.main_app, 'market_bus', None)
+        if market_bus is None:
+            try:
+                from market_state_bus import MarketStateBus
+                market_bus = MarketStateBus.get_instance()
+            except Exception:
+                market_bus = None
+
+        if market_bus:
+            for b_attr in ['_df_all', '_df_filtered', '_df_all_res', '_df_filtered_res']:
+                try:
+                    b_df = getattr(market_bus, b_attr, None)
+                    if isinstance(b_df, pd.DataFrame) and not b_df.empty:
+                        clean_name = b_attr.lstrip('_')
+                        self.internal_dfs[f"market_bus.{clean_name}"] = b_df
+                except Exception:
+                    pass
+
+        # 重新构建与刷新下拉框
+        # 保留 File 和 Memory Service（如果存在）
+        base_items = ["File"]
+        if self.service_proxy:
+            base_items.append("Memory Service")
+
+        current_selected = self.source_combo.currentText()
         
-        self.statusBar().showMessage(f"Discovered {len(self.internal_dfs)} unique internal DataFrames.")
+        self.source_combo.blockSignals(True)
+        self.source_combo.clear()
+        for item in base_items:
+            self.source_combo.addItem(item)
+        
+        for name in sorted(self.internal_dfs.keys()):
+            self.source_combo.addItem(name)
+        
+        # 恢复选择
+        idx = self.source_combo.findText(current_selected)
+        if idx >= 0:
+            self.source_combo.setCurrentIndex(idx)
+        else:
+            self.source_combo.setCurrentIndex(0)
+        self.source_combo.blockSignals(False)
+
+        # 动态计算最宽条目文本像素，使弹出视图与下拉框自适应展开
+        fm = self.source_combo.fontMetrics()
+        max_w = 180  # 默认变宽基础底线
+        for i in range(self.source_combo.count()):
+            text_w = getattr(fm, "horizontalAdvance", getattr(fm, "width", lambda s: 120))(self.source_combo.itemText(i)) + 45
+            if text_w > max_w:
+                max_w = text_w
+        
+        # 限制自适应最大上界，防止异常超长文本
+        if max_w > 450:
+            max_w = 450
+
+        self.source_combo.setMinimumWidth(max_w)
+        combo_view = self.source_combo.view()
+        if combo_view:
+            combo_view.setMinimumWidth(max_w)
+
+        self.statusBar().showMessage(f"Discovered {len(self.internal_dfs)} internal DataFrames.")
 
     def on_source_changed(self, index):
         source_name = self.source_combo.currentText()
@@ -1108,7 +1179,12 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self.on_memory_sync()
         elif source_name in self.internal_dfs:
             self.is_memory_mode = False # Treat as file-like for direct local modification
-            self.df_file = self.internal_dfs[source_name].copy()
+            raw_df = self.internal_dfs[source_name]
+            # 🛡️ 进行格式规范化，确保包含 code 列及正确的 Index 映射
+            normalized_df = self._normalize_dataframe(raw_df)
+            self.active_df = normalized_df
+            self.df_file = normalized_df.copy()
+            self.update_summary()
             self.on_apply_query()
             self.statusBar().showMessage(f"Loaded internal source: {source_name} count: {len(self.df_file)}", 3000)
 
