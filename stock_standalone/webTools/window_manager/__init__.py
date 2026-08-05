@@ -20,7 +20,8 @@ from .core import (
     get_wm_show_msg_id,
     check_and_activate_existing_instance,
     is_autostart_enabled,
-    set_autostart_enabled
+    set_autostart_enabled,
+    AcerPerformanceController
 )
 
 from .ui import (
@@ -45,6 +46,7 @@ __all__ = [
     'check_and_activate_existing_instance',
     'is_autostart_enabled',
     'set_autostart_enabled',
+    'AcerPerformanceController',
     'WindowPosManagerUI',
     'run_ui'
 ]

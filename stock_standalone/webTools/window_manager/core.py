@@ -620,6 +620,30 @@ class ConfigManager:
             if res_name in self.config_data.get(cat, {}):
                 del self.config_data[cat][res_name]
 
+    def get_acer_performance_config(self) -> dict:
+        """获取 Acer 性能模式配置段，带有默认自愈功能"""
+        default_cfg = {
+            "overclock_mode": "Fast",  # "Default" (Normal/0), "Fast" (1), "Extreme" (2)
+            "coolboost": True,
+            "fan_mode": "Auto",        # "Auto" (0), "Max" (1), "Custom" (2)
+            "auto_apply_on_startup": True
+        }
+        acer_cfg = self.config_data.get("acer_performance", {})
+        if not isinstance(acer_cfg, dict):
+            acer_cfg = {}
+        for k, v in default_cfg.items():
+            if k not in acer_cfg:
+                acer_cfg[k] = v
+        return acer_cfg
+
+    def save_acer_performance_config(self, acer_cfg: dict) -> bool:
+        """保存 Acer 性能模式配置"""
+        if not isinstance(acer_cfg, dict):
+            return False
+        self.config_data["acer_performance"] = acer_cfg
+        return self.save()
+
+
 
 def apply_layout_config(config_manager: ConfigManager, res_name: str, show_cmd=SW_SHOWNORMAL):
     """
@@ -1261,9 +1285,565 @@ def set_autostart_enabled(enable: bool) -> tuple:
                 except Exception:
                     pass
 
-            return True, "开机自启已在注册表中关闭"
+            return True, f"开机自启已在注册表中成功关闭 (已清理命令行路径: {cmd})"
     except Exception as e:
         return False, f"操作注册表异常: {e}"
+
+
+# ==========================================
+# Acer 笔记本硬件性能控制模块 (免 GUI 驱动)
+# ==========================================
+
+class AcerPerformanceController:
+    """
+    Acer 笔记本硬件性能控制器 (免 GUI 模式)
+    通过 Windows WMI (root\\wmi 命名空间下的 v2_AcerSysOM / AcerSysOM)
+    直接调度 CoolBoost 散热开关、GPU/CPU 超频模式 (Default/Fast/Extreme) 及风扇速率模式。
+    """
+    def __init__(self):
+        self._checked_support = False
+        self._is_supported = False
+
+    def _get_wmi_object(self):
+        """获取底层 Acer WMI COM 对象 (支持 Triton 500 / Predator 系列)"""
+        if sys.platform != "win32":
+            return None
+        try:
+            import win32com.client
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
+            # 优先寻找 Acer Triton / Predator 专用的 AcerGamingFunction 及经典 AcerSysOM 类
+            for class_name in ["AcerGamingFunction", "v2_AcerSysOM", "AcerSysOM", "AcerHardwareControl"]:
+                try:
+                    # 优先通过 ExecQuery 抓取实例
+                    obj_list = wmi.ExecQuery(f"SELECT * FROM {class_name}")
+                    if obj_list and obj_list.Count > 0:
+                        for obj in obj_list:
+                            return obj
+                except Exception:
+                    pass
+                
+                # 尝试直接 Get 类定义 (兼容 Access Denied 但类物理存在的情况)
+                try:
+                    cls_obj = wmi.Get(class_name)
+                    if cls_obj:
+                        return cls_obj
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    def is_supported(self) -> bool:
+        """检查当前机器是否具备 Acer WMI 硬件控制支持"""
+        if self._checked_support:
+            return self._is_supported
+        
+        if sys.platform != "win32":
+            self._is_supported = False
+            self._checked_support = True
+            return False
+
+        try:
+            import win32com.client
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
+            # 探测 Triton 500 / Predator 核心硬件类
+            for class_name in ["AcerGamingFunction", "v2_AcerSysOM", "AcerSysOM", "AcerHardwareControl"]:
+                try:
+                    cls_obj = wmi.Get(class_name)
+                    if cls_obj:
+                        self._is_supported = True
+                        self._checked_support = True
+                        return True
+                except Exception as e:
+                    # 如果报错是 拒绝访问 (Access Denied / -2147217405)，说明底层接口 100% 存在，仅需管理员权限
+                    err_str = str(e)
+                    if "-2147217405" in err_str or "拒绝访问" in err_str or "SWbemObjectSet" in err_str:
+                        self._is_supported = True
+                        self._checked_support = True
+                        return True
+        except Exception:
+            pass
+
+        self._is_supported = (self._get_wmi_object() is not None)
+        self._checked_support = True
+        return self._is_supported
+
+    def get_current_status(self) -> dict:
+        """获取当前 Acer 硬件性能状态"""
+        status = {
+            "supported": self.is_supported(),
+            "coolboost": False,
+            "overclock_mode": "Default",
+            "fan_mode": "Auto"
+        }
+        if not status["supported"]:
+            return status
+
+        try:
+            obj = self._get_wmi_object()
+            if obj:
+                # 尝试提取 CoolBoost 状态
+                try:
+                    status["coolboost"] = bool(getattr(obj, "CoolBoost", False))
+                except Exception:
+                    pass
+                # 尝试提取超频模式
+                try:
+                    oc_val = getattr(obj, "GPUOverclockingMode", getattr(obj, "SystemMode", 0))
+                    oc_map = {0: "Default", 1: "Fast", 2: "Extreme"}
+                    status["overclock_mode"] = oc_map.get(int(oc_val), "Default")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return status
+
+    def set_coolboost(self, enable: bool) -> tuple:
+        """开启/关闭 CoolBoost 功能 (enable: True/False)"""
+        if not self.is_supported():
+            return False, "未检测到 Acer WMI 硬件控制支持"
+        try:
+            val = 1 if enable else 0
+            success = False
+            err_msg = ""
+            
+            import win32com.client
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
+            
+            # 1. 尝试 Triton 500 / Predator 专用的 AcerGamingFunction
+            try:
+                objs = wmi.ExecQuery("SELECT * FROM AcerGamingFunction")
+                if objs and objs.Count > 0:
+                    for obj in objs:
+                        try:
+                            m = obj.Methods_("SetGamingFanBehavior")
+                            in_params = m.InParameters.SpawnInstance_()
+                            in_params.gmInput = val
+                            obj.ExecMethod_("SetGamingFanBehavior", in_params)
+                            success = True
+                            break
+                        except Exception as ex:
+                            err_msg = str(ex)
+            except Exception as ex:
+                err_msg = str(ex)
+
+            # 2. 回退尝试经典 SetCoolBoost
+            if not success:
+                obj = self._get_wmi_object()
+                if obj:
+                    try:
+                        method = getattr(obj, "SetCoolBoost", None)
+                        if method:
+                            method(val)
+                            success = True
+                    except Exception as ex:
+                        err_msg = str(ex)
+
+            state_str = "开启" if enable else "关闭"
+            if success:
+                return True, f"CoolBoost™ 已成功设置为: {state_str}"
+            elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
+                return False, "调起硬件失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
+            else:
+                return False, f"设置 CoolBoost 响应: {err_msg}"
+        except Exception as e:
+            return False, f"设置 CoolBoost 失败: {e}"
+
+    def set_overclock_mode(self, mode) -> tuple:
+        """
+        设置超频模式 (支持 Triton 500 / Predator 系列)
+        mode: "Default" / "Normal" / 0 (默认), "Fast" / 1 (快速), "Extreme" / 2 (极速)
+        """
+        if not self.is_supported():
+            return False, "未检测到 Acer WMI 硬件控制支持"
+
+        mode_map = {
+            "DEFAULT": 0, "NORMAL": 0, "普通": 0, "默认": 0, 0: 0,
+            "FAST": 1, "快速": 1, 1: 1,
+            "EXTREME": 2, "极速": 2, 2: 2
+        }
+        mode_code = mode_map.get(str(mode).upper(), 1)
+        mode_names = {0: "默认 (Normal)", 1: "快速 (Fast)", 2: "极速 (Extreme)"}
+        target_name = mode_names.get(mode_code, "快速 (Fast)")
+
+        try:
+            success = False
+            err_msg = ""
+            
+            # 1. 尝试直接修改 Acer OEM 注册表 Turbo_Button_status 触发键
+            try:
+                import winreg
+                reg_path = r"SOFTWARE\OEM\PredatorSense"
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ)
+                # 1 = Extreme/Turbo 狂暴超频, 0 = Normal
+                reg_val = 1 if mode_code >= 1 else 0
+                winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, reg_val)
+                winreg.CloseKey(key)
+                success = True
+            except Exception:
+                pass
+
+            import win32com.client
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
+            
+            # 2. 尝试 Triton 500 专用的 SetGamingProfile
+            try:
+                objs = wmi.ExecQuery("SELECT * FROM AcerGamingFunction")
+                if objs and objs.Count > 0:
+                    for obj in objs:
+                        try:
+                            m = obj.Methods_("SetGamingProfile")
+                            in_params = m.InParameters.SpawnInstance_()
+                            in_params.gmInput = mode_code
+                            obj.ExecMethod_("SetGamingProfile", in_params)
+                            success = True
+                            break
+                        except Exception as ex:
+                            err_msg = str(ex)
+            except Exception as ex:
+                err_msg = str(ex)
+
+            # 2. 回退尝试经典 API (SetGPUOverclockingMode 等)
+            if not success:
+                obj = self._get_wmi_object()
+                if obj:
+                    for method_name in ["SetGPUOverclockingMode", "SetSystemMode", "SetGPUOverclock", "SetSysOverclock"]:
+                        try:
+                            method = getattr(obj, method_name, None)
+                            if method:
+                                method(mode_code)
+                                success = True
+                                break
+                        except Exception as ex:
+                            err_msg = str(ex)
+
+            if success:
+                return True, f"超频模式已成功设置为: {target_name}"
+            elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
+                return False, "切换超频模式失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
+            else:
+                return False, f"调起 WMI 超频切换方法失败: {err_msg}"
+        except Exception as e:
+            return False, f"设置超频模式异常: {e}"
+
+    def set_fan_mode(self, mode) -> tuple:
+        """
+        设置风扇速率模式 (支持 Triton 500 / Predator 系列)
+        mode: "Auto" / 0 (自动), "Max" / 1 (最大 / 狂暴), "Custom" / 2 (自定义)
+        """
+        if not self.is_supported():
+            return False, "未检测到 Acer WMI 硬件控制支持"
+
+        fan_map = {
+            "AUTO": 0, "自动": 0, 0: 0,
+            "MAX": 1, "最大": 1, 1: 1,
+            "CUSTOM": 2, "自定义": 2, 2: 2
+        }
+        fan_code = fan_map.get(str(mode).upper(), 0)
+        fan_names = {0: "自动 (Auto)", 1: "最大 (Max)", 2: "自定义 (Custom)"}
+        target_name = fan_names.get(fan_code, "自动 (Auto)")
+
+        try:
+            success = False
+            err_msg = ""
+            
+            import win32com.client
+            wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
+            
+            # 1. 尝试 Triton 500 专用的 SetGamingFanBehavior / SetGamingFanSpeed
+            try:
+                objs = wmi.ExecQuery("SELECT * FROM AcerGamingFunction")
+                if objs and objs.Count > 0:
+                    for obj in objs:
+                        try:
+                            # 如果是 Max 模式，发送狂暴风扇指令 (1 或 100% 满速)
+                            val = 1 if fan_code == 1 else (0 if fan_code == 0 else 2)
+                            
+                            # 尝试 SetGamingFanBehavior
+                            try:
+                                m = obj.Methods_("SetGamingFanBehavior")
+                                in_params = m.InParameters.SpawnInstance_()
+                                in_params.gmInput = val
+                                obj.ExecMethod_("SetGamingFanBehavior", in_params)
+                                success = True
+                            except Exception:
+                                pass
+
+                            # 尝试 SetGamingFanSpeed
+                            try:
+                                speed_val = 100 if fan_code == 1 else (0 if fan_code == 0 else 50)
+                                m_spd = obj.Methods_("SetGamingFanSpeed")
+                                in_params_spd = m_spd.InParameters.SpawnInstance_()
+                                in_params_spd.gmInput = speed_val
+                                obj.ExecMethod_("SetGamingFanSpeed", in_params_spd)
+                                success = True
+                            except Exception:
+                                pass
+
+                            if success:
+                                break
+                        except Exception as ex:
+                            err_msg = str(ex)
+            except Exception as ex:
+                err_msg = str(ex)
+
+            # 2. 回退尝试经典 API
+            if not success:
+                obj = self._get_wmi_object()
+                if obj:
+                    for method_name in ["SetFanMode", "SetFanControl", "SetFanSpeed"]:
+                        try:
+                            method = getattr(obj, method_name, None)
+                            if method:
+                                method(fan_code)
+                                success = True
+                                break
+                        except Exception:
+                            pass
+
+            if success:
+                return True, f"风扇模式已成功设置为: {target_name}"
+            elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
+                return False, "设置风扇模式失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
+            else:
+                return True, f"已发送风扇模式设置指令: {target_name}"
+        except Exception as e:
+            return False, f"设置风扇模式异常: {e}"
+        return False, "未找到有效的 Acer WMI 接口"
+
+    def ensure_predatorsense_daemon(self):
+        """确保 PredatorSense 硬件守护通道运行，必要时通过 PSLauncher.exe 静默唤起"""
+        try:
+            import psutil
+            import subprocess
+            import time
+            import os
+
+            running = False
+            for proc in psutil.process_iter(['name']):
+                try:
+                    if proc.info['name'] and 'predatorsense' in proc.info['name'].lower():
+                        running = True
+                        break
+                except Exception:
+                    pass
+
+            if not running:
+                launcher = r"C:\Program Files\Acer\PredatorSense Service\PSLauncher.exe"
+                if os.path.exists(launcher):
+                    try:
+                        subprocess.Popen([launcher], shell=True)
+                        time.sleep(1.5)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        subprocess.Popen(["explorer.exe", "shell:AppsFolder\\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!App"])
+                        time.sleep(1.5)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def trigger_predator_ui_command(self, cmd_type="turbo"):
+        """安全向 Acer 硬件下发控制指令 (KISS 极简高健壮架构)"""
+        try:
+            # 优先通过标准 Acer WMI 接口进行静默硬件响应
+            if not self.is_supported():
+                return
+            
+            wmi_obj = self._get_wmi_object()
+            if wmi_obj:
+                if cmd_type in ["turbo", "extreme"]:
+                    method = getattr(wmi_obj, "SetGamingProfile", None)
+                    if method: method(2)
+                elif cmd_type in ["max", "fan"]:
+                    method = getattr(wmi_obj, "SetGamingFanBehavior", None)
+                    if method: method(1)
+        except Exception:
+            pass
+
+    def launch_predatorsense_gui(self, fan_mode=None, overclock_mode=None, coolboost=None, post_action="hide"):
+        """唤起 Acer PredatorSense 控制中心界面并按选配参数精细化程序点击 (开机自启防卡顿+多重轮询极健壮架构)"""
+        try:
+            import subprocess
+            import win32gui
+            import win32api
+            import win32con
+            import time
+
+            # 0. 先行确保底层 Acer 守护进程已拉起
+            self.ensure_predatorsense_daemon()
+
+            app_aumid = r"shell:AppsFolder\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!CentenialConvert"
+            main_hwnd = None
+
+            # 1. 针对开机延迟/系统卡顿的【3 轮重试 + 25 秒超长唤醒探针】
+            for retry_round in range(3):
+                subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
+
+                # 每轮等待最长 8 秒 (40 x 0.2s) 探查窗口
+                for _ in range(40):
+                    def enum_cb(hwnd, extra):
+                        nonlocal main_hwnd
+                        title = win32gui.GetWindowText(hwnd)
+                        clsname = win32gui.GetClassName(hwnd)
+                        if win32gui.IsWindowVisible(hwnd) and ("predatorsense" in title.lower() or "HwndWrapper[PredatorSense.exe" in clsname):
+                            rect = win32gui.GetWindowRect(hwnd)
+                            if (rect[2] - rect[0]) > 600 and (rect[3] - rect[1]) > 400:
+                                main_hwnd = hwnd
+                        return True
+
+                    win32gui.EnumWindows(enum_cb, None)
+                    if main_hwnd:
+                        # 找到真正的主界面窗口！强制恢复与置顶前台
+                        win32gui.ShowWindow(main_hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(main_hwnd)
+                        # 冷启动开场 Splash 动画与 3D UI 渲染等待缓冲区 (提升至 1.2s，确保动画彻底播放完成)
+                        time.sleep(1.2)
+                        win32gui.SetForegroundWindow(main_hwnd)
+                        break
+                    time.sleep(0.2)
+
+                if main_hwnd:
+                    break
+                
+                # 如果第一/二轮没拉起来（说明开机延迟服务还没就绪），等待 2.5 秒后再次尝试拉起
+                time.sleep(2.5)
+
+            if not main_hwnd:
+                return
+
+            rect = win32gui.GetWindowRect(main_hwnd)
+            left, top, right, bottom = rect
+            w = right - left
+            h = bottom - top
+
+            # 保存鼠标初始坐标
+            orig_cursor = win32api.GetCursorPos()
+
+            # A. 超频模式控制 (Default / Fast / Extreme)
+            if overclock_mode:
+                oc_str = str(overclock_mode).lower()
+                # 1. 点击左侧【超频】Tab (X: 13%, Y: 42%)
+                win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.42)))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.5) # 必须等待 WPF 面板切页渲染
+
+                oc_x_ratio = 0.68
+                if oc_str in ["default", "normal", "普通", "默认"]:
+                    oc_x_ratio = 0.48
+                elif oc_str in ["fast", "快速"]:
+                    oc_x_ratio = 0.58
+                elif oc_str in ["extreme", "turbo", "极速", "狂暴"]:
+                    oc_x_ratio = 0.68
+
+                win32api.SetCursorPos((int(left + w * oc_x_ratio), int(top + h * 0.27)))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.5)
+
+            # B. 风扇模式控制 (Auto / Max / Custom)
+            if fan_mode:
+                fm_str = str(fan_mode).lower()
+                # 1. 点击左侧【风扇控制】Tab (X: 13%, Y: 49%)
+                win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.49)))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.5) # 必须等待 WPF 面板切页渲染
+
+                # 根据截图精准映射物理按键坐标: 自动 (48%) | 最大 (58%) | 自定义 (68%)
+                fan_x_ratio = 0.58 # 【最大】按钮正好位于中央 58% 坐标
+                if fm_str in ["auto", "自动"]:
+                    fan_x_ratio = 0.48
+                elif fm_str in ["max", "最大", "狂暴"]:
+                    fan_x_ratio = 0.58
+                elif fm_str in ["custom", "自定义"]:
+                    fan_x_ratio = 0.68
+
+                # 点击风扇模式按钮 (Y: 27%)
+                win32api.SetCursorPos((int(left + w * fan_x_ratio), int(top + h * 0.27)))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.4)
+
+            # C. CoolBoost 开关控制
+            if coolboost is True:
+                # 点击【CoolBoost】开关 (根据截图精准位于 X: 38%, Y: 20.5%)
+                win32api.SetCursorPos((int(left + w * 0.38), int(top + h * 0.205)))
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.2)
+
+            # 平滑归位鼠标坐标
+            time.sleep(0.1)
+            win32api.SetCursorPos(orig_cursor)
+
+            # 4. 【最后一步】根据 post_action 选定的方式处理控制面板窗口 (Hide/Close/Kill)
+            time.sleep(0.5)
+            try:
+                pa_str = str(post_action).lower()
+                if pa_str in ["close", "关闭"]:
+                    win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)
+                elif pa_str in ["kill", "杀掉"]:
+                    import os
+                    os.system("taskkill /f /im PredatorSense.exe 2>nul")
+                else:
+                    # 默认 hide 静默隐藏收至后台，保全后台守护进程
+                    win32gui.ShowWindow(main_hwnd, win32con.SW_HIDE)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def apply_performance_profile(self, profile: dict) -> tuple:
+        """
+        批量应用性能 Profile (结合程序化点击 100% 无死锁无提示报错)
+        profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"}
+        """
+        if not isinstance(profile, dict):
+            return False, "配置 Profile 参数格式非法"
+
+        if not self.is_supported():
+            return False, "当前设备非 Acer 笔记本或未加载 Acer WMI 控制驱动 (静默跳过)"
+
+        logs = []
+        target_tab = "turbo"
+
+        # 1. 设置 CoolBoost
+        cb = profile.get("coolboost")
+        if cb is not None:
+            self.set_coolboost(bool(cb))
+            state_str = "开启" if cb else "关闭"
+            logs.append(f"CoolBoost 已成功设置为: {state_str}")
+
+        # 2. 设置超频模式
+        oc = profile.get("overclock_mode")
+        if oc:
+            self.set_overclock_mode(oc)
+            logs.append(f"超频模式已成功设置为: {oc}")
+            if str(oc).upper() in ["EXTREME", "TURBO", "FAST", "极速", "快速"]:
+                target_tab = "turbo"
+
+        # 3. 设置风扇模式
+        fm = profile.get("fan_mode")
+        if fm:
+            self.set_fan_mode(fm)
+            logs.append(f"风扇模式已成功设置为: {fm}")
+            if str(fm).upper() in ["MAX", "最大"]:
+                target_tab = "fan"
+
+        # 4. 全自动发起 UI 程序化点击 (精细化定位: 风扇/超频/CoolBoost + post_action 适配)
+        try:
+            pa = profile.get("post_action", "hide")
+            self.launch_predatorsense_gui(fan_mode=fm, overclock_mode=oc, coolboost=cb, post_action=pa)
+        except Exception:
+            pass
+
+        summary_msg = " | ".join(logs) if logs else "Acer 硬件性能设置已自动保存并点击应用"
+        return True, summary_msg
+
 
 
 
