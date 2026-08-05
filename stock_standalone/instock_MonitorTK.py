@@ -3278,12 +3278,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self._send_df_wake_event.set()
 
                         elif obj and obj.get("cmd") == "ATS_RECEIVED":
-                            target_port = obj.get("port", 26670)
+                            target_port = obj.get("port")
                             logger.info(f'[Pipe] Feedback listener cmd ATS_RECEIVED (target_port={target_port})')
                             if target_port == 26671:
                                 self._force_sync_26671 = False
+                            elif target_port == 26670:
+                                self._force_sync_26670 = False
                             else:
                                 self._force_sync_26670 = False
+                                self._force_sync_26671 = False
                             self._force_full_sync_pending = getattr(self, '_force_sync_26670', False) or getattr(self, '_force_sync_26671', False)
                             self._df_first_send_done = True
                             self._last_ats_recv_confirm_time = time.time()
@@ -8698,14 +8701,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(2)
                         continue
                     
-                    # 🚀 [THROTTLE] ats跟tk链接数据更新频率限制 (最少30秒, 基于 cct.duration_sleep_time)
-                    # 交易期最少 30 秒，非交易期大幅度延长（如 180 秒）
+                    # 🚀 [THROTTLE] ats跟tk链接数据更新频率限制 (交易期最少 5 分钟 / 300秒，非交易期 300 秒以上)
                     is_work = cct.get_work_time()
-                    base_interval = float(getattr(cct, 'duration_sleep_time', getattr(getattr(cct, 'CFG', None), 'duration_sleep_time', 30.0)))
+                    base_interval = float(getattr(cct, 'duration_sleep_time', getattr(getattr(cct, 'CFG', None), 'duration_sleep_time', 300.0)))
                     if is_work:
-                        dynamic_interval = max(30.0, base_interval)
+                        dynamic_interval = max(300.0, base_interval)
                     else:
-                        dynamic_interval = max(180.0, base_interval * 3.0)
+                        dynamic_interval = max(300.0, base_interval * 3.0)
                     
                     # ⭐ 限流 + 抖动 (如果是强制全量同步请求，则无视冷却时间直接发送)
                     is_forced = getattr(self, '_force_full_sync_pending', False)

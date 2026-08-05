@@ -10343,7 +10343,7 @@ class MainWindow(QMainWindow, WindowMixin):
         max_retries = 3
         for i in range(max_retries):
             try:
-                success = send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=logger,pipe_name=PIPE_NAME_TK)
+                success = send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26668}, logger=logger,pipe_name=PIPE_NAME_TK)
                 if success:
                     logger.info(f"[Sync] Requested full sync via Pipe (Attempt {i+1})")
                     # 暂时将版本设为无效，防止在收到全量包前继续处理碎片增量
