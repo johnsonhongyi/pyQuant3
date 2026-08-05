@@ -1,3 +1,54 @@
+## 2026-08-05 10:35
+- [x] **实现外盘/热点板块置顶 (📌 Pinned) 排序保护引擎 (`ats/ui/styles.py`, `ats/ui/global_market_panel.py`, `scratch/test_pinned_sorting.py`)**：
+    - [x] **解构置顶项目掉到中间/下方的底层机制**：在上一次恢复外盘表格 `setSortingEnabled(True)` 与列宽持久化状态恢复后，Qt 的 `QTableWidget` 会根据 Header 上的 `SortIndicator` （如按涨跌幅%降序/升序）对所有行重新执行 `sortByColumn`。因原生的 `QTableWidgetItem` 无法感知置顶属性，导致带有 `📌` 标记的资产（如 SOXX 费城半导体）被普通按涨跌幅大小排序到了第 12 行。
+    - [x] **创新设计 `PinnedNumericTableWidgetItem` 具备排序感知卫士**：
+        - 继承自 `NumericTableWidgetItem`，保存 `is_pinned` 与 `pin_rank` 属性，并重写 `__lt__` 比较运算。
+        - 引入排序方向双向感应：在 `DescendingOrder` 降序模式下判定置顶行 `self > other`，在 `AscendingOrder` 升序模式下判定置顶行 `self < other`；两个置顶行之间按 `pin_rank` 次序对比，普通行之间恢复正常数值降级比较。
+        - 彻底保证了无论用户点击表头按任意列（资产名称/最新价格/涨跌幅%）升序或降序排序，**所有置顶行 (Pinned) 100% 永远锁定留在表格最顶端 (Row 0, 1...)**！
+    - [x] **单元测试 100% 成功通过**：新建 `scratch/test_pinned_sorting.py` 测试在升序与降序下 SOXX 绝对锁定在 Row 0 最顶端，结合 `pytest tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
+
+## 2026-08-05 10:22
+- [x] **根除多周期筛选器打开时 `REQ_FULL_SYNC (target_port=None)` 广播广播死锁致 ATS 连带剧烈推送 Bug (`ipc_sync_manager.py`, `trade_visualizer_qt6.py`, `instock_MonitorTK.py`, `scratch/test_ipc_decoupling_port_fix.py`)**：
+    - [x] **解构由于缺失 `port` 参数造成的广播死锁根源**：
+        - 用户打开多周期筛选器 (`IPCSyncManager`, 端口 26671) 时，`IPCSyncManager` 发出的全量拉取请求 `request_full_sync()` 与确认 Ack `_send_received_feedback()` 内部 `cmd_dict` 缺少 `"port": self.port`。
+        - 监控端 `instock_MonitorTK` 收到 `target_port=None` 时误判为广播全量同步，同时激活 `_force_sync_26670 = True` (ATS 终端) 和 `_force_sync_26671 = True` (多周期)，并把 5621 行数据连带重复推送给 ATS 终端。
+        - 随后多周期返回确认时因缺 `port` 被误当成 26670 的 ACK，导致 `_force_sync_26671` 永远无法置为 `False`，陷入“以为多周期未收到，不断每隔数秒重试全量推送”的死锁发包循环！
+    - [x] **全管道精准绑定 `port` 与解封加固**：
+        - 在 `ipc_sync_manager.py` 中向 `request_full_sync()` (`REQ_FULL_SYNC`) 与 `_send_received_feedback()` (`ATS_RECEIVED`) 注入 `"port": self.port` (26671)。
+        - 在 `trade_visualizer_qt6.py` Line 10346 中向 `_request_full_sync()` 注入 `"port": 26668`。
+        - 在 `instock_MonitorTK.py` 中加固 `ATS_RECEIVED` 解析，安全解封具体端口标记，彻底消除死锁重试循环。
+    - [x] **单元测试 100% 成功通过**：新建 `scratch/test_ipc_decoupling_port_fix.py` 测试，结合 `pytest tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
+
+## 2026-08-05 10:15
+- [x] **实现 ATS 界面数据接收分级异步延迟渲染架构 (`ats/ui/main_window.py`, `scratch/test_async_tiered_ui_refresh.py`)**：
+    - [x] **重构 `refresh_realtime_ui` 为三级异步 Pipeline**：
+        - **Tier 1 (0ms 即时渲染)**：仅渲染当前活动页签（`Top Tab`：重点关注/MA20d 跟踪器）及显示中的 `StockDetailDialog`，确保交易关键主控界面 0 延迟极速响应。
+        - **Tier 2 (10ms 异步延迟)**：通过 `_async_tier2_timer` 异步处理非活动页签与 `UniverseTreeWidget` 股票池列表，彻底切断主线程被大量隐藏组件拖累导致的顿卡。
+        - **Tier 3 (30ms 异步延迟)**：通过 `_async_tier3_timer` 延迟更新 `SectorHeatmapWidget` 板块热力图及其他独立辅助弹窗（`DragonMonitor` / `EquityPop` / `SectorDetail`）。
+    - [x] **自动化测试 100% 成功通过**：`scratch/test_async_tiered_ui_refresh.py` 验证 warm-up 状态下主界面 Tier 1 执行仅 59.15ms，Tier 2 与 Tier 3 异步定时器平滑触发；结合 `pytest tests/test_signal_ledger.py` 12 项全量核心单元测试 100% 成功通过！
+
+## 2026-08-05 10:05
+- [x] **调整 `instock_MonitorTK.py` `send_df` 线程交易期数据推送频率为 5 分钟 (300 秒) (`instock_MonitorTK.py`)**：
+    - [x] **交易期发送频率优化**：响应用户指令，将 `send_df` 线程在交易期内的最小限流冷却间隔 `dynamic_interval` 从原来的 30 秒（`max(30.0, base_interval)`）提升至 5 分钟（`max(300.0, base_interval)`），有效减少高频推送带来的日志刷屏与 GIL 竞争。
+    - [x] **自动化测试 100% 成功通过**：运行 `scratch/test_ipc_decoupling.py` (3/3 PASSED) 及 `pytest tests/test_signal_ledger.py` (12/12 PASSED) 全量通过！
+
+## 2026-08-05 09:55
+- [x] **实现跨时区（美东 EST/EDT vs 北京时间 UTC+8）目标市场日期精确判定、多重数据安全清洗与绝对防范穿越 `2026-08-05` Bar 引擎 (`JSONData/global_market_data.py`, `scratch/test_timezone_pipeline.py`)**：
+    - [x] **解构跨时区数据错乱与提前出现 `2026-08-05` 穿越 Bar 根本原因**：
+        - 本地电脑（北京时间 UTC+8）处于 8 月 5 日上午时，由于时差关系，美股目标市场（美东时间 EDT UTC-4）时间尚为 8 月 4 日夜间 21:53（休市期，8 月 5 日盘前与盘中均未开始）。
+        - 旧版 `append_realtime_bar_if_needed` 函数直接取用本地机器时间 `today_str = '2026-08-05'`，在判定 `last_date ('2026-08-04') != today_str` 后，未校验美股目标市场是否开盘即强行追加 `date = '2026-08-05'` 实时 Bar，导致美股及外盘 K 线在白天提前出了未开盘的 `2026-08-05` 虚假 Bar。
+    - [x] **构建零依赖目标市场时区与开盘窗口判定模块 (`JSONData/global_market_data.py`)**：
+        - 引入 `get_symbol_market_timezone(symbol)` 精准识别标的所属市场（美股/大宗期货 -> `America/New_York`；A50/汇率 -> `Asia/Shanghai`）。
+        - 引入 `get_target_market_datetime(symbol)`，兼容 Windows / PyInstaller 零第三方库依赖，准确换算美东夏令时 EDT (UTC-4) / 冬令时 EST (UTC-5) 精确时刻，并派生 `get_target_market_date_str(symbol)` 返回目标市场当前物理日期（如 `2026-08-04`）。
+        - 引入 `is_target_market_session_open(symbol)`，严格判定目标市场当前是否处于【盘前/盘中/盘后】开盘交易时段（美东时间 04:00~20:00），闭市休盘期（20:00~04:00）硬锁定返回 `False`。
+    - [x] **引入 `sanitize_klines_for_symbol` 多重数据防穿越安全清洗与磁盘物理去污染**：
+        - 在 `sanitize_klines_for_symbol` 中拦截所有 K 线序列，严格剥离剔除任何 `date > target_today` 的未来/穿越 Bar，重新按日期升序排序并向量化算齐 `pct`。
+        - 编写 `clean_all_disk_kline_caches()` 自动扫除磁盘全量物理 JSON 缓存（`global_market_klines_yahoo.json` 等）中的穿越条目。
+    - [x] **重构 `merge_kline_sequences` 与 `append_realtime_bar_if_needed`**：
+        - 率先通过 `sanitize_klines_for_symbol` 清洗历史序列；在 `last_date < target_today_str` 时植入**核心安全卫士**：只有在 `is_target_market_session_open(sym_code) == True`（目标市场当前处于交易期内）时才允许追加今日实时 Bar；休市闭市期绝对零追加，完美杜绝穿越柱！
+    - [x] **管道测试与全量单元测试 100% 成功通过**：
+        - 新建 `scratch/test_timezone_pipeline.py`（SOXX 与 NVDA 末尾 Bar 日期精准锁定为 `2026-08-04`，`assert <= target_date` 100% PASSED）；结合 `pytest tests/test_signal_ledger.py` 全量 12 项单元测试 100% 成功通过！
+
 ## 2026-08-05 09:10
 - [x] **确认使用 `cct.get_work_time()` 严格管控交易时段数据推送 (`instock_MonitorTK.py`, `scratch/test_ipc_decoupling.py`)**：
     - [x] **交易时段判定统一使用 `cct.get_work_time()`**：

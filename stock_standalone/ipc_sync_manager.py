@@ -77,7 +77,7 @@ class IPCSyncManager:
 
     def request_full_sync(self):
         """通过 Windows 命名管道向主程序发送 REQ_FULL_SYNC，拉取全量行情快照"""
-        cmd_dict = {"cmd": "REQ_FULL_SYNC"}
+        cmd_dict = {"cmd": "REQ_FULL_SYNC", "port": self.port}
         payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
         
         for attempt in range(5):
@@ -262,7 +262,7 @@ class IPCSyncManager:
 
     def _send_received_feedback(self):
         """通过管道发送确认指令"""
-        cmd_dict = {"cmd": "ATS_RECEIVED"}
+        cmd_dict = {"cmd": "ATS_RECEIVED", "port": self.port}
         payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
         try:
             import win32file
