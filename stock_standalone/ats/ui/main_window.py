@@ -2258,7 +2258,7 @@ class ATSMainWindow(QMainWindow):
                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
                 import logging
                 local_logger = logging.getLogger("ATS")
-                send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
             except Exception as e:
                 print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
 
@@ -2656,7 +2656,7 @@ class ATSMainWindow(QMainWindow):
                     import time
                     local_logger = logging.getLogger("ATS")
                     self._last_pipe_sync_t = time.time()  # 初始化时间戳，防止 heartbeat 瞬间重复请求
-                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
                 except Exception as e:
                     print(f"[ATSMainWindow] Startup failed to send REQ_FULL_SYNC: {e}")
  
@@ -3609,67 +3609,89 @@ class ATSMainWindow(QMainWindow):
                 pass
 
     def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
-        """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪"""
+        """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪 (当日精准去重+重大突破再触发)"""
         import os
         import json
         import time
         
-        # 仅在有意义的逆市/共振强信号时记录；对符合条件的所有信号均纳入本轮批次列表
+        # 仅在有意义的逆市/共振强信号时记录
         if resonance not in ("逆市抗跌", "大盘共振"):
             return False
 
-        recorded = True
+        today_date = time.strftime("%Y-%m-%d")
         
-        # 仅对暴拉偏离>=4.0%的排头黑马才触发系统 Toast 弹窗与语音 (杜绝刷屏)
-        if pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0:
-            try:
-                from ats.alert_notifier import AlertNotifier
-                AlertNotifier().notify_special_signal(
-                    code, name,
-                    reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
-                    score=90.0,
-                    parent=self
-                )
-            except Exception:
-                pass
-            
+        # 自动迁移旧路径下的所有 ats_alpha_tracker_*.json 文件到新的 datacsv 目录下
         try:
-            today_date = time.strftime("%Y-%m-%d")
             from sys_utils import get_app_root
             data_dir = os.path.join(get_app_root(), "datacsv")
             if not os.path.exists(data_dir):
                 os.makedirs(data_dir, exist_ok=True)
                 
-            # 自动迁移旧路径下的所有 ats_alpha_tracker_*.json 文件到新的 datacsv 目录下
             old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
             if os.path.exists(old_data_dir) and old_data_dir != data_dir:
-                try:
-                    import shutil
-                    for fname in os.listdir(old_data_dir):
-                        if fname.startswith("ats_alpha_tracker_") and fname.endswith(".json"):
-                            old_filepath = os.path.join(old_data_dir, fname)
-                            new_filepath = os.path.join(data_dir, fname)
-                            if os.path.exists(old_filepath) and not os.path.exists(new_filepath):
-                                shutil.copy2(old_filepath, new_filepath)
-                                print(f"[ATSAlphaTracker] Migrated old alpha tracker data: {fname}")
-                except Exception as e:
-                    print(f"[ATSAlphaTracker] Failed to migrate old alpha tracker data: {e}")
-                    
+                import shutil
+                for fname in os.listdir(old_data_dir):
+                    if fname.startswith("ats_alpha_tracker_") and fname.endswith(".json"):
+                        old_filepath = os.path.join(old_data_dir, fname)
+                        new_filepath = os.path.join(data_dir, fname)
+                        if os.path.exists(old_filepath) and not os.path.exists(new_filepath):
+                            shutil.copy2(old_filepath, new_filepath)
+        except Exception:
+            pass
+
+        # 初始化内存锁，并自动预读今天已有记录，杜绝重启或冷却过后大量重复刷屏
+        if getattr(self, "_recorded_alpha_stocks", None) is None or getattr(self, "_recorded_alpha_today", None) != today_date:
+            self._recorded_alpha_stocks = {}  # {code: max_pct_val}
+            self._recorded_alpha_today = today_date
+            
+            try:
+                from sys_utils import get_app_root
+                data_dir = os.path.join(get_app_root(), "datacsv")
+                log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
+                if os.path.exists(log_path):
+                    with open(log_path, 'r', encoding='utf-8') as f:
+                        existing_records = json.load(f)
+                        for rec in existing_records:
+                            c = rec.get('code')
+                            p_str = str(rec.get('pct', '0%')).replace('%', '').replace('+', '')
+                            try:
+                                p_float = float(p_str)
+                            except ValueError:
+                                p_float = 0.0
+                            if c:
+                                if c not in self._recorded_alpha_stocks or p_float > self._recorded_alpha_stocks[c]:
+                                    self._recorded_alpha_stocks[c] = p_float
+            except Exception:
+                pass
+
+        # 检查是否重复：若当天已记录且当前涨跌幅未超过上次记录的 2.0% 以上（未发生重大突破），则直接跳过去重
+        last_pct = self._recorded_alpha_stocks.get(code)
+        if last_pct is not None and (pct_val - last_pct) < 2.0:
+            return False
+
+        # 更新内存记录
+        self._recorded_alpha_stocks[code] = max(pct_val, last_pct if last_pct is not None else -999.0)
+
+        # 仅对暴拉偏离>=5.0%且偏离>=4.0%的排头黑马才触发系统 Toast 弹窗与语音 (杜绝刷屏)
+        if pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0 and last_pct is None:
+            try:
+                from PyQt6.QtWidgets import QApplication
+                if QApplication.instance():
+                    from ats.alert_notifier import AlertNotifier
+                    AlertNotifier().notify_special_signal(
+                        code, name,
+                        reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
+                        score=90.0,
+                        parent=self
+                    )
+            except Exception:
+                pass
+
+        try:
+            from sys_utils import get_app_root
+            data_dir = os.path.join(get_app_root(), "datacsv")
             log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
             
-            # 使用内存去重，避免对同一个股票每秒行情刷新都重复写文件
-            if not hasattr(self, "_recorded_alpha_stocks"):
-                self._recorded_alpha_stocks = {}
-                
-            last_recorded_time = self._recorded_alpha_stocks.get(code, 0)
-            now = time.time()
-            # 针对同一只股票，同一状态，在 5 分钟（300秒）内只记录一次
-            if now - last_recorded_time < 300:
-                return
-                
-            self._recorded_alpha_stocks[code] = now
-            
-            # 读取已有的
             records = []
             if os.path.exists(log_path):
                 try:
@@ -3678,7 +3700,6 @@ class ATSMainWindow(QMainWindow):
                 except Exception:
                     records = []
                     
-            # 追加新纪录
             time_str = time.strftime("%H:%M:%S")
             records.append({
                 "time": time_str,
@@ -3690,7 +3711,6 @@ class ATSMainWindow(QMainWindow):
                 "type": resonance
             })
             
-            # 限制大小，最多保留 1000 条
             if len(records) > 1000:
                 records = records[-1000:]
                 
@@ -3700,7 +3720,7 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {pct_val:+.2f}% {resonance}")
         except Exception as e:
             print(f"[ATSAlphaTracker] 记录信号失败: {e}")
-        return recorded
+        return True
 
     def _handle_realtime_signal(self, signal):
         if not signal:

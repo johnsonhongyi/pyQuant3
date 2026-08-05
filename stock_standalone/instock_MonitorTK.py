@@ -3263,15 +3263,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # ================== 原有逻辑：完全保留 ==================
 
                         if obj and obj.get("cmd") == "REQ_FULL_SYNC":
-                            logger.info('[Pipe] Feedback listener cmd REQ_FULL_SYNC')
+                            target_port = obj.get("port")
+                            logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC (target_port={target_port})')
+                            if target_port == 26671:
+                                self._force_sync_26671 = True
+                            elif target_port == 26670:
+                                self._force_sync_26670 = True
+                            else:
+                                self._force_sync_26670 = True
+                                self._force_sync_26671 = True
                             self._force_full_sync_pending = True
                             self._df_first_send_done = False
                             if hasattr(self, '_send_df_wake_event'):
                                 self._send_df_wake_event.set()
 
                         elif obj and obj.get("cmd") == "ATS_RECEIVED":
-                            logger.info('[Pipe] Feedback listener cmd ATS_RECEIVED')
-                            self._force_full_sync_pending = False
+                            target_port = obj.get("port", 26670)
+                            logger.info(f'[Pipe] Feedback listener cmd ATS_RECEIVED (target_port={target_port})')
+                            if target_port == 26671:
+                                self._force_sync_26671 = False
+                            else:
+                                self._force_sync_26670 = False
+                            self._force_full_sync_pending = getattr(self, '_force_sync_26670', False) or getattr(self, '_force_sync_26671', False)
                             self._df_first_send_done = True
                             self._last_ats_recv_confirm_time = time.time()
 
@@ -8926,38 +8939,56 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         except (socket.timeout, ConnectionError, OSError):
                                             pass
 
-                                # 发送给 26670 (ATS 终端) 和 26671 (人气共振终端)
-                                # 只要端口是活跃的，或者距离上一次尝试超过冷却时间，或者有强制同步请求，就尝试发送
-                                need_ats_send = False
+                                # 3️⃣ 分开独立分发给 26670 (ATS 终端) 与 26671 (人气共振/多周期引擎)
+                                # 彻底解耦按需发送：非交易时段不自动发送（除非客户端显式发起 REQ_FULL_SYNC），交易时段内且数据变动时才按端口独立推送
+                                ports_to_send = []
+                                now_ipc = time.time()
+                                is_work_time = cct.get_work_time()
+
                                 for port in (26670, 26671):
                                     active_key = '_ats_enabled_cache' if port == 26670 else '_pr_enabled_cache'
                                     is_port_active = getattr(self, active_key, False)
                                     last_try = getattr(self, f'_last_try_{port}', 0.0)
-                                    if is_port_active or is_forced or (now_ipc - last_try > 30.0):
-                                        need_ats_send = True
-                                        break
-                                
-                                if need_ats_send:
+                                    is_forced_port = getattr(self, f'_force_sync_{port}', False)
+                                    
+                                    should_send = False
+                                    if is_forced_port:
+                                        # 显式请求：无论交易时段与否，精准响应请求
+                                        should_send = True
+                                    elif is_work_time:
+                                        if is_port_active:
+                                            # 交易日交易时段内：满足动态冷却间隔且数据 Hash 变动时才定时推送
+                                            if now_ipc - last_try >= dynamic_interval:
+                                                curr_hash = hash((version, len(df_daily)))
+                                                last_hash = getattr(self, f'_last_sent_hash_{port}', None)
+                                                if curr_hash != last_hash:
+                                                    should_send = True
+                                        elif (now_ipc - last_try > 60.0):
+                                            # 交易时段内未激活端口：每 60 秒轻量探测 1 次
+                                            should_send = True
+
+                                    if should_send:
+                                        ports_to_send.append((port, active_key, is_forced_port))
+
+                                if ports_to_send:
                                     with timed_ctx("ats_IPC_send", warn_ms=1000):
-                                        for port in (26670, 26671):
-                                            active_key = '_ats_enabled_cache' if port == 26670 else '_pr_enabled_cache'
-                                            is_port_active = getattr(self, active_key, False)
-                                            last_try = getattr(self, f'_last_try_{port}', 0.0)
-                                            
-                                            # 如果端口已经是活跃的，或者是强制同步请求，或者距离上次尝试连接超过30秒
-                                            if is_port_active or is_forced or (now_ipc - last_try > 30.0):
-                                                setattr(self, f'_last_try_{port}', now_ipc)
-                                                try:
-                                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-                                                        s2.settimeout(1.5)  # 1.5秒超时防止阻塞
-                                                        s2.connect(('127.0.0.1', port))
-                                                        s2.sendall(b"DATA" + header_daily + payload_daily)
-                                                        send_success_any = True
-                                                        setattr(self, active_key, True)
-                                                        if port == 26670:
-                                                            sent_to_ats = True
-                                                except (socket.timeout, ConnectionError, OSError):
-                                                    setattr(self, active_key, False)
+                                        for port, active_key, is_forced_port in ports_to_send:
+                                            setattr(self, f'_last_try_{port}', now_ipc)
+                                            try:
+                                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                                                    s2.settimeout(1.5)  # 1.5秒超时防止阻塞
+                                                    s2.connect(('127.0.0.1', port))
+                                                    s2.sendall(b"DATA" + header_daily + payload_daily)
+                                                    send_success_any = True
+                                                    setattr(self, active_key, True)
+                                                    if is_forced_port:
+                                                        setattr(self, f'_force_sync_{port}', False)
+                                                    if port == 26670:
+                                                        sent_to_ats = True
+                                                    curr_hash = hash((version, len(df_daily)))
+                                                    setattr(self, f'_last_sent_hash_{port}', curr_hash)
+                                            except (socket.timeout, ConnectionError, OSError):
+                                                setattr(self, active_key, False)
 
                                 if send_success_any:
                                     logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")

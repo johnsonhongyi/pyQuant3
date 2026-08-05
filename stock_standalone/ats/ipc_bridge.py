@@ -122,7 +122,7 @@ class IPCBridge:
                                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
                                 import logging
                                 local_logger = logging.getLogger("ATS_Bridge")
-                                send_code_via_pipe({"cmd": "ATS_RECEIVED"}, local_logger, PIPE_NAME_TK)
+                                send_code_via_pipe({"cmd": "ATS_RECEIVED", "port": 26670}, local_logger, PIPE_NAME_TK)
                             except Exception as pipe_err:
                                 print(f"[IPCBridge] Failed to send ATS_RECEIVED: {pipe_err}")
                             data_callback(body)
