@@ -14,8 +14,21 @@ def get_global_ipc_sync_manager():
     if _global_ipc_manager is None:
         try:
             from ipc_sync_manager import IPCSyncManager
-            _global_ipc_manager = IPCSyncManager(port=26671, logger=logger)
-            _global_ipc_manager.start()
+            candidate_ports = [26671, 26679, 26680, 26681, 26682, 26683]
+            for p in candidate_ports:
+                try:
+                    mgr = IPCSyncManager(port=p, logger=logger)
+                    mgr.start()
+                    if getattr(mgr, '_bind_event', None):
+                        mgr._bind_event.wait(timeout=0.5)
+                    if getattr(mgr, 'is_bound', False):
+                        _global_ipc_manager = mgr
+                        logger.info(f"⚡ [IPC 同步单例] 成功绑定并启动于端口 Port={p}")
+                        break
+                    else:
+                        mgr.stop()
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Failed to initialize IPCSyncManager: {e}")
     return _global_ipc_manager
@@ -81,18 +94,26 @@ class MultiPeriodStrategyEngine:
                 if s.isna().all():
                     missing_cols.add(col)
 
-        if not strategy_expr and not force_refresh:
-            missing_cols = {
+        if not strategy_expr:
+            default_core_cols = {
                 'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
                 'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_nclose1d', 'last_nclose3d',
                 'Trends', 'nclose', 'sig_bottom', 'sig_launch'
             }
+            if force_refresh:
+                missing_cols.update(default_core_cols)
+            else:
+                for col in default_core_cols:
+                    if col not in df.columns or df[col].isna().all():
+                        missing_cols.add(col)
 
         if not missing_cols:
             return df
 
         try:
             import time
+            import re
+            import numpy as np
             ipc_mgr = get_global_ipc_sync_manager()
             if ipc_mgr is not None:
                 ipc_df = ipc_mgr.get_current_df()
@@ -105,21 +126,41 @@ class MultiPeriodStrategyEngine:
                             break
 
                 if ipc_df is not None and not ipc_df.empty:
-                    # 💥 仅抓取 missing_cols，多余的不抓取
+                    # 构建包含 6 位 zfill 字符串、原始字符串和 int 键的容错 val_map 映射
+                    df_codes = df['code'] if 'code' in df.columns else df.index
+                    df_code_strs = [str(c).strip().zfill(6) for c in df_codes]
+
                     for col in missing_cols:
                         target_col = col
-                        if target_col not in ipc_df.columns and target_col.endswith('_d'):
-                            base = target_col[:-2]
-                            if base in ipc_df.columns:
-                                target_col = base
+                        clean_col = re.sub(r'_(d|1d|2d|3d|4d|5d|w|m|45d|3m)$', '', col)
+                        if target_col not in ipc_df.columns:
+                            if clean_col in ipc_df.columns:
+                                target_col = clean_col
+                            elif target_col.endswith('_d') and target_col[:-2] in ipc_df.columns:
+                                target_col = target_col[:-2]
 
                         if target_col in ipc_df.columns:
-                            ipc_series = ipc_df[target_col].reindex(df.index)
+                            s_ipc = ipc_df[target_col]
+                            val_map = {}
+                            for k, v in s_ipc.items():
+                                sk = str(k).strip()
+                                val_map[sk] = v
+                                val_map[sk.zfill(6)] = v
+                                if sk.isdigit():
+                                    val_map[int(sk)] = v
+
+                            ipc_vals = [val_map.get(c_str, val_map.get(orig_c, np.nan)) for c_str, orig_c in zip(df_code_strs, df_codes)]
+                            ipc_series = pd.Series(ipc_vals, index=df.index)
+
+                            valid_mask = ipc_series.notna()
                             if col not in df.columns or force_refresh:
-                                df[col] = ipc_series.combine_first(df[col]) if col in df.columns else ipc_series
+                                if col in df.columns:
+                                    df.loc[valid_mask, col] = ipc_series[valid_mask]
+                                else:
+                                    df[col] = ipc_series
                             else:
-                                df[col] = ipc_series.fillna(df[col])
-                            
+                                df.loc[valid_mask & df[col].isna(), col] = ipc_series[valid_mask & df[col].isna()]
+
                             base_alias = col[:-2] if col.endswith('_d') else f"{col}_d"
                             if base_alias not in df.columns or force_refresh:
                                 df[base_alias] = df[col]

@@ -3269,6 +3269,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self._force_sync_26671 = True
                             elif target_port == 26670:
                                 self._force_sync_26670 = True
+                            elif target_port and isinstance(target_port, int) and target_port not in (26668, 26670, 26671):
+                                if not hasattr(self, '_temp_dynamic_ports'):
+                                    self._temp_dynamic_ports = set()
+                                self._temp_dynamic_ports.add(target_port)
+                                logger.info(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC 请求: Port={target_port}')
                             else:
                                 self._force_sync_26670 = True
                                 self._force_sync_26671 = True
@@ -9026,6 +9031,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     if should_send:
                                         ports_to_send.append((port, active_key, is_forced_port))
 
+                                # ⚡ [IPC 动态适配] 将临时请求的动态端口 (如 26679/26678 等) 纳入本次发送队列
+                                temp_dynamic_ports = list(getattr(self, '_temp_dynamic_ports', set()))
+                                for t_port in temp_dynamic_ports:
+                                    ports_to_send.append((t_port, None, True))
+
                                 if ports_to_send:
                                     with timed_ctx("ats_IPC_send", warn_ms=1000):
                                         for port, active_key, is_forced_port in ports_to_send:
@@ -9036,15 +9046,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     s2.connect(('127.0.0.1', port))
                                                     s2.sendall(b"DATA" + header_daily + payload_daily)
                                                     send_success_any = True
-                                                    setattr(self, active_key, True)
-                                                    if is_forced_port:
+                                                    if active_key:
+                                                        setattr(self, active_key, True)
+                                                    if is_forced_port and port in (26670, 26671):
                                                         setattr(self, f'_force_sync_{port}', False)
                                                     if port == 26670:
                                                         sent_to_ats = True
                                                     curr_hash = hash((version, len(df_daily)))
                                                     setattr(self, f'_last_sent_hash_{port}', curr_hash)
                                             except (socket.timeout, ConnectionError, OSError):
-                                                setattr(self, active_key, False)
+                                                if active_key:
+                                                    setattr(self, active_key, False)
+                                            finally:
+                                                # 🛡️ 临时动态端口发完（无论成功或失败）均单次完成即自动清理关闭，避免常驻无脑轮询
+                                                if port not in (26670, 26671):
+                                                    if hasattr(self, '_temp_dynamic_ports'):
+                                                        self._temp_dynamic_ports.discard(port)
+                                                        logger.info(f"✅ [IPC 动态适配] 临时动态端口 {port} 单次全量快照推送完成，已自动关闭/移除该端口订阅。")
 
                                 if send_success_any:
                                     logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")

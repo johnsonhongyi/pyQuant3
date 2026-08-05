@@ -252,9 +252,11 @@ def build_hma_and_trendscore(
     # for col in [f'Hma{p}d' for p in ma_map.keys()] + ['TrendS']:
     #     if col in df.columns:
     #         df[col] = np.round(df[col].values, 1)
-    for col in ['Hma5d','Hma10d','Hma20d','Hma60d','TrendS']:
+    for col in ['Hma5d','Hma10d','Hma20d','Hma60d']:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: f"{x:.1f}")
+    if 'TrendS' in df.columns:
+        df['TrendS'] = pd.to_numeric(df['TrendS'], errors='coerce').fillna(60).round(0).astype(int)
 
     return df
 
@@ -556,7 +558,8 @@ def complete_indicators_pipeline(
     with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
         top_all = build_hma_and_trendscore(top_all, status_callback=status_callback)
     
-    logger.debug(f'[complete_indicators_pipeline] resample={resample} elapsed={time.time() - time_sum:.2f}s')
+    if logger:
+        logger.debug(f'[complete_indicators_pipeline] resample={resample} elapsed={time.time() - time_sum:.2f}s')
     return top_all
 
 
@@ -650,9 +653,11 @@ def build_hma_and_trendscore_noVol(
     # -------------------------
     # 6️⃣ 最终输出格式化 .1f（展示用）
     # -------------------------
-    for col in ['Hma5d','Hma10d','Hma20d','Hma60d','TrendS']:
+    for col in ['Hma5d','Hma10d','Hma20d','Hma60d']:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: f"{x:.1f}")
+    if 'TrendS' in df.columns:
+        df['TrendS'] = pd.to_numeric(df['TrendS'], errors='coerce').fillna(60).round(0).astype(int)
 
     return df
 
@@ -1071,7 +1076,8 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     lastbuy_safe = top_all['lastbuy'].mask(top_all['lastbuy'] == 0, top_all['llastp'])
     
     if cct.get_trade_date_status():
-        logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
+        if logger:
+            logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
         if 'lastbuy' in top_all.columns:
             if 915 < now_time < 930:
                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
@@ -1383,11 +1389,11 @@ def process_merged_sina_with_history(df, mode='A'):
     curr_a = df['vol'] if 'vol' in df.columns else df['volume']
     
     # 2. 提取历史特征
-    close_1d = df['lastp1d']
-    amount_1d = df['lastv1d']
-    eval_1d   = df['eval1d'].fillna(9).astype(int)   # 昨天状态
-    eval_2d   = df['eval2d'].fillna(9).astype(int)   # 前天状态
-    signal_1d = df['signal1d'].fillna(5).astype(int) # 昨天产生的信号
+    close_1d = df['lastp1d'] if 'lastp1d' in df.columns else curr_c
+    amount_1d = df['lastv1d'] if 'lastv1d' in df.columns else curr_a
+    eval_1d   = df['eval1d'].fillna(9).astype(int) if 'eval1d' in df.columns else pd.Series(9, index=df.index)
+    eval_2d   = df['eval2d'].fillna(9).astype(int) if 'eval2d' in df.columns else pd.Series(9, index=df.index)
+    signal_1d = df['signal1d'].fillna(5).astype(int) if 'signal1d' in df.columns else pd.Series(5, index=df.index)
     
     # 提取多条均线作为参考
     ma5_curr = df['ma51d'] if 'ma51d' in df.columns else df['ma5d']
@@ -1413,7 +1419,7 @@ def process_merged_sina_with_history(df, mode='A'):
     
     # 破位：跌破大结构生命线 MA60，或【有效跌破 MA20】(连续两日收盘低于MA20)
     # 因为很多强势股盘中或单日会刺穿 MA20 骗线，所以增加两日确认机制
-    ma20_1d = df['ma20d'].shift(1).fillna(ma20_curr)
+    ma20_1d = df['ma20d'].shift(1).fillna(ma20_curr) if 'ma20d' in df.columns else ma20_curr
     effective_break_ma20 = (curr_c < ma20_curr) & (close_1d < ma20_1d)
     cond_bear = (curr_c < ma60_curr) | effective_break_ma20
 
