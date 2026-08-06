@@ -157,7 +157,6 @@ if __name__ == '__main__':
     # 纯命令行 CLI 模式 (-cli) 绝对不去唤醒/打开 UI 窗口！
     if use_ui:
         if check_and_activate_existing_instance():
-            print("[SingleInstance] 成功唤醒已运行程序的窗口视窗到前台，阻止重复启动多实例。")
             sys.exit(0)
 
         if hide_mode:

@@ -1027,15 +1027,14 @@ def get_wm_show_msg_id() -> int:
         return user32.RegisterWindowMessageW(WM_SHOW_MANAGE_WINDOW_LAYOUT_NAME)
     except Exception:
         return 0xC000 + 888
-
-
 SINGLE_INSTANCE_SERVER_NAME = "ManageWindowLayout_SingleInstance_Server"
+
 
 def check_and_activate_existing_instance() -> bool:
     """
     检查 manage_window_layout.exe 或 manage_window_layout.py 是否已经在运行。
-    如果已经运行，通过 QLocalSocket 管道发送 WAKEUP 消息并结合 Win32 接口唤醒已有窗口到前台显示，并返回 True（指示调用方退出）；
-    如果未在运行，返回 False（指示可以继续正常启动新实例）。
+    如果已经运行：通过 QLocalSocket 管道发送 WAKEUP 消息并结合 Win32 接口唤醒已有窗口到前台显示，并返回 True（指示调用方退出）；
+    如果未在运行：返回 False（指示可以继续正常启动新实例）。
     """
     current_pid = os.getpid()
     parent_pid = os.getppid() if hasattr(os, 'getppid') else None
@@ -1158,9 +1157,9 @@ def check_and_activate_existing_instance() -> bool:
             except Exception as e:
                 print(f"[SingleInstance] 唤醒窗口 HWND {hwnd} 异常: {e}")
 
-    # 仅当成功通过 IPC 唤醒 或 成功拉起前台 UI 窗口时，才指示调用方退出；避免无界面的僵尸进程死锁导致闪退
+    # 仅当成功通过 IPC 唤醒 或 成功找到/拉起已存实例时，指示调用方退出；避免重复创建新窗口
     if ipc_connected or activated:
-        print("[SingleInstance] 成功唤醒已有主 UI 实例，阻止重复启动新实例。")
+        print("[SingleInstance] 成功唤醒已有主 UI 实例到前台，阻止重复启动新实例。")
         return True
 
     return False
