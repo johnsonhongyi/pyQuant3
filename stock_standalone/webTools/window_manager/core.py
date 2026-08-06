@@ -1295,6 +1295,38 @@ def set_autostart_enabled(enable: bool) -> tuple:
 
 
 # ==========================================
+# 系统开机时间 (Uptime) 与系统冷启动判定 API
+# ==========================================
+
+def get_system_uptime() -> float:
+    """
+    获取 Windows 系统开机运行时间 (单位: 秒)。
+    优先通过 psutil.boot_time() 计算，备选通过 Win32 GetTickCount64()。
+    """
+    try:
+        import psutil
+        import time
+        boot_ts = psutil.boot_time()
+        if boot_ts > 0:
+            return max(0.0, time.time() - boot_ts)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetTickCount64() / 1000.0
+    except Exception:
+        pass
+    return 999999.0
+
+
+def is_system_cold_boot(threshold_seconds: int = 300) -> bool:
+    """
+    判断当前操作系统是否处于开机冷启动阶段 (系统运行时间 Uptime < threshold_seconds，默认 300 秒/5分钟)。
+    """
+    return get_system_uptime() < threshold_seconds
+
+
+# ==========================================
 # Acer 笔记本硬件性能控制模块 (免 GUI 驱动)
 # ==========================================
 
@@ -1667,8 +1699,15 @@ class AcerPerformanceController:
         except Exception:
             pass
 
-    def launch_predatorsense_gui(self, fan_mode=None, overclock_mode=None, coolboost=None, post_action="hide"):
+    def launch_predatorsense_gui(self, fan_mode=None, overclock_mode=None, coolboost=None, post_action="hide", log_cb=None):
         """唤起 Acer PredatorSense 控制中心界面并按选配参数精细化程序点击 (开机自启防卡顿+多重轮询极健壮架构)"""
+        def _do_log(msg):
+            if callable(log_cb):
+                try:
+                    log_cb(msg)
+                except Exception:
+                    pass
+
         try:
             import subprocess
             import win32gui
@@ -1676,10 +1715,13 @@ class AcerPerformanceController:
             import win32con
             import time
 
-            # 0. 精准探测【唤起前系统是否存在前台 UI 进程 PredatorSense.exe】
+            # 0. 精准探测【唤起前系统是否存在前台 UI 进程 PredatorSense.exe】与【系统级 Uptime 冷启动判定】
             # 必须在 ensure_predatorsense_daemon 之前前置检测，严格精准匹配 predatorsense.exe！
             is_cold_start = True
             ps_create_time = 0
+            sys_cold_boot = is_system_cold_boot(300)
+            sys_uptime = get_system_uptime()
+
             try:
                 import psutil
                 for p in psutil.process_iter(['name', 'create_time']):
@@ -1691,29 +1733,49 @@ class AcerPerformanceController:
             except Exception:
                 pass
 
+            # 若操作系统本身属于刚开机阶段 (Uptime < 300s)，强行认定为系统级冷启动以扩展容错
+            if sys_cold_boot:
+                is_cold_start = True
+
+            now_t = time.time()
+            ps_age_str = f"{(now_t - ps_create_time):.1f}s" if ps_create_time > 0 else "N/A"
+            cold_type_str = "系统开机冷启动 (<300s)" if sys_cold_boot else ("应用无进程冷启动" if is_cold_start else "热唤醒")
+            _do_log(f"[ColdStart Probe] 状态: PredatorSense.exe 存在={not is_cold_start} (创建距今: {ps_age_str}) | Uptime={sys_uptime:.1f}s | 认定类型: {cold_type_str}")
+
             # 1. 确保底层 Acer 守护进程已拉起
+            _do_log("[Step 1/4] 校验并拉起 Acer 硬件守护进程 PSLauncher.exe ...")
             self.ensure_predatorsense_daemon()
+            if sys_cold_boot:
+                _do_log("[Step 1/4] 系统刚开机，额外挂起等待 2.0s 待 Windows Acer 驱动与 WMI 服务完全就绪...")
+                time.sleep(2.0) # 系统冷启动给底层 PSSvc.exe 服务充足的注册响应时间
 
             app_aumid = r"shell:AppsFolder\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!CentenialConvert"
             main_hwnd = None
 
-            # 2. 如果属于无进程冷启动，或者进程创建时间小于 6.5s (仍在播开场动画)，强行挂起等待 6.8s 动画播完
-            now_t = time.time()
+            # 2. 如果属于无进程冷启动，或者进程创建时间小于 6.5s (仍在播开场动画)，强行挂起等待动画播完
             if is_cold_start:
+                _do_log("[Step 2/4] 发起 explorer.exe AUMID 界面唤起...")
                 subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
-                time.sleep(6.8)
+                anim_wait = 9.5 if sys_cold_boot else 6.8 # 系统冷启动下开场动画加载稍长
+                _do_log(f"[Step 2/4] 冷启动等待 WPF 开场动画播放与 UI 渲染 ({anim_wait}s)...")
+                time.sleep(anim_wait)
             elif ps_create_time > 0 and (now_t - ps_create_time) < 6.5:
-                # 进程刚由系统拉起还在播动画，补齐动画剩余时长
                 remain_anim = max(0.5, 6.8 - (now_t - ps_create_time))
+                _do_log(f"[Step 2/4] 进程刚创建 ({ps_age_str})，等待开场动画剩余时长 ({remain_anim:.1f}s)...")
                 time.sleep(remain_anim)
+            else:
+                _do_log("[Step 2/4] UI 进程已完全就绪，直接进入窗口捕获与点击步骤...")
 
             # 3. 针对开机延迟/系统卡顿的【多轮探查与窗口捕获】
+            max_enum_steps = 75 if sys_cold_boot else 45 # 系统冷启动放宽至 22.5 秒多轮探查
+            _do_log(f"[Step 3/4] 开始轮询探查 UI 主窗口句柄 (最大 {max_enum_steps} 步, 每步 0.3s)...")
             for retry_round in range(3):
                 if not is_cold_start or retry_round > 0:
+                    _do_log(f"[Step 3/4] [重试第 {retry_round+1} 轮] 再次调起 AUMID 探查窗口...")
                     subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
 
-                # 每轮等待探查窗口 (最长 13.5 秒)
-                for _ in range(45):
+                # 每轮等待探查窗口 (系统冷启动放宽探查)
+                for _ in range(max_enum_steps):
                     def enum_cb(hwnd, extra):
                         nonlocal main_hwnd
                         title = win32gui.GetWindowText(hwnd)
@@ -1726,13 +1788,11 @@ class AcerPerformanceController:
 
                     win32gui.EnumWindows(enum_cb, None)
                     if main_hwnd:
-                        # 找到真正的主界面窗口！强制恢复与置顶前台
                         win32gui.ShowWindow(main_hwnd, win32con.SW_RESTORE)
                         win32gui.SetForegroundWindow(main_hwnd)
-                        if is_cold_start:
-                            time.sleep(1.2) # 冷启动最后 1.2s 界面平滑沉淀
-                        else:
-                            time.sleep(0.4) # 热唤醒 0.4s 极速响应
+                        settle_time = 1.5 if (sys_cold_boot or is_cold_start) else 0.4
+                        _do_log(f"[Step 3/4] 成功捕捉主窗口 HWND=0x{main_hwnd:X}，置顶前台平滑沉淀 {settle_time}s ...")
+                        time.sleep(settle_time)
                         win32gui.SetForegroundWindow(main_hwnd)
                         break
                     time.sleep(0.3)
@@ -1748,12 +1808,15 @@ class AcerPerformanceController:
                 time.sleep(2.5)
 
             if not main_hwnd:
+                _do_log("⚠️ [Step 3/4] 探查超时: 未能在预定时长内抓取到有效的 PredatorSense UI 窗口句柄")
                 return
 
             rect = win32gui.GetWindowRect(main_hwnd)
             left, top, right, bottom = rect
             w = right - left
             h = bottom - top
+
+            _do_log(f"[Step 4/4] 窗口尺寸 ({w}x{h})，开始执行 UI 程序化极速点击 [超频={overclock_mode}, 风扇={fan_mode}, CoolBoost={coolboost}] ...")
 
             # 保存鼠标初始坐标
             orig_cursor = win32api.GetCursorPos()
@@ -1822,22 +1885,32 @@ class AcerPerformanceController:
                 pa_str = str(post_action).lower()
                 if pa_str in ["close", "关闭"]:
                     win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)
+                    _do_log("[Step 4/4] 已成功发送关闭窗口 WM_CLOSE 消息")
                 elif pa_str in ["kill", "杀掉"]:
                     import os
                     os.system("taskkill /f /im PredatorSense.exe 2>nul")
+                    _do_log("[Step 4/4] 已强行终止 PredatorSense.exe UI 进程")
                 else:
                     # 默认 hide 静默隐藏收至后台，保全后台守护进程
                     win32gui.ShowWindow(main_hwnd, win32con.SW_HIDE)
+                    _do_log("[Step 4/4] 已成功隐藏 PredatorSense 窗口常驻后台")
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            _do_log(f"⚠️ UI 程序化点击调优过程异常: {e}")
 
-    def apply_performance_profile(self, profile: dict) -> tuple:
+    def apply_performance_profile(self, profile: dict, log_cb=None) -> tuple:
         """
         批量应用性能 Profile (结合程序化点击 100% 无死锁无提示报错)
         profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"}
         """
+        def _do_log(msg):
+            if callable(log_cb):
+                try:
+                    log_cb(msg)
+                except Exception:
+                    pass
+
         if not isinstance(profile, dict):
             return False, "配置 Profile 参数格式非法"
 
@@ -1845,7 +1918,6 @@ class AcerPerformanceController:
             return False, "当前设备非 Acer 笔记本或未加载 Acer WMI 控制驱动 (静默跳过)"
 
         logs = []
-        target_tab = "turbo"
 
         # 1. 设置 CoolBoost
         cb = profile.get("coolboost")
@@ -1853,29 +1925,28 @@ class AcerPerformanceController:
             self.set_coolboost(bool(cb))
             state_str = "开启" if cb else "关闭"
             logs.append(f"CoolBoost 已成功设置为: {state_str}")
+            _do_log(f"WMI 硬件底座指令 -> CoolBoost: {state_str}")
 
         # 2. 设置超频模式
         oc = profile.get("overclock_mode")
         if oc:
             self.set_overclock_mode(oc)
             logs.append(f"超频模式已成功设置为: {oc}")
-            if str(oc).upper() in ["EXTREME", "TURBO", "FAST", "极速", "快速"]:
-                target_tab = "turbo"
+            _do_log(f"WMI 硬件底座指令 -> 超频模式: {oc}")
 
         # 3. 设置风扇模式
         fm = profile.get("fan_mode")
         if fm:
             self.set_fan_mode(fm)
             logs.append(f"风扇模式已成功设置为: {fm}")
-            if str(fm).upper() in ["MAX", "最大"]:
-                target_tab = "fan"
+            _do_log(f"WMI 硬件底座指令 -> 风扇模式: {fm}")
 
         # 4. 全自动发起 UI 程序化点击 (精细化定位: 风扇/超频/CoolBoost + post_action 适配)
         try:
             pa = profile.get("post_action", "hide")
-            self.launch_predatorsense_gui(fan_mode=fm, overclock_mode=oc, coolboost=cb, post_action=pa)
-        except Exception:
-            pass
+            self.launch_predatorsense_gui(fan_mode=fm, overclock_mode=oc, coolboost=cb, post_action=pa, log_cb=log_cb)
+        except Exception as e:
+            _do_log(f"⚠️ 唤起 UI 程序化点击调优异常: {e}")
 
         summary_msg = " | ".join(logs) if logs else "Acer 硬件性能设置已自动保存并点击应用"
         return True, summary_msg

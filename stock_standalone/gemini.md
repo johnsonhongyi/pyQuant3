@@ -1,3 +1,9 @@
+## 2026-08-06 23:15
+- [x] **实现 Acer 控制器冷启动全流程 4 大步骤详细打点诊断日志系统 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_acer_performance.py`)**：
+    - [x] **打通 `log_cb` 实时回调与全流程可视化**：在 `core.py` 的 `apply_performance_profile` 与 `launch_predatorsense_gui` 中引入 `log_cb` 回调，将冷启动与热唤醒调优全流程打通至 UI 日志组件 (`self.log_signal.emit`)。
+    - [x] **冷启动 4 大步骤透明可视化**：详细打印 Step 0 (进程存在性与系统 Uptime 探查)、Step 1 (PSLauncher 守护进程与 Windows 服务就绪等待)、Step 2 (explorer AUMID 唤起与 9.5s WPF 动画平滑等待)、Step 3 (窗口句柄 HWND 多轮探查与置顶前台)、Step 4 (超频/风扇/CoolBoost 程序化点击与 WM_CLOSE/SW_HIDE 窗口收尾)，彻底解决此前沉寂 16 秒“犹如盲盒”的日志排查缺陷。
+    - [x] **单元测试与回归 100% PASSED**：`pytest tests/test_acer_performance.py` 4 项测试与 `pytest tests/test_signal_ledger.py` 13 项测试全量通过！
+
 ## 2026-08-06 22:20
 - [x] **为交易可视化主画板 (`trade_visualizer_qt6.py`) 与外盘 K 线弹窗 (`ats/ui/global_market_kline_dialog.py`) 实现 K 线黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系最右侧边界吸附与平滑跟随架构 (`trade_visualizer_qt6.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_visualizer_fib.py`)**：
     - [x] **7 大黄金分割比率价格标签动态吸附最右侧**：实现 `_update_fib_label_positions()` 算法，在用户拖拽平移 (Pan)、滚轮缩放 (Zoom) 或重置 K 线图表 ViewBox 视角时，自动监听 `sigXRangeChanged` 视角变化信号，将 7 大黄金分割价格标签（如 `Fib 100.0%: 15.20`）永远精准贴合固定吸附在可视区域最右侧边框内 (`x_max - 0.2`)，绝对不随 K 线柱子向左移动或跑出可视边界！
