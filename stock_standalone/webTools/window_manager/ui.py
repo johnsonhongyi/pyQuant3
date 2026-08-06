@@ -1669,6 +1669,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     """主窗口：窗口坐标及分布管理器"""
     toggle_ui_signal = QtCore.pyqtSignal()
     show_ui_signal = QtCore.pyqtSignal()
+    log_signal = QtCore.pyqtSignal(str)
     
     def __init__(self):
         super().__init__()
@@ -1699,6 +1700,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.bind_hotkey(self.current_bound_hotkey)
         self.toggle_ui_signal.connect(self.toggle_visibility)
         self.show_ui_signal.connect(self._force_show_and_top)
+        self.log_signal.connect(self.log)
         self.setup_single_instance_server()
         
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
@@ -1754,17 +1756,69 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             self.log(f"[SingleInstance] 管道数据解析异常: {e}")
 
+    def apply_acer_performance_async(self, profile: dict = None, custom_msg_prefix: str = ""):
+        """在后台守护线程中异步应用 Acer 性能配置 (用于托盘右键极速响应)"""
+        def _bg_worker():
+            try:
+                controller = core.AcerPerformanceController()
+                if controller.is_supported():
+                    target_profile = profile if profile is not None else self.config_manager.get_acer_performance_config()
+                    ok, acer_msg = controller.apply_performance_profile(target_profile)
+                    prefix = custom_msg_prefix or "应用 Acer 性能模式"
+                    msg_str = f"[Acer Hardware] {prefix}: {acer_msg}"
+                else:
+                    msg_str = "[Acer Hardware] 设备无 Acer WMI 支持，静默跳过性能调优"
+                self.log_signal.emit(msg_str)
+            except Exception as e:
+                logger.error(f"异步执行 Acer 性能模式调优异常: {e}")
+                self.log_signal.emit(f"⚠️ [Acer Hardware] 执行 Acer 性能模式调优异常: {e}")
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
     def setup_tray_icon(self):
-        self.tray_icon = QSystemTrayIcon(self)
+        """初始化系统托盘图标及右键快捷控制菜单"""
+        self.tray_icon = QtWidgets.QSystemTrayIcon(self)
         self.tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
         
-        tray_menu = QMenu(self)
-        show_action = tray_menu.addAction("显示主界面")
+        self.tray_menu = QtWidgets.QMenu(self)
+        show_action = self.tray_menu.addAction("🖥️ 显示主界面")
         show_action.triggered.connect(self.showNormal)
-        quit_action = tray_menu.addAction("完全退出")
+        
+        # 🚀 Acer 硬件性能控制快捷右键菜单
+        try:
+            controller = core.AcerPerformanceController()
+            if controller.is_supported():
+                self.tray_menu.addSeparator()
+                apply_preset_action = self.tray_menu.addAction("⚡ 应用当前 Acer 性能预设")
+                apply_preset_action.triggered.connect(lambda: self.apply_acer_performance_async(custom_msg_prefix="右键托盘极速应用"))
+                
+                acer_sub_menu = self.tray_menu.addMenu("🚀 Acer 性能极速切换")
+                
+                act_turbo = acer_sub_menu.addAction("🔥 狂暴模式 (Extreme + 最大风扇)")
+                act_turbo.triggered.connect(lambda: self.apply_acer_performance_async(
+                    {"overclock_mode": "Extreme", "coolboost": True, "fan_mode": "Max", "post_action": "hide"},
+                    custom_msg_prefix="托盘一键切【狂暴模式】"
+                ))
+
+                act_fast = acer_sub_menu.addAction("⚡ 快速模式 (Fast + 自动风扇)")
+                act_fast.triggered.connect(lambda: self.apply_acer_performance_async(
+                    {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"},
+                    custom_msg_prefix="托盘一键切【快速模式】"
+                ))
+
+                act_normal = acer_sub_menu.addAction("🍃 默认模式 (Normal + 自动风扇)")
+                act_normal.triggered.connect(lambda: self.apply_acer_performance_async(
+                    {"overclock_mode": "Default", "coolboost": False, "fan_mode": "Auto", "post_action": "hide"},
+                    custom_msg_prefix="托盘一键切【默认模式】"
+                ))
+        except Exception as e:
+            logger.error(f"托盘图标 Acer 快捷菜单初始化异常: {e}")
+
+        self.tray_menu.addSeparator()
+        quit_action = self.tray_menu.addAction("❌ 完全退出")
         quit_action.triggered.connect(self.force_quit)
         
-        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_activated)
         
@@ -1785,8 +1839,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         QApplication.instance().quit()
         
     def on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.toggle_visibility()
+        try:
+            if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
+                self.toggle_visibility()
+        except Exception as e:
+            logger.error(f"托盘激活事件处理异常: {e}")
             
     def closeEvent(self, event):
         try:

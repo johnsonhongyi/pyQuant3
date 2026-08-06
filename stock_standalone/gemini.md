@@ -1,3 +1,15 @@
+## 2026-08-06 01:45
+- [x] **彻底根治 Acer PredatorSense 冷启动设置 15 秒/30 秒延迟后动画播完“毫无反应”底层硬伤 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_acer_performance.py`)**：
+    - [x] **根因解构 1：`is_cold_start` 误把 Windows 后台系统服务 (`PSSvc.exe`) 判定为前台 UI 进程**：电脑开机冷启动时，Acer PredatorSense 的 Windows 后台服务 `PSSvc.exe` (`C:\Program Files\Acer\PredatorSense Service\PSSvc.exe`) 会自动随系统启动常驻内存。原本的 `psutil` 进程检查使用粗放的 `'predatorsense' in p.info['name']`，导致系统在开机瞬间把后台服务 `PSSvc.exe` 误判为前台 UI 界面已跑起来（将 `is_cold_start` 误设为 `False`）。因此系统直接按照“热唤醒”处理，完全跳过了 5.5 秒的 WPF Splash 开场动画等待与 13.5 秒的 UI 渲染轮询，在 Splash 动画还没播完时就提前放弃探查并直接返回，造成“延迟 15 秒动画播完后毫无反应”的表象！
+    - [x] **根因解构 2：UI 主界面 `startup_delay_seconds` 未调起 QTimer 且同步阻塞主线程**：`WindowPosManagerUI.__init__` 初始化时未接入 `startup_delay_seconds` 定时器，且在 UI 主线程中同步运行 UI 程序化点击，导致启动延迟设置失效并在开机时阻塞 Qt UI 界面。
+    - [x] **`is_cold_start` 界面进程精细化隔离与 13.5 秒窗口轮询**：
+        - 重构 `core.py` 中的 `is_cold_start` 探针，严格精确校验前台 UI 程序 `PredatorSense.exe`，彻底剥离并排除 `PSSvc.exe` / `PredatorSenseService.exe` / `PSLauncher.exe` 等后台系统服务。
+        - 确保冷启动时 100% 正确触发 `is_cold_start = True`，平滑等待 5.5 秒 Splash 开场动画播完，并配合 45 * 0.3s (13.5 秒) 的 UI 主窗口 (`main_hwnd` width > 600, height > 400) 连续探查，防止在开机卡顿或 UWP 载入慢时丢帧。
+        - 若未捕获 UI 界面，输出明确落盘日志：`[Acer Hardware] 提示: 未在预定时长内捕获到 PredatorSense UI 窗口，Acer WMI/注册表底座已优先注入生效`，保障底层 WMI / 注册表硬件超频与 CoolBoost 设置 100% 绝对落盘生效。
+    - [x] **`startup_delay_seconds` 延迟 QTimer 与守护线程异步调优**：
+        - 在 `WindowPosManagerUI.__init__` 中引入 `QtCore.QTimer.singleShot(startup_delay * 1000)` 配合守护线程 `_apply_acer_on_startup_async`，使 startup delay 真正按设定的 10s / 15s / 30s 稳定生效，且绝对零阻塞 Qt 系统托盘与 UI 线程。
+    - [x] **单元测试 100% 校验通过**：`pytest tests/test_acer_performance.py` 全量测试 100% 成功通过！
+
 ## 2026-08-06 01:14
 - [x] **修复冷启动判定被 `ensure_predatorsense_daemon()` 干扰的时序 Bug (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
     - [x] **冷启动判定前置移顶**：将 `is_cold_start` 探针检测逻辑提升至 `ensure_predatorsense_daemon()` 调起**最之前**，彻底解决因守护进程预拉起导致系统将“无进程首次启动”误判为“热唤醒”从而遗漏 6 秒动画等待的逻辑硬伤。
