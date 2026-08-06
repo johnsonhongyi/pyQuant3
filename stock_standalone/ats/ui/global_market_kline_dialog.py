@@ -1226,26 +1226,27 @@ class GlobalMarketKLineDialog(QDialog):
 
         # ---------------- 1. 顶部 Header 控件 ----------------
         header_frame = QFrame()
+        header_frame.setFixedHeight(36)  # ⚡ 强力锁定顶部 Header 框架固定高度，绝对不自动变高或折成两行
         header_frame.setStyleSheet("""
             QFrame {
                 background-color: #1e222d;
                 border: 1px solid #2a2e39;
                 border-radius: 6px;
-                padding: 4px;
+                padding: 2px;
             }
         """)
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(6, 4, 6, 4)
-        header_layout.setSpacing(4)
+        header_layout.setContentsMargins(6, 2, 6, 2)
+        header_layout.setSpacing(3)
 
         from PyQt6.QtWidgets import QSizePolicy
         self.lbl_title = QLabel(f"🌐 {self.name} ({self.symbol})")
-        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 11pt;")
+        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 10.5pt;")
         self.lbl_title.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.lbl_title)
 
         self.lbl_price_info = QLabel("最新价: -- | 涨跌: --")
-        self.lbl_price_info.setStyleSheet("font-size: 9.5pt; font-weight: bold; margin-left: 4px;")
+        self.lbl_price_info.setStyleSheet("font-size: 9pt; font-weight: bold; margin-left: 4px;")
         self.lbl_price_info.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.lbl_price_info)
 
@@ -1256,7 +1257,7 @@ class GlobalMarketKLineDialog(QDialog):
                 font-size: 8.5pt;
                 color: #9db2c6;
                 margin-left: 4px;
-                padding: 1px 5px;
+                padding: 1px 4px;
                 background: #1a1f2e;
                 border: 1px solid #2a2e39;
                 border-radius: 3px;
@@ -1269,7 +1270,7 @@ class GlobalMarketKLineDialog(QDialog):
 
         header_layout.addStretch(1)
 
-        # 数据源选择按钮组
+        # 数据源选择按钮组 (按键宽度自适应文字内容)
         self.btn_src_yahoo = QPushButton("Yahoo")
         self.btn_src_yahoo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_src_yahoo.clicked.connect(lambda: self._switch_data_source("yahoo"))
@@ -1293,7 +1294,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 5px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 46px;
             }
             QPushButton:hover {
                 background-color: #363c56;
@@ -1314,7 +1314,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 5px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #1e54b7;
@@ -1323,7 +1322,7 @@ class GlobalMarketKLineDialog(QDialog):
         self.btn_mode_toggle.clicked.connect(self._toggle_chart_mode)
         header_layout.addWidget(self.btn_mode_toggle)
 
-        # 视区快捷控制组
+        # 视区快捷控制组 (60日 / 120日)
         self.btn_focus_60 = QPushButton("60日")
         self.btn_focus_60.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_focus_60.setStyleSheet("""
@@ -1334,7 +1333,6 @@ class GlobalMarketKLineDialog(QDialog):
                 border-radius: 3px;
                 padding: 2px 4px;
                 font-size: 8.5pt;
-                min-width: 32px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
@@ -1354,13 +1352,15 @@ class GlobalMarketKLineDialog(QDialog):
                 border-radius: 3px;
                 padding: 2px 4px;
                 font-size: 8.5pt;
-                min-width: 38px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
                 color: #ffffff;
             }
         """)
+        self.btn_focus_120.clicked.connect(self._focus_full_120)
+        header_layout.addWidget(self.btn_focus_120)
+
         # 📐 FIB 黄金分割坐标系开关按键
         self.show_fib = True
         self.btn_fib_toggle = QPushButton("FIB:开")
@@ -1374,7 +1374,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 4px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 38px;
             }
             QPushButton:hover {
                 background-color: #3d2f4d;
@@ -1397,7 +1396,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 5px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #0065ff;
@@ -1419,7 +1417,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 5px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #26543e;
@@ -1441,7 +1438,6 @@ class GlobalMarketKLineDialog(QDialog):
                 padding: 2px 5px;
                 font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 52px;
             }
             QPushButton:hover {
                 background-color: #2962ff;
@@ -1473,14 +1469,16 @@ class GlobalMarketKLineDialog(QDialog):
 
         # ---------------- 2. 动态信息条 (Info Banner) ----------------
         self.lbl_info = QLabel("提示: 鼠标悬浮移入画板查看开高低收明细与指标数据")
+        self.lbl_info.setFixedHeight(26)  # ⚡ 强力锁定第二行动态信息条固定高度 (26px)，绝对不自动拆行变高
+        self.lbl_info.setWordWrap(False)  # ⚡ 禁止文本换行折叠
         self.lbl_info.setStyleSheet("""
             QLabel {
                 background-color: #181c27;
                 border: 1px solid #232733;
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 2px 8px;
                 color: #9db2c6;
-                font-size: 9.5pt;
+                font-size: 9pt;
             }
         """)
         layout.addWidget(self.lbl_info)
@@ -2918,7 +2916,6 @@ class GlobalMarketKLineDialog(QDialog):
                             border-radius: 3px;
                             padding: 2px 4px;
                             font-size: 8.5pt;
-                            min-width: 45px;
                         }
                         QPushButton:hover {
                             background-color: #33ebff;
@@ -2935,7 +2932,6 @@ class GlobalMarketKLineDialog(QDialog):
                             padding: 2px 4px;
                             font-size: 8.5pt;
                             font-weight: bold;
-                            min-width: 40px;
                         }
                         QPushButton:hover {
                             background-color: #2a2e39;
@@ -2975,7 +2971,6 @@ class GlobalMarketKLineDialog(QDialog):
                         padding: 2px 4px;
                         font-size: 8.5pt;
                         font-weight: bold;
-                        min-width: 42px;
                     }
                     QPushButton:hover {
                         background-color: #2962ff;
@@ -2992,7 +2987,6 @@ class GlobalMarketKLineDialog(QDialog):
                         border-radius: 3px;
                         padding: 2px 4px;
                         font-size: 8.5pt;
-                        min-width: 42px;
                     }
                     QPushButton:hover {
                         background-color: #2a2e39;

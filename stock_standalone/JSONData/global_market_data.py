@@ -463,6 +463,9 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
     active_trading = is_market_active_time()
     cache_ttl = get_global_market_cache_ttl()
 
+    if force_refresh:
+        _global_cache['last_update_ts'] = 0.0
+
     # 1. 自动更新保护规则:
     # - 未达到统一阈值 (cache_ttl) 且非强制刷新: 直接返回缓存
     if not force_refresh and has_cache:
@@ -491,7 +494,8 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
+        opener = get_urllib_request_opener()
+        with opener.open(req, timeout=5.0) as resp:
             content = resp.read().decode('gbk', errors='ignore')
 
         # parsing dictionary for US stocks & ETFs
