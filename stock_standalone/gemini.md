@@ -1,3 +1,22 @@
+## 2026-08-06 17:42
+- [x] **恢复外盘 K 线弹窗 (`GlobalMarketKLineDialog`) 顶部两行控件默认固定高度与按键宽度自适应 (`ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_top_layout.py`)**：
+    - [x] **顶部 Header 第一行强力锁定 36px 默认高度 (`header_frame.setFixedHeight(36)`)**：恢复原始默认高度，绝对禁止自动变高或自动调整成两行；同时补齐 missing 的 `120日` 视区控制按钮 (`btn_focus_120`)。
+    - [x] **第二行动态信息条强力锁定 26px 高度 (`lbl_info.setFixedHeight(26)`)**：设置 `wordWrap=False` 禁用自动换行折叠，确保鼠标悬浮查看指标明细时第二行保持完美的单行默认高度，绝不自动调整扩展高度。
+    - [x] **顶部按键宽度 100% 跟着文字内容自适应 (Self-Adapting Button Widths)**：清理全部顶栏按钮 (`BOLL`, `美国线`, `60日`, `120日`, `FIB`, `刷新`, `复位`, `资讯`, `日志`, `代理`) 的硬编码 `min-width` 限制，改为依据文字长度优雅自适应拓展宽度。
+    - [x] **单元测试 100% 校验通过**：编写 `scratch/test_kline_top_layout.py` 验证固定高度与按键自适应宽度，测试 100% PASSED！
+
+## 2026-08-06 17:25
+- [x] **彻底解决外盘面板「强制实时刷新无效果/不全量更新」底层缺陷，实现全量 16 大外盘品种 K 线与实时点位批量并发重构更新 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_batch_force_refresh.py`)**：
+    - [x] **根因精准解构 1：`fetch_global_market_quotes` 超时与代理掉帧硬伤**：之前在 `fetch_global_market_quotes` 中使用 `urllib.request.urlopen(req, timeout=2.0)` 且未调起 `get_urllib_request_opener()` 代理设置。当代理或网络波动超过 2.0s 时抛出 Timeout 异常并静默降级返回旧内存缓存，导致用户点击“强制实时刷新”时觉得“毫无效果”！
+    - [x] **根因精准解构 2：强制刷新未进行全量外盘 K 线批量更新与 K 线弹窗同步**：此前点击“强制实时刷新外盘”时，仅更新了实时 snapshot 字典，未对 16 大外盘核心品种（A50, USDCNH, OIL, BRENT, GOLD, NVDA, AAPL, MSFT, GOOGL, AMZN, META, TSLA, MU, TSM, SOXX, QQQ）进行 K 线数据全量更新落盘；同时若外盘 K 线走势弹窗 (`GlobalMarketKLineDialog`) 处于打开状态，不会自动重载刷新，导致 K 线图表没有变化。
+    - [x] **HTTP 代理与 5s 超时强化**：
+        - 重构 `fetch_global_market_quotes`：接入 `get_urllib_request_opener()`，代理开启时走指定代理，关闭时强行绕过 Windows 注册表残留代理；并将 HTTP 超时限制由 2.0s 提升至 5.0s；当 `force_refresh=True` 时重置 `last_update_ts = 0.0` 强刷。
+    - [x] **`ThreadPoolExecutor` 6 线程并发批量全量 K 线在线重构更新**：
+        - 在 `GlobalMarketWorker.run` 中，当触发 `force_refresh=True` 时，调起 6 线程 `ThreadPoolExecutor` 并发拉取并更新全量 16 大外盘核心品种 K 线（A50, USDCNH, OIL, BRENT, GOLD, NVDA, AAPL, MSFT, GOOGL, AMZN, META, TSLA, MU, TSM, SOXX, QQQ）并物理写盘落盘。
+    - [x] **K 线走势弹窗自动同步重载 (`_on_worker_finished`)**：
+        - 当外盘面板完成强制全量刷新时，若外盘 K 线弹窗 (`_kline_dialog`) 正在打开显示，自动同步触发 `_kline_dialog._trigger_async_load(force_refresh=True)`，使屏幕上打开的 K 线图表瞬间完成自动重绘与更新！
+    - [x] **单元测试 100% 校验通过**：编写 `scratch/test_batch_force_refresh.py` 对全量并发批量 K 线更新落盘、状态标签变化与 K 线弹窗自动重载全流程进行测试，单元测试 100% PASSED！
+
 ## 2026-08-06 17:14
 - [x] **实现外盘 K 线弹窗全场景最前显示 (Bring to Front) 与单击/双击/后台切标的强力激活 (`ats/ui/global_market_panel.py`, `scratch/test_bring_to_front_panel.py`)**：
     - [x] **全场景强力最前显示 (Bring to Front)**：在 `_open_kline_dialog` 中接入 `isMinimized()` 判定与 `showNormal()` 还原，并配合 `show()`, `raise_()`, `activateWindow()`, `setFocus()` 及 `QTimer.singleShot(50)` 延迟二次置顶激活，彻底解决在后台或最小化收起时点击新 Code 无法把窗口弹至屏幕最前端的缺陷。
