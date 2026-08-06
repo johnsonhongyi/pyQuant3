@@ -1672,13 +1672,16 @@ class AcerPerformanceController:
             import win32con
             import time
 
-            # 0. 精准探测【唤起前系统是否存在 PredatorSense.exe 进程】
-            is_cold_start = False
+            # 0. 精准探测【唤起前系统是否存在前台 UI 进程 PredatorSense.exe】
+            # 必须精确匹配 predatorsense.exe，严格排除后台系统服务 PSSvc.exe / PredatorSenseService.exe 等！
+            is_cold_start = True
             try:
                 import psutil
-                ps_procs = [p for p in psutil.process_iter(['name']) if p.info['name'] and 'predatorsense' in p.info['name'].lower()]
-                if not ps_procs:
-                    is_cold_start = True
+                for p in psutil.process_iter(['name']):
+                    p_name = (p.info['name'] or '').lower()
+                    if p_name == 'predatorsense.exe':
+                        is_cold_start = False
+                        break
             except Exception:
                 pass
 
