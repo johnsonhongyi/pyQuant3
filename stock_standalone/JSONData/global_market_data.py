@@ -285,7 +285,7 @@ def is_target_market_session_open(symbol: str) -> bool:
 
 
 def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
-    """安全清洗与校验 K 线序列，严格剥离剔除任何 > 目标市场当前日期的穿越/未来 Bar，确保历史天数与跨时区 100% 一致"""
+    """安全清洗与校验 K 线序列，严格剥离剔除任何 > 目标市场当前日期的穿越/未来 Bar 及数量级离群脏数据"""
     if not klines:
         return []
 
@@ -306,14 +306,38 @@ def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
         if d_str > target_today:
             continue
 
+        c_val = float(item.get('close', 0))
+        if c_val <= 0:
+            continue
+
         if d_str not in seen_dates:
             seen_dates.add(d_str)
             item_copy = dict(item)
             item_copy['date'] = d_str
+            item_copy['close'] = c_val
             sanitized.append(item_copy)
 
-    # 按日期升序排列并算齐 pct
+    if not sanitized:
+        return []
+
+    # 按日期升序排列
     sanitized.sort(key=lambda x: x['date'])
+
+    # 🛡️ 核心数量级护盾：根据中位数过滤离群脏 Bar (防 14943.97 点位与 16.98 港元混存拉爆 Y 轴)
+    valid_closes = [k['close'] for k in sanitized if k['close'] > 0]
+    if valid_closes:
+        sorted_closes = sorted(valid_closes)
+        med_close = sorted_closes[len(sorted_closes) // 2]
+        if med_close > 0:
+            clean_by_mag = []
+            for item in sanitized:
+                c = item['close']
+                ratio = c / med_close
+                if 0.25 <= ratio <= 4.0:
+                    clean_by_mag.append(item)
+            if clean_by_mag:
+                sanitized = clean_by_mag
+
     prev_c = None
     for item in sanitized:
         c = float(item.get('close', 0))
@@ -802,11 +826,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         return sanitize_klines_for_symbol(sym_upper, raw_res)
 
     def append_realtime_bar_if_needed(sym_code: str, klines: list) -> list:
-        """根据目标市场时区 (Target Market Date & Session) 动态融合实时行情，绝对防范跨时区穿越 Bar"""
+        """根据目标市场时区 (Target Market Date & Session) 动态融合实时行情，绝对防范跨时区穿越 Bar 与数量级拉爆 Bug"""
         if not klines:
             return klines
         
-        # 1. 率先清洗剥离超出目标市场当前日期的穿越 Bar
+        # 1. 率先清洗剥离超出目标市场当前日期的穿越 Bar 与数量级离群脏点
         clean_klines = sanitize_klines_for_symbol(sym_code, klines)
         if not clean_klines:
             return klines
@@ -827,22 +851,31 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         klines_copy = [dict(k) for k in clean_klines]
         last_item = klines_copy[-1]
         last_date = last_item.get('date', '')
+        last_close = float(last_item.get('close', 0))
+
+        # 🛡️ 核心数量级安全控制：判断 rt_price 与 last_close 是否属于同一数量级
+        # (例如 A50 新浪实时 API 给出 14943 点，而 Yahoo K 线收盘价为 17.16 港元，ratio 为 870 倍)
+        effective_price = rt_price
+        if last_close > 0:
+            ratio = rt_price / last_close
+            if ratio > 3.0 or ratio < 0.33:
+                # 数量级冲突！按照涨跌百分比算同数量级下的合理点位，绝不将 14943 点误写入 17 港币收盘价中！
+                effective_price = round(last_close * (1.0 + rt_pct / 100.0), 2)
         
         if last_date == target_today_str:
             # 只有在目标市场今天已开盘且有最新点位时，更新今日 K 线
-            last_item['close'] = round(rt_price, 2)
+            last_item['close'] = round(effective_price, 2)
             last_item['pct'] = round(rt_pct, 2)
-            high_p = float(last_item.get('high', rt_price))
-            low_p = float(last_item.get('low', rt_price))
-            if rt_price > high_p:
-                last_item['high'] = round(rt_price, 2)
-            if rt_price < low_p and rt_price > 0:
-                last_item['low'] = round(rt_price, 2)
+            high_p = float(last_item.get('high', effective_price))
+            low_p = float(last_item.get('low', effective_price))
+            if effective_price > high_p:
+                last_item['high'] = round(effective_price, 2)
+            if effective_price < low_p and effective_price > 0:
+                last_item['low'] = round(effective_price, 2)
             klines_copy[-1] = last_item
         else:
             # 当 last_date < target_today_str 时:
             # 核心卫士：只有在【目标市场当前处于交易盘中/已开盘活跃期】时，才追加 target_today_str 实时 Bar！
-            # 若目标市场今天尚未开盘 (如美东夜间闭市时段，8月5日还没开盘)，绝对不追加 target_today_str 的虚假 Bar！
             if not session_open:
                 return klines_copy
             
@@ -855,7 +888,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 while curr_dt < dt_today:
                     if curr_dt.weekday() < 5:
                         mid_date_str = curr_dt.strftime('%Y-%m-%d')
-                        prev_close = float(klines_copy[-1].get('close', rt_price))
+                        prev_close = float(klines_copy[-1].get('close', effective_price))
                         mid_bar = {
                             'date': mid_date_str,
                             'open': round(prev_close, 2),
@@ -871,16 +904,16 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 pass
             
             # 追加目标市场今日最新实时 Bar
-            prev_close = float(klines_copy[-1].get('close', rt_price))
-            open_p = prev_close * (1.0 + rt_pct / 100.0) if prev_close > 0 else rt_price
-            high_p = max(open_p, rt_price)
-            low_p = min(open_p, rt_price)
+            prev_close = float(klines_copy[-1].get('close', effective_price))
+            open_p = prev_close * (1.0 + rt_pct / 100.0) if prev_close > 0 else effective_price
+            high_p = max(open_p, effective_price)
+            low_p = min(open_p, effective_price)
             new_bar = {
                 'date': target_today_str,
                 'open': round(open_p, 2),
                 'high': round(high_p, 2),
                 'low': round(low_p, 2),
-                'close': round(rt_price, 2),
+                'close': round(effective_price, 2),
                 'volume': float(klines_copy[-1].get('volume', 0)),
                 'pct': round(rt_pct, 2)
             }
@@ -1224,6 +1257,40 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         return res_klines[-limit:]
 
     return []
+
+
+def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yahoo') -> bool:
+    """强制将最新清洗后的 K 线数据写盘保存至 JSON 物理持久化文件"""
+    if not symbol or not klines:
+        return False
+
+    sym_upper = symbol.strip().upper()
+    source_key = (data_source or 'yahoo').lower()
+    cache_path = get_kline_cache_file_path().replace(".json", f"_{source_key}.json")
+
+    try:
+        clean_list = sanitize_klines_for_symbol(sym_upper, klines)
+        if not clean_list:
+            return False
+
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        all_cache = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    all_cache = json.load(f)
+            except Exception:
+                all_cache = {}
+
+        all_cache[sym_upper] = clean_list
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(all_cache, f, ensure_ascii=False, indent=2)
+
+        log_market_msg(f"[GlobalMarketData] 物理落盘持久化保存 [{source_key}源] {sym_upper} K线 ({len(clean_list)} 条) -> {cache_path}")
+        return True
+    except Exception as ex:
+        log_market_msg(f"[GlobalMarketData] 物理落盘 Save 异常 ({sym_upper}): {ex}")
+        return False
 
 
 def get_related_symbols(symbol: str) -> list:

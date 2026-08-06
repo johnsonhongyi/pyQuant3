@@ -73,7 +73,7 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         layout.addWidget(lbl_t)
         layout.addWidget(lbl_m)
         
-        # 100% 纯不透明实色背景 + 1px 霓虹蓝精致高对比边框
+        # 100% 纯不透明实色背景 + 1px 霓虹蓝精致高对比边框 (100% 恢复原始优雅样式)
         self.setStyleSheet(f"""
             InAppToastWidget {{
                 background-color: #0f172a;
@@ -88,7 +88,7 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         
         self.resize(card_w, card_h)
         
-        # 目标窗口所在屏幕的右下角精致定位 (Target Screen Bottom-Right)，留出 Taskbar 任务栏边距
+        # 目标窗口所在屏幕的右下角精致定位 (Target Screen Bottom-Right)，保持原始位置不动
         if screen:
             try:
                 s_geom = screen.availableGeometry()
@@ -102,7 +102,6 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
 
         self.show()
         self.raise_()
-        QTimer.singleShot(8000, self.close)
 
     def closeEvent(self, event):
         """关闭时主动从强引用池解绑"""
@@ -131,7 +130,7 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
 
 
 class AlertNotifier(QObject if HAS_PYQT else object):
-    """黄金特异信号桌面弹窗与语音通知器"""
+    """黄金特异信号桌面弹窗与语音通知器 (支持串行轮播队列)"""
     
     _instance = None
     
@@ -150,14 +149,23 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             return
         self._initialized = True
         self.tray_icon = None
-        self._last_alert_ts = {}  # 单股 15 分钟内冷却
-        self._last_global_ts = 0.0 # 全局 15 秒内冷却，防止批量刷屏
+        self._last_alert_ts = {}  # 单股冷却
+        self._last_global_ts = 0.0 # 全局冷却
         self._last_notified_code = None
         self._last_parent = None
+        
+        # 串行轮播通知队列
+        import collections
+        self._notify_queue = collections.deque()
+        self._is_busy = False
+        self._current_toast = None
+        
         self._init_tray()
         
     def _init_tray(self):
         if not HAS_PYQT:
+            return
+        if not QApplication.instance():
             return
         try:
             self.tray_icon = QSystemTrayIcon(self)
@@ -238,6 +246,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
         now = time.time()
         code_str = str(code).strip().zfill(6)
+        is_priority_signal = ("通达信" in str(reason)) or (score >= 95.0)
 
         # 0.1 通过共享 SignalLedger 校验是否今天已提示过相同的信号提示，防止 ATS 与多周期重复播报
         try:
@@ -249,16 +258,18 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         except Exception as e_check:
             logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
 
-        # 1. 全局限频：15 秒内最多推送 1 条，杜绝批量刷屏
-        if (now - self._last_global_ts) < 15.0:
-            return
+        # 仅对普通微弱信号进行时间抽样拦截；通达信实盘信号与黄金强特异信号免除全局丢弃，保证 100% 去重后依次弹窗+语音轮播
+        if not is_priority_signal:
+            # 1. 普通信号全局限频：15 秒内最多推送 1 条
+            if (now - self._last_global_ts) < 15.0:
+                return
 
-        # 2. 单股限频：同一股票 15 分钟 (900s) 内绝不重复推送
-        last_ts = self._last_alert_ts.get(code_str, 0.0)
-        if (now - last_ts) < 900.0:
-            return
+            # 2. 普通信号单股限频：同一股票 15 分钟 (900s) 内不重复推送
+            last_ts = self._last_alert_ts.get(code_str, 0.0)
+            if (now - last_ts) < 900.0:
+                return
 
-        # 标记为已播报提醒
+        # 标记为今日已播报提醒 (去重写入 SignalLedger)
         try:
             from ats.signal_ledger import get_signal_ledger
             get_signal_ledger().mark_notified_today(code_str, reason)
@@ -267,20 +278,51 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
         self._last_global_ts = now
         self._last_alert_ts[code_str] = now
+
+        item = {
+            'code': code_str,
+            'name': name,
+            'reason': reason,
+            'score': score,
+            'win_rate': win_rate,
+            'parent': parent,
+            'ts': now
+        }
+        self._notify_queue.append(item)
+        self._process_queue()
+
+    def _process_queue(self):
+        """串行轮播队列处理：前一个信号弹窗+语音播报完毕后再弹出下一个"""
+        if self._is_busy:
+            return
+        if not self._notify_queue:
+            self._is_busy = False
+            return
+
+        self._is_busy = True
+        item = self._notify_queue.popleft()
+
+        code_str = item['code']
+        name = item['name']
+        reason = item['reason']
+        score = item['score']
+        win_rate = item['win_rate']
+        parent = item['parent']
+
         self._last_notified_code = code_str
         self._last_parent = parent
 
         title = f"⭐ 黄金特异信号: {name} ({code_str})"
         message = f"【打分】: {score:.1f}分 | 【胜率】: {win_rate}\n【逻辑】: {reason}"
-        
-        logger.info(f"📢 [ALERT_NOTIFY] 触发特异黄金桌面/界面通知: {title} | {message}")
-        
-        # 1. 在当前屏幕/活跃窗口右上角弹出高分屏 HighDPI 自适应炫酷 Toast (100% 优雅美观且完美放大幅面)
+
+        logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str}]: {reason}")
+
+        # 1. 弹出右下角 Toast 卡片 (完全还原原始样式与固定位置)
         toast_success = False
-        if HAS_PYQT:
+        if HAS_PYQT and QApplication.instance():
             try:
                 target_p = parent if parent else QApplication.activeWindow()
-                InAppToastWidget(title, message, code=code_str, parent=target_p)
+                self._current_toast = InAppToastWidget(title, message, code=code_str, parent=target_p)
                 toast_success = True
             except Exception as e_toast:
                 logger.warning(f"InAppToastWidget failed: {e_toast}")
@@ -299,10 +341,37 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 )
             except Exception as e:
                 logger.warning(f"ShowMessage failed: {e}")
-                
-        # 3. 触发 TTS 语音播报 (绝对禁用 pyttsx3，基于项目标准 AlertManager 或 SAPI.SpVoice 独立 safe 子线程)
+
+        # 3. 触发语音播报
         voice_text = f"特异买点 {name}，{reason}"
         self._speak_text(voice_text)
+
+        # 4. 根据语音与内容自适应展示时长 (最小 4.5s，随文本长度平滑顺延)
+        display_sec = max(4.5, min(8.5, len(voice_text) * 0.32 + 1.2))
+        display_ms = int(display_sec * 1000)
+
+        if HAS_PYQT and QApplication.instance():
+            QTimer.singleShot(display_ms, self._on_current_item_finished)
+        else:
+            import threading
+            threading.Timer(display_sec, self._on_current_item_finished).start()
+
+    def _on_current_item_finished(self):
+        """当前信号展示与播报完成，关闭当前 Toast，并秒级切入下一个信号"""
+        if self._current_toast:
+            try:
+                self._current_toast.close()
+            except Exception:
+                pass
+            self._current_toast = None
+
+        self._is_busy = False
+
+        # 延迟 300ms 顺畅弹出下一个轮播信号
+        if HAS_PYQT and QApplication.instance():
+            QTimer.singleShot(300, self._process_queue)
+        else:
+            self._process_queue()
 
     def _speak_text(self, text: str):
         """标准 safe 子线程语音播报：基于 AlertManager / SAPI.SpVoice，绝对不与 Tk/Qt/Vis 冲突"""
