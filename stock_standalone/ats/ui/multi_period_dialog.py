@@ -732,9 +732,10 @@ class MultiPeriodStrategyEditorDialog(QDialog):
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
                     splitter_saved = cfg.get("editor_splitter_qt")
+                    restored = False
                     if splitter_saved:
-                        self.splitter.restoreState(QByteArray.fromHex(splitter_saved.encode('utf-8')))
-                    if "editor_splitter_sizes" in cfg:
+                        restored = self.splitter.restoreState(QByteArray.fromHex(splitter_saved.encode('utf-8')))
+                    if not restored and "editor_splitter_sizes" in cfg:
                         sizes = cfg["editor_splitter_sizes"]
                         if isinstance(sizes, list) and len(sizes) == 2 and sum(sizes) > 0:
                             self.splitter.setSizes(sizes)
@@ -769,6 +770,7 @@ class MultiPeriodStrategyEditorDialog(QDialog):
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.splitterMoved.connect(lambda *args: self._save_geometry())
         main_layout.addWidget(self.splitter)
 
         # ── Left Pane: Strategy List ──
@@ -2539,8 +2541,9 @@ class MultiPeriodDialog(QDialog, WindowMixin):
                     with open(self.config_file, 'r', encoding='utf-8') as f:
                         cfg = json.load(f)
 
+                skip_editor_keys = {"editor_geometry_qt", "editor_splitter_qt", "editor_splitter_sizes", "editor_is_maximized"}
                 for k, v in self.ui_state.items():
-                    if k != "editor_geometry_qt":
+                    if k not in skip_editor_keys:
                         cfg[k] = v
 
                 os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
