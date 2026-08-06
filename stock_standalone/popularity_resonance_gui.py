@@ -194,7 +194,7 @@ class PRServiceGUI:
         self.sync_manager = _DynamicIPCSyncProxy(self)
         
         # 启动后后台延迟发起一次动态端口 IPC 数据同步 (按需获取且不常驻占用)
-        threading.Thread(target=self.request_dynamic_ipc_sync, kwargs={'timeout': 2.0}, daemon=True).start()
+        threading.Thread(target=self.request_dynamic_ipc_sync, kwargs={'timeout': 8.0}, daemon=True).start()
         
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
@@ -874,7 +874,7 @@ class PRServiceGUI:
         except Exception:
             return 26685
 
-    def request_dynamic_ipc_sync(self, timeout=1.8):
+    def request_dynamic_ipc_sync(self, timeout=8.0):
         """自动刷新或更新数据时，开启动态端口向主程序拉取全量行情数据包，接收解包完后即刻物理关闭释放端口"""
         if getattr(self, '_ipc_sync_in_progress', False):
             return self.get_current_df()
@@ -910,7 +910,7 @@ class PRServiceGUI:
                     if df_got is not None and not df_got.empty:
                         with self.df_lock:
                             self.current_df = df_got
-                        service_logger.info(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据，即刻释放端口")
+                        service_logger.info(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据 (耗时 {time.time()-start_t:.2f}s)，即刻释放端口")
                         break
                 time.sleep(0.1)
         except Exception as e:
@@ -2076,7 +2076,7 @@ class PRServiceGUI:
         try:
             # 💥 自动使用 IPC 动态端口同步拉取最新行情数据包，完事即刻物理释放端口
             service_logger.info("正在通过 IPC 动态端口同步请求最新行情数据...")
-            self.request_dynamic_ipc_sync(timeout=1.8)
+            self.request_dynamic_ipc_sync(timeout=8.0)
 
             today = time.strftime("%Y-%m-%d")
             # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期

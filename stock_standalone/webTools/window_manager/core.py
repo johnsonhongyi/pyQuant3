@@ -1673,14 +1673,16 @@ class AcerPerformanceController:
             import time
 
             # 0. 精准探测【唤起前系统是否存在前台 UI 进程 PredatorSense.exe】
-            # 必须精确匹配 predatorsense.exe，严格排除后台系统服务 PSSvc.exe / PredatorSenseService.exe 等！
+            # 必须在 ensure_predatorsense_daemon 之前前置检测，严格精准匹配 predatorsense.exe！
             is_cold_start = True
+            ps_create_time = 0
             try:
                 import psutil
-                for p in psutil.process_iter(['name']):
+                for p in psutil.process_iter(['name', 'create_time']):
                     p_name = (p.info['name'] or '').lower()
                     if p_name == 'predatorsense.exe':
                         is_cold_start = False
+                        ps_create_time = p.info.get('create_time', 0)
                         break
             except Exception:
                 pass
@@ -1691,18 +1693,23 @@ class AcerPerformanceController:
             app_aumid = r"shell:AppsFolder\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!CentenialConvert"
             main_hwnd = None
 
-            # 2. 如果属于【无进程冷启动】，调起后先直接挂起 5.5 秒等待 6 秒 Splash 开场动画播完
+            # 2. 如果属于无进程冷启动，或者进程创建时间小于 6.5s (仍在播开场动画)，强行挂起等待 6.8s 动画播完
+            now_t = time.time()
             if is_cold_start:
                 subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
-                time.sleep(5.5)
+                time.sleep(6.8)
+            elif ps_create_time > 0 and (now_t - ps_create_time) < 6.5:
+                # 进程刚由系统拉起还在播动画，补齐动画剩余时长
+                remain_anim = max(0.5, 6.8 - (now_t - ps_create_time))
+                time.sleep(remain_anim)
 
             # 3. 针对开机延迟/系统卡顿的【多轮探查与窗口捕获】
             for retry_round in range(3):
                 if not is_cold_start or retry_round > 0:
                     subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
 
-                # 每轮等待探查窗口 (最长 6 秒)
-                for _ in range(30):
+                # 每轮等待探查窗口 (最长 13.5 秒)
+                for _ in range(45):
                     def enum_cb(hwnd, extra):
                         nonlocal main_hwnd
                         title = win32gui.GetWindowText(hwnd)
@@ -1719,12 +1726,12 @@ class AcerPerformanceController:
                         win32gui.ShowWindow(main_hwnd, win32con.SW_RESTORE)
                         win32gui.SetForegroundWindow(main_hwnd)
                         if is_cold_start:
-                            time.sleep(0.8) # 冷启动最后 0.8s 界面平滑沉淀
+                            time.sleep(1.2) # 冷启动最后 1.2s 界面平滑沉淀
                         else:
-                            time.sleep(0.3) # 热唤醒 0.3s 极速响应
+                            time.sleep(0.4) # 热唤醒 0.4s 极速响应
                         win32gui.SetForegroundWindow(main_hwnd)
                         break
-                    time.sleep(0.2)
+                    time.sleep(0.3)
 
                 if main_hwnd:
                     break

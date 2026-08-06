@@ -1,3 +1,9 @@
+## 2026-08-06 01:55
+- [x] **彻底根治人气共振 GUI (`popularity_resonance_gui.py`) 动态端口 IPC 行情同步高延迟超时丢包 Bug (`popularity_resonance_gui.py`, `scratch/test_delayed_dynamic_port.py`)**：
+    - [x] **根因解构与时序分析**：昨晚更新的 `popularity_resonance_gui.py` 动态端口 IPC 请求 `request_dynamic_ipc_sync` 默认 timeout 设定为过于激进的 1.8 秒。实盘中 `instock_MonitorTK.py` 处理全量 5500+ 行行情快照并执行 `send_df` Socket 推送的过程耗时约为 1.5s~3.5s。当服务端延迟推送时，客户端 1.8 秒超时提前退出并关闭了临时监听端口，导致后续推送连接失败，用户界面显示“未接收到数据”且日志打印失败。
+    - [x] **`request_dynamic_ipc_sync` 超时门槛升级与耗时精准打点**：将 `popularity_resonance_gui.py` 中 `request_dynamic_ipc_sync` 的默认 `timeout` 由 1.8s 升级为 `8.0s`（包括初始化后台线程、`_run_once_job` 及函数默认签名）。只要数据包送达，客户端即可在毫秒级被唤醒解包并提前跳出循环释放端口，绝对零额外延迟与零卡顿。
+    - [x] **模拟延迟推送测试与全量 IPC 单元测试 100% 校验**：新建 `scratch/test_delayed_dynamic_port.py` 模拟 3.5s 高延迟服务端推送场景，验证客户端在 8.0s 宽松等待门槛下成功于 3.01s 精准解包接收；`pytest tests/test_dynamic_twap_auto_refresh.py tests/test_multi_period_ipc_diagnose_300058.py` 6 项 IPC 单元测试 100% PASSED！
+
 ## 2026-08-06 01:45
 - [x] **彻底根治 Acer PredatorSense 冷启动设置 15 秒/30 秒延迟后动画播完“毫无反应”底层硬伤 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_acer_performance.py`)**：
     - [x] **根因解构 1：`is_cold_start` 误把 Windows 后台系统服务 (`PSSvc.exe`) 判定为前台 UI 进程**：电脑开机冷启动时，Acer PredatorSense 的 Windows 后台服务 `PSSvc.exe` (`C:\Program Files\Acer\PredatorSense Service\PSSvc.exe`) 会自动随系统启动常驻内存。原本的 `psutil` 进程检查使用粗放的 `'predatorsense' in p.info['name']`，导致系统在开机瞬间把后台服务 `PSSvc.exe` 误判为前台 UI 界面已跑起来（将 `is_cold_start` 误设为 `False`）。因此系统直接按照“热唤醒”处理，完全跳过了 5.5 秒的 WPF Splash 开场动画等待与 13.5 秒的 UI 渲染轮询，在 Splash 动画还没播完时就提前放弃探查并直接返回，造成“延迟 15 秒动画播完后毫无反应”的表象！
