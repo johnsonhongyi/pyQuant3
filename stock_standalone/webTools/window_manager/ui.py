@@ -1706,18 +1706,17 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
             self.log(f"[Route Startup] {self.startup_route_msg}")
             
-        # 自动探测与在后台应用 Acer 硬件性能模式配置
+        # 自动探测与在后台应用 Acer 硬件性能模式配置 (结合 startup_delay_seconds 秒数延迟与异步线程)
         try:
             acer_cfg = self.config_manager.get_acer_performance_config()
             if acer_cfg.get("auto_apply_on_startup", True):
-                controller = core.AcerPerformanceController()
-                if controller.is_supported():
-                    ok, acer_msg = controller.apply_performance_profile(acer_cfg)
-                    self.log(f"[Acer Hardware] 启动自动调度性能模式: {acer_msg}")
-                else:
-                    self.log("[Acer Hardware] 设备无 Acer WMI 支持，静默跳过性能调优")
+                startup_delay = int(acer_cfg.get("startup_delay_seconds", 3))
+                delay_ms = max(0, startup_delay * 1000)
+                if startup_delay > 0:
+                    self.log(f"⏳ [AutoStart] 启动延迟引擎已就绪，将在 {startup_delay} 秒后自动调度应用 Acer 性能模式...")
+                QtCore.QTimer.singleShot(delay_ms, lambda: self.apply_acer_performance_async(acer_cfg, custom_msg_prefix="启动自动调度性能模式"))
         except Exception as e:
-            logger.error(f"启动自动应用 Acer 性能模式异常: {e}")
+            logger.error(f"启动自动应用 Acer 性能模式初始化异常: {e}")
 
             
         # 允许驻留后台
@@ -1777,12 +1776,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def setup_tray_icon(self):
         """初始化系统托盘图标及右键快捷控制菜单"""
-        self.tray_icon = QtWidgets.QSystemTrayIcon(self)
+        self.tray_icon = QtWidgets.QSystemTrayIcon(QApplication.instance())
         self.tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
         
         self.tray_menu = QtWidgets.QMenu(self)
         show_action = self.tray_menu.addAction("🖥️ 显示主界面")
-        show_action.triggered.connect(self.showNormal)
+        show_action.triggered.connect(self._force_show_and_top)
         
         # 🚀 Acer 硬件性能控制快捷右键菜单
         try:
@@ -1965,6 +1964,34 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         else:
             self._force_show_and_top()
             
+    def _hide_tray_message_window(self):
+        """物理将 QTrayIconMessageWindow 原生遮罩窗口移出屏幕外部(-10000, -10000)并强行隐蔽，彻底消灭白屏遮罩"""
+        try:
+            import win32gui, win32con
+            def _kill_tray_wnd(hwnd, _):
+                if win32gui.IsWindow(hwnd):
+                    title = win32gui.GetWindowText(hwnd) or ""
+                    cls = win32gui.GetClassName(hwnd) or ""
+                    if "QTrayIconMessageWindow" in title or "QTrayIconMessageWindow" in cls:
+                        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+                        win32gui.SetWindowPos(hwnd, 0, -10000, -10000, 0, 0,
+                                            win32con.SWP_HIDEWINDOW | win32con.SWP_NOACTIVATE | win32con.SWP_NOZORDER)
+                return True
+
+            main_hwnd = int(self.winId()) if hasattr(self, 'winId') and self.winId() else 0
+            if main_hwnd:
+                try:
+                    win32gui.EnumChildWindows(main_hwnd, _kill_tray_wnd, None)
+                except Exception:
+                    pass
+            win32gui.EnumWindows(_kill_tray_wnd, None)
+        except Exception:
+            pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._hide_tray_message_window()
+
     def _force_show_and_top(self):
         # 1. 无论在托盘还是任务栏最小化，均强制拉起显示
         self.show()
@@ -1973,11 +2000,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         else:
             self.showNormal()
 
-        # 2. 提升视窗层级并抢占 Qt 激活焦点
+        # 2. 隐蔽 Qt 内部生成的 QTrayIconMessageWindow 原生遮罩窗口，彻底消除白板遮罩
+        self._hide_tray_message_window()
+
+        # 3. 提升视窗层级并抢占 Qt 激活焦点
         self.raise_()
         self.activateWindow()
 
-        # 3. 强制 Qt 绘图引擎与事件队列立刻刷新并重绘界面，彻底消除白板无响应现象
+        # 4. 强制 Qt 绘图引擎与事件队列立刻刷新并重绘界面，彻底消除白板无响应现象
         try:
             self.update()
             self.repaint()
@@ -1985,7 +2015,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception:
             pass
 
-        # 4. 使用底层 Win32 API 强制夺取 Windows 系统前台焦点
+        self._hide_tray_message_window()
+
+        # 5. 使用底层 Win32 API 强制夺取 Windows 系统前台焦点
         try:
             import ctypes
             hwnd = int(self.winId())
@@ -1996,7 +2028,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception:
             pass
 
-        # 5. 激活前台后自动同步检测桌面位置状态
+        # 6. 激活前台后自动同步检测桌面位置状态
         self.detect_and_refresh_state()
 
             
