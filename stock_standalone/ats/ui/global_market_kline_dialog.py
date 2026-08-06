@@ -1915,18 +1915,17 @@ class GlobalMarketKLineDialog(QDialog):
 
 
     def _update_data_source_btn_style(self):
-        """根据当前的 data_source 动态更新数据源按键高亮样式"""
+        """根据当前的 data_source 动态更新数据源按键高亮样式 (自适应文字宽度，与顶栏其他按钮一致)"""
         src = (self.data_source or 'yahoo').lower()
         active_style = """
             QPushButton {
                 background-color: #2962ff;
                 color: #ffffff;
                 border: 1px solid #00F0FF;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 90px;
             }
         """
         normal_style = """
@@ -1934,10 +1933,9 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #1e222d;
                 color: #787b86;
                 border: 1px solid #363c4e;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
-                min-width: 80px;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
             }
             QPushButton:hover {
                 background-color: #2a2e39;
@@ -2785,9 +2783,9 @@ class GlobalMarketKLineDialog(QDialog):
                 if mode in ['candlestick', 'ohlc']:
                     self.chart_mode = mode
                     if mode == 'ohlc':
-                        self.btn_mode_toggle.setText("🕯️ 切换 蜡烛图(K线)")
+                        self.btn_mode_toggle.setText("🕯️ 蜡烛图(K线)")
                     else:
-                        self.btn_mode_toggle.setText("📊 切换 OHLC(美国线)")
+                        self.btn_mode_toggle.setText("📊 OHLC(美国线)")
                 boll = data.get("ats_global_kline_dialog_boll")
                 if boll is not None:
                     self.show_boll = bool(boll)
@@ -2888,11 +2886,19 @@ class GlobalMarketKLineDialog(QDialog):
         QTimer.singleShot(80, self._auto_fit_y_range)
 
     def closeEvent(self, event):
-        """关闭事件，自动隐藏浮窗并持久化配置与尺寸"""
+        """关闭事件：自动隐藏浮窗、持久化配置与尺寸，并将内存脏 K 线数据原子落盘"""
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
             self.kline_detail_win.hide()
         self._save_settings()
+        # 关闭时统一触发脏数据落盘，确保当次抓取到的 K 线数据不丢失
+        try:
+            from JSONData.global_market_data import flush_kline_disk_cache
+            flush_kline_disk_cache('yahoo', force=False)
+            flush_kline_disk_cache('sina', force=False)
+        except Exception:
+            pass
         super().closeEvent(event)
+
 
     def _update_proxy_btn_style(self):
         """更新 🌐 代理: 开/关 按键高亮与显示文本"""

@@ -25,7 +25,7 @@ from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_AC
 
 
 class GlobalMarketWorker(QThread):
-    """后台异步抓取/更新外盘行情 worker"""
+    """后台异步抓取/更新外盘行情 worker (支持并发批量全量外盘 K 线重构与实时数据更新)"""
     finished_signal = pyqtSignal(dict, float, str, dict, dict) # quotes, score, label, sector_boosts, metadata
 
     def __init__(self, force_refresh: bool = False, parent=None):
@@ -39,18 +39,41 @@ class GlobalMarketWorker(QThread):
                 get_global_sentiment_score,
                 get_sector_global_boost,
                 get_global_market_quotes_metadata,
-                fetch_symbol_financial_news
+                fetch_symbol_financial_news,
+                fetch_global_kline_history,
+                save_klines_to_disk_cache,
+                log_market_msg
             )
+            import concurrent.futures
 
             quotes = fetch_global_market_quotes(force_refresh=self.force_refresh)
             score, label = get_global_sentiment_score()
             meta = get_global_market_quotes_metadata()
             meta['force_refresh'] = self.force_refresh
 
-            # 若强制刷新，同步预刷新自选热榜新闻
+            # ⚡ 核心功能强化：如果触发强制实时刷新 (force_refresh=True)，执行全量 16 大外盘核心品种 K 线与新闻批量在线重构更新！
             if self.force_refresh:
+                from JSONData.global_market_data import flush_kline_disk_cache
+                batch_symbols = ['A50', 'USDCNH', 'OIL', 'BRENT', 'GOLD', 'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ']
+                
+                def _refresh_symbol_kline(sym):
+                    try:
+                        fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='yahoo')
+                    except Exception as ex:
+                        log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} K线异常: {ex}")
+
+                # 使用线程池并发 6 线程批量全量抓取更新 K 线
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                    executor.map(_refresh_symbol_kline, batch_symbols)
+
+                # ⚡ 16 大标的加载完成后，一次性统一批量落盘保存！(单次物理文件 IO，绝对零多线程踩踏)
+                flush_kline_disk_cache('yahoo', force=True)
+
+
+                # 预刷新自选热榜新闻
                 try:
                     fetch_symbol_financial_news('A50', '富时A50', force_refresh=True)
+                    fetch_symbol_financial_news('NVDA', '英伟达', force_refresh=True)
                 except Exception:
                     pass
 
@@ -400,10 +423,10 @@ class GlobalMarketPanel(QWidget):
         active_time = is_market_active_time()
 
         if is_live:
-            if changed_syms:
+            if is_force:
+                status_str = f"✅ 强制全量实时刷新成功 ({q_count} 项实时点位 + 16 外盘品种 K 线同步重构写盘)"
+            elif changed_syms:
                 status_str = f"✅ 网络在线抓取成功 ({q_count} 项, {', '.join(changed_syms[:3])} 等最新价变动)"
-            elif is_force:
-                status_str = f"✅ 手动强制刷新完成 (已是最新 {q_count} 项数据)"
             else:
                 status_str = f"✅ 网络在线更新 ({q_count} 项数据集)"
             self.lbl_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; margin-left: 8px;")
@@ -422,6 +445,14 @@ class GlobalMarketPanel(QWidget):
 
         # 4. 更新板块 Boost 看板
         self._update_boosts_table(boosts)
+
+        # 5. ⚡ 若外盘 K 线走势弹窗处于打开状态，同步调起其内部 K 线全量刷新！
+        from PyQt6.sip import isdeleted
+        if hasattr(self, "_kline_dialog") and self._kline_dialog and not isdeleted(self._kline_dialog) and self._kline_dialog.isVisible():
+            try:
+                self._kline_dialog._trigger_async_load(force_refresh=is_force)
+            except Exception as ex:
+                print(f"[GlobalMarketPanel] Sync refresh kline dialog error: {ex}")
 
     def _update_cards(self, quotes: dict):
         if not quotes:

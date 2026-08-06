@@ -4172,6 +4172,16 @@ class ATSMainWindow(QMainWindow):
             except Exception as ex:
                 print(f"[ATSMainWindow] 程序退出保存信号快照异常: {ex}")
 
+        # 4.6 外盘 K 线内存脏数据统一原子落盘 (彻底确保退出时 K 线缓存不丢失)
+        try:
+            from JSONData.global_market_data import flush_kline_disk_cache
+            flush_kline_disk_cache('yahoo', force=False)
+            flush_kline_disk_cache('sina', force=False)
+            print("[ATSMainWindow] 外盘 K 线脏数据已成功原子落盘持久化!")
+        except Exception as ex:
+            print(f"[ATSMainWindow] 外盘 K 线落盘异常 (非致命): {ex}")
+
+
         # 5. 关闭散落的行情分布弹窗、搜索历史与辅助对话框
         try:
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_close_all_dialogs'):

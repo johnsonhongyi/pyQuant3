@@ -23,6 +23,7 @@ import urllib.request
 import json
 import os
 import re
+import threading
 
 # 全局缓存与锁
 _global_cache = {
@@ -36,8 +37,15 @@ _global_cache = {
 CACHE_TTL = 1800.0
 
 
-# 记录每个 (symbol, source_key) 上次网络在线抓取的时间戳，防止短时间重复网络请求
+# ⚡ Tier 1: 内存 (RAM) 级别 K线分级 Cache, 脏标志, 并发请求去重 set 与线程安全互斥锁
+# Key: (symbol_upper, source_key) -> {'klines': list, 'fetch_ts': float}
+_KLINE_RAM_CACHE = {}
+_KLINE_CACHE_LOCK = threading.Lock()
+_KLINE_DIRTY_FLAGS = {'yahoo': False, 'sina': False}
+_KLINE_IN_FLIGHT = set()
 _kline_fetch_timestamps = {}
+
+
 
 
 def get_global_market_log_enabled() -> bool:
@@ -190,23 +198,29 @@ _load_disk_cache()
 
 
 def is_market_active_time() -> bool:
-    """判断当前时间是否处于外盘/美股活跃交易窗口
-    - 周末 (周六 05:00 - 周一 20:00): 美股休市非交易日，绝对无新收盘数据，零网络请求！
-    - 工作日: 20:00 - 05:00 属于美股盘前/盘中/盘后活跃窗口
+    """判断当前时间是否处于外盘/美股活跃交易窗口 (盘前 16:00 -> 盘中 -> 盘后 08:00)
+    - 周末 (周六 08:00 - 周一 16:00): 美股休市非交易日，绝对无新收盘数据，零网络请求！
+    - 工作日白天 (08:00 - 16:00): 美股全盘闭市非交易时段，零网络请求！
+    - 工作日盘前/盘中/盘后 (16:00 - 08:00 次日): 外盘活跃交易窗口
     """
     now = datetime.datetime.now()
     weekday = now.weekday()
     hour = now.hour
 
-    # 周六 05:00 以后 -> 周日整天 -> 周一 20:00 前: 美股休市非交易日
-    if weekday == 5 and hour >= 5:
+    # 周六 08:00 以后 -> 周日整天 -> 周一 16:00 前: 美股休市非交易日
+    if weekday == 5 and hour >= 8:
         return False
     if weekday == 6:
         return False
-    if weekday == 0 and hour < 20:
+    if weekday == 0 and hour < 16:
+        return False
+
+    # 工作日白天 08:00 至 16:00: 美股全盘闭市，绝无新日K线数据，零网络请求
+    if weekday in (0, 1, 2, 3, 4) and 8 <= hour < 16:
         return False
 
     return True
+
 
 
 # ---------------- 跨时区与目标市场日历安全处理模块 ----------------
@@ -318,12 +332,35 @@ def is_target_market_session_open(symbol: str) -> bool:
 
 def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
     """安全清洗与校验 K 线序列，严格剥离剔除任何 > 目标市场当前日期的穿越/未来 Bar 及数量级离群脏数据"""
-    if not klines:
+    if not klines or not symbol:
         return []
 
-    target_today = get_target_market_date_str(symbol)
+    sym_u = symbol.strip().upper()
+    target_today = get_target_market_date_str(sym_u)
     sanitized = []
     seen_dates = set()
+
+    # 🛡️ 核心物理数值门槛: 防范美金与人民币内盘混存 (如 OIL 美原油 $75 vs 国内 sc0 500RMB)
+    EXPECTED_RANGES = {
+        'AAPL': (100.0, 450.0),
+        'MSFT': (200.0, 750.0),
+        'NVDA': (20.0, 400.0),
+        'GOOGL': (50.0, 350.0),
+        'AMZN': (50.0, 350.0),
+        'META': (100.0, 1000.0),
+        'TSLA': (50.0, 700.0),
+        'MU': (20.0, 300.0),
+        'SOXX': (100.0, 500.0),
+        'QQQ': (150.0, 800.0),
+        'OIL': (15.0, 180.0),      # 美原油 $15~$180/桶 (彻底剥离 >200 的 sc0 人民币)
+        'BRENT': (15.0, 180.0),    # 布伦特 $15~$180/桶
+        'GOLD': (800.0, 4500.0),   # 美黄金 $800~$4500/盎司 (彻底剥离 <800 的 au0 人民币/克)
+        'XAUUSD': (800.0, 4500.0),
+        'SILVER': (8.0, 100.0),
+        'A50': (5.0, 40.0),
+        'USDCNH': (4.0, 10.0),
+    }
+    min_p, max_p = EXPECTED_RANGES.get(sym_u, (0.001, 100000.0))
 
     for item in klines:
         if not isinstance(item, dict):
@@ -342,6 +379,10 @@ def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
         if c_val <= 0:
             continue
 
+        # 绝对物理区间校验 (拦截非同单位脏数据)
+        if not (min_p <= c_val <= max_p):
+            continue
+
         if d_str not in seen_dates:
             seen_dates.add(d_str)
             item_copy = dict(item)
@@ -355,7 +396,7 @@ def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
     # 按日期升序排列
     sanitized.sort(key=lambda x: x['date'])
 
-    # 🛡️ 核心数量级护盾：根据中位数过滤离群脏 Bar (防 14943.97 点位与 16.98 港元混存拉爆 Y 轴)
+    # 🛡️ 相对数量级护盾：根据中位数过滤离群脏 Bar (防 14943.97 点位与 16.98 港元混存拉爆 Y 轴)
     valid_closes = [k['close'] for k in sanitized if k['close'] > 0]
     if valid_closes:
         sorted_closes = sorted(valid_closes)
@@ -381,6 +422,7 @@ def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
             prev_c = c
 
     return sanitized
+
 
 
 def clean_all_disk_kline_caches():
@@ -838,24 +880,18 @@ def get_kline_cache_file_path() -> str:
 
 def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: bool = False, data_source: str = 'yahoo') -> list:
     """抓取与获取重点外盘资产 (如 NVDA, AAPL, MSFT, MU, A50, OIL, GOLD 等) 的近 120 日 K 线数据
-    支持物理磁盘 JSON 独立隔离持久化 (global_market_klines_yahoo.json / global_market_klines_sina.json)
+    支持分级 Cache (Tier 1 RAM 内存快照 -> Tier 2 磁盘物理 JSON -> Tier 3 网络)
     支持 'yahoo' (Yahoo Finance 权威连续) 与 'sina' (新浪财经) 两种数据源自定与自动降级
     """
     sym_upper = symbol.strip().upper()
     source_key = (data_source or 'yahoo').lower()
+    fetch_key = (sym_upper, source_key)
     cache_path = get_kline_cache_file_path().replace(".json", f"_{source_key}.json")
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    now_ts = time.time()
+    active_time = is_market_active_time()
 
-    # 1. 尝试从当前数据源对应的磁盘物理持久化文件加载
-    all_cache = {}
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                all_cache = json.load(f)
-        except Exception:
-            all_cache = {}
-
-    existing_klines = all_cache.get(sym_upper, [])
+    # 1. 冷却门槛算定: 交易活跃期 300s (5min)；非交易期 (如白天盘后/闭市) 14400s (4小时) 避免无谓网络请求
+    cooldown_sec = 300.0 if active_time else 14400.0
 
     def merge_kline_sequences(old_list: list, new_list: list) -> list:
         """根据 'date' 唯一键将新老 K 线序列进行增量合并与去重，按日期升序重排，严格防范跨时区穿越数据"""
@@ -902,16 +938,13 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         last_close = float(last_item.get('close', 0))
 
         # 🛡️ 核心数量级安全控制：判断 rt_price 与 last_close 是否属于同一数量级
-        # (例如 A50 新浪实时 API 给出 14943 点，而 Yahoo K 线收盘价为 17.16 港元，ratio 为 870 倍)
         effective_price = rt_price
         if last_close > 0:
             ratio = rt_price / last_close
             if ratio > 3.0 or ratio < 0.33:
-                # 数量级冲突！按照涨跌百分比算同数量级下的合理点位，绝不将 14943 点误写入 17 港币收盘价中！
                 effective_price = round(last_close * (1.0 + rt_pct / 100.0), 2)
         
         if last_date == target_today_str:
-            # 只有在目标市场今天已开盘且有最新点位时，更新今日 K 线
             last_item['close'] = round(effective_price, 2)
             last_item['pct'] = round(rt_pct, 2)
             high_p = float(last_item.get('high', effective_price))
@@ -922,12 +955,9 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 last_item['low'] = round(effective_price, 2)
             klines_copy[-1] = last_item
         else:
-            # 当 last_date < target_today_str 时:
-            # 核心卫士：只有在【目标市场当前处于交易盘中/已开盘活跃期】时，才追加 target_today_str 实时 Bar！
             if not session_open:
                 return klines_copy
             
-            # 检查从 last_date 到 target_today 之间是否有中间缺失的交易日 (周一至周五)
             try:
                 dt_last = datetime.datetime.strptime(last_date, '%Y-%m-%d')
                 dt_today = datetime.datetime.strptime(target_today_str, '%Y-%m-%d')
@@ -951,13 +981,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             except Exception:
                 pass
             
-            # 追加目标市场今日最新实时 Bar
             prev_close = float(klines_copy[-1].get('close', effective_price))
             rt_open = float(rt.get('open', 0))
             rt_high = float(rt.get('high', 0))
             rt_low = float(rt.get('low', 0))
 
-            # 校验开盘价逻辑: 优先选真实开盘价 rt_open，如无开盘价则以昨日收盘价 prev_close 为平开锚点，绝对防范误推算
             if rt_open > 0 and prev_close > 0 and 0.5 <= (rt_open / prev_close) <= 2.0:
                 open_p = rt_open
             else:
@@ -979,24 +1007,45 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         
         return klines_copy
 
-    fetch_key = (sym_upper, source_key)
-    now_ts = time.time()
-    last_fetch_ts = _kline_fetch_timestamps.get(fetch_key, 0.0)
-    elapsed = now_ts - last_fetch_ts
+    # ⚡ Tier 1 & Tier 2 分级 Cache 判定 (线程安全)
+    existing_klines = []
+    with _KLINE_CACHE_LOCK:
+        ram_entry = _KLINE_RAM_CACHE.get(fetch_key)
+        if ram_entry and ram_entry.get('klines'):
+            ram_ts = ram_entry.get('fetch_ts', 0.0)
+            elapsed_ram = now_ts - ram_ts
+            if force_refresh and (elapsed_ram < 30.0 or not active_time) and len(ram_entry['klines']) >= 5:
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [RAM-Cache] 触发 30s 防抖锁/非交易期保护 ({elapsed_ram:.1f}s 前): 复用 [{source_key}] 内存 K线 -> {sym_upper}")
+                return append_realtime_bar_if_needed(sym_upper, ram_entry['klines'])[-limit:]
+            elif not force_refresh and (elapsed_ram < cooldown_sec or not active_time) and len(ram_entry['klines']) >= 5:
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [RAM-Cache] 命中 {cooldown_sec:.0f}s 分级冷却锁 ({elapsed_ram:.1f}s < {cooldown_sec:.0f}s): 瞬间复用 [{source_key}] 内存 K线 ({len(ram_entry['klines'])} 条) -> {sym_upper}")
+                return append_realtime_bar_if_needed(sym_upper, ram_entry['klines'])[-limit:]
 
-    # 1. 显式 force_refresh 30 秒硬防抖，防止高频密集点击或切换 code 触发重复请求
-    if force_refresh and elapsed < 30.0 and existing_klines and len(existing_klines) >= 5:
-        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 触发 30s 密集刷新防抖锁 (上次抓取于 {elapsed:.1f}s 前): 复用 [{source_key}] 本地 K线缓存 -> {sym_upper}")
-        return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
+        # Tier 2: 磁盘 Cache 加载与 mtime 恢复
+        all_cache = {}
+        file_mtime = 0.0
+        if os.path.exists(cache_path):
+            try:
+                file_mtime = os.path.getmtime(cache_path)
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    all_cache = json.load(f)
+            except Exception:
+                all_cache = {}
 
-    # 2. 正常读取: 动态梯度冷却锁 (美股/外盘交易活跃期 300s/5min，非交易期 900s/15min)
-    cooldown_sec = 300.0 if is_market_active_time() else 900.0
-    if not force_refresh and elapsed < cooldown_sec and existing_klines and len(existing_klines) >= 5:
-        log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 命中 {cooldown_sec:.0f}s 动态梯度冷却锁 ({elapsed:.1f}s < {cooldown_sec:.0f}s): 瞬间复用 [{source_key}] 本地物理 K线缓存 ({len(existing_klines)} 条) -> {sym_upper}")
-        return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
+        existing_klines = all_cache.get(sym_upper, [])
+        if existing_klines and len(existing_klines) >= 5:
+            _KLINE_RAM_CACHE[fetch_key] = {'klines': existing_klines, 'fetch_ts': file_mtime}
+            elapsed_file = now_ts - file_mtime
+            if force_refresh and (elapsed_file < 30.0 or not active_time):
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [Disk-Cache] 触发 30s 防抖锁/非交易期保护 (修改于 {elapsed_file:.1f}s 前): 复用 [{source_key}] 磁盘 K线 -> {sym_upper}")
+                return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
 
-    # 更新本次网络抓取时间戳锁
-    _kline_fetch_timestamps[fetch_key] = now_ts
+            elif not force_refresh and (elapsed_file < cooldown_sec or not active_time):
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [Disk-Cache] 命中 {cooldown_sec:.0f}s 磁盘分级冷却锁 (修改于 {elapsed_file:.1f}s 前): 瞬间复用 [{source_key}] 磁盘 K线 ({len(existing_klines)} 条) -> {sym_upper}")
+                return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
+
+        _KLINE_RAM_CACHE[fetch_key] = {'klines': existing_klines, 'fetch_ts': now_ts}
+
     log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # Helper: 尝试抓取 Yahoo 源
@@ -1011,41 +1060,20 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         }
         yahoo_sym = yahoo_symbol_map.get(sym_upper, sym_upper)
         
-        # 优先使用 query2.finance.yahoo.com 节点，兼容 query1
         hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'Referer': 'https://finance.yahoo.com',
         }
         
         for host in hosts:
-            url = f"https://{host}/v8/finance/chart/{yahoo_sym}?range=7mo&interval=1d&includePrePost=false"
+            url = f"https://{host}/v8/finance/chart/{yahoo_sym}?range=1y&interval=1d&includePrePost=false"
             try:
                 req = urllib.request.Request(url, headers=headers)
-                raw = None
-                import ssl
-                ctx = ssl._create_unverified_context()
                 opener = get_urllib_request_opener()
-                if opener:
-                    try:
-                        with opener.open(req, timeout=6.0) as resp:
-                            raw = resp.read().decode('utf-8')
-                    except Exception as ex_proxy:
-                        cfg_p = get_proxy_config()
-                        if cfg_p.get("enabled"):
-                            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 代理请求 Yahoo ({host}) 异常 ({ex_proxy})，尝试直连...")
-                        else:
-                            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 首选直连请求 Yahoo ({host}) 异常 ({ex_proxy})，尝试备用网络重试...")
-                if not raw:
-                    try:
-                        with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
-                            raw = resp.read().decode('utf-8')
-                    except Exception:
-                        open_noprimary = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                        with open_noprimary.open(req, timeout=5.0) as resp:
-                            raw = resp.read().decode('utf-8')
-
+                with opener.open(req, timeout=5.0) as resp:
+                    raw = resp.read().decode('utf-8')
                 if not raw:
                     continue
                 data = json.loads(raw)
@@ -1081,9 +1109,6 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} Yahoo 源在线抓取异常 {sym_upper}: 所有 Host 节点无有效数据响应")
         return []
 
-    # Helper: 腾讯极速免代理直连源 (国内 10ms 零延迟免代理)
-    # 注意: 腾讯对部分 ETF/特殊品种 (如 SOXX/QQQ/META) 只返回 1~2 条最新数据，
-    #       不满足历史 K 线最低门槛，需用 >= 5 守卫防止假成功
     MIN_KLINES = 5
 
     def _fetch_from_tencent() -> list:
@@ -1104,7 +1129,6 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 prev_c = None
                 for item in klines:
                     if isinstance(item, list) and len(item) >= 5:
-                        # 腾讯格式: [date, close, open, high, low, volume]
                         d = str(item[0])
                         c = float(item[1])
                         o = float(item[2])
@@ -1115,8 +1139,6 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                # [BUGFIX] 腾讯对 ETF/部分品种只返回 1~2 条最新 K 线，不满足历史最低门槛
-                # 必须 >= MIN_KLINES 才视为成功，否则降级到 Sina/Yahoo
                 if len(parsed) >= MIN_KLINES:
                     log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                     return parsed
@@ -1128,17 +1150,12 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
-    # Helper: 尝试抓取 Sina 源 (支持美股 & 内外盘期货)
     def _fetch_from_sina() -> list:
         import re
-        # 所有走美股 US_MinKService 接口的品种（包括 ETF 类 SOXX/QQQ）
-        # 注意: 新浪接口使用小写纯符号名，如 meta, soxx, qqq
-        # gb_ 前缀格式已不再返回数据（只返回 null），不使用
         COMMODITY_SYMBOLS = {'BRENT', 'OIL', 'GOLD', 'A50', 'SILVER', 'XAUUSD', 'USDCNH'}
         is_us_stock = sym_upper not in COMMODITY_SYMBOLS
 
         if is_us_stock:
-            # 美股 / ETF 接口: 直接使用小写符号名（如 meta, soxx, nvda, qqq）
             url = f"https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_r=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
             log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 开始抓取 {sym_upper} -> {url}")
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -1188,8 +1205,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             except Exception as ex:
                 log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
 
-        # 2. 商品期货 / 内外盘接口 (OIL/BRENT/GOLD/A50/SILVER)
-        if not is_us_stock or not True:  # 只对商品品种走期货接口
+        if not is_us_stock or not True:
             sina_symbol_map = {
                 'BRENT':  'sc0',
                 'OIL':    'sc0',
@@ -1199,7 +1215,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 'A50':    'hf_CHA50CFD',
             }
             if sym_upper not in sina_symbol_map and is_us_stock:
-                return []  # 美股品种已经在上面处理完了
+                return []
             sina_code = sina_symbol_map.get(sym_upper, 'sc0' if 'OIL' in sym_upper or 'BRENT' in sym_upper else 'au0')
             is_inner = sina_code in ['sc0', 'au0', 'ag0']
             if is_inner:
@@ -1260,11 +1276,8 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
-    # 按照用户选择的首选源进行抓取，失败时尝试备用源
-    # [BUGFIX] 统一使用 >= MIN_KLINES 判断，防止 Tencent 只返回 1~2 条时假成功导致后续源被跳过
     parsed_klines = []
     proxy_enabled = get_proxy_config().get("enabled", False)
-    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 开始在线网络抓取 [{source_key}] 外盘 K线数据 ({sym_upper})... 持久化目标: {cache_path}")
 
     # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Tencent / Sina 国内免代理直连源
     if not proxy_enabled:
@@ -1294,17 +1307,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                 log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
                 parsed_klines = _fetch_from_yahoo()
 
-    # 抓取成功后独立落盘写入该数据源物理文件 (采用 merge_kline_sequences 增量去重合并，保证历史天数与缺失工作日 100% 完整补齐)
+    # 抓取成功后更新内存 RAM Cache 并标脏，支持后期批量统一写盘或即时落盘
     if parsed_klines and len(parsed_klines) >= 5:
         merged_klines = merge_kline_sequences(existing_klines, parsed_klines)
-        all_cache[sym_upper] = merged_klines
-        try:
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(all_cache, f, ensure_ascii=False, indent=2)
-            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 成功落盘增量合并 {sym_upper} K线 ({len(merged_klines)} 条) -> {cache_path}")
-        except Exception as ex:
-            log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 写入 JSON 异常: {ex}")
+        save_klines_to_disk_cache(sym_upper, merged_klines, source_key, immediate_flush=False)
+        log_market_msg(f"[GlobalMarketData] [{source_key}源] {get_proxy_info_str()} 在线抓取成功增量合并 {sym_upper} K线 ({len(merged_klines)} 条) -> 已写入内存 RAM Cache")
         res_klines = append_realtime_bar_if_needed(sym_upper, merged_klines)
         return res_klines[-limit:]
 
@@ -1317,75 +1324,159 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
     return []
 
 
-def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yahoo') -> bool:
-    """强制将最新清洗后的 K 线数据写盘保存至 JSON 物理持久化文件 (物理剥离未闭市实时 Bar，绝不污染历史盘库)"""
+def flush_kline_disk_cache(data_source: str = 'yahoo', force: bool = False) -> bool:
+    """一次加载批量统一落盘：将内存 RAM Cache 中攒存的全部标的 K线一次性原子合并写入 JSON 物理文件
+    极速、高效，单次文件 IO 完成批量写盘，彻底根治多线程写盘踩踏与频繁磁盘 IO。
+    磁盘 IO 在锁外执行，防止 Lock 持有期阻塞其他线程的 RAM 读写。
+    """
+    source_key = (data_source or 'yahoo').lower()
+    cache_path = get_kline_cache_file_path().replace(".json", f"_{source_key}.json")
+
+    # ---- Phase 1: 在锁内"快照"需要落盘的数据，立即释放锁 ----
+    with _KLINE_CACHE_LOCK:
+        if not force and not _KLINE_DIRTY_FLAGS.get(source_key, False):
+            return True
+        snapshot = {
+            sym: list(ram_val['klines'])
+            for (sym, src), ram_val in _KLINE_RAM_CACHE.items()
+            if src == source_key and ram_val.get('klines')
+        }
+
+    if not snapshot:
+        with _KLINE_CACHE_LOCK:
+            _KLINE_DIRTY_FLAGS[source_key] = False
+        return True
+
+    # ---- Phase 2: 在锁外读取磁盘旧文件并合并 ----
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    all_cache = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                all_cache = json.load(f)
+        except Exception:
+            all_cache = {}
+
+    updated_count = 0
+    total_bars = 0
+    for sym, raw_klines in snapshot.items():
+        if not sym or sym == 'TEST_SYM':
+            continue
+
+        clean_list = sanitize_klines_for_symbol(sym, raw_klines)
+        if not clean_list:
+            continue
+
+        target_today = get_target_market_date_str(sym)
+        session_open = is_target_market_session_open(sym)
+        # 盘中时段：剥离未闭市今日实时 Bar，只落盘历史已完结日 K
+        if session_open:
+            historical_only = [k for k in clean_list if k.get('date', '') < target_today]
+        else:
+            historical_only = clean_list
+        if not historical_only:
+            historical_only = clean_list
+
+        existing = all_cache.get(sym, [])
+        if existing:
+            merged_dict = {k.get('date'): dict(k) for k in existing if k.get('date')}
+            for k in historical_only:
+                if k.get('date'):
+                    merged_dict[k.get('date')] = dict(k)
+            sorted_dates = sorted(merged_dict.keys())
+            raw_final = [merged_dict[d] for d in sorted_dates]
+            final_list = sanitize_klines_for_symbol(sym, raw_final)
+        else:
+            final_list = historical_only
+
+        if not final_list:
+            continue
+
+        all_cache[sym] = final_list
+        updated_count += 1
+        total_bars += len(final_list)
+
+    if updated_count == 0:
+        with _KLINE_CACHE_LOCK:
+            _KLINE_DIRTY_FLAGS[source_key] = False
+        return True
+
+    # ---- Phase 3: 原子写盘 (write-to-temp-then-replace) ----
+    now_ts = time.time()
+    tmp_path = cache_path + f".tmp_{os.getpid()}_{int(now_ts * 1000)}"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(all_cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, cache_path)
+
+        # ---- Phase 4: 写盘成功后刷新 RAM fetch_ts，防止下次误判磁盘已过期而重触网络 ----
+        with _KLINE_CACHE_LOCK:
+            _KLINE_DIRTY_FLAGS[source_key] = False
+            for sym in snapshot:
+                fk = (sym, source_key)
+                if fk in _KLINE_RAM_CACHE:
+                    _KLINE_RAM_CACHE[fk]['fetch_ts'] = now_ts
+
+        log_market_msg(f"[GlobalMarketData] ⚡ 物理落盘批量持久化成功 [{source_key}源] ({updated_count} 个标的, 共 {total_bars} 条 K线) -> {cache_path}")
+        return True
+    except Exception as ex:
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except Exception: pass
+        log_market_msg(f"[GlobalMarketData] 物理落盘批量持久化异常 [{source_key}]: {ex}")
+        return False
+
+
+
+def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yahoo', immediate_flush: bool = False) -> bool:
+    """将最新清洗后的 K 线数据缓存至内存 RAM Cache 并标记脏状态
+    当 immediate_flush=True 或调用 flush_kline_disk_cache 时进行单次统一物理写盘。
+    """
     if not symbol or not klines:
         return False
 
     sym_upper = symbol.strip().upper()
     source_key = (data_source or 'yahoo').lower()
-    cache_path = get_kline_cache_file_path().replace(".json", f"_{source_key}.json")
+    fetch_key = (sym_upper, source_key)
 
-    try:
-        clean_list = sanitize_klines_for_symbol(sym_upper, klines)
-        if not clean_list:
-            return False
-
-        # 🛡️ 物理防污染护盾：当目标市场正处于交易活跃期 (Session Open) 时，
-        # 不将尚未闭市清算的今日实时 Bar (date >= target_today) 写入历史 Daily 磁盘主库，
-        # 避免动态实盘合成数据污染历史 Daily K线。只落盘保存完结的 Daily 历史数据！
-        target_today = get_target_market_date_str(sym_upper)
-        session_open = is_target_market_session_open(sym_upper)
-
-        if session_open:
-            historical_only = [k for k in clean_list if k.get('date', '') < target_today]
-        else:
-            historical_only = clean_list
-
-        if not historical_only:
-            historical_only = clean_list
-
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        all_cache = {}
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    all_cache = json.load(f)
-            except Exception:
-                all_cache = {}
-
-        all_cache[sym_upper] = historical_only
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(all_cache, f, ensure_ascii=False, indent=2)
-
-        log_market_msg(f"[GlobalMarketData] 物理落盘持久化保存 [{source_key}源] {sym_upper} K线 ({len(historical_only)} 条) -> {cache_path}")
-        return True
-    except Exception as ex:
-        log_market_msg(f"[GlobalMarketData] 物理落盘 Save 异常 ({sym_upper}): {ex}")
+    clean_list = sanitize_klines_for_symbol(sym_upper, klines)
+    if not clean_list:
         return False
+
+    with _KLINE_CACHE_LOCK:
+        now_ts = time.time()
+        _KLINE_RAM_CACHE[fetch_key] = {'klines': clean_list, 'fetch_ts': now_ts}
+        _KLINE_DIRTY_FLAGS[source_key] = True
+
+    if immediate_flush:
+        return flush_kline_disk_cache(source_key, force=True)
+    return True
+
 
 
 def repair_disk_kline_caches() -> dict:
     """物理磁盘 K 线缓存全量自愈与清理引擎 (Scrub corrupted entries & synthetic bars from disk)"""
     repaired_stats = {}
     EXPECTED_SYMBOL_RANGES = {
-        'AAPL': (100.0, 350.0),
-        'MSFT': (250.0, 700.0),
-        'NVDA': (20.0, 350.0),
-        'GOOGL': (60.0, 300.0),
-        'AMZN': (60.0, 300.0),
-        'META': (100.0, 900.0),
-        'TSLA': (80.0, 600.0),
-        'MU': (30.0, 250.0),
-        'SOXX': (100.0, 450.0),
-        'QQQ': (200.0, 700.0),
-        'OIL': (20.0, 180.0),
-        'BRENT': (20.0, 180.0),
-        'GOLD': (1000.0, 4000.0),
-        'A50': (8.0, 50.0),
-        'USDCNH': (5.0, 10.0),
+        'AAPL': (100.0, 450.0),
+        'MSFT': (200.0, 750.0),
+        'NVDA': (20.0, 400.0),
+        'GOOGL': (50.0, 350.0),
+        'AMZN': (50.0, 350.0),
+        'META': (100.0, 1000.0),
+        'TSLA': (50.0, 700.0),
+        'MU': (20.0, 300.0),
+        'SOXX': (100.0, 500.0),
+        'QQQ': (150.0, 800.0),
+        'OIL': (15.0, 180.0),
+        'BRENT': (15.0, 180.0),
+        'GOLD': (800.0, 4500.0),
+        'A50': (5.0, 40.0),
+        'USDCNH': (4.0, 10.0),
     }
 
+    # 1. 扫描与基础清洗
+    disk_caches = {}
     for src in ['yahoo', 'sina']:
         cache_path = get_kline_cache_file_path().replace(".json", f"_{src}.json")
         if not os.path.exists(cache_path):
@@ -1393,51 +1484,80 @@ def repair_disk_kline_caches() -> dict:
         try:
             with open(cache_path, 'r', encoding='utf-8') as f:
                 all_cache = json.load(f)
-            if not isinstance(all_cache, dict):
+            if isinstance(all_cache, dict):
+                disk_caches[src] = (cache_path, all_cache)
+        except Exception:
+            pass
+
+    for src, (cache_path, all_cache) in disk_caches.items():
+        modified = False
+        for sym, klist in list(all_cache.items()):
+            sym_u = str(sym).strip().upper()
+            if sym_u == 'TEST_SYM':
+                del all_cache[sym]
+                modified = True
                 continue
-            
-            modified = False
-            for sym, klist in list(all_cache.items()):
-                if not klist or not isinstance(klist, list):
-                    continue
-                sym_u = sym.strip().upper()
-                clean = sanitize_klines_for_symbol(sym_u, klist)
-                target_today = get_target_market_date_str(sym_u)
-                session_open = is_target_market_session_open(sym_u)
 
-                # 1. 剔除原油商品中混入的人民币 (sc0 ~490RMB) 脏数据点
-                if sym_u in ['OIL', 'BRENT']:
-                    clean = [k for k in clean if float(k.get('close', 0)) < 200.0]
+            if not klist or not isinstance(klist, list):
+                continue
 
-                # 2. 剔除未闭市时写入磁盘的实时 Bar
-                if session_open:
-                    clean = [k for k in clean if k.get('date', '') < target_today]
-                
-                # 3. 🛡️ 跨标的污染检视: 检查价格数量级中枢，若严重偏离该标的合理区间则说明遭遇了异步竞争写错，全量剔除重装！
-                if clean and sym_u in EXPECTED_SYMBOL_RANGES:
-                    closes = sorted([float(k.get('close', 0)) for k in clean if float(k.get('close', 0)) > 0])
-                    if closes:
-                        med_close = closes[len(closes) // 2]
-                        min_p, max_p = EXPECTED_SYMBOL_RANGES[sym_u]
-                        if med_close < min_p or med_close > max_p:
-                            del all_cache[sym]
-                            modified = True
-                            repaired_stats[f"{src}_{sym_u}"] = f"PURGED_CROSS_POLLUTED (med_close={med_close:.2f} not in [{min_p}, {max_p}])"
-                            log_market_msg(f"[GlobalMarketData] 🛡️ 成功清除 [{src}] 物理盘库中被跨标的污染的脏记录: {sym_u} (中枢价={med_close:.2f} 不在合理区间 [{min_p}, {max_p}])")
-                            continue
+            clean = sanitize_klines_for_symbol(sym_u, klist)
+            target_today = get_target_market_date_str(sym_u)
+            session_open = is_target_market_session_open(sym_u)
 
-                if len(clean) != len(klist):
-                    all_cache[sym] = clean
-                    modified = True
-                    repaired_stats[f"{src}_{sym_u}"] = f"{len(klist)} -> {len(clean)}"
-            
-            if modified:
+            # 剔除未闭市时写入磁盘的实时 Bar
+            if session_open:
+                clean = [k for k in clean if k.get('date', '') < target_today]
+
+            # 🛡️ 跨标的污染检视: 检查价格数量级中枢，若严重偏离该标的合理区间则说明遭遇了异步竞争写错，全量剔除！
+            if clean and sym_u in EXPECTED_SYMBOL_RANGES:
+                closes = sorted([float(k.get('close', 0)) for k in clean if float(k.get('close', 0)) > 0])
+                if closes:
+                    med_close = closes[len(closes) // 2]
+                    min_p, max_p = EXPECTED_SYMBOL_RANGES[sym_u]
+                    if med_close < min_p or med_close > max_p:
+                        del all_cache[sym]
+                        modified = True
+                        repaired_stats[f"{src}_{sym_u}"] = f"PURGED_CROSS_POLLUTED (med_close={med_close:.2f} not in [{min_p}, {max_p}])"
+                        log_market_msg(f"[GlobalMarketData] 🛡️ 成功清除 [{src}] 物理盘库中被跨标的污染的脏记录: {sym_u} (中枢价={med_close:.2f} 不在合理区间 [{min_p}, {max_p}])")
+                        continue
+
+            if len(clean) != len(klist):
+                all_cache[sym] = clean
+                modified = True
+                repaired_stats[f"{src}_{sym_u}"] = f"{len(klist)} -> {len(clean)}"
+
+        if modified:
+            try:
                 with open(cache_path, 'w', encoding='utf-8') as f:
                     json.dump(all_cache, f, ensure_ascii=False, indent=2)
-                log_market_msg(f"[GlobalMarketData] 自愈物理磁盘 [{src}] K线缓存成功 ({len(repaired_stats)} 项修正)")
-        except Exception as ex:
-            log_market_msg(f"[GlobalMarketData] 自愈物理磁盘 [{src}] 异常: {ex}")
-    
+            except Exception:
+                pass
+
+    # 2. 🛡️ 跨源自动救援填充 (Cross-source Healing): 若 yahoo 数据过少，自动从 sina 填充健全历史
+    if 'yahoo' in disk_caches and 'sina' in disk_caches:
+        y_path, yahoo_cache = disk_caches['yahoo']
+        _, sina_cache = disk_caches['sina']
+        y_modified = False
+        for sym, s_klines in sina_cache.items():
+            sym_u = sym.strip().upper()
+            if sym_u == 'TEST_SYM':
+                continue
+            y_klines = yahoo_cache.get(sym_u, [])
+            if len(y_klines) < 20 and len(s_klines) >= 20:
+                clean_s = sanitize_klines_for_symbol(sym_u, s_klines)
+                if clean_s:
+                    yahoo_cache[sym_u] = clean_s
+                    y_modified = True
+                    repaired_stats[f"HEAL_YAHOO_{sym_u}"] = f"RESTORED_FROM_SINA ({len(clean_s)} bars)"
+                    log_market_msg(f"[GlobalMarketData] 🛡️ 成功将 {sym_u} 从 sina 盘库自动恢复至 yahoo 盘库 ({len(clean_s)} 条)")
+        if y_modified:
+            try:
+                with open(y_path, 'w', encoding='utf-8') as f:
+                    json.dump(yahoo_cache, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
     return repaired_stats
 
 
