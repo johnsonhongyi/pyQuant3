@@ -1,8 +1,8 @@
-## 2026-08-06 22:15
-- [x] **为交易可视化主画板 (`trade_visualizer_qt6.py`) 添加与外盘 100% 一致的 K 线黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系与开关持久化 (`trade_visualizer_qt6.py`, `scratch/test_visualizer_fib.py`)**：
-    - [x] **7 大黄金分割核心比率位与右侧动态价格标签**：实现 `_draw_fibonacci_levels(day_df)` 算法，高精度计算与绘制 `100.0% (顶峰)` (亮红/Dash)、`80.9% (强阻)` (橙/Dot)、`61.8% (黄金位)` (金黄/Dash)、`50.0% (中枢)` (霓虹蓝/Solid)、`38.2% (黄金位)` (金黄/Dash)、`23.6% (强撑)` (嫩绿/Dot) 及 `0.0% (谷底)` (墨绿/Dash) 7 大水平线及右侧 Consolas 粗体浮动价格标签。
+## 2026-08-06 22:20
+- [x] **为交易可视化主画板 (`trade_visualizer_qt6.py`) 与外盘 K 线弹窗 (`ats/ui/global_market_kline_dialog.py`) 实现 K 线黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系最右侧边界吸附与平滑跟随架构 (`trade_visualizer_qt6.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_visualizer_fib.py`)**：
+    - [x] **7 大黄金分割比率价格标签动态吸附最右侧**：实现 `_update_fib_label_positions()` 算法，在用户拖拽平移 (Pan)、滚轮缩放 (Zoom) 或重置 K 线图表 ViewBox 视角时，自动监听 `sigXRangeChanged` 视角变化信号，将 7 大黄金分割价格标签（如 `Fib 100.0%: 15.20`）永远精准贴合固定吸附在可视区域最右侧边框内 (`x_max - 0.2`)，绝对不随 K 线柱子向左移动或跑出可视边界！
     - [x] **工具栏 Action 开关与物理持久化**：在主工具栏 (`_init_toolbar`) 注册 `self.fib_action` (Checkable)，实现 `on_toggle_fib` 槽函数；在 `_save_visualizer_config` 与 `_load_visualizer_config` 中自动落盘与恢复 `show_fib` 配置项。
-    - [x] **绘图对象池清理与图表自动重载**：实现 `_clear_fib_levels` 安全清理旧的 `InfiniteLine` 与 `TextItem` 对象，并在 `render_charts` K线绘制逻辑中完成自动无缝调起。
+    - [x] **绘图对象池清理与图表自动重载**：实现 `_clear_fib_levels` 安全清理旧的 `InfiniteLine` 与 `TextItem` 对象及 `fib_labels_data` 引用，并在 `render_charts` K线绘制逻辑中完成自动无缝调起。
     - [x] **单元测试与全系统回归 100% 通过**：编写 `scratch/test_visualizer_fib.py` 自动化测试 3 项断言全量通过，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
 
 ## 2026-08-06 22:12
