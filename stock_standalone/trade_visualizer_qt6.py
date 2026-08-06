@@ -3452,6 +3452,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- ⚡ [NEW] 缠论分析状态与渲染对象 ---
         self.show_chan = True
         self.show_auto_channel = True
+        self.show_fib = True  # ⭐ [NEW] 默认开启黄金分割 (Fibonacci) 动态支撑阻力坐标系
+        self.fib_lines = []   # 存储 InfiniteLine 列表
+        self.fib_labels = []  # 存储 TextItem 列表
+        self.fib_labels_data = []  # 存储 (txt_item, price_val) 列表用于视区变化时锁定最右侧边框
         self.chan_bi_pen = pg.mkPen(color='#00FFFF', width=1.5)  # 青色分笔
         # self.chan_bi_curve = pg.PlotDataItem(pen=self.chan_bi_pen, connect='finite', zValue=80)
         # self.kline_plot.addItem(self.chan_bi_curve)
@@ -5258,6 +5262,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.auto_channel_action.triggered.connect(self.on_toggle_auto_channel)
         self.toolbar.addAction(self.auto_channel_action)
 
+        # [NEW] 黄金分割 (Fibonacci) Action
+        self.fib_action = QAction("FIB", self)
+        self.fib_action.setCheckable(True)
+        self.fib_action.setChecked(getattr(self, 'show_fib', True))
+        self.fib_action.setToolTip("显示/隐藏黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系")
+        self.fib_action.triggered.connect(self.on_toggle_fib)
+        self.toolbar.addAction(self.fib_action)
+
         # [NEW] SBC 回放 Action
         self.sbc_replay_action = QAction("SBC", self)
         self.sbc_replay_action.setToolTip("使用本地缓存/日线数据执行SBC逻辑验证 (跟随全局实时开关)")
@@ -5476,6 +5488,146 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def on_toggle_fib(self, checked: bool):
+        """切换 FIB 黄金分割坐标系的显隐"""
+        self.show_fib = checked
+        if hasattr(self, 'fib_action') and self.fib_action.isChecked() != checked:
+            self.fib_action.setChecked(checked)
+
+        if not checked:
+            self._clear_fib_levels()
+
+        self._save_visualizer_config()
+
+        if getattr(self, 'current_code', None):
+            self.render_charts(self.current_code, getattr(self, 'day_df', pd.DataFrame()), getattr(self, 'tick_df', pd.DataFrame()))
+
+    def _clear_fib_levels(self):
+        """清理已绘制的 FIB 黄金分割水平线及价格标签"""
+        if hasattr(self, 'fib_lines') and self.fib_lines:
+            for line in self.fib_lines:
+                try:
+                    if hasattr(self, 'kline_plot') and line in self.kline_plot.items:
+                        self.kline_plot.removeItem(line)
+                except Exception:
+                    pass
+            self.fib_lines.clear()
+
+        if hasattr(self, 'fib_labels') and self.fib_labels:
+            for label in self.fib_labels:
+                try:
+                    if hasattr(self, 'kline_plot') and label in self.kline_plot.items:
+                        self.kline_plot.removeItem(label)
+                except Exception:
+                    pass
+            self.fib_labels.clear()
+
+        if hasattr(self, 'fib_labels_data') and self.fib_labels_data:
+            self.fib_labels_data.clear()
+
+    def _update_fib_label_positions(self):
+        """动态同步 FIB 价格标签位置，使其始终固定吸附在可视视角 (ViewBox) 最右侧边缘，不随 K 线移动"""
+        if not getattr(self, 'show_fib', True) or not hasattr(self, 'fib_labels_data') or not self.fib_labels_data:
+            return
+
+        try:
+            if not hasattr(self, 'kline_plot') or self.kline_plot is None:
+                return
+
+            view_box = self.kline_plot.getViewBox()
+            if view_box is None:
+                return
+
+            (x_min, x_max), _ = view_box.viewRange()
+            # 始终锁定在可视区域最右侧边框内 (X 轴右边界 x_max，微调 0.2 个 unit)
+            target_x = x_max - 0.2
+
+            for txt_item, price_val in self.fib_labels_data:
+                try:
+                    txt_item.setPos(target_x, price_val)
+                except Exception:
+                    pass
+        except Exception as e:
+            pass
+
+    def _draw_fibonacci_levels(self, day_df):
+        """
+        在 K 线主画板上高精度绘制 0%, 23.6%, 38.2%, 50.0%, 61.8%, 80.9%, 100% 
+        黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系水平线与右侧价格标签
+        """
+        self._clear_fib_levels()
+        if not getattr(self, 'show_fib', True) or day_df is None or day_df.empty:
+            return
+
+        try:
+            if 'high' not in day_df.columns or 'low' not in day_df.columns:
+                return
+
+            highs = day_df['high'].values
+            lows = day_df['low'].values
+            n = len(day_df)
+            if n <= 0:
+                return
+
+            valid_lows = lows[lows > 0]
+            valid_highs = highs[highs > 0]
+            if len(valid_lows) == 0 or len(valid_highs) == 0:
+                return
+
+            min_p = float(np.min(valid_lows))
+            max_p = float(np.max(valid_highs))
+            diff = max_p - min_p
+            if diff <= 0:
+                return
+
+            # 7 大黄金分割核心比率位 (与外盘 100% 完全一致)
+            fib_ratios = [
+                (1.000, "100.0% (顶峰)", "#F6465D", QtCore.Qt.PenStyle.DashLine),
+                (0.809, "80.9% (强阻)", "#FF7700", QtCore.Qt.PenStyle.DotLine),
+                (0.618, "61.8% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
+                (0.500, "50.0% (中枢)", "#00E5FF", QtCore.Qt.PenStyle.SolidLine),
+                (0.382, "38.2% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
+                (0.236, "23.6% (强撑)", "#00FF88", QtCore.Qt.PenStyle.DotLine),
+                (0.000, "0.0% (谷底)", "#089981", QtCore.Qt.PenStyle.DashLine)
+            ]
+
+            # 绑定 ViewBox 视角 X 轴平移/缩放监听器
+            if hasattr(self, 'kline_plot') and self.kline_plot:
+                vbox = self.kline_plot.getViewBox()
+                if vbox and not getattr(self, '_fib_sig_connected', False):
+                    try:
+                        vbox.sigXRangeChanged.connect(self._update_fib_label_positions)
+                        self._fib_sig_connected = True
+                    except Exception:
+                        pass
+
+            for ratio, ratio_label, color_hex, line_style in fib_ratios:
+                price_val = min_p + diff * ratio
+                pen = pg.mkPen(color_hex, width=1.0, style=line_style)
+                line = pg.InfiniteLine(pos=price_val, angle=0, pen=pen, movable=False)
+                line.setZValue(80)
+                self.kline_plot.addItem(line)
+                self.fib_lines.append(line)
+
+                # 右侧边端悬浮黄金分割比例 + 价格标签
+                txt_item = pg.TextItem(
+                    text=f" Fib {ratio_label}: {price_val:.2f}",
+                    color=color_hex,
+                    anchor=(1.0, 0.5)
+                )
+                font = QFont("Consolas", 8, QFont.Weight.Bold)
+                txt_item.setFont(font)
+                txt_item.setZValue(85)
+                self.kline_plot.addItem(txt_item)
+                txt_item.setPos(n - 0.5, price_val)
+                self.fib_labels.append(txt_item)
+                self.fib_labels_data.append((txt_item, price_val))
+
+            # 绘制完成后即刻更新一次 X 位置，锁定最右侧边框
+            self._update_fib_label_positions()
+        except Exception as e:
+            logger.error(f"[Fibonacci] 绘制黄金分割线失败: {e}")
 
     def _on_sbc_window_destroyed(self, win):
         """窗口关闭时自动清理资源"""
@@ -12594,8 +12746,11 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'chan_zs_pool'):
                 for item in self.chan_zs_pool: item.hide()
 
-        # --- 🚀 [IPC/CLEAN] 联动标记现在集成到信号系统中，不再手动绘制 Line/Label ---
-        pass
+        # --- ⚡ [NEW] 黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系 ---
+        if getattr(self, 'show_fib', True):
+            self._draw_fibonacci_levels(day_df)
+        else:
+            self._clear_fib_levels()
 
 
         # ----------------- 绘制 Volume -----------------
@@ -14896,6 +15051,15 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.td_action.setChecked(enabled)
                     self.td_action.blockSignals(False)
 
+            # 3.5.0 FIB 黄金分割开关
+            if 'show_fib' in window_config:
+                enabled = bool(window_config.get('show_fib', True))
+                self.show_fib = enabled
+                if hasattr(self, 'fib_action'):
+                    self.fib_action.blockSignals(True)
+                    self.fib_action.setChecked(enabled)
+                    self.fib_action.blockSignals(False)
+
             # 3.5.1 pdays 开关
             if 'show_pdays' in window_config:
                 enabled = bool(window_config.get('show_pdays', True))
@@ -15031,6 +15195,9 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if hasattr(self, 'show_td_sequential'):
                 window_config['show_td_sequential'] = self.show_td_sequential
+
+            if hasattr(self, 'show_fib'):
+                window_config['show_fib'] = self.show_fib
 
             if hasattr(self, 'show_pdays'):
                 window_config['show_pdays'] = self.show_pdays
