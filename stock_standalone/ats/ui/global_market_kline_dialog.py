@@ -49,6 +49,209 @@ class OnlineTranslateWorkerThread(QThread):
             self.translated_signal.emit(self.text, self.text, self.mode, "")
 
 
+class GlobalKLineDetailWindow(QFrame):
+    """
+    外盘 K 线十字光标/鼠标 hover 的独立悬浮详情窗口，支持手动拖拽、复用和位置持久化。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent=None)  # parent设为None，使它成为独立顶层窗口，但设置Tool标志，使它依赖主窗口
+        self.main_window = parent
+        self.is_custom_positioned = False
+        self.is_hovered = False
+        self.hover_activation_delay = 2000
+        
+        # 窗口属性：工具窗口（不占任务栏）、无边框、置顶
+        self.setWindowFlags(
+            Qt.WindowType.Tool | 
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("GlobalDetailContainer")
+        
+        # 内部布局
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        
+        # 顶部拖拽把手栏 (平时隐藏，hover时显示)
+        self.handle_bar = QFrame(self)
+        self.handle_bar.setFixedHeight(16)
+        self.handle_bar.setObjectName("HandleBar")
+        self.handle_layout = QHBoxLayout(self.handle_bar)
+        self.handle_layout.setContentsMargins(6, 0, 6, 0)
+        
+        self.handle_label = QLabel("⠿ 拖动以调整位置", self.handle_bar)
+        self.handle_label.setStyleSheet("color: #00f0ff; font-family: monospace; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+        self.handle_layout.addWidget(self.handle_label)
+        self.handle_bar.setVisible(False)
+        
+        self.main_layout.addWidget(self.handle_bar)
+        
+        # 内容区域
+        self.content_frame = QFrame(self)
+        self.content_frame.setObjectName("ContentFrame")
+        self.content_layout = QVBoxLayout(self.content_frame)
+        self.content_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # 富文本标签展示详情
+        self.label = QLabel(self.content_frame)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setObjectName("ContentLabel")
+        self.label.setStyleSheet("font-family: monospace; font-size: 11px; line-height: 1.3;")
+        self.label.setWordWrap(True)
+        self.label.setMinimumWidth(200)
+        self.label.setMaximumWidth(280)
+        self.content_layout.addWidget(self.label)
+        
+        self.main_layout.addWidget(self.content_frame)
+        
+        self.drag_position = None
+        self.is_dragging = False
+        
+        # 开启鼠标悬停跟踪
+        self.setMouseTracking(True)
+        self.content_frame.setMouseTracking(True)
+        self.label.setMouseTracking(True)
+        
+        # 静止悬停定时器
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.timeout.connect(self._on_hover_timeout)
+        
+        # 无操作自动隐藏定时器
+        self.auto_hide_timer = QTimer(self)
+        self.auto_hide_timer.setSingleShot(True)
+        self.auto_hide_timer.setInterval(6000)
+        self.auto_hide_timer.timeout.connect(self._on_auto_hide_timeout)
+        
+        self.setMinimumWidth(220)
+        self.setMinimumHeight(130)
+        self.setMaximumWidth(300)
+        self._update_stylesheets()
+
+    def _update_stylesheets(self):
+        if self.is_hovered:
+            self.setStyleSheet("""
+                QFrame#GlobalDetailContainer {
+                    background: transparent;
+                    border: none;
+                }
+                QFrame#HandleBar {
+                    background-color: rgba(0, 240, 255, 30);
+                    border-bottom: 1px solid rgba(0, 240, 255, 80);
+                    border-top-left-radius: 3px;
+                    border-top-right-radius: 3px;
+                }
+                QLabel#ContentLabel {
+                    color: #FFFFFF;
+                    border: none;
+                    background-color: transparent;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#GlobalDetailContainer {
+                    background: transparent;
+                    border: none;
+                }
+                QFrame#HandleBar {
+                    background: transparent;
+                    border: none;
+                }
+                QLabel#ContentLabel {
+                    color: #FFFFFF;
+                    border: none;
+                    background-color: transparent;
+                }
+            """)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.is_hovered:
+            painter.setBrush(QBrush(QColor(17, 18, 36, 230)))
+            painter.setPen(QPen(QColor("#00f0ff"), 1))
+        else:
+            painter.setBrush(QBrush(QColor(0, 0, 0, 195)))
+            painter.setPen(QPen(QColor("#363c4e"), 1))
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        painter.drawRoundedRect(rect, 4, 4)
+
+    def _on_hover_timeout(self):
+        self.is_hovered = True
+        self.handle_bar.setVisible(True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._update_stylesheets()
+        self.adjustSize()
+
+    def _on_auto_hide_timeout(self):
+        if not self.is_hovered and not self.is_dragging:
+            self.hide()
+
+    def setVisible(self, visible):
+        super().setVisible(visible)
+        if visible:
+            self.auto_hide_timer.start(6000)
+        else:
+            self.auto_hide_timer.stop()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self.isVisible() and not self.is_hovered and not self.is_dragging:
+            self.auto_hide_timer.start(6000)
+
+    def enterEvent(self, event):
+        if not self.is_hovered:
+            self.hover_timer.start(self.hover_activation_delay)
+        self.auto_hide_timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hover_timer.stop()
+        if self.is_hovered:
+            self.is_hovered = False
+            self.handle_bar.setVisible(False)
+            self.unsetCursor()
+            self._update_stylesheets()
+            self.adjustSize()
+        if self.isVisible():
+            self.auto_hide_timer.start(6000)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self.is_hovered and event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = True
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self.is_hovered:
+            self.hover_timer.start(self.hover_activation_delay)
+            self.auto_hide_timer.start(6000)
+            if self.main_window and hasattr(self.main_window, 'p_kline'):
+                try:
+                    global_pos = event.globalPosition().toPoint()
+                    local_pos = self.main_window.p_kline.mapFromGlobal(global_pos)
+                    scene_pos = self.main_window.p_kline.mapToScene(local_pos)
+                    if self.main_window.p_kline.rect().contains(local_pos):
+                        self.main_window._on_mouse_moved([scene_pos])
+                except Exception:
+                    pass
+        if event.buttons() == Qt.MouseButton.LeftButton and self.is_dragging:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = False
+            self.is_custom_positioned = True
+            if self.main_window and hasattr(self.main_window, 'save_detail_window_position'):
+                self.main_window.save_detail_window_position()
+            event.accept()
+
+
 # ---------------- 全局股票实体识别与联动工具集 ----------------
 _GLOBAL_STOCK_NAME_MAP_CACHE = None
 
@@ -255,7 +458,7 @@ def trigger_stock_linkage(code: str, name: str, parent_dialog=None):
 
 class KLineWorkerThread(QThread):
     """后台非阻塞异步 K 线抓取线程，彻底解决 UI 界面调起卡顿问题"""
-    finished_signal = pyqtSignal(list, str)  # klines, error_msg
+    finished_signal = pyqtSignal(str, list, str)  # symbol, klines, error_msg
 
     def __init__(self, symbol: str, force_refresh: bool = False, data_source: str = 'yahoo'):
         super().__init__()
@@ -266,9 +469,9 @@ class KLineWorkerThread(QThread):
     def run(self):
         try:
             klines = fetch_global_kline_history(self.symbol, limit=120, force_refresh=self.force_refresh, data_source=self.data_source)
-            self.finished_signal.emit(klines or [], "")
+            self.finished_signal.emit(self.symbol, klines or [], "")
         except Exception as e:
-            self.finished_signal.emit([], str(e))
+            self.finished_signal.emit(self.symbol, [], str(e))
 
 
 class RelatedKLineWorkerThread(QThread):
@@ -1032,30 +1235,34 @@ class GlobalMarketKLineDialog(QDialog):
             }
         """)
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(10, 6, 10, 6)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(6, 4, 6, 4)
+        header_layout.setSpacing(4)
 
+        from PyQt6.QtWidgets import QSizePolicy
         self.lbl_title = QLabel(f"🌐 {self.name} ({self.symbol})")
-        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 12.5pt;")
+        self.lbl_title.setStyleSheet("font-weight: bold; color: #00F0FF; font-size: 11pt;")
+        self.lbl_title.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.lbl_title)
 
         self.lbl_price_info = QLabel("最新价: -- | 涨跌: --")
-        self.lbl_price_info.setStyleSheet("font-size: 10.5pt; font-weight: bold; margin-left: 10px;")
+        self.lbl_price_info.setStyleSheet("font-size: 9.5pt; font-weight: bold; margin-left: 4px;")
+        self.lbl_price_info.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         header_layout.addWidget(self.lbl_price_info)
 
         # 关联品种实时涨跌标签 (仅当有关联品种时显示)
         self.lbl_related_info = QLabel("")
         self.lbl_related_info.setStyleSheet("""
             QLabel {
-                font-size: 9pt;
+                font-size: 8.5pt;
                 color: #9db2c6;
-                margin-left: 8px;
-                padding: 2px 8px;
+                margin-left: 4px;
+                padding: 1px 5px;
                 background: #1a1f2e;
                 border: 1px solid #2a2e39;
                 border-radius: 3px;
             }
         """)
+        self.lbl_related_info.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         if self.related_symbols:
             header_layout.addWidget(self.lbl_related_info)
         self._refresh_related_info_label()  # 先展示缓存实时报价
@@ -1082,11 +1289,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #262b3e;
                 color: #FF2A6D;
                 border: 1px solid #FF2A6D;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 65px;
+                min-width: 46px;
             }
             QPushButton:hover {
                 background-color: #363c56;
@@ -1103,11 +1310,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #2962ff;
                 color: #ffffff;
                 border: none;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 55px;
+                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #1e54b7;
@@ -1124,10 +1331,10 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #2a2e39;
                 color: #d1d4dc;
                 border: 1px solid #363c4e;
-                border-radius: 4px;
-                padding: 4px 6px;
-                font-size: 9pt;
-                min-width: 45px;
+                border-radius: 3px;
+                padding: 2px 4px;
+                font-size: 8.5pt;
+                min-width: 32px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
@@ -1144,10 +1351,10 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #2a2e39;
                 color: #d1d4dc;
                 border: 1px solid #363c4e;
-                border-radius: 4px;
-                padding: 4px 6px;
-                font-size: 9pt;
-                min-width: 45px;
+                border-radius: 3px;
+                padding: 2px 4px;
+                font-size: 8.5pt;
+                min-width: 38px;
             }
             QPushButton:hover {
                 background-color: #363c4e;
@@ -1163,11 +1370,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #2a2233;
                 color: #FFD700;
                 border: 1px solid #FFD700;
-                border-radius: 4px;
-                padding: 4px 6px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 4px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 50px;
+                min-width: 38px;
             }
             QPushButton:hover {
                 background-color: #3d2f4d;
@@ -1186,11 +1393,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #0052cc;
                 color: #ffffff;
                 border: 1px solid #0065ff;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 55px;
+                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #0065ff;
@@ -1208,11 +1415,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #1b3a2b;
                 color: #00E676;
                 border: 1px solid #00E676;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 55px;
+                min-width: 42px;
             }
             QPushButton:hover {
                 background-color: #26543e;
@@ -1230,11 +1437,11 @@ class GlobalMarketKLineDialog(QDialog):
                 background-color: #1a2233;
                 color: #00F0FF;
                 border: 1px solid #00F0FF;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 9pt;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8.5pt;
                 font-weight: bold;
-                min-width: 65px;
+                min-width: 52px;
             }
             QPushButton:hover {
                 background-color: #2962ff;
@@ -1259,6 +1466,10 @@ class GlobalMarketKLineDialog(QDialog):
         header_layout.addWidget(self.btn_proxy_toggle)
 
         layout.addWidget(header_frame)
+
+        # ⭐ 创建可手动拖拽与复用的 K 线悬浮详情窗 (适配 trade_visualizer_qt6.py 体验)
+        self.kline_detail_win = GlobalKLineDetailWindow(self)
+        self.restore_detail_window_position()
 
         # ---------------- 2. 动态信息条 (Info Banner) ----------------
         self.lbl_info = QLabel("提示: 鼠标悬浮移入画板查看开高低收明细与指标数据")
@@ -1869,27 +2080,44 @@ class GlobalMarketKLineDialog(QDialog):
 
     def _trigger_async_load(self, force_refresh: bool = False):
         if self.worker and self.worker.isRunning():
-            return
+            if hasattr(self.worker, 'symbol') and self.worker.symbol == self.symbol and not force_refresh:
+                return
+            # 如果当前子线程正在抓取其他标的，切断关联以防响应混乱
+            try:
+                self.worker.finished_signal.disconnect(self._on_worker_finished)
+            except Exception:
+                pass
 
         if not self.klines and hasattr(self, 'lbl_info'):
-            self.lbl_info.setText(f"🌐 正在后台异步加载 [{self.data_source}] 最新外盘 K 线数据...")
+            self.lbl_info.setText(f"🌐 正在后台异步加载 [{self.data_source}] {self.symbol} 最新外盘 K 线数据...")
 
         self.worker = KLineWorkerThread(self.symbol, force_refresh=force_refresh, data_source=self.data_source)
         self.worker.finished_signal.connect(self._on_worker_finished)
         self.worker.start()
 
-    def _on_worker_finished(self, klines: list, err_msg: str):
+    def _on_worker_finished(self, worker_symbol: str, klines: list, err_msg: str):
         if hasattr(self, 'btn_refresh_kline'):
             self.btn_refresh_kline.setEnabled(True)
             self.btn_refresh_kline.setText("🔄 刷新")
 
-        cache_path = get_kline_cache_file_path()
+        src_key = (self.data_source or 'yahoo').lower()
+        cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
+
+        # 🛡️ 核心符号一致性校验护盾：绝对禁止跨标的数据混淆与错配！
+        # 若子线程返回的 worker_symbol 与当前 UI 绑定的 self.symbol 不匹配，说明中途切换了标的
+        if not worker_symbol or worker_symbol.upper() != self.symbol.upper():
+            log_market_msg(f"[GlobalMarketKLineDialog] 🛡️ 成功拦截并隔离跨标的旧异步包: worker={worker_symbol} != 当前UI标的={self.symbol}")
+            # 依然可以给 worker_symbol 自己安全独立落盘，但绝不能用 self.symbol 存或覆盖 UI 画板！
+            if klines and len(klines) >= 5 and worker_symbol:
+                save_klines_to_disk_cache(worker_symbol, klines, self.data_source)
+            return
+
         if klines and len(klines) >= 5:
             self.klines = klines
-            # 🛡️ 核心保障：抓取成功后立即强制物理落盘持久化至 JSON 文件！
-            save_klines_to_disk_cache(self.symbol, klines, self.data_source)
+            # 🛡️ 核心保障：用精准匹配的 worker_symbol 物理落盘持久化至 JSON 文件！
+            save_klines_to_disk_cache(worker_symbol, klines, self.data_source)
 
-            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载完成 ({len(klines)} 条)，物理写盘成功: {cache_path}")
+            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} {worker_symbol} K线数据加载完成 ({len(klines)} 条)，物理写盘成功: {cache_path}")
             self._draw_chart()
             self._apply_zoom_mode()
             # 主 K 线数据就绪后再触发关联品种加载
@@ -1898,11 +2126,11 @@ class GlobalMarketKLineDialog(QDialog):
             last_close = float(klines[-1].get('close', 0.0)) if klines else 0.0
             last_pct = float(klines[-1].get('pct', 0.0)) if klines else 0.0
             if hasattr(self, 'lbl_info'):
-                self.lbl_info.setText(f"✅ [{self.data_source.upper()}源] K 线数据刷新并已成功物理落盘: {len(klines)} 条 (最新切片: {last_date}, 点位: {last_close:.2f}, {last_pct:+.2f}%)")
+                self.lbl_info.setText(f"✅ [{self.data_source.upper()}源] {worker_symbol} K 线数据刷新并已成功物理落盘: {len(klines)} 条 (最新切片: {last_date}, 点位: {last_close:.2f}, {last_pct:+.2f}%)")
         elif not self.klines:
-            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
+            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} {worker_symbol} K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
             if hasattr(self, 'lbl_info'):
-                self.lbl_info.setText(f"❌ K 线数据加载失败: {err_msg or '网络或解析异常'}")
+                self.lbl_info.setText(f"❌ {worker_symbol} K 线数据加载失败: {err_msg or '网络或解析异常'}")
 
     def _refresh_related_info_label(self):
         """刷新 Header 关联品种实时涨跌标签"""
@@ -1931,8 +2159,9 @@ class GlobalMarketKLineDialog(QDialog):
         """后台异步加载各关联品种 K 线，不阻塞主图渲染"""
         if not self.related_symbols or self.p_related is None:
             return
-        # 先尝试从本地缓存块速加载
-        cache_path = get_kline_cache_file_path()
+        # 先尝试从本地缓存快速加载
+        src_key = (self.data_source or 'yahoo').lower()
+        cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
         all_data = {}
         if os.path.exists(cache_path):
             try:
@@ -2408,15 +2637,140 @@ class GlobalMarketKLineDialog(QDialog):
         )
 
     def _on_mouse_moved(self, evt):
-        """鼠标悬浮十字光标穿透交互"""
-        pos = evt[0]
-        if self.p_kline.sceneBoundingRect().contains(pos):
+        """鼠标悬浮十字光标穿透交互与独立 KLineDetailWindow 悬浮窗联动"""
+        pos = evt[0] if isinstance(evt, (list, tuple)) else evt
+        if hasattr(self, 'p_kline') and self.p_kline and self.p_kline.sceneBoundingRect().contains(pos):
             mouse_point = self.p_kline.vb.mapSceneToView(pos)
             x_idx = int(round(mouse_point.x()))
             if 0 <= x_idx < len(self.klines):
                 self.v_line.setPos(mouse_point.x())
                 self.h_line.setPos(mouse_point.y())
+                self.v_line.setVisible(True)
+                self.h_line.setVisible(True)
                 self._update_info_banner(x_idx)
+                # 动态生成悬浮 K 线明细富文本并跟随/固定显示
+                self._update_detail_window(x_idx, mouse_point)
+
+    def _update_detail_window(self, idx: int, mouse_point=None):
+        """更新并渲染 KLineDetailWindow 悬浮富文本详情"""
+        if not hasattr(self, 'kline_detail_win') or not self.kline_detail_win:
+            return
+        if not self.klines or not (0 <= idx < len(self.klines)):
+            self.kline_detail_win.hide()
+            return
+
+        item = self.klines[idx]
+        dt = item['date']
+        o = float(item['open'])
+        h = float(item['high'])
+        l = float(item['low'])
+        c = float(item['close'])
+        pct = float(item['pct'])
+        v = float(item.get('volume', 0))
+
+        c_color = "#F6465D" if pct >= 0 else "#089981"
+        pct_color = "#F6465D" if pct >= 0 else "#089981"
+        v_str = f"{v/1e8:.2f}亿" if v >= 1e8 else (f"{v/1e4:.1f}万" if v >= 1e4 else f"{int(v)}")
+
+        ma5_str = f"{self.ma5[idx]:.2f}" if hasattr(self, 'ma5') and idx < len(self.ma5) and self.ma5[idx] else "--"
+        ma20_str = f"{self.ma20[idx]:.2f}" if hasattr(self, 'ma20') and idx < len(self.ma20) and self.ma20[idx] else "--"
+        ma60_str = f"{self.ma60[idx]:.2f}" if hasattr(self, 'ma60') and idx < len(self.ma60) and self.ma60[idx] else "--"
+
+        boll_html = ""
+        if getattr(self, 'show_boll', False) and hasattr(self, 'boll_upper') and hasattr(self, 'boll_lower'):
+            up_s = f"{self.boll_upper[idx]:.2f}" if idx < len(self.boll_upper) and self.boll_upper[idx] else "--"
+            dn_s = f"{self.boll_lower[idx]:.2f}" if idx < len(self.boll_lower) and self.boll_lower[idx] else "--"
+            boll_html = (
+                f"<div style='margin-top:2px; font-size:8.5pt; color:#9db2c6;'>"
+                f"BOLL上: <font color='#FF2A6D'><b>{up_s}</b></font> &nbsp; "
+                f"下: <font color='#00E5FF'><b>{dn_s}</b></font>"
+                f"</div>"
+            )
+
+        html_text = (
+            f"<div style='line-height:1.3; color:#d1d4dc;'>"
+            f"<div style='font-size:9.5pt; font-weight:bold; color:#00F0FF; margin-bottom:3px;'>"
+            f"📅 {dt} &nbsp; <span style='font-size:8pt; color:#787b86;'>[{self.name}]</span>"
+            f"</div>"
+            f"<table style='width:100%; font-size:8.5pt; color:#d1d4dc; border-collapse:collapse;'>"
+            f"<tr><td>开盘: <b>{o:.2f}</b></td><td>最高: <font color='#F6465D'><b>{h:.2f}</b></font></td></tr>"
+            f"<tr><td>最低: <font color='#089981'><b>{l:.2f}</b></font></td><td>收盘: <font color='{c_color}'><b>{c:.2f}</b></font></td></tr>"
+            f"<tr><td>涨跌: <font color='{pct_color}'><b>{pct:+.2f}%</b></font></td><td>成交: <b>{v_str}</b></td></tr>"
+            f"</table>"
+            f"<div style='margin-top:4px; font-size:8.5pt; color:#9db2c6; border-top:1px solid #2a2e39; padding-top:2px;'>"
+            f"<font color='#f0b90b'>MA5: {ma5_str}</font> | "
+            f"<font color='#00F0FF'>MA20: {ma20_str}</font> | "
+            f"<font color='#e040fb'>MA60: {ma60_str}</font>"
+            f"</div>"
+            f"{boll_html}"
+            f"</div>"
+        )
+        self.kline_detail_win.label.setText(html_text)
+        self.kline_detail_win.adjustSize()
+
+        # 如果用户未手动固定拖动浮窗位置，则跟随鼠标在 plot 附近智能定位
+        if not self.kline_detail_win.is_custom_positioned:
+            try:
+                global_mouse_pos = QCursor.pos()
+                x_offset = 20
+                y_offset = -60
+                
+                win_w = self.kline_detail_win.width() or 220
+                win_h = self.kline_detail_win.height() or 130
+                
+                target_x = global_mouse_pos.x() + x_offset
+                target_y = global_mouse_pos.y() + y_offset
+                
+                screen = QApplication.primaryScreen()
+                if screen:
+                    s_rect = screen.availableGeometry()
+                    if target_x + win_w > s_rect.right() - 10:
+                        target_x = global_mouse_pos.x() - win_w - 20
+                    if target_y + win_h > s_rect.bottom() - 10:
+                        target_y = s_rect.bottom() - win_h - 10
+                    if target_y < s_rect.top() + 10:
+                        target_y = s_rect.top() + 10
+                
+                self.kline_detail_win.move(target_x, target_y)
+            except Exception:
+                pass
+
+        if not self.kline_detail_win.isVisible():
+            self.kline_detail_win.show()
+
+    def save_detail_window_position(self):
+        """持久化浮窗详情位置坐标"""
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            try:
+                pos = self.kline_detail_win.pos()
+                cfg_path = get_conf_path("window_config.json", get_app_root())
+                data = {}
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                data["ats_global_kline_detail_win_pos"] = [pos.x(), pos.y()]
+                data["ats_global_kline_detail_win_custom"] = self.kline_detail_win.is_custom_positioned
+                with CONFIG_FILE_LOCK:
+                    with open(cfg_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    def restore_detail_window_position(self):
+        """读取并恢复浮窗位置坐标"""
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            try:
+                cfg_path = get_conf_path("window_config.json", get_app_root())
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    pos = data.get("ats_global_kline_detail_win_pos")
+                    custom = data.get("ats_global_kline_detail_win_custom", False)
+                    if pos and len(pos) == 2:
+                        self.kline_detail_win.move(pos[0], pos[1])
+                        self.kline_detail_win.is_custom_positioned = bool(custom)
+            except Exception:
+                pass
 
     def _restore_settings(self):
         """恢复物理窗口几何尺寸、模式、BOLL状态、视区、h_splitter 水平比例及资讯面板显隐"""
@@ -2536,7 +2890,9 @@ class GlobalMarketKLineDialog(QDialog):
         QTimer.singleShot(80, self._auto_fit_y_range)
 
     def closeEvent(self, event):
-        """关闭事件，自动持久化配置与尺寸"""
+        """关闭事件，自动隐藏浮窗并持久化配置与尺寸"""
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            self.kline_detail_win.hide()
         self._save_settings()
         super().closeEvent(event)
 
@@ -2559,10 +2915,10 @@ class GlobalMarketKLineDialog(QDialog):
                             color: #000000;
                             font-weight: bold;
                             border: 1px solid #00E5FF;
-                            border-radius: 4px;
-                            padding: 4px 8px;
-                            font-size: 9pt;
-                            min-width: 60px;
+                            border-radius: 3px;
+                            padding: 2px 4px;
+                            font-size: 8.5pt;
+                            min-width: 45px;
                         }
                         QPushButton:hover {
                             background-color: #33ebff;
@@ -2575,11 +2931,11 @@ class GlobalMarketKLineDialog(QDialog):
                             background-color: #1e222d;
                             color: #787b86;
                             border: 1px solid #363c4e;
-                            border-radius: 4px;
-                            padding: 4px 8px;
-                            font-size: 9pt;
+                            border-radius: 3px;
+                            padding: 2px 4px;
+                            font-size: 8.5pt;
                             font-weight: bold;
-                            min-width: 55px;
+                            min-width: 40px;
                         }
                         QPushButton:hover {
                             background-color: #2a2e39;
@@ -2615,11 +2971,11 @@ class GlobalMarketKLineDialog(QDialog):
                         background-color: #1a2233;
                         color: #00F0FF;
                         border: 1px solid #00F0FF;
-                        border-radius: 4px;
-                        padding: 4px 8px;
-                        font-size: 9pt;
+                        border-radius: 3px;
+                        padding: 2px 4px;
+                        font-size: 8.5pt;
                         font-weight: bold;
-                        min-width: 55px;
+                        min-width: 42px;
                     }
                     QPushButton:hover {
                         background-color: #2962ff;
@@ -2633,10 +2989,10 @@ class GlobalMarketKLineDialog(QDialog):
                         background-color: #191d26;
                         color: #787b86;
                         border: 1px solid #363c4e;
-                        border-radius: 4px;
-                        padding: 4px 8px;
-                        font-size: 9pt;
-                        min-width: 55px;
+                        border-radius: 3px;
+                        padding: 2px 4px;
+                        font-size: 8.5pt;
+                        min-width: 42px;
                     }
                     QPushButton:hover {
                         background-color: #2a2e39;

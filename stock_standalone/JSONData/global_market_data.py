@@ -66,7 +66,14 @@ def log_market_msg(*args, **kwargs):
     """统一外盘数据日志打印 helper：仅当日志开关开启 (enable_market_logging=True) 时打印带 [HH:MM:SS] 时间戳的控制台调试日志"""
     if get_global_market_log_enabled():
         now_str = datetime.datetime.now().strftime("[%H:%M:%S]")
-        print(now_str, *args, **kwargs)
+        try:
+            print(now_str, *args, **kwargs)
+        except Exception:
+            try:
+                safe_args = [str(a).encode('gbk', errors='replace').decode('gbk') for a in args]
+                print(now_str, *safe_args, **kwargs)
+            except Exception:
+                pass
 
 
 def get_proxy_config() -> dict:
@@ -255,33 +262,58 @@ def get_target_market_date_str(symbol: str) -> str:
     return dt_target.strftime('%Y-%m-%d')
 
 
+def is_us_stock_symbol(symbol: str) -> bool:
+    """判断是否为美股股票/美股ETF标的 (需要美东时间 09:30 正式开盘后才产生今日 Daily K 线)"""
+    if not symbol:
+        return False
+    sym_upper = str(symbol).strip().upper()
+    US_STOCKS = {
+        'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ',
+        'NASDAQ', 'SP500'
+    }
+    return sym_upper in US_STOCKS or sym_upper.startswith('GB_') or sym_upper.startswith('US')
+
+
 def is_target_market_session_open(symbol: str) -> bool:
-    """判断指定标的所属目标市场当前是否处于【盘前/盘中/盘后】开盘活跃状态（即是否处于有动态 Bar 产生的交易窗口）
-    - 美股 (US/Eastern): 04:00 - 20:00 (EDT) 为盘前/盘中/盘后交易时段；20:00 - 次日 04:00 为完全闭市休市阶段
-    - A50 / 国内外汇 (Asia/Shanghai): 周一至周五 交易时间
+    """判断指定标的所属目标市场当前是否处于【正式开盘/盘中动态 Bar 产生】活跃窗口
+    - 美股股票/ETF (US Stocks): 美东时间 09:30 - 20:00 (EDT) 为常规正盘与盘后交易窗口。在美东 00:00 - 09:30 (即北京时间 12:00 - 21:30) 美股正盘未开盘前，session_open 为 False，绝对不生成/不追加未开盘日的临时日 K Bar！
+    - 全球大宗/期货 (OIL, GOLD, BRENT): 美东时间 04:00 - 20:00 活跃交易窗口
+    - A50 / 离岸RMB (Asia/Shanghai 时区): 北京时间 09:00 - 16:30, 17:00 - 03:00 (次日)
     """
     dt_target = get_target_market_datetime(symbol)
     tz_name = get_symbol_market_timezone(symbol)
     weekday = dt_target.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
     hour = dt_target.hour
+    minute = dt_target.minute
+    time_float = hour + minute / 60.0
 
     if tz_name == 'America/New_York':
         # 周末休市 (美东周五 20:00 后 至 周日 18:00 前)
         if weekday == 5:  # 周六
             return False
-        if weekday == 6 and hour < 18:  # 周日 18:00 前
+        if weekday == 6 and time_float < 18.0:  # 周日 18:00 前
             return False
-        if weekday == 4 and hour >= 20:  # 周五 20:00 后
+        if weekday == 4 and time_float >= 20.0:  # 周五 20:00 后
             return False
 
-        # 工作日：美东时间 04:00 (盘前) 至 20:00 (盘后) 为开盘/活跃交易时段；20:00 ~ 04:00 闭市休盘
-        if 4 <= hour < 20:
-            return True
-        return False
+        # ⚡ 关键美股时区修复：美股股票/ETF 必须在美东时间 09:30 以后 (正式开盘) 至 20:00 (盘后) 才算 session_open！
+        # 在 00:00 - 09:30 (即北京时间 12:00 - 21:30)，美股正盘尚未开始， session_open = False，绝对不追加今日未开盘日K Bar！
+        if is_us_stock_symbol(symbol):
+            if 9.5 <= time_float < 20.0:
+                return True
+            return False
+        else:
+            # 大宗商品期货 / 现货黄金 / 外汇: 04:00 - 20:00 处于交易活跃期
+            if 4.0 <= time_float < 20.0:
+                return True
+            return False
     else:
+        # A50 / 离岸人民币 (Asia/Shanghai 时区)
         if weekday >= 5:
             return False
-        return True
+        if 9.0 <= time_float <= 16.5 or 17.0 <= time_float or time_float < 3.0:
+            return True
+        return False
 
 
 def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
@@ -586,7 +618,19 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
                         try:
                             price = float(parts[1])
                             pct = float(parts[2])
-                            quotes[code] = {'price': price, 'pct': pct, 'name': name}
+                            open_p = float(parts[5]) if len(parts) > 5 and float(parts[5]) > 0 else price
+                            high_p = float(parts[6]) if len(parts) > 6 and float(parts[6]) > 0 else max(price, open_p)
+                            low_p = float(parts[7]) if len(parts) > 7 and float(parts[7]) > 0 else min(price, open_p)
+                            prev_close = float(parts[26]) if len(parts) > 26 and float(parts[26]) > 0 else price
+                            quotes[code] = {
+                                'price': price,
+                                'pct': pct,
+                                'open': open_p,
+                                'high': high_p,
+                                'low': low_p,
+                                'prev_close': prev_close,
+                                'name': name
+                            }
                         except Exception:
                             pass
 
@@ -905,9 +949,19 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             
             # 追加目标市场今日最新实时 Bar
             prev_close = float(klines_copy[-1].get('close', effective_price))
-            open_p = prev_close * (1.0 + rt_pct / 100.0) if prev_close > 0 else effective_price
-            high_p = max(open_p, effective_price)
-            low_p = min(open_p, effective_price)
+            rt_open = float(rt.get('open', 0))
+            rt_high = float(rt.get('high', 0))
+            rt_low = float(rt.get('low', 0))
+
+            # 校验开盘价逻辑: 优先选真实开盘价 rt_open，如无开盘价则以昨日收盘价 prev_close 为平开锚点，绝对防范误推算
+            if rt_open > 0 and prev_close > 0 and 0.5 <= (rt_open / prev_close) <= 2.0:
+                open_p = rt_open
+            else:
+                open_p = prev_close
+
+            high_p = max([p for p in [open_p, effective_price, rt_high] if p > 0])
+            low_p = min([p for p in [open_p, effective_price, rt_low] if p > 0])
+
             new_bar = {
                 'date': target_today_str,
                 'open': round(open_p, 2),
@@ -1260,7 +1314,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
 
 
 def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yahoo') -> bool:
-    """强制将最新清洗后的 K 线数据写盘保存至 JSON 物理持久化文件"""
+    """强制将最新清洗后的 K 线数据写盘保存至 JSON 物理持久化文件 (物理剥离未闭市实时 Bar，绝不污染历史盘库)"""
     if not symbol or not klines:
         return False
 
@@ -1273,6 +1327,20 @@ def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yah
         if not clean_list:
             return False
 
+        # 🛡️ 物理防污染护盾：当目标市场正处于交易活跃期 (Session Open) 时，
+        # 不将尚未闭市清算的今日实时 Bar (date >= target_today) 写入历史 Daily 磁盘主库，
+        # 避免动态实盘合成数据污染历史 Daily K线。只落盘保存完结的 Daily 历史数据！
+        target_today = get_target_market_date_str(sym_upper)
+        session_open = is_target_market_session_open(sym_upper)
+
+        if session_open:
+            historical_only = [k for k in clean_list if k.get('date', '') < target_today]
+        else:
+            historical_only = clean_list
+
+        if not historical_only:
+            historical_only = clean_list
+
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         all_cache = {}
         if os.path.exists(cache_path):
@@ -1282,15 +1350,95 @@ def save_klines_to_disk_cache(symbol: str, klines: list, data_source: str = 'yah
             except Exception:
                 all_cache = {}
 
-        all_cache[sym_upper] = clean_list
+        all_cache[sym_upper] = historical_only
         with open(cache_path, 'w', encoding='utf-8') as f:
             json.dump(all_cache, f, ensure_ascii=False, indent=2)
 
-        log_market_msg(f"[GlobalMarketData] 物理落盘持久化保存 [{source_key}源] {sym_upper} K线 ({len(clean_list)} 条) -> {cache_path}")
+        log_market_msg(f"[GlobalMarketData] 物理落盘持久化保存 [{source_key}源] {sym_upper} K线 ({len(historical_only)} 条) -> {cache_path}")
         return True
     except Exception as ex:
         log_market_msg(f"[GlobalMarketData] 物理落盘 Save 异常 ({sym_upper}): {ex}")
         return False
+
+
+def repair_disk_kline_caches() -> dict:
+    """物理磁盘 K 线缓存全量自愈与清理引擎 (Scrub corrupted entries & synthetic bars from disk)"""
+    repaired_stats = {}
+    EXPECTED_SYMBOL_RANGES = {
+        'AAPL': (100.0, 350.0),
+        'MSFT': (250.0, 700.0),
+        'NVDA': (20.0, 350.0),
+        'GOOGL': (60.0, 300.0),
+        'AMZN': (60.0, 300.0),
+        'META': (100.0, 900.0),
+        'TSLA': (80.0, 600.0),
+        'MU': (30.0, 250.0),
+        'SOXX': (100.0, 450.0),
+        'QQQ': (200.0, 700.0),
+        'OIL': (20.0, 180.0),
+        'BRENT': (20.0, 180.0),
+        'GOLD': (1000.0, 4000.0),
+        'A50': (8.0, 50.0),
+        'USDCNH': (5.0, 10.0),
+    }
+
+    for src in ['yahoo', 'sina']:
+        cache_path = get_kline_cache_file_path().replace(".json", f"_{src}.json")
+        if not os.path.exists(cache_path):
+            continue
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                all_cache = json.load(f)
+            if not isinstance(all_cache, dict):
+                continue
+            
+            modified = False
+            for sym, klist in list(all_cache.items()):
+                if not klist or not isinstance(klist, list):
+                    continue
+                sym_u = sym.strip().upper()
+                clean = sanitize_klines_for_symbol(sym_u, klist)
+                target_today = get_target_market_date_str(sym_u)
+                session_open = is_target_market_session_open(sym_u)
+
+                # 1. 剔除原油商品中混入的人民币 (sc0 ~490RMB) 脏数据点
+                if sym_u in ['OIL', 'BRENT']:
+                    clean = [k for k in clean if float(k.get('close', 0)) < 200.0]
+
+                # 2. 剔除未闭市时写入磁盘的实时 Bar
+                if session_open:
+                    clean = [k for k in clean if k.get('date', '') < target_today]
+                
+                # 3. 🛡️ 跨标的污染检视: 检查价格数量级中枢，若严重偏离该标的合理区间则说明遭遇了异步竞争写错，全量剔除重装！
+                if clean and sym_u in EXPECTED_SYMBOL_RANGES:
+                    closes = sorted([float(k.get('close', 0)) for k in clean if float(k.get('close', 0)) > 0])
+                    if closes:
+                        med_close = closes[len(closes) // 2]
+                        min_p, max_p = EXPECTED_SYMBOL_RANGES[sym_u]
+                        if med_close < min_p or med_close > max_p:
+                            del all_cache[sym]
+                            modified = True
+                            repaired_stats[f"{src}_{sym_u}"] = f"PURGED_CROSS_POLLUTED (med_close={med_close:.2f} not in [{min_p}, {max_p}])"
+                            log_market_msg(f"[GlobalMarketData] 🛡️ 成功清除 [{src}] 物理盘库中被跨标的污染的脏记录: {sym_u} (中枢价={med_close:.2f} 不在合理区间 [{min_p}, {max_p}])")
+                            continue
+
+                if len(clean) != len(klist):
+                    all_cache[sym] = clean
+                    modified = True
+                    repaired_stats[f"{src}_{sym_u}"] = f"{len(klist)} -> {len(clean)}"
+            
+            if modified:
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    json.dump(all_cache, f, ensure_ascii=False, indent=2)
+                log_market_msg(f"[GlobalMarketData] 自愈物理磁盘 [{src}] K线缓存成功 ({len(repaired_stats)} 项修正)")
+        except Exception as ex:
+            log_market_msg(f"[GlobalMarketData] 自愈物理磁盘 [{src}] 异常: {ex}")
+    
+    return repaired_stats
+
+
+# 启动时自动物理清理磁盘脏数据
+repair_disk_kline_caches()
 
 
 def get_related_symbols(symbol: str) -> list:
