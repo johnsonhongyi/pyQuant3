@@ -1965,14 +1965,15 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._force_show_and_top()
             
     def _hide_tray_message_window(self):
-        """物理将 QTrayIconMessageWindow 原生遮罩窗口移出屏幕外部(-10000, -10000)并强行隐蔽，彻底消灭白屏遮罩"""
+        """物理将 QTrayIconMessageWindow 与 PyInstaller Onefile Hidden Window 等后台辅助遮罩窗口移出屏幕外部(-10000, -10000)并强行隐蔽，彻底消灭打包后的白屏遮罩"""
         try:
             import win32gui, win32con
-            def _kill_tray_wnd(hwnd, _):
+            def _kill_aux_wnd(hwnd, _):
                 if win32gui.IsWindow(hwnd):
                     title = win32gui.GetWindowText(hwnd) or ""
                     cls = win32gui.GetClassName(hwnd) or ""
-                    if "QTrayIconMessageWindow" in title or "QTrayIconMessageWindow" in cls:
+                    if any(k in title for k in ("QTrayIconMessageWindow", "PyInstaller", "Hidden Window")) or \
+                       any(k in cls for k in ("QTrayIconMessageWindow", "PyInstaller", "Hidden Window")):
                         win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
                         win32gui.SetWindowPos(hwnd, 0, -10000, -10000, 0, 0,
                                             win32con.SWP_HIDEWINDOW | win32con.SWP_NOACTIVATE | win32con.SWP_NOZORDER)
@@ -1981,10 +1982,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             main_hwnd = int(self.winId()) if hasattr(self, 'winId') and self.winId() else 0
             if main_hwnd:
                 try:
-                    win32gui.EnumChildWindows(main_hwnd, _kill_tray_wnd, None)
+                    win32gui.EnumChildWindows(main_hwnd, _kill_aux_wnd, None)
                 except Exception:
                     pass
-            win32gui.EnumWindows(_kill_tray_wnd, None)
+            win32gui.EnumWindows(_kill_aux_wnd, None)
         except Exception:
             pass
 
