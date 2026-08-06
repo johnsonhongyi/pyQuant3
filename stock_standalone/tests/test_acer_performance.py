@@ -16,7 +16,9 @@ if parent_dir not in sys.path:
 if webtools_dir not in sys.path:
     sys.path.insert(0, webtools_dir)
 
-from window_manager.core import AcerPerformanceController, ConfigManager
+from window_manager.core import (
+    AcerPerformanceController, ConfigManager, get_system_uptime, is_system_cold_boot
+)
 
 def test_acer_controller_support():
     """测试 Acer 性能控制器底层硬件支持度检测与安全兜底"""
@@ -31,6 +33,27 @@ def test_acer_controller_support():
     assert "coolboost" in status
     assert "overclock_mode" in status
     assert "fan_mode" in status
+
+def test_system_uptime_and_cold_boot(monkeypatch=None):
+    """测试系统 Uptime 计算与开机冷启动 (System Cold Boot) 判定引擎"""
+    uptime = get_system_uptime()
+    is_cold = is_system_cold_boot(300)
+    print(f"[TEST] Real System Uptime: {uptime:.2f} s, Is Cold Boot (<300s): {is_cold}")
+    assert isinstance(uptime, float)
+    assert uptime >= 0.0
+    assert isinstance(is_cold, bool)
+
+    # 通过猴子补丁/直接逻辑校验阈值判定
+    from window_manager import core
+    orig_fn = core.get_system_uptime
+    try:
+        core.get_system_uptime = lambda: 15.0
+        assert is_system_cold_boot(300) is True
+
+        core.get_system_uptime = lambda: 1000.0
+        assert is_system_cold_boot(300) is False
+    finally:
+        core.get_system_uptime = orig_fn
 
 def test_acer_config_persistence():
     """测试 ConfigManager 对 acer_performance 配置段的读写与默认自愈功能"""
@@ -92,6 +115,7 @@ def test_acer_apply_profile():
 
 if __name__ == "__main__":
     test_acer_controller_support()
+    test_system_uptime_and_cold_boot()
     test_acer_config_persistence()
     test_acer_apply_profile()
     print("ALL ACER PERFORMANCE CONTROLLER TESTS PASSED!")

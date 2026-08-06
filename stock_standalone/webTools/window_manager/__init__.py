@@ -21,7 +21,9 @@ from .core import (
     check_and_activate_existing_instance,
     is_autostart_enabled,
     set_autostart_enabled,
-    AcerPerformanceController
+    AcerPerformanceController,
+    get_system_uptime,
+    is_system_cold_boot
 )
 
 from .ui import (
@@ -47,6 +49,8 @@ __all__ = [
     'is_autostart_enabled',
     'set_autostart_enabled',
     'AcerPerformanceController',
+    'get_system_uptime',
+    'is_system_cold_boot',
     'WindowPosManagerUI',
     'run_ui'
 ]

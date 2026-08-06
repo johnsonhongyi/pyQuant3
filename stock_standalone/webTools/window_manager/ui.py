@@ -1706,15 +1706,27 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
             self.log(f"[Route Startup] {self.startup_route_msg}")
             
-        # 自动探测与在后台应用 Acer 硬件性能模式配置 (结合 startup_delay_seconds 秒数延迟与异步线程)
+        # 自动探测与在后台应用 Acer 硬件性能模式配置 (结合 system uptime 开机冷启动与 startup_delay_seconds 秒数延迟)
         try:
             acer_cfg = self.config_manager.get_acer_performance_config()
             if acer_cfg.get("auto_apply_on_startup", True):
-                startup_delay = int(acer_cfg.get("startup_delay_seconds", 3))
-                delay_ms = max(0, startup_delay * 1000)
-                if startup_delay > 0:
-                    self.log(f"⏳ [AutoStart] 启动延迟引擎已就绪，将在 {startup_delay} 秒后自动调度应用 Acer 性能模式...")
-                QtCore.QTimer.singleShot(delay_ms, lambda: self.apply_acer_performance_async(acer_cfg, custom_msg_prefix="启动自动调度性能模式"))
+                user_delay = int(acer_cfg.get("startup_delay_seconds", 10))
+                uptime = core.get_system_uptime()
+                sys_cold = core.is_system_cold_boot(300)
+
+                if sys_cold:
+                    # 系统开机冷启动 (System Uptime < 300s):
+                    # Windows Acer 系统服务 (PSSvc.exe) 需约 20-30s 完成开机就绪
+                    cold_target_delay = 25
+                    actual_delay = max(user_delay, cold_target_delay)
+                    self.log(f"⏳ [AutoStart] 检测到系统刚开机 (系统 Uptime: {uptime:.1f}s < 300s 门槛)，自动将 Acer 调度延迟调整为 {actual_delay} 秒，以等待 Windows 硬件驱动与 Acer 服务彻底就绪...")
+                else:
+                    actual_delay = max(0, user_delay)
+                    if actual_delay > 0:
+                        self.log(f"⏳ [AutoStart] 启动延迟引擎已就绪 (系统 Uptime: {uptime:.1f}s)，将在 {actual_delay} 秒后自动调度应用 Acer 性能模式...")
+
+                delay_ms = max(0, int(actual_delay * 1000))
+                QtCore.QTimer.singleShot(delay_ms, lambda: self.apply_acer_performance_async(acer_cfg, custom_msg_prefix="开机自动应用 Acer 性能预设"))
         except Exception as e:
             logger.error(f"启动自动应用 Acer 性能模式初始化异常: {e}")
 
@@ -1756,13 +1768,16 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.log(f"[SingleInstance] 管道数据解析异常: {e}")
 
     def apply_acer_performance_async(self, profile: dict = None, custom_msg_prefix: str = ""):
-        """在后台守护线程中异步应用 Acer 性能配置 (用于托盘右键极速响应)"""
+        """在后台守护线程中异步应用 Acer 性能配置 (用于托盘右键极速响应与全流程详细打点)"""
         def _bg_worker():
             try:
                 controller = core.AcerPerformanceController()
                 if controller.is_supported():
                     target_profile = profile if profile is not None else self.config_manager.get_acer_performance_config()
-                    ok, acer_msg = controller.apply_performance_profile(target_profile)
+                    def _log_cb(msg):
+                        self.log_signal.emit(f"[Acer Hardware] {msg}")
+
+                    ok, acer_msg = controller.apply_performance_profile(target_profile, log_cb=_log_cb)
                     prefix = custom_msg_prefix or "应用 Acer 性能模式"
                     msg_str = f"[Acer Hardware] {prefix}: {acer_msg}"
                 else:
