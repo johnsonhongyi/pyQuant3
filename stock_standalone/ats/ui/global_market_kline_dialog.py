@@ -23,8 +23,8 @@ from JSONData.global_market_data import (
     get_related_symbols, fetch_global_market_quotes,
     fetch_symbol_financial_news, get_proxy_info_str,
     delete_news_item_by_id, save_news_hotlist_json,
-    _auto_translate_en_text_to_cn,
-    log_market_msg
+    _auto_translate_en_text_to_cn, save_klines_to_disk_cache,
+    sanitize_klines_for_symbol, log_market_msg
 )
 from sys_utils import get_app_root, get_conf_path
 from ats.ui.styles import CONFIG_FILE_LOCK
@@ -58,7 +58,9 @@ def get_global_stock_name_map(parent_dialog=None) -> tuple:
     """
     global _GLOBAL_STOCK_NAME_MAP_CACHE
     if _GLOBAL_STOCK_NAME_MAP_CACHE is not None:
-        return _GLOBAL_STOCK_NAME_MAP_CACHE
+        c_map, n_map, _ = _GLOBAL_STOCK_NAME_MAP_CACHE
+        if len(n_map) > 100:
+            return _GLOBAL_STOCK_NAME_MAP_CACHE
 
     code_to_name = {}
     name_to_code = {}
@@ -80,8 +82,8 @@ def get_global_stock_name_map(parent_dialog=None) -> tuple:
         code_to_name[c] = n
         name_to_code[n] = c
 
+    main_app = None
     try:
-        main_app = None
         curr = parent_dialog
         while curr:
             if hasattr(curr, 'main_app'):
@@ -100,6 +102,16 @@ def get_global_stock_name_map(parent_dialog=None) -> tuple:
                     break
 
         if main_app:
+            # 1) 从 name_cache 获取全量映射
+            if hasattr(main_app, 'name_cache') and isinstance(main_app.name_cache, dict):
+                for c_raw, n_raw in main_app.name_cache.items():
+                    c_str = str(c_raw).zfill(6)
+                    n_str = str(n_raw).strip()
+                    if n_str and n_str != '未知' and len(n_str) >= 2:
+                        code_to_name[c_str] = n_str
+                        name_to_code[n_str] = c_str
+
+            # 2) 从 DataFrame 获取全量映射
             for attr in ('current_df', 'df_realtime', 'df_all'):
                 if hasattr(main_app, attr):
                     df = getattr(main_app, attr)
@@ -112,6 +124,13 @@ def get_global_stock_name_map(parent_dialog=None) -> tuple:
                                 name_to_code[n_str] = c_str
     except Exception:
         pass
+
+    # 若未找到 main_app，但此前已有注入的 Cache，直接回退复用
+    if not main_app and _GLOBAL_STOCK_NAME_MAP_CACHE is not None:
+        c_map, n_map, _ = _GLOBAL_STOCK_NAME_MAP_CACHE
+        for c, n in c_map.items():
+            code_to_name[c] = n
+            name_to_code[n] = c
 
     import re
     valid_names = sorted([n for n in name_to_code.keys() if len(n) >= 2], key=lambda x: len(x), reverse=True)
@@ -159,8 +178,8 @@ def extract_stock_entities_from_text(text: str, parent_dialog=None) -> list:
 
 def highlight_stock_names_in_html(text: str, parent_dialog=None) -> str:
     """
-    将文本中识别出的股票名称打上 HTML 超链接标签 (stock://CODE|NAME)
-    直接在正文/标题标记位上支持鼠标点击联动，彻底解决底部按钮挤压折叠缺陷
+    将文本中识别出的所有股票名称打上 HTML 超链接标签 (stock://CODE|NAME)
+    采用 HTML 标签隔离与 C 正则高效扫描，彻底解决后续个股被错误跳过与高亮失效缺陷
     """
     if not text:
         return text
@@ -169,19 +188,32 @@ def highlight_stock_names_in_html(text: str, parent_dialog=None) -> str:
     if not entities:
         return text
 
-    highlighted = text
-    for ent in entities:
-        name = ent['name']
-        code = ent['code']
-        if not name or name in ['原油', '黄金']:
-            continue
-        if f">{name}<" in highlighted or f"href=" in highlighted or f"style=" in highlighted:
-            # 避免对已被 HTML 标签修饰过的文本重复替换
-            continue
-        replacement = f"<a href='stock://{code}|{name}' style='color:#00ff88; text-decoration:underline; font-weight:bold; padding:0 2px;'>{name}</a>"
-        highlighted = highlighted.replace(name, replacement)
+    valid_entities = [ent for ent in entities if ent.get('name') and ent['name'] not in ('原油', '黄金')]
+    if not valid_entities:
+        return text
 
-    return highlighted
+    name_code_map = {ent['name']: ent['code'] for ent in valid_entities}
+    sorted_names = sorted(name_code_map.keys(), key=lambda x: len(x), reverse=True)
+
+    import re
+    pattern = r'(' + r'|'.join([re.escape(n) for n in sorted_names]) + r')'
+    regex = re.compile(pattern)
+
+    def _replace_func(match):
+        matched_name = match.group(1)
+        code = name_code_map.get(matched_name, '')
+        return f"<a href='stock://{code}|{matched_name}' style='color:#00ff88; text-decoration:underline; font-weight:bold; padding:0 2px;'>{matched_name}</a>"
+
+    # 按 HTML 标签 split 隔离，仅在纯文本节点中高亮股票实体名称
+    tokens = re.split(r'(<[^>]+>)', text)
+    new_tokens = []
+    for token in tokens:
+        if token.startswith('<') and token.endswith('>'):
+            new_tokens.append(token)
+        else:
+            new_tokens.append(regex.sub(_replace_func, token))
+
+    return "".join(new_tokens)
 
 
 def trigger_stock_linkage(code: str, name: str, parent_dialog=None):
@@ -1145,6 +1177,51 @@ class GlobalMarketKLineDialog(QDialog):
         self.btn_fib_toggle.clicked.connect(self._toggle_fib_mode)
         header_layout.addWidget(self.btn_fib_toggle)
 
+        # 🔄 刷新 K 线数据与物理持久化落盘按键
+        self.btn_refresh_kline = QPushButton("🔄 刷新")
+        self.btn_refresh_kline.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh_kline.setToolTip("在线强制拉取最新 K 线数据并物理写盘持久化")
+        self.btn_refresh_kline.setStyleSheet("""
+            QPushButton {
+                background-color: #0052cc;
+                color: #ffffff;
+                border: 1px solid #0065ff;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-width: 55px;
+            }
+            QPushButton:hover {
+                background-color: #0065ff;
+            }
+        """)
+        self.btn_refresh_kline.clicked.connect(self._on_manual_refresh_kline)
+        header_layout.addWidget(self.btn_refresh_kline)
+
+        # 🎯 视区 100% 复位按键 (Reset 坐标轴伸缩与清理离群脏数据)
+        self.btn_reset_view = QPushButton("🎯 复位")
+        self.btn_reset_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_view.setToolTip("恢复 100% 默认视区、消除坐标轴挤压缩放并自动清洗离群脏 Bar")
+        self.btn_reset_view.setStyleSheet("""
+            QPushButton {
+                background-color: #1b3a2b;
+                color: #00E676;
+                border: 1px solid #00E676;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 9pt;
+                font-weight: bold;
+                min-width: 55px;
+            }
+            QPushButton:hover {
+                background-color: #26543e;
+                color: #ffffff;
+            }
+        """)
+        self.btn_reset_view.clicked.connect(self._reset_chart_view)
+        header_layout.addWidget(self.btn_reset_view)
+
         # 📰 关联资讯展开/收起控制按键
         self.btn_news_toggle = QPushButton("资讯:收起")
         self.btn_news_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1760,6 +1837,36 @@ class GlobalMarketKLineDialog(QDialog):
         force_flag = True if is_market_active_time() else (False if (cached_klines and len(cached_klines) >= 5) else True)
         self._trigger_async_load(force_refresh=force_flag)
 
+    def _on_manual_refresh_kline(self):
+        """点击【🔄 刷新】按键：在线强制抓取最新 K 线，清洗并写盘物理持久化"""
+        if hasattr(self, 'lbl_info'):
+            self.lbl_info.setText(f"⏳ 正在在线请求抓取 [{self.data_source.upper()}源] 最新 {self.symbol} K 线数据并写盘持久化...")
+        if hasattr(self, 'btn_refresh_kline'):
+            self.btn_refresh_kline.setEnabled(False)
+            self.btn_refresh_kline.setText("⏳ 刷新中")
+
+        self._trigger_async_load(force_refresh=True)
+
+    def _reset_chart_view(self):
+        """点击【🎯 复位】按键：自动清洗离群脏 Bar，100% 恢复最佳默认伸缩坐标视区"""
+        if self.klines:
+            cleaned = sanitize_klines_for_symbol(self.symbol, self.klines)
+            if cleaned:
+                self.klines = cleaned
+                # 强力落盘物理持久化
+                save_klines_to_disk_cache(self.symbol, self.klines, self.data_source)
+                self._draw_chart()
+
+        # 重置画板坐标系为 100% 自动范围
+        if hasattr(self, 'plot_widget') and self.plot_widget:
+            self.plot_widget.enableAutoRange()
+        if hasattr(self, 'vol_plot_widget') and self.vol_plot_widget:
+            self.vol_plot_widget.enableAutoRange()
+
+        self._focus_recent_60()
+        if hasattr(self, 'lbl_info'):
+            self.lbl_info.setText("🎯 [已 100% 复位视区] 坐标轴伸缩与自适应高度已重置为默认最佳比例，离群脏数据已自动清洗并持久化")
+
     def _trigger_async_load(self, force_refresh: bool = False):
         if self.worker and self.worker.isRunning():
             return
@@ -1772,10 +1879,17 @@ class GlobalMarketKLineDialog(QDialog):
         self.worker.start()
 
     def _on_worker_finished(self, klines: list, err_msg: str):
+        if hasattr(self, 'btn_refresh_kline'):
+            self.btn_refresh_kline.setEnabled(True)
+            self.btn_refresh_kline.setText("🔄 刷新")
+
         cache_path = get_kline_cache_file_path()
         if klines and len(klines) >= 5:
             self.klines = klines
-            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载完成 ({len(klines)} 条)，物理文件: {cache_path}")
+            # 🛡️ 核心保障：抓取成功后立即强制物理落盘持久化至 JSON 文件！
+            save_klines_to_disk_cache(self.symbol, klines, self.data_source)
+
+            log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载完成 ({len(klines)} 条)，物理写盘成功: {cache_path}")
             self._draw_chart()
             self._apply_zoom_mode()
             # 主 K 线数据就绪后再触发关联品种加载
@@ -1784,7 +1898,7 @@ class GlobalMarketKLineDialog(QDialog):
             last_close = float(klines[-1].get('close', 0.0)) if klines else 0.0
             last_pct = float(klines[-1].get('pct', 0.0)) if klines else 0.0
             if hasattr(self, 'lbl_info'):
-                self.lbl_info.setText(f"✅ [{self.data_source.upper()}源] K 线数据加载成功: {len(klines)} 条日K线 (最新切片: {last_date}, 点位: {last_close:.2f}, {last_pct:+.2f}%)")
+                self.lbl_info.setText(f"✅ [{self.data_source.upper()}源] K 线数据刷新并已成功物理落盘: {len(klines)} 条 (最新切片: {last_date}, 点位: {last_close:.2f}, {last_pct:+.2f}%)")
         elif not self.klines:
             log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} K线数据加载失败: {err_msg} | 持久化路径: {cache_path}")
             if hasattr(self, 'lbl_info'):

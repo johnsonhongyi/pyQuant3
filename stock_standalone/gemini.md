@@ -1,3 +1,24 @@
+## 2026-08-06 11:35
+- [x] **实现通达信 (TDX) / 黄金实盘信号串行轮播队列与 Toast 原始样式复原 (`ats/alert_notifier.py`, `ats/signal_ledger.py`, `scratch/test_tdx_queue_and_dedup.py`)**：
+    - [x] **100% 恢复 Toast 原始优雅外观与右下角固定定位**：彻底撤销多卡片瀑布平移，完全复原 `InAppToastWidget` 原始不透明深蓝背景 (`#0f172a`) + 霓虹蓝边框 (`#00b0ff`) 样式，且弹窗位置固定置于屏幕右下角（`s_geom.right() - card_w - 15`），显示风格完全未作改变。
+    - [x] **串行轮播队列引擎 (Serial Notification Queue)**：
+        - 盘中集中收到的多个信号不再一次性全部弹出，而是被有序压入 `_notify_queue` 队列中；
+        - 当前弹窗弹出并同步触发语音播报，根据语音与文本长度自适应展示时间；
+        - 当当前信号播放+展示完毕后，**自动平滑关闭当前弹窗**，接着延迟 300ms **顺畅弹出下一个信号并语音播报下一个**，实现真正的“一个一个串行轮播”！
+    - [x] **`SignalLedger` 信号指纹今日精准去重 (Deduplication Guard)**：依赖 `ledger.is_notified_today(code_str, reason)` 对 `(代码, 信号标记)` 组合进行去重记录（如长城军工从 `10均死叉5` 变为 `5均金叉10` 属于新信号组合放行，而完全相同的信号第二次触发时优雅去重拦截）。
+    - [x] **全流程自测自检 100% 校验通过**：编写 `scratch/test_tdx_queue_and_dedup.py` 对去重防刷、`_is_busy` 状态变迁、`_notify_queue` 排队与一个一个切入轮播全流程进行模拟断言自测，全量 2 项单元测试 100% PASSED！
+
+## 2026-08-06 11:20
+- [x] **彻底根治外盘 K 线弹窗 (A50 等) 异源/实时 API 点位数量级拉爆 Y 轴 Bug，并新增【🔄 刷新】与【🎯 复位】(Reset) 强力物理落盘持久化功能 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_magnitude_and_reset.py`)**：
+    - [x] **根因精准解构**：A50 历史 K 线 (来自于 Yahoo / 港币 ETF) 的收盘价在 `16.98` 左右；而盘中实时行情切片 (从新浪 `hf_CHA50CFD` API) 获取的真实指数点位为 `14943.97`。原本的 `append_realtime_bar_if_needed` 未做数量级对比，直接将 `14943.97` 填入当日 K 线，生成了一根处于 1.5 万高空的天际柱！这导致 pyqtgraph 的 Y 轴自适应缩放范围被强行拉大至 0~15000，正常的 16~18 点位 K 线被极限压缩成贴在底部的细线，只有用户手动拉大 Y 轴才能勉强看到。
+    - [x] **`sanitize_klines_for_symbol` 中位数数量级护盾 (Median Magnitude Guard)**：在 `sanitize_klines_for_symbol` 中植入中位数离群值校验算法 (`valid_closes` 中位数比对 `0.25 <= ratio <= 4.0`)。若混入诸如 `14943.97` 等与中枢 `17.2` 相差几千倍的脏点，自动剥离剔除，恢复正常平滑的 Y 轴坐标中枢。
+    - [x] **`append_realtime_bar_if_needed` 跨数量级实时转换**：强行比对 `rt_price` 与 `last_close` 数量级。当 `ratio > 3.0` 或 `< 0.33` 时，禁止直接覆盖，改用按实时涨跌百分比 `rt_pct` 自动折算同数量级合理点位 (`last_close * (1.0 + rt_pct / 100.0)`)。既真实继承盘中变动，又绝对不破坏数量级。
+    - [x] **顶部工具栏新增【🔄 刷新】与【🎯 复位】(Reset) 物理写盘持久化按键**：
+        - 在外盘 K 线弹窗顶部 Header 工具栏右侧新增 **`🔄 刷新` (`btn_refresh_kline`)** 与 **`🎯 复位` (`btn_reset_view`)** 按钮。
+        - 点击 **`🔄 刷新`**：在线强制拉取最新 K 线，清洗后自动调用 `save_klines_to_disk_cache` **物理落盘持久化至 JSON 文件**。
+        - 点击 **`🎯 复位` (Reset)**：物理剥离离群脏 Bar，自动调用 `enableAutoRange()` 并复位视区至 60 日/120 日最佳比例，同时同步保存至磁盘，瞬间恢复 100% 优雅默认显示。
+    - [x] **单元测试 100% 校验通过**：`scratch/test_kline_magnitude_and_reset.py` 数量级清洗与物理写盘落盘断言测试 100% 成功通过！
+
 ## 2026-08-06 01:55
 - [x] **彻底根治人气共振 GUI (`popularity_resonance_gui.py`) 动态端口 IPC 行情同步高延迟超时丢包 Bug (`popularity_resonance_gui.py`, `scratch/test_delayed_dynamic_port.py`)**：
     - [x] **根因解构与时序分析**：昨晚更新的 `popularity_resonance_gui.py` 动态端口 IPC 请求 `request_dynamic_ipc_sync` 默认 timeout 设定为过于激进的 1.8 秒。实盘中 `instock_MonitorTK.py` 处理全量 5500+ 行行情快照并执行 `send_df` Socket 推送的过程耗时约为 1.5s~3.5s。当服务端延迟推送时，客户端 1.8 秒超时提前退出并关闭了临时监听端口，导致后续推送连接失败，用户界面显示“未接收到数据”且日志打印失败。
