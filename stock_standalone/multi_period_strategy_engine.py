@@ -20,7 +20,7 @@ def get_global_ipc_sync_manager():
                     mgr = IPCSyncManager(port=p, logger=logger)
                     mgr.start()
                     if getattr(mgr, '_bind_event', None):
-                        mgr._bind_event.wait(timeout=0.5)
+                        mgr._bind_event.wait(timeout=3.0)
                     if getattr(mgr, 'is_bound', False):
                         _global_ipc_manager = mgr
                         logger.info(f"⚡ [IPC 同步单例] 成功绑定并启动于端口 Port={p}")
@@ -71,13 +71,14 @@ class MultiPeriodStrategyEngine:
                 expanded_cols.add(c[:-2])
         return expanded_cols
 
-    def ensure_strategy_ipc_columns(self, df: pd.DataFrame, strategy_expr: str = "", force_refresh: bool = False, force_refresh_ipc: bool = False) -> pd.DataFrame:
+    def ensure_strategy_ipc_columns(self, df: pd.DataFrame, strategy_expr: str = "", force_refresh: bool = False, force_refresh_ipc: bool = False, timeout: float = 8.0) -> pd.DataFrame:
         """
         通过 IPC 工厂模式按需抓取策略中所需但 df 中缺失或为初始缺省值的列。
         性能与稳定性规则:
         1. 向量化匹配 (Vectorized Reindex)，全面替代逐列 Python 循环与字典构建；
         2. 一次性批量落盘并巩固 BlockManager (consolidate)，彻底防范 pandas BlockManager Gaps 碎片化异常；
-        3. 若列已存在且无需重刷，秒级跳过直接返回。
+        3. 若列已存在且无需重刷，秒级跳过直接返回；
+        4. 包含 8.0 秒宽松超时等待门槛与全量数据 (>=3000行) 接收校验。
         """
         if df is None or df.empty:
             return df
@@ -120,17 +121,18 @@ class MultiPeriodStrategyEngine:
                     is_work_time = False
 
                 cache_expired = (now_ts - last_recv > 900.0) if is_work_time else False
-                has_valid_ipc = (ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20)
+                has_valid_ipc = (ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20 and len(ipc_df) >= 3000)
 
                 need_socket_sync = (not has_valid_ipc or cache_expired or force_refresh_ipc)
                 if need_socket_sync:
                     ipc_mgr.request_full_sync()
-                    for _ in range(25):
+                    max_ticks = int(timeout / 0.1)
+                    for _ in range(max_ticks):
                         time.sleep(0.1)
                         ipc_df = ipc_mgr.get_current_df()
-                        if ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20:
+                        if ipc_df is not None and not ipc_df.empty and len(ipc_df.columns) >= 20 and len(ipc_df) >= 3000:
                             last_recv = getattr(ipc_mgr, 'last_recv_t', time.time())
-                            logger.info(f"⚡ [IPC 工厂单例缓存] 成功完整获取 {len(ipc_df)} 行 {len(ipc_df.columns)} 列实时行情快照至策略引擎")
+                            logger.info(f"⚡ [IPC 工厂单例缓存] 成功完整获取全量 {len(ipc_df)} 行 {len(ipc_df.columns)} 列实时行情快照至策略引擎")
                             break
 
                 if ipc_df is not None and not ipc_df.empty:

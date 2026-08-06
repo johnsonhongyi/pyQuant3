@@ -191,6 +191,7 @@ class GlobalMarketPanel(QWidget):
             config_key="ats_global_quotes_table_state",
             default_widths=[145, 85, 110, 110, 185, 220]
         )
+        self.tbl_quotes.itemClicked.connect(self._on_quotes_table_clicked)
         self.tbl_quotes.itemDoubleClicked.connect(self._on_quotes_table_double_clicked)
         self.tbl_quotes.customContextMenuRequested.disconnect()
         self.tbl_quotes.customContextMenuRequested.connect(self._show_quotes_context_menu)
@@ -822,8 +823,21 @@ class GlobalMarketPanel(QWidget):
         except Exception as e:
             print(f"[GlobalMarketPanel] Save pinned sectors error: {e}")
 
+    def _on_quotes_table_clicked(self, item):
+        """单击外盘明细表格行，若 K 线弹窗已存在，即刻无缝切标的并强力最前显示"""
+        row = item.row()
+        sym_item = self.tbl_quotes.item(row, 1)
+        name_item = self.tbl_quotes.item(row, 0)
+        if sym_item and name_item:
+            symbol = sym_item.text().strip().replace("📌 ", "")
+            name = name_item.text().strip().replace("📌 ", "")
+            from PyQt6.sip import isdeleted
+            # 若已打开 K 线弹窗，单击任一 code 行即刻无缝同步切标的并最前显示！
+            if hasattr(self, "_kline_dialog") and self._kline_dialog and not isdeleted(self._kline_dialog) and self._kline_dialog.isVisible():
+                self._open_kline_dialog(symbol, name)
+
     def _on_quotes_table_double_clicked(self, item):
-        """双击外盘明细表格行，直接调起该资产 120 日 K 线图"""
+        """双击外盘明细表格行，直接调起该资产 120 日 K 线图并强力最前显示"""
         row = item.row()
         sym_item = self.tbl_quotes.item(row, 1)
         name_item = self.tbl_quotes.item(row, 0)
@@ -833,26 +847,42 @@ class GlobalMarketPanel(QWidget):
             self._open_kline_dialog(symbol, name)
 
     def _open_kline_dialog(self, symbol: str, name: str = ""):
-        """打开/平滑复用外盘个股与指数 120 日 K 线走势图 (0 毫秒秒开，彻底告别阻塞卡顿)"""
+        """打开/平滑复用外盘个股与指数 120 日 K 线走势图 (0 毫秒秒开，100% 恢复最小化并置顶激活最前显示)"""
         try:
             from ats.ui.global_market_kline_dialog import GlobalMarketKLineDialog
             from PyQt6.sip import isdeleted
+            from PyQt6.QtCore import QTimer
 
-            if hasattr(self, "_kline_dialog") and self._kline_dialog and not isdeleted(self._kline_dialog):
+            dlg = getattr(self, "_kline_dialog", None)
+            if dlg and not isdeleted(dlg):
                 try:
-                    self._kline_dialog.update_symbol(symbol, name)
-                    self._kline_dialog.show()
-                    self._kline_dialog.raise_()
-                    self._kline_dialog.activateWindow()
+                    # 1. 🛡️ 若窗口被最小化收起，强力还原为正常视区尺寸
+                    if dlg.isMinimized():
+                        dlg.showNormal()
+                    
+                    # 2. 0ms 无缝更新标的与 K 线数据
+                    dlg.update_symbol(symbol, name)
+                    
+                    # 3. ⚡ 强力最前显示 (Bring to Front) 与全方位激活
+                    dlg.show()
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    dlg.setFocus()
+
+                    # 4. 延迟 50ms 进行二次激活强化，突破 Windows 前台抢占拦截
+                    QTimer.singleShot(50, lambda: (dlg.raise_(), dlg.activateWindow()) if (dlg and not isdeleted(dlg)) else None)
                     return
                 except Exception as ex:
                     print(f"[GlobalMarketPanel] Reuse KLine dialog exception: {ex}")
                     self._kline_dialog = None
 
+            # 新建窗口并初始化最前显示
             self._kline_dialog = GlobalMarketKLineDialog(symbol, name, parent=self)
             self._kline_dialog.show()
             self._kline_dialog.raise_()
             self._kline_dialog.activateWindow()
+            self._kline_dialog.setFocus()
+            QTimer.singleShot(50, lambda: (self._kline_dialog.raise_(), self._kline_dialog.activateWindow()) if (hasattr(self, "_kline_dialog") and self._kline_dialog and not isdeleted(self._kline_dialog)) else None)
         except Exception as e:
             print(f"[GlobalMarketPanel] Open KLine dialog error: {e}")
 

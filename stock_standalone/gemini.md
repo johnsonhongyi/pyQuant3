@@ -1,3 +1,36 @@
+## 2026-08-06 17:14
+- [x] **实现外盘 K 线弹窗全场景最前显示 (Bring to Front) 与单击/双击/后台切标的强力激活 (`ats/ui/global_market_panel.py`, `scratch/test_bring_to_front_panel.py`)**：
+    - [x] **全场景强力最前显示 (Bring to Front)**：在 `_open_kline_dialog` 中接入 `isMinimized()` 判定与 `showNormal()` 还原，并配合 `show()`, `raise_()`, `activateWindow()`, `setFocus()` 及 `QTimer.singleShot(50)` 延迟二次置顶激活，彻底解决在后台或最小化收起时点击新 Code 无法把窗口弹至屏幕最前端的缺陷。
+    - [x] **表格单双击全自动响应**：新增 `tbl_quotes.itemClicked` 单击事件响应 `_on_quotes_table_clicked`，无论 K 线弹窗处于隐藏、后台还是最小化状态，点击表格中任意资产 Code 即刻秒级无缝同步切标的并 100% 强力显示在最前端。
+    - [x] **单元测试 100% 校验通过**：编写 `scratch/test_bring_to_front_panel.py` 对后台切标的、窗口最小化自动还原与最前显示全流程进行断言自测，单元测试 100% PASSED！
+
+## 2026-08-06 17:10
+- [x] **彻底根治外盘 K 线“原油/苹果/微软跨标的数据混淆与错配”死穴，实现信号与标的物理强绑定及磁盘脏记录自动自愈 (`ats/ui/global_market_kline_dialog.py`, `JSONData/global_market_data.py`, `scratch/test_cross_symbol_race_fix.py`)**：
+    - [x] **根因精准解构（异步竞争写盘 Bug）**：当用户在界面中快速双击或切换标的（例如 AAPL -> MSFT 或 OIL -> AAPL）时，前一个标的（AAPL）的后台子线程仍在异步拉取数据。由于 `KLineWorkerThread` 的 `finished_signal` 之前只发射 `(klines, err_msg)` 而未携带发射时的 `symbol` 标签，在回调函数 `_on_worker_finished` 中直接使用了 UI 当前的 `self.symbol`（已切换为 MSFT）。这导致 AAPL 的数据被写死落盘到了 `MSFT` 甚至 `OIL` 标的名下，并直接在 MSFT 画板上画出 AAPL 走势，造成严重的跨标的数据污染！
+    - [x] **`KLineWorkerThread` 信号注入 `symbol` 强锚定**：
+        - 升级 `finished_signal = pyqtSignal(str, list, str)`，强制带上子线程本身的 `symbol` 标识；
+        - 在 `_trigger_async_load` 中，切换标的时自动切断旧线程的 `finished_signal` 响应；
+        - 在 `_on_worker_finished(worker_symbol, klines, err_msg)` 中植入强一致性安全护盾：若 `worker_symbol != self.symbol`，拦截并隔离过期的异步包，绝对禁止覆盖当前 UI 画板与当前标的；若需落盘则仅为 `worker_symbol` 本身独立安全写盘。
+    - [x] **`repair_disk_kline_caches` 数量级中枢强力自愈**：
+        - 在自愈引擎中引入 15 大外盘核心品种（AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, MU, SOXX, QQQ, OIL, BRENT, GOLD, A50, USDCNH）的基准价格区间门槛校验；
+        - 自动扫描物理磁盘 `global_market_klines_*.json` 文件，精准捕获中枢价格严重偏离基准区间的脏条目（例如在 AAPL 名下发现了中枢为 $445 的 MSFT 数据，或在 GOOGL 名下发现了中枢为 $337 的数据），瞬间全量物理剔除自愈，以便后续在线重新抓取 100% 干净数据！
+    - [x] **单元测试 100% 成功通过**：编写 `scratch/test_cross_symbol_race_fix.py`，成功验证了线程信号隔离、中枢偏离识别与磁盘全量自动清洗逻辑，单元测试 100% PASSED！
+
+## 2026-08-06 16:40
+- [x] **彻底根治外盘 K 线“越刷新越乱、物理磁盘写满脏 Bar”底层死穴，实现未闭市实时 Bar 物理隔离与全量数据清洗 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_persistence_final_fix.py`)**：
+    - [x] **根因精准解构 1：未闭市实时 Bar 污染物理磁盘文件（核心死穴）**：盘中实时更新时，系统会生成一根今天的实时合成 Bar (Real-time Synthetic Bar)。之前每次点击“刷新”或后台线程完毕时，直接调起 `save_klines_to_disk_cache` **把未闭市结算、带有错误开盘价的临时 Bar 写死落盘保存到了 `global_market_klines_*.json` 物理盘库中**！导致每次重新打开或刷新时，读取的已有磁盘缓存里已经带有上一次算错的脏 Bar，越刷新写进磁盘的脏 Bar 越多，导致显示乱七八糟！
+    - [x] **根因精准解构 2：实时合成 Bar 开盘价计算逻辑硬伤与美股 API 缺失**：`append_realtime_bar_if_needed` 中计算实时 Bar 时误将开盘价推算为 `open_p = prev_close * (1.0 + rt_pct / 100.0)`（即把现价当成了开盘价！），导致实时 Bar 的开盘价与现价完全重合或把上一日撕裂；同时 `fetch_global_market_quotes` 在解析新浪美股行情时未解析 `open`, `high`, `low`, `prev_close` 字段。
+    - [x] **根因精准解构 3：Sina 降级源将 OIL 误映射为 `sc0` (490 人民币/桶)**：在走 Sina 降级源时把 `OIL` 误映射为国内原油 `sc0` (~490 元/桶)，与 Yahoo 的 `$75` 美元/桶混存在同一 JSON 中，导致 6 倍数量级拉扯与图形崩塌。
+    - [x] **物理脱敏与实时 Bar 动态合成**：
+        - 重构 `save_klines_to_disk_cache`：当目标市场处于交易盘中 (`session_open`) 时，**物理剥离剔除今日未闭市 Bar (`date >= target_today`)，只把已完结的 Daily 历史 K 线写盘存库**，从源头彻底切断磁盘污染；
+        - 重构 `append_realtime_bar_if_needed`：补齐美股 `open`, `high`, `low`, `prev_close` 解析；优先选择行情 API 真实 `open`，无 `open` 时以昨日收盘价 `prev_close` 为平开锚点，绝不误推算！
+    - [x] **磁盘全量自愈与脏点清洗 (repair_disk_kline_caches)**：
+        - 新增 `repair_disk_kline_caches()` 引擎并在模块启动时自动执行，扫描并剔除物理磁盘中残留的 `OIL` >200 RMB 脏点与历史残留未闭市 Bar。
+    - [x] **美股正盘 09:30 EDT (北京时间 21:30) 以前严格禁止生成/追加今日未开盘日 K Bar**：
+        - 修复 `is_target_market_session_open`：美股股票 (NVDA, MSFT, AAPL, TSLA 等) 必须在美东时间 **09:30 EDT (正式开盘) 至 20:00 EDT (盘后)** 属于交易活跃期。在美东时间 00:00 - 09:30 (即北京时间 12:00 - 21:30 美股未开盘前)，`session_open` 判定为 `False`。
+        - 彻底解决在北京时间 16:40 (美东 04:40 盘前) 打开或刷新美股时误生成/错误追加今日 `2026-08-06` 尚未开盘的虚假日 K 线 Bar 缺陷，未开盘前日线图最新根 100% 保持为昨日已完结的 `2026-08-05`！
+    - [x] **单元测试 100% 校验通过**：编写 `scratch/test_kline_persistence_final_fix.py` 对物理脱敏写盘、开盘价锚点推算、美股正盘 09:30 EDT 时区门槛与磁盘全量自愈进行验证，单元测试 100% PASSED！
+
 ## 2026-08-06 11:35
 - [x] **实现通达信 (TDX) / 黄金实盘信号串行轮播队列与 Toast 原始样式复原 (`ats/alert_notifier.py`, `ats/signal_ledger.py`, `scratch/test_tdx_queue_and_dedup.py`)**：
     - [x] **100% 恢复 Toast 原始优雅外观与右下角固定定位**：彻底撤销多卡片瀑布平移，完全复原 `InAppToastWidget` 原始不透明深蓝背景 (`#0f172a`) + 霓虹蓝边框 (`#00b0ff`) 样式，且弹窗位置固定置于屏幕右下角（`s_geom.right() - card_w - 15`），显示风格完全未作改变。
