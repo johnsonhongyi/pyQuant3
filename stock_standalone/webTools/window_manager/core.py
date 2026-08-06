@@ -1067,9 +1067,11 @@ def check_and_activate_existing_instance() -> bool:
             return True
 
         try:
-            title = win32gui.GetWindowText(hwnd)
-            if title:
-                if "窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title:
+            title = win32gui.GetWindowText(hwnd) or ""
+            cls = win32gui.GetClassName(hwnd) or ""
+            if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
+                if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
+                   not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
                     target_hwnds.append((hwnd, pid.value, title))
         except Exception:
             pass
@@ -1120,9 +1122,12 @@ def check_and_activate_existing_instance() -> bool:
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 if pid.value in other_pids:
-                    title = win32gui.GetWindowText(hwnd)
-                    if title:
-                        target_hwnds.append((hwnd, pid.value, title))
+                    title = win32gui.GetWindowText(hwnd) or ""
+                    cls = win32gui.GetClassName(hwnd) or ""
+                    if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
+                        if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
+                           not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
+                            target_hwnds.append((hwnd, pid.value, title))
                 return True
 
             try:
