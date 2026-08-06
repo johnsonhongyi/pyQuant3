@@ -1,4 +1,29 @@
+## 2026-08-06 22:15
+- [x] **为交易可视化主画板 (`trade_visualizer_qt6.py`) 添加与外盘 100% 一致的 K 线黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系与开关持久化 (`trade_visualizer_qt6.py`, `scratch/test_visualizer_fib.py`)**：
+    - [x] **7 大黄金分割核心比率位与右侧动态价格标签**：实现 `_draw_fibonacci_levels(day_df)` 算法，高精度计算与绘制 `100.0% (顶峰)` (亮红/Dash)、`80.9% (强阻)` (橙/Dot)、`61.8% (黄金位)` (金黄/Dash)、`50.0% (中枢)` (霓虹蓝/Solid)、`38.2% (黄金位)` (金黄/Dash)、`23.6% (强撑)` (嫩绿/Dot) 及 `0.0% (谷底)` (墨绿/Dash) 7 大水平线及右侧 Consolas 粗体浮动价格标签。
+    - [x] **工具栏 Action 开关与物理持久化**：在主工具栏 (`_init_toolbar`) 注册 `self.fib_action` (Checkable)，实现 `on_toggle_fib` 槽函数；在 `_save_visualizer_config` 与 `_load_visualizer_config` 中自动落盘与恢复 `show_fib` 配置项。
+    - [x] **绘图对象池清理与图表自动重载**：实现 `_clear_fib_levels` 安全清理旧的 `InfiniteLine` 与 `TextItem` 对象，并在 `render_charts` K线绘制逻辑中完成自动无缝调起。
+    - [x] **单元测试与全系统回归 100% 通过**：编写 `scratch/test_visualizer_fib.py` 自动化测试 3 项断言全量通过，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
+## 2026-08-06 22:12
+- [x] **为外盘 K 线走势弹窗 (`GlobalMarketKLineDialog`) 数据源选择按钮组 (Yahoo / 新浪) 实现按键宽度跟着文字自适应与与顶栏按钮统一规格 (`ats/ui/global_market_kline_dialog.py`, `scratch/test_btn_style.py`)**：
+    - [x] **移除硬编码 `min-width` 宽度限制**：彻底清理 `_update_data_source_btn_style` 中针对 `Yahoo` (`min-width: 90px`) 与 `新浪` (`min-width: 80px`) 设定的硬编码宽度，使其与顶部 Header 工具栏中的其他按钮（BOLL/美国线/60日/120日/FIB/刷新/复位/资讯/日志/代理）一样，极窄且完全按文字内容紧凑自适应。
+    - [x] **统一顶栏按键 `padding`、`font-size` 与 `border-radius` 规格**：将 `padding` 由 `4px 8px` 缩减为 `2px 5px`，`font-size` 由 `9pt` 调整为 `8.5pt`，`border-radius` 改为 `3px`，视觉整体完美一致。
+    - [x] **单元测试与全量回归 100% 通过**：编写 `scratch/test_btn_style.py` 验证样式自适应，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
+## 2026-08-06 17:50
+- [x] **彻底根治外盘 K 线“白批量更新、数据写了半天写不上”持久化底层 Bug，实现脏状态 (Dirty Flags) 攒存与一次性批量统一落盘架构 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `scratch/test_batch_flush_and_dedup.py`)**：
+    - [x] **根因精准解构 1：高频全量文件覆盖 (Write-on-every-fetch) 导致多线程竞争写盘与覆盖损失**：此前在线抓取每个外盘标的（16 大核心品种）时，系统在每个单线程内均直接以 `'w'` 模式打开 `global_market_klines_yahoo.json` 将整表重写落盘。在 `ThreadPoolExecutor` 6 线程并发更新时，后执行完的线程读到了未更新的磁盘缓存并将先执行完的线程数据覆盖掉，造成“日志里一直在落盘，但磁盘文件里半天啥也没有”的白忙活 Bug！
+    - [x] **根因精准解构 2：缺乏 batch-save 攒存与 dirty-flag 状态管理**：数据未在内存 RAM Cache (`_KLINE_RAM_CACHE`) 中完成批量攒存，缺失针对数据源的脏状态标志 `_KLINE_DIRTY_FLAGS[source_key]`。
+    - [x] **攒存内存 RAM Cache 与实现 `flush_kline_disk_cache` 批量统一原子写盘**：
+        - 重构 `fetch_global_kline_history` 与 `save_klines_to_disk_cache`：抓取成功后优先更新 `_KLINE_RAM_CACHE` 并将脏标志 `_KLINE_DIRTY_FLAGS[source_key]` 设为 `True`，不再在单个抓取中高频盲目写盘；
+        - 新增 `flush_kline_disk_cache(data_source='yahoo', force=False)`：在 16 大标的全部抓取或定时批处理结束时调起，一次性读取磁盘历史数据，合并 RAM Cache 攒存的全量标的数据，并通过临时文件原子替换 (`tmp_file` -> `os.replace`) 完成**单次极速物理落盘**！
+    - [x] **`GlobalMarketWorker` 批处理线程池收尾统一调起 `flush_kline_disk_cache`**：
+        - 重构 `global_market_panel.py` 中的 `GlobalMarketWorker`：6 线程并发拉取 16 大外盘标的数据时仅写入内存 RAM Cache，线程池 `executor.map` 执行完成后调起 `flush_kline_disk_cache('yahoo', force=True)`，单次文件 IO 完成 16 大标的全量更新持久化！
+    - [x] **单元测试与系统全量回归 100% 通过**：编写 `scratch/test_batch_flush_and_dedup.py` 验证 16 个标的批量统一写盘 (耗时仅 61.12ms) 与离线秒载，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
 ## 2026-08-06 17:42
+
 - [x] **恢复外盘 K 线弹窗 (`GlobalMarketKLineDialog`) 顶部两行控件默认固定高度与按键宽度自适应 (`ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_top_layout.py`)**：
     - [x] **顶部 Header 第一行强力锁定 36px 默认高度 (`header_frame.setFixedHeight(36)`)**：恢复原始默认高度，绝对禁止自动变高或自动调整成两行；同时补齐 missing 的 `120日` 视区控制按钮 (`btn_focus_120`)。
     - [x] **第二行动态信息条强力锁定 26px 高度 (`lbl_info.setFixedHeight(26)`)**：设置 `wordWrap=False` 禁用自动换行折叠，确保鼠标悬浮查看指标明细时第二行保持完美的单行默认高度，绝不自动调整扩展高度。
