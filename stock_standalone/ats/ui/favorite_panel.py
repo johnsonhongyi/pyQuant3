@@ -16,7 +16,7 @@ import datetime
 import time
 
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem
 
 
 class FavoritePanel(QWidget):
@@ -100,9 +100,29 @@ class FavoritePanel(QWidget):
             rows: list of tuples (code, name, price, state, deviation, limit_ups, position,
                                   first_seen, priority, dff, rank, dff2, dff3, rs, resonance, reason)
         """
+        header = self.table.horizontalHeader()
+        sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
+        sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
+
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.count_label.setText(f"共 {len(rows)} 只重点标的")
+
+        def _parse_num_val(row_item, col_idx):
+            if col_idx >= len(row_item):
+                return 0.0
+            val_str = str(row_item[col_idx]).strip()
+            import re
+            clean_str = val_str.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
+            m = re.search(r'[-+]?\d*\.?\d+', clean_str)
+            if m:
+                try:
+                    return float(m.group())
+                except ValueError:
+                    pass
+            return 0.0
+
+        rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
 
         for row_idx, row_data in enumerate(rows):
             self.table.insertRow(row_idx)
@@ -131,8 +151,7 @@ class FavoritePanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                from PyQt6.QtWidgets import QTableWidgetItem
-                item = QTableWidgetItem(val)
+                item = NumericTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, 15) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # Highlight entire row for favorite
@@ -171,3 +190,5 @@ class FavoritePanel(QWidget):
                 self.table.setItem(row_idx, col_idx, item)
 
         self.table.setSortingEnabled(True)
+        if sort_col >= 0:
+            self.table.sortItems(sort_col, sort_order)
