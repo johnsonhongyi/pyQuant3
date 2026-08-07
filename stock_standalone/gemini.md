@@ -1,3 +1,15 @@
+## 2026-08-07 09:50
+- [x] **彻底根治 `_save_monitors` IndexError 数组越界与 `voice_alert_config.json` Extra Data 解析自愈 Bug (`stock_live_strategy.py`, `global_favorites.py`, `scratch/test_voice_config_fix.py`)**：
+    - [x] **`_save_monitors` 多线程并发与数组越界防御**：在 `stock_live_strategy.py` 的 `_save_monitors` 中引入局部变量快照 (`df_curr = self.df`) 隔离多线程底层 DataFrame 动态缩放；增加针对重复 Code 索引返回 `pd.DataFrame` 的 `row.iloc[0]` 降级处理；并将快照提取逻辑放入 `try...except Exception:` 全量防护块，确保单只股票快照异常绝对不崩溃或中断存盘。
+    - [x] **`voice_alert_config.json` JSON 损坏自愈与 safe atomic write**：在 `global_favorites.py` 与 `stock_live_strategy.py` 中引入 `json.JSONDecoder().raw_decode` 捕获 `json.JSONDecodeError` (`Extra data`)，自愈挽救第一主 JSON 对象并以 `tmp_file` + `os.replace` 原子替换覆写落盘，彻底解决并发写盘冲突遗留 Extra Data 致启动加载失败的沉痾。
+    - [x] **单元测试与全量回归 100% 成功通过**：新建 `scratch/test_voice_config_fix.py` 完成并发防越界与坏 JSON 自愈测试，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
+## 2026-08-07 09:45
+- [x] **严格限制在 `ats` 模块内完成 HDF5 历史 K 线异步加载安全防护，零侵入底层代码 (`ats/ui/main_window.py`)**：
+    - [x] **零改动底层 `JSONData` 结构**：遵循“不改动除了 ats 以外的底层代码”原则，完全撤销与隔离对 `JSONData/tdx_hdf5_api.py` 的任何改动，保留其原始实现。
+    - [x] **`ats` 内部原子互斥锁与标准 `pd.HDFStore` 上下文封装**：在 `ats/ui/main_window.py` 内部使用 `self.hdf5_history_lock` 严格保护 `_flush_batch_stock_history` 的 HDF5 异步并发读取，并采用原生标准 `with pd.HDFStore(path, mode='r') as store:` 上下文安全管理句柄，防止 `ImportError` / `AttributeError` 崩溃。
+    - [x] **全量单元测试 100% 成功通过**：`pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
 ## 2026-08-06 23:15
 - [x] **实现 Acer 控制器冷启动全流程 4 大步骤详细打点诊断日志系统 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_acer_performance.py`)**：
     - [x] **打通 `log_cb` 实时回调与全流程可视化**：在 `core.py` 的 `apply_performance_profile` 与 `launch_predatorsense_gui` 中引入 `log_cb` 回调，将冷启动与热唤醒调优全流程打通至 UI 日志组件 (`self.log_signal.emit`)。

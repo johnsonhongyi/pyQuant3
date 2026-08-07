@@ -2837,6 +2837,13 @@ class ATSMainWindow(QMainWindow):
         import threading
         def worker():
             t0 = time.time()
+            acquired = self.hdf5_history_lock.acquire(blocking=True, timeout=5.0)
+            if not acquired:
+                for code in codes_to_load:
+                    self.prices_loading_codes.discard(code)
+                    self.prices_failed_codes.add(code)
+                logger.debug(f"[ATSMainWindow] HDF5 lock busy, postponed price load for {len(codes_to_load)} codes.")
+                return
             try:
                 from JSONData import sina_data
                 s = sina_data.Sina(readonly=True)
@@ -2872,6 +2879,8 @@ class ATSMainWindow(QMainWindow):
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
+            finally:
+                self.hdf5_history_lock.release()
                 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2930,7 +2939,7 @@ class ATSMainWindow(QMainWindow):
             import os
             t0 = _time.time()
 
-            acquired = self.hdf5_history_lock.acquire(blocking=False)
+            acquired = self.hdf5_history_lock.acquire(blocking=True, timeout=5.0)
             if not acquired:
                 fail_ts = _time.time()
                 for code in codes_to_load:

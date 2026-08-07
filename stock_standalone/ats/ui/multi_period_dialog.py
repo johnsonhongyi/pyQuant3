@@ -390,7 +390,6 @@ class MultiPeriodWorker(QThread):
 
                 if self.top_now is not None and not self.top_now.empty and 'ratio' not in self.top_now.columns:
                     try:
-                        from JohnsonUtil import commonTips as cct
                         from JSONData import realdatajson as rl
                         dd = rl.get_sina_Market_json('all')
                         if isinstance(dd, pd.DataFrame) and 'ratio' in dd.columns:
@@ -518,7 +517,6 @@ class MultiPeriodWorker(QThread):
                 if ipc_mgr is not None:
                     ipc_df = ipc_mgr.get_current_df()
                     try:
-                        from JohnsonUtil import commonTips as cct
                         is_work_time = cct.get_work_time()
                     except Exception:
                         is_work_time = False
@@ -4849,7 +4847,6 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             QApplication.processEvents()
             # 1. 动态加载自定义列配置
             try:
-                from JohnsonUtil import commonTips as cct
                 custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
             except:
                 custom_cols = ['dff2', 'dff3', 'Rank']
@@ -5664,7 +5661,6 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self.end_date = end_date
         self.resample = resample
         try:
-            from JohnsonUtil import commonTips as cct
             self.custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
         except:
             self.custom_cols = ['dff2', 'dff3', 'Rank']
