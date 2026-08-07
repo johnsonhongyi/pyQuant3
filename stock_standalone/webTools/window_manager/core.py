@@ -1395,6 +1395,31 @@ class AcerPerformanceController:
                 self._last_applied_profile["fan_mode"] = norm_fm
                 _GLOBAL_LAST_APPLIED_PROFILE["fan_mode"] = norm_fm
 
+        # 实时同步更新 Windows OEM 注册表, 确保下一次物理探查 (force_physical=True) 100% 精准匹配
+        try:
+            import winreg
+            reg_path = r"SOFTWARE\OEM\PredatorSense"
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ)
+            if overclock_mode is not None:
+                norm_oc = self._normalize_oc_mode(overclock_mode)
+                oc_code_map = {"Default": 0, "Fast": 1, "Extreme": 2}
+                if norm_oc in oc_code_map:
+                    oc_val = oc_code_map[norm_oc]
+                    winreg.SetValueEx(key, "GPU_Overclock_Level", 0, winreg.REG_DWORD, oc_val)
+                    tb_val = 1 if oc_val >= 2 else 0
+                    winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, tb_val)
+            if fan_mode is not None:
+                norm_fm = self._normalize_fan_mode(fan_mode)
+                fan_code_map = {"Auto": 0, "Max": 1, "Custom": 2}
+                if norm_fm in fan_code_map:
+                    winreg.SetValueEx(key, "Fan_Control", 0, winreg.REG_DWORD, fan_code_map[norm_fm])
+            if coolboost is not None:
+                winreg.SetValueEx(key, "CoolBoost_Status", 0, winreg.REG_DWORD, 1 if coolboost else 0)
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+        # 实时同步落盘至 ConfigManager，确保软件重启或跨进程调用时 get_current_status() 保持最新真实状态
         try:
             cm = ConfigManager()
             cfg = cm.get_acer_performance_config() or {}
@@ -1467,8 +1492,8 @@ class AcerPerformanceController:
         self._checked_support = True
         return self._is_supported
 
-    def get_current_status(self) -> dict:
-        """获取当前 Acer 硬件性能状态"""
+    def get_current_status(self, force_physical: bool = False) -> dict:
+        """获取当前 Acer 硬件真实性能状态 (force_physical=True 时强制读取 OEM 原生注册表物理状态)"""
         status = {
             "supported": self.is_supported(),
             "coolboost": False,
@@ -1478,19 +1503,59 @@ class AcerPerformanceController:
         if not status["supported"]:
             return status
 
-        # 1. 尝试从 OEM 注册表读取超频按钮硬件状态
+        has_real_hardware_status = False
+
+        # 1. 从 Acer OEM 系统注册表读取真实硬件物理状态
         try:
             import winreg
             reg_path = r"SOFTWARE\OEM\PredatorSense"
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_READ)
-            val, _ = winreg.QueryValueEx(key, "Turbo_Button_status")
+
+            # A. 提取物理超频模式 (GPU_Overclock_Level: 0=Default, 1=Fast, 2=Extreme)
+            has_gpu_oc = False
+            try:
+                gpu_oc, _ = winreg.QueryValueEx(key, "GPU_Overclock_Level")
+                oc_map = {0: "Default", 1: "Fast", 2: "Extreme"}
+                if int(gpu_oc) in oc_map:
+                    status["overclock_mode"] = oc_map[int(gpu_oc)]
+                    has_real_hardware_status = True
+                    has_gpu_oc = True
+            except Exception:
+                pass
+
+            # 仅当未成功获取 GPU_Overclock_Level 时，才使用 Turbo_Button_status 辅助判定
+            if not has_gpu_oc:
+                try:
+                    tb_stat, _ = winreg.QueryValueEx(key, "Turbo_Button_status")
+                    if int(tb_stat) == 1:
+                        status["overclock_mode"] = "Extreme"
+                        has_real_hardware_status = True
+                except Exception:
+                    pass
+
+            # B. 提取风扇速率控制 (Fan_Control: 0=Auto, 1=Max, 2=Custom)
+            try:
+                fan_ctrl, _ = winreg.QueryValueEx(key, "Fan_Control")
+                fan_map = {0: "Auto", 1: "Max", 2: "Custom"}
+                if int(fan_ctrl) in fan_map:
+                    status["fan_mode"] = fan_map[int(fan_ctrl)]
+                    has_real_hardware_status = True
+            except Exception:
+                pass
+
+            # C. 提取 CoolBoost 开启状态 (CoolBoost_Status: 1=开启, 0=关闭)
+            try:
+                cb_stat, _ = winreg.QueryValueEx(key, "CoolBoost_Status")
+                status["coolboost"] = (int(cb_stat) == 1)
+                has_real_hardware_status = True
+            except Exception:
+                pass
+
             winreg.CloseKey(key)
-            if val == 1:
-                status["overclock_mode"] = "Extreme"
         except Exception:
             pass
 
-        # 2. 尝试提取 WMI 属性 (针对部分 Acer 经典型号)
+        # 2. 尝试从 WMI 补充物理属性
         try:
             obj = self._get_wmi_object()
             if obj:
@@ -1498,40 +1563,19 @@ class AcerPerformanceController:
                     cb_val = getattr(obj, "CoolBoost", None)
                     if cb_val is not None:
                         status["coolboost"] = bool(cb_val)
+                        has_real_hardware_status = True
                 except Exception:
                     pass
                 try:
                     oc_val = getattr(obj, "GPUOverclockingMode", getattr(obj, "SystemMode", None))
-                    if oc_val is not None and oc_val != 0:
+                    if oc_val is not None and int(oc_val) != 0:
                         oc_map = {0: "Default", 1: "Fast", 2: "Extreme"}
                         status["overclock_mode"] = oc_map.get(int(oc_val), "Extreme")
+                        has_real_hardware_status = True
                 except Exception:
                     pass
         except Exception:
             pass
-
-        # 3. 结合应用缓存与 ConfigManager 补充最新设置，避免 WMI 硬件只读返回普通默认值
-        applied = self._last_applied_profile or _GLOBAL_LAST_APPLIED_PROFILE
-        if not applied:
-            try:
-                cm = ConfigManager()
-                cfg = cm.get_acer_performance_config()
-                if cfg:
-                    applied = cfg
-            except Exception:
-                pass
-
-        if applied:
-            if "coolboost" in applied and applied["coolboost"] is not None:
-                status["coolboost"] = bool(applied["coolboost"])
-            if "overclock_mode" in applied and applied["overclock_mode"]:
-                norm_oc = self._normalize_oc_mode(applied["overclock_mode"])
-                if norm_oc:
-                    status["overclock_mode"] = norm_oc
-            if "fan_mode" in applied and applied["fan_mode"]:
-                norm_fm = self._normalize_fan_mode(applied["fan_mode"])
-                if norm_fm:
-                    status["fan_mode"] = norm_fm
 
         return status
 
@@ -1977,20 +2021,29 @@ class AcerPerformanceController:
             # C. CoolBoost 开关控制 (开启/关闭 CoolBoost)
             if coolboost is not None:
                 target_cb = bool(coolboost)
-                # 若此前未下发风扇模式变更（未切到风扇页），则必须先点击【风扇控制】Tab 确保 UI 在风扇 Tab 页面
-                if not fan_mode:
-                    _do_log("[Step 4/4] 点击左侧【风扇控制】Tab 切页以暴露 CoolBoost 开关...")
-                    win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.49)))
+                curr_cb = curr_status.get("coolboost")
+
+                # CoolBoost 为 Toggle 开关，仅当当前硬件状态与目标不一致时才触发点击翻转
+                if curr_cb is None or bool(curr_cb) != target_cb or force:
+                    # 若此前未下发风扇模式变更（未切到风扇页），则必须先点击【风扇控制】Tab 确保 UI 在风扇 Tab 页面
+                    if not fan_mode:
+                        _do_log("[Step 4/4] 点击左侧【风扇控制】Tab 切页以暴露 CoolBoost 开关...")
+                        win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.49)))
+                        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                        time.sleep(0.5)
+
+                    _do_log(f"[Step 4/4] 点击【CoolBoost】切换开关 -> 设为: {'开启' if target_cb else '关闭'}")
+                    # 点击【CoolBoost】开关 (根据截图精准位于 X: 38%, Y: 20.5%)
+                    win32api.SetCursorPos((int(left + w * 0.38), int(top + h * 0.205)))
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                    time.sleep(0.5)
+                    time.sleep(0.2)
+                else:
+                    _do_log(f"[Step 4/4] CoolBoost 状态已处于: {'开启' if target_cb else '关闭'}，无需重复点击开关")
 
-                _do_log(f"[Step 4/4] 点击【CoolBoost】切换开关 -> 设为: {'开启' if target_cb else '关闭'}")
-                # 点击【CoolBoost】开关 (根据截图精准位于 X: 38%, Y: 20.5%)
-                win32api.SetCursorPos((int(left + w * 0.38), int(top + h * 0.205)))
-                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                time.sleep(0.2)
+            # 更新最新应用的 Profile 缓存状态
+            self._update_applied_cache(coolboost=coolboost, overclock_mode=overclock_mode, fan_mode=fan_mode)
 
             # 平滑归位鼠标坐标
             time.sleep(0.1)
@@ -2039,15 +2092,21 @@ class AcerPerformanceController:
         fm = profile.get("fan_mode")
         pa = profile.get("post_action", "hide")
 
-        # 1. 探查并打印执行前系统 3 大参数明细
-        before_status = self.get_current_status()
-        curr_oc = before_status.get("overclock_mode")
-        curr_fm = before_status.get("fan_mode")
-        curr_cb = before_status.get("coolboost")
+        # 1. 探查并打印执行前系统 3 大参数明细 (force_physical=True 强行物理探查 OEM 注册表)
+        phys_status = self.get_current_status(force_physical=True)
+        curr_status = self.get_current_status(force_physical=False)
+
+        phys_oc = phys_status.get("overclock_mode")
+        phys_fm = phys_status.get("fan_mode")
+        phys_cb = phys_status.get("coolboost")
+
+        curr_oc = curr_status.get("overclock_mode")
+        curr_fm = curr_status.get("fan_mode")
+        curr_cb = curr_status.get("coolboost")
 
         _do_log(
-            f"[Acer Hardware] 执行前系统探查状态 -> "
-            f"超频(overclock_mode)={curr_oc}, 风扇(fan_mode)={curr_fm}, CoolBoost(coolboost)={'开启' if curr_cb else '关闭'}"
+            f"[Acer Hardware] 执行前系统物理探查状态 -> "
+            f"超频(overclock_mode)={phys_oc}, 风扇(fan_mode)={phys_fm}, CoolBoost(coolboost)={'开启' if phys_cb else '关闭'}"
         )
 
         # 2. 精细化比对各参数是否有变动
@@ -2081,17 +2140,15 @@ class AcerPerformanceController:
         )
         _do_log(
             f"[Acer Hardware] 发起 PredatorSense 极速 UI 鼠标点击应用 -> "
-            f"超频={oc if (need_oc or force) else '保持(' + str(curr_oc) + ')'}, "
-            f"风扇={fm if (need_fm or force) else '保持(' + str(curr_fm) + ')'}, "
-            f"CoolBoost={cb if (need_cb or force) else '保持(' + ('开启' if curr_cb else '关闭') + ')'}"
+            f"超频={oc}, 风扇={fm}, CoolBoost={cb}"
         )
 
-        # 4. 仅向 launch_predatorsense_gui 传递真正需要变更的参数
+        # 4. 唤起 launch_predatorsense_gui 完整下发 Profile 参数，保持 100% 稳定可靠的全流程 UI 点击
         try:
             self.launch_predatorsense_gui(
-                fan_mode=fm if (need_fm or force) else None,
-                overclock_mode=oc if (need_oc or force) else None,
-                coolboost=cb if (need_cb or force) else None,
+                fan_mode=fm,
+                overclock_mode=oc,
+                coolboost=cb,
                 post_action=pa,
                 log_cb=log_cb,
                 force=force
