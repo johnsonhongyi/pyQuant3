@@ -1325,7 +1325,7 @@ class ATSMainWindow(QMainWindow):
         # Setup simple timer for mock ticker updating (simulate live environment in P0)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.on_heartbeat)
-        self.update_timer.start(3000)
+        self.update_timer.start(60000)
 
     def _prepopulate_name_cache(self):
         self.name_cache = {}
@@ -2236,8 +2236,18 @@ class ATSMainWindow(QMainWindow):
 
     def on_heartbeat(self):
         # 1. Periodically load and update DB data
+
+        try:
+            is_work = cct.get_work_time()
+        except Exception:
+            is_work = False
+        if not is_work:
+            # print("is not work time")
+            return
+
         self.load_db_data()
         
+
         # 2. Periodically load trace logs
         if hasattr(self, 'kernel_trace_panel'):
             self.kernel_trace_panel.load_trace_logs()
@@ -2256,10 +2266,7 @@ class ATSMainWindow(QMainWindow):
                 should_sync = True
         else:
             # 只有在交易时间段，且超过 10 分钟（600秒）没有收到更新时才手动请求一次，防止高频请求导致 TK 后台持续发送
-            try:
-                is_work = cct.get_work_time()
-            except Exception:
-                is_work = False
+
             
             if is_work and (now - getattr(self, "_last_recv_t", 0) > 600):
                 if now - getattr(self, "_last_pipe_sync_t", 0) > 60:
@@ -2661,17 +2668,22 @@ class ATSMainWindow(QMainWindow):
                     signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
                 )
                 self._listener_started = True
-                
-                # Trigger immediate sync upon listener startup
+
+            # Trigger sync on cold boot OR explicit manual refresh (force=True)
+            if force or not getattr(self, '_pipe_initial_synced', False):
+                self._pipe_initial_synced = True
                 try:
                     from data_utils import send_code_via_pipe, PIPE_NAME_TK
                     import logging
                     import time
                     local_logger = logging.getLogger("ATS")
-                    self._last_pipe_sync_t = time.time()  # 初始化时间戳，防止 heartbeat 瞬间重复请求
+                    self._last_pipe_sync_t = time.time()  # 重置时间戳，防止 heartbeat 瞬间重复请求
                     send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                    print("[ATSMainWindow] 手动/强制刷新: 已成功向后台 Pipe 发送全量行情同步指令 (REQ_FULL_SYNC -> port 26670)")
+                    if hasattr(self, 'status_bar') and self.status_bar:
+                        self.status_bar.showMessage("🔄 已下发 IPC 全量行情刷新请求 (REQ_FULL_SYNC)，正在获取最新数据...", 3000)
                 except Exception as e:
-                    print(f"[ATSMainWindow] Startup failed to send REQ_FULL_SYNC: {e}")
+                    print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
  
         except Exception as e:
             print(f"[ATSMainWindow] Error loading SQLite data: {e}")

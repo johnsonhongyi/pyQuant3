@@ -1,3 +1,8 @@
+## 2026-08-07 15:00
+- [x] **彻底解决 ATS 手动点击【🔄 刷新状态】时缺失 IPC 管道获取数据问题 (`ats/ui/main_window.py`)**：
+    - [x] **根因精准解构**：排查发现 `load_db_data` 中向 Windows 命名管道发送 `REQ_FULL_SYNC` 信令的代码此前被误包裹在 `if not getattr(self, '_listener_started', False):` 冷启动分支内。导致冷启动后 `_listener_started` 变为 `True`，后续用户手动点击【🔄 刷新状态】(调起 `load_db_data(force=True)`) 时，直接跳过了向 `PIPE_NAME_TK` 发送 `REQ_FULL_SYNC` 请求，后台监控端无法收到强刷信号，导致“只有冷启动可以获取数据，手动刷新没有数据”。
+    - [x] **强刷与冷启动双通道解封**：在 `load_db_data` 中重构 IPC 信令下发逻辑，解封为 `if force or not getattr(self, '_pipe_initial_synced', False):`。无论在冷启动还是在用户手动点击【🔄 刷新状态】(`force=True`) 时，100% 触发下发 `REQ_FULL_SYNC` 请求至后台 26670 端口，并提供状态栏实时反馈。
+
 ## 2026-08-07 11:35
 - [x] **实现 Acer 控制器全一致去重跳过与 CoolBoost 前置 Tab 切页修复 (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
     - [x] **CoolBoost 前置 Tab 切页**：修复当 `fan_mode` 无需变动 (`None`) 但 `coolboost` 需变更时，UI 停留在超频页导致 CoolBoost 按钮“点了空气”的缺陷。在 `launch_predatorsense_gui` 中增加校验：若未下发风扇变动，自动前置点击左侧【风扇控制】Tab (`X: 13%, Y: 49%`) 确保切入风扇页后再点击 CoolBoost 开关。
