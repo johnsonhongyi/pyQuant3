@@ -796,8 +796,23 @@ class StockLiveStrategy:
             with self._lock:
                 self._monitored_stocks = {}
             if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    raw_data = json.load(f)
+                try:
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        raw_data = json.load(f)
+                except json.JSONDecodeError as j_err:
+                    logger.warning(f"⚠️ [JSONSelfHealing] {self.config_file} decode error: {j_err}. Attempting raw_decode repair...")
+                    try:
+                        with open(self.config_file, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        raw_data, _ = json.JSONDecoder().raw_decode(content)
+                        tmp_file = f"{self.config_file}.tmp.{os.getpid()}"
+                        with open(tmp_file, 'w', encoding='utf-8') as f_out:
+                            json.dump(raw_data, f_out, ensure_ascii=False, indent=2)
+                        os.replace(tmp_file, self.config_file)
+                        logger.info(f"✅ [JSONSelfHealing] Repaired and saved clean JSON to {self.config_file}")
+                    except Exception as e_repair:
+                        logger.error(f"❌ [JSONSelfHealing] Failed to auto-repair {self.config_file}: {e_repair}")
+                        raw_data = {}
                 
                 # [Fix] Enforce Unique Code: Merge duplicates into single entry keyed by pure code
                 for key, data in raw_data.items():
@@ -1115,6 +1130,11 @@ class StockLiveStrategy:
         try:
             data = {}
 
+            # 🛡️ 快照线程安全保护：首先获取 df 快照引用
+            df_curr = None
+            if hasattr(self, 'df') and self.df is not None and not self.df.empty:
+                df_curr = self.df
+
             for key, stock in list(self._monitored_stocks.items()):
                 # --- 构建基础数据 ---
                 record = {
@@ -1131,49 +1151,60 @@ class StockLiveStrategy:
                     'score': stock.get('score', stock.get('snapshot', {}).get('score', 0.0)) # [NEW] 持久化分值
                 }
 
-                # --- 可选：添加行情快照 ---
-                if hasattr(self, 'df') and self.df is not None and not self.df.empty:
-                    # 从 key 中提取原始 code
+                # --- 可选：添加行情快照 (加固多线程防护与重复 Code 防护) ---
+                if df_curr is not None and not df_curr.empty:
                     code = stock.get('code', key.split('_')[0])
-                    if code in self.df.index:
-                        row = self.df.loc[code]
-                        try:
-                            record['snapshot'] = {
-                                'trade': float(row.get('trade', 0)),
-                                'percent': float(row.get('percent', 0)),
-                                'volume': float(row.get('volume', 0)),
-                                'ratio': float(row.get('ratio', 0)),
-                                'nclose': float(row.get('nclose', 0)),
-                                'last_close': float(row.get('lastp1d', 0)),
-                                'ma5d': float(row.get('ma5d', 0)),
-                                'ma10d': float(row.get('ma10d', 0))
-                            }
-                        except (ValueError, TypeError):
-                            # 如果数据异常，不存 snapshot
-                            pass
+                    try:
+                        if code in df_curr.index:
+                            row = df_curr.loc[code]
+                            # 如果存在重复索引，loc[code] 会返回 DataFrame
+                            if isinstance(row, pd.DataFrame):
+                                if not row.empty:
+                                    row = row.iloc[0]
+                                else:
+                                    row = None
+                            if row is not None:
+                                record['snapshot'] = {
+                                    'trade': float(row.get('trade', 0)),
+                                    'percent': float(row.get('percent', 0)),
+                                    'volume': float(row.get('volume', 0)),
+                                    'ratio': float(row.get('ratio', 0)),
+                                    'nclose': float(row.get('nclose', 0)),
+                                    'last_close': float(row.get('lastp1d', 0)),
+                                    'ma5d': float(row.get('ma5d', 0)),
+                                    'ma10d': float(row.get('ma10d', 0))
+                                }
+                    except Exception:
+                        # 捕获包含 IndexError / KeyError / ValueError 在内的所有快照提取异常，绝对不中断保存流程
+                        pass
 
                 data[key] = record
 
-            # --- 保存到 JSON ---
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            # --- 保存到 JSON (使用临时文件 + 原子替换，防止并发覆盖毁损文件) ---
+            tmp_path = f"{self.config_file}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.config_file)
 
             # --- [新增] 同步到数据库，支持跨终端状态一致性 ---
             if hasattr(self, 'trading_logger'):
                 for key, stock in list(self._monitored_stocks.items()):
                     code_from_key = key.split('_')[0]
                     resample_from_key = stock.get('resample', 'd')
-                    self.trading_logger.log_voice_alert_config(
-                        code=code_from_key,
-                        resample=resample_from_key,
-                        name=stock.get('name', ''),
-                        rules=json.dumps(stock.get('rules', [])),
-                        last_alert=stock.get('last_alert', 0),
-                        tags=stock.get('tags', ''),
-                        rule_type_tag=stock.get('rule_type_tag', ''),
-                        create_price=stock.get('create_price', 0.0),
-                        created_time=stock.get('created_time', '')
-                    )
+                    try:
+                        self.trading_logger.log_voice_alert_config(
+                            code=code_from_key,
+                            resample=resample_from_key,
+                            name=stock.get('name', ''),
+                            rules=json.dumps(stock.get('rules', [])),
+                            last_alert=stock.get('last_alert', 0),
+                            tags=stock.get('tags', ''),
+                            rule_type_tag=stock.get('rule_type_tag', ''),
+                            create_price=stock.get('create_price', 0.0),
+                            created_time=stock.get('created_time', '')
+                        )
+                    except Exception as db_err:
+                        logger.warning(f"Failed to log voice alert config to DB for {code_from_key}: {db_err}")
 
         except Exception as e:
             logger.error(f"Failed to save voice monitors: {e}")

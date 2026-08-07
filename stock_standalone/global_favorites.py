@@ -60,17 +60,36 @@ class GlobalFavoriteManager:
             from sys_utils import get_conf_path
             path = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"
             if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                grades = {}
-                for key, stock in data.items():
-                    code = stock.get('code') or key.split('_')[0]
-                    grade = stock.get('grade') or stock.get('snapshot', {}).get('grade', '')
-                    if grade:
-                        grades[code] = grade
-                with self._lock:
-                    self.stock_grades.update(grades)
-                logger.info(f"[GlobalFavorites] Loaded {len(grades)} stock grades from {path}.")
+                data = None
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except json.JSONDecodeError as j_err:
+                    logger.warning(f"⚠️ [GlobalFavorites] {path} decode error: {j_err}. Attempting raw_decode repair...")
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        data, _ = json.JSONDecoder().raw_decode(content)
+                        tmp_file = f"{path}.tmp.{os.getpid()}"
+                        with open(tmp_file, "w", encoding="utf-8") as f_out:
+                            json.dump(data, f_out, ensure_ascii=False, indent=2)
+                        os.replace(tmp_file, path)
+                        logger.info(f"✅ [GlobalFavorites] Repaired and saved clean JSON to {path}")
+                    except Exception as e_repair:
+                        logger.error(f"❌ [GlobalFavorites] Failed to auto-repair {path}: {e_repair}")
+                        data = {}
+
+                if isinstance(data, dict):
+                    grades = {}
+                    for key, stock in data.items():
+                        if isinstance(stock, dict):
+                            code = stock.get('code') or key.split('_')[0]
+                            grade = stock.get('grade') or stock.get('snapshot', {}).get('grade', '')
+                            if grade:
+                                grades[code] = grade
+                    with self._lock:
+                        self.stock_grades.update(grades)
+                    logger.info(f"[GlobalFavorites] Loaded {len(grades)} stock grades from {path}.")
         except Exception as e:
             logger.error(f"Failed to load grades from voice alert config: {e}")
 
