@@ -1319,9 +1319,9 @@ def get_system_uptime() -> float:
     return 999999.0
 
 
-def is_system_cold_boot(threshold_seconds: int = 300) -> bool:
+def is_system_cold_boot(threshold_seconds: int = 60) -> bool:
     """
-    判断当前操作系统是否处于开机冷启动阶段 (系统运行时间 Uptime < threshold_seconds，默认 300 秒/5分钟)。
+    判断当前操作系统是否处于开机冷启动阶段 (系统运行时间 Uptime < threshold_seconds，默认 60 秒/1分钟)。
     """
     return get_system_uptime() < threshold_seconds
 
@@ -1329,6 +1329,9 @@ def is_system_cold_boot(threshold_seconds: int = 300) -> bool:
 # ==========================================
 # Acer 笔记本硬件性能控制模块 (免 GUI 驱动)
 # ==========================================
+
+_GLOBAL_LAST_APPLIED_PROFILE = {}
+
 
 class AcerPerformanceController:
     """
@@ -1339,6 +1342,66 @@ class AcerPerformanceController:
     def __init__(self):
         self._checked_support = False
         self._is_supported = False
+        self._last_applied_profile = None
+
+    @staticmethod
+    def _normalize_oc_mode(mode):
+        if mode is None:
+            return None
+        m_str = str(mode).upper()
+        if m_str in ["DEFAULT", "NORMAL", "普通", "默认", "0"]:
+            return "Default"
+        elif m_str in ["FAST", "快速", "1"]:
+            return "Fast"
+        elif m_str in ["EXTREME", "TURBO", "极速", "狂暴", "2"]:
+            return "Extreme"
+        return str(mode)
+
+    @staticmethod
+    def _normalize_fan_mode(mode):
+        if mode is None:
+            return None
+        f_str = str(mode).upper()
+        if f_str in ["AUTO", "自动", "0"]:
+            return "Auto"
+        elif f_str in ["MAX", "最大", "狂暴", "1"]:
+            return "Max"
+        elif f_str in ["CUSTOM", "自定义", "2"]:
+            return "Custom"
+        return str(mode)
+
+    @staticmethod
+    def _normalize_coolboost(cb):
+        if cb is None:
+            return None
+        return bool(cb)
+
+    def _update_applied_cache(self, coolboost=None, overclock_mode=None, fan_mode=None):
+        global _GLOBAL_LAST_APPLIED_PROFILE
+        if self._last_applied_profile is None:
+            self._last_applied_profile = {}
+        if coolboost is not None:
+            cb_b = bool(coolboost)
+            self._last_applied_profile["coolboost"] = cb_b
+            _GLOBAL_LAST_APPLIED_PROFILE["coolboost"] = cb_b
+        if overclock_mode is not None:
+            norm_oc = self._normalize_oc_mode(overclock_mode)
+            if norm_oc:
+                self._last_applied_profile["overclock_mode"] = norm_oc
+                _GLOBAL_LAST_APPLIED_PROFILE["overclock_mode"] = norm_oc
+        if fan_mode is not None:
+            norm_fm = self._normalize_fan_mode(fan_mode)
+            if norm_fm:
+                self._last_applied_profile["fan_mode"] = norm_fm
+                _GLOBAL_LAST_APPLIED_PROFILE["fan_mode"] = norm_fm
+
+        try:
+            cm = ConfigManager()
+            cfg = cm.get_acer_performance_config() or {}
+            cfg.update(self._last_applied_profile)
+            cm.save_acer_performance_config(cfg)
+        except Exception:
+            pass
 
     def _get_wmi_object(self):
         """获取底层 Acer WMI COM 对象 (支持 Triton 500 / Predator 系列)"""
@@ -1415,23 +1478,61 @@ class AcerPerformanceController:
         if not status["supported"]:
             return status
 
+        # 1. 尝试从 OEM 注册表读取超频按钮硬件状态
+        try:
+            import winreg
+            reg_path = r"SOFTWARE\OEM\PredatorSense"
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_READ)
+            val, _ = winreg.QueryValueEx(key, "Turbo_Button_status")
+            winreg.CloseKey(key)
+            if val == 1:
+                status["overclock_mode"] = "Extreme"
+        except Exception:
+            pass
+
+        # 2. 尝试提取 WMI 属性 (针对部分 Acer 经典型号)
         try:
             obj = self._get_wmi_object()
             if obj:
-                # 尝试提取 CoolBoost 状态
                 try:
-                    status["coolboost"] = bool(getattr(obj, "CoolBoost", False))
+                    cb_val = getattr(obj, "CoolBoost", None)
+                    if cb_val is not None:
+                        status["coolboost"] = bool(cb_val)
                 except Exception:
                     pass
-                # 尝试提取超频模式
                 try:
-                    oc_val = getattr(obj, "GPUOverclockingMode", getattr(obj, "SystemMode", 0))
-                    oc_map = {0: "Default", 1: "Fast", 2: "Extreme"}
-                    status["overclock_mode"] = oc_map.get(int(oc_val), "Default")
+                    oc_val = getattr(obj, "GPUOverclockingMode", getattr(obj, "SystemMode", None))
+                    if oc_val is not None and oc_val != 0:
+                        oc_map = {0: "Default", 1: "Fast", 2: "Extreme"}
+                        status["overclock_mode"] = oc_map.get(int(oc_val), "Extreme")
                 except Exception:
                     pass
         except Exception:
             pass
+
+        # 3. 结合应用缓存与 ConfigManager 补充最新设置，避免 WMI 硬件只读返回普通默认值
+        applied = self._last_applied_profile or _GLOBAL_LAST_APPLIED_PROFILE
+        if not applied:
+            try:
+                cm = ConfigManager()
+                cfg = cm.get_acer_performance_config()
+                if cfg:
+                    applied = cfg
+            except Exception:
+                pass
+
+        if applied:
+            if "coolboost" in applied and applied["coolboost"] is not None:
+                status["coolboost"] = bool(applied["coolboost"])
+            if "overclock_mode" in applied and applied["overclock_mode"]:
+                norm_oc = self._normalize_oc_mode(applied["overclock_mode"])
+                if norm_oc:
+                    status["overclock_mode"] = norm_oc
+            if "fan_mode" in applied and applied["fan_mode"]:
+                norm_fm = self._normalize_fan_mode(applied["fan_mode"])
+                if norm_fm:
+                    status["fan_mode"] = norm_fm
+
         return status
 
     def set_coolboost(self, enable: bool) -> tuple:
@@ -1477,6 +1578,7 @@ class AcerPerformanceController:
 
             state_str = "开启" if enable else "关闭"
             if success:
+                self._update_applied_cache(coolboost=bool(enable))
                 return True, f"CoolBoost™ 已成功设置为: {state_str}"
             elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
                 return False, "调起硬件失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
@@ -1554,6 +1656,7 @@ class AcerPerformanceController:
                             err_msg = str(ex)
 
             if success:
+                self._update_applied_cache(overclock_mode=mode)
                 return True, f"超频模式已成功设置为: {target_name}"
             elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
                 return False, "切换超频模式失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
@@ -1638,6 +1741,7 @@ class AcerPerformanceController:
                             pass
 
             if success:
+                self._update_applied_cache(fan_mode=mode)
                 return True, f"风扇模式已成功设置为: {target_name}"
             elif "-2147217405" in err_msg or "拒绝访问" in err_msg or "SWbemObjectSet" in err_msg:
                 return False, "设置风扇模式失败：Triton 500 WMI 接口存在，但需要以【管理员身份运行】管理器"
@@ -1699,7 +1803,7 @@ class AcerPerformanceController:
         except Exception:
             pass
 
-    def launch_predatorsense_gui(self, fan_mode=None, overclock_mode=None, coolboost=None, post_action="hide", log_cb=None):
+    def launch_predatorsense_gui(self, fan_mode=None, overclock_mode=None, coolboost=None, post_action="hide", log_cb=None, force=False):
         """唤起 Acer PredatorSense 控制中心界面并按选配参数精细化程序点击 (开机自启防卡顿+多重轮询极健壮架构)"""
         def _do_log(msg):
             if callable(log_cb):
@@ -1719,7 +1823,7 @@ class AcerPerformanceController:
             # 必须在 ensure_predatorsense_daemon 之前前置检测，严格精准匹配 predatorsense.exe！
             is_cold_start = True
             ps_create_time = 0
-            sys_cold_boot = is_system_cold_boot(300)
+            sys_cold_boot = is_system_cold_boot(80)
             sys_uptime = get_system_uptime()
 
             try:
@@ -1818,12 +1922,14 @@ class AcerPerformanceController:
 
             _do_log(f"[Step 4/4] 窗口尺寸 ({w}x{h})，开始执行 UI 程序化极速点击 [超频={overclock_mode}, 风扇={fan_mode}, CoolBoost={coolboost}] ...")
 
-            # 保存鼠标初始坐标
+            # 保存鼠标初始坐标与获取当前状态
             orig_cursor = win32api.GetCursorPos()
+            curr_status = self.get_current_status()
 
             # A. 超频模式控制 (Default / Fast / Extreme)
             if overclock_mode:
                 oc_str = str(overclock_mode).lower()
+                _do_log(f"[Step 4/4] 切换【超频模式】 -> 设为: {overclock_mode}")
                 # 1. 点击左侧【超频】Tab (X: 13%, Y: 42%)
                 win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.42)))
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -1846,6 +1952,7 @@ class AcerPerformanceController:
             # B. 风扇模式控制 (Auto / Max / Custom)
             if fan_mode:
                 fm_str = str(fan_mode).lower()
+                _do_log(f"[Step 4/4] 切换【风扇速率】 -> 设为: {fan_mode}")
                 # 1. 点击左侧【风扇控制】Tab (X: 13%, Y: 49%)
                 win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.49)))
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -1867,8 +1974,18 @@ class AcerPerformanceController:
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
                 time.sleep(0.4)
 
-            # C. CoolBoost 开关控制
-            if coolboost is True:
+            # C. CoolBoost 开关控制 (开启/关闭 CoolBoost)
+            if coolboost is not None:
+                target_cb = bool(coolboost)
+                # 若此前未下发风扇模式变更（未切到风扇页），则必须先点击【风扇控制】Tab 确保 UI 在风扇 Tab 页面
+                if not fan_mode:
+                    _do_log("[Step 4/4] 点击左侧【风扇控制】Tab 切页以暴露 CoolBoost 开关...")
+                    win32api.SetCursorPos((int(left + w * 0.13), int(top + h * 0.49)))
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    time.sleep(0.5)
+
+                _do_log(f"[Step 4/4] 点击【CoolBoost】切换开关 -> 设为: {'开启' if target_cb else '关闭'}")
                 # 点击【CoolBoost】开关 (根据截图精准位于 X: 38%, Y: 20.5%)
                 win32api.SetCursorPos((int(left + w * 0.38), int(top + h * 0.205)))
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -1899,9 +2016,9 @@ class AcerPerformanceController:
         except Exception as e:
             _do_log(f"⚠️ UI 程序化点击调优过程异常: {e}")
 
-    def apply_performance_profile(self, profile: dict, log_cb=None) -> tuple:
+    def apply_performance_profile(self, profile: dict, log_cb=None, force=False) -> tuple:
         """
-        批量应用性能 Profile (结合程序化点击 100% 无死锁无提示报错)
+        批量应用性能 Profile (100% 依赖 PredatorSense UI 程序化鼠标点击下发)
         profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"}
         """
         def _do_log(msg):
@@ -1917,39 +2034,81 @@ class AcerPerformanceController:
         if not self.is_supported():
             return False, "当前设备非 Acer 笔记本或未加载 Acer WMI 控制驱动 (静默跳过)"
 
-        logs = []
-
-        # 1. 设置 CoolBoost
-        cb = profile.get("coolboost")
-        if cb is not None:
-            self.set_coolboost(bool(cb))
-            state_str = "开启" if cb else "关闭"
-            logs.append(f"CoolBoost 已成功设置为: {state_str}")
-            _do_log(f"WMI 硬件底座指令 -> CoolBoost: {state_str}")
-
-        # 2. 设置超频模式
         oc = profile.get("overclock_mode")
-        if oc:
-            self.set_overclock_mode(oc)
-            logs.append(f"超频模式已成功设置为: {oc}")
-            _do_log(f"WMI 硬件底座指令 -> 超频模式: {oc}")
-
-        # 3. 设置风扇模式
+        cb = profile.get("coolboost")
         fm = profile.get("fan_mode")
-        if fm:
-            self.set_fan_mode(fm)
-            logs.append(f"风扇模式已成功设置为: {fm}")
-            _do_log(f"WMI 硬件底座指令 -> 风扇模式: {fm}")
+        pa = profile.get("post_action", "hide")
 
-        # 4. 全自动发起 UI 程序化点击 (精细化定位: 风扇/超频/CoolBoost + post_action 适配)
+        # 1. 探查并打印执行前系统 3 大参数明细
+        before_status = self.get_current_status()
+        curr_oc = before_status.get("overclock_mode")
+        curr_fm = before_status.get("fan_mode")
+        curr_cb = before_status.get("coolboost")
+
+        _do_log(
+            f"[Acer Hardware] 执行前系统探查状态 -> "
+            f"超频(overclock_mode)={curr_oc}, 风扇(fan_mode)={curr_fm}, CoolBoost(coolboost)={'开启' if curr_cb else '关闭'}"
+        )
+
+        # 2. 精细化比对各参数是否有变动
+        need_oc = False
+        if oc is not None:
+            norm_target_oc = (self._normalize_oc_mode(oc) or "").lower()
+            norm_curr_oc = (curr_oc or "").lower()
+            if norm_target_oc != norm_curr_oc:
+                need_oc = True
+
+        need_fm = False
+        if fm is not None:
+            norm_target_fm = (self._normalize_fan_mode(fm) or "").lower()
+            norm_curr_fm = (curr_fm or "").lower()
+            if norm_target_fm != norm_curr_fm:
+                need_fm = True
+
+        need_cb = False
+        if cb is not None:
+            target_cb = bool(cb)
+            if curr_cb is None or bool(curr_cb) != target_cb:
+                need_cb = True
+
+        # 3. 若非强刷模式且所有请求参数与当前状态完全一致，直接优雅跳过 UI
+        if not force and not need_oc and not need_fm and not need_cb:
+            _do_log("[Acer Hardware] 当前系统状态与目标配置 100% 完全一致，无需重复唤起 UI 模拟点击")
+            return True, "目标性能 Profile 已处于生效状态 (无需重复调用 UI)"
+
+        _do_log(
+            f"[Acer Hardware] 检测到差量设置需求 -> [超频变更={need_oc}, 风扇变更={need_fm}, CoolBoost变更={need_cb}]"
+        )
+        _do_log(
+            f"[Acer Hardware] 发起 PredatorSense 极速 UI 鼠标点击应用 -> "
+            f"超频={oc if (need_oc or force) else '保持(' + str(curr_oc) + ')'}, "
+            f"风扇={fm if (need_fm or force) else '保持(' + str(curr_fm) + ')'}, "
+            f"CoolBoost={cb if (need_cb or force) else '保持(' + ('开启' if curr_cb else '关闭') + ')'}"
+        )
+
+        # 4. 仅向 launch_predatorsense_gui 传递真正需要变更的参数
         try:
-            pa = profile.get("post_action", "hide")
-            self.launch_predatorsense_gui(fan_mode=fm, overclock_mode=oc, coolboost=cb, post_action=pa, log_cb=log_cb)
+            self.launch_predatorsense_gui(
+                fan_mode=fm if (need_fm or force) else None,
+                overclock_mode=oc if (need_oc or force) else None,
+                coolboost=cb if (need_cb or force) else None,
+                post_action=pa,
+                log_cb=log_cb,
+                force=force
+            )
         except Exception as e:
             _do_log(f"⚠️ 唤起 UI 程序化点击调优异常: {e}")
 
-        summary_msg = " | ".join(logs) if logs else "Acer 硬件性能设置已自动保存并点击应用"
-        return True, summary_msg
+        # 5. 更新状态应用缓存并打印执行后系统最新状态
+        self._update_applied_cache(coolboost=cb, overclock_mode=oc, fan_mode=fm)
+        after_status = self.get_current_status()
+        _do_log(
+            f"[Acer Hardware] 执行后系统最新状态 -> "
+            f"超频(overclock_mode)={after_status.get('overclock_mode')}, 风扇(fan_mode)={after_status.get('fan_mode')}, CoolBoost(coolboost)={'开启' if after_status.get('coolboost') else '关闭'}"
+        )
+
+        return True, f"Acer 硬件性能 Profile 已通过 PredatorSense UI 极速点击应用 [超频={oc}, 风扇={fm}, CoolBoost={cb}]"
+
 
 
 

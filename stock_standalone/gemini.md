@@ -1,3 +1,23 @@
+## 2026-08-07 11:35
+- [x] **实现 Acer 控制器全一致去重跳过与 CoolBoost 前置 Tab 切页修复 (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
+    - [x] **CoolBoost 前置 Tab 切页**：修复当 `fan_mode` 无需变动 (`None`) 但 `coolboost` 需变更时，UI 停留在超频页导致 CoolBoost 按钮“点了空气”的缺陷。在 `launch_predatorsense_gui` 中增加校验：若未下发风扇变动，自动前置点击左侧【风扇控制】Tab (`X: 13%, Y: 49%`) 确保切入风扇页后再点击 CoolBoost 开关。
+    - [x] **3 大参数明细探查**：在 `apply_performance_profile` 中增加 `超频(overclock_mode)`, `风扇(fan_mode)`, `CoolBoost(coolboost)` 3 大参数执行前与执行后的明细日志打印。
+    - [x] **全一致优雅去重跳过**：执行前探查系统状态，当 3 大参数与目标 Profile **100% 完全一致**时，直接记录 Log 并返回成功，彻底避免重复调起 PredatorSense UI 执行多余鼠标点击；当存在差量时仅下发变动项。
+    - [x] **测试脚本 Step 0~3 验证**：在 `test_acer_performance.py` 中覆盖 Step 0 (初始明细探查)、Step 1 (Extreme/Max/True)、Step 2 (Fast/Auto/True) 与 Step 3 (重复下发优雅跳过) 全流程校验。
+    - [x] **全量单元测试 100% 通过**：`pytest tests/test_acer_performance.py` 4 项测试全部通过。
+
+## 2026-08-07 11:15
+- [x] **恢复 Acer 控制器原有 100% 完美稳定执行逻辑并增强状态检测精度 (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
+    - [x] **无条件恢复原有稳定执行逻辑**：彻底撤销 `apply_performance_profile` 中的前置拦截与跳过中断机制，完全无损恢复原先 100% 顺畅调起的 WMI 控制与 `launch_predatorsense_gui` 程序化 UI 点击流程。
+    - [x] **根治“设置后获取一直为普通状态”缺陷**：在 `core.py` 中引入 `_GLOBAL_LAST_APPLIED_PROFILE` 全局缓存，并在 `get_current_status()` 中结合 OEM 注册表 `Turbo_Button_status` 探查、全局应用缓存与 `ConfigManager` 兜底；彻底解决硬件 WMI 无法反写导致状态查询恒定返回普通状态 (`Default`/`Auto`/`False`) 的死穴。
+    - [x] **单元测试全量验证 100% PASSED**：运行 `pytest tests/test_acer_performance.py tests/test_signal_ledger.py` 全量 17 项测试 100% 通过。
+
+## 2026-08-07 10:15
+- [x] **优化 Acer 性能控制器 (`AcerPerformanceController`) 实现状态先查后写、 CoolBoost 防重复开合与 `force` 强刷控制 (`webTools/window_manager/core.py`, `tests/test_acer_performance.py`)**：
+    - [x] **状态标准化与智能去重 (State Deduplication)**：在 `AcerPerformanceController` 中引入 `_last_applied_profile` 内存缓存与 `_normalize_oc_mode` / `_normalize_fan_mode` / `_normalize_coolboost` 规范化校验；在 `apply_performance_profile` 执行 WMI/GUI 前对比 `get_current_status()` 探查状态，已处于目标状态时自动拦截重复设置，彻底解决 CoolBoost 被反复开关（导致意外翻转关掉）的痛点。
+    - [x] **界面自动化精准控制与 `force` 强制覆盖**：在 GUI 唤醒与点击流中仅在 CoolBoost 状态不符合预期时才触发程序化点击；同时为 `apply_performance_profile` 增加 `force: bool` 强刷参数支持显式同步。
+    - [x] **单元测试全量验证 100% PASSED**：扩展 `tests/test_acer_performance.py` 补充状态去重与 `force` 强制覆盖校验断言，4 项 Acer 测试及 `tests/test_signal_ledger.py` 13 项单元测试 100% 通过。
+
 ## 2026-08-07 09:50
 - [x] **彻底根治 `_save_monitors` IndexError 数组越界与 `voice_alert_config.json` Extra Data 解析自愈 Bug (`stock_live_strategy.py`, `global_favorites.py`, `scratch/test_voice_config_fix.py`)**：
     - [x] **`_save_monitors` 多线程并发与数组越界防御**：在 `stock_live_strategy.py` 的 `_save_monitors` 中引入局部变量快照 (`df_curr = self.df`) 隔离多线程底层 DataFrame 动态缩放；增加针对重复 Code 索引返回 `pd.DataFrame` 的 `row.iloc[0]` 降级处理；并将快照提取逻辑放入 `try...except Exception:` 全量防护块，确保单只股票快照异常绝对不崩溃或中断存盘。
