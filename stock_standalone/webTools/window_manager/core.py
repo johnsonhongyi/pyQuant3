@@ -1577,6 +1577,21 @@ class AcerPerformanceController:
         except Exception:
             pass
 
+        # 3. 若非强制物理探查 (force_physical=False)，则结合运行时 applied 应用缓存记录
+        if not force_physical:
+            applied = self._last_applied_profile or _GLOBAL_LAST_APPLIED_PROFILE
+            if applied:
+                if "coolboost" in applied and applied["coolboost"] is not None:
+                    status["coolboost"] = bool(applied["coolboost"])
+                if "overclock_mode" in applied and applied["overclock_mode"]:
+                    norm_oc = self._normalize_oc_mode(applied["overclock_mode"])
+                    if norm_oc:
+                        status["overclock_mode"] = norm_oc
+                if "fan_mode" in applied and applied["fan_mode"]:
+                    norm_fm = self._normalize_fan_mode(applied["fan_mode"])
+                    if norm_fm:
+                        status["fan_mode"] = norm_fm
+
         return status
 
     def set_coolboost(self, enable: bool) -> tuple:
