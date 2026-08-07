@@ -100,18 +100,52 @@ def test_acer_config_persistence():
             pass
 
 def test_acer_apply_profile():
-    """测试批量应用 Acer 性能 Profile 接口"""
+    """测试批量应用 Acer 性能 Profile 接口及每步状态更新的准确性"""
     controller = AcerPerformanceController()
-    profile = {
+    
+    # 1. Step 0: 首先获取 3 个状态的初始/默认设置明细
+    init_status = controller.get_current_status()
+    print(f"[TEST Step 0] 初始系统探查明细 -> 超频(overclock_mode)={init_status.get('overclock_mode')}, 风扇(fan_mode)={init_status.get('fan_mode')}, CoolBoost(coolboost)={init_status.get('coolboost')}")
+
+    # 2. Step 1: 设置极速模式 [超频=Extreme, 风扇=Max, CoolBoost=True]
+    p1 = {
         "overclock_mode": "Extreme",
         "coolboost": True,
         "fan_mode": "Max"
     }
-    success, msg = controller.apply_performance_profile(profile)
-    print(f"[TEST] Apply Profile Result: success={success}, msg={msg}")
-    # 无论硬件是否存在，接口均必须安全返回 (bool, str) 元组，不引发 Exception 崩溃
-    assert isinstance(success, bool)
-    assert isinstance(msg, str)
+    s1, msg1 = controller.apply_performance_profile(p1, log_cb=print)
+    print(f"[TEST Step 1 Result] success={s1}, msg={msg1}")
+    assert s1 is True
+    
+    st1 = controller.get_current_status()
+    print(f"[TEST Step 1 Status] 设置后状态明细 -> 超频(overclock_mode)={st1.get('overclock_mode')}, 风扇(fan_mode)={st1.get('fan_mode')}, CoolBoost(coolboost)={st1.get('coolboost')}")
+    if controller.is_supported():
+        assert st1["coolboost"] is True
+        assert st1["overclock_mode"] == "Extreme"
+        assert st1["fan_mode"] == "Max"
+
+    # 3. Step 2: 切换为 Fast 模式 [超频=Fast, 风扇=Auto, CoolBoost=True]
+    p2 = {
+        "overclock_mode": "Fast",
+        "coolboost": True,
+        "fan_mode": "Auto"
+    }
+    s2, msg2 = controller.apply_performance_profile(p2, log_cb=print)
+    print(f"[TEST Step 2 Result] success={s2}, msg={msg2}")
+    assert s2 is True
+
+    st2 = controller.get_current_status()
+    print(f"[TEST Step 2 Status] 设置后状态明细 -> 超频(overclock_mode)={st2.get('overclock_mode')}, 风扇(fan_mode)={st2.get('fan_mode')}, CoolBoost(coolboost)={st2.get('coolboost')}")
+    if controller.is_supported():
+        assert st2["coolboost"] is True
+        assert st2["overclock_mode"] == "Fast"
+        assert st2["fan_mode"] == "Auto"
+
+    # 4. Step 3: 再次应用相同 Fast 模式 (验证状态已完全一致，优雅跳过 UI 模拟点击)
+    s3, msg3 = controller.apply_performance_profile(p2, log_cb=print)
+    print(f"[TEST Step 3 Repeat Result] success={s3}, msg={msg3}")
+    assert s3 is True
+    assert "无需重复" in msg3 or "生效状态" in msg3
 
 if __name__ == "__main__":
     test_acer_controller_support()
@@ -119,3 +153,4 @@ if __name__ == "__main__":
     test_acer_config_persistence()
     test_acer_apply_profile()
     print("ALL ACER PERFORMANCE CONTROLLER TESTS PASSED!")
+
