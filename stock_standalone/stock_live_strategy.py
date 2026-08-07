@@ -1368,7 +1368,7 @@ class StockLiveStrategy:
         # --- 1.2 [NEW] 每日热股跨日验证 (9:15-9:30 处理昨天入队的标的) ---
         if 915 <= now_time_int <= 930:
             if getattr(self, '_last_validation_date', '') != today_str:
-                self.executor.submit(self._daily_watchlist_validation, df_internal)
+                self.executor.submit(self._daily_watchlist_validation, df_internal.copy())
                 self._last_validation_date = today_str
 
         # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
@@ -1376,7 +1376,7 @@ class StockLiveStrategy:
         if not getattr(self, '_rank_scan_done_today', False):
             # 只有在非休市时间且有数据时才扫描
             if not df_internal.empty and cct.get_trade_date_status(): # 确保是交易日
-                 self.executor.submit(self._scan_rank_for_follow, df_internal, concept_top5, top_n=100)
+                 self.executor.submit(self._scan_rank_for_follow, df_internal.copy(), concept_top5, top_n=100)
                  self._rank_scan_done_today = True
                  logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
             else:
@@ -1880,6 +1880,9 @@ class StockLiveStrategy:
         if df is None or df.empty:
             return
         
+        # 🛡️ [THREAD-SAFETY] 局部快照隔离，防止主线程并发修改/缩放底层 DataFrame 导致的 IndexError: index out of bounds
+        df_curr = df.copy()
+        
         try:
             hub = get_trading_hub()
             # import removed
@@ -1902,7 +1905,7 @@ class StockLiveStrategy:
             
             candidates = []
             
-            for code, row in df.iterrows():
+            for code, row in df_curr.iterrows():
                 code_str = str(code).zfill(6)
                 
                 # 跳过今日已入队 / 已在监控的
@@ -2058,11 +2061,16 @@ class StockLiveStrategy:
         """
         [Phase 3] 每日热股跨日验证调度
         """
+        if df is None or df.empty:
+            return
+            
+        # 🛡️ [THREAD-SAFETY] 局部快照隔离
+        df_curr = df.copy()
         try:
             hub = get_trading_hub()
             # 1. 构造验证所需的 OHLC 数据字典
             ohlc_data = {}
-            for code, row in df.iterrows():
+            for code, row in df_curr.iterrows():
                 code_str = str(code).zfill(6)
                 ohlc_data[code_str] = {
                     'close': float(row.get('close', 0)),
