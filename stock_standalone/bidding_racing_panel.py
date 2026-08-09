@@ -1048,6 +1048,56 @@ class SectorDetailDialog(QDialog, WindowMixin):
         # 恢复物理位置与大小持久化
         self._restore_geometry()
         
+        self.setUpdatesEnabled(False)
+        self._sort_col = 2 # 默认排序: 结构分
+        self._sort_order = Qt.SortOrder.DescendingOrder
+        
+        # [NEW] 注册到全局活动详情窗口列表
+        if self not in _active_racing_detail_dialogs:
+            _active_racing_detail_dialogs.append(self)
+            
+        # [NEW] 加载赛马详情共用多级排序状态
+        self._apply_saved_racing_detail_sort()
+        
+        # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
+        self._boot_lock = True
+        self._is_height_doubled = False # [NEW] 高度翻倍状态位
+        self._show_reason = False       # [NEW] 形态详情/理由显示标志 (默认关闭)
+        
+        # [🚀 极限性能] 状态追踪
+        self._last_rendered_version = -1
+        self._last_rendered_ts = 0.0
+        self._dirty = False
+        self._init_refresh_count = 0  # [NEW] 初始强制刷新计数器
+        
+        self._init_ui()
+        
+        # 延迟恢复表头状态 (确保窗口布局已初步完成)
+        QTimer.singleShot(150, self._restore_header_state)
+        
+        # 1秒后解除保护锁
+        QTimer.singleShot(1000, self._release_boot_lock)
+        
+        # 启动定时刷新
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh_data)
+        self.timer.start(500) 
+        self.refresh_data()
+        self._update_header_labels()
+        self.setUpdatesEnabled(True)
+        
+        # Initialize favorites version-tracking and start polling loop
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self._last_favorites_version = GlobalFavoriteManager().version
+        except Exception:
+            self._last_favorites_version = 0
+
+        self._favorites_poll_timer = QTimer(self)
+        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
+        self._favorites_poll_timer.start()
+
     def _restore_geometry(self):
         """从 window_config.json 恢复竞价板块详情弹窗位置与大小"""
         try:
@@ -1099,56 +1149,6 @@ class SectorDetailDialog(QDialog, WindowMixin):
         """隐藏时自动持久化窗口大小与位置"""
         self._save_geometry()
         super().hideEvent(event)
-        
-        self.setUpdatesEnabled(False)
-        self._sort_col = 2 # 默认排序: 结构分
-        self._sort_order = Qt.SortOrder.DescendingOrder
-        
-        # [NEW] 注册到全局活动详情窗口列表
-        if self not in _active_racing_detail_dialogs:
-            _active_racing_detail_dialogs.append(self)
-            
-        # [NEW] 加载赛马详情共用多级排序状态
-        self._apply_saved_racing_detail_sort()
-        
-        # [NEW] 启动保护锁，防止初始化时的自动布局覆盖用户保存的列宽
-        self._boot_lock = True
-        self._is_height_doubled = False # [NEW] 高度翻倍状态位
-        self._show_reason = False       # [NEW] 形态详情/理由显示标志 (默认关闭)
-        
-        # [🚀 极限性能] 状态追踪
-        self._last_rendered_version = -1
-        self._last_rendered_ts = 0.0
-        self._dirty = False
-        self._init_refresh_count = 0  # [NEW] 初始强制刷新计数器
-        
-        self._init_ui()
-        
-        # 延迟恢复表头状态 (确保窗口布局已初步完成)
-        QTimer.singleShot(150, self._restore_header_state)
-        
-        # 1秒后解除保护锁
-        QTimer.singleShot(1000, self._release_boot_lock)
-        
-        # 启动定时刷新
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_data)
-        self.timer.start(500) 
-        self.refresh_data()
-        self._update_header_labels()
-        self.setUpdatesEnabled(True)
-        
-        # Initialize favorites version-tracking and start polling loop
-        try:
-            from global_favorites import GlobalFavoriteManager
-            self._last_favorites_version = GlobalFavoriteManager().version
-        except Exception:
-            self._last_favorites_version = 0
-
-        self._favorites_poll_timer = QTimer(self)
-        self._favorites_poll_timer.setInterval(500)
-        self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
-        self._favorites_poll_timer.start()
 
     def parent(self):
         """重写 parent 方法，为 Python 层业务逻辑保留对主窗口 of 引用"""
@@ -2644,9 +2644,13 @@ class CategoryDetailDialog(QDialog, WindowMixin):
         avg_pct = sum((getattr(x, 'current_pct', 0) or 0) for x in data_list) / len(data_list) if data_list else 0
         total_count = len(data_list)
         stats_text = (f"📊 统计: 共 {total_count} 只{' (仅显Top%d)' % RENDER_TOP_K if total_count > RENDER_TOP_K else ''} | "
-                      f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'};'>{avg_pct:+.2f}%</span>")
-        self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
-        self.status_lbl.setText(stats_text)
+                      f"🏁 均幅: <span style='color:{'#FF4444' if avg_pct >= 0 else '#44CC44'}; font-weight:bold;'>{avg_pct:+.2f}%</span>")
+        if hasattr(self, 'status_lbl') and self.status_lbl:
+            self.status_lbl.setTextFormat(Qt.TextFormat.RichText)
+            self.status_lbl.setText(stats_text)
+
+        if not hasattr(self, 'table') or not self.table:
+            return
 
         self._render_table(flattened)
 

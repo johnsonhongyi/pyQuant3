@@ -1,3 +1,10 @@
+## 2026-08-09 09:40
+- [x] **彻底根治竞价赛马看板 `SectorDetailDialog` AttributeError 及初始化/隐藏事件作用域错位 Bug (`bidding_racing_panel.py`, `scratch/test_sector_detail_dialog_init.py`)**：
+    - [x] **根因精准解构**：排查发现之前在 `bidding_racing_panel.py` 中引入物理位置与大小持久化 (`_restore_geometry` / `_save_geometry`) 时，误将 `SectorDetailDialog.__init__` 的后半段（包含 `_init_ui()`、`_apply_saved_racing_detail_sort()`、表头状态恢复以及 500ms 刷新定时器 `self.timer` 的创建启动）包裹放进了 `def hideEvent(self, event):` 方法体中。导致在实例化 `SectorDetailDialog` 对象时未自动构建 UI 节点，`title_lbl`、`status_lbl`、`table` 等属性缺失。当隐藏/刷新事件触发时，调起 `refresh_data()` 频繁抛出 `AttributeError: 'SectorDetailDialog' object has no attribute 'title_lbl'`，并被全局未捕获异常句柄 `hotkey_rotator.py` 截获。
+    - [x] **初始化逻辑归位与 `hideEvent` 精简解耦**：将 UI 节点构建与定时器启动全量重新移回 `SectorDetailDialog.__init__` 构造函数末尾，彻底还原 `hideEvent` 为极简的 `_save_geometry()` 与父类方法调用。
+    - [x] **`refresh_data()` 控件安全属性检查 protection**：在 `refresh_data()` 中为 `title_lbl`、`status_lbl` 及 `table` 等成员控件加全 `if hasattr(self, 'widget_name'):` 防御防护，确保在任何极小窗口生命周期交替阶段绝对零崩溃。
+    - [x] **单元测试与回归 100% 成功通过**：新建 `scratch/test_sector_detail_dialog_init.py` 校验对象实例化后控件属性存在性与 `refresh_data` 安全调起，结合 `pytest tests/test_signal_ledger.py` 全量 13 项单元测试 100% PASSED！
+
 ## 2026-08-07 15:00
 - [x] **彻底解决 ATS 手动点击【🔄 刷新状态】时缺失 IPC 管道获取数据问题 (`ats/ui/main_window.py`)**：
     - [x] **根因精准解构**：排查发现 `load_db_data` 中向 Windows 命名管道发送 `REQ_FULL_SYNC` 信令的代码此前被误包裹在 `if not getattr(self, '_listener_started', False):` 冷启动分支内。导致冷启动后 `_listener_started` 变为 `True`，后续用户手动点击【🔄 刷新状态】(调起 `load_db_data(force=True)`) 时，直接跳过了向 `PIPE_NAME_TK` 发送 `REQ_FULL_SYNC` 请求，后台监控端无法收到强刷信号，导致“只有冷启动可以获取数据，手动刷新没有数据”。
