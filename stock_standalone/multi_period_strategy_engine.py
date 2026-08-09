@@ -303,6 +303,12 @@ class MultiPeriodStrategyEngine:
             df['last_vwap_cum_3d'] = c_val
             df['last_vwap_cum_3d_d'] = c_val
 
+        # 统一格式化所有的 vwap / nclose 列为 2 位浮点数
+        for col in df.columns:
+            c_low = col.lower()
+            if ('vwap' in c_low or 'nclose' in c_low) and pd.api.types.is_float_dtype(df[col]):
+                df[col] = df[col].round(2)
+
         return df
         
     def load_period_data(self, period: str, top_now: pd.DataFrame, force_reload: bool = False, end: str = None, readonly: bool = True) -> pd.DataFrame:

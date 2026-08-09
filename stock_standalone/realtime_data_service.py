@@ -773,7 +773,7 @@ class MinuteKlineCache:
                 w_vol = sum(day_vols[d] for d in w_dates)
                 w_amt = sum(day_amt[d] for d in w_dates)
                 if w_vol > 0:
-                    c_vwap = round(float(w_amt / w_vol), 3)
+                    c_vwap = float(w_amt / w_vol)
                     res[f'vwap_cum_{window}d'] = c_vwap
                     res[f'cum_vwap_{window}d'] = c_vwap
                     res[f'vwap_{window}d_cum'] = c_vwap
@@ -795,13 +795,18 @@ class MinuteKlineCache:
                 h_w_vol = sum(day_vols[d] for d in h_w_dates)
                 h_w_amt = sum(day_amt[d] for d in h_w_dates)
                 if h_w_vol > 0:
-                    h_c_vwap = round(float(h_w_amt / h_w_vol), 3)
+                    h_c_vwap = float(h_w_amt / h_w_vol)
                     res[f'last_vwap_cum_{window}d'] = h_c_vwap
                     res[f'last_cum_vwap_{window}d'] = h_c_vwap
                     last_avail_hist_cum = h_c_vwap
             else:
                 res[f'last_vwap_cum_{window}d'] = last_avail_hist_cum
                 res[f'last_cum_vwap_{window}d'] = last_avail_hist_cum
+
+        # 仅在数据最后返回前统一进行 2 位浮点数格式化
+        for k, v in list(res.items()):
+            if isinstance(v, float):
+                res[k] = round(v, 2)
 
         return res
 
@@ -887,6 +892,11 @@ class MinuteKlineCache:
         except Exception as e:
             if hasattr(self, 'verbose') and self.verbose:
                 logger.warning(f"attach_multiday_twap_to_df error: {e}")
+
+        # 仅在数据最后返回前统一进行 2 位浮点数格式化
+        for key in CORE_KEYS:
+            if key in df.columns and pd.api.types.is_float_dtype(df[key]):
+                df[key] = df[key].round(2)
 
         return df
 
@@ -1015,6 +1025,11 @@ class MinuteKlineCache:
         except Exception as e:
             if hasattr(self, 'verbose') and self.verbose:
                 logger.warning(f"attach_multiday_twap_for_non_trading_day error: {e}")
+
+        # 仅在数据最后返回前统一进行 2 位浮点数格式化
+        for key in all_keys:
+            if key in df.columns and pd.api.types.is_float_dtype(df[key]):
+                df[key] = df[key].round(2)
 
         return df
 
