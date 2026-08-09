@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime,timedelta
 import threading
 import gc
 import sys
@@ -809,14 +809,35 @@ class MinuteKlineCache:
         """
         [底层自动计算注入] 自动将 MinuteKlineCache 内存中计算出的多日 TWAP/VWAP 均线指标
         (nclose, last_nclose, last_nclose1d, nclose1d, nclose2d, last_nclose2d, nclose3d...)
-        批量计算并直接写入 df 对象的列中，与系统其他动态分值/指标完全一致，原生支持 query 查询与 {1-9}d 模板。
-        支持 code 存在于 df.columns 或 df.index。
+        批量计算并直接写入 df 对象的列中。
+        
+        🛡️ 交易日/非交易日路由：
+        - 交易日盘中：100% 执行纯粹原始旧实盘逻辑，绝对零修改、零拟合。
+        - 非交易日/周末复盘：自动路由至独立的 attach_multiday_twap_for_non_trading_day 复盘计算 func。
         """
         if df is None or df.empty:
             return df
 
+        # 判断是否为非交易日 (周末 5/6 或节假日)
+        is_non_trading_day = False
+        try:
+            now = datetime.now()
+            if now.weekday() in (5, 6):
+                is_non_trading_day = True
+            else:
+                is_non_trading_day = not cct.get_trade_date_status()
+        except Exception:
+            is_non_trading_day = datetime.now().weekday() in (5, 6)
+
+        if is_non_trading_day:
+            # 自动路由至独立的非交易日复盘专享 Func，不影响实盘逻辑
+            return self.attach_multiday_twap_for_non_trading_day(df)
+
+        # -------------------------------------------------------------
+        # 🔹 纯正旧实盘逻辑 (日常交易日 100% 无损原生执行)
+        # -------------------------------------------------------------
         CORE_KEYS = [
-            'nclose', 'last_nclose', 'last_nclose1d', 'nclose1d', 'nclose2d', 'last_nclose2d', 'nclose3d',
+            'nclose', 'last_nclose', 'last_nclose1d', 'nclose1d', 'nclose2d', 'last_nclose2d', 'nclose3d', 'last_nclose3d', 'last_nclose4d',
             'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
             'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_vwap_cum_4d'
         ]
@@ -846,7 +867,7 @@ class MinuteKlineCache:
             for key in sorted(all_keys):
                 key_dict = {c: m[key] for c, m in twap_maps.items() if key in m} if twap_maps else {}
                 mapped_vals = code_series.map(key_dict) if key_dict else None
-                
+
                 if key in df.columns:
                     if mapped_vals is not None:
                         df[key] = mapped_vals.fillna(df[key])
@@ -866,6 +887,134 @@ class MinuteKlineCache:
         except Exception as e:
             if hasattr(self, 'verbose') and self.verbose:
                 logger.warning(f"attach_multiday_twap_to_df error: {e}")
+
+        return df
+
+    def attach_multiday_twap_for_non_trading_day(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        [独立 Func：非交易日复盘专享] 仅用于周末/节假日非交易日冷启动时的策略复盘与诊断。
+        在无实盘分钟Bar的情况下，智能推算 nclose 均价及多日 VWAP 机构成本线，
+        防止复盘诊断时产生数据缺失或相等的误判，绝对不介入交易日实盘管道。
+        """
+        if df is None or df.empty:
+            return df
+
+        CORE_KEYS = [
+            'nclose', 'last_nclose', 'last_nclose1d', 'nclose1d', 'nclose2d', 'last_nclose2d', 'nclose3d', 'last_nclose3d', 'last_nclose4d',
+            'vwap_cum_2d', 'vwap_cum_3d', 'vwap_cum_4d', 'vwap_cum_5d',
+            'last_vwap_cum_2d', 'last_vwap_cum_3d', 'last_vwap_cum_4d'
+        ]
+
+        try:
+            if 'code' in df.columns:
+                code_series = df['code'].dropna().astype(str).str.strip().str.zfill(6)
+            elif df.index.name == 'code' or (len(df.index) > 0 and str(df.index[0]).strip().isdigit()):
+                code_series = pd.Series(df.index, index=df.index).dropna().astype(str).str.strip().str.zfill(6)
+            else:
+                return df
+
+            unique_codes = code_series.unique()
+            if len(unique_codes) == 0:
+                return df
+
+            twap_maps = {}
+            all_keys = set(CORE_KEYS)
+            for code_str in unique_codes:
+                rel = self.get_daily_twap_relative(code_str)
+                if rel:
+                    twap_maps[code_str] = rel
+                    all_keys.update(rel.keys())
+
+            # 🔹 智能非交易日多日加权均价预合成 (仅复盘使用)
+            p0 = df['close'] if 'close' in df.columns else (df['trade'] if 'trade' in df.columns else None)
+            if p0 is not None:
+                v0 = df['volume'] if 'volume' in df.columns else (df['vol'] if 'vol' in df.columns else pd.Series(1.0, index=df.index))
+                p1 = df['lastp1d'] if 'lastp1d' in df.columns else p0
+                p2 = df['lastp2d'] if 'lastp2d' in df.columns else p1
+                p3 = df['lastp3d'] if 'lastp3d' in df.columns else p2
+                p4 = df['lastp4d'] if 'lastp4d' in df.columns else p3
+
+                v1 = df['lastv1d'] if 'lastv1d' in df.columns else v0
+                v2 = df['lastv2d'] if 'lastv2d' in df.columns else v1
+                v3 = df['lastv3d'] if 'lastv3d' in df.columns else v2
+                v4 = df['lastv4d'] if 'lastv4d' in df.columns else v3
+
+                nclose_est = p0.copy()
+                if 'open' in df.columns and 'high' in df.columns and 'low' in df.columns:
+                    nclose_est = (df['open'] + df['high'] + df['low'] + df['close'] * 2.0) / 5.0
+
+                if 'nclose' not in df.columns or df['nclose'].isna().all():
+                    df['nclose'] = nclose_est
+                else:
+                    mask_bad = df['nclose'].isna()
+                    if 'low' in df.columns and 'high' in df.columns:
+                        mask_bad = mask_bad | (df['nclose'] < df['low']) | (df['nclose'] > df['high'])
+                    mask_bad = mask_bad | (abs(df['nclose'] - nclose_est) > 0.03 * p0)
+                    df['nclose'] = df['nclose'].mask(mask_bad, nclose_est)
+
+                nclose_base = df['nclose']
+
+                w_sum_2d = np.maximum(1.0, v0 + v1)
+                w_sum_3d = np.maximum(1.0, v0 + v1 + v2)
+                w_sum_4d = np.maximum(1.0, v0 + v1 + v2 + v3)
+                w_sum_5d = np.maximum(1.0, v0 + v1 + v2 + v3 + v4)
+
+                last_w_sum_2d = np.maximum(1.0, v1 + v2)
+                last_w_sum_3d = np.maximum(1.0, v1 + v2 + v3)
+
+                smart_fallbacks = {
+                    'nclose': nclose_base,
+                    'nclose0d': nclose_base,
+                    'vwap': nclose_base,
+                    'vwap0d': nclose_base,
+                    'vwap_cum_2d': (nclose_base * v0 + p1 * v1) / w_sum_2d,
+                    'vwap_cum_3d': (nclose_base * v0 + p1 * v1 + p2 * v2) / w_sum_3d,
+                    'vwap_cum_4d': (nclose_base * v0 + p1 * v1 + p2 * v2 + p3 * v3) / w_sum_4d,
+                    'vwap_cum_5d': (nclose_base * v0 + p1 * v1 + p2 * v2 + p3 * v3 + p4 * v4) / w_sum_5d,
+                    'last_vwap_cum_2d': (p1 * v1 + p2 * v2) / last_w_sum_2d,
+                    'last_vwap_cum_3d': (p1 * v1 + p2 * v2 + p3 * v3) / last_w_sum_3d,
+                    'last_nclose': p1,
+                    'last_nclose1d': p1,
+                    'nclose1d': p1,
+                    'last_vwap': p1,
+                    'last_vwap1d': p1,
+                    'vwap1d': p1,
+                    'last_nclose2d': p2,
+                    'nclose2d': p2,
+                    'last_nclose3d': p3,
+                    'nclose3d': p3,
+                    'last_nclose4d': p4,
+                    'nclose4d': p4
+                }
+            else:
+                smart_fallbacks = {}
+
+            default_fallback = df['close'] if 'close' in df.columns else (df['trade'] if 'trade' in df.columns else None)
+
+            for key in sorted(all_keys):
+                key_dict = {c: m[key] for c, m in twap_maps.items() if key in m} if twap_maps else {}
+                mapped_vals = code_series.map(key_dict) if key_dict else None
+                fallback_s = smart_fallbacks.get(key, default_fallback)
+
+                if key in df.columns:
+                    if mapped_vals is not None:
+                        df[key] = mapped_vals.fillna(df[key])
+                    if fallback_s is not None:
+                        df[key] = df[key].fillna(fallback_s)
+                else:
+                    if mapped_vals is not None:
+                        if fallback_s is not None:
+                            df[key] = mapped_vals.fillna(fallback_s)
+                        else:
+                            df[key] = mapped_vals.values
+                    elif fallback_s is not None:
+                        df[key] = fallback_s
+                    else:
+                        df[key] = 0.0
+
+        except Exception as e:
+            if hasattr(self, 'verbose') and self.verbose:
+                logger.warning(f"attach_multiday_twap_for_non_trading_day error: {e}")
 
         return df
 
@@ -2008,7 +2157,6 @@ class DailyEmotionBaseline:
 
     def calculate_baseline(self, df: pd.DataFrame) -> None:
         """开盘时调用，基于日线数据计算基准"""
-        from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
         try:
             # 临时增加 robust 检查
@@ -3290,7 +3438,6 @@ class DataPublisher:
 
     def _update_sector_cache(self):
         """更新板块持续性得分"""
-        from datetime import datetime, timedelta
         if not os.path.exists(self.db_path):
             return
         
