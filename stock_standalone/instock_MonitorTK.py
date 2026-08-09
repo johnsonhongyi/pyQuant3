@@ -871,6 +871,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Button-2>", self.copy_code)
         
+        # 💡 [NEW] 表头指标悬浮提示框 (Tooltip)
+        self.tree_tooltip = stock_indicator_help.TreeColumnTooltip(self.tree)
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()

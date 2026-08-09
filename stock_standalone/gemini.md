@@ -1,3 +1,22 @@
+## 2026-08-09 14:35
+- [x] **全量补齐与扩充 `stock_indicator_help.py` 算法指标说明文档 (`stock_indicator_help.py`, `tests/test_treeview_tooltip.py`)**：
+    - [x] **补齐 `ptop`, `pbottom`, `pbreak`, `pdays`, `obs_d` 等突破中枢与算法指标**：针对之前缺失或匹配偏差的指标，补充 `ptop` (平台顶阻力位 120日高点中枢)、`pbottom` (平台底支撑位 120日次低点中枢)、`pbreak` (平台突破信号标记)、`pdays` (主升/连阳/平台突破持续天数)、`obs_d` (二次起爆观察期运行天数) 的精准定义与逻辑描述，彻底解决了 `ptop` 错比对至 `op` (区间累计涨幅) 的误导问题。
+    - [x] **全量扩充多维动能/均价/信号指标**：新增 `resist_next` / `resist_top` (目标与极值压力位)、`winU` / `winD` (线上阳线/线下阴线运行天数)、`vwap_cum_2d`~`10d` (多日加权累计 VWAP 机构成本线)、`fib_50` (50% 斐波那契中轴中枢位)、`sig_bottom` / `sig_top` / `sig_launch` / `sig_escape` / `sig_start` (见底/见顶/启动/逃顶信号)、`sk_val` / `sd_val` / `rsi6` 等 30+ 项高频技术指标的详细中英文释义与Query同义词映射。
+    - [x] **单元测试全量验证 100% PASSED**：扩展 `tests/test_treeview_tooltip.py` 覆盖新补齐指标存在性与精准匹配断言，`pytest tests/test_treeview_tooltip.py tests/test_co2int_formatting.py tests/test_non_trading_day_twap.py tests/test_signal_ledger.py` 全量 20 项单元测试 100% PASSED！
+
+## 2026-08-09 14:18
+- [x] **根治 Treeview 表头指标悬浮提示 (Tooltip) 未显示 Bug 与智能匹配重构 (`stock_indicator_help.py`, `instock_MonitorTK.py`, `tests/test_treeview_tooltip.py`)**：
+    - [x] **`disp_cols` 元组解包与原生列 ID 探查 (`_get_column_info`)**：修复 `self.tree.cget("displaycolumns")` 返回 `('#all',)` 元组导致 `disp_cols == "#all"` 评估为 `False` 误将列名判为 `'#all'` 的底层硬伤；引入 `self.tree.column(col_id, option="id")` 原生 API 与表头文字 `self.tree.heading(col_id, option="text")` 双重可靠解包。
+    - [x] **补齐 `import re` 依赖与 4 重智能搜索匹配**：补齐 `stock_indicator_help.py` 缺失的 `import re` 模块导入；在 `_show_tooltip` 中引入 4 重检索降级链（精准列名 -> 正则剥离多周期后缀如 `ch_nod_w` -> `ch_nod` -> 表头文字 -> 包含子串模糊匹配），确保复杂场景下 100% 精准响应。
+    - [x] **防御 Windows 虚假 Leave 事件与计时器闭包安全**：在 `_on_leave` 中增加 mouse 物理点在 Treeview 几何区域内的防护拦截，防止弹出 `Toplevel` 时触发虚假 Leave 事件；在 `after` 计时器回调中显式绑定变量防闭包失效。
+    - [x] **单元测试全量验证 100% PASSED**：更新 `tests/test_treeview_tooltip.py` 覆盖后缀剥离与多维检索断言，全量 22 项单元测试套件 100% 成功通过！
+
+## 2026-08-09 13:55
+- [x] **实现 Treeview 表头指标悬浮提示 (Tooltip) 系统与 `stock_indicator_help.py` 字典集中化映射 (`stock_indicator_help.py`, `instock_MonitorTK.py`, `tests/test_treeview_tooltip.py`)**：
+    - [x] **`stock_indicator_help.py` 指标描述字典统一解析与 Tooltip 组件**：新增 `get_indicator_help_dict()` 函数解析指标说明并建立 `_INDICATOR_HELP_DICT_CACHE` 缓存；开发 `TreeColumnTooltip` 类，绑定 `ttk.Treeview` 的 `<Motion>` 事件，防抖延迟（300ms）显示包含主功能说明与极值天数（如 `ch_nod` 洗盘/拉升 K 线天数统计）的悬浮提示框。
+    - [x] **`instock_MonitorTK.py` 主监控端无缝绑定**：在 `MonitorTK.__init__` 中实例化 `self.tree_tooltip = stock_indicator_help.TreeColumnTooltip(self.tree)`，零入侵主代码，实现全局所有 Treeview 表头指标鼠标悬浮实时提示。
+    - [x] **单元测试全量验证 100% PASSED**：新建 `tests/test_treeview_tooltip.py` 覆盖指标字典解析与 GUI Tooltip 生命期，结合全量测试套件（含 `test_co2int_formatting.py`, `test_non_trading_day_twap.py`, `test_smart_vwap_fallback.py`, `test_signal_ledger.py` 等 22 项测试）100% PASSED！
+
 ## 2026-08-09 13:20
 - [x] **实现 Treeview 增量更新与全量渲染管道可配置整数列格式化系统 (`co2int`) (`JohnsonUtil/commonTips.py`, `global.ini`, `performance_optimizer.py`, `instock_MonitorTK.py`, `tests/test_co2int_formatting.py`)**：
     - [x] **`co2int` 配置项注入与全局持久化**：在 `JohnsonUtil/commonTips.py` 的 `GlobalConfig` 中新增 `co2int` 属性注册（默认包含 `["ch_tc2", "ch_bc2", "ch_nod", "pday"]` 等需要强制显示为整数的指标字段），同步在根目录与 `JohnsonUtil/` 的 `global.ini` 的 `[general]` 配置节中追加持久化定义。
