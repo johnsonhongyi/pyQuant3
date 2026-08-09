@@ -156,16 +156,24 @@ class TreeviewIncrementalUpdater:
         else:
             codes = [str(i) for i in df.index]
         
-        # 获取需要转换为 float 格式化的自定义列
+        # 获取需要转换为 float 或 int 格式化的自定义列
         try:
             from JohnsonUtil import commonTips as cct
             co2float_cols = cct.CFG.co2float
+            co2int_cols = getattr(cct.CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod", "pdays"])
         except Exception:
             co2float_cols = ["signal_strength", "signal4d"]
+            co2int_cols = ["ch_tc2", "ch_bc2", "ch_nod", "pdays"]
 
         def _fmt_sig(v):
             try:
                 return f"{float(v):.2f}"
+            except:
+                return str(v)
+
+        def _fmt_int(v):
+            try:
+                return str(int(round(float(v))))
             except:
                 return str(v)
 
@@ -176,6 +184,8 @@ class TreeviewIncrementalUpdater:
                 # fillna 处理 NaN
                 if col in co2float_cols:
                     arr = [_fmt_sig(x) if pd.notna(x) else '' for x in df[col]]
+                elif col in co2int_cols:
+                    arr = [_fmt_int(x) if pd.notna(x) else '' for x in df[col]]
                 else:
                     arr = df[col].fillna('').tolist()
             else:
@@ -557,12 +567,14 @@ class TreeviewIncrementalUpdater:
         rows_to_update: list = []  # (code, values, iid, row_data)
         rows_to_add: list = []     # (code, values, row_data)
         
-        # 获取需要转换为 float 格式化的自定义列
+        # 获取需要转换为 float 或 int 格式化的自定义列
         try:
             from JohnsonUtil import commonTips as cct
             co2float_cols = cct.CFG.co2float
+            co2int_cols = getattr(cct.CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod", "pdays"])
         except Exception:
             co2float_cols = ["signal_strength", "signal4d"]
+            co2int_cols = ["ch_tc2", "ch_bc2", "ch_nod", "pdays"]
 
         for i in range(n_rows):
             row_arr = data_array[i]
@@ -585,6 +597,12 @@ class TreeviewIncrementalUpdater:
                         if col in co2float_cols:
                             try:
                                 formatted_val = f"{float(val):.2f}"
+                            except:
+                                formatted_val = str(val)
+                            values.append(formatted_val)
+                        elif col in co2int_cols:
+                            try:
+                                formatted_val = str(int(round(float(val))))
                             except:
                                 formatted_val = str(val)
                             values.append(formatted_val)

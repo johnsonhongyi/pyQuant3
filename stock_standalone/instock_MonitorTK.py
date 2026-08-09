@@ -9420,11 +9420,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         display_df = df[DISPLAY_COLS]
         self.tree.delete(*self.tree.get_children())
 
-        # 获取需要转换为 float 格式化的自定义列
+        # 获取需要转换为 float 或 int 格式化的自定义列
         try:
             co2float_cols = cct.CFG.co2float
+            co2int_cols = getattr(cct.CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod"])
         except Exception:
             co2float_cols = ["signal_strength", "signal4d"]
+            co2int_cols = ["ch_tc2", "ch_bc2", "ch_nod"]
 
         def _fmt_sig(v):
             try:
@@ -9432,11 +9434,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except:
                 return str(v)
 
+        def _fmt_int(v):
+            try:
+                return str(int(round(float(v))))
+            except:
+                return str(v)
+
         for idx, row in display_df.iterrows():
             code_val = str(idx).zfill(6)
             raw_vals = [row[col] for col in DISPLAY_COLS]
             vals = [code_val] + [
-                _fmt_sig(v) if DISPLAY_COLS[i] in co2float_cols and pd.notna(v) else (v if pd.notna(v) else "")
+                _fmt_sig(v) if DISPLAY_COLS[i] in co2float_cols and pd.notna(v) else (
+                    _fmt_int(v) if DISPLAY_COLS[i] in co2int_cols and pd.notna(v) else (v if pd.notna(v) else "")
+                )
                 for i, v in enumerate(raw_vals)
             ]
             self.tree.insert("", "end", values=vals)
@@ -16746,15 +16756,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.warning(f"Failed to fetch global favorites or grades cache: {e}")
 
+        try:
+            from JohnsonUtil import commonTips as cct
+            co2int_cols = set(getattr(cct.CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod", "pday"]))
+        except Exception:
+            co2int_cols = {"ch_tc2", "ch_bc2", "ch_nod", "pday"}
+
         # 4. 极速单流插入 (itertuples 是 Pandas 最快迭代器)
         for row in df_view.itertuples(index=False):
             # 获取显示值 (Lazy 处理 NaN)
             raw_values = [row[i] for i in show_idx]
             # 💡 Treeview 插入浮点数很慢，且无法处理 NaN。此处预格式化。
-            formatted_values = [
-                f"{v:.2f}" if isinstance(v, (float, np.floating)) and pd.notna(v) else (v if pd.notna(v) else "")
-                for v in raw_values
-            ]
+            formatted_values = []
+            for col_i, v in enumerate(raw_values):
+                col_name = cols_to_show[col_i] if col_i < len(cols_to_show) else ""
+                if pd.notna(v):
+                    if col_name in co2int_cols and isinstance(v, (float, np.floating, int, np.integer)):
+                        try:
+                            formatted_values.append(str(int(round(float(v)))))
+                        except Exception:
+                            formatted_values.append(str(v))
+                    elif isinstance(v, (float, np.floating)):
+                        formatted_values.append(f"{v:.2f}")
+                    else:
+                        formatted_values.append(v)
+                else:
+                    formatted_values.append("")
             
             tags = ()
             if use_fm:
