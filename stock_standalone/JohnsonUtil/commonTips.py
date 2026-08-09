@@ -727,7 +727,7 @@ class GlobalConfig:
         self.tdx_signal_path = self.get_with_writeback("general", "tdx_signal_path", fallback=r"D:\TdxSignal.txt", value_type="str")
         self.ordermon_ini_path = self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini", value_type="str")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
-        self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays"], value_type="list")
+        self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",

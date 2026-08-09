@@ -728,6 +728,13 @@ class MinuteKlineCache:
             hist_dates = sorted_dates[:-1]
         else:
             hist_dates = sorted_dates
+        
+        # val_today = twap_dict[sorted_dates[-1]]
+        # res['nclose'] = val_today
+        # res['nclose0d'] = val_today
+        # res['vwap'] = val_today
+        # res['vwap0d'] = val_today
+        # hist_dates = sorted_dates[:-1]
 
         num_hist = len(hist_dates)
         oldest_hist_val = twap_dict[hist_dates[0]] if hist_dates else (val_today if 'val_today' in locals() else 0.0)
