@@ -1,3 +1,16 @@
+## 2026-08-09 10:45
+- [x] **完全恢复旧实盘原汁原味数据管道，并新增独立非交易日复盘计算 Func (`realtime_data_service.py`, `tests/test_smart_vwap_fallback.py`)**：
+    - [x] **全无损恢复旧实盘逻辑 (`attach_multiday_twap_to_df`)**：彻底撤销交易日实盘中的任何“拟合/篡改”逻辑，100% 保持既有经受长期盘中实盘检验的原始数据流，绝对不干预、不修改盘中物理 `nclose` 及衍生列，确保周一开盘实盘数据管道 100% 稳定纯粹。
+    - [x] **新增独立非交易日复盘专享 Func (`attach_multiday_twap_for_non_trading_day`)**：新建独立的非交易日计算函数，仅在周末（周六/周日）或节假日非交易日冷启动复盘时调起。在缺少分钟 Bar 的离线复盘场景下，智能推算 `nclose` 估算均价与多日加权机构成本线 (`vwap_cum_2d`等)，完美解决离线复盘诊断与策略评估时的数据偏离与误判。
+    - [x] **交易日与非交易日双通道自动路由**：在 `attach_multiday_twap_to_df` 入口集成基于 `cct.is_trading_day()` 与 `weekday()` 的自动路由，交易日盘中 100% 原生无缝走旧实盘逻辑，非交易日离线自动路由至复盘 Func，两端完全解耦、互不干扰。
+    - [x] **单元测试全量验证 100% PASSED**：更新 `tests/test_smart_vwap_fallback.py` 覆盖独立交易日与非交易日 Func，结合 `pytest tests/test_non_trading_day_twap.py tests/test_signal_ledger.py` 全量 17 项单元测试 100% PASSED！
+
+## 2026-08-09 10:05
+- [x] **彻底解决非交易日 (周末/节假日) 冷启动下多日分时 VWAP/TWAP 指标错位与计算失效 Bug (`realtime_data_service.py`, `tests/test_non_trading_day_twap.py`)**：
+    - [x] **根因精准解构**：排查发现 `MinuteKlineCache.get_daily_twap_relative` 以前在按相对天数分配 `nclose` / `vwap` / `last_nclose` 时，硬编码使用 `sorted_dates[-1] == today_str` 作为判定标准。在周末（如 2026-08-09 周日）或节假日非交易日冷启动时，`today_str`（`2026-08-09`）在分钟 K 线缓存中无任何实时 Bar，物理最新的有效交易日数据为上周五（`2026-08-07`）。由于 `'2026-08-07' == '2026-08-09'` 评估为 `False`，系统错将最新有效交易日 `2026-08-07` 误判为了历史天 `hist_dates`，导致 `last_nclose` / `vwap1d` 误填了 `2026-08-07` 的均价，而 `nclose` / `vwap` (最新交易日均价) 结果直接为 `None` / 缺失，且 `nclose2d`、`vwap_cum_2d` 等全套多日指标整版向前错位 1 天！
+    - [x] **全场景交易日与非交易日自适应计算引擎**：重构 `get_daily_twap_relative` 算法逻辑，无论今天是交易日盘中还是周末/节假日非交易日冷启动，始终将内存保存的最新有效交易日数据 `sorted_dates[-1]` 自动精准绑定为 `nclose` / `vwap` / `nclose0d`；将之前的交易日 `sorted_dates[:-1]` 依次递推绑定为 `last_nclose` (1d), `nclose2d` 等，并精准计算跨日加权累计 VWAP (`vwap_cum_2d`等)。
+    - [x] **单元测试 100% 校验通过**：新建 `tests/test_non_trading_day_twap.py` 覆盖周末非交易日与交易日盘中求值断言，结合 `pytest tests/test_signal_ledger.py` 全量 15 项单元测试 100% PASSED！
+
 ## 2026-08-09 09:40
 - [x] **彻底根治竞价赛马看板 `SectorDetailDialog` AttributeError 及初始化/隐藏事件作用域错位 Bug (`bidding_racing_panel.py`, `scratch/test_sector_detail_dialog_init.py`)**：
     - [x] **根因精准解构**：排查发现之前在 `bidding_racing_panel.py` 中引入物理位置与大小持久化 (`_restore_geometry` / `_save_geometry`) 时，误将 `SectorDetailDialog.__init__` 的后半段（包含 `_init_ui()`、`_apply_saved_racing_detail_sort()`、表头状态恢复以及 500ms 刷新定时器 `self.timer` 的创建启动）包裹放进了 `def hideEvent(self, event):` 方法体中。导致在实例化 `SectorDetailDialog` 对象时未自动构建 UI 节点，`title_lbl`、`status_lbl`、`table` 等属性缺失。当隐藏/刷新事件触发时，调起 `refresh_data()` 频繁抛出 `AttributeError: 'SectorDetailDialog' object has no attribute 'title_lbl'`，并被全局未捕获异常句柄 `hotkey_rotator.py` 截获。
