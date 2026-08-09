@@ -727,6 +727,7 @@ class GlobalConfig:
         self.tdx_signal_path = self.get_with_writeback("general", "tdx_signal_path", fallback=r"D:\TdxSignal.txt", value_type="str")
         self.ordermon_ini_path = self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini", value_type="str")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
+        self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays"], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",
@@ -1037,6 +1038,7 @@ v_reversal_pool_col: List[str] = CFG.v_reversal_pool_col
 popularity_col: List[str] = CFG.popularity_col
 dna_audit_custom_cols: List[str] = CFG.dna_audit_custom_cols
 co2float: List[str] = CFG.co2float
+co2int: List[str] = CFG.co2int
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

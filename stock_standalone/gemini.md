@@ -1,3 +1,10 @@
+## 2026-08-09 13:20
+- [x] **实现 Treeview 增量更新与全量渲染管道可配置整数列格式化系统 (`co2int`) (`JohnsonUtil/commonTips.py`, `global.ini`, `performance_optimizer.py`, `instock_MonitorTK.py`, `tests/test_co2int_formatting.py`)**：
+    - [x] **`co2int` 配置项注入与全局持久化**：在 `JohnsonUtil/commonTips.py` 的 `GlobalConfig` 中新增 `co2int` 属性注册（默认包含 `["ch_tc2", "ch_bc2", "ch_nod", "pday"]` 等需要强制显示为整数的指标字段），同步在根目录与 `JohnsonUtil/` 的 `global.ini` 的 `[general]` 配置节中追加持久化定义。
+    - [x] **性能优化模块增量与批量数据点格式化加固**：在 `performance_optimizer.py` 的 `TreeviewIncrementalUpdater._prepare_rows_fast`（批量行构建）与 `_incremental_update`（增量单单元格更新）hot-path 循环中追加 `co2int` 判断与 `_fmt_int` 安全转换助手（采用 `int(round(float(v)))` 浮点约分四舍五入并提供异常降级保护），彻底消除 `56.0` / `13.0` 等长尾浮点尾数。
+    - [x] **`instock_MonitorTK.py` 监控端多视图模式对齐**：在 `refresh_tree_with_query`（Query 表达式刷新）与 `_refresh_tree_traditional`（传统树刷新）数据转换末端同步整合 `co2int` 格式化逻辑，保证传统渲染与增量渲染管道下数据展示 100% 精准一致。
+    - [x] **单元测试全量验证 100% PASSED**：新建 `tests/test_co2int_formatting.py`，全量 3 项单元测试及 `pytest tests/test_signal_ledger.py` 16 项测试 100% PASSED！
+
 ## 2026-08-09 11:05
 - [x] **实现多日/单日 VWAP 与 `nclose` 全量均价衍生指标 2 位浮点数格式化优化 (`realtime_data_service.py`, `tests/test_smart_vwap_fallback.py`)**：
     - [x] **彻底告别长尾浮点数**：将 `get_daily_twap_relative` 与 `attach_multiday_twap_for_non_trading_day` 计算出的所有均线/均价衍生列（如 `nclose`, `vwap_cum_2d`, `vwap_cum_3d`, `vwap_cum_4d`, `last_vwap_cum_2d`, `last_vwap_cum_3d` 等）全部通过 `.round(2)` / `round(val, 2)` 格式化为标准的 **2 位浮点数**（例如：`24.59`, `22.00`, `21.49`, `21.17`），消除了 `22.0000026937...` 长尾尾数，提高视觉可读性与策略比较效率。
