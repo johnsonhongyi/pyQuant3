@@ -6153,6 +6153,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if self._is_rendering: return
         
         curr_time = getattr(self.detector, 'last_data_ts', 0)
+        is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
         
         # --- [⚡ 核心生命周期：心跳驱动自启动逻辑] ---
         with self.detector._lock:
@@ -6252,7 +6253,6 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 prefix = self._status_prefix
             else:
                 # [FIX] 兼容 100x 模拟回测模式的标识展示
-                is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
                 prefix = "🎥 录像回放" if is_simulation else "🚩 竞技进度"
             self.timeline.set_time(t_str, prefix=prefix)
             

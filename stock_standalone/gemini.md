@@ -1,3 +1,9 @@
+## 2026-08-09 17:35
+- [x] **修复 `bidding_racing_panel.py` 中 `update_visuals` 的 `UnboundLocalError` 变量未赋值报错 (`bidding_racing_panel.py`, `scratch/test_update_visuals_unbound_error.py`)**：
+    - [x] **变量定义提升 (Variable Hoisting)**：将 `is_simulation` 的赋值提取定义在 `update_visuals` 方法顶部，确保在 `hasattr(self, 'timeline')` 评估为 `False` 且满足基准重置等后续分支条件时，`is_simulation` 变量已绝对初始化完成。
+    - [x] **根治 `UnboundLocalError` 隐患**：消除了启动或刷新时由于 `timeline` 节点未就绪导致的 `UnboundLocalError: local variable 'is_simulation' referenced before assignment` 异常。
+    - [x] **单元测试验证 100% 通过**：编写 `scratch/test_update_visuals_unbound_error.py` 测试用例，结合 `pytest tests/test_signal_ledger.py` 全量 13 项核心单元测试 100% PASSED！
+
 ## 2026-08-09 14:35
 - [x] **全量补齐与扩充 `stock_indicator_help.py` 算法指标说明文档 (`stock_indicator_help.py`, `tests/test_treeview_tooltip.py`)**：
     - [x] **补齐 `ptop`, `pbottom`, `pbreak`, `pdays`, `obs_d` 等突破中枢与算法指标**：针对之前缺失或匹配偏差的指标，补充 `ptop` (平台顶阻力位 120日高点中枢)、`pbottom` (平台底支撑位 120日次低点中枢)、`pbreak` (平台突破信号标记)、`pdays` (主升/连阳/平台突破持续天数)、`obs_d` (二次起爆观察期运行天数) 的精准定义与逻辑描述，彻底解决了 `ptop` 错比对至 `op` (区间累计涨幅) 的误导问题。
