@@ -1,3 +1,8 @@
+## 2026-08-09 11:05
+- [x] **实现多日/单日 VWAP 与 `nclose` 全量均价衍生指标 2 位浮点数格式化优化 (`realtime_data_service.py`, `tests/test_smart_vwap_fallback.py`)**：
+    - [x] **彻底告别长尾浮点数**：将 `get_daily_twap_relative` 与 `attach_multiday_twap_for_non_trading_day` 计算出的所有均线/均价衍生列（如 `nclose`, `vwap_cum_2d`, `vwap_cum_3d`, `vwap_cum_4d`, `last_vwap_cum_2d`, `last_vwap_cum_3d` 等）全部通过 `.round(2)` / `round(val, 2)` 格式化为标准的 **2 位浮点数**（例如：`24.59`, `22.00`, `21.49`, `21.17`），消除了 `22.0000026937...` 长尾尾数，提高视觉可读性与策略比较效率。
+    - [x] **单元测试全量验证 100% PASSED**：全量 17 项单元测试 100% PASSED！
+
 ## 2026-08-09 10:45
 - [x] **完全恢复旧实盘原汁原味数据管道，并新增独立非交易日复盘计算 Func (`realtime_data_service.py`, `tests/test_smart_vwap_fallback.py`)**：
     - [x] **全无损恢复旧实盘逻辑 (`attach_multiday_twap_to_df`)**：彻底撤销交易日实盘中的任何“拟合/篡改”逻辑，100% 保持既有经受长期盘中实盘检验的原始数据流，绝对不干预、不修改盘中物理 `nclose` 及衍生列，确保周一开盘实盘数据管道 100% 稳定纯粹。
