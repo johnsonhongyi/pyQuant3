@@ -576,49 +576,6 @@ class PRServiceGUI:
         return test_code_against_queries(df_cache, [{"query": query}])
 
 
-    def save_cached_data(self, em_data=None, ths_data=None, lh_data=None, tgb_data=None, resonance_results=None, quotes=None):
-        """持久化保存人气共振排行榜及行情快照至 popularity_resonance_cache.json"""
-        try:
-            last_cache = getattr(self, "_last_data_cache", {}) or {}
-            em_data = em_data if em_data is not None else last_cache.get("em_data", {})
-            ths_data = ths_data if ths_data is not None else last_cache.get("ths_data", {})
-            lh_data = lh_data if lh_data is not None else last_cache.get("lh_data", {})
-            tgb_data = tgb_data if tgb_data is not None else last_cache.get("tgb_data", {})
-            resonance_results = resonance_results if resonance_results is not None else last_cache.get("resonance_results", [])
-            quotes = quotes if quotes is not None else last_cache.get("quotes", {})
-
-            if not (em_data or ths_data or tgb_data or lh_data or resonance_results):
-                service_logger.debug("当前无有效人气排行数据，跳过持久化缓存")
-                return False
-
-            limit = 50
-            if hasattr(self, "entry_limit") and self.entry_limit:
-                try:
-                    limit = int(self.entry_limit.get() or "50")
-                except Exception:
-                    limit = 50
-
-            cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
-            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-
-            cache_data = {
-                "em_data": em_data,
-                "ths_data": ths_data,
-                "tgb_data": tgb_data,
-                "lh_data": lh_data,
-                "resonance_results": resonance_results[:limit] if isinstance(resonance_results, list) else resonance_results,
-                "quotes": quotes,
-                "timestamp": time.time(),
-                "block_cache": getattr(self, "_block_cache", {})
-            }
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, indent=4, ensure_ascii=False)
-            service_logger.info(f"人气排行数据已自动持久化落盘: {cache_file}")
-            return True
-        except Exception as cache_err:
-            service_logger.error(f"写入人气排行数据缓存失败: {cache_err}")
-            return False
-
     def on_close(self):
         try:
             self.sync_manager.stop()
@@ -638,28 +595,17 @@ class PRServiceGUI:
             except Exception:
                 pass
 
-        # 退出时无条件自动保存最新的排行榜数据与 block_cache 到 JSON 缓存文件
-        try:
-            self.save_cached_data()
-        except Exception as e:
-            service_logger.error(f"退出保存缓存数据异常: {e}")
-
-        # 如果存在有效排行榜数据，同步尝试一次盘后 CSV 持久化
-        last_cache = getattr(self, "_last_data_cache", {}) or {}
-        if last_cache and any(last_cache.values()):
+        # 在退出时同步保存一次最新的 block_cache
+        cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
+        if os.path.exists(cache_file):
             try:
-                self.save_daily_resonance_csv(
-                    em_data=last_cache.get("em_data", {}),
-                    ths_data=last_cache.get("ths_data", {}),
-                    lh_data=last_cache.get("lh_data", {}),
-                    tgb_data=last_cache.get("tgb_data", {}),
-                    resonance_results=last_cache.get("resonance_results", []),
-                    all_quotes=last_cache.get("quotes", {}),
-                    force_save=False
-                )
-            except Exception as csv_err:
-                service_logger.debug(f"退出自动保存 CSV 异常: {csv_err}")
-
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cache = json.load(f)
+                cache["block_cache"] = getattr(self, "_block_cache", {})
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
         self.root.destroy()
 
     def _start_ipc_polling_loop(self):
@@ -1185,7 +1131,8 @@ class PRServiceGUI:
             "link_vis": True,
             "sort_col": None,
             "sort_descending": False,
-            "auto_refresh": False
+            "auto_refresh": False,
+            "sash_ratio": 0.5
         }
         
     def _get_dpi_scale_factor(self):
@@ -1212,10 +1159,11 @@ class PRServiceGUI:
                 self.config["link_vis"] = self.link_vis_var.get()
             self.config["auto_refresh"] = bool(getattr(self, "is_running", False))
             
-            # 保存窗口位置与大小
+            # 保存窗口位置与大小（防极窄尺寸污染落盘）
             if hasattr(self, "root") and self.root:
                 try:
-                    self.config["geometry"] = self.root.winfo_geometry()
+                    geo = self.root.winfo_geometry()
+                    self.config["geometry"] = geo
                 except Exception:
                     pass
             
@@ -1499,8 +1447,6 @@ class PRServiceGUI:
 
         # 设置 sash 的位置恢复与保存
         def save_sash_pos(event=None):
-            if not self.sash_restored:
-                return
             try:
                 pos = self.paned.sash_coord(0)[0]
                 if pos <= 50:
@@ -1508,28 +1454,35 @@ class PRServiceGUI:
                 width = self.paned.winfo_width()
                 if width > 100 and pos < width - 50:
                     ratio = float(pos) / float(width)
-                    self.config["sash_ratio"] = ratio
-                    self.save_config_settings()
-                    service_logger.debug(f"[sash] 已保存 PR 界面 sash_ratio={ratio:.4f}")
+                    if 0.15 <= ratio <= 0.85:
+                        self.config["sash_ratio"] = ratio
+                        self.save_config_settings()
+                        self.sash_restored = True
+                        service_logger.debug(f"[sash] 已保存 PR 界面 sash_ratio={ratio:.4f}")
             except Exception as e:
                 service_logger.error(f"Failed to save sash position: {e}")
 
         def restore_sash(event=None):
-            width = self.paned.winfo_width()
-            if width > 100:  # 确保已经分配合理的大小
-                # 只有在初次还原，或者宽度发生变化时，才按比例重置
-                if not self.sash_restored or abs(width - getattr(self, '_last_paned_width', 0)) > 2:
-                    self._last_paned_width = width
-                    ratio = self.config.get("sash_ratio", 380.0 / 780.0)
-                    target_sash = int(width * ratio)
-                    try:
+            try:
+                width = self.paned.winfo_width()
+                if width > 100:  # 确保已经分配合理的大小
+                    # 只有在初次还原，或者宽度发生变化 (拖拽拉伸/最大化/全屏) 时，按比例等比缩放和居中对齐
+                    last_w = getattr(self, '_last_paned_width', 0)
+                    if not getattr(self, 'sash_restored', False) or abs(width - last_w) >= 2:
+                        self._last_paned_width = width
+                        ratio = self.config.get("sash_ratio", 0.5)
+                        if not isinstance(ratio, (int, float)) or ratio < 0.15 or ratio > 0.85:
+                            ratio = 0.5
+                        target_sash = int(width * ratio)
                         self.paned.sash_place(0, target_sash, 0)
                         self.sash_restored = True
-                    except Exception:
-                        pass
+            except Exception as e:
+                service_logger.debug(f"Restore sash position failed: {e}")
 
         self.paned.bind("<Configure>", restore_sash)
-        self.root.after(200, restore_sash)  # 兜底延迟执行
+        # 多阶段连环延时，确保冷启动、加载配置、最大化及渲染完毕后 100% 自动装载和恢复 sash
+        for delay_ms in (50, 150, 300, 600, 1000):
+            self.root.after(delay_ms, restore_sash)
         self.paned.bind("<ButtonRelease-1>", save_sash_pos)
 
         # 底部配置控制栏
