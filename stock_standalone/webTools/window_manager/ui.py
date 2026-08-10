@@ -3958,7 +3958,21 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             return exe_quoted
 
     def _launch_program(self, exe_path, title, pos_item):
-        """智能解析并拉起普通程序（支持命令行与多段脚本），若需权限则自动提权"""
+        """智能解析并拉起普通程序（支持命令行与多段脚本），若需权限则自动提权 (带 5 秒防抖)"""
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_launch_timestamps'):
+            self._last_launch_timestamps = {}
+            
+        launch_key = f"{title}_{exe_path.strip().lower()}"
+        last_t = self._last_launch_timestamps.get(launch_key, 0.0)
+        debounce_interval = 5.0  # 5 秒防抖冷却防护
+        if now - last_t < debounce_interval:
+            remaining = debounce_interval - (now - last_t)
+            self.log(f"⚠️ 防抖拦截: [{title}] 刚触发启动中 (冷却剩余 {remaining:.1f}s)，防止重复打开")
+            return True
+
+        self._last_launch_timestamps[launch_key] = now
         exe_path = exe_path.strip()
         if (exe_path.startswith('"') and exe_path.endswith('"')) or (exe_path.startswith("'") and exe_path.endswith("'")):
             inner = exe_path[1:-1].strip()
@@ -3976,17 +3990,33 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         old_cwd = os.getcwd()
         try:
             target_dir = ""
-            if final_exe and os.path.isabs(final_exe):
-                target_dir = os.path.dirname(final_exe)
-            if not target_dir:
-                if isinstance(final_args, list) and final_args:
-                    for arg in final_args:
-                        arg_clean = arg.strip('"').strip("'")
-                        if os.path.isabs(arg_clean) and os.path.exists(os.path.dirname(arg_clean)):
-                            target_dir = os.path.dirname(arg_clean)
-                            break
-            if not target_dir:
-                target_dir = old_cwd
+            # 1. 探查 final_exe (例如 D:\path\to\app.exe)
+            if final_exe and os.path.isabs(final_exe) and os.path.exists(final_exe):
+                target_dir = os.path.dirname(os.path.abspath(final_exe))
+                
+            # 2. 如果 final_exe 只是 python/cmd 等全局解释器命令，从 final_args 中精确定位被调起脚本/程序自身的物理目录
+            if not target_dir and isinstance(final_args, list):
+                for arg in final_args:
+                    arg_clean = arg.strip('"').strip("'")
+                    if not arg_clean or arg_clean.startswith("-"):
+                        continue
+                    if os.path.isabs(arg_clean) and os.path.exists(arg_clean):
+                        target_dir = os.path.dirname(os.path.abspath(arg_clean))
+                        break
+                    abs_p = os.path.abspath(arg_clean)
+                    if os.path.exists(abs_p):
+                        target_dir = os.path.dirname(abs_p)
+                        break
+                    # 尝试项目根目录下的脚本文件 (例如 stock_standalone/popularity_resonance_gui.py)
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    parent_p = os.path.join(project_root, arg_clean)
+                    if os.path.exists(parent_p):
+                        target_dir = os.path.dirname(os.path.abspath(parent_p))
+                        break
+
+            # 3. 兜底退回项目根目录或当前 CWD
+            if not target_dir or not os.path.exists(target_dir):
+                target_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
             if target_dir and os.path.exists(target_dir):
                 os.chdir(target_dir)

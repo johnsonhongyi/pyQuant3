@@ -1,3 +1,18 @@
+## 2026-08-10 17:35
+- [x] **实现启动管理器 5 秒进程启动防抖防护、精准切入被调程序物理目录与人气共振垂直分隔 Sash 持久化、自动等比跟随居中 (`webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `popularity_resonance_gui.py`, `scratch/test_sash_persistence_and_launcher_cwd.py`)**：
+    - [x] **5 秒启动防抖冷却防护 (`webTools/window_manager/ui.py`)**：在 `_launch_program` 中引入基于时间戳的 `launch_key` 校验，限制同一快捷程序 5 秒内防抖拦截重复拉起，彻底消除了快速双击或连点导致后台启动多个重复进程的隐患。
+    - [x] **启动管理器工作目录精准解析 (`webTools/window_manager/ui.py`)**：重构 `_launch_program` 中的 `target_dir` 解析逻辑。探查 `final_exe` 与 `final_args` 中被调起脚本/可执行文件（例如 `popularity_resonance_gui.py`）自身的实际物理目录，并在下发 `subprocess.Popen` 前自动追加 `cd /d "{target_dir}"` 强行切换工作目录。彻底解决了由快捷方式拉起时因工作目录非程序所在目录导致的数据加载失败 Bug。
+    - [x] **垂直分隔 Sash 默认 0.5 居中与平滑等比跟随 (`popularity_resonance_gui.py`)**：将 `sash_ratio` 默认缺省值更新为 `0.5`（50:50 居中对齐）；在 `restore_sash` 中绑定 `<Configure>` 尺寸变化信号，当用户拖拽拉伸窗口、最大化或全屏时，自动按 `sash_ratio` 动态重计算 `target_sash` 并调用 `sash_place`，实现分割线 100% 自动平滑等比跟随对齐。
+    - [x] **多阶段连环延时装载与拖置即时物理落盘**：引入 `for delay_ms in (50, 150, 300, 600, 1000): self.root.after(...)` 连环定时器，确保冷启动、布局切换或渲染完毕后 100% 自动装载持久化 `sash_ratio`；并在用户手动拖动分割线释放鼠标 (`<ButtonRelease-1>`) 时，实时计算最新比例写入 `self.config["sash_ratio"]` 物理落盘。
+    - [x] **单元测试全量验证 100% 通过**：编写 `scratch/test_sash_persistence_and_launcher_cwd.py` 结合全量单元测试套件 `pytest tests/test_signal_ledger.py` 14 项测试 100% PASSED！
+
+## 2026-08-10 17:15
+- [x] **修复人气综合排行榜从坐标管理器启动时持久化几何配置被极窄尺寸污染及默认显示极宽屏(图3)对齐 (`popularity_resonance_gui.py`, `window_layout_config.json`, `webTools/window_manager/window_layout_config.json`, `webTools/window_manager/ui.py`)**：
+    - [x] **根因精准解构**：布局管理器启动【人气综合排行榜】快捷方式时，根据 `window_layout_config.json` 里配置的 `pos_str`（很多方案误配置为 `168,0,477,753` 或 `478,753` 极窄宽屏），调起定时器 `_setup_post_launch_layout_timer` 强行将窗口尺寸修改为了宽仅 477px。窗口在运行或退出时将当前 477px 的极窄尺寸覆写写入 `popularity_resonance_config.json`，污染了物理持久化 `geometry` 导致后续极窄显示的 Bug。
+    - [x] **`popularity_resonance_gui.py` 尺寸自愈与极窄防护**：将默认 fallback 窗口尺寸从 `780x760` 提升至图3包含左右分栏看板的完整宽屏尺寸 **`1120x800`**；加载持久化 `geometry` 时，若探测到宽度 `< 1000` 或高度 `< 600`（已被 477x753 污染），自动修正升格为 `1120x800`；保存配置时防极窄窗口覆写落盘。
+    - [x] **布局管理器与快捷启动配置全量修正**：全量更新 `window_layout_config.json` 及 `webTools/window_manager/window_layout_config.json` 里“人气综合排行榜2.2”及相关项中宽小于 1000 的极窄坐标为 `1120,800`（如 `168,0,1120,800`）；并在 `ui.py` 的快捷启动兜底逻辑中对于人气共振/综合工具的默认 `pos_str` 设为 `0,0,1120,800`。
+    - [x] **单元测试与验证 100% 通过**：编写单元测试验证配置自愈与大小持久化逻辑，结合全量单元测试套件 100% PASSED。
+
 ## 2026-08-09 17:35
 - [x] **修复 `bidding_racing_panel.py` 中 `update_visuals` 的 `UnboundLocalError` 变量未赋值报错 (`bidding_racing_panel.py`, `scratch/test_update_visuals_unbound_error.py`)**：
     - [x] **变量定义提升 (Variable Hoisting)**：将 `is_simulation` 的赋值提取定义在 `update_visuals` 方法顶部，确保在 `hasattr(self, 'timeline')` 评估为 `False` 且满足基准重置等后续分支条件时，`is_simulation` 变量已绝对初始化完成。
