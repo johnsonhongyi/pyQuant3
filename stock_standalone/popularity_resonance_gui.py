@@ -193,8 +193,19 @@ class PRServiceGUI:
         self._ipc_sync_in_progress = False
         self.sync_manager = _DynamicIPCSyncProxy(self)
         
-        # 启动后后台延迟发起一次动态端口 IPC 数据同步 (按需获取且不常驻占用)
-        threading.Thread(target=self.request_dynamic_ipc_sync, kwargs={'timeout': 8.0}, daemon=True).start()
+        # 启动后后台发起带退避重试的动态端口 IPC 数据同步 (提升启动成功率)
+        def _start_initial_ipc_sync():
+            for attempt in range(3):
+                df = self.request_dynamic_ipc_sync(timeout=8.0)
+                if df is not None and not df.empty:
+                    service_logger.info(f"[IPC 启动同步] 第 {attempt + 1} 次尝试成功获取 IPC 行情数据 ({len(df)} 行)")
+                    break
+                time.sleep(2.0 * (attempt + 1))
+
+        threading.Thread(target=_start_initial_ipc_sync, daemon=True).start()
+        
+        # 启动交易时间内后台轻量级 IPC 动态行情定时轮询更新器
+        self._start_ipc_polling_loop()
         
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
@@ -221,6 +232,11 @@ class PRServiceGUI:
         self._final_post_market_saved_date = None
         if hasattr(self, 'root'):
             self.root.after(5000, self._check_auto_refresh_after_close)
+
+        # 启动初始化自动加载：若配置中上一次处于“启动自动”状态，自动恢复唤起自动刷新
+        if self.config.get("auto_refresh", False):
+            if hasattr(self, 'root'):
+                self.root.after(1000, lambda: self.toggle_loop() if not getattr(self, "is_running", False) else None)
 
     def _format_history_item_local(self, item):
         """人气共振专用格式化：备注 | [Hit: N] | 逻辑"""
@@ -560,6 +576,49 @@ class PRServiceGUI:
         return test_code_against_queries(df_cache, [{"query": query}])
 
 
+    def save_cached_data(self, em_data=None, ths_data=None, lh_data=None, tgb_data=None, resonance_results=None, quotes=None):
+        """持久化保存人气共振排行榜及行情快照至 popularity_resonance_cache.json"""
+        try:
+            last_cache = getattr(self, "_last_data_cache", {}) or {}
+            em_data = em_data if em_data is not None else last_cache.get("em_data", {})
+            ths_data = ths_data if ths_data is not None else last_cache.get("ths_data", {})
+            lh_data = lh_data if lh_data is not None else last_cache.get("lh_data", {})
+            tgb_data = tgb_data if tgb_data is not None else last_cache.get("tgb_data", {})
+            resonance_results = resonance_results if resonance_results is not None else last_cache.get("resonance_results", [])
+            quotes = quotes if quotes is not None else last_cache.get("quotes", {})
+
+            if not (em_data or ths_data or tgb_data or lh_data or resonance_results):
+                service_logger.debug("当前无有效人气排行数据，跳过持久化缓存")
+                return False
+
+            limit = 50
+            if hasattr(self, "entry_limit") and self.entry_limit:
+                try:
+                    limit = int(self.entry_limit.get() or "50")
+                except Exception:
+                    limit = 50
+
+            cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+
+            cache_data = {
+                "em_data": em_data,
+                "ths_data": ths_data,
+                "tgb_data": tgb_data,
+                "lh_data": lh_data,
+                "resonance_results": resonance_results[:limit] if isinstance(resonance_results, list) else resonance_results,
+                "quotes": quotes,
+                "timestamp": time.time(),
+                "block_cache": getattr(self, "_block_cache", {})
+            }
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, indent=4, ensure_ascii=False)
+            service_logger.info(f"人气排行数据已自动持久化落盘: {cache_file}")
+            return True
+        except Exception as cache_err:
+            service_logger.error(f"写入人气排行数据缓存失败: {cache_err}")
+            return False
+
     def on_close(self):
         try:
             self.sync_manager.stop()
@@ -579,18 +638,48 @@ class PRServiceGUI:
             except Exception:
                 pass
 
-        # 在退出时同步保存一次最新的 block_cache
-        cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
-        if os.path.exists(cache_file):
+        # 退出时无条件自动保存最新的排行榜数据与 block_cache 到 JSON 缓存文件
+        try:
+            self.save_cached_data()
+        except Exception as e:
+            service_logger.error(f"退出保存缓存数据异常: {e}")
+
+        # 如果存在有效排行榜数据，同步尝试一次盘后 CSV 持久化
+        last_cache = getattr(self, "_last_data_cache", {}) or {}
+        if last_cache and any(last_cache.values()):
             try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cache = json.load(f)
-                cache["block_cache"] = getattr(self, "_block_cache", {})
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(cache, f, indent=4, ensure_ascii=False)
-            except Exception:
-                pass
+                self.save_daily_resonance_csv(
+                    em_data=last_cache.get("em_data", {}),
+                    ths_data=last_cache.get("ths_data", {}),
+                    lh_data=last_cache.get("lh_data", {}),
+                    tgb_data=last_cache.get("tgb_data", {}),
+                    resonance_results=last_cache.get("resonance_results", []),
+                    all_quotes=last_cache.get("quotes", {}),
+                    force_save=False
+                )
+            except Exception as csv_err:
+                service_logger.debug(f"退出自动保存 CSV 异常: {csv_err}")
+
         self.root.destroy()
+
+    def _start_ipc_polling_loop(self):
+        """交易时间内后台轻量级 IPC 动态行情定时轮询更新器"""
+        def polling_worker():
+            while getattr(self, "root", None):
+                try:
+                    time.sleep(30)  # 每 30 秒后台静默轮询一次
+                    from JohnsonUtil import commonTips as cct
+                    if cct.get_work_time():
+                        # 若当前未在手动/自动主抓取中，拉取最新 IPC 行情切片
+                        if not getattr(self, '_ipc_sync_in_progress', False):
+                            refresh_thread = getattr(self, 'refresh_thread', None)
+                            if not (refresh_thread and refresh_thread.is_alive()):
+                                service_logger.debug("[IPC 定时轮询] 交易时间内自动轮询拉取最新 IPC 行情数据...")
+                                self.request_dynamic_ipc_sync(timeout=6.0)
+                except Exception as e:
+                    service_logger.debug(f"[IPC 定时轮询] 异常: {e}")
+
+        threading.Thread(target=polling_worker, daemon=True).start()
 
     def _poll_favorites_loop(self):
         if not hasattr(self, 'root') or not self.root:
@@ -900,8 +989,8 @@ class PRServiceGUI:
             if getattr(temp_mgr, '_bind_event', None):
                 temp_mgr._bind_event.wait(timeout=0.5)
 
-            # 通过命名管道向 TK 发送包含动态端口的 REQ_FULL_SYNC 指令
-            temp_mgr.request_full_sync()
+            # 通过命名管道向 TK 发送包含动态端口的 REQ_FULL_SYNC 指令 (强行发包，避免被防刷冷却逻辑误拦截)
+            temp_mgr.request_full_sync(force=True)
 
             start_t = time.time()
             while time.time() - start_t < timeout:
@@ -1095,7 +1184,8 @@ class PRServiceGUI:
             "link_ths": True,
             "link_vis": True,
             "sort_col": None,
-            "sort_descending": False
+            "sort_descending": False,
+            "auto_refresh": False
         }
         
     def _get_dpi_scale_factor(self):
@@ -1106,26 +1196,39 @@ class PRServiceGUI:
 
     def save_config_settings(self):
         try:
-            self.config["blk_name"] = self.entry_blk_name.get().strip() or "RQG.blk"
-            self.config["limit"] = int(self.entry_limit.get() or "50")
-            self.config["interval"] = float(self.entry_interval.get() or "5")
-            self.config["link_tdx"] = self.link_tdx_var.get()
-            self.config["link_ths"] = self.link_ths_var.get()
-            self.config["link_vis"] = self.link_vis_var.get()
+            if hasattr(self, "entry_blk_name") and self.entry_blk_name:
+                self.config["blk_name"] = self.entry_blk_name.get().strip() or "RQG.blk"
+            if hasattr(self, "entry_limit") and self.entry_limit:
+                try: self.config["limit"] = int(self.entry_limit.get() or "50")
+                except Exception: pass
+            if hasattr(self, "entry_interval") and self.entry_interval:
+                try: self.config["interval"] = float(self.entry_interval.get() or "5")
+                except Exception: pass
+            if hasattr(self, "link_tdx_var") and self.link_tdx_var:
+                self.config["link_tdx"] = self.link_tdx_var.get()
+            if hasattr(self, "link_ths_var") and self.link_ths_var:
+                self.config["link_ths"] = self.link_ths_var.get()
+            if hasattr(self, "link_vis_var") and self.link_vis_var:
+                self.config["link_vis"] = self.link_vis_var.get()
+            self.config["auto_refresh"] = bool(getattr(self, "is_running", False))
             
             # 保存窗口位置与大小
-            try:
-                self.config["geometry"] = self.root.winfo_geometry()
-            except Exception:
-                pass
+            if hasattr(self, "root") and self.root:
+                try:
+                    self.config["geometry"] = self.root.winfo_geometry()
+                except Exception:
+                    pass
             
             # 保存排序状态
             if hasattr(self, "tree_res") and self.tree_res is not None:
-                self.config["sort_col"] = self.tree_res.sort_col
-                self.config["sort_descending"] = self.tree_res.sort_descending
+                try:
+                    self.config["sort_col"] = getattr(self.tree_res, "sort_col", None)
+                    self.config["sort_descending"] = getattr(self.tree_res, "sort_descending", False)
+                except Exception:
+                    pass
                 
             # 保存 sash 比例
-            if hasattr(self, "paned") and hasattr(self, "sash_restored") and self.sash_restored:
+            if hasattr(self, "paned") and self.paned is not None and getattr(self, "sash_restored", False):
                 try:
                     pos = self.paned.sash_coord(0)[0]
                     if pos > 50:
@@ -1135,10 +1238,11 @@ class PRServiceGUI:
                 except Exception as e:
                     service_logger.error(f"Failed to save sash in config: {e}")
 
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
-        except:
-            pass
+        except Exception as e:
+            service_logger.error(f"保存系统配置失败: {e}")
 
     def load_cached_data(self):
         cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
@@ -2575,6 +2679,7 @@ class PRServiceGUI:
             self.entry_interval.config(state="disabled")
             self.entry_limit.config(state="disabled")
             self.lbl_status.config(text="自动刷新已启动", fg="blue")
+            self.save_config_settings()
             
             def loop():
                 while self.is_running:
@@ -2592,6 +2697,7 @@ class PRServiceGUI:
             self.entry_interval.config(state="normal")
             self.entry_limit.config(state="normal")
             self.lbl_status.config(text="自动刷新已停止", fg="blue")
+            self.save_config_settings()
 
     def _show_calendar(self):
         if hasattr(self, 'date_entry'):

@@ -117,6 +117,10 @@ class IPCSyncManager:
         last_request_t = 0
         
         while self._listener_running:
+            if not getattr(self, 'is_bound', False):
+                time.sleep(0.2)
+                continue
+
             now = time.time()
             has_data = False
             with self.df_lock:
