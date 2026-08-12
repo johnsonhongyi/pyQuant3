@@ -1485,6 +1485,12 @@ class ATSMainWindow(QMainWindow):
         self.btn_global_market.setStyleSheet("QPushButton { background-color: #1e3a5f; color: #00e5ff; font-weight: bold; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #00e5ff; color: #000; }")
         self.btn_global_market.clicked.connect(self.open_global_market_dialog)
         toolbar.addWidget(self.btn_global_market)
+
+        self.btn_intraday_strategy = QPushButton("新股分时策略⚡")
+        self.btn_intraday_strategy.setToolTip("打开新股及日内阶梯分批交易策略与SBC实盘显示面板")
+        self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
+        self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
+        toolbar.addWidget(self.btn_intraday_strategy)
         
         toolbar.addSeparator()
         
@@ -2702,6 +2708,19 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             self.backtest_panel.lbl_status.setText("状态: 计算失败")
             self.status_bar.showMessage(f"❌ 回测计算失败: {e}")
+
+    def open_intraday_strategy_dialog(self, code=None, name=None):
+        """调起 ATS 单独分时交易策略与 SBC 实盘显示面板"""
+        try:
+            from ats.ui.intraday_strategy_dialog import IntradayStrategyDialog
+            if isinstance(code, bool) or not code:
+                code = "920199"
+            if isinstance(name, bool) or not name:
+                name = self.get_stock_name(code) if hasattr(self, 'get_stock_name') else "倍益康"
+            dlg = IntradayStrategyDialog(code=code, name=name, parent=self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[ATSMainWindow] 调起新股分时策略面板异常: {e}")
 
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd

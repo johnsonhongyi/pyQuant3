@@ -853,6 +853,24 @@ def run_sbc_analysis_core(code: str, day_df: pd.DataFrame, tick_df: pd.DataFrame
                     last_signal_times["FOLLOW"] = i
                     last_signal_times["FOLLOW_STATUS"] = status
                     last_signal_times["LAST_BUY_PRICE"] = p
+
+            # (A.1.1) ⚡ 新股/分时单独策略与卖出信号评估
+            try:
+                t_str_eval = get_tick_str(r)
+                open_p = float(r.get('open', day_row.get('open', p) if 'day_row' in locals() and day_row else p))
+                from ats.intraday_strategy_engine import IntradayStrategyEngine
+                strat_sigs = IntradayStrategyEngine.get_instance().evaluate_tick(
+                    code=code,
+                    tick_row={'trade': p, 'close': p, 'high': cur_high, 'low': cur_low},
+                    open_price=open_p,
+                    current_time_str=t_str_eval,
+                    bid1_price=p,
+                    bar_index=i
+                )
+                if strat_sigs:
+                    signals.extend(strat_sigs)
+            except Exception as e_strat:
+                pass
     
             # (A.2) 🚀 Optimized Buy Pattern (SBC_OPT)
             # 规则：多日下跌后 -> 早盘破均线 -> 反弹过昨收 -> 回落 -> 11:30前反弹上破均线
