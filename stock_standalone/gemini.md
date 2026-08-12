@@ -1,3 +1,23 @@
+## 2026-08-12 08:58
+- [x] **根治 `TimeAxisPhasePanel` QSS 后代选择器样式污染与文字挤压重叠 Bug (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`)**：
+    - [x] **后代选择器隔离与 QSS 命名空间划分**：给 `p_box` 绑定 `setObjectName("PhaseItemFrame")` 并在 QSS 中限定为 `QFrame#PhaseItemFrame` 结合 `QLabel { border: none; background: transparent; }`，彻底根治了高亮执行中 (`🔥 执行中`) 时 `border: 2px solid #38bdf8` 被子控件 `QLabel` 递归继承导致的内部多重蓝色边框、边距挤压与文字重叠排版错乱。
+    - [x] **高度与内边距弹性防挤压保护**：为每个阶段 Frame 设定 `setMinimumHeight(62)` 最小高度与标准 `setContentsMargins(8, 6, 8, 6)` 内边距，彻底消除了不同 DPI 屏幕下布局高度被压缩变形的隐患。
+    - [x] **`sys.path` 与 19 项单元测试 100% 通过**：解封并加固 `_PROJECT_ROOT` 项目根路径，全量 19 项单元测试 `pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` **100% PASSED**。
+
+## 2026-08-12 08:52
+- [x] **根治调起新股分时策略面板 `NameError: name 'Dict' is not defined` 报错与 `sys.path` 根路径兼容 (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `scratch/test_intraday_dialog_instantiation.py`)**：
+    - [x] **`Dict` 缺失导入修复**：在 `ats/ui/intraday_strategy_dialog.py` 头部补齐 `from typing import Dict, List, Any, Optional, Tuple`，彻底消除了调起 `open_intraday_strategy_dialog` 时由于 `update_status` 中的 `strategy: Dict[str, Any]` 触发的 `NameError: name 'Dict' is not defined` 异常。
+    - [x] **`sys.path` 自动项目根目录补丁**：在 `ats/ui/intraday_strategy_dialog.py` 与 `ats/ui/main_window.py` 头部注入 `_PROJECT_ROOT` 路径保护，确保在任何终端/目录直接调起子模块脚本时均不会再抛出 `ModuleNotFoundError: No module named 'ats'`。
+    - [x] **`__main__` 独立测试入口与单元测试通过**：为 `ats/ui/intraday_strategy_dialog.py` 追加独立执行入口，并通过 `pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 19 项单元测试 **100% PASSED**。
+
+## 2026-08-11 18:00
+- [x] **实现 ATS 新股分时阶梯交易策略引擎 (`IntradayStrategyEngine`)、自定制 JSON 配置与实盘 SBC 买卖点可视化 (`config/intraday_newstock_strategies.json`, `ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `sbc_core.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **策略 JSON 结构解构与配置系统 (`config/intraday_newstock_strategies.json`)**：解构策略 A（首日分批卖出·不留隔夜仓）5 大开盘价档位（乐观/乐观下沿/中性/中性下沿/保守）与 4 大时间轴阶段（集合竞价定盘/开盘冲高卖出/临停复牌/尾盘清仓）以及策略 B（首日卖1/3·留2/3赌趋势）；自动计算价格笼子限价单（买一价 * 1.02，不超过交易所上限）。
+    - [x] **分时交易策略引擎核心 (`ats/intraday_strategy_engine.py`)**：构建 `IntradayStrategyEngine` 单例，在 `get_current_phase` 中引入按时间跨度狭窄度优先的精准匹配算法，评估 `price >= open_price * 1.10` (冲高卖50%)、`10:00` 超时兜底 (卖30%)、`max_price >= open_price * 1.30` (临停复牌卖30%) 以及尾盘清仓规则，并生成标准 `SignalPoint` 信号。
+    - [x] **UI 交互面板与 SBC 显示 (`ats/ui/intraday_strategy_dialog.py`)**：开发包含 `TimeAxisPhasePanel`（动态时间轴阶段指示器、开盘定盘档位速查与实时规则匹配）与 SBC 图形看板的监控视图，提供【⚙️ 自定制策略】JSON 在线编辑器热更新与物理落盘。
+    - [x] **SBC 核心管道解耦集成与入口 (`ats/ui/main_window.py`, `sbc_core.py`)**：主界面工具栏新增【新股分时策略⚡】入口按钮；在 `sbc_core.py` 遍历 Tick 时注入 `evaluate_tick`，实现分时策略买卖点在 SBC 上的无缝投影。
+    - [x] **单元测试全量验证 100% 通过 (`tests/test_intraday_strategy_engine.py`)**：新建包含开盘价档位分类、时间轴推算、冲高卖出限价单、10:00整超时兜底、+30%临停复牌卖出及配置落盘的单元测试套件，`pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 19 项单元测试 **100% PASSED**！
+
 ## 2026-08-10 17:35
 - [x] **实现启动管理器 5 秒进程启动防抖防护、精准切入被调程序物理目录与人气共振垂直分隔 Sash 持久化、自动等比跟随居中 (`webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `popularity_resonance_gui.py`, `scratch/test_sash_persistence_and_launcher_cwd.py`)**：
     - [x] **5 秒启动防抖冷却防护 (`webTools/window_manager/ui.py`)**：在 `_launch_program` 中引入基于时间戳的 `launch_key` 校验，限制同一快捷程序 5 秒内防抖拦截重复拉起，彻底消除了快速双击或连点导致后台启动多个重复进程的隐患。

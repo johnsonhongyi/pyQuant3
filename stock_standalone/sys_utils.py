@@ -240,6 +240,11 @@ RESOURCE_MAP = {
         "src": "config/global_market_klines.json",
         "dst": "config/global_market_klines.json",
         "delay_release": True
+    },
+    "intraday_newstock_strategies.json": {
+        "src": "config/intraday_newstock_strategies.json",
+        "dst": "config/intraday_newstock_strategies.json",
+        "delay_release": True
     }
 }
 
