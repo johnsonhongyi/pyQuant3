@@ -13212,10 +13212,530 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             def stop_shake(event=None):
                 win.is_shaking = False
             
+            tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15, selectmode="extended")
+            
+            # 刷新统计函数
+            def refresh_stats():
+                total = len(tree.get_children())
+                selected = len(tree.selection())
+                total_label.config(text=f"总条目: {total} (已选: {selected})")
+
+            def treeview_sort_column(tv, col, reverse):
+                # 记录当前排序状态
+                tv.current_sort_col = col
+                tv.current_sort_reverse = reverse
+                
+                l = [(tv.set(k, col), k) for k in tv.get_children('')]
+                
+                # 智能数值排序:尝试转换为数值,失败则按字符串排序
+                def sort_key(item):
+                    val = item[0]
+                    if val in ('', '-', '--', 'N/A', None):
+                        return (1, 0)  # 空值排在最后
+                    try:
+                        # 尝试转换为数值 (处理百分比和符号)
+                        clean_val = str(val).replace('%', '').replace('+', '')
+                        return (0, float(clean_val))
+                    except (ValueError, TypeError):
+                        # 无法转换,按字符串排序
+                        return (0, str(val).lower())
+                
+                l.sort(key=sort_key, reverse=reverse)
+
+                for index, (val, k) in enumerate(l):
+                    tv.move(k, '', index)
+
+                tv.heading(col, command=lambda: treeview_sort_column(tv, col, not reverse))
+
+            for col in columns:
+                tree.heading(col, text=col_names.get(col, col), command=lambda _col=col: treeview_sort_column(tree, _col, False))
+
+            tree.column("code", width=65, anchor="center")
+            tree.column("name", width=85, anchor="center")
+            tree.column("resample", width=45, anchor="center")
+            tree.column("rule_type", width=95, anchor="center")
+            tree.column("value", width=65, anchor="e")
+            tree.column("create_price", width=65, anchor="e")
+            tree.column("curr_price", width=65, anchor="e")
+            tree.column("pnl", width=65, anchor="e")
+            tree.column("rank", width=50, anchor="center")
+            tree.column("add_time", width=125, anchor="center")
+            tree.column("tags", width=110, anchor="w")
+            tree.column("id", width=0, stretch=False)
+            
+            tree.pack(side="left", fill="both", expand=True)
+            
+            scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+            scrollbar.pack(side="right", fill="y")
+            tree.configure(yscrollcommand=scrollbar.set)
+
+            def load_data():
+                tree.delete(*tree.get_children())
+                if not self.live_strategy:
+                    return
+
+                monitors = self.live_strategy.get_monitors()
+                if hasattr(self, 'df_all') and self.df_all is not None and not self.df_all.empty:
+                    df = self.df_all
+                else:
+                    df = getattr(self, 'df', None)
+
+                for key, data in monitors.items():
+                    code = data.get('code', key.split('_')[0])
+                    name = data.get('name', '')
+                    resample = data.get('resample', 'd')
+                    create_price = data.get('create_price', 0.0)
+                    rules = data.get('rules', [])
+                    add_time = data.get('created_time', '')
+                    tags = data.get('tags', '')
+
+                    curr_price = 0.0
+                    rank_str = "-"
+                    if df is not None and not df.empty and code in df.index:
+                        row = df.loc[code]
+                        if type(row) == pd.DataFrame:
+                            row = row.iloc[0]
+                        curr_price = float(row.get('trade', 0) or row.get('close', 0))
+                        rank_val = row.get('rank', row.get('rank_score', '-'))
+                        if pd.notna(rank_val) and rank_val != '-':
+                            try:
+                                rank_str = str(int(float(rank_val)))
+                            except Exception:
+                                rank_str = str(rank_val)
+
+                    if curr_price == 0.0:
+                        curr_price = float(data.get('trade', 0.0) or data.get('close', 0.0))
+
+                    pnl_str = "-"
+                    if create_price > 0 and curr_price > 0:
+                        pnl_pct = (curr_price - create_price) / create_price * 100
+                        pnl_str = f"{pnl_pct:+.2f}%"
+
+                    if not rules:
+                        r_type_cn = "默认/从盘"
+                        r_val_str = f"{create_price:.2f}" if create_price > 0 else "-"
+                        item_id = f"{key}_none"
+                        tree.insert("", "end", values=(
+                            code, name, resample, r_type_cn, r_val_str, 
+                            f"{create_price:.2f}" if create_price > 0 else "-", 
+                            f"{curr_price:.2f}" if curr_price > 0 else "-", 
+                            pnl_str, rank_str, add_time, tags, item_id
+                        ))
+                    else:
+                        for idx, r in enumerate(rules):
+                            r_type = r.get('type', '')
+                            r_val = r.get('value', 0.0)
+                            r_type_cn = RULE_TYPE_MAP.get(r_type, r_type)
+                            r_val_str = f"{r_val:.2f}"
+                            item_id = f"{key}_{idx}"
+
+                            tree.insert("", "end", values=(
+                                code, name, resample, r_type_cn, r_val_str, 
+                                f"{create_price:.2f}" if create_price > 0 else "-", 
+                                f"{curr_price:.2f}" if curr_price > 0 else "-", 
+                                pnl_str, rank_str, add_time, tags, item_id
+                            ))
+                refresh_stats()
+
+            load_data()
+
+            def clean_recovered_holdings():
+                if not self.live_strategy:
+                    return
+                monitors = self.live_strategy.get_monitors()
+                to_remove = []
+                for key, data in monitors.items():
+                    tags = data.get('tags', '')
+                    if 'recovered_holding' in tags:
+                        code = data.get('code', key.split('_')[0])
+                        to_remove.append(code)
+                
+                if not to_remove:
+                    messagebox.showinfo("提示", "未发现带有 'recovered_holding' 标签的监控项", parent=win)
+                    return
+                
+                if not messagebox.askyesno("确认操作", f"确定要清理这 {len(to_remove)} 只恢复持仓股吗？\n这将自动在交易日志中记录已卖出并移除监控。", parent=win):
+                    return
+                
+                count = 0
+                for code in to_remove:
+                    data = monitors.get(code)
+                    name = data.get('name', '')
+                    price = 0.0
+                    if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                        price = float(self.df_all.loc[code].get('trade', 0))
+                    
+                    self.live_strategy.close_position_if_any(code, price, name)
+                    self.live_strategy.remove_monitor(code)
+                    count += 1
+                
+                messagebox.showinfo("成功", f"已成功清理并记录 {count} 只持仓股", parent=win)
+                load_data()
+
+            def delete_selected(event=None):
+                selected = tree.selection()
+                if not selected:
+                    return
+
+                # 高效支持批量选择删除 (Ctrl / Shift 选中的多行)
+                if len(selected) > 1:
+                    if not messagebox.askyesno("批量删除确认", f"确定要彻底删除选中的 {len(selected)} 条监控规则吗？", parent=win):
+                        return
+
+                    keys_to_remove = []
+                    codes_to_clean = set()
+                    for item in selected:
+                        values = tree.item(item, "values")
+                        if not values:
+                            continue
+                        code = values[0]
+                        resample = values[2]
+                        composite_key = f"{code}_{resample}"
+                        keys_to_remove.append(composite_key)
+                        codes_to_clean.add(code)
+
+                    if keys_to_remove and self.live_strategy:
+                        self.live_strategy.remove_monitors_batch(keys_to_remove)
+                        # 批量清理UI报警弹窗与语音
+                        for code in codes_to_clean:
+                            try:
+                                if hasattr(self, 'code_to_alert_win') and code in self.code_to_alert_win:
+                                    awin = self.code_to_alert_win[code]
+                                    if awin.winfo_exists():
+                                        self._close_alert(awin, is_manual=True)
+                                elif hasattr(self, 'active_alerts'):
+                                    for awin in list(self.active_alerts):
+                                        if getattr(awin, 'stock_code', None) == code:
+                                            self._close_alert(awin, is_manual=True)
+                            except Exception:
+                                pass
+
+                        if hasattr(self, '_update_voice_active_codes'):
+                            self._update_voice_active_codes()
+
+                    self._is_deleting = True
+                    try:
+                        load_data()
+                        refresh_stats()
+                    finally:
+                        tree.after_idle(lambda: setattr(self, '_is_deleting', False))
+                    return
+
+                # 单条删除（保留原有的持仓检测与单条确认流程）
+                item = selected[0]
+                values = tree.item(item, "values")
+                code = values[0]  # Pure code
+                resample = values[2]  # Period
+                uid = values[8] if len(values) > 8 else (values[11] if len(values) > 11 else "none")
+                
+                composite_key = f"{code}_{resample}"
+                suffix = uid.rsplit('_', 1)[-1] if '_' in uid else "none"
+
+                if self.live_strategy:
+                    is_holding = False
+                    if hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'trading_logger'):
+                        try:
+                            trades = self.live_strategy.trading_logger.get_trades()
+                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' for t in trades)
+                        except Exception as e:
+                            logger.error(f"Error in task: {e}")
+                    
+                    if is_holding:
+                        ans = messagebox.askyesnocancel(
+                            "持仓确认", 
+                            f"检测到 {values[1]}({code}) 尚有在册持仓！\n\n移除监控将导致该持仓不再被实时跟踪，且为了防止自动恢复，系统将必须强制关闭该持仓记录。\n\n是否同时并在交易日志中标记为[卖出平仓]？\n\n'是' - 标记平仓并移除监控\n'否' - 仅标记移除(不再跟踪)但保留日志闭环\n'取消' - 放弃操作", 
+                            parent=win
+                        )
+                        if ans is None: return
+                        if ans is True:
+                            price = 0.0
+                            if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                                price = float(self.df_all.loc[code].get('trade', 0))
+                            self.live_strategy.close_position_if_any(code, price, values[1])
+
+                    if suffix == "none":
+                        self.live_strategy.remove_monitor(composite_key)
+                    else:
+                        try:
+                            idx = int(suffix)
+                            self.live_strategy.remove_rule(composite_key, idx)
+                        except Exception:
+                            pass
+
+                    try:
+                        if hasattr(self, 'code_to_alert_win') and code in self.code_to_alert_win:
+                            awin = self.code_to_alert_win[code]
+                            if awin.winfo_exists():
+                                self._close_alert(awin, is_manual=True)
+                        elif hasattr(self, 'active_alerts'):
+                            for awin in list(self.active_alerts):
+                                if getattr(awin, 'stock_code', None) == code:
+                                    self._close_alert(awin, is_manual=True)
+                        
+                        if hasattr(self, '_update_voice_active_codes'):
+                            self._update_voice_active_codes()
+                    except Exception as linkage_e:
+                        logger.debug(f"Linkage cleanup failed for {code}: {linkage_e}")
+
+                children = list(tree.get_children())
+                try:
+                    del_idx = children.index(item)
+                except ValueError:
+                    del_idx = 0
+
+                load_data()
+                refresh_stats()
+                
+                self._is_deleting = True
+                try:
+                     children = tree.get_children()
+                     if children:
+                         if del_idx >= len(children):
+                             del_idx = len(children) - 1
+                         next_item = children[del_idx]
+                         tree.selection_set(next_item)
+                         tree.focus(next_item)
+                         tree.see(next_item)
+                finally:
+                     tree.after_idle(lambda: setattr(self, '_is_deleting', False))
+
+            def delete_current_page():
+                all_items = tree.get_children()
+                if not all_items:
+                    messagebox.showinfo("提示", "当前列表中没有可删除的监控项", parent=win)
+                    return
+
+                if not messagebox.askyesno("确认删除当前页", f"确定要彻底删除当前列表中显示的全部 {len(all_items)} 条监控规则吗？", parent=win):
+                    return
+
+                keys_to_remove = []
+                codes_to_clean = set()
+                for item in all_items:
+                    values = tree.item(item, "values")
+                    if not values:
+                        continue
+                    code = values[0]
+                    resample = values[2]
+                    composite_key = f"{code}_{resample}"
+                    keys_to_remove.append(composite_key)
+                    codes_to_clean.add(code)
+
+                if keys_to_remove and self.live_strategy:
+                    self.live_strategy.remove_monitors_batch(keys_to_remove)
+                    for code in codes_to_clean:
+                        try:
+                            if hasattr(self, 'code_to_alert_win') and code in self.code_to_alert_win:
+                                awin = self.code_to_alert_win[code]
+                                if awin.winfo_exists():
+                                    self._close_alert(awin, is_manual=True)
+                        except Exception:
+                            pass
+
+                    if hasattr(self, '_update_voice_active_codes'):
+                        self._update_voice_active_codes()
+
+                self._is_deleting = True
+                try:
+                    load_data()
+                    refresh_stats()
+                finally:
+                    tree.after_idle(lambda: setattr(self, '_is_deleting', False))
+
+                messagebox.showinfo("成功", f"已成功删除当前页 {len(keys_to_remove)} 条监控规则", parent=win)
+
+            def auto_clean_excess():
+                if not self.live_strategy:
+                    return
+                cleaned = self.live_strategy.clean_expired_monitors(max_limit=100)
+                self._is_deleting = True
+                try:
+                    load_data()
+                    refresh_stats()
+                finally:
+                    tree.after_idle(lambda: setattr(self, '_is_deleting', False))
+
+                current_total = len(self.live_strategy.get_monitors())
+                if cleaned > 0:
+                    messagebox.showinfo("清理完成", f"已成功自动清理 {cleaned} 条过期/超限监控项！\n当前监控总数: {current_total} (上限: 100)", parent=win)
+                else:
+                    messagebox.showinfo("提示", f"当前监控数量为 {current_total}，未超过 100 条且无无效数据，无需清理。", parent=win)
+
+            def on_voice_tree_select(event):
+                if getattr(self, '_is_deleting', False):
+                    return
+
+                selected = tree.selection()
+                if not selected: return
+                refresh_stats()
+                item = selected[0]
+                values = tree.item(item, "values")
+                target_code = values[0]
+                name = values[1]
+                stock_code = str(target_code).zfill(6)
+                add_time = str(values[9])[:10] if len(values) > 9 else None
+                self.sender.send(stock_code)
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code, timestamp=add_time)
+
+            def on_voice_right_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+                
+                # 如果点右键的行不在已选中集合中，则仅选中右键行；若已包含（如多选右键），保持选中
+                if item_id not in tree.selection():
+                    tree.selection_set(item_id)
+                values = tree.item(item_id, "values")
+                
+                stock_code = str(values[0]).zfill(6)
+                stock_name = values[1]
+                add_time = str(values[9])[:10] if len(values) > 9 else None
+                
+                menu = tk.Menu(win, tearoff=0)
+                
+                menu.add_command(label=f"🔭 可视化联动 [{stock_code}]", 
+                                command=lambda: self.open_visualizer(stock_code, timestamp=add_time),
+                                font=("Arial", 9, "bold"))
+                
+                def do_dna_audit():
+                    codes_dict = {stock_code: stock_name}
+                    all_ids = tree.get_children()
+                    try:
+                        start_idx = all_ids.index(item_id)
+                        for next_item in all_ids[start_idx+1 : start_idx+11]:
+                            v = tree.item(next_item, "values")
+                            if v and len(v) > 1:
+                                codes_dict[str(v[0]).zfill(6)] = v[1]
+                    except: pass
+                    
+                    if hasattr(self, '_run_dna_audit_batch'):
+                        self._run_dna_audit_batch(codes_dict)
+                    else:
+                        messagebox.showinfo("提示", "DNA 审计功能在当前模式下不可用")
+
+                menu.add_command(label="🧬 DNA 专项审计...", command=do_dna_audit, foreground="purple")
+                menu.add_separator()
+                menu.add_command(label="✏️ 修改阈值 (Edit)", command=lambda: edit_selected(item_id, values))
+                menu.add_command(label="🗑️ 删除选中规则 (Del)", command=lambda: delete_selected(), foreground="red")
+                menu.add_command(label="🗑️ 删除当前页", command=delete_current_page, foreground="#d32f2f")
+                menu.add_separator()
+                menu.add_command(label="🎯 滚动到主表", command=lambda: self.tree_scroll_to_code(stock_code))
+                menu.add_command(label="🚀 发送到关联软件", command=lambda: self.original_push_logic(stock_code))
+                menu.add_command(label="📋 复制代码", command=lambda: [self.clipboard_clear(), self.clipboard_append(stock_code)])
+
+                menu.post(event.x_root, event.y_root)
+
+            def on_voice_on_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+
+                values = tree.item(item_id, "values")
+                code = values[0]
+                name = values[1]
+
+                stock_code = str(code).zfill(6)
+                add_time = values[9] if len(values) > 9 else None
+                if stock_code:
+                    self.sender.send(stock_code)
+                    if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                        self.open_visualizer(stock_code, timestamp=add_time)
+
+            def edit_selected(item=None, values=None):
+                 if values is None:
+                    selected = tree.selection()
+                    if not selected:
+                        return
+                    item = selected[0]
+                    values = tree.item(item, "values")
+                 code = values[0]
+                 name = values[1]
+                 resample = values[2]
+                 old_val = values[4]
+                 uid = values[11]
+                 
+                 composite_key = f"{code}_{resample}"
+                 suffix = uid.rsplit('_', 1)[-1] if '_' in uid else "none"
+                 
+                 if suffix == "none":
+                     idx = -1
+                 else:
+                     try:
+                         idx = int(suffix)
+                     except:
+                         idx = -1
+                 
+                 current_type = "price_up"
+                 monitors = self.live_strategy.get_monitors()
+                 if composite_key in monitors:
+                     rules = monitors[composite_key].get('rules', [])
+                     if 0 <= idx < len(rules):
+                         current_type = rules[idx].get('type', 'price_up')
+                 
+                 edit_win = tk.Toplevel(win)
+                 edit_win.title(f"修改阈值 - {name}({code})")
+                 edit_win.geometry("340x240")
+                 edit_win.transient(win)
+                 edit_win.grab_set()
+
+                 tk.Label(edit_win, text=f"股票: {name} ({code})", font=("Arial", 10, "bold")).pack(pady=5)
+                 
+                 f_type = tk.Frame(edit_win)
+                 f_type.pack(fill="x", padx=15, pady=5)
+                 tk.Label(f_type, text="规则类型:").pack(side="left")
+                 type_var = tk.StringVar(value=current_type)
+                 combo_type = ttk.Combobox(f_type, textvariable=type_var, state="readonly", width=18)
+                 combo_type['values'] = list(RULE_TYPE_MAP.keys())
+                 combo_type.pack(side="left", padx=5)
+
+                 f_val = tk.Frame(edit_win)
+                 f_val.pack(fill="x", padx=15, pady=5)
+                 tk.Label(f_val, text="阈值设定:").pack(side="left")
+                 val_var = tk.StringVar(value=str(old_val))
+                 entry_val = tk.Entry(f_val, textvariable=val_var, width=15)
+                 entry_val.pack(side="left", padx=5)
+
+                 def confirm_edit():
+                     try:
+                         new_v = float(val_var.get())
+                         new_t = type_var.get()
+                         if self.live_strategy:
+                             if idx >= 0:
+                                 self.live_strategy.update_rule(composite_key, idx, new_t, new_v)
+                             else:
+                                 self.live_strategy.add_monitor(code, resample, new_t, new_v, name=name)
+                         
+                         edit_win.destroy()
+                         load_data()
+                         toast_message(self, f"已成功更新 {code} 规则")
+                     except ValueError:
+                         messagebox.showerror("错误", "无效数字", parent=edit_win)
+
+                 edit_win.bind("<Escape>", lambda e: edit_win.destroy())
+                 edit_win.protocol("WM_DELETE_WINDOW", lambda e: edit_win.destroy())
+                 edit_win.bind("<Return>", lambda e: confirm_edit())
+                 
+                 btn_f = tk.Frame(edit_win)
+                 btn_f.pack(pady=10, side="bottom", fill="x", padx=10)
+                 tk.Button(btn_f, text="保存 (Enter)", command=confirm_edit, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
+                 tk.Button(btn_f, text="取消 (Esc)", command=edit_win.destroy, height=2).pack(side="left", fill="x", expand=True, padx=5)
+
+            tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=5)
+            tk.Button(btn_frame, text="🗑️ 删除选中 (Del)", command=delete_selected, fg="red").pack(side="left", padx=5)
+            tk.Button(btn_frame, text="🗑️ 删除当前页", command=delete_current_page, fg="#d32f2f").pack(side="left", padx=5)
+            tk.Button(btn_frame, text="🧹 清理超限(>100)", command=auto_clean_excess, fg="#7b1fa2").pack(side="left", padx=5)
+            
+            def manual_refresh():
+                if self.live_strategy:
+                    self.live_strategy.load_monitors()
+                load_data()
+                refresh_stats()
+                toast_message(self, "监控列表已刷新")
+
+            tk.Button(btn_frame, text="刷新列表", command=manual_refresh).pack(side="left", padx=5)
             title_label = tk.Label(title_bar, text=f"🔔 {name} ({code})", bg=title_bg, fg="white", font=("Microsoft YaHei", 10, "bold"), anchor="w", padx=8)
             title_label.pack(side="left", fill="x", expand=True)
             
-            title_bar.bind("<Double-Button-1>", toggle_size)
             title_label.bind("<Double-Button-1>", toggle_size)
             title_bar.bind("<Enter>", stop_shake)
             title_label.bind("<Enter>", stop_shake)

@@ -995,6 +995,24 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Failed to remove voice alert config: {e}")
 
+    def remove_voice_alert_configs_batch(self, items: list[tuple[str, Optional[str]]]):
+        """批量物理删除语音预警配置"""
+        if not items:
+            return
+        try:
+            conn = self.db_manager.get_connection()
+            cur = conn.cursor()
+            for code, resample in items:
+                if resample is None:
+                    cur.execute("DELETE FROM voice_alerts WHERE code = ?", (code,))
+                else:
+                    cur.execute("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
+            conn.commit()
+            cur.close()
+            logger.info(f"DB: Batch removed {len(items)} voice alert configs")
+        except Exception as e:
+            logger.error(f"Failed batch remove voice alert configs: {e}")
+
     def log_voice_alert_config(self, code: str, resample: str, name: str, rules: str, last_alert: float, tags: str = "", rule_type_tag: str = "", create_price: float = 0.0, created_time: str = ""):
         """记录或更新语音预警配置"""
         try:

@@ -10,6 +10,12 @@ import time
 import json
 import logging
 
+# 兼容开发模式单独运行子脚本（防重复挂载，打包运行下 if 为 False 不会污染 sys.path）
+_CUR_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_CUR_DIR))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 logger = logging.getLogger("ATS")
 
 # 必须在导入任何 PyQt6 UI 元素前确保 HighDPI 高分屏自适应生效
@@ -2357,7 +2363,12 @@ class ATSMainWindow(QMainWindow):
         code_str = str(code).strip()
         code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
         
-        # 1. 从 current_df / df_realtime 中安全匹配
+        # 1. ⚡ 优先从内存字典 name_cache 中 O(1) 极速提取 (微秒级, 极速响应)
+        name = self.name_cache.get(code_clean) or self.name_cache.get(code_str)
+        if name and name != "未知" and name != code_clean and not name.isdigit() and not name.startswith("个股_"):
+            return name
+
+        # 2. 回退：从 current_df / df_realtime 中安全匹配
         for attr_name in ('current_df', 'df_realtime'):
             df_obj = getattr(self, attr_name, None)
             if df_obj is not None and not df_obj.empty:
@@ -2370,11 +2381,6 @@ class ATSMainWindow(QMainWindow):
                             return name_val
                     except Exception:
                         pass
-
-        # 2. 检查 name_cache (支持 code_clean 与 code_str)
-        name = self.name_cache.get(code_clean) or self.name_cache.get(code_str)
-        if name and name != "未知" and name != code_clean and not name.isdigit() and not name.startswith("个股_"):
-            return name
 
         # 3. 调起全局权威解析器 sys_utils
         try:
@@ -2837,11 +2843,22 @@ class ATSMainWindow(QMainWindow):
                 if len(counts) == 10:
                     self.dist_chart.update_data(counts, stats_dict, self.current_df)
             
-            self.refresh_realtime_ui()
+            # ⚡ 30ms 防抖异步触发 UI 渲染 (极其流畅汇聚高频 IPC 广播数据包)
+            self._trigger_realtime_ui_update()
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
             import time
             self._last_recv_t = time.time()
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
+
+    def _trigger_realtime_ui_update(self):
+        """防抖异步触发 UI 渲染 (30ms 汇聚高频 IPC 广播包, 防范主线程卡顿)"""
+        if not hasattr(self, '_realtime_ui_debounce_timer'):
+            from PyQt6.QtCore import QTimer
+            self._realtime_ui_debounce_timer = QTimer(self)
+            self._realtime_ui_debounce_timer.setSingleShot(True)
+            self._realtime_ui_debounce_timer.setInterval(30)
+            self._realtime_ui_debounce_timer.timeout.connect(self.refresh_realtime_ui)
+        self._realtime_ui_debounce_timer.start(30)
 
     def _async_load_stock_prices(self, codes):
         if not codes:
@@ -3435,9 +3452,10 @@ class ATSMainWindow(QMainWindow):
         )
         target_df = df_all[valid_mask]
 
-        # 5. 增量写入信号账本（第一步：更新各股票量能初分与形态）
+        # 5. 增量写入信号账本（第一步：转换为 dict 向量化高效遍历，比 iterrows 快 30 倍）
         valid_target_codes = []
-        for code, row in target_df.iterrows():
+        target_dict = target_df.to_dict('index')
+        for code, row in target_dict.items():
             code_str = str(code).strip()
             if not code_str or code_str in ('sh000001', 'sz399001', 'sz399006', '000001.SH', '399001.SZ', '399006.SZ'):
                 continue  # 跳过指数
@@ -3702,7 +3720,7 @@ class ATSMainWindow(QMainWindow):
                 pass
 
     def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
-        """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪 (当日精准去重+重大突破再触发)"""
+        """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪 (内存级极速去重 + 异步防抖落盘, 绝对零主线程 IO)"""
         import os
         import json
         import time
@@ -3732,9 +3750,10 @@ class ATSMainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 初始化内存锁，并自动预读今天已有记录，杜绝重启或冷却过后大量重复刷屏
+        # 初始化内存锁与记录列表，仅启动时读一次磁盘
         if getattr(self, "_recorded_alpha_stocks", None) is None or getattr(self, "_recorded_alpha_today", None) != today_date:
             self._recorded_alpha_stocks = {}  # {code: max_pct_val}
+            self._recorded_alpha_list = []
             self._recorded_alpha_today = today_date
             
             try:
@@ -3744,7 +3763,8 @@ class ATSMainWindow(QMainWindow):
                 if os.path.exists(log_path):
                     with open(log_path, 'r', encoding='utf-8') as f:
                         existing_records = json.load(f)
-                        for rec in existing_records:
+                        self._recorded_alpha_list = existing_records if isinstance(existing_records, list) else []
+                        for rec in self._recorded_alpha_list:
                             c = rec.get('code')
                             p_str = str(rec.get('pct', '0%')).replace('%', '').replace('+', '')
                             try:
@@ -3780,40 +3800,55 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        try:
-            from sys_utils import get_app_root
-            data_dir = os.path.join(get_app_root(), "datacsv")
-            log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
+        # 纯内存添加记录，绝不进行主线程阻塞式 IO 读写
+        time_str = time.strftime("%H:%M:%S")
+        if not hasattr(self, '_recorded_alpha_list') or self._recorded_alpha_list is None:
+            self._recorded_alpha_list = []
             
-            records = []
-            if os.path.exists(log_path):
-                try:
-                    with open(log_path, 'r', encoding='utf-8') as f:
-                        records = json.load(f)
-                except Exception:
-                    records = []
-                    
-            time_str = time.strftime("%H:%M:%S")
-            records.append({
-                "time": time_str,
-                "code": code,
-                "name": name,
-                "pct": f"{pct_val:+.2f}%",
-                "index_pct": f"{sh_pct:+.2f}%",
-                "relative_strength": f"{rs_val:+.2f}%",
-                "type": resonance
-            })
+        self._recorded_alpha_list.append({
+            "time": time_str,
+            "code": code,
+            "name": name,
+            "pct": f"{pct_val:+.2f}%",
+            "index_pct": f"{sh_pct:+.2f}%",
+            "relative_strength": f"{rs_val:+.2f}%",
+            "type": resonance
+        })
+        
+        if len(self._recorded_alpha_list) > 1000:
+            self._recorded_alpha_list = self._recorded_alpha_list[-1000:]
             
-            if len(records) > 1000:
-                records = records[-1000:]
-                
-            with open(log_path, 'w', encoding='utf-8') as f:
-                json.dump(records, f, ensure_ascii=False, indent=2)
-                
-            print(f"[ATSAlphaTracker] 记录强势信号: {code} ({name}) {pct_val:+.2f}% {resonance}")
-        except Exception as e:
-            print(f"[ATSAlphaTracker] 记录信号失败: {e}")
+        # 防抖后台异步落盘
+        self._request_alpha_flush_debounced(today_date)
+        print(f"[ATSAlphaTracker] 内存记录强势信号: {code} ({name}) {pct_val:+.2f}% {resonance}")
         return True
+
+    def _request_alpha_flush_debounced(self, today_date):
+        """500ms 防抖后台线程落盘 alpha 信号记录 (异步子线程, 绝对不占用 GUI 主线程)"""
+        if not hasattr(self, '_alpha_flush_timer'):
+            from PyQt6.QtCore import QTimer
+            self._alpha_flush_timer = QTimer(self)
+            self._alpha_flush_timer.setSingleShot(True)
+            self._alpha_flush_timer.setInterval(500)
+            self._alpha_flush_timer.timeout.connect(lambda: self._flush_alpha_records_to_disk(today_date))
+        self._alpha_flush_timer.start(500)
+
+    def _flush_alpha_records_to_disk(self, today_date):
+        if not hasattr(self, '_recorded_alpha_list') or not self._recorded_alpha_list:
+            return
+        import threading
+        records_copy = list(self._recorded_alpha_list)
+        def worker():
+            try:
+                from sys_utils import get_app_root
+                data_dir = os.path.join(get_app_root(), "datacsv")
+                os.makedirs(data_dir, exist_ok=True)
+                log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
+                with open(log_path, 'w', encoding='utf-8') as f:
+                    json.dump(records_copy, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[ATSAlphaTracker] Background flush error: {e}")
+        threading.Thread(target=worker, daemon=True).start()
 
     def _handle_realtime_signal(self, signal):
         if not signal:

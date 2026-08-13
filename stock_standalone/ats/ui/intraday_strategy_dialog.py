@@ -15,6 +15,12 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
+# 兼容开发模式单独运行子脚本（防重复挂载，打包运行下 if 为 False 不会污染 sys.path）
+_CUR_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_CUR_DIR))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
@@ -511,12 +517,6 @@ class IntradayStrategyDialog(QDialog):
         self.phase_panel.update_status(self.code, self.open_price, now_str, strategy, self.engine)
 
 if __name__ == "__main__":
-    # 仅当直接运行本文件进行独立 UI 测试时挂载开发路径
-    _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
-    _PROJECT_ROOT = os.path.dirname(os.path.dirname(_CUR_DIR))
-    if _PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, _PROJECT_ROOT)
-
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     dlg = IntradayStrategyDialog(code="920199", name="倍益康")
