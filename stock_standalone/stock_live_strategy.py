@@ -1001,6 +1001,9 @@ class StockLiveStrategy:
             self._save_monitors() # ✅ 持久化修补后的价格到 JSON 和数据库
             self._sync_grades_to_detectors() # [NEW] 同步评级数据到检测器
             logger.info(f"Loaded {self.stock_count} voice monitors (File: {self.config_file})")
+            
+            # 💥 [NEW] 自动清理过期/超限(>100条)的监控数据
+            self.clean_expired_monitors(max_limit=100)
 
         except Exception as e:
             logger.error(f"Failed to load voice monitors: {e}")
@@ -3995,6 +3998,91 @@ class StockLiveStrategy:
         else:
             logger.warning(f"Failed to remove monitor: {code} not found")
             return False
+
+    def remove_monitors_batch(self, keys_or_codes: list) -> int:
+        """[高性能] 批量移除监控项 (避免单条解包与多次磁盘写入)"""
+        if not keys_or_codes:
+            return 0
+
+        resolved_keys = []
+        items_to_db = []
+        codes_to_cancel = set()
+
+        for item in keys_or_codes:
+            key = self._resolve_stock_key(item)
+            if key and key in self._monitored_stocks:
+                resolved_keys.append(key)
+                pure_code = key.split('_')[0]
+                stock_resample = self._monitored_stocks[key].get('resample', 'd')
+                items_to_db.append((pure_code, stock_resample))
+                codes_to_cancel.add(pure_code)
+
+        if not resolved_keys:
+            return 0
+
+        # 1. 内存批量移除
+        with self._lock:
+            for k in resolved_keys:
+                if k in self._monitored_stocks:
+                    del self._monitored_stocks[k]
+
+        # 2. 数据库批量物理删除
+        if getattr(self, 'trading_logger', None) is not None and items_to_db:
+            self.trading_logger.remove_voice_alert_configs_batch(items_to_db)
+
+        # 3. 批量取消语音
+        if hasattr(self, '_voice'):
+            for c in codes_to_cancel:
+                self._voice.cancel_for_code(c)
+
+        # 4. 磁盘物理保存 (只执行一次)
+        self._save_monitors()
+
+        sample_codes = [k.split('_')[0] for k in resolved_keys[:8]]
+        more_str = f" 等共 {len(resolved_keys)} 只" if len(resolved_keys) > 8 else ""
+        logger.info(f"Batch removed {len(resolved_keys)} monitors from memory & DB: {', '.join(sample_codes)}{more_str}")
+        return len(resolved_keys)
+
+    def clean_expired_monitors(self, max_limit: int = 100) -> int:
+        """
+        自动清理过期/无效的监控数据，且保持总数不超过 max_limit (默认100条)。
+        返回清理的数量。
+        """
+        with self._lock:
+            total = len(self._monitored_stocks)
+            if total == 0:
+                return 0
+
+            invalid_keys = []
+            valid_items = []
+            for k, data in self._monitored_stocks.items():
+                tags = data.get('tags', '')
+                rules = data.get('rules', [])
+                # 规则为空 或 带有已恢复持仓标记且无有效规则的视作无效
+                if not rules:
+                    invalid_keys.append(k)
+                else:
+                    created_t = data.get('created_time', '')
+                    last_a = data.get('last_alert', 0)
+                    valid_items.append((k, created_t, last_a))
+
+            keys_to_clean = list(invalid_keys)
+            remaining_count = total - len(keys_to_clean)
+
+            # 如果仍然超过 max_limit，按创建时间/告警时间从最旧开始淘汰
+            if remaining_count > max_limit:
+                excess_count = remaining_count - max_limit
+                # 按 created_time 升序（最老的前面）排序
+                valid_items.sort(key=lambda x: (x[1] or '9999-99-99', x[2]))
+                for i in range(excess_count):
+                    keys_to_clean.append(valid_items[i][0])
+
+        if keys_to_clean:
+            cleaned_count = self.remove_monitors_batch(keys_to_clean)
+            logger.info(f"🧹 Auto-cleaned {cleaned_count} expired/excess monitor items. Remaining: {len(self._monitored_stocks)} (Limit: {max_limit})")
+            return cleaned_count
+        return 0
+
 
 
     def close_position_if_any(self, code: str, price: float, name: Optional[str] = None) -> bool:

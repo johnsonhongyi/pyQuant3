@@ -1,3 +1,10 @@
+## 2026-08-12 18:15
+- [x] **实现语音预警管理批量多选删除、一键删除当前页、性能批处理与监控上限 100 自动淘汰 (`instock_MonitorTK.py`, `stock_live_strategy.py`, `trading_logger.py`, `tests/test_voice_monitor_batch_cleanup.py`)**：
+    - [x] **UI 端批量多选、当前页一键删除与快捷清理**：在 `open_voice_monitor_manager` 的 Treeview 视图中升级 `selectmode="extended"`，支持 `Ctrl` / `Shift` 键进行批量多项选中；实现 `delete_selected` 批量移除选中项及 `delete_current_page` 当前页一键删除，并补齐手动与自动 `clean_expired_monitors` 超限清理。
+    - [x] **后端数据库与内存批量性能优化**：在 `TradingLogger` 中新增 `remove_voice_alert_configs_batch` 批量 SQL 物理删除，并重构 `StockLiveStrategy.remove_monitors_batch`。支持单次连接与事务提交完成多项监控的内存清理、DB 删除与语音队列取消，消除了大量顺序写盘与 I/O 阻塞导致的 UI 假死顿卡。
+    - [x] **100 条监控上限自动淘汰与数据自愈**：在 `load_monitors` 与管理器装载末端挂载 `clean_expired_monitors(max_limit=100)`，按添加日期与更新时间戳自动淘汰过期失效或超限记录，确保监控列表规模稳定在 100 以内。
+    - [x] **全量单元测试 100% 验证通过**：新建 `tests/test_voice_monitor_batch_cleanup.py` 覆盖 120 条监控下批量删除与 100 条上限自动清理断言，结合 `pytest tests/test_signal_ledger.py` 全量 14 项单元测试 **100% PASSED**！
+
 ## 2026-08-12 08:58
 - [x] **根治 `TimeAxisPhasePanel` QSS 后代选择器样式污染与文字挤压重叠 Bug (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`)**：
     - [x] **后代选择器隔离与 QSS 命名空间划分**：给 `p_box` 绑定 `setObjectName("PhaseItemFrame")` 并在 QSS 中限定为 `QFrame#PhaseItemFrame` 结合 `QLabel { border: none; background: transparent; }`，彻底根治了高亮执行中 (`🔥 执行中`) 时 `border: 2px solid #38bdf8` 被子控件 `QLabel` 递归继承导致的内部多重蓝色边框、边距挤压与文字重叠排版错乱。
