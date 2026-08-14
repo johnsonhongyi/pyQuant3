@@ -583,3 +583,38 @@ class UniverseTreeWidget(QWidget):
                 clipboard.setText(str(text).strip())
         except Exception as e:
             print(f"[Universe] Clipboard copy failed: {e}")
+
+    def refresh_favorites_display(self):
+        """[0ms 轻量刷新] 原位刷新树节点重点关注 ⭐ 标识与背景样式，绝不摧毁重建节点"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        for i in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(i)
+            for j in range(root.childCount()):
+                item = root.child(j)
+                code = item.data(0, Qt.ItemDataRole.UserRole)
+                if not code or code == "root":
+                    continue
+                code_str = str(code).strip()
+                name = item.data(1, Qt.ItemDataRole.UserRole) or item.text(1)
+                is_fav = code_str in fav_stocks
+                clean_name = str(name).replace("⭐ ", "").replace("⭐", "").replace("★ ", "").replace("★", "").strip()
+                new_name_text = f"⭐ {clean_name}" if is_fav else clean_name
+                if item.text(1) != new_name_text:
+                    item.setText(1, new_name_text)
+
+                if is_fav:
+                    for col in range(6):
+                        item.setBackground(col, QColor("#1A2A1A"))
+                    item.setForeground(0, QColor("#00FF88"))
+                    item.setForeground(1, QColor("#00FF88"))
+                else:
+                    for col in range(6):
+                        item.setData(col, Qt.ItemDataRole.BackgroundRole, None)
+                    item.setForeground(0, QColor("#e2e2e5"))
+                    item.setForeground(1, QColor("#e2e2e5"))
+

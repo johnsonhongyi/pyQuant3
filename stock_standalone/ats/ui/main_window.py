@@ -4323,12 +4323,66 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, '_is_closing', False):
             return
         try:
-            # Refresh universe tree and swing table
-            self.refresh_realtime_ui()
-            
-            # If the universe tree is currently displaying mock data, refresh the mock view too
-            if hasattr(self, 'universe_widget') and getattr(self.universe_widget, '_is_mock_active', False):
-                self.universe_widget.load_mock_data()
+            # 🚀 [PERF OPTIMIZE] 沿用既有内存数据，原位刷新所有当前可见视图上的 ⭐ 重点标识
+            # 1. 刷新重点关注 Tab 视图 (favorite_panel)
+            if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, 'update_favorite_rows'):
+                from global_favorites import GlobalFavoriteManager
+                import time
+                import pandas as pd
+
+                fav_mgr = GlobalFavoriteManager()
+                fav_stocks = fav_mgr.get_favorite_stocks()
+                fav_stocks_clean = {str(c).strip().zfill(6) for c in fav_stocks}
+
+                existing_fav_rows = {}
+                if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
+                    for r in self._pending_swing_rows:
+                        code_clean = str(r[0]).strip().zfill(6)
+                        if code_clean in fav_stocks_clean:
+                            existing_fav_rows[code_clean] = r
+
+                fav_rows = []
+                has_df = hasattr(self, 'current_df') and isinstance(self.current_df, pd.DataFrame) and not self.current_df.empty
+
+                for code_clean in fav_stocks_clean:
+                    if code_clean in existing_fav_rows:
+                        fav_rows.append(existing_fav_rows[code_clean])
+                    else:
+                        name = "未知"
+                        price_str = "0.00"
+                        if has_df and code_clean in self.current_df.index:
+                            row_df = self.current_df.loc[code_clean]
+                            if isinstance(row_df, pd.DataFrame):
+                                row_df = row_df.iloc[0]
+                            name = str(row_df.get('name', '未知'))
+                            price_val = row_df.get('trade', row_df.get('price', 0.0))
+                            try:
+                                price_str = f"{float(price_val):.2f}"
+                            except Exception:
+                                price_str = str(price_val)
+                        else:
+                            from sys_utils import resolve_stock_name
+                            name = resolve_stock_name(code_clean) or "未知"
+
+                        fav_date = fav_mgr.get_favorite_stock_date(code_clean) or time.strftime("%Y-%m-%d")
+                        fallback_row = (
+                            code_clean, name, price_str, "重点关注", "+0.0%", "0", "观察",
+                            fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通", "基础重点关注标的"
+                        )
+                        fav_rows.append(fallback_row)
+
+                self.favorite_panel.update_favorite_rows(fav_rows)
+
+            # 2. 原位刷新 SwingStateTable (📉 大级别 MA20d 回调跟踪器) 上的 ⭐ 标识与背景高亮
+            if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'refresh_favorites_display'):
+                self.swing_table.refresh_favorites_display()
+
+            # 3. 原位刷新左侧 UniverseTreeWidget 上的 ⭐ 标识与背景高亮
+            if hasattr(self, 'universe_widget'):
+                if getattr(self.universe_widget, '_is_mock_active', False):
+                    self.universe_widget.load_mock_data()
+                elif hasattr(self.universe_widget, 'refresh_favorites_display'):
+                    self.universe_widget.refresh_favorites_display()
                 
             # Refresh heatmap widget
             if hasattr(self, 'heatmap_widget'):
@@ -4345,6 +4399,7 @@ class ATSMainWindow(QMainWindow):
                         pass
         except Exception as e:
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
+
 
     def open_dragon_monitor(self):
         if getattr(self, '_is_closing', False):
