@@ -2716,14 +2716,36 @@ class ATSMainWindow(QMainWindow):
             self.status_bar.showMessage(f"❌ 回测计算失败: {e}")
 
     def open_intraday_strategy_dialog(self, code=None, name=None):
-        """调起 ATS 单独分时交易策略与 SBC 实盘显示面板"""
+        """调起 ATS 单独分时交易策略与 SBC 实盘显示面板（支持 JSON 多 code 自动路由）"""
         try:
             from ats.ui.intraday_strategy_dialog import IntradayStrategyDialog
+            from ats.intraday_strategy_engine import IntradayStrategyEngine
+
+            engine = IntradayStrategyEngine.get_instance()
+            json_target_codes = engine.get_all_target_codes()
+
             if isinstance(code, bool) or not code:
-                code = "920199"
-            if isinstance(name, bool) or not name:
-                name = self.get_stock_name(code) if hasattr(self, 'get_stock_name') else "倍益康"
-            dlg = IntradayStrategyDialog(code=code, name=name, parent=self)
+                # 1. 优先获取主界面当前选中的股票
+                if hasattr(self, 'current_selected_code') and self.current_selected_code:
+                    code = self.current_selected_code
+                elif hasattr(self, 'selected_code') and self.selected_code:
+                    code = self.selected_code
+                # 2. 其次动态获取 JSON 策略中配置的 target_codes
+                elif json_target_codes:
+                    code = json_target_codes[0]
+                # 3. 再次获取当前行情列表或 Universe 中的首只股票
+                elif hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+                    code = str(self.current_df.index[0])
+                elif hasattr(self, 'universe_manager') and hasattr(self.universe_manager, 'active_codes') and self.universe_manager.active_codes:
+                    code = self.universe_manager.active_codes[0]
+                else:
+                    code = "000001"
+
+            c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+            if isinstance(name, bool) or not name or name == "未知" or name == c_clean:
+                name = self.get_stock_name(c_clean) if hasattr(self, 'get_stock_name') else "新股标的"
+
+            dlg = IntradayStrategyDialog(code=c_clean, name=name, parent=self)
             dlg.exec()
         except Exception as e:
             print(f"[ATSMainWindow] 调起新股分时策略面板异常: {e}")

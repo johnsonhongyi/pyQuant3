@@ -1,3 +1,23 @@
+## 2026-08-13 13:12
+- [x] **修复 ATS 新股分时策略面板 `TimeAxisPhasePanel` UI 动态渲染与作用域 `NameError` 报错 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **根治 `main_layout` 作用域与 `phase_group_layout` 异常**：彻底修复 `TimeAxisPhasePanel._init_ui` 布局定义与 `_rebuild_phase_items` 动态重构方法体嵌套错位缺陷，确保 `rule_group`、`log_group` 及 `v_splitter` 等 3 大界面容器在 `_init_ui` 内顺畅完成初始化与层级挂载。
+    - [x] **多 Code 策略动态切标的无缝重绘**：在 `update_status` 中植入基于 `strategy_id` 的懒加载重构机制（`_rebuild_phase_items`），当引擎切换不同个股专属策略 JSON 时，自动清空旧阶段 Widget (`deleteLater()`) 并平滑构建新时间轴阶段。
+    - [x] **单元测试全量 100% 验证通过**：运行 `pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py`，全量 22 项单元测试 **100% PASSED**！
+
+## 2026-08-13 12:30
+- [x] **实现 ATS 新股分时阶梯交易策略引擎 Code 专属策略映射与多 Code 下拉交互系统 (`config/intraday_newstock_strategies.json`, `ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **多 Code 策略动态匹配与解耦 (`ats/intraday_strategy_engine.py`)**：为 `IntradayStrategyEngine` 新增 `get_all_target_codes()`、`get_code_strategy_map()` 及 `get_default_target_code()` 助手函数，实现按 JSON 策略定义的 `target_codes` 动态路由对应策略，无专属策略时平滑降级走通用开盘价档位筛选。
+    - [x] **UI 交互升级与全 Code 自动评估 (`ats/ui/intraday_strategy_dialog.py`)**：在 `IntradayStrategyDialog` 顶栏增加 `QComboBox` 下拉选单，支持多 Code 实时切标的并同步重绘策略规则；新增【⚡ 评估全量策略】按钮与 `_on_eval_all_codes` 批量评估函数，可一键评估当前全部 target codes 对应的策略触发状态。
+    - [x] **`main_window.py` 动态 Code 上下文解析与名称映射**：重构 `open_intraday_strategy_dialog` 方法，消除硬编码 default code 依赖，优先从 UI 选中标的、SBC 上下文及引擎 `get_default_target_code()` 动态解析代码，并配合 `sys_utils.resolve_stock_name` 全局获取股票名称。
+    - [x] **单元测试全量验证 100% 通过 (`tests/test_intraday_strategy_engine.py`)**：扩展单元测试覆盖多 Code 策略匹配、引擎 Helper 方法、UI 下拉框组件及 `QSplitter` 布局，全量 22 项单元测试 `pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` **100% PASSED**！
+
+## 2026-08-13 11:35
+- [x] **实现 ATS 新股分时阶梯交易策略引擎多 Code 独立策略匹配绑定、`IntradayStrategyDialog` `QSplitter` 手动缩放与实时跟踪(`config/intraday_newstock_strategies.json`, `ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **多 Code 策略动态匹配绑定 (`ats/intraday_strategy_engine.py`)**：在 `auto_select_strategy` 中引入针对个股代码的专属策略优先匹配算法，支持在 JSON 配置文件中通过 `target_codes` / `target_code` 指定特定个股（如 `688826` / `920199`），若无专属策略则优雅降级走通用开盘价档位筛选逻辑。
+    - [x] **UI 分割器 (`QSplitter`) 手动拖拽调大小与 `QScrollArea` 滚轮浏览 (`ats/ui/intraday_strategy_dialog.py`)**：将 `TimeAxisPhasePanel` 及其下方的规则状态表格、运行日志面板重构为垂直方向的 `QSplitter`，允许用户自由拖拽调整各区域高度；将盘中时间轴策略段包裹进 `QScrollArea` 滚动视图中，无需强制展开全部区域即可通过滚轮滑动浏览，并实现当前执行阶段 `ensureWidgetVisible` 自动平滑焦准定位。
+    - [x] **UI 自动跟随选中 Code 实时行情与限价单刷新 (`ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`)**：在 `main_window.py` 的 `open_intraday_strategy_dialog` 中接入当前选中个股自动探查，并重构弹窗内部 `_get_stock_realtime_data` 行情获取逻辑，实现分时面板与实盘/SBC 选中标的实时价格、开盘价及挂单上限（买一价 * 1.02）毫秒级跟随与自适应重绘。
+    - [x] **单元测试全量验证 100% 通过 (`tests/test_intraday_strategy_engine.py`)**：扩展单元测试套件覆盖 Code 专属策略匹配、多 Code 分锁、`QSplitter` 布局与 `QScrollArea` 组件存在性校验，全量 21 项单元测试 `pytest tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` **100% PASSED**！
+
 ## 2026-08-12 18:15
 - [x] **实现语音预警管理批量多选删除、一键删除当前页、性能批处理与监控上限 100 自动淘汰 (`instock_MonitorTK.py`, `stock_live_strategy.py`, `trading_logger.py`, `tests/test_voice_monitor_batch_cleanup.py`)**：
     - [x] **UI 端批量多选、当前页一键删除与快捷清理**：在 `open_voice_monitor_manager` 的 Treeview 视图中升级 `selectmode="extended"`，支持 `Ctrl` / `Shift` 键进行批量多项选中；实现 `delete_selected` 批量移除选中项及 `delete_current_page` 当前页一键删除，并补齐手动与自动 `clean_expired_monitors` 超限清理。
