@@ -1,3 +1,17 @@
+## 2026-08-14 18:00
+- [x] **根治 ATS 重点关注 Tab 页面在添加/取消关注后数据未刷新的致命 Bug (`ats/ui/main_window.py`, `tests/test_favorites_perf_optimization.py`)**：
+    - [x] **定位并根治未刷新瓶颈**：解构出 `ats/ui/main_window.py` 的 `_safe_favorites_changed` 方法中误写为 `hasattr(self.favorite_panel, 'update_data')`，而 `FavoritePanel` 内部实际接收数据的 API 方法名为 **`update_favorite_rows(rows)`**。导致 `hasattr` 恒评估为 `False`，添加/取消重点关注后 `FavoritePanel` 的表格与数量标签 `共 X 只重点标的` 永远无法调起更新。
+    - [x] **实现 `update_favorite_rows` 精准数据管道**：重构 `_safe_favorites_changed` 中的 `favorite_panel` 刷新分支，提取 `GlobalFavoriteManager` 的最新标的并优先检索 `_pending_swing_rows` 中的高密特征；若标的不在回调列表中，通过 `resolve_stock_name` 与 `current_df` 自动构建补全行，最后直接调起 `self.favorite_panel.update_favorite_rows(fav_rows)` 刷新视图。
+    - [x] **单元测试全量 100% 验证通过**：更新 `tests/test_favorites_perf_optimization.py` 断言，`pytest tests/test_signal_ledger.py tests/test_intraday_strategy_engine.py tests/test_favorites_perf_optimization.py` 全量 23 项单元测试 **100% PASSED**！
+
+## 2026-08-14 15:35
+- [x] **根治 ATS 重点关注 (Global Favorites) 高频频繁触发 UI 假死顿卡 Bug，实现 0ms 原位刷新当前页 ⭐ 图标与背景 (`instock_MonitorTK.py`, `signal_dashboard_panel.py`, `ats/ui/main_window.py`, `ats/ui/swing_table.py`, `ats/ui/universe_widget.py`, `tests/test_favorites_perf_optimization.py`)**：
+    - [x] **定位并根治卡顿瓶颈**：解构出原卡顿来自 3 层主线程同步阻塞——① 磁盘 JSON 与 SQLite 频繁读写；② `df.iterrows()` 逐行慢速循环；③ 每次切换均调起 `clear()` / `setRowCount(0)` 强行摧毁重建数千个 UI 节点。
+    - [x] **`ats/ui/swing_table.py` & `universe_widget.py` 0ms 原位刷新**：为 `SwingStateTable` 与 `UniverseTreeWidget` 补齐 `refresh_favorites_display()` 接口，收到重点关注变更时仅在已有节点上原位更新 `⭐` 文本与 `#1A2A1A` 绿色高亮背景，彻底解决“取消/添加重点关注后当前页未刷新显示图标”的问题。
+    - [x] **`instock_MonitorTK.py` `name` 列原位格式化与 `_values_cache` 保护**：在 `_refresh_ui_favorites` 中对 `df['name']` 赋予自适应 `⭐` 图标格式化，配合增量刷新 (`force=False`)，无缝更新 Treeview 视图。
+    - [x] **`signal_dashboard_panel.py` 斩断 5000 条记录全量重绘**：在 `_refresh_ui_for_favorites` 中彻底剥离 `self._refresh_all_tables()` 耗时 1.23 秒的全表摧毁重绘调用，改为直接沿用现有数据流。
+    - [x] **单元测试全量 100% 验证通过**：更新 `tests/test_favorites_perf_optimization.py` 断言，`pytest tests/test_signal_ledger.py tests/test_intraday_strategy_engine.py tests/test_favorites_perf_optimization.py` 全量 23 项单元测试 **100% PASSED**！
+
 ## 2026-08-13 13:12
 - [x] **修复 ATS 新股分时策略面板 `TimeAxisPhasePanel` UI 动态渲染与作用域 `NameError` 报错 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
     - [x] **根治 `main_layout` 作用域与 `phase_group_layout` 异常**：彻底修复 `TimeAxisPhasePanel._init_ui` 布局定义与 `_rebuild_phase_items` 动态重构方法体嵌套错位缺陷，确保 `rule_group`、`log_group` 及 `v_splitter` 等 3 大界面容器在 `_init_ui` 内顺畅完成初始化与层级挂载。

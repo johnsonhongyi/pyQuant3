@@ -384,3 +384,43 @@ class SwingStateTable(QWidget):
                 'status': f"MA20偏离: {ma20_dist} | 连板数: {limit_ups} | 首次发现: {first_seen} | 优先级: {priority} | DFF: {dff} | Rank: {rank} | 大盘偏离: {rs} | 共振: {resonance}"
             }
             self.stock_double_clicked.emit(code, name, context_info)
+
+    def refresh_favorites_display(self):
+        """[0ms 轻量刷新] 原位刷新表格行重点关注 ⭐ 标识、背景色与行显显隐筛选"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            fav_stocks = set()
+
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 0)
+            name_item = self.table.item(row, 1)
+            if not code_item or not name_item:
+                continue
+            code_str = code_item.text().strip()
+            name_str = name_item.text().strip()
+            is_fav = code_str in fav_stocks
+            clean_name = name_str.replace("⭐ ", "").replace("⭐", "").replace("★ ", "").replace("★", "").strip()
+            
+            new_name = f"⭐ {clean_name}" if is_fav else clean_name
+            if name_item.text() != new_name:
+                name_item.setText(new_name)
+
+            if is_fav:
+                for col in range(self.table.columnCount()):
+                    it = self.table.item(row, col)
+                    if it:
+                        it.setBackground(QColor("#1A2A1A"))
+                code_item.setForeground(QColor("#00FF88"))
+                name_item.setForeground(QColor("#00FF88"))
+            else:
+                for col in range(self.table.columnCount()):
+                    it = self.table.item(row, col)
+                    if it:
+                        it.setData(Qt.ItemDataRole.BackgroundRole, None)
+                code_item.setForeground(QColor("#e2e2e5"))
+                name_item.setForeground(QColor("#e2e2e5"))
+
+        self._apply_favorite_filter()
+
