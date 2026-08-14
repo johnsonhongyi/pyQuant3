@@ -831,6 +831,56 @@ class IntradayStrategyDialog(QDialog):
             self._populate_code_combo()
             self._load_mock_or_live_data()
 
+    def _update_sbc_view(self, trade_price: float, bid1_price: float, strategy: Dict[str, Any], is_unlisted: bool):
+        """全面刷新右侧 SBC 视图：显示参数、每一步执行交易价格及详细路由日志"""
+        c_clean = str(self.code).zfill(6)
+        state = self.engine._get_stock_state(c_clean, self.open_price)
+        signals = state.get("signals", [])
+        logs = state.get("execution_logs", [])
+        remaining_ratio = state.get("remaining_ratio", 1.0)
+        max_p = state.get("max_price", trade_price)
+        min_p = state.get("min_price", trade_price)
+
+        unlisted_tag = " (未上市/挂牌定盘)" if is_unlisted else ""
+        rem_str = f"{remaining_ratio*100:.0f}%" if remaining_ratio > 0 else "0% (已全部清仓)"
+
+        sbc_info = (
+            f"=== ⚡ SBC 分时走势与买卖点可视化信息 ===\n"
+            f"股票代码: {self.code} ({self.name}){unlisted_tag}\n"
+            f"开盘基准价 (Open): {self.open_price:.2f} 元 (基准参考线已绘制)\n"
+            f"实时触发价 (Price): {trade_price:.2f} 元 (最高:{max_p:.2f} / 最低:{min_p:.2f})\n"
+            f"冲高卖出目标 (+10%): {self.open_price*1.10:.2f} 元\n"
+            f"临停参考线 (+30%): {self.open_price*1.30:.2f} 元 (挂单 1.28x={self.open_price*1.28:.2f})\n"
+            f"应用策略: {strategy.get('name', '默认策略')}\n"
+            f"当前持仓状态: 剩余持仓比例 {rem_str}\n"
+            f"--------------------------------------------------\n"
+            f"【⚡ 策略执行买卖点明细 (共 {len(signals)} 步)】:\n"
+        )
+
+        if signals:
+            for idx, sig in enumerate(signals, 1):
+                sell_pct = getattr(sig, 'sell_ratio', 0.5) * 100
+                sugg_p = getattr(sig, 'suggested_price', sig.price)
+                rule_id = getattr(sig, 'rule_id', '')
+                rule_tag = f"[{rule_id}] " if rule_id else ""
+                sbc_info += (
+                    f"  第 {idx} 步 | 🔴 触发卖出 | 时间: {sig.timestamp} | 执行价: {sig.price:.2f} 元\n"
+                    f"         | 卖出比例: {sell_pct:.0f}% | 建议挂单价: {sugg_p:.2f} 元\n"
+                    f"         | 触发规则: {rule_tag}{sig.reason}\n"
+                )
+        else:
+            sbc_info += "  ⏳ 盘中实时监控中，尚未达成触发条件 (捕获 0 个交易信号)\n"
+
+        sbc_info += f"--------------------------------------------------\n"
+        sbc_info += f"【📋 实盘指令与策略路由流水日志 (共 {len(logs)} 条)】:\n"
+        if logs:
+            for log_item in logs:
+                sbc_info += f"  ▶ {log_item}\n"
+        else:
+            sbc_info += "  (暂无执行日志，实时监听中...)\n"
+
+        self.txt_sbc_placeholder.setText(sbc_info)
+
     def _load_mock_or_live_data(self):
         """加载初始或实盘行情数据并匹配策略"""
         open_price, trade_price, bid1_price, real_name, is_unlisted = self._get_stock_realtime_data()
@@ -848,11 +898,10 @@ class IntradayStrategyDialog(QDialog):
             strategy = self.engine.get_strategy_by_id(self.selected_strategy_id)
         if not strategy:
             strategy = self.engine.auto_select_strategy(self.open_price, code=self.code)
-        self.phase_panel.update_status(self.code, self.open_price, now_time_str, strategy, self.engine, is_unlisted=is_unlisted)
 
-        # 触发一次评估
+        # 评估当前 tick
         tick_row = {"trade": trade_price, "close": trade_price}
-        signals = self.engine.evaluate_tick(
+        self.engine.evaluate_tick(
             code=self.code,
             tick_row=tick_row,
             open_price=self.open_price,
@@ -860,29 +909,11 @@ class IntradayStrategyDialog(QDialog):
             bid1_price=bid1_price if bid1_price > 0 else trade_price
         )
 
-        unlisted_tag = " (未上市/挂牌定盘)" if is_unlisted else ""
-        sbc_info = (
-            f"=== ⚡ SBC 分时走势与买卖点可视化信息 ===\n"
-            f"股票代码: {self.code} ({self.name}){unlisted_tag}\n"
-            f"开盘基准价 (Open): {self.open_price:.2f} 元 (基准参考线已绘制)\n"
-            f"实时触发价 (Price): {trade_price:.2f} 元\n"
-            f"冲高卖出目标 (+10%): {self.open_price*1.10:.2f} 元\n"
-            f"临停参考线 (+30%): {self.open_price*1.30:.2f} 元 (挂单 1.28x={self.open_price*1.28:.2f})\n"
-            f"应用策略: {strategy.get('name', '默认策略')}\n"
-            f"--------------------------------------------------\n"
-            f"捕获策略触发买卖点数: {len(signals)} 个\n"
-        )
-        for sig in signals:
-            sbc_info += (
-                f"  🔴 [SELL 卖出信号] BarIndex: {sig.bar_index} | 触发价: {sig.price:.2f}\n"
-                f"     原因: {sig.reason}\n"
-                f"     卖出比例: {getattr(sig, 'sell_ratio', 0.5)*100:.0f}%\n"
-                f"     价格笼子挂单买一价*1.02: {getattr(sig, 'suggested_price', sig.price):.2f} 元\n"
-            )
-        self.txt_sbc_placeholder.setText(sbc_info)
+        self.phase_panel.update_status(self.code, self.open_price, now_time_str, strategy, self.engine, is_unlisted=is_unlisted)
+        self._update_sbc_view(trade_price, bid1_price, strategy, is_unlisted)
 
     def _on_tick_update(self):
-        """定时刷新界面与策略推算（实时跟随 code 价格变动）"""
+        """定时刷新界面与策略推算（实时跟随 code 价格变动与每一步执行日志）"""
         open_price, trade_price, bid1_price, real_name, is_unlisted = self._get_stock_realtime_data()
         self.name = real_name
         self.open_price = open_price
@@ -893,7 +924,19 @@ class IntradayStrategyDialog(QDialog):
             strategy = self.engine.get_strategy_by_id(self.selected_strategy_id)
         if not strategy:
             strategy = self.engine.auto_select_strategy(self.open_price, code=self.code)
+
+        # 实时评估 tick
+        tick_row = {"trade": trade_price, "close": trade_price}
+        self.engine.evaluate_tick(
+            code=self.code,
+            tick_row=tick_row,
+            open_price=self.open_price,
+            current_time_str=now_str,
+            bid1_price=bid1_price if bid1_price > 0 else trade_price
+        )
+
         self.phase_panel.update_status(self.code, self.open_price, now_str, strategy, self.engine, is_unlisted=is_unlisted)
+        self._update_sbc_view(trade_price, bid1_price, strategy, is_unlisted)
 
 if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
