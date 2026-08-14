@@ -112,6 +112,7 @@ class SignalEntry:
         'tier', 'is_locked',
         'state_history',
         'tdx_label', 'tdx_boost', 'early_launch_boost',
+        'tdx_price', 'tdx_time_str', 'promote_reason',
         'signal_source', 'signal_tag',
         '_date_str',
     ]
@@ -143,6 +144,9 @@ class SignalEntry:
         # TDX 与特殊分类信号标记
         self.tdx_label = ''
         self.tdx_boost = 0.0
+        self.tdx_price = 0.0
+        self.tdx_time_str = ''
+        self.promote_reason = ''
         self.signal_source = 'ATS'  # 'ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD'
         self.signal_tag = ''        # 分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
 
@@ -182,6 +186,8 @@ class SignalEntry:
                 'price': self.latest_price,
                 'pct': self.latest_pct,
             })
+            if reason:
+                self.promote_reason = reason
 
     def to_dict(self):
         """序列化为字典（用于快照持久化）"""
@@ -700,7 +706,10 @@ class SignalLedger:
             pct = float(row.get('percent', 0.0)) if 'percent' in row else 0.0
             dev = float(row.get('dff', 0.0)) if 'dff' in row else 0.0
 
-        tag_str = f"🔔 TDX {flag_label}"
+        period_cn = sig_dict.get('period_cn', '')
+        period_str = f"[{period_cn}] " if period_cn else ""
+        
+        tag_str = f"🔔 TDX {period_str}{flag_label}"
         entry = self.record_signal(
             code=code,
             name=name,
@@ -713,9 +722,11 @@ class SignalLedger:
         )
         if entry:
             entry.tdx_label = tag_str
+            entry.tdx_price = price
+            entry.tdx_time_str = sig_dict.get('time_str', '')
             entry.signal_tag = '🔔'
             entry.tdx_boost = 150.0  # 通达信实盘信号提权 150 分
-            entry.promote('WATCH', reason=f'通达信实盘信号: {flag_label} ({direction_cn})')
+            entry.promote('WATCH', reason=f'通达信实盘信号: {period_str}{flag_label} ({direction_cn})')
             entry.priority_score = self._compute_priority(entry, row)
             print(f"[SignalLedger] 已锁定通达信信号: {code} ({name}) {entry.tdx_label} 提权至 {entry.priority_score:.1f}分")
 

@@ -38,6 +38,21 @@ DEFAULT_FLAG_MAP = {
     '99': '设定信号',
 }
 
+TDX_PERIOD_MAP = {
+    '0': '分时',
+    '1': '1分钟',
+    '2': '5分钟',
+    '3': '15分钟',
+    '4': '30分钟',
+    '5': '60分钟',
+    '6': '日线',
+    '7': '周线',
+    '8': '月线',
+    '9': '多日线',
+    '10': '季线',
+    '11': '年线'
+}
+
 
 def load_ordermon_flag_map(ini_path=None) -> dict:
     """从 OrderMon.ini 读取 [FlagConfig] 信号代码与中文描述映射 (支持多编码与容错降级)"""
@@ -141,6 +156,8 @@ def parse_tdx_signal_line(line: str, flag_map: dict = None) -> dict:
     if flag_map is None:
         flag_map = DEFAULT_FLAG_MAP
     flag_label = flag_map.get(str(flag1), f"TDX-{flag1}")
+    
+    period_cn = TDX_PERIOD_MAP.get(str(flag2), '')
 
     # 获取股票名称 (使用内存高速缓存，绝不发起同步网络阻塞)
     name = code
@@ -161,6 +178,7 @@ def parse_tdx_signal_line(line: str, flag_map: dict = None) -> dict:
         'flag1': flag1,
         'flag2': flag2,
         'flag_label': flag_label,
+        'period_cn': period_cn,
         'price': price,
         'time_str': time_str,
         'raw_line': line,
