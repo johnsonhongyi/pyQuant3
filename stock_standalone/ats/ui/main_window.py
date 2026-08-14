@@ -2453,7 +2453,12 @@ class ATSMainWindow(QMainWindow):
             entry = self.signal_ledger.entries.get(code_clean)
             if entry:
                 res['position'] = f"SignalLedger {getattr(entry, 'tier', 'RADAR')} 信号池"
-                res['reason'] = getattr(entry, 'promote_reason', '黄金特异高分跟进信号')
+                if hasattr(entry, 'tdx_label') and entry.tdx_label:
+                    price_info = f" | 触发价格:{getattr(entry, 'tdx_price', 0.0):.2f}" if hasattr(entry, 'tdx_price') else ""
+                    time_info = f" | 处理时间:[{entry.tdx_time_str}]" if hasattr(entry, 'tdx_time_str') and entry.tdx_time_str else ""
+                    res['reason'] = f"{entry.tdx_label} | {getattr(entry, 'promote_reason', '')}{price_info}{time_info}"
+                else:
+                    res['reason'] = getattr(entry, 'promote_reason', '黄金特异高分跟进信号')
                 res['status'] = (
                     f"MA20偏离: {getattr(entry, 'latest_deviation', 0.0):+.2f}% | "
                     f"优先级: {getattr(entry, 'priority_score', 0.0):.0f} | "
@@ -4298,7 +4303,9 @@ class ATSMainWindow(QMainWindow):
             self.refresh_realtime_ui()
 
         # 5. 状态栏与控制台提醒 (带 AlertNotifier 去重语音与 Toast 提示)
-        msg = f"🔔 [通达信信号] {code} {name} [{flag_label}] ({direction_cn}) 价格:{price:.2f} [{time_str}]"
+        period_cn = sig_dict.get('period_cn', '')
+        period_str = f"[{period_cn}] " if period_cn else ""
+        msg = f"🔔 [通达信信号] {code} {name} {period_str}[{flag_label}] ({direction_cn}) 触发价格:{price:.2f} 处理时间:[{time_str}]"
         if hasattr(self, 'statusBar') and self.statusBar():
             self.statusBar().showMessage(msg, 10000)
 
