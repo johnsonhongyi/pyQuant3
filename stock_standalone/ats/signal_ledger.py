@@ -727,8 +727,10 @@ class SignalLedger:
             entry.signal_tag = '🔔'
             entry.tdx_boost = 150.0  # 通达信实盘信号提权 150 分
             entry.promote('WATCH', reason=f'通达信实盘信号: {period_str}{flag_label} ({direction_cn})')
-            entry.priority_score = self._compute_priority(entry, row)
-            print(f"[SignalLedger] 已锁定通达信信号: {code} ({name}) {entry.tdx_label} 提权至 {entry.priority_score:.1f}分")
+            try:
+                print(f"[SignalLedger] 已锁定通达信信号: {code} ({name}) {entry.tdx_label} 提权至 {entry.priority_score:.1f}分")
+            except Exception:
+                pass
 
         return entry
 

@@ -1536,12 +1536,14 @@ class StockDetailDialog(QDialog):
 class ATSMainWindow(QMainWindow):
     realtime_data_signal = pyqtSignal(object)
     realtime_signal_signal = pyqtSignal(object)
+    db_data_loaded_signal = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
         app = QApplication.instance()
         if app:
             app.main_window = self
+        self.db_data_loaded_signal.connect(self._on_db_data_loaded)
         self.setWindowTitle("🛡️ ATS v2 智能自治股票交易终端 (Autonomous Trading Terminal)")
         self.resize(1440, 900)
         self.current_font_size = self.load_font_size()
@@ -2931,39 +2933,80 @@ class ATSMainWindow(QMainWindow):
                 be = BacktestEngine(bridge_ref)
                 metrics = be.calculate_performance_metrics()
 
-                # ── 回调主线程更新 UI ──────────────────────────────────────────────
-                def _apply_to_ui():
-                    try:
-                        if final_flow:
-                            self.trade_flow_table.update_flow_list(final_flow)
-                        if pos_formatted:
-                            self.position_panel.update_positions(pos_formatted, cash=cash_val, total_assets=total_assets_val)
-                        # 更新三级池
-                        self.universe_manager.radar_pool.clear()
-                        self.universe_manager.watch_pool.clear()
-                        self.universe_manager.trade_pool.clear()
-                        self.universe_manager.radar_pool.update(radar_entries)
-                        self.universe_manager.watch_pool.update(watch_entries)
-                        self.universe_manager.trade_pool.update(trade_entries)
-                        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
-                        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
-                        if init_codes:
-                            self._async_load_stock_history(init_codes)
-                        # 权益曲线
-                        self.equity_chart.update_curve(x, strat_equity, bench_equity)
-                        # 绩效
-                        self.backtest_engine = be
-                        self.backtest_panel.update_stats(metrics)
-                        logger.debug("[ATSMainWindow] load_db_data 后台加载完成，UI 已更新")
-                    except Exception as e:
-                        print(f"[ATSMainWindow] _apply_to_ui 回调异常: {e}")
-
-                QTimer.singleShot(0, _apply_to_ui)
+                # ── 通过 Qt 线程安全信号将数据派发回主线程 UI ──────────────
+                payload = {
+                    "final_flow": final_flow,
+                    "pos_formatted": pos_formatted,
+                    "cash_val": cash_val,
+                    "total_assets_val": total_assets_val,
+                    "radar_entries": radar_entries,
+                    "watch_entries": watch_entries,
+                    "trade_entries": trade_entries,
+                    "init_codes": init_codes,
+                    "x": x,
+                    "strat_equity": strat_equity,
+                    "bench_equity": bench_equity,
+                    "be": be,
+                    "metrics": metrics,
+                }
+                self.db_data_loaded_signal.emit(payload)
 
             except Exception as e:
                 print(f"[ATSMainWindow] load_db_data 后台线程异常: {e}")
 
         threading.Thread(target=_bg_load, daemon=True, name="ATS-load_db").start()
+
+    def _on_db_data_loaded(self, payload):
+        """主线程槽函数：安全接收后台线程计算结果并无卡顿刷新 UI"""
+        if not isinstance(payload, dict) or getattr(self, '_is_closing', False):
+            return
+        try:
+            final_flow = payload.get("final_flow")
+            if final_flow is not None:
+                self.trade_flow_table.update_flow_list(final_flow)
+
+            pos_formatted = payload.get("pos_formatted")
+            cash_val = payload.get("cash_val", 1000000.0)
+            total_assets_val = payload.get("total_assets_val", 1000000.0)
+            if pos_formatted is not None:
+                self.position_panel.update_positions(pos_formatted, cash=cash_val, total_assets=total_assets_val)
+
+            # 更新三级池
+            radar_entries = payload.get("radar_entries", {})
+            watch_entries = payload.get("watch_entries", {})
+            trade_entries = payload.get("trade_entries", {})
+            if radar_entries or watch_entries or trade_entries:
+                self.universe_manager.radar_pool.clear()
+                self.universe_manager.watch_pool.clear()
+                self.universe_manager.trade_pool.clear()
+                self.universe_manager.radar_pool.update(radar_entries)
+                self.universe_manager.watch_pool.update(watch_entries)
+                self.universe_manager.trade_pool.update(trade_entries)
+                radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+                self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+
+            init_codes = payload.get("init_codes", [])
+            if init_codes:
+                self._async_load_stock_history(init_codes)
+
+            # 权益曲线
+            x = payload.get("x", [])
+            strat_equity = payload.get("strat_equity", [])
+            bench_equity = payload.get("bench_equity", [])
+            if x and strat_equity:
+                self.equity_chart.update_curve(x, strat_equity, bench_equity)
+
+            # 绩效
+            be = payload.get("be")
+            metrics = payload.get("metrics")
+            if be:
+                self.backtest_engine = be
+            if metrics:
+                self.backtest_panel.update_stats(metrics)
+
+            logger.debug("[ATSMainWindow] load_db_data 后台数据已成功安全派发至主线程 UI")
+        except Exception as e:
+            print(f"[ATSMainWindow] _on_db_data_loaded 回调异常: {e}")
 
     def on_run_backtest_clicked(self):
         self.status_bar.showMessage("正在读取历史信号与 K 线分时数据库进行多周期回测...")
@@ -4309,7 +4352,10 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'statusBar') and self.statusBar():
             self.statusBar().showMessage(msg, 10000)
 
-        print(f"[ATS] {msg}")
+        try:
+            print(f"[ATS] {msg}")
+        except Exception:
+            pass
 
         try:
             from ats.alert_notifier import AlertNotifier
