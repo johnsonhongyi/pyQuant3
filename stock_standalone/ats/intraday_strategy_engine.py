@@ -84,8 +84,54 @@ class IntradayStrategyEngine:
         else:
             return ("保守档", "strategy_a_new_stock_batch_sell", "hold_rebound")
 
-    def auto_select_strategy(self, open_price: float, is_b_conditions_met: bool = True) -> Dict[str, Any]:
-        """根据开盘价与条件自动选择对应策略"""
+    def get_all_target_codes(self) -> List[str]:
+        """获取所有 JSON 策略配置中指定的目标股票代码列表（去除重复与格式化）"""
+        codes = []
+        for st in self.strategies:
+            t_codes = st.get("target_codes", [])
+            t_code = st.get("target_code", "")
+            if isinstance(t_codes, list):
+                for tc in t_codes:
+                    c_clean = "".join(filter(str.isdigit, str(tc))).zfill(6)
+                    if c_clean and c_clean not in codes and c_clean != "000000":
+                        codes.append(c_clean)
+            if t_code:
+                c_clean = "".join(filter(str.isdigit, str(t_code))).zfill(6)
+                if c_clean and c_clean not in codes and c_clean != "000000":
+                    codes.append(c_clean)
+        return codes
+
+    def get_code_strategy_map(self) -> Dict[str, Dict[str, Any]]:
+        """获取全量代码与策略绑定映射字典 {code: strategy_dict}"""
+        code_map = {}
+        for c in self.get_all_target_codes():
+            code_map[c] = self.auto_select_strategy(0.0, code=c)
+        return code_map
+
+    def get_default_target_code(self) -> Optional[str]:
+        """获取 JSON 配置文件中的首个目标股票代码，无则返回 None"""
+        all_codes = self.get_all_target_codes()
+        return all_codes[0] if all_codes else None
+
+    def get_strategy_by_id(self, strategy_id: str) -> Optional[Dict[str, Any]]:
+        """按 strategy_id 获取对应的策略字典"""
+        for st in self.strategies:
+            if st.get("id") == strategy_id:
+                return st
+        return None
+
+    def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
+        """根据股票代码 code 或开盘价与条件自动选择对应策略（支持多 code 专用策略与通用规则）"""
+        if code:
+            c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+            for st in self.strategies:
+                target_codes = st.get("target_codes", [])
+                target_code = st.get("target_code", "")
+                if isinstance(target_codes, list) and any(c_clean == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in target_codes if tc):
+                    return st
+                if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6):
+                    return st
+
         tier_name, strat_id, mode = self.get_open_price_tier(open_price)
         if strat_id == "strategy_b_new_stock_trend_hold" and not is_b_conditions_met:
             # 即使 Open >= 467，若 4 条件不满足，降级至 策略A 标准
@@ -175,7 +221,7 @@ class IntradayStrategyEngine:
         
         # 1. 动态选择策略
         if strategy is None:
-            strategy = self.auto_select_strategy(open_price, is_b_conditions_met)
+            strategy = self.auto_select_strategy(open_price, code=c_clean, is_b_conditions_met=is_b_conditions_met)
 
         tier_name, _, action_mode = self.get_open_price_tier(open_price)
         
