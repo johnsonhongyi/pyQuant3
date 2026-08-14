@@ -2792,20 +2792,35 @@ class ATSMainWindow(QMainWindow):
                     except Exception as e:
                         print(f"[ATSMainWindow] Error loading paper_account_state.json: {e}")
 
-                # 步骤 1: 交易流水
+                # 步骤 1: 交易流水 (9列格式: 时间, 代码, 名称, 方向, 成交价, 成交数量, 成交金额, 距今涨跌, 策略来源)
+                def _calc_since_pct(code_str: str, trade_price_val: float) -> str:
+                    if cur_df_ref is not None and code_str in cur_df_ref.index and trade_price_val > 0:
+                        try:
+                            row_c = cur_df_ref.loc[code_str]
+                            now_p = float(row_c.get('trade', row_c.get('close', 0.0)))
+                            if now_p > 0:
+                                diff_pct = ((now_p - trade_price_val) / trade_price_val) * 100
+                                return f"{diff_pct:+.2f}%"
+                        except Exception:
+                            pass
+                    return "+0.00%"
+
                 flow_data = []
                 if state_data and "orders" in state_data:
                     for o in state_data["orders"]:
                         action = "买入" if o.get('action') == 'BUY' else "卖出"
                         qty = o.get('volume') or 0
-                        price = o.get('price') or 0.0
+                        price = float(o.get('price') or 0.0)
                         amount = price * qty
                         ts = (o.get('timestamp') or '').replace('T', ' ')
-                        flow_data.append((str(ts), str(o.get('code') or ''), "",
+                        c = str(o.get('code') or '').strip().zfill(6)
+                        since_pct = _calc_since_pct(c, price)
+                        flow_data.append((str(ts), c, "",
                                           str(action),
                                           f"{price:.2f}" if price else "0.00",
                                           f"{int(qty):,}" if qty else "0",
                                           f"{amount:,.2f}" if amount else "0.00",
+                                          since_pct,
                                           "核对无误"))
                     flow_data.sort(key=lambda x: x[0], reverse=True)
 
@@ -2816,14 +2831,17 @@ class ATSMainWindow(QMainWindow):
                     for _, row in flow_df.iterrows():
                         action = row.get('action') or ('买入' if row.get('status') == 'OPEN' else '卖出')
                         date = row.get('buy_date') if action == '买入' else (row.get('sell_date') or row.get('buy_date'))
-                        price = row.get('buy_price') if action == '买入' else (row.get('sell_price') or row.get('buy_price'))
-                        qty = row.get('buy_amount') or 0
+                        price = float(row.get('buy_price') if action == '买入' else (row.get('sell_price') or row.get('buy_price')) or 0.0)
+                        qty = float(row.get('buy_amount') or 0)
                         amount = price * qty if price and qty else 0.0
-                        c, n = str(row.get('code') or ''), str(row.get('name') or '')
+                        c = str(row.get('code') or '').strip().zfill(6)
+                        n = str(row.get('name') or '')
+                        since_pct = _calc_since_pct(c, price)
                         db_flow_data.append((str(date or ''), c, n, str(action or ''),
                                              f"{price:.2f}" if price else "0.00",
                                              f"{int(qty):,}" if qty else "0",
                                              f"{amount:,.2f}" if amount else "0.00",
+                                             since_pct,
                                              str(row.get('buy_reason') or '自动触发')))
                         if c and n and n != "未知":
                             name_cache_ref[c] = n
@@ -2832,7 +2850,7 @@ class ATSMainWindow(QMainWindow):
                         code, key = item[1], (item[0], item[1], item[3])
                         if key not in seen_orders:
                             n = name_cache_ref.get(code, code)
-                            final_flow.append((item[0], code, n, item[3], item[4], item[5], item[6], item[7]))
+                            final_flow.append((item[0], code, n, item[3], item[4], item[5], item[6], item[7], item[8]))
                             seen_orders.add(key)
                     for item in db_flow_data:
                         key = (item[0], item[1], item[3])
@@ -2841,7 +2859,7 @@ class ATSMainWindow(QMainWindow):
                             seen_orders.add(key)
                     final_flow.sort(key=lambda x: x[0], reverse=True)
                 elif flow_data:
-                    final_flow = [(i[0], i[1], name_cache_ref.get(i[1], i[1]), i[3], i[4], i[5], i[6], i[7])
+                    final_flow = [(i[0], i[1], name_cache_ref.get(i[1], i[1]), i[3], i[4], i[5], i[6], i[7], i[8])
                                   for i in flow_data]
 
                 # 步骤 2: 持仓
@@ -3479,6 +3497,12 @@ class ATSMainWindow(QMainWindow):
 
         # ── 更新已打开的个股详情弹窗 (0ms, 主线程直接刷 visible widget) ──────────
         if has_df:
+            if hasattr(self, 'trade_flow_table') and self.trade_flow_table is not None:
+                try:
+                    self.trade_flow_table.update_realtime_prices(self.current_df)
+                except Exception:
+                    pass
+
             for widget in QApplication.topLevelWidgets():
                 if isinstance(widget, StockDetailDialog) and widget.isVisible():
                     w_code = widget.code

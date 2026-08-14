@@ -7,7 +7,10 @@ Contains widgets for:
 - BacktestReportPanel: Backtest statistics and performance cards.
 """
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QLabel, QGridLayout, QPushButton
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QLabel, QGridLayout,
+    QPushButton, QComboBox, QSpinBox
+)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem
@@ -15,56 +18,236 @@ from ats.ui.base_table import BaseATSTableWidget
 
 class TradeFlowTable(QWidget):
     """
-    Table widget displaying transaction histories and orders.
+    Table widget displaying transaction histories and orders with pagination and real-time PnL tracking.
     """
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._all_flow_list = []
+        self._current_page = 1
+        self._page_size = 100
         self._init_ui()
         self.load_mock_flow()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
+        # 1. 交易流水表格 (9列，包含距今涨跌)
         self.table = BaseATSTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "时间", "代码", "名称", "方向", "成交价", "成交数量", "成交金额", "策略来源"
+            "时间", "代码", "名称", "方向", "成交价", "成交数量", "成交金额", "距今涨跌", "策略来源"
         ])
         self.table.setup_persistence(
-            config_key="ats_trade_flow_table_state",
-            default_widths=[90, 80, 90, 80, 90, 90, 100, 200],
-            max_widths={7: 300}
+            config_key="ats_trade_flow_table_state_v2",
+            default_widths=[95, 80, 90, 75, 85, 85, 95, 95, 220],
+            max_widths={8: 350}
         )
         self.table.setAlternatingRowColors(True)
         self.table.stock_activated.connect(self.stock_clicked.emit)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
+
+        # 2. 分页控制工具栏 (默认 100 条/页)
+        self.pagination_widget = QWidget()
+        self.pagination_widget.setStyleSheet("""
+            QWidget {
+                background-color: #14141d;
+                border: 1px solid #232330;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background-color: #1f1f2e;
+                color: #e0e0e0;
+                border: 1px solid #333348;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2b2b40;
+                color: #38bdf8;
+                border-color: #38bdf8;
+            }
+            QPushButton:disabled {
+                background-color: #161620;
+                color: #555566;
+                border-color: #222230;
+            }
+            QComboBox, QSpinBox {
+                background-color: #1a1a26;
+                color: #38bdf8;
+                border: 1px solid #333348;
+                border-radius: 3px;
+                padding: 1px 4px;
+                font-size: 8.5pt;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+                color: #a0a0b8;
+                font-size: 8.5pt;
+            }
+        """)
+        pag_layout = QHBoxLayout(self.pagination_widget)
+        pag_layout.setContentsMargins(8, 3, 8, 3)
+        pag_layout.setSpacing(6)
+
+        self.btn_first = QPushButton("⏮ 首页")
+        self.btn_first.clicked.connect(self._go_first_page)
+        pag_layout.addWidget(self.btn_first)
+
+        self.btn_prev = QPushButton("◀ 上一页")
+        self.btn_prev.clicked.connect(self._go_prev_page)
+        pag_layout.addWidget(self.btn_prev)
+
+        self.lbl_page_info = QLabel("第 1 / 1 页 (共 0 条)")
+        self.lbl_page_info.setStyleSheet("font-weight: bold; color: #ffd700;")
+        pag_layout.addWidget(self.lbl_page_info)
+
+        self.btn_next = QPushButton("下一页 ▶")
+        self.btn_next.clicked.connect(self._go_next_page)
+        pag_layout.addWidget(self.btn_next)
+
+        self.btn_last = QPushButton("末页 ⏭")
+        self.btn_last.clicked.connect(self._go_last_page)
+        pag_layout.addWidget(self.btn_last)
+
+        pag_layout.addSpacing(10)
+
+        # 每页条数下拉框
+        lbl_size = QLabel("每页显示:")
+        pag_layout.addWidget(lbl_size)
+        self.combo_page_size = QComboBox()
+        self.combo_page_size.addItems(["50 条/页", "100 条/页 (默认)", "200 条/页", "500 条/页", "全部显示"])
+        self.combo_page_size.setCurrentIndex(1) # 默认 100 条
+        self.combo_page_size.currentIndexChanged.connect(self._on_page_size_changed)
+        pag_layout.addWidget(self.combo_page_size)
+
+        pag_layout.addSpacing(10)
+
+        # 快速跳页
+        lbl_jump = QLabel("跳转至:")
+        pag_layout.addWidget(lbl_jump)
+        self.spin_page = QSpinBox()
+        self.spin_page.setMinimum(1)
+        self.spin_page.setMaximum(1)
+        self.spin_page.setValue(1)
+        pag_layout.addWidget(self.spin_page)
+
+        self.btn_go = QPushButton("GO")
+        self.btn_go.clicked.connect(self._go_spin_page)
+        pag_layout.addWidget(self.btn_go)
+
+        pag_layout.addStretch()
+        layout.addWidget(self.pagination_widget)
 
     def load_mock_flow(self):
-        # time, code, name, action, price, qty, amount, strategy
+        # time, code, name, action, price, qty, amount, since_pct, strategy
         mock_data = [
-            ("09:31:05", "300750", "宁德时代", "买入", "185.50", "800", "148,400", "早盘低开拉升突破"),
-            ("09:35:12", "600111", "北方稀土", "买入", "19.25", "5,000", "96,250", "大级别支撑企稳"),
-            ("10:15:30", "000001", "平安银行", "卖出", "10.45", "10,000", "104,500", "破位均线保护离场"),
-            ("14:45:00", "600030", "中信证券", "买入", "20.15", "5,000", "100,750", "板块异动共振买入")
+            ("09:31:05", "300750", "宁德时代", "买入", "185.50", "800", "148,400", "+2.50%", "早盘低开拉升突破"),
+            ("09:35:12", "600111", "北方稀土", "买入", "19.25", "5,000", "96,250", "+1.20%", "大级别支撑企稳"),
+            ("10:15:30", "000001", "平安银行", "卖出", "10.45", "10,000", "104,500", "-0.80%", "破位均线保护离场"),
+            ("14:45:00", "600030", "中信证券", "买入", "20.15", "5,000", "100,750", "+0.65%", "板块异动共振买入")
         ]
         self.update_flow_list(mock_data)
 
     def update_flow_list(self, flow_list):
+        """接收全量流水列表并重置/渲染分页视图"""
+        self._all_flow_list = list(flow_list) if flow_list else []
+        self._update_pagination_ui()
+        self._render_current_page()
+
+    def update_realtime_prices(self, current_df):
+        """实时行情推送时原位更新当前页可见行的距今涨跌幅"""
+        if current_df is None or current_df.empty:
+            return
+        self.table.setSortingEnabled(False)
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 1)
+            price_item = self.table.item(row, 4)
+            pnl_item = self.table.item(row, 7)
+            if not code_item or not price_item or not pnl_item:
+                continue
+            code = code_item.text().strip()
+            if code in current_df.index:
+                try:
+                    trade_p = float(price_item.text().replace(',', ''))
+                    if trade_p > 0:
+                        row_cur = current_df.loc[code]
+                        now_p = float(row_cur.get('trade', row_cur.get('close', 0.0)))
+                        if now_p > 0:
+                            diff_pct = ((now_p - trade_p) / trade_p) * 100
+                            pnl_str = f"{diff_pct:+.2f}%"
+                            pnl_item.setText(pnl_str)
+                            if diff_pct > 0:
+                                pnl_item.setForeground(QColor(COLOR_UP))
+                            elif diff_pct < 0:
+                                pnl_item.setForeground(QColor(COLOR_DOWN))
+                            else:
+                                pnl_item.setForeground(QColor("#a0a0b8"))
+                except Exception:
+                    pass
+        self.table.setSortingEnabled(True)
+
+    def _get_total_pages(self) -> int:
+        if self._page_size <= 0 or not self._all_flow_list:
+            return 1
+        return max(1, (len(self._all_flow_list) + self._page_size - 1) // self._page_size)
+
+    def _update_pagination_ui(self):
+        total_pages = self._get_total_pages()
+        total_count = len(self._all_flow_list)
+
+        if self._current_page > total_pages:
+            self._current_page = total_pages
+        if self._current_page < 1:
+            self._current_page = 1
+
+        self.lbl_page_info.setText(f"第 {self._current_page} / {total_pages} 页 (共 {total_count:,} 条)")
+        self.btn_first.setEnabled(self._current_page > 1)
+        self.btn_prev.setEnabled(self._current_page > 1)
+        self.btn_next.setEnabled(self._current_page < total_pages)
+        self.btn_last.setEnabled(self._current_page < total_pages)
+
+        self.spin_page.blockSignals(True)
+        self.spin_page.setMaximum(total_pages)
+        self.spin_page.setValue(self._current_page)
+        self.spin_page.blockSignals(False)
+
+    def _render_current_page(self):
+        """渲染当前页切片数据到 QTableWidget"""
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
-        self.table.setRowCount(len(flow_list))
-        for row, data in enumerate(flow_list):
-            for col, text in enumerate(data):
+
+        if not self._all_flow_list:
+            self.table.setSortingEnabled(True)
+            return
+
+        if self._page_size <= 0:
+            page_data = self._all_flow_list
+        else:
+            start_idx = (self._current_page - 1) * self._page_size
+            end_idx = start_idx + self._page_size
+            page_data = self._all_flow_list[start_idx:end_idx]
+
+        self.table.setRowCount(len(page_data))
+        for row, data in enumerate(page_data):
+            # 兼容 8 列或 9 列数据格式
+            row_items = list(data)
+            if len(row_items) == 8:
+                # 插入默认距今涨跌幅占位
+                row_items.insert(7, "+0.00%")
+
+            for col, text in enumerate(row_items[:9]):
                 item = NumericTableWidgetItem(str(text))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                if col == 3: # Action (Buy/Sell)
+
+                if col == 3: # 方向 (买入/卖出)
                     if "买" in str(text) or "BUY" in str(text) or "ADD" in str(text):
                         item.setForeground(QColor(COLOR_UP))
                         font = self.table.font()
@@ -75,10 +258,59 @@ class TradeFlowTable(QWidget):
                         font = self.table.font()
                         font.setBold(True)
                         item.setFont(font)
-                
+                elif col == 7: # 距今涨跌
+                    txt_str = str(text).strip()
+                    if txt_str.startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    elif txt_str.startswith("-"):
+                        item.setForeground(QColor(COLOR_DOWN))
+                    else:
+                        item.setForeground(QColor("#a0a0b8"))
+
                 self.table.setItem(row, col, item)
-        auto_fit_columns_once(self.table, "ats_trade_flow_table_state", max_widths={7: 300})
+
+        auto_fit_columns_once(self.table, "ats_trade_flow_table_state_v2", max_widths={8: 350})
         self.table.setSortingEnabled(True)
+
+    def _go_first_page(self):
+        if self._current_page != 1:
+            self._current_page = 1
+            self._update_pagination_ui()
+            self._render_current_page()
+
+    def _go_prev_page(self):
+        if self._current_page > 1:
+            self._current_page -= 1
+            self._update_pagination_ui()
+            self._render_current_page()
+
+    def _go_next_page(self):
+        if self._current_page < self._get_total_pages():
+            self._current_page += 1
+            self._update_pagination_ui()
+            self._render_current_page()
+
+    def _go_last_page(self):
+        total_p = self._get_total_pages()
+        if self._current_page != total_p:
+            self._current_page = total_p
+            self._update_pagination_ui()
+            self._render_current_page()
+
+    def _go_spin_page(self):
+        target = self.spin_page.value()
+        if target != self._current_page and 1 <= target <= self._get_total_pages():
+            self._current_page = target
+            self._update_pagination_ui()
+            self._render_current_page()
+
+    def _on_page_size_changed(self, index):
+        sizes = [50, 100, 200, 500, -1]
+        if 0 <= index < len(sizes):
+            self._page_size = sizes[index]
+            self._current_page = 1
+            self._update_pagination_ui()
+            self._render_current_page()
 
     def _on_cell_double_clicked(self, row, col):
         code_item = self.table.item(row, 1)
@@ -91,11 +323,12 @@ class TradeFlowTable(QWidget):
             price = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
             qty = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
             amount = self.table.item(row, 6).text() if self.table.item(row, 6) else ""
-            strategy = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            pnl_since = self.table.item(row, 7).text() if self.table.item(row, 7) else ""
+            strategy = self.table.item(row, 8).text() if self.table.item(row, 8) else ""
             context_info = {
                 'position': '交易流水 (Trade Flow)',
                 'reason': f"触发策略: {strategy}",
-                'status': f"成交流水: 于 {time_str} 执行【{action}】{qty}股 | 成交价: {price} | 成交总额: {amount}元"
+                'status': f"成交流水: 于 {time_str} 执行【{action}】{qty}股 | 成交价: {price} | 成交总额: {amount}元 | 距今涨跌: {pnl_since}"
             }
             self.stock_double_clicked.emit(code, name, context_info)
 
