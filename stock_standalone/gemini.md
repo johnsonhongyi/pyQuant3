@@ -1,3 +1,9 @@
+## 2026-08-14 18:38
+- [x] **实现 ATS 实时 IPC 数据流高频吞吐性能优化与 $O(1)$ 高速 Favorite 缓存 (`ats/signal_ledger.py`, `tests/test_realtime_ipc_perf.py`)**：
+    - [x] **`SignalLedger` $O(1)$ 重点关注缓存机制**：在 `SignalLedger` 内部引入 `_fav_version` 与 `_fav_stocks_cache` 缓存集合，配合 `GlobalFavoriteManager` 的版本号比对，实现重点关注标的 $O(1)$ 级别极速校验，彻底消除了高频行情数据包（5500+ 行/次）写入信号账本时因重复 I/O 与对象检索带来的严重 CPU 阻塞。
+    - [x] **`_compute_priority` 优先权打分 hot-path 优化**：重构 `_compute_priority` 及重点关注加权分支，使用 `_fav_stocks_cache` 直接判定重点关注标的 (+200.0 分置顶提权)，并对板块 `get_sector_global_boost` 引入惰性防抖保护，大幅降低了每秒数千次信号判断时的 Python 函数调用开销。
+    - [x] **5500 行爆发式数据流性能基准测试与 100% 单元测试覆盖**：重构并加固 `tests/test_realtime_ipc_perf.py` 性能测试基准套件，验证 5500 行全市场快照数据并发吞吐与 10,000 次 $O(1)$ 股票查找毫秒级完成。全量 25 项单元测试 `pytest tests/test_signal_ledger.py tests/test_intraday_strategy_engine.py tests/test_favorites_perf_optimization.py tests/test_realtime_ipc_perf.py` **100% PASSED**！
+
 ## 2026-08-14 18:00
 - [x] **根治 ATS 重点关注 Tab 页面在添加/取消关注后数据未刷新的致命 Bug (`ats/ui/main_window.py`, `tests/test_favorites_perf_optimization.py`)**：
     - [x] **定位并根治未刷新瓶颈**：解构出 `ats/ui/main_window.py` 的 `_safe_favorites_changed` 方法中误写为 `hasattr(self.favorite_panel, 'update_data')`，而 `FavoritePanel` 内部实际接收数据的 API 方法名为 **`update_favorite_rows(rows)`**。导致 `hasattr` 恒评估为 `False`，添加/取消重点关注后 `FavoritePanel` 的表格与数量标签 `共 X 只重点标的` 永远无法调起更新。

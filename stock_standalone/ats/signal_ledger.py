@@ -251,6 +251,21 @@ class SignalLedger:
         self._today_str = None
         self._signal_count = 0  # 当日发现信号总数
         self._notified_keys = set()  # 当日已提醒通知的信号 key 集合，防止多周期/ATS/TDX重复播报
+        self._fav_version = -1
+        self._fav_stocks_cache = set()
+
+    def get_favorite_stocks_set(self) -> set:
+        """[PERF] 极速提取重点关注集合（基于 GlobalFavoriteManager 版本号 0ms 高速缓存）"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            cur_ver = fav_mgr.version
+            if self._fav_version != cur_ver:
+                self._fav_version = cur_ver
+                self._fav_stocks_cache = fav_mgr.get_favorite_stocks()
+            return self._fav_stocks_cache
+        except Exception:
+            return set()
 
     def is_notified_today(self, code: str, signal_tag: str = '') -> bool:
         """检查指定股票或信号在今天是否已经进行过桌面/语音通知，防止多周期与 ATS 两个界面重复播报"""
@@ -364,13 +379,8 @@ class SignalLedger:
         """
         self._ensure_daily_reset()
 
-        # 获取重点关注集合
-        fav_stocks = set()
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-        except Exception:
-            pass
+        # ⚡ 高效获取重点关注集合 (利用缓存, 0ms)
+        fav_stocks = self.get_favorite_stocks_set()
         is_fav = str(code).strip() in fav_stocks
 
         if row is not None and 'name' in row and str(row['name']).strip():
@@ -613,13 +623,7 @@ class SignalLedger:
         deviation_score = max(0.0, 100.0 - dev_abs * 20.0)
 
         # 重点关注置顶加权
-        fav_boost = 0.0
-        try:
-            from global_favorites import GlobalFavoriteManager
-            if str(entry.code).strip() in GlobalFavoriteManager().get_favorite_stocks():
-                fav_boost = 200.0
-        except Exception:
-            pass
+        fav_boost = 200.0 if str(entry.code).strip() in self.get_favorite_stocks_set() else 0.0
 
         # 外盘连带提权 (A50 / 纳指 / 大宗商品)
         global_boost = 0.0
@@ -630,11 +634,29 @@ class SignalLedger:
                 if cat and isinstance(cat, str):
                     sector_name = cat.split(';')[0].split('-')[0].strip()
             if sector_name:
-                from JSONData.global_market_data import get_sector_global_boost
-                b_val, g_tag = get_sector_global_boost(sector_name)
-                global_boost = b_val
-                if g_tag and not entry.signal_tag:
-                    entry.signal_tag = g_tag
+                try:
+                    now_ts = time.time()
+                    if not hasattr(self, '_sector_boost_cache'):
+                        self._sector_boost_cache = {}
+                        self._sector_boost_last_ts = now_ts
+                    
+                    # 缓存 120 秒过期，防止瞬间数千次网络/模块调用拖垮性能
+                    if now_ts - self._sector_boost_last_ts > 120.0:
+                        self._sector_boost_cache.clear()
+                        self._sector_boost_last_ts = now_ts
+
+                    if sector_name in self._sector_boost_cache:
+                        b_val, g_tag = self._sector_boost_cache[sector_name]
+                    else:
+                        from JSONData.global_market_data import get_sector_global_boost
+                        b_val, g_tag = get_sector_global_boost(sector_name)
+                        self._sector_boost_cache[sector_name] = (b_val, g_tag)
+
+                    global_boost = b_val
+                    if g_tag and not entry.signal_tag:
+                        entry.signal_tag = g_tag
+                except Exception:
+                    pass
         except Exception:
             pass
 

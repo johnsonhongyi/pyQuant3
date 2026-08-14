@@ -24,7 +24,7 @@ os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox, QAbstractItemView
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
@@ -43,8 +43,319 @@ from ats.volume_profiler import VolumeProfiler
 from ats.session_snapshot import SessionSnapshot
 from JohnsonUtil import commonTips as cct
 
+
+class LedgerUpdateWorker(QThread):
+    """
+    ⚡ 后台信号账本计算 Worker — 彻底解耦数据计算与 UI 渲染，根治主线程卡顿
+
+    职责：在后台线程中完成全部重量级数据计算：
+      1. _update_signal_ledger (向量化偏离度 + volume_profiler 更新)
+      2. swing_rows / fav_rows 列表计算
+    计算完成后通过 results_ready Signal 推回主线程，主线程仅负责 <20ms 的纯 UI 渲染。
+
+    线程安全规范：Worker 中绝不操作任何 Qt Widget。
+    """
+    # (swing_rows, fav_rows, sh_pct, alpha_signals, ledger_stats_str)
+    results_ready = pyqtSignal(list, list, float, list, str)
+
+    def __init__(self, df_all, signal_ledger, volume_profiler,
+                 session_snapshot, swing_tracker, stock_history_cache,
+                 price_pct_cache, name_cache, fav_stocks, universe_manager,
+                 today_str):
+        super().__init__()
+        # 浅拷贝 DataFrame：仅复制 index/columns 结构元数据，数据块共享内存
+        # 在 Worker 只读访问 df 的场景下足够安全，避免 ~80ms 的深拷贝开销
+        import pandas as pd
+        self._df = df_all.copy(deep=False)
+        self._signal_ledger = signal_ledger
+        self._volume_profiler = volume_profiler
+        self._session_snapshot = session_snapshot
+        self._swing_tracker = swing_tracker
+        self._stock_history_cache = stock_history_cache
+        self._price_pct_cache = price_pct_cache
+        self._name_cache = name_cache
+        self._fav_stocks = fav_stocks
+        self._universe_manager = universe_manager
+        self._today_str = today_str
+
+    def _get_name(self, code):
+        """从 name_cache 或 df 解析股票名称 (无 IO 纯内存)"""
+        n = self._name_cache.get(code, '')
+        if n and n not in ('未知', '重点标的'):
+            return n
+        code_clean = ''.join(c for c in str(code) if c.isdigit()).zfill(6)
+        n2 = self._name_cache.get(code_clean, '')
+        return n2 if (n2 and n2 not in ('未知', '重点标的')) else code
+
+    def run(self):
+        import time as _time
+        import datetime
+        import pandas as pd
+        try:
+            df_all = self._df
+            t0 = _time.time()
+
+            # ── 阶段 A: 更新信号账本 (原 _update_signal_ledger 逻辑) ──────────────
+            self._volume_profiler.update_market_context(df_all)
+
+            # 定位 MA20 列
+            ma20_col = next((c for c in ('ma20d', 'ma20', 'MA20', 'ma20_series') if c in df_all.columns), None)
+            close_col = 'close' if 'close' in df_all.columns else 'price'
+
+            if ma20_col and close_col in df_all.columns:
+                close_s = pd.to_numeric(df_all[close_col], errors='coerce')
+                safe_ma20 = pd.to_numeric(df_all[ma20_col], errors='coerce').replace(0, float('nan'))
+                dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
+
+                tracked_codes = set(self._signal_ledger.entries.keys())
+                valid_mask = (
+                    ((dev_series >= self._signal_ledger.DEVIATION_MIN) &
+                     (dev_series <= self._signal_ledger.DEVIATION_MAX)) |
+                    df_all.index.isin(tracked_codes)
+                )
+                target_df = df_all[valid_mask]
+
+                valid_target_codes = []
+                target_dict = target_df.to_dict('index')
+                for code, row in target_dict.items():
+                    code_str = str(code).strip()
+                    if not code_str or code_str in ('sh000001', 'sz399001', 'sz399006',
+                                                     '000001.SH', '399001.SZ', '399006.SZ'):
+                        continue
+                    try:
+                        price = float(row.get(close_col, 0.0))
+                        ma20_val = float(row.get(ma20_col, 0.0))
+                        if price <= 0 or ma20_val <= 0:
+                            continue
+                        self._volume_profiler.update_profile(code_str, row)
+                        valid_target_codes.append((code_str, row, price, ma20_val))
+                    except Exception:
+                        continue
+
+                active_codes_list = [item[0] for item in valid_target_codes]
+                self._volume_profiler.analyze_sector_resonance(active_codes=active_codes_list)
+
+                for code_str, row, price, ma20_val in valid_target_codes:
+                    try:
+                        name = str(row.get('name', ''))
+                        pct = float(row.get('percent', 0.0))
+                        deviation = (price - ma20_val) / ma20_val * 100.0
+                        vol_score = self._volume_profiler.get_volume_score(code_str)
+                        self._signal_ledger.record_signal(
+                            code=code_str, name=name, price=price, pct=pct,
+                            deviation=deviation, row=row, volume_score=vol_score,
+                        )
+                    except Exception:
+                        continue
+
+            # 快照持久化 (文件 IO 放在 Worker 线程，不阻塞主线程)
+            if self._session_snapshot.should_snapshot():
+                self._session_snapshot.save_snapshot(self._signal_ledger)
+                self._session_snapshot.cleanup_old_snapshots()
+
+            now_dt = datetime.datetime.now()
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trade_day = cct.get_trade_date_status()
+            except Exception:
+                is_trade_day = False
+            if is_trade_day and now_dt.hour >= 15:
+                self._session_snapshot.save_daily_summary(self._signal_ledger)
+
+            # ── 阶段 B: 计算 swing_rows (原 refresh_realtime_ui 中的 for code in all_codes) ──
+            # 从信号账本同步三级池
+            self._universe_manager.sync_from_ledger(
+                self._signal_ledger,
+                df_realtime=df_all,
+                price_pct_cache=self._price_pct_cache
+            )
+
+            pool_codes = (list(self._universe_manager.radar_pool.keys()) +
+                          list(self._universe_manager.watch_pool.keys()) +
+                          list(self._universe_manager.trade_pool.keys()))
+            all_codes = list(dict.fromkeys(pool_codes + [c for c in self._fav_stocks if c]))
+
+            # 计算大盘涨幅参考
+            sh_pct = 0.0
+            for idx_code in ('sh000001', '000001'):
+                if idx_code in df_all.index:
+                    try:
+                        sh_pct = float(df_all.loc[idx_code, 'percent'])
+                        break
+                    except Exception:
+                        pass
+            if sh_pct == 0.0 and 'percent' in df_all.columns:
+                sh_pct = float(df_all['percent'].mean())
+
+            swing_rows = []
+            alpha_signals = []  # [(code, name, pct_val, sh_pct, rs_val, resonance)]
+
+            for code in all_codes:
+                latest_close = 0.0
+                pct_val = dff_val = dff2_val = dff3_val = 0.0
+                rank_val = 0
+
+                code_clean = ''.join(c for c in str(code) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
+
+                # 从 df 获取行情
+                row = None
+                if code in df_all.index:
+                    try:
+                        r = df_all.loc[code]
+                        row = r.iloc[0].to_dict() if hasattr(r, 'iloc') and len(r.shape) > 1 else r.to_dict()
+                    except Exception:
+                        pass
+                elif code_clean in df_all.index:
+                    try:
+                        r = df_all.loc[code_clean]
+                        row = r.iloc[0].to_dict() if hasattr(r, 'iloc') and len(r.shape) > 1 else r.to_dict()
+                    except Exception:
+                        pass
+
+                if row is not None:
+                    try: latest_close = float(row.get('close', row.get('price', 0.0)))
+                    except: pass
+                    try: pct_val = float(row.get('percent', 0.0))
+                    except: pass
+                    try: dff_val = float(row.get('dff', 0.0))
+                    except: pass
+                    try: rank_val = int(row.get('Rank', row.get('rank', 0)))
+                    except: pass
+                    try: dff2_val = float(row.get('dff2', 0.0))
+                    except: pass
+                    try: dff3_val = float(row.get('dff3', 0.0))
+                    except: pass
+                elif code_clean in self._price_pct_cache:
+                    latest_close, pct_val = self._price_pct_cache[code_clean]
+                elif code in self._price_pct_cache:
+                    latest_close, pct_val = self._price_pct_cache[code]
+                elif code_clean in self._stock_history_cache and self._stock_history_cache[code_clean]:
+                    latest_close = float(self._stock_history_cache[code_clean][-1][1])
+                elif code in self._stock_history_cache and self._stock_history_cache[code]:
+                    latest_close = float(self._stock_history_cache[code][-1][1])
+
+                name = self._get_name(code)
+
+                rs_val = pct_val - sh_pct
+                resonance = '同步整理'
+                if sh_pct < -0.3 and pct_val > 1.5:
+                    resonance = '逆市抗跌'
+                elif sh_pct > 0.3 and pct_val > 3.0 and dff_val > 2.0:
+                    resonance = '大盘共振'
+                elif pct_val < -3.0 and rs_val < -2.0:
+                    resonance = '同步走弱'
+
+                # 历史数据重建
+                has_history = code in self._stock_history_cache and self._stock_history_cache[code]
+                if has_history:
+                    hist = self._stock_history_cache[code]
+                    close_series = [float(item[1]) for item in hist if item[1] is not None]
+                    if hist[-1][0] == self._today_str:
+                        if close_series: close_series[-1] = latest_close
+                    else:
+                        close_series.append(latest_close)
+                    ma20_series, ma5_series = [], []
+                    for i in range(len(close_series)):
+                        sub20 = close_series[max(0, i - 19): i + 1]
+                        ma20_series.append(sum(sub20) / len(sub20) if sub20 else close_series[i])
+                        sub5 = close_series[max(0, i - 4): i + 1]
+                        ma5_series.append(sum(sub5) / len(sub5) if sub5 else close_series[i])
+                else:
+                    row_data = row if row is not None else {}
+                    history_closes = []
+                    last_val = latest_close
+                    for d_idx in range(9, 0, -1):
+                        col_name = f'lastp{d_idx}d'
+                        try:
+                            val = float(row_data.get(col_name, last_val) if row_data else last_val)
+                            if val > 0:
+                                history_closes.append(val)
+                                last_val = val
+                        except Exception:
+                            pass
+                    close_series = history_closes + [latest_close]
+                    try: current_ma20 = float(row_data.get('ma20d', latest_close)) if row_data else latest_close
+                    except: current_ma20 = latest_close
+                    try: current_ma5 = float(row_data.get('ma5d', latest_close)) if row_data else latest_close
+                    except: current_ma5 = latest_close
+                    ma20_series = [current_ma20] * len(close_series)
+                    ma5_series = [current_ma5] * len(close_series)
+
+                state, dev_str, position, reason = self._swing_tracker.update_stock_state(
+                    code, name, latest_close, close_series, ma20_series, ma5_series
+                )
+
+                limit_ups = 0
+                if len(close_series) > 1:
+                    for idx in range(len(close_series) - 1, 0, -1):
+                        if close_series[idx] > close_series[idx - 1] * 1.002:
+                            limit_ups += 1
+                        else:
+                            break
+
+                from ats.signal_ledger import PHASE_LABELS
+                entry = self._signal_ledger.entries.get(code)
+                if entry:
+                    phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
+                    first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
+                    first_seen = f'{phase_label} [{first_time}]'
+                    priority_val = f'{entry.priority_score:.1f}'
+                else:
+                    first_seen = '⏳ 初始/持仓'
+                    priority_val = '0.0'
+
+                swing_rows.append((
+                    code, name, f'{latest_close:.2f}', state, dev_str, str(limit_ups), position,
+                    first_seen, priority_val,
+                    f'{dff_val:.2f}', str(rank_val), f'{dff2_val:.2f}', f'{dff3_val:.2f}',
+                    f'{rs_val:+.2f}%', resonance, reason
+                ))
+
+                if resonance in ('逆市抗跌', '大盘共振'):
+                    alpha_signals.append((code, name, pct_val, sh_pct, rs_val, resonance))
+
+            # fav_rows
+            fav_rows = [r for r in swing_rows if str(r[0]).strip() in self._fav_stocks]
+
+            # ── 阶段 C: 构造状态栏统计文本 ────────────────────────────────────────
+            env_label = ''
+            if self._volume_profiler.market_context.is_rebound_from_shrink:
+                n_shrink = self._volume_profiler.market_context.consecutive_market_shrink_days
+                env_label = f' | 🔥 缩量{n_shrink}日后反弹'
+
+            if hasattr(self._signal_ledger, 'get_stats'):
+                stats = self._signal_ledger.get_stats()
+            else:
+                tier_counts = {}
+                for e in self._signal_ledger.entries.values():
+                    t = getattr(e, 'tier', 'RADAR')
+                    tier_counts[t] = tier_counts.get(t, 0) + 1
+                stats = {'tiers': tier_counts, 'today_new': getattr(self._signal_ledger, '_signal_count', 0)}
+
+            tier_info = stats.get('tiers', {})
+            stats_str = (
+                f"📊 信号池: 候选 {tier_info.get('RADAR', 0)} | "
+                f"精选 {tier_info.get('WATCH', 0)} | 实盘 {tier_info.get('TRADE', 0)} | "
+                f"今日新发现: {stats.get('today_new', 0)}{env_label}"
+            )
+
+            elapsed = (_time.time() - t0) * 1000.0
+            import logging
+            logging.getLogger('ATS').debug(f'[LedgerWorker] 后台计算完成 {elapsed:.1f}ms, swing={len(swing_rows)}, fav={len(fav_rows)}')
+
+            self.results_ready.emit(swing_rows, fav_rows, sh_pct, alpha_signals, stats_str)
+
+        except Exception as exc:
+            import traceback
+            import logging
+            logging.getLogger('ATS').error(f'[LedgerWorker] 异常: {exc}\n{traceback.format_exc()}')
+            # 出错时仍要清除 busy 标志，由主线程在 _on_ledger_results 中处理，或直接在此 emit 空结果
+            self.results_ready.emit([], [], 0.0, [], '')
+
+
 class QtVarProxy:
     """包装 QCheckBox 或 Callable 为带 .get() 方法的 Var 对象，用于兼容全系统 StockSender 标准单例"""
+
     def __init__(self, getter_func):
         self.getter_func = getter_func
     def get(self):
@@ -2395,310 +2706,259 @@ class ATSMainWindow(QMainWindow):
         return name if (name and name != code_clean and not name.isdigit()) else code_clean
 
     def load_db_data(self, force=False):
-        try:
-            # First, check if logs/paper_account_state.json exists and read it
-            # This contains live paper account status (positions, cash, orders)
-            import os
-            import json
-            from sys_utils import get_app_root
-            
-            base = get_app_root()
-            state_path = os.path.join(base, "logs", "paper_account_state.json")
-            db_path = os.path.join(base, "trading_signals.db")
-            if not os.path.exists(db_path):
-                db_path = "./trading_signals.db"
-                
-            db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
-            paper_mtime = os.path.getmtime(state_path) if os.path.exists(state_path) else 0
-            
-            # Check modification time to avoid redundant heavy IO/queries
-            if not force and getattr(self, '_last_db_mtime', None) == db_mtime and getattr(self, '_last_paper_mtime', None) == paper_mtime:
-                return
-                
-            self._last_db_mtime = db_mtime
-            self._last_paper_mtime = paper_mtime
-            
-            state_data = None
-            if os.path.exists(state_path):
-                try:
-                    with open(state_path, "r", encoding="utf-8") as f:
-                        state_data = json.load(f)
-                except Exception as e:
-                    print(f"[ATSMainWindow] Error loading paper_account_state.json: {e}")
+        """
+        ⚡ 异步加载数据库数据，根治启动时 10+ 秒卡顿。
 
+        策略：
+         - 主线程: 立即启动 IPC 监听器 + 发送 REQ_FULL_SYNC (耗时 <100ms)
+         - 后台线程: SQLite/JSON 查询 (步骤1-5)，完成后 QTimer.singleShot(0) 回调主线程刷新 UI
+        """
+        import os
+        import json
+        import threading
+        from sys_utils import get_app_root
+
+        base = get_app_root()
+        state_path = os.path.join(base, "logs", "paper_account_state.json")
+        db_path = os.path.join(base, "trading_signals.db")
+        if not os.path.exists(db_path):
+            db_path = "./trading_signals.db"
+
+        db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
+        paper_mtime = os.path.getmtime(state_path) if os.path.exists(state_path) else 0
+
+        # 未修改时跳过（仅非 force 时检查）
+        if not force and getattr(self, '_last_db_mtime', None) == db_mtime and getattr(self, '_last_paper_mtime', None) == paper_mtime:
+            return
+
+        self._last_db_mtime = db_mtime
+        self._last_paper_mtime = paper_mtime
+
+        # ── ① 主线程立即启动 IPC 监听器（必须在主线程，<50ms）────────────────────
+        try:
             from ats.ipc_bridge import IPCBridge
             if not hasattr(self, 'bridge') or self.bridge is None:
                 self.bridge = IPCBridge()
-            
-            # Update name cache from current_df if available using fast vectorized call
-            self._update_name_cache_from_df(self.current_df)
-            
-            # --- 1. Load trade flows (Orders) ---
-            flow_data = []
-            if state_data and "orders" in state_data:
-                for o in state_data["orders"]:
-                    action = "买入" if o.get('action') == 'BUY' else "卖出"
-                    qty = o.get('volume') or 0
-                    price = o.get('price') or 0.0
-                    amount = price * qty
-                    ts = o.get('timestamp') or ''
-                    if 'T' in ts:
-                        ts = ts.replace('T', ' ')
-                    flow_data.append((
-                        str(ts),
-                        str(o.get('code') or ''),
-                        "", # Filled from cache later
-                        str(action),
-                        f"{price:.2f}" if price else "0.00",
-                        f"{int(qty):,}" if qty else "0",
-                        f"{amount:,.2f}" if amount else "0.00",
-                        "核对无误"
-                    ))
-                flow_data.sort(key=lambda x: x[0], reverse=True)
-                
-            flow_df = self.bridge.get_all_trade_flows()
-            if not flow_df.empty:
-                db_flow_data = []
-                for _, row in flow_df.iterrows():
-                    action = row.get('action') or ('买入' if row.get('status') == 'OPEN' else '卖出')
-                    date = row.get('buy_date') if action == '买入' else (row.get('sell_date') or row.get('buy_date'))
-                    price = row.get('buy_price') if action == '买入' else (row.get('sell_price') or row.get('buy_price'))
-                    qty = row.get('buy_amount') or 0
-                    amount = price * qty if price and qty else 0.0
-                    db_flow_data.append((
-                        str(date or ''),
-                        str(row.get('code') or ''),
-                        str(row.get('name') or ''),
-                        str(action or ''),
-                        f"{price:.2f}" if price else "0.00",
-                        f"{int(qty):,}" if qty else "0",
-                        f"{amount:,.2f}" if amount else "0.00",
-                        str(row.get('buy_reason') or '自动触发')
-                    ))
-                # Update global name cache with any names from database flow data
-                for x in db_flow_data:
-                    c = x[1]
-                    n = x[2]
-                    if c and n and n != "未知":
-                        self.name_cache[c] = n
-                        
-                final_flow = []
-                seen_orders = set()
-                # Process paper account orders
-                for item in flow_data:
-                    code = item[1]
-                    name = self.get_stock_name(code)
-                    key = (item[0], code, item[3])
-                    if key not in seen_orders:
-                        final_flow.append((item[0], code, name, item[3], item[4], item[5], item[6], item[7]))
-                        seen_orders.add(key)
-                # Process DB flows
-                for item in db_flow_data:
-                    key = (item[0], item[1], item[3])
-                    if key not in seen_orders:
-                        final_flow.append(item)
-                        seen_orders.add(key)
-                
-                final_flow.sort(key=lambda x: x[0], reverse=True)
-                if final_flow:
-                    self.trade_flow_table.update_flow_list(final_flow)
-            else:
-                if flow_data:
-                    # Resolve names from cache
-                    resolved_flow_data = []
-                    for item in flow_data:
-                        code = item[1]
-                        name = self.get_stock_name(code)
-                        resolved_flow_data.append((item[0], code, name, item[3], item[4], item[5], item[6], item[7]))
-                    self.trade_flow_table.update_flow_list(resolved_flow_data)
- 
-            # --- 2. Load open positions ---
-            pos_data = []
-            cash = 1000000.0
-            total_assets = 1000000.0
-            
-            if state_data and "positions" in state_data:
-                cash = state_data.get("cash", 1000000.0)
-                positions = state_data.get("positions", {})
-                total_market_value = 0.0
-                
-                for code, p in positions.items():
-                    name = self.get_stock_name(code)
-                    if name == "未知" and p.get("name"):
-                        name = p.get("name")
-                    qty = p.get("volume") or 0.0
-                    cost = p.get("entry_price") or 0.0
-                    price = p.get("current_price") or cost
-                    
-                    # Update price to current_df price if available
-                    if hasattr(self, 'current_df') and self.current_df is not None and code in self.current_df.index:
-                        try:
-                            price_val = float(self.current_df.loc[code].get('close', self.current_df.loc[code].get('trade', price)))
-                            if price_val > 0:
-                                price = price_val
-                        except:
-                            pass
-                            
-                    market_val = qty * price
-                    total_market_value += market_val
-                    pnl = (price - cost) * qty
-                    pnl_pct_val = ((price - cost) / cost * 100) if cost else 0.0
-                    pnl_pct = f"{pnl_pct_val:+.2f}%"
-                    
-                    pos_data.append({
-                        'code': code,
-                        'name': name,
-                        'qty': qty,
-                        'cost': cost,
-                        'price': price,
-                        'market_val': market_val,
-                        'pnl_pct': pnl_pct,
-                        'pnl_val': pnl
-                    })
-                
-                total_assets = cash + total_market_value
-                
-                formatted_pos = []
-                for p in pos_data:
-                    alloc = f"{(p['market_val'] / total_assets) * 100:.1f}%" if total_assets else "0.0%"
-                    formatted_pos.append((
-                        str(p['code']),
-                        str(p['name']),
-                        f"{int(p['qty']):,}" if p['qty'] else "0",
-                        f"{p['cost']:.2f}" if p['cost'] else "0.00",
-                        f"{p['price']:.2f}" if p['price'] else "0.00",
-                        f"{p['market_val']:,.2f}" if p['market_val'] else "0.00",
-                        p['pnl_pct'],
-                        alloc
-                    ))
-                self.position_panel.update_positions(formatted_pos, cash=cash, total_assets=total_assets)
-            else:
-                pos_df = self.bridge.get_open_positions()
-                if not pos_df.empty:
-                    db_pos_data = []
-                    total_market_value = 0.0
-                    for _, row in pos_df.iterrows():
-                        code = row.get('code')
-                        name = row.get('name') or self.get_stock_name(code)
-                        qty = row.get('buy_amount') or 0
-                        cost = row.get('buy_price') or 0.0
-                        price = cost  # Fallback for last price
-                        market_val = qty * price
-                        total_market_value += market_val
-                        pnl_pct = "+0.00%"
-                        alloc = f"{(market_val / 1000000.0) * 100:.1f}%"
-                        db_pos_data.append((
-                            str(code or ''),
-                            str(name or ''),
-                            f"{int(qty):,}" if qty else "0",
-                            f"{cost:.2f}" if cost else "0.00",
-                            f"{price:.2f}" if price else "0.00",
-                            f"{market_val:,.2f}" if market_val else "0.00",
-                            pnl_pct,
-                            alloc
-                        ))
-                    self.position_panel.update_positions(db_pos_data, cash=cash, total_assets=cash + total_market_value)
- 
-            # --- 3. Load historical signals and populate universe manager ---
-            self.universe_manager.radar_pool.clear()
-            self.universe_manager.watch_pool.clear()
-            self.universe_manager.trade_pool.clear()
-            
-            signals_df = self.bridge.get_historical_signals(limit=50)
-            if not signals_df.empty:
-                for _, row in signals_df.iterrows():
-                    code = str(row.get('code') or '').strip()
-                    if not code:
-                        continue
-                    name = row.get('name') or self.get_stock_name(code)
-                    if name == "未知":
-                        name = ""
-                    price = float(row.get('price') or 0.0)
-                    action = row.get('action')
-                    reason = row.get('reason') or '指标共振'
-                    strategy = row.get('resample') or 'd'
-                    
-                    if action == 'BUY':
-                        self.universe_manager.watch_pool[code] = {
-                            "name": name,
-                            "price": price,
-                            "pct": 0.0,
-                            "strategy": f"周期:{strategy}",
-                            "reason": reason
-                        }
-                    else:
-                        self.universe_manager.radar_pool[code] = {
-                            "name": name,
-                            "price": price,
-                            "pct": 0.0,
-                            "strategy": f"周期:{strategy}",
-                            "reason": reason
-                        }
-            
-            # Add open positions to trade pool
-            pos_df = self.bridge.get_open_positions()
-            if not pos_df.empty:
-                for _, row in pos_df.iterrows():
-                    p_code = str(row.get('code') or '').strip()
-                    if not p_code:
-                        continue
-                    name = row.get('name') or self.get_stock_name(p_code)
-                    price = float(row.get('buy_price') or 0.0)
-                    self.universe_manager.trade_pool[p_code] = {
-                        "name": name,
-                        "price": price,
-                        "pct": 0.0,
-                        "strategy": "当前持仓",
-                        "reason": "大级别多头持股"
-                    }
-            
-            # Refresh tree widget UI
-            radar_list, watch_list, trade_list = self.universe_manager.get_pools()
-            self.universe_widget.update_pools(radar_list, watch_list, trade_list)
-            
-            # Pre-fetch history for these initial stocks asynchronously to populate swing states
-            all_init_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
-            if all_init_codes:
-                self._async_load_stock_history(all_init_codes)
- 
-            # --- 4. Load equity curves ---
-            dates, strat_equity, bench_equity = self.bridge.get_equity_curve_data()
-            x = list(range(len(dates)))
-            self.equity_chart.update_curve(x, strat_equity, bench_equity)
- 
-            # --- 5. Load performance metrics ---
-            from ats.backtest_engine import BacktestEngine
-            self.backtest_engine = BacktestEngine(self.bridge)
-            metrics = self.backtest_engine.calculate_performance_metrics()
-            self.backtest_panel.update_stats(metrics)
- 
-            # --- 6. Start real-time IPC socket listener (P6) ---
-            if not getattr(self, '_listener_started', False):
+        except Exception as e:
+            print(f"[ATSMainWindow] IPCBridge 初始化失败: {e}")
+            return
+
+        if not getattr(self, '_listener_started', False):
+            try:
                 self.bridge.start_realtime_listener(
                     port=26670,
                     data_callback=lambda data: self.realtime_data_signal.emit(data),
                     signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
                 )
                 self._listener_started = True
+            except Exception as e:
+                print(f"[ATSMainWindow] start_realtime_listener 失败: {e}")
 
-            # Trigger sync on cold boot OR explicit manual refresh (force=True)
-            if force or not getattr(self, '_pipe_initial_synced', False):
-                self._pipe_initial_synced = True
-                try:
-                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                    import logging
-                    import time
-                    local_logger = logging.getLogger("ATS")
-                    self._last_pipe_sync_t = time.time()  # 重置时间戳，防止 heartbeat 瞬间重复请求
-                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
-                    print("[ATSMainWindow] 手动/强制刷新: 已成功向后台 Pipe 发送全量行情同步指令 (REQ_FULL_SYNC -> port 26670)")
-                    if hasattr(self, 'status_bar') and self.status_bar:
-                        self.status_bar.showMessage("🔄 已下发 IPC 全量行情刷新请求 (REQ_FULL_SYNC)，正在获取最新数据...", 3000)
-                except Exception as e:
-                    print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
- 
-        except Exception as e:
-            print(f"[ATSMainWindow] Error loading SQLite data: {e}")
+        # ── ② 主线程立即发送 REQ_FULL_SYNC，让主进程推送全量行情（不等待结果）──
+        if force or not getattr(self, '_pipe_initial_synced', False):
+            self._pipe_initial_synced = True
+            try:
+                from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                local_logger = logging.getLogger("ATS")
+                self._last_pipe_sync_t = time.time()
+                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                print("[ATSMainWindow] 手动/强制刷新: 已成功向后台 Pipe 发送全量行情同步指令 (REQ_FULL_SYNC -> port 26670)")
+                if hasattr(self, 'status_bar') and self.status_bar:
+                    self.status_bar.showMessage("🔄 已下发 IPC 全量行情刷新请求，后台正在异步加载持仓与信号数据...", 4000)
+            except Exception as e:
+                print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
+
+        # ── ③ 后台线程异步完成慢速 SQLite/JSON 查询（不阻塞主线程 UI）─────────────
+        # 把需要的引用快照到局部变量，避免 lambda 闭包陷阱
+        bridge_ref = self.bridge
+        name_cache_ref = self.name_cache
+        cur_df_ref = self.current_df
+
+        def _bg_load():
+            try:
+                import json as _json
+                state_data = None
+                if os.path.exists(state_path):
+                    try:
+                        with open(state_path, "r", encoding="utf-8") as f:
+                            state_data = _json.load(f)
+                    except Exception as e:
+                        print(f"[ATSMainWindow] Error loading paper_account_state.json: {e}")
+
+                # 步骤 1: 交易流水
+                flow_data = []
+                if state_data and "orders" in state_data:
+                    for o in state_data["orders"]:
+                        action = "买入" if o.get('action') == 'BUY' else "卖出"
+                        qty = o.get('volume') or 0
+                        price = o.get('price') or 0.0
+                        amount = price * qty
+                        ts = (o.get('timestamp') or '').replace('T', ' ')
+                        flow_data.append((str(ts), str(o.get('code') or ''), "",
+                                          str(action),
+                                          f"{price:.2f}" if price else "0.00",
+                                          f"{int(qty):,}" if qty else "0",
+                                          f"{amount:,.2f}" if amount else "0.00",
+                                          "核对无误"))
+                    flow_data.sort(key=lambda x: x[0], reverse=True)
+
+                flow_df = bridge_ref.get_all_trade_flows()
+                final_flow = []
+                if not flow_df.empty:
+                    db_flow_data = []
+                    for _, row in flow_df.iterrows():
+                        action = row.get('action') or ('买入' if row.get('status') == 'OPEN' else '卖出')
+                        date = row.get('buy_date') if action == '买入' else (row.get('sell_date') or row.get('buy_date'))
+                        price = row.get('buy_price') if action == '买入' else (row.get('sell_price') or row.get('buy_price'))
+                        qty = row.get('buy_amount') or 0
+                        amount = price * qty if price and qty else 0.0
+                        c, n = str(row.get('code') or ''), str(row.get('name') or '')
+                        db_flow_data.append((str(date or ''), c, n, str(action or ''),
+                                             f"{price:.2f}" if price else "0.00",
+                                             f"{int(qty):,}" if qty else "0",
+                                             f"{amount:,.2f}" if amount else "0.00",
+                                             str(row.get('buy_reason') or '自动触发')))
+                        if c and n and n != "未知":
+                            name_cache_ref[c] = n
+                    seen_orders = set()
+                    for item in flow_data:
+                        code, key = item[1], (item[0], item[1], item[3])
+                        if key not in seen_orders:
+                            n = name_cache_ref.get(code, code)
+                            final_flow.append((item[0], code, n, item[3], item[4], item[5], item[6], item[7]))
+                            seen_orders.add(key)
+                    for item in db_flow_data:
+                        key = (item[0], item[1], item[3])
+                        if key not in seen_orders:
+                            final_flow.append(item)
+                            seen_orders.add(key)
+                    final_flow.sort(key=lambda x: x[0], reverse=True)
+                elif flow_data:
+                    final_flow = [(i[0], i[1], name_cache_ref.get(i[1], i[1]), i[3], i[4], i[5], i[6], i[7])
+                                  for i in flow_data]
+
+                # 步骤 2: 持仓
+                pos_formatted = []
+                cash_val = 1000000.0
+                total_assets_val = 1000000.0
+                if state_data and "positions" in state_data:
+                    cash_val = state_data.get("cash", 1000000.0)
+                    total_mkt = 0.0
+                    for code, p in state_data.get("positions", {}).items():
+                        n = name_cache_ref.get(code) or p.get("name") or code
+                        qty = p.get("volume") or 0.0
+                        cost = p.get("entry_price") or 0.0
+                        price = p.get("current_price") or cost
+                        if cur_df_ref is not None and code in cur_df_ref.index:
+                            try:
+                                pv = float(cur_df_ref.loc[code].get('close', cur_df_ref.loc[code].get('trade', price)))
+                                if pv > 0: price = pv
+                            except: pass
+                        mkt = qty * price
+                        total_mkt += mkt
+                        pnl_pct = f"{((price - cost) / cost * 100):+.2f}%" if cost else "+0.00%"
+                        total_assets_val = cash_val + total_mkt
+                        alloc = f"{(mkt / max(total_assets_val, 1)) * 100:.1f}%"
+                        pos_formatted.append((str(code), str(n),
+                                              f"{int(qty):,}" if qty else "0",
+                                              f"{cost:.2f}" if cost else "0.00",
+                                              f"{price:.2f}" if price else "0.00",
+                                              f"{mkt:,.2f}" if mkt else "0.00",
+                                              pnl_pct, alloc))
+                    total_assets_val = cash_val + total_mkt
+                else:
+                    pos_df = bridge_ref.get_open_positions()
+                    if not pos_df.empty:
+                        total_mkt = 0.0
+                        for _, row in pos_df.iterrows():
+                            code = row.get('code')
+                            n = row.get('name') or name_cache_ref.get(str(code), str(code))
+                            qty = row.get('buy_amount') or 0
+                            cost = row.get('buy_price') or 0.0
+                            mkt = qty * cost
+                            total_mkt += mkt
+                            alloc = f"{(mkt / 1000000.0) * 100:.1f}%"
+                            pos_formatted.append((str(code or ''), str(n or ''),
+                                                  f"{int(qty):,}" if qty else "0",
+                                                  f"{cost:.2f}" if cost else "0.00",
+                                                  f"{cost:.2f}" if cost else "0.00",
+                                                  f"{mkt:,.2f}" if mkt else "0.00",
+                                                  "+0.00%", alloc))
+                        cash_val = 1000000.0
+                        total_assets_val = cash_val + total_mkt
+
+                # 步骤 3: 历史信号
+                radar_entries, watch_entries, trade_entries = {}, {}, {}
+                signals_df = bridge_ref.get_historical_signals(limit=50)
+                if not signals_df.empty:
+                    for _, row in signals_df.iterrows():
+                        code = str(row.get('code') or '').strip()
+                        if not code: continue
+                        n = row.get('name') or name_cache_ref.get(code, '')
+                        if n == "未知": n = ""
+                        price = float(row.get('price') or 0.0)
+                        action = row.get('action')
+                        entry = {"name": n, "price": price, "pct": 0.0,
+                                 "strategy": f"周期:{row.get('resample') or 'd'}",
+                                 "reason": row.get('reason') or '指标共振'}
+                        if action == 'BUY':
+                            watch_entries[code] = entry
+                        else:
+                            radar_entries[code] = entry
+
+                pos_df2 = bridge_ref.get_open_positions()
+                if not pos_df2.empty:
+                    for _, row in pos_df2.iterrows():
+                        p_code = str(row.get('code') or '').strip()
+                        if not p_code: continue
+                        n = row.get('name') or name_cache_ref.get(p_code, p_code)
+                        trade_entries[p_code] = {"name": n, "price": float(row.get('buy_price') or 0.0),
+                                                  "pct": 0.0, "strategy": "当前持仓",
+                                                  "reason": "大级别多头持股"}
+                init_codes = list(radar_entries) + list(watch_entries) + list(trade_entries)
+
+                # 步骤 4: 权益曲线
+                dates, strat_equity, bench_equity = bridge_ref.get_equity_curve_data()
+                x = list(range(len(dates)))
+
+                # 步骤 5: 绩效指标
+                from ats.backtest_engine import BacktestEngine
+                be = BacktestEngine(bridge_ref)
+                metrics = be.calculate_performance_metrics()
+
+                # ── 回调主线程更新 UI ──────────────────────────────────────────────
+                def _apply_to_ui():
+                    try:
+                        if final_flow:
+                            self.trade_flow_table.update_flow_list(final_flow)
+                        if pos_formatted:
+                            self.position_panel.update_positions(pos_formatted, cash=cash_val, total_assets=total_assets_val)
+                        # 更新三级池
+                        self.universe_manager.radar_pool.clear()
+                        self.universe_manager.watch_pool.clear()
+                        self.universe_manager.trade_pool.clear()
+                        self.universe_manager.radar_pool.update(radar_entries)
+                        self.universe_manager.watch_pool.update(watch_entries)
+                        self.universe_manager.trade_pool.update(trade_entries)
+                        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+                        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+                        if init_codes:
+                            self._async_load_stock_history(init_codes)
+                        # 权益曲线
+                        self.equity_chart.update_curve(x, strat_equity, bench_equity)
+                        # 绩效
+                        self.backtest_engine = be
+                        self.backtest_panel.update_stats(metrics)
+                        logger.debug("[ATSMainWindow] load_db_data 后台加载完成，UI 已更新")
+                    except Exception as e:
+                        print(f"[ATSMainWindow] _apply_to_ui 回调异常: {e}")
+
+                QTimer.singleShot(0, _apply_to_ui)
+
+            except Exception as e:
+                print(f"[ATSMainWindow] load_db_data 后台线程异常: {e}")
+
+        threading.Thread(target=_bg_load, daemon=True, name="ATS-load_db").start()
 
     def on_run_backtest_clicked(self):
         self.status_bar.showMessage("正在读取历史信号与 K 线分时数据库进行多周期回测...")
@@ -3110,67 +3370,55 @@ class ATSMainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_realtime_ui(self):
+        """
+        ⚡ 轻量级 IPC 数据处理入口 — 主线程只做防重入检查和 Worker 启动 (<5ms)
+        重量级计算 (signal ledger / volume profiler / swing_rows) 全部在 LedgerUpdateWorker 后台线程执行。
+        UI 渲染结果通过 results_ready 信号在主线程的 _on_ledger_results 中完成。
+        """
         if getattr(self, '_is_closing', False):
             return
-        t_ui_start = time.time()
+
         has_df = self.current_df is not None and not self.current_df.empty
-        
-        # 1. Update prices/percents in universe_manager pools
-        fav_stocks = set()
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-        except Exception:
-            pass
 
-        pool_codes = list(self.universe_manager.radar_pool.keys()) + list(self.universe_manager.watch_pool.keys()) + list(self.universe_manager.trade_pool.keys())
+        # ── 快速任务：检查缺少行情/历史数据的标的，异步补齐 ──────────────────────
+        fav_stocks = self.signal_ledger.get_favorite_stocks_set()
+
+        pool_codes = (list(self.universe_manager.radar_pool.keys()) +
+                      list(self.universe_manager.watch_pool.keys()) +
+                      list(self.universe_manager.trade_pool.keys()))
         all_codes = list(dict.fromkeys(pool_codes + [c for c in fav_stocks if c]))
-        missing_realtime_codes = []
-        
-        # 2. 增量更新信号账本（替代全量重算，信号只增不删）
+
         if has_df:
-            self._update_signal_ledger(self.current_df)
-            # 从信号账本同步到三级池（稳定展示，不快速流动）
-            self.universe_manager.sync_from_ledger(self.signal_ledger, df_realtime=self.current_df, price_pct_cache=self.price_pct_cache)
-        else:
-            self.universe_manager.sync_from_ledger(self.signal_ledger, price_pct_cache=self.price_pct_cache)
-
-        for pool in [self.universe_manager.radar_pool, self.universe_manager.watch_pool, self.universe_manager.trade_pool]:
-            for code in list(pool.keys()):
-                real_name = self.get_stock_name(code)
-                if real_name and real_name not in ('未知', '重点标的', ''):
-                    pool[code]['name'] = real_name
-
-                row = self.get_df_row_safe(self.current_df, code) if has_df else None
-                code_clean = "".join(c for c in str(code) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
-                if row is not None:
-                    pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
-                    pool[code]['pct'] = float(row.get('percent', 0.0))
-                elif code_clean in self.price_pct_cache:
-                    price, pct = self.price_pct_cache[code_clean]
-                    pool[code]['price'] = price
-                    pool[code]['pct'] = pct
-                elif code in self.price_pct_cache:
-                    price, pct = self.price_pct_cache[code]
-                    pool[code]['price'] = price
-                    pool[code]['pct'] = pct
-                else:
-                    if code_clean in self.stock_history_cache and self.stock_history_cache[code_clean]:
-                        pool[code]['price'] = float(self.stock_history_cache[code_clean][-1][1])
-                        pool[code]['pct'] = 0.0
-                    elif code in self.stock_history_cache and self.stock_history_cache[code]:
-                        pool[code]['price'] = float(self.stock_history_cache[code][-1][1])
-                        pool[code]['pct'] = 0.0
+            # 池子名称与价格快速更新（纯内存操作, <5ms）
+            missing_realtime_codes = []
+            for pool in [self.universe_manager.radar_pool,
+                         self.universe_manager.watch_pool,
+                         self.universe_manager.trade_pool]:
+                for code in list(pool.keys()):
+                    real_name = self.get_stock_name(code)
+                    if real_name and real_name not in ('未知', '重点标的', ''):
+                        pool[code]['name'] = real_name
+                    row = self.get_df_row_safe(self.current_df, code)
+                    code_clean = (''.join(c for c in str(code) if c.isdigit()).zfill(6)
+                                  if any(c.isdigit() for c in str(code)) else str(code).strip())
+                    if row is not None:
+                        pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
+                        pool[code]['pct'] = float(row.get('percent', 0.0))
+                    elif code_clean in self.price_pct_cache:
+                        pool[code]['price'], pool[code]['pct'] = self.price_pct_cache[code_clean]
+                    elif code in self.price_pct_cache:
+                        pool[code]['price'], pool[code]['pct'] = self.price_pct_cache[code]
                     else:
                         pool[code]['price'] = 0.0
                         pool[code]['pct'] = 0.0
-                    missing_realtime_codes.append(code)
-                    
-        missing_realtime_codes = [c for c in missing_realtime_codes if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
-        if missing_realtime_codes:
-            self._async_load_stock_prices(missing_realtime_codes)
-        
-        # 4. Update swing state table (过滤掉正在加载及处于冷却期内的无数据代码，防范 3s 轮询重复查询)
+                        missing_realtime_codes.append(code)
+
+            missing_realtime_codes = [c for c in missing_realtime_codes
+                                      if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
+            if missing_realtime_codes:
+                self._async_load_stock_prices(missing_realtime_codes)
+
+        # 异步补齐历史数据（不在主线程阻塞）
         now_ts = time.time()
         missing_history_codes = [
             c for c in all_codes
@@ -3180,170 +3428,78 @@ class ATSMainWindow(QMainWindow):
         ]
         if missing_history_codes:
             self._async_load_stock_history(missing_history_codes)
-            
-        swing_rows = []
-        current_batch_alpha = []
-        
-        # 计算大盘参考涨幅 (优先使用上证指数，回退到个股等权均值)
-        sh_pct = 0.0
+
+        # ── 更新已打开的个股详情弹窗 (0ms, 主线程直接刷 visible widget) ──────────
         if has_df:
-            sh_row = self.get_df_row_safe(self.current_df, 'sh000001')
-            if sh_row is None:
-                sh_row = self.get_df_row_safe(self.current_df, '000001')
-            if sh_row is not None:
-                sh_pct = float(sh_row.get('percent', 0.0))
-            elif 'percent' in self.current_df.columns:
-                sh_pct = float(self.current_df['percent'].mean())
-                    
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, StockDetailDialog) and widget.isVisible():
+                    w_code = widget.code
+                    if w_code in self.current_df.index:
+                        w_row = self.current_df.loc[w_code]
+                        import pandas as pd
+                        if isinstance(w_row, pd.DataFrame):
+                            w_row = w_row.iloc[0]
+                        widget.update_data(w_row)
+
+        # ── 防重入：若上一个 Worker 仍在运行，跳过本次触发 ──────────────────────
+        if getattr(self, '_ledger_worker_busy', False):
+            logger.debug('[ATS_Realtime] LedgerWorker busy, skipping this tick')
+            return
+
+        if not has_df:
+            # 无行情数据时仅同步 universe tree
+            self.universe_manager.sync_from_ledger(self.signal_ledger, price_pct_cache=self.price_pct_cache)
+            radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+            self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+            return
+
+        # ── 启动后台 Worker ─────────────────────────────────────────────────────
         import datetime
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        for code in all_codes:
-            latest_close = 0.0
-            pct_val = 0.0
-            dff_val = 0.0
-            rank_val = 0
-            dff2_val = 0.0
-            dff3_val = 0.0
-            
-            code_clean = "".join(c for c in str(code) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
-            row = self.get_df_row_safe(self.current_df, code) if has_df else None
-            if row is not None:
-                latest_close = float(row.get('close', row.get('price', 0.0)))
-                pct_val = float(row.get('percent', 0.0))
-                try: dff_val = float(row.get('dff', 0.0))
-                except: pass
-                try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                except: pass
-                try: dff2_val = float(row.get('dff2', 0.0))
-                except: pass
-                try: dff3_val = float(row.get('dff3', 0.0))
-                except: pass
-            elif code_clean in self.price_pct_cache:
-                latest_close = self.price_pct_cache[code_clean][0]
-                pct_val = self.price_pct_cache[code_clean][1]
-            elif code in self.price_pct_cache:
-                latest_close = self.price_pct_cache[code][0]
-                pct_val = self.price_pct_cache[code][1]
-            elif code_clean in self.stock_history_cache and self.stock_history_cache[code_clean]:
-                latest_close = float(self.stock_history_cache[code_clean][-1][1])
-                pct_val = 0.0
-            elif code in self.stock_history_cache and self.stock_history_cache[code]:
-                latest_close = float(self.stock_history_cache[code][-1][1])
-                pct_val = 0.0
-                
-            name = self.get_stock_name(code)
-            
-            # 计算大盘偏离度和共振状态
-            rs_val = pct_val - sh_pct
-            resonance = "同步整理"
-            if sh_pct < -0.3 and pct_val > 1.5:
-                resonance = "逆市抗跌"
-            elif sh_pct > 0.3 and pct_val > 3.0 and dff_val > 2.0:
-                resonance = "大盘共振"
-            elif pct_val < -3.0 and rs_val < -2.0:
-                resonance = "同步走弱"
-            
-            # Try to use database history first
-            has_history = (code in self.stock_history_cache and self.stock_history_cache[code])
-            
-            if has_history:
-                hist = self.stock_history_cache[code]
-                close_series = [item[1] for item in hist]
-                if hist[-1][0] == today_str:
-                    close_series[-1] = latest_close
-                else:
-                    close_series.append(latest_close)
-                close_series = [float(x) for x in close_series if x is not None]
-                
-                # Calc rolling MA in pure Python for high performance (no pandas Series overhead)
-                ma20_series = []
-                ma5_series = []
-                for i in range(len(close_series)):
-                    sub20 = close_series[max(0, i - 19) : i + 1]
-                    ma20_series.append(sum(sub20) / len(sub20) if sub20 else close_series[i])
-                    sub5 = close_series[max(0, i - 4) : i + 1]
-                    ma5_series.append(sum(sub5) / len(sub5) if sub5 else close_series[i])
-            else:
-                # Fallback: Reconstruct history and MAs from the real-time slice data (up to compute_lastdays days)
-                # This allows the state machine to run immediately even if HDF5 is missing/empty
-                is_in_df = (has_df and code in self.current_df.index)
-                row_data = row if is_in_df else {}
-                
-                limit_days = int(getattr(cct, 'compute_lastdays', 9))
-                
-                # Extract lastp1d ... lastp{limit_days}d dynamically
-                history_closes = []
-                last_val = latest_close
-                for d_idx in range(limit_days, 0, -1):
-                    col_name = f"lastp{d_idx}d"
-                    val_raw = row_data.get(col_name, last_val) if is_in_df else last_val
-                    try:
-                        val = float(val_raw)
-                    except:
-                        val = last_val
-                    if val > 0:  # Avoid 0 or invalid values
-                        history_closes.append(val)
-                        last_val = val
-                        
-                close_series = history_closes + [latest_close]
-                
-                try:
-                    current_ma20 = float(row_data.get('ma20d', latest_close)) if is_in_df else latest_close
-                except:
-                    current_ma20 = latest_close
-                try:
-                    current_ma5 = float(row_data.get('ma5d', latest_close)) if is_in_df else latest_close
-                except:
-                    current_ma5 = latest_close
-                
-                ma20_series = [current_ma20] * len(close_series)
-                ma5_series = [current_ma5] * len(close_series)
-            
-            # Update state machine
-            state, dev_str, position, reason = self.swing_tracker.update_stock_state(
-                code, name, latest_close, close_series, ma20_series, ma5_series
-            )
-            
-            # limit ups (consecutive close days up)
-            limit_ups = 0
-            if len(close_series) > 1:
-                for idx in range(len(close_series)-1, 0, -1):
-                    if close_series[idx] > close_series[idx-1] * 1.002:
-                        limit_ups += 1
-                    else:
-                        break
-            
-            # 从信号账本提取首次发现和优先级评分，提供回退值
-            entry = self.signal_ledger.entries.get(code)
-            if entry:
-                from ats.signal_ledger import PHASE_LABELS
-                phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
-                first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
-                first_seen = f"{phase_label} [{first_time}]"
-                priority_val = f"{entry.priority_score:.1f}"
-            else:
-                first_seen = "⏳ 初始/持仓"
-                priority_val = "0.0"
-                
-            swing_rows.append((
-                code, name, f"{latest_close:.2f}", state, dev_str, str(limit_ups), position, 
-                first_seen, priority_val,
-                f"{dff_val:.2f}", str(rank_val), f"{dff2_val:.2f}", f"{dff3_val:.2f}", f"{rs_val:+.2f}%", resonance, reason
-            ))
-            
-            # 记录逆市/共振个股，提供每日跟踪与高级反馈能力
-            if resonance in ("逆市抗跌", "大盘共振"):
+        today_str = datetime.date.today().strftime('%Y-%m-%d')
+        worker = LedgerUpdateWorker(
+            df_all=self.current_df,
+            signal_ledger=self.signal_ledger,
+            volume_profiler=self.volume_profiler,
+            session_snapshot=self.session_snapshot,
+            swing_tracker=self.swing_tracker,
+            stock_history_cache=self.stock_history_cache,
+            price_pct_cache=self.price_pct_cache,
+            name_cache=self.name_cache,
+            fav_stocks=fav_stocks,
+            universe_manager=self.universe_manager,
+            today_str=today_str,
+        )
+        worker.results_ready.connect(self._on_ledger_results)
+        worker.finished.connect(worker.deleteLater)
+        self._ledger_worker_busy = True
+        self._ledger_worker = worker  # 持有引用，防止提前 GC
+        worker.start()
+
+    def _on_ledger_results(self, swing_rows, fav_rows, sh_pct, alpha_signals, stats_str):
+        """
+        ⚡ Worker 计算完成回调 — 主线程纯 UI 渲染 (<20ms, 零卡顿)
+        只做表格与状态栏刷新，不含任何数据计算或 IO。
+        """
+        self._ledger_worker_busy = False
+
+        if getattr(self, '_is_closing', False):
+            return
+
+        # 记录 alpha 信号（内存去重，防重入）
+        if alpha_signals:
+            current_batch_alpha = []
+            for code, name, pct_val, sh_pct_v, rs_val, resonance in alpha_signals:
                 current_batch_alpha.append((code, name))
-                self._record_alpha_signal(code, name, pct_val, sh_pct, rs_val, resonance)
-            
-        if current_batch_alpha:
-            self._last_batch_signal_codes = current_batch_alpha
+                self._record_alpha_signal(code, name, pct_val, sh_pct_v, rs_val, resonance)
+            if current_batch_alpha:
+                self._last_batch_signal_codes = current_batch_alpha
 
-        fav_rows = []
-        if swing_rows and hasattr(self, 'favorite_panel'):
-            fav_rows = [r for r in swing_rows if str(r[0]).strip() in fav_stocks]
+        # 缓存数据供 Tier 2 / Tier 3 异步排队使用
+        self._pending_swing_rows = swing_rows
+        self._pending_fav_rows = fav_rows
+        self._pending_sh_pct = sh_pct
 
-        # ⚡ Tier 1 (0ms - 瞬间高优先/前台响应): 优先渲染用户当前正在查看的 Top Tab 视图
+        # ⚡ Tier 1: 立即渲染当前激活的 Tab
         active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
         if active_tab_idx == 0:
             if hasattr(self, 'favorite_panel') and fav_rows:
@@ -3352,33 +3508,21 @@ class ATSMainWindow(QMainWindow):
             if swing_rows:
                 self.swing_table.update_data_list(swing_rows)
 
-        # ⚡ 0ms 瞬间更新已打开且 Visible 的个股详情弹窗
-        if has_df:
-            for widget in QApplication.topLevelWidgets():
-                if isinstance(widget, StockDetailDialog) and widget.isVisible():
-                    code = widget.code
-                    if code in self.current_df.index:
-                        row = self.current_df.loc[code]
-                        import pandas as pd
-                        if isinstance(row, pd.DataFrame):
-                            row = row.iloc[0]
-                        widget.update_data(row)
+        # 更新左侧三级池 tree
+        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
 
-        # 缓存数据供 Tier 2 / Tier 3 异步排队使用
-        self._pending_swing_rows = swing_rows
-        self._pending_fav_rows = fav_rows
-        self._pending_sh_pct = sh_pct
+        # 状态栏
+        if stats_str:
+            self.status_bar.showMessage(stats_str)
 
-        # 🚀 启动 10ms 后的 Tier 2 异步定时器 (渲染非激活 Tab + 三级池 tree)
+        # 🚀 Tier 2 (10ms 后): 补齐渲染非激活 Tab
         if hasattr(self, '_async_tier2_timer'):
             self._async_tier2_timer.start(10)
-            
-        # 🚀 启动 30ms 后的 Tier 3 异步定时器 (渲染右侧板块热力图 + 独立副弹窗)
+
+        # 🚀 Tier 3 (30ms 后): 板块热力图 + 独立副弹窗
         if hasattr(self, '_async_tier3_timer'):
             self._async_tier3_timer.start(30)
-
-        ui_cost = (time.time() - t_ui_start) * 1000.0
-        logger.debug(f"[ATS_Realtime] refresh_realtime_ui (Tier 1 core) completed in {ui_cost:.1f}ms")
 
     def _async_refresh_tier2(self):
         """Tier 2 (10ms 延迟): 异步渲染未在激活态的副 Tab 看板与左侧三级池视图"""
