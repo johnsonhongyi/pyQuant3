@@ -18753,6 +18753,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         tree.bind("<<TreeviewSelect>>", on_click)
 
+        # 联动触发：点击 Simple 窗口或表格时，通知同屏监控窗口自动置顶
+        def window_focus_bring_monitor_status(w):
+            if hasattr(self, 'on_monitor_window_focus'):
+                self.on_monitor_window_focus(w)
+
+        win.bind("<Button-1>", lambda e, w=win: window_focus_bring_monitor_status(w), add="+")
+        tree.bind("<Button-1>", lambda e, w=win: window_focus_bring_monitor_status(w), add="+")
+
         # -------------------
         # 键盘操作
         # -------------------
@@ -22969,38 +22977,58 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         return hwnd == foreground
 
     def bring_monitor_to_front(self, active_window):
-        target_monitor = get_monitor_index_for_window(active_window)
+        if not active_window:
+            return
+        try:
+            target_monitor = get_monitor_index_for_window(active_window)
+        except Exception:
+            return
 
-        for win_id, win_info in self.monitor_windows.items():
-            toplevel = win_info.get("toplevel")
-            if not (toplevel and toplevel.winfo_exists()):
-                continue
+        # 聚合所有监控窗口（包括常规 monitor_windows 与 simple 监控窗口）
+        all_monitors = []
+        if hasattr(self, 'monitor_windows') and isinstance(self.monitor_windows, dict):
+            for win_info in list(self.monitor_windows.values()):
+                w = win_info.get("toplevel") or win_info.get("win")
+                if w and w.winfo_exists():
+                    all_monitors.append((w, win_info))
+        if hasattr(self, '_pg_top10_window_simple') and isinstance(self._pg_top10_window_simple, dict):
+            for win_info in list(self._pg_top10_window_simple.values()):
+                w = win_info.get("win") or win_info.get("toplevel")
+                if w and w.winfo_exists() and not any(m[0] == w for m in all_monitors):
+                    all_monitors.append((w, win_info))
 
-            monitor_idx = get_monitor_index_for_window(toplevel)
-            if monitor_idx != target_monitor:
-                continue
+        for toplevel, win_info in all_monitors:
+            try:
+                monitor_idx = get_monitor_index_for_window(toplevel)
+                if monitor_idx != target_monitor:
+                    continue
 
-            # 如果窗口被最小化，则恢复
-            if toplevel.state() == "iconic":
-                toplevel.deiconify()
-                win_info["is_lifted"] = False
+                # 如果窗口被最小化，则恢复
+                if toplevel.state() == "iconic":
+                    toplevel.deiconify()
 
-            # 检查是否真的还在最前层
-            if not self.is_window_visible_on_top(toplevel):
-                win_info["is_lifted"] = False
-
-            # 提升逻辑
-            if not win_info.get("is_lifted", False):
+                # 提升同屏窗口到最前
                 toplevel.lift()
-                toplevel.attributes("-topmost", 1)
-                toplevel.attributes("-topmost", 0)
-                win_info["is_lifted"] = True
+                toplevel.attributes("-topmost", True)
+                toplevel.after(30, lambda w=toplevel: w.attributes("-topmost", False) if (w and w.winfo_exists()) else None)
+                if isinstance(win_info, dict):
+                    win_info["is_lifted"] = True
+            except Exception as e:
+                logger.debug(f"bring_monitor_to_front error: {e}")
+
+        # 确保被点击的 active_window 在同屏层级最顶
+        try:
+            if active_window and active_window.winfo_exists():
+                active_window.lift()
+        except Exception:
+            pass
 
 
     def bring_monitor_to_front_pg(self, active_code):
         """仅在当前 PG 窗口被主窗口遮挡时才提升"""
-        # main_win = self.main_window     # 主窗口
-        main_win = self.main_window     # 主窗口
+        if not hasattr(self, '_pg_windows') or not self._pg_windows:
+            return
+        main_win = getattr(self, 'main_window', None)     # 主窗口
         if main_win is None:
             return
 
