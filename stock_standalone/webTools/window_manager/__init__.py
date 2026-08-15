@@ -23,7 +23,9 @@ from .core import (
     set_autostart_enabled,
     AcerPerformanceController,
     get_system_uptime,
-    is_system_cold_boot
+    is_system_cold_boot,
+    get_screen_topology_signature,
+    get_screen_topology_orientation_tag
 )
 
 from .ui import (
@@ -40,6 +42,8 @@ __all__ = [
     'list_visible_windows',
     'find_windows_by_title_safe',
     'get_screen_resolution_summary',
+    'get_screen_topology_signature',
+    'get_screen_topology_orientation_tag',
     'save_display_configuration',
     'restore_display_configuration',
     'bring_window_to_top_by_title',

@@ -310,11 +310,77 @@ def get_screen_topology_signature() -> str:
     return summary.get("summary_signature", "")
 
 
+
+def get_screen_topology_orientation_tag(monitors=None) -> str:
+    """
+    计算多屏幕相对于主屏幕 (0,0) 的相对摆放方位标签。
+    例如：
+    - 主屏在中间，上方有屏，左侧有屏 -> 'TopLeft'
+    - 主屏在中间，上方有屏，右侧有屏 -> 'TopRight'
+    - 主屏在右，副屏在左 -> 'Left'
+    - 主屏在左，副屏在右 -> 'Right'
+    - 主屏在下，副屏在上 -> 'Top'
+    """
+    if monitors is None:
+        summary = get_screen_resolution_summary()
+        monitors = summary.get("monitors", [])
+        
+    if len(monitors) <= 1:
+        return ""
+        
+    # 找到主屏幕
+    pri = next((m for m in monitors if m.get("is_primary")), monitors[0])
+    pri_x = pri.get("x", 0)
+    pri_y = pri.get("y", 0)
+    pri_w = pri.get("width", 1920)
+    pri_h = pri.get("height", 1080)
+    
+    has_left = False
+    has_right = False
+    has_top = False
+    has_bottom = False
+    
+    for m in monitors:
+        if m.get("is_primary") or m == pri:
+            continue
+        mx = m.get("x", 0)
+        my = m.get("y", 0)
+        mw = m.get("width", 1920)
+        mh = m.get("height", 1080)
+        
+        # 水平相对关系判断 (基于边界与中心点投影)
+        if (mx + mw <= pri_x + 100) or (mx < pri_x - 100):
+            has_left = True
+        elif (mx >= pri_x + pri_w - 100) or (mx > pri_x + pri_w // 2 and mx > pri_x + 100):
+            has_right = True
+            
+        # 垂直相对关系判断
+        if (my + mh <= pri_y + 100) or (my < pri_y - 100):
+            has_top = True
+        elif (my >= pri_y + pri_h - 100) or (my > pri_y + pri_h // 2 and my > pri_y + 100):
+            has_bottom = True
+            
+    tags = []
+    if has_top:
+        tags.append("Top")
+    if has_bottom:
+        tags.append("Bottom")
+    if has_left:
+        tags.append("Left")
+    if has_right:
+        tags.append("Right")
+        
+    return "".join(tags)
+
+
+
 def detect_display_config_name(config_manager=None) -> str:
     """
-    根据当前系统的物理显示器拓扑结构（支持 1/2/3/4/N 屏）智能自适应匹配最佳方案名称。
-    彻底杜绝硬编码固定总宽。
-    优先匹配已存方案，无匹配时自动规范化生成符合当前屏幕组合的标准方案标识。
+    根据当前系统的物理显示器拓扑结构（支持 1/2/3/4/N 屏及排列方位）智能自适应匹配最佳方案名称。
+    - 优先级 1：当前排列方位的专属新方案（如 5376_TopRight, 5376_Right），自动优先采用！
+    - 优先级 2：平滑兼容既有标准分辨率方案（如 5376, 3840, 3456），零改动无感过渡！
+    - 优先级 3：临近相近多屏历史方案；
+    - 优先级 4：自动规范生成符合当前物理排布的最佳新方案名称。
     """
     existing_keys = set()
     if config_manager:
@@ -341,6 +407,7 @@ def detect_display_config_name(config_manager=None) -> str:
     virt_w = summary["virtual_width"]
     primary_w = summary["primary_width"]
     primary_log_w = summary["primary_logical_width"]
+    ori_tag = get_screen_topology_orientation_tag(summary["monitors"])
 
     # 1. 单屏场景 (display_num <= 1)
     if display_num <= 1:
@@ -355,34 +422,51 @@ def detect_display_config_name(config_manager=None) -> str:
         return f"tdx_ths_position{primary_w}"
 
     # 2. 多屏场景 (2 屏、3 屏、4 屏及以上)
-    # 优先候选方案名列表（从物理总宽到逻辑折合总宽）
-    primary_candidates = []
-    
-    # (a) 精确物理总宽方案 (例如: 7680, 5760, 9600, 3840 等)
-    primary_candidates.append(f"tdx_ths_position{total_w}")
-    
-    # (b) 逻辑折合总宽方案 (例如: 5376, 4644, 3456, 3072 等)
-    if total_log_w != total_w:
-        primary_candidates.append(f"tdx_ths_position{total_log_w}")
-        
-    # (c) 虚拟桌面跨度
-    if virt_w not in (total_w, total_log_w):
-        primary_candidates.append(f"tdx_ths_position{virt_w}")
-        
-    # (d) 屏幕数量命名方案 (例如: tdx_ths_position_{display_num}screen)
-    primary_candidates.append(f"tdx_ths_position_{display_num}screen")
-    
-    # (e) 双屏历史兼容命名
-    if display_num == 2:
-        primary_candidates.append("tdx_ths_positionDouble")
+    # --- [第一梯队：专属方位新配置优先] ---
+    if ori_tag:
+        orientation_candidates = [
+            f"tdx_ths_position{total_log_w}_{ori_tag}",
+            f"tdx_ths_position{total_w}_{ori_tag}",
+        ]
+        # 兼容简易单向方位词（如 TopRight 也匹配 _Right, _Top）
+        if "Right" in ori_tag:
+            orientation_candidates.extend([
+                f"tdx_ths_position{total_log_w}_Right",
+                f"tdx_ths_position{total_w}_Right",
+                f"tdx_ths_position{total_log_w}_right"
+            ])
+        if "Left" in ori_tag:
+            orientation_candidates.extend([
+                f"tdx_ths_position{total_log_w}_Left",
+                f"tdx_ths_position{total_w}_Left",
+                f"tdx_ths_position{total_log_w}_left"
+            ])
+            
+        for cand in orientation_candidates:
+            if cand in existing_keys:
+                return cand
 
-    # 检查精确候选是否在已有方案库中
-    for cand in primary_candidates:
+        # 检查库中是否有同时包含当前分辨率数字与当前方位关键字的自定义方案
+        for key in existing_keys:
+            key_lower = key.lower()
+            if (str(total_log_w) in key or str(total_w) in key) and ori_tag.lower() in key_lower:
+                return key
+
+    # --- [第二梯队：平滑兼容标准总宽已有方案（老方案无感过渡）] ---
+    standard_candidates = [
+        f"tdx_ths_position{total_w}",
+        f"tdx_ths_position{total_log_w}" if total_log_w != total_w else None,
+        f"tdx_ths_position{virt_w}" if virt_w not in (total_w, total_log_w) else None,
+        f"tdx_ths_position_{display_num}screen",
+        "tdx_ths_positionDouble" if display_num == 2 else None
+    ]
+    standard_candidates = [c for c in standard_candidates if c]
+
+    for cand in standard_candidates:
         if cand in existing_keys:
             return cand
 
-    # (f) 智能容差匹配已有多屏方案：提取方案名中的数字进行贴合度比对
-    # 如果用户已有类似方案（误差在合理范围内），优先匹配已有方案
+    # --- [第三梯队：智能容差贴合已有相近多屏方案] ---
     best_match = None
     min_diff = float("inf")
     
@@ -403,8 +487,10 @@ def detect_display_config_name(config_manager=None) -> str:
     if best_match:
         return best_match
 
-    # (g) 若无任何已有方案匹配，生成最符合当前物理拓扑的标准新方案名称
-    # 例如：3 屏总宽 7680 -> tdx_ths_position7680; 2 屏 5760 -> tdx_ths_position5760; 4 屏 9600 -> tdx_ths_position9600
+    # --- [第四梯队：若无任何已有方案，生成带清晰方位特征的推荐新方案名] ---
+    # 例如：3 屏副屏在右 -> tdx_ths_position5376_TopRight; 2 屏副屏在右 -> tdx_ths_position5760_Right
+    if ori_tag:
+        return f"tdx_ths_position{total_log_w}_{ori_tag}"
     return f"tdx_ths_position{total_w}"
 
 
