@@ -1,3 +1,8 @@
+## 2026-08-15 16:22
+- [x] **修复 Simple 监控窗口点击时联动将同屏幕其他 Simple 窗口自动带到最前显示 (`stock_standalone/instock_MonitorTK.py`)**：
+    - [x] **补齐 Simple 窗口 `<Button-1>` 点击事件绑定**：在 `show_concept_top10_window_simple` 中为 `win` 和 `tree` 增加 `<Button-1>` 鼠标点击事件监听（`add="+"`），点击时自动调用 `self.on_monitor_window_focus(win)`，使得在多屏幕任意 Simple 窗口被激活时能够实时调起同屏置顶协同。
+    - [x] **重构 `bring_monitor_to_front` 窗口聚合与批量同屏提升**：全面聚合 `self.monitor_windows` 与 `self._pg_top10_window_simple` 中所有存活的监控窗口，通过 `get_monitor_index_for_window` 匹配同屏窗口，对同屏的所有 Simple 窗口一并解除最小化 (`deiconify`) 并调用 `lift()` 及短期 `topmost` 浮动到前台，最后保证当前点击的活跃窗口处于最顶层。
+
 ## 2026-08-14 18:38
 - [x] **实现 ATS 实时 IPC 数据流高频吞吐性能优化与 $O(1)$ 高速 Favorite 缓存 (`ats/signal_ledger.py`, `tests/test_realtime_ipc_perf.py`)**：
     - [x] **`SignalLedger` $O(1)$ 重点关注缓存机制**：在 `SignalLedger` 内部引入 `_fav_version` 与 `_fav_stocks_cache` 缓存集合，配合 `GlobalFavoriteManager` 的版本号比对，实现重点关注标的 $O(1)$ 级别极速校验，彻底消除了高频行情数据包（5500+ 行/次）写入信号账本时因重复 I/O 与对象检索带来的严重 CPU 阻塞。
