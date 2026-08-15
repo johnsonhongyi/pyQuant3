@@ -179,7 +179,7 @@ if __name__ == '__main__':
         config_mgr = ConfigManager()
         success, route_msg = check_and_add_route(config_mgr)
         print(f"[Route Check] {route_msg}")
-        rec_name = detect_display_config_name()
+        rec_name = detect_display_config_name(config_mgr)
         print(f"当前系统匹配的最佳配置方案为: {rec_name}")
         
         # 3. 尝试应用窗口布局位置

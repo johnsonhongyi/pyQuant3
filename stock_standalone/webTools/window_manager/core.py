@@ -97,54 +97,224 @@ def get_window_rect(hwnd) -> tuple:
     return (left, top, width, height)
 
 
-def get_screen_resolution_summary() -> dict:
+def get_monitor_details_all_with_scale():
     """
-    通过 screeninfo 及 win32 获取显示器配置汇总
-    返回结构: { "total_width": int, "primary_res": str, "monitors": list, "display_num": int }
+    获取所有显示器信息，同时计算 scale（DPI缩放）
+    - 主显示器排在最前
+    - 返回 monitors 列表 + 汇总字符串
     """
-    summary = {
-        "total_width": 0,
-        "primary_res": "1920x1080",
-        "monitors": [],
-        "display_num": 0
-    }
-    
     try:
-        monitors = get_monitors()
-        summary["display_num"] = len(monitors)
-        for i, m in enumerate(monitors):
-            summary["monitors"].append({
-                "index": i + 1,
-                "name": m.name,
-                "width": m.width,
-                "height": m.height,
-                "x": m.x,
-                "y": m.y,
-                "is_primary": m.is_primary
-            })
-            summary["total_width"] += m.width
-            if m.is_primary:
-                summary["primary_res"] = f"{m.width}x{m.height}"
-    except Exception as e:
-        # 回退：如果没有屏幕信息或读取出错
-        summary["display_num"] = 1
-        summary["total_width"] = user32.GetSystemMetrics(0) # SM_CXSCREEN
-        summary["primary_res"] = f"{user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)}"
-        summary["monitors"].append({
-            "index": 1,
-            "name": "Primary",
-            "width": user32.GetSystemMetrics(0),
-            "height": user32.GetSystemMetrics(1),
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    shcore = None
+    try:
+        shcore = ctypes.windll.shcore
+        shcore.GetDpiForMonitor.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint)
+        ]
+    except Exception:
+        pass
+
+    monitors = []
+    try:
+        import win32api
+        import win32con
+        monitor_handles = win32api.EnumDisplayMonitors()
+        if monitor_handles:
+            for handle_tuple in monitor_handles:
+                monitor_handle = handle_tuple[0]
+                try:
+                    info = win32api.GetMonitorInfo(monitor_handle)
+                    device_name = info.get("Device", "Unknown")
+                    is_primary = (info.get("Flags", 0) & win32con.MONITORINFOF_PRIMARY) != 0
+                    left, top, right, bottom = info["Monitor"]
+                    logical_width = right - left
+                    logical_height = bottom - top
+
+                    devmode = win32api.EnumDisplaySettings(device_name, win32con.ENUM_CURRENT_SETTINGS)
+                    physical_width = devmode.PelsWidth
+                    physical_height = devmode.PelsHeight
+
+                    scale = None
+                    if shcore is not None:
+                        try:
+                            dpi_x = ctypes.c_uint()
+                            dpi_y = ctypes.c_uint()
+                            res = shcore.GetDpiForMonitor(int(monitor_handle), 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                            if res == 0: # S_OK
+                                scale = round(dpi_x.value / 96.0, 2)
+                        except Exception:
+                            pass
+
+                    if scale is None:
+                        scale_x = physical_width / logical_width if logical_width else 1.0
+                        scale_y = physical_height / logical_height if logical_height else 1.0
+                        scale = round((scale_x + scale_y) / 2, 2)
+
+                    real_logical_width = int(physical_width / scale) if scale else logical_width
+                    real_logical_height = int(physical_height / scale) if scale else logical_height
+
+                    monitors.append({
+                        "device_name": device_name,
+                        "width": physical_width,
+                        "height": physical_height,
+                        "x": devmode.Position_x,
+                        "y": devmode.Position_y,
+                        "is_primary": is_primary,
+                        "logical_width": real_logical_width,
+                        "logical_height": real_logical_height,
+                        "scale": scale
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if not monitors:
+        try:
+            from screeninfo import get_monitors
+            for m in get_monitors():
+                monitors.append({
+                    "device_name": m.name,
+                    "width": m.width,
+                    "height": m.height,
+                    "x": m.x,
+                    "y": m.y,
+                    "is_primary": m.is_primary,
+                    "logical_width": m.width,
+                    "logical_height": m.height,
+                    "scale": 1.0
+                })
+        except Exception:
+            pass
+
+    if not monitors:
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+        monitors.append({
+            "device_name": "\\\\.\\DISPLAY1",
+            "width": w,
+            "height": h,
             "x": 0,
             "y": 0,
-            "is_primary": True
+            "is_primary": True,
+            "logical_width": w,
+            "logical_height": h,
+            "scale": 1.0
         })
-    return summary
+
+    # 主显示器排前
+    monitors.sort(key=lambda x: not x["is_primary"])
+    summary = "_".join(f"{m['width']}x{m['height']}@{m['scale']}" for m in monitors)
+    return {"monitors": monitors, "summary": summary}
+
+
+def get_screen_resolution_summary() -> dict:
+    """
+    通过底层硬件与 Win32 获取显示器配置汇总（支持 1/2/3/4/N 屏与动态拓扑检测）
+    返回结构: {
+        "total_width": int,           # 物理总宽度
+        "total_logical_width": int,   # 逻辑折合总宽度
+        "virtual_width": int,         # 虚拟桌面跨度
+        "virtual_height": int,
+        "primary_res": str,
+        "primary_width": int,
+        "primary_logical_width": int,
+        "monitors": list,
+        "display_num": int,
+        "summary_signature": str
+    }
+    """
+    details = get_monitor_details_all_with_scale()
+    monitors = details.get("monitors", [])
+    
+    total_physical_width = 0
+    total_logical_width = 0
+    primary_res = "1920x1080"
+    primary_w = 1920
+    primary_log_w = 1920
+    
+    formatted_monitors = []
+    for i, m in enumerate(monitors):
+        is_pri = m.get("is_primary", False)
+        w = m.get("width", 1920)
+        h = m.get("height", 1080)
+        lw = m.get("logical_width", w)
+        lh = m.get("logical_height", h)
+        x = m.get("x", 0)
+        y = m.get("y", 0)
+        scale = m.get("scale", 1.0)
+        dev_name = m.get("device_name", f"DISPLAY{i+1}")
+        
+        total_physical_width += w
+        total_logical_width += lw
+        
+        if is_pri or i == 0:
+            primary_res = f"{w}x{h}"
+            primary_w = w
+            primary_log_w = lw
+            
+        formatted_monitors.append({
+            "index": i + 1,
+            "name": dev_name,
+            "device_name": dev_name,
+            "width": w,
+            "height": h,
+            "logical_width": lw,
+            "logical_height": lh,
+            "scale": scale,
+            "x": x,
+            "y": y,
+            "is_primary": is_pri
+        })
+        
+    try:
+        virt_w = user32.GetSystemMetrics(78) # SM_CXVIRTUALSCREEN
+        virt_h = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+        if virt_w <= 0:
+            virt_w = total_physical_width
+        if virt_h <= 0:
+            virt_h = 1080
+    except Exception:
+        virt_w = total_physical_width
+        virt_h = 1080
+        
+    sig = details.get("summary", "")
+    topo_sig = f"{len(formatted_monitors)}screens_{sig}_" + "_".join(f"{m['x']},{m['y']}" for m in formatted_monitors)
+
+    return {
+        "total_width": total_physical_width,
+        "total_logical_width": total_logical_width,
+        "virtual_width": virt_w,
+        "virtual_height": virt_h,
+        "primary_res": primary_res,
+        "primary_width": primary_w,
+        "primary_logical_width": primary_log_w,
+        "monitors": formatted_monitors,
+        "display_num": len(formatted_monitors),
+        "summary_signature": topo_sig
+    }
+
+
+def get_screen_topology_signature() -> str:
+    """获取当前连接的显示器物理拓扑结构的唯一指纹"""
+    summary = get_screen_resolution_summary()
+    return summary.get("summary_signature", "")
 
 
 def detect_display_config_name(config_manager=None) -> str:
     """
-    使用内置与外部逻辑探测出当前系统应匹配的配置名(如: tdx_ths_position1920, tdx_ths_position3840)
+    根据当前系统的物理显示器拓扑结构（支持 1/2/3/4/N 屏）智能自适应匹配最佳方案名称。
+    彻底杜绝硬编码固定总宽。
+    优先匹配已存方案，无匹配时自动规范化生成符合当前屏幕组合的标准方案标识。
     """
     existing_keys = set()
     if config_manager:
@@ -164,73 +334,78 @@ def detect_display_config_name(config_manager=None) -> str:
         except Exception:
             pass
 
-    if Display_Detection is not None:
-        try:
-            displaySet = Display_Detection()
-            displayNum = displaySet[0]
-            displayMainRes = displaySet[1][0]
-            rawMainRes = displayMainRes
-            
-            # 获取当前系统的物理 DPI 缩放比例
-            try:
-                hdc = ctypes.windll.user32.GetDC(0)
-                dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX = 88
-                ctypes.windll.user32.ReleaseDC(0, hdc)
-                scale = dpi_x / 96.0
-            except Exception:
-                scale = 1.0
-
-            if displayNum > 1:
-                displayRes = 0 
-                for i in range(1, displayNum + 1):
-                    val = displaySet[i][0]
-                    if i == 2 and scale > 1.0:
-                        val = int(val / scale)
-                    displayRes += val
-                
-                if 3800 < displayRes < 4700:
-                    displayRes = 4644
-                elif displayRes >= 4700:
-                    displayRes = 5376
-                target_key = f'tdx_ths_position{displayRes}'
-                return target_key
-            else:
-                # 优先匹配无缩放折合的物理分辨率名称（如 3840 对应 tdx_ths_position3840）
-                raw_key = f'tdx_ths_position{rawMainRes}'
-                if raw_key in existing_keys:
-                    return raw_key
-                
-                # 如果没有精确物理方案，再尝试逻辑像素折合
-                if scale > 1.0:
-                    scaled_res = int(displayMainRes / scale)
-                    scaled_key = f'tdx_ths_position{scaled_res}'
-                    if scaled_key in existing_keys:
-                        return scaled_key
-                return raw_key
-        except Exception:
-            pass
-
-    # 无法调用 Display_Detection 时的原生回退逻辑
     summary = get_screen_resolution_summary()
-    if summary["display_num"] > 1:
-        # 双屏/多屏
-        total_w = summary["total_width"]
-        if 3800 < total_w < 4700:
-            total_w = 4644
-        elif total_w > 4700:
-            total_w = 5376
-        if total_w in [4644, 5376]:
-            return f'tdx_ths_position{total_w}'
-        else:
-            return 'tdx_ths_positionDouble'
-    else:
-        # 单屏
-        mon = summary["monitors"][0] if summary["monitors"] else None
-        res_w = mon["width"] if mon else 1920
-        raw_key = f'tdx_ths_position{res_w}'
-        if raw_key in existing_keys or not existing_keys:
-            return raw_key
-        return f'tdx_ths_position{res_w}'
+    display_num = summary["display_num"]
+    total_w = summary["total_width"]
+    total_log_w = summary["total_logical_width"]
+    virt_w = summary["virtual_width"]
+    primary_w = summary["primary_width"]
+    primary_log_w = summary["primary_logical_width"]
+
+    # 1. 单屏场景 (display_num <= 1)
+    if display_num <= 1:
+        candidates = [
+            f"tdx_ths_position{primary_w}",
+            f"tdx_ths_position{primary_log_w}",
+            "tdx_ths_position"
+        ]
+        for c in candidates:
+            if c in existing_keys:
+                return c
+        return f"tdx_ths_position{primary_w}"
+
+    # 2. 多屏场景 (2 屏、3 屏、4 屏及以上)
+    # 优先候选方案名列表（从物理总宽到逻辑折合总宽）
+    primary_candidates = []
+    
+    # (a) 精确物理总宽方案 (例如: 7680, 5760, 9600, 3840 等)
+    primary_candidates.append(f"tdx_ths_position{total_w}")
+    
+    # (b) 逻辑折合总宽方案 (例如: 5376, 4644, 3456, 3072 等)
+    if total_log_w != total_w:
+        primary_candidates.append(f"tdx_ths_position{total_log_w}")
+        
+    # (c) 虚拟桌面跨度
+    if virt_w not in (total_w, total_log_w):
+        primary_candidates.append(f"tdx_ths_position{virt_w}")
+        
+    # (d) 屏幕数量命名方案 (例如: tdx_ths_position_{display_num}screen)
+    primary_candidates.append(f"tdx_ths_position_{display_num}screen")
+    
+    # (e) 双屏历史兼容命名
+    if display_num == 2:
+        primary_candidates.append("tdx_ths_positionDouble")
+
+    # 检查精确候选是否在已有方案库中
+    for cand in primary_candidates:
+        if cand in existing_keys:
+            return cand
+
+    # (f) 智能容差匹配已有多屏方案：提取方案名中的数字进行贴合度比对
+    # 如果用户已有类似方案（误差在合理范围内），优先匹配已有方案
+    best_match = None
+    min_diff = float("inf")
+    
+    for key in existing_keys:
+        m = re.search(r"(\d{4,5})", key)
+        if m:
+            num = int(m.group(1))
+            if num > 2560: # 属于多屏范畴
+                diff_phys = abs(num - total_w)
+                diff_log = abs(num - total_log_w)
+                closest_diff = min(diff_phys, diff_log)
+                
+                threshold = max(150, int(total_w * 0.04))
+                if closest_diff <= threshold and closest_diff < min_diff:
+                    min_diff = closest_diff
+                    best_match = key
+                    
+    if best_match:
+        return best_match
+
+    # (g) 若无任何已有方案匹配，生成最符合当前物理拓扑的标准新方案名称
+    # 例如：3 屏总宽 7680 -> tdx_ths_position7680; 2 屏 5760 -> tdx_ths_position5760; 4 屏 9600 -> tdx_ths_position9600
+    return f"tdx_ths_position{total_w}"
 
 
 _MAGNETIC_KEYWORDS_CACHE = None
@@ -688,100 +863,6 @@ import win32api
 import win32con
 import pywintypes
 
-def get_monitor_details_all_with_scale():
-    """
-    获取所有显示器信息，同时计算 scale（DPI缩放）
-    - 主显示器排在最前
-    - 返回 monitors 列表 + 汇总字符串
-    """
-    # 强制设置进程级 DPI 意识，保证逻辑和物理分辨率检测结果在命令行与 UI 模式下完全对齐一致
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
-    # 尝试加载 GetDpiForMonitor 获取底层真实的物理缩放率
-    shcore = None
-    try:
-        shcore = ctypes.windll.shcore
-        shcore.GetDpiForMonitor.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.POINTER(ctypes.c_uint),
-            ctypes.POINTER(ctypes.c_uint)
-        ]
-    except Exception:
-        pass
-
-    monitor_handles = win32api.EnumDisplayMonitors()
-    if not monitor_handles:
-        return {"monitors": [], "summary": "0"}
-
-    monitors = []
-    for handle_tuple in monitor_handles:
-        monitor_handle = handle_tuple[0]
-
-        # 逻辑分辨率（系统显示逻辑）
-        try:
-            info = win32api.GetMonitorInfo(monitor_handle)
-            device_name = info.get("Device", "Unknown")
-            is_primary = (info.get("Flags", 0) & win32con.MONITORINFOF_PRIMARY) != 0
-            left, top, right, bottom = info["Monitor"]
-            logical_width = right - left
-            logical_height = bottom - top
-
-            # 物理分辨率（实际设置）
-            devmode = win32api.EnumDisplaySettings(device_name, win32con.ENUM_CURRENT_SETTINGS)
-            physical_width = devmode.PelsWidth
-            physical_height = devmode.PelsHeight
-
-            # 优先使用 GetDpiForMonitor 获取真实的物理 DPI 缩放值
-            scale = None
-            if shcore is not None:
-                try:
-                    dpi_x = ctypes.c_uint()
-                    dpi_y = ctypes.c_uint()
-                    # 0 代表 MDT_EFFECTIVE_DPI
-                    res = shcore.GetDpiForMonitor(int(monitor_handle), 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
-                    if res == 0: # S_OK
-                        scale = round(dpi_x.value / 96.0, 2)
-                except Exception:
-                    pass
-
-            # Fallback 策略：如果 API 获取失败，则采用逻辑/物理分辨率估算
-            if scale is None:
-                scale_x = physical_width / logical_width if logical_width else 1.0
-                scale_y = physical_height / logical_height if logical_height else 1.0
-                scale = round((scale_x + scale_y) / 2, 2)
-
-            # 在高 DPI 意识进程中，GetMonitorInfo 得到的 logical_width 可能退化成物理像素。
-            # 为了反映操作系统实际缩放的逻辑分辨率，在这里根据真实 scale 进行修正折算。
-            real_logical_width = int(physical_width / scale) if scale else logical_width
-            real_logical_height = int(physical_height / scale) if scale else logical_height
-
-            monitors.append({
-                "device_name": device_name,
-                "width": physical_width,
-                "height": physical_height,
-                "x": devmode.Position_x,
-                "y": devmode.Position_y,
-                "is_primary": is_primary,
-                "logical_width": real_logical_width,
-                "logical_height": real_logical_height,
-                "scale": scale
-            })
-        except Exception:
-            pass
-
-    # 主显示器排前
-    monitors.sort(key=lambda x: not x["is_primary"])
-
-    # 汇总字符串，用于区分不同显示器组合下的持久化文件命名
-    summary = "_".join(f"{m['width']}x{m['height']}@{m['scale']}" for m in monitors)
-    return {"monitors": monitors, "summary": summary}
 
 
 def is_same_display_config(current, saved):
