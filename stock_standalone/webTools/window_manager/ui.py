@@ -1703,6 +1703,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.log_signal.connect(self.log)
         self.setup_single_instance_server()
         
+        # 记录当前屏幕拓扑指纹并配置屏幕热插拔/拓扑动态监听（免冷启动程序）
+        self._last_topology_signature = core.get_screen_topology_signature()
+        self._setup_screen_topology_listener()
+        
         if hasattr(self, 'startup_route_msg') and self.startup_route_msg:
             self.log(f"[Route Startup] {self.startup_route_msg}")
             
@@ -1937,15 +1941,61 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"[_ensure_window_fits_screen] 自适应调整失败: {e}")
 
-    def detect_and_refresh_state(self):
+    def _setup_screen_topology_listener(self):
+        """配置屏幕拓扑热插拔/切换动态监听器（免冷启动程序自适应）"""
+        try:
+            app = QApplication.instance()
+            if app:
+                app.screenAdded.connect(self._schedule_topology_check)
+                app.screenRemoved.connect(self._schedule_topology_check)
+                app.primaryScreenChanged.connect(self._schedule_topology_check)
+                for screen in app.screens():
+                    screen.geometryChanged.connect(self._schedule_topology_check)
+        except Exception as e:
+            logger.error(f"绑定 QApplication 屏幕信号异常: {e}")
+
+        # 后台定时比对心跳（每 1.5 秒快速比对拓扑指纹）
+        self._topology_timer = QtCore.QTimer(self)
+        self._topology_timer.timeout.connect(self._check_screen_topology_heartbeat)
+        self._topology_timer.start(1500)
+        
+        # 防抖定时器：在接收到屏幕插拔事件后延时 600ms 触发拓扑重检
+        self._topology_debounce_timer = QtCore.QTimer(self)
+        self._topology_debounce_timer.setSingleShot(True)
+        self._topology_debounce_timer.timeout.connect(self._on_display_topology_changed)
+
+    def _schedule_topology_check(self, *args):
+        """接收到 Qt 屏幕增减/主屏切换/尺寸改变信号时触发防抖检查"""
+        if hasattr(self, '_topology_debounce_timer'):
+            self._topology_debounce_timer.start(600)
+
+    def _check_screen_topology_heartbeat(self):
+        """定时心跳检查当前屏幕拓扑是否有变动"""
+        current_sig = core.get_screen_topology_signature()
+        if hasattr(self, '_last_topology_signature') and current_sig != self._last_topology_signature:
+            self._on_display_topology_changed()
+
+    def _on_display_topology_changed(self):
+        """物理显示器拓扑结构发生变更时的自适应处理（免冷启动）"""
+        current_sig = core.get_screen_topology_signature()
+        self._last_topology_signature = current_sig
+        
+        info = core.get_screen_resolution_summary()
+        self.log(f"⚡ [Screen Topology] 检测到物理显示器拓扑发生变更 (显示器: {info['display_num']} 个，物理总宽: {info['total_width']}px)，正在自适应重新匹配...")
+        
+        # 重新检测与自适应切换方案
+        self.detect_and_refresh_state(auto_switch_scheme=True)
+
+    def detect_and_refresh_state(self, auto_switch_scheme=False):
         """自动检测物理屏幕拓扑结构并刷新当前桌面各窗口的实际坐标位置"""
         self._ensure_window_fits_screen()
         self.load_screen_info()
-        self.refresh_resolutions_combo()
+        if auto_switch_scheme:
+            self.refresh_resolutions_combo()
         self.refresh_current_positions()
 
     def on_refresh_pos_clicked(self):
-        self.detect_and_refresh_state()
+        self.detect_and_refresh_state(auto_switch_scheme=True)
         self.log("已手动刷新当前桌面各窗口的实际坐标位置与显示器拓扑。")
 
     def showEvent(self, event):
@@ -2670,7 +2720,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.lbl_display_details.setText("\n".join(details))
         
         # 推荐配置名
-        rec_name = core.detect_display_config_name()
+        rec_name = core.detect_display_config_name(self.config_manager)
         self.log(f"系统智能推荐的分辨率配置为: {rec_name}")
 
     def refresh_resolutions_combo(self, select_name=None):
@@ -2701,7 +2751,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.cb_resolutions.setCurrentIndex(found_index)
         else:
             # 自动选择最匹配的
-            rec_name = core.detect_display_config_name()
+            rec_name = core.detect_display_config_name(self.config_manager)
             matched_index = -1
             for i in range(self.cb_resolutions.count()):
                 data = self.cb_resolutions.itemData(i)
@@ -3001,7 +3051,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def auto_detect_and_set(self):
         """一键识别当前系统应匹配的配置名，并应用到 UI"""
-        rec_name = core.detect_display_config_name()
+        self.load_screen_info()
+        self._last_topology_signature = core.get_screen_topology_signature()
+        rec_name = core.detect_display_config_name(self.config_manager)
         
         matched_index = -1
         for i in range(self.cb_resolutions.count()):
@@ -3017,7 +3069,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             # 询问是否新建
             reply = QMessageBox.question(
                 self, "未找到对应匹配方案", 
-                f"当前屏幕探测到对应的配置标识为 '{rec_name}'，但当前配置库中没有该方案。\n是否使用此名字新建一个空白配置？",
+                f"当前屏幕探测到对应的配置标识为 '{rec_name}'，但当前配置库中没有该方案。\n是否使用此名字新建并融合当前桌面坐标生成配置？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
@@ -3025,7 +3077,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 info = core.get_screen_resolution_summary()
                 cat = "single_display" if info["display_num"] <= 1 else "multi_display"
                 
-                self.config_manager.set_resolution_mapping(rec_name, {}, cat)
+                initial_mapping = self.create_merged_initial_mapping()
+                self.config_manager.set_resolution_mapping(rec_name, initial_mapping, cat)
+                self.config_manager.save()
                 self.refresh_resolutions_combo(rec_name)
 
     def capture_desktop_windows(self):
