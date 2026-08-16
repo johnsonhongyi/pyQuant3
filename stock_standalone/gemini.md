@@ -1,3 +1,15 @@
+## 2026-08-16 23:25
+- [x] **修复 ATS 分时阶梯策略窗口关闭异常与策略编辑器动态联动选中 (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_intraday_dialog_fix.py`)**：
+    - [x] **根治关闭窗口 `NameError: name 'QApplication' is not defined` 与误杀主进程 Bug**：在 `ats/ui/intraday_strategy_dialog.py` 导入 `QApplication`；彻底移除 `closeEvent` 中调用 `QApplication.quit` 的危险逻辑，改为安全停止后台定时器并断开 TDX 连接，交由 Qt 事件循环自然管理窗口生命周期，并在 `ATSMainWindow.closeEvent` 中协同安全关闭。
+    - [x] **主界面个股选中状态实时追踪**：在 `main_window.py` 的 `link_stock` 与 `on_stock_clicked` 中显式记录 `self.current_selected_code` 和 `self.current_selected_name`，确保用户在任何表格（Universe 树、大级别回调表、重点关注表等）点击选中个股后，主窗口能精准追踪当前选中的标的代码。
+    - [x] **重构 `IntradayStrategyEditDialog` 支持单策略精准聚焦与全量 JSON 双模式编辑**：
+        - 构造函数支持传入 `initial_strategy_id` 与 `current_code`，并在弹窗顶部增加【🎯 选择编辑策略】下拉选框（包含各个具体策略及【🌐 全部策略配置 (全量 JSON 文件)】）；
+        - 打开编辑器时默认自动精准聚焦并仅显示当前选中的这套策略，用户点击编辑时不再固定展示“频准激光”策略；
+        - 支持单策略单独编辑保存与全量 JSON 保存，校验合法性后即时落盘并自动调用 `IntradayStrategyEngine.get_instance().load_config()`；
+        - 保存后自动双向刷新父窗口的策略下拉框（`_populate_strategy_combo`）与标的下拉框（`_populate_code_combo`）。
+    - [x] **`open_intraday_strategy_dialog` 动态关联选中股票与策略**：重构主窗口调起分时策略逻辑，以当前选中的 `self.current_selected_code` 为标的，自动匹配对应策略 ID，在复用或新建窗口时同步更新标题、策略下拉框与标的下拉框。
+    - [x] **全量 29 项单元测试 100% 通过**：新建专项测试 `tests/test_intraday_dialog_fix.py`，全量执行 `pytest tests/test_intraday_dialog_fix.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py tests/test_dynamic_twap_auto_refresh.py` **100% PASSED**！
+
 ## 2026-08-16 10:50
 - [x] **复查可视化极限性能优化 (commit `6f56227`) 并修复 5 项 Bug/隐患 (`stock_standalone/trade_visualizer_qt6.py`)**：
     - [x] **BUG-1: 修复 `_draw_breakout_price_lines` 双重 `except` 死代码**：删除 L11802-11803 处由于新增 `except` 块未移除原有 `except` 导致的冗余/死代码，消除语法/逻辑隐患。
