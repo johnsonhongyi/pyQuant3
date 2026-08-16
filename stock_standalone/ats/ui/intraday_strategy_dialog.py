@@ -28,7 +28,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
     QTextEdit, QComboBox, QMessageBox, QFrame, QGridLayout, QProgressBar,
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
@@ -92,59 +92,176 @@ def _set_or_update_table_item(
 
 
 class IntradayStrategyEditDialog(QDialog):
-    """自定制策略编辑器弹窗"""
-    def __init__(self, parent=None):
+    """自定制分时策略 JSON 编辑器（支持单策略精准聚焦与全量 JSON 双模式编辑）"""
+    def __init__(self, parent=None, initial_strategy_id: Optional[str] = None, current_code: Optional[str] = None):
         super().__init__(parent)
-        self.setWindowTitle("⚙️ 自定制分时交易策略 JSON 编辑器")
-        self.resize(780, 580)
+        self.setWindowTitle("⚙️ 自定制分时交易策略编辑器")
+        self.resize(860, 640)
         self.engine = IntradayStrategyEngine.get_instance()
+        self.initial_strategy_id = initial_strategy_id
+        self.current_code = current_code
+        self._full_config_data = {}
+        self._current_selected_mode = ""  # 记录当前选中的策略 ID 或 "__ALL__"
         apply_dark_theme(self)
+        self._load_full_config()
         self._init_ui()
+
+    def _load_full_config(self):
+        if os.path.exists(self.engine.config_path):
+            try:
+                with open(self.engine.config_path, "r", encoding="utf-8") as f:
+                    self._full_config_data = json.load(f)
+            except Exception as e:
+                logger.error(f"加载策略配置文件失败: {e}")
+                self._full_config_data = {"version": "2.0", "strategies": self.engine.strategies}
+        else:
+            self._full_config_data = {"version": "2.0", "strategies": self.engine.strategies}
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-        lbl_tips = QLabel("💡 提示：在下方可编辑/扩充分时交易策略规则 JSON，修改后点击“保存并应用”可即时完成配置落盘。")
-        lbl_tips.setStyleSheet("color: #38bdf8; font-weight: bold;")
-        layout.addWidget(lbl_tips)
+        # 顶部策略选择与切换栏
+        top_bar = QHBoxLayout()
+        lbl_target = QLabel("🎯 选择编辑策略:")
+        lbl_target.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 10pt;")
+        top_bar.addWidget(lbl_target)
 
+        self.combo_strat = QComboBox()
+        self.combo_strat.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 4px 8px; font-weight: bold; min-width: 340px; font-size: 9.5pt; }")
+        
+        # 填充策略选项
+        strats = self._full_config_data.get("strategies", [])
+        for st in strats:
+            st_id = st.get("id", "")
+            st_name = st.get("name", st_id)
+            t_codes = st.get("target_codes", [])
+            t_str = f" [标的: {', '.join(t_codes)}]" if t_codes else ""
+            self.combo_strat.addItem(f"📋 {st_name}{t_str}", st_id)
+        
+        self.combo_strat.addItem("🌐 全部策略配置 (全量 JSON 文件)", "__ALL__")
+        top_bar.addWidget(self.combo_strat)
+        top_bar.addStretch()
+
+        self.lbl_tips = QLabel("💡 提示：在下方可实时编辑策略规则，保存后即时生效落盘。")
+        self.lbl_tips.setStyleSheet("color: #00ff88; font-size: 9pt;")
+        top_bar.addWidget(self.lbl_tips)
+
+        layout.addLayout(top_bar)
+
+        # JSON 编辑框
         self.txt_json = QTextEdit()
-        self.txt_json.setStyleSheet("background-color: #121218; color: #00ff88; font-family: Consolas, Monospace; font-size: 10pt;")
-        layout.addWidget(self.txt_json)
+        self.txt_json.setStyleSheet("background-color: #121218; color: #00ff88; font-family: Consolas, 'Courier New', Monospace; font-size: 10pt; line-height: 1.3;")
+        layout.addWidget(self.txt_json, 1)
 
-        if os.path.exists(self.engine.config_path):
-            try:
-                with open(self.engine.config_path, "r", encoding="utf-8") as f:
-                    self.txt_json.setText(f.read())
-            except Exception:
-                pass
-
+        # 底部按钮栏
         btn_layout = QHBoxLayout()
+        btn_format = QPushButton("🔄 格式化校验")
+        btn_format.setStyleSheet("background-color: #242436; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 14px;")
+        btn_format.clicked.connect(self._on_format)
+
         btn_save = QPushButton("💾 保存并应用")
-        btn_save.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; padding: 6px 16px;")
+        btn_save.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; border-radius: 4px; padding: 6px 18px;")
         btn_save.clicked.connect(self._on_save)
 
         btn_close = QPushButton("取消/关闭")
-        btn_close.setStyleSheet("background-color: #333344; color: white; padding: 6px 16px;")
+        btn_close.setStyleSheet("background-color: #333344; color: white; border-radius: 4px; padding: 6px 14px;")
         btn_close.clicked.connect(self.reject)
 
+        btn_layout.addWidget(btn_format)
         btn_layout.addStretch()
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_close)
         layout.addLayout(btn_layout)
 
+        # 确定初始选中的策略
+        target_id = self.initial_strategy_id
+        if not target_id and self.current_code:
+            auto_st = self.engine.auto_select_strategy(0.0, code=self.current_code)
+            if auto_st:
+                target_id = auto_st.get("id")
+        
+        target_idx = 0
+        if target_id:
+            for i in range(self.combo_strat.count()):
+                if self.combo_strat.itemData(i) == target_id:
+                    target_idx = i
+                    break
+
+        self.combo_strat.setCurrentIndex(target_idx)
+        self._switch_to_mode(self.combo_strat.itemData(target_idx))
+        self.combo_strat.currentIndexChanged.connect(self._on_combo_strat_changed)
+
+    def _switch_to_mode(self, mode: str):
+        self._current_selected_mode = mode
+        if mode == "__ALL__":
+            self.setWindowTitle("⚙️ 自定制分时交易策略编辑器 - 【全量 JSON 配置】")
+            content_str = json.dumps(self._full_config_data, ensure_ascii=False, indent=2)
+            self.txt_json.setPlainText(content_str)
+        else:
+            strats = self._full_config_data.get("strategies", [])
+            target_st = next((s for s in strats if s.get("id") == mode), None)
+            if target_st:
+                st_name = target_st.get("name", mode)
+                self.setWindowTitle(f"⚙️ 自定制分时交易策略编辑器 - 【{st_name}】")
+                content_str = json.dumps(target_st, ensure_ascii=False, indent=2)
+                self.txt_json.setPlainText(content_str)
+            else:
+                self.txt_json.setPlainText("{\n}")
+
+    def _on_combo_strat_changed(self, index: int):
+        mode = self.combo_strat.itemData(index)
+        self._switch_to_mode(mode)
+
+    def _on_format(self):
+        try:
+            cur_text = self.txt_json.toPlainText()
+            data = json.loads(cur_text)
+            formatted = json.dumps(data, ensure_ascii=False, indent=2)
+            self.txt_json.setPlainText(formatted)
+            QMessageBox.information(self, "格式正确", "✅ JSON 语法校验通过并已自动格式化排版！")
+        except Exception as e:
+            QMessageBox.critical(self, "JSON 语法错误", f"❌ JSON 解析失败，请检查语法:\n{e}")
+
     def _on_save(self):
         content = self.txt_json.toPlainText()
         try:
-            data = json.loads(content)
-            if self.engine.save_config(data):
+            parsed = json.loads(content)
+        except Exception as e:
+            QMessageBox.critical(self, "JSON 语法错误", f"❌ 解析 JSON 格式失败，请修正后再保存:\n{e}")
+            return
+
+        try:
+            if self._current_selected_mode == "__ALL__":
+                if not isinstance(parsed, dict) or "strategies" not in parsed:
+                    QMessageBox.warning(self, "格式错误", "❌ 全量配置必须为包含 'strategies' 列表的 JSON 对象！")
+                    return
+                self._full_config_data = parsed
+            else:
+                if not isinstance(parsed, dict):
+                    QMessageBox.warning(self, "格式错误", "❌ 单策略配置必须为 JSON 对象 (dict)！")
+                    return
+                st_id = parsed.get("id") or self._current_selected_mode
+                parsed["id"] = st_id
+                strats = self._full_config_data.setdefault("strategies", [])
+                replaced = False
+                for idx, s in enumerate(strats):
+                    if s.get("id") == st_id or s.get("id") == self._current_selected_mode:
+                        strats[idx] = parsed
+                        replaced = True
+                        break
+                if not replaced:
+                    strats.append(parsed)
+
+            if self.engine.save_config(self._full_config_data):
+                self.engine.load_config()
                 QMessageBox.information(self, "成功", "✅ 策略配置更新成功并已物理落盘！")
                 self.accept()
             else:
                 QMessageBox.warning(self, "错误", "❌ 策略配置保存失败，请检查文件写入权限。")
         except Exception as e:
-            QMessageBox.critical(self, "JSON 语法错误", f"❌ 解析 JSON 格式失败:\n{e}")
+            QMessageBox.critical(self, "保存异常", f"❌ 保存策略配置失败:\n{e}")
 
 
 class IntegratedTradingStrategyPanel(QWidget):
@@ -1261,9 +1378,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         return self._get_stock_realtime_data_for_code(self.code)
 
     def _on_open_editor(self):
-        dlg = IntradayStrategyEditDialog(self)
+        dlg = IntradayStrategyEditDialog(parent=self, initial_strategy_id=self.selected_strategy_id, current_code=self.code)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.engine.load_config()
+            self._populate_strategy_combo()
             self._populate_code_combo()
             self._load_mock_or_live_data()
 
@@ -1387,9 +1505,6 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"closeEvent cleanup: {e}")
         event.accept()
-        # 若是作为独立顶级窗口运行，异步触发主事件循环退出
-        if self.parent() is None:
-            QTimer.singleShot(50, QApplication.quit)
 
 
 # 向后兼容别名

@@ -2342,6 +2342,11 @@ class ATSMainWindow(QMainWindow):
         code_clean = str(code).strip()
         if not code_clean:
             return
+
+        # 记录主界面当前选中的股票和名称 (供分时策略等各独立功能模块联动)
+        c_digits = "".join(x for x in code_clean if x.isdigit()).zfill(6) if any(x.isdigit() for x in code_clean) else code_clean
+        self.current_selected_code = c_digits
+        self.current_selected_name = str(name) if name and name != "未知" else self.get_stock_name(c_digits)
             
         import time
         now = time.time()
@@ -2480,6 +2485,9 @@ class ATSMainWindow(QMainWindow):
         self.status_bar.showMessage(f"双击详情: {code} {name}")
         context_info = self._ensure_context_info(code, name, context_info)
         code_clean = str(code).strip()
+        c_digits = "".join(x for x in code_clean if x.isdigit()).zfill(6) if any(x.isdigit() for x in code_clean) else code_clean
+        self.current_selected_code = c_digits
+        self.current_selected_name = str(name) if name and name != "未知" else self.get_stock_name(c_digits)
 
         # 【核心机制】若详情弹窗实例存在且有效（不论处于悬浮显示还是磁吸贴边隐藏），直接复用、更新并拉至最前端唤醒
         from PyQt6.sip import isdeleted
@@ -3042,10 +3050,11 @@ class ATSMainWindow(QMainWindow):
             self.status_bar.showMessage(f"❌ 回测计算失败: {e}")
 
     def open_intraday_strategy_dialog(self, code=None, name=None):
-        """调起频准激光 8/18 上市盯盘与分时阶梯策略独立窗口（非模态独立运行，完全不阻塞主界面）"""
+        """调起新股分时阶梯策略独立窗口（非模态独立运行，完全不阻塞主界面）"""
         try:
             from ats.ui.intraday_strategy_dialog import PinzhunLadderStandaloneWindow
             from ats.intraday_strategy_engine import IntradayStrategyEngine
+            from PyQt6.sip import isdeleted
 
             engine = IntradayStrategyEngine.get_instance()
             json_target_codes = engine.get_all_target_codes()
@@ -3069,18 +3078,29 @@ class ATSMainWindow(QMainWindow):
 
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
             if isinstance(name, bool) or not name or name == "未知" or name == c_clean:
-                name = self.get_stock_name(c_clean) if hasattr(self, 'get_stock_name') else "频准激光"
+                name = self.get_stock_name(c_clean) if hasattr(self, 'get_stock_name') else "新股标的"
+
+            # 自动联动匹配该标的归属的策略
+            auto_st = engine.auto_select_strategy(0.0, code=c_clean)
+            target_strat_id = auto_st.get("id") if auto_st else (engine.strategies[0].get("id") if engine.strategies else "")
 
             # 保持持久非模态独立窗口引用，彻底杜绝模态阻塞
-            if not hasattr(self, 'ladder_monitor_win') or self.ladder_monitor_win is None:
+            if not hasattr(self, 'ladder_monitor_win') or self.ladder_monitor_win is None or isdeleted(self.ladder_monitor_win):
                 self.ladder_monitor_win = PinzhunLadderStandaloneWindow(code=c_clean, name=name, parent=None)
-            else:
-                if hasattr(self.ladder_monitor_win, 'code') and self.ladder_monitor_win.code != c_clean:
-                    self.ladder_monitor_win.code = c_clean
-                    self.ladder_monitor_win.name = name
-                    self.ladder_monitor_win.setWindowTitle(f"⚡ 频准激光（{c_clean} {name}）8/18 上市盯盘与分时阶梯交易独立系统")
+                if target_strat_id:
+                    self.ladder_monitor_win.selected_strategy_id = target_strat_id
+                    self.ladder_monitor_win._populate_strategy_combo()
                     self.ladder_monitor_win._populate_code_combo()
                     self.ladder_monitor_win._load_mock_or_live_data()
+            else:
+                self.ladder_monitor_win.code = c_clean
+                self.ladder_monitor_win.name = name
+                if target_strat_id:
+                    self.ladder_monitor_win.selected_strategy_id = target_strat_id
+                self.ladder_monitor_win.setWindowTitle(f"⚡ 【{c_clean} {name}】分时阶梯交易与时序评估系统")
+                self.ladder_monitor_win._populate_strategy_combo()
+                self.ladder_monitor_win._populate_code_combo()
+                self.ladder_monitor_win._load_mock_or_live_data()
 
             # 将当前最新的行情 DataFrame 传入独立窗口
             if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
@@ -4546,6 +4566,12 @@ class ATSMainWindow(QMainWindow):
             mpd._dialog_instance = None
         except Exception as e:
             print(f"[ATSMainWindow] Error closing multi period dialog on close: {e}")
+
+        if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win and not isdeleted(self.ladder_monitor_win):
+            try:
+                self.ladder_monitor_win.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing ladder monitor on close: {e}")
             
         super().closeEvent(event)
 
