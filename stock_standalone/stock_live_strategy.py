@@ -4983,167 +4983,179 @@ class StockLiveStrategy:
             if len(df) < initial_count:
                 logger.info(f"🚫 Blacklist Filter: Removed {initial_count - len(df)} ignored stocks from candidates.")
 
-            # [NEW] 精选条件：低开高走强势放量上攻
-            # 1. 低开：open < pre_close * 0.98
-            # 2. 高走：当前涨幅 > 2%
-            # 3. 强势放量：量比 > 1.5 或 换手 > 3%
+            # --- [UPGRADE] 废除反向低开过滤，精选超短强势爆发与主线梯队标的 ---
+            # 优先保留: S/A级、主线先锋、空间龙头、通道爆量突破、高开抢跑大阳
             elite_df = df.copy()
+            if 'grade' in elite_df.columns:
+                high_grade = elite_df[elite_df['grade'].isin(['S', 'A'])]
+                if len(high_grade) >= 5:
+                    elite_df = high_grade
             
-            # 应用精选过滤条件（如果列存在）
-            if 'open' in elite_df.columns and 'pre_close' in elite_df.columns:
-                elite_df = elite_df[elite_df['open'] < elite_df['pre_close'] * 0.98]
-                logger.info(f"低开筛选后剩余: {len(elite_df)} 只")
+            # 放量与动量过滤 (涨幅 >= 2.5% 且 量比 >= 1.2 或 换手 >= 2.0%)
+            pct_col = 'percent' if 'percent' in elite_df.columns else ('change_pct' if 'change_pct' in elite_df.columns else 'change')
+            ratio_col = 'volume_ratio' if 'volume_ratio' in elite_df.columns else 'ratio'
             
-            if 'change' in elite_df.columns:
-                elite_df = elite_df[elite_df['change'] > 2.0]
-                logger.info(f"高走筛选后剩余: {len(elite_df)} 只")
-            
-            # 放量条件：量比或换手满足其一
-            if 'volume_ratio' in elite_df.columns or 'turnover_rate' in elite_df.columns:
-                volume_filter = pd.Series([False] * len(elite_df), index=elite_df.index)
-                if 'volume_ratio' in elite_df.columns:
-                    volume_filter |= (elite_df['volume_ratio'] > 1.5)
-                if 'turnover_rate' in elite_df.columns:
-                    volume_filter |= (elite_df['turnover_rate'] > 3.0)
-                elite_df = elite_df[volume_filter]
-                logger.info(f"放量筛选后剩余: {len(elite_df)} 只（精选标的）")
-            
-            # 如果精选标的不足5只，用原始候选补充
+            if pct_col in elite_df.columns:
+                momentum_filter = (elite_df[pct_col] >= 2.0)
+                if ratio_col in elite_df.columns:
+                    momentum_filter |= (elite_df[ratio_col] >= 1.2)
+                if momentum_filter.sum() >= 5:
+                    elite_df = elite_df[momentum_filter]
+
             if len(elite_df) < 5:
-                logger.warning(f"精选标的不足5只，用原始候选补充")
-                df = df  # 使用原始候选
+                df = df # 原始候选补充
             else:
-                df = elite_df  # 使用精选标的
-                logger.info(f"✅ 使用精选标的: {len(df)} 只")
-            
-            # --- [DELETED] 冗余的二次过滤 ---
-            # df = selector.filter_strong_stocks(df) 
-            # 前面的 get_candidates_df 内部已调用过 filter_strong_stocks，且 elite_df 是其子集，不需要再次过滤。
-            
+                df = elite_df
+                logger.info(f"✅ 精选强势梯队标的: {len(df)} 只")
+
             # 识别热点股 (确保 reason 列存在)
             if 'reason' in df.columns:
-                df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if '热点' in x else 0)
+                df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if ('热点' in x or '先锋' in x or '龙头' in x or '中军' in x) else 0)
             else:
                 df['is_hot'] = 0
 
             selected_codes = []
-            final_top5_df = pd.DataFrame()
+            final_pool_df = pd.DataFrame()
             
-            # [FIX] 防御性检查：确保 df 不为空且包含 category 列
             if df.empty:
                 logger.warning("Auto Loop: No candidates left after elite filtering.")
                 return "无标的"
             
             if 'category' not in df.columns:
-                logger.warning("Auto Loop: 'category' column missing in candidates. Adding empty column.")
                 df['category'] = ''
             
-            # --- 策略演进：一个板块一只股 ---
+            # --- 策略演进：主线军团梯队构建 (超级主线每个板块容纳 2~3 只先锋+中军+弹性，总池扩容至 15 只) ---
+            max_pool_limit = 15 # 扩容至 15 只，承载超级主线梯队
             if concept_top5 and len(concept_top5) > 0:
-                logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
+                logger.info(f"Auto Loop: Building squadron pool from {len(concept_top5)} concepts (Max {max_pool_limit})")
                 for sector_info in concept_top5[:5]:
                     sector_name = sector_info[0]
-                    # 匹配板块 (使用 regex=False，免除特殊字符/括号过滤失败问题)
                     sub_df = df[df['category'].fillna('').str.contains(sector_name, regex=False, na=False)].copy()
                     
                     if not sub_df.empty:
-                        # 权衡选择逻辑: 
-                        # 1. 情绪价值 (score) 
-                        # 2. 量能 (amount)
-                        # 3. 联动强度 (is_hot)
                         # 排序权重: is_hot > score > amount
                         sub_df = sub_df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
-                        pick = sub_df.head(1)
-                        if pick['code'].values[0] not in selected_codes:
-                            final_top5_df = pd.concat([final_top5_df, pick])
-                            selected_codes.append(pick['code'].values[0])
+                        # 超级主线每个板块最多选 2~3 只 (先锋 + 中军/弹性)
+                        picks = sub_df.head(3)
+                        for _, pick_row in picks.iterrows():
+                            c_val = pick_row['code']
+                            if c_val not in selected_codes:
+                                final_pool_df = pd.concat([final_pool_df, pd.DataFrame([pick_row])])
+                                selected_codes.append(c_val)
+                                if len(final_pool_df) >= max_pool_limit:
+                                    break
+                    if len(final_pool_df) >= max_pool_limit:
+                        break
                 
-                # 如果板块覆盖不足5个，用全局 Top 补充
-                if len(final_top5_df) < 5:
+                # 若不足 15 只，使用全局优质 Top 补充
+                if len(final_pool_df) < max_pool_limit:
                     global_top = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
                     for _, row in global_top.iterrows():
                         if row['code'] not in selected_codes:
-                            final_top5_df = pd.concat([final_top5_df, pd.DataFrame([row])])
+                            final_pool_df = pd.concat([final_pool_df, pd.DataFrame([row])])
                             selected_codes.append(row['code'])
-                            if len(final_top5_df) >= 5: break
+                            if len(final_pool_df) >= max_pool_limit:
+                                break
             else:
-                # 降级：无板块信息则直接全局 Top 5
-                final_top5_df = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False]).head(5)
+                final_pool_df = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False]).head(max_pool_limit)
 
-            # 最终取 Top 5
-            final_top5_df = final_top5_df.head(5)
+            final_pool_df = final_pool_df.head(max_pool_limit)
             
-            # 手动执行不干扰自动化状态机的 Batch 限制
             if not is_manual:
-                self.current_batch = final_top5_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
+                self.current_batch = final_pool_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
             
-            # 导入监控列表
+            # --- 导入监控列表与盘中自修复 (遍历全部 15 只标的) ---
             added_names = []
             skipped_names = []
             repaired_names = []
             
-            for _, row in final_top5_df.iterrows():
-                code = str(row['code']).zfill(6)
-                name = row['name']
-                current_price = float(row.get('price', 0))
-                
+            # 盘中自修复淘汰：清理非持仓且明显走弱的旧标的
+            holding_codes = set()
+            if hasattr(self, 'trading_logger') and self.trading_logger:
+                try:
+                    trades = self.trading_logger.get_trades()
+                    holding_codes = set([str(t.get('code')).zfill(6) for t in trades if t.get('status') == 'OPEN'])
+                except Exception:
+                    pass
+            
             with self._lock:
-                if code in self._monitored_stocks:
-                    stock_data = self._monitored_stocks[code]
-                    # [Fix]: 如果已有条目，必须更新标签以确认为今日热点，防止"跟丢"
-                    was_updated = False
-                    if stock_data.get('create_price', 0) <= 0:
-                        stock_data['create_price'] = current_price
-                        was_updated = True
+                # 1. 自修复淘汰逻辑：非持仓且涨幅大幅回落至 < 1.0% 的 auto 标的予以移除
+                if not is_manual and hasattr(self, 'df') and self.df is not None and not self.df.empty:
+                    stale_keys = []
+                    for k_code, k_data in self._monitored_stocks.items():
+                        if str(k_data.get('tags', '')).startswith('auto_') and k_code not in holding_codes:
+                            # 检查现价涨幅
+                            if k_code in self.df.index:
+                                cur_pct = float(self.df.loc[k_code].get('percent', self.df.loc[k_code].get('change_pct', 0)))
+                                if cur_pct < 1.0: # 走弱淘汰
+                                    stale_keys.append(k_code)
+                    for k_code in stale_keys:
+                        del self._monitored_stocks[k_code]
+                        logger.info(f"🔄 [SelfHealing] 淘汰走弱监控标的: {k_code} (涨幅回落)")
+
+                # 2. 全量遍历新标的入池
+                for _, row in final_pool_df.iterrows():
+                    code = str(row['code']).zfill(6)
+                    name = str(row.get('name', ''))
+                    current_price = float(row.get('price', row.get('trade', 0)))
                     
-                    # 更新标签为最新热点标签 (除非是手动股，不覆盖手动标)
-                    # 这样依然保留原来的 rules，但刷新了身份
-                    current_tag = str(stock_data.get('tags', ''))
-                    if 'manual' not in current_tag and tag not in current_tag:
-                         stock_data['tags'] = tag  # 更新为最新的 auto_hotspot_loop
-                         was_updated = True
-                    
-                    # 更新 snapshot 中的 reason (最新的热点理由)
-                    if 'snapshot' not in stock_data: stock_data['snapshot'] = {}
-                    stock_data['snapshot']['reason'] = row.get('reason', '')
-                    stock_data['snapshot']['score'] = row.get('score', 0)
-                         
-                    if was_updated:
-                        repaired_names.append(name)
+                    if code in self._monitored_stocks:
+                        stock_data = self._monitored_stocks[code]
+                        was_updated = False
+                        if stock_data.get('create_price', 0) <= 0:
+                            stock_data['create_price'] = current_price
+                            was_updated = True
+                        
+                        current_tag = str(stock_data.get('tags', ''))
+                        if 'manual' not in current_tag and tag not in current_tag:
+                             stock_data['tags'] = tag
+                             was_updated = True
+                        
+                        if 'snapshot' not in stock_data: stock_data['snapshot'] = {}
+                        stock_data['snapshot']['reason'] = str(row.get('reason', ''))
+                        stock_data['snapshot']['score'] = float(row.get('score', 0))
+                        stock_data['snapshot']['grade'] = str(row.get('grade', ''))
+                             
+                        if was_updated:
+                            repaired_names.append(name)
+                        else:
+                            skipped_names.append(name)
                     else:
-                        skipped_names.append(name)
-                else:
-                    added_names.append(name)
-                    self._monitored_stocks[code] = {
-                        "name": name,
-                        "rules": [{'type': 'price_up', 'value': current_price}], 
-                        "last_alert": 0,
-                        "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "create_price": current_price,
-                        "tags": tag,
-                        "grade": row.get('grade', ''),
-                        "snapshot": {
-                            "score": row.get('score', 0),
-                            "reason": row.get('reason', ''),
-                            "category": row.get('category', ''),
-                            "tqi": row.get('tqi_score', 0)
+                        added_names.append(name)
+                        self._monitored_stocks[code] = {
+                            "name": name,
+                            "rules": [{'type': 'price_up', 'value': current_price}], 
+                            "last_alert": 0,
+                            "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "create_price": current_price,
+                            "tags": tag,
+                            "grade": str(row.get('grade', '')),
+                            "snapshot": {
+                                "score": float(row.get('score', 0)),
+                                "reason": str(row.get('reason', '')),
+                                "category": str(row.get('category', '')),
+                                "tqi": float(row.get('tqi_score', 0)),
+                                "status": str(row.get('status', ''))
+                            }
                         }
-                    }
-                
-                # 同步到数据库
-                if hasattr(self, 'trading_logger'):
-                    data = self._monitored_stocks[code]
-                    self.trading_logger.log_voice_alert_config(
-                        code=code,
-                        resample=data.get('resample', 'd'),
-                        name=name,
-                        rules=json.dumps(data.get('rules', [])),
-                        last_alert=data.get('last_alert', 0),
-                        tags=data.get('tags', ''),
-                        rule_type_tag=data.get('rule_type_tag', ''),
-                        create_price=data.get('create_price', 0.0),
-                        created_time=data.get('created_time', '')
-                    )
+                    
+                    # 同步到数据库
+                    if hasattr(self, 'trading_logger') and self.trading_logger:
+                        data = self._monitored_stocks[code]
+                        try:
+                            self.trading_logger.log_voice_alert_config(
+                                code=code,
+                                resample=data.get('resample', 'd'),
+                                name=name,
+                                rules=json.dumps(data.get('rules', [])),
+                                last_alert=data.get('last_alert', 0),
+                                tags=data.get('tags', ''),
+                                rule_type_tag=data.get('rule_type_tag', ''),
+                                create_price=data.get('create_price', 0.0),
+                                created_time=data.get('created_time', '')
+                            )
+                        except Exception:
+                            pass
            
             added_count = len(added_names)
             repaired_count = len(repaired_names)
@@ -5153,8 +5165,7 @@ class StockLiveStrategy:
                 self._save_monitors()
                 mode_str = "Manual" if is_manual else "Auto"
                 
-                # 构建详细日志
-                log_detail = f"{mode_str} Hotspots Report:"
+                log_detail = f"{mode_str} Hotspots Report (Pool={len(self._monitored_stocks)}):"
                 if added_names: log_detail += f" [Added: {','.join(added_names)}]"
                 if repaired_names: log_detail += f" [Repaired: {','.join(repaired_names)}]"
                 if skipped_names: log_detail += f" [Skipped: {','.join(skipped_names)}]"

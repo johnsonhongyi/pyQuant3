@@ -303,8 +303,8 @@ class StockSelector:
         
         return df
 
-    def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None,top10 = 10) -> pd.DataFrame:
-        """执行优化后的筛选逻辑"""
+    def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None, top10: int = 10) -> pd.DataFrame:
+        """执行优化后的筛选逻辑 (支持分时自适应流动性门槛、板块军团梯队、多周期通道挤压突破与竞价抢跑)"""
         resample = self.resample # 使用当前实例的周期标识
         if df.empty:
             return df
@@ -315,160 +315,220 @@ class StockSelector:
         if today is None:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
 
-        # 1. 基础过滤 (非停牌，成交额需大于 1.5亿 提高流动性门槛，确保可操作性)
+        # 1. 动态时段自适应流动性门槛与特权豁免
+        now_str = datetime.datetime.now().strftime("%H:%M")
+        if now_str < "09:35":
+            dyn_amount_threshold = 15000000 # 1500万 (早盘竞价与开盘秒板窗口)
+        elif now_str < "10:00":
+            dyn_amount_threshold = 35000000 # 3500万 (早盘快速发酵窗口)
+        else:
+            dyn_amount_threshold = 80000000 # 8000万 (盘中常态门槛)
+
+        # 基础活跃度过滤 (非停牌，成交额满足动态门槛 或 具备涨停/爆发特权)
         mask = pd.Series(True, index=df.index)
         if 'volume' in df.columns:
             mask &= (df['volume'] > 0)
+        
         if 'amount' in df.columns:
-            # 提高门槛：1.5亿以上，排除流流动性差的僵尸股
-            mask &= (df['amount'] >= 150000000) 
+            amt = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+            pct_col = pd.to_numeric(df.get('per1d', df.get('percent', df.get('pct', df.get('change_pct', 0)))), errors='coerce').fillna(0)
+            ratio_col = pd.to_numeric(df.get('ratio', df.get('volume_ratio', 1.0)), errors='coerce').fillna(1.0)
+            
+            # 特权豁免条件：涨停、大阳抢跑、高量比异动
+            is_limit_up = (pct_col >= 9.2) | (pct_col >= 19.0) # 主板或创业/科创板涨停
+            is_surge = (pct_col >= 4.5) & (ratio_col >= 1.5)  # 大阳且放量
+            is_exempt = is_limit_up | is_surge
+            
+            # 满足动态金额 或 满足特权豁免
+            mask &= ((amt >= dyn_amount_threshold) | is_exempt)
             
         df_active = df[mask].copy()
         if df_active.empty:
-            self.logger.info("无满足高流动性要求的股票 (Threshold: 1.5亿)")
+            self.logger.info(f"无满足流动性/特权要求的股票 (时段门槛: {dyn_amount_threshold/1e4:.0f}万)")
             return pd.DataFrame()
         
         # 获取历史选股频次
         hist_counts = self.get_historical_selected_codes(days=5)
 
-        # --- Pre-calculate Market Hot Concepts ---
+        # --- 2. 板块军团爆发深度分析与梯队构建 (Sector Squadron & Echelon Engine) ---
         concept_dict = {}
-        for _, row in df_active.iterrows():
-            raw_c = row.get('category', row.get('sector', '')) # 兼容 scraper 的 sector 字段
+        for code_val, row in df_active.iterrows():
+            raw_c = row.get('category', row.get('sector', ''))
             if pd.isna(raw_c) or str(raw_c).lower() == 'nan': continue
             cats = [c.strip() for c in re.split('[;|]', str(raw_c)) if c.strip() and c.strip() != '0']
             if not cats and isinstance(raw_c, str):
-                # 兼容逗号或空格分隔
                 cats = [c.strip() for c in re.split('[;,| ]', raw_c) if c.strip() and c.strip() != '0']
             
-            pct = float(row.get('percent', row.get('change_pct', 0))) # 兼容 scraper 的 change_pct
+            row_pct = float(row.get('per1d', row.get('percent', row.get('pct', row.get('change_pct', 0)))))
+            row_amt = float(row.get('amount', 0))
+            code_s = str(row.get('code', code_val)).zfill(6)
+            
             for c in cats:
-                concept_dict.setdefault(c, []).append(pct)
-        
+                if c not in concept_dict:
+                    concept_dict[c] = {
+                        'stocks': [],
+                        'limit_up_count': 0,
+                        'surge_count': 0,
+                        'total_amount': 0.0,
+                        'pcts': []
+                    }
+                concept_dict[c]['stocks'].append({
+                    'code': code_s,
+                    'pct': row_pct,
+                    'amount': row_amt,
+                    'name': str(row.get('name', ''))
+                })
+                concept_dict[c]['pcts'].append(row_pct)
+                concept_dict[c]['total_amount'] += row_amt
+                if row_pct >= 9.2:
+                    concept_dict[c]['limit_up_count'] += 1
+                elif row_pct >= 4.5:
+                    concept_dict[c]['surge_count'] += 1
+
+        # 计算板块综合热度得分：(涨停数*3 + 大阳数*1.5 + 平均涨幅)
         concept_scores = []
-        for c, pcts in concept_dict.items():
-            if len(pcts) >= 3: 
-                avg = sum(pcts) / len(pcts)
-                concept_scores.append((c, avg))
-        
+        for c, stats in concept_dict.items():
+            if len(stats['pcts']) >= 2:
+                avg_pct = sum(stats['pcts']) / len(stats['pcts'])
+                heat_score = stats['limit_up_count'] * 3.0 + stats['surge_count'] * 1.5 + avg_pct
+                concept_scores.append((c, heat_score, avg_pct, stats['limit_up_count'], stats['stocks'], stats['total_amount']))
+
         concept_scores.sort(key=lambda x: x[1], reverse=True)
         top_hot_names = [x[0] for x in concept_scores[:top10]]
-        self.logger.info(f"Top {top10} Concepts: {top_hot_names}")
-        self._last_hotspots = concept_scores # 缓存供外部查询
+        self.logger.info(f"Top {top10} Hot Concepts: {[(x[0], round(x[1], 1), f'涨停:{x[3]}') for x in concept_scores[:top10]]}")
+        self._last_hotspots = [(x[0], x[2]) for x in concept_scores]
+
+        # 梯队角色映射字典
+        echelon_map: Dict[str, Dict[str, Any]] = {} # code -> {'role': '空间龙头/主线先锋/主线中军/弹性标的', 'theme': '光通信', 'bonus': int}
         
-        # --- [NEW] Identify Sector Leaders (Top 5 per Hot Theme) ---
-        protected_leaders = set()
-        for c_name in top_hot_names:
-            # 在当前活跃股中找属于该题材的
-            sector_stocks = []
-            for code, row in df_active.iterrows():
-                raw_c = row.get('category', row.get('sector', ''))
-                # 题材龙头排序：优先使用 per1d 涨幅
-                row_pct = float(row.get('per1d', row.get('percent', row.get('pct', 0))))
-                if pd.notna(raw_c) and c_name in str(raw_c):
-                    sector_stocks.append({
-                        'code': str(code).zfill(6),
-                        'percent': row_pct,
-                        'amount': float(row.get('amount', 0))
-                    })
-            # 按涨幅和成交额排序，取前 5 名
-            sector_stocks.sort(key=lambda x: (x['percent'], x['amount']), reverse=True)
-            for s in sector_stocks[:top10]:
-                protected_leaders.add(s['code'])
-        
-        self.logger.info(f"Protected Sector Leaders: {len(protected_leaders)} stocks from Top {top10} Themes")
+        # 识别超级主线 (涨停 >= 2 或 热度排名 Top 5)
+        for rank_idx, (c_name, heat_sc, avg_p, lu_cnt, st_list, tot_amt) in enumerate(concept_scores[:top10]):
+            st_list.sort(key=lambda x: (x['pct'], x['amount']), reverse=True)
+            # 1. 主线先锋 (前 2 名涨幅最高且 >= 5% 的标的)
+            for s in st_list[:2]:
+                if s['pct'] >= 4.5:
+                    code_key = s['code']
+                    if code_key not in echelon_map or echelon_map[code_key]['bonus'] < 70:
+                        echelon_map[code_key] = {
+                            'role': '【主线先锋】',
+                            'theme': c_name,
+                            'bonus': 70
+                        }
+            
+            # 2. 主线中军 (板块内成交额 Top 2 且涨幅 >= 2% 的容量标的)
+            st_by_amt = sorted(st_list, key=lambda x: x['amount'], reverse=True)
+            for s in st_by_amt[:2]:
+                if s['amount'] >= 300000000 and s['pct'] >= 2.0: # 成交额 >= 3亿
+                    code_key = s['code']
+                    if code_key not in echelon_map:
+                        echelon_map[code_key] = {
+                            'role': '【主线中军】',
+                            'theme': c_name,
+                            'bonus': 50
+                        }
+                        
+            # 3. 20cm 弹性先锋 (300/688 开头且涨幅 >= 8%)
+            for s in st_list:
+                if (s['code'].startswith('30') or s['code'].startswith('68')) and s['pct'] >= 8.0:
+                    code_key = s['code']
+                    if code_key not in echelon_map or echelon_map[code_key]['bonus'] < 60:
+                        echelon_map[code_key] = {
+                            'role': '【弹性先锋】',
+                            'theme': c_name,
+                            'bonus': 60
+                        }
 
         selected_records = []
 
         for idx, row in df_active.iterrows():
             data = row.to_dict()
-            # [SAFETY] 明确从 column 中获取 code，防止 index 被重置后使用 RangeIndex 导致代码/名称不对应
             code_str = str(row.get('code', idx)).zfill(6)
             data['code'] = code_str
 
-            # [REORDER] 预先提取核心指标，防止 UnboundLocalError
             price = float(data.get('price', data.get('trade', data.get('close', 0))))
             pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
-            ratio = float(data.get('ratio', 0)) # 核心量比
+            ratio = float(data.get('ratio', data.get('volume_ratio', 0))) # 核心量比
             lastp1d = float(data.get('lastp1d', 0))
 
-            # [USER-REQ] 计算量比：成交量 / 近6日均量 (last6vol)
             last6v = float(data.get('last6vol', 0))
             vol_raw = float(data.get('vol', data.get('volume', 0)))
             vol_ratio_l6 = vol_raw / last6v if last6v > 0 else 0.0
 
             if pct == 0 and lastp1d > 0:
                 pct = round((price - lastp1d) / lastp1d * 100, 2)
-            data['percent'] = pct # 回填以供后续评估使用
+            data['percent'] = pct
             
             reason = []
             score = 0
+            echelon_info = echelon_map.get(code_str, None)
             
-            # A. 趋势判断
+            # --- A. 板块梯队暴击加分与角色赋予 ---
+            if echelon_info:
+                score += echelon_info['bonus']
+                reason.append(f"{echelon_info['role']}({echelon_info['theme']})")
+
+            # --- B. 趋势与结构分析 ---
             try:
-                # price, pct, amount 已在上方提取
                 ma5 = float(data.get('ma5d', 0))
                 ma10 = float(data.get('ma10d', 0))
                 ma20 = float(data.get('ma20d', 0))
                 ma60 = float(data.get('ma60d', 0))
                 
-                # [NEW] 振幅与波动率 (上蹿下跳特征)
                 high_p = float(data.get('high', 0))
                 low_p = float(data.get('low', 0))
+                open_p = float(data.get('open', 0))
                 amplitude = (high_p - low_p) / lastp1d * 100 if lastp1d > 0 else 0
                 
-                # [NEW] 破位检测 (Broken Wave Detection)
+                # 破位检测
                 is_broken = False
-                if ma20 > 0 and price < ma20 * 0.985: # 跌穿 20 日线 1.5% 以上
+                if ma20 > 0 and price < ma20 * 0.985:
                     is_broken = True
-                if ma60 > 0 and price < ma60 * 0.98: # 跌穿 60 日线 (生命线)
+                if ma60 > 0 and price < ma60 * 0.98:
                     is_broken = True
                 
-                # 对已破位且仍有跌势的个股进行严厉惩罚 (除非是极速反弹的情形)
                 if is_broken and pct < 2.0:
                     score -= 100
                     reason.append("趋势破位")
                 
-                # 1. 均线状态：三线顺排是强势基础 (主升浪核心)
-                if ma5 > 0 and ma10 > 0 and ma20 > 0 and ma60 > 0:
-                    if ma5 > ma10 > ma20 > ma60: # 完美多头排列
-                        score += 40 # 权重提升 from 15
-                        reason.append("主升浪结构")
-                    elif ma5 > ma10 > ma20:
-                        score += 20
-                        reason.append("三线多排")
+                # 1. 均线状态
+                if ma5 > 0 and ma10 > 0 and ma20 > 0:
+                    if ma5 > ma10 > ma20:
+                        score += 30
+                        reason.append("多头排列")
                 
-                # 均线斜率 (上涨力度)
                 ma5_1d = float(data.get('ma51d', 0))
                 if ma5 > 0 and ma5_1d > 0 and ma5 > ma5_1d:
                     score += 15
                     reason.append("均线向上")
 
-                # 2. 突破高点判断
-                upper1d = float(data.get('upper1', 0))
-                last_h1d = float(data.get('last_h1d', data.get('lastp1d', 0))) # 兼容快照与历史数据
-                last_h2d = float(data.get('last_h2d', 0))
+                # 2. 多周期通道挤压与爆量突破 (Squeeze & Launch)
+                upper1d = float(data.get('upper1', data.get('ch_upper', 0)))
+                lower1d = float(data.get('lower1', data.get('ch_lower', 0)))
+                mid1d = float(data.get('mid1', data.get('ch_mid', (upper1d + lower1d)/2 if upper1d > 0 and lower1d > 0 else 0)))
                 
-                is_breaking_high = False
-                if upper1d > 0 and price > upper1d:
-                    is_breaking_high = True
-                    reason.append("突破上轨")
-                elif last_h1d > 0 and price > last_h1d * 1.01:
-                    is_breaking_high = True
+                is_squeeze_breakout = False
+                if upper1d > 0 and mid1d > 0 and lower1d > 0:
+                    band_width = (upper1d - lower1d) / mid1d
+                    # 通道宽度处于挤压期 (< 12%) 且今日大阳突破上轨
+                    if band_width < 0.12 and price > upper1d * 0.995 and (ratio > 1.5 or vol_ratio_l6 > 1.5):
+                        is_squeeze_breakout = True
+                        score += 65
+                        reason.append("通道挤压爆量突破")
+                    elif price > upper1d:
+                        score += 25
+                        reason.append("突破通道上轨")
+
+                # 3. 突破前高判断
+                last_h1d = float(data.get('lasth1d', data.get('lastp1d', 0)))
+                last_h2d = float(data.get('lasth2d', 0))
+                if last_h1d > 0 and price > last_h1d * 1.01:
+                    score += 25
                     reason.append("突破昨日高点")
                 elif last_h2d > 0 and price > last_h2d:
-                    is_breaking_high = True
+                    score += 15
                     reason.append("突破前两日高点")
 
-                if is_breaking_high:
-                    if vol_ratio_l6 > 1.8 or ratio > 1.8: # 强放量突破
-                        score += 50 # from 40
-                        reason.append("强势放量启动")
-                    else:
-                        score += 20 # from 15
-                        reason.append("尝试启动突破")
-
-                # 3. 动能：连涨逻辑
+                # 4. 动能与连涨 (连板/主升空间龙头判定)
                 limit_days = getattr(cct, 'compute_lastdays', 5)
                 consecutive_rise = 0
                 if lastp1d > 0 and price > lastp1d:
@@ -481,364 +541,106 @@ class StockSelector:
                         else:
                             break
                 
-                if consecutive_rise >= 3:
-                    score += consecutive_rise * 8 # 提升权重
-                    reason.append(f"{consecutive_rise}连阳")
-                    if consecutive_rise >= 5:
-                        score += 20 # 大主升波 bonus
-                        reason.append("主升波段")
+                # 连板/空间龙头赋予超高优先级
+                last_pct1d = float(data.get('per1d', 0))
+                if last_pct1d >= 9.2 and pct >= 9.2:
+                    score += 80
+                    reason.append("【空间龙头连板】")
+                elif consecutive_rise >= 3:
+                    score += consecutive_rise * 10
+                    reason.append(f"{consecutive_rise}连阳主升")
                 
-                # 4. 波动率加分 (上蹿下跳 = 弹性好)
-                if amplitude > 8.0:
-                    score += 25
-                    reason.append("高弹性/暴量")
-                elif amplitude > 5.0:
-                    score += 15
-                    reason.append("活跃波动")
-                
-                # 5. 回调买点 (缩量企稳)
+                # 5. 早盘竞价与开盘抢跑异动 (09:25 - 09:35 Sniffer)
+                if open_p > 0 and lastp1d > 0:
+                    open_pct = (open_p - lastp1d) / lastp1d * 100
+                    if 2.0 <= open_pct <= 8.5 and price >= open_p and (ratio > 1.8 or vol_ratio_l6 > 1.8):
+                        score += 45
+                        reason.append("竞价抢跑强启动")
+
+                # 6. 回调买点 (缩量回踩 MA5/10)
                 is_pullback = False
-                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.02: # 稍微放宽回调幅度
-                    if ratio < 1.1 and price >= ma5: # 缩量且守住 MA5
-                        score += 30 # from 20
+                if ma5 > 0 and 0 <= (price - ma5) / ma5 < 0.02:
+                    if ratio < 1.1 and price >= ma5:
+                        score += 30
                         reason.append("强势缩量回踩")
                         is_pullback = True
-                
-                # 5. 资金强度 (成交额权重)
+
+                # 7. 资金成交额
                 amount = float(data.get('amount', 0))
-                if amount > 500000000: # 5亿以上大资金
-                    score += 20 # 提升权重 from 15 to 20
-                    reason.append("主力活跃")
+                if amount > 500000000:
+                    score += 20
+                    reason.append("主力大资金")
                 elif amount > 200000000:
-                    score += 10 # from 5 to 10
+                    score += 10
 
             except Exception as e:
                 self.logger.error(f"Error filtering {code_str}: {e}")
 
-            # B. 今日涨跌与量能精细判断 (pct, ratio已在上面提取)
-            
-            # 优选 3% - 8% 的稳健涨幅，避免已涨停难以介入，也避免冲高回落
+            # --- C. 今日涨跌与量能精细判断 ---
             if 3.0 <= pct <= 8.5:
-                score += 15
-                if ratio > 1.2: score += 10 # 量价齐升
-            elif pct > 9.5:
-                score += 15 # 冲击涨停权重提升
-                reason.append("冲击涨停")
-            elif -2.0 <= pct < 2.0 and is_pullback:
-                score += 15 # 提升权重 from 10 to 15
+                score += 20
+                if ratio > 1.2: score += 10
+            elif pct > 9.2:
+                score += 35 # 涨停大幅加分
+                reason.append("冲击涨停/封死")
             
-            # C. 放量情况 (量比)
-            if 1.5 < ratio < 4.0: # 健康放量
-                score += 15
+            if 1.5 < ratio < 5.0:
+                score += 20
                 reason.append("健康放量")
-            elif ratio >= 4.0: # 巨量
-                score += 10
-                reason.append("巨量成交")
-            
-            # D. 板块效应
-            stock_cats = []
-            raw_c_val = data.get('category', '')
-            if pd.notna(raw_c_val) and str(raw_c_val).lower() != 'nan':
-                 stock_cats = [c.strip() for c in re.split('[;|]', str(raw_c_val)) if c.strip()]
-            
-            strong_sector_hit = [c for c in stock_cats if c in top_hot_names]
-            if strong_sector_hit:
-                score += 15 # 提升权重 from 10 to 15
-                reason.append(f"热点:{strong_sector_hit[0]}")
-                # [针对性保护] 如果是核心热点前 5 名龙头
-                if code_str in protected_leaders:
-                    score += 50
-                    reason.append("板块龙头")
+            elif ratio >= 5.0:
+                score += 15
+                reason.append("巨量爆发")
 
-            # F. [New] 特定模式筛选 (MA60 反转 / 布林上轨攻击)
-            try:
-                # 1. MA60 反转选股
-                ma60 = float(data.get('ma60d', 0))
-                if ma60 > 0:
-                    # 最近 1-2 日有探底 (破MA60)
-                    last_low1d = float(data.get('lastl1d', 0)) # 假设有这些字段
-                    # 或者从 ma60 乖离判断整理
-                    ma60_bias = (price - ma60) / ma60
-                    if -0.01 < ma60_bias < 0.04 and pct > 2.0:
-                        # 穿过前两日最高
-                        max_h_2d = max(float(data.get('lastp1d', 0)), float(data.get('lastp2d', 0)))
-                        if price > max_h_2d and price > ma60:
-                             score += 30
-                             reason.append("MA60反转启动")
-                
-                # 3. 量能配合 (Volume Support) - 寻找持续性放量
-                vma5 = float(data.get('vma5', 0))
-                is_pulse_risk = False
-                if amount > 0 and vma5 > 0:
-                    vol_ratio = amount / vma5
-                    if vol_ratio > 1.5 and vol_ratio < 6.0: # 适度放量
-                        score += 30
-                        reason.append("量能配合")
-                    elif vol_ratio >= 6.0: # 极速放量 (需警惕脉冲诱多)
-                        score -= 50 # 严厉惩罚脉冲诱多
-                        is_pulse_risk = True
-                        reason.append("放量过激(诱多风险)")
-                
-                # 3.A 偏离度检查 (Deviation Check) - 预防洗盘初期或过热
-                is_overheated = False
-                if ma5 > 0:
-                    deviation = (price - ma5) / ma5
-                    if deviation > 0.12: # 离 5 日线太远，容易洗盘
-                        score -= 40
-                        is_overheated = True
-                        reason.append("乖离过大(洗盘风险)")
-                
-                # 2. 布林上轨攻击 (Upper Attack)
-                upper1d = float(data.get('upper1', 0))
-                if upper1d > 0:
-                    if price > upper1d:
-                        score += 20
-                        reason.append("站稳上轨")
-                        # 检查是否连续攻击 (昨收也在上轨附近或之上)
-                        last_close1d = float(data.get('lastp1d', 0))
-                        upper2d = float(data.get('upper2', 0))
-                        if last_close1d > upper2d * 0.99:
-                             score += 15
-                             reason.append("连续上轨攻击")
-
-                # 3. [User NEW] 触底反弹 + 新高连阳 (Safety Priority)
-                # 检查是否从低位起涨：price 站上 MA10/MA20，且连阳
-                if consecutive_rise >= 2 and ma20 > 0:
-                    dist_to_ma20 = (price - ma20) / ma20
-                    if 0 < dist_to_ma20 < 0.05: # 距离 20 日线不远，属于反弹初中期
-                        score += 35
-                        reason.append("触底反弹启动")
-                        if consecutive_rise >= 3:
-                            score += 20
-                            reason.append("新高连阳(安全)")
-
-                # 4. [Structural Pattern] 大级别底部与回踩启动 (针对 600519 类型)
-                # 引入衰减因子: 在启动前 1-2 天分数最高，随连阳天数增加而衰减
-                # 这样可以精准捕捉 03-13 这种临界点
-                decay = max(0.2, 1.0 - (consecutive_rise - 1) * 0.3) if consecutive_rise > 0 else 1.0
-                
-                # [NEW] 缩量横盘突破识别
-                max5 = float(data.get('max5', 0))
-                min5 = float(data.get('min5', 0))
-                
-                if max5 > 0 and min5 > 0:
-                    consolidation_width = (max5 - min5) / min5
-                    if code_str == '603817' or code_str == '300672': self.logger.info(f"DEBUG {code_str}: max5={max5}, min5={min5}, width={consolidation_width:.4f}, breakout={price > max5}")
-                    
-                    # 4.A 窄幅横盘突破 (短期动力)
-                    if consolidation_width < 0.05 and price > max5 * 0.995:
-                        score += 60 * decay
-                        reason.append(f"横盘突破(时效:{consecutive_rise}d)")
-                    
-                    # 4.B 大级别平台突破 (周线/宏观动力)
-                    # 检查是否突破了近 20 日甚至更长的高点 (基于 TDD 注入的 lasth1d..10d 及 max5)
-                    # 如果当前价远超近两周高位，且属于启动前 3 日
-                    if price > max5 * 1.02 and consecutive_rise <= 3:
-                        score += 30
-                        reason.append("大级别平台突破")
-
-                # 利用 tdd 指标: hmax, max10, upper, lower
-                hmax = float(data.get('hmax', 0))
-                lower = float(data.get('lower', 0))
-                # 如果股价在 ma60 之上，且距离 ma60 较近 (回踩)
-                if ma60 > 0 and price > ma60 * 0.99 and price < ma60 * 1.05:
-                    # 如果近期有过从 [lower] 附近的拉起，说明底部已构筑
-                    if lower > 0 and price > lower * 1.05:
-                        score += 40 * decay
-                        reason.append("大级别底部构筑")
-                        if 1 <= consecutive_rise <= 2: # 刚启动阶段
-                            score += 20 * decay
-                            reason.append("回踩确认启动")
-                
-                # 特征：中阳吞没 (突破近期 max10/hmax 阻力)
-                max10 = float(data.get('max10', 0))
-                if max10 > 0 and price > max10 * 1005 and pct > 2.0:
-                    score += 25 * decay
-                    reason.append("突破近期平台")
-                
-                # [NEW] 开盘结构与临界突破 (盘中发掘)
-                high4 = float(data.get('high4', 0))
-                if high4 > 0 and price > high4:
-                    score += 20 * decay
-                    reason.append("突破4日高点")
-                
-                # 低开高走 / 高开高走 (03-13 模型)
-                opened = float(data.get('open', 0))
-                if opened > 0 and lastp1d > 0:
-                    # 低开反包 (03-13 是低开高走反包昨高)
-                    if opened < lastp1d and price > lastp1d * 1.01:
-                        score += 30 * decay
-                        reason.append("低开反包(强)")
-                    # 高开高走 (加速)
-                    elif opened > lastp1d * 1.01 and price > opened:
-                        score += 40 * decay
-                        reason.append("高开加速突破")
-
-                # [NEW] 反包新高结构
-                last_high1d = float(data.get('lasth1d', 0))
-                last_pct1d = float(data.get('per1d', 0))
-                if price > last_high1d and last_pct1d < 0.5: # 昨低迷今反转
-                    score += 25 * decay
-                    reason.append("反包启动")
-
-                # 6. ⭐ [NEW] 超短结构 (Short-term Ultra Structure)
-                # 逻辑：两日均为阳线 + 重心逐日抬高(HH/LL) + 收盘递增 + 站稳 MA5 + (今日或昨日振幅 > 5%)
-                low_p = float(data.get('low', 0))
-                open_p = float(data.get('open', 0))
-                lasto1d = float(data.get('lasto1d', 0))
-                lasth1d = float(data.get('lasth1d', 0))
-                lastl1d = float(data.get('lastl1d', 0))
-                lasth2d = float(data.get('lasth2d', 0))
-                lastl2d = float(data.get('lastl2d', 0))
-                lastp2d = float(data.get('lastp2d', 0))
-                
-                # A. 阳线与收盘递增
-                is_today_red = (price > open_p)
-                is_yesterday_red = (lastp1d > lasto1d)
-                is_price_rising = (price > lastp1d) and (lastp1d > lastp2d)
-                
-                # B. 重心抬高结构 (Rising Structure: HH & LL)
-                # 今日 vs 昨日
-                is_today_hhll = (high_p > lasth1d) and (low_p > lastl1d)
-                # 昨日 vs 前日
-                is_yesterday_hhll = (lasth1d > lasth2d) and (lastl1d > lastl2d)
-                
-                # C. MA5 支撑
-                is_on_ma5 = (price > ma5) if ma5 > 0 else False
-                
-                # D. 振幅门槛 (其中一日 > 5%)
-                amp_today = (high_p - low_p) / lastp1d if lastp1d > 0 else 0
-                amp_yesterday = (lasth1d - lastl1d) / lastp2d if lastp2d > 0 else 0
-                has_high_amp = (amp_today > 0.05) or (amp_yesterday > 0.05)
-                
-                if is_today_red and is_yesterday_red and is_price_rising and is_on_ma5 and has_high_amp:
-                    if is_today_hhll and is_yesterday_hhll:
-                        score += 120
-                        reason.append("超短结构(重心抬高)")
-                    else:
-                        score += 80
-                        reason.append("超短结构(双阳振幅)")
-                        
-                    if amp_today > 0.05 and amp_yesterday > 0.05:
-                        score += 20
-                        reason.append("双阳双振")
-                    elif amp_today > 0.08:
-                        score += 10
-                        reason.append("今日强弹性")
-            except Exception:
-                pass
-
-            # E. 走势分级与状态标签 (重心调整)
+            # --- D. 走势分级与状态标签 ---
             hist_cnt = hist_counts.get(code_str, 0)
             tqi = data.get('tqi_score', 0)
             up_r = data.get('up_ratio', 0)
             stage = int(data.get('cycle_stage', 2))
             
-            status_tag = ""
+            status_tag = "蓄势"
             grade = "C"
             
-            # --- 走势分级逻辑 2.0 (增强双轨直通: 主升爆发 & 触底反弹) ---
-            is_ma60_resistance = False
-            is_ma60_support = False
-            is_expansion_breakout = any("突破" in r or "启动" in r for r in reason) # 识别主升爆发标志
+            # 直通特权判定：空间龙头、主线先锋、通道挤压爆量突破、竞价抢跑
+            is_vip_launch = (echelon_info is not None) or is_squeeze_breakout or ("空间龙头" in "|".join(reason)) or ("竞价抢跑" in "|".join(reason))
             
-            ma60 = float(data.get('ma60d', 0))
-            if ma60 > 0:
-                ma10 = float(data.get('ma10', 0))
-                # 场景 A: 下降通道反弹压力 
-                if ma10 > 0 and ma10 < ma60 * 0.98 and price < ma60 * 1.015:
-                    is_ma60_resistance = True
-                # 场景 B: 趋势扭转后的回踩 (Rebound 型)
-                elif ma10 > 0 and ma10 > ma60 * 0.99 and price > ma60 * 0.98 and price < ma60 * 1.05:
-                    is_ma60_support = True
-
-            # [NEW] 启动浪结构定义 (Launch Wave): 
-            # 1. 突破关键均线或近期高点 且 放量
-            # 2. 之前处于震荡或底部 (TQI 并不极高)
-            is_launch_confirm = any("突破" in r or "启动" in r for r in reason)
-            is_launch_wave = False
-            if is_launch_confirm and (ratio > 1.5 or vol_ratio_l6 > 1.5) and pct > 3.0:
-                 is_launch_wave = True
-            
-            # 核心过滤器: 
-            # 1. 顺势加速类: TQI 极高
-            # 2. 抄底反转类: MA60 支撑且分值达 80 
-            # 3. 主升爆点类: 高分触发 (score >= 80) 或 启动浪关键词直通
-            if ((((tqi >= 60 and up_r >= 0.7 and stage in (2, 3)) or (up_r >= 0.8 and stage == 2)) or 
-                 (score >= 80 and not is_ma60_resistance) or 
-                 (score >= 50 and is_launch_confirm)) and (not is_ma60_resistance or is_launch_confirm)):
-                
-                # 分级调优
-                if is_broken:
-                    grade = "D"
-                    status_tag = "趋势破位"
-                elif score >= 140 or (tqi >= 80 and up_r >= 0.85):
-                    grade = "S"
-                    if is_launch_wave and tqi < 50: # TQI 还不高说明是真正“刚启动”
-                         status_tag = "启动浪加速"
-                    else:
-                         status_tag = "主升加速" if not is_pullback else "强势回踩"
-                    
-                elif score >= 90 or (tqi >= 60 and up_r >= 0.7):
-                    grade = "A"
-                    status_tag = "启动浪" if is_launch_wave else ("上升中继" if not is_ma60_support else "趋势回归")
-                elif score >= 60 or tqi >= 45:
-                    grade = "B"
-                    status_tag = "蓄势待发"
+            if score >= 120 or is_vip_launch:
+                grade = "S"
+                if echelon_info:
+                    status_tag = echelon_info['role']
+                elif "空间龙头" in "|".join(reason):
+                    status_tag = "【空间龙头】"
+                elif is_squeeze_breakout:
+                    status_tag = "通道爆量突破"
                 else:
-                    grade = "C"
-                    status_tag = "震荡蓄势"
-                
-                if not is_broken:
-                    score += 30 # S/A/B 通用奖分 (趋势对齐)
-                    if is_launch_wave:
-                        score += 20 # 启动浪额外奖励
-                        reason.append("捕捉:启动浪结构")
-                    reason.append(f"{grade}级:趋势对齐")
-            # 回踩支撑处理 (正向激励)
-            elif is_ma60_support:
-                grade = "A" if (tqi >= 40 or up_r >= 0.6) else "B"
-                status_tag = "趋势回踩确认"
-                score += 35
-                reason.append("分级调整:MA60支撑回踩")
-            # 压力位处理 (B级降级)
-            elif is_ma60_resistance and (tqi >= 45 or up_r >= 0.6):
-                grade = "B" 
-                status_tag = "反弹压力位"
-                score -= 30
-                reason.append("分级降级:MA60下降压力")
-            # B级: 模式启动
-            elif score > 60 or stage == 1:
+                    status_tag = "主升加速"
+            elif score >= 85:
+                grade = "A"
+                status_tag = "启动浪" if not is_pullback else "上升中继"
+            elif score >= 60:
                 grade = "B"
-                status_tag = "启动/蓄势"
-                score += 10
-            
-            # [特供逻辑] 高位中继/接力 (空中接力)
-            # 特征: 虽今日涨幅不大，但处于 S/A 级且缩量不破 MA5/10
-            if grade in ("S", "A") and is_pullback:
-                status_tag = "空中接力"
-                score += 20
-                reason.append("强势股高位接力")
-                
-            if hist_cnt >= 3:
-                score += 10
-                reason.append("持续上榜")
-            elif hist_cnt == 0 and grade == "S":
-                reason.append("主升初显")
+                status_tag = "蓄势待发"
+            else:
+                grade = "C"
+                status_tag = "震荡蓄势"
 
-            # 最终筛选阈值大幅提高 (score >= 80) 以确保结果精简且高质
-            if score >= 80 and reason: 
+            if not is_broken:
+                if grade == "S": score += 30
+                elif grade == "A": score += 20
+
+            # 最终筛选门槛 (score >= 70，确保龙头与主线先锋绝不遗漏)
+            if score >= 70 and reason:
                 reason = list(dict.fromkeys(reason))
                 
-                # 自动生成建议
-                if is_pullback and pct < 2:
+                # 自动生成操作建议
+                if pct >= 9.2:
+                    reason.append("建议:涨停持股/排单")
+                elif is_vip_launch and pct > 4.0:
+                    reason.append("建议:右侧追入/主线跟进")
+                elif is_pullback:
                     reason.append("建议:低吸关注")
-                elif "放量突破" in reason and pct > 4:
-                    reason.append("建议:右侧追入")
-                elif hist_cnt >= 3 and pct > 0:
-                    reason.append("建议:强者恒强")
+                else:
+                    reason.append("建议:择机介入")
                 
-                # 拼接理由
                 advices = [r for r in reason if r.startswith("建议:")]
                 others = [r for r in reason if not r.startswith("建议:")]
                 final_reason = "|".join(others + advices)
@@ -850,23 +652,21 @@ class StockSelector:
                     'score': score,
                     'price': price,
                     'percent': pct,
-                    'change_pct': pct, # 兼容别名
-                    'zhuli_rank': data.get('zhuli_rank', '-'), # 增加主力排名
+                    'change_pct': pct,
+                    'zhuli_rank': data.get('zhuli_rank', '-'),
                     'ratio': ratio,
-                    'volume': round(vol_ratio_l6, 1), # [USER-REQ] 显示 Volume/last6vol 的量比
+                    'volume': round(vol_ratio_l6, 1),
                     'amount': amount,
                     'reason': final_reason,
                     'status': status_tag,
-                    'grade': grade, # 新增分级
-                    'tqi': tqi,     # 新增质量分
-                    'ma5': ma5,
-                    'ma10': ma10,
+                    'grade': grade,
+                    'tqi': tqi,
+                    'ma5': ma5 if 'ma5' in locals() else 0.0,
+                    'ma10': ma10 if 'ma10' in locals() else 0.0,
                     'open': float(data.get('open', 0)),
-                    'category': "|".join(stock_cats),
+                    'category': "|".join([c.strip() for c in re.split('[;|]', str(data.get('category', ''))) if c.strip()]),
                     'stage': stage, 
                     'resample': resample,
-                    
-                    # 🚀 [新增] 历史回溯补齐字段映射 (2026-05-08)
                     'rank': int(data.get('Rank', data.get('rank', 0))),
                     'yesterday_pct': float(data.get('per1d', 0.0)),
                     'sum_perc': float(data.get('sum_perc', 0.0)),
@@ -878,21 +678,20 @@ class StockSelector:
 
         df_selected = pd.DataFrame(selected_records)
         if df_selected.empty:
-            # [FIX] 即使为空，也要确保返回标准列结构，特别是 category
             return pd.DataFrame(columns=['date', 'code', 'name', 'score', 'price', 'percent', 'ratio', 'volume', 'amount', 'reason', 'status', 'grade', 'tqi', 'ma5', 'ma10', 'category', 'resample'])
 
-        if not df_selected.empty:
-            # 理由去重
-            df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
-            
-            # [CRITICAL] 仅保留前 300 名优质标的
-            df_selected = df_selected.head(cct.stock_select_limit)
-            
-            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (Threshold >= 80, Top {cct.stock_select_limit} Limiter)")
-            
-            # 保存日志
-            self.save_selection_log(df_selected)
-            
+        # 排序：优先按 grade (S > A > B > C)、score、amount 排序
+        grade_order = {'S': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4}
+        df_selected['grade_rank'] = df_selected['grade'].map(lambda x: grade_order.get(x, 9))
+        df_selected.sort_values(by=['grade_rank', 'score', 'amount'], ascending=[True, False, False], inplace=True)
+        df_selected.drop(columns=['grade_rank'], inplace=True)
+        
+        # 保留优质标的
+        df_selected = df_selected.head(cct.stock_select_limit)
+        self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (分级S/A/B, Top {cct.stock_select_limit})")
+        
+        # 保存日志
+        self.save_selection_log(df_selected)
         return df_selected
 
     def get_market_hotspots(self) -> List[tuple]:
