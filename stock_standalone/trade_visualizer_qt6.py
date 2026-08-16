@@ -11535,9 +11535,14 @@ class MainWindow(QMainWindow, WindowMixin):
         line_item.show()
 
     def _find_date_index(self, day_df, target_date):
-        """Helper to find date index"""
+        """Helper to find date index - [PERF] O(1) 优先快速映射"""
         if ' ' in target_date: target_date = target_date.split(' ')[0]
-        # Optimize: Check exact match first
+        
+        # ⚡ [PERF] 优先利用权威的 _cached_date_map 执行 O(1) 字典查找
+        if hasattr(self, '_cached_date_map') and self._cached_date_map and target_date in self._cached_date_map:
+            return self._cached_date_map[target_date]
+
+        # Optimize: Check exact match in index
         if target_date in day_df.index:
             res = day_df.index.get_loc(target_date)
             if isinstance(res, slice):
@@ -11560,11 +11565,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if target_date == datetime.now().strftime("%Y-%m-%d"):
             return len(day_df) - 1
         return -1
-
-    def _clear_follow_markers(self):
-        """清理跟单相关的线和标记 (Compatibility wrapper)"""
-        for attr in ['follow_line_p', 'exit_line_p']:
-            if hasattr(self, attr): getattr(self, attr).hide()
 
 
     def _clear_platform_breakout(self):
@@ -12097,6 +12097,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._db_query_cache.clear()
             if hasattr(self, '_platform_breakout_cache'):
                 self._platform_breakout_cache.clear()
+            if hasattr(self, '_archived_strat_cache'):
+                self._archived_strat_cache.clear()
             self._fib_last_range = None
 
         # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
@@ -12462,13 +12464,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # 4. 绘制标签 (九转序列 1-9, 主力买卖文字)
                 # 使用专门的对象池 custom_indicator_pool
-                # ⚡ [SAFETY CHECK] 确保池中的项目确实在 Plot 的 Items 中，防止因其他地方的 .clear() 或重置导致的脱靶
+                # ⚡ [PERF] 仅隐藏上次实际使用过的池子项，避免盲目遍历 500 个项目
                 pool = self.custom_indicator_pool
                 scene_items = set(self.kline_plot.items)
-                for t in pool:
+                last_cnt = getattr(self, '_last_custom_indicator_count', len(pool))
+                for k in range(min(last_cnt, len(pool))):
+                    t = pool[k]
                     if t not in scene_items:
                         self.kline_plot.addItem(t)
-                        # logger.debug(f"[FIX] Re-adding indicator item to plot scene")
                     t.hide()
                 
                 pool_idx = 0
@@ -12525,7 +12528,8 @@ class MainWindow(QMainWindow, WindowMixin):
                         t.setPos(x_axis[i], highs[i] * 1.015) # 稍微再上移一点
                         t.show()
                         pool_idx += 1
-                        
+                
+                self._last_custom_indicator_count = pool_idx
 
             except Exception as e:
                 logger.error(f"Upgraded Tdx Indicators display error: {e}")
@@ -12534,8 +12538,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # --- [BUGFIX] 当九转开关关闭时，执行彻底清理 ---
             # 1. 隐藏池中所有 TextItem
             if hasattr(self, 'custom_indicator_pool'):
-                for t in self.custom_indicator_pool:
-                    t.hide()
+                last_cnt = getattr(self, '_last_custom_indicator_count', len(self.custom_indicator_pool))
+                for k in range(min(last_cnt, len(self.custom_indicator_pool))):
+                    self.custom_indicator_pool[k].hide()
+                self._last_custom_indicator_count = 0
             
             # 2. 隐藏翻转线
             if hasattr(self, 'reversal_line_curve'):
