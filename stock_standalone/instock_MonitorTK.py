@@ -18613,14 +18613,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 新窗口 ---
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
-        # win.minsize(460, 320)
-        real_width = int(saved_width * self.scale_factor)
-        real_height = int(saved_height * self.scale_factor)
-        win.minsize(real_width, real_height)
-        
-        # 🚀 [NEW] 加载历史位置
-        window_name = f"concept_top10_window-{unique_code}"
-        self.load_window_position(win, window_name, default_width=saved_width, default_height=saved_height)
+        win.minsize(360, 180)
 
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
@@ -18658,17 +18651,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame.pack(side="top", fill="both", expand=True, padx=2, pady=1)
 
         columns = concept_top10_window_col
-        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=3)
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=5)
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","volume":"成交量","red":"连阳","win":"主升"}
-        limit_col = ['volume','red','win','dff']
+        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","dff":"dff","dff2":"dff2","volume":"成交量","red":"连阳","win":"主升"}
+        limit_col = ['volume','red','win','dff','dff2']
         for col in columns:
             tree.heading(col, text=col_texts.get(col, col), anchor="center")
-            width = 80 if col in ["name","code"] else (30 if col in limit_col else 50)
+            width = 75 if col in ["name","code"] else (35 if col in limit_col else 45)
             tree.column(col, anchor="center", width=width)
 
         # 尝试加载并应用已保存的概念板块多级排序，若无则使用默认的涨幅降序
@@ -18695,9 +18688,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 使用 unique_code 构造唯一的窗口保存名
         window_name = f"concept_top10_window-{unique_code}"
         try:
-            self.load_window_position(win, window_name, default_width=290, default_height=160)
+            self.load_window_position(win, window_name, default_width=460, default_height=260)
         except Exception:
-            win.geometry("290x160")
+            win.geometry("460x260")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
