@@ -1,3 +1,18 @@
+## 2026-08-16 13:45
+- [x] **实现选股信息显式展示 (pop_streak / pop_platforms / pop_score / pop_details) 与多日连榜智能语音报警全链条贯通 (`stock_standalone/stock_selector.py`, `stock_standalone/stock_live_strategy.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **选股结果显式字段扩展**：在 `StockSelector` 选股结果 `record` 与返回的 DataFrame 中正式增加了 `pop_streak`（多日连续在榜天数）、`pop_platforms`（全网共振平台数）、`pop_score`（共振热度总分）、`pop_details`（各平台排名明细）等独立物理列；在 UI 选股表格与日志中一目了然直观呈现。
+    - [x] **选股理由与状态标签直观呈现**：在选股 `reason` 中显式生成 `【多日持续人气龙(连榜N天)】`、`【全网三台共振】(明细)`、`【双台共振】`，并在 `status` 中打上 `【人气共振龙】` 标签。
+    - [x] **智能语音播报深度贯通**：在 `StockLiveStrategy` 监控池入池与刷新时，自动提取标的人气特征进行语音播报：“`关注 [股票名]，连续[N]天人气龙！`” 或 “`关注 [股票名]，全网三台共振！`”，实现视觉与听觉的全天候无缝跟踪。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
+## 2026-08-16 13:24
+- [x] **实现全网人气共振 (东财/同花顺/淘股吧/龙虎大师) 与多日历史持续性画像系统级整合 (`stock_standalone/stock_selector.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **全网人气共振多源实时打通**：在 `StockSelector` 中实现 `load_popularity_profile`，无缝读取 `popularity_resonance_cache.json` 中的全网四大人气平台（东财、同花顺、淘股吧、龙虎大师）共振得分、共振平台数与排名明细。
+    - [x] **多日历史热度持续性画像 (Streak Days)**：深度扫描 `datacsv/popularity_resonance_*.csv.gz` 历史归档，精准回溯过去 7 天连续在榜天数，对多日持续在榜的核心人气龙赋予 `【多日持续人气龙(连榜N天)】` 专属标签与超额加分。
+    - [x] **多平台共振暴击与直通 S 级特权**：对全网 3 平台以上共振标的赋予 +50 分，双平台共振赋予 +30 分，且在股价维持健康多头或大阳启动时赋予 `【人气共振龙】` 标签并直通 S 级，作为超短与语音报警的最核心标的。
+    - [x] **走势与人气健康度风控（高位破位诱多防接盘）**：对高人气但在形态上已跌破 MA20 且今日走弱破位的个股执行严厉惩罚（-60分），标注 `高位派发(诱多风险)`，彻底杜绝散户盲目追高接盘。
+    - [x] **全量自动化测试 100% 断言通过**：新增 `test_popularity_resonance_and_persistence_integration` 测试用例，配合信号账本与通道算法，全量 23 项测试 100% 全部通过。
+
 ## 2026-08-16 13:13
 - [x] **完成实盘监控池扩容至 15 只梯队池、消除低开反向过滤与盘中动态自修复淘汰/晋级机制重构 (`stock_standalone/stock_live_strategy.py`, `tests/test_breakout_and_selector.py`)**：
     - [x] **彻底废除反向低开硬过滤**：移除 `open < pre_close * 0.98` 错误过滤条件，全面放行早盘高开抢跑、高开连板与秒板龙头（中石科技、华西股份、神奇制药等）。
