@@ -1,3 +1,17 @@
+## 2026-08-16 11:35
+- [x] **完成 trade_visualizer_qt6 数据库读取池深度整合与零功能丢失安全核验 (`stock_standalone/trade_visualizer_qt6.py`)**：
+    - [x] **深度整合 `SQLiteConnectionManager`**：在 `_query_sqlite_cached` 中深度整合 `db_utils.SQLiteConnectionManager` 单例连接池能力（支持 WAL 模式、256MB 内存映射 mmap、64MB 缓存与线程安全连接复用），并具备 URI 只读与短超时双重兜底。
+    - [x] **零功能丢失与无破坏性检查**：严格核查全文件函数与调用链，确认所有已有功能、图元清理机制、跟单逻辑、观察池逻辑、分时十字光标跟随等全部完整保留且零破坏。
+    - [x] **全量单元测试 100% 验证通过**：通过 `pytest stock_standalone/tests/test_signal_ledger.py stock_standalone/tests/test_trend_channel.py` 全部 17 项测试。
+
+## 2026-08-16 11:20
+- [x] **实现集中式 SQLite 内存只读池与时间阈值 (5s TTL) 缓存极限优化 (`stock_standalone/trade_visualizer_qt6.py`)**：
+    - [x] **集中式 SQLite 只读内存缓存池 (`_query_sqlite_cached`)**：构建统一只读连接池管理与 5s 内存 TTL 拦截机制，支持只读 URI 模式（`mode=ro`）与短超时防御，彻底杜绝主渲染线程高频磁盘 I/O。
+    - [x] **跟单与观察池跨模块查询去重共享**：`_get_follow_signals`、`_draw_follow_lines` 与 `_get_watchlist_signals` 全面接入统一只读池，单帧渲染内完全复用单次查询结果，实现 0 重复查库。
+    - [x] **分时图十字光标悬浮详情标签位置修复**：在 `_update_tick_crosshair_ui` 中补齐 `self.tick_crosshair_label.setPos(idx, y_price)`，修复分时图悬浮窗不随鼠标十字光标移动的问题。
+    - [x] **图元安全清理与防御升级**：`_clear_hotspot_markers` 与 `_clear_follow_markers` 升级为独立属性安全遍历隐藏，彻底杜绝切股残留与潜在的 `AttributeError`。
+    - [x] **自动化测试断言 100% 通过**：17 项测试（信号账本 + 趋势通道）100% 全部通过。
+
 ## 2026-08-16 11:05
 - [x] **实现 trade_visualizer_qt6 深度审查优化与自查自检 (`stock_standalone/trade_visualizer_qt6.py`)**：
     - [x] **消除 `_clear_follow_markers` 重复定义冲突**：删除 L11564 残缺覆盖定义，统一保留 L11348 全量清理（包含线、标签和 Emoji 标记），杜绝切股残留。

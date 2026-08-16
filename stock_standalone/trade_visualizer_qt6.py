@@ -7724,22 +7724,8 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             self.tick_crosshair_label.setAnchor((-0.1, 1.1)) # 靠左显示在右下
 
-        # Y 轴避让：底部或顶部
-        if y_price < y_range[0] + (y_range[1] - y_range[0]) * 0.2:
-             self.tick_crosshair_label.setAnchor((self.tick_crosshair_label.anchor.x(), -0.1)) # 在鼠标下方
-        elif y_price > y_range[0] + (y_range[1] - y_range[0]) * 0.8:
-             self.tick_crosshair_label.setAnchor((self.tick_crosshair_label.anchor.x(), 1.1)) # 在鼠标上方 (默认)其实 anchor 的 y=1.1 是向上偏移
-             # [Correction] anchor (0, 1) usually means the label's top-left is at the POS? 
-             # No, pyqtgraph anchor: (0,0) is top-left, (1,1) is bottom-right.
-             # anchor (0, 1) means bottom-left of label is at position.
-             pass
-        
-        # 统一逻辑:
-        # X: 0 (显示在右), 1 (显示在左)
-        # Y: 1 (显示在平齐/略高), 0 (显示在下)
-        
-        # 修正 K线逻辑的 anchor_y 灵敏度并应用到分时
-        # 我们希望靠近顶端时显示在下方，靠近底端时显示在上方。
+        # 统一设置坐标跟随鼠标
+        self.tick_crosshair_label.setPos(idx, y_price)
 
     def _hide_tick_crosshair(self):
         self._last_tick_crosshair_idx = -1
@@ -11337,54 +11323,100 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Failed to draw signal annotation: {e}")
 
+    def _query_sqlite_cached(self, db_path: str, query: str, params: tuple = (), ttl: float = 5.0):
+        """
+        [PERF] 集中式 SQLite 内存只读缓存与并发保护池
+        1. 基于内存 TTL (默认 5s) 拦截高频重复查询，杜绝主渲染线程高频磁盘 I/O
+        2. 多模块间 (如 _get_follow_signals 与 _draw_follow_lines) 共享查询结果
+        3. 只读连接 + 短超时，安全降级不阻断主流程
+        """
+        if not hasattr(self, '_db_query_cache'):
+            self._db_query_cache = {}
+
+        now = time.time()
+        cache_key = (db_path, query, params)
+        cached_entry = self._db_query_cache.get(cache_key)
+
+        if cached_entry is not None and (now - cached_entry[0] < ttl):
+            return cached_entry[1]
+
+        # 检查数据库文件是否存在
+        if not os.path.exists(db_path):
+            self._db_query_cache[cache_key] = (now, None)
+            return None
+
+        try:
+            try:
+                from db_utils import SQLiteConnectionManager
+                manager = SQLiteConnectionManager.get_instance(db_path)
+                with manager.execute_query(query, params) as cursor:
+                    row = cursor.fetchone()
+                self._db_query_cache[cache_key] = (now, row)
+                return row
+            except Exception:
+                import sqlite3
+                # 使用 URI 只读模式与极速超时
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+                c = conn.cursor()
+                c.execute(query, params)
+                row = c.fetchone()
+                conn.close()
+                self._db_query_cache[cache_key] = (now, row)
+                return row
+        except Exception:
+            # 降级尝试普通连接
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path, timeout=2)
+                c = conn.cursor()
+                c.execute(query, params)
+                row = c.fetchone()
+                conn.close()
+                self._db_query_cache[cache_key] = (now, row)
+                return row
+            except Exception as e:
+                logger.debug(f"[DBPool] SQLite query error on {db_path}: {e}")
+                self._db_query_cache[cache_key] = (now, None)
+                return None
+
     def _clear_hotspot_markers(self):
-        """清理旧的热点标记 - 仅隐藏版本"""
-        if hasattr(self, 'hotspot_line_p'):
-            self.hotspot_line_p.hide()
-            self.hotspot_label_p.hide()
-            self.hotspot_marker_p.hide()
+        """清理旧的热点标记 - [SAFETY] 独立属性安全隐藏"""
+        for attr in ['hotspot_line_p', 'hotspot_label_p', 'hotspot_marker_p']:
+            if hasattr(self, attr):
+                getattr(self, attr).hide()
 
 
     def _clear_follow_markers(self):
-        """清理旧的跟单标记 - 仅隐藏版本"""
-        if hasattr(self, 'follow_line_p'):
-            self.follow_line_p.hide()
-            self.follow_label_p.hide()
-            self.follow_marker_p.hide()
-        if hasattr(self, 'exit_line_p'):
-            self.exit_line_p.hide()
-            self.exit_label_p.hide()
-            self.exit_marker_p.hide()
+        """清理旧的跟单标记 - [SAFETY] 独立属性安全隐藏"""
+        for attr in ['follow_line_p', 'follow_label_p', 'follow_marker_p', 'exit_line_p', 'exit_label_p', 'exit_marker_p']:
+            if hasattr(self, attr):
+                getattr(self, attr).hide()
 
 
     def _get_follow_signals(self, code, day_df) -> list[SignalPoint]:
-        """获取跟单信号点列表 (Follow/Exit)"""
+        """获取跟单信号点列表 (Follow/Exit) - [PERF] 数据库内存只读池"""
         signals = []
         try:
-            import sqlite3
-            conn = sqlite3.connect("signal_strategy.db", timeout=5)
-            c = conn.cursor()
-            c.execute("""
-                SELECT detected_date, exit_date, detected_price, exit_price, status
-                FROM follow_queue
-                WHERE code = ?
-                ORDER BY detected_date DESC
-                LIMIT 1
-            """, (code[:6],))
-            row = c.fetchone()
-            conn.close()
-            
+            # 1. 优先处理显式传递的上下文 (来自双击/联动)
+            if getattr(self, 'current_signal_type', None) == 'follow' and getattr(self, 'current_signal_date', None):
+                t_date = self.current_signal_date
+                idx = self._find_date_index(day_df, t_date)
+                if idx != -1:
+                    price = day_df['close'].iloc[idx]
+                    signals.append(SignalPoint(
+                        code=code, timestamp=t_date, bar_index=idx, price=price,
+                        signal_type=SignalType.FOLLOW, reason="Follow Entry (Manual)"
+                    ))
+                return signals
+
+            # 2. 查询 follow_queue (共享 _query_sqlite_cached 5s TTL 缓存)
+            row = self._query_sqlite_cached(
+                "signal_strategy.db",
+                "SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code = ? ORDER BY detected_date DESC LIMIT 1",
+                (code[:6],),
+                ttl=5.0
+            )
             if not row:
-                # 降级处理：仅当明确请求 follow 类型时显示
-                if getattr(self, 'current_signal_type', None) == 'follow' and getattr(self, 'current_signal_date', None):
-                    t_date = self.current_signal_date
-                    idx = self._find_date_index(day_df, t_date)
-                    if idx != -1:
-                        price = day_df['close'].iloc[idx]
-                        signals.append(SignalPoint(
-                            code=code, timestamp=t_date, bar_index=idx, price=price,
-                            signal_type=SignalType.FOLLOW, reason="Follow Entry (Manual)"
-                        ))
                 return signals
 
             detected_date, exit_date, detected_price, exit_price, status = row
@@ -11393,7 +11425,6 @@ class MainWindow(QMainWindow, WindowMixin):
             if detected_date:
                 idx = self._find_date_index(day_df, detected_date)
                 if idx != -1:
-                     # Use detected_price if available, else close
                     price = detected_price if detected_price else day_df['close'].iloc[idx]
                     signals.append(SignalPoint(
                         code=code, timestamp=detected_date, bar_index=idx, price=price,
@@ -11416,35 +11447,15 @@ class MainWindow(QMainWindow, WindowMixin):
         return signals
 
     def _draw_follow_lines(self, code, day_df):
-        """仅绘制跟单的价格参考线 (虚线) - [PERF] 带内存 TTL 缓存"""
-        # 清理旧线
-        for attr in ['follow_line_p', 'exit_line_p']:
-             if hasattr(self, attr): getattr(self, attr).hide()
+        """仅绘制跟单的价格参考线 (虚线) - [PERF] 数据库内存只读池"""
+        self._clear_follow_markers()
         
-        # ⚡ [PERF] 5s TTL 内存缓存，杜绝主线程高频 SQLite IO 阻塞
-        if not hasattr(self, '_db_query_cache'):
-            self._db_query_cache = {}
-
-        now = time.time()
-        cache_key = ('follow_queue', code[:6])
-        cached_entry = self._db_query_cache.get(cache_key)
-
-        if cached_entry is not None and (now - cached_entry[0] < 5.0):
-            row = cached_entry[1]
-        else:
-            try:
-                import sqlite3
-                conn = sqlite3.connect("signal_strategy.db", timeout=2)
-                row = conn.execute(
-                    "SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code=? ORDER BY detected_date DESC LIMIT 1",
-                    (code[:6],)
-                ).fetchone()
-                conn.close()
-                self._db_query_cache[cache_key] = (now, row)
-            except Exception:
-                row = None
-                self._db_query_cache[cache_key] = (now, None)
-        
+        row = self._query_sqlite_cached(
+            "signal_strategy.db",
+            "SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code = ? ORDER BY detected_date DESC LIMIT 1",
+            (code[:6],),
+            ttl=5.0
+        )
         if not row:
             return
 
@@ -11462,7 +11473,7 @@ class MainWindow(QMainWindow, WindowMixin):
             pass
 
     def _get_watchlist_signals(self, code, day_df) -> list[SignalPoint]:
-        """获取观察池信号标记 (WATCH) - [PERF] 带内存 TTL 缓存"""
+        """获取观察池信号标记 (WATCH) - [PERF] 数据库内存只读池"""
         signals = []
         try:
             # 1. 优先处理显式传递的上下文 (来自双击/联动)
@@ -11477,34 +11488,13 @@ class MainWindow(QMainWindow, WindowMixin):
                     ))
                 return signals
 
-            # 2. 数据库回溯 (带 5s 内存缓存)
-            if not hasattr(self, '_db_query_cache'):
-                self._db_query_cache = {}
-
-            now = time.time()
-            cache_key = ('watchlist', code[:6])
-            cached_entry = self._db_query_cache.get(cache_key)
-
-            if cached_entry is not None and (now - cached_entry[0] < 5.0):
-                row = cached_entry[1]
-            else:
-                db_path = "signal_strategy.db"
-                if not os.path.exists(db_path):
-                    return signals
-                    
-                import sqlite3
-                conn = sqlite3.connect(db_path, timeout=2)
-                c = conn.cursor()
-                c.execute("""
-                    SELECT discover_date, discover_price 
-                    FROM hot_stock_watchlist 
-                    WHERE code = ? AND validation_status != 'DROPPED'
-                    ORDER BY discover_date DESC LIMIT 1
-                """, (code[:6],))
-                row = c.fetchone()
-                conn.close()
-                self._db_query_cache[cache_key] = (now, row)
-            
+            # 2. 数据库回溯 (共享 _query_sqlite_cached 5s TTL 缓存)
+            row = self._query_sqlite_cached(
+                "signal_strategy.db",
+                "SELECT discover_date, discover_price FROM hot_stock_watchlist WHERE code = ? AND validation_status != 'DROPPED' ORDER BY discover_date DESC LIMIT 1",
+                (code[:6],),
+                ttl=5.0
+            )
             if row:
                 d_date, d_price = row
                 if d_date:
