@@ -5023,6 +5023,9 @@ class StockLiveStrategy:
             
             if 'category' not in df.columns:
                 df['category'] = ''
+            for c_req in ['is_hot', 'score', 'amount', 'pop_streak', 'pop_platforms', 'pop_score', 'pop_details', 'status', 'reason']:
+                if c_req not in df.columns:
+                    df[c_req] = 0 if c_req in ['is_hot', 'score', 'amount', 'pop_streak', 'pop_platforms', 'pop_score'] else ''
             
             # --- 策略演进：主线军团梯队构建 (超级主线每个板块容纳 2~3 只先锋+中军+弹性，总池扩容至 15 只) ---
             max_pool_limit = 15 # 扩容至 15 只，承载超级主线梯队
@@ -5115,6 +5118,12 @@ class StockLiveStrategy:
                         stock_data['snapshot']['reason'] = str(row.get('reason', ''))
                         stock_data['snapshot']['score'] = float(row.get('score', 0))
                         stock_data['snapshot']['grade'] = str(row.get('grade', ''))
+                        stock_data['snapshot']['status'] = str(row.get('status', ''))
+                        stock_data['snapshot']['pop_streak'] = int(row.get('pop_streak', 0))
+                        stock_data['snapshot']['pop_platforms'] = int(row.get('pop_platforms', 0))
+                        stock_data['snapshot']['pop_score'] = float(row.get('pop_score', 0))
+                        stock_data['snapshot']['pop_details'] = str(row.get('pop_details', ''))
+                        was_updated = True
                              
                         if was_updated:
                             repaired_names.append(name)
@@ -5135,7 +5144,11 @@ class StockLiveStrategy:
                                 "reason": str(row.get('reason', '')),
                                 "category": str(row.get('category', '')),
                                 "tqi": float(row.get('tqi_score', 0)),
-                                "status": str(row.get('status', ''))
+                                "status": str(row.get('status', '')),
+                                "pop_streak": int(row.get('pop_streak', 0)),
+                                "pop_platforms": int(row.get('pop_platforms', 0)),
+                                "pop_score": float(row.get('pop_score', 0)),
+                                "pop_details": str(row.get('pop_details', ''))
                             }
                         }
                     
@@ -5170,6 +5183,30 @@ class StockLiveStrategy:
                 if repaired_names: log_detail += f" [Repaired: {','.join(repaired_names)}]"
                 if skipped_names: log_detail += f" [Skipped: {','.join(skipped_names)}]"
                 logger.info(log_detail)
+
+                # 🔊 智能语音播报新入池主线龙头与连榜人气龙 (包含新增与刷新爆发标的)
+                if getattr(self, 'voice_enabled', False) and hasattr(self, 'voice_announcer') and self.voice_announcer:
+                    active_names_set = set(added_names + repaired_names)
+                    for _, p_row in final_pool_df.iterrows():
+                        p_name = str(p_row.get('name', ''))
+                        if p_name in active_names_set:
+                            p_code = str(p_row.get('code', '')).zfill(6)
+                            p_streak = int(p_row.get('pop_streak', 0))
+                            p_plat = int(p_row.get('pop_platforms', 0))
+                            s_tag = str(p_row.get('status', ''))
+                            
+                            v_msg = f"关注 {p_name}"
+                            if p_streak >= 3:
+                                v_msg += f"，连续{p_streak}天人气龙"
+                            elif p_plat >= 3:
+                                v_msg += "，全网三台共振"
+                            elif s_tag:
+                                v_msg += f"，{s_tag}"
+                            
+                            try:
+                                self.voice_announcer.announce(v_msg, code=p_code)
+                            except Exception:
+                                pass
 
                 return f"成功添加 {added_count} 只, 修补 {repaired_count} 只 ({mode_str})"
             
@@ -5235,8 +5272,8 @@ class StockLiveStrategy:
         """
         try:
             # 获取当前持仓代码
-            trades = self.trading_logger.get_trades()
-            holding_codes = set([t['code'] for t in trades if t['status'] == 'OPEN'])
+            trades = self.trading_logger.get_trades() if (hasattr(self, 'trading_logger') and self.trading_logger) else []
+            holding_codes = set([t.get('code') for t in trades if isinstance(t, dict) and t.get('status') == 'OPEN'])
             
             to_remove = []
             

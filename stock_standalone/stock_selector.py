@@ -255,6 +255,91 @@ class StockSelector:
             self.logger.error(f"获取选股历史日期统计失败: {e}")
             return []
 
+    def load_popularity_profile(self, lookback_days: int = 7) -> Dict[str, Dict[str, Any]]:
+        """
+        [NEW] 加载全网人气共振实时与多日历史持续性画像
+        1. 实时缓存: popularity_resonance_cache.json (东财/同花顺/淘股吧/龙虎榜)
+        2. 历史归档: datacsv/popularity_resonance_*.csv.gz (多日历史热度沉淀与连榜天数)
+        """
+        pop_profile: Dict[str, Dict[str, Any]] = {}
+        
+        # 1. 尝试读取实时 popularity_resonance_cache.json
+        app_root = get_app_root()
+        cache_paths = [
+            os.path.join(app_root, "popularity_resonance_cache.json"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "popularity_resonance_cache.json"),
+            os.path.join(os.getcwd(), "popularity_resonance_cache.json")
+        ]
+        
+        realtime_cache = {}
+        for cp in cache_paths:
+            if os.path.exists(cp):
+                try:
+                    with open(cp, "r", encoding="utf-8") as f:
+                        realtime_cache = json.load(f)
+                    break
+                except Exception as e:
+                    self.logger.debug(f"读取人气缓存失败 {cp}: {e}")
+        
+        # 解析实时共振
+        res_list = realtime_cache.get("resonance_results", [])
+        for item in res_list:
+            c = str(item.get("code", "")).zfill(6)
+            if not c: continue
+            plat_cnt = int(item.get("platforms", 0))
+            sc = int(item.get("score", 0))
+            pop_profile[c] = {
+                "resonance_score": sc,
+                "platforms": plat_cnt,
+                "details": str(item.get("details", "")),
+                "streak_days": 1,
+                "is_resonance": (plat_cnt >= 2 or sc >= 200)
+            }
+        
+        # 2. 扫描 datacsv/popularity_resonance_*.csv.gz 统计多日持续上榜天数 (streak_days)
+        csv_dirs = [
+            os.path.join(app_root, "datacsv"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "datacsv"),
+            os.path.join(os.getcwd(), "datacsv")
+        ]
+        
+        hist_files = []
+        for d in csv_dirs:
+            if os.path.exists(d):
+                for fname in os.listdir(d):
+                    if fname.startswith("popularity_resonance_") and (fname.endswith(".csv.gz") or fname.endswith(".csv")):
+                        hist_files.append(os.path.join(d, fname))
+                if hist_files:
+                    break
+        
+        hist_files.sort(reverse=True)
+        recent_files = hist_files[:lookback_days]
+        
+        code_appear_count = {}
+        for fpath in recent_files:
+            try:
+                df_pop_day = pd.read_csv(fpath, usecols=['code'])
+                for c_val in df_pop_day['code'].dropna():
+                    c_clean = str(c_val).strip().zfill(6)
+                    code_appear_count[c_clean] = code_appear_count.get(c_clean, 0) + 1
+            except Exception:
+                pass
+        
+        # 合并多日持续性天数
+        for c, cnt in code_appear_count.items():
+            if c in pop_profile:
+                pop_profile[c]["streak_days"] = max(pop_profile[c]["streak_days"], cnt)
+            else:
+                pop_profile[c] = {
+                    "resonance_score": 0,
+                    "platforms": 0,
+                    "details": "历史人气榜",
+                    "streak_days": cnt,
+                    "is_resonance": False
+                }
+                
+        return pop_profile
+
     def _calc_trend_quality(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         [极限向量化] 计算趋势质量指标 (TQI & Pulse Frequency)
@@ -349,6 +434,8 @@ class StockSelector:
         
         # 获取历史选股频次
         hist_counts = self.get_historical_selected_codes(days=5)
+        # 加载全网人气共振与多日持续性画像 (东财/同花顺/淘股吧/龙虎榜 + 历史连榜天数)
+        pop_profile = self.load_popularity_profile(lookback_days=7)
 
         # --- 2. 板块军团爆发深度分析与梯队构建 (Sector Squadron & Echelon Engine) ---
         concept_dict = {}
@@ -591,7 +678,44 @@ class StockSelector:
                 score += 15
                 reason.append("巨量爆发")
 
-            # --- D. 走势分级与状态标签 ---
+            # --- D. 全网人气共振与多日持续性画像 (Popularity Resonance & Persistence) ---
+            pop_info = pop_profile.get(code_str)
+            is_pop_leader = False
+            if pop_info:
+                p_platforms = pop_info.get('platforms', 0)
+                p_streak = pop_info.get('streak_days', 0)
+                p_details = pop_info.get('details', '')
+                
+                # 1. 多平台共振加分
+                if p_platforms >= 3:
+                    score += 50
+                    reason.append(f"【全网三台共振】({p_details})")
+                    is_pop_leader = True
+                elif p_platforms == 2:
+                    score += 30
+                    reason.append(f"【双台共振】({p_details})")
+                    is_pop_leader = True
+                elif pop_info.get('resonance_score', 0) >= 200:
+                    score += 25
+                    reason.append("【高人气标的】")
+                    is_pop_leader = True
+
+                # 2. 多日持续性在榜天数加成 (龙头持续性)
+                if p_streak >= 3:
+                    score += 40
+                    reason.append(f"【多日持续人气龙(连榜{p_streak}天)】")
+                    is_pop_leader = True
+                elif p_streak == 2:
+                    score += 20
+                    reason.append("【2日连榜人气】")
+
+                # 3. 走势与人气健康度风控 (防止高位破位接盘散户诱多)
+                if is_broken and pct < 1.0:
+                    score -= 60
+                    reason.append("高位派发(诱多风险)")
+                    is_pop_leader = False
+
+            # --- E. 走势分级与状态标签 ---
             hist_cnt = hist_counts.get(code_str, 0)
             tqi = data.get('tqi_score', 0)
             up_r = data.get('up_ratio', 0)
@@ -600,13 +724,15 @@ class StockSelector:
             status_tag = "蓄势"
             grade = "C"
             
-            # 直通特权判定：空间龙头、主线先锋、通道挤压爆量突破、竞价抢跑
-            is_vip_launch = (echelon_info is not None) or is_squeeze_breakout or ("空间龙头" in "|".join(reason)) or ("竞价抢跑" in "|".join(reason))
+            # 直通特权判定：空间龙头、主线先锋、通道挤压爆量突破、竞价抢跑、全网共振人气龙
+            is_vip_launch = (echelon_info is not None) or is_squeeze_breakout or ("空间龙头" in "|".join(reason)) or ("竞价抢跑" in "|".join(reason)) or (is_pop_leader and pct >= 3.5)
             
             if score >= 120 or is_vip_launch:
                 grade = "S"
                 if echelon_info:
                     status_tag = echelon_info['role']
+                elif is_pop_leader and pct >= 3.5:
+                    status_tag = "【人气共振龙】"
                 elif "空间龙头" in "|".join(reason):
                     status_tag = "【空间龙头】"
                 elif is_squeeze_breakout:
@@ -660,6 +786,10 @@ class StockSelector:
                     'reason': final_reason,
                     'status': status_tag,
                     'grade': grade,
+                    'pop_streak': pop_info.get('streak_days', 0) if pop_info else 0,
+                    'pop_platforms': pop_info.get('platforms', 0) if pop_info else 0,
+                    'pop_score': pop_info.get('resonance_score', 0) if pop_info else 0,
+                    'pop_details': pop_info.get('details', '') if pop_info else '',
                     'tqi': tqi,
                     'ma5': ma5 if 'ma5' in locals() else 0.0,
                     'ma10': ma10 if 'ma10' in locals() else 0.0,
