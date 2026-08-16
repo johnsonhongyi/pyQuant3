@@ -4988,15 +4988,13 @@ class StockLiveStrategy:
         if not StockSelector:
             return "StockSelector不可用"
         
-        # 1. 标签与清理策略
+        # 1. 标签与科学留强汰弱清理策略 (严禁误杀盈利股与强势股)
         if is_manual:
             tag = "auto_manual_hotspot"
-            # 手动触发时，清理之前的“非持仓手动股”，但不碰自动循环的标签
-            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_manual_hotspot")
+            self._cleanup_auto_monitors(force_all=False, tag_filter="auto_manual_hotspot")
         else:
             tag = "auto_hotspot_loop"
-            # 自动循环触发时，只清理自动标签的“非持仓股”
-            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop")
+            self._cleanup_auto_monitors(force_all=False, tag_filter="auto_hotspot_loop")
 
         try:
             # [FIX] 传入 self.df (即实时行情 df_all)，确保板块 category 信息可获取
@@ -5100,12 +5098,11 @@ class StockLiveStrategy:
             if not is_manual:
                 self.current_batch = final_pool_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
             
-            # --- 导入监控列表与盘中自修复 (遍历全部 15 只标的) ---
+            # --- 导入监控列表与留强汰弱自修复 (遍历全部 15 只标的) ---
             added_names = []
             skipped_names = []
             repaired_names = []
             
-            # 盘中自修复淘汰：清理非持仓且明显走弱的旧标的
             holding_codes = set()
             if hasattr(self, 'trading_logger') and self.trading_logger:
                 try:
@@ -5115,21 +5112,42 @@ class StockLiveStrategy:
                     pass
             
             with self._lock:
-                # 1. 自修复淘汰逻辑：非持仓且涨幅大幅回落至 < 1.0% 的 auto 标的予以移除
+                # 1. 科学自修复淘汰逻辑：留强汰弱 (严禁误杀盈利强势股，仅淘汰亏损且走弱失败标的)
                 if not is_manual and hasattr(self, 'df') and self.df is not None and not self.df.empty:
                     stale_keys = []
                     for k_code, k_data in self._monitored_stocks.items():
                         if str(k_data.get('tags', '')).startswith('auto_') and k_code not in holding_codes:
-                            # 检查现价涨幅
+                            k_cprice = float(k_data.get('create_price', 0.0))
+                            k_cur_p = 0.0
+                            k_cur_pct = 0.0
                             if k_code in self.df.index:
-                                cur_pct = float(self.df.loc[k_code].get('percent', self.df.loc[k_code].get('change_pct', 0)))
-                                if cur_pct < 1.0: # 走弱淘汰
-                                    stale_keys.append(k_code)
+                                row_k = self.df.loc[k_code]
+                                if isinstance(row_k, pd.DataFrame): row_k = row_k.iloc[0] if not row_k.empty else None
+                                if row_k is not None:
+                                    k_cur_p = float(row_k.get('trade', row_k.get('price', 0.0)))
+                                    k_cur_pct = float(row_k.get('percent', row_k.get('change_pct', 0.0)))
+                            
+                            # 若无法获取行情现价，绝不盲目淘汰
+                            if k_cur_p <= 0:
+                                k_cur_p = float(k_data.get('snapshot', {}).get('trade', 0.0))
+                            if k_cur_p <= 0:
+                                continue # 无行情数据时跳过淘汰，安全第一
+                            
+                            k_profit = (k_cur_p - k_cprice) / k_cprice * 100 if k_cprice > 0 and k_cur_p > 0 else 0.0
+                            
+                            # 强势盈利股 (profit >= 2.0%) 或 人气龙 (pop_streak >= 2) 绝对保护
+                            if k_profit >= 2.0 or int(k_data.get('snapshot', {}).get('pop_streak', 0)) >= 2:
+                                continue
+                            
+                            # 仅淘汰自加入以来未成功盈利 (<= 0) 且今日走弱 (< 1.0%) 的失败标的
+                            if k_profit <= 0.0 and k_cur_pct < 1.0:
+                                stale_keys.append(k_code)
+                                
                     for k_code in stale_keys:
                         del self._monitored_stocks[k_code]
-                        logger.info(f"🔄 [SelfHealing] 淘汰走弱监控标的: {k_code} (涨幅回落)")
+                        logger.info(f"🔄 [SelfHealing] 淘汰未成功盈利的走弱标的: {k_code} (盈亏 <= 0 且今日走弱)")
 
-                # 2. 全量遍历新标的入池
+                # 2. 全量遍历新标的入池 (保证首次挖掘加入价与时间不可篡改)
                 for _, row in final_pool_df.iterrows():
                     code = str(row['code']).zfill(6)
                     name = str(row.get('name', '')).strip()
@@ -5146,6 +5164,7 @@ class StockLiveStrategy:
                     if code in self._monitored_stocks:
                         stock_data = self._monitored_stocks[code]
                         was_updated = False
+                        # 保持原始加入价不变
                         if stock_data.get('create_price', 0) <= 0:
                             stock_data['create_price'] = current_price
                             was_updated = True
@@ -5171,13 +5190,46 @@ class StockLiveStrategy:
                         else:
                             skipped_names.append(name)
                     else:
+                        # 检查数据库中是否已有历史首次挖掘记录，若有则必须成对 (Pairwise) 继承历史加入价与首次挖掘时间！
+                        hist_create_price = 0.0
+                        hist_created_time = ""
+                        if hasattr(self, 'trading_logger') and self.trading_logger:
+                            try:
+                                conn = self.trading_logger.db_manager.get_connection()
+                                cur = conn.cursor()
+                                # 1. 优先从 voice_alerts 查询历史首次预警入池记录
+                                cur.execute("SELECT create_price, created_time FROM voice_alerts WHERE code=? AND create_price > 0 ORDER BY created_time ASC LIMIT 1", (code,))
+                                row_db = cur.fetchone()
+                                if row_db and row_db[0] and float(row_db[0]) > 0:
+                                    hist_create_price = float(row_db[0])
+                                    hist_created_time = str(row_db[1]).strip() if row_db[1] else ""
+                                
+                                # 2. 若无，尝试从 selection_history 查询历史最早选股挖掘记录
+                                if hist_create_price <= 0:
+                                    cur.execute("SELECT price, date FROM selection_history WHERE code=? AND price > 0 ORDER BY date ASC, id ASC LIMIT 1", (code,))
+                                    row_sel = cur.fetchone()
+                                    if row_sel and row_sel[0] and float(row_sel[0]) > 0:
+                                        hist_create_price = float(row_sel[0])
+                                        hist_created_time = str(row_sel[1]).strip() + " 09:30:00"
+                                cur.close()
+                            except Exception:
+                                pass
+                        
+                        # 必须成对生效：如果有历史价格与历史时间，同时继承历史；否则成对记录当前
+                        if hist_create_price > 0 and hist_created_time:
+                            init_price = hist_create_price
+                            init_time = hist_created_time
+                        else:
+                            init_price = current_price
+                            init_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
                         added_names.append(name)
                         self._monitored_stocks[code] = {
                             "name": name,
                             "rules": [{'type': 'price_up', 'value': current_price}], 
                             "last_alert": 0,
-                            "created_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "create_price": current_price,
+                            "created_time": init_time, # 永久锁定历史首次挖掘时间
+                            "create_price": init_price, # 永久锁定历史首次挖掘加入价格
                             "tags": tag,
                             "grade": str(row.get('grade', '')),
                             "snapshot": {
@@ -5307,39 +5359,78 @@ class StockLiveStrategy:
 
     def _cleanup_auto_monitors(self, force_all: bool = False, tag_filter: str = "auto_"):
         """
-        清理自动/手动添加的监控标的
-        :param force_all: 是否强力清理 (不考虑今日创建时间)
+        科学清理自动/手动添加的监控标的 (留强汰弱: 绝对保护持仓股与盈利强势股，仅淘汰未成功盈利的失败个股)
+        :param force_all: 是否强力清理失败个股 (不考虑当日新加入保护)
         :param tag_filter: 标签过滤前缀，默认清理所有 auto_ 开头的
         """
         try:
-            # 获取当前持仓代码
             trades = self.trading_logger.get_trades() if (hasattr(self, 'trading_logger') and self.trading_logger) else []
-            holding_codes = set([t.get('code') for t in trades if isinstance(t, dict) and t.get('status') == 'OPEN'])
+            holding_codes = set([str(t.get('code')).zfill(6) for t in trades if isinstance(t, dict) and t.get('status') == 'OPEN'])
             
             to_remove = []
-            
             today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-            for code, data in self._monitored_stocks.items():
+            
+            for code, data in list(self._monitored_stocks.items()):
                 tags = str(data.get('tags', ''))
-                # 识别标签
-                if tags.startswith(tag_filter):
-                    if code in holding_codes:
+                if not tags.startswith(tag_filter):
+                    continue
+                
+                # 1. 持仓标的绝对受保护
+                if code in holding_codes:
+                    continue
+                
+                # 提取加入价、现价与盈亏
+                create_price = float(data.get('create_price', 0.0))
+                cur_price = 0.0
+                cur_pct = 0.0
+                
+                if hasattr(self, 'df') and self.df is not None and not self.df.empty and code in self.df.index:
+                    row_rt = self.df.loc[code]
+                    if isinstance(row_rt, pd.DataFrame):
+                        row_rt = row_rt.iloc[0] if not row_rt.empty else None
+                    if row_rt is not None:
+                        cur_price = float(row_rt.get('trade', row_rt.get('price', 0.0)))
+                        cur_pct = float(row_rt.get('percent', row_rt.get('change_pct', 0.0)))
+                
+                if cur_price <= 0:
+                    cur_price = float(data.get('snapshot', {}).get('trade', 0.0))
+                
+                # 若无法获取有效现价，跳过清理
+                if cur_price <= 0:
+                    continue
+                
+                # 计算自加入以来的累计盈亏比例
+                profit_pct = 0.0
+                if create_price > 0 and cur_price > 0:
+                    profit_pct = (cur_price - create_price) / create_price * 100
+                
+                # 2. 强势盈利股 (如 +119.31%, +16.89%, +10.94%, +8.57%, +4.30% 等) 绝对受保护 (严禁清理)
+                if profit_pct >= 2.0:
+                    continue
+                
+                # 3. 连榜人气龙与 S 级核心主线标的受保护
+                snap = data.get('snapshot', {})
+                pop_streak = int(snap.get('pop_streak', data.get('pop_streak', 0)))
+                grade = str(snap.get('grade', data.get('grade', '')))
+                if pop_streak >= 2 or grade == 'S' or cur_pct >= 3.0:
+                    continue
+                
+                # 4. 今日新加入的标的给予日内观察期 (除非 force_all 显式要求)
+                if not force_all:
+                    created_time = str(data.get('created_time', ''))
+                    if created_time.startswith(today_str):
                         continue
-                    # 如果不是强制清理（如盘中维护），且是今天刚添加的，则保留
-                    if not force_all:
-                        created_time = str(data.get('created_time', ''))
-                        if created_time.startswith(today_str):
-                            continue
-                    to_remove.append(code)
+                
+                # 5. 真正需要清理淘汰的：挖掘后未成功盈利 (<= 0) 且今日走弱且失去热度的失败标的
+                to_remove.append(code)
             
             if to_remove:
                 for key in to_remove:
                     del self._monitored_stocks[key]
-                
                 self._save_monitors()
-                logger.info(f"Auto Loop Cleanup: Removed {len(to_remove)} unheld stocks: {to_remove}")
+                logger.info(f"Auto Loop Cleanup: Removed {len(to_remove)} losing/stale stocks (cut losers): {to_remove}")
             else:
-                logger.info("Auto Loop Cleanup: No unheld auto-stocks found.")
+                logger.info("Auto Loop Cleanup: All monitored stocks are profitable or holding (ride winners).")
                 
         except Exception as e:
             logger.error(f"Cleanup Error: {e}")

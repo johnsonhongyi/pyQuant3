@@ -1020,14 +1020,14 @@ class TradingLogger:
             cur = conn.cursor()
             added_date = datetime.now().strftime('%Y-%m-%d')
             
-            # --- [关键保护] 保护已有的“加入价”和“创建时间”不被 0.0 或当前时间误覆盖 ---
+            # --- [关键保护] 保护已有的“首次挖掘加入价”和“首次挖掘时间”绝对不被当前现价与时间覆盖 ---
             cur.execute("SELECT create_price, created_time FROM voice_alerts WHERE code=? AND resample=?", (code, resample))
             existing = cur.fetchone()
             if existing:
-                if create_price <= 0 and existing[0] and existing[0] > 0:
-                    create_price = float(existing[0])
-                if not created_time and existing[1]:
-                    created_time = str(existing[1])
+                if existing[0] and float(existing[0]) > 0:
+                    create_price = float(existing[0]) # 永久锁定历史首次挖掘加入价
+                if existing[1] and str(existing[1]).strip():
+                    created_time = str(existing[1]) # 永久锁定历史首次挖掘时间
             
             if not created_time:
                 created_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
