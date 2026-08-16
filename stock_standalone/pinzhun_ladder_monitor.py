@@ -6,13 +6,16 @@ pinzhun_ladder_monitor.py — 频准激光 (688826) 8/18 上市盯盘与分时�
 2. 支持 Windows HighDPI 高分屏自适应与 multiprocessing.freeze_support()；
 3. 具备独立 IPC 数据流监听与本地行情解析，不与 ATS 共享主界面，杜绝模态阻塞；
 4. 支持双击直接启动、或在命令行中指定标的代码（如 pinzhun_ladder_monitor.exe 688826）；
-5. 具备窗口置顶、全天分时模拟回测演练、7 节点动态评分与 ATS 统一 QSS 暗黑样式。
+5. 具备窗口置顶、全天分时模拟回测演练、7 节点动态评分与 ATS 统一 QSS 暗黑样式；
+6. 完善的全局异常捕获 (sys.excepthook) 与 Ctrl+C (SIGINT) 极速响应，绝不僵死。
 """
 
 import sys
 import os
+import signal
 import argparse
 import multiprocessing
+import traceback
 
 # 1. 必须在导入任何 PyQt6 组件前开启 Windows HighDPI 高分屏自适应
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
@@ -37,8 +40,8 @@ except Exception:
 if app_root not in sys.path:
     sys.path.insert(0, app_root)
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon
 
 from ats.intraday_strategy_engine import IntradayStrategyEngine
@@ -47,7 +50,35 @@ from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS
 from sys_utils import resolve_stock_name
 
 
+def _global_excepthook(exc_type, exc_val, exc_tb):
+    """全局未捕获异常钩子，打印详细堆栈并弹窗提示，避免进程静默僵死"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        print("\n👋 接收到 Ctrl+C 中断信号，系统已优雅退出。")
+        sys.exit(0)
+
+    err_msg = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
+    print(f"\n❌ [致命错误] 独立盯盘系统运行异常:\n{err_msg}", file=sys.stderr)
+
+    if QApplication.instance():
+        try:
+            QMessageBox.critical(
+                None,
+                "⚠️ 系统异常提示",
+                f"独立盯盘系统遇到未捕获异常:\n\n{exc_val}\n\n建议查看控制台日志了解详细信息。"
+            )
+        except Exception:
+            pass
+
+    sys.exit(1)
+
+
+sys.excepthook = _global_excepthook
+
+
 def main():
+    # 注册 Ctrl+C 信号支持
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     parser = argparse.ArgumentParser(description="频准激光 8/18 上市盯盘与分时阶梯交易独立系统")
     parser.add_argument("code", nargs="?", default="688826", help="目标股票代码 (默认 688826 频准激光)")
     parser.add_argument("--top", action="store_true", help="启动时默认窗口置顶")
@@ -66,20 +97,33 @@ def main():
     font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
 
-    engine = IntradayStrategyEngine.get_instance()
-    code_clean = "".join(filter(str.isdigit, str(args.code))).zfill(6)
-    name = resolve_stock_name(code_clean)
+    # 启用定时器周期唤醒 Python 解释器处理 Ctrl+C 信号
+    sig_timer = QTimer()
+    sig_timer.timeout.connect(lambda: None)
+    sig_timer.start(300)
 
-    win = PinzhunLadderStandaloneWindow(code=code_clean, name=name)
-    if args.top:
-        win._toggle_stay_on_top()
-    win.show()
+    try:
+        engine = IntradayStrategyEngine.get_instance()
+        code_clean = "".join(filter(str.isdigit, str(args.code))).zfill(6)
+        name = resolve_stock_name(code_clean)
 
-    pkg_info = " [打包环境]" if is_packaged_env() else " [源码环境]"
-    print(f"🚀 频准激光 8/18 独立盯盘窗口已成功启动！[股票: {code_clean} {name}]{pkg_info}")
-    print(f"📁 根目录定位: {app_root}")
-    
-    sys.exit(app.exec())
+        win = PinzhunLadderStandaloneWindow(code=code_clean, name=name)
+        if args.top:
+            win._toggle_stay_on_top()
+        win.show()
+
+        pkg_info = " [打包环境]" if is_packaged_env() else " [源码环境]"
+        print(f"🚀 频准激光 8/18 独立盯盘窗口已成功启动！[股票: {code_clean} {name}]{pkg_info}")
+        print(f"📁 根目录定位: {app_root}")
+        print(f"💡 提示: 在终端可随时按下 Ctrl+C 快速安全退出。")
+        
+        exit_code = app.exec()
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print("\n👋 接收到 Ctrl+C 中断信号，系统已优雅退出。")
+        sys.exit(0)
+    except Exception as e:
+        _global_excepthook(type(e), e, e.__traceback__)
 
 
 if __name__ == "__main__":

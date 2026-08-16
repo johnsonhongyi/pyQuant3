@@ -353,10 +353,25 @@ class IntradayStrategyEngine:
         return state
 
     def set_manual_node_score(self, code: str, node_id_or_idx: Any, score: float):
-        """设置某节点的人工打分"""
+        """设置某节点的人工打分覆盖"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["manual_scores"][str(node_id_or_idx)] = float(score)
+
+    def set_node_custom_param(self, code: str, node_id: str, value: float):
+        """设置某节点的校准价格或换手率参数"""
+        c_clean = str(code).zfill(6)
+        state = self._get_stock_state(c_clean, 0.0)
+        if "node_custom_params" not in state:
+            state["node_custom_params"] = {}
+        state["node_custom_params"][str(node_id)] = float(value)
+
+    def reset_node_custom_params(self, code: str):
+        """重置所有节点的校准参数与人工打分"""
+        c_clean = str(code).zfill(6)
+        state = self._get_stock_state(c_clean, 0.0)
+        state["node_custom_params"] = {}
+        state["manual_scores"] = {}
 
     def evaluate_seven_nodes(
         self,
@@ -375,11 +390,13 @@ class IntradayStrategyEngine:
     ) -> Dict[str, Any]:
         """
         全面评估 7 大时序节点，生成各节点观察值、强中弱判定、节点分(0-10)、加权得分、形态分类与实操建议。
+        支持根据用户在表格中输入的校准价格/换手率全自动重新推导评分。
         """
         c_clean = str(code).zfill(6)
         spec = self.get_stock_ladder_spec(c_clean)
         nodes_def = self.get_timeline_nodes_def(c_clean)
         state = self._get_stock_state(c_clean, open_price)
+        custom_params = state.setdefault("node_custom_params", {})
 
         clean_t = current_time_str[-8:] if len(current_time_str) >= 8 else current_time_str
         if len(clean_t) > 5 and ":" in clean_t:
@@ -435,20 +452,25 @@ class IntradayStrategyEngine:
                 current_node_idx = idx
                 current_node_info = nd
 
-            # 1. 提取/推算盘中实际观察值
+            # 1. 提取/推算盘中实际观察值与校准参数
             observed_val = ""
             judgment = "中" # 强 / 中 / 弱
             auto_score = 5.0 # 0 - 10
             remarks = ""
+            input_val = 0.0
+            input_unit = "元"
 
-            if idx == 0: # 9:25 集合竞价
-                open_gain_issue = ((open_price - issue_p) / issue_p * 100.0) if (issue_p > 0 and open_price > 0) else 0.0
-                observed_val = f"开盘:{open_price:.2f}元 (较发行价{open_gain_issue:+.1f}%)"
-                if open_price >= 560.64: # +200% 强势基准
+            if idx == 0: # 9:25 集合竞价 (校准开盘价)
+                cur_op = float(custom_params.get(n_id, open_price if open_price > 0 else 565.0))
+                input_val = cur_op
+                input_unit = "元"
+                open_gain_issue = ((cur_op - issue_p) / issue_p * 100.0) if (issue_p > 0 and cur_op > 0) else 0.0
+                observed_val = f"开盘:{cur_op:.2f}元 (较发行价{open_gain_issue:+.1f}%)"
+                if cur_op >= 560.64: # +200% 强势基准
                     judgment = "强"
                     auto_score = 9.0
-                    remarks = "高开>=+200%超预期，资金做多意愿极强"
-                elif open_price >= 373.76: # +100% 翻倍
+                    remarks = "高开>=+200%超预期，做多意愿极强"
+                elif cur_op >= 373.76: # +100% 翻倍
                     judgment = "中"
                     auto_score = 7.0
                     remarks = "开盘落在+100%~+200%中性区间，量价正常"
@@ -457,13 +479,17 @@ class IntradayStrategyEngine:
                     auto_score = 4.0
                     remarks = "开盘低于翻倍线，关注度略显不足"
 
-            elif idx == 1: # 9:40 早盘第一波攻击
-                observed_val = f"现价:{price:.2f}元 (较开盘{gain_from_open:+.1f}%) 最高:{max_p:.2f}元"
-                if gain_from_open >= 10.0 or price >= open_price * 1.10 or max_p >= open_price * 1.10:
+            elif idx == 1: # 9:40 早盘第一波攻击 (校准 9:40 现价)
+                cur_p1 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                input_val = cur_p1
+                input_unit = "元"
+                cur_gain_open = ((cur_p1 - open_price) / open_price * 100.0) if open_price > 0 else 0.0
+                observed_val = f"现价:{cur_p1:.2f}元 (较开盘{cur_gain_open:+.1f}%)"
+                if cur_gain_open >= 10.0 or cur_p1 >= open_price * 1.10:
                     judgment = "强"
                     auto_score = 9.0
                     remarks = "放量上攻突破开盘价并涨超10%，攻击迅猛"
-                elif price >= open_price or max_p >= open_price:
+                elif cur_p1 >= open_price:
                     judgment = "中"
                     auto_score = 6.5
                     remarks = "维持在开盘价上方震荡，等待方向选择"
@@ -472,13 +498,16 @@ class IntradayStrategyEngine:
                     auto_score = 3.5
                     remarks = "跌破开盘价走弱，出现分歧砸盘"
 
-            elif idx == 2: # 10:00 换手质量检验
-                observed_val = f"换手率:{turnover_rate:.1f}% 金额:{amount_yi:.2f}亿 低点:{min_p:.2f}元"
-                if turnover_rate >= 15.0 and price >= open_price:
+            elif idx == 2: # 10:00 换手质量检验 (校准 10:00 换手率)
+                cur_to = float(custom_params.get(n_id, turnover_rate if turnover_rate > 0 else 62.5))
+                input_val = cur_to
+                input_unit = "%"
+                observed_val = f"换手率:{cur_to:.1f}% 金额:{amount_yi:.2f}亿"
+                if cur_to >= 15.0 and price >= open_price:
                     judgment = "强"
                     auto_score = 8.5
-                    remarks = "10min换手充沛且价格抬升，承接有力"
-                elif turnover_rate >= 10.0:
+                    remarks = "换手充沛且价格抬升，承接有力"
+                elif cur_to >= 10.0:
                     judgment = "中"
                     auto_score = 6.0
                     remarks = "换手稳步推进，量能温和"
@@ -487,14 +516,17 @@ class IntradayStrategyEngine:
                     auto_score = 4.0
                     remarks = "换手偏低或放量滞涨，警惕承接衰竭"
 
-            elif idx == 3: # 11:00 分歧承接测试
-                vwap_diff = ((price - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
-                observed_val = f"现价:{price:.2f}元 / 均价VWAP:{vwap_val:.2f}元 (偏离{vwap_diff:+.1f}%)"
-                if price >= vwap_val and price >= open_price:
+            elif idx == 3: # 11:00 分歧承接测试 (校准 11:00 价格)
+                cur_p3 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                input_val = cur_p3
+                input_unit = "元"
+                vwap_diff = ((cur_p3 - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
+                observed_val = f"现价:{cur_p3:.2f}元 (偏离均价{vwap_diff:+.1f}%)"
+                if cur_p3 >= vwap_val and cur_p3 >= open_price:
                     judgment = "强"
                     auto_score = 8.5
                     remarks = "回落快速收回均线之上，均价线斜率向上"
-                elif price >= vwap_val * 0.98:
+                elif cur_p3 >= vwap_val * 0.95 or cur_p3 >= open_price * 0.95:
                     judgment = "中"
                     auto_score = 6.0
                     remarks = "贴近分时均线窄幅拉锯，承接尚可"
@@ -503,13 +535,16 @@ class IntradayStrategyEngine:
                     auto_score = 3.5
                     remarks = "跌破分时均线且反抽无力，重心下移"
 
-            elif idx == 4: # 14:00 午后突破验证
-                observed_val = f"现价:{price:.2f}元 / 上午最高:{high_am:.2f}元 (突破: {'是' if price >= high_am else '否'})"
-                if price >= high_am and price > open_price:
+            elif idx == 4: # 14:00 午后突破验证 (校准 14:00 价格)
+                cur_p4 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                input_val = cur_p4
+                input_unit = "元"
+                observed_val = f"现价:{cur_p4:.2f}元 / 上午最高:{high_am:.2f}元"
+                if cur_p4 >= high_am and cur_p4 > open_price:
                     judgment = "强"
                     auto_score = 9.0
                     remarks = "午后放量突破上午最高价，趋势延续"
-                elif price >= vwap_val:
+                elif cur_p4 >= vwap_val or cur_p4 >= open_price * 0.90:
                     judgment = "中"
                     auto_score = 6.5
                     remarks = "午后震荡蓄势，未破关键支撑"
@@ -518,28 +553,36 @@ class IntradayStrategyEngine:
                     auto_score = 4.0
                     remarks = "午后持续走弱回落，板块分化"
 
-            elif idx == 5: # 14:50 尾盘抢筹强度
-                observed_val = f"现价:{price:.2f}元 / 最高:{max_p:.2f}元 (收盘/最高: {close_high_ratio*100:.1f}%)"
-                if close_high_ratio >= 0.95 or (price >= max_p * 0.98):
+            elif idx == 5: # 14:50 尾盘抢筹强度 (校准 14:50 价格)
+                cur_p5 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                input_val = cur_p5
+                input_unit = "元"
+                cur_ch_ratio = (cur_p5 / max_p) if max_p > 0 else 1.0
+                observed_val = f"现价:{cur_p5:.2f}元 (收盘/最高: {cur_ch_ratio*100:.1f}%)"
+                if cur_ch_ratio >= 0.95 or (cur_p5 >= max_p * 0.98):
                     judgment = "强"
                     auto_score = 9.5
                     remarks = "尾盘放量抢筹逼近最高价，资金意愿坚决"
-                elif close_high_ratio >= 0.88:
+                elif cur_ch_ratio >= 0.88:
                     judgment = "中"
                     auto_score = 6.5
                     remarks = "尾盘平稳维持，无恐慌跳水"
                 else:
                     judgment = "弱"
                     auto_score = 3.0
-                    remarks = "尾盘放量跳水跳水抛售，走弱明显"
+                    remarks = "尾盘放量跳水抛售，走弱明显"
 
-            elif idx == 6: # 15:00 收盘结构与锁仓
-                observed_val = f"收盘:{price:.2f}元 强度:{intensity_ratio:.2f}x 锁仓比:{close_high_ratio*100:.1f}%"
-                if close_high_ratio >= 0.90 and intensity_ratio >= 2.0:
+            elif idx == 6: # 15:00 收盘结构与锁仓 (校准收盘价)
+                cur_p6 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                input_val = cur_p6
+                input_unit = "元"
+                cur_ch_ratio = (cur_p6 / max_p) if max_p > 0 else 1.0
+                observed_val = f"收盘:{cur_p6:.2f}元 锁仓比:{cur_ch_ratio*100:.1f}%"
+                if cur_ch_ratio >= 0.90 and intensity_ratio >= 2.0:
                     judgment = "强"
                     auto_score = 9.5
                     remarks = "收盘/最高>90%强锁仓，资金强度极高"
-                elif close_high_ratio >= 0.80:
+                elif cur_ch_ratio >= 0.80 or cur_p6 >= open_price * 0.90:
                     judgment = "中"
                     auto_score = 6.5
                     remarks = "守住大部分涨幅，形态结构健康"
@@ -573,7 +616,8 @@ class IntradayStrategyEngine:
                 "judgment": judgment,
                 "auto_score": auto_score,
                 "final_score": round(final_score, 1),
-                "is_manual": (manual_score is not None),
+                "input_val": input_val,
+                "input_unit": input_unit,
                 "weighted_score": weighted_score,
                 "action_guide": nd.get("action_guide", ""),
                 "remarks": remarks,

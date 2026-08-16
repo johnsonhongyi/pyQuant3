@@ -3,10 +3,12 @@
 ats/ui/intraday_strategy_dialog.py — ATS 分时阶梯交易策略 & 频准激光 8/18 上市动态时序评估一体化系统
 特点：
 1. 深度整合原有的分时阶梯交易策略（开盘定盘、时间轴阶段、规则达成、价格笼子挂单、买卖点信号路由与流水、SBC 实盘走势）与 7 节点时序动态打分评估体系；
-2. Tab 1 为一体化实盘交易与动态评估工作台，数据由实时 df 全自动摄入解析并动态驱动；
-3. Tab 2 为 8/18 开盘时间对齐全天分时模拟回测演练器（四大情景 A/B/C/D型，一键秒级回测 + 动态逐帧回放）；
-4. Tab 3 为频准激光 8/18 专属盯盘模板、综合加权汇总表与 7 条实盘法则；
-5. 基于 QMainWindow 独立窗口运行，支持窗口置顶 (StayOnTop) 与非模态异步数据推送。
+2. Tab 1 为一体化实盘交易与动态评估工作台，数据由实时 df / TDX 秒级直连 / 手动估价自动摄入解析并动态驱动；
+3. 支持【✍️ 估价推演 / 手动输入价格自动评分】模式，在行情未开盘、数据获取异常或需要推演时，用户输入开盘估价/现价/换手率即可全自动重新评估 7 节点打分与操作策略；
+4. 彻底解决滚动条自动跳回顶部问题（采用滚动条位置保护与脏检查复用机制）；
+5. Tab 2 为 8/18 开盘时间对齐全天分时模拟回测演练器（四大情景 A/B/C/D型）；
+6. Tab 3 为频准激光 8/18 专属盯盘模板、综合加权汇总表与 7 条实盘法则；
+7. 基于 QMainWindow 独立窗口运行，支持窗口置顶 (StayOnTop) 与 TDX 1 秒极速直连。
 """
 
 import sys
@@ -37,10 +39,56 @@ from PyQt6.QtGui import QColor, QFont, QBrush, QIcon
 
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
+from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS
 from signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger("IntradayStrategyDialog")
+
+
+def _set_or_update_table_item(
+    table: QTableWidget,
+    row: int,
+    col: int,
+    text: str,
+    fg_color=None,
+    bg_color=None,
+    align=None,
+    font=None,
+    tooltip=None
+) -> QTableWidgetItem:
+    """
+    安全设置或更新 QTableWidget 单元格 Item。
+    若 Item 已经存在，则只调用 setText / setForeground 等属性更新，
+    绝不重复调用 setItem()，彻底避免 'cannot insert an item that is already owned' 警告。
+    """
+    item = table.item(row, col)
+    if item is None:
+        item = QTableWidgetItem(str(text))
+        if fg_color is not None:
+            item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
+        if bg_color is not None:
+            item.setBackground(bg_color if isinstance(bg_color, (QColor, QBrush)) else QColor(bg_color))
+        if align is not None:
+            item.setTextAlignment(align)
+        if font is not None:
+            item.setFont(font)
+        if tooltip is not None:
+            item.setToolTip(tooltip)
+        table.setItem(row, col, item)
+    else:
+        item.setText(str(text))
+        if fg_color is not None:
+            item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
+        if bg_color is not None:
+            item.setBackground(bg_color if isinstance(bg_color, (QColor, QBrush)) else QColor(bg_color))
+        if align is not None:
+            item.setTextAlignment(align)
+        if font is not None:
+            item.setFont(font)
+        if tooltip is not None:
+            item.setToolTip(tooltip)
+    return item
 
 
 class IntradayStrategyEditDialog(QDialog):
@@ -197,7 +245,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.scroll_layout.setSpacing(4)
         self.phase_scroll.setWidget(self.scroll_content)
         phase_box_layout.addWidget(self.phase_scroll)
-        phase_box.setMinimumHeight(150)
+        phase_box.setMinimumHeight(140)
         left_layout.addWidget(phase_box, 1)
 
         # 规则达成表格
@@ -222,18 +270,29 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.table_rules.setColumnWidth(0, 130)
         self.table_rules.setColumnWidth(3, 85)
         rule_box_layout.addWidget(self.table_rules)
-        rule_box.setMinimumHeight(150)
+        rule_box.setMinimumHeight(130)
         left_layout.addWidget(rule_box, 1)
 
-        # 7 节点动态评估速查表
-        node_box = QGroupBox("🎯 7 节点动态时序打分速查 (通过实时 df 自动获取计算)")
+        # 7 节点动态评估速查表 (输入价格校准自动评分)
+        node_box = QGroupBox("🎯 7 节点时序评估 (根据当时价格/换手自动评分，数据异常可手动输入价格校准)")
         node_box.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 6px; font-weight: bold; color: #ffd700; background-color: #14141d; }")
         node_box_layout = QVBoxLayout(node_box)
         node_box_layout.setContentsMargins(4, 8, 4, 4)
 
+        node_header_lay = QHBoxLayout()
+        lbl_node_hint = QLabel("💡 评分由系统根据价格全自动评估；若行情出错可在【校准价格/换手】列输入真实价格。")
+        lbl_node_hint.setStyleSheet("color: #00ff88; font-size: 8pt;")
+        btn_reset_node_params = QPushButton("🔄 重置校准")
+        btn_reset_node_params.setStyleSheet("background-color: #222232; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+        btn_reset_node_params.clicked.connect(self._on_reset_node_custom_params)
+        node_header_lay.addWidget(lbl_node_hint)
+        node_header_lay.addStretch()
+        node_header_lay.addWidget(btn_reset_node_params)
+        node_box_layout.addLayout(node_header_lay)
+
         self.table_quick_nodes = QTableWidget()
-        self.table_quick_nodes.setColumnCount(6)
-        self.table_quick_nodes.setHorizontalHeaderLabels(["节点", "时间", "实时观察值", "信号判定", "评分(0-10)", "权重"])
+        self.table_quick_nodes.setColumnCount(7)
+        self.table_quick_nodes.setHorizontalHeaderLabels(["节点", "时间", "校准价格/换手", "特征观察解析", "信号判定", "自动评分", "权重"])
         self.table_quick_nodes.setAlternatingRowColors(True)
         self.table_quick_nodes.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table_quick_nodes.setStyleSheet("QTableWidget { background-color: #101017; gridline-color: #252535; color: #d0d0e0; font-size: 8.5pt; } QHeaderView::section { background-color: #1a1a26; color: #ffd700; font-weight: bold; padding: 3px; }")
@@ -241,11 +300,12 @@ class IntegratedTradingStrategyPanel(QWidget):
         h_q = self.table_quick_nodes.horizontalHeader()
         h_q.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         h_q.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        h_q.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        h_q.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        h_q.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        h_q.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        h_q.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        h_q.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         h_q.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.table_quick_nodes.setColumnWidth(4, 75)
+        h_q.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_quick_nodes.setColumnWidth(2, 95)
         node_box_layout.addWidget(self.table_quick_nodes)
         node_box.setMinimumHeight(150)
         left_layout.addWidget(node_box, 1)
@@ -272,7 +332,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         right_layout.addWidget(sbc_box, 1)
 
         # 买卖点明细表
-        sig_box = QGroupBox("⚡ 策略执行买卖点明细 (实盘/模拟触发)")
+        sig_box = QGroupBox("⚡ 策略执行买卖点明细 (实盘/模拟/推演触发)")
         sig_box.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 6px; font-weight: bold; color: #ffaa44; background-color: #14141d; }")
         sig_box_layout = QVBoxLayout(sig_box)
         sig_box_layout.setContentsMargins(4, 8, 4, 4)
@@ -291,7 +351,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         h_s.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         h_s.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         sig_box_layout.addWidget(self.table_signals)
-        sig_box.setMinimumHeight(140)
+        sig_box.setMinimumHeight(130)
         right_layout.addWidget(sig_box, 1)
 
         # 路由日志
@@ -314,11 +374,19 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.phase_items = []
         self._last_strategy_id = None
 
+    def _on_reset_node_custom_params(self):
+        self.engine.reset_node_custom_params(self.code)
+        self.manual_score_signal.emit()
+
     def _rebuild_phase_items(self, strategy: Dict[str, Any]):
         st_id = strategy.get("id") if isinstance(strategy, dict) else None
         if getattr(self, "_last_strategy_id", None) == st_id and self.phase_items:
             return
         self._last_strategy_id = st_id
+
+        # 记录滚动位置
+        sb = self.phase_scroll.verticalScrollBar()
+        old_val = sb.value()
 
         while self.scroll_layout.count():
             item = self.scroll_layout.takeAt(0)
@@ -390,6 +458,8 @@ class IntegratedTradingStrategyPanel(QWidget):
                 "lbl_desc": lbl_sub
             })
 
+        sb.setValue(old_val)
+
     def update_data(
         self,
         code: str,
@@ -405,7 +475,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         strategy: Dict[str, Any],
         is_unlisted: bool = False
     ):
-        """全面刷新一体化工作台数据"""
+        """全面刷新一体化工作台数据（带滚动条位置锁定保护）"""
         self.code = code
         c_clean = str(code).zfill(6)
 
@@ -432,7 +502,7 @@ class IntegratedTradingStrategyPanel(QWidget):
 
         # 2. 顶部状态卡
         tier_name, strat_id, mode = self.engine.get_open_price_tier(open_price, code=c_clean)
-        unlisted_str = " (待上市定盘)" if is_unlisted or open_price <= 0 else ""
+        unlisted_str = " (待上市估价)" if is_unlisted or open_price <= 0 else ""
         self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{unlisted_str} | 所属档位: {tier_name} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
         self.lbl_strat_name.setText(f"当前策略: {strategy.get('name', '默认策略')}")
         self.lbl_score_badge.setText(
@@ -446,8 +516,11 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.lbl_diagnosis.setText(f"⏱️ [{current_time_str}] {eval_res.get('current_status_diagnosis', '')}")
         self.lbl_action.setText(eval_res.get("action_execution_text", ""))
 
-        # 4. 时间轴策略阶段高亮
+        # 4. 时间轴策略阶段高亮（带滚动条位置锁定）
+        sb_phase = self.phase_scroll.verticalScrollBar()
+        old_phase_pos = sb_phase.value()
         self._rebuild_phase_items(strategy)
+
         clean_t = current_time_str[-8:] if len(current_time_str) >= 8 else current_time_str
         if len(clean_t) > 5 and ":" in clean_t:
             clean_t = clean_t[:5]
@@ -467,11 +540,18 @@ class IntegratedTradingStrategyPanel(QWidget):
                 item["lbl_status"].setText("⏳ 待生效")
                 item["lbl_status"].setStyleSheet("font-weight: bold; color: #555566; font-size: 8pt;")
 
-        # 5. 规则达成表格
+        sb_phase.setValue(old_phase_pos)
+
+        # 5. 规则达成表格（带滚动条锁定）
+        sb_rules = self.table_rules.verticalScrollBar()
+        old_rule_pos = sb_rules.value()
+
         if curr_phase:
             rules = curr_phase.get("rules", [])
             triggered_rules = state.get("triggered_rules", set())
-            self.table_rules.setRowCount(len(rules))
+            if self.table_rules.rowCount() != len(rules):
+                self.table_rules.setRowCount(len(rules))
+
             for row, r in enumerate(rules):
                 r_id = r.get("rule_id", "")
                 r_name = r.get("name", r_id)
@@ -492,113 +572,114 @@ class IntegratedTradingStrategyPanel(QWidget):
                     sugg_p = "--"
 
                 status_str = "✅ 已触发卖出" if r_id in triggered_rules else "⏳ 监控中"
-                status_color = QColor("#00ff88") if r_id in triggered_rules else QColor("#ffaa44")
+                status_color = "#00ff88" if r_id in triggered_rules else "#ffaa44"
 
-                it_0 = QTableWidgetItem(r_name)
-                it_1 = QTableWidgetItem(target_str)
-                it_2 = QTableWidgetItem(r_ratio)
-                it_2.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_3 = QTableWidgetItem(sugg_p)
-                it_3.setForeground(QColor("#ffd700"))
-                it_4 = QTableWidgetItem(status_str)
-                it_4.setForeground(status_color)
+                _set_or_update_table_item(self.table_rules, row, 0, r_name)
+                _set_or_update_table_item(self.table_rules, row, 1, target_str)
+                _set_or_update_table_item(self.table_rules, row, 2, r_ratio, align=Qt.AlignmentFlag.AlignCenter)
+                _set_or_update_table_item(self.table_rules, row, 3, sugg_p, fg_color="#ffd700")
+                _set_or_update_table_item(self.table_rules, row, 4, status_str, fg_color=status_color)
 
-                self.table_rules.setItem(row, 0, it_0)
-                self.table_rules.setItem(row, 1, it_1)
-                self.table_rules.setItem(row, 2, it_2)
-                self.table_rules.setItem(row, 3, it_3)
-                self.table_rules.setItem(row, 4, it_4)
-            self.table_rules.resizeRowsToContents()
+        sb_rules.setValue(old_rule_pos)
 
-        # 6. 7 节点动态打分速查表
+        # 6. 7 节点动态打分速查表（带滚动条锁定 & 价格校准自动评分）
+        sb_quick = self.table_quick_nodes.verticalScrollBar()
+        old_quick_pos = sb_quick.value()
+
         node_results = eval_res.get("node_results", [])
-        self.table_quick_nodes.setRowCount(len(node_results))
+        if self.table_quick_nodes.rowCount() != len(node_results):
+            self.table_quick_nodes.setRowCount(len(node_results))
+
         self._is_updating = True
         for row, nr in enumerate(node_results):
-            it_n = QTableWidgetItem(nr["name"])
-            it_t = QTableWidgetItem(nr["time_str"])
-            it_o = QTableWidgetItem(nr["observed_val"])
-            it_o.setToolTip(nr["observed_val"])
-            it_j = QTableWidgetItem(nr["judgment"])
-            it_j.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if nr["judgment"] == "强":
-                it_j.setForeground(QColor("#00ff88"))
-            elif nr["judgment"] == "中":
-                it_j.setForeground(QColor("#38bdf8"))
-            else:
-                it_j.setForeground(QColor("#ff5555"))
+            judg_color = "#00ff88" if nr["judgment"] == "强" else ("#38bdf8" if nr["judgment"] == "中" else "#ff5555")
+            _set_or_update_table_item(self.table_quick_nodes, row, 0, nr["name"])
+            _set_or_update_table_item(self.table_quick_nodes, row, 1, nr["time_str"])
 
-            spin = self.table_quick_nodes.cellWidget(row, 4)
+            # 列 2: 价格/换手校准输入框 (QDoubleSpinBox)
+            unit_str = nr.get("input_unit", "元")
+            input_v = float(nr.get("input_val", 0.0))
+            spin = self.table_quick_nodes.cellWidget(row, 2)
             if not isinstance(spin, QDoubleSpinBox):
                 spin = QDoubleSpinBox()
-                spin.setRange(0.0, 10.0)
-                spin.setSingleStep(0.5)
-                spin.setStyleSheet("background-color: #1e1e2d; color: #ffd700; font-weight: bold; border: 1px solid #38bdf8;")
-                spin.valueChanged.connect(self._make_spin_handler(row, nr["node_id"]))
-                self.table_quick_nodes.setCellWidget(row, 4, spin)
+                spin.setRange(0.0, 5000.0)
+                spin.setSingleStep(1.0 if unit_str == "%" else 5.0)
+                spin.setSuffix(f" {unit_str}")
+                spin.setStyleSheet("background-color: #1a1a26; color: #ffd700; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px;")
+                spin.valueChanged.connect(self._make_param_spin_handler(row, nr["node_id"]))
+                self.table_quick_nodes.setCellWidget(row, 2, spin)
 
             spin.blockSignals(True)
-            spin.setValue(float(nr["final_score"]))
+            spin.setSuffix(f" {unit_str}")
+            spin.setValue(input_v)
             spin.blockSignals(False)
 
-            it_w = QTableWidgetItem(nr["weight_pct"])
-            it_w.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            # 列 3: 特征解析观察值
+            _set_or_update_table_item(self.table_quick_nodes, row, 3, nr["observed_val"], tooltip=nr["observed_val"])
 
-            self.table_quick_nodes.setItem(row, 0, it_n)
-            self.table_quick_nodes.setItem(row, 1, it_t)
-            self.table_quick_nodes.setItem(row, 2, it_o)
-            self.table_quick_nodes.setItem(row, 3, it_j)
-            self.table_quick_nodes.setItem(row, 5, it_w)
-        self.table_quick_nodes.resizeRowsToContents()
+            # 列 4: 信号判定
+            _set_or_update_table_item(self.table_quick_nodes, row, 4, nr["judgment"], fg_color=judg_color, align=Qt.AlignmentFlag.AlignCenter)
+
+            # 列 5: 自动评分展示 (不可手动乱改，由价格严谨推导)
+            score_fg = "#00ff88" if nr["final_score"] >= 8.0 else ("#38bdf8" if nr["final_score"] >= 6.0 else "#ff5555")
+            _set_or_update_table_item(self.table_quick_nodes, row, 5, f"{nr['final_score']:.1f}分", fg_color=score_fg, font=QFont("Arial", 9, QFont.Weight.Bold), align=Qt.AlignmentFlag.AlignCenter)
+
+            # 列 6: 权重
+            _set_or_update_table_item(self.table_quick_nodes, row, 6, nr["weight_pct"], align=Qt.AlignmentFlag.AlignCenter)
+
+        sb_quick.setValue(old_quick_pos)
         self._is_updating = False
 
-        # 7. SBC 实盘走势与基准线
+        # 7. SBC 实盘走势与基准线 (带文本脏检查与滚动条位置保护)
         max_p = state.get("max_price", price)
         min_p = state.get("min_price", price)
         sbc_text = (
             f"=== 📊 SBC 实盘分时走势与关键阶梯基准线 ===\n"
             f"【标的代码】: {code} ({resolve_stock_name(code)})\n"
             f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定)\n"
-            f"【实时成交】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
+            f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
             f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元\n"
             f"【冲高卖出目标 (+10%)】: {open_price*1.10:.2f} 元 (价格笼子限价卖出 50%)\n"
             f"【临停触发目标 (+30%)】: {open_price*1.30:.2f} 元 (复牌前挂单 1.28x={open_price*1.28:.2f} 卖出 30%)\n"
             f"【移动止盈清仓 (-10%)】: {max_p*0.90:.2f} 元 (高点回撤 10% 触发)\n"
             f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
         )
-        self.txt_sbc_info.setText(sbc_text)
+        if self.txt_sbc_info.toPlainText() != sbc_text:
+            sb_sbc = self.txt_sbc_info.verticalScrollBar()
+            saved_sbc_pos = sb_sbc.value()
+            self.txt_sbc_info.setPlainText(sbc_text)
+            sb_sbc.setValue(saved_sbc_pos)
 
-        # 8. 买卖点明细表
-        self.table_signals.setRowCount(len(signals))
+        # 8. 买卖点明细表（带滚动条锁定）
+        sb_sig = self.table_signals.verticalScrollBar()
+        old_sig_pos = sb_sig.value()
+
+        if self.table_signals.rowCount() != len(signals):
+            self.table_signals.setRowCount(len(signals))
+
         for r, s in enumerate(signals):
             pct_str = f"{getattr(s, 'sell_ratio', 0.5)*100:.0f}%"
             sugg_p = getattr(s, 'suggested_price', s.price)
-            it_t = QTableWidgetItem(s.timestamp)
-            it_act = QTableWidgetItem("🔴 卖出")
-            it_act.setForeground(QColor("#ff5555"))
-            it_act.setFont(QFont("Arial", 8.5, QFont.Weight.Bold))
-            it_p = QTableWidgetItem(f"{s.price:.2f}元 (挂单:{sugg_p:.2f})")
-            it_p.setForeground(QColor("#ffd700"))
-            it_rt = QTableWidgetItem(pct_str)
-            it_rt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_rs = QTableWidgetItem(s.reason)
-            it_rs.setToolTip(s.reason)
+            _set_or_update_table_item(self.table_signals, r, 0, s.timestamp)
+            _set_or_update_table_item(self.table_signals, r, 1, "🔴 卖出", fg_color="#ff5555", font=QFont("Arial", 9, QFont.Weight.Bold))
+            _set_or_update_table_item(self.table_signals, r, 2, f"{s.price:.2f}元 (挂单:{sugg_p:.2f})", fg_color="#ffd700")
+            _set_or_update_table_item(self.table_signals, r, 3, pct_str, align=Qt.AlignmentFlag.AlignCenter)
+            _set_or_update_table_item(self.table_signals, r, 4, s.reason, tooltip=s.reason)
 
-            self.table_signals.setItem(r, 0, it_t)
-            self.table_signals.setItem(r, 1, it_act)
-            self.table_signals.setItem(r, 2, it_p)
-            self.table_signals.setItem(r, 3, it_rt)
-            self.table_signals.setItem(r, 4, it_rs)
-        self.table_signals.resizeRowsToContents()
+        sb_sig.setValue(old_sig_pos)
 
-        # 9. 路由日志
-        if logs:
-            self.txt_log.setText("\n".join(logs))
+        # 9. 路由日志 (带文本脏检查与滚动条锁定)
+        new_log_text = "\n".join(logs) if logs else ""
+        if self.txt_log.toPlainText() != new_log_text:
+            sb_log = self.txt_log.verticalScrollBar()
+            saved_log_pos = sb_log.value()
+            self.txt_log.setPlainText(new_log_text)
+            sb_log.setValue(saved_log_pos)
 
-    def _make_spin_handler(self, row: int, node_id: str):
+    def _make_param_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):
             if not self._is_updating:
-                self.engine.set_manual_node_score(self.code, node_id, val)
+                self.engine.set_node_custom_param(self.code, node_id, val)
                 self.manual_score_signal.emit()
         return _handler
 
@@ -606,12 +687,14 @@ class IntegratedTradingStrategyPanel(QWidget):
 class PinzhunLadderStandaloneWindow(QMainWindow):
     """
     频准激光 8/18 专属上市盯盘与分时阶梯交易策略独立主窗口
-    具备完全独立的窗口生命周期、窗口置顶、最大化最小化、多屏支持与非模态异步更新能力
+    具备完全独立的窗口生命周期、窗口置顶、最大化最小化、多屏支持、TDX 极速秒级直连与估价自动评分能力
     """
     def __init__(self, code: Optional[str] = None, name: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.engine = IntradayStrategyEngine.get_instance()
+        self.tdx_fetcher = TDXRealtimeFetcher.get_instance()
         self.selected_strategy_id: Optional[str] = None
+        self.selected_data_source: str = "TDX_REALTIME"  # TDX_REALTIME | ATS_IPC | MANUAL_EVAL
         self._is_stay_on_top = False
 
         if isinstance(code, bool) or not code:
@@ -637,8 +720,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         # 独立窗口属性设置 (允许独立任务栏、独立最小化/最大化/关闭)
         self.setWindowFlags(Qt.WindowType.Window)
         self.setWindowTitle(f"⚡ 频准激光（{self.code} {self.name}）8/18 上市盯盘与分时阶梯交易独立系统")
-        self.resize(1300, 900)
-        self.setMinimumSize(1000, 700)
+        self.resize(1340, 920)
+        self.setMinimumSize(1020, 720)
 
         # 🎨 全局应用 ATS 统一暗黑主题样式表模板 (QSS)
         apply_dark_theme(self)
@@ -656,41 +739,60 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # 1. 顶部 Header 控制栏
+        # 1. 顶部 Header 控制栏 第一行：标的与策略选择、置顶、数据源
         hdr_layout = QHBoxLayout()
         self.title_lbl = QLabel(f"📈 频准激光（{self.code} {self.name}）8/18 上市分时阶梯交易与动态评估工作台")
-        self.title_lbl.setStyleSheet("font-size: 12pt; font-weight: bold; color: #38bdf8;")
+        self.title_lbl.setStyleSheet("font-size: 11.5pt; font-weight: bold; color: #38bdf8;")
 
-        lbl_select = QLabel("🎯 目标标的:")
+        lbl_select = QLabel("🎯 标的:")
         lbl_select.setStyleSheet("font-weight: bold; color: #aad4ff;")
 
         self.combo_code = QComboBox()
-        self.combo_code.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #00ff88; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px; font-weight: bold; min-width: 220px; } QComboBox QAbstractItemView { background-color: #161622; color: #e0e0e0; selection-background-color: #007acc; }")
+        self.combo_code.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #00ff88; border: 1px solid #38bdf8; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 200px; }")
         self._populate_code_combo()
         self.combo_code.currentIndexChanged.connect(self._on_combo_code_changed)
 
-        lbl_strat = QLabel("📋 动态策略:")
+        lbl_strat = QLabel("📋 策略:")
         lbl_strat.setStyleSheet("font-weight: bold; color: #aad4ff;")
 
         self.combo_strategy = QComboBox()
-        self.combo_strategy.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 3px 8px; font-weight: bold; min-width: 220px; } QComboBox QAbstractItemView { background-color: #161622; color: #e0e0e0; selection-background-color: #007acc; }")
+        self.combo_strategy.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 200px; }")
         self._populate_strategy_combo()
         self.combo_strategy.currentIndexChanged.connect(self._on_combo_strategy_changed)
 
-        self.btn_topmost = QPushButton("📌 窗口置顶: 关")
-        self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 4px 10px;")
+        lbl_src = QLabel("📡 数据源:")
+        lbl_src.setStyleSheet("font-weight: bold; color: #aad4ff;")
+
+        self.combo_source = QComboBox()
+        self.combo_source.addItem("⚡ 【TDX 极速秒级直连 1s】", "TDX_REALTIME")
+        self.combo_source.addItem("🔄 【ATS 后台 IPC 同步】", "ATS_IPC")
+        self.combo_source.addItem("✍️ 【手动估价/推演模式】", "MANUAL_EVAL")
+        self.combo_source.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #00ff88; border: 1px solid #00ff88; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 175px; }")
+        self.combo_source.currentIndexChanged.connect(self._on_source_changed)
+
+        # TDX 连接状态徽标
+        tdx_host_str = f"{self.tdx_fetcher.current_host[1]}:{self.tdx_fetcher.current_host[2]}" if self.tdx_fetcher.current_host else "默认"
+        self.lbl_tdx_status = QLabel(f"🟢 TDX: {tdx_host_str} ({self.tdx_fetcher.latency_ms:.0f}ms)")
+        self.lbl_tdx_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold; background-color: #14241d; padding: 3px 6px; border-radius: 3px; border: 1px solid #00ff88;")
+
+        btn_refresh = QPushButton("⚡ 刷新")
+        btn_refresh.setStyleSheet("background-color: #0e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
+        btn_refresh.clicked.connect(self._load_mock_or_live_data)
+
+        self.btn_topmost = QPushButton("📌 置顶: 关")
+        self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
         self.btn_topmost.clicked.connect(self._toggle_stay_on_top)
 
-        btn_auto_eval = QPushButton("⚡ 全量 Code 检测")
-        btn_auto_eval.setStyleSheet("background-color: #1e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 4px 10px;")
+        btn_auto_eval = QPushButton("⚡ 全量检测")
+        btn_auto_eval.setStyleSheet("background-color: #1e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
         btn_auto_eval.clicked.connect(self._on_eval_all_codes)
 
         btn_edit = QPushButton("⚙️ 策略编辑")
-        btn_edit.setStyleSheet("background-color: #242436; color: #aad4ff; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 4px 10px;")
+        btn_edit.setStyleSheet("background-color: #242436; color: #aad4ff; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
         btn_edit.clicked.connect(self._on_open_editor)
 
         btn_close = QPushButton("关闭")
-        btn_close.setStyleSheet("background-color: #2b2b36; color: #d1d5db; border-radius: 4px; padding: 4px 10px;")
+        btn_close.setStyleSheet("background-color: #2b2b36; color: #d1d5db; border-radius: 4px; padding: 3px 8px;")
         btn_close.clicked.connect(self.close)
 
         hdr_layout.addWidget(self.title_lbl)
@@ -699,13 +801,71 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         hdr_layout.addWidget(self.combo_code)
         hdr_layout.addWidget(lbl_strat)
         hdr_layout.addWidget(self.combo_strategy)
+        hdr_layout.addWidget(lbl_src)
+        hdr_layout.addWidget(self.combo_source)
+        hdr_layout.addWidget(self.lbl_tdx_status)
+        hdr_layout.addWidget(btn_refresh)
         hdr_layout.addWidget(self.btn_topmost)
         hdr_layout.addWidget(btn_auto_eval)
         hdr_layout.addWidget(btn_edit)
         hdr_layout.addWidget(btn_close)
         layout.addLayout(hdr_layout)
 
-        # 2. 中央 3 大 Tab 选项卡
+        # 2. 顶部第二行：【💡 估价自动评估 & 手动输入快速推演栏】
+        eval_bar_layout = QHBoxLayout()
+        eval_bar_layout.setContentsMargins(0, 0, 0, 0)
+        eval_bar_layout.setSpacing(8)
+
+        lbl_eval_tips = QLabel("💡 估价自动评估 / 异常手动输入:")
+        lbl_eval_tips.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9pt;")
+
+        lbl_open_p = QLabel("开盘估价:")
+        lbl_open_p.setStyleSheet("color: #aad4ff; font-size: 8.5pt;")
+        self.spin_eval_open = QDoubleSpinBox()
+        self.spin_eval_open.setRange(1.0, 5000.0)
+        self.spin_eval_open.setValue(565.0)
+        self.spin_eval_open.setSingleStep(5.0)
+        self.spin_eval_open.setSuffix(" 元")
+        self.spin_eval_open.setStyleSheet("background-color: #1a1a24; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px;")
+        self.spin_eval_open.valueChanged.connect(self._on_eval_param_changed)
+
+        lbl_curr_p = QLabel("当前现价/估价:")
+        lbl_curr_p.setStyleSheet("color: #aad4ff; font-size: 8.5pt;")
+        self.spin_eval_price = QDoubleSpinBox()
+        self.spin_eval_price.setRange(1.0, 5000.0)
+        self.spin_eval_price.setValue(625.0)
+        self.spin_eval_price.setSingleStep(5.0)
+        self.spin_eval_price.setSuffix(" 元")
+        self.spin_eval_price.setStyleSheet("background-color: #1a1a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px;")
+        self.spin_eval_price.valueChanged.connect(self._on_eval_param_changed)
+
+        lbl_to_p = QLabel("换手率估算:")
+        lbl_to_p.setStyleSheet("color: #aad4ff; font-size: 8.5pt;")
+        self.spin_eval_turnover = QDoubleSpinBox()
+        self.spin_eval_turnover.setRange(0.0, 100.0)
+        self.spin_eval_turnover.setValue(62.5)
+        self.spin_eval_turnover.setSingleStep(1.0)
+        self.spin_eval_turnover.setSuffix(" %")
+        self.spin_eval_turnover.setStyleSheet("background-color: #1a1a24; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px;")
+        self.spin_eval_turnover.valueChanged.connect(self._on_eval_param_changed)
+
+        btn_auto_calc = QPushButton("⚡ 根据估价全自动评分 & 策略推演")
+        btn_auto_calc.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 12px;")
+        btn_auto_calc.clicked.connect(self._on_apply_custom_eval)
+
+        eval_bar_layout.addWidget(lbl_eval_tips)
+        eval_bar_layout.addWidget(lbl_open_p)
+        eval_bar_layout.addWidget(self.spin_eval_open)
+        eval_bar_layout.addWidget(lbl_curr_p)
+        eval_bar_layout.addWidget(self.spin_eval_price)
+        eval_bar_layout.addWidget(lbl_to_p)
+        eval_bar_layout.addWidget(self.spin_eval_turnover)
+        eval_bar_layout.addWidget(btn_auto_calc)
+        eval_bar_layout.addStretch()
+
+        layout.addLayout(eval_bar_layout)
+
+        # 3. 中央 3 大 Tab 选项卡
         self.tab_widget = QTabWidget(self)
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane {
@@ -745,7 +905,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         layout.addWidget(self.tab_widget, 1)
 
-        # 3. 定时刷新 Timer (秒级自动推进)
+        # 4. 定时刷新 Timer (秒级自动推进)
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._on_tick_update)
@@ -756,19 +916,52 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._is_stay_on_top = not self._is_stay_on_top
         if self._is_stay_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-            self.btn_topmost.setText("📌 窗口置顶: 开")
-            self.btn_topmost.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 4px 10px;")
+            self.btn_topmost.setText("📌 置顶: 开")
+            self.btn_topmost.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px;")
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-            self.btn_topmost.setText("📌 窗口置顶: 关")
-            self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 4px 10px;")
+            self.btn_topmost.setText("📌 置顶: 关")
+            self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
         self.show()
+
+    def _on_source_changed(self, index: int):
+        self.selected_data_source = self.combo_source.itemData(index)
+        if self.selected_data_source == "TDX_REALTIME":
+            self.lbl_tdx_status.show()
+            self._update_tdx_status_badge()
+        elif self.selected_data_source == "MANUAL_EVAL":
+            self.lbl_tdx_status.setText("✍️ 估价模式")
+            self.lbl_tdx_status.show()
+        else:
+            self.lbl_tdx_status.hide()
+        self._load_mock_or_live_data()
+
+    def _on_eval_param_changed(self):
+        """当用户修改开盘估价、现价估价或换手率时自动触发评分"""
+        if self.selected_data_source == "MANUAL_EVAL":
+            self._load_mock_or_live_data()
+
+    def _on_apply_custom_eval(self):
+        """手动点击估价评估按钮：一键切换到估价模式并全自动打分"""
+        idx = self.combo_source.findData("MANUAL_EVAL")
+        if idx >= 0:
+            self.combo_source.setCurrentIndex(idx)
+        self.selected_data_source = "MANUAL_EVAL"
+        self._load_mock_or_live_data()
+
+    def _update_tdx_status_badge(self):
+        if self.tdx_fetcher and self.tdx_fetcher.current_host:
+            h = self.tdx_fetcher.current_host
+            self.lbl_tdx_status.setText(f"🟢 TDX: {h[1]}:{h[2]} ({self.tdx_fetcher.latency_ms:.0f}ms)")
+        else:
+            self.lbl_tdx_status.setText("🔴 TDX: 未连接")
 
     def on_realtime_df_update(self, df: Optional[pd.DataFrame]):
         """接收来自 ATS 主窗口或独立 IPC 数据流的实时行情推送"""
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
             self._latest_df = df
-            self._load_mock_or_live_data()
+            if self.selected_data_source == "ATS_IPC":
+                self._load_mock_or_live_data()
 
     def _populate_code_combo(self):
         self.combo_code.blockSignals(True)
@@ -934,10 +1127,57 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         QMessageBox.information(self, "⚡ 全量 Code 分时策略自动检测", res_summary)
 
     def _get_stock_realtime_data_for_code(self, code_str: str) -> Tuple[float, float, float, float, float, float, float, float, str, bool]:
-        """全自动从 self._latest_df、parent.current_df 或行情快照解析全量字段"""
+        """全自动从 TDX 秒级直连、手动估价输入、self._latest_df 或行情快照解析全量字段"""
         c_clean = str(code_str).zfill(6)
-        curr_df = self._latest_df
+        resolved_name = resolve_stock_name(c_clean)
         parent = self.parent()
+        if parent and hasattr(parent, 'get_stock_name'):
+            p_name = parent.get_stock_name(c_clean)
+            if p_name and p_name != "未知" and p_name != c_clean:
+                resolved_name = p_name
+
+        # 1. 若用户选择【✍️ 手动估价/推演模式】，直接由顶部估价控件驱动自动评分
+        if getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
+            op = self.spin_eval_open.value()
+            tp = self.spin_eval_price.value()
+            to_rate = self.spin_eval_turnover.value()
+            hp = max(op, tp, op * 1.13)
+            lp = min(op, tp)
+            vw = (op + tp) / 2.0
+            amt = float(to_rate / 100.0 * 14.24 * 1e8)
+            b1 = tp
+            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False
+
+        # 2. 优先从 TDX 极速秒级直连获取
+        if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
+            try:
+                tdx_snap = self.tdx_fetcher.fetch_stock_snapshot(c_clean)
+                if tdx_snap and float(tdx_snap.get("price", 0.0)) > 0:
+                    op = float(tdx_snap.get("open_price", tdx_snap.get("price", 0.0)))
+                    tp = float(tdx_snap.get("price", 0.0))
+                    hp = float(tdx_snap.get("high_price", tp))
+                    lp = float(tdx_snap.get("low_price", tp))
+                    vw = float(tdx_snap.get("vwap", tp))
+                    to_rate = float(tdx_snap.get("turnover_rate", 0.0))
+                    amt = float(tdx_snap.get("amount", 0.0))
+                    b1 = float(tdx_snap.get("bid1_price", tp))
+                    self._update_tdx_status_badge()
+                    # 同步到界面估价框中方便观察
+                    self.spin_eval_open.blockSignals(True)
+                    self.spin_eval_price.blockSignals(True)
+                    self.spin_eval_turnover.blockSignals(True)
+                    self.spin_eval_open.setValue(op)
+                    self.spin_eval_price.setValue(tp)
+                    self.spin_eval_turnover.setValue(to_rate)
+                    self.spin_eval_open.blockSignals(False)
+                    self.spin_eval_price.blockSignals(False)
+                    self.spin_eval_turnover.blockSignals(False)
+                    return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False
+            except Exception as e:
+                logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
+
+        # 3. 从 ATS 推送的 df 获取
+        curr_df = self._latest_df
         if curr_df is None and parent is not None and hasattr(parent, 'current_df') and parent.current_df is not None:
             curr_df = parent.current_df
 
@@ -950,24 +1190,19 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         turnover_rate = snap["turnover_rate"]
         amount_val = snap["amount"]
         bid1_price = snap["bid1_price"]
-        resolved_name = resolve_stock_name(c_clean)
         is_unlisted = False
 
-        if parent and hasattr(parent, 'get_stock_name'):
-            p_name = parent.get_stock_name(c_clean)
-            if p_name and p_name != "未知" and p_name != c_clean:
-                resolved_name = p_name
-
+        # 4. 若行情尚未产生（如周日或未上市），自动使用界面输入的估价进行自动评分！
         if open_price <= 0 and trade_price <= 0:
             is_unlisted = True
-            open_price = 565.0
-            trade_price = 625.0
-            high_price = 638.0
-            low_price = 560.0
-            turnover_rate = 62.5
-            amount_val = 36.5 * 1e8
-            bid1_price = 624.5
-            vwap_price = 612.0
+            open_price = self.spin_eval_open.value()
+            trade_price = self.spin_eval_price.value()
+            turnover_rate = self.spin_eval_turnover.value()
+            high_price = max(open_price, trade_price, open_price * 1.13)
+            low_price = min(open_price, trade_price)
+            amount_val = float(turnover_rate / 100.0 * 14.24 * 1e8)
+            bid1_price = trade_price - 0.5
+            vwap_price = round((open_price + trade_price) / 2.0, 2)
         elif open_price <= 0 and trade_price > 0:
             open_price = trade_price
             high_price = max(high_price, trade_price)
@@ -1093,16 +1328,32 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             current_time_str=now_str
         )
 
+    def closeEvent(self, event):
+        """窗口关闭时停止所有后台定时器并释放资源，确保应用彻底安全退出"""
+        try:
+            if hasattr(self, 'timer') and self.timer.isActive():
+                self.timer.stop()
+            if hasattr(self, 'sim_panel') and hasattr(self.sim_panel, 'replay_timer') and self.sim_panel.replay_timer.isActive():
+                self.sim_panel.replay_timer.stop()
+            if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher:
+                self.tdx_fetcher.disconnect()
+        except Exception as e:
+            logger.debug(f"closeEvent cleanup: {e}")
+        event.accept()
+        # 若是作为独立顶级窗口运行，异步触发主事件循环退出
+        if self.parent() is None:
+            QTimer.singleShot(50, QApplication.quit)
+
 
 # 向后兼容别名
 IntradayStrategyDialog = PinzhunLadderStandaloneWindow
 
 
-# 补充 PinzhunLaserMonitorWidget 类的定义供 Tab 3 使用
+# 补充 PinzhunLaserMonitorWidget 类的定义供 Tab 3 使用（带滚动条位置保持保护）
 class PinzhunLaserMonitorWidget(QWidget):
     """
     频准激光（688826）8/18 上市盯盘与动态评分实操看板组件 (Tab 3)
-    全自动由实时推送的 df 获取换手率、成交量、成交额、最高最低价并自动填表打分
+    全自动由实时推送的 df / TDX 秒级行情获取换手率、成交量、成交额、最高最低价并自动填表打分
     """
     score_changed_signal = pyqtSignal()
 
@@ -1118,10 +1369,10 @@ class PinzhunLaserMonitorWidget(QWidget):
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(6)
 
-        scroll_area = QScrollArea(self)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
@@ -1162,13 +1413,13 @@ class PinzhunLaserMonitorWidget(QWidget):
         content_layout.addWidget(card_spec)
 
         # 2. 🎯 七节点实盘观察表
-        node_group = QGroupBox("🎯 七节点实盘观察表（通过推送 df 自动解析换手率、成交量与价格，自动填表打分）")
+        node_group = QGroupBox("🎯 七节点实盘观察表（通过行情/估价自动解析换手率、成交量与价格，自动填表打分）")
         node_group.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 6px; margin-top: 6px; font-weight: bold; color: #ffd700; background-color: #14141d; }")
         node_layout = QVBoxLayout(node_group)
         node_layout.setContentsMargins(6, 14, 6, 6)
 
         top_bar = QHBoxLayout()
-        lbl_hint = QLabel("⚡ 全自动模式：数据 100% 由实时行情 df 自动摄入计算（换手/量能/VWAP/锁仓比）；您也可在【节点评分】列手动微调分值。")
+        lbl_hint = QLabel("⚡ 全自动模式：数据根据行情/估价自动计算；您也可在【节点评分】列手动微调分值。")
         lbl_hint.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold;")
         
         btn_reset_scores = QPushButton("🔄 重置为自动打分")
@@ -1184,7 +1435,7 @@ class PinzhunLaserMonitorWidget(QWidget):
         self.table_nodes.setColumnCount(9)
         self.table_nodes.setHorizontalHeaderLabels([
             "#", "时间节点", "观察项目", "强势信号（打✓）", "风险信号（打✓）",
-            "实际观察值\n(实时df自动获取)", "信号判定\n强/中/弱", "节点评分\n(0-10分)", "备注/应对"
+            "实际观察值\n(实时df/估价自动获取)", "信号判定\n强/中/弱", "节点评分\n(0-10分)", "备注/应对"
         ])
         self.table_nodes.setAlternatingRowColors(True)
         self.table_nodes.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1240,7 +1491,7 @@ class PinzhunLaserMonitorWidget(QWidget):
         guide_layout.setContentsMargins(8, 12, 8, 8)
 
         guide_txt = (
-            "1. <b>节点观察</b>: 每个时间节点到达时，系统自动从实时 df 抓取价格/涨幅/换手/量能/VWAP；<br>"
+            "1. <b>节点观察</b>: 每个时间节点到达时，系统自动抓取价格/涨幅/换手/量能/VWAP；<br>"
             "2. <b>信号判定</b>: 自动判定 \"强\" / \"中\" / \"弱\" 并高亮呈现；<br>"
             "3. <b>节点评分</b>: 强=8-10分，中=5-7分，弱=0-4分；<br>"
             "4. <b>加权得分</b>: 自动计算 (加权得分 = 节点分 × 权重)；<br>"
@@ -1255,8 +1506,8 @@ class PinzhunLaserMonitorWidget(QWidget):
         guide_layout.addWidget(lbl_guide)
         content_layout.addWidget(guide_group)
 
-        scroll_area.setWidget(content_widget)
-        main_layout.addWidget(scroll_area)
+        self.scroll_area.setWidget(content_widget)
+        main_layout.addWidget(self.scroll_area)
 
     def _on_reset_scores(self):
         state = self.engine._get_stock_state(self.code, 0.0)
@@ -1275,8 +1526,13 @@ class PinzhunLaserMonitorWidget(QWidget):
         amount: float,
         current_time_str: str
     ):
-        """全面刷新盯盘看板数据"""
+        """全面刷新盯盘看板数据（带全局滚动条锁定保护）"""
         self.code = code
+
+        # 保护外层 ScrollArea 滚动条位置
+        outer_sb = self.scroll_area.verticalScrollBar()
+        saved_outer_pos = outer_sb.value()
+
         res = self.engine.evaluate_seven_nodes(
             code=code,
             current_time_str=current_time_str,
@@ -1297,56 +1553,28 @@ class PinzhunLaserMonitorWidget(QWidget):
         )
 
         node_results = res.get("node_results", [])
-        self.table_nodes.setRowCount(len(node_results))
+        if self.table_nodes.rowCount() != len(node_results):
+            self.table_nodes.setRowCount(len(node_results))
+
         self._is_updating = True
 
         for row, nr in enumerate(node_results):
             n_id = nr["node_id"]
-            it_0 = QTableWidgetItem(nr["node_num"])
-            it_0.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_nodes.setItem(row, 0, it_0)
+            _set_or_update_table_item(self.table_nodes, row, 0, nr["node_num"], align=Qt.AlignmentFlag.AlignCenter)
 
-            it_1 = QTableWidgetItem(f"{nr['name']}\n({nr['time_str']})")
-            it_1.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if nr["is_active"]:
-                it_1.setForeground(QColor("#00ff88"))
-                it_1.setBackground(QColor("#1a2e24"))
-            elif nr["is_completed"]:
-                it_1.setForeground(QColor("#888899"))
-            self.table_nodes.setItem(row, 1, it_1)
+            fg_t = QColor("#00ff88") if nr["is_active"] else (QColor("#888899") if nr["is_completed"] else None)
+            bg_t = QColor("#1a2e24") if nr["is_active"] else None
+            _set_or_update_table_item(self.table_nodes, row, 1, f"{nr['name']}\n({nr['time_str']})", fg_color=fg_t, bg_color=bg_t, align=Qt.AlignmentFlag.AlignCenter)
 
-            it_2 = QTableWidgetItem(nr["focus"])
-            it_2.setToolTip(nr["focus"])
-            self.table_nodes.setItem(row, 2, it_2)
-
-            it_3 = QTableWidgetItem(nr["strong_signals"])
-            it_3.setToolTip(nr["strong_signals"])
-            it_3.setForeground(QColor("#00ff88"))
-            self.table_nodes.setItem(row, 3, it_3)
-
-            it_4 = QTableWidgetItem(nr["risk_signals"])
-            it_4.setToolTip(nr["risk_signals"])
-            it_4.setForeground(QColor("#ff5555"))
-            self.table_nodes.setItem(row, 4, it_4)
-
-            it_5 = QTableWidgetItem(nr["observed_val"])
-            it_5.setToolTip(nr["observed_val"])
-            it_5.setForeground(QColor("#ffd700"))
-            self.table_nodes.setItem(row, 5, it_5)
+            _set_or_update_table_item(self.table_nodes, row, 2, nr["focus"], tooltip=nr["focus"])
+            _set_or_update_table_item(self.table_nodes, row, 3, nr["strong_signals"], fg_color="#00ff88", tooltip=nr["strong_signals"])
+            _set_or_update_table_item(self.table_nodes, row, 4, nr["risk_signals"], fg_color="#ff5555", tooltip=nr["risk_signals"])
+            _set_or_update_table_item(self.table_nodes, row, 5, nr["observed_val"], fg_color="#ffd700", tooltip=nr["observed_val"])
 
             judg = nr["judgment"]
-            it_6 = QTableWidgetItem(judg)
-            it_6.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if judg == "强":
-                it_6.setForeground(QColor("#00ff88"))
-                it_6.setBackground(QColor("#163322"))
-            elif judg == "中":
-                it_6.setForeground(QColor("#38bdf8"))
-                it_6.setBackground(QColor("#162838"))
-            else:
-                it_6.setForeground(QColor("#ff4444"))
-                it_6.setBackground(QColor("#331616"))
-            self.table_nodes.setItem(row, 6, it_6)
+            fg_j = QColor("#00ff88") if judg == "强" else (QColor("#38bdf8") if judg == "中" else QColor("#ff4444"))
+            bg_j = QColor("#163322") if judg == "强" else (QColor("#162838") if judg == "中" else QColor("#331616"))
+            _set_or_update_table_item(self.table_nodes, row, 6, judg, fg_color=fg_j, bg_color=bg_j, align=Qt.AlignmentFlag.AlignCenter)
 
             spin = self.table_nodes.cellWidget(row, 7)
             if not isinstance(spin, QDoubleSpinBox):
@@ -1361,103 +1589,59 @@ class PinzhunLaserMonitorWidget(QWidget):
             spin.setValue(float(nr["final_score"]))
             spin.blockSignals(False)
 
-            it_8 = QTableWidgetItem(f"{nr['remarks']} | {nr['action_guide']}")
-            it_8.setToolTip(it_8.text())
-            self.table_nodes.setItem(row, 8, it_8)
+            remark_text = f"{nr['remarks']} | {nr['action_guide']}"
+            _set_or_update_table_item(self.table_nodes, row, 8, remark_text, tooltip=remark_text)
 
-        self.table_nodes.resizeRowsToContents()
+        if self.table_summary.rowCount() != 10:
+            self.table_summary.setRowCount(10)
 
-        self.table_summary.setRowCount(10)
         tot_score = res.get("total_weighted_score", 0.0)
         pattern = res.get("pattern", "--")
         t1_advice = res.get("t1_advice", "--")
         pat_color = res.get("pattern_color", "#00ff88")
 
         for row, nr in enumerate(node_results):
-            it_name = QTableWidgetItem(f"{nr['name']}({nr['time_str']})")
-            it_time = QTableWidgetItem(nr["time_str"])
-            it_time.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_score = QTableWidgetItem(f"{nr['final_score']:.1f}")
-            it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_weight = QTableWidgetItem(nr["weight_pct"])
-            it_weight.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_weight.setForeground(QColor("#38bdf8"))
-            it_wscore = QTableWidgetItem(f"{nr['weighted_score']:.2f}")
-            it_wscore.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-            self.table_summary.setItem(row, 0, it_name)
-            self.table_summary.setItem(row, 1, it_time)
-            self.table_summary.setItem(row, 2, it_score)
-            self.table_summary.setItem(row, 3, it_weight)
-            self.table_summary.setItem(row, 4, it_wscore)
+            _set_or_update_table_item(self.table_summary, row, 0, f"{nr['name']}({nr['time_str']})")
+            _set_or_update_table_item(self.table_summary, row, 1, nr["time_str"], align=Qt.AlignmentFlag.AlignCenter)
+            _set_or_update_table_item(self.table_summary, row, 2, f"{nr['final_score']:.1f}", align=Qt.AlignmentFlag.AlignCenter)
+            _set_or_update_table_item(self.table_summary, row, 3, nr["weight_pct"], fg_color="#38bdf8", align=Qt.AlignmentFlag.AlignCenter)
+            _set_or_update_table_item(self.table_summary, row, 4, f"{nr['weighted_score']:.2f}", align=Qt.AlignmentFlag.AlignCenter)
 
             if row == 0:
-                it_gain = QTableWidgetItem(f"{res.get('gain_from_issue', 0.0):+.1f}%")
-                it_gain.setForeground(QColor("#00ff88"))
-                it_to = QTableWidgetItem(f"{res.get('turnover_rate', 0.0):.1f}%")
-                it_ch = QTableWidgetItem(f"{res.get('close_high_ratio', 1.0)*100:.1f}%")
-                it_pat = QTableWidgetItem(pattern)
-                it_pat.setForeground(QColor(pat_color))
-                it_pat.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-
-                self.table_summary.setItem(row, 5, it_gain)
-                self.table_summary.setItem(row, 6, it_to)
-                self.table_summary.setItem(row, 7, it_ch)
-                self.table_summary.setItem(row, 8, it_pat)
+                _set_or_update_table_item(self.table_summary, row, 5, f"{res.get('gain_from_issue', 0.0):+.1f}%", fg_color="#00ff88")
+                _set_or_update_table_item(self.table_summary, row, 6, f"{res.get('turnover_rate', 0.0):.1f}%")
+                _set_or_update_table_item(self.table_summary, row, 7, f"{res.get('close_high_ratio', 1.0)*100:.1f}%")
+                _set_or_update_table_item(self.table_summary, row, 8, pattern, fg_color=pat_color, font=QFont("Arial", 9, QFont.Weight.Bold))
             else:
                 for c in range(5, 9):
-                    self.table_summary.setItem(row, c, QTableWidgetItem(""))
+                    _set_or_update_table_item(self.table_summary, row, c, "")
 
         r_sum = 7
-        it_sum_lbl = QTableWidgetItem("综合得分")
-        it_sum_lbl.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        it_sum_lbl.setForeground(QColor("#38bdf8"))
-        it_sum_t = QTableWidgetItem("合计")
-        it_sum_t.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_sum_pct = QTableWidgetItem("100%")
-        it_sum_pct.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_sum_pct.setForeground(QColor("#38bdf8"))
-        it_sum_val = QTableWidgetItem(f"{tot_score:.2f}")
-        it_sum_val.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_sum_val.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        it_sum_val.setForeground(QColor("#ff0055" if tot_score < 5 else ("#00ff88" if tot_score >= 8 else "#ffd700")))
-        it_sum_val.setBackground(QColor("#2d2218"))
-
-        self.table_summary.setItem(r_sum, 0, it_sum_lbl)
-        self.table_summary.setItem(r_sum, 1, it_sum_t)
-        self.table_summary.setItem(r_sum, 2, QTableWidgetItem(""))
-        self.table_summary.setItem(r_sum, 3, it_sum_pct)
-        self.table_summary.setItem(r_sum, 4, it_sum_val)
+        score_fg = "#ff0055" if tot_score < 5 else ("#00ff88" if tot_score >= 8 else "#ffd700")
+        _set_or_update_table_item(self.table_summary, r_sum, 0, "综合得分", fg_color="#38bdf8", font=QFont("Arial", 9, QFont.Weight.Bold))
+        _set_or_update_table_item(self.table_summary, r_sum, 1, "合计", align=Qt.AlignmentFlag.AlignCenter)
+        _set_or_update_table_item(self.table_summary, r_sum, 2, "")
+        _set_or_update_table_item(self.table_summary, r_sum, 3, "100%", fg_color="#38bdf8", align=Qt.AlignmentFlag.AlignCenter)
+        _set_or_update_table_item(self.table_summary, r_sum, 4, f"{tot_score:.2f}", fg_color=score_fg, bg_color="#2d2218", font=QFont("Arial", 10, QFont.Weight.Bold), align=Qt.AlignmentFlag.AlignCenter)
         for c in range(5, 9):
-            self.table_summary.setItem(r_sum, c, QTableWidgetItem(""))
+            _set_or_update_table_item(self.table_summary, r_sum, c, "")
 
         r_pat = 8
-        it_p_lbl = QTableWidgetItem("形态判定")
-        it_p_lbl.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        it_p_val = QTableWidgetItem(f"【{pattern}】")
-        it_p_val.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        it_p_val.setForeground(QColor(pat_color))
-        it_p_val.setBackground(QColor("#22182d"))
-
-        self.table_summary.setItem(r_pat, 0, it_p_lbl)
-        self.table_summary.setItem(r_pat, 8, it_p_val)
+        _set_or_update_table_item(self.table_summary, r_pat, 0, "形态判定", font=QFont("Arial", 9, QFont.Weight.Bold))
         for c in range(1, 8):
-            self.table_summary.setItem(r_pat, c, QTableWidgetItem(""))
+            _set_or_update_table_item(self.table_summary, r_pat, c, "")
+        _set_or_update_table_item(self.table_summary, r_pat, 8, f"【{pattern}】", fg_color=pat_color, bg_color="#22182d", font=QFont("Arial", 10, QFont.Weight.Bold))
 
         r_t1 = 9
-        it_t1_lbl = QTableWidgetItem("T+1建议")
-        it_t1_lbl.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        it_t1_val = QTableWidgetItem(t1_advice)
-        it_t1_val.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        it_t1_val.setForeground(QColor(pat_color))
-
-        self.table_summary.setItem(r_t1, 0, it_t1_lbl)
-        self.table_summary.setItem(r_t1, 8, it_t1_val)
+        _set_or_update_table_item(self.table_summary, r_t1, 0, "T+1建议", font=QFont("Arial", 9, QFont.Weight.Bold))
         for c in range(1, 8):
-            self.table_summary.setItem(r_t1, c, QTableWidgetItem(""))
+            _set_or_update_table_item(self.table_summary, r_t1, c, "")
+        _set_or_update_table_item(self.table_summary, r_t1, 8, t1_advice, fg_color=pat_color, font=QFont("Arial", 9, QFont.Weight.Bold))
 
-        self.table_summary.resizeRowsToContents()
         self._is_updating = False
+
+        # 恢复外层滚动条位置
+        outer_sb.setValue(saved_outer_pos)
 
     def _make_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):
@@ -1705,9 +1889,18 @@ class IntradaySimulationWidget(QWidget):
 
 
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
     apply_dark_theme(app)
+
+    # 启用定时器周期唤醒 Python 解释器处理 Ctrl+C 信号
+    sig_timer = QTimer()
+    sig_timer.timeout.connect(lambda: None)
+    sig_timer.start(300)
+
     engine = IntradayStrategyEngine.get_instance()
     default_code = engine.get_default_target_code() or "688826"
     win = PinzhunLadderStandaloneWindow(code=default_code)
