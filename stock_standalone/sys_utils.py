@@ -946,28 +946,107 @@ def register_link_callback(callback):
     global _link_callback
     _link_callback = callback
 
-_stock_names_cache_data = None
-_stock_names_cache_mtime = 0
+_stock_names_cache_bytes = None
+_stock_names_cache_version = 0
 
 def get_cached_stock_names():
-    global _stock_names_cache_data, _stock_names_cache_mtime
-    import os
-    path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+    """
+    为 HTTP 服务提供股票代码→名称映射 JSON bytes。
+    优先从内存 _resolved_name_cache 序列化返回（包含 bootstrap + 实时 df 动态补入的全量名称），
+    确保新上市股票（如 301717、688797 臻宝科技等）在 stock_name_cache.json 未收录时也能被正确推送。
+    """
+    global _stock_names_cache_bytes, _stock_names_cache_version, _resolved_name_cache
     try:
-        if not os.path.exists(path):
-            return b"{}"
-        mtime = os.path.getmtime(path)
-        if _stock_names_cache_data is not None and mtime == _stock_names_cache_mtime:
-            return _stock_names_cache_data
-        
-        # 缓存失效或首次加载：执行文件读取
-        with open(path, 'rb') as f:
-            data = f.read()
-        _stock_names_cache_data = data
-        _stock_names_cache_mtime = mtime
-        return data
+        # 内存缓存字典非空时，直接从内存序列化（比磁盘文件更完整）
+        if _resolved_name_cache:
+            current_version = len(_resolved_name_cache)
+            if _stock_names_cache_bytes is not None and current_version == _stock_names_cache_version:
+                return _stock_names_cache_bytes
+            # 缓存失效或条目数变化：重新序列化
+            data = json.dumps(_resolved_name_cache, ensure_ascii=False).encode('utf-8')
+            _stock_names_cache_bytes = data
+            _stock_names_cache_version = current_version
+            return data
     except Exception:
-        return b"{}"
+        pass
+
+    # 兜底：内存缓存为空时从磁盘文件读取
+    try:
+        path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return f.read()
+    except Exception:
+        pass
+    return b"{}"
+
+
+def bulk_update_name_cache_from_df(df):
+    """
+    从实时行情 DataFrame 中批量提取 code→name 映射，注入内存缓存 _resolved_name_cache。
+    解决极新上市股票（如只有几天数据的 IPO 新股）不在 TDX/Sina/top_all.h5 底层数据中，
+    导致 stock_name_cache.json 缺失、网页联动伴侣无法识别中文名称的问题。
+    
+    该函数设计为高频安全调用（轻量级，仅在发现新条目时才触发磁盘写入）。
+    """
+    global _resolved_name_cache
+    if df is None or not hasattr(df, 'columns'):
+        return
+    if 'name' not in df.columns:
+        return
+
+    # 确定 code 列来源
+    code_col = None
+    if 'code' in df.columns:
+        code_col = 'code'
+    elif df.index.name == 'code':
+        code_col = None  # 使用 index
+    else:
+        return
+
+    added_count = 0
+    try:
+        if code_col:
+            pairs = zip(df[code_col].astype(str), df['name'].astype(str))
+        else:
+            pairs = zip(df.index.astype(str), df['name'].astype(str))
+
+        for raw_code, raw_name in pairs:
+            k = raw_code.strip().zfill(6)
+            v = raw_name.strip()
+            if not v or v.startswith("个股_") or v.isdigit() or v == k or v == '-' or v == '--':
+                continue
+            existing = _resolved_name_cache.get(k)
+            if existing:
+                # 允许自动覆盖的场景：
+                # 1. 新股"C"前缀到期去除（如 "C超纯" -> "超纯应材"）
+                # 2. ST/退市风险警示摘帽（如 "*ST某某" -> "某某"）
+                # 3. 名称确实发生了变更（如更名公告后）
+                need_update = False
+                if existing != v:
+                    # 旧名以 C 开头（新股临时前缀）且新名不以 C 开头
+                    if existing.startswith('C') and not v.startswith('C'):
+                        need_update = True
+                    # 旧名包含 ST 标记但新名不再包含
+                    elif 'ST' in existing and 'ST' not in v:
+                        need_update = True
+                if not need_update:
+                    continue
+            _resolved_name_cache[k] = v
+            added_count += 1
+
+        # 仅在有新增时才触发一次磁盘持久化（异步友好，不阻塞主线程）
+        if added_count > 0:
+            logger.info(f"📡 [NameCache] Bulk injected {added_count} new stock names from realtime df. Total: {len(_resolved_name_cache)}")
+            try:
+                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(_resolved_name_cache, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.error(f"[NameCache] Failed to persist bulk update: {e}")
+    except Exception as e:
+        logger.error(f"[NameCache] bulk_update_name_cache_from_df error: {e}")
 
 _server_started = False
 _server_lock = threading.Lock()
