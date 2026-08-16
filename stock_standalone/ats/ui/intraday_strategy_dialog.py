@@ -91,12 +91,15 @@ def _set_or_update_table_item(
     return item
 
 
+import copy
+
+
 class IntradayStrategyEditDialog(QDialog):
-    """自定制分时策略 JSON 编辑器（支持单策略精准聚焦与全量 JSON 双模式编辑）"""
+    """自定制分时策略 JSON 编辑器（支持单策略精准聚焦、一键新建/复制/删除策略与全量 JSON 多模式管理）"""
     def __init__(self, parent=None, initial_strategy_id: Optional[str] = None, current_code: Optional[str] = None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ 自定制分时交易策略编辑器")
-        self.resize(860, 640)
+        self.resize(920, 660)
         self.engine = IntradayStrategyEngine.get_instance()
         self.initial_strategy_id = initial_strategy_id
         self.current_code = current_code
@@ -122,26 +125,34 @@ class IntradayStrategyEditDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # 顶部策略选择与切换栏
+        # 顶部策略选择与管理栏
         top_bar = QHBoxLayout()
-        lbl_target = QLabel("🎯 选择编辑策略:")
+        lbl_target = QLabel("🎯 策略选择:")
         lbl_target.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 10pt;")
         top_bar.addWidget(lbl_target)
 
         self.combo_strat = QComboBox()
-        self.combo_strat.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 4px 8px; font-weight: bold; min-width: 340px; font-size: 9.5pt; }")
-        
-        # 填充策略选项
-        strats = self._full_config_data.get("strategies", [])
-        for st in strats:
-            st_id = st.get("id", "")
-            st_name = st.get("name", st_id)
-            t_codes = st.get("target_codes", [])
-            t_str = f" [标的: {', '.join(t_codes)}]" if t_codes else ""
-            self.combo_strat.addItem(f"📋 {st_name}{t_str}", st_id)
-        
-        self.combo_strat.addItem("🌐 全部策略配置 (全量 JSON 文件)", "__ALL__")
+        self.combo_strat.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 4px 8px; font-weight: bold; min-width: 320px; font-size: 9.5pt; }")
         top_bar.addWidget(self.combo_strat)
+
+        btn_new_strat = QPushButton("➕ 新建策略")
+        btn_new_strat.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 4px 10px; font-size: 9pt;")
+        btn_new_strat.setToolTip("基于标准阶梯模板创建一个全新独立策略")
+        btn_new_strat.clicked.connect(self._on_create_new_strategy)
+        top_bar.addWidget(btn_new_strat)
+
+        btn_clone_strat = QPushButton("📑 复制策略")
+        btn_clone_strat.setStyleSheet("background-color: #242436; color: #aad4ff; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 4px 10px; font-size: 9pt;")
+        btn_clone_strat.setToolTip("以当前选中的策略为蓝本快速克隆一套新策略")
+        btn_clone_strat.clicked.connect(self._on_clone_current_strategy)
+        top_bar.addWidget(btn_clone_strat)
+
+        btn_del_strat = QPushButton("🗑️ 删除策略")
+        btn_del_strat.setStyleSheet("background-color: #3a1e1e; color: #ff6666; font-weight: bold; border: 1px solid #ff4444; border-radius: 4px; padding: 4px 10px; font-size: 9pt;")
+        btn_del_strat.setToolTip("从列表中移除当前选中的策略配置")
+        btn_del_strat.clicked.connect(self._on_delete_strategy)
+        top_bar.addWidget(btn_del_strat)
+
         top_bar.addStretch()
 
         self.lbl_tips = QLabel("💡 提示：在下方可实时编辑策略规则，保存后即时生效落盘。")
@@ -181,17 +192,34 @@ class IntradayStrategyEditDialog(QDialog):
             auto_st = self.engine.auto_select_strategy(0.0, code=self.current_code)
             if auto_st:
                 target_id = auto_st.get("id")
-        
+
+        self.combo_strat.currentIndexChanged.connect(self._on_combo_strat_changed)
+        self._refresh_combo_strat(select_id=target_id)
+
+    def _refresh_combo_strat(self, select_id: Optional[str] = None):
+        self.combo_strat.blockSignals(True)
+        self.combo_strat.clear()
+
+        strats = self._full_config_data.get("strategies", [])
+        for st in strats:
+            st_id = st.get("id", "")
+            st_name = st.get("name", st_id)
+            t_codes = st.get("target_codes", [])
+            t_str = f" [标的: {', '.join(t_codes)}]" if t_codes else ""
+            self.combo_strat.addItem(f"📋 {st_name}{t_str}", st_id)
+
+        self.combo_strat.addItem("🌐 全部策略配置 (全量 JSON 文件)", "__ALL__")
+
         target_idx = 0
-        if target_id:
+        if select_id:
             for i in range(self.combo_strat.count()):
-                if self.combo_strat.itemData(i) == target_id:
+                if self.combo_strat.itemData(i) == select_id:
                     target_idx = i
                     break
 
         self.combo_strat.setCurrentIndex(target_idx)
+        self.combo_strat.blockSignals(False)
         self._switch_to_mode(self.combo_strat.itemData(target_idx))
-        self.combo_strat.currentIndexChanged.connect(self._on_combo_strat_changed)
 
     def _switch_to_mode(self, mode: str):
         self._current_selected_mode = mode
@@ -213,6 +241,155 @@ class IntradayStrategyEditDialog(QDialog):
     def _on_combo_strat_changed(self, index: int):
         mode = self.combo_strat.itemData(index)
         self._switch_to_mode(mode)
+
+    def _on_create_new_strategy(self):
+        """【➕ 新建策略】一键根据标准阶梯模板生成全新独立策略并进入编辑"""
+        strats = self._full_config_data.setdefault("strategies", [])
+        new_idx = len(strats) + 1
+        ts_suffix = str(int(time.time()))[-4:]
+        new_id = f"strategy_custom_{ts_suffix}"
+        target_code_str = self.current_code if self.current_code else "688888"
+        new_name = f"新股自定义阶梯策略 {new_idx}（{target_code_str}）"
+
+        new_strat = {
+            "id": new_id,
+            "name": new_name,
+            "target_codes": [target_code_str] if target_code_str else [],
+            "description": "基于时间轴分批减仓与价格笼子挂单的自定制分时阶梯策略",
+            "applicable_rules": {
+                "open_price_ranges": [
+                    {"name": "标准档", "min": 0.0, "max": 99999.0, "action_mode": "standard"}
+                ]
+            },
+            "phases": [
+                {
+                    "phase_id": "call_auction",
+                    "name": "9:15~9:25 集合竞价定盘",
+                    "start_time": "09:15",
+                    "end_time": "09:25",
+                    "description": "记录开盘价 Open，判定价格所属档位，锁定执行策略",
+                    "rules": []
+                },
+                {
+                    "phase_id": "opening_surge",
+                    "name": "9:30~10:00 开盘冲高卖出",
+                    "start_time": "09:30",
+                    "end_time": "10:00",
+                    "description": "开盘后冲高分批卖出第一批仓位",
+                    "rules": [
+                        {
+                            "rule_id": f"rule_s{new_idx}_surge_10",
+                            "name": "规则1: 开盘冲高涨10%卖50%",
+                            "condition_mode": "standard",
+                            "trigger_expr": "price >= open_price * 1.10",
+                            "sell_ratio": 0.5,
+                            "order_type": "limit_price_cage",
+                            "price_offset_ratio": 1.02,
+                            "description": "较开盘涨10%以上，按当前买一价*1.02限价单卖出50%"
+                        },
+                        {
+                            "rule_id": f"rule_s{new_idx}_timeout",
+                            "name": "规则1兜底: 10:00整超时卖30%",
+                            "condition_mode": "all",
+                            "trigger_expr": "current_time >= '10:00'",
+                            "sell_ratio": 0.3,
+                            "order_type": "market_price",
+                            "description": "若10:00前未触发冲高条件，10:00整按市价卖出30%"
+                        }
+                    ]
+                },
+                {
+                    "phase_id": "circuit_breaker",
+                    "name": "9:30~15:00 临停复牌卖出",
+                    "start_time": "09:30",
+                    "end_time": "15:00",
+                    "description": "触发较开盘价+30%临停复牌后卖出",
+                    "rules": [
+                        {
+                            "rule_id": f"rule_s{new_idx}_halt_30",
+                            "name": "规则2: 较开盘+30%临停复牌卖30%",
+                            "condition_mode": "all",
+                            "trigger_expr": "max_price >= open_price * 1.30",
+                            "sell_ratio": 0.3,
+                            "order_type": "limit",
+                            "limit_price_expr": "open_price * 1.28",
+                            "description": "复牌后3分钟内再卖30%，复牌前挂 Open*1.28 限价单"
+                        }
+                    ]
+                },
+                {
+                    "phase_id": "closing_clearance",
+                    "name": "14:50~14:57 尾盘清仓",
+                    "start_time": "14:50",
+                    "end_time": "14:57",
+                    "description": "尾盘清仓剩余全部仓位",
+                    "rules": [
+                        {
+                            "rule_id": f"rule_s{new_idx}_clear_all",
+                            "name": "规则3: 尾盘市价清仓剩余",
+                            "condition_mode": "all",
+                            "trigger_expr": "current_time >= '14:50'",
+                            "sell_ratio": 1.0,
+                            "order_type": "market_price",
+                            "description": "14:50~14:57 按买一价市价卖出剩余全部"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        strats.append(new_strat)
+        self._refresh_combo_strat(select_id=new_id)
+        QMessageBox.information(self, "新建策略成功", f"✅ 已成功生成新策略【{new_name}】模板！\n可在下方直接调整参数与规则，修改后点击“保存并应用”即可生效。")
+
+    def _on_clone_current_strategy(self):
+        """【📑 复制策略】以当前选中的策略为基础克隆一份并直接切换至编辑"""
+        if self._current_selected_mode == "__ALL__":
+            QMessageBox.warning(self, "提示", "请在上方下拉列表中先选择一个具体策略，再进行复制克隆。")
+            return
+
+        strats = self._full_config_data.setdefault("strategies", [])
+        target_st = next((s for s in strats if s.get("id") == self._current_selected_mode), None)
+        if not target_st:
+            QMessageBox.warning(self, "错误", "未找到要克隆的目标策略。")
+            return
+
+        cloned_strat = copy.deepcopy(target_st)
+        ts_suffix = str(int(time.time()))[-4:]
+        cloned_strat["id"] = f"{target_st.get('id', 'strat')}_copy_{ts_suffix}"
+        cloned_strat["name"] = f"{target_st.get('name', '策略')} (副本)"
+        
+        strats.append(cloned_strat)
+        self._refresh_combo_strat(select_id=cloned_strat["id"])
+        QMessageBox.information(self, "克隆成功", f"✅ 已成功克隆策略【{cloned_strat['name']}】！\n可在下方直接修改配置。")
+
+    def _on_delete_strategy(self):
+        """【🗑️ 删除策略】从列表中安全移除当前选中的策略"""
+        if self._current_selected_mode == "__ALL__":
+            QMessageBox.warning(self, "提示", "全量配置文件不可直接删除！")
+            return
+
+        strats = self._full_config_data.get("strategies", [])
+        if len(strats) <= 1:
+            QMessageBox.warning(self, "提示", "当前只剩 1 套策略，不可继续删除，至少需要保留 1 套有效策略。")
+            return
+
+        target_st = next((s for s in strats if s.get("id") == self._current_selected_mode), None)
+        if not target_st:
+            return
+
+        st_name = target_st.get("name", self._current_selected_mode)
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除策略【{st_name}】吗？\n删除后点击“保存并应用”将永久生效。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._full_config_data["strategies"] = [s for s in strats if s.get("id") != self._current_selected_mode]
+            next_select = self._full_config_data["strategies"][0].get("id") if self._full_config_data["strategies"] else "__ALL__"
+            self._refresh_combo_strat(select_id=next_select)
+            QMessageBox.information(self, "已移除", f"策略【{st_name}】已从临时列表中移除，点击“保存并应用”即可写入磁盘。")
 
     def _on_format(self):
         try:
@@ -830,7 +1007,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             else:
                 code = "688826"
 
-        self.code = "".join(filter(str.isdigit, str(code))).zfill(6)
+        self.code = "".join(filter(str.isdigit, str(code))).zfill(6) if code else "688826"
+        if not self.code or self.code == "000000":
+            self.code = "688826"
+        self._known_codes = [self.code]
+
         if isinstance(name, bool) or not name or name == "未知" or name == self.code:
             if parent and hasattr(parent, 'get_stock_name'):
                 self.name = parent.get_stock_name(self.code)
@@ -841,7 +1022,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         # 独立窗口属性设置 (允许独立任务栏、独立最小化/最大化/关闭)
         self.setWindowFlags(Qt.WindowType.Window)
-        self.setWindowTitle(f"⚡ 频准激光（{self.code} {self.name}）8/18 上市盯盘与分时阶梯交易独立系统")
+        self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
         self.resize(1340, 920)
         self.setMinimumSize(1020, 720)
 
@@ -1107,19 +1288,66 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 break
         self.combo_strategy.blockSignals(False)
 
+    def switch_to_code(self, code: str, name: Optional[str] = None):
+        """外部（如主窗口）动态切换当前监控标的"""
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
+        if not c_clean or c_clean == "000000":
+            return
+        self.code = c_clean
+        if not hasattr(self, '_known_codes'):
+            self._known_codes = []
+        if self.code not in self._known_codes:
+            self._known_codes.append(self.code)
+
+        if isinstance(name, bool) or not name or name == "未知" or name == c_clean:
+            parent = self.parent()
+            if parent and hasattr(parent, 'get_stock_name'):
+                self.name = parent.get_stock_name(self.code)
+            else:
+                self.name = resolve_stock_name(self.code)
+        else:
+            self.name = name
+
+        self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
+        if hasattr(self, 'title_lbl'):
+            self.title_lbl.setText(f"📈 【{self.code} {self.name}】分时阶梯交易与时序评估工作台")
+
+        # 自动匹配新标的对应的策略并更新策略下拉框
+        auto_st = self.engine.auto_select_strategy(0.0, code=self.code)
+        if auto_st:
+            self.selected_strategy_id = auto_st.get("id")
+            self._populate_strategy_combo()
+
+        # 刷新并同步标的下拉框
+        self._populate_code_combo()
+        self._load_mock_or_live_data()
+
     def _populate_code_combo(self):
         self.combo_code.blockSignals(True)
         self.combo_code.clear()
 
+        # 聚合所有可用、历史传入与策略配置的代码，杜绝任何代码丢失
+        strat_codes = []
+        if self.code and self.code not in strat_codes and self.code != "000000":
+            strat_codes.append(self.code)
+        for kc in getattr(self, '_known_codes', []):
+            if kc and kc not in strat_codes and kc != "000000":
+                strat_codes.append(kc)
+
         # 获取当前选定策略所绑定的目标标的代码
         curr_strat = self.engine.get_strategy_by_id(self.selected_strategy_id) if self.selected_strategy_id else None
         if curr_strat and curr_strat.get("target_codes"):
-            strat_codes = [str(c).zfill(6) for c in curr_strat.get("target_codes", [])]
-        else:
-            strat_codes = self.engine.get_all_target_codes()
+            for tc in curr_strat.get("target_codes", []):
+                c_clean = "".join(filter(str.isdigit, str(tc))).zfill(6)
+                if c_clean and c_clean not in strat_codes and c_clean != "000000":
+                    strat_codes.append(c_clean)
 
-        if self.code and self.code not in strat_codes:
-            strat_codes.insert(0, self.code)
+        for c in self.engine.get_all_target_codes():
+            if c and c not in strat_codes and c != "000000":
+                strat_codes.append(c)
+
+        if not strat_codes:
+            strat_codes = [self.code] if self.code and self.code != "000000" else ["688826"]
 
         for c in strat_codes:
             c_name = resolve_stock_name(c)
@@ -1141,26 +1369,30 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.selected_strategy_id = selected_strat_id
         strategy = self.engine.get_strategy_by_id(selected_strat_id)
         if strategy:
-            t_codes = strategy.get("target_codes", [])
-            target_c = t_codes[0] if t_codes else strategy.get("target_code", "688826")
-            if target_c:
-                self.code = str(target_c).zfill(6)
+            t_codes = [str(c).zfill(6) for c in strategy.get("target_codes", []) if str(c).strip() not in ("", "000000", "0")]
+            # 只有当策略具有专属 target_codes 且当前 code 不在该专属列表中时，才切换为专属代码
+            if t_codes and self.code not in t_codes:
+                self.code = t_codes[0]
+                if not hasattr(self, '_known_codes'):
+                    self._known_codes = []
+                if self.code not in self._known_codes:
+                    self._known_codes.append(self.code)
                 self.name = resolve_stock_name(self.code)
 
-                # 刷新并同步标的下拉框
-                self._populate_code_combo()
+            # 刷新并同步标的下拉框
+            self._populate_code_combo()
 
-                # 重置估价输入框为该策略预设基准价格
-                if self.code == "688826":
-                    self.spin_eval_open.blockSignals(True)
-                    self.spin_eval_price.blockSignals(True)
-                    self.spin_eval_turnover.blockSignals(True)
-                    self.spin_eval_open.setValue(565.0)
-                    self.spin_eval_price.setValue(625.0)
-                    self.spin_eval_turnover.setValue(62.5)
-                    self.spin_eval_open.blockSignals(False)
-                    self.spin_eval_price.blockSignals(False)
-                    self.spin_eval_turnover.blockSignals(False)
+            # 重置估价输入框为该策略预设基准价格
+            if self.code == "688826":
+                self.spin_eval_open.blockSignals(True)
+                self.spin_eval_price.blockSignals(True)
+                self.spin_eval_turnover.blockSignals(True)
+                self.spin_eval_open.setValue(565.0)
+                self.spin_eval_price.setValue(625.0)
+                self.spin_eval_turnover.setValue(62.5)
+                self.spin_eval_open.blockSignals(False)
+                self.spin_eval_price.blockSignals(False)
+                self.spin_eval_turnover.blockSignals(False)
 
         self._load_mock_or_live_data()
 
@@ -1168,11 +1400,20 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         selected_code = self.combo_code.itemData(index)
         if selected_code and selected_code != self.code:
             self.code = str(selected_code).zfill(6)
+            if not hasattr(self, '_known_codes'):
+                self._known_codes = []
+            if self.code not in self._known_codes:
+                self._known_codes.append(self.code)
+
             parent = self.parent()
             if parent and hasattr(parent, 'get_stock_name'):
                 self.name = parent.get_stock_name(self.code)
             else:
                 self.name = resolve_stock_name(self.code)
+
+            if hasattr(self, 'title_lbl'):
+                self.title_lbl.setText(f"📈 【{self.code} {self.name}】分时阶梯交易与时序评估工作台")
+            self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
 
             # 自动联动切换到该标的对应的策略
             auto_st = self.engine.auto_select_strategy(0.0, code=self.code)

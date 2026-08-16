@@ -273,14 +273,21 @@ class IntradayStrategyEngine:
         """根据股票代码 code 或开盘价与条件自动选择对应策略"""
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+            # 1. 优先匹配明确配置了 target_codes 的专属策略 (例如 688826)
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
-                if isinstance(target_codes, list) and any(c_clean == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in target_codes if tc):
+                if isinstance(target_codes, list) and any(c_clean == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in target_codes if tc and str(tc).strip() not in ("", "000000")):
                     return st
-                if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6):
+                if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6) and str(target_code).strip() not in ("", "000000"):
                     return st
 
+            # 2. 对于普通日常个股（未在专属新股列表中指定），默认自动路由到通用日常分时阶梯策略
+            for st in self.strategies:
+                if st.get("id") == "strategy_c_daily_surge_ladder":
+                    return st
+
+        # 3. 未传 code 时的开盘价档位判定 (针对新股)
         tier_name, strat_id, mode = self.get_open_price_tier(open_price, code=code)
         if strat_id == "strategy_b_new_stock_trend_hold" and not is_b_conditions_met:
             strat_id = "strategy_a_new_stock_batch_sell"
@@ -288,7 +295,9 @@ class IntradayStrategyEngine:
         for st in self.strategies:
             if st.get("id") == strat_id:
                 return st
-        # 默认优先 strategy_pinzhun_laser_688826 或 strategy_a_new_stock_batch_sell
+        for st in self.strategies:
+            if st.get("id") == "strategy_c_daily_surge_ladder":
+                return st
         for st in self.strategies:
             if st.get("id") == "strategy_a_new_stock_batch_sell":
                 return st
@@ -830,48 +839,91 @@ class IntradayStrategyEngine:
             is_triggered = False
             trigger_reason = ""
             
-            # 规则条件匹配判断
-            if rule_id in ["rule_a1_surge", "rule_pz_surge_10"]:
-                if price >= open_price * 1.10:
-                    is_triggered = True
-                    trigger_reason = f"开盘冲高≥10% (现价:{price:.2f} >= 目标:{open_price*1.10:.2f})"
-            elif rule_id == "rule_a1_surge_decelerated":
-                if price >= open_price * 1.05:
-                    is_triggered = True
-                    trigger_reason = f"中性下沿冲高≥5% (现价:{price:.2f} >= 目标:{open_price*1.05:.2f})"
-            elif rule_id in ["rule_a1_timeout", "rule_pz_timeout"]:
-                if clean_time >= "10:00" and "rule_a1_surge" not in state["triggered_rules"] and "rule_pz_surge_10" not in state["triggered_rules"]:
-                    is_triggered = True
-                    trigger_reason = "10:00整冲高未触发兜底卖出30%"
-            elif rule_id in ["rule_a2_halt_30", "rule_pz_halt_30"]:
-                if state["max_price"] >= open_price * 1.30:
-                    is_triggered = True
-                    trigger_reason = f"+30%临停复牌卖30% (最高:{state['max_price']:.2f} >= 临停阈值:{open_price*1.30:.2f})"
-            elif rule_id in ["rule_a3_overnight_check", "rule_pz_overnight_check"]:
-                if clean_time >= "14:50" and price >= open_price * 1.20:
-                    is_triggered = True
-                    trigger_reason = f"14:50仍高出开盘20%(现价:{price:.2f})，保留10%过夜，清仓其余"
-            elif rule_id in ["rule_a3_clear_all", "rule_pz_clear_all"]:
-                if clean_time >= "14:50" and "rule_a3_overnight_check" not in state["triggered_rules"] and "rule_pz_overnight_check" not in state["triggered_rules"]:
-                    is_triggered = True
-                    trigger_reason = "14:50~14:57 尾盘市价清仓剩余全部"
-            elif rule_id == "rule_b1_surge":
-                if price >= open_price * 1.08:
-                    is_triggered = True
-                    trigger_reason = f"策略B开盘冲高≥8% (现价:{price:.2f} >= 目标:{open_price*1.08:.2f})"
-            elif rule_id == "rule_b1_timeout":
-                if clean_time >= "10:00" and "rule_b1_surge" not in state["triggered_rules"]:
-                    is_triggered = True
-                    trigger_reason = "策略B 10:00整超时卖出20%"
-            elif rule_id == "rule_b2_halt_60":
-                if state["max_price"] >= open_price * 1.60:
-                    is_triggered = True
-                    trigger_reason = f"+60%临停复牌未创新高再卖33% (最高:{state['max_price']:.2f})"
-            elif rule_id == "rule_b3_trailing_stop":
-                high_t = state.get("high_t", state["max_price"])
-                if price <= high_t * 0.90:
-                    is_triggered = True
-                    trigger_reason = f"T日高点({high_t:.2f})回撤10%移动止盈清仓(现价:{price:.2f})"
+            # 规则条件匹配判断 (优先支持 trigger_expr 动态表达式求值，向下兼容既有硬编码 ID)
+            trigger_expr = rule.get("trigger_expr", "")
+            if trigger_expr:
+                try:
+                    vwap_val = float(tick_row.get("vwap", price))
+                    to_val = float(tick_row.get("turnover", tick_row.get("turnover_rate", 0.0)))
+                    amt_val = float(tick_row.get("amount", 0.0))
+                    eval_scope = {
+                        "price": price,
+                        "close": price,
+                        "trade": price,
+                        "open_price": open_price,
+                        "open": open_price,
+                        "max_price": state["max_price"],
+                        "high": state["max_price"],
+                        "min_price": state["min_price"],
+                        "low": state["min_price"],
+                        "vwap": vwap_val,
+                        "turnover_rate": to_val,
+                        "turnover": to_val,
+                        "amount": amt_val,
+                        "gain_from_open": ((price - open_price) / open_price * 100.0) if open_price > 0 else 0.0,
+                        "gain_pct": ((price - open_price) / open_price * 100.0) if open_price > 0 else 0.0,
+                        "pct": ((price - open_price) / open_price * 100.0) if open_price > 0 else 0.0,
+                        "percent": ((price - open_price) / open_price * 100.0) if open_price > 0 else 0.0,
+                        "close_high_ratio": (price / state["max_price"]) if state["max_price"] > 0 else 1.0,
+                        "current_time": clean_time,
+                        "time": clean_time,
+                        "remaining_ratio": state["remaining_ratio"]
+                    }
+                    for tr_id in state["triggered_rules"]:
+                        eval_scope[f"{tr_id}_triggered"] = True
+                    for r_sub in rules:
+                        sub_id = r_sub.get("rule_id", "")
+                        if sub_id and f"{sub_id}_triggered" not in eval_scope:
+                            eval_scope[f"{sub_id}_triggered"] = False
+
+                    if eval(trigger_expr, {"__builtins__": {}}, eval_scope):
+                        is_triggered = True
+                        trigger_reason = rule.get("description", f"满足触发条件 [{trigger_expr}]")
+                except Exception as e_eval:
+                    logger.debug(f"规则 {rule_id} 表达式求值异常: {e_eval}")
+
+            if not is_triggered:
+                if rule_id in ["rule_a1_surge", "rule_pz_surge_10"]:
+                    if price >= open_price * 1.10:
+                        is_triggered = True
+                        trigger_reason = f"开盘冲高≥10% (现价:{price:.2f} >= 目标:{open_price*1.10:.2f})"
+                elif rule_id == "rule_a1_surge_decelerated":
+                    if price >= open_price * 1.05:
+                        is_triggered = True
+                        trigger_reason = f"中性下沿冲高≥5% (现价:{price:.2f} >= 目标:{open_price*1.05:.2f})"
+                elif rule_id in ["rule_a1_timeout", "rule_pz_timeout"]:
+                    if clean_time >= "10:00" and "rule_a1_surge" not in state["triggered_rules"] and "rule_pz_surge_10" not in state["triggered_rules"]:
+                        is_triggered = True
+                        trigger_reason = "10:00整冲高未触发兜底卖出30%"
+                elif rule_id in ["rule_a2_halt_30", "rule_pz_halt_30"]:
+                    if state["max_price"] >= open_price * 1.30:
+                        is_triggered = True
+                        trigger_reason = f"+30%临停复牌卖30% (最高:{state['max_price']:.2f} >= 临停阈值:{open_price*1.30:.2f})"
+                elif rule_id in ["rule_a3_overnight_check", "rule_pz_overnight_check"]:
+                    if clean_time >= "14:50" and price >= open_price * 1.20:
+                        is_triggered = True
+                        trigger_reason = f"14:50仍高出开盘20%(现价:{price:.2f})，保留10%过夜，清仓其余"
+                elif rule_id in ["rule_a3_clear_all", "rule_pz_clear_all"]:
+                    if clean_time >= "14:50" and "rule_a3_overnight_check" not in state["triggered_rules"] and "rule_pz_overnight_check" not in state["triggered_rules"]:
+                        is_triggered = True
+                        trigger_reason = "14:50~14:57 尾盘市价清仓剩余全部"
+                elif rule_id == "rule_b1_surge":
+                    if price >= open_price * 1.08:
+                        is_triggered = True
+                        trigger_reason = f"策略B开盘冲高≥8% (现价:{price:.2f} >= 目标:{open_price*1.08:.2f})"
+                elif rule_id == "rule_b1_timeout":
+                    if clean_time >= "10:00" and "rule_b1_surge" not in state["triggered_rules"]:
+                        is_triggered = True
+                        trigger_reason = "策略B 10:00整超时卖出20%"
+                elif rule_id == "rule_b2_halt_60":
+                    if state["max_price"] >= open_price * 1.60:
+                        is_triggered = True
+                        trigger_reason = f"+60%临停复牌未创新高再卖33% (最高:{state['max_price']:.2f})"
+                elif rule_id == "rule_b3_trailing_stop":
+                    high_t = state.get("high_t", state["max_price"])
+                    if price <= high_t * 0.90:
+                        is_triggered = True
+                        trigger_reason = f"T日高点({high_t:.2f})回撤10%移动止盈清仓(现价:{price:.2f})"
 
             # 4. 触发动作与信号路由生成
             if is_triggered:

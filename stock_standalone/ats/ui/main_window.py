@@ -3093,14 +3093,7 @@ class ATSMainWindow(QMainWindow):
                     self.ladder_monitor_win._populate_code_combo()
                     self.ladder_monitor_win._load_mock_or_live_data()
             else:
-                self.ladder_monitor_win.code = c_clean
-                self.ladder_monitor_win.name = name
-                if target_strat_id:
-                    self.ladder_monitor_win.selected_strategy_id = target_strat_id
-                self.ladder_monitor_win.setWindowTitle(f"⚡ 【{c_clean} {name}】分时阶梯交易与时序评估系统")
-                self.ladder_monitor_win._populate_strategy_combo()
-                self.ladder_monitor_win._populate_code_combo()
-                self.ladder_monitor_win._load_mock_or_live_data()
+                self.ladder_monitor_win.switch_to_code(c_clean, name)
 
             # 将当前最新的行情 DataFrame 传入独立窗口
             if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
