@@ -478,14 +478,13 @@ VoiceThread = VoiceProcess
 
 
 class CandlestickItem(pg.GraphicsObject):
+    # ⚡ [PERF] 静态 Pen / Brush 缓存池，彻底消除千级 K 线绘制时的重复对象构造
+    _pen_cache = {}
+    _brush_cache = {}
+
     def __init__(self, data=None, theme='dark'):
-        # 🚀 [NEW] Centralized Data Hub Initialization (Multi-Point Protection)
-        # Ensure DataHub is ready in the Visualizer process
-            # self.data_hub = DataHubService.get_instance()
-        pass
-        
         super().__init__()
-        self.data = np.asarray(data)
+        self.data = np.asarray(data) if data is not None else np.array([])
         self.theme = theme
         self.picture = pg.QtGui.QPicture()
         self._gen_colors()
@@ -506,54 +505,60 @@ class CandlestickItem(pg.GraphicsObject):
             self.wick_pen = pg.mkPen(QColor(80, 80, 80))
 
     def setData(self, data, colors=None):
-        self.data = np.asarray(data)
+        self.data = np.asarray(data) if data is not None else np.array([])
         self.bar_colors = colors # Optional array of QColor or color strings
         self.generatePicture()
         self.prepareGeometryChange()
         self.update()
 
+    def _get_cached_pen_brush(self, color_spec):
+        """极速获取缓存的 Pen 与 Brush"""
+        if color_spec not in self._pen_cache:
+            col = pg.mkColor(color_spec)
+            self._pen_cache[color_spec] = pg.mkPen(col)
+            self._brush_cache[color_spec] = pg.mkBrush(col)
+        return self._pen_cache[color_spec], self._brush_cache[color_spec]
+
     def generatePicture(self):
         self.picture = pg.QtGui.QPicture()
+        if len(self.data) == 0:
+            return
+
         p = pg.QtGui.QPainter(self.picture)
         w = 0.4
 
         has_custom_colors = hasattr(self, 'bar_colors') and self.bar_colors is not None and len(self.bar_colors) == len(self.data)
+        bar_colors = self.bar_colors if has_custom_colors else None
+        up_pen, up_brush = self.up_pen, self.up_brush
+        down_pen, down_brush = self.down_pen, self.down_brush
+        wick_pen = self.wick_pen
+        get_cached = self._get_cached_pen_brush
 
         for i, row in enumerate(self.data):
             t, open_, close, low, high = row[:5]
+            custom_c = bar_colors[i] if bar_colors is not None else None
             
-            if has_custom_colors and self.bar_colors[i] is not None:
-                # Use custom color if provided for this bar
-                custom_color = pg.mkColor(self.bar_colors[i])
-                pen = pg.mkPen(custom_color)
-                brush = pg.mkBrush(custom_color)
+            if custom_c is not None:
+                pen, brush = get_cached(custom_c)
+                p.setPen(pen)
+                p.setBrush(brush)
             else:
-                # Default logic
                 if close >= open_:
-                    pen = self.up_pen
-                    brush = self.up_brush
+                    pen = up_pen
+                    brush = up_brush
                 else:
-                    pen = self.down_pen
-                    brush = self.down_brush
+                    pen = down_pen
+                    brush = down_brush
+                p.setPen(wick_pen)
 
             # wick
-            p.setPen(self.wick_pen if not has_custom_colors or self.bar_colors[i] is None else pen)
-            p.drawLine(
-                pg.QtCore.QPointF(t, low),
-                pg.QtCore.QPointF(t, high)
-            )
+            p.drawLine(pg.QtCore.QPointF(t, low), pg.QtCore.QPointF(t, high))
 
             # body
             p.setPen(pen)
             p.setBrush(brush)
-            p.drawRect(
-                pg.QtCore.QRectF(
-                    t - w,
-                    open_,
-                    w * 2,
-                    close - open_
-                )
-            )
+            p.drawRect(pg.QtCore.QRectF(t - w, open_, w * 2, close - open_))
+
         p.end()
 
     def setTheme(self, theme):
@@ -841,12 +846,12 @@ class SignalOverlay:
             # [UPGRADE] Special handling for Emoji Markers
             is_emoji = isinstance(sig.symbol, str) and len(sig.symbol) == 1 and ord(sig.symbol) > 127
             if is_emoji:
-                marker = pg.TextItem()
+                marker = self._get_text_item(target)
                 marker.setHtml(f'<div style="font-size: {sig.size}pt; color: #FFD700; font-weight: bold;">{sig.symbol}</div>')
                 marker.setAnchor((0.5, 0.5))
                 marker.setPos(x_pos, y_pos)
+                marker.show()
                 self.text_items[target].append(marker)
-                plot.addItem(marker)
                 
                 xs.append(x_pos)
                 ys.append(y_pos)
@@ -5592,6 +5597,11 @@ class MainWindow(QMainWindow, WindowMixin):
                         needs_init = True
 
                 if needs_init:
+                    # ⚡ [BUGFIX] 清理旧图元防止泄漏到场景中
+                    for old_item in getattr(self, 'fib_lines', []):
+                        old_line = old_item[1] if isinstance(old_item, tuple) else old_item
+                        if old_line in self.kline_plot.items:
+                            self.kline_plot.removeItem(old_line)
                     self.fib_lines = []
                     font = getattr(self, '_fib_font', None)
                     if font is None:
@@ -7574,7 +7584,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_kline_mouse_moved(self, pos):
         """
-        K 线图鼠标移动事件处理器
+        K 线图鼠标移动事件处理器 - [PERF] 索引级脏检查节流
         显示十字光标和 OHLC 数据浮窗
         只在鼠标悬停在有效K线柱上时显示
         """
@@ -7597,14 +7607,20 @@ class MainWindow(QMainWindow, WindowMixin):
             # 记录当前索引，方便键盘操作接管
             if 0 <= idx < len(self.day_df):
                 self.current_crosshair_idx = idx
-                self._update_crosshair_ui(idx, y)
+                last_idx = getattr(self, '_last_crosshair_idx', -1)
+                if idx == last_idx:
+                    # ⚡ [PERF]: 鼠标在同一根 K 线上滑动时，仅微秒级更新水平标线 Y 坐标，跳过繁重的 HTML 解析与重绘
+                    self.hline.setPos(y)
+                else:
+                    self._last_crosshair_idx = idx
+                    self._update_crosshair_ui(idx, y)  # 内部已调用 _update_ma_legend
             else:
                 self._hide_crosshair()
         else:
             self._hide_crosshair()
 
     def _on_tick_mouse_moved(self, pos):
-        """分时图鼠标移动回调 (1.2)"""
+        """分时图鼠标移动回调 (1.2) - [PERF] 索引级脏检查节流"""
         if not self.crosshair_enabled: return
         self.mouse_last_pos = pos
         self.mouse_last_scene = 'tick'
@@ -7616,7 +7632,12 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if 0 <= idx < len(self.tick_prices):
                 self.current_tick_crosshair_idx = idx
-                self._update_tick_crosshair_ui(idx, y)
+                last_tick_idx = getattr(self, '_last_tick_crosshair_idx', -1)
+                if idx == last_tick_idx:
+                    self.tick_hline.setPos(y)
+                else:
+                    self._last_tick_crosshair_idx = idx
+                    self._update_tick_crosshair_ui(idx, y)
             else:
                 self._hide_tick_crosshair()
         else:
@@ -7721,22 +7742,25 @@ class MainWindow(QMainWindow, WindowMixin):
         # 我们希望靠近顶端时显示在下方，靠近底端时显示在上方。
 
     def _hide_tick_crosshair(self):
+        self._last_tick_crosshair_idx = -1
         self.tick_vline.setVisible(False)
         self.tick_hline.setVisible(False)
         self.tick_crosshair_label.setVisible(False)
 
     def _hide_crosshair(self):
         """隐藏十字光标及其标签"""
+        self._last_crosshair_idx = -1
         self.vline.setVisible(False)
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
             self.kline_detail_win.hide()
+        self._last_legend_idx = None
         self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
 
     def _update_ma_legend(self, idx=None):
         """
-        更新 K 线图顶部的 MA 和布林带等指标数值显示 (与通达信一致)
+        更新 K 线图顶部的 MA 和布林带等指标数值显示 (与通达信一致) - [PERF] 索引级脏检查
         """
         if not hasattr(self, 'ma_legend_label') or not self.ma_legend_label:
             return
@@ -7748,6 +7772,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 如果没有指定 idx，或者 idx 超出范围，默认显示最新的数据 (最右侧一根 K 线)
         if idx is None or idx < 0 or idx >= len(self.day_df):
             idx = len(self.day_df) - 1
+
+        last_leg_idx = getattr(self, '_last_legend_idx', None)
+        if idx == last_leg_idx:
+            return
+        self._last_legend_idx = idx
 
         row = self.day_df.iloc[idx]
         
@@ -11305,91 +11334,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.anno_arrow_p.show()
             self.anno_label_p.show()
             logger.debug(f"[Annotation] Updated signal annotation for {code}: {short_msg}")
-
-            # --- ⚡ [NEW] 缠论分析展示 ---
-            if getattr(self, 'show_chan', True):
-                try:
-                    # 1. 核心计算 (Numba 加速) - 返回 (chanK, results) 元组
-                    with timed_ctx(f"my_chan2_get_chan_analysis_fast_{code}", warn_ms=50):
-                        chanK, results = my_chan2.get_chan_analysis_fast(day_df)
-                    
-                    # 0. 准备 X 轴日期映射
-                    date_to_x = {d: i for i, d in enumerate(day_df.index)}
-                    
-                    # ⚡ [NEW] 主题感知配色方案
-                    is_dark = getattr(self, 'qt_theme', 'dark') == 'dark'
-                    if is_dark:
-                        bi_pen = pg.mkPen(color=(0, 255, 255), width=1.5)         # Cyan
-                        xd_pen = pg.mkPen(color=(255, 165, 0), width=3.0)         # Gold/Orange
-                        zs_pen = pg.mkPen(color=(0, 255, 255, 220), width=2.0)    # Thicker Cyan
-                        zs_brush = pg.mkBrush(color=(0, 255, 255, 40))           # Semi-transparent Cyan
-                    else:
-                        bi_pen = pg.mkPen(color=(0, 100, 255), width=2.0)        # Darker Blue
-                        xd_pen = pg.mkPen(color=(205, 133, 63), width=3.5)       # BurlyWood/DarkOrange
-                        zs_pen = pg.mkPen(color=(0, 100, 255, 230), width=2.5)   # Extra Thicker Blue
-                        zs_brush = pg.mkBrush(color=(0, 100, 255, 35))           # Low opacity blue
-
-                    # ⚡ [SELF-HEALING] 确保绘图项在场景中且 zValue 置顶
-                    scene_items = set(self.kline_plot.items)
-                    if hasattr(self, 'chan_bi_curve'):
-                        if self.chan_bi_curve not in scene_items:
-                            self.kline_plot.addItem(self.chan_bi_curve)
-                        self.chan_bi_curve.setZValue(100)
-                    
-                    if hasattr(self, 'chan_xd_curve'):
-                        if self.chan_xd_curve not in scene_items:
-                            self.kline_plot.addItem(self.chan_xd_curve)
-                        self.chan_xd_curve.setZValue(110) # 线段最顶
-                    
-                    # 2. 渲染分笔 (Bi)
-                    bi_idxs = results.get('biIdx', [])
-                    if bi_idxs and hasattr(self, 'chan_bi_curve'):
-                        bi_x, bi_y = [], []
-                        first_bi_type = results.get('frsBiType', 0)
-                        curr_type = -first_bi_type if first_bi_type != 0 else -1 
-                        
-                        for idx in bi_idxs:
-                            dt = chanK.index[idx]
-                            if dt in date_to_x:
-                                bi_x.append(date_to_x[dt])
-                                val = chanK['high'].iloc[idx] if curr_type == 1 else chanK['low'].iloc[idx]
-                                bi_y.append(val)
-                                curr_type = -curr_type
-                        
-                        self.chan_bi_curve.setData(x=bi_x, y=bi_y)
-                        self.chan_bi_curve.setPen(bi_pen)
-                        self.chan_bi_curve.show()
-                    elif hasattr(self, 'chan_bi_curve'):
-                        self.chan_bi_curve.hide()
-
-                    # 2.1 渲染线段 (Xianduan) [DISABLED: 效果不好，按用户需求取消显示]
-                    if hasattr(self, 'chan_xd_curve'):
-                        self.chan_xd_curve.hide()
-                        
-                    # 3. 渲染中枢 (Zhongshu) - 复用对象池
-                    zs_list = results.get('zs_list', [])
-                    if hasattr(self, 'chan_zs_pool'):
-                        for i, item in enumerate(self.chan_zs_pool):
-                            if item not in scene_items:
-                                self.kline_plot.addItem(item)
-                            item.setZValue(90) # 中枢放在线条下方
-                            
-                            if i < len(zs_list):
-                                zs = zs_list[i]
-                                x_s = date_to_x.get(chanK.index[zs['start']], zs['start'])
-                                x_e = date_to_x.get(chanK.index[zs['end']], zs['end'])
-                                
-                                rect_x = x_s - 0.4
-                                rect_w = (x_e - x_s) + 0.8
-                                item.setRect(pg.QtCore.QRectF(rect_x, zs['zd'], rect_w, zs['zg'] - zs['zd']))
-                                item.setPen(zs_pen)
-                                item.setBrush(zs_brush)
-                                item.show()
-                            else:
-                                item.hide()
-                except Exception as e:
-                    logger.error(f"Chan analysis rendering error: {e}")
-            
         except Exception as e:
             logger.error(f"Failed to draw signal annotation: {e}")
 
@@ -11472,35 +11416,53 @@ class MainWindow(QMainWindow, WindowMixin):
         return signals
 
     def _draw_follow_lines(self, code, day_df):
-        """仅绘制跟单的价格参考线 (虚线)"""
+        """仅绘制跟单的价格参考线 (虚线) - [PERF] 带内存 TTL 缓存"""
         # 清理旧线
         for attr in ['follow_line_p', 'exit_line_p']:
              if hasattr(self, attr): getattr(self, attr).hide()
         
-        # 复用逻辑获取数据，只画线
-        try:
-             import sqlite3
-             conn = sqlite3.connect("signal_strategy.db", timeout=5)
-             row = conn.execute("SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code=? ORDER BY detected_date DESC LIMIT 1", (code[:6],)).fetchone()
-             conn.close()
-             
-             if not row: return
+        # ⚡ [PERF] 5s TTL 内存缓存，杜绝主线程高频 SQLite IO 阻塞
+        if not hasattr(self, '_db_query_cache'):
+            self._db_query_cache = {}
 
-             detected_date, exit_date, detected_price, exit_price, status = row
-             
-             # Entry Line
-             if detected_date:
-                 self._draw_single_line(day_df, detected_date, detected_price, 'follow', '#FFD700')
-             
-             # Exit Line
-             if exit_date and status == "EXITED":
-                 self._draw_single_line(day_df, exit_date, exit_price, 'exit', '#FF4500')
-                 
+        now = time.time()
+        cache_key = ('follow_queue', code[:6])
+        cached_entry = self._db_query_cache.get(cache_key)
+
+        if cached_entry is not None and (now - cached_entry[0] < 5.0):
+            row = cached_entry[1]
+        else:
+            try:
+                import sqlite3
+                conn = sqlite3.connect("signal_strategy.db", timeout=2)
+                row = conn.execute(
+                    "SELECT detected_date, exit_date, detected_price, exit_price, status FROM follow_queue WHERE code=? ORDER BY detected_date DESC LIMIT 1",
+                    (code[:6],)
+                ).fetchone()
+                conn.close()
+                self._db_query_cache[cache_key] = (now, row)
+            except Exception:
+                row = None
+                self._db_query_cache[cache_key] = (now, None)
+        
+        if not row:
+            return
+
+        try:
+            detected_date, exit_date, detected_price, exit_price, status = row
+            
+            # Entry Line
+            if detected_date:
+                self._draw_single_line(day_df, detected_date, detected_price, 'follow', '#FFD700')
+            
+            # Exit Line
+            if exit_date and status == "EXITED":
+                self._draw_single_line(day_df, exit_date, exit_price, 'exit', '#FF4500')
         except Exception:
             pass
 
     def _get_watchlist_signals(self, code, day_df) -> list[SignalPoint]:
-        """获取观察池信号标记 (WATCH)"""
+        """获取观察池信号标记 (WATCH) - [PERF] 带内存 TTL 缓存"""
         signals = []
         try:
             # 1. 优先处理显式传递的上下文 (来自双击/联动)
@@ -11515,22 +11477,33 @@ class MainWindow(QMainWindow, WindowMixin):
                     ))
                 return signals
 
-            # 2. 数据库回溯 (兜底显示)
-            import sqlite3
-            db_path = "signal_strategy.db"
-            if not os.path.exists(db_path):
-                return signals
-                
-            conn = sqlite3.connect(db_path, timeout=5)
-            c = conn.cursor()
-            c.execute("""
-                SELECT discover_date, discover_price 
-                FROM hot_stock_watchlist 
-                WHERE code = ? AND validation_status != 'DROPPED'
-                ORDER BY discover_date DESC LIMIT 1
-            """, (code[:6],))
-            row = c.fetchone()
-            conn.close()
+            # 2. 数据库回溯 (带 5s 内存缓存)
+            if not hasattr(self, '_db_query_cache'):
+                self._db_query_cache = {}
+
+            now = time.time()
+            cache_key = ('watchlist', code[:6])
+            cached_entry = self._db_query_cache.get(cache_key)
+
+            if cached_entry is not None and (now - cached_entry[0] < 5.0):
+                row = cached_entry[1]
+            else:
+                db_path = "signal_strategy.db"
+                if not os.path.exists(db_path):
+                    return signals
+                    
+                import sqlite3
+                conn = sqlite3.connect(db_path, timeout=2)
+                c = conn.cursor()
+                c.execute("""
+                    SELECT discover_date, discover_price 
+                    FROM hot_stock_watchlist 
+                    WHERE code = ? AND validation_status != 'DROPPED'
+                    ORDER BY discover_date DESC LIMIT 1
+                """, (code[:6],))
+                row = c.fetchone()
+                conn.close()
+                self._db_query_cache[cache_key] = (now, row)
             
             if row:
                 d_date, d_price = row
@@ -11595,23 +11568,28 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def _clear_platform_breakout(self):
-        """清理平台突破相关的渲染项目"""
+        """清理平台突破相关的渲染项目 - [PERF] 精准隐藏版"""
         if hasattr(self, 'pbottom_curve'):
             self.pbottom_curve.hide()
         if hasattr(self, 'ptop_curve'):
             self.ptop_curve.hide()
         if hasattr(self, 'platform_fill'):
             self.platform_fill.hide()
+            
         if hasattr(self, 'pbreak_items_pool'):
-            for item in self.pbreak_items_pool:
-                item.setVisible(False)
+            last_cnt = getattr(self, '_last_pbreak_pool_count', len(self.pbreak_items_pool))
+            for k in range(min(last_cnt, len(self.pbreak_items_pool))):
+                self.pbreak_items_pool[k].setVisible(False)
+            self._last_pbreak_pool_count = 0
+            
         # 清理新增的突破价格水平线与标记
         if hasattr(self, 'pbreak_price_lines_pool'):
-            for item in self.pbreak_price_lines_pool:
-                item.setVisible(False)
-        if hasattr(self, 'pbreak_price_labels_pool'):
-            for item in self.pbreak_price_labels_pool:
-                item.setVisible(False)
+            last_p_cnt = getattr(self, '_last_pbreak_price_lines_count', len(self.pbreak_price_lines_pool))
+            for k in range(min(last_p_cnt, len(self.pbreak_price_lines_pool))):
+                self.pbreak_price_lines_pool[k].setVisible(False)
+                self.pbreak_price_labels_pool[k].setVisible(False)
+            self._last_pbreak_price_lines_count = 0
+            
         if hasattr(self, 'ptop_price_label'):
             self.ptop_price_label.setVisible(False)
         if hasattr(self, 'pbottom_price_label'):
@@ -11623,14 +11601,26 @@ class MainWindow(QMainWindow, WindowMixin):
         # 故不论列是否存在，均强制对其进行实时重算，保证最新的一根实时K线得到 100% 准确的平台顶底与突破计算
         try:
             import stock_logic_utils
-            # 动态计算看盘视野的 lookback，防止传入长度刚好等于 120 导致 range 循环为空被跳过
-            dynamic_lookback = max(15, int(len(day_df) * 0.4))
-            calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
-            if 'ptop' in calc_df.columns:
-                day_df['ptop'] = calc_df['ptop'].values
-                day_df['pbottom'] = calc_df['pbottom'].values
-                day_df['pbreak'] = calc_df['pbreak'].values
-                day_df['pdays'] = calc_df['pdays'].values
+            # ⚡ [PERF] 平台突破计算结果缓存
+            if not hasattr(self, '_platform_breakout_cache'):
+                self._platform_breakout_cache = {}
+
+            last_close = round(float(day_df['close'].iloc[-1]), 2) if len(day_df) > 0 else 0
+            cache_key = (getattr(self, 'current_code', ''), len(day_df), day_df.index[-1] if len(day_df) > 0 else None, last_close)
+            cached_res = self._platform_breakout_cache.get(cache_key)
+
+            if cached_res is not None:
+                day_df['ptop'], day_df['pbottom'], day_df['pbreak'], day_df['pdays'] = cached_res
+            else:
+                dynamic_lookback = max(15, int(len(day_df) * 0.4))
+                calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
+                if 'ptop' in calc_df.columns:
+                    ptop_v = calc_df['ptop'].values
+                    pbottom_v = calc_df['pbottom'].values
+                    pbreak_v = calc_df['pbreak'].values
+                    pdays_v = calc_df['pdays'].values
+                    day_df['ptop'], day_df['pbottom'], day_df['pbreak'], day_df['pdays'] = ptop_v, pbottom_v, pbreak_v, pdays_v
+                    self._platform_breakout_cache[cache_key] = (ptop_v, pbottom_v, pbreak_v, pdays_v)
         except Exception as e:
             logger.error(f"Error calculating platform breakout for visualization: {e}")
             return
@@ -11640,14 +11630,13 @@ class MainWindow(QMainWindow, WindowMixin):
             
         self._clear_platform_breakout()
         
-        # 🛡️ [BUGFIX] 提取并替换 0.0 与 NaN 值，前向填充以防断条，彻底杜绝垂落到 0.0 轴和显示 "支撑: 0.0" 的 BUG
+        # 🛡️ [BUGFIX] 提取并替换 0.0 与 NaN 值，前向填充以防断条
         ptop_series = pd.Series(day_df['ptop']).replace(0.0, np.nan).ffill().bfill()
         pbottom_series = pd.Series(day_df['pbottom']).replace(0.0, np.nan).ffill().bfill()
         
         ptop_vals = ptop_series.values
         pbottom_vals = pbottom_series.values
         
-        # 使用阶梯状或折线绘制历史平台顶底变化，像 MA 均线一样
         ptop_pen = pg.mkPen(color=(255, 0, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
         pbottom_pen = pg.mkPen(color=(0, 255, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
         
@@ -11665,14 +11654,12 @@ class MainWindow(QMainWindow, WindowMixin):
             self.pbottom_curve.setPen(pbottom_pen)
             self.pbottom_curve.show()
             
-        # 🚀 [NEW] 绘制半透明的 "中枢通道" (Trading Hub Tunnel)
+        # 🚀 绘制半透明中枢通道
         if not hasattr(self, 'platform_fill') or self.platform_fill not in self.kline_plot.items:
-            # 使用带科技感的蓝紫色半透明填充
             tunnel_brush = pg.mkBrush(color=(138, 43, 226, 35)) 
             self.platform_fill = pg.FillBetweenItem(self.pbottom_curve, self.ptop_curve, brush=tunnel_brush)
             self.kline_plot.addItem(self.platform_fill)
         else:
-            # 必须重新设置 curves 引用以刷新区域
             self.platform_fill.setCurves(self.pbottom_curve, self.ptop_curve)
             self.platform_fill.show()
             
@@ -11680,7 +11667,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if not hasattr(self, 'pbreak_items_pool'):
             self.pbreak_items_pool = []
             for _ in range(80):
-                text_item = pg.TextItem(anchor=(0.5, 0)) # anchor 设为顶部对齐，这样放在底部才不会遮挡
+                text_item = pg.TextItem(anchor=(0.5, 0))
                 self.kline_plot.addItem(text_item)
                 text_item.setVisible(False)
                 self.pbreak_items_pool.append(text_item)
@@ -11693,10 +11680,7 @@ class MainWindow(QMainWindow, WindowMixin):
         pdays_vals = day_df['pdays'].values
         low_vals = day_df['low'].values
         
-        # 计算全局高度偏差用于安全定位，防止 0.98 将文字推到视口外部
         safe_offset = (day_df['high'].max() - day_df['low'].min()) * 0.015
-        
-        # 仅扫描最近的 150 根 K 线
         total = len(day_df)
         scan_start = max(0, total - 150)
         
@@ -11710,22 +11694,22 @@ class MainWindow(QMainWindow, WindowMixin):
             if getattr(self, 'show_pdays', True) and pbreak == 1 and not pd.isna(pdays) and pdays > 0:
                 text_item = self.pbreak_items_pool[pool_idx]
                 if pdays == 1:
-                    # 突破首日使用显眼样式，带底色框
-                    text_item.setHtml(f'<div style="background-color:rgba(255,215,0,60); border: 1px solid #FFD700; color: #FFD700; padding: 2px;"><b>🎯突破</b></div>')
+                    text_item.setHtml('<div style="background-color:rgba(255,215,0,60); border: 1px solid #FFD700; color: #FFD700; padding: 2px;"><b>🎯突破</b></div>')
                 else:
                     text_item.setHtml(f'<div style="color: #00FFFF;">T+{int(pdays)}</div>')
                     
                 text_item.setFont(self.custom_font_signal)
-                # 安全放置在 K线最低点下方 1.5% 视口高度处，保证绝对可见且不粘连
                 text_item.setPos(x_axis[i], low_vals[i] - safe_offset)
                 text_item.show()
                 pool_idx += 1
 
-        # 🚀 [NEW] 绘制所有突破收盘价的支撑/压力水平线以及最右侧价格标记，加上 ptop/pbottom 的价格标记
+        self._last_pbreak_pool_count = pool_idx
+
+        # 🚀 绘制所有突破收盘价的支撑/压力水平线以及最右侧价格标记
         self._draw_breakout_price_lines(x_axis, day_df, ptop_vals, pbottom_vals)
 
     def _draw_breakout_price_lines(self, x_axis, day_df, ptop_vals, pbottom_vals):
-        """绘制所有突破收盘价的支撑/压力线，并在最右侧标注价格，同时在最右侧标注 ptop / pbottom 价格"""
+        """绘制所有突破收盘价的支撑/压力线，并在最右侧标注价格 - [PERF] 精准复用版"""
         try:
             total = len(day_df)
             if total == 0:
@@ -11756,42 +11740,42 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.kline_plot.addItem(self.pbottom_price_label)
                 self.pbottom_price_label.setVisible(False)
 
-            # 2. 隐藏所有的池子项 (重置状态)
-            for item in self.pbreak_price_lines_pool:
-                item.setVisible(False)
-            for item in self.pbreak_price_labels_pool:
-                item.setVisible(False)
+            # 2. ⚡ [PERF] 仅隐藏上次使用过的池子项，避免盲目遍历 100+ 个项目
+            last_cnt = getattr(self, '_last_pbreak_price_lines_count', len(self.pbreak_price_lines_pool))
+            for k in range(min(last_cnt, len(self.pbreak_price_lines_pool))):
+                self.pbreak_price_lines_pool[k].setVisible(False)
+                self.pbreak_price_labels_pool[k].setVisible(False)
+
             self.ptop_price_label.setVisible(False)
             self.pbottom_price_label.setVisible(False)
 
-            # 如果用户在工具栏中关闭了支撑压力线显示，则直接退出（上面第2步已将其全部隐蔽）
             if not getattr(self, 'show_breakout_lines', True):
+                self._last_pbreak_price_lines_count = 0
                 return
 
-            # 3. 绘制 ptop/pbottom 的最新最右侧价格标记 (紧贴最后一根K线，以防被右轴裁剪)
+            # 3. 绘制 ptop/pbottom 最右侧价格标记
             if len(ptop_vals) > 0 and len(pbottom_vals) > 0:
                 ptop_curr = ptop_vals[-1]
                 pbottom_curr = pbottom_vals[-1]
                 
-                # 绘制 ptop 阻力标签 (紫红色，2px 描边与暗背景)
                 self.ptop_price_label.setHtml(f'<div style="color: #FF00FF; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #FF00FF; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">阻力: {ptop_curr:.2f}</div>')
                 self.ptop_price_label.setFont(self.custom_font_signal)
                 self.ptop_price_label.setPos(total - 1, ptop_curr)
                 self.ptop_price_label.setVisible(True)
                 
-                # 绘制 pbottom 支撑标签 (青色，2px 描边与暗背景)
                 self.pbottom_price_label.setHtml(f'<div style="color: #00FFFF; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #00FFFF; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">支撑: {pbottom_curr:.2f}</div>')
                 self.pbottom_price_label.setFont(self.custom_font_signal)
                 self.pbottom_price_label.setPos(total - 1, pbottom_curr)
                 self.pbottom_price_label.setVisible(True)
 
-            # 4. 扫描最近的 150 根 K 线寻找 pbreak == 1 且 pdays == 1 的突破日
+            # 4. 扫描最近 150 根 K 线寻找突破日
             pbreak_vals = day_df['pbreak'].values
             pdays_vals = day_df['pdays'].values
             close_vals = day_df['close'].values
             
             scan_start = max(0, total - 150)
             line_idx = 0
+            line_pen = pg.mkPen(color=(255, 215, 0, 240), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
             
             for i in range(scan_start, total):
                 if line_idx >= len(self.pbreak_price_lines_pool):
@@ -11803,15 +11787,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 if pbreak == 1 and pdays == 1:
                     price = close_vals[i]
                     
-                    # 绘制水平延长线 (金色虚线，提高对比度和粗度到 1.5)
                     line_item = self.pbreak_price_lines_pool[line_idx]
-                    line_pen = pg.mkPen(color=(255, 215, 0, 240), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
-                    # 从突破日起点一直画到最后一根 K 线 index = total - 1
                     line_item.setData([x_axis[i], total - 1], [price, price])
                     line_item.setPen(line_pen)
                     line_item.setVisible(True)
                     
-                    # 绘制最右侧价格标记，位置与延长线终端 (total - 1) 贴合，避免遮挡或距离太远
                     label_item = self.pbreak_price_labels_pool[line_idx]
                     label_item.setHtml(f'<div style="color: #FFD700; background-color: rgba(20, 20, 20, 230); border: 1.5px solid #FFD700; padding: 2px 4px; font-size: 11px; font-weight: bold; border-radius: 3px;">🎯 {price:.2f}</div>')
                     label_item.setFont(self.custom_font_signal)
@@ -11820,6 +11800,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     
                     line_idx += 1
                     
+            self._last_pbreak_price_lines_count = line_idx
         except Exception as e:
             logger.error(f"Error drawing breakout price lines: {e}")
 
@@ -12108,6 +12089,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_df = tick_df
         if is_new_stock:
             self.last_shadow_decision = None
+            self._last_crosshair_idx = -1
+            self._last_legend_idx = None
+            self._last_tick_crosshair_idx = -1
+            # ⚡ [PERF] 切股清理缓存，防 24x7 挂机内存膨胀
+            if hasattr(self, '_db_query_cache'):
+                self._db_query_cache.clear()
+            if hasattr(self, '_platform_breakout_cache'):
+                self._platform_breakout_cache.clear()
+            self._fib_last_range = None
 
         # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
         last_resample = getattr(self, "_last_resample", None)
@@ -12578,12 +12568,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 limit_high = np.max(highs[-100:]) * 1.10 if n >= 100 else np.max(highs) * 1.10
                 limit_low = np.min(lows[-100:]) * 0.90 if n >= 100 else np.min(lows) * 0.90
                 
-                # 清除旧的多条 KX 曲线从主图
-                if hasattr(self, 'kx_curves'):
-                    for curve in self.kx_curves:
-                        self.kline_plot.removeItem(curve)
-                self.kx_curves = []
-                
                 # 计算多条独立的 KX 趋势线
                 kx_lines_data = calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far)
                 
@@ -12644,21 +12628,32 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.dn_curve.setPen(dn_pen)
                     self.dn_curve.show()
                     
-                # 依次绘制每一条独立的 KX 趋势线
+                # ⚡ [PERF] 合并多条 KX 趋势线为常驻单曲线复用 (使用 NaN 隔离多段线)，零场景增删
+                kx_x_all = []
+                kx_y_all = []
                 for item in kx_lines_data:
-                    x_coords = x_axis[item['x']]
-                    y_coords = item['y']
-                    curve = self.kline_plot.plot(x_coords, y_coords, pen=kx_pen, connect='finite')
-                    self.kx_curves.append(curve)
+                    if kx_x_all:
+                        kx_x_all.append(np.nan)
+                        kx_y_all.append(np.nan)
+                    kx_x_all.extend(x_axis[item['x']])
+                    kx_y_all.extend(item['y'])
+
+                kx_x_arr = np.array(kx_x_all, dtype=float) if kx_x_all else np.array([], dtype=float)
+                kx_y_arr = np.array(kx_y_all, dtype=float) if kx_y_all else np.array([], dtype=float)
+
+                if not hasattr(self, 'kx_curve') or self.kx_curve not in self.kline_plot.items:
+                    self.kx_curve = self.kline_plot.plot(kx_x_arr, kx_y_arr, pen=kx_pen, connect='finite', name="Channel_KX")
+                else:
+                    self.kx_curve.setData(kx_x_arr, kx_y_arr)
+                    self.kx_curve.setPen(kx_pen)
+                    self.kx_curve.show()
             except Exception as e:
                 logger.error(f"[AutoChannel] 绘制失败: {e}")
         else:
             if hasattr(self, 'mid_curve'): self.mid_curve.hide()
             if hasattr(self, 'up_curve'): self.up_curve.hide()
             if hasattr(self, 'dn_curve'): self.dn_curve.hide()
-            if hasattr(self, 'kx_curves'):
-                for curve in self.kx_curves:
-                    curve.hide()
+            if hasattr(self, 'kx_curve'): self.kx_curve.hide()
 
         # --- ⚡ [NEW] 缠论分析展示 ---
         if getattr(self, 'show_chan', True):
