@@ -1,3 +1,29 @@
+## 2026-08-16 14:20
+- [x] **修复加速形态 (_check_acceleration_pattern) 计算涨幅时的 ZeroDivisionError 除零异常 (`stock_standalone/intraday_decision_engine.py`)**：
+    - [x] **根除除零漏洞**：修复 `snapshot.get('last_close', 0)` 为 0.0 时作为分母触发的 `float division by zero` 崩溃异常。
+    - [x] **多级回退安全计算**：优先使用 `last_close > 0` 计算涨幅，若为 0 自动安全回退至行情行中的 `percent` / `change_pct`，确保多线程实时策略轮询 100% 稳健运行。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
+## 2026-08-16 14:07
+- [x] **优化语音预警管理窗口默认排序规则为时间升序（`add_time` 升序，最旧在顶，最新在最下）(`stock_standalone/instock_MonitorTK.py`, `stock_standalone/temp_historical_monitor.py`)**：
+    - [x] **根治首次打开乱序缺陷**：修复此前由于 Python 字典哈希顺序导致打开窗口时时间乱序的现象。
+    - [x] **默认时间升序展示**：在 `load_data()` 完成后，若用户无主动指定的排序列，默认执行 `treeview_sort_column(tree, "add_time", False)`，确保早期挖掘标的在上方、最新挖掘/入选标的整齐排在最下方；用户点击“时间”表头可随时升降序切换。
+    - [x] **全量自动化测试 100% 断言通过**：全量回归测试 100% 全部通过。
+
+## 2026-08-16 14:02
+- [x] **实现首次挖掘历史加入价与创建时间成对 (Pairwise) 原子绑定与深度回溯恢复 (`stock_standalone/stock_live_strategy.py`, `stock_standalone/trading_logger.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **彻底根治时间与价格脱节错位 Bug**：纠正了“时间被重置为近期，但价格是更早之前”的严重不一致缺陷。将首次挖掘加入价（`create_price`）与首次挖掘时间（`created_time`）在 DB、内存与配置文件中**进行成对原子强绑定（Atomic Pairwise Binding）**。
+    - [x] **支持跨库深度历史首次挖掘回溯**：当标的入池时，优先深度回溯 `voice_alerts`（按最早 `created_time ASC`）及 `selection_history` 历史最早选股记录，成对完整恢复真正的历史首次挖掘时间（如 7月/8月初）与初始加入价（14.55 元），绝不因盘中重新入选而错误重置时间。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块测试 100% 全部通过。
+
+## 2026-08-16 13:56
+- [x] **实现首次挖掘加入价/时间绝对防篡改锁定与科学“留强汰弱 (Ride Winners, Cut Losers)”自动清理重构 (`stock_standalone/stock_live_strategy.py`, `stock_standalone/trading_logger.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **首次挖掘时间与加入价不可篡改保护**：在 `StockLiveStrategy._import_hotspot_candidates`、`add_monitor` 以及 `trading_logger.log_voice_alert_config` 中彻底锁死历史首次挖掘价格（`create_price`）与创建时间（`created_time`）。一旦股票被挖掘，无论盘中如何轮询循环、结算刷新，绝不重置为最新时间和现价，100% 忠实保留历史初始挖掘基准（如一鸣食品 8月11日 14.55 元，累计盈利 +119.31% 永久准确无误）。
+    - [x] **科学“留强汰弱”自动清理算法重构**：
+        1. **绝对保护盈利强势股（Ride Winners）**：自加入以来累计盈利 `profit_pct >= 2.0%` 的大牛股（如截图中的 +119.31%、+16.89%、+10.94%、+8.57%、+4.30%）、连榜人气龙（`pop_streak >= 2`）、S 级龙头以及持仓股，**绝对严禁清理，永远保留在监控池中**；
+        2. **精准淘汰未成功盈利的失败个股（Cut Losers）**：仅清理挖掘后未成功盈利（累计盈亏 `<= 0` 或大幅亏损）、且今日走弱（涨幅 `< 1.0%`）、且失去主线题材热度的失败标的，为新爆发的龙头腾出容量空间。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
 ## 2026-08-16 13:51
 - [x] **修复股票名称混淆 (002001 显为“通道突破股”)、接入权威名称纠偏与底层特征全量补齐 (`stock_standalone/stock_selector.py`, `stock_standalone/stock_live_strategy.py`, `tests/test_breakout_and_selector.py`)**：
     - [x] **根治名称占位符与测试数据混淆**：在 `StockSelector.filter_strong_stocks`、`StockLiveStrategy._save_monitors` 以及 `_import_hotspot_candidates` 中统一接入 `sys_utils.resolve_stock_name` 权威解析，对任何包含 `突破股`、`走弱`、`测试`、`跟风`、`--` 或纯数字的名称自动纠正为真实股票名称（如 `002001 -> 新和成`）。

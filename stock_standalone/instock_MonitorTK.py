@@ -14673,9 +14673,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 💥 关键：数据加载后更新统计标签
                 refresh_stats()
                 
-                # ✅ 恢复排序状态
-                if hasattr(tree, 'current_sort_col'):
+                # ✅ 恢复排序状态，若无记忆排序则默认按时间升序（最旧在顶，最新在最下）
+                if hasattr(tree, 'current_sort_col') and tree.current_sort_col:
                     treeview_sort_column(tree, tree.current_sort_col, tree.current_sort_reverse)
+                else:
+                    treeview_sort_column(tree, "add_time", False)
 
             load_data()
             win.refresh_list = load_data

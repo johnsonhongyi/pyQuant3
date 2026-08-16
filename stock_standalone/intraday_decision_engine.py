@@ -1691,7 +1691,12 @@ class IntradayDecisionEngine:
         
         # 模式3: 极致力度(成交量爆炸)加速 (Quantified Volume Acceleration)
         # 逻辑：量比 > 2.0 (倍量) + 涨幅 > 3% + 站稳均价线 + 位于5日线上方
-        pct = (price - float(snapshot.get('last_close', 0))) / float(snapshot.get('last_close', 1))
+        last_c = float(snapshot.get('last_close', 0) or snapshot.get('lastp1d', 0) or snapshot.get('pre_close', 0) or 0.0)
+        if last_c > 0:
+            pct = (price - last_c) / last_c
+        else:
+            pct = float(row.get('percent', row.get('pct', row.get('change_pct', 0)))) / 100.0
+            
         if volume > 2.0 and pct > 0.03 and price > nclose and price > ma5:
              result["is_acc"] = True
              result["bonus"] += 0.25
