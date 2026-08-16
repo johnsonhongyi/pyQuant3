@@ -1,3 +1,10 @@
+## 2026-08-16 13:51
+- [x] **修复股票名称混淆 (002001 显为“通道突破股”)、接入权威名称纠偏与底层特征全量补齐 (`stock_standalone/stock_selector.py`, `stock_standalone/stock_live_strategy.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **根治名称占位符与测试数据混淆**：在 `StockSelector.filter_strong_stocks`、`StockLiveStrategy._save_monitors` 以及 `_import_hotspot_candidates` 中统一接入 `sys_utils.resolve_stock_name` 权威解析，对任何包含 `突破股`、`走弱`、`测试`、`跟风`、`--` 或纯数字的名称自动纠正为真实股票名称（如 `002001 -> 新和成`）。
+    - [x] **修正单测 Mock 标的真实性并清理残留脏数据**：将 `tests/test_breakout_and_selector.py` 中的测试名称全部替换为真实合法股票名称（`002001 -> 新和成`，`600999 -> 招商证券`），并全量扫描清洗了本地配置文件中的残留脏数据。
+    - [x] **全量底层特征补齐与持久化**：在 `_monitored_stocks[code]['snapshot']` 以及 `voice_alert_config.json` 中，补齐并持久化了完整的底层特征字段：`pop_streak` (连榜天数)、`pop_platforms` (共振平台数)、`pop_score` (共振得分)、`pop_details` (明细)、`status` (梯队角色与状态)、`grade` (S/A/B/C)、`score` (综合得分)、`reason` (选股理由)、`category` (所属板块)、`volume_ratio` (量比)、`amount` (金额)、`tqi` (趋势质量指数) 等。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块测试 100% 全部通过。
+
 ## 2026-08-16 13:45
 - [x] **实现选股信息显式展示 (pop_streak / pop_platforms / pop_score / pop_details) 与多日连榜智能语音报警全链条贯通 (`stock_standalone/stock_selector.py`, `stock_standalone/stock_live_strategy.py`, `tests/test_breakout_and_selector.py`)**：
     - [x] **选股结果显式字段扩展**：在 `StockSelector` 选股结果 `record` 与返回的 DataFrame 中正式增加了 `pop_streak`（多日连续在榜天数）、`pop_platforms`（全网共振平台数）、`pop_score`（共振热度总分）、`pop_details`（各平台排名明细）等独立物理列；在 UI 选股表格与日志中一目了然直观呈现。
