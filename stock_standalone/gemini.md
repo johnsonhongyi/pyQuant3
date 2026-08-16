@@ -1,3 +1,12 @@
+## 2026-08-16 10:50
+- [x] **复查可视化极限性能优化 (commit `6f56227`) 并修复 5 项 Bug/隐患 (`stock_standalone/trade_visualizer_qt6.py`)**：
+    - [x] **BUG-1: 修复 `_draw_breakout_price_lines` 双重 `except` 死代码**：删除 L11802-11803 处由于新增 `except` 块未移除原有 `except` 导致的冗余/死代码，消除语法/逻辑隐患。
+    - [x] **BUG-2: 修复 `_on_kline_mouse_moved` 中 `_update_ma_legend` 被双重调用**：删除 L7612 处冗余的 `self._update_ma_legend(idx)` 调用（`_update_crosshair_ui` 内部 L8124 已调用），遵循 DRY 原则消除语义混淆。
+    - [x] **BUG-3: 修复 Fibonacci 对象池 `needs_init=True` 重建时未清理旧 InfiniteLine 图元泄漏**：在 `self.fib_lines = []` 重建前，先遍历旧 `fib_lines` 对仍在 `kline_plot.items` 中的 InfiniteLine 执行 `removeItem`，防止新旧线条重叠导致的场景泄漏。
+    - [x] **WARN-3: 修复平台突破缓存 key 缺少价格维度导致盘中信号过时**：在 `_platform_breakout_cache` 的 cache_key 中加入 `round(last_close, 2)` 维度，确保实盘最后一根 K 线 close 变化时自动失效重算 `ptop/pbottom/pbreak` 信号。
+    - [x] **WARN-4+5: 修复 `_db_query_cache` 与 `_platform_breakout_cache` 24×7 挂机内存膨胀**：在 `is_new_stock` 切股时统一 `clear()` 清理 DB 查询缓存、平台计算缓存与 Fibonacci 脏检查标记 `_fib_last_range`，防止长期运行切换数千只股票后字典无限增长。
+    - [x] **语法校验与单元测试 100% 通过**：`py_compile` 语法编译通过，`pytest tests/test_signal_ledger.py` 全量 13 项单元测试 **100% PASSED**！
+
 ## 2026-08-15 16:22
 - [x] **修复 Simple 监控窗口点击时联动将同屏幕其他 Simple 窗口自动带到最前显示 (`stock_standalone/instock_MonitorTK.py`)**：
     - [x] **补齐 Simple 窗口 `<Button-1>` 点击事件绑定**：在 `show_concept_top10_window_simple` 中为 `win` 和 `tree` 增加 `<Button-1>` 鼠标点击事件监听（`add="+"`），点击时自动调用 `self.on_monitor_window_focus(win)`，使得在多屏幕任意 Simple 窗口被激活时能够实时调起同屏置顶协同。

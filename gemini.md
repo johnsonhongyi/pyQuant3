@@ -1,3 +1,16 @@
+## 2026-08-16 11:05
+- [x] **实现 trade_visualizer_qt6 深度审查优化与自查自检 (`stock_standalone/trade_visualizer_qt6.py`)**：
+    - [x] **消除 `_clear_follow_markers` 重复定义冲突**：删除 L11564 残缺覆盖定义，统一保留 L11348 全量清理（包含线、标签和 Emoji 标记），杜绝切股残留。
+    - [x] **`_find_date_index` 引入权威索引映射**：优先查询 `self._cached_date_map`，时间轴索引查找由 $O(N)$ 字符串循环全面升级为 $O(1)$ 字典秒级定位。
+    - [x] **`_archived_strat_cache` 挂机内存防膨胀**：在 `is_new_stock` 切股清理逻辑中补齐对 `_archived_strat_cache` 的 `clear()` 释放，杜绝 24x7 挂机内存缓慢增长。
+    - [x] **九转/主力买卖指标池（500 项）精准节流隐藏**：引入 `_last_custom_indicator_count`，将每次 K 线重绘对 500 个 TextItem 的盲目全量 `hide()` 优化为仅隐藏实际使用项（5~20 次），大幅削减 Qt/C++ 调用开销。
+    - [x] **自查自检 100% 成功**：Python 语法编译 0 报错，全量 17 项单元测试（信号账本 + 趋势通道）100% 全部断言通过。
+
+## 2026-08-16 10:48
+- [x] **完成全局与工作区 Rules、Workflows 及 Skills 的全量同步与 IDE 配置补齐**：
+    - [x] **全局配置规范对齐 (`~/.gemini/config/rules/`, `workflows/`, `skills/`)**：在全局配置目录完整建立并同步 `00_global_rules.md`（包含角色定位、四大核心原则、Windows 多进程/文件锁约束、MCP 调用规则、中文与 UTF-8 规范）；补齐 `review.md`、`debug.md`、`test.md` 工作流；同步 `code-review-router`、`code-review`、`systematic-debugging`、`test-driven-development` 等全套审查与调试技能。
+    - [x] **工作区配置根目录对齐 (`.agents/rules/`, `workflows/`, `skills/`)**：在当前工作区根目录补全 `.agents` 目录结构，同步 `quant_rules.md` 量化专属规则、`review.md` 审查工作流（解决 `/review` 及 Review 工作流缺失问题）、`debug.md`、`test.md` 及对应 skills，实现 Antigravity IDE 对项目的秒级自动识别与加载。
+
 ## 2026-08-16 10:35
 - [x] **实现 trade_visualizer_qt6 可视化极限性能优化与无用性能损耗清理 (`stock_standalone/trade_visualizer_qt6.py`)**：
     - [x] **黄金分割（Fibonacci）常驻对象池与底层自适应**：彻底解除 `sigXRangeChanged` 监听与 `_update_fib_label_positions` 高频 Python 回调，利用 `InfiniteLine(label=..., labelOpts=...)` 原生自适应对齐，并引入 `_fib_last_range` 脏检查，分时刷新与重绘耗时由 121.5ms 骤降至 0.06ms（提速 2000+ 倍）。
