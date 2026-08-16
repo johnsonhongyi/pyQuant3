@@ -1,3 +1,24 @@
+## 2026-08-16 14:54
+- [x] **实现多日历史宽表数据 (lasth1d...lasth10d) 自动对齐补齐与系统性代码审查 (Code Review) (`stock_standalone/stock_selector.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **核查并打通全量历史宽表数据流**：针对用户提出的“是否使用 df 的全数据获取扫描近 10 日历史高点序列”，在 `StockSelector.filter_strong_stocks` 顶部加入智能对齐机制：当传入的 `df` 为局部实时数据时，自动关联 `base_df`/`top_all.h5` 补齐 `lasth1d ... lasth10d`、`lastp1d ... lastp10d`、`upper1 ... upper4` 等全量多日历史字段，确保在任何调用入口下 100% 具备多日历史穿透判断能力。
+    - [x] **安全兜底与局部变量保护**：在趋势分析块中提前安全初始化 `amount`, `last_h1d`, `last_h2d`, `is_broken`, `is_squeeze_breakout`，彻底消除 UnboundLocalError 隐患。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
+## 2026-08-16 14:50
+- [x] **实现右侧强力突破模式 (Power Breakout Engine)、换手量能合力确认与严厉诱多压制体系 (`stock_standalone/stock_selector.py`, `tests/test_breakout_and_selector.py`)**：
+    - [x] **右侧多维平台高点强突破识别**：新增对近 10 日/20 日阶段整理箱体高点的横向穿透扫描。一旦股价放量突破近期平台历史最高价，直接触发 `【突破近N日平台新高】`（+55分高额加权），并赋予 S 级 VIP 直通入选权与 `【平台新高突破】` 显式标签。
+    - [x] **放量强换手量价合力确认**：在选股逻辑中对健康换手率区间（$4.0\% \sim 28.0\%$）且量比 $\ge 1.5$ 的标的增加 `【放量强换手合力】`（+30分），确保选出有主力真金白银换手接力的强动量标的。
+    - [x] **严惩冲高回落与底部无量诱多**：
+        1. 针对盘中脉冲长上影线回落（上影线 $\ge 3.5\%$ 且涨幅 $< 4\%$），扣除 50 分并标记 `冲高回落(诱多风险)`；
+        2. 针对底部无题材、无量比（量比 $< 1.0$）、涨幅 $< 2.5\%$ 的弱势震荡杂毛实施 -35 分强力压制，彻底杜绝在底部捞取不确定诱多假票。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
+## 2026-08-16 14:35
+- [x] **纠正“蓝盾光电”股票代码与名称绑定错误（`300862` 蓝盾光电，根除单测 `300297` 历史脏数据残留）(`tests/test_breakout_and_selector.py`, `stock_standalone/voice_alert_config.json`, SQLite DB)**：
+    - [x] **根因定位与纠偏**：排查发现早期在 `tests/test_breakout_and_selector.py` 的梯队测试 Mock 数据中误将“蓝盾光电”写为了退市到三板的 `300297`（*ST蓝盾），导致该测试数据被写入了本地监控配置与数据库中。
+    - [x] **全量修正与彻底清洗**：将测试数据纠正为真实的“蓝盾光电”代码 `300862`；全量扫描并彻底清理了 `voice_alert_config.json` 及所有临时文件、SQLite 数据库中的 `300297` 脏数据。
+    - [x] **全量自动化测试 100% 断言通过**：全量 23 项跨模块联合测试 100% 全部通过。
+
 ## 2026-08-16 14:20
 - [x] **修复加速形态 (_check_acceleration_pattern) 计算涨幅时的 ZeroDivisionError 除零异常 (`stock_standalone/intraday_decision_engine.py`)**：
     - [x] **根除除零漏洞**：修复 `snapshot.get('last_close', 0)` 为 0.0 时作为分母触发的 `float division by zero` 崩溃异常。
