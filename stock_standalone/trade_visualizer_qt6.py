@@ -3453,9 +3453,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_chan = True
         self.show_auto_channel = True
         self.show_fib = True  # ⭐ [NEW] 默认开启黄金分割 (Fibonacci) 动态支撑阻力坐标系
-        self.fib_lines = []   # 存储 InfiniteLine 列表
-        self.fib_labels = []  # 存储 TextItem 列表
-        self.fib_labels_data = []  # 存储 (txt_item, price_val) 列表用于视区变化时锁定最右侧边框
+        self.fib_lines = []   # 存储 InfiniteLine 列表 (对象池复用)
+        self.fib_labels = []  # 存储 TextItem 列表 (保留兼容)
+        self.fib_labels_data = []  # 存储 (txt_item, price_val) 列表 (保留兼容)
+        self._fib_last_range = None  # 黄金分割脏检查缓存 (min_p, max_p, len)
+        self._fib_visible = False   # 黄金分割当前显示状态
+        self._fib_font = QFont("Consolas", 8, QFont.Weight.Bold)
         self.chan_bi_pen = pg.mkPen(color='#00FFFF', width=1.5)  # 青色分笔
         # self.chan_bi_curve = pg.PlotDataItem(pen=self.chan_bi_pen, connect='finite', zValue=80)
         # self.kline_plot.addItem(self.chan_bi_curve)
@@ -5497,6 +5500,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if not checked:
             self._clear_fib_levels()
+        else:
+            self._fib_last_range = None  # 重置脏标记以触发刷新显示
 
         self._save_visualizer_config()
 
@@ -5504,130 +5509,127 @@ class MainWindow(QMainWindow, WindowMixin):
             self.render_charts(self.current_code, getattr(self, 'day_df', pd.DataFrame()), getattr(self, 'tick_df', pd.DataFrame()))
 
     def _clear_fib_levels(self):
-        """清理已绘制的 FIB 黄金分割水平线及价格标签"""
+        """清理/隐藏已绘制的 FIB 黄金分割水平线 (零 GC / 极速隐藏)"""
         if hasattr(self, 'fib_lines') and self.fib_lines:
-            for line in self.fib_lines:
+            for item in self.fib_lines:
                 try:
-                    if hasattr(self, 'kline_plot') and line in self.kline_plot.items:
-                        self.kline_plot.removeItem(line)
+                    line = item[1] if isinstance(item, tuple) else item
+                    line.hide()
                 except Exception:
                     pass
-            self.fib_lines.clear()
-
-        if hasattr(self, 'fib_labels') and self.fib_labels:
-            for label in self.fib_labels:
-                try:
-                    if hasattr(self, 'kline_plot') and label in self.kline_plot.items:
-                        self.kline_plot.removeItem(label)
-                except Exception:
-                    pass
-            self.fib_labels.clear()
-
-        if hasattr(self, 'fib_labels_data') and self.fib_labels_data:
-            self.fib_labels_data.clear()
+        self._fib_visible = False
+        self._fib_last_range = None
 
     def _update_fib_label_positions(self):
-        """动态同步 FIB 价格标签位置，使其始终固定吸附在可视视角 (ViewBox) 最右侧边缘，不随 K 线移动"""
-        if not getattr(self, 'show_fib', True) or not hasattr(self, 'fib_labels_data') or not self.fib_labels_data:
-            return
-
-        try:
-            if not hasattr(self, 'kline_plot') or self.kline_plot is None:
-                return
-
-            view_box = self.kline_plot.getViewBox()
-            if view_box is None:
-                return
-
-            (x_min, x_max), _ = view_box.viewRange()
-            # 始终锁定在可视区域最右侧边框内 (X 轴右边界 x_max，微调 0.2 个 unit)
-            target_x = x_max - 0.2
-
-            for txt_item, price_val in self.fib_labels_data:
-                try:
-                    txt_item.setPos(target_x, price_val)
-                except Exception:
-                    pass
-        except Exception as e:
-            pass
+        """兼容保留：原生 InfLineLabel 自动在视区右侧对齐，无需频繁循环 setPos"""
+        pass
 
     def _draw_fibonacci_levels(self, day_df):
         """
         在 K 线主画板上高精度绘制 0%, 23.6%, 38.2%, 50.0%, 61.8%, 80.9%, 100% 
         黄金分割 (Fibonacci Ratios) 动态支撑阻力坐标系水平线与右侧价格标签
+        [极限性能优化]:
+        1. 采用对象池常驻 + 就地更新 (In-place Update)，避免频繁 removeItem/addItem 引起的场景重构。
+        2. 原生利用 InfiniteLine.label 与 format="{value:.2f}" 自动跟随 ViewBox 视区，彻底移除 sigXRangeChanged 监听与高频 setPos 带来的主线程抖动。
+        3. 脏检查机制 (Dirty Checking)，同一数据或同区间仅需微秒级直接返回。
+        4. 性能耗时由 timed_ctx 监控，确保平滑无感知。
         """
-        self._clear_fib_levels()
-        if not getattr(self, 'show_fib', True) or day_df is None or day_df.empty:
-            return
-
-        try:
-            if 'high' not in day_df.columns or 'low' not in day_df.columns:
+        with timed_ctx("_draw_fibonacci_levels", warn_ms=10):
+            if not getattr(self, 'show_fib', True) or day_df is None or day_df.empty:
+                self._clear_fib_levels()
                 return
 
-            highs = day_df['high'].values
-            lows = day_df['low'].values
-            n = len(day_df)
-            if n <= 0:
-                return
+            try:
+                if 'high' not in day_df.columns or 'low' not in day_df.columns:
+                    self._clear_fib_levels()
+                    return
 
-            valid_lows = lows[lows > 0]
-            valid_highs = highs[highs > 0]
-            if len(valid_lows) == 0 or len(valid_highs) == 0:
-                return
+                highs = day_df['high'].values
+                lows = day_df['low'].values
+                if len(highs) == 0 or len(lows) == 0:
+                    self._clear_fib_levels()
+                    return
 
-            min_p = float(np.min(valid_lows))
-            max_p = float(np.max(valid_highs))
-            diff = max_p - min_p
-            if diff <= 0:
-                return
+                valid_lows = lows[lows > 0]
+                valid_highs = highs[highs > 0]
+                if len(valid_lows) == 0 or len(valid_highs) == 0:
+                    self._clear_fib_levels()
+                    return
 
-            # 7 大黄金分割核心比率位 (与外盘 100% 完全一致)
-            fib_ratios = [
-                (1.000, "100.0% (顶峰)", "#F6465D", QtCore.Qt.PenStyle.DashLine),
-                (0.809, "80.9% (强阻)", "#FF7700", QtCore.Qt.PenStyle.DotLine),
-                (0.618, "61.8% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
-                (0.500, "50.0% (中枢)", "#00E5FF", QtCore.Qt.PenStyle.SolidLine),
-                (0.382, "38.2% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
-                (0.236, "23.6% (强撑)", "#00FF88", QtCore.Qt.PenStyle.DotLine),
-                (0.000, "0.0% (谷底)", "#089981", QtCore.Qt.PenStyle.DashLine)
-            ]
+                min_p = float(np.min(valid_lows))
+                max_p = float(np.max(valid_highs))
+                diff = max_p - min_p
+                if diff <= 0:
+                    self._clear_fib_levels()
+                    return
 
-            # 绑定 ViewBox 视角 X 轴平移/缩放监听器
-            if hasattr(self, 'kline_plot') and self.kline_plot:
-                vbox = self.kline_plot.getViewBox()
-                if vbox and not getattr(self, '_fib_sig_connected', False):
-                    try:
-                        vbox.sigXRangeChanged.connect(self._update_fib_label_positions)
-                        self._fib_sig_connected = True
-                    except Exception:
-                        pass
+                current_range = (round(min_p, 4), round(max_p, 4), len(day_df))
+                # ⚡ [脏检查]: 若区间与上一次一致且线已在显示中，直接 0 开销返回
+                if getattr(self, '_fib_last_range', None) == current_range and getattr(self, '_fib_visible', False):
+                    return
 
-            for ratio, ratio_label, color_hex, line_style in fib_ratios:
-                price_val = min_p + diff * ratio
-                pen = pg.mkPen(color_hex, width=1.0, style=line_style)
-                line = pg.InfiniteLine(pos=price_val, angle=0, pen=pen, movable=False)
-                line.setZValue(80)
-                self.kline_plot.addItem(line)
-                self.fib_lines.append(line)
+                if not hasattr(self, 'kline_plot') or self.kline_plot is None:
+                    return
 
-                # 右侧边端悬浮黄金分割比例 + 价格标签
-                txt_item = pg.TextItem(
-                    text=f" Fib {ratio_label}: {price_val:.2f}",
-                    color=color_hex,
-                    anchor=(1.0, 0.5)
-                )
-                font = QFont("Consolas", 8, QFont.Weight.Bold)
-                txt_item.setFont(font)
-                txt_item.setZValue(85)
-                self.kline_plot.addItem(txt_item)
-                txt_item.setPos(n - 0.5, price_val)
-                self.fib_labels.append(txt_item)
-                self.fib_labels_data.append((txt_item, price_val))
+                # 7 大黄金分割核心比率位 (与外盘 100% 完全一致)
+                fib_ratios = [
+                    (1.000, "100.0% (顶峰)", "#F6465D", QtCore.Qt.PenStyle.DashLine),
+                    (0.809, "80.9% (强阻)", "#FF7700", QtCore.Qt.PenStyle.DotLine),
+                    (0.618, "61.8% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
+                    (0.500, "50.0% (中枢)", "#00E5FF", QtCore.Qt.PenStyle.SolidLine),
+                    (0.382, "38.2% (黄金位)", "#FFD700", QtCore.Qt.PenStyle.DashLine),
+                    (0.236, "23.6% (强撑)", "#00FF88", QtCore.Qt.PenStyle.DotLine),
+                    (0.000, "0.0% (谷底)", "#089981", QtCore.Qt.PenStyle.DashLine)
+                ]
 
-            # 绘制完成后即刻更新一次 X 位置，锁定最右侧边框
-            self._update_fib_label_positions()
-        except Exception as e:
-            logger.error(f"[Fibonacci] 绘制黄金分割线失败: {e}")
+                # 检查对象池是否需要初始化 (首次或 kline_plot 发生 clear 导致图元不在 items 中)
+                needs_init = False
+                if not hasattr(self, 'fib_lines') or not self.fib_lines or len(self.fib_lines) != len(fib_ratios):
+                    needs_init = True
+                else:
+                    first_line = self.fib_lines[0][1] if isinstance(self.fib_lines[0], tuple) else self.fib_lines[0]
+                    if first_line not in self.kline_plot.items:
+                        needs_init = True
+
+                if needs_init:
+                    self.fib_lines = []
+                    font = getattr(self, '_fib_font', None)
+                    if font is None:
+                        font = QFont("Consolas", 8, QFont.Weight.Bold)
+                        self._fib_font = font
+
+                    for ratio, ratio_label, color_hex, line_style in fib_ratios:
+                        pen = pg.mkPen(color_hex, width=1.0, style=line_style)
+                        price_val = min_p + diff * ratio
+                        line = pg.InfiniteLine(
+                            pos=price_val,
+                            angle=0,
+                            pen=pen,
+                            movable=False,
+                            label=f" Fib {ratio_label}: {{value:.2f}}",
+                            labelOpts={
+                                'position': 0.98,
+                                'color': color_hex,
+                                'anchors': [(1.0, 0.5), (1.0, 0.5)]
+                            }
+                        )
+                        line.setZValue(80)
+                        if hasattr(line, 'label') and line.label:
+                            line.label.setFont(font)
+                        self.kline_plot.addItem(line)
+                        self.fib_lines.append((ratio, line))
+                else:
+                    # ⚡ [就地极速更新]: 仅更新 line 的 value，零场景树增删开销
+                    for item in self.fib_lines:
+                        ratio, line = item if isinstance(item, tuple) else (0.0, item)
+                        price_val = min_p + diff * ratio
+                        line.setValue(price_val)
+                        line.show()
+
+                self._fib_last_range = current_range
+                self._fib_visible = True
+            except Exception as e:
+                logger.error(f"[Fibonacci] 绘制黄金分割线失败: {e}")
 
     def _on_sbc_window_destroyed(self, win):
         """窗口关闭时自动清理资源"""
