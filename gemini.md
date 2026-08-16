@@ -1,3 +1,39 @@
+## 2026-08-16 21:02
+- [x] **深度整合分时阶梯交易全生命周期与 7 节点动态时序评估体系 (`stock_standalone/ats/ui/intraday_strategy_dialog.py`)**：
+    - [x] **恢复并强化原有阶梯交易主战场 (Tab 1 升级为一体化工作台)**：
+        - 顶部整合开盘定盘速查（开盘价/档位/现价/VWAP）、7 节点动态时序综合评分徽标、形态诊断与剩余持仓状态管理；
+        - 实操指引卡片高亮指示当前阶段操作（挂单比例/价格笼子建议价）；
+        - 左侧无缝呈现 4 大时间轴阶段动态指示、策略规则达成监控表（触发条件/卖出比例/建议挂单价/已触发状态）与 7 节点动态打分速查表；
+        - 右侧呈现 SBC 实盘分时走势与基准参考线、策略买卖点触发明细表（时间/动作/执行价/比例/理由）与实盘指令流水日志。
+    - [x] **三大 Tab 职责分明无割裂**：
+        - Tab 1：⚡ 分时阶梯交易策略 & 7 节点动态评估一体化工作台（主交易执行看板）；
+        - Tab 2：🎮 8/18 上市全天分时模拟回测与情景演练（A/B/C/D 4大情景秒级回测 + 动态逐帧回放）；
+        - Tab 3：📋 频准激光 8/18 盯盘模板 & 综合评分明细汇总（复刻 Excel 盯盘模板与 7 条实盘法则）。
+
+## 2026-08-16 20:48
+- [x] **完整集成 ATS 官方 QSS 暗黑样式模板体系 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/pinzhun_ladder_monitor.py`)**：
+    - [x] **应用 ATS 原生 Dark Theme QSS (`apply_dark_theme`)**：将 `PinzhunLadderStandaloneWindow` 与独立启动程序 `pinzhun_ladder_monitor.py` 全局接入 `ats.ui.styles.DARK_THEME_QSS`。
+    - [x] **统一视觉渲染规范**：彻底清除系统默认浅色边框与原生未渲染控件，使独立窗口的表头 (HeaderView)、分组框 (QGroupBox)、滚动条 (QScrollBar)、标签页 (QTabWidget)、下拉框 (QComboBox) 与 ATS 主程序 100% 保持极致暗黑高质感与视觉一体化。
+
+## 2026-08-16 20:43
+- [x] **重构为完全独立主窗口系统 (Standalone Window Architecture) 并提供单独运行程序 (`stock_standalone/pinzhun_ladder_monitor.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/main_window.py`)**：
+    - [x] **彻底脱离模态阻塞**：将 `IntradayStrategyDialog` 重构为基于 `QMainWindow` 的 `PinzhunLadderStandaloneWindow`，具备独立生命周期、独立任务栏项、最大化/最小化、多屏拖拽与【📌 窗口置顶】切换功能。
+    - [x] **独立程序一键启动 (`pinzhun_ladder_monitor.py`)**：支持无需启动 ATS 直接单独双击/命令行运行 `python pinzhun_ladder_monitor.py [688826]`，功能完全独立且不受任何受限。
+    - [x] **主界面非模态联动与实时 df 异步推送**：在 ATS 主界面点击【阶梯盯盘⚡】时弹出独立非模态窗口（主界面与盯盘窗口可同时自由操作），并在主窗口接收到实时 `df` 时异步推给独立窗口，确保双端极速同步。
+    - [x] **UI 按钮与排版优化**：将工具栏按钮文字精简优化为“阶梯盯盘⚡”并增加专属边距与悬浮提示，解决窄屏下按钮折行拥挤问题。
+
+## 2026-08-16 20:35
+- [x] **实现 ATS 频准激光 (688826) 8/18 上市开盘时间对齐全天分时模拟回测演练器与推送 df 全自动数据摄入计算 (`config/intraday_newstock_strategies.json`, `ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **推送 df 100% 全自动数据摄入与填表计算 (Zero Manual Entry)**：系统彻底脱离人工填表，由 `engine.extract_market_snapshot_from_df` 自动解析实时 `df` 中的换手率 `turnover`、成交额 `amount`、成交量 `volume`、`open`、`trade/close`、`high`、`low`、`vwap`、`buy/bid1`、`sell/ask1`，实时自动填表、自动评分(0-10)、自动判定强中弱、自动计算加权总分与形态分类。
+    - [x] **8/18 上市开盘时间对齐全天分时模拟回测引擎 (Intraday Simulation Engine)**：针对 8/18 开盘日打造 9:15 到 15:00 精确时间对齐的 241 根分时仿真演练器（覆盖 A/B/C/D 4大走势情景），支持“⚡ 一键全天秒级回测”与“▶️ 分时动态逐帧回放 (1x/5x/10x/20x)”，分时走势、7 节点评分动态推进、买卖点信号实时触发与持仓变化一览无余。
+    - [x] **直接明确的交易逻辑闭环**：
+        1. 09:25 竞价定盘：对比 560.64元(+200%)与 373.76元(+100%)，自动定档锁定策略；
+        2. 09:30~10:00 早盘冲高：较开盘涨 $\ge +10\%$，申报买一价*1.02限价单卖出 50%；10:00 未冲高则 10:00 整市价卖出 30% 兜底；
+        3. 10:00~15:00 临停：较开盘涨 $\ge +30\%$ 临停复牌前挂 Open*1.28 卖出 30%；
+        4. 移动止盈：高点回撤 $\ge 10\%$ 触发移动止盈清仓；
+        5. 14:50 尾盘：收盘/最高 $\ge 90\%$ 且综合得分 $\ge 8.0$ 保留 10% 底仓过夜，其余市价清仓。
+    - [x] **全量 24 项跨模块自动化单测 100% 断言全部通过**。
+
 ## 2026-08-16 14:54
 - [x] **实现多日历史宽表数据 (lasth1d...lasth10d) 自动对齐补齐与系统性代码审查 (Code Review) (`stock_standalone/stock_selector.py`, `tests/test_breakout_and_selector.py`)**：
     - [x] **核查并打通全量历史宽表数据流**：针对用户提出的“是否使用 df 的全数据获取扫描近 10 日历史高点序列”，在 `StockSelector.filter_strong_stocks` 顶部加入智能对齐机制：当传入的 `df` 为局部实时数据时，自动关联 `base_df`/`top_all.h5` 补齐 `lasth1d ... lasth10d`、`lastp1d ... lastp10d`、`upper1 ... upper4` 等全量多日历史字段，确保在任何调用入口下 100% 具备多日历史穿透判断能力。

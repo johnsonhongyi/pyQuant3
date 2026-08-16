@@ -1805,9 +1805,9 @@ class ATSMainWindow(QMainWindow):
         self.btn_global_market.clicked.connect(self.open_global_market_dialog)
         toolbar.addWidget(self.btn_global_market)
 
-        self.btn_intraday_strategy = QPushButton("新股分时策略⚡")
-        self.btn_intraday_strategy.setToolTip("打开新股及日内阶梯分批交易策略与SBC实盘显示面板")
-        self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
+        self.btn_intraday_strategy = QPushButton("阶梯盯盘⚡")
+        self.btn_intraday_strategy.setToolTip("打开频准激光（688826）8/18 上市独立盯盘窗口、7节点动态评分与分时阶梯策略系统 (完全独立非模态运行)")
+        self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
         
@@ -3042,9 +3042,9 @@ class ATSMainWindow(QMainWindow):
             self.status_bar.showMessage(f"❌ 回测计算失败: {e}")
 
     def open_intraday_strategy_dialog(self, code=None, name=None):
-        """调起 ATS 单独分时交易策略与 SBC 实盘显示面板（支持 JSON 多 code 自动路由）"""
+        """调起频准激光 8/18 上市盯盘与分时阶梯策略独立窗口（非模态独立运行，完全不阻塞主界面）"""
         try:
-            from ats.ui.intraday_strategy_dialog import IntradayStrategyDialog
+            from ats.ui.intraday_strategy_dialog import PinzhunLadderStandaloneWindow
             from ats.intraday_strategy_engine import IntradayStrategyEngine
 
             engine = IntradayStrategyEngine.get_instance()
@@ -3065,16 +3065,32 @@ class ATSMainWindow(QMainWindow):
                 elif hasattr(self, 'universe_manager') and hasattr(self.universe_manager, 'active_codes') and self.universe_manager.active_codes:
                     code = self.universe_manager.active_codes[0]
                 else:
-                    code = "000001"
+                    code = "688826"
 
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
             if isinstance(name, bool) or not name or name == "未知" or name == c_clean:
-                name = self.get_stock_name(c_clean) if hasattr(self, 'get_stock_name') else "新股标的"
+                name = self.get_stock_name(c_clean) if hasattr(self, 'get_stock_name') else "频准激光"
 
-            dlg = IntradayStrategyDialog(code=c_clean, name=name, parent=self)
-            dlg.exec()
+            # 保持持久非模态独立窗口引用，彻底杜绝模态阻塞
+            if not hasattr(self, 'ladder_monitor_win') or self.ladder_monitor_win is None:
+                self.ladder_monitor_win = PinzhunLadderStandaloneWindow(code=c_clean, name=name, parent=None)
+            else:
+                if hasattr(self.ladder_monitor_win, 'code') and self.ladder_monitor_win.code != c_clean:
+                    self.ladder_monitor_win.code = c_clean
+                    self.ladder_monitor_win.name = name
+                    self.ladder_monitor_win.setWindowTitle(f"⚡ 频准激光（{c_clean} {name}）8/18 上市盯盘与分时阶梯交易独立系统")
+                    self.ladder_monitor_win._populate_code_combo()
+                    self.ladder_monitor_win._load_mock_or_live_data()
+
+            # 将当前最新的行情 DataFrame 传入独立窗口
+            if hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
+                self.ladder_monitor_win.on_realtime_df_update(self.current_df)
+
+            self.ladder_monitor_win.show()
+            self.ladder_monitor_win.raise_()
+            self.ladder_monitor_win.activateWindow()
         except Exception as e:
-            print(f"[ATSMainWindow] 调起新股分时策略面板异常: {e}")
+            print(f"[ATSMainWindow] 调起独立新股分时策略窗口异常: {e}")
 
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
@@ -3160,6 +3176,13 @@ class ATSMainWindow(QMainWindow):
 
         # Fast vectorized name cache update
         self._update_name_cache_from_df(self.current_df)
+
+        # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞)
+        if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None and self.ladder_monitor_win.isVisible():
+            try:
+                self.ladder_monitor_win.on_realtime_df_update(self.current_df)
+            except Exception:
+                pass
 
         # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
