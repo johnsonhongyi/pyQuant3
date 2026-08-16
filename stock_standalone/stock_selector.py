@@ -532,6 +532,18 @@ class StockSelector:
             code_str = str(row.get('code', idx)).zfill(6)
             data['code'] = code_str
 
+            # 权威名称解析与纠偏 (彻底根除 mock 占位名与突破股等标签混淆)
+            raw_name = str(data.get('name', '')).strip()
+            if not raw_name or any(ph in raw_name for ph in ['突破股', '走弱', '测试', '跟风', '个股_', '--']) or raw_name.isdigit():
+                try:
+                    from sys_utils import resolve_stock_name
+                    real_n = resolve_stock_name(code_str)
+                    if real_n and not real_n.isdigit() and '个股_' not in real_n:
+                        raw_name = real_n
+                except Exception:
+                    pass
+            data['name'] = raw_name
+
             price = float(data.get('price', data.get('trade', data.get('close', 0))))
             pct = float(data.get('per1d', data.get('percent', data.get('pct', data.get('change_pct', 0)))))
             ratio = float(data.get('ratio', data.get('volume_ratio', 0))) # 核心量比

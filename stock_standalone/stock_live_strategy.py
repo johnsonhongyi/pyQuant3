@@ -1138,10 +1138,25 @@ class StockLiveStrategy:
             if hasattr(self, 'df') and self.df is not None and not self.df.empty:
                 df_curr = self.df
 
+            from sys_utils import resolve_stock_name
             for key, stock in list(self._monitored_stocks.items()):
+                code_from_key = str(stock.get('code', key.split('_')[0])).zfill(6)
+                raw_name = str(stock.get('name', '')).strip()
+                
+                # 名称权威纠偏：纠正占位符、突破股、走弱等测试名或数字
+                if not raw_name or any(ph in raw_name for ph in ['突破股', '走弱', '测试', '跟风', '个股_', '--']) or raw_name.isdigit():
+                    try:
+                        real_n = resolve_stock_name(code_from_key)
+                        if real_n and not real_n.isdigit() and '个股_' not in real_n:
+                            raw_name = real_n
+                            stock['name'] = real_n
+                    except Exception:
+                        pass
+
+                old_snap = stock.get('snapshot', {})
                 # --- 构建基础数据 ---
                 record = {
-                    'name': stock.get('name'),
+                    'name': raw_name,
                     'rules': stock.get('rules', []),
                     'last_alert': stock.get('last_alert', 0),
                     'resample': stock.get('resample', 'd'), # 保存周期信息
@@ -1150,37 +1165,55 @@ class StockLiveStrategy:
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
                     'rule_type_tag': stock.get('rule_type_tag', ""),
-                    'grade': stock.get('grade', stock.get('snapshot', {}).get('grade', "")), # [NEW] 持久化等级
-                    'score': stock.get('score', stock.get('snapshot', {}).get('score', 0.0)) # [NEW] 持久化分值
+                    'grade': stock.get('grade', old_snap.get('grade', "")), # [NEW] 持久化等级
+                    'score': stock.get('score', old_snap.get('score', 0.0)) # [NEW] 持久化分值
                 }
 
-                # --- 可选：添加行情快照 (加固多线程防护与重复 Code 防护) ---
+                # --- 补齐并持久化完整的底层特征快照 ---
+                snap_dict = {
+                    'trade': float(old_snap.get('trade', stock.get('create_price', 0.0))),
+                    'percent': float(old_snap.get('percent', 0.0)),
+                    'volume': float(old_snap.get('volume', 0.0)),
+                    'ratio': float(old_snap.get('ratio', old_snap.get('volume_ratio', 0.0))),
+                    'nclose': float(old_snap.get('nclose', 0.0)),
+                    'last_close': float(old_snap.get('last_close', old_snap.get('lastp1d', 0.0))),
+                    'ma5d': float(old_snap.get('ma5d', 0.0)),
+                    'ma10d': float(old_snap.get('ma10d', 0.0)),
+                    'pop_streak': int(old_snap.get('pop_streak', stock.get('pop_streak', 0))),
+                    'pop_platforms': int(old_snap.get('pop_platforms', stock.get('pop_platforms', 0))),
+                    'pop_score': float(old_snap.get('pop_score', stock.get('pop_score', 0.0))),
+                    'pop_details': str(old_snap.get('pop_details', stock.get('pop_details', ''))),
+                    'status': str(old_snap.get('status', stock.get('status', ''))),
+                    'reason': str(old_snap.get('reason', stock.get('reason', ''))),
+                    'category': str(old_snap.get('category', stock.get('category', ''))),
+                    'grade': str(old_snap.get('grade', stock.get('grade', ''))),
+                    'score': float(old_snap.get('score', stock.get('score', 0.0))),
+                    'amount': float(old_snap.get('amount', 0.0)),
+                    'tqi': float(old_snap.get('tqi', 0.0))
+                }
+
+                # 实时数据覆盖即时行情字段
                 if df_curr is not None and not df_curr.empty:
-                    code = stock.get('code', key.split('_')[0])
                     try:
-                        if code in df_curr.index:
-                            row = df_curr.loc[code]
-                            # 如果存在重复索引，loc[code] 会返回 DataFrame
+                        if code_from_key in df_curr.index:
+                            row = df_curr.loc[code_from_key]
                             if isinstance(row, pd.DataFrame):
-                                if not row.empty:
-                                    row = row.iloc[0]
-                                else:
-                                    row = None
+                                if not row.empty: row = row.iloc[0]
+                                else: row = None
                             if row is not None:
-                                record['snapshot'] = {
-                                    'trade': float(row.get('trade', 0)),
-                                    'percent': float(row.get('percent', 0)),
-                                    'volume': float(row.get('volume', 0)),
-                                    'ratio': float(row.get('ratio', 0)),
-                                    'nclose': float(row.get('nclose', 0)),
-                                    'last_close': float(row.get('lastp1d', 0)),
-                                    'ma5d': float(row.get('ma5d', 0)),
-                                    'ma10d': float(row.get('ma10d', 0))
-                                }
+                                snap_dict.update({
+                                    'trade': float(row.get('trade', row.get('price', snap_dict['trade']))),
+                                    'percent': float(row.get('percent', row.get('change_pct', snap_dict['percent']))),
+                                    'volume': float(row.get('volume', row.get('vol', snap_dict['volume']))),
+                                    'ratio': float(row.get('ratio', row.get('volume_ratio', snap_dict['ratio']))),
+                                    'last_close': float(row.get('lastp1d', snap_dict['last_close'])),
+                                    'ma5d': float(row.get('ma5d', snap_dict['ma5d'])),
+                                    'ma10d': float(row.get('ma10d', snap_dict['ma10d']))
+                                })
                     except Exception:
-                        # 捕获包含 IndexError / KeyError / ValueError 在内的所有快照提取异常，绝对不中断保存流程
                         pass
 
+                record['snapshot'] = snap_dict
                 data[key] = record
 
             # --- 保存到 JSON (使用临时文件 + 原子替换，防止并发覆盖毁损文件) ---
@@ -5099,7 +5132,15 @@ class StockLiveStrategy:
                 # 2. 全量遍历新标的入池
                 for _, row in final_pool_df.iterrows():
                     code = str(row['code']).zfill(6)
-                    name = str(row.get('name', ''))
+                    name = str(row.get('name', '')).strip()
+                    if not name or any(ph in name for ph in ['突破股', '走弱', '测试', '跟风', '个股_', '--']) or name.isdigit():
+                        try:
+                            from sys_utils import resolve_stock_name
+                            real_n = resolve_stock_name(code)
+                            if real_n and not real_n.isdigit() and '个股_' not in real_n:
+                                name = real_n
+                        except Exception:
+                            pass
                     current_price = float(row.get('price', row.get('trade', 0)))
                     
                     if code in self._monitored_stocks:
