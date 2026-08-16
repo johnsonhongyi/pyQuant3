@@ -394,6 +394,21 @@ class StockSelector:
         if df.empty:
             return df
             
+        # --- 0. 智能对齐补齐全量多日历史宽表数据 (确保 lasth1d...lasth10d 多日高点序列完整) ---
+        if 'lasth2d' not in df.columns:
+            try:
+                base_full = self.load_data()
+                if not base_full.empty and ('lasth2d' in base_full.columns or 'lasth1d' in base_full.columns):
+                    hist_cols = [c for c in base_full.columns if c.startswith('lasth') or c.startswith('lastp') or c.startswith('lastl') or c.startswith('upper') or c.startswith('ma')]
+                    hist_cols = [c for c in hist_cols if c not in df.columns]
+                    if hist_cols:
+                        merge_key = 'code' if 'code' in base_full.columns else None
+                        if merge_key and merge_key in df.columns:
+                            df = pd.merge(df, base_full[[merge_key] + hist_cols], on=merge_key, how='left')
+                            df.set_index(merge_key, inplace=True, drop=False)
+            except Exception as e:
+                self.logger.debug(f"补齐历史多日宽表列失败 (使用既有数据): {e}")
+
         # 0. 预计算趋势质量指标 (分级基础)
         df = self._calc_trend_quality(df)
 
@@ -567,6 +582,15 @@ class StockSelector:
                 reason.append(f"{echelon_info['role']}({echelon_info['theme']})")
 
             # --- B. 趋势与结构分析 ---
+            amount = float(data.get('amount', 0))
+            is_broken = False
+            is_squeeze_breakout = False
+            is_pullback = False
+            ma5 = 0.0
+            ma10 = 0.0
+            ma20 = 0.0
+            ma60 = 0.0
+            
             try:
                 ma5 = float(data.get('ma5d', 0))
                 ma10 = float(data.get('ma10d', 0))
@@ -576,10 +600,11 @@ class StockSelector:
                 high_p = float(data.get('high', 0))
                 low_p = float(data.get('low', 0))
                 open_p = float(data.get('open', 0))
+                last_h1d = float(data.get('lasth1d', data.get('lastp1d', 0)))
+                last_h2d = float(data.get('lasth2d', 0))
                 amplitude = (high_p - low_p) / lastp1d * 100 if lastp1d > 0 else 0
                 
                 # 破位检测
-                is_broken = False
                 if ma20 > 0 and price < ma20 * 0.985:
                     is_broken = True
                 if ma60 > 0 and price < ma60 * 0.98:
@@ -605,7 +630,6 @@ class StockSelector:
                 lower1d = float(data.get('lower1', data.get('ch_lower', 0)))
                 mid1d = float(data.get('mid1', data.get('ch_mid', (upper1d + lower1d)/2 if upper1d > 0 and lower1d > 0 else 0)))
                 
-                is_squeeze_breakout = False
                 if upper1d > 0 and mid1d > 0 and lower1d > 0:
                     band_width = (upper1d - lower1d) / mid1d
                     # 通道宽度处于挤压期 (< 12%) 且今日大阳突破上轨
@@ -617,15 +641,44 @@ class StockSelector:
                         score += 25
                         reason.append("突破通道上轨")
 
-                # 3. 突破前高判断
-                last_h1d = float(data.get('lasth1d', data.get('lastp1d', 0)))
-                last_h2d = float(data.get('lasth2d', 0))
-                if last_h1d > 0 and price > last_h1d * 1.01:
+                # 3. 突破结构判断 (前高突破 / 阶段箱体强突破 / 平台新高)
+                high_list = [float(data.get(f'lasth{i}d', 0)) for i in range(1, 10)]
+                valid_highs = [h for h in high_list if h > 0]
+                if valid_highs:
+                    max_hist_high = max(valid_highs)
+                    if price > max_hist_high * 1.002:
+                        score += 55
+                        reason.append(f"【突破近{len(valid_highs)}日平台新高】")
+                    elif last_h1d > 0 and price > last_h1d * 1.01:
+                        score += 25
+                        reason.append("突破昨日高点")
+                    elif last_h2d > 0 and price > last_h2d:
+                        score += 15
+                        reason.append("突破前两日高点")
+                elif last_h1d > 0 and price > last_h1d * 1.01:
                     score += 25
                     reason.append("突破昨日高点")
-                elif last_h2d > 0 and price > last_h2d:
-                    score += 15
-                    reason.append("突破前两日高点")
+                
+                # 3.1 冲高回落长上影线诱多严厉惩罚 (Trap Detection)
+                if high_p > 0 and price > 0 and lastp1d > 0:
+                    upper_shadow = (high_p - price) / lastp1d * 100
+                    if upper_shadow >= 3.5 and pct < 4.0:
+                        score -= 50
+                        reason.append("冲高回落(诱多风险)")
+                
+                # 3.2 换手率与量价合力确认
+                turnover = float(data.get('turnover', data.get('turnover_rate', data.get('couts', 0))))
+                if 4.0 <= turnover <= 28.0 and pct >= 3.0 and (ratio >= 1.5 or vol_ratio_l6 >= 1.5):
+                    score += 30
+                    reason.append("【放量强换手合力】")
+                elif turnover > 35.0 and pct < 2.0:
+                    score -= 30
+                    reason.append("高位滞涨巨换手")
+                
+                # 3.3 压制底部无量无题材的弱势诱多杂毛
+                if pct < 2.5 and ratio < 1.0 and echelon_info is None and not is_squeeze_breakout:
+                    score -= 35
+                    reason.append("弱势缺乏动能")
 
                 # 4. 动能与连涨 (连板/主升空间龙头判定)
                 limit_days = getattr(cct, 'compute_lastdays', 5)
@@ -736,8 +789,9 @@ class StockSelector:
             status_tag = "蓄势"
             grade = "C"
             
-            # 直通特权判定：空间龙头、主线先锋、通道挤压爆量突破、竞价抢跑、全网共振人气龙
-            is_vip_launch = (echelon_info is not None) or is_squeeze_breakout or ("空间龙头" in "|".join(reason)) or ("竞价抢跑" in "|".join(reason)) or (is_pop_leader and pct >= 3.5)
+            # 直通特权判定：空间龙头、主线先锋、通道挤压爆量突破、竞价抢跑、平台新高强突破、全网共振人气龙
+            is_platform_breakout = any("平台新高" in r for r in reason)
+            is_vip_launch = (echelon_info is not None) or is_squeeze_breakout or is_platform_breakout or ("空间龙头" in "|".join(reason)) or ("竞价抢跑" in "|".join(reason)) or (is_pop_leader and pct >= 3.5)
             
             if score >= 120 or is_vip_launch:
                 grade = "S"
@@ -749,6 +803,8 @@ class StockSelector:
                     status_tag = "【空间龙头】"
                 elif is_squeeze_breakout:
                     status_tag = "通道爆量突破"
+                elif is_platform_breakout:
+                    status_tag = "【平台新高突破】"
                 else:
                     status_tag = "主升加速"
             elif score >= 85:
