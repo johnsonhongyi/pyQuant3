@@ -630,15 +630,20 @@ class IntegratedTradingStrategyPanel(QWidget):
         sb_quick.setValue(old_quick_pos)
         self._is_updating = False
 
-        # 7. SBC 实盘走势与基准线 (带文本脏检查与滚动条位置保护)
+        # 7. SBC 实盘走势与基准线 (100% 策略与标的自适应)
+        strat_name = strategy.get("name", "分时阶梯策略") if strategy else "分时阶梯策略"
+        spec = self.engine.get_stock_ladder_spec(code)
+        issue_p = float(spec.get("issue_price", open_price * 0.5 if open_price > 0 else 100.0))
+        float_mv_yi = float(spec.get("float_mv_yi", 14.24))
+
         max_p = state.get("max_price", price)
         min_p = state.get("min_price", price)
+
         sbc_text = (
-            f"=== 📊 SBC 实盘分时走势与关键阶梯基准线 ===\n"
-            f"【标的代码】: {code} ({resolve_stock_name(code)})\n"
-            f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定)\n"
+            f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
+            f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定 | 发行价: {issue_p:.2f}元)\n"
             f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
-            f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元\n"
+            f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
             f"【冲高卖出目标 (+10%)】: {open_price*1.10:.2f} 元 (价格笼子限价卖出 50%)\n"
             f"【临停触发目标 (+30%)】: {open_price*1.30:.2f} 元 (复牌前挂单 1.28x={open_price*1.28:.2f} 卖出 30%)\n"
             f"【移动止盈清仓 (-10%)】: {max_p*0.90:.2f} 元 (高点回撤 10% 触发)\n"
@@ -739,26 +744,26 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        # 1. 顶部 Header 控制栏 第一行：标的与策略选择、置顶、数据源
+        # 1. 顶部 Header 控制栏 第一行：以策略为主导驱动标的与价格联动
         hdr_layout = QHBoxLayout()
-        self.title_lbl = QLabel(f"📈 频准激光（{self.code} {self.name}）8/18 上市分时阶梯交易与动态评估工作台")
-        self.title_lbl.setStyleSheet("font-size: 11.5pt; font-weight: bold; color: #38bdf8;")
-
-        lbl_select = QLabel("🎯 标的:")
-        lbl_select.setStyleSheet("font-weight: bold; color: #aad4ff;")
-
-        self.combo_code = QComboBox()
-        self.combo_code.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #00ff88; border: 1px solid #38bdf8; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 200px; }")
-        self._populate_code_combo()
-        self.combo_code.currentIndexChanged.connect(self._on_combo_code_changed)
+        self.title_lbl = QLabel(f"📈 【{self.code} {self.name}】分时阶梯交易与时序评估工作台")
+        self.title_lbl.setStyleSheet("font-size: 11pt; font-weight: bold; color: #38bdf8;")
 
         lbl_strat = QLabel("📋 策略:")
-        lbl_strat.setStyleSheet("font-weight: bold; color: #aad4ff;")
+        lbl_strat.setStyleSheet("font-weight: bold; color: #ffaa44;")
 
         self.combo_strategy = QComboBox()
-        self.combo_strategy.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 200px; }")
+        self.combo_strategy.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #ffaa44; border: 1px solid #ffaa44; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 220px; }")
         self._populate_strategy_combo()
         self.combo_strategy.currentIndexChanged.connect(self._on_combo_strategy_changed)
+
+        lbl_select = QLabel("🎯 标的:")
+        lbl_select.setStyleSheet("font-weight: bold; color: #00ff88;")
+
+        self.combo_code = QComboBox()
+        self.combo_code.setStyleSheet("QComboBox { background-color: #1e1e2d; color: #00ff88; border: 1px solid #00ff88; border-radius: 4px; padding: 2px 6px; font-weight: bold; min-width: 140px; }")
+        self._populate_code_combo()
+        self.combo_code.currentIndexChanged.connect(self._on_combo_code_changed)
 
         lbl_src = QLabel("📡 数据源:")
         lbl_src.setStyleSheet("font-weight: bold; color: #aad4ff;")
@@ -797,10 +802,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         hdr_layout.addWidget(self.title_lbl)
         hdr_layout.addStretch()
-        hdr_layout.addWidget(lbl_select)
-        hdr_layout.addWidget(self.combo_code)
         hdr_layout.addWidget(lbl_strat)
         hdr_layout.addWidget(self.combo_strategy)
+        hdr_layout.addWidget(lbl_select)
+        hdr_layout.addWidget(self.combo_code)
         hdr_layout.addWidget(lbl_src)
         hdr_layout.addWidget(self.combo_source)
         hdr_layout.addWidget(self.lbl_tdx_status)
@@ -963,28 +968,50 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             if self.selected_data_source == "ATS_IPC":
                 self._load_mock_or_live_data()
 
+    def _populate_strategy_combo(self):
+        self.combo_strategy.blockSignals(True)
+        self.combo_strategy.clear()
+
+        for st in self.engine.strategies:
+            st_id = st.get("id", "")
+            st_name = st.get("name", st_id)
+            self.combo_strategy.addItem(f"📋 {st_name}", st_id)
+
+        target_id = self.selected_strategy_id
+        if not target_id and self.engine.strategies:
+            # 优先匹配当前标的归属的策略，若无则默认第一套
+            auto_st = self.engine.auto_select_strategy(0.0, code=self.code)
+            target_id = auto_st.get("id") if auto_st else self.engine.strategies[0].get("id")
+            self.selected_strategy_id = target_id
+
+        for idx in range(self.combo_strategy.count()):
+            if self.combo_strategy.itemData(idx) == target_id:
+                self.combo_strategy.setCurrentIndex(idx)
+                break
+        self.combo_strategy.blockSignals(False)
+
     def _populate_code_combo(self):
         self.combo_code.blockSignals(True)
         self.combo_code.clear()
 
-        all_target_codes = self.engine.get_all_target_codes()
-        parent = self.parent()
+        # 获取当前选定策略所绑定的目标标的代码
+        curr_strat = self.engine.get_strategy_by_id(self.selected_strategy_id) if self.selected_strategy_id else None
+        if curr_strat and curr_strat.get("target_codes"):
+            strat_codes = [str(c).zfill(6) for c in curr_strat.get("target_codes", [])]
+        else:
+            strat_codes = self.engine.get_all_target_codes()
 
-        code_list = list(all_target_codes)
-        if self.code and self.code not in code_list:
-            code_list.insert(0, self.code)
+        if self.code and self.code not in strat_codes:
+            strat_codes.insert(0, self.code)
 
-        for c in code_list:
-            st = self.engine.auto_select_strategy(0.0, code=c)
-            st_name = st.get("name", "默认策略")
-            c_name = self.name if c == self.code else resolve_stock_name(c)
+        for c in strat_codes:
+            c_name = resolve_stock_name(c)
+            parent = self.parent()
             if parent and hasattr(parent, 'get_stock_name'):
                 p_name = parent.get_stock_name(c)
                 if p_name and p_name != "未知" and p_name != c:
                     c_name = p_name
-
-            item_text = f"{c} {c_name} [{st_name}]"
-            self.combo_code.addItem(item_text, c)
+            self.combo_code.addItem(f"{c} {c_name}", c)
 
         for idx in range(self.combo_code.count()):
             if self.combo_code.itemData(idx) == self.code:
@@ -992,46 +1019,65 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 break
         self.combo_code.blockSignals(False)
 
-    def _populate_strategy_combo(self):
-        self.combo_strategy.blockSignals(True)
-        self.combo_strategy.clear()
-
-        self.combo_strategy.addItem("⚡ 【自动匹配】按开盘价/TargetCode", "auto")
-        for st in self.engine.strategies:
-            st_id = st.get("id", "")
-            st_name = st.get("name", st_id)
-            self.combo_strategy.addItem(f"📋 {st_name}", st_id)
-
-        target_id = self.selected_strategy_id or "auto"
-        for idx in range(self.combo_strategy.count()):
-            if self.combo_strategy.itemData(idx) == target_id:
-                self.combo_strategy.setCurrentIndex(idx)
-                break
-        self.combo_strategy.blockSignals(False)
-
     def _on_combo_strategy_changed(self, index: int):
         selected_strat_id = self.combo_strategy.itemData(index)
-        if selected_strat_id == "auto":
-            self.selected_strategy_id = None
-        else:
-            self.selected_strategy_id = selected_strat_id
+        self.selected_strategy_id = selected_strat_id
+        strategy = self.engine.get_strategy_by_id(selected_strat_id)
+        if strategy:
+            t_codes = strategy.get("target_codes", [])
+            target_c = t_codes[0] if t_codes else strategy.get("target_code", "688826")
+            if target_c:
+                self.code = str(target_c).zfill(6)
+                self.name = resolve_stock_name(self.code)
+
+                # 刷新并同步标的下拉框
+                self._populate_code_combo()
+
+                # 重置估价输入框为该策略预设基准价格
+                if self.code == "688826":
+                    self.spin_eval_open.blockSignals(True)
+                    self.spin_eval_price.blockSignals(True)
+                    self.spin_eval_turnover.blockSignals(True)
+                    self.spin_eval_open.setValue(565.0)
+                    self.spin_eval_price.setValue(625.0)
+                    self.spin_eval_turnover.setValue(62.5)
+                    self.spin_eval_open.blockSignals(False)
+                    self.spin_eval_price.blockSignals(False)
+                    self.spin_eval_turnover.blockSignals(False)
+
         self._load_mock_or_live_data()
 
     def _on_combo_code_changed(self, index: int):
         selected_code = self.combo_code.itemData(index)
         if selected_code and selected_code != self.code:
-            self.code = selected_code
+            self.code = str(selected_code).zfill(6)
             parent = self.parent()
             if parent and hasattr(parent, 'get_stock_name'):
                 self.name = parent.get_stock_name(self.code)
             else:
                 self.name = resolve_stock_name(self.code)
 
-            self.setWindowTitle(f"⚡ 频准激光（{self.code} {self.name}）8/18 上市盯盘与分时阶梯交易独立系统")
-            auto_st = self.engine.auto_select_strategy(self.open_price if hasattr(self, 'open_price') else 0.0, code=self.code)
+            # 自动联动切换到该标的对应的策略
+            auto_st = self.engine.auto_select_strategy(0.0, code=self.code)
             if auto_st:
                 self.selected_strategy_id = auto_st.get("id")
-                self._populate_strategy_combo()
+                self.combo_strategy.blockSignals(True)
+                for idx in range(self.combo_strategy.count()):
+                    if self.combo_strategy.itemData(idx) == self.selected_strategy_id:
+                        self.combo_strategy.setCurrentIndex(idx)
+                        break
+                self.combo_strategy.blockSignals(False)
+
+            if self.code == "688826":
+                self.spin_eval_open.blockSignals(True)
+                self.spin_eval_price.blockSignals(True)
+                self.spin_eval_turnover.blockSignals(True)
+                self.spin_eval_open.setValue(565.0)
+                self.spin_eval_price.setValue(625.0)
+                self.spin_eval_turnover.setValue(62.5)
+                self.spin_eval_open.blockSignals(False)
+                self.spin_eval_price.blockSignals(False)
+                self.spin_eval_turnover.blockSignals(False)
 
             self._load_mock_or_live_data()
 
@@ -1226,7 +1272,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.name = real_name
         self.open_price = open_price
 
-        self.title_lbl.setText(f"📈 频准激光（{self.code} {self.name}）8/18 上市分时阶梯交易与动态评估工作台")
+        self.title_lbl.setText(f"📈 【{self.code} {self.name}】分时阶梯交易与时序评估工作台")
+        self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
 
         now_time_str = datetime.now().strftime("%H:%M:%S")
 
@@ -1545,11 +1592,13 @@ class PinzhunLaserMonitorWidget(QWidget):
             amount=amount
         )
 
+        spec = self.engine.get_stock_ladder_spec(code)
+        float_mv = float(spec.get("float_mv_yi", 14.24))
         intensity_val = res.get("intensity_ratio", 0.0)
         int_str = f"{intensity_val:.2f}x"
         int_color = "#00ff88" if intensity_val >= 2.5 else "#38bdf8"
         self.lbl_intensity.setText(
-            f"<b>资金强度</b>: 成交额/流通市值(14.24亿) > 2.5x 为极强 [当前: <font color='{int_color}'>{int_str}</font>]"
+            f"<b>资金强度</b>: 成交额/流通市值({float_mv:.1f}亿) > 2.5x 为极强 [当前: <font color='{int_color}'>{int_str}</font>]"
         )
 
         node_results = res.get("node_results", [])

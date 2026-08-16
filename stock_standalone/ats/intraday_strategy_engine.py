@@ -461,16 +461,20 @@ class IntradayStrategyEngine:
             input_unit = "元"
 
             if idx == 0: # 9:25 集合竞价 (校准开盘价)
-                cur_op = float(custom_params.get(n_id, open_price if open_price > 0 else 565.0))
+                default_op = open_price if open_price > 0 else (issue_p * 3.0 if issue_p > 0 else 565.0)
+                cur_op = float(custom_params.get(n_id, default_op))
                 input_val = cur_op
                 input_unit = "元"
                 open_gain_issue = ((cur_op - issue_p) / issue_p * 100.0) if (issue_p > 0 and cur_op > 0) else 0.0
                 observed_val = f"开盘:{cur_op:.2f}元 (较发行价{open_gain_issue:+.1f}%)"
-                if cur_op >= 560.64: # +200% 强势基准
+
+                strong_ref = issue_p * 3.0 # +200%
+                double_ref = issue_p * 2.0 # +100%
+                if cur_op >= strong_ref: # >= +200% 强势基准
                     judgment = "强"
                     auto_score = 9.0
-                    remarks = "高开>=+200%超预期，做多意愿极强"
-                elif cur_op >= 373.76: # +100% 翻倍
+                    remarks = f"高开>={open_gain_issue:+.0f}%超预期，做多意愿极强"
+                elif cur_op >= double_ref: # >= +100% 翻倍
                     judgment = "中"
                     auto_score = 7.0
                     remarks = "开盘落在+100%~+200%中性区间，量价正常"
@@ -480,7 +484,8 @@ class IntradayStrategyEngine:
                     remarks = "开盘低于翻倍线，关注度略显不足"
 
             elif idx == 1: # 9:40 早盘第一波攻击 (校准 9:40 现价)
-                cur_p1 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                default_p1 = price if price > 0 else (open_price * 1.10 if open_price > 0 else 625.0)
+                cur_p1 = float(custom_params.get(n_id, default_p1))
                 input_val = cur_p1
                 input_unit = "元"
                 cur_gain_open = ((cur_p1 - open_price) / open_price * 100.0) if open_price > 0 else 0.0
@@ -517,7 +522,8 @@ class IntradayStrategyEngine:
                     remarks = "换手偏低或放量滞涨，警惕承接衰竭"
 
             elif idx == 3: # 11:00 分歧承接测试 (校准 11:00 价格)
-                cur_p3 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                default_p3 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                cur_p3 = float(custom_params.get(n_id, default_p3))
                 input_val = cur_p3
                 input_unit = "元"
                 vwap_diff = ((cur_p3 - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
@@ -536,7 +542,8 @@ class IntradayStrategyEngine:
                     remarks = "跌破分时均线且反抽无力，重心下移"
 
             elif idx == 4: # 14:00 午后突破验证 (校准 14:00 价格)
-                cur_p4 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                default_p4 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                cur_p4 = float(custom_params.get(n_id, default_p4))
                 input_val = cur_p4
                 input_unit = "元"
                 observed_val = f"现价:{cur_p4:.2f}元 / 上午最高:{high_am:.2f}元"
@@ -554,7 +561,8 @@ class IntradayStrategyEngine:
                     remarks = "午后持续走弱回落，板块分化"
 
             elif idx == 5: # 14:50 尾盘抢筹强度 (校准 14:50 价格)
-                cur_p5 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                default_p5 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                cur_p5 = float(custom_params.get(n_id, default_p5))
                 input_val = cur_p5
                 input_unit = "元"
                 cur_ch_ratio = (cur_p5 / max_p) if max_p > 0 else 1.0
@@ -573,7 +581,8 @@ class IntradayStrategyEngine:
                     remarks = "尾盘放量跳水抛售，走弱明显"
 
             elif idx == 6: # 15:00 收盘结构与锁仓 (校准收盘价)
-                cur_p6 = float(custom_params.get(n_id, price if price > 0 else 625.0))
+                default_p6 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                cur_p6 = float(custom_params.get(n_id, default_p6))
                 input_val = cur_p6
                 input_unit = "元"
                 cur_ch_ratio = (cur_p6 / max_p) if max_p > 0 else 1.0
@@ -627,23 +636,42 @@ class IntradayStrategyEngine:
 
         total_score_rounded = round(total_weighted_score, 2)
 
-        # 3. 形态判定与 T+1 操作建议 (根据综合得分)
-        if total_score_rounded >= 8.0:
-            pattern = "A型·超强趋势"
-            t1_advice = "★关注竞价接力，强势可参与"
-            pattern_color = "#00ff88"
-        elif total_score_rounded >= 6.5:
-            pattern = "B型·强势换手"
-            t1_advice = "★观察次日竞价，回踩不破可试"
-            pattern_color = "#38bdf8"
-        elif total_score_rounded >= 5.0:
-            pattern = "C型·冲高兑现"
-            t1_advice = "★谨慎，等二次确认"
-            pattern_color = "#ffaa44"
+        # 3. 动态根据策略中的 grade_levels 判定形态与 T+1 操作建议
+        pattern = "未知形态"
+        t1_advice = "--"
+        pattern_color = "#ffffff"
+
+        grade_levels = spec.get("scoring_rules", {}).get("grade_levels", [])
+        if not grade_levels:
+            st = self.auto_select_strategy(open_price, code=c_clean)
+            if st and "scoring_rules" in st:
+                grade_levels = st["scoring_rules"].get("grade_levels", [])
+
+        if grade_levels:
+            for gl in grade_levels:
+                min_s = float(gl.get("min_score", 0.0))
+                if total_score_rounded >= min_s:
+                    pattern = gl.get("pattern", "未知形态")
+                    t1_advice = gl.get("advice", "--")
+                    pattern_color = gl.get("color", "#ffffff")
+                    break
         else:
-            pattern = "D/E型·弱势或衰竭"
-            t1_advice = "★回避，防回撤"
-            pattern_color = "#ff4444"
+            if total_score_rounded >= 8.0:
+                pattern = "A型·超强趋势"
+                t1_advice = "★关注竞价接力，强势可参与"
+                pattern_color = "#00ff88"
+            elif total_score_rounded >= 6.5:
+                pattern = "B型·强势换手"
+                t1_advice = "★观察次日竞价，回踩不破可试"
+                pattern_color = "#38bdf8"
+            elif total_score_rounded >= 5.0:
+                pattern = "C型·冲高兑现"
+                t1_advice = "★谨慎，等二次确认"
+                pattern_color = "#ffaa44"
+            else:
+                pattern = "D/E型·弱势或衰竭"
+                t1_advice = "★回避，防回撤"
+                pattern_color = "#ff4444"
 
         # 4. 当前阶段自动解析与实操指引 (Action Guidance Engine)
         if not current_node_info and nodes_def:
