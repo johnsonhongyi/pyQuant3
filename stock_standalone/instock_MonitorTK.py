@@ -5965,6 +5965,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             except Exception as ex:
                                 logger.error(f"[Bus] Failed to attach dynamic twap: {ex}")
 
+                        # 📡 从实时 df 中批量提取新股名称注入缓存（防抖：60s 一次）
+                        _last_name_bulk = getattr(self, '_last_name_bulk_ts', 0)
+                        if time.time() - _last_name_bulk > 60:
+                            try:
+                                import sys_utils
+                                sys_utils.bulk_update_name_cache_from_df(full_df)
+                                self._last_name_bulk_ts = time.time()
+                            except Exception:
+                                pass
+
                         self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
                         self._last_snapshot_recv_time = time.time()  # 🌟 成功收到并发布快照，更新时间戳
                         # logger.debug("📡 [Bus] Published latest snapshot with resampled track.")

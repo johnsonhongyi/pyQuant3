@@ -1629,6 +1629,8 @@ if __name__ == '__main__':
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
     log.setLevel(LoggerFactory.INFO)
     df = get_market_price_sina_dd_realTime(dp='', vol='1', type='0')
+    print(df.loc['301717'])
+    print(df.loc['688797'])
     import ipdb;ipdb.set_trace()
 
     # df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
