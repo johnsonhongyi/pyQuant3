@@ -81,11 +81,10 @@ class TDXFetchLogDialog(QDialog):
         self._init_ui()
         self._refresh_logs()
 
-        # 1 秒定时自动刷新日志
+        # 定时刷新器 (默认不开启，由用户勾选控制)
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self._refresh_logs)
-        self.timer.start()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -112,6 +111,12 @@ class TDXFetchLogDialog(QDialog):
 
         info_lay.addStretch()
 
+        self.chk_auto_refresh = QCheckBox("自动刷新 (1s)")
+        self.chk_auto_refresh.setChecked(False) # 默认关闭自动刷新
+        self.chk_auto_refresh.setStyleSheet("color: #ffd700; font-size: 8.5pt; font-weight: bold;")
+        self.chk_auto_refresh.toggled.connect(self._toggle_auto_refresh)
+        info_lay.addWidget(self.chk_auto_refresh)
+
         self.chk_auto_scroll = QCheckBox("自动滚动到底部")
         self.chk_auto_scroll.setChecked(True)
         self.chk_auto_scroll.setStyleSheet("color: #aad4ff; font-size: 8.5pt;")
@@ -127,16 +132,37 @@ class TDXFetchLogDialog(QDialog):
         # 底部操作栏
         btn_lay = QHBoxLayout()
         self.btn_refresh = QPushButton("🔄 立即刷新")
-        self.btn_refresh.setStyleSheet("background-color: #1a2233; color: #00ffaa; border: 1px solid #00ffaa; border-radius: 3px; padding: 4px 10px; font-weight: bold;")
-        self.btn_refresh.clicked.connect(self._refresh_logs)
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.setStyleSheet("""
+            QPushButton { 
+                background-color: #1a2e22; 
+                color: #00ffaa; 
+                border: 1px solid #00ffaa; 
+                border-radius: 3px; 
+                padding: 4px 14px; 
+                font-weight: bold; 
+                font-size: 9pt;
+            }
+            QPushButton:hover { 
+                background-color: #00ffaa; 
+                color: #000000; 
+            }
+            QPushButton:pressed {
+                background-color: #00aa77;
+                color: #ffffff;
+            }
+        """)
+        self.btn_refresh.clicked.connect(self._on_click_refresh)
         btn_lay.addWidget(self.btn_refresh)
 
         self.btn_copy = QPushButton("📋 复制全部")
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setStyleSheet("background-color: #202436; color: #ffffff; border: 1px solid #445577; border-radius: 3px; padding: 4px 10px;")
         self.btn_copy.clicked.connect(self._copy_logs)
         btn_lay.addWidget(self.btn_copy)
 
         self.btn_clear = QPushButton("🗑️ 清空日志")
+        self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear.setStyleSheet("background-color: #332020; color: #ff8888; border: 1px solid #663333; border-radius: 3px; padding: 4px 10px;")
         self.btn_clear.clicked.connect(self._clear_logs)
         btn_lay.addWidget(self.btn_clear)
@@ -144,11 +170,22 @@ class TDXFetchLogDialog(QDialog):
         btn_lay.addStretch()
 
         self.btn_close = QPushButton("关闭")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close.setStyleSheet("background-color: #24283b; color: #ffffff; border: 1px solid #3e445f; border-radius: 3px; padding: 4px 14px;")
         self.btn_close.clicked.connect(self.close)
         btn_lay.addWidget(self.btn_close)
 
         layout.addLayout(btn_lay)
+
+    def _toggle_auto_refresh(self, checked: bool):
+        if checked:
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+    def _on_click_refresh(self):
+        """用户主动点击刷新按钮"""
+        self._refresh_logs()
 
     def _refresh_logs(self):
         from ats.tdx_realtime_fetcher import TDXRealtimeFetcher, is_trading_time
