@@ -991,19 +991,25 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                         QApplication.restoreOverrideCursor()
 
     def update_data(self, df_filtered):
+        if df_filtered is None:
+            return
+
         self.current_df = df_filtered
         self._is_updating = True
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
         try:
-            if df_filtered is None or df_filtered.empty:
+            if df_filtered.empty:
+                if self.table.rowCount() > 0:
+                    self.table.setRowCount(0)
                 return
                 
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
             fav_stocks = fav_mgr.get_favorite_stocks()
             
-            self.table.setRowCount(len(df_filtered))
+            if self.table.rowCount() != len(df_filtered):
+                self.table.setRowCount(len(df_filtered))
+
             for i, (code, row) in enumerate(df_filtered.iterrows()):
                 name = str(row.get('name', '--'))
                 pct = safe_float(row.get('percent', 0.0))

@@ -94,19 +94,27 @@ class FavoritePanel(QWidget):
             self.table.setRowHidden(row, not match)
 
     def update_favorite_rows(self, rows):
-        """更新重点关注看板表格
+        """更新重点关注看板表格 (双缓冲平滑覆盖，杜绝更新前清空导致的闪烁/清0)
         
         Args:
             rows: list of tuples (code, name, price, state, deviation, limit_ups, position,
                                   first_seen, priority, dff, rank, dff2, dff3, rs, resonance, reason)
         """
+        if rows is None:
+            return
+
         header = self.table.horizontalHeader()
         sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
         sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
 
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
         self.count_label.setText(f"共 {len(rows)} 只重点标的")
+
+        if not rows:
+            # 只有在明确传入空列表且当前表格确实需要清空时才清空，且无需逐行重建
+            if self.table.rowCount() > 0:
+                self.table.setRowCount(0)
+            return
 
         def _parse_num_val(row_item, col_idx):
             if col_idx >= len(row_item):
@@ -122,10 +130,13 @@ class FavoritePanel(QWidget):
                     pass
             return 0.0
 
-        rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
+        sorted_rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
 
-        for row_idx, row_data in enumerate(rows):
-            self.table.insertRow(row_idx)
+        # 调整总行数到新行数（不先清空到0，直接变更为目标长度）
+        if self.table.rowCount() != len(sorted_rows):
+            self.table.setRowCount(len(sorted_rows))
+
+        for row_idx, row_data in enumerate(sorted_rows):
             
             code = str(row_data[0])
             name = str(row_data[1])

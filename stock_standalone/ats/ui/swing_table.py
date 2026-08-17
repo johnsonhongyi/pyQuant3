@@ -196,17 +196,26 @@ class SwingStateTable(QWidget):
         self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
+        if data_list is None:
+            return
+
         self._is_mock_active = False
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
         
+        if not data_list:
+            if self.table.rowCount() > 0:
+                self.table.setRowCount(0)
+            return
+
         from global_favorites import GlobalFavoriteManager
         fav_mgr = GlobalFavoriteManager()
         fav_stocks = fav_mgr.get_favorite_stocks()
-        data_list = sorted(data_list, key=lambda x: (str(x[0]).strip() not in fav_stocks, str(x[0]).strip()))
+        sorted_list = sorted(data_list, key=lambda x: (str(x[0]).strip() not in fav_stocks, str(x[0]).strip()))
         
-        self.table.setRowCount(len(data_list))
-        for row_idx, row_data in enumerate(data_list):
+        if self.table.rowCount() != len(sorted_list):
+            self.table.setRowCount(len(sorted_list))
+
+        for row_idx, row_data in enumerate(sorted_list):
             code = str(row_data[0]).strip()
             is_fav = code in fav_stocks
             

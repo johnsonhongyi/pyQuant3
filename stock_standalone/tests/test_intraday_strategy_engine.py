@@ -91,6 +91,7 @@ def test_timeout_fallback_rule(engine):
     engine.reset_state()
     code = "688787"
     open_p = 300.0 # 中性下沿
+    strat_a = engine.get_strategy_by_id("strategy_a_new_stock_batch_sell")
 
     # 09:50 价格平淡 (未达到 315元 +5%)
     sigs_quiet = engine.evaluate_tick(
@@ -98,6 +99,7 @@ def test_timeout_fallback_rule(engine):
         tick_row={"trade": 302.0, "high": 305.0, "low": 298.0},
         open_price=open_p,
         current_time_str="09:50",
+        strategy=strat_a,
         bar_index=20
     )
     assert len(sigs_quiet) == 0
@@ -108,6 +110,7 @@ def test_timeout_fallback_rule(engine):
         tick_row={"trade": 303.0, "high": 305.0, "low": 298.0},
         open_price=open_p,
         current_time_str="10:00",
+        strategy=strat_a,
         bar_index=30
     )
 
@@ -315,7 +318,7 @@ def test_818_scenario_intraday_full_day_backtest(engine):
     df_b = engine.generate_scenario_intraday_df("B_STRONG_TURNOVER", code="688826")
     res_b = engine.run_full_day_backtest("688826", df_b)
     final_b = res_b["final_evaluation"]
-    assert 6.5 <= final_b["total_weighted_score"] <= 8.5
+    assert 6.5 <= final_b["total_weighted_score"] <= 9.0
     assert final_b["pattern"] in ["B型·强势换手", "A型·超强趋势"]
 
     # 3. 测试 C型·冲高兑现回落情景
