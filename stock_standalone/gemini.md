@@ -1,3 +1,30 @@
+## 2026-08-17 14:50
+- [x] **根治加速龙头磁吸展开失效与鼠标无响应 Bug，并在加速龙头与涨跌明细中全面适配 `ats_col` 自定义列与模块顶部导入规范 (`ats/ui/dragon_monitor.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `tests/test_monitor_persistence.py`)**：
+    - [x] **根治加速龙头磁吸属性被覆盖重置与鼠标/点击无反应 Bug**：
+        - 消除 `DragonLeaderMonitorDialog.__init__` 中将已恢复的 `normal_geometry`、`anchor_edge`、`is_hidden_state` 重置为 `None/False` 的代码覆写缺陷，将磁吸属性与定时器初始化提前至 `restore_state` 读取之前；
+        - 重构 `open_dragon_monitor`：在冷启动恢复（`cold_start=True`）时保持贴边细条，在用户点击唤起（`cold_start=False`）时强制触发 `show_normal_position` 进行滑动展开与置顶激活；优化 `show_normal_position` 确保在展开时即时同步将 `windowOpacity` 设为 `1.0`。
+    - [x] **在【🐉 加速龙头追踪器】与【📊 涨跌分布个股明细】中全面适配 `ats_col` 动态自定义列**：
+        - 抽象 `get_dragon_extra_cols()` / `get_dragon_table_headers()` 与 `get_distribution_extra_cols()` / `get_distribution_table_headers()`；
+        - 表格列头动态嵌入自定义列（如 `ch_bc2` 等），使用 `NumericTableWidgetItem` 居中对齐并支持表头数值点击排序；
+        - 行数据通过 `cct.format_col_value(ec, val_raw)` 智能格式化，严格遵循 `co2int` 规范输出整数（如 `3`，杜绝 `3.00`），缺失值安全兜底 `'--'`。
+    - [x] **模块顶部统一导入规范**：
+        - 遵循用户指令，将 `from JohnsonUtil import commonTips as cct` 统一置于各模块顶部全局导入，彻底清除函数与方法内的局部重复导入。
+    - [x] **单元测试 100% 通过**：扩充 `tests/test_monitor_persistence.py` 至 5 个全流程单元测试用例，覆盖状态保存、IPC 数据自动拉起、磁吸状态恢复与点击展开、以及 `ats_col` 动态自定义列渲染与整型格式化断言，全量测试 **100% PASSED**！
+
+## 2026-08-17 13:50
+- [x] **实现 ATS 磁吸监控窗口（加速龙头追踪器、各涨跌分布明细面板）退出自动持久化与启动 IPC 数据就绪自动加载打开 (`ats/ui/dragon_monitor.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `tests/test_monitor_persistence.py`)**：
+    - [x] **退出时磁吸与打开状态原子持久化保护**：
+        - **主窗口主动持久化**：在 `ATSMainWindow.closeEvent` 开始时，设置 `_is_closing = True` 与 `_is_exiting = True`，并在遍历关闭子窗口前，主动保存当前打开的磁吸窗口（`dragon_monitor_dialog`、`dist_chart._active_dialogs` 等）的 `is_open: True` 状态及几何位置。
+        - **子窗口生命周期防护**：在 `DragonLeaderMonitorDialog` 与 `DistributionDetailsDialog` 的 `closeEvent` / `hideEvent` 中检查主窗口退出状态（`_is_closing` / `_is_exiting`），若是系统退出流程或窗口处于贴边半隐藏状态（`is_hidden_state`），保持 `is_open=True`，彻底根治主程序关闭时子窗口被误写为 `is_open: False` 的缺陷。
+        - **打开状态即时写盘**：在 `show_normal_position`、`show()` 及 `showEvent` 唤醒时，自动记录 `_save_window_states(is_open=True)`。
+    - [x] **启动后在数据 IPC 获取完成后自动加载打开与数据同步**：
+        - 在 `ATSMainWindow._handle_realtime_data` 中，当 IPC 通道首次接收并同步全市场实时行情数据（`self.current_df` 就绪且非空）后，自动触发 `_restore_persistent_monitors_on_data_ready()`：
+            - 读取 `window_config.json` 中的 `"dragon_leader_monitor_dialog"`，若 `is_open: True` 则自动拉起【🐉 2D/3D 加速龙头追踪器】，应用磁吸贴边与几何参数，并立即传入 `current_df` 刷新数据；
+            - 读取所有的 `distribution_details_dialog_{idx}`（0~9 各涨跌区间及 999 公式过滤窗口），若 `is_open: True` 则自动拉起并过滤当前全市场数据即时填入表格中；
+            - 采用 `_monitors_auto_restored` 防重入标志，确保仅在首次行情数据到来时自动拉起，后续数据流仅进行增量广播更新。
+    - [x] **`StockDetailDialog` 规范化与定时器内存管理**：修复个股详情弹窗中定时器与磁吸初始化误置于 `hideEvent` 的缺陷，在 `__init__` 中正确初始化并在 `closeEvent` 中安全回收定时器。
+    - [x] **单元测试全量验证通过**：新建专项测试 `tests/test_monitor_persistence.py` 覆盖加速龙头状态保存、涨跌明细状态保存、IPC 数据到来自动拉起与数据填入断言，全量测试 **100% PASSED**！
+
 ## 2026-08-17 12:00
 - [x] **实现 ATS 主窗口（重点关注、大级别 MA20d 跟踪器、板块明细）动态列功能 (`ats_col`) 与全系统 `co2int` 智能整型格式化 (`JohnsonUtil/commonTips.py`, `global.ini`, `ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`, `popularity_resonance_gui.py`, `tests/test_ats_dynamic_col.py`)**：
     - [x] **`ats_col` 配置项全局注册与持久化**：在 `JohnsonUtil/commonTips.py` 中注册 `self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")`，并在 `global.ini` 与 `JohnsonUtil/global.ini` 的 `[general]` 节中注册并写回 `ats_col = ["ch_bc2"]`；确保 `co2int` 包含 `["ch_tc2", "ch_bc2", "ch_nod", "pdays", "pbreak", "obs_d"]`。

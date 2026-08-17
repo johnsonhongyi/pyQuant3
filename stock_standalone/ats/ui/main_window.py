@@ -155,7 +155,6 @@ class LedgerUpdateWorker(QThread):
 
             now_dt = datetime.datetime.now()
             try:
-                from JohnsonUtil import commonTips as cct
                 is_trade_day = cct.get_trade_date_status()
             except Exception:
                 is_trade_day = False
@@ -513,8 +512,31 @@ class StockDetailDialog(QDialog):
         self._init_ui(self.code, self.name, self.df_row, self.context_info)
         self.update_data(self.df_row)
 
-        # 4. 恢复物理位置与大小持久化
-        self._restore_geometry()
+        # 5. 磁吸与隐藏状态初始化
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
+        self._is_auto_popping = False
+        self._switching = False
+        
+        # 悬停与离开监控定时器
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+        
+        # 拖拽结束防抖定时器
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
 
     def _get_parent_mw(self):
         return getattr(self, '_py_parent', None) or self.parent()
@@ -585,6 +607,10 @@ class StockDetailDialog(QDialog):
 
     def closeEvent(self, event):
         """关闭时自动持久化窗口大小与位置"""
+        if self.hover_timer:
+            self.hover_timer.stop()
+        if self.snap_timer:
+            self.snap_timer.stop()
         self._save_geometry()
         super().closeEvent(event)
 
@@ -592,35 +618,6 @@ class StockDetailDialog(QDialog):
         """隐藏时自动持久化窗口大小与位置"""
         self._save_geometry()
         super().hideEvent(event)
-        
-        # 1. 自动删除属性以防非模态显示内存泄露
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
-        # 2. 磁吸与隐藏状态初始化
-        self.anchor_edge = None
-        self.is_hidden_state = False
-        self.normal_geometry = None
-        self.hover_ticks = 0
-        self.leave_ticks = 0
-        self._in_snap_action = False
-        self.anim_group = None
-        self._is_dragging = False
-        self._last_show_time = 0.0
-        self._has_hovered_since_show = False
-        self._is_auto_popping = False
-        self._switching = False
-        
-        # 悬停与离开监控定时器
-        self.hover_timer = QTimer(self)
-        self.hover_timer.setInterval(100)
-        self.hover_timer.timeout.connect(self._check_hover)
-        self.hover_timer.start()
-        
-        # 拖拽结束防抖定时器
-        self.snap_timer = QTimer(self)
-        self.snap_timer.setSingleShot(True)
-        self.snap_timer.setInterval(200)
-        self.snap_timer.timeout.connect(self._detect_and_snap)
 
     def update_batch_codes(self, new_batch_codes=None, current_code=None):
         """【关键机制】动态实时更新弹窗顶部的 [本轮强势信号] 下拉框列表，并 100% 自动高亮选中当前 code"""
@@ -3331,6 +3328,10 @@ class ATSMainWindow(QMainWindow):
             
             # ⚡ 30ms 防抖异步触发 UI 渲染 (极其流畅汇聚高频 IPC 广播数据包)
             self._trigger_realtime_ui_update()
+            
+            # 🚀 首次收到全量行情数据后，自动加载打开退出前持久化的磁吸/监控窗口 (加速龙头跟踪器、各涨跌明细面板等)
+            self._restore_persistent_monitors_on_data_ready()
+            
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
             import time
             self._last_recv_t = time.time()
@@ -3338,6 +3339,45 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, '_refresh_statusbar_time_display'):
                 self._refresh_statusbar_time_display()
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
+
+    def _restore_persistent_monitors_on_data_ready(self):
+        """
+        🚀 在数据 IPC 首次获取完成（self.current_df 就绪）后，自动加载打开退出前持久化的监控窗口：
+        1. 🐉 2D/3D 加速龙头追踪器 (DragonLeaderMonitorDialog)
+        2. 📊 涨跌分布个股明细面板 (DistributionDetailsDialog)
+        """
+        if getattr(self, '_monitors_auto_restored', False):
+            return
+        self._monitors_auto_restored = True
+        
+        try:
+            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+            from ats.ui.chart_widgets import _CONFIG_FILE_LOCK
+            config_data = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config_data = json.load(f)
+        except Exception as e:
+            print(f"[ATSMainWindow] Read window_config.json error: {e}")
+            config_data = {}
+
+        # 1. 恢复加载加速龙头追踪器
+        try:
+            dragon_cfg = config_data.get("dragon_leader_monitor_dialog", {})
+            if dragon_cfg.get("is_open", False):
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的加速龙头监控窗口...")
+                self.open_dragon_monitor(restore_state=dragon_cfg, cold_start=True)
+        except Exception as e:
+            logger.warning(f"[ATSMainWindow] Error auto-restoring dragon monitor: {e}")
+
+        # 2. 恢复加载涨跌分布个股明细面板
+        try:
+            if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_restore_details_dialog_if_saved'):
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的涨跌分布个股明细面板...")
+                self.dist_chart._restore_details_dialog_if_saved(cold_start=False)
+        except Exception as e:
+            logger.warning(f"[ATSMainWindow] Error auto-restoring distribution detail dialogs: {e}")
 
     def _trigger_realtime_ui_update(self):
         """防抖异步触发 UI 渲染 (30ms 汇聚高频 IPC 广播包, 防范主线程卡顿)"""
@@ -4541,6 +4581,24 @@ class ATSMainWindow(QMainWindow):
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
+        self._is_exiting = True
+
+        # 0. 🚀【原子持久化打开的磁吸/监控窗口状态】：在子窗口被 close() 前优先保存 is_open: True
+        try:
+            from PyQt6.sip import isdeleted
+            # 1. 持久化加速龙头跟踪器状态
+            if hasattr(self, 'dragon_monitor_dialog') and self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog):
+                if self.dragon_monitor_dialog.isVisible() or getattr(self.dragon_monitor_dialog, 'is_hidden_state', False):
+                    self.dragon_monitor_dialog._save_window_states(is_open=True)
+            
+            # 2. 持久化所有打开的涨跌分布个股明细窗口状态
+            if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
+                for d in self.dist_chart._active_dialogs:
+                    if d and not isdeleted(d):
+                        if d.isVisible() or getattr(d, 'is_hidden_state', False):
+                            d._save_window_states(is_open=True)
+        except Exception as e_persist:
+            print(f"[ATSMainWindow] Error persisting active monitor dialogs on close: {e_persist}")
         
         # 1. 停止定时器与后台 Watcher
         if hasattr(self, 'update_timer') and self.update_timer.isActive():
@@ -4732,7 +4790,6 @@ class ATSMainWindow(QMainWindow):
                             from sys_utils import resolve_stock_name
                             name = resolve_stock_name(code_clean) or "未知"
                         from ats.ui.favorite_panel import get_ats_extra_cols
-                        from JohnsonUtil import commonTips as cct
                         extra_cols = get_ats_extra_cols()
                         extra_fallback = []
                         for ec in extra_cols:
@@ -4789,14 +4846,23 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
 
 
-    def open_dragon_monitor(self):
-        if getattr(self, '_is_closing', False):
+    def open_dragon_monitor(self, restore_state=None, cold_start=False):
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
             return
         from PyQt6.sip import isdeleted
         if self.dragon_monitor_dialog is None or isdeleted(self.dragon_monitor_dialog):
-            self.dragon_monitor_dialog = DragonLeaderMonitorDialog(self)
+            self.dragon_monitor_dialog = DragonLeaderMonitorDialog(self, restore_state=restore_state)
             self.dragon_monitor_dialog.code_clicked.connect(self.link_stock)
-        self.dragon_monitor_dialog.show_normal_position()
+        
+        # 如果是 cold_start 启动恢复且原处于贴边折叠隐藏状态，则保持贴边细条展示；
+        # 若是用户主动点击唤起（cold_start=False），无论当前是否折叠隐藏，均强制展开显示（show_normal_position）！
+        if cold_start and getattr(self.dragon_monitor_dialog, 'is_hidden_state', False):
+            self.dragon_monitor_dialog.show()
+        else:
+            self.dragon_monitor_dialog.show_normal_position()
+            
+        if hasattr(self.dragon_monitor_dialog, '_save_window_states'):
+            self.dragon_monitor_dialog._save_window_states(is_open=True)
         
         has_df = self.current_df is not None and not self.current_df.empty
         sh_pct = 0.0
@@ -4808,10 +4874,10 @@ class ATSMainWindow(QMainWindow):
             else:
                 if 'percent' in self.current_df.columns:
                     sh_pct = float(self.current_df['percent'].mean())
-        try:
-            self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
-        except Exception as e:
-            print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
+            try:
+                self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
+            except Exception as e:
+                print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
 
     def open_global_market_dialog(self):
         """打开/激活【🌐 全球外盘与热点情绪看板】独立自适应窗口 (不影响主界面原有布局)"""
