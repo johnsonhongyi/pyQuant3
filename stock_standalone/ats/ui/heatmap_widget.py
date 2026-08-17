@@ -17,6 +17,7 @@ from JohnsonUtil import commonTips as cct
 class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
     sector_selected_with_codes = pyqtSignal(str, list) # sector name, member codes list
+    hot_leaders_clicked = pyqtSignal() # 龙头突击榜点击
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,6 +36,14 @@ class SectorHeatmapWidget(QWidget):
         title.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
         header.addWidget(title)
         header.addStretch()
+
+        self.btn_hot_leaders = QPushButton("🚀 龙头突击榜")
+        self.btn_hot_leaders.setStyleSheet("""
+            QPushButton { background-color: #2a1b1b; color: #ff5577; border: 1px solid #ff4466; border-radius: 4px; font-weight: bold; font-size: 9pt; padding: 3px 8px; }
+            QPushButton:hover { background-color: #ff4466; color: #ffffff; }
+        """)
+        self.btn_hot_leaders.clicked.connect(self._on_hot_leaders_clicked)
+        header.addWidget(self.btn_hot_leaders)
 
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序"])
@@ -59,6 +68,24 @@ class SectorHeatmapWidget(QWidget):
         
         scroll.setWidget(self.grid_container)
         layout.addWidget(scroll)
+
+    def _on_hot_leaders_clicked(self):
+        self.hot_leaders_clicked.emit()
+        main_win = self.window()
+        p = self.parent()
+        while p:
+            if hasattr(p, "open_hot_sector_leaderboard"):
+                main_win = p
+                break
+            p = p.parent()
+        if hasattr(main_win, "open_hot_sector_leaderboard"):
+            main_win.open_hot_sector_leaderboard()
+
+    def get_top_sectors(self, top_n: int = 3) -> list:
+        if not hasattr(self, 'sectors') or not self.sectors:
+            return []
+        return [str(item[0]).strip() for item in self.sectors[:top_n] if item]
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

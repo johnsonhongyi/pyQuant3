@@ -13,15 +13,19 @@ import sys
 import os
 import re
 import time
-import logging
 import threading
 import concurrent.futures
+import collections
+import datetime
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from pytdx.hq import TdxHq_API
 
-logger = logging.getLogger("TDXRealtimeFetcher")
+from logger_utils import LoggerFactory
+from JohnsonUtil import commonTips as cct
+
+logger = LoggerFactory.getLogger("TDXRealtimeFetcher")
 
 # 默认预备通达信 HQ 服务器 (防本地配置文件不存在时的 Fallback)
 FALLBACK_TDX_HOSTS = [
@@ -113,9 +117,46 @@ def get_market_code(stock_code: str) -> int:
     return 0
 
 
+def is_trading_time(now_dt=None) -> Tuple[bool, str]:
+    """
+    优先使用 JohnsonUtil.commonTips (cct) 原生实盘时段与交易日状态判定
+    返回 (is_trading, status_text)
+    """
+    t_str = time.strftime("%H:%M:%S")
+    try:
+        is_work_day = cct.get_work_day_status()
+        if not is_work_day:
+            return False, f"周末/假日休市 ({t_str})"
+
+        is_work_time = cct.get_work_time()
+        now_int = cct.get_now_time_int()
+
+        if is_work_time:
+            if now_int < 930:
+                return True, f"早盘集合竞价 ({t_str})"
+            elif now_int >= 1500:
+                return True, f"尾盘收盘集合竞价 ({t_str})"
+            return True, f"实盘交易中 ({t_str})"
+        else:
+            if 1130 <= now_int < 1300:
+                return False, f"午间休市休眠 ({t_str})"
+            return False, f"收盘休市休眠 ({t_str})"
+    except Exception as e:
+        logger.debug(f"cct.get_work_time 异常降级: {e}")
+
+    # 本地备用降级逻辑
+    now = now_dt or datetime.datetime.now()
+    if now.weekday() >= 5:
+        return False, f"周末休市 ({t_str})"
+    t = now.time()
+    if datetime.time(9, 15, 0) <= t <= datetime.time(11, 30, 30) or datetime.time(12, 59, 30) <= t <= datetime.time(15, 5, 0):
+        return True, f"实盘交易中 ({t_str})"
+    return False, f"休市休眠中 ({t_str})"
+
+
 class TDXRealtimeFetcher:
     """
-    通达信秒级独立行情拉取引擎（支持单例与独立实例）
+    通达信行情高频并发拉取单例引擎
     """
     _instance: Optional['TDXRealtimeFetcher'] = None
     _lock = threading.Lock()
@@ -134,9 +175,44 @@ class TDXRealtimeFetcher:
         self.active_hosts_pool: List[Tuple[float, str, str, int]] = []
         self._is_connected = False
         self._conn_lock = threading.RLock()
+        
+        # 内存日志缓冲队列 (最大保留 500 条最新日志)
+        self._log_buffer = collections.deque(maxlen=500)
+        self._log_lock = threading.Lock()
+        self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站", level="INFO")
 
         # 启动时快速选取最优服务器
         self._init_best_server()
+
+    def add_log(self, msg: str, level: str = "INFO"):
+        """向内存循环队列记录结构化日志"""
+        ts = time.strftime("%H:%M:%S")
+        prefix = {
+            "INFO": "✅ [INFO]",
+            "WARN": "⚠️ [WARN]",
+            "ERROR": "❌ [ERROR]",
+            "SLEEP": "💤 [SLEEP]",
+            "SPEED": "⚡ [SPEED]"
+        }.get(level, "🔹 [LOG]")
+        log_line = f"[{ts}] {prefix} {msg}"
+        with self._log_lock:
+            self._log_buffer.append(log_line)
+        if level in ("ERROR", "WARN"):
+            logger.warning(log_line)
+        else:
+            logger.debug(log_line)
+
+    def get_logs(self, limit: int = 300) -> List[str]:
+        """获取最近的结构化日志列表"""
+        with self._log_lock:
+            logs = list(self._log_buffer)
+            return logs[-limit:] if limit > 0 else logs
+
+    def clear_logs(self):
+        """清空日志缓存"""
+        with self._log_lock:
+            self._log_buffer.clear()
+            self._log_buffer.append(f"[{time.strftime('%H:%M:%S')}] 🧹 [INFO] 日志缓存已清空")
 
     def _ping_single_host(self, host_item: Tuple[str, str, int]) -> Optional[Tuple[float, str, str, int]]:
         name, ip, port = host_item
@@ -192,6 +268,7 @@ class TDXRealtimeFetcher:
                 self._init_best_server()
 
             if not self.current_host:
+                self.add_log("❌ 无可用 TDX 服务器列表，连接失败", level="ERROR")
                 return False
 
             name, ip, port = self.current_host
@@ -199,10 +276,10 @@ class TDXRealtimeFetcher:
             try:
                 if self.api.connect(ip, port, time_out=1.2):
                     self._is_connected = True
-                    logger.info(f"✅ TDX 行情接口已成功连接到 {name} ({ip}:{port})")
+                    self.add_log(f"已成功连接到主站 [{name}] ({ip}:{port})", level="INFO")
                     return True
             except Exception as e:
-                logger.warning(f"❌ 连接 TDX 服务器 {ip}:{port} 失败: {e}")
+                self.add_log(f"连接主站 [{name}] ({ip}:{port}) 失败: {e}", level="WARN")
                 self._is_connected = False
 
             # 故障转移
@@ -213,11 +290,13 @@ class TDXRealtimeFetcher:
                         self._is_connected = True
                         self.current_host = (f_name, f_ip, f_port)
                         self.latency_ms = cost
-                        logger.info(f"✅ TDX 故障切换成功连接到备用服务器 {f_name} ({f_ip}:{f_port})")
+                        self.add_log(f"故障切换成功连接到备用服务器 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
                         return True
-                except Exception:
+                except Exception as e_failover:
+                    self.add_log(f"尝试备用服务器 [{f_name}] ({f_ip}:{f_port}) 失败: {e_failover}", level="WARN")
                     continue
 
+            self.add_log("所有备用 TDX HQ 服务器连接均失败，网络或 IP 可能受限", level="ERROR")
             return False
 
     def disconnect(self):
@@ -239,9 +318,11 @@ class TDXRealtimeFetcher:
         if not codes:
             return []
 
+        t_start = time.time()
         with self._conn_lock:
             if not self._is_connected:
                 if not self.connect():
+                    self.add_log(f"无法建立 TDX 连接，跳过获取 {len(codes)} 只标的行情", level="ERROR")
                     return []
 
             req_params = []
@@ -253,9 +334,12 @@ class TDXRealtimeFetcher:
             try:
                 quotes = self.api.get_security_quotes(req_params)
                 if quotes:
+                    cost_ms = (time.time() - t_start) * 1000.0
+                    host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
+                    self.add_log(f"批量拉取 {len(codes)} 只标的成功 (耗时: {cost_ms:.1f}ms, 服务器: {host_info})", level="INFO")
                     return quotes
             except Exception as e:
-                logger.warning(f"批量获取 TDX 盘口异常: {e}, 尝试逐个重试...")
+                self.add_log(f"批量获取 {len(codes)} 只标的行情异常: {e}, 正在切换连接重试...", level="WARN")
                 self._is_connected = False
 
             # 若批量出错，尝试重新连接后逐个安全获取
@@ -268,8 +352,10 @@ class TDXRealtimeFetcher:
                     q_single = self.api.get_security_quotes([(mkt, c_clean)])
                     if q_single and len(q_single) > 0:
                         results.append(q_single[0])
-                except Exception:
-                    pass
+                except Exception as e_s:
+                    self.add_log(f"单股 {c_clean} 行情拉取异常: {e_s}", level="WARN")
+            cost_ms = (time.time() - t_start) * 1000.0
+            self.add_log(f"逐个降级拉取完成: 成功 {len(results)}/{len(codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
             return results
 
     def fetch_stock_snapshot(
@@ -352,6 +438,214 @@ class TDXRealtimeFetcher:
             "ask1_vol": ask1_v,
             "server_time": time.strftime("%H:%M:%S")
         }
+
+    def fetch_multi_stock_alpha_quotes(
+        self,
+        codes: List[str],
+        sector_map: Optional[Dict[str, str]] = None,
+        multi_period_cache: Optional[Dict[str, Any]] = None,
+        name_map: Optional[Dict[str, str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        批量拉取多只股票的 TDX 高频盘口数据，并计算量比爆发力、分时 VWAP 偏离、
+        买卖盘口承接力、分时进攻斜率以及【三维买点定位】(领涨龙头/先锋突破/VWAP回踩/跟风)。
+
+        :param codes: 股票代码列表，例如 ['300570', '688167', '603083']
+        :param sector_map: 代码到所属强势板块的映射 {code: sector_name}
+        :param multi_period_cache: 底层多日底蕴特征 {code: {dff, dff2, dff3, rank, perc3d...}}
+        :param name_map: 代码到名称的映射 {code: name}
+        :return: 包含完整 Alpha 动量与买点指引的字典列表，按 alpha_score 降序排列
+        """
+        if not codes:
+            return []
+
+        quotes = self.get_security_quotes_safe(codes)
+        if not quotes:
+            return []
+
+        sector_map = sector_map or {}
+        multi_period_cache = multi_period_cache or {}
+        name_map = name_map or {}
+
+        # 1. 整理盘口并计算基础分时指标
+        parsed_items = []
+        for q in quotes:
+            code_str = str(q.get("code", "")).strip().zfill(6)
+            if not code_str:
+                continue
+
+            price = float(q.get("price", 0.0))
+            open_p = float(q.get("open", price))
+            high_p = float(q.get("high", price))
+            low_p = float(q.get("low", price))
+            last_close = float(q.get("last_close", price))
+            vol = float(q.get("vol", 0.0))       # 手
+            amount = float(q.get("amount", 0.0)) # 元
+
+            # 涨幅 %
+            pct = round((price - last_close) / last_close * 100.0, 2) if last_close > 0 else 0.0
+
+            # 日内 VWAP (元)
+            if vol > 0 and amount > 0:
+                calc_vwap = amount / (vol * 100.0)
+                if price > 0 and (price * 0.7 <= calc_vwap <= price * 1.3):
+                    vwap = round(calc_vwap, 2)
+                else:
+                    vwap = round((open_p + high_p + low_p + price) / 4.0, 2) if open_p > 0 else price
+            else:
+                vwap = price if price > 0 else open_p
+
+            # VWAP 偏离度 % (现价相对日内均价的偏离，正表示在均线上方强势)
+            vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+
+            # 五档买卖盘量能统计与买压比 (%)
+            bid_vol_sum = 0.0
+            ask_vol_sum = 0.0
+            for i in range(1, 6):
+                bid_vol_sum += float(q.get(f"bid_vol{i}", 0.0) or 0.0)
+                ask_vol_sum += float(q.get(f"ask_vol{i}", 0.0) or 0.0)
+
+            total_depth = bid_vol_sum + ask_vol_sum
+            bid_pressure = round((bid_vol_sum / total_depth) * 100.0, 1) if total_depth > 0 else 50.0
+
+            # 多日特征
+            mp_info = multi_period_cache.get(code_str, {})
+            dff = float(mp_info.get("dff", 0.0) or 0.0)
+            dff2 = float(mp_info.get("dff2", 0.0) or 0.0)
+            dff3 = float(mp_info.get("dff3", 0.0) or 0.0)
+            rank_val = int(mp_info.get("rank", mp_info.get("Rank", 999)) or 999)
+            perc3d = float(mp_info.get("perc3d", 0.0) or 0.0)
+            vol_ratio_base = float(mp_info.get("vol_ratio", mp_info.get("vol_rati", 1.0)) or 1.0)
+
+            # 动态量比预估 (结合多日量比与盘中换手强度)
+            vol_ratio = round(vol_ratio_base, 2) if vol_ratio_base > 0 else 1.0
+
+            # 分时拉升攻角评分 (0 ~ 100)
+            # 依据: 现价高于VWAP、处于日内高位区、涨幅、五档买压
+            pos_in_day = (price - low_p) / (high_p - low_p) if (high_p > low_p) else 0.5
+            slope_score = 40.0
+            if vwap_dev_pct > 0:
+                slope_score += min(25.0, vwap_dev_pct * 8.0)
+            if pos_in_day > 0.8:
+                slope_score += 15.0
+            if bid_pressure > 60.0:
+                slope_score += min(15.0, (bid_pressure - 50.0) * 0.4)
+            if pct > 3.0:
+                slope_score += min(15.0, pct * 1.5)
+            slope_score = round(min(100.0, max(10.0, slope_score)), 1)
+
+            parsed_items.append({
+                "code": code_str,
+                "name": name_map.get(code_str, q.get("name", code_str)),
+                "sector": sector_map.get(code_str, "重点关注"),
+                "price": price,
+                "open": open_p,
+                "high": high_p,
+                "low": low_p,
+                "last_close": last_close,
+                "pct": pct,
+                "vwap": vwap,
+                "vwap_dev_pct": vwap_dev_pct,
+                "vol": vol,
+                "amount": amount,
+                "bid1": float(q.get("bid1", price)),
+                "ask1": float(q.get("ask1", price)),
+                "bid_vol_sum": bid_vol_sum,
+                "ask_vol_sum": ask_vol_sum,
+                "bid_pressure": bid_pressure,
+                "vol_ratio": vol_ratio,
+                "slope_score": slope_score,
+                "dff": dff,
+                "dff2": dff2,
+                "dff3": dff3,
+                "rank": rank_val,
+                "perc3d": perc3d,
+                "extra_vals": mp_info.get("extra_vals", {}),
+            })
+
+        # 2. 板块内领涨与三维买点智能判决
+        # 按板块分组统计最高涨幅与领跑者
+        sector_max_pct = {}
+        for it in parsed_items:
+            sec = it["sector"]
+            if sec not in sector_max_pct or it["pct"] > sector_max_pct[sec]:
+                sector_max_pct[sec] = it["pct"]
+
+        results = []
+        for it in parsed_items:
+            pct = it["pct"]
+            vwap = it["vwap"]
+            vwap_dev = it["vwap_dev_pct"]
+            price = it["price"]
+            vol_r = it["vol_ratio"]
+            dff2 = it["dff2"]
+            dff3 = it["dff3"]
+            slope = it["slope_score"]
+            bid_p = it["bid_pressure"]
+            sec = it["sector"]
+            max_sec_p = sector_max_pct.get(sec, pct)
+
+            # 是否多日多头底座扎实 (2D/3D 加速)
+            has_base = (dff2 > 0.0 or dff3 > 0.0)
+
+            # 三维买点判定
+            if pct >= 5.0 and (pct >= max_sec_p - 0.5) and vwap_dev >= 0.0:
+                buy_type = "👑 领涨龙头"
+                buy_tag = "LEADER"
+                buy_zone = f"{vwap:.2f} ~ {price:.2f}"
+                stop_loss = round(vwap * 0.985, 2)
+                reason = f"板块领涨先锋(同板块涨幅最高), 站稳VWAP(+{vwap_dev:.1f}%), 主攻波形"
+                type_priority = 100
+            elif (1.5 <= pct <= 6.5) and vwap_dev >= 0.2 and vol_r >= 1.2 and has_base:
+                buy_type = "🚀 先锋突破"
+                buy_tag = "BREAKOUT"
+                buy_zone = f"{price:.2f} ~ {round(price * 1.008, 2)}"
+                stop_loss = round(vwap * 0.985, 2)
+                reason = f"起爆先锋突破, 放量(量比{vol_r:.1f}), 站稳均线(+{vwap_dev:.1f}%), 性价比极高"
+                type_priority = 90
+            elif (-0.5 <= vwap_dev <= 0.8) and pct > 0.5 and has_base and slope >= 45:
+                buy_type = "🎯 VWAP回踩"
+                buy_tag = "PULLBACK"
+                buy_zone = f"{vwap:.2f} ~ {round(vwap * 1.005, 2)}"
+                stop_loss = round(min(it['low'], vwap * 0.98), 2)
+                reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 风险收益比极佳"
+                type_priority = 80
+            elif vwap_dev < -1.0 or pct < -2.0:
+                buy_type = "⚠️ 破位转弱"
+                buy_tag = "WEAK"
+                buy_zone = "--"
+                stop_loss = round(vwap * 0.97, 2)
+                reason = f"跌破分时均线({vwap_dev:.1f}%), 动能不足"
+                type_priority = 20
+            else:
+                buy_type = "📋 蓄势观察"
+                buy_tag = "WATCH"
+                buy_zone = f"{vwap:.2f} 附近"
+                stop_loss = round(vwap * 0.98, 2)
+                reason = f"在均线附近窄幅震荡, 等待放量信号"
+                type_priority = 50
+
+            # 综合 Alpha 进攻得分 (0 ~ 100)
+            alpha_score = (
+                type_priority * 0.35 +
+                min(30.0, max(0.0, pct * 2.5)) +
+                min(15.0, slope * 0.15) +
+                min(10.0, bid_p * 0.1) +
+                (10.0 if has_base else 0.0)
+            )
+            alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
+
+            it["buy_type"] = buy_type
+            it["buy_tag"] = buy_tag
+            it["buy_zone"] = buy_zone
+            it["stop_loss"] = stop_loss
+            it["reason"] = reason
+            it["alpha_score"] = alpha_score
+            results.append(it)
+
+        # 按 Alpha 得分降序排列
+        results.sort(key=lambda x: x["alpha_score"], reverse=True)
+        return results
 
     def convert_quotes_to_df(self, quotes: List[Dict[str, Any]]) -> pd.DataFrame:
         """将 TDX 盘口列表转化为量化系统标准 DataFrame"""
@@ -447,3 +741,4 @@ class TDXRealtimePollingWorker(threading.Thread):
             time.sleep(self.interval)
 
         logger.info("🛑 TDX 高频轮询 Worker 线程已安全停止")
+

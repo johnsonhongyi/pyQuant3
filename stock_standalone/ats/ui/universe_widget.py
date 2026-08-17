@@ -6,9 +6,12 @@ Provides a tree structure with real-time mockup data.
 """
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QHBoxLayout, QPushButton, QLabel, QLineEdit
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, auto_fit_columns_once
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger(__name__)
 
 class UniverseTreeItem(QTreeWidgetItem):
     def __lt__(self, other):
@@ -179,6 +182,15 @@ class UniverseTreeWidget(QWidget):
             default_widths=[75, 90, 75, 75, 200, 120]
         )
         
+        # 3. 挂载持久化方法与防抖保存
+        self.tree.save_header_state = self.save_header_state
+        self.tree.restore_header_state = self.restore_header_state
+        self._header_save_timer = QTimer(self)
+        self._header_save_timer.setSingleShot(True)
+        self._header_save_timer.setInterval(500)
+        self._header_save_timer.timeout.connect(self.save_header_state)
+        self.tree.header().sectionResized.connect(self._on_section_resized)
+
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.currentItemChanged.connect(self._on_current_item_changed)
@@ -186,6 +198,49 @@ class UniverseTreeWidget(QWidget):
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.tree)
+
+        # 恢复先前持久化的列宽
+        QTimer.singleShot(100, self.restore_header_state)
+
+    def _on_section_resized(self, logicalIndex, oldSize, newSize):
+        if getattr(self, '_is_restoring_header', False):
+            return
+        if hasattr(self, '_header_save_timer'):
+            self._header_save_timer.start(500)
+
+    def save_header_state(self):
+        try:
+            from ats.ui.styles import save_config_node
+            col_widths = [self.tree.columnWidth(c) for c in range(self.tree.columnCount())]
+            save_config_node("ats_universe_tree_widths", col_widths)
+            if self.tree.header():
+                state_hex = self.tree.header().saveState().toHex().data().decode("utf-8")
+                save_config_node("ats_universe_tree_state", state_hex)
+        except Exception as e:
+            logger.debug(f"保存策略股票池列宽异常: {e}")
+
+    def restore_header_state(self):
+        self._is_restoring_header = True
+        try:
+            from ats.ui.styles import load_config_node
+            from PyQt6.QtCore import QByteArray
+            widths = load_config_node("ats_universe_tree_widths")
+            if widths and isinstance(widths, list):
+                self.tree.header().blockSignals(True)
+                for c, w in enumerate(widths):
+                    if c < self.tree.columnCount() and int(w) > 10:
+                        self.tree.setColumnWidth(c, int(w))
+                self.tree.header().blockSignals(False)
+            else:
+                state_hex = load_config_node("ats_universe_tree_state")
+                if state_hex and isinstance(state_hex, str):
+                    self.tree.header().blockSignals(True)
+                    self.tree.header().restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                    self.tree.header().blockSignals(False)
+        except Exception as e:
+            logger.debug(f"恢复策略股票池列宽异常: {e}")
+        finally:
+            self._is_restoring_header = False
 
     def load_mock_data(self):
         self._is_mock_active = True
@@ -314,7 +369,9 @@ class UniverseTreeWidget(QWidget):
                 item.setForeground(3, QColor(COLOR_DOWN))
 
         self.tree.expandAll()
-        auto_fit_columns_once(self.tree, "ats_universe_tree_state")
+        if not getattr(self, '_has_restored_widths_once', False):
+            self._has_restored_widths_once = True
+            self.restore_header_state()
         self.tree.setSortingEnabled(True)
 
     def update_pools(self, radar_list, watch_list, trade_list):
@@ -464,7 +521,9 @@ class UniverseTreeWidget(QWidget):
                 item.setForeground(3, QColor(COLOR_DOWN))
         
         self.tree.expandAll()
-        auto_fit_columns_once(self.tree, "ats_universe_tree_state")
+        if not getattr(self, '_has_restored_widths_once', False):
+            self._has_restored_widths_once = True
+            self.restore_header_state()
         self.tree.setSortingEnabled(True)
 
     def _on_item_clicked(self, item, column):

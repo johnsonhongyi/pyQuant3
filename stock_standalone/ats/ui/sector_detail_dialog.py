@@ -18,6 +18,9 @@ from PyQt6.QtGui import QColor
 from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger(__name__)
 
 def get_sector_extra_cols():
     """获取板块明细追加的动态自定义列（排除基础列已有的字段）"""
@@ -302,12 +305,42 @@ class ATSSectorDetailDialog(QDialog):
 
         # 只要存在目标股票代码或 current_df 包含匹配数据，100% 走实时 IPC 数据渲染
         if target_codes:
-            self.setWindowTitle(f"📡 {self.sector_name} 板块明细 (实时IPC)")
+            self.setWindowTitle(f"📡 {self.sector_name} 板块明细 (实时IPC + TDX秒级)")
             rows = []
             leader_code = ""
             leader_name = ""
             max_pct = -999.0
             
+            # 尝试通过 TDX 极速批量接口拉取最新高频盘口与买点评级
+            tdx_alpha_map = {}
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                code_list = list(target_codes)
+                sec_map = {c: self.sector_name for c in code_list}
+                mp_cache = {}
+                n_map = {}
+                if current_df is not None:
+                    for c in code_list:
+                        r_row = _get_row(current_df, c)
+                        if r_row is not None:
+                            if isinstance(r_row, pd.DataFrame):
+                                r_row = r_row.iloc[0]
+                            n_map[c] = str(r_row.get('name', c))
+                            mp_cache[c] = {
+                                'dff': float(r_row.get('dff', 0.0) or 0.0),
+                                'dff2': float(r_row.get('DFF2', r_row.get('dff2', 0.0)) or 0.0),
+                                'dff3': float(r_row.get('DFF3', r_row.get('dff3', 0.0)) or 0.0),
+                                'rank': int(r_row.get('Rank', r_row.get('rank', 999)) or 999),
+                                'perc3d': float(r_row.get('perc3d', 0.0) or 0.0),
+                                'vol_ratio': float(r_row.get('vol_ratio', r_row.get('vol_rati', 1.0)) or 1.0)
+                            }
+                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(code_list, sec_map, mp_cache, n_map)
+                for aq in alpha_quotes:
+                    tdx_alpha_map[aq["code"]] = aq
+            except Exception as e:
+                logger.debug(f"板块明细 TDX 批量获取降级: {e}")
+
             for code_str in target_codes:
                 name = get_name_fn(code_str) if get_name_fn else "个股"
                 if not name or name == "未知":
@@ -320,6 +353,7 @@ class ATSSectorDetailDialog(QDialog):
                 dff2_val = 0.0
                 dff3_val = 0.0
                 pattern_hint = "反转/板块成分"
+                type_str = "跟涨"
                 row = None
                 
                 if current_df is not None:
@@ -341,7 +375,17 @@ class ATSSectorDetailDialog(QDialog):
                         except: pass
                         try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
                         except: pass
-                
+
+                # 若 TDX 高频接口拉取成功，使用 TDX 最新实时现价与买点分类
+                aq = tdx_alpha_map.get(code_str)
+                if aq:
+                    pct_val = aq.get("pct", pct_val)
+                    type_str = aq.get("buy_type", type_str)
+                    score = aq.get("alpha_score", score)
+                    vwap_dev = aq.get("vwap_dev_pct", 0.0)
+                    vol_r = aq.get("vol_ratio", 1.0)
+                    pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
+
                 extra_dict = {}
                 for ec in self.extra_cols:
                     val_raw = None
@@ -361,7 +405,7 @@ class ATSSectorDetailDialog(QDialog):
                     'code': code_str,
                     'name': name,
                     'score': score,
-                    'type': '跟涨',
+                    'type': type_str,
                     'pct': pct_val,
                     'start_pct': pct_val - dff_val,
                     'dff': dff_val,
@@ -374,12 +418,11 @@ class ATSSectorDetailDialog(QDialog):
                 
             # 标记领涨龙头
             for r in rows:
-                if r['code'] == leader_code:
-                    r['type'] = '👑 领涨'
-                    r['score'] = 95.0
-                    r['pattern'] = '领涨先锋'
+                if r['code'] == leader_code and '👑' not in str(r['type']):
+                    r['type'] = '👑 领涨龙头'
+                    r['score'] = max(95.0, r['score'])
                     
-            rows.sort(key=lambda x: x['pct'], reverse=True)
+            rows.sort(key=lambda x: (x['score'], x['pct']), reverse=True)
             
             self.score_lbl.setText(f"强度得分: {min(100.0, len(rows) * 12.5):.1f}")
             self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_name} ({leader_code}) [{max_pct:+.2f}%]")
