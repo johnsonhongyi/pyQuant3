@@ -25,6 +25,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
+from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
@@ -42,6 +43,39 @@ def safe_float(val, default=0.0):
         return float(val)
     except:
         return default
+
+
+def get_distribution_extra_cols():
+    """获取涨跌分布个股明细追加的动态自定义列（排除基础列已有的字段）"""
+    try:
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    BASE_EXCLUDE = {
+        'code', 'name', 'pct', 'percent', 'ratio', 'close', 'price', 'trade', 
+        'volume_ratio', 'dff', 'dff2', 'dff3', 'category', 'industry', 'sector'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+def get_distribution_table_headers(extra_cols=None):
+    if extra_cols is None:
+        extra_cols = get_distribution_extra_cols()
+    try:
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+    base_pre = ["代码", "名称", "涨幅%", "现价", "量比", "DFF", "DFF2", "DFF3"]
+    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    base_post = ["所属板块"]
+    return base_pre + extra_headers + base_post
 
 
 class DistributionDetailsDialog(QDialog, WindowMixin):
@@ -118,8 +152,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         
         layout.addWidget(header_frame)
         
-        # Table
-        self.cols = ["代码", "名称", "涨幅%", "现价", "量比", "DFF", "DFF2", "DFF3", "所属板块"]
+        # Table (支持动态 ats_col)
+        self.extra_cols = get_distribution_extra_cols()
+        self.cols = get_distribution_table_headers(self.extra_cols)
         self.table = QTableWidget(0, len(self.cols))
         self.table.setHorizontalHeaderLabels(self.cols)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -170,10 +205,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             QScrollBar::handle:vertical:hover {
                 background: rgba(220, 220, 220, 150);
             }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            QScrollBar:add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            QScrollBar:add-page:vertical, QScrollBar::sub-page:vertical {
                 background: transparent;
             }
             QScrollBar:horizontal {
@@ -189,39 +224,23 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             QScrollBar::handle:horizontal:hover {
                 background: rgba(220, 220, 220, 150);
             }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            QScrollBar:add-line:horizontal, QScrollBar::sub-line:horizontal {
                 width: 0px;
             }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            QScrollBar:add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: transparent;
             }
         """)
         
-        # Column widths default settings
-        self.table.setColumnWidth(0, 70)   # 代码
-        self.table.setColumnWidth(1, 80)   # 名称
-        self.table.setColumnWidth(2, 75)   # 涨幅
-        self.table.setColumnWidth(3, 65)   # 现价
-        self.table.setColumnWidth(4, 65)   # 量比
-        self.table.setColumnWidth(5, 60)   # DFF
-        self.table.setColumnWidth(6, 60)   # DFF2
-        self.table.setColumnWidth(7, 60)   # DFF3
-        h_header.setStretchLastSection(True)
-        
         # Setup column widths and persistence using setup_header_persistence
         from ats.ui.styles import setup_header_persistence
-        default_widths = {
-            0: 70,  # 代码
-            1: 80,  # 名称
-            2: 75,  # 涨幅
-            3: 65,  # 现价
-            4: 65,  # 量比
-            5: 60,  # DFF
-            6: 60,  # DFF2
-            7: 60,  # DFF3
-            8: 120  # 所属板块
-        }
-        setup_header_persistence(self.table, "distribution_details_header_v1", default_widths=default_widths)
+        base_widths = [70, 80, 75, 65, 65, 60, 60, 60]
+        extra_widths = [60] * len(self.extra_cols)
+        post_widths = [120]
+        all_w = base_widths + extra_widths + post_widths
+        default_widths = {idx: w for idx, w in enumerate(all_w)}
+        setup_header_persistence(self.table, "distribution_details_header_v2", default_widths=default_widths)
+        h_header.setStretchLastSection(True)
 
         # Connect signals
         self.table.itemClicked.connect(self._on_item_clicked)
@@ -511,6 +530,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._save_window_states(is_open=True)
 
     def _check_hover(self):
         if not self.isVisible():
@@ -579,10 +599,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         main_app = self._get_main_app()
         is_app_exiting = False
         if main_app:
-            if not main_app.isVisible() or getattr(main_app, '_is_exiting', False):
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
                 
-        if is_app_exiting:
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
             self._save_window_states(is_open=True)
         else:
             self._save_window_states(is_open=False)
@@ -593,10 +613,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         main_app = self._get_main_app()
         is_app_exiting = False
         if main_app:
-            if not main_app.isVisible() or getattr(main_app, '_is_exiting', False):
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
                 
-        if is_app_exiting:
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
             self._save_window_states(is_open=True)
         else:
             self._save_window_states(is_open=False)
@@ -607,6 +627,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         super().showEvent(event)
         if self.layout():
             self.layout().activate()
+        self._save_window_states(is_open=True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -935,7 +956,6 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                         
                         # 1. 动态加载自定义列配置
                         try:
-                            from JohnsonUtil import commonTips as cct
                             custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
                         except:
                             custom_cols = ['dff2', 'dff3', 'Rank']
@@ -1087,20 +1107,35 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 elif dff3 < 0: d3_item.setForeground(QBrush(QColor("#44ff44")))
                 self.table.setItem(i, 7, d3_item)
                 
-                # 8: 所属板块
+                # 填入 extra_cols (8 ~ 8 + len(extra_cols) - 1)
+                extra_items = []
+                col_offset = 8
+                for e_idx, ec in enumerate(self.extra_cols):
+                    val_raw = None
+                    for k in (ec, ec.lower(), ec.upper()):
+                        if k in row:
+                            val_raw = row[k]
+                            break
+                    formatted_val = cct.format_col_value(ec, val_raw)
+                    e_item = NumericTableWidgetItem(str(formatted_val))
+                    e_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    e_item.setForeground(QBrush(QColor("#E0E0E0")))
+                    self.table.setItem(i, col_offset + e_idx, e_item)
+                    extra_items.append(e_item)
+                
+                col_offset += len(self.extra_cols)
+                
+                # 末尾: 所属板块
                 sec_item = QTableWidgetItem(sector)
                 sec_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(i, 8, sec_item)
+                self.table.setItem(i, col_offset, sec_item)
                 
                 if is_fav:
-                    for item in (c_item, n_item, ch_item, p_item, r_item, d_item, d2_item, d3_item, sec_item):
+                    all_row_items = [c_item, n_item, ch_item, p_item, r_item, d_item, d2_item, d3_item] + extra_items + [sec_item]
+                    for item in all_row_items:
                         item.setBackground(QBrush(QColor("#1A2A1A")))
                 
         finally:
-            # Auto fit columns once if no custom widths saved
-            from ats.ui.styles import auto_fit_columns_once
-            auto_fit_columns_once(self.table, "distribution_details_header_v1")
-            
             self.table.setSortingEnabled(True)
             self._is_updating = False
 

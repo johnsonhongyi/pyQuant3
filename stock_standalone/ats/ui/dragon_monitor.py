@@ -23,6 +23,7 @@ from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, setup_header_persistence
+from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
@@ -37,6 +38,39 @@ def safe_float(val, default=0.0):
         return default
 
 
+def get_dragon_extra_cols():
+    """获取加速龙头追踪器追加的动态自定义列（排除基础列已有的字段）"""
+    try:
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    BASE_EXCLUDE = {
+        'code', 'name', 'price', 'close', 'trade', 'pct', 'percent', 'ratio',
+        'state', 'dff', 'dff2', 'dff3', 'rs_val', 'dev', 'resonance', 'source'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+def get_dragon_table_headers(extra_cols=None):
+    if extra_cols is None:
+        extra_cols = get_dragon_extra_cols()
+    try:
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+    base_pre = ["代码", "名称", "现价", "涨幅%", "波段状态", "DFF", "DFF2", "DFF3"]
+    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    base_post = ["大盘偏离", "共振状态", "来源"]
+    return base_pre + extra_headers + base_post
+
+
 
 class DragonLeaderMonitorDialog(QDialog, WindowMixin):
     """
@@ -45,12 +79,35 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
     """
     code_clicked = pyqtSignal(str, str) # linkage
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, restore_state=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("🐉 2D/3D 加速龙头追踪器")
         self.setMinimumWidth(250)
         self._is_updating = False
+
+        # 0. Magnetic snap setup & Timers (必须在 restore_state 前初始化，防覆盖重置)
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
+        self._is_auto_popping = False
+        
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+        
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
         
         # 1. Load config path and data files
         try:
@@ -96,7 +153,59 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.setWindowFlags(flags)
         
         # Load window position and size
-        self.load_window_position_qt(self, "dragon_leader_monitor_dialog", default_width=800, default_height=500)
+        if restore_state is None and os.path.exists(WINDOW_CONFIG_FILE):
+            try:
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        restore_state = data.get("dragon_leader_monitor_dialog", {})
+            except Exception:
+                restore_state = None
+
+        if restore_state:
+            try:
+                scale = self._get_dpi_scale_factor()
+                rx = int(restore_state.get("x", 100) * scale)
+                ry = int(restore_state.get("y", 100) * scale)
+                rw = int(restore_state.get("width", 800) * scale)
+                rh = int(restore_state.get("height", 500) * scale)
+                
+                from gui_utils import clamp_window_to_screens
+                rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
+                
+                self.normal_geometry = QRect(rx, ry, rw, rh)
+                self.anchor_edge = restore_state.get("anchor_edge")
+                
+                is_hidden = restore_state.get("is_hidden_state", False)
+                if is_hidden and self.anchor_edge:
+                    self.is_hidden_state = True
+                    strip_size = 5
+                    screen = self.screen() or QApplication.primaryScreen()
+                    screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                    
+                    if self.anchor_edge == "left":
+                        hx = screen_geo.left() - rw + strip_size
+                        hy = ry
+                    elif self.anchor_edge == "right":
+                        hx = screen_geo.right() - strip_size
+                        hy = ry
+                    elif self.anchor_edge == "top":
+                        hx = rx
+                        hy = screen_geo.top() - rh + strip_size
+                    else:
+                        hx, hy = rx, ry
+                        self.is_hidden_state = False
+                        
+                    self.setGeometry(hx, hy, rw, rh)
+                    self.setWindowOpacity(0.35)
+                else:
+                    self.setGeometry(rx, ry, rw, rh)
+                    self.setWindowOpacity(1.0)
+            except Exception as e:
+                logger.warning(f"[DragonLeaderMonitorDialog] Error restoring geometry: {e}")
+                self.load_window_position_qt(self, "dragon_leader_monitor_dialog", default_width=800, default_height=500)
+        else:
+            self.load_window_position_qt(self, "dragon_leader_monitor_dialog", default_width=800, default_height=500)
         self._is_updating = True
         self.setStyleSheet("QDialog { background-color: #161822; color: #ffffff; }")
         
@@ -140,8 +249,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         
         layout.addWidget(header_frame)
         
-        # Main Table
-        self.cols = ["代码", "名称", "现价", "涨幅%", "波段状态", "DFF", "DFF2", "DFF3", "大盘偏离", "共振状态", "来源"]
+        # Main Table (支持动态 ats_col)
+        self.extra_cols = get_dragon_extra_cols()
+        self.cols = get_dragon_table_headers(self.extra_cols)
         self.table = QTableWidget(0, len(self.cols))
         self.table.setHorizontalHeaderLabels(self.cols)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -198,20 +308,12 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         """)
         
         # Setup column widths and persistence
-        default_widths = {
-            0: 75,   # 代码
-            1: 85,   # 名称
-            2: 70,   # 现价
-            3: 70,   # 涨幅
-            4: 80,   # 波段状态
-            5: 65,   # DFF
-            6: 65,   # DFF2
-            7: 65,   # DFF3
-            8: 85,   # 大盘偏离
-            9: 100,  # 共振状态
-            10: 80   # 来源
-        }
-        setup_header_persistence(self.table, "dragon_leader_monitor_header_v1", default_widths=default_widths)
+        base_widths = [75, 85, 70, 70, 80, 65, 65, 65]
+        extra_widths = [60] * len(self.extra_cols)
+        post_widths = [85, 100, 80]
+        all_w = base_widths + extra_widths + post_widths
+        default_widths = {idx: w for idx, w in enumerate(all_w)}
+        setup_header_persistence(self.table, "dragon_leader_monitor_header_v2", default_widths=default_widths)
         h_header.setStretchLastSection(True)
         
         # Connect signals
@@ -225,29 +327,6 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.setLayout(layout)
         
         QTimer.singleShot(200, lambda: setattr(self, '_is_updating', False))
-        
-        # 3. Magnetic snap setup
-        self.anchor_edge = None
-        self.is_hidden_state = False
-        self.normal_geometry = None
-        self.hover_ticks = 0
-        self.leave_ticks = 0
-        self._in_snap_action = False
-        self.anim_group = None
-        self._is_dragging = False
-        self._last_show_time = 0.0
-        self._has_hovered_since_show = False
-        self._is_auto_popping = False
-        
-        self.hover_timer = QTimer(self)
-        self.hover_timer.setInterval(100)
-        self.hover_timer.timeout.connect(self._check_hover)
-        self.hover_timer.start()
-        
-        self.snap_timer = QTimer(self)
-        self.snap_timer.setSingleShot(True)
-        self.snap_timer.setInterval(200)
-        self.snap_timer.timeout.connect(self._detect_and_snap)
 
     def _load_dragon_data(self):
         try:
@@ -318,7 +397,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             y = int(geom.y() / scale)
             
             if is_open is None:
-                is_open = self.isVisible()
+                is_open = self.isVisible() or getattr(self, 'is_hidden_state', False)
                 
             with _CONFIG_FILE_LOCK:
                 data = {}
@@ -337,7 +416,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                     "stays_on_top": self.stays_on_top,
                     "anchor_edge": self.anchor_edge,
                     "is_hidden_state": self.is_hidden_state,
-                    "is_open": is_open
+                    "is_open": bool(is_open)
                 }
                 
                 tmp = WINDOW_CONFIG_FILE + f".tmp_dragon_states_{id(self)}"
@@ -553,9 +632,21 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                     resonance = "大盘共振"
                 elif sh_pct < -1.0 and pct < -1.5:
                     resonance = "同步走弱"
+                
+                # 提取动态自定义列数据
+                extra_vals = []
+                for ec in self.extra_cols:
+                    val_raw = None
+                    for k in (ec, ec.lower(), ec.upper()):
+                        if k in row:
+                            val_raw = row[k]
+                            break
+                    extra_vals.append(cct.format_col_value(ec, val_raw))
+            else:
+                extra_vals = ['--'] * len(self.extra_cols)
             
             rows_data.append((
-                code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source
+                code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source
             ))
             
         # 4. 刷新渲染表格
@@ -564,8 +655,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.table.setRowCount(len(rows_data))
         
         for idx, data in enumerate(rows_data):
-            # ["代码", "名称", "现价", "涨幅%", "波段状态", "DFF", "DFF2", "DFF3", "大盘偏离", "共振状态", "来源"]
-            code, name, price, pct, state, dff, dff2, dff3, rs_val, resonance, source = data
+            code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source = data
             
             c_item = QTableWidgetItem(code)
             c_item.setForeground(QBrush(QColor("#00FF88" if source.startswith("手动") else "#FFE4C4")))
@@ -606,6 +696,25 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             d3_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             d3_item.setForeground(QBrush(QColor(COLOR_UP if dff3 > 0 else COLOR_DOWN)))
             
+            self.table.setItem(idx, 0, c_item)
+            self.table.setItem(idx, 1, n_item)
+            self.table.setItem(idx, 2, p_item)
+            self.table.setItem(idx, 3, pct_item)
+            self.table.setItem(idx, 4, st_item)
+            self.table.setItem(idx, 5, d1_item)
+            self.table.setItem(idx, 6, d2_item)
+            self.table.setItem(idx, 7, d3_item)
+            
+            # 填入 extra_cols
+            col_offset = 8
+            for e_idx, e_val in enumerate(extra_vals):
+                e_item = NumericTableWidgetItem(str(e_val))
+                e_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                e_item.setForeground(QBrush(QColor("#E0E0E0")))
+                self.table.setItem(idx, col_offset + e_idx, e_item)
+                
+            col_offset += len(extra_vals)
+            
             rs_item = NumericTableWidgetItem(f"{rs_val:+.2f}%")
             rs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if rs_val >= 2.0:
@@ -634,17 +743,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if "自动" in source:
                 src_item.setForeground(QBrush(QColor("#FFD700")))
                 
-            self.table.setItem(idx, 0, c_item)
-            self.table.setItem(idx, 1, n_item)
-            self.table.setItem(idx, 2, p_item)
-            self.table.setItem(idx, 3, pct_item)
-            self.table.setItem(idx, 4, st_item)
-            self.table.setItem(idx, 5, d1_item)
-            self.table.setItem(idx, 6, d2_item)
-            self.table.setItem(idx, 7, d3_item)
-            self.table.setItem(idx, 8, rs_item)
-            self.table.setItem(idx, 9, res_item)
-            self.table.setItem(idx, 10, src_item)
+            self.table.setItem(idx, col_offset, rs_item)
+            self.table.setItem(idx, col_offset + 1, res_item)
+            self.table.setItem(idx, col_offset + 2, src_item)
             
             # 手动添加整行高亮特殊背景色
             if source.startswith("手动"):
@@ -958,19 +1059,54 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.is_hidden_state = True
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
+    def _get_main_app(self):
+        curr = self.parent() if hasattr(self, 'parent') else None
+        from PyQt6.sip import isdeleted
+        try:
+            while curr:
+                if not isdeleted(curr) and curr.__class__.__name__ == 'ATSMainWindow':
+                    return curr
+                curr = curr.parent() if hasattr(curr, 'parent') else None
+        except Exception:
+            pass
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            if getattr(app, 'main_window', None) is not None:
+                try:
+                    mw = app.main_window
+                    if not isdeleted(mw) and mw.__class__.__name__ == 'ATSMainWindow':
+                        return mw
+                except Exception:
+                    pass
+            try:
+                for widget in app.topLevelWidgets():
+                    if not isdeleted(widget) and widget.__class__.__name__ == 'ATSMainWindow':
+                        return widget
+            except Exception:
+                pass
+        return None
+
     def show_normal_position(self):
-        if self.is_hidden_state and self.normal_geometry:
+        if self.is_hidden_state:
+            self.is_hidden_state = False
             self._is_auto_popping = True
             QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
-            
-            self.is_hidden_state = False
             self._last_show_time = time.time()
             self._has_hovered_since_show = False
-            self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
         
-        self.show()
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
         self.raise_()
         self.activateWindow()
+        self._save_window_states(is_open=True)
 
     def _check_hover(self):
         if not self.isVisible():
@@ -1031,17 +1167,36 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         self.hover_timer.stop()
         self.snap_timer.stop()
-        self._save_window_states(is_open=False)
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
         event.accept()
 
     def hideEvent(self, event):
-        self._save_window_states(is_open=False)
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
         super().hideEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
         if self.layout():
             self.layout().activate()
+        self._save_window_states(is_open=True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
