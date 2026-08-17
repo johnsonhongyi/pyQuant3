@@ -1802,6 +1802,18 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         show_action = self.tray_menu.addAction("🖥️ 显示主界面")
         show_action.triggered.connect(self._force_show_and_top)
         
+        self.tray_menu.addSeparator()
+        
+        # 🚀 窗口布局快捷控制菜单
+        apply_layout_action = self.tray_menu.addAction("🚀 应用当前窗口布局")
+        apply_layout_action.triggered.connect(lambda: self.apply_current_layout(show_tray_message=True))
+        
+        detect_layout_action = self.tray_menu.addAction("🎯 探测并应用推荐布局")
+        detect_layout_action.triggered.connect(self.detect_and_apply_layout_from_tray)
+        
+        self.tray_layout_menu = self.tray_menu.addMenu("📐 切换并应用布局方案")
+        self.tray_layout_menu.aboutToShow.connect(self._update_tray_layout_submenu)
+        
         # 🚀 Acer 硬件性能控制快捷右键菜单
         try:
             controller = core.AcerPerformanceController()
@@ -1839,6 +1851,65 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.show()
         self.tray_icon.activated.connect(self.on_tray_activated)
+
+    def _update_tray_layout_submenu(self):
+        """动态构建系统托盘右键中的‘切换并应用方案’子菜单"""
+        if not hasattr(self, 'tray_layout_menu'):
+            return
+        self.tray_layout_menu.clear()
+        
+        current_res = self.get_current_selected_resolution()
+        rec_name = core.detect_display_config_name(self.config_manager)
+        
+        categories = {
+            "single_display": "🖥️ 单屏方案",
+            "multi_display": "🖥️🖥️ 多屏方案",
+            "custom_special": "⚙️ 特殊方案"
+        }
+        
+        # 1. 探测推荐项
+        rec_action = self.tray_layout_menu.addAction(f"🎯 智能推荐: {rec_name}")
+        rec_action.triggered.connect(self.detect_and_apply_layout_from_tray)
+        self.tray_layout_menu.addSeparator()
+        
+        # 2. 遍历分类方案
+        has_any = False
+        for cat_name in self.config_manager.get_categories():
+            res_list = self.config_manager.get_resolutions_by_category(cat_name)
+            if not res_list:
+                continue
+            has_any = True
+            cat_cn = categories.get(cat_name, cat_name)
+            cat_menu = self.tray_layout_menu.addMenu(cat_cn)
+            for res in res_list:
+                mark = " ✔" if res == current_res else ""
+                act = cat_menu.addAction(f"{res}{mark}")
+                act.triggered.connect(lambda checked=False, r=res: self.apply_layout_by_name(r, show_tray_message=True))
+                
+        if not has_any:
+            empty_act = self.tray_layout_menu.addAction("(暂无已保存方案)")
+            empty_act.setEnabled(False)
+
+    def detect_and_apply_layout_from_tray(self):
+        """从托盘右键触发自动探测屏幕并应用推荐布局"""
+        self.load_screen_info()
+        rec_name = core.detect_display_config_name(self.config_manager)
+        self.log(f"[托盘快捷] 探测到推荐配置方案: {rec_name}，正在应用...")
+        self.apply_layout_by_name(rec_name, show_tray_message=True)
+
+    def apply_layout_by_name(self, res_name: str, show_tray_message: bool = True):
+        """按指定的方案名切换并应用布局"""
+        matched = False
+        for i in range(self.cb_resolutions.count()):
+            data = self.cb_resolutions.itemData(i)
+            if data and data[1] == res_name:
+                self.cb_resolutions.setCurrentIndex(i)
+                matched = True
+                break
+        if not matched:
+            self.refresh_resolutions_combo(select_name=res_name)
+        
+        self.apply_current_layout(show_tray_message=show_tray_message)
         
     def force_quit(self):
         try:
@@ -3527,7 +3598,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             start_action = None
             start_admin_action = None
 
-        # 2. 移除常用选项
+        # 2. 应用布局选项
+        apply_shortcut_action = menu.addAction("🎯 应用该窗口坐标 (对齐位置)")
+        menu.addSeparator()
+
+        # 3. 移除/固定常用选项
         pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
         is_pinned = title in pinned_list
         
@@ -3544,6 +3619,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_as_admin(exe_path, title, None)
         elif open_dir_action and action == open_dir_action:
             self.open_program_dir(exe_path)
+        elif apply_shortcut_action and action == apply_shortcut_action:
+            status, msg = self.apply_window_layout_by_title(title)
+            if status == "not_found":
+                QMessageBox.information(self, "提示", f"桌面当前未检测到运行中的窗口: '{title}'\n可尝试通过右键菜单‘🚀 启动程序’启动它。")
+            elif status == "error":
+                QMessageBox.warning(self, "错误", msg)
         elif action == pin_action:
             if is_pinned:
                 pinned_list.remove(title)
@@ -3784,6 +3865,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             menu.addSeparator()
 
         menu.addSeparator()
+        apply_single_action = menu.addAction("🎯 应用该窗口坐标 (移动至配置位置)")
+        apply_all_action = menu.addAction("🚀 应用当前方案所有窗口布局")
+        menu.addSeparator()
+
         pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
         is_pinned = title in pinned_list
         if is_pinned:
@@ -3802,6 +3887,15 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_as_admin(exe_path, title, pos_item)
         elif open_dir_action and action == open_dir_action:
             self.open_program_dir(exe_path)
+        elif apply_single_action and action == apply_single_action:
+            pos_text = pos_item.text().strip() if pos_item else ""
+            status, msg = self.apply_window_layout_by_title(title, pos_text)
+            if status == "not_found":
+                QMessageBox.information(self, "提示", f"桌面当前未检测到运行中的窗口: '{title}'\n可尝试通过右键菜单‘🚀 启动程序’启动它。")
+            elif status == "error":
+                QMessageBox.warning(self, "错误", msg)
+        elif apply_all_action and action == apply_all_action:
+            self.apply_current_layout()
         elif action == pin_action:
             # 如果未配置启动路径，先引导配置路径，配置完自动拉入常用
             if not exe_path:
@@ -4283,7 +4377,72 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         else:
             self.log("❌ 自动防抖保存配置文件失败。")
 
-    def apply_current_layout(self):
+    def apply_window_layout_by_title(self, title: str, pos_str: str = None) -> tuple:
+        """
+        根据窗口标题（支持 .py / .exe 互相匹配）将该窗口移动到指定或当前方案中配置的位置。
+        返回: (status: str, message: str) 其中 status 为 'moved', 'same', 'not_found', 'error'
+        """
+        import time
+        if not pos_str or not pos_str.strip():
+            current_res = self.get_current_selected_resolution()
+            if current_res:
+                mapping = self.config_manager.get_resolution_mapping(current_res)
+                if title in mapping:
+                    pos_str = mapping[title].split('|')[0].strip()
+        
+        if not pos_str:
+            return "error", f"未找到窗口 '{title}' 的坐标配置"
+            
+        pos_str = pos_str.strip().split('|')[0].strip()
+        try:
+            cfg_parts = [int(p.strip()) for p in pos_str.split(',')]
+        except Exception:
+            cfg_parts = []
+            
+        if len(cfg_parts) != 4:
+            return "error", f"坐标格式错误: {pos_str}"
+            
+        titles_to_try = [title]
+        if title.endswith('.py') and not title.startswith('py'):
+            titles_to_try.append(title.replace('.py', '.exe'))
+        elif title.endswith('.exe'):
+            titles_to_try.append(title.replace('.exe', '.py'))
+            
+        found_any = False
+        moved_any = False
+        same_any = False
+        
+        for t in titles_to_try:
+            hwnds = core.find_windows_by_title_safe(t)
+            if hwnds:
+                found_any = True
+                for hwnd, actual_title in hwnds:
+                    left, top, w, h = core.get_window_rect(hwnd)
+                    is_minimized = (left < -10000 and top < -10000)
+                    is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
+                    
+                    if is_minimized or is_diff:
+                        if is_minimized:
+                            core.user32.ShowWindow(hwnd, core.SW_SHOWNORMAL)
+                            time.sleep(0.1)
+                        if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
+                            self.log(f"✅ 成功对齐窗口: '{actual_title}' -> [{pos_str}]")
+                            moved_any = True
+                    else:
+                        self.log(f"➖ 窗口 '{actual_title}' 位置已是一致 [{pos_str}]")
+                        same_any = True
+                break
+                
+        if not found_any:
+            return "not_found", f"桌面未运行窗口: '{title}'"
+        elif moved_any:
+            self.refresh_current_positions()
+            return "moved", f"已成功将 '{title}' 移动到配置坐标 [{pos_str}]"
+        elif same_any:
+            return "same", f"窗口 '{title}' 当前位置已与配置一致"
+        return "same", "位置无变动"
+
+    def apply_current_layout(self, show_tray_message: bool = False):
         """一键应用当前方案的所有规则到桌面运行中的窗口 (仅对位置有变动的窗口执行操作)"""
         current_res = self.get_current_selected_resolution()
         if not current_res:
@@ -4295,6 +4454,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         mapping = self.config_manager.get_resolution_mapping(current_res)
         if not mapping:
             self.log("配置为空，没有需要移动的窗口。")
+            if show_tray_message and hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "桌面窗口布局管理器",
+                    f"方案 [{current_res}] 无任何窗口规则配置",
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                    2500
+                )
             return
             
         moved_count = 0
@@ -4354,8 +4520,17 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 elif skip_any:
                     skip_count += 1
                     
-        self.log(f"🏁 布局应用完毕！移动/调整 {moved_count} 个，保持/跳过 {skip_count} 个，忽略 {missing_count} 个未启动。")
+        summary_msg = f"🏁 布局应用完毕！移动/调整 {moved_count} 个，保持/跳过 {skip_count} 个，忽略 {missing_count} 个未启动。"
+        self.log(summary_msg)
         self.refresh_current_positions()
+        
+        if show_tray_message and hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                "桌面窗口布局管理器",
+                f"方案 [{current_res}] 布局应用完成！\n移动: {moved_count} | 保持: {skip_count} | 未运行: {missing_count}",
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+                3000
+            )
 
 
 def main(hide_window: bool = False):
