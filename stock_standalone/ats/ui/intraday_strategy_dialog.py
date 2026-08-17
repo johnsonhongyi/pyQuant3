@@ -46,11 +46,29 @@ from signal_types import SignalPoint, SignalType, SignalSource
 logger = logging.getLogger("IntradayStrategyDialog")
 
 
+def _format_cell_text(val) -> str:
+    """安全格式化单元格文本"""
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple, set)):
+        return "；".join(str(x) for x in val)
+    return str(val)
+
+
+def _format_tooltip_text(val) -> Optional[str]:
+    """安全格式化 Tooltip 文本"""
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple, set)):
+        return "\n".join(str(x) for x in val)
+    return str(val)
+
+
 def _set_or_update_table_item(
     table: QTableWidget,
     row: int,
     col: int,
-    text: str,
+    text: Any,
     fg_color=None,
     bg_color=None,
     align=None,
@@ -61,10 +79,14 @@ def _set_or_update_table_item(
     安全设置或更新 QTableWidget 单元格 Item。
     若 Item 已经存在，则只调用 setText / setForeground 等属性更新，
     绝不重复调用 setItem()，彻底避免 'cannot insert an item that is already owned' 警告。
+    支持自动格式化 list / tuple 类型的 text 与 tooltip。
     """
+    str_text = _format_cell_text(text)
+    str_tooltip = _format_tooltip_text(tooltip)
+
     item = table.item(row, col)
     if item is None:
-        item = QTableWidgetItem(str(text))
+        item = QTableWidgetItem(str_text)
         if fg_color is not None:
             item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
         if bg_color is not None:
@@ -73,11 +95,11 @@ def _set_or_update_table_item(
             item.setTextAlignment(align)
         if font is not None:
             item.setFont(font)
-        if tooltip is not None:
-            item.setToolTip(tooltip)
+        if str_tooltip is not None:
+            item.setToolTip(str_tooltip)
         table.setItem(row, col, item)
     else:
-        item.setText(str(text))
+        item.setText(str_text)
         if fg_color is not None:
             item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
         if bg_color is not None:
@@ -86,8 +108,8 @@ def _set_or_update_table_item(
             item.setTextAlignment(align)
         if font is not None:
             item.setFont(font)
-        if tooltip is not None:
-            item.setToolTip(tooltip)
+        if str_tooltip is not None:
+            item.setToolTip(str_tooltip)
     return item
 
 
@@ -776,11 +798,13 @@ class IntegratedTradingStrategyPanel(QWidget):
 
         strat_id = strategy.get("id", "") if strategy else ""
         strat_type = strategy.get("strategy_type", "") if strategy else ""
+        target_newstock_codes = self.engine.get_all_target_codes()
+        has_stock_spec = bool(strategy and ("stock_spec" in strategy or strategy.get("schema_version") == "v1.0-unified"))
         is_daily_strategy = (
             strat_type in ("daily_surge", "general", "daily")
             or "daily" in strat_id
             or "surge" in strat_id
-            or (c_clean not in ("688826", "920199") and not strat_id.startswith("strategy_pinzhun") and not strat_id.startswith("strategy_a_") and not strat_id.startswith("strategy_b_"))
+            or (not has_stock_spec and c_clean not in target_newstock_codes)
         )
 
         # 1. 评估 7 节点动态打分与形态
@@ -1017,8 +1041,40 @@ class IntegratedTradingStrategyPanel(QWidget):
         def _handler(val: float):
             if not self._is_updating:
                 self.engine.set_node_custom_param(self.code, node_id, val)
+                # 反向同步到顶部的估价微调控件 (DoubleSpinBox)
+                parent = self.parent()
+                while parent:
+                    if hasattr(parent, 'spin_eval_open') and hasattr(parent, 'spin_eval_price'):
+                        if node_id == "node_1_auction":
+                            parent.spin_eval_open.blockSignals(True)
+                            parent.spin_eval_open.setValue(val)
+                            parent.spin_eval_open.blockSignals(False)
+                            # 同步更新 open_price
+                            state = self.engine._get_stock_state(self.code, val)
+                            state["open_price"] = val
+                        elif node_id == "node_2_first_wave":
+                            parent.spin_eval_price.blockSignals(True)
+                            parent.spin_eval_price.setValue(val)
+                            parent.spin_eval_price.blockSignals(False)
+                        elif node_id == "node_3_turnover":
+                            parent.spin_eval_turnover.blockSignals(True)
+                            parent.spin_eval_turnover.setValue(val)
+                            parent.spin_eval_turnover.blockSignals(False)
+                        break
+                    parent = parent.parent()
                 self.manual_score_signal.emit()
         return _handler
+
+    def _on_reset_node_custom_params(self):
+        """【🔄 重置校准】清空节点自定义参数与人工评分，恢复系统标准参考价格"""
+        self.engine.reset_node_custom_params(self.code)
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, '_sync_eval_spins_for_current_stock'):
+                parent._sync_eval_spins_for_current_stock()
+                break
+            parent = parent.parent()
+        self.manual_score_signal.emit()
 
 
 class PinzhunLadderStandaloneWindow(QMainWindow):
@@ -1033,6 +1089,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.selected_strategy_id: Optional[str] = None
         self.selected_data_source: str = "TDX_REALTIME"  # TDX_REALTIME | ATS_IPC | MANUAL_EVAL
         self._is_stay_on_top = False
+        self.tdx_log_dialog = None
 
         if isinstance(code, bool) or not code:
             json_codes = self.engine.get_all_target_codes()
@@ -1118,7 +1175,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         btn_refresh = QPushButton("⚡ 刷新")
         btn_refresh.setStyleSheet("background-color: #0e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
-        btn_refresh.clicked.connect(self._load_mock_or_live_data)
+        btn_refresh.clicked.connect(self._on_manual_refresh)
 
         self.btn_topmost = QPushButton("📌 置顶: 关")
         self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
@@ -1152,13 +1209,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         hdr_layout.addWidget(btn_close)
         layout.addLayout(hdr_layout)
 
-        # 2. 顶部第二行：【💡 估价自动评估 & 手动输入快速推演栏】
+        # 2. 顶部第二行：【💡 估价自动评估 & 手动输入快速推演栏 (带默认关闭开关)】
         eval_bar_layout = QHBoxLayout()
         eval_bar_layout.setContentsMargins(0, 0, 0, 0)
         eval_bar_layout.setSpacing(8)
 
-        lbl_eval_tips = QLabel("💡 估价自动评估 / 异常手动输入:")
-        lbl_eval_tips.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9pt;")
+        self.chk_manual_eval = QCheckBox("💡 开启手动估价/异常推演 (默认关闭)")
+        self.chk_manual_eval.setChecked(False) # 默认关闭，绝对优先保证实盘自动获取不受干扰
+        self.chk_manual_eval.setStyleSheet("QCheckBox { color: #ffd700; font-weight: bold; font-size: 8.5pt; } QCheckBox::indicator:unchecked { border: 1px solid #777799; background: #1a1a24; } QCheckBox::indicator:checked { border: 1px solid #00ff88; background: #00ff88; }")
+        self.chk_manual_eval.toggled.connect(self._on_toggle_manual_eval)
 
         lbl_open_p = QLabel("开盘估价:")
         lbl_open_p.setStyleSheet("color: #aad4ff; font-size: 8.5pt;")
@@ -1168,6 +1227,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.spin_eval_open.setSingleStep(5.0)
         self.spin_eval_open.setSuffix(" 元")
         self.spin_eval_open.setStyleSheet("background-color: #1a1a24; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px;")
+        self.spin_eval_open.setEnabled(False) # 默认禁用
         self.spin_eval_open.valueChanged.connect(self._on_eval_param_changed)
 
         lbl_curr_p = QLabel("当前现价/估价:")
@@ -1178,6 +1238,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.spin_eval_price.setSingleStep(5.0)
         self.spin_eval_price.setSuffix(" 元")
         self.spin_eval_price.setStyleSheet("background-color: #1a1a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px;")
+        self.spin_eval_price.setEnabled(False) # 默认禁用
         self.spin_eval_price.valueChanged.connect(self._on_eval_param_changed)
 
         lbl_to_p = QLabel("换手率估算:")
@@ -1190,19 +1251,43 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.spin_eval_turnover.setStyleSheet("background-color: #1a1a24; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px;")
         self.spin_eval_turnover.valueChanged.connect(self._on_eval_param_changed)
 
-        btn_auto_calc = QPushButton("⚡ 根据估价全自动评分 & 策略推演")
-        btn_auto_calc.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 12px;")
-        btn_auto_calc.clicked.connect(self._on_apply_custom_eval)
+        self.btn_auto_calc = QPushButton("⚡ 根据估价全自动评分 & 策略推演")
+        self.btn_auto_calc.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 12px;")
+        self.btn_auto_calc.setEnabled(False) # 默认禁用
+        self.btn_auto_calc.clicked.connect(self._on_apply_custom_eval)
 
-        eval_bar_layout.addWidget(lbl_eval_tips)
+        # 📜 TDX 数据获取日志与异常诊断按钮 (与龙头榜样式完全一致)
+        self.btn_tdx_log = QPushButton("📜 TDX日志")
+        self.btn_tdx_log.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tdx_log.setToolTip("查看通达信 (pytdx) 行情拉取实时日志、非交易休市状态与网络诊断")
+        self.btn_tdx_log.setStyleSheet("""
+            QPushButton { 
+                background-color: #1a2233; 
+                color: #aad4ff; 
+                border: 1px solid #334466; 
+                border-radius: 3px; 
+                padding: 3px 10px; 
+                font-size: 8.5pt; 
+                font-weight: bold; 
+            }
+            QPushButton:hover { 
+                background-color: #2b3855; 
+                color: #00ffcc; 
+                border: 1px solid #00ffcc; 
+            }
+        """)
+        self.btn_tdx_log.clicked.connect(self._open_tdx_log_dialog)
+
+        eval_bar_layout.addWidget(self.chk_manual_eval)
         eval_bar_layout.addWidget(lbl_open_p)
         eval_bar_layout.addWidget(self.spin_eval_open)
         eval_bar_layout.addWidget(lbl_curr_p)
         eval_bar_layout.addWidget(self.spin_eval_price)
         eval_bar_layout.addWidget(lbl_to_p)
         eval_bar_layout.addWidget(self.spin_eval_turnover)
-        eval_bar_layout.addWidget(btn_auto_calc)
+        eval_bar_layout.addWidget(self.btn_auto_calc)
         eval_bar_layout.addStretch()
+        eval_bar_layout.addWidget(self.btn_tdx_log)
 
         layout.addLayout(eval_bar_layout)
 
@@ -1234,15 +1319,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.integrated_panel.manual_score_signal.connect(self._load_mock_or_live_data)
         self.tab_widget.addTab(self.integrated_panel, "⚡ 分时阶梯交易策略 & 7节点动态评估一体化工作台")
 
-        # Tab 2: 8/18 开盘全天分时模拟回测与情景演练器
+        # Tab 2: 开盘全天分时模拟回测与情景演练器
         self.sim_panel = IntradaySimulationWidget(self)
         self.sim_panel.tick_emitted_signal.connect(self._on_simulation_tick_emitted)
-        self.tab_widget.addTab(self.sim_panel, "🎮 8/18 上市全天分时模拟回测与情景演练 (A/B/C/D型)")
+        self.tab_widget.addTab(self.sim_panel, "🎮 上市全天分时模拟回测与情景演练 (A/B/C/D型)")
 
-        # Tab 3: 频准激光 8/18 专属盯盘模板 & 综合评分明细汇总
+        # Tab 3: 专属盯盘模板 & 综合评分明细汇总
         self.pinzhun_monitor_panel = PinzhunLaserMonitorWidget(self)
         self.pinzhun_monitor_panel.score_changed_signal.connect(self._load_mock_or_live_data)
-        self.tab_widget.addTab(self.pinzhun_monitor_panel, "📋 频准激光 8/18 盯盘模板 & 综合评分明细汇总")
+        self.tab_widget.addTab(self.pinzhun_monitor_panel, f"📋 【{self.name}】专属盯盘模板 & 综合评分汇总")
 
         layout.addWidget(self.tab_widget, 1)
 
@@ -1265,8 +1350,48 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
         self.show()
 
+    def _on_toggle_manual_eval(self, checked: bool):
+        """【开关】手动估价/异常推演开关切换：默认关闭，防止干扰实盘"""
+        # 更新输入框与推演按钮启用状态
+        self.spin_eval_open.setEnabled(checked)
+        self.spin_eval_price.setEnabled(checked)
+        self.spin_eval_turnover.setEnabled(checked)
+        self.btn_auto_calc.setEnabled(checked)
+
+        target_source = "MANUAL_EVAL" if checked else "TDX_REALTIME"
+        if self.selected_data_source != target_source:
+            self.combo_source.blockSignals(True)
+            idx = self.combo_source.findData(target_source)
+            if idx >= 0:
+                self.combo_source.setCurrentIndex(idx)
+            self.selected_data_source = target_source
+            self.combo_source.blockSignals(False)
+
+        if not checked:
+            # 关闭手动估价时，重置节点覆盖参数，完全恢复实盘自动拉取
+            self.engine.reset_node_custom_params(self.code)
+            self.lbl_tdx_status.show()
+            self._update_tdx_status_badge()
+        else:
+            self.lbl_tdx_status.setText("✍️ 估价模式")
+            self.lbl_tdx_status.show()
+            self._on_eval_param_changed()
+            return
+
+        self._load_mock_or_live_data()
+
     def _on_source_changed(self, index: int):
         self.selected_data_source = self.combo_source.itemData(index)
+        is_manual = (self.selected_data_source == "MANUAL_EVAL")
+        if hasattr(self, 'chk_manual_eval'):
+            self.chk_manual_eval.blockSignals(True)
+            self.chk_manual_eval.setChecked(is_manual)
+            self.spin_eval_open.setEnabled(is_manual)
+            self.spin_eval_price.setEnabled(is_manual)
+            self.spin_eval_turnover.setEnabled(is_manual)
+            self.btn_auto_calc.setEnabled(is_manual)
+            self.chk_manual_eval.blockSignals(False)
+
         if self.selected_data_source == "TDX_REALTIME":
             self.lbl_tdx_status.show()
             self._update_tdx_status_badge()
@@ -1278,22 +1403,64 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._load_mock_or_live_data()
 
     def _on_eval_param_changed(self):
-        """当用户修改开盘估价、现价估价或换手率时自动触发评分"""
-        if self.selected_data_source == "MANUAL_EVAL":
-            self._load_mock_or_live_data()
+        """当用户修改开盘估价、现价估价或换手率时自动同步 7 节点校准参数并触发评分"""
+        if not getattr(self, 'chk_manual_eval', None) or not self.chk_manual_eval.isChecked():
+            return
+        if hasattr(self, 'spin_eval_open'):
+            op = self.spin_eval_open.value()
+            tp = self.spin_eval_price.value()
+            to_rate = self.spin_eval_turnover.value()
+            self.open_price = op
+            # 实时同步到引擎中 7 节点对应的节点校准槽位
+            self.engine.set_node_custom_param(self.code, "node_1_auction", op)
+            self.engine.set_node_custom_param(self.code, "node_2_first_wave", tp)
+            self.engine.set_node_custom_param(self.code, "node_3_turnover", to_rate)
+            # 同步更新股票状态
+            state = self.engine._get_stock_state(self.code, op)
+            state["open_price"] = op
+            if tp > state.get("max_price", 0.0):
+                state["max_price"] = tp
+        self._load_mock_or_live_data()
 
     def _on_apply_custom_eval(self):
-        """手动点击估价评估按钮：一键切换到估价模式并全自动打分"""
+        """手动点击估价评估按钮：一键开启估价模式并全自动打分"""
+        if hasattr(self, 'chk_manual_eval'):
+            self.chk_manual_eval.setChecked(True)
         idx = self.combo_source.findData("MANUAL_EVAL")
         if idx >= 0:
             self.combo_source.setCurrentIndex(idx)
         self.selected_data_source = "MANUAL_EVAL"
+        self._on_eval_param_changed()
+
+    def _on_manual_refresh(self):
+        """用户手动点击【⚡ 刷新】按钮：重置 TDX 静默状态并立即拉取"""
+        if self.tdx_fetcher:
+            self.tdx_fetcher.reset_code_dormancy(self.code)
         self._load_mock_or_live_data()
+
+    def _open_tdx_log_dialog(self):
+        """打开/激活通达信高频数据获取诊断日志独立窗口"""
+        from PyQt6.sip import isdeleted
+        from ats.ui.hot_sector_leaderboard import TDXFetchLogDialog
+        if self.tdx_log_dialog is not None and not isdeleted(self.tdx_log_dialog):
+            self.tdx_log_dialog.show()
+            self.tdx_log_dialog.raise_()
+            self.tdx_log_dialog.activateWindow()
+            return
+
+        self.tdx_log_dialog = TDXFetchLogDialog(parent=self)
+        self.tdx_log_dialog.show()
+        self.tdx_log_dialog.raise_()
+        self.tdx_log_dialog.activateWindow()
 
     def _update_tdx_status_badge(self):
         if self.tdx_fetcher and self.tdx_fetcher.current_host:
             h = self.tdx_fetcher.current_host
-            self.lbl_tdx_status.setText(f"🟢 TDX: {h[1]}:{h[2]} ({self.tdx_fetcher.latency_ms:.0f}ms)")
+            is_dormant = self.code in getattr(self.tdx_fetcher, '_unlisted_or_dormant_codes', set())
+            if is_dormant:
+                self.lbl_tdx_status.setText(f"🟡 TDX: 暂无成交 (30s静默)")
+            else:
+                self.lbl_tdx_status.setText(f"🟢 TDX: {h[1]}:{h[2]} ({self.tdx_fetcher.latency_ms:.0f}ms)")
         else:
             self.lbl_tdx_status.setText("🔴 TDX: 未连接")
 
@@ -1337,6 +1504,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         if self.code not in self._known_codes:
             self._known_codes.append(self.code)
 
+        # 切换标的时重置该标的的 TDX 静默保护状态
+        if self.tdx_fetcher:
+            self.tdx_fetcher.reset_code_dormancy(self.code)
+
         if isinstance(name, bool) or not name or name == "未知" or name == c_clean:
             parent = self.parent()
             if parent and hasattr(parent, 'get_stock_name'):
@@ -1358,6 +1529,9 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         # 刷新并同步标的下拉框
         self._populate_code_combo()
+        self._sync_eval_spins_for_current_stock()
+        if hasattr(self, 'tab_widget') and self.tab_widget.count() > 2:
+            self.tab_widget.setTabText(2, f"📋 【{self.name}】专属盯盘模板 & 综合评分汇总")
         self._load_mock_or_live_data()
 
     def _populate_code_combo(self):
@@ -1402,6 +1576,44 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 break
         self.combo_code.blockSignals(False)
 
+    def _sync_eval_spins_for_current_stock(self):
+        """根据当前标的的策略规格（stock_spec / price_ladder）自动重置顶部预估价格与换手率，并清空旧节点的校准缓存"""
+        if not hasattr(self, 'spin_eval_open') or not hasattr(self, 'spin_eval_price'):
+            return
+
+        spec = self.engine.get_stock_ladder_spec(self.code)
+        issue_p = float(spec.get("issue_price", 100.0))
+        price_ladder = spec.get("price_ladder", [])
+
+        # 默认开盘估价取 +200% 强势基准（如果有价格阶梯则取第2档价格，否则 issue_p * 3.0）
+        suggested_open = round(issue_p * 3.0, 2)
+        if len(price_ladder) >= 2 and "price" in price_ladder[1]:
+            suggested_open = float(price_ladder[1]["price"])
+        elif len(price_ladder) >= 1 and "price" in price_ladder[0]:
+            suggested_open = float(price_ladder[0]["price"])
+
+        # 默认现价估价取开盘价 * 1.10（较开盘冲高 10%）
+        suggested_price = round(suggested_open * 1.10, 2)
+        suggested_turnover = 62.5
+
+        # 同步重置该代码的节点校准缓存
+        self.engine.set_node_custom_param(self.code, "node_1_auction", suggested_open)
+        self.engine.set_node_custom_param(self.code, "node_2_first_wave", suggested_price)
+        self.engine.set_node_custom_param(self.code, "node_3_turnover", suggested_turnover)
+        state = self.engine._get_stock_state(self.code, suggested_open)
+        state["open_price"] = suggested_open
+        state["max_price"] = max(suggested_open, suggested_price)
+
+        self.spin_eval_open.blockSignals(True)
+        self.spin_eval_price.blockSignals(True)
+        self.spin_eval_turnover.blockSignals(True)
+        self.spin_eval_open.setValue(suggested_open)
+        self.spin_eval_price.setValue(suggested_price)
+        self.spin_eval_turnover.setValue(suggested_turnover)
+        self.spin_eval_open.blockSignals(False)
+        self.spin_eval_price.blockSignals(False)
+        self.spin_eval_turnover.blockSignals(False)
+
     def _on_combo_strategy_changed(self, index: int):
         selected_strat_id = self.combo_strategy.itemData(index)
         self.selected_strategy_id = selected_strat_id
@@ -1420,17 +1632,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             # 刷新并同步标的下拉框
             self._populate_code_combo()
 
-            # 重置估价输入框为该策略预设基准价格
-            if self.code == "688826":
-                self.spin_eval_open.blockSignals(True)
-                self.spin_eval_price.blockSignals(True)
-                self.spin_eval_turnover.blockSignals(True)
-                self.spin_eval_open.setValue(565.0)
-                self.spin_eval_price.setValue(625.0)
-                self.spin_eval_turnover.setValue(62.5)
-                self.spin_eval_open.blockSignals(False)
-                self.spin_eval_price.blockSignals(False)
-                self.spin_eval_turnover.blockSignals(False)
+            # 动态重置估价输入框为当前标的基准价格
+            self._sync_eval_spins_for_current_stock()
+
+            if hasattr(self, 'tab_widget') and self.tab_widget.count() > 2:
+                self.tab_widget.setTabText(2, f"📋 【{self.name}】专属盯盘模板 & 综合评分明细汇总")
 
         self._load_mock_or_live_data()
 
@@ -1442,6 +1648,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 self._known_codes = []
             if self.code not in self._known_codes:
                 self._known_codes.append(self.code)
+
+            # 切换标的时重置该标的的 TDX 静默保护状态
+            if self.tdx_fetcher:
+                self.tdx_fetcher.reset_code_dormancy(self.code)
 
             parent = self.parent()
             if parent and hasattr(parent, 'get_stock_name'):
@@ -1464,16 +1674,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                         break
                 self.combo_strategy.blockSignals(False)
 
-            if self.code == "688826":
-                self.spin_eval_open.blockSignals(True)
-                self.spin_eval_price.blockSignals(True)
-                self.spin_eval_turnover.blockSignals(True)
-                self.spin_eval_open.setValue(565.0)
-                self.spin_eval_price.setValue(625.0)
-                self.spin_eval_turnover.setValue(62.5)
-                self.spin_eval_open.blockSignals(False)
-                self.spin_eval_price.blockSignals(False)
-                self.spin_eval_turnover.blockSignals(False)
+            # 动态重置估价输入框为当前标的基准价格
+            self._sync_eval_spins_for_current_stock()
+
+            if hasattr(self, 'tab_widget') and self.tab_widget.count() > 2:
+                self.tab_widget.setTabText(2, f"📋 【{self.name}】专属盯盘模板 & 综合评分明细汇总")
 
             self._load_mock_or_live_data()
 
@@ -1578,6 +1783,9 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             if p_name and p_name != "未知" and p_name != c_clean:
                 resolved_name = p_name
 
+        spec = self.engine.get_stock_ladder_spec(c_clean)
+        float_mv_yi = float(spec.get("float_mv_yi", 15.0))
+
         # 1. 若用户选择【✍️ 手动估价/推演模式】，直接由顶部估价控件驱动自动评分
         if getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
             op = self.spin_eval_open.value()
@@ -1586,7 +1794,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             hp = max(op, tp, op * 1.13)
             lp = min(op, tp)
             vw = (op + tp) / 2.0
-            amt = float(to_rate / 100.0 * 14.24 * 1e8)
+            amt = float(to_rate / 100.0 * float_mv_yi * 1e8)
             b1 = tp
             lc = op
             return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
@@ -1645,7 +1853,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             turnover_rate = self.spin_eval_turnover.value()
             high_price = max(open_price, trade_price, open_price * 1.13)
             low_price = min(open_price, trade_price)
-            amount_val = float(turnover_rate / 100.0 * 14.24 * 1e8)
+            amount_val = float(turnover_rate / 100.0 * float_mv_yi * 1e8)
             bid1_price = trade_price - 0.5
             vwap_price = round((open_price + trade_price) / 2.0, 2)
             last_close = open_price
@@ -1800,8 +2008,9 @@ IntradayStrategyDialog = PinzhunLadderStandaloneWindow
 # 补充 PinzhunLaserMonitorWidget 类的定义供 Tab 3 使用（带滚动条位置保持保护）
 class PinzhunLaserMonitorWidget(QWidget):
     """
-    频准激光（688826）8/18 上市盯盘与动态评分实操看板组件 (Tab 3)
+    新股上市专属盯盘与动态评分实操看板组件 (Tab 3)
     全自动由实时推送的 df / TDX 秒级行情获取换手率、成交量、成交额、最高最低价并自动填表打分
+    100% 动态自适应不同标的（688826、688835、688836等）的发行价、阶梯价位与流通盘
     """
     score_changed_signal = pyqtSignal()
 
@@ -1809,6 +2018,7 @@ class PinzhunLaserMonitorWidget(QWidget):
         super().__init__(parent)
         self.engine = IntradayStrategyEngine.get_instance()
         self.code = "688826"
+        self._current_spec_code = None
         self._is_updating = False
         self._init_ui()
 
@@ -1827,38 +2037,15 @@ class PinzhunLaserMonitorWidget(QWidget):
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.setSpacing(8)
 
-        # 1. 🔑 关键阈值速查与量能档位面板
-        card_spec = QGroupBox("🔑 关键阈值速查（发行价 186.88 元 | 首日流通≈761.78万股 | 流通市值≈14.24亿 | 中签率 0.02014%）")
-        card_spec.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 6px; margin-top: 6px; font-weight: bold; color: #38bdf8; background-color: #14141d; }")
-        spec_layout = QGridLayout(card_spec)
-        spec_layout.setContentsMargins(10, 14, 10, 8)
-        spec_layout.setSpacing(8)
+        # 1. 🔑 关键阈值速查与量能档位面板（动态容器）
+        self.card_spec = QGroupBox("🔑 关键阈值速查与量能档位面板")
+        self.card_spec.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 6px; margin-top: 6px; font-weight: bold; color: #38bdf8; background-color: #14141d; }")
+        self.spec_layout = QGridLayout(self.card_spec)
+        self.spec_layout.setContentsMargins(10, 14, 10, 8)
+        self.spec_layout.setSpacing(8)
 
-        lbl_l1 = QLabel("<b>+100%</b>: 373.76元 (翻倍)")
-        lbl_l1.setStyleSheet("color: #00ff88; font-size: 9.5pt;")
-        lbl_l2 = QLabel("<b>+200%</b>: 560.64元 (强势基准)")
-        lbl_l2.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9.5pt;")
-        lbl_l3 = QLabel("<b>+300%</b>: 747.52元 (高频发区间)")
-        lbl_l3.setStyleSheet("color: #ffaa44; font-size: 9.5pt;")
-        lbl_l4 = QLabel("<b>+400%</b>: 934.40元 (强势上限)")
-        lbl_l4.setStyleSheet("color: #ff5555; font-size: 9.5pt;")
-        lbl_l5 = QLabel("<b>+500%</b>: 1121.28元 (极端行情)")
-        lbl_l5.setStyleSheet("color: #ff00ff; font-size: 9.5pt;")
-
-        spec_layout.addWidget(lbl_l1, 0, 0)
-        spec_layout.addWidget(lbl_l2, 0, 1)
-        spec_layout.addWidget(lbl_l3, 0, 2)
-        spec_layout.addWidget(lbl_l4, 0, 3)
-        spec_layout.addWidget(lbl_l5, 0, 4)
-
-        lbl_t1 = QLabel("<b>换手档位</b>: 弱(<40%) | 标准(50-70%健康) | 高(70-90%充分) | 极高(>90%过热)")
-        lbl_t1.setStyleSheet("color: #a0a0c0; font-size: 9pt;")
-        self.lbl_intensity = QLabel("<b>资金强度</b>: 成交额/流通市值(14.24亿) > 2.5x 为极强 [当前: --]")
-        self.lbl_intensity.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 9pt;")
-
-        spec_layout.addWidget(lbl_t1, 1, 0, 1, 3)
-        spec_layout.addWidget(self.lbl_intensity, 1, 3, 1, 2)
-        content_layout.addWidget(card_spec)
+        self._refresh_spec_card(self.code)
+        content_layout.addWidget(self.card_spec)
 
         # 2. 🎯 七节点实盘观察表
         node_group = QGroupBox("🎯 七节点实盘观察表（通过行情/估价自动解析换手率、成交量与价格，自动填表打分）")
@@ -1938,24 +2125,75 @@ class PinzhunLaserMonitorWidget(QWidget):
         guide_layout = QVBoxLayout(guide_group)
         guide_layout.setContentsMargins(8, 12, 8, 8)
 
-        guide_txt = (
-            "1. <b>节点观察</b>: 每个时间节点到达时，系统自动抓取价格/涨幅/换手/量能/VWAP；<br>"
-            "2. <b>信号判定</b>: 自动判定 \"强\" / \"中\" / \"弱\" 并高亮呈现；<br>"
-            "3. <b>节点评分</b>: 强=8-10分，中=5-7分，弱=0-4分；<br>"
-            "4. <b>加权得分</b>: 自动计算 (加权得分 = 节点分 × 权重)；<br>"
-            "5. <b>形态判定</b>: <b>综合得分≥8.0</b> → A型超强趋势(★关注竞价接力)；<b>6.5-8.0</b> → B型(★观察回踩)；<b>5.0-6.5</b> → C型(★谨慎)；<b><5.0</b> → D/E型(★回避)；<br>"
-            "6. <b>重点监控</b>: <b>成交额/流通市值(14.24亿) > 2.5x 为极强</b>；<b>收盘/最高 > 90% 为超强锁仓</b>；<br>"
-            "7. <b>同板块联动</b>: 同步观察半导体设备与激光板块龙头走势，确认资金协同性。"
-        )
-        lbl_guide = QLabel(guide_txt)
-        lbl_guide.setTextFormat(Qt.TextFormat.RichText)
-        lbl_guide.setStyleSheet("color: #b0b0c8; font-size: 8.5pt; line-height: 140%;")
-        lbl_guide.setWordWrap(True)
-        guide_layout.addWidget(lbl_guide)
+        self.lbl_guide = QLabel()
+        self.lbl_guide.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_guide.setStyleSheet("color: #b0b0c8; font-size: 8.5pt; line-height: 140%;")
+        self.lbl_guide.setWordWrap(True)
+        self._refresh_guide_text(self.code)
+        guide_layout.addWidget(self.lbl_guide)
         content_layout.addWidget(guide_group)
 
         self.scroll_area.setWidget(content_widget)
         main_layout.addWidget(self.scroll_area)
+
+    def _refresh_spec_card(self, code: str):
+        """根据当前标的重新渲染顶部阈值卡片（支持5档/6档价格阶梯与不同流通盘）"""
+        c_clean = str(code).zfill(6)
+        spec = self.engine.get_stock_ladder_spec(c_clean)
+        issue_p = float(spec.get("issue_price", 100.0))
+        float_shares_wan = float(spec.get("float_shares_wan", 1000.0))
+        float_mv = float(spec.get("float_mv_yi", 15.0))
+        lottery = spec.get("lottery_rate", "--")
+        name = spec.get("name", resolve_stock_name(c_clean))
+
+        self.card_spec.setTitle(
+            f"🔑 【{name}】关键阈值速查（发行价 {issue_p:.2f} 元 | 流通股≈{float_shares_wan:.2f}万股 | 流通市值≈{float_mv:.2f}亿 | 中签率 {lottery}）"
+        )
+
+        # 清空已有子控件
+        while self.spec_layout.count():
+            item = self.spec_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        price_ladder = spec.get("price_ladder", [])
+        colors = ["#00ff88", "#ffd700", "#ffaa44", "#ff5555", "#ff00ff", "#00ffff"]
+        cols = max(len(price_ladder), 5)
+
+        for i, ld in enumerate(price_ladder):
+            p_val = float(ld.get("price", 0.0))
+            p_name = ld.get("name", "")
+            p_mean = ld.get("meaning", "")
+            lbl = QLabel(f"<b>{p_name}</b>: {p_val:.2f}元 ({p_mean})")
+            c_idx = i % len(colors)
+            lbl.setStyleSheet(f"color: {colors[c_idx]}; font-size: 9pt; {'font-weight: bold;' if i==1 else ''}")
+            self.spec_layout.addWidget(lbl, 0, i)
+
+        lbl_t1 = QLabel("<b>换手档位</b>: 弱(<40%) | 标准(50-70%健康) | 高(70-90%充分) | 极高(>90%过热)")
+        lbl_t1.setStyleSheet("color: #a0a0c0; font-size: 9pt;")
+        
+        self.lbl_intensity = QLabel(f"<b>资金强度</b>: 成交额/流通市值({float_mv:.2f}亿) > 2.5x 为极强 [当前: --]")
+        self.lbl_intensity.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 9pt;")
+
+        span_left = max(1, cols - 2)
+        self.spec_layout.addWidget(lbl_t1, 1, 0, 1, span_left)
+        self.spec_layout.addWidget(self.lbl_intensity, 1, span_left, 1, cols - span_left)
+        self._current_spec_code = c_clean
+
+    def _refresh_guide_text(self, code: str):
+        c_clean = str(code).zfill(6)
+        spec = self.engine.get_stock_ladder_spec(c_clean)
+        float_mv = float(spec.get("float_mv_yi", 15.0))
+        guide_txt = (
+            f"1. <b>节点观察</b>: 每个时间节点到达时，系统自动抓取价格/涨幅/换手/量能/VWAP；<br>"
+            f"2. <b>信号判定</b>: 自动判定 \"强\" / \"中\" / \"弱\" 并高亮呈现；<br>"
+            f"3. <b>节点评分</b>: 强=8-10分，中=5-7分，弱=0-4分；<br>"
+            f"4. <b>加权得分</b>: 自动计算 (加权得分 = 节点分 × 权重)；<br>"
+            f"5. <b>形态判定</b>: <b>综合得分≥8.0</b> → A型超强趋势(★关注次日竞价接力)；<b>6.5-8.0</b> → B型(★观察回踩承接)；<b>5.0-6.5</b> → C型(★冲高兑现)；<b><5.0</b> → D/E型(★弱势回避)；<br>"
+            f"6. <b>重点监控</b>: <b>成交额/流通市值({float_mv:.2f}亿) > 2.5x 为极强</b>；<b>收盘/最高 > 90% 为超强锁仓</b>；<br>"
+            f"7. <b>同板块联动</b>: 同步观察关联板块龙头走势，确认资金协同性与做多共识。"
+        )
+        self.lbl_guide.setText(guide_txt)
 
     def _on_reset_scores(self):
         state = self.engine._get_stock_state(self.code, 0.0)
@@ -1976,6 +2214,10 @@ class PinzhunLaserMonitorWidget(QWidget):
     ):
         """全面刷新盯盘看板数据（带全局滚动条锁定保护）"""
         self.code = code
+        c_clean = str(code).zfill(6)
+        if getattr(self, "_current_spec_code", None) != c_clean:
+            self._refresh_spec_card(c_clean)
+            self._refresh_guide_text(c_clean)
 
         # 保护外层 ScrollArea 滚动条位置
         outer_sb = self.scroll_area.verticalScrollBar()
@@ -1998,9 +2240,10 @@ class PinzhunLaserMonitorWidget(QWidget):
         intensity_val = res.get("intensity_ratio", 0.0)
         int_str = f"{intensity_val:.2f}x"
         int_color = "#00ff88" if intensity_val >= 2.5 else "#38bdf8"
-        self.lbl_intensity.setText(
-            f"<b>资金强度</b>: 成交额/流通市值({float_mv:.1f}亿) > 2.5x 为极强 [当前: <font color='{int_color}'>{int_str}</font>]"
-        )
+        if hasattr(self, 'lbl_intensity'):
+            self.lbl_intensity.setText(
+                f"<b>资金强度</b>: 成交额/流通市值({float_mv:.2f}亿) > 2.5x 为极强 [当前: <font color='{int_color}'>{int_str}</font>]"
+            )
 
         node_results = res.get("node_results", [])
         if self.table_nodes.rowCount() != len(node_results):
@@ -2225,18 +2468,35 @@ class IntradaySimulationWidget(QWidget):
         splitter.setSizes([500, 650])
         layout.addWidget(splitter, 1)
 
+    def _get_current_code(self) -> str:
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'code') and getattr(parent, 'code'):
+                return str(getattr(parent, 'code')).zfill(6)
+            parent = parent.parent()
+        return "688826"
+
     def _ensure_scenario_df(self):
         sc_type = self.combo_scenario.currentData()
-        if self.sim_df is None or getattr(self, "_last_sc_type", None) != sc_type:
-            self.sim_df = self.engine.generate_scenario_intraday_df(sc_type, code="688826")
+        cur_code = self._get_current_code()
+        last_code = getattr(self, "_last_code", None)
+        if self.sim_df is None or getattr(self, "_last_sc_type", None) != sc_type or last_code != cur_code:
+            self.sim_df = self.engine.generate_scenario_intraday_df(sc_type, code=cur_code)
             self._last_sc_type = sc_type
+            self._last_code = cur_code
             self.slider_progress.setMaximum(len(self.sim_df) - 1)
         return self.sim_df
 
     def _on_run_full_backtest(self):
         """一键全天秒级回测"""
+        cur_code = self._get_current_code()
+        spec = self.engine.get_stock_ladder_spec(cur_code)
+        issue_p = float(spec.get("issue_price", 100.0))
+        float_mv = float(spec.get("float_mv_yi", 15.0))
+        stock_name = spec.get("name", resolve_stock_name(cur_code))
+
         df = self._ensure_scenario_df()
-        res = self.engine.run_full_day_backtest("688826", df)
+        res = self.engine.run_full_day_backtest(cur_code, df)
 
         final_eval = res.get("final_evaluation", {})
         sigs = res.get("signals", [])
@@ -2244,13 +2504,13 @@ class IntradaySimulationWidget(QWidget):
         rem_ratio = res.get("remaining_ratio", 0.0)
 
         report = (
-            f"=== ⚡ 频准激光（688826）8/18 全天分时模拟回测报告 ===\n"
+            f"=== ⚡ 【{cur_code} {stock_name}】全天分时模拟回测报告 ===\n"
             f"【情景选择】: {self.combo_scenario.currentText()}\n"
-            f"【开盘基准】: {res.get('open_price', 0):.2f} 元 | 发行价: 186.88 元\n"
+            f"【开盘基准】: {res.get('open_price', 0):.2f} 元 | 发行价: {issue_p:.2f} 元\n"
             f"【收盘价格】: {final_eval.get('price', 0):.2f} 元 (较开盘 {final_eval.get('gain_from_open', 0):+.1f}% | 较发行价 {final_eval.get('gain_from_issue', 0):+.1f}%)\n"
             f"【全天最高】: {final_eval.get('high_price', 0):.2f} 元 | 最低: {final_eval.get('low_price', 0):.2f} 元 | VWAP均价: {final_eval.get('vwap', 0):.2f} 元\n"
             f"【全天换手】: {final_eval.get('turnover_rate', 0):.1f}% | 成交金额: {final_eval.get('amount_yi', 0):.2f} 亿元\n"
-            f"【资金强度】: {final_eval.get('intensity_ratio', 0):.2f}x (流通市值14.24亿) | 锁仓比例: {final_eval.get('close_high_ratio', 1)*100:.1f}%\n"
+            f"【资金强度】: {final_eval.get('intensity_ratio', 0):.2f}x (流通市值{float_mv:.2f}亿) | 锁仓比例: {final_eval.get('close_high_ratio', 1)*100:.1f}%\n"
             f"--------------------------------------------------\n"
             f"【🏆 15:00 最终综合评分】: {final_eval.get('total_weighted_score', 0):.2f} 分 (满分10分)\n"
             f"【🎯 最终形态分类】: 【{final_eval.get('pattern', '--')}】\n"

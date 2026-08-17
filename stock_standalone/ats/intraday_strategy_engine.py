@@ -18,6 +18,22 @@ from signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger("IntradayStrategyEngine")
 
+
+def resolve_stock_name(code: str) -> str:
+    """根据股票代码解析标的名称（包含内置专属新股标的与保底格式）"""
+    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
+    names_map = {
+        "688826": "频准激光",
+        "688835": "高凯技术",
+        "688836": "宇树科技",
+        "920199": "倍益康",
+        "688787": "海天瑞声",
+        "300862": "蓝盾光电",
+        "000001": "平安银行"
+    }
+    return names_map.get(c_clean, f"标的_{c_clean}" if c_clean else "新股标的")
+
+
 class IntradayStrategyEngine:
     """分时交易策略与新股阶梯盯盘引擎"""
     _instance = None
@@ -70,22 +86,29 @@ class IntradayStrategyEngine:
 
     def get_stock_ladder_spec(self, code: Optional[str] = None) -> Dict[str, Any]:
         """
-        获取证券阶梯规格配置（优先从 JSON 专属策略中读取，如 688826 频准激光）
+        获取证券阶梯规格配置（优先从 JSON 专属策略中读取，如 688826、688835、688836 等）
         """
-        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else "688826"
-        st = self.auto_select_strategy(0.0, code=c_clean)
-        if st and "stock_spec" in st:
-            return st["stock_spec"]
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
+        if c_clean:
+            st = self.auto_select_strategy(0.0, code=c_clean)
+            if st and "stock_spec" in st:
+                return st["stock_spec"]
 
-        # 默认回退 688826 频准激光标准规格
-        issue_p = 186.88
+        # 若未直接匹配，从全部策略中检索 target_codes 匹配
+        for st in self.strategies:
+            tc_list = [str(x).zfill(6) for x in st.get("target_codes", []) if str(x).strip()]
+            if c_clean in tc_list and "stock_spec" in st:
+                return st["stock_spec"]
+
+        # 保底标准规格
+        issue_p = 100.0
         return {
-            "code": c_clean,
-            "name": "频准激光" if c_clean == "688826" else "新股标的",
+            "code": c_clean or "000000",
+            "name": resolve_stock_name(c_clean) if c_clean else "新股标的",
             "issue_price": issue_p,
-            "float_shares_wan": 761.78,
-            "float_mv_yi": 14.24,
-            "lottery_rate": "0.02014%",
+            "float_shares_wan": 1000.0,
+            "float_mv_yi": 15.0,
+            "lottery_rate": "0.02000%",
             "price_ladder": [
                 {"name": "+100%", "gain_pct": 100.0, "price": round(issue_p * 2.0, 2), "meaning": "翻倍"},
                 {"name": "+200%", "gain_pct": 200.0, "price": round(issue_p * 3.0, 2), "meaning": "强势基准"},
@@ -100,7 +123,7 @@ class IntradayStrategyEngine:
                 {"level": "极高换手", "range": ">90%", "min": 90.0, "max": 999.0, "meaning": "过热/分歧"}
             ],
             "intensity_benchmark": {
-                "metric": "成交额/流通市值(14.24亿)",
+                "metric": "成交额/流通市值(15.0亿)",
                 "threshold": 2.5,
                 "meaning": "资金强度极高"
             }
@@ -203,33 +226,55 @@ class IntradayStrategyEngine:
 
     def get_open_price_tier(self, open_price: float, code: Optional[str] = None) -> Tuple[str, str, str]:
         """
-        开盘价档位速查判定
+        开盘价档位速查判定（100% 动态自适应不同发行价的新股与策略）
         返回: (tier_name, default_strategy_id, action_mode)
         """
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
-        if c_clean == "688826":
-            if open_price >= 560.64:
-                return ("乐观档(+200%基准)", "strategy_pinzhun_laser_688826", "trend_hold")
-            elif open_price >= 467.0:
-                return ("乐观下沿(+150%)", "strategy_pinzhun_laser_688826", "standard")
-            elif open_price >= 373.76:
-                return ("中性档(+100%翻倍)", "strategy_pinzhun_laser_688826", "standard")
-            elif open_price >= 280.0:
-                return ("中性下沿(+50%)", "strategy_pinzhun_laser_688826", "decelerated")
-            else:
-                return ("保守档(<+50%)", "strategy_pinzhun_laser_688826", "hold_rebound")
+        st = None
+        if c_clean:
+            for s in self.strategies:
+                tc = [str(x).zfill(6) for x in s.get("target_codes", []) if str(x).strip()]
+                if c_clean in tc:
+                    st = s
+                    break
 
-        # 通用新股标准档位
+        st_id = st.get("id", "strategy_a_new_stock_batch_sell") if st else "strategy_a_new_stock_batch_sell"
+
+        if st and "stock_spec" in st:
+            spec = st["stock_spec"]
+            issue_p = float(spec.get("issue_price", 0.0))
+            if issue_p > 0:
+                p_200 = issue_p * 3.0  # +200% 强势基准
+                p_150 = issue_p * 2.5  # +150% 乐观下沿
+                p_100 = issue_p * 2.0  # +100% 翻倍中性
+                p_50 = issue_p * 1.5   # +50% 中性下沿
+
+                if open_price >= p_200:
+                    return ("乐观档(+200%基准)", st_id, "trend_hold")
+                elif open_price >= p_150:
+                    return ("乐观下沿(+150%)", st_id, "standard")
+                elif open_price >= p_100:
+                    return ("中性档(+100%翻倍)", st_id, "standard")
+                elif open_price >= p_50:
+                    return ("中性下沿(+50%)", st_id, "decelerated")
+                else:
+                    return ("保守档(<+50%)", st_id, "hold_rebound")
+
+        # 对于通用日常个股策略或非新股标的，按日常标准档位执行
+        if (st and st.get("id") == "strategy_c_daily_surge_ladder") or (c_clean and c_clean not in ["688826", "688835", "688836"]):
+            return ("日常标准档", st_id, "standard")
+
+        # 通用新股/未指定发行价标准档位
         if open_price >= 467.0:
-            return ("乐观档", "strategy_b_new_stock_trend_hold", "trend_hold")
+            return ("乐观档", st_id, "trend_hold")
         elif open_price >= 412.0:
-            return ("乐观下沿", "strategy_a_new_stock_batch_sell", "standard")
+            return ("乐观下沿", st_id, "standard")
         elif open_price >= 336.0:
-            return ("中性档", "strategy_a_new_stock_batch_sell", "standard")
+            return ("中性档", st_id, "standard")
         elif open_price >= 280.0:
-            return ("中性下沿", "strategy_a_new_stock_batch_sell", "decelerated")
+            return ("中性下沿", st_id, "decelerated")
         else:
-            return ("保守档", "strategy_a_new_stock_batch_sell", "hold_rebound")
+            return ("保守档", st_id, "hold_rebound")
 
     def get_all_target_codes(self) -> List[str]:
         """获取所有 JSON 策略配置中指定的目标股票代码列表（去除重复与格式化）"""
@@ -414,11 +459,13 @@ class IntradayStrategyEngine:
         current_strat = self.get_strategy_by_id(strategy_id) if strategy_id else self.auto_select_strategy(open_price, code=c_clean)
         strat_id = current_strat.get("id", "") if current_strat else ""
         strat_type = current_strat.get("strategy_type", "") if current_strat else ""
+        target_newstock_codes = self.get_all_target_codes()
+        has_stock_spec = bool(current_strat and ("stock_spec" in current_strat or current_strat.get("schema_version") == "v1.0-unified"))
         is_daily_strategy = (
             strat_type in ("daily_surge", "general", "daily")
             or "daily" in strat_id
             or "surge" in strat_id
-            or (c_clean not in ("688826", "920199") and not strat_id.startswith("strategy_pinzhun") and not strat_id.startswith("strategy_a_") and not strat_id.startswith("strategy_b_"))
+            or (not has_stock_spec and c_clean not in target_newstock_codes)
         )
 
         clean_t = current_time_str[-8:] if len(current_time_str) >= 8 else current_time_str
@@ -529,20 +576,21 @@ class IntradayStrategyEngine:
                         remarks = "开盘低于翻倍线，关注度略显不足"
 
             elif idx == 1: # 9:40 早盘第一波攻击 (校准 9:40 现价)
-                default_p1 = price if price > 0 else (open_price * 1.03 if open_price > 0 else ref_base_p)
+                default_p1 = price if price > 0 else (cur_op * 1.03 if cur_op > 0 else ref_base_p)
                 cur_p1 = float(custom_params.get(n_id, default_p1))
                 input_val = cur_p1
                 input_unit = "元"
-                cur_gain_open = ((cur_p1 - open_price) / open_price * 100.0) if open_price > 0 else 0.0
+                base_op_for_calc = cur_op if cur_op > 0 else open_price
+                cur_gain_open = ((cur_p1 - base_op_for_calc) / base_op_for_calc * 100.0) if base_op_for_calc > 0 else 0.0
                 observed_val = f"现价:{cur_p1:.2f}元 (较开盘{cur_gain_open:+.1f}%)"
 
                 if is_daily_strategy:
                     # 通用日常策略：早盘冲高突破与站稳开盘价/VWAP
-                    if cur_gain_open >= 3.0 or cur_p1 >= open_price * 1.03:
+                    if cur_gain_open >= 3.0 or cur_p1 >= base_op_for_calc * 1.03:
                         judgment = "强"
                         auto_score = 9.0
                         remarks = "早盘放量冲高突破开盘价，多头攻击形态明确"
-                    elif cur_p1 >= open_price:
+                    elif cur_p1 >= base_op_for_calc:
                         judgment = "中"
                         auto_score = 6.5
                         remarks = "维持在开盘价上方震荡蓄势，趋势良性"
@@ -551,11 +599,11 @@ class IntradayStrategyEngine:
                         auto_score = 3.5
                         remarks = "冲高回落跌破开盘价，早盘承接偏弱"
                 else:
-                    if cur_gain_open >= 10.0 or cur_p1 >= open_price * 1.10:
+                    if cur_gain_open >= 10.0 or cur_p1 >= base_op_for_calc * 1.10:
                         judgment = "强"
                         auto_score = 9.0
                         remarks = "放量上攻突破开盘价并涨超10%，攻击迅猛"
-                    elif cur_p1 >= open_price:
+                    elif cur_p1 >= base_op_for_calc:
                         judgment = "中"
                         auto_score = 6.5
                         remarks = "维持在开盘价上方震荡，等待方向选择"
@@ -694,6 +742,13 @@ class IntradayStrategyEngine:
             weighted_score = round(final_score * n_weight, 3)
             total_weighted_score += weighted_score
 
+            raw_strong = nd.get("strong_signals", "")
+            strong_str = "；".join(str(x) for x in raw_strong) if isinstance(raw_strong, (list, tuple, set)) else str(raw_strong)
+            raw_risk = nd.get("risk_signals", "")
+            risk_str = "；".join(str(x) for x in raw_risk) if isinstance(raw_risk, (list, tuple, set)) else str(raw_risk)
+            raw_guide = nd.get("action_guide", "")
+            guide_str = "；".join(str(x) for x in raw_guide) if isinstance(raw_guide, (list, tuple, set)) else str(raw_guide)
+
             node_results.append({
                 "node_id": n_id,
                 "node_num": nd.get("node_num", f"#{idx+1}"),
@@ -702,8 +757,8 @@ class IntradayStrategyEngine:
                 "weight": n_weight,
                 "weight_pct": f"{int(n_weight*100)}%",
                 "focus": nd.get("focus", ""),
-                "strong_signals": nd.get("strong_signals", ""),
-                "risk_signals": nd.get("risk_signals", ""),
+                "strong_signals": strong_str,
+                "risk_signals": risk_str,
                 "observed_val": observed_val,
                 "judgment": judgment,
                 "auto_score": auto_score,
@@ -711,7 +766,7 @@ class IntradayStrategyEngine:
                 "input_val": input_val,
                 "input_unit": input_unit,
                 "weighted_score": weighted_score,
-                "action_guide": nd.get("action_guide", ""),
+                "action_guide": guide_str,
                 "remarks": remarks,
                 "is_active": is_active,
                 "is_completed": is_completed
@@ -834,12 +889,14 @@ class IntradayStrategyEngine:
             # === 新股上市首日专属 实操指引体系 ===
             if clean_t < "09:25":
                 current_status_diagnosis = f"当前处于【集合竞价定盘阶段】。发行价 {issue_p:.2f} 元，重点观察 9:25 最终撮合价格与盘口委买厚度。"
-                if open_price >= 560.64:
-                    action_execution_text = "【操作建议】高开达到 +200% 强势基准 (>=560.64元)！开盘后优先按策略B持有观察或准备在较开盘涨10%处挂买一价*1.02卖出首批50%。"
-                elif open_price >= 373.76:
-                    action_execution_text = "【操作建议】开盘落在翻倍区间 (+100%~+200%)。执行策略A标准分批：早盘冲高+10%申报价格笼子卖出50%，若10:00前未冲高则10:00市价卖30%。"
+                p_strong = issue_p * 3.0
+                p_double = issue_p * 2.0
+                if open_price >= p_strong:
+                    action_execution_text = f"【操作建议】高开达到 +200% 强势基准 (>={p_strong:.2f}元)！开盘后优先按强势模式持有观察或准备在较开盘涨10%处挂买一价*1.02卖出首批仓位。"
+                elif open_price >= p_double:
+                    action_execution_text = f"【操作建议】开盘落在翻倍区间 (+100%~+200%，{p_double:.2f}~{p_strong:.2f}元)。执行标准阶梯分批：早盘冲高+10%申报价格笼子卖出，若10:00前未冲高则10:00市价减仓30%。"
                 else:
-                    action_execution_text = "【操作建议】开盘低于翻倍线 (<373.76元)，按保守档应对，不急于低位割肉，观察开盘是否有放量反弹拉升。"
+                    action_execution_text = f"【操作建议】开盘低于翻倍线 (<{p_double:.2f}元)，按保守档应对，不急于低位割肉，观察开盘是否有放量反弹拉升。"
 
             elif "09:25" <= clean_t < "09:40":
                 current_status_diagnosis = f"当前处于【早盘第一波攻击阶段】。现价 {price:.2f} 元 (较开盘 {gain_from_open:+.1f}%)，最高 {max_p:.2f} 元。"
@@ -940,7 +997,7 @@ class IntradayStrategyEngine:
         if strategy is None:
             strategy = self.auto_select_strategy(open_price, code=c_clean, is_b_conditions_met=is_b_conditions_met)
 
-        tier_name, _, action_mode = self.get_open_price_tier(open_price)
+        tier_name, _, action_mode = self.get_open_price_tier(open_price, code=c_clean)
         
         # 保守档不卖出，等待反弹
         if action_mode == "hold_rebound":
@@ -1240,15 +1297,23 @@ class IntradayStrategyEngine:
 
     def generate_scenario_intraday_df(self, scenario_type: str = "A_SUPER_TREND", code: str = "688826") -> pd.DataFrame:
         """
-        生成 8/18 全天分时模拟回测情景数据（9:15 到 15:00 精确时间对齐，共 241 根分时记录）
+        生成全天分时模拟回测情景数据（9:15 到 15:00 精确时间对齐，共 241 根分时记录）
+        100% 动态自适应任何股票代码及其专属发行价与流通盘！
         情景可选:
         - 'A_SUPER_TREND': A型·超强主升主线 (+336% 超强封板锁仓，得分 > 8.0)
         - 'B_STRONG_TURNOVER': B型·强势换手洗盘 (+189% 强势换手承接，得分 6.5~8.0)
         - 'C_SURGE_AND_CASH': C型·冲高兑现回落 (+105% 冲高回落走弱，得分 5.0~6.5)
         - 'D_WEAK_EXHAUSTION': D/E型·弱势衰竭走弱 (+60% 高开低走破位，得分 < 5.0)
         """
+        c_clean = str(code).zfill(6) if code else "688826"
+        spec = self.get_stock_ladder_spec(c_clean)
+        issue_p = float(spec.get("issue_price", 100.0))
+        float_shares_wan = float(spec.get("float_shares_wan", 1000.0))
+        float_shares = float_shares_wan * 10000.0
+        float_mv = float(spec.get("float_mv_yi", 15.0)) * 1e8
+
         times = []
-        # 1. 集合竞价 09:15 ~ 09:25 (10 min)
+        # 1. 集合竞价 09:15 ~ 09:25 (11 min)
         for m in range(15, 26):
             times.append(f"09:{m:02d}")
         # 2. 上午分时 09:30 ~ 11:30 (121 min)
@@ -1264,36 +1329,31 @@ class IntradayStrategyEngine:
             for m in range(start_m, end_m):
                 times.append(f"{h:02d}:{m:02d}")
 
-        issue_p = 186.88
-        float_shares = 7617800 # 761.78万股
-        float_mv = 14.24 * 1e8 # 14.24亿元
         n = len(times)
-
         records = []
         cum_volume = 0
         cum_amount = 0.0
         running_high = 0.0
-        running_low = 99999.0
+        running_low = 999999.0
 
         if scenario_type == "A_SUPER_TREND":
-            open_p = 580.0 # +210% 强势高开
-            base_curve = np.linspace(open_p, 815.0, n)
-            # 叠加早盘冲高与午后突破脉冲
+            open_p = round(issue_p * 3.10, 2) # +210% 强势高开
+            target_close = round(issue_p * 4.36, 2) # 冲高至 +336%
             for i, t in enumerate(times):
                 if t <= "09:25":
                     p = open_p
                 elif "09:30" <= t <= "09:45":
-                    p = open_p + (i - 11) * 5.5 + np.sin(i)*2.0 # 冲高至 650
+                    p = open_p + (i - 11) * (open_p * 0.010) + np.sin(i)*1.5
                 elif "09:45" < t <= "10:30":
-                    p = 640.0 + np.sin(i*0.3)*6.0
+                    p = open_p * 1.10 + np.sin(i*0.3)*(open_p * 0.01)
                 elif "10:30" < t <= "11:30":
-                    p = 680.0 + (i - 70) * 1.2 # 逼近 730 (+30% 临停)
+                    p = open_p * 1.17 + (i - 70) * (open_p * 0.002)
                 elif "13:00" <= t <= "14:00":
-                    p = 750.0 + (i - 130) * 0.8 # 突破上午最高
+                    p = open_p * 1.28 + (i - 130) * (open_p * 0.0015)
                 elif "14:00" < t <= "14:50":
-                    p = 790.0 + (i - 190) * 0.6 # 尾盘抢筹逼近最高 820
+                    p = target_close * 0.98 + (i - 190) * (open_p * 0.001)
                 else:
-                    p = 815.0 - (i - 230) * 0.2 # 收盘 815 (收盘/最高 99.4%)
+                    p = target_close - (i - 230) * (open_p * 0.0005)
                 
                 running_high = max(running_high, p)
                 running_low = min(running_low, p)
@@ -1312,20 +1372,20 @@ class IntradayStrategyEngine:
                 })
 
         elif scenario_type == "B_STRONG_TURNOVER":
-            open_p = 490.0 # +162% 乐观下沿
+            open_p = round(issue_p * 2.62, 2) # +162% 乐观下沿
             for i, t in enumerate(times):
                 if t <= "09:25":
                     p = open_p
                 elif "09:30" <= t <= "09:40":
-                    p = open_p + (i - 11) * 4.0 # 冲高至 530
+                    p = open_p + (i - 11) * (open_p * 0.008)
                 elif "09:40" < t <= "10:30":
-                    p = 530.0 - (i - 21) * 0.6 # 回踩均线至 505
+                    p = open_p * 1.08 - (i - 21) * (open_p * 0.0012)
                 elif "10:30" < t <= "11:30":
-                    p = 510.0 + np.sin(i*0.2)*4.0
+                    p = open_p * 1.04 + np.sin(i*0.2)*(open_p * 0.008)
                 elif "13:00" <= t <= "14:30":
-                    p = 525.0 + (i - 130) * 0.3
+                    p = open_p * 1.07 + (i - 130) * (open_p * 0.0006)
                 else:
-                    p = 540.0 + np.sin(i)*2.0 # 收盘 540
+                    p = round(open_p * 1.10 + np.sin(i)*(open_p * 0.004), 2)
                 
                 running_high = max(running_high, p)
                 running_low = min(running_low, p)
@@ -1344,16 +1404,16 @@ class IntradayStrategyEngine:
                 })
 
         elif scenario_type == "C_SURGE_AND_CASH":
-            open_p = 395.0 # +111% 翻倍中性档
+            open_p = round(issue_p * 2.11, 2) # +111% 翻倍中性档
             for i, t in enumerate(times):
                 if t <= "09:25":
                     p = open_p
                 elif "09:30" <= t <= "09:40":
-                    p = open_p + (i - 11) * 4.5 # 冲高至 440 (+11.4% 触发冲高卖出50%)
+                    p = open_p + (i - 11) * (open_p * 0.011)
                 elif "09:40" < t <= "11:30":
-                    p = 440.0 - (i - 21) * 0.45 # 冲高后逐步回落至 395
+                    p = open_p * 1.11 - (i - 21) * (open_p * 0.001)
                 else:
-                    p = 395.0 - (i - 130) * 0.12 # 尾盘震荡收 382 (收盘/最高约 87%)
+                    p = open_p * 0.99 - (i - 130) * (open_p * 0.0003)
                 
                 running_high = max(running_high, p)
                 running_low = min(running_low, p)
@@ -1372,16 +1432,16 @@ class IntradayStrategyEngine:
                 })
 
         else: # D_WEAK_EXHAUSTION
-            open_p = 420.0
+            open_p = round(issue_p * 2.25, 2)
             for i, t in enumerate(times):
                 if t <= "09:25":
                     p = open_p
                 elif "09:30" <= t <= "09:45":
-                    p = open_p - (i - 11) * 3.5 # 放量砸盘跌破开盘价
+                    p = open_p - (i - 11) * (open_p * 0.008)
                 elif "09:45" < t <= "11:30":
-                    p = 370.0 - (i - 26) * 0.5 # 持续阴跌
+                    p = open_p * 0.88 - (i - 26) * (open_p * 0.0012)
                 else:
-                    p = 330.0 - (i - 130) * 0.2 # 尾盘跳水至 310
+                    p = open_p * 0.78 - (i - 130) * (open_p * 0.0005)
                 
                 running_high = max(running_high, p)
                 running_low = min(running_low, p)

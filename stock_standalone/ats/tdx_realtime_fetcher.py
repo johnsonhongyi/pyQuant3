@@ -108,11 +108,14 @@ def get_all_tdx_hosts() -> List[Tuple[str, str, int]]:
 def get_market_code(stock_code: str) -> int:
     """
     根据股票代码判断通达信市场代码：
-    0 -> 深圳市场 (000, 001, 002, 003, 300, 301)
-    1 -> 上海市场 (600, 601, 603, 605, 688, 689)
+    0 -> 深圳市场 (000, 001, 002, 003, 300, 301, 302, 159, 123, 127, 128, 200)
+    1 -> 上海市场 (600, 601, 603, 605, 688, 689, 110, 113, 118, 510, 588, 900)
+    2 -> 北京市场 (920, 83, 87, 88, 43, 82)
     """
     c = str(stock_code).strip().zfill(6)
-    if c.startswith(("600", "601", "603", "605", "688", "689", "110", "113", "510")):
+    if c.startswith(("920", "83", "87", "88", "43", "82")):
+        return 2
+    elif c.startswith(("600", "601", "603", "605", "688", "689", "110", "113", "118", "510", "588", "900")):
         return 1
     return 0
 
@@ -154,6 +157,10 @@ def is_trading_time(now_dt=None) -> Tuple[bool, str]:
     return False, f"休市休眠中 ({t_str})"
 
 
+# 兼容性别名
+is_trade_time_now = is_trading_time
+
+
 class TDXRealtimeFetcher:
     """
     通达信行情高频并发拉取单例引擎
@@ -179,10 +186,77 @@ class TDXRealtimeFetcher:
         # 内存日志缓冲队列 (最大保留 500 条最新日志)
         self._log_buffer = collections.deque(maxlen=500)
         self._log_lock = threading.Lock()
-        self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站", level="INFO")
+        
+        # 标的尝试获取计数与未上市/休市静默保护字典 (尝试 3 次无成交则标记并进入冷却)
+        self._no_quote_counts: Dict[str, int] = collections.defaultdict(int)
+        self._no_quote_last_attempt: Dict[str, float] = collections.defaultdict(float)
+        self._unlisted_or_dormant_codes: Set[str] = set()
+
+        # 非交易时段定盘缓存与尝试计数 (非交易时段成功获取 3 次即定盘休眠，复用盘后缓存，不再重复发送网络请求)
+        self._off_hours_cached_quotes: Dict[str, Dict[str, Any]] = {}
+        self._off_hours_success_counts: Dict[str, int] = collections.defaultdict(int)
+        self._off_hours_settled_codes: Set[str] = set()
+
+        # 自适应防限流与动态间隔退避控制器 (基准 3.0s，限流时自动延展至 15.0s)
+        self.base_interval_sec: float = 3.0
+        self.current_interval_sec: float = 3.0
+        self.max_backoff_interval: float = 15.0
+        self._consecutive_slow_or_errors: int = 0
+        self._consecutive_healthy: int = 0
+
+        self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站 (基准周期: 3.0s)", level="INFO")
 
         # 启动时快速选取最优服务器
         self._init_best_server()
+
+    def _record_request_feedback(self, cost_ms: float, is_error: bool = False):
+        """
+        根据单次网络通信的耗时与健康状况，自适应调整拉取间隔（防封禁与退避保护）：
+        - 耗时 >= 600ms 或通信异常 -> 触发退避延长间隔 (3.0s -> 4.5s -> 6.8s -> 10.0s -> 15.0s)
+        - 耗时 < 250ms 且正常通信 -> 连续 2 次后平滑恢复至 3.0s
+        """
+        if is_error or cost_ms >= 600.0:
+            self._consecutive_slow_or_errors += 1
+            self._consecutive_healthy = 0
+            if self._consecutive_slow_or_errors >= 2:
+                new_interval = min(self.max_backoff_interval, round(self.base_interval_sec * (1.5 ** min(self._consecutive_slow_or_errors, 4)), 1))
+                if new_interval > self.current_interval_sec:
+                    self.current_interval_sec = new_interval
+                    reason = "通信异常" if is_error else f"响应缓慢 ({cost_ms:.0f}ms)"
+                    self.add_log(f"⚠️ [WARN] 捕捉到 TDX {reason} 疑似被限流，自适应延长获取间隔至 {self.current_interval_sec:.1f}s 避免封禁", level="WARN")
+        else:
+            self._consecutive_slow_or_errors = 0
+            if self.current_interval_sec > self.base_interval_sec:
+                self._consecutive_healthy += 1
+                if self._consecutive_healthy >= 2:
+                    self.current_interval_sec = self.base_interval_sec
+                    self._consecutive_healthy = 0
+                    self.add_log(f"✅ [INFO] TDX 通信恢复极速稳定 ({cost_ms:.0f}ms)，获取间隔自动恢复为 {self.base_interval_sec:.1f}s", level="INFO")
+
+    def get_recommended_interval_ms(self) -> int:
+        """获取当前推荐的 UI 定时器毫秒数 (默认 3000ms)"""
+        return int(self.current_interval_sec * 1000)
+
+    def get_current_interval_sec(self) -> float:
+        """获取当前推荐的轮询秒数 (默认 3.0s)"""
+        return self.current_interval_sec
+
+    def reset_code_dormancy(self, code: Optional[str] = None):
+        """重置某标的或全量标的的无行情尝试计数与静默状态（供用户切换标的或手动刷新时调用）"""
+        with self._conn_lock:
+            if code:
+                c_clean = str(code).strip().zfill(6)
+                self._no_quote_counts.pop(c_clean, None)
+                self._no_quote_last_attempt.pop(c_clean, None)
+                self._unlisted_or_dormant_codes.discard(c_clean)
+                self._off_hours_success_counts.pop(c_clean, None)
+                self._off_hours_settled_codes.discard(c_clean)
+            else:
+                self._no_quote_counts.clear()
+                self._no_quote_last_attempt.clear()
+                self._unlisted_or_dormant_codes.clear()
+                self._off_hours_success_counts.clear()
+                self._off_hours_settled_codes.clear()
 
     def add_log(self, msg: str, level: str = "INFO"):
         """向内存循环队列记录结构化日志"""
@@ -311,40 +385,106 @@ class TDXRealtimeFetcher:
 
     def get_security_quotes_safe(self, codes: List[str]) -> List[Dict[str, Any]]:
         """
-        安全批量获取股票最新五档盘口行情
+        安全批量获取股票最新五档盘口行情（带 3 次尝试静默保护与非交易时段定盘缓存）
         :param codes: 股票代码列表，例如 ['688826', '600519']
         :return: 盘口字典列表
         """
         if not codes:
             return []
 
+        now_t = time.time()
+        is_trading, _ = is_trading_time()
+        cooldown_sec = 30.0 if is_trading else 60.0
+
+        # 若进入交易时段，清空非交易时段定盘状态
+        if is_trading and self._off_hours_settled_codes:
+            self._off_hours_settled_codes.clear()
+            self._off_hours_success_counts.clear()
+
+        cached_results = []
+        active_codes = []
+        for c in codes:
+            c_clean = str(c).strip().zfill(6)
+            # 非交易时段定盘保护：若已完成 3 次拉取定盘，直接复用盘后缓存
+            if not is_trading and c_clean in self._off_hours_settled_codes and c_clean in self._off_hours_cached_quotes:
+                cached_results.append(self._off_hours_cached_quotes[c_clean])
+                continue
+
+            if c_clean in self._unlisted_or_dormant_codes:
+                last_try = self._no_quote_last_attempt.get(c_clean, 0.0)
+                if now_t - last_try < cooldown_sec:
+                    # 处于静默冷却保护期，若有缓存则复用，否则跳过
+                    if c_clean in self._off_hours_cached_quotes:
+                        cached_results.append(self._off_hours_cached_quotes[c_clean])
+                    continue
+            active_codes.append(c_clean)
+
+        if not active_codes:
+            return cached_results
+
         t_start = time.time()
         with self._conn_lock:
             if not self._is_connected:
                 if not self.connect():
-                    self.add_log(f"无法建立 TDX 连接，跳过获取 {len(codes)} 只标的行情", level="ERROR")
-                    return []
+                    self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="ERROR")
+                    return cached_results
 
             req_params = []
-            for c in codes:
-                c_clean = str(c).strip().zfill(6)
+            for c_clean in active_codes:
                 mkt = get_market_code(c_clean)
                 req_params.append((mkt, c_clean))
 
+            codes_str = ",".join(c for _, c in req_params)
             try:
                 quotes = self.api.get_security_quotes(req_params)
+                cost_ms = (time.time() - t_start) * 1000.0
+                host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
                 if quotes:
-                    cost_ms = (time.time() - t_start) * 1000.0
-                    host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
-                    self.add_log(f"批量拉取 {len(codes)} 只标的成功 (耗时: {cost_ms:.1f}ms, 服务器: {host_info})", level="INFO")
-                    return quotes
+                    self._record_request_feedback(cost_ms, is_error=False)
+                    for q in quotes:
+                        c_clean = str(q.get("code", "")).strip().zfill(6)
+                        if not c_clean:
+                            continue
+                        if c_clean in self._unlisted_or_dormant_codes:
+                            self._unlisted_or_dormant_codes.discard(c_clean)
+                            self.add_log(f"标的 [{c_clean}] 恢复实时成交行情！", level="INFO")
+                        self._no_quote_counts[c_clean] = 0
+
+                        # 非交易时段定盘计数
+                        if not is_trading:
+                            self._off_hours_cached_quotes[c_clean] = q
+                            self._off_hours_success_counts[c_clean] += 1
+                            cnt = self._off_hours_success_counts[c_clean]
+                            if cnt >= 3:
+                                self._off_hours_settled_codes.add(c_clean)
+                                self.add_log(f"📌 标的 [{c_clean}] 非交易时段已成功获取 3 次定盘，进入休市静默保护 (复用盘后快照，停止重复网络请求)", level="INFO")
+
+                    # 非交易时段且所有活跃标的均已定盘时，不再打印单次获取日志
+                    if is_trading or any(c not in self._off_hours_settled_codes for c in active_codes):
+                        self.add_log(f"标的 [{codes_str}] 行情获取成功 (耗时: {cost_ms:.1f}ms, 服务器: {host_info})", level="INFO")
+                    return cached_results + quotes
+                else:
+                    # 标的未上市或当前无盘口成交
+                    self._record_request_feedback(cost_ms, is_error=False)
+                    for _, c_clean in req_params:
+                        self._no_quote_last_attempt[c_clean] = now_t
+                        self._no_quote_counts[c_clean] += 1
+                        cnt = self._no_quote_counts[c_clean]
+                        if cnt == 3:
+                            self._unlisted_or_dormant_codes.add(c_clean)
+                            self.add_log(f"📌 标的 [{c_clean}] 连续 3 次无分时成交，已标记为【可能未上市或非交易时段】，进入低频静默保护 ({cooldown_sec:.0f}s 冷却)", level="INFO")
+                        elif cnt < 3:
+                            self.add_log(f"标的 [{c_clean}] 暂无分时成交 (尝试 {cnt}/3 次, 耗时: {cost_ms:.1f}ms)", level="INFO")
+                    return cached_results
             except Exception as e:
-                self.add_log(f"批量获取 {len(codes)} 只标的行情异常: {e}, 正在切换连接重试...", level="WARN")
+                cost_ms = (time.time() - t_start) * 1000.0
+                self._record_request_feedback(cost_ms, is_error=True)
+                self.add_log(f"标的 [{codes_str}] 批量获取行情异常: {e}, 正在切换连接重试...", level="WARN")
                 self._is_connected = False
 
-            # 若批量出错，尝试重新连接后逐个安全获取
+            # 若网络通信异常，尝试重新连接后逐个安全获取
             if not self.connect():
-                return []
+                return cached_results
 
             results = []
             for mkt, c_clean in req_params:
@@ -352,11 +492,28 @@ class TDXRealtimeFetcher:
                     q_single = self.api.get_security_quotes([(mkt, c_clean)])
                     if q_single and len(q_single) > 0:
                         results.append(q_single[0])
+                        self._no_quote_counts[c_clean] = 0
+                        self._unlisted_or_dormant_codes.discard(c_clean)
+                        if not is_trading:
+                            self._off_hours_cached_quotes[c_clean] = q_single[0]
+                            self._off_hours_success_counts[c_clean] += 1
+                            if self._off_hours_success_counts[c_clean] >= 3:
+                                self._off_hours_settled_codes.add(c_clean)
+                                self.add_log(f"📌 标的 [{c_clean}] 非交易时段已成功获取 3 次定盘，进入休市静默保护 (复用盘后快照，停止重复网络请求)", level="INFO")
+                    else:
+                        self._no_quote_last_attempt[c_clean] = now_t
+                        self._no_quote_counts[c_clean] += 1
+                        cnt = self._no_quote_counts[c_clean]
+                        if cnt >= 3:
+                            self._unlisted_or_dormant_codes.add(c_clean)
                 except Exception as e_s:
-                    self.add_log(f"单股 {c_clean} 行情拉取异常: {e_s}", level="WARN")
+                    self.add_log(f"单股 [{c_clean}] 行情拉取异常: {e_s}", level="WARN")
             cost_ms = (time.time() - t_start) * 1000.0
-            self.add_log(f"逐个降级拉取完成: 成功 {len(results)}/{len(codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
-            return results
+            if results:
+                self._record_request_feedback(cost_ms, is_error=False)
+                if is_trading or any(c not in self._off_hours_settled_codes for c in active_codes):
+                    self.add_log(f"标的 [{codes_str}] 逐个重试完成: 成功 {len(results)}/{len(active_codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
+            return cached_results + results
 
     def fetch_stock_snapshot(
         self,
@@ -400,13 +557,15 @@ class TDXRealtimeFetcher:
             try:
                 from ats.intraday_strategy_engine import IntradayStrategyEngine
                 spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
-                float_mv_yi = float(spec.get("float_mv_yi", 0.0))
-                if float_mv_yi > 0 and trade_price > 0:
-                    circ_wan = (float_mv_yi * 1e8 / trade_price) / 10000.0
-                elif c_clean == "688826":
-                    circ_wan = 761.78
+                float_shares_wan = float(spec.get("float_shares_wan", 0.0))
+                if float_shares_wan > 0:
+                    circ_wan = float_shares_wan
+                else:
+                    float_mv_yi = float(spec.get("float_mv_yi", 0.0))
+                    if float_mv_yi > 0 and trade_price > 0:
+                        circ_wan = (float_mv_yi * 1e8 / trade_price) / 10000.0
             except Exception:
-                circ_wan = 761.78 if c_clean == "688826" else None
+                circ_wan = None
 
         # 计算换手率 (%)
         if circ_wan and circ_wan > 0 and vol > 0:
@@ -696,17 +855,17 @@ class TDXRealtimeFetcher:
 
 class TDXRealtimePollingWorker(threading.Thread):
     """
-    后台高频秒级 TDX 轮询 Worker 线程
+    后台 TDX 轮询 Worker 线程 (基准 3.0s，支持自适应动态退避)
     """
     def __init__(
         self,
         codes: List[str],
-        interval_seconds: float = 1.0,
+        interval_seconds: float = 3.0,
         on_data_callback: Optional[Callable[[pd.DataFrame, Dict[str, Any]], None]] = None
     ):
         super().__init__(daemon=True, name="TDXPollingWorker")
         self.codes = [str(c).zfill(6) for c in codes]
-        self.interval = max(0.5, float(interval_seconds))
+        self.interval = max(1.0, float(interval_seconds))
         self.callback = on_data_callback
         self.fetcher = TDXRealtimeFetcher.get_instance()
         self._running = False
@@ -719,7 +878,7 @@ class TDXRealtimePollingWorker(threading.Thread):
 
     def run(self):
         self._running = True
-        logger.info(f"🚀 TDX 高频轮询 Worker 线程启动: 监控标的 {self.codes}, 刷新间隔 {self.interval}s")
+        logger.info(f"🚀 TDX 轮询 Worker 线程启动: 监控标的 {self.codes}, 基准刷新间隔 {self.interval}s")
 
         while self._running:
             try:
@@ -738,7 +897,9 @@ class TDXRealtimePollingWorker(threading.Thread):
             except Exception as e:
                 logger.warning(f"TDX 轮询执行异常: {e}")
 
-            time.sleep(self.interval)
+            # 动态使用自适应间隔进行休眠
+            current_sleep = max(self.interval, self.fetcher.get_current_interval_sec())
+            time.sleep(current_sleep)
 
         logger.info("🛑 TDX 高频轮询 Worker 线程已安全停止")
 
