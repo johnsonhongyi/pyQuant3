@@ -191,35 +191,47 @@ class NumericTableWidgetItem(QTableWidgetItem):
         t1 = self.text().strip()
         t2 = other.text().strip()
         
-        # Treat placeholders as empty, ensuring they always go to the bottom of the table
-        is_empty1 = not t1 or t1 in ("-", "--", "nan", "NaN")
-        is_empty2 = not t2 or t2 in ("-", "--", "nan", "NaN")
-        
-        if is_empty1 and is_empty2:
-            return False
-        if is_empty1:
-            return False
-        if is_empty2:
-            return True
-            
-        import re
-        # Clean commas (e.g. 100,000 -> 100000) and percentage signs/currency symbols
-        clean_t1 = t1.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
-        clean_t2 = t2.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
-        
-        # Regex to find the first numeric float/int (handles negative/positive signs)
-        num_re = r'[-+]?\d*\.?\d+'
-        m1 = re.search(num_re, clean_t1)
-        m2 = re.search(num_re, clean_t2)
-        
-        if m1 and m2:
+        import math, re
+
+        def _parse_num(t):
+            if not t:
+                return None
+            t_lower = t.lower()
+            if t in ("-", "--") or "nan" in t_lower or "none" in t_lower:
+                return None
+            clean_t = t.replace(',', '').replace('%', '').replace('￥', '').replace('$', '').strip()
+            num_re = r'[-+]?\d*\.?\d+'
+            m = re.search(num_re, clean_t)
+            if m:
+                try:
+                    v = float(m.group())
+                    if not math.isnan(v):
+                        return v
+                except Exception:
+                    pass
+            return None
+
+        v1 = _parse_num(t1)
+        v2 = _parse_num(t2)
+
+        table = self.tableWidget()
+        is_desc = False
+        if table and hasattr(table, 'horizontalHeader') and table.horizontalHeader():
             try:
-                v1 = float(m1.group())
-                v2 = float(m2.group())
-                if v1 != v2:
-                    return v1 < v2
-            except ValueError:
+                from PyQt6.QtCore import Qt
+                is_desc = (table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+            except Exception:
                 pass
+
+        # 确保空值/NaN/占位符在比较中具备严格传递性，并在升降序下均稳定沉底
+        if v1 is None and v2 is None:
+            return t1 < t2
+        if v1 is None:
+            return True if is_desc else False
+        if v2 is None:
+            return False if is_desc else True
+        if v1 != v2:
+            return v1 < v2
         return t1 < t2
 
 

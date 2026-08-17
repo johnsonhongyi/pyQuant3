@@ -44,9 +44,17 @@ class NumericTableWidgetItem(QTableWidgetItem):
             val_self = self._get_numeric_value()
             val_other = self._get_numeric_value(other)
             
-            if isinstance(val_self, (int, float)) and isinstance(val_other, (int, float)):
+            import math
+            is_num_self = isinstance(val_self, (int, float)) and not math.isnan(val_self)
+            is_num_other = isinstance(val_other, (int, float)) and not math.isnan(val_other)
+
+            if is_num_self and is_num_other:
                 return val_self < val_other
-        except:
+            elif is_num_self:
+                return True
+            elif is_num_other:
+                return False
+        except Exception:
             pass
             
         return super().__lt__(other)
@@ -60,9 +68,13 @@ class NumericTableWidgetItem(QTableWidgetItem):
         if '(' in text:
             text = text.split('(')[0].strip()
         try:
-            return float(text)
-        except:
-            return text
+            val = float(text)
+            import math
+            if not math.isnan(val):
+                return val
+        except Exception:
+            pass
+        return text
 
 class EnhancedTableWidget(QTableWidget):
     """

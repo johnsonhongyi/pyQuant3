@@ -31,38 +31,34 @@ class UniverseManager:
         """
         Returns lists of tuples formatted for UniverseTreeWidget.
         """
-        radar_list = []
-        for code, meta in self.radar_pool.items():
-            radar_list.append((
-                code,
-                meta.get('name', '未知'),
-                f"{meta.get('price', 0.0):.2f}",
-                f"{meta.get('pct', 0.0):+.2f}%",
-                meta.get('strategy', 'MA20d支撑'),
-                meta.get('reason', '回踩均线中')
-            ))
-            
-        watch_list = []
-        for code, meta in self.watch_pool.items():
-            watch_list.append((
-                code,
-                meta.get('name', '未知'),
-                f"{meta.get('price', 0.0):.2f}",
-                f"{meta.get('pct', 0.0):+.2f}%",
-                meta.get('strategy', '黄金早盘'),
-                meta.get('reason', '黄金时段爆量高走')
-            ))
+        import math
 
-        trade_list = []
-        for code, meta in self.trade_pool.items():
-            trade_list.append((
-                code,
-                meta.get('name', '未知'),
-                f"{meta.get('price', 0.0):.2f}",
-                f"{meta.get('pct', 0.0):+.2f}%",
-                meta.get('strategy', '建议买入'),
-                meta.get('reason', f"仓位: {meta.get('alloc_pct', 10.0)}% | 持仓追踪")
-            ))
+        def _format_item(code, meta, def_strat, def_reason):
+            name = meta.get('name', '未知')
+            price_v = meta.get('price', 0.0)
+            pct_v = meta.get('pct', 0.0)
+            try:
+                price_v = float(price_v)
+                if math.isnan(price_v):
+                    price_v = 0.0
+            except Exception:
+                price_v = 0.0
+            try:
+                pct_v = float(pct_v)
+                if math.isnan(pct_v):
+                    pct_v = 0.0
+            except Exception:
+                pct_v = 0.0
+
+            p_str = f"{price_v:.2f}" if price_v > 0.001 else "--"
+            pct_str = f"{pct_v:+.2f}%" if price_v > 0.001 or pct_v != 0.0 else "0.00%"
+            strat = meta.get('strategy', def_strat)
+            reason = meta.get('reason', def_reason)
+            return (code, name, p_str, pct_str, strat, reason)
+
+        radar_list = [_format_item(code, meta, 'MA20d支撑', '回踩均线中') for code, meta in self.radar_pool.items()]
+        watch_list = [_format_item(code, meta, '黄金早盘', '黄金时段爆量高走') for code, meta in self.watch_pool.items()]
+        trade_list = [_format_item(code, meta, '建议买入', f"仓位: {meta.get('alloc_pct', 10.0)}% | 持仓追踪") for code, meta in self.trade_pool.items()]
 
         return radar_list, watch_list, trade_list
 
@@ -156,23 +152,58 @@ class UniverseManager:
                 pass
             return current_name or code_str
 
+        import math
         def _get_price_pct(code_str, current_price, current_pct):
-            if current_price > 0.01:
-                return current_price, current_pct
+            p = current_price
+            pct = current_pct
+            try:
+                p = float(p)
+                if math.isnan(p):
+                    p = 0.0
+            except Exception:
+                p = 0.0
+            try:
+                pct = float(pct)
+                if math.isnan(pct):
+                    pct = 0.0
+            except Exception:
+                pct = 0.0
+
+            if p > 0.01:
+                return p, pct
             if df_realtime is not None and not df_realtime.empty and code_str in df_realtime.index:
                 row = df_realtime.loc[code_str]
                 import pandas as pd
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
-                p = float(row.get('close', row.get('price', 0.0)))
-                pct = float(row.get('percent', 0.0))
+                try:
+                    p_cand = float(row.get('close', row.get('price', 0.0)))
+                    if not math.isnan(p_cand):
+                        p = p_cand
+                except Exception:
+                    pass
+                try:
+                    pct_cand = float(row.get('percent', 0.0))
+                    if not math.isnan(pct_cand):
+                        pct = pct_cand
+                except Exception:
+                    pass
                 if p > 0.01:
                     return p, pct
             if price_pct_cache and code_str in price_pct_cache:
-                p, pct = price_pct_cache[code_str]
+                p_c, pct_c = price_pct_cache[code_str]
+                try:
+                    p_c = float(p_c)
+                    pct_c = float(pct_c)
+                    if not math.isnan(p_c) and p_c > 0.01:
+                        p = p_c
+                    if not math.isnan(pct_c):
+                        pct = pct_c
+                except Exception:
+                    pass
                 if p > 0.01:
                     return p, pct
-            return current_price, current_pct
+            return p, pct
 
         # 保留 trade_pool 中非来自 ledger 的持仓项（真实持仓）
         real_positions = {}

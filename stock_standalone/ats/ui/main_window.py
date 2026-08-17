@@ -303,12 +303,28 @@ class LedgerUpdateWorker(QThread):
                 else:
                     first_seen = '⏳ 初始/持仓'
                     priority_val = '0.0'
+                from ats.ui.favorite_panel import get_ats_extra_cols
+                extra_cols = get_ats_extra_cols()
+                extra_vals = []
+                for ec in extra_cols:
+                    v_raw = None
+                    if row is not None:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                v_raw = row[k]
+                                break
+                    if v_raw is not None:
+                        extra_vals.append(cct.format_col_value(ec, v_raw))
+                    else:
+                        extra_vals.append('--')
 
                 swing_rows.append((
                     code, name, f'{latest_close:.2f}', state, dev_str, str(limit_ups), position,
                     first_seen, priority_val,
                     f'{dff_val:.2f}', str(rank_val), f'{dff2_val:.2f}', f'{dff3_val:.2f}',
-                    f'{rs_val:+.2f}%', resonance, reason
+                    f'{rs_val:+.2f}%', resonance,
+                    *extra_vals,
+                    reason
                 ))
 
                 if resonance in ('逆市抗跌', '大盘共振'):
@@ -4715,11 +4731,31 @@ class ATSMainWindow(QMainWindow):
                         else:
                             from sys_utils import resolve_stock_name
                             name = resolve_stock_name(code_clean) or "未知"
+                        from ats.ui.favorite_panel import get_ats_extra_cols
+                        from JohnsonUtil import commonTips as cct
+                        extra_cols = get_ats_extra_cols()
+                        extra_fallback = []
+                        for ec in extra_cols:
+                            ec_val = '--'
+                            if has_df and code_clean in self.current_df.index:
+                                try:
+                                    row_df = self.current_df.loc[code_clean]
+                                    if isinstance(row_df, pd.DataFrame):
+                                        row_df = row_df.iloc[0]
+                                    for k in (ec, ec.lower(), ec.upper()):
+                                        if k in row_df:
+                                            ec_val = cct.format_col_value(ec, row_df[k])
+                                            break
+                                except Exception:
+                                    pass
+                            extra_fallback.append(ec_val)
 
                         fav_date = fav_mgr.get_favorite_stock_date(code_clean) or time.strftime("%Y-%m-%d")
                         fallback_row = (
                             code_clean, name, price_str, "重点关注", "+0.0%", "0", "观察",
-                            fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通", "基础重点关注标的"
+                            fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通",
+                            *extra_fallback,
+                            "基础重点关注标的"
                         )
                         fav_rows.append(fallback_row)
 
