@@ -36,6 +36,7 @@ from ats.ui.swing_table import SwingStateTable
 from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
 from ats.ui.kernel_trace_panel import KernelTracePanel
 from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
+from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
 from ats.signal_ledger import SignalLedger
@@ -1593,6 +1594,7 @@ class ATSMainWindow(QMainWindow):
             print(f"[MainWindow] 跨日快照加载异常: {e}")
         self.stock_history_cache = {}
         self.dragon_monitor_dialog = None
+        self.hot_sector_dialog = None
         self.history_loading_codes = set()
         # Changed from a simple set to a {code: fail_timestamp} dict.
         # Codes that failed will be retried after 5 minutes, and the entire
@@ -1828,6 +1830,12 @@ class ATSMainWindow(QMainWindow):
         self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
+
+        self.btn_hot_leaderboard = QPushButton("🔥 龙头突击榜")
+        self.btn_hot_leaderboard.setToolTip("打开 Top 3 强势板块龙头突击与三维买点定位跟单看板 (完全独立非模态运行)")
+        self.btn_hot_leaderboard.setStyleSheet("QPushButton { background-color: #2a1515; color: #ff5577; font-weight: bold; border: 1px solid #ff4466; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ff4466; color: #ffffff; }")
+        self.btn_hot_leaderboard.clicked.connect(self.open_hot_sector_leaderboard)
+        toolbar.addWidget(self.btn_hot_leaderboard)
         
         toolbar.addSeparator()
 
@@ -3371,6 +3379,15 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"[ATSMainWindow] Error auto-restoring dragon monitor: {e}")
 
+        # 1.1 恢复加载 Top 3 强势板块龙头突击跟单榜
+        try:
+            hot_cfg = config_data.get("hot_sector_leaderboard_dialog", {})
+            if hot_cfg.get("is_open", False):
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的龙头突击跟单榜...")
+                self.open_hot_sector_leaderboard(restore_state=hot_cfg, cold_start=True)
+        except Exception as e:
+            logger.warning(f"[ATSMainWindow] Error auto-restoring hot sector leaderboard: {e}")
+
         # 2. 恢复加载涨跌分布个股明细面板
         try:
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_restore_details_dialog_if_saved'):
@@ -4590,6 +4607,11 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'dragon_monitor_dialog') and self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog):
                 if self.dragon_monitor_dialog.isVisible() or getattr(self.dragon_monitor_dialog, 'is_hidden_state', False):
                     self.dragon_monitor_dialog._save_window_states(is_open=True)
+
+            # 1.1 持久化龙头突击跟单榜状态
+            if hasattr(self, 'hot_sector_dialog') and self.hot_sector_dialog and not isdeleted(self.hot_sector_dialog):
+                if self.hot_sector_dialog.isVisible() or getattr(self.hot_sector_dialog, 'is_hidden_state', False):
+                    self.hot_sector_dialog._save_window_states(is_open=True)
             
             # 2. 持久化所有打开的涨跌分布个股明细窗口状态
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
@@ -4600,12 +4622,32 @@ class ATSMainWindow(QMainWindow):
         except Exception as e_persist:
             print(f"[ATSMainWindow] Error persisting active monitor dialogs on close: {e_persist}")
         
-        # 1. 停止定时器与后台 Watcher
-        if hasattr(self, 'update_timer') and self.update_timer.isActive():
-            self.update_timer.stop()
-            
-        if hasattr(self, '_favorites_poll_timer') and self._favorites_poll_timer:
-            self._favorites_poll_timer.stop()
+        # 1. 彻底停止所有 UI 状态定时器与后台轮询
+        timers_to_stop = [
+            '_status_clock_timer', 'update_timer', '_favorites_poll_timer',
+            '_history_load_timer', '_price_load_timer', '_auto_switch_timer',
+            'pool_rotation_timer', 'rotation_timer'
+        ]
+        for t_name in timers_to_stop:
+            if hasattr(self, t_name):
+                t = getattr(self, t_name)
+                if t:
+                    try:
+                        t.stop()
+                    except Exception:
+                        pass
+
+        try:
+            from ats.hot_sector_engine import HotSectorEngine
+            HotSectorEngine.get_instance().stop_polling_worker()
+        except Exception:
+            pass
+
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            TDXRealtimeFetcher.get_instance().disconnect()
+        except Exception:
+            pass
 
         try:
             from global_favorites import GlobalFavoriteManager
@@ -4714,6 +4756,12 @@ class ATSMainWindow(QMainWindow):
                 self.dragon_monitor_dialog.close()
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing dragon monitor on close: {e}")
+
+        if hasattr(self, 'hot_sector_dialog') and self.hot_sector_dialog and not isdeleted(self.hot_sector_dialog):
+            try:
+                self.hot_sector_dialog.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing hot sector leaderboard on close: {e}")
                 
         try:
             import ats.ui.multi_period_dialog as mpd
@@ -4728,8 +4776,38 @@ class ATSMainWindow(QMainWindow):
                 self.ladder_monitor_win.close()
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing ladder monitor on close: {e}")
+
+        # 关闭个股详情弹窗
+        if hasattr(self, '_detail_dialog') and self._detail_dialog and not isdeleted(self._detail_dialog):
+            try:
+                self._detail_dialog.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing detail dialog on close: {e}")
+
+        # 关闭板块详情弹窗
+        if hasattr(self, '_sector_detail_dialog') and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
+            try:
+                self._sector_detail_dialog.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing sector detail dialog on close: {e}")
+
+        # 彻底关闭并销毁 AlertNotifier 的系统托盘图标 (消除任务栏绿色小圆点常驻)
+        try:
+            from ats.alert_notifier import AlertNotifier
+            AlertNotifier.get_instance().shutdown()
+        except Exception as e:
+            print(f"[ATSMainWindow] Error shutting down AlertNotifier: {e}")
             
         super().closeEvent(event)
+
+        # 确保主窗口关闭后，通知 Qt 应用退出事件循环
+        try:
+            from PyQt6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                app.quit()
+        except Exception:
+            pass
 
     def _on_favorites_changed(self):
         # Thread-safe trigger UI refresh on favorite changes using QTimer
@@ -4878,6 +4956,26 @@ class ATSMainWindow(QMainWindow):
                 self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
+
+    def open_hot_sector_leaderboard(self, restore_state=None, cold_start=False):
+        """调起 Top 3 强势板块龙头突击跟单榜独立窗口（非模态独立运行，完全不阻塞主界面）"""
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
+            return
+        from PyQt6.sip import isdeleted
+        if not hasattr(self, 'hot_sector_dialog') or self.hot_sector_dialog is None or isdeleted(self.hot_sector_dialog):
+            self.hot_sector_dialog = HotSectorLeaderboardDialog(self, restore_state=restore_state)
+            self.hot_sector_dialog.code_clicked.connect(self.link_stock)
+
+        if cold_start and getattr(self.hot_sector_dialog, 'is_hidden_state', False):
+            self.hot_sector_dialog.show()
+        else:
+            self.hot_sector_dialog.show_normal_position()
+
+        if hasattr(self.hot_sector_dialog, '_save_window_states'):
+            self.hot_sector_dialog._save_window_states(is_open=True)
+
+        if hasattr(self.hot_sector_dialog, '_force_refresh_data'):
+            self.hot_sector_dialog._force_refresh_data()
 
     def open_global_market_dialog(self):
         """打开/激活【🌐 全球外盘与热点情绪看板】独立自适应窗口 (不影响主界面原有布局)"""

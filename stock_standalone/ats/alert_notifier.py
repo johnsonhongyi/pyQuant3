@@ -134,6 +134,12 @@ class AlertNotifier(QObject if HAS_PYQT else object):
     
     _instance = None
     
+    @classmethod
+    def get_instance(cls) -> 'AlertNotifier':
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             if HAS_PYQT:
@@ -159,8 +165,24 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._notify_queue = collections.deque()
         self._is_busy = False
         self._current_toast = None
-        
         self._init_tray()
+
+    def shutdown(self):
+        """关闭并销毁系统托盘图标与浮动 Toast 弹窗，确保主进程退出"""
+        try:
+            if self.tray_icon:
+                self.tray_icon.hide()
+                self.tray_icon.deleteLater()
+                self.tray_icon = None
+        except Exception as e:
+            logger.debug(f"Error hiding tray_icon: {e}")
+        try:
+            if self._current_toast:
+                self._current_toast.close()
+                self._current_toast = None
+        except Exception:
+            pass
+        self._notify_queue.clear()
         
     def _init_tray(self):
         if not HAS_PYQT:

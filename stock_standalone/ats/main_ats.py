@@ -47,7 +47,8 @@ def main():
     window = ATSMainWindow()
     window.show()
     
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    os._exit(exit_code)
 
 if __name__ == "__main__":
     main()
