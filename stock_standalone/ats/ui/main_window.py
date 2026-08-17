@@ -24,7 +24,7 @@ os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox, QAbstractItemView
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect, QSettings
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
@@ -1630,6 +1630,10 @@ class ATSMainWindow(QMainWindow):
         self.search_histories = {"history1": [], "history2": [], "history3": [], "history4": [], "history5": []}
         self._load_search_history_data()
         
+        # 读取后台自动刷新状态持久化配置 (默认 False，被动等待 TK 主进程自动推送 IPC)
+        settings = QSettings("pyQuant", "ATSMainWindow")
+        self.is_auto_refresh_enabled = settings.value("auto_refresh_enabled", False, type=bool)
+
         self._init_toolbar()
         self._init_ui()
         self._restore_layout_state()
@@ -1641,10 +1645,11 @@ class ATSMainWindow(QMainWindow):
         # Load SQLite database data (P1 Integration)
         self.load_db_data(force=True)
         
-        # Setup simple timer for mock ticker updating (simulate live environment in P0)
+        # Setup simple timer for ticker updating (当用户开启后台自动刷新时才运行)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.on_heartbeat)
-        self.update_timer.start(60000)
+        if self.is_auto_refresh_enabled:
+            self.update_timer.start(60000)
 
     def _prepopulate_name_cache(self):
         self.name_cache = {}
@@ -1806,10 +1811,20 @@ class ATSMainWindow(QMainWindow):
         toolbar.addWidget(self.btn_global_market)
 
         self.btn_intraday_strategy = QPushButton("阶梯盯盘⚡")
-        self.btn_intraday_strategy.setToolTip("打开频准激光（688826）8/18 上市独立盯盘窗口、7节点动态评分与分时阶梯策略系统 (完全独立非模态运行)")
+        self.btn_intraday_strategy.setToolTip("打开分时阶梯策略独立盯盘窗口、7节点动态评分与实盘策略系统 (完全独立非模态运行)")
         self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
+        
+        toolbar.addSeparator()
+
+        # 🔄 后台自动刷新开关 (默认 False，被动等待 TK 自动推送 IPC)
+        self.chk_auto_refresh = QCheckBox("自动刷新🔄")
+        self.chk_auto_refresh.setToolTip("开启/关闭后台自动刷新轮询 (默认关闭，被动等待主进程 TK 自动推送 IPC 数据；勾选后开启主动轮询)")
+        self.chk_auto_refresh.setChecked(self.is_auto_refresh_enabled)
+        self.chk_auto_refresh.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; font-size: 9pt; padding: 1px 4px; } QCheckBox::indicator { width: 13px; height: 13px; }")
+        self.chk_auto_refresh.toggled.connect(self._on_auto_refresh_toggled)
+        toolbar.addWidget(self.chk_auto_refresh)
         
         toolbar.addSeparator()
         
@@ -2319,6 +2334,43 @@ class ATSMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("初始化独立自治交易系统，就绪。")
 
+        # 🕒 状态栏右侧常驻显示：数据更新时间与下次自动刷新倒计时
+        self._last_data_update_time = None
+        self._next_auto_refresh_time = None
+
+        self.lbl_data_time_status = QLabel()
+        self.lbl_data_time_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9pt; padding-right: 8px;")
+        self.status_bar.addPermanentWidget(self.lbl_data_time_status)
+
+        # 每秒刷新一次右下角时间与倒计时状态
+        self._status_clock_timer = QTimer(self)
+        self._status_clock_timer.timeout.connect(self._refresh_statusbar_time_display)
+        self._status_clock_timer.start(1000)
+        self._refresh_statusbar_time_display()
+
+    def _refresh_statusbar_time_display(self):
+        """动态刷新状态栏右侧的数据更新时间与下次自动刷新倒计时"""
+        import time
+        from datetime import datetime
+
+        now = time.time()
+        if self._last_data_update_time:
+            t_str = datetime.fromtimestamp(self._last_data_update_time).strftime("%H:%M:%S")
+        else:
+            t_str = "--:--:--"
+
+        if getattr(self, "is_auto_refresh_enabled", False):
+            if self._next_auto_refresh_time is None or self._next_auto_refresh_time <= now:
+                self._next_auto_refresh_time = now + 60.0
+            
+            rem_sec = max(0, int(self._next_auto_refresh_time - now))
+            next_str = datetime.fromtimestamp(self._next_auto_refresh_time).strftime("%H:%M:%S")
+            self.lbl_data_time_status.setText(f"🕒 数据更新: {t_str}  |  🔄 下次自动刷新: {next_str} ({rem_sec}s)")
+            self.lbl_data_time_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9pt; padding-right: 8px;")
+        else:
+            self.lbl_data_time_status.setText(f"🕒 数据更新: {t_str}  |  🔄 自动刷新: 已关闭 (等待TK推送)")
+            self.lbl_data_time_status.setStyleSheet("color: #8e8e93; font-weight: bold; font-size: 9pt; padding-right: 8px;")
+
     def toggle_rotation(self):
         if self.btn_toggle_rotation.text().startswith("▶"):
             self.btn_toggle_rotation.setText("■ 停止 24x7 自动旋转")
@@ -2572,9 +2624,43 @@ class ATSMainWindow(QMainWindow):
             else:
                 print(f"打开板块详情失败: {e}")
 
-    def on_heartbeat(self):
-        # 1. Periodically load and update DB data
+    def _on_auto_refresh_toggled(self, checked: bool):
+        """用户切换【自动刷新🔄】开关状态：持久化并即时启停主动轮询定时器"""
+        import time
+        self.is_auto_refresh_enabled = checked
+        try:
+            settings = QSettings("pyQuant", "ATSMainWindow")
+            settings.setValue("auto_refresh_enabled", checked)
+        except Exception as e:
+            logger.debug(f"保存 auto_refresh_enabled 状态异常: {e}")
 
+        if checked:
+            self._next_auto_refresh_time = time.time() + 60.0
+            if hasattr(self, 'update_timer') and self.update_timer:
+                self.update_timer.start(60000)
+            self.status_bar.showMessage("已开启后台自动刷新轮询 (60s)。")
+            logger.info("⚡ [ATSMainWindow] 用户已开启后台自动刷新轮询")
+        else:
+            self._next_auto_refresh_time = None
+            if hasattr(self, 'update_timer') and self.update_timer:
+                self.update_timer.stop()
+            self.status_bar.showMessage("已关闭后台自动刷新，被动等待 TK 主进程推送 IPC 数据。")
+            logger.info("⏸️ [ATSMainWindow] 用户已关闭后台自动刷新，等待 TK 自动推送 IPC")
+
+        if hasattr(self, '_refresh_statusbar_time_display'):
+            self._refresh_statusbar_time_display()
+
+    def on_heartbeat(self):
+        # 0. 若未开启自动刷新，静默退出，不发起任何主动网络/管道轮询
+        if not getattr(self, 'is_auto_refresh_enabled', False):
+            return
+
+        import time
+        self._next_auto_refresh_time = time.time() + 60.0
+        if hasattr(self, '_refresh_statusbar_time_display'):
+            self._refresh_statusbar_time_display()
+
+        # 1. Periodically load and update DB data
         try:
             is_work = cct.get_work_time()
         except Exception:
@@ -3232,6 +3318,9 @@ class ATSMainWindow(QMainWindow):
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
             import time
             self._last_recv_t = time.time()
+            self._last_data_update_time = self._last_recv_t
+            if hasattr(self, '_refresh_statusbar_time_display'):
+                self._refresh_statusbar_time_display()
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
 
     def _trigger_realtime_ui_update(self):

@@ -395,17 +395,31 @@ class IntradayStrategyEngine:
         amount: float = 0.0, # 成交金额(元)
         bid1_price: float = 0.0,
         ask1_price: float = 0.0,
-        sector_strengths: Optional[Dict[str, str]] = None
+        sector_strengths: Optional[Dict[str, str]] = None,
+        strategy_id: Optional[str] = None,
+        last_close: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         全面评估 7 大时序节点，生成各节点观察值、强中弱判定、节点分(0-10)、加权得分、形态分类与实操建议。
         支持根据用户在表格中输入的校准价格/换手率全自动重新推导评分。
+        全面适配【通用日常个股策略】与【新股上市策略】两种模式。
         """
         c_clean = str(code).zfill(6)
         spec = self.get_stock_ladder_spec(c_clean)
         nodes_def = self.get_timeline_nodes_def(c_clean)
         state = self._get_stock_state(c_clean, open_price)
         custom_params = state.setdefault("node_custom_params", {})
+
+        # 判断当前策略归属：通用日常个股策略 vs 新股专属策略
+        current_strat = self.get_strategy_by_id(strategy_id) if strategy_id else self.auto_select_strategy(open_price, code=c_clean)
+        strat_id = current_strat.get("id", "") if current_strat else ""
+        strat_type = current_strat.get("strategy_type", "") if current_strat else ""
+        is_daily_strategy = (
+            strat_type in ("daily_surge", "general", "daily")
+            or "daily" in strat_id
+            or "surge" in strat_id
+            or (c_clean not in ("688826", "920199") and not strat_id.startswith("strategy_pinzhun") and not strat_id.startswith("strategy_a_") and not strat_id.startswith("strategy_b_"))
+        )
 
         clean_t = current_time_str[-8:] if len(current_time_str) >= 8 else current_time_str
         if len(clean_t) > 5 and ":" in clean_t:
@@ -426,11 +440,15 @@ class IntradayStrategyEngine:
 
         issue_p = float(spec.get("issue_price", 186.88))
         float_mv_yi = float(spec.get("float_mv_yi", 14.24)) # 亿元
-        amount_yi = (amount / 1e8) if amount > 1e5 else 0.0 # 转换为亿元
-        intensity_ratio = (amount_yi / float_mv_yi) if float_mv_yi > 0 else 0.0
+        amount_yi = (amount / 1e8) if amount > 1e5 else (amount if amount > 0 else 0.0) # 转换为亿元
+        intensity_ratio = (amount_yi / float_mv_yi) if (float_mv_yi > 0 and amount_yi > 0) else 1.0
+
+        # 通用日常策略基准：以昨收价为核心参考基准
+        ref_base_p = last_close if (last_close is not None and last_close > 0) else (open_price if open_price > 0 else (price if price > 0 else 10.0))
 
         gain_from_issue = ((price - issue_p) / issue_p * 100.0) if (issue_p > 0 and price > 0) else 0.0
         gain_from_open = ((price - open_price) / open_price * 100.0) if (open_price > 0 and price > 0) else 0.0
+        gain_from_base = ((price - ref_base_p) / ref_base_p * 100.0) if (ref_base_p > 0 and price > 0) else 0.0
         close_high_ratio = (price / max_p) if max_p > 0 else 1.0
 
         node_results = []
@@ -469,145 +487,201 @@ class IntradayStrategyEngine:
             input_val = 0.0
             input_unit = "元"
 
-            if idx == 0: # 9:25 集合竞价 (校准开盘价)
-                default_op = open_price if open_price > 0 else (issue_p * 3.0 if issue_p > 0 else 565.0)
+            if idx == 0: # 9:25 集合竞价定盘 (校准开盘价)
+                default_op = open_price if open_price > 0 else (price if price > 0 else ref_base_p)
                 cur_op = float(custom_params.get(n_id, default_op))
                 input_val = cur_op
                 input_unit = "元"
-                open_gain_issue = ((cur_op - issue_p) / issue_p * 100.0) if (issue_p > 0 and cur_op > 0) else 0.0
-                observed_val = f"开盘:{cur_op:.2f}元 (较发行价{open_gain_issue:+.1f}%)"
 
-                strong_ref = issue_p * 3.0 # +200%
-                double_ref = issue_p * 2.0 # +100%
-                if cur_op >= strong_ref: # >= +200% 强势基准
-                    judgment = "强"
-                    auto_score = 9.0
-                    remarks = f"高开>={open_gain_issue:+.0f}%超预期，做多意愿极强"
-                elif cur_op >= double_ref: # >= +100% 翻倍
-                    judgment = "中"
-                    auto_score = 7.0
-                    remarks = "开盘落在+100%~+200%中性区间，量价正常"
+                if is_daily_strategy:
+                    # 通用日常策略：评估较昨收价高开/平开/低开幅度
+                    open_pct = ((cur_op - ref_base_p) / ref_base_p * 100.0) if ref_base_p > 0 else 0.0
+                    observed_val = f"开盘:{cur_op:.2f}元 (较昨收{open_pct:+.2f}%)"
+                    if open_pct >= 2.0:
+                        judgment = "强"
+                        auto_score = 8.5
+                        remarks = f"高开{open_pct:+.2f}%做多意愿积极，竞价承接强势"
+                    elif open_pct >= -0.5:
+                        judgment = "中"
+                        auto_score = 6.5
+                        remarks = f"平开至微幅震荡({open_pct:+.2f}%)，竞价平稳"
+                    else:
+                        judgment = "弱"
+                        auto_score = 4.0
+                        remarks = f"低开{open_pct:+.2f}%，早盘开盘承接偏弱"
                 else:
-                    judgment = "弱"
-                    auto_score = 4.0
-                    remarks = "开盘低于翻倍线，关注度略显不足"
+                    # 新股专属策略：较发行价涨幅评估
+                    open_gain_issue = ((cur_op - issue_p) / issue_p * 100.0) if (issue_p > 0 and cur_op > 0) else 0.0
+                    observed_val = f"开盘:{cur_op:.2f}元 (较发行价{open_gain_issue:+.1f}%)"
+                    strong_ref = issue_p * 3.0 # +200%
+                    double_ref = issue_p * 2.0 # +100%
+                    if cur_op >= strong_ref: # >= +200% 强势基准
+                        judgment = "强"
+                        auto_score = 9.0
+                        remarks = f"高开>={open_gain_issue:+.0f}%超预期，做多意愿极强"
+                    elif cur_op >= double_ref: # >= +100% 翻倍
+                        judgment = "中"
+                        auto_score = 7.0
+                        remarks = "开盘落在+100%~+200%中性区间，量价正常"
+                    else:
+                        judgment = "弱"
+                        auto_score = 4.0
+                        remarks = "开盘低于翻倍线，关注度略显不足"
 
             elif idx == 1: # 9:40 早盘第一波攻击 (校准 9:40 现价)
-                default_p1 = price if price > 0 else (open_price * 1.10 if open_price > 0 else 625.0)
+                default_p1 = price if price > 0 else (open_price * 1.03 if open_price > 0 else ref_base_p)
                 cur_p1 = float(custom_params.get(n_id, default_p1))
                 input_val = cur_p1
                 input_unit = "元"
                 cur_gain_open = ((cur_p1 - open_price) / open_price * 100.0) if open_price > 0 else 0.0
                 observed_val = f"现价:{cur_p1:.2f}元 (较开盘{cur_gain_open:+.1f}%)"
-                if cur_gain_open >= 10.0 or cur_p1 >= open_price * 1.10:
-                    judgment = "强"
-                    auto_score = 9.0
-                    remarks = "放量上攻突破开盘价并涨超10%，攻击迅猛"
-                elif cur_p1 >= open_price:
-                    judgment = "中"
-                    auto_score = 6.5
-                    remarks = "维持在开盘价上方震荡，等待方向选择"
+
+                if is_daily_strategy:
+                    # 通用日常策略：早盘冲高突破与站稳开盘价/VWAP
+                    if cur_gain_open >= 3.0 or cur_p1 >= open_price * 1.03:
+                        judgment = "强"
+                        auto_score = 9.0
+                        remarks = "早盘放量冲高突破开盘价，多头攻击形态明确"
+                    elif cur_p1 >= open_price:
+                        judgment = "中"
+                        auto_score = 6.5
+                        remarks = "维持在开盘价上方震荡蓄势，趋势良性"
+                    else:
+                        judgment = "弱"
+                        auto_score = 3.5
+                        remarks = "冲高回落跌破开盘价，早盘承接偏弱"
                 else:
-                    judgment = "弱"
-                    auto_score = 3.5
-                    remarks = "跌破开盘价走弱，出现分歧砸盘"
+                    if cur_gain_open >= 10.0 or cur_p1 >= open_price * 1.10:
+                        judgment = "强"
+                        auto_score = 9.0
+                        remarks = "放量上攻突破开盘价并涨超10%，攻击迅猛"
+                    elif cur_p1 >= open_price:
+                        judgment = "中"
+                        auto_score = 6.5
+                        remarks = "维持在开盘价上方震荡，等待方向选择"
+                    else:
+                        judgment = "弱"
+                        auto_score = 3.5
+                        remarks = "跌破开盘价走弱，出现分歧砸盘"
 
             elif idx == 2: # 10:00 换手质量检验 (校准 10:00 换手率)
-                cur_to = float(custom_params.get(n_id, turnover_rate if turnover_rate > 0 else 62.5))
+                # 换手率合理边界保护：若 turnover_rate 大于 100 且未校准，重置为合理默认值
+                safe_to_val = turnover_rate if (0.0 < turnover_rate <= 100.0) else (5.0 if is_daily_strategy else 25.0)
+                cur_to = float(custom_params.get(n_id, safe_to_val))
                 input_val = cur_to
                 input_unit = "%"
                 observed_val = f"换手率:{cur_to:.1f}% 金额:{amount_yi:.2f}亿"
-                if cur_to >= 15.0 and price >= open_price:
-                    judgment = "强"
-                    auto_score = 8.5
-                    remarks = "换手充沛且价格抬升，承接有力"
-                elif cur_to >= 10.0:
-                    judgment = "中"
-                    auto_score = 6.0
-                    remarks = "换手稳步推进，量能温和"
-                else:
-                    judgment = "弱"
-                    auto_score = 4.0
-                    remarks = "换手偏低或放量滞涨，警惕承接衰竭"
 
-            elif idx == 3: # 11:00 分歧承接测试 (校准 11:00 价格)
-                default_p3 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                if is_daily_strategy:
+                    # 通用日常个股：10:00 换手达到 3%~8% 为活跃健康
+                    if cur_to >= 3.0 and price >= vwap_val:
+                        judgment = "强"
+                        auto_score = 8.5
+                        remarks = "早盘换手充沛且站稳均线，资金承接活跃"
+                    elif cur_to >= 1.0:
+                        judgment = "中"
+                        auto_score = 6.5
+                        remarks = "换手温和推进，量价结构平稳"
+                    else:
+                        judgment = "弱"
+                        auto_score = 4.0
+                        remarks = "换手偏低无量横盘，警惕量能不济"
+                else:
+                    if cur_to >= 15.0 and price >= open_price:
+                        judgment = "强"
+                        auto_score = 8.5
+                        remarks = "换手充沛且价格抬升，承接有力"
+                    elif cur_to >= 10.0:
+                        judgment = "中"
+                        auto_score = 6.0
+                        remarks = "换手稳步推进，量能温和"
+                    else:
+                        judgment = "弱"
+                        auto_score = 4.0
+                        remarks = "换手偏低或放量滞涨，警惕承接衰竭"
+
+            elif idx == 3: # 11:00 分歧承接/均线测试 (校准 11:00 价格)
+                default_p3 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
                 cur_p3 = float(custom_params.get(n_id, default_p3))
                 input_val = cur_p3
                 input_unit = "元"
                 vwap_diff = ((cur_p3 - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
                 observed_val = f"现价:{cur_p3:.2f}元 (偏离均价{vwap_diff:+.1f}%)"
+
                 if cur_p3 >= vwap_val and cur_p3 >= open_price:
                     judgment = "强"
                     auto_score = 8.5
-                    remarks = "回落快速收回均线之上，均价线斜率向上"
-                elif cur_p3 >= vwap_val * 0.95 or cur_p3 >= open_price * 0.95:
+                    remarks = "稳居分时均线之上，分时均线向上支撑坚挺"
+                elif cur_p3 >= vwap_val * 0.98 or cur_p3 >= open_price * 0.98:
                     judgment = "中"
                     auto_score = 6.0
-                    remarks = "贴近分时均线窄幅拉锯，承接尚可"
+                    remarks = "贴近分时均线窄幅拉锯，承接尚在可控范围"
                 else:
                     judgment = "弱"
                     auto_score = 3.5
-                    remarks = "跌破分时均线且反抽无力，重心下移"
+                    remarks = "跌破分时均线且反抽无力，警惕破线阴跌"
 
             elif idx == 4: # 14:00 午后突破验证 (校准 14:00 价格)
-                default_p4 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                default_p4 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
                 cur_p4 = float(custom_params.get(n_id, default_p4))
                 input_val = cur_p4
                 input_unit = "元"
                 observed_val = f"现价:{cur_p4:.2f}元 / 上午最高:{high_am:.2f}元"
-                if cur_p4 >= high_am and cur_p4 > open_price:
+
+                if cur_p4 >= high_am and cur_p4 > vwap_val:
                     judgment = "强"
                     auto_score = 9.0
-                    remarks = "午后放量突破上午最高价，趋势延续"
-                elif cur_p4 >= vwap_val or cur_p4 >= open_price * 0.90:
+                    remarks = "午后放量突破上午高点，主升趋势延续"
+                elif cur_p4 >= vwap_val or cur_p4 >= open_price * 0.95:
                     judgment = "中"
                     auto_score = 6.5
-                    remarks = "午后震荡蓄势，未破关键支撑"
+                    remarks = "午后震荡蓄势守住分时均线，未破关键支撑"
                 else:
                     judgment = "弱"
                     auto_score = 4.0
-                    remarks = "午后持续走弱回落，板块分化"
+                    remarks = "午后持续走弱重心下移，波段调整"
 
             elif idx == 5: # 14:50 尾盘抢筹强度 (校准 14:50 价格)
-                default_p5 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+                default_p5 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
                 cur_p5 = float(custom_params.get(n_id, default_p5))
                 input_val = cur_p5
                 input_unit = "元"
                 cur_ch_ratio = (cur_p5 / max_p) if max_p > 0 else 1.0
                 observed_val = f"现价:{cur_p5:.2f}元 (收盘/最高: {cur_ch_ratio*100:.1f}%)"
-                if cur_ch_ratio >= 0.95 or (cur_p5 >= max_p * 0.98):
+
+                if (cur_ch_ratio >= 0.95 or cur_p5 >= max_p * 0.98) and cur_p5 >= vwap_val:
                     judgment = "强"
                     auto_score = 9.5
-                    remarks = "尾盘放量抢筹逼近最高价，资金意愿坚决"
-                elif cur_ch_ratio >= 0.88:
+                    remarks = "尾盘放量抢筹逼近日内最高价，资金做多坚决"
+                elif cur_ch_ratio >= 0.88 or cur_p5 >= vwap_val:
                     judgment = "中"
                     auto_score = 6.5
-                    remarks = "尾盘平稳维持，无恐慌跳水"
+                    remarks = "尾盘平稳维持守住均线，按计划管理持仓"
                 else:
                     judgment = "弱"
                     auto_score = 3.0
-                    remarks = "尾盘放量跳水抛售，走弱明显"
+                    remarks = "尾盘放量跳水破位，建议清仓规避隔夜风险"
 
-            elif idx == 6: # 15:00 收盘结构与锁仓 (校准收盘价)
-                default_p6 = price if price > 0 else (open_price if open_price > 0 else 625.0)
+            elif idx == 6: # 15:00 收盘结构与持仓管理 (校准收盘价)
+                default_p6 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
                 cur_p6 = float(custom_params.get(n_id, default_p6))
                 input_val = cur_p6
                 input_unit = "元"
                 cur_ch_ratio = (cur_p6 / max_p) if max_p > 0 else 1.0
-                observed_val = f"收盘:{cur_p6:.2f}元 锁仓比:{cur_ch_ratio*100:.1f}%"
-                if cur_ch_ratio >= 0.90 and intensity_ratio >= 2.0:
+                observed_val = f"收盘:{cur_p6:.2f}元 相对日高:{cur_ch_ratio*100:.1f}%"
+
+                if (cur_ch_ratio >= 0.90 or cur_p6 >= cur_op) and cur_p6 >= vwap_val:
                     judgment = "强"
                     auto_score = 9.5
-                    remarks = "收盘/最高>90%强锁仓，资金强度极高"
-                elif cur_ch_ratio >= 0.80 or cur_p6 >= open_price * 0.90:
+                    remarks = "收盘站稳分时均线之上且形态良好，持仓结构健康"
+                elif cur_ch_ratio >= 0.80 or cur_p6 >= vwap_val * 0.98:
                     judgment = "中"
                     auto_score = 6.5
-                    remarks = "守住大部分涨幅，形态结构健康"
+                    remarks = "平稳收盘守住核心区间，形态结构正常"
                 else:
                     judgment = "弱"
                     auto_score = 3.5
-                    remarks = "收盘远低于最高(<80%)，兑现压力沉重"
+                    remarks = "破位收阴跌破分时均线，防范次日低开风险"
 
             # 2. 检查是否有用户人工打分覆盖 (Manual Score Override)
             manual_score = None
@@ -693,60 +767,125 @@ class IntradayStrategyEngine:
         current_status_diagnosis = ""
         action_execution_text = ""
 
-        if clean_t < "09:25":
-            current_status_diagnosis = f"当前处于【集合竞价定盘阶段】。发行价 {issue_p:.2f} 元，重点观察 9:25 最终撮合价格与盘口委买厚度。"
-            if open_price >= 560.64:
-                action_execution_text = "【操作建议】高开达到 +200% 强势基准 (>=560.64元)！开盘后优先按策略B持有观察或准备在较开盘涨10%处挂买一价*1.02卖出首批50%。"
-            elif open_price >= 373.76:
-                action_execution_text = "【操作建议】开盘落在翻倍区间 (+100%~+200%)。执行策略A标准分批：早盘冲高+10%申报价格笼子卖出50%，若10:00前未冲高则10:00市价卖30%。"
-            else:
-                action_execution_text = "【操作建议】开盘低于翻倍线 (<373.76元)，按保守档应对，不急于低位割肉，观察开盘是否有放量反弹拉升。"
+        if is_daily_strategy:
+            # === 通用日常个股分时策略 实操指引体系 ===
+            open_gain_val = ((open_price - last_close) / last_close * 100.0) if (last_close and last_close > 0) else 0.0
+            cur_gain_val = ((price - last_close) / last_close * 100.0) if (last_close and last_close > 0) else gain_from_open
 
-        elif "09:25" <= clean_t < "09:40":
-            current_status_diagnosis = f"当前处于【早盘第一波攻击阶段】。现价 {price:.2f} 元 (较开盘 {gain_from_open:+.1f}%)，最高 {max_p:.2f} 元。"
-            if price >= open_price * 1.10:
-                action_execution_text = f"【操作建议 🔴 触发卖出】股价较开盘已冲高 >= 10% (目标价 {open_price*1.10:.2f}元)！立即按买一价*1.02限价申报卖出 50% 仓位锁定利润！"
-            elif price >= open_price:
-                action_execution_text = f"【操作建议 ⏳ 监控冲高】股价在开盘价上方稳健上行，未达+10%卖点(目标 {open_price*1.10:.2f}元)，继续持股盯盘，勿提前抢跑。"
-            else:
-                action_execution_text = f"【操作建议 ⚠️ 风险防范】股价跌破开盘价 {open_price:.2f} 元！若反抽无力或换手滞涨，需提高警惕准备在10:00执行减仓。"
+            if clean_t < "09:25":
+                lc_desc = f"昨收 {last_close:.2f} 元" if (last_close and last_close > 0) else "待开盘"
+                current_status_diagnosis = f"当前处于【集合竞价定盘阶段】。{lc_desc}，试盘价 {open_price:.2f} 元 ({open_gain_val:+.2f}%)，观察 9:25 最终撮合与竞价量比。"
+                if open_gain_val >= 3.0:
+                    action_execution_text = f"【操作建议 🚀 强势高开】高开幅度达 {open_gain_val:+.2f}%！若量比充足，开盘后关注冲高至 +5%~+7% 目标位分批止盈机会。"
+                elif open_gain_val >= 0.0:
+                    action_execution_text = "【操作建议 ⏳ 平开/微高开】开盘在昨收上方，盘初关注能否放量突破开盘价并稳健运行在分时均线上方。"
+                else:
+                    action_execution_text = "【操作建议 ⚠️ 低开防守】低开在昨收线下方，不盲目追单，观察开盘是否有放量拉升快速收复昨收价。"
 
-        elif "09:40" <= clean_t < "10:00":
-            current_status_diagnosis = f"当前处于【换手质量检验阶段】。当前换手率 {turnover_rate:.1f}%，成交金额 {amount_yi:.2f} 亿元，分时低点 {min_p:.2f} 元。"
-            if clean_t >= "09:59":
-                action_execution_text = "【操作建议 🔔 10:00整兜底】若此前冲高50%未触发，在 10:00:00 整按市价果断卖出 30% 仓位执行纪律兜底！"
-            elif turnover_rate >= 15.0 and price >= open_price:
-                action_execution_text = "【操作建议 ✅ 健康换手】10分钟换手超15%且价格稳步抬升，属于健康充分交换，剩余仓位继续持有等待分歧承接。"
-            else:
-                action_execution_text = "【操作建议 ⚠️ 观察承接】换手推进中，若出现放量滞涨且低点下移，准备在 10:00 执行兜底减仓。"
+            elif "09:25" <= clean_t < "09:40":
+                current_status_diagnosis = f"当前处于【早盘快速冲高攻击阶段】。现价 {price:.2f} 元 (较昨收 {cur_gain_val:+.2f}% / 较开盘 {gain_from_open:+.2f}%)，日内高点 {max_p:.2f} 元。"
+                if gain_from_open >= 3.0 or cur_gain_val >= 5.0:
+                    action_execution_text = f"【操作建议 🔴 冲高分批止盈】早盘快速拉升已达预期冲高目标 (现价 {price:.2f}元)！建议按阶梯分批挂单止盈 30%~50%，锁定日内利润！"
+                elif price >= open_price:
+                    action_execution_text = f"【操作建议 ⏳ 沿均线持股】股价在开盘价上方稳健上行，未达减仓条件，继续沿分时均线持有盯盘。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 跌破开盘价】股价跌破开盘价 ({open_price:.2f}元)！若反抽无力且均线下行，需提高警惕控制仓位。"
 
-        elif "10:00" <= clean_t < "11:30" or "11:30" <= clean_t < "13:00":
-            current_status_diagnosis = f"当前处于【分歧承接测试阶段】。现价 {price:.2f} 元，分时均价 VWAP 为 {vwap_val:.2f} 元。"
-            if price >= vwap_val:
-                action_execution_text = f"【操作建议 🛡️ 守线持有】股价稳稳运行在分时均线 ({vwap_val:.2f}元) 上方，承接良好，剩余仓位安心持有博弈午后突破；若盘中触及+30%临停复牌前挂 Open*1.28 限价单卖30%。"
-            else:
-                action_execution_text = f"【操作建议 ⚠️ 破线警惕】股价跌破分时均线 ({vwap_val:.2f}元)！若反抽不过均线，建议逢反弹高点主动减仓，严防阴跌。"
+            elif "09:40" <= clean_t < "10:00":
+                current_status_diagnosis = f"当前处于【换手质量与量比检验阶段】。当前换手率 {turnover_rate:.2f}%，成交金额 {amount_yi:.2f} 亿元，分时低点 {min_p:.2f} 元。"
+                if price >= vwap_val and turnover_rate >= 3.0:
+                    action_execution_text = f"【操作建议 ✅ 量价健康】换手率 ({turnover_rate:.2f}%) 推进充分且股价运行在均价线 ({vwap_val:.2f}元) 上方，承接有力，持股观察。"
+                elif price < vwap_val:
+                    action_execution_text = f"【操作建议 ⚠️ 破线警惕】股价跌破分时均线 ({vwap_val:.2f}元)！若 10:00 前反抽无力，建议主动分批减仓防范日内调整。"
+                else:
+                    action_execution_text = f"【操作建议 ⏳ 观察承接】换手推进中，密切关注分时均线 ({vwap_val:.2f}元) 支撑力度。"
 
-        elif "13:00" <= clean_t < "14:30":
-            current_status_diagnosis = f"当前处于【午后突破验证阶段】。现价 {price:.2f} 元，上午最高价 {high_am:.2f} 元。"
-            if price >= high_am:
-                action_execution_text = f"【操作建议 🔥 突破新高】午后成功突破上午最高价 {high_am:.2f} 元！主力做多趋势强化，保持锁仓，关注激光/半导体板块协同性。"
-            else:
-                action_execution_text = f"【操作建议 ⏳ 震荡观察】午后尚未突破上午高点 ({high_am:.2f}元)，若缩量横盘维持在均线上方可继续观察，破均线则分批派发。"
+            elif "10:00" <= clean_t < "11:30" or "11:30" <= clean_t < "13:00":
+                current_status_diagnosis = f"当前处于【分歧承接测试阶段】。现价 {price:.2f} 元，分时均价 VWAP 为 {vwap_val:.2f} 元。"
+                if price >= vwap_val:
+                    action_execution_text = f"【操作建议 🛡️ 守线持有】股价稳健运行在分时均线 ({vwap_val:.2f}元) 上方，承接良好，剩余仓位安心持有博弈午后突破；若盘中高点回撤 >= 3%~5% 则触发移动止盈。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 破线减仓】股价跌破分时均线 ({vwap_val:.2f}元)！若反抽无法收复均线，建议逢反弹高点主动减仓，规避阴跌回落。"
 
-        elif "14:30" <= clean_t < "14:50":
-            current_status_diagnosis = f"当前处于【尾盘抢筹强度检验阶段】。收盘/最高价比例为 {close_high_ratio*100:.1f}%。"
-            if close_high_ratio >= 0.90:
-                action_execution_text = "【操作建议 🚀 尾盘抢筹】尾盘放量上攻逼近全天最高价！锁仓迹象明显，准备在 14:50 之后保留 10%~20% 底仓过夜博次日溢价。"
-            else:
-                action_execution_text = "【操作建议 ⚠️ 准备清仓】尾盘回落且收盘/最高 < 90%，不满足留仓条件，准备在 14:50~14:57 尾盘全部市价清仓，不留隔夜仓。"
+            elif "13:00" <= clean_t < "14:30":
+                current_status_diagnosis = f"当前处于【午后波段方向选择阶段】。现价 {price:.2f} 元，上午最高价 {high_am:.2f} 元，VWAP {vwap_val:.2f} 元。"
+                if price >= high_am:
+                    action_execution_text = f"【操作建议 🔥 突破上午高点】午后放量突破上午最高价 ({high_am:.2f}元)！多头趋势强化，持股待涨并注意涨停板封板强度。"
+                elif price >= vwap_val:
+                    action_execution_text = f"【操作建议 ⏳ 震荡蓄势】午后维持在分时均线 ({vwap_val:.2f}元) 上方震荡，继续持仓观察，等待尾盘方向选择。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 破位减仓】午后走弱跌破分时均线 ({vwap_val:.2f}元)，建议主动降低仓位防范尾盘跳水。"
 
-        else: # 14:50 ~ 15:00
-            current_status_diagnosis = f"当前处于【收盘结构与锁仓结算阶段】。综合加权得分 {total_score_rounded:.2f} 分，形态判定【{pattern}】。"
-            if close_high_ratio >= 0.90 and total_score_rounded >= 8.0:
-                action_execution_text = f"【操作建议 🌙 优质锁仓过夜】收盘/最高 {close_high_ratio*100:.1f}% >= 90% 且综合评分达 {total_score_rounded:.2f} 分(A型)！保留 10% 底仓过夜，次日开盘 9:25 关注竞价接力！"
-            else:
-                action_execution_text = "【操作建议 🚪 尾盘市价清仓】未达成超强锁仓条件(或评分<8.0)，执行策略A纪律，在 14:57 前按买一价市价全部清仓，规避次日低开风险！"
+            elif "14:30" <= clean_t < "14:50":
+                current_status_diagnosis = f"当前处于【尾盘承接与留仓评估阶段】。收盘/最高价比例为 {close_high_ratio*100:.1f}%，现价 {price:.2f} 元。"
+                if close_high_ratio >= 0.95 and price >= vwap_val:
+                    action_execution_text = f"【操作建议 🚀 尾盘强势】尾盘保持高位震荡 (>=95%高点)，分时形态健康，可评估保留仓位博弈次日溢价。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 冲高回落防守】尾盘回落或跌破分时均线，不满足强势留仓条件，建议在 14:50 后择机减仓或止盈。"
+
+            else: # 14:50 ~ 15:00
+                current_status_diagnosis = f"当前处于【收盘持仓决策阶段】。综合加权得分 {total_score_rounded:.2f} 分，形态判定【{pattern}】。"
+                if close_high_ratio >= 0.92 and total_score_rounded >= 7.5:
+                    action_execution_text = f"【操作建议 🌙 强势留仓】全天结构强势，综合评分达 {total_score_rounded:.2f} 分({pattern})！可保留仓位过夜，关注次日开盘竞价！"
+                else:
+                    action_execution_text = f"【操作建议 🚪 纪律防守】走势平淡或走弱 (评分 {total_score_rounded:.2f}分 < 7.5)，建议按交易纪律在收盘前降低仓位或锁定胜果。"
+
+        else:
+            # === 新股上市首日专属 实操指引体系 ===
+            if clean_t < "09:25":
+                current_status_diagnosis = f"当前处于【集合竞价定盘阶段】。发行价 {issue_p:.2f} 元，重点观察 9:25 最终撮合价格与盘口委买厚度。"
+                if open_price >= 560.64:
+                    action_execution_text = "【操作建议】高开达到 +200% 强势基准 (>=560.64元)！开盘后优先按策略B持有观察或准备在较开盘涨10%处挂买一价*1.02卖出首批50%。"
+                elif open_price >= 373.76:
+                    action_execution_text = "【操作建议】开盘落在翻倍区间 (+100%~+200%)。执行策略A标准分批：早盘冲高+10%申报价格笼子卖出50%，若10:00前未冲高则10:00市价卖30%。"
+                else:
+                    action_execution_text = "【操作建议】开盘低于翻倍线 (<373.76元)，按保守档应对，不急于低位割肉，观察开盘是否有放量反弹拉升。"
+
+            elif "09:25" <= clean_t < "09:40":
+                current_status_diagnosis = f"当前处于【早盘第一波攻击阶段】。现价 {price:.2f} 元 (较开盘 {gain_from_open:+.1f}%)，最高 {max_p:.2f} 元。"
+                if price >= open_price * 1.10:
+                    action_execution_text = f"【操作建议 🔴 触发卖出】股价较开盘已冲高 >= 10% (目标价 {open_price*1.10:.2f}元)！立即按买一价*1.02限价申报卖出 50% 仓位锁定利润！"
+                elif price >= open_price:
+                    action_execution_text = f"【操作建议 ⏳ 监控冲高】股价在开盘价上方稳健上行，未达+10%卖点(目标 {open_price*1.10:.2f}元)，继续持股盯盘，勿提前抢跑。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 风险防范】股价跌破开盘价 {open_price:.2f} 元！若反抽无力或换手滞涨，需提高警惕准备在10:00执行减仓。"
+
+            elif "09:40" <= clean_t < "10:00":
+                current_status_diagnosis = f"当前处于【换手质量检验阶段】。当前换手率 {turnover_rate:.1f}%，成交金额 {amount_yi:.2f} 亿元，分时低点 {min_p:.2f} 元。"
+                if clean_t >= "09:59":
+                    action_execution_text = "【操作建议 🔔 10:00整兜底】若此前冲高50%未触发，在 10:00:00 整按市价果断卖出 30% 仓位执行纪律兜底！"
+                elif turnover_rate >= 15.0 and price >= open_price:
+                    action_execution_text = "【操作建议 ✅ 健康换手】10分钟换手超15%且价格稳步抬升，属于健康充分交换，剩余仓位继续持有等待分歧承接。"
+                else:
+                    action_execution_text = "【操作建议 ⚠️ 观察承接】换手推进中，若出现放量滞涨且低点下移，准备在 10:00 执行兜底减仓。"
+
+            elif "10:00" <= clean_t < "11:30" or "11:30" <= clean_t < "13:00":
+                current_status_diagnosis = f"当前处于【分歧承接测试阶段】。现价 {price:.2f} 元，分时均价 VWAP 为 {vwap_val:.2f} 元。"
+                if price >= vwap_val:
+                    action_execution_text = f"【操作建议 🛡️ 守线持有】股价稳稳运行在分时均线 ({vwap_val:.2f}元) 上方，承接良好，剩余仓位安心持有博弈午后突破；若盘中触及+30%临停复牌前挂 Open*1.28 限价单卖30%。"
+                else:
+                    action_execution_text = f"【操作建议 ⚠️ 破线警惕】股价跌破分时均线 ({vwap_val:.2f}元)！若反抽不过均线，建议逢反弹高点主动减仓，严防阴跌。"
+
+            elif "13:00" <= clean_t < "14:30":
+                current_status_diagnosis = f"当前处于【午后突破验证阶段】。现价 {price:.2f} 元，上午最高价 {high_am:.2f} 元。"
+                if price >= high_am:
+                    action_execution_text = f"【操作建议 🔥 突破新高】午后成功突破上午最高价 {high_am:.2f} 元！主力做多趋势强化，保持锁仓，关注激光/半导体板块协同性。"
+                else:
+                    action_execution_text = f"【操作建议 ⏳ 震荡观察】午后尚未突破上午高点 ({high_am:.2f}元)，若缩量横盘维持在均线上方可继续观察，破均线则分批派发。"
+
+            elif "14:30" <= clean_t < "14:50":
+                current_status_diagnosis = f"当前处于【尾盘抢筹强度检验阶段】。收盘/最高价比例为 {close_high_ratio*100:.1f}%。"
+                if close_high_ratio >= 0.90:
+                    action_execution_text = "【操作建议 🚀 尾盘抢筹】尾盘放量上攻逼近全天最高价！锁仓迹象明显，准备在 14:50 之后保留 10%~20% 底仓过夜博次日溢价。"
+                else:
+                    action_execution_text = "【操作建议 ⚠️ 准备清仓】尾盘回落且收盘/最高 < 90%，不满足留仓条件，准备在 14:50~14:57 尾盘全部市价清仓，不留隔夜仓。"
+
+            else: # 14:50 ~ 15:00
+                current_status_diagnosis = f"当前处于【收盘结构与锁仓结算阶段】。综合加权得分 {total_score_rounded:.2f} 分，形态判定【{pattern}】。"
+                if close_high_ratio >= 0.90 and total_score_rounded >= 8.0:
+                    action_execution_text = f"【操作建议 🌙 优质锁仓过夜】收盘/最高 {close_high_ratio*100:.1f}% >= 90% 且综合评分达 {total_score_rounded:.2f} 分(A型)！保留 10% 底仓过夜，次日开盘 9:25 关注竞价接力！"
+                else:
+                    action_execution_text = "【操作建议 🚪 尾盘市价清仓】未达成超强锁仓条件(或评分<8.0)，执行策略A纪律，在 14:57 前按买一价市价全部清仓，规避次日低开风险！"
 
         eval_result = {
             "code": c_clean,
@@ -1023,14 +1162,35 @@ class IntradayStrategyEngine:
             res["high_price"] = float(row.get('high', row.get('high_price', row.get('High', res['price']))))
             res["low_price"] = float(row.get('low', row.get('low_price', row.get('Low', res['price']))))
             
-            # 换手率 (%)
-            res["turnover_rate"] = float(row.get('turnover', row.get('turnover_rate', row.get('turnover_ratio', 0.0))))
+            # 昨收价 / 前收盘价
+            res["last_close"] = float(row.get('last_close', row.get('llastp', row.get('pre_close', row.get('settlement', res['open_price'])))))
             
-            # 成交金额 (元)
-            res["amount"] = float(row.get('amount', row.get('money', row.get('Amount', 0.0))))
+            # 成交金额 (元) — 兼容 amount / turnover(金额) / money
+            raw_amt = float(row.get('amount', row.get('money', row.get('Amount', 0.0))))
+            raw_to_col = float(row.get('turnover', 0.0))
+            if raw_amt <= 0 and raw_to_col > 1e4:
+                raw_amt = raw_to_col
+            res["amount"] = raw_amt
             
             # 成交量 (股/手)
             res["volume"] = float(row.get('volume', row.get('vol', row.get('Volume', 0.0))))
+            
+            # 换手率 (%) — 优先读取 turnoverratio / turnover_rate / turnover_ratio
+            raw_to_ratio = row.get('turnoverratio', row.get('turnover_rate', row.get('turnover_ratio', row.get('turnover_d', None))))
+            if raw_to_ratio is not None and float(raw_to_ratio) > 0:
+                res["turnover_rate"] = float(raw_to_ratio)
+            elif raw_to_col > 0 and raw_to_col <= 100.0:
+                res["turnover_rate"] = raw_to_col
+            else:
+                # 若无直接换手率字段，尝试从成交额/流通市值推导
+                spec = self.get_stock_ladder_spec(c_clean)
+                float_mv_yi = float(spec.get("float_mv_yi", 0.0))
+                if float_mv_yi > 0 and res["amount"] > 0:
+                    res["turnover_rate"] = round((res["amount"] / (float_mv_yi * 1e8)) * 100.0, 2)
+            
+            # 换手率合理边界保护 (0.0% ~ 100.0%)
+            if res["turnover_rate"] > 100.0 or res["turnover_rate"] < 0:
+                res["turnover_rate"] = min(100.0, max(0.0, res["turnover_rate"]))
             
             # 买一价 / 卖一价
             res["bid1_price"] = float(row.get('buy', row.get('bid1', row.get('buy1', res['price']))))
@@ -1041,17 +1201,37 @@ class IntradayStrategyEngine:
             if t_val:
                 res["time_str"] = str(t_val)[-8:] if len(str(t_val)) >= 8 else str(t_val)
 
-            # 动态计算 VWAP
-            if res["amount"] > 0 and res["volume"] > 0:
-                # 若 volume 是手，换算为股 (*100)
-                unit_vol = res["volume"] if res["volume"] > 1e4 else (res["volume"] * 100)
-                if unit_vol > 0:
-                    res["vwap"] = round(res["amount"] / unit_vol, 2)
-            if res["vwap"] <= 0:
-                if res["open_price"] > 0:
+            # 动态计算与提取 VWAP 均价线
+            # 1. 优先提取显式均价字段
+            explicit_vwap = float(row.get('vwap_price', row.get('vwap', row.get('avg_price', row.get('nclose', row.get('avg', 0.0))))))
+            cur_p = res["price"] if res["price"] > 0 else res["open_price"]
+            
+            if explicit_vwap > 0 and cur_p > 0 and (cur_p * 0.5 <= explicit_vwap <= cur_p * 2.0):
+                res["vwap"] = round(explicit_vwap, 2)
+            elif res["amount"] > 0 and res["volume"] > 0 and cur_p > 0:
+                # 2. 尝试从 amount / volume 计算 (考虑 volume 是手还是股)
+                v_gu = res["volume"] * 100.0  # 假设 volume 是手
+                v_raw = res["volume"]         # 假设 volume 是股
+                
+                vwap_from_gu = res["amount"] / v_gu if v_gu > 0 else 0.0
+                vwap_from_raw = res["amount"] / v_raw if v_raw > 0 else 0.0
+                
+                if cur_p * 0.7 <= vwap_from_gu <= cur_p * 1.3:
+                    res["vwap"] = round(vwap_from_gu, 2)
+                elif cur_p * 0.7 <= vwap_from_raw <= cur_p * 1.3:
+                    res["vwap"] = round(vwap_from_raw, 2)
+                else:
+                    # 回退到四价均值
+                    res["vwap"] = round((res["open_price"] + res["price"] + res["high_price"] + res["low_price"]) / 4.0, 2) if res["open_price"] > 0 else cur_p
+            else:
+                if res["open_price"] > 0 and cur_p > 0:
                     res["vwap"] = round((res["open_price"] + res["price"] + res["high_price"] + res["low_price"]) / 4.0, 2)
                 else:
-                    res["vwap"] = res["price"]
+                    res["vwap"] = cur_p
+
+            # 最终极端值兜底保护
+            if res["vwap"] <= 0 or (cur_p > 0 and (res["vwap"] > cur_p * 3.0 or res["vwap"] < cur_p * 0.3)):
+                res["vwap"] = cur_p
 
         except Exception as e:
             logger.warning(f"Error parsing market row from DataFrame: {e}")

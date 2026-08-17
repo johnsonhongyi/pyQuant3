@@ -767,11 +767,21 @@ class IntegratedTradingStrategyPanel(QWidget):
         bid1_price: float,
         current_time_str: str,
         strategy: Dict[str, Any],
-        is_unlisted: bool = False
+        is_unlisted: bool = False,
+        last_close: Optional[float] = None
     ):
         """全面刷新一体化工作台数据（带滚动条位置锁定保护）"""
         self.code = code
         c_clean = str(code).zfill(6)
+
+        strat_id = strategy.get("id", "") if strategy else ""
+        strat_type = strategy.get("strategy_type", "") if strategy else ""
+        is_daily_strategy = (
+            strat_type in ("daily_surge", "general", "daily")
+            or "daily" in strat_id
+            or "surge" in strat_id
+            or (c_clean not in ("688826", "920199") and not strat_id.startswith("strategy_pinzhun") and not strat_id.startswith("strategy_a_") and not strat_id.startswith("strategy_b_"))
+        )
 
         # 1. 评估 7 节点动态打分与形态
         eval_res = self.engine.evaluate_seven_nodes(
@@ -783,7 +793,9 @@ class IntegratedTradingStrategyPanel(QWidget):
             low_price=low_price,
             vwap=vwap,
             turnover_rate=turnover_rate,
-            amount=amount
+            amount=amount,
+            strategy_id=strat_id,
+            last_close=last_close
         )
 
         tot_score = eval_res.get("total_weighted_score", 0.0)
@@ -795,9 +807,15 @@ class IntegratedTradingStrategyPanel(QWidget):
         logs = state.get("execution_logs", [])
 
         # 2. 顶部状态卡
-        tier_name, strat_id, mode = self.engine.get_open_price_tier(open_price, code=c_clean)
+        tier_name, _, _ = self.engine.get_open_price_tier(open_price, code=c_clean)
         unlisted_str = " (待上市估价)" if is_unlisted or open_price <= 0 else ""
-        self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{unlisted_str} | 所属档位: {tier_name} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+        
+        if is_daily_strategy:
+            open_gain_str = f" (今开幅: {((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0 and open_price > 0) else ""
+            self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{open_gain_str} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+        else:
+            self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{unlisted_str} | 所属档位: {tier_name} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+
         self.lbl_strat_name.setText(f"当前策略: {strategy.get('name', '默认策略')}")
         self.lbl_score_badge.setText(
             f"🏆 综合评级: <font color='#00ff88'>{tot_score:.2f}分</font> (形态: <font color='#ffd700'>【{pattern}】</font>) | 资金强度: {intensity_val:.2f}x"
@@ -858,6 +876,9 @@ class IntegratedTradingStrategyPanel(QWidget):
                     elif r_id in ["rule_a2_halt_30", "rule_pz_halt_30"]:
                         target_str = f"最高 ≥ {open_price*1.30:.2f}元 (+30%)"
                         sugg_p = f"{round(open_price*1.28, 2):.2f}元"
+                    elif is_daily_strategy and ("surge" in r_id or "profit" in r_id):
+                        target_str = r.get("trigger_expr", f"冲高 ≥ {open_price*1.03:.2f}元")
+                        sugg_p = f"{price:.2f}元(市价)"
                     else:
                         target_str = r.get("trigger_expr", "--")
                         sugg_p = f"{price:.2f}元(市价)"
@@ -933,16 +954,33 @@ class IntegratedTradingStrategyPanel(QWidget):
         max_p = state.get("max_price", price)
         min_p = state.get("min_price", price)
 
-        sbc_text = (
-            f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
-            f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定 | 发行价: {issue_p:.2f}元)\n"
-            f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
-            f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
-            f"【冲高卖出目标 (+10%)】: {open_price*1.10:.2f} 元 (价格笼子限价卖出 50%)\n"
-            f"【临停触发目标 (+30%)】: {open_price*1.30:.2f} 元 (复牌前挂单 1.28x={open_price*1.28:.2f} 卖出 30%)\n"
-            f"【移动止盈清仓 (-10%)】: {max_p*0.90:.2f} 元 (高点回撤 10% 触发)\n"
-            f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
-        )
+        if is_daily_strategy:
+            # 通用日常个股分时走势面板文案
+            lc_str = f"{last_close:.2f} 元" if (last_close and last_close > 0) else f"{open_price:.2f} 元"
+            op_pct_str = f"今开: {open_price:.2f} 元 ({((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0) else f"开盘: {open_price:.2f} 元"
+            sbc_text = (
+                f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
+                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str})\n"
+                f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
+                f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.2f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
+                f"【冲高卖出目标 (+3%~+5%)】: {open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元 (冲高分批止盈 30%)\n"
+                f"【破分时均线止损/减仓】: {vwap:.2f} 元 (跌破分时均价线 VWAP 触发减仓)\n"
+                f"【移动止盈清仓 (-3%~-5%)】: {max_p*0.96:.2f} 元 (日内高点回撤触发)\n"
+                f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
+            )
+        else:
+            # 新股上市专属走势面板文案
+            sbc_text = (
+                f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
+                f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定 | 发行价: {issue_p:.2f}元)\n"
+                f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
+                f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
+                f"【冲高卖出目标 (+10%)】: {open_price*1.10:.2f} 元 (价格笼子限价卖出 50%)\n"
+                f"【临停触发目标 (+30%)】: {open_price*1.30:.2f} 元 (复牌前挂单 1.28x={open_price*1.28:.2f} 卖出 30%)\n"
+                f"【移动止盈清仓 (-10%)】: {max_p*0.90:.2f} 元 (高点回撤 10% 触发)\n"
+                f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
+            )
+
         if self.txt_sbc_info.toPlainText() != sbc_text:
             sb_sbc = self.txt_sbc_info.verticalScrollBar()
             saved_sbc_pos = sb_sbc.value()
@@ -1530,7 +1568,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         QMessageBox.information(self, "⚡ 全量 Code 分时策略自动检测", res_summary)
 
-    def _get_stock_realtime_data_for_code(self, code_str: str) -> Tuple[float, float, float, float, float, float, float, float, str, bool]:
+    def _get_stock_realtime_data_for_code(self, code_str: str) -> Tuple[float, float, float, float, float, float, float, float, str, bool, float]:
         """全自动从 TDX 秒级直连、手动估价输入、self._latest_df 或行情快照解析全量字段"""
         c_clean = str(code_str).zfill(6)
         resolved_name = resolve_stock_name(c_clean)
@@ -1550,7 +1588,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             vw = (op + tp) / 2.0
             amt = float(to_rate / 100.0 * 14.24 * 1e8)
             b1 = tp
-            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False
+            lc = op
+            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
 
         # 2. 优先从 TDX 极速秒级直连获取
         if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
@@ -1565,6 +1604,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                     to_rate = float(tdx_snap.get("turnover_rate", 0.0))
                     amt = float(tdx_snap.get("amount", 0.0))
                     b1 = float(tdx_snap.get("bid1_price", tp))
+                    lc = float(tdx_snap.get("last_close", op))
                     self._update_tdx_status_badge()
                     # 同步到界面估价框中方便观察
                     self.spin_eval_open.blockSignals(True)
@@ -1576,7 +1616,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                     self.spin_eval_open.blockSignals(False)
                     self.spin_eval_price.blockSignals(False)
                     self.spin_eval_turnover.blockSignals(False)
-                    return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False
+                    return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
             except Exception as e:
                 logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
 
@@ -1594,6 +1634,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         turnover_rate = snap["turnover_rate"]
         amount_val = snap["amount"]
         bid1_price = snap["bid1_price"]
+        last_close = snap.get("last_close", open_price)
         is_unlisted = False
 
         # 4. 若行情尚未产生（如周日或未上市），自动使用界面输入的估价进行自动评分！
@@ -1607,13 +1648,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             amount_val = float(turnover_rate / 100.0 * 14.24 * 1e8)
             bid1_price = trade_price - 0.5
             vwap_price = round((open_price + trade_price) / 2.0, 2)
+            last_close = open_price
         elif open_price <= 0 and trade_price > 0:
             open_price = trade_price
             high_price = max(high_price, trade_price)
             low_price = min(low_price, trade_price) if low_price > 0 else trade_price
             vwap_price = trade_price if vwap_price <= 0 else vwap_price
+            last_close = open_price if last_close <= 0 else last_close
 
-        return open_price, trade_price, high_price, low_price, vwap_price, turnover_rate, amount_val, bid1_price, resolved_name, is_unlisted
+        return open_price, trade_price, high_price, low_price, vwap_price, turnover_rate, amount_val, bid1_price, resolved_name, is_unlisted, last_close
 
     def _get_stock_realtime_data(self):
         return self._get_stock_realtime_data_for_code(self.code)
@@ -1627,7 +1670,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             self._load_mock_or_live_data()
 
     def _load_mock_or_live_data(self):
-        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted = self._get_stock_realtime_data()
+        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = self._get_stock_realtime_data()
         self.name = real_name
         self.open_price = open_price
 
@@ -1664,7 +1707,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             bid1_price=bid1_price,
             current_time_str=now_time_str,
             strategy=strategy,
-            is_unlisted=is_unlisted
+            is_unlisted=is_unlisted,
+            last_close=last_close
         )
 
         # 刷新 Tab 3
@@ -1685,7 +1729,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         if hasattr(self, 'sim_panel') and self.sim_panel.replay_timer.isActive():
             return
 
-        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted = self._get_stock_realtime_data()
+        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = self._get_stock_realtime_data()
         self.name = real_name
         self.open_price = open_price
 
@@ -1718,7 +1762,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             bid1_price=bid1_price,
             current_time_str=now_str,
             strategy=strategy,
-            is_unlisted=is_unlisted
+            is_unlisted=is_unlisted,
+            last_close=last_close
         )
 
         # 刷新 Tab 3

@@ -275,7 +275,7 @@ class TDXRealtimeFetcher:
     def fetch_stock_snapshot(
         self,
         code: str,
-        circulation_shares_wan: float = 761.78
+        circulation_shares_wan: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         拉取单只股票的高精度秒级快照字典（包含开高低收、五档盘口、换手率、成交额、VWAP）
@@ -298,16 +298,35 @@ class TDXRealtimeFetcher:
         ask1_p = float(q.get("ask1", trade_price))
         ask1_v = float(q.get("ask_vol1", 0.0))
 
-        # 计算 VWAP 均价
+        # 计算与修正 VWAP 均价 (元)
         if vol > 0 and amount > 0:
-            vwap = round(amount / (vol * 100.0), 2)
+            calc_vwap = amount / (vol * 100.0)
+            if trade_price > 0 and (trade_price * 0.7 <= calc_vwap <= trade_price * 1.3):
+                vwap = round(calc_vwap, 2)
+            else:
+                vwap = round((open_price + high_price + low_price + trade_price) / 4.0, 2) if open_price > 0 else trade_price
         else:
             vwap = trade_price if trade_price > 0 else open_price
 
-        # 计算换手率
-        total_circ_shares = circulation_shares_wan * 10000.0
-        if total_circ_shares > 0 and vol > 0:
+        # 动态获取该标的真实流通盘 (万股)
+        circ_wan = circulation_shares_wan
+        if circ_wan is None or circ_wan <= 0:
+            try:
+                from ats.intraday_strategy_engine import IntradayStrategyEngine
+                spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
+                float_mv_yi = float(spec.get("float_mv_yi", 0.0))
+                if float_mv_yi > 0 and trade_price > 0:
+                    circ_wan = (float_mv_yi * 1e8 / trade_price) / 10000.0
+                elif c_clean == "688826":
+                    circ_wan = 761.78
+            except Exception:
+                circ_wan = 761.78 if c_clean == "688826" else None
+
+        # 计算换手率 (%)
+        if circ_wan and circ_wan > 0 and vol > 0:
+            total_circ_shares = circ_wan * 10000.0
             turnover_rate = round((vol * 100.0 / total_circ_shares) * 100.0, 2)
+            turnover_rate = min(100.0, max(0.0, turnover_rate))
         else:
             turnover_rate = 0.0
 
