@@ -12,6 +12,8 @@ import os
 import json
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_WARN, COLOR_INFO, COLOR_ACCENT, auto_fit_columns_once, NumericTableWidgetItem
 from ats.ui.base_table import BaseATSTableWidget
+from ats.ui.favorite_panel import get_ats_extra_cols, get_ats_table_headers
+
 class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
@@ -20,6 +22,7 @@ class SwingStateTable(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._is_mock_active = False
+        self.extra_cols = get_ats_extra_cols()
         self._init_ui()
 
     def _init_ui(self):
@@ -60,16 +63,15 @@ class SwingStateTable(QWidget):
 
         # Table
         self.table = BaseATSTableWidget()
-        self.table.setColumnCount(16)
-        self.table.setHorizontalHeaderLabels([
-            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振", "推荐理由"
-        ])
+        headers = get_ats_table_headers(self.extra_cols)
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
         
-        # Table configuration using base widget's persistence
+        default_widths = [90, 100, 90, 110, 110, 90, 100, 110, 75, 60, 50, 60, 60, 75, 75] + [70] * len(self.extra_cols) + [250]
         self.table.setup_persistence(
             config_key="ats_swing_table_state_v2",
-            default_widths=[90, 100, 90, 110, 110, 90, 100, 110, 75, 60, 50, 60, 60, 75, 75, 250],
-            max_widths={15: 350}
+            default_widths=default_widths,
+            max_widths={len(headers) - 1: 350}
         )
         
         self.table.setAlternatingRowColors(True)
@@ -98,12 +100,18 @@ class SwingStateTable(QWidget):
         fav_stocks = fav_mgr.get_favorite_stocks()
         mock_data = sorted(mock_data, key=lambda x: (str(x[0]).strip() not in fav_stocks, str(x[0]).strip()))
 
+        num_extra = len(self.extra_cols)
         self.table.setRowCount(len(mock_data))
         for row_idx, row_data in enumerate(mock_data):
             code = str(row_data[0]).strip()
             is_fav = code in fav_stocks
             
-            for col_idx, text in enumerate(row_data):
+            # 补齐动态列与理由结构
+            row_items = list(row_data[:15]) + ["--"] * num_extra + [row_data[15] if len(row_data) > 15 else ""]
+            
+            for col_idx, text in enumerate(row_items):
+                if col_idx >= self.table.columnCount():
+                    break
                 if col_idx == 1 and is_fav:
                     if not str(text).startswith("⭐"):
                         text = f"⭐ {text}"
@@ -114,7 +122,7 @@ class SwingStateTable(QWidget):
                 if is_fav:
                     item.setBackground(QColor("#1A2A1A"))
                 
-                # Dynamic cell styling based on state/pct, preserving it for favorite stocks too
+                # Dynamic cell styling based on state/pct
                 if col_idx in (0, 1): # Code and Name
                     if is_fav:
                         item.setForeground(QColor("#00FF88"))
@@ -132,7 +140,7 @@ class SwingStateTable(QWidget):
                     elif text == "已平仓":
                         item.setForeground(QColor(COLOR_DOWN))
                 elif col_idx == 4: # MA20 deviation
-                    if text.startswith("+"):
+                    if str(text).startswith("+"):
                         item.setForeground(QColor(COLOR_UP))
                     else:
                         item.setForeground(QColor(COLOR_DOWN))
@@ -141,7 +149,6 @@ class SwingStateTable(QWidget):
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
                 elif col_idx == 7: # 首次发现 (时段时间)
-                    # 早期先手信号高亮
                     strategy_str = str(text)
                     if '🔔' in strategy_str or '竞价' in strategy_str:
                         item.setForeground(QColor("#FF4444"))
@@ -152,7 +159,7 @@ class SwingStateTable(QWidget):
                 elif col_idx == 8: # 优先级评分
                     item.setForeground(QColor(COLOR_ACCENT))
                     item.setFont(self._get_bold_font())
-                elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3 (以前是 7, 9, 10)
+                elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3
                     try:
                         val = float(text)
                         if val > 0:
@@ -163,7 +170,7 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 13: # 大盘偏离 (以前是 11)
+                elif col_idx == 13: # 大盘偏离
                     try:
                         clean_text = text.replace("%", "").replace("+", "")
                         val = float(clean_text)
@@ -177,7 +184,7 @@ class SwingStateTable(QWidget):
                             item.setForeground(QColor("#e2e2e5"))
                     except ValueError:
                         item.setForeground(QColor("#e2e2e5"))
-                elif col_idx == 14: # 大盘共振 (以前是 12)
+                elif col_idx == 14: # 大盘共振
                     if text == "逆市抗跌":
                         item.setForeground(QColor("#FF7F50"))
                         item.setFont(self._get_bold_font())
@@ -188,16 +195,31 @@ class SwingStateTable(QWidget):
                         item.setForeground(QColor(COLOR_DOWN))
                     else:
                         item.setForeground(QColor("#e2e2e5"))
+                elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
+                    if str(text).startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    elif str(text).startswith("-"):
+                        item.setForeground(QColor(COLOR_DOWN))
+                    else:
+                        item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={15: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
         self.table.setSortingEnabled(True)
 
     def update_data_list(self, data_list):
         if data_list is None:
             return
+
+        current_extra = get_ats_extra_cols()
+        if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
+            self.extra_cols = current_extra
+            headers = get_ats_table_headers(self.extra_cols)
+            if self.table.columnCount() != len(headers):
+                self.table.setColumnCount(len(headers))
+                self.table.setHorizontalHeaderLabels(headers)
 
         self._is_mock_active = False
         self.table.setSortingEnabled(False)
@@ -215,11 +237,15 @@ class SwingStateTable(QWidget):
         if self.table.rowCount() != len(sorted_list):
             self.table.setRowCount(len(sorted_list))
 
+        num_extra = len(self.extra_cols)
+
         for row_idx, row_data in enumerate(sorted_list):
             code = str(row_data[0]).strip()
             is_fav = code in fav_stocks
             
             for col_idx, text in enumerate(row_data):
+                if col_idx >= self.table.columnCount():
+                    break
                 if col_idx == 1 and is_fav:
                     if not str(text).startswith("⭐"):
                         text = f"⭐ {text}"
@@ -256,7 +282,7 @@ class SwingStateTable(QWidget):
                     if str(text) != "0%":
                         item.setForeground(QColor(COLOR_ACCENT))
                         item.setFont(self._get_bold_font())
-                elif col_idx == 7: # 首次发现 (时段时间)
+                elif col_idx == 7: # 首次发现
                     strategy_str = str(text)
                     if '🔔' in strategy_str or '竞价' in strategy_str:
                         item.setForeground(QColor("#FF4444"))
@@ -303,11 +329,18 @@ class SwingStateTable(QWidget):
                         item.setForeground(QColor(COLOR_DOWN))
                     else:
                         item.setForeground(QColor("#e2e2e5"))
+                elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
+                    if str(text).startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    elif str(text).startswith("-"):
+                        item.setForeground(QColor(COLOR_DOWN))
+                    else:
+                        item.setForeground(QColor("#e2e2e5"))
                 else:
                     item.setForeground(QColor("#e2e2e5"))
                 
                 self.table.setItem(row_idx, col_idx, item)
-        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={15: 350})
+        auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
         self.table.setSortingEnabled(True)
         self._apply_favorite_filter()
 

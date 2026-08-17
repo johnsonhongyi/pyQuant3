@@ -58,43 +58,63 @@ class UniverseTreeItem(QTreeWidgetItem):
         t1 = self.text(column)
         t2 = other.text(column)
         
-        import re
+        import math, re
         
-        # Helper to extract first float number
+        # Helper to extract clean float number (handles NaN, --, none safely)
         def extract_float(s):
-            match = re.search(r'[-+]?\d*\.?\d+', s)
+            if not s:
+                return None
+            s_clean = str(s).strip()
+            if s_clean in ('-', '--', 'nan', 'NaN', '+nan%', '-nan%', 'None', ''):
+                return None
+            match = re.search(r'[-+]?\d*\.?\d+', s_clean)
             if match:
                 try:
-                    return float(match.group())
-                except:
+                    val = float(match.group())
+                    if not math.isnan(val):
+                        return val
+                except Exception:
                     pass
             return None
 
+        order = tree.header().sortIndicatorOrder() if tree.header() else Qt.SortOrder.AscendingOrder
+        is_desc = (order == Qt.SortOrder.DescendingOrder)
+
+        # 辅助比较函数：无论升序还是降序，空值/NaN 始终稳定沉底到最后
+        def compare_nums(n1, n2, default_str_comp=True):
+            if n1 is None and n2 is None:
+                return t1 < t2 if default_str_comp else False
+            if n1 is None:
+                # self 是空值/NaN: 若降序，返回 True 让其在反转后排在底部；若升序，返回 False 让其排在底部
+                return True if is_desc else False
+            if n2 is None:
+                # other 是空值/NaN: 
+                return False if is_desc else True
+            if n1 != n2:
+                return n1 < n2
+            return t1 < t2 if default_str_comp else False
+
         if column == 0:
             # Code sorting
-            try:
-                v1 = int(t1.strip())
-                v2 = int(t2.strip())
-                return v1 < v2
-            except:
-                return t1 < t2
+            c1_clean = ''.join(c for c in str(t1) if c.isdigit())
+            c2_clean = ''.join(c for c in str(t2) if c.isdigit())
+            if c1_clean and c2_clean:
+                try:
+                    v1 = int(c1_clean)
+                    v2 = int(c2_clean)
+                    if v1 != v2:
+                        return v1 < v2
+                except Exception:
+                    pass
+            return t1 < t2
         elif column == 1:
             # Name sorting
             return t1 < t2
-        elif column == 2:
-            # Price sorting
+        elif column in (2, 3):
+            # Price (2) / Percent (3) sorting
             v1 = extract_float(t1)
             v2 = extract_float(t2)
-            if v1 is not None and v2 is not None:
-                return v1 < v2
-            return t1 < t2
-        elif column == 3:
-            # Percent sorting
-            v1 = extract_float(t1)
-            v2 = extract_float(t2)
-            if v1 is not None and v2 is not None:
-                return v1 < v2
-            return t1 < t2
+            return compare_nums(v1, v2, default_str_comp=True)
         elif column == 4:
             # Description / Status sorting
             return t1 < t2
@@ -103,15 +123,9 @@ class UniverseTreeItem(QTreeWidgetItem):
             pos_re = r'\((\d+)%\)'
             p1_match = re.search(pos_re, t1)
             p2_match = re.search(pos_re, t2)
-            p1_val = float(p1_match.group(1)) if p1_match else None
-            p2_val = float(p2_match.group(1)) if p2_match else None
-            if p1_val is not None and p2_val is not None:
-                return p1_val < p2_val
-            elif p1_val is not None:
-                return True
-            elif p2_val is not None:
-                return False
-            return t1 < t2
+            p1_val = float(p1_match.group(1)) if p1_match else extract_float(t1)
+            p2_val = float(p2_match.group(1)) if p2_match else extract_float(t2)
+            return compare_nums(p1_val, p2_val, default_str_comp=True)
         else:
             return t1 < t2
 

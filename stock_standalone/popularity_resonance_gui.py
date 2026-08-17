@@ -1075,10 +1075,7 @@ class PRServiceGUI:
                                 if v is None or str(v) in ('nan', 'None', ''):
                                     new_vals[idx_in_vals] = "--"
                                 else:
-                                    try:
-                                        new_vals[idx_in_vals] = f"{float(v):.2f}"
-                                    except (ValueError, TypeError):
-                                        new_vals[idx_in_vals] = str(v)
+                                    new_vals[idx_in_vals] = cct.format_col_value(ec, v)
                             except Exception:
                                 pass
 
@@ -2381,10 +2378,7 @@ class PRServiceGUI:
                     if v is None or str(v) in ('nan', 'None', ''):
                         result.append("--")
                     else:
-                        try:
-                            result.append(f"{float(v):.2f}")
-                        except (ValueError, TypeError):
-                            result.append(str(v))
+                        result.append(cct.format_col_value(ec, v))
                 except Exception:
                     result.append("--")
             return tuple(result)

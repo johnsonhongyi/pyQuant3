@@ -1,3 +1,22 @@
+## 2026-08-17 12:00
+- [x] **实现 ATS 主窗口（重点关注、大级别 MA20d 跟踪器、板块明细）动态列功能 (`ats_col`) 与全系统 `co2int` 智能整型格式化 (`JohnsonUtil/commonTips.py`, `global.ini`, `ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`, `popularity_resonance_gui.py`, `tests/test_ats_dynamic_col.py`)**：
+    - [x] **`ats_col` 配置项全局注册与持久化**：在 `JohnsonUtil/commonTips.py` 中注册 `self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")`，并在 `global.ini` 与 `JohnsonUtil/global.ini` 的 `[general]` 节中注册并写回 `ats_col = ["ch_bc2"]`；确保 `co2int` 包含 `["ch_tc2", "ch_bc2", "ch_nod", "pdays", "pbreak", "obs_d"]`。
+    - [x] **全系统统一 `cct.format_col_value` 智能格式化助手**：在 `commonTips.py` 中抽象模块级 `format_col_value(col_name, val)`，当列名命中 `co2int` 列表时自动进行四舍五入并转为纯整数字符串（例如 `3`，彻底杜绝 `3.00`），空值/无效值防崩统一返回 `'--'`。
+    - [x] **ATS 重点关注 (`FavoritePanel`) 与大级别 MA20d 跟踪器 (`SwingStateTable`) 动态列接入**：
+        - 支持从 `ats_col` 动态计算自定义列，在【大盘共振】之后、【推荐理由】之前平滑嵌入动态列；
+        - 列数与表头支持自适应刷新，数据单元格使用 `NumericTableWidgetItem` 居中对齐并支持表头数值点击排序；
+        - 在 `LedgerUpdateWorker.run` 与 `_safe_favorites_changed` 中统一提取并组装动态列元组。
+    - [x] **板块明细弹窗 (`ATSSectorDetailDialog`) 动态列与极窄持久化支持**：
+        - 动态追加 `ats_col` 自定义列（在 DFF3 之后、形态提示之前），无论走实时 IPC、快照降级还是知名龙头兜底，均统一提取指标并通过 `cct.format_col_value` 格式化后渲染；
+        - **极窄紧凑列宽适配与公共持久化**：统一将持久化 key 设为全局共用的 `"ats_sector_detail_table_v2"`（避免各板块独立持久化失效）；禁用最后一列强制拉伸 `setStretchLastSection(False)`；默认分配代码(60px)、名称(75px)、得分(48px)、类型(65px)、涨幅(68px)、起点(68px)、DFF(58px)、Rank(45px)、DFF2(58px)、DFF3(58px)、动态列(55px)、形态提示(100px)等极窄默认列宽；彻底移除 `_render_rows` 尾部 `resizeColumnsToContents`，防止数据刷新时强行冲掉用户手动调整好的列宽。
+    - [x] **彻底根治表格/树组件在出现 `nan` / `+nan%` 时破坏排序偏序传递性的 Bug (`ats/ui/universe_widget.py`, `ats/universe_manager.py`, `ats/ui/styles.py`, `tk_gui_modules/qt_table_utils.py`)**：
+        - **数据层格式化防护 (`ats/universe_manager.py`)**：在 `_get_price_pct` 与 `get_pools` 中全面引入 `math.isnan` 校验，若行情中 `price` 或 `pct` 遇到 `NaN`（如上市首日新股等极端情况），自动兜底为 `0.0`，彻底消灭输出 `+nan%` 异常字符串的根源；
+        - **排序层感知与严格偏序传递性保护 (`ats/ui/universe_widget.py`, `ats/ui/styles.py`, `tk_gui_modules/qt_table_utils.py`)**：
+            - 重构 `UniverseTreeItem.__lt__` 与 `NumericTableWidgetItem.__lt__`，显式感知 `sortIndicatorOrder()`；
+            - 在数值提取与比较时，将 `nan`、`NaN`、`+nan%`、`-nan%`、`--`、`None` 统一识别为非法数值，并在升序和降序两种状态下均稳定沉底到列表最底端；
+            - 彻底修复 `+nan%` 夹在正负数中间截断排序传递性导致大涨标的被排到后面的重大缺陷。
+    - [x] **单元测试 100% 通过**：编写专项测试 `tests/test_ats_dynamic_col.py` 覆盖配置读写、整型格式化转换、表头计算、重点关注/MA20d跟踪器、板块明细渲染、NaN 升降序沉底及偏序传递性验证，全量测试 **100% PASSED**！
+
 ## 2026-08-16 23:25
 - [x] **修复 ATS 分时阶梯策略窗口关闭异常与策略编辑器动态联动选中 (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_intraday_dialog_fix.py`)**：
     - [x] **根治关闭窗口 `NameError: name 'QApplication' is not defined` 与误杀主进程 Bug**：在 `ats/ui/intraday_strategy_dialog.py` 导入 `QApplication`；彻底移除 `closeEvent` 中调用 `QApplication.quit` 的危险逻辑，改为安全停止后台定时器并断开 TDX 连接，交由 Qt 事件循环自然管理窗口生命周期，并在 `ATSMainWindow.closeEvent` 中协同安全关闭。

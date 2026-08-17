@@ -728,6 +728,8 @@ class GlobalConfig:
         self.ordermon_ini_path = self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini", value_type="str")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
+        # [NEW] ATS 主窗口/MA20d跟踪器/重点关注/板块明细追加自定义列配置
+        self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",
@@ -1039,6 +1041,55 @@ popularity_col: List[str] = CFG.popularity_col
 dna_audit_custom_cols: List[str] = CFG.dna_audit_custom_cols
 co2float: List[str] = CFG.co2float
 co2int: List[str] = CFG.co2int
+ats_col: List[str] = CFG.ats_col
+
+def format_col_value(col_name: str, val, co2int_list=None, co2float_list=None) -> str:
+    """全系统统一的指标列值智能格式化助手：
+    - 在 co2int 列表中的列名：自动四舍五入转为整数字符串（例如 3, 杜绝 3.00/nan）
+    - 在 co2float 列表中的列名：保留两位小数浮点字符串
+    - 其它浮点数值：默认保留两位小数
+    - 空值/无效值：返回 '--'
+    """
+    if val is None:
+        return '--'
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ('nan', 'none', '--', 'null', '<na>'):
+        return '--'
+    
+    col_str = str(col_name).strip()
+    col_lower = col_str.lower()
+    
+    if co2int_list is None:
+        try:
+            co2int_list = getattr(CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod", "pdays", "pbreak", "obs_d"])
+        except Exception:
+            co2int_list = ["ch_tc2", "ch_bc2", "ch_nod", "pdays", "pbreak", "obs_d"]
+    int_set = {str(c).strip().lower() for c in (co2int_list or [])}
+    
+    if co2float_list is None:
+        try:
+            co2float_list = getattr(CFG, 'co2float', ["signal_strength"])
+        except Exception:
+            co2float_list = ["signal_strength"]
+    float_set = {str(c).strip().lower() for c in (co2float_list or [])}
+    
+    clean_num_str = val_str.replace('%', '').replace(',', '').strip()
+    if col_lower in int_set:
+        try:
+            return str(int(round(float(clean_num_str))))
+        except (ValueError, TypeError):
+            return val_str
+    elif col_lower in float_set:
+        try:
+            return f"{float(clean_num_str):.2f}"
+        except (ValueError, TypeError):
+            return val_str
+    else:
+        try:
+            f_val = float(clean_num_str)
+            return f"{f_val:.2f}"
+        except (ValueError, TypeError):
+            return val_str
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:

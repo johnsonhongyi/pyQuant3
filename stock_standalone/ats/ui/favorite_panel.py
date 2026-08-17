@@ -19,6 +19,49 @@ from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem
 
 
+
+def get_ats_extra_cols():
+    """获取 ats_col 排除已有固定列后的自定义追加列"""
+    try:
+        from JohnsonUtil import commonTips as cct
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    
+    BASE_EXCLUDE = {
+        'code', 'name', 'price', 'close', 'trade', 'state', 'deviation', 
+        'limit_ups', 'position', 'first_seen', 'priority', 'dff', 'rank', 
+        'dff2', 'dff3', 'rs', 'resonance', 'reason'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+def get_ats_table_headers(extra_cols=None):
+    """组合 ATS 表格列名：前15列基础列 + 动态自定义列 + 最后一列推荐理由"""
+    if extra_cols is None:
+        extra_cols = get_ats_extra_cols()
+    try:
+        from JohnsonUtil import commonTips as cct
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+        
+    base_pre = [
+        "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", 
+        "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
+    ]
+    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    base_post = ["推荐理由"]
+    return base_pre + extra_headers + base_post
+
+
 class FavoritePanel(QWidget):
     """⭐ 重点关注(基础重点) 专属看板页"""
     
@@ -27,6 +70,7 @@ class FavoritePanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.extra_cols = get_ats_extra_cols()
         self._init_ui()
 
     def _init_ui(self):
@@ -56,17 +100,15 @@ class FavoritePanel(QWidget):
 
         # BaseATSTableWidget
         self.table = BaseATSTableWidget(self)
-        headers = [
-            "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", 
-            "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振", "推荐理由"
-        ]
+        headers = get_ats_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         
+        default_widths = [90, 100, 90, 110, 110, 90, 100, 110, 75, 60, 50, 60, 60, 75, 75] + [70] * len(self.extra_cols) + [250]
         self.table.setup_persistence(
             config_key="ats_swing_table_state_v2",
-            default_widths=[90, 100, 90, 110, 110, 90, 100, 110, 75, 60, 50, 60, 60, 75, 75, 250],
-            max_widths={15: 350}
+            default_widths=default_widths,
+            max_widths={len(headers) - 1: 350}
         )
 
         self.table.itemDoubleClicked.connect(self._on_double_clicked)
@@ -98,10 +140,18 @@ class FavoritePanel(QWidget):
         
         Args:
             rows: list of tuples (code, name, price, state, deviation, limit_ups, position,
-                                  first_seen, priority, dff, rank, dff2, dff3, rs, resonance, reason)
+                                  first_seen, priority, dff, rank, dff2, dff3, rs, resonance, *extra_vals, reason)
         """
         if rows is None:
             return
+
+        current_extra = get_ats_extra_cols()
+        if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
+            self.extra_cols = current_extra
+            headers = get_ats_table_headers(self.extra_cols)
+            if self.table.columnCount() != len(headers):
+                self.table.setColumnCount(len(headers))
+                self.table.setHorizontalHeaderLabels(headers)
 
         header = self.table.horizontalHeader()
         sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
@@ -111,7 +161,6 @@ class FavoritePanel(QWidget):
         self.count_label.setText(f"共 {len(rows)} 只重点标的")
 
         if not rows:
-            # 只有在明确传入空列表且当前表格确实需要清空时才清空，且无需逐行重建
             if self.table.rowCount() > 0:
                 self.table.setRowCount(0)
             return
@@ -132,12 +181,14 @@ class FavoritePanel(QWidget):
 
         sorted_rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
 
-        # 调整总行数到新行数（不先清空到0，直接变更为目标长度）
         if self.table.rowCount() != len(sorted_rows):
             self.table.setRowCount(len(sorted_rows))
 
+        num_extra = len(self.extra_cols)
+        total_cols = 16 + num_extra
+        reason_col_idx = total_cols - 1
+
         for row_idx, row_data in enumerate(sorted_rows):
-            
             code = str(row_data[0])
             name = str(row_data[1])
             price = str(row_data[2])
@@ -153,17 +204,29 @@ class FavoritePanel(QWidget):
             dff3 = str(row_data[12])
             rs_val = str(row_data[13])
             resonance = str(row_data[14])
-            reason = str(row_data[15]) if len(row_data) > 15 else "重点关注追踪"
+            
+            # 动态列提取
+            extra_vals = []
+            if len(row_data) > 16:
+                # 传入了动态列数据: 结构为 15基础 + N动态 + 1理由
+                extra_vals = [str(row_data[15 + i]) for i in range(num_extra) if 15 + i < len(row_data) - 1]
+            while len(extra_vals) < num_extra:
+                extra_vals.append("--")
+                
+            reason = str(row_data[-1]) if len(row_data) > 15 else "重点关注追踪"
 
             display_name = f"⭐ {name}"
             col_values = [
                 code, display_name, price, state, dev_str, limit_ups, position,
-                first_seen, priority, dff, rank, dff2, dff3, rs_val, resonance, reason
+                first_seen, priority, dff, rank, dff2, dff3, rs_val, resonance,
+                *extra_vals, reason
             ]
 
             for col_idx, val in enumerate(col_values):
+                if col_idx >= self.table.columnCount():
+                    break
                 item = NumericTableWidgetItem(val)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, 15) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, reason_col_idx) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # Highlight entire row for favorite
                 item.setBackground(QColor("#1F2D1F"))
@@ -197,6 +260,13 @@ class FavoritePanel(QWidget):
                     if "逆市" in resonance or "共振" in resonance:
                         item.setForeground(QColor("#FFD700"))
                         item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
+                    if str(val).startswith("+"):
+                        item.setForeground(QColor(COLOR_UP))
+                    elif str(val).startswith("-"):
+                        item.setForeground(QColor(COLOR_DOWN))
+                    else:
+                        item.setForeground(QColor("#E2E2E5"))
 
                 self.table.setItem(row_idx, col_idx, item)
 

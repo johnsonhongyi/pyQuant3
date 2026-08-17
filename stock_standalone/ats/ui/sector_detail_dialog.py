@@ -19,6 +19,39 @@ from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, appl
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 
+def get_sector_extra_cols():
+    """获取板块明细追加的动态自定义列（排除基础列已有的字段）"""
+    try:
+        from JohnsonUtil import commonTips as cct
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    BASE_EXCLUDE = {
+        'code', 'name', 'score', 'type', 'pct', 'percent', 'start_pct', 
+        'dff', 'rank', 'dff2', 'dff3', 'pattern', 'price', 'trade'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+def get_sector_table_headers(extra_cols=None):
+    if extra_cols is None:
+        extra_cols = get_sector_extra_cols()
+    try:
+        from JohnsonUtil import commonTips as cct
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+    base_pre = ["代码", "名称", "得分", "类型", "涨幅", "起点", "DFF", "Rank", "DFF2", "DFF3"]
+    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    base_post = ["形态提示"]
+    return base_pre + extra_headers + base_post
+
 class ATSSectorDetailDialog(QDialog):
     def __init__(self, sector_name, linkage_cb=None, double_click_cb=None, member_codes=None, parent=None):
         super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，防止窗口在 OS 视角下被强制浮在 Parent 主窗口上方
@@ -27,6 +60,7 @@ class ATSSectorDetailDialog(QDialog):
         self.linkage_cb = linkage_cb
         self.double_click_cb = double_click_cb
         self.member_codes = member_codes or []
+        self.extra_cols = get_sector_extra_cols()
         
         self.setWindowTitle(f"🔥 {sector_name} 板块明细 (Real-time Sector Details)")
         self.resize(750, 480)
@@ -43,10 +77,11 @@ class ATSSectorDetailDialog(QDialog):
                 background-color: #18181c;
                 alternate-background-color: #1c1c22;
                 color: #e2e2e5;
-                gridline-color: #2e2e36;
-                border: 1px solid #2e2e36;
-                selection-background-color: #2a3a4a;
+                gridline-color: #282830;
+                selection-background-color: #2e3b4e;
                 selection-color: #00ff88;
+                border: 1px solid #282830;
+                font-family: 'Microsoft YaHei', sans-serif;
             }
             QHeaderView::section {
                 background-color: #1a1a1f;
@@ -97,22 +132,26 @@ class ATSSectorDetailDialog(QDialog):
         
         # Table of members
         self.table = QTableWidget()
-        self.table.setColumnCount(11)
-        self.table.setHorizontalHeaderLabels([
-            "代码", "名称", "得分", "类型", "涨幅", "起点", "DFF", "Rank", "DFF2", "DFF3", "形态提示"
-        ])
+        headers = get_sector_table_headers(self.extra_cols)
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
         
         # Set headers left align and vertical center
         header_view = self.table.horizontalHeader()
         header_view.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header_view.setStretchLastSection(True)
+        header_view.setStretchLastSection(False)
         
         self.table.setAlternatingRowColors(True)
         self.table.setCornerButtonEnabled(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        
+        # 极窄列宽默认分配 (共用 ats_sector_detail_table_v2 持久化配置)
+        # 代码(60), 名称(75), 得分(48), 类型(65), 涨幅(68), 起点(68), DFF(58), Rank(45), DFF2(58), DFF3(58) + 动态列(55)*N + 形态提示(100)
+        default_widths = [60, 75, 48, 65, 68, 68, 58, 45, 58, 58] + [55] * len(self.extra_cols) + [100]
+        setup_header_persistence(self.table, "ats_sector_detail_table_v2", default_widths=default_widths)
         
         # Connect signals
         self.table.itemClicked.connect(self.on_item_clicked)
@@ -281,6 +320,7 @@ class ATSSectorDetailDialog(QDialog):
                 dff2_val = 0.0
                 dff3_val = 0.0
                 pattern_hint = "反转/板块成分"
+                row = None
                 
                 if current_df is not None:
                     import pandas as pd
@@ -302,6 +342,16 @@ class ATSSectorDetailDialog(QDialog):
                         try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
                         except: pass
                 
+                extra_dict = {}
+                for ec in self.extra_cols:
+                    val_raw = None
+                    if row is not None:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                val_raw = row[k]
+                                break
+                    extra_dict[ec] = cct.format_col_value(ec, val_raw)
+
                 if pct_val > max_pct:
                     max_pct = pct_val
                     leader_code = code_str
@@ -318,6 +368,7 @@ class ATSSectorDetailDialog(QDialog):
                     'rank': rank_val,
                     'dff2': dff2_val,
                     'dff3': dff3_val,
+                    'extra_cols': extra_dict,
                     'pattern': pattern_hint
                 })
                 
@@ -454,6 +505,17 @@ class ATSSectorDetailDialog(QDialog):
                 # Combine leader and followers into rows list
                 rows = []
                 if leader_code:
+                    l_extra = {}
+                    for ec in self.extra_cols:
+                        val_raw = None
+                        if current_df is not None and leader_code:
+                            l_row = _get_row(current_df, leader_code)
+                            if l_row is not None:
+                                for k in (ec, ec.lower(), ec.upper()):
+                                    if k in l_row:
+                                        val_raw = l_row[k]
+                                        break
+                        l_extra[ec] = cct.format_col_value(ec, val_raw)
                     rows.append({
                         'code': leader_code,
                         'name': leader_name,
@@ -465,6 +527,7 @@ class ATSSectorDetailDialog(QDialog):
                         'rank': leader_rank,
                         'dff2': leader_dff2,
                         'dff3': leader_dff3,
+                        'extra_cols': l_extra,
                         'pattern': '领涨先锋'
                     })
                     
@@ -482,6 +545,7 @@ class ATSSectorDetailDialog(QDialog):
                     f_rank = 0
                     f_dff2 = 0.0
                     f_dff3 = 0.0
+                    f_extra = {}
                     if current_df is not None:
                         import pandas as pd
                         f_row = _get_row(current_df, f_code)
@@ -494,6 +558,16 @@ class ATSSectorDetailDialog(QDialog):
                             except: pass
                             try: f_dff3 = float(f_row.get('DFF3', f_row.get('dff3', 0.0)))
                             except: pass
+                            for ec in self.extra_cols:
+                                val_raw = None
+                                for k in (ec, ec.lower(), ec.upper()):
+                                    if k in f_row:
+                                        val_raw = f_row[k]
+                                        break
+                                f_extra[ec] = cct.format_col_value(ec, val_raw)
+                    for ec in self.extra_cols:
+                        if ec not in f_extra:
+                            f_extra[ec] = '--'
                         
                     rows.append({
                         'code': f_code,
@@ -506,6 +580,7 @@ class ATSSectorDetailDialog(QDialog):
                         'rank': f_rank,
                         'dff2': f_dff2,
                         'dff3': f_dff3,
+                        'extra_cols': f_extra,
                         'pattern': fol.get('pattern_hint', '')
                     })
                     
@@ -540,6 +615,7 @@ class ATSSectorDetailDialog(QDialog):
                 dff2_val = 0.0
                 dff3_val = 0.0
                 pattern_hint = "国内知名行业龙头"
+                extra_fam = {}
                 
                 if current_df is not None and code_str in current_df.index:
                     import pandas as pd
@@ -559,6 +635,16 @@ class ATSSectorDetailDialog(QDialog):
                     except: pass
                     try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
                     except: pass
+                    for ec in self.extra_cols:
+                        val_raw = None
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                val_raw = row[k]
+                                break
+                        extra_fam[ec] = cct.format_col_value(ec, val_raw)
+                for ec in self.extra_cols:
+                    if ec not in extra_fam:
+                        extra_fam[ec] = '--'
                 
                 if pct_val > max_pct:
                     max_pct = pct_val
@@ -576,6 +662,7 @@ class ATSSectorDetailDialog(QDialog):
                     'rank': rank_val,
                     'dff2': dff2_val,
                     'dff3': dff3_val,
+                    'extra_cols': extra_fam,
                     'pattern': pattern_hint
                 })
                 
@@ -599,8 +686,19 @@ class ATSSectorDetailDialog(QDialog):
         self._is_rendering = True
         self.table.blockSignals(True)
         try:
+            current_extra = get_sector_extra_cols()
+            if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
+                self.extra_cols = current_extra
+                headers = get_sector_table_headers(self.extra_cols)
+                if self.table.columnCount() != len(headers):
+                    self.table.setColumnCount(len(headers))
+                    self.table.setHorizontalHeaderLabels(headers)
+                    default_widths = [60, 75, 48, 65, 68, 68, 58, 45, 58, 58] + [55] * len(self.extra_cols) + [100]
+                    setup_header_persistence(self.table, "ats_sector_detail_table_v2", default_widths=default_widths)
+
             self.table.setSortingEnabled(False)
             self.table.setRowCount(len(rows))
+            num_extra = len(self.extra_cols)
             
             for row_idx, r in enumerate(rows):
                 # 0. Code
@@ -683,17 +781,29 @@ class ATSSectorDetailDialog(QDialog):
                     dff3_item.setForeground(QColor("#33cc5a"))
                 self.table.setItem(row_idx, 9, dff3_item)
                 
-                # 10. Pattern
+                # 10 ~ 10 + num_extra - 1: Dynamic Extra Cols
+                extra_data = r.get('extra_cols', {})
+                for ei, ec in enumerate(self.extra_cols):
+                    c_idx = 10 + ei
+                    e_val = extra_data.get(ec, '--')
+                    e_item = NumericTableWidgetItem(str(e_val))
+                    e_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if str(e_val).startswith('+'):
+                        e_item.setForeground(QColor("#ff4444"))
+                    elif str(e_val).startswith('-'):
+                        e_item.setForeground(QColor("#33cc5a"))
+                    else:
+                        e_item.setForeground(QColor("#e2e2e5"))
+                    self.table.setItem(row_idx, c_idx, e_item)
+
+                # Pattern (Last Column)
+                pat_col_idx = 10 + num_extra
                 pat_item = QTableWidgetItem(str(r['pattern'] or '--'))
                 pat_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 10, pat_item)
+                self.table.setItem(row_idx, pat_col_idx, pat_item)
                 
             self.table.setSortingEnabled(True)
-            self.table.resizeColumnsToContents()
             self.table.clearSelection()
-            
-            # Setup columns minimum widths or interactive persistence
-            setup_header_persistence(self.table, f"ats_sector_detail_table_{self.sector_name}")
         finally:
             self.table.blockSignals(False)
             self._is_rendering = False
