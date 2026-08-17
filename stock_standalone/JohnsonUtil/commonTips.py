@@ -1047,6 +1047,7 @@ def format_col_value(col_name: str, val, co2int_list=None, co2float_list=None) -
     """全系统统一的指标列值智能格式化助手：
     - 在 co2int 列表中的列名：自动四舍五入转为整数字符串（例如 3, 杜绝 3.00/nan）
     - 在 co2float 列表中的列名：保留两位小数浮点字符串
+    - MainU 字段：默认作为字符串处理（若为浮点数值如 35.0 则转为 35，杜绝 35.00，支持 '1,2,3,6' 等序列）
     - 其它浮点数值：默认保留两位小数
     - 空值/无效值：返回 '--'
     """
@@ -1073,23 +1074,42 @@ def format_col_value(col_name: str, val, co2int_list=None, co2float_list=None) -
             co2float_list = ["signal_strength"]
     float_set = {str(c).strip().lower() for c in (co2float_list or [])}
     
-    clean_num_str = val_str.replace('%', '').replace(',', '').strip()
+    # 1. 命中 co2int，转为整数字符串
     if col_lower in int_set:
+        clean_num_str = val_str.replace('%', '').replace(',', '').strip()
         try:
             return str(int(round(float(clean_num_str))))
         except (ValueError, TypeError):
             return val_str
-    elif col_lower in float_set:
+
+    # 2. MainU 字段默认作为字符串处理（防止被转成浮点 35.00，若是 35.0/35.00 则还原为 35）
+    if col_lower == 'mainu':
+        if val_str.endswith('.0') or val_str.endswith('.00'):
+            try:
+                return str(int(float(val_str)))
+            except Exception:
+                pass
+        return val_str
+    
+    # 3. 命中 co2float，保留两位小数
+    if col_lower in float_set:
+        clean_num_str = val_str.replace('%', '').replace(',', '').strip()
         try:
             return f"{float(clean_num_str):.2f}"
         except (ValueError, TypeError):
             return val_str
-    else:
-        try:
-            f_val = float(clean_num_str)
-            return f"{f_val:.2f}"
-        except (ValueError, TypeError):
-            return val_str
+
+    # 4. 若字符串中包含逗号分隔符（如序列、列表组合字符串），直接保留原样
+    if ',' in val_str:
+        return val_str
+
+    # 5. 其它常规数值列：尝试转为浮点并保留两位小数
+    clean_num_str = val_str.replace('%', '').strip()
+    try:
+        f_val = float(clean_num_str)
+        return f"{f_val:.2f}"
+    except (ValueError, TypeError):
+        return val_str
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
