@@ -1331,9 +1331,9 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         layout.addWidget(self.tab_widget, 1)
 
-        # 4. 定时刷新 Timer (秒级自动推进)
+        # 4. 定时刷新 Timer (秒级自动推进，基准 3.0s，支持自适应退避调节)
         self.timer = QTimer(self)
-        self.timer.setInterval(1000)
+        self.timer.setInterval(3000)
         self.timer.timeout.connect(self._on_tick_update)
         self.timer.start()
 

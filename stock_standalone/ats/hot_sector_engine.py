@@ -169,9 +169,25 @@ class HotSectorEngine:
                     except Exception:
                         perc3d = 0.0
                     try:
-                        vol_r = float(row.get('vol_ratio', row.get('vol_rati', row.get('volume_ratio', 1.0))) or 1.0)
+                        # 换手率提取 (注意：Sina数据中 turnover 为成交额元，需过滤掉 >100 的大数，优先取 turnover_rate / hsl / ratio)
+                        raw_to = row.get('turnover_rate', row.get('hsl', row.get('turnover_ratio', row.get('ratio', 0.0))))
+                        turnover_val = float(raw_to or 0.0)
+                        if turnover_val > 100.0 or turnover_val < 0.0:
+                            turnover_val = 0.0
+                    except Exception:
+                        turnover_val = 0.0
+                    try:
+                        # 真实量比提取 (兼容 volume_ratio / vol_ratio / ratio)
+                        raw_vr = row.get('volume_ratio', row.get('vol_ratio', row.get('volume', 1.0)))
+                        vol_r = float(raw_vr or 1.0)
+                        if vol_r > 100.0: # 若是成交手数而非量比
+                            vol_r = float(row.get('volume_ratio', row.get('vol_ratio', 1.0)) or 1.0)
                     except Exception:
                         vol_r = 1.0
+                    try:
+                        outstanding_val = float(row.get('outstanding', row.get('totals', 0.0)) or 0.0)
+                    except Exception:
+                        outstanding_val = 0.0
 
                     # 提取动态自定义扩展列 (如 ch_bc2 等)
                     extra_vals = {}
@@ -195,6 +211,8 @@ class HotSectorEngine:
                         "dff3": dff3,
                         "rank": rank_val,
                         "perc3d": perc3d,
+                        "turnover": turnover_val,
+                        "outstanding": outstanding_val,
                         "vol_ratio": vol_r,
                         "extra_vals": extra_vals
                     }
