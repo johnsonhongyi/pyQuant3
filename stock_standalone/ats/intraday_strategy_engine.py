@@ -769,8 +769,119 @@ class IntradayStrategyEngine:
                 node_locked_params["node_5"] = v_1400
                 node_locked_params["node_5_afternoon_breakout"] = v_1400
 
+        self.scan_and_evaluate_intraday_timeline(code, df_intraday)
         self.save_intraday_cache()
         return True
+
+    def scan_and_evaluate_intraday_timeline(self, code: str, df_intraday: pd.DataFrame) -> List[SignalPoint]:
+        """
+        根据全量 240 分钟分时 K 线，逐分钟反演扫描策略规则触发点，
+        标记【实际成交价买卖点】与【预估不及预期降价修正平仓点】！
+        """
+        if df_intraday.empty:
+            return []
+
+        state = self._get_stock_state(code, 0.0)
+        strategy = state.get("current_strategy") or self.auto_select_strategy(0.0, code=code)
+        if not strategy:
+            return []
+
+        open_price = state.get("open_price", 0.0)
+        if open_price <= 1.0 and not df_intraday.empty:
+            open_price = float(df_intraday.iloc[0].get("open", 0.0))
+        if open_price <= 1.0:
+            return []
+
+        signals: List[SignalPoint] = []
+        triggered_rule_ids = set()
+        rem_ratio = 1.0
+        cum_high = open_price
+
+        for idx_row, (t_idx, row) in enumerate(df_intraday.iterrows()):
+            t_str = str(t_idx).strip()[-8:]
+            t_5 = t_str[:5] if len(t_str) >= 5 else t_str
+
+            p = float(row.get("close", row.get("price", 0.0)))
+            if p <= 1.0:
+                continue
+            h_p = float(row.get("high", p))
+            vw = float(row.get("vwap", p))
+
+            cum_high = max(cum_high, h_p, p)
+
+            # 获取当前分钟所在的策略阶段
+            curr_phase, _ = self.get_current_phase(t_5, strategy)
+            if not curr_phase:
+                continue
+
+            rules = curr_phase.get("rules", [])
+            for r in rules:
+                r_id = r.get("rule_id", "")
+                if r_id in triggered_rule_ids:
+                    continue
+
+                sell_r = float(r.get("sell_ratio", 0.5))
+                r_name = r.get("name", r_id)
+                cond_expr = r.get("trigger_expr", "")
+
+                triggered = False
+                exec_price = p
+                sugg_price = p
+                reason_msg = ""
+
+                # 1. 冲高达标 (如 +10%)
+                if "open_price * 1.10" in cond_expr or "surge" in r_id or "profit" in r_id:
+                    if h_p >= open_price * 1.10:
+                        triggered = True
+                        exec_price = max(p, open_price * 1.10)
+                        sugg_price = round(open_price * 1.10 * 1.02, 2)
+                        reason_msg = f"🔴 [冲高止盈] 较开盘+10%触达 (实际成交:{exec_price:.2f}元, 笼子挂单:{sugg_price:.2f}元)"
+
+                # 2. 临停复牌 (如 +30%)
+                elif "open_price * 1.30" in cond_expr or "halt" in r_id:
+                    if cum_high >= open_price * 1.30:
+                        triggered = True
+                        exec_price = max(p, open_price * 1.30)
+                        sugg_price = round(open_price * 1.28, 2)
+                        reason_msg = f"⚡ [临停复牌] +30%达成 (实际成交:{exec_price:.2f}元, 挂单:{sugg_price:.2f}元)"
+
+                # 3. 预估不及预期修正 (如 10:00 攻势未达标降价清仓 / 破均线 VWAP 防守修正)
+                elif "10:00" in cond_expr or "timeout" in r_id:
+                    if t_5 >= "10:00" and rem_ratio > 0.5:
+                        triggered = True
+                        exec_price = p
+                        sugg_price = p
+                        reason_msg = f"⚠️ [不及预期修正] 10:00攻势未达标，降价市价卖出 (成交:{exec_price:.2f}元)"
+
+                elif "vwap" in cond_expr.lower() or "break" in r_id:
+                    if p < vw and t_5 >= "09:40":
+                        triggered = True
+                        exec_price = p
+                        sugg_price = vw
+                        reason_msg = f"🛡️ [均线防守修正] 跌破 VWAP 均线，止损修正平仓 (成交:{exec_price:.2f}元)"
+
+                if triggered:
+                    triggered_rule_ids.add(r_id)
+                    actual_sell = min(rem_ratio, sell_r)
+                    rem_ratio -= actual_sell
+                    sig_pt = SignalPoint(
+                        code=code,
+                        timestamp=t_5,
+                        bar_index=idx_row,
+                        price=exec_price,
+                        signal_type=SignalType.SELL,
+                        source=SignalSource.STRATEGY_ENGINE,
+                        debug_info={"suggested_price": sugg_price, "sell_ratio": actual_sell},
+                        reason=reason_msg
+                    )
+                    sig_pt.suggested_price = sugg_price
+                    sig_pt.sell_ratio = actual_sell
+                    signals.append(sig_pt)
+
+        state["signals"] = signals
+        state["triggered_rules"] = triggered_rule_ids
+        state["remaining_position_ratio"] = rem_ratio
+        return signals
 
     def evaluate_seven_nodes(
         self,
