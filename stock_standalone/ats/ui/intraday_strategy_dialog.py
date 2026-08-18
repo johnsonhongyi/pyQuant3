@@ -253,26 +253,47 @@ class SBCChartCanvas(QWidget):
 
         # 绘制买卖点触发标记 Pin
         if self.signals:
+            times_5 = [str(t).strip()[:5] for t in times]
             for sig in self.signals:
                 if isinstance(sig, dict):
-                    sig_t = str(sig.get("timestamp", sig.get("time", sig.get("time_str", ""))))[:5]
+                    sig_t = str(sig.get("timestamp", sig.get("time", sig.get("time_str", "")))).strip()[:5]
                     sig_p = float(sig.get("price", sig.get("executed_price", 0.0)))
                     sig_rule = str(sig.get("reason", sig.get("rule_name", sig.get("rule_id", "卖出"))))
                 else:
-                    sig_t = str(getattr(sig, "timestamp", getattr(sig, "time", getattr(sig, "time_str", ""))))[:5]
+                    sig_t = str(getattr(sig, "timestamp", getattr(sig, "time", getattr(sig, "time_str", "")))).strip()[:5]
                     sig_p = float(getattr(sig, "price", getattr(sig, "executed_price", 0.0)))
                     sig_rule = str(getattr(sig, "reason", getattr(sig, "rule_name", getattr(sig, "rule_id", "卖出"))))
 
-                if sig_t in times and sig_p > 0:
-                    idx_s = times.index(sig_t)
+                if sig_t in times_5 and sig_p > 0:
+                    idx_s = times_5.index(sig_t)
                     x_s = time_to_x(idx_s)
                     y_s = price_to_y(sig_p)
 
-                    painter.setPen(QPen(QColor("#ff5555"), 2))
-                    painter.setBrush(QBrush(QColor("#ff5555")))
-                    painter.drawEllipse(int(x_s - 4), int(y_s - 4), 8, 8)
+                    # 绘制红色垂直定位针 Pin 线
+                    painter.setPen(QPen(QColor("#ff5555"), 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(x_s), int(rect.bottom() - margin_b), int(x_s), int(margin_t))
+
+                    # 绘制高亮红色圆圈标记
+                    painter.setPen(QPen(QColor("#ffffff"), 1.5))
+                    painter.setBrush(QBrush(QColor("#ff3333")))
+                    painter.drawEllipse(int(x_s - 5), int(y_s - 5), 10, 10)
+
+                    # 绘制带鲜红背景的叫牌悬浮框 Tag
+                    lbl_text = f"🔴 卖出 ({sig_p:.2f}元)"
                     painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
-                    painter.drawText(int(x_s - 25), int(y_s - 8), f"🔻{sig_rule[:10]}")
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(lbl_text) + 8
+                    th = fm.height() + 4
+
+                    tag_x = int(max(margin_l, min(rect.right() - margin_r - tw, x_s - tw / 2)))
+                    tag_y = int(max(margin_t, y_s - 22))
+
+                    painter.setPen(QPen(QColor("#ff5555"), 1))
+                    painter.setBrush(QBrush(QColor("#2a1215")))
+                    painter.drawRoundedRect(tag_x, tag_y, tw, th, 3, 3)
+
+                    painter.setPen(QPen(QColor("#ff6666")))
+                    painter.drawText(tag_x + 4, tag_y + th - 4, lbl_text)
 
 
 class SBCIntradayChartDialog(QDialog):
@@ -421,6 +442,11 @@ class SBCIntradayChartDialog(QDialog):
                 amt = float(df_intraday.iloc[-1].get("amount", 0.0))
             if to_rate <= 0:
                 to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
+
+        if not sigs and self.engine is not None and op > 1.0:
+            now_t = datetime.now().strftime("%H:%M:%S")
+            eval_res = self.engine.evaluate_seven_nodes(self.code, op, hi, lo, p, to_rate, amt, now_t)
+            sigs = state.get("signals", []) or eval_res.get("signals", [])
 
         t_min = op * 1.03
         t_max = op * 1.05
