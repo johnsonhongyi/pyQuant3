@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QToolBar
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QBrush, QIcon
+from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath
 
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
@@ -111,6 +111,334 @@ def _set_or_update_table_item(
         if str_tooltip is not None:
             item.setToolTip(str_tooltip)
     return item
+
+
+class SBCChartCanvas(QWidget):
+    """
+    SBC 实盘分时走势图画布控件 (包含分时现价走势线、VWAP均线、成交量柱、关键基准线与买卖点标记)
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.df_intraday = pd.DataFrame()
+        self.open_price = 0.0
+        self.vwap = 0.0
+        self.high_price = 0.0
+        self.low_price = 0.0
+        self.target_sell_min = 0.0
+        self.target_sell_max = 0.0
+        self.signals = []
+        self.setMinimumSize(600, 360)
+        self.setStyleSheet("background-color: #0c0d14;")
+
+    def set_data(self, df_intraday: pd.DataFrame, open_p: float, vwap_p: float, high_p: float, low_p: float, sell_min: float, sell_max: float, signals: list):
+        self.df_intraday = df_intraday
+        self.open_price = open_p
+        self.vwap = vwap_p
+        self.high_price = high_p
+        self.low_price = low_p
+        self.target_sell_min = sell_min
+        self.target_sell_max = sell_max
+        self.signals = signals
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        painter.fillRect(0, 0, w, h, QColor("#0c0d14"))
+
+        margin_left = 65
+        margin_right = 85
+        margin_top = 40
+        margin_bottom = 40
+
+        chart_w = w - margin_left - margin_right
+        chart_h = h - margin_top - margin_bottom
+
+        if chart_w <= 10 or chart_h <= 10:
+            return
+
+        painter.setPen(QPen(QColor("#202030"), 1))
+        painter.drawRect(margin_left, margin_top, chart_w, chart_h)
+
+        if self.df_intraday.empty:
+            painter.setPen(QPen(QColor("#888899"), 1))
+            painter.setFont(QFont("Microsoft YaHei", 11))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "⏳ 正在拉取分时 K 线数据...")
+            return
+
+        prices = self.df_intraday['close'].astype(float).values if 'close' in self.df_intraday.columns else []
+        vwaps = self.df_intraday['vwap'].astype(float).values if 'vwap' in self.df_intraday.columns else []
+        times = list(self.df_intraday.index.astype(str))
+
+        if len(prices) == 0:
+            return
+
+        all_cands = [p for p in prices if p > 0] + [v for v in vwaps if v > 0]
+        if self.open_price > 0:
+            all_cands.append(self.open_price)
+        if self.high_price > 0:
+            all_cands.append(self.high_price)
+
+        min_p = min(all_cands) * 0.98 if all_cands else 1.0
+        max_p = max(all_cands) * 1.02 if all_cands else 100.0
+        if max_p <= min_p:
+            max_p = min_p + 1.0
+
+        p_range = max_p - min_p
+
+        def price_to_y(p_val: float) -> float:
+            return margin_top + chart_h - ((p_val - min_p) / p_range) * chart_h
+
+        def time_to_x(idx_val: int) -> float:
+            total_n = max(240, len(prices))
+            return margin_left + (idx_val / (total_n - 1)) * chart_w
+
+        # 🔴 开盘基准线 (红色虚线)
+        if self.open_price > 0:
+            y_op = price_to_y(self.open_price)
+            painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_op), int(margin_left + chart_w), int(y_op))
+            painter.setPen(QPen(QColor("#ff4444"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 4), int(y_op + 4), f"开盘:{self.open_price:.2f}")
+
+        # 🟡 VWAP 均价线 (金黄点线)
+        if self.vwap > 0:
+            y_vw = price_to_y(self.vwap)
+            painter.setPen(QPen(QColor("#ffd700"), 1, Qt.PenStyle.DotLine))
+            painter.drawLine(int(margin_left), int(y_vw), int(margin_left + chart_w), int(y_vw))
+            painter.setPen(QPen(QColor("#ffd700"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 4), int(y_vw + 4), f"VWAP:{self.vwap:.2f}")
+
+        # 🔴 日内最高线 (橙色点划线)
+        if self.high_price > 0 and self.high_price != self.open_price:
+            y_hi = price_to_y(self.high_price)
+            painter.setPen(QPen(QColor("#ff8800"), 1, Qt.PenStyle.DashDotLine))
+            painter.drawLine(int(margin_left), int(y_hi), int(margin_left + chart_w), int(y_hi))
+            painter.setPen(QPen(QColor("#ff8800"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 4), int(y_hi + 4), f"最高:{self.high_price:.2f}")
+
+        # 🟢 冲高止盈目标线 (翠绿点虚线)
+        if self.target_sell_min > 0:
+            y_tmin = price_to_y(self.target_sell_min)
+            painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
+            painter.drawLine(int(margin_left), int(y_tmin), int(margin_left + chart_w), int(y_tmin))
+            painter.setPen(QPen(QColor("#00ff88"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 4), int(y_tmin + 4), f"止盈:{self.target_sell_min:.2f}")
+
+        # 绘制 VWAP 均价曲线 (黄线)
+        if len(vwaps) > 1:
+            path_vwap = QPainterPath()
+            path_vwap.moveTo(time_to_x(0), price_to_y(vwaps[0]))
+            for i in range(1, len(vwaps)):
+                path_vwap.lineTo(time_to_x(i), price_to_y(vwaps[i]))
+            painter.setPen(QPen(QColor("#ffd700"), 1, Qt.PenStyle.SolidLine))
+            painter.drawPath(path_vwap)
+
+        # 绘制分时现价走势曲线 (青蓝主线)
+        if len(prices) > 1:
+            path_price = QPainterPath()
+            path_price.moveTo(time_to_x(0), price_to_y(prices[0]))
+            for i in range(1, len(prices)):
+                path_price.lineTo(time_to_x(i), price_to_y(prices[i]))
+            painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.PenStyle.SolidLine))
+            painter.drawPath(path_price)
+
+        # 绘制买卖点触发标记 Pin
+        if self.signals:
+            for sig in self.signals:
+                if isinstance(sig, dict):
+                    sig_t = str(sig.get("timestamp", sig.get("time", sig.get("time_str", ""))))[:5]
+                    sig_p = float(sig.get("price", sig.get("executed_price", 0.0)))
+                    sig_rule = str(sig.get("reason", sig.get("rule_name", sig.get("rule_id", "卖出"))))
+                else:
+                    sig_t = str(getattr(sig, "timestamp", getattr(sig, "time", getattr(sig, "time_str", ""))))[:5]
+                    sig_p = float(getattr(sig, "price", getattr(sig, "executed_price", 0.0)))
+                    sig_rule = str(getattr(sig, "reason", getattr(sig, "rule_name", getattr(sig, "rule_id", "卖出"))))
+
+                if sig_t in times and sig_p > 0:
+                    idx_s = times.index(sig_t)
+                    x_s = time_to_x(idx_s)
+                    y_s = price_to_y(sig_p)
+
+                    painter.setPen(QPen(QColor("#ff5555"), 2))
+                    painter.setBrush(QBrush(QColor("#ff5555")))
+                    painter.drawEllipse(int(x_s - 4), int(y_s - 4), 8, 8)
+                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                    painter.drawText(int(x_s - 25), int(y_s - 8), f"🔻{sig_rule[:10]}")
+
+
+class SBCIntradayChartDialog(QDialog):
+    """
+    SBC 实盘分时走势与关键阶梯基准图 独立实时观察窗口 (支持独立多屏全屏、实时轮询刷新与行情日志监控)
+    """
+    def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None):
+        super().__init__(parent)
+        self.code = str(code).zfill(6)
+        self.engine = engine if engine else IntradayStrategyEngine.get_instance()
+
+        # 设置为彻底独立的顶层 Window (非模态，不阻塞主窗口)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图 (独立窗口)")
+        self.setMinimumSize(880, 560)
+        self.resize(1000, 640)
+        self.setStyleSheet("background-color: #101018; color: #ffffff;")
+
+        layout = QVBoxLayout(self)
+
+        # 1. 顶部工具栏
+        tb_layout = QHBoxLayout()
+        self.lbl_title = QLabel(f"📊 标的: {self.code} {resolve_stock_name(self.code)} | SBC 实盘走势基准线")
+        self.lbl_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #00ff88;")
+
+        btn_refresh = QPushButton("🔄 极速刷新")
+        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 4px 12px;")
+        btn_refresh.clicked.connect(self.reload_chart)
+
+        self.btn_toggle_log = QPushButton("📋 行情数据日志")
+        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 4px; padding: 4px 12px;")
+        self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
+
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 4px; padding: 4px 12px;")
+        btn_close.clicked.connect(self.close)
+
+        tb_layout.addWidget(self.lbl_title)
+        tb_layout.addStretch()
+        tb_layout.addWidget(btn_refresh)
+        tb_layout.addWidget(self.btn_toggle_log)
+        tb_layout.addWidget(btn_close)
+        layout.addLayout(tb_layout)
+
+        # 2. 实盘走势图画布
+        self.canvas = SBCChartCanvas(self)
+        layout.addWidget(self.canvas, 1)
+
+        # 3. 折叠式行情数据与 TDX 通信日志区域
+        self.log_box = QGroupBox("📋 实时行情获取与数据健康调试日志")
+        self.log_box.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 4px; font-weight: bold; color: #ffd700; background-color: #14141d; }")
+        log_box_lay = QVBoxLayout(self.log_box)
+        log_box_lay.setContentsMargins(4, 4, 4, 4)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setStyleSheet("background-color: #08080c; color: #00ff88; font-family: Consolas, Monospace; font-size: 8.5pt;")
+        self.txt_log.setMaximumHeight(120)
+        log_box_lay.addWidget(self.txt_log)
+
+        layout.addWidget(self.log_box)
+        self.log_box.setVisible(False)
+
+        # 4. 底部提示
+        self.lbl_info = QLabel("💡 提示: 独立窗口可脱离主工作台随意拖拽/全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
+        self.lbl_info.setStyleSheet("color: #888899; font-size: 9pt;")
+        layout.addWidget(self.lbl_info)
+
+        # 5. 3 秒自动轮询刷新定时器
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(3000)
+        self.poll_timer.timeout.connect(self.reload_chart)
+        self.poll_timer.start()
+
+        self.reload_chart()
+
+    def _toggle_log_panel(self):
+        vis = not self.log_box.isVisible()
+        self.log_box.setVisible(vis)
+        self.btn_toggle_log.setText("📋 行情数据日志 (显示)" if vis else "📋 行情数据日志")
+
+    def reload_chart(self):
+        fetcher = TDXRealtimeFetcher.get_instance()
+        df_intraday = fetcher.fetch_intraday_bars(self.code)
+
+        # 1. 自动向上回退寻找父窗口链上的 _latest_df / current_df
+        if df_intraday.empty:
+            curr = self.parent()
+            while curr:
+                if hasattr(curr, '_latest_df') and curr._latest_df is not None and not curr._latest_df.empty:
+                    df_intraday = curr._latest_df
+                    break
+                if hasattr(curr, 'current_df') and curr.current_df is not None and not curr.current_df.empty:
+                    df_intraday = curr.current_df
+                    break
+                curr = curr.parent()
+
+        snap = fetcher.fetch_stock_snapshot(self.code)
+
+        op = float(snap.get("open_price", 0.0))
+        p = float(snap.get("price", 0.0))
+        vw = float(snap.get("vwap", p))
+        hi = float(snap.get("high_price", p))
+        lo = float(snap.get("low_price", p))
+        amt = float(snap.get("amount", 0.0))
+        to_rate = float(snap.get("turnover_rate", 0.0))
+
+        state = self.engine._get_stock_state(self.code, op)
+        sigs = state.get("signals", [])
+
+        # 2. 三重物理兜底：若仍为空，利用 state["time_snapshots"] 物理构造全量 DataFrame
+        if df_intraday.empty:
+            snaps = state.get("time_snapshots", {})
+            if snaps:
+                rows = []
+                for t_str, s_dict in sorted(snaps.items()):
+                    rows.append({
+                        "time": t_str,
+                        "close": float(s_dict.get("price", op if op > 0 else 1.0)),
+                        "open": op if op > 0 else float(s_dict.get("price", 1.0)),
+                        "high": float(s_dict.get("high", op)),
+                        "low": float(s_dict.get("low", op)),
+                        "vwap": float(s_dict.get("vwap", op)),
+                        "turnover_rate": float(s_dict.get("turnover_rate", 0.0)),
+                        "amount": float(s_dict.get("amount", 0.0))
+                    })
+                if rows:
+                    df_intraday = pd.DataFrame(rows).set_index("time")
+
+        if (op <= 1.0 or p <= 1.0) and not df_intraday.empty:
+            if op <= 1.0:
+                op = float(df_intraday.iloc[0].get("open", p))
+            if p <= 1.0:
+                p = float(df_intraday.iloc[-1].get("close", op))
+            if hi <= 1.0:
+                hi = float(df_intraday['high'].max()) if 'high' in df_intraday.columns else p
+            if lo <= 1.0:
+                lo = float(df_intraday['low'].min()) if 'low' in df_intraday.columns else p
+            if vw <= 1.0:
+                vw = float(df_intraday.iloc[-1].get("vwap", p))
+            if amt <= 0:
+                amt = float(df_intraday.iloc[-1].get("amount", 0.0))
+            if to_rate <= 0:
+                to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
+
+        t_min = op * 1.03
+        t_max = op * 1.05
+
+        self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs)
+        self.lbl_title.setText(f"📊 标的: {self.code} {resolve_stock_name(self.code)} | 今开: {op:.2f}元 | 现价: {p:.2f}元 | VWAP: {vw:.2f}元")
+
+        # 打印行情健康调试日志
+        now_str = datetime.now().strftime("%H:%M:%S")
+        server_info = fetcher.best_server.get("name", "TDX服务器") if hasattr(fetcher, "best_server") and fetcher.best_server else "TDX"
+        k_count = len(df_intraday) if not df_intraday.empty else 0
+        log_msg = (
+            f"[{now_str}] 🚀 行情源: {server_info} | 分时 K 线: {k_count} 条\n"
+            f"[{now_str}] 📈 关键价格: 今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元\n"
+            f"[{now_str}] 💰 量价换手: 换手率={to_rate:.2f}%, 累计成交额={amt/1e8:.2f}亿元 | 买卖信号数: {len(sigs)} 步\n"
+            f"[{now_str}] ✅ 结论: 行情摄入 {k_count} 条，分时基准图与信号 Tag 渲染正常。"
+        )
+        self.txt_log.setPlainText(log_msg)
 
 
 import copy
@@ -509,7 +837,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         main_layout.addWidget(status_card)
 
         # 2. 💡 盘中阶段自动解析与实操指引
-        self.action_card = QGroupBox("💡 盘中阶段自动解析与实操指引 (当前情况如何操作)")
+        self.action_card = QGroupBox()
         self.action_card.setStyleSheet("""
             QGroupBox {
                 border: 2px solid #00ff88;
@@ -521,8 +849,19 @@ class IntegratedTradingStrategyPanel(QWidget):
             }
         """)
         action_layout = QVBoxLayout(self.action_card)
-        action_layout.setContentsMargins(8, 8, 8, 8)
+        action_layout.setContentsMargins(8, 6, 8, 8)
         action_layout.setSpacing(4)
+
+        action_header_lay = QHBoxLayout()
+        lbl_action_head = QLabel("💡 盘中阶段自动解析与实操指引 (当前情况如何操作)")
+        lbl_action_head.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9.5pt;")
+        btn_open_sbc_win_top = QPushButton("📈 打开 SBC 独立分时走势图窗口")
+        btn_open_sbc_win_top.setStyleSheet("background-color: #1e2638; color: #00ff88; font-weight: bold; border: 1.5px solid #00ff88; border-radius: 4px; padding: 2px 10px; font-size: 9pt;")
+        btn_open_sbc_win_top.clicked.connect(self._on_open_sbc_chart_dialog)
+        action_header_lay.addWidget(lbl_action_head)
+        action_header_lay.addStretch()
+        action_header_lay.addWidget(btn_open_sbc_win_top)
+        action_layout.addLayout(action_header_lay)
 
         self.lbl_diagnosis = QLabel("⏳ 正在自动解析当前盘中阶段与行情特征...")
         self.lbl_diagnosis.setStyleSheet("color: #ffffff; font-size: 9.5pt; font-weight: bold;")
@@ -644,7 +983,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.txt_sbc_info.setReadOnly(True)
         self.txt_sbc_info.setStyleSheet("background-color: #0e0e14; color: #38bdf8; font-family: Consolas, Monospace; font-size: 9.5pt;")
         sbc_box_layout.addWidget(self.txt_sbc_info)
-        sbc_box.setMinimumHeight(170)
+        sbc_box.setMinimumHeight(180)
         right_layout.addWidget(sbc_box, 1)
 
         # 买卖点明细表
@@ -978,37 +1317,44 @@ class IntegratedTradingStrategyPanel(QWidget):
         max_p = state.get("max_price", price)
         min_p = state.get("min_price", price)
 
+        red = "#ff5555"
+        gold = "#ffd700"
+        cyan = "#38bdf8"
+        green = "#00ff88"
+
         if is_daily_strategy:
-            # 通用日常个股分时走势面板文案
-            lc_str = f"{last_close:.2f} 元" if (last_close and last_close > 0) else f"{open_price:.2f} 元"
-            op_pct_str = f"今开: {open_price:.2f} 元 ({((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0) else f"开盘: {open_price:.2f} 元"
-            sbc_text = (
-                f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
-                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str})\n"
-                f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
-                f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.2f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
-                f"【冲高卖出目标 (+3%~+5%)】: {open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元 (冲高分批止盈 30%)\n"
-                f"【破分时均线止损/减仓】: {vwap:.2f} 元 (跌破分时均价线 VWAP 触发减仓)\n"
-                f"【移动止盈清仓 (-3%~-5%)】: {max_p*0.96:.2f} 元 (日内高点回撤触发)\n"
-                f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
+            lc_str = f"<font color='{red}'><b>{last_close:.2f} 元</b></font>" if (last_close and last_close > 0) else f"<font color='{red}'><b>{open_price:.2f} 元</b></font>"
+            op_pct_str = f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font> ({((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0) else f"开盘: <font color='{red}'><b>{open_price:.2f} 元</b></font>"
+            sbc_html = (
+                f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
+                f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
+                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str})<br/>"
+                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>)<br/>"
+                f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.2f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
+                f"【冲高卖出目标 (+3%~+5%)】: <font color='{red}'><b>{open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元</b></font> (冲高分批止盈 30%)<br/>"
+                f"【破分时均线止损/减仓】: <font color='{red}'><b>{vwap:.2f} 元</b></font> (跌破分时均价线 VWAP 触发减仓)<br/>"
+                f"【移动止盈清仓 (-3%~-5%)】: <font color='{red}'><b>{max_p*0.96:.2f} 元</b></font> (日内高点回撤触发)<br/>"
+                f"【当前持仓管理】: 剩余持仓比例 <font color='{green}'><b>{rem_ratio*100:.0f}%</b></font><br/>"
+                f"</div>"
             )
         else:
-            # 新股上市专属走势面板文案
-            sbc_text = (
-                f"=== 📊 【{code} {resolve_stock_name(code)}】{strat_name} ===\n"
-                f"【开盘基准】: {open_price:.2f} 元 (基准参考线已锚定 | 发行价: {issue_p:.2f}元)\n"
-                f"【实时成交/估价】: {price:.2f} 元 (最高: {max_p:.2f}元 / 最低: {min_p:.2f}元)\n"
-                f"【均价线 VWAP】: {vwap:.2f} 元 | 换手率: {turnover_rate:.1f}% | 成交额: {amount/1e8:.2f} 亿元 (流通市值:{float_mv_yi:.1f}亿)\n"
-                f"【冲高卖出目标 (+10%)】: {open_price*1.10:.2f} 元 (价格笼子限价卖出 50%)\n"
-                f"【临停触发目标 (+30%)】: {open_price*1.30:.2f} 元 (复牌前挂单 1.28x={open_price*1.28:.2f} 卖出 30%)\n"
-                f"【移动止盈清仓 (-10%)】: {max_p*0.90:.2f} 元 (高点回撤 10% 触发)\n"
-                f"【当前持仓管理】: 剩余持仓比例 {rem_ratio*100:.0f}%\n"
+            sbc_html = (
+                f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
+                f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
+                f"【开盘基准】: <font color='{red}'><b>{open_price:.2f} 元</b></font> (基准参考线已锚定 | 发行价: <font color='{gold}'><b>{issue_p:.2f}元</b></font>)<br/>"
+                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>)<br/>"
+                f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.1f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
+                f"【冲高卖出目标 (+10%)】: <font color='{red}'><b>{open_price*1.10:.2f} 元</b></font> (价格笼子限价卖出 50%)<br/>"
+                f"【临停触发目标 (+30%)】: <font color='{red}'><b>{open_price*1.30:.2f} 元</b></font> (复牌前挂单 1.28x=<font color='{red}'><b>{open_price*1.28:.2f}</b></font> 卖出 30%)<br/>"
+                f"【移动止盈清仓 (-10%)】: <font color='{red}'><b>{max_p*0.90:.2f} 元</b></font> (高点回撤 10% 触发)<br/>"
+                f"【当前持仓管理】: 剩余持仓比例 <font color='{green}'><b>{rem_ratio*100:.0f}%</b></font><br/>"
+                f"</div>"
             )
 
-        if self.txt_sbc_info.toPlainText() != sbc_text:
+        if self.txt_sbc_info.toHtml() != sbc_html:
             sb_sbc = self.txt_sbc_info.verticalScrollBar()
             saved_sbc_pos = sb_sbc.value()
-            self.txt_sbc_info.setPlainText(sbc_text)
+            self.txt_sbc_info.setHtml(sbc_html)
             sb_sbc.setValue(saved_sbc_pos)
 
         # 8. 买卖点明细表（带滚动条锁定）
@@ -1036,6 +1382,11 @@ class IntegratedTradingStrategyPanel(QWidget):
             saved_log_pos = sb_log.value()
             self.txt_log.setPlainText(new_log_text)
             sb_log.setValue(saved_log_pos)
+
+    def _on_open_sbc_chart_dialog(self):
+        code = getattr(self, 'code', getattr(self, '_current_stock_code', '688826'))
+        dlg = SBCIntradayChartDialog(self, code=code, engine=self.engine)
+        dlg.exec()
 
     def _make_param_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):

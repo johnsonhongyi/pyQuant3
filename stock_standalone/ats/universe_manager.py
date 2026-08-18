@@ -66,6 +66,10 @@ class UniverseManager:
         """
         Adds a stock to the Radar Pool.
         """
+        from JohnsonUtil import commonTips as cct
+        if cct.is_delisted_stock(code=code, name=name):
+            return
+
         self.radar_pool[code] = {
             "name": name,
             "price": price,
@@ -235,9 +239,11 @@ class UniverseManager:
         # 重建 radar_pool
         new_radar = {}
         for entry in radar_entries:
+            real_name = _get_name(entry.code, entry.name)
+            if cct.is_delisted_stock(code=entry.code, name=real_name):
+                continue
             phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
             first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
-            real_name = _get_name(entry.code, entry.name)
             p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
             new_radar[entry.code] = {
                 'name': real_name,
@@ -254,6 +260,9 @@ class UniverseManager:
         # 重建 watch_pool
         new_watch = {}
         for entry in watch_entries:
+            real_name = _get_name(entry.code, entry.name)
+            if cct.is_delisted_stock(code=entry.code, name=real_name):
+                continue
             phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
             first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
             promote_reason = ''
@@ -261,7 +270,6 @@ class UniverseManager:
                 if 'PROMOTED' in hist.get('action', ''):
                     promote_reason = hist.get('reason', '')
                     break
-            real_name = _get_name(entry.code, entry.name)
             p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
             new_watch[entry.code] = {
                 'name': real_name,
@@ -278,9 +286,11 @@ class UniverseManager:
         new_trade = dict(real_positions)  # 保留真实持仓
         for entry in trade_entries:
             if entry.code not in new_trade:
+                real_name = _get_name(entry.code, entry.name)
+                if cct.is_delisted_stock(code=entry.code, name=real_name):
+                    continue
                 phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
                 first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
-                real_name = _get_name(entry.code, entry.name)
                 p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
                 new_trade[entry.code] = {
                     'name': real_name,
