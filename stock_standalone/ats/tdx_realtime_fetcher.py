@@ -249,6 +249,10 @@ class TDXRealtimeFetcher:
         # 默认基准 1.5 亿股 (1500万手)
         return 150000000.0
 
+    def get_market_code(self, code: str) -> int:
+        """获取通达信市场代码 (0: 深市/创业板, 1: 沪市/科创板, 2: 北交所)"""
+        return get_market_code(code)
+
     def _record_request_feedback(self, cost_ms: float, is_error: bool = False):
         """
         根据单次网络通信的耗时与健康状况，自适应调整拉取间隔（防封禁与退避保护）：
@@ -555,6 +559,27 @@ class TDXRealtimeFetcher:
                     self.add_log(f"标的 [{codes_str}] 逐个重试完成: 成功 {len(results)}/{len(active_codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
             return cached_results + results
 
+    def get_circulation_shares(self, code: str) -> float:
+        """
+        获取股票流通股本 (单位：股)。优先从 IntradayStrategyEngine 的 stock_spec 中获取，
+        回退使用 15 亿元 / 昨收估算流通股本，保底 1000 万股。
+        """
+        c_clean = str(code).strip().zfill(6)
+        try:
+            from ats.intraday_strategy_engine import IntradayStrategyEngine
+            spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
+            sh_wan = float(spec.get("float_shares_wan", 0.0))
+            if sh_wan > 0:
+                return sh_wan * 10000.0
+
+            mv_yi = float(spec.get("float_mv_yi", 15.0))
+            issue_p = float(spec.get("issue_price", 10.0))
+            if mv_yi > 0 and issue_p > 0:
+                return (mv_yi * 1e8) / issue_p
+        except Exception:
+            pass
+        return 10000000.0 # 默认保底 1000 万股
+
     def fetch_stock_snapshot(
         self,
         code: str,
@@ -573,6 +598,8 @@ class TDXRealtimeFetcher:
         open_price = float(q.get("open", trade_price))
         high_price = float(q.get("high", trade_price))
         low_price = float(q.get("low", trade_price))
+        if low_price <= 1.0 or (trade_price > 5.0 and low_price < trade_price * 0.1):
+            low_price = trade_price if trade_price > 0 else (open_price if open_price > 0 else 10.0)
         last_close = float(q.get("last_close", trade_price))
         vol = float(q.get("vol", 0.0))       # 单位：手 (100股)
         amount = float(q.get("amount", 0.0)) # 单位：元
@@ -626,6 +653,108 @@ class TDXRealtimeFetcher:
             "server_time": time.strftime("%H:%M:%S")
         }
 
+    def fetch_intraday_bars(self, code: str) -> pd.DataFrame:
+        """
+        从 TDX 极速拉取当日 1 分钟 K 线数据 (包含早盘全量分钟 Tick 走势、开高低收与换手率)
+        """
+        c_clean = str(code).strip().zfill(6)
+        mkt = get_market_code(c_clean)
+        try:
+            with self._conn_lock:
+                if not self._is_connected or self.api is None:
+                    if not self.connect():
+                        return pd.DataFrame()
+                try:
+                    bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
+                    if not bars:
+                        bars = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
+                    if not bars:
+                        self._is_connected = False
+                        if self.connect():
+                            bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
+                            if not bars:
+                                bars = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
+                except Exception as e:
+                    self.add_log(f"获取 {c_clean} 分时 K 线重试: {e}", level="WARN")
+                    self._is_connected = False
+                    if self.connect():
+                        try:
+                            bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
+                        except Exception:
+                            bars = None
+
+                if not bars:
+                    return pd.DataFrame()
+
+                df = pd.DataFrame(bars)
+                if df.empty:
+                    return pd.DataFrame()
+
+                # 过滤只保留今日 K 线
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if "datetime" in df.columns:
+                    df["date_str"] = df["datetime"].astype(str).str[:10]
+                    df_today = df[df["date_str"] == today_str]
+                    if df_today.empty:
+                        df_today = df # 非交易日回放模式下复用最新一轮 K 线
+                else:
+                    df_today = df
+
+                # 整理标准字段
+                res_rows = []
+                tot_circ_shares = self.get_circulation_shares(c_clean)
+                cum_vol_shares = 0.0
+                cum_amt = 0.0
+                for _, r in df_today.iterrows():
+                    dt = str(r.get("datetime", r.get("time", "")))
+                    t_str = dt[-5:] if len(dt) >= 5 else dt
+                    p = float(r.get("close", 0.0))
+                    op = float(r.get("open", p))
+                    hp = float(r.get("high", p))
+                    lp = float(r.get("low", p))
+                    if lp <= 1.0 or (p > 5.0 and lp < p * 0.1):
+                        lp = p
+
+                    vol_shares = float(r.get("vol", 0.0))
+                    cum_vol_shares += vol_shares
+                    amt = float(r.get("amount", 0.0))
+                    cum_amt += amt
+
+                    to_rate = 0.0
+                    if tot_circ_shares > 0:
+                        to_rate = round((cum_vol_shares / tot_circ_shares) * 100.0, 2)
+                        to_rate = min(100.0, max(0.0, to_rate))
+
+                    # 计算截止到当前分钟的全天真实累计 VWAP 均价与累计成交金额
+                    if cum_vol_shares > 0 and cum_amt > 0:
+                        vw = round(cum_amt / cum_vol_shares, 2)
+                    else:
+                        vw = p
+
+                    res_rows.append({
+                        "time": t_str,
+                        "open": op,
+                        "close": p,
+                        "trade": p,
+                        "price": p,
+                        "high": hp,
+                        "low": lp,
+                        "vwap": vw,
+                        "volume": cum_vol_shares / 100.0,
+                        "vol": cum_vol_shares / 100.0,
+                        "amount": cum_amt,
+                        "turnover": to_rate,
+                        "turnover_rate": to_rate
+                    })
+
+                df_res = pd.DataFrame(res_rows)
+                if not df_res.empty:
+                    df_res.set_index("time", inplace=True)
+                return df_res
+        except Exception as e:
+            logger.debug(f"TDX 获取 {c_clean} 分时 K 线异常: {e}")
+            return pd.DataFrame()
+
     def fetch_multi_stock_alpha_quotes(
         self,
         codes: List[str],
@@ -666,6 +795,8 @@ class TDXRealtimeFetcher:
             open_p = float(q.get("open", price))
             high_p = float(q.get("high", price))
             low_p = float(q.get("low", price))
+            if low_p <= 1.0 or (price > 5.0 and low_p < price * 0.1):
+                low_p = price if price > 0 else (open_p if open_p > 0 else 10.0)
             last_close = float(q.get("last_close", price))
             vol = float(q.get("vol", 0.0))       # 手
             amount = float(q.get("amount", 0.0)) # 元

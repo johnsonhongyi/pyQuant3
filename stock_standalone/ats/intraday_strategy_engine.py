@@ -50,6 +50,200 @@ class IntradayStrategyEngine:
         self.active_strategy: Optional[Dict[str, Any]] = None
         self.rule_state_map: Dict[str, Dict[str, Any]] = {} # code -> state
         self.load_config()
+        self.load_intraday_cache()
+
+    def _get_cache_filepath(self) -> str:
+        cache_dir = os.path.join(get_app_root(), "config")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, "intraday_strategy_state_cache.json")
+
+    def load_intraday_cache(self) -> bool:
+        """从 JSON 加载当日分时节点与状态锁，避免崩溃/重启导致时间线混乱"""
+        cache_file = self._get_cache_filepath()
+        if not os.path.exists(cache_file):
+            return False
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if data.get("date") != today_str:
+                logger.info(f"🗑️ 清理非今日分时策略缓存 ({data.get('date')} vs {today_str})")
+                return False
+
+            stocks_cache = data.get("stocks", {})
+            for c_clean, s_data in stocks_cache.items():
+                state = self._get_stock_state(c_clean, float(s_data.get("open_price", 0.0)))
+                state["open_price"] = float(s_data.get("open_price", state["open_price"]))
+                state["max_price"] = float(s_data.get("max_price", state["max_price"]))
+                state["min_price"] = float(s_data.get("min_price", state["min_price"]))
+                state["high_am"] = float(s_data.get("high_am", state["high_am"]))
+                state["remaining_ratio"] = float(s_data.get("remaining_ratio", state["remaining_ratio"]))
+                state["triggered_rules"] = set(s_data.get("triggered_rules", []))
+                state["execution_logs"] = s_data.get("execution_logs", [])
+                state["manual_scores"] = s_data.get("manual_scores", {})
+                state["node_custom_params"] = s_data.get("node_custom_params", {})
+                state["node_locked_params"] = s_data.get("node_locked_params", {})
+                state["time_snapshots"] = s_data.get("time_snapshots", {})
+
+                # 重构 signals 列表
+                sigs_raw = s_data.get("signals", [])
+                state["signals"] = []
+                for sig_dict in sigs_raw:
+                    try:
+                        sp = SignalPoint(
+                            code=sig_dict.get("code", c_clean),
+                            timestamp=sig_dict.get("timestamp", ""),
+                            signal_type=SignalType.SELL if str(sig_dict.get("signal_type")) in ("SELL", SignalType.SELL.value) else SignalType.BUY,
+                            price=float(sig_dict.get("price", 0.0)),
+                            reason=sig_dict.get("reason", ""),
+                            source=SignalSource.STRATEGY_RULE,
+                            suggested_price=float(sig_dict.get("suggested_price", sig_dict.get("price", 0.0))),
+                            sell_ratio=float(sig_dict.get("sell_ratio", 0.0))
+                        )
+                        state["signals"].append(sp)
+                    except Exception as e_sig:
+                        logger.debug(f"还原 SignalPoint 异常: {e_sig}")
+
+            logger.info(f"✅ 成功从磁盘加载 {len(stocks_cache)} 只标的的分时节点持久化缓存 ({today_str})")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 加载分时策略持久化缓存异常: {e}")
+            return False
+
+    def _get_closing_eval_filepath(self) -> str:
+        """获取新股首日收盘综合评分账本 JSON 路径"""
+        config_dir = os.path.join(get_app_root(), "config")
+        os.makedirs(config_dir, exist_ok=True)
+        return os.path.join(config_dir, "newstock_listing_closing_evaluations.json")
+
+    def load_listing_closing_scorecards(self) -> Dict[str, Any]:
+        """加载历史新股首日收盘定盘综合评分账本"""
+        fp = self._get_closing_eval_filepath()
+        if not os.path.exists(fp):
+            return {}
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.debug(f"加载新股首日收盘账本异常: {e}")
+            return {}
+
+    def save_listing_closing_scorecard(self, code: str, eval_result: Dict[str, Any]) -> bool:
+        """【收盘定盘持久化】保存新股上市首日 15:00 收盘综合评分与 7 节点评级，作为永久历史档案"""
+        c_clean = str(code).zfill(6)
+        fp = self._get_closing_eval_filepath()
+        try:
+            data = self.load_listing_closing_scorecards()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            data[c_clean] = {
+                "code": c_clean,
+                "date": today_str,
+                "listing_date": today_str,
+                "open_price": eval_result.get("open_price", 0.0),
+                "close_price": eval_result.get("price", 0.0),
+                "max_price": eval_result.get("high_price", 0.0),
+                "min_price": eval_result.get("low_price", 0.0),
+                "vwap": eval_result.get("vwap", 0.0),
+                "turnover_rate": eval_result.get("turnover_rate", 0.0),
+                "amount_yi": eval_result.get("amount_yi", 0.0),
+                "total_weighted_score": eval_result.get("total_weighted_score", 0.0),
+                "pattern": eval_result.get("pattern", ""),
+                "t1_advice": eval_result.get("t1_advice", ""),
+                "node_results": eval_result.get("node_results", []),
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            tmp_fp = fp + f".tmp_{os.getpid()}"
+            with open(tmp_fp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(fp):
+                    os.replace(tmp_fp, fp)
+                else:
+                    os.rename(tmp_fp, fp)
+            except Exception:
+                shutil.move(tmp_fp, fp)
+            logger.info(f"💾 [收盘定盘] 标的 [{c_clean}] 上市首日收盘综合评分 ({eval_result.get('total_weighted_score')}分, {eval_result.get('pattern')}) 已成功永久持久化！")
+            return True
+        except Exception as e:
+            logger.error(f"保存新股首日收盘账本异常: {e}")
+            return False
+
+    def save_intraday_cache(self) -> bool:
+        """持久化保存当前盘中所有标的的分时节点、锁死状态与买卖点账本至磁盘 (含 TDX 有效行情防污染校验)"""
+        cache_file = self._get_cache_filepath()
+        try:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            stocks_data = {}
+            for c_clean, state in self.rule_state_map.items():
+                op = float(state.get("open_price", 0.0))
+                locked = state.get("node_locked_params", {})
+                snapshots = state.get("time_snapshots", {})
+
+                # 严格校验：若未获取到 TDX 有效行情数据 (op <= 1.0) 且无真实时间线快照，判定为无效/未连线上线的脏数据，禁止持久化落盘污染账本！
+                if op <= 1.0 and not snapshots and not locked:
+                    continue
+
+                # 消除脏数据残留：若 node_1 或 node_2 锁定了旧默认值，但当前已有真实 open_price (> 1.0)，自动修正对齐
+                if op > 1.0:
+                    custom_params = state.get("node_custom_params", {})
+                    if "node_1" in locked and abs(float(locked.get("node_1", 0.0)) - op) > 0.01:
+                        if "node_1" not in custom_params and "node_1_auction" not in custom_params:
+                            locked["node_1"] = op
+                            locked["node_1_auction"] = op
+                    if "node_2" in locked and float(locked.get("node_2", 0.0)) < op * 0.8:
+                        if "node_2" not in custom_params and "node_2_first_wave" not in custom_params:
+                            if snapshots and "09:40" in snapshots:
+                                locked["node_2"] = float(snapshots["09:40"].get("price", op))
+                                locked["node_2_first_wave"] = locked["node_2"]
+                                locked["node_2_first_attack"] = locked["node_2"]
+
+                sigs_serialized = []
+                for sig in state.get("signals", []):
+                    sigs_serialized.append({
+                        "code": getattr(sig, "code", c_clean),
+                        "timestamp": getattr(sig, "timestamp", ""),
+                        "signal_type": getattr(sig, "signal_type", SignalType.SELL).value if hasattr(getattr(sig, "signal_type", None), "value") else str(getattr(sig, "signal_type", "")),
+                        "price": getattr(sig, "price", 0.0),
+                        "reason": getattr(sig, "reason", ""),
+                        "suggested_price": getattr(sig, "suggested_price", getattr(sig, "price", 0.0)),
+                        "sell_ratio": getattr(sig, "sell_ratio", 0.0)
+                    })
+
+                stocks_data[c_clean] = {
+                    "open_price": op,
+                    "max_price": state.get("max_price", 0.0),
+                    "min_price": state.get("min_price", 0.0),
+                    "high_am": state.get("high_am", 0.0),
+                    "remaining_ratio": state.get("remaining_ratio", 1.0),
+                    "triggered_rules": list(state.get("triggered_rules", set())),
+                    "execution_logs": state.get("execution_logs", []),
+                    "manual_scores": state.get("manual_scores", {}),
+                    "node_custom_params": state.get("node_custom_params", {}),
+                    "node_locked_params": locked,
+                    "time_snapshots": snapshots,
+                    "signals": sigs_serialized
+                }
+
+            cache_data = {
+                "date": today_str,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "stocks": stocks_data
+            }
+            tmp_file = cache_file + f".tmp_{os.getpid()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(cache_file):
+                    os.replace(tmp_file, cache_file)
+                else:
+                    os.rename(tmp_file, cache_file)
+            except Exception:
+                shutil.move(tmp_file, cache_file)
+            return True
+            return True
+        except Exception as e:
+            logger.error(f"❌ 保存分时策略持久化缓存异常: {e}")
+            return False
 
     def load_config(self) -> bool:
         """从 JSON 加载策略配置"""
@@ -315,10 +509,23 @@ class IntradayStrategyEngine:
         return None
 
     def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
-        """根据股票代码 code 或开盘价与条件自动选择对应策略"""
+        """根据股票代码 code 或开盘价与条件自动选择对应策略 (上市首日 T=0 专属策略，上市次日 T+1 及以后自动切通用普通股策略)"""
+        today_str = datetime.now().strftime("%Y-%m-%d")
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
-            # 1. 优先匹配明确配置了 target_codes 的专属策略 (例如 688826)
+
+            # 1. 检查是否有前一个交易日的新股首日定盘记录 (如果存在历史首日记录且 date < today_str，次日自动切通用普通股策略)
+            closing_scorecards = self.load_listing_closing_scorecards()
+            if c_clean in closing_scorecards:
+                rec = closing_scorecards[c_clean]
+                rec_date = str(rec.get("date", rec.get("listing_date", "")))
+                if rec_date and rec_date < today_str:
+                    # 上市次日 T+1 自动切换为【通用日常分时阶梯策略】
+                    for st in self.strategies:
+                        if st.get("id") == "strategy_c_daily_surge_ladder":
+                            return st
+
+            # 2. 上市首日 T=0：匹配专属新股策略 (例如 688826)
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
@@ -327,7 +534,7 @@ class IntradayStrategyEngine:
                 if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6) and str(target_code).strip() not in ("", "000000"):
                     return st
 
-            # 2. 对于普通日常个股（未在专属新股列表中指定），默认自动路由到通用日常分时阶梯策略
+            # 3. 对于普通日常个股（未在专属新股列表中指定），默认自动路由到通用日常分时阶梯策略
             for st in self.strategies:
                 if st.get("id") == "strategy_c_daily_surge_ladder":
                     return st
@@ -390,42 +597,179 @@ class IntradayStrategyEngine:
         c_clean = str(code).zfill(6)
         if c_clean not in self.rule_state_map:
             self.rule_state_map[c_clean] = {
-                "open_price": open_price,
-                "max_price": open_price,
-                "min_price": open_price,
-                "high_am": open_price, # 上午最高价
+                "open_price": open_price if open_price > 1.0 else 0.0,
+                "max_price": open_price if open_price > 1.0 else 0.0,
+                "min_price": open_price if open_price > 1.0 else 0.0,
+                "high_am": open_price if open_price > 1.0 else 0.0, # 上午最高价
                 "remaining_ratio": 1.0,
                 "triggered_rules": set(),
                 "execution_logs": [],
                 "signals": [],
                 "manual_scores": {}, # node_id -> float (人工覆盖评分)
+                "node_custom_params": {}, # node_id -> float (人工校准参数)
+                "node_locked_params": {}, # node_id -> float (按时间锁死的历史节点参数)
+                "time_snapshots": {}, # HH:MM -> snapshot dict
                 "timeline_eval_cache": {} # 7 节点评估缓存
             }
         state = self.rule_state_map[c_clean]
-        if open_price > 0 and state["open_price"] <= 0:
+        # 当获取到真实有效的开盘价时，动态实时更新对齐 open_price 与基准价
+        if open_price > 1.0 and (state["open_price"] <= 1.0 or abs(state["open_price"] - open_price) > 0.001):
             state["open_price"] = open_price
+            if state["max_price"] <= 1.0:
+                state["max_price"] = open_price
+            if state["min_price"] <= 1.0:
+                state["min_price"] = open_price
         return state
 
     def set_manual_node_score(self, code: str, node_id_or_idx: Any, score: float):
-        """设置某节点的人工打分覆盖"""
+        """设置某节点的人工打分覆盖并自动保存盘中持久化缓存"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["manual_scores"][str(node_id_or_idx)] = float(score)
+        self.save_intraday_cache()
 
     def set_node_custom_param(self, code: str, node_id: str, value: float):
-        """设置某节点的校准价格或换手率参数"""
+        """设置某节点的校准价格或换手率参数并自动保存盘中持久化缓存"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         if "node_custom_params" not in state:
             state["node_custom_params"] = {}
         state["node_custom_params"][str(node_id)] = float(value)
+        self.save_intraday_cache()
 
     def reset_node_custom_params(self, code: str):
-        """重置所有节点的校准参数与人工打分"""
+        """重置所有节点的校准参数、锁死参数与人工打分"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["node_custom_params"] = {}
+        state["node_locked_params"] = {}
         state["manual_scores"] = {}
+        self.save_intraday_cache()
+
+    def _clean_time_str(self, time_str: str) -> str:
+        """统一清洗时间字符串为 5 位 HH:MM 标准格式"""
+        if not time_str:
+            return "00:00"
+        s = str(time_str).strip()
+        if len(s) >= 8 and ":" in s:
+            s = s[-8:]
+        if ":" in s:
+            parts = s.split(":")
+            if len(parts) >= 2:
+                try:
+                    return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+                except Exception:
+                    return s[:5]
+        return s[:5]
+
+    def hydrate_from_intraday_df(self, code: str, df_intraday: Optional[pd.DataFrame], open_price: Optional[float] = None) -> bool:
+        """
+        全自动解析分时 DataFrame (1分钟 K 线 / 盘中 Tick 历史)，将早盘至当前时刻的所有历史节点 (09:25, 09:40, 10:00, 11:00 等)
+        完美补全并精准锁死到 node_locked_params 中，防止中途启动系统或过了早盘后丢失早盘历史数据！
+        """
+        if df_intraday is None or not isinstance(df_intraday, pd.DataFrame) or df_intraday.empty:
+            return False
+
+        c_clean = str(code).zfill(6)
+        state = self._get_stock_state(c_clean, open_price if open_price else 0.0)
+        time_snapshots = state.setdefault("time_snapshots", {})
+        node_locked_params = state.setdefault("node_locked_params", {})
+        custom_params = state.get("node_custom_params", {})
+
+        op = open_price if (open_price and open_price > 1.0) else 0.0
+        if op <= 1.0 and not df_intraday.empty:
+            first_bar_open = float(df_intraday.iloc[0].get("open", 0.0))
+            if first_bar_open > 1.0:
+                op = first_bar_open
+        if op <= 1.0:
+            op = state.get("open_price", 0.0)
+
+        # 1. 遍历 df_intraday 的所有分钟行
+        for idx_row, (time_idx, row) in enumerate(df_intraday.iterrows()):
+            clean_t = self._clean_time_str(str(time_idx))
+
+            p = float(row.get("close", row.get("trade", row.get("price", 0.0))))
+            if p <= 0:
+                continue
+
+            if op <= 1.0:
+                op = float(row.get("open", p))
+                if op > 1.0:
+                    state["open_price"] = op
+
+            to_val = float(row.get("turnover", row.get("turnover_rate", row.get("turnoverratio", 0.0))))
+            vw_val = float(row.get("vwap", p))
+            h_val = float(row.get("high", p))
+            l_val = float(row.get("low", p))
+            amt_val = float(row.get("amount", 0.0))
+
+            time_snapshots[clean_t] = {
+                "price": p,
+                "turnover_rate": to_val,
+                "vwap": vw_val,
+                "high": h_val,
+                "low": l_val,
+                "amount": amt_val
+            }
+
+            if clean_t < "13:00":
+                state["high_am"] = max(state.get("high_am", p), h_val, p)
+            state["max_price"] = max(state.get("max_price", p), h_val, p)
+            if l_val > 1.0:
+                cur_min = state.get("min_price", p)
+                state["min_price"] = min(cur_min, l_val, p) if cur_min > 1.0 else min(l_val, p)
+
+        if op > 1.0:
+            state["open_price"] = op
+
+        # 2. 如果 node_locked_params 未填充或存在默认遗留值，利用 time_snapshots 精准复原 09:25 / 09:40 / 10:00 / 11:00 等节点！
+        def get_snapshot_at_or_before(target_t: str, field: str, default_val: float) -> float:
+            if target_t in time_snapshots and field in time_snapshots[target_t]:
+                v = float(time_snapshots[target_t][field])
+                if v > 0:
+                    return v
+            cands = [t for t in time_snapshots.keys() if t <= target_t]
+            if cands:
+                best_t = max(cands)
+                v = float(time_snapshots[best_t].get(field, 0.0))
+                if v > 0:
+                    return v
+            return default_val
+
+        latest_time = max(time_snapshots.keys()) if time_snapshots else "00:00"
+
+        if op > 1.0:
+            node_locked_params["node_1"] = op
+            node_locked_params["node_1_auction"] = op
+
+        if latest_time >= "09:40":
+            v_0940 = get_snapshot_at_or_before("09:40", "price", 0.0)
+            if v_0940 > 0:
+                node_locked_params["node_2"] = v_0940
+                node_locked_params["node_2_first_wave"] = v_0940
+                node_locked_params["node_2_first_attack"] = v_0940
+
+        if latest_time >= "10:00":
+            v_1000 = get_snapshot_at_or_before("10:00", "turnover_rate", 0.0)
+            if v_1000 > 0:
+                node_locked_params["node_3"] = v_1000
+                node_locked_params["node_3_turnover"] = v_1000
+                node_locked_params["node_3_turnover_check"] = v_1000
+
+        if latest_time >= "11:00":
+            v_1100 = get_snapshot_at_or_before("11:00", "price", 0.0)
+            if v_1100 > 0:
+                node_locked_params["node_4"] = v_1100
+                node_locked_params["node_4_vwap_test"] = v_1100
+
+        if latest_time >= "14:00":
+            v_1400 = get_snapshot_at_or_before("14:00", "price", 0.0)
+            if v_1400 > 0:
+                node_locked_params["node_5"] = v_1400
+                node_locked_params["node_5_afternoon_breakout"] = v_1400
+
+        self.save_intraday_cache()
+        return True
 
     def evaluate_seven_nodes(
         self,
@@ -468,15 +812,17 @@ class IntradayStrategyEngine:
             or (not has_stock_spec and c_clean not in target_newstock_codes)
         )
 
-        clean_t = current_time_str[-8:] if len(current_time_str) >= 8 else current_time_str
-        if len(clean_t) > 5 and ":" in clean_t:
-            clean_t = clean_t[:5]
+        clean_t = self._clean_time_str(current_time_str)
 
-        # 记录全天最高/最低与上午最高
+        # 记录全天最高/最低与上午最高 (过滤低价异常噪声)
         if price > 0:
             state["max_price"] = max(state.get("max_price", price), high_price, price)
-            min_p = state.get("min_price", price)
-            state["min_price"] = min(min_p, low_price, price) if min_p > 0 else price
+            cur_min = state.get("min_price", price)
+            valid_lows = [p for p in (cur_min, low_price, price) if p > 1.0 and (price <= 5.0 or p >= price * 0.1)]
+            if valid_lows:
+                state["min_price"] = min(valid_lows)
+            else:
+                state["min_price"] = price
             if clean_t < "13:00":
                 state["high_am"] = max(state.get("high_am", price), state["max_price"])
 
@@ -484,6 +830,77 @@ class IntradayStrategyEngine:
         min_p = state.get("min_price", low_price if low_price > 0 else price)
         high_am = state.get("high_am", max_p)
         vwap_val = vwap if vwap > 0 else (price if price > 0 else open_price)
+
+        # 1. 保存当前时间点的行情快照 (时间线历史)
+        time_snapshots = state.setdefault("time_snapshots", {})
+        if price > 0:
+            time_snapshots[clean_t] = {
+                "price": price,
+                "turnover_rate": turnover_rate,
+                "vwap": vwap_val,
+                "high": max_p,
+                "low": min_p,
+                "amount": amount
+            }
+
+        # 2. 7 节点锁定参数表 (node_locked_params)
+        node_locked_params = state.setdefault("node_locked_params", {})
+
+        def get_best_historical_val(target_time: str, key: str, fallback_val: float) -> float:
+            """在历史快照中寻找目标时刻 (<= target_time) 最贴切的数据，无则回退到 fallback_val"""
+            if target_time in time_snapshots and key in time_snapshots[target_time]:
+                v = float(time_snapshots[target_time][key])
+                if v > 0:
+                    return v
+            candidates = [t for t in time_snapshots.keys() if t <= target_time]
+            if candidates:
+                best_t = max(candidates)
+                v = float(time_snapshots[best_t].get(key, 0.0))
+                if v > 0:
+                    return v
+            return fallback_val
+
+        # 动态锁死已过节点参数，防止随后续实时行情浮动
+        if clean_t >= "09:25" and open_price > 1.0:
+            if ("node_1" not in node_locked_params or abs(node_locked_params.get("node_1", 0.0) - open_price) > 0.01) and "node_1" not in custom_params and "node_1_auction" not in custom_params:
+                node_locked_params["node_1"] = open_price
+                node_locked_params["node_1_auction"] = open_price
+
+        if clean_t >= "09:40" and "node_2" not in node_locked_params:
+            v_0940 = get_best_historical_val("09:40", "price", price)
+            if v_0940 > 0:
+                node_locked_params["node_2"] = v_0940
+                node_locked_params["node_2_first_attack"] = v_0940
+
+        if clean_t >= "10:00" and "node_3" not in node_locked_params:
+            v_1000 = get_best_historical_val("10:00", "turnover_rate", turnover_rate)
+            if v_1000 > 0:
+                node_locked_params["node_3"] = v_1000
+                node_locked_params["node_3_turnover_check"] = v_1000
+
+        if clean_t >= "11:00" and "node_4" not in node_locked_params:
+            v_1100 = get_best_historical_val("11:00", "price", price)
+            if v_1100 > 0:
+                node_locked_params["node_4"] = v_1100
+                node_locked_params["node_4_vwap_test"] = v_1100
+
+        if clean_t >= "14:00" and "node_5" not in node_locked_params:
+            v_1400 = get_best_historical_val("14:00", "price", price)
+            if v_1400 > 0:
+                node_locked_params["node_5"] = v_1400
+                node_locked_params["node_5_afternoon_breakout"] = v_1400
+
+        if clean_t >= "14:50" and "node_6" not in node_locked_params:
+            v_1450 = get_best_historical_val("14:50", "price", price)
+            if v_1450 > 0:
+                node_locked_params["node_6"] = v_1450
+                node_locked_params["node_6_tail_buy"] = v_1450
+
+        if clean_t >= "15:00" and "node_7" not in node_locked_params:
+            v_1500 = get_best_historical_val("15:00", "price", price)
+            if v_1500 > 0:
+                node_locked_params["node_7"] = v_1500
+                node_locked_params["node_7_close_structure"] = v_1500
 
         issue_p = float(spec.get("issue_price", 186.88))
         float_mv_yi = float(spec.get("float_mv_yi", 14.24)) # 亿元
@@ -526,7 +943,7 @@ class IntradayStrategyEngine:
                 current_node_idx = idx
                 current_node_info = nd
 
-            # 1. 提取/推算盘中实际观察值与校准参数
+            # 1. 提取/推算盘中实际观察值与校准参数 (优先级: 人工校准 > 时间锁定 > 动态实时)
             observed_val = ""
             judgment = "中" # 强 / 中 / 弱
             auto_score = 5.0 # 0 - 10
@@ -534,9 +951,20 @@ class IntradayStrategyEngine:
             input_val = 0.0
             input_unit = "元"
 
+            def get_resolved_val(primary_key: str, alt_key: str, default_val: float) -> float:
+                if primary_key in custom_params:
+                    return float(custom_params[primary_key])
+                if alt_key in custom_params:
+                    return float(custom_params[alt_key])
+                if primary_key in node_locked_params:
+                    return float(node_locked_params[primary_key])
+                if alt_key in node_locked_params:
+                    return float(node_locked_params[alt_key])
+                return default_val
+
             if idx == 0: # 9:25 集合竞价定盘 (校准开盘价)
                 default_op = open_price if open_price > 0 else (price if price > 0 else ref_base_p)
-                cur_op = float(custom_params.get(n_id, default_op))
+                cur_op = get_resolved_val(n_id, "node_1", default_op)
                 input_val = cur_op
                 input_unit = "元"
 
@@ -577,7 +1005,7 @@ class IntradayStrategyEngine:
 
             elif idx == 1: # 9:40 早盘第一波攻击 (校准 9:40 现价)
                 default_p1 = price if price > 0 else (cur_op * 1.03 if cur_op > 0 else ref_base_p)
-                cur_p1 = float(custom_params.get(n_id, default_p1))
+                cur_p1 = get_resolved_val(n_id, "node_2", default_p1)
                 input_val = cur_p1
                 input_unit = "元"
                 base_op_for_calc = cur_op if cur_op > 0 else open_price
@@ -615,7 +1043,9 @@ class IntradayStrategyEngine:
             elif idx == 2: # 10:00 换手质量检验 (校准 10:00 换手率)
                 # 换手率合理边界保护：若 turnover_rate 大于 100 且未校准，重置为合理默认值
                 safe_to_val = turnover_rate if (0.0 < turnover_rate <= 100.0) else (5.0 if is_daily_strategy else 25.0)
-                cur_to = float(custom_params.get(n_id, safe_to_val))
+                cur_to = get_resolved_val(n_id, "node_3", safe_to_val)
+                if cur_to > 100.0 or cur_to < 0.0:
+                    cur_to = min(100.0, max(0.0, safe_to_val))
                 input_val = cur_to
                 input_unit = "%"
                 observed_val = f"换手率:{cur_to:.1f}% 金额:{amount_yi:.2f}亿"
@@ -639,18 +1069,9 @@ class IntradayStrategyEngine:
                         judgment = "强"
                         auto_score = 8.5
                         remarks = "换手充沛且价格抬升，承接有力"
-                    elif cur_to >= 10.0:
-                        judgment = "中"
-                        auto_score = 6.0
-                        remarks = "换手稳步推进，量能温和"
-                    else:
-                        judgment = "弱"
-                        auto_score = 4.0
-                        remarks = "换手偏低或放量滞涨，警惕承接衰竭"
-
             elif idx == 3: # 11:00 分歧承接/均线测试 (校准 11:00 价格)
                 default_p3 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
-                cur_p3 = float(custom_params.get(n_id, default_p3))
+                cur_p3 = get_resolved_val(n_id, "node_4", default_p3)
                 input_val = cur_p3
                 input_unit = "元"
                 vwap_diff = ((cur_p3 - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
@@ -671,7 +1092,7 @@ class IntradayStrategyEngine:
 
             elif idx == 4: # 14:00 午后突破验证 (校准 14:00 价格)
                 default_p4 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
-                cur_p4 = float(custom_params.get(n_id, default_p4))
+                cur_p4 = get_resolved_val(n_id, "node_5", default_p4)
                 input_val = cur_p4
                 input_unit = "元"
                 observed_val = f"现价:{cur_p4:.2f}元 / 上午最高:{high_am:.2f}元"
@@ -691,7 +1112,7 @@ class IntradayStrategyEngine:
 
             elif idx == 5: # 14:50 尾盘抢筹强度 (校准 14:50 价格)
                 default_p5 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
-                cur_p5 = float(custom_params.get(n_id, default_p5))
+                cur_p5 = get_resolved_val(n_id, "node_6", default_p5)
                 input_val = cur_p5
                 input_unit = "元"
                 cur_ch_ratio = (cur_p5 / max_p) if max_p > 0 else 1.0
@@ -712,7 +1133,7 @@ class IntradayStrategyEngine:
 
             elif idx == 6: # 15:00 收盘结构与持仓管理 (校准收盘价)
                 default_p6 = price if price > 0 else (open_price if open_price > 0 else ref_base_p)
-                cur_p6 = float(custom_params.get(n_id, default_p6))
+                cur_p6 = get_resolved_val(n_id, "node_7", default_p6)
                 input_val = cur_p6
                 input_unit = "元"
                 cur_ch_ratio = (cur_p6 / max_p) if max_p > 0 else 1.0
@@ -971,6 +1392,9 @@ class IntradayStrategyEngine:
         }
 
         state["timeline_eval_cache"] = eval_result
+        if clean_t >= "14:55" and open_price > 1.0 and not is_daily_strategy:
+            self.save_listing_closing_scorecard(code, eval_result)
+        self.save_intraday_cache()
         return eval_result
 
     def evaluate_tick(
@@ -1163,6 +1587,9 @@ class IntradayStrategyEngine:
                 state["signals"].append(sp)
                 generated_signals.append(sp)
 
+        if generated_signals:
+            self.save_intraday_cache()
+
         return generated_signals
 
     def extract_market_snapshot_from_df(self, df: Optional[pd.DataFrame], code: str) -> Dict[str, Any]:
@@ -1203,6 +1630,38 @@ class IntradayStrategyEngine:
                     row = matched.iloc[0]
 
         if row is None:
+            # 3. 兼容单股 1 分钟 K 线历史 DataFrame (以 time 为行，非多股大表)
+            if 'close' in df.columns or 'open' in df.columns:
+                try:
+                    first_r = df.iloc[0]
+                    last_r = df.iloc[-1]
+                    op_val = float(first_r.get('open', last_r.get('close', 0.0)))
+                    cl_val = float(last_r.get('close', op_val))
+                    hi_val = float(df['high'].max()) if 'high' in df.columns else max(op_val, cl_val)
+                    lo_val = float(df['low'].min()) if 'low' in df.columns else min(op_val, cl_val)
+                    if lo_val <= 1.0 or (cl_val > 5.0 and lo_val < cl_val * 0.1):
+                        lo_val = cl_val if cl_val > 0 else op_val
+                    vw_val = float(last_r.get('vwap', cl_val)) if 'vwap' in last_r and float(last_r.get('vwap', 0.0)) > 0 else cl_val
+                    to_val = float(last_r.get('turnover', 0.0)) if 'turnover' in last_r else 0.0
+                    amt_val = float(df['amount'].sum()) if 'amount' in df.columns else 0.0
+                    vol_val = float(df['volume'].sum()) if 'volume' in df.columns else 0.0
+
+                    return {
+                        "open_price": op_val,
+                        "price": cl_val,
+                        "high_price": hi_val,
+                        "low_price": lo_val,
+                        "vwap": vw_val,
+                        "turnover_rate": to_val,
+                        "amount": amt_val,
+                        "volume": vol_val,
+                        "bid1_price": cl_val,
+                        "ask1_price": cl_val,
+                        "last_close": op_val,
+                        "time_str": str(last_r.get('time', datetime.now().strftime("%H:%M:%S")))
+                    }
+                except Exception:
+                    pass
             return res
 
         if isinstance(row, pd.DataFrame):
@@ -1217,7 +1676,10 @@ class IntradayStrategyEngine:
             
             # 最高价/最低价
             res["high_price"] = float(row.get('high', row.get('high_price', row.get('High', res['price']))))
-            res["low_price"] = float(row.get('low', row.get('low_price', row.get('Low', res['price']))))
+            raw_low = float(row.get('low', row.get('low_price', row.get('Low', res['price']))))
+            if raw_low <= 1.0 or (res['price'] > 5.0 and raw_low < res['price'] * 0.1):
+                raw_low = res['price'] if res['price'] > 0 else (res['open_price'] if res['open_price'] > 0 else 10.0)
+            res["low_price"] = raw_low
             
             # 昨收价 / 前收盘价
             res["last_close"] = float(row.get('last_close', row.get('llastp', row.get('pre_close', row.get('settlement', res['open_price'])))))

@@ -1066,8 +1066,16 @@ class IntegratedTradingStrategyPanel(QWidget):
         return _handler
 
     def _on_reset_node_custom_params(self):
-        """【🔄 重置校准】清空节点自定义参数与人工评分，恢复系统标准参考价格"""
+        """【🔄 重置校准】清空节点自定义参数与人工评分，重新极速拉取 TDX 分时 K 线精准恢复早盘真实节点"""
         self.engine.reset_node_custom_params(self.code)
+        try:
+            intraday_bars = self.tdx_fetcher.fetch_intraday_bars(self.code)
+            if not intraday_bars.empty:
+                op = self.spin_eval_open.value()
+                self.engine.hydrate_from_intraday_df(self.code, intraday_bars, op if op > 1.0 else None)
+        except Exception as e:
+            logger.debug(f"重置后刷新 TDX 分时 K 线异常: {e}")
+
         parent = self.parent()
         while parent:
             if hasattr(parent, '_sync_eval_spins_for_current_stock'):
@@ -1129,6 +1137,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         self._init_ui()
         self._load_mock_or_live_data()
+
+        # 启动 3.0s 极速 UI 自动刷新定时器，驱动 UI 画面与 TDX 秒级直连后台无缝同步跳动！
+        self.live_poll_timer = QTimer(self)
+        self.live_poll_timer.timeout.connect(self._on_live_timer_tick)
+        self.live_poll_timer.start(3000)
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -1432,6 +1445,12 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.selected_data_source = "MANUAL_EVAL"
         self._on_eval_param_changed()
 
+    def _on_live_timer_tick(self):
+        """3.0s 定时刷新回调：在 TDX 直连模式且未开启手动估价勾选时，自动驱动界面极速跳动与评估"""
+        if getattr(self, "selected_data_source", "") == "TDX_REALTIME":
+            if not hasattr(self, "chk_manual_eval") or not self.chk_manual_eval.isChecked():
+                self._load_mock_or_live_data()
+
     def _on_manual_refresh(self):
         """用户手动点击【⚡ 刷新】按钮：重置 TDX 静默状态并立即拉取"""
         if self.tdx_fetcher:
@@ -1596,13 +1615,18 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         suggested_price = round(suggested_open * 1.10, 2)
         suggested_turnover = 62.5
 
-        # 同步重置该代码的节点校准缓存
-        self.engine.set_node_custom_param(self.code, "node_1_auction", suggested_open)
-        self.engine.set_node_custom_param(self.code, "node_2_first_wave", suggested_price)
-        self.engine.set_node_custom_param(self.code, "node_3_turnover", suggested_turnover)
-        state = self.engine._get_stock_state(self.code, suggested_open)
-        state["open_price"] = suggested_open
-        state["max_price"] = max(suggested_open, suggested_price)
+        # 仅当手动估价勾选开启时才写入 custom_params；在实盘 TDX 直连模式下绝对不注入污染数据！
+        if hasattr(self, 'chk_manual_eval') and self.chk_manual_eval.isChecked():
+            self.engine.set_node_custom_param(self.code, "node_1_auction", suggested_open)
+            self.engine.set_node_custom_param(self.code, "node_2_first_wave", suggested_price)
+            self.engine.set_node_custom_param(self.code, "node_3_turnover", suggested_turnover)
+        else:
+            # 清理历史可能残留的手动覆盖参数
+            state = self.engine._get_stock_state(self.code, 0.0)
+            custom_p = state.get("node_custom_params", {})
+            custom_p.pop("node_1_auction", None)
+            custom_p.pop("node_2_first_wave", None)
+            custom_p.pop("node_3_turnover", None)
 
         self.spin_eval_open.blockSignals(True)
         self.spin_eval_price.blockSignals(True)
@@ -1786,8 +1810,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         spec = self.engine.get_stock_ladder_spec(c_clean)
         float_mv_yi = float(spec.get("float_mv_yi", 15.0))
 
-        # 1. 若用户选择【✍️ 手动估价/推演模式】，直接由顶部估价控件驱动自动评分
-        if getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
+        # 1. 只有当用户显式勾选了【✍️ 开启手动估价/异常推演 (默认关闭)】复选框时，才由手动 SpinBox 驱动；否则 100% 走 TDX 秒级直连！
+        if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
             op = self.spin_eval_open.value()
             tp = self.spin_eval_price.value()
             to_rate = self.spin_eval_turnover.value()
@@ -1814,6 +1838,13 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                     b1 = float(tdx_snap.get("bid1_price", tp))
                     lc = float(tdx_snap.get("last_close", op))
                     self._update_tdx_status_badge()
+
+                    # 首次加载或切换标的时，不受非交易时段限制，强力获取 TDX 今日 1分钟 K线全量回溯早盘节点 (09:25, 09:40, 10:00, 11:00 等)
+                    st_state = self.engine._get_stock_state(c_clean, op)
+                    intraday_bars = self.tdx_fetcher.fetch_intraday_bars(c_clean)
+                    if not intraday_bars.empty:
+                        self.engine.hydrate_from_intraday_df(c_clean, intraday_bars, op)
+
                     # 同步到界面估价框中方便观察
                     self.spin_eval_open.blockSignals(True)
                     self.spin_eval_price.blockSignals(True)
@@ -1828,10 +1859,19 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             except Exception as e:
                 logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
 
-        # 3. 从 ATS 推送的 df 获取
+        # 3. 若 TDX 秒级快照未能获取，从 1 分钟 K 线历史或 ATS 推送 df 解析
         curr_df = self._latest_df
         if curr_df is None and parent is not None and hasattr(parent, 'current_df') and parent.current_df is not None:
             curr_df = parent.current_df
+
+        if curr_df is None or curr_df.empty:
+            try:
+                curr_df = self.tdx_fetcher.fetch_intraday_bars(c_clean)
+            except Exception:
+                curr_df = None
+
+        if curr_df is not None and not curr_df.empty:
+            self.engine.hydrate_from_intraday_df(c_clean, curr_df)
 
         snap = self.engine.extract_market_snapshot_from_df(curr_df, c_clean)
         open_price = snap["open_price"]
@@ -1845,18 +1885,27 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         last_close = snap.get("last_close", open_price)
         is_unlisted = False
 
-        # 4. 若行情尚未产生（如周日或未上市），自动使用界面输入的估价进行自动评分！
+        # 4. 若行情与 K线 历史均尚未产生（如周日或未上市），且用户显式勾选了手动估价，才由界面估价 SpinBox 驱动
         if open_price <= 0 and trade_price <= 0:
-            is_unlisted = True
-            open_price = self.spin_eval_open.value()
-            trade_price = self.spin_eval_price.value()
-            turnover_rate = self.spin_eval_turnover.value()
-            high_price = max(open_price, trade_price, open_price * 1.13)
-            low_price = min(open_price, trade_price)
-            amount_val = float(turnover_rate / 100.0 * float_mv_yi * 1e8)
-            bid1_price = trade_price - 0.5
-            vwap_price = round((open_price + trade_price) / 2.0, 2)
-            last_close = open_price
+            if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked():
+                is_unlisted = True
+                open_price = self.spin_eval_open.value()
+                trade_price = self.spin_eval_price.value()
+                turnover_rate = self.spin_eval_turnover.value()
+                high_price = max(open_price, trade_price)
+                low_price = min(open_price, trade_price)
+                amount_val = float(turnover_rate / 100.0 * float_mv_yi * 1e8)
+                bid1_price = trade_price
+                vwap_price = round((open_price + trade_price) / 2.0, 2)
+                last_close = open_price
+            else:
+                st_state = self.engine._get_stock_state(c_clean, 0.0)
+                open_price = st_state.get("open_price", 0.0)
+                trade_price = st_state.get("max_price", open_price)
+                high_price = st_state.get("max_price", open_price)
+                low_price = st_state.get("min_price", open_price)
+                vwap_price = open_price
+                last_close = open_price
         elif open_price <= 0 and trade_price > 0:
             open_price = trade_price
             high_price = max(high_price, trade_price)
