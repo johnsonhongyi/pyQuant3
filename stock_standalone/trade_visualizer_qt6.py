@@ -7846,14 +7846,16 @@ class MainWindow(QMainWindow, WindowMixin):
             chan_mid_v = row.get('chan_mid', np.nan)
             chan_up_v = row.get('chan_up', np.nan)
             chan_dn_v = row.get('chan_dn', np.nan)
-            chan_kx_v = row.get('chan_kx', np.nan)
+            chan_kx_v = row.get('chan_kx', row.get('ch_supp_price', np.nan))
+            supp_price_v = row.get('ch_supp_price', chan_kx_v)
+            supp_slope_deg_v = row.get('ch_supp_slope_deg', np.nan)
             
             mid_str = format_indicator_with_icon(chan_mid_v)
             up_str = format_indicator_with_icon(chan_up_v)
             dn_str = format_indicator_with_icon(chan_dn_v)
-            kx_str = format_indicator_with_icon(chan_kx_v)
+            supp_str = format_indicator_with_icon(supp_price_v)
             
-            c_mid = "#FFFFFF" if is_dark else "#000000"
+            c_mid = "#A0A0A0" if is_dark else "#646464"
             c_up_dn = "#C8C8C8" if is_dark else "#646464"
             c_kx = "#FFFFFF" if is_dark else "#000000"
             
@@ -7863,8 +7865,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>UP:{up_str}</span>&nbsp;&nbsp;"
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>DN:{dn_str}</span>"
             )
-            if not pd.isna(chan_kx_v):
-                html_text += f"&nbsp;&nbsp;<span style='color:{c_kx}; font-weight:bold;'>KX:{kx_str}</span>"
+            if not pd.isna(supp_price_v):
+                html_text += f"&nbsp;&nbsp;<span style='color:#FF3333; font-weight:bold;'>支:{supp_str}</span>"
+            if not pd.isna(supp_slope_deg_v):
+                c_slope = "#00FF88" if supp_slope_deg_v > 0 else "#FF7700"
+                html_text += f"&nbsp;&nbsp;<span style='color:{c_slope}; font-weight:bold;'>支撑角:{supp_slope_deg_v:.1f}°</span>"
 
         # 👑 [NEW] 如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在均线下方新起一行展示
         if hasattr(self, 'current_code') and self.current_code:
@@ -11794,6 +11799,86 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Error drawing breakout price lines: {e}")
 
+    def _draw_channel_extrema_labels(self, x_axis, day_df):
+        """
+        绘制通达信同款自动通道极值点最低价标注 (如 8.650) 与垂直引导虚线，
+        以及最高价极值标注 (如 13.670)。
+        """
+        try:
+            n = len(day_df)
+            if n < 10 or not hasattr(self, 'kline_plot') or self.kline_plot is None:
+                return
+
+            lows = day_df['low'].values
+            highs = day_df['high'].values
+
+            # 初始化对象池
+            if not hasattr(self, 'extrema_low_label'):
+                self.extrema_low_label = pg.TextItem(anchor=(0.5, 0))
+                self.kline_plot.addItem(self.extrema_low_label)
+                self.extrema_low_label.setVisible(False)
+
+            if not hasattr(self, 'extrema_high_label'):
+                self.extrema_high_label = pg.TextItem(anchor=(0.5, 1))
+                self.kline_plot.addItem(self.extrema_high_label)
+                self.extrema_high_label.setVisible(False)
+
+            if not hasattr(self, 'extrema_v_line'):
+                self.extrema_v_line = pg.PlotCurveItem()
+                self.kline_plot.addItem(self.extrema_v_line)
+                self.extrema_v_line.setVisible(False)
+
+            # 寻找最近符合 LLV(36) 的低点和 HHV(36) 的高点
+            w = 36
+            llv = day_df['low'].rolling(w, min_periods=1).min().values
+            hhv = day_df['high'].rolling(w, min_periods=1).max().values
+            
+            low_matches = np.where(lows == llv)[0]
+            high_matches = np.where(highs == hhv)[0]
+
+            if len(low_matches) > 0:
+                idx_low = low_matches[-1]
+                p_low = float(lows[idx_low])
+                x_pos = float(x_axis[idx_low])
+
+                # 通达信同款黄色垂直引导线
+                v_pen = pg.mkPen(color=QColor(255, 215, 0, 200), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+                p_min_all = float(np.min(lows))
+                p_max_all = float(np.max(highs))
+                self.extrema_v_line.setData([x_pos, x_pos], [p_min_all, p_max_all])
+                self.extrema_v_line.setPen(v_pen)
+                self.extrema_v_line.show()
+
+                # 通达信同款最低价文本标注
+                self.extrema_low_label.setHtml(
+                    f'<div style="color: #00FFFF; background-color: rgba(10, 10, 10, 220); '
+                    f'border: 1px solid #00FFFF; padding: 1px 4px; font-size: 11px; font-weight: bold; '
+                    f'border-radius: 3px;">{p_low:.3f}</div>'
+                )
+                self.extrema_low_label.setPos(x_pos, p_low * 0.985)
+                self.extrema_low_label.show()
+            else:
+                self.extrema_low_label.hide()
+                self.extrema_v_line.hide()
+
+            if len(high_matches) > 0:
+                idx_high = high_matches[-1]
+                p_high = float(highs[idx_high])
+                x_pos_h = float(x_axis[idx_high])
+
+                self.extrema_high_label.setHtml(
+                    f'<div style="color: #FF5555; background-color: rgba(10, 10, 10, 220); '
+                    f'border: 1px solid #FF5555; padding: 1px 4px; font-size: 11px; font-weight: bold; '
+                    f'border-radius: 3px;">{p_high:.3f}</div>'
+                )
+                self.extrema_high_label.setPos(x_pos_h, p_high * 1.015)
+                self.extrema_high_label.show()
+            else:
+                self.extrema_high_label.hide()
+
+        except Exception as e:
+            logger.error(f"[AutoChannel] 绘制极值标注失败: {e}")
+
     def _clear_price_gaps(self):
         """清理价格缺口 - 仅隐藏版本"""
         if hasattr(self, 'gap_items_pool'):
@@ -12577,7 +12662,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # 确定画线颜色和宽度
                 is_dark = self.qt_theme == 'dark'
-                mid_color = QColor(255, 255, 255) if is_dark else QColor(0, 0, 0)
+                # 中轨线：通达信风格暗白/虚线，避免与 KX 上涨支撑线混淆
+                mid_color = QColor(160, 160, 160, 180) if is_dark else QColor(100, 100, 100, 180)
                 
                 # 默认颜色
                 up_color = QColor(200, 200, 200) if is_dark else QColor(100, 100, 100)
@@ -12592,13 +12678,13 @@ class MainWindow(QMainWindow, WindowMixin):
                     up_color = QColor(255, 150, 0) if is_dark else QColor(210, 80, 0)
                     dn_color = QColor(0, 210, 255) if is_dark else QColor(0, 110, 220)
                     
-                mid_pen = pg.mkPen(mid_color, width=2)
+                mid_pen = pg.mkPen(mid_color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)
                 up_pen = pg.mkPen(up_color, width=2)
                 dn_pen = pg.mkPen(dn_color, width=2)
                 
-                # KX 趋势线画笔：粗线亮白色
+                # KX 上涨支撑线画笔：通达信同款亮白色粗实线
                 kx_color = QColor(255, 255, 255)
-                kx_pen = pg.mkPen(kx_color, width=3.0)
+                kx_pen = pg.mkPen(kx_color, width=2.5)
                 
                 # 绘制或更新中轨线
                 if not hasattr(self, 'mid_curve') or self.mid_curve not in self.kline_plot.items:
@@ -12643,6 +12729,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.kx_curve.setData(kx_x_arr, kx_y_arr)
                     self.kx_curve.setPen(kx_pen)
                     self.kx_curve.show()
+
+                # ⚡ [NEW] 绘制通达信同款极值点最低价标注 (如 8.650) 与垂直引导线
+                self._draw_channel_extrema_labels(x_axis, day_df)
             except Exception as e:
                 logger.error(f"[AutoChannel] 绘制失败: {e}")
         else:
@@ -12650,6 +12739,9 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'up_curve'): self.up_curve.hide()
             if hasattr(self, 'dn_curve'): self.dn_curve.hide()
             if hasattr(self, 'kx_curve'): self.kx_curve.hide()
+            if hasattr(self, 'extrema_v_line'): self.extrema_v_line.hide()
+            if hasattr(self, 'extrema_low_label'): self.extrema_low_label.hide()
+            if hasattr(self, 'extrema_high_label'): self.extrema_high_label.hide()
 
         # --- ⚡ [NEW] 缠论分析展示 ---
         if getattr(self, 'show_chan', True):
