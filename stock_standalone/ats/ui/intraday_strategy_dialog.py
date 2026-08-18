@@ -55,6 +55,103 @@ def _format_cell_text(val) -> str:
     return str(val)
 
 
+def save_ui_layout_state(key: str, val: Any):
+    """【💾 布局落盘】保存 UI 布局、窗口大小、QSplitter 与表格列宽到 config/intraday_ui_layout.json"""
+    try:
+        conf_dir = os.path.join(get_app_root(), "config")
+        os.makedirs(conf_dir, exist_ok=True)
+        conf_file = os.path.join(conf_dir, "intraday_ui_layout.json")
+        data = {}
+        if os.path.exists(conf_file):
+            with open(conf_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[key] = val
+        with open(conf_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.debug(f"保存 UI 布局落盘文件异常: {e}")
+
+def load_ui_layout_state(key: str, default: Any = None) -> Any:
+    """【💾 布局恢复】从 config/intraday_ui_layout.json 恢复 UI 布局状态"""
+    try:
+        conf_file = os.path.join(get_app_root(), "config", "intraday_ui_layout.json")
+        if os.path.exists(conf_file):
+            with open(conf_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get(key, default)
+    except Exception as e:
+        logger.debug(f"读取 UI 布局落盘文件异常: {e}")
+    return default
+
+def bind_table_column_persistence(table: QTableWidget, key_name: str):
+    """【📏 列宽落盘绑定】自动恢复并监听 QTableWidget 各列宽度改变，实现 100% 物理持久化"""
+    saved_widths = load_ui_layout_state(key_name)
+    if saved_widths and isinstance(saved_widths, list):
+        for c, w in enumerate(saved_widths):
+            if c < table.columnCount() and int(w) > 15:
+                table.setColumnWidth(c, int(w))
+
+    def _on_section_resized(logical_index, old_size, new_size):
+        widths = [table.columnWidth(c) for c in range(table.columnCount())]
+        save_ui_layout_state(key_name, widths)
+
+    table.horizontalHeader().sectionResized.connect(_on_section_resized)
+
+class DetailTextDialog(QDialog):
+    """【🔍 详情悬浮弹窗】双击表格单元格查看完整应对备注、信号明细与指导建议"""
+    def __init__(self, parent=None, title: str = "详细信息", content_text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(f"🔍 【{title}】详细信息与实操应对")
+        self.resize(640, 420)
+        self.setStyleSheet("background-color: #12121c; color: #ffffff;")
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel(f"📋 【{title}】")
+        lbl.setStyleSheet("font-size: 11pt; font-weight: bold; color: #00ff88;")
+        layout.addWidget(lbl)
+
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setPlainText(content_text)
+        txt.setStyleSheet("background-color: #08080d; color: #38bdf8; font-family: Consolas, Microsoft YaHei; font-size: 10pt; line-height: 1.6; padding: 10px; border: 1px solid #303042; border-radius: 4px;")
+        layout.addWidget(txt, 1)
+
+        btn_box = QHBoxLayout()
+        btn_copy = QPushButton("📋 复制文本内容")
+        btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_copy.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 16px;")
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(content_text))
+
+        btn_close = QPushButton("关闭")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 4px; padding: 6px 16px;")
+        btn_close.clicked.connect(self.accept)
+
+        btn_box.addWidget(btn_copy)
+        btn_box.addStretch()
+        btn_box.addWidget(btn_close)
+        layout.addLayout(btn_box)
+
+def handle_table_cell_double_click(table: QTableWidget, row: int, col: int, parent=None):
+    """通用单元格双击悬浮窗处理函数"""
+    item = table.item(row, col)
+    if not item:
+        return
+    cell_text = item.text()
+    tooltip_text = item.toolTip()
+    full_text = tooltip_text if (tooltip_text and len(tooltip_text) > len(cell_text)) else cell_text
+    if not full_text or full_text == "--":
+        return
+
+    header_item = table.horizontalHeaderItem(col)
+    col_title = header_item.text().replace("\n", " ") if header_item else f"第 {col+1} 列"
+
+    node_item = table.item(row, 1) or table.item(row, 0)
+    node_name = node_item.text() if node_item else f"行 {row+1}"
+
+    dlg = DetailTextDialog(parent=parent, title=f"{node_name} - {col_title}", content_text=full_text)
+    dlg.exec()
+
 def _format_tooltip_text(val) -> Optional[str]:
     """安全格式化 Tooltip 文本"""
     if val is None:
@@ -982,6 +1079,9 @@ class IntegratedTradingStrategyPanel(QWidget):
         h_r.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table_rules.setColumnWidth(0, 130)
         self.table_rules.setColumnWidth(3, 85)
+        bind_table_column_persistence(self.table_rules, "tab1_table_rules_col_widths")
+        self.table_rules.cellDoubleClicked.connect(lambda r, c: handle_table_cell_double_click(self.table_rules, r, c, self))
+
         rule_box_layout.addWidget(self.table_rules)
         rule_box.setMinimumHeight(130)
         left_layout.addWidget(rule_box, 1)
@@ -1019,6 +1119,10 @@ class IntegratedTradingStrategyPanel(QWidget):
         h_q.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         h_q.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.table_quick_nodes.setColumnWidth(2, 95)
+
+        bind_table_column_persistence(self.table_quick_nodes, "tab1_table_quick_nodes_col_widths")
+        self.table_quick_nodes.cellDoubleClicked.connect(lambda r, c: handle_table_cell_double_click(self.table_quick_nodes, r, c, self))
+
         node_box_layout.addWidget(self.table_quick_nodes)
         node_box.setMinimumHeight(150)
         left_layout.addWidget(node_box, 1)
@@ -1063,6 +1167,9 @@ class IntegratedTradingStrategyPanel(QWidget):
         h_s.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         h_s.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         h_s.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+
+        bind_table_column_persistence(self.table_signals, "tab1_table_signals_col_widths")
+        self.table_signals.cellDoubleClicked.connect(lambda r, c: handle_table_cell_double_click(self.table_signals, r, c, self))
         sig_box_layout.addWidget(self.table_signals)
         sig_box.setMinimumHeight(130)
         right_layout.addWidget(sig_box, 1)
@@ -1551,12 +1658,32 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
         self.setMinimumSize(1020, 720)
 
-        # 物理恢复窗口几何大小与位置 (QSettings)
+        # 物理恢复窗口几何大小与位置 (QSettings + config/intraday_ui_layout.json 双保险落盘)
         settings = QSettings("pyQuant3", "IntradayWorkbench")
         geo = settings.value("main_window_geometry")
+        layout_state = load_ui_layout_state("main_window_layout")
+
+        restored = False
         if geo:
-            self.restoreGeometry(geo)
-        else:
+            try:
+                restored = self.restoreGeometry(geo)
+            except Exception:
+                restored = False
+
+        if not restored and layout_state and isinstance(layout_state, dict):
+            w = layout_state.get("width", 1340)
+            h = layout_state.get("height", 920)
+            x = layout_state.get("x")
+            y = layout_state.get("y")
+            is_max = layout_state.get("is_maximized", False)
+            self.resize(w, h)
+            if x is not None and y is not None:
+                self.move(x, y)
+            if is_max:
+                self.showMaximized()
+            restored = True
+
+        if not restored:
             self.resize(1340, 920)
 
         # 🎨 全局应用 ATS 统一暗黑主题样式表模板 (QSS)
@@ -1875,10 +2002,34 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.selected_data_source = "MANUAL_EVAL"
         self._on_eval_param_changed()
 
+    def _save_window_layout(self):
+        """【💾 物理落盘】保存主窗口尺寸、坐标与最大化状态到 QSettings 及 JSON 配置文件"""
+        try:
+            settings = QSettings("pyQuant3", "IntradayWorkbench")
+            settings.setValue("main_window_geometry", self.saveGeometry())
+
+            geo = self.geometry()
+            save_ui_layout_state("main_window_layout", {
+                "width": geo.width(),
+                "height": geo.height(),
+                "x": geo.x(),
+                "y": geo.y(),
+                "is_maximized": self.isMaximized()
+            })
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._save_window_layout()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._save_window_layout()
+
     def closeEvent(self, event):
-        """关闭窗口时持久化保存主窗口大小与位置到 QSettings"""
-        settings = QSettings("pyQuant3", "IntradayWorkbench")
-        settings.setValue("main_window_geometry", self.saveGeometry())
+        """关闭窗口时持久化保存主窗口大小与位置"""
+        self._save_window_layout()
         super().closeEvent(event)
 
     def _on_live_timer_tick(self):
@@ -2367,8 +2518,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.name = real_name
         self.open_price = open_price
 
-        self.title_lbl.setText(f"📈 【{self.code} {self.name}】分时阶梯交易与时序评估工作台")
-        self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
+        # 1. 尝试从 TDX 极速行情拉取全量 240 分钟分时 K 线，驱动策略全量分时反演与买卖点流水挂单生成
+        if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
+            try:
+                df_intraday = self.tdx_fetcher.fetch_intraday_bars(self.code)
+                if df_intraday is not None and not df_intraday.empty:
+                    self._latest_df = df_intraday
+                    self.engine.hydrate_from_intraday_df(self.code, df_intraday, open_price=self.open_price)
+            except Exception as e_hyd:
+                logger.debug(f"加载 TDX 分时反演流异常: {e_hyd}")
 
         now_time_str = datetime.now().strftime("%H:%M:%S")
 
@@ -2577,6 +2735,10 @@ class PinzhunLaserMonitorWidget(QWidget):
         self.table_nodes.setColumnWidth(5, 150)
         self.table_nodes.setColumnWidth(7, 85)
         self.table_nodes.setMinimumHeight(240)
+
+        # 绑定列宽落盘与单元格双击悬浮弹窗查看完整备注
+        bind_table_column_persistence(self.table_nodes, "tab3_table_nodes_col_widths")
+        self.table_nodes.cellDoubleClicked.connect(lambda r, c: handle_table_cell_double_click(self.table_nodes, r, c, self))
 
         node_layout.addWidget(self.table_nodes)
         content_layout.addWidget(node_group)
