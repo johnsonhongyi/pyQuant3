@@ -436,6 +436,11 @@ class TDXRealtimeFetcher:
         if not codes:
             return []
 
+        # ⚡ 拦截并过滤退市股票
+        codes = cct.filter_delisted_stocks(codes)
+        if not codes:
+            return []
+
         now_t = time.time()
         is_trading, _ = is_trading_time()
         cooldown_sec = 30.0 if is_trading else 60.0

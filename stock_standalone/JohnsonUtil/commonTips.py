@@ -728,8 +728,9 @@ class GlobalConfig:
         self.ordermon_ini_path = self.get_with_writeback("general", "ordermon_ini_path", fallback=r"D:\MacTools\OrderMonitor\OrderMon.ini", value_type="str")
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
-        # [NEW] ATS 主窗口/MA20d跟踪器/重点关注/板块明细追加自定义列配置
         self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")
+        # [NEW] 退市股票黑名单配置 (支持自动写回与配置化，如 000004 国恒退, 002808 恒久退等)
+        self.delisted_codes = self.get_with_writeback("general", "delisted_codes", fallback=['000004', '002808', '000005', '000003', '000007', '000013', '000015', '000018', '000022', '000024', '000029', '000043', '000405', '000508', '000511'], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
             "vis_column_map",
@@ -1042,6 +1043,70 @@ dna_audit_custom_cols: List[str] = CFG.dna_audit_custom_cols
 co2float: List[str] = CFG.co2float
 co2int: List[str] = CFG.co2int
 ats_col: List[str] = CFG.ats_col
+delisted_codes: List[str] = CFG.delisted_codes
+
+# ⚡ [GLOBAL] 退市股票默认硬编码黑名单 (内置 000004 国恒退, 002808 恒久退等)
+DELISTED_BLACKLIST = {'000004', '002808', '000005', '000003', '000007', '000013', '000015', '000018', '000022', '000024', '000029', '000043', '000405', '000508', '000511'}
+
+def is_delisted_stock(code: str = '', name: str = '') -> bool:
+    """
+    全局退市股票判定：
+    1. 代码属于已知退市黑名单 (如 000004 国恒退, 002808 恒久退等)
+    2. 股票名称包含 '退' (如 '国恒退', '恒久退', '*退', '退市xx', 'xx(退)', 'xx退' 等)
+    """
+    if code:
+        c_str = str(code).strip().zfill(6)
+        if c_str in DELISTED_BLACKLIST:
+            return True
+        if hasattr(CFG, 'delisted_codes') and CFG.delisted_codes and c_str in CFG.delisted_codes:
+            return True
+    if name:
+        n_str = str(name).strip()
+        if '退' in n_str:
+            return True
+    return False
+
+is_delisted = is_delisted_stock
+
+def filter_delisted_stocks(df_or_codes):
+    """
+    从 DataFrame 或 List[str] 中过滤剔除所有退市股票
+    """
+    if df_or_codes is None:
+        return df_or_codes
+    
+    # 动态构建黑名单集合
+    blacklist = set(DELISTED_BLACKLIST)
+    if hasattr(CFG, 'delisted_codes') and CFG.delisted_codes:
+        blacklist.update([str(x).strip().zfill(6) for x in CFG.delisted_codes])
+
+    # 如果是 DataFrame
+    if hasattr(df_or_codes, 'columns'):
+        df = df_or_codes
+        if df.empty:
+            return df
+        
+        mask = np.ones(len(df), dtype=bool)
+        
+        # 1. 检查 code 列或 index
+        if 'code' in df.columns:
+            codes = df['code'].astype(str).str.strip().str.zfill(6)
+            mask &= ~codes.isin(blacklist)
+        elif df.index.name == 'code' or (len(df.index) > 0 and isinstance(df.index[0], str) and len(df.index[0]) == 6 and df.index[0].isdigit()):
+            codes = pd.Series(df.index).astype(str).str.strip().str.zfill(6).values
+            mask &= ~np.isin(codes, list(blacklist))
+            
+        # 2. 检查 name 列
+        if 'name' in df.columns:
+            names = df['name'].astype(str)
+            mask &= ~names.str.contains('退', na=False)
+            
+        return df[mask]
+        
+    elif isinstance(df_or_codes, (list, tuple, set)):
+        return [c for c in df_or_codes if not is_delisted_stock(code=c)]
+        
+    return df_or_codes
 
 def format_col_value(col_name: str, val, co2int_list=None, co2float_list=None) -> str:
     """全系统统一的指标列值智能格式化助手：
