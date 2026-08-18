@@ -793,6 +793,7 @@ class IntradayStrategyEngine:
             return []
 
         signals: List[SignalPoint] = []
+        execution_logs: List[str] = []
         triggered_rule_ids = set()
         rem_ratio = 1.0
         cum_high = open_price
@@ -863,6 +864,8 @@ class IntradayStrategyEngine:
                 if triggered:
                     triggered_rule_ids.add(r_id)
                     actual_sell = min(rem_ratio, sell_r)
+                    if actual_sell <= 0.001:
+                        continue
                     rem_ratio -= actual_sell
                     sig_pt = SignalPoint(
                         code=code,
@@ -878,9 +881,14 @@ class IntradayStrategyEngine:
                     sig_pt.sell_ratio = actual_sell
                     signals.append(sig_pt)
 
+                    log_entry = f"{t_5} [{r_name}] {reason_msg} | 卖出{actual_sell*100:.0f}% 建议挂单:{sugg_price:.2f}"
+                    if log_entry not in execution_logs:
+                        execution_logs.append(log_entry)
+
         state["signals"] = signals
         state["triggered_rules"] = triggered_rule_ids
         state["remaining_position_ratio"] = rem_ratio
+        state["execution_logs"] = execution_logs
         return signals
 
     def evaluate_seven_nodes(
@@ -987,6 +995,10 @@ class IntradayStrategyEngine:
 
         if clean_t >= "10:00":
             v_1000 = get_best_historical_val("10:00", "turnover_rate", turnover_rate)
+            if v_1000 <= 0.0:
+                v_1000 = get_snap_field("10:00", "turnover_rate", 0.0)
+            if v_1000 <= 0.0 and turnover_rate > 0:
+                v_1000 = turnover_rate
             if v_1000 > 0 and ("node_3" not in node_locked_params or ("10:00" in time_snapshots and abs(node_locked_params.get("node_3", 0.0) - v_1000) > 0.01)):
                 node_locked_params["node_3"] = v_1000
                 node_locked_params["node_3_turnover_check"] = v_1000
@@ -1064,15 +1076,31 @@ class IntradayStrategyEngine:
             input_val = 0.0
             input_unit = "元"
 
+            time_snaps = state.get("time_snapshots", {})
+
+            def get_snap_field(target_t: str, field: str, default_val: float) -> float:
+                target_5 = str(target_t).strip()[:5]
+                if target_5 in time_snaps and field in time_snaps[target_5]:
+                    v = float(time_snaps[target_5][field])
+                    if v > 0:
+                        return v
+                cands = [t for t in time_snaps.keys() if str(t).strip()[:5] <= target_5]
+                if cands:
+                    best_t = max(cands, key=lambda x: str(x).strip()[:5])
+                    v = float(time_snaps[best_t].get(field, 0.0))
+                    if v > 0:
+                        return v
+                return default_val
+
             def get_resolved_val(primary_key: str, alt_key: str, default_val: float) -> float:
                 try:
-                    if primary_key in custom_params:
+                    if primary_key in custom_params and float(custom_params[primary_key]) > 0:
                         return float(custom_params[primary_key])
-                    if alt_key in custom_params:
+                    if alt_key in custom_params and float(custom_params[alt_key]) > 0:
                         return float(custom_params[alt_key])
-                    if primary_key in node_locked_params:
+                    if primary_key in node_locked_params and float(node_locked_params[primary_key]) > 0:
                         return float(node_locked_params[primary_key])
-                    if alt_key in node_locked_params:
+                    if alt_key in node_locked_params and float(node_locked_params[alt_key]) > 0:
                         return float(node_locked_params[alt_key])
                 except Exception:
                     pass
@@ -1170,7 +1198,9 @@ class IntradayStrategyEngine:
                     cur_to = min(100.0, max(0.0, safe_to_val))
                 input_val = cur_to
                 input_unit = "%"
-                observed_val = f"换手率:{cur_to:.1f}% 金额:{amount_yi:.2f}亿"
+                v_1000_amt = get_snap_field("10:00", "amount", 0.0)
+                amt_1000_yi = (v_1000_amt / 1e8) if v_1000_amt > 0 else amount_yi
+                observed_val = f"换手率:{cur_to:.1f}% 金额:{amt_1000_yi:.2f}亿"
 
                 if is_daily_strategy:
                     # 通用日常个股：10:00 换手达到 3%~8% 为活跃健康
@@ -1561,6 +1591,10 @@ class IntradayStrategyEngine:
         if len(clean_time) > 5 and ":" in clean_time:
             clean_time = clean_time[:5]
 
+        # 盘后非交易时间 (>= 15:05 或 < 09:15) 不再由实时 Timer 触发新规则与日志落盘
+        if clean_time > "15:05" or clean_time < "09:15":
+            return []
+
         phase, phase_idx = self.get_current_phase(clean_time, strategy)
         if not phase:
             return []
@@ -1684,12 +1718,15 @@ class IntradayStrategyEngine:
                 # 标记规则已触发
                 state["triggered_rules"].add(rule_id)
                 actual_sell_ratio = min(sell_ratio, state["remaining_ratio"])
+                if actual_sell_ratio <= 0.001:
+                    continue
                 state["remaining_ratio"] = max(0.0, state["remaining_ratio"] - actual_sell_ratio)
 
                 sig_msg = f"[{rule.get('name')}] {trigger_reason} | 卖出{actual_sell_ratio*100:.0f}% 建议挂单:{suggested_limit_price:.2f}"
                 log_entry = f"{clean_time} {sig_msg}"
-                state["execution_logs"].append(log_entry)
-                logger.info(f"⚡ [IntradayStrategyEngine] {c_clean} {log_entry}")
+                if log_entry not in state["execution_logs"]:
+                    state["execution_logs"].append(log_entry)
+                    logger.info(f"⚡ [IntradayStrategyEngine] {c_clean} {log_entry}")
 
                 sp = SignalPoint(
                     code=c_clean,
