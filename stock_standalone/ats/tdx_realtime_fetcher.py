@@ -17,6 +17,7 @@ import threading
 import concurrent.futures
 import collections
 import datetime
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Callable
@@ -660,27 +661,37 @@ class TDXRealtimeFetcher:
 
     def fetch_intraday_bars(self, code: str) -> pd.DataFrame:
         """
-        从 TDX 极速拉取当日 1 分钟 K 线数据 (包含早盘全量分钟 Tick 走势、开高低收与换手率)
+        从 TDX 极速拉取当日 1 分钟 K 线与分时走势全量数据 (包含 09:25 集合竞价、早盘全量分钟 Tick 走势、开高低收与换手率)
         """
         c_clean = str(code).strip().zfill(6)
         mkt = get_market_code(c_clean)
+        t_start = time.time()
+
+        # 1. 优先使用内存中已缓存的全量 240 条分时 K 线 (0ms 极速响应，避免 UI 线程与后台轮询抢锁)
+        if not hasattr(self, '_intraday_bars_cache'):
+            self._intraday_bars_cache = {}
+        
+        cached_df = self._intraday_bars_cache.get(c_clean)
+        if cached_df is not None and not cached_df.empty and len(cached_df) >= 30:
+            return cached_df
+
         try:
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
-                        return pd.DataFrame()
+                        return cached_df if cached_df is not None else pd.DataFrame()
+
+                bars = None
                 try:
                     bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
-                    if not bars:
-                        bars = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
-                    if not bars:
-                        self._is_connected = False
-                        if self.connect():
-                            bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
-                            if not bars:
-                                bars = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
-                except Exception as e:
-                    self.add_log(f"获取 {c_clean} 分时 K 线重试: {e}", level="WARN")
+                    if not bars or len(bars) < 30:
+                        bars_8 = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
+                        if bars_8 and len(bars_8) > (len(bars) if bars else 0):
+                            bars = bars_8
+                except Exception:
+                    bars = None
+
+                if not bars or len(bars) < 30:
                     self._is_connected = False
                     if self.connect():
                         try:
@@ -688,12 +699,45 @@ class TDXRealtimeFetcher:
                         except Exception:
                             bars = None
 
+                # 若 K 线引擎拉取条数不足，触发 PyTDX 官方分时走势全量引擎 (get_minute_time_data / get_history_minute_time_data) 补齐 240 分钟全量走势
+                if (not bars or len(bars) < 30) and self._is_connected and self.api is not None:
+                    try:
+                        min_data = self.api.get_minute_time_data(mkt, c_clean)
+                        if not min_data or len(min_data) < 30:
+                            today_int = int(datetime.now().strftime("%Y%m%d"))
+                            min_data = self.api.get_history_minute_time_data(mkt, c_clean, today_int)
+                        
+                        if min_data and len(min_data) >= 30:
+                            bars = []
+                            today_prefix = datetime.now().strftime("%Y-%m-%d")
+                            base_time = datetime.strptime(f"{today_prefix} 09:30", "%Y-%m-%d %H:%M")
+                            for idx_m, md in enumerate(min_data):
+                                p_val = float(md.get("price", 0.0))
+                                v_val = float(md.get("vol", 0.0))
+                                if p_val <= 0:
+                                    continue
+                                if idx_m < 120:
+                                    t_curr = base_time + pd.Timedelta(minutes=idx_m+1)
+                                else:
+                                    t_curr = datetime.strptime(f"{today_prefix} 13:00", "%Y-%m-%d %H:%M") + pd.Timedelta(minutes=idx_m-120+1)
+                                bars.append({
+                                    "datetime": t_curr.strftime("%Y-%m-%d %H:%M"),
+                                    "open": p_val,
+                                    "close": p_val,
+                                    "high": p_val,
+                                    "low": p_val,
+                                    "vol": v_val * 100.0, # 转换为股
+                                    "amount": p_val * v_val * 100.0
+                                })
+                    except Exception as e_min:
+                        self.add_log(f"TDX 分时全量引擎回补异常: {e_min}", level="WARN")
+
                 if not bars:
-                    return pd.DataFrame()
+                    return cached_df if cached_df is not None else pd.DataFrame()
 
                 df = pd.DataFrame(bars)
                 if df.empty:
-                    return pd.DataFrame()
+                    return cached_df if cached_df is not None else pd.DataFrame()
 
                 # 过滤只保留今日 K 线
                 today_str = datetime.now().strftime("%Y-%m-%d")
@@ -755,6 +799,12 @@ class TDXRealtimeFetcher:
                 df_res = pd.DataFrame(res_rows)
                 if not df_res.empty:
                     df_res.set_index("time", inplace=True)
+                    self._intraday_bars_cache[c_clean] = df_res # 缓存到内存
+                    cost_ms = (time.time() - t_start) * 1000.0
+                    srv_name = self.best_server.get("name", "TDX行情") if hasattr(self, "best_server") and self.best_server else "TDX"
+                    op_first = df_res.iloc[0].get("open", 0.0)
+                    cl_last = df_res.iloc[-1].get("close", 0.0)
+                    self.add_log(f"✅ 标的 [{c_clean}] 行情获取成功: 全量补齐 {len(df_res)} 条分时 K线/Tick (含 09:25 竞价今开: {op_first:.2f}元, 现价: {cl_last:.2f}元) (耗时: {cost_ms:.1f}ms, 服务器: {srv_name})", level="INFO")
                 return df_res
         except Exception as e:
             logger.debug(f"TDX 获取 {c_clean} 分时 K 线异常: {e}")

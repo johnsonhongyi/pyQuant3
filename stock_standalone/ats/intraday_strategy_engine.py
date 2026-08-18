@@ -724,13 +724,14 @@ class IntradayStrategyEngine:
 
         # 2. 如果 node_locked_params 未填充或存在默认遗留值，利用 time_snapshots 精准复原 09:25 / 09:40 / 10:00 / 11:00 等节点！
         def get_snapshot_at_or_before(target_t: str, field: str, default_val: float) -> float:
-            if target_t in time_snapshots and field in time_snapshots[target_t]:
-                v = float(time_snapshots[target_t][field])
+            target_5 = str(target_t).strip()[:5]
+            if target_5 in time_snapshots and field in time_snapshots[target_5]:
+                v = float(time_snapshots[target_5][field])
                 if v > 0:
                     return v
-            cands = [t for t in time_snapshots.keys() if t <= target_t]
+            cands = [t for t in time_snapshots.keys() if str(t).strip()[:5] <= target_5]
             if cands:
-                best_t = max(cands)
+                best_t = max(cands, key=lambda x: str(x).strip()[:5])
                 v = float(time_snapshots[best_t].get(field, 0.0))
                 if v > 0:
                     return v
@@ -848,13 +849,14 @@ class IntradayStrategyEngine:
 
         def get_best_historical_val(target_time: str, key: str, fallback_val: float) -> float:
             """在历史快照中寻找目标时刻 (<= target_time) 最贴切的数据，无则回退到 fallback_val"""
-            if target_time in time_snapshots and key in time_snapshots[target_time]:
-                v = float(time_snapshots[target_time][key])
+            target_5 = str(target_time).strip()[:5]
+            if target_5 in time_snapshots and key in time_snapshots[target_5]:
+                v = float(time_snapshots[target_5][key])
                 if v > 0:
                     return v
-            candidates = [t for t in time_snapshots.keys() if t <= target_time]
+            candidates = [t for t in time_snapshots.keys() if str(t).strip()[:5] <= target_5]
             if candidates:
-                best_t = max(candidates)
+                best_t = max(candidates, key=lambda x: str(x).strip()[:5])
                 v = float(time_snapshots[best_t].get(key, 0.0))
                 if v > 0:
                     return v
@@ -866,39 +868,39 @@ class IntradayStrategyEngine:
                 node_locked_params["node_1"] = open_price
                 node_locked_params["node_1_auction"] = open_price
 
-        if clean_t >= "09:40" and "node_2" not in node_locked_params:
+        if clean_t >= "09:40":
             v_0940 = get_best_historical_val("09:40", "price", price)
-            if v_0940 > 0:
+            if v_0940 > 0 and ("node_2" not in node_locked_params or ("09:40" in time_snapshots and abs(node_locked_params.get("node_2", 0.0) - v_0940) > 0.01)):
                 node_locked_params["node_2"] = v_0940
                 node_locked_params["node_2_first_attack"] = v_0940
 
-        if clean_t >= "10:00" and "node_3" not in node_locked_params:
+        if clean_t >= "10:00":
             v_1000 = get_best_historical_val("10:00", "turnover_rate", turnover_rate)
-            if v_1000 > 0:
+            if v_1000 > 0 and ("node_3" not in node_locked_params or ("10:00" in time_snapshots and abs(node_locked_params.get("node_3", 0.0) - v_1000) > 0.01)):
                 node_locked_params["node_3"] = v_1000
                 node_locked_params["node_3_turnover_check"] = v_1000
 
-        if clean_t >= "11:00" and "node_4" not in node_locked_params:
+        if clean_t >= "11:00":
             v_1100 = get_best_historical_val("11:00", "price", price)
-            if v_1100 > 0:
+            if v_1100 > 0 and ("node_4" not in node_locked_params or ("11:00" in time_snapshots and abs(node_locked_params.get("node_4", 0.0) - v_1100) > 0.01)):
                 node_locked_params["node_4"] = v_1100
                 node_locked_params["node_4_vwap_test"] = v_1100
 
-        if clean_t >= "14:00" and "node_5" not in node_locked_params:
+        if clean_t >= "14:00":
             v_1400 = get_best_historical_val("14:00", "price", price)
-            if v_1400 > 0:
+            if v_1400 > 0 and ("node_5" not in node_locked_params or ("14:00" in time_snapshots and abs(node_locked_params.get("node_5", 0.0) - v_1400) > 0.01)):
                 node_locked_params["node_5"] = v_1400
                 node_locked_params["node_5_afternoon_breakout"] = v_1400
 
-        if clean_t >= "14:50" and "node_6" not in node_locked_params:
+        if clean_t >= "14:50":
             v_1450 = get_best_historical_val("14:50", "price", price)
-            if v_1450 > 0:
+            if v_1450 > 0 and ("node_6" not in node_locked_params or ("14:50" in time_snapshots and abs(node_locked_params.get("node_6", 0.0) - v_1450) > 0.01)):
                 node_locked_params["node_6"] = v_1450
                 node_locked_params["node_6_tail_buy"] = v_1450
 
-        if clean_t >= "15:00" and "node_7" not in node_locked_params:
+        if clean_t >= "15:00":
             v_1500 = get_best_historical_val("15:00", "price", price)
-            if v_1500 > 0:
+            if v_1500 > 0 and ("node_7" not in node_locked_params or ("15:00" in time_snapshots and abs(node_locked_params.get("node_7", 0.0) - v_1500) > 0.01)):
                 node_locked_params["node_7"] = v_1500
                 node_locked_params["node_7_close_structure"] = v_1500
 
@@ -952,15 +954,21 @@ class IntradayStrategyEngine:
             input_unit = "元"
 
             def get_resolved_val(primary_key: str, alt_key: str, default_val: float) -> float:
-                if primary_key in custom_params:
-                    return float(custom_params[primary_key])
-                if alt_key in custom_params:
-                    return float(custom_params[alt_key])
-                if primary_key in node_locked_params:
-                    return float(node_locked_params[primary_key])
-                if alt_key in node_locked_params:
-                    return float(node_locked_params[alt_key])
-                return default_val
+                try:
+                    if primary_key in custom_params:
+                        return float(custom_params[primary_key])
+                    if alt_key in custom_params:
+                        return float(custom_params[alt_key])
+                    if primary_key in node_locked_params:
+                        return float(node_locked_params[primary_key])
+                    if alt_key in node_locked_params:
+                        return float(node_locked_params[alt_key])
+                except Exception:
+                    pass
+                try:
+                    return float(default_val)
+                except Exception:
+                    return 0.0
 
             if idx == 0: # 9:25 集合竞价定盘 (校准开盘价)
                 default_op = open_price if open_price > 0 else (price if price > 0 else ref_base_p)
@@ -1041,8 +1049,11 @@ class IntradayStrategyEngine:
                         remarks = "跌破开盘价走弱，出现分歧砸盘"
 
             elif idx == 2: # 10:00 换手质量检验 (校准 10:00 换手率)
-                # 换手率合理边界保护：若 turnover_rate 大于 100 且未校准，重置为合理默认值
-                safe_to_val = turnover_rate if (0.0 < turnover_rate <= 100.0) else (5.0 if is_daily_strategy else 25.0)
+                try:
+                    to_num = float(turnover_rate)
+                except Exception:
+                    to_num = 0.0
+                safe_to_val = to_num if (0.0 < to_num <= 100.0) else (5.0 if is_daily_strategy else 25.0)
                 cur_to = get_resolved_val(n_id, "node_3", safe_to_val)
                 if cur_to > 100.0 or cur_to < 0.0:
                     cur_to = min(100.0, max(0.0, safe_to_val))
