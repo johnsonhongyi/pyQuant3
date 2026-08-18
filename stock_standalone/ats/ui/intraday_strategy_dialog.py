@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QCheckBox, QSlider, QToolBar
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath
 
 from sys_utils import resolve_stock_name
@@ -271,7 +271,7 @@ class SBCChartCanvas(QWidget):
 
                     # 绘制红色垂直定位针 Pin 线
                     painter.setPen(QPen(QColor("#ff5555"), 1, Qt.PenStyle.DashLine))
-                    painter.drawLine(int(x_s), int(rect.bottom() - margin_b), int(x_s), int(margin_t))
+                    painter.drawLine(int(x_s), int(self.height() - margin_bottom), int(x_s), int(margin_top))
 
                     # 绘制高亮红色圆圈标记
                     painter.setPen(QPen(QColor("#ffffff"), 1.5))
@@ -285,8 +285,8 @@ class SBCChartCanvas(QWidget):
                     tw = fm.horizontalAdvance(lbl_text) + 8
                     th = fm.height() + 4
 
-                    tag_x = int(max(margin_l, min(rect.right() - margin_r - tw, x_s - tw / 2)))
-                    tag_y = int(max(margin_t, y_s - 22))
+                    tag_x = int(max(margin_left, min(self.width() - margin_right - tw, x_s - tw / 2)))
+                    tag_y = int(max(margin_top, y_s - 22))
 
                     painter.setPen(QPen(QColor("#ff5555"), 1))
                     painter.setBrush(QBrush(QColor("#2a1215")))
@@ -362,17 +362,49 @@ class SBCIntradayChartDialog(QDialog):
         self.log_box.setVisible(False)
 
         # 4. 底部提示
-        self.lbl_info = QLabel("💡 提示: 独立窗口可脱离主工作台随意拖拽/全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
+        self.lbl_info = QLabel("💡 提示: 独立窗口支持【主窗口智能磁吸吸附】与脱离自由全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 9pt;")
         layout.addWidget(self.lbl_info)
 
-        # 5. 3 秒自动轮询刷新定时器
+        # 5. 实盘交易期 2 秒级高频自动刷新与动态绘制定时器
         self.poll_timer = QTimer(self)
-        self.poll_timer.setInterval(3000)
+        self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self.reload_chart)
         self.poll_timer.start()
 
         self.reload_chart()
+
+    def moveEvent(self, event):
+        """【🧲 磁吸窗口】当拖拽靠近主工作台窗口边缘 25 像素以内时自动磁吸对齐"""
+        super().moveEvent(event)
+        if self.parent() is not None:
+            main_win = self.parent().window()
+            if main_win and main_win.isVisible():
+                m_geo = main_win.geometry()
+                s_geo = self.geometry()
+                SNAP_DIST = 25
+
+                new_x = s_geo.x()
+                new_y = s_geo.y()
+
+                # 右侧边界磁吸
+                if abs(s_geo.x() - m_geo.right()) < SNAP_DIST:
+                    new_x = m_geo.right() + 1
+                    if abs(s_geo.y() - m_geo.y()) < SNAP_DIST:
+                        new_y = m_geo.y()
+                # 左侧边界磁吸
+                elif abs(s_geo.right() - m_geo.x()) < SNAP_DIST:
+                    new_x = m_geo.x() - s_geo.width() - 1
+                    if abs(s_geo.y() - m_geo.y()) < SNAP_DIST:
+                        new_y = m_geo.y()
+                # 底部边界磁吸
+                elif abs(s_geo.y() - m_geo.bottom()) < SNAP_DIST:
+                    new_y = m_geo.bottom() + 1
+                    if abs(s_geo.x() - m_geo.x()) < SNAP_DIST:
+                        new_x = m_geo.x()
+
+                if new_x != s_geo.x() or new_y != s_geo.y():
+                    self.move(new_x, new_y)
 
     def _toggle_log_panel(self):
         vis = not self.log_box.isVisible()
@@ -881,7 +913,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         action_header_lay = QHBoxLayout()
         lbl_action_head = QLabel("💡 盘中阶段自动解析与实操指引 (当前情况如何操作)")
         lbl_action_head.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9.5pt;")
-        btn_open_sbc_win_top = QPushButton("📈 打开 SBC 独立分时走势图窗口")
+        btn_open_sbc_win_top = QPushButton("📈 SBC 独立分时走势图")
         btn_open_sbc_win_top.setStyleSheet("background-color: #1e2638; color: #00ff88; font-weight: bold; border: 1.5px solid #00ff88; border-radius: 4px; padding: 2px 10px; font-size: 9pt;")
         btn_open_sbc_win_top.clicked.connect(self._on_open_sbc_chart_dialog)
         action_header_lay.addWidget(lbl_action_head)
@@ -1049,11 +1081,25 @@ class IntegratedTradingStrategyPanel(QWidget):
         right_layout.addWidget(log_box, 1)
 
         self.main_splitter.addWidget(right_container)
-        self.main_splitter.setSizes([600, 620])
+
+        # 4. 从 QSettings 物理持久化恢复 Splitter 左右分割位置
+        settings = QSettings("pyQuant3", "IntradayWorkbench")
+        splitter_state = settings.value("main_splitter_state")
+        if splitter_state:
+            self.main_splitter.restoreState(splitter_state)
+        else:
+            self.main_splitter.setSizes([600, 620])
+
+        self.main_splitter.splitterMoved.connect(self._save_splitter_state)
         main_layout.addWidget(self.main_splitter, 1)
 
         self.phase_items = []
         self._last_strategy_id = None
+
+    def _save_splitter_state(self):
+        """【💾 物理持久化】实时保存 Splitter 分割布局位置到 QSettings"""
+        settings = QSettings("pyQuant3", "IntradayWorkbench")
+        settings.setValue("main_splitter_state", self.main_splitter.saveState())
 
     def _on_reset_node_custom_params(self):
         self.engine.reset_node_custom_params(self.code)
@@ -1503,8 +1549,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         # 独立窗口属性设置 (允许独立任务栏、独立最小化/最大化/关闭)
         self.setWindowFlags(Qt.WindowType.Window)
         self.setWindowTitle(f"⚡ 【{self.code} {self.name}】分时阶梯交易与时序评估系统")
-        self.resize(1340, 920)
         self.setMinimumSize(1020, 720)
+
+        # 物理恢复窗口几何大小与位置 (QSettings)
+        settings = QSettings("pyQuant3", "IntradayWorkbench")
+        geo = settings.value("main_window_geometry")
+        if geo:
+            self.restoreGeometry(geo)
+        else:
+            self.resize(1340, 920)
 
         # 🎨 全局应用 ATS 统一暗黑主题样式表模板 (QSS)
         apply_dark_theme(self)
@@ -1821,6 +1874,12 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             self.combo_source.setCurrentIndex(idx)
         self.selected_data_source = "MANUAL_EVAL"
         self._on_eval_param_changed()
+
+    def closeEvent(self, event):
+        """关闭窗口时持久化保存主窗口大小与位置到 QSettings"""
+        settings = QSettings("pyQuant3", "IntradayWorkbench")
+        settings.setValue("main_window_geometry", self.saveGeometry())
+        super().closeEvent(event)
 
     def _on_live_timer_tick(self):
         """3.0s 定时刷新回调：在 TDX 直连模式且未开启手动估价勾选时，自动驱动界面极速跳动与评估"""
