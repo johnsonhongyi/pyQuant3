@@ -52,8 +52,8 @@ def get_leaderboard_headers(extra_cols=None):
         col_map = {}
         
     base_headers = [
-        "代码", "名称", "所属强板块", "买点类型", "现价", "涨幅%", "量比", 
-        "分时攻角", "VWAP偏离", "DFF", "Rank", "DFF2", "DFF3"
+        "代码", "名称", "所属强板块", "买点类型", "现价", "涨幅%", "涨速%", "换手%", "量比", 
+        "盘口意图", "分时攻角", "VWAP偏离", "DFF", "Rank", "DFF2", "DFF3"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
     tail_headers = ["建议买入区间", "止损防守", "综合得分", "决策依据"]
@@ -328,9 +328,9 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         # 5. 恢复上次用户使用的排序列与排序方向
         self._restore_saved_sorting()
 
-        # 6. 秒级高频刷新定时器 (UI 定时刷新)
+        # 6. 秒级高频刷新定时器 (UI 定时刷新，基准 3.0s，支持自适应动态退避)
         self.ui_refresh_timer = QTimer(self)
-        self.ui_refresh_timer.setInterval(1500) # 1.5s
+        self.ui_refresh_timer.setInterval(3000) # 3.0s
         self.ui_refresh_timer.timeout.connect(self._on_ui_timer_tick)
         self.ui_refresh_timer.start()
 
@@ -570,10 +570,20 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         flags = self.windowFlags()
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
+            # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
+            if self.is_hidden_state:
+                self.show_normal_position()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            self.snap_timer.stop()
+            self.hover_ticks = 0
+            self.leave_ticks = 0
+            self.setWindowOpacity(1.0)
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
+        self._save_window_states()
 
     def _save_window_states(self, is_open=None) -> None:
         try:
@@ -798,6 +808,11 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             self.cached_results = results
             self._render_table_data(results)
             self._has_init_fetched = True
+
+            # 动态根据 TDX 自适应退避机制同步 UI 刷新定时器
+            rec_ms = fetcher.get_recommended_interval_ms()
+            if self.ui_refresh_timer.interval() != rec_ms:
+                self.ui_refresh_timer.setInterval(rec_ms)
         except Exception as e:
             fetcher.add_log(f"热榜轮询计算异常: {e}", level="ERROR")
             logger.warning(f"热榜轮询计算异常: {e}")
@@ -915,7 +930,10 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         buy_tag = r["buy_tag"]
         price = r["price"]
         pct = r["pct"]
-        vol_r = r["vol_ratio"]
+        vel_pct = r.get("velocity_pct", 0.0)
+        turnover = r.get("turnover", 0.0)
+        vol_r = r.get("vol_ratio", 1.0)
+        intent = r.get("order_intent", "⚖️ 均衡博弈")
         slope = r["slope_score"]
         vwap_dev = r["vwap_dev_pct"]
         dff = r.get("dff", 0.0)
@@ -984,53 +1002,99 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         it_pct.setFont(font_bold)
         self.table.setItem(row_idx, 5, it_pct)
 
-        # 6: 量比
-        it_vr = NumericTableWidgetItem(f"{vol_r:.1f}")
-        it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        vr_color = QColor("#ff5577") if vol_r >= 2.0 else QColor("#e2e2e5")
-        it_vr.setForeground(QBrush(vr_color))
-        self.table.setItem(row_idx, 6, it_vr)
+        # 6: 涨速%
+        if vel_pct > 0.8:
+            vel_str = f"🔥+{vel_pct:.1f}%"
+            vel_color = QColor("#ff3344")
+        elif vel_pct > 0.1:
+            vel_str = f"⚡+{vel_pct:.1f}%"
+            vel_color = QColor("#ff8844")
+        elif vel_pct < -0.8:
+            vel_str = f"❄️{vel_pct:.1f}%"
+            vel_color = QColor("#00ff88")
+        elif vel_pct < -0.1:
+            vel_str = f"🔻{vel_pct:.1f}%"
+            vel_color = QColor("#00ddcc")
+        else:
+            vel_str = "0.0%"
+            vel_color = QColor("#888899")
 
-        # 7: 分时攻角
+        it_vel = NumericTableWidgetItem(vel_str)
+        it_vel.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        it_vel.setForeground(QBrush(vel_color))
+        self.table.setItem(row_idx, 6, it_vel)
+
+        # 7: 换手%
+        turn_str = f"{turnover:.2f}%" if turnover > 0 else "--"
+        it_turn = NumericTableWidgetItem(turn_str)
+        it_turn.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        it_turn.setForeground(QBrush(QColor("#ffe066" if turnover >= 5.0 else "#c0c0d0")))
+        self.table.setItem(row_idx, 7, it_turn)
+
+        # 8: 量比
+        it_vr = NumericTableWidgetItem(f"{vol_r:.2f}")
+        it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        vr_color = QColor("#ff4466") if vol_r >= 2.5 else (QColor("#ffaa44") if vol_r >= 1.5 else QColor("#e2e2e5"))
+        it_vr.setForeground(QBrush(vr_color))
+        self.table.setItem(row_idx, 8, it_vr)
+
+        # 9: 盘口意图
+        it_intent = NumericTableWidgetItem(intent)
+        it_intent.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if "扫买" in intent or "抢筹" in intent:
+            it_intent.setForeground(QBrush(QColor("#ff3355")))
+            it_intent.setBackground(QBrush(QColor(60, 20, 25, 160)))
+            it_intent.setFont(font_bold)
+        elif "托底" in intent:
+            it_intent.setForeground(QBrush(QColor("#00ffbb")))
+            it_intent.setBackground(QBrush(QColor(10, 45, 35, 160)))
+        elif "砸盘" in intent or "压盘" in intent:
+            it_intent.setForeground(QBrush(QColor("#55ddff")))
+            it_intent.setBackground(QBrush(QColor(20, 30, 50, 160)))
+        else:
+            it_intent.setForeground(QBrush(QColor("#aaaaaa")))
+        self.table.setItem(row_idx, 9, it_intent)
+
+        # 10: 分时攻角
         it_sl = NumericTableWidgetItem(f"{slope:.0f}")
         it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_sl.setForeground(QBrush(QColor("#00ffcc") if slope >= 60 else QColor("#aaaaaa")))
-        self.table.setItem(row_idx, 7, it_sl)
+        self.table.setItem(row_idx, 10, it_sl)
 
-        # 8: VWAP偏离
+        # 11: VWAP偏离
         it_dev = NumericTableWidgetItem(f"{vwap_dev:+.1f}%")
         it_dev.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         dev_color = QColor("#ff88aa") if vwap_dev > 0 else QColor("#66aacc")
         it_dev.setForeground(QBrush(dev_color))
-        self.table.setItem(row_idx, 8, it_dev)
+        self.table.setItem(row_idx, 11, it_dev)
 
-        # 9: DFF (多日偏离度)
+        # 12: DFF (多日偏离度)
         it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
         it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_dff.setForeground(QBrush(QColor(COLOR_UP if dff > 0 else COLOR_DOWN)))
-        self.table.setItem(row_idx, 9, it_dff)
+        self.table.setItem(row_idx, 12, it_dff)
 
-        # 10: Rank (强度排位)
+        # 13: Rank (强度排位)
         rank_str = str(rank_val) if rank_val != 999 else "--"
         it_rank = NumericTableWidgetItem(rank_str)
         it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_rank.setForeground(QBrush(QColor("#FFD700" if rank_val < 500 else "#e2e2e5")))
-        self.table.setItem(row_idx, 10, it_rank)
+        self.table.setItem(row_idx, 13, it_rank)
 
-        # 11: DFF2 (2日加速)
+        # 14: DFF2 (2日加速)
         it_d2 = NumericTableWidgetItem(f"{dff2:+.2f}")
         it_d2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d2.setForeground(QBrush(QColor(COLOR_UP if dff2 > 0 else COLOR_DOWN)))
-        self.table.setItem(row_idx, 11, it_d2)
+        self.table.setItem(row_idx, 14, it_d2)
 
-        # 12: DFF3 (3日加速)
+        # 15: DFF3 (3日加速)
         it_d3 = NumericTableWidgetItem(f"{dff3:+.2f}")
         it_d3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d3.setForeground(QBrush(QColor(COLOR_UP if dff3 > 0 else COLOR_DOWN)))
-        self.table.setItem(row_idx, 12, it_d3)
+        self.table.setItem(row_idx, 15, it_d3)
 
-        # 填入动态自定义扩展列 (extra_cols)
-        col_offset = 13
+        # 填入动态自定义扩展列 (extra_cols，从列 16 开始)
+        col_offset = 16
         for ec in self.extra_cols:
             ec_val = extra_vals.get(ec, "--")
             it_ec = NumericTableWidgetItem(str(ec_val))
@@ -1203,7 +1267,8 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.anim_group.start()
 
     def _detect_and_snap(self):
-        if self.is_hidden_state:
+        # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
+        if self.stays_on_top or self.is_hidden_state:
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -1245,7 +1310,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             self.normal_geometry = None
 
     def hide_to_edge(self):
-        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+        if self.stays_on_top or not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
 
         screen = self.screen()
@@ -1296,7 +1361,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self._save_window_states(is_open=True)
 
     def _check_hover(self):
-        if not self.isVisible():
+        if not self.isVisible() or self.stays_on_top:
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -1338,7 +1403,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+        if not self.stays_on_top and not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             self.anchor_edge = None
             self.snap_timer.start()

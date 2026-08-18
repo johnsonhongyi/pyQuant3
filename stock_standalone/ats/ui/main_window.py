@@ -1830,12 +1830,6 @@ class ATSMainWindow(QMainWindow):
         self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
-
-        self.btn_hot_leaderboard = QPushButton("🔥 龙头突击榜")
-        self.btn_hot_leaderboard.setToolTip("打开 Top 3 强势板块龙头突击与三维买点定位跟单看板 (完全独立非模态运行)")
-        self.btn_hot_leaderboard.setStyleSheet("QPushButton { background-color: #2a1515; color: #ff5577; font-weight: bold; border: 1px solid #ff4466; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ff4466; color: #ffffff; }")
-        self.btn_hot_leaderboard.clicked.connect(self.open_hot_sector_leaderboard)
-        toolbar.addWidget(self.btn_hot_leaderboard)
         
         toolbar.addSeparator()
 

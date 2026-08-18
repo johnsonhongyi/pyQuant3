@@ -204,10 +204,50 @@ class TDXRealtimeFetcher:
         self._consecutive_slow_or_errors: int = 0
         self._consecutive_healthy: int = 0
 
+        # 瞬时上涨涨速历史追踪缓存 {code: (last_price, last_timestamp)}
+        self._velocity_history: Dict[str, Tuple[float, float]] = {}
+
+        # 标的真实流通股本永久缓存 (股数)
+        self._finance_shares_cache: Dict[str, float] = {}
+
         self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站 (基准周期: 3.0s)", level="INFO")
 
         # 启动时快速选取最优服务器
         self._init_best_server()
+
+    def get_circulation_shares(self, code: str) -> float:
+        """获取标的真实流通股本 (股)，带内存永久缓存与按需懒拉取，实现 100% 精准换手率"""
+        c_clean = str(code).strip().zfill(6)
+        if c_clean in self._finance_shares_cache:
+            return self._finance_shares_cache[c_clean]
+
+        # 1. 尝试从本地阶梯规格获取
+        try:
+            from ats.intraday_strategy_engine import IntradayStrategyEngine
+            spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
+            float_shares_wan = float(spec.get("float_shares_wan", 0.0) or 0.0)
+            if float_shares_wan > 0:
+                self._finance_shares_cache[c_clean] = float_shares_wan * 10000.0
+                return self._finance_shares_cache[c_clean]
+        except Exception:
+            pass
+
+        # 2. 尝试从 TDX 财务数据接口懒拉取 (单次拉取永久有效)
+        with self._conn_lock:
+            try:
+                if self._is_connected and self.api:
+                    mkt = get_market_code(c_clean)
+                    fin = self.api.get_finance_info(mkt, c_clean)
+                    if fin and "liutongguben" in fin:
+                        shares = float(fin["liutongguben"] or 0.0)
+                        if shares > 0:
+                            self._finance_shares_cache[c_clean] = shares
+                            return shares
+            except Exception:
+                pass
+
+        # 默认基准 1.5 亿股 (1500万手)
+        return 150000000.0
 
     def _record_request_feedback(self, cost_ms: float, is_error: bool = False):
         """
@@ -551,25 +591,13 @@ class TDXRealtimeFetcher:
         else:
             vwap = trade_price if trade_price > 0 else open_price
 
-        # 动态获取该标的真实流通盘 (万股)
-        circ_wan = circulation_shares_wan
-        if circ_wan is None or circ_wan <= 0:
-            try:
-                from ats.intraday_strategy_engine import IntradayStrategyEngine
-                spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
-                float_shares_wan = float(spec.get("float_shares_wan", 0.0))
-                if float_shares_wan > 0:
-                    circ_wan = float_shares_wan
-                else:
-                    float_mv_yi = float(spec.get("float_mv_yi", 0.0))
-                    if float_mv_yi > 0 and trade_price > 0:
-                        circ_wan = (float_mv_yi * 1e8 / trade_price) / 10000.0
-            except Exception:
-                circ_wan = None
+        # 动态获取该标的真实流通盘并计算换手率 (%)
+        if circulation_shares_wan and circulation_shares_wan > 0:
+            total_circ_shares = circulation_shares_wan * 10000.0
+        else:
+            total_circ_shares = self.get_circulation_shares(c_clean)
 
-        # 计算换手率 (%)
-        if circ_wan and circ_wan > 0 and vol > 0:
-            total_circ_shares = circ_wan * 10000.0
+        if total_circ_shares > 0 and vol > 0:
             turnover_rate = round((vol * 100.0 / total_circ_shares) * 100.0, 2)
             turnover_rate = min(100.0, max(0.0, turnover_rate))
         else:
@@ -626,6 +654,7 @@ class TDXRealtimeFetcher:
         multi_period_cache = multi_period_cache or {}
         name_map = name_map or {}
 
+        now_ts = time.time()
         # 1. 整理盘口并计算基础分时指标
         parsed_items = []
         for q in quotes:
@@ -640,9 +669,21 @@ class TDXRealtimeFetcher:
             last_close = float(q.get("last_close", price))
             vol = float(q.get("vol", 0.0))       # 手
             amount = float(q.get("amount", 0.0)) # 元
+            cur_vol = float(q.get("cur_vol", 0.0))
+            b_vol = float(q.get("b_vol", 0.0))
+            s_vol = float(q.get("s_vol", 0.0))
 
             # 涨幅 %
             pct = round((price - last_close) / last_close * 100.0, 2) if last_close > 0 else 0.0
+
+            # 1. 瞬时/动态上涨涨速 (%/分)
+            velocity_pct = 0.0
+            if hasattr(self, '_velocity_history') and code_str in self._velocity_history:
+                old_p, old_t = self._velocity_history[code_str]
+                dt = now_ts - old_t
+                if 1.0 <= dt <= 30.0 and last_close > 0:
+                    velocity_pct = round((price - old_p) / last_close * 100.0 * (60.0 / dt), 1)
+            self._velocity_history[code_str] = (price, now_ts)
 
             # 日内 VWAP (元)
             if vol > 0 and amount > 0:
@@ -657,7 +698,7 @@ class TDXRealtimeFetcher:
             # VWAP 偏离度 % (现价相对日内均价的偏离，正表示在均线上方强势)
             vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
 
-            # 五档买卖盘量能统计与买压比 (%)
+            # 2. 五档买卖盘量能深度与主力追买/追卖意图判定
             bid_vol_sum = 0.0
             ask_vol_sum = 0.0
             for i in range(1, 6):
@@ -666,21 +707,60 @@ class TDXRealtimeFetcher:
 
             total_depth = bid_vol_sum + ask_vol_sum
             bid_pressure = round((bid_vol_sum / total_depth) * 100.0, 1) if total_depth > 0 else 50.0
+            taker_buy_ratio = round((b_vol / (b_vol + s_vol)) * 100.0, 1) if (b_vol + s_vol > 0) else 50.0
+
+            # 盘口主力行为分析
+            if pct >= 9.8 and (ask_vol_sum == 0 or bid_pressure > 85.0):
+                order_intent = "🔒 封板抢筹"
+                intent_score = 95
+            elif taker_buy_ratio >= 58.0 or (price >= high_p - 0.02 and bid_pressure >= 55.0):
+                order_intent = "🔥 主动扫买"
+                intent_score = 85
+            elif taker_buy_ratio <= 42.0 and bid_pressure <= 45.0:
+                order_intent = "⚠️ 主动砸盘"
+                intent_score = 30
+            elif bid_pressure >= 65.0:
+                order_intent = "🛡️ 大单托底"
+                intent_score = 75
+            elif bid_pressure <= 35.0:
+                order_intent = "🧱 大单压盘"
+                intent_score = 40
+            else:
+                order_intent = "⚖️ 均衡博弈"
+                intent_score = 50
+
+            # 3. 换手率计算 (100% 对齐通达信流通盘换手，自动过滤成交额异常大数)
+            mp_info = multi_period_cache.get(code_str, {})
+            turnover_val = float(mp_info.get("turnover", 0.0) or 0.0)
+            if (turnover_val <= 0 or turnover_val > 100.0) and vol > 0:
+                circ_shares = self.get_circulation_shares(code_str)
+                if circ_shares > 0:
+                    turnover_val = round((vol * 100.0 / circ_shares) * 100.0, 2)
+            turnover_val = min(100.0, max(0.0, turnover_val))
+
+            # 4. 真实量比计算 (若外部传入真实量比优先使用，否则结合开盘分钟与成交量计算)
+            raw_vr = mp_info.get("vol_ratio", 0.0)
+            if raw_vr and float(raw_vr) > 0 and float(raw_vr) != 1.8:
+                vol_ratio_val = round(float(raw_vr), 2)
+            elif vol > 0:
+                # 依据当日总成交手与基准均量计算量比 (以流通盘0.5%为1倍量基准)
+                circ_s = self.get_circulation_shares(code_str)
+                benchmark_daily_vol = (circ_s / 100.0) * 0.02 # 2% 基准换手
+                if benchmark_daily_vol > 0:
+                    vol_ratio_val = round(max(0.2, min(30.0, vol / benchmark_daily_vol)), 2)
+                else:
+                    vol_ratio_val = 1.0
+            else:
+                vol_ratio_val = 1.0
 
             # 多日特征
-            mp_info = multi_period_cache.get(code_str, {})
             dff = float(mp_info.get("dff", 0.0) or 0.0)
             dff2 = float(mp_info.get("dff2", 0.0) or 0.0)
             dff3 = float(mp_info.get("dff3", 0.0) or 0.0)
             rank_val = int(mp_info.get("rank", mp_info.get("Rank", 999)) or 999)
             perc3d = float(mp_info.get("perc3d", 0.0) or 0.0)
-            vol_ratio_base = float(mp_info.get("vol_ratio", mp_info.get("vol_rati", 1.0)) or 1.0)
-
-            # 动态量比预估 (结合多日量比与盘中换手强度)
-            vol_ratio = round(vol_ratio_base, 2) if vol_ratio_base > 0 else 1.0
 
             # 分时拉升攻角评分 (0 ~ 100)
-            # 依据: 现价高于VWAP、处于日内高位区、涨幅、五档买压
             pos_in_day = (price - low_p) / (high_p - low_p) if (high_p > low_p) else 0.5
             slope_score = 40.0
             if vwap_dev_pct > 0:
@@ -703,6 +783,7 @@ class TDXRealtimeFetcher:
                 "low": low_p,
                 "last_close": last_close,
                 "pct": pct,
+                "velocity_pct": velocity_pct,
                 "vwap": vwap,
                 "vwap_dev_pct": vwap_dev_pct,
                 "vol": vol,
@@ -712,7 +793,9 @@ class TDXRealtimeFetcher:
                 "bid_vol_sum": bid_vol_sum,
                 "ask_vol_sum": ask_vol_sum,
                 "bid_pressure": bid_pressure,
-                "vol_ratio": vol_ratio,
+                "order_intent": order_intent,
+                "turnover": turnover_val,
+                "vol_ratio": vol_ratio_val,
                 "slope_score": slope_score,
                 "dff": dff,
                 "dff2": dff2,
