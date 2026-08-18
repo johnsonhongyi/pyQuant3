@@ -2582,6 +2582,8 @@ def get_tdx_Exp_day_to_df_lday(
     """
     全极速稳定版（二进制 .day 路径）
     """
+    if cct.is_delisted_stock(code=code):
+        return pd.DataFrame()
 
     # =========================
     # 1. 文件定位（.day）
@@ -2741,6 +2743,8 @@ def get_tdx_Exp_day_to_df(
     """
     全极速稳定版（无回退 / 自动支持 resample & MultiIndex）
     """
+    if cct.is_delisted_stock(code=code):
+        return pd.DataFrame()
 
     # =========================
     # 1. 文件定位

@@ -206,6 +206,7 @@ class StockCode:
             return self.get_stock_codes(False)
 
         stock_codes = df.index.tolist()
+        stock_codes = cct.filter_delisted_stocks(stock_codes)
         # stock_codes = [c for c in stock_codes if len(c) == 6 and c.isdigit() and c.startswith(cct.code_startswith)]
         
         # [DYNAMIC FILTER PROTECTION] 动态安全性校验，防止因个别网络包失败导致的残缺代码库覆盖
@@ -242,14 +243,14 @@ class StockCode:
         # print "days:",cct.creation_date_duration(self.stock_code_path)
         if realtime:
             stock_codes = self.update_stock_codes()
-            self.stock_codes = stock_codes
-            log.info("realtime codes:%s" % (len(stock_codes)))
-            return stock_codes
+            self.stock_codes = cct.filter_delisted_stocks(stock_codes)
+            log.info("realtime codes:%s" % (len(self.stock_codes)))
+            return self.stock_codes
         else:
             try:
                 if os.path.exists(self.stock_code_path) and os.path.getsize(self.stock_code_path) > 0:
                     with open(self.stock_code_path) as f:
-                        self.stock_codes = json.load(f)['stock']
+                        self.stock_codes = cct.filter_delisted_stocks(json.load(f)['stock'])
                         return self.stock_codes
             except Exception as e:
                 log.error(f"Error reading stock_codes.conf: {e}")
@@ -2641,7 +2642,7 @@ if __name__ == "__main__":
     dm = sina.all
     import ipdb;ipdb.set_trace()
     
-    code_l = ['300291','000868','603917','600392','300713','000933','002505','603676']
+    code_l = ['300291','000868','603917','600392','300713','000933','002505','688826']
     dd = sina.get_real_time_tick(code_l)
     dde = sina.get_real_time_tick(code_l, enrich_data=True)
     import ipdb;ipdb.set_trace()

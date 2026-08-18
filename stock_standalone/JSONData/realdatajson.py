@@ -142,11 +142,8 @@ def _parsing_Market_price_json_src(url):
                       columns=ct.SINA_Market_COLUMNS)
 
     '''
-    # df = df.drop('symbol', axis=1)
     df = df.loc[df.volume >= 0]
-    # print type(df)
-    # print df[-2:-1],len(df.index)
-    # print df.loc['300208',['name']]
+    df = cct.filter_delisted_stocks(df)
     return df
 
 
@@ -256,8 +253,8 @@ def get_sina_Market_json_src(market='all', showtime=True, num='100', retry_count
             df = df.loc[co_inx]            
         elif market == 'cyb':
             co_inx = [inx for inx in df.index if str(inx).startswith(('30'))]
-            df = df.loc[co_inx]            
-
+            df = df.loc[co_inx]
+        df = cct.filter_delisted_stocks(df)
         return df
     else:
         if showtime:print(("no data Market-df:%s" % (format((time.time() - start_t), '.2f'))))
