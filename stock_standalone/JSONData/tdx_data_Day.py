@@ -2240,7 +2240,93 @@ def calc_trend_channel(df, ur=6, lr=6):
     var52 = 3.0 * sma1 - 2.0 * sma2
     sig_start = _cross_vec(var52, 3.0).astype(np.int8)
 
-    # 批量更新至 DataFrame (避免 22 次 Block 重排)
+    # ======== 模块 7: 通达信翻转线 (talib.EMA / SMA) ========
+    # 趋势线:=(EMA(C,5)+EMA(C,13)+EMA(C,21))/3;
+    # 翻转:IF(MA(C,3)>趋势线,趋势线,MA(C,3));
+    ema5 = talib.EMA(close, timeperiod=5)
+    ema13 = talib.EMA(close, timeperiod=13)
+    ema21 = talib.EMA(close, timeperiod=21)
+    ema5[np.isnan(ema5)] = close[np.isnan(ema5)]
+    ema13[np.isnan(ema13)] = close[np.isnan(ema13)]
+    ema21[np.isnan(ema21)] = close[np.isnan(ema21)]
+    trend_line = (ema5 + ema13 + ema21) / 3.0
+    ma3 = talib.SMA(close, timeperiod=3)
+    ma3[np.isnan(ma3)] = close[np.isnan(ma3)]
+    reversal_line = np.where(ma3 > trend_line, trend_line, ma3)
+
+    # ======== 模块 8: 通达信上涨支撑线与反弹特征 (KX DRAWLINE) ========
+    # KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);
+    llv20 = low_s.rolling(20, min_periods=1).min().values
+    hhv20 = high_s.rolling(20, min_periods=1).max().values
+    llv4 = low_s.rolling(4, min_periods=1).min().values
+
+    cond1 = (low <= llv20)
+    cond2 = (high >= hhv20)
+
+    pairs = []
+    i = 0
+    while i < n:
+        if cond1[i]:
+            i_A = i
+            price_A = low[i]
+            i_B = -1
+            for j in range(i_A + 1, n):
+                if cond1[j]:
+                    i_A = j
+                    price_A = low[j]
+                elif cond2[j]:
+                    i_B = j
+                    price_B = llv4[j]
+                    break
+            if i_B != -1:
+                pairs.append((i_A, price_A, i_B, price_B))
+                i = i_B + 1
+            else:
+                break
+        else:
+            i += 1
+
+    supp_slope = 0.0
+    supp_days = bc2
+    if pairs:
+        last_i_A, last_p_A, last_i_B, last_p_B = pairs[-1]
+        # 仅当最近配对的起点或终点与当前低点处于同一反弹周期内，且斜率为正时采纳
+        is_recent_pair = (last_i_A >= max(0, n - bc2 - 3) or last_i_B >= max(0, n - bc2 - 3))
+        if is_recent_pair and last_i_B > last_i_A:
+            supp_k = (last_p_B - last_p_A) / float(last_i_B - last_i_A)
+            if supp_k > 1e-8:
+                supp_slope = supp_k
+                supp_price_last = supp_k * ((n - 1) - last_i_A) + last_p_A
+                supp_days = (n - 1) - last_i_A
+            else:
+                supp_k = (close[-1] - lower_price) / max(1, bc2)
+                supp_slope = supp_k
+                supp_price_last = lower_price + supp_k * bc2
+                supp_days = bc2
+        else:
+            supp_k = (close[-1] - lower_price) / max(1, bc2)
+            supp_slope = supp_k
+            supp_price_last = lower_price + supp_k * bc2
+            supp_days = bc2
+    else:
+        supp_k = (close[-1] - lower_price) / max(1, bc2)
+        supp_slope = supp_k
+        supp_price_last = lower_price + supp_k * bc2
+        supp_days = bc2
+
+    supp_price_last = max(0.01, float(supp_price_last))
+    close_last = close[-1] if close[-1] > 1e-8 else 1.0
+
+    supp_slope_pct = supp_slope / close_last * 100.0
+    supp_slope_deg = np.degrees(np.arctan(supp_slope_pct))
+    supp_pos = (close[-1] - supp_price_last) / supp_price_last * 100.0
+
+    res_price = upper_price
+    res_slope = (upper_price - close[-1]) / max(1, tc2)
+    res_slope_pct = res_slope / close_last * 100.0
+    res_slope_deg = np.degrees(np.arctan(res_slope_pct))
+
+    # 批量更新至 DataFrame (避免 Block 重排)
     new_cols = {
         'ch_anchor_high_price': np.full(n, upper_price), 'ch_anchor_low_price': np.full(n, lower_price),
         'ch_tc2': np.full(n, tc2, dtype=np.int16), 'ch_bc2': np.full(n, bc2, dtype=np.int16),
@@ -2252,7 +2338,16 @@ def calc_trend_channel(df, ur=6, lr=6):
         'ch_upper': upper, 'ch_mid': mid, 'ch_lower': lower,
         'ch_slope': np.round(slope, 6), 'ch_slope_deg': np.round(ch_slope_deg, 2),
         'ch_width': ch_width, 'ch_pos': np.round(ch_pos, 2), 'ch_dir': ch_dir,
-        'sig_escape': sig_escape, 'sig_start': sig_start, 'rsi6': np.round(rsi6, 2)
+        'sig_escape': sig_escape, 'sig_start': sig_start, 'rsi6': np.round(rsi6, 2),
+        'ch_supp_price': np.round(np.full(n, supp_price_last), 3),
+        'ch_supp_slope': np.round(np.full(n, supp_slope), 4),
+        'ch_supp_slope_deg': np.round(np.full(n, supp_slope_deg), 2),
+        'ch_supp_pos': np.round(np.full(n, supp_pos), 2),
+        'ch_supp_days': np.full(n, supp_days, dtype=np.int16),
+        'reversal_line': np.round(reversal_line, 3),
+        'ch_res_price': np.round(np.full(n, res_price), 3),
+        'ch_res_slope': np.round(np.full(n, res_slope), 4),
+        'ch_res_slope_deg': np.round(np.full(n, res_slope_deg), 2)
     }
     df = df.assign(**new_cols)
     return df
@@ -8504,7 +8599,7 @@ if __name__ == '__main__':
     code = '300905'
     resample = 'd'
 
-    code = '688200'
+    code = '002205'
     df2=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df3=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d')
     df4=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
