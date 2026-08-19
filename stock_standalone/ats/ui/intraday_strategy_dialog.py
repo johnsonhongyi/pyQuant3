@@ -630,7 +630,16 @@ class SBCIntradayChartDialog(QWidget):
         btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         btn_close.clicked.connect(self.close)
 
+        btn_linkage = QPushButton("⚡ 联动")
+        btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_linkage.setToolTip("发送当前标的到异动联动窗口")
+        def _on_send_linkage():
+            from ats.ui.base_table import send_to_linkage
+            send_to_linkage(self.code, resolve_stock_name(self.code), self)
+        btn_linkage.clicked.connect(_on_send_linkage)
+
         tb_layout.addStretch()
+        tb_layout.addWidget(btn_linkage)
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)

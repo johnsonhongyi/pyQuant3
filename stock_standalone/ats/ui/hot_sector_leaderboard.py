@@ -1224,6 +1224,12 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             open_sbc_chart_dialog(self, code)
         act_sbc.triggered.connect(_open_sbc)
 
+        act_send = menu.addAction(f"⚡ 发送到异动联动 ({code})")
+        def _send_link():
+            from ats.ui.base_table import send_to_linkage
+            send_to_linkage(code, name, self)
+        act_send.triggered.connect(_send_link)
+
         act_strategy = menu.addAction(f"🎯 调出 {name} 分时阶梯交易策略")
         act_strategy.triggered.connect(lambda: self._on_item_double_clicked(c_item))
 
