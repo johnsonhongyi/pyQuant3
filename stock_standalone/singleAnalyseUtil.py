@@ -535,7 +535,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     else:
         duration_dfcfw_Except_time = time.time() - dfcfw_Except_time
         if duration_dfcfw_Except_time > 60:
-            dfcfw_Except_time == 0
+            dfcfw_Except_time = 0
             cct.GlobalValues().setkey('dfcfw_Except', False)
     log.debug("shzs:%s hgt:%s" % (ff, hgt))
     # if len(ff) > 0:
@@ -702,152 +702,179 @@ if __name__ == '__main__':
     dfcfw_Except_time = 0
     blkname = '061.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
+
+    # 读取持久化收盘状态
+    try:
+        conf_ini = cct.get_conf_path('global.ini')
+        CFG = cct.GlobalConfig(conf_ini)
+        write_all_day_date = CFG.write_all_day_date
+    except Exception as e_init_cfg:
+        log.warning("GlobalConfig init warning: %s" % e_init_cfg)
+        CFG = None
+        write_all_day_date = ''
+
+    # 首次启动必须完整走完并显示一次市场资金强弱流程
+    first_run = True
+
     while 1:
         try:
-            today_str = cct.get_today()
-            if today_str != rzrq_date:
-                log.info("Trading day changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
+            current_today = cct.get_today()
+            # 跨天检测：次日自动重新初始化
+            if current_today != today_str:
+                log.info("Trading day changed from %s to %s. Auto-reinitializing for 24x7 running..." % (today_str, current_today))
+                today_str = current_today
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 rzrq_date = today_str
-            if not status:
-                if len(fibl) == 0 or fibcount >= fibc:
-                    # print "change FibDiff"
-                    fibcount = 0
-                    fibl = fibonacciCount(
-                        ['999999', '399001', '399006'], dl=dl)
-                    
-                if ( 920 < cct.get_now_time_int() and not cct.isDigit(rzrq['all'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0):
-                    # if rzrq['shrz'] == 0 or rzrq['szrz'] == 0 or rzrq['dff'] == 0 or rzrq['all'] == 0:
-                    #     log.warn("rzrq 0")
-                    rzrq = ffu.get_dfcfw_rzrq_SHSZ()
-                    rzrq_date = cct.get_today()
+                fibcount = 0
+                fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
+                cct.GlobalValues().setkey('top_max', None)
+                cct.GlobalValues().setkey('dfcfw_Except', False)
+                dfcfw_Except_time = 0
+                status = False
+                num_input = ''
+                ave = None
+                code = ''
+                except_count = 0
+                first_run = True  # 次日跨天后也允许首次运行完整显示一次
+            elif today_str != rzrq_date:
+                log.info("rzrq_date changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
+                rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                rzrq_date = today_str
 
-                log.info('start get_hot_count')
-                get_hot_countNew(percentDuration, rzrq, fibl, fibc)
-                fibcount += 1
-            if status:
-                # status=True
-                if not num_input:
-                    num_input = input("please input code:")
-                    if num_input == 'ex' or num_input == 'qu' \
-                            or num_input == 'q' or num_input == "e":
-                        sys.exit()
-                    # str.isdigit()是用来判断字符串是否纯粹由数字组成
-                    elif not num_input or not len(num_input) == 6:
-                        print("Please input 6 code:or exit")
-                        num_input = ''
-                if num_input:
-                    if ave == None:
-                        ave = get_code_search_loop(num_input, code, dayl=days)
-                    else:
-                        ave = get_code_search_loop(
-                            num_input, code, dayl=days, ave=ave)
-                    code = num_input
-
-            # int_time = cct.get_now_time_int()
-            # if cct.get_work_time():
-            #     if 930 < int_time < 1000:
-            #         cct.sleep(45)
-            #     else:
-            #         cct.sleep(ct.duration_sleep_time)
             int_time = cct.get_now_time_int()
-            if cct.get_work_time():
-                log.debug('into get_work_time:%s' % (int_time))
-                if 920 < int_time < 926:
-                    while 1:
-                        cct.sleeprandom(cct.duration_sleep_time)
-                        break
-                elif 926 < int_time < 930:
-                    while 1:
-                        cct.sleep(cct.duration_sleep_time)
-                        if cct.get_now_time_int() < 931:
-                            cct.sleep(cct.duration_sleep_time)
-                            print(".", end=' ')
-                        else:
-                            # cct.sleep(random.randint(0, 30))
-                            # print "."
-                            fibcount = 0
-                            break
+            is_work_time = cct.get_work_time()
+            is_work_duration = cct.get_work_duration()
+
+            # 1. 首次启动初始化，或 盘中工作时间 (9:15-11:30, 13:00-15:05)，或 手动个股查询模式
+            if first_run or is_work_time or status:
+                if not status:
+                    if len(fibl) == 0 or fibcount >= fibc:
+                        fibcount = 0
+                        fibl = fibonacciCount(
+                            ['999999', '399001', '399006'], dl=dl)
+                        
+                    if (920 < int_time and not cct.isDigit(rzrq['all'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0):
+                        rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                        rzrq_date = cct.get_today()
+
+                    log.info('start get_hot_count')
+                    get_hot_countNew(percentDuration, rzrq, fibl, fibc)
+                    fibcount += 1
                 else:
-                    cct.sleep(ct.single_duration_sleep_time)
+                    if not num_input:
+                        num_input = input("please input code:")
+                        if num_input == 'ex' or num_input == 'qu' \
+                                or num_input == 'q' or num_input == "e":
+                            sys.exit()
+                        elif not num_input or not len(num_input) == 6:
+                            print("Please input 6 code:or exit")
+                            num_input = ''
+                    if num_input:
+                        if ave is None:
+                            ave = get_code_search_loop(num_input, code, dayl=days)
+                        else:
+                            ave = get_code_search_loop(
+                                num_input, code, dayl=days, ave=ave)
+                        code = num_input
+
+                # 首次运行走完后打印状态并切换标记
+                if first_run:
+                    first_run = False
+                    if not is_work_time and not is_work_duration:
+                        if write_all_day_date == today_str:
+                            print("\n[INIT] 检测到今日 (%s) 盘后收盘数据已处理完毕并持久化记忆 (write_all_day_date=%s)。" % (today_str, write_all_day_date))
+                            print("[INIT] 当前处于非交易时段，进入 24*7 自动等待状态 (每 5 分钟呼吸打点)...", flush=True)
+
+                # 盘中休眠控制
+                if is_work_time:
+                    log.debug('into get_work_time:%s' % (int_time))
+                    if 920 < int_time < 926:
+                        cct.sleeprandom(cct.duration_sleep_time)
+                    elif 926 < int_time < 930:
+                        while 1:
+                            cct.sleep(cct.duration_sleep_time)
+                            if cct.get_now_time_int() < 931:
+                                cct.sleep(cct.duration_sleep_time)
+                                print(".", end='', flush=True)
+                            else:
+                                fibcount = 0
+                                break
+                    else:
+                        cct.sleep(ct.single_duration_sleep_time)
                     
-            elif cct.get_work_duration():
+            # 2. 盘前准备或午间休市 (7:00-9:15, 11:30-13:00)
+            elif is_work_duration:
                 log.debug('into work_duration:%s' % (int_time))
                 while 1:
                     if cct.get_work_duration():
-                        print(".", end=' ')
+                        print(".", end='', flush=True)
                         cct.sleep(ct.single_duration_sleep_time)
                     else:
                         print("#")
                         cct.sleep(random.randint(0, 30))
-                        top_all = pd.DataFrame()
                         fibcount = 0
                         break
 
+            # 3. 盘后及非交易时间 (clean_duration / 夜间 / 周末 / 节假日)
             else:
-
                 log.debug('into clean_duration:%s' % (int_time))
-                if (not cct.get_trade_date_status() or cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 2400):
-                    while 1:
-                        if cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 1505:
-                            print(".", end=' ')
-                            cct.sleep(cct.duration_sleep_time)
-                        elif not cct.get_trade_date_status() or cct.get_now_time_int() < 2400:
-                            print(".", end=' ')
-                            print("write dm to file")
+                
+                # 检查是否需要执行盘后收盘写入与备份
+                need_write = False
+                if cct.get_trade_date_status() and int_time > 1501:
+                    if write_all_day_date != today_str:
+                        need_write = True
+                elif not cct.get_trade_date_status():
+                    if write_all_day_date != today_str:
+                        need_write = True
 
-                            if (cct.get_trade_date_status() and cct.get_now_time_int() > 1502) or not cct.get_trade_date_status():
-                                tdd.Write_market_all_day_mp('all')
-                                top_temp = cct.GlobalValues().getkey('top_max')
-                                codew = stf.WriteCountFilter(
-                                    top_temp, writecount='all')
-                            break
-                        else:
-                            print(".")
-                else:
-                    if  not cct.get_trade_date_status() :
-                        print(".", end=' ')
-                        print("write dm to file")
+                if need_write:
+                    # 如果在 15:01-15:05 之间，稍作等待收盘数据齐全
+                    if cct.get_trade_date_status() and 1501 < int_time < 1505:
+                        print(".", end='', flush=True)
+                        cct.sleep(cct.duration_sleep_time)
+                    else:
+                        print("\nwrite dm to file")
                         tdd.Write_market_all_day_mp('all')
                         top_temp = cct.GlobalValues().getkey('top_max')
-                        codew = stf.WriteCountFilter(
-                            top_temp, writecount='all')
-                        break
+                        codew = stf.WriteCountFilter(top_temp, writecount='all')
+                        
+                        # 执行 RamDisk 备份
+                        if cct.isMac():
+                            ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
+                            if cct.creation_date_duration(ramdisk_h5) >= 0:
+                                os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
+                                time.sleep(1)
+                        else:
+                            ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
+                            if cct.get_trade_date_status() and cct.creation_date_duration(ramdisk_h5) > 0:
+                                os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
+                                time.sleep(1)
+                                print("1-ramdisk_back is OK")
+                        
+                        # 记录并持久化收盘数据已完成
+                        write_all_day_date = today_str
+                        try:
+                            if CFG is not None:
+                                CFG.set_and_save("general", "write_all_day_date", today_str)
+                            else:
+                                conf_ini = cct.get_conf_path('global.ini')
+                                CFG = cct.GlobalConfig(conf_ini)
+                                CFG.set_and_save("general", "write_all_day_date", today_str)
+                        except Exception as e_cfg:
+                            log.error("Save write_all_day_date error: %s" % (e_cfg))
+                        print("All is ok. EOD task finished for %s. Entering auto-waiting state..." % today_str)
+                else:
+                    # 当天收盘已做完或处于非交易等待状态：5分钟输出一次呼吸打点，绝不频繁刷屏
+                    print(".", end='', flush=True)
+                    # 休眠 300 秒 (5分钟)，每 15 秒检查一次是否跨天或到达开盘/盘前时段
+                    for _ in range(20):
+                        time.sleep(15)
+                        if cct.get_today() != today_str or cct.get_work_time() or cct.get_work_duration():
+                            break
 
-
-                raise KeyboardInterrupt("Stop Time")
-                # st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e)]:")
-                # if len(st) == 0:
-                #     status = False
-                # elif st.lower() == 'g' or st.lower() == 'go':
-                #     status = True
-                #     num_input = ''
-                #     ave = None
-                #     code = ''
-                # elif len(st) == 6:
-                #     status = True
-                #     num_input = st
-                #     ave = None
-                #     code = ''
-                # else:
-                #     sys.exit(0)
         except (KeyboardInterrupt) as e:
-            # print "key"
-            print("KeyboardInterrupt:", e)
-            if cct.isMac():
-                # ramdisk_h5 = '/Volumes/RamDisk/sina_MultiIndex_data.h5'
-                ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
-                # if  cct.get_work_day_status() and cct.get_now_time_int() > 1500 and cct.creation_date_duration(ramdisk_h5) == 0:
-                if  cct.get_now_time_int() > 1500 and cct.creation_date_duration(ramdisk_h5) >= 0:
-                    os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
-                    time.sleep(1)
-            else:
-                ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-                if  cct.get_now_time_int() > 1500 and cct.get_trade_date_status() and cct.creation_date_duration(ramdisk_h5) > 0:
-                    os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
-                    time.sleep(1)
-                    # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
-                    print("1-ramdisk_back is OK")
+            print("\nKeyboardInterrupt:", e)
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
             today_str = cct.get_today()
             if len(st) == 0:
@@ -861,51 +888,33 @@ if __name__ == '__main__':
                 log.info("Manually re-fetching rzrq data...")
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 rzrq_date = cct.get_today()
-            # elif st.startswith('w') or st.startswith('a'):
-            #     args = cct.writeArgmain().parse_args(st.split())
-            #     top_temp = cct.GlobalValues().getkey('top_max')
-            #     codew = stf.WriteCountFilter(
-            #         top_temp, writecount=args.dl)
-            #     if args.code == 'a':
-            #         cct.write_to_blocknew(block_path, codew, doubleFile=False)
-            #         # sl.write_to_blocknew(all_diffpath, codew)
-            #     else:
-            #         cct.write_to_blocknew(
-            #             block_path, codew, False, doubleFile=False)
-            #         # sl.write_to_blocknew(all_diffpath, codew, False)
-            #     print(("wri ok:%s" % block_path))
-            elif st.startswith('w') or st.lower == 'w':
-                # log.debug('into clean_duration:%s' % (int_time))
-                if (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900 or not cct.get_trade_date_status() ):
-                    while 1:
-                        if cct.get_trade_date_status() and cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 1510:
-                            print(".", end=' ')
-                            cct.sleep(60)
-                        # elif (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900):
-                        elif not cct.get_trade_date_status():
-                            print(".", end=' ')
-                            print("write dm to file")
-                            # if cct.get_work_day_status():
-                            if cct.creation_date_duration(ramdisk_h5) > 0:
-                                tdd.Write_market_all_day_mp('all')
-                                top_temp = cct.GlobalValues().getkey('top_max')
-                                codew = stf.WriteCountFilter(
-                                    top_temp, writecount='all')
-                                # cct.write_to_blocknew(
-                                #     block_path, codew, append=False, doubleFile=False)
-
-                                
-                                # print("Now append sina to tdx 300 hdf:")
-                                # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-                                # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-                            else:
-                                print(f"creation_date_duration({ramdisk_h5}):{cct.creation_date_duration(ramdisk_h5)}")
-
-                            break
-                        else:
-                            print(".")
-
-            elif len(st) == 6:
+            elif st.startswith('w') or st.lower() == 'w':
+                print("Manual trigger write dm to file...")
+                tdd.Write_market_all_day_mp('all')
+                top_temp = cct.GlobalValues().getkey('top_max')
+                codew = stf.WriteCountFilter(top_temp, writecount='all')
+                if cct.isMac():
+                    ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
+                    if cct.creation_date_duration(ramdisk_h5) >= 0:
+                        os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
+                        time.sleep(1)
+                else:
+                    ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
+                    if cct.creation_date_duration(ramdisk_h5) > 0:
+                        os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
+                        time.sleep(1)
+                        print("1-ramdisk_back is OK")
+                write_all_day_date = today_str
+                try:
+                    if CFG is not None:
+                        CFG.set_and_save("general", "write_all_day_date", today_str)
+                    else:
+                        conf_ini = cct.get_conf_path('global.ini')
+                        CFG = cct.GlobalConfig(conf_ini)
+                        CFG.set_and_save("general", "write_all_day_date", today_str)
+                except Exception as e_cfg:
+                    log.error("Save write_all_day_date error: %s" % (e_cfg))
+            elif len(st) == 6 and st.isdigit():
                 status = True
                 num_input = st
                 ave = None
@@ -918,44 +927,19 @@ if __name__ == '__main__':
                 sys.exit(0)
             else:
                 print("input error:%s" % (st))
-                cct.sleep(10)
-                count_Except = cct.GlobalValues().getkey('Except_count')
-                if count_Except is not None and count_Except > 3:
-                    raise KeyboardInterrupt("Stop Time")
-                # cct.sleep(0.5)
-                # if success > 3:
-                #     raw_input("Except")
-                #     sys.exit(0)
+                cct.sleep(2)
 
         except (IOError, EOFError) as e:
             print("SingleError", e)
-            # traceback.print_exc()
-#            sleeptime=random.randint(5, 15)
             cct.sleeprandom(30)
-#            print "Error2sleep:%s"%(sleeptime)
         except Exception as e:
             log.error("Error Exception:%s" % (e))
             import traceback
             traceback.print_exc()
-            # global except_count
             except_count += 1
             if except_count < 3:
                 cct.sleeprandom(ct.duration_sleep_time / 2)
             else:
                 print("except_count >3")
                 cct.sleeprandom(ct.duration_sleep_time * 2)
-                # sys.exit(0)
-        # finally:
-        #     cct.sleeprandom(ct.duration_sleep_time/2)
-            # raw_input("Except")
-            # num_input=num_input
-            # print "status:",status
-            # handle_ctrl_c()
-            # raise
-            # except (Exception, KeyboardInterrupt):
-            #     # print "key"
-            #     print "a"
-            #     status=not status
-            #     num_input=''
-            # finally:
-            #     print "fina"
+

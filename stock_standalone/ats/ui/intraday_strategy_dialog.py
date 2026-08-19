@@ -632,10 +632,27 @@ class SBCIntradayChartDialog(QWidget):
 
         btn_linkage = QPushButton("⚡ 联动")
         btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        btn_linkage.setToolTip("发送当前标的到异动联动窗口")
+        btn_linkage.setToolTip("调用 ATS 主系统联动功能联动当前标的")
         def _on_send_linkage():
-            from ats.ui.base_table import send_to_linkage
-            send_to_linkage(self.code, resolve_stock_name(self.code), self)
+            c_digits = "".join(filter(str.isdigit, str(self.code))).zfill(6)
+            st_name = resolve_stock_name(c_digits)
+            # 1. 优先调用 main_workbench 上的 link_stock
+            main_win = getattr(self, "main_workbench", None)
+            if main_win and hasattr(main_win, "link_stock") and callable(getattr(main_win, "link_stock")):
+                main_win.link_stock(c_digits, st_name)
+                return
+            # 2. 遍历全局 topLevelWidgets 查找具有 link_stock 的 ATS 主工作台
+            from PyQt6.QtWidgets import QApplication
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "link_stock") and callable(getattr(w, "link_stock")):
+                    w.link_stock(c_digits, st_name)
+                    return
+            # 3. 备用：向本地联动服务推送
+            try:
+                from linkage_service import get_link_manager
+                get_link_manager().push(c_digits, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)
+            except Exception:
+                pass
         btn_linkage.clicked.connect(_on_send_linkage)
 
         tb_layout.addStretch()
@@ -891,47 +908,29 @@ class SBCIntradayChartDialog(QWidget):
             return
         mode = sender.property("period_mode") or "1m"
         self._current_period_mode = mode
-
-        fetcher = TDXRealtimeFetcher.get_instance()
-        if mode == "1m":
-            self.reload_chart()
-        elif mode in ["2d", "3d"]:
-            days = 2 if mode == "2d" else 3
-            df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
-            if not df_multi.empty:
-                op = float(df_multi.iloc[0].get("open", 0.0))
-                vw = float(df_multi.iloc[-1].get("vwap", 0.0))
-                hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else 0.0
-                lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else 0.0
-                self.canvas.set_data(df_multi, op, vw, hi, lo, 0.0, 0.0, [], period_mode=mode)
-                cl_last = float(df_multi.iloc[-1].get("close", 0.0))
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 现:{cl_last:.2f}")
-        elif mode in ["5m", "15m", "30m", "60m", "day"]:
-            df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
-            if not df_kline.empty:
-                self.canvas.set_kline_data(df_kline, period_mode=mode)
-                cl_last = float(df_kline.iloc[-1].get("close", 0.0))
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 现:{cl_last:.2f}")
+        self.reload_chart()
 
     def _on_rearrange_windows_clicked(self):
-        """【🪟 窗口重排】自动平铺重排所有打开的 SBC 窗口 (保持各自窗口原尺寸不变，只顺畅排列 x, y 坐标)"""
-        main_win = getattr(self, "main_workbench", None)
-        if main_win and hasattr(main_win, "rearrange_all_sbc_windows"):
-            main_win.rearrange_all_sbc_windows()
-            return
-
+        """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
         from PyQt6.QtWidgets import QApplication
-        active_dialogs = [
-            w for w in QApplication.topLevelWidgets()
-            if isinstance(w, SBCIntradayChartDialog) and w.isVisible()
-        ]
+
+        # 1. 精准确定当前点击重排按钮的窗口所在的物理屏幕
+        target_screen = self.screen() or QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+        if not target_screen:
+            return
+        sg = target_screen.availableGeometry()
+
+        # 2. 筛选位于当前物理屏幕范围内的所有可见 SBC 独立窗口
+        active_dialogs = []
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, SBCIntradayChartDialog) and w.isVisible():
+                w_screen = w.screen() or QApplication.screenAt(w.geometry().center())
+                # 若窗口在当前屏幕上，或窗口区域与当前屏幕相交
+                if w_screen == target_screen or target_screen.geometry().intersects(w.geometry()):
+                    active_dialogs.append(w)
+
         if not active_dialogs:
             active_dialogs = [self]
-
-        screen = QApplication.primaryScreen()
-        if not screen:
-            return
-        sg = screen.availableGeometry()
 
         margin_x = 10
         margin_y = 10
@@ -946,6 +945,10 @@ class SBCIntradayChartDialog(QWidget):
                 curr_x = sg.left() + 20
                 curr_y += row_max_h + margin_y
                 row_max_h = 0
+
+            # 防越界超出屏幕底部
+            if curr_y + h > sg.bottom():
+                curr_y = sg.top() + 20
 
             dlg._is_snapping = True
             try:
@@ -975,9 +978,31 @@ class SBCIntradayChartDialog(QWidget):
         QMessageBox.information(self, "🧹 缓存已强力重置", f"标的 [{c_clean} {resolve_stock_name(c_clean)}] 的内存与磁盘行情缓存已成功强力清除！\n已自动拉取最新 TDX 分时数据并重置评级与分时走势线！")
 
     def reload_chart(self):
-        if getattr(self, '_current_period_mode', '1m') != '1m':
-            return
+        mode = getattr(self, '_current_period_mode', '1m')
         fetcher = TDXRealtimeFetcher.get_instance()
+
+        if mode in ["2d", "3d"]:
+            days = 2 if mode == "2d" else 3
+            df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
+            if not df_multi.empty:
+                op = float(df_multi.iloc[0].get("open", 0.0))
+                vw = float(df_multi.iloc[-1].get("vwap", 0.0))
+                hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else 0.0
+                lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else 0.0
+                self.canvas.set_data(df_multi, op, vw, hi, lo, 0.0, 0.0, [], period_mode=mode)
+                cl_last = float(df_multi.iloc[-1].get("close", 0.0))
+                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 现:{cl_last:.2f}")
+            return
+
+        if mode in ["5m", "15m", "30m", "60m", "day", "week"]:
+            df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
+            if not df_kline.empty:
+                self.canvas.set_kline_data(df_kline, period_mode=mode)
+                cl_last = float(df_kline.iloc[-1].get("close", 0.0))
+                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 现:{cl_last:.2f}")
+            return
+
+        # 默认为 1日分时 (1m)
         df_intraday = fetcher.fetch_intraday_bars(self.code)
 
         # 💡 [数据隔离防污染强校验] 若当前标的数据获取为空/异常，绝对不上溯抓取主工作台其他标的数据，维持当前有效画幅不变
@@ -1065,6 +1090,46 @@ class SBCIntradayChartDialog(QWidget):
             f"[{now_str}] ✅ 结论: 行情摄入 {k_count} 条，分时基准图与信号 Tag 渲染正常。"
         )
         self.txt_log.setPlainText(log_msg)
+
+
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826") -> Optional[SBCIntradayChartDialog]:
+    """
+    【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
+    """
+    if not code:
+        return None
+    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+    if not c_clean or c_clean == "000000":
+        return None
+
+    main_win = parent_win.window() if parent_win else None
+    target_win = main_win or parent_win
+
+    if target_win:
+        if not hasattr(target_win, '_sbc_dialogs'):
+            target_win._sbc_dialogs = {}
+        sbc_dict = target_win._sbc_dialogs
+    else:
+        if not hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs'):
+            SBCIntradayChartDialog._global_sbc_dialogs = {}
+        sbc_dict = SBCIntradayChartDialog._global_sbc_dialogs
+
+    dlg = sbc_dict.get(c_clean)
+    engine = IntradayStrategyEngine.get_instance()
+
+    if dlg is None or not dlg.isVisible():
+        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine)
+        sbc_dict[c_clean] = dlg
+    else:
+        dlg.code = c_clean
+        dlg.lbl_title.setText(f"📊 标的: {c_clean} {resolve_stock_name(c_clean)} | SBC 实盘走势基准线")
+        dlg.setWindowTitle(f"📈 【{c_clean} {resolve_stock_name(c_clean)}】SBC 实盘分时走势与关键阶梯基准图")
+        dlg.reload_chart()
+
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
 
 
 import copy
@@ -2037,46 +2102,6 @@ class IntegratedTradingStrategyPanel(QWidget):
         """【📈 打开/激活 SBC 独立分时走势图窗口】支持多标的多窗口并行对比观察，非模态、非置顶"""
         code = getattr(self, 'code', getattr(self, '_current_stock_code', '688826'))
         open_sbc_chart_dialog(self, code)
-
-
-def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826") -> Optional[SBCIntradayChartDialog]:
-    """
-    【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
-    """
-    if not code:
-        return None
-    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
-    if not c_clean or c_clean == "000000":
-        return None
-
-    main_win = parent_win.window() if parent_win else None
-    target_win = main_win or parent_win
-
-    if target_win:
-        if not hasattr(target_win, '_sbc_dialogs'):
-            target_win._sbc_dialogs = {}
-        sbc_dict = target_win._sbc_dialogs
-    else:
-        if not hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs'):
-            SBCIntradayChartDialog._global_sbc_dialogs = {}
-        sbc_dict = SBCIntradayChartDialog._global_sbc_dialogs
-
-    dlg = sbc_dict.get(c_clean)
-    engine = IntradayStrategyEngine.get_instance()
-
-    if dlg is None or not dlg.isVisible():
-        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine)
-        sbc_dict[c_clean] = dlg
-    else:
-        dlg.code = c_clean
-        dlg.lbl_title.setText(f"📊 标的: {c_clean} {resolve_stock_name(c_clean)} | SBC 实盘走势基准线")
-        dlg.setWindowTitle(f"📈 【{c_clean} {resolve_stock_name(c_clean)}】SBC 实盘分时走势与关键阶梯基准图")
-        dlg.reload_chart()
-
-    dlg.show()
-    dlg.raise_()
-    dlg.activateWindow()
-    return dlg
 
     def _make_param_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):

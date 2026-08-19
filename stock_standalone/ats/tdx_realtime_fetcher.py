@@ -836,8 +836,18 @@ class TDXRealtimeFetcher:
                         return pd.DataFrame()
                 try:
                     bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800)
-                except Exception:
+                except Exception as e_b:
+                    logger.debug(f"TDX get_security_bars 8 异常: {e_b}")
                     bars = None
+
+                # 💡 若连接闲置超时被服务端切断或拉取为空，自动标记断开并立即重连重试！
+                if not bars or len(bars) == 0:
+                    self._is_connected = False
+                    if self.connect():
+                        try:
+                            bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800)
+                        except Exception:
+                            bars = None
 
             if not bars:
                 return pd.DataFrame()
@@ -936,8 +946,18 @@ class TDXRealtimeFetcher:
                         return pd.DataFrame()
                 try:
                     bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, count)
-                except Exception:
+                except Exception as e_k:
+                    logger.debug(f"TDX get_security_bars {cat_code} 异常: {e_k}")
                     bars = None
+
+                # 💡 若连接闲置超时被服务端切断或拉取为空，自动标记断开并立即重连重试！
+                if not bars or len(bars) == 0:
+                    self._is_connected = False
+                    if self.connect():
+                        try:
+                            bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, count)
+                        except Exception:
+                            bars = None
 
             if not bars:
                 return pd.DataFrame()
