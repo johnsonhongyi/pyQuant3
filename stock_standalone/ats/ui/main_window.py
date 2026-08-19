@@ -246,9 +246,10 @@ class LedgerUpdateWorker(QThread):
                     resonance = '同步走弱'
 
                 # 历史数据重建
-                has_history = code in self._stock_history_cache and self._stock_history_cache[code]
+                has_history = (code in self._stock_history_cache and self._stock_history_cache[code]) or \
+                              (code_clean in self._stock_history_cache and self._stock_history_cache[code_clean])
                 if has_history:
-                    hist = self._stock_history_cache[code]
+                    hist = self._stock_history_cache.get(code) or self._stock_history_cache.get(code_clean)
                     close_series = [float(item[1]) for item in hist if item[1] is not None]
                     if hist[-1][0] == self._today_str:
                         if close_series: close_series[-1] = latest_close
@@ -274,12 +275,61 @@ class LedgerUpdateWorker(QThread):
                         except Exception:
                             pass
                     close_series = history_closes + [latest_close]
-                    try: current_ma20 = float(row_data.get('ma20d', latest_close)) if row_data else latest_close
+                    try: current_ma20 = float(row_data.get('ma20d', row_data.get('ma20', row_data.get('MA20', latest_close)))) if row_data else latest_close
                     except: current_ma20 = latest_close
-                    try: current_ma5 = float(row_data.get('ma5d', latest_close)) if row_data else latest_close
+                    try: current_ma5 = float(row_data.get('ma5d', row_data.get('ma5', row_data.get('MA5', latest_close)))) if row_data else latest_close
                     except: current_ma5 = latest_close
                     ma20_series = [current_ma20] * len(close_series)
                     ma5_series = [current_ma5] * len(close_series)
+
+                # 💥 【核心修复】权威 MA20d / MA5d 动态接入与对齐
+                # 无论是否有 _stock_history_cache 历史缓存，只要 row/row_data 或 signal_ledger 中存在权威 MA20d/MA5d 数值，
+                # 必须优先使用权威 MA20d/MA5d 作为 ma20_series[-1] / ma5_series[-1]，避免因 HDF5 历史不足20天/未复权导致的偏离度失真 Bug！
+                real_ma20 = None
+                real_ma5 = None
+                row_data = row if row is not None else {}
+                if row_data:
+                    for k in ('ma20d', 'ma20', 'MA20', 'ma20_series'):
+                        if k in row_data and row_data[k] is not None:
+                            try:
+                                v = float(row_data[k])
+                                if v > 0:
+                                    real_ma20 = v
+                                    break
+                            except Exception:
+                                pass
+                    for k in ('ma5d', 'ma5', 'MA5', 'ma5_series'):
+                        if k in row_data and row_data[k] is not None:
+                            try:
+                                v = float(row_data[k])
+                                if v > 0:
+                                    real_ma5 = v
+                                    break
+                            except Exception:
+                                pass
+
+                # 兜底 fallback: 若 row_data 中无 ma20d，检查 _signal_ledger.entries 中绑定的偏离度反推 ma20
+                if real_ma20 is None and code in self._signal_ledger.entries:
+                    entry = self._signal_ledger.entries[code]
+                    if entry and entry.latest_deviation is not None and latest_close > 0:
+                        try:
+                            dev_val = float(entry.latest_deviation)
+                            if 1.0 + dev_val / 100.0 > 0:
+                                real_ma20 = latest_close / (1.0 + dev_val / 100.0)
+                        except Exception:
+                            pass
+
+                if real_ma20 and real_ma20 > 0:
+                    if ma20_series:
+                        ma20_series[-1] = real_ma20
+                    else:
+                        ma20_series = [real_ma20]
+
+                if real_ma5 and real_ma5 > 0:
+                    if ma5_series:
+                        ma5_series[-1] = real_ma5
+                    else:
+                        ma5_series = [real_ma5]
 
                 state, dev_str, position, reason = self._swing_tracker.update_stock_state(
                     code, name, latest_close, close_series, ma20_series, ma5_series
