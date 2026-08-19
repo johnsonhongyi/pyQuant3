@@ -396,9 +396,15 @@ class SBCChartCanvas(QWidget):
                     painter.setBrush(QBrush(QColor("#ff3333")))
                     painter.drawEllipse(int(x_s - 4), int(y_s - 4), 8, 8)
 
-                    # 绘制带鲜红背景的叫牌悬浮框 Tag (如 🔴 卖出 1008.00元)
-                    sig_rule = str(sig.get("reason", sig.get("rule_name", "卖出")) if isinstance(sig, dict) else getattr(sig, "reason", getattr(sig, "rule_name", "卖出")))
-                    lbl_text = f"🔴 {sig_rule} ({sig_p:.2f}元)"
+                    # 💡 极简高性价比悬浮 Tag: 只要买卖类型与价格 (如 🔴 卖:898.04)，不占用过多画布空间
+                    action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
+                    is_buy = "buy" in action_type or "买" in action_type
+                    prefix = "🟢 买" if is_buy else "🔴 卖"
+                    border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
+                    bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
+                    fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
+
+                    lbl_text = f"{prefix}:{sig_p:.2f}"
                     painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
                     tw = fm.horizontalAdvance(lbl_text) + 8
@@ -407,11 +413,11 @@ class SBCChartCanvas(QWidget):
                     tag_x = int(max(margin_left, min(margin_left + chart_w - tw, x_s - tw / 2)))
                     tag_y = int(max(margin_top, y_s - 22))
 
-                    painter.setPen(QPen(QColor("#ff5555"), 1))
-                    painter.setBrush(QBrush(QColor("#2a1215")))
+                    painter.setPen(QPen(border_color, 1))
+                    painter.setBrush(QBrush(bg_color))
                     painter.drawRoundedRect(tag_x, tag_y, tw, th, 3, 3)
 
-                    painter.setPen(QPen(QColor("#ff6666")))
+                    painter.setPen(QPen(fg_color))
                     painter.drawText(tag_x + 4, tag_y + th - 4, lbl_text)
 
     def _paint_kline(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
@@ -530,7 +536,7 @@ class SBCChartCanvas(QWidget):
         painter.drawText(margin_left + 6, margin_top + 16, f"📊 [{self.period_mode.upper()}] GG通道 & MA均线K线走势")
 
 
-class SBCIntradayChartDialog(QDialog):
+class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
     """
@@ -656,10 +662,12 @@ class SBCIntradayChartDialog(QDialog):
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
         layout.addWidget(self.lbl_info)
 
-        # 5. 落盘防抖定时器 (拖拽停止 500ms 后才物理写入磁盘，彻底消除拖拽卡顿与抖动)
+        # 5. 30 分钟定时物理落盘与退出刷盘策略 (交易时段 30 分钟落盘一次，关闭窗口落盘；非交易时段只落盘一次)
+        self._has_saved_post_market = False
         self._save_timer = QTimer(self)
-        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(30 * 60 * 1000) # 30 分钟物理落盘一次
         self._save_timer.timeout.connect(self._do_save_sbc_geometry)
+        self._save_timer.start()
 
         # 6. 实盘交易期 2 秒级高频自动刷新与动态绘制定时器
         self.poll_timer = QTimer(self)
@@ -672,29 +680,44 @@ class SBCIntradayChartDialog(QDialog):
         self.reload_chart()
 
     def _save_sbc_geometry(self):
-        """【💾 物理落盘防抖】拖拽/缩放过程刷新 500ms 单次防抖定时器，停止后才写入磁盘"""
-        if hasattr(self, "_save_timer"):
-            self._save_timer.start(500)
-        else:
-            self._do_save_sbc_geometry()
-
-    def _do_save_sbc_geometry(self):
-        """【💾 物理落盘】防抖定时器触发真正落盘写入"""
+        """【💾 内存缓存】拖拽/缩放仅更新内存中的 Geometry 字典，避免实时物理写盘卡顿"""
         if self.isMaximized() or self.isMinimized():
             return
-        try:
+        geo = self.geometry()
+        self._memory_geo_dict = {
+            "x": geo.x(),
+            "y": geo.y(),
+            "width": geo.width(),
+            "height": geo.height()
+        }
+
+    def _do_save_sbc_geometry(self):
+        """
+        【💾 物理写盘】遵守严格策略：
+        1. 交易时段 (09:15-15:00): 仅在关闭窗口或每 30 分钟定时写盘一次；
+        2. 非交易时段 (15:00 后/周末): 若当日已保存过完整数据，无需重复物理写盘。
+        """
+        if self.isMaximized() or self.isMinimized():
+            return
+
+        now = datetime.now()
+        t_str = now.strftime("%H:%M")
+        is_trading_hours = "09:15" <= t_str <= "15:00" and now.weekday() < 5
+
+        # 非交易时段：若今日盘后已写盘过一次，则不再重复写盘
+        if not is_trading_hours:
+            if getattr(self, "_has_saved_post_market", False):
+                return
+
+        geo_dict = getattr(self, "_memory_geo_dict", None)
+        if not geo_dict:
             geo = self.geometry()
-            geo_dict = {
-                "x": geo.x(),
-                "y": geo.y(),
-                "width": geo.width(),
-                "height": geo.height()
-            }
-            # 1. 保存到 QSettings (全局 Key: sbc_window_geometry)
+            geo_dict = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
+
+        try:
             settings = QSettings("pyQuant3", "IntradayWorkbench")
             settings.setValue("sbc_window_geometry", geo_dict)
 
-            # 2. 双保险落盘至 config/intraday_ui_layout.json (全局 Key: sbc_window_geometry)
             cfg_dir = os.path.join(get_app_root(), "config")
             os.makedirs(cfg_dir, exist_ok=True)
             cfg_path = os.path.join(cfg_dir, "intraday_ui_layout.json")
@@ -720,6 +743,9 @@ class SBCIntradayChartDialog(QDialog):
                     os.rename(tmp_path, cfg_path)
             except Exception:
                 shutil.move(tmp_path, cfg_path)
+
+            if not is_trading_hours:
+                self._has_saved_post_market = True
         except Exception as e:
             logger.debug(f"保存 SBC 窗口布局坐标异常: {e}")
 
@@ -945,17 +971,9 @@ class SBCIntradayChartDialog(QDialog):
         fetcher = TDXRealtimeFetcher.get_instance()
         df_intraday = fetcher.fetch_intraday_bars(self.code)
 
-        # 1. 自动向上回退寻找主工作台或父窗口链上的 _latest_df / current_df
-        if df_intraday.empty:
-            curr = getattr(self, 'main_workbench', None) or self.parent()
-            while curr:
-                if hasattr(curr, '_latest_df') and curr._latest_df is not None and not curr._latest_df.empty:
-                    df_intraday = curr._latest_df
-                    break
-                if hasattr(curr, 'current_df') and curr.current_df is not None and not curr.current_df.empty:
-                    df_intraday = curr.current_df
-                    break
-                curr = curr.parent() if hasattr(curr, 'parent') else None
+        # 💡 [数据隔离防污染强校验] 若当前标的数据获取为空/异常，绝对不上溯抓取主工作台其他标的数据，维持当前有效画幅不变
+        if df_intraday is None or df_intraday.empty:
+            return
 
         snap = fetcher.fetch_stock_snapshot(self.code)
 

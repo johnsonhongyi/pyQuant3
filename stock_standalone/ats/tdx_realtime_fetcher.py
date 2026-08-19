@@ -858,10 +858,10 @@ class TDXRealtimeFetcher:
 
             res_rows = []
             tot_circ_shares = self.get_circulation_shares(c_clean)
+            cum_vol_shares = 0.0
+            cum_amt = 0.0
 
             for d_str, group in df_filtered.groupby("date_str"):
-                cum_vol_shares = 0.0
-                cum_amt = 0.0
                 date_short = d_str[5:] # MM-DD
 
                 for _, r in group.iterrows():
