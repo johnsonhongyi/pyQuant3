@@ -5513,7 +5513,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     from signal_bus import get_signal_bus, BusEvent
                     bus = get_signal_bus()
                     logger.info("📡 [Backtest][IPC] SignalBus Bridge Listener started.")
-                    _debug_count = 0  # <--- Count first 10 signals
                     while not quit_event.is_set():
                         if getattr(self, '_is_closing', False):
                             break
@@ -5531,12 +5530,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 阻塞式读取，超时设短一点以便响应退出
                             data = q.get(timeout=1.0)
                             if data:
-                                _debug_count += 1
-                                if _debug_count <= 10:
-                                    msg = f"🌟 [IPC DEBUG #{_debug_count}] {type(data)} -> {str(data)[:200]}"
-                                    print(msg)
-                                    logger.warning(msg) # Ensure visibility even in WARNING level
-                                
                                 # 物理转发：将子进程产生的信号在主进程总线重新发布
                                 if isinstance(data, BusEvent):
                                     bus.publish(data.event_type, data.source, data.payload)
@@ -5545,7 +5538,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 elif isinstance(data, dict) and 'event_type' in data:
                                     bus.publish(data['event_type'], data.get('source', 'Bridge'), data.get('payload', {}))
                                 else:
-                                    logger.warning(f"📡 [Backtest][IPC] Unrecognized format from bus queue: {type(data)} - {data}")
+                                    logger.debug(f"📡 [Backtest][IPC] data from bus queue: {type(data)}")
 
                                 # [🚀 NUITKA-DECOUPLING] 在 Nuitka 编译的高频 C 循环中，主动执行微秒级休眠让渡 GIL 和 CPU 时间片，确保 PyQt6 主线程和 GC 有充足时间片呼吸，彻底打碎 GIL 争用死锁
                                 time.sleep(0.0001)
@@ -5589,15 +5582,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             try:
                                 import gc
                                 cleaned = gc.collect()
-                                logger.info(f"🛡️ [GC] 主线程安全垃圾回收执行完成，集中清理了 {cleaned} 个残留对象。")
+                                if cleaned > 50:
+                                    logger.info(f"🛡️ [GC] 主线程安全垃圾回收执行完成，集中清理了 {cleaned} 个残留对象。")
                             except Exception as e:
                                 logger.warning(f"Controlled GC error: {e}")
                             
-                            # 每 15 秒周期性呼唤下一次安全回收
-                            self.after(15000, controlled_gc_loop)
+                            # 每 60 秒周期性呼唤下一次安全回收
+                            self.after(60000, controlled_gc_loop)
                 
-                # 15 秒后触发第一轮安全回收气孔
-                self.after(15000, controlled_gc_loop)
+                # 60 秒后触发第一轮安全回收气孔
+                self.after(60000, controlled_gc_loop)
                 
                 # [🚀 NEW] 启动存活监视，确保回测进程退出后也能触发统一防抖
                 def monitor_backtest_exit(proc):

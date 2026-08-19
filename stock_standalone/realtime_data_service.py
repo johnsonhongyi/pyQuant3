@@ -846,7 +846,7 @@ class MinuteKlineCache:
             return self.attach_multiday_twap_for_non_trading_day(df)
 
         # -------------------------------------------------------------
-        # 🔹 纯正旧实盘逻辑 (日常交易日 100% 无损原生执行)
+        # 🔹 纯正旧实盘逻辑 (日常交易日 100% 无损原生执行，带极致性能快径)
         # -------------------------------------------------------------
         CORE_KEYS = [
             'nclose', 'last_nclose', 'last_nclose1d', 'nclose1d', 'nclose2d', 'last_nclose2d', 'nclose3d', 'last_nclose3d', 'last_nclose4d',
@@ -855,6 +855,11 @@ class MinuteKlineCache:
         ]
 
         try:
+            # [🚀 FAST-PATH] 如果传入的数据已经具备完整的 TWAP/VWAP 核心列（如注入基准），直接秒级放行
+            if all(k in df.columns for k in ('nclose', 'vwap_cum_2d', 'last_nclose')):
+                if not df.empty and df['vwap_cum_2d'].notna().any():
+                    return df
+
             if 'code' in df.columns:
                 code_series = df['code'].dropna().astype(str).str.strip().str.zfill(6)
             elif df.index.name == 'code' or (len(df.index) > 0 and str(df.index[0]).strip().isdigit()):
@@ -866,13 +871,27 @@ class MinuteKlineCache:
             if len(unique_codes) == 0:
                 return df
 
-            twap_maps = {}
-            all_keys = set(CORE_KEYS)
-            for code_str in unique_codes:
-                rel = self.get_daily_twap_relative(code_str)
-                if rel:
-                    twap_maps[code_str] = rel
-                    all_keys.update(rel.keys())
+            # [🚀 CACHE] 增加短时/版本缓存，避免 1 秒内对 5000+ 个股重复调用 get_daily_twap_relative
+            now_mono = time.monotonic()
+            cached_maps = getattr(self, '_cached_twap_maps_dict', None)
+            cached_ts = getattr(self, '_cached_twap_maps_ts', 0.0)
+            cached_len = getattr(self, '_cached_twap_maps_len', 0)
+
+            if cached_maps is not None and (now_mono - cached_ts < 2.0) and cached_len == len(unique_codes):
+                twap_maps = cached_maps
+                all_keys = getattr(self, '_cached_twap_all_keys', set(CORE_KEYS))
+            else:
+                twap_maps = {}
+                all_keys = set(CORE_KEYS)
+                for code_str in unique_codes:
+                    rel = self.get_daily_twap_relative(code_str)
+                    if rel:
+                        twap_maps[code_str] = rel
+                        all_keys.update(rel.keys())
+                self._cached_twap_maps_dict = twap_maps
+                self._cached_twap_maps_ts = now_mono
+                self._cached_twap_maps_len = len(unique_codes)
+                self._cached_twap_all_keys = all_keys
 
             fallback_series = df['close'] if 'close' in df.columns else (df['trade'] if 'trade' in df.columns else None)
 
@@ -1091,6 +1110,37 @@ class MinuteKlineCache:
         if self.simulation_mode and self.verbose and not df_iter.empty:
              logger.debug(f"DEBUG: update_batch simulation processing {len(df_iter)} rows. Cols: {core_cols}. First row: {df_iter.iloc[0].to_dict() if len(df_iter)>0 else 'N/A'}")
              
+        # [🚀 PRE-PARSE TIME] 循环外预解析批次共享时间戳，避免 5000+ 次逐行 pd.to_datetime
+        _cached_raw_val = None
+        _cached_parsed_ts = time.time()
+        _cached_hhmm = 930
+        _cached_minute_ts = int(_cached_parsed_ts - (_cached_parsed_ts % 60))
+
+        if time_col_found and not df_iter.empty:
+            first_val = getattr(df_iter.iloc[0], time_col_found, None)
+            if first_val is not None:
+                try:
+                    if isinstance(first_val, (int, float)) and first_val > 1e8:
+                        _cached_parsed_ts = float(first_val)
+                    elif isinstance(first_val, str) and first_val.replace('.', '', 1).isdigit() and float(first_val) > 1e8:
+                        _cached_parsed_ts = float(first_val)
+                    else:
+                        dt = pd.to_datetime(first_val)
+                        if dt.tzinfo is None:
+                            try:
+                                dt = dt.tz_localize('Asia/Shanghai')
+                            except Exception:
+                                pass
+                        _cached_parsed_ts = dt.timestamp()
+                    
+                    _cached_raw_val = first_val
+                    _sec_mid = (_cached_parsed_ts + 28800) % 86400
+                    _mins_mid = int(_sec_mid // 60)
+                    _cached_hhmm = (_mins_mid // 60) * 100 + (_mins_mid % 60)
+                    _cached_minute_ts = int(_cached_parsed_ts - (_cached_parsed_ts % 60))
+                except Exception:
+                    pass
+
         for idx, row in enumerate(df_iter.itertuples(index=False)):
             try:
                 code_raw = getattr(row, 'code', '')
@@ -1103,7 +1153,6 @@ class MinuteKlineCache:
                     price = float(getattr(row, price_col_found, 0.0))
                 
                 # [REFINED] 成交量提取逻辑优化
-                # 为了支持 Bidding 阶段，优先使用 volume/nvol 等累积值
                 current_cum_vol = 0.0
                 for vc in vol_cols_found:
                     val = getattr(row, vc, 0.0)
@@ -1112,43 +1161,39 @@ class MinuteKlineCache:
                         break
                 vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
                 
-                # [REFINED] 允许 0 成交量数据进入缓存以支持竞价和不活跃个股
+                # 允许 0 成交量数据进入缓存以支持竞价和不活跃个股
                 if price <= 0 and vol <= 0:
                     continue
                 
-                # 即使本间隔无成交，只要价格有效，也记录该分钟 Bar，确保全市场 240 对齐
-                
-                # 时间戳提取
-                ts = 0.0
-                val = None
-                if time_col_found:
-                    val = getattr(row, time_col_found)
+                # 时间戳提取 (极速复用已解析的批次时间)
+                val = getattr(row, time_col_found) if time_col_found else None
+                if val == _cached_raw_val or val is None:
+                    ts = _cached_parsed_ts
+                    hhmm = _cached_hhmm
+                    minute_ts = _cached_minute_ts
+                else:
                     try:
                         if isinstance(val, (int, float)) and val > 1e8:
                             ts = float(val)
                         elif isinstance(val, str) and val.replace('.', '', 1).isdigit() and float(val) > 1e8:
                             ts = float(val)
                         else:
-                            # 鲁棒转换：处理 Unix timestamp, datetime, 或 HH:MM:SS 字符串
                             dt = pd.to_datetime(val)
                             if dt.tzinfo is None:
-                                # [FIX] 显式锁定北京时间，防止 .timestamp() 默认将其视为 UTC 导致的 8 小时超前
-                                try:
-                                    dt = dt.tz_localize('Asia/Shanghai')
-                                except Exception:
-                                    # 如果已经有时区或报错，保持现状
-                                    pass
+                                try: dt = dt.tz_localize('Asia/Shanghai')
+                                except Exception: pass
                             ts = dt.timestamp()
+                        _cached_raw_val = val
+                        _cached_parsed_ts = ts
+                        _sec_mid = (ts + 28800) % 86400
+                        _mins_mid = int(_sec_mid // 60)
+                        _cached_hhmm = (_mins_mid // 60) * 100 + (_mins_mid % 60)
+                        _cached_minute_ts = int(ts - (ts % 60))
+                        hhmm = _cached_hhmm
+                        minute_ts = _cached_minute_ts
                     except Exception as e:
                         logger.error(f"❌ [{code}] Time parse error: col={time_col_found}, val={val}, err={e}")
                         continue
-                else:
-                    ts = time.time()
-                
-                # --- [FIX] 统一时间准入检查 ---
-                seconds_from_midnight = (ts + 28800) % 86400
-                mins_from_midnight = int(seconds_from_midnight // 60)
-                hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
                 
                 # --- [FIX] 未来时间防御墙与严格审计 (Simulation 模式下跳过) ---
                 if not self.simulation_mode:
@@ -1272,42 +1317,29 @@ class MinuteKlineCache:
                 self._shared_cache[code] = []
             klines = self._shared_cache[code]
             
-            # 1. 情绪数据清理 (9:30 自动剔除模拟竞价数据)
+            curr_day_idx = (minute_ts + 28800) // 86400
+            
+            # 1. 情绪数据清理 (9:30 自动剔除模拟竞价数据，使用整型时间戳毫秒级完成)
             if hhmm is not None and hhmm >= 930 and klines:
-                 curr_dt = datetime.fromtimestamp(minute_ts)
-                 today_str = curr_dt.strftime('%Y%m%d')
-                 
-                 # 性能优化：只有在今日尚未清理过时才进行扫描
-                 if self._bidding_pruned_today.get(code) != today_str:
-                      has_bidding = False
-                      for k in klines:
-                          k_dt = datetime.fromtimestamp(k.time)
-                          if k_dt.date() == curr_dt.date():
-                              k_hhmm = k_dt.hour * 100 + k_dt.minute
-                              # 9:25 是真实的集合竞价，保留；清理 9:15-9:24 模拟数据
-                              if 915 <= k_hhmm < 930 and k_hhmm != 925:
-                                  has_bidding = True
-                                  break
-                      
-                      if has_bidding:
-                           # 执行清理
-                           self._shared_cache[code] = [k for k in klines if not (
-                               datetime.fromtimestamp(k.time).date() == curr_dt.date() and 
-                               915 <= (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) < 930 and
-                               (datetime.fromtimestamp(k.time).hour * 100 + datetime.fromtimestamp(k.time).minute) != 925
-                           )]
-                           klines = self._shared_cache[code]
-                           self._is_dirty = True
-                      
-                      # 标记今日已处理
-                      self._bidding_pruned_today[code] = today_str
+                if self._bidding_pruned_today.get(code) != curr_day_idx:
+                    today_00_ts = curr_day_idx * 86400 - 28800
+                    t_915 = today_00_ts + 9 * 3600 + 15 * 60
+                    t_925 = today_00_ts + 9 * 3600 + 25 * 60
+                    t_930 = today_00_ts + 9 * 3600 + 30 * 60
 
-            # 2. 初始插入 or 跨天插入
+                    has_bidding = any(t_915 <= k.time < t_930 and k.time != t_925 for k in klines)
+                    if has_bidding:
+                        self._shared_cache[code] = [k for k in klines if not (t_915 <= k.time < t_930 and k.time != t_925)]
+                        klines = self._shared_cache[code]
+                        self._is_dirty = True
+                    
+                    self._bidding_pruned_today[code] = curr_day_idx
+
+            # 2. 初始插入 or 跨天插入 (纯整型日序号比对)
             is_new_day = False
             if klines:
-                last_dt = datetime.fromtimestamp(klines[-1].time)
-                curr_dt = datetime.fromtimestamp(minute_ts)
-                if last_dt.date() != curr_dt.date():
+                last_day_idx = (klines[-1].time + 28800) // 86400
+                if last_day_idx != curr_day_idx:
                     is_new_day = True
 
             if not klines or is_new_day:
@@ -1318,10 +1350,6 @@ class MinuteKlineCache:
                     volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
                 ))
                 self._is_dirty = True
-                try:
-                    self.update_wave_structure_state(code)
-                except Exception as e:
-                    logger.error(f"Failed to update wave state for {code} on first K-line: {e}")
                 return
 
             # 获取 last_k 引用 (安全获取)
@@ -1512,17 +1540,18 @@ class MinuteKlineCache:
             return
         try:
             self.attach_multiday_twap_to_df(df)
-            fp_cols = [c for c in ['code', 'close', 'now', 'trade', 'ma20d', 'ma20', 'ma60d', 'ma60'] if c in df.columns]
-            if not fp_cols:
-                fp_cols = ['code'] if 'code' in df.columns else list(df.columns)
-            new_fp = df_fingerprint(df, cols=fp_cols)
+            # [🚀 LIGHTWEIGHT FAST-FINGERPRINT] 仅基于首尾采样与形状生成指纹，避免 5000+ 行全量 to_csv 产生的数秒 I/O 阻塞
+            n_rows = len(df)
+            sample_idx = [0, n_rows // 2, n_rows - 1] if n_rows >= 3 else list(range(n_rows))
+            p_sample = tuple(df['close'].iloc[sample_idx]) if 'close' in df.columns else ()
+            new_fp = (n_rows, tuple(df.columns[:8]), p_sample)
             old_fp = getattr(self, '_df_all_cache_fp', None)
             if old_fp == new_fp:
                 return
             self._df_all_cache = df
             self._df_all_cache_fp = new_fp
             if self.verbose:
-                logger.info(f"💾 [df_all缓存更新] 数据发生实际变更，更新缓存快照 (指纹: {new_fp})")
+                logger.info(f"💾 [df_all缓存更新] 数据发生实际变更，更新缓存快照")
         except Exception as e:
             self._df_all_cache = df
 
@@ -1544,8 +1573,16 @@ class MinuteKlineCache:
         df_snap = df if df is not None and not df.empty else getattr(self, '_df_all_cache', None)
         if df_snap is not None and not df_snap.empty:
             try:
-                row_match = df_snap[df_snap['code'].astype(str).str.strip().str.zfill(6) == code]
-                if not row_match.empty:
+                code_clean = str(code).strip().zfill(6)
+                row_match = None
+                if df_snap.index.name == 'code' and code_clean in df_snap.index:
+                    row_match = df_snap.loc[[code_clean]]
+                elif 'code' in df_snap.columns:
+                    m = (df_snap['code'] == code_clean) | (df_snap['code'] == code)
+                    if m.any():
+                        row_match = df_snap[m]
+
+                if row_match is not None and not row_match.empty:
                     def _fv(keys, default=0.0):
                         for k in keys:
                             if k in row_match.columns:
@@ -1664,8 +1701,16 @@ class MinuteKlineCache:
             # 提取实时日内涨幅 (以百分比表示，如 10.0 代表 10%)
             realtime_pct = 0.0
             if df is not None and not df.empty:
-                row_match = df[df['code'].astype(str).str.strip().str.zfill(6) == code]
-                if not row_match.empty:
+                code_clean = str(code).strip().zfill(6)
+                row_match = None
+                if df.index.name == 'code' and code_clean in df.index:
+                    row_match = df.loc[[code_clean]]
+                elif 'code' in df.columns:
+                    m = (df['code'] == code_clean) | (df['code'] == code)
+                    if m.any():
+                        row_match = df[m]
+                
+                if row_match is not None and not row_match.empty:
                     for pct_col in ['changepercent', 'percent', 'pct_chg', 'pct']:
                         if pct_col in row_match.columns:
                             try:
@@ -1749,8 +1794,20 @@ class MinuteKlineCache:
                             state["phase"] = "CONSOLIDATING"
                             state["anchor_low"] = recent_min
                             state["base_vol"] = recent_avg_vol
-                            state["entry_ts"] = now_ts
-                            state["entry_date"] = today_str
+                            # 保持最初入池时间不变（若已有则继承，首次进池才设为今日）
+                            existing_entry = state.get("entry_date") or state.get("first_entry_date")
+                            if not existing_entry or existing_entry == "-":
+                                state["entry_date"] = today_str
+                                state["first_entry_date"] = today_str
+                                state["entry_ts"] = now_ts
+                                state["first_entry_ts"] = now_ts
+                            else:
+                                state["entry_date"] = existing_entry
+                                state["first_entry_date"] = existing_entry
+                                if "first_entry_ts" not in state:
+                                    state["first_entry_ts"] = state.get("entry_ts", now_ts)
+                            state["phase_entry_date"] = today_str
+                            state["phase_ts"] = now_ts
                             state["structure"] = structure_type  # 写入结构分级标签
                             state["dff3"] = calc_dff3
                             state["dff2"] = calc_dff2
@@ -1764,14 +1821,16 @@ class MinuteKlineCache:
                 anchor_low = state.get("anchor_low", recent_min)
                 base_vol = state.get("base_vol", recent_avg_vol)
                 
-                # 提取或补齐交易日锚点
-                entry_date = state.get("entry_date")
-                if not entry_date:
+                # 提取或补齐最初入池时间与阶段进入锚点
+                entry_date = state.get("entry_date") or state.get("first_entry_date")
+                if not entry_date or entry_date == "-":
                     entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
                     entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
                     state["entry_date"] = entry_date
+                state["first_entry_date"] = entry_date
                 
-                trade_dist = cct.get_trade_day_distance(entry_date)
+                phase_entry_date = state.get("phase_entry_date", entry_date)
+                trade_dist = cct.get_trade_day_distance(phase_entry_date)
                 if trade_dist is None:
                     trade_dist = 0
                 
@@ -1800,8 +1859,9 @@ class MinuteKlineCache:
                         state["wave_1_start_price"] = recent_close
                         state["wave_1_start_vwap"] = vwap
                         state["wave_peak"] = recent_close
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"🌊 [波段跟踪] {code} 企稳拉升/次日加速突破! 价:{recent_close} 涨幅:{realtime_pct}%")
                         
             elif phase == "WAVE_UP":
@@ -1809,14 +1869,16 @@ class MinuteKlineCache:
                 # 更新波段最高点
                 state["wave_peak"] = max(state.get("wave_peak", 0), recent_max)
                 
-                # 提取或补齐交易日锚点
-                entry_date = state.get("entry_date")
-                if not entry_date:
+                # 提取或补齐最初入池时间与阶段进入锚点
+                entry_date = state.get("entry_date") or state.get("first_entry_date")
+                if not entry_date or entry_date == "-":
                     entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
                     entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
                     state["entry_date"] = entry_date
+                state["first_entry_date"] = entry_date
                 
-                trade_dist = cct.get_trade_day_distance(entry_date)
+                phase_entry_date = state.get("phase_entry_date", entry_date)
+                trade_dist = cct.get_trade_day_distance(phase_entry_date)
                 if trade_dist is None:
                     trade_dist = 0
                 
@@ -1831,8 +1893,9 @@ class MinuteKlineCache:
                     # 顺延保护：如果股价依然坚挺（没有比拉升起点跌超 2%），或者今日收红/大涨，或者日线强势，则不判定为淘汰，而是将拉升状态顺延
                     is_still_strong = (recent_close >= state.get("wave_1_start_price", recent_close) * 0.98) or (realtime_pct >= 1.5)
                     if is_still_strong:
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于强势大涨拉升中，顺延 WAVE_UP 状态")
                     else:
                         state["phase"] = "INIT"
@@ -1844,21 +1907,24 @@ class MinuteKlineCache:
                     if recent_close < vwap * 1.01 and recent_avg_vol < state.get("base_vol", recent_avg_vol) * 1.5:
                         state["phase"] = "PULLBACK"
                         state["pullback_price"] = recent_close
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"📉 [波段跟踪] {code} 触发缩量回踩VWAP! 价:{recent_close}")
                         
             elif phase == "PULLBACK":
                 pullback_price = state.get("pullback_price", recent_close)
                 
-                # 提取或补齐交易日锚点
-                entry_date = state.get("entry_date")
-                if not entry_date:
+                # 提取或补齐最初入池时间与阶段进入锚点
+                entry_date = state.get("entry_date") or state.get("first_entry_date")
+                if not entry_date or entry_date == "-":
                     entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
                     entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
                     state["entry_date"] = entry_date
+                state["first_entry_date"] = entry_date
                 
-                trade_dist = cct.get_trade_day_distance(entry_date)
+                phase_entry_date = state.get("phase_entry_date", entry_date)
+                trade_dist = cct.get_trade_day_distance(phase_entry_date)
                 if trade_dist is None:
                     trade_dist = 0
                 
@@ -1873,8 +1939,9 @@ class MinuteKlineCache:
                     # 顺延保护：如果股价依然处于安全回踩区间（未跌破 pullback_price * 0.975 且未跌破 vwap 2%），则顺延回踩状态，允许在均线支撑上进行整理
                     is_still_valid = (recent_close >= pullback_price * 0.975) and (recent_close >= vwap * 0.98)
                     if is_still_valid:
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于均线支撑安全回踩中，顺延 PULLBACK 状态")
                     else:
                         state["phase"] = "INIT"
@@ -1888,19 +1955,22 @@ class MinuteKlineCache:
 
                     if cond_v2_break or cond_v2_accelerate:
                         state["phase"] = "WAVE_UP_2"  # 或者循环回 WAVE_UP
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"🚀 [波段跟踪] {code} 完美命中第二波拉升结构! 即将发射信号。")
                         
             elif phase == "WAVE_UP_2":
-                # 提取或补齐交易日锚点
-                entry_date = state.get("entry_date")
-                if not entry_date:
+                # 提取或补齐最初入池时间与阶段进入锚点
+                entry_date = state.get("entry_date") or state.get("first_entry_date")
+                if not entry_date or entry_date == "-":
                     entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
                     entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
                     state["entry_date"] = entry_date
+                state["first_entry_date"] = entry_date
                 
-                trade_dist = cct.get_trade_day_distance(entry_date)
+                phase_entry_date = state.get("phase_entry_date", entry_date)
+                trade_dist = cct.get_trade_day_distance(phase_entry_date)
                 if trade_dist is None:
                     trade_dist = 0
                 
@@ -1914,8 +1984,9 @@ class MinuteKlineCache:
                 elif trade_dist >= 2:
                     is_still_strong = (recent_close >= state.get("pullback_price", recent_close) * 0.98) or (realtime_pct >= 1.5)
                     if is_still_strong:
-                        state["entry_ts"] = now_ts
-                        state["entry_date"] = today_str
+                        state["phase_ts"] = now_ts
+                        state["phase_entry_date"] = today_str
+                        # 保持 state["entry_date"] / state["first_entry_date"] 最初入池时间不变
                         if self.verbose: logger.info(f"🔄 [波段跟踪] {code} 处于二次拉升强势中，顺延 WAVE_UP_2 状态")
                     else:
                         state["phase"] = "INIT"
@@ -2680,20 +2751,34 @@ class IntradayEmotionTracker:
                     def __getitem__(self, key): return self.tup[col_idx[key]]
                 
                 row = TupleProxy()
+                
+                # [🚀 PRE-PARSE BATCH TIME] 循环外预提取批次统一时间
+                _sample_r_ts = now_ts
+                _sample_t_str = "09:30"
+                if not df.empty:
+                    _first_time_val = df['time'].iloc[0] if 'time' in df.columns else (df['timestamp'].iloc[0] if 'timestamp' in df.columns else now_ts)
+                    if isinstance(_first_time_val, str):
+                        try: _sample_r_ts = pd.to_datetime(_first_time_val).timestamp()
+                        except: _sample_r_ts = now_ts
+                        _sample_t_str = _first_time_val.split(' ')[-1][:5]
+                    elif isinstance(_first_time_val, (int, float)) and _first_time_val > 1e8:
+                        _sample_r_ts = float(_first_time_val)
+                        _sample_t_str = datetime.fromtimestamp(_sample_r_ts).strftime('%H:%M')
+                
+                _sample_r_day_num = int((_sample_r_ts + 28800) // 86400)
+                _sample_is_morning = "09:30" <= _sample_t_str <= "11:35"
+                _sample_is_early = "09:30" <= _sample_t_str <= "10:15"
+
                 for i, tup in enumerate(df.itertuples(index=False, name=None)):
                     row.tup = tup
                     code_str = str(row['code']).zfill(6)
                     name_str = self._code_to_name.get(code_str, "")
                     name_display = f" {name_str}" if name_str else ""
                     
-                    # [RESTORED] Day Reset Logic & Cleanup
-                    r_ts = row.get('time', row.get('timestamp', now_ts))
-                    if isinstance(r_ts, str):
-                        try: r_ts = pd.to_datetime(r_ts).timestamp()
-                        except: r_ts = now_ts
-                    r_day_num = int((r_ts + 28800) // 86400)
+                    # [RESTORED] Day Reset Logic & Cleanup (复用预解析时间)
+                    r_ts = _sample_r_ts
+                    r_day_num = _sample_r_day_num
                     if r_day_num > self._last_date.get(code_str, 0):
-                        # [FIX] 注入完整状态 Schema，防止 setdefault 逻辑因空字典导致的 KeyError
                         self._opt_states[code_str] = {
                             "down_vwap": False, "up_last_close": False, "pullback": False,
                             "peak_after_rebound": 0.0, "morning_v_rebound": False
@@ -2701,7 +2786,7 @@ class IntradayEmotionTracker:
                         self._last_date[code_str] = r_day_num
                         self._intraday_high[code_str] = 0.0 
                         if code_str in self._sbc_signals_registry: del self._sbc_signals_registry[code_str]
-                        if code_str in self._signal_start_price: del self._signal_start_price[code_str] # [FIX] 清理绩效起始价
+                        if code_str in self._signal_start_price: del self._signal_start_price[code_str]
                         self._sbc_alert_set = {k for k in self._sbc_alert_set if not k.startswith(f"{code_str}_")}
 
                     anchors = baseline_tracker.get_anchor(code_str)
@@ -2719,10 +2804,9 @@ class IntradayEmotionTracker:
                         vol_r = float(row.get(active_ratio_col, 1.0))
                         cur_vol = float(row.get(active_vol_col, 0))
                         r_high = float(row.get('high', price))
-                        t_str = str(row.get('time', str(row.get('timestamp', '')))).split(' ')[-1][:5]
-                        
-                        is_morning = "09:30" <= t_str <= "11:35"
-                        is_early = "09:30" <= t_str <= "10:15"
+                        t_str = _sample_t_str
+                        is_morning = _sample_is_morning
+                        is_early = _sample_is_early
                         
                         # [RESTORED] 统一使用 _intraday_high 逻辑 (FIX: 先比对后更新)
                         prev_i_high = self._intraday_high.get(code_str, 0.0)
@@ -2909,7 +2993,7 @@ class IntradayEmotionTracker:
                                         
                                         log_msg = f"{sig_text} [SBC] {code_str}{name_display} {r_time_str} 价:{price:.2f} %:{float(row.get('percent',0)):+.1f} 量比:{vol_r:.1f} 评分:{scores_dict[code_str]:.0f}"
                                         if is_sim:
-                                            logger.info(log_msg)
+                                            logger.debug(log_msg)
                                         else:
                                             logger.warning(log_msg)
                                     else:
@@ -4011,8 +4095,6 @@ class DataPublisher:
                 self.data_version += 1
                 
                 # 情绪与 KLine 更新
-                # [OPTIMIZED] Support incremental updates of newly added stocks
-                # [FIX] Simulation 模式下跳过自动重新计算，防止覆盖手动设置的大样基准
                 if not self.simulation_mode:
                     self.emotion_baseline.calculate_baseline(df)
                     
@@ -4021,17 +4103,16 @@ class DataPublisher:
                 if any(col in df.columns for col in ['trade', 'now', 'price', 'close', 'hq_last', 'llastp']):
                     self.kline_cache.update_batch(df, self.subscribers)
                     
-                    # [NEW] Real-time V-Reversal state machine update for pool stocks
-                    # Only update stocks already in the pool to catch real-time breakouts
+                    # [🚀 PERFORMANCE FIX] 反向遍历 pool 集合，彻底消除 5500+ 次 Python 循环与字符串格式化
                     pool = self.kline_cache.get_v_reversal_pool()
                     if pool and 'code' in df.columns:
-                        for raw_c in df['code'].dropna().unique():
-                            code_str = str(raw_c).strip().zfill(6)
-                            if code_str in pool:
+                        df_codes_set = set(df['code'])
+                        for pool_code in pool:
+                            if pool_code in df_codes_set:
                                 try:
-                                    self.kline_cache.update_wave_structure_state(code=code_str, df=df)
+                                    self.kline_cache.update_wave_structure_state(code=pool_code, df=df)
                                 except Exception as e:
-                                    logger.error(f"Failed to update real-time wave state for pool stock {code_str}: {e}")
+                                    logger.error(f"Failed to update real-time wave state for pool stock {pool_code}: {e}")
                 
                 # [NEW] ⚡ 赛马/赛道探测逻辑嵌入 (One Calculation, Global Availability)
                 if self.racing_detector is not None:

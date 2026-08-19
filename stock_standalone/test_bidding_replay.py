@@ -687,6 +687,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
 
     # [SIM-DATE] 提前确定模拟日期，用于量比计算与时间戳生成
     sim_date = replay_date if replay_date else datetime.now().strftime('%Y-%m-%d')
+    last_time_ratio_str = ""
+    cached_time_ratio = 1.0
+    base_v_series = real_df_all['lastv1d'] if 'lastv1d' in real_df_all.columns else real_df_all.get('last6vol', pd.Series(0, index=real_df_all.index))
 
     _last_emitted_t_str = ""
     try:
@@ -726,12 +729,6 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             
             # 把该时间点发生过交易的 tick 数据合并进当前最新行情快照里
             # DataPublisher 需要的是含有 trade, code, volume 的 DataFrame
-            # 注意：这里需要模拟构建市场最新状况
-            
-            # 简单处理：我们只推送发生改变的票给 update_batch，
-            # 为了配合 BiddingMomentumDetector，需要尽量模拟标准格式
-            # e.g.: code, trade, percent, highest, lowest, open, volume
-            # (真实中，DataPublisher 接收的是最新行情)
             
             # [FIX] 显式清理缓存，防止由于 RegisterRegistry 缓存导致的实盘数据干扰
             if idx == 0:
@@ -751,15 +748,14 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             batch_df.rename(columns=rename_map, inplace=True)
             
             # [PERF] 利用 Vectorized 方式同步 Tick 级别价格数据到 Detector 中
-            # 避免使用 5000 次 itertuples(), 直接通过 Series.map 或 dict 批量注入
             batch_prices = batch_df.set_index('code')['trade'].to_dict()
             batch_settlements = batch_df.set_index('code')['settlement'].to_dict() if 'settlement' in batch_df.columns else {}
             
             with detector._lock:
                 for c, price in batch_prices.items():
                     c_str = str(c).zfill(6)
-                    if c_str in detector._tick_series:
-                        ts = detector._tick_series[c_str]
+                    ts = detector._tick_series.get(c_str)
+                    if ts is not None:
                         p_val = float(price)
                         if p_val > 0:
                             ts.now_price = p_val
@@ -798,12 +794,16 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
                 # 腾出 'volume' 位置给量比计算结果 (Ratio)
                 batch_df.rename(columns={'volume': 'vol'}, inplace=True)
                 
-                # 2. 映射基座成交量 (优先 lastv1d, 否则 last6vol)
-                base_v_series = real_df_all['lastv1d'] if 'lastv1d' in real_df_all.columns else real_df_all.get('last6vol', pd.Series(0, index=real_df_all.index))
+                # 2. 映射基座成交量
+                if t_str != last_time_ratio_str:
+                    try:
+                        sim_dt = datetime.strptime(f"{sim_date} {t_str}", '%Y-%m-%d %H:%M:%S')
+                        cached_time_ratio = cct.get_work_time_ratio_sbc(now_time=sim_dt)
+                    except Exception:
+                        cached_time_ratio = 1.0
+                    last_time_ratio_str = t_str
                 
-                # 3. 计算物理时刻比例与基座
-                sim_dt = datetime.strptime(f"{sim_date} {t_str}", '%Y-%m-%d %H:%M:%S')
-                time_ratio = cct.get_work_time_ratio_sbc(now_time=sim_dt)
+                time_ratio = cached_time_ratio if cached_time_ratio > 0 else 1.0
                 batch_df['base_vol'] = batch_df['code'].map(base_v_series)
                 
                 # 4. 矢量化计算量比写入 'volume' (对齐 strategy_config.py 中的 "量比" 定义)

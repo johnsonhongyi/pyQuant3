@@ -1258,33 +1258,34 @@ class BiddingMomentumDetector:
         self._lock.acquire()
         try:
             for row in df.itertuples(index=False):
-                raw_code = str(getattr(row, 'code', '')).strip()
-                code = _RE_NON_DIGIT.sub('', raw_code)
-
-                if len(code) < 6 and code.isdigit():
-                    code = code.zfill(6)
-                elif len(code) > 6:
-                    code = code[-6:]
+                raw_code = getattr(row, 'code', '')
+                if isinstance(raw_code, str) and len(raw_code) == 6 and raw_code.isdigit():
+                    code = raw_code
+                else:
+                    code = _RE_NON_DIGIT.sub('', str(raw_code).strip())
+                    if len(code) < 6 and code.isdigit():
+                        code = code.zfill(6)
+                    elif len(code) > 6:
+                        code = code[-6:]
 
                 if len(code) != 6 or code == "000000":
                     continue
 
-                row_data = row._asdict()
-                name = str(row_data.get('name', '')).strip()
-
-                if not name or name in ('nan', 'None', 'null', '', 'δ֪', '未知', code):
-                    continue
-
-                self._code_index[code] = name
-                self._name_index[name] = code
-
                 ts = self._tick_series.get(code)
                 if ts is None:
+                    row_data = row._asdict()
+                    name = str(row_data.get('name', '')).strip()
+                    if not name or name in ('nan', 'None', 'null', '', 'δ֪', '未知', code):
+                        continue
+                    self._code_index[code] = name
+                    self._name_index[name] = code
                     ts = TickSeries(code)
                     self._tick_series[code] = ts
                     new_codes.append(code)
-
-                ts.update_meta(row_data)
+                    ts.update_meta(row_data)
+                else:
+                    # [🚀 FAST-PATH] 已注册个股直接传 row，避免每秒创建 5000+ 个 _asdict() 临时字典
+                    ts.update_meta(row)
 
                 # ── 分片锁管理 ──
                 row_count += 1
@@ -3977,25 +3978,32 @@ class BiddingMomentumDetector:
                     ts = self._tick_series.get(code)
                     if ts:
                         # [P0-OPT] __slots__ 保证字段存在，直接访问替换 getattr 防御
+                        p_now = ts.current_price
+                        m5, m20, m60 = ts.ma5, ts.ma20, ts.ma60
+                        is_b = bool(m5 > 0.001 and m20 > 0.001 and m60 > 0.001 and m5 > m20 and m20 > m60 and p_now > m60)
+                        is_a60 = bool(m60 > 0.001 and p_now > m60)
+
                         data = {
                             'code': code,
-                            'score': ts.score, 'pct': ts.current_pct, 'price': ts.current_price,
-                            'close': ts.current_price,
+                            'score': ts.score, 'pct': ts.current_pct, 'price': p_now,
+                            'close': p_now,
                             'name': ts.name, 'category': ts.category, 'last_close': ts.last_close,
-                            'ma5': ts.ma5, 'ma5d': ts.ma5,
-                            'ma20': ts.ma20, 'ma20d': ts.ma20,
-                            'ma60': ts.ma60, 'ma60d': ts.ma60,
+                            'ma5': m5, 'ma5d': m5,
+                            'ma20': m20, 'ma20d': m20,
+                            'ma60': m60, 'ma60d': m60,
                             'first_breakout_ts': ts.first_breakout_ts,
                             'pattern_hint': ts.pattern_hint,
                             'opening_bonus': ts.opening_bonus,
                             # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
                             'klines': list(ts.klines) if (ts.score >= self.score_threshold and ts.klines) else [],
                             # 🚀 [PERF] 预计算 prices5，根除下游 O(N) 列表推导，注意 deque 需要先 list 化才能切片
-                            'prices5': [float(k.get('close', ts.current_price)) for k in list(ts.klines)[-5:]] if ts.klines else [ts.current_price],
+                            'prices5': [float(k.get('close', p_now)) for k in list(ts.klines)[-5:]] if ts.klines else [p_now],
                             'is_untradable': ts.is_untradable,
                             'is_counter_trend': ts.is_counter_trend,
                             'is_accumulating': ts.is_accumulating,
                             'is_reversal': ts.is_reversal,
+                            'is_bullish': is_b,
+                            'is_above_60': is_a60,
                             'signal_count': ts.signal_count,
                             'ral': ts.ral,
                             'top0': ts.top0,
@@ -4014,15 +4022,21 @@ class BiddingMomentumDetector:
                             'yesterday_pct': ts.per1d,
                             'prev_pct': ts.per1d,
                         }
-                        if getattr(ts, 'custom_cols', None):
-                            data.update(ts.custom_cols)
+                        # [🚀 DIRTY CHECK] 检查股票在当前 Tick 是否发生实际价格/分值变动 (防御性 .get 访问)
+                        old_data = self._global_snap_cache.get(code)
+                        is_dirty = (old_data is None or 
+                                    old_data.get('price') != p_now or 
+                                    old_data.get('pct') != ts.current_pct or 
+                                    old_data.get('score') != ts.score or
+                                    old_data.get('total_amount') != ts.total_amount)
+
                         self._global_snap_cache[code] = data
                         _pct_sum_delta += ts.current_pct
                         _pct_count_delta += 1
 
                         # 2. 同步更新增量分组 (持久化)
                         cats = ts.get_splitted_cats()
-                        if target_sectors is not None:
+                        if target_sectors is not None and is_dirty:
                             target_sectors.update(cats)
                         if ts.score >= 0.5:
                             for cat in cats:
@@ -4044,20 +4058,6 @@ class BiddingMomentumDetector:
                 _new_sample = _pct_sum_delta / _pct_count_delta
                 self._cached_market_avg_pct = _old_avg * 0.8 + _new_sample * 0.2
                 self._cached_market_avg_count = max(1, getattr(self, '_cached_market_avg_count', 0) + _pct_count_delta)
-            
-            # 🔬 [Detector-Diag] 开启临时详细诊断以抓取白屏硬伤
-            _scores = [ts.score for ts in self._tick_series.values()]
-            _max_score = max(_scores) if _scores else 0.0
-            _above_threshold = sum(1 for s in _scores if s >= self.score_threshold)
-            _above_05 = sum(1 for s in _scores if s >= 0.5)
-            # logger.debug(
-            #     f"🔬 [Detector-Diag] TickSeries: {len(self._tick_series)} | "
-            #     f"Max Score: {_max_score:.2f} | "
-            #     f"Score>={self.score_threshold}: {_above_threshold} | "
-            #     f"Score>=0.5: {_above_05} | "
-            #     f"Persistent Sectors: {len(self._sector_active_stocks_persistent)} | "
-            #     f"Sample Keys: {list(self._sector_active_stocks_persistent.keys())[:10]}"
-            # )
             
         # [P1-OPT] 预算 today_anchor_930 （全函数只算一次 datetime 对象）
         _now = datetime.datetime.now()
@@ -4151,7 +4151,6 @@ class BiddingMomentumDetector:
                             'time_str': _datetime.fromtimestamp(now_ts).strftime('%H:%M:%S'),
                             'ts': now_ts
                         }
-            # [PERF] snap copy and new_active are now handled below in the main flow
             pass
         
         # 4. [NEW] 全局对照基准重置逻辑 (移动到循环外，每周期仅检查一次)
@@ -4194,7 +4193,6 @@ class BiddingMomentumDetector:
             sector_stocks_map = {k: v.copy() for k, v in self._sector_active_stocks_persistent.items()}
             # [🚀 安全性加固] 执行深层副本（拷贝 Set），防止锁外计算时受到行情线程对集合的 inplace 修改
             sector_full_map = {k: v.copy() for k, v in self.sector_map.items()}
-            # snap and market_avg_pct were already handled above
 
         # 联动概念本轮跟风计算局部缓存，避免在同一个 _aggregate_sectors 周期内重复遍历计算相同概念
         concept_cache = {}
@@ -4222,17 +4220,30 @@ class BiddingMomentumDetector:
 
             # [P1-OPT] Use prefetched sector_full_map
             all_member_codes = sector_full_map.get(sector, set())
-            # 聚合计算：收集有数据的成员涨幅和相对基准的变化
+            # [🚀 SINGLE-PASS AGGREGATION] 单遍扫描聚合成员涨幅、涨跌变动、均线多头与 MA60 支撑
             member_percents = []
             member_pct_diffs = []
+            bullish_count = 0
+            above_60_count = 0
+            leader_sign = 1 if leader_pct >= 0 else -1
+            active_member_count = 0
+
             for c in all_member_codes:
-                if c in snap:
-                    mc_pct = snap[c].get('pct')
+                c_data = snap.get(c)
+                if c_data is not None:
+                    mc_pct = c_data.get('pct')
                     if mc_pct is not None and not pd.isna(mc_pct):
                         member_percents.append(mc_pct)
-                    mc_pct_diff = snap[c].get('pct_diff')
+                        mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
+                        if mc_sign == leader_sign:
+                            active_member_count += 1
+                    mc_pct_diff = c_data.get('pct_diff')
                     if mc_pct_diff is not None and not pd.isna(mc_pct_diff):
                         member_pct_diffs.append(mc_pct_diff)
+                    if c_data.get('is_bullish'):
+                        bullish_count += 1
+                    if c_data.get('is_above_60'):
+                        above_60_count += 1
             
             actual_data_count = len(member_percents)
             if actual_data_count < 1:
@@ -4242,15 +4253,6 @@ class BiddingMomentumDetector:
             # 对齐 get_following_concepts_by_correlation 的均值算法
             avg_pct = sum(member_percents) / actual_data_count
             avg_pct_diff = sum(member_pct_diffs) / len(member_pct_diffs) if member_pct_diffs else 0.0
-            
-            # 对齐 get_following_concepts_by_correlation 的跟随率算法
-            leader_sign = 1 if leader_pct >= 0 else -1
-            active_member_count = 0
-            for mc_pct in member_percents:
-                mc_sign = 1 if mc_pct > 0 else (-1 if mc_pct < 0 else 0)
-                if mc_sign == leader_sign:
-                    active_member_count += 1
-            
             follow_ratio = active_member_count / actual_data_count
             
             # [REFINED] 噪点过滤：对齐 GUI 过滤杂音门槛 (成员数不少于 2)
@@ -4264,32 +4266,9 @@ class BiddingMomentumDetector:
             s_top15_sum = sum(1 for s in stocks if s.get('top15', 0) > 0)
             hotness_multiplier = min(2.0, 1.0 + (s_top0_sum * 0.1) + (s_top15_sum * 0.03))
 
-            # 计算趋势加成 (完全对齐 get_following_concepts_by_correlation 逻辑)
-            bullish_count = 0
-            above_60_count = 0
-            member_count = 0
-            for c in all_member_codes:
-                if c in snap:
-                    member_count += 1
-                    c_data = snap[c]
-                    price = c_data['price']
-                    ma5 = c_data.get('ma5', 0.0)
-                    ma20 = c_data.get('ma20', 0.0)
-                    ma60 = c_data.get('ma60', 0.0)
-                    
-                    is_bullish = False
-                    is_above_60 = True
-                    if ma5 > 0.001 and ma20 > 0.001 and ma60 > 0.001:
-                        is_bullish = (ma5 > ma20) and (ma20 > ma60) and (price > ma60)
-                        is_above_60 = price > ma60
-                    
-                    if is_bullish:
-                        bullish_count += 1
-                    if is_above_60:
-                        above_60_count += 1
-            
-            bullish_ratio = bullish_count / member_count if member_count > 0 else 0.0
-            above_60_ratio = above_60_count / member_count if member_count > 0 else 1.0
+            # 趋势加成（使用单遍扫描统计的 bullish_count / above_60_count）
+            bullish_ratio = bullish_count / actual_data_count
+            above_60_ratio = above_60_count / actual_data_count
             
             trend_multiplier = 1.0 + (bullish_ratio * 1.5)
             if above_60_ratio < 0.3:
