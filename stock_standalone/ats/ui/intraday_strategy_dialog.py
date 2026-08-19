@@ -15,6 +15,7 @@ import sys
 import os
 import json
 import time
+import math
 import logging
 import pandas as pd
 import numpy as np
@@ -274,11 +275,23 @@ class SBCChartCanvas(QWidget):
         if len(prices) == 0:
             return
 
-        all_cands = [p for p in prices if p > 0] + [v for v in vwaps if v > 0]
+        # 🛡️ 异常脏数据与极高毛刺强力过滤 (例如 2048.93 元等错误推送点，防止挤压整个 K 线画布比例)
+        max_valid_price = (self.open_price * 1.70) if self.open_price > 10.0 else (self.open_price * 3.0)
+
+        all_cands = []
+        for p in prices:
+            if 1.0 < p <= max_valid_price:
+                all_cands.append(p)
+        for v in vwaps:
+            if 1.0 < v <= max_valid_price:
+                all_cands.append(v)
         if self.open_price > 0:
             all_cands.append(self.open_price)
-        if self.high_price > 0:
+        if 0 < self.high_price <= max_valid_price:
             all_cands.append(self.high_price)
+
+        if not all_cands:
+            all_cands = [self.open_price if self.open_price > 0 else 100.0]
 
         min_p = min(all_cands) * 0.98 if all_cands else 1.0
         max_p = max(all_cands) * 1.02 if all_cands else 100.0
@@ -395,46 +408,66 @@ class SBCChartCanvas(QWidget):
 
 class SBCIntradayChartDialog(QDialog):
     """
-    SBC 实盘分时走势与关键阶梯基准图 独立实时观察窗口 (支持独立多屏全屏、实时轮询刷新与行情日志监控)
+    SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
     """
     def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None):
-        super().__init__(parent)
+        # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
+        # 彻底切断 Windows 属主窗口层级约束，使其表现为 100% 独立的桌面顶级 Window，绝不上浮置顶或遮挡主窗口！
+        self.main_workbench = parent.window() if parent else None
+        super().__init__(None)
+
         self.code = str(code).zfill(6)
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
 
-        # 设置为彻底独立的顶层 Window (非模态，不阻塞主窗口)
+        # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
         self.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.WindowMinMaxButtonsHint
             | Qt.WindowType.WindowCloseButtonHint
         )
-        self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图 (独立窗口)")
-        self.setMinimumSize(880, 560)
-        self.resize(1000, 640)
+        self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
+        self.setMinimumSize(320, 180) # 💡 极度紧凑的最小窗口尺寸保护
         self.setStyleSheet("background-color: #101018; color: #ffffff;")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
-        # 1. 顶部工具栏
+        # 1. 顶部工具栏 (超紧凑精致微型布局，零挤压，防拉长窗口)
         tb_layout = QHBoxLayout()
-        self.lbl_title = QLabel(f"📊 标的: {self.code} {resolve_stock_name(self.code)} | SBC 实盘走势基准线")
-        self.lbl_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #00ff88;")
+        tb_layout.setContentsMargins(2, 2, 2, 2)
+        tb_layout.setSpacing(3)
 
-        btn_refresh = QPushButton("🔄 极速刷新")
-        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 4px 12px;")
+        self.lbl_title = QLabel(f"📊 {self.code} {resolve_stock_name(self.code)}")
+        self.lbl_title.setStyleSheet("font-size: 9pt; font-weight: bold; color: #00ff88;")
+
+        btn_rearrange = QPushButton("🪟 重排")
+        btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_rearrange.setToolTip("自动将所有已打开的 SBC 分时窗口网格平铺重排")
+        btn_rearrange.clicked.connect(self._on_rearrange_windows_clicked)
+
+        btn_refresh = QPushButton("🔄 刷新")
+        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         btn_refresh.clicked.connect(self.reload_chart)
 
-        self.btn_toggle_log = QPushButton("📋 行情数据日志")
-        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 4px; padding: 4px 12px;")
+        btn_clear_cache = QPushButton("🧹 清缓存")
+        btn_clear_cache.setStyleSheet("background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存")
+        btn_clear_cache.clicked.connect(self._on_clear_cache_clicked)
+
+        self.btn_toggle_log = QPushButton("📋 日志")
+        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
         btn_close = QPushButton("关闭")
-        btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 4px; padding: 4px 12px;")
+        btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         btn_close.clicked.connect(self.close)
 
         tb_layout.addWidget(self.lbl_title)
         tb_layout.addStretch()
+        tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
+        tb_layout.addWidget(btn_clear_cache)
         tb_layout.addWidget(self.btn_toggle_log)
         tb_layout.addWidget(btn_close)
         layout.addLayout(tb_layout)
@@ -460,7 +493,7 @@ class SBCIntradayChartDialog(QDialog):
 
         # 4. 底部提示
         self.lbl_info = QLabel("💡 提示: 独立窗口支持【主窗口智能磁吸吸附】与脱离自由全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
-        self.lbl_info.setStyleSheet("color: #888899; font-size: 9pt;")
+        self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
         layout.addWidget(self.lbl_info)
 
         # 5. 实盘交易期 2 秒级高频自动刷新与动态绘制定时器
@@ -469,52 +502,249 @@ class SBCIntradayChartDialog(QDialog):
         self.poll_timer.timeout.connect(self.reload_chart)
         self.poll_timer.start()
 
+        # 6. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标 (单一全局 sbc_window_geometry Key)
+        self._restore_sbc_geometry()
         self.reload_chart()
 
+    def _save_sbc_geometry(self):
+        """【💾 物理落盘】保存 SBC 独立窗口全局统一尺寸与坐标到 QSettings 及 JSON 配置文件"""
+        if self.isMaximized() or self.isMinimized():
+            return
+        try:
+            geo = self.geometry()
+            geo_dict = {
+                "x": geo.x(),
+                "y": geo.y(),
+                "width": geo.width(),
+                "height": geo.height()
+            }
+            # 1. 保存到 QSettings (全局 Key: sbc_window_geometry)
+            settings = QSettings("pyQuant3", "IntradayWorkbench")
+            settings.setValue("sbc_window_geometry", geo_dict)
+
+            # 2. 双保险落盘至 config/intraday_ui_layout.json (全局 Key: sbc_window_geometry)
+            cfg_dir = os.path.join(get_app_root(), "config")
+            os.makedirs(cfg_dir, exist_ok=True)
+            cfg_path = os.path.join(cfg_dir, "intraday_ui_layout.json")
+            data = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+
+            data["sbc_window_geometry"] = geo_dict
+            if "sbc_geometries" in data:
+                data["sbc_geometries"]["latest"] = geo_dict
+
+            tmp_path = cfg_path + f".tmp_{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(cfg_path):
+                    os.replace(tmp_path, cfg_path)
+                else:
+                    os.rename(tmp_path, cfg_path)
+            except Exception:
+                shutil.move(tmp_path, cfg_path)
+        except Exception as e:
+            logger.debug(f"保存 SBC 窗口布局坐标异常: {e}")
+
+    def _restore_sbc_geometry(self):
+        """【💾 物理恢复】从 QSettings / JSON 还原 SBC 全局统一窗口尺寸与坐标 (含越界保护)"""
+        try:
+            geo_dict = None
+
+            # 1. 优先读取 JSON
+            cfg_path = os.path.join(get_app_root(), "config", "intraday_ui_layout.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    geo_dict = data.get("sbc_window_geometry")
+                    if not geo_dict and "sbc_geometries" in data:
+                        geos = data.get("sbc_geometries", {})
+                        geo_dict = geos.get("latest") or geos.get(self.code)
+                except Exception:
+                    pass
+
+            # 2. 回退读取 QSettings
+            if not geo_dict:
+                settings = QSettings("pyQuant3", "IntradayWorkbench")
+                geo_dict = settings.value("sbc_window_geometry") or settings.value("sbc_geo_latest")
+
+            if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
+                x = int(geo_dict.get("x", 100))
+                y = int(geo_dict.get("y", 100))
+                w = int(geo_dict.get("width", 680))
+                h = int(geo_dict.get("height", 420))
+
+                # 3. 安全性判断：防超出桌面屏幕可见边界
+                screen = QApplication.primaryScreen()
+                if screen:
+                    sg = screen.availableGeometry()
+                    if x < sg.left() - w + 50 or x > sg.right() - 50 or y < sg.top() - 30 or y > sg.bottom() - 50:
+                        x = sg.left() + 50
+                        y = sg.top() + 50
+
+                self.setGeometry(x, y, w, h)
+            else:
+                self.resize(680, 420)
+        except Exception as e:
+            logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
+            self.resize(680, 420)
+
+    def closeEvent(self, event):
+        """关闭窗口时自动持久化保存几何大小与坐标"""
+        self._save_sbc_geometry()
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        """调整大小事件自动防抖保存几何坐标"""
+        super().resizeEvent(event)
+        self._save_sbc_geometry()
+
     def moveEvent(self, event):
-        """【🧲 磁吸窗口】当拖拽靠近主工作台窗口边缘 25 像素以内时自动磁吸对齐"""
+        """【🧲 ATS 现成磁吸代码逻辑】靠近主工作台或屏幕边缘 35 像素时自动磁吸对齐 (带递归防抖，顺畅不卡顿)"""
         super().moveEvent(event)
-        if self.parent() is not None:
+        if getattr(self, "_is_snapping", False) or self.isMaximized():
+            return
+
+        main_win = getattr(self, "main_workbench", None)
+        if not main_win and self.parent() is not None:
             main_win = self.parent().window()
-            if main_win and main_win.isVisible():
-                m_geo = main_win.geometry()
-                s_geo = self.geometry()
-                SNAP_DIST = 25
 
-                new_x = s_geo.x()
-                new_y = s_geo.y()
+        s_fg = self.frameGeometry()
+        margin = 35  # ATS 现成磁吸检测门槛像素
 
-                # 右侧边界磁吸
-                if abs(s_geo.x() - m_geo.right()) < SNAP_DIST:
-                    new_x = m_geo.right() + 1
-                    if abs(s_geo.y() - m_geo.y()) < SNAP_DIST:
-                        new_y = m_geo.y()
-                # 左侧边界磁吸
-                elif abs(s_geo.right() - m_geo.x()) < SNAP_DIST:
-                    new_x = m_geo.x() - s_geo.width() - 1
-                    if abs(s_geo.y() - m_geo.y()) < SNAP_DIST:
-                        new_y = m_geo.y()
-                # 底部边界磁吸
-                elif abs(s_geo.y() - m_geo.bottom()) < SNAP_DIST:
-                    new_y = m_geo.bottom() + 1
-                    if abs(s_geo.x() - m_geo.x()) < SNAP_DIST:
-                        new_x = m_geo.x()
+        target_x = s_fg.left()
+        target_y = s_fg.top()
+        snapped = False
 
-                if new_x != s_geo.x() or new_y != s_geo.y():
-                    self.move(new_x, new_y)
+        # 1. 优先与主工作台窗口边缘磁吸
+        if main_win and main_win.isVisible() and not main_win.isMaximized():
+            m_fg = main_win.frameGeometry()
+
+            # 贴附在主窗口右边缘
+            if abs(s_fg.left() - m_fg.right()) < margin:
+                target_x = m_fg.right()
+                snapped = True
+            # 贴附在主窗口左边缘
+            elif abs(s_fg.right() - m_fg.left()) < margin:
+                target_x = m_fg.left() - s_fg.width()
+                snapped = True
+
+            # 顶端对齐
+            if abs(s_fg.top() - m_fg.top()) < margin:
+                target_y = m_fg.top()
+                snapped = True
+            # 贴附在主窗口底边
+            elif abs(s_fg.top() - m_fg.bottom()) < margin:
+                target_y = m_fg.bottom()
+                snapped = True
+            # 底端对齐
+            elif abs(s_fg.bottom() - m_fg.bottom()) < margin:
+                target_y = m_fg.bottom() - s_fg.height()
+                snapped = True
+
+        # 2. 次选：若未与主窗口磁吸，则与屏幕边缘磁吸（ATS 现成逻辑）
+        if not snapped:
+            screen = QApplication.primaryScreen()
+            if screen:
+                screen_geo = screen.availableGeometry()
+                if abs(s_fg.top() - screen_geo.top()) < margin:
+                    target_y = screen_geo.top()
+                    snapped = True
+                if abs(s_fg.left() - screen_geo.left()) < margin:
+                    target_x = screen_geo.left()
+                    snapped = True
+                elif abs(s_fg.right() - screen_geo.right()) < margin:
+                    target_x = screen_geo.right() - s_fg.width()
+                    snapped = True
+
+        if snapped and (target_x != s_fg.left() or target_y != s_fg.top()):
+            self._is_snapping = True
+            try:
+                self.move(target_x, target_y)
+            finally:
+                self._is_snapping = False
+
+        self._save_sbc_geometry()
 
     def _toggle_log_panel(self):
         vis = not self.log_box.isVisible()
         self.log_box.setVisible(vis)
         self.btn_toggle_log.setText("📋 行情数据日志 (显示)" if vis else "📋 行情数据日志")
 
+    def _on_rearrange_windows_clicked(self):
+        """【🪟 窗口重排】自动平铺重排所有打开的 SBC 窗口 (保持各自窗口原尺寸不变，只顺畅排列 x, y 坐标)"""
+        main_win = getattr(self, "main_workbench", None)
+        if main_win and hasattr(main_win, "rearrange_all_sbc_windows"):
+            main_win.rearrange_all_sbc_windows()
+            return
+
+        from PyQt6.QtWidgets import QApplication
+        active_dialogs = [
+            w for w in QApplication.topLevelWidgets()
+            if isinstance(w, SBCIntradayChartDialog) and w.isVisible()
+        ]
+        if not active_dialogs:
+            active_dialogs = [self]
+
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        sg = screen.availableGeometry()
+
+        margin_x = 10
+        margin_y = 10
+        curr_x = sg.left() + 20
+        curr_y = sg.top() + 20
+        row_max_h = 0
+
+        for dlg in active_dialogs:
+            w = dlg.width()
+            h = dlg.height()
+            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
+                curr_x = sg.left() + 20
+                curr_y += row_max_h + margin_y
+                row_max_h = 0
+
+            dlg._is_snapping = True
+            try:
+                dlg.move(curr_x, curr_y)
+                dlg._save_sbc_geometry()
+                dlg.raise_()
+                dlg.activateWindow()
+            finally:
+                dlg._is_snapping = False
+
+            curr_x += w + margin_x
+            row_max_h = max(row_max_h, h)
+
+    def _on_clear_cache_clicked(self):
+        """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新"""
+        c_clean = str(self.code).zfill(6)
+        fetcher = TDXRealtimeFetcher.get_instance()
+        fetcher.clear_stock_cache(c_clean)
+        self.engine.clear_stock_cache(c_clean)
+
+        # 向上同步刷新主工作台
+        main_win = getattr(self, "main_workbench", None)
+        if main_win and hasattr(main_win, "_on_manual_refresh"):
+            main_win._on_manual_refresh()
+
+        self.reload_chart()
+        QMessageBox.information(self, "🧹 缓存已强力重置", f"标的 [{c_clean} {resolve_stock_name(c_clean)}] 的内存与磁盘行情缓存已成功强力清除！\n已自动拉取最新 TDX 分时数据并重置评级与分时走势线！")
+
     def reload_chart(self):
         fetcher = TDXRealtimeFetcher.get_instance()
         df_intraday = fetcher.fetch_intraday_bars(self.code)
 
-        # 1. 自动向上回退寻找父窗口链上的 _latest_df / current_df
+        # 1. 自动向上回退寻找主工作台或父窗口链上的 _latest_df / current_df
         if df_intraday.empty:
-            curr = self.parent()
+            curr = getattr(self, 'main_workbench', None) or self.parent()
             while curr:
                 if hasattr(curr, '_latest_df') and curr._latest_df is not None and not curr._latest_df.empty:
                     df_intraday = curr._latest_df
@@ -522,7 +752,7 @@ class SBCIntradayChartDialog(QDialog):
                 if hasattr(curr, 'current_df') and curr.current_df is not None and not curr.current_df.empty:
                     df_intraday = curr.current_df
                     break
-                curr = curr.parent()
+                curr = curr.parent() if hasattr(curr, 'parent') else None
 
         snap = fetcher.fetch_stock_snapshot(self.code)
 
@@ -574,14 +804,25 @@ class SBCIntradayChartDialog(QDialog):
 
         if not sigs and self.engine is not None and op > 1.0:
             now_t = datetime.now().strftime("%H:%M:%S")
-            eval_res = self.engine.evaluate_seven_nodes(self.code, op, hi, lo, p, to_rate, amt, now_t)
+            eval_res = self.engine.evaluate_seven_nodes(
+                code=self.code,
+                current_time_str=now_t,
+                open_price=op,
+                price=p,
+                high_price=hi,
+                low_price=lo,
+                vwap=vw,
+                turnover_rate=to_rate,
+                amount=amt
+            )
             sigs = state.get("signals", []) or eval_res.get("signals", [])
 
         t_min = op * 1.03
         t_max = op * 1.05
 
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs)
-        self.lbl_title.setText(f"📊 标的: {self.code} {resolve_stock_name(self.code)} | 今开: {op:.2f}元 | 现价: {p:.2f}元 | VWAP: {vw:.2f}元")
+        self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
+        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元")
 
         # 打印行情健康调试日志
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -1563,9 +1804,25 @@ class IntegratedTradingStrategyPanel(QWidget):
             sb_log.setValue(saved_log_pos)
 
     def _on_open_sbc_chart_dialog(self):
+        """【📈 打开/激活 SBC 独立分时走势图窗口】支持多标的多窗口并行对比观察，非模态、非置顶"""
         code = getattr(self, 'code', getattr(self, '_current_stock_code', '688826'))
-        dlg = SBCIntradayChartDialog(self, code=code, engine=self.engine)
-        dlg.exec()
+        if not hasattr(self, '_sbc_dialogs'):
+            self._sbc_dialogs = {}
+
+        # 💡 按 code 独立维护 SBC 窗口句柄！同一标的唤醒已有窗口，不同标的独立新建并行观察窗口！
+        dlg = self._sbc_dialogs.get(code)
+        if dlg is None or not dlg.isVisible():
+            dlg = SBCIntradayChartDialog(parent=self, code=code, engine=self.engine)
+            self._sbc_dialogs[code] = dlg
+        else:
+            dlg.code = code
+            dlg.lbl_title.setText(f"📊 标的: {code} {resolve_stock_name(code)} | SBC 实盘走势基准线")
+            dlg.setWindowTitle(f"📈 【{code} {resolve_stock_name(code)}】SBC 实盘分时走势与关键阶梯基准图 (独立窗口)")
+            dlg.reload_chart()
+
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _make_param_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):
@@ -1747,9 +2004,19 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         btn_refresh.setStyleSheet("background-color: #0e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
         btn_refresh.clicked.connect(self._on_manual_refresh)
 
+        btn_clear_cache = QPushButton("🧹 清理缓存")
+        btn_clear_cache.setStyleSheet("background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 4px; padding: 3px 8px;")
+        btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存，重新拉取最新 TDX 分时数据")
+        btn_clear_cache.clicked.connect(self._on_clear_stock_cache)
+
         self.btn_topmost = QPushButton("📌 置顶: 关")
         self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
         self.btn_topmost.clicked.connect(self._toggle_stay_on_top)
+
+        btn_rearrange = QPushButton("🪟 窗口重排")
+        btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px;")
+        btn_rearrange.setToolTip("自动将所有已打开的 SBC 分时走势窗口网格平铺重排对齐")
+        btn_rearrange.clicked.connect(self.rearrange_all_sbc_windows)
 
         btn_auto_eval = QPushButton("⚡ 全量检测")
         btn_auto_eval.setStyleSheet("background-color: #1e3a5f; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 8px;")
@@ -1773,6 +2040,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         hdr_layout.addWidget(self.combo_source)
         hdr_layout.addWidget(self.lbl_tdx_status)
         hdr_layout.addWidget(btn_refresh)
+        hdr_layout.addWidget(btn_clear_cache)
+        hdr_layout.addWidget(btn_rearrange)
         hdr_layout.addWidget(self.btn_topmost)
         hdr_layout.addWidget(btn_auto_eval)
         hdr_layout.addWidget(btn_edit)
@@ -1971,6 +2240,71 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         else:
             self.lbl_tdx_status.hide()
         self._load_mock_or_live_data()
+
+    def _on_clear_stock_cache(self):
+        """【🧹 彻底清理单股缓存】强力清除内存与磁盘错误缓存并立即重置对齐"""
+        c_clean = str(self.code).zfill(6)
+        self.tdx_fetcher.clear_stock_cache(c_clean)
+        self.engine.clear_stock_cache(c_clean)
+
+        if hasattr(self, '_sbc_dialogs'):
+            for d in self._sbc_dialogs.values():
+                if d and d.isVisible():
+                    d.reload_chart()
+        elif hasattr(self, '_sbc_dialog') and self._sbc_dialog is not None:
+            self._sbc_dialog.reload_chart()
+
+        self._on_manual_refresh()
+        QMessageBox.information(self, "🧹 缓存已强力重置", f"标的 [{c_clean} {self.name}] 的内存与磁盘行情缓存已成功强力清除！\n已自动拉取最新 TDX 分时数据并重置评级！")
+
+    def rearrange_all_sbc_windows(self):
+        """【🪟 窗口重排】自动平铺重排所有打开的 SBC 窗口 (保持各自窗口原尺寸不变，只顺畅排列 x, y 坐标)"""
+        active_dialogs = []
+        if hasattr(self, '_sbc_dialogs'):
+            active_dialogs = [d for d in self._sbc_dialogs.values() if d is not None and d.isVisible()]
+
+        if not active_dialogs:
+            active_dialogs = [
+                w for w in QApplication.topLevelWidgets()
+                if isinstance(w, SBCIntradayChartDialog) and w.isVisible()
+            ]
+
+        if not active_dialogs:
+            QMessageBox.information(self, "🪟 窗口重排", "当前暂无打开的 SBC 分时走势独立窗口。")
+            return
+
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        sg = screen.availableGeometry()
+
+        margin_x = 10
+        margin_y = 10
+        curr_x = sg.left() + 20
+        curr_y = sg.top() + 20
+        row_max_h = 0
+
+        for dlg in active_dialogs:
+            w = dlg.width()
+            h = dlg.height()
+            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
+                curr_x = sg.left() + 20
+                curr_y += row_max_h + margin_y
+                row_max_h = 0
+
+            dlg._is_snapping = True
+            try:
+                dlg.move(curr_x, curr_y)
+                dlg._save_sbc_geometry()
+                dlg.raise_()
+                dlg.activateWindow()
+            finally:
+                dlg._is_snapping = False
+
+            curr_x += w + margin_x
+            row_max_h = max(row_max_h, h)
+
+        logger.info(f"🪟 [窗口重排] 已成功将 {len(active_dialogs)} 个 SBC 窗口自动并排重排 (保持窗口原尺寸不变)！")
 
     def _on_eval_param_changed(self):
         """当用户修改开盘估价、现价估价或换手率时自动同步 7 节点校准参数并触发评分"""
