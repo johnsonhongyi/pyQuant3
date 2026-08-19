@@ -211,6 +211,16 @@ class GlobalFavoriteManager:
                 new_stocks = set(ui_state.get('favorite_stocks', []))
                 new_stocks_dates = ui_state.get('favorite_stocks_dates', {})
                 
+                # 💥 运行时自动防卫与退市死码物理自愈清洗
+                delisted_found = {c for c in new_stocks if sys_utils.is_delisted_stock(c)}
+                if delisted_found:
+                    logger.warning(f"🧹 [GlobalFavorites] 自动自愈清洗从 {path} 加载的已知退市死码: {delisted_found}")
+                    new_stocks = {c for c in new_stocks if not sys_utils.is_delisted_stock(c)}
+                    for d_code in delisted_found:
+                        if d_code in new_stocks_dates:
+                            del new_stocks_dates[d_code]
+                    auto_filled = True
+
                 default_date = self._get_default_trade_date()
                 for code in new_stocks:
                     cur_d = new_stocks_dates.get(code)
@@ -350,7 +360,9 @@ class GlobalFavoriteManager:
 
     def add_favorite_stock(self, code: str, add_date: str = None):
         code = str(code).strip().zfill(6)
-        if not code or code == '000000':
+        if not code or code == '000000' or sys_utils.is_delisted_stock(code):
+            if sys_utils.is_delisted_stock(code):
+                logger.warning(f"🚫 [GlobalFavorites] 拦截添加已知退市死码: {code}")
             return
             
         with self._lock:
@@ -380,7 +392,7 @@ class GlobalFavoriteManager:
                     if len(item) >= 2 and item[1]:
                         item_date = str(item[1])
 
-                if not code or code == '000000':
+                if not code or code == '000000' or sys_utils.is_delisted_stock(code):
                     continue
 
                 existing_date = self.favorite_stocks_dates.get(code)
