@@ -540,6 +540,9 @@ class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
     """
+    _global_sbc_size: Optional[tuple] = None
+    _global_sbc_geo: Optional[dict] = None
+
     def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None):
         # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
         # 彻底切断 Windows 属主窗口层级约束，使其表现为 100% 独立的桌面顶级 Window，绝不上浮置顶或遮挡主窗口！
@@ -724,52 +727,60 @@ class SBCIntradayChartDialog(QWidget):
         self.snap_timer.setInterval(200)
         self.snap_timer.timeout.connect(self._detect_and_snap)
 
+        # 7.1 🪟 窗口尺寸与位置自动防抖持久化定时器 (350ms 用户停止拉伸/拖拽后自动原子落盘)
+        self._geo_save_timer = QTimer(self)
+        self._geo_save_timer.setSingleShot(True)
+        self._geo_save_timer.setInterval(350)
+        self._geo_save_timer.timeout.connect(self._do_save_sbc_geometry)
+
         # 8. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
         self._restore_sbc_geometry()
         self.reload_chart()
 
     def _save_sbc_geometry(self):
-        """【💾 内存缓存】拖拽/缩放仅更新内存中的 Geometry 字典，避免实时物理写盘卡顿"""
-        if self.isMaximized() or self.isMinimized():
+        """【💾 内存缓存与防抖写盘】拖拽/缩放仅更新内存中的 Geometry 字典并触发防抖写盘"""
+        if self.isMaximized() or self.isMinimized() or getattr(self, "_in_snap_action", False):
             return
-        geo = self.geometry()
+        geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None)) else self.geometry()
+        if geo.width() < 200 or geo.height() < 100:
+            return
+
         self._memory_geo_dict = {
             "x": geo.x(),
             "y": geo.y(),
             "width": geo.width(),
             "height": geo.height()
         }
+        SBCIntradayChartDialog._global_sbc_size = (geo.width(), geo.height())
+        SBCIntradayChartDialog._global_sbc_geo = dict(self._memory_geo_dict)
+
+        if hasattr(self, '_geo_save_timer'):
+            self._geo_save_timer.start(350)
 
     def _do_save_sbc_geometry(self):
         """
-        【💾 物理写盘】遵守严格策略：
-        1. 交易时段 (09:15-15:00): 仅在关闭窗口或每 30 分钟定时写盘一次；
-        2. 非交易时段 (15:00 后/周末): 若当日已保存过完整数据，无需重复物理写盘。
+        【💾 物理写盘】原子持久化窗口尺寸大小与屏显坐标到 JSON 与 QSettings (支持任意时段实时配置更新)
         """
         if self.isMaximized() or self.isMinimized():
             return
 
-        now = datetime.now()
-        t_str = now.strftime("%H:%M")
-        is_trading_hours = "09:15" <= t_str <= "15:00" and now.weekday() < 5
-
-        # 非交易时段：若今日盘后已写盘过一次，则不再重复写盘
-        if not is_trading_hours:
-            if getattr(self, "_has_saved_post_market", False):
-                return
-
         geo_dict = getattr(self, "_memory_geo_dict", None)
         if not geo_dict:
-            geo = self.geometry()
-            geo_dict = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
+            geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None)) else self.geometry()
+            if geo.width() >= 200 and geo.height() >= 100:
+                geo_dict = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
+
+        if not geo_dict or geo_dict.get("width", 0) < 200 or geo_dict.get("height", 0) < 100:
+            return
 
         try:
+            # 1. 写入 QSettings
             settings = QSettings("pyQuant3", "IntradayWorkbench")
             settings.setValue("sbc_window_geometry", geo_dict)
+            settings.setValue("sbc_window_size", {"width": geo_dict["width"], "height": geo_dict["height"]})
 
-            cfg_dir = os.path.join(get_app_root(), "config")
-            os.makedirs(cfg_dir, exist_ok=True)
-            cfg_path = os.path.join(cfg_dir, "intraday_ui_layout.json")
+            # 2. 原子写入 JSON 配置文件
+            cfg_path = _get_sbc_layout_cfg_path()
             data = {}
             if os.path.exists(cfg_path):
                 try:
@@ -779,8 +790,21 @@ class SBCIntradayChartDialog(QWidget):
                     data = {}
 
             data["sbc_window_geometry"] = geo_dict
-            if "sbc_geometries" in data:
-                data["sbc_geometries"]["latest"] = geo_dict
+            data["sbc_window_size"] = {"width": geo_dict["width"], "height": geo_dict["height"]}
+            if "sbc_geometries" not in data:
+                data["sbc_geometries"] = {}
+            data["sbc_geometries"]["latest"] = geo_dict
+            data["sbc_geometries"][self.code] = geo_dict
+
+            # 同步更新 sbc_open_windows 中当前个股条目的尺寸与坐标
+            if "sbc_open_windows" in data and isinstance(data["sbc_open_windows"], list):
+                for item in data["sbc_open_windows"]:
+                    if item.get("code") == self.code:
+                        item["width"] = geo_dict["width"]
+                        item["height"] = geo_dict["height"]
+                        item["x"] = geo_dict["x"]
+                        item["y"] = geo_dict["y"]
+                        break
 
             tmp_path = cfg_path + f".tmp_{os.getpid()}"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -793,51 +817,70 @@ class SBCIntradayChartDialog(QWidget):
             except Exception:
                 shutil.move(tmp_path, cfg_path)
 
-            if not is_trading_hours:
-                self._has_saved_post_market = True
         except Exception as e:
             logger.debug(f"保存 SBC 窗口布局坐标异常: {e}")
 
     def _restore_sbc_geometry(self):
-        """【💾 物理恢复】从 QSettings / JSON 还原 SBC 全局统一窗口尺寸与坐标 (含越界保护)"""
+        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸与坐标 (含越界保护)"""
         try:
-            geo_dict = None
+            target_w, target_h = 680, 420
+            x, y = 100, 100
+            has_exact_pos = False
 
-            # 1. 优先读取 JSON
-            cfg_path = os.path.join(get_app_root(), "config", "intraday_ui_layout.json")
+            # 0. 优先从类内存变量读取最新尺寸
+            if SBCIntradayChartDialog._global_sbc_size:
+                target_w, target_h = SBCIntradayChartDialog._global_sbc_size
+
+            # 1. 优先读取 JSON 配置文件
+            cfg_path = _get_sbc_layout_cfg_path()
             if os.path.exists(cfg_path):
                 try:
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    geo_dict = data.get("sbc_window_geometry")
-                    if not geo_dict and "sbc_geometries" in data:
-                        geos = data.get("sbc_geometries", {})
-                        geo_dict = geos.get("latest") or geos.get(self.code)
+                    
+                    if "sbc_window_size" in data and isinstance(data["sbc_window_size"], dict):
+                        sz = data["sbc_window_size"]
+                        target_w = int(sz.get("width", target_w))
+                        target_h = int(sz.get("height", target_h))
+
+                    code_geo = data.get("sbc_geometries", {}).get(self.code)
+                    latest_geo = data.get("sbc_window_geometry") or data.get("sbc_geometries", {}).get("latest")
+                    
+                    geo_dict = code_geo or latest_geo
+                    if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
+                        target_w = int(geo_dict.get("width", target_w))
+                        target_h = int(geo_dict.get("height", target_h))
+                        x = int(geo_dict.get("x", x))
+                        y = int(geo_dict.get("y", y))
+                        has_exact_pos = True
                 except Exception:
                     pass
 
             # 2. 回退读取 QSettings
-            if not geo_dict:
-                settings = QSettings("pyQuant3", "IntradayWorkbench")
-                geo_dict = settings.value("sbc_window_geometry") or settings.value("sbc_geo_latest")
+            if target_w == 680 and target_h == 420:
+                try:
+                    settings = QSettings("pyQuant3", "IntradayWorkbench")
+                    sz = settings.value("sbc_window_size")
+                    if isinstance(sz, dict):
+                        target_w = int(sz.get("width", target_w))
+                        target_h = int(sz.get("height", target_h))
+                    geo = settings.value("sbc_window_geometry") or settings.value("sbc_geo_latest")
+                    if isinstance(geo, dict) and "width" in geo and "height" in geo:
+                        target_w = int(geo.get("width", target_w))
+                        target_h = int(geo.get("height", target_h))
+                        if not has_exact_pos:
+                            x = int(geo.get("x", x))
+                            y = int(geo.get("y", y))
+                            has_exact_pos = True
+                except Exception:
+                    pass
 
-            if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
-                x = int(geo_dict.get("x", 100))
-                y = int(geo_dict.get("y", 100))
-                w = int(geo_dict.get("width", 680))
-                h = int(geo_dict.get("height", 420))
+            # 3. 安全性防越界处理
+            from gui_utils import clamp_window_to_screens
+            rx, ry = clamp_window_to_screens(x, y, target_w, target_h)
 
-                # 3. 安全性判断：防超出桌面屏幕可见边界
-                screen = QApplication.primaryScreen()
-                if screen:
-                    sg = screen.availableGeometry()
-                    if x < sg.left() - w + 50 or x > sg.right() - 50 or y < sg.top() - 30 or y > sg.bottom() - 50:
-                        x = sg.left() + 50
-                        y = sg.top() + 50
-
-                self.setGeometry(x, y, w, h)
-            else:
-                self.resize(680, 420)
+            self.setGeometry(rx, ry, target_w, target_h)
+            SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
         except Exception as e:
             logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
             self.resize(680, 420)
@@ -846,6 +889,8 @@ class SBCIntradayChartDialog(QWidget):
         """关闭窗口时自动持久化保存几何大小与坐标，并维护打开列表"""
         self.hover_timer.stop()
         self.snap_timer.stop()
+        if hasattr(self, '_geo_save_timer'):
+            self._geo_save_timer.stop()
         self._do_save_sbc_geometry()
 
         main_win = getattr(self, "main_workbench", None)
@@ -1400,6 +1445,13 @@ def _record_sbc_open(code: str, geo=None):
             sbc_list.append(entry)
 
         data["sbc_open_windows"] = sbc_list
+        if geo and geo.width() >= 200 and geo.height() >= 100:
+            data["sbc_window_size"] = {"width": geo.width(), "height": geo.height()}
+            data["sbc_window_geometry"] = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
+            if "sbc_geometries" not in data:
+                data["sbc_geometries"] = {}
+            data["sbc_geometries"]["latest"] = data["sbc_window_geometry"]
+            data["sbc_geometries"][c_clean] = data["sbc_window_geometry"]
         tmp_path = cfg_path + f".tmp_{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1449,6 +1501,7 @@ def save_all_open_sbc_windows():
         from PyQt6.QtWidgets import QApplication
         from PyQt6.sip import isdeleted
         active_list = []
+        last_valid_geo = None
         for w in QApplication.topLevelWidgets():
             if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
                 geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else w.geometry()
@@ -1463,6 +1516,8 @@ def save_all_open_sbc_windows():
                         "anchor_edge": getattr(w, "anchor_edge", None),
                         "is_hidden_state": bool(getattr(w, "is_hidden_state", False))
                     })
+                    if geo.width() >= 200 and geo.height() >= 100:
+                        last_valid_geo = geo
 
         cfg_path = _get_sbc_layout_cfg_path()
         data = {}
@@ -1474,6 +1529,17 @@ def save_all_open_sbc_windows():
                 data = {}
 
         data["sbc_open_windows"] = active_list
+        if last_valid_geo:
+            data["sbc_window_size"] = {"width": last_valid_geo.width(), "height": last_valid_geo.height()}
+            data["sbc_window_geometry"] = {
+                "x": last_valid_geo.x(),
+                "y": last_valid_geo.y(),
+                "width": last_valid_geo.width(),
+                "height": last_valid_geo.height()
+            }
+            if "sbc_geometries" not in data:
+                data["sbc_geometries"] = {}
+            data["sbc_geometries"]["latest"] = data["sbc_window_geometry"]
         tmp_path = cfg_path + f".tmp_{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
