@@ -926,6 +926,13 @@ class ATSSectorDetailDialog(QDialog):
             link_act = menu.addAction(f"⚡ 选中联动 ({code})")
             link_act.triggered.connect(lambda: self.linkage_cb(code, name))
 
+        # 📈 调出 SBC 实盘分时走势
+        sbc_act = menu.addAction(f"📈 调出 {name or code} SBC 实盘分时走势")
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code)
+        sbc_act.triggered.connect(_open_sbc)
+
         # 发送到异动联动
         pipe_act = menu.addAction(f"⚡ 发送到异动联动 ({code})")
         pipe_act.triggered.connect(lambda: send_to_linkage(code, name, self))
