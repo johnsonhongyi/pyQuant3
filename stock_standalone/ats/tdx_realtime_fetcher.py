@@ -565,6 +565,18 @@ class TDXRealtimeFetcher:
                     self.add_log(f"标的 [{codes_str}] 逐个重试完成: 成功 {len(results)}/{len(active_codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
             return cached_results + results
 
+    def clear_stock_cache(self, code: str):
+        """【🧹 彻底清理单股 TDX 行情缓存】清除 1 分钟 K 线内存缓存与盘后快照缓存"""
+        c_clean = str(code).strip().zfill(6)
+        with self._conn_lock:
+            self._intraday_bars_cache.pop(c_clean, None)
+            self._off_hours_cached_quotes.pop(c_clean, None)
+            self._off_hours_settled_codes.discard(c_clean)
+            self._no_quote_last_attempt.pop(c_clean, None)
+            self._no_quote_counts.pop(c_clean, None)
+            self._unlisted_or_dormant_codes.discard(c_clean)
+        self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线与快照缓存！", level="INFO")
+
     def get_circulation_shares(self, code: str) -> float:
         """
         获取股票流通股本 (单位：股)。优先从 IntradayStrategyEngine 的 stock_spec 中获取，

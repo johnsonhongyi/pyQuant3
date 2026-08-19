@@ -18,6 +18,7 @@ ATS Universe Manager (Refactored)
 
 import time
 import pandas as pd
+from JohnsonUtil import commonTips as cct
 
 
 class UniverseManager:
@@ -66,7 +67,6 @@ class UniverseManager:
         """
         Adds a stock to the Radar Pool.
         """
-        from JohnsonUtil import commonTips as cct
         if cct.is_delisted_stock(code=code, name=name):
             return
 

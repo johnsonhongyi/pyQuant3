@@ -646,6 +646,14 @@ class IntradayStrategyEngine:
         state["manual_scores"] = {}
         self.save_intraday_cache()
 
+    def clear_stock_cache(self, code: str):
+        """【🧹 彻底清理单股缓存】清除该标的内存中的节点锁死状态、手动参数、时间快照与磁盘缓存"""
+        c_clean = str(code).zfill(6)
+        if c_clean in self.rule_state_map:
+            self.rule_state_map.pop(c_clean, None)
+        self.save_intraday_cache()
+        logger.info(f"🧹 [IntradayStrategyEngine] 已强力清除标的 [{c_clean}] 的盘中状态与磁盘缓存！")
+
     def _clean_time_str(self, time_str: str) -> str:
         """统一清洗时间字符串为 5 位 HH:MM 标准格式"""
         if not time_str:
@@ -787,8 +795,13 @@ class IntradayStrategyEngine:
             return []
 
         open_price = state.get("open_price", 0.0)
-        if open_price <= 1.0 and not df_intraday.empty:
-            open_price = float(df_intraday.iloc[0].get("open", 0.0))
+        if not df_intraday.empty:
+            df_first_open = float(df_intraday.iloc[0].get("open", df_intraday.iloc[0].get("close", 0.0)))
+            if df_first_open > 1.0 and (open_price <= 1.0 or open_price < df_first_open * 0.2 or open_price > df_first_open * 5.0):
+                logger.info(f"🔄 [IntradayStrategyEngine] {code} 识别到陈旧错乱开盘价 ({open_price:.2f}元)，已自动强力对齐为分时 K 线真实开盘价 ({df_first_open:.2f}元)！")
+                open_price = df_first_open
+                state["open_price"] = open_price
+
         if open_price <= 1.0:
             return []
 
@@ -807,6 +820,13 @@ class IntradayStrategyEngine:
                 continue
             h_p = float(row.get("high", p))
             vw = float(row.get("vwap", p))
+
+            # 🛡️ 异常价格毛刺脏数据强力清洗门禁 (例如 2048.93 元等由于行情错误推送导致的暴涨红针)
+            if open_price > 10.0:
+                max_allowed_p = open_price * 1.70
+                if p > max_allowed_p or h_p > max_allowed_p:
+                    logger.warning(f"⚠️ [IntradayStrategyEngine] 识别并强力过滤 K 线中 异常毛刺脏数据: t={t_5}, p={p:.2f}, h_p={h_p:.2f} (上限={max_allowed_p:.2f})")
+                    continue
 
             cum_high = max(cum_high, h_p, p)
 
@@ -981,6 +1001,21 @@ class IntradayStrategyEngine:
                     return v
             return fallback_val
 
+        def get_snap_field(target_t: str, field: str, default_val: float) -> float:
+            """在历史快照中按字段名安全提取数值"""
+            target_5 = str(target_t).strip()[:5]
+            if target_5 in time_snapshots and field in time_snapshots[target_5]:
+                v = float(time_snapshots[target_5][field])
+                if v > 0:
+                    return v
+            cands = [t for t in time_snapshots.keys() if str(t).strip()[:5] <= target_5]
+            if cands:
+                best_t = max(cands, key=lambda x: str(x).strip()[:5])
+                v = float(time_snapshots[best_t].get(field, 0.0))
+                if v > 0:
+                    return v
+            return default_val
+
         # 动态锁死已过节点参数，防止随后续实时行情浮动
         if clean_t >= "09:25" and open_price > 1.0:
             if ("node_1" not in node_locked_params or abs(node_locked_params.get("node_1", 0.0) - open_price) > 0.01) and "node_1" not in custom_params and "node_1_auction" not in custom_params:
@@ -1077,20 +1112,6 @@ class IntradayStrategyEngine:
             input_unit = "元"
 
             time_snaps = state.get("time_snapshots", {})
-
-            def get_snap_field(target_t: str, field: str, default_val: float) -> float:
-                target_5 = str(target_t).strip()[:5]
-                if target_5 in time_snaps and field in time_snaps[target_5]:
-                    v = float(time_snaps[target_5][field])
-                    if v > 0:
-                        return v
-                cands = [t for t in time_snaps.keys() if str(t).strip()[:5] <= target_5]
-                if cands:
-                    best_t = max(cands, key=lambda x: str(x).strip()[:5])
-                    v = float(time_snaps[best_t].get(field, 0.0))
-                    if v > 0:
-                        return v
-                return default_val
 
             def get_resolved_val(primary_key: str, alt_key: str, default_val: float) -> float:
                 try:
@@ -1583,7 +1604,20 @@ class IntradayStrategyEngine:
         price = float(tick_row.get("trade", tick_row.get("close", 0.0)))
         if price <= 0:
             return []
-            
+
+        # 自动纠偏陈旧/错乱开盘价 (例如缓存为 24.95 元但现价为 892.78 元)
+        if price > 10.0 and (open_price <= 1.0 or open_price < price * 0.2 or open_price > price * 5.0):
+            logger.info(f"🔄 [IntradayStrategyEngine] {c_clean} 识别到陈旧错乱开盘价 ({open_price:.2f}元)，已自动强力对齐为现价基准 ({price:.2f}元)！")
+            open_price = price
+            state["open_price"] = open_price
+
+        # 🛡️ 异常价格毛刺脏数据强力清洗门禁 (过滤由于 TDX 或行情错误推送引起的 2048.93 元等红针)
+        if open_price > 10.0:
+            max_allowed_p = open_price * 1.70
+            if price > max_allowed_p:
+                logger.warning(f"⚠️ [IntradayStrategyEngine] 识别到异常价格毛刺脏数据: 现价={price:.2f} (上限={max_allowed_p:.2f})，已强力压制过滤！")
+                return []
+
         state["max_price"] = max(state["max_price"], price)
         state["min_price"] = min(state["min_price"], price) if state["min_price"] > 0 else price
         
