@@ -637,6 +637,14 @@ class GlobalMarketPanel(QWidget):
         sbc_action.triggered.connect(_open_sbc)
         menu.addAction(sbc_action)
 
+        # ⚡ 发送到异动联动
+        linkage_action = QAction(f"⚡ 发送到异动联动 ({symbol})", self)
+        def _send_link():
+            from ats.ui.base_table import send_to_linkage
+            send_to_linkage(symbol, name, self)
+        linkage_action.triggered.connect(_send_link)
+        menu.addAction(linkage_action)
+
         menu.addSeparator()
 
         copy_action = QAction(f"📋 复制资产代码 {symbol}", self)
