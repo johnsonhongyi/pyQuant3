@@ -822,6 +822,158 @@ class TDXRealtimeFetcher:
             logger.debug(f"TDX 获取 {c_clean} 分时 K 线异常: {e}")
             return pd.DataFrame()
 
+    def fetch_multi_day_intraday_bars(self, code: str, days: int = 2) -> pd.DataFrame:
+        """
+        拉取最近 N 个交易日的全量分时 K 线数据 (包含 1日, 2日, 3日分时图)，按交易日拼接并计算每日 VWAP 均线与换手率
+        """
+        c_clean = str(code).zfill(6)
+        try:
+            mkt = get_market_code(c_clean)
+            bars = None
+            with self._conn_lock:
+                if not self._is_connected or self.api is None:
+                    if not self.connect():
+                        return pd.DataFrame()
+                try:
+                    bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800)
+                except Exception:
+                    bars = None
+
+            if not bars:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(bars)
+            if df.empty or "datetime" not in df.columns:
+                return pd.DataFrame()
+
+            df["date_str"] = df["datetime"].astype(str).str[:10]
+            df["time_str"] = df["datetime"].astype(str).str[11:16]
+
+            unique_dates = sorted(df["date_str"].unique())
+            target_dates = unique_dates[-days:] if len(unique_dates) >= days else unique_dates
+
+            df_filtered = df[df["date_str"].isin(target_dates)].copy()
+            if df_filtered.empty:
+                return pd.DataFrame()
+
+            res_rows = []
+            tot_circ_shares = self.get_circulation_shares(c_clean)
+
+            for d_str, group in df_filtered.groupby("date_str"):
+                cum_vol_shares = 0.0
+                cum_amt = 0.0
+                date_short = d_str[5:] # MM-DD
+
+                for _, r in group.iterrows():
+                    t_str = str(r.get("time_str", ""))
+                    time_label = f"{date_short} {t_str}"
+                    p = float(r.get("close", 0.0))
+                    op = float(r.get("open", p))
+                    hp = float(r.get("high", p))
+                    lp = float(r.get("low", p))
+                    if lp <= 1.0 or (p > 5.0 and lp < p * 0.1):
+                        lp = p
+
+                    vol_shares = float(r.get("vol", 0.0))
+                    cum_vol_shares += vol_shares
+                    amt = float(r.get("amount", 0.0))
+                    cum_amt += amt
+
+                    to_rate = 0.0
+                    if tot_circ_shares > 0:
+                        to_rate = round((cum_vol_shares / tot_circ_shares) * 100.0, 2)
+                        to_rate = min(100.0, max(0.0, to_rate))
+
+                    vw = round(cum_amt / cum_vol_shares, 2) if (cum_vol_shares > 0 and cum_amt > 0) else p
+
+                    res_rows.append({
+                        "time": time_label,
+                        "date": d_str,
+                        "time_only": t_str,
+                        "open": op,
+                        "close": p,
+                        "trade": p,
+                        "price": p,
+                        "high": hp,
+                        "low": lp,
+                        "vwap": vw,
+                        "volume": cum_vol_shares / 100.0,
+                        "vol": cum_vol_shares / 100.0,
+                        "amount": cum_amt,
+                        "turnover": to_rate,
+                        "turnover_rate": to_rate
+                    })
+
+            df_res = pd.DataFrame(res_rows)
+            if not df_res.empty:
+                df_res.set_index("time", inplace=True)
+            return df_res
+        except Exception as e:
+            logger.debug(f"拉取 {c_clean} 多日分时数据异常: {e}")
+            return pd.DataFrame()
+
+    def fetch_kline_bars(self, code: str, category: str = "5m", count: int = 150) -> pd.DataFrame:
+        """
+        拉取不同周期的 K 线数据 (5m, 30m, 60m, day)，并计算 MA5, MA20, MA60, Bollinger 通道 (GG 通道) 与 Volume
+        """
+        c_clean = str(code).zfill(6)
+        cat_map = {
+            "5m": 0,
+            "15m": 1,
+            "30m": 2,
+            "60m": 3,
+            "day": 4,
+            "week": 5
+        }
+        cat_code = cat_map.get(category, 0)
+
+        try:
+            mkt = get_market_code(c_clean)
+            bars = None
+            with self._conn_lock:
+                if not self._is_connected or self.api is None:
+                    if not self.connect():
+                        return pd.DataFrame()
+                try:
+                    bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, count)
+                except Exception:
+                    bars = None
+
+            if not bars:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(bars)
+            if df.empty:
+                return pd.DataFrame()
+
+            if "datetime" in df.columns:
+                df["time"] = df["datetime"].astype(str)
+            elif "time" not in df.columns:
+                df["time"] = [str(i) for i in range(len(df))]
+
+            df["close"] = df["close"].astype(float)
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            df["vol"] = df["vol"].astype(float)
+            df["amount"] = df.get("amount", df["close"] * df["vol"] * 100.0).astype(float)
+
+            # 技术指标计算: MA5, MA20, MA60, 布林通道 (Upper, Mid, Lower)
+            df["ma5"] = df["close"].rolling(5, min_periods=1).mean()
+            df["ma20"] = df["close"].rolling(20, min_periods=1).mean()
+            df["ma60"] = df["close"].rolling(60, min_periods=1).mean()
+
+            std20 = df["close"].rolling(20, min_periods=1).std().fillna(0)
+            df["boll_mid"] = df["ma20"]
+            df["boll_upper"] = df["boll_mid"] + 2.0 * std20
+            df["boll_lower"] = df["boll_mid"] - 2.0 * std20
+
+            df.set_index("time", inplace=True)
+            return df
+        except Exception as e:
+            logger.debug(f"拉取 {c_clean} [{category}] K 线数据异常: {e}")
+            return pd.DataFrame()
+
     def fetch_multi_stock_alpha_quotes(
         self,
         codes: List[str],

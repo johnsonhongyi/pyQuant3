@@ -453,6 +453,159 @@ def save_display_config(config_file, config):
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
 
+HISTORICAL_DELISTED_STOCKS = {
+    "600001": "邯郸钢铁",     # 已退市 (2010年吸收合并)
+    "600002": "齐鲁石化",     # 已退市 (2006年私有化)
+    "600003": "ST东北高",     # 已退市历史代码
+    "600005": "武钢股份",     # 已退市 (2017年宝钢合并)
+    "600013": "华能国电",     # 已退市历史死码
+    "600024": "华能国际旧",   # 已退市历史旧代码 (现华能国际为 600011)
+    "600087": "退市长油",     # 已退市
+    "000003": "PT金田A",      # 已退市
+    "000005": "ST星源",       # 已退市
+    "000018": "神州长城",     # 已退市
+    "300297": "退市蓝盾",     # 已退市 (*ST蓝盾)
+    "000022": "深赤湾A",      # 已退市 (招商港口合并)
+}
+
+KNOWN_DELISTED_CODES = set(HISTORICAL_DELISTED_STOCKS.keys())
+
+def is_delisted_stock(code: str) -> bool:
+    """判定股票代码是否为已知的历史退市死码或僵尸代码"""
+    if not code:
+        return False
+    import re
+    c_clean = str(code).strip()
+    m = re.search(r'(\d{6})', c_clean)
+    if m:
+        c_clean = m.group(1)
+    else:
+        c_clean = c_clean.zfill(6)
+    return c_clean in KNOWN_DELISTED_CODES
+
+def sanitize_delisted_stocks_from_list(codes):
+    """从输入的代码列表或集合中剔除已知退市死码"""
+    if not codes:
+        return codes
+    if isinstance(codes, set):
+        return {c for c in codes if c and not is_delisted_stock(c)}
+    elif isinstance(codes, list):
+        return [c for c in codes if c and not is_delisted_stock(c)]
+    return codes
+
+def repair_system_configurations_and_delisted_stocks():
+    """
+    全系统通用数据与配置文件自动化抢占式检测与自愈修复引擎 (Self-Healing Engine)。
+    无论在开发环境还是打包编译环境 (EXE / Nuitka / PyInstaller) 下运行，
+    冷启动时自动校验并剥离磁盘上各类配置文件 (favorite_stocks.json, stock_name_cache.json, voice_alert_config.json 等)
+    中的退市死码、僵尸代码以及乱码字符，实现 100% 打包自修复。
+    """
+    logger.info("🛡️ [Self-Healing Engine] 正在启动全系统配置文件与退市脏数据抢占式自动检测与自愈修复...")
+    app_root = get_app_root()
+    repaired_count = 0
+
+    # 1. 自愈清洗 `favorite_stocks.json` 重点关注列表
+    try:
+        fav_path = get_conf_path("favorite_stocks.json") or os.path.join(app_root, "favorite_stocks.json")
+        if os.path.exists(fav_path) and os.path.getsize(fav_path) > 0:
+            with open(fav_path, "r", encoding="utf-8") as f:
+                fav_data = json.load(f)
+
+            need_save = False
+            ui_state = fav_data.get("sector_bidding_panel_persistence_ui_state", fav_data)
+
+            # 清洗 顶层 与 ui_state 内的 favorite_stocks 列表
+            for target_dict in [fav_data, ui_state]:
+                stocks_list = target_dict.get("favorite_stocks", [])
+                if stocks_list:
+                    clean_stocks = [c for c in stocks_list if c and not is_delisted_stock(str(c))]
+                    if len(clean_stocks) != len(stocks_list):
+                        removed_codes = set(stocks_list) - set(clean_stocks)
+                        logger.warning(f"🧹 [Self-Healing] 从 {os.path.basename(fav_path)} 中剔除已退市死码: {removed_codes}")
+                        target_dict["favorite_stocks"] = clean_stocks
+                        need_save = True
+
+                dates_dict = target_dict.get("favorite_stocks_dates", {})
+                if dates_dict:
+                    clean_dates = {k: v for k, v in dates_dict.items() if k and not is_delisted_stock(str(k))}
+                    if len(clean_dates) != len(dates_dict):
+                        target_dict["favorite_stocks_dates"] = clean_dates
+                        need_save = True
+
+            if need_save:
+                tmp_fav = f"{fav_path}.tmp.{os.getpid()}"
+                with open(tmp_fav, "w", encoding="utf-8") as f_out:
+                    json.dump(fav_data, f_out, ensure_ascii=False, indent=2)
+                os.replace(tmp_fav, fav_path)
+                logger.info(f"✅ [Self-Healing] 成功自愈修复并重写物理文件: {fav_path}")
+                repaired_count += 1
+    except Exception as e:
+        logger.error(f"❌ [Self-Healing] 修复 favorite_stocks.json 发生异常: {e}")
+
+    # 2. 自愈清洗 `stock_name_cache.json` 名称缓存
+    try:
+        cache_path = os.path.join(app_root, "datacsv", "stock_name_cache.json")
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                name_data = json.load(f)
+
+            if isinstance(name_data, dict):
+                need_save_cache = False
+                clean_name_data = {}
+                for k, v in name_data.items():
+                    k_str = str(k).strip().zfill(6)
+                    v_str = str(v).strip()
+                    # 剔除已知退市死码与格式/占位异常
+                    if is_delisted_stock(k_str):
+                        need_save_cache = True
+                        continue
+                    # 剥离 GBK 误当 UTF-8 造成的乱码字符
+                    if any(ord(c) in range(0xC0, 0x100) or ord(c) in range(0x80, 0xA0) for c in v_str):
+                        need_save_cache = True
+                        continue
+                    clean_name_data[k_str] = v_str
+
+                if need_save_cache:
+                    tmp_cache = f"{cache_path}.tmp.{os.getpid()}"
+                    with open(tmp_cache, "w", encoding="utf-8") as f_out:
+                        json.dump(clean_name_data, f_out, ensure_ascii=False, indent=2)
+                    os.replace(tmp_cache, cache_path)
+                    logger.info(f"✅ [Self-Healing] 成功自愈清洗 stock_name_cache.json 中的退市/乱码条目: {cache_path}")
+                    repaired_count += 1
+    except Exception as e:
+        logger.error(f"❌ [Self-Healing] 修复 stock_name_cache.json 发生异常: {e}")
+
+    # 3. 自愈清洗 `voice_alert_config.json` 预警项
+    try:
+        voice_path = get_conf_path("voice_alert_config.json") or os.path.join(app_root, "voice_alert_config.json")
+        if os.path.exists(voice_path) and os.path.getsize(voice_path) > 0:
+            with open(voice_path, "r", encoding="utf-8") as f:
+                voice_data = json.load(f)
+
+            if isinstance(voice_data, dict):
+                clean_voice = {}
+                need_save_voice = False
+                for key, val in voice_data.items():
+                    code = key.split('_')[0] if '_' in key else key
+                    if isinstance(val, dict):
+                        code = val.get('code', code)
+                    if is_delisted_stock(str(code)):
+                        need_save_voice = True
+                        continue
+                    clean_voice[key] = val
+
+                if need_save_voice:
+                    tmp_voice = f"{voice_path}.tmp.{os.getpid()}"
+                    with open(tmp_voice, "w", encoding="utf-8") as f_out:
+                        json.dump(clean_voice, f_out, ensure_ascii=False, indent=2)
+                    os.replace(tmp_voice, voice_path)
+                    logger.info(f"✅ [Self-Healing] 成功自愈清洗 voice_alert_config.json 中的退市预警项: {voice_path}")
+                    repaired_count += 1
+    except Exception as e:
+        logger.error(f"❌ [Self-Healing] 修复 voice_alert_config.json 发生异常: {e}")
+
+    logger.info(f"✨ [Self-Healing Engine] 全系统抢占式检测与自愈完成，共自愈修复 {repaired_count} 个配置文件。")
+
 def ensure_all_configs_released():
     """在主程序最早期抢占式预加载并释放所有注册的核心配置文件，建立全物理自愈安全屏障"""
     # 💥 彻底根治并自动清理历史遗留的 `datacsv/datacsv` 重复嵌套目录，迁移旧数据
@@ -500,19 +653,8 @@ def ensure_all_configs_released():
             logger.error(f"预加载释放 {fname} 异常: {e}")
     logger.info("✅ 抢占式预加载自愈释放完成，全物理安全屏障已建立。")
 
-HISTORICAL_DELISTED_STOCKS = {
-    "600001": "邯郸钢铁",
-    "600002": "齐鲁石化",
-    "600003": "ST合金",
-    "600013": "华能国电",
-    "600024": "华能国际",
-    "600005": "武钢股份",
-    "600020": "中原高速",
-    "600087": "退市长油",
-    "000003": "PT金田A",
-    "000005": "ST星源",
-    "000018": "神州长城",
-}
+    # 💥 挂载通用退市死码与脏配置抢占式自动自修复引擎
+    repair_system_configurations_and_delisted_stocks()
 
 _resolved_name_cache = {}
 _name_cache_lock = threading.Lock()
@@ -529,6 +671,8 @@ def _load_name_cache():
                     for k, v in data.items():
                         v_str = str(v).strip()
                         k_str = str(k).strip().zfill(6)
+                        if is_delisted_stock(k_str):
+                            continue
                         if v_str and not v_str.isdigit() and v_str != k_str:
                             _resolved_name_cache[k_str] = v_str
     except Exception as e:
@@ -550,6 +694,8 @@ def _load_name_cache():
                 for k, v in name_map.items():
                     k_clean = str(k).strip().zfill(6)
                     v_clean = str(v).strip()
+                    if is_delisted_stock(k_clean):
+                        continue
                     if v_clean and not v_clean.startswith("个股_") and not v_clean.isdigit() and v_clean != k_clean:
                         if k_clean not in _resolved_name_cache:
                             _resolved_name_cache[k_clean] = v_clean
