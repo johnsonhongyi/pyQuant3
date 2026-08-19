@@ -971,16 +971,80 @@ class StockDetailDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        
+        # 绑定右键菜单
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+
         layout.addWidget(self.table)
         
-        # 4. Button close
+        # 4. Action buttons
+        btn_sbc = QPushButton("📈 调出 SBC 分时走势")
+        btn_sbc.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2e22; color: #00ff88; font-weight: bold;
+                border: 1px solid #00ff88; border-radius: 4px; padding: 4px 10px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #244633; }
+        """)
+        def _on_open_sbc_clicked():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, self.code)
+        btn_sbc.clicked.connect(_on_open_sbc_clicked)
+
         btn_close = QPushButton("关闭窗口")
         btn_close.clicked.connect(self.accept)
         
         bottom_layout = QHBoxLayout()
+        bottom_layout.addWidget(btn_sbc)
         bottom_layout.addStretch()
         bottom_layout.addWidget(btn_close)
         layout.addLayout(bottom_layout)
+
+    def _show_context_menu(self, pos):
+        """个股详情弹窗右键菜单"""
+        from PyQt6.QtWidgets import QMenu, QApplication
+        from ats.ui.base_table import send_to_linkage
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #ffffff;
+            }
+        """)
+
+        # 📈 调出 SBC 实盘分时走势
+        sbc_act = menu.addAction(f"📈 调出 {self.name} SBC 实盘分时走势")
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, self.code)
+        sbc_act.triggered.connect(_open_sbc)
+
+        # ⚡ 发送到异动联动
+        link_act = menu.addAction(f"⚡ 发送到异动联动 ({self.code})")
+        link_act.triggered.connect(lambda: send_to_linkage(self.code, self.name, self))
+
+        menu.addSeparator()
+        copy_code = menu.addAction("📋 复制代码")
+        copy_code.triggered.connect(lambda: QApplication.clipboard().setText(self.code))
+        copy_name = menu.addAction("📋 复制名称")
+        copy_name.triggered.connect(lambda: QApplication.clipboard().setText(self.name))
+
+        sender = self.sender()
+        map_widget = sender if isinstance(sender, QWidget) else self
+        menu.exec(map_widget.mapToGlobal(pos))
 
     def update_data(self, df_row):
         t_u0 = time.perf_counter()

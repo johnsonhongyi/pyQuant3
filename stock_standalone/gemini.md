@@ -14372,3 +14372,26 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
   2. ATS 主窗口 `_on_tdx_signal_detected` 增加初次加载隔离：对 `is_initial_load=True` 的历史信号仅静默写入 `SignalLedger` 账本和信号列表用于手动查看，坚决不触发 `link_stock` 联动切股和 `AlertNotifier` 桌面弹窗与语音播报。
   3. 增加单元测试覆盖初次扫描与增量新行的状态标识与主窗口防联动行为验证。
 
+## [2026-08-19 21:12:00] 修复 SBC 窗口尺寸大小无法持久化与新开窗口自动继承尺寸
+- **关联文件**:
+  - `stock_standalone/ats/ui/intraday_strategy_dialog.py`
+  - `stock_standalone/tests/test_sbc_geometry_persistence.py`
+- **修复要点**:
+  1. 类级全局尺寸共享：增加 `SBCIntradayChartDialog._global_sbc_size`，确保同一运行期内打开的任意新标的 SBC 窗口即刻使用最新尺寸。
+  2. 防抖自动持久化：在 `SBCIntradayChartDialog` 中引入 350ms 防抖定时器 `_geo_save_timer`，在用户调整窗口尺寸与拖拽停止后自动写盘。
+  3. 移除盘后阻断：彻底解除 `_do_save_sbc_geometry` 中非交易时段的拦截，使任意时段调整大小均可无条件原子落盘至 `intraday_ui_layout.json` 和 `QSettings`。
+  4. 强化初始化还原：`_restore_sbc_geometry` 优先读取持久化的 `sbc_window_size` 与 `sbc_window_geometry`，确保新开窗口与重启后完美呈现用户自定义的窗口宽高。
+
+## [2026-08-19 21:33:00] ATS 板块明细与个股明细右键添加使用 SBC 打开功能
+- **关联文件**:
+  - `stock_standalone/ats/ui/sector_detail_dialog.py`
+  - `stock_standalone/ats/ui/chart_widgets.py`
+  - `stock_standalone/ats/ui/main_window.py`
+  - `stock_standalone/tests/test_detail_sbc_context_menu.py`
+- **修复要点**:
+  1. 板块明细：在 `ATSSectorDetailDialog` 成分股表格右键菜单中增加 `📈 调出 {name or code} SBC 实盘分时走势`。
+  2. 涨跌分布个股明细：在 `DistributionDetailsDialog` 个股表格右键菜单中增加 `📈 调出 {name_clean} SBC 实盘分时走势`。
+  3. 实时实盘个股详情：在 `StockDetailDialog` 底部操作栏增加 `📈 调出 SBC 分时走势` 按钮，并在窗口与表格右键菜单中增加 `📈 调出 {self.name} SBC 实盘分时走势`。
+
+
+
