@@ -1,3 +1,12 @@
+## 2026-08-19 16:00
+- [x] **根治 ATS 大级别 MA20d 回调跟踪器 (SwingStateTable) 偏离度严重失真 Bug，实现权威行情 MA20d/MA5d 动态接入与全管道数据对齐 (`ats/ui/main_window.py`, `ats/swing_tracker.py`, `tests/test_ma20_deviation_fix.py`)**：
+    - [x] **数据源权威 MA20d 强优先级接入与对齐**：
+        - 彻底排查并根治了 `LedgerUpdateWorker.run` 在构建 `ma20_series` 时依赖缺损/未复权的 HDF5 历史 K 线计算滚动均值，导致 001229 (魅视科技) 偏离度从真实 `+14.29%` 被误算降级为 `+2.84%` 的死穴；
+        - 在 `LedgerUpdateWorker.run` 中植入权威 MA20d / MA5d 校验与覆盖机制：无论是否有历史 K 线缓存，只要行情数据（`row` / `row_data`）或 `SignalLedger` 信号账本中存在真实 `ma20d` / `ma5d`，必须优先锁定为 `ma20_series[-1]` / `ma5_series[-1]`；
+        - 补充 `_stock_history_cache` 跨 `code` 与 `code_clean` (剥离 sh/sz 前缀) 双向兼容探查，消除了因代码键名不匹配导致的历史缺损降级。
+    - [x] **21 项跨模块单元测试 100% 全部通过**：
+        - 新建 `tests/test_ma20_deviation_fix.py` 专项测试，覆盖公式精度计算与短历史缓存下的权威行情覆盖，结合全量测试套件 **100% PASSED**！
+
 ## 2026-08-17 14:50
 - [x] **根治加速龙头磁吸展开失效与鼠标无响应 Bug，并在加速龙头与涨跌明细中全面适配 `ats_col` 自定义列与模块顶部导入规范 (`ats/ui/dragon_monitor.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `tests/test_monitor_persistence.py`)**：
     - [x] **根治加速龙头磁吸属性被覆盖重置与鼠标/点击无反应 Bug**：
