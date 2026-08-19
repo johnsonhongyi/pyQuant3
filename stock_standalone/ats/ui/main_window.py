@@ -3440,6 +3440,14 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             logger.warning(f"[ATSMainWindow] Error auto-restoring distribution detail dialogs: {e}")
 
+        # 3. 恢复加载持久化打开的 SBC 独立分时走势图窗口
+        try:
+            from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows
+            logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口...")
+            restore_all_open_sbc_windows(self)
+        except Exception as e:
+            logger.warning(f"[ATSMainWindow] Error auto-restoring SBC chart dialogs: {e}")
+
     def _trigger_realtime_ui_update(self):
         """防抖异步触发 UI 渲染 (30ms 汇聚高频 IPC 广播包, 防范主线程卡顿)"""
         if not hasattr(self, '_realtime_ui_debounce_timer'):
@@ -4663,6 +4671,13 @@ class ATSMainWindow(QMainWindow):
                     if d and not isdeleted(d):
                         if d.isVisible() or getattr(d, 'is_hidden_state', False):
                             d._save_window_states(is_open=True)
+
+            # 3. 持久化所有打开的 SBC 独立分时走势图窗口状态与位置
+            try:
+                from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
+                save_all_open_sbc_windows()
+            except Exception as e_sbc:
+                print(f"[ATSMainWindow] Error persisting SBC dialogs on close: {e_sbc}")
         except Exception as e_persist:
             print(f"[ATSMainWindow] Error persisting active monitor dialogs on close: {e_persist}")
         

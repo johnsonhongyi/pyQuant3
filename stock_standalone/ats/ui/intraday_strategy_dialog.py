@@ -35,8 +35,8 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QCheckBox, QSlider, QToolBar
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings
-from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QEvent, QPoint
+from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor
 
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
@@ -701,7 +701,30 @@ class SBCIntradayChartDialog(QWidget):
         self.poll_timer.timeout.connect(self.reload_chart)
         self.poll_timer.start()
 
-        # 7. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
+        # 7. 磁吸贴边、自动隐藏与滑出动画系统 (与 ATS 加速龙头监视器完全统一)
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
+        self._is_auto_popping = False
+
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
+
+        # 8. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
         self._restore_sbc_geometry()
         self.reload_chart()
 
@@ -820,81 +843,270 @@ class SBCIntradayChartDialog(QWidget):
             self.resize(680, 420)
 
     def closeEvent(self, event):
-        """关闭窗口时自动持久化保存几何大小与坐标"""
+        """关闭窗口时自动持久化保存几何大小与坐标，并维护打开列表"""
+        self.hover_timer.stop()
+        self.snap_timer.stop()
         self._do_save_sbc_geometry()
+
+        main_win = getattr(self, "main_workbench", None)
+        is_app_exiting = False
+        if main_win:
+            if not main_win.isVisible() or getattr(main_win, '_is_closing', False) or getattr(main_win, '_is_exiting', False):
+                is_app_exiting = True
+
+        # 若非整个程序退出（即用户手动单独关闭该 SBC 窗口），从持久化打开列表中移除
+        if not is_app_exiting:
+            try:
+                _remove_sbc_open_record(self.code)
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def resizeEvent(self, event):
         """调整大小事件自动防抖保存几何坐标"""
         super().resizeEvent(event)
-        self._save_sbc_geometry()
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            if self.anchor_edge:
+                self.anchor_edge = None
+                self.normal_geometry = None
+            self._save_sbc_geometry()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_user_dragging = True
+        super().mousePressEvent(event)
 
     def moveEvent(self, event):
-        """【🧲 ATS 现成磁吸代码逻辑】靠近主工作台或屏幕边缘 35 像素时自动磁吸对齐 (带防抖与拖拽保护，顺畅不抖动)"""
+        """【🧲 移动防抖记录与磁吸触发】移动时记录内存坐标，仅在用户手动拖拽停止松手后触发磁吸吸附"""
         super().moveEvent(event)
-        if getattr(self, "_is_snapping", False) or self.isMaximized():
+        if getattr(self, "_is_programmatic_move", False) or getattr(self, "_in_snap_action", False):
             return
-
-        # 💡 若鼠标左键处于按住拖拽移动状态，不强行调用 self.move 干扰 Windows DWM 拖拽过程，防止高频抖动
-        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-            self._save_sbc_geometry()
-            return
-
-        main_win = getattr(self, "main_workbench", None)
-        if not main_win and self.parent() is not None:
-            main_win = self.parent().window()
-
-        s_fg = self.frameGeometry()
-        margin = 35  # ATS 现成磁吸检测门槛像素
-
-        target_x = s_fg.left()
-        target_y = s_fg.top()
-        snapped = False
-
-        # 1. 优先与主工作台窗口边缘磁吸
-        if main_win and main_win.isVisible() and not main_win.isMaximized():
-            m_fg = main_win.frameGeometry()
-
-            if abs(s_fg.left() - m_fg.right()) < margin:
-                target_x = m_fg.right()
-                snapped = True
-            elif abs(s_fg.right() - m_fg.left()) < margin:
-                target_x = m_fg.left() - s_fg.width()
-                snapped = True
-
-            if abs(s_fg.top() - m_fg.top()) < margin:
-                target_y = m_fg.top()
-                snapped = True
-            elif abs(s_fg.top() - m_fg.bottom()) < margin:
-                target_y = m_fg.bottom()
-                snapped = True
-            elif abs(s_fg.bottom() - m_fg.bottom()) < margin:
-                target_y = m_fg.bottom() - s_fg.height()
-                snapped = True
-
-        # 2. 次选：若未与主窗口磁吸，则与屏幕边缘磁吸
-        if not snapped:
-            screen = QApplication.primaryScreen()
-            if screen:
-                screen_geo = screen.availableGeometry()
-                if abs(s_fg.top() - screen_geo.top()) < margin:
-                    target_y = screen_geo.top()
-                    snapped = True
-                if abs(s_fg.left() - screen_geo.left()) < margin:
-                    target_x = screen_geo.left()
-                    snapped = True
-                elif abs(s_fg.right() - screen_geo.right()) < margin:
-                    target_x = screen_geo.right() - s_fg.width()
-                    snapped = True
-
-        if snapped and (target_x != s_fg.left() or target_y != s_fg.top()):
-            self._is_snapping = True
-            try:
-                self.move(target_x, target_y)
-            finally:
-                self._is_snapping = False
-
         self._save_sbc_geometry()
+        if not self.is_hidden_state:
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                self._is_user_dragging = True
+            if getattr(self, "_is_user_dragging", False):
+                self.anchor_edge = None
+                self.snap_timer.start(200)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange:
+            if self.isActiveWindow() and self.is_hidden_state:
+                self._is_auto_popping = True
+                QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+                self.show_normal_position()
+
+    # --- 🧲 ATS 标准磁吸、边缘自动隐藏与滑出动画系统 ---
+    def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
+        if hasattr(self, 'anim_group') and self.anim_group is not None:
+            try:
+                if self.anim_group.state() == QParallelAnimationGroup.State.Running:
+                    self.anim_group.stop()
+            except Exception:
+                pass
+
+        self.anim_group = QParallelAnimationGroup(self)
+        self.geom_anim = QPropertyAnimation(self, b"geometry")
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_rect)
+        if is_snap_feedback:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        else:
+            self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            self.opacity_anim.setKeyValueAt(0.5, 0.4)
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+
+        self._in_snap_action = True
+
+        def on_finished():
+            self._in_snap_action = False
+            if self.is_hidden_state:
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(1.0)
+            self._save_sbc_geometry()
+
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
+    def _detect_and_snap(self):
+        """【🧲 智能磁吸对齐】仅在用户手动拖拽停止松开鼠标后，才触发磁吸对齐"""
+        if self.is_hidden_state or self.isMaximized() or self.isMinimized() or getattr(self, "_is_programmatic_move", False):
+            return
+
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.snap_timer.start(200)
+            return
+
+        # 💡 只有用户手动拖动触发时才允许进入磁吸贴边，重排与开机程序加载绝不自动贴边！
+        if not getattr(self, "_is_user_dragging", False):
+            return
+        self._is_user_dragging = False
+
+        screen = self.screen() or QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+        if not screen:
+            return
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 35
+
+        snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
+
+        # 优先吸附屏幕四周边缘并激活边缘自动收缩
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
+            snapped = True
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
+            snapped = True
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
+            snapped = True
+
+        # 次选：若未靠屏幕边缘，则检测是否靠近主工作台
+        if not snapped:
+            main_win = getattr(self, "main_workbench", None)
+            if not main_win and self.parent() is not None:
+                main_win = self.parent().window()
+            if not main_win:
+                for w in QApplication.topLevelWidgets():
+                    if w.isVisible() and w.__class__.__name__ == 'ATSMainWindow':
+                        main_win = w
+                        break
+
+            if main_win and main_win.isVisible() and not main_win.isMaximized() and not main_win.isMinimized():
+                m_fg = main_win.geometry()
+                if abs(win_geo.left() - m_fg.right()) < margin:
+                    target_x = m_fg.right()
+                    snapped = True
+                elif abs(win_geo.right() - m_fg.left()) < margin:
+                    target_x = m_fg.left() - win_geo.width()
+                    snapped = True
+                if abs(win_geo.top() - m_fg.top()) < margin:
+                    target_y = m_fg.top()
+                    snapped = True
+                elif abs(win_geo.bottom() - m_fg.bottom()) < margin:
+                    target_y = m_fg.bottom() - win_geo.height()
+                    snapped = True
+
+        self._is_dragging = False
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+
+    def hide_to_edge(self):
+        """贴边自动收缩隐藏为 5px 边缘条，半透明 0.35"""
+        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+            return
+
+        screen = self.screen() or QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+        if not screen:
+            return
+        screen_geo = screen.availableGeometry()
+
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        strip_size = 5
+
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+
+        self.is_hidden_state = True
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        """鼠标悬停边缘条时自动滑出展开至正常完整画幅"""
+        if self.is_hidden_state:
+            self.is_hidden_state = False
+            self._is_auto_popping = True
+            QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
+
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _check_hover(self):
+        """100ms 鼠标位置巡检：实现边缘悬停极速展开与移出自动收缩隐藏"""
+        if not self.isVisible():
+            return
+
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+
+        mouse_pos = QCursor.pos()
+        in_window = self.frameGeometry().contains(mouse_pos)
+
+        if in_window:
+            self._has_hovered_since_show = True
+
+        if self.is_hidden_state:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
 
     def _toggle_log_panel(self):
         vis = not self.log_box.isVisible()
@@ -950,14 +1162,22 @@ class SBCIntradayChartDialog(QWidget):
             if curr_y + h > sg.bottom():
                 curr_y = sg.top() + 20
 
-            dlg._is_snapping = True
+            # 💡 重排时彻底重置磁吸状态，保持正常完全可见的浮动窗口布局，绝不自动触发边缘收缩
+            dlg.snap_timer.stop()
+            dlg.anchor_edge = None
+            dlg.normal_geometry = None
+            dlg.is_hidden_state = False
+            dlg._is_dragging = False
+            dlg._is_user_dragging = False
+            dlg.setWindowOpacity(1.0)
+            dlg._is_programmatic_move = True
             try:
                 dlg.move(curr_x, curr_y)
                 dlg._save_sbc_geometry()
                 dlg.raise_()
                 dlg.activateWindow()
             finally:
-                dlg._is_snapping = False
+                dlg._is_programmatic_move = False
 
             curr_x += w + margin_x
             row_max_h = max(row_max_h, h)
@@ -1129,7 +1349,196 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()
+    _record_sbc_open(c_clean, dlg.geometry())
     return dlg
+
+
+def _get_sbc_layout_cfg_path():
+    from sys_utils import get_app_root
+    cfg_dir = os.path.join(get_app_root(), "config")
+    os.makedirs(cfg_dir, exist_ok=True)
+    return os.path.join(cfg_dir, "intraday_ui_layout.json")
+
+
+def _record_sbc_open(code: str, geo=None):
+    """记录新打开的 SBC 窗口"""
+    try:
+        c_clean = str(code).zfill(6)
+        cfg_path = _get_sbc_layout_cfg_path()
+        data = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        sbc_list = data.get("sbc_open_windows", [])
+        # 查找是否存在
+        found = False
+        for item in sbc_list:
+            if item.get("code") == c_clean:
+                if geo:
+                    item["x"] = geo.x()
+                    item["y"] = geo.y()
+                    item["width"] = geo.width()
+                    item["height"] = geo.height()
+                found = True
+                break
+        if not found:
+            entry = {"code": c_clean}
+            if geo:
+                entry["x"] = geo.x()
+                entry["y"] = geo.y()
+                entry["width"] = geo.width()
+                entry["height"] = geo.height()
+            else:
+                entry["x"] = 100
+                entry["y"] = 100
+                entry["width"] = 680
+                entry["height"] = 420
+            sbc_list.append(entry)
+
+        data["sbc_open_windows"] = sbc_list
+        tmp_path = cfg_path + f".tmp_{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            if os.path.exists(cfg_path):
+                os.replace(tmp_path, cfg_path)
+            else:
+                os.rename(tmp_path, cfg_path)
+        except Exception:
+            import shutil
+            shutil.move(tmp_path, cfg_path)
+    except Exception as e:
+        logger.debug(f"记录打开 SBC 窗口异常: {e}")
+
+
+def _remove_sbc_open_record(code: str):
+    """从已打开 SBC 窗口列表中移除指定个股"""
+    try:
+        c_clean = str(code).zfill(6)
+        cfg_path = _get_sbc_layout_cfg_path()
+        if not os.path.exists(cfg_path):
+            return
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sbc_list = data.get("sbc_open_windows", [])
+        new_list = [item for item in sbc_list if item.get("code") != c_clean]
+        if len(new_list) != len(sbc_list):
+            data["sbc_open_windows"] = new_list
+            tmp_path = cfg_path + f".tmp_{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(cfg_path):
+                    os.replace(tmp_path, cfg_path)
+                else:
+                    os.rename(tmp_path, cfg_path)
+            except Exception:
+                import shutil
+                shutil.move(tmp_path, cfg_path)
+    except Exception as e:
+        logger.debug(f"移除 SBC 窗口记录异常: {e}")
+
+
+def save_all_open_sbc_windows():
+    """【💾 全局保存所有已打开的 SBC 窗口与坐标】ATS 退出或定时刷盘时调用"""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.sip import isdeleted
+        active_list = []
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
+                geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else w.geometry()
+                c = getattr(w, 'code', None)
+                if c:
+                    active_list.append({
+                        "code": str(c).zfill(6),
+                        "x": geo.x(),
+                        "y": geo.y(),
+                        "width": geo.width(),
+                        "height": geo.height(),
+                        "anchor_edge": getattr(w, "anchor_edge", None),
+                        "is_hidden_state": bool(getattr(w, "is_hidden_state", False))
+                    })
+
+        cfg_path = _get_sbc_layout_cfg_path()
+        data = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        data["sbc_open_windows"] = active_list
+        tmp_path = cfg_path + f".tmp_{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            if os.path.exists(cfg_path):
+                os.replace(tmp_path, cfg_path)
+            else:
+                os.rename(tmp_path, cfg_path)
+        except Exception:
+            import shutil
+            shutil.move(tmp_path, cfg_path)
+    except Exception as e:
+        logger.debug(f"保存所有已打开 SBC 窗口列表异常: {e}")
+
+
+def restore_all_open_sbc_windows(parent_win=None):
+    """【🚀 启动时自动恢复所有持久化的 SBC 窗口及位置】仅退出前处于磁吸状态的窗口才恢复磁吸，默认边缘不触发"""
+    try:
+        cfg_path = _get_sbc_layout_cfg_path()
+        if not os.path.exists(cfg_path):
+            return
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sbc_list = data.get("sbc_open_windows", [])
+        if not sbc_list:
+            return
+
+        from gui_utils import clamp_window_to_screens
+        for item in sbc_list:
+            code = item.get("code")
+            if not code:
+                continue
+            x = item.get("x", 100)
+            y = item.get("y", 100)
+            w = item.get("width", 680)
+            h = item.get("height", 420)
+            rx, ry = clamp_window_to_screens(x, y, w, h)
+            
+            dlg = open_sbc_chart_dialog(parent_win, code)
+            if dlg:
+                dlg._is_programmatic_move = True
+                dlg._is_user_dragging = False
+                try:
+                    dlg.setGeometry(rx, ry, w, h)
+                    dlg.snap_timer.stop()
+                    saved_edge = item.get("anchor_edge")
+                    saved_hidden = item.get("is_hidden_state", False)
+                    # 💡 只有退出前明确处于磁吸状态的窗口，启动才自动恢复磁吸；普通边缘位置绝不误触发收缩！
+                    if saved_edge:
+                        dlg.anchor_edge = saved_edge
+                        dlg.normal_geometry = QRect(rx, ry, w, h)
+                        if saved_hidden:
+                            dlg.hide_to_edge()
+                        else:
+                            dlg.setWindowOpacity(1.0)
+                    else:
+                        dlg.anchor_edge = None
+                        dlg.normal_geometry = None
+                        dlg.is_hidden_state = False
+                        dlg.setWindowOpacity(1.0)
+                    dlg._save_sbc_geometry()
+                finally:
+                    dlg._is_programmatic_move = False
+    except Exception as e:
+        logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
 
 
 import copy
