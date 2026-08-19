@@ -2025,10 +2025,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"绑定 QApplication 屏幕信号异常: {e}")
 
-        # 后台定时比对心跳（每 1.5 秒快速比对拓扑指纹）
+        # 后台定时比对心跳（每 5 秒比对拓扑指纹）
         self._topology_timer = QtCore.QTimer(self)
         self._topology_timer.timeout.connect(self._check_screen_topology_heartbeat)
-        self._topology_timer.start(1500)
+        self._topology_timer.start(5000)
         
         # 防抖定时器：在接收到屏幕插拔事件后延时 600ms 触发拓扑重检
         self._topology_debounce_timer = QtCore.QTimer(self)
@@ -2042,19 +2042,29 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def _check_screen_topology_heartbeat(self):
         """定时心跳检查当前屏幕拓扑是否有变动"""
-        current_sig = core.get_screen_topology_signature()
-        if hasattr(self, '_last_topology_signature') and current_sig != self._last_topology_signature:
-            self._on_display_topology_changed()
+        try:
+            info = core.get_screen_resolution_summary()
+            # 🛡️ 息屏/休眠/锁屏瞬态异常防护：若无有效显示器或总宽度过小，直接跳过心跳判定
+            if not info or info.get("display_num", 0) <= 0 or info.get("total_width", 0) < 640:
+                return
+            current_sig = info.get("summary_signature", "")
+            if hasattr(self, '_last_topology_signature') and current_sig and current_sig != self._last_topology_signature:
+                self._on_display_topology_changed()
+        except Exception:
+            pass
 
     def _on_display_topology_changed(self):
         """物理显示器拓扑结构发生变更时的自适应处理（免冷启动）"""
-        current_sig = core.get_screen_topology_signature()
+        info = core.get_screen_resolution_summary()
+        if not info or info.get("display_num", 0) <= 0 or info.get("total_width", 0) < 640:
+            return
+            
+        current_sig = info.get("summary_signature", "")
         self._last_topology_signature = current_sig
         
-        info = core.get_screen_resolution_summary()
         self.log(f"⚡ [Screen Topology] 检测到物理显示器拓扑发生变更 (显示器: {info['display_num']} 个，物理总宽: {info['total_width']}px)，正在自适应重新匹配...")
         
-        # 重新检测与自适应切换方案
+        # 重新检测与自适应切换方案 (保持当前用户已选方案优先)
         self.detect_and_refresh_state(auto_switch_scheme=True)
 
     def detect_and_refresh_state(self, auto_switch_scheme=False):
@@ -2796,6 +2806,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def refresh_resolutions_combo(self, select_name=None):
         """刷新下拉配置选择框，带上中文分类标识"""
+        # 🛡️ 若未显式指定 select_name，优先保留当前下拉框中已经选中的方案（防止后台心跳刷新把 5376_Triton 篡改为 5376）
+        if not select_name:
+            current_selected = self.get_current_selected_resolution()
+            if current_selected and current_selected in self.config_manager.get_resolutions():
+                select_name = current_selected
+
         self.cb_resolutions.blockSignals(True)
         self.cb_resolutions.clear()
         
@@ -2832,15 +2848,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if matched_index >= 0:
                 self.cb_resolutions.setCurrentIndex(matched_index)
             else:
-                # 💥 自动创建匹配当前显示器的推荐配置方案，避免 Fallback 到错乱的方案中导致保存覆盖
-                self.log(f"⚡ 发现新屏幕拓扑，自动创建并配置新方案: {rec_name}...")
+                # 内存中创建匹配当前显示器的推荐配置方案，但不在此处自动调用 save() 覆盖磁盘，防止后台息屏时将挤压错乱坐标落盘
+                self.log(f"⚡ 发现新屏幕拓扑，自动挂载新方案: {rec_name}...")
                 info = core.get_screen_resolution_summary()
                 cat = "single_display" if info["display_num"] <= 1 else "multi_display"
                 
                 # 融合当前已存所有方案中的窗口规则列表，并探测当前桌面上实际位置作为初始位置
                 initial_mapping = self.create_merged_initial_mapping()
                 self.config_manager.set_resolution_mapping(rec_name, initial_mapping, cat)
-                self.config_manager.save()
                 
                 # 递归重新刷新一次下拉框，此时就能找到这个新创建的方案
                 self.cb_resolutions.blockSignals(False)
