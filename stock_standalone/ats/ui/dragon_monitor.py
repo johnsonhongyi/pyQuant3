@@ -87,6 +87,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._is_updating = False
 
         # 0. Magnetic snap setup & Timers (必须在 restore_state 前初始化，防覆盖重置)
+        self.current_df = None
+        self.last_sh_pct = 0.0
         self.anchor_edge = None
         self.is_hidden_state = False
         self.normal_geometry = None
@@ -443,6 +445,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if current_df is None or current_df.empty:
             return
             
+        self.current_df = current_df
+        self.last_sh_pct = sh_pct
         self._is_updating = True
         
         # 0. 锁定当前选中的股票代码以防止刷新时焦点丢失
@@ -570,7 +574,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             dff = safe_float(dff_dict.get(code_str, 0.0))
             dff2 = safe_float(dff2_dict.get(code_str, 0.0))
             dff3 = safe_float(dff3_dict.get(code_str, 0.0))
-            pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
+            pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
             rs_val = pct - sh_pct
             
             # Super Strong 2D/3D 加速多头条件过滤
@@ -618,7 +622,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 if row_name and row_name not in ('nan', '--', '0', ''):
                     name = row_name
                 price = safe_float(row.get('close', row.get('price', 0.0)))
-                pct = safe_float(row.get('ratio', row.get('percent', 0.0)))
+                pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
                 state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
                 dff = safe_float(dff_dict.get(code, 0.0))
                 dff2 = safe_float(dff2_dict.get(code, 0.0))
@@ -827,10 +831,13 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 self.blacklist_codes.remove(code_str)
             self.manual_codes.append(code_str)
             self._save_manual_codes()
-            # 立即触发主程序重绘
-            main_app = self._get_main_app()
-            if main_app and hasattr(main_app, 'refresh_realtime_ui'):
-                main_app.refresh_realtime_ui()
+            from global_favorites import GlobalFavoriteManager
+            try:
+                GlobalFavoriteManager().add_favorite_stock(code_str)
+            except Exception:
+                pass
+            if getattr(self, 'current_df', None) is not None:
+                self.update_data(self.current_df, getattr(self, 'last_sh_pct', 0.0))
 
     def _on_item_clicked(self, item):
         if item:
@@ -873,9 +880,16 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if not item: return
         
         row = item.row()
-        code = self.table.item(row, 0).text()
-        name = self.table.item(row, 1).text().replace("⭐ ", "")
-        source = self.table.item(row, 10).text()
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if not code_item:
+            return
+        code = code_item.text().strip()
+        name = name_item.text().replace("⭐ ", "").replace("★ ", "") if name_item else code
+        
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = (code in self.manual_codes) or (code in fav_mgr.get_favorite_stocks())
         
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -900,26 +914,38 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
         menu.addSeparator()
         
-        # Manage manual list
-        if source.startswith("手动"):
-            rm_act = menu.addAction("❌ 移出手动跟踪列表")
-            rm_act.triggered.connect(lambda: self._remove_from_manual(code))
+        # Manage favorite / manual list
+        if is_fav:
+            rm_act = menu.addAction(f"❌ 取消重点关注 / 手动跟踪 ({code})")
+            def _remove_fav():
+                self._remove_from_manual(code)
+                try:
+                    fav_mgr.remove_favorite_stock(code)
+                except Exception:
+                    pass
+            rm_act.triggered.connect(_remove_fav)
             
-            black_act = menu.addAction("🚫 移出并加入黑名单")
+            black_act = menu.addAction(f"🚫 移出并加入黑名单 ({code})")
             black_act.triggered.connect(lambda: self._add_to_blacklist(code))
         else:
-            add_act = menu.addAction("⭐ 转为重点手动跟踪")
-            add_act.triggered.connect(lambda: self._convert_to_manual(code))
+            add_act = menu.addAction(f"⭐ 设为重点关注 / 手动跟踪 ({code})")
+            def _add_fav():
+                self._convert_to_manual(code)
+                try:
+                    fav_mgr.add_favorite_stock(code)
+                except Exception:
+                    pass
+            add_act.triggered.connect(_add_fav)
             
-            black_act = menu.addAction("🚫 移除并加入黑名单")
+            black_act = menu.addAction(f"🚫 移除并加入黑名单 ({code})")
             black_act.triggered.connect(lambda: self._add_to_blacklist(code))
             
         menu.addSeparator()
         
         # Copy actions
-        copy_code = menu.addAction("复制代码")
+        copy_code = menu.addAction(f"📋 复制代码 {code}")
         copy_code.triggered.connect(lambda: QApplication.clipboard().setText(code))
-        copy_name = menu.addAction("复制名称")
+        copy_name = menu.addAction(f"📋 复制名称 {name}")
         copy_name.triggered.connect(lambda: QApplication.clipboard().setText(name))
         
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -928,17 +954,15 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if code not in self.manual_codes:
             self.manual_codes.append(code)
             self._save_manual_codes()
-            main_app = self._get_main_app()
-            if main_app and hasattr(main_app, 'refresh_realtime_ui'):
-                main_app.refresh_realtime_ui()
+            if getattr(self, 'current_df', None) is not None:
+                self.update_data(self.current_df, getattr(self, 'last_sh_pct', 0.0))
 
     def _remove_from_manual(self, code):
         if code in self.manual_codes:
             self.manual_codes.remove(code)
             self._save_manual_codes()
-            main_app = self._get_main_app()
-            if main_app and hasattr(main_app, 'refresh_realtime_ui'):
-                main_app.refresh_realtime_ui()
+            if getattr(self, 'current_df', None) is not None:
+                self.update_data(self.current_df, getattr(self, 'last_sh_pct', 0.0))
 
     def _add_to_blacklist(self, code):
         if code in self.manual_codes:
@@ -946,9 +970,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if code not in self.blacklist_codes:
             self.blacklist_codes.append(code)
         self._save_manual_codes()
-        main_app = self._get_main_app()
-        if main_app and hasattr(main_app, 'refresh_realtime_ui'):
-            main_app.refresh_realtime_ui()
+        if getattr(self, 'current_df', None) is not None:
+            self.update_data(self.current_df, getattr(self, 'last_sh_pct', 0.0))
 
     # --- Magnetic Snap Implementation ---
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
