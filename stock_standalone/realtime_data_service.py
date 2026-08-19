@@ -2124,16 +2124,20 @@ class MinuteKlineCache:
                         phase_mapped = phase_map_rev.get(raw_phase, raw_phase)
                         
                         # 引入细粒度过期过滤 (例如 3天/2天 交易日超时)
-                        entry_date = flag_data.get("entry_date")
-                        if not entry_date:
-                            entry_date_ts = flag_data.get("entry_ts", update_ts)
+                        entry_date = flag_data.get("entry_date") or flag_data.get("first_entry_date")
+                        if not entry_date or entry_date == "-":
+                            entry_date_ts = flag_data.get("first_entry_ts", flag_data.get("entry_ts", update_ts))
                             if entry_date_ts > 0:
                                 entry_date = datetime.fromtimestamp(entry_date_ts).strftime("%Y-%m-%d")
                             else:
                                 entry_date = cct.get_today()
                             flag_data["entry_date"] = entry_date
+                        flag_data["first_entry_date"] = entry_date
                         
-                        trade_dist = cct.get_trade_day_distance(entry_date)
+                        phase_entry_date = flag_data.get("phase_entry_date", entry_date)
+                        flag_data["phase_entry_date"] = phase_entry_date
+                        
+                        trade_dist = cct.get_trade_day_distance(phase_entry_date)
                         if trade_dist is None:
                             trade_dist = 0
                             
@@ -2147,13 +2151,15 @@ class MinuteKlineCache:
                         if is_expired or (need_cleanup and phase_mapped == "CONSOLIDATING"):
                             # 细粒度超时或满溢，直接将其重置为 INIT，且不加入 valid_pool
                             flag_data["phase"] = "INIT"
-                            flag_data["entry_ts"] = now_ts
+                            flag_data["phase_ts"] = now_ts
                             flag_data["update_ts"] = now_ts
                             flag_data["last_fail_ts"] = now_ts  # [NEW] 写入冷却保护，当天不得重新进入潜伏期
                         else:
                             flag_data["phase"] = phase_mapped
                             if "entry_ts" not in flag_data:
                                 flag_data["entry_ts"] = update_ts
+                            if "first_entry_ts" not in flag_data:
+                                flag_data["first_entry_ts"] = flag_data.get("entry_ts", update_ts)
                             
                             if code in state.get("v_reversal_pool", []):
                                 valid_pool.add(code)

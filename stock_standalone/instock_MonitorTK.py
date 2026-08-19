@@ -22122,8 +22122,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         state["anchor_low"] = float(klines[0]['close']) if klines else 0.0
                                         klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
                                         state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
-                                        state["entry_ts"] = time.time()
-                                        state["entry_date"] = cct.get_today()
+                                        
+                                        # 保持最初入池时间，若已有则继承，首次进池才赋予今天
+                                        existing_entry = state.get("entry_date") or state.get("first_entry_date")
+                                        if not existing_entry or existing_entry == "-":
+                                            state["entry_date"] = cct.get_today()
+                                            state["first_entry_date"] = cct.get_today()
+                                            state["entry_ts"] = time.time()
+                                            state["first_entry_ts"] = time.time()
+                                        else:
+                                            state["entry_date"] = existing_entry
+                                            state["first_entry_date"] = existing_entry
+                                        if "phase_entry_date" not in state:
+                                            state["phase_entry_date"] = cct.get_today()
+                                            state["phase_ts"] = time.time()
+                                            
                                         state["last_fail_ts"] = 0
                                         state["name"] = get_stock_name(code)
                                         # 注入时预填 structure 占位，由状态机下次 tick 通过自愈补齐器更新为真实值
@@ -22292,7 +22305,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         structure_val = "-"
                                     row_values.append(structure_val)
                                 elif col == "entry_date":
-                                    row_values.append(flags.get("entry_date", "-"))
+                                    row_values.append(flags.get("first_entry_date") or flags.get("entry_date", "-"))
                                 elif col == "anchor_low":
                                     row_values.append(anchor_low_str)
                                 elif col == "vol_ratio":
@@ -22403,8 +22416,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             state["anchor_low"] = float(klines_1[0]['close']) if klines_1 else 0.0
                             klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
                             state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
-                            state["entry_ts"] = time.time()
-                            state["entry_date"] = cct.get_today()
+                            
+                            # 保持最初入池时间，若已有则继承，首次进池才赋予今天
+                            existing_entry = state.get("entry_date") or state.get("first_entry_date")
+                            if not existing_entry or existing_entry == "-":
+                                state["entry_date"] = cct.get_today()
+                                state["first_entry_date"] = cct.get_today()
+                                state["entry_ts"] = time.time()
+                                state["first_entry_ts"] = time.time()
+                            else:
+                                state["entry_date"] = existing_entry
+                                state["first_entry_date"] = existing_entry
+                            state["phase_entry_date"] = cct.get_today()
+                            state["phase_ts"] = time.time()
+                            
                             state["last_fail_ts"] = 0
                             # 手动加入或强设潜伏时，同时获取并持久化名字，实现一次解决
                             state["name"] = get_stock_name(code)
@@ -22440,7 +22465,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
                     try:
                         flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
-                        entry_date = flags.get("entry_date", None)
+                        entry_date = flags.get("first_entry_date") or flags.get("entry_date", None)
                         if entry_date == "-":
                             entry_date = None
                     except Exception:
