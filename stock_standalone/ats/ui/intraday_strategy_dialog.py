@@ -2027,23 +2027,47 @@ class IntegratedTradingStrategyPanel(QWidget):
     def _on_open_sbc_chart_dialog(self):
         """【📈 打开/激活 SBC 独立分时走势图窗口】支持多标的多窗口并行对比观察，非模态、非置顶"""
         code = getattr(self, 'code', getattr(self, '_current_stock_code', '688826'))
-        if not hasattr(self, '_sbc_dialogs'):
-            self._sbc_dialogs = {}
+        open_sbc_chart_dialog(self, code)
 
-        # 💡 按 code 独立维护 SBC 窗口句柄！同一标的唤醒已有窗口，不同标的独立新建并行观察窗口！
-        dlg = self._sbc_dialogs.get(code)
-        if dlg is None or not dlg.isVisible():
-            dlg = SBCIntradayChartDialog(parent=self, code=code, engine=self.engine)
-            self._sbc_dialogs[code] = dlg
-        else:
-            dlg.code = code
-            dlg.lbl_title.setText(f"📊 标的: {code} {resolve_stock_name(code)} | SBC 实盘走势基准线")
-            dlg.setWindowTitle(f"📈 【{code} {resolve_stock_name(code)}】SBC 实盘分时走势与关键阶梯基准图 (独立窗口)")
-            dlg.reload_chart()
 
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826") -> Optional[SBCIntradayChartDialog]:
+    """
+    【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
+    """
+    if not code:
+        return None
+    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+    if not c_clean or c_clean == "000000":
+        return None
+
+    main_win = parent_win.window() if parent_win else None
+    target_win = main_win or parent_win
+
+    if target_win:
+        if not hasattr(target_win, '_sbc_dialogs'):
+            target_win._sbc_dialogs = {}
+        sbc_dict = target_win._sbc_dialogs
+    else:
+        if not hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs'):
+            SBCIntradayChartDialog._global_sbc_dialogs = {}
+        sbc_dict = SBCIntradayChartDialog._global_sbc_dialogs
+
+    dlg = sbc_dict.get(c_clean)
+    engine = IntradayStrategyEngine.get_instance()
+
+    if dlg is None or not dlg.isVisible():
+        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine)
+        sbc_dict[c_clean] = dlg
+    else:
+        dlg.code = c_clean
+        dlg.lbl_title.setText(f"📊 标的: {c_clean} {resolve_stock_name(c_clean)} | SBC 实盘走势基准线")
+        dlg.setWindowTitle(f"📈 【{c_clean} {resolve_stock_name(c_clean)}】SBC 实盘分时走势与关键阶梯基准图")
+        dlg.reload_chart()
+
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
 
     def _make_param_spin_handler(self, row: int, node_id: str):
         def _handler(val: float):

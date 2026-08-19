@@ -1218,6 +1218,12 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         act_link = menu.addAction(f"📊 联动查看 {name} ({code}) 分时K线")
         act_link.triggered.connect(lambda: self._on_item_clicked(c_item))
 
+        act_sbc = menu.addAction(f"📈 使用 SBC 打开独立分时图 ({code})")
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code)
+        act_sbc.triggered.connect(_open_sbc)
+
         act_strategy = menu.addAction(f"🎯 调出 {name} 分时阶梯交易策略")
         act_strategy.triggered.connect(lambda: self._on_item_double_clicked(c_item))
 

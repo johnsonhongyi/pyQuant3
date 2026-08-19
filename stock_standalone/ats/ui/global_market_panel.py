@@ -630,6 +630,13 @@ class GlobalMarketPanel(QWidget):
         kline_action.triggered.connect(lambda: self._open_kline_dialog(symbol, name))
         menu.addAction(kline_action)
 
+        sbc_action = QAction(f"📈 使用 SBC 打开独立分时图 ({symbol})", self)
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, symbol)
+        sbc_action.triggered.connect(_open_sbc)
+        menu.addAction(sbc_action)
+
         menu.addSeparator()
 
         copy_action = QAction(f"📋 复制资产代码 {symbol}", self)

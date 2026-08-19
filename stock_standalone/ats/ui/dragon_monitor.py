@@ -892,6 +892,12 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         linkage_act = menu.addAction(f"⚡ 发送到异动联动 ({code})")
         linkage_act.triggered.connect(lambda: send_to_linkage(code, name, self))
         
+        sbc_act = menu.addAction(f"📈 使用 SBC 打开独立分时图 ({code})")
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code)
+        sbc_act.triggered.connect(_open_sbc)
+
         menu.addSeparator()
         
         # Manage manual list
