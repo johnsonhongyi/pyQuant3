@@ -739,10 +739,16 @@ def get_app_root() -> str:
     
     if is_frozen or is_nuitka:
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
+        # 兼容若打包 EXE 置于 webTools 子目录时的物理根目录提升
+        if os.path.basename(calculated_root).lower() in ('webtools', 'window_manager'):
+            calculated_root = os.path.dirname(calculated_root)
+            if os.path.basename(calculated_root).lower() == 'webtools':
+                calculated_root = os.path.dirname(calculated_root)
     else:
         # 对应本地开发环境项目根目录 (webTools/window_manager 的上上级)
         calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
     return calculated_root
 
 
@@ -784,14 +790,25 @@ def get_conf_path(fname: str) -> str:
 
 
 class ConfigManager:
-    """管理分类持久化的 JSON 配置"""
+    """管理分类持久化的 JSON 配置，具备基于磁盘 mtime 的自动热重载与防覆盖机制"""
     
     def __init__(self, config_path=None):
         if config_path is None:
             config_path = get_conf_path("window_layout_config.json")
         self.config_path = config_path
         self.config_data = {}
+        self._last_mtime = 0.0
         self.load()
+
+    def _check_and_reload(self):
+        """检查物理磁盘文件是否有外部更新，若有则自动热重载"""
+        try:
+            if os.path.exists(self.config_path):
+                current_mtime = os.path.getmtime(self.config_path)
+                if current_mtime > self._last_mtime:
+                    self.load()
+        except Exception:
+            pass
 
     def load(self):
         """从文件读取 JSON 配置"""
@@ -801,6 +818,7 @@ class ConfigManager:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self.config_data = json.load(f)
+                self._last_mtime = os.path.getmtime(self.config_path)
                 loaded = True
             except Exception as e:
                 print(f"Failed to load config from {self.config_path}: {e}")
@@ -817,12 +835,14 @@ class ConfigManager:
                 self.config_data[cat] = {}
             
     def save(self):
-        """保存当前内存中的配置到文件"""
+        """保存当前内存中的配置到文件，并同步更新 mtime"""
         try:
             # 确保物理持久化文件夹存在
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.config_data, f, ensure_ascii=False, indent=4)
+            if os.path.exists(self.config_path):
+                self._last_mtime = os.path.getmtime(self.config_path)
             return True
         except Exception as e:
             print(f"Failed to save config to {self.config_path}: {e}")
@@ -830,16 +850,19 @@ class ConfigManager:
 
     def get_categories(self) -> list:
         """获取所有分类"""
+        self._check_and_reload()
         return ["single_display", "multi_display", "custom_special"]
 
     def get_resolutions_by_category(self, category: str) -> list:
         """获取特定分类下的所有方案名"""
+        self._check_and_reload()
         if category in self.config_data:
             return sorted(list(self.config_data[category].keys()))
         return []
 
     def get_resolutions(self) -> list:
         """获取所有可用分辨率配置方案的名称（扁平列表）"""
+        self._check_and_reload()
         res_list = []
         for cat in self.get_categories():
             res_list.extend(self.get_resolutions_by_category(cat))
@@ -847,13 +870,15 @@ class ConfigManager:
 
     def get_category_of_resolution(self, res_name: str) -> str:
         """判断一个方案名属于哪个分类"""
+        self._check_and_reload()
         for cat in self.get_categories():
-            if res_name in self.config_data[cat]:
+            if res_name in self.config_data.get(cat, {}):
                 return cat
         return "custom_special" # 默认分类
 
     def get_resolution_mapping(self, res_name: str) -> dict:
         """获取指定分辨率配置的窗口坐标映射表"""
+        self._check_and_reload()
         for cat in self.get_categories():
             if res_name in self.config_data.get(cat, {}):
                 return self.config_data[cat][res_name]
@@ -861,6 +886,7 @@ class ConfigManager:
 
     def set_resolution_mapping(self, res_name: str, mapping: dict, category: str = None):
         """更新指定分辨率的配置"""
+        self._check_and_reload()
         if not category:
             category = self.get_category_of_resolution(res_name)
             
@@ -870,19 +896,21 @@ class ConfigManager:
             
         # 如果该配置在其他分类中也存在，先删掉，避免重复
         for cat in self.get_categories():
-            if cat != category and res_name in self.config_data[cat]:
+            if cat != category and res_name in self.config_data.get(cat, {}):
                 del self.config_data[cat][res_name]
                 
         self.config_data[category][res_name] = mapping
         
     def delete_resolution(self, res_name: str):
         """删除某个分辨率的配置"""
+        self._check_and_reload()
         for cat in self.get_categories():
             if res_name in self.config_data.get(cat, {}):
                 del self.config_data[cat][res_name]
 
     def get_acer_performance_config(self) -> dict:
         """获取 Acer 性能模式配置段，带有默认自愈功能"""
+        self._check_and_reload()
         default_cfg = {
             "overclock_mode": "Fast",  # "Default" (Normal/0), "Fast" (1), "Extreme" (2)
             "coolboost": True,
@@ -1016,9 +1044,7 @@ def restore_display_configuration(filename="display_config.json") -> tuple:
         in_filename = get_conf_path(file_key)
 
         if not os.path.exists(in_filename):
-            # 自动保存当前作为默认
-            save_display_configuration(filename)
-            return False, f"未找到屏幕组合备份: {in_filename}，已将当前排布存为默认备份"
+            return False, f"未找到对应屏幕拓扑的配置备份文件: {os.path.basename(in_filename)} (当前屏幕指纹: {summary})"
 
         with open(in_filename, "r", encoding="utf-8") as f:
             saved_config = json.load(f)

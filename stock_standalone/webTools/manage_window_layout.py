@@ -30,9 +30,17 @@ def get_app_root() -> str:
     is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
     if is_frozen or is_nuitka:
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
+        # 兼容若打包 EXE 置于 webTools 或 window_manager 子目录时的物理根目录提升
+        if os.path.basename(calculated_root).lower() in ('webtools', 'window_manager'):
+            calculated_root = os.path.dirname(calculated_root)
+            if os.path.basename(calculated_root).lower() == 'webtools':
+                calculated_root = os.path.dirname(calculated_root)
     else:
         # 开发环境下，项目根目录是 webTools 的上级目录
         calculated_root = parent_dir
+
+    # 物理锁定并写入环境变量，保障所有子进程/模块路径 100% 统一
+    os.environ["INSTOCK_APP_ROOT"] = calculated_root
 
     # 强制将当前进程的工作目录切换为定位到的绝对物理根目录，防止通过右键快捷菜单或计划任务等启动时导致的 CWD 不对
     try:
