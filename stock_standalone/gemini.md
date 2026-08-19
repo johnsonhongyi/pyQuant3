@@ -14361,3 +14361,14 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
 ## [2026-08-10 14:09:41] 自动持久化启动自动/停止自动状态与初始化自动加载
 - 关联文件: popularity_resonance_gui.py
 - 功能要点: 1. load/save_config_settings增加auto_refresh字段; 2. toggle_loop切换即刻自动写盘; 3. __init__初始化若配置开启则自动恢复唤起.
+
+## [2026-08-19 20:47:00] 修复通达信信号监听器启动批量误触发联动与播报bug (启动静默加载)
+- **关联文件**:
+  - `stock_standalone/ats/tdx_signal_watcher.py`
+  - `stock_standalone/ats/ui/main_window.py`
+  - `stock_standalone/tests/test_tdx_signal_watcher.py`
+- **修复要点**:
+  1. TdxSignalWatcher 维护 `_is_initial_load` 状态：初次启动扫描已有文件历史信号时标记 `sig_dict['is_initial_load'] = True`，处理完毕后自动切为 `False`，后续盘中增量行正常标记为 `False`。
+  2. ATS 主窗口 `_on_tdx_signal_detected` 增加初次加载隔离：对 `is_initial_load=True` 的历史信号仅静默写入 `SignalLedger` 账本和信号列表用于手动查看，坚决不触发 `link_stock` 联动切股和 `AlertNotifier` 桌面弹窗与语音播报。
+  3. 增加单元测试覆盖初次扫描与增量新行的状态标识与主窗口防联动行为验证。
+

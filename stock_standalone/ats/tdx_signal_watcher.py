@@ -198,6 +198,7 @@ class TdxSignalWatcher(QThread):
         self.flag_map = load_ordermon_flag_map()
         self._last_file_path = None
         self._file_offset = 0
+        self._is_initial_load = True
 
     def stop(self):
         """停止轮询监听 (安全等待线程退出，避免 QThread: Destroyed while still running)"""
@@ -217,10 +218,11 @@ class TdxSignalWatcher(QThread):
             try:
                 sig_path = cct.get_tdx_signal_path()
                 
-                # 若监听路径变动，重置 offset
+                # 若监听路径变动，重置 offset 与 initial_load 标记
                 if sig_path != self._last_file_path:
                     self._last_file_path = sig_path
                     self._file_offset = 0
+                    self._is_initial_load = True
                     self.processed_hashes.clear()
                     self.flag_map = load_ordermon_flag_map()
 
@@ -230,6 +232,7 @@ class TdxSignalWatcher(QThread):
                     # 如果文件被重置截断，Offset 复位
                     if file_size < self._file_offset:
                         self._file_offset = 0
+                        self._is_initial_load = True
 
                     if file_size > self._file_offset:
                         with open(sig_path, 'r', encoding='gbk', errors='ignore') as f:
@@ -237,6 +240,7 @@ class TdxSignalWatcher(QThread):
                             new_lines = f.readlines()
                             self._file_offset = f.tell()
 
+                        is_init = self._is_initial_load
                         for line in new_lines:
                             line_str = line.strip()
                             if not line_str:
@@ -249,14 +253,19 @@ class TdxSignalWatcher(QThread):
 
                             sig_dict = parse_tdx_signal_line(line_str, self.flag_map)
                             if sig_dict:
+                                sig_dict['is_initial_load'] = is_init
                                 # 校验是否为今日信号（盘中实时消费）
                                 sig_date = sig_dict.get('date_str', '')
                                 if sig_date == today_ymd or not sig_date:
-                                    logger.info(
-                                        f"[TdxSignalWatcher] 捕获通达信信号: {sig_dict['code']} {sig_dict['name']} "
-                                        f"[{sig_dict['flag_label']}] {sig_dict['direction_cn']} 价格:{sig_dict['price']} 时刻:{sig_dict['time_str']}"
-                                    )
+                                    if not is_init:
+                                        logger.info(
+                                            f"[TdxSignalWatcher] 捕获通达信信号: {sig_dict['code']} {sig_dict['name']} "
+                                            f"[{sig_dict['flag_label']}] {sig_dict['direction_cn']} 价格:{sig_dict['price']} 时刻:{sig_dict['time_str']}"
+                                        )
                                     self.signal_detected.emit(sig_dict)
+
+                        if is_init:
+                            self._is_initial_load = False
 
             except Exception as e:
                 logger.error(f"[TdxSignalWatcher] 轮询异常: {e}")

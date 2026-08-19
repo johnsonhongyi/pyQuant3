@@ -4619,6 +4619,12 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'refresh_realtime_ui'):
             self.refresh_realtime_ui()
 
+        is_initial_load = sig_dict.get('is_initial_load', False)
+
+        # 启动初始扫描历史信号时，仅静默载入账本用于列表展示，坚决不触发报警通知与切股联动
+        if is_initial_load:
+            return
+
         # 5. 状态栏与控制台提醒 (带 AlertNotifier 去重语音与 Toast 提示)
         period_cn = sig_dict.get('period_cn', '')
         period_str = f"[{period_cn}] " if period_cn else ""
