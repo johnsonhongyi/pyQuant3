@@ -259,6 +259,14 @@ class BaseATSTableWidget(QTableWidget):
         linkage_action.triggered.connect(lambda: send_to_linkage(code_clean, name, self))
         menu.addAction(linkage_action)
         
+        # 📈 使用 SBC 打开独立分时图
+        sbc_action = QAction(f"📈 使用 SBC 打开独立分时图 ({code_clean})", self)
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code_clean)
+        sbc_action.triggered.connect(_open_sbc)
+        menu.addAction(sbc_action)
+
         menu.addSeparator()
         
         if is_fav:
