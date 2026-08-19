@@ -1,3 +1,17 @@
+## 2026-08-19 23:00
+- [x] **彻底根治 Tk V型反转监控潜伏池入池时间 (`entry_date`) 每日被覆写 Bug，实现最初挖掘入池时间永久锁定与阶段进入时间解耦 (`realtime_data_service.py`, `instock_MonitorTK.py`, `tests/test_v_reversal_entry_date_fix.py`)**：
+    - [x] **最初入池时间与波段阶段时间精准解耦 (KISS / SRP)**：
+        - 彻底排查并根治了 `MinuteKlineCache.update_wave_structure_state` 在状态跃迁 (`CONSOLIDATING` -> `WAVE_UP` -> `PULLBACK` -> `WAVE_UP_2`) 及强势顺延保护时直接覆写 `state["entry_date"] = today_str` 的死穴；
+        - 将时间维度清晰解耦为 **`first_entry_date` / `entry_date` (最初入池挖掘时间)** 与 **`phase_entry_date` / `phase_ts` (当前波段阶段进入时间)**；
+        - 股票一旦首次被挖掘/识别或手动加入潜伏池，`first_entry_date` / `entry_date` 永久固化锁定，后续无论跨日计算、波段流转、强势顺延还是重点个股同步，均**绝对不被覆写**；
+        - 状态机内部各阶段超时（3交易日/2交易日）与顺延判定全部改用 `phase_entry_date`，既保证了波段生命周期精准跟踪，又杜绝了冷启动加载恢复时将多日前入池的健康活跃股误判淘汰。
+    - [x] **UI 呈现与联动交互精准对齐**：
+        - `instock_MonitorTK.py` 中的表格渲染列 `col == "entry_date"` 统一优先取 `first_entry_date`（回退 `entry_date`）；
+        - `refresh_pool_data`（重点关注个股自动同步）与 `force_consolidate_stock`（手动加入）加入防御继承逻辑，已存在入池时间的标的绝不被 `cct.get_today()` 重置；
+        - 双击联动 `view_stock_kline` 优先以最初入池时间调起 `link_to_visualizer`，精准定位至最初挖掘入池的历史 K 线锚点。
+    - [x] **单元测试全量 100% 验证通过**：
+        - 新增专项测试 `tests/test_v_reversal_entry_date_fix.py`，全量覆盖首次入池记录、跨日多轮更新防覆写、多波段状态跃迁与顺延防覆写、重点关注同步/手动操作防覆写、以及持久化保存与恢复断言，结合全量测试套件 **100% PASSED**！
+
 ## 2026-08-19 16:00
 - [x] **根治 ATS 大级别 MA20d 回调跟踪器 (SwingStateTable) 偏离度严重失真 Bug，实现权威行情 MA20d/MA5d 动态接入与全管道数据对齐 (`ats/ui/main_window.py`, `ats/swing_tracker.py`, `tests/test_ma20_deviation_fix.py`)**：
     - [x] **数据源权威 MA20d 强优先级接入与对齐**：
