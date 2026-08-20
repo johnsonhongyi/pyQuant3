@@ -8,23 +8,25 @@ import sys
 import os
 import multiprocessing
 
-# 必须在导入任何 PyQt6 组件前开启 Windows HighDPI 高分屏自适应
-os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
-os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
-
-if __name__ == "__main__":
-    multiprocessing.freeze_support()
-
 # Ensure project root is in python path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
-    from sys_utils import get_app_root
+    from sys_utils import get_app_root, setup_qt_clean_environment
     project_root = get_app_root()
+    setup_qt_clean_environment()
 except Exception:
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false;qt.qpa.fonts.debug=false;qt.text.font.warning=false;qt.text.font.debug=false;qt.qpa.fonts=false"
 
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+    try:
+        from sys_utils import setup_qt_clean_environment
+        setup_qt_clean_environment()
+    except Exception:
+        pass
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
