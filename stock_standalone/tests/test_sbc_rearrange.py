@@ -15,7 +15,16 @@ _PROJECT_ROOT = os.path.dirname(_CUR_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog, rearrange_all_sbc_windows
+import json
+from ats.ui.intraday_strategy_dialog import (
+    SBCIntradayChartDialog,
+    rearrange_all_sbc_windows,
+    open_sbc_chart_dialog,
+    save_all_open_sbc_windows,
+    restore_all_open_sbc_windows,
+    _get_sbc_layout_cfg_path,
+    VALID_SBC_PERIODS
+)
 from ats.ui.main_window import ATSMainWindow
 
 
@@ -105,3 +114,168 @@ def test_rearrange_no_active_dialogs_safe(qapp):
     """测试在无可见 SBC 窗口时调用 rearrange_all_sbc_windows 安全返回不抛异常"""
     # 保证没有抛出任何未捕获异常
     rearrange_all_sbc_windows(parent_win=None)
+
+
+def test_sbc_set_period_mode(qapp):
+    """测试 SBCIntradayChartDialog 的 set_period_mode 切换、按钮选中状态同步与非法值兜底"""
+    dlg = SBCIntradayChartDialog(code="688826")
+    try:
+        dlg.show()
+        qapp.processEvents()
+
+        # 1. 默认应为 '1m'
+        assert dlg._current_period_mode == "1m"
+        btn_1m = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "1m"), None)
+        assert btn_1m is not None and btn_1m.isChecked()
+
+        # 2. 依次测试各个有效周期的切换与 UI 按钮选中态同步
+        test_periods = ["2d", "3d", "5m", "30m", "60m", "day"]
+        for p in test_periods:
+            dlg.set_period_mode(p, reload=False, save=False)
+            assert dlg._current_period_mode == p
+            btn = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == p), None)
+            assert btn is not None and btn.isChecked()
+            assert not btn_1m.isChecked()
+
+        # 3. 测试非法周期模式传入时的安全兜底 (自动回退至 '1m')
+        dlg.set_period_mode("invalid_mode_xyz", reload=False, save=False)
+        assert dlg._current_period_mode == "1m"
+        assert btn_1m.isChecked()
+
+        dlg.set_period_mode(None, reload=False, save=False)
+        assert dlg._current_period_mode == "1m"
+        assert btn_1m.isChecked()
+
+    finally:
+        dlg.close()
+
+
+def test_sbc_save_all_open_windows_with_period(qapp):
+    """测试多个处于不同周期的 SBC 窗口在调用 save_all_open_sbc_windows 时能够正确落盘周期模式"""
+    dlg1 = SBCIntradayChartDialog(code="688826")
+    dlg2 = SBCIntradayChartDialog(code="002189")
+    dlg3 = SBCIntradayChartDialog(code="300570")
+
+    try:
+        dlg1.show()
+        dlg2.show()
+        dlg3.show()
+        qapp.processEvents()
+
+        # 设置不同周期
+        dlg1.set_period_mode("5m", reload=False, save=False)
+        dlg2.set_period_mode("2d", reload=False, save=False)
+        dlg3.set_period_mode("day", reload=False, save=False)
+
+        # 全局持久化保存
+        save_all_open_sbc_windows()
+
+        # 检查持久化配置文件
+        cfg_path = _get_sbc_layout_cfg_path()
+        assert os.path.exists(cfg_path)
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        sbc_list = data.get("sbc_open_windows", [])
+        saved_dict = {item.get("code"): item.get("period_mode") for item in sbc_list}
+
+        assert saved_dict.get("688826") == "5m"
+        assert saved_dict.get("002189") == "2d"
+        assert saved_dict.get("300570") == "day"
+
+        # 检查 sbc_period_modes 字段
+        assert "sbc_period_modes" in data
+        assert data["sbc_period_modes"].get("688826") == "5m"
+        assert data["sbc_period_modes"].get("002189") == "2d"
+        assert data["sbc_period_modes"].get("300570") == "day"
+
+    finally:
+        dlg1.close()
+        dlg2.close()
+        dlg3.close()
+
+
+def test_sbc_restore_all_open_windows_with_period(qapp):
+    """测试 restore_all_open_sbc_windows 启动恢复时能准确还原各窗口原本选择的周期"""
+    cfg_path = _get_sbc_layout_cfg_path()
+    mock_data = {
+        "sbc_open_windows": [
+            {"code": "600519", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "30m"},
+            {"code": "000001", "x": 200, "y": 200, "width": 680, "height": 420, "period_mode": "3d"}
+        ],
+        "sbc_period_modes": {
+            "600519": "30m",
+            "000001": "3d"
+        }
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(mock_data, f, ensure_ascii=False, indent=2)
+
+    # 恢复窗口
+    restore_all_open_sbc_windows(parent_win=None)
+    qapp.processEvents()
+
+    restored_dlgs = [w for w in QApplication.topLevelWidgets() if isinstance(w, SBCIntradayChartDialog) and w.isVisible()]
+    try:
+        dlg_map = {dlg.code: dlg for dlg in restored_dlgs}
+        assert "600519" in dlg_map
+        assert "000001" in dlg_map
+
+        assert dlg_map["600519"]._current_period_mode == "30m"
+        btn_30m = next((b for b in dlg_map["600519"].btn_group_period.buttons() if b.property("period_mode") == "30m"), None)
+        assert btn_30m is not None and btn_30m.isChecked()
+
+        assert dlg_map["000001"]._current_period_mode == "3d"
+        btn_3d = next((b for b in dlg_map["000001"].btn_group_period.buttons() if b.property("period_mode") == "3d"), None)
+        assert btn_3d is not None and btn_3d.isChecked()
+
+    finally:
+        for dlg in restored_dlgs:
+            dlg.close()
+
+
+def test_open_sbc_chart_dialog_with_explicit_period(qapp):
+    """测试 open_sbc_chart_dialog 显式传入 period_mode 参数时正确初始化与唤醒切换"""
+    dlg = open_sbc_chart_dialog(None, code="688981", period_mode="60m")
+    try:
+        assert dlg is not None
+        assert dlg._current_period_mode == "60m"
+        btn_60m = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "60m"), None)
+        assert btn_60m is not None and btn_60m.isChecked()
+
+        # 再次调用同一个窗口，切换到 5m
+        dlg2 = open_sbc_chart_dialog(None, code="688981", period_mode="5m")
+        assert dlg2 is dlg
+        assert dlg._current_period_mode == "5m"
+        btn_5m = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "5m"), None)
+        assert btn_5m is not None and btn_5m.isChecked()
+
+    finally:
+        if dlg:
+            dlg.close()
+
+
+def test_backward_compatibility_fallback_to_1m(qapp):
+    """测试当历史配置文件缺少 period_mode 字段时，自动安全回退为 1m 分时且不报错"""
+    cfg_path = _get_sbc_layout_cfg_path()
+    mock_legacy_data = {
+        "sbc_open_windows": [
+            {"code": "002594", "x": 150, "y": 150, "width": 680, "height": 420}
+        ]
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(mock_legacy_data, f, ensure_ascii=False, indent=2)
+
+    restore_all_open_sbc_windows(parent_win=None)
+    qapp.processEvents()
+
+    restored_dlgs = [w for w in QApplication.topLevelWidgets() if isinstance(w, SBCIntradayChartDialog) and w.isVisible() and w.code == "002594"]
+    try:
+        assert len(restored_dlgs) == 1
+        dlg = restored_dlgs[0]
+        assert dlg._current_period_mode == "1m"
+        btn_1m = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "1m"), None)
+        assert btn_1m is not None and btn_1m.isChecked()
+    finally:
+        for dlg in restored_dlgs:
+            dlg.close()
