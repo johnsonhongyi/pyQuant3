@@ -988,6 +988,20 @@ class TDXRealtimeFetcher:
             df["boll_upper"] = df["boll_mid"] + 2.0 * std20
             df["boll_lower"] = df["boll_mid"] - 2.0 * std20
 
+            # ⚡ 接入通达信自动通道 (Trend Channel) + 上涨支撑线 + 翻转线 + Fibonacci + 拐点启动信号
+            try:
+                from JSONData.tdx_data_Day import calc_trend_channel
+                df = calc_trend_channel(df)
+            except Exception as e_tc:
+                logger.debug(f"calc_trend_channel 向量化通道计算异常: {e_tc}")
+
+            # ⚡ 数据处理后单独调用内置神奇九转处理，不影响原有通道基础预处理逻辑
+            try:
+                from JSONData.tdx_data_Day import td_sequential_fast
+                df = td_sequential_fast(df, lookback=4)
+            except Exception as e_td:
+                logger.debug(f"td_sequential_fast 神奇九转计算异常: {e_td}")
+
             df.set_index("time", inplace=True)
             return df
         except Exception as e:

@@ -1,3 +1,100 @@
+## 2026-08-20 17:40
+- [x] **修复德明利等标的多周期图形绘制异常 (QPolygonF 未导入导致 NameError 中断 K 线循环) (`ats/ui/intraday_strategy_dialog.py`)**：
+    - [x] **根因定位与彻底修复**：
+        - 启动/逃顶信号波段聚类在绘制中间节点（`middle` 角色）微小箭头时，调用了未在顶部导入的 `QPolygonF`，在遇到包含多段波段推进的个股（如德明利 001309）时触发 `NameError`，导致 `for i in range(n)` K 线循环在该 K 棒处中断退出；
+        - 顶部完整导入 `QPointF`, `QPolygon`, `QPolygonF`，并将微图标绘制重构为标准整数 `QPolygon([QPoint(...), ...])`，完全杜绝中断异常；
+    - [x] **全量单元测试与多周期验证**：
+        - 15 个多周期及信号测试 100% 通过（0 错误，0 异常）。
+
+## 2026-08-20 17:15
+- [x] **九转序列精简、启动/逃顶信号波段聚类统计与支撑/反转标签统一移至右侧 Y 轴刻度栏 (`ats/ui/intraday_strategy_dialog.py`, `JSONData/tdx_data_Day.py`, `tests/test_sbc_multi_period_signals.py`)**：
+    - [x] **神奇九转精简 (过滤碎片数字，连续 9 转去重) (KISS / Visual Polish)**：
+        - 过滤 `< 4` 的震荡碎片数字（不显示 1, 2, 3，杜绝碎步杂音），仅在成熟序列（4~8）与见顶/探底（9）时显示；
+        - 连续触发 9 转时，仅在首个转折点绘制醒目高亮圆角胶囊 `9`，后续仅绘制纯数字，彻底杜绝大方块重叠堆积。
+    - [x] **启动信号与逃顶信号波段聚类精简 (首尾统计数量，中间仅保留精巧微图标)**：
+        - 引入波段聚类引擎，多段连续推进的启动/逃顶信号：首个节点显示总计统计 `🚀启动×N`（或 `⚠️逃顶×N`），末尾显示收尾，中间节点取消大文本大方块，仅保留精巧微型粉紫三角/金黄倒三角（零遮挡蜡烛）。
+    - [x] **支撑与反转价标签统一定位至右侧 Y 轴刻度栏 (彻底消除主图内部悬浮框遮挡)**：
+        - 彻底移除主图内部右下角悬浮面板（彻底解决窗口缩小压盖 K 线的痛点）；
+        - 将支撑价、反转价与黄金分割、开盘价、目标价统一移至右侧 Y 轴外侧刻度区（`margin_right` 拓宽至 75px），并加入智能垂直避让排序算法，字字清晰、主图 100% 纯净舒展。
+
+## 2026-08-20 16:45
+- [x] **通达信标准神奇九转 (TD Sequential 9) 完整呈现与 10 根 K 棒局部极值价格去重 (`JSONData/tdx_data_Day.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`, `tests/verify_688826_channel.py`)**：
+    - [x] **数据管道解耦与内置九转算法单独调用 (KISS / DRY / SOLID)**：
+        - `calc_trend_channel(df)` 保持纯净的基础通道、支撑线、Fibonacci 与拐点特征计算，不硬编码九转逻辑；
+        - 在 `ats/tdx_realtime_fetcher.py` 中数据基础处理完成后，单独调用内置 `td_sequential_fast(df)`，计算 `td_sell_count`（上涨序列 1~9）与 `td_buy_count`（下跌序列 1~9），完全不影响原有基础数据流程；
+        - **上涨九转 (卖出结构)**：在蜡烛图上方绘制品红数字 1~8，第 9 转高潮触发时绘制醒目高亮圆角红底 `9` 胶囊；
+        - **下跌九转 (买入结构)**：在蜡烛图下方绘制薄荷绿数字 1~8，第 9 转探底反转时绘制醒目高亮圆角青绿底 `9` 胶囊；
+        - 效果与通达信 TDX 界面 100% 对齐。
+    - [x] **拐点价格文字 10 根 K 棒滑动窗口极值去重 (彻底消除数字重叠扎堆)**：
+        - 引入局部 10 根 K 棒（前后 ±5 根）滑动窗口极值判定；
+        - 仅在窗口内真正的最高价波段拐点标注 `sig_top` 价格数字，仅在真正的最低价拐点标注 `sig_bot` 价格数字；
+        - 其余密集拐点仅保留精致小圆点，不再重复绘制密密麻麻的价格数字，画面极度清爽大方。
+    - [x] **全量单元测试与真实标的回归验证**：
+        - 全套 15 个多周期、缩放、重排与九转测试全部 100% 通过；
+        - 真实标的（688313 60分K/日K）九转计数与通道截断验证完全准确。
+
+## 2026-08-20 16:20
+- [x] **鼠标滚轮自由缩放、左键拖拽平移、右键一键 Reset 视图与通达信通道线截止于最高价/最低价波段起点 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`, `tests/verify_688826_channel.py`)**：
+    - [x] **通达信通道线严格截止于最高价/最低价波段起点 (彻底消除左上角冗长斜线与 Y 轴失真) (KISS / SOLID)**：
+        - 根据波段极值周期 `chan_len = max(tc2, bc2)`，定位通道起点 `chan_start = max(0, total_n - chan_len)`；
+        - 通道三轨仅从 `chan_start` 向右绘制至最新 K 棒，历史左侧前 `chan_start` 根 K 棒彻底截断不画；
+        - Y 轴自适应价格范围仅采纳有效波段内的通道价格，彻底排除左侧远端虚高外推值，K 线走势饱满舒展，与通达信完全对齐。
+    - [x] **鼠标滚轮以光标为中心平滑缩放 (`wheelEvent`)**：
+        - 滚轮向前向上滚动放大（减少可视 K 棒数，最小保留 8 根），滚轮向下滚动缩小（最大展示全部数据）；
+        - 以鼠标当前所在 X 坐标为锚点进行自适应左右分配，操作手感顺滑。
+    - [x] **鼠标左键平移与右键一键重置 (`mousePressEvent` / `mouseMoveEvent` / `reset_view`)**：
+        - 放大状态下按住鼠标左键可左右拖拽平移查看历史 K 线/分时，光标自动切换为抓手；
+        - 鼠标右键点击立即一键重置回 100% 全景视图；
+        - 右上角动态展示缩放状态与提示（如 `🔍 局部放大: 45/200 根 [右键重置]`）。
+    - [x] **分时走势（1m/2d/3d）与多周期 K 线（5m/15m/30m/60m/日K/周K）全周期通用生效**。
+
+## 2026-08-20 15:35
+- [x] **黄金分割全图价格区间修正、短点线视觉优化、多卖点时间智能区间映射与右侧多余横线清理 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`)**：
+    - [x] **Fibonacci 黄金分割全图价格空间自适应与短点线化 (KISS / SOLID)**：
+        - 黄金分割阶梯由局部 8 根 K 棒计算改为基于**当前加载的全部数据价格空间**（`full_high = np.max(highs)`, `full_low = np.min(lows)`），彻底解决 30分/60分K 线上阶梯挤在底部过于密集的问题；
+        - 修正自上而下的比例与价格对应关系（`80.9%` 强阻高位、`61.8%` 黄金阻力、`50.0%` 中枢平衡、`38.2%` 黄金支撑、`19.1%` 强撑低位）；
+        - 横线由全屏横穿优化为短点线（从 `chart_w * 0.40` 到右边缘），左侧历史 K 线完全不受遮挡，清爽干净。
+    - [x] **多周期分时买卖信号智能时间区间映射（防止卖点丢失）**：
+        - 提取分时买卖点的具体时分 `sig_hm`，在分钟 K 线序列中按当日 K 棒顺序定位第一个 `bar_time >= sig_hm` 的 K 棒索引；
+        - 支持同根 K 棒或相邻 K 棒多个买卖点（如 950.00 和 912.00 两个卖点）各自根据价格 Y 轴高度独立绘制实心圆点、垂直线与悬浮 Tag 胶囊，并加入自适应水平交错防重叠机制，确保所有卖点 100% 完整清晰显示。
+    - [x] **移除右侧多余买卖横线与右侧标签**：
+        - 彻底移除贯穿全屏的买卖水平虚线与右侧坐标轴上的买卖标签，将视觉焦点回归于蜡烛图本身的波段拐点。
+    - [x] **自动化测试与小屏幕排布防重叠优化**：
+        - 优化 `rearrange_all_sbc_windows` 在紧凑或小屏幕下的平铺与微错位防重叠；
+        - 全套 12 个多周期与重排测试全部 100% 通过。
+
+## 2026-08-20 15:05
+- [x] **通达信自动通道 (Trend Channel)、上涨支撑线、翻转线、Fibonacci 黄金分割阶梯与拐点信号图表全景渲染与 TDX 效果对齐 (`JSONData/tdx_data_Day.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`, `tests/verify_688826_channel.py`)**：
+    - [x] **K 线数据管道接入通达信 `calc_trend_channel` 算法引擎 (`ats/tdx_realtime_fetcher.py`) (KISS / DRY)**：
+        - 在 `TDXRealtimeFetcher.fetch_kline_bars` 中注入 `calc_trend_channel(df)`，向量化一次性预计算通道三轨 (`ch_upper`/`ch_mid`/`ch_lower`)、上涨支撑线 (`ch_supp_price`/`ch_supp_days`/`ch_supp_slope`)、翻转线 (`reversal_line`)、Fibonacci 五阶黄金分割 (`fib_19`~`fib_80`) 以及 见底/见顶/启动/逃顶 拐点信号。
+    - [x] **`SBCChartCanvas._paint_kline` 通达信同款图元渲染对齐 (`ats/ui/intraday_strategy_dialog.py`) (SOLID / KISS)**：
+        - **自动通道三轨**：绘制通达信同款亮白实线/虚线通道上轨、下轨与中轨；
+        - **上涨支撑线**：绘制从反弹低点延伸至右侧的黄金色粗实线/射线 (`#FFD700`) 与基准虚线，右侧标注黄色胶囊标签；
+        - **翻转线**：绘制连续黄色/洋红色折线；
+        - **Fibonacci 黄金分割阶梯**：绘制 5 阶水平点线（80.9%、61.8%、50.0%、38.2%、19.1%）并在右侧轴标注比例与价格；
+        - **拐点信号 Tag**：在对应 K 棒上绘制 `sig_bottom`（见底青蓝圆点+最低价如 `870.00`）、`sig_top`（见顶红点+最高价如 `1300.00`）、`sig_launch`（`🚀启动` 胶囊）与 `sig_escape`（`⚠️逃顶` 胶囊）；
+        - **右下角看板**：绘制通达信原版紧凑信息板 `支撑:xxx.xx 元  反转:xxx.xx 元`，顶部标注斜率与状态。
+    - [x] **自动化测试与真实标的 (688826) 校验**：
+        - 补充 `test_sbc_canvas_kline_with_tdx_trend_channel_and_support_lines` 单元测试通过；
+        - 编写 `verify_688826_channel.py` 验证 688826 5分钟 K 线实时通道与支撑线计算及渲染对齐。
+
+## 2026-08-20 14:35
+- [x] **实现 ATS SBC 买卖价格与关键基准在多周期（2日/3日分时、5分/15分/30分/60分/日K/周K）全周期同步渲染显示 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`)**：
+    - [x] **`SBCChartCanvas` 接口与 K 线模式买卖价格渲染 (`set_kline_data` & `_paint_kline`) (KISS / SOLID)**：
+        - 扩展 `set_kline_data` 接口接收 `open_p`, `vwap_p`, `high_p`, `low_p`, `sell_min`, `sell_max`, `signals` 等参数；
+        - 在 `_paint_kline` 中将买卖信号价格纳入 Y 轴自适应极值计算范围，杜绝买卖点超限截断；
+        - 在 K 线主图上绘制买入价（绿色虚线 `#00ff88`）与卖出价（红色虚线 `#ff4444`）全宽水平基准线，并在右侧价格轴绘制高对比度 `🟢 买:xxx.xx` / `🔴 卖:xxx.xx` 标签；
+        - 结合 K 线时间序列将买卖信号精准对齐到对应分钟/日K棒，绘制垂直参考线、买卖实心圆点与悬浮 Tag，未完全匹配时兜底在最新 K 棒对应价位展示；
+        - 在 K 线图上同步绘制开盘基准线与止盈目标线。
+    - [x] **多日分时买卖价格与信号精准对齐 (`_paint_intraday`)**：
+        - 在 `2d` / `3d` 多日分时模式下，透传并解析 `signals` 与基准价格；
+        - 优化时间匹配逻辑，将当日时分信号精准锚定至最后一日（当日）的对应时间索引并渲染买卖 Tag 与参考线。
+    - [x] **`SBCIntradayChartDialog.reload_chart()` 全周期数据管道打通**：
+        - 统一获取标的快照、7节点时序动态打分以及 SBC 策略买卖信号 `sigs`、`t_min`、`t_max`；
+        - 在 2日/3日分时与所有 K 线周期模式（5m/15m/30m/60m/day/week）下均完整透传 signals 与基准价格给画布渲染。
+    - [x] **自动化测试与全量回归**：
+        - 新增 `tests/test_sbc_multi_period_signals.py` 覆盖各周期下信号透传、买卖价格存储与绘制无异常断言。
+
 ## 2026-08-20 13:30
 - [x] **实现 ATS 退出持久化 SBC 独立看盘窗口时一同持久化所选周期并在启动时自动恢复 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_rearrange.py`, `20260820_1318_task.md`)**：
     - [x] **SBC 周期管理与 UI 状态同步 (`set_period_mode`) (KISS / SOLID)**：
