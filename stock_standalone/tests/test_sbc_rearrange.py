@@ -118,7 +118,7 @@ def test_rearrange_no_active_dialogs_safe(qapp):
 
 def test_sbc_set_period_mode(qapp):
     """测试 SBCIntradayChartDialog 的 set_period_mode 切换、按钮选中状态同步与非法值兜底"""
-    dlg = SBCIntradayChartDialog(code="688826")
+    dlg = SBCIntradayChartDialog(code="688826", initial_period_mode="1m")
     try:
         dlg.show()
         qapp.processEvents()

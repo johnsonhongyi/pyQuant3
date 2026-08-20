@@ -35,8 +35,8 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QCheckBox, QSlider, QToolBar
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QEvent, QPoint
-from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QEvent, QPoint, QPointF
+from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF
 
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
@@ -214,11 +214,15 @@ def _set_or_update_table_item(
 class SBCChartCanvas(QWidget):
     """
     SBC 多功能走势图画布控件 (支持 1日/2日/3日分时走势图 以及 5分/30分/60分/日K 线的 GG 通道图)
+    - 🔍 支持鼠标滚轮以光标为中心自由缩放；
+    - 🖐️ 支持按住鼠标左键左右拖拽平移历史 K 线/分时；
+    - 🔄 支持鼠标右键一键重置回 100% 全景视图；
+    - 🎯 通达信自动通道严格截止于最高价/最低价波段起点，杜绝左上角冗长斜线。
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.df_intraday = pd.DataFrame()
-        self.period_mode = "1m" # 1m | 2d | 3d | 5m | 30m | 60m | day
+        self.period_mode = "1m" # 1m | 2d | 3d | 5m | 30m | 60m | day | week
         self.open_price = 0.0
         self.vwap = 0.0
         self.high_price = 0.0
@@ -226,8 +230,173 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = 0.0
         self.target_sell_max = 0.0
         self.signals = []
+
+        # 🔍 缩放与平移视口状态
+        self._zoom_start_idx = 0
+        self._zoom_end_idx = -1  # -1 表示显示到最新一根
+        self._is_panning = False
+        self._pan_start_x = 0
+        self._pan_start_indices = (0, -1)
+        self._last_period_mode = "1m"
+
         self.setMinimumSize(320, 180)
         self.setStyleSheet("background-color: #0c0d14;")
+        self.setMouseTracking(True)
+
+    def reset_view(self):
+        """🔄 重置视口至 100% 全景显示"""
+        self._zoom_start_idx = 0
+        self._zoom_end_idx = -1
+        self._is_panning = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def _is_zoomed(self) -> bool:
+        """检查当前是否处于局部放大状态"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return False
+        total_n = len(self.df_intraday)
+        cur_start = max(0, self._zoom_start_idx)
+        cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
+        return (cur_start > 0 or cur_end < total_n - 1) and (cur_end - cur_start + 1 < total_n)
+
+    def _get_visible_slice(self):
+        """获取当前可视切片 DataFrame 以及切片起止索引"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return pd.DataFrame(), 0, 0
+        total_n = len(self.df_intraday)
+        start_i = max(0, self._zoom_start_idx)
+        end_i = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
+        if start_i > end_i:
+            start_i = 0
+            end_i = total_n - 1
+        return self.df_intraday.iloc[start_i:end_i + 1], start_i, end_i
+
+    def wheelEvent(self, event):
+        """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return
+
+        total_n = len(self.df_intraday)
+        if total_n < 5:
+            return
+
+        cur_start = max(0, self._zoom_start_idx)
+        cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
+        cur_count = cur_end - cur_start + 1
+
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
+            return
+
+        margin_left = 55
+        margin_right = 65
+        chart_w = max(10, self.width() - margin_left - margin_right)
+        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+        mouse_x = mouse_pos.x()
+        rel_x = max(0.0, min(1.0, (mouse_x - margin_left) / float(chart_w)))
+
+        if delta_y > 0:
+            # 向上滚：放大 (缩减可视数量，最少保留 8 根 K 棒)
+            new_count = max(8, int(cur_count * 0.80))
+            if new_count >= cur_count:
+                new_count = max(8, cur_count - 2)
+            diff = cur_count - new_count
+            left_diff = int(round(diff * rel_x))
+            right_diff = diff - left_diff
+            new_start = cur_start + left_diff
+            new_end = cur_end - right_diff
+        else:
+            # 向下滚：缩小 (增加可视数量，最大至全量 total_n)
+            new_count = min(total_n, int(cur_count * 1.25) + 2)
+            diff = new_count - cur_count
+            left_diff = int(round(diff * rel_x))
+            right_diff = diff - left_diff
+            new_start = max(0, cur_start - left_diff)
+            new_end = min(total_n - 1, cur_end + right_diff)
+
+        # 越界防溢出修正
+        if new_start < 0:
+            new_end = min(total_n - 1, new_end - new_start)
+            new_start = 0
+        if new_end >= total_n:
+            new_start = max(0, new_start - (new_end - (total_n - 1)))
+            new_end = total_n - 1
+
+        if new_start == 0 and new_end == total_n - 1:
+            self._zoom_start_idx = 0
+            self._zoom_end_idx = -1
+        else:
+            self._zoom_start_idx = new_start
+            self._zoom_end_idx = new_end
+
+        self.update()
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """鼠标按下：右键一键重置，左键开始拖拽平移"""
+        if event.button() == Qt.MouseButton.RightButton:
+            self.reset_view()
+            event.accept()
+            return
+        elif event.button() == Qt.MouseButton.LeftButton:
+            if self.df_intraday is not None and not self.df_intraday.empty:
+                total_n = len(self.df_intraday)
+                cur_start = max(0, self._zoom_start_idx)
+                cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
+                self._is_panning = True
+                mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+                self._pan_start_x = mouse_pos.x()
+                self._pan_start_indices = (cur_start, cur_end)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """鼠标移动：处于拖拽状态时平滑平移历史 K 线/分时"""
+        if self._is_panning and self.df_intraday is not None and not self.df_intraday.empty:
+            total_n = len(self.df_intraday)
+            mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+            dx = mouse_pos.x() - self._pan_start_x
+
+            cur_count = self._pan_start_indices[1] - self._pan_start_indices[0] + 1
+            margin_left = 55
+            margin_right = 65
+            chart_w = max(10, self.width() - margin_left - margin_right)
+            bar_px = max(1.0, chart_w / max(1, cur_count))
+            shift_bars = int(round(dx / bar_px))
+
+            orig_start, orig_end = self._pan_start_indices
+            new_start = orig_start - shift_bars
+            new_end = orig_end - shift_bars
+
+            # 边界限制
+            if new_start < 0:
+                new_end += (0 - new_start)
+                new_start = 0
+            if new_end >= total_n:
+                new_start -= (new_end - (total_n - 1))
+                new_end = total_n - 1
+
+            new_start = max(0, min(total_n - 1, new_start))
+            new_end = max(0, min(total_n - 1, new_end))
+
+            self._zoom_start_idx = new_start
+            self._zoom_end_idx = new_end
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """鼠标松开：结束拖拽平移"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def set_data(self, df_intraday: pd.DataFrame, open_p: float, vwap_p: float, high_p: float, low_p: float, sell_min: float, sell_max: float, signals: list, period_mode: str = "1m"):
         self.df_intraday = df_intraday
@@ -237,12 +406,27 @@ class SBCChartCanvas(QWidget):
         self.low_price = low_p
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
-        self.signals = signals
+        self.signals = signals or []
+        if getattr(self, '_last_period_mode', None) != period_mode:
+            self._zoom_start_idx = 0
+            self._zoom_end_idx = -1
+            self._last_period_mode = period_mode
         self.period_mode = period_mode
         self.update()
 
-    def set_kline_data(self, df_kline: pd.DataFrame, period_mode: str = "5m"):
+    def set_kline_data(self, df_kline: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "5m"):
         self.df_intraday = df_kline
+        self.open_price = open_p
+        self.vwap = vwap_p
+        self.high_price = high_p
+        self.low_price = low_p
+        self.target_sell_min = sell_min
+        self.target_sell_max = sell_max
+        self.signals = signals or []
+        if getattr(self, '_last_period_mode', None) != period_mode:
+            self._zoom_start_idx = 0
+            self._zoom_end_idx = -1
+            self._last_period_mode = period_mode
         self.period_mode = period_mode
         self.update()
 
@@ -257,7 +441,7 @@ class SBCChartCanvas(QWidget):
             painter.fillRect(0, 0, w, h, QColor("#0c0d14"))
 
             margin_left = 55
-            margin_right = 65
+            margin_right = 75
             margin_top = 30
             margin_bottom = 30
 
@@ -276,8 +460,8 @@ class SBCChartCanvas(QWidget):
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"⏳ 正在加载 [{self.period_mode}] 行情走势图...")
                 return
 
-            # 1. K 线图模式 (5m / 15m / 30m / 60m / day)
-            if self.period_mode in ["5m", "15m", "30m", "60m", "day"]:
+            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / week)
+            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "week"]:
                 self._paint_kline(painter, margin_left, margin_top, chart_w, chart_h)
                 return
 
@@ -287,9 +471,13 @@ class SBCChartCanvas(QWidget):
             painter.end()
 
     def _paint_intraday(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
-        prices = self.df_intraday['close'].astype(float).values if 'close' in self.df_intraday.columns else []
-        vwaps = self.df_intraday['vwap'].astype(float).values if 'vwap' in self.df_intraday.columns else []
-        times = list(self.df_intraday.index.astype(str))
+        df_view, start_i, end_i = self._get_visible_slice()
+        if df_view.empty:
+            return
+
+        prices = df_view['close'].astype(float).values if 'close' in df_view.columns else []
+        vwaps = df_view['vwap'].astype(float).values if 'vwap' in df_view.columns else []
+        times = list(df_view.index.astype(str))
 
         if len(prices) == 0:
             return
@@ -308,6 +496,13 @@ class SBCChartCanvas(QWidget):
             all_cands.append(op_ref)
         if 0 < self.high_price <= max_valid_price:
             all_cands.append(self.high_price)
+        if 0 < self.target_sell_min <= max_valid_price:
+            all_cands.append(self.target_sell_min)
+        if self.signals:
+            for sig in self.signals:
+                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                if 0 < sig_p <= max_valid_price:
+                    all_cands.append(sig_p)
 
         if not all_cands:
             all_cands = [op_ref if op_ref > 0 else 100.0]
@@ -323,120 +518,162 @@ class SBCChartCanvas(QWidget):
             return margin_top + chart_h - ((p_val - min_p) / p_range) * chart_h
 
         def time_to_x(idx_val: int) -> float:
-            total_n = max(240 if self.period_mode == "1m" else len(prices), len(prices))
+            total_n = max(240 if self.period_mode == "1m" and not self._is_zoomed() else len(prices), len(prices))
             return margin_left + (idx_val / max(1, total_n - 1)) * chart_w
 
-        # 多日分时分割虚线
-        if "date" in self.df_intraday.columns:
-            dates = list(self.df_intraday["date"].astype(str))
-            for i in range(1, len(dates)):
-                if dates[i] != dates[i-1]:
-                    x_sep = time_to_x(i)
-                    painter.setPen(QPen(QColor("#444466"), 1, Qt.PenStyle.DashLine))
-                    painter.drawLine(int(x_sep), int(margin_top), int(x_sep), int(margin_top + chart_h))
-                    painter.setPen(QPen(QColor("#8888aa"), 1))
-                    painter.setFont(QFont("Arial", 8))
-                    painter.drawText(int(x_sep + 3), int(margin_top + 14), str(dates[i])[5:])
+        # 绘制背景水平网格线
+        grid_pens = [
+            (min_p + p_range * 0.75, QColor("#1e2230"), Qt.PenStyle.DotLine),
+            (min_p + p_range * 0.50, QColor("#282c3f"), Qt.PenStyle.DashLine),
+            (min_p + p_range * 0.25, QColor("#1e2230"), Qt.PenStyle.DotLine),
+        ]
+        for gp_val, gp_col, gp_style in grid_pens:
+            gy = price_to_y(gp_val)
+            painter.setPen(QPen(gp_col, 1, gp_style))
+            painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
 
-        # 🔴 开盘基准线 (红色虚线)
-        if op_ref > 0:
-            y_op = price_to_y(op_ref)
-            painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(int(margin_left), int(y_op), int(margin_left + chart_w), int(y_op))
-            painter.setPen(QPen(QColor("#ff4444"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            painter.drawText(int(margin_left + chart_w + 3), int(y_op + 3), f"开盘:{op_ref:.2f}")
-
-        # 🟡 VWAP 均价线 (金黄点线)
-        if self.vwap > 0:
-            y_vw = price_to_y(self.vwap)
-            painter.setPen(QPen(QColor("#ffd700"), 1, Qt.PenStyle.DotLine))
-            painter.drawLine(int(margin_left), int(y_vw), int(margin_left + chart_w), int(y_vw))
-            painter.setPen(QPen(QColor("#ffd700"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            painter.drawText(int(margin_left + chart_w + 3), int(y_vw + 3), f"VWAP:{self.vwap:.2f}")
-
-        # 🟢 止盈目标线
-        if self.target_sell_min > 0:
-            y_tmin = price_to_y(self.target_sell_min)
-            painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
-            painter.drawLine(int(margin_left), int(y_tmin), int(margin_left + chart_w), int(y_tmin))
-
-        # 绘制 VWAP 均价曲线 (黄线)
+        # 绘制 VWAP 均价线 (金黄虚线)
         if len(vwaps) > 1:
             path_vwap = QPainterPath()
             path_vwap.moveTo(time_to_x(0), price_to_y(vwaps[0]))
             for i in range(1, len(vwaps)):
-                path_vwap.lineTo(time_to_x(i), price_to_y(vwaps[i]))
-            painter.setPen(QPen(QColor("#ffd700"), 1, Qt.PenStyle.SolidLine))
+                if vwaps[i] > 1.0:
+                    path_vwap.lineTo(time_to_x(i), price_to_y(vwaps[i]))
+            painter.setPen(QPen(QColor("#ffd700"), 1.5, Qt.PenStyle.DashLine))
             painter.drawPath(path_vwap)
 
-        # 绘制分时现价走势曲线 (青蓝主线)
+        # 绘制分时价格曲线 (亮青色)
         if len(prices) > 1:
-            path_price = QPainterPath()
-            path_price.moveTo(time_to_x(0), price_to_y(prices[0]))
+            path_p = QPainterPath()
+            path_p.moveTo(time_to_x(0), price_to_y(prices[0]))
             for i in range(1, len(prices)):
-                path_price.lineTo(time_to_x(i), price_to_y(prices[i]))
-            painter.setPen(QPen(QColor("#38bdf8"), 2, Qt.PenStyle.SolidLine))
-            painter.drawPath(path_price)
+                if prices[i] > 1.0:
+                    path_p.lineTo(time_to_x(i), price_to_y(prices[i]))
+            painter.setPen(QPen(QColor("#00b4d8"), 1.8))
+            painter.drawPath(path_p)
 
-        # 绘制买卖点 Pin
+        # 🔴 开盘基准线
+        if op_ref > 0:
+            y_op = price_to_y(op_ref)
+            painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(margin_left, int(y_op), margin_left + chart_w, int(y_op))
+            painter.setPen(QPen(QColor("#ff4444"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(margin_left + chart_w + 3, int(y_op + 3), f"开盘:{op_ref:.2f}")
+
+        # 🟢 目标止盈线
+        if self.target_sell_min > 0:
+            y_target = price_to_y(self.target_sell_min)
+            painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
+            painter.drawLine(margin_left, int(y_target), margin_left + chart_w, int(y_target))
+            painter.setPen(QPen(QColor("#00ff88"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(margin_left + chart_w + 3, int(y_target + 3), f"目标:{self.target_sell_min:.2f}")
+
+        # 🟡 最新 VWAP 标签
+        if len(vwaps) > 0 and vwaps[-1] > 1.0:
+            y_vwap = price_to_y(vwaps[-1])
+            painter.setPen(QPen(QColor("#ffd700"), 1))
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(margin_left + chart_w + 3, int(y_vwap + 3), f"VWAP:{vwaps[-1]:.2f}")
+
+        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag
         if self.signals:
-            times_5 = [str(t).strip()[:5] for t in times]
+            times_raw = list(df_view.index.astype(str))
+            times_5 = [t[-5:] if len(t) >= 5 else t for t in times_raw]
+
             for sig in self.signals:
-                sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()[:5]
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if sig_t in times_5 and sig_p > 0:
-                    idx_s = times_5.index(sig_t)
+                if sig_p <= 0 or sig_p > max_valid_price:
+                    continue
+
+                sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
+                action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
+                is_buy = "buy" in action_type or "买" in action_type
+                prefix = "🟢 买" if is_buy else "🔴 卖"
+                border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
+                bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
+                fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
+
+                y_s = price_to_y(sig_p)
+
+                # 寻找在当前可视切片时间轴上的对应位置 idx_s
+                idx_s = -1
+                sig_t_5 = sig_t[-5:] if len(sig_t) >= 5 else sig_t
+                if sig_t in times_raw:
+                    idx_s = times_raw.index(sig_t)
+                elif sig_t_5 in times_5:
+                    idx_candidates = [i for i, t in enumerate(times_5) if t == sig_t_5]
+                    idx_s = idx_candidates[-1] if idx_candidates else -1
+                else:
+                    for i, t in enumerate(times_5):
+                        if t >= sig_t_5:
+                            idx_s = i
+                            break
+
+                if idx_s >= 0:
                     x_s = time_to_x(idx_s)
-                    y_s = price_to_y(sig_p)
-                    painter.setPen(QPen(QColor("#ff5555"), 1, Qt.PenStyle.DashLine))
+                    painter.setPen(QPen(border_color, 1, Qt.PenStyle.DashLine))
                     painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
                     painter.setPen(QPen(QColor("#ffffff"), 1.5))
-                    painter.setBrush(QBrush(QColor("#ff3333")))
+                    painter.setBrush(QBrush(border_color))
                     painter.drawEllipse(int(x_s - 4), int(y_s - 4), 8, 8)
-
-                    # 💡 极简高性价比悬浮 Tag: 只要买卖类型与价格 (如 🔴 卖:898.04)，不占用过多画布空间
-                    action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
-                    is_buy = "buy" in action_type or "买" in action_type
-                    prefix = "🟢 买" if is_buy else "🔴 卖"
-                    border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
-                    bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
-                    fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
 
                     lbl_text = f"{prefix}:{sig_p:.2f}"
                     painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
-                    tw = fm.horizontalAdvance(lbl_text) + 8
-                    th = fm.height() + 4
-
-                    tag_x = int(max(margin_left, min(margin_left + chart_w - tw, x_s - tw / 2)))
-                    tag_y = int(max(margin_top, y_s - 22))
+                    tw_k = fm.horizontalAdvance(lbl_text) + 8
+                    th_k = fm.height() + 4
+                    tag_x = int(max(margin_left, min(margin_left + chart_w - tw_k, x_s - tw_k / 2)))
+                    tag_y = int(max(margin_top, min(margin_top + chart_h - th_k, y_s - th_k / 2)))
 
                     painter.setPen(QPen(border_color, 1))
                     painter.setBrush(QBrush(bg_color))
-                    painter.drawRoundedRect(tag_x, tag_y, tw, th, 3, 3)
-
+                    painter.drawRoundedRect(tag_x, tag_y, tw_k, th_k, 3, 3)
                     painter.setPen(QPen(fg_color))
-                    painter.drawText(tag_x + 4, tag_y + th - 4, lbl_text)
+                    painter.drawText(tag_x + 4, tag_y + th_k - 4, lbl_text)
 
+        # 缩放状态提示
+        if self._is_zoomed():
+            zoom_tip = f"🔍 局部放大: {len(df_view)}/{len(self.df_intraday)} [右键重置]"
+            painter.setFont(QFont("Microsoft YaHei", 8))
     def _paint_kline(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
-        df = self.df_intraday
-        if df.empty:
+        df_view, start_i, end_i = self._get_visible_slice()
+        if df_view.empty:
             return
 
-        opens = df['open'].astype(float).values
-        closes = df['close'].astype(float).values
-        highs = df['high'].astype(float).values
-        lows = df['low'].astype(float).values
-        vols = df['vol'].astype(float).values if 'vol' in df.columns else np.zeros(len(df))
+        opens = df_view['open'].astype(float).values
+        closes = df_view['close'].astype(float).values
+        highs = df_view['high'].astype(float).values
+        lows = df_view['low'].astype(float).values
+        vols = df_view['vol'].astype(float).values if 'vol' in df_view.columns else np.zeros(len(df_view))
 
-        ma5 = df['ma5'].astype(float).values if 'ma5' in df.columns else []
-        ma20 = df['ma20'].astype(float).values if 'ma20' in df.columns else []
-        b_up = df['boll_upper'].astype(float).values if 'boll_upper' in df.columns else []
-        b_dn = df['boll_lower'].astype(float).values if 'boll_lower' in df.columns else []
+        ma5 = df_view['ma5'].astype(float).values if 'ma5' in df_view.columns else []
+        ma20 = df_view['ma20'].astype(float).values if 'ma20' in df_view.columns else []
+        b_up = df_view['boll_upper'].astype(float).values if 'boll_upper' in df_view.columns else []
+        b_dn = df_view['boll_lower'].astype(float).values if 'boll_lower' in df_view.columns else []
 
-        n = len(df)
+        # ⚡ 提取通达信自动通道 (calc_trend_channel) 系列指标
+        ch_up = df_view['ch_upper'].astype(float).values if 'ch_upper' in df_view.columns else []
+        ch_mid = df_view['ch_mid'].astype(float).values if 'ch_mid' in df_view.columns else []
+        ch_dn = df_view['ch_lower'].astype(float).values if 'ch_lower' in df_view.columns else []
+        ch_tc2 = int(df_view['ch_tc2'].iloc[-1]) if 'ch_tc2' in df_view.columns and len(df_view) > 0 else 1
+        ch_bc2 = int(df_view['ch_bc2'].iloc[-1]) if 'ch_bc2' in df_view.columns and len(df_view) > 0 else 1
+        ch_supp_p = float(df_view['ch_supp_price'].iloc[-1]) if 'ch_supp_price' in df_view.columns and len(df_view) > 0 else 0.0
+        ch_supp_days = int(df_view['ch_supp_days'].iloc[-1]) if 'ch_supp_days' in df_view.columns and len(df_view) > 0 else 0
+        ch_supp_slope = float(df_view['ch_supp_slope'].iloc[-1]) if 'ch_supp_slope' in df_view.columns and len(df_view) > 0 else 0.0
+        ch_slope_deg = float(df_view['ch_slope_deg'].iloc[-1]) if 'ch_slope_deg' in df_view.columns and len(df_view) > 0 else 0.0
+        ch_pos = float(df_view['ch_pos'].iloc[-1]) if 'ch_pos' in df_view.columns and len(df_view) > 0 else 50.0
+        rev_line = df_view['reversal_line'].astype(float).values if 'reversal_line' in df_view.columns else []
+        rev_last = float(rev_line[-1]) if len(rev_line) > 0 else 0.0
+
+        # 拐点与启动信号
+        sig_bot = df_view['sig_bottom'].values if 'sig_bottom' in df_view.columns else np.zeros(len(df_view))
+        sig_top_arr = df_view['sig_top'].values if 'sig_top' in df_view.columns else np.zeros(len(df_view))
+        sig_launch_arr = df_view['sig_launch'].values if 'sig_launch' in df_view.columns else np.zeros(len(df_view))
+        sig_escape_arr = df_view['sig_escape'].values if 'sig_escape' in df_view.columns else np.zeros(len(df_view))
+
+        n = len(df_view)
         if n == 0:
             return
 
@@ -444,11 +681,46 @@ class SBCChartCanvas(QWidget):
         vol_h = int(chart_h * 0.20)
         vol_top = margin_top + main_h + int(chart_h * 0.05)
 
+        # 🎯 通道严格截止于最高价/最低价波段起点 (遵照通达信规则，历史左侧不画，杜绝左上角冗长斜线与 Y 轴失真)
+        total_n = len(self.df_intraday)
+        chan_len = max(ch_tc2, ch_bc2)
+        global_chan_start = max(0, total_n - chan_len)
+        local_chan_start = max(0, global_chan_start - start_i)
+
+        # 全图最高最低价与波段空间 (用于 Fibonacci 黄金分割阶梯稳定呈现)
+        all_highs = self.df_intraday['high'].astype(float).values if 'high' in self.df_intraday.columns else highs
+        all_lows = self.df_intraday['low'].astype(float).values if 'low' in self.df_intraday.columns else lows
+        full_high = float(np.max(all_highs))
+        full_low = float(np.min(all_lows))
+        fib_range = full_high - full_low
+
+        # Y 轴自适应计算：仅将可视区 K 棒和有效波段区间内的通道价格纳入范围，绝不纳入左侧历史的虚高外推值
         all_vals = list(highs) + list(lows)
         if len(b_up) > 0:
             all_vals += [x for x in b_up if x > 0]
         if len(b_dn) > 0:
             all_vals += [x for x in b_dn if x > 0]
+
+        if len(ch_up) > local_chan_start and local_chan_start < n:
+            all_vals += [x for x in ch_up[local_chan_start:] if x > 0]
+        if len(ch_dn) > local_chan_start and local_chan_start < n:
+            all_vals += [x for x in ch_dn[local_chan_start:] if x > 0]
+
+        if ch_supp_p > 0 and (total_n - ch_supp_days <= end_i):
+            all_vals.append(ch_supp_p)
+        if rev_last > 0:
+            all_vals.append(rev_last)
+
+        # 💡 将 SBC 买卖信号价格、开盘价、目标价纳入 Y 轴范围计算，确保买卖线完整显示不被截断
+        if self.open_price > 0:
+            all_vals.append(self.open_price)
+        if self.target_sell_min > 0:
+            all_vals.append(self.target_sell_min)
+        if self.signals:
+            for sig in self.signals:
+                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                if sig_p > 0:
+                    all_vals.append(sig_p)
 
         all_vals = [x for x in all_vals if x > 0]
         if not all_vals:
@@ -470,29 +742,71 @@ class SBCChartCanvas(QWidget):
 
         bar_w = max(2.0, (chart_w / n) * 0.7)
 
-        # 1. 绘制 GG 布林通道 (上轨翠绿，下轨灰紫)
-        if len(b_up) > 1 and len(b_dn) > 1:
+        # 1. 🌟 绘制 Fibonacci 黄金分割阶梯线 (基于加载的所有数据价格区间，通达信同款自上而下对齐)
+        if fib_range > 1e-4:
+            fib_levels = [
+                (full_low + fib_range * 0.809, "80.9%", QColor("#FF7700")),  # 高阻位 (如 1231)
+                (full_low + fib_range * 0.618, "61.8%", QColor("#FFD700")),  # 黄金阻力 (如 1122)
+                (full_low + fib_range * 0.500, "50.0%", QColor("#00E5FF")),  # 中枢位 (如 1055)
+                (full_low + fib_range * 0.382, "38.2%", QColor("#FFD700")),  # 黄金支撑 (如 988.5)
+                (full_low + fib_range * 0.191, "19.1%", QColor("#00FF88")),  # 强撑位 (如 880.2)
+            ]
+            fib_start_x = int(margin_left + chart_w * 0.45)  # 短虚线，不遮挡左侧历史 K 线
+            fib_end_x = int(margin_left + chart_w)
+            for f_val, f_lbl, f_col in fib_levels:
+                if min_p <= f_val <= max_p:
+                    y_fib = k_to_y(f_val)
+                    painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
+
+        # 2. 🌟 绘制通达信自动通道三轨 (从波段最高价/最低价拐点开始延伸至最新 K 棒，左侧不画)
+        if len(ch_up) > 1 and len(ch_dn) > 1 and local_chan_start < n:
+            path_ch_up = QPainterPath()
+            path_ch_mid = QPainterPath()
+            path_ch_dn = QPainterPath()
+            path_ch_up.moveTo(k_to_x(local_chan_start), k_to_y(ch_up[local_chan_start]))
+            path_ch_mid.moveTo(k_to_x(local_chan_start), k_to_y(ch_mid[local_chan_start]))
+            path_ch_dn.moveTo(k_to_x(local_chan_start), k_to_y(ch_dn[local_chan_start]))
+            for i in range(local_chan_start + 1, n):
+                if ch_up[i] > 0: path_ch_up.lineTo(k_to_x(i), k_to_y(ch_up[i]))
+                if ch_mid[i] > 0: path_ch_mid.lineTo(k_to_x(i), k_to_y(ch_mid[i]))
+                if ch_dn[i] > 0: path_ch_dn.lineTo(k_to_x(i), k_to_y(ch_dn[i]))
+
+            # 上下轨用通达信亮白色粗实线，中轨用白点划线
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
+            painter.drawPath(path_ch_up)
+            painter.drawPath(path_ch_dn)
+            painter.setPen(QPen(QColor("#C0C0D0"), 1.0, Qt.PenStyle.DashLine))
+            painter.drawPath(path_ch_mid)
+        elif len(b_up) > 1 and len(b_dn) > 1:
             path_up = QPainterPath()
             path_dn = QPainterPath()
             path_up.moveTo(k_to_x(0), k_to_y(b_up[0]))
             path_dn.moveTo(k_to_x(0), k_to_y(b_dn[0]))
             for i in range(1, n):
-                if b_up[i] > 0:
-                    path_up.lineTo(k_to_x(i), k_to_y(b_up[i]))
-                if b_dn[i] > 0:
-                    path_dn.lineTo(k_to_x(i), k_to_y(b_dn[i]))
+                if b_up[i] > 0: path_up.lineTo(k_to_x(i), k_to_y(b_up[i]))
+                if b_dn[i] > 0: path_dn.lineTo(k_to_x(i), k_to_y(b_dn[i]))
             painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashLine))
             painter.drawPath(path_up)
             painter.setPen(QPen(QColor("#8888aa"), 1, Qt.PenStyle.DashLine))
             painter.drawPath(path_dn)
 
-        # 2. 绘制 MA 均线 (MA5 金黄, MA20 紫红)
+        # 3. 🌟 绘制通达信翻转线 (reversal_line)
+        if len(rev_line) > 1:
+            path_rev = QPainterPath()
+            path_rev.moveTo(k_to_x(0), k_to_y(rev_line[0]))
+            for i in range(1, n):
+                if rev_line[i] > 0:
+                    path_rev.lineTo(k_to_x(i), k_to_y(rev_line[i]))
+            painter.setPen(QPen(QColor("#FFCC00"), 1.2, Qt.PenStyle.SolidLine))
+            painter.drawPath(path_rev)
+
+        # 4. 绘制 MA 均线 (MA5 金黄, MA20 紫红)
         if len(ma5) > 1:
             path_m5 = QPainterPath()
             path_m5.moveTo(k_to_x(0), k_to_y(ma5[0]))
             for i in range(1, n):
-                if ma5[i] > 0:
-                    path_m5.lineTo(k_to_x(i), k_to_y(ma5[i]))
+                if ma5[i] > 0: path_m5.lineTo(k_to_x(i), k_to_y(ma5[i]))
             painter.setPen(QPen(QColor("#ffd700"), 1))
             painter.drawPath(path_m5)
 
@@ -500,12 +814,101 @@ class SBCChartCanvas(QWidget):
             path_m20 = QPainterPath()
             path_m20.moveTo(k_to_x(0), k_to_y(ma20[0]))
             for i in range(1, n):
-                if ma20[i] > 0:
-                    path_m20.lineTo(k_to_x(i), k_to_y(ma20[i]))
+                if ma20[i] > 0: path_m20.lineTo(k_to_x(i), k_to_y(ma20[i]))
             painter.setPen(QPen(QColor("#ff00ff"), 1))
             painter.drawPath(path_m20)
 
-        # 3. 绘制 K 线蜡烛实体与影线
+        # 5. 🌟 绘制通达信上涨斜率支撑线 (KX DRAWLINE 斜向实体线)
+        if ch_supp_p > 0:
+            y_supp = k_to_y(ch_supp_p)
+
+            supp_global_start = max(0, total_n - 1 - ch_supp_days)
+            if supp_global_start <= end_i and 0 < ch_supp_days < total_n:
+                supp_local_start = max(0, supp_global_start - start_i)
+                p_start = ch_supp_p - ch_supp_slope * (total_n - 1 - (start_i + supp_local_start))
+                x_s0 = k_to_x(supp_local_start)
+                y_s0 = k_to_y(p_start)
+                x_s1 = k_to_x(n - 1)
+                y_s1 = y_supp
+                painter.setPen(QPen(QColor("#FFD700"), 2.0, Qt.PenStyle.SolidLine))
+                painter.drawLine(int(x_s0), int(y_s0), int(x_s1), int(y_s1))
+
+        # 提取神奇九转 (TD Sequential 9) 序列
+        td_up_arr = df_view['td_sell_count'].values if 'td_sell_count' in df_view.columns else (
+            df_view['td_up_label'].values if 'td_up_label' in df_view.columns else np.zeros(len(df_view))
+        )
+        td_dn_arr = df_view['td_buy_count'].values if 'td_buy_count' in df_view.columns else (
+            df_view['td_dn_label'].values if 'td_dn_label' in df_view.columns else np.zeros(len(df_view))
+        )
+        if (len(td_up_arr) == 0 or np.all(td_up_arr == 0)) and len(closes) >= 5:
+            td_up_arr = np.zeros(n, dtype=int)
+            td_dn_arr = np.zeros(n, dtype=int)
+            cur_u, cur_d = 0, 0
+            for i_td in range(4, n):
+                if closes[i_td] > closes[i_td - 4]:
+                    cur_u = 1 if cur_u >= 9 else (cur_u + 1)
+                    cur_d = 0
+                    td_up_arr[i_td] = cur_u
+                elif closes[i_td] < closes[i_td - 4]:
+                    cur_d = 1 if cur_d >= 9 else (cur_d + 1)
+                    cur_u = 0
+                    td_dn_arr[i_td] = cur_d
+                else:
+                    cur_u, cur_d = 0, 0
+
+        # 🌟 局部 10 根 K 棒窗口极值去重 (相邻 10 根 K 线内只在真正最高/最低极值点标注价格数字，彻底解决数字扎堆挤爆)
+        show_top_price = np.zeros(n, dtype=bool)
+        show_bot_price = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if i < len(sig_top_arr) and sig_top_arr[i] == 1:
+                w_s = max(0, i - 5)
+                w_e = min(n, i + 6)
+                cands = [highs[j] for j in range(w_s, w_e) if j < len(sig_top_arr) and sig_top_arr[j] == 1]
+                if cands and highs[i] >= max(cands):
+                    show_top_price[i] = True
+
+            if i < len(sig_bot) and sig_bot[i] == 1:
+                w_s = max(0, i - 5)
+                w_e = min(n, i + 6)
+                cands = [lows[j] for j in range(w_s, w_e) if j < len(sig_bot) and sig_bot[j] == 1]
+                if cands and lows[i] <= min(cands):
+                    show_bot_price[i] = True
+
+        # 🌟 7.1 启动信号 (sig_launch) 与 逃顶信号 (sig_escape) 波段聚类精简 (去重合并，首尾统计，中间仅保留精致微图标)
+        def _cluster_signals(sig_arr: np.ndarray, max_gap: int = 4) -> Dict[int, Dict[str, Any]]:
+            sig_indices = [i for i in range(len(sig_arr)) if sig_arr[i] == 1]
+            if not sig_indices:
+                return {}
+            clusters = []
+            curr_cluster = [sig_indices[0]]
+            for idx in sig_indices[1:]:
+                if idx - curr_cluster[-1] <= max_gap:
+                    curr_cluster.append(idx)
+                else:
+                    clusters.append(curr_cluster)
+                    curr_cluster = [idx]
+            if curr_cluster:
+                clusters.append(curr_cluster)
+
+            draw_plan = {}
+            for cl in clusters:
+                cnt = len(cl)
+                if cnt == 1:
+                    draw_plan[cl[0]] = {'role': 'single', 'count': 1, 'seq': 1}
+                else:
+                    for seq, idx in enumerate(cl, 1):
+                        if seq == 1:
+                            draw_plan[idx] = {'role': 'first', 'count': cnt, 'seq': 1}
+                        elif seq == cnt:
+                            draw_plan[idx] = {'role': 'last', 'count': cnt, 'seq': cnt}
+                        else:
+                            draw_plan[idx] = {'role': 'middle', 'count': cnt, 'seq': seq}
+            return draw_plan
+
+        launch_plan = _cluster_signals(sig_launch_arr, max_gap=4)
+        escape_plan = _cluster_signals(sig_escape_arr, max_gap=4)
+
+        # 6. 绘制 K 线蜡烛实体、影线、神奇九转与拐点信号
         for i in range(n):
             x_c = k_to_x(i)
             y_op = k_to_y(opens[i])
@@ -524,16 +927,318 @@ class SBCChartCanvas(QWidget):
             painter.setBrush(QBrush(color if is_up else QColor("#0c0d14")))
             painter.drawRect(int(x_c - bar_w / 2), int(y_top_c), int(bar_w), int(body_h))
 
-            # 4. 副图成交量柱
+            # 副图成交量柱
             vh = (vols[i] / max_v) * vol_h
             vy = vol_top + vol_h - vh
             painter.setBrush(QBrush(color))
             painter.drawRect(int(x_c - bar_w / 2), int(vy), int(bar_w), int(vh))
 
-        # 标注周期标题
+            # 🌟 6.1 绘制通达信神奇九转 (TD Sequential 9) 序列 (过滤 <4 碎片杂音，仅在成熟序列与变盘点显示)
+            # 上涨九转 (卖出结构)：上方绘制粉色 4~8 与醒目红底 9 胶囊 (连续 9 转仅首个画胶囊)
+            if i < len(td_up_arr) and td_up_arr[i] >= 4:
+                num = int(td_up_arr[i])
+                is_first_9 = (num == 9) and (i == 0 or td_up_arr[i-1] != 9)
+                if is_first_9:
+                    painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF0055"), 1))
+                    painter.setBrush(QBrush(QColor("#450018")))
+                    painter.drawRoundedRect(int(x_c - 8), int(y_hi - 22), 16, 14, 3, 3)
+                    painter.setPen(QPen(QColor("#FFFFFF")))
+                    painter.drawText(int(x_c - 4), int(y_hi - 11), "9")
+                else:
+                    painter.setFont(QFont("Arial", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF0055") if num == 9 else QColor("#FF77AA")))
+                    painter.drawText(int(x_c - 3), int(y_hi - 9), str(num))
+
+            # 下跌九转 (买入结构)：下方绘制薄荷绿 4~8 与醒目青绿底 9 胶囊 (连续 9 转仅首个画胶囊)
+            if i < len(td_dn_arr) and td_dn_arr[i] >= 4:
+                num = int(td_dn_arr[i])
+                is_first_9 = (num == 9) and (i == 0 or td_dn_arr[i-1] != 9)
+                if is_first_9:
+                    painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#00E5FF"), 1))
+                    painter.setBrush(QBrush(QColor("#003325")))
+                    painter.drawRoundedRect(int(x_c - 8), int(y_lo + 8), 16, 14, 3, 3)
+                    painter.setPen(QPen(QColor("#FFFFFF")))
+                    painter.drawText(int(x_c - 4), int(y_lo + 19), "9")
+                else:
+                    painter.setFont(QFont("Arial", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#00E5FF") if num == 9 else QColor("#00FF88")))
+                    painter.drawText(int(x_c - 3), int(y_lo + 17), str(num))
+
+            # 🌟 7. 绘制通达信见底/见顶/启动/逃顶信号 (带 10 根 K 棒极值去重价格)
+            if i < len(sig_bot) and sig_bot[i] == 1:
+                painter.setPen(QPen(QColor("#00FFFF"), 1.5))
+                painter.setBrush(QBrush(QColor("#00FFFF")))
+                painter.drawEllipse(int(x_c - 2), int(y_lo + 4), 4, 4)
+                if show_bot_price[i]:
+                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#00FFFF")))
+                    y_offset = (y_lo + 26) if (i < len(td_dn_arr) and td_dn_arr[i] >= 4) else (y_lo + 16)
+                    painter.drawText(int(x_c - 16), int(y_offset), f"{lows[i]:.2f}")
+
+            if i < len(sig_top_arr) and sig_top_arr[i] == 1:
+                painter.setPen(QPen(QColor("#FF5555"), 1.5))
+                painter.setBrush(QBrush(QColor("#FF5555")))
+                painter.drawEllipse(int(x_c - 2), int(y_hi - 6), 4, 4)
+                if show_top_price[i]:
+                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF7777")))
+                    y_offset = (y_hi - 24) if (i < len(td_up_arr) and td_up_arr[i] >= 4) else (y_hi - 10)
+                    painter.drawText(int(x_c - 16), int(y_offset), f"{highs[i]:.2f}")
+
+            # 🌟 7.2 启动信号 (sig_launch)：首尾统计，中间仅保留精致微图标
+            if i in launch_plan:
+                info = launch_plan[i]
+                role = info['role']
+                total_c = info['count']
+                seq_c = info['seq']
+                if role == 'single':
+                    lbl_la = "🚀启动"
+                    painter.setFont(QFont("Microsoft YaHei", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF007F"), 1))
+                    painter.setBrush(QBrush(QColor("#2A0015")))
+                    painter.drawRoundedRect(int(x_c - 18), int(y_lo + 14), 36, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FF66AA")))
+                    painter.drawText(int(x_c - 16), int(y_lo + 25), lbl_la)
+                elif role == 'first':
+                    lbl_la = f"🚀启动×{total_c}"
+                    tw = 44 if total_c < 10 else 48
+                    painter.setFont(QFont("Microsoft YaHei", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF007F"), 1))
+                    painter.setBrush(QBrush(QColor("#35001C")))
+                    painter.drawRoundedRect(int(x_c - tw / 2), int(y_lo + 14), tw, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FF66AA")))
+                    painter.drawText(int(x_c - tw / 2 + 2), int(y_lo + 25), lbl_la)
+                elif role == 'last':
+                    lbl_la = f"🚀{seq_c}/{total_c}"
+                    tw = 32
+                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FF007F"), 1))
+                    painter.setBrush(QBrush(QColor("#2A0015")))
+                    painter.drawRoundedRect(int(x_c - tw / 2), int(y_lo + 14), tw, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FF88CC")))
+                    painter.drawText(int(x_c - tw / 2 + 3), int(y_lo + 25), lbl_la)
+                else:
+                    # 中间节点：取消大方框文字，仅保留粉紫色精巧微箭头，零遮挡
+                    painter.setPen(QPen(QColor("#FF007F"), 1))
+                    painter.setBrush(QBrush(QColor("#FF3399")))
+                    tri = QPolygon([
+                        QPoint(int(x_c), int(y_lo + 12)),
+                        QPoint(int(x_c - 3), int(y_lo + 17)),
+                        QPoint(int(x_c + 3), int(y_lo + 17))
+                    ])
+                    painter.drawPolygon(tri)
+
+            # 🌟 7.3 逃顶信号 (sig_escape)：首尾统计，中间仅保留精致微图标
+            if i in escape_plan:
+                info = escape_plan[i]
+                role = info['role']
+                total_c = info['count']
+                seq_c = info['seq']
+                if role == 'single':
+                    lbl_es = "⚠️逃顶"
+                    painter.setFont(QFont("Microsoft YaHei", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FFAA00"), 1))
+                    painter.setBrush(QBrush(QColor("#2A1E00")))
+                    painter.drawRoundedRect(int(x_c - 18), int(y_hi - 24), 36, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FFDD66")))
+                    painter.drawText(int(x_c - 16), int(y_hi - 13), lbl_es)
+                elif role == 'first':
+                    lbl_es = f"⚠️逃顶×{total_c}"
+                    tw = 44 if total_c < 10 else 48
+                    painter.setFont(QFont("Microsoft YaHei", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FFAA00"), 1))
+                    painter.setBrush(QBrush(QColor("#352400")))
+                    painter.drawRoundedRect(int(x_c - tw / 2), int(y_hi - 24), tw, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FFDD66")))
+                    painter.drawText(int(x_c - tw / 2 + 2), int(y_hi - 13), lbl_es)
+                elif role == 'last':
+                    lbl_es = f"⚠️{seq_c}/{total_c}"
+                    tw = 32
+                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FFAA00"), 1))
+                    painter.setBrush(QBrush(QColor("#2A1E00")))
+                    painter.drawRoundedRect(int(x_c - tw / 2), int(y_hi - 24), tw, 14, 2, 2)
+                    painter.setPen(QPen(QColor("#FFE088")))
+                    painter.drawText(int(x_c - tw / 2 + 3), int(y_hi - 13), lbl_es)
+                else:
+                    # 中间节点：取消大方框文字，仅保留金黄色精巧微倒三角，零遮挡
+                    painter.setPen(QPen(QColor("#FFAA00"), 1))
+                    painter.setBrush(QBrush(QColor("#FFCC00")))
+                    tri = QPolygon([
+                        QPoint(int(x_c), int(y_hi - 10)),
+                        QPoint(int(x_c - 3), int(y_hi - 15)),
+                        QPoint(int(x_c + 3), int(y_hi - 15))
+                    ])
+                    painter.drawPolygon(tri)
+
+        # 8. 🌟 统一收集右侧 Y 轴基准线与标签 (黄金分割、支撑、反转、开盘、止盈目标)
+        # 完全移到右侧边栏刻度区，彻底消除主图内部悬浮框遮挡蜡烛图和通道线的问题
+        right_axis_labels = []
+
+        # 8.1 黄金分割阶梯线
+        if fib_range > 1e-4:
+            fib_levels = [
+                (full_low + fib_range * 0.809, "80.9%", QColor("#FF7700")),  # 高阻位
+                (full_low + fib_range * 0.618, "61.8%", QColor("#FFD700")),  # 黄金阻力
+                (full_low + fib_range * 0.500, "50.0%", QColor("#00E5FF")),  # 中枢位
+                (full_low + fib_range * 0.382, "38.2%", QColor("#FFD700")),  # 黄金支撑
+                (full_low + fib_range * 0.191, "19.1%", QColor("#00FF88")),  # 强撑位
+            ]
+            fib_start_x = int(margin_left + chart_w * 0.45)
+            fib_end_x = int(margin_left + chart_w)
+            for f_val, f_lbl, f_col in fib_levels:
+                if min_p <= f_val <= max_p:
+                    y_fib = k_to_y(f_val)
+                    painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
+                    right_axis_labels.append((y_fib, f"{f_val:.1f} {f_lbl}", f_col, QFont("Consolas", 7)))
+
+        # 8.2 上涨支撑线 (ch_supp_p) 右侧标签与短水平虚线
+        if ch_supp_p > 0 and min_p <= ch_supp_p <= max_p:
+            y_supp_line = k_to_y(ch_supp_p)
+            painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left + chart_w * 0.50), int(y_supp_line), int(margin_left + chart_w), int(y_supp_line))
+            right_axis_labels.append((y_supp_line, f"支撑:{ch_supp_p:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 8.3 翻转线 (rev_last) 右侧标签与短水平虚线
+        if rev_last > 0 and min_p <= rev_last <= max_p:
+            y_rev_line = k_to_y(rev_last)
+            painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left + chart_w * 0.50), int(y_rev_line), int(margin_left + chart_w), int(y_rev_line))
+            right_axis_labels.append((y_rev_line, f"反转:{rev_last:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 8.4 开盘基准线 (self.open_price) 右侧标签
+        if self.open_price > 0 and min_p <= self.open_price <= max_p:
+            y_op_line = k_to_y(self.open_price)
+            painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left + chart_w * 0.35), int(y_op_line), int(margin_left + chart_w), int(y_op_line))
+            right_axis_labels.append((y_op_line, f"开盘:{self.open_price:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 8.5 止盈目标线 (self.target_sell_min) 右侧标签
+        if self.target_sell_min > 0 and min_p <= self.target_sell_min <= max_p:
+            y_tmin_line = k_to_y(self.target_sell_min)
+            painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashDotLine))
+            painter.drawLine(int(margin_left + chart_w * 0.35), int(y_tmin_line), int(margin_left + chart_w), int(y_tmin_line))
+            right_axis_labels.append((y_tmin_line, f"目标:{self.target_sell_min:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 🌟 统一渲染右侧 Y 轴标签（带垂直防重叠智能微调）
+        if right_axis_labels:
+            right_axis_labels.sort(key=lambda item: item[0])
+            adjusted_labels = []
+            min_y_gap = 12.0
+            last_drawn_y = -999.0
+            for raw_y, text, col, font in right_axis_labels:
+                target_y = max(raw_y, last_drawn_y + min_y_gap)
+                target_y = max(margin_top + 8, min(margin_top + main_h - 2, target_y))
+                adjusted_labels.append((target_y, text, col, font))
+                last_drawn_y = target_y
+
+            for adj_y, text, col, font in adjusted_labels:
+                painter.setFont(font)
+                painter.setPen(QPen(col))
+                painter.drawText(int(margin_left + chart_w + 3), int(adj_y + 3), text)
+
+        # 9. 🌟 绘制 SBC 买卖信号 (精准对齐对应 K 棒 Pin 标与悬浮 Tag，不画右侧多余横线)
+        if self.signals:
+            times_k = [str(t).strip() for t in df_view.index]
+            last_k_time = times_k[-1] if times_k else ""
+            today_str = last_k_time[:10] if len(last_k_time) >= 10 and "-" in last_k_time[:10] else ""
+
+            k_hhmm_list = []
+            today_k_indices = []
+            for i, tk in enumerate(times_k):
+                tk_sub = tk.split()[-1] if " " in tk else tk
+                tk_hm = tk_sub[:5] if len(tk_sub) >= 5 else tk_sub
+                k_hhmm_list.append(tk_hm)
+                if not today_str or tk.startswith(today_str):
+                    today_k_indices.append(i)
+
+            if not today_k_indices:
+                today_k_indices = list(range(n))
+
+            sig_drawn_slots = {}
+
+            for sig_idx, sig in enumerate(self.signals):
+                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                if sig_p <= 0:
+                    continue
+
+                sig_t_raw = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
+                action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
+                is_buy = "buy" in action_type or "买" in action_type
+                prefix = "🟢 买" if is_buy else "🔴 卖"
+                border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
+                bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
+                fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
+
+                y_s = k_to_y(sig_p)
+
+                sig_hm = sig_t_raw.split()[-1][:5] if " " in sig_t_raw else sig_t_raw[:5]
+
+                idx_k = -1
+                if self.period_mode in ["day", "week"]:
+                    idx_k = today_k_indices[-1]
+                else:
+                    for ki in today_k_indices:
+                        if k_hhmm_list[ki] >= sig_hm:
+                            idx_k = ki
+                            break
+                    if idx_k < 0:
+                        idx_k = today_k_indices[-1]
+
+                if 0 <= idx_k < n:
+                    x_k = k_to_x(idx_k)
+
+                    painter.setPen(QPen(border_color, 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
+
+                    painter.setPen(QPen(QColor("#ffffff"), 1.5))
+                    painter.setBrush(QBrush(border_color))
+                    painter.drawEllipse(int(x_k - 4), int(y_s - 4), 8, 8)
+
+                    lbl_text = f"{prefix}:{sig_p:.2f}"
+                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                    fm = painter.fontMetrics()
+                    tw_k = fm.horizontalAdvance(lbl_text) + 8
+                    th_k = fm.height() + 4
+
+                    x_offset = 0
+                    if idx_k in sig_drawn_slots:
+                        prev_y, prev_count = sig_drawn_slots[idx_k]
+                        if abs(y_s - prev_y) < (th_k + 4):
+                            x_offset = (tw_k + 6) if (prev_count % 2 == 1) else -(tw_k + 6)
+                        sig_drawn_slots[idx_k] = (y_s, prev_count + 1)
+                    else:
+                        sig_drawn_slots[idx_k] = (y_s, 1)
+
+                    tag_kx = int(max(margin_left, min(margin_left + chart_w - tw_k, x_k - tw_k / 2 + x_offset)))
+                    tag_ky = int(max(margin_top, min(margin_top + main_h - th_k, y_s - th_k / 2)))
+
+                    painter.setPen(QPen(border_color, 1))
+                    painter.setBrush(QBrush(bg_color))
+                    painter.drawRoundedRect(tag_kx, tag_ky, tw_k, th_k, 3, 3)
+
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(tag_kx + 4, tag_ky + th_k - 4, lbl_text)
+
+        # 10. 顶部通道标题与参数标注
         painter.setPen(QPen(QColor("#ffd700"), 1))
         painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
-        painter.drawText(margin_left + 6, margin_top + 16, f"📊 [{self.period_mode.upper()}] GG通道 & MA均线K线走势")
+        info_header = f"📊 [{self.period_mode.upper()}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
+        if ch_supp_p > 0:
+            info_header += f" | 支撑:{ch_supp_p:.2f}"
+        if rev_last > 0:
+            info_header += f" | 反转:{rev_last:.2f}"
+        painter.drawText(margin_left + 6, margin_top + 16, info_header)
+
+        # 13. 🔍 缩放状态提示 (右上角)
+        if self._is_zoomed():
+            zoom_tip = f"🔍 局部放大: {n}/{len(self.df_intraday)} 根 [右键重置]"
+            painter.setFont(QFont("Microsoft YaHei", 8))
+            painter.setPen(QPen(QColor("#00E5FF")))
+            painter.drawText(margin_left + chart_w - 200, margin_top + 16, zoom_tip)
 
 
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week"]
@@ -1243,34 +1948,6 @@ class SBCIntradayChartDialog(QWidget):
         mode = getattr(self, '_current_period_mode', '1m')
         fetcher = TDXRealtimeFetcher.get_instance()
 
-        if mode in ["2d", "3d"]:
-            days = 2 if mode == "2d" else 3
-            df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
-            if not df_multi.empty:
-                op = float(df_multi.iloc[0].get("open", 0.0))
-                vw = float(df_multi.iloc[-1].get("vwap", 0.0))
-                hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else 0.0
-                lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else 0.0
-                self.canvas.set_data(df_multi, op, vw, hi, lo, 0.0, 0.0, [], period_mode=mode)
-                cl_last = float(df_multi.iloc[-1].get("close", 0.0))
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 现:{cl_last:.2f}")
-            return
-
-        if mode in ["5m", "15m", "30m", "60m", "day", "week"]:
-            df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
-            if not df_kline.empty:
-                self.canvas.set_kline_data(df_kline, period_mode=mode)
-                cl_last = float(df_kline.iloc[-1].get("close", 0.0))
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 现:{cl_last:.2f}")
-            return
-
-        # 默认为 1日分时 (1m)
-        df_intraday = fetcher.fetch_intraday_bars(self.code)
-
-        # 💡 [数据隔离防污染强校验] 若当前标的数据获取为空/异常，绝对不上溯抓取主工作台其他标的数据，维持当前有效画幅不变
-        if df_intraday is None or df_intraday.empty:
-            return
-
         snap = fetcher.fetch_stock_snapshot(self.code)
 
         op = float(snap.get("open_price", 0.0))
@@ -1281,11 +1958,67 @@ class SBCIntradayChartDialog(QWidget):
         amt = float(snap.get("amount", 0.0))
         to_rate = float(snap.get("turnover_rate", 0.0))
 
-        state = self.engine._get_stock_state(self.code, op)
+        state = self.engine._get_stock_state(self.code, op) if self.engine else {}
         sigs = state.get("signals", [])
 
+        if not sigs and self.engine is not None and op > 1.0:
+            now_t = datetime.now().strftime("%H:%M:%S")
+            eval_res = self.engine.evaluate_seven_nodes(
+                code=self.code,
+                current_time_str=now_t,
+                open_price=op,
+                price=p,
+                high_price=hi,
+                low_price=lo,
+                vwap=vw,
+                turnover_rate=to_rate,
+                amount=amt
+            )
+            sigs = state.get("signals", []) or eval_res.get("signals", [])
+
+        t_min = op * 1.03 if op > 1.0 else 0.0
+        t_max = op * 1.05 if op > 1.0 else 0.0
+
+        if mode in ["2d", "3d"]:
+            days = 2 if mode == "2d" else 3
+            df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
+            if not df_multi.empty:
+                if op <= 1.0:
+                    op = float(df_multi.iloc[-1].get("open", p))
+                if vw <= 1.0:
+                    vw = float(df_multi.iloc[-1].get("vwap", p))
+                if hi <= 1.0:
+                    hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else p
+                if lo <= 1.0:
+                    lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else p
+                cl_last = float(df_multi.iloc[-1].get("close", p))
+                self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
+                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
+                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+            return
+
+        if mode in ["5m", "15m", "30m", "60m", "day", "week"]:
+            df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
+            if not df_kline.empty:
+                if op <= 1.0:
+                    op = float(df_kline.iloc[-1].get("open", p))
+                if vw <= 1.0:
+                    vw = float(df_kline.iloc[-1].get("close", p))
+                if hi <= 1.0:
+                    hi = float(df_kline['high'].max()) if 'high' in df_kline.columns else p
+                if lo <= 1.0:
+                    lo = float(df_kline['low'].min()) if 'low' in df_kline.columns else p
+                cl_last = float(df_kline.iloc[-1].get("close", p))
+                self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
+                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
+                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+            return
+
+        # 默认为 1日分时 (1m)
+        df_intraday = fetcher.fetch_intraday_bars(self.code)
+
         # 2. 三重物理兜底：若仍为空，利用 state["time_snapshots"] 物理构造全量 DataFrame
-        if df_intraday.empty:
+        if (df_intraday is None or df_intraday.empty) and state:
             snaps = state.get("time_snapshots", {})
             if snaps:
                 rows = []
@@ -1303,6 +2036,10 @@ class SBCIntradayChartDialog(QWidget):
                 if rows:
                     df_intraday = pd.DataFrame(rows).set_index("time")
 
+        # 💡 [数据隔离防污染强校验] 若当前标的数据获取为空/异常，绝对不上溯抓取主工作台其他标的数据，维持当前有效画幅不变
+        if df_intraday is None or df_intraday.empty:
+            return
+
         if (op <= 1.0 or p <= 1.0) and not df_intraday.empty:
             if op <= 1.0:
                 op = float(df_intraday.iloc[0].get("open", p))
@@ -1319,27 +2056,9 @@ class SBCIntradayChartDialog(QWidget):
             if to_rate <= 0:
                 to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
 
-        if not sigs and self.engine is not None and op > 1.0:
-            now_t = datetime.now().strftime("%H:%M:%S")
-            eval_res = self.engine.evaluate_seven_nodes(
-                code=self.code,
-                current_time_str=now_t,
-                open_price=op,
-                price=p,
-                high_price=hi,
-                low_price=lo,
-                vwap=vw,
-                turnover_rate=to_rate,
-                amount=amt
-            )
-            sigs = state.get("signals", []) or eval_res.get("signals", [])
-
-        t_min = op * 1.03
-        t_max = op * 1.05
-
-        self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs)
+        self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
-        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元")
+        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
 
         # 打印行情健康调试日志
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -1711,7 +2430,7 @@ def rearrange_all_sbc_windows(parent_win=None):
         curr_y = sg.top() + 20
         row_max_h = 0
 
-        for dlg in dlgs_on_screen:
+        for idx_d, dlg in enumerate(dlgs_on_screen):
             w = dlg.width()
             h = dlg.height()
             if curr_x + w > sg.right() and curr_x > sg.left() + 20:
@@ -1719,9 +2438,10 @@ def rearrange_all_sbc_windows(parent_win=None):
                 curr_y += row_max_h + margin_y
                 row_max_h = 0
 
-            # 防越界超出屏幕底部
-            if curr_y + h > sg.bottom():
-                curr_y = sg.top() + 20
+            # 防越界超出屏幕底部：若无法容纳完整新行，采用微错位平铺，避免所有窗口重叠在同一坐标
+            if curr_y + h > sg.bottom() and curr_y > sg.top() + 20:
+                curr_y = sg.top() + 20 + (idx_d * 25) % max(1, sg.height() - h if sg.height() > h else 50)
+                curr_x = sg.left() + 20 + (idx_d * 25) % max(1, sg.width() - w if sg.width() > w else 50)
 
             # 💡 重排时彻底重置磁吸状态，保持正常完全可见的浮动窗口布局，绝不自动触发边缘收缩
             if hasattr(dlg, "snap_timer"):
