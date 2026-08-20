@@ -1,3 +1,13 @@
+## 2026-08-21 00:41
+- [x] **修复 `singleAnalyseUtil.py` 交易日/非交易日收盘判定与 RamDisk 备份脚本触发机制 (`singleAnalyseUtil.py`)**：
+    - [x] **精准交易日/盘后判定（杜绝非交易日无意义执行与重复）**：
+        - 移除原非交易日分支 `elif not cct.get_trade_date_status(): need_write = True` 漏洞，严格限制只有在交易日收盘后（`cct.get_trade_date_status() and int_time > 1501`）且当天未写过时才触发收盘数据写入与备份；
+        - 非交易日（周末/假日）及交易日当天已完成后，自动保持 24*7 呼吸打点状态，绝不重复执行；
+    - [x] **备份脚本触发条件修正**：
+        - 收盘数据写入后，`sina_MultiIndex_data.h5` 的文件修改时间即为当天，`cct.creation_date_duration(ramdisk_h5)` 计算结果为 `0` 天；原代码 `> 0` 条件导致 `0 > 0` 恒为 False；
+        - 将自动收盘与手动 `w` 分支中的备份条件统一修正为 `if os.path.exists(ramdisk_h5):`；
+        - 确保 Windows 环境下成功拉起 `1-ramdisk_back.bat` 并输出 `1-ramdisk_back is OK`，Mac 环境下成功执行 `saveRamdisk.sh` 并输出 `saveRamdisk is OK`。
+
 ## 2026-08-21 00:32
 - [x] **升级 `history_manager.py` 多选对比弹窗股票联动为 HTTP 接口协议并纯净化剪贴板操作 (`history_manager.py`)**：
     - [x] **统一标准接口联动（对齐 `网页联动伴侣2.js` 规范）**：
