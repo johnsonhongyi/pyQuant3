@@ -4202,8 +4202,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
             self.log(f"正在拉起进程: {cmd_run} (工作目录: {target_dir})")
 
+            # 隔离父进程环境变量，防止管理器自身的 INSTOCK_APP_ROOT 污染被启动的独立子程序
+            sub_env = os.environ.copy()
+            sub_env.pop("INSTOCK_APP_ROOT", None)
+            sub_env.pop("NUITKA_ONEFILE_DIRECTORY", None)
+
             # 在 windows 上，使用 shell=True 启动任何脚本或命令最稳妥
-            subprocess.Popen(cmd_run, shell=True, cwd=target_dir)
+            subprocess.Popen(cmd_run, shell=True, cwd=target_dir, env=sub_env)
             self._setup_post_launch_layout_timer(title, pos_item)
             return True
         except OSError as e:
