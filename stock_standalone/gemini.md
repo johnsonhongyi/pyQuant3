@@ -1,3 +1,15 @@
+## 2026-08-19 23:25
+- [x] **根治窗口布局管理器打包后运行环境配置文件被环境变量污染与回退 Bug，并完成底层路径识别单一流水线重构 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `sys_utils.py`, `window_layout_config.json`, `webTools/window_manager/window_layout_config.json`, `tests/test_packaged_path_isolation.py`)**：
+    - [x] **打包环境物理运行根目录强锁定与单一流水线重构（KISS / DRY / SOLID）**：
+        - 彻底排查并根治了 `get_app_root()` 优先判断外部 `INSTOCK_APP_ROOT` 环境变量导致打包 EXE 启动时被父进程/终端残留环境变量带偏回源码开发目录的致命缺陷；
+        - 将分散在头尾的重复判断重构为统一自顶向下流水线：打包主进程优先锁定物理路径（排除 Temp 解压目录） $\rightarrow$ 跨进程继承非临时合法路径 $\rightarrow$ 源码默认 Fallback；
+        - 采用直接 `print()` 输出底层路径定位信息，替代进入异步 logger 队列，既直观展示路径，又彻底消除多线程/异步监听器在标准流被重定向时触发的句柄冲突异常；
+    - [x] **运行环境配置单向自愈与唯一可信源（SSOT）**：
+        - 锁定 `get_conf_path("window_layout_config.json")`：当且仅当运行目录下文件物理不存在时才从内部资源包做一次性初始化模板释放；一旦文件存在，100% 仅使用运行目录物理文件，绝不扫描、回退或覆盖；
+    - [x] **全量同步最新配置至打包源模板与自动化测试**：
+        - 将生产环境（`55188`）与根目录已校验的最新全量窗口坐标全量同步覆盖至 `webTools/window_manager/window_layout_config.json` 与 `dist/window_layout_config.json`；
+        - 新增专项测试 `tests/test_packaged_path_isolation.py`，全量覆盖开发模式、PyInstaller、Nuitka Launcher 及 Temp 深度子进程场景，100% 秒级 PASSED！
+
 ## 2026-08-19 23:00
 - [x] **彻底根治 Tk V型反转监控潜伏池入池时间 (`entry_date`) 每日被覆写 Bug，实现最初挖掘入池时间永久锁定与阶段进入时间解耦 (`realtime_data_service.py`, `instock_MonitorTK.py`, `tests/test_v_reversal_entry_date_fix.py`)**：
     - [x] **最初入池时间与波段阶段时间精准解耦 (KISS / SRP)**：

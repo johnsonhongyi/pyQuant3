@@ -729,24 +729,24 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
 
 def get_app_root() -> str:
     """获取程序物理根目录。"""
-
-    env_root = os.environ.get("INSTOCK_APP_ROOT")
-    if env_root and os.path.exists(env_root):
-        return env_root
-
     is_frozen = getattr(sys, "frozen", False)
     is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
     
     if is_frozen or is_nuitka:
+        # 🚀 打包 EXE 模式：物理根目录永远 100% 锁定为 EXE 自身所在目录，严禁被外部继承的环境变量带偏！
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
-        # 兼容若打包 EXE 置于 webTools 子目录时的物理根目录提升
+        # 兼容若打包 EXE 置于 webTools 或 window_manager 子目录时的物理根目录提升
         if os.path.basename(calculated_root).lower() in ('webtools', 'window_manager'):
             calculated_root = os.path.dirname(calculated_root)
             if os.path.basename(calculated_root).lower() == 'webtools':
                 calculated_root = os.path.dirname(calculated_root)
     else:
-        # 对应本地开发环境项目根目录 (webTools/window_manager 的上上级)
-        calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # 源码开发调试模式：优先遵循显式指定的 INSTOCK_APP_ROOT，否则回退到本地开发环境项目根目录 (webTools/window_manager 的上上级)
+        env_root = os.environ.get("INSTOCK_APP_ROOT")
+        if env_root and os.path.exists(env_root):
+            calculated_root = env_root
+        else:
+            calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
     return calculated_root

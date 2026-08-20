@@ -18,17 +18,11 @@ def get_app_root() -> str:
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
         
-    env_root = os.environ.get("INSTOCK_APP_ROOT")
-    if env_root and os.path.exists(env_root):
-        try:
-            os.chdir(env_root)
-        except Exception:
-            pass
-        return env_root
-
     is_frozen = getattr(sys, "frozen", False)
     is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+
     if is_frozen or is_nuitka:
+        # 🚀 打包 EXE 模式：物理根目录永远 100% 锁定为 EXE 自身所在目录，严禁被外部继承的环境变量带偏！
         calculated_root = os.path.dirname(os.path.abspath(sys.executable))
         # 兼容若打包 EXE 置于 webTools 或 window_manager 子目录时的物理根目录提升
         if os.path.basename(calculated_root).lower() in ('webtools', 'window_manager'):
@@ -36,8 +30,12 @@ def get_app_root() -> str:
             if os.path.basename(calculated_root).lower() == 'webtools':
                 calculated_root = os.path.dirname(calculated_root)
     else:
-        # 开发环境下，项目根目录是 webTools 的上级目录
-        calculated_root = parent_dir
+        # 源码开发调试模式：优先遵循显式指定的 INSTOCK_APP_ROOT，否则回退到开发工程物理根目录
+        env_root = os.environ.get("INSTOCK_APP_ROOT")
+        if env_root and os.path.exists(env_root):
+            calculated_root = env_root
+        else:
+            calculated_root = parent_dir
 
     # 物理锁定并写入环境变量，保障所有子进程/模块路径 100% 统一
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
