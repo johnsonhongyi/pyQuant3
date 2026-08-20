@@ -366,15 +366,24 @@ def test_sbc_canvas_right_click_reset_view(qapp):
     df_view, _, _ = canvas._get_visible_slice()
     assert len(df_view) == 21
 
-    # 模拟鼠标右键点击
-    right_click_ev = QMouseEvent(
+    # 模拟鼠标右键按下与松开 (无拖拽单击)
+    press_ev = QMouseEvent(
         QMouseEvent.Type.MouseButtonPress,
         QPointF(300, 200),
         Qt.MouseButton.RightButton,
         Qt.MouseButton.RightButton,
         Qt.KeyboardModifier.NoModifier
     )
-    canvas.mousePressEvent(right_click_ev)
+    canvas.mousePressEvent(press_ev)
+
+    release_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(300, 200),
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    canvas.mouseReleaseEvent(release_ev)
 
     # 验证已一键重置为 100% 全景
     assert not canvas._is_zoomed()
@@ -382,6 +391,98 @@ def test_sbc_canvas_right_click_reset_view(qapp):
     assert len(df_view_reset) == 60
     assert s_i == 0
     assert e_i == 59
+
+
+def test_sbc_canvas_box_zoom_and_channel_cutoff(qapp):
+    """测试默认鼠标左键拖拽平移视图 (Pan) 与 Shift+左键框选放大 (Box Zoom)"""
+    from PyQt6.QtCore import Qt, QPoint, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    canvas = SBCChartCanvas()
+    canvas.resize(600, 400)
+    df_kline = _create_mock_kline_df(100)
+    
+    # 模拟极端通道下轨 (低于最低价 20%，测试是否截断且不崩溃)
+    df_kline['ch_upper'] = df_kline['high'] * 1.05
+    df_kline['ch_mid'] = df_kline['close']
+    df_kline['ch_lower'] = df_kline['low'] * 0.70  # 极低值
+    df_kline['ch_tc2'] = 10
+    df_kline['ch_bc2'] = 10
+    
+    canvas.set_kline_data(df_kline=df_kline, period_mode="5m")
+
+    # 1. 默认左键拖拽：执行平移视图 (Pan)
+    press_pan_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(300, 150),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    canvas.mousePressEvent(press_pan_ev)
+    assert canvas._is_panning
+
+    move_pan_ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        QPointF(200, 150),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    canvas.mouseMoveEvent(move_pan_ev)
+    assert canvas._is_zoomed()  # 平移已切入可移动局部视口
+
+    release_pan_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(200, 150),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    canvas.mouseReleaseEvent(release_pan_ev)
+    assert not canvas._is_panning
+
+    # 2. Shift+左键拖拽：执行框选放大 (Rubberband Box Zoom)
+    canvas.reset_view()
+    assert not canvas._is_zoomed()
+
+    press_zoom_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        QPointF(100, 150),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier
+    )
+    canvas.mousePressEvent(press_zoom_ev)
+
+    move_zoom_ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        QPointF(300, 250),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier
+    )
+    canvas.mouseMoveEvent(move_zoom_ev)
+    assert canvas._is_box_zooming
+
+    release_zoom_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(300, 250),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ShiftModifier
+    )
+    canvas.mouseReleaseEvent(release_zoom_ev)
+    assert not canvas._is_box_zooming
+    assert canvas._is_zoomed()
+
+    # 2. 模拟渲染，验证通道截断无异常
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    painter = QPainter(img)
+    try:
+        canvas.render(painter)
+    finally:
+        painter.end()
 
 
 def test_sbc_canvas_td_sequential_and_price_dedup(qapp):
@@ -410,5 +511,47 @@ def test_sbc_canvas_td_sequential_and_price_dedup(qapp):
         canvas.render(painter)
     finally:
         painter.end()
+
+
+def test_sbc_canvas_hover_crosshair_and_price_display(qapp):
+    """测试鼠标指针悬停时十字光标与价格浮标计算以及 leaveEvent 清除"""
+    from PyQt6.QtCore import Qt, QPointF, QEvent
+    from PyQt6.QtGui import QMouseEvent, QImage, QPainter
+
+    canvas = SBCChartCanvas()
+    canvas.resize(700, 450)
+    df_kline = _create_mock_kline_df(80)
+    canvas.set_kline_data(df_kline=df_kline, period_mode="day")
+
+    # 1. 模拟鼠标移动到 (350, 200)
+    move_ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        QPointF(350, 200),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    canvas.mouseMoveEvent(move_ev)
+    assert canvas._hover_pos is not None
+    assert canvas._hover_pos.x() == 350
+    assert canvas._hover_pos.y() == 200
+
+    # 2. 模拟渲染，验证十字光标与价格反推逻辑无崩溃
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    painter = QPainter(img)
+    try:
+        canvas.render(painter)
+    finally:
+        painter.end()
+
+    assert canvas._coord_info.get("ready", False) is True
+    assert canvas._coord_info["min_p"] > 0
+    assert canvas._coord_info["max_p"] > canvas._coord_info["min_p"]
+
+    # 3. 模拟鼠标移出画布 (leaveEvent)
+    leave_ev = QEvent(QEvent.Type.Leave)
+    canvas.leaveEvent(leave_ev)
+    assert canvas._hover_pos is None
+
 
 

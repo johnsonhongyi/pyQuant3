@@ -239,6 +239,20 @@ class SBCChartCanvas(QWidget):
         self._pan_start_indices = (0, -1)
         self._last_period_mode = "1m"
 
+        # 🔍 框选放大 (Rubberband Box Zoom) 状态
+        self._box_zoom_origin = None
+        self._box_zoom_current = None
+        self._is_box_zooming = False
+
+        # 🖐️ 鼠标右键平移/单击重置状态
+        self._right_press_pos = None
+        self._is_right_panning = False
+        self._right_pan_start_indices = (0, -1)
+
+        # 🎯 鼠标指针悬停与实时价格坐标
+        self._hover_pos = None
+        self._coord_info = {}
+
         self.setMinimumSize(320, 180)
         self.setStyleSheet("background-color: #0c0d14;")
         self.setMouseTracking(True)
@@ -248,6 +262,9 @@ class SBCChartCanvas(QWidget):
         self._zoom_start_idx = 0
         self._zoom_end_idx = -1
         self._is_panning = False
+        self._is_box_zooming = False
+        self._box_zoom_origin = None
+        self._box_zoom_current = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -290,7 +307,7 @@ class SBCChartCanvas(QWidget):
             return
 
         margin_left = 55
-        margin_right = 65
+        margin_right = 75
         chart_w = max(10, self.width() - margin_left - margin_right)
         mouse_pos = event.position() if hasattr(event, "position") else event.pos()
         mouse_x = mouse_pos.x()
@@ -334,68 +351,178 @@ class SBCChartCanvas(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
-        """鼠标按下：右键一键重置，左键开始拖拽平移"""
+        """鼠标按下：默认左键拖拽为平移视图，Shift+左键为框选放大，右键单击重置"""
+        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+
         if event.button() == Qt.MouseButton.RightButton:
-            self.reset_view()
-            event.accept()
-            return
-        elif event.button() == Qt.MouseButton.LeftButton:
+            # 记录右键按下点，若松开未移动则为一键重置，若移动则为右键平移
+            self._right_press_pos = mouse_pos
+            self._is_right_panning = False
             if self.df_intraday is not None and not self.df_intraday.empty:
                 total_n = len(self.df_intraday)
                 cur_start = max(0, self._zoom_start_idx)
                 cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
-                self._is_panning = True
-                mouse_pos = event.position() if hasattr(event, "position") else event.pos()
-                self._pan_start_x = mouse_pos.x()
-                self._pan_start_indices = (cur_start, cur_end)
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._right_pan_start_indices = (cur_start, cur_end)
+            event.accept()
+            return
+
+        elif event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.MiddleButton:
+            if self.df_intraday is not None and not self.df_intraday.empty:
+                total_n = len(self.df_intraday)
+                cur_start = max(0, self._zoom_start_idx)
+                cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
+
+                is_shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+                if is_shift and event.button() == Qt.MouseButton.LeftButton:
+                    # 🔍 Shift+左键：框选放大模式 (Rubberband Box Zoom)
+                    self._box_zoom_origin = mouse_pos
+                    self._box_zoom_current = mouse_pos
+                    self._is_box_zooming = False
+                    self._pan_start_x = mouse_pos.x()
+                    self._pan_start_indices = (cur_start, cur_end)
+                else:
+                    # 🖐️ 默认鼠标左键/中键：平移视图查看边缘被遮挡信息 (Pan)
+                    self._is_panning = True
+                    self._pan_start_x = mouse_pos.x()
+                    self._pan_start_indices = (cur_start, cur_end)
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
                 event.accept()
                 return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """鼠标移动：处于拖拽状态时平滑平移历史 K 线/分时"""
+        """鼠标移动：平滑平移视图或 Shift 框选选区绘制"""
+        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+
+        # 1. 🖐️ 默认左键/中键平移视图 (Pan)
         if self._is_panning and self.df_intraday is not None and not self.df_intraday.empty:
             total_n = len(self.df_intraday)
-            mouse_pos = event.position() if hasattr(event, "position") else event.pos()
             dx = mouse_pos.x() - self._pan_start_x
+            orig_start, orig_end = self._pan_start_indices
+            if orig_start == 0 and orig_end == total_n - 1 and total_n > 50:
+                # 若当前处于 100% 全景，拖拽时自动切入局部可平移视口
+                orig_start = max(0, total_n - 80)
+                orig_end = total_n - 1
 
-            cur_count = self._pan_start_indices[1] - self._pan_start_indices[0] + 1
+            cur_count = orig_end - orig_start + 1
             margin_left = 55
-            margin_right = 65
+            margin_right = 75
             chart_w = max(10, self.width() - margin_left - margin_right)
             bar_px = max(1.0, chart_w / max(1, cur_count))
             shift_bars = int(round(dx / bar_px))
 
-            orig_start, orig_end = self._pan_start_indices
-            new_start = orig_start - shift_bars
-            new_end = orig_end - shift_bars
-
-            # 边界限制
-            if new_start < 0:
-                new_end += (0 - new_start)
-                new_start = 0
-            if new_end >= total_n:
-                new_start -= (new_end - (total_n - 1))
-                new_end = total_n - 1
-
-            new_start = max(0, min(total_n - 1, new_start))
-            new_end = max(0, min(total_n - 1, new_end))
-
+            new_start = max(0, min(total_n - 1, orig_start - shift_bars))
+            new_end = max(0, min(total_n - 1, orig_end - shift_bars))
             self._zoom_start_idx = new_start
             self._zoom_end_idx = new_end
             self.update()
             event.accept()
             return
+
+        # 2. 🖐️ 右键按住拖拽平移
+        if (event.buttons() & Qt.MouseButton.RightButton) and self._right_press_pos is not None:
+            dx = mouse_pos.x() - self._right_press_pos.x()
+            if abs(dx) > 3 or self._is_right_panning:
+                self._is_right_panning = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                if self.df_intraday is not None and not self.df_intraday.empty:
+                    total_n = len(self.df_intraday)
+                    orig_start, orig_end = self._right_pan_start_indices
+                    if orig_start == 0 and orig_end == total_n - 1 and total_n > 50:
+                        orig_start = max(0, total_n - 80)
+                        orig_end = total_n - 1
+
+                    cur_count = orig_end - orig_start + 1
+                    margin_left = 55
+                    margin_right = 75
+                    chart_w = max(10, self.width() - margin_left - margin_right)
+                    bar_px = max(1.0, chart_w / max(1, cur_count))
+                    shift_bars = int(round(dx / bar_px))
+
+                    new_start = max(0, min(total_n - 1, orig_start - shift_bars))
+                    new_end = max(0, min(total_n - 1, orig_end - shift_bars))
+                    self._zoom_start_idx = new_start
+                    self._zoom_end_idx = new_end
+                    self.update()
+                event.accept()
+                return
+
+        # 3. 🔍 Shift+左键拖拽框选放大 (Rubberband Box Zoom)
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._box_zoom_origin is not None:
+            dx = mouse_pos.x() - self._box_zoom_origin.x()
+            dy = mouse_pos.y() - self._box_zoom_origin.y()
+            if abs(dx) > 6 or abs(dy) > 6 or self._is_box_zooming:
+                self._is_box_zooming = True
+                self._box_zoom_current = mouse_pos
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+
+        # 4. 🎯 正常悬停：记录 hover_pos 触发实时十字光标与价格浮标
+        self._hover_pos = mouse_pos
+        self.update()
         super().mouseMoveEvent(event)
 
+    def leaveEvent(self, event):
+        """鼠标离开画布：清除光标价格与十字线"""
+        self._hover_pos = None
+        self.update()
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        """鼠标松开：结束拖拽平移"""
-        if event.button() == Qt.MouseButton.LeftButton:
+        """鼠标松开：结束平移、结算 Shift 框选放大或右键单击一键重置"""
+        if event.button() == Qt.MouseButton.RightButton:
+            if not self._is_right_panning:
+                # 纯右键单击：执行一键重置 100% 全景
+                self.reset_view()
+            self._is_right_panning = False
+            self._right_press_pos = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+
+        elif event.button() == Qt.MouseButton.LeftButton:
+            if self._is_box_zooming and self._box_zoom_origin and self._box_zoom_current and self.df_intraday is not None and not self.df_intraday.empty:
+                # 结算框选放大区域
+                margin_left = 55
+                margin_right = 75
+                chart_w = max(10, self.width() - margin_left - margin_right)
+
+                x1 = min(self._box_zoom_origin.x(), self._box_zoom_current.x())
+                x2 = max(self._box_zoom_origin.x(), self._box_zoom_current.x())
+
+                if (x2 - x1) >= 12:
+                    df_view, cur_s, cur_e = self._get_visible_slice()
+                    vis_n = len(df_view)
+                    if vis_n > 0:
+                        rel_x1 = max(0.0, min(1.0, (x1 - margin_left) / float(chart_w)))
+                        rel_x2 = max(0.0, min(1.0, (x2 - margin_left) / float(chart_w)))
+
+                        idx_from = cur_s + int(round(rel_x1 * (vis_n - 1)))
+                        idx_to = cur_s + int(round(rel_x2 * (vis_n - 1)))
+                        if idx_to - idx_from >= 3:
+                            self._zoom_start_idx = max(0, min(len(self.df_intraday) - 1, idx_from))
+                            self._zoom_end_idx = max(0, min(len(self.df_intraday) - 1, idx_to))
+
+            self._is_box_zooming = False
+            self._box_zoom_origin = None
+            self._box_zoom_current = None
+            self._is_panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+            event.accept()
+            return
+
+        elif event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
             return
+
         super().mouseReleaseEvent(event)
 
     def set_data(self, df_intraday: pd.DataFrame, open_p: float, vwap_p: float, high_p: float, low_p: float, sell_min: float, sell_max: float, signals: list, period_mode: str = "1m"):
@@ -460,13 +587,125 @@ class SBCChartCanvas(QWidget):
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"⏳ 正在加载 [{self.period_mode}] 行情走势图...")
                 return
 
-            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / week)
-            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "week"]:
+            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / week / month)
+            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
                 self._paint_kline(painter, margin_left, margin_top, chart_w, chart_h)
-                return
+            else:
+                # 2. 分时图模式 (1m / 2d / 3d)
+                self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
 
-            # 2. 分时图模式 (1m / 2d / 3d)
-            self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
+            # 3. 🔍 顶层绘制鼠标左键框选放大矩形遮罩 (Rubberband Box Zoom)
+            if getattr(self, '_is_box_zooming', False) and self._box_zoom_origin and self._box_zoom_current:
+                x1 = min(self._box_zoom_origin.x(), self._box_zoom_current.x())
+                x2 = max(self._box_zoom_origin.x(), self._box_zoom_current.x())
+                y1 = min(self._box_zoom_origin.y(), self._box_zoom_current.y())
+                y2 = max(self._box_zoom_origin.y(), self._box_zoom_current.y())
+
+                rx = max(margin_left, x1)
+                rw = max(1, min(margin_left + chart_w, x2) - rx)
+                ry = max(margin_top, y1)
+                rh = max(1, min(margin_top + chart_h, y2) - ry)
+
+                # 估算框选涵盖的 K 棒数量
+                df_view, start_i, end_i = self._get_visible_slice()
+                vis_n = len(df_view)
+                sel_n = max(1, int(round((rw / max(1.0, float(chart_w))) * vis_n))) if vis_n > 0 else 1
+
+                box_rect = QRect(int(rx), int(ry), int(rw), int(rh))
+                painter.setPen(QPen(QColor("#00E5FF"), 1.2, Qt.PenStyle.DashLine))
+                painter.setBrush(QBrush(QColor(0, 229, 255, 35)))
+                painter.drawRect(box_rect)
+
+                # 框选角标提示
+                lbl_tip = f"🔍 选定: {sel_n} 根 [松开放大]"
+                painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                painter.setPen(QPen(QColor("#FFFFFF")))
+                painter.setBrush(QBrush(QColor("#00384d")))
+                tag_y = max(4, int(ry - 18))
+                painter.drawRoundedRect(int(rx), tag_y, 130, 16, 2, 2)
+                painter.drawText(int(rx + 4), tag_y + 12, lbl_tip)
+
+            # 4. 🎯 鼠标指针悬停：十字光标、动态 Y 轴精确价格胶囊与光标跟随价格浮标
+            if getattr(self, '_hover_pos', None) and self._coord_info.get("ready"):
+                hx = self._hover_pos.x()
+                hy = self._hover_pos.y()
+                c_info = self._coord_info
+                ml = c_info["margin_left"]
+                mt = c_info["margin_top"]
+                cw = c_info["chart_w"]
+                mh = c_info["main_h"]
+                min_p = c_info["min_p"]
+                max_p = c_info["max_p"]
+                times = c_info.get("times", [])
+
+                if ml <= hx <= (ml + cw) and mt <= hy <= (mt + mh):
+                    # 精确反推当前指针所在 Y 坐标的价格 (与绘制完全同源)
+                    p_ratio = max(0.0, min(1.0, 1.0 - (hy - mt) / float(mh)))
+                    p_hover = min_p + (max_p - min_p) * p_ratio
+
+                    # ① 十字虚线 (水平线与垂直线)
+                    painter.setPen(QPen(QColor("#4a5578"), 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(ml), int(hy), int(ml + cw), int(hy))
+                    painter.drawLine(int(hx), int(mt), int(hx), int(mt + mh))
+
+                    # ② 右侧 Y 轴动态价格高亮胶囊 (醒目青底白字)
+                    tag_w = 58
+                    tag_h = 18
+                    tag_y = max(mt, min(mt + mh - tag_h, int(hy - tag_h / 2)))
+                    painter.setPen(QPen(QColor("#00E5FF"), 1.2))
+                    painter.setBrush(QBrush(QColor("#002b3d")))
+                    painter.drawRoundedRect(int(ml + cw + 2), tag_y, tag_w, tag_h, 3, 3)
+
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#00FFFF")))
+                    painter.drawText(int(ml + cw + 5), tag_y + 13, f"{p_hover:.2f}")
+
+                    # ③ 鼠标指针右上角跟随微浮标 (指针指到哪，价格跟到哪)
+                    tip_w = 52
+                    tip_h = 16
+                    tip_x = min(ml + cw - tip_w - 4, max(ml + 4, int(hx + 12)))
+                    tip_y = max(mt + 4, min(mt + mh - tip_h - 4, int(hy - 20)))
+                    painter.setPen(QPen(QColor("#00E5FF"), 1))
+                    painter.setBrush(QBrush(QColor(12, 16, 28, 230)))
+                    painter.drawRoundedRect(tip_x, tip_y, tip_w, tip_h, 2, 2)
+                    painter.setPen(QPen(QColor("#FFFFFF")))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.drawText(tip_x + 4, tip_y + 12, f"{p_hover:.2f}")
+
+                    # ④ 底部 X 轴时间/日期对齐标签
+                    if times and len(times) > 0:
+                        idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
+                        t_str = str(times[idx_hover])
+                        if len(t_str) > 10:
+                            t_str = t_str[-8:]  # 截取 HH:MM:SS 或 HH:MM
+                        t_w = max(46, len(t_str) * 7 + 8)
+                        t_x = max(ml, min(ml + cw - t_w, int(hx - t_w / 2)))
+                        painter.setPen(QPen(QColor("#8899bb"), 1))
+                        painter.setBrush(QBrush(QColor("#181d2a")))
+                        painter.drawRoundedRect(t_x, int(mt + mh + 2), t_w, 16, 2, 2)
+                        painter.setFont(QFont("Consolas", 7))
+                        painter.setPen(QPen(QColor("#ccddee")))
+                        painter.drawText(t_x + 4, int(mt + mh + 14), t_str)
+
+            # 5. 🔍 局部缩放状态提示 (默认彻底隐藏不遮挡任何内容，仅当鼠标移至右上角时展开悬浮气泡)
+            if self._is_zoomed() and self._coord_info.get("ready"):
+                ml = self._coord_info["margin_left"]
+                mt = self._coord_info["margin_top"]
+                cw = self._coord_info["chart_w"]
+                c_hover = getattr(self, '_hover_pos', None)
+                is_hover_top_right = (c_hover is not None and (ml + cw - 120 <= c_hover.x() <= ml + cw + 40) and (mt <= c_hover.y() <= mt + 28))
+
+                if is_hover_top_right:
+                    df_v, s_i, e_i = self._get_visible_slice()
+                    zoom_tip = f"🔍 局部: {len(df_v)}/{len(self.df_intraday)} 根 [左键平移 | Shift框选 | 滚轮缩放 | 右键重置]"
+                    painter.setFont(QFont("Microsoft YaHei", 8))
+                    painter.setPen(QPen(QColor("#00E5FF"), 1))
+                    painter.setBrush(QBrush(QColor(12, 18, 30, 240)))
+                    tip_w = 340
+                    tip_x = int(ml + cw - tip_w)
+                    painter.drawRoundedRect(tip_x, int(mt + 4), tip_w, 20, 3, 3)
+                    painter.setPen(QPen(QColor("#00E5FF")))
+                    painter.drawText(tip_x + 8, int(mt + 18), zoom_tip)
         finally:
             painter.end()
 
@@ -513,6 +752,18 @@ class SBCChartCanvas(QWidget):
             max_p = min_p + 1.0
 
         p_range = max_p - min_p
+
+        self._coord_info = {
+            "ready": True,
+            "min_p": min_p,
+            "max_p": max_p,
+            "margin_left": margin_left,
+            "margin_top": margin_top,
+            "chart_w": chart_w,
+            "main_h": chart_h,
+            "times": times,
+            "n_items": len(prices),
+        }
 
         def price_to_y(p_val: float) -> float:
             return margin_top + chart_h - ((p_val - min_p) / p_range) * chart_h
@@ -647,6 +898,7 @@ class SBCChartCanvas(QWidget):
         highs = df_view['high'].astype(float).values
         lows = df_view['low'].astype(float).values
         vols = df_view['vol'].astype(float).values if 'vol' in df_view.columns else np.zeros(len(df_view))
+        times = list(df_view.index.astype(str))
 
         ma5 = df_view['ma5'].astype(float).values if 'ma5' in df_view.columns else []
         ma20 = df_view['ma20'].astype(float).values if 'ma20' in df_view.columns else []
@@ -659,11 +911,13 @@ class SBCChartCanvas(QWidget):
         ch_dn = df_view['ch_lower'].astype(float).values if 'ch_lower' in df_view.columns else []
         ch_tc2 = int(df_view['ch_tc2'].iloc[-1]) if 'ch_tc2' in df_view.columns and len(df_view) > 0 else 1
         ch_bc2 = int(df_view['ch_bc2'].iloc[-1]) if 'ch_bc2' in df_view.columns and len(df_view) > 0 else 1
-        ch_supp_p = float(df_view['ch_supp_price'].iloc[-1]) if 'ch_supp_price' in df_view.columns and len(df_view) > 0 else 0.0
-        ch_supp_days = int(df_view['ch_supp_days'].iloc[-1]) if 'ch_supp_days' in df_view.columns and len(df_view) > 0 else 0
-        ch_supp_slope = float(df_view['ch_supp_slope'].iloc[-1]) if 'ch_supp_slope' in df_view.columns and len(df_view) > 0 else 0.0
-        ch_slope_deg = float(df_view['ch_slope_deg'].iloc[-1]) if 'ch_slope_deg' in df_view.columns and len(df_view) > 0 else 0.0
-        ch_pos = float(df_view['ch_pos'].iloc[-1]) if 'ch_pos' in df_view.columns and len(df_view) > 0 else 50.0
+        ch_supp_p = float(df_view['ch_supp_price'].iloc[-1]) if 'ch_supp_price' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_supp_price'].iloc[-1]) else 0.0
+        ch_supp_days = int(df_view['ch_supp_days'].iloc[-1]) if 'ch_supp_days' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_supp_days'].iloc[-1]) else 0
+        ch_supp_slope = float(df_view['ch_supp_slope'].iloc[-1]) if 'ch_supp_slope' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_supp_slope'].iloc[-1]) else 0.0
+        ch_supp_slope_deg = float(df_view['ch_supp_slope_deg'].iloc[-1]) if 'ch_supp_slope_deg' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_supp_slope_deg'].iloc[-1]) else 0.0
+        ch_supp_pos = float(df_view['ch_supp_pos'].iloc[-1]) if 'ch_supp_pos' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_supp_pos'].iloc[-1]) else 0.0
+        ch_slope_deg = float(df_view['ch_slope_deg'].iloc[-1]) if 'ch_slope_deg' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_slope_deg'].iloc[-1]) else 0.0
+        ch_pos = float(df_view['ch_pos'].iloc[-1]) if 'ch_pos' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_pos'].iloc[-1]) else 50.0
         rev_line = df_view['reversal_line'].astype(float).values if 'reversal_line' in df_view.columns else []
         rev_last = float(rev_line[-1]) if len(rev_line) > 0 else 0.0
 
@@ -694,32 +948,36 @@ class SBCChartCanvas(QWidget):
         full_low = float(np.min(all_lows))
         fib_range = full_high - full_low
 
-        # Y 轴自适应计算：仅将可视区 K 棒和有效波段区间内的通道价格纳入范围，绝不纳入左侧历史的虚高外推值
+        # 🌟 严格截断界限：低于最低价 10%，高于最高价 10% (杜绝穿底穿顶及底部横线折线)
+        min_cutoff = full_low * 0.90
+        max_cutoff = full_high * 1.10
+
+        # Y 轴自适应计算：仅将可视区 K 棒和有效波段区间内的通道价格纳入范围，绝不纳入穿底/穿顶虚值
         all_vals = list(highs) + list(lows)
         if len(b_up) > 0:
-            all_vals += [x for x in b_up if x > 0]
+            all_vals += [x for x in b_up if min_cutoff <= x <= max_cutoff]
         if len(b_dn) > 0:
-            all_vals += [x for x in b_dn if x > 0]
+            all_vals += [x for x in b_dn if min_cutoff <= x <= max_cutoff]
 
         if len(ch_up) > local_chan_start and local_chan_start < n:
-            all_vals += [x for x in ch_up[local_chan_start:] if x > 0]
+            all_vals += [x for x in ch_up[local_chan_start:] if min_cutoff <= x <= max_cutoff]
         if len(ch_dn) > local_chan_start and local_chan_start < n:
-            all_vals += [x for x in ch_dn[local_chan_start:] if x > 0]
+            all_vals += [x for x in ch_dn[local_chan_start:] if min_cutoff <= x <= max_cutoff]
 
-        if ch_supp_p > 0 and (total_n - ch_supp_days <= end_i):
+        if ch_supp_p > 0 and (total_n - ch_supp_days <= end_i) and min_cutoff <= ch_supp_p <= max_cutoff:
             all_vals.append(ch_supp_p)
-        if rev_last > 0:
+        if rev_last > 0 and min_cutoff <= rev_last <= max_cutoff:
             all_vals.append(rev_last)
 
         # 💡 将 SBC 买卖信号价格、开盘价、目标价纳入 Y 轴范围计算，确保买卖线完整显示不被截断
-        if self.open_price > 0:
+        if self.open_price > 0 and min_cutoff <= self.open_price <= max_cutoff:
             all_vals.append(self.open_price)
-        if self.target_sell_min > 0:
+        if self.target_sell_min > 0 and min_cutoff <= self.target_sell_min <= max_cutoff:
             all_vals.append(self.target_sell_min)
         if self.signals:
             for sig in self.signals:
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if sig_p > 0:
+                if min_cutoff <= sig_p <= max_cutoff:
                     all_vals.append(sig_p)
 
         all_vals = [x for x in all_vals if x > 0]
@@ -731,6 +989,18 @@ class SBCChartCanvas(QWidget):
         if max_p <= min_p:
             max_p = min_p + 1.0
         p_range = max_p - min_p
+
+        self._coord_info = {
+            "ready": True,
+            "min_p": min_p,
+            "max_p": max_p,
+            "margin_left": margin_left,
+            "margin_top": margin_top,
+            "chart_w": chart_w,
+            "main_h": main_h,
+            "times": times,
+            "n_items": n,
+        }
 
         max_v = max(vols) if len(vols) > 0 and max(vols) > 0 else 1.0
 
@@ -759,18 +1029,68 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
                     painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
 
-        # 2. 🌟 绘制通达信自动通道三轨 (从波段最高价/最低价拐点开始延伸至最新 K 棒，左侧不画)
+        # 2. 🌟 绘制通达信自动通道三轨 (从波段极值起点开始，遇低于最低价10%/高于最高价10%或波段终点严格截止)
         if len(ch_up) > 1 and len(ch_dn) > 1 and local_chan_start < n:
             path_ch_up = QPainterPath()
             path_ch_mid = QPainterPath()
             path_ch_dn = QPainterPath()
-            path_ch_up.moveTo(k_to_x(local_chan_start), k_to_y(ch_up[local_chan_start]))
-            path_ch_mid.moveTo(k_to_x(local_chan_start), k_to_y(ch_mid[local_chan_start]))
-            path_ch_dn.moveTo(k_to_x(local_chan_start), k_to_y(ch_dn[local_chan_start]))
-            for i in range(local_chan_start + 1, n):
-                if ch_up[i] > 0: path_ch_up.lineTo(k_to_x(i), k_to_y(ch_up[i]))
-                if ch_mid[i] > 0: path_ch_mid.lineTo(k_to_x(i), k_to_y(ch_mid[i]))
-                if ch_dn[i] > 0: path_ch_dn.lineTo(k_to_x(i), k_to_y(ch_dn[i]))
+
+            # 寻找通道有效结束索引：遇低于 min_cutoff 或 高于 max_cutoff 立即截止，绝不延伸出边界产生底部横线
+            chan_end_i = n
+            for i in range(local_chan_start, n):
+                val_dn = ch_dn[i] if i < len(ch_dn) else 0.0
+                val_up = ch_up[i] if i < len(ch_up) else 0.0
+                val_mid = ch_mid[i] if i < len(ch_mid) else 0.0
+                if (val_dn > 0 and val_dn < min_cutoff) or (val_mid > 0 and val_mid < min_cutoff):
+                    chan_end_i = i
+                    break
+                if (val_up > 0 and val_up > max_cutoff) or (val_mid > 0 and val_mid > max_cutoff):
+                    chan_end_i = i
+                    break
+
+            if chan_end_i > local_chan_start:
+                started_up = False
+                for i in range(local_chan_start, chan_end_i):
+                    v = ch_up[i] if i < len(ch_up) else 0.0
+                    if min_cutoff <= v <= max_cutoff:
+                        if not started_up:
+                            path_ch_up.moveTo(k_to_x(i), k_to_y(v))
+                            started_up = True
+                        else:
+                            path_ch_up.lineTo(k_to_x(i), k_to_y(v))
+                    else:
+                        break
+
+                started_mid = False
+                for i in range(local_chan_start, chan_end_i):
+                    v = ch_mid[i] if i < len(ch_mid) else 0.0
+                    if min_cutoff <= v <= max_cutoff:
+                        if not started_mid:
+                            path_ch_mid.moveTo(k_to_x(i), k_to_y(v))
+                            started_mid = True
+                        else:
+                            path_ch_mid.lineTo(k_to_x(i), k_to_y(v))
+                    else:
+                        break
+
+                started_dn = False
+                for i in range(local_chan_start, chan_end_i):
+                    v = ch_dn[i] if i < len(ch_dn) else 0.0
+                    if min_cutoff <= v <= max_cutoff:
+                        if not started_dn:
+                            path_ch_dn.moveTo(k_to_x(i), k_to_y(v))
+                            started_dn = True
+                        else:
+                            path_ch_dn.lineTo(k_to_x(i), k_to_y(v))
+                    else:
+                        break
+
+                # 上下轨用通达信亮白色粗实线，中轨用白点划线
+                painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
+                painter.drawPath(path_ch_up)
+                painter.drawPath(path_ch_dn)
+                painter.setPen(QPen(QColor("#C0C0D0"), 1.0, Qt.PenStyle.DashLine))
+                painter.drawPath(path_ch_mid)
 
             # 上下轨用通达信亮白色粗实线，中轨用白点划线
             painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
@@ -966,26 +1286,18 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#00E5FF") if num == 9 else QColor("#00FF88")))
                     painter.drawText(int(x_c - 3), int(y_lo + 17), str(num))
 
-            # 🌟 7. 绘制通达信见底/见顶/启动/逃顶信号 (带 10 根 K 棒极值去重价格)
-            if i < len(sig_bot) and sig_bot[i] == 1:
-                painter.setPen(QPen(QColor("#00FFFF"), 1.5))
-                painter.setBrush(QBrush(QColor("#00FFFF")))
-                painter.drawEllipse(int(x_c - 2), int(y_lo + 4), 4, 4)
-                if show_bot_price[i]:
-                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
-                    painter.setPen(QPen(QColor("#00FFFF")))
-                    y_offset = (y_lo + 26) if (i < len(td_dn_arr) and td_dn_arr[i] >= 4) else (y_lo + 16)
-                    painter.drawText(int(x_c - 16), int(y_offset), f"{lows[i]:.2f}")
+            # 🌟 7. 绘制通达信见底/见顶局部 10 根 K 棒极值价格 (移除密集杂乱的红点/青点，仅保留真正波段极值价格)
+            if i < len(sig_bot) and sig_bot[i] == 1 and show_bot_price[i]:
+                painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                painter.setPen(QPen(QColor("#00FFFF")))
+                y_offset = (y_lo + 26) if (i < len(td_dn_arr) and td_dn_arr[i] >= 4) else (y_lo + 16)
+                painter.drawText(int(x_c - 16), int(y_offset), f"{lows[i]:.2f}")
 
-            if i < len(sig_top_arr) and sig_top_arr[i] == 1:
-                painter.setPen(QPen(QColor("#FF5555"), 1.5))
-                painter.setBrush(QBrush(QColor("#FF5555")))
-                painter.drawEllipse(int(x_c - 2), int(y_hi - 6), 4, 4)
-                if show_top_price[i]:
-                    painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
-                    painter.setPen(QPen(QColor("#FF7777")))
-                    y_offset = (y_hi - 24) if (i < len(td_up_arr) and td_up_arr[i] >= 4) else (y_hi - 10)
-                    painter.drawText(int(x_c - 16), int(y_offset), f"{highs[i]:.2f}")
+            if i < len(sig_top_arr) and sig_top_arr[i] == 1 and show_top_price[i]:
+                painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                painter.setPen(QPen(QColor("#FF7777")))
+                y_offset = (y_hi - 24) if (i < len(td_up_arr) and td_up_arr[i] >= 4) else (y_hi - 10)
+                painter.drawText(int(x_c - 16), int(y_offset), f"{highs[i]:.2f}")
 
             # 🌟 7.2 启动信号 (sig_launch)：首尾统计，中间仅保留精致微图标
             if i in launch_plan:
@@ -1223,7 +1535,7 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(fg_color))
                     painter.drawText(tag_kx + 4, tag_ky + th_k - 4, lbl_text)
 
-        # 10. 顶部通道标题与参数标注
+        # 10. 顶部通道标题与参数标注 (两行结构化展示)
         painter.setPen(QPen(QColor("#ffd700"), 1))
         painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
         info_header = f"📊 [{self.period_mode.upper()}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
@@ -1231,17 +1543,17 @@ class SBCChartCanvas(QWidget):
             info_header += f" | 支撑:{ch_supp_p:.2f}"
         if rev_last > 0:
             info_header += f" | 反转:{rev_last:.2f}"
-        painter.drawText(margin_left + 6, margin_top + 16, info_header)
+        painter.drawText(margin_left + 6, margin_top + 15, info_header)
 
-        # 13. 🔍 缩放状态提示 (右上角)
-        if self._is_zoomed():
-            zoom_tip = f"🔍 局部放大: {n}/{len(self.df_intraday)} 根 [右键重置]"
-            painter.setFont(QFont("Microsoft YaHei", 8))
-            painter.setPen(QPen(QColor("#00E5FF")))
-            painter.drawText(margin_left + chart_w - 200, margin_top + 16, zoom_tip)
+        # 第二行：上涨支撑线物理特征 (与第一行格式保持高度统一、简洁清晰)
+        if ch_supp_p > 0:
+            painter.setPen(QPen(QColor("#00E5FF"), 1))
+            painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            supp_info = f"📈 上涨支撑 (斜率:{ch_supp_slope_deg:.1f}°) | 偏离:{ch_supp_pos:+.2f}% | 周期:{ch_supp_days}"
+            painter.drawText(margin_left + 6, margin_top + 31, supp_info)
 
 
-VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week"]
+VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week", "month"]
 
 
 class SBCIntradayChartDialog(QWidget):
@@ -1283,7 +1595,7 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title = QLabel(f"📊 {self.code} {resolve_stock_name(self.code)}")
         self.lbl_title.setStyleSheet("font-size: 9pt; font-weight: bold; color: #00ff88;")
 
-        # 周期切换按钮组: [1日分时] [2日分时] [3日分时] | [5分K] [30分K] [60分K] [日K]
+        # 周期切换按钮组: [1日分时] [2日分时] [3日分时] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
         self._current_period_mode = "1m"
         self.btn_group_period = QButtonGroup(self)
         periods = [
@@ -1293,7 +1605,9 @@ class SBCIntradayChartDialog(QWidget):
             ("5分K", "5m"),
             ("30分K", "30m"),
             ("60分K", "60m"),
-            ("日K", "day")
+            ("日K", "day"),
+            ("周K", "week"),
+            ("月K", "month")
         ]
 
         tb_layout.addWidget(self.lbl_title)
@@ -1314,6 +1628,9 @@ class SBCIntradayChartDialog(QWidget):
                 }
                 QPushButton:hover {
                     color: #ffffff; border: 1px solid #38bdf8;
+                }
+                QPushButton:focus {
+                    border: 1px solid #00ff88; background-color: #162c22; outline: none;
                 }
             """)
             btn.clicked.connect(self._on_period_btn_clicked)
@@ -1441,21 +1758,54 @@ class SBCIntradayChartDialog(QWidget):
         self._restore_sbc_geometry()
         self.reload_chart()
 
-    def _save_sbc_geometry(self):
-        """【💾 内存缓存与防抖写盘】拖拽/缩放仅更新内存中的 Geometry 字典并触发防抖写盘"""
-        if self.isMaximized() or self.isMinimized() or getattr(self, "_in_snap_action", False):
-            return
-        geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None)) else self.geometry()
-        if geo.width() < 200 or geo.height() < 100:
-            return
+    def _get_max_allowed_sbc_size(self) -> Tuple[int, int]:
+        """获取 SBC 窗口最大允许尺寸规格 (不得超过屏幕可用宽高的 2/3)"""
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen:
+                ag = screen.availableGeometry()
+                max_w = max(400, int(ag.width() * 2 / 3))
+                max_h = max(250, int(ag.height() * 2 / 3))
+                return max_w, max_h
+        except Exception:
+            pass
+        return 1280, 720
 
-        self._memory_geo_dict = {
+    def _get_effective_normal_geometry(self) -> Optional[dict]:
+        """获取有效的正常窗口尺寸与坐标 (最大化状态下提取恢复尺寸 normalGeometry，绝不记忆最大化全屏尺寸)"""
+        if self.isMinimized() or getattr(self, "_in_snap_action", False):
+            return None
+
+        if self.isMaximized():
+            # 💡 最大化状态下，取恢复窗口尺寸 normalGeometry()
+            geo = self.normalGeometry()
+        elif getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None):
+            geo = self.normal_geometry
+        else:
+            geo = self.geometry()
+
+        if not geo or geo.width() < 200 or geo.height() < 100:
+            return None
+
+        max_w, max_h = self._get_max_allowed_sbc_size()
+        w = max(320, min(geo.width(), max_w))
+        h = max(180, min(geo.height(), max_h))
+
+        return {
             "x": geo.x(),
             "y": geo.y(),
-            "width": geo.width(),
-            "height": geo.height()
+            "width": w,
+            "height": h
         }
-        SBCIntradayChartDialog._global_sbc_size = (geo.width(), geo.height())
+
+    def _save_sbc_geometry(self):
+        """【💾 内存缓存与防抖写盘】拖拽/缩放仅更新内存中的 Geometry 字典并触发防抖写盘"""
+        geo_dict = self._get_effective_normal_geometry()
+        if not geo_dict:
+            return
+
+        self._memory_geo_dict = geo_dict
+        SBCIntradayChartDialog._global_sbc_size = (geo_dict["width"], geo_dict["height"])
         SBCIntradayChartDialog._global_sbc_geo = dict(self._memory_geo_dict)
 
         if hasattr(self, '_geo_save_timer'):
@@ -1465,7 +1815,7 @@ class SBCIntradayChartDialog(QWidget):
         """【📈 设定并切换 SBC 图表看盘周期】
         
         Args:
-            mode: 周期模式 ('1m' | '2d' | '3d' | '5m' | '15m' | '30m' | '60m' | 'day' | 'week')
+            mode: 周期模式 ('1m' | '2d' | '3d' | '5m' | '15m' | '30m' | '60m' | 'day' | 'week' | 'month')
             reload: 是否立即刷新重载走势图 (默认 True)
             save: 是否触发防抖持久化 (默认 True)
         """
@@ -1477,11 +1827,14 @@ class SBCIntradayChartDialog(QWidget):
 
         self._current_period_mode = mode_clean
 
-        # 同步更新顶部按钮组的 checked 高亮状态
+        # 同步更新顶部按钮组的 checked 高亮状态并使当前按钮获得焦点
         if hasattr(self, 'btn_group_period') and self.btn_group_period:
             for btn in self.btn_group_period.buttons():
                 btn_mode = (btn.property("period_mode") or "").strip().lower()
-                btn.setChecked(btn_mode == mode_clean)
+                is_match = (btn_mode == mode_clean)
+                btn.setChecked(is_match)
+                if is_match:
+                    btn.setFocus()
 
         if reload:
             self.reload_chart()
@@ -1493,15 +1846,7 @@ class SBCIntradayChartDialog(QWidget):
         """
         【💾 物理写盘】原子持久化窗口尺寸大小、屏显坐标与看盘周期到 JSON 与 QSettings (支持任意时段实时配置更新)
         """
-        if self.isMaximized() or self.isMinimized():
-            return
-
-        geo_dict = getattr(self, "_memory_geo_dict", None)
-        if not geo_dict:
-            geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None)) else self.geometry()
-            if geo.width() >= 200 and geo.height() >= 100:
-                geo_dict = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
-
+        geo_dict = getattr(self, "_memory_geo_dict", None) or self._get_effective_normal_geometry()
         if not geo_dict or geo_dict.get("width", 0) < 200 or geo_dict.get("height", 0) < 100:
             return
 
@@ -1563,7 +1908,7 @@ class SBCIntradayChartDialog(QWidget):
             logger.debug(f"保存 SBC 窗口布局与周期异常: {e}")
 
     def _restore_sbc_geometry(self):
-        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标与看盘周期 (含越界保护)"""
+        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标与看盘周期 (含越界与2/3屏幕规格保护)"""
         try:
             target_w, target_h = 680, 420
             x, y = 100, 100
@@ -1634,7 +1979,11 @@ class SBCIntradayChartDialog(QWidget):
             if target_period and str(target_period).lower() in VALID_SBC_PERIODS:
                 self.set_period_mode(str(target_period).lower(), reload=False, save=False)
 
-            # 4. 安全性防越界处理
+            # 4. 安全性防越界与屏幕规格 2/3 尺寸上限约束 (绝不超过屏幕 2/3 规格)
+            max_w, max_h = self._get_max_allowed_sbc_size()
+            target_w = max(320, min(target_w, max_w))
+            target_h = max(180, min(target_h, max_h))
+
             from gui_utils import clamp_window_to_screens
             rx, ry = clamp_window_to_screens(x, y, target_w, target_h)
 
@@ -1643,6 +1992,15 @@ class SBCIntradayChartDialog(QWidget):
         except Exception as e:
             logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
             self.resize(680, 420)
+
+    def showEvent(self, event):
+        """SBC 窗口打开展示事件：默认将焦点赋予当前显示的周期按钮上，便于键盘/鼠标快速操作"""
+        super().showEvent(event)
+        if hasattr(self, 'btn_group_period') and self.btn_group_period:
+            for btn in self.btn_group_period.buttons():
+                if btn.isChecked():
+                    btn.setFocus()
+                    break
 
     def closeEvent(self, event):
         """关闭窗口时自动持久化保存几何大小与坐标，并维护打开列表"""
@@ -1997,7 +2355,7 @@ class SBCIntradayChartDialog(QWidget):
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
             return
 
-        if mode in ["5m", "15m", "30m", "60m", "day", "week"]:
+        if mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
             df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
             if not df_kline.empty:
                 if op <= 1.0:

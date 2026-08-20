@@ -279,3 +279,76 @@ def test_backward_compatibility_fallback_to_1m(qapp):
     finally:
         for dlg in restored_dlgs:
             dlg.close()
+
+
+def test_sbc_all_periods_and_month_support(qapp):
+    """测试包含 2d, 3d, week, month 在内的全部周期支持及按钮初始化"""
+    assert "month" in VALID_SBC_PERIODS
+    assert "week" in VALID_SBC_PERIODS
+    assert "2d" in VALID_SBC_PERIODS
+    assert "3d" in VALID_SBC_PERIODS
+
+    dlg = SBCIntradayChartDialog(code="688313", initial_period_mode="month")
+    try:
+        dlg.show()
+        qapp.processEvents()
+
+        assert dlg._current_period_mode == "month"
+        btn_month = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "month"), None)
+        assert btn_month is not None and btn_month.isChecked()
+
+        # 切换到 week
+        dlg.set_period_mode("week", reload=False)
+        assert dlg._current_period_mode == "week"
+        btn_week = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "week"), None)
+        assert btn_week is not None and btn_week.isChecked()
+    finally:
+        dlg.close()
+
+
+def test_sbc_maximized_normal_geometry_persistence_and_screen_limit(qapp):
+    """测试 SBC 窗口最大化时不记忆全屏尺寸，且恢复与保存尺寸绝不超过屏幕规格 2/3"""
+    dlg = SBCIntradayChartDialog(code="001309")
+    try:
+        dlg.resize(600, 400)
+        dlg.show()
+        qapp.processEvents()
+
+        # 检查最大允许尺寸 (2/3 屏幕规格)
+        max_w, max_h = dlg._get_max_allowed_sbc_size()
+        screen = dlg.screen() or QApplication.primaryScreen()
+        if screen:
+            ag = screen.availableGeometry()
+            assert max_w <= int(ag.width() * 2 / 3) + 1
+            assert max_h <= int(ag.height() * 2 / 3) + 1
+
+        # 模拟提取正常尺寸
+        effective_geo = dlg._get_effective_normal_geometry()
+        assert effective_geo is not None
+        assert effective_geo["width"] <= max_w
+        assert effective_geo["height"] <= max_h
+
+        # 模拟窗口最大化后提取有效尺寸 (不应返回全屏尺寸，而是返回正常窗口尺寸)
+        dlg.showMaximized()
+        qapp.processEvents()
+        max_effective_geo = dlg._get_effective_normal_geometry()
+        if max_effective_geo:
+            assert max_effective_geo["width"] <= max_w
+            assert max_effective_geo["height"] <= max_h
+    finally:
+        dlg.close()
+
+
+def test_sbc_initial_focus_on_period_button(qapp):
+    """测试 SBC 窗口打开后默认焦点在当前周期按钮上，便于键盘与鼠标直接操作"""
+    dlg = SBCIntradayChartDialog(code="688826", initial_period_mode="30m")
+    try:
+        dlg.show()
+        qapp.processEvents()
+
+        btn_30m = next((b for b in dlg.btn_group_period.buttons() if b.property("period_mode") == "30m"), None)
+        assert btn_30m is not None
+        assert btn_30m.isChecked()
+        assert btn_30m.hasFocus() or dlg.focusWidget() == btn_30m
+    finally:
+        dlg.close()
