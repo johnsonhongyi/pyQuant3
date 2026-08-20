@@ -1035,68 +1035,50 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
                     painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
 
-        # 2. 🌟 绘制通达信自动通道三轨 (从波段极值起点开始，遇低于最低价10%/高于最高价10%或波段终点严格截止)
+        # 2. 🌟 绘制通达信自动通道三轨 (从波段起点开始，三轨各自独立延伸，各自在低于最低价10%/高于最高价10%处独立截止)
         if len(ch_up) > 1 and len(ch_dn) > 1 and local_chan_start < n:
             path_ch_up = QPainterPath()
             path_ch_mid = QPainterPath()
             path_ch_dn = QPainterPath()
 
-            # 寻找通道有效结束索引：遇低于 min_cutoff 或 高于 max_cutoff 立即截止，绝不延伸出边界产生底部横线
-            chan_end_i = n
+            # 2.1 上轨独立绘制 (一直画到最新 K 棒或自身越界，不与下轨等长绑定截断)
+            started_up = False
             for i in range(local_chan_start, n):
-                val_dn = ch_dn[i] if i < len(ch_dn) else 0.0
-                val_up = ch_up[i] if i < len(ch_up) else 0.0
-                val_mid = ch_mid[i] if i < len(ch_mid) else 0.0
-                if (val_dn > 0 and val_dn < min_cutoff) or (val_mid > 0 and val_mid < min_cutoff):
-                    chan_end_i = i
+                v = ch_up[i] if i < len(ch_up) else 0.0
+                if min_cutoff <= v <= max_cutoff:
+                    if not started_up:
+                        path_ch_up.moveTo(k_to_x(i), k_to_y(v))
+                        started_up = True
+                    else:
+                        path_ch_up.lineTo(k_to_x(i), k_to_y(v))
+                else:
                     break
-                if (val_up > 0 and val_up > max_cutoff) or (val_mid > 0 and val_mid > max_cutoff):
-                    chan_end_i = i
+
+            # 2.2 中轨独立绘制
+            started_mid = False
+            for i in range(local_chan_start, n):
+                v = ch_mid[i] if i < len(ch_mid) else 0.0
+                if min_cutoff <= v <= max_cutoff:
+                    if not started_mid:
+                        path_ch_mid.moveTo(k_to_x(i), k_to_y(v))
+                        started_mid = True
+                    else:
+                        path_ch_mid.lineTo(k_to_x(i), k_to_y(v))
+                else:
                     break
 
-            if chan_end_i > local_chan_start:
-                started_up = False
-                for i in range(local_chan_start, chan_end_i):
-                    v = ch_up[i] if i < len(ch_up) else 0.0
-                    if min_cutoff <= v <= max_cutoff:
-                        if not started_up:
-                            path_ch_up.moveTo(k_to_x(i), k_to_y(v))
-                            started_up = True
-                        else:
-                            path_ch_up.lineTo(k_to_x(i), k_to_y(v))
+            # 2.3 下轨独立绘制
+            started_dn = False
+            for i in range(local_chan_start, n):
+                v = ch_dn[i] if i < len(ch_dn) else 0.0
+                if min_cutoff <= v <= max_cutoff:
+                    if not started_dn:
+                        path_ch_dn.moveTo(k_to_x(i), k_to_y(v))
+                        started_dn = True
                     else:
-                        break
-
-                started_mid = False
-                for i in range(local_chan_start, chan_end_i):
-                    v = ch_mid[i] if i < len(ch_mid) else 0.0
-                    if min_cutoff <= v <= max_cutoff:
-                        if not started_mid:
-                            path_ch_mid.moveTo(k_to_x(i), k_to_y(v))
-                            started_mid = True
-                        else:
-                            path_ch_mid.lineTo(k_to_x(i), k_to_y(v))
-                    else:
-                        break
-
-                started_dn = False
-                for i in range(local_chan_start, chan_end_i):
-                    v = ch_dn[i] if i < len(ch_dn) else 0.0
-                    if min_cutoff <= v <= max_cutoff:
-                        if not started_dn:
-                            path_ch_dn.moveTo(k_to_x(i), k_to_y(v))
-                            started_dn = True
-                        else:
-                            path_ch_dn.lineTo(k_to_x(i), k_to_y(v))
-                    else:
-                        break
-
-                # 上下轨用通达信亮白色粗实线，中轨用白点划线
-                painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
-                painter.drawPath(path_ch_up)
-                painter.drawPath(path_ch_dn)
-                painter.setPen(QPen(QColor("#C0C0D0"), 1.0, Qt.PenStyle.DashLine))
-                painter.drawPath(path_ch_mid)
+                        path_ch_dn.lineTo(k_to_x(i), k_to_y(v))
+                else:
+                    break
 
             # 上下轨用通达信亮白色粗实线，中轨用白点划线
             painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
