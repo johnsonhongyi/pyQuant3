@@ -1090,20 +1090,50 @@ class QueryHistoryManager:
             hits_cnt = sum(1 for hits in query_hits.values() if c in hits)
             tree2.insert("", "end", values=(c, n, p, f"{hits_cnt}/{len(queries)}", " | ".join(hit_mask)))
 
-        # 💡 [NEW] 股票点击与键盘上下方向键实时联动主界面/K线/通达信 (防抖与GIL安全机制)
+        # 💡 [NEW] 股票点击与键盘上下方向键实时联动主界面/K线/通达信/网页联动接口 (防抖与GIL安全机制)
         debounce_timer = [None]
+
+        def _send_http_link(code):
+            """通过本地 HTTP 联动接口 (26672) 触发系统级联动 (与 网页联动伴侣2.js 保持一致，纯净且绝不污染剪贴板)"""
+            def _async_req():
+                try:
+                    import urllib.request
+                    url = f"http://127.0.0.1:26672/link?code={code}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'HistoryManagerLink/1.0'})
+                    with urllib.request.urlopen(req, timeout=0.5) as resp:
+                        pass
+                except Exception:
+                    pass
+            import threading
+            threading.Thread(target=_async_req, daemon=True).start()
 
         def _do_linkage(code):
             try:
+                linked_internally = False
                 # 1. 主界面树滚动定位与可视化联动 (内部自带线程安全投递)
                 if self.root and hasattr(self.root, 'tree_scroll_to_code'):
                     self.root.tree_scroll_to_code(code, vis=True)
+                    linked_internally = True
                 elif hasattr(self, 'master') and hasattr(self.master, 'tree_scroll_to_code'):
                     self.master.tree_scroll_to_code(code, vis=True)
+                    linked_internally = True
                 
                 # 2. K线监控器联动
                 if self.root and hasattr(self.root, 'kline_monitor') and self.root.kline_monitor and hasattr(self.root.kline_monitor, 'winfo_exists') and self.root.kline_monitor.winfo_exists():
                     self.root.kline_monitor.tree_scroll_to_code_kline(code)
+                    linked_internally = True
+
+                # 3. 具备主界面 sender 则优先调用
+                if self.root and hasattr(self.root, 'sender') and self.root.sender:
+                    try:
+                        self.root.sender.send(code)
+                        linked_internally = True
+                    except Exception:
+                        pass
+
+                # 4. 若未接入宿主主界面或宿主无对应联动函数，则使用本地 HTTP 接口 (26672) 联动 (与 网页联动伴侣2.js 规范一致)
+                if not linked_internally:
+                    _send_http_link(code)
             except Exception as e:
                 logger.debug(f"multi_query_details linkage error: {e}")
 
@@ -1124,8 +1154,78 @@ class QueryHistoryManager:
             except Exception as e:
                 logger.debug(f"_on_stock_select parse error: {e}")
 
+        # 💡 [NEW] 右键复制股票代码 / Ctrl+C 快捷键复制功能 (纯净剪贴板操作，与联动严格解耦)
+        def _copy_selected_codes(target_tree, mode="code"):
+            try:
+                sel = target_tree.selection()
+                if not sel: return
+                copied_items = []
+                for s in sel:
+                    vals = target_tree.item(s, "values")
+                    if not vals: continue
+                    c = str(vals[0]).strip()
+                    n = str(vals[1]).strip() if len(vals) > 1 else ""
+                    if not (c.isdigit() and len(c) == 6): continue
+                    if mode == "code":
+                        copied_items.append(c)
+                    elif mode == "code_name":
+                        copied_items.append(f"{c} {n}")
+                if copied_items:
+                    text_to_copy = " ".join(copied_items) if len(copied_items) > 1 and mode == "code" else "\n".join(copied_items)
+                    top.clipboard_clear()
+                    top.clipboard_append(text_to_copy)
+                    toast_message(top, f"✅ 已复制代码: {text_to_copy[:50]}", 1500)
+            except Exception as e:
+                logger.debug(f"_copy_selected_codes error: {e}")
+
+        def _copy_all_codes_in_tree(target_tree):
+            try:
+                all_codes = []
+                for iid in target_tree.get_children():
+                    vals = target_tree.item(iid, "values")
+                    if vals and len(vals) > 0:
+                        c = str(vals[0]).strip()
+                        if c.isdigit() and len(c) == 6:
+                            all_codes.append(c)
+                if all_codes:
+                    text_to_copy = " ".join(all_codes)
+                    top.clipboard_clear()
+                    top.clipboard_append(text_to_copy)
+                    toast_message(top, f"✅ 已复制全部 {len(all_codes)} 只股票代码", 1500)
+            except Exception as e:
+                logger.debug(f"_copy_all_codes_in_tree error: {e}")
+
+        def _on_stock_context_menu(event, target_tree):
+            item = target_tree.identify_row(event.y)
+            if not item: return
+            selected = target_tree.selection()
+            if item not in selected:
+                target_tree.selection_set(item)
+                selected = (item,)
+            
+            # 右键弹出时触发当前行联动
+            _on_stock_select(event, target_tree)
+
+            s_menu = tk.Menu(top, tearoff=0)
+            if len(selected) > 1:
+                s_menu.add_command(label=f"📋 复制选中的 {len(selected)} 只股票代码 (空格隔开)", command=lambda: _copy_selected_codes(target_tree, "code"))
+                s_menu.add_command(label=f"📋 复制选中的 {len(selected)} 只股票 (代码+名称)", command=lambda: _copy_selected_codes(target_tree, "code_name"))
+            else:
+                vals = target_tree.item(item, "values")
+                c = str(vals[0]).strip() if vals else ""
+                n = str(vals[1]).strip() if vals and len(vals) > 1 else ""
+                s_menu.add_command(label=f"📋 复制股票代码 ({c})", command=lambda: _copy_selected_codes(target_tree, "code"))
+                s_menu.add_command(label=f"📋 复制代码与名称 ({c} {n})", command=lambda: _copy_selected_codes(target_tree, "code_name"))
+            
+            s_menu.add_separator()
+            s_menu.add_command(label="📋 复制当前标签页全部股票代码", command=lambda: _copy_all_codes_in_tree(target_tree))
+            s_menu.tk_popup(event.x_root, event.y_root)
+
         for target_t in (tree1, tree2):
             target_t.bind("<<TreeviewSelect>>", lambda e, t=target_t: _on_stock_select(e, t))
+            target_t.bind("<Button-3>", lambda e, t=target_t: _on_stock_context_menu(e, t))
+            target_t.bind("<Control-c>", lambda e, t=target_t: _copy_selected_codes(t, "code"))
+            target_t.bind("<Control-C>", lambda e, t=target_t: _copy_selected_codes(t, "code"))
 
         # Tab 3: 📋 组合公式与汇总概览
         f3 = ttk.Frame(nb)
