@@ -748,7 +748,6 @@ def get_app_root() -> str:
         else:
             calculated_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    os.environ["INSTOCK_APP_ROOT"] = calculated_root
     return calculated_root
 
 

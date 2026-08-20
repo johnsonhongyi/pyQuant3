@@ -37,9 +37,6 @@ def get_app_root() -> str:
         else:
             calculated_root = parent_dir
 
-    # 物理锁定并写入环境变量，保障所有子进程/模块路径 100% 统一
-    os.environ["INSTOCK_APP_ROOT"] = calculated_root
-
     # 强制将当前进程的工作目录切换为定位到的绝对物理根目录，防止通过右键快捷菜单或计划任务等启动时导致的 CWD 不对
     try:
         os.chdir(calculated_root)
