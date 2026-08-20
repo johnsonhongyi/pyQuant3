@@ -1,3 +1,33 @@
+## 2026-08-20 20:10
+- [x] **优化通道三轨独立延伸与独立截止机制，彻底解决上轨受下轨提前触底连带截断过短问题 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`)**：
+    - [x] **问题根因定位**：
+        - 原先在下降通道中，下轨（`ch_dn`）最先降低触碰到 `min_cutoff`（低于最低价 10%）；因三轨共享同一个 `chan_end_i` 截止索引，导致价格依然处于高位的上轨（`ch_up`）被迫提前截断，呈现出“上面太短”的断裂感。
+    - [x] **三轨独立绘制方案**：
+        - 上轨 (`ch_up`)、中轨 (`ch_mid`)、下轨 (`ch_dn`) 全部改为**各自独立延伸与各自独立边界截断**；
+        - 上轨只要处于合法价格区间内，完整延伸绘制至右侧最新 K 棒处（不与下轨等长绑定截断）；下轨到达底部边界时平滑独立截止，杜绝底部横白线的同时保持上部通道线完整优美。
+    - [x] **全量自动化测试**：
+        - 20 个单元测试 100% 全部通过。
+
+## 2026-08-20 18:55
+- [x] **彻底解决 Windows 下多窗口并发读写 `window_config.json` 引发的 `[WinError 5] 拒绝访问` 与 `[Errno 13] Permission denied` (`ats/ui/styles.py`, `ats/ui/chart_widgets.py`, `ats/ui/dragon_monitor.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/global_market_panel.py`, `ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`)**：
+    - [x] **根本原因剖析**：
+        - Windows 系统具有严格的文件强制锁（Mandatory File Lock）。当多个组件（如 `DistributionDetailsDialog`、`DragonMonitorDialog` 等）在启动/关闭时各自生成私有临时文件并直接调用 `os.replace` 覆写 `window_config.json` 时，若恰逢其他窗口正在 `open(..., 'r')` 读取配置（如读取 `ats_global_market_ttl_minutes`），Windows 核心直接抛出 `[WinError 5] 拒绝访问` 与 `[Errno 13] Permission denied`。
+    - [x] **一揽子架构收敛方案**：
+        1. **强化中枢**：重构 `styles.py` 的 `load_config_node` 与 `save_config_nodes`，增加 5 次线性退避重试（Backoff Retry）机制，对 `os.replace` 和 `open` 异常进行毫秒级自动重试与静默平滑保护；
+        2. **全面收敛**：彻底重构 `DistributionDetailsDialog`、`DragonMonitorDialog`、`HotSectorLeaderboardDialog`、`GlobalMarketPanel`、`SectorDetailDialog`、`StockDetailDialog`，废除各自为政的 `os.replace`，统一收敛调用 `save_config_node` / `load_config_node` 管道。
+    - [x] **全量自动化测试**：
+        - 20 个单元测试全部绿灯通过。
+
+## 2026-08-20 18:50
+- [x] **彻底消除 Windows 平台下 DirectWrite 对老旧位图字体 (.fon) 的 CreateFontFaceFromHDC 警告与乱码 (`sys_utils.py`, `ats/main_ats.py`, `ats/ui/intraday_strategy_dialog.py`)**：
+    - [x] **根本原因剖析**：
+        - 微软 DirectWrite 矢量字体引擎不支持 Windows 历史遗留的点阵/光栅位图字体（如 `Fixedsys`, `Modern`, `Terminal`, `MS Sans Serif`, `MS Serif`, `Roman`, `Script` 等）；当 Qt 在 Windows 下枚举系统字体或回退探测时，DirectWrite 抛出非致命底层调试日志。
+    - [x] **一揽子净化方案**：
+        - 在 `sys_utils.py` 封装 `setup_qt_clean_environment()`，注入 `QT_LOGGING_RULES="qt.qpa.fonts.warning=false;..."` 并挂载 `qInstallMessageHandler` 消息拦截器；
+        - 在 `ats/main_ats.py` 及 `ats/ui/intraday_strategy_dialog.py` 最顶层优先执行环境净化，保持终端 100% 纯净无乱码。
+    - [x] **全量自动化测试**：
+        - 20 个单元测试全部绿灯通过。
+
 ## 2026-08-20 18:45
 - [x] **左上角两行简洁中文说明完全统一风格 (KISS / Visual Polish) (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_multi_period_signals.py`)**：
     - [x] **第一行（通道全局状态 · 金黄色加粗）**：

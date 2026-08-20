@@ -337,47 +337,30 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             if is_open is None:
                 is_open = self.isVisible()
                 
-            config_file = WINDOW_CONFIG_FILE
-            with _CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(config_file):
-                    try:
-                        with open(config_file, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                    except:
-                        pass
-                
-                # 保存为每个 bucket 独立的项
-                key = f"distribution_details_dialog_{self.bucket_idx}"
-                data[key] = {
-                    "x": x,
-                    "y": y,
-                    "width": width,
-                    "height": height,
-                    "stays_on_top": self.stays_on_top,
-                    "anchor_edge": self.anchor_edge,
-                    "is_hidden_state": self.is_hidden_state,
-                    "bucket_idx": self.bucket_idx,
-                    "is_open": is_open
-                }
-                
-                tmp = config_file + f".tmp_dist_states_{id(self)}"
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-                os.replace(tmp, config_file)
+            key = f"distribution_details_dialog_{self.bucket_idx}"
+            node_data = {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "stays_on_top": self.stays_on_top,
+                "anchor_edge": self.anchor_edge,
+                "is_hidden_state": self.is_hidden_state,
+                "bucket_idx": self.bucket_idx,
+                "is_open": is_open
+            }
+            from ats.ui.styles import save_config_node
+            save_config_node(key, node_data)
         except Exception as e:
             print(f"[DistributionDetailsDialog] Error saving window states: {e}")
 
     def _load_stays_on_top(self) -> bool:
         try:
-            if os.path.exists(WINDOW_CONFIG_FILE):
-                with _CONFIG_FILE_LOCK:
-                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        key = f"distribution_details_dialog_{getattr(self, 'bucket_idx', 0)}"
-                        dialog_config = data.get(key, {})
-                        if "stays_on_top" in dialog_config:
-                            return dialog_config["stays_on_top"]
+            from ats.ui.styles import load_config_node
+            key = f"distribution_details_dialog_{getattr(self, 'bucket_idx', 0)}"
+            dialog_config = load_config_node(key, {})
+            if isinstance(dialog_config, dict) and "stays_on_top" in dialog_config:
+                return bool(dialog_config["stays_on_top"])
         except Exception:
             pass
         return False

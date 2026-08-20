@@ -623,36 +623,19 @@ class StockDetailDialog(QDialog):
             from sys_utils import get_app_root, get_conf_path
             import json, os
             from PyQt6.QtCore import QByteArray
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                geom = data.get("ats_stock_detail_dialog_geom")
-                if geom:
-                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+            from ats.ui.styles import load_config_node
+            geom = load_config_node("ats_stock_detail_dialog_geom")
+            if geom:
+                self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
         except Exception:
             pass
 
     def _save_geometry(self):
         """原子写盘持久化个股详情弹窗位置与大小至 window_config.json"""
         try:
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            import json, os
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_stock_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
-                tmp_path = cfg_path + ".tmp_stock_detail"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            from ats.ui.styles import save_config_node
+            hex_data = self.saveGeometry().toHex().data().decode('utf-8')
+            save_config_node("ats_stock_detail_dialog_geom", hex_data)
         except Exception:
             pass
 

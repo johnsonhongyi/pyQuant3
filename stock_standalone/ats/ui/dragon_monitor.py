@@ -401,40 +401,18 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if is_open is None:
                 is_open = self.isVisible() or getattr(self, 'is_hidden_state', False)
                 
-            with _CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(WINDOW_CONFIG_FILE):
-                    try:
-                        with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                    except:
-                        pass
-                
-                data["dragon_leader_monitor_dialog"] = {
-                    "x": x,
-                    "y": y,
-                    "width": width,
-                    "height": height,
-                    "stays_on_top": self.stays_on_top,
-                    "anchor_edge": self.anchor_edge,
-                    "is_hidden_state": self.is_hidden_state,
-                    "is_open": bool(is_open)
-                }
-                
-                tmp = WINDOW_CONFIG_FILE + f".tmp_dragon_states_{id(self)}"
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-                
-                # Windows 多进程并发写入重试退避机制，防止 WinError 5 拒绝访问
-                for attempt in range(5):
-                    try:
-                        os.replace(tmp, WINDOW_CONFIG_FILE)
-                        break
-                    except PermissionError:
-                        if attempt == 4:
-                            raise
-                        import time
-                        time.sleep(0.05 * (attempt + 1))
+            node_data = {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "stays_on_top": self.stays_on_top,
+                "anchor_edge": self.anchor_edge,
+                "is_hidden_state": self.is_hidden_state,
+                "is_open": bool(is_open)
+            }
+            from ats.ui.styles import save_config_node
+            save_config_node("dragon_leader_monitor_dialog", node_data)
         except Exception as e:
             logger.warning(f"Error saving window states: {e}")
 
