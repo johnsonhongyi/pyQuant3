@@ -105,12 +105,12 @@ def get_app_root() -> str:
 
     # 物理锁定并写入环境变量，保障多进程完美一致
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
-    logger.warning(f"sys.executable={sys.executable}")
-    logger.warning(f"sys.argv[0]={sys.argv[0] if sys.argv else None}")
-    logger.warning(f"cwd={os.getcwd()}")
-    logger.warning(f"get_app_root={calculated_root}")
-    logger.warning(f"get_base_path={get_base_path()}")
+    print(f"[sys_utils] sys.executable={sys.executable}")
+    print(f"[sys_utils] sys.argv[0]={sys.argv[0] if sys.argv else None}")
+    print(f"[sys_utils] cwd={os.getcwd()}")
+    print(f"[sys_utils] get_app_root={calculated_root}")
     return calculated_root
+
 
 def get_app_root_two() -> str:
     """返回 EXE 或脚本所在目录（不依赖 CWD）"""
