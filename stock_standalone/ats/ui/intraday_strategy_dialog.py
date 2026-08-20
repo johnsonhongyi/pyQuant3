@@ -629,10 +629,6 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
-        btn_close = QPushButton("关闭")
-        btn_close.setStyleSheet("background-color: #222230; color: #aaaaaa; border: 1px solid #444455; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        btn_close.clicked.connect(self.close)
-
         btn_linkage = QPushButton("⚡ 联动")
         btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
         btn_linkage.setToolTip("调用 ATS 主系统联动功能联动当前标的")
@@ -664,7 +660,6 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)
         tb_layout.addWidget(self.btn_toggle_log)
-        tb_layout.addWidget(btn_close)
         layout.addLayout(tb_layout)
 
         # 2. 实盘走势图画布
@@ -1169,63 +1164,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def _on_rearrange_windows_clicked(self):
         """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
-        from PyQt6.QtWidgets import QApplication
-
-        # 1. 精准确定当前点击重排按钮的窗口所在的物理屏幕
-        target_screen = self.screen() or QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
-        if not target_screen:
-            return
-        sg = target_screen.availableGeometry()
-
-        # 2. 筛选位于当前物理屏幕范围内的所有可见 SBC 独立窗口
-        active_dialogs = []
-        for w in QApplication.topLevelWidgets():
-            if isinstance(w, SBCIntradayChartDialog) and w.isVisible():
-                w_screen = w.screen() or QApplication.screenAt(w.geometry().center())
-                # 若窗口在当前屏幕上，或窗口区域与当前屏幕相交
-                if w_screen == target_screen or target_screen.geometry().intersects(w.geometry()):
-                    active_dialogs.append(w)
-
-        if not active_dialogs:
-            active_dialogs = [self]
-
-        margin_x = 10
-        margin_y = 10
-        curr_x = sg.left() + 20
-        curr_y = sg.top() + 20
-        row_max_h = 0
-
-        for dlg in active_dialogs:
-            w = dlg.width()
-            h = dlg.height()
-            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
-                curr_x = sg.left() + 20
-                curr_y += row_max_h + margin_y
-                row_max_h = 0
-
-            # 防越界超出屏幕底部
-            if curr_y + h > sg.bottom():
-                curr_y = sg.top() + 20
-
-            # 💡 重排时彻底重置磁吸状态，保持正常完全可见的浮动窗口布局，绝不自动触发边缘收缩
-            dlg.snap_timer.stop()
-            dlg.anchor_edge = None
-            dlg.normal_geometry = None
-            dlg.is_hidden_state = False
-            dlg._is_dragging = False
-            dlg._is_user_dragging = False
-            dlg.setWindowOpacity(1.0)
-            dlg._is_programmatic_move = True
-            try:
-                dlg.move(curr_x, curr_y)
-                dlg._save_sbc_geometry()
-                dlg.raise_()
-                dlg.activateWindow()
-            finally:
-                dlg._is_programmatic_move = False
-
-            curr_x += w + margin_x
-            row_max_h = max(row_max_h, h)
+        rearrange_all_sbc_windows(parent_win=self)
 
     def _on_clear_cache_clicked(self):
         """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新"""
@@ -1605,6 +1544,124 @@ def restore_all_open_sbc_windows(parent_win=None):
                     dlg._is_programmatic_move = False
     except Exception as e:
         logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
+
+
+def rearrange_all_sbc_windows(parent_win=None):
+    """
+    【🪟 全局 SBC 独立窗口基于各自物理屏幕网格平铺重排】
+    自动按物理显示器分组，对每个屏幕上打开的 SBC 分时走势独立窗口分别在其所在屏幕内就地网格平铺重排。
+    - 多屏幕独立处理：每个物理显示器各自平铺重排，绝不把副屏窗口强行拉到主屏；
+    - 尺寸与状态保持：保持各窗口已有宽高尺寸，彻底重置贴边半隐藏状态为完全展开显示；
+    - 自动持久化：重排完成后即时同步保存全部最新窗口坐标。
+    """
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.sip import isdeleted
+
+    active_dialogs = []
+
+    # 1. 优先从 parent_win 的 _sbc_dialogs 收集
+    if parent_win and hasattr(parent_win, '_sbc_dialogs') and isinstance(parent_win._sbc_dialogs, dict):
+        for d in parent_win._sbc_dialogs.values():
+            if d is not None and not isdeleted(d) and d.isVisible():
+                if d not in active_dialogs:
+                    active_dialogs.append(d)
+
+    # 2. 从全局 topLevelWidgets 补充收集所有可见的 SBCIntradayChartDialog
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
+            if w not in active_dialogs:
+                active_dialogs.append(w)
+
+    if not active_dialogs:
+        if parent_win:
+            QMessageBox.information(parent_win, "🪟 窗口重排", "当前暂无打开的 SBC 分时走势独立窗口。")
+        return
+
+    # 3. 按窗口当前所在物理屏幕进行分组 (多显示器支持)
+    screens = QApplication.screens()
+    primary_screen = QApplication.primaryScreen() or (screens[0] if screens else None)
+    screen_map = {}  # screen_obj -> list of dlgs
+
+    for dlg in active_dialogs:
+        dlg_screen = None
+        if hasattr(dlg, "screen") and callable(dlg.screen):
+            try:
+                dlg_screen = dlg.screen()
+            except Exception:
+                dlg_screen = None
+        if not dlg_screen and hasattr(dlg, "geometry"):
+            try:
+                dlg_screen = QApplication.screenAt(dlg.geometry().center())
+            except Exception:
+                dlg_screen = None
+        if not dlg_screen and screens:
+            for s in screens:
+                try:
+                    if s.geometry().intersects(dlg.geometry()):
+                        dlg_screen = s
+                        break
+                except Exception:
+                    pass
+        if not dlg_screen:
+            dlg_screen = primary_screen
+
+        if dlg_screen not in screen_map:
+            screen_map[dlg_screen] = []
+        screen_map[dlg_screen].append(dlg)
+
+    # 4. 对每个屏幕分别独立执行网格平铺排布
+    margin_x = 10
+    margin_y = 10
+
+    for target_screen, dlgs_on_screen in screen_map.items():
+        if not target_screen or not dlgs_on_screen:
+            continue
+        sg = target_screen.availableGeometry()
+        curr_x = sg.left() + 20
+        curr_y = sg.top() + 20
+        row_max_h = 0
+
+        for dlg in dlgs_on_screen:
+            w = dlg.width()
+            h = dlg.height()
+            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
+                curr_x = sg.left() + 20
+                curr_y += row_max_h + margin_y
+                row_max_h = 0
+
+            # 防越界超出屏幕底部
+            if curr_y + h > sg.bottom():
+                curr_y = sg.top() + 20
+
+            # 💡 重排时彻底重置磁吸状态，保持正常完全可见的浮动窗口布局，绝不自动触发边缘收缩
+            if hasattr(dlg, "snap_timer"):
+                dlg.snap_timer.stop()
+            dlg.anchor_edge = None
+            dlg.normal_geometry = None
+            dlg.is_hidden_state = False
+            dlg._is_dragging = False
+            dlg._is_user_dragging = False
+            dlg.setWindowOpacity(1.0)
+            dlg._is_programmatic_move = True
+            try:
+                dlg.move(curr_x, curr_y)
+                if hasattr(dlg, "_save_sbc_geometry"):
+                    dlg._save_sbc_geometry()
+                dlg.raise_()
+                dlg.activateWindow()
+            finally:
+                dlg._is_programmatic_move = False
+
+            curr_x += w + margin_x
+            row_max_h = max(row_max_h, h)
+
+    # 5. 持久化最新窗口坐标
+    try:
+        save_all_open_sbc_windows()
+    except Exception as e:
+        logger.debug(f"重排后持久化坐标异常: {e}")
+
+    logger.info(f"🪟 [SBC多屏窗口重排] 已成功在 {len(screen_map)} 个屏幕上将 {len(active_dialogs)} 个 SBC 窗口基于各自屏幕平铺重排！")
 
 
 import copy
@@ -3013,52 +3070,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
     def rearrange_all_sbc_windows(self):
         """【🪟 窗口重排】自动平铺重排所有打开的 SBC 窗口 (保持各自窗口原尺寸不变，只顺畅排列 x, y 坐标)"""
-        active_dialogs = []
-        if hasattr(self, '_sbc_dialogs'):
-            active_dialogs = [d for d in self._sbc_dialogs.values() if d is not None and d.isVisible()]
-
-        if not active_dialogs:
-            active_dialogs = [
-                w for w in QApplication.topLevelWidgets()
-                if isinstance(w, SBCIntradayChartDialog) and w.isVisible()
-            ]
-
-        if not active_dialogs:
-            QMessageBox.information(self, "🪟 窗口重排", "当前暂无打开的 SBC 分时走势独立窗口。")
-            return
-
-        screen = QApplication.primaryScreen()
-        if not screen:
-            return
-        sg = screen.availableGeometry()
-
-        margin_x = 10
-        margin_y = 10
-        curr_x = sg.left() + 20
-        curr_y = sg.top() + 20
-        row_max_h = 0
-
-        for dlg in active_dialogs:
-            w = dlg.width()
-            h = dlg.height()
-            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
-                curr_x = sg.left() + 20
-                curr_y += row_max_h + margin_y
-                row_max_h = 0
-
-            dlg._is_snapping = True
-            try:
-                dlg.move(curr_x, curr_y)
-                dlg._save_sbc_geometry()
-                dlg.raise_()
-                dlg.activateWindow()
-            finally:
-                dlg._is_snapping = False
-
-            curr_x += w + margin_x
-            row_max_h = max(row_max_h, h)
-
-        logger.info(f"🪟 [窗口重排] 已成功将 {len(active_dialogs)} 个 SBC 窗口自动并排重排 (保持窗口原尺寸不变)！")
+        rearrange_all_sbc_windows(parent_win=self)
 
     def _on_eval_param_changed(self):
         """当用户修改开盘估价、现价估价或换手率时自动同步 7 节点校准参数并触发评分"""

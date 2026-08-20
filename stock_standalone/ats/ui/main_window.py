@@ -2093,9 +2093,36 @@ class ATSMainWindow(QMainWindow):
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
         
-        # 将 [🔄 刷新状态] 按钮上移放置到 top_tabs 的右上角 CornerWidget
+        # 顶部主看板 Tab 右上角添加【🪟 SBC 重排】与【🔄 刷新状态】组合入口
+        top_corner_container = QWidget()
+        top_corner_layout = QHBoxLayout(top_corner_container)
+        top_corner_layout.setContentsMargins(0, 0, 0, 0)
+        top_corner_layout.setSpacing(6)
+
+        self.btn_rearrange_sbc = QPushButton("🪟 SBC 重排")
+        self.btn_rearrange_sbc.setToolTip("自动将所有已打开的 SBC 分时走势独立窗口在当前屏幕网格平铺重排对齐")
+        self.btn_rearrange_sbc.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2e22;
+                color: #00ff88;
+                font-weight: bold;
+                border: 1px solid #00ff88;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #00ff88;
+                color: #000000;
+            }
+        """)
+        self.btn_rearrange_sbc.clicked.connect(self.rearrange_all_sbc_windows)
+        top_corner_layout.addWidget(self.btn_rearrange_sbc)
+
         if hasattr(self.swing_table, "btn_refresh"):
-            self.top_tabs.setCornerWidget(self.swing_table.btn_refresh, Qt.Corner.TopRightCorner)
+            top_corner_layout.addWidget(self.swing_table.btn_refresh)
+
+        self.top_tabs.setCornerWidget(top_corner_container, Qt.Corner.TopRightCorner)
 
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         self.center_splitter.addWidget(self.top_tabs)
@@ -4107,6 +4134,14 @@ class ATSMainWindow(QMainWindow):
             f"📊 信号池: 候选 {radar_n} | 精选 {watch_n} | 实盘 {trade_n} | "
             f"今日新发现: {stats.get('today_new', 0)}{env_label}"
         )
+
+    def rearrange_all_sbc_windows(self):
+        """【🪟 自动平铺重排 SBC 独立分时走势图窗口】"""
+        try:
+            from ats.ui.intraday_strategy_dialog import rearrange_all_sbc_windows
+            rearrange_all_sbc_windows(self)
+        except Exception as e:
+            logger.error(f"[ATSMainWindow] Error rearranging SBC windows: {e}")
 
     def _open_signal_detail_dialog(self):
         """点击按钮直接弹出/唤醒 [实时实盘个股详情] 提示窗口 (自动归纳 SignalLedger、TDX 信号及历史精选)"""

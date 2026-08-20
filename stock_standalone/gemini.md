@@ -1,3 +1,18 @@
+## 2026-08-20 12:50
+- [x] **ATS 主窗口顶部主看板 Tab 右上角新增【🪟 SBC 重排】按钮、实现基于各自屏幕独立网格平铺重排，并移除 SBC 窗口内部冗余关闭按钮 (`ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_rearrange.py`)**：
+    - [x] **ATS 主看板右上角 CornerWidget 组合入口构建 (KISS / DRY)**：
+        - 在 `ATSMainWindow._init_ui` 中，将 `self.top_tabs` 右上角由单一按钮重构为组合容器 `top_corner_container`；
+        - 在【🔄 刷新状态】按钮前面添加【🪟 SBC 重排】按钮（`btn_rearrange_sbc`），赋予暗黑高亮科技感样式，并绑定 `rearrange_all_sbc_windows` 槽函数。
+    - [x] **多显示器独立分组网格平铺重排算法（Per-Screen Tiling）**：
+        - 抽取顶层通用重构函数 `rearrange_all_sbc_windows(parent_win=None)`，兼顾 `_sbc_dialogs` 与全局 `QApplication.topLevelWidgets()` 中的所有可见 `SBCIntradayChartDialog`；
+        - 按各窗口当前所在物理屏幕（`dlg.screen()` / `QApplication.screenAt()` / `intersects`）自动进行屏幕分组，每个屏幕各自在其 `availableGeometry()` 可用工作区内自适应网格平铺换行排布，绝不跨屏瞬移；
+        - 重排时统一重置磁吸定时器与半隐藏贴边状态（`is_hidden_state=False`, `opacity=1.0`），确保所有重排后的窗口 100% 清晰展开显示，并即时同步持久化最新窗口坐标。
+    - [x] **移除 SBC 分时走势独立窗口内部冗余“关闭”按钮**：
+        - 移除 `SBCIntradayChartDialog` 顶部工具栏中的 `btn_close = QPushButton("关闭")`，依赖窗口原生右上角 `[X]` 按钮关闭；
+        - 彻底释放 45~50 像素横向宽度，根治窗口尺寸较小时周期切换按钮（1日分时/2日分时/30分K等）与功能按钮被挤压截断显示的问题。
+    - [x] **新增单元测试套件 100% PASSED**：
+        - 新增 `tests/test_sbc_rearrange.py`，全量覆盖 CornerWidget 布局与按钮顺序校验、多窗口多屏网格排布与磁吸重置断言、以及无打开窗口时的安全防护断言。
+
 ## 2026-08-19 23:25
 - [x] **根治窗口布局管理器打包后运行环境配置文件被环境变量污染与回退 Bug，并完成底层路径识别单一流水线重构 (`webTools/manage_window_layout.py`, `webTools/window_manager/core.py`, `sys_utils.py`, `window_layout_config.json`, `webTools/window_manager/window_layout_config.json`, `tests/test_packaged_path_isolation.py`)**：
     - [x] **打包环境物理运行根目录强锁定与单一流水线重构（KISS / DRY / SOLID）**：
