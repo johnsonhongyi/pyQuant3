@@ -536,6 +536,9 @@ class SBCChartCanvas(QWidget):
         painter.drawText(margin_left + 6, margin_top + 16, f"📊 [{self.period_mode.upper()}] GG通道 & MA均线K线走势")
 
 
+VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week"]
+
+
 class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
@@ -543,7 +546,7 @@ class SBCIntradayChartDialog(QWidget):
     _global_sbc_size: Optional[tuple] = None
     _global_sbc_geo: Optional[dict] = None
 
-    def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None):
+    def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None):
         # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
         # 彻底切断 Windows 属主窗口层级约束，使其表现为 100% 独立的桌面顶级 Window，绝不上浮置顶或遮挡主窗口！
         self.main_workbench = parent.window() if parent else None
@@ -551,6 +554,7 @@ class SBCIntradayChartDialog(QWidget):
 
         self.code = str(code).zfill(6)
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
+        self._initial_period_mode = initial_period_mode
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
         self.setWindowFlags(
@@ -752,9 +756,37 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(self, '_geo_save_timer'):
             self._geo_save_timer.start(350)
 
+    def set_period_mode(self, mode: str, reload: bool = True, save: bool = True):
+        """【📈 设定并切换 SBC 图表看盘周期】
+        
+        Args:
+            mode: 周期模式 ('1m' | '2d' | '3d' | '5m' | '15m' | '30m' | '60m' | 'day' | 'week')
+            reload: 是否立即刷新重载走势图 (默认 True)
+            save: 是否触发防抖持久化 (默认 True)
+        """
+        if not isinstance(mode, str):
+            mode = "1m"
+        mode_clean = mode.strip().lower()
+        if mode_clean not in VALID_SBC_PERIODS:
+            mode_clean = "1m"
+
+        self._current_period_mode = mode_clean
+
+        # 同步更新顶部按钮组的 checked 高亮状态
+        if hasattr(self, 'btn_group_period') and self.btn_group_period:
+            for btn in self.btn_group_period.buttons():
+                btn_mode = (btn.property("period_mode") or "").strip().lower()
+                btn.setChecked(btn_mode == mode_clean)
+
+        if reload:
+            self.reload_chart()
+
+        if save:
+            self._save_sbc_geometry()
+
     def _do_save_sbc_geometry(self):
         """
-        【💾 物理写盘】原子持久化窗口尺寸大小与屏显坐标到 JSON 与 QSettings (支持任意时段实时配置更新)
+        【💾 物理写盘】原子持久化窗口尺寸大小、屏显坐标与看盘周期到 JSON 与 QSettings (支持任意时段实时配置更新)
         """
         if self.isMaximized() or self.isMinimized():
             return
@@ -769,10 +801,14 @@ class SBCIntradayChartDialog(QWidget):
             return
 
         try:
+            cur_period = getattr(self, "_current_period_mode", "1m")
+
             # 1. 写入 QSettings
             settings = QSettings("pyQuant3", "IntradayWorkbench")
             settings.setValue("sbc_window_geometry", geo_dict)
             settings.setValue("sbc_window_size", {"width": geo_dict["width"], "height": geo_dict["height"]})
+            settings.setValue(f"sbc_period_{self.code}", cur_period)
+            settings.setValue("sbc_period_latest", cur_period)
 
             # 2. 原子写入 JSON 配置文件
             cfg_path = _get_sbc_layout_cfg_path()
@@ -791,7 +827,12 @@ class SBCIntradayChartDialog(QWidget):
             data["sbc_geometries"]["latest"] = geo_dict
             data["sbc_geometries"][self.code] = geo_dict
 
-            # 同步更新 sbc_open_windows 中当前个股条目的尺寸与坐标
+            if "sbc_period_modes" not in data:
+                data["sbc_period_modes"] = {}
+            data["sbc_period_modes"]["latest"] = cur_period
+            data["sbc_period_modes"][self.code] = cur_period
+
+            # 同步更新 sbc_open_windows 中当前个股条目的尺寸、坐标与选择的周期
             if "sbc_open_windows" in data and isinstance(data["sbc_open_windows"], list):
                 for item in data["sbc_open_windows"]:
                     if item.get("code") == self.code:
@@ -799,6 +840,7 @@ class SBCIntradayChartDialog(QWidget):
                         item["height"] = geo_dict["height"]
                         item["x"] = geo_dict["x"]
                         item["y"] = geo_dict["y"]
+                        item["period_mode"] = cur_period
                         break
 
             tmp_path = cfg_path + f".tmp_{os.getpid()}"
@@ -813,14 +855,15 @@ class SBCIntradayChartDialog(QWidget):
                 shutil.move(tmp_path, cfg_path)
 
         except Exception as e:
-            logger.debug(f"保存 SBC 窗口布局坐标异常: {e}")
+            logger.debug(f"保存 SBC 窗口布局与周期异常: {e}")
 
     def _restore_sbc_geometry(self):
-        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸与坐标 (含越界保护)"""
+        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标与看盘周期 (含越界保护)"""
         try:
             target_w, target_h = 680, 420
             x, y = 100, 100
             has_exact_pos = False
+            restored_period = None
 
             # 0. 优先从类内存变量读取最新尺寸
             if SBCIntradayChartDialog._global_sbc_size:
@@ -848,6 +891,15 @@ class SBCIntradayChartDialog(QWidget):
                         x = int(geo_dict.get("x", x))
                         y = int(geo_dict.get("y", y))
                         has_exact_pos = True
+
+                    # 周期读取：优先个股历史周期 -> sbc_open_windows 记录 -> latest 周期
+                    if "sbc_period_modes" in data and isinstance(data["sbc_period_modes"], dict):
+                        restored_period = data["sbc_period_modes"].get(self.code) or data["sbc_period_modes"].get("latest")
+                    if not restored_period and "sbc_open_windows" in data and isinstance(data["sbc_open_windows"], list):
+                        for item in data["sbc_open_windows"]:
+                            if item.get("code") == self.code:
+                                restored_period = item.get("period_mode") or item.get("period")
+                                break
                 except Exception:
                     pass
 
@@ -867,10 +919,17 @@ class SBCIntradayChartDialog(QWidget):
                             x = int(geo.get("x", x))
                             y = int(geo.get("y", y))
                             has_exact_pos = True
+                    if not restored_period:
+                        restored_period = settings.value(f"sbc_period_{self.code}") or settings.value("sbc_period_latest")
                 except Exception:
                     pass
 
-            # 3. 安全性防越界处理
+            # 3. 周期模式应用 (构造指定 > 历史恢复 > 默认 '1m')
+            target_period = getattr(self, "_initial_period_mode", None) or restored_period or "1m"
+            if target_period and str(target_period).lower() in VALID_SBC_PERIODS:
+                self.set_period_mode(str(target_period).lower(), reload=False, save=False)
+
+            # 4. 安全性防越界处理
             from gui_utils import clamp_window_to_screens
             rx, ry = clamp_window_to_screens(x, y, target_w, target_h)
 
@@ -1159,8 +1218,7 @@ class SBCIntradayChartDialog(QWidget):
         if not sender:
             return
         mode = sender.property("period_mode") or "1m"
-        self._current_period_mode = mode
-        self.reload_chart()
+        self.set_period_mode(mode, reload=True, save=True)
 
     def _on_rearrange_windows_clicked(self):
         """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
@@ -1296,7 +1354,7 @@ class SBCIntradayChartDialog(QWidget):
         self.txt_log.setPlainText(log_msg)
 
 
-def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826") -> Optional[SBCIntradayChartDialog]:
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None) -> Optional[SBCIntradayChartDialog]:
     """
     【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
     """
@@ -1322,18 +1380,21 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     engine = IntradayStrategyEngine.get_instance()
 
     if dlg is None or not dlg.isVisible():
-        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine)
+        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine, initial_period_mode=period_mode)
         sbc_dict[c_clean] = dlg
     else:
         dlg.code = c_clean
         dlg.lbl_title.setText(f"📊 标的: {c_clean} {resolve_stock_name(c_clean)} | SBC 实盘走势基准线")
         dlg.setWindowTitle(f"📈 【{c_clean} {resolve_stock_name(c_clean)}】SBC 实盘分时走势与关键阶梯基准图")
-        dlg.reload_chart()
+        if period_mode:
+            dlg.set_period_mode(period_mode, reload=True, save=True)
+        else:
+            dlg.reload_chart()
 
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()
-    _record_sbc_open(c_clean, dlg.geometry())
+    _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
     return dlg
 
 
@@ -1344,7 +1405,7 @@ def _get_sbc_layout_cfg_path():
     return os.path.join(cfg_dir, "intraday_ui_layout.json")
 
 
-def _record_sbc_open(code: str, geo=None):
+def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
     """记录新打开的 SBC 窗口"""
     try:
         c_clean = str(code).zfill(6)
@@ -1367,6 +1428,8 @@ def _record_sbc_open(code: str, geo=None):
                     item["y"] = geo.y()
                     item["width"] = geo.width()
                     item["height"] = geo.height()
+                if period_mode:
+                    item["period_mode"] = period_mode
                 found = True
                 break
         if not found:
@@ -1381,9 +1444,17 @@ def _record_sbc_open(code: str, geo=None):
                 entry["y"] = 100
                 entry["width"] = 680
                 entry["height"] = 420
+            if period_mode:
+                entry["period_mode"] = period_mode
             sbc_list.append(entry)
 
         data["sbc_open_windows"] = sbc_list
+        if period_mode:
+            if "sbc_period_modes" not in data:
+                data["sbc_period_modes"] = {}
+            data["sbc_period_modes"]["latest"] = period_mode
+            data["sbc_period_modes"][c_clean] = period_mode
+
         if geo and geo.width() >= 200 and geo.height() >= 100:
             data["sbc_window_size"] = {"width": geo.width(), "height": geo.height()}
             data["sbc_window_geometry"] = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
@@ -1435,26 +1506,33 @@ def _remove_sbc_open_record(code: str):
 
 
 def save_all_open_sbc_windows():
-    """【💾 全局保存所有已打开的 SBC 窗口与坐标】ATS 退出或定时刷盘时调用"""
+    """【💾 全局保存所有已打开的 SBC 窗口与坐标、周期】ATS 退出或定时刷盘时调用"""
     try:
         from PyQt6.QtWidgets import QApplication
         from PyQt6.sip import isdeleted
         active_list = []
         last_valid_geo = None
+        period_map = {}
+        latest_period = None
         for w in QApplication.topLevelWidgets():
             if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
                 geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else w.geometry()
                 c = getattr(w, 'code', None)
+                cur_period = getattr(w, '_current_period_mode', '1m')
                 if c:
+                    c_clean = str(c).zfill(6)
                     active_list.append({
-                        "code": str(c).zfill(6),
+                        "code": c_clean,
                         "x": geo.x(),
                         "y": geo.y(),
                         "width": geo.width(),
                         "height": geo.height(),
                         "anchor_edge": getattr(w, "anchor_edge", None),
-                        "is_hidden_state": bool(getattr(w, "is_hidden_state", False))
+                        "is_hidden_state": bool(getattr(w, "is_hidden_state", False)),
+                        "period_mode": cur_period
                     })
+                    period_map[c_clean] = cur_period
+                    latest_period = cur_period
                     if geo.width() >= 200 and geo.height() >= 100:
                         last_valid_geo = geo
 
@@ -1468,6 +1546,12 @@ def save_all_open_sbc_windows():
                 data = {}
 
         data["sbc_open_windows"] = active_list
+        if "sbc_period_modes" not in data:
+            data["sbc_period_modes"] = {}
+        data["sbc_period_modes"].update(period_map)
+        if latest_period:
+            data["sbc_period_modes"]["latest"] = latest_period
+
         if last_valid_geo:
             data["sbc_window_size"] = {"width": last_valid_geo.width(), "height": last_valid_geo.height()}
             data["sbc_window_geometry"] = {
@@ -1495,7 +1579,7 @@ def save_all_open_sbc_windows():
 
 
 def restore_all_open_sbc_windows(parent_win=None):
-    """【🚀 启动时自动恢复所有持久化的 SBC 窗口及位置】仅退出前处于磁吸状态的窗口才恢复磁吸，默认边缘不触发"""
+    """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置及所选周期】"""
     try:
         cfg_path = _get_sbc_layout_cfg_path()
         if not os.path.exists(cfg_path):
@@ -1515,9 +1599,12 @@ def restore_all_open_sbc_windows(parent_win=None):
             y = item.get("y", 100)
             w = item.get("width", 680)
             h = item.get("height", 420)
+            saved_period = item.get("period_mode") or item.get("period") or (
+                data.get("sbc_period_modes", {}).get(str(code).zfill(6))
+            ) or "1m"
             rx, ry = clamp_window_to_screens(x, y, w, h)
             
-            dlg = open_sbc_chart_dialog(parent_win, code)
+            dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period)
             if dlg:
                 dlg._is_programmatic_move = True
                 dlg._is_user_dragging = False
@@ -1539,10 +1626,13 @@ def restore_all_open_sbc_windows(parent_win=None):
                         dlg.normal_geometry = None
                         dlg.is_hidden_state = False
                         dlg.setWindowOpacity(1.0)
+                    if hasattr(dlg, 'set_period_mode'):
+                        dlg.set_period_mode(saved_period, reload=False, save=False)
                     dlg._save_sbc_geometry()
                 finally:
                     dlg._is_programmatic_move = False
     except Exception as e:
+        logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
         logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
 
 

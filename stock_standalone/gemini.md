@@ -1,3 +1,20 @@
+## 2026-08-20 13:30
+- [x] **实现 ATS 退出持久化 SBC 独立看盘窗口时一同持久化所选周期并在启动时自动恢复 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_rearrange.py`, `20260820_1318_task.md`)**：
+    - [x] **SBC 周期管理与 UI 状态同步 (`set_period_mode`) (KISS / SOLID)**：
+        - 定义合法周期集合 `VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week"]`；
+        - 在 `SBCIntradayChartDialog` 中抽象实现标准方法 `set_period_mode(self, mode, reload=True, save=True)`，自动完成非法模式安全兜底（默认回退 `'1m'`）、`_current_period_mode` 更新、顶部 `btn_group_period` 按钮组 checked 状态联动高亮、图表重载及防抖持久化；
+        - 重构 `_on_period_btn_clicked` 接入 `set_period_mode`，彻底消除手动点击与代码恢复时的重复逻辑。
+    - [x] **双层持久化与退出自动原子落盘 (`save_all_open_sbc_windows`)**：
+        - 窗口尺寸/坐标保存（`_do_save_sbc_geometry`）与全局退出保存（`save_all_open_sbc_windows`）时，提取每个可见 SBC 窗口的 `_current_period_mode`；
+        - 同步将周期记录落盘至 `intraday_ui_layout.json` 中的 `sbc_open_windows`（各窗口独立项）、`sbc_period_modes`（个股与 latest 全局映射）以及 `QSettings`；
+        - `_record_sbc_open` 同步记录新打开窗口的周期，保证任意时段操作均有据可查。
+    - [x] **启动 IPC 数据就绪自动精确还原周期 (`restore_all_open_sbc_windows`)**：
+        - 重构 `restore_all_open_sbc_windows` 与 `open_sbc_chart_dialog`，从 JSON 配置中优先读取各标的此前选择的看盘周期；
+        - 恢复时自动设置对应周期并同步勾选对应周期按钮（如 2日分时/30分K/日K 等），图表自动对应加载分时或 K 线通道走势；
+        - 向后兼容：对缺少 `period_mode` 字段的历史旧配置自动安全回退为 `"1m"`（1日分时），绝不报错。
+    - [x] **全流程自动化测试覆盖**：
+        - 在 `tests/test_sbc_rearrange.py` 中补充 5 项周期切换、按钮选中同步、多窗口多周期保存与恢复、指定周期唤醒以及向后兼容回退的完整专项测试。
+
 ## 2026-08-20 12:50
 - [x] **ATS 主窗口顶部主看板 Tab 右上角新增【🪟 SBC 重排】按钮、实现基于各自屏幕独立网格平铺重排，并移除 SBC 窗口内部冗余关闭按钮 (`ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_rearrange.py`)**：
     - [x] **ATS 主看板右上角 CornerWidget 组合入口构建 (KISS / DRY)**：
