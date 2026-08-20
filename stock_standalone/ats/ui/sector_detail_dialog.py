@@ -186,34 +186,20 @@ class ATSSectorDetailDialog(QDialog):
     def _restore_geometry(self):
         """从 window_config.json 恢复弹窗位置与大小"""
         try:
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                geom = data.get("ats_sector_detail_dialog_geom")
-                if geom:
-                    from PyQt6.QtCore import QByteArray
-                    self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
+            from ats.ui.styles import load_config_node
+            geom = load_config_node("ats_sector_detail_dialog_geom")
+            if geom:
+                from PyQt6.QtCore import QByteArray
+                self.restoreGeometry(QByteArray.fromHex(geom.encode('utf-8')))
         except Exception:
             pass
 
     def _save_geometry(self):
         """原子写盘持久化弹窗位置与大小至 window_config.json"""
         try:
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                data["ats_sector_detail_dialog_geom"] = self.saveGeometry().toHex().data().decode('utf-8')
-                tmp_path = cfg_path + ".tmp_sector"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            from ats.ui.styles import save_config_node
+            hex_data = self.saveGeometry().toHex().data().decode('utf-8')
+            save_config_node("ats_sector_detail_dialog_geom", hex_data)
         except Exception:
             pass
 

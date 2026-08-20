@@ -282,55 +282,34 @@ class GlobalMarketPanel(QWidget):
         try:
             import json
             import os
-            from sys_utils import get_app_root, get_conf_path
-            from ats.ui.styles import CONFIG_FILE_LOCK
-            from PyQt6.QtCore import QByteArray
-
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            with CONFIG_FILE_LOCK:
-                data = {}
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except Exception:
-                        data = {}
-                if hasattr(self, 'v_splitter'):
-                    data["ats_global_market_v_splitter"] = self.v_splitter.saveState().toHex().data().decode('utf-8')
-                if hasattr(self, 'h_splitter'):
-                    data["ats_global_market_h_splitter"] = self.h_splitter.saveState().toHex().data().decode('utf-8')
-                
-                tmp_path = cfg_path + ".tmp_gpanel"
-                with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
+            nodes = {}
+            if hasattr(self, 'v_splitter'):
+                nodes["ats_global_market_v_splitter"] = self.v_splitter.saveState().toHex().data().decode('utf-8')
+            if hasattr(self, 'h_splitter'):
+                nodes["ats_global_market_h_splitter"] = self.h_splitter.saveState().toHex().data().decode('utf-8')
+            if nodes:
+                from ats.ui.styles import save_config_nodes
+                save_config_nodes(nodes)
         except Exception as e:
             print(f"[GlobalMarketPanel] Save splitter states error: {e}")
 
     def _restore_splitter_states(self):
         """恢复上下 (v_splitter) 与左右 (h_splitter) 分割线位置"""
         try:
-            import json
-            import os
-            from sys_utils import get_app_root, get_conf_path
             from PyQt6.QtCore import QByteArray
+            from ats.ui.styles import load_config_node
 
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                
-                v_hex = data.get("ats_global_market_v_splitter")
-                if v_hex and hasattr(self, 'v_splitter'):
-                    self.v_splitter.restoreState(QByteArray.fromHex(v_hex.encode('utf-8')))
-                else:
-                    self.v_splitter.setSizes([85, 550]) # 默认顶部卡片紧凑 85px
+            v_hex = load_config_node("ats_global_market_v_splitter")
+            if v_hex and hasattr(self, 'v_splitter'):
+                self.v_splitter.restoreState(QByteArray.fromHex(v_hex.encode('utf-8')))
+            elif hasattr(self, 'v_splitter'):
+                self.v_splitter.setSizes([85, 550]) # 默认顶部卡片紧凑 85px
 
-                h_hex = data.get("ats_global_market_h_splitter")
-                if h_hex and hasattr(self, 'h_splitter'):
-                    self.h_splitter.restoreState(QByteArray.fromHex(h_hex.encode('utf-8')))
-                else:
-                    self.h_splitter.setSizes([480, 520])
+            h_hex = load_config_node("ats_global_market_h_splitter")
+            if h_hex and hasattr(self, 'h_splitter'):
+                self.h_splitter.restoreState(QByteArray.fromHex(h_hex.encode('utf-8')))
+            elif hasattr(self, 'h_splitter'):
+                self.h_splitter.setSizes([480, 520])
         except Exception as e:
             print(f"[GlobalMarketPanel] Restore splitter states error: {e}")
 

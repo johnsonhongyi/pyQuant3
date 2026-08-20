@@ -544,26 +544,36 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
 
 def load_config_node(key: str, default=None):
-    """线程安全从 window_config.json 读取指定 key 的持久化数据"""
+    """线程安全从 window_config.json 读取指定 key 的持久化数据，具备 Windows 文件并发重试退避"""
     import os
     import json
+    import time
     from sys_utils import get_app_root, get_conf_path
-    try:
-        cfg_path = get_conf_path("window_config.json", get_app_root())
-        with CONFIG_FILE_LOCK:
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and key in data:
-                    return data[key]
-    except Exception as ex:
-        print(f"[ConfigHelper] 读取节点 {key} 异常: {ex}")
+    
+    cfg_path = get_conf_path("window_config.json", get_app_root())
+    
+    for attempt in range(5):
+        try:
+            with CONFIG_FILE_LOCK:
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and key in data:
+                        return data[key]
+            return default
+        except (PermissionError, OSError, json.JSONDecodeError):
+            # 遇到 Windows 瞬时文件锁竞争或正在原子替换，微休眠退避后重试
+            time.sleep(0.03 * (attempt + 1))
+        except Exception as ex:
+            if attempt == 4:
+                print(f"[ConfigHelper] 读取节点 {key} 异常: {ex}")
+            time.sleep(0.03)
     return default
 
 
 def save_config_nodes(key_val_dict: dict) -> bool:
     """线程安全将多个 key-value 增量物理原子落盘保存至 window_config.json
-    具备重试与防覆盖保护，绝不使用空字典覆盖已有物理配置。
+    具备重试与防覆盖保护，绝不使用空字典覆盖已有物理配置，兼容 Windows 文件锁。
     """
     if not key_val_dict or not isinstance(key_val_dict, dict):
         return False
@@ -577,7 +587,7 @@ def save_config_nodes(key_val_dict: dict) -> bool:
     cfg_path = get_conf_path("window_config.json", get_app_root())
     
     with CONFIG_FILE_LOCK:
-        for attempt in range(3):
+        for attempt in range(5):
             data = {}
             file_existed_and_valid = False
             if os.path.exists(cfg_path):
@@ -587,35 +597,48 @@ def save_config_nodes(key_val_dict: dict) -> bool:
                         if isinstance(loaded, dict):
                             data = loaded
                             file_existed_and_valid = True
-                except Exception as read_ex:
-                    time.sleep(0.05)
+                except Exception:
+                    time.sleep(0.03 * (attempt + 1))
                     continue
             else:
                 file_existed_and_valid = True
 
             # 如果文件存在但读取解析失败，避免直接用 {} 抹掉整盘配置，在第 3 次重试失败前不盲目覆写
-            if not file_existed_and_valid and os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0 and attempt < 2:
-                time.sleep(0.05)
+            if not file_existed_and_valid and os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0 and attempt < 3:
+                time.sleep(0.03 * (attempt + 1))
                 continue
 
             # 增量合并字典
             for k, v in key_val_dict.items():
                 data[k] = v
 
+            tmp_path = None
             try:
                 temp_dir = os.path.dirname(cfg_path) or "."
                 fd, tmp_path = tempfile.mkstemp(dir=temp_dir, prefix="win_cfg_", suffix=".tmp", text=True)
                 with os.fdopen(fd, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, cfg_path)
-                return True
-            except Exception as write_ex:
-                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                
+                # Windows 下 os.replace 遇到并发读时重试
+                replaced = False
+                for rep_attempt in range(3):
+                    try:
+                        os.replace(tmp_path, cfg_path)
+                        replaced = True
+                        break
+                    except (PermissionError, OSError):
+                        time.sleep(0.03)
+                if replaced:
+                    return True
+            except Exception:
+                pass
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
                     try:
                         os.remove(tmp_path)
                     except Exception:
                         pass
-                time.sleep(0.05)
+            time.sleep(0.03 * (attempt + 1))
 
     print(f"[ConfigHelper] 警告: 写入节点 {list(key_val_dict.keys())} 失败")
     return False
