@@ -932,17 +932,188 @@ class QueryHistoryManager:
     def show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
         if not item: return
-        self.tree.selection_set(item)
+        selected = self.tree.selection()
+        if item not in selected:
+            self.tree.selection_set(item)
+            selected = (item,)
+
         menu = tk.Menu(self.editor_frame, tearoff=0)
-        menu.add_command(label="使用", command=lambda: self.use_query())
-        menu.add_command(label="编辑Query", command=lambda: self.edit_query(item))
-        menu.add_command(label="编辑框", command=lambda: self.up_to_entry(item))
-        menu.add_command(label="删除", command=lambda: self.delete_item(item))
+        
+        if len(selected) > 1:
+            # 💡 [NEW] 多选模式上下文菜单 (Shift / Ctrl 多选) - 严格从 Treeview 节点实时读取真实 Query
+            sel_queries = []
+            for sel_id in selected:
+                vals = self.tree.item(sel_id, "values")
+                if vals and len(vals) > 0:
+                    q = str(vals[0]).strip()
+                    if q: sel_queries.append(q)
+            
+            menu.add_command(label=f"🔗 组合测试交集 (AND 全中标的 - {len(sel_queries)}条)", command=lambda: self.test_multi_queries(sel_queries, op="and"))
+            menu.add_command(label=f"➕ 组合测试并集 (OR 合并标的 - {len(sel_queries)}条)", command=lambda: self.test_multi_queries(sel_queries, op="or"))
+            menu.add_command(label="📊 查看全中与未全中标的明细对比", command=lambda: self.show_multi_query_details(sel_queries))
+            menu.add_separator()
+            menu.add_command(label="📋 复制为全中公式: (Q1) and (Q2)...", command=lambda: self.copy_combined_query(sel_queries, op="and"))
+            menu.add_command(label="📋 复制为合并公式: (Q1) or (Q2)...", command=lambda: self.copy_combined_query(sel_queries, op="or"))
+            menu.add_separator()
+            menu.add_command(label=f"🗑️ 批量删除选中的 {len(selected)} 条记录", command=lambda: [self.delete_item(s) for s in list(selected)])
+        else:
+            # 单选模式
+            menu.add_command(label="使用", command=lambda: self.use_query())
+            menu.add_command(label="编辑Query", command=lambda: self.edit_query(item))
+            menu.add_command(label="编辑框", command=lambda: self.up_to_entry(item))
+            menu.add_command(label="删除", command=lambda: self.delete_item(item))
+
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _get_runtime_df(self):
+        """[NEW] 优先从主窗口运行时获取最权威的实时完整数据集 (含分时 VWAP / 动态指标)"""
+        df_target = None
+        if self.root:
+            for attr in ('df_all_res', 'df_all', 'df_top_all', 'df_all_realtime'):
+                if hasattr(self.root, attr) and getattr(self.root, attr) is not None:
+                    df_target = getattr(self.root, attr)
+                    break
+        if df_target is None and hasattr(self, 'master') and self.master:
+            for attr in ('df_all_res', 'df_all', 'df_top_all', 'df_all_realtime'):
+                if hasattr(self.master, attr) and getattr(self.master, attr) is not None:
+                    df_target = getattr(self.master, attr)
+                    break
+        if df_target is None:
+            df_target = self.df_all
+        if df_target is None:
+            try:
+                from instock_MonitorTK import test_single_thread
+                df_target = test_single_thread(single=True)
+                self.df_all = df_target
+            except Exception: pass
+        return df_target
+
+    def test_multi_queries(self, queries, op="and"):
+        """[NEW] Shift/Ctrl 多选策略组合测试 (交集 AND / 并集 OR)"""
+        if not queries: return
+        df_target = self._get_runtime_df()
+
+        combined_q = f" {' and ' if op.lower() == 'and' else ' or '} ".join([f"({q})" for q in queries])
+        self.entry_query.delete(0, tk.END)
+        self.entry_query.insert(0, combined_q)
+
+        # 准确计算组合公式真实命中数
+        hit_cnt = 0
+        if df_target is not None and not df_target.empty:
+            try:
+                from query_engine_util import query_engine
+                sub_res = query_engine.execute(df_target, combined_q)
+                hit_cnt = len(sub_res) if sub_res is not None and not sub_res.empty else 0
+            except Exception as e:
+                logger.error(f"test_multi_queries execute error: {e}")
+
+        total_s = len(df_target) if df_target is not None else 0
+        op_label = "全中交集 (AND)" if op.lower() == "and" else "合并并集 (OR)"
+        self.status_var.set(f"🔗 多选组合 [{op_label}]: {len(queries)}条策略 -> 真实命中: {hit_cnt} / {total_s} 只")
+        toast_message(self.root, f"🔗 组合测试 [{op_label}]: 真实命中 {hit_cnt} 只\n公式已载入输入框，可点击'添加'保存", 3000)
+
+    def copy_combined_query(self, queries, op="and"):
+        """[NEW] 复制多选组合后的 Query 公式"""
+        if not queries: return
+        combined_q = f" {' and ' if op.lower() == 'and' else ' or '} ".join([f"({q})" for q in queries])
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(combined_q)
+            toast_message(self.root, f"✅ 已复制 {len(queries)} 条组合公式 ({op.upper()})")
+        except Exception: pass
+
+    def show_multi_query_details(self, queries):
+        """[NEW] 弹窗展示多选策略的【全中标的】与【未全中标的】矩阵对比"""
+        if not queries: return
+        df_target = self._get_runtime_df()
+        if df_target is None or df_target.empty:
+            toast_message(self.root, "❌ 暂无可用回测数据集")
+            return
+
+        from query_engine_util import query_engine
+        query_hits = {}
+        for i, q in enumerate(queries):
+            try:
+                sub = query_engine.execute(df_target, q)
+                query_hits[i] = set(sub.index) if (sub is not None and not sub.empty) else set()
+            except Exception as e:
+                logger.error(f"show_multi_query_details execute error for Q{i}: {e}")
+                query_hits[i] = set()
+
+        if not query_hits: return
+        all_union = set.union(*query_hits.values()) if query_hits else set()
+        all_inter = set.intersection(*query_hits.values()) if query_hits else set()
+        not_all = all_union - all_inter
+
+        top = tk.Toplevel(self.root)
+        top.title(f"📊 多选策略对比 ({len(queries)}条) | 🎯全中:{len(all_inter)}只 | 📈并集:{len(all_union)}只 | ⚠️未全中:{len(not_all)}只")
+        top.geometry("880x520")
+
+        nb = ttk.Notebook(top)
+        nb.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Tab 1: 全中标的
+        f1 = ttk.Frame(nb)
+        nb.add(f1, text=f"🌟 全中标的 ({len(all_inter)} 只)")
+        tree1 = ttk.Treeview(f1, columns=("code", "name", "pct", "status"), show="headings")
+        tree1.heading("code", text="代码"); tree1.column("code", width=80, anchor="center")
+        tree1.heading("name", text="名称"); tree1.column("name", width=100, anchor="center")
+        tree1.heading("pct", text="涨幅%"); tree1.column("pct", width=80, anchor="e")
+        tree1.heading("status", text="命中状态与诊断"); tree1.column("status", width=420)
+        tree1.pack(fill="both", expand=True)
+
+        if all_inter:
+            for c in sorted(all_inter):
+                r = df_target.loc[c] if c in df_target.index else None
+                n = str(r.get("name", "")) if r is not None else ""
+                p = f"{float(r.get('percent', 0)):.2f}%" if r is not None else ""
+                tree1.insert("", "end", values=(c, n, p, f"✅ 100% 全部命中 ({len(queries)}/{len(queries)} 策略全中共振)"))
+        else:
+            tree1.insert("", "end", values=("-", "无全中个股", "0.00%", "💡 选中的策略条件存在形态互斥 (如主升加速 vs 回踩洗盘)，请看[未全中]标签"))
+
+        # Tab 2: 未全中标的
+        f2 = ttk.Frame(nb)
+        nb.add(f2, text=f"⚠️ 未全中标的/差集 ({len(not_all)} 只)")
+        tree2 = ttk.Treeview(f2, columns=("code", "name", "pct", "hit_count", "details"), show="headings")
+        tree2.heading("code", text="代码"); tree2.column("code", width=80, anchor="center")
+        tree2.heading("name", text="名称"); tree2.column("name", width=100, anchor="center")
+        tree2.heading("pct", text="涨幅%"); tree2.column("pct", width=80, anchor="e")
+        tree2.heading("hit_count", text="命中数"); tree2.column("hit_count", width=80, anchor="center")
+        tree2.heading("details", text="各策略命中分布"); tree2.column("details", width=400)
+        tree2.pack(fill="both", expand=True)
+
+        for c in sorted(not_all):
+            r = df_target.loc[c] if c in df_target.index else None
+            n = str(r.get("name", "")) if r is not None else ""
+            p = f"{float(r.get('percent', 0)):.2f}%" if r is not None else ""
+            hit_mask = [f"Q{idx+1}:{'✅' if c in hits else '❌'}" for idx, hits in query_hits.items()]
+            hits_cnt = sum(1 for hits in query_hits.values() if c in hits)
+            tree2.insert("", "end", values=(c, n, p, f"{hits_cnt}/{len(queries)}", " | ".join(hit_mask)))
+
+        # Tab 2: 未全中标的
+        f2 = ttk.Frame(nb)
+        nb.add(f2, text=f"⚠️ 未全中标的/差集 ({len(not_all)} 只)")
+        tree2 = ttk.Treeview(f2, columns=("code", "name", "pct", "hit_count", "details"), show="headings")
+        tree2.heading("code", text="代码"); tree2.column("code", width=80, anchor="center")
+        tree2.heading("name", text="名称"); tree2.column("name", width=100, anchor="center")
+        tree2.heading("pct", text="涨幅%"); tree2.column("pct", width=80, anchor="e")
+        tree2.heading("hit_count", text="命中数"); tree2.column("hit_count", width=80, anchor="center")
+        tree2.heading("details", text="各策略命中分布"); tree2.column("details", width=400)
+        tree2.pack(fill="both", expand=True)
+
+        for c in sorted(not_all):
+            r = df_target.loc[c] if c in df_target.index else None
+            n = str(r.get("name", "")) if r is not None else ""
+            p = f"{float(r.get('percent', 0)):.2f}%" if r is not None else ""
+            hit_mask = [f"Q{idx+1}:{'✅' if c in hits else '❌'}" for idx, hits in query_hits.items()]
+            hits_cnt = sum(1 for hits in query_hits.values() if c in hits)
+            tree2.insert("", "end", values=(c, n, p, f"{hits_cnt}/{len(queries)}", " | ".join(hit_mask)))
 
     def on_delete_key(self, event):
         selected = self.tree.selection()
-        if selected: self.delete_item(selected[0])
+        if selected:
+            for item in selected:
+                self.delete_item(item)
 
     def sync_history_current(self, record, action="delete", history_key=None):
         if history_key is None: history_key = self.current_key
