@@ -150,17 +150,15 @@ class PRServiceGUI:
             
         self.create_widgets()
 
-        # 实例化 QueryHistoryManager 和独立 Toplevel 窗口
+        # 实例化 QueryHistoryManager 和独立 Toplevel 窗口 (只读模式)
         self.history_win = tk.Toplevel(self.root)
-        self.history_win.title("人气过滤公式历史管理器")
+        self.history_win.title("人气过滤公式历史管理器 (只读模式)")
         self.history_win.geometry("800x480")
         self.history_win.withdraw()  # 默认隐藏
         
         def on_history_win_close():
             self.history_win.withdraw()
-            if hasattr(self, 'query_manager') and self.query_manager._history_changed:
-                self.query_manager.save_search_history()
-                self.query_manager._history_changed = False
+            # [只读模式] 仅隐藏窗口，不进行任何历史写盘保存
                 
         self.history_win.protocol("WM_DELETE_WINDOW", on_history_win_close)
 
@@ -178,6 +176,12 @@ class PRServiceGUI:
             sync_history_callback=self.sync_history_from_QM,
             test_callback=self.on_test_code
         )
+        
+        # [只读模式强约束] 人气综合模块仅读取 search_history.json 作为过滤公式，绝不覆写修改
+        def _read_only_save(*args, **kwargs):
+            service_logger.debug("[QueryHistoryManager] 人气综合处于只读模式，忽略写盘操作")
+            return
+        self.query_manager.save_search_history = _read_only_save
         
         # 刚初始化完，将编辑器内置 Frame 放置到 Toplevel 容器中
         if hasattr(self.query_manager, 'editor_frame'):
@@ -479,25 +483,7 @@ class PRServiceGUI:
         query = self._get_real_query()
         self.query_expr = query
         
-        if query and hasattr(self, 'query_manager'):
-            group = self.history_selector.get()
-            h_list = getattr(self.query_manager, group)
-            
-            exists = False
-            for item in h_list:
-                if isinstance(item, dict) and item.get("query") == query:
-                    exists = True
-                    break
-                elif isinstance(item, str) and item == query:
-                    exists = True
-                    break
-                    
-            if not exists:
-                h_list.insert(0, {"query": query, "starred": 0, "note": ""})
-                if len(h_list) > self.query_manager.MAX_HISTORY:
-                    h_list.pop()
-                self.query_manager.save_search_history()
-                self._on_history_group_changed()
+        # [只读模式] 仅作为即时过滤条件应用，不修改/追加历史记录，不触发写盘
                     
         if hasattr(self, '_last_data_cache') and self._last_data_cache:
             c = self._last_data_cache
@@ -583,12 +569,7 @@ class PRServiceGUI:
             pass
         self.save_config_settings()
         
-        # 保存历史记录
-        if hasattr(self, 'query_manager'):
-            try:
-                self.query_manager.save_search_history()
-            except Exception:
-                pass
+        # [只读模式] 关闭时无需保存 search_history
         if hasattr(self, 'history_win') and self.history_win.winfo_exists():
             try:
                 self.history_win.destroy()
@@ -798,6 +779,13 @@ class PRServiceGUI:
             
         menu = tk.Menu(self.root, tearoff=0)
 
+        # 📋 复制股票代码
+        menu.add_command(
+            label=f"📋 复制代码 ({code})",
+            command=lambda: self.copy_code_to_clipboard(code)
+        )
+        menu.add_separator()
+
         # [NEW] 查找此个股所属的最强板块（股票只数最多）并支持右键一键打开
         block_str = getattr(self, '_block_cache', {}).get(code, "")
         if block_str and block_str not in ("--", "nan", "None"):
@@ -862,6 +850,32 @@ class PRServiceGUI:
             menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
             
         menu.post(event.x_root, event.y_root)
+
+    def copy_code_to_clipboard(self, code):
+        """复制股票代码到剪贴板并更新状态栏提示"""
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.root.update()
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text=f"已复制代码: {code}", fg="darkgreen")
+        except Exception as e:
+            service_logger.error(f"复制代码到剪贴板失败: {e}")
+
+    def on_copy_shortcut(self, event):
+        """表格 Ctrl+C 快捷键响应"""
+        try:
+            tree = event.widget
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], "values")
+                cols = list(tree["columns"])
+                code_idx = cols.index("code") if "code" in cols else 1
+                if vals and len(vals) > code_idx:
+                    code = str(vals[code_idx]).strip().zfill(6)
+                    self.copy_code_to_clipboard(code)
+        except Exception as e:
+            service_logger.error(f"快捷键复制代码失败: {e}")
 
     def add_to_favorites(self, code):
         try:
@@ -1138,6 +1152,45 @@ class PRServiceGUI:
         except Exception:
             return 1.0
 
+    def save_sash_pos(self, event=None):
+        """仅在用户手动拖拽分隔栏并释放鼠标时，更新并持久化保存 sash 比例"""
+        try:
+            if not hasattr(self, "paned") or self.paned is None:
+                return
+            pos = self.paned.sash_coord(0)[0]
+            if pos <= 50:
+                return
+            width = self.paned.winfo_width()
+            if width > 100 and pos < width - 50:
+                ratio = float(pos) / float(width)
+                if 0.15 <= ratio <= 0.85:
+                    self.config["sash_ratio"] = ratio
+                    self._last_paned_width = width
+                    self.sash_restored = True
+                    self.save_config_settings()
+                    service_logger.debug(f"[sash] 用户拖动调整并保存 sash_ratio={ratio:.4f}")
+        except Exception as e:
+            service_logger.error(f"Failed to save sash position: {e}")
+
+    def restore_sash(self, event=None, force=False):
+        """恢复 PanedWindow 中间分隔栏 (sash) 的持久化比例"""
+        try:
+            if not hasattr(self, "paned") or self.paned is None:
+                return
+            width = self.paned.winfo_width()
+            if width > 100:  # 确保已经分配合理的大小
+                last_w = getattr(self, '_last_paned_width', 0)
+                if force or not getattr(self, 'sash_restored', False) or abs(width - last_w) >= 2:
+                    self._last_paned_width = width
+                    ratio = self.config.get("sash_ratio", 0.5)
+                    if not isinstance(ratio, (int, float)) or ratio < 0.15 or ratio > 0.85:
+                        ratio = 0.5
+                    target_sash = int(width * ratio)
+                    self.paned.sash_place(0, target_sash, 0)
+                    self.sash_restored = True
+        except Exception as e:
+            service_logger.debug(f"Restore sash position failed: {e}")
+
     def save_config_settings(self):
         try:
             if hasattr(self, "entry_blk_name") and self.entry_blk_name:
@@ -1171,17 +1224,6 @@ class PRServiceGUI:
                     self.config["sort_descending"] = getattr(self.tree_res, "sort_descending", False)
                 except Exception:
                     pass
-                
-            # 保存 sash 比例
-            if hasattr(self, "paned") and self.paned is not None and getattr(self, "sash_restored", False):
-                try:
-                    pos = self.paned.sash_coord(0)[0]
-                    if pos > 50:
-                        width = self.paned.winfo_width()
-                        if width > 100 and pos < width - 50:
-                            self.config["sash_ratio"] = float(pos) / float(width)
-                except Exception as e:
-                    service_logger.error(f"Failed to save sash in config: {e}")
 
             os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -1398,14 +1440,15 @@ class PRServiceGUI:
         main_pane.pack(fill="both", expand=True, padx=4, pady=2)
 
         # 引入中间垂直分隔的手动拖动
-        self.paned = tk.PanedWindow(main_pane, orient="horizontal", sashrelief="raised", sashwidth=4)
+        self.paned = tk.PanedWindow(main_pane, orient="horizontal", sashrelief="raised", sashwidth=4, opaqueresize=True)
         self.paned.pack(fill="both", expand=True)
 
         self.sash_restored = False
+        self._last_paned_width = 0
 
         # 左分栏
         self.left_frame = tk.Frame(self.paned)
-        self.paned.add(self.left_frame, minsize=200)
+        self.paned.add(self.left_frame, minsize=100, stretch="always")
 
         # 东 (EastMoney) Table Frame (1px 窄边框模式)
         self.em_container = tk.Frame(self.left_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
@@ -1420,7 +1463,7 @@ class PRServiceGUI:
 
         # 右分栏
         self.right_frame = tk.Frame(self.paned)
-        self.paned.add(self.right_frame, minsize=300)
+        self.paned.add(self.right_frame, minsize=100, stretch="always")
 
         # 开 (LongHu) Table Frame (1px 窄边框模式)
         self.lh_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
@@ -1440,47 +1483,13 @@ class PRServiceGUI:
         self.tgb_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         self.tree_tgb = self.create_treeview(self.tgb_container, "淘")
 
-        self._last_paned_width = 0
+        # 绑定 sash 的位置恢复与保存
+        self.paned.bind("<Configure>", lambda e: self.restore_sash(e))
+        self.paned.bind("<ButtonRelease-1>", self.save_sash_pos)
 
-        # 设置 sash 的位置恢复与保存
-        def save_sash_pos(event=None):
-            try:
-                pos = self.paned.sash_coord(0)[0]
-                if pos <= 50:
-                    return
-                width = self.paned.winfo_width()
-                if width > 100 and pos < width - 50:
-                    ratio = float(pos) / float(width)
-                    if 0.15 <= ratio <= 0.85:
-                        self.config["sash_ratio"] = ratio
-                        self.save_config_settings()
-                        self.sash_restored = True
-                        service_logger.debug(f"[sash] 已保存 PR 界面 sash_ratio={ratio:.4f}")
-            except Exception as e:
-                service_logger.error(f"Failed to save sash position: {e}")
-
-        def restore_sash(event=None):
-            try:
-                width = self.paned.winfo_width()
-                if width > 100:  # 确保已经分配合理的大小
-                    # 只有在初次还原，或者宽度发生变化 (拖拽拉伸/最大化/全屏) 时，按比例等比缩放和居中对齐
-                    last_w = getattr(self, '_last_paned_width', 0)
-                    if not getattr(self, 'sash_restored', False) or abs(width - last_w) >= 2:
-                        self._last_paned_width = width
-                        ratio = self.config.get("sash_ratio", 0.5)
-                        if not isinstance(ratio, (int, float)) or ratio < 0.15 or ratio > 0.85:
-                            ratio = 0.5
-                        target_sash = int(width * ratio)
-                        self.paned.sash_place(0, target_sash, 0)
-                        self.sash_restored = True
-            except Exception as e:
-                service_logger.debug(f"Restore sash position failed: {e}")
-
-        self.paned.bind("<Configure>", restore_sash)
         # 多阶段连环延时，确保冷启动、加载配置、最大化及渲染完毕后 100% 自动装载和恢复 sash
-        for delay_ms in (50, 150, 300, 600, 1000):
-            self.root.after(delay_ms, restore_sash)
-        self.paned.bind("<ButtonRelease-1>", save_sash_pos)
+        for delay_ms in (50, 150, 300, 500, 800, 1200):
+            self.root.after(delay_ms, lambda: self.restore_sash(force=True))
 
         # 底部配置控制栏
         bottom_frame = tk.Frame(self.root, bd=1, relief="groove")
@@ -1708,6 +1717,8 @@ class PRServiceGUI:
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         tree.bind("<Button-3>", self.show_context_menu)
         tree.bind("<Double-1>", self.on_tree_double_click)
+        tree.bind("<Control-c>", self.on_copy_shortcut)
+        tree.bind("<Control-C>", self.on_copy_shortcut)
 
         # 绑定大小改变事件以自适应列宽
         tree.bind("<Configure>", lambda e, t=tree: self._adjust_tree_column_widths(t))
@@ -2114,6 +2125,12 @@ class PRServiceGUI:
                     self.right_sep1.pack(fill="x", pady=4)
                 else:
                     self.right_sep2.pack(fill="x", pady=4)
+
+        # 左右容器 pack 完毕后，Tkinter 几何重算可能会重置 sash 位置，延迟触发强行恢复
+        if hasattr(self, 'root') and hasattr(self, 'paned'):
+            self.root.after_idle(lambda: self.restore_sash(force=True))
+            self.root.after(30, lambda: self.restore_sash(force=True))
+            self.root.after(100, lambda: self.restore_sash(force=True))
 
     def clear_all_trees(self):
         for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
@@ -3968,6 +3985,8 @@ class PRServiceGUI:
         tree.bind("<<TreeviewSelect>>", on_select_top10)
         tree.bind("<Double-1>", on_double_click_top10)
         tree.bind("<Button-3>", self.show_context_menu)
+        tree.bind("<Control-c>", self.on_copy_shortcut)
+        tree.bind("<Control-C>", self.on_copy_shortcut)
 
         win.title(f"板块【{target_concept}】个股列表")
         

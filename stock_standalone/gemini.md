@@ -7,6 +7,30 @@
     - [x] **策略引擎全量验证**：
         - 38 套策略全部合法加载，单元测试全部绿灯通过。
 
+## 2026-08-20 23:28
+- [x] **重构弹窗股票联动为系统成熟的 Tk 原生防抖与 GIL 线程安全链路 (`history_manager.py`)**：
+    - [x] **GIL 安全与防重入机制**：
+        - 统一收敛为 Tkinter 原生标准虚拟事件 `<<TreeviewSelect>>`（自动完美响应鼠标点击与键盘上下方向键）；
+        - 引入 `top.after(50, ...)` 50ms 轻量防抖调度，彻底消除快速连按方向键时的事件洪泛与重入冲突；
+        - 复用主程序经过工业级实盘验证的 `tree_scroll_to_code(code, vis=True)` 线程安全派发链路。
+
+## 2026-08-20 23:25
+- [x] **为多选策略对比弹窗添加鼠标点击与键盘上下键（Up/Down）全套股票联动功能 (`history_manager.py`, `instock_MonitorTK.py`)**：
+    - [x] **全事件监听支持**：
+        - 针对 Tab 1（全中标的）和 Tab 2（未全中标的）表格，绑定了 `<<TreeviewSelect>>`、`<KeyRelease-Up>`、`<KeyRelease-Down>`、`<ButtonRelease-1>`；
+    - [x] **三级联动链路**：
+        1. **主界面联动**：自动调用 `tree_scroll_to_code(code, vis=True)` 在主列表滚动定位并选中对应股票；
+        2. **K线窗口联动**：自动调用 `kline_monitor.tree_scroll_to_code_kline(code)` 实时切换 K 线图；
+        3. **通达信与剪切板联动**：自动通过 `sender.send(code)` 将代码投递至通达信进行看盘联动。
+
+## 2026-08-20 23:20
+- [x] **修复多选对比弹窗重复添加差集标签页 Bug 并新增“📋 组合公式与概览”选项卡 (`history_manager.py`)**：
+    - [x] **修复重复标签**：移除了多余的第二次 `nb.add(f2, text="未全中标的/差集")`，消除重复选项卡；
+    - [x] **新增 Tab 3 概览面板**：
+        - Tab 1: 🌟 全中标的 (AND 共振)
+        - Tab 2: ⚠️ 未全中标的 / 差集 (勾叉矩阵分布)
+        - Tab 3: 📋 组合公式与概览 (展示样本总数、各策略独立命中数、自动拼接好的 AND / OR 完整组合公式)。
+
 ## 2026-08-20 22:50
 - [x] **彻底修复多选策略对比弹窗 `show_multi_query_details` 全中交集为 0 的两大底层数据链 Bug (`history_manager.py`)**：
     - [x] **根本原因精准定位**：

@@ -1071,7 +1071,7 @@ class QueryHistoryManager:
         else:
             tree1.insert("", "end", values=("-", "无全中个股", "0.00%", "💡 选中的策略条件存在形态互斥 (如主升加速 vs 回踩洗盘)，请看[未全中]标签"))
 
-        # Tab 2: 未全中标的
+        # Tab 2: 未全中标的/差集
         f2 = ttk.Frame(nb)
         nb.add(f2, text=f"⚠️ 未全中标的/差集 ({len(not_all)} 只)")
         tree2 = ttk.Treeview(f2, columns=("code", "name", "pct", "hit_count", "details"), show="headings")
@@ -1079,7 +1079,7 @@ class QueryHistoryManager:
         tree2.heading("name", text="名称"); tree2.column("name", width=100, anchor="center")
         tree2.heading("pct", text="涨幅%"); tree2.column("pct", width=80, anchor="e")
         tree2.heading("hit_count", text="命中数"); tree2.column("hit_count", width=80, anchor="center")
-        tree2.heading("details", text="各策略命中分布"); tree2.column("details", width=400)
+        tree2.heading("details", text="各策略命中分布"); tree2.column("details", width=420)
         tree2.pack(fill="both", expand=True)
 
         for c in sorted(not_all):
@@ -1090,24 +1090,74 @@ class QueryHistoryManager:
             hits_cnt = sum(1 for hits in query_hits.values() if c in hits)
             tree2.insert("", "end", values=(c, n, p, f"{hits_cnt}/{len(queries)}", " | ".join(hit_mask)))
 
-        # Tab 2: 未全中标的
-        f2 = ttk.Frame(nb)
-        nb.add(f2, text=f"⚠️ 未全中标的/差集 ({len(not_all)} 只)")
-        tree2 = ttk.Treeview(f2, columns=("code", "name", "pct", "hit_count", "details"), show="headings")
-        tree2.heading("code", text="代码"); tree2.column("code", width=80, anchor="center")
-        tree2.heading("name", text="名称"); tree2.column("name", width=100, anchor="center")
-        tree2.heading("pct", text="涨幅%"); tree2.column("pct", width=80, anchor="e")
-        tree2.heading("hit_count", text="命中数"); tree2.column("hit_count", width=80, anchor="center")
-        tree2.heading("details", text="各策略命中分布"); tree2.column("details", width=400)
-        tree2.pack(fill="both", expand=True)
+        # 💡 [NEW] 股票点击与键盘上下方向键实时联动主界面/K线/通达信 (防抖与GIL安全机制)
+        debounce_timer = [None]
 
-        for c in sorted(not_all):
-            r = df_target.loc[c] if c in df_target.index else None
-            n = str(r.get("name", "")) if r is not None else ""
-            p = f"{float(r.get('percent', 0)):.2f}%" if r is not None else ""
-            hit_mask = [f"Q{idx+1}:{'✅' if c in hits else '❌'}" for idx, hits in query_hits.items()]
-            hits_cnt = sum(1 for hits in query_hits.values() if c in hits)
-            tree2.insert("", "end", values=(c, n, p, f"{hits_cnt}/{len(queries)}", " | ".join(hit_mask)))
+        def _do_linkage(code):
+            try:
+                # 1. 主界面树滚动定位与可视化联动 (内部自带线程安全投递)
+                if self.root and hasattr(self.root, 'tree_scroll_to_code'):
+                    self.root.tree_scroll_to_code(code, vis=True)
+                elif hasattr(self, 'master') and hasattr(self.master, 'tree_scroll_to_code'):
+                    self.master.tree_scroll_to_code(code, vis=True)
+                
+                # 2. K线监控器联动
+                if self.root and hasattr(self.root, 'kline_monitor') and self.root.kline_monitor and hasattr(self.root.kline_monitor, 'winfo_exists') and self.root.kline_monitor.winfo_exists():
+                    self.root.kline_monitor.tree_scroll_to_code_kline(code)
+            except Exception as e:
+                logger.debug(f"multi_query_details linkage error: {e}")
+
+        def _on_stock_select(event, target_tree):
+            try:
+                sel = target_tree.selection()
+                if not sel: return
+                vals = target_tree.item(sel[0], "values")
+                if not vals or len(vals) < 1: return
+                code = str(vals[0]).strip()
+                if code.isdigit() and len(code) == 6:
+                    # 取消未执行的防抖定时器
+                    if debounce_timer[0] is not None:
+                        try: top.after_cancel(debounce_timer[0])
+                        except Exception: pass
+                    # 50ms 轻量防抖调度，杜绝快速按住上下键时的 GIL 争用与重入
+                    debounce_timer[0] = top.after(50, lambda c=code: _do_linkage(c))
+            except Exception as e:
+                logger.debug(f"_on_stock_select parse error: {e}")
+
+        for target_t in (tree1, tree2):
+            target_t.bind("<<TreeviewSelect>>", lambda e, t=target_t: _on_stock_select(e, t))
+
+        # Tab 3: 📋 组合公式与汇总概览
+        f3 = ttk.Frame(nb)
+        nb.add(f3, text="📋 组合公式与概览")
+        txt_frame = ttk.Frame(f3, padding=8)
+        txt_frame.pack(fill="both", expand=True)
+        txt = tk.Text(txt_frame, font=("Consolas", 10), wrap="word")
+        txt.pack(fill="both", expand=True)
+        
+        summary_lines = [
+            f"=== 📊 多选策略组合回测概览 (共 {len(queries)} 条策略) ===",
+            f"• 样本股票总数: {len(df_target)} 只",
+            f"• 🌟 全中标的 (AND 交集): {len(all_inter)} 只",
+            f"• 📈 任意命中 (OR 并集): {len(all_union)} 只",
+            f"• ⚠️ 未全中标的 (差集/分歧): {len(not_all)} 只",
+            "",
+            "=== 🔍 各单条策略独立命中统计 ==="
+        ]
+        for i, q in enumerate(queries):
+            cnt = len(query_hits.get(i, set()))
+            summary_lines.append(f"  [Q{i+1}] 命中 {cnt} 只: {q}")
+        
+        summary_lines.extend([
+            "",
+            "=== 🔗 组合交集公式 (AND 全中) ===",
+            " and ".join([f"({q})" for q in queries]),
+            "",
+            "=== ➕ 组合并集公式 (OR 合并) ===",
+            " or ".join([f"({q})" for q in queries]),
+        ])
+        txt.insert("1.0", "\n".join(summary_lines))
+        txt.config(state="disabled")
 
     def on_delete_key(self, event):
         selected = self.tree.selection()
