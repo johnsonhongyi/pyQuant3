@@ -933,7 +933,8 @@ class TDXRealtimeFetcher:
             "30m": 2,
             "60m": 3,
             "day": 4,
-            "week": 5
+            "week": 5,
+            "month": 6
         }
         cat_code = cat_map.get(category, 0)
 
