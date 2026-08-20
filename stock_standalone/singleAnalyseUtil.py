@@ -784,6 +784,9 @@ if __name__ == '__main__':
                         if write_all_day_date == today_str:
                             print("\n[INIT] 检测到今日 (%s) 盘后收盘数据已处理完毕并持久化记忆 (write_all_day_date=%s)。" % (today_str, write_all_day_date))
                             print("[INIT] 当前处于非交易时段，进入 24*7 自动等待状态 (每 5 分钟呼吸打点)...", flush=True)
+                        elif not cct.get_trade_date_status():
+                            print("\n[INIT] 今日 (%s) 为非交易日/休市日，无需执行盘后数据处理。" % today_str)
+                            print("[INIT] 进入 24*7 自动等待状态 (每 5 分钟呼吸打点)...", flush=True)
 
                 # 盘中休眠控制
                 if is_work_time:
@@ -819,18 +822,15 @@ if __name__ == '__main__':
             else:
                 log.debug('into clean_duration:%s' % (int_time))
                 
-                # 检查是否需要执行盘后收盘写入与备份
+                # 检查是否需要执行盘后收盘写入与备份（仅交易日收盘 15:01 之后且当天未处理过时触发）
                 need_write = False
                 if cct.get_trade_date_status() and int_time > 1501:
-                    if write_all_day_date != today_str:
-                        need_write = True
-                elif not cct.get_trade_date_status():
                     if write_all_day_date != today_str:
                         need_write = True
 
                 if need_write:
                     # 如果在 15:01-15:05 之间，稍作等待收盘数据齐全
-                    if cct.get_trade_date_status() and 1501 < int_time < 1505:
+                    if 1501 < int_time < 1505:
                         print(".", end='', flush=True)
                         cct.sleep(cct.duration_sleep_time)
                     else:
@@ -842,12 +842,13 @@ if __name__ == '__main__':
                         # 执行 RamDisk 备份
                         if cct.isMac():
                             ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
-                            if cct.creation_date_duration(ramdisk_h5) >= 0:
+                            if os.path.exists(ramdisk_h5):
                                 os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
                                 time.sleep(1)
+                                print("saveRamdisk is OK")
                         else:
                             ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-                            if cct.get_trade_date_status() and cct.creation_date_duration(ramdisk_h5) > 0:
+                            if os.path.exists(ramdisk_h5):
                                 os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
                                 time.sleep(1)
                                 print("1-ramdisk_back is OK")
@@ -895,12 +896,13 @@ if __name__ == '__main__':
                 codew = stf.WriteCountFilter(top_temp, writecount='all')
                 if cct.isMac():
                     ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
-                    if cct.creation_date_duration(ramdisk_h5) >= 0:
+                    if os.path.exists(ramdisk_h5):
                         os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
                         time.sleep(1)
+                        print("saveRamdisk is OK")
                 else:
                     ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-                    if cct.creation_date_duration(ramdisk_h5) > 0:
+                    if os.path.exists(ramdisk_h5):
                         os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
                         time.sleep(1)
                         print("1-ramdisk_back is OK")
