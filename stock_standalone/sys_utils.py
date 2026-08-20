@@ -10,6 +10,48 @@ from JohnsonUtil import commonTips as cct
 # 获取或创建日志记录器
 logger = LoggerFactory.getLogger("instock_TK.Sys")
 
+def setup_qt_clean_environment():
+    """
+    配置干净稳定的 Qt 运行环境 (Windows HighDPI + DirectWrite 位图字体静默过滤)
+    1. 启用 HighDPI 缩放自适应与 PassThrough 四舍五入策略；
+    2. 静默过滤 Windows DirectWrite 枚举老旧位图字体 (.fon, 如 Fixedsys, Terminal, Modern, MS Sans Serif) 时产生的非致命警告与乱码；
+    3. 屏蔽底层字体回退探测的无用 debug/warning 日志。
+    """
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
+
+    font_logging_rules = (
+        "qt.qpa.fonts.warning=false;"
+        "qt.qpa.fonts.debug=false;"
+        "qt.text.font.warning=false;"
+        "qt.text.font.debug=false;"
+        "qt.qpa.fonts=false"
+    )
+    existing_rules = os.environ.get("QT_LOGGING_RULES", "")
+    if font_logging_rules not in existing_rules:
+        os.environ["QT_LOGGING_RULES"] = (existing_rules + ";" + font_logging_rules).strip(";")
+
+    try:
+        from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
+        def _qt_clean_message_handler(mode, context, message):
+            if any(k in message for k in ("DirectWrite", "CreateFontFaceFromHDC", "QFontDef", "Fixedsys", "Terminal")):
+                return
+            if mode == QtMsgType.QtWarningMsg:
+                sys.stderr.write(f"[Qt Warning] {message}\n")
+            elif mode == QtMsgType.QtCriticalMsg:
+                sys.stderr.write(f"[Qt Critical] {message}\n")
+            elif mode == QtMsgType.QtFatalMsg:
+                sys.stderr.write(f"[Qt Fatal] {message}\n")
+
+        qInstallMessageHandler(_qt_clean_message_handler)
+    except Exception:
+        pass
+
+# 模块导入时自动配置一次
+setup_qt_clean_environment()
+
+
 def assert_main_thread(tag=""):
     """
     检查当前是否在主线程执行。如果不在，抛出 RuntimeError。

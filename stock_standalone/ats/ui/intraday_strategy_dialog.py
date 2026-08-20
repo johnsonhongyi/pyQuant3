@@ -28,6 +28,12 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(_CUR_DIR))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+try:
+    from sys_utils import setup_qt_clean_environment
+    setup_qt_clean_environment()
+except Exception:
+    pass
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
