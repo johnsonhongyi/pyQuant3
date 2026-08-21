@@ -7,6 +7,7 @@ ats/intraday_strategy_engine.py — 单独分时交易策略与策略路由引�
 
 import os
 import json
+import shutil
 import logging
 import pandas as pd
 import numpy as np
@@ -239,7 +240,6 @@ class IntradayStrategyEngine:
                     os.rename(tmp_file, cache_file)
             except Exception:
                 shutil.move(tmp_file, cache_file)
-            return True
             return True
         except Exception as e:
             logger.error(f"❌ 保存分时策略持久化缓存异常: {e}")

@@ -327,14 +327,14 @@ class NewStockPanel(QWidget):
         self.preview_card = QGroupBox("📍 新股发行参数与分时阶梯档位推演 (Ladder Prediction)")
         self.preview_card.setStyleSheet("""
             QGroupBox {
-                background-color: #0b0f19;
+                background-color: #0b1120;
                 color: #38bdf8;
                 border: 1px solid #1e293b;
                 border-radius: 4px;
                 margin-top: 4px;
                 font-weight: bold;
                 padding: 6px;
-                font-size: 8.5pt;
+                font-size: 9pt;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -353,7 +353,8 @@ class NewStockPanel(QWidget):
         self.ladder_labels = []
         for i in range(5):
             lbl = QLabel(f"档位 +{(i+1)*100}%: --")
-            lbl.setStyleSheet("background-color: #0f172a; color: #f8fafc; padding: 2px 4px; border: 1px solid #334155; border-radius: 2px; font-size: 8.5pt;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("background-color: #111827; color: #cbd5e1; padding: 3px 6px; border: 1px solid #1e293b; border-radius: 3px; font-size: 8.5pt; font-family: Consolas, 'Microsoft YaHei';")
             preview_layout.addWidget(lbl, 1, i)
             self.ladder_labels.append(lbl)
 
@@ -450,16 +451,24 @@ class NewStockPanel(QWidget):
     def _on_data_ready(self, df: pd.DataFrame):
         self._is_fetching = False
         if df is not None and not df.empty:
-            # 基础数据回填，保留已计算好的 IPC / 指标字段
+            # 基础数据回填，严格保留已计算好的 IPC / 指标字段
             if not self.df_data.empty:
+                old_map = {str(r["code"]).zfill(6): r for _, r in self.df_data.iterrows()}
+                flds_to_keep = ("dff", "rank", "dff2", "dff3", "rs", "resonance") + tuple(self.extra_cols)
+                
+                # 先确保 df 中具有这些列（初始化为 NaN）
+                for fld in flds_to_keep:
+                    if fld not in df.columns:
+                        df[fld] = np.nan
+
                 for idx, row in df.iterrows():
                     c = str(row["code"]).zfill(6)
-                    match = self.df_data[self.df_data["code"] == c]
-                    if not match.empty:
-                        old_r = match.iloc[0]
-                        for fld in ("dff", "rank", "dff2", "dff3", "rs", "resonance") + tuple(self.extra_cols):
-                            if fld in old_r and fld not in row:
-                                df.at[idx, fld] = old_r[fld]
+                    if c in old_map:
+                        old_r = old_map[c]
+                        for fld in flds_to_keep:
+                            old_val = old_r.get(fld)
+                            if old_val is not None and not pd.isna(old_val):
+                                df.at[idx, fld] = old_val
 
             self.df_data = df
 
@@ -523,14 +532,22 @@ class NewStockPanel(QWidget):
         if self.df_data.empty:
             return
 
+        ipc_index_set = set(str(k) for k in df_ipc.index)
+        has_code_col = 'code' in df_ipc.columns
+
         updated_any = False
         for idx, row in self.df_data.iterrows():
             code = str(row["code"]).zfill(6)
             ipc_row = None
-            if code in df_ipc.index:
-                ipc_row = df_ipc.loc[code]
-            elif code.lstrip('0') in df_ipc.index:
-                ipc_row = df_ipc.loc[code.lstrip('0')]
+            for key in (code, code.lstrip('0'), f"sh{code}", f"sz{code}", f"bj{code}"):
+                if key in ipc_index_set:
+                    ipc_row = df_ipc.loc[key]
+                    break
+            
+            if ipc_row is None and has_code_col:
+                matched = df_ipc[df_ipc['code'].astype(str).str.zfill(6) == code]
+                if not matched.empty:
+                    ipc_row = matched.iloc[0]
 
             if ipc_row is not None:
                 if hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
@@ -540,12 +557,20 @@ class NewStockPanel(QWidget):
                 if p > 0:
                     self.df_data.at[idx, "price"] = p
                     
-                    # 1. 涨跌幅
+                    # 1. 涨跌幅（针对已上市/次新股票严格以昨收为准，绝不误算为发行价累计涨幅）
                     raw_pct = ipc_row.get("percent", ipc_row.get("pct"))
                     pct_val = clean_num(raw_pct, default=float('nan'))
                     if math.isnan(pct_val):
-                        issue_p = clean_num(row.get("issue_price", 0.0))
-                        pct_val = round((p - issue_p) / issue_p * 100.0, 2) if issue_p > 0 else 0.0
+                        last_c = clean_num(ipc_row.get("last_close", ipc_row.get("last_c", 0.0)))
+                        if last_c > 0:
+                            pct_val = round((p - last_c) / last_c * 100.0, 2)
+                        else:
+                            st = str(row.get("status", ""))
+                            if "首日" in st or "N" in st:
+                                issue_p = clean_num(row.get("issue_price", 0.0))
+                                pct_val = round((p - issue_p) / issue_p * 100.0, 2) if issue_p > 0 else 0.0
+                            else:
+                                pct_val = 0.0
                     self.df_data.at[idx, "pct"] = pct_val
 
                     # 2. 换手率
@@ -565,7 +590,7 @@ class NewStockPanel(QWidget):
 
                     # 4. 对齐重点关注核心指标: DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振
                     dff_raw = ipc_row.get("dff", ipc_row.get("dfi", ipc_row.get("dff_d")))
-                    if dff_raw is not None:
+                    if dff_raw is not None and not pd.isna(dff_raw):
                         self.df_data.at[idx, "dff"] = clean_num(dff_raw, default=0.0)
 
                     rank_raw = ipc_row.get("Rank", ipc_row.get("rank", ipc_row.get("market_rank")))
@@ -573,22 +598,39 @@ class NewStockPanel(QWidget):
                         self.df_data.at[idx, "rank"] = rank_raw
 
                     dff2_raw = ipc_row.get("dff2", ipc_row.get("dff_w"))
-                    if dff2_raw is not None:
+                    if dff2_raw is not None and not pd.isna(dff2_raw):
                         self.df_data.at[idx, "dff2"] = clean_num(dff2_raw, default=0.0)
 
                     dff3_raw = ipc_row.get("dff3", ipc_row.get("dff_m"))
-                    if dff3_raw is not None:
+                    if dff3_raw is not None and not pd.isna(dff3_raw):
                         self.df_data.at[idx, "dff3"] = clean_num(dff3_raw, default=0.0)
 
                     rs_raw = ipc_row.get("rs", ipc_row.get("rs_val", ipc_row.get("deviation")))
-                    if rs_raw is not None:
+                    if rs_raw is not None and not pd.isna(rs_raw):
                         self.df_data.at[idx, "rs"] = clean_num(rs_raw, default=0.0)
 
                     res_raw = ipc_row.get("resonance", ipc_row.get("market_resonance", ipc_row.get("sync_status")))
                     if res_raw is not None and not pd.isna(res_raw):
                         self.df_data.at[idx, "resonance"] = str(res_raw)
 
-                    # 5. 提取动态自定义列 (ats_col)
+                    # 5. 同步市值字段 (流通市值 & 总市值，单位: 亿元)
+                    fmv_raw = ipc_row.get("nmc", ipc_row.get("float_mv", ipc_row.get("float_mv_yi")))
+                    if fmv_raw is not None and not pd.isna(fmv_raw):
+                        fmv_num = clean_num(fmv_raw)
+                        if fmv_num > 1e4:
+                            fmv_num = round(fmv_num / 1e8, 2)
+                        if fmv_num > 0:
+                            self.df_data.at[idx, "float_mv_yi"] = fmv_num
+
+                    tmv_raw = ipc_row.get("mktcap", ipc_row.get("total_mv", ipc_row.get("total_mv_yi")))
+                    if tmv_raw is not None and not pd.isna(tmv_raw):
+                        tmv_num = clean_num(tmv_raw)
+                        if tmv_num > 1e4:
+                            tmv_num = round(tmv_num / 1e8, 2)
+                        if tmv_num > 0:
+                            self.df_data.at[idx, "total_mv_yi"] = tmv_num
+
+                    # 6. 提取动态自定义列 (ats_col)
                     for c_name in self.extra_cols:
                         for k in (c_name, c_name.lower(), c_name.upper()):
                             if k in ipc_row:
@@ -599,6 +641,11 @@ class NewStockPanel(QWidget):
 
         if updated_any:
             self._render_table()
+            if self.selected_code:
+                match = self.df_data[self.df_data["code"] == self.selected_code]
+                if not match.empty:
+                    self.selected_row_data = match.iloc[0].to_dict()
+                    self._update_preview_card(self.selected_row_data)
 
     def _apply_filter(self):
         """应用分类筛选和关键词过滤"""
@@ -729,8 +776,11 @@ class NewStockPanel(QWidget):
         if self.table.rowCount() != target_row_count:
             self.table.setRowCount(target_row_count)
 
-        bold_font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
-        consolas_bold = QFont("Consolas", 9, QFont.Weight.Bold)
+        # 统一规范的字体系统（等宽数字 + 雅黑文本，杜绝忽大忽小与基线参差不齐）
+        text_font = QFont("Microsoft YaHei", 9)
+        num_font = QFont("Consolas", 9)
+        bold_text_font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
+        bold_num_font = QFont("Consolas", 9, QFont.Weight.Bold)
         sh_pct = self.last_sh_pct
 
         for row_idx, (_, row) in enumerate(df_filtered.iterrows()):
@@ -763,9 +813,9 @@ class NewStockPanel(QWidget):
             elif "次新" in status:
                 status_short = "次新"
 
-            # 0: 代码 (重点关注显示亮绿加粗)
+            # 0: 代码 (等宽字体)
             code_col = "#00ff88" if is_fav else "#38bdf8"
-            self._set_or_update_item(row_idx, 0, code, color=code_col, font=bold_font if is_fav else None, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 0, code, color=code_col, font=bold_num_font if is_fav else num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 1: 名称 (重点关注显示 ⭐ + 亮金加粗)
             display_name = f"⭐ {name}" if is_fav else name
@@ -777,46 +827,45 @@ class NewStockPanel(QWidget):
                 name_color = "#fbbf24"
             else:
                 name_color = "#ffffff"
-            self._set_or_update_item(row_idx, 1, display_name, color=name_color, font=bold_font, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 1, display_name, color=name_color, font=bold_text_font if (is_fav or name.startswith(("N", "C"))) else text_font, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 2: 状态
             status_color = "#f43f5e" if "首日" in status_short else ("#fbbf24" if "前5日" in status_short else ("#a78bfa" if "待上市" in status_short else "#94a3b8"))
-            self._set_or_update_item(row_idx, 2, status_short, color=status_color, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 2, status_short, color=status_color, font=bold_text_font if ("首日" in status_short or "前5日" in status_short) else text_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 3: 上市日
-            self._set_or_update_item(row_idx, 3, listing_d, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 3, listing_d, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 4: 申购日
-            self._set_or_update_item(row_idx, 4, apply_d, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 4, apply_d, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 5: 发行价
             issue_str = f"{issue_p:.2f}" if issue_p > 0 else "--"
-            self._set_or_update_item(row_idx, 5, issue_str, color="#cbd5e1", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 5, issue_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 6: 现价 & 7: 涨跌%
             p_display = f"{price:.2f}" if price > 0 else "--"
             pct_str = f"{pct:+.2f}%" if price > 0 else "--"
             p_color = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#94a3b8")
-            self._set_or_update_item(row_idx, 6, p_display, color=p_color, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
-            self._set_or_update_item(row_idx, 7, pct_str, color=p_color, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 6, p_display, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 7, pct_str, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
-            # 8: 换手%
+            # 8: 换手% (字体粗细字号完全一致，通过专业色温区分活跃度)
             to_str = f"{turnover:.2f}%" if (0.0 < turnover <= 100.0) else "--"
             to_color = "#f43f5e" if turnover >= 70.0 else ("#fbbf24" if turnover >= 50.0 else "#94a3b8")
-            to_font = consolas_bold if turnover >= 70.0 else None
-            self._set_or_update_item(row_idx, 8, to_str, color=to_color, font=to_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 8, to_str, color=to_color, font=bold_num_font if turnover >= 50.0 else num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 9: 流通(亿)
             fmv_str = f"{float_mv:.2f}" if float_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 9, fmv_str, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 9, fmv_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 10: 总值(亿)
             tmv_str = f"{total_mv:.2f}" if total_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 10, tmv_str, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 10, tmv_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 11: 成交(亿)
             amt_str = f"{amt:.2f}" if amt > 0 else "--"
-            self._set_or_update_item(row_idx, 11, amt_str, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 11, amt_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # ── 12~17: 对齐重点关注核心指标列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) ──
             # 12: DFF (日线动量强度，带降级计算保护)
@@ -830,7 +879,7 @@ class NewStockPanel(QWidget):
             else:
                 dff_str = "--"
                 dff_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 12, dff_str, color=dff_col, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 12, dff_str, color=dff_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 13: Rank (全市场综合排名，带降级排序保护)
             rank_val = row.get("rank", row.get("Rank", None))
@@ -843,7 +892,7 @@ class NewStockPanel(QWidget):
             else:
                 rank_str = str(row_idx + 1) if price > 0 else "--"
                 rank_col = "#38bdf8" if price > 0 else "#94a3b8"
-            self._set_or_update_item(row_idx, 13, rank_str, color=rank_col, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 13, rank_str, color=rank_col, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 14: DFF2 (周线强度)
             dff2_val = clean_num(row.get("dff2", row.get("dff_w", None)), default=float('nan'))
@@ -855,7 +904,7 @@ class NewStockPanel(QWidget):
             else:
                 dff2_str = "--"
                 dff2_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 14, dff2_str, color=dff2_col, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 14, dff2_str, color=dff2_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 15: DFF3 (月线/3日强度)
             dff3_val = clean_num(row.get("dff3", row.get("dff_m", None)), default=float('nan'))
@@ -867,7 +916,7 @@ class NewStockPanel(QWidget):
             else:
                 dff3_str = "--"
                 dff3_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 15, dff3_str, color=dff3_col, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 15, dff3_str, color=dff3_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 16: 大盘偏离 (rs = pct - sh_pct)
             rs_val = clean_num(row.get("rs", row.get("rs_val", row.get("deviation", None))), default=float('nan'))
@@ -880,7 +929,7 @@ class NewStockPanel(QWidget):
             else:
                 rs_str = "--"
                 rs_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 16, rs_str, color=rs_col, font=consolas_bold, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 16, rs_str, color=rs_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 17: 大盘共振 (全 ATS 统一对齐判定逻辑)
             res_val = str(row.get("resonance", row.get("market_resonance", "--"))).strip()
@@ -903,13 +952,13 @@ class NewStockPanel(QWidget):
             
             if "逆市" in res_val or "共振" in res_val or "抗跌" in res_val:
                 res_col = "#ffd700"
-                res_font = bold_font
+                res_font = bold_text_font
             elif "走弱" in res_val or "破位" in res_val:
                 res_col = "#f87171"
-                res_font = None
+                res_font = text_font
             else:
                 res_col = "#94a3b8"
-                res_font = None
+                res_font = text_font
             self._set_or_update_item(row_idx, 17, res_val, color=res_col, font=res_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # ── 动态自定义列 (ats_col) ──
@@ -935,13 +984,13 @@ class NewStockPanel(QWidget):
                 else:
                     c_str = "--"
                     c_col = "#94a3b8"
-                self._set_or_update_item(row_idx, col_offset, c_str, color=c_col, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+                self._set_or_update_item(row_idx, col_offset, c_str, color=c_col, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
                 col_offset += 1
 
             # 最后一列: 阶梯策略
             strat_txt = "✅ 已配" if has_strat else "⚪ 未配"
             strat_color = "#4ade80" if has_strat else "#64748b"
-            self._set_or_update_item(row_idx, col_offset, strat_txt, color=strat_color, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, col_offset, strat_txt, color=strat_color, font=text_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
         # ── 4. 应用并保持持久化的排序列和方向 ──
         self.table.setSortingEnabled(True)
@@ -985,7 +1034,7 @@ class NewStockPanel(QWidget):
                 logger.debug(f"link_stock 异常: {e}")
 
     def _on_cell_double_clicked(self, row: int, col: int):
-        """双击单元格：直接调出分时阶梯独立盯盘窗口"""
+        """双击单元格：联动选中并通知主窗口打开详情窗口（不自动调起阶梯盯盘）"""
         item_code = self.table.item(row, 0)
         item_name = self.table.item(row, 1)
         if item_code:
@@ -993,10 +1042,9 @@ class NewStockPanel(QWidget):
             name = item_name.text().replace("⭐ ", "").strip() if item_name else ""
             self._on_stock_activated(code, name)
             self.stock_double_clicked.emit(code, name)
-            self._on_open_ladder_clicked()
 
     def _update_preview_card(self, row_data: Dict[str, Any]):
-        """根据选中标的数据更新底部阶梯推演卡片"""
+        """根据选中标的数据更新底部阶梯推演卡片，并根据当前价格自动点亮对应档位与实际盈利"""
         if not row_data:
             return
 
@@ -1014,14 +1062,69 @@ class NewStockPanel(QWidget):
             f"【{name} ({code})】 发行价: {issue_p:.2f}元 | 上市: {listing_d} | 发行流通市值: {float_mv:.2f}亿"
         )
 
-        sign_shares = 100 if code.startswith(("920", "83", "87", "88", "43")) else 500
+        sign_shares = 500  # 统一量化标准：单签均按 500 股计算收益
         gains = [100.0, 200.0, 300.0, 400.0, 500.0]
 
+        def _fmt_profit(val: float) -> str:
+            """格式化收益金额：超过 1 万元的转为保留 2 位小数的万格式 (如 盈利38.03万)，低于 1 万元显示具体元 (如 盈利4,420元)"""
+            abs_v = abs(val)
+            if abs_v >= 10000.0:
+                wan = val / 10000.0
+                return f"盈利{wan:.2f}万"
+            else:
+                return f"盈利{val:,.0f}元"
+
+        # 计算当前相对于发行价的累计涨幅与实际单签盈利
+        if issue_p > 0 and curr_p > 0:
+            cum_pct = (curr_p - issue_p) / issue_p * 100.0
+            actual_profit = round((curr_p - issue_p) * sign_shares, 2)
+
+            # 档位判定：
+            # 低于 100% 或 100%~199.99% 落在 100 档 (index 0)；
+            # 200%~299.99% 落在 200 档 (index 1)；
+            # 300%~399.99% 落在 300 档 (index 2)；
+            # 400%~499.99% 落在 400 档 (index 3)；
+            # 超过 500% 落在 500 档 (index 4)。
+            if cum_pct < 200.0:
+                active_idx = 0
+            elif cum_pct < 300.0:
+                active_idx = 1
+            elif cum_pct < 400.0:
+                active_idx = 2
+            elif cum_pct < 500.0:
+                active_idx = 3
+            else:
+                active_idx = 4
+        else:
+            cum_pct = 0.0
+            actual_profit = 0.0
+            active_idx = -1
+
+        # 样式定义：优雅量化暗色主题，高对比易读且舒适直观
+        normal_style = (
+            "background-color: #111827; color: #cbd5e1; padding: 3px 6px; "
+            "border: 1px solid #1e293b; border-radius: 3px; font-size: 8.5pt; font-family: Consolas, 'Microsoft YaHei';"
+        )
+        highlight_style = (
+            "background-color: #581c1c; color: #ffffff; padding: 3px 6px; "
+            "border: 1px solid #ef4444; border-radius: 3px; font-size: 8.5pt; font-weight: bold; font-family: Consolas, 'Microsoft YaHei';"
+        )
+
         for i, gain in enumerate(gains):
+            if i >= len(self.ladder_labels):
+                break
             target_p = round(issue_p * (1.0 + gain / 100.0), 2)
-            profit = round((target_p - issue_p) * sign_shares, 2)
-            if i < len(self.ladder_labels):
-                self.ladder_labels[i].setText(f"+{int(gain)}%: {target_p:.2f}元 (赚{profit:,.0f}元)")
+            est_profit = round((target_p - issue_p) * sign_shares, 2)
+
+            if i == active_idx:
+                # 所在档位：显示取整实际比例与实际盈利金额，并以纯净白字+深绯红高亮呈现
+                int_pct = int(cum_pct) if cum_pct >= 0 else int(round(cum_pct))
+                self.ladder_labels[i].setText(f"+{int_pct}%: {curr_p:.2f}元 ({_fmt_profit(actual_profit)})")
+                self.ladder_labels[i].setStyleSheet(highlight_style)
+            else:
+                # 普通档位：显示标准预估
+                self.ladder_labels[i].setText(f"+{int(gain)}%: {target_p:.2f}元 ({_fmt_profit(est_profit)})")
+                self.ladder_labels[i].setStyleSheet(normal_style)
 
         # 临停监控
         base_p = curr_p if curr_p > 0 else issue_p
