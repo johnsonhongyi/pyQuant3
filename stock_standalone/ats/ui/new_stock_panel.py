@@ -553,67 +553,67 @@ class NewStockPanel(QWidget):
                 if hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
                     ipc_row = ipc_row.iloc[0]
 
-                p = clean_num(ipc_row.get("close", ipc_row.get("price", ipc_row.get("now", 0.0))))
-                if p > 0:
-                    self.df_data.at[idx, "price"] = p
-                    
-                    # 1. 涨跌幅（针对已上市/次新股票严格以昨收为准，绝不误算为发行价累计涨幅）
-                    raw_pct = ipc_row.get("percent", ipc_row.get("pct"))
-                    pct_val = clean_num(raw_pct, default=float('nan'))
-                    if math.isnan(pct_val):
-                        last_c = clean_num(ipc_row.get("last_close", ipc_row.get("last_c", 0.0)))
-                        if last_c > 0:
-                            pct_val = round((p - last_c) / last_c * 100.0, 2)
-                        else:
-                            st = str(row.get("status", ""))
-                            if "首日" in st or "N" in st:
-                                issue_p = clean_num(row.get("issue_price", 0.0))
-                                pct_val = round((p - issue_p) / issue_p * 100.0, 2) if issue_p > 0 else 0.0
-                            else:
-                                pct_val = 0.0
-                    self.df_data.at[idx, "pct"] = pct_val
+                # ── 新股行情权威性原则 ──
+                # 新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场指标，绝不覆写已由 TDX 算好的真实价格与涨跌幅！
+                local_p = clean_num(self.df_data.at[idx, "price"], default=0.0)
+                local_pct = clean_num(self.df_data.at[idx, "pct"], default=0.0)
 
-                    # 2. 换手率
+                p = clean_num(ipc_row.get("close", ipc_row.get("price", ipc_row.get("now", 0.0))))
+                # 仅当本地尚无价格时，才允许从 IPC 降级补充
+                if local_p <= 0 and p > 0:
+                    self.df_data.at[idx, "price"] = p
+                    raw_pct = ipc_row.get("percent", ipc_row.get("pct", ipc_row.get("ratio", ipc_row.get("changepercent"))))
+                    pct_val = clean_num(raw_pct, default=float('nan'))
+                    if not math.isnan(pct_val) and pct_val != 0.0:
+                        self.df_data.at[idx, "pct"] = pct_val
+
+                # 换手率：若本地无换手率且 IPC 有有效换手率时补充
+                local_to = clean_num(self.df_data.at[idx, "turnover"], default=0.0)
+                if local_to <= 0:
                     to_val = ipc_row.get("turnoverrate", ipc_row.get("turnover_ratio", ipc_row.get("hsl")))
                     if to_val is not None:
                         to_clean = clean_num(to_val, default=0.0)
                         if 0.0 < to_clean <= 100.0:
                             self.df_data.at[idx, "turnover"] = to_clean
 
-                    # 3. 成交额
+                # 成交额：若本地无成交额且 IPC 有有效成交额时补充
+                local_amt = clean_num(self.df_data.at[idx, "amount_yi"], default=0.0)
+                if local_amt <= 0:
                     amt_val = ipc_row.get("amount", ipc_row.get("turnover", 0.0))
                     amt_clean = clean_num(amt_val, default=0.0)
-                    if amt_clean > 100000:  # 单位为元
+                    if amt_clean > 100000:
                         self.df_data.at[idx, "amount_yi"] = round(amt_clean / 1e8, 2)
                     elif amt_clean > 0:
                         self.df_data.at[idx, "amount_yi"] = round(amt_clean, 2)
 
-                    # 4. 对齐重点关注核心指标: DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振
-                    dff_raw = ipc_row.get("dff", ipc_row.get("dfi", ipc_row.get("dff_d")))
-                    if dff_raw is not None and not pd.isna(dff_raw):
-                        self.df_data.at[idx, "dff"] = clean_num(dff_raw, default=0.0)
+                # 4. 对齐重点关注核心指标: DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振
+                dff_raw = ipc_row.get("dff", ipc_row.get("dfi", ipc_row.get("dff_d")))
+                if dff_raw is not None and not pd.isna(dff_raw):
+                    self.df_data.at[idx, "dff"] = clean_num(dff_raw, default=0.0)
 
-                    rank_raw = ipc_row.get("Rank", ipc_row.get("rank", ipc_row.get("market_rank")))
-                    if rank_raw is not None and not pd.isna(rank_raw):
-                        self.df_data.at[idx, "rank"] = rank_raw
+                rank_raw = ipc_row.get("Rank", ipc_row.get("rank", ipc_row.get("market_rank")))
+                if rank_raw is not None and not pd.isna(rank_raw):
+                    self.df_data.at[idx, "rank"] = rank_raw
 
-                    dff2_raw = ipc_row.get("dff2", ipc_row.get("dff_w"))
-                    if dff2_raw is not None and not pd.isna(dff2_raw):
-                        self.df_data.at[idx, "dff2"] = clean_num(dff2_raw, default=0.0)
+                dff2_raw = ipc_row.get("dff2", ipc_row.get("dff_w"))
+                if dff2_raw is not None and not pd.isna(dff2_raw):
+                    self.df_data.at[idx, "dff2"] = clean_num(dff2_raw, default=0.0)
 
-                    dff3_raw = ipc_row.get("dff3", ipc_row.get("dff_m"))
-                    if dff3_raw is not None and not pd.isna(dff3_raw):
-                        self.df_data.at[idx, "dff3"] = clean_num(dff3_raw, default=0.0)
+                dff3_raw = ipc_row.get("dff3", ipc_row.get("dff_m"))
+                if dff3_raw is not None and not pd.isna(dff3_raw):
+                    self.df_data.at[idx, "dff3"] = clean_num(dff3_raw, default=0.0)
 
-                    rs_raw = ipc_row.get("rs", ipc_row.get("rs_val", ipc_row.get("deviation")))
-                    if rs_raw is not None and not pd.isna(rs_raw):
-                        self.df_data.at[idx, "rs"] = clean_num(rs_raw, default=0.0)
+                rs_raw = ipc_row.get("rs", ipc_row.get("rs_val", ipc_row.get("deviation")))
+                if rs_raw is not None and not pd.isna(rs_raw):
+                    self.df_data.at[idx, "rs"] = clean_num(rs_raw, default=0.0)
 
-                    res_raw = ipc_row.get("resonance", ipc_row.get("market_resonance", ipc_row.get("sync_status")))
-                    if res_raw is not None and not pd.isna(res_raw):
-                        self.df_data.at[idx, "resonance"] = str(res_raw)
+                res_raw = ipc_row.get("resonance", ipc_row.get("market_resonance", ipc_row.get("sync_status")))
+                if res_raw is not None and not pd.isna(res_raw):
+                    self.df_data.at[idx, "resonance"] = str(res_raw)
 
-                    # 5. 同步市值字段 (流通市值 & 总市值，单位: 亿元)
+                # 5. 同步市值字段 (若本地无市值时从 IPC 补充)
+                local_fmv = clean_num(self.df_data.at[idx, "float_mv_yi"], default=0.0)
+                if local_fmv <= 0:
                     fmv_raw = ipc_row.get("nmc", ipc_row.get("float_mv", ipc_row.get("float_mv_yi")))
                     if fmv_raw is not None and not pd.isna(fmv_raw):
                         fmv_num = clean_num(fmv_raw)
@@ -622,6 +622,8 @@ class NewStockPanel(QWidget):
                         if fmv_num > 0:
                             self.df_data.at[idx, "float_mv_yi"] = fmv_num
 
+                local_tmv = clean_num(self.df_data.at[idx, "total_mv_yi"], default=0.0)
+                if local_tmv <= 0:
                     tmv_raw = ipc_row.get("mktcap", ipc_row.get("total_mv", ipc_row.get("total_mv_yi")))
                     if tmv_raw is not None and not pd.isna(tmv_raw):
                         tmv_num = clean_num(tmv_raw)
@@ -630,16 +632,16 @@ class NewStockPanel(QWidget):
                         if tmv_num > 0:
                             self.df_data.at[idx, "total_mv_yi"] = tmv_num
 
-                    # 6. 提取动态自定义列 (ats_col)
-                    for c_name in self.extra_cols:
-                        for k in (c_name, c_name.lower(), c_name.upper()):
-                            if k in ipc_row:
-                                self.df_data.at[idx, c_name] = ipc_row.get(k)
-                                break
+                # 6. 提取动态自定义列 (ats_col)
+                for c_name in self.extra_cols:
+                    for k in (c_name, c_name.lower(), c_name.upper()):
+                        if k in ipc_row:
+                            self.df_data.at[idx, c_name] = ipc_row.get(k)
+                            break
 
-                    updated_any = True
+                updated_any = True
 
-        if updated_any:
+        if updated_any or not self.df_data.empty:
             self._render_table()
             if self.selected_code:
                 match = self.df_data[self.df_data["code"] == self.selected_code]
@@ -834,10 +836,10 @@ class NewStockPanel(QWidget):
             self._set_or_update_item(row_idx, 2, status_short, color=status_color, font=bold_text_font if ("首日" in status_short or "前5日" in status_short) else text_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 3: 上市日
-            self._set_or_update_item(row_idx, 3, listing_d, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 3, listing_d, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 4: 申购日
-            self._set_or_update_item(row_idx, 4, apply_d, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 4, apply_d, color="#94a3b8", font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 5: 发行价
             issue_str = f"{issue_p:.2f}" if issue_p > 0 else "--"
@@ -857,15 +859,15 @@ class NewStockPanel(QWidget):
 
             # 9: 流通(亿)
             fmv_str = f"{float_mv:.2f}" if float_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 9, fmv_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 9, fmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 10: 总值(亿)
             tmv_str = f"{total_mv:.2f}" if total_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 10, tmv_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 10, tmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # 11: 成交(亿)
             amt_str = f"{amt:.2f}" if amt > 0 else "--"
-            self._set_or_update_item(row_idx, 11, amt_str, font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
+            self._set_or_update_item(row_idx, 11, amt_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=is_fav)
 
             # ── 12~17: 对齐重点关注核心指标列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) ──
             # 12: DFF (日线动量强度，带降级计算保护)
