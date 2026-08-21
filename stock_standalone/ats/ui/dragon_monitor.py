@@ -155,22 +155,16 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.setWindowFlags(flags)
         
         # Load window position and size
-        if restore_state is None and os.path.exists(WINDOW_CONFIG_FILE):
-            try:
-                with _CONFIG_FILE_LOCK:
-                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        restore_state = data.get("dragon_leader_monitor_dialog", {})
-            except Exception:
-                restore_state = None
+        if restore_state is None:
+            from ats.ui.styles import load_config_node
+            restore_state = load_config_node("dragon_leader_monitor_dialog")
 
-        if restore_state:
+        if restore_state and isinstance(restore_state, dict):
             try:
-                scale = self._get_dpi_scale_factor()
-                rx = int(restore_state.get("x", 100) * scale)
-                ry = int(restore_state.get("y", 100) * scale)
-                rw = int(restore_state.get("width", 800) * scale)
-                rh = int(restore_state.get("height", 500) * scale)
+                rx = int(restore_state.get("x", 100))
+                ry = int(restore_state.get("y", 100))
+                rw = max(350, int(restore_state.get("width", 800)))
+                rh = max(250, int(restore_state.get("height", 500)))
                 
                 from gui_utils import clamp_window_to_screens
                 rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
@@ -182,7 +176,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 if is_hidden and self.anchor_edge:
                     self.is_hidden_state = True
                     strip_size = 5
-                    screen = self.screen() or QApplication.primaryScreen()
+                    from PyQt6.QtCore import QPoint
+                    screen = QApplication.screenAt(QPoint(rx, ry)) or self.screen() or QApplication.primaryScreen()
                     screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
                     
                     if self.anchor_edge == "left":
@@ -391,12 +386,11 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
     def _save_window_states(self, is_open=None) -> None:
         try:
-            scale = self._get_dpi_scale_factor()
             geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
-            width = max(130, int(geom.width() / scale))
-            height = max(150, int(geom.height() / scale))
-            x = int(geom.x() / scale)
-            y = int(geom.y() / scale)
+            width = max(350, int(geom.width()))
+            height = max(250, int(geom.height()))
+            x = int(geom.x())
+            y = int(geom.y())
             
             if is_open is None:
                 is_open = self.isVisible() or getattr(self, 'is_hidden_state', False)

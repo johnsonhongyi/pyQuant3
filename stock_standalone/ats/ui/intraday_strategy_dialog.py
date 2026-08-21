@@ -1570,6 +1570,7 @@ class SBCIntradayChartDialog(QWidget):
         self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
         self.setMinimumSize(320, 180) # 💡 极度紧凑的最小窗口尺寸保护
         self.setStyleSheet("background-color: #101018; color: #ffffff;")
+        self._unmaximized_size = (680, 420)  # 💡 维护未最大化前的真实标准尺寸，绝不被最大化污染
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -1760,13 +1761,35 @@ class SBCIntradayChartDialog(QWidget):
         return 1280, 720
 
     def _get_effective_normal_geometry(self) -> Optional[dict]:
-        """获取有效的正常窗口尺寸与坐标 (最大化状态下提取恢复尺寸 normalGeometry，绝不记忆最大化全屏尺寸)"""
+        """获取有效的正常窗口尺寸与坐标 (最大化状态下严格提取恢复尺寸 _unmaximized_size，绝不记忆最大化全屏或2/3截断尺寸)"""
         if self.isMinimized() or getattr(self, "_in_snap_action", False):
             return None
 
-        if self.isMaximized():
-            # 💡 最大化状态下，取恢复窗口尺寸 normalGeometry()
-            geo = self.normalGeometry()
+        if self.isMaximized() or self.isFullScreen():
+            # 💡 最大化或全屏状态下，严格提取未最大化前的真实尺寸 _unmaximized_size，绝不使用全屏或 2/3 截断尺寸！
+            uw, uh = 680, 420
+            if hasattr(self, "_unmaximized_size") and isinstance(self._unmaximized_size, (tuple, list)):
+                uw, uh = self._unmaximized_size
+            elif SBCIntradayChartDialog._global_sbc_size:
+                gw, gh = SBCIntradayChartDialog._global_sbc_size
+                if gw < 1000 and gh < 650:
+                    uw, uh = gw, gh
+            
+            # 位置提取 normalGeometry 或 100, 100
+            nx, ny = 100, 100
+            try:
+                ng = self.normalGeometry()
+                if ng and ng.isValid() and ng.width() > 0:
+                    nx, ny = ng.x(), ng.y()
+            except Exception:
+                pass
+            return {
+                "x": nx,
+                "y": ny,
+                "width": max(320, min(uw, 900)),
+                "height": max(180, min(uh, 600))
+            }
+
         elif getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None):
             geo = self.normal_geometry
         else:
@@ -1788,12 +1811,17 @@ class SBCIntradayChartDialog(QWidget):
 
     def _save_sbc_geometry(self):
         """【💾 内存缓存与防抖写盘】拖拽/缩放仅更新内存中的 Geometry 字典并触发防抖写盘"""
+        # [CRITICAL] 最大化、全屏、最小化状态下绝对严禁覆盖保存 normal geometry！
+        if self.isMaximized() or self.isFullScreen() or self.isMinimized():
+            return
         geo_dict = self._get_effective_normal_geometry()
         if not geo_dict:
             return
 
         self._memory_geo_dict = geo_dict
-        SBCIntradayChartDialog._global_sbc_size = (geo_dict["width"], geo_dict["height"])
+        if geo_dict["width"] < 1000 and geo_dict["height"] < 650:
+            SBCIntradayChartDialog._global_sbc_size = (geo_dict["width"], geo_dict["height"])
+            self._unmaximized_size = (geo_dict["width"], geo_dict["height"])
         SBCIntradayChartDialog._global_sbc_geo = dict(self._memory_geo_dict)
 
         if hasattr(self, '_geo_save_timer'):
@@ -1905,7 +1933,9 @@ class SBCIntradayChartDialog(QWidget):
 
             # 0. 优先从类内存变量读取最新尺寸
             if SBCIntradayChartDialog._global_sbc_size:
-                target_w, target_h = SBCIntradayChartDialog._global_sbc_size
+                gw, gh = SBCIntradayChartDialog._global_sbc_size
+                if gw < 1000 and gh < 650:
+                    target_w, target_h = gw, gh
 
             # 1. 优先读取 JSON 配置文件
             cfg_path = _get_sbc_layout_cfg_path()
@@ -1916,16 +1946,20 @@ class SBCIntradayChartDialog(QWidget):
                     
                     if "sbc_window_size" in data and isinstance(data["sbc_window_size"], dict):
                         sz = data["sbc_window_size"]
-                        target_w = int(sz.get("width", target_w))
-                        target_h = int(sz.get("height", target_h))
+                        sw = int(sz.get("width", target_w))
+                        sh = int(sz.get("height", target_h))
+                        if sw < 1000 and sh < 650:
+                            target_w, target_h = sw, sh
 
                     code_geo = data.get("sbc_geometries", {}).get(self.code)
                     latest_geo = data.get("sbc_window_geometry") or data.get("sbc_geometries", {}).get("latest")
                     
                     geo_dict = code_geo or latest_geo
                     if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
-                        target_w = int(geo_dict.get("width", target_w))
-                        target_h = int(geo_dict.get("height", target_h))
+                        gw = int(geo_dict.get("width", target_w))
+                        gh = int(geo_dict.get("height", target_h))
+                        if gw < 1000 and gh < 650:
+                            target_w, target_h = gw, gh
                         x = int(geo_dict.get("x", x))
                         y = int(geo_dict.get("y", y))
                         has_exact_pos = True
@@ -2015,11 +2049,21 @@ class SBCIntradayChartDialog(QWidget):
     def resizeEvent(self, event):
         """调整大小事件自动防抖保存几何坐标"""
         super().resizeEvent(event)
-        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
-            if self.anchor_edge:
-                self.anchor_edge = None
-                self.normal_geometry = None
-            self._save_sbc_geometry()
+        # [CRITICAL] 最大化、全屏、最小化、贴边隐藏或程序化移动期间，绝不记录为正常尺寸！
+        if self.isMaximized() or self.isFullScreen() or self.isMinimized() or getattr(self, "is_hidden_state", False) or getattr(self, "_in_snap_action", False) or getattr(self, "_is_programmatic_move", False):
+            return
+        
+        # 仅当处于普通浮动窗口且尺寸合理时，才记录为 _unmaximized_size 并防抖保存
+        w, h = self.width(), self.height()
+        if w >= 320 and h >= 180:
+            max_w, max_h = self._get_max_allowed_sbc_size()
+            # 严格保护：若尺寸过大（例如超过屏幕宽度的 60%），防止是最大化过渡中的假事件
+            if w <= int(max_w * 0.9) and h <= int(max_h * 0.9):
+                self._unmaximized_size = (w, h)
+                if self.anchor_edge:
+                    self.anchor_edge = None
+                    self.normal_geometry = None
+                self._save_sbc_geometry()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2029,7 +2073,7 @@ class SBCIntradayChartDialog(QWidget):
     def moveEvent(self, event):
         """【🧲 移动防抖记录与磁吸触发】移动时记录内存坐标，仅在用户手动拖拽停止松手后触发磁吸吸附"""
         super().moveEvent(event)
-        if getattr(self, "_is_programmatic_move", False) or getattr(self, "_in_snap_action", False):
+        if self.isMaximized() or self.isFullScreen() or self.isMinimized() or getattr(self, "_is_programmatic_move", False) or getattr(self, "_in_snap_action", False):
             return
         self._save_sbc_geometry()
         if not self.is_hidden_state:
@@ -2736,9 +2780,14 @@ def rearrange_all_sbc_windows(parent_win=None):
                 active_dialogs.append(w)
 
     if not active_dialogs:
-        if parent_win:
+        if parent_win and not os.environ.get("PYTEST_CURRENT_TEST"):
             QMessageBox.information(parent_win, "🪟 窗口重排", "当前暂无打开的 SBC 分时走势独立窗口。")
         return
+
+    # 2.1 [FIX] 前置检查：若有任何窗口处于最大化或最小化状态，先强制还原为正常窗口大小
+    for dlg in active_dialogs:
+        if dlg.isMaximized() or dlg.isMinimized():
+            dlg.showNormal()
 
     # 3. 按窗口当前所在物理屏幕进行分组 (多显示器支持)
     screens = QApplication.screens()
@@ -2780,13 +2829,51 @@ def rearrange_all_sbc_windows(parent_win=None):
         if not target_screen or not dlgs_on_screen:
             continue
         sg = target_screen.availableGeometry()
+
+        # 4.1 寻找同屏上未最大化窗口的参考标准尺寸 (Reference Normal Size)
+        ref_w, ref_h = 680, 420
+        # 优先读取同屏未处于最大化/最小化的正常窗口尺寸
+        normal_dlgs = [d for d in dlgs_on_screen if not d.isMaximized() and not d.isMinimized() and not d.isFullScreen()]
+        if normal_dlgs:
+            # 取第一个正常窗口的尺寸，且限制在合法紧凑范围内
+            first_norm = normal_dlgs[0]
+            nw, nh = first_norm.width(), first_norm.height()
+            if 320 <= nw <= int(sg.width() * 0.5) and 180 <= nh <= int(sg.height() * 0.6):
+                ref_w, ref_h = nw, nh
+        elif getattr(SBCIntradayChartDialog, "_global_sbc_size", None):
+            gw, gh = SBCIntradayChartDialog._global_sbc_size
+            if 320 <= gw <= int(sg.width() * 0.5) and 180 <= gh <= int(sg.height() * 0.6):
+                ref_w, ref_h = gw, gh
+
         curr_x = sg.left() + 20
         curr_y = sg.top() + 20
         row_max_h = 0
 
         for idx_d, dlg in enumerate(dlgs_on_screen):
-            w = dlg.width()
-            h = dlg.height()
+            was_maximized = dlg.isMaximized() or dlg.isFullScreen()
+
+            # [FIX] 确保彻底退出最大化/全屏/最小化状态
+            if dlg.isMaximized() or dlg.isMinimized() or dlg.isFullScreen():
+                dlg.showNormal()
+
+            # [FIX] 提取并恢复窗口原本的未最大化尺寸：
+            # 如果窗口原本被最大化，或者当前尺寸过大（如之前误存的 2/3 巨型尺寸），统一恢复为同屏其他正常窗口尺寸 ref_w, ref_h 或其 _unmaximized_size
+            unmax_size = getattr(dlg, "_unmaximized_size", None)
+            if unmax_size and isinstance(unmax_size, (tuple, list)) and len(unmax_size) == 2:
+                uw, uh = unmax_size
+                if 320 <= uw <= int(sg.width() * 0.5) and 180 <= uh <= int(sg.height() * 0.6):
+                    w, h = uw, uh
+                else:
+                    w, h = ref_w, ref_h
+            elif not was_maximized and 320 <= dlg.width() <= int(sg.width() * 0.5) and 180 <= dlg.height() <= int(sg.height() * 0.6):
+                w, h = dlg.width(), dlg.height()
+            else:
+                w, h = ref_w, ref_h
+
+            # 显式 resize 恢复规范尺寸
+            dlg.resize(w, h)
+            dlg._unmaximized_size = (w, h)
+
             if curr_x + w > sg.right() and curr_x > sg.left() + 20:
                 curr_x = sg.left() + 20
                 curr_y += row_max_h + margin_y

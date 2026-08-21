@@ -184,7 +184,23 @@ def rearrange_sbc_windows(monitor_index: int = 0, windows_list: List[Dict] = Non
     padding = 2
 
     for info in sbc_windows:
-        w, h = info['width'], info['height']
+        hwnd = info['hwnd']
+        # [FIX] 若窗口当前处于最大化或最小化状态，先恢复为普通窗口
+        try:
+            if win32gui.IsZoomed(hwnd) or win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                rect = win32gui.GetWindowRect(hwnd)
+                w, h = rect[2] - rect[0], rect[3] - rect[1]
+            else:
+                w, h = info['width'], info['height']
+        except Exception:
+            w, h = info['width'], info['height']
+        
+        # 安全尺寸保护（不得超过屏幕工作区的 2/3）
+        max_allowed_w = max(400, int((wa_r - wa_l) * 2 / 3))
+        max_allowed_h = max(250, int((wa_b - wa_t) * 2 / 3))
+        w = max(320, min(w, max_allowed_w))
+        h = max(180, min(h, max_allowed_h))
         
         # Wrap to next row if it exceeds work area width
         if curr_x + w > wa_r and curr_x > wa_l:

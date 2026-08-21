@@ -352,3 +352,50 @@ def test_sbc_initial_focus_on_period_button(qapp):
         assert btn_30m.hasFocus() or dlg.focusWidget() == btn_30m
     finally:
         dlg.close()
+
+
+def test_rearrange_with_maximized_sbc_dialog(qapp):
+    """测试当 SBC 窗口处于最大化查看时，点击重排能自动恢复窗口大小并正确执行网格平铺"""
+    dlg1 = SBCIntradayChartDialog(code="688826")
+    dlg2 = SBCIntradayChartDialog(code="002189")
+    dlg3 = SBCIntradayChartDialog(code="300570")
+
+    try:
+        dlg1.show()
+        dlg2.show()
+        dlg3.show()
+        qapp.processEvents()
+
+        # 模拟用户将 dlg1 最大化查看
+        dlg1.showMaximized()
+        qapp.processEvents()
+        assert dlg1.isMaximized()
+
+        # 执行重排
+        rearrange_all_sbc_windows(parent_win=None)
+        qapp.processEvents()
+
+        # 1. 验证 dlg1 已经自动退出最大化状态
+        assert not dlg1.isMaximized()
+        assert not dlg2.isMaximized()
+        assert not dlg3.isMaximized()
+
+        # 2. 验证所有窗口尺寸恢复为与同屏正常窗口相同的一致紧凑尺寸（绝非 2/3 或全屏巨型尺寸）
+        screen = dlg1.screen() or QApplication.primaryScreen()
+        if screen:
+            sg = screen.availableGeometry()
+            # 验证 dlg1 恢复后与 dlg2, dlg3 尺寸保持完全一致（对应图 1 原始并排大小）
+            assert dlg1.width() == dlg2.width() == dlg3.width()
+            assert dlg1.height() == dlg2.height() == dlg3.height()
+            assert dlg1.width() <= int(sg.width() * 0.5)
+            assert dlg1.height() <= int(sg.height() * 0.6)
+
+        # 3. 验证所有窗口坐标已成功平铺，互不重叠
+        positions = [(dlg.x(), dlg.y()) for dlg in [dlg1, dlg2, dlg3]]
+        assert len(set(positions)) == 3, f"Expected 3 distinct positions, got {positions}"
+
+    finally:
+        dlg1.close()
+        dlg2.close()
+        dlg3.close()
+
