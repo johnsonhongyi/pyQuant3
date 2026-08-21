@@ -383,7 +383,7 @@ class NewStockFetcher:
         except Exception as e:
             logger.debug(f"腾讯行情补齐异常: {e}")
 
-        # ── 通道 2: TDXRealtimeFetcher 补充秒级五档与昨收价 (分批全覆盖) ──
+        # ── 通道 2: TDXRealtimeFetcher 补充秒级五档与昨收价 (分批全覆盖，权威一等公民) ──
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
@@ -395,13 +395,14 @@ class NewStockFetcher:
                     for q in quotes:
                         c_clean = str(q.get("code", "")).strip().zfill(6)
                         p = safe_float(q.get("price", 0.0))
+                        last_c = safe_float(q.get("last_close", 0.0))
                         if c_clean and p > 0:
                             if c_clean not in quote_map:
                                 quote_map[c_clean] = {}
                             quote_map[c_clean]["price"] = p
-                            last_c = safe_float(q.get("last_close", 0.0))
                             if last_c > 0:
                                 quote_map[c_clean]["last_close"] = last_c
+                                quote_map[c_clean]["pct"] = round((p - last_c) / last_c * 100.0, 2)
                             if safe_float(q.get("amount", 0.0)) > 0:
                                 quote_map[c_clean]["amount"] = safe_float(q.get("amount"))
                             if safe_float(q.get("open", 0.0)) > 0:
@@ -425,14 +426,13 @@ class NewStockFetcher:
                     df.at[idx, "price"] = p
 
                     # 涨跌幅精确计算：
-                    # 1. 优先使用行情源返回的当日实时涨跌幅 (q["pct"])
-                    if "pct" in q and q["pct"] is not None and not math.isnan(safe_float(q["pct"])):
-                        df.at[idx, "pct"] = round(safe_float(q["pct"]), 2)
-                    elif last_c > 0:
-                        # 2. 已上市/次新股：以昨日收盘价计算今日真实涨跌幅
+                    # 1. 优先使用由昨收价与现价计算的真实涨跌幅 (已上市/次新股/前5日标的)
+                    if last_c > 0:
                         df.at[idx, "pct"] = round((p - last_c) / last_c * 100.0, 2)
+                    elif "pct" in q and q["pct"] is not None and not math.isnan(safe_float(q["pct"])):
+                        df.at[idx, "pct"] = round(safe_float(q["pct"]), 2)
                     elif is_first_day and issue_p > 0:
-                        # 3. 仅首日(N)且无昨收时，才以发行价作为基准计算首日涨幅
+                        # 仅首日(N)且无昨收时，以发行价为基准计算涨幅
                         df.at[idx, "pct"] = round((p - issue_p) / issue_p * 100.0, 2)
                     else:
                         df.at[idx, "pct"] = 0.0

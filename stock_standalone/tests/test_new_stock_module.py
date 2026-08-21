@@ -173,12 +173,11 @@ class TestNewStockModule(unittest.TestCase):
         ])
         panel._on_data_ready(df_base)
 
-        # 模拟主终端推送 IPC 指标
+        # 模拟主终端推送全市场 IPC 指标 (注意：IPC 行情中次新股可能没有 percent 或为 0)
         df_ipc = pd.DataFrame(
             index=["688826", "301717"],
             data={
                 "close": [947.45, 385.10],
-                "percent": [1.50, 2.10],
                 "dff": [1.30, 0.30],
                 "rank": [1649, 1646],
                 "dff2": [12.50, 8.20],
@@ -189,10 +188,13 @@ class TestNewStockModule(unittest.TestCase):
         )
         panel.update_from_ipc_df(df_ipc, sh_pct=-0.3)
 
-        # 验证指标已写入
+        # 验证 IPC 推送后：
+        # 1. 衍生指标已写入 (dff2, dff3)
         row_688826 = panel.df_data[panel.df_data["code"] == "688826"].iloc[0]
         self.assertEqual(row_688826["dff2"], 12.50)
         self.assertEqual(row_688826["dff3"], 18.30)
+        # 2. TDX 权威涨跌幅绝未被 IPC 覆盖抹平为 0.00！保持 1.50%
+        self.assertEqual(row_688826["pct"], 1.5)
 
         # 模拟后台 Worker 再次刷新新数据并触发 _on_data_ready
         df_new_refresh = pd.DataFrame([
@@ -205,7 +207,8 @@ class TestNewStockModule(unittest.TestCase):
         row_688826_after = panel.df_data[panel.df_data["code"] == "688826"].iloc[0]
         self.assertEqual(row_688826_after["dff2"], 12.50)
         self.assertEqual(row_688826_after["dff3"], 18.30)
-        print("[Test 5] IPC 数据多轮刷新后指标完好保持测试成功")
+        self.assertEqual(row_688826_after["pct"], 1.55)
+        print("[Test 5] TDX 权威行情保护与 IPC 数据多轮刷新后指标完好保持测试成功")
 
     def test_06_pct_calculation_rules(self):
         """测试已上市次新股与首日股的涨跌幅精确计算规则"""
