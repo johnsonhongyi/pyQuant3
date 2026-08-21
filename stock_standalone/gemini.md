@@ -1,9 +1,13 @@
 ## 2026-08-21 16:00
-- [x] **ATS 新股次新股涨跌幅与 IPC 指标丢失彻底修复 & 档位推演自动点亮与双击行为优化全落地 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`, `tests/test_new_stock_module.py`)**：
-    - [x] **新股行情确立以底层 TDX API 为权威一等公民 & IPC 覆写彻底隔离 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`)**：
+- [x] **ATS 新股次新股与 SBC 走势图/K线图极值水平支撑虚线全落地 (`trade_visualizer_qt6.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/new_stock_panel.py`)**：
+    - [x] **SBC / K线图通达信同款最近低点水平支撑虚线补齐 (`trade_visualizer_qt6.py`, `ats/ui/intraday_strategy_dialog.py`)**：
+        - 针对用户反馈的“SBC 中最近低点没有虚线标记”，在 `_draw_channel_extrema_labels` 与 `SBCChartCanvas._paint_kline` 中，为 LLV(36) 识别的最近低点 `p_low` 补充自低点位置向右水平延伸至最新 K 棒的**水平支撑虚线**（青色虚线，对象池管理复用，零场景树泄露）；
+        - 同步为 HHV(36) 最近高点补充向右水平延伸的**水平阻力虚线**（红色虚线），与垂直黄色引导虚线、极值文本胶囊协同形成完整的通达信同款极值标记系统；
+    - [x] **新股行情确立以底层 TDX API 为权威一等公民 & IPC 覆写彻底隔离与渲染链路修复 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`)**：
         - 查明并彻底根治了“主终端全市场 IPC 数据流推送时因缺少 percent 字段而将新股真实涨跌幅暴力覆盖为 0.00%”的严重时序缺陷；
+        - 查明并修复了 `update_from_ipc_df` 中因 `updated_any = True` 缩进层级嵌套过深导致表格渲染被跳过的空白显示问题；
         - 在 `update_from_ipc_df` 中建立行情权限保护：新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场衍生指标（DFF/Rank/DFF2/DFF3/rs/共振/自定义列），绝不覆写 TDX 已计算好的真实价格与涨跌幅；
-        - 在 `enrich_with_tdx_realtime` 中强化 TDX 现价与昨收价计算机制（`last_c > 0` 优先直算 `pct`）；
+        - 补齐单元格显式高对比文字颜色配置，杜绝黑底黑字隐患；
     - [x] **档位收益文案统一由“赚”更正为“盈利” (`ats/ui/new_stock_panel.py`)**：
         - 界面展示全面规范化为 `盈利38.03万`、`盈利9.34万`、`盈利4,420元`；
     - [x] **总市值数据获取与回填 Bug 根除 (`ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`)**：

@@ -1142,6 +1142,25 @@ class SBCChartCanvas(QWidget):
                 painter.setPen(QPen(QColor("#FFD700"), 2.0, Qt.PenStyle.SolidLine))
                 painter.drawLine(int(x_s0), int(y_s0), int(x_s1), int(y_s1))
 
+        # 5.1 🌟 绘制通达信同款最近低点水平支撑虚线 (完全对齐 calc_trend_channel 向量化通道引擎输出)
+        ch_lower_p = float(df_view['ch_anchor_low_price'].iloc[-1]) if 'ch_anchor_low_price' in df_view.columns and len(df_view) > 0 and pd.notna(df_view['ch_anchor_low_price'].iloc[-1]) else 0.0
+        
+        low_global_start = max(0, total_n - ch_bc2)
+        if low_global_start <= end_i and ch_lower_p > 0:
+            low_local_start = max(0, low_global_start - start_i)
+            if 0 <= low_local_start < n:
+                x_low_s0 = k_to_x(low_local_start)
+                y_low_s0 = k_to_y(ch_lower_p)
+                x_low_s1 = k_to_x(n - 1)
+
+                # 黄色垂直引导虚线
+                painter.setPen(QPen(QColor(255, 215, 0, 180), 1.2, Qt.PenStyle.DashLine))
+                painter.drawLine(int(x_low_s0), int(margin_top + main_h), int(x_low_s0), int(margin_top))
+
+                # 🌟 最近低点向右水平延伸支撑虚线 (青色虚线)
+                painter.setPen(QPen(QColor(0, 255, 255, 200), 1.2, Qt.PenStyle.DashLine))
+                painter.drawLine(int(x_low_s0), int(y_low_s0), int(x_low_s1), int(y_low_s0))
+
         # 提取神奇九转 (TD Sequential 9) 序列
         td_up_arr = df_view['td_sell_count'].values if 'td_sell_count' in df_view.columns else (
             df_view['td_up_label'].values if 'td_up_label' in df_view.columns else np.zeros(len(df_view))
