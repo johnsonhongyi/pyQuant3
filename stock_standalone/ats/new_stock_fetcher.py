@@ -4,7 +4,7 @@ ats/new_stock_fetcher.py — ATS 新股/次新股/IPO发行日历全市场多通
 职责：
 1. 自动抓取全市场（沪深主板、科创板、创业板、北交所）近期已上市、前5日(C)、首日(N)、次新股(近60日)实时行情；
 2. 自动拉取最新新股发行一览与 IPO 申购/上市日历（含发行价、申购日、上市日、网上发行量、中签率等）；
-3. 多通道（腾讯行情+东方财富+新浪+TDX）毫秒级补齐现价、涨跌幅、换手率、成交额、流通市值、总市值，彻底杜绝数据缺失；
+3. 多通道（腾讯行情+东方财富+新浪+TDX）毫秒级补齐现价、涨跌幅、换手率、成交额、流通市值、总市值，彻底杜绝数据缺失与类型转换异常；
 4. 深度对接 TDXRealtimeFetcher 与分时阶梯策略引擎。
 """
 
@@ -12,6 +12,7 @@ import sys
 import os
 import time
 import json
+import math
 import logging
 import datetime
 import requests
@@ -27,6 +28,19 @@ DEFAULT_HEADERS = {
     "Accept": "*/*",
     "Referer": "http://quote.eastmoney.com/"
 }
+
+
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
 
 
 class NewStockFetcher:
@@ -74,18 +88,8 @@ class NewStockFetcher:
                     if apply_d in ("None", "null", ""):
                         apply_d = ""
 
-                    issue_price = it.get("ISSUE_PRICE")
-                    try:
-                        issue_price_val = float(issue_price) if issue_price is not None else None
-                    except (ValueError, TypeError):
-                        issue_price_val = None
-
-                    online_issue_num = it.get("ONLINE_ISSUE_NUM")
-                    try:
-                        online_num_val = float(online_issue_num) if online_issue_num is not None else None
-                    except (ValueError, TypeError):
-                        online_num_val = None
-
+                    issue_price_val = safe_float(it.get("ISSUE_PRICE"), default=0.0)
+                    online_num_val = safe_float(it.get("ONLINE_ISSUE_NUM"), default=0.0)
                     ballot_num = it.get("BALLOT_NUM")
 
                     ipo_dict[c] = {
@@ -93,10 +97,10 @@ class NewStockFetcher:
                         "name": str(it.get("SECURITY_NAME", "")).strip(),
                         "trade_market": str(it.get("TRADE_MARKET", "")).strip(),
                         "apply_code": str(it.get("APPLY_CODE", "")).strip(),
-                        "issue_price": issue_price_val,
+                        "issue_price": issue_price_val if issue_price_val > 0 else None,
                         "apply_date": apply_d,
                         "listing_date": listing_d,
-                        "online_issue_num": online_num_val,
+                        "online_issue_num": online_num_val if online_num_val > 0 else None,
                         "ballot_num": ballot_num,
                     }
                 self._cached_ipo_dict = ipo_dict
@@ -124,26 +128,26 @@ class NewStockFetcher:
                     spot_dict[c] = {
                         "code": c,
                         "name": str(row.get("名称", "")).strip(),
-                        "price": float(row.get("最新价", 0.0) or 0.0),
-                        "pct": float(row.get("涨跌幅", 0.0) or 0.0),
-                        "change_val": float(row.get("涨跌额", 0.0) or 0.0),
-                        "vol": float(row.get("成交量", 0.0) or 0.0),
-                        "amount": float(row.get("成交额", 0.0) or 0.0),
-                        "amplitude": float(row.get("振幅", 0.0) or 0.0),
-                        "high": float(row.get("最高", 0.0) or 0.0),
-                        "low": float(row.get("最低", 0.0) or 0.0),
-                        "open": float(row.get("今开", 0.0) or 0.0),
-                        "last_close": float(row.get("昨收", 0.0) or 0.0),
-                        "turnover": float(row.get("换手率", 0.0) or 0.0),
-                        "pe_dynamic": float(row.get("市盈率-动态", 0.0) or 0.0),
-                        "pb": float(row.get("市净率", 0.0) or 0.0),
+                        "price": safe_float(row.get("最新价")),
+                        "pct": safe_float(row.get("涨跌幅")),
+                        "change_val": safe_float(row.get("涨跌额")),
+                        "vol": safe_float(row.get("成交量")),
+                        "amount": safe_float(row.get("成交额")),
+                        "amplitude": safe_float(row.get("振幅")),
+                        "high": safe_float(row.get("最高")),
+                        "low": safe_float(row.get("最低")),
+                        "open": safe_float(row.get("今开")),
+                        "last_close": safe_float(row.get("昨收")),
+                        "turnover": safe_float(row.get("换手率")),
+                        "pe_dynamic": safe_float(row.get("市盈率-动态")),
+                        "pb": safe_float(row.get("市净率")),
                         "listing_date": str(row.get("上市日期", "") or "").split(" ")[0].strip(),
-                        "total_mv": float(row.get("总市值", 0.0) or 0.0),
-                        "float_mv": float(row.get("流通市值", 0.0) or 0.0),
-                        "speed": float(row.get("涨速", 0.0) or 0.0),
-                        "pct_5min": float(row.get("5分钟涨跌", 0.0) or 0.0),
-                        "pct_60d": float(row.get("60日涨跌幅", 0.0) or 0.0),
-                        "pct_ytd": float(row.get("年初至今涨跌幅", 0.0) or 0.0),
+                        "total_mv": safe_float(row.get("总市值")),
+                        "float_mv": safe_float(row.get("流通市值")),
+                        "speed": safe_float(row.get("涨速")),
+                        "pct_5min": safe_float(row.get("5分钟涨跌")),
+                        "pct_60d": safe_float(row.get("60日涨跌幅")),
+                        "pct_ytd": safe_float(row.get("年初至今涨跌幅")),
                     }
                 return spot_dict
         except Exception as e:
@@ -182,25 +186,25 @@ class NewStockFetcher:
                     spot_dict[c] = {
                         "code": c,
                         "name": str(it.get("f14", "")).strip(),
-                        "price": float(it.get("f2", 0.0) or 0.0),
-                        "pct": float(it.get("f3", 0.0) or 0.0),
-                        "change_val": float(it.get("f4", 0.0) or 0.0),
-                        "vol": float(it.get("f5", 0.0) or 0.0),
-                        "amount": float(it.get("f6", 0.0) or 0.0),
-                        "amplitude": float(it.get("f7", 0.0) or 0.0),
-                        "high": float(it.get("f15", 0.0) or 0.0),
-                        "low": float(it.get("f16", 0.0) or 0.0),
-                        "open": float(it.get("f17", 0.0) or 0.0),
-                        "last_close": float(it.get("f18", 0.0) or 0.0),
-                        "turnover": float(it.get("f8", 0.0) or 0.0),
-                        "pe_dynamic": float(it.get("f9", 0.0) or 0.0),
-                        "pb": float(it.get("f23", 0.0) or 0.0),
+                        "price": safe_float(it.get("f2")),
+                        "pct": safe_float(it.get("f3")),
+                        "change_val": safe_float(it.get("f4")),
+                        "vol": safe_float(it.get("f5")),
+                        "amount": safe_float(it.get("f6")),
+                        "amplitude": safe_float(it.get("f7")),
+                        "high": safe_float(it.get("f15")),
+                        "low": safe_float(it.get("f16")),
+                        "open": safe_float(it.get("f17")),
+                        "last_close": safe_float(it.get("f18")),
+                        "turnover": safe_float(it.get("f8")),
+                        "pe_dynamic": safe_float(it.get("f9")),
+                        "pb": safe_float(it.get("f23")),
                         "listing_date": listing_d,
-                        "total_mv": float(it.get("f20", 0.0) or 0.0),
-                        "float_mv": float(it.get("f21", 0.0) or 0.0),
+                        "total_mv": safe_float(it.get("f20")),
+                        "float_mv": safe_float(it.get("f21")),
                     }
         except Exception as e:
-            logger.warning(f"Push2 获取新股行情异常: {e}")
+            logger.debug(f"Push2 获取新股行情解析: {e}")
 
         return spot_dict
 
@@ -212,141 +216,114 @@ class NewStockFetcher:
         if not force_refresh and self._cached_stocks_df is not None and (now - self._last_fetch_time < self._cache_ttl_seconds):
             return self._cached_stocks_df
 
-        # 1. 抓取行情与日历
+        ipo_dict = self.fetch_ipo_calendar(page_size=100)
         spot_dict = self.fetch_recent_new_stocks_spot()
-        ipo_dict = self.fetch_ipo_calendar()
 
-        # 2. 读取已有的分时阶梯策略配置
-        from ats.intraday_strategy_engine import IntradayStrategyEngine
-        engine = IntradayStrategyEngine.get_instance()
-        configured_codes = set()
-        strategy_id_map = {}
-        for st in engine.strategies:
-            s_id = st.get("id", "")
-            target_codes = st.get("target_codes", [])
-            for tc in target_codes:
-                tc_clean = str(tc).strip().zfill(6)
-                configured_codes.add(tc_clean)
-                strategy_id_map[tc_clean] = s_id
-            spec = st.get("stock_spec", {})
-            if spec and "code" in spec:
-                tc_clean = str(spec["code"]).strip().zfill(6)
-                configured_codes.add(tc_clean)
-                strategy_id_map[tc_clean] = s_id
-
-        # 3. 合并全量代码列表
-        all_codes = list(dict.fromkeys(list(spot_dict.keys()) + list(ipo_dict.keys())))
-        records = []
-        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        all_codes = set(ipo_dict.keys()) | set(spot_dict.keys())
+        rows = []
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
 
         for c in all_codes:
-            spot = spot_dict.get(c, {})
-            ipo = ipo_dict.get(c, {})
+            ipo_info = ipo_dict.get(c, {})
+            spot_info = spot_dict.get(c, {})
 
-            name = spot.get("name") or ipo.get("name") or f"新股_{c}"
-            price = spot.get("price", 0.0)
-            pct = spot.get("pct", 0.0)
-            turnover = spot.get("turnover", 0.0)
-            float_mv = spot.get("float_mv", 0.0)
-            total_mv = spot.get("total_mv", 0.0)
-            amount = spot.get("amount", 0.0)
-            open_p = spot.get("open", 0.0)
-            high_p = spot.get("high", 0.0)
-            low_p = spot.get("low", 0.0)
-            pe_dyn = spot.get("pe_dynamic", 0.0)
+            name = spot_info.get("name") or ipo_info.get("name") or c
+            listing_date = spot_info.get("listing_date") or ipo_info.get("listing_date") or ""
+            apply_date = ipo_info.get("apply_date") or ""
+            issue_price = ipo_info.get("issue_price")
 
-            listing_date = spot.get("listing_date") or ipo.get("listing_date") or ""
-            apply_date = ipo.get("apply_date") or ""
-
-            issue_price = ipo.get("issue_price")
-            if (issue_price is None or issue_price <= 0) and c in configured_codes:
-                spec = engine.get_stock_ladder_spec(c)
-                if spec and "issue_price" in spec:
-                    try:
-                        issue_price = float(spec["issue_price"])
-                    except:
-                        pass
-
-            # 判定状态
-            status = "次新股"
-            if not listing_date or listing_date in ("-", "None", ""):
+            # 状态推断
+            status = "次新"
+            if not listing_date or listing_date > today_str:
                 status = "待上市"
-            elif listing_date > today_str:
-                status = "待上市"
-            elif listing_date == today_str or str(name).startswith("N"):
+            elif listing_date == today_str:
                 status = "首日(N)"
-            elif str(name).startswith("C"):
-                status = "前5日(C)"
             else:
                 try:
-                    ld_dt = datetime.datetime.strptime(listing_date, "%Y-%m-%d")
-                    diff_days = (datetime.datetime.now() - ld_dt).days
-                    if diff_days <= 5:
+                    ld = datetime.datetime.strptime(listing_date, "%Y-%m-%d").date()
+                    delta_days = (datetime.date.today() - ld).days
+                    if delta_days <= 7:
                         status = "前5日(C)"
-                    elif diff_days <= 60:
+                    elif delta_days <= 90:
                         status = "次新"
                     else:
-                        status = "次新"
-                except:
+                        status = "已上市"
+                except Exception:
                     status = "次新"
 
-            has_strat = c in configured_codes
-            strat_id = strategy_id_map.get(c, "")
+            price = safe_float(spot_info.get("price", 0.0))
+            pct = safe_float(spot_info.get("pct", 0.0))
+            turnover = safe_float(spot_info.get("turnover", 0.0))
+            float_mv = safe_float(spot_info.get("float_mv", 0.0))
+            total_mv = safe_float(spot_info.get("total_mv", 0.0))
+            amount = safe_float(spot_info.get("amount", 0.0))
 
-            records.append({
+            float_mv_yi = round(float_mv / 1e8, 2) if float_mv > 1e4 else (float_mv if float_mv > 0 else 0.0)
+            total_mv_yi = round(total_mv / 1e8, 2) if total_mv > 1e4 else (total_mv if total_mv > 0 else 0.0)
+            amount_yi = round(amount / 1e8, 2) if amount > 1e4 else (amount if amount > 0 else 0.0)
+
+            # 策略配置状态检测
+            has_strategy = self._check_strategy_exists(c)
+
+            rows.append({
                 "code": c,
                 "name": name,
                 "status": status,
                 "listing_date": listing_date if listing_date else "-",
                 "apply_date": apply_date if apply_date else "-",
-                "issue_price": float(issue_price) if (issue_price is not None and issue_price > 0) else 0.0,
-                "price": float(price) if price else 0.0,
-                "pct": float(pct) if pct else 0.0,
-                "turnover": float(turnover) if turnover else 0.0,
-                "float_mv_yi": round(float(float_mv) / 1e8, 2) if float_mv else 0.0,
-                "total_mv_yi": round(float(total_mv) / 1e8, 2) if total_mv else 0.0,
-                "amount_yi": round(float(amount) / 1e8, 2) if amount else 0.0,
-                "open": float(open_p) if open_p else 0.0,
-                "high": float(high_p) if high_p else 0.0,
-                "low": float(low_p) if low_p else 0.0,
-                "pe_dynamic": float(pe_dyn) if pe_dyn else 0.0,
-                "has_strategy": has_strat,
-                "strategy_id": strat_id
+                "issue_price": issue_price if issue_price is not None else 0.0,
+                "price": price,
+                "pct": pct,
+                "turnover": turnover,
+                "float_mv_yi": float_mv_yi,
+                "total_mv_yi": total_mv_yi,
+                "amount_yi": amount_yi,
+                "has_strategy": has_strategy,
+                "trade_market": ipo_info.get("trade_market", ""),
             })
 
-        df = pd.DataFrame(records)
+        df = pd.DataFrame(rows)
         if not df.empty:
             df.drop_duplicates(subset=["code"], keep="first", inplace=True)
+            # 排序：首日/前5日 > 待上市 > 次新股，同类按上市日期倒序
+            def _sort_weight(row):
+                st = row["status"]
+                ld = row["listing_date"]
+                w = 4
+                if "首日" in st: w = 1
+                elif "前5日" in st: w = 2
+                elif "待上市" in st: w = 3
+                elif "次新" in st: w = 4
+                return (w, ld if ld != "-" else "1970-01-01")
+
+            df["_sort"] = df.apply(_sort_weight, axis=1)
+            df.sort_values(by=["_sort"], ascending=[True], inplace=True)
+            df.drop(columns=["_sort"], inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-        # 4. 极速全通道补齐缺失的现价、涨跌幅、换手率、流通市值与总市值
-        df = self.enrich_with_tdx_realtime(df)
+            # 极速秒级多通道补齐全量字段（腾讯 + TDX）
+            df = self.enrich_with_tdx_realtime(df)
 
         self._cached_stocks_df = df
-        self._last_fetch_time = now
+        self._last_fetch_time = time.time()
         return df
 
-    def enrich_with_tdx_realtime(self, df: pd.DataFrame, target_codes: Optional[List[str]] = None) -> pd.DataFrame:
+    def enrich_with_tdx_realtime(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        使用 腾讯行情直连 + TDXRealtimeFetcher + 新浪行情 极速对焦补齐目标新股的
-        [最新价, 涨跌幅, 换手率, 成交额, 流通市值, 总市值, 开高低]
-        彻底解决新股上市初期数据缺失、显示 -- 的痛点
+        利用腾讯行情 API + 本地 TDX 批量为新股/次新股补充最新实时行情
         """
         if df.empty:
             return df
 
-        codes_to_query = target_codes or df["code"].tolist()
-        if not codes_to_query:
-            return df
-
+        codes_to_query = df["code"].tolist()
         quote_map = {}
 
-        # ── 通道 1: 腾讯极速行情 API (全市场、含流通市值/总市值/换手率) ──
+        # ── 通道 1: 腾讯高频行情 API ──
         try:
             formatted_list = []
             for c in codes_to_query[:100]:
-                c_str = str(c).strip().zfill(6)
-                if c_str.startswith(("600", "601", "603", "605", "688", "689")):
+                c_str = str(c).zfill(6)
+                if c_str.startswith(("60", "68")):
                     formatted_list.append(f"sh{c_str}")
                 elif c_str.startswith(("920", "83", "87", "88", "43")):
                     formatted_list.append(f"bj{c_str}")
@@ -365,17 +342,17 @@ class NewStockFetcher:
                         vals = parts[1].strip('"').split("~")
                         if len(vals) > 45:
                             c_raw = str(vals[2]).strip().zfill(6)
-                            p_now = float(vals[3]) if vals[3] else 0.0
-                            p_close = float(vals[4]) if vals[4] else 0.0
-                            p_open = float(vals[5]) if vals[5] else 0.0
-                            p_vol = float(vals[36]) if vals[36] else 0.0 # 手
-                            p_amt = float(vals[37]) * 10000.0 if vals[37] else 0.0 # 元
-                            p_high = float(vals[33]) if vals[33] else p_now
-                            p_low = float(vals[34]) if vals[34] else p_now
-                            p_pct = float(vals[32]) if vals[32] else 0.0
-                            p_to = float(vals[38]) if vals[38] else 0.0
-                            p_fmv = float(vals[44]) if vals[44] else 0.0 # 亿
-                            p_tmv = float(vals[45]) if vals[45] else 0.0 # 亿
+                            p_now = safe_float(vals[3])
+                            p_close = safe_float(vals[4])
+                            p_open = safe_float(vals[5])
+                            p_vol = safe_float(vals[36]) # 手
+                            p_amt = safe_float(vals[37]) * 10000.0 if vals[37] else 0.0 # 元
+                            p_high = safe_float(vals[33], default=p_now)
+                            p_low = safe_float(vals[34], default=p_now)
+                            p_pct = safe_float(vals[32])
+                            p_to = safe_float(vals[38])
+                            p_fmv = safe_float(vals[44]) # 亿
+                            p_tmv = safe_float(vals[45]) # 亿
 
                             quote_map[c_raw] = {
                                 "code": c_raw,
@@ -402,17 +379,17 @@ class NewStockFetcher:
             if quotes:
                 for q in quotes:
                     c_clean = str(q.get("code", "")).strip().zfill(6)
-                    p = float(q.get("price", 0.0))
+                    p = safe_float(q.get("price", 0.0))
                     if c_clean and p > 0:
                         if c_clean not in quote_map:
                             quote_map[c_clean] = {}
                         quote_map[c_clean]["price"] = p
-                        if float(q.get("last_close", 0.0)) > 0:
-                            quote_map[c_clean]["last_close"] = float(q.get("last_close"))
-                        if float(q.get("amount", 0.0)) > 0:
-                            quote_map[c_clean]["amount"] = float(q.get("amount"))
-                        if float(q.get("open", 0.0)) > 0:
-                            quote_map[c_clean]["open"] = float(q.get("open"))
+                        if safe_float(q.get("last_close", 0.0)) > 0:
+                            quote_map[c_clean]["last_close"] = safe_float(q.get("last_close"))
+                        if safe_float(q.get("amount", 0.0)) > 0:
+                            quote_map[c_clean]["amount"] = safe_float(q.get("amount"))
+                        if safe_float(q.get("open", 0.0)) > 0:
+                            quote_map[c_clean]["open"] = safe_float(q.get("open"))
         except Exception as e:
             logger.debug(f"TDX 补齐异常: {e}")
 
@@ -421,53 +398,53 @@ class NewStockFetcher:
             c = str(row["code"]).zfill(6)
             if c in quote_map:
                 q = quote_map[c]
-                p = float(q.get("price", 0.0))
-                issue_p = float(row.get("issue_price", 0.0))
+                p = safe_float(q.get("price", 0.0))
+                issue_p = safe_float(row.get("issue_price", 0.0))
 
                 if p > 0:
                     df.at[idx, "price"] = p
 
                     # 计算涨跌幅
-                    pct_val = float(q.get("pct", 0.0))
+                    pct_val = safe_float(q.get("pct", 0.0))
                     if pct_val != 0.0:
                         df.at[idx, "pct"] = pct_val
                     else:
-                        last_c = float(q.get("last_close", 0.0))
+                        last_c = safe_float(q.get("last_close", 0.0))
                         ref_p = last_c if last_c > 0 else issue_p
                         if ref_p > 0:
                             df.at[idx, "pct"] = round((p - ref_p) / ref_p * 100.0, 2)
 
                 # 成交额
-                amt = float(q.get("amount", 0.0))
+                amt = safe_float(q.get("amount", 0.0))
                 if amt > 0:
                     df.at[idx, "amount_yi"] = round(amt / 1e8, 2)
 
                 # 换手率
-                to_val = float(q.get("turnover", 0.0))
+                to_val = safe_float(q.get("turnover", 0.0))
                 if to_val > 0:
                     df.at[idx, "turnover"] = to_val
 
                 # 流通市值
-                fmv = float(q.get("float_mv_yi", 0.0))
+                fmv = safe_float(q.get("float_mv_yi", 0.0))
                 if fmv > 0:
                     df.at[idx, "float_mv_yi"] = fmv
-                elif float(row.get("float_mv_yi", 0.0)) <= 0 and issue_p > 0 and p > 0:
-                    # 尝试推算流通市值
-                    df.at[idx, "float_mv_yi"] = round((p * 2000.0 * 10000.0) / 1e8, 2)
 
                 # 总市值
-                tmv = float(q.get("total_mv_yi", 0.0))
+                tmv = safe_float(q.get("total_mv_yi", 0.0))
                 if tmv > 0:
                     df.at[idx, "total_mv_yi"] = tmv
-                elif float(row.get("total_mv_yi", 0.0)) <= 0 and issue_p > 0:
-                    df.at[idx, "total_mv_yi"] = round((issue_p * 8000.0 * 10000.0) / 1e8, 2)
-
-                # 开高低
-                if float(q.get("open", 0.0)) > 0:
-                    df.at[idx, "open"] = float(q.get("open"))
-                if float(q.get("high", 0.0)) > 0:
-                    df.at[idx, "high"] = float(q.get("high"))
-                if float(q.get("low", 0.0)) > 0:
-                    df.at[idx, "low"] = float(q.get("low"))
 
         return df
+
+    def _check_strategy_exists(self, code: str) -> bool:
+        """检查指定股票代码是否已有分时阶梯策略配置"""
+        cfg_path = os.path.join(get_app_root(), "config", "intraday_newstock_strategies.json")
+        if not os.path.exists(cfg_path):
+            return False
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                strategies = data.get("strategies", {})
+                return any(str(st.get("code", "")).zfill(6) == code for st in strategies.values())
+        except Exception:
+            return False
