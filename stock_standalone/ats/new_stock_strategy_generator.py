@@ -41,16 +41,8 @@ class NewStockStrategyGenerator:
 
     def _get_sign_shares(self, code: str) -> int:
         """
-        根据股票代码确定单签申购股数：
-        科创板 (688xxx): 500股
-        创业板 (300xxx, 301xxx): 500股
-        沪市主板 (600xxx, 601xxx, 603xxx, 605xxx): 500股 (新规)
-        深市主板 (000xxx, 001xxx, 002xxx, 003xxx): 500股
-        北交所 (920xxx, 83xxxx, 87xxxx, 43xxxx): 100股
+        根据量化规则统一按单签 500 股计算中签收益
         """
-        c = str(code).strip().zfill(6)
-        if c.startswith(("920", "83", "87", "88", "43")):
-            return 100
         return 500
 
     def generate_strategy(self, stock_info: Dict[str, Any]) -> Dict[str, Any]:

@@ -252,11 +252,20 @@ class NewStockFetcher:
                     status = "次新"
 
             price = safe_float(spot_info.get("price", 0.0))
-            pct = safe_float(spot_info.get("pct", 0.0))
             turnover = safe_float(spot_info.get("turnover", 0.0))
             float_mv = safe_float(spot_info.get("float_mv", 0.0))
             total_mv = safe_float(spot_info.get("total_mv", 0.0))
             amount = safe_float(spot_info.get("amount", 0.0))
+
+            is_first_day = ("首日" in status) or ("N" in status)
+            if is_first_day:
+                pct = safe_float(spot_info.get("pct", 0.0))
+            else:
+                last_c = safe_float(spot_info.get("last_close", 0.0))
+                if last_c > 0 and price > 0:
+                    pct = round((price - last_c) / last_c * 100.0, 2)
+                else:
+                    pct = 0.0
 
             float_mv_yi = round(float_mv / 1e8, 2) if float_mv > 1e4 else (float_mv if float_mv > 0 else 0.0)
             total_mv_yi = round(total_mv / 1e8, 2) if total_mv > 1e4 else (total_mv if total_mv > 0 else 0.0)
@@ -301,7 +310,7 @@ class NewStockFetcher:
             df.drop(columns=["_sort"], inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-            # 极速秒级多通道补齐全量字段（腾讯 + TDX）
+            # 极速秒级多通道补齐全量字段（腾讯 + TDX 分批覆盖全部新股）
             df = self.enrich_with_tdx_realtime(df)
 
         self._cached_stocks_df = df
@@ -310,7 +319,7 @@ class NewStockFetcher:
 
     def enrich_with_tdx_realtime(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        利用腾讯行情 API + 本地 TDX 批量为新股/次新股补充最新实时行情
+        利用腾讯行情 API + 本地 TDX 分批覆盖全量新股/次新股补充最新实时行情
         """
         if df.empty:
             return df
@@ -318,101 +327,115 @@ class NewStockFetcher:
         codes_to_query = df["code"].tolist()
         quote_map = {}
 
-        # ── 通道 1: 腾讯高频行情 API ──
+        # ── 通道 1: 腾讯高频行情 API (分批全覆盖) ──
         try:
-            formatted_list = []
-            for c in codes_to_query[:100]:
-                c_str = str(c).zfill(6)
-                if c_str.startswith(("60", "68")):
-                    formatted_list.append(f"sh{c_str}")
-                elif c_str.startswith(("920", "83", "87", "88", "43")):
-                    formatted_list.append(f"bj{c_str}")
-                else:
-                    formatted_list.append(f"sz{c_str}")
+            chunk_size = 80
+            for i in range(0, len(codes_to_query), chunk_size):
+                chunk = codes_to_query[i:i + chunk_size]
+                formatted_list = []
+                for c in chunk:
+                    c_str = str(c).zfill(6)
+                    if c_str.startswith(("60", "68")):
+                        formatted_list.append(f"sh{c_str}")
+                    elif c_str.startswith(("920", "83", "87", "88", "43")):
+                        formatted_list.append(f"bj{c_str}")
+                    else:
+                        formatted_list.append(f"sz{c_str}")
 
-            if formatted_list:
-                url = f"http://qt.gtimg.cn/q={','.join(formatted_list)}"
-                r = requests.get(url, headers=DEFAULT_HEADERS, timeout=3.5)
-                if r.status_code == 200:
-                    for line in r.text.split(";"):
-                        line = line.strip()
-                        if not line or "=" not in line:
-                            continue
-                        parts = line.split("=")
-                        vals = parts[1].strip('"').split("~")
-                        if len(vals) > 45:
-                            c_raw = str(vals[2]).strip().zfill(6)
-                            p_now = safe_float(vals[3])
-                            p_close = safe_float(vals[4])
-                            p_open = safe_float(vals[5])
-                            p_vol = safe_float(vals[36]) # 手
-                            p_amt = safe_float(vals[37]) * 10000.0 if vals[37] else 0.0 # 元
-                            p_high = safe_float(vals[33], default=p_now)
-                            p_low = safe_float(vals[34], default=p_now)
-                            p_pct = safe_float(vals[32])
-                            p_to = safe_float(vals[38])
-                            p_fmv = safe_float(vals[44]) # 亿
-                            p_tmv = safe_float(vals[45]) # 亿
+                if formatted_list:
+                    url = f"http://qt.gtimg.cn/q={','.join(formatted_list)}"
+                    r = requests.get(url, headers=DEFAULT_HEADERS, timeout=3.5)
+                    if r.status_code == 200:
+                        for line in r.text.split(";"):
+                            line = line.strip()
+                            if not line or "=" not in line:
+                                continue
+                            parts = line.split("=")
+                            vals = parts[1].strip('"').split("~")
+                            if len(vals) > 45:
+                                c_raw = str(vals[2]).strip().zfill(6)
+                                p_now = safe_float(vals[3])
+                                p_close = safe_float(vals[4])
+                                p_open = safe_float(vals[5])
+                                p_vol = safe_float(vals[36]) # 手
+                                p_amt = safe_float(vals[37]) * 10000.0 if vals[37] else 0.0 # 元
+                                p_high = safe_float(vals[33], default=p_now)
+                                p_low = safe_float(vals[34], default=p_now)
+                                p_pct = safe_float(vals[32])
+                                p_to = safe_float(vals[38])
+                                p_fmv = safe_float(vals[44]) # 亿
+                                p_tmv = safe_float(vals[45]) # 亿
 
-                            quote_map[c_raw] = {
-                                "code": c_raw,
-                                "price": p_now,
-                                "last_close": p_close,
-                                "open": p_open,
-                                "high": p_high,
-                                "low": p_low,
-                                "vol": p_vol,
-                                "amount": p_amt,
-                                "pct": p_pct,
-                                "turnover": p_to,
-                                "float_mv_yi": p_fmv,
-                                "total_mv_yi": p_tmv
-                            }
+                                quote_map[c_raw] = {
+                                    "code": c_raw,
+                                    "price": p_now,
+                                    "last_close": p_close,
+                                    "open": p_open,
+                                    "high": p_high,
+                                    "low": p_low,
+                                    "vol": p_vol,
+                                    "amount": p_amt,
+                                    "pct": p_pct,
+                                    "turnover": p_to,
+                                    "float_mv_yi": p_fmv,
+                                    "total_mv_yi": p_tmv
+                                }
         except Exception as e:
             logger.debug(f"腾讯行情补齐异常: {e}")
 
-        # ── 通道 2: TDXRealtimeFetcher 补充秒级五档 ──
+        # ── 通道 2: TDXRealtimeFetcher 补充秒级五档与昨收价 (分批全覆盖) ──
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
-            quotes = tdx_fetcher.get_security_quotes_safe(codes_to_query[:50])
-            if quotes:
-                for q in quotes:
-                    c_clean = str(q.get("code", "")).strip().zfill(6)
-                    p = safe_float(q.get("price", 0.0))
-                    if c_clean and p > 0:
-                        if c_clean not in quote_map:
-                            quote_map[c_clean] = {}
-                        quote_map[c_clean]["price"] = p
-                        if safe_float(q.get("last_close", 0.0)) > 0:
-                            quote_map[c_clean]["last_close"] = safe_float(q.get("last_close"))
-                        if safe_float(q.get("amount", 0.0)) > 0:
-                            quote_map[c_clean]["amount"] = safe_float(q.get("amount"))
-                        if safe_float(q.get("open", 0.0)) > 0:
-                            quote_map[c_clean]["open"] = safe_float(q.get("open"))
+            chunk_size = 50
+            for i in range(0, len(codes_to_query), chunk_size):
+                chunk = codes_to_query[i:i + chunk_size]
+                quotes = tdx_fetcher.get_security_quotes_safe(chunk)
+                if quotes:
+                    for q in quotes:
+                        c_clean = str(q.get("code", "")).strip().zfill(6)
+                        p = safe_float(q.get("price", 0.0))
+                        if c_clean and p > 0:
+                            if c_clean not in quote_map:
+                                quote_map[c_clean] = {}
+                            quote_map[c_clean]["price"] = p
+                            last_c = safe_float(q.get("last_close", 0.0))
+                            if last_c > 0:
+                                quote_map[c_clean]["last_close"] = last_c
+                            if safe_float(q.get("amount", 0.0)) > 0:
+                                quote_map[c_clean]["amount"] = safe_float(q.get("amount"))
+                            if safe_float(q.get("open", 0.0)) > 0:
+                                quote_map[c_clean]["open"] = safe_float(q.get("open"))
         except Exception as e:
             logger.debug(f"TDX 补齐异常: {e}")
 
         # ── 3. 回填更新到 DataFrame ──
         for idx, row in df.iterrows():
             c = str(row["code"]).zfill(6)
+            st = str(row.get("status", ""))
+            is_first_day = ("首日" in st) or ("N" in st)
+            issue_p = safe_float(row.get("issue_price", 0.0))
+
             if c in quote_map:
                 q = quote_map[c]
                 p = safe_float(q.get("price", 0.0))
-                issue_p = safe_float(row.get("issue_price", 0.0))
+                last_c = safe_float(q.get("last_close", 0.0))
 
                 if p > 0:
                     df.at[idx, "price"] = p
 
-                    # 计算涨跌幅
-                    pct_val = safe_float(q.get("pct", 0.0))
-                    if pct_val != 0.0:
-                        df.at[idx, "pct"] = pct_val
+                    # 涨跌幅精确计算：
+                    # 1. 优先使用行情源返回的当日实时涨跌幅 (q["pct"])
+                    if "pct" in q and q["pct"] is not None and not math.isnan(safe_float(q["pct"])):
+                        df.at[idx, "pct"] = round(safe_float(q["pct"]), 2)
+                    elif last_c > 0:
+                        # 2. 已上市/次新股：以昨日收盘价计算今日真实涨跌幅
+                        df.at[idx, "pct"] = round((p - last_c) / last_c * 100.0, 2)
+                    elif is_first_day and issue_p > 0:
+                        # 3. 仅首日(N)且无昨收时，才以发行价作为基准计算首日涨幅
+                        df.at[idx, "pct"] = round((p - issue_p) / issue_p * 100.0, 2)
                     else:
-                        last_c = safe_float(q.get("last_close", 0.0))
-                        ref_p = last_c if last_c > 0 else issue_p
-                        if ref_p > 0:
-                            df.at[idx, "pct"] = round((p - ref_p) / ref_p * 100.0, 2)
+                        df.at[idx, "pct"] = 0.0
 
                 # 成交额
                 amt = safe_float(q.get("amount", 0.0))
@@ -433,7 +456,6 @@ class NewStockFetcher:
                 tmv = safe_float(q.get("total_mv_yi", 0.0))
                 if tmv > 0:
                     df.at[idx, "total_mv_yi"] = tmv
-
         return df
 
     def _check_strategy_exists(self, code: str) -> bool:
