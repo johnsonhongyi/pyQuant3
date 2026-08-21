@@ -1,3 +1,59 @@
+## 2026-08-21 13:18
+- [x] **彻底根治 SBC 窗口最大化尺寸被截断污染成 2/3 规格的问题，实现最大化窗口点击重排后精准恢复原本尺寸（与同屏正常窗口大小保持 100% 一致）(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_rearrange.py`)**：
+    - [x] **最大化与全屏状态尺寸持久化绝对隔离**：
+        - 维护 `self._unmaximized_size` 独立记忆用户正常浮动窗口尺寸；
+        - 在 `resizeEvent`、`moveEvent`、`_save_sbc_geometry` 中增加强制守卫：若处于最大化、全屏、最小化状态，立即直接 `return`，绝不触发写盘，绝不覆写 `_global_sbc_size`，杜绝 2/3 屏幕规格（`max_allowed_w/h`）污染全局配置；
+    - [x] **重排时基准尺寸自适应与同屏一致性恢复**：
+        - 在 `rearrange_all_sbc_windows` 中引入同屏正常窗口参考机制（Reference Normal Size），从同屏非最大化窗口或合法 `_unmaximized_size` 提取标准紧凑尺寸；
+        - 最大化窗口退出后，自动将尺寸恢复为与同屏其他正常窗口（如 920093 与 920059 并排）完全相同的原始紧凑大小，消除图 3 中的异常 2/3 巨型窗口；
+    - [x] **自动化专项强化测试 100% 通过 (`tests/test_sbc_rearrange.py`)**：
+        - 断言最大化恢复后的窗口与未最大化窗口宽、高完全一致（`dlg1.width() == dlg2.width() == dlg3.width()`），全套 12 个用例全部通过。
+
+## 2026-08-21 13:06
+- [x] **修复 SBC 窗口最大化查看时点击重排未恢复正常窗口大小的 Bug 并增强多屏排布鲁棒性 (`ats/ui/intraday_strategy_dialog.py`, `qt_window_utils.py`, `tests/test_sbc_rearrange.py`)**：
+    - [x] **前置检测与状态强制还原**：
+        - 在 `rearrange_all_sbc_windows` 执行网格排布计算前，遍历所有活动 SBC 窗口，凡处于最大化（`isMaximized()`）或最小化（`isMinimized()`）状态的窗口，强制调用 `dlg.showNormal()` 还原为正常窗口；
+    - [x] **杜绝全屏分辨率尺寸污染网格算法**：
+        - 排布算法中通过 `dlg._get_effective_normal_geometry()` 提取正常窗口大小，严格限制在屏幕可用宽高的 2/3 以内（最小 320x180 保护），并显式执行 `dlg.resize(w, h)`，防止全屏宽高将后续子窗口推向屏幕外或错位；
+    - [x] **底层 Win32 窗口平铺同步增强 (`qt_window_utils.py`)**：
+        - 针对 Win32 原生句柄重排，增加 `win32gui.IsZoomed(hwnd)` 检测与 `SW_RESTORE` 恢复保护，确保底层平铺一致性；
+    - [x] **自动化专项回归测试保障 (`tests/test_sbc_rearrange.py`)**：
+        - 新增 `test_rearrange_with_maximized_sbc_dialog` 专项用例，全面验证最大化窗口自动还原、尺寸合规限制与多窗口无重叠网格平铺，全套 12 个测试 100% 通过。
+
+## 2026-08-21 13:19
+- [x] **根治 Push2 字段类型转换异常与龙头追踪器多屏 `setGeometry` 坐标越界警告 (`ats/new_stock_fetcher.py`, `ats/ui/dragon_monitor.py`)**：
+    - [x] **Push2 安全浮点数解析 (`safe_float`)**：
+        - 针对东财 Push2 / akshare 返回的 `"-"`、`"--"`、`"None"`、`null` 等缺省字符串增加 `safe_float` 拦截，杜绝 `could not convert string to float: '-'` 异常日志；
+    - [x] **消除多屏环境 `DragonLeaderMonitorDialog` 的 `setGeometry` 警告**：
+        - 移除保存与恢复时重复进行的 DPI 缩放乘除导致的坐标越界放大问题；
+        - 接入 `clamp_window_to_screens` 与多屏幕虚拟桌面边界约束，设置最小窗口边界（350x250），彻底杜绝跨屏恢复时 Windows 底层报 `Unable to set geometry` 警告。
+
+## 2026-08-21 13:01
+- [x] **ATS 新股/次新股主控看板全面对齐重点关注核心监控列与 `ats_col` 自定义列 (`ats/ui/new_stock_panel.py`)**：
+    - [x] **对齐重点关注 6 大核心监控列**：
+        - 默认新增：`DFI (DFF)`、`Rank`、`DFF2`、`DFF3`、`大盘偏离`、`大盘共振`；
+        - 正红负绿精确高亮，共振状态自动标注“逆市抗跌”金色加粗、“同步走弱”等状态；
+    - [x] **动态支持 `ats_col` 自定义列**：
+        - 接入 `cct.ats_col` 与 `cct.vis_column_map`，动态扩展用户自定义指标列；
+        - IPC 推送自动提取赋值，列宽与表头排序全自动持久化落盘。
+
+## 2026-08-21 12:52
+- [x] **根治数据异常（`+nan%` 与换手率大数混淆）并保证全系统统一的启动数据有效性 (`ats/ui/new_stock_panel.py`)**：
+    - [x] **全系统统一启动数据初始化**：
+        - 启动时立即执行 `self.load_data(force_refresh=True)`，多通道全量获取权威行情与 IPO 发行日历，确保首屏数据 100% 合法有效；
+    - [x] **字段清洗与安全校验**：
+        - 针对 IPC 数据流可能传入的 `np.nan` 涨跌幅进行安全推算（基于现价与发行价或前收价），杜绝 `+nan%`；
+        - 针对成交额（元）误入 `turnover` 字段进行严格范围（`0%~100%`）与别名（`turnoverrate` / `turnover_ratio`）校验，彻底杜绝数十万异常大数；
+        - 所有数值渲染统一经过 `clean_num()` 防御，保障界面呈现绝对严谨规范。
+
+## 2026-08-21 12:46
+- [x] **优化 ATS 新股主控看板实盘时段与休市休眠机制 (`ats/ui/new_stock_panel.py`)**：
+    - [x] **非交易时段彻底静止休眠（杜绝休市无意义刷新 UI）**：
+        - 接入 `cct.get_work_time()` 实盘交易时段动态判定（09:15~11:30, 13:00~15:02）；
+        - 在非交易时段（盘前、午休、收盘后、周末节假日），系统在初始化拉取一次基准数据后，自动进入休眠静态模式 (`🕒 休市静态模式`)，定时器彻底跳过网络抓取与 UI 重绘，彻底消除无谓的刷新与 CPU/网络开销；
+        - 进入连续竞价实盘交易时段时，自动恢复 3 秒级实时高频动态更新 (`🟢 实时更新`)；
+        - 用户随时可点击【🔄 刷新】进行强制单次更新。
+
 ## 2026-08-21 12:40
 - [x] **升级 ATS 新股/次新股主控看板：修复 SBC 走势调起、实现数据刷新视图/焦点保护与排序持久化 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`)**：
     - [x] **修复 SBC 走势窗口调起异常**：
