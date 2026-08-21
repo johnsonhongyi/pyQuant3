@@ -1,5 +1,9 @@
 ## 2026-08-21 16:00
 - [x] **ATS 新股次新股涨跌幅与 IPC 指标丢失彻底修复 & 档位推演自动点亮与双击行为优化全落地 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`, `tests/test_new_stock_module.py`)**：
+    - [x] **新股行情确立以底层 TDX API 为权威一等公民 & IPC 覆写彻底隔离 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`)**：
+        - 查明并彻底根治了“主终端全市场 IPC 数据流推送时因缺少 percent 字段而将新股真实涨跌幅暴力覆盖为 0.00%”的严重时序缺陷；
+        - 在 `update_from_ipc_df` 中建立行情权限保护：新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场衍生指标（DFF/Rank/DFF2/DFF3/rs/共振/自定义列），绝不覆写 TDX 已计算好的真实价格与涨跌幅；
+        - 在 `enrich_with_tdx_realtime` 中强化 TDX 现价与昨收价计算机制（`last_c > 0` 优先直算 `pct`）；
     - [x] **档位收益文案统一由“赚”更正为“盈利” (`ats/ui/new_stock_panel.py`)**：
         - 界面展示全面规范化为 `盈利38.03万`、`盈利9.34万`、`盈利4,420元`；
     - [x] **总市值数据获取与回填 Bug 根除 (`ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`)**：

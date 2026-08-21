@@ -1113,13 +1113,18 @@ class PRServiceGUI:
                 # 提取板块缓存（优先于 df 数据以支持离线自愈）
                 block_str = getattr(self, '_block_cache', {}).get(code_str, '--')
                 if block_str and block_str not in ('--', 'nan', 'None'):
+                    clean_name = str(old_vals[2]).strip() if len(old_vals) > 2 else code_str
+                    if clean_name.startswith("★ "):
+                        clean_name = clean_name[len("★ "):]
                     all_stocks_for_stats[code_str] = {
+                        "name": clean_name,
                         "percent": pct,
                         "category": block_str,
                         "close": price_str,
                         "ma5d": row.get('ma5d', 0.0) if row is not None else 0.0,
                         "ma20d": row.get('ma20d', 0.0) if row is not None else 0.0,
                         "ma60d": row.get('ma60d', 0.0) if row is not None else 0.0,
+                        "rank": int(row.get('Rank', row.get('rank', 0))) if row is not None else 0,
                     }
 
         # 实时根据推送的行情重新分析和更新板块排行展示
@@ -1890,7 +1895,86 @@ class PRServiceGUI:
                         pass
 
 
+    def tree_scroll_to_code(self, code, select_win=False, vis=True):
+        """
+        [NEW] 跨视图联动与自动滚动定位指定股票代码行 (Thread-Safe + Anti-recursion)
+        在当前主界面的所有视图 (东、花、开、淘、合) 以及板块个股弹窗中搜索 code，
+        如果存在则自动选中、聚焦并滚动到该行 (see)，并联动 TDX/THS/可视化器。
+        """
+        if not code:
+            return False
+        code = str(code).strip().zfill(6)
+
+        # 记录当前选中的 code，防止事件循环与重复触发
+        self._active_link_code = code
+
+        # 1. 触发外部物理通道联动 (TDX/THS/可视化器) - 全部放入后台守护线程，避免 Windows IPC / Socket 阻塞主线程
+        if vis:
+            def _bg_link(c):
+                try:
+                    is_tdx = self.link_tdx_var.get()
+                    is_ths = self.link_ths_var.get()
+                    if is_tdx or is_ths:
+                        flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
+                        if get_link_manager:
+                            get_link_manager().push(c, flags=flags)
+                        elif self.local_sender:
+                            self.local_sender.send(c)
+                    if self.link_vis_var.get():
+                        self.send_to_visualizer(c)
+                except Exception as ex:
+                    service_logger.debug(f"联动发送异常: {ex}")
+
+            threading.Thread(target=_bg_link, args=(code,), daemon=True).start()
+
+            if hasattr(self, 'lbl_status'):
+                try:
+                    self.lbl_status.config(text=f"已联动定位: {code}", fg="darkgreen")
+                except Exception:
+                    pass
+
+        # 2. UI 视图滚动定位
+        def _do_scroll():
+            if getattr(self, '_is_scrolling_to_code', False):
+                return
+            self._is_scrolling_to_code = True
+            try:
+                # 收集所有当前活跃的 Treeview
+                target_trees = [self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res]
+                concept_tree = getattr(self, 'concept_tree', None)
+                if concept_tree and concept_tree.winfo_exists():
+                    target_trees.append(concept_tree)
+
+                for tree in target_trees:
+                    if not tree or not tree.winfo_exists():
+                        continue
+                    cols = list(tree["columns"])
+                    code_idx = cols.index("code") if "code" in cols else 1
+                    for iid in tree.get_children():
+                        vals = tree.item(iid, "values")
+                        if vals and len(vals) > code_idx:
+                            c = str(vals[code_idx]).strip().zfill(6)
+                            if c == code:
+                                curr_sel = tree.selection()
+                                if not curr_sel or curr_sel[0] != iid:
+                                    tree.selection_set(iid)
+                                tree.focus(iid)
+                                tree.see(iid)
+                                break
+            except Exception as e:
+                service_logger.debug(f"tree_scroll_to_code 滚动异常: {e}")
+            finally:
+                self._is_scrolling_to_code = False
+
+        if threading.current_thread() is threading.main_thread():
+            _do_scroll()
+        else:
+            self.root.after(0, _do_scroll)
+        return True
+
     def on_tree_select(self, event):
+        if getattr(self, '_is_scrolling_to_code', False):
+            return
         tree = event.widget
         self._last_active_tree = tree
         selection = tree.selection()
@@ -1898,24 +1982,14 @@ class PRServiceGUI:
             item = tree.item(selection[0])
             values = item.get("values")
             if values and len(values) >= 2:
-                code = str(values[1]).strip().zfill(6)
-                
-                # 1. 联动 TDX / THS
-                is_tdx = self.link_tdx_var.get()
-                is_ths = self.link_ths_var.get()
-                
-                if is_tdx or is_ths:
-                    flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
-                    if get_link_manager:
-                        get_link_manager().push(code, flags=flags)
-                    elif self.local_sender:
-                        self.local_sender.send(code)
-                
-                # 2. 联动可视化 (Vis / Port 26668)
-                if self.link_vis_var.get():
-                    threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
-                    
-                self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+                cols = list(tree["columns"])
+                code_idx = cols.index("code") if "code" in cols else 1
+                if len(values) > code_idx:
+                    code = str(values[code_idx]).strip().zfill(6)
+                    # 💥 关键防重入：如果当前 code 已经处于 active 状态，则说明是程序选中的，不重复触发广播
+                    if getattr(self, '_active_link_code', None) == code:
+                        return
+                    self.tree_scroll_to_code(code, vis=True)
 
     def on_tree_double_click(self, event):
         tree = event.widget
@@ -1939,7 +2013,7 @@ class PRServiceGUI:
         IPC_PORT = 26668
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.5)
+            s.settimeout(0.3)
             s.connect((IPC_HOST, IPC_PORT))
             
             # 检测是否处于历史数据模式 (self.current_date 与今日不同)
@@ -1959,38 +2033,7 @@ class PRServiceGUI:
         """DNA 审计窗口点击个股时，回传人气排行界面以触发 TDX、Visualizer 联动以及高亮该个股"""
         if not code:
             return
-        code = str(code).strip().zfill(6)
-        
-        # 联动 TDX / THS 及可视化
-        is_tdx = self.link_tdx_var.get()
-        is_ths = self.link_ths_var.get()
-        if is_tdx or is_ths:
-            flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
-            if get_link_manager:
-                get_link_manager().push(code, flags=flags)
-            elif self.local_sender:
-                self.local_sender.send(code)
-                
-        if self.link_vis_var.get():
-            threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
-            
-        self.lbl_status.config(text=f"已通过DNA审计联动: {code}", fg="darkgreen")
-        
-        # 尝试在界面五个 Treeview 里面查找该股票并高亮选中
-        all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
-        for tree in all_trees:
-            # 只有在此 Treeview 实际展示且包含该个股时才选中它
-            if not tree.winfo_viewable():
-                continue
-            for iid in tree.get_children():
-                vals = tree.item(iid, "values")
-                if vals and len(vals) >= 2:
-                    c = str(vals[1]).strip().zfill(6)
-                    if c == code:
-                        tree.selection_set(iid)
-                        tree.focus(iid)
-                        tree.see(iid)
-                        break
+        self.tree_scroll_to_code(code, vis=True)
 
     def _run_dna_audit_batch(self, code_to_name, end_date=None, resample='d'):
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
@@ -2444,6 +2487,15 @@ class PRServiceGUI:
                             row_obj = None
 
                 code_str = str(code).strip().zfill(6)
+                if (name == "--" or not name.strip()) and row_obj is not None:
+                    name = str(row_obj.get("name", row_obj.get("Name", "--"))).strip()
+                if name == "--" or not name.strip():
+                    try:
+                        from sys_utils import resolve_stock_name
+                        name = resolve_stock_name(code_str)
+                    except Exception:
+                        name = "--"
+
                 if block_str == '--' or not block_str:
                     block_str = self._block_cache.get(code_str, '--')
 
@@ -2453,25 +2505,14 @@ class PRServiceGUI:
                 elif pct < 0:
                     tag = "down"
 
-                code_str = str(code).strip().zfill(6)
                 is_fav = code_str in fav_stocks
                 display_name = f"★ {name}" if is_fav else name
                 tags = [tag]
                 if is_fav:
                     tags.append("favorite")
 
-                # 板块写入缓存，不写入 Treeview
                 if block_str and block_str not in ('--', 'nan', 'None'):
                     self._block_cache[code_str] = block_str
-                    # 放入统计字典
-                    all_stocks_for_stats[code_str] = {
-                        "percent": pct,
-                        "category": block_str,
-                        "close": price_str,
-                        "ma5d": row_obj.get('ma5d', 0.0) if row_obj is not None else 0.0,
-                        "ma20d": row_obj.get('ma20d', 0.0) if row_obj is not None else 0.0,
-                        "ma60d": row_obj.get('ma60d', 0.0) if row_obj is not None else 0.0,
-                    }
 
                 # 历史公式过滤
                 if has_query:
@@ -2484,6 +2525,19 @@ class PRServiceGUI:
                     cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
                     if self.selected_concept not in cats:
                         continue
+
+                # 仅将实际展示/命中的个股放入统计字典
+                if block_str and block_str not in ('--', 'nan', 'None'):
+                    all_stocks_for_stats[code_str] = {
+                        "name": name,
+                        "percent": pct,
+                        "category": block_str,
+                        "close": price_str,
+                        "ma5d": row_obj.get('ma5d', 0.0) if row_obj is not None else 0.0,
+                        "ma20d": row_obj.get('ma20d', 0.0) if row_obj is not None else 0.0,
+                        "ma60d": row_obj.get('ma60d', 0.0) if row_obj is not None else 0.0,
+                        "rank": int(row_obj.get('Rank', row_obj.get('rank', 0))) if row_obj is not None else 0,
+                    }
 
                 # 基础列 + 自定义追加列
                 extra_vals = _read_extra_vals(row_obj)
@@ -2536,6 +2590,15 @@ class PRServiceGUI:
                         row_obj_res = None
 
             code_str = str(code).strip().zfill(6)
+            if (name == "--" or not name.strip()) and row_obj_res is not None:
+                name = str(row_obj_res.get("name", row_obj_res.get("Name", "--"))).strip()
+            if name == "--" or not name.strip():
+                try:
+                    from sys_utils import resolve_stock_name
+                    name = resolve_stock_name(code_str)
+                except Exception:
+                    name = "--"
+
             if block_str == '--' or not block_str:
                 block_str = self._block_cache.get(code_str, '--')
 
@@ -2545,25 +2608,14 @@ class PRServiceGUI:
             elif pct < 0:
                 tag = "down"
 
-            code_str = str(code).strip().zfill(6)
             is_fav = code_str in fav_stocks
             display_name = f"★ {name}" if is_fav else name
             tags = [tag]
             if is_fav:
                 tags.append("favorite")
 
-            # 板块写入缓存，不写入 Treeview
             if block_str and block_str not in ('--', 'nan', 'None'):
                 self._block_cache[code_str] = block_str
-                # 放入统计字典
-                all_stocks_for_stats[code_str] = {
-                    "percent": pct,
-                    "category": block_str,
-                    "close": price_str,
-                    "ma5d": row_obj_res.get('ma5d', 0.0) if row_obj_res is not None else 0.0,
-                    "ma20d": row_obj_res.get('ma20d', 0.0) if row_obj_res is not None else 0.0,
-                    "ma60d": row_obj_res.get('ma60d', 0.0) if row_obj_res is not None else 0.0,
-                }
 
             # 历史公式过滤
             if has_query:
@@ -2576,6 +2628,19 @@ class PRServiceGUI:
                 cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
                 if self.selected_concept not in cats:
                     continue
+
+            # 仅将实际展示/命中的个股放入统计字典
+            if block_str and block_str not in ('--', 'nan', 'None'):
+                all_stocks_for_stats[code_str] = {
+                    "name": name,
+                    "percent": pct,
+                    "category": block_str,
+                    "close": price_str,
+                    "ma5d": row_obj_res.get('ma5d', 0.0) if row_obj_res is not None else 0.0,
+                    "ma20d": row_obj_res.get('ma20d', 0.0) if row_obj_res is not None else 0.0,
+                    "ma60d": row_obj_res.get('ma60d', 0.0) if row_obj_res is not None else 0.0,
+                    "rank": int(row_obj_res.get('Rank', row_obj_res.get('rank', 0))) if row_obj_res is not None else 0,
+                }
 
             # 共振表同样追加自定义列
             extra_vals_res = _read_extra_vals(row_obj_res)
@@ -2896,12 +2961,14 @@ class PRServiceGUI:
                     except (ValueError, TypeError):
                         pct_val = 0.0
                     all_stocks_for_stats[code] = {
+                        "name": name,
                         "percent": pct_val,
                         "category": block,
                         "close": price,
                         "ma5d": 0.0,
                         "ma20d": 0.0,
-                        "ma60d": 0.0
+                        "ma60d": 0.0,
+                        "rank": rank
                     }
 
                 # 读取自适应历史列值（CSV 中有则取，否则 '--'）
@@ -3277,24 +3344,31 @@ class PRServiceGUI:
         temp_cat_stocks = {}
 
         for code, info in all_stocks.items():
-            cat_str = info["category"]
+            cat_str = info.get("category", "")
             if not cat_str or cat_str in ("--", "nan", "None"):
                 continue
             cats = [c.strip() for c in re.split(r'[;；,，/|]', cat_str) if c.strip()]
-            pct = info["percent"]
+            pct = info.get("percent", 0.0)
             
-            # 获取个股的基本属性
+            # 获取个股的基本属性并多层兜底
             name = info.get("name", "--")
-            if name == "--" and hasattr(self, '_last_data_cache') and self._last_data_cache:
-                q_data = self._last_data_cache.get("quotes", {})
-                if code in q_data:
-                    name = q_data[code].get("name", name)
+            if not name or name == "--" or not str(name).strip():
+                if hasattr(self, '_last_data_cache') and self._last_data_cache:
+                    q_data = self._last_data_cache.get("quotes", {})
+                    if code in q_data:
+                        name = q_data[code].get("name", name)
+            if not name or name == "--" or not str(name).strip():
+                try:
+                    from sys_utils import resolve_stock_name
+                    name = resolve_stock_name(code)
+                except Exception:
+                    name = "--"
             
             try:
-                close = float(info["close"])
-                ma5 = float(info["ma5d"])
-                ma20 = float(info["ma20d"])
-                ma6 = float(info["ma60d"])
+                close = float(info.get("close", 0.0))
+                ma5 = float(info.get("ma5d", 0.0))
+                ma20 = float(info.get("ma20d", 0.0))
+                ma6 = float(info.get("ma60d", 0.0))
                 is_bullish = (ma5 > ma20 > ma6) and (close > ma6)
             except Exception:
                 is_bullish = False
@@ -3320,35 +3394,53 @@ class PRServiceGUI:
         for cat, percents in concept_dict.items():
             if not percents:
                 continue
-            avg_pct = sum(percents) / len(percents)
+            cnt = len(percents)
+            total_pct = sum(percents)
+            avg_pct = total_pct / cnt
             bullish_list = concept_is_bullish.get(cat, [])
             bullish_ratio = sum(bullish_list) / len(bullish_list) if bullish_list else 0.0
             
-            # 使用和 tk 一致的得分算法并放大10倍
-            score = avg_pct * (1.0 + bullish_ratio) * 10.0
+            # 🚀【板块热度加权】：板块异动个股越多权重越大！
+            # 综合板块总动量(总涨幅 sum(pct))与只数群聚分(Count * 10.0)，辅以多头趋势加成：
+            # Score = (TotalPct + Count * 10.0) * (1.0 + 0.5 * BullishRatio) * 10.0
+            if total_pct > 0:
+                base_energy = total_pct + (cnt * 10.0)
+                score = base_energy * (1.0 + 0.5 * bullish_ratio) * 10.0
+            else:
+                score = (total_pct - cnt * 5.0) * (1.0 + 0.5 * bullish_ratio) * 10.0
             
             concept_score.append({
                 "name": cat,
                 "score": round(score, 2),
                 "avg_percent": round(avg_pct, 2),
-                "count": len(percents),
+                "count": cnt,
                 "bullish_ratio": round(bullish_ratio, 2)
             })
 
-        # ── 跟 tk 一致的底层过滤与排序逻辑 ──
-        # 1. 过滤成员数不足 2 的概念 (过滤杂音)
-        filtered_scores = [x for x in concept_score if x["count"] >= 2]
-        if not filtered_scores:
-            # 降级保留全部 (当所有板块 count 都为 1 时)
-            filtered_scores = concept_score
-
-        # 2. 在非噪声（_is_noise_concept）内，以 score 降序为主关键字排序，若 score 相同则按 count 降序
-        filtered_scores.sort(key=lambda x: (
+        # ── 过滤与排序逻辑 ──
+        # 1. 优先选取成员数 >= 2 的有效概念 (过滤杂音)
+        valid_scores = [x for x in concept_score if x["count"] >= 2]
+        valid_scores.sort(key=lambda x: (
             1 if self._is_noise_concept(x["name"]) else 0,
             -x["score"],
-            -x["count"]
+            -x["count"],
+            -x["avg_percent"]
         ))
-        top5 = filtered_scores[:5]
+        
+        # 2. 如果 valid_scores 数量不足 5 个，平滑降级从 count < 2 中补充非噪声概念
+        if len(valid_scores) < 5:
+            remaining = [x for x in concept_score if x["count"] < 2]
+            remaining.sort(key=lambda x: (
+                1 if self._is_noise_concept(x["name"]) else 0,
+                -x["score"],
+                -x["count"],
+                -x["avg_percent"]
+            ))
+            top_candidates = valid_scores + remaining
+        else:
+            top_candidates = valid_scores
+
+        top5 = top_candidates[:5]
 
         if not top5:
             lbl_empty = tk.Label(self.dynamic_concepts_frame, text="暂无板块数据", font=("Microsoft YaHei", 9, "bold"), fg="gray")
@@ -3638,20 +3730,9 @@ class PRServiceGUI:
                 canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
 
     def _on_label_click(self, code, idx):
-        """点击详情中个股标签，实现联动"""
+        """点击详情中个股标签，实现多视图滚动定位与通道联动"""
         self._update_detail_selection(idx)
-        # 联动逻辑
-        is_tdx = self.link_tdx_var.get()
-        is_ths = self.link_ths_var.get()
-        if is_tdx or is_ths:
-            flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
-            if get_link_manager:
-                get_link_manager().push(code, flags=flags)
-            elif self.local_sender:
-                self.local_sender.send(code)
-        if self.link_vis_var.get():
-            threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
-        self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+        self.tree_scroll_to_code(code, vis=True)
 
     def _on_label_double_click(self, code, concept_name):
         """双击详情个股，直接弹出具体板块列表窗口"""
@@ -3707,7 +3788,7 @@ class PRServiceGUI:
                 return default
             return str(val).strip()
 
-        # 1. 提取当前模式下正在显示的所有个股的数据行，并进行物理去重
+        # 1. 提取当前模式下正在显示的所有人气强势个股的数据行，并进行物理去重
         current_stocks = []
         seen_codes = set()
         if is_history_mode:
@@ -3718,12 +3799,28 @@ class PRServiceGUI:
                         seen_codes.add(c)
                         current_stocks.append((c, row))
         else:
-            if df_all is not None:
-                for idx, row in df_all.iterrows():
-                    c = str(idx).strip().split('.')[0].zfill(6)
-                    if c and c != "000000" and c not in seen_codes:
-                        seen_codes.add(c)
-                        current_stocks.append((c, row))
+            # 严格从当前人气综合界面的 5 个表格中实际展示/载入的所有强势个股中提取！
+            all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
+            for tree_w in all_trees:
+                if not tree_w or not tree_w.winfo_exists():
+                    continue
+                cols = list(tree_w["columns"])
+                code_idx = cols.index("code") if "code" in cols else 1
+                for iid in tree_w.get_children():
+                    vals = tree_w.item(iid, "values")
+                    if vals and len(vals) > code_idx:
+                        c = str(vals[code_idx]).strip().zfill(6)
+                        if c and c != "000000" and c not in seen_codes:
+                            seen_codes.add(c)
+                            row_obj = None
+                            if df_all is not None and c in df_all.index:
+                                try:
+                                    row_obj = df_all.loc[c]
+                                    if isinstance(row_obj, pd.DataFrame):
+                                        row_obj = row_obj.iloc[0]
+                                except Exception:
+                                    row_obj = None
+                            current_stocks.append((c, row_obj))
 
         # 2. 遍历并匹配属于 target_concept 的股票
         for code_str, row in current_stocks:
@@ -3798,12 +3895,13 @@ class PRServiceGUI:
                     try:
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
-                        name = row.get("name", row.get("Name", "--"))
-                        pct = float(row.get('percent', row.get('ratio', 0.0)))
-                        price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
-                        rank_val = int(row.get('Rank', row.get('rank', 0)))
-                        dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
-                        dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
+                        if row is not None:
+                            name = row.get("name", row.get("Name", "--"))
+                            pct = float(row.get('percent', row.get('ratio', 0.0)))
+                            price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+                            rank_val = int(row.get('Rank', row.get('rank', 0)))
+                            dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
+                            dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
                     except Exception:
                         pass
 
@@ -3829,7 +3927,8 @@ class PRServiceGUI:
                 for ec in extra_cols:
                     val_item = "--"
                     try:
-                        val_item = safe_str(row.get(ec))
+                        if row is not None:
+                            val_item = safe_str(row.get(ec))
                     except Exception:
                         pass
                     extra_vals[ec] = val_item
@@ -3943,31 +4042,21 @@ class PRServiceGUI:
         tree.tag_configure("flat",     foreground="#000000", font=("Microsoft YaHei", 9))
         tree.tag_configure("favorite", background="#e6ffe6", font=("Microsoft YaHei", 9, "bold"))
 
-        # 绑定大小改变事件以自适应列宽
-        tree.bind("<Configure>", lambda e, t=tree: self._adjust_tree_column_widths(t))
-
         self.concept_tree = tree
 
         # 单击与双击联动事件
         def on_select_top10(event):
+            if getattr(self, '_is_scrolling_to_code', False):
+                return
             self._last_active_tree = tree
             sel = tree.selection()
             if sel:
                 vals = tree.item(sel[0], "values")
                 if vals and len(vals) >= 2:
                     code = str(vals[1]).strip().zfill(6) # 0 is idx, 1 is code
-                    # 联动
-                    is_tdx = self.link_tdx_var.get()
-                    is_ths = self.link_ths_var.get()
-                    if is_tdx or is_ths:
-                        flags = {'tdx': is_tdx, 'ths': is_ths, 'dfcf': False}
-                        if get_link_manager:
-                            get_link_manager().push(code, flags=flags)
-                        elif self.local_sender:
-                            self.local_sender.send(code)
-                    if self.link_vis_var.get():
-                        threading.Thread(target=self.send_to_visualizer, args=(code,), daemon=True).start()
-                    self.lbl_status.config(text=f"已联动: {code}", fg="darkgreen")
+                    if getattr(self, '_active_link_code', None) == code:
+                        return
+                    self.tree_scroll_to_code(code, vis=True)
 
         def on_double_click_top10(event):
             sel = tree.selection()
