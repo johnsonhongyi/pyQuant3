@@ -434,6 +434,11 @@ class IntradayStrategyEngine:
 
         st_id = st.get("id", "strategy_a_new_stock_batch_sell") if st else "strategy_a_new_stock_batch_sell"
 
+        try:
+            open_price = float(open_price)
+        except (ValueError, TypeError):
+            open_price = 0.0
+
         if st and "stock_spec" in st:
             spec = st["stock_spec"]
             issue_p = float(spec.get("issue_price", 0.0))
@@ -454,8 +459,8 @@ class IntradayStrategyEngine:
                 else:
                     return ("保守档(<+50%)", st_id, "hold_rebound")
 
-        # 对于通用日常个股策略或非新股标的，按日常标准档位执行
-        if (st and st.get("id") == "strategy_c_daily_surge_ladder") or (c_clean and c_clean not in ["688826", "688835", "688836"]):
+        # 对于通用日常个股策略，按日常标准档位执行
+        if st and st.get("id") == "strategy_c_daily_surge_ladder":
             return ("日常标准档", st_id, "standard")
 
         # 通用新股/未指定发行价标准档位

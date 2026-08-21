@@ -2419,17 +2419,25 @@ class SBCIntradayChartDialog(QWidget):
         self.txt_log.setPlainText(log_msg)
 
 
-def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None) -> Optional[SBCIntradayChartDialog]:
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
     """
     【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
     """
+    # 兼容各种调用形式 (code, parent=self / parent_win, code)
+    if "parent" in kwargs and parent_win is None:
+        parent_win = kwargs.get("parent")
+    if not isinstance(code, str) and isinstance(parent_win, str):
+        temp = code
+        code = parent_win
+        parent_win = temp if isinstance(temp, QWidget) else None
+
     if not code:
         return None
     c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
     if not c_clean or c_clean == "000000":
         return None
 
-    main_win = parent_win.window() if parent_win else None
+    main_win = parent_win.window() if (parent_win and hasattr(parent_win, 'window')) else None
     target_win = main_win or parent_win
 
     if target_win:
@@ -3467,15 +3475,17 @@ class IntegratedTradingStrategyPanel(QWidget):
             num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
             phase_defs = []
             for idx, p in enumerate(phases):
-                s_t = p.get("start_time", "")
-                e_t = p.get("end_time", "")
-                t_range = f"{s_t}~{e_t}" if (s_t and e_t) else p.get("phase_id", "")
-                p_name = p.get("name", f"阶段 {idx+1}")
+                s_t = str(p.get("start_time", "") or "")
+                e_t = str(p.get("end_time", "") or "")
+                t_range = str(p.get("time_range", "") or "")
+                if not t_range:
+                    t_range = f"{s_t}~{e_t}" if (s_t and e_t) else f"阶段 {p.get('phase_id', idx+1)}"
+                p_name = str(p.get("name", f"阶段 {idx+1}"))
                 emoji = num_emojis[idx] if idx < len(num_emojis) else f"{idx+1}️⃣"
                 if not any(char in p_name for char in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]):
                     p_name = f"{emoji} {p_name}"
-                p_desc = p.get("description", "")
-                phase_defs.append((t_range, p_name, p_desc))
+                p_desc = str(p.get("description") or p.get("action_guidance") or "")
+                phase_defs.append((str(t_range), str(p_name), str(p_desc)))
 
         for idx, (time_range, phase_title, phase_desc) in enumerate(phase_defs):
             p_box = QFrame(self.scroll_content)
@@ -3489,9 +3499,9 @@ class IntegratedTradingStrategyPanel(QWidget):
             h_lay = QHBoxLayout()
             h_lay.setContentsMargins(0, 0, 0, 0)
 
-            lbl_time = QLabel(time_range)
+            lbl_time = QLabel(str(time_range))
             lbl_time.setStyleSheet("font-weight: bold; color: #ffaa44; font-size: 8.5pt;")
-            lbl_title = QLabel(phase_title)
+            lbl_title = QLabel(str(phase_title))
             lbl_title.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 8.5pt;")
             lbl_status = QLabel("⏳ 待生效")
             lbl_status.setStyleSheet("font-weight: bold; color: #555566; font-size: 8pt;")
@@ -3501,7 +3511,7 @@ class IntegratedTradingStrategyPanel(QWidget):
             h_lay.addStretch()
             h_lay.addWidget(lbl_status)
 
-            lbl_sub = QLabel(phase_desc)
+            lbl_sub = QLabel(str(phase_desc))
             lbl_sub.setStyleSheet("color: #8e8e9e; font-size: 8pt;")
 
             p_layout.addLayout(h_lay)

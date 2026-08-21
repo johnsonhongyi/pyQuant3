@@ -37,6 +37,7 @@ from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
 from ats.ui.kernel_trace_panel import KernelTracePanel
 from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
 from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+from ats.ui.new_stock_panel import NewStockPanel
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
 from ats.signal_ledger import SignalLedger
@@ -2075,6 +2076,11 @@ class ATSMainWindow(QMainWindow):
         self.swing_table = SwingStateTable()
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
+
+        self.new_stock_panel = NewStockPanel(main_window=self)
+        self.new_stock_panel.stock_selected.connect(self.link_stock)
+        self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
+        self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         
         # 顶部主看板 Tab 右上角添加【🪟 SBC 重排】与【🔄 刷新状态】组合入口
         top_corner_container = QWidget()
@@ -3848,6 +3854,13 @@ class ATSMainWindow(QMainWindow):
             radar_list, watch_list, trade_list = self.universe_manager.get_pools()
             self.universe_widget.update_pools(radar_list, watch_list, trade_list)
             return
+
+        # ── 同步推送实时行情给新股次新股主控面板 ──
+        if hasattr(self, 'new_stock_panel') and self.new_stock_panel is not None:
+            try:
+                self.new_stock_panel.update_from_ipc_df(self.current_df)
+            except Exception as e_nsp:
+                logger.debug(f"[ATSMainWindow] new_stock_panel update from ipc error: {e_nsp}")
 
         # ── 启动后台 Worker ─────────────────────────────────────────────────────
         import datetime

@@ -1,3 +1,16 @@
+## 2026-08-21 12:40
+- [x] **升级 ATS 新股/次新股主控看板：修复 SBC 走势调起、实现数据刷新视图/焦点保护与排序持久化 (`ats/ui/new_stock_panel.py`, `ats/new_stock_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`)**：
+    - [x] **修复 SBC 走势窗口调起异常**：
+        - 修复 `open_sbc_chart_dialog` 函数签名与关键字参数兼容性，确保无论是通过面板顶部【📈 SBC 走势】按钮还是右键菜单均可秒级无缝调起 SBC 实盘分时走势图；
+    - [x] **数据刷新视图与焦点绝对保护（杜绝浏览中断与页面跳动）**：
+        - 数据刷新前后精确保存并恢复垂直滚动条位置 (`v_scroll`)、水平滚动条位置 (`h_scroll`) 与当前选中的股票焦点 (`selected_code`)；
+        - 采用单元格原地复用更新 (`In-Place Row Update`) 与 `blockSignals` 防抖，消除销毁重建造成的界面闪烁与焦点丢失；
+    - [x] **排序持久化与自动恢复**：
+        - 监听表头 `sortIndicatorChanged` 信号，原子持久化用户设置的排序列与升降序规则 (`ats_new_stock_sort_state_v1`)；
+        - 每次数据刷新与程序启动时，自动恢复并维持最后的排序状态；
+    - [x] **未上市新股 0 重复与全通道数据保障**：
+        - 严格去重保障，未上市新股申购日、发行价、估算流通市值、估算总市值完备呈现，0 缺失、0 重复。
+
 ## 2026-08-21 00:41
 - [x] **修复 `singleAnalyseUtil.py` 交易日/非交易日收盘判定与 RamDisk 备份脚本触发机制 (`singleAnalyseUtil.py`)**：
     - [x] **精准交易日/盘后判定（杜绝非交易日无意义执行与重复）**：
