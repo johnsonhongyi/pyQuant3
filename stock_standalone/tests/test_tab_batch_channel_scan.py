@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Tab 顶部公共 60f 通道测算、多选交互与统计联动窗口专项单元测试
+Tab 顶部公共 60f 通道测算、单选/多选交互与统计联动窗口专项单元测试
 """
 
 import sys
@@ -27,10 +27,10 @@ from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
 
 
 class TestTabBatchChannelScan(unittest.TestCase):
-    """Tab 顶部批量测算与多选统计窗口测试套件"""
+    """Tab 顶部批量测算与单选/多选统计窗口测试套件"""
 
-    def test_01_extended_selection_and_selected_pairs(self):
-        """测试 BaseATSTableWidget 的 ExtendedSelection 多选与标的对提取"""
+    def test_01_single_and_extended_selection(self):
+        """测试 BaseATSTableWidget 的单选点击 (1行)、多选 (多行) 与未选 (全量) 标的对提取"""
         table = BaseATSTableWidget()
         table.setColumnCount(2)
         table.setHorizontalHeaderLabels(["代码", "名称"])
@@ -44,12 +44,24 @@ class TestTabBatchChannelScan(unittest.TestCase):
 
         self.assertEqual(table.selectionMode(), QTableWidget.SelectionMode.ExtendedSelection)
 
-        # 1. 未选时默认提取全量
+        # 1. 未选任何行时：降级提取全量
+        table.clearSelection()
         all_pairs = table.get_selected_stock_pairs()
         self.assertEqual(len(all_pairs), 4)
         self.assertEqual(all_pairs[0], ("688826", "频准激光"))
 
-        # 2. 模拟 Shift/Ctrl 多选选中 第0行 和 第2行
+        # 2. 单选点击第0行 (只选1只股票)：必须仅返回这 1 只股票，绝不跑全量！
+        table.clearSelection()
+        table.selectionModel().select(
+            table.model().index(0, 0),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        )
+        single_pairs = table.get_selected_stock_pairs()
+        self.assertEqual(len(single_pairs), 1)
+        self.assertEqual(single_pairs[0], ("688826", "频准激光"))
+
+        # 3. 模拟 Shift/Ctrl 多选选中 第0行 和 第2行 (2只股票)
+        table.clearSelection()
         table.selectionModel().select(
             table.model().index(0, 0),
             QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
@@ -64,10 +76,10 @@ class TestTabBatchChannelScan(unittest.TestCase):
         codes = [c for c, _ in multi_pairs]
         self.assertIn("688826", codes)
         self.assertIn("920059", codes)
-        print("[Test 1] BaseATSTableWidget 多选提取成功")
+        print("[Test 1] BaseATSTableWidget 单选/多选/全量提取验证成功")
 
     def test_02_channel_scan_result_dialog_stats_and_table(self):
-        """测试 ChannelReversalScanResultDialog 统计卡片与结果明细渲染"""
+        """测试 ChannelReversalScanResultDialog 独立非阻塞窗口渲染与联动"""
         df_mock = pd.DataFrame([
             {
                 "code": "688826",
@@ -110,7 +122,7 @@ class TestTabBatchChannelScan(unittest.TestCase):
 
         self.assertEqual(len(linkage_emitted), 1)
         self.assertEqual(linkage_emitted[0], ("688826", "频准激光"))
-        print("[Test 2] ChannelReversalScanResultDialog 渲染与联动触发成功")
+        print("[Test 2] ChannelReversalScanResultDialog 独立窗口渲染与纯粹联动触发成功")
 
 
 if __name__ == "__main__":

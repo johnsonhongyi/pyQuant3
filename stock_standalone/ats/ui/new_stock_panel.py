@@ -288,16 +288,6 @@ class NewStockPanel(QWidget):
         self.btn_open_sbc.clicked.connect(self._on_open_sbc_clicked)
         top_bar.addWidget(self.btn_open_sbc)
 
-        self.btn_eval_60f = QPushButton("🎯 60f通道测算")
-        self.btn_eval_60f.setToolTip("通过底层 TDX API 直连拉取 60m 真实 K 线，测算通道底部缩量横盘与右侧突破介入点")
-        self.btn_eval_60f.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_eval_60f.setStyleSheet("""
-            QPushButton { background-color: #0e2a38; color: #38bdf8; font-weight: bold; border: 1px solid #0284c7; border-radius: 3px; padding: 2px 6px; font-size: 9pt; }
-            QPushButton:hover { background-color: #0284c7; color: #ffffff; }
-        """)
-        self.btn_eval_60f.clicked.connect(self._on_eval_60f_clicked)
-        top_bar.addWidget(self.btn_eval_60f)
-
         top_bar.addStretch()
 
         self.lbl_status = QLabel("🟢 启动初始化数据中...")
@@ -1364,11 +1354,20 @@ class NewStockPanel(QWidget):
             df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c, c))
 
         from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
-        dlg = ChannelReversalScanResultDialog(
-            parent=self,
-            df_results=df_matched,
-            total_scanned=len(codes),
-            source_tab_name="新股次新股"
-        )
-        dlg.stock_linkage_requested.connect(self.stock_selected)
-        dlg.exec()
+        if not hasattr(self, '_channel_scan_dialog') or self._channel_scan_dialog is None:
+            self._channel_scan_dialog = ChannelReversalScanResultDialog(
+                parent=self,
+                df_results=df_matched,
+                total_scanned=len(codes),
+                source_tab_name="新股次新股"
+            )
+            self._channel_scan_dialog.stock_linkage_requested.connect(self.stock_selected)
+        else:
+            self._channel_scan_dialog.update_results(
+                df_results=df_matched,
+                total_scanned=len(codes),
+                source_tab_name="新股次新股"
+            )
+        self._channel_scan_dialog.show()
+        self._channel_scan_dialog.raise_()
+        self._channel_scan_dialog.activateWindow()

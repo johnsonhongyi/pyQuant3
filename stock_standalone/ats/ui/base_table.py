@@ -146,14 +146,14 @@ class BaseATSTableWidget(QTableWidget):
     def get_selected_stock_pairs(self) -> list:
         """
         获取当前表格中用户选中的所有标的 [(code, name), ...]
-        - 若用户按 Shift/Ctrl 多选了多行，返回所选多行；
-        - 若用户未选择任何行，则返回表格中所有未隐藏的有效行。
+        - 若用户选中了 1 行或多行 (单选点击、或按 Shift/Ctrl 多选)，返回选中的行；
+        - 若当前没有任何选中行，则降级返回表格中所有未隐藏的有效行。
         """
         code_col, name_col = self._get_code_name_cols()
         selected_rows = sorted(list(set(idx.row() for idx in self.selectedIndexes())))
         
         pairs = []
-        if len(selected_rows) > 1:
+        if len(selected_rows) >= 1:
             for r in selected_rows:
                 if not self.isRowHidden(r):
                     it_c = self.item(r, code_col)
@@ -165,7 +165,7 @@ class BaseATSTableWidget(QTableWidget):
             if pairs:
                 return pairs
 
-        # 降级：未多选时，提取表格中当前全部可见行
+        # 降级：当前未选中任何行时，提取表格中全部可见行
         for r in range(self.rowCount()):
             if not self.isRowHidden(r):
                 it_c = self.item(r, code_col)

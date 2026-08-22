@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-ats/ui/channel_scan_result_dialog.py — 60f 通道底部反转策略批量测算统计与联动结果窗口
+ats/ui/channel_scan_result_dialog.py — 60f 通道策略批量测算统计与联动独立窗口
 具备高品质量化深色主题、形态统计卡片、全字段结果表格、单击/双击系统级多图联动与右键 SBC 走势直达能力。
+【100% 独立非模态窗口】：不阻塞主窗口与看盘窗口，自由层级覆盖、可拖拽多屏浏览。
 """
 
 from typing import Dict, List, Any, Optional
 import pandas as pd
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu, QApplication, 
     QFrame, QGridLayout
 )
@@ -15,35 +16,60 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QCursor
 
 from ats.ui.styles import setup_header_persistence, NumericTableWidgetItem
-from ats.ui.base_table import send_to_linkage
 
 
-class ChannelReversalScanResultDialog(QDialog):
+class ChannelReversalScanResultDialog(QWidget):
     """
-    【60f 通道底部反转突破批量测算统计窗口】
+    【60f 通道底部反转/上涨顺势策略批量测算统计独立窗口】
     - 📊 顶部统计面板: 扫描总数、命中总数、命中率、平均分、最高分;
-    - 📋 结果明细表格: 代码、名称、得分、介入价、止损位、第一目标、第二目标、通道斜率、缩量比、逻辑解析;
-    - ⚡ 联动能力: 单击/双击表格行自动触发系统级多图/行情联动 (通达信/同花顺/主终端);
-    - 📈 右键菜单: 调出 SBC 实盘走势、调出分时阶梯盯盘、加入关注、复制代码。
+    - 📋 结果明细表格: 代码、名称、通道类型、形态名称、得分、介入价、止损位、第一目标、第二目标、通道斜率、缩量比、逻辑解析;
+    - ⚡ 联动能力: 单击/双击表格行触发主工作台/外部终端联动 (绝不发送到异动模块);
+    - 📈 右键菜单: 调出 SBC 实盘走势、调出分时阶梯盯盘、加入关注、复制代码;
+    - 🪟 100% 独立顶层窗口: 不阻塞主界面，支持多屏拖拽、自由缩放。
     """
-    stock_linkage_requested = pyqtSignal(str, str) # code, name
+    stock_linkage_requested = pyqtSignal(str, str)  # code, name
 
     def __init__(self, parent=None, df_results: Optional[pd.DataFrame] = None, total_scanned: int = 0, source_tab_name: str = ""):
-        super().__init__(parent)
+        # 向 QWidget 构造传 None，使其成为真正的顶层非模态独立桌面窗口，绝不阻塞或锁定主界面
+        super().__init__(None)
+        self.main_window = parent.window() if parent else None
         self.df_results = df_results if df_results is not None else pd.DataFrame()
         self.total_scanned = total_scanned if total_scanned > 0 else len(self.df_results)
         self.source_tab_name = source_tab_name or "当前看板"
-        self.main_window = parent.window() if parent else None
 
-        self.setWindowTitle(f"🎯 60f 通道底部反转策略批量测算结果 - 来自【{self.source_tab_name}】")
-        self.resize(1020, 620)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setWindowTitle(f"🎯 60f 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
+        self.resize(1060, 640)
         self.setMinimumSize(800, 480)
         self.setStyleSheet("""
-            QDialog { background-color: #0f172a; color: #f8fafc; }
-            QLabel { color: #cbd5e1; font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif; }
+            QWidget { background-color: #0f172a; color: #f8fafc; font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif; }
+            QLabel { color: #cbd5e1; }
         """)
 
         self._init_ui()
+        self._populate_table()
+
+    def update_results(self, df_results: pd.DataFrame, total_scanned: int = 0, source_tab_name: str = ""):
+        """动态刷新测算结果与统计面板"""
+        self.df_results = df_results if df_results is not None else pd.DataFrame()
+        self.total_scanned = total_scanned if total_scanned > 0 else len(self.df_results)
+        if source_tab_name:
+            self.source_tab_name = source_tab_name
+            self.setWindowTitle(f"🎯 60f 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
+
+        hit_cnt = len(self.df_results)
+        hit_rate = (hit_cnt / max(1, self.total_scanned)) * 100.0
+        avg_score = float(self.df_results['score'].mean()) if hit_cnt > 0 and 'score' in self.df_results.columns else 0.0
+        max_score = float(self.df_results['score'].max()) if hit_cnt > 0 and 'score' in self.df_results.columns else 0.0
+
+        self.lbl_val_scanned.setText(f"<b>{self.total_scanned}</b> 只")
+        self.lbl_val_hit.setText(f"<b style='color: #00ff88;'>{hit_cnt} 只 (命中率: {hit_rate:.1f}%)</b>")
+        self.lbl_val_score.setText(f"<b style='color: #38bdf8;'>{avg_score:.1f} 分</b> / <span style='color: #fbbf24;'>最高 {max_score:.1f} 分</span>")
+
         self._populate_table()
 
     def _init_ui(self):
@@ -58,31 +84,35 @@ class ChannelReversalScanResultDialog(QDialog):
         grid_lay.setContentsMargins(12, 10, 12, 10)
         grid_lay.setSpacing(12)
 
-        n_hit = len(self.df_results)
-        hit_rate = (n_hit / max(1, self.total_scanned)) * 100.0
-        avg_score = float(self.df_results["score"].mean()) if n_hit > 0 and "score" in self.df_results.columns else 0.0
-        max_score = float(self.df_results["score"].max()) if n_hit > 0 and "score" in self.df_results.columns else 0.0
+        hit_cnt = len(self.df_results)
+        hit_rate = (hit_cnt / max(1, self.total_scanned)) * 100.0
+        avg_score = float(self.df_results['score'].mean()) if hit_cnt > 0 and 'score' in self.df_results.columns else 0.0
+        max_score = float(self.df_results['score'].max()) if hit_cnt > 0 and 'score' in self.df_results.columns else 0.0
 
-        # 卡片 1: 扫描总数
-        grid_lay.addWidget(QLabel("🔍 扫描标的总数:"), 0, 0)
-        lbl_scan = QLabel(f"<b>{self.total_scanned}</b> 只")
-        lbl_scan.setStyleSheet("font-size: 11pt; color: #38bdf8;")
-        grid_lay.addWidget(lbl_scan, 0, 1)
+        lbl_tit_scanned = QLabel("🔍 扫描标的总数:")
+        lbl_tit_scanned.setStyleSheet("color: #94a3b8; font-weight: bold;")
+        self.lbl_val_scanned = QLabel(f"<b>{self.total_scanned}</b> 只")
+        self.lbl_val_scanned.setStyleSheet("color: #38bdf8; font-size: 11pt;")
 
-        # 卡片 2: 命中总数
-        grid_lay.addWidget(QLabel("🎯 策略命中总数:"), 0, 2)
-        lbl_hit = QLabel(f"<b>{n_hit}</b> 只 (命中率: {hit_rate:.1f}%)")
-        lbl_hit.setStyleSheet(f"font-size: 11pt; color: {'#00ff88' if n_hit > 0 else '#94a3b8'}; font-weight: bold;")
-        grid_lay.addWidget(lbl_hit, 0, 3)
+        lbl_tit_hit = QLabel("🎯 策略命中总数:")
+        lbl_tit_hit.setStyleSheet("color: #94a3b8; font-weight: bold;")
+        self.lbl_val_hit = QLabel(f"<b style='color: #00ff88;'>{hit_cnt} 只 (命中率: {hit_rate:.1f}%)</b>")
+        self.lbl_val_hit.setStyleSheet("font-size: 11pt;")
 
-        # 卡片 3: 综合形态评分
-        grid_lay.addWidget(QLabel("📊 平均得分 / 最高:"), 1, 0)
-        lbl_score = QLabel(f"<b>{avg_score:.1f}</b> 分 / 最高 <b>{max_score:.1f}</b> 分")
-        lbl_score.setStyleSheet("font-size: 10pt; color: #fbbf24;")
-        grid_lay.addWidget(lbl_score, 1, 1)
+        lbl_tit_score = QLabel("📊 平均得分 / 最高:")
+        lbl_tit_score.setStyleSheet("color: #94a3b8; font-weight: bold;")
+        self.lbl_val_score = QLabel(f"<b style='color: #38bdf8;'>{avg_score:.1f} 分</b> / <span style='color: #fbbf24;'>最高 {max_score:.1f} 分</span>")
+        self.lbl_val_score.setStyleSheet("font-size: 11pt;")
 
-        # 卡片 4: 快捷操作提示
-        lbl_tips = QLabel("💡 提示: <b>单击/双击</b>任意行即时联动主终端与行情；<b>右键</b>调出 SBC 走势与分时阶梯。")
+        grid_lay.addWidget(lbl_tit_scanned, 0, 0)
+        grid_lay.addWidget(self.lbl_val_scanned, 0, 1)
+        grid_lay.addWidget(lbl_tit_hit, 0, 2)
+        grid_lay.addWidget(self.lbl_val_hit, 0, 3)
+
+        grid_lay.addWidget(lbl_tit_score, 1, 0)
+        grid_lay.addWidget(self.lbl_val_score, 1, 1)
+
+        lbl_tips = QLabel("💡 提示: <b>单击/双击</b>联动主终端与行情；<b>右键</b>调出 SBC 走势与分时阶梯盯盘。")
         lbl_tips.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
         grid_lay.addWidget(lbl_tips, 1, 2, 1, 2)
 
@@ -152,7 +182,7 @@ class ChannelReversalScanResultDialog(QDialog):
             QPushButton { background-color: #334155; color: #f8fafc; border: 1px solid #475569; border-radius: 4px; padding: 4px 14px; font-weight: bold; }
             QPushButton:hover { background-color: #475569; }
         """)
-        btn_close.clicked.connect(self.accept)
+        btn_close.clicked.connect(self.close)
         btn_bar.addWidget(btn_close)
 
         main_layout.addLayout(btn_bar)
@@ -285,16 +315,15 @@ class ChannelReversalScanResultDialog(QDialog):
         return code, name
 
     def _on_item_clicked(self, item):
-        """单击表格行触发系统级多图联动"""
+        """单击表格行触发常规联动 (绝不发送到异动监测)"""
         code, name = self._get_current_code_name()
         if code:
-            send_to_linkage(code, name, self)
             self.stock_linkage_requested.emit(code, name)
             if self.main_window and hasattr(self.main_window, "link_stock"):
                 self.main_window.link_stock(code, name)
 
     def _on_item_double_clicked(self, item):
-        """双击表格行直接调出 SBC 实盘分时走势窗口"""
+        """双击表格行直接调出 SBC 实盘走势窗口"""
         code, name = self._get_current_code_name()
         if code:
             self._open_sbc_window(code, name)
@@ -309,7 +338,7 @@ class ChannelReversalScanResultDialog(QDialog):
                 from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
                 dlg = SBCIntradayChartDialog(self.main_window, code=code, initial_period_mode="60m")
                 dlg.show()
-            except Exception as e2:
+            except Exception:
                 pass
 
     def _open_ladder_window(self, code: str, name: str):
@@ -340,20 +369,17 @@ class ChannelReversalScanResultDialog(QDialog):
         act_ladder.triggered.connect(lambda: self._open_ladder_window(code, name))
 
         menu.addSeparator()
-
-        act_link = menu.addAction(f"⚡ 发送系统多图联动 ({code})")
-        act_link.triggered.connect(lambda: send_to_linkage(code, name, self))
-
-        act_copy = menu.addAction(f"📋 复制股票代码 ({code})")
+        act_copy = menu.addAction("📋 复制该股票代码")
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(code))
 
         menu.exec(QCursor.pos())
 
     def _on_export_clicked(self):
-        """复制表格中所有命中股票的代码"""
-        codes = [str(self.table.item(r, 0).text()) for r in range(self.table.rowCount()) if self.table.item(r, 0)]
-        if codes:
-            txt = " ".join(codes)
-            QApplication.clipboard().setText(txt)
-            self.btn_export.setText(f"✅ 已复制 {len(codes)} 只代码！")
-            QApplication.processEvents()
+        """复制全部命中代码到剪贴板"""
+        if self.df_results.empty or 'code' not in self.df_results.columns:
+            return
+        codes = [str(c).zfill(6) for c in self.df_results['code']]
+        clip_str = "\n".join(codes)
+        QApplication.clipboard().setText(clip_str)
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "复制成功", f"已成功复制 {len(codes)} 只命中股票代码至系统剪贴板！")
