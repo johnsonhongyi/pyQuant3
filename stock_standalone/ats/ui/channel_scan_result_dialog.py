@@ -119,14 +119,14 @@ class ChannelReversalScanResultDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
 
         headers = [
-            "股票代码", "股票名称", "形态得分", "建议介入价", "止损保护位", 
-            "第一目标位", "第二目标位", "通道下倾角", "底部缩量比", "结构逻辑解析"
+            "股票代码", "股票名称", "通道类型", "形态名称", "综合得分", 
+            "建议介入价", "止损保护位", "第一目标位", "第二目标位", "通道斜率", "缩量比", "结构逻辑解析"
         ]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        default_widths = [85, 95, 80, 95, 95, 95, 95, 90, 85, 320]
-        setup_header_persistence(self.table, "channel_scan_dialog_headers", default_widths=default_widths)
+        default_widths = [80, 90, 85, 120, 75, 90, 90, 90, 90, 80, 75, 300]
+        setup_header_persistence(self.table, "channel_scan_dialog_headers_v2", default_widths=default_widths)
 
         self.table.itemClicked.connect(self._on_item_clicked)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -176,6 +176,8 @@ class ChannelReversalScanResultDialog(QDialog):
                 except Exception:
                     c_name = c_code
 
+            ch_type_cn = str(row.get("channel_type_cn", "上涨通道" if float(row.get("channel_slope_deg", 0)) > 0 else "下降通道"))
+            pat_name = str(row.get("pattern_name", "通道顺势/反转"))
             score_v = float(row.get("score", 0.0))
             entry_p = float(row.get("entry_price", 0.0))
             stop_p = float(row.get("stop_loss", 0.0))
@@ -199,61 +201,75 @@ class ChannelReversalScanResultDialog(QDialog):
             it_name.setForeground(QColor("#f8fafc"))
             self.table.setItem(r, 1, it_name)
 
-            # 2. 得分
+            # 2. 通道类型
+            it_ch = QTableWidgetItem(ch_type_cn)
+            it_ch.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_ch.setFont(QFont("Microsoft YaHei", 9))
+            it_ch.setForeground(QColor("#00ff88") if "上" in ch_type_cn else QColor("#fbbf24"))
+            self.table.setItem(r, 2, it_ch)
+
+            # 3. 形态名称
+            it_pat = QTableWidgetItem(pat_name)
+            it_pat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_pat.setFont(QFont("Microsoft YaHei", 9))
+            it_pat.setForeground(QColor("#e2e8f0"))
+            self.table.setItem(r, 3, it_pat)
+
+            # 4. 得分
             it_score = NumericTableWidgetItem(f"{score_v:.1f}")
             it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_score.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
             it_score.setForeground(QColor("#fbbf24") if score_v >= 80 else QColor("#00ff88"))
-            self.table.setItem(r, 2, it_score)
+            self.table.setItem(r, 4, it_score)
 
-            # 3. 建议介入价
+            # 5. 建议介入价
             it_entry = NumericTableWidgetItem(f"{entry_p:.2f}")
             it_entry.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             it_entry.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
             it_entry.setForeground(QColor("#f43f5e"))
-            self.table.setItem(r, 3, it_entry)
+            self.table.setItem(r, 5, it_entry)
 
-            # 4. 止损保护位
+            # 6. 止损保护位
             it_stop = NumericTableWidgetItem(f"{stop_p:.2f}")
             it_stop.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             it_stop.setFont(QFont("Consolas", 9))
             it_stop.setForeground(QColor("#ef4444"))
-            self.table.setItem(r, 4, it_stop)
+            self.table.setItem(r, 6, it_stop)
 
-            # 5. 第一目标位
+            # 7. 第一目标位
             it_tgt1 = NumericTableWidgetItem(f"{tgt_1:.2f}")
             it_tgt1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             it_tgt1.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
             it_tgt1.setForeground(QColor("#10b981"))
-            self.table.setItem(r, 5, it_tgt1)
+            self.table.setItem(r, 7, it_tgt1)
 
-            # 6. 第二目标位
+            # 8. 第二目标位
             it_tgt2 = NumericTableWidgetItem(f"{tgt_2:.2f}")
             it_tgt2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             it_tgt2.setFont(QFont("Consolas", 9))
             it_tgt2.setForeground(QColor("#059669"))
-            self.table.setItem(r, 6, it_tgt2)
+            self.table.setItem(r, 8, it_tgt2)
 
-            # 7. 通道下倾角
+            # 9. 通道斜率
             it_deg = NumericTableWidgetItem(f"{deg_v:+.1f}°")
             it_deg.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_deg.setFont(QFont("Consolas", 9))
-            it_deg.setForeground(QColor("#94a3b8"))
-            self.table.setItem(r, 7, it_deg)
+            it_deg.setForeground(QColor("#00ff88") if deg_v > 0 else QColor("#f43f5e"))
+            self.table.setItem(r, 9, it_deg)
 
-            # 8. 底部缩量比
+            # 10. 缩量比
             it_shrink = NumericTableWidgetItem(f"{shrink_v:.1f}%")
             it_shrink.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_shrink.setFont(QFont("Consolas", 9))
             it_shrink.setForeground(QColor("#38bdf8"))
-            self.table.setItem(r, 8, it_shrink)
+            self.table.setItem(r, 10, it_shrink)
 
-            # 9. 逻辑解析
+            # 11. 逻辑解析
             it_reason = QTableWidgetItem(reason_str)
             it_reason.setToolTip(reason_str)
             it_reason.setFont(QFont("Microsoft YaHei", 9))
             it_reason.setForeground(QColor("#cbd5e1"))
-            self.table.setItem(r, 9, it_reason)
+            self.table.setItem(r, 11, it_reason)
 
         self.table.setSortingEnabled(True)
 

@@ -1731,7 +1731,10 @@ class SBCChartCanvas(QWidget):
                     painter.drawText(int(margin_left + chart_w - 95), int(y_tgt1 - 3), f"💎目标1:{tgt_p1:.2f}")
 
                 # 11.5 右上角 HUD 浮动诊断条
-                hud_text = f"🎯 [R键测算·{strat_period}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
+                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
+                pat_name = str(res_strat.get("pattern_name", ""))
+                pat_str = f"·{pat_name}" if pat_name else ""
+                hud_text = f"🎯 [R键测算·{strat_period}·{ch_cn}{pat_str}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
                 painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
                 fm_hud = painter.fontMetrics()
                 hud_w = fm_hud.horizontalAdvance(hud_text) + 16
@@ -1746,7 +1749,8 @@ class SBCChartCanvas(QWidget):
             else:
                 # 未命中时的浮动提示条
                 fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
-                hud_text = f"⚠️ [R键测算·{strat_period}] {fail_reason}"
+                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
+                hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
                 painter.setFont(QFont("Microsoft YaHei", 8))
                 fm_hud = painter.fontMetrics()
                 hud_w = min(int(chart_w * 0.8), fm_hud.horizontalAdvance(hud_text) + 16)

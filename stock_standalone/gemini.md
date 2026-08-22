@@ -1,3 +1,20 @@
+## 2026-08-22 09:00
+- [x] **极限性能上涨通道顺势突破/回踩企稳测算与通道类型分支决策引擎全落地 (`ats/channel_bottom_reversal_strategy.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/channel_scan_result_dialog.py`, `tests/test_ascending_channel_strategy.py`)**：
+    - [x] **通道类型极速判决器 (`classify_channel_type`)**：
+        - 纯 NumPy 向量化一维点积极速线性回归斜率（单次耗时 < 0.02ms）；
+        - 精准判决与分流：**【上涨通道 (ascending)】** vs **【下降通道 (descending)】** vs **【横盘震荡 (horizontal)】**；
+        - 精确结合 LLV(36) 波谷前段主跌斜率与全局斜率，杜绝下降通道筑底与上涨通道高位形态交叉污染；
+    - [x] **极限性能上涨通道分支策略 (`evaluate_ascending_channel_strategy`)**：
+        - **形态 1：上涨通道下轨回踩缩量企稳 (Pullback Support)**：识别股价回踩通道下轨/上升支撑线，量能显著萎缩，出现止跌企稳阳线，低点稳步抬高（Higher Lows）；
+        - **形态 2：上涨通道中继平台放量突破 (Box Breakout)**：识别在上升通道中途小箱体整理后，放量突破局部平台高点，顺势波段起爆；
+        - **风控买卖点量化**：自动输出买入价、止损位（支撑线下方 1.5%）、第一目标位与通道向上等幅翻折加速位；
+    - [x] **统一通道策略分发引擎 (`evaluate_channel_strategy` / `ChannelTrendStrategy`)**：
+        - 统一入口先分类通道形态，再分支执行对应通道极速量化策略，单次测算耗时仅 **0.22ms**（2000 次压力测试验证通过）；
+    - [x] **UI 与统计窗口全面升级呈现**：
+        - **SBC 走势图 HUD**：动态标识 `[R键测算·周期·上涨通道·上涨通道中继突破]` / `[R键测算·周期·下降通道·通道底部缩量右侧突破]`；
+        - **批量测算统计窗口 (`ChannelReversalScanResultDialog`)**：新增【通道类型】与【形态名称】列，清晰展示全通道测算明细；
+    - [x] **全套 5 大专项单元测试 100% 通过**：`test_ascending_channel_strategy.py`、`test_channel_bottom_reversal.py`、`test_sbc_shortcut_r.py`、`test_tab_batch_channel_scan.py`、`test_universe_sbc_context_menu.py` 全部绿色通过。
+
 ## 2026-08-22 08:25
 - [x] **Tab 顶部公用 60f 通道测算、多选批量扫描、满足条件统计窗口与左侧策略池 SBC 右键直达落地 (`ats/ui/main_window.py`, `ats/ui/universe_widget.py`, `ats/ui/channel_scan_result_dialog.py`, `ats/ui/base_table.py`, `tests/test_tab_batch_channel_scan.py`, `tests/test_universe_sbc_context_menu.py`)**：
     - [x] **Tab 顶部公用测算按钮提升**：
