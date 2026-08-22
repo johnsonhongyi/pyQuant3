@@ -622,7 +622,24 @@ class UniverseTreeWidget(QWidget):
         copy_action = QAction(f"📋 复制股票代码 {code} ({name})", self)
         copy_action.triggered.connect(lambda: self._copy_to_clipboard(code))
         menu.addAction(copy_action)
-        
+
+        # 📈 调出 SBC 实盘走势
+        sbc_action = QAction(f"📈 调出 【{name} ({code})】 SBC 实盘走势", self)
+        sbc_action.triggered.connect(lambda: self._open_sbc_chart(code, name))
+        menu.addAction(sbc_action)
+
+        # 🚀 调出分时阶梯独立盯盘
+        ladder_action = QAction(f"🚀 调出 【{name} ({code})】 分时阶梯独立盯盘", self)
+        ladder_action.triggered.connect(lambda: self._open_ladder_window(code, name))
+        menu.addAction(ladder_action)
+
+        # 🎯 运行 60f 通道策略测算 (TDX直连)
+        eval_action = QAction(f"🎯 运行 【{name}】 60f 通道底部反转测算 (TDX直连)", self)
+        eval_action.triggered.connect(lambda: self._run_60f_channel_eval(code, name))
+        menu.addAction(eval_action)
+
+        menu.addSeparator()
+
         # ⚡ 发送到异动联动
         from ats.ui.base_table import send_to_linkage
         linkage_action = QAction(f"⚡ 发送到异动联动 {code}", self)
@@ -639,6 +656,64 @@ class UniverseTreeWidget(QWidget):
         menu.addAction(fav_action)
         
         menu.exec(self.tree.mapToGlobal(pos))
+
+    def _open_sbc_chart(self, code, name):
+        """调出 SBC 实盘走势独立窗口"""
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(code, self.window(), initial_period_mode="60m")
+        except Exception as e:
+            try:
+                from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+                dlg = SBCIntradayChartDialog(self.window(), code=code, initial_period_mode="60m")
+                dlg.show()
+            except Exception as e2:
+                logger.error(f"[Universe] 调出 SBC 窗口失败: {e2}")
+
+    def _open_ladder_window(self, code, name):
+        """调出分时阶梯独立盯盘主窗口"""
+        try:
+            from ats.ui.intraday_strategy_dialog import PinzhunLadderStandaloneWindow
+            win = PinzhunLadderStandaloneWindow(code=code, name=name, parent=self.window())
+            win.show()
+        except Exception as e:
+            logger.error(f"[Universe] 调出分时阶梯窗口失败: {e}")
+
+    def _run_60f_channel_eval(self, code, name):
+        """单股直连 TDX 进行 60f 通道底部反转策略测算"""
+        try:
+            from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+            from PyQt6.QtWidgets import QMessageBox
+            strategy = ChannelBottomReversalStrategy()
+            res = strategy.evaluate_stock_tdx(code)
+            if res.get("is_matched", False):
+                msg = (
+                    f"🎉 【{name} ({code})】 命中 60f 通道底部反转突破形态！\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 形态评分: {res.get('score', 0)} 分\n"
+                    f"🎯 建议介入价: {res.get('entry_price', 0.0):.2f} 元\n"
+                    f"🛡️ 止损保护位: {res.get('stop_loss', 0.0):.2f} 元\n"
+                    f"🚀 第一目标位: {res.get('target_price_1', 0.0):.2f} 元\n"
+                    f"💎 第二目标位: {res.get('target_price_2', 0.0):.2f} 元\n"
+                    f"📉 通道下倾角: {res.get('channel_slope_deg', 0.0):+.1f}°\n"
+                    f"💧 底部缩量比: {res.get('volume_shrink_pct', 0.0):.1f}%\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💡 逻辑解析:\n{res.get('reason', '')}"
+                )
+                QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
+            else:
+                msg = (
+                    f"⚠️ 【{name} ({code})】 未触发 60f 通道底部反转信号\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔍 未满足原因: {res.get('reason', '不满足形态条件')}\n"
+                    f"📉 通道斜率: {res.get('channel_slope_deg', 0.0):+.1f}°\n"
+                    f"最低波谷: {res.get('lowest_low', 0.0):.2f} 元\n"
+                    f"整理高点: {res.get('base_high', 0.0):.2f} 元\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
+        except Exception as e:
+            logger.error(f"[Universe] 60f 通道测算异常: {e}")
 
     def _toggle_favorite(self, code):
         try:
