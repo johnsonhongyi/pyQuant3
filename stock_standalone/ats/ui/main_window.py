@@ -4702,6 +4702,30 @@ class ATSMainWindow(QMainWindow):
         stock_pairs = []
         if hasattr(cur_widget, "table") and hasattr(cur_widget.table, "get_selected_stock_pairs"):
             stock_pairs = cur_widget.table.get_selected_stock_pairs()
+        elif hasattr(cur_widget, "get_selected_stock_pairs"):
+            stock_pairs = cur_widget.get_selected_stock_pairs()
+        elif hasattr(cur_widget, "table") and hasattr(cur_widget.table, "selectedIndexes"):
+            # 兼容普通 QTableWidget 单选与多选提取
+            t = cur_widget.table
+            sel_rows = sorted(list(set(idx.row() for idx in t.selectedIndexes())))
+            if sel_rows:
+                for r in sel_rows:
+                    if not t.isRowHidden(r):
+                        it_c = t.item(r, 0)
+                        it_n = t.item(r, 1)
+                        c = it_c.text().strip() if it_c else ""
+                        n = it_n.text().strip().replace("⭐ ", "").replace("🐉 ", "") if it_n else ""
+                        if c:
+                            stock_pairs.append((c, n))
+            else:
+                for r in range(t.rowCount()):
+                    if not t.isRowHidden(r):
+                        it_c = t.item(r, 0)
+                        it_n = t.item(r, 1)
+                        c = it_c.text().strip() if it_c else ""
+                        n = it_n.text().strip().replace("⭐ ", "").replace("🐉 ", "") if it_n else ""
+                        if c:
+                            stock_pairs.append((c, n))
         elif hasattr(cur_widget, "df_data") and not cur_widget.df_data.empty:
             for _, r in cur_widget.df_data.iterrows():
                 c_val = str(r.get("code", "")).zfill(6)
@@ -4733,16 +4757,25 @@ class ATSMainWindow(QMainWindow):
 
             self.statusBar().showMessage(f"🟢 【{tab_title}】 60f 通道策略测算完成: 扫描 {len(code_list)} 只, 命中 {len(df_matched)} 只", 10000)
 
-            # 4. 弹出专业统计结果窗口
+            # 4. 弹出专业统计结果独立窗口 (非阻塞、自由层级、多屏支持)
             from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
-            dlg = ChannelReversalScanResultDialog(
-                parent=self, 
-                df_results=df_matched, 
-                total_scanned=len(code_list), 
-                source_tab_name=tab_title
-            )
-            dlg.stock_linkage_requested.connect(self.link_stock)
-            dlg.exec()
+            if not hasattr(self, '_channel_scan_dialog') or self._channel_scan_dialog is None:
+                self._channel_scan_dialog = ChannelReversalScanResultDialog(
+                    parent=self, 
+                    df_results=df_matched, 
+                    total_scanned=len(code_list), 
+                    source_tab_name=tab_title
+                )
+                self._channel_scan_dialog.stock_linkage_requested.connect(self.link_stock)
+            else:
+                self._channel_scan_dialog.update_results(
+                    df_results=df_matched,
+                    total_scanned=len(code_list),
+                    source_tab_name=tab_title
+                )
+            self._channel_scan_dialog.show()
+            self._channel_scan_dialog.raise_()
+            self._channel_scan_dialog.activateWindow()
         except Exception as e:
             logger.error(f"批量通道策略测算异常: {e}")
             from PyQt6.QtWidgets import QMessageBox

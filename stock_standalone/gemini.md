@@ -1,3 +1,29 @@
+## 2026-08-22 19:42
+- [x] **删除子 Tab 冗余测算按钮 & 修复单选行点击时错误提取全量标的 Bug (`ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tab_batch_channel_scan.py`)**：
+    - [x] **删除子 Tab 冗余测算入口**：
+        - 彻底从新股次新股面板工具栏中删除 `btn_eval_60f` 按钮，统一使用主看板顶部公共 Corner 区域的 **`🎯 60f通道测算`** 入口；
+    - [x] **根治单选点击行时误跑全量数据的 Bug (`BaseATSTableWidget.get_selected_stock_pairs`)**：
+        - 查明原逻辑中 `if len(selected_rows) > 1:` 将单选点击选中（`len(selected_rows) == 1`）误判为非多选进而降级提取全量 100 行的致命逻辑缺陷；
+        - 修复为 `if len(selected_rows) >= 1:`：当用户单选点击某 1 只股票（如频准激光）时，精准仅扫描该选中的 1 只股票；多选时扫描多只；仅在完全未选行时才扫描全量；
+        - 专项单元测试加入单选/多选/全量提取断言，100% 验证通过。
+
+## 2026-08-22 19:30
+- [x] **SBC 测算提示位置精准定位至 K 线主图右下角、批量测算独立非模态窗口与点击行免弹异动全落地 (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/channel_scan_result_dialog.py`, `ats/ui/main_window.py`, `ats/ui/new_stock_panel.py`)**：
+    - [x] **HUD 浮动提示条精准定位于 K 线主图右下角**：
+        - 将 `SBCChartCanvas` 中 `🎯 [R键测算...]` 浮动条纵坐标调整为 `margin_top + main_h - hud_h - 6`，精确停靠在主 K 线图右下角空白区（成交量柱上方），零遮挡顶部通道参数亦零遮挡底部 VOL 量能柱；
+        - 在切换周期（`set_data` / `set_kline_data`）时自动重置清空上一周期的旧测算提示，彻底杜绝跨周期文案残留；
+    - [x] **测算结果升级为 100% 独立非模态窗口 (`ChannelReversalScanResultDialog`)**：
+        - 继承 `QWidget`（独立顶层 Window），彻底切断模态阻塞，用户可一边开启测算结果窗口一边自由浏览和操作主工作台、SBC、分时阶梯盯盘；
+    - [x] **点击表格行彻底移除“发送到异动”**：
+        - 彻底移除 `send_to_linkage(code, name, self)` 调用，单击仅进行常规股票切换与终端行情联动，绝不向异动模块推送或弹出异动提示；
+    - [x] **全套 5 大单元测试 100% 绿色通过**。
+
+## 2026-08-22 19:18
+- [x] **SBC 实盘走势图策略测算 HUD 浮动诊断条位置移至右下角 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_shortcut_r.py`)**：
+    - 将 `SBCChartCanvas` 中 `🎯 [R键测算...]` 浮动 HUD 条的纵坐标锚点从顶部（`margin_top + 6`）调整为整个画布的**右下角**（`margin_top + chart_h - hud_h - 4`）；
+    - 彻底消除原右上角位置对顶部通道线角度、上升支撑价、翻转线及极值文字胶囊的重叠与遮挡；
+    - 单元测试验证 100% 绿色通过。
+
 ## 2026-08-22 09:00
 - [x] **极限性能上涨通道顺势突破/回踩企稳测算与通道类型分支决策引擎全落地 (`ats/channel_bottom_reversal_strategy.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/channel_scan_result_dialog.py`, `tests/test_ascending_channel_strategy.py`)**：
     - [x] **通道类型极速判决器 (`classify_channel_type`)**：

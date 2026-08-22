@@ -657,6 +657,7 @@ class SBCChartCanvas(QWidget):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
             self._last_period_mode = period_mode
+            self.strategy_eval_result = None  # 切换周期时重置策略测算结果
         self.period_mode = period_mode
         self.update()
 
@@ -673,6 +674,7 @@ class SBCChartCanvas(QWidget):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
             self._last_period_mode = period_mode
+            self.strategy_eval_result = None  # 切换周期时重置策略测算结果
         self.period_mode = period_mode
         self.update()
 
@@ -1730,7 +1732,7 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#10B981")))
                     painter.drawText(int(margin_left + chart_w - 95), int(y_tgt1 - 3), f"💎目标1:{tgt_p1:.2f}")
 
-                # 11.5 右上角 HUD 浮动诊断条
+                # 11.5 K线主图右下角 HUD 浮动诊断条 (位于K线区右下角，在成交量柱上方，零遮挡)
                 ch_cn = str(res_strat.get("channel_type_cn", "通道"))
                 pat_name = str(res_strat.get("pattern_name", ""))
                 pat_str = f"·{pat_name}" if pat_name else ""
@@ -1740,14 +1742,14 @@ class SBCChartCanvas(QWidget):
                 hud_w = fm_hud.horizontalAdvance(hud_text) + 16
                 hud_h = 22
                 hud_x = int(margin_left + chart_w - hud_w - 6)
-                hud_y = int(margin_top + 6)
+                hud_y = int(margin_top + main_h - hud_h - 6)
                 painter.setPen(QPen(QColor("#38BDF8"), 1))
-                painter.setBrush(QBrush(QColor(14, 42, 56, 220)))
+                painter.setBrush(QBrush(QColor(14, 42, 56, 225)))
                 painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
                 painter.setPen(QPen(QColor("#38BDF8")))
                 painter.drawText(hud_x + 8, hud_y + 15, hud_text)
             else:
-                # 未命中时的浮动提示条
+                # 未命中时的浮动提示条 (K线主图右下角)
                 fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
                 ch_cn = str(res_strat.get("channel_type_cn", "通道"))
                 hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
@@ -1756,9 +1758,9 @@ class SBCChartCanvas(QWidget):
                 hud_w = min(int(chart_w * 0.8), fm_hud.horizontalAdvance(hud_text) + 16)
                 hud_h = 22
                 hud_x = int(margin_left + chart_w - hud_w - 6)
-                hud_y = int(margin_top + 6)
+                hud_y = int(margin_top + main_h - hud_h - 6)
                 painter.setPen(QPen(QColor("#94A3B8"), 1))
-                painter.setBrush(QBrush(QColor(20, 20, 30, 210)))
+                painter.setBrush(QBrush(QColor(20, 20, 30, 215)))
                 painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
                 painter.setPen(QPen(QColor("#CBD5E1")))
                 painter.drawText(hud_x + 8, hud_y + 15, hud_text)
