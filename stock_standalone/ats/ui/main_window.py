@@ -2082,11 +2082,31 @@ class ATSMainWindow(QMainWindow):
         self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         
-        # 顶部主看板 Tab 右上角添加【🪟 SBC 重排】与【🔄 刷新状态】组合入口
+        # 顶部主看板 Tab 右上角添加【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
         top_corner_layout = QHBoxLayout(top_corner_container)
         top_corner_layout.setContentsMargins(0, 0, 0, 0)
         top_corner_layout.setSpacing(6)
+
+        self.btn_top_scan_60f = QPushButton("🎯 60f通道测算")
+        self.btn_top_scan_60f.setToolTip("对当前 Tab (重点关注 / MA20d回调 / 新股次新股) 中选中的股票或全量列表直连 TDX 进行 60f 通道底部反转策略批量测算")
+        self.btn_top_scan_60f.setStyleSheet("""
+            QPushButton {
+                background-color: #0e2a38;
+                color: #38bdf8;
+                font-weight: bold;
+                border: 1px solid #0284c7;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_top_scan_60f.clicked.connect(self._on_top_tab_scan_60f_clicked)
+        top_corner_layout.addWidget(self.btn_top_scan_60f)
 
         self.btn_rearrange_sbc = QPushButton("🪟 SBC 重排")
         self.btn_rearrange_sbc.setToolTip("自动将所有已打开的 SBC 分时走势独立窗口在当前屏幕网格平铺重排对齐")
@@ -4669,6 +4689,64 @@ class ATSMainWindow(QMainWindow):
         """自动持久化记忆当前打开的是【重点关注】还是【大级别回调跟踪器】Tab 选项卡"""
         if not getattr(self, '_is_restoring_sizes', False):
             self._save_layout_state()
+
+    def _on_top_tab_scan_60f_clicked(self):
+        """
+        【Tab 顶部公共入口】60f 通道底部反转策略批量测算 (支持重点关注、MA20d回调、新股次新股等多选与全量)
+        """
+        cur_idx = self.top_tabs.currentIndex()
+        cur_widget = self.top_tabs.currentWidget()
+        tab_title = self.top_tabs.tabText(cur_idx)
+        
+        # 1. 提取当前 Tab 中用户选中的标的对 [(code, name), ...]
+        stock_pairs = []
+        if hasattr(cur_widget, "table") and hasattr(cur_widget.table, "get_selected_stock_pairs"):
+            stock_pairs = cur_widget.table.get_selected_stock_pairs()
+        elif hasattr(cur_widget, "df_data") and not cur_widget.df_data.empty:
+            for _, r in cur_widget.df_data.iterrows():
+                c_val = str(r.get("code", "")).zfill(6)
+                n_val = str(r.get("name", ""))
+                if c_val:
+                    stock_pairs.append((c_val, n_val))
+
+        if not stock_pairs:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "提示", f"【{tab_title}】当前列表中无可用股票进行 60f 通道策略测算！")
+            return
+
+        code_list = [c for c, _ in stock_pairs if c]
+        code_to_name = {c: n for c, n in stock_pairs if c}
+        
+        # 2. 状态栏提示
+        self.statusBar().showMessage(f"📡 正在直连 TDX API 批量拉取 【{tab_title}】 {len(code_list)} 只标的 60m K线进行通道策略扫描...", 8000)
+        QApplication.processEvents()
+
+        # 3. 极速纯 NumPy 批量高并发测算
+        try:
+            from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+            strategy = ChannelBottomReversalStrategy()
+            df_matched = strategy.scan_stocks_tdx(code_list, count=120)
+            
+            # 回填名称
+            if not df_matched.empty:
+                df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c, self.get_stock_name(c)))
+
+            self.statusBar().showMessage(f"🟢 【{tab_title}】 60f 通道策略测算完成: 扫描 {len(code_list)} 只, 命中 {len(df_matched)} 只", 10000)
+
+            # 4. 弹出专业统计结果窗口
+            from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
+            dlg = ChannelReversalScanResultDialog(
+                parent=self, 
+                df_results=df_matched, 
+                total_scanned=len(code_list), 
+                source_tab_name=tab_title
+            )
+            dlg.stock_linkage_requested.connect(self.link_stock)
+            dlg.exec()
+        except Exception as e:
+            logger.error(f"批量通道策略测算异常: {e}")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "测算异常", f"执行批量 60f 通道策略测算时发生异常: {e}")
 
     def _on_tdx_signal_detected(self, sig_dict):
         """当后台 TdxSignalWatcher 捕获到通达信 / OrderMon 信号时的全逻辑联动处理"""

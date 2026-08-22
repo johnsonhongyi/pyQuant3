@@ -1,3 +1,18 @@
+## 2026-08-22 08:25
+- [x] **Tab 顶部公用 60f 通道测算、多选批量扫描、满足条件统计窗口与左侧策略池 SBC 右键直达落地 (`ats/ui/main_window.py`, `ats/ui/universe_widget.py`, `ats/ui/channel_scan_result_dialog.py`, `ats/ui/base_table.py`, `tests/test_tab_batch_channel_scan.py`, `tests/test_universe_sbc_context_menu.py`)**：
+    - [x] **Tab 顶部公用测算按钮提升**：
+        - 将 **`🎯 60f通道测算`** 提升至 `top_tabs` 顶部公用 Corner 区域，全看板（**⭐ 重点关注**、**📉 大级别 MA20d 回调跟踪器**、**🆕 新股次新股**等）均可随时一键调用；
+    - [x] **全表格支持 Shift 多选与 Ctrl 点选**：
+        - `BaseATSTableWidget` 全面开启 `ExtendedSelection` 多选交互，新增 `get_selected_stock_pairs()` 方法，支持用户任意多选指定行或全量自动测算；
+    - [x] **满足条件的统计与联动独立窗口 (`ChannelReversalScanResultDialog`)**：
+        - **统计卡片**：顶部磁贴实时计算扫描总数、命中总数、命中率、平均得分与最高分；
+        - **结果表格**：完整展示代码、名称、得分、建议介入价、止损位、目标1、目标2、通道下倾角、缩量比与逻辑解析；
+        - **全系统多图联动**：单击/双击表格行即时广播系统联动信号（同步通达信、同花顺、主终端多图）；
+        - **右键 SBC 直达**：支持右键调出 SBC 实盘走势与分时阶梯独立盯盘；
+    - [x] **ATS 左侧策略池右键添加 SBC 功能 (`ats/ui/universe_widget.py`)**：
+        - `UniverseTreeWidget` 树节点右键菜单新增：`📈 调出 【xxx】 SBC 实盘走势`、`🚀 调出分时阶梯独立盯盘` 与 `🎯 运行 60f 通道底部反转测算 (TDX直连)`；
+    - [x] **专项单元测试 100% 通过**：`test_tab_batch_channel_scan.py` 与 `test_universe_sbc_context_menu.py` 全部验证通过。
+
 ## 2026-08-22 08:15
 - [x] **SBC 实盘走势图快捷键 R 自适应周期策略测算与图上信号点全标记落地 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_shortcut_r.py`)**：
     - [x] **快捷键 R 极速交互与自适应周期测算**：

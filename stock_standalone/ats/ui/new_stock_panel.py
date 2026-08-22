@@ -1339,26 +1339,36 @@ class NewStockPanel(QWidget):
                 QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
             return
 
-        # 2. 如果未单选，执行全量新股 TDX 批量扫描
-        if self.df_data.empty:
+        # 2. 批量扫描：优先提取多选选中的标的，否则扫描当前面板全量新股
+        stock_pairs = []
+        if hasattr(self, 'table') and hasattr(self.table, 'get_selected_stock_pairs'):
+            stock_pairs = self.table.get_selected_stock_pairs()
+        
+        if stock_pairs:
+            codes = [c for c, _ in stock_pairs if c]
+            code_to_name = {c: n for c, n in stock_pairs if c}
+        elif not self.df_data.empty:
+            codes = list(self.df_data["code"].dropna().unique())
+            code_to_name = dict(zip(self.df_data["code"], self.df_data["name"]))
+        else:
             QMessageBox.warning(self, "提示", "当前新股列表中无可用标的！")
             return
 
-        codes = list(self.df_data["code"].dropna().unique())
         self.lbl_status.setText(f"📡 正在直连 TDX API 批量拉取 {len(codes)} 只新股 60m K线进行形态扫描...")
         QApplication.processEvents()
 
         df_matched = strategy.scan_stocks_tdx(codes)
         self.lbl_status.setText(f"🟢 批量扫描完成: 命中 {len(df_matched)} 只标的")
 
-        if df_matched.empty:
-            QMessageBox.information(self, "60f 通道策略批量扫描", f"扫描了 {len(codes)} 只新股，当前暂无标的命中 60f 通道底部反转突破形态。")
-        else:
-            lines = [f"🚀 60f 通道底部反转突破扫描结果 (共命中 {len(df_matched)} 只):\n"]
-            for _, r in df_matched.iterrows():
-                c = r["code"]
-                # 匹配股票名称
-                match_name = self.df_data.loc[self.df_data["code"] == c, "name"].values
-                n_str = match_name[0] if len(match_name) > 0 else c
-                lines.append(f"• 【{n_str} ({c})】 得分: {r.get('score', 0)}分 | 介入: {r.get('entry_price', 0):.2f} | 止损: {r.get('stop_loss', 0):.2f} | 目标: {r.get('target_price_1', 0):.2f}")
-            QMessageBox.information(self, "60f 通道策略批量扫描结果", "\n".join(lines))
+        if not df_matched.empty:
+            df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c, c))
+
+        from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
+        dlg = ChannelReversalScanResultDialog(
+            parent=self,
+            df_results=df_matched,
+            total_scanned=len(codes),
+            source_tab_name="新股次新股"
+        )
+        dlg.stock_linkage_requested.connect(self.stock_selected)
+        dlg.exec()
