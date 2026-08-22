@@ -390,10 +390,20 @@ class NewStockPanel(QWidget):
     def _start_system_lifecycle(self):
         """
         【全系统生命周期启动】：
-        1. 启动时立即强制全量拉取一次数据 (force_refresh=True)，确保数据合法有效；
-        2. 启动 3 秒定时器：实盘时段自动静默刷新，非交易时段自动休眠。
+        1. 启动时瞬间从本地磁盘持久化数据加载并渲染，保证 0 秒开箱即显，绝无白屏或0标的；
+        2. 发起后台静默增量刷新；
+        3. 启动 3 秒定时器：实盘时段自动静默刷新，非交易时段自动休眠。
         """
-        self.load_data(force_refresh=True)
+        try:
+            fetcher = NewStockFetcher.get_instance()
+            init_df = fetcher.get_combined_new_stocks(force_refresh=False)
+            if init_df is not None and not init_df.empty:
+                self.df_data = init_df
+                self._render_table()
+        except Exception as e:
+            logger.debug(f"冷启动恢复本地新股持久化数据异常: {e}")
+
+        self.load_data(force_refresh=False)
 
         self.auto_refresh_timer = QTimer(self)
         self.auto_refresh_timer.setInterval(3000)
@@ -527,7 +537,14 @@ class NewStockPanel(QWidget):
                     sh_pct = clean_num(sh_row.get("percent", sh_row.get("pct", 0.0)))
                     break
         self.last_sh_pct = sh_pct
-        self._last_ipc_sh_pct = sh_pct
+        if self.df_data.empty:
+            try:
+                fetcher = NewStockFetcher.get_instance()
+                loaded = fetcher.get_combined_new_stocks(force_refresh=False)
+                if loaded is not None and not loaded.empty:
+                    self.df_data = loaded
+            except Exception:
+                pass
 
         if self.df_data.empty:
             return
