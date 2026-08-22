@@ -260,9 +260,14 @@ class SBCChartCanvas(QWidget):
         self._hover_pos = None
         self._coord_info = {}
 
+        # ⚡ 快捷键 R 自适应周期策略测算结果与标的代码
+        self.code = ""
+        self.strategy_eval_result = None
+
         self.setMinimumSize(320, 180)
         self.setStyleSheet("background-color: #0c0d14;")
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def reset_view(self):
         """🔄 重置视口至 100% 全景显示"""
@@ -295,6 +300,113 @@ class SBCChartCanvas(QWidget):
             start_i = 0
             end_i = total_n - 1
         return self.df_intraday.iloc[start_i:end_i + 1], start_i, end_i
+
+    def keyPressEvent(self, event):
+        """
+        ⚡ 键盘快捷键响应：
+        - 按下 R / r 键：自适应当前视图周期运行策略测算并在图上标记买卖介入点
+        - 按下 0 或 Esc 键：重置缩放回 100% 全景
+        """
+        if event.key() == Qt.Key.Key_R:
+            self.run_adaptive_strategy_eval()
+            event.accept()
+            return
+        elif event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_0):
+            self.reset_view()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def run_adaptive_strategy_eval(self):
+        """
+        【自适应周期策略测算引擎 (快捷键 R 核心处理入口)】
+        自动识别当前画布的周期模式 (1m/2d/3d/5m/30m/60m/day/week/month) 并执行对应策略测算与图上标记
+        """
+        c_clean = "".join(filter(str.isdigit, str(self.code))).zfill(6) if self.code else "688826"
+        p_mode = str(self.period_mode).lower()
+
+        # 1. 确保数据充足：若数据为空或过短，尝试从 TDX API 直连拉取
+        if self.df_intraday is None or len(self.df_intraday) < 15:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "week", "month") else "60m"
+                df_k = fetcher.fetch_kline_bars(c_clean, category=cat_req, count=150)
+                if not df_k.empty and len(df_k) >= 15:
+                    self.df_intraday = df_k
+            except Exception as e_tdx:
+                logger.debug(f"[SBC自适应测算] TDX拉取异常: {e_tdx}")
+
+        if self.df_intraday is None or len(self.df_intraday) < 8:
+            self.strategy_eval_result = {
+                "is_matched": False,
+                "period": p_mode,
+                "reason": f"当前周期 ({p_mode}) K线数据不足 8 根，无法测算"
+            }
+            self.update()
+            return
+
+        # 2. K 线多周期形态测算 (5m / 15m / 30m / 60m / day / week / month)
+        if p_mode in ("5m", "15m", "30m", "60m", "day", "week", "month"):
+            try:
+                from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+                strategy = ChannelBottomReversalStrategy()
+                res = strategy.evaluate(self.df_intraday)
+                res["period"] = p_mode
+                res["code"] = c_clean
+                self.strategy_eval_result = res
+                self.update()
+                logger.info(f"🎯 [SBC快捷键R测算·{p_mode}] {c_clean} 结果: matched={res.get('is_matched')} | score={res.get('score')} | entry={res.get('entry_price')} | reason={res.get('reason')}")
+            except Exception as e_eval:
+                logger.error(f"[SBC策略测算] 异常: {e_eval}")
+                self.strategy_eval_result = {
+                    "is_matched": False,
+                    "period": p_mode,
+                    "reason": f"策略测算异常: {e_eval}"
+                }
+                self.update()
+        else:
+            # 3. 日内分时周期 (1m / 2d / 3d): 运行分时 7 节点与阶梯买卖测算
+            try:
+                from ats.intraday_strategy_engine import IntradayStrategyEngine
+                engine = IntradayStrategyEngine.get_instance()
+                curr_t = str(self.df_intraday.index[-1]) if len(self.df_intraday) > 0 else "15:00:00"
+                curr_p = float(self.df_intraday['close'].iloc[-1]) if 'close' in self.df_intraday.columns else (
+                    float(self.df_intraday['trade'].iloc[-1]) if 'trade' in self.df_intraday.columns else self.open_price
+                )
+                hi_p = float(self.df_intraday['high'].max()) if 'high' in self.df_intraday.columns else curr_p
+                lo_p = float(self.df_intraday['low'].min()) if 'low' in self.df_intraday.columns else curr_p
+
+                eval_res = engine.evaluate_seven_nodes(
+                    code=c_clean,
+                    current_time_str=curr_t,
+                    open_price=self.open_price if self.open_price > 0 else curr_p,
+                    price=curr_p,
+                    high_price=hi_p,
+                    low_price=lo_p,
+                    vwap=self.vwap if self.vwap > 0 else curr_p
+                )
+                self.strategy_eval_result = {
+                    "is_matched": True,
+                    "period": p_mode,
+                    "score": eval_res.get("total_score", 0),
+                    "entry_price": curr_p,
+                    "stop_loss": round(lo_p * 0.985, 2),
+                    "target_price_1": round(self.target_sell_min if self.target_sell_min > 0 else curr_p * 1.05, 2),
+                    "target_price_2": round(self.target_sell_max if self.target_sell_max > 0 else curr_p * 1.10, 2),
+                    "pattern_name": eval_res.get("pattern_name", ""),
+                    "reason": f"分时7节点评分: {eval_res.get('total_score', 0)}分 ({eval_res.get('pattern_name', '')}) | {eval_res.get('guidance_text', '')}"
+                }
+                self.update()
+                logger.info(f"🎯 [SBC快捷键R分时测算] {c_clean} 评分: {eval_res.get('total_score', 0)}分 | {eval_res.get('pattern_name')}")
+            except Exception as e_node:
+                logger.error(f"[SBC分时测算] 异常: {e_node}")
+                self.strategy_eval_result = {
+                    "is_matched": False,
+                    "period": p_mode,
+                    "reason": f"分时测算异常: {e_node}"
+                }
+                self.update()
 
     def wheelEvent(self, event):
         """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
@@ -1560,6 +1672,93 @@ class SBCChartCanvas(QWidget):
             supp_info = f"📈 上涨支撑 (斜率:{ch_supp_slope_deg:.1f}°) | 偏离:{ch_supp_pos:+.2f}% | 周期:{ch_supp_days}"
             painter.drawText(margin_left + 6, margin_top + 31, supp_info)
 
+        # 11. 🌟 快捷键 R 自适应策略测算信号点与基准线绘制
+        if getattr(self, 'strategy_eval_result', None):
+            res_strat = self.strategy_eval_result
+            is_matched = res_strat.get("is_matched", False)
+            strat_period = str(res_strat.get("period", self.period_mode)).upper()
+
+            if is_matched:
+                entry_p = float(res_strat.get("entry_price", 0.0))
+                stop_p = float(res_strat.get("stop_loss", 0.0))
+                tgt_p1 = float(res_strat.get("target_price_1", 0.0))
+                score_v = res_strat.get("score", 0)
+
+                # 突破 K 棒在可视切片中的 X 位置
+                brk_idx_local = n - 1
+                brk_raw = res_strat.get("breakout_bar_idx", -1)
+                if brk_raw >= 0:
+                    brk_idx_local = max(0, min(n - 1, brk_raw - start_i))
+
+                x_brk = k_to_x(brk_idx_local)
+                y_entry = k_to_y(entry_p) if (entry_p > 0 and min_p <= entry_p <= max_p) else k_to_y(closes[brk_idx_local])
+
+                # 11.1 高亮垂直介入指引虚线
+                painter.setPen(QPen(QColor(255, 0, 128, 200), 1.5, Qt.PenStyle.DashLine))
+                painter.drawLine(int(x_brk), int(margin_top + main_h), int(x_brk), int(margin_top))
+
+                # 11.2 介入信号胶囊卡片
+                entry_tag = f"🚀 介入点:{entry_p:.2f} ({score_v}分)"
+                painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                fm_e = painter.fontMetrics()
+                tw_e = fm_e.horizontalAdvance(entry_tag) + 12
+                th_e = fm_e.height() + 6
+                tag_x_e = int(max(margin_left, min(margin_left + chart_w - tw_e, x_brk - tw_e / 2)))
+                tag_y_e = int(max(margin_top, min(margin_top + main_h - th_e, y_entry - th_e - 6)))
+
+                painter.setPen(QPen(QColor("#FF007F"), 1.2))
+                painter.setBrush(QBrush(QColor("#35001C")))
+                painter.drawRoundedRect(tag_x_e, tag_y_e, tw_e, th_e, 3, 3)
+                painter.setPen(QPen(QColor("#FFFFFF")))
+                painter.drawText(tag_x_e + 6, tag_y_e + th_e - 5, entry_tag)
+
+                # 11.3 止损位水平虚线与标签
+                if stop_p > 0 and min_p <= stop_p <= max_p:
+                    y_stop = k_to_y(stop_p)
+                    painter.setPen(QPen(QColor("#EF4444"), 1.2, Qt.PenStyle.DashDotLine))
+                    painter.drawLine(int(x_brk), int(y_stop), int(margin_left + chart_w), int(y_stop))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#EF4444")))
+                    painter.drawText(int(margin_left + chart_w - 95), int(y_stop - 3), f"🛡️止损:{stop_p:.2f}")
+
+                # 11.4 目标位水平虚线与标签
+                if tgt_p1 > 0 and min_p <= tgt_p1 <= max_p:
+                    y_tgt1 = k_to_y(tgt_p1)
+                    painter.setPen(QPen(QColor("#10B981"), 1.2, Qt.PenStyle.DashDotLine))
+                    painter.drawLine(int(x_brk), int(y_tgt1), int(margin_left + chart_w), int(y_tgt1))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#10B981")))
+                    painter.drawText(int(margin_left + chart_w - 95), int(y_tgt1 - 3), f"💎目标1:{tgt_p1:.2f}")
+
+                # 11.5 右上角 HUD 浮动诊断条
+                hud_text = f"🎯 [R键测算·{strat_period}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
+                painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                fm_hud = painter.fontMetrics()
+                hud_w = fm_hud.horizontalAdvance(hud_text) + 16
+                hud_h = 22
+                hud_x = int(margin_left + chart_w - hud_w - 6)
+                hud_y = int(margin_top + 6)
+                painter.setPen(QPen(QColor("#38BDF8"), 1))
+                painter.setBrush(QBrush(QColor(14, 42, 56, 220)))
+                painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
+                painter.setPen(QPen(QColor("#38BDF8")))
+                painter.drawText(hud_x + 8, hud_y + 15, hud_text)
+            else:
+                # 未命中时的浮动提示条
+                fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
+                hud_text = f"⚠️ [R键测算·{strat_period}] {fail_reason}"
+                painter.setFont(QFont("Microsoft YaHei", 8))
+                fm_hud = painter.fontMetrics()
+                hud_w = min(int(chart_w * 0.8), fm_hud.horizontalAdvance(hud_text) + 16)
+                hud_h = 22
+                hud_x = int(margin_left + chart_w - hud_w - 6)
+                hud_y = int(margin_top + 6)
+                painter.setPen(QPen(QColor("#94A3B8"), 1))
+                painter.setBrush(QBrush(QColor(20, 20, 30, 210)))
+                painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
+                painter.setPen(QPen(QColor("#CBD5E1")))
+                painter.drawText(hud_x + 8, hud_y + 15, hud_text)
+
 
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week", "month"]
 
@@ -1689,7 +1888,13 @@ class SBCIntradayChartDialog(QWidget):
                 pass
         btn_linkage.clicked.connect(_on_send_linkage)
 
+        self.btn_eval_r = QPushButton("⚡ 测算 (R)")
+        self.btn_eval_r.setStyleSheet("background-color: #0e2a38; color: #38bdf8; font-weight: bold; border: 1px solid #0284c7; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        self.btn_eval_r.setToolTip("快捷键: R 键，自适应当前视图周期运行策略测算并在图上标记买卖介入点、止损与目标位")
+        self.btn_eval_r.clicked.connect(self._on_eval_r_clicked)
+
         tb_layout.addStretch()
+        tb_layout.addWidget(self.btn_eval_r)
         tb_layout.addWidget(btn_linkage)
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
@@ -1699,6 +1904,7 @@ class SBCIntradayChartDialog(QWidget):
 
         # 2. 实盘走势图画布
         self.canvas = SBCChartCanvas(self)
+        self.canvas.code = self.code
         layout.addWidget(self.canvas, 1)
 
         # 3. 折叠式行情数据与 TDX 通信日志区域
@@ -2035,9 +2241,39 @@ class SBCIntradayChartDialog(QWidget):
             logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
             self.resize(680, 420)
 
+    def keyPressEvent(self, event):
+        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算"""
+        if event.key() == Qt.Key.Key_R:
+            self._on_eval_r_clicked()
+            event.accept()
+            return
+        elif event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_0):
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.reset_view()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _on_eval_r_clicked(self):
+        """⚡ 快捷键 R / 按钮触发当前周期自适应策略测算与图上标记"""
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.code = self.code
+            self.canvas.run_adaptive_strategy_eval()
+            res = getattr(self.canvas, 'strategy_eval_result', None)
+            if res and res.get("is_matched", False):
+                self.lbl_info.setText(
+                    f"🎉 [{res.get('period', '').upper()}] 策略测算命中: 得分={res.get('score')}分 | "
+                    f"介入价={res.get('entry_price', 0.0):.2f}元 | 止损={res.get('stop_loss', 0.0):.2f}元 | "
+                    f"目标1={res.get('target_price_1', 0.0):.2f}元"
+                )
+            elif res:
+                self.lbl_info.setText(f"⚠️ [{res.get('period', '').upper()}] 策略测算: {res.get('reason', '当前周期未触发反转突破')}")
+
     def showEvent(self, event):
         """SBC 窗口打开展示事件：默认将焦点赋予当前显示的周期按钮上，便于键盘/鼠标快速操作"""
         super().showEvent(event)
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.code = self.code
         if hasattr(self, 'btn_group_period') and self.btn_group_period:
             for btn in self.btn_group_period.buttons():
                 if btn.isChecked():
@@ -4756,6 +4992,17 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             res_summary += "--------------------------------------------------\n"
 
         QMessageBox.information(self, "⚡ 全量 Code 分时策略自动检测", res_summary)
+
+    def keyPressEvent(self, event):
+        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算"""
+        if event.key() == Qt.Key.Key_R:
+            # 优先调用 Tab1 中的 SBC 画布测算
+            if hasattr(self, 'tab1_sbc_canvas') and self.tab1_sbc_canvas:
+                self.tab1_sbc_canvas.code = self.code
+                self.tab1_sbc_canvas.run_adaptive_strategy_eval()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def _get_stock_realtime_data_for_code(self, code_str: str) -> Tuple[float, float, float, float, float, float, float, float, str, bool, float]:
         """全自动从 TDX 秒级直连、手动估价输入、self._latest_df 或行情快照解析全量字段"""

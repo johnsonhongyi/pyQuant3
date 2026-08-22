@@ -288,6 +288,16 @@ class NewStockPanel(QWidget):
         self.btn_open_sbc.clicked.connect(self._on_open_sbc_clicked)
         top_bar.addWidget(self.btn_open_sbc)
 
+        self.btn_eval_60f = QPushButton("🎯 60f通道测算")
+        self.btn_eval_60f.setToolTip("通过底层 TDX API 直连拉取 60m 真实 K 线，测算通道底部缩量横盘与右侧突破介入点")
+        self.btn_eval_60f.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_eval_60f.setStyleSheet("""
+            QPushButton { background-color: #0e2a38; color: #38bdf8; font-weight: bold; border: 1px solid #0284c7; border-radius: 3px; padding: 2px 6px; font-size: 9pt; }
+            QPushButton:hover { background-color: #0284c7; color: #ffffff; }
+        """)
+        self.btn_eval_60f.clicked.connect(self._on_eval_60f_clicked)
+        top_bar.addWidget(self.btn_eval_60f)
+
         top_bar.addStretch()
 
         self.lbl_status = QLabel("🟢 启动初始化数据中...")
@@ -1256,6 +1266,11 @@ class NewStockPanel(QWidget):
 
         menu.addSeparator()
 
+        act_eval_60f = menu.addAction(f"🎯 运行 【{self.selected_name}】 60f 通道底部反转测算 (TDX直连)")
+        act_eval_60f.triggered.connect(self._on_eval_60f_clicked)
+
+        menu.addSeparator()
+
         act_gen = menu.addAction(f"⚡ 自动生成/重新生成分时阶梯策略")
         act_gen.triggered.connect(self._on_generate_strategy_clicked)
 
@@ -1280,3 +1295,70 @@ class NewStockPanel(QWidget):
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(self.selected_code))
 
         menu.exec(QCursor.pos())
+
+    def _on_eval_60f_clicked(self):
+        """60f 通道底部反转突破策略直连 TDX API 测算事件 (支持单选与全量批量)"""
+        from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+        strategy = ChannelBottomReversalStrategy()
+
+        # 1. 如果选中了单只标的，单股直连诊断
+        if self.selected_code and self.selected_name:
+            code = self.selected_code
+            name = self.selected_name
+            self.lbl_status.setText(f"📡 正在通过 TDX API 直连拉取 【{name}】 60m K线进行通道测算...")
+            QApplication.processEvents()
+
+            res = strategy.evaluate_stock_tdx(code)
+            self.lbl_status.setText("🟢 60f 通道策略测算完成")
+
+            if res.get("is_matched", False):
+                msg = (
+                    f"🎉 【{name} ({code})】 命中 60f 通道底部反转突破形态！\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 形态评分: {res.get('score', 0)} 分\n"
+                    f"🎯 建议介入价: {res.get('entry_price', 0.0):.2f} 元\n"
+                    f"🛡️ 止损保护位: {res.get('stop_loss', 0.0):.2f} 元\n"
+                    f"🚀 第一目标位: {res.get('target_price_1', 0.0):.2f} 元\n"
+                    f"💎 第二目标位: {res.get('target_price_2', 0.0):.2f} 元\n"
+                    f"📉 通道下倾角: {res.get('channel_slope_deg', 0.0):+.1f}°\n"
+                    f"💧 底部缩量比: {res.get('volume_shrink_pct', 0.0):.1f}%\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💡 逻辑解析:\n{res.get('reason', '')}"
+                )
+                QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
+            else:
+                msg = (
+                    f"⚠️ 【{name} ({code})】 未触发 60f 通道底部反转信号\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔍 未满足原因: {res.get('reason', '不满足形态条件')}\n"
+                    f"📉 通道斜率: {res.get('channel_slope_deg', 0.0):+.1f}°\n"
+                    f"最低波谷: {res.get('lowest_low', 0.0):.2f} 元\n"
+                    f"整理高点: {res.get('base_high', 0.0):.2f} 元\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
+            return
+
+        # 2. 如果未单选，执行全量新股 TDX 批量扫描
+        if self.df_data.empty:
+            QMessageBox.warning(self, "提示", "当前新股列表中无可用标的！")
+            return
+
+        codes = list(self.df_data["code"].dropna().unique())
+        self.lbl_status.setText(f"📡 正在直连 TDX API 批量拉取 {len(codes)} 只新股 60m K线进行形态扫描...")
+        QApplication.processEvents()
+
+        df_matched = strategy.scan_stocks_tdx(codes)
+        self.lbl_status.setText(f"🟢 批量扫描完成: 命中 {len(df_matched)} 只标的")
+
+        if df_matched.empty:
+            QMessageBox.information(self, "60f 通道策略批量扫描", f"扫描了 {len(codes)} 只新股，当前暂无标的命中 60f 通道底部反转突破形态。")
+        else:
+            lines = [f"🚀 60f 通道底部反转突破扫描结果 (共命中 {len(df_matched)} 只):\n"]
+            for _, r in df_matched.iterrows():
+                c = r["code"]
+                # 匹配股票名称
+                match_name = self.df_data.loc[self.df_data["code"] == c, "name"].values
+                n_str = match_name[0] if len(match_name) > 0 else c
+                lines.append(f"• 【{n_str} ({c})】 得分: {r.get('score', 0)}分 | 介入: {r.get('entry_price', 0):.2f} | 止损: {r.get('stop_loss', 0):.2f} | 目标: {r.get('target_price_1', 0):.2f}")
+            QMessageBox.information(self, "60f 通道策略批量扫描结果", "\n".join(lines))

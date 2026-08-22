@@ -253,12 +253,80 @@ class ChannelBottomReversalStrategy:
         }
 
     def evaluate(self, df_60m: pd.DataFrame) -> Dict[str, Any]:
-        """单股评估"""
+        """单股评估 (传入 DataFrame)"""
         return evaluate_channel_bottom_reversal(df_60m, **self.params)
+
+    def evaluate_stock_tdx(self, code: str, count: int = 120) -> Dict[str, Any]:
+        """
+        【底层 TDX API 权威直连】拉取单只标的 60m 真实 K 线并进行策略测算
+        """
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+            df_60m = fetcher.fetch_kline_bars(c_clean, category="60m", count=count)
+            if df_60m.empty or len(df_60m) < 20:
+                return {
+                    "is_matched": False,
+                    "score": 0.0,
+                    "code": c_clean,
+                    "reason": f"TDX API 未能获取到 [{c_clean}] 充足的 60m K线数据"
+                }
+            res = self.evaluate(df_60m)
+            res["code"] = c_clean
+            return res
+        except Exception as e:
+            logger.error(f"[TDX直连测算] {c_clean} 异常: {e}")
+            return {
+                "is_matched": False,
+                "score": 0.0,
+                "code": c_clean,
+                "reason": f"TDX 测算异常: {e}"
+            }
+
+    def scan_stocks_tdx(self, codes: List[str], count: int = 120, max_workers: int = 6) -> pd.DataFrame:
+        """
+        【底层 TDX API 权威直连高并发批量测算】
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        clean_codes = ["".join(filter(str.isdigit, str(c))).zfill(6) for c in codes if c]
+        if not clean_codes:
+            return pd.DataFrame()
+
+        results = []
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_code = {
+                executor.submit(self.evaluate_stock_tdx, code, count): code 
+                for code in clean_codes
+            }
+            for future in as_completed(future_to_code):
+                try:
+                    res = future.result()
+                    if res.get("is_matched", False):
+                        results.append(res)
+                except Exception as e:
+                    pass
+
+        cost_ms = (time.time() - t0) * 1000.0
+        if not results:
+            df_out = pd.DataFrame(columns=[
+                "code", "score", "entry_price", "stop_loss", "target_price_1", 
+                "target_price_2", "channel_slope_deg", "lowest_low", "base_high", 
+                "volume_shrink_pct", "reason"
+            ])
+            logger.info(f"⚡ [TDX直连 60f批量测算] 完成, 扫描 {len(clean_codes)} 标的, 命中 0 个 (耗时: {cost_ms:.1f}ms)")
+            return df_out
+
+        df_out = pd.DataFrame(results)
+        df_out.sort_values(by="score", ascending=False, inplace=True)
+        df_out.reset_index(drop=True, inplace=True)
+        logger.info(f"⚡ [TDX直连 60f批量测算] 完成, 扫描 {len(clean_codes)} 标的, 命中 {len(df_out)} 个 (耗时: {cost_ms:.1f}ms)")
+        return df_out
 
     def scan_batch(self, stock_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
-        全市场 / 多标的批量扫描引擎 (返回符合 quant_rules 的标准 DataFrame)
+        全市场 / 多标的 DataFrame 批量扫描引擎 (返回符合 quant_rules 的标准 DataFrame)
         """
         results = []
         t0 = time.time()
