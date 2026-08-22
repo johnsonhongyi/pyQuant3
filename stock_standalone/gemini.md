@@ -1,3 +1,16 @@
+## 2026-08-22 20:15
+- [x] **新股/次新股模块磁盘持久化、直连代理穿透与多通道权威股本补齐重构 (`ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`, `tests/test_new_stock_module.py`)**：
+    - [x] **建立双层 JSON 磁盘原子持久化机制**：
+        - 持久化文件 `config/new_stock_ipo_calendar.json` 与 `config/new_stock_data_cache.json`；
+        - 新增出厂预置新股清单（Factory Defaults），冷启动 0 秒恢复渲染，彻底杜绝启动时显示“共 0 标的”或白屏；
+    - [x] **直连 Session 穿透与 6 小时智能防频控**：
+        - 显式设置 `trust_env=False` 与 `proxies={"http": None, "https": None}`，彻底根治本地代理导致的 `ProxyError: Handshake timed out`；
+        - 低频 IPO 日历采用 6 小时防频控，非强制刷新直接复用本地持久化缓存，杜绝高频请求被封 IP；
+        - 任何网络异常 100% 自动无缝降级至本地持久化日历；
+    - [x] **TDX 权威股本 + IPC 广播数据流补齐换手率与流通市值**：
+        - 结合 `TDXRealtimeFetcher.get_circulation_shares` 获取真实流通股本，精准推算流通市值与换手率，并与主工作台 IPC 全市场广播（`UPDATE_DF_ALL` 5634 行）无缝对齐，彻底消除 `--` 占位符；
+    - [x] **全套测试（含新股模块 6 项与策略 5 组）全部 100% PASS**。
+
 ## 2026-08-22 19:42
 - [x] **删除子 Tab 冗余测算按钮 & 修复单选行点击时错误提取全量标的 Bug (`ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tab_batch_channel_scan.py`)**：
     - [x] **删除子 Tab 冗余测算入口**：
