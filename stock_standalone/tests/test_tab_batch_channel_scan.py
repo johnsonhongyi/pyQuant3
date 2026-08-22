@@ -99,7 +99,7 @@ class TestTabBatchChannelScan(unittest.TestCase):
         self.assertEqual(dlg.table.rowCount(), 2)
         self.assertEqual(dlg.table.item(0, 0).text(), "688826")
         self.assertEqual(dlg.table.item(0, 1).text(), "频准激光")
-        self.assertEqual(dlg.table.item(0, 2).text(), "95.0")
+        self.assertEqual(dlg.table.item(0, 4).text(), "95.0")
         self.assertEqual(dlg.table.item(1, 0).text(), "301655")
 
         # 触发单击联动信号测试
