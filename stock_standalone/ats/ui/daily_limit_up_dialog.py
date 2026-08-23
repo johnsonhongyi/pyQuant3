@@ -88,12 +88,12 @@ def get_limit_up_table_headers(extra_cols=None) -> Tuple[List[str], List[str]]:
         col_map = {}
 
     base_headers = [
-        "代码", "名称", "现价", "涨幅%", "连板数", "梯队分类", 
+        "代码", "名称", "现价", "涨幅%", "连板数", "梯队分类", "形态与质量",
         "封单额(万)", "封流比%", "封成比%", "换手%", "量比", "成交额(亿)", 
         "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "共振状态"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
-    tail_headers = ["形态与质量", "所属板块"]
+    tail_headers = ["所属板块"]
     full_headers = base_headers + extra_headers + tail_headers
     return full_headers, extra_cols
 
@@ -124,8 +124,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.last_sh_pct: float = 0.0
         self.is_narrow_mode: bool = False
         self._last_wide_width: int = 1280
-        # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 封单额(6), 封流比(7), 换手(9), DFF(12), Rank(13)
-        self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13}
+        # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 形态与质量(6), 封单额(7), 封流比(8), 换手(10), DFF(13), Rank(14)
+        self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 14}
 
         # 空间龙头当前标的
         self.current_top_leader_code: str = ""
@@ -402,12 +402,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             "全部梯队", 
             "👑 空间高度龙", 
             "🚀 连板接力", 
+            "💎 统治级大封单",
             "🎯 支撑阳包阴反转", 
-            "⚡ 阳包阴强反转", 
-            "🛡️ 关键支撑起爆", 
+            "⭐ 20cm强势首板",
             "🔥 强势主升首板", 
-            "💥 曾涨停炸板", 
-            "⚡ 爆量超跌反包"
+            "⚡ 大阳冲板未封",
+            "💥 曾涨停炸板"
         ])
         self.combo_tier_filter.setStyleSheet("""
             QComboBox { background-color: #1e1e24; color: #00ffaa; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
@@ -776,111 +776,27 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 # 5. 梯队分类
                 it_tier = QTableWidgetItem(tier_tag)
                 it_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if "支撑阳包阴" in tier_tag:
-                    it_tier.setForeground(QBrush(QColor("#ff55ff")))
+                if "空间高度龙" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ff3399"))) # 亮洋红
                     f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
-                elif "阳包阴" in tier_tag:
-                    it_tier.setForeground(QBrush(QColor("#00ffcc")))
+                elif "统治级" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#00ffcc"))) # 碧青极强
                     f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
-                elif "支撑起爆" in tier_tag or "支撑反弹" in tier_tag:
-                    it_tier.setForeground(QBrush(QColor("#ffd700")))
-                elif "空间高度龙" in tier_tag:
-                    it_tier.setForeground(QBrush(QColor("#ff3399")))
+                elif "支撑阳包阴" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ff55ff"))) # 亮紫粉
+                    f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
+                elif "20cm" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ffd700"))) # 金黄
                     f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
                 elif "连板接力" in tier_tag:
-                    it_tier.setForeground(QBrush(QColor("#ffaa00")))
+                    it_tier.setForeground(QBrush(QColor("#ffaa00"))) # 亮橙黄
+                elif "冲板未封" in tier_tag or "跟涨" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#aad4ff"))) # 浅蓝
+                elif "炸板" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ff8800"))) # 橙色
                 self.table.setItem(row_idx, col, it_tier); col += 1
 
-                # 6. 封单额(万)
-                it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if (seal_amt_wan > 0 and r.get("is_limit_up")) else "--")
-                it_seal_amt.setData(Qt.ItemDataRole.UserRole, seal_amt_wan if (seal_amt_wan > 0 and r.get("is_limit_up")) else -999999999.0)
-                it_seal_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                it_seal_amt.setForeground(QBrush(color_seal))
-                self.table.setItem(row_idx, col, it_seal_amt); col += 1
-
-                # 7. 封流比%
-                it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if (seal_to_circ > 0 and r.get("is_limit_up")) else "--")
-                it_seal_circ.setData(Qt.ItemDataRole.UserRole, seal_to_circ if (seal_to_circ > 0 and r.get("is_limit_up")) else -999999999.0)
-                it_seal_circ.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if seal_to_circ >= 10.0 and r.get("is_limit_up"):
-                    it_seal_circ.setForeground(QBrush(QColor("#ffd700")))
-                elif seal_to_circ >= 5.0 and r.get("is_limit_up"):
-                    it_seal_circ.setForeground(QBrush(QColor("#ff9900")))
-                self.table.setItem(row_idx, col, it_seal_circ); col += 1
-
-                # 8. 封成比%
-                it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if (seal_to_vol > 0 and r.get("is_limit_up")) else "--")
-                it_seal_vol.setData(Qt.ItemDataRole.UserRole, seal_to_vol if (seal_to_vol > 0 and r.get("is_limit_up")) else -999999999.0)
-                it_seal_vol.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_seal_vol); col += 1
-
-                # 9. 换手%
-                it_to = NumericTableWidgetItem(f"{turnover:.2f}%")
-                it_to.setData(Qt.ItemDataRole.UserRole, turnover)
-                it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_to); col += 1
-
-                # 10. 量比
-                it_vr = NumericTableWidgetItem(f"{vol_ratio:.2f}")
-                it_vr.setData(Qt.ItemDataRole.UserRole, vol_ratio)
-                it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_vr); col += 1
-
-                # 11. 成交额(亿)
-                it_amt = NumericTableWidgetItem(f"{amt_yi:.2f}" if amt_yi > 0 else "--")
-                it_amt.setData(Qt.ItemDataRole.UserRole, amt_yi if amt_yi > 0 else -999999999.0)
-                it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_amt); col += 1
-
-                # 12. DFF
-                it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
-                it_dff.setData(Qt.ItemDataRole.UserRole, dff)
-                it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                it_dff.setForeground(QBrush(QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))))
-                self.table.setItem(row_idx, col, it_dff); col += 1
-
-                # 13. Rank
-                it_rank = NumericTableWidgetItem(str(rank_val) if rank_val < 999 else "--")
-                it_rank.setData(Qt.ItemDataRole.UserRole, rank_val if rank_val < 999 else 999999.0)
-                it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, col, it_rank); col += 1
-
-                # 14. DFF2
-                it_dff2 = NumericTableWidgetItem(f"{dff2:+.1f}")
-                it_dff2.setData(Qt.ItemDataRole.UserRole, dff2)
-                it_dff2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_dff2); col += 1
-
-                # 15. DFF3
-                it_dff3 = NumericTableWidgetItem(f"{dff3:+.1f}")
-                it_dff3.setData(Qt.ItemDataRole.UserRole, dff3)
-                it_dff3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, col, it_dff3); col += 1
-
-                # 16. 大盘偏离
-                it_rs = NumericTableWidgetItem(f"{rs_val:+.2f}%")
-                it_rs.setData(Qt.ItemDataRole.UserRole, rs_val)
-                it_rs.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                it_rs.setForeground(QBrush(QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)))
-                self.table.setItem(row_idx, col, it_rs); col += 1
-
-                # 17. 共振状态
-                it_res = QTableWidgetItem(resonance)
-                it_res.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if resonance == "逆市抗跌":
-                    it_res.setForeground(QBrush(QColor("#ff55ff")))
-                elif resonance == "大盘共振":
-                    it_res.setForeground(QBrush(QColor("#00ff88")))
-                self.table.setItem(row_idx, col, it_res); col += 1
-
-                # 18. 动态 ats_col 自定义列
-                for ec in self.extra_cols:
-                    raw_val = extra_dict.get(ec, "--")
-                    it_extra = NumericTableWidgetItem(str(raw_val))
-                    it_extra.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    self.table.setItem(row_idx, col, it_extra); col += 1
-
-                # 19. 形态与质量 (倒数第二列，结合多日动能与两日情绪)
+                # 6. 形态与质量 (前移至核心位置，便于用户快速点击表头按动能评分一键排序)
                 quality_score = _safe_float(r.get("seal_quality_score", 70.0))
                 momentum_score = _safe_float(r.get("momentum_score", quality_score))
                 desc_tag = str(r.get("pattern_desc", f"动能 {momentum_score:.0f}分"))
@@ -893,14 +809,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 it_desc.setData(Qt.ItemDataRole.UserRole, momentum_score)
                 it_desc.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-                if is_support_bounce and is_bullish_engulfing:
-                    it_desc.setForeground(QBrush(QColor("#ff55ff"))) # 亮紫粉 (顶级反包反转)
+                if momentum_score >= 95 and r.get("is_limit_up"):
+                    it_desc.setForeground(QBrush(QColor("#ff3399"))) # 亮洋红 (顶级统治龙)
                     font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
-                elif is_bullish_engulfing:
-                    it_desc.setForeground(QBrush(QColor("#00ffcc"))) # 碧青 (阳包阴)
+                elif is_support_bounce and is_bullish_engulfing and r.get("is_limit_up"):
+                    it_desc.setForeground(QBrush(QColor("#ff55ff"))) # 亮紫粉 (支撑阳包阴)
                     font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
-                elif is_support_bounce:
-                    it_desc.setForeground(QBrush(QColor("#ffd700"))) # 金黄 (支撑反弹)
+                elif r.get("is_limit_up"):
+                    it_desc.setForeground(QBrush(QColor("#00ffcc"))) # 碧青 (真涨停首板)
+                elif "冲板未封" in desc_tag:
+                    it_desc.setForeground(QBrush(QColor("#aad4ff"))) # 浅蓝 (未封死冲板)
                 elif r.get("is_broken"):
                     it_desc.setForeground(QBrush(QColor("#ff8800"))) # 橙色 (炸板)
 
@@ -921,7 +839,96 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 it_desc.setToolTip(tip)
                 self.table.setItem(row_idx, col, it_desc); col += 1
 
-                # 20. 所属板块 (放置在最后一列)
+                # 7. 封单额(万)
+                it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if (seal_amt_wan > 0 and r.get("is_limit_up")) else "--")
+                it_seal_amt.setData(Qt.ItemDataRole.UserRole, seal_amt_wan if (seal_amt_wan > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_seal_amt.setForeground(QBrush(color_seal))
+                self.table.setItem(row_idx, col, it_seal_amt); col += 1
+
+                # 8. 封流比%
+                it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if (seal_to_circ > 0 and r.get("is_limit_up")) else "--")
+                it_seal_circ.setData(Qt.ItemDataRole.UserRole, seal_to_circ if (seal_to_circ > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_circ.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if seal_to_circ >= 10.0 and r.get("is_limit_up"):
+                    it_seal_circ.setForeground(QBrush(QColor("#ffd700")))
+                elif seal_to_circ >= 5.0 and r.get("is_limit_up"):
+                    it_seal_circ.setForeground(QBrush(QColor("#ff9900")))
+                self.table.setItem(row_idx, col, it_seal_circ); col += 1
+
+                # 9. 封成比%
+                it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if (seal_to_vol > 0 and r.get("is_limit_up")) else "--")
+                it_seal_vol.setData(Qt.ItemDataRole.UserRole, seal_to_vol if (seal_to_vol > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_vol.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_seal_vol); col += 1
+
+                # 10. 换手%
+                it_to = NumericTableWidgetItem(f"{turnover:.2f}%")
+                it_to.setData(Qt.ItemDataRole.UserRole, turnover)
+                it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_to); col += 1
+
+                # 11. 量比
+                it_vr = NumericTableWidgetItem(f"{vol_ratio:.2f}")
+                it_vr.setData(Qt.ItemDataRole.UserRole, vol_ratio)
+                it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_vr); col += 1
+
+                # 12. 成交额(亿)
+                it_amt = NumericTableWidgetItem(f"{amt_yi:.2f}" if amt_yi > 0 else "--")
+                it_amt.setData(Qt.ItemDataRole.UserRole, amt_yi if amt_yi > 0 else -999999999.0)
+                it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_amt); col += 1
+
+                # 13. DFF
+                it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
+                it_dff.setData(Qt.ItemDataRole.UserRole, dff)
+                it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_dff.setForeground(QBrush(QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))))
+                self.table.setItem(row_idx, col, it_dff); col += 1
+
+                # 14. Rank
+                it_rank = NumericTableWidgetItem(str(rank_val) if rank_val < 999 else "--")
+                it_rank.setData(Qt.ItemDataRole.UserRole, rank_val if rank_val < 999 else 999999.0)
+                it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_rank); col += 1
+
+                # 15. DFF2
+                it_dff2 = NumericTableWidgetItem(f"{dff2:+.1f}")
+                it_dff2.setData(Qt.ItemDataRole.UserRole, dff2)
+                it_dff2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_dff2); col += 1
+
+                # 16. DFF3
+                it_dff3 = NumericTableWidgetItem(f"{dff3:+.1f}")
+                it_dff3.setData(Qt.ItemDataRole.UserRole, dff3)
+                it_dff3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_dff3); col += 1
+
+                # 17. 大盘偏离
+                it_rs = NumericTableWidgetItem(f"{rs_val:+.2f}%")
+                it_rs.setData(Qt.ItemDataRole.UserRole, rs_val)
+                it_rs.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_rs.setForeground(QBrush(QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)))
+                self.table.setItem(row_idx, col, it_rs); col += 1
+
+                # 18. 共振状态
+                it_res = QTableWidgetItem(resonance)
+                it_res.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if resonance == "逆市抗跌":
+                    it_res.setForeground(QBrush(QColor("#ff55ff")))
+                elif resonance == "大盘共振":
+                    it_res.setForeground(QBrush(QColor("#00ff88")))
+                self.table.setItem(row_idx, col, it_res); col += 1
+
+                # 19. 动态 ats_col 自定义列
+                for ec in self.extra_cols:
+                    raw_val = extra_dict.get(ec, "--")
+                    it_extra = NumericTableWidgetItem(str(raw_val))
+                    it_extra.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col, it_extra); col += 1
+
+                # 20. 所属板块 (严格放置在最右侧最后一列)
                 it_cat = QTableWidgetItem(category if category else "--")
                 it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, col, it_cat); col += 1
