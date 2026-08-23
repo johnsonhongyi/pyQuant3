@@ -93,21 +93,22 @@ def get_limit_up_table_headers(extra_cols=None) -> Tuple[List[str], List[str]]:
         "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "共振状态"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
-    tail_headers = ["所属板块", "形态与质量"]
+    tail_headers = ["形态与质量", "所属板块"]
     full_headers = base_headers + extra_headers + tail_headers
     return full_headers, extra_cols
 
 
-class DailyLimitUpDialog(QDialog, WindowMixin):
+class DailyLimitUpDialog(QWidget, WindowMixin):
     """
     每日涨停分析与多日强势股天梯看板独立窗口
-    支持磁吸边沿吸附、自动贴边隐藏、窗口置顶、多日时序分析与全端联动。
+    支持磁吸边沿吸附、自动贴边隐藏、独立窗口模式、多日时序分析与全端联动。
     """
     code_clicked = pyqtSignal(str, str) # 单击联动 (code, name)
     code_double_clicked = pyqtSignal(str, str) # 双击查看详情 (code, name)
 
     def __init__(self, parent=None, restore_state=None):
-        super().__init__(parent)
+        super().__init__(None) # 必须为 None，确保是系统级独立窗口，不依附于主窗口层级
+        self._py_parent = parent
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("🔥 每日涨停分析与强势股天梯 (Limit-Up & Multi-Day Momentum)")
         self.resize(1280, 720)
@@ -139,6 +140,12 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
         self._linkage_timer.setSingleShot(True)
         self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
 
+        # 手动列宽调整防抖持久化定时器
+        self._header_save_timer = QTimer(self)
+        self._header_save_timer.setInterval(300)
+        self._header_save_timer.setSingleShot(True)
+        self._header_save_timer.timeout.connect(self._save_current_column_widths)
+
         # 0. Magnetic snap setup (必须在 restore_state 前初始化)
         self.anchor_edge = None
         self.is_hidden_state = False
@@ -162,15 +169,9 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
         self.snap_timer.setInterval(200)
         self.snap_timer.timeout.connect(self._detect_and_snap)
 
-        # 1. 窗口置顶标志与配置
+        # 1. 独立窗口模式与置顶配置 (默认不置顶，完全独立窗口)
         self.stays_on_top = self._load_stays_on_top()
-        flags = self.windowFlags()
-        flags &= ~Qt.WindowType.Dialog
-        flags &= ~Qt.WindowType.Tool
-        flags |= Qt.WindowType.Window
-        flags |= Qt.WindowType.WindowMinimizeButtonHint
-        flags |= Qt.WindowType.WindowMaximizeButtonHint
-        flags |= Qt.WindowType.WindowCloseButtonHint
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -194,10 +195,20 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
                 with _CONFIG_FILE_LOCK:
                     with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                        return data.get("daily_limit_up_dialog", {}).get("stays_on_top", True)
+                        return data.get("daily_limit_up_dialog", {}).get("stays_on_top", False)
         except Exception:
             pass
-        return True
+        return False
+
+    def _save_current_column_widths(self):
+        """持久化保存当前所有可见/隐藏列的精确列宽"""
+        try:
+            if hasattr(self, 'table') and self.table:
+                col_count = self.table.columnCount()
+                widths = [self.table.columnWidth(i) for i in range(col_count)]
+                save_config_node("ats_daily_limit_up_table_header", widths)
+        except Exception as e:
+            logger.debug(f"保存每日涨停看板列宽异常: {e}")
 
     def _save_window_states(self, is_open: Optional[bool] = None):
         try:
@@ -224,6 +235,8 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
                     "is_narrow_mode": self.is_narrow_mode,
                     "last_wide_width": self._last_wide_width
                 })
+                if hasattr(self, 'table') and self.table:
+                    node["column_widths"] = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
                 if is_open is not None:
                     node["is_open"] = is_open
 
@@ -488,10 +501,11 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
 
-        # 表头右键菜单支持
+        # 表头右键菜单支持与手动拖拽列宽防抖持久化监听
         header = self.table.horizontalHeader()
         header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         header.customContextMenuRequested.connect(self._show_header_context_menu)
+        header.sectionResized.connect(self._on_header_section_resized)
 
         setup_header_persistence(self.table, "ats_daily_limit_up_table", self)
         main_layout.addWidget(self.table)
@@ -500,6 +514,13 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
         self.lbl_status = QLabel("就绪。实时监控全市场涨停与封单比数据。")
         self.lbl_status.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
         main_layout.addWidget(self.lbl_status)
+
+    def _on_header_section_resized(self, logicalIndex: int, oldSize: int, newSize: int):
+        """当用户手动拖拽调整表格列宽时，触发防抖持久化保存"""
+        if getattr(self, '_is_populating', False):
+            return
+        if hasattr(self, '_header_save_timer'):
+            self._header_save_timer.start()
 
     def _get_btn_style(self, active: bool) -> str:
         if active:
@@ -834,12 +855,7 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
                     it_extra.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.table.setItem(row_idx, col, it_extra); col += 1
 
-                # 19. 所属板块
-                it_cat = QTableWidgetItem(category if category else "--")
-                it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, col, it_cat); col += 1
-
-                # 20. 形态与质量
+                # 19. 形态与质量 (倒数第二列)
                 quality_score = _safe_float(r.get("seal_quality_score", 70.0))
                 desc = f"质量 {quality_score:.0f}分"
                 if r.get("is_broken"):
@@ -847,6 +863,11 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
                 it_desc = QTableWidgetItem(desc)
                 it_desc.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, col, it_desc); col += 1
+
+                # 20. 所属板块 (放置在最后一列)
+                it_cat = QTableWidgetItem(category if category else "--")
+                it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_cat); col += 1
         finally:
             self.table.setSortingEnabled(True)
             self._is_populating = False
@@ -922,7 +943,8 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
             code_item = self.table.item(r, 0)
             name_item = self.table.item(r, 1)
             tier_item = self.table.item(r, 5)
-            cat_item = self.table.item(r, self.table.columnCount() - 2)
+            # 所属板块现在放置在最后一列
+            cat_item = self.table.item(r, self.table.columnCount() - 1)
 
             code = code_item.text().lower() if code_item else ""
             name = name_item.text().lower() if name_item else ""
@@ -943,14 +965,7 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
             c = code_item.text().strip()
             n = name_item.text().strip()
             self.code_clicked.emit(c, n)
-            # 广播物理切股
-            try:
-                from ats.ui.main_window import ATSMainWindow
-                app = QApplication.instance()
-                if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
-                    app.main_window.link_stock(c, n)
-            except Exception:
-                pass
+            self._broadcast_link_stock(c, n)
 
     def _on_cell_double_clicked(self, row: int, col: int):
         code_item = self.table.item(row, 0)
@@ -961,8 +976,8 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
             self.code_double_clicked.emit(c, n)
             # 调起 SBC 日内分时图与详情
             try:
-                from ats.ui.intraday_strategy_dialog import open_sbc_intraday_chart
-                open_sbc_intraday_chart(c, n, parent=self)
+                from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+                open_sbc_chart_dialog(self, c)
             except Exception as e:
                 logger.debug(f"打开 SBC 分时窗口异常: {e}")
 
@@ -990,14 +1005,14 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
                 new_w = max(75, min(120, new_w))
             elif col in (12, 13, 14, 15): # DFF / Rank / DFF2 / DFF3
                 new_w = max(48, min(75, new_w))
+            elif col == col_count - 1: # 最后一列：所属板块 (严格限制列宽)
+                new_w = max(65, min(95, new_w))
+            elif col == col_count - 2: # 倒数第二列：形态与质量
+                new_w = max(70, min(100, new_w))
             self.table.setColumnWidth(col, new_w)
 
         # 触发持久化保存列宽
-        try:
-            widths = [self.table.columnWidth(i) for i in range(col_count)]
-            save_config_node("ats_daily_limit_up_table_header", widths)
-        except Exception:
-            pass
+        self._save_current_column_widths()
         self.lbl_status.setText(f"📐 已完成一键自适应列宽 ({time.strftime('%H:%M:%S')})")
 
     def reset_default_columns(self):
@@ -1007,14 +1022,16 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
             6: 78, 7: 68, 8: 65, 9: 60, 10: 58, 11: 72,
             12: 58, 13: 48, 14: 52, 15: 52, 16: 68, 17: 72
         }
-        for col in range(self.table.columnCount()):
-            w = default_widths.get(col, 65)
+        col_count = self.table.columnCount()
+        for col in range(col_count):
+            if col == col_count - 1:
+                w = 80  # 所属板块默认 80px
+            elif col == col_count - 2:
+                w = 85  # 形态与质量默认 85px
+            else:
+                w = default_widths.get(col, 65)
             self.table.setColumnWidth(col, w)
-        try:
-            widths = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
-            save_config_node("ats_daily_limit_up_table_header", widths)
-        except Exception:
-            pass
+        self._save_current_column_widths()
         self.lbl_status.setText(f"🔄 已恢复默认紧凑列宽 ({time.strftime('%H:%M:%S')})")
 
     def toggle_narrow_mode(self, enabled: Optional[bool] = None):
@@ -1148,12 +1165,13 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
             self.toggle_narrow_mode()
         elif act_link and action == act_link:
             self.code_clicked.emit(c, n)
+            self._broadcast_link_stock(c, n)
         elif act_sbc and action == act_sbc:
             try:
-                from ats.ui.intraday_strategy_dialog import open_sbc_intraday_chart
-                open_sbc_intraday_chart(c, n, parent=self)
-            except Exception:
-                pass
+                from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+                open_sbc_chart_dialog(self, c)
+            except Exception as ex:
+                logger.warning(f"打开 SBC 分时走势异常: {ex}")
         elif act_60f and action == act_60f:
             try:
                 from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
@@ -1453,6 +1471,11 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         self.hover_timer.stop()
         self.snap_timer.stop()
+        if hasattr(self, '_header_save_timer'):
+            self._header_save_timer.stop()
+        # 显式持久化保存最新手动/自动调整的表格列宽
+        self._save_current_column_widths()
+
         main_app = self._get_main_app()
         is_app_exiting = False
         if main_app:
@@ -1466,6 +1489,10 @@ class DailyLimitUpDialog(QDialog, WindowMixin):
         event.accept()
 
     def hideEvent(self, event):
+        if hasattr(self, '_header_save_timer'):
+            self._header_save_timer.stop()
+        self._save_current_column_widths()
+
         main_app = self._get_main_app()
         is_app_exiting = False
         if main_app:

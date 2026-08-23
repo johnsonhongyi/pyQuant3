@@ -30,11 +30,16 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         self.assertIn("Rank", headers)
         self.assertIn("DFF2", headers)
         self.assertIn("DFF3", headers)
+        # 断言末尾两列顺序：倒数第二列为形态与质量，最后一列为所属板块
+        self.assertEqual(headers[-1], "所属板块")
+        self.assertEqual(headers[-2], "形态与质量")
 
     def test_dialog_init_and_update(self):
         dialog = DailyLimitUpDialog(parent=None)
         self.assertIsNotNone(dialog)
         self.assertGreater(dialog.table.columnCount(), 15)
+        # 断言默认不置顶
+        self.assertFalse(dialog.stays_on_top)
 
         mock_df = pd.DataFrame([
             {
@@ -54,9 +59,11 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog.update_data_payload(mock_df, sh_pct=1.0)
         self.assertGreaterEqual(dialog.table.rowCount(), 1)
 
-        # 测试自适应列宽
+        # 测试自适应列宽与板块列宽限制
         dialog.auto_fit_columns()
         self.assertGreater(dialog.table.columnWidth(0), 40)
+        last_col = dialog.table.columnCount() - 1
+        self.assertLessEqual(dialog.table.columnWidth(last_col), 95) # 板块列限制宽度不超过95px
 
         # 测试空间龙头点击联动
         dialog.current_top_leader_code = "600519"
@@ -73,6 +80,10 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog._fire_linkage_debounced()
         self.assertGreaterEqual(len(emitted_signals), 2)
         self.assertEqual(emitted_signals[-1][0], "600519")
+
+        # 测试手动调整列宽持久化保存
+        dialog.table.setColumnWidth(0, 77)
+        dialog._save_current_column_widths()
 
         # 测试切换到极窄模式
         dialog.toggle_narrow_mode(True)
