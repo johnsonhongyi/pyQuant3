@@ -443,8 +443,9 @@ class NewStockPanel(QWidget):
         if is_manual_btn and hasattr(self, 'btn_refresh'):
             self.btn_refresh.setText("⏳ 正在更新新股...")
             self.btn_refresh.setEnabled(False)
-            self.lbl_status.setText("🔄 正在强制拉取最新新股日历与行情...")
+            self.lbl_status.setText("🔄 正在通过 TDX 权威接口强制更新 100 只新股行情与股本...")
             self.lbl_status.setStyleSheet("color: #38bdf8; font-size: 8.5pt; font-weight: bold;")
+            logger.info("🔄 [NewStockPanel] 正在通过 TDX 权威接口强制更新 100 只新股行情、真实股本与换手率...")
 
         self.worker = NewStockFetchWorker(force_refresh=force_refresh, enrich_tdx=True)
         self.worker.data_ready.connect(self._on_data_ready)

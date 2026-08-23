@@ -26,7 +26,22 @@ from pytdx.hq import TdxHq_API
 from logger_utils import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
+import math
+
 logger = LoggerFactory.getLogger("TDXRealtimeFetcher")
+
+
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
 
 # 默认预备通达信 HQ 服务器 (防本地配置文件不存在时的 Fallback)
 FALLBACK_TDX_HOSTS = [
@@ -109,14 +124,14 @@ def get_all_tdx_hosts() -> List[Tuple[str, str, int]]:
 def get_market_code(stock_code: str) -> int:
     """
     根据股票代码判断通达信市场代码：
-    0 -> 深圳市场 (000, 001, 002, 003, 300, 301, 302, 159, 123, 127, 128, 200)
-    1 -> 上海市场 (600, 601, 603, 605, 688, 689, 110, 113, 118, 510, 588, 900)
-    2 -> 北京市场 (920, 83, 87, 88, 43, 82)
+    0 -> 深圳市场 (000, 001, 002, 003, 300, 301, 302, 159, 123, 127, 128, 200 等)
+    1 -> 上海市场 (600, 601, 603, 605, 688, 689, 110, 113, 118, 510, 588, 900, 999 等)
+    2 -> 北京市场 (920, 83, 87, 88, 43, 82 等)
     """
     c = str(stock_code).strip().zfill(6)
     if c.startswith(("920", "83", "87", "88", "43", "82")):
         return 2
-    elif c.startswith(("600", "601", "603", "605", "688", "689", "110", "113", "118", "510", "588", "900")):
+    elif c.startswith(("60", "68", "99", "11", "51", "58", "90")):
         return 1
     return 0
 
@@ -208,8 +223,9 @@ class TDXRealtimeFetcher:
         # 瞬时上涨涨速历史追踪缓存 {code: (last_price, last_timestamp)}
         self._velocity_history: Dict[str, Tuple[float, float]] = {}
 
-        # 标的真实流通股本永久缓存 (股数)
+        # 标的真实流通股本与总股本永久缓存 (股数)
         self._finance_shares_cache: Dict[str, float] = {}
+        self._total_shares_cache: Dict[str, float] = {}
 
         self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站 (基准周期: 3.0s)", level="INFO")
 
@@ -217,9 +233,9 @@ class TDXRealtimeFetcher:
         self._init_best_server()
 
     def get_circulation_shares(self, code: str) -> float:
-        """获取标的真实流通股本 (股)，带内存永久缓存与按需懒拉取，实现 100% 精准换手率"""
+        """获取标的真实流通股本 (股)，带内存永久缓存与按需懒拉取，实现 100% 精准换手率与流通市值"""
         c_clean = str(code).strip().zfill(6)
-        if c_clean in self._finance_shares_cache:
+        if c_clean in self._finance_shares_cache and self._finance_shares_cache[c_clean] > 0:
             return self._finance_shares_cache[c_clean]
 
         # 1. 尝试从本地阶梯规格获取
@@ -233,9 +249,11 @@ class TDXRealtimeFetcher:
         except Exception:
             pass
 
-        # 2. 尝试从 TDX 财务数据接口懒拉取 (单次拉取永久有效)
+        # 2. 尝试从 TDX 财务数据接口拉取 (单次拉取永久有效)
         with self._conn_lock:
             try:
+                if not self._is_connected:
+                    self.connect()
                 if self._is_connected and self.api:
                     mkt = get_market_code(c_clean)
                     fin = self.api.get_finance_info(mkt, c_clean)
@@ -243,12 +261,89 @@ class TDXRealtimeFetcher:
                         shares = float(fin["liutongguben"] or 0.0)
                         if shares > 0:
                             self._finance_shares_cache[c_clean] = shares
+                        if "zongguben" in fin and float(fin["zongguben"] or 0.0) > 0:
+                            self._total_shares_cache[c_clean] = float(fin["zongguben"])
+                        if shares > 0:
                             return shares
             except Exception:
                 pass
 
-        # 默认基准 1.5 亿股 (1500万手)
         return 150000000.0
+
+    def get_total_shares(self, code: str) -> float:
+        """获取标的真实总股本 (股)，用于精准推算总市值"""
+        c_clean = str(code).strip().zfill(6)
+        if c_clean in self._total_shares_cache and self._total_shares_cache[c_clean] > 0:
+            return self._total_shares_cache[c_clean]
+
+        with self._conn_lock:
+            try:
+                if not self._is_connected:
+                    self.connect()
+                if self._is_connected and self.api:
+                    mkt = get_market_code(c_clean)
+                    fin = self.api.get_finance_info(mkt, c_clean)
+                    if fin and "zongguben" in fin:
+                        zg = float(fin["zongguben"] or 0.0)
+                        if zg > 0:
+                            self._total_shares_cache[c_clean] = zg
+                        if "liutongguben" in fin and float(fin["liutongguben"] or 0.0) > 0:
+                            self._finance_shares_cache[c_clean] = float(fin["liutongguben"])
+                        if zg > 0:
+                            return zg
+            except Exception:
+                pass
+
+        # 降级：若无总股本，回退为流通股本
+        return self.get_circulation_shares(c_clean)
+
+    def get_batch_finance_shares(self, codes: List[str]) -> Dict[str, Tuple[float, float]]:
+        """
+        批量并发/按需快速拉取标的流通股本与总股本字典 {code: (liutong_shares, total_shares)}
+        """
+        res: Dict[str, Tuple[float, float]] = {}
+        if not codes:
+            return res
+
+        missing = []
+        for c in codes:
+            c_clean = str(c).strip().zfill(6)
+            lt = self._finance_shares_cache.get(c_clean, 0.0)
+            zg = self._total_shares_cache.get(c_clean, 0.0)
+            if lt > 0 and zg > 0:
+                res[c_clean] = (lt, zg)
+            else:
+                missing.append(c_clean)
+
+        if missing:
+            with self._conn_lock:
+                if not self._is_connected:
+                    self.connect()
+                if self._is_connected and self.api:
+                    for c_clean in missing:
+                        try:
+                            mkt = get_market_code(c_clean)
+                            fin = self.api.get_finance_info(mkt, c_clean)
+                            lt = float(fin.get("liutongguben") or 0.0) if fin else 0.0
+                            zg = float(fin.get("zongguben") or 0.0) if fin else 0.0
+                            if lt > 0:
+                                self._finance_shares_cache[c_clean] = lt
+                            if zg > 0:
+                                self._total_shares_cache[c_clean] = zg
+                            if lt > 0 or zg > 0:
+                                res[c_clean] = (lt if lt > 0 else zg, zg if zg > 0 else lt)
+                        except Exception:
+                            pass
+
+        # 针对仍未命中的赋予安全降级值
+        for c in codes:
+            c_clean = str(c).strip().zfill(6)
+            if c_clean not in res:
+                lt = self._finance_shares_cache.get(c_clean, 150000000.0)
+                zg = self._total_shares_cache.get(c_clean, lt)
+                res[c_clean] = (lt, zg)
+
+        return res
 
     def get_market_code(self, code: str) -> int:
         """获取通达信市场代码 (0: 深市/创业板, 1: 沪市/科创板, 2: 北交所)"""
@@ -428,10 +523,11 @@ class TDXRealtimeFetcher:
             self.api = None
             self._is_connected = False
 
-    def get_security_quotes_safe(self, codes: List[str]) -> List[Dict[str, Any]]:
+    def get_security_quotes_safe(self, codes: List[str], force: bool = False) -> List[Dict[str, Any]]:
         """
-        安全批量获取股票最新五档盘口行情（带 3 次尝试静默保护与非交易时段定盘缓存）
+        安全批量获取股票最新五档盘口行情（支持 force=True 强制透传全量穿透）
         :param codes: 股票代码列表，例如 ['688826', '600519']
+        :param force: 是否强制无视定盘与静默冷却，全量向服务器发起拉取
         :return: 盘口字典列表
         """
         if not codes:
@@ -446,24 +542,28 @@ class TDXRealtimeFetcher:
         is_trading, _ = is_trading_time()
         cooldown_sec = 30.0 if is_trading else 60.0
 
-        # 若进入交易时段，清空非交易时段定盘状态
-        if is_trading and self._off_hours_settled_codes:
-            self._off_hours_settled_codes.clear()
-            self._off_hours_success_counts.clear()
+        # 若强制刷新或进入交易时段，清空非交易时段定盘与静默状态
+        if force or is_trading:
+            if self._off_hours_settled_codes:
+                self._off_hours_settled_codes.clear()
+                self._off_hours_success_counts.clear()
+            if force:
+                self._unlisted_or_dormant_codes.clear()
+                self._no_quote_counts.clear()
+                self._no_quote_last_attempt.clear()
 
         cached_results = []
         active_codes = []
         for c in codes:
             c_clean = str(c).strip().zfill(6)
-            # 非交易时段定盘保护：若已完成 3 次拉取定盘，直接复用盘后缓存
-            if not is_trading and c_clean in self._off_hours_settled_codes and c_clean in self._off_hours_cached_quotes:
+            # 非交易时段定盘保护：若已完成 3 次拉取定盘且非强制，直接复用盘后缓存
+            if not force and not is_trading and c_clean in self._off_hours_settled_codes and c_clean in self._off_hours_cached_quotes:
                 cached_results.append(self._off_hours_cached_quotes[c_clean])
                 continue
 
-            if c_clean in self._unlisted_or_dormant_codes:
+            if not force and c_clean in self._unlisted_or_dormant_codes:
                 last_try = self._no_quote_last_attempt.get(c_clean, 0.0)
                 if now_t - last_try < cooldown_sec:
-                    # 处于静默冷却保护期，若有缓存则复用，否则跳过
                     if c_clean in self._off_hours_cached_quotes:
                         cached_results.append(self._off_hours_cached_quotes[c_clean])
                     continue
@@ -472,98 +572,61 @@ class TDXRealtimeFetcher:
         if not active_codes:
             return cached_results
 
-        t_start = time.time()
+        all_fetched_quotes = []
+        chunk_size = 40  # 符合 TDXHQ 协议的安全批次大小
+
         with self._conn_lock:
             if not self._is_connected:
                 if not self.connect():
                     self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="ERROR")
                     return cached_results
 
-            req_params = []
-            for c_clean in active_codes:
-                mkt = get_market_code(c_clean)
-                req_params.append((mkt, c_clean))
-
-            codes_str = ",".join(c for _, c in req_params)
-            try:
-                quotes = self.api.get_security_quotes(req_params)
-                cost_ms = (time.time() - t_start) * 1000.0
-                host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
-                if quotes:
-                    self._record_request_feedback(cost_ms, is_error=False)
-                    for q in quotes:
-                        c_clean = str(q.get("code", "")).strip().zfill(6)
-                        if not c_clean:
-                            continue
-                        if c_clean in self._unlisted_or_dormant_codes:
-                            self._unlisted_or_dormant_codes.discard(c_clean)
-                            self.add_log(f"标的 [{c_clean}] 恢复实时成交行情！", level="INFO")
-                        self._no_quote_counts[c_clean] = 0
-
-                        # 非交易时段定盘计数
-                        if not is_trading:
-                            self._off_hours_cached_quotes[c_clean] = q
-                            self._off_hours_success_counts[c_clean] += 1
-                            cnt = self._off_hours_success_counts[c_clean]
-                            if cnt >= 3:
-                                self._off_hours_settled_codes.add(c_clean)
-                                self.add_log(f"📌 标的 [{c_clean}] 非交易时段已成功获取 3 次定盘，进入休市静默保护 (复用盘后快照，停止重复网络请求)", level="INFO")
-
-                    # 非交易时段且所有活跃标的均已定盘时，不再打印单次获取日志
-                    if is_trading or any(c not in self._off_hours_settled_codes for c in active_codes):
-                        self.add_log(f"标的 [{codes_str}] 行情获取成功 (耗时: {cost_ms:.1f}ms, 服务器: {host_info})", level="INFO")
-                    return cached_results + quotes
-                else:
-                    # 标的未上市或当前无盘口成交
-                    self._record_request_feedback(cost_ms, is_error=False)
-                    for _, c_clean in req_params:
-                        self._no_quote_last_attempt[c_clean] = now_t
-                        self._no_quote_counts[c_clean] += 1
-                        cnt = self._no_quote_counts[c_clean]
-                        if cnt == 3:
-                            self._unlisted_or_dormant_codes.add(c_clean)
-                            self.add_log(f"📌 标的 [{c_clean}] 连续 3 次无分时成交，已标记为【可能未上市或非交易时段】，进入低频静默保护 ({cooldown_sec:.0f}s 冷却)", level="INFO")
-                        elif cnt < 3:
-                            self.add_log(f"标的 [{c_clean}] 暂无分时成交 (尝试 {cnt}/3 次, 耗时: {cost_ms:.1f}ms)", level="INFO")
-                    return cached_results
-            except Exception as e:
-                cost_ms = (time.time() - t_start) * 1000.0
-                self._record_request_feedback(cost_ms, is_error=True)
-                self.add_log(f"标的 [{codes_str}] 批量获取行情异常: {e}, 正在切换连接重试...", level="WARN")
-                self._is_connected = False
-
-            # 若网络通信异常，尝试重新连接后逐个安全获取
-            if not self.connect():
-                return cached_results
-
-            results = []
-            for mkt, c_clean in req_params:
+            for i in range(0, len(active_codes), chunk_size):
+                chunk = active_codes[i:i + chunk_size]
+                req_params = [(get_market_code(c_c), c_c) for c_c in chunk]
+                codes_str = ",".join(c for _, c in req_params)
+                t_start = time.time()
                 try:
-                    q_single = self.api.get_security_quotes([(mkt, c_clean)])
-                    if q_single and len(q_single) > 0:
-                        results.append(q_single[0])
-                        self._no_quote_counts[c_clean] = 0
-                        self._unlisted_or_dormant_codes.discard(c_clean)
-                        if not is_trading:
-                            self._off_hours_cached_quotes[c_clean] = q_single[0]
-                            self._off_hours_success_counts[c_clean] += 1
-                            if self._off_hours_success_counts[c_clean] >= 3:
-                                self._off_hours_settled_codes.add(c_clean)
-                                self.add_log(f"📌 标的 [{c_clean}] 非交易时段已成功获取 3 次定盘，进入休市静默保护 (复用盘后快照，停止重复网络请求)", level="INFO")
+                    quotes = self.api.get_security_quotes(req_params)
+                    cost_ms = (time.time() - t_start) * 1000.0
+                    host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
+                    if quotes:
+                        self._record_request_feedback(cost_ms, is_error=False)
+                        for q in quotes:
+                            c_clean = str(q.get("code", "")).strip().zfill(6)
+                            if not c_clean:
+                                continue
+                            p = safe_float(q.get("price", 0.0))
+                            last_c = safe_float(q.get("last_close", 0.0))
+                            if p > 0 or last_c > 0:
+                                if c_clean in self._unlisted_or_dormant_codes:
+                                    self._unlisted_or_dormant_codes.discard(c_clean)
+                                self._no_quote_counts[c_clean] = 0
+
+                                # 记录有效定盘快照
+                                self._off_hours_cached_quotes[c_clean] = q
+                                if not is_trading:
+                                    self._off_hours_success_counts[c_clean] += 1
+                                    if self._off_hours_success_counts[c_clean] >= 3:
+                                        self._off_hours_settled_codes.add(c_clean)
+                        all_fetched_quotes.extend(quotes)
+                        self.add_log(f"⚡ [TDX] 成功获取批次 {len(quotes)} 只标的行情 (耗时: {cost_ms:.1f}ms, 主站: {host_info})", level="INFO")
                     else:
-                        self._no_quote_last_attempt[c_clean] = now_t
-                        self._no_quote_counts[c_clean] += 1
-                        cnt = self._no_quote_counts[c_clean]
-                        if cnt >= 3:
-                            self._unlisted_or_dormant_codes.add(c_clean)
-                except Exception as e_s:
-                    self.add_log(f"单股 [{c_clean}] 行情拉取异常: {e_s}", level="WARN")
-            cost_ms = (time.time() - t_start) * 1000.0
-            if results:
-                self._record_request_feedback(cost_ms, is_error=False)
-                if is_trading or any(c not in self._off_hours_settled_codes for c in active_codes):
-                    self.add_log(f"标的 [{codes_str}] 逐个重试完成: 成功 {len(results)}/{len(active_codes)} 只 (耗时: {cost_ms:.1f}ms)", level="INFO")
-            return cached_results + results
+                        self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，尝试单只补拉", level="WARN")
+                        for mkt, c_clean in req_params:
+                            try:
+                                single_q = self.api.get_security_quotes([(mkt, c_clean)])
+                                if single_q:
+                                    all_fetched_quotes.extend(single_q)
+                                    self._off_hours_cached_quotes[c_clean] = single_q[0]
+                            except Exception:
+                                pass
+                except Exception as e:
+                    cost_ms = (time.time() - t_start) * 1000.0
+                    self._record_request_feedback(cost_ms, is_error=True)
+                    self.add_log(f"标的批次 [{codes_str[:30]}...] 行情获取异常: {e}", level="WARN")
+
+        return cached_results + all_fetched_quotes
 
     def clear_stock_cache(self, code: str):
         """【🧹 彻底清理单股 TDX 行情缓存】清除 1 分钟 K 线内存缓存与盘后快照缓存"""
