@@ -1139,7 +1139,7 @@ class GlobalMarketNewsDetailDialog(QDialog):
 class GlobalMarketKLineDialog(QDialog):
     """外盘资产 120 日 K 线 / OHLC 走势弹窗 (TradingView 风格极简暗黑画板)"""
 
-    def __init__(self, symbol: str, name: str = "", parent=None):
+    def __init__(self, symbol: str, name: str = "", parent=None, data_source: str = None):
         super().__init__(None)  # ⚡ 传入 None 使其成为完全独立的顶级 Window 窗口，支持多屏独立拖拽与全屏展宽
         self.symbol = symbol.strip().upper()
         self.name = name or self.symbol
@@ -1180,7 +1180,14 @@ class GlobalMarketKLineDialog(QDialog):
         self.chart_mode = "candlestick"
         self.show_boll = True
         self.zoom_mode = "recent_60"
-        self.data_source = "yahoo"
+        
+        # 确定数据源默认策略
+        from JSONData.global_market_data import get_proxy_config
+        proxy_on = get_proxy_config().get("enabled", False)
+        if data_source:
+            self.data_source = data_source.lower()
+        else:
+            self.data_source = "yahoo" if proxy_on else "sina"
 
         self._init_ui()
         self._restore_settings()
@@ -2009,9 +2016,35 @@ class GlobalMarketKLineDialog(QDialog):
             self.btn_mode_toggle.setText("美国线")
         self._draw_chart()
 
+    def _refresh_price_info_label(self):
+        """刷新 Header 主标的最新价格与涨跌幅标签，确保与外盘面板数据 100% 同步"""
+        try:
+            from JSONData.global_market_data import _global_cache
+            quotes = _global_cache.get('quotes', {})
+            q = quotes.get(self.symbol, {})
+            if q and 'price' in q and float(q.get('price', 0)) > 0:
+                p_val = float(q['price'])
+                pct_val = float(q.get('pct', 0.0))
+                color_tag = "#F6465D" if pct_val >= 0 else "#089981"
+                self.lbl_price_info.setText(
+                    f"最新价: <font color='{color_tag}'>{p_val:.2f}</font> | "
+                    f"涨跌: <font color='{color_tag}'>{pct_val:+.2f}%</font>"
+                )
+            elif self.klines:
+                last_item = self.klines[-1]
+                c_val = float(last_item.get('close', 0.0))
+                pct_val = float(last_item.get('pct', 0.0))
+                color_tag = "#F6465D" if pct_val >= 0 else "#089981"
+                self.lbl_price_info.setText(
+                    f"最新价: <font color='{color_tag}'>{c_val:.2f}</font> | "
+                    f"涨跌: <font color='{color_tag}'>{pct_val:+.2f}%</font>"
+                )
+        except Exception:
+            pass
+
     def _load_fast_cached_or_async(self):
-        """0 毫秒极速读取本地 JSON 缓存；若无缓存则触发后台异步线程"""
-        src_key = (self.data_source or 'yahoo').lower()
+        """0 毫秒极速读取本地 JSON 缓存；若无缓存或需更新则触发后台异步线程"""
+        src_key = (self.data_source or 'sina').lower()
         cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
         log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 检查 [{src_key}] 外盘 K线物理持久化文件路径: {cache_path}")
         cached_klines = []
@@ -2030,18 +2063,13 @@ class GlobalMarketKLineDialog(QDialog):
             self.klines = cached_klines
             self._draw_chart()
             self._apply_zoom_mode()
+            self._refresh_price_info_label()
             # 异步加载关联品种 K 线
             self._trigger_related_loads()
 
-            # 非外盘交易窗口 (如周末/休市)，已有缓存直接锁定，绝对不触发异步网络请求！
-            from JSONData.global_market_data import is_market_active_time
-            if not is_market_active_time():
-                log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} 当前处于外盘休市/非交易时间，已命中本地物理 JSON 缓存，停止网络抓取 -> {self.symbol}")
-                return
-
-        # 后台异步抓取最新或静默刷新
+        # 后台异步抓取最新以防历史滞后或补全切片
         from JSONData.global_market_data import is_market_active_time
-        force_flag = True if is_market_active_time() else (False if (cached_klines and len(cached_klines) >= 5) else True)
+        force_flag = True if (not cached_klines or len(cached_klines) < 5) else False
         self._trigger_async_load(force_refresh=force_flag)
 
     def _on_manual_refresh_kline(self):
@@ -2096,7 +2124,7 @@ class GlobalMarketKLineDialog(QDialog):
             self.btn_refresh_kline.setEnabled(True)
             self.btn_refresh_kline.setText("🔄 刷新")
 
-        src_key = (self.data_source or 'yahoo').lower()
+        src_key = (self.data_source or 'sina').lower()
         cache_path = get_kline_cache_file_path().replace(".json", f"_{src_key}.json")
 
         # 🛡️ 核心符号一致性校验护盾：绝对禁止跨标的数据混淆与错配！
@@ -2116,6 +2144,7 @@ class GlobalMarketKLineDialog(QDialog):
             log_market_msg(f"[GlobalMarketKLineDialog] {get_proxy_info_str()} {worker_symbol} K线数据加载完成 ({len(klines)} 条)，物理写盘成功: {cache_path}")
             self._draw_chart()
             self._apply_zoom_mode()
+            self._refresh_price_info_label()
             # 主 K 线数据就绪后再触发关联品种加载
             self._trigger_related_loads()
             last_date = klines[-1].get('date', '') if klines else ''
@@ -2129,7 +2158,8 @@ class GlobalMarketKLineDialog(QDialog):
                 self.lbl_info.setText(f"❌ {worker_symbol} K 线数据加载失败: {err_msg or '网络或解析异常'}")
 
     def _refresh_related_info_label(self):
-        """刷新 Header 关联品种实时涨跌标签"""
+        """刷新 Header 关联品种实时涨跌标签与主标的最新价"""
+        self._refresh_price_info_label()
         if not self.related_symbols:
             return
         try:
@@ -2142,12 +2172,14 @@ class GlobalMarketKLineDialog(QDialog):
                 q = quotes.get(sym, {})
                 if q and 'pct' in q:
                     pct = float(q['pct'])
-                    color_tag = 'red' if pct >= 0 else 'green'
+                    color_tag = '#F6465D' if pct >= 0 else '#089981'
                     parts.append(f"<font color='{color_tag}'>{name} {pct:+.2f}%</font>")
                 else:
                     parts.append(f"{name} --")
             if parts:
                 self.lbl_related_info.setText(' | '.join(parts))
+        except Exception:
+            pass
         except Exception:
             pass
 

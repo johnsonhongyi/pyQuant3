@@ -129,10 +129,16 @@ def get_proxy_info_str() -> str:
         return "[Proxy: OFF - 纯直连]"
 
 
-def get_urllib_request_opener():
+def get_urllib_request_opener(target_url: str = ""):
     """获取应用代理设置的 urllib.request.OpenerDirector 实例 
-    (开启时使用配置代理，关闭时强制纯直连以彻底绕过 Windows 系统注册表残留代理)
+    (对于国内常用财经直连源 sina.com.cn / sinajs.cn / gtimg.cn 自动优先直连以提升数百毫秒响应速度并避免代理踩踏；
+    对于境外源如 Yahoo Finance 在代理开启时使用配置代理)
     """
+    if target_url:
+        u_lower = str(target_url).lower()
+        if 'sina.com.cn' in u_lower or 'sinajs.cn' in u_lower or 'gtimg.cn' in u_lower:
+            return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
     cfg = get_proxy_config()
     if cfg.get("enabled") and cfg.get("proxy_url"):
         p_url = cfg.get("proxy_url").strip()
@@ -340,27 +346,28 @@ def sanitize_klines_for_symbol(symbol: str, klines: list) -> list:
     sanitized = []
     seen_dates = set()
 
-    # 🛡️ 核心物理数值门槛: 防范美金与人民币内盘混存 (如 OIL 美原油 $75 vs 国内 sc0 500RMB)
+    # 🛡️ 核心物理数值门槛: 宽容合理的安全数值门槛，防止误杀最新牛市行情与大宗商品暴涨
     EXPECTED_RANGES = {
-        'AAPL': (100.0, 450.0),
-        'MSFT': (200.0, 750.0),
-        'NVDA': (20.0, 400.0),
-        'GOOGL': (50.0, 350.0),
-        'AMZN': (50.0, 350.0),
-        'META': (100.0, 1000.0),
-        'TSLA': (50.0, 700.0),
-        'MU': (20.0, 300.0),
-        'SOXX': (100.0, 500.0),
-        'QQQ': (150.0, 800.0),
-        'OIL': (15.0, 180.0),      # 美原油 $15~$180/桶 (彻底剥离 >200 的 sc0 人民币)
-        'BRENT': (15.0, 180.0),    # 布伦特 $15~$180/桶
-        'GOLD': (800.0, 4500.0),   # 美黄金 $800~$4500/盎司 (彻底剥离 <800 的 au0 人民币/克)
-        'XAUUSD': (800.0, 4500.0),
-        'SILVER': (8.0, 100.0),
-        'A50': (5.0, 40.0),
-        'USDCNH': (4.0, 10.0),
+        'AAPL': (10.0, 5000.0),
+        'MSFT': (10.0, 5000.0),
+        'NVDA': (1.0, 5000.0),
+        'GOOGL': (10.0, 5000.0),
+        'AMZN': (10.0, 5000.0),
+        'META': (10.0, 5000.0),
+        'TSLA': (5.0, 5000.0),
+        'MU': (5.0, 5000.0),
+        'TSM': (5.0, 5000.0),
+        'SOXX': (10.0, 5000.0),
+        'QQQ': (10.0, 5000.0),
+        'OIL': (5.0, 500.0),        # 美原油 $5~$500/桶
+        'BRENT': (5.0, 500.0),      # 布伦特 $5~$500/桶
+        'GOLD': (100.0, 20000.0),   # 美黄金 $100~$20000/盎司
+        'XAUUSD': (100.0, 20000.0),
+        'SILVER': (2.0, 500.0),     # COMEX白银 $2~$500/盎司
+        'A50': (1.0, 50000.0),      # A50 ETF(10~30) / A50 期货(10000~30000)
+        'USDCNH': (2.0, 20.0),      # 离岸人民币
     }
-    min_p, max_p = EXPECTED_RANGES.get(sym_u, (0.001, 100000.0))
+    min_p, max_p = EXPECTED_RANGES.get(sym_u, (0.01, 1000000.0))
 
     for item in klines:
         if not isinstance(item, dict):
@@ -536,7 +543,7 @@ def fetch_global_market_quotes(force_refresh=False) -> dict:
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        opener = get_urllib_request_opener()
+        opener = get_urllib_request_opener(url)
         with opener.open(req, timeout=5.0) as resp:
             content = resp.read().decode('gbk', errors='ignore')
 
@@ -1014,10 +1021,11 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         if ram_entry and ram_entry.get('klines'):
             ram_ts = ram_entry.get('fetch_ts', 0.0)
             elapsed_ram = now_ts - ram_ts
-            if force_refresh and (elapsed_ram < 30.0 or not active_time) and len(ram_entry['klines']) >= 5:
-                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [RAM-Cache] 触发 30s 防抖锁/非交易期保护 ({elapsed_ram:.1f}s 前): 复用 [{source_key}] 内存 K线 -> {sym_upper}")
+            # 仅在 2 秒内防疯狂连击，force_refresh 必须强制穿透以执行在线拉取和自愈！
+            if force_refresh and elapsed_ram < 2.0 and len(ram_entry['klines']) >= 5:
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [RAM-Cache] 触发 2s 连击保护 ({elapsed_ram:.1f}s 前): 复用 [{source_key}] 内存 K线 -> {sym_upper}")
                 return append_realtime_bar_if_needed(sym_upper, ram_entry['klines'])[-limit:]
-            elif not force_refresh and (elapsed_ram < cooldown_sec or not active_time) and len(ram_entry['klines']) >= 5:
+            elif not force_refresh and (elapsed_ram < cooldown_sec) and len(ram_entry['klines']) >= 5:
                 log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [RAM-Cache] 命中 {cooldown_sec:.0f}s 分级冷却锁 ({elapsed_ram:.1f}s < {cooldown_sec:.0f}s): 瞬间复用 [{source_key}] 内存 K线 ({len(ram_entry['klines'])} 条) -> {sym_upper}")
                 return append_realtime_bar_if_needed(sym_upper, ram_entry['klines'])[-limit:]
 
@@ -1036,11 +1044,10 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         if existing_klines and len(existing_klines) >= 5:
             _KLINE_RAM_CACHE[fetch_key] = {'klines': existing_klines, 'fetch_ts': file_mtime}
             elapsed_file = now_ts - file_mtime
-            if force_refresh and (elapsed_file < 30.0 or not active_time):
-                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [Disk-Cache] 触发 30s 防抖锁/非交易期保护 (修改于 {elapsed_file:.1f}s 前): 复用 [{source_key}] 磁盘 K线 -> {sym_upper}")
+            if force_refresh and elapsed_file < 2.0:
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [Disk-Cache] 触发 2s 防抖锁 (修改于 {elapsed_file:.1f}s 前): 复用 [{source_key}] 磁盘 K线 -> {sym_upper}")
                 return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
-
-            elif not force_refresh and (elapsed_file < cooldown_sec or not active_time):
+            elif not force_refresh and (elapsed_file < cooldown_sec):
                 log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} [Disk-Cache] 命中 {cooldown_sec:.0f}s 磁盘分级冷却锁 (修改于 {elapsed_file:.1f}s 前): 瞬间复用 [{source_key}] 磁盘 K线 ({len(existing_klines)} 条) -> {sym_upper}")
                 return append_realtime_bar_if_needed(sym_upper, existing_klines)[-limit:]
 
@@ -1060,7 +1067,7 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         }
         yahoo_sym = yahoo_symbol_map.get(sym_upper, sym_upper)
         
-        hosts = ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']
+        hosts = ['query2.finance.yahoo.com']
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
@@ -1071,8 +1078,8 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
             url = f"https://{host}/v8/finance/chart/{yahoo_sym}?range=1y&interval=1d&includePrePost=false"
             try:
                 req = urllib.request.Request(url, headers=headers)
-                opener = get_urllib_request_opener()
-                with opener.open(req, timeout=5.0) as resp:
+                opener = get_urllib_request_opener(url)
+                with opener.open(req, timeout=3.0) as resp:
                     raw = resp.read().decode('utf-8')
                 if not raw:
                     continue
@@ -1104,24 +1111,31 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                     if parsed:
                         log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
                         return parsed
-            except Exception as ex:
+            except Exception:
                 pass
-        log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} Yahoo 源在线抓取异常 {sym_upper}: 所有 Host 节点无有效数据响应")
+        log_market_msg(f"[GlobalMarketData] [Yahoo] {get_proxy_info_str()} Yahoo 源在线抓取异常 {sym_upper}: Host 节点无有效响应")
         return []
 
     MIN_KLINES = 5
 
     def _fetch_from_tencent() -> list:
-        tencent_sym = f"us{sym_upper}" if not sym_upper.startswith("us") else sym_upper
+        if sym_upper == 'A50':
+            tencent_sym = 'hk02823'
+        elif is_us_stock_symbol(sym_upper):
+            tencent_sym = f"us{sym_upper}" if not sym_upper.lower().startswith("us") else sym_upper
+        else:
+            return []
+
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={tencent_sym},day,,,{limit + 20},qfq"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://finance.qq.com'}
         try:
             req = urllib.request.Request(url, headers=headers)
-            opener = get_urllib_request_opener()
+            opener = get_urllib_request_opener(url)
             with opener.open(req, timeout=4.0) as resp:
                 raw = resp.read().decode('utf-8')
             data = json.loads(raw)
-            sec_dict = data.get('data', {})
+            raw_d = data.get('data', {})
+            sec_dict = raw_d if isinstance(raw_d, dict) else {}
             sec_data = sec_dict.get(tencent_sym, {}) or sec_dict.get(tencent_sym.lower(), {}) or sec_dict.get(sym_upper, {})
             klines = sec_data.get('day', []) or sec_data.get('qfqday', [])
             if klines:
@@ -1140,39 +1154,31 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         prev_c = c
                         parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
                 if len(parsed) >= MIN_KLINES:
-                    log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                    log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} ({tencent_sym}) 历史 K 线 {len(parsed)} 条")
                     return parsed
-                elif parsed:
-                    log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 只有 {len(parsed)} 条历史数据（不足 {MIN_KLINES}），降级到 Sina/Yahoo")
-            else:
-                log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} {sym_upper} 无历史 K 线数据, sec_dict keys: {list(sec_dict.keys())}")
         except Exception as ex:
             log_market_msg(f"[GlobalMarketData] [Tencent] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
     def _fetch_from_sina() -> list:
-        import re
         COMMODITY_SYMBOLS = {'BRENT', 'OIL', 'GOLD', 'A50', 'SILVER', 'XAUUSD', 'USDCNH'}
         is_us_stock = sym_upper not in COMMODITY_SYMBOLS
 
         if is_us_stock:
             url = f"https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var_r=/US_MinKService.getDailyK?symbol={sym_upper.lower()}"
             log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 开始抓取 {sym_upper} -> {url}")
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://finance.sina.com.cn'}
             try:
                 req = urllib.request.Request(url, headers=headers)
-                opener = get_urllib_request_opener()
+                opener = get_urllib_request_opener(url)
                 with opener.open(req, timeout=8.0) as resp:
                     raw = resp.read().decode('gbk', errors='ignore')
                 raw_list = []
-                json_str = None
-                match = re.search(r'=\s*(\[.*\])\s*;?', raw, re.DOTALL) or re.search(r'\((.*)\)', raw, re.DOTALL)
-                if match:
-                    json_str = match.group(1).strip()
-                elif raw.strip().startswith('[') and raw.strip().endswith(']'):
-                    json_str = raw.strip()
-
-                if json_str and json_str.lower() not in ('null', 'undefined', ''):
+                raw_str = raw.strip()
+                s_idx = raw_str.find('[')
+                e_idx = raw_str.rfind(']')
+                if s_idx != -1 and e_idx != -1 and e_idx > s_idx:
+                    json_str = raw_str[s_idx:e_idx + 1]
                     try:
                         raw_list = json.loads(json_str)
                     except Exception:
@@ -1197,107 +1203,48 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
                         except Exception:
                             continue
                     if len(parsed) >= MIN_KLINES:
-                        log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
+                        log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条 (最新: {parsed[-1]['date']}, 收盘: {parsed[-1]['close']})")
                         return parsed
-                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条，响应前 200: {raw[:200]}")
+                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条")
                 else:
-                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {raw[:200]}")
+                    log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表")
             except Exception as ex:
                 log_market_msg(f"[GlobalMarketData] [Sina-US] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
 
-        if not is_us_stock or not True:
-            sina_symbol_map = {
-                'BRENT':  'sc0',
-                'OIL':    'sc0',
-                'GOLD':   'au0',
-                'XAUUSD': 'au0',
-                'SILVER': 'ag0',
-                'A50':    'hf_CHA50CFD',
-            }
-            if sym_upper not in sina_symbol_map and is_us_stock:
-                return []
-            sina_code = sina_symbol_map.get(sym_upper, 'sc0' if 'OIL' in sym_upper or 'BRENT' in sym_upper else 'au0')
-            is_inner = sina_code in ['sc0', 'au0', 'ag0']
-            if is_inner:
-                url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var_r=/InnerFuturesNewService.getDailyK?symbol={sina_code}"
-            else:
-                url = f"https://gu.sina.cn/ft/api/jsonp.php/var_r=/GlobalFuturesService.getGlobalFuturesDailyK?symbol={sina_code}"
-            log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 开始抓取 {sym_upper} ({sina_code}) -> {url}")
-            headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}
+        # 大宗商品/期货与A50降级抓取
+        if sym_upper == 'A50':
+            # 尝试通过腾讯 HK 02823 抓取 A50 ETF 走势
             try:
-                req = urllib.request.Request(url, headers=headers)
-                opener = get_urllib_request_opener()
-                with opener.open(req, timeout=6.0) as resp:
-                    txt = resp.read().decode('gbk', errors='ignore')
-                json_match = re.search(r'=\s*(\[.*\])\s*;?', txt, re.DOTALL) or re.search(r'\((.*)\)', txt, re.DOTALL)
-                raw_list = []
-                if json_match:
-                    try:
-                        raw_list = json.loads(json_match.group(1).strip())
-                    except Exception:
-                        raw_list = []
-                elif txt.strip().startswith('[') and txt.strip().endswith(']'):
-                    try:
-                        raw_list = json.loads(txt.strip())
-                    except Exception:
-                        raw_list = []
+                a50_klines = _fetch_from_tencent()
+                if len(a50_klines) >= MIN_KLINES:
+                    return a50_klines
+            except Exception:
+                pass
 
-                if isinstance(raw_list, list) and raw_list:
-                    parsed = []
-                    prev_c = None
-                    slice_start = max(0, len(raw_list) - limit - 10)
-                    for item in raw_list[slice_start:]:
-                        try:
-                            if isinstance(item, list) and len(item) >= 5:
-                                d, o, h, l, c = str(item[0]), float(item[1]), float(item[2]), float(item[3]), float(item[4])
-                                v = float(item[5]) if len(item) > 5 else 0.0
-                            elif isinstance(item, dict):
-                                d = str(item.get('d', item.get('date', '')))
-                                o = float(item.get('o', item.get('open', 0)))
-                                h = float(item.get('h', item.get('high', 0)))
-                                l = float(item.get('l', item.get('low', 0)))
-                                c = float(item.get('c', item.get('close', 0)))
-                                v = float(item.get('v', item.get('volume', 0)))
-                            else:
-                                continue
-                            if c <= 0: continue
-                            pct = round(((c - prev_c) / prev_c) * 100.0, 2) if prev_c and prev_c > 0 else 0.0
-                            prev_c = c
-                            parsed.append({'date': d, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v, 'pct': pct})
-                        except Exception:
-                            continue
-                    if len(parsed) >= MIN_KLINES:
-                        log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 历史 K 线 {len(parsed)} 条")
-                        return parsed
-                    log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 解析只得 {len(parsed)} 条")
-                else:
-                    log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} {sym_upper} 响应体无有效 JSON 列表，响应前 200: {txt[:200]}")
-            except Exception as ex:
-                log_market_msg(f"[GlobalMarketData] [Sina-Futures] {get_proxy_info_str()} 抓取异常 {sym_upper}: {ex}")
         return []
 
     parsed_klines = []
     proxy_enabled = get_proxy_config().get("enabled", False)
 
-    # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Tencent / Sina 国内免代理直连源
+    # 1. 若代理已关闭 (国内纯直连模式)，优先使用 Sina (国内极速免代理全量源) -> Tencent -> Yahoo
     if not proxy_enabled:
-        parsed_klines = _fetch_from_tencent()
+        parsed_klines = _fetch_from_sina()
         if len(parsed_klines) < MIN_KLINES:
-            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
-            parsed_klines = _fetch_from_sina()
+            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Tencent...")
+            parsed_klines = _fetch_from_tencent()
         if len(parsed_klines) < MIN_KLINES:
-            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Yahoo...")
+            log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Yahoo...")
             parsed_klines = _fetch_from_yahoo()
     else:
         # 2. 代理已开启模式
         if source_key == 'yahoo':
             parsed_klines = _fetch_from_yahoo()
             if len(parsed_klines) < MIN_KLINES:
-                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Yahoo 不足 {MIN_KLINES} 条，降级到 Tencent...")
-                parsed_klines = _fetch_from_tencent()
-            if len(parsed_klines) < MIN_KLINES:
-                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Tencent 不足 {MIN_KLINES} 条，降级到 Sina...")
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Yahoo 不足 {MIN_KLINES} 条，降级到 Sina...")
                 parsed_klines = _fetch_from_sina()
+            if len(parsed_klines) < MIN_KLINES:
+                log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} Sina 不足 {MIN_KLINES} 条，降级到 Tencent...")
+                parsed_klines = _fetch_from_tencent()
         else:
             parsed_klines = _fetch_from_sina()
             if len(parsed_klines) < MIN_KLINES:
@@ -1458,21 +1405,24 @@ def repair_disk_kline_caches() -> dict:
     """物理磁盘 K 线缓存全量自愈与清理引擎 (Scrub corrupted entries & synthetic bars from disk)"""
     repaired_stats = {}
     EXPECTED_SYMBOL_RANGES = {
-        'AAPL': (100.0, 450.0),
-        'MSFT': (200.0, 750.0),
-        'NVDA': (20.0, 400.0),
-        'GOOGL': (50.0, 350.0),
-        'AMZN': (50.0, 350.0),
-        'META': (100.0, 1000.0),
-        'TSLA': (50.0, 700.0),
-        'MU': (20.0, 300.0),
-        'SOXX': (100.0, 500.0),
-        'QQQ': (150.0, 800.0),
-        'OIL': (15.0, 180.0),
-        'BRENT': (15.0, 180.0),
-        'GOLD': (800.0, 4500.0),
-        'A50': (5.0, 40.0),
-        'USDCNH': (4.0, 10.0),
+        'AAPL': (10.0, 5000.0),
+        'MSFT': (10.0, 5000.0),
+        'NVDA': (1.0, 5000.0),
+        'GOOGL': (10.0, 5000.0),
+        'AMZN': (10.0, 5000.0),
+        'META': (10.0, 5000.0),
+        'TSLA': (5.0, 5000.0),
+        'MU': (5.0, 5000.0),
+        'TSM': (5.0, 5000.0),
+        'SOXX': (10.0, 5000.0),
+        'QQQ': (10.0, 5000.0),
+        'OIL': (5.0, 500.0),
+        'BRENT': (5.0, 500.0),
+        'GOLD': (100.0, 20000.0),
+        'XAUUSD': (100.0, 20000.0),
+        'SILVER': (2.0, 500.0),
+        'A50': (1.0, 50000.0),
+        'USDCNH': (2.0, 20.0),
     }
 
     # 1. 扫描与基础清洗
@@ -1534,29 +1484,73 @@ def repair_disk_kline_caches() -> dict:
             except Exception:
                 pass
 
-    # 2. 🛡️ 跨源自动救援填充 (Cross-source Healing): 若 yahoo 数据过少，自动从 sina 填充健全历史
-    if 'yahoo' in disk_caches and 'sina' in disk_caches:
-        y_path, yahoo_cache = disk_caches['yahoo']
+    # 2. 🛡️ 跨源自动救援与最新日期自愈同步 (Cross-source Healing & Auto-sync):
+    # 若 sina 数据具备更新的交易日切片或 yahoo 缺失，自动增量同步至 yahoo 与默认全局盘库
+    if 'sina' in disk_caches:
         _, sina_cache = disk_caches['sina']
-        y_modified = False
-        for sym, s_klines in sina_cache.items():
-            sym_u = sym.strip().upper()
-            if sym_u == 'TEST_SYM':
-                continue
-            y_klines = yahoo_cache.get(sym_u, [])
-            if len(y_klines) < 20 and len(s_klines) >= 20:
-                clean_s = sanitize_klines_for_symbol(sym_u, s_klines)
-                if clean_s:
-                    yahoo_cache[sym_u] = clean_s
-                    y_modified = True
-                    repaired_stats[f"HEAL_YAHOO_{sym_u}"] = f"RESTORED_FROM_SINA ({len(clean_s)} bars)"
-                    log_market_msg(f"[GlobalMarketData] 🛡️ 成功将 {sym_u} 从 sina 盘库自动恢复至 yahoo 盘库 ({len(clean_s)} 条)")
-        if y_modified:
-            try:
-                with open(y_path, 'w', encoding='utf-8') as f:
-                    json.dump(yahoo_cache, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+        
+        # 同步至 yahoo
+        if 'yahoo' in disk_caches:
+            y_path, yahoo_cache = disk_caches['yahoo']
+            y_modified = False
+            for sym, s_klines in sina_cache.items():
+                sym_u = sym.strip().upper()
+                if not sym_u or sym_u == 'TEST_SYM': continue
+                y_klines = yahoo_cache.get(sym_u, [])
+                
+                # 判定条件：yahoo 缺失，或 sina 的最新日期更新于 yahoo
+                s_last_date = s_klines[-1].get('date', '') if s_klines else ''
+                y_last_date = y_klines[-1].get('date', '') if y_klines else ''
+                if len(s_klines) >= 5 and (len(y_klines) < 20 or s_last_date > y_last_date):
+                    # 增量合并
+                    merged_dict = {k.get('date'): dict(k) for k in y_klines if k.get('date')}
+                    for k in s_klines:
+                        if k.get('date'):
+                            merged_dict[k.get('date')] = dict(k)
+                    sorted_dates = sorted(merged_dict.keys())
+                    raw_final = [merged_dict[d] for d in sorted_dates]
+                    clean_final = sanitize_klines_for_symbol(sym_u, raw_final)
+                    if clean_final:
+                        yahoo_cache[sym_u] = clean_final
+                        y_modified = True
+                        repaired_stats[f"HEAL_YAHOO_{sym_u}"] = f"SYNCED ({len(clean_final)} bars, latest={clean_final[-1]['date']})"
+                        log_market_msg(f"[GlobalMarketData] 🛡️ 成功将 {sym_u} 最新 K 线从 sina 同步至 yahoo 盘库 ({len(clean_final)} 条, 最新: {clean_final[-1]['date']})")
+            if y_modified:
+                try:
+                    with open(y_path, 'w', encoding='utf-8') as f:
+                        json.dump(yahoo_cache, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
+        # 同步至默认 global_market_klines.json
+        try:
+            def_path = get_kline_cache_file_path()
+            if def_path and os.path.exists(def_path):
+                with open(def_path, 'r', encoding='utf-8') as f:
+                    def_cache = json.load(f)
+                d_mod = False
+                for sym, s_klines in sina_cache.items():
+                    sym_u = sym.strip().upper()
+                    if not sym_u or sym_u == 'TEST_SYM': continue
+                    d_klines = def_cache.get(sym_u, [])
+                    s_last_date = s_klines[-1].get('date', '') if s_klines else ''
+                    d_last_date = d_klines[-1].get('date', '') if d_klines else ''
+                    if len(s_klines) >= 5 and (len(d_klines) < 20 or s_last_date > d_last_date):
+                        merged_dict = {k.get('date'): dict(k) for k in d_klines if k.get('date')}
+                        for k in s_klines:
+                            if k.get('date'):
+                                merged_dict[k.get('date')] = dict(k)
+                        sorted_dates = sorted(merged_dict.keys())
+                        raw_final = [merged_dict[d] for d in sorted_dates]
+                        clean_final = sanitize_klines_for_symbol(sym_u, raw_final)
+                        if clean_final:
+                            def_cache[sym_u] = clean_final
+                            d_mod = True
+                if d_mod:
+                    with open(def_path, 'w', encoding='utf-8') as f:
+                        json.dump(def_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     return repaired_stats
 
