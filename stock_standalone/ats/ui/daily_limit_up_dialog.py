@@ -359,6 +359,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_tier_filter.addItems([
             "全部梯队", 
             "💎 冰点反身性龙",
+            "💎 地量地价起爆",
             "💎 冰点反身潜伏",
             "🟢 黄金潜伏区",
             "🟡 半路点火区",

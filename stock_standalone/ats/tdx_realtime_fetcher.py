@@ -1313,6 +1313,15 @@ class TDXRealtimeFetcher:
                 reason = f"主升先锋放量突破 (量比{vol_r:.1f}), 站稳均线(+{vwap_dev:.1f}%), 盈亏比极佳"
                 type_priority = 90
 
+            elif (vol_r >= 1.25 or dff2 >= 5.0) and (-0.3 <= vwap_dev <= 2.5) and (1.0 <= pct <= 5.0) and (has_base or turnover <= 5.5):
+                # 💎 地量地价多日震荡起爆：多日筑底震荡，地量转放量起爆点
+                buy_type = "💎 地量起爆"
+                buy_tag = "PULLBACK"
+                buy_zone = f"{vwap:.2f} ~ {round(vwap * 1.008, 2)}"
+                stop_loss = round(vwap * 0.985, 2)
+                reason = f"地量地价多日震荡筑底 (底座DFF2={dff2:.1f}), 今日放量起爆(量比{vol_r:.1f}), 均线支撑扎实, 黄金起爆点"
+                type_priority = 88
+
             elif (-0.5 <= vwap_dev <= 1.8) and (0.8 <= pct <= 4.5) and (has_base or dff2 > 5.0 or slope >= 40):
                 # 🎯 冰点反身低吸 / VWAP回踩：回踩分时均线不破，绝佳潜伏点 (如ST八菱、源杰科技)
                 buy_type = "💎 反身低吸"
@@ -1349,13 +1358,20 @@ class TDXRealtimeFetcher:
                 reason = f"在均线附近窄幅震荡, 等待放量突破或回踩信号"
                 type_priority = 50
 
+            # 重点关注标的专属加权与置顶提权
+            is_focus = (sec == "重点关注" or it.get("is_focus", False))
+            if is_focus:
+                type_priority += 8
+                reason = "⭐[重点关注] " + reason
+
             # 综合 Alpha 进攻得分 (0 ~ 100)
             alpha_score = (
                 type_priority * 0.35 +
                 min(30.0, max(0.0, pct * 2.5)) +
                 min(15.0, slope * 0.15) +
                 min(10.0, bid_p * 0.1) +
-                (10.0 if has_base else 0.0)
+                (10.0 if has_base else 0.0) +
+                (6.0 if is_focus else 0.0)
             )
             alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 

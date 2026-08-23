@@ -687,11 +687,17 @@ class LimitUpEngine:
                 desc_tag = f"⚠️ 炸板分歧({momentum_score:.0f}分)"
 
             else:
-                # 未封板的冲板/潜伏/跟涨股 (55 ~ 78 分，融合时间窗口衰减)
+                # 未封板的冲板/潜伏/跟涨股 (55 ~ 88 分，融合时间窗口与地量起爆)
                 ch_score = 55.0 + min(10.0, (pct - 2.0) * 1.3)
                 ch_score += min(6.0, max(0.0, dff2 * 0.05 + dff3 * 0.01))
+                
+                # 地量地价多日震荡起爆特征判定
+                is_low_vol_breakout = (vol_ratio >= 1.25 or dff2 >= 5.0) and (dff2 > 0 or dff3 > 0) and (turnover <= 5.5) and (-0.3 <= vwap_dev <= 2.5) and (1.5 <= pct <= 7.0)
+
                 if is_reflexivity_leader:
                     ch_score += 8.0
+                elif is_low_vol_breakout:
+                    ch_score += 7.0
                 elif "黄金潜伏" in entry_stage or "半路点火" in entry_stage:
                     ch_score += 5.0
                 if vol_ratio > 1.8:
@@ -699,7 +705,7 @@ class LimitUpEngine:
 
                 # 应用时间衰减惩罚
                 ch_score = ch_score * time_multiplier
-                momentum_score = round(min(78.0, max(45.0, ch_score)), 0)
+                momentum_score = round(min(88.0, max(45.0, ch_score)), 0)
 
                 if "尾盘诱多" in entry_stage:
                     r["tier_tag"] = "⚠️ 尾盘诱多脉冲"
@@ -707,6 +713,9 @@ class LimitUpEngine:
                 elif is_reflexivity_leader:
                     r["tier_tag"] = "💎 冰点反身潜伏"
                     desc_tag = f"💎 反身潜伏({momentum_score:.0f}分)"
+                elif is_low_vol_breakout:
+                    r["tier_tag"] = "💎 地量地价起爆"
+                    desc_tag = f"💎 地量起爆({momentum_score:.0f}分)"
                 elif "黄金潜伏" in entry_stage:
                     r["tier_tag"] = "🟢 黄金潜伏区"
                     desc_tag = f"🟢 均线低吸({momentum_score:.0f}分)"
@@ -767,9 +776,12 @@ class LimitUpEngine:
             if vwap_dev > 5.5:
                 continue
 
-            # 筛选具备强烈上车动能的梯度标的
+            # 筛选具备强烈上车动能的梯度标的 (含地量起爆与重点关注)
             is_radar_hit = False
+            tier_t = str(r.get("tier_tag", ""))
             if r.get("is_limit_up", False):
+                is_radar_hit = True
+            elif "地量" in tier_t or "地量" in str(r.get("pattern_desc", "")):
                 is_radar_hit = True
             elif "黄金潜伏" in stage or "半路点火" in stage or "封板临界" in stage:
                 is_radar_hit = True
@@ -777,12 +789,15 @@ class LimitUpEngine:
                 is_radar_hit = True
             elif r.get("is_support_bounce", False) and pct >= 2.5:
                 is_radar_hit = True
+            elif r.get("category") == "重点关注" or r.get("is_focus", False):
+                is_radar_hit = True
 
             if is_radar_hit:
                 radar_list.append(r)
 
-        # 排序：反身性龙头优先 > 上车动能评分降序 > 买盘压强降序 > 量比降序
+        # 排序：重点关注优先 > 反身性龙头优先 > 上车动能评分降序 > 买盘压强降序 > 量比降序
         radar_list.sort(key=lambda x: (
+            1 if (x.get("is_focus", False) or x.get("category") == "重点关注") else 0,
             1 if x.get("is_reflexivity_leader", False) else 0,
             x.get("momentum_score", 50.0),
             x.get("bid_pressure", 50.0),

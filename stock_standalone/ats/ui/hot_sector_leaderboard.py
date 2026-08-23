@@ -466,6 +466,8 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.combo_filter.addItems([
             "🔥 全部跟单标的", 
             "⭐ 核心聚焦 (Top 5)", 
+            "⭐ 仅看重点关注",
+            "💎 仅看地量起爆",
             "👑 仅看领涨龙头", 
             "🚀 仅看先锋突破", 
             "💎 仅看反身低吸", 
@@ -746,12 +748,16 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         if idx == 1:
             self.filter_mode = "TOP5_FOCUS" # ⭐ 核心聚焦 (Top 5)
         elif idx == 2:
-            self.filter_mode = "LEADER"     # 👑 仅看领涨龙头
+            self.filter_mode = "FOCUS"      # ⭐ 仅看重点关注
         elif idx == 3:
-            self.filter_mode = "BREAKOUT"   # 🚀 仅看先锋突破
+            self.filter_mode = "LOW_VOL"    # 💎 仅看地量起爆
         elif idx == 4:
-            self.filter_mode = "PULLBACK"   # 💎 仅看反身低吸
+            self.filter_mode = "LEADER"     # 👑 仅看领涨龙头
         elif idx == 5:
+            self.filter_mode = "BREAKOUT"   # 🚀 仅看先锋突破
+        elif idx == 6:
+            self.filter_mode = "PULLBACK"   # 💎 仅看反身低吸
+        elif idx == 7:
             self.filter_mode = "SURGE"      # ⚡ 仅看扫盘冲板
         else:
             self.filter_mode = "ALL"
@@ -907,6 +913,12 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             # 筛选模式过滤
             if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
                 filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "FOCUS":
+                if sec == "重点关注" or r.get("is_focus", False) or "重点关注" in r.get("reason", ""):
+                    filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "LOW_VOL":
+                if "地量" in r.get("buy_type", "") or "地量" in r.get("reason", ""):
+                    filtered.append(r)
             elif getattr(self, "filter_mode", "ALL") == "LEADER":
                 if tag == "LEADER":
                     filtered.append(r)
