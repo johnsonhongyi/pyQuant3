@@ -433,19 +433,6 @@ class LimitUpEngine:
                         tot_depth = bid_sum + ask_sum
                         r["bid_pressure"] = round((bid_sum / tot_depth) * 100.0, 1) if tot_depth > 0 else 50.0
 
-                        # 封单金额 (万元 / 亿元)
-                        seal_amt_yuan = bid1_v * 100.0 * price_now
-                        r["seal_amount_wan"] = round(seal_amt_yuan / 10000.0, 1)
-                        r["seal_amount_yi"] = round(seal_amt_yuan / 1e8, 3)
-
-                        # 封流比 (%) = 封单总股数 / 流通总股数 * 100%
-                        if circ_shares > 0:
-                            r["seal_to_circ_ratio"] = round((bid1_v * 100.0 / circ_shares) * 100.0, 2)
-                        
-                        # 封成比 (%) = 封单手数 / 当日总成交手数 * 100%
-                        if vol_now > 0:
-                            r["seal_to_vol_ratio"] = round((bid1_v / vol_now) * 100.0, 1)
-
                         # 真实换手率 (%)
                         if circ_shares > 0 and vol_now > 0:
                             r["turnover_rate"] = round((vol_now * 100.0 / circ_shares) * 100.0, 2)
@@ -455,43 +442,133 @@ class LimitUpEngine:
                             r["is_limit_up"] = False
                             r["is_broken"] = True
 
+                        # 仅对真实封涨停 (is_limit_up == True) 计算封单指标，非涨停/炸板一律清零杜绝误导
+                        if r["is_limit_up"]:
+                            bid1_v = _safe_float(q.get("bid_vol1", 0.0))
+                            r["bid1_vol"] = bid1_v
+                            seal_amt_yuan = bid1_v * 100.0 * price_now
+                            r["seal_amount_wan"] = round(seal_amt_yuan / 10000.0, 1)
+                            r["seal_amount_yi"] = round(seal_amt_yuan / 1e8, 3)
+
+                            # 封流比 (%) = 封单总股数 / 流通总股数 * 100%
+                            if circ_shares > 0:
+                                r["seal_to_circ_ratio"] = round((bid1_v * 100.0 / circ_shares) * 100.0, 2)
+                            
+                            # 封成比 (%) = 封单手数 / 当日总成交手数 * 100%
+                            if vol_now > 0:
+                                r["seal_to_vol_ratio"] = round((bid1_v / vol_now) * 100.0, 1)
+                        else:
+                            r["bid1_vol"] = 0.0
+                            r["seal_amount_wan"] = 0.0
+                            r["seal_amount_yi"] = 0.0
+                            r["seal_to_circ_ratio"] = 0.0
+                            r["seal_to_vol_ratio"] = 0.0
+                    else:
+                        r["bid1_vol"] = 0.0
+                        r["seal_amount_wan"] = 0.0
+                        r["seal_amount_yi"] = 0.0
+                        r["seal_to_circ_ratio"] = 0.0
+                        r["seal_to_vol_ratio"] = 0.0
+
             except Exception as e:
                 logger.debug(f"TDX 封单与股本数据拉取补充异常: {e}")
 
-        # 3. 结合多日历史归档推算真实连板天数与强势梯队分类
+        # 3. 结合多日历史归档、两日情绪反包与关键支撑位推算多维动能与梯队分类
         for r in records:
             consecutive = self._calc_consecutive_boards(r["code"], r["is_limit_up"])
             r["consecutive_boards"] = consecutive
 
-            # 封板质量综合评分 (0~100)
+            # ── 💡 多日趋势与两日情绪动能分析 (解决只看单日涨停的问题) ──
+            dff = _safe_float(r.get("dff", 0.0))
+            dff2 = _safe_float(r.get("dff2", 0.0))
+            dff3 = _safe_float(r.get("dff3", 0.0))
+            pct = _safe_float(r.get("pct", 0.0))
+            price = _safe_float(r.get("price", 0.0))
+            vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
+            rs_val = _safe_float(r.get("rs_val", 0.0))
+
+            # 1. 两日情绪与阳包阴反包判定 (如双鹭药业: 昨日洗盘震荡，今日放量反包涨停)
+            pct_yesterday = round(dff2 - pct, 2) if abs(dff2) > 0.01 else 0.0
+            is_bullish_engulfing = False
+            # 昨日小阳/小阴/回调 (<= 2.5%)，今日大阳/涨停且 2日动能 dff2 强劲
+            if pct >= 6.0 and pct_yesterday <= 3.0 and dff2 >= 8.0:
+                is_bullish_engulfing = True
+
+            # 2. 关键支撑位反转与通道底部起爆识别 (Support Reversal)
+            # 从 row 中提取 support_price / ch_bc2 / rs_val
+            extra_d = r.get("extra_cols", {})
+            supp_price = _safe_float(r.get("support", extra_d.get("support", 0.0)))
+            if supp_price <= 0 and price > 0:
+                # 若无显式 support，按近 20 日筹码下轨/均线估算支撑位
+                supp_price = round(price * 0.96, 2)
+            
+            supp_dist_pct = round((price - supp_price) / supp_price * 100.0, 2) if supp_price > 0 else 5.0
+            is_support_bounce = (0.0 <= supp_dist_pct <= 4.0) or (dff3 > 25.0 and dff2 > 15.0 and dff <= 2.0)
+
+            # 3. 多日趋势与情绪动能综合评分 (0~100)
+            # 融合：基础封单质量 (25%) + 两日反转反包动能 (35%) + DFF2/DFF3 趋势强度 (25%) + 量能比 (15%)
             seal_score = 50.0
             if r["is_limit_up"]:
                 seal_score = 65.0 + min(15.0, r["seal_to_circ_ratio"] * 2.0) + min(10.0, r["seal_to_vol_ratio"] * 0.1) + (10.0 if consecutive >= 2 else 0.0)
             elif r["is_broken"]:
                 seal_score = 35.0
-            r["seal_quality_score"] = round(min(100.0, max(10.0, seal_score)), 1)
+            seal_quality = round(min(100.0, max(10.0, seal_score)), 1)
+            r["seal_quality_score"] = seal_quality
 
-            # 赋予梯队标签
+            # 计算趋势反转动能评分 (Trend Momentum Score)
+            trend_score = 50.0
+            if is_bullish_engulfing:
+                trend_score += 20.0
+            if is_support_bounce:
+                trend_score += 15.0
+            trend_score += min(15.0, dff2 * 0.5) + min(10.0, dff3 * 0.2) + min(10.0, (vol_ratio - 1.0) * 5.0)
+            if rs_val > 5.0: # 逆势大盘偏离强动能
+                trend_score += 8.0
+            momentum_score = round(min(99.0, max(30.0, trend_score)), 0)
+            r["momentum_score"] = momentum_score
+            r["is_bullish_engulfing"] = is_bullish_engulfing
+            r["is_support_bounce"] = is_support_bounce
+            r["supp_dist_pct"] = supp_dist_pct
+            r["pct_yesterday"] = pct_yesterday
+
+            # 4. 精细化形态与质量标签描述 (展示两日情绪与多日反转)
             if consecutive >= 4:
                 r["tier_tag"] = f"👑 空间高度龙 ({consecutive}板)"
+                desc_tag = f"高度主升 {momentum_score:.0f}分"
             elif consecutive >= 2:
                 r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
+                desc_tag = f"连板加速 {momentum_score:.0f}分"
             elif r["is_broken"]:
                 r["tier_tag"] = "💥 曾涨停炸板"
-            elif r["dff2"] > 15.0 or r["dff3"] > 30.0:
+                desc_tag = "⚠️ 炸板分歧"
+            elif is_support_bounce and is_bullish_engulfing:
+                r["tier_tag"] = "🎯 支撑阳包阴反转"
+                desc_tag = f"🎯 支撑反包({momentum_score:.0f}分)"
+            elif is_bullish_engulfing:
+                r["tier_tag"] = "⚡ 阳包阴强反转"
+                desc_tag = f"⚡ 阳包阴({momentum_score:.0f}分)"
+            elif is_support_bounce:
+                r["tier_tag"] = "🛡️ 关键支撑起爆"
+                desc_tag = f"🛡️ 支撑反弹({momentum_score:.0f}分)"
+            elif dff2 > 15.0 or dff3 > 30.0:
                 r["tier_tag"] = "🔥 强势主升首板"
-            elif r["dff"] < 0 and r["pct"] > 9.0:
+                desc_tag = f"主升突破({momentum_score:.0f}分)"
+            elif dff < 0 and pct > 9.0:
                 r["tier_tag"] = "⚡ 爆量超跌反包"
+                desc_tag = f"超跌反包({momentum_score:.0f}分)"
             else:
                 r["tier_tag"] = "📋 换手首板"
+                desc_tag = f"换手首板({seal_quality:.0f}分)"
 
-        # 4. 排序：连板数降序 > 封流比降序 > 涨幅降序 > DFF降序
+            r["pattern_desc"] = desc_tag
+
+        # 4. 排序：连板数降序 > 动能评分降序 > 封流比降序 > 涨幅降序
         records.sort(key=lambda x: (
             1 if x["is_limit_up"] else 0,
             x["consecutive_boards"],
+            x.get("momentum_score", 50.0),
             x["seal_to_circ_ratio"],
-            x["pct"],
-            x["dff"]
+            x["pct"]
         ), reverse=True)
 
         with self._cache_lock:
