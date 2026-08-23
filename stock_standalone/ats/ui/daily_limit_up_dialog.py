@@ -189,6 +189,23 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if self.is_narrow_mode:
             self._apply_narrow_mode_layout()
 
+        # 4. 实盘时钟周期巡检定时器 (每 5 秒巡检一次时钟跨越，自动平滑切片)
+        self._last_time_slice_cache = ""
+        self._clock_tick_timer = QTimer(self)
+        self._clock_tick_timer.setInterval(5000)
+        self._clock_tick_timer.timeout.connect(self._on_clock_tick)
+        self._clock_tick_timer.start()
+
+    def _on_clock_tick(self):
+        """实盘时钟巡检：若处于【自动实盘跟随】且跨越了时间窗口，自动无缝平滑切片"""
+        raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else ""
+        if "自动实盘跟随" in raw_slice:
+            from ats.limit_up_engine import get_live_time_slice_name
+            live_slice = get_live_time_slice_name()
+            if live_slice != getattr(self, "_last_time_slice_cache", ""):
+                self._last_time_slice_cache = live_slice
+                self._apply_filter()
+
     def _load_stays_on_top(self) -> bool:
         try:
             if os.path.exists(WINDOW_CONFIG_FILE):
@@ -779,15 +796,32 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.current_top_leader_code = s.get("top_leader_code", "")
         self.current_top_leader_name = s.get("top_leader_name", "")
 
+        # 市场情绪与防猎状态
+        s_phase = s.get("sentiment_phase", "⚖️ 均衡博弈期")
+        s_defense = s.get("defense_status", "")
+        is_avalanche = s.get("is_avalanche", False)
+
         self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家")
         self.lbl_kpi_ladder.setText(f"👑 连板: <b>{multi_b}</b> 家 (最高 <b>{max_b}</b> 板)")
-        self.lbl_kpi_broken.setText(f"💥 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b>)")
+        
+        # 炸板率恶化时的防猎高亮警示
+        if rate < 50.0 and brk_cnt >= 10:
+            self.lbl_kpi_broken.setStyleSheet("color: #ff3344; font-size: 10pt; font-weight: bold;")
+            self.lbl_kpi_broken.setText(f"🚨 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b> 退潮高危!)")
+        else:
+            self.lbl_kpi_broken.setStyleSheet("color: #ff9900; font-size: 10pt;")
+            self.lbl_kpi_broken.setText(f"💥 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b>)")
+
         self.lbl_kpi_seal.setText(f"💰 平均封流比: <b>{avg_seal:.2f}%</b> | 封单总额: <b>{tot_amt:.2f}</b> 亿")
         
         btn_text = f"🏆 空间龙头: {leader}"
         if self.current_top_leader_code:
             btn_text += " ⚡"
         self.btn_top_leader.setText(btn_text)
+
+        if is_avalanche:
+            self.lbl_status.setStyleSheet("color: #ff3344; font-weight: bold; background-color: #330000; padding: 2px 6px; border-radius: 3px;")
+            self.lbl_status.setText(f"🚨 触发全局防猎熔断: {s_defense}")
 
     def _on_top_leader_clicked(self):
         """点击顶部空间龙头按钮：立即联动切股并在表格中高亮定位"""
