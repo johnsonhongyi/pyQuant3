@@ -97,9 +97,90 @@ def get_window_rect(hwnd) -> tuple:
     return (left, top, width, height)
 
 
+import winreg
+
+def get_monitor_hardware_info(adapter_device_name: str) -> dict:
+    """
+    通过 Windows EnumDisplayDevices 和注册表 EDID 解析指定适配器上连接的显示器真实厂商型号、PNP ID 与硬件 ID
+    返回: {
+        "model_name": "LG HDR 4K",
+        "pnp_id": "GSM7707",
+        "hardware_id": "\\\\?\\DISPLAY#GSM7707#...",
+        "device_string": "LG HDR 4K(Display Port)"
+    }
+    """
+    result = {
+        "model_name": "",
+        "pnp_id": "",
+        "hardware_id": "",
+        "device_string": "Generic Monitor"
+    }
+    if not adapter_device_name:
+        return result
+
+    try:
+        import win32api
+        import win32con
+        for j in range(8):
+            try:
+                mon_dev = win32api.EnumDisplayDevices(adapter_device_name, j, 1)
+                if not mon_dev:
+                    continue
+                if not (mon_dev.StateFlags & win32con.DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) and j > 0:
+                    continue
+
+                dev_id = getattr(mon_dev, "DeviceID", "") or ""
+                dev_str = getattr(mon_dev, "DeviceString", "") or ""
+
+                result["hardware_id"] = dev_id
+                result["device_string"] = dev_str
+
+                # 提取 PNP 厂商代号 (例如 GSM7707, SAM0676, AUO82ED)
+                parts = [p for p in re.split(r'[#\\]', dev_id) if p]
+                pnp_id = ""
+                for p in parts:
+                    if len(p) >= 6 and any(c.isdigit() for c in p) and any(c.isalpha() for c in p):
+                        if p.upper() not in ("DISPLAY", "UID", "GLOBALROOT", "ROOT"):
+                            pnp_id = p.upper()
+                            break
+                result["pnp_id"] = pnp_id
+
+                # 尝试从注册表读取 EDID 解析厂商 Friendly Model Name
+                if "#" in dev_id or "\\" in dev_id:
+                    clean_parts = dev_id.replace("\\\\?\\", "").replace("??\\", "").split("#")
+                    if len(clean_parts) >= 3:
+                        reg_path = f"SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\{clean_parts[1]}\\{clean_parts[2]}\\Device Parameters"
+                        try:
+                            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as k:
+                                edid, _ = winreg.QueryValueEx(k, "EDID")
+                                for off in (54, 72, 90, 108):
+                                    if len(edid) >= off + 18 and edid[off:off+4] == b'\x00\x00\x00\xfc':
+                                        model_name = edid[off+5:off+18].decode('ascii', errors='ignore').split('\n')[0].strip()
+                                        if model_name:
+                                            result["model_name"] = model_name
+                                            break
+                        except Exception:
+                            pass
+
+                if not result["model_name"]:
+                    if dev_str and dev_str.lower() not in ("generic pnp monitor", "generic monitor"):
+                        result["model_name"] = dev_str
+                    elif pnp_id:
+                        result["model_name"] = pnp_id
+
+                if result["hardware_id"]:
+                    break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return result
+
+
 def get_monitor_details_all_with_scale():
     """
-    获取所有显示器信息，同时计算 scale（DPI缩放）
+    获取所有显示器信息，同时计算 scale（DPI缩放）与真实物理硬件厂商型号
     - 主显示器排在最前
     - 返回 monitors 列表 + 汇总字符串
     """
@@ -143,6 +224,13 @@ def get_monitor_details_all_with_scale():
                     physical_width = devmode.PelsWidth
                     physical_height = devmode.PelsHeight
 
+                    # 获取显示器真实厂商型号与硬件ID
+                    hw_info = get_monitor_hardware_info(device_name)
+                    model_name = hw_info.get("model_name", "") or device_name
+                    pnp_id = hw_info.get("pnp_id", "")
+                    hw_id = hw_info.get("hardware_id", "")
+                    dev_str = hw_info.get("device_string", "")
+
                     scale = None
                     if shcore is not None:
                         try:
@@ -164,6 +252,10 @@ def get_monitor_details_all_with_scale():
 
                     monitors.append({
                         "device_name": device_name,
+                        "model_name": model_name,
+                        "pnp_id": pnp_id,
+                        "hardware_id": hw_id,
+                        "device_string": dev_str,
                         "width": physical_width,
                         "height": physical_height,
                         "x": devmode.Position_x,
@@ -184,6 +276,10 @@ def get_monitor_details_all_with_scale():
             for m in get_monitors():
                 monitors.append({
                     "device_name": m.name,
+                    "model_name": m.name,
+                    "pnp_id": "",
+                    "hardware_id": "",
+                    "device_string": "Generic Screen",
                     "width": m.width,
                     "height": m.height,
                     "x": m.x,
@@ -201,6 +297,10 @@ def get_monitor_details_all_with_scale():
         h = user32.GetSystemMetrics(1)
         monitors.append({
             "device_name": "\\\\.\\DISPLAY1",
+            "model_name": "主显示器",
+            "pnp_id": "",
+            "hardware_id": "",
+            "device_string": "Generic Display",
             "width": w,
             "height": h,
             "x": 0,
@@ -211,8 +311,15 @@ def get_monitor_details_all_with_scale():
             "scale": 1.0
         })
 
-    # 主显示器排前
-    monitors.sort(key=lambda x: not x["is_primary"])
+    # 稳定确定性排序：主显示器排第 1 位；其余副屏按 (Position_x, Position_y, Width, Height, Scale) 升序稳定排序
+    monitors.sort(key=lambda m: (
+        0 if m.get("is_primary") else 1,
+        m.get("x", 0),
+        m.get("y", 0),
+        m.get("width", 0),
+        m.get("height", 0),
+        m.get("scale", 1.0)
+    ))
     summary = "_".join(f"{m['width']}x{m['height']}@{m['scale']}" for m in monitors)
     return {"monitors": monitors, "summary": summary}
 
@@ -220,18 +327,6 @@ def get_monitor_details_all_with_scale():
 def get_screen_resolution_summary() -> dict:
     """
     通过底层硬件与 Win32 获取显示器配置汇总（支持 1/2/3/4/N 屏与动态拓扑检测）
-    返回结构: {
-        "total_width": int,           # 物理总宽度
-        "total_logical_width": int,   # 逻辑折合总宽度
-        "virtual_width": int,         # 虚拟桌面跨度
-        "virtual_height": int,
-        "primary_res": str,
-        "primary_width": int,
-        "primary_logical_width": int,
-        "monitors": list,
-        "display_num": int,
-        "summary_signature": str
-    }
     """
     details = get_monitor_details_all_with_scale()
     monitors = details.get("monitors", [])
@@ -253,6 +348,10 @@ def get_screen_resolution_summary() -> dict:
         y = m.get("y", 0)
         scale = m.get("scale", 1.0)
         dev_name = m.get("device_name", f"DISPLAY{i+1}")
+        model_name = m.get("model_name", dev_name)
+        pnp_id = m.get("pnp_id", "")
+        hw_id = m.get("hardware_id", "")
+        dev_str = m.get("device_string", "")
         
         total_physical_width += w
         total_logical_width += lw
@@ -266,6 +365,10 @@ def get_screen_resolution_summary() -> dict:
             "index": i + 1,
             "name": dev_name,
             "device_name": dev_name,
+            "model_name": model_name,
+            "pnp_id": pnp_id,
+            "hardware_id": hw_id,
+            "device_string": dev_str,
             "width": w,
             "height": h,
             "logical_width": lw,
@@ -1056,95 +1159,299 @@ def is_same_display_config(current, saved):
         return False
 
     def build_key(m):
-        return m.get("device_name") or (m.get("logical_width"), m.get("logical_height"), m.get("scale"))
+        return (m.get("width"), m.get("height"), m.get("x"), m.get("y"), bool(m.get("is_primary")))
 
-    cur_map = {build_key(m): m for m in current}
-    sav_map = {build_key(m): m for m in saved}
+    cur_set = [build_key(m) for m in current]
+    sav_set = [build_key(m) for m in saved]
 
-    if cur_map.keys() != sav_map.keys():
-        return False
-
-    fields = ("width", "height", "x", "y", "is_primary", "scale", "logical_width", "logical_height")
-    for key, cur in cur_map.items():
-        if key not in sav_map:
-            return False
-        sav = sav_map[key]
-        for f in fields:
-            if cur.get(f) != sav.get(f):
-                return False
-    return True
+    return sorted(cur_set) == sorted(sav_set)
 
 
-def save_display_configuration(filename="display_config.json") -> tuple:
+def save_display_configuration(filename="display_config.json", target_path=None) -> tuple:
     """
-    保存当前显示器物理拓扑排布到 JSON 文件中（由显示器组合签名区分）
+    保存当前显示器物理拓扑排布到 JSON 文件中（由确定性显示器组合签名区分）
+    返回 (success: bool, filepath_or_msg: str)
     """
     try:
         config = get_monitor_details_all_with_scale()
         if not config or not config["monitors"]:
             return False, "未检测到有效的显示器数据"
 
-        summary = config["summary"]
-        file_key = f"{summary}_monitor{filename}"
+        if target_path:
+            out_filename = target_path
+        else:
+            summary = config["summary"]
+            file_key = f"{summary}_monitor{filename}"
+            out_filename = get_conf_path(file_key)
         
-        out_filename = get_conf_path(file_key)
-        
+        os.makedirs(os.path.dirname(os.path.abspath(out_filename)), exist_ok=True)
         with open(out_filename, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4)
+            json.dump(config, f, indent=4, ensure_ascii=False)
         return True, out_filename
     except Exception as e:
         return False, str(e)
 
 
-def restore_display_configuration(filename="display_config.json") -> tuple:
+def restore_display_configuration(target_file_or_name="display_config.json") -> tuple:
     """
-    读取并恢复显示器排列设置。
+    智能读取并恢复显示器排列设置。
+    支持自动匹配或显式传入配置文件路径/名称。
+    采用基于真实硬件厂商型号（Model/EDID/PNP ID/Hardware ID）的精准绑定匹配算法，杜绝因系统设备编号变化导致的分辨率/坐标错乱。
+    返回 (success: bool, message: str)
     """
     try:
         monitor_info = get_monitor_details_all_with_scale()
         if not monitor_info or not monitor_info["monitors"]:
-            return False, "未检测到当前连接的显示器"
+            return False, "未检测到当前连接的显示器设备"
 
-        summary = monitor_info["summary"]
         current_monitors = monitor_info["monitors"]
-        file_key = f"{summary}_monitor{filename}"
-        
-        in_filename = get_conf_path(file_key)
+        summary = monitor_info["summary"]
 
-        if not os.path.exists(in_filename):
-            return False, f"未找到对应屏幕拓扑的配置备份文件: {os.path.basename(in_filename)} (当前屏幕指纹: {summary})"
+        # 定位目标配置文件
+        in_filename = None
+        if target_file_or_name:
+            if os.path.isabs(target_file_or_name) and os.path.exists(target_file_or_name):
+                in_filename = target_file_or_name
+            else:
+                candidates = [
+                    os.path.join(get_app_root(), target_file_or_name),
+                    get_conf_path(target_file_or_name),
+                    os.path.join(os.getcwd(), target_file_or_name),
+                    get_conf_path(f"{summary}_monitor{target_file_or_name}"),
+                    os.path.join(get_app_root(), f"{summary}_monitor{target_file_or_name}")
+                ]
+                for cand in candidates:
+                    if os.path.exists(cand):
+                        in_filename = cand
+                        break
+
+        if not in_filename or not os.path.exists(in_filename):
+            return False, f"未找到指定的屏幕拓扑配置文件: {target_file_or_name or summary}"
 
         with open(in_filename, "r", encoding="utf-8") as f:
             saved_config = json.load(f)
 
-        save_monitors = saved_config["monitors"]
-        if is_same_display_config(current_monitors, save_monitors):
-            return True, "当前屏幕物理排布与备份完全一致，跳过恢复"
+        save_monitors = saved_config.get("monitors", [])
+        if not save_monitors:
+            return False, f"配置文件中未包含有效的屏幕拓扑数据: {os.path.basename(in_filename)}"
 
-        # 执行 Windows 物理拓扑与排布坐标更改
-        for monitor in save_monitors:
-            device_name = monitor["device_name"]
+        # 检查是否当前已经与备份完全一致
+        if is_same_display_config(current_monitors, save_monitors):
+            return True, "当前屏幕物理排布与备份完全一致，无需重复应用"
+
+        # 🎯 基于真实硬件厂商型号（EDID/PNP/Hardware ID）的多层权重精准绑定算法
+        available_current = list(current_monitors)
+        matched_pairs = [] # (target_config, current_device_dict)
+
+        def calc_hardware_match_score(tgt, cur):
+            score = 0
+            # 1. 硬件 ID 完全一致 (最高优先级)
+            if tgt.get("hardware_id") and cur.get("hardware_id") and tgt["hardware_id"].lower() == cur["hardware_id"].lower():
+                score += 1000
+            # 2. PNP 厂商代号码一致 (例如 GSM7707, SAM0676)
+            if tgt.get("pnp_id") and cur.get("pnp_id") and tgt["pnp_id"].upper() == cur["pnp_id"].upper():
+                score += 500
+            # 3. 厂商 Friendly 型号名称一致 (例如 LG HDR 4K, SyncMaster)
+            if tgt.get("model_name") and cur.get("model_name") and tgt["model_name"].lower() == cur["model_name"].lower():
+                score += 300
+            # 4. 原生物理分辨率完全一致
+            if tgt.get("width") == cur.get("width") and tgt.get("height") == cur.get("height"):
+                score += 150
+            # 5. 主屏属性偏好
+            if bool(tgt.get("is_primary")) == bool(cur.get("is_primary")):
+                score += 50
+            # 6. 适配器设备名一致
+            if tgt.get("device_name") == cur.get("device_name"):
+                score += 10
+            return score
+
+        # 优先主屏，然后副屏依次进行最佳硬件匹配
+        sorted_targets = sorted(save_monitors, key=lambda x: not x.get("is_primary"))
+        for tgt in sorted_targets:
+            if not available_current:
+                break
+            best_cur = max(available_current, key=lambda c: calc_hardware_match_score(tgt, c))
+            matched_pairs.append((tgt, best_cur))
+            available_current.remove(best_cur)
+
+        if not matched_pairs:
+            return False, "未能将目标屏幕配置映射到当前系统的物理显示设备"
+
+        # 执行 Windows 物理拓扑排布应用
+        applied_devices = []
+        for tgt_cfg, curr_dev in matched_pairs:
+            device_name = curr_dev["device_name"]
+            model_name = curr_dev.get("model_name") or tgt_cfg.get("model_name") or device_name
             try:
                 devmode = win32api.EnumDisplaySettings(device_name, win32con.ENUM_CURRENT_SETTINGS)
-                devmode.PelsWidth = monitor["width"]
-                devmode.PelsHeight = monitor["height"]
-                devmode.Position_x = monitor["x"]
-                devmode.Position_y = monitor["y"]
+                devmode.PelsWidth = tgt_cfg["width"]
+                devmode.PelsHeight = tgt_cfg["height"]
+                devmode.Position_x = tgt_cfg["x"]
+                devmode.Position_y = tgt_cfg["y"]
+                devmode.Fields = win32con.DM_PELSWIDTH | win32con.DM_PELSHEIGHT | win32con.DM_POSITION
 
-                if monitor["is_primary"]:
+                if tgt_cfg.get("is_primary"):
                     flags = win32con.CDS_UPDATEREGISTRY | win32con.CDS_NORESET | win32con.CDS_SET_PRIMARY
                 else:
                     flags = win32con.CDS_UPDATEREGISTRY | win32con.CDS_NORESET
 
-                win32api.ChangeDisplaySettingsEx(device_name, devmode, flags)
+                res = win32api.ChangeDisplaySettingsEx(device_name, devmode, flags)
+                if res in (win32con.DISP_CHANGE_SUCCESSFUL, win32con.DISP_CHANGE_NOTUPDATED):
+                    pri_tag = " [👑主屏]" if tgt_cfg.get("is_primary") else ""
+                    applied_devices.append(f"[{model_name}] {device_name}{pri_tag}: {tgt_cfg['width']}x{tgt_cfg['height']} @ ({tgt_cfg['x']}, {tgt_cfg['y']})")
+                else:
+                    return False, f"应用显示器 '{device_name}' ({model_name}) 设置失败 (错误代码: {res})"
             except pywintypes.error as ex:
-                return False, f"设置显示器 '{device_name}' 排布失败: {ex}"
+                return False, f"配置显示器 '{device_name}' ({model_name}) 出错: {ex}"
 
-        # 最终应用全部变更并触发系统广播
+        # 最终应用全部变更并触发系统全局广播
         win32api.ChangeDisplaySettings(None, 0)
-        return True, f"已恢复多屏幕排布，配置包: {in_filename}"
+        
+        detail_msg = f"已恢复屏幕物理排布 [{os.path.basename(in_filename)}]:\n" + "\n".join(f"• {d}" for d in applied_devices)
+        return True, detail_msg
     except Exception as e:
         return False, f"恢复多显示器排布时出错: {e}"
+
+
+def list_display_configurations() -> list:
+    """
+    扫描程序运行目录及相关目录下的所有显示器物理拓扑配置文件。
+    严格按文件名去重，并精准计算与当前系统屏幕的匹配度。
+    返回列表，按当前屏幕匹配优先、修改时间倒序排列。
+    """
+    import time
+    app_root = get_app_root()
+    search_dirs = [app_root]
+    cwd = os.getcwd()
+    if os.path.abspath(cwd) != os.path.abspath(app_root):
+        search_dirs.append(cwd)
+    wm_dir = os.path.join(app_root, "webTools", "window_manager")
+    if os.path.exists(wm_dir) and wm_dir not in search_dirs:
+        search_dirs.append(wm_dir)
+
+    found_files = []
+    seen_filenames = set()
+
+    current_info = get_screen_resolution_summary()
+    current_details = get_monitor_details_all_with_scale()
+    current_summary = current_details.get("summary", "")
+    current_display_num = current_info.get("display_num", len(current_details.get("monitors", [])))
+
+    for s_dir in search_dirs:
+        if not os.path.exists(s_dir):
+            continue
+        try:
+            for fname in os.listdir(s_dir):
+                if not fname.endswith(".json"):
+                    continue
+                # 严格匹配显示器拓扑配置文件
+                fname_lower = fname.lower()
+                if "monitordisplay_config" in fname_lower or fname_lower == "display_config.json":
+                    # 严格按文件名去重（优先保留首先在 app_root 中扫描到的文件）
+                    if fname_lower in seen_filenames:
+                        continue
+                    seen_filenames.add(fname_lower)
+
+                    fpath = os.path.abspath(os.path.join(s_dir, fname))
+
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        monitors = data.get("monitors", [])
+                        if not monitors or not isinstance(monitors, list):
+                            continue
+
+                        m_count = len(monitors)
+                        summary = data.get("summary", "")
+                        if not summary:
+                            summary = "_".join(f"{m.get('width', 0)}x{m.get('height', 0)}@{m.get('scale', 1.0)}" for m in monitors)
+
+                        mtime_ts = os.path.getmtime(fpath)
+                        mtime_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime_ts))
+
+                        pri = next((m for m in monitors if m.get("is_primary")), monitors[0])
+                        pri_model = pri.get("model_name") or f"{pri.get('width', 0)}x{pri.get('height', 0)}"
+                        
+                        other_models = [m.get("model_name") or f"{m.get('width', 0)}x{m.get('height', 0)}" for m in monitors if m != pri]
+                        if other_models:
+                            other_desc = " + ".join(other_models)
+                            display_name = f"{m_count}屏 [{pri_model}(主) + {other_desc}] ({mtime_str})"
+                        else:
+                            display_name = f"单屏 [{pri_model}] ({mtime_str})"
+
+                        # 🎯 严谨精准匹配：屏幕数量必须严格相等且拓扑签名完全一致
+                        is_match = (m_count == current_display_num) and (summary == current_summary)
+
+                        found_files.append({
+                            "filename": fname,
+                            "filepath": fpath,
+                            "display_name": display_name,
+                            "summary": summary,
+                            "monitor_count": m_count,
+                            "mtime": mtime_str,
+                            "mtime_ts": mtime_ts,
+                            "is_current_match": is_match,
+                            "monitors": monitors
+                        })
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    found_files.sort(key=lambda x: (not x["is_current_match"], -x["mtime_ts"]))
+    return found_files
+
+
+def delete_display_configuration(filename_or_path: str) -> tuple:
+    """
+    安全删除指定的显示器拓扑配置文件。
+    返回 (success: bool, message: str)
+    """
+    if not filename_or_path:
+        return False, "未指定要删除的配置文件"
+
+    if os.path.isabs(filename_or_path):
+        target = filename_or_path
+    else:
+        target = get_conf_path(filename_or_path)
+        if not os.path.exists(target):
+            target = os.path.join(get_app_root(), filename_or_path)
+
+    if not os.path.exists(target):
+        return False, f"配置文件不存在: {filename_or_path}"
+
+    try:
+        os.remove(target)
+        return True, f"成功删除显示器配置文件: {os.path.basename(target)}"
+    except Exception as e:
+        return False, f"删除文件失败: {e}"
+
+
+def get_display_configuration_details(filename_or_path: str) -> dict:
+    """
+    获取指定显示器拓扑配置文件的详细解析数据。
+    """
+    if not filename_or_path:
+        return {}
+    if os.path.isabs(filename_or_path):
+        target = filename_or_path
+    else:
+        target = get_conf_path(filename_or_path)
+        if not os.path.exists(target):
+            target = os.path.join(get_app_root(), filename_or_path)
+
+    if not os.path.exists(target):
+        return {}
+
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["filepath"] = target
+        data["filename"] = os.path.basename(target)
+        return data
+    except Exception:
+        return {}
+
 
 
 def bring_window_to_top_by_title(title: str) -> bool:

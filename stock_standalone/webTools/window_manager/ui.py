@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
     QSizePolicy, QTabWidget, QCheckBox
 )
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QIcon, QColor, QBrush, QPen, QFont, QPainter, QLinearGradient
 
 # 导入核心模块
 from . import core
@@ -1632,8 +1632,299 @@ class RouteConfigDialog(QDialog):
         else:
             QMessageBox.warning(self, "检测失败", msg)
             
-        self.config_manager.config_data["routing_config"] = old_cfg
+class TopologyCanvasWidget(QWidget):
+    """
+    多显示器物理拓扑可视化绘制画布
+    根据各显示器的相对坐标与尺寸，等比例居中绘制屏幕分布几何图
+    """
+    def __init__(self, monitors=None, parent=None):
+        super().__init__(parent)
+        self.monitors = monitors or []
+        self.setMinimumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet("background-color: #121216; border: 1px solid #2d2d38; border-radius: 6px;")
 
+    def set_monitors(self, monitors):
+        self.monitors = monitors or []
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QLinearGradient
+        from PyQt6.QtCore import QRectF, Qt
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        # 绘制背景深色渐变与微网格
+        bg_gradient = QLinearGradient(0, 0, 0, h)
+        bg_gradient.setColorAt(0.0, QColor("#141419"))
+        bg_gradient.setColorAt(1.0, QColor("#0d0d11"))
+        painter.fillRect(0, 0, w, h, bg_gradient)
+
+        # 绘制浅微网格点
+        grid_pen = QPen(QColor(255, 255, 255, 12))
+        grid_pen.setWidth(1)
+        painter.setPen(grid_pen)
+        grid_step = 24
+        for gx in range(0, w, grid_step):
+            painter.drawLine(gx, 0, gx, h)
+        for gy in range(0, h, grid_step):
+            painter.drawLine(0, gy, w, gy)
+
+        if not self.monitors:
+            painter.setPen(QColor("#6b7280"))
+            painter.setFont(QFont("Microsoft YaHei", 12))
+            painter.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, "暂无显示器物理拓扑数据")
+            return
+
+        # 计算所有显示器的虚拟桌面坐标范围
+        min_x = min(m.get("x", 0) for m in self.monitors)
+        min_y = min(m.get("y", 0) for m in self.monitors)
+        max_x = max(m.get("x", 0) + m.get("width", 1920) for m in self.monitors)
+        max_y = max(m.get("y", 0) + m.get("height", 1080) for m in self.monitors)
+
+        total_w = max(1, max_x - min_x)
+        total_h = max(1, max_y - min_y)
+
+        # 留白 padding
+        padding = 32
+        avail_w = max(10, w - padding * 2)
+        avail_h = max(10, h - padding * 2)
+
+        # 统一比例尺
+        scale = min(avail_w / total_w, avail_h / total_h)
+        draw_total_w = total_w * scale
+        draw_total_h = total_h * scale
+
+        offset_x = (w - draw_total_w) / 2.0
+        offset_y = (h - draw_total_h) / 2.0
+
+        # 逐个绘制显示器矩形
+        for idx, m in enumerate(self.monitors):
+            mx = m.get("x", 0)
+            my = m.get("y", 0)
+            mw = m.get("width", 1920)
+            mh = m.get("height", 1080)
+            is_pri = m.get("is_primary", False)
+            scale_factor = m.get("scale", 1.0)
+            dev_name = m.get("device_name", f"DISPLAY{idx+1}")
+            model_name = m.get("model_name", "") or dev_name
+
+            rect_x = offset_x + (mx - min_x) * scale
+            rect_y = offset_y + (my - min_y) * scale
+            rect_w = mw * scale
+            rect_h = mh * scale
+            rect = QRectF(rect_x, rect_y, rect_w, rect_h)
+
+            # 主屏使用翡翠绿/天空蓝渐变，副屏使用深青/深蓝灰
+            grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            if is_pri:
+                grad.setColorAt(0.0, QColor(14, 165, 233, 160))
+                grad.setColorAt(1.0, QColor(16, 185, 129, 140))
+                border_pen = QPen(QColor("#38bdf8"), 2.5)
+            else:
+                grad.setColorAt(0.0, QColor(30, 41, 59, 190))
+                grad.setColorAt(1.0, QColor(15, 23, 42, 210))
+                border_pen = QPen(QColor("#64748b"), 1.8)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(grad))
+            painter.drawRoundedRect(rect, 8.0, 8.0)
+
+            painter.setPen(border_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, 8.0, 8.0)
+
+            # 绘制屏幕内部文本标注
+            painter.setPen(QColor("#ffffff"))
+            font_title = QFont("Microsoft YaHei", max(9, int(min(rect_w, rect_h) * 0.085)), QFont.Weight.Bold)
+            painter.setFont(font_title)
+
+            pri_tag = " [👑 主屏]" if is_pri else f" [设备 {idx+1}]"
+            # 优先显示厂商型号
+            title_text = f"{model_name}{pri_tag}"
+            res_text = f"{mw}x{mh} (@{int(scale_factor*100)}%)"
+            pos_text = f"坐标: ({mx}, {my})"
+
+            text_rect_top = QRectF(rect_x + 4, rect_y + 6, rect_w - 8, rect_h * 0.35)
+            painter.drawText(text_rect_top, Qt.AlignmentFlag.AlignCenter, title_text)
+
+            painter.setFont(QFont("Microsoft YaHei", max(8, int(min(rect_w, rect_h) * 0.075))))
+            painter.setPen(QColor("#e2e8f0"))
+            text_rect_mid = QRectF(rect_x + 4, rect_y + rect_h * 0.36, rect_w - 8, rect_h * 0.3)
+            painter.drawText(text_rect_mid, Qt.AlignmentFlag.AlignCenter, res_text)
+
+            painter.setPen(QColor("#94a3b8"))
+            painter.setFont(QFont("Microsoft YaHei", max(7, int(min(rect_w, rect_h) * 0.065))))
+            text_rect_bot = QRectF(rect_x + 4, rect_y + rect_h * 0.66, rect_w - 8, rect_h * 0.3)
+            painter.drawText(text_rect_bot, Qt.AlignmentFlag.AlignCenter, pos_text)
+
+
+class DisplayTopologyPreviewDialog(QDialog):
+    """
+    多显示器物理拓扑可视化预览与恢复对话框
+    """
+    def __init__(self, config_info, parent=None):
+        super().__init__(parent)
+        self.config_info = config_info or {}
+        self.filepath = self.config_info.get("filepath", "")
+        self.filename = self.config_info.get("filename", os.path.basename(self.filepath))
+        self.monitors = self.config_info.get("monitors", [])
+        
+        self.setWindowTitle(f"👁️ 显示器物理拓扑预览 - {self.filename}")
+        self.resize(720, 580)
+        self.init_ui()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1a22;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QTableWidget {
+                background-color: #141419;
+                border: 1px solid #2d2d38;
+                border-radius: 4px;
+                color: #e2e8f0;
+                gridline-color: #2a2a36;
+            }
+            QHeaderView::section {
+                background-color: #24242e;
+                color: #38bdf8;
+                padding: 5px;
+                border: 1px solid #2d2d38;
+                font-weight: bold;
+            }
+            QPushButton {
+                background-color: #2e2e38;
+                border: 1px solid #4a4a56;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 14px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+            }
+            QPushButton#btnRestoreNow {
+                background-color: #ea580c;
+                border: none;
+                font-weight: bold;
+                color: white;
+            }
+            QPushButton#btnRestoreNow:hover {
+                background-color: #c2410c;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # 顶部概览栏
+        top_box = QHBoxLayout()
+        icon_lbl = QLabel("🖥️")
+        icon_lbl.setStyleSheet("font-size: 24px;")
+        top_box.addWidget(icon_lbl)
+        
+        m_count = len(self.monitors)
+        pri = next((m for m in self.monitors if m.get("is_primary")), self.monitors[0] if self.monitors else {})
+        pri_model = pri.get("model_name", "") or pri.get("device_name", "")
+        pri_desc = f"{pri_model} ({pri.get('width', 0)}x{pri.get('height', 0)})" if pri else "未知"
+        
+        info_vbox = QVBoxLayout()
+        title_lbl = QLabel(f"<b>拓扑配置文件:</b> {self.filename}")
+        title_lbl.setStyleSheet("color: #38bdf8; font-size: 14px;")
+        sub_lbl = QLabel(f"显示器总数: {m_count} 块 | 主屏幕: {pri_desc} | 路径: {self.filepath}")
+        sub_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        sub_lbl.setWordWrap(True)
+        info_vbox.addWidget(title_lbl)
+        info_vbox.addWidget(sub_lbl)
+        top_box.addLayout(info_vbox)
+        top_box.addStretch()
+        layout.addLayout(top_box)
+
+        # 中间：可视化多屏排布几何画布
+        layout.addWidget(QLabel("<b>📐 屏幕相对排布空间几何示意图 (自适应比例):</b>"))
+        self.canvas = TopologyCanvasWidget(self.monitors, self)
+        layout.addWidget(self.canvas, stretch=1)
+
+        # 下方：显示器参数列表表格
+        layout.addWidget(QLabel("<b>📋 显示器硬件型号与排布清单:</b>"))
+        self.table = QTableWidget(len(self.monitors), 6, self)
+        self.table.setHorizontalHeaderLabels(["厂商型号 / 设备名", "硬件 PNP ID", "物理分辨率", "DPI缩放比", "起始坐标 (X, Y)", "主屏幕"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setFixedHeight(120)
+
+        for row, m in enumerate(self.monitors):
+            dev = m.get("device_name", f"DISPLAY{row+1}")
+            model = m.get("model_name", "") or dev
+            pnp = m.get("pnp_id", "") or "-"
+            pw = m.get("width", 1920)
+            ph = m.get("height", 1080)
+            sc = m.get("scale", 1.0)
+            mx = m.get("x", 0)
+            my = m.get("y", 0)
+            is_pri = m.get("is_primary", False)
+
+            dev_display = f"{model} ({dev})" if model != dev else dev
+            self.table.setItem(row, 0, QTableWidgetItem(dev_display))
+            self.table.setItem(row, 1, QTableWidgetItem(pnp))
+            self.table.setItem(row, 2, QTableWidgetItem(f"{pw} x {ph}"))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{int(sc * 100)}% ({sc})"))
+            self.table.setItem(row, 4, QTableWidgetItem(f"({mx}, {my})"))
+            pri_item = QTableWidgetItem("👑 主屏" if is_pri else "副屏")
+            if is_pri:
+                pri_item.setForeground(QColor("#38bdf8"))
+            self.table.setItem(row, 5, pri_item)
+
+        layout.addWidget(self.table)
+
+        # 底部操作栏
+        bottom_bar = QHBoxLayout()
+        bottom_bar.addStretch()
+
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.reject)
+
+        self.btn_restore = QPushButton("🔄 恢复应用此拓扑配置")
+        self.btn_restore.setObjectName("btnRestoreNow")
+        self.btn_restore.clicked.connect(self.restore_current_topology)
+
+        bottom_bar.addWidget(self.btn_close)
+        bottom_bar.addWidget(self.btn_restore)
+        layout.addLayout(bottom_bar)
+
+    def restore_current_topology(self):
+        """在预览对话框中恢复应用当前拓扑，包含详细二次确认"""
+        m_count = len(self.monitors)
+        reply = QMessageBox.question(
+            self,
+            "确认恢复显示器物理拓扑",
+            f"是否确认将当前桌面显示器排布恢复为此配置？\n\n"
+            f"【配置文件】: {self.filename}\n"
+            f"【显示器数】: {m_count} 块屏幕\n"
+            f"【文件路径】: {self.filepath}\n\n"
+            f"⚠️ 恢复操作会刷新系统显示设置并重新定位所有连接屏幕。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = core.restore_display_configuration(self.filepath)
+            if success:
+                QMessageBox.information(self, "恢复完成", msg)
+                self.accept()
+            else:
+                QMessageBox.warning(self, "恢复提示", msg)
 
 
 class ManagerHotkeyThread(threading.Thread):
@@ -2459,23 +2750,78 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.gb_display_info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         gb_display_layout = QVBoxLayout(self.gb_display_info)
         gb_display_layout.setContentsMargins(10, 10, 10, 8)
+        gb_display_layout.setSpacing(6)
+        
         self.lbl_display_details = QLabel("无显示器数据")
         self.lbl_display_details.setWordWrap(True)
         self.lbl_display_details.setStyleSheet("color: #d1d5db; line-height: 1.4;")
         gb_display_layout.addWidget(self.lbl_display_details)
         
-        # 增加显示器物理布局保存/恢复按钮栏
+        # 增加显示器物理布局配置管理与操作栏
         screen_btn_bar = FlowLayout(hspacing=6, vspacing=6)
-        self.btn_save_screen_layout = QPushButton("💾 保存显示器物理拓扑")
-        self.btn_save_screen_layout.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-weight: bold;")
-        self.btn_save_screen_layout.clicked.connect(self.save_physical_screen_layout)
         
-        self.btn_restore_screen_layout = QPushButton("🔄 恢复显示器物理拓扑")
+        lbl_topo = QLabel("📂 运行目录拓扑配置:")
+        lbl_topo.setStyleSheet("color: #93c5fd; font-weight: bold;")
+        screen_btn_bar.addWidget(lbl_topo)
+        
+        self.cb_topology_configs = QComboBox()
+        self.cb_topology_configs.setMinimumWidth(320)
+        self.cb_topology_configs.setStyleSheet("""
+            QComboBox {
+                background-color: #1e1e24;
+                border: 1px solid #3b82f6;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 4px 8px;
+                font-weight: 500;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left-width: 1px;
+                border-left-color: #3b82f6;
+                border-left-style: solid;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e24;
+                color: #ffffff;
+                selection-background-color: #0284c7;
+                selection-color: #ffffff;
+            }
+        """)
+        screen_btn_bar.addWidget(self.cb_topology_configs)
+        
+        self.btn_refresh_topo_configs = QPushButton("🔄 刷新")
+        self.btn_refresh_topo_configs.setToolTip("重新扫描运行目录下的显示器拓扑配置文件")
+        self.btn_refresh_topo_configs.setStyleSheet("background-color: #374151; color: white; padding: 4px 8px;")
+        self.btn_refresh_topo_configs.clicked.connect(lambda: self.refresh_topology_configs_combo())
+        screen_btn_bar.addWidget(self.btn_refresh_topo_configs)
+        
+        self.btn_preview_topo_config = QPushButton("👁️ 预览拓扑")
+        self.btn_preview_topo_config.setToolTip("查看当前下拉框选中配置文件的屏幕空间相对排布与详细参数")
+        self.btn_preview_topo_config.setStyleSheet("background-color: #0284c7; color: white; padding: 4px 10px; font-weight: bold;")
+        self.btn_preview_topo_config.clicked.connect(self.preview_selected_topology)
+        screen_btn_bar.addWidget(self.btn_preview_topo_config)
+
+        self.btn_restore_screen_layout = QPushButton("🔄 恢复选中拓扑")
+        self.btn_restore_screen_layout.setToolTip("将当前桌面显示器排列智能恢复为下拉框选中的配置（需二次确认）")
         self.btn_restore_screen_layout.setStyleSheet("background-color: #ea580c; color: white; padding: 4px 10px; font-weight: bold;")
         self.btn_restore_screen_layout.clicked.connect(self.restore_physical_screen_layout)
-        
-        screen_btn_bar.addWidget(self.btn_save_screen_layout)
         screen_btn_bar.addWidget(self.btn_restore_screen_layout)
+
+        self.btn_save_screen_layout = QPushButton("💾 保存当前拓扑")
+        self.btn_save_screen_layout.setToolTip("将当前系统实际屏幕物理排布保存为新配置文件")
+        self.btn_save_screen_layout.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-weight: bold;")
+        self.btn_save_screen_layout.clicked.connect(self.save_physical_screen_layout)
+        screen_btn_bar.addWidget(self.btn_save_screen_layout)
+
+        self.btn_delete_topo_config = QPushButton("🗑️ 删除配置")
+        self.btn_delete_topo_config.setToolTip("从磁盘删除下拉框当前选中的拓扑配置文件")
+        self.btn_delete_topo_config.setStyleSheet("background-color: #b91c1c; color: white; padding: 4px 8px;")
+        self.btn_delete_topo_config.clicked.connect(self.delete_selected_topology)
+        screen_btn_bar.addWidget(self.btn_delete_topo_config)
+
         gb_display_layout.addLayout(screen_btn_bar)
 
         main_layout.addWidget(self.gb_display_info)
@@ -2780,27 +3126,150 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             success, msg = core.check_and_add_route(self.config_manager)
             self.log(f"[Route Settings] {msg}")
 
+    def refresh_topology_configs_combo(self, select_filepath=None):
+        """刷新运行目录下的显示器拓扑配置文件下拉框"""
+        if not hasattr(self, "cb_topology_configs"):
+            return
+            
+        self.cb_topology_configs.blockSignals(True)
+        self.cb_topology_configs.clear()
+
+        configs = core.list_display_configurations()
+        if not configs:
+            self.cb_topology_configs.addItem("⚠️ 运行目录未找到任何拓扑备份文件 (请点击[💾保存当前拓扑])", None)
+            self.cb_topology_configs.setEnabled(False)
+            if hasattr(self, "btn_preview_topo_config"):
+                self.btn_preview_topo_config.setEnabled(False)
+            if hasattr(self, "btn_restore_screen_layout"):
+                self.btn_restore_screen_layout.setEnabled(False)
+            if hasattr(self, "btn_delete_topo_config"):
+                self.btn_delete_topo_config.setEnabled(False)
+            self.cb_topology_configs.blockSignals(False)
+            return
+
+        self.cb_topology_configs.setEnabled(True)
+        if hasattr(self, "btn_preview_topo_config"):
+            self.btn_preview_topo_config.setEnabled(True)
+        if hasattr(self, "btn_restore_screen_layout"):
+            self.btn_restore_screen_layout.setEnabled(True)
+        if hasattr(self, "btn_delete_topo_config"):
+            self.btn_delete_topo_config.setEnabled(True)
+
+        info = core.get_screen_resolution_summary()
+        cur_count = info.get("display_num", 1)
+
+        matched_index = -1
+        for idx, cfg in enumerate(configs):
+            is_match = cfg.get("is_current_match", False)
+            tag = " ⭐ [当前匹配]" if is_match else ""
+            label = f"{cfg.get('display_name')}{tag}"
+            self.cb_topology_configs.addItem(label, cfg)
+            
+            if is_match and matched_index == -1:
+                matched_index = idx
+            if select_filepath and os.path.abspath(cfg.get("filepath", "")) == os.path.abspath(select_filepath):
+                matched_index = idx
+
+        if matched_index >= 0:
+            self.cb_topology_configs.setCurrentIndex(matched_index)
+        else:
+            # 当前屏幕硬件没有匹配的历史配置文件，在第 0 位插入提示项，引导用户点击保存
+            self.cb_topology_configs.insertItem(
+                0, 
+                f"⚠️ 当前拓扑未保存 (当前共 {cur_count} 屏 · 点击[💾保存当前拓扑])", 
+                None
+            )
+            self.cb_topology_configs.setCurrentIndex(0)
+
+        self.cb_topology_configs.blockSignals(False)
+
+    def preview_selected_topology(self):
+        """弹出可视化对话框预览当前选中的拓扑配置文件"""
+        cfg = self.cb_topology_configs.currentData()
+        if not cfg or not isinstance(cfg, dict):
+            QMessageBox.information(
+                self, 
+                "提示", 
+                "当前选中的屏幕排布尚未保存为配置文件。\n如需保存此屏幕排布，请点击【💾 保存当前拓扑】按钮！"
+            )
+            return
+
+        dialog = DisplayTopologyPreviewDialog(cfg, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_screen_info()
+
+    def delete_selected_topology(self):
+        """删除当前选中的显示器拓扑配置文件"""
+        cfg = self.cb_topology_configs.currentData()
+        if not cfg or not isinstance(cfg, dict):
+            QMessageBox.warning(self, "提示", "请先在下拉列表中选择要删除的有效配置文件！")
+            return
+
+        filename = cfg.get("filename", "")
+        filepath = cfg.get("filepath", "")
+
+        reply = QMessageBox.question(
+            self,
+            "确认删除配置文件",
+            f"是否确认彻底从磁盘删除以下显示器物理拓扑配置文件？\n\n"
+            f"【文件名称】: {filename}\n"
+            f"【完整路径】: {filepath}\n\n"
+            f"⚠️ 此操作不可撤销！",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = core.delete_display_configuration(filepath)
+            if success:
+                QMessageBox.information(self, "删除成功", msg)
+                self.log(f"🗑️ {msg}")
+                self.refresh_topology_configs_combo()
+            else:
+                QMessageBox.critical(self, "删除失败", msg)
+                self.log(f"❌ {msg}")
+
     def save_physical_screen_layout(self):
         """保存当前多显示器的物理排布与相对坐标到磁盘"""
         success, msg = core.save_display_configuration()
         if success:
-            QMessageBox.information(self, "保存成功", f"当前显示器拓扑结构已保存！\n配置文件: {msg}")
+            QMessageBox.information(self, "保存成功", f"当前显示器物理拓扑结构已成功保存！\n\n【配置文件】:\n{msg}")
             self.log(f"💾 多显示器物理排布保存成功: {msg}")
+            self.refresh_topology_configs_combo(select_filepath=msg)
         else:
             QMessageBox.critical(self, "保存失败", f"无法保存显示器配置: {msg}")
             self.log(f"❌ 保存显示器配置失败: {msg}")
 
     def restore_physical_screen_layout(self):
-        """一键从磁盘恢复当前屏幕组合下保存的物理排布与拓扑"""
+        """根据当前下拉框选中的配置恢复屏幕物理排布，必须弹窗二次确认"""
+        cfg = self.cb_topology_configs.currentData()
+        if not cfg or not isinstance(cfg, dict):
+            QMessageBox.warning(
+                self, 
+                "提示", 
+                "当前屏幕排布尚未保存为备份文件，无法恢复。\n如需将当前屏幕排布作为备份保存，请点击【💾 保存当前拓扑】按钮！"
+            )
+            return
+
+        filename = cfg.get("filename", "")
+        filepath = cfg.get("filepath", "")
+        display_name = cfg.get("display_name", filename)
+        m_count = cfg.get("monitor_count", len(cfg.get("monitors", [])))
+
         reply = QMessageBox.question(
             self, 
-            "确认恢复", 
-            "是否确定恢复已保存的显示器物理排布相对位置？\n这会瞬间刷新您的系统显示设置并重新排布桌面上所有屏幕。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            "确认恢复显示器物理拓扑", 
+            f"是否确定将当前多显示器排布恢复为此配置？\n\n"
+            f"【配置文件】: {filename}\n"
+            f"【拓扑概要】: {display_name}\n"
+            f"【屏幕数量】: {m_count} 块显示器\n"
+            f"【文件路径】: {filepath}\n\n"
+            f"⚠️ 恢复操作会瞬间刷新您的系统显示设置并重新排布桌面上所有屏幕。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.log("正在尝试还原多显示器物理拓扑...")
-            success, msg = core.restore_display_configuration()
+            self.log(f"正在尝试将多显示器物理拓扑还原为: {filename}...")
+            success, msg = core.restore_display_configuration(filepath)
             if success:
                 QMessageBox.information(self, "恢复完成", msg)
                 self.log(f"🔄 {msg}")
@@ -2810,19 +3279,24 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 self.log(f"⚠️ {msg}")
 
     def load_screen_info(self):
-        """探测当前连接的显示器参数并在 UI 呈现"""
+        """探测当前连接的显示器参数并在 UI 呈现，展示真实厂商型号信息"""
         info = core.get_screen_resolution_summary()
         self.lbl_screen_status.setText(f"检测到显示器: {info['display_num']} 个  总宽度: {info['total_width']}px")
         
         details = []
         for m in info["monitors"]:
-            primary_tag = " [主屏幕]" if m["is_primary"] else ""
+            primary_tag = " [👑 主屏幕]" if m["is_primary"] else ""
+            model_tag = f"[{m['model_name']}] " if m.get("model_name") and m['model_name'] != m['name'] else ""
+            pnp_tag = f" (PNP: {m['pnp_id']})" if m.get("pnp_id") else ""
             details.append(
-                f"设备 {m['index']}: 名称: {m['name']} | 分辨率: {m['width']}x{m['height']} | "
+                f"设备 {m['index']}: {model_tag}名称: {m['name']}{pnp_tag} | 分辨率: {m['width']}x{m['height']} (@{int(m['scale']*100)}%) | "
                 f"起始坐标: ({m['x']}, {m['y']}){primary_tag}"
             )
         self.lbl_display_details.setText("\n".join(details))
         
+        # 刷新拓扑配置文件下拉框
+        self.refresh_topology_configs_combo()
+
         # 推荐配置名
         rec_name = core.detect_display_config_name(self.config_manager)
         self.log(f"系统智能推荐的分辨率配置为: {rec_name}")
