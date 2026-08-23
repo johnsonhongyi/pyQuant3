@@ -60,6 +60,8 @@ user32.EnumWindows.errcheck = check_zero
 user32.EnumWindows.argtypes = (WNDENUMPROC, wintypes.LPARAM)
 user32.IsWindowVisible.argtypes = (wintypes.HWND,)
 user32.IsIconic.argtypes = (wintypes.HWND,)
+user32.IsZoomed.argtypes = (wintypes.HWND,)
+user32.IsZoomed.restype = wintypes.BOOL
 user32.GetForegroundWindow.argtypes = ()
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.ShowWindow.argtypes = (wintypes.HWND, wintypes.BOOL)
@@ -70,6 +72,10 @@ user32.GetWindowTextLengthW.errcheck = check_zero
 user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
 user32.GetWindowTextW.errcheck = check_zero
 user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+user32.GetWindowLongW.restype = wintypes.LONG
+user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
+user32.SetWindowPos.restype = wintypes.BOOL
 
 # 窗口显示常量
 SW_HIDE = 0
@@ -84,6 +90,22 @@ SW_SHOWNA = 8
 SW_RESTORE = 9
 SW_SHOWDEFAULT = 10
 SW_FORCEMINIMIZE = 11
+
+# SetWindowPos 标志位
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOREDRAW = 0x0008
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+SWP_SHOWWINDOW = 0x0040
+SWP_HIDEWINDOW = 0x0080
+
+# 窗口样式常量
+GWL_STYLE = -16
+GWL_EXSTYLE = -20
+WS_MAXIMIZE = 0x01000000
+WS_MINIMIZE = 0x20000000
 
 
 def get_window_rect(hwnd) -> tuple:
@@ -767,9 +789,47 @@ def get_exe_path(hwnd) -> str:
     return ""
 
 
+def cancel_window_maximized_or_fullscreen(hwnd: int) -> bool:
+    """
+    智能检测并取消窗口的最大化 (Maximized)、全屏 (Fullscreen) 或最小化 (Minimized) 状态，
+    将其恢复为标准的普通自由窗口 (SW_RESTORE)，
+    以彻底解决在最大化或全屏状态下 Windows 系统锁定窗口、导致 SetWindowPos 坐标与尺寸应用失效的问题。
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+
+    need_restore = False
+    
+    # 1. 检查是否最小化
+    if user32.IsIconic(hwnd):
+        need_restore = True
+        
+    # 2. 检查是否最大化
+    if user32.IsZoomed(hwnd):
+        need_restore = True
+
+    # 3. 检查窗口样式标志 (WS_MAXIMIZE / WS_MINIMIZE)
+    try:
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        if (style & WS_MAXIMIZE) or (style & WS_MINIMIZE):
+            need_restore = True
+    except Exception:
+        pass
+
+    if need_restore:
+        # 发送 SW_RESTORE (9) 命令，使窗口由最大化/全屏/最小化退回常规恢复态
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        # 短暂微延时确保 DWM 与 Win32 消息队列完成几何属性解绑
+        time.sleep(0.04)
+        return True
+
+    return False
+
+
 def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
     """
-    通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小
+    通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小。
+    执行前先判断是否最大化/全屏/最小化，自动取消并还原后再执行精准坐标与尺寸设定。
     """
     try:
         parts = [int(p.strip()) for p in pos_str.split(',')]
@@ -779,12 +839,20 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
             # 仅对专属磁吸折叠窗口做反向纠偏；常规日常软件直接按精准坐标设定
             x, y, width, height = normalize_docked_window_rect(x, y, width, height, title=title)
 
-            # 先重置为普通窗口，以防窗口处于最小化或最大化状态导致无法移动
-            # 并移动位置
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 1) # SWP_NOSIZE = 1
-            # 设定窗口大小
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, width, height, 2) # SWP_NOMOVE = 2
-            return True
+            # 🛡️ 核心防失效：若窗口处于全屏、最大化或最小化，先强制取消并还原为普通窗口
+            cancel_window_maximized_or_fullscreen(hwnd)
+
+            # 一次性原子设定窗口坐标与大小，并触发系统刷新重绘
+            flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+            success = bool(user32.SetWindowPos(hwnd, 0, x, y, width, height, flags))
+
+            # 二次保障：若仍然处于最大化锁定状态，再补一次还原并重设
+            if user32.IsZoomed(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                time.sleep(0.03)
+                user32.SetWindowPos(hwnd, 0, x, y, width, height, flags)
+
+            return success
     except Exception as e:
         print(f"Error setting window pos for HWND {hwnd}: {e}")
     return False
@@ -1079,6 +1147,53 @@ class ConfigManager:
             if res_name in self.config_data.get(cat, {}):
                 del self.config_data[cat][res_name]
 
+    def get_duplicate_resolutions_info(self) -> dict:
+        """
+        自动检测所有分类下的分辨率方案中是否有窗口坐标映射表完全一致的重复方案。
+        返回: {重复方案名: (原始方案名, 所属分类)} 字典
+        """
+        self._check_and_reload()
+        seen_mappings = {}  # mapping_fingerprint -> (first_res_name, cat)
+        duplicates = {}     # dup_res_name -> (original_res_name, cat)
+
+        def score_name(name):
+            n_low = name.lower()
+            is_copy = any(k in n_low for k in ["duplicate", "copy", "副本", "bak", "temp"])
+            return (is_copy, len(name), name)
+
+        for cat in self.get_categories():
+            res_names = sorted(self.get_resolutions_by_category(cat), key=score_name)
+            for res_name in res_names:
+                mapping = self.get_resolution_mapping(res_name)
+                if not mapping:
+                    continue
+                # 提取窗口映射指纹 (排序后的 key-pos 对，pos 仅比对坐标部分)
+                items = []
+                for k, v in mapping.items():
+                    pos_coord = str(v).split('|')[0].strip()
+                    items.append((k.strip().lower(), pos_coord))
+                fp = tuple(sorted(items))
+                if fp in seen_mappings:
+                    duplicates[res_name] = seen_mappings[fp]
+                else:
+                    seen_mappings[fp] = (res_name, cat)
+
+        return duplicates
+
+    def delete_duplicate_resolutions(self) -> tuple:
+        """
+        一键删除所有窗口映射数据完全一致的重复方案（保留最早定义的原始方案）。
+        返回 (deleted_count: int, deleted_names: list[str])
+        """
+        dups = self.get_duplicate_resolutions_info()
+        deleted = []
+        for dup_name in dups.keys():
+            self.delete_resolution(dup_name)
+            deleted.append(dup_name)
+        if deleted:
+            self.save()
+        return len(deleted), deleted
+
     def get_acer_performance_config(self) -> dict:
         """获取 Acer 性能模式配置段，带有默认自愈功能"""
         self._check_and_reload()
@@ -1169,7 +1284,8 @@ def is_same_display_config(current, saved):
 
 def save_display_configuration(filename="display_config.json", target_path=None) -> tuple:
     """
-    保存当前显示器物理拓扑排布到 JSON 文件中（由确定性显示器组合签名区分）
+    保存当前显示器物理拓扑排布到 JSON 文件中（由确定性显示器组合与相对摆放方位签名区分）。
+    若同设备组合有不同摆放方式（如副屏在右 vs 副屏在左），自动生成带方位后缀的独立文件名，避免相互覆盖。
     返回 (success: bool, filepath_or_msg: str)
     """
     try:
@@ -1181,7 +1297,9 @@ def save_display_configuration(filename="display_config.json", target_path=None)
             out_filename = target_path
         else:
             summary = config["summary"]
-            file_key = f"{summary}_monitor{filename}"
+            ori_tag = get_screen_topology_orientation_tag(config["monitors"])
+            tag_part = f"_{ori_tag}" if ori_tag else ""
+            file_key = f"{summary}{tag_part}_monitor{filename}"
             out_filename = get_conf_path(file_key)
         
         os.makedirs(os.path.dirname(os.path.abspath(out_filename)), exist_ok=True)
@@ -1213,11 +1331,14 @@ def restore_display_configuration(target_file_or_name="display_config.json") -> 
             if os.path.isabs(target_file_or_name) and os.path.exists(target_file_or_name):
                 in_filename = target_file_or_name
             else:
+                ori_tag = get_screen_topology_orientation_tag(current_monitors)
                 candidates = [
                     os.path.join(get_app_root(), target_file_or_name),
                     get_conf_path(target_file_or_name),
                     os.path.join(os.getcwd(), target_file_or_name),
+                    get_conf_path(f"{summary}_{ori_tag}_monitor{target_file_or_name}"),
                     get_conf_path(f"{summary}_monitor{target_file_or_name}"),
+                    os.path.join(get_app_root(), f"{summary}_{ori_tag}_monitor{target_file_or_name}"),
                     os.path.join(get_app_root(), f"{summary}_monitor{target_file_or_name}")
                 ]
                 for cand in candidates:
@@ -1313,29 +1434,138 @@ def restore_display_configuration(target_file_or_name="display_config.json") -> 
         return False, f"恢复多显示器排布时出错: {e}"
 
 
+def build_topology_fingerprint(monitors: list) -> tuple:
+    """生成显示器物理排布的数据指纹，用于自动识别数据布局是否完全一致"""
+    fps = []
+class SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", wintypes.HWND),
+        ("wFunc", wintypes.UINT),
+        ("pFrom", wintypes.LPCWSTR),
+        ("pTo", wintypes.LPCWSTR),
+        ("fFlags", wintypes.WORD),
+        ("fAnyOperationsAborted", wintypes.BOOL),
+        ("hNameMappings", wintypes.LPVOID),
+        ("lpszProgressTitle", wintypes.LPCWSTR),
+    ]
+
+FO_DELETE = 0x0003
+FOF_ALLOWUNDO = 0x0040        # 核心：移动至 Windows 回收站，支持撤销/还原
+FOF_NOCONFIRMATION = 0x0010   # 静默模式，不弹出系统原生二次确认
+FOF_SILENT = 0x0004           # 静默模式，不显示系统进度条
+FOF_NOERRORUI = 0x0400        # 静默模式，不显示错误对话框
+
+
+def send_file_to_recycle_bin(filepath: str) -> tuple:
+    """
+    将指定文件安全删除并移入 Windows 系统回收站（支持桌面回收站随时撤销还原）。
+    同时在本地 BackConfig/deleted_topologies 建立时间戳硬备份，杜绝任何物理抹除风险。
+    返回 (success: bool, message: str)
+    """
+    if not filepath or not os.path.exists(filepath):
+        return False, f"文件不存在: {filepath}"
+
+    abs_path = os.path.abspath(filepath)
+    fname = os.path.basename(abs_path)
+
+    # 1. 自动执行本地快照硬备份
+    try:
+        backup_dir = os.path.join(get_app_root(), "BackConfig", "deleted_topologies")
+        os.makedirs(backup_dir, exist_ok=True)
+        import shutil
+        ts = int(time.time())
+        bak_file = os.path.join(backup_dir, f"{fname}.{ts}.bak")
+        shutil.copy2(abs_path, bak_file)
+    except Exception as e:
+        logger.warning(f"删除前本地自动备份失败: {e}")
+
+    # 2. 若为非 Windows 系统，回退为普通删除
+    if sys.platform != "win32":
+        try:
+            os.remove(abs_path)
+            return True, f"已删除: {fname}"
+        except Exception as e:
+            return False, f"删除失败: {e}"
+
+    # 3. 尝试使用第三方 send2trash (若环境中存在)
+    try:
+        import send2trash
+        send2trash.send2trash(abs_path)
+        return True, f"已安全移入 Windows 回收站: {fname}"
+    except Exception:
+        pass
+
+    # 4. 使用 Windows 原生 Shell32 SHFileOperationW API 移入回收站
+    try:
+        # SHFileOperationW 要求路径字符串以双空字符 (\0\0) 结尾
+        p_from = abs_path + "\0\0"
+        
+        fileop = SHFILEOPSTRUCTW()
+        fileop.hwnd = 0
+        fileop.wFunc = FO_DELETE
+        fileop.pFrom = p_from
+        fileop.pTo = None
+        fileop.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
+        fileop.fAnyOperationsAborted = False
+        fileop.hNameMappings = None
+        fileop.lpszProgressTitle = None
+
+        res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fileop))
+        if res == 0 and not fileop.fAnyOperationsAborted and not os.path.exists(abs_path):
+            return True, f"已安全移入 Windows 回收站: {fname}"
+        else:
+            # 若回收站 API 失败，执行安全重命名移入备份目录
+            if os.path.exists(abs_path):
+                shutil.move(abs_path, bak_file)
+            return True, f"已安全移入备份归档 (BackConfig/deleted_topologies): {fname}"
+    except Exception as e:
+        return False, f"安全删除失败: {e}"
+
+
+def build_topology_fingerprint(monitors: list):
+    """
+    提取显示器拓扑配置的核心数据指纹。
+    仅当所有显示器的硬件参数、物理分辨率、缩放比例、相对排布坐标 (x, y) 完全相同时，指纹才相同。
+    若 monitors 为空或无有效显示器，返回 None，严禁生成空指纹造成误判。
+    """
+    if not monitors or not isinstance(monitors, list):
+        return None
+    valid_m = [m for m in monitors if isinstance(m, dict) and m.get("width", 0) > 0 and m.get("height", 0) > 0]
+    if not valid_m:
+        return None
+
+    fps = []
+    for m in valid_m:
+        w = int(m.get("width", 0))
+        h = int(m.get("height", 0))
+        x = int(m.get("x", 0))
+        y = int(m.get("y", 0))
+        s = int(round(float(m.get("scale", 1.0)) * 100))
+        pri = bool(m.get("is_primary"))
+        pnp = str(m.get("pnp_id") or "").strip().upper()
+        hw = str(m.get("hardware_id") or "").strip().upper()
+        model = str(m.get("model_name") or "").strip().lower()
+        fps.append((w, h, s, x, y, pri, pnp, hw, model))
+    return (len(fps), tuple(sorted(fps)))
+
+
 def list_display_configurations() -> list:
     """
-    扫描程序运行目录及相关目录下的所有显示器物理拓扑配置文件。
-    严格按文件名去重，并精准计算与当前系统屏幕的匹配度。
-    返回列表，按当前屏幕匹配优先、修改时间倒序排列。
+    扫描程序唯一运行根目录 (app_root) 下的所有显示器物理拓扑配置文件。
+    完整支持同设备组合但不同物理摆放方式的多布局共存。
+    自动检测数据布局完全一致的重复项并标记 (is_duplicate & duplicate_of)，以便用户在界面上手动或一键清理。
+    返回列表，按当前屏幕匹配优先、非重复优先、修改时间倒序排列。
     """
     import time
     app_root = get_app_root()
+    # 🛡️ 严格锁定单一权威配置目录，绝不允许跨目录混扫导致同一文件被重复加载或自身与自身比对
     search_dirs = [app_root]
-    cwd = os.getcwd()
-    if os.path.abspath(cwd) != os.path.abspath(app_root):
-        search_dirs.append(cwd)
-    wm_dir = os.path.join(app_root, "webTools", "window_manager")
-    if os.path.exists(wm_dir) and wm_dir not in search_dirs:
-        search_dirs.append(wm_dir)
 
-    found_files = []
+    raw_files = []
     seen_filenames = set()
 
-    current_info = get_screen_resolution_summary()
     current_details = get_monitor_details_all_with_scale()
-    current_summary = current_details.get("summary", "")
-    current_display_num = current_info.get("display_num", len(current_details.get("monitors", [])))
+    current_monitors = current_details.get("monitors", [])
 
     for s_dir in search_dirs:
         if not os.path.exists(s_dir):
@@ -1344,14 +1574,13 @@ def list_display_configurations() -> list:
             for fname in os.listdir(s_dir):
                 if not fname.endswith(".json"):
                     continue
-                # 严格匹配显示器拓扑配置文件
+                # 匹配显示器拓扑配置文件 (包含 monitordisplay_config 或 display_config，排除 display_cols 等非拓扑文件)
                 fname_lower = fname.lower()
-                if "monitordisplay_config" in fname_lower or fname_lower == "display_config.json":
-                    # 严格按文件名去重（优先保留首先在 app_root 中扫描到的文件）
-                    if fname_lower in seen_filenames:
+                if ("monitordisplay_config" in fname_lower or fname_lower == "display_config.json") and fname_lower != "display_cols.json":
+                    if fname in seen_filenames:
                         continue
-                    seen_filenames.add(fname_lower)
-
+                    seen_filenames.add(fname)
+                    
                     fpath = os.path.abspath(os.path.join(s_dir, fname))
 
                     try:
@@ -1373,38 +1602,110 @@ def list_display_configurations() -> list:
                         pri_model = pri.get("model_name") or f"{pri.get('width', 0)}x{pri.get('height', 0)}"
                         
                         other_models = [m.get("model_name") or f"{m.get('width', 0)}x{m.get('height', 0)}" for m in monitors if m != pri]
+                        
+                        ori_tag = get_screen_topology_orientation_tag(monitors)
+                        ori_cn = ""
+                        if ori_tag:
+                            ori_map = {
+                                "Right": "副屏居右",
+                                "Left": "副屏居左",
+                                "Top": "副屏居上",
+                                "Bottom": "副屏居下",
+                                "TopRight": "副屏居右上",
+                                "TopLeft": "副屏居左上",
+                                "BottomRight": "副屏居右下",
+                                "BottomLeft": "副屏居左下"
+                            }
+                            ori_cn = f"[{ori_map.get(ori_tag, ori_tag)}] "
+
                         if other_models:
                             other_desc = " + ".join(other_models)
-                            display_name = f"{m_count}屏 [{pri_model}(主) + {other_desc}] ({mtime_str})"
+                            base_display_name = f"{m_count}屏 {ori_cn}[{pri_model}(主) + {other_desc}] ({mtime_str})"
                         else:
-                            display_name = f"单屏 [{pri_model}] ({mtime_str})"
+                            base_display_name = f"单屏 [{pri_model}] ({mtime_str})"
 
-                        # 🎯 严谨精准匹配：屏幕数量必须严格相等且拓扑签名完全一致
-                        is_match = (m_count == current_display_num) and (summary == current_summary)
+                        # 🎯 严谨精准匹配当前实际物理排布 (包含各个屏幕的分辨率、缩放、相对坐标与主副屏属性)
+                        is_match = is_same_display_config(current_monitors, monitors)
 
-                        found_files.append({
+                        # 计算数据指纹
+                        fingerprint = build_topology_fingerprint(monitors)
+
+                        raw_files.append({
                             "filename": fname,
                             "filepath": fpath,
-                            "display_name": display_name,
+                            "base_display_name": base_display_name,
                             "summary": summary,
                             "monitor_count": m_count,
+                            "orientation_tag": ori_tag,
                             "mtime": mtime_str,
                             "mtime_ts": mtime_ts,
                             "is_current_match": is_match,
-                            "monitors": monitors
+                            "monitors": monitors,
+                            "fingerprint": fingerprint
                         })
                     except Exception:
                         continue
         except Exception:
             continue
 
-    found_files.sort(key=lambda x: (not x["is_current_match"], -x["mtime_ts"]))
-    return found_files
+    # 自动进行数据布局一致性分析与重复标记 (带白名单安全防护)
+    seen_fingerprints = {}  # fingerprint -> first_cfg_item
+    final_files = []
+
+    # 排序：优先让标准文件/当前匹配文件排在前面作为基准
+    raw_files.sort(key=lambda x: (not x["is_current_match"], x["filename"] != "display_config.json", x["mtime_ts"]))
+
+    for cfg in raw_files:
+        fp = cfg["fingerprint"]
+        # 白名单保护：当前匹配中的配置或标准主配置文件，严禁判定为重复副本
+        is_protected = cfg["is_current_match"] or cfg["filename"] == "display_config.json"
+
+        if fp is not None and fp in seen_fingerprints and not is_protected:
+            first_cfg = seen_fingerprints[fp]
+            # 必须是不同文件名才算重复冗余副本
+            if cfg["filename"] != first_cfg["filename"]:
+                cfg["is_duplicate"] = True
+                cfg["duplicate_of"] = first_cfg["filename"]
+                cfg["display_name"] = f"{cfg['base_display_name']} ⚠️[数据与 {first_cfg['filename']} 重复]"
+            else:
+                cfg["is_duplicate"] = False
+                cfg["duplicate_of"] = ""
+                cfg["display_name"] = cfg["base_display_name"]
+        else:
+            if fp is not None and fp not in seen_fingerprints:
+                seen_fingerprints[fp] = cfg
+            cfg["is_duplicate"] = False
+            cfg["duplicate_of"] = ""
+            cfg["display_name"] = cfg["base_display_name"]
+            
+        final_files.append(cfg)
+
+    # 排序：当前实际匹配优先 > 非重复优先 > 修改时间倒序
+    final_files.sort(key=lambda x: (not x["is_current_match"], x["is_duplicate"], -x["mtime_ts"]))
+    return final_files
+
+
+def clean_duplicate_display_configurations() -> tuple:
+    """
+    一键扫描并清理所有与已有配置数据完全一致的重复显示器拓扑配置文件。
+    保留主配置文件，将所有冗余副本安全移入 Windows 回收站，并在 BackConfig 自动备份。
+    返回 (deleted_count: int, deleted_files: list[str])
+    """
+    configs = list_display_configurations()
+    deleted = []
+    for c in configs:
+        if c.get("is_duplicate") and not c.get("is_current_match") and c.get("filename") != "display_config.json":
+            fpath = c.get("filepath")
+            if fpath and os.path.exists(fpath):
+                ok, _ = send_file_to_recycle_bin(fpath)
+                if ok:
+                    deleted.append(c.get("filename", os.path.basename(fpath)))
+    return len(deleted), deleted
 
 
 def delete_display_configuration(filename_or_path: str) -> tuple:
     """
-    安全删除指定的显示器拓扑配置文件。
+    安全删除指定的显示器拓扑配置文件（移入 Windows 回收站，支持撤销还原）。
     返回 (success: bool, message: str)
     """
     if not filename_or_path:
@@ -1420,11 +1721,7 @@ def delete_display_configuration(filename_or_path: str) -> tuple:
     if not os.path.exists(target):
         return False, f"配置文件不存在: {filename_or_path}"
 
-    try:
-        os.remove(target)
-        return True, f"成功删除显示器配置文件: {os.path.basename(target)}"
-    except Exception as e:
-        return False, f"删除文件失败: {e}"
+    return send_file_to_recycle_bin(target)
 
 
 def get_display_configuration_details(filename_or_path: str) -> dict:
@@ -1601,19 +1898,14 @@ SINGLE_INSTANCE_SERVER_NAME = "ManageWindowLayout_SingleInstance_Server"
 def check_and_activate_existing_instance() -> bool:
     """
     检查 manage_window_layout 是否已经在运行：
-    1. 同路径实例：直接通过全局 IPC 管道发送 WAKEUP 唤醒前台并返回 True（指示当前启动退出）；
-    2. 异路径历史旧实例：弹窗提示用户是否关闭旧实例并启动当前程序；
-    3. 无运行中实例：返回 False（指示正常启动）。
+    若已在运行，直接通过 IPC 管道 / Win32 消息自动唤醒并拉起已有窗口至前台置顶，
+    无需弹出任何切换弹窗打断用户操作，当前新启动进程自动平滑退出。
     """
     current_pid = os.getpid()
     parent_pid = os.getppid() if hasattr(os, 'getppid') else None
-    current_app_root = os.path.normcase(os.path.abspath(get_app_root()))
-    current_exe = os.path.normcase(os.path.abspath(sys.executable))
 
-    # 1. 扫描后台正在运行的 manage_window_layout 实例
-    same_path_pids = set()
-    other_path_pids = []  # list of (pid, exe_path, proc_obj)
-
+    # 1. 扫描后台正在运行的 manage_window_layout 目标进程 PID
+    target_pids = set()
     try:
         for p in psutil.process_iter(['pid', 'name', 'exe']):
             try:
@@ -1622,99 +1914,52 @@ def check_and_activate_existing_instance() -> bool:
                     continue
 
                 p_name = (p.info['name'] or '').lower()
-                p_exe = (p.info['exe'] or '').lower()
-                
-                is_target_proc = False
                 if p_name == 'manage_window_layout.exe' or 'manage_window_layout.py' in p_name:
-                    is_target_proc = True
-
-                if is_target_proc:
-                    proc_dir = os.path.normcase(os.path.abspath(os.path.dirname(p_exe))) if p_exe else ""
-                    if proc_dir and proc_dir == current_app_root:
-                        same_path_pids.add(p_pid)
-                    else:
-                        other_path_pids.append((p_pid, p_exe or p_name, p))
+                    target_pids.add(p_pid)
             except Exception:
                 continue
     except Exception as e:
         print(f"[SingleInstance] psutil 进程扫描异常: {e}")
 
-    # 2. 如果检测到系统中已有异路径的历史旧实例常驻（如 55188 还在后台运行）
-    if other_path_pids and not same_path_pids:
-        try:
-            from PyQt6.QtWidgets import QApplication, QMessageBox
-            app = QApplication.instance()
-            if not app:
-                app = QApplication(sys.argv if hasattr(sys, 'argv') else [])
-
-            old_pid, old_path, _ = other_path_pids[0]
-            reply = QMessageBox.question(
-                None,
-                "检测到后台存在旧版本实例",
-                f"检测到系统后台已有正在运行的其它路径实例：\n"
-                f"【旧版路径】: {old_path} (PID: {old_pid})\n\n"
-                f"当前尝试启动的新程序路径为：\n"
-                f"【当前路径】: {current_exe}\n\n"
-                f"整个系统只应保留一个正在运行的 manage_window_layout。\n"
-                f"是否关闭后台旧实例并启动当前程序？\n\n"
-                f"• 点击【是 (Yes)】：终止后台旧实例，正常启动当前程序\n"
-                f"• 点击【否 (No)】：退出当前启动",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                for opid, opath, op_obj in other_path_pids:
-                    try:
-                        op_obj.kill()
-                        op_obj.wait(timeout=1.0)
-                    except Exception:
-                        pass
-                print("[SingleInstance] 用户已选择终止后台异路径旧实例，继续启动当前程序。")
-                return False
-            else:
-                return True
-        except Exception as e:
-            print(f"[SingleInstance] 弹窗提示异常: {e}")
-
-    # 3. 针对同路径实例，尝试通过 Qt 的 QLocalSocket 发送 WAKEUP 指令
+    # 2. 尝试通过 Qt QLocalSocket IPC 管道发送 WAKEUP 极速唤醒指令
     ipc_connected = False
     try:
         from PyQt6.QtNetwork import QLocalSocket
         socket = QLocalSocket()
         socket.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
         if socket.waitForConnected(300):
-            print(f"[SingleInstance] 成功连接至已有 IPC 服务 ({SINGLE_INSTANCE_SERVER_NAME})，发送 WAKEUP 指令...")
+            print(f"[SingleInstance] 成功连接至已有 IPC 服务 ({SINGLE_INSTANCE_SERVER_NAME})，发送 WAKEUP 唤醒指令...")
             socket.write(b"WAKEUP\n")
             socket.flush()
             socket.waitForBytesWritten(300)
             socket.disconnectFromServer()
             ipc_connected = True
-    except Exception as e:
+    except Exception:
         pass
 
+    # 3. 扫描并唤醒后台运行实例的所有 UI 窗口句柄（支持从托盘最小化中拉起到前台置顶）
     target_hwnds = []
-    if same_path_pids or not other_path_pids:
-        def enum_pid_windows_callback(hwnd, lparam):
-            if not user32.IsWindow(hwnd):
-                return True
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value in same_path_pids:
-                title = win32gui.GetWindowText(hwnd) or ""
-                cls = win32gui.GetClassName(hwnd) or ""
-                if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
-                    if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
-                       not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
-                        target_hwnds.append((hwnd, pid.value, title))
+    def enum_pid_windows_callback(hwnd, lparam):
+        if not user32.IsWindow(hwnd):
             return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in target_pids or not target_pids:
+            title = win32gui.GetWindowText(hwnd) or ""
+            cls = win32gui.GetClassName(hwnd) or ""
+            if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
+                if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
+                   not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
+                    target_hwnds.append((hwnd, pid.value, title))
+        return True
 
-        try:
-            proc_pid = WNDENUMPROC(enum_pid_windows_callback)
-            user32.EnumWindows(proc_pid, 0)
-        except Exception:
-            pass
+    try:
+        proc_pid = WNDENUMPROC(enum_pid_windows_callback)
+        user32.EnumWindows(proc_pid, 0)
+    except Exception:
+        pass
 
-    # 4. 如果成功通过 IPC 连接或找到了真实运行中的 UI 窗口句柄
+    # 4. 执行 Win32 消息唤醒与强力置顶
     activated = False
     wm_msg_id = get_wm_show_msg_id()
 
@@ -1723,22 +1968,20 @@ def check_and_activate_existing_instance() -> bool:
         for hwnd, pid, title in target_hwnds:
             try:
                 if user32.IsWindow(hwnd):
-                    # 通过 Win32 API 广播/发送唤醒注册消息
+                    # 发送恢复与显示指令
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                     if wm_msg_id:
                         user32.PostMessageW(hwnd, wm_msg_id, 0, 0)
-
-                    # 调用工业级强力置顶与激活
+                    # 强力置顶与激活
                     force_topmost_activate_hwnd(hwnd)
                     activated = True
             except Exception as e:
                 print(f"[SingleInstance] 唤醒窗口 HWND {hwnd} 异常: {e}")
 
-    # 仅当成功通过 IPC 唤醒 或 成功找到/拉起已存实例时，指示调用方退出；避免重复创建新窗口
-    if ipc_connected or activated:
-        print("[SingleInstance] 成功唤醒已有主 UI 实例到前台，阻止重复启动新实例。")
+    # 5. 若已成功通过 IPC 唤醒、或已激活窗口、或后台确实存在已运行的实例：直接退出当前进程
+    if ipc_connected or activated or target_pids:
+        print("[SingleInstance] [OK] 已自动唤醒并拉起后台运行实例至前台，新启动进程安全退出。")
         return True
-
-    return False
 
     return False
 
@@ -1810,8 +2053,45 @@ def get_current_autostart_command() -> tuple:
     return False, ""
 
 
-def is_autostart_enabled() -> bool:
-    """检查 Windows 注册表中是否已存在开机自启项"""
+def is_autostart_enabled_for_current_app() -> bool:
+    """
+    检查 Windows 注册表中是否已将【当前运行程序】配置为开机自启。
+    只有当注册表中的命令与当前程序的自启动命令完全匹配时才返回 True；
+    如果注册表中配置的是其他路径/其他程序，对当前程序而言返回 False。
+    """
+    configured, current_cmd = get_current_autostart_command()
+    if not configured or not current_cmd:
+        return False
+    expected_cmd = get_autostart_command()
+    
+    # 标准化路径比较（统一去除两端引号、转小写、处理斜杠与多余空格）
+    def extract_main_executable(c: str) -> str:
+        s = c.strip()
+        if s.startswith('"'):
+            end_q = s.find('"', 1)
+            if end_q != -1:
+                return os.path.normpath(s[1:end_q]).lower()
+        parts = s.split()
+        if parts:
+            return os.path.normpath(parts[0].strip('"')).lower()
+        return ""
+
+    cur_exe = extract_main_executable(current_cmd)
+    exp_exe = extract_main_executable(expected_cmd)
+    if not cur_exe or not exp_exe:
+        return False
+
+    return cur_exe == exp_exe
+
+
+def is_autostart_enabled(for_current_app_only: bool = True) -> bool:
+    """
+    检查开机自启状态。
+    默认 for_current_app_only=True，仅当当前运行程序已被设置为开机自启时返回 True；
+    若 for_current_app_only=False，只要系统注册表中存在任意 manage_window_layout 自启项即返回 True。
+    """
+    if for_current_app_only:
+        return is_autostart_enabled_for_current_app()
     configured, _ = get_current_autostart_command()
     return configured
 

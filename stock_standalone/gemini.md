@@ -1,3 +1,67 @@
+## 2026-08-24 00:06
+- [x] **单实例无感唤醒升级：彻底移除实例切换弹窗，检测到已存后台实例时直接自动唤醒拉起并置顶至前台 (`webTools/window_manager/core.py`)**：
+    - [x] **彻底消除 QMessageBox 切换确认弹窗**：
+        - 废除“检测到后台存在旧版本实例是否切换”弹窗，无论后台是同路径还是异路径实例，直接通过 Qt LocalSocket IPC 管道或 Win32 PostMessage 极速发送 `WAKEUP` 唤醒信号；
+        - 调用 `force_topmost_activate_hwnd` 直接从托盘/最小化拉起到最前台激活置顶；
+    - [x] **新进程平滑快速退出**：
+        - 新启动的进程在唤醒后台实例后自动静默安全退出（退出码 0），杜绝任何打断用户操作的弹窗。
+
+## 2026-08-24 00:04
+- [x] **彻底根治多目录扫描导致同一物理文件重复加载及自身与自身比对为重复的问题 (`webTools/window_manager/core.py`)**：
+    - [x] **权威配置目录唯一锁定 (`search_dirs = [app_root]`)**：
+        - 彻底消除 `app_root`、`cwd` 与 `webTools` 跨目录混扫，锁定程序根目录为唯一权威配置文件存储与扫描路径；
+        - 清理 `webTools` 目录下的多余旧副本，杜绝同一文件被加载两次；
+    - [x] **强文件名唯一排重与自身比对隔离**：
+        - 增加 `seen_filenames = set()` 强排重，同一文件名在下拉列表中绝对只出现一次；
+        - 修复去重比对逻辑：严禁相同文件名自身与自身比对为重复，仅当文件名不同但拓扑数据 100% 相同且非当前匹配项时才判定为重复副本；
+    - [x] **3 屏/2 屏/单屏配置各保留一份且独立共存**：
+        - 下拉列表只展示 3 个独一无二的拓扑选项，无任何重复项；全量测试 100% PASS。
+
+## 2026-08-23 23:58
+- [x] **修复清理拓扑物理抹除缺陷（全面接入 Windows 回收站与 BackConfig 自动备份）、加固拓扑指纹算法与白名单保护机制，并完整恢复 3 屏/2 屏/单屏标准拓扑配置 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`)**：
+    - [x] **Win32 原生回收站安全删除引擎 (`core.send_file_to_recycle_bin`)**：
+        - 彻底废弃所有直接 `os.remove` 永久物理抹除；
+        - 调用 Windows 原生 Shell32 API `SHFileOperationW`（`FO_DELETE` + `FOF_ALLOWUNDO`），确保删除文件时 100% 安全送入 Windows 回收站，用户可在桌面回收站随时撤销还原；
+        - 删除前强制在 `BackConfig/deleted_topologies/` 自动生成带时间戳快照备份，双重保险防误删；
+    - [x] **拓扑指纹算法防护与白名单保护**：
+        - 修复 `build_topology_fingerprint`：对空 monitors 或异常数据返回 `None`，严禁生成空指纹 `()` 导致不同文件被批量误判为重复；
+        - 增加白名单机制：当前正在匹配的拓扑文件（`is_current_match == True`）以及主配置文件（`display_config.json`）受绝对保护，永远不可被标记为重复，永远不被清理；
+    - [x] **拓扑配置文件全面恢复**：
+        - 根据当前系统实际 3 块物理屏幕（LG HDR 4K、AUO82ED、SyncMaster）自动恢复生成 3 屏拓扑；同时恢复标准 2 屏拓扑与单屏拓扑；
+        - 自动化回归测试套件 `scratch/test_recycle_bin_and_safe_dedup.py` 验证 100% 通过。
+
+## 2026-08-23 23:55
+- [x] **修复开机自启动路径归属与非自启设置时不自动运行程序，优化主界面紧凑布局与超长文本自动换行 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`)**：
+    - [x] **开机自启动状态判定精准绑定当前运行程序 (`core.is_autostart_enabled_for_current_app`)**：
+        - 界面上的“开机自启”复选框仅依据当前运行程序（比较注册表命令与当前程序路径是否一致）进行勾选状态初始化，若注册表中是外部其他路径则对当前程序默认为未勾选；
+        - 保存设置时若未勾选当前程序自启，绝不弹窗误询问覆盖外部其他路径，也绝不擅自删除别人的自启动项；仅当用户主动勾选且检测到外部路径冲突时才弹窗询问是否覆盖更新；
+    - [x] **非当前自启设置时不用自动运行程序**：
+        - 在程序启动逻辑中严格校验：仅当【当前运行程序】已被注册为系统开机自启，或本次启动带有开机静默参数（`-hide`）时，才自动调度运行后台 Acer 性能模式或外部程序；在手动打开或源码调试时跳过自动运行；
+    - [x] **主界面拓扑管理区紧凑两行排版与自动换行 (`QComboBox.view().setWordWrap(True)`)**：
+        - 彻底解决拓扑栏单行硬塞 8 个控件导致横向拉伸撑爆窗口的问题；
+        - 第一行布局：`📂 拓扑排布:` + 自适应宽度下拉框（开启 `WordWrap`） + `🔄 刷新` + `👁️ 预览`；
+        - 第二行布局：`🔄 恢复排布` + `💾 保存当前` + `🗑️ 删除` + `🧹 清理重复`（采用 `FlowLayout` 自动折行，保证窄屏不溢出）；
+        - 为拓扑下拉项注入详细 ToolTip，兼顾界面精炼与完整参数查看。
+
+## 2026-08-23 23:35
+- [x] **修复多显示器多布局支持、数据一致性自动检测标记/清理与窗口全屏/最大化应用布局失效问题 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`)**：
+    - [x] **多摆放方式独立保存与多布局扫描共存**：
+        - 改造 `save_display_configuration`：保存时自动融合相对摆放方位标签 `ori_tag`（如 `Right`, `Left`, `Top`, `TopRight` 等），生成带方位后缀的独立文件名（如 `{summary}_{ori_tag}_monitordisplay_config.json`），使相同设备在不同摆放方式下自动生成独立文件，不再相互覆盖或被忽略；
+        - 改造 `list_display_configurations`：支持扫描所有有效拓扑文件，不再因设备名或粗粒度 summary 忽略不同排布；
+    - [x] **拓扑数据一致性自动检测与重复副本标记 (Fingerprint Matching)**：
+        - 提取各个显示器的硬件 ID/PNP、物理分辨率、缩放比例、起始坐标 `(x, y)` 与主屏属性构建数据指纹；
+        - 自动比对数据一致性：若配置 B 与配置 A 的拓扑数据完全相同，标记为 `is_duplicate = True`，并在下拉框中直观显示 `⚠️[数据与 {dup_of} 重复]`；
+        - 若设备相同但 `(x, y)` 坐标不同，则清晰标识为不同的摆放方式（如 `[副屏居右]`、`[副屏居左]`），绝不误判为重复；
+    - [x] **一键与手动清理重复拓扑备份 (`clean_duplicate_display_configurations` & UI 交互)**：
+        - 界面上新增 **`🧹 清理重复拓扑`** 按钮，点击可扫描并弹窗展示所有重复冗余副本清单，确认后一键安全删除（保留对应的原配置文件）；
+        - 在 `DisplayTopologyPreviewDialog` 顶部增加黄色警示横幅提示数据重复；
+    - [x] **窗口方案数据一致性自动检测 (`ConfigManager.get_duplicate_resolutions_info`)**：
+        - 检测各窗口方案的坐标映射表，在方案下拉框中对完全重复的方案标注 `⚠️[与 {orig_name} 布局一致]`，支持手动与一键清理；
+    - [x] **全屏/最大化状态解除与原子定位 (`core.cancel_window_maximized_or_fullscreen`)**：
+        - 针对窗口处于最大化（`IsZoomed`）、全屏或最小化（`IsIconic`）时系统锁定几何边界导致应用布局失效的问题，增加 Win32 状态解绑函数；
+        - 在 `set_window_hwnd_pos`、`set_window_pos_by_title`、`apply_current_layout` 和 `apply_single_window_rule` 中，先调用 `cancel_window_maximized_or_fullscreen` 发送 `SW_RESTORE` 恢复为普通可缩放窗口，再原子化设置目标坐标与宽高，彻底根治全屏化导致布局失效的问题；
+    - [x] **自动化测试 100% PASS (`scratch/test_layout_dedup_and_fullscreen.py`)**。
+
 ## 2026-08-23 23:00
 - [x] **重构显示器物理拓扑保存恢复引擎、支持硬件真实厂商型号记忆与运行目录配置管理 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`)**：
     - [x] **真实物理显示器厂商型号与 EDID 硬件指纹解析 (`core.get_monitor_hardware_info`)**：
