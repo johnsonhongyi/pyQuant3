@@ -132,6 +132,43 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         self.assertFalse(dialog.is_narrow_mode)
         self.assertFalse(dialog.table.isColumnHidden(9))
 
+        # 测试语音弹窗预警开关切换
+        self.assertIsNotNone(dialog.btn_voice_alert)
+        orig_voice = dialog.is_voice_alert_enabled
+        dialog._toggle_voice_alert()
+        self.assertNotEqual(dialog.is_voice_alert_enabled, orig_voice)
+        dialog._toggle_voice_alert()
+        self.assertEqual(dialog.is_voice_alert_enabled, orig_voice)
+
+        # 测试全市场宏观情绪概览与防猎熔断
+        mock_summary = {
+            "zt_count": 45,
+            "broken_count": 28,
+            "seal_rate": 61.6,
+            "max_boards": 4,
+            "multi_boards_count": 3,
+            "avg_seal_circ_ratio": 2.15,
+            "total_seal_amount_yi": 38.5,
+            "top_leader": "键凯科技 (4板)",
+            "top_leader_code": "688356",
+            "top_leader_name": "键凯科技",
+            "up_cnt": 3200,
+            "down_cnt": 1800,
+            "panic_down_cnt": 12,
+            "limit_down_cnt": 0,
+            "sentiment_phase": "⚖️ 均衡博弈期",
+            "sentiment_score": 65.0,
+            "defense_status": "结构分化",
+            "is_avalanche": False
+        }
+        dialog._update_kpi_display(mock_summary)
+        self.assertIn("3200", dialog.lbl_kpi_zt.text())
+        self.assertIn("1800", dialog.lbl_kpi_zt.text())
+
+        # 测试通过 locate_stock_in_table 自动高亮居中
+        dialog.locate_stock_in_table("688356")
+        self.assertEqual(dialog.table.currentRow(), 0)
+
         dialog.close()
 
 
