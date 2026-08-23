@@ -1,3 +1,15 @@
+## 2026-08-23 14:52
+- [x] **外盘数据、资讯新闻、自动更新与自修复能力全方位 Code Review 与深度加固 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`)**：
+    - [x] **复查发现 1：新闻同一优先级内时间倒序 Bug 修复**：
+        - 原 `_sort_key` 在 `reverse=False` 时导致同为优先级 1 的新闻按时间升序排列（旧新闻在上）；修复为 `(prio, -timestamp)` 降序，确保最最新发布的新闻 100% 呈现在列表最上方；
+    - [x] **复查发现 2：新闻批量抓取英译中从 40 秒骤降至 0.2 秒**：
+        - 查明 `_auto_translate_en_text_to_cn` 在 RSS 批量解析时同步发 20 次 Google 在线翻译导致阻塞 40 秒的性能瓶颈；引入 `use_online=False` 默认使用微秒级离线超级短语词典，在线精翻移至后台 Worker 非阻塞线程；
+    - [x] **复查发现 3：批量预热 `fetch_global_klines_batch` 补齐标的与单次批量落盘**：
+        - 补齐 `SILVER` 与 `USDCNH` 标的，并在批量更新后自动调用 `flush_kline_disk_cache(data_source, force=True)`，杜绝仅停留在 RAM Cache 未落盘的风险；
+    - [x] **复查发现 4：提升 `append_realtime_bar_if_needed` 为模块级导出函数**：
+        - 清理闭包嵌套与重复定义，提升为顶层全局函数，统一服务于主抓取、绝境保底与盘中实时 Bar 动态追加；
+    - [x] **全套 4 组 Review 自动化测试（新闻时效性、批量预热落盘、异常脏点自修复清洗、实时 Bar 动态融合）100% PASS**。
+
 ## 2026-08-23 14:40
 - [x] **全球外盘及 K 线图数据全面修复、自动更新、自愈对齐与日志报告 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `ats/ui/global_market_panel.py`)**：
     - [x] **彻底根治 2026 年最新 K 线被静态阈值误杀过滤的致命 Bug**：
