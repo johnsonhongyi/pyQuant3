@@ -1,0 +1,726 @@
+# -*- coding: utf-8 -*-
+"""
+ats/limit_up_engine.py — ATS 每日涨停个股数据统计、封单比/量能比分析、多日强势股聚合与持久化核心引擎
+职责：
+1. 【实时与盘后涨停个股精准识别与盘口提取】：
+   - 支持全市场各板涨停规则判定 (主板 10%、创业/科创板 20%、北交所 30%、ST 5%) 与炸板/触板状态标记；
+   - 直连 TDX Realtime Fetcher 获取秒级五档挂单、买一封单量、真实流通股本与总股本；
+2. 【全维封单比与量能比指标推演】：
+   - 封单金额 (万元/亿元) = bid1_vol * 100 * price；
+   - 封流比 (%) = (bid1_vol * 100 / 流通股本) * 100% (精准反映封单占流通盘比例，>5%为强板，>10%为特强一字/大单)；
+   - 封成比 (%) = (bid1_vol / 当日总成交量) * 100% (反映买盘封板相对实际成交的厚度)；
+   - 买盘压强 (bid_pressure %) = 买一~买五总量 / 五档总深度 * 100%；
+   - 封板质量综合评分 (0~100)；
+   - 真实量比 (vol_ratio)、换手率 (turnover_rate %)、成交金额 (亿元)；
+3. 【多日强势股与连板天梯快速聚合】：
+   - 支持滑动窗口快速聚合统计 (1日、2日、3日、5日、10日、20日)；
+   - 自动统计 N 日 M 板 (如 5日3板、10日6板)、最高连板数、区间累计涨幅与区间换手率；
+   - 梯队分类标签 (【👑 空间高度龙】、【🚀 连板接力梯队】、【🔥 强势换手首板】、【💥 强势反包】、【🛡️ 稳健中军】)；
+4. 【跟随 ATS 的 dff 等策略特征与 ats_col 动态自定义列】：
+   - 严格继承 ATS 指标体系：dff, dff2, dff3, rank, perc3d, 大盘偏离度 (rs_val) 与大盘共振 (resonance)；
+   - 动态解析并格式化 cct.ats_col / cct.CFG.ats_col 自定义扩展列；
+5. 【安全原子持久化与多日历史时序回溯】：
+   - 数据原子存储至 datacsv/ats_limit_up_records.json 与按日归档的 datacsv/ats_limit_up_daily_archive_{date}.json；
+   - 提供多日历史数据回放、查询与对比分析能力。
+"""
+
+import os
+import sys
+import json
+import time
+import math
+import logging
+import datetime
+import threading
+import pandas as pd
+from typing import Dict, List, Tuple, Optional, Any, Set
+
+from sys_utils import get_app_root, get_conf_path
+from JohnsonUtil import commonTips as cct
+from logger_utils import LoggerFactory
+
+logger = LoggerFactory.getLogger("LimitUpEngine")
+
+# 本地数据持久化文件路径
+DATA_DIR = os.path.join(get_app_root(), "datacsv")
+LIMIT_UP_RECORDS_FILE = os.path.join(DATA_DIR, "ats_limit_up_records.json")
+ARCHIVE_PREFIX = os.path.join(DATA_DIR, "ats_limit_up_daily_archive_")
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """安全转换为 int"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_limit_up_ratio_threshold(code: str, name: str = "") -> float:
+    """
+    获取不同板块个股的理论涨停涨幅阈值 (%):
+    - 北交所 (920, 83, 87, 88, 43, 82 等): 30.0% (阈值 29.2%)
+    - 科创板 (688)/创业板 (300, 301): 20.0% (阈值 19.5%)
+    - ST / *ST 股票: 5.0% (阈值 4.85%)
+    - 主板 (600, 601, 603, 605, 000, 001, 002, 003): 10.0% (阈值 9.8%)
+    """
+    c_clean = str(code).strip().zfill(6)
+    n_clean = str(name).strip().upper()
+    if "ST" in n_clean or "*ST" in n_clean or "退" in n_clean:
+        return 4.85
+    if c_clean.startswith(("920", "83", "87", "88", "43", "82")):
+        return 29.2
+    elif c_clean.startswith(("688", "300", "301", "302")):
+        return 19.5
+    return 9.8
+
+
+def calc_theoretical_limit_up_price(code: str, last_close: float, name: str = "") -> float:
+    """计算个股精准理论涨停价 (元)"""
+    if last_close <= 0:
+        return 0.0
+    c_clean = str(code).strip().zfill(6)
+    n_clean = str(name).strip().upper()
+    if "ST" in n_clean or "*ST" in n_clean:
+        ratio = 0.05
+    elif c_clean.startswith(("920", "83", "87", "88", "43", "82")):
+        ratio = 0.30
+    elif c_clean.startswith(("688", "300", "301", "302")):
+        ratio = 0.20
+    else:
+        ratio = 0.10
+    return round(last_close * (1.0 + ratio), 2)
+
+
+def get_ats_custom_extra_cols() -> List[str]:
+    """获取 ats_col 排除已有基础固定列后的自定义追加列"""
+    try:
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    BASE_EXCLUDE = {
+        'code', 'name', 'price', 'close', 'trade', 'pct', 'percent', 'ratio',
+        'state', 'dff', 'dff2', 'dff3', 'rank', 'rs_val', 'dev', 'resonance',
+        'volume', 'vol', 'amount', 'turnover', 'vol_ratio', 'open', 'high', 'low'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+class LimitUpEngine:
+    """
+    ATS 每日涨停与多日强势股聚合分析单例引擎
+    """
+    _instance: Optional['LimitUpEngine'] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> 'LimitUpEngine':
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def __init__(self):
+        self._cache_lock = threading.RLock()
+        self._history_daily_records: Dict[str, List[Dict[str, Any]]] = {}  # {date_str: [record, ...]}
+        self._last_loaded_date: Optional[str] = None
+        self._is_loading_history = False
+        
+        # 内存中当前实时计算出的涨停标的列表
+        self._current_live_records: List[Dict[str, Any]] = []
+        self._last_scan_time: float = 0.0
+
+        # 确保数据目录存在
+        os.makedirs(DATA_DIR, exist_ok=True)
+
+        # 启动时加载持久化历史数据
+        self._load_persisted_history_records()
+
+    def _load_persisted_history_records(self):
+        """【💾 磁盘持久化加载】冷启动瞬间恢复历史涨停与强势股归档记录"""
+        with self._cache_lock:
+            # 1. 尝试从全量归档主文件加载
+            if os.path.exists(LIMIT_UP_RECORDS_FILE):
+                try:
+                    with open(LIMIT_UP_RECORDS_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            self._history_daily_records = data
+                            logger.info(f"✅ 成功从主持久化文件加载涨停历史数据: 共 {len(data)} 个交易日记录")
+                except Exception as e:
+                    logger.warning(f"加载主涨停持久化文件异常: {e}")
+
+            # 2. 补充扫描分日归档文件 (ats_limit_up_daily_archive_YYYY-MM-DD.json)
+            try:
+                if os.path.exists(DATA_DIR):
+                    for fname in os.listdir(DATA_DIR):
+                        if fname.startswith("ats_limit_up_daily_archive_") and fname.endswith(".json"):
+                            date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json", "")
+                            if date_part not in self._history_daily_records:
+                                fpath = os.path.join(DATA_DIR, fname)
+                                try:
+                                    with open(fpath, "r", encoding="utf-8") as f_sub:
+                                        sub_data = json.load(f_sub)
+                                        if isinstance(sub_data, list):
+                                            self._history_daily_records[date_part] = sub_data
+                                except Exception:
+                                    pass
+            except Exception as e:
+                logger.debug(f"扫描分日涨停归档异常: {e}")
+
+    def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False):
+        """
+        【💾 安全原子持久化】将指定日期的涨停分析记录原子落盘保存
+        :param date_str: 格式 YYYY-MM-DD
+        :param records: 涨停记录字典列表
+        :param force: 是否强制覆写
+        """
+        if not date_str or not records:
+            return
+
+        with self._cache_lock:
+            # 更新内存字典
+            self._history_daily_records[date_str] = records
+
+            # 异步后台线程执行文件 I/O，杜绝阻塞主线程 UI
+            history_copy = {d: list(recs) for d, recs in self._history_daily_records.items()}
+            single_date_records = list(records)
+
+            def _persist_worker():
+                try:
+                    # 1. 写入分日独立归档文件
+                    single_file = f"{ARCHIVE_PREFIX}{date_str}.json"
+                    tmp_single = f"{single_file}.tmp_{int(time.time()*1000)}"
+                    with open(tmp_single, "w", encoding="utf-8") as f:
+                        json.dump(single_date_records, f, ensure_ascii=False, indent=2)
+                    if os.path.exists(single_file):
+                        os.remove(single_file)
+                    os.rename(tmp_single, single_file)
+
+                    # 2. 写入全量主归档文件 (只保留最近 90 个交易日，防止文件过度膨胀)
+                    sorted_dates = sorted(history_copy.keys())
+                    if len(sorted_dates) > 90:
+                        pruned_copy = {d: history_copy[d] for d in sorted_dates[-90:]}
+                    else:
+                        pruned_copy = history_copy
+
+                    tmp_main = f"{LIMIT_UP_RECORDS_FILE}.tmp_{int(time.time()*1000)}"
+                    with open(tmp_main, "w", encoding="utf-8") as f:
+                        json.dump(pruned_copy, f, ensure_ascii=False, indent=2)
+                    if os.path.exists(LIMIT_UP_RECORDS_FILE):
+                        os.remove(LIMIT_UP_RECORDS_FILE)
+                    os.rename(tmp_main, LIMIT_UP_RECORDS_FILE)
+                    logger.debug(f"✅ 涨停历史数据已成功原子持久化落盘: {date_str} (共 {len(single_date_records)} 条记录)")
+                except Exception as e:
+                    logger.error(f"涨停数据原子持久化落盘失败: {e}")
+
+            threading.Thread(target=_persist_worker, daemon=True, name="LimitUpPersistWorker").start()
+
+    def scan_limit_up_records_from_df(
+        self,
+        current_df: pd.DataFrame,
+        fetch_l2_quotes: bool = True,
+        extra_cols: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        【🎯 核心识别与计算引擎】输入当前全市场/监控池 DataFrame，全自动提取：
+        1. 识别真实封板、炸板与大涨个股；
+        2. 直连 TDX 获取最新买一封单量、五档深度、流通股本与总股本；
+        3. 精准推算封单额、封流比、封成比、买盘压强、封板质量分、量比与换手率；
+        4. 融合 ATS 核心指标 (dff, dff2, dff3, rank, perc3d, 大盘偏离, 大盘共振) 与动态 ats_col；
+        5. 计算连板天数与多日历史特征。
+        """
+        if current_df is None or current_df.empty:
+            return []
+
+        extra_cols = extra_cols or get_ats_custom_extra_cols()
+        records = []
+        target_codes_for_l2 = []
+
+        # 获取大盘参考涨幅
+        sh_pct = 0.0
+        for idx_code in ('sh000001', '000001'):
+            if idx_code in current_df.index:
+                try:
+                    sh_pct = _safe_float(current_df.loc[idx_code].get('percent', 0.0))
+                    break
+                except Exception:
+                    pass
+        if sh_pct == 0.0 and 'percent' in current_df.columns:
+            sh_pct = _safe_float(current_df['percent'].mean(), 0.0)
+
+        # 1. 快速遍历 DataFrame 筛选涨停与逼近涨停标的
+        is_index_code = 'code' not in current_df.columns
+        for idx, row in current_df.iterrows():
+            code_raw = str(idx) if is_index_code else str(row.get('code', idx))
+            c_clean = ''.join(c for c in code_raw if c.isdigit()).zfill(6)
+            if not c_clean or len(c_clean) != 6:
+                continue
+
+            name = str(row.get('name', '')).strip()
+            if not name or name == '未知' or name == c_clean or name.isdigit():
+                try:
+                    from sys_utils import resolve_stock_name
+                    name = resolve_stock_name(c_clean) or c_clean
+                except Exception:
+                    name = c_clean
+
+            price = _safe_float(row.get('trade', row.get('close', row.get('price', 0.0))))
+            last_close = _safe_float(row.get('last_close', row.get('prev_close', price)))
+            pct = _safe_float(row.get('percent', row.get('pct', 0.0)))
+            if last_close > 0 and pct == 0.0 and price > 0:
+                pct = round((price - last_close) / last_close * 100.0, 2)
+
+            high_p = _safe_float(row.get('high', price))
+            low_p = _safe_float(row.get('low', price))
+            open_p = _safe_float(row.get('open', price))
+            vol = _safe_float(row.get('volume', row.get('vol', 0.0)))
+            amount = _safe_float(row.get('amount', row.get('turnover', 0.0)))
+
+            threshold = get_limit_up_ratio_threshold(c_clean, name)
+            theoretical_zt_price = calc_theoretical_limit_up_price(c_clean, last_close, name)
+
+            # 判定是否涨停或炸板
+            is_at_limit_price = (price >= theoretical_zt_price - 0.01) if (theoretical_zt_price > 0 and price > 0) else False
+            is_pct_limit = (pct >= threshold)
+            is_limit_up = is_pct_limit or is_at_limit_price
+
+            # 判定炸板 (最高价触及涨停价但现价脱离涨停)
+            was_touch_zt = (high_p >= theoretical_zt_price - 0.01) if (theoretical_zt_price > 0 and high_p > 0) else False
+            is_broken = was_touch_zt and not is_limit_up and (pct < threshold - 0.5)
+
+            # 如果既未涨停也非炸板且涨幅未达大阳线 (>=7%)，则跳过
+            if not is_limit_up and not is_broken and pct < 7.0:
+                continue
+
+            target_codes_for_l2.append(c_clean)
+
+            # 提取 ATS 核心策略指标
+            dff = _safe_float(row.get('dff', 0.0))
+            dff2 = _safe_float(row.get('DFF2', row.get('dff2', 0.0)))
+            dff3 = _safe_float(row.get('DFF3', row.get('dff3', 0.0)))
+            rank_val = _safe_int(row.get('Rank', row.get('rank', 999)), 999)
+            perc3d = _safe_float(row.get('perc3d', 0.0))
+
+            rs_val = round(pct - sh_pct, 2)
+            resonance = "同步整理"
+            if sh_pct < -0.3 and pct > 1.5:
+                resonance = "逆市抗跌"
+            elif sh_pct > 0.3 and pct > 3.0 and dff > 2.0:
+                resonance = "大盘共振"
+            elif pct < -3.0 and rs_val < -2.0:
+                resonance = "同步走弱"
+
+            # 提取动态自定义列 (ats_col)
+            extra_dict = {}
+            for ec in extra_cols:
+                val_raw = None
+                for k in (ec, ec.lower(), ec.upper()):
+                    if k in row:
+                        val_raw = row[k]
+                        break
+                extra_dict[ec] = cct.format_col_value(ec, val_raw)
+
+            # 板块分类
+            category = str(row.get('category', row.get('industry', row.get('hy', '')))).strip()
+
+            records.append({
+                "code": c_clean,
+                "name": name,
+                "price": price,
+                "pct": pct,
+                "last_close": last_close,
+                "open": open_p,
+                "high": high_p,
+                "low": low_p,
+                "vol": vol,
+                "amount": amount,
+                "amount_yi": round(amount / 1e8, 2) if amount > 1e5 else round((price * vol * 100) / 1e8, 2),
+                "is_limit_up": is_limit_up,
+                "is_broken": is_broken,
+                "threshold": threshold,
+                "theoretical_zt_price": theoretical_zt_price,
+                "dff": dff,
+                "dff2": dff2,
+                "dff3": dff3,
+                "rank": rank_val,
+                "perc3d": perc3d,
+                "rs_val": rs_val,
+                "resonance": resonance,
+                "category": category,
+                "extra_cols": extra_dict,
+                # 下列字段由后续 TDX 盘口与股本接口精准补齐
+                "bid1_vol": 0.0,
+                "seal_amount_wan": 0.0,
+                "seal_amount_yi": 0.0,
+                "seal_to_circ_ratio": 0.0,
+                "seal_to_vol_ratio": 0.0,
+                "bid_pressure": 50.0,
+                "seal_quality_score": 70.0,
+                "vol_ratio": _safe_float(row.get('vol_ratio', row.get('ratio', 1.0)), 1.0),
+                "turnover_rate": _safe_float(row.get('turnover', row.get('turnover_rate', 0.0))),
+                "consecutive_boards": 1,
+                "tier_tag": "🔥 换手首板"
+            })
+
+        # 2. 直连 TDX Realtime Fetcher 获取秒级高精度盘口五档与真实流通股本
+        if fetch_l2_quotes and target_codes_for_l2:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                
+                # 批量获取五档盘口
+                quotes = fetcher.get_security_quotes_safe(target_codes_for_l2)
+                quote_map = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q.get("code")}
+
+                # 批量拉取真实流通股本与总股本字典 {code: (liutong_shares, total_shares)}
+                shares_map = fetcher.get_batch_finance_shares(target_codes_for_l2)
+
+                for r in records:
+                    c = r["code"]
+                    q = quote_map.get(c)
+                    shares_info = shares_map.get(c, (150000000.0, 150000000.0))
+                    circ_shares = shares_info[0] if (shares_info and shares_info[0] > 0) else 150000000.0
+
+                    if q:
+                        price_now = _safe_float(q.get("price", r["price"]))
+                        last_c = _safe_float(q.get("last_close", r["last_close"]))
+                        if price_now > 0:
+                            r["price"] = price_now
+                        if last_c > 0:
+                            r["last_close"] = last_c
+                            r["pct"] = round((price_now - last_c) / last_c * 100.0, 2)
+
+                        vol_now = _safe_float(q.get("vol", r["vol"]))
+                        amt_now = _safe_float(q.get("amount", r["amount"]))
+                        if vol_now > 0:
+                            r["vol"] = vol_now
+                        if amt_now > 0:
+                            r["amount"] = amt_now
+                            r["amount_yi"] = round(amt_now / 1e8, 2)
+
+                        # 买一封单量 (手)
+                        bid1_v = _safe_float(q.get("bid_vol1", 0.0))
+                        r["bid1_vol"] = bid1_v
+
+                        # 买一~买五与卖一~卖五深度计算
+                        bid_sum = sum(_safe_float(q.get(f"bid_vol{i}", 0.0)) for i in range(1, 6))
+                        ask_sum = sum(_safe_float(q.get(f"ask_vol{i}", 0.0)) for i in range(1, 6))
+                        tot_depth = bid_sum + ask_sum
+                        r["bid_pressure"] = round((bid_sum / tot_depth) * 100.0, 1) if tot_depth > 0 else 50.0
+
+                        # 封单金额 (万元 / 亿元)
+                        seal_amt_yuan = bid1_v * 100.0 * price_now
+                        r["seal_amount_wan"] = round(seal_amt_yuan / 10000.0, 1)
+                        r["seal_amount_yi"] = round(seal_amt_yuan / 1e8, 3)
+
+                        # 封流比 (%) = 封单总股数 / 流通总股数 * 100%
+                        if circ_shares > 0:
+                            r["seal_to_circ_ratio"] = round((bid1_v * 100.0 / circ_shares) * 100.0, 2)
+                        
+                        # 封成比 (%) = 封单手数 / 当日总成交手数 * 100%
+                        if vol_now > 0:
+                            r["seal_to_vol_ratio"] = round((bid1_v / vol_now) * 100.0, 1)
+
+                        # 真实换手率 (%)
+                        if circ_shares > 0 and vol_now > 0:
+                            r["turnover_rate"] = round((vol_now * 100.0 / circ_shares) * 100.0, 2)
+
+                        # 封板状态二次核实 (若为涨停但卖一有挂单则判定为烂板/炸板)
+                        if r["is_limit_up"] and ask_sum > 0 and bid1_v < ask_sum * 0.1:
+                            r["is_limit_up"] = False
+                            r["is_broken"] = True
+
+            except Exception as e:
+                logger.debug(f"TDX 封单与股本数据拉取补充异常: {e}")
+
+        # 3. 结合多日历史归档推算真实连板天数与强势梯队分类
+        for r in records:
+            consecutive = self._calc_consecutive_boards(r["code"], r["is_limit_up"])
+            r["consecutive_boards"] = consecutive
+
+            # 封板质量综合评分 (0~100)
+            seal_score = 50.0
+            if r["is_limit_up"]:
+                seal_score = 65.0 + min(15.0, r["seal_to_circ_ratio"] * 2.0) + min(10.0, r["seal_to_vol_ratio"] * 0.1) + (10.0 if consecutive >= 2 else 0.0)
+            elif r["is_broken"]:
+                seal_score = 35.0
+            r["seal_quality_score"] = round(min(100.0, max(10.0, seal_score)), 1)
+
+            # 赋予梯队标签
+            if consecutive >= 4:
+                r["tier_tag"] = f"👑 空间高度龙 ({consecutive}板)"
+            elif consecutive >= 2:
+                r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
+            elif r["is_broken"]:
+                r["tier_tag"] = "💥 曾涨停炸板"
+            elif r["dff2"] > 15.0 or r["dff3"] > 30.0:
+                r["tier_tag"] = "🔥 强势主升首板"
+            elif r["dff"] < 0 and r["pct"] > 9.0:
+                r["tier_tag"] = "⚡ 爆量超跌反包"
+            else:
+                r["tier_tag"] = "📋 换手首板"
+
+        # 4. 排序：连板数降序 > 封流比降序 > 涨幅降序 > DFF降序
+        records.sort(key=lambda x: (
+            1 if x["is_limit_up"] else 0,
+            x["consecutive_boards"],
+            x["seal_to_circ_ratio"],
+            x["pct"],
+            x["dff"]
+        ), reverse=True)
+
+        with self._cache_lock:
+            self._current_live_records = records
+            self._last_scan_time = time.time()
+
+        return records
+
+    def _calc_consecutive_boards(self, code: str, is_today_zt: bool) -> int:
+        """从历史归档记录中回溯推算该个股的当前连板天数"""
+        c_clean = str(code).strip().zfill(6)
+        if not is_today_zt:
+            return 0
+
+        boards = 1
+        sorted_dates = sorted(self._history_daily_records.keys(), reverse=True)
+        today_str = time.strftime("%Y-%m-%d")
+
+        # 排除今天的记录（防止重复计数）
+        past_dates = [d for d in sorted_dates if d != today_str]
+
+        for d in past_dates:
+            day_records = self._history_daily_records.get(d, [])
+            # 查找该代码在历史日中是否为有效涨停
+            found = False
+            for rec in day_records:
+                if str(rec.get("code", "")).strip().zfill(6) == c_clean:
+                    if rec.get("is_limit_up", False) or _safe_float(rec.get("pct", 0.0)) >= get_limit_up_ratio_threshold(c_clean):
+                        found = True
+                        break
+            if found:
+                boards += 1
+            else:
+                # 连板中断
+                break
+
+        return boards
+
+    def aggregate_multi_day_strong_stocks(
+        self,
+        days: int = 5,
+        min_limit_ups: int = 1,
+        current_df: Optional[pd.DataFrame] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        【🚀 多日强势股快速聚合分析引擎】
+        快速扫描最近 N 个交易日内的涨停历史与当前最新状态，统计：
+        - N日M板统计 (如 5日3板、10日6板)；
+        - 区间最高连板高度与区间累计涨幅；
+        - 最新的封单比、量能比、ATS dff/dff2/dff3 与自定义列；
+        - 强势梯队与龙头状态。
+        """
+        with self._cache_lock:
+            sorted_dates = sorted(self._history_daily_records.keys())
+
+        # 获取最近 N 日的日期子集
+        target_dates = sorted_dates[-days:] if len(sorted_dates) >= days else sorted_dates
+        today_str = time.strftime("%Y-%m-%d")
+        if today_str not in target_dates and self._current_live_records:
+            target_dates.append(today_str)
+
+        # 统计每个代码在区间内的出现频次、涨停天数与历史数据
+        code_stats: Dict[str, Dict[str, Any]] = {}
+        for d in target_dates:
+            recs = self._current_live_records if d == today_str and self._current_live_records else self._history_daily_records.get(d, [])
+            for r in recs:
+                c = str(r.get("code", "")).strip().zfill(6)
+                if not c:
+                    continue
+                if c not in code_stats:
+                    code_stats[c] = {
+                        "code": c,
+                        "name": r.get("name", c),
+                        "limit_up_dates": [],
+                        "broken_dates": [],
+                        "max_consecutive": 0,
+                        "latest_record": dict(r),
+                        "accum_pct": 0.0
+                    }
+                if r.get("is_limit_up", False):
+                    code_stats[c]["limit_up_dates"].append(d)
+                elif r.get("is_broken", False):
+                    code_stats[c]["broken_dates"].append(d)
+                
+                cons = _safe_int(r.get("consecutive_boards", 1))
+                if cons > code_stats[c]["max_consecutive"]:
+                    code_stats[c]["max_consecutive"] = cons
+                
+                code_stats[c]["accum_pct"] += _safe_float(r.get("pct", 0.0))
+                code_stats[c]["latest_record"] = dict(r)
+
+        results = []
+        extra_cols = get_ats_custom_extra_cols()
+
+        for c, st in code_stats.items():
+            zt_count = len(st["limit_up_dates"])
+            if zt_count < min_limit_ups and st["max_consecutive"] < 2:
+                continue
+
+            lat = st["latest_record"]
+            # 若提供了实时 current_df，从中同步最新行情与策略指标
+            if current_df is not None and not current_df.empty:
+                if c in current_df.index:
+                    row = current_df.loc[c]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    lat["price"] = _safe_float(row.get("trade", row.get("close", lat["price"])))
+                    lat["pct"] = _safe_float(row.get("percent", row.get("pct", lat["pct"])))
+                    lat["dff"] = _safe_float(row.get("dff", lat["dff"]))
+                    lat["dff2"] = _safe_float(row.get("DFF2", row.get("dff2", lat["dff2"])))
+                    lat["dff3"] = _safe_float(row.get("DFF3", row.get("dff3", lat["dff3"])))
+                    lat["rank"] = _safe_int(row.get("Rank", row.get("rank", lat["rank"])), lat["rank"])
+
+                    for ec in extra_cols:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                lat["extra_cols"][ec] = cct.format_col_value(ec, row[k])
+                                break
+
+            # 生成 N日M板 摘要
+            n_d_m_b = f"{len(target_dates)}日{zt_count}板"
+            if len(st["broken_dates"]) > 0:
+                n_d_m_b += f" (炸板{len(st['broken_dates'])}次)"
+
+            # 综合强势评分 (0~100)
+            strong_score = (
+                zt_count * 20.0 +
+                st["max_consecutive"] * 15.0 +
+                min(25.0, lat["pct"] * 1.5) +
+                min(15.0, lat["seal_to_circ_ratio"] * 2.0) +
+                (10.0 if (lat["dff2"] > 10.0 or lat["dff3"] > 20.0) else 0.0)
+            )
+            strong_score = round(min(100.0, max(20.0, strong_score)), 1)
+
+            # 强势梯队分类
+            if st["max_consecutive"] >= 4 or zt_count >= 4:
+                tier = f"👑 核心总龙头 ({n_d_m_b})"
+            elif st["max_consecutive"] >= 2 or zt_count >= 2:
+                tier = f"🚀 连板接力梯队 ({n_d_m_b})"
+            elif lat.get("is_limit_up"):
+                tier = f"🔥 强势首板 ({n_d_m_b})"
+            elif lat.get("is_broken"):
+                tier = f"💥 炸板洗盘 ({n_d_m_b})"
+            else:
+                tier = f"⚡ 活跃强势反包 ({n_d_m_b})"
+
+            res_item = dict(lat)
+            res_item.update({
+                "n_days_m_boards": n_d_m_b,
+                "zt_count": zt_count,
+                "max_consecutive": st["max_consecutive"],
+                "accum_pct_nd": round(st["accum_pct"], 2),
+                "strong_score": strong_score,
+                "tier_tag": tier
+            })
+            results.append(res_item)
+
+        # 排序：强势评分降序 > 连板数降序 > 涨幅降序
+        results.sort(key=lambda x: (
+            x["strong_score"],
+            x["zt_count"],
+            x["max_consecutive"],
+            x["pct"]
+        ), reverse=True)
+
+        return results
+
+    def get_market_limit_up_summary(self, date_str: Optional[str] = None) -> Dict[str, Any]:
+        """
+        生成指定日期或实时的全市场涨停概览核心 KPI (涨停家数、连板家数、炸板家数、封板率、最高板、平均封流比等)
+        """
+        date_str = date_str or time.strftime("%Y-%m-%d")
+        with self._cache_lock:
+            records = self._current_live_records if (date_str == time.strftime("%Y-%m-%d") and self._current_live_records) else self._history_daily_records.get(date_str, [])
+
+        if not records:
+            return {
+                "date": date_str,
+                "zt_count": 0,
+                "broken_count": 0,
+                "total_attempts": 0,
+                "seal_rate": 0.0,
+                "max_boards": 0,
+                "multi_boards_count": 0,
+                "avg_seal_circ_ratio": 0.0,
+                "total_seal_amount_yi": 0.0,
+                "top_leader": "--"
+            }
+
+        zt_count = sum(1 for r in records if r.get("is_limit_up", False))
+        broken_count = sum(1 for r in records if r.get("is_broken", False))
+        total_attempts = zt_count + broken_count
+        seal_rate = round((zt_count / total_attempts * 100.0), 1) if total_attempts > 0 else 0.0
+
+        max_boards = max((_safe_int(r.get("consecutive_boards", 1)) for r in records if r.get("is_limit_up")), default=0)
+        multi_boards_count = sum(1 for r in records if r.get("is_limit_up") and _safe_int(r.get("consecutive_boards", 1)) >= 2)
+
+        seal_circ_sum = sum(_safe_float(r.get("seal_to_circ_ratio", 0.0)) for r in records if r.get("is_limit_up"))
+        avg_seal_circ = round(seal_circ_sum / max(1, zt_count), 2)
+
+        tot_seal_amt = sum(_safe_float(r.get("seal_amount_yi", 0.0)) for r in records if r.get("is_limit_up"))
+
+        # 最高板空间龙
+        top_leaders = [r for r in records if r.get("is_limit_up") and _safe_int(r.get("consecutive_boards", 1)) == max_boards]
+        top_leader_code = top_leaders[0]["code"] if top_leaders else (records[0]["code"] if records else "")
+        top_leader_name = top_leaders[0]["name"] if top_leaders else (records[0]["name"] if records else "")
+        top_leader_str = f"{top_leader_name} ({max_boards}板)" if (top_leaders and max_boards >= 2) else (top_leader_name if top_leader_name else "--")
+
+        return {
+            "date": date_str,
+            "zt_count": zt_count,
+            "broken_count": broken_count,
+            "total_attempts": total_attempts,
+            "seal_rate": seal_rate,
+            "max_boards": max_boards,
+            "multi_boards_count": multi_boards_count,
+            "avg_seal_circ_ratio": avg_seal_circ,
+            "total_seal_amount_yi": round(tot_seal_amt, 2),
+            "top_leader": top_leader_str,
+            "top_leader_code": top_leader_code,
+            "top_leader_name": top_leader_name
+        }
+
+    def get_all_archived_dates(self) -> List[str]:
+        """获取所有已持久化归档的历史交易日日期列表 (升序排列)"""
+        with self._cache_lock:
+            return sorted(self._history_daily_records.keys())
+
+    def get_records_by_date(self, date_str: str) -> List[Dict[str, Any]]:
+        """获取指定历史日期的涨停归档记录"""
+        with self._cache_lock:
+            return list(self._history_daily_records.get(date_str, []))
