@@ -1,3 +1,29 @@
+## 2026-08-22 21:05
+- [x] **根除新股批量数据中断 Bug & TDX 分块安全拉取与历史数据无损继承 (`ats/tdx_realtime_fetcher.py`, `ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`)**：
+    - [x] **根除 `NameError: safe_float is not defined`**：
+        - 在 `ats/tdx_realtime_fetcher.py` 补充完善 `safe_float` 函数，根治多批次新股拉取时因异常中断导致的前半区股票（创达新材、族兴新材等）数据丢失 Bug；
+    - [x] **TDX 安全批次（Chunk=40）与 `force` 穿透保护**：
+        - `get_security_quotes_safe` 支持 `force=True`，强制刷新时瞬间清空定盘休眠与静默冷却，分块独立安全拉取；
+        - 新增单股补拉降级防护，杜绝单只未上市标的拖累整批股票；
+    - [x] **数据永不退化与历史有效数据无损继承**：
+        - `enrich_with_tdx_realtime` 引入 `history_map`，凡是历史成功获取过有效现价/市值/换手率的标的，绝不因临时网络波动而清零覆盖为 `--`；
+    - [x] **全套 6 组自动化测试全部 100% PASS**。
+
+## 2026-08-22 20:45
+- [x] **已上市新股日历永久免重复请求 & TDX API 绝对最高优先级直连行情与股本市值推演 (`ats/new_stock_fetcher.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_new_stock_module.py`)**：
+    - [x] **已上市个股基础日历免重复请求与增量 Upsert**：
+        - 只要本地已存在且已上市的个股信息（`code`, `name`, `issue_price`, `apply_date`, `listing_date`），永久保存在本地 `config/new_stock_ipo_calendar.json`，绝不再重复向东方财富请求该股票；
+        - 东方财富 API 仅在后台增量扫描最新未上市/新发行标的，网络受阻时 100% 平滑降级；
+    - [x] **修正北交所市场代码映射 (Market Code = 2) 与 TDX 权威最高优先级驱动**：
+        - 修正通达信市场代码判定：北交所（920/83/87/88/43/82）准确映射为 `mkt=2`，沪市/科创板映射为 `mkt=1`，深市/创业板映射为 `mkt=0`；
+        - 所有实时数据（现价、昨收、涨跌幅、成交额、成交量、开盘价、最高价、最低价）100% 由 TDX API 权威直连驱动；
+    - [x] **TDX 真实流通股本与总股本批量推算换手率与市值**：
+        - 新增 `TDXRealtimeFetcher.get_batch_finance_shares`，从 TDX `get_finance_info` 批量获取真实 `liutongguben` 与 `zongguben`；
+        - 毫秒级精确推算【换手%】、$流通市值(亿) = 现价 \times 流通股本 / 10^8$、$总市值(亿) = 现价 \times 总股本 / 10^8$；
+        - 彻底根治 920093 等北交所新股现价为空、688826/688836/301655/920059 等换手率与市值为空（`--`）的 Bug；
+        - 每次计算完成后自动原子写盘至 `config/new_stock_data_cache.json`；
+    - [x] **全套 6 项新股单元测试与 5 组策略测试全部 100% PASS**。
+
 ## 2026-08-22 20:15
 - [x] **新股/次新股模块磁盘持久化、直连代理穿透与多通道权威股本补齐重构 (`ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`, `tests/test_new_stock_module.py`)**：
     - [x] **建立双层 JSON 磁盘原子持久化机制**：
