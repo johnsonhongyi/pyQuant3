@@ -5291,7 +5291,8 @@ class ATSMainWindow(QMainWindow):
             return
         from PyQt6.sip import isdeleted
         if not hasattr(self, 'daily_limit_up_dialog') or self.daily_limit_up_dialog is None or isdeleted(self.daily_limit_up_dialog):
-            self.daily_limit_up_dialog = DailyLimitUpDialog(self, restore_state=restore_state)
+            self.daily_limit_up_dialog = DailyLimitUpDialog(parent=None, restore_state=restore_state)
+            self.daily_limit_up_dialog._py_parent = self
             self.daily_limit_up_dialog.code_clicked.connect(self.link_stock)
             self.daily_limit_up_dialog.code_double_clicked.connect(self.on_stock_clicked)
 
