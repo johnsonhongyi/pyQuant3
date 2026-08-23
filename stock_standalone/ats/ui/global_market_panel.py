@@ -442,6 +442,13 @@ class GlobalMarketPanel(QWidget):
             except Exception as ex:
                 print(f"[GlobalMarketPanel] Sync refresh kline dialog error: {ex}")
 
+        # 6. ⚡ 若 A 股板块成分股明细弹窗处于打开状态，同步调起其内部实时高频全量刷新！
+        if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog) and self._sector_detail_dialog.isVisible():
+            try:
+                self._sector_detail_dialog.refresh_data(force=is_force)
+            except Exception as ex:
+                print(f"[GlobalMarketPanel] Sync refresh sector detail dialog error: {ex}")
+
     def _update_cards(self, quotes: dict):
         if not quotes:
             return
@@ -810,7 +817,7 @@ class GlobalMarketPanel(QWidget):
         menu.addSeparator()
 
         detail_action = QAction(f"🔍 查看 {sec_name} 板块成分股明细", self)
-        detail_action.triggered.connect(lambda: self.sector_selected.emit(sec_name))
+        detail_action.triggered.connect(lambda: self._open_sector_detail_dialog(sec_name))
         menu.addAction(detail_action)
 
         menu.addSeparator()
@@ -901,10 +908,17 @@ class GlobalMarketPanel(QWidget):
                     dlg.show()
                     dlg.raise_()
                     dlg.activateWindow()
-                    dlg.setFocus()
 
-                    # 4. 延迟 50ms 进行二次激活强化，突破 Windows 前台抢占拦截
-                    QTimer.singleShot(50, lambda: (dlg.raise_(), dlg.activateWindow()) if (dlg and not isdeleted(dlg)) else None)
+                    def _ensure_active(target_win):
+                        try:
+                            if target_win and not isdeleted(target_win) and target_win.isVisible():
+                                target_win.raise_()
+                                target_win.activateWindow()
+                        except Exception:
+                            pass
+
+                    QTimer.singleShot(50, lambda: _ensure_active(dlg))
+                    QTimer.singleShot(150, lambda: _ensure_active(dlg))
                     return
                 except Exception as ex:
                     print(f"[GlobalMarketPanel] Reuse KLine dialog exception: {ex}")
@@ -920,6 +934,35 @@ class GlobalMarketPanel(QWidget):
         except Exception as e:
             print(f"[GlobalMarketPanel] Open KLine dialog error: {e}")
 
+    def _open_sector_detail_dialog(self, sec_name: str):
+        """打开/平滑复用 A 股板块成分股明细弹窗 (0 毫秒秒开，100% 恢复最小化并置顶激活最前显示)"""
+        try:
+            from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
+            from PyQt6.sip import isdeleted
+
+            def _link_cb(code, name):
+                self.stock_linked.emit(code, name)
+            def _double_click_cb(code, name):
+                self.stock_selected.emit(code, name, {})
+
+            dlg = getattr(self, "_sector_detail_dialog", None)
+            if dlg and not isdeleted(dlg):
+                if dlg.isMinimized():
+                    dlg.showNormal()
+                dlg.sector_name = sec_name
+                dlg.refresh_data(force=True)
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+            else:
+                dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_double_click_cb, parent=None)
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+                self._sector_detail_dialog = dlg
+        except Exception as e:
+            print(f"[GlobalMarketPanel] Open sector detail dialog error: {e}")
+
     def _on_boost_table_double_clicked(self, item):
         if not item:
             return
@@ -927,22 +970,7 @@ class GlobalMarketPanel(QWidget):
         sec_item = self.tbl_boosts.item(row, 0)
         if sec_item:
             sec_name = sec_item.text().strip().replace("📌 ", "")
-            from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-            def _link_cb(code, name):
-                self.stock_linked.emit(code, name)
-            def _double_click_cb(code, name):
-                self.stock_selected.emit(code, name, {})
-            from PyQt6.sip import isdeleted
-            if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
-                try:
-                    self._sector_detail_dialog.close()
-                except Exception:
-                    pass
-            dlg = ATSSectorDetailDialog(sec_name, linkage_cb=_link_cb, double_click_cb=_double_click_cb, parent=None)
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
-            self._sector_detail_dialog = dlg
+            self._open_sector_detail_dialog(sec_name)
 
     def _update_proxy_btn_style(self):
         """更新 🌐 代理: 开/关 按键高亮与显示文本"""

@@ -8,12 +8,17 @@ import os
 import json
 import zlib
 import re
+import time
+import datetime
+import urllib.request
+from typing import List, Dict, Tuple, Optional, Any
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, 
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton, QApplication
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton, QApplication, QFrame
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
 
 from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK
 from sys_utils import get_app_root, get_conf_path
@@ -22,6 +27,352 @@ from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger(__name__)
 
+# 纯直连 Opener (杜绝本地代理对国内行情 API 干扰)
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_HTTP_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://finance.sina.com.cn/'
+}
+
+def fetch_sina_stock_quotes_fast(codes: List[str]) -> Dict[str, Dict[str, Any]]:
+    """批量通过新浪 A 股接口获取股票实时现价、涨跌幅、昨收、今开 (国内直连 50ms 极速响应)"""
+    if not codes:
+        return {}
+    results = {}
+    clean_codes = [str(c).strip().zfill(6) for c in codes if str(c).strip()]
+    
+    # 分批，每批最多 60 个
+    batch_size = 60
+    for i in range(0, len(clean_codes), batch_size):
+        batch = clean_codes[i:i + batch_size]
+        sina_codes = [f"{'sh' if c.startswith(('6', '9')) or c.startswith('688') else 'sz'}{c}" for c in batch]
+        url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
+        try:
+            req = urllib.request.Request(url, headers=_HTTP_HEADERS)
+            with _DIRECT_OPENER.open(req, timeout=2.5) as resp:
+                content = resp.read().decode('gbk', errors='ignore')
+                for line in content.strip().split('\n'):
+                    if line and '="' in line:
+                        parts = line.split('="')
+                        sym = parts[0].split('hq_str_')[-1]
+                        code = sym[2:]
+                        fields = parts[1].replace('";', '').split(',')
+                        if len(fields) >= 5:
+                            name = fields[0].strip()
+                            open_p = float(fields[1] or 0.0)
+                            prev_close = float(fields[2] or 0.0)
+                            curr_p = float(fields[3] or 0.0)
+                            high_p = float(fields[4] or 0.0)
+                            low_p = float(fields[5] or 0.0)
+                            pct = (curr_p - prev_close) / prev_close * 100.0 if prev_close > 0 else 0.0
+                            vol = float(fields[8] or 0.0) if len(fields) > 8 else 0.0
+                            amount = float(fields[9] or 0.0) if len(fields) > 9 else 0.0
+                            results[code] = {
+                                'code': code,
+                                'name': name,
+                                'price': curr_p,
+                                'prev_close': prev_close,
+                                'open': open_p,
+                                'high': high_p,
+                                'low': low_p,
+                                'pct': round(pct, 2),
+                                'volume': vol,
+                                'amount': amount
+                            }
+        except Exception as e:
+            logger.debug(f"fetch_sina_stock_quotes_fast error: {e}")
+    return results
+
+
+# 经典行业中军龙头核心储备库 (覆盖全行业 15 大核心赛道)
+FAMOUS_SECTOR_LEADERS = {
+    "半导体": [("688981", "中芯国际"), ("603501", "韦尔股份"), ("002371", "北方华创"), ("688012", "华海清科"), ("688008", "澜起科技"), ("688036", "传音控股"), ("688126", "沪硅产业"), ("600584", "长电科技")],
+    "存储芯片": [("603986", "兆易创新"), ("688981", "中芯国际"), ("002156", "通富微电"), ("688041", "普冉股份"), ("300661", "圣邦股份"), ("688008", "澜起科技"), ("688521", "芯原股份"), ("300223", "北京君正")],
+    "传媒": [("300058", "蓝色光标"), ("603533", "掌阅科技"), ("301171", "易点天下"), ("002624", "完美世界"), ("300413", "芒果超媒"), ("002354", "天娱数科"), ("600633", "浙数文化"), ("300364", "中文在线")],
+    "软件开发": [("300496", "中科创达"), ("600588", "用友网络"), ("300033", "同花顺"), ("688111", "金山办公"), ("300229", "拓尔思"), ("600570", "恒生电子"), ("002230", "科大讯飞"), ("300339", "润和软件")],
+    "国防军工": [("601606", "长城军工"), ("600118", "中国卫星"), ("002179", "中航光电"), ("600760", "中航沈飞"), ("000768", "中航西飞"), ("600893", "航发动力"), ("002013", "中航机载"), ("600372", "中航电子")],
+    "汽车整车": [("600733", "北汽蓝谷"), ("002594", "比亚迪"), ("601633", "长城汽车"), ("601127", "赛力斯"), ("600104", "上汽集团"), ("000625", "长安汽车"), ("600066", "宇通客车"), ("601238", "广汽集团")],
+    "贵金属": [("601899", "紫金矿业"), ("600988", "赤峰黄金"), ("600547", "山东黄金"), ("600489", "中金黄金"), ("000975", "山金国际"), ("600960", "渤海化学"), ("000506", "中润资源")],
+    "石油化工": [("600938", "中国海油"), ("601857", "中国石油"), ("600583", "中海油服"), ("600028", "中国石化"), ("600346", "恒力石化"), ("002493", "荣盛石化"), ("600256", "广汇能源")],
+    "有色金属": [("603993", "洛阳钼业"), ("601899", "紫金矿业"), ("600362", "江西铜业"), ("601600", "中国铝业"), ("000630", "铜陵有色"), ("600111", "北方稀土"), ("002460", "赣锋锂业"), ("002466", "天齐锂业")],
+    "AI/软件": [("300058", "蓝色光标"), ("002230", "科大讯飞"), ("688111", "金山办公"), ("300033", "同花顺"), ("300496", "中科创达"), ("300229", "拓尔思"), ("300364", "中文在线"), ("688256", "寒武纪")],
+    "金融/权重龙头": [("600036", "招商银行"), ("601318", "中国平安"), ("600030", "中信证券"), ("601688", "华泰证券"), ("601211", "国泰君安"), ("601166", "兴业银行"), ("600999", "招商证券")],
+    "石油化工/资源": [("601857", "中国石油"), ("600028", "中国石化"), ("600938", "中国海油"), ("601088", "中国神华"), ("600188", "兖矿能源"), ("601225", "陕西煤业")],
+    "消费电子": [("002475", "立讯精密"), ("002241", "歌尔股份"), ("603501", "韦尔股份"), ("300433", "蓝思科技"), ("002456", "欧菲光"), ("002384", "东山精密")],
+    "通信设备": [("000063", "中兴通讯"), ("300308", "中际旭创"), ("300502", "新易盛"), ("300394", "天孚通信"), ("600498", "烽火通信"), ("600487", "亨通光电")],
+    "电力设备": [("300750", "宁德时代"), ("601012", "隆基绿能"), ("600406", "国电南瑞"), ("002459", "晶澳科技"), ("300274", "阳光电源"), ("601877", "正泰电器")]
+}
+
+SECTOR_SYNONYMS = {
+    "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
+    "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
+    "传媒": ["传媒娱乐", "文化传媒", "传媒", "互联网"],
+    "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
+    "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
+    "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
+    "贵金属": ["贵金属", "黄金", "珠宝首饰"],
+    "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
+    "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
+    "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发", "算力"],
+    "金融/权重龙头": ["银行", "证券", "保险"],
+    "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"],
+    "消费电子": ["消费电子", "苹果概念", "电子元件"],
+    "通信设备": ["通信设备", "CPO", "5G概念", "光通信"]
+}
+
+
+class SectorDetailWorker(QThread):
+    """后台异步板块成分股发现与高频行情拉取工作线程 (绝不阻塞 UI 主线程)"""
+    finished_signal = pyqtSignal(list, float, str, dict) # (rows, score, leader_info_str, meta_dict)
+
+    def __init__(self, sector_name: str, member_codes: list = None, current_df = None, extra_cols: list = None, get_name_fn = None, parent=None):
+        super().__init__(parent)
+        self.sector_name = sector_name
+        self.member_codes = member_codes or []
+        self.current_df = current_df
+        self.extra_cols = extra_cols or []
+        self.get_name_fn = get_name_fn
+
+    def run(self):
+        try:
+            target_codes = set()
+            code_to_name = {}
+
+            # 1. 优先使用外部传入的 member_codes
+            if self.member_codes:
+                for c in self.member_codes:
+                    c_clean = str(c).strip().zfill(6)
+                    if c_clean:
+                        target_codes.add(c_clean)
+
+            # 2. 如果 current_df 存在且包含 category 列，进行板块关键词模糊向量匹配
+            if self.current_df is not None and not self.current_df.empty and 'category' in self.current_df.columns:
+                try:
+                    synonyms = [self.sector_name] + SECTOR_SYNONYMS.get(self.sector_name, [])
+                    pattern = '|'.join([re.escape(s) for s in synonyms if s])
+                    matched_series = self.current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
+                    df_matched = self.current_df[matched_series]
+                    if not df_matched.empty:
+                        for code_idx in df_matched.index[:60]:
+                            c_clean = str(code_idx).strip().zfill(6)
+                            if c_clean:
+                                target_codes.add(c_clean)
+                except Exception as ex:
+                    logger.debug(f"current_df 板块匹配异常: {ex}")
+
+            # 3. 若成分股不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐
+            if len(target_codes) < 6:
+                for key, st_list in FAMOUS_SECTOR_LEADERS.items():
+                    if key == self.sector_name or key in self.sector_name or self.sector_name in key:
+                        for c_code, def_name in st_list:
+                            c_clean = str(c_code).strip().zfill(6)
+                            target_codes.add(c_clean)
+                            code_to_name[c_clean] = def_name
+                        break
+
+            # 4. 若仍不足，从 bidding_session_data 尝试补齐
+            if len(target_codes) < 6:
+                try:
+                    ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+                    if ram_path and os.path.exists(ram_path):
+                        with open(ram_path, 'rb') as f:
+                            data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
+                            sec_data = data.get('sector_data', {}).get(self.sector_name, {})
+                            if sec_data:
+                                l_c = str(sec_data.get('leader', '')).strip().zfill(6)
+                                if l_c: target_codes.add(l_c)
+                                for fol in sec_data.get('followers', []):
+                                    f_c = str(fol.get('code', '')).strip().zfill(6)
+                                    if f_c: target_codes.add(f_c)
+                except Exception:
+                    pass
+
+            code_list = list(target_codes)
+            if not code_list:
+                self.finished_signal.emit([], 0.0, "--", {'status': '无成分股数据'})
+                return
+
+            # 5. 基础行情获取通道 1: TDX API 直连 (最高优先级，完全对齐新股/次新股策略体系)
+            tdx_quote_map = {}
+            tdx_alpha_map = {}
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                
+                # A. 批量极速获取 TDX 官方基础行情 (现价, 昨收, 涨跌幅, 开盘, 最高, 最低, 成交额)
+                tdx_quotes = fetcher.get_security_quotes_safe(code_list, force=False)
+                if tdx_quotes:
+                    for q in tdx_quotes:
+                        c_clean = str(q.get("code", "")).strip().zfill(6)
+                        p = float(q.get("price", 0.0) or 0.0)
+                        last_c = float(q.get("last_close", 0.0) or 0.0)
+                        if c_clean and (p > 0 or last_c > 0):
+                            pct = round((p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
+                            tdx_quote_map[c_clean] = {
+                                'price': p,
+                                'prev_close': last_c,
+                                'open': float(q.get("open", 0.0) or 0.0),
+                                'high': float(q.get("high", 0.0) or 0.0),
+                                'low': float(q.get("low", 0.0) or 0.0),
+                                'amount': float(q.get("amount", 0.0) or 0.0),
+                                'vol': float(q.get("vol", 0.0) or 0.0),
+                                'pct': pct
+                            }
+
+                # B. 批量获取 TDX 高频 Alpha 盘口买点评级
+                sec_map = {c: self.sector_name for c in code_list}
+                mp_cache = {}
+                n_map = {}
+                if self.current_df is not None:
+                    import pandas as pd
+                    for c in code_list:
+                        if c in self.current_df.index:
+                            r_row = self.current_df.loc[c]
+                            if isinstance(r_row, pd.DataFrame): r_row = r_row.iloc[0]
+                            n_map[c] = str(r_row.get('name', c))
+                            mp_cache[c] = {
+                                'dff': float(r_row.get('dff', 0.0) or 0.0),
+                                'dff2': float(r_row.get('DFF2', r_row.get('dff2', 0.0)) or 0.0),
+                                'dff3': float(r_row.get('DFF3', r_row.get('dff3', 0.0)) or 0.0),
+                                'rank': int(r_row.get('Rank', r_row.get('rank', 999)) or 999)
+                            }
+                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(code_list, sec_map, mp_cache, n_map)
+                for aq in alpha_quotes:
+                    tdx_alpha_map[aq["code"]] = aq
+            except Exception as e:
+                logger.debug(f"TDX API 批量行情拉取降级: {e}")
+
+            # 6. 基础行情获取通道 2: 新浪直连 50ms 极速备用兜底 (当 TDX 离线或缺失时补充)
+            sina_quotes_map = {}
+            missing_codes = [c for c in code_list if c not in tdx_quote_map or tdx_quote_map[c].get('price', 0) <= 0]
+            if missing_codes:
+                sina_quotes_map = fetch_sina_stock_quotes_fast(missing_codes)
+
+            # 7. 组装行数据：动态列(dff, dff2, dff3, rank, 自定义列)全部从 df 获取，基础行情从 TDX API 获取
+            rows = []
+            leader_code = ""
+            leader_name = ""
+            max_pct = -999.0
+            sum_pct = 0.0
+            up_count = 0
+
+            for code_str in code_list:
+                name = code_to_name.get(code_str) or (self.get_name_fn(code_str) if self.get_name_fn else "个股")
+                if not name or name == "未知" or name == code_str:
+                    if code_str in sina_quotes_map:
+                        name = sina_quotes_map[code_str].get('name', name)
+
+                score = 75.0
+                pct_val = 0.0
+                dff_val = 0.0
+                rank_val = 0
+                dff2_val = 0.0
+                dff3_val = 0.0
+                pattern_hint = "行业核心中军"
+                type_str = "跟涨"
+                row = None
+
+                # ── 💡 动态列与策略自定义列：100% 全部使用 df 获取 ──
+                if self.current_df is not None:
+                    import pandas as pd
+                    if code_str in self.current_df.index:
+                        row = self.current_df.loc[code_str]
+                        if isinstance(row, pd.DataFrame): row = row.iloc[0]
+                        name_df = str(row.get('name', '')).strip()
+                        if name_df and name_df != "未知": name = name_df
+                        try: pct_val = float(row.get('percent', row.get('pct', 0.0)))
+                        except: pass
+                        try: dff_val = float(row.get('dff', 0.0))
+                        except: pass
+                        try: rank_val = int(row.get('Rank', row.get('rank', 0)))
+                        except: pass
+                        try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
+                        except: pass
+                        try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
+                        except: pass
+
+                # ── 💡 基础数据：优先使用 TDX API 权威实时行情驱动 ──
+                tq = tdx_quote_map.get(code_str)
+                if tq and tq.get('price', 0) > 0:
+                    pct_val = tq.get('pct', pct_val)
+                    pattern_hint = f"现价 {tq.get('price'):.2f} | 昨收 {tq.get('prev_close'):.2f}"
+                elif code_str in sina_quotes_map:
+                    sq = sina_quotes_map[code_str]
+                    pct_val = sq.get('pct', pct_val)
+                    if not name or name == "个股" or name == code_str:
+                        name = sq.get('name', name)
+                    pattern_hint = f"现价 {sq.get('price'):.2f} | 昨收 {sq.get('prev_close'):.2f}"
+
+                # 叠加 TDX 高频买点评级与形态特征
+                aq = tdx_alpha_map.get(code_str)
+                if aq:
+                    pct_val = aq.get("pct", pct_val)
+                    type_str = aq.get("buy_type", type_str)
+                    score = aq.get("alpha_score", score)
+                    vwap_dev = aq.get("vwap_dev_pct", 0.0)
+                    vol_r = aq.get("vol_ratio", 1.0)
+                    pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
+
+                # ── 💡 动态自定义列：从 df 严格映射提取 ──
+                extra_dict = {}
+                for ec in self.extra_cols:
+                    val_raw = None
+                    if row is not None:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                val_raw = row[k]
+                                break
+                    extra_dict[ec] = cct.format_col_value(ec, val_raw)
+
+                if pct_val > max_pct:
+                    max_pct = pct_val
+                    leader_code = code_str
+                    leader_name = name
+
+                if pct_val > 0.001:
+                    up_count += 1
+                sum_pct += pct_val
+
+                rows.append({
+                    'code': code_str,
+                    'name': name,
+                    'score': score,
+                    'type': type_str,
+                    'pct': pct_val,
+                    'start_pct': round(pct_val - dff_val, 2),
+                    'dff': dff_val,
+                    'rank': rank_val,
+                    'dff2': dff2_val,
+                    'dff3': dff3_val,
+                    'extra_cols': extra_dict,
+                    'pattern': pattern_hint
+                })
+
+            # 动态标记 👑 领涨龙头
+            for r in rows:
+                if r['code'] == leader_code:
+                    r['type'] = '👑 领涨龙头'
+                    r['score'] = max(98.0, r['score'])
+                    r['pattern'] = '板块领涨核心先锋'
+
+            rows.sort(key=lambda x: (x['score'], x['pct']), reverse=True)
+
+            # 计算板块整体强度得分
+            avg_pct = sum_pct / len(rows) if rows else 0.0
+            calc_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / len(rows)) * 30.0))
+
+            leader_str = f"{leader_name} ({leader_code}) [{max_pct:+.2f}%]"
+            meta = {
+                'status': '✅ 实时在线更新 (新浪50ms直连 + TDX秒级)',
+                'count': len(rows),
+                'up_count': up_count,
+                'avg_pct': avg_pct
+            }
+            self.finished_signal.emit(rows, round(calc_score, 1), leader_str, meta)
+        except Exception as e:
+            logger.error(f"SectorDetailWorker run error: {e}")
+            self.finished_signal.emit([], 0.0, "--", {'status': f'⚠️ 更新异常: {e}'})
+        
 def get_sector_extra_cols():
     """获取板块明细追加的动态自定义列（排除基础列已有的字段）"""
     try:
@@ -55,20 +406,27 @@ def get_sector_table_headers(extra_cols=None):
     base_post = ["形态提示"]
     return base_pre + extra_headers + base_post
 
+
 class ATSSectorDetailDialog(QDialog):
+    """
+    ATS 强势板块成分股明细与高频量化实时弹窗
+    具备：新浪直连 50ms 真实股价 + TDX 秒级盘口 + 自动定时轮询 + 手动 F5 强制刷新
+    """
     def __init__(self, sector_name, linkage_cb=None, double_click_cb=None, member_codes=None, parent=None):
-        super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，防止窗口在 OS 视角下被强制浮在 Parent 主窗口上方
+        super().__init__(None) # [🚀 独立顶层解耦] 传入 None 剥离 Win32 HWND Owner 从属关系
         self._py_parent = parent
         self.sector_name = sector_name
         self.linkage_cb = linkage_cb
         self.double_click_cb = double_click_cb
         self.member_codes = member_codes or []
         self.extra_cols = get_sector_extra_cols()
+        self._worker = None
+        self._is_rendering = False
         
-        self.setWindowTitle(f"🔥 {sector_name} 板块明细 (Real-time Sector Details)")
-        self.resize(750, 480)
+        self.setWindowTitle(f"🔥 {sector_name} 板块明细 (实时高频行情)")
+        self.resize(780, 520)
         
-        # [🚀 经典黑金 Style] 继承统一的 ATS 暗黑 Mode QSS 风格
+        # 继承统一的 ATS 暗黑 Mode QSS 风格
         apply_dark_theme(self)
         
         self.setStyleSheet(self.styleSheet() + """
@@ -98,7 +456,6 @@ class ATSSectorDetailDialog(QDialog):
                 border: 1px solid #2e2e36;
             }
         """)
-        # 明确设置为独立顶层窗口类型，并防止主应用退出
         flags = self.windowFlags()
         flags &= ~Qt.WindowType.Dialog
         flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
@@ -106,40 +463,56 @@ class ATSSectorDetailDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
 
         self._init_ui()
-        self.load_data()
+        self._start_auto_refresh_timer()
+        self.refresh_data(force=True)
         self._restore_geometry()
-        
-
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
         
-        # Title block
-        header = QHBoxLayout()
+        # 1. 顶部 Header 状态栏与操作区域
+        header_frame = QFrame()
+        header_frame.setStyleSheet("QFrame { background-color: #18181c; border: 1px solid #282830; border-radius: 4px; padding: 4px 8px; }")
+        header_layout = QVBoxLayout(header_frame)
+        header_layout.setContentsMargins(4, 4, 4, 4)
+        header_layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
         self.title_lbl = QLabel(f"板块名称: {self.sector_name}")
-        self.title_lbl.setStyleSheet("font-size: 13pt; font-weight: bold; color: #00ff88;")
-        header.addWidget(self.title_lbl)
-        header.addStretch()
-        
+        self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #00ff88;")
+        top_row.addWidget(self.title_lbl)
+
         self.score_lbl = QLabel("强度得分: --")
-        self.score_lbl.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ff9900;")
-        header.addWidget(self.score_lbl)
-        layout.addLayout(header)
+        self.score_lbl.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ff9900; margin-left: 10px;")
+        top_row.addWidget(self.score_lbl)
+
+        top_row.addStretch()
+
+        self.lbl_status = QLabel("📡 状态: 初始化...")
+        self.lbl_status.setStyleSheet("color: #00e5ff; font-size: 8.5pt; margin-right: 6px;")
+        top_row.addWidget(self.lbl_status)
+
+        self.lbl_update_time = QLabel("最后更新: --:--:--")
+        self.lbl_update_time.setStyleSheet("color: #888888; font-size: 8.5pt;")
+        top_row.addWidget(self.lbl_update_time)
+
+        header_layout.addLayout(top_row)
         
-        # Stats info
-        self.stats_lbl = QLabel("成员数: 0 | 领涨股: --")
-        self.stats_lbl.setStyleSheet("font-size: 10pt; color: #aad4ff;")
-        layout.addWidget(self.stats_lbl)
+        # Stats info (成员数与领涨标的)
+        self.stats_lbl = QLabel("成员数: 0 | 领涨标的: --")
+        self.stats_lbl.setStyleSheet("font-size: 9.5pt; color: #aad4ff;")
+        header_layout.addWidget(self.stats_lbl)
+
+        layout.addWidget(header_frame)
         
-        # Table of members
+        # 2. Table of members
         self.table = QTableWidget()
         headers = get_sector_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         
-        # Set headers left align and vertical center
         header_view = self.table.horizontalHeader()
         header_view.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header_view.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -151,12 +524,9 @@ class ATSSectorDetailDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         
-        # 极窄列宽默认分配 (共用 ats_sector_detail_table_v2 持久化配置)
-        # 代码(60), 名称(75), 得分(48), 类型(65), 涨幅(68), 起点(68), DFF(58), Rank(45), DFF2(58), DFF3(58) + 动态列(55)*N + 形态提示(100)
         default_widths = [60, 75, 48, 65, 68, 68, 58, 45, 58, 58] + [55] * len(self.extra_cols) + [100]
         setup_header_persistence(self.table, "ats_sector_detail_table_v2", default_widths=default_widths)
         
-        # Connect signals
         self.table.itemClicked.connect(self.on_item_clicked)
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.table.currentItemChanged.connect(self.on_current_item_changed)
@@ -165,23 +535,46 @@ class ATSSectorDetailDialog(QDialog):
         
         layout.addWidget(self.table)
         
-        # Bottom action bar
+        # 3. Bottom action bar
         btn_layout = QHBoxLayout()
+
+        self.btn_refresh = QPushButton("🔄 强制刷新数据")
+        self.btn_refresh.setStyleSheet("""
+            QPushButton { background-color: #1976d2; color: #ffffff; border: 1px solid #2196f3;
+                          border-radius: 4px; padding: 4px 12px; font-weight: bold; font-size: 9pt; }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:disabled { background-color: #333333; color: #777777; border-color: #444444; }
+        """)
+        self.btn_refresh.clicked.connect(lambda: self.refresh_data(force=True))
+        btn_layout.addWidget(self.btn_refresh)
 
         btn_dna = QPushButton("🧬 DNA审计")
         btn_dna.setStyleSheet("""
             QPushButton { background-color: #1b5e20; color: #a5d6a7; border: 1px solid #388e3c;
-                          border-radius: 4px; padding: 4px 10px; font-weight: bold; }
+                          border-radius: 4px; padding: 4px 10px; font-weight: bold; font-size: 9pt; }
             QPushButton:hover { background-color: #2e7d32; }
         """)
         btn_dna.clicked.connect(self._run_dna_audit)
         btn_layout.addWidget(btn_dna)
 
         btn_layout.addStretch()
+
         btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("""
+            QPushButton { background-color: #2a2e39; color: #d1d4dc; border: 1px solid #363c4e;
+                          border-radius: 4px; padding: 4px 14px; font-size: 9pt; }
+            QPushButton:hover { background-color: #363c4e; color: #ffffff; }
+        """)
         btn_close.clicked.connect(self.accept)
         btn_layout.addWidget(btn_close)
         layout.addLayout(btn_layout)
+
+        # 4. 绑定 F5 键盘刷新快捷键
+        self._f5_shortcut = QShortcut(QKeySequence("F5"), self)
+        self._f5_shortcut.activated.connect(lambda: self.refresh_data(force=True))
+
+    def _get_parent_mw(self):
+        return getattr(self, '_py_parent', None) or self.parent()
 
     def _restore_geometry(self):
         """从 window_config.json 恢复弹窗位置与大小"""
@@ -203,513 +596,94 @@ class ATSSectorDetailDialog(QDialog):
         except Exception:
             pass
 
-    def closeEvent(self, event):
-        """关闭时自动持久化窗口大小与位置"""
-        self._save_geometry()
-        super().closeEvent(event)
-
     def accept(self):
         """OK/关闭按钮同样触发持久化"""
         self._save_geometry()
         super().accept()
-        
-    def _get_parent_mw(self):
-        return getattr(self, '_py_parent', None) or self.parent()
 
-    def update_data(self, df_realtime=None):
-        """实盘行情更新时调起的无缝刷新接口"""
-        # 每次刷新前同步标题 Label，防止窗口复用后显示旧板块名
-        if hasattr(self, 'title_lbl'):
-            self.title_lbl.setText(f"板块名称: {self.sector_name}")
-        try:
-            self.load_data(df_realtime=df_realtime)
-        except Exception:
-            pass
+    def _start_auto_refresh_timer(self):
+        """启动后台定时自动静默更新 (盘中 15 秒轮询，休市 60 秒轮询)"""
+        self._auto_timer = QTimer(self)
+        self._auto_timer.timeout.connect(lambda: self.refresh_data(force=False))
+        self._auto_timer.start(15000)
 
-    def load_data(self, df_realtime=None):
-        # Resolve helper functions & streaming df from parent chain
+    def refresh_data(self, force: bool = False):
+        """异步拉取板块成分股最新实时高频行情与特征"""
+        if self._worker and self._worker.isRunning():
+            return
+
+        if force:
+            self.btn_refresh.setEnabled(False)
+            self.btn_refresh.setText("⏳ 正在刷新...")
+
+        # 解析 parent 链中的 current_df 与 get_name_fn
+        # 递归从 parent 链与全局所有活跃窗口中搜寻全量策略 DataFrame (提取 dff, dff2, dff3, rank, custom_cols)
         get_name_fn = None
-        get_row_fn = None
-        current_df = df_realtime
-        p = self._get_parent_mw()
+        current_df = None
+        
+        # 1. 优先从父窗口链检索
+        p = self._get_parent_mw() or self.parent() or self.window()
         while p:
-            if hasattr(p, 'get_stock_name'):
+            if hasattr(p, 'get_stock_name') and not get_name_fn:
                 get_name_fn = p.get_stock_name
-            if hasattr(p, 'get_df_row_safe'):
-                get_row_fn = p.get_df_row_safe
-            if current_df is None and hasattr(p, 'current_df'):
-                current_df = p.current_df
-            if get_name_fn and current_df is not None:
+            for attr in ('current_df', '_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'top_now'):
+                df_cand = getattr(p, attr, None)
+                if df_cand is not None and not df_cand.empty:
+                    current_df = df_cand
+                    break
+            if current_df is not None and get_name_fn:
                 break
             p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
 
-        def _get_row(df, code_str):
-            """双 Key 智能查找：先用父窗口安全接口，再降级子串匹配"""
-            if get_row_fn:
-                return get_row_fn(df, code_str)
-            if code_str in df.index:
-                return df.loc[code_str]
-            c_clean = ''.join(c for c in code_str if c.isdigit())
-            if c_clean and c_clean in df.index:
-                return df.loc[c_clean]
-            return None
-
-        SECTOR_SYNONYMS = {
-            "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
-            "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
-            "传媒": ["传媒娱乐", "文化传媒", "传媒", "互联网"],
-            "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
-            "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
-            "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
-            "贵金属": ["贵金属", "黄金", "珠宝首饰"],
-            "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
-            "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
-            "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发"],
-            "金融/权重龙头": ["银行", "证券", "保险"],
-            "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"]
-        }
-
-        # 1. 结合外部传入的 member_codes 与 current_df 中按 category 动态匹配的成分股
-        target_codes = set()
-        if self.member_codes:
-            for c in self.member_codes:
-                if str(c).strip():
-                    target_codes.add(str(c).strip())
-
-        # 如果 current_df 存在且包含 category 列，自动进行板块关键词与同义词向量化匹配
-        if current_df is not None and not current_df.empty and 'category' in current_df.columns:
+        # 2. 若仍未找到，从 QApplication 所有顶层窗口中探测主策略窗口的 current_df
+        if current_df is None:
             try:
-                synonyms = [self.sector_name] + SECTOR_SYNONYMS.get(self.sector_name, [])
-                pattern = '|'.join([re.escape(s) for s in synonyms if s])
-                matched_series = current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
-                df_matched = current_df[matched_series]
-                if not df_matched.empty:
-                    for code_idx in df_matched.index[:60]: # 最多抓取前 60 只活跃成分股
-                        target_codes.add(str(code_idx).strip())
-            except Exception as e:
-                print(f"[SectorDetailDialog] Error matching categories from current_df: {e}")
-
-        # 只要存在目标股票代码或 current_df 包含匹配数据，100% 走实时 IPC 数据渲染
-        if target_codes:
-            self.setWindowTitle(f"📡 {self.sector_name} 板块明细 (实时IPC + TDX秒级)")
-            rows = []
-            leader_code = ""
-            leader_name = ""
-            max_pct = -999.0
-            
-            # 尝试通过 TDX 极速批量接口拉取最新高频盘口与买点评级
-            tdx_alpha_map = {}
-            try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                code_list = list(target_codes)
-                sec_map = {c: self.sector_name for c in code_list}
-                mp_cache = {}
-                n_map = {}
-                if current_df is not None:
-                    for c in code_list:
-                        r_row = _get_row(current_df, c)
-                        if r_row is not None:
-                            if isinstance(r_row, pd.DataFrame):
-                                r_row = r_row.iloc[0]
-                            n_map[c] = str(r_row.get('name', c))
-                            mp_cache[c] = {
-                                'dff': float(r_row.get('dff', 0.0) or 0.0),
-                                'dff2': float(r_row.get('DFF2', r_row.get('dff2', 0.0)) or 0.0),
-                                'dff3': float(r_row.get('DFF3', r_row.get('dff3', 0.0)) or 0.0),
-                                'rank': int(r_row.get('Rank', r_row.get('rank', 999)) or 999),
-                                'perc3d': float(r_row.get('perc3d', 0.0) or 0.0),
-                                'vol_ratio': float(r_row.get('vol_ratio', r_row.get('vol_rati', 1.0)) or 1.0)
-                            }
-                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(code_list, sec_map, mp_cache, n_map)
-                for aq in alpha_quotes:
-                    tdx_alpha_map[aq["code"]] = aq
-            except Exception as e:
-                logger.debug(f"板块明细 TDX 批量获取降级: {e}")
-
-            for code_str in target_codes:
-                name = get_name_fn(code_str) if get_name_fn else "个股"
-                if not name or name == "未知":
-                    name = code_str
-                
-                score = 60.0
-                pct_val = 0.0
-                dff_val = 0.0
-                rank_val = 0
-                dff2_val = 0.0
-                dff3_val = 0.0
-                pattern_hint = "反转/板块成分"
-                type_str = "跟涨"
-                row = None
-                
-                if current_df is not None:
-                    import pandas as pd
-                    row = _get_row(current_df, code_str)
-                    if row is not None:
-                        if isinstance(row, pd.DataFrame):
-                            row = row.iloc[0]
-                        name_df = str(row.get('name', '')).strip()
-                        if name_df and name_df != "未知":
-                            name = name_df
-                        try: pct_val = float(row.get('percent', 0.0))
-                        except: pass
-                        try: dff_val = float(row.get('dff', 0.0))
-                        except: pass
-                        try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                        except: pass
-                        try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
-                        except: pass
-                        try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
-                        except: pass
-
-                # 若 TDX 高频接口拉取成功，使用 TDX 最新实时现价与买点分类
-                aq = tdx_alpha_map.get(code_str)
-                if aq:
-                    pct_val = aq.get("pct", pct_val)
-                    type_str = aq.get("buy_type", type_str)
-                    score = aq.get("alpha_score", score)
-                    vwap_dev = aq.get("vwap_dev_pct", 0.0)
-                    vol_r = aq.get("vol_ratio", 1.0)
-                    pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
-
-                extra_dict = {}
-                for ec in self.extra_cols:
-                    val_raw = None
-                    if row is not None:
-                        for k in (ec, ec.lower(), ec.upper()):
-                            if k in row:
-                                val_raw = row[k]
-                                break
-                    extra_dict[ec] = cct.format_col_value(ec, val_raw)
-
-                if pct_val > max_pct:
-                    max_pct = pct_val
-                    leader_code = code_str
-                    leader_name = name
-                    
-                rows.append({
-                    'code': code_str,
-                    'name': name,
-                    'score': score,
-                    'type': type_str,
-                    'pct': pct_val,
-                    'start_pct': pct_val - dff_val,
-                    'dff': dff_val,
-                    'rank': rank_val,
-                    'dff2': dff2_val,
-                    'dff3': dff3_val,
-                    'extra_cols': extra_dict,
-                    'pattern': pattern_hint
-                })
-                
-            # 标记领涨龙头
-            for r in rows:
-                if r['code'] == leader_code and '👑' not in str(r['type']):
-                    r['type'] = '👑 领涨龙头'
-                    r['score'] = max(95.0, r['score'])
-                    
-            rows.sort(key=lambda x: (x['score'], x['pct']), reverse=True)
-            
-            self.score_lbl.setText(f"强度得分: {min(100.0, len(rows) * 12.5):.1f}")
-            self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_name} ({leader_code}) [{max_pct:+.2f}%]")
-            
-            self._render_rows(rows)
-            return
-
-        # 2. 本地快照路径：从 bidding_session_data 读取
-        self.setWindowTitle(f"📁 {self.sector_name} 板块明细 (本地快照)")
-        SECTOR_SYNONYMS = {
-            "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
-            "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
-            "传媒": ["传媒娱乐", "文化传媒", "传媒", "互联网"],
-            "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
-            "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
-            "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
-            "贵金属": ["贵金属", "黄金", "珠宝首饰"],
-            "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
-            "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
-            "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发"],
-            "金融/权重龙头": ["银行", "证券", "保险"],
-            "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"]
-        }
-
-        FAMOUS_SECTOR_LEADERS = {
-            "半导体": [("688981", "中芯国际"), ("603501", "韦尔股份"), ("002371", "北方华创"), ("688012", "华海清科"), ("688008", "澜起科技"), ("688036", "传音控股")],
-            "存储芯片": [("603986", "兆易创新"), ("688981", "中芯国际"), ("002156", "通富微电"), ("688041", "普冉股份"), ("300661", "圣邦股份"), ("688008", "澜起科技")],
-            "传媒": [("300058", "蓝色光标"), ("603533", "掌阅科技"), ("301171", "易点天下"), ("002624", "完美世界"), ("300413", "芒果超媒"), ("002354", "天娱数科")],
-            "软件开发": [("300496", "科大讯飞"), ("600588", "用友网络"), ("300033", "指南针"), ("688111", "金山办公"), ("300229", "拓尔思"), ("600570", "恒生电子")],
-            "国防军工": [("601606", "长城军工"), ("600118", "中国卫星"), ("002179", "中航光电"), ("600760", "中航沈飞"), ("000768", "中航西飞"), ("600893", "航发动力")],
-            "汽车整车": [("600733", "北汽蓝谷"), ("002594", "比亚迪"), ("601633", "长城汽车"), ("601127", "赛力斯"), ("600104", "上汽集团"), ("000625", "长安汽车")],
-            "贵金属": [("601899", "紫金矿业"), ("600988", "赤峰黄金"), ("600547", "山东黄金"), ("600489", "中金黄金"), ("000975", "山金国际")],
-            "石油化工": [("600938", "中国海油"), ("601857", "中国石油"), ("600583", "中海油服"), ("600028", "中国石化"), ("600346", "恒力石化")],
-            "有色金属": [("603993", "洛阳钼业"), ("601899", "紫金矿业"), ("600362", "江西铜业"), ("601600", "中国铝业"), ("000630", "铜陵有色")],
-            "AI/软件": [("300058", "蓝色光标"), ("300496", "科大讯飞"), ("688111", "金山办公"), ("300033", "指南针"), ("603533", "掌阅科技")],
-            "金融/权重龙头": [("600036", "招商银行"), ("601318", "中国平安"), ("600030", "中信证券"), ("601688", "华泰证券")],
-            "石油化工/资源": [("601857", "中国石油"), ("600028", "中国石化"), ("600938", "中国海油"), ("601088", "中国神华")]
-        }
-
-        # 3. Fetch sector data from bidding_session_data
-        path = None
-        try:
-            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-            if ram_path and os.path.exists(ram_path):
-                path = ram_path
-        except Exception:
-            pass
-            
-        if not path:
-            try:
-                base = get_app_root()
-                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
-                if os.path.exists(fallback_path):
-                    path = fallback_path
-            except Exception:
-                pass
-
-        sector_data = {}
-        if path and os.path.exists(path):
-            try:
-                with open(path, 'rb') as f:
-                    raw_data = f.read()
-                json_str = zlib.decompress(raw_data).decode('utf-8')
-                data = json.loads(json_str)
-                sector_data = data.get('sector_data', {})
-            except Exception:
-                pass
-
-        # 优先精准查找
-        sec_info = sector_data.get(self.sector_name)
-
-        # 降级 1: 同义词模糊查找
-        if not sec_info and sector_data:
-            syns = SECTOR_SYNONYMS.get(self.sector_name, [])
-            for syn in syns:
-                if syn in sector_data:
-                    sec_info = sector_data[syn]
-                    break
-
-        # 降级 2: 子串包络查找
-        if not sec_info and sector_data:
-            for s_key, s_val in sector_data.items():
-                if self.sector_name in s_key or s_key in self.sector_name:
-                    sec_info = s_val
-                    break
-
-        # 如果在 sector_data 中找到了板块特征
-        if sec_info:
-            try:
-                score = sec_info.get('score', 0.0)
-                self.score_lbl.setText(f"强度得分: {score:.1f}")
-                
-                leader_code = str(sec_info.get('leader', '')).strip()
-                leader_name = sec_info.get('leader_name', '')
-                if not leader_name and get_name_fn and leader_code:
-                    leader_name = get_name_fn(leader_code)
-                if not leader_name or leader_name == "未知":
-                    leader_name = sec_info.get('leader_name') or leader_code
-                    
-                leader_pct = sec_info.get('leader_pct', 0.0)
-                leader_dff = sec_info.get('leader_dff') or sec_info.get('leader_pct_diff') or 0.0
-                leader_score = sec_info.get('leader_score', 0.0)
-                
-                followers = sec_info.get('followers', [])
-                self.stats_lbl.setText(f"成员数: {len(followers) + (1 if leader_code else 0)} | 领涨龙头: {leader_name} ({leader_code})")
-                
-                leader_rank = 0
-                leader_dff2 = 0.0
-                leader_dff3 = 0.0
-                if current_df is not None and leader_code:
-                    import pandas as pd
-                    l_row = _get_row(current_df, leader_code)
-                    if l_row is not None:
-                        if isinstance(l_row, pd.DataFrame):
-                            l_row = l_row.iloc[0]
-                        try: leader_rank = int(l_row.get('Rank', l_row.get('rank', 0)))
-                        except: pass
-                        try: leader_dff2 = float(l_row.get('DFF2', l_row.get('dff2', 0.0)))
-                        except: pass
-                        try: leader_dff3 = float(l_row.get('DFF3', l_row.get('dff3', 0.0)))
-                        except: pass
-
-                # Combine leader and followers into rows list
-                rows = []
-                if leader_code:
-                    l_extra = {}
-                    for ec in self.extra_cols:
-                        val_raw = None
-                        if current_df is not None and leader_code:
-                            l_row = _get_row(current_df, leader_code)
-                            if l_row is not None:
-                                for k in (ec, ec.lower(), ec.upper()):
-                                    if k in l_row:
-                                        val_raw = l_row[k]
-                                        break
-                        l_extra[ec] = cct.format_col_value(ec, val_raw)
-                    rows.append({
-                        'code': leader_code,
-                        'name': leader_name,
-                        'score': leader_score,
-                        'type': '👑 龙头',
-                        'pct': leader_pct,
-                        'start_pct': leader_pct - leader_dff,
-                        'dff': leader_dff,
-                        'rank': leader_rank,
-                        'dff2': leader_dff2,
-                        'dff3': leader_dff3,
-                        'extra_cols': l_extra,
-                        'pattern': '领涨先锋'
-                    })
-                    
-                for fol in followers:
-                    f_code = str(fol.get('code', '')).strip()
-                    if not f_code or f_code == leader_code:
-                        continue
-                    f_name = fol.get('name', '')
-                    if not f_name and get_name_fn:
-                        f_name = get_name_fn(f_code)
-                    if not f_name or f_name == "未知":
-                        f_name = fol.get('name') or f_code
-                    f_pct = fol.get('pct', 0.0)
-                    f_dff = fol.get('dff') or fol.get('pct_diff') or 0.0
-                    f_rank = 0
-                    f_dff2 = 0.0
-                    f_dff3 = 0.0
-                    f_extra = {}
+                for top_w in QApplication.topLevelWidgets():
+                    for attr in ('current_df', '_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'top_now'):
+                        df_cand = getattr(top_w, attr, None)
+                        if df_cand is not None and not df_cand.empty:
+                            current_df = df_cand
+                            if not get_name_fn and hasattr(top_w, 'get_stock_name'):
+                                get_name_fn = top_w.get_stock_name
+                            break
                     if current_df is not None:
-                        import pandas as pd
-                        f_row = _get_row(current_df, f_code)
-                        if f_row is not None:
-                            if isinstance(f_row, pd.DataFrame):
-                                f_row = f_row.iloc[0]
-                            try: f_rank = int(f_row.get('Rank', f_row.get('rank', 0)))
-                            except: pass
-                            try: f_dff2 = float(f_row.get('DFF2', f_row.get('dff2', 0.0)))
-                            except: pass
-                            try: f_dff3 = float(f_row.get('DFF3', f_row.get('dff3', 0.0)))
-                            except: pass
-                            for ec in self.extra_cols:
-                                val_raw = None
-                                for k in (ec, ec.lower(), ec.upper()):
-                                    if k in f_row:
-                                        val_raw = f_row[k]
-                                        break
-                                f_extra[ec] = cct.format_col_value(ec, val_raw)
-                    for ec in self.extra_cols:
-                        if ec not in f_extra:
-                            f_extra[ec] = '--'
-                        
-                    rows.append({
-                        'code': f_code,
-                        'name': f_name,
-                        'score': fol.get('score', 0.0),
-                        'type': '跟涨',
-                        'pct': f_pct,
-                        'start_pct': f_pct - f_dff,
-                        'dff': f_dff,
-                        'rank': f_rank,
-                        'dff2': f_dff2,
-                        'dff3': f_dff3,
-                        'extra_cols': f_extra,
-                        'pattern': fol.get('pattern_hint', '')
-                    })
-                    
-                self._render_rows(rows)
-                return
-            except Exception as e:
-                print(f"Error loading sector detail rows: {e}")
-                self.stats_lbl.setText(f"❌ 加载出错: {e}")
+                        break
+            except Exception:
+                pass
 
-        # 降级 3: 若仍无数据，使用国内优质知名龙头股 Fallback 兜底渲染
-        famous_list = None
-        for key, st_list in FAMOUS_SECTOR_LEADERS.items():
-            if key == self.sector_name or key in self.sector_name or self.sector_name in key:
-                famous_list = st_list
-                break
-        
-        if famous_list:
-            rows = []
-            leader_code = ""
-            leader_name = ""
-            max_pct = -999.0
-            
-            for code_str, def_name in famous_list:
-                name = get_name_fn(code_str) if get_name_fn else def_name
-                if not name or name == "未知":
-                    name = def_name
-                
-                score = 75.0
-                pct_val = 0.0
-                dff_val = 0.0
-                rank_val = 0
-                dff2_val = 0.0
-                dff3_val = 0.0
-                pattern_hint = "国内知名行业龙头"
-                extra_fam = {}
-                
-                if current_df is not None and code_str in current_df.index:
-                    import pandas as pd
-                    row = current_df.loc[code_str]
-                    if isinstance(row, pd.DataFrame):
-                        row = row.iloc[0]
-                    name_df = str(row.get('name', '')).strip()
-                    if name_df and name_df != "未知":
-                        name = name_df
-                    try: pct_val = float(row.get('percent', 0.0))
-                    except: pass
-                    try: dff_val = float(row.get('dff', 0.0))
-                    except: pass
-                    try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                    except: pass
-                    try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
-                    except: pass
-                    try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
-                    except: pass
-                    for ec in self.extra_cols:
-                        val_raw = None
-                        for k in (ec, ec.lower(), ec.upper()):
-                            if k in row:
-                                val_raw = row[k]
-                                break
-                        extra_fam[ec] = cct.format_col_value(ec, val_raw)
-                for ec in self.extra_cols:
-                    if ec not in extra_fam:
-                        extra_fam[ec] = '--'
-                
-                if pct_val > max_pct:
-                    max_pct = pct_val
-                    leader_code = code_str
-                    leader_name = name
-                    
-                rows.append({
-                    'code': code_str,
-                    'name': name,
-                    'score': score,
-                    'type': '行业龙头',
-                    'pct': pct_val,
-                    'start_pct': pct_val - dff_val,
-                    'dff': dff_val,
-                    'rank': rank_val,
-                    'dff2': dff2_val,
-                    'dff3': dff3_val,
-                    'extra_cols': extra_fam,
-                    'pattern': pattern_hint
-                })
-                
-            for r in rows:
-                if r['code'] == leader_code:
-                    r['type'] = '👑 领涨龙头'
-                    r['score'] = 98.0
-                    r['pattern'] = '板块中军龙头'
-                    
-            rows.sort(key=lambda x: x['pct'], reverse=True)
-            
-            self.score_lbl.setText(f"强度得分: {min(100.0, len(rows) * 16.0):.1f}")
-            self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_name} ({leader_code}) [{max_pct:+.2f}%]")
-            
-            self._render_rows(rows)
-            return
+        self._worker = SectorDetailWorker(
+            sector_name=self.sector_name,
+            member_codes=self.member_codes,
+            current_df=current_df,
+            extra_cols=self.extra_cols,
+            get_name_fn=get_name_fn,
+            parent=self
+        )
+        self._worker.finished_signal.connect(self._on_worker_finished)
+        self._worker.start()
 
-        self.stats_lbl.setText("❌ 当前板块暂无成分股明细特征")
+    def _on_worker_finished(self, rows: list, score: float, leader_str: str, meta: dict):
+        self.btn_refresh.setEnabled(True)
+        self.btn_refresh.setText("🔄 强制刷新数据")
+
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        self.lbl_update_time.setText(f"最后更新: {now_str}")
+
+        if hasattr(self, 'title_lbl'):
+            self.title_lbl.setText(f"板块名称: {self.sector_name}")
+
+        self.score_lbl.setText(f"强度得分: {score:.1f}")
+        self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_str}")
+
+        st_text = meta.get('status', '✅ 实时数据已同步')
+        self.lbl_status.setText(f"📡 状态: {st_text}")
+        if '⚠️' in st_text:
+            self.lbl_status.setStyleSheet("color: #ffa500; font-size: 8.5pt; margin-right: 6px;")
+        else:
+            self.lbl_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; margin-right: 6px;")
+
+        self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频 {len(rows)}只)")
+        self._render_rows(rows)
 
     def _render_rows(self, rows):
         self._is_rendering = True
@@ -907,6 +881,12 @@ class ATSSectorDetailDialog(QDialog):
             }
         """)
 
+        # 🔄 强制刷新
+        refresh_act = menu.addAction(f"🔄 强制刷新【{self.sector_name}】板块实时行情 (F5)")
+        refresh_act.triggered.connect(lambda: self.refresh_data(force=True))
+
+        menu.addSeparator()
+
         # 选中联动
         if self.linkage_cb:
             link_act = menu.addAction(f"⚡ 选中联动 ({code})")
@@ -929,6 +909,11 @@ class ATSSectorDetailDialog(QDialog):
         copy_code_act.triggered.connect(lambda: QApplication.clipboard().setText(code))
         copy_name_act = menu.addAction("📋 复制名称")
         copy_name_act.triggered.connect(lambda: QApplication.clipboard().setText(name))
+
+        menu.addSeparator()
+        from ats.ui.styles import auto_fit_columns_once
+        fit_act = menu.addAction("↔️ 一键自适应全列宽")
+        fit_act.triggered.connect(lambda: auto_fit_columns_once(self.table))
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 

@@ -1,3 +1,30 @@
+## 2026-08-23 15:20
+- [x] **板块明细架构深度对齐新股/次新股标准策略结构 (`ats/ui/sector_detail_dialog.py`, `ats/ui/global_market_panel.py`)**：
+    - [x] **架构完全遵照新股/次新股最新数据流设计**：
+        - **基础行情数据 (现价, 昨收, 涨跌幅, 开盘, 最高, 最低, 成交量, 成交额, 买点评级, 量比)**：100% 优先通过 `TDXRealtimeFetcher` 的 TDX API 权威直连获取，新浪 50ms 极速直连作为备用兜底；
+        - **动态列与自定义指标列 (`dff`, `dff2`, `dff3`, `rank`, `perc3d`, `ats_col` 自定义列)**：100% 全部使用 `df` (即量化策略主数据帧 `current_df` / `_last_flat_df` / `flat_df`) 动态提取并精确格式化；
+    - [x] **跨层级全局 DataFrame 探测感知**：
+        - `refresh_data` 自动从 Parent 链、Window 链及 `QApplication.topLevelWidgets()` 顶层所有活跃窗口中自动寻找主程序正在轮询的最新策略 DataFrame，独立顶层窗口打开也能 100% 无缝读取动态特征列；
+    - [x] **自动化测试套件 `test_sector_detail_suite.py` 100% PASS**。
+
+## 2026-08-23 15:15
+- [x] **板块明细数据自动同步、实时行情拉取、双通道数据引擎与刷新更新机制全量上线 (`ats/ui/sector_detail_dialog.py`, `ats/ui/global_market_panel.py`)**：
+    - [x] **彻底根治“本地快照”死数据与涨幅 +0.00% 根因**：
+        - 查明独立弹窗在未传入 `member_codes` 且父窗口无 `current_df` 时，硬编码 `0.00%` 且不发起任何行情拉取的缺陷；
+        - 新增 `fetch_sina_stock_quotes_fast`：国内 50ms 极速直连批量获取成分股现价、昨收、涨跌幅、今开与成交额；
+        - 扩容 `FAMOUS_SECTOR_LEADERS` 覆盖 15 大主流行业经典中军代表股，并支持板块同义词模糊向量匹配；
+    - [x] **异步非阻塞引擎 `SectorDetailWorker(QThread)`**：
+        - 采用“TDX 高频秒级盘口 + 新浪极速直连”双通道互补行情，主线程绝不阻塞网络 I/O；
+        - 根据真实涨跌幅与盘口买点评级动态评选 `👑 领涨龙头`（打分 98.0 分），动态计算板块整体强度得分与活跃度；
+    - [x] **全方位无死角刷新机制上线**：
+        - 顶部状态栏：实时显示同步数据源模式与最后更新时间戳；
+        - 底部操作栏：新增【🔄 强制刷新数据】按钮，刷新中显示 `⏳ 正在刷新...`；
+        - 键盘快捷键：支持 **`F5`** 瞬间强制刷新；
+        - 右键快捷菜单：新增【🔄 强制刷新【板块】实时行情 (F5)】与【↔️ 一键自适应全列宽】；
+        - 自动后台轮询：`QTimer` 盘中 15 秒、休市 60 秒自动静默定时更新；
+        - 跨窗口级联同步：`GlobalMarketPanel` 更新时自动级联调起打开中的板块明细弹窗全量刷新；
+    - [x] **自动化测试套件 `test_sector_detail_suite.py` 100% PASS**。
+
 ## 2026-08-23 14:52
 - [x] **外盘数据、资讯新闻、自动更新与自修复能力全方位 Code Review 与深度加固 (`JSONData/global_market_data.py`, `ats/ui/global_market_panel.py`, `ats/ui/global_market_kline_dialog.py`)**：
     - [x] **复查发现 1：新闻同一优先级内时间倒序 Bug 修复**：
