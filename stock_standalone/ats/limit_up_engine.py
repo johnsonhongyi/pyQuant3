@@ -423,11 +423,16 @@ class LimitUpEngine:
                             r["amount"] = amt_now
                             r["amount_yi"] = round(amt_now / 1e8, 2)
 
+                        # 日内 VWAP 均价与偏离度测算
+                        vwap_now = round(amt_now / (vol_now * 100.0), 2) if (amt_now > 0 and vol_now > 0) else price_now
+                        r["vwap"] = vwap_now
+                        r["vwap_dev_pct"] = round((price_now - vwap_now) / vwap_now * 100.0, 2) if vwap_now > 0 else 0.0
+
                         # 买一封单量 (手)
                         bid1_v = _safe_float(q.get("bid_vol1", 0.0))
                         r["bid1_vol"] = bid1_v
 
-                        # 买一~买五与卖一~卖五深度计算
+                        # 买一~买五与卖一~卖五深度计算与买盘压强
                         bid_sum = sum(_safe_float(q.get(f"bid_vol{i}", 0.0)) for i in range(1, 6))
                         ask_sum = sum(_safe_float(q.get(f"ask_vol{i}", 0.0)) for i in range(1, 6))
                         tot_depth = bid_sum + ask_sum
@@ -483,8 +488,11 @@ class LimitUpEngine:
             dff3 = _safe_float(r.get("dff3", 0.0))
             pct = _safe_float(r.get("pct", 0.0))
             price = _safe_float(r.get("price", 0.0))
+            vwap = _safe_float(r.get("vwap", price))
+            vwap_dev = _safe_float(r.get("vwap_dev_pct", 0.0))
             vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
             turnover = _safe_float(r.get("turnover_rate", 0.0))
+            bid_p = _safe_float(r.get("bid_pressure", 50.0))
             rs_val = _safe_float(r.get("rs_val", 0.0))
             seal_amt_wan = _safe_float(r.get("seal_amount_wan", 0.0))
             seal_to_circ = _safe_float(r.get("seal_to_circ_ratio", 0.0))
@@ -499,7 +507,7 @@ class LimitUpEngine:
             
             # 1. 两日情绪与阳包阴反包判定 (昨日洗盘震荡/小阴回调，今日放量大阳反包)
             pct_yesterday = round(dff2 - pct, 2) if abs(dff2) > 0.01 else 0.0
-            is_bullish_engulfing = (pct >= 6.0 and pct_yesterday <= 3.0 and dff2 >= 8.0)
+            is_bullish_engulfing = (pct >= 5.0 and pct_yesterday <= 3.0 and dff2 >= 7.0)
 
             # 2. 关键支撑位反转判定 (需满足: ch_bc2<=45波谷周期 或 真实接近有效支撑位)
             is_support_bounce = False
@@ -509,7 +517,6 @@ class LimitUpEngine:
                 if 0.0 <= supp_dist_pct <= 3.5:
                     is_support_bounce = True
             elif 1 <= ch_bc2 <= 45 and (is_bullish_engulfing or (dff3 > 20.0 and dff2 > 10.0)):
-                # 处于底部反转 45 天黄金反弹窗口
                 is_support_bounce = True
 
             r["is_bullish_engulfing"] = is_bullish_engulfing
@@ -517,12 +524,59 @@ class LimitUpEngine:
             r["supp_dist_pct"] = supp_dist_pct
             r["pct_yesterday"] = pct_yesterday
 
+            # ── 💡 索罗斯【反身性动能指数 (Reflexivity Momentum Index)】与冰点逆市挖掘 ──
+            # 考量维度：大盘逆市偏离强度(30%) + 关键支撑贴合度(25%) + VWAP黄金承接(20%) + 两日阳包阴(15%) + 买盘点火压强(10%)
+            reflex_score = 50.0
+            if rs_val > 5.0: # 逆市抗跌大盘偏离
+                reflex_score += 15.0
+            elif rs_val > 2.0:
+                reflex_score += 8.0
+            
+            if is_support_bounce: # 支撑线贴合
+                reflex_score += 12.0
+            if is_bullish_engulfing: # 突然阳包阴
+                reflex_score += 10.0
+            if -0.3 <= vwap_dev <= 1.8: # 紧贴VWAP黄金反身点
+                reflex_score += 8.0
+            if bid_p >= 70.0: # 主力主动点火压强
+                reflex_score += 5.0
+            
+            is_reflexivity_leader = (reflex_score >= 82.0 and is_support_bounce and (is_bullish_engulfing or vol_ratio >= 1.5))
+            r["reflex_score"] = round(min(99.0, reflex_score), 0)
+            r["is_reflexivity_leader"] = is_reflexivity_leader
+
+            # ── 💡 盘中上车梯度智能判决 (Intraday Entry Gradient) ──
+            if is_limit_up:
+                entry_stage = "🔒 封死涨停"
+                entry_advice = "已封死涨停，监控封单硬度与排撤单"
+            elif is_broken:
+                entry_stage = "⚠️ 炸板分歧"
+                entry_advice = "涨停炸板被砸，分歧过大谨慎接飞刀"
+            elif vwap_dev > 5.5:
+                entry_stage = "⚠️ 乖离过大"
+                entry_advice = "远离VWAP均线(+5.5%+)，防脉冲冲高回落，切勿追高"
+            elif is_reflexivity_leader and (1.0 <= pct <= 5.0):
+                entry_stage = "💎 冰点反身潜伏"
+                entry_advice = f"大盘冰点逆市抗跌，回踩VWAP({vwap:.2f})支撑阳包阴反身启动(万里挑一顶级潜伏点)"
+            elif (1.0 <= pct <= 4.5) and (-0.5 <= vwap_dev <= 1.8) and (is_support_bounce or is_bullish_engulfing or vol_ratio >= 1.3):
+                entry_stage = "🟢 黄金潜伏区"
+                entry_advice = f"回踩VWAP({vwap:.2f})支撑放量启动，极高盈亏比(低吸上车点)"
+            elif (4.5 < pct <= 7.5) and (0.5 <= vwap_dev <= 4.0) and (vol_ratio >= 1.8 or bid_p >= 65.0):
+                entry_stage = "🟡 半路点火区"
+                entry_advice = f"放量突破站稳均线(+{vwap_dev:.1f}%)，主力点火主升(半路上车点)"
+            elif (7.5 < pct < 9.8) and bid_p >= 75.0:
+                entry_stage = "🔴 封板临界区"
+                entry_advice = f"大单连续扫盘冲击涨停，买盘压强{bid_p:.0f}%(抢跑封板卡位点)"
+            else:
+                entry_stage = "📋 蓄势观察区"
+                entry_advice = "分时窄幅震荡，等待放量突破或回踩均线信号"
+
+            r["entry_stage"] = entry_stage
+            r["entry_advice"] = entry_advice
+
             # ── 💡 核心量化打分：构建具备绝对区分度与统治力梯度的分层体系 ──
             if is_limit_up:
-                # 【第一/二/三梯队：真实涨停板 (80 ~ 99 分)】
                 base_score = 80.0
-
-                # A. 连板高度溢价 (2板+4分, 3板+7分, 4板以上+10分)
                 if consecutive >= 4:
                     base_score += 10.0
                 elif consecutive == 3:
@@ -530,33 +584,33 @@ class LimitUpEngine:
                 elif consecutive == 2:
                     base_score += 4.0
 
-                # B. 盘口封单硬度贡献 (封流比与封单绝对额)
                 seal_bonus = min(6.0, seal_to_circ * 0.8) + min(3.0, (seal_amt_wan / 10000.0) * 0.6)
                 base_score += seal_bonus
 
-                # C. 20cm / 30cm 弹性溢价
                 if pct >= 19.5:
                     base_score += 2.0
 
-                # D. 支撑阳包阴反转加成
-                if is_support_bounce and is_bullish_engulfing:
+                if is_reflexivity_leader:
+                    base_score += 6.0
+                elif is_support_bounce and is_bullish_engulfing:
                     base_score += 5.0
                 elif is_bullish_engulfing or is_support_bounce:
                     base_score += 2.5
 
-                # E. 多日趋势 DFF2/DFF3 动能修正
                 dff_bonus = min(3.0, max(0.0, (dff2 * 0.04 + dff3 * 0.01)))
                 base_score += dff_bonus
 
                 momentum_score = round(min(99.0, max(80.0, base_score)), 0)
 
-                # 真实涨停板的梯队与形态标签
                 if consecutive >= 4:
                     r["tier_tag"] = f"👑 空间高度龙 ({consecutive}板)"
                     desc_tag = f"👑 空间总龙({momentum_score:.0f}分)"
                 elif consecutive >= 2:
                     r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
                     desc_tag = f"🚀 连板加速({momentum_score:.0f}分)"
+                elif is_reflexivity_leader:
+                    r["tier_tag"] = "💎 冰点反身性龙"
+                    desc_tag = f"💎 反身性龙头({momentum_score:.0f}分)"
                 elif (seal_amt_wan >= 20000 or seal_to_circ >= 4.0) and momentum_score >= 95:
                     r["tier_tag"] = "💎 统治级大封单"
                     desc_tag = f"💎 极强封板({momentum_score:.0f}分)"
@@ -580,29 +634,40 @@ class LimitUpEngine:
                     desc_tag = f"📋 换手首板({momentum_score:.0f}分)"
 
             elif is_broken:
-                # 【第五梯队：曾涨停炸板 (30 ~ 58 分)】
                 momentum_score = round(min(58.0, max(30.0, 35.0 + pct * 1.5)), 0)
                 r["tier_tag"] = "💥 曾涨停炸板"
                 desc_tag = f"⚠️ 炸板分歧({momentum_score:.0f}分)"
 
             else:
-                # 【第四梯队：未封死涨停的冲板/跟涨股 (55 ~ 78 分，严格不越界)】
-                ch_score = 55.0 + min(12.0, (pct - 4.0) * 1.5)
-                # 动能加成
+                # 未封板的冲板/潜伏/跟涨股 (55 ~ 78 分，严格不越界)
+                ch_score = 55.0 + min(10.0, (pct - 2.0) * 1.3)
                 ch_score += min(6.0, max(0.0, dff2 * 0.05 + dff3 * 0.01))
-                if vol_ratio > 1.5:
+                if is_reflexivity_leader:
+                    ch_score += 8.0
+                elif "黄金潜伏" in entry_stage or "半路点火" in entry_stage:
+                    ch_score += 5.0
+                if vol_ratio > 1.8:
                     ch_score += 2.0
                 momentum_score = round(min(78.0, max(50.0, ch_score)), 0)
 
-                if pct >= 7.5:
+                if is_reflexivity_leader:
+                    r["tier_tag"] = "💎 冰点反身潜伏"
+                    desc_tag = f"💎 反身潜伏({momentum_score:.0f}分)"
+                elif "黄金潜伏" in entry_stage:
+                    r["tier_tag"] = "🟢 黄金潜伏区"
+                    desc_tag = f"🟢 均线低吸({momentum_score:.0f}分)"
+                elif "半路点火" in entry_stage:
+                    r["tier_tag"] = "🟡 半路点火区"
+                    desc_tag = f"🟡 先锋点火({momentum_score:.0f}分)"
+                elif "封板临界" in entry_stage:
+                    r["tier_tag"] = "🔴 封板临界区"
+                    desc_tag = f"🔴 冲击涨停({momentum_score:.0f}分)"
+                elif pct >= 7.5:
                     r["tier_tag"] = "⚡ 大阳冲板未封"
                     desc_tag = f"⚡ 冲板未封({momentum_score:.0f}分)"
                 elif is_bullish_engulfing:
                     r["tier_tag"] = "📈 阳包阴跟涨"
                     desc_tag = f"📈 阳包阴({momentum_score:.0f}分)"
-                elif dff2 > 20.0 or dff3 > 50.0:
-                    r["tier_tag"] = "🌊 强动能趋势股"
-                    desc_tag = f"🌊 趋势跟涨({momentum_score:.0f}分)"
                 else:
                     r["tier_tag"] = "📊 板块跟涨标的"
                     desc_tag = f"📊 跟涨蓄势({momentum_score:.0f}分)"
@@ -625,6 +690,53 @@ class LimitUpEngine:
             self._last_scan_time = time.time()
 
         return records
+
+    def get_intraday_radar_records(self, current_df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
+        """
+        【🎯 盘中动态潜伏与梯度上车雷达】
+        专为盘中实战打造：不盲目追涨，通过 VWAP 偏离、早盘量能爆发比、关键支撑阳包阴、买盘压强锁定日内黄金买点
+        过滤出: 🟢 黄金潜伏区(低吸) / 🟡 半路点火区(顺势) / 🔴 封板临界区(抢跑) / 🎯 支撑反转板 / 👑 统治级龙头
+        """
+        all_recs = self.scan_limit_up_records_from_df(current_df)
+        if not all_recs:
+            return []
+
+        radar_list = []
+        for r in all_recs:
+            if r.get("is_broken", False):
+                continue
+            stage = str(r.get("entry_stage", ""))
+            pct = _safe_float(r.get("pct", 0.0))
+            vwap_dev = _safe_float(r.get("vwap_dev_pct", 0.0))
+
+            # 排除严重破位或分时远离均线偏离过大的虚拉标的
+            if vwap_dev > 5.5:
+                continue
+
+            # 筛选具备强烈上车动能的梯度标的
+            is_radar_hit = False
+            if r.get("is_limit_up", False):
+                is_radar_hit = True
+            elif "黄金潜伏" in stage or "半路点火" in stage or "封板临界" in stage:
+                is_radar_hit = True
+            elif r.get("is_bullish_engulfing", False) and pct >= 3.0:
+                is_radar_hit = True
+            elif r.get("is_support_bounce", False) and pct >= 2.5:
+                is_radar_hit = True
+
+            if is_radar_hit:
+                radar_list.append(r)
+
+        # 排序：反身性龙头优先 > 上车动能评分降序 > 买盘压强降序 > 量比降序
+        radar_list.sort(key=lambda x: (
+            1 if x.get("is_reflexivity_leader", False) else 0,
+            x.get("momentum_score", 50.0),
+            x.get("bid_pressure", 50.0),
+            x.get("vol_ratio", 1.0),
+            x.get("pct", 0.0)
+        ), reverse=True)
+
+        return radar_list
 
     def _calc_consecutive_boards(self, code: str, is_today_zt: bool) -> int:
         """从历史归档记录中回溯推算该个股的当前连板天数"""

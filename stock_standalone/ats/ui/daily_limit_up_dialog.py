@@ -357,6 +357,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_mode_today.clicked.connect(lambda: self._switch_mode("TODAY"))
         ctrl_layout.addWidget(self.btn_mode_today)
 
+        self.btn_mode_radar = QPushButton("🎯 盘中上车雷达")
+        self.btn_mode_radar.setToolTip("盘中动态潜伏与梯度上车雷达 (VWAP均价回踩低吸 / 半路点火确认 / 临界抢跑)")
+        self.btn_mode_radar.setCheckable(True)
+        self.btn_mode_radar.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_radar.clicked.connect(lambda: self._switch_mode("RADAR"))
+        ctrl_layout.addWidget(self.btn_mode_radar)
+
         self.btn_mode_3d = QPushButton("🚀 3日强势")
         self.btn_mode_3d.setCheckable(True)
         self.btn_mode_3d.setStyleSheet(self._get_btn_style(active=False))
@@ -400,6 +407,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_tier_filter = QComboBox()
         self.combo_tier_filter.addItems([
             "全部梯队", 
+            "💎 冰点反身性龙",
+            "💎 冰点反身潜伏",
+            "🟢 黄金潜伏区",
+            "🟡 半路点火区",
+            "🔴 封板临界区",
             "👑 空间高度龙", 
             "🚀 连板接力", 
             "💎 统治级大封单",
@@ -570,12 +582,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     def _switch_mode(self, mode: str):
         self.current_mode = mode
         self.btn_mode_today.setChecked(mode == "TODAY")
+        self.btn_mode_radar.setChecked(mode == "RADAR")
         self.btn_mode_3d.setChecked(mode == "3D")
         self.btn_mode_5d.setChecked(mode == "5D")
         self.btn_mode_10d.setChecked(mode == "10D")
         self.btn_mode_ladder.setChecked(mode == "LADDER")
 
         self.btn_mode_today.setStyleSheet(self._get_btn_style(mode == "TODAY"))
+        self.btn_mode_radar.setStyleSheet(self._get_btn_style(mode == "RADAR"))
         self.btn_mode_3d.setStyleSheet(self._get_btn_style(mode == "3D"))
         self.btn_mode_5d.setStyleSheet(self._get_btn_style(mode == "5D"))
         self.btn_mode_10d.setStyleSheet(self._get_btn_style(mode == "10D"))
@@ -595,7 +609,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             date_str = self.combo_history_date.currentText()
             self.selected_history_date = date_str
             self.current_mode = "HISTORY"
-            for btn in (self.btn_mode_today, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder):
+            for btn in (self.btn_mode_today, self.btn_mode_radar, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder):
                 btn.setChecked(False)
                 btn.setStyleSheet(self._get_btn_style(False))
             self._refresh_data_for_mode()
@@ -633,6 +647,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.engine.save_daily_records_atomic(today_str, self.current_records)
             else:
                 self.current_records = self.engine.get_records_by_date(today_str)
+        elif self.current_mode == "RADAR":
+            # 🎯 盘中上车雷达视图
+            self.current_records = self.engine.get_intraday_radar_records(current_df=df)
         elif self.current_mode == "3D":
             self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=3, min_limit_ups=1, current_df=df)
         elif self.current_mode == "5D":
@@ -776,7 +793,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 # 5. 梯队分类
                 it_tier = QTableWidgetItem(tier_tag)
                 it_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if "空间高度龙" in tier_tag:
+                if "冰点反身" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#00ffff"))) # 荧光亮青 (反身性万里挑一)
+                    f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
+                elif "空间高度龙" in tier_tag:
                     it_tier.setForeground(QBrush(QColor("#ff3399"))) # 亮洋红
                     f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
                 elif "统治级" in tier_tag:
@@ -790,6 +810,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
                 elif "连板接力" in tier_tag:
                     it_tier.setForeground(QBrush(QColor("#ffaa00"))) # 亮橙黄
+                elif "黄金潜伏" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#00e676"))) # 翠绿
+                elif "半路点火" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ffea00"))) # 亮黄
                 elif "冲板未封" in tier_tag or "跟涨" in tier_tag:
                     it_tier.setForeground(QBrush(QColor("#aad4ff"))) # 浅蓝
                 elif "炸板" in tier_tag:
@@ -802,6 +826,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 desc_tag = str(r.get("pattern_desc", f"动能 {momentum_score:.0f}分"))
                 is_bullish_engulfing = r.get("is_bullish_engulfing", False)
                 is_support_bounce = r.get("is_support_bounce", False)
+                is_reflex_lead = r.get("is_reflexivity_leader", False)
                 pct_yesterday = _safe_float(r.get("pct_yesterday", 0.0))
                 supp_dist_pct = _safe_float(r.get("supp_dist_pct", 0.0))
 
@@ -809,7 +834,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 it_desc.setData(Qt.ItemDataRole.UserRole, momentum_score)
                 it_desc.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-                if momentum_score >= 95 and r.get("is_limit_up"):
+                if is_reflex_lead:
+                    it_desc.setForeground(QBrush(QColor("#00ffff"))) # 荧光亮青 (反身性核心)
+                    font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
+                elif momentum_score >= 95 and r.get("is_limit_up"):
                     it_desc.setForeground(QBrush(QColor("#ff3399"))) # 亮洋红 (顶级统治龙)
                     font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
                 elif is_support_bounce and is_bullish_engulfing and r.get("is_limit_up"):
@@ -817,23 +845,34 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
                 elif r.get("is_limit_up"):
                     it_desc.setForeground(QBrush(QColor("#00ffcc"))) # 碧青 (真涨停首板)
+                elif "黄金潜伏" in desc_tag or "低吸" in desc_tag:
+                    it_desc.setForeground(QBrush(QColor("#00e676"))) # 翠绿
                 elif "冲板未封" in desc_tag:
                     it_desc.setForeground(QBrush(QColor("#aad4ff"))) # 浅蓝 (未封死冲板)
                 elif r.get("is_broken"):
                     it_desc.setForeground(QBrush(QColor("#ff8800"))) # 橙色 (炸板)
 
-                # 全维度多日趋势与情绪动能 ToolTip
+                # 全维度多日趋势、日内VWAP与实战上车指导 ToolTip
+                entry_stage = str(r.get("entry_stage", "📋 蓄势观察区"))
+                entry_advice = str(r.get("entry_advice", "分时震荡蓄势"))
+                bid_p = _safe_float(r.get("bid_pressure", 50.0))
+                vwap_val = _safe_float(r.get("vwap", price))
+                vwap_dev = _safe_float(r.get("vwap_dev_pct", 0.0))
+
                 tip = (
-                    f"【{code} {name} 多维动能与趋势深度透视】\n"
+                    f"【{code} {name} 盘中潜伏与上车深度透视】\n"
                     f"────────────────────────\n"
-                    f"• 梯队分类: {tier_tag}\n"
-                    f"• 趋势动能评分: {momentum_score:.0f} 分 | 封单质量: {quality_score:.0f} 分\n"
+                    f"• 上车信号梯度: {entry_stage}\n"
+                    f"• 实战操作建议: {entry_advice}\n"
+                    f"• 梯队动能评分: {momentum_score:.0f} 分 (统治力梯队: {tier_tag})\n"
+                    f"• 日内VWAP均线: {vwap_val:.2f} 元 (偏离度: {vwap_dev:+.1f}%)\n"
+                    f"• 盘口买盘压强: {bid_p:.1f}% | 量比: {vol_ratio:.2f} | 换手: {turnover:.2f}%\n"
                     f"• 2日情绪反包: 昨日涨跌 {pct_yesterday:+.2f}% ➔ 今日涨跌 {pct:+.2f}%"
-                    f"{' (🔥阳包阴强势反转)' if is_bullish_engulfing else ''}\n"
+                    f"{' (🔥阳包阴反转)' if is_bullish_engulfing else ''}\n"
                     f"• 关键支撑位状态: 偏离支撑 {supp_dist_pct:+.1f}%"
-                    f"{' (🎯回踩关键支撑起爆)' if is_support_bounce else ''}\n"
+                    f"{' (🎯回踩支撑起爆)' if is_support_bounce else ''}\n"
                     f"• 多日趋势强度: DFF={dff:+.2f} | DFF2={dff2:+.1f} | DFF3={dff3:+.1f}\n"
-                    f"• 盘口封单量能: 封单额 {seal_amt_wan:,.0f}万 | 封流比 {seal_to_circ:.2f}% | 换手 {turnover:.2f}%\n"
+                    f"• 封单指标: 封单额 {seal_amt_wan:,.0f}万 | 封流比 {seal_to_circ:.2f}%\n"
                     f"• 大盘共振偏离: {rs_val:+.2f}% ({resonance})"
                 )
                 it_desc.setToolTip(tip)
