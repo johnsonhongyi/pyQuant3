@@ -1,3 +1,38 @@
+## 2026-08-23 18:20
+- [x] **板块聚合数据中枢与明细弹窗深度 Code Review、隐藏关联 Bug 修复与全维度加固 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`)**：
+    - [x] **根治主窗口复用与轮询时丢失 `update_data`/`load_data` 接口引发的 AttributeError 隐患**：
+        - 补齐 `ATSSectorDetailDialog.update_data(current_df)` 与 `load_data(df_realtime, member_codes)`，使主窗口实盘行情轮询推送与板块切换弹窗复用平滑无缝，杜绝崩溃；
+    - [x] **修复成分股列表排序遗漏问题**：
+        - 在 `SectorDataAggregator.fetch_sector_detail` 统一加上 `rows.sort(key=lambda x: (x.get('score', 0.0), x.get('pct', 0.0)), reverse=True)`，确保 `👑 领涨龙头` 与核心先锋股 100% 居首展示；
+    - [x] **修复外部显式传入 `member_codes` 时被中军龙头库过度污染的问题**：
+        - 严格遵循传入意图，显式传入代码时仅提取指定成分股，仅在未传入代码时启动同义词与龙头库自动兜底；
+    - [x] **全面引入 `_safe_float` 与 `_safe_int` 防御性数值转换**：
+        - 清洗 `NaN`、`Inf`、`None`、`--`，彻底杜绝 `np.nan or 0.0` 带来的浮点污染与 `start_pct` 计算异常；
+    - [x] **增强交易所代码映射与新浪接口单股异常隔离**：
+        - 补充 ETF（`51/56/58` 上交所，`15/16/18` 深交所）、可转债（`11` 上交所，`12` 深交所）与北交所映射；新浪行情解析增加单行独立容错；
+    - [x] **清理重复代码 (DRY) 与线程生命周期加固**：
+        - 清除 `sector_detail_dialog.py` 中重复定义的表头函数，`closeEvent` 增加 `_worker.wait(1000)` 安全回收；
+    - [x] **8 项全量自动化测试（`test_sector_aggregator_suite.py`, `test_ats_dynamic_col.py`）100% PASS**。
+
+## 2026-08-23 15:30
+- [x] **EA 平台、EA 游戏全系与 Steam 游戏下载直连规则深度优化与落地 (`config/clash_rules/`)**：
+    - [x] **全覆盖 EA/Origin 核心域名与下载鉴权 CDN**：
+        - 补充 `*.ea.com`、`app-images.ea.com`、`*.origin.com`、`*.electronicarts.com`、`*.akamaized.net` (`ealockbox.akamaized.net`)、`*.akamaihd.net`、`*.edgekey.net`、`*.edgesuite.net`；
+    - [x] **底层进程级与 Steam 下载 CDN 直连拦截**：
+        - 补充 `EADesktop.exe`、`EABackgroundService.exe`、`OriginClientService.exe`、`r5apex.exe`、`bf2042.exe`、`FC24.exe/FC25.exe` 等全部 EA 进程以及 `steamcontent.com`、`steamconnecttest.com` 直连规则；
+    - [x] **自动同步覆盖至 `Merge.yaml`、`Script.js` 与 `dns_config.yaml`**。
+
+## 2026-08-23 15:25
+- [x] **统一板块与量化数据聚合引擎专用类上线 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`)**：
+    - [x] **封装专用中枢类 `SectorDataAggregator` (单例模式)**：
+        - 统一多模块数据接口 `fetch_sector_detail(sector_name, member_codes, current_df, extra_cols, get_name_fn)`，支持一键完成成分股发现、高频行情拉取、动态列映射、领涨龙头评选与强度打分；
+        - 统一股票列表批量获取接口 `fetch_quotes_unified(codes, current_df, extra_cols, sector_name)`；
+        - 统一策略 DataFrame 跨窗口探测接口 `resolve_active_strategy_df(widget_or_parent)`；
+        - 沉淀常驻行业中军龙头库 `FAMOUS_SECTOR_LEADERS` 与板块同义词库 `SECTOR_SYNONYMS`；
+    - [x] **UI 层解耦与极简重构**：
+        - `ATSSectorDetailDialog` 和 `SectorDetailWorker` 直接基于 `SectorDataAggregator` 驱动，UI 代码减少 300+ 行，严格践行 SOLID / DRY / KISS 原则；
+    - [x] **综合自动化测试套件 `test_aggregator_suite.py` 100% PASS**。
+
 ## 2026-08-23 15:20
 - [x] **板块明细架构深度对齐新股/次新股标准策略结构 (`ats/ui/sector_detail_dialog.py`, `ats/ui/global_market_panel.py`)**：
     - [x] **架构完全遵照新股/次新股最新数据流设计**：
