@@ -10,6 +10,7 @@
 
 import sys
 import os
+import ctypes
 
 def get_app_root() -> str:
     """获取程序物理根目录。"""

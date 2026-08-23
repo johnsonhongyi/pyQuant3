@@ -636,13 +636,19 @@ def find_windows_by_title_safe(target_title: str) -> list:
     pattern = re.compile(escaped_title, re.IGNORECASE)
 
     def enum_handler(hwnd, _):
-        if user32.IsWindowVisible(hwnd):
-            window_title = win32gui.GetWindowText(hwnd)
-            if pattern.search(window_title):
-                found.append((hwnd, window_title))
+        try:
+            if user32.IsWindowVisible(hwnd):
+                window_title = win32gui.GetWindowText(hwnd)
+                if pattern.search(window_title):
+                    found.append((hwnd, window_title))
+        except Exception:
+            pass
         return True
         
-    win32gui.EnumWindows(enum_handler, None)
+    try:
+        win32gui.EnumWindows(enum_handler, None)
+    except Exception:
+        pass
     return found
 
 def get_exe_path(hwnd) -> str:
@@ -681,11 +687,71 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
     return False
 
 
-def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNORMAL) -> bool:
+def force_topmost_activate_hwnd(hwnd: int) -> bool:
+    """
+    工业级 Win32 窗口强力置顶与激活前台焦点：
+    结合 ShowWindow(SW_RESTORE) + AttachThreadInput 线程输入关联 + 模拟按键 + BringWindowToTop + HWND_TOPMOST/HWND_NOTOPMOST 切换，
+    彻底绕过 Windows 10/11 的前台锁定限制，确保窗口 100% 弹出到最前台并抢占焦点。
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+    try:
+        # 1. 若最小化或隐藏，先恢复显示
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        else:
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+        # 2. 线程输入挂接 (AttachThreadInput)
+        fore_hwnd = user32.GetForegroundWindow()
+        curr_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        fore_tid = user32.GetWindowThreadProcessId(fore_hwnd, None) if fore_hwnd else 0
+        target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+
+        attached_fore = False
+        attached_target = False
+        if fore_tid and fore_tid != curr_tid:
+            attached_fore = bool(user32.AttachThreadInput(curr_tid, fore_tid, True))
+        if target_tid and target_tid != curr_tid:
+            attached_target = bool(user32.AttachThreadInput(curr_tid, target_tid, True))
+
+        # 3. 模拟轻按 Alt 键，突破 Windows 前台激活锁
+        user32.keybd_event(0x12, 0, 0, 0)       # Alt Down
+        user32.keybd_event(0x12, 0, 0x0002, 0)  # Alt Up
+
+        # 4. 临时 HWND_TOPMOST 切换将窗口推至顶层，随后解除 TOPMOST 恢复正常层级
+        HWND_TOPMOST = -1
+        HWND_NOTOPMOST = -2
+        SWP_NOSIZE = 1
+        SWP_NOMOVE = 2
+        SWP_SHOWWINDOW = 0x0040
+        flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+
+        # 5. 夺取焦点与置顶
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+
+        # 6. 解除线程挂接
+        if attached_fore:
+            user32.AttachThreadInput(curr_tid, fore_tid, False)
+        if attached_target:
+            user32.AttachThreadInput(curr_tid, target_tid, False)
+
+        return True
+    except Exception as e:
+        print(f"force_topmost_activate_hwnd 异常: {e}")
+        return False
+
+
+def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNORMAL, activate_topmost: bool = False) -> bool:
     """
     模糊匹配窗口标题，并将其移动到指定位置。
     如果是专属磁吸窗口且处于隐藏收缩状态，会自动先执行显示/还原；
     对东方财富等常规日常软件，只在最小化时还原，靠边放置不触发误判。
+    若 activate_topmost=True，移动后将窗口强力提升至最前台并激活。
     """
     found = find_windows_by_title_safe(target_title)
     if not found:
@@ -723,6 +789,9 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
             
         if show_cmd != SW_SHOWNORMAL:
             user32.ShowWindow(hwnd, show_cmd)
+
+        if activate_topmost:
+            force_topmost_activate_hwnd(hwnd)
             
     return success
 
@@ -1224,116 +1293,126 @@ SINGLE_INSTANCE_SERVER_NAME = "ManageWindowLayout_SingleInstance_Server"
 
 def check_and_activate_existing_instance() -> bool:
     """
-    检查 manage_window_layout.exe 或 manage_window_layout.py 是否已经在运行。
-    如果已经运行：通过 QLocalSocket 管道发送 WAKEUP 消息并结合 Win32 接口唤醒已有窗口到前台显示，并返回 True（指示调用方退出）；
-    如果未在运行：返回 False（指示可以继续正常启动新实例）。
+    检查 manage_window_layout 是否已经在运行：
+    1. 同路径实例：直接通过全局 IPC 管道发送 WAKEUP 唤醒前台并返回 True（指示当前启动退出）；
+    2. 异路径历史旧实例：弹窗提示用户是否关闭旧实例并启动当前程序；
+    3. 无运行中实例：返回 False（指示正常启动）。
     """
     current_pid = os.getpid()
     parent_pid = os.getppid() if hasattr(os, 'getppid') else None
-    ipc_connected = False
+    current_app_root = os.path.normcase(os.path.abspath(get_app_root()))
+    current_exe = os.path.normcase(os.path.abspath(sys.executable))
 
-    # 1. 尝试使用 Qt 的 QLocalSocket 连接已存主 UI 的 IPC 本地命名管道服务
+    # 1. 扫描后台正在运行的 manage_window_layout 实例
+    same_path_pids = set()
+    other_path_pids = []  # list of (pid, exe_path, proc_obj)
+
+    try:
+        for p in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                p_pid = p.info['pid']
+                if p_pid == current_pid or (parent_pid and p_pid == parent_pid) or p_pid == 0:
+                    continue
+
+                p_name = (p.info['name'] or '').lower()
+                p_exe = (p.info['exe'] or '').lower()
+                
+                is_target_proc = False
+                if p_name == 'manage_window_layout.exe' or 'manage_window_layout.py' in p_name:
+                    is_target_proc = True
+
+                if is_target_proc:
+                    proc_dir = os.path.normcase(os.path.abspath(os.path.dirname(p_exe))) if p_exe else ""
+                    if proc_dir and proc_dir == current_app_root:
+                        same_path_pids.add(p_pid)
+                    else:
+                        other_path_pids.append((p_pid, p_exe or p_name, p))
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[SingleInstance] psutil 进程扫描异常: {e}")
+
+    # 2. 如果检测到系统中已有异路径的历史旧实例常驻（如 55188 还在后台运行）
+    if other_path_pids and not same_path_pids:
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance()
+            if not app:
+                app = QApplication(sys.argv if hasattr(sys, 'argv') else [])
+
+            old_pid, old_path, _ = other_path_pids[0]
+            reply = QMessageBox.question(
+                None,
+                "检测到后台存在旧版本实例",
+                f"检测到系统后台已有正在运行的其它路径实例：\n"
+                f"【旧版路径】: {old_path} (PID: {old_pid})\n\n"
+                f"当前尝试启动的新程序路径为：\n"
+                f"【当前路径】: {current_exe}\n\n"
+                f"整个系统只应保留一个正在运行的 manage_window_layout。\n"
+                f"是否关闭后台旧实例并启动当前程序？\n\n"
+                f"• 点击【是 (Yes)】：终止后台旧实例，正常启动当前程序\n"
+                f"• 点击【否 (No)】：退出当前启动",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for opid, opath, op_obj in other_path_pids:
+                    try:
+                        op_obj.kill()
+                        op_obj.wait(timeout=1.0)
+                    except Exception:
+                        pass
+                print("[SingleInstance] 用户已选择终止后台异路径旧实例，继续启动当前程序。")
+                return False
+            else:
+                return True
+        except Exception as e:
+            print(f"[SingleInstance] 弹窗提示异常: {e}")
+
+    # 3. 针对同路径实例，尝试通过 Qt 的 QLocalSocket 发送 WAKEUP 指令
+    ipc_connected = False
     try:
         from PyQt6.QtNetwork import QLocalSocket
         socket = QLocalSocket()
         socket.connectToServer(SINGLE_INSTANCE_SERVER_NAME)
         if socket.waitForConnected(300):
-            print("[SingleInstance] 成功连接至已有实例的 IPC 服务，发送 WAKEUP 指令...")
+            print(f"[SingleInstance] 成功连接至已有 IPC 服务 ({SINGLE_INSTANCE_SERVER_NAME})，发送 WAKEUP 指令...")
             socket.write(b"WAKEUP\n")
             socket.flush()
             socket.waitForBytesWritten(300)
             socket.disconnectFromServer()
             ipc_connected = True
     except Exception as e:
-        print(f"[SingleInstance] QLocalSocket IPC 握手异常: {e}")
+        pass
 
     target_hwnds = []
-
-    # 2. 枚举桌面所有窗口，寻找目标标题的 HWND 句柄
-    def enum_windows_callback(hwnd, lparam):
-        if not user32.IsWindow(hwnd):
-            return True
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value == current_pid or (parent_pid and pid.value == parent_pid) or pid.value == 0:
+    if same_path_pids or not other_path_pids:
+        def enum_pid_windows_callback(hwnd, lparam):
+            if not user32.IsWindow(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in same_path_pids:
+                title = win32gui.GetWindowText(hwnd) or ""
+                cls = win32gui.GetClassName(hwnd) or ""
+                if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
+                    if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
+                       not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
+                        target_hwnds.append((hwnd, pid.value, title))
             return True
 
         try:
-            title = win32gui.GetWindowText(hwnd) or ""
-            cls = win32gui.GetClassName(hwnd) or ""
-            if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
-                if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
-                   not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
-                    target_hwnds.append((hwnd, pid.value, title))
+            proc_pid = WNDENUMPROC(enum_pid_windows_callback)
+            user32.EnumWindows(proc_pid, 0)
         except Exception:
             pass
-        return True
-
-    try:
-        proc = WNDENUMPROC(enum_windows_callback)
-        user32.EnumWindows(proc, 0)
-    except Exception as e:
-        print(f"[SingleInstance] EnumWindows 扫描异常: {e}")
-
-    # 3. 扫描后台进程是否存在已存的 manage_window_layout 实例
-    other_pids = set()
-
-    if not target_hwnds:
-        try:
-            for p in psutil.process_iter(['pid', 'name']):
-                try:
-                    p_pid = p.info['pid']
-                    if p_pid == current_pid or (parent_pid and p_pid == parent_pid) or p_pid == 0:
-                        continue
-
-                    p_name = (p.info['name'] or '').lower()
-                    cmd_str = ''
-                    try:
-                        p_cmdline = p.cmdline() or []
-                        cmd_str = ' '.join(p_cmdline).lower()
-                    except Exception:
-                        pass
-
-                    is_target_proc = False
-                    if p_name == 'manage_window_layout.exe':
-                        is_target_proc = True
-                    elif 'manage_window_layout.py' in cmd_str:
-                        is_target_proc = True
-
-                    if is_target_proc:
-                        other_pids.add(p_pid)
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[SingleInstance] psutil 进程扫描异常: {e}")
-
-        if other_pids:
-            def enum_pid_windows_callback(hwnd, lparam):
-                if not user32.IsWindow(hwnd):
-                    return True
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in other_pids:
-                    title = win32gui.GetWindowText(hwnd) or ""
-                    cls = win32gui.GetClassName(hwnd) or ""
-                    if title and ("窗口坐标分类管理器" in title or "桌面窗口坐标布局" in title):
-                        if not any(k in title for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")) and \
-                           not any(k in cls for k in ("PyInstaller", "Hidden Window", "QTrayIconMessageWindow")):
-                            target_hwnds.append((hwnd, pid.value, title))
-                return True
-
-            try:
-                proc_pid = WNDENUMPROC(enum_pid_windows_callback)
-                user32.EnumWindows(proc_pid, 0)
-            except Exception:
-                pass
 
     # 4. 如果成功通过 IPC 连接或找到了真实运行中的 UI 窗口句柄
     activated = False
     wm_msg_id = get_wm_show_msg_id()
 
     if target_hwnds:
-        print("[SingleInstance] 检测到 manage_window_layout 已有 UI 实例运行，正在唤醒并拉起窗口到前台...")
+        print("[SingleInstance] 检测到已有 UI 实例运行，正在置顶唤醒并拉起窗口到前台...")
         for hwnd, pid, title in target_hwnds:
             try:
                 if user32.IsWindow(hwnd):
@@ -1341,15 +1420,8 @@ def check_and_activate_existing_instance() -> bool:
                     if wm_msg_id:
                         user32.PostMessageW(hwnd, wm_msg_id, 0, 0)
 
-                    if user32.IsIconic(hwnd):
-                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    else:
-                        user32.ShowWindow(hwnd, 5)  # SW_SHOW
-
-                    user32.keybd_event(0x12, 0, 0, 0)  # Alt down
-                    user32.SetForegroundWindow(hwnd)
-                    user32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
-                    user32.BringWindowToTop(hwnd)
+                    # 调用工业级强力置顶与激活
+                    force_topmost_activate_hwnd(hwnd)
                     activated = True
             except Exception as e:
                 print(f"[SingleInstance] 唤醒窗口 HWND {hwnd} 异常: {e}")
@@ -1358,6 +1430,8 @@ def check_and_activate_existing_instance() -> bool:
     if ipc_connected or activated:
         print("[SingleInstance] 成功唤醒已有主 UI 实例到前台，阻止重复启动新实例。")
         return True
+
+    return False
 
     return False
 
@@ -1401,13 +1475,13 @@ def get_autostart_command() -> str:
 
 
 
-def is_autostart_enabled() -> bool:
+def get_current_autostart_command() -> tuple:
     """
-    检查 Windows 注册表中是否已设置开机自启
-    检查 HKCU 与 HKLM 的 SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run
+    获取 Windows 注册表中当前实际配置的开机自启命令行。
+    返回: (is_configured: bool, current_cmd: str)
     """
     if sys.platform != "win32":
-        return False
+        return False, ""
     try:
         import winreg
         for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
@@ -1417,7 +1491,7 @@ def is_autostart_enabled() -> bool:
                     val, _ = winreg.QueryValueEx(key, REG_AUTORUN_NAME)
                     if val:
                         winreg.CloseKey(key)
-                        return True
+                        return True, str(val)
                 except FileNotFoundError:
                     pass
                 finally:
@@ -1426,12 +1500,20 @@ def is_autostart_enabled() -> bool:
                 pass
     except Exception:
         pass
-    return False
+    return False, ""
 
 
-def set_autostart_enabled(enable: bool) -> tuple:
+def is_autostart_enabled() -> bool:
+    """检查 Windows 注册表中是否已存在开机自启项"""
+    configured, _ = get_current_autostart_command()
+    return configured
+
+
+def set_autostart_enabled(enable: bool, target_cmd: str = None) -> tuple:
     """
-    通过注册表开启或关闭开机自启
+    通过注册表开启或关闭开机自启（仅在用户主动配置保存时调用，严禁启动时静默自动添加/修改）。
+    若 enable=True，写入 target_cmd 或当前程序的标准自启命令；
+    若 enable=False，从注册表中彻底删除启动项。
     返回: (success: bool, message: str)
     """
     if sys.platform != "win32":
@@ -1439,7 +1521,7 @@ def set_autostart_enabled(enable: bool) -> tuple:
 
     try:
         import winreg
-        cmd = get_autostart_command()
+        cmd = target_cmd if target_cmd is not None else get_autostart_command()
 
         if enable:
             # 优先写入 HKCU (无需管理员权限)
@@ -1466,7 +1548,7 @@ def set_autostart_enabled(enable: bool) -> tuple:
             else:
                 return False, f"写入注册表自启动项失败 (可能需要管理员权限): {err_msg}"
         else:
-            # 关闭：删除 HKCU 与 HKLM 中的启动项
+            # 关闭：彻底删除 HKCU 与 HKLM 中的启动项
             deleted = False
             for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
                 try:
@@ -1481,7 +1563,7 @@ def set_autostart_enabled(enable: bool) -> tuple:
                 except Exception:
                     pass
 
-            return True, f"开机自启已在注册表中成功关闭 (已清理命令行路径: {cmd})"
+            return True, "开机自启已在注册表中成功删除取消"
     except Exception as e:
         return False, f"操作注册表异常: {e}"
 
