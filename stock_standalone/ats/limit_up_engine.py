@@ -47,6 +47,25 @@ LIMIT_UP_RECORDS_FILE = os.path.join(DATA_DIR, "ats_limit_up_records.json")
 ARCHIVE_PREFIX = os.path.join(DATA_DIR, "ats_limit_up_daily_archive_")
 
 
+def get_live_time_slice_name() -> str:
+    """根据当前实盘 A 股时钟返回对应的生命周期时间片名称"""
+    now_hhmm = time.strftime("%H:%M")
+    if "09:15" <= now_hhmm < "10:00":
+        return "👑 09:30~10:00 黄金定龙"
+    elif "10:00" <= now_hhmm < "11:30":
+        return "💎 10:00~11:30 分歧低吸"
+    elif "11:30" <= now_hhmm < "13:00":
+        return "💎 10:00~11:30 分歧低吸"
+    elif "13:00" <= now_hhmm < "14:00":
+        return "🚀 13:00~14:00 午后助攻"
+    elif "14:00" <= now_hhmm < "14:45":
+        return "⚠️ 14:00~14:45 尾盘诱多"
+    elif "14:45" <= now_hhmm <= "15:30":
+        return "🔒 14:45~15:00 尾盘定盘"
+    else:
+        return "⏱️ 全天全时段"
+
+
 def _safe_float(val: Any, default: float = 0.0) -> float:
     """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
     if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
@@ -524,8 +543,34 @@ class LimitUpEngine:
             r["supp_dist_pct"] = supp_dist_pct
             r["pct_yesterday"] = pct_yesterday
 
+            # ── 💡 交易时钟生命周期 (Time Window Alpha) ──
+            # 区分：09:30~10:00黄金定龙期 / 10:00~11:30分歧低吸期 / 13:00~14:00午后助攻期 / 14:00~14:45尾盘诱多高危期
+            curr_hhmm = time.strftime("%H:%M")
+            if "09:30" <= curr_hhmm < "10:00":
+                time_phase = "👑 黄金定龙期"
+                time_multiplier = 1.10
+                time_tip = "09:30~10:00早盘黄金定龙点火，溢价最高，最佳先锋抢跑时机"
+            elif "10:00" <= curr_hhmm < "11:30":
+                time_phase = "💎 分歧低吸期"
+                time_multiplier = 0.95
+                time_tip = "10:00~11:30盘中分歧期，严禁盲目追高，只做回踩VWAP企稳低吸"
+            elif "13:00" <= curr_hhmm < "14:00":
+                time_phase = "🚀 午后助攻期"
+                time_multiplier = 0.95
+                time_tip = "13:00~14:00午后发酵期，观察板块多股共振助攻"
+            elif "14:00" <= curr_hhmm < "14:45":
+                time_phase = "⚠️ 尾盘高危期"
+                time_multiplier = 0.75 # 尾盘脉冲大幅打折，防偷袭与次日低开闷杀
+                time_tip = "14:00后尾盘高危期，脉冲多为诱多偷袭，严防尾盘炸板"
+            else:
+                time_phase = "📋 稳健定盘期"
+                time_multiplier = 1.0
+                time_tip = "大局已定，观察封单硬度与隔夜潜伏"
+
+            r["time_phase"] = time_phase
+            r["time_tip"] = time_tip
+
             # ── 💡 索罗斯【反身性动能指数 (Reflexivity Momentum Index)】与冰点逆市挖掘 ──
-            # 考量维度：大盘逆市偏离强度(30%) + 关键支撑贴合度(25%) + VWAP黄金承接(20%) + 两日阳包阴(15%) + 买盘点火压强(10%)
             reflex_score = 50.0
             if rs_val > 5.0: # 逆市抗跌大盘偏离
                 reflex_score += 15.0
@@ -545,36 +590,39 @@ class LimitUpEngine:
             r["reflex_score"] = round(min(99.0, reflex_score), 0)
             r["is_reflexivity_leader"] = is_reflexivity_leader
 
-            # ── 💡 盘中上车梯度智能判决 (Intraday Entry Gradient) ──
+            # ── 💡 盘中上车梯度与介入时机智能判决 (Intraday Entry Timing) ──
             if is_limit_up:
                 entry_stage = "🔒 封死涨停"
-                entry_advice = "已封死涨停，监控封单硬度与排撤单"
+                entry_advice = f"已封死涨停，监控封单硬度与排撤单 ({time_tip})"
             elif is_broken:
                 entry_stage = "⚠️ 炸板分歧"
-                entry_advice = "涨停炸板被砸，分歧过大谨慎接飞刀"
+                entry_advice = f"涨停炸板被砸，分歧过大谨慎接飞刀 ({time_tip})"
             elif vwap_dev > 5.5:
                 entry_stage = "⚠️ 乖离过大"
                 entry_advice = "远离VWAP均线(+5.5%+)，防脉冲冲高回落，切勿追高"
+            elif "尾盘高危" in time_phase and pct >= 5.0 and not is_limit_up:
+                entry_stage = "⚠️ 尾盘诱多"
+                entry_advice = f"14:00后尾盘突然脉冲拉升，极大概率系诱多偷袭，切勿打地鼠追高！"
             elif is_reflexivity_leader and (1.0 <= pct <= 5.0):
                 entry_stage = "💎 冰点反身潜伏"
-                entry_advice = f"大盘冰点逆市抗跌，回踩VWAP({vwap:.2f})支撑阳包阴反身启动(万里挑一顶级潜伏点)"
+                entry_advice = f"大盘冰点逆市抗跌，回踩VWAP({vwap:.2f})支撑阳包阴反身启动({time_tip})"
             elif (1.0 <= pct <= 4.5) and (-0.5 <= vwap_dev <= 1.8) and (is_support_bounce or is_bullish_engulfing or vol_ratio >= 1.3):
                 entry_stage = "🟢 黄金潜伏区"
-                entry_advice = f"回踩VWAP({vwap:.2f})支撑放量启动，极高盈亏比(低吸上车点)"
+                entry_advice = f"回踩VWAP({vwap:.2f})支撑放量启动，极高盈亏比(低吸上车点 | {time_tip})"
             elif (4.5 < pct <= 7.5) and (0.5 <= vwap_dev <= 4.0) and (vol_ratio >= 1.8 or bid_p >= 65.0):
                 entry_stage = "🟡 半路点火区"
-                entry_advice = f"放量突破站稳均线(+{vwap_dev:.1f}%)，主力点火主升(半路上车点)"
+                entry_advice = f"放量突破站稳均线(+{vwap_dev:.1f}%)，主力点火主升(半路上车点 | {time_tip})"
             elif (7.5 < pct < 9.8) and bid_p >= 75.0:
                 entry_stage = "🔴 封板临界区"
-                entry_advice = f"大单连续扫盘冲击涨停，买盘压强{bid_p:.0f}%(抢跑封板卡位点)"
+                entry_advice = f"大单连续扫盘冲击涨停，买盘压强{bid_p:.0f}%(抢跑封板卡位点 | {time_tip})"
             else:
                 entry_stage = "📋 蓄势观察区"
-                entry_advice = "分时窄幅震荡，等待放量突破或回踩均线信号"
+                entry_advice = f"分时窄幅震荡，等待放量突破或回踩均线信号 ({time_tip})"
 
             r["entry_stage"] = entry_stage
             r["entry_advice"] = entry_advice
 
-            # ── 💡 核心量化打分：构建具备绝对区分度与统治力梯度的分层体系 ──
+            # ── 💡 核心量化打分：结合时序生命周期乘数 ──
             if is_limit_up:
                 base_score = 80.0
                 if consecutive >= 4:
@@ -639,7 +687,7 @@ class LimitUpEngine:
                 desc_tag = f"⚠️ 炸板分歧({momentum_score:.0f}分)"
 
             else:
-                # 未封板的冲板/潜伏/跟涨股 (55 ~ 78 分，严格不越界)
+                # 未封板的冲板/潜伏/跟涨股 (55 ~ 78 分，融合时间窗口衰减)
                 ch_score = 55.0 + min(10.0, (pct - 2.0) * 1.3)
                 ch_score += min(6.0, max(0.0, dff2 * 0.05 + dff3 * 0.01))
                 if is_reflexivity_leader:
@@ -648,9 +696,15 @@ class LimitUpEngine:
                     ch_score += 5.0
                 if vol_ratio > 1.8:
                     ch_score += 2.0
-                momentum_score = round(min(78.0, max(50.0, ch_score)), 0)
 
-                if is_reflexivity_leader:
+                # 应用时间衰减惩罚
+                ch_score = ch_score * time_multiplier
+                momentum_score = round(min(78.0, max(45.0, ch_score)), 0)
+
+                if "尾盘诱多" in entry_stage:
+                    r["tier_tag"] = "⚠️ 尾盘诱多脉冲"
+                    desc_tag = f"⚠️ 尾盘偷袭({momentum_score:.0f}分)"
+                elif is_reflexivity_leader:
                     r["tier_tag"] = "💎 冰点反身潜伏"
                     desc_tag = f"💎 反身潜伏({momentum_score:.0f}分)"
                 elif "黄金潜伏" in entry_stage:

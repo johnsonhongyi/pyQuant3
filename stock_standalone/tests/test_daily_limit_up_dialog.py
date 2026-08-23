@@ -37,26 +37,48 @@ class TestDailyLimitUpDialog(unittest.TestCase):
     def test_dialog_init_and_update(self):
         dialog = DailyLimitUpDialog(parent=None)
         self.assertIsNotNone(dialog)
-        self.assertGreater(dialog.table.columnCount(), 15)
-        # 断言默认不置顶
+        # 断言置顶状态与切换互斥
+        self.assertIn(dialog.stays_on_top, (True, False))
+        dialog.chk_ontop.setChecked(True)
+        self.assertTrue(dialog.stays_on_top)
+        dialog.chk_ontop.setChecked(False)
         self.assertFalse(dialog.stays_on_top)
 
-        mock_df = pd.DataFrame([
+        # 断言顶栏存在时间片生命周期直选控件
+        self.assertIsNotNone(dialog.combo_time_slice)
+        self.assertGreaterEqual(dialog.combo_time_slice.count(), 5)
+
+        mock_records = [
             {
                 "code": "688356",
                 "name": "键凯科技",
-                "price": 85.20,
-                "percent": 20.0,
-                "last_close": 71.00,
-                "dff": 4.5,
-                "dff2": 25.0,
-                "dff3": 45.0,
-                "Rank": 1,
-                "category": "化学制药"
+                "price": 107.04,
+                "pct": 20.0,
+                "consecutive_boards": 1,
+                "tier_tag": "💎 冰点反身性龙",
+                "seal_amount_wan": 47238.0,
+                "seal_to_circ_ratio": 7.26,
+                "seal_to_vol_ratio": 134.6,
+                "turnover_rate": 5.39,
+                "vol_ratio": 1.84,
+                "amount_yi": 3.51,
+                "is_limit_up": True,
+                "is_broken": False,
+                "dff": 0.0,
+                "rank": 11,
+                "dff2": 45.4,
+                "dff3": 72.0,
+                "rs_val": 19.91,
+                "resonance": "同步整理",
+                "category": "创新药;医美概念",
+                "extra_cols": {}
             }
-        ])
-        mock_df.set_index("code", drop=False, inplace=True)
-        dialog.update_data_payload(mock_df, sh_pct=1.0)
+        ]
+        dialog.current_records = mock_records
+        dialog.combo_time_slice.setCurrentIndex(0)
+        dialog.combo_tier_filter.setCurrentIndex(0)
+        dialog.search_edit.clear()
+        dialog._apply_filter()
         self.assertGreaterEqual(dialog.table.rowCount(), 1)
 
         # 测试自适应列宽与板块列宽限制

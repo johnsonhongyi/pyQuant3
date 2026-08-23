@@ -315,6 +315,55 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.lbl_kpi_seal.setStyleSheet("color: #00ffaa; font-size: 10pt;")
         self.kpi_layout.addWidget(self.lbl_kpi_seal)
 
+        self.kpi_layout.addSpacing(10)
+
+        # ⏱️ 盘中时间片生命周期直选 (支持根据实盘时间自动切换 / 手动点选锁定)
+        self.combo_time_slice = QComboBox()
+        self.combo_time_slice.addItems([
+            "⚡ 自动实盘跟随",
+            "⏱️ 全天全时段",
+            "👑 09:30~10:00 黄金定龙",
+            "💎 10:00~11:30 分歧低吸",
+            "🚀 13:00~14:00 午后助攻",
+            "⚠️ 14:00~14:45 尾盘诱多",
+            "🔒 14:45~15:00 尾盘定盘"
+        ])
+        self.combo_time_slice.setMinimumWidth(185)
+        self.combo_time_slice.setStyleSheet("""
+            QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 9.5pt; min-width: 180px; }
+            QComboBox::drop-down { width: 20px; }
+            QComboBox QAbstractItemView { background-color: #1e1e24; color: #ffd700; selection-background-color: #3d3014; }
+        """)
+        self.combo_time_slice.currentTextChanged.connect(self._apply_filter)
+        self.kpi_layout.addWidget(self.combo_time_slice)
+
+        # 梯队分类过滤 (放置在第一行宽敞区域，完整显示无截断)
+        self.combo_tier_filter = QComboBox()
+        self.combo_tier_filter.addItems([
+            "全部梯队", 
+            "💎 冰点反身性龙",
+            "💎 冰点反身潜伏",
+            "🟢 黄金潜伏区",
+            "🟡 半路点火区",
+            "🔴 封板临界区",
+            "👑 空间高度龙", 
+            "🚀 连板接力", 
+            "💎 统治级大封单",
+            "🎯 支撑阳包阴反转", 
+            "⭐ 20cm强势首板",
+            "🔥 强势主升首板", 
+            "⚡ 大阳冲板未封",
+            "💥 曾涨停炸板"
+        ])
+        self.combo_tier_filter.setMinimumWidth(135)
+        self.combo_tier_filter.setStyleSheet("""
+            QComboBox { background-color: #12241e; color: #00ffaa; border: 1px solid #00aa77; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 9.5pt; min-width: 130px; }
+            QComboBox::drop-down { width: 20px; }
+            QComboBox QAbstractItemView { background-color: #1e1e24; color: #00ffaa; selection-background-color: #143d2c; }
+        """)
+        self.combo_tier_filter.currentTextChanged.connect(self._apply_filter)
+        self.kpi_layout.addWidget(self.combo_tier_filter)
+
         self.kpi_layout.addStretch()
 
         self.btn_top_leader = QPushButton("🏆 空间龙头: --")
@@ -344,7 +393,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         main_layout.addWidget(self.kpi_frame)
 
-        # ── 2. 控制栏 (周期切换、历史回溯、搜索、过滤与操作按钮) ──
+        # ── 2. 控制栏 (周期切换、历史回溯、搜索与操作按钮) ──
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setContentsMargins(0, 2, 0, 2)
         ctrl_layout.setSpacing(6)
@@ -403,36 +452,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_history_date.currentIndexChanged.connect(self._on_history_date_selected)
         ctrl_layout.addWidget(self.combo_history_date)
 
-        # 梯队分类过滤
-        self.combo_tier_filter = QComboBox()
-        self.combo_tier_filter.addItems([
-            "全部梯队", 
-            "💎 冰点反身性龙",
-            "💎 冰点反身潜伏",
-            "🟢 黄金潜伏区",
-            "🟡 半路点火区",
-            "🔴 封板临界区",
-            "👑 空间高度龙", 
-            "🚀 连板接力", 
-            "💎 统治级大封单",
-            "🎯 支撑阳包阴反转", 
-            "⭐ 20cm强势首板",
-            "🔥 强势主升首板", 
-            "⚡ 大阳冲板未封",
-            "💥 曾涨停炸板"
-        ])
-        self.combo_tier_filter.setStyleSheet("""
-            QComboBox { background-color: #1e1e24; color: #00ffaa; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
-        """)
-        self.combo_tier_filter.currentTextChanged.connect(self._apply_filter)
-        ctrl_layout.addWidget(self.combo_tier_filter)
-
         # 搜索过滤框
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("🔍 搜索代码/名称/板块...")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setStyleSheet("""
-            QLineEdit { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; min-width: 130px; }
+            QLineEdit { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; min-width: 160px; }
         """)
         self.search_edit.textChanged.connect(self._apply_filter)
         ctrl_layout.addWidget(self.search_edit)
@@ -667,9 +692,80 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else today_str)
         self._update_kpi_display(summary)
 
-        # 填充表格
-        self._populate_table_rows(self.current_records)
-        self.lbl_status.setText(f"数据已更新: 视图【{self.current_mode}】共 {len(self.current_records)} 只标的 (更新时间: {time.strftime('%H:%M:%S')})")
+        # 应用时间片与梯队过滤并填充表格
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """【三维精准分拣】联合时间片生命周期、梯队分类与搜索文本进行实时原位过滤"""
+        if not hasattr(self, "current_records") or not self.current_records:
+            self._populate_table_rows([])
+            return
+
+        raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else "⚡ 自动实盘跟随"
+        if "全天全时段" in raw_slice:
+            # 用户明确选择【全天全时段】时，锁定全量展示，绝不自动切换
+            time_slice = "⏱️ 全天全时段"
+        elif "自动实盘跟随" in raw_slice:
+            # 自动根据当前实盘本地/A股时钟切换对应时间片动能
+            from ats.limit_up_engine import get_live_time_slice_name
+            time_slice = get_live_time_slice_name()
+        else:
+            time_slice = raw_slice
+
+        tier_filter = self.combo_tier_filter.currentText() if hasattr(self, "combo_tier_filter") else "全部梯队"
+        kw = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
+
+        filtered = []
+        for r in self.current_records:
+            # 1. 关键词搜索
+            if kw:
+                c = str(r.get("code", "")).lower()
+                n = str(r.get("name", "")).lower()
+                cat = str(r.get("category", "")).lower()
+                if kw not in c and kw not in n and kw not in cat:
+                    continue
+
+            # 2. 梯队分类过滤
+            if tier_filter != "全部梯队":
+                tag = str(r.get("tier_tag", ""))
+                if tier_filter not in tag:
+                    continue
+
+            # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段时跳过过滤)
+            if "全天全时段" in time_slice:
+                pass
+            elif "黄金定龙" in time_slice:
+                # 09:30~10:00 黄金定龙期标的
+                t_phase = str(r.get("time_phase", ""))
+                is_zt = r.get("is_limit_up", False)
+                pct = _safe_float(r.get("pct", 0.0))
+                if "黄金定龙" not in t_phase and not is_zt and pct < 7.0:
+                    continue
+            elif "分歧低吸" in time_slice:
+                # 10:00~11:30 分歧回踩低吸标的
+                stage = str(r.get("entry_stage", ""))
+                is_supp = r.get("is_support_bounce", False)
+                if "低吸" not in stage and "潜伏" not in stage and not is_supp:
+                    continue
+            elif "午后助攻" in time_slice:
+                t_phase = str(r.get("time_phase", ""))
+                stage = str(r.get("entry_stage", ""))
+                if "午后" not in t_phase and "点火" not in stage and "先锋" not in stage:
+                    continue
+            elif "尾盘诱多" in time_slice:
+                # 尾盘脉冲高危标的
+                stage = str(r.get("entry_stage", ""))
+                tier = str(r.get("tier_tag", ""))
+                if "尾盘" not in stage and "尾盘" not in tier and not r.get("is_broken", False):
+                    continue
+            elif "尾盘定盘" in time_slice:
+                if not r.get("is_limit_up", False):
+                    continue
+
+            filtered.append(r)
+
+        self._populate_table_rows(filtered)
+        self.lbl_status.setText(f"数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】共 {len(filtered)} 只标的 (更新: {time.strftime('%H:%M:%S')})")
 
     def _update_kpi_display(self, s: Dict[str, Any]):
         zt_cnt = s.get("zt_count", 0)
@@ -862,6 +958,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 tip = (
                     f"【{code} {name} 盘中潜伏与上车深度透视】\n"
                     f"────────────────────────\n"
+                    f"• ⏰ 介入时机评估: {r.get('time_phase', '稳健定盘期')} ({r.get('time_tip', '')})\n"
                     f"• 上车信号梯度: {entry_stage}\n"
                     f"• 实战操作建议: {entry_advice}\n"
                     f"• 梯队动能评分: {momentum_score:.0f} 分 (统治力梯队: {tier_tag})\n"
@@ -1036,30 +1133,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                         pass
                     return
         super().keyPressEvent(event)
-
-    def _apply_filter(self):
-        """根据搜索文本与梯队下拉框过滤表格行"""
-        search_txt = self.search_edit.text().strip().lower()
-        tier_filter = self.combo_tier_filter.currentText()
-
-        for r in range(self.table.rowCount()):
-            code_item = self.table.item(r, 0)
-            name_item = self.table.item(r, 1)
-            tier_item = self.table.item(r, 5)
-            # 所属板块现在放置在最后一列
-            cat_item = self.table.item(r, self.table.columnCount() - 1)
-
-            code = code_item.text().lower() if code_item else ""
-            name = name_item.text().lower() if name_item else ""
-            tier = tier_item.text() if tier_item else ""
-            cat = cat_item.text().lower() if cat_item else ""
-
-            match_search = (search_txt in code or search_txt in name or search_txt in cat) if search_txt else True
-            match_tier = True
-            if tier_filter != "全部梯队":
-                match_tier = tier_filter in tier or tier in tier_filter
-
-            self.table.setRowHidden(r, not (match_search and match_tier))
 
     def _on_cell_clicked(self, row: int, col: int):
         code_item = self.table.item(row, 0)
@@ -1363,6 +1436,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def _on_stays_on_top_toggled(self, checked: bool):
         self.stays_on_top = checked
+        if checked:
+            self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            if self.is_hidden_state:
+                self.show_normal_position()
+            self.setWindowOpacity(1.0)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
         self.show()
         self._save_window_states()
@@ -1558,6 +1638,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
+        if self.stays_on_top:
+            self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             self.anchor_edge = None
