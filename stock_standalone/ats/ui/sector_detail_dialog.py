@@ -27,98 +27,14 @@ from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger(__name__)
 
-# 纯直连 Opener (杜绝本地代理对国内行情 API 干扰)
-_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_HTTP_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://finance.sina.com.cn/'
-}
-
-def fetch_sina_stock_quotes_fast(codes: List[str]) -> Dict[str, Dict[str, Any]]:
-    """批量通过新浪 A 股接口获取股票实时现价、涨跌幅、昨收、今开 (国内直连 50ms 极速响应)"""
-    if not codes:
-        return {}
-    results = {}
-    clean_codes = [str(c).strip().zfill(6) for c in codes if str(c).strip()]
-    
-    # 分批，每批最多 60 个
-    batch_size = 60
-    for i in range(0, len(clean_codes), batch_size):
-        batch = clean_codes[i:i + batch_size]
-        sina_codes = [f"{'sh' if c.startswith(('6', '9')) or c.startswith('688') else 'sz'}{c}" for c in batch]
-        url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
-        try:
-            req = urllib.request.Request(url, headers=_HTTP_HEADERS)
-            with _DIRECT_OPENER.open(req, timeout=2.5) as resp:
-                content = resp.read().decode('gbk', errors='ignore')
-                for line in content.strip().split('\n'):
-                    if line and '="' in line:
-                        parts = line.split('="')
-                        sym = parts[0].split('hq_str_')[-1]
-                        code = sym[2:]
-                        fields = parts[1].replace('";', '').split(',')
-                        if len(fields) >= 5:
-                            name = fields[0].strip()
-                            open_p = float(fields[1] or 0.0)
-                            prev_close = float(fields[2] or 0.0)
-                            curr_p = float(fields[3] or 0.0)
-                            high_p = float(fields[4] or 0.0)
-                            low_p = float(fields[5] or 0.0)
-                            pct = (curr_p - prev_close) / prev_close * 100.0 if prev_close > 0 else 0.0
-                            vol = float(fields[8] or 0.0) if len(fields) > 8 else 0.0
-                            amount = float(fields[9] or 0.0) if len(fields) > 9 else 0.0
-                            results[code] = {
-                                'code': code,
-                                'name': name,
-                                'price': curr_p,
-                                'prev_close': prev_close,
-                                'open': open_p,
-                                'high': high_p,
-                                'low': low_p,
-                                'pct': round(pct, 2),
-                                'volume': vol,
-                                'amount': amount
-                            }
-        except Exception as e:
-            logger.debug(f"fetch_sina_stock_quotes_fast error: {e}")
-    return results
-
-
-# 经典行业中军龙头核心储备库 (覆盖全行业 15 大核心赛道)
-FAMOUS_SECTOR_LEADERS = {
-    "半导体": [("688981", "中芯国际"), ("603501", "韦尔股份"), ("002371", "北方华创"), ("688012", "华海清科"), ("688008", "澜起科技"), ("688036", "传音控股"), ("688126", "沪硅产业"), ("600584", "长电科技")],
-    "存储芯片": [("603986", "兆易创新"), ("688981", "中芯国际"), ("002156", "通富微电"), ("688041", "普冉股份"), ("300661", "圣邦股份"), ("688008", "澜起科技"), ("688521", "芯原股份"), ("300223", "北京君正")],
-    "传媒": [("300058", "蓝色光标"), ("603533", "掌阅科技"), ("301171", "易点天下"), ("002624", "完美世界"), ("300413", "芒果超媒"), ("002354", "天娱数科"), ("600633", "浙数文化"), ("300364", "中文在线")],
-    "软件开发": [("300496", "中科创达"), ("600588", "用友网络"), ("300033", "同花顺"), ("688111", "金山办公"), ("300229", "拓尔思"), ("600570", "恒生电子"), ("002230", "科大讯飞"), ("300339", "润和软件")],
-    "国防军工": [("601606", "长城军工"), ("600118", "中国卫星"), ("002179", "中航光电"), ("600760", "中航沈飞"), ("000768", "中航西飞"), ("600893", "航发动力"), ("002013", "中航机载"), ("600372", "中航电子")],
-    "汽车整车": [("600733", "北汽蓝谷"), ("002594", "比亚迪"), ("601633", "长城汽车"), ("601127", "赛力斯"), ("600104", "上汽集团"), ("000625", "长安汽车"), ("600066", "宇通客车"), ("601238", "广汽集团")],
-    "贵金属": [("601899", "紫金矿业"), ("600988", "赤峰黄金"), ("600547", "山东黄金"), ("600489", "中金黄金"), ("000975", "山金国际"), ("600960", "渤海化学"), ("000506", "中润资源")],
-    "石油化工": [("600938", "中国海油"), ("601857", "中国石油"), ("600583", "中海油服"), ("600028", "中国石化"), ("600346", "恒力石化"), ("002493", "荣盛石化"), ("600256", "广汇能源")],
-    "有色金属": [("603993", "洛阳钼业"), ("601899", "紫金矿业"), ("600362", "江西铜业"), ("601600", "中国铝业"), ("000630", "铜陵有色"), ("600111", "北方稀土"), ("002460", "赣锋锂业"), ("002466", "天齐锂业")],
-    "AI/软件": [("300058", "蓝色光标"), ("002230", "科大讯飞"), ("688111", "金山办公"), ("300033", "同花顺"), ("300496", "中科创达"), ("300229", "拓尔思"), ("300364", "中文在线"), ("688256", "寒武纪")],
-    "金融/权重龙头": [("600036", "招商银行"), ("601318", "中国平安"), ("600030", "中信证券"), ("601688", "华泰证券"), ("601211", "国泰君安"), ("601166", "兴业银行"), ("600999", "招商证券")],
-    "石油化工/资源": [("601857", "中国石油"), ("600028", "中国石化"), ("600938", "中国海油"), ("601088", "中国神华"), ("600188", "兖矿能源"), ("601225", "陕西煤业")],
-    "消费电子": [("002475", "立讯精密"), ("002241", "歌尔股份"), ("603501", "韦尔股份"), ("300433", "蓝思科技"), ("002456", "欧菲光"), ("002384", "东山精密")],
-    "通信设备": [("000063", "中兴通讯"), ("300308", "中际旭创"), ("300502", "新易盛"), ("300394", "天孚通信"), ("600498", "烽火通信"), ("600487", "亨通光电")],
-    "电力设备": [("300750", "宁德时代"), ("601012", "隆基绿能"), ("600406", "国电南瑞"), ("002459", "晶澳科技"), ("300274", "阳光电源"), ("601877", "正泰电器")]
-}
-
-SECTOR_SYNONYMS = {
-    "半导体": ["半导体及部件", "半导体", "芯片", "电子元器件"],
-    "存储芯片": ["半导体及部件", "存储芯片", "芯片", "电子元器件"],
-    "传媒": ["传媒娱乐", "文化传媒", "传媒", "互联网"],
-    "软件开发": ["软件服务", "软件开发", "IT设备", "计算机"],
-    "国防军工": ["国防军工", "军工", "航天装备", "通用设备"],
-    "汽车整车": ["汽车类", "汽车整车", "新能源车", "交运设备"],
-    "贵金属": ["贵金属", "黄金", "珠宝首饰"],
-    "石油化工": ["石油行业", "石油", "石油化工", "采掘行业", "化学原料"],
-    "有色金属": ["有色金属", "有色", "小金属", "稀缺资源", "工业金属"],
-    "AI/软件": ["软件服务", "人工智能", "互联网", "软件开发", "算力"],
-    "金融/权重龙头": ["银行", "证券", "保险"],
-    "石油化工/资源": ["石油", "煤炭开采", "化工", "化学原料"],
-    "消费电子": ["消费电子", "苹果概念", "电子元件"],
-    "通信设备": ["通信设备", "CPO", "5G概念", "光通信"]
-}
+from ats.sector_data_aggregator import (
+    SectorDataAggregator,
+    get_sector_extra_cols,
+    get_sector_table_headers,
+    fetch_sina_stock_quotes_fast,
+    FAMOUS_SECTOR_LEADERS,
+    SECTOR_SYNONYMS
+)
 
 
 class SectorDetailWorker(QThread):
@@ -135,278 +51,19 @@ class SectorDetailWorker(QThread):
 
     def run(self):
         try:
-            target_codes = set()
-            code_to_name = {}
-
-            # 1. 优先使用外部传入的 member_codes
-            if self.member_codes:
-                for c in self.member_codes:
-                    c_clean = str(c).strip().zfill(6)
-                    if c_clean:
-                        target_codes.add(c_clean)
-
-            # 2. 如果 current_df 存在且包含 category 列，进行板块关键词模糊向量匹配
-            if self.current_df is not None and not self.current_df.empty and 'category' in self.current_df.columns:
-                try:
-                    synonyms = [self.sector_name] + SECTOR_SYNONYMS.get(self.sector_name, [])
-                    pattern = '|'.join([re.escape(s) for s in synonyms if s])
-                    matched_series = self.current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
-                    df_matched = self.current_df[matched_series]
-                    if not df_matched.empty:
-                        for code_idx in df_matched.index[:60]:
-                            c_clean = str(code_idx).strip().zfill(6)
-                            if c_clean:
-                                target_codes.add(c_clean)
-                except Exception as ex:
-                    logger.debug(f"current_df 板块匹配异常: {ex}")
-
-            # 3. 若成分股不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐
-            if len(target_codes) < 6:
-                for key, st_list in FAMOUS_SECTOR_LEADERS.items():
-                    if key == self.sector_name or key in self.sector_name or self.sector_name in key:
-                        for c_code, def_name in st_list:
-                            c_clean = str(c_code).strip().zfill(6)
-                            target_codes.add(c_clean)
-                            code_to_name[c_clean] = def_name
-                        break
-
-            # 4. 若仍不足，从 bidding_session_data 尝试补齐
-            if len(target_codes) < 6:
-                try:
-                    ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-                    if ram_path and os.path.exists(ram_path):
-                        with open(ram_path, 'rb') as f:
-                            data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
-                            sec_data = data.get('sector_data', {}).get(self.sector_name, {})
-                            if sec_data:
-                                l_c = str(sec_data.get('leader', '')).strip().zfill(6)
-                                if l_c: target_codes.add(l_c)
-                                for fol in sec_data.get('followers', []):
-                                    f_c = str(fol.get('code', '')).strip().zfill(6)
-                                    if f_c: target_codes.add(f_c)
-                except Exception:
-                    pass
-
-            code_list = list(target_codes)
-            if not code_list:
-                self.finished_signal.emit([], 0.0, "--", {'status': '无成分股数据'})
-                return
-
-            # 5. 基础行情获取通道 1: TDX API 直连 (最高优先级，完全对齐新股/次新股策略体系)
-            tdx_quote_map = {}
-            tdx_alpha_map = {}
-            try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                
-                # A. 批量极速获取 TDX 官方基础行情 (现价, 昨收, 涨跌幅, 开盘, 最高, 最低, 成交额)
-                tdx_quotes = fetcher.get_security_quotes_safe(code_list, force=False)
-                if tdx_quotes:
-                    for q in tdx_quotes:
-                        c_clean = str(q.get("code", "")).strip().zfill(6)
-                        p = float(q.get("price", 0.0) or 0.0)
-                        last_c = float(q.get("last_close", 0.0) or 0.0)
-                        if c_clean and (p > 0 or last_c > 0):
-                            pct = round((p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
-                            tdx_quote_map[c_clean] = {
-                                'price': p,
-                                'prev_close': last_c,
-                                'open': float(q.get("open", 0.0) or 0.0),
-                                'high': float(q.get("high", 0.0) or 0.0),
-                                'low': float(q.get("low", 0.0) or 0.0),
-                                'amount': float(q.get("amount", 0.0) or 0.0),
-                                'vol': float(q.get("vol", 0.0) or 0.0),
-                                'pct': pct
-                            }
-
-                # B. 批量获取 TDX 高频 Alpha 盘口买点评级
-                sec_map = {c: self.sector_name for c in code_list}
-                mp_cache = {}
-                n_map = {}
-                if self.current_df is not None:
-                    import pandas as pd
-                    for c in code_list:
-                        if c in self.current_df.index:
-                            r_row = self.current_df.loc[c]
-                            if isinstance(r_row, pd.DataFrame): r_row = r_row.iloc[0]
-                            n_map[c] = str(r_row.get('name', c))
-                            mp_cache[c] = {
-                                'dff': float(r_row.get('dff', 0.0) or 0.0),
-                                'dff2': float(r_row.get('DFF2', r_row.get('dff2', 0.0)) or 0.0),
-                                'dff3': float(r_row.get('DFF3', r_row.get('dff3', 0.0)) or 0.0),
-                                'rank': int(r_row.get('Rank', r_row.get('rank', 999)) or 999)
-                            }
-                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(code_list, sec_map, mp_cache, n_map)
-                for aq in alpha_quotes:
-                    tdx_alpha_map[aq["code"]] = aq
-            except Exception as e:
-                logger.debug(f"TDX API 批量行情拉取降级: {e}")
-
-            # 6. 基础行情获取通道 2: 新浪直连 50ms 极速备用兜底 (当 TDX 离线或缺失时补充)
-            sina_quotes_map = {}
-            missing_codes = [c for c in code_list if c not in tdx_quote_map or tdx_quote_map[c].get('price', 0) <= 0]
-            if missing_codes:
-                sina_quotes_map = fetch_sina_stock_quotes_fast(missing_codes)
-
-            # 7. 组装行数据：动态列(dff, dff2, dff3, rank, 自定义列)全部从 df 获取，基础行情从 TDX API 获取
-            rows = []
-            leader_code = ""
-            leader_name = ""
-            max_pct = -999.0
-            sum_pct = 0.0
-            up_count = 0
-
-            for code_str in code_list:
-                name = code_to_name.get(code_str) or (self.get_name_fn(code_str) if self.get_name_fn else "个股")
-                if not name or name == "未知" or name == code_str:
-                    if code_str in sina_quotes_map:
-                        name = sina_quotes_map[code_str].get('name', name)
-
-                score = 75.0
-                pct_val = 0.0
-                dff_val = 0.0
-                rank_val = 0
-                dff2_val = 0.0
-                dff3_val = 0.0
-                pattern_hint = "行业核心中军"
-                type_str = "跟涨"
-                row = None
-
-                # ── 💡 动态列与策略自定义列：100% 全部使用 df 获取 ──
-                if self.current_df is not None:
-                    import pandas as pd
-                    if code_str in self.current_df.index:
-                        row = self.current_df.loc[code_str]
-                        if isinstance(row, pd.DataFrame): row = row.iloc[0]
-                        name_df = str(row.get('name', '')).strip()
-                        if name_df and name_df != "未知": name = name_df
-                        try: pct_val = float(row.get('percent', row.get('pct', 0.0)))
-                        except: pass
-                        try: dff_val = float(row.get('dff', 0.0))
-                        except: pass
-                        try: rank_val = int(row.get('Rank', row.get('rank', 0)))
-                        except: pass
-                        try: dff2_val = float(row.get('DFF2', row.get('dff2', 0.0)))
-                        except: pass
-                        try: dff3_val = float(row.get('DFF3', row.get('dff3', 0.0)))
-                        except: pass
-
-                # ── 💡 基础数据：优先使用 TDX API 权威实时行情驱动 ──
-                tq = tdx_quote_map.get(code_str)
-                if tq and tq.get('price', 0) > 0:
-                    pct_val = tq.get('pct', pct_val)
-                    pattern_hint = f"现价 {tq.get('price'):.2f} | 昨收 {tq.get('prev_close'):.2f}"
-                elif code_str in sina_quotes_map:
-                    sq = sina_quotes_map[code_str]
-                    pct_val = sq.get('pct', pct_val)
-                    if not name or name == "个股" or name == code_str:
-                        name = sq.get('name', name)
-                    pattern_hint = f"现价 {sq.get('price'):.2f} | 昨收 {sq.get('prev_close'):.2f}"
-
-                # 叠加 TDX 高频买点评级与形态特征
-                aq = tdx_alpha_map.get(code_str)
-                if aq:
-                    pct_val = aq.get("pct", pct_val)
-                    type_str = aq.get("buy_type", type_str)
-                    score = aq.get("alpha_score", score)
-                    vwap_dev = aq.get("vwap_dev_pct", 0.0)
-                    vol_r = aq.get("vol_ratio", 1.0)
-                    pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
-
-                # ── 💡 动态自定义列：从 df 严格映射提取 ──
-                extra_dict = {}
-                for ec in self.extra_cols:
-                    val_raw = None
-                    if row is not None:
-                        for k in (ec, ec.lower(), ec.upper()):
-                            if k in row:
-                                val_raw = row[k]
-                                break
-                    extra_dict[ec] = cct.format_col_value(ec, val_raw)
-
-                if pct_val > max_pct:
-                    max_pct = pct_val
-                    leader_code = code_str
-                    leader_name = name
-
-                if pct_val > 0.001:
-                    up_count += 1
-                sum_pct += pct_val
-
-                rows.append({
-                    'code': code_str,
-                    'name': name,
-                    'score': score,
-                    'type': type_str,
-                    'pct': pct_val,
-                    'start_pct': round(pct_val - dff_val, 2),
-                    'dff': dff_val,
-                    'rank': rank_val,
-                    'dff2': dff2_val,
-                    'dff3': dff3_val,
-                    'extra_cols': extra_dict,
-                    'pattern': pattern_hint
-                })
-
-            # 动态标记 👑 领涨龙头
-            for r in rows:
-                if r['code'] == leader_code:
-                    r['type'] = '👑 领涨龙头'
-                    r['score'] = max(98.0, r['score'])
-                    r['pattern'] = '板块领涨核心先锋'
-
-            rows.sort(key=lambda x: (x['score'], x['pct']), reverse=True)
-
-            # 计算板块整体强度得分
-            avg_pct = sum_pct / len(rows) if rows else 0.0
-            calc_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / len(rows)) * 30.0))
-
-            leader_str = f"{leader_name} ({leader_code}) [{max_pct:+.2f}%]"
-            meta = {
-                'status': '✅ 实时在线更新 (新浪50ms直连 + TDX秒级)',
-                'count': len(rows),
-                'up_count': up_count,
-                'avg_pct': avg_pct
-            }
-            self.finished_signal.emit(rows, round(calc_score, 1), leader_str, meta)
+            aggregator = SectorDataAggregator.get_instance()
+            rows, score, leader_str, meta = aggregator.fetch_sector_detail(
+                sector_name=self.sector_name,
+                member_codes=self.member_codes,
+                current_df=self.current_df,
+                extra_cols=self.extra_cols,
+                get_name_fn=self.get_name_fn
+            )
+            self.finished_signal.emit(rows, score, leader_str, meta)
         except Exception as e:
             logger.error(f"SectorDetailWorker run error: {e}")
             self.finished_signal.emit([], 0.0, "--", {'status': f'⚠️ 更新异常: {e}'})
         
-def get_sector_extra_cols():
-    """获取板块明细追加的动态自定义列（排除基础列已有的字段）"""
-    try:
-        from JohnsonUtil import commonTips as cct
-        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
-    except Exception:
-        cfg_cols = ['ch_bc2']
-    BASE_EXCLUDE = {
-        'code', 'name', 'score', 'type', 'pct', 'percent', 'start_pct', 
-        'dff', 'rank', 'dff2', 'dff3', 'pattern', 'price', 'trade'
-    }
-    extra = []
-    seen = set(BASE_EXCLUDE)
-    for c in cfg_cols:
-        c_str = str(c).strip()
-        if c_str and c_str.lower() not in seen:
-            extra.append(c_str)
-            seen.add(c_str.lower())
-    return extra
-
-def get_sector_table_headers(extra_cols=None):
-    if extra_cols is None:
-        extra_cols = get_sector_extra_cols()
-    try:
-        from JohnsonUtil import commonTips as cct
-        col_map = getattr(cct, 'vis_column_map', {}) or {}
-    except Exception:
-        col_map = {}
-    base_pre = ["代码", "名称", "得分", "类型", "涨幅", "起点", "DFF", "Rank", "DFF2", "DFF3"]
-    extra_headers = [col_map.get(c, c) for c in extra_cols]
-    base_post = ["形态提示"]
-    return base_pre + extra_headers + base_post
-
-
 class ATSSectorDetailDialog(QDialog):
     """
     ATS 强势板块成分股明细与高频量化实时弹窗
@@ -607,6 +264,36 @@ class ATSSectorDetailDialog(QDialog):
         self._auto_timer.timeout.connect(lambda: self.refresh_data(force=False))
         self._auto_timer.start(15000)
 
+    def update_data(self, current_df=None):
+        """【外部/主窗口数据同步入口】供主窗口实盘行情轮询时推送最新 DataFrame 或原地复用更新"""
+        if current_df is not None and not current_df.empty:
+            self._cached_df = current_df
+        if hasattr(self, 'title_lbl'):
+            self.title_lbl.setText(f"板块名称: {self.sector_name}")
+        self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频行情)")
+        self.refresh_data(force=False)
+
+    def load_data(self, df_realtime=None, member_codes=None):
+        """【兼容/快速加载入口】支持同步直接根据传入 DataFrame 计算并渲染，或触发异步刷新"""
+        if df_realtime is not None and not df_realtime.empty:
+            self._cached_df = df_realtime
+        if member_codes:
+            self.member_codes = member_codes
+        # 优先使用显式注入的 DataFrame 同步计算渲染（单测/极速离线保障）
+        aggregator = SectorDataAggregator.get_instance()
+        current_df = getattr(self, '_cached_df', None)
+        get_name_fn = None
+        if current_df is None:
+            current_df, get_name_fn = aggregator.resolve_active_strategy_df(self)
+        rows, score, leader_str, meta = aggregator.fetch_sector_detail(
+            sector_name=self.sector_name,
+            member_codes=self.member_codes,
+            current_df=current_df,
+            extra_cols=self.extra_cols,
+            get_name_fn=get_name_fn
+        )
+        self._on_worker_finished(rows, score, leader_str, meta)
+
     def refresh_data(self, force: bool = False):
         """异步拉取板块成分股最新实时高频行情与特征"""
         if self._worker and self._worker.isRunning():
@@ -616,40 +303,11 @@ class ATSSectorDetailDialog(QDialog):
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("⏳ 正在刷新...")
 
-        # 解析 parent 链中的 current_df 与 get_name_fn
-        # 递归从 parent 链与全局所有活跃窗口中搜寻全量策略 DataFrame (提取 dff, dff2, dff3, rank, custom_cols)
+        # 优先使用显式注入的 _cached_df，否则从统一聚合引擎探测感知系统活跃的策略 DataFrame
+        current_df = getattr(self, '_cached_df', None)
         get_name_fn = None
-        current_df = None
-        
-        # 1. 优先从父窗口链检索
-        p = self._get_parent_mw() or self.parent() or self.window()
-        while p:
-            if hasattr(p, 'get_stock_name') and not get_name_fn:
-                get_name_fn = p.get_stock_name
-            for attr in ('current_df', '_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'top_now'):
-                df_cand = getattr(p, attr, None)
-                if df_cand is not None and not df_cand.empty:
-                    current_df = df_cand
-                    break
-            if current_df is not None and get_name_fn:
-                break
-            p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
-
-        # 2. 若仍未找到，从 QApplication 所有顶层窗口中探测主策略窗口的 current_df
         if current_df is None:
-            try:
-                for top_w in QApplication.topLevelWidgets():
-                    for attr in ('current_df', '_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'top_now'):
-                        df_cand = getattr(top_w, attr, None)
-                        if df_cand is not None and not df_cand.empty:
-                            current_df = df_cand
-                            if not get_name_fn and hasattr(top_w, 'get_stock_name'):
-                                get_name_fn = top_w.get_stock_name
-                            break
-                    if current_df is not None:
-                        break
-            except Exception:
-                pass
+            current_df, get_name_fn = SectorDataAggregator.get_instance().resolve_active_strategy_df(self)
 
         self._worker = SectorDetailWorker(
             sector_name=self.sector_name,
@@ -689,6 +347,14 @@ class ATSSectorDetailDialog(QDialog):
         self._is_rendering = True
         self.table.blockSignals(True)
         try:
+            # 记录刷新前用户选中的股票代码，避免刷新导致选中状态跳脱
+            curr_sel_code = None
+            curr_row = self.table.currentRow()
+            if curr_row >= 0 and curr_row < self.table.rowCount():
+                item0 = self.table.item(curr_row, 0)
+                if item0:
+                    curr_sel_code = item0.text().strip()
+
             current_extra = get_sector_extra_cols()
             if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
                 self.extra_cols = current_extra
@@ -806,7 +472,15 @@ class ATSSectorDetailDialog(QDialog):
                 self.table.setItem(row_idx, pat_col_idx, pat_item)
                 
             self.table.setSortingEnabled(True)
-            self.table.clearSelection()
+
+            # 恢复刷新前用户选中的股票行
+            if curr_sel_code:
+                for r_i in range(len(rows)):
+                    if str(rows[r_i].get('code', '')) == curr_sel_code:
+                        self.table.selectRow(r_i)
+                        break
+            else:
+                self.table.clearSelection()
         finally:
             self.table.blockSignals(False)
             self._is_rendering = False
@@ -983,21 +657,8 @@ class ATSSectorDetailDialog(QDialog):
             from PyQt6.QtCore import Qt as _Qt
             QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
             QApplication.processEvents()
-            # 尝试从 parent 链或活跃窗口中获取包含自定义列的 DataFrame
-            _period_data = None
-            try:
-                p = self.parent() or self.window()
-                while p:
-                    for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
-                        df_cand = getattr(p, attr, None)
-                        if df_cand is not None and not df_cand.empty:
-                            _period_data = df_cand
-                            break
-                    if _period_data is not None:
-                        break
-                    p = p.parent() if hasattr(p, 'parent') and callable(p.parent) else None
-            except Exception:
-                pass
+            # 从统一聚合引擎探测感知系统活跃的策略 DataFrame
+            _period_data, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(self)
             summaries = audit_multiple_codes(
                 list(code_to_name.keys()),
                 end_date=None,
@@ -1019,8 +680,25 @@ class ATSSectorDetailDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, '_auto_timer') and self._auto_timer and not self._auto_timer.isActive():
+            self._auto_timer.start(15000)
+
+    def hideEvent(self, event):
+        if hasattr(self, '_auto_timer') and self._auto_timer and self._auto_timer.isActive():
+            self._auto_timer.stop()
+        super().hideEvent(event)
+
     def closeEvent(self, event):
         self._save_geometry()
+        if hasattr(self, '_auto_timer') and self._auto_timer:
+            self._auto_timer.stop()
+        if hasattr(self, '_worker') and self._worker and self._worker.isRunning():
+            try:
+                self._worker.wait(1000)
+            except Exception:
+                pass
         # Save header state of the table
         if hasattr(self.table, 'save_column_widths'):
             try:
