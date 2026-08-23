@@ -1,5 +1,5 @@
 # ==============================================================================
-# 量化股票监控与交易系统 — DNS Fake-IP 过滤白名单 (直连解析真实IP)
+# 量化股票监控与 EA/Steam 游戏 — DNS Fake-IP 过滤白名单 (直连解析真实IP)
 # 保存路径: stock_standalone/config/clash_rules/clash_dns_fakeip_filter.yaml
 # ==============================================================================
 
@@ -19,3 +19,16 @@ fake-ip-filter:
   - '*.bse.com.cn'
   - '*.bse.cn'
   - '*.cninfo.com.cn'
+  # EA 域名与 CDN 白名单 (真实 IP 直连，跑满下载带宽)
+  - '*.ea.com'
+  - '*.origin.com'
+  - '*.electronicarts.com'
+  - '*.akamaized.net'
+  - '*.akamaihd.net'
+  - '*.edgekey.net'
+  - '*.edgesuite.net'
+  - '*.respawn.com'
+  - '*.dice.se'
+  # Steam 下载 CDN
+  - '*.steamconnecttest.com'
+  - '*.steamcontent.com'

@@ -1,5 +1,5 @@
 # ==============================================================================
-# 量化股票监控与交易系统 — Clash / Mihomo 专属国内直连前置规则 (Merge 格式)
+# 量化股票监控与 EA/Steam 游戏极速下载 — Clash / Mihomo 专属直连前置规则 (Merge 格式)
 # 适用客户端: Clash Verge Rev / Clash Nyanpasu / Mihomo Party / Clash for Windows
 # 保存路径: stock_standalone/config/clash_rules/clash_custom_direct_rules.yaml
 # ==============================================================================
@@ -35,14 +35,71 @@ prepend-rules:
   - DOMAIN-SUFFIX,chinamoney.com.cn,DIRECT  # 中国外汇交易中心
 
   # ----------------------------------------------------------------------------
-  # 3. 关键字兜底直连
+  # 3. EA 平台与游戏极速下载 (包括 EA App、Origin、Apex、战地、FIFA 等 CDN)
+  # ----------------------------------------------------------------------------
+  # EA 域名与接口直连
+  - DOMAIN-SUFFIX,ea.com,DIRECT             # EA 官方主站、app-images、junction、API
+  - DOMAIN-SUFFIX,origin.com,DIRECT         # Origin 客户端与商城
+  - DOMAIN-SUFFIX,electronicarts.com,DIRECT # Electronic Arts
+  - DOMAIN-SUFFIX,eamobile.com,DIRECT       # EA 移动端
+  - DOMAIN-SUFFIX,dice.se,DIRECT            # DICE 战地工作室
+  - DOMAIN-SUFFIX,respawn.com,DIRECT        # Respawn Apex 英雄工作室
+  - DOMAIN-SUFFIX,bioware.com,DIRECT        # BioWare 工作室
+  - DOMAIN-SUFFIX,frostbite.com,DIRECT      # 寒霜引擎
+  - DOMAIN-SUFFIX,eacdn.com,DIRECT          # EA CDN
+  # EA 游戏下载与鉴权专用 CDN (直连跑满千兆带宽)
+  - DOMAIN-SUFFIX,akamaized.net,DIRECT      # ealockbox.akamaized.net 等 EA 下载鉴权
+  - DOMAIN-SUFFIX,akamaihd.net,DIRECT       # origin-a.akamaihd.net 等游戏下载包
+  - DOMAIN-SUFFIX,edgekey.net,DIRECT        # Akamai EdgeKey CDN
+  - DOMAIN-SUFFIX,edgesuite.net,DIRECT      # Akamai EdgeSuite CDN
+  # EA 游戏与下载进程名直连 (底层进程级拦截，绝不走代理)
+  - PROCESS-NAME,EADesktop.exe,DIRECT       # EA App 主程序
+  - PROCESS-NAME,EABackgroundService.exe,DIRECT # EA App 核心后台下载进程
+  - PROCESS-NAME,EALauncher.exe,DIRECT      # EA 启动器
+  - PROCESS-NAME,EACrashReporter.exe,DIRECT # EA 崩溃报告
+  - PROCESS-NAME,Origin.exe,DIRECT          # Origin 客户端
+  - PROCESS-NAME,OriginClientService.exe,DIRECT # Origin 下载与客户端服务
+  - PROCESS-NAME,OriginWebHelperService.exe,DIRECT # Origin 网页助手
+  - PROCESS-NAME,r5apex.exe,DIRECT          # Apex Legends (Apex 英雄)
+  - PROCESS-NAME,bf1.exe,DIRECT             # Battlefield 1 (战地1)
+  - PROCESS-NAME,bfv.exe,DIRECT             # Battlefield V (战地5)
+  - PROCESS-NAME,bf2042.exe,DIRECT          # Battlefield 2042 (战地2042)
+  - PROCESS-NAME,FC24.exe,DIRECT            # EA Sports FC 24
+  - PROCESS-NAME,FC25.exe,DIRECT            # EA Sports FC 25
+  - PROCESS-NAME,FIFA23.exe,DIRECT          # FIFA 23
+  - PROCESS-NAME,FIFA22.exe,DIRECT          # FIFA 22
+  - PROCESS-NAME,NeedForSpeedUnbound.exe,DIRECT # 极品飞车：不羁
+  - PROCESS-NAME,NFS22.exe,DIRECT           # 极品飞车
+  - PROCESS-NAME,starwarsjedisurvivor.exe,DIRECT # 星球大战绝地：幸存者
+  - PROCESS-NAME,deadspace.exe,DIRECT       # 死亡空间重制版
+  - PROCESS-NAME,EasyAntiCheat.exe,DIRECT   # 小蓝熊反作弊
+  - PROCESS-NAME,EasyAntiCheat_EOS.exe,DIRECT # 小蓝熊 EOS 反作弊
+  - PROCESS-NAME,Link2EA.exe,DIRECT         # Steam 关联 EA
+  - PROCESS-NAME,ActivationUI.exe,DIRECT    # EA 激活程序
+  # EA 关键词直连
+  - DOMAIN-KEYWORD,ea.com,DIRECT
+  - DOMAIN-KEYWORD,origin,DIRECT
+  - DOMAIN-KEYWORD,electronicarts,DIRECT
+
+  # ----------------------------------------------------------------------------
+  # 4. Steam 游戏满速下载与连通性检测直连
+  # ----------------------------------------------------------------------------
+  - DOMAIN-SUFFIX,steamconnecttest.com,DIRECT # Steam 连通性测试
+  - DOMAIN-SUFFIX,steamcontent.com,DIRECT     # Steam 游戏下载 CDN (跑满宽带)
+  - DOMAIN-SUFFIX,steamserver.net,DIRECT      # Steam 服务器
+  - DOMAIN-SUFFIX,steam-chat.com,DIRECT       # Steam 聊天
+  - DOMAIN-SUFFIX,steambroadcast.akamaized.net,DIRECT
+  - DOMAIN-SUFFIX,steamcdn-a.akamaihd.net,DIRECT
+
+  # ----------------------------------------------------------------------------
+  # 5. 金融与股票关键字兜底直连
   # ----------------------------------------------------------------------------
   - DOMAIN-KEYWORD,stock,DIRECT
   - DOMAIN-KEYWORD,tongdaxin,DIRECT
   - DOMAIN-KEYWORD,eastmoney,DIRECT
 
   # ----------------------------------------------------------------------------
-  # 4. 通达信与主流券商行情服务器 IP 段 (TCP 7709 / 7711 直连)
+  # 6. 通达信与主流券商行情服务器 IP 段 (TCP 7709 / 7711 直连)
   # ----------------------------------------------------------------------------
   - IP-CIDR,202.108.254.0/24,DIRECT        # 通达信北京联通主站 (极速 6ms)
   - IP-CIDR,202.108.253.0/24,DIRECT        # 通达信北京联通主站2
@@ -58,6 +115,6 @@ prepend-rules:
   - IP-CIDR,60.12.136.0/24,DIRECT          # 通达信河北/官方主站
 
   # ----------------------------------------------------------------------------
-  # 5. 国内 IP 与局域网直连兜底
+  # 7. 国内 IP 与局域网直连兜底
   # ----------------------------------------------------------------------------
   - GEOIP,CN,DIRECT
