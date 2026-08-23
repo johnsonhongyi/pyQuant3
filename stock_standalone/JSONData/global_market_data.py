@@ -885,6 +885,105 @@ def get_kline_cache_file_path() -> str:
         return path
 
 
+def append_realtime_bar_if_needed(sym_code: str, klines: list) -> list:
+    """根据目标市场时区 (Target Market Date & Session) 动态融合实时行情，绝对防范跨时区穿越 Bar 与数量级拉爆 Bug"""
+    if not klines:
+        return klines
+    
+    # 1. 率先清洗剥离超出目标市场当前日期的穿越 Bar 与数量级离群脏点
+    clean_klines = sanitize_klines_for_symbol(sym_code, klines)
+    if not clean_klines:
+        return klines
+
+    target_today_str = get_target_market_date_str(sym_code)
+    session_open = is_target_market_session_open(sym_code)
+    
+    quotes = _global_cache.get('quotes', {})
+    if not quotes or sym_code not in quotes:
+        return clean_klines
+    
+    rt = quotes[sym_code]
+    rt_price = float(rt.get('price', 0))
+    rt_pct = float(rt.get('pct', 0))
+    if rt_price <= 0:
+        return clean_klines
+    
+    klines_copy = [dict(k) for k in clean_klines]
+    last_item = klines_copy[-1]
+    last_date = last_item.get('date', '')
+    last_close = float(last_item.get('close', 0))
+
+    # 🛡️ 核心数量级安全控制：判断 rt_price 与 last_close 是否属于同一数量级
+    effective_price = rt_price
+    if last_close > 0:
+        ratio = rt_price / last_close
+        if ratio > 3.0 or ratio < 0.33:
+            effective_price = round(last_close * (1.0 + rt_pct / 100.0), 2)
+    
+    if last_date == target_today_str:
+        last_item['close'] = round(effective_price, 2)
+        last_item['pct'] = round(rt_pct, 2)
+        high_p = float(last_item.get('high', effective_price))
+        low_p = float(last_item.get('low', effective_price))
+        if effective_price > high_p:
+            last_item['high'] = round(effective_price, 2)
+        if effective_price < low_p and effective_price > 0:
+            last_item['low'] = round(effective_price, 2)
+        klines_copy[-1] = last_item
+    else:
+        if not session_open:
+            return klines_copy
+        
+        try:
+            dt_last = datetime.datetime.strptime(last_date, '%Y-%m-%d')
+            dt_today = datetime.datetime.strptime(target_today_str, '%Y-%m-%d')
+            curr_dt = dt_last + datetime.timedelta(days=1)
+            
+            while curr_dt < dt_today:
+                if curr_dt.weekday() < 5:
+                    mid_date_str = curr_dt.strftime('%Y-%m-%d')
+                    prev_close = float(klines_copy[-1].get('close', effective_price))
+                    mid_bar = {
+                        'date': mid_date_str,
+                        'open': round(prev_close, 2),
+                        'high': round(prev_close, 2),
+                        'low': round(prev_close, 2),
+                        'close': round(prev_close, 2),
+                        'volume': 0.0,
+                        'pct': 0.0
+                    }
+                    klines_copy.append(mid_bar)
+                curr_dt += datetime.timedelta(days=1)
+        except Exception:
+            pass
+        
+        prev_close = float(klines_copy[-1].get('close', effective_price))
+        rt_open = float(rt.get('open', 0))
+        rt_high = float(rt.get('high', 0))
+        rt_low = float(rt.get('low', 0))
+
+        if rt_open > 0 and prev_close > 0 and 0.5 <= (rt_open / prev_close) <= 2.0:
+            open_p = rt_open
+        else:
+            open_p = prev_close
+
+        high_p = max([p for p in [open_p, effective_price, rt_high] if p > 0])
+        low_p = min([p for p in [open_p, effective_price, rt_low] if p > 0])
+
+        new_bar = {
+            'date': target_today_str,
+            'open': round(open_p, 2),
+            'high': round(high_p, 2),
+            'low': round(low_p, 2),
+            'close': round(effective_price, 2),
+            'volume': float(klines_copy[-1].get('volume', 0)),
+            'pct': round(rt_pct, 2)
+        }
+        klines_copy.append(new_bar)
+    
+    return klines_copy
+
+
 def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: bool = False, data_source: str = 'yahoo') -> list:
     """抓取与获取重点外盘资产 (如 NVDA, AAPL, MSFT, MU, A50, OIL, GOLD 等) 的近 120 日 K 线数据
     支持分级 Cache (Tier 1 RAM 内存快照 -> Tier 2 磁盘物理 JSON -> Tier 3 网络)
@@ -915,104 +1014,6 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         sorted_dates = sorted(merged.keys())
         raw_res = [merged[d] for d in sorted_dates]
         return sanitize_klines_for_symbol(sym_upper, raw_res)
-
-    def append_realtime_bar_if_needed(sym_code: str, klines: list) -> list:
-        """根据目标市场时区 (Target Market Date & Session) 动态融合实时行情，绝对防范跨时区穿越 Bar 与数量级拉爆 Bug"""
-        if not klines:
-            return klines
-        
-        # 1. 率先清洗剥离超出目标市场当前日期的穿越 Bar 与数量级离群脏点
-        clean_klines = sanitize_klines_for_symbol(sym_code, klines)
-        if not clean_klines:
-            return klines
-
-        target_today_str = get_target_market_date_str(sym_code)
-        session_open = is_target_market_session_open(sym_code)
-        
-        quotes = _global_cache.get('quotes', {})
-        if not quotes or sym_code not in quotes:
-            return clean_klines
-        
-        rt = quotes[sym_code]
-        rt_price = float(rt.get('price', 0))
-        rt_pct = float(rt.get('pct', 0))
-        if rt_price <= 0:
-            return clean_klines
-        
-        klines_copy = [dict(k) for k in clean_klines]
-        last_item = klines_copy[-1]
-        last_date = last_item.get('date', '')
-        last_close = float(last_item.get('close', 0))
-
-        # 🛡️ 核心数量级安全控制：判断 rt_price 与 last_close 是否属于同一数量级
-        effective_price = rt_price
-        if last_close > 0:
-            ratio = rt_price / last_close
-            if ratio > 3.0 or ratio < 0.33:
-                effective_price = round(last_close * (1.0 + rt_pct / 100.0), 2)
-        
-        if last_date == target_today_str:
-            last_item['close'] = round(effective_price, 2)
-            last_item['pct'] = round(rt_pct, 2)
-            high_p = float(last_item.get('high', effective_price))
-            low_p = float(last_item.get('low', effective_price))
-            if effective_price > high_p:
-                last_item['high'] = round(effective_price, 2)
-            if effective_price < low_p and effective_price > 0:
-                last_item['low'] = round(effective_price, 2)
-            klines_copy[-1] = last_item
-        else:
-            if not session_open:
-                return klines_copy
-            
-            try:
-                dt_last = datetime.datetime.strptime(last_date, '%Y-%m-%d')
-                dt_today = datetime.datetime.strptime(target_today_str, '%Y-%m-%d')
-                curr_dt = dt_last + datetime.timedelta(days=1)
-                
-                while curr_dt < dt_today:
-                    if curr_dt.weekday() < 5:
-                        mid_date_str = curr_dt.strftime('%Y-%m-%d')
-                        prev_close = float(klines_copy[-1].get('close', effective_price))
-                        mid_bar = {
-                            'date': mid_date_str,
-                            'open': round(prev_close, 2),
-                            'high': round(prev_close, 2),
-                            'low': round(prev_close, 2),
-                            'close': round(prev_close, 2),
-                            'volume': 0.0,
-                            'pct': 0.0
-                        }
-                        klines_copy.append(mid_bar)
-                    curr_dt += datetime.timedelta(days=1)
-            except Exception:
-                pass
-            
-            prev_close = float(klines_copy[-1].get('close', effective_price))
-            rt_open = float(rt.get('open', 0))
-            rt_high = float(rt.get('high', 0))
-            rt_low = float(rt.get('low', 0))
-
-            if rt_open > 0 and prev_close > 0 and 0.5 <= (rt_open / prev_close) <= 2.0:
-                open_p = rt_open
-            else:
-                open_p = prev_close
-
-            high_p = max([p for p in [open_p, effective_price, rt_high] if p > 0])
-            low_p = min([p for p in [open_p, effective_price, rt_low] if p > 0])
-
-            new_bar = {
-                'date': target_today_str,
-                'open': round(open_p, 2),
-                'high': round(high_p, 2),
-                'low': round(low_p, 2),
-                'close': round(effective_price, 2),
-                'volume': float(klines_copy[-1].get('volume', 0)),
-                'pct': round(rt_pct, 2)
-            }
-            klines_copy.append(new_bar)
-        
-        return klines_copy
 
     # ⚡ Tier 1 & Tier 2 分级 Cache 判定 (线程安全)
     existing_klines = []
@@ -2064,17 +2065,18 @@ def _translate_text_online_fast(text: str, timeout: float = 2.0) -> str:
     return ""
 
 
-def _auto_translate_en_text_to_cn(text: str) -> str:
-    """专业外盘金融词汇与句式英译中双模引擎 (优先在线精确翻译，离线超级词典兜底)"""
+def _auto_translate_en_text_to_cn(text: str, use_online: bool = False) -> str:
+    """专业外盘金融词汇与句式英译中双模引擎 (批量抓取时 0ms 离线超级词典极速翻译，独立查看时支持在线精翻)"""
     if not text or not text.strip():
         return ""
     
-    # 1. 在线极速 Api 翻译 (优先获得最通顺整句中译)
-    online_res = _translate_text_online_fast(text, timeout=2.0)
-    if online_res:
-        return online_res
+    # 1. 如果显式开启在线精确翻译
+    if use_online:
+        online_res = _translate_text_online_fast(text, timeout=1.5)
+        if online_res:
+            return online_res
 
-    # 2. 离线超级短语与实体词典兜底
+    # 2. 离线超级短语与实体词典兜底 (0.05ms 极速毫秒级替换)
     dict_map = [
         ('The Magnificent Seven', '美股科技七巨头'), ('Magnificent Seven', '美股科技七巨头'), ('Magnificent 7', '科技七巨头'),
         ('Burning Cash', '大规模消耗资金烧钱'), ('Cash Burn', '现金流烧钱消耗'), ('cash burn', '现金消耗'),
@@ -2381,11 +2383,15 @@ def fetch_symbol_financial_news(symbol: str = "", name: str = "", force_refresh:
 
             processed_items.append(item_copy)
 
-        # 排序：优先专属要闻(1) -> 其次产业链与同行业(2) -> 宏观金融(3)，内部按时间降序
+        # 排序：优先专属要闻(1) -> 其次产业链与同行业(2) -> 宏观金融(3)，内部严格按时间戳降序 (最新在最上面)
         def _sort_key(it):
             prio = it.get('_priority', 3)
             dt_str = str(it.get('datetime', ''))
-            return (prio, dt_str)
+            try:
+                ts = datetime.datetime.strptime(dt_str[:16], "%Y-%m-%d %H:%M").timestamp()
+            except Exception:
+                ts = 0.0
+            return (prio, -ts)
 
         processed_items.sort(key=_sort_key, reverse=False)
         for it in processed_items:
@@ -2431,16 +2437,16 @@ def fetch_symbol_financial_news(symbol: str = "", name: str = "", force_refresh:
     return [fallback_item]
 
 
-# 核心集中批量预预热标的清单 (全量包含美股 7 巨头/半导体/大宗商品/外盘主要 ETF)
+# 核心集中批量预热标的清单 (全量包含美股 7 巨头/半导体/大宗商品/外盘主要 ETF/汇率)
 GLOBAL_BATCH_KLINE_SYMBOLS = [
     'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 
-    'MU', 'TSM', 'SOXX', 'QQQ', 'A50', 'GOLD', 'OIL', 'BRENT'
+    'MU', 'TSM', 'SOXX', 'QQQ', 'A50', 'GOLD', 'OIL', 'BRENT', 'SILVER', 'USDCNH'
 ]
 
 
-def fetch_global_klines_batch(data_source: str = 'yahoo', force_refresh: bool = False):
-    """一键集中批量预热更新全量核心外盘标的 K 线 (自动批量更新一次全部更新，彻底避免切换 code 时不停触发网络请求)"""
-    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 启动全量外盘标的一键集中批量预预热/更新引擎 ({len(GLOBAL_BATCH_KLINE_SYMBOLS)} 个核心标的)...")
+def fetch_global_klines_batch(data_source: str = 'sina', force_refresh: bool = False):
+    """一键集中批量预热更新全量核心外盘标的 K 线并单次原子写盘 (彻底避免切换标的时不停触发单点网络请求)"""
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 启动全量外盘标的一键集中批量预热/更新引擎 ({len(GLOBAL_BATCH_KLINE_SYMBOLS)} 个核心标的)...")
     success_cnt = 0
     for sym in GLOBAL_BATCH_KLINE_SYMBOLS:
         try:
@@ -2449,7 +2455,10 @@ def fetch_global_klines_batch(data_source: str = 'yahoo', force_refresh: bool = 
                 success_cnt += 1
         except Exception as ex:
             log_market_msg(f"[GlobalMarketData] 批量预热标的 {sym} 异常: {ex}")
-    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 全量外盘标的一键集中批量更新完毕 ({success_cnt}/{len(GLOBAL_BATCH_KLINE_SYMBOLS)} 成功)")
+    
+    # ⚡ 批量抓取完成后，统一单次原子物理写盘！
+    flush_kline_disk_cache(data_source, force=True)
+    log_market_msg(f"[GlobalMarketData] {get_proxy_info_str()} 全量外盘标的一键集中批量更新并写盘完毕 ({success_cnt}/{len(GLOBAL_BATCH_KLINE_SYMBOLS)} 成功)")
 
 
 
