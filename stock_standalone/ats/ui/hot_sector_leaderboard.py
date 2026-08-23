@@ -441,6 +441,26 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.btn_log.clicked.connect(self._open_tdx_log_dialog)
         header_lay.addWidget(self.btn_log)
 
+        # ⏱️ 盘中时间片生命周期直选 (支持实盘时间自动跟随 / 手动点选锁定)
+        self.combo_time_slice = QComboBox()
+        self.combo_time_slice.addItems([
+            "⚡ 自动实盘跟随",
+            "⏱️ 全天全时段",
+            "👑 09:30~10:00 黄金定龙",
+            "💎 10:00~11:30 分歧低吸",
+            "🚀 13:00~14:00 午后助攻",
+            "⚠️ 14:00~14:45 尾盘诱多",
+            "🔒 14:45~15:00 尾盘定盘"
+        ])
+        self.combo_time_slice.setMinimumWidth(185)
+        self.combo_time_slice.setStyleSheet("""
+            QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 9pt; min-width: 180px; }
+            QComboBox::drop-down { width: 18px; }
+            QComboBox QAbstractItemView { background-color: #1e1e24; color: #ffd700; selection-background-color: #3d3014; }
+        """)
+        self.combo_time_slice.currentIndexChanged.connect(lambda: self._render_table_data(self.cached_results))
+        header_lay.addWidget(self.combo_time_slice)
+
         # 筛选下拉框 (支持盘中极度聚焦与买点分拣)
         self.combo_filter = QComboBox()
         self.combo_filter.addItems([
@@ -836,6 +856,15 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         sort_order = h_header.sortIndicatorOrder()
 
         # 2. 过滤数据
+        raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else "⚡ 自动实盘跟随"
+        if "全天全时段" in raw_slice:
+            time_slice = "⏱️ 全天全时段"
+        elif "自动实盘跟随" in raw_slice:
+            from ats.limit_up_engine import get_live_time_slice_name
+            time_slice = get_live_time_slice_name()
+        else:
+            time_slice = raw_slice
+
         filtered = []
         for r in results:
             sec = r.get("sector", "")
@@ -844,6 +873,29 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
                 continue
 
             tag = r.get("buy_tag", "")
+            pct = float(r.get("pct", 0.0))
+            vwap_dev = float(r.get("vwap_dev_pct", 0.0))
+
+            # ⏱️ 盘中时间片生命周期过滤 (全天全时段时跳过过滤)
+            if "全天全时段" in time_slice:
+                pass
+            elif "黄金定龙" in time_slice:
+                if tag not in ("LEADER", "SURGE", "BREAKOUT") and pct < 4.0:
+                    continue
+            elif "分歧低吸" in time_slice:
+                if tag != "PULLBACK" and not (-0.5 <= vwap_dev <= 2.0 and 0.5 <= pct <= 5.0):
+                    continue
+            elif "午后助攻" in time_slice:
+                if tag not in ("BREAKOUT", "SURGE", "LEADER"):
+                    continue
+            elif "尾盘诱多" in time_slice:
+                if tag != "WEAK" and not (pct >= 5.0 and vwap_dev > 4.0):
+                    continue
+            elif "尾盘定盘" in time_slice:
+                if tag != "LEADER":
+                    continue
+
+            # 筛选模式过滤
             if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
                 filtered.append(r)
             elif getattr(self, "filter_mode", "ALL") == "LEADER":
@@ -1430,7 +1482,12 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        if not self.stays_on_top and not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+        if self.stays_on_top:
+            self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             self.anchor_edge = None
             self.snap_timer.start()
