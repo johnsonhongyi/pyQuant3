@@ -30,9 +30,9 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         self.assertIn("Rank", headers)
         self.assertIn("DFF2", headers)
         self.assertIn("DFF3", headers)
-        # 断言末尾两列顺序：倒数第二列为形态与质量，最后一列为所属板块
+        # 断言表头列顺序：第6列为形态与质量，最后一列为所属板块
         self.assertEqual(headers[-1], "所属板块")
-        self.assertEqual(headers[-2], "形态与质量")
+        self.assertEqual(headers[6], "形态与质量")
 
     def test_dialog_init_and_update(self):
         dialog = DailyLimitUpDialog(parent=None)
@@ -100,14 +100,15 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         # 测试切换到极窄模式
         dialog.toggle_narrow_mode(True)
         self.assertTrue(dialog.is_narrow_mode)
-        self.assertTrue(dialog.table.isColumnHidden(8)) # 封成比应被隐藏
+        self.assertTrue(dialog.table.isColumnHidden(9)) # 封成比(索引9)应被隐藏
         self.assertFalse(dialog.table.isColumnHidden(0)) # 代码保留
         self.assertFalse(dialog.table.isColumnHidden(3)) # 涨幅%保留
+        self.assertFalse(dialog.table.isColumnHidden(6)) # 形态与质量保留
 
         # 测试切回宽屏全量模式
         dialog.toggle_narrow_mode(False)
         self.assertFalse(dialog.is_narrow_mode)
-        self.assertFalse(dialog.table.isColumnHidden(8))
+        self.assertFalse(dialog.table.isColumnHidden(9))
 
         dialog.close()
 
