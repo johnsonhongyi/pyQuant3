@@ -7,6 +7,8 @@ ATS Alert Notifier
 import sys
 import os
 import time
+import json
+import threading
 import logging
 from typing import Optional, Tuple, Dict, List, Any
 
@@ -14,32 +16,127 @@ logger = logging.getLogger("ats.alert_notifier")
 
 try:
     from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QFrame, QLabel, QVBoxLayout, QApplication
-    from PyQt6.QtGui import QIcon
-    from PyQt6.QtCore import QObject, pyqtSignal, Qt, QTimer
+    from PyQt6.QtGui import QIcon, QCursor
+    from PyQt6.QtCore import QObject, pyqtSignal, Qt, QTimer, QPoint
     HAS_PYQT = True
 except ImportError:
     HAS_PYQT = False
 
 
 _active_toasts = set()
+ALERT_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "alert_notifier_layout.json")
+_ALERT_CONFIG_LOCK = threading.Lock()
+_has_loaded_screen_config = False
+
+def get_screen_dpi_scale(screen: Optional[Any] = None) -> float:
+    """获取指定显示器的真实 DPI 缩放比例 (以标准 96 DPI 为基准 1.0)"""
+    if not HAS_PYQT:
+        return 1.0
+    if not screen:
+        screen = QApplication.primaryScreen()
+    if not screen:
+        return 1.0
+    try:
+        dpi = screen.logicalDotsPerInch()
+        scale = max(0.8, min(3.0, dpi / 96.0))
+        return scale
+    except Exception:
+        return 1.0
+
+
+def load_toast_screen_config():
+    """从本地配置文件安全加载 Toast 显示器与坐标配置，并执行多屏幕物理级自修复与自愈校验"""
+    global _has_loaded_screen_config
+    _has_loaded_screen_config = True
+    if not HAS_PYQT:
+        return
+    custom_pos = None
+    target_screen_index = None
+    try:
+        if os.path.exists(ALERT_CONFIG_FILE):
+            with _ALERT_CONFIG_LOCK:
+                with open(ALERT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    target_screen_index = data.get("target_screen_index", None)
+                    pos_data = data.get("custom_pos", None)
+                    if isinstance(pos_data, (list, tuple)) and len(pos_data) == 2:
+                        custom_pos = (int(pos_data[0]), int(pos_data[1]))
+    except Exception as e:
+        logger.debug(f"Load toast config exception: {e}")
+
+    # ── 物理级多屏幕自修复 (Self-Healing Fallback) ──
+    try:
+        screens = QApplication.screens()
+        # 1. 屏幕索引失效自修复 (如拔掉副屏后)
+        if target_screen_index is not None:
+            if not (0 <= target_screen_index < len(screens)):
+                logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到保存的显示器索引 [{target_screen_index}] 已失效(当前仅有 {len(screens)} 块物理屏幕)，自动自愈复位至主屏幕!")
+                target_screen_index = None
+                save_toast_screen_config(target_screen_index=None, custom_pos=None)
+
+        # 2. 坐标越界与盲区自修复 (如副屏断开或分辨率缩小变异)
+        if custom_pos is not None:
+            pt = QPoint(custom_pos[0], custom_pos[1])
+            is_valid_point = False
+            for scr in screens:
+                # 检查点是否在任何一个物理屏幕的可视几何区域内 (给予 30px 外围容错)
+                if scr.geometry().adjusted(-30, -30, 30, 30).contains(pt):
+                    is_valid_point = True
+                    break
+            if not is_valid_point:
+                logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到持久化坐标 {custom_pos} 落在无效/已断开的屏幕盲区中，自动自愈复位到当前屏幕可视区域!")
+                custom_pos = None
+                save_toast_screen_config(target_screen_index=target_screen_index, custom_pos=None)
+    except Exception as e_heal:
+        logger.debug(f"Toast screen self-healing check error: {e_heal}")
+
+    InAppToastWidget._target_screen_index = target_screen_index
+    InAppToastWidget._custom_pos = custom_pos
+
+
+def save_toast_screen_config(target_screen_index: Optional[int] = None, custom_pos: Optional[Tuple[int, int]] = None):
+    """原子写盘持久化保存 Toast 显示器偏好与自定义拖拽坐标到 JSON 文件"""
+    try:
+        os.makedirs(os.path.dirname(ALERT_CONFIG_FILE), exist_ok=True)
+        data = {
+            "target_screen_index": target_screen_index,
+            "custom_pos": list(custom_pos) if custom_pos else None,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        with _ALERT_CONFIG_LOCK:
+            with open(ALERT_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        logger.info(f"💾 [TOAST_CONFIG] 通知屏幕配置已原子持久化落盘: 显示器索引={target_screen_index}, 自定义坐标={custom_pos}")
+    except Exception as e:
+        logger.warning(f"Save toast config failed: {e}")
+
 
 class InAppToastWidget(QFrame if HAS_PYQT else object):
-    """应用内半透明高分屏自适应 Toast 卡片 (支持自由拖拽到副屏/任意屏幕、点击联动定位股票，100% 优雅显示)"""
+    """应用内半透明高分屏自适应 Toast 卡片 (支持不同 DPI/分辨率自适应、自由跨屏拖拽与点击联动)"""
     _custom_pos: Optional[Tuple[int, int]] = None  # 跨屏幕自定义持久化坐标 (全局记忆)
+    _target_screen_index: Optional[int] = None
 
     def __init__(self, title, message, code="", parent=None):
         if not HAS_PYQT:
             return
         super().__init__(None) # 使用独立 Tool 浮窗，全屏幕弹出，支持自由跨屏拖动
+        
+        # 确保首次弹窗时已加载持久化配置与完成自愈检查
+        global _has_loaded_screen_config
+        if not _has_loaded_screen_config:
+            load_toast_screen_config()
         self.code = str(code).strip()
         self.target_parent = parent
+        self.title_text = title
+        self.message_text = message
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        # 拖拽状态
+        # 拖拽状态与当前屏幕
         self._drag_pos = None
         self._press_pos = None
         self._is_dragging = False
+        self._current_screen = None
 
         tip_str = "💡 点击即可在列表中高亮定位并联动分析\n🖱️ 按住鼠标左键可自由拖动至副屏/任意屏幕记忆通知位置"
         if self.code:
@@ -49,24 +146,67 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         # 强引用注册，防止 Python 垃圾回收器 (GC) 提前销毁弹窗
         _active_toasts.add(self)
 
-        # 调整为精致直立黄金比
-        card_w = 260
-        card_h = 94
-        title_f_size = 12
-        msg_f_size = 10
+        # ── 1. 确定目标显示器 ──
+        target_screen = None
+        # 1.1 检查用户是否自定义了拖拽坐标所在屏幕
+        if InAppToastWidget._custom_pos is not None:
+            cx, cy = InAppToastWidget._custom_pos
+            from PyQt6.QtCore import QPoint
+            scr = QApplication.screenAt(QPoint(cx, cy))
+            if scr:
+                target_screen = scr
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(11, 9, 11, 9)
-        layout.setSpacing(4)
+        # 1.2 检查托盘右键菜单指定的显示器
+        if not target_screen and getattr(InAppToastWidget, '_target_screen_index', None) is not None:
+            screens = QApplication.screens()
+            tgt_idx = InAppToastWidget._target_screen_index
+            if 0 <= tgt_idx < len(screens):
+                target_screen = screens[tgt_idx]
+
+        # 1.3 检查父窗口所在屏幕
+        if not target_screen:
+            if parent and hasattr(parent, 'screen') and parent.screen():
+                target_screen = parent.screen()
+            elif parent and hasattr(parent, 'window') and parent.window() and parent.window().screen():
+                target_screen = parent.window().screen()
+
+        if not target_screen and HAS_PYQT:
+            try:
+                from PyQt6.QtGui import QCursor
+                target_screen = QApplication.screenAt(QCursor.pos())
+            except Exception:
+                pass
+
+        if not target_screen:
+            target_screen = QApplication.primaryScreen()
+
+        self._current_screen = target_screen
+
+        # ── 2. 根据目标显示器的 DPI 与分辨率动态自适应尺寸与字号 ──
+        scale = get_screen_dpi_scale(target_screen)
+        self._current_scale = scale
+
+        base_w = 260
+        base_h = 94
+        self.card_w = int(base_w * scale)
+        self.card_h = int(base_h * scale)
+        title_f_size = max(11, int(12 * scale))
+        msg_f_size = max(9, int(10 * scale))
+        pad_lr = max(8, int(11 * scale))
+        pad_tb = max(6, int(9 * scale))
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(pad_lr, pad_tb, pad_lr, pad_tb)
+        self.layout.setSpacing(max(3, int(4 * scale)))
         
-        lbl_t = QLabel(title, self)
-        lbl_t.setStyleSheet(f"color: #ffca28; font-weight: bold; font-size: {title_f_size}px; background: transparent;")
-        lbl_m = QLabel(message, self)
-        lbl_m.setWordWrap(True)
-        lbl_m.setStyleSheet(f"color: #e2e8f0; font-size: {msg_f_size}px; background: transparent; line-height: 1.35;")
+        self.lbl_t = QLabel(title, self)
+        self.lbl_t.setStyleSheet(f"color: #ffca28; font-weight: bold; font-size: {title_f_size}px; background: transparent;")
+        self.lbl_m = QLabel(message, self)
+        self.lbl_m.setWordWrap(True)
+        self.lbl_m.setStyleSheet(f"color: #e2e8f0; font-size: {msg_f_size}px; background: transparent; line-height: 1.35;")
         
-        layout.addWidget(lbl_t)
-        layout.addWidget(lbl_m)
+        self.layout.addWidget(self.lbl_t)
+        self.layout.addWidget(self.lbl_m)
         
         # 100% 纯不透明实色背景 + 1px 霓虹蓝精致高对比边框
         self.setStyleSheet(f"""
@@ -81,47 +221,18 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
             }}
         """)
         
-        self.resize(card_w, card_h)
+        self.resize(self.card_w, self.card_h)
         
-        # ── 智能多屏位置决定 ──
-        # 1. 优先使用用户手动拖动过的多屏自定义坐标
-        has_positioned = False
+        # ── 3. 初始位置计算 ──
         if InAppToastWidget._custom_pos is not None:
             cx, cy = InAppToastWidget._custom_pos
-            from PyQt6.QtCore import QPoint
-            scr = QApplication.screenAt(QPoint(cx, cy))
-            if scr:
-                self.move(cx, cy)
-                has_positioned = True
-
-        # 2. 默认定位在目标窗口所在屏幕或用户通过右键菜单指定的显示器右下角
-        if not has_positioned:
-            screen = None
-            if getattr(InAppToastWidget, '_target_screen_index', None) is not None:
-                screens = QApplication.screens()
-                tgt_idx = InAppToastWidget._target_screen_index
-                if 0 <= tgt_idx < len(screens):
-                    screen = screens[tgt_idx]
-
-            if not screen and parent and hasattr(parent, 'screen') and parent.screen():
-                screen = parent.screen()
-            elif not screen and parent and hasattr(parent, 'window') and parent.window() and parent.window().screen():
-                screen = parent.window().screen()
-
-            if not screen and HAS_PYQT:
+            self.move(cx, cy)
+        else:
+            if target_screen:
                 try:
-                    from PyQt6.QtGui import QCursor
-                    screen = QApplication.screenAt(QCursor.pos())
-                except Exception:
-                    pass
-            if not screen:
-                screen = QApplication.primaryScreen()
-
-            if screen:
-                try:
-                    s_geom = screen.availableGeometry()
-                    pos_x = s_geom.right() - card_w - 15
-                    pos_y = s_geom.bottom() - card_h - 15
+                    s_geom = target_screen.availableGeometry()
+                    pos_x = s_geom.right() - self.card_w - int(15 * scale)
+                    pos_y = s_geom.bottom() - self.card_h - int(15 * scale)
                     self.move(max(s_geom.left() + 10, pos_x), max(s_geom.top() + 10, pos_y))
                 except Exception:
                     self.move(100, 100)
@@ -130,6 +241,31 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
 
         self.show()
         self.raise_()
+
+    def _adapt_to_screen_dpi(self, new_screen):
+        """跨屏幕拖拽时动态根据新屏幕 DPI 自适应调整尺寸与字号"""
+        if not new_screen or new_screen == self._current_screen:
+            return
+        self._current_screen = new_screen
+        scale = get_screen_dpi_scale(new_screen)
+        if abs(scale - self._current_scale) < 0.05:
+            return
+        
+        self._current_scale = scale
+        base_w = 260
+        base_h = 94
+        self.card_w = int(base_w * scale)
+        self.card_h = int(base_h * scale)
+        title_f_size = max(11, int(12 * scale))
+        msg_f_size = max(9, int(10 * scale))
+        pad_lr = max(8, int(11 * scale))
+        pad_tb = max(6, int(9 * scale))
+
+        self.layout.setContentsMargins(pad_lr, pad_tb, pad_lr, pad_tb)
+        self.layout.setSpacing(max(3, int(4 * scale)))
+        self.lbl_t.setStyleSheet(f"color: #ffca28; font-weight: bold; font-size: {title_f_size}px; background: transparent;")
+        self.lbl_m.setStyleSheet(f"color: #e2e8f0; font-size: {msg_f_size}px; background: transparent; line-height: 1.35;")
+        self.resize(self.card_w, self.card_h)
 
     def closeEvent(self, event):
         """关闭时主动从强引用池解绑"""
@@ -149,14 +285,23 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
             if self._press_pos and (curr_pos - self._press_pos).manhattanLength() > 4:
                 self._is_dragging = True
                 self.move(curr_pos - self._drag_pos)
+                
+                # 动态检测跨屏 DPI 适配
+                try:
+                    scr = QApplication.screenAt(curr_pos)
+                    if scr:
+                        self._adapt_to_screen_dpi(scr)
+                except Exception:
+                    pass
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._is_dragging:
-                # 用户完成了跨屏幕拖拽：记录自定义坐标，后续所有通知均在此时拖动的新屏幕位置弹出！
+                # 用户完成了跨屏幕拖拽：记录自定义坐标并原子落盘持久化，后续所有通知均在此时拖动的新屏幕位置弹出！
                 InAppToastWidget._custom_pos = (self.x(), self.y())
-                logger.info(f"📍 [TOAST_DRAG] 用户已将通知窗口拖动至新屏幕坐标: {InAppToastWidget._custom_pos}，后续通知将在此屏幕展示")
+                save_toast_screen_config(InAppToastWidget._target_screen_index, InAppToastWidget._custom_pos)
+                logger.info(f"📍 [TOAST_DRAG] 用户已将通知窗口拖动至新屏幕坐标: {InAppToastWidget._custom_pos} (已持久化)，后续通知将在此屏幕展示")
                 self._is_dragging = False
                 self._drag_pos = None
                 self._press_pos = None
@@ -222,6 +367,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._notify_queue = collections.deque()
         self._is_busy = False
         self._current_toast = None
+        load_toast_screen_config()
         self._init_tray()
 
     def shutdown(self):
@@ -368,9 +514,10 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         if 0 <= screen_index < len(screens):
             InAppToastWidget._target_screen_index = screen_index
             InAppToastWidget._custom_pos = None # 清除手动坐标，复位到所选屏幕默认右下角
+            save_toast_screen_config(screen_index, None)
             scr = screens[screen_index]
             geom = scr.geometry()
-            logger.info(f"🖥️ [TRAY_MENU] 用户已通过任务栏右键菜单切换预警通知显示器为: 显示器 {screen_index + 1} ({geom.width()}x{geom.height()})")
+            logger.info(f"🖥️ [TRAY_MENU] 用户已通过任务栏右键菜单切换预警通知显示器为: 显示器 {screen_index + 1} ({geom.width()}x{geom.height()}) [已持久化]")
             
             # 立即弹出一个轻量 Toast 确认切换
             try:
@@ -386,7 +533,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
     def _reset_toast_position(self):
         """重置弹窗坐标到当前屏幕默认右下角"""
         InAppToastWidget._custom_pos = None
-        logger.info("🎯 [TRAY_MENU] 已重置通知弹窗位置为默认右下角")
+        save_toast_screen_config(InAppToastWidget._target_screen_index, None)
+        logger.info("🎯 [TRAY_MENU] 已重置通知弹窗位置为默认右下角 [已持久化]")
         try:
             InAppToastWidget(
                 "🎯 通知位置已复位", 
