@@ -1,3 +1,30 @@
+## 2026-08-23 19:30
+- [x] **落地磁盘与开发缓存交互式询问清理工具 (`clean_disk_interactive.py`, `clean_disk_interactive.bat`)**：
+    - [x] **根治 Windows 控制台编码解析问题**：采用纯 Python 跨平台标准 I/O 引擎 (`clean_disk_interactive.py`)，彻底杜绝 PowerShell 5.1 在解析中文字符时的 GBK 乱码与断行语法错误；
+    - [x] **清理冗余脚本 (KISS/DRY)**：删除冗余的 `clean_disk_interactive.ps1`，由 `clean_disk_interactive.py` + `clean_disk_interactive.bat` 统一维护与执行；
+    - [x] **逐项确认与实时测算**：针对 5 大类清理模块（D盘构建产物、Nuitka/NVIDIA缓存、包管理器缓存、Ditto超大库、CrashDumps与回收站）实时计算占用体积并逐项询问 `[Y]是 / [N]跳过 / [A]全部是 / [Q]退出`；
+    - [x] **核心白名单防御锁**：强制硬编码白名单过滤（`JSONData`、`.git`、`ats`、`config`、`Code\User` 等），杜绝任何误删；
+    - [x] **双击即用与结果汇报**：配套 `.bat` 双击启动器，全流程 UTF-8 杜绝乱码，并在清理完成后自动统计已释放空间与各盘最新容量；
+    - [x] **语法解析与模块导入校验 100% 通过**。
+
+
+## 2026-08-23 18:45
+- [x] **系统盘 (C:) 与数据盘 (D:) 无效数据占用、多级缓存深度扫描与清理方案报告**：
+    - [x] **全盘容量透视**：C 盘占用 223.06 GB (剩余仅 14.85 GB)，D 盘占用 214.08 GB (剩余仅 23.83 GB)；
+    - [x] **定位 C 盘高占用与无效缓存大头**：
+        - `Ditto.db` 剪贴板历史数据库膨胀至 **4.62 GB**；
+        - NVIDIA `DXCache` 着色器渲染缓存占用 **3.57 GB**；
+        - Nuitka 编译/GCC 工具链缓存占用 **5.02 GB**；
+        - Anaconda `pkgs` 未清理包与缓存占用 **1.15+ GB**；
+        - QQ/TIM 历史接收文件占用 **6.86 GB**；
+        - 包管理器与日常缓存（npm, Yarn, nuget, pip, 浏览器等）占用 **2.2+ GB**；
+    - [x] **定位 D 盘无效/临时构建与历史占用大头**：
+        - `D:\pagefile.sys` 虚拟内存占用 **20.86 GB**；
+        - `D:\Document\Downloads` 历史安装包与 ISO 镜像占用 **21.08 GB**；
+        - `pyQuant3` 及子项目编译产物 (`build`/`dist`) 占用超过 **8.40 GB**（如 `stock_standalone\build` 5.87GB）；
+        - `D:\QQMusicCache` 缓存占用 **1.81 GB**，历史 zip 备份占用 **650+ MB**；
+    - [x] **分级整理清理报告与安全一键/分步清理指令**。
+
 ## 2026-08-23 18:20
 - [x] **板块聚合数据中枢与明细弹窗深度 Code Review、隐藏关联 Bug 修复与全维度加固 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`)**：
     - [x] **根治主窗口复用与轮询时丢失 `update_data`/`load_data` 接口引发的 AttributeError 隐患**：
