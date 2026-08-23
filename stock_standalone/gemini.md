@@ -1,3 +1,25 @@
+## 2026-08-23 21:15
+- [x] **重构开机自启全局唯一性、显式授权与异路径冲突交互确认机制 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_packaged_path_isolation.py`)**：
+    - [x] **全局唯一与严禁启动隐式添加**：
+        - 整个系统中只允许一个 `ManageWindowLayout` 开机自启项；
+        - 彻底移除程序启动时的隐式自动写注册表行为，确保程序运行期纯只读，绝不擅自添加/修改自启动；
+    - [x] **设置保存时显式交互确认**：
+        - 用户在设置界面保存开机自启时，若注册表中已有旧路径（如 55188），弹窗向用户明确展示【已有路径】与【当前路径】，由用户显式选择是否覆盖更新；
+        - 用户取消勾选开机自启时，直接调用 `set_autostart_enabled(False)` 彻底从注册表中删除 `ManageWindowLayout` 项；
+    - [x] **单实例全局唯一与异路径旧进程交互提示**：
+        - 启动时若扫描到系统中存在来自异路径的历史旧进程（如后台驻留的 55188），弹窗向用户询问是否终止旧进程并启动当前新程序，彻底杜绝被旧进程静默劫持；
+    - [x] **Win32 工业级强力置顶与前台激活引擎 (`core.force_topmost_activate_hwnd`)**：
+        - 结合 `ShowWindow(SW_RESTORE)` + `AttachThreadInput` 挂接前台线程 + 模拟 Alt 键绕过 Windows 10/11 前台锁定限制 + `BringWindowToTop` + `HWND_TOPMOST/HWND_NOTOPMOST` 快速弹跳置顶，确保窗口 100% 弹出到最前台并获取焦点；
+        - 主管理器普通双击启动自动置顶，启动外部子程序自动置顶；
+    - [x] **严格遵守零底层侵入原则**：底层 `sys_utils.py` 100% 保持原样未做任何修改；
+    - [x] **8 项全量自动化测试（`test_packaged_path_isolation.py`）100% PASS**。
+
+## 2026-08-23 20:38
+- [x] **窗口布局管理器与自启动模块代码审查与加固 (`webTools/manage_window_layout.py`)**：
+    - [x] **修复 `attach_to_parent_console` 丢失 `import ctypes` 缺陷**：补齐模块头部的 `import ctypes`，确保在无控制台 GUI/noconsole 打包模式下通过终端调用 `-h` / `-cli` 时能稳定附加到父进程控制台正常输出；
+    - [x] **开机自启动与命令行参数验证**：确认 `--autostart-on` / `--autostart-off` / `--autostart-status` 与 `-hide` 注册表挂载链条完整健壮；
+    - [x] **全参数功能解析与测试 100% PASS**。
+
 ## 2026-08-23 19:30
 - [x] **落地磁盘与开发缓存交互式询问清理工具 (`clean_disk_interactive.py`, `clean_disk_interactive.bat`)**：
     - [x] **根治 Windows 控制台编码解析问题**：采用纯 Python 跨平台标准 I/O 引擎 (`clean_disk_interactive.py`)，彻底杜绝 PowerShell 5.1 在解析中文字符时的 GBK 乱码与断行语法错误；

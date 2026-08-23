@@ -1384,8 +1384,8 @@ class RouteConfigDialog(QDialog):
 
         # 4. 自动化开机/启动设置 (带秒数微调)
         row_autostart = QHBoxLayout()
-        self.chk_acer_autostart = QCheckBox(" 随窗口管理器启动时，自动在后台应用此 Acer 性能设置")
-        self.chk_acer_autostart.setChecked(acer_cfg.get("auto_apply_on_startup", True))
+        self.chk_acer_autostart = QCheckBox(" 开启 Windows 开机自启动 (开机登录后在后台托盘静默运行，全局唯一)")
+        self.chk_acer_autostart.setChecked(core.is_autostart_enabled())
         
         row_autostart.addWidget(self.chk_acer_autostart)
         row_autostart.addWidget(QLabel("   ⏳ 启动延迟应用: "))
@@ -1551,12 +1551,39 @@ class RouteConfigDialog(QDialog):
             # 刷新内存中的磁吸关键字缓存
             core._MAGNETIC_KEYWORDS_CACHE = None
             
-            # 1. 同步设置 Windows 注册表开机自启状态并获取官方路径日志
+            # 1. 设置 Windows 注册表开机自启状态（全局唯一，用户显式确认与更新，严禁启动隐式添加）
             is_autostart_checked = self.chk_acer_autostart.isChecked()
-            auto_ok, auto_msg = core.set_autostart_enabled(is_autostart_checked)
+            auto_ok = True
+            auto_msg = ""
+            if is_autostart_checked:
+                has_existing, existing_cmd = core.get_current_autostart_command()
+                expected_cmd = core.get_autostart_command()
+                
+                if has_existing and existing_cmd.strip().lower() != expected_cmd.strip().lower():
+                    reply = QMessageBox.question(
+                        self,
+                        "更新开机自启动路径确认",
+                        f"检测到 Windows 注册表中已存在其他开机自启动路径：\n【已有路径】: {existing_cmd}\n\n"
+                        f"当前程序运行路径为：\n【当前路径】: {expected_cmd}\n\n"
+                        f"整个系统只允许一个 manage_window_layout 开机自启。\n"
+                        f"是否将开机自启动路径更新为当前程序？\n\n"
+                        f"• 点击【是 (Yes)】：覆盖更新为当前程序路径\n"
+                        f"• 点击【否 (No)】：保留原有开机自启路径不修改",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        auto_ok, auto_msg = core.set_autostart_enabled(True)
+                    else:
+                        auto_ok, auto_msg = True, f"用户选择保留已有注册表自启路径: {existing_cmd}"
+                else:
+                    auto_ok, auto_msg = core.set_autostart_enabled(True)
+            else:
+                # 用户取消勾选：彻底从注册表中删除开机自启动项
+                auto_ok, auto_msg = core.set_autostart_enabled(False)
             
             # 2. 在主窗口日志文本框输出结构化通知
-            autostart_str = "已开启" if is_autostart_checked else "已关闭"
+            autostart_str = "已开启" if is_autostart_checked else "已关闭/已删除"
             delay_str = f"{self.spn_startup_delay.value()} 秒"
             
             main_win = getattr(self, 'parent_ui', None) or self.parent()
@@ -2164,14 +2191,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         self._hide_tray_message_window()
 
-        # 5. 使用底层 Win32 API 强制夺取 Windows 系统前台焦点
+        # 5. 使用底层 Win32 工业级 API 强力夺取 Windows 系统前台焦点与置顶
         try:
-            import ctypes
             hwnd = int(self.winId())
-            # 模拟轻按 Alt 键以绕过 Windows 系统的焦点抢夺拦截限制
-            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0) # Alt Down
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0) # Alt Up
+            core.force_topmost_activate_hwnd(hwnd)
         except Exception:
             pass
 
@@ -3984,8 +4007,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 
             moved = False
             for t in titles_to_try:
-                if core.set_window_pos_by_title(t, pos_str):
-                    self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}]")
+                if core.set_window_pos_by_title(t, pos_str, activate_topmost=True):
+                    self.log(f"✅ 自动布局: 成功捕捉刚启动的 '{t}' 并移动到配置坐标 [{pos_str}] 且已前台置顶激活")
                     self.refresh_current_positions()
                     self.refresh_app_shortcuts(rebuild=True)
                     moved = True
@@ -4599,7 +4622,7 @@ def main(hide_window: bool = False):
         window.hide()
         window.log("🙈 程序已以 [-hide 托盘后台不弹窗] 模式启动，常驻系统托盘，静默待命。")
     else:
-        window.show()
+        window._force_show_and_top()
         
     sys.exit(app.exec())
 

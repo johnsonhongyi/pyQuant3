@@ -121,5 +121,30 @@ def test_get_conf_path_single_source_of_truth():
                 os.environ.pop("INSTOCK_APP_ROOT", None)
 
 
+def test_single_instance_server_name():
+    """单实例 IPC 服务管道名必须保持全局唯一标准名称"""
+    assert core.SINGLE_INSTANCE_SERVER_NAME == "ManageWindowLayout_SingleInstance_Server"
+
+
+def test_autostart_command_format():
+    """开机自启命令必须包含 -hide 参数且格式规范"""
+    cmd = core.get_autostart_command()
+    assert "-hide" in cmd
+    assert cmd.startswith('"')
+
+
+def test_force_topmost_activate_invalid_hwnd():
+    """无效 HWND 或 0 句柄安全返回 False，不崩溃不抛出异常"""
+    assert core.force_topmost_activate_hwnd(0) is False
+    assert core.force_topmost_activate_hwnd(-1) is False
+    assert core.force_topmost_activate_hwnd(99999999) is False
+
+
+def test_set_window_pos_by_title_activate_topmost_arg():
+    """set_window_pos_by_title 接受 activate_topmost 参数且未找到窗口时安全返回 False"""
+    res = core.set_window_pos_by_title("NonExistentWindow_9999999", "0,0,100,100", activate_topmost=True)
+    assert res is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
