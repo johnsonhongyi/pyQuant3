@@ -305,14 +305,21 @@ class SBCChartCanvas(QWidget):
         """
         ⚡ 键盘快捷键响应：
         - 按下 R / r 键：自适应当前视图周期运行策略测算并在图上标记买卖介入点
-        - 按下 0 或 Esc 键：重置缩放回 100% 全景
+        - 按下 0 键：重置缩放回 100% 全景
+        - 按下 Esc 键：关闭 SBC 窗口
         """
         if event.key() == Qt.Key.Key_R:
             self.run_adaptive_strategy_eval()
             event.accept()
             return
-        elif event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_0):
+        elif event.key() == Qt.Key.Key_0:
             self.reset_view()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Escape:
+            parent_win = self.window()
+            if parent_win:
+                parent_win.close()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -2248,14 +2255,18 @@ class SBCIntradayChartDialog(QWidget):
             self.resize(680, 420)
 
     def keyPressEvent(self, event):
-        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算"""
+        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算，按下 Esc 键关闭窗口，按下 0 键重置视图"""
         if event.key() == Qt.Key.Key_R:
             self._on_eval_r_clicked()
             event.accept()
             return
-        elif event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_0):
+        elif event.key() == Qt.Key.Key_0:
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.reset_view()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Escape:
+            self.close()
             event.accept()
             return
         super().keyPressEvent(event)
