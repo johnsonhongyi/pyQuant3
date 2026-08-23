@@ -306,25 +306,49 @@ class SBCChartCanvas(QWidget):
         ⚡ 键盘快捷键响应：
         - 按下 R / r 键：自适应当前视图周期运行策略测算并在图上标记买卖介入点
         - 按下 F / f 键：触发全系统与通达信外部行情联动
+        - 按下 Left / Up / PageUp / Backtab：向前环形轮转切换周期
+        - 按下 Right / Down / PageDown / Tab：向后环形轮转切换周期
+        - 按下 1~9 键：直接精准切换对应周期 (1:1日分时 2:2日 3:3日 4:5分 5:30分 6:60分 7:日K 8:周K 9:月K)
         - 按下 0 键：重置缩放回 100% 全景
         - 按下 Esc 键：关闭 SBC 窗口
         """
-        if event.key() == Qt.Key.Key_R:
+        key = event.key()
+        parent_win = self.window()
+        if key == Qt.Key.Key_R:
             self.run_adaptive_strategy_eval()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_F:
-            parent_win = self.window()
+        elif key == Qt.Key.Key_F:
             if parent_win and hasattr(parent_win, '_trigger_linkage'):
                 parent_win._trigger_linkage()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_0:
+        elif key == Qt.Key.Key_Q:
+            if parent_win and hasattr(parent_win, '_on_rearrange_windows_clicked'):
+                parent_win._on_rearrange_windows_clicked()
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+            if parent_win and hasattr(parent_win, 'rotate_period'):
+                parent_win.rotate_period(-1)
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+            if parent_win and hasattr(parent_win, 'rotate_period'):
+                parent_win.rotate_period(1)
+            event.accept()
+            return
+        elif Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+            idx = key - Qt.Key.Key_1
+            if parent_win and hasattr(parent_win, 'switch_period_by_index'):
+                parent_win.switch_period_by_index(idx)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_0:
             self.reset_view()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_Escape:
-            parent_win = self.window()
+        elif key == Qt.Key.Key_Escape:
             if parent_win:
                 parent_win.close()
             event.accept()
@@ -1865,9 +1889,9 @@ class SBCIntradayChartDialog(QWidget):
             self.btn_group_period.addButton(btn)
             tb_layout.addWidget(btn)
 
-        btn_rearrange = QPushButton("🪟 重排")
+        btn_rearrange = QPushButton("🪟 重排 (Q)")
         btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        btn_rearrange.setToolTip("自动将所有已打开的 SBC 分时窗口网格平铺重排")
+        btn_rearrange.setToolTip("快捷键: Q 键，自动将所有已打开的 SBC 分时走势窗口在当前屏幕网格平铺重排")
         btn_rearrange.clicked.connect(self._on_rearrange_windows_clicked)
 
         btn_refresh = QPushButton("🔄 刷新")
@@ -2261,22 +2285,73 @@ class SBCIntradayChartDialog(QWidget):
             logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
             self.resize(680, 420)
 
+    def showEvent(self, event):
+        """窗口显示事件：自动将焦点赋予当前选中的周期按钮，便于直接键盘轮转与按键切周期"""
+        super().showEvent(event)
+        try:
+            if hasattr(self, 'btn_group_period') and self.btn_group_period:
+                btn = self.btn_group_period.checkedButton()
+                if btn:
+                    btn.setFocus()
+        except Exception:
+            pass
+
+    def rotate_period(self, step: int = 1):
+        """环形顺时针/逆时针轮转切换 SBC 周期"""
+        period_list = ["1m", "2d", "3d", "5m", "30m", "60m", "day", "week", "month"]
+        curr = getattr(self, "_current_period_mode", "1m").lower()
+        if curr not in period_list:
+            curr = "1m"
+        idx = period_list.index(curr)
+        new_idx = (idx + step) % len(period_list)
+        new_mode = period_list[new_idx]
+        self.set_period_mode(new_mode)
+        if hasattr(self, 'lbl_info') and self.lbl_info:
+            self.lbl_info.setText(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】 (快捷键: ←/→ 键轮转, 1~9 直选, F 联动, Esc 关闭)")
+
+    def switch_period_by_index(self, index: int):
+        """通过数字键 1~9 直接切换到指定序号的周期"""
+        period_list = ["1m", "2d", "3d", "5m", "30m", "60m", "day", "week", "month"]
+        if 0 <= index < len(period_list):
+            new_mode = period_list[index]
+            self.set_period_mode(new_mode)
+            if hasattr(self, 'lbl_info') and self.lbl_info:
+                self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: ←/→ 键轮转, 1~9 直选, F 联动, Esc 关闭)")
+
     def keyPressEvent(self, event):
-        """⚡ 窗口级快捷键：按下 R 键触发测算，按下 F 键触发联动，按下 0 键重置视图，按下 Esc 键关闭窗口"""
-        if event.key() == Qt.Key.Key_R:
+        """⚡ 窗口级快捷键：支持 R 测算、F 联动、方向键/Tab 轮转、1~9 直选、0 重置、Esc 关闭"""
+        key = event.key()
+        if key == Qt.Key.Key_R:
             self._on_eval_r_clicked()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_F:
+        elif key == Qt.Key.Key_F:
             self._trigger_linkage()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_0:
+        elif key == Qt.Key.Key_Q:
+            self._on_rearrange_windows_clicked()
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+            self.rotate_period(-1)
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+            self.rotate_period(1)
+            event.accept()
+            return
+        elif Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+            idx = key - Qt.Key.Key_1
+            self.switch_period_by_index(idx)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_0:
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.reset_view()
             event.accept()
             return
-        elif event.key() == Qt.Key.Key_Escape:
+        elif key == Qt.Key.Key_Escape:
             self.close()
             event.accept()
             return
