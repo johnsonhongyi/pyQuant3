@@ -1,3 +1,24 @@
+## 2026-08-23 23:00
+- [x] **重构显示器物理拓扑保存恢复引擎、支持硬件真实厂商型号记忆与运行目录配置管理 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`)**：
+    - [x] **真实物理显示器厂商型号与 EDID 硬件指纹解析 (`core.get_monitor_hardware_info`)**：
+        - 结合 Windows API `EnumDisplayDevices` 与注册表 EDID 原始数据块解析，精准读取每个屏幕的真实 Friendly Model Name（如 `LG HDR 4K`、`SyncMaster`）、硬件 PNP 代号（如 `GSM7707`、`SAM0676`、`AUO82ED`）与唯一硬件 ID；
+        - 在保存配置时完整记忆硬件指纹，彻底解决只依赖动态 `\\.\DISPLAYx` 适配器名导致重启/重插后设备名漂移问题；
+    - [x] **6 梯队精准硬件对齐恢复算法（Smart Hardware Model Matching）**：
+        - 恢复时不再盲目使用旧 `device_name`，而是根据 `硬件ID(1000分) -> PNP代号(500分) -> 厂商型号(300分) -> 物理分辨率(150分)` 多层加权打分，将目标排布坐标与分辨率 100% 精确映射到当前真实对应的物理设备上，彻底根治 1080P 被误设成 4K 导致分辨率错乱与排布混乱的问题；
+    - [x] **确定性多维稳定排序规则**：
+        - 在 `get_monitor_details_all_with_scale` 中实施确定性排序（主屏幕排第 1，副屏按 `(x, y, width, height, scale)` 升序排序），杜绝因底层枚举顺序随机导致配置文件签名颠倒；
+    - [x] **运行目录配置文件管理与选择加载恢复**：
+        - 自动扫描运行目录下的所有 `*monitordisplay_config.json` 与 `display_config.json` 配置文件；
+        - 下拉框友好呈现配置概览（屏幕数、主副屏厂商型号、时间）并高亮标记 `⭐ [当前匹配]`；
+        - 恢复选中拓扑时**强制弹出详细二次确认对话框**，展示目标配置详细参数，用户确认后再执行恢复；
+    - [x] **可视化拓扑预览对话框 (`DisplayTopologyPreviewDialog` & `TopologyCanvasWidget`)**：
+        - 支持按比例还原多屏空间几何排布图，主屏高亮标注 `[👑 主屏]`，清晰呈现各屏幕相对坐标、物理分辨率、缩放比例与硬件型号；
+        - 提供详细参数列表表格与一键恢复按钮；
+    - [x] **配置列表严格去重与未保存智能提示**：
+        - 引入 `seen_filenames` 严格按文件名对多目录扫描结果去重，彻底消除列表中出现重复条目的问题；
+        - 优化匹配算法，屏幕数量与签名必须严格一致才标记为 `⭐ [当前匹配]`；当处于新屏幕组合（如刚切换为2屏未保存）时，下拉框清晰提示 `⚠️ 当前拓扑未保存 (共2屏 · 点击[💾保存当前拓扑])`，杜绝误默认选中不匹配的旧3屏配置；
+    - [x] **测试验证 100% 通过**：硬件识别、配置扫描严格去重、保存恢复、UI 实例化全流程验证无误。
+
 ## 2026-08-23 21:15
 - [x] **重构开机自启全局唯一性、显式授权与异路径冲突交互确认机制 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_packaged_path_isolation.py`)**：
     - [x] **全局唯一与严禁启动隐式添加**：
