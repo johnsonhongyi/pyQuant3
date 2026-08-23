@@ -1253,66 +1253,91 @@ class TDXRealtimeFetcher:
                 "extra_vals": mp_info.get("extra_vals", {}),
             })
 
-        # 2. 板块内领涨与三维买点智能判决
+        # 2. 板块内领涨与多维买点统一智能分拣
         # 按板块分组统计最高涨幅与领跑者
         sector_max_pct = {}
+        sector_leader_code = {}
         for it in parsed_items:
             sec = it["sector"]
             if sec not in sector_max_pct or it["pct"] > sector_max_pct[sec]:
                 sector_max_pct[sec] = it["pct"]
+                sector_leader_code[sec] = it["code"]
 
         results = []
         for it in parsed_items:
+            code = it["code"]
             pct = it["pct"]
             vwap = it["vwap"]
             vwap_dev = it["vwap_dev_pct"]
             price = it["price"]
             vol_r = it["vol_ratio"]
+            dff = it["dff"]
             dff2 = it["dff2"]
             dff3 = it["dff3"]
             slope = it["slope_score"]
             bid_p = it["bid_pressure"]
+            order_intent = it["order_intent"]
+            turnover = it["turnover"]
             sec = it["sector"]
             max_sec_p = sector_max_pct.get(sec, pct)
+            is_sec_leader = (code == sector_leader_code.get(sec, ""))
 
             # 是否多日多头底座扎实 (2D/3D 加速)
             has_base = (dff2 > 0.0 or dff3 > 0.0)
 
-            # 三维买点判定
-            if pct >= 5.0 and (pct >= max_sec_p - 0.5) and vwap_dev >= 0.0:
+            # ── 💡 统一多模块智能阿尔法分拣决策 ──
+            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 5.0 and vwap_dev >= 0.0):
+                # 👑 领涨龙头：封死涨停或板块绝对领涨第一名
                 buy_type = "👑 领涨龙头"
                 buy_tag = "LEADER"
                 buy_zone = f"{vwap:.2f} ~ {price:.2f}"
                 stop_loss = round(vwap * 0.985, 2)
-                reason = f"板块领涨先锋(同板块涨幅最高), 站稳VWAP(+{vwap_dev:.1f}%), 主攻波形"
+                reason = f"板块领涨灵魂标的 (板块第一), 站稳VWAP(+{vwap_dev:.1f}%), 主力强势统治"
                 type_priority = 100
-            elif (1.5 <= pct <= 6.5) and vwap_dev >= 0.2 and vol_r >= 1.2 and has_base:
+
+            elif pct >= 7.0 and (bid_p >= 70.0 or "扫买" in order_intent or "托底" in order_intent):
+                # ⚡ 扫盘冲板：大阳拉升，主力主动扫买，冲击涨停临界点 (如三元基因)
+                buy_type = "⚡ 扫盘冲板"
+                buy_tag = "SURGE"
+                buy_zone = f"{price:.2f} ~ {round(price * 1.01, 2)}"
+                stop_loss = round(vwap * 0.985, 2)
+                reason = f"主力主动扫买冲击涨停 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), 临界抢跑点"
+                type_priority = 95
+
+            elif (3.0 <= pct <= 7.0) and (vwap_dev >= 0.2) and (vol_r >= 1.1 or bid_p >= 60.0 or dff2 >= 8.0):
+                # 🚀 先锋突破：放量起爆，突破日内高点，主升确认 (如长盈通、新开源)
                 buy_type = "🚀 先锋突破"
                 buy_tag = "BREAKOUT"
                 buy_zone = f"{price:.2f} ~ {round(price * 1.008, 2)}"
                 stop_loss = round(vwap * 0.985, 2)
-                reason = f"起爆先锋突破, 放量(量比{vol_r:.1f}), 站稳均线(+{vwap_dev:.1f}%), 性价比极高"
+                reason = f"主升先锋放量突破 (量比{vol_r:.1f}), 站稳均线(+{vwap_dev:.1f}%), 盈亏比极佳"
                 type_priority = 90
-            elif (-0.5 <= vwap_dev <= 0.8) and pct > 0.5 and has_base and slope >= 45:
-                buy_type = "🎯 VWAP回踩"
+
+            elif (-0.5 <= vwap_dev <= 1.8) and (0.8 <= pct <= 4.5) and (has_base or dff2 > 5.0 or slope >= 40):
+                # 🎯 冰点反身低吸 / VWAP回踩：回踩分时均线不破，绝佳潜伏点 (如ST八菱、源杰科技)
+                buy_type = "💎 反身低吸"
                 buy_tag = "PULLBACK"
                 buy_zone = f"{vwap:.2f} ~ {round(vwap * 1.005, 2)}"
                 stop_loss = round(min(it['low'], vwap * 0.98), 2)
-                reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 风险收益比极佳"
-                type_priority = 80
-            elif vwap_dev < -1.0 or pct < -2.0:
+                reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 冰点黄金潜伏上车点"
+                type_priority = 85
+
+            elif vwap_dev < -1.2 or pct < -2.0:
+                # ⚠️ 破位转弱
                 buy_type = "⚠️ 破位转弱"
                 buy_tag = "WEAK"
                 buy_zone = "--"
                 stop_loss = round(vwap * 0.97, 2)
-                reason = f"跌破分时均线({vwap_dev:.1f}%), 动能不足"
+                reason = f"跌破分时均线({vwap_dev:.1f}%), 承接动能不足"
                 type_priority = 20
+
             else:
+                # 📋 蓄势观察 / 趋势蓄力
                 buy_type = "📋 蓄势观察"
                 buy_tag = "WATCH"
                 buy_zone = f"{vwap:.2f} 附近"
                 stop_loss = round(vwap * 0.98, 2)
-                reason = f"在均线附近窄幅震荡, 等待放量信号"
+                reason = f"在均线附近窄幅震荡, 等待放量突破或回踩信号"
                 type_priority = 50
 
             # 综合 Alpha 进攻得分 (0 ~ 100)

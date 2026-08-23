@@ -441,11 +441,18 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.btn_log.clicked.connect(self._open_tdx_log_dialog)
         header_lay.addWidget(self.btn_log)
 
-        # 筛选下拉框
+        # 筛选下拉框 (支持盘中极度聚焦与买点分拣)
         self.combo_filter = QComboBox()
-        self.combo_filter.addItems(["全部跟单标的", "👑 仅看龙头与先锋突破", "🎯 仅看VWAP企稳回踩"])
+        self.combo_filter.addItems([
+            "🔥 全部跟单标的", 
+            "⭐ 核心聚焦 (Top 5)", 
+            "👑 仅看领涨龙头", 
+            "🚀 仅看先锋突破", 
+            "💎 仅看反身低吸", 
+            "⚡ 仅看扫盘冲板"
+        ])
         self.combo_filter.setStyleSheet("""
-            QComboBox { background-color: #1c1c22; color: #00ff88; border: 1px solid #3e3e4a; border-radius: 3px; padding: 2px 6px; font-size: 9pt; }
+            QComboBox { background-color: #1c1c22; color: #00ffaa; border: 1px solid #3e3e4a; border-radius: 3px; padding: 2px 6px; font-size: 9pt; font-weight: bold; }
             QComboBox::drop-down { border: none; }
             QComboBox QAbstractItemView { background-color: #18181c; color: #ffffff; selection-background-color: #2e3b4e; }
         """)
@@ -708,9 +715,15 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def _on_filter_changed(self, idx):
         if idx == 1:
-            self.filter_mode = "LEADER_BREAKOUT"
+            self.filter_mode = "TOP5_FOCUS" # ⭐ 核心聚焦 (Top 5)
         elif idx == 2:
-            self.filter_mode = "PULLBACK"
+            self.filter_mode = "LEADER"     # 👑 仅看领涨龙头
+        elif idx == 3:
+            self.filter_mode = "BREAKOUT"   # 🚀 仅看先锋突破
+        elif idx == 4:
+            self.filter_mode = "PULLBACK"   # 💎 仅看反身低吸
+        elif idx == 5:
+            self.filter_mode = "SURGE"      # ⚡ 仅看扫盘冲板
         else:
             self.filter_mode = "ALL"
         self._render_table_data(self.cached_results)
@@ -831,14 +844,26 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
                 continue
 
             tag = r.get("buy_tag", "")
-            if self.filter_mode == "LEADER_BREAKOUT":
-                if tag in ("LEADER", "BREAKOUT"):
+            if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
+                filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "LEADER":
+                if tag == "LEADER":
                     filtered.append(r)
-            elif self.filter_mode == "PULLBACK":
+            elif getattr(self, "filter_mode", "ALL") == "BREAKOUT":
+                if tag == "BREAKOUT":
+                    filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "PULLBACK":
                 if tag == "PULLBACK":
+                    filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "SURGE":
+                if tag == "SURGE":
                     filtered.append(r)
             else:
                 filtered.append(r)
+
+        if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
+            filtered.sort(key=lambda x: x.get("alpha_score", 0.0), reverse=True)
+            filtered = filtered[:5]
 
         # 3. 原地填充表格
         self.table.setSortingEnabled(False)
@@ -874,10 +899,11 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         # 7. 更新底部统计栏与各板块领跑个股
         total_cnt = len(filtered)
         leader_cnt = sum(1 for x in filtered if x.get("buy_tag") == "LEADER")
+        surge_cnt = sum(1 for x in filtered if x.get("buy_tag") == "SURGE")
         breakout_cnt = sum(1 for x in filtered if x.get("buy_tag") == "BREAKOUT")
         pullback_cnt = sum(1 for x in filtered if x.get("buy_tag") == "PULLBACK")
 
-        self.lbl_stats.setText(f"标的: {total_cnt} | 👑龙头: {leader_cnt} | 🚀先锋: {breakout_cnt} | 🎯回踩: {pullback_cnt}")
+        self.lbl_stats.setText(f"标的: {total_cnt} | 👑龙头: {leader_cnt} | ⚡扫盘: {surge_cnt} | 🚀先锋: {breakout_cnt} | 💎回踩: {pullback_cnt}")
 
         # 找出各板块内涨幅最高的领跑股
         sec_leaders = {}
@@ -931,16 +957,22 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
         pct_color = QColor("#ff4455") if pct > 0 else (QColor("#00ee77") if pct < 0 else QColor("#cccccc"))
         
-        # 买点类型专属样式
+        # 买点类型专属精细化视觉高亮
         if buy_tag == "LEADER":
-            type_color = QColor("#FFD700") # 亮金
-            type_bg = QColor(60, 45, 10, 150)
+            type_color = QColor("#FF3399") # 亮洋红领涨龙头
+            type_bg = QColor(65, 20, 45, 160)
+        elif buy_tag == "SURGE":
+            type_color = QColor("#FF5533") # 亮橙红扫盘冲板
+            type_bg = QColor(65, 30, 20, 160)
         elif buy_tag == "BREAKOUT":
-            type_color = QColor("#00FF88") # 荧光绿起爆
+            type_color = QColor("#00FF88") # 荧光绿先锋起爆
             type_bg = QColor(10, 50, 30, 150)
         elif buy_tag == "PULLBACK":
-            type_color = QColor("#00DDFF") # 青蓝企稳
-            type_bg = QColor(10, 40, 55, 150)
+            type_color = QColor("#00FFFF") # 荧光亮青反身低吸
+            type_bg = QColor(10, 45, 60, 160)
+        elif buy_tag == "WEAK":
+            type_color = QColor("#FF8800") # 橙色破位
+            type_bg = QColor(50, 30, 10, 140)
         else:
             type_color = QColor("#aaaaaa")
             type_bg = QColor(30, 30, 35, 100)

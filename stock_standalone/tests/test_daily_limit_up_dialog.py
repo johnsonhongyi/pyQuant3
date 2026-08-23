@@ -43,16 +43,16 @@ class TestDailyLimitUpDialog(unittest.TestCase):
 
         mock_df = pd.DataFrame([
             {
-                "code": "600519",
-                "name": "贵州茅台",
-                "price": 1800.0,
-                "percent": 10.0,
-                "last_close": 1636.36,
+                "code": "688356",
+                "name": "键凯科技",
+                "price": 85.20,
+                "percent": 20.0,
+                "last_close": 71.00,
                 "dff": 4.5,
-                "dff2": 15.0,
-                "dff3": 35.0,
+                "dff2": 25.0,
+                "dff3": 45.0,
                 "Rank": 1,
-                "category": "白酒"
+                "category": "化学制药"
             }
         ])
         mock_df.set_index("code", drop=False, inplace=True)
@@ -79,7 +79,7 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog._last_emitted_code = ""
         dialog._fire_linkage_debounced()
         self.assertGreaterEqual(len(emitted_signals), 2)
-        self.assertEqual(emitted_signals[-1][0], "600519")
+        self.assertEqual(emitted_signals[-1][0], "688356")
 
         # 测试手动调整列宽持久化保存
         dialog.table.setColumnWidth(0, 77)
