@@ -398,7 +398,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # 梯队分类过滤
         self.combo_tier_filter = QComboBox()
-        self.combo_tier_filter.addItems(["全部梯队", "👑 空间高度龙", "🚀 连板接力", "🔥 换手首板", "💥 曾涨停炸板", "⚡ 强势反包"])
+        self.combo_tier_filter.addItems([
+            "全部梯队", 
+            "👑 空间高度龙", 
+            "🚀 连板接力", 
+            "🎯 支撑阳包阴反转", 
+            "⚡ 阳包阴强反转", 
+            "🛡️ 关键支撑起爆", 
+            "🔥 强势主升首板", 
+            "💥 曾涨停炸板", 
+            "⚡ 爆量超跌反包"
+        ])
         self.combo_tier_filter.setStyleSheet("""
             QComboBox { background-color: #1e1e24; color: #00ffaa; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
         """)
@@ -598,27 +608,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._refresh_data_for_mode()
 
     def _resolve_active_strategy_df(self) -> Optional[pd.DataFrame]:
-        """尝试从父窗口或全局感知主策略 DataFrame"""
+        """【统一感知接口】复用 SectorDataAggregator 递归感知探测系统当前运行中的量化策略主 DataFrame"""
         if self.current_df is not None and not self.current_df.empty:
             return self.current_df
-        p = self.parent()
-        while p:
-            for attr in ('current_df', 'df_realtime', '_last_flat_df', 'flat_df'):
-                df_cand = getattr(p, attr, None)
-                if df_cand is not None and not df_cand.empty:
-                    self.current_df = df_cand
-                    return df_cand
-            p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
-
         try:
-            app = QApplication.instance()
-            if app:
-                for top_w in app.topLevelWidgets():
-                    for attr in ('current_df', 'df_realtime', '_last_flat_df'):
-                        df_cand = getattr(top_w, attr, None)
-                        if df_cand is not None and not df_cand.empty:
-                            self.current_df = df_cand
-                            return df_cand
+            from ats.sector_data_aggregator import SectorDataAggregator
+            df, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(self._py_parent or self)
+            if df is not None and not df.empty:
+                self.current_df = df
+                return df
         except Exception:
             pass
         return None
@@ -751,11 +749,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 2. 现价
                 it_price = NumericTableWidgetItem(f"{price:.2f}")
+                it_price.setData(Qt.ItemDataRole.UserRole, price)
                 it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_price); col += 1
 
                 # 3. 涨幅%
                 it_pct = NumericTableWidgetItem(f"{pct:+.2f}%")
+                it_pct.setData(Qt.ItemDataRole.UserRole, pct)
                 it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_pct.setForeground(QBrush(color_pct))
                 font = it_pct.font()
@@ -764,77 +764,102 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.table.setItem(row_idx, col, it_pct); col += 1
 
                 # 4. 连板数
-                it_cons = NumericTableWidgetItem(f"{consecutive}板" if consecutive >= 1 else "--")
+                it_cons = NumericTableWidgetItem(f"{consecutive}板" if (consecutive >= 1 and r.get("is_limit_up")) else "--")
+                it_cons.setData(Qt.ItemDataRole.UserRole, consecutive if (consecutive >= 1 and r.get("is_limit_up")) else -999999999.0)
                 it_cons.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if consecutive >= 3:
+                if consecutive >= 3 and r.get("is_limit_up"):
                     it_cons.setForeground(QBrush(QColor("#ff55ff")))
-                elif consecutive == 2:
+                elif consecutive == 2 and r.get("is_limit_up"):
                     it_cons.setForeground(QBrush(QColor("#ffd700")))
                 self.table.setItem(row_idx, col, it_cons); col += 1
 
                 # 5. 梯队分类
                 it_tier = QTableWidgetItem(tier_tag)
                 it_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if "支撑阳包阴" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ff55ff")))
+                    f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
+                elif "阳包阴" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#00ffcc")))
+                    f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
+                elif "支撑起爆" in tier_tag or "支撑反弹" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ffd700")))
+                elif "空间高度龙" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ff3399")))
+                    f = it_tier.font(); f.setBold(True); it_tier.setFont(f)
+                elif "连板接力" in tier_tag:
+                    it_tier.setForeground(QBrush(QColor("#ffaa00")))
                 self.table.setItem(row_idx, col, it_tier); col += 1
 
                 # 6. 封单额(万)
-                it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if seal_amt_wan > 0 else "--")
+                it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if (seal_amt_wan > 0 and r.get("is_limit_up")) else "--")
+                it_seal_amt.setData(Qt.ItemDataRole.UserRole, seal_amt_wan if (seal_amt_wan > 0 and r.get("is_limit_up")) else -999999999.0)
                 it_seal_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_seal_amt.setForeground(QBrush(color_seal))
                 self.table.setItem(row_idx, col, it_seal_amt); col += 1
 
                 # 7. 封流比%
-                it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if seal_to_circ > 0 else "--")
+                it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if (seal_to_circ > 0 and r.get("is_limit_up")) else "--")
+                it_seal_circ.setData(Qt.ItemDataRole.UserRole, seal_to_circ if (seal_to_circ > 0 and r.get("is_limit_up")) else -999999999.0)
                 it_seal_circ.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if seal_to_circ >= 10.0:
+                if seal_to_circ >= 10.0 and r.get("is_limit_up"):
                     it_seal_circ.setForeground(QBrush(QColor("#ffd700")))
-                elif seal_to_circ >= 5.0:
+                elif seal_to_circ >= 5.0 and r.get("is_limit_up"):
                     it_seal_circ.setForeground(QBrush(QColor("#ff9900")))
                 self.table.setItem(row_idx, col, it_seal_circ); col += 1
 
                 # 8. 封成比%
-                it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if seal_to_vol > 0 else "--")
+                it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if (seal_to_vol > 0 and r.get("is_limit_up")) else "--")
+                it_seal_vol.setData(Qt.ItemDataRole.UserRole, seal_to_vol if (seal_to_vol > 0 and r.get("is_limit_up")) else -999999999.0)
                 it_seal_vol.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_seal_vol); col += 1
 
                 # 9. 换手%
                 it_to = NumericTableWidgetItem(f"{turnover:.2f}%")
+                it_to.setData(Qt.ItemDataRole.UserRole, turnover)
                 it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_to); col += 1
 
                 # 10. 量比
                 it_vr = NumericTableWidgetItem(f"{vol_ratio:.2f}")
+                it_vr.setData(Qt.ItemDataRole.UserRole, vol_ratio)
                 it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_vr); col += 1
 
                 # 11. 成交额(亿)
                 it_amt = NumericTableWidgetItem(f"{amt_yi:.2f}" if amt_yi > 0 else "--")
+                it_amt.setData(Qt.ItemDataRole.UserRole, amt_yi if amt_yi > 0 else -999999999.0)
                 it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_amt); col += 1
 
                 # 12. DFF
                 it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
+                it_dff.setData(Qt.ItemDataRole.UserRole, dff)
                 it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_dff.setForeground(QBrush(QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))))
                 self.table.setItem(row_idx, col, it_dff); col += 1
 
                 # 13. Rank
                 it_rank = NumericTableWidgetItem(str(rank_val) if rank_val < 999 else "--")
+                it_rank.setData(Qt.ItemDataRole.UserRole, rank_val if rank_val < 999 else 999999.0)
                 it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, col, it_rank); col += 1
 
                 # 14. DFF2
                 it_dff2 = NumericTableWidgetItem(f"{dff2:+.1f}")
+                it_dff2.setData(Qt.ItemDataRole.UserRole, dff2)
                 it_dff2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_dff2); col += 1
 
                 # 15. DFF3
                 it_dff3 = NumericTableWidgetItem(f"{dff3:+.1f}")
+                it_dff3.setData(Qt.ItemDataRole.UserRole, dff3)
                 it_dff3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_dff3); col += 1
 
                 # 16. 大盘偏离
                 it_rs = NumericTableWidgetItem(f"{rs_val:+.2f}%")
+                it_rs.setData(Qt.ItemDataRole.UserRole, rs_val)
                 it_rs.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_rs.setForeground(QBrush(QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)))
                 self.table.setItem(row_idx, col, it_rs); col += 1
@@ -855,13 +880,45 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     it_extra.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.table.setItem(row_idx, col, it_extra); col += 1
 
-                # 19. 形态与质量 (倒数第二列)
+                # 19. 形态与质量 (倒数第二列，结合多日动能与两日情绪)
                 quality_score = _safe_float(r.get("seal_quality_score", 70.0))
-                desc = f"质量 {quality_score:.0f}分"
-                if r.get("is_broken"):
-                    desc = "⚠️ 炸板破位"
-                it_desc = QTableWidgetItem(desc)
+                momentum_score = _safe_float(r.get("momentum_score", quality_score))
+                desc_tag = str(r.get("pattern_desc", f"动能 {momentum_score:.0f}分"))
+                is_bullish_engulfing = r.get("is_bullish_engulfing", False)
+                is_support_bounce = r.get("is_support_bounce", False)
+                pct_yesterday = _safe_float(r.get("pct_yesterday", 0.0))
+                supp_dist_pct = _safe_float(r.get("supp_dist_pct", 0.0))
+
+                it_desc = NumericTableWidgetItem(desc_tag)
+                it_desc.setData(Qt.ItemDataRole.UserRole, momentum_score)
                 it_desc.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                if is_support_bounce and is_bullish_engulfing:
+                    it_desc.setForeground(QBrush(QColor("#ff55ff"))) # 亮紫粉 (顶级反包反转)
+                    font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
+                elif is_bullish_engulfing:
+                    it_desc.setForeground(QBrush(QColor("#00ffcc"))) # 碧青 (阳包阴)
+                    font = it_desc.font(); font.setBold(True); it_desc.setFont(font)
+                elif is_support_bounce:
+                    it_desc.setForeground(QBrush(QColor("#ffd700"))) # 金黄 (支撑反弹)
+                elif r.get("is_broken"):
+                    it_desc.setForeground(QBrush(QColor("#ff8800"))) # 橙色 (炸板)
+
+                # 全维度多日趋势与情绪动能 ToolTip
+                tip = (
+                    f"【{code} {name} 多维动能与趋势深度透视】\n"
+                    f"────────────────────────\n"
+                    f"• 梯队分类: {tier_tag}\n"
+                    f"• 趋势动能评分: {momentum_score:.0f} 分 | 封单质量: {quality_score:.0f} 分\n"
+                    f"• 2日情绪反包: 昨日涨跌 {pct_yesterday:+.2f}% ➔ 今日涨跌 {pct:+.2f}%"
+                    f"{' (🔥阳包阴强势反转)' if is_bullish_engulfing else ''}\n"
+                    f"• 关键支撑位状态: 偏离支撑 {supp_dist_pct:+.1f}%"
+                    f"{' (🎯回踩关键支撑起爆)' if is_support_bounce else ''}\n"
+                    f"• 多日趋势强度: DFF={dff:+.2f} | DFF2={dff2:+.1f} | DFF3={dff3:+.1f}\n"
+                    f"• 盘口封单量能: 封单额 {seal_amt_wan:,.0f}万 | 封流比 {seal_to_circ:.2f}% | 换手 {turnover:.2f}%\n"
+                    f"• 大盘共振偏离: {rs_val:+.2f}% ({resonance})"
+                )
+                it_desc.setToolTip(tip)
                 self.table.setItem(row_idx, col, it_desc); col += 1
 
                 # 20. 所属板块 (放置在最后一列)

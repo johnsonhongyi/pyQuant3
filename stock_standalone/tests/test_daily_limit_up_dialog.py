@@ -85,6 +85,18 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog.table.setColumnWidth(0, 77)
         dialog._save_current_column_widths()
 
+        # 测试数值比较与 `--` 占位符排序稳定性
+        from ats.ui.styles import NumericTableWidgetItem
+        from PyQt6.QtCore import Qt
+        it_val = NumericTableWidgetItem("26,740")
+        it_val.setData(Qt.ItemDataRole.UserRole, 26740.0)
+        it_dash = NumericTableWidgetItem("--")
+        it_dash.setData(Qt.ItemDataRole.UserRole, -999999999.0)
+
+        # 降序比较断言: 26740 > --，即 not (it_val < it_dash)，it_dash < it_val 为 True
+        self.assertTrue(it_dash < it_val)
+        self.assertFalse(it_val < it_dash)
+
         # 测试切换到极窄模式
         dialog.toggle_narrow_mode(True)
         self.assertTrue(dialog.is_narrow_mode)

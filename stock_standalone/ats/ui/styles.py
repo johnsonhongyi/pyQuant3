@@ -188,18 +188,33 @@ class NumericTableWidgetItem(QTableWidgetItem):
         if not isinstance(other, QTableWidgetItem):
             return super().__lt__(other)
             
+        import math, re
+        from PyQt6.QtCore import Qt
+
+        # 1. 优先使用 setData(Qt.ItemDataRole.UserRole, float_val) 高精度真实数值比较
+        u1 = self.data(Qt.ItemDataRole.UserRole)
+        u2 = other.data(Qt.ItemDataRole.UserRole)
+        if u1 is not None and u2 is not None:
+            try:
+                f1 = float(u1)
+                f2 = float(u2)
+                if not (math.isnan(f1) or math.isnan(f2)):
+                    if f1 != f2:
+                        return f1 < f2
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 文本解析降级
         t1 = self.text().strip()
         t2 = other.text().strip()
-        
-        import math, re
 
         def _parse_num(t):
             if not t:
                 return None
             t_lower = t.lower()
-            if t in ("-", "--") or "nan" in t_lower or "none" in t_lower:
+            if t in ("-", "--", "---") or "nan" in t_lower or "none" in t_lower:
                 return None
-            clean_t = t.replace(',', '').replace('%', '').replace('￥', '').replace('$', '').strip()
+            clean_t = t.replace(',', '').replace('%', '').replace('￥', '').replace('$', '').replace('板', '').strip()
             num_re = r'[-+]?\d*\.?\d+'
             m = re.search(num_re, clean_t)
             if m:
@@ -211,25 +226,16 @@ class NumericTableWidgetItem(QTableWidgetItem):
                     pass
             return None
 
-        v1 = _parse_num(t1)
-        v2 = _parse_num(t2)
+        v1 = float(u1) if (u1 is not None and not math.isnan(float(u1))) else _parse_num(t1)
+        v2 = float(u2) if (u2 is not None and not math.isnan(float(u2))) else _parse_num(t2)
 
-        table = self.tableWidget()
-        is_desc = False
-        if table and hasattr(table, 'horizontalHeader') and table.horizontalHeader():
-            try:
-                from PyQt6.QtCore import Qt
-                is_desc = (table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
-            except Exception:
-                pass
-
-        # 确保空值/NaN/占位符在比较中具备严格传递性，并在升降序下均稳定沉底
+        # 缺失值占位符 "--" 在比较中作为极小值 (-inf)，降序时必然稳稳沉底排在最后
         if v1 is None and v2 is None:
             return t1 < t2
         if v1 is None:
-            return True if is_desc else False
+            return True
         if v2 is None:
-            return False if is_desc else True
+            return False
         if v1 != v2:
             return v1 < v2
         return t1 < t2
