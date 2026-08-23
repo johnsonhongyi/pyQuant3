@@ -37,6 +37,7 @@ from ats.ui.trade_flow import TradeFlowTable, PositionPanel, BacktestReportPanel
 from ats.ui.kernel_trace_panel import KernelTracePanel
 from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
 from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
 from ats.ui.new_stock_panel import NewStockPanel
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
@@ -1693,6 +1694,7 @@ class ATSMainWindow(QMainWindow):
         self.stock_history_cache = {}
         self.dragon_monitor_dialog = None
         self.hot_sector_dialog = None
+        self.daily_limit_up_dialog = None
         self.history_loading_codes = set()
         # Changed from a simple set to a {code: fail_timestamp} dict.
         # Codes that failed will be retried after 5 minutes, and the entire
@@ -1928,6 +1930,12 @@ class ATSMainWindow(QMainWindow):
         self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
+
+        self.btn_limit_up_ladder = QPushButton("涨停天梯🔥")
+        self.btn_limit_up_ladder.setToolTip("打开每日涨停个股分析、封单比/量能比统计、多日强势股聚合与天梯看板 (完全独立非模态运行)")
+        self.btn_limit_up_ladder.setStyleSheet("QPushButton { background-color: #3d1414; color: #ff5555; font-weight: bold; border: 1px solid #ff4444; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ff4444; color: #000; }")
+        self.btn_limit_up_ladder.clicked.connect(self.open_daily_limit_up_analyzer)
+        toolbar.addWidget(self.btn_limit_up_ladder)
         
         toolbar.addSeparator()
 
@@ -2082,11 +2090,31 @@ class ATSMainWindow(QMainWindow):
         self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         
-        # 顶部主看板 Tab 右上角添加【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
+        # 顶部主看板 Tab 右上角添加【🔥 涨停天梯】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
         top_corner_layout = QHBoxLayout(top_corner_container)
         top_corner_layout.setContentsMargins(0, 0, 0, 0)
         top_corner_layout.setSpacing(6)
+
+        self.btn_top_limit_up = QPushButton("🔥 涨停天梯")
+        self.btn_top_limit_up.setToolTip("打开每日涨停分析、封单比/量能比统计与多日强势股天梯看板")
+        self.btn_top_limit_up.setStyleSheet("""
+            QPushButton {
+                background-color: #3d1414;
+                color: #ff5555;
+                font-weight: bold;
+                border: 1px solid #ff4444;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #ff4444;
+                color: #000000;
+            }
+        """)
+        self.btn_top_limit_up.clicked.connect(self.open_daily_limit_up_analyzer)
+        top_corner_layout.addWidget(self.btn_top_limit_up)
 
         self.btn_top_scan_60f = QPushButton("🎯 60f通道测算")
         self.btn_top_scan_60f.setToolTip("对当前 Tab (重点关注 / MA20d回调 / 新股次新股) 中选中的股票或全量列表直连 TDX 进行 60f 通道底部反转策略批量测算")
@@ -3448,6 +3476,15 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # 🛡️ 实时推送到独立每日涨停看板 (非阻塞)
+        from PyQt6.sip import isdeleted
+        if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
+            try:
+                sh_pct_val = getattr(self, '_last_sh_pct', 0.0)
+                self.daily_limit_up_dialog.update_data_payload(self.current_df, sh_pct_val)
+            except Exception:
+                pass
+
         # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
@@ -3531,6 +3568,15 @@ class ATSMainWindow(QMainWindow):
                 self.open_hot_sector_leaderboard(restore_state=hot_cfg, cold_start=True)
         except Exception as e:
             logger.warning(f"[ATSMainWindow] Error auto-restoring hot sector leaderboard: {e}")
+
+        # 1.2 恢复加载每日涨停与强势股天梯看板
+        try:
+            zt_cfg = config_data.get("daily_limit_up_dialog", {})
+            if zt_cfg.get("is_open", False):
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的每日涨停看板...")
+                self.open_daily_limit_up_analyzer(restore_state=zt_cfg, cold_start=True)
+        except Exception as e:
+            logger.warning(f"[ATSMainWindow] Error auto-restoring daily limit-up dialog: {e}")
 
         # 2. 恢复加载涨跌分布个股明细面板
         try:
@@ -4876,6 +4922,11 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'hot_sector_dialog') and self.hot_sector_dialog and not isdeleted(self.hot_sector_dialog):
                 if self.hot_sector_dialog.isVisible() or getattr(self.hot_sector_dialog, 'is_hidden_state', False):
                     self.hot_sector_dialog._save_window_states(is_open=True)
+
+            # 1.2 持久化每日涨停与强势股天梯看板状态
+            if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
+                if self.daily_limit_up_dialog.isVisible() or getattr(self.daily_limit_up_dialog, 'is_hidden_state', False):
+                    self.daily_limit_up_dialog._save_window_states(is_open=True)
             
             # 2. 持久化所有打开的涨跌分布个股明细窗口状态
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
@@ -5033,6 +5084,12 @@ class ATSMainWindow(QMainWindow):
                 self.hot_sector_dialog.close()
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing hot sector leaderboard on close: {e}")
+
+        if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
+            try:
+                self.daily_limit_up_dialog.close()
+            except Exception as e:
+                print(f"[ATSMainWindow] Error closing daily limit-up dialog on close: {e}")
                 
         try:
             import ats.ui.multi_period_dialog as mpd
@@ -5227,6 +5284,36 @@ class ATSMainWindow(QMainWindow):
                 self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
+
+    def open_daily_limit_up_analyzer(self, restore_state=None, cold_start=False):
+        """打开/激活【🔥 每日涨停分析与强势股天梯】独立看板 (非模态独立运行，完全不阻塞主界面)"""
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
+            return
+        from PyQt6.sip import isdeleted
+        if not hasattr(self, 'daily_limit_up_dialog') or self.daily_limit_up_dialog is None or isdeleted(self.daily_limit_up_dialog):
+            self.daily_limit_up_dialog = DailyLimitUpDialog(self, restore_state=restore_state)
+            self.daily_limit_up_dialog.code_clicked.connect(self.link_stock)
+            self.daily_limit_up_dialog.code_double_clicked.connect(self.on_stock_clicked)
+
+        if cold_start and getattr(self.daily_limit_up_dialog, 'is_hidden_state', False):
+            self.daily_limit_up_dialog.show()
+        else:
+            self.daily_limit_up_dialog.show_normal_position()
+
+        if hasattr(self.daily_limit_up_dialog, '_save_window_states'):
+            self.daily_limit_up_dialog._save_window_states(is_open=True)
+
+        # 立即注入当前最新的 DataFrame 和大盘涨幅
+        sh_pct = 0.0
+        if self.current_df is not None and not self.current_df.empty:
+            if 'sh000001' in self.current_df.index:
+                sh_pct = float(self.current_df.loc['sh000001'].get('percent', 0.0))
+            elif '000001' in self.current_df.index and 'sh' in str(self.current_df.loc['000001'].get('code', '')):
+                sh_pct = float(self.current_df.loc['000001'].get('percent', 0.0))
+            elif 'percent' in self.current_df.columns:
+                sh_pct = float(self.current_df['percent'].mean())
+        if hasattr(self.daily_limit_up_dialog, 'update_data_payload'):
+            self.daily_limit_up_dialog.update_data_payload(self.current_df, sh_pct)
 
     def open_hot_sector_leaderboard(self, restore_state=None, cold_start=False):
         """调起 Top 3 强势板块龙头突击跟单榜独立窗口（非模态独立运行，完全不阻塞主界面）"""

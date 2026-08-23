@@ -1,0 +1,1494 @@
+# -*- coding: utf-8 -*-
+"""
+ats/ui/daily_limit_up_dialog.py — ATS 每日涨停分析与多日强势股天梯看板 (Daily Limit-Up & Momentum Leaderboard)
+特点：
+1. 【市场核心涨停 KPI 实时大盘看板】：
+   - 顶部实时统计当日涨停家数、连板家数、炸板家数、封板率、最高连板高度、平均封流比与封单总额；
+2. 【全维封单比与量能比数据呈现】：
+   - 买一封单额 (万元/亿元)、封流比 (封单占流通盘比例 %)、封成比 (封单占当日成交量比 %)、买盘压强与封板质量评分；
+   - 真实流通换手率 (%)、量比与成交额 (亿元)；
+3. 【多日强势股与连板天梯快速切换】：
+   - 支持 今日涨停 / 3日强势 / 5日强势 / 10日强势 / 连板天梯 / 历史日期回溯等不同视角的极速切换；
+   - 自动统计 N 日 M 板 (如 5日3板、10日6板)、区间累计涨幅与强势梯队；
+4. 【跟随 ATS 的 dff 等策略特征与 ats_col 动态自定义列】：
+   - 完整继承 ATS 核心指标：dff, dff2, dff3, rank, perc3d, 大盘偏离, 大盘共振；
+   - 动态提取与渲染 cct.ats_col 自定义指标列，并支持列宽自适应记忆与数值排序；
+5. 【全端联动与极速磁吸】：
+   - 具备磁吸边沿吸附、自动贴边隐藏、窗口置顶、平滑动画与位置记忆；
+   - 单击联动通达信/同花顺及可视化器，双击调起 SBC 日内分时走势图。
+"""
+
+import os
+import json
+import time
+import math
+import threading
+from typing import Optional, List, Dict, Any, Tuple
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QHBoxLayout, QDialog, QTableWidget, 
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox, 
+    QPushButton, QFrame, QMenu, QApplication, QComboBox, QLineEdit, 
+    QFileDialog, QMessageBox
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+from PyQt6.QtGui import QBrush, QColor, QFont, QAction
+import pandas as pd
+
+from tk_gui_modules.window_mixin import WindowMixin
+from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
+from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
+from logger_utils import LoggerFactory
+from ats.ui.styles import (
+    COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
+    auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
+    apply_dark_theme
+)
+from ats.ui.favorite_panel import get_ats_extra_cols
+from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
+from JohnsonUtil import commonTips as cct
+
+logger = LoggerFactory.getLogger(__name__)
+_CONFIG_FILE_LOCK = threading.RLock()
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """安全转换为 int"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_limit_up_table_headers(extra_cols=None) -> Tuple[List[str], List[str]]:
+    """生成每日涨停与强势股天梯看板的标准表头字段与动态自定义列列表"""
+    if extra_cols is None:
+        extra_cols = get_ats_custom_extra_cols()
+    try:
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+
+    base_headers = [
+        "代码", "名称", "现价", "涨幅%", "连板数", "梯队分类", 
+        "封单额(万)", "封流比%", "封成比%", "换手%", "量比", "成交额(亿)", 
+        "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "共振状态"
+    ]
+    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    tail_headers = ["所属板块", "形态与质量"]
+    full_headers = base_headers + extra_headers + tail_headers
+    return full_headers, extra_cols
+
+
+class DailyLimitUpDialog(QDialog, WindowMixin):
+    """
+    每日涨停分析与多日强势股天梯看板独立窗口
+    支持磁吸边沿吸附、自动贴边隐藏、窗口置顶、多日时序分析与全端联动。
+    """
+    code_clicked = pyqtSignal(str, str) # 单击联动 (code, name)
+    code_double_clicked = pyqtSignal(str, str) # 双击查看详情 (code, name)
+
+    def __init__(self, parent=None, restore_state=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle("🔥 每日涨停分析与强势股天梯 (Limit-Up & Multi-Day Momentum)")
+        self.resize(1280, 720)
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(240)
+        apply_dark_theme(self)
+
+        self.engine = LimitUpEngine.get_instance()
+        self.current_df: Optional[pd.DataFrame] = None
+        self.current_records: List[Dict[str, Any]] = []
+        self.current_mode: str = "TODAY"  # "TODAY", "3D", "5D", "10D", "LADDER", "HISTORY"
+        self.selected_history_date: Optional[str] = None
+        self.last_sh_pct: float = 0.0
+        self.is_narrow_mode: bool = False
+        self._last_wide_width: int = 1280
+        # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 封单额(6), 封流比(7), 换手(9), DFF(12), Rank(13)
+        self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13}
+
+        # 空间龙头当前标的
+        self.current_top_leader_code: str = ""
+        self.current_top_leader_name: str = ""
+
+        # 键盘上下键与单元格平滑防抖联动
+        self._pending_linkage_row: int = -1
+        self._last_emitted_code: str = ""
+        self._is_populating: bool = False
+        self._linkage_timer = QTimer(self)
+        self._linkage_timer.setInterval(60)
+        self._linkage_timer.setSingleShot(True)
+        self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
+
+        # 0. Magnetic snap setup (必须在 restore_state 前初始化)
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        self.normal_geometry = None
+        self.hover_ticks = 0
+        self.leave_ticks = 0
+        self._in_snap_action = False
+        self.anim_group = None
+        self._is_dragging = False
+        self._last_show_time = 0.0
+        self._has_hovered_since_show = False
+        self._is_auto_popping = False
+
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+        self.hover_timer.start()
+
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(200)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
+
+        # 1. 窗口置顶标志与配置
+        self.stays_on_top = self._load_stays_on_top()
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.Dialog
+        flags &= ~Qt.WindowType.Tool
+        flags |= Qt.WindowType.Window
+        flags |= Qt.WindowType.WindowMinimizeButtonHint
+        flags |= Qt.WindowType.WindowMaximizeButtonHint
+        flags |= Qt.WindowType.WindowCloseButtonHint
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+
+        self._init_ui()
+
+        # 2. 恢复几何布局与磁吸状态
+        if restore_state:
+            self._apply_restore_state(restore_state)
+        else:
+            self._load_saved_geometry()
+
+        # 3. 首次加载与主动扫描
+        self._refresh_data_for_mode()
+        if self.is_narrow_mode:
+            self._apply_narrow_mode_layout()
+
+    def _load_stays_on_top(self) -> bool:
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        return data.get("daily_limit_up_dialog", {}).get("stays_on_top", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_window_states(self, is_open: Optional[bool] = None):
+        try:
+            with _CONFIG_FILE_LOCK:
+                config_data = {}
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    try:
+                        with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                            config_data = json.load(f)
+                    except Exception:
+                        config_data = {}
+
+                geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
+                node = config_data.get("daily_limit_up_dialog", {})
+                node.update({
+                    "x": geom.x(),
+                    "y": geom.y(),
+                    "width": geom.width(),
+                    "height": geom.height(),
+                    "anchor_edge": self.anchor_edge,
+                    "is_hidden": self.is_hidden_state,
+                    "stays_on_top": self.stays_on_top,
+                    "current_mode": self.current_mode,
+                    "is_narrow_mode": self.is_narrow_mode,
+                    "last_wide_width": self._last_wide_width
+                })
+                if is_open is not None:
+                    node["is_open"] = is_open
+
+                config_data["daily_limit_up_dialog"] = node
+                with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(config_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"保存每日涨停看板窗口配置异常: {e}")
+
+    def _apply_restore_state(self, state: Dict[str, Any]):
+        try:
+            x = state.get("x")
+            y = state.get("y")
+            w = state.get("width", 1280)
+            h = state.get("height", 720)
+            self._last_wide_width = state.get("last_wide_width", 1280)
+            self.is_narrow_mode = state.get("is_narrow_mode", False)
+            if hasattr(self, 'btn_narrow_mode'):
+                self.btn_narrow_mode.setChecked(self.is_narrow_mode)
+
+            if x is not None and y is not None:
+                self.setGeometry(x, y, w, h)
+                self.normal_geometry = QRect(x, y, w, h)
+
+            self.anchor_edge = state.get("anchor_edge")
+            self.is_hidden_state = state.get("is_hidden", False)
+            if state.get("current_mode"):
+                self.current_mode = state["current_mode"]
+        except Exception as e:
+            logger.debug(f"应用每日涨停看板恢复状态异常: {e}")
+
+    def _load_saved_geometry(self):
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        st = data.get("daily_limit_up_dialog", {})
+                        if st:
+                            self._apply_restore_state(st)
+        except Exception:
+            pass
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
+
+        # ── 1. 顶部市场核心涨停概览 KPI 卡片 ──
+        self.kpi_frame = QFrame()
+        self.kpi_frame.setStyleSheet("""
+            QFrame {
+                background-color: #16181f;
+                border: 1px solid #282a36;
+                border-radius: 6px;
+                padding: 4px;
+            }
+        """)
+        self.kpi_layout = QHBoxLayout(self.kpi_frame)
+        self.kpi_layout.setContentsMargins(8, 4, 8, 4)
+        self.kpi_layout.setSpacing(12)
+
+        self.lbl_kpi_zt = QLabel("🔴 今日涨停: <b>0</b> 家")
+        self.lbl_kpi_zt.setStyleSheet("color: #ff4444; font-size: 10pt;")
+        self.kpi_layout.addWidget(self.lbl_kpi_zt)
+
+        self.lbl_kpi_ladder = QLabel("👑 连板天梯: <b>0</b> 家 (最高 <b>0</b> 板)")
+        self.lbl_kpi_ladder.setStyleSheet("color: #ffd700; font-size: 10pt;")
+        self.kpi_layout.addWidget(self.lbl_kpi_ladder)
+
+        self.lbl_kpi_broken = QLabel("💥 炸板: <b>0</b> 家 (封板率 <b>0.0%</b>)")
+        self.lbl_kpi_broken.setStyleSheet("color: #ff9900; font-size: 10pt;")
+        self.kpi_layout.addWidget(self.lbl_kpi_broken)
+
+        self.lbl_kpi_seal = QLabel("💰 平均封流比: <b>0.0%</b> | 封单总额: <b>0.0</b> 亿")
+        self.lbl_kpi_seal.setStyleSheet("color: #00ffaa; font-size: 10pt;")
+        self.kpi_layout.addWidget(self.lbl_kpi_seal)
+
+        self.kpi_layout.addStretch()
+
+        self.btn_top_leader = QPushButton("🏆 空间龙头: --")
+        self.btn_top_leader.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_top_leader.setToolTip("点击立即联动切股并在表格中高亮定位当前最高板空间龙头")
+        self.btn_top_leader.setStyleSheet("""
+            QPushButton {
+                background-color: #2b1430;
+                color: #ff77ff;
+                font-weight: bold;
+                font-size: 10pt;
+                border: 1px solid #d946ef;
+                border-radius: 4px;
+                padding: 3px 10px;
+            }
+            QPushButton:hover {
+                background-color: #d946ef;
+                color: #ffffff;
+                border-color: #f0abfc;
+            }
+            QPushButton:pressed {
+                background-color: #a21caf;
+            }
+        """)
+        self.btn_top_leader.clicked.connect(self._on_top_leader_clicked)
+        self.kpi_layout.addWidget(self.btn_top_leader)
+
+        main_layout.addWidget(self.kpi_frame)
+
+        # ── 2. 控制栏 (周期切换、历史回溯、搜索、过滤与操作按钮) ──
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.setContentsMargins(0, 2, 0, 2)
+        ctrl_layout.setSpacing(6)
+
+        # 模式切换按钮组
+        self.btn_mode_today = QPushButton("🔥 今日涨停")
+        self.btn_mode_today.setCheckable(True)
+        self.btn_mode_today.setChecked(True)
+        self.btn_mode_today.setStyleSheet(self._get_btn_style(active=True))
+        self.btn_mode_today.clicked.connect(lambda: self._switch_mode("TODAY"))
+        ctrl_layout.addWidget(self.btn_mode_today)
+
+        self.btn_mode_3d = QPushButton("🚀 3日强势")
+        self.btn_mode_3d.setCheckable(True)
+        self.btn_mode_3d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_3d.clicked.connect(lambda: self._switch_mode("3D"))
+        ctrl_layout.addWidget(self.btn_mode_3d)
+
+        self.btn_mode_5d = QPushButton("⚡ 5日强势")
+        self.btn_mode_5d.setCheckable(True)
+        self.btn_mode_5d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_5d.clicked.connect(lambda: self._switch_mode("5D"))
+        ctrl_layout.addWidget(self.btn_mode_5d)
+
+        self.btn_mode_10d = QPushButton("👑 10日强势")
+        self.btn_mode_10d.setCheckable(True)
+        self.btn_mode_10d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_10d.clicked.connect(lambda: self._switch_mode("10D"))
+        ctrl_layout.addWidget(self.btn_mode_10d)
+
+        self.btn_mode_ladder = QPushButton("🪜 连板天梯")
+        self.btn_mode_ladder.setCheckable(True)
+        self.btn_mode_ladder.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_ladder.clicked.connect(lambda: self._switch_mode("LADDER"))
+        ctrl_layout.addWidget(self.btn_mode_ladder)
+
+        # 历史日期回溯选择框
+        lbl_date = QLabel(" 📅 历史回溯:")
+        lbl_date.setStyleSheet("color: #8e8e93; font-size: 9pt;")
+        ctrl_layout.addWidget(lbl_date)
+
+        self.combo_history_date = QComboBox()
+        self.combo_history_date.setMinimumWidth(110)
+        self.combo_history_date.setStyleSheet("""
+            QComboBox { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
+            QComboBox::drop-down { width: 18px; }
+        """)
+        self._populate_history_dates()
+        self.combo_history_date.currentIndexChanged.connect(self._on_history_date_selected)
+        ctrl_layout.addWidget(self.combo_history_date)
+
+        # 梯队分类过滤
+        self.combo_tier_filter = QComboBox()
+        self.combo_tier_filter.addItems(["全部梯队", "👑 空间高度龙", "🚀 连板接力", "🔥 换手首板", "💥 曾涨停炸板", "⚡ 强势反包"])
+        self.combo_tier_filter.setStyleSheet("""
+            QComboBox { background-color: #1e1e24; color: #00ffaa; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
+        """)
+        self.combo_tier_filter.currentTextChanged.connect(self._apply_filter)
+        ctrl_layout.addWidget(self.combo_tier_filter)
+
+        # 搜索过滤框
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 搜索代码/名称/板块...")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setStyleSheet("""
+            QLineEdit { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; min-width: 130px; }
+        """)
+        self.search_edit.textChanged.connect(self._apply_filter)
+        ctrl_layout.addWidget(self.search_edit)
+
+        ctrl_layout.addStretch()
+
+        # 📐 自适应与 📱 极窄模式快捷按钮
+        self.btn_autofit = QPushButton("📐 自适应")
+        self.btn_autofit.setToolTip("一键自适应调整所有表格列宽 (右键表格亦可调用)")
+        self.btn_autofit.setStyleSheet("""
+            QPushButton { background-color: #1a233a; color: #60a5fa; border: 1px solid #3b82f6; border-radius: 4px; padding: 3px 8px; font-weight: bold; }
+            QPushButton:hover { background-color: #3b82f6; color: #ffffff; }
+        """)
+        self.btn_autofit.clicked.connect(self.auto_fit_columns)
+        ctrl_layout.addWidget(self.btn_autofit)
+
+        self.btn_narrow_mode = QPushButton("📱 极窄模式")
+        self.btn_narrow_mode.setCheckable(True)
+        self.btn_narrow_mode.setChecked(self.is_narrow_mode)
+        self.btn_narrow_mode.setToolTip("开启/关闭极窄紧凑盯盘模式 (隐藏次要列，窗口宽度收敛至480px，适合侧边吸附)")
+        self.btn_narrow_mode.setStyleSheet("""
+            QPushButton { background-color: #2b1f3c; color: #c084fc; border: 1px solid #a855f7; border-radius: 4px; padding: 3px 8px; font-weight: bold; }
+            QPushButton:checked { background-color: #7e22ce; color: #ffffff; border-color: #d8b4fe; }
+            QPushButton:hover { background-color: #a855f7; color: #ffffff; }
+        """)
+        self.btn_narrow_mode.toggled.connect(self.toggle_narrow_mode)
+        ctrl_layout.addWidget(self.btn_narrow_mode)
+
+        # 刷新与导出按钮
+        self.btn_refresh = QPushButton("🔄 刷新")
+        self.btn_refresh.setStyleSheet("""
+            QPushButton { background-color: #1a2a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px; }
+            QPushButton:hover { background-color: #00ff88; color: #000000; }
+        """)
+        self.btn_refresh.clicked.connect(self._refresh_data_for_mode)
+        ctrl_layout.addWidget(self.btn_refresh)
+
+        self.btn_export = QPushButton("📤 导出")
+        self.btn_export.setStyleSheet("""
+            QPushButton { background-color: #1e1e24; color: #8e8e93; border: 1px solid #33333f; border-radius: 4px; padding: 3px 8px; }
+            QPushButton:hover { background-color: #2e2e36; color: #ffffff; }
+        """)
+        self.btn_export.clicked.connect(self._export_to_csv)
+        ctrl_layout.addWidget(self.btn_export)
+
+        # 置顶保持勾选
+        self.chk_ontop = QCheckBox("置顶")
+        self.chk_ontop.setChecked(self.stays_on_top)
+        self.chk_ontop.setStyleSheet("color: #ffd700; font-size: 9pt;")
+        self.chk_ontop.toggled.connect(self._on_stays_on_top_toggled)
+        ctrl_layout.addWidget(self.chk_ontop)
+
+        main_layout.addLayout(ctrl_layout)
+
+        # ── 3. 主数据表格 ──
+        headers, self.extra_cols = get_limit_up_table_headers()
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setSortingEnabled(True)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #121214;
+                alternate-background-color: #17171c;
+                color: #e2e2e5;
+                gridline-color: #282830;
+                border: 1px solid #282830;
+                selection-background-color: #2a3b4c;
+            }
+            QHeaderView::section {
+                background-color: #18181f;
+                color: #8e8e93;
+                font-weight: bold;
+                border: 1px solid #282830;
+                padding: 4px 6px;
+            }
+        """)
+
+        # 键盘上下键与鼠标点击统一驱动实时防抖联动
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+
+        # 表头右键菜单支持
+        header = self.table.horizontalHeader()
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._show_header_context_menu)
+
+        setup_header_persistence(self.table, "ats_daily_limit_up_table", self)
+        main_layout.addWidget(self.table)
+
+        # ── 4. 底部状态栏 ──
+        self.lbl_status = QLabel("就绪。实时监控全市场涨停与封单比数据。")
+        self.lbl_status.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        main_layout.addWidget(self.lbl_status)
+
+    def _get_btn_style(self, active: bool) -> str:
+        if active:
+            return """
+                QPushButton {
+                    background-color: #3b1818;
+                    color: #ff5555;
+                    font-weight: bold;
+                    border: 1px solid #ff4444;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                }
+            """
+        return """
+            QPushButton {
+                background-color: #1e1e24;
+                color: #c0c0c8;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 3px 10px;
+            }
+            QPushButton:hover {
+                background-color: #2a2a36;
+                color: #ffffff;
+            }
+        """
+
+    def _populate_history_dates(self):
+        self.combo_history_date.blockSignals(True)
+        self.combo_history_date.clear()
+        self.combo_history_date.addItem("实时今日")
+        archived_dates = self.engine.get_all_archived_dates()
+        for d in reversed(archived_dates):
+            self.combo_history_date.addItem(d)
+        self.combo_history_date.blockSignals(False)
+
+    def _switch_mode(self, mode: str):
+        self.current_mode = mode
+        self.btn_mode_today.setChecked(mode == "TODAY")
+        self.btn_mode_3d.setChecked(mode == "3D")
+        self.btn_mode_5d.setChecked(mode == "5D")
+        self.btn_mode_10d.setChecked(mode == "10D")
+        self.btn_mode_ladder.setChecked(mode == "LADDER")
+
+        self.btn_mode_today.setStyleSheet(self._get_btn_style(mode == "TODAY"))
+        self.btn_mode_3d.setStyleSheet(self._get_btn_style(mode == "3D"))
+        self.btn_mode_5d.setStyleSheet(self._get_btn_style(mode == "5D"))
+        self.btn_mode_10d.setStyleSheet(self._get_btn_style(mode == "10D"))
+        self.btn_mode_ladder.setStyleSheet(self._get_btn_style(mode == "LADDER"))
+
+        if mode != "HISTORY":
+            self.combo_history_date.blockSignals(True)
+            self.combo_history_date.setCurrentIndex(0)
+            self.combo_history_date.blockSignals(False)
+
+        self._refresh_data_for_mode()
+
+    def _on_history_date_selected(self, index: int):
+        if index == 0:
+            self._switch_mode("TODAY")
+        else:
+            date_str = self.combo_history_date.currentText()
+            self.selected_history_date = date_str
+            self.current_mode = "HISTORY"
+            for btn in (self.btn_mode_today, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder):
+                btn.setChecked(False)
+                btn.setStyleSheet(self._get_btn_style(False))
+            self._refresh_data_for_mode()
+
+    def update_data_payload(self, current_df: Optional[pd.DataFrame] = None, sh_pct: float = 0.0):
+        """【外部实时数据注入入口】由 ATS 主窗口在收到 IPC 或轮询数据时直接驱动"""
+        if current_df is not None and not current_df.empty:
+            self.current_df = current_df
+        self.last_sh_pct = sh_pct
+        self._refresh_data_for_mode()
+
+    def _resolve_active_strategy_df(self) -> Optional[pd.DataFrame]:
+        """尝试从父窗口或全局感知主策略 DataFrame"""
+        if self.current_df is not None and not self.current_df.empty:
+            return self.current_df
+        p = self.parent()
+        while p:
+            for attr in ('current_df', 'df_realtime', '_last_flat_df', 'flat_df'):
+                df_cand = getattr(p, attr, None)
+                if df_cand is not None and not df_cand.empty:
+                    self.current_df = df_cand
+                    return df_cand
+            p = getattr(p, '_py_parent', None) or (p.parent() if hasattr(p, 'parent') and callable(p.parent) else None)
+
+        try:
+            app = QApplication.instance()
+            if app:
+                for top_w in app.topLevelWidgets():
+                    for attr in ('current_df', 'df_realtime', '_last_flat_df'):
+                        df_cand = getattr(top_w, attr, None)
+                        if df_cand is not None and not df_cand.empty:
+                            self.current_df = df_cand
+                            return df_cand
+        except Exception:
+            pass
+        return None
+
+    def _refresh_data_for_mode(self):
+        """根据当前选定的视图模式计算并刷新数据"""
+        df = self._resolve_active_strategy_df()
+        today_str = time.strftime("%Y-%m-%d")
+
+        if self.current_mode == "TODAY":
+            if df is not None and not df.empty:
+                self.current_records = self.engine.scan_limit_up_records_from_df(df, fetch_l2_quotes=True, extra_cols=self.extra_cols)
+                # 盘中/盘后自动归档
+                self.engine.save_daily_records_atomic(today_str, self.current_records)
+            else:
+                self.current_records = self.engine.get_records_by_date(today_str)
+        elif self.current_mode == "3D":
+            self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=3, min_limit_ups=1, current_df=df)
+        elif self.current_mode == "5D":
+            self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=5, min_limit_ups=1, current_df=df)
+        elif self.current_mode == "10D":
+            self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=10, min_limit_ups=1, current_df=df)
+        elif self.current_mode == "LADDER":
+            # 连板天梯：连板数 >= 2 的标的
+            all_strong = self.engine.aggregate_multi_day_strong_stocks(days=5, min_limit_ups=1, current_df=df)
+            self.current_records = [r for r in all_strong if _safe_int(r.get("max_consecutive", r.get("consecutive_boards", 1))) >= 2]
+        elif self.current_mode == "HISTORY" and self.selected_history_date:
+            self.current_records = self.engine.get_records_by_date(self.selected_history_date)
+
+        # 更新顶部 KPI 卡片
+        summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else today_str)
+        self._update_kpi_display(summary)
+
+        # 填充表格
+        self._populate_table_rows(self.current_records)
+        self.lbl_status.setText(f"数据已更新: 视图【{self.current_mode}】共 {len(self.current_records)} 只标的 (更新时间: {time.strftime('%H:%M:%S')})")
+
+    def _update_kpi_display(self, s: Dict[str, Any]):
+        zt_cnt = s.get("zt_count", 0)
+        max_b = s.get("max_boards", 0)
+        multi_b = s.get("multi_boards_count", 0)
+        brk_cnt = s.get("broken_count", 0)
+        rate = s.get("seal_rate", 0.0)
+        avg_seal = s.get("avg_seal_circ_ratio", 0.0)
+        tot_amt = s.get("total_seal_amount_yi", 0.0)
+        leader = s.get("top_leader", "--")
+        self.current_top_leader_code = s.get("top_leader_code", "")
+        self.current_top_leader_name = s.get("top_leader_name", "")
+
+        self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家")
+        self.lbl_kpi_ladder.setText(f"👑 连板: <b>{multi_b}</b> 家 (最高 <b>{max_b}</b> 板)")
+        self.lbl_kpi_broken.setText(f"💥 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b>)")
+        self.lbl_kpi_seal.setText(f"💰 平均封流比: <b>{avg_seal:.2f}%</b> | 封单总额: <b>{tot_amt:.2f}</b> 亿")
+        
+        btn_text = f"🏆 空间龙头: {leader}"
+        if self.current_top_leader_code:
+            btn_text += " ⚡"
+        self.btn_top_leader.setText(btn_text)
+
+    def _on_top_leader_clicked(self):
+        """点击顶部空间龙头按钮：立即联动切股并在表格中高亮定位"""
+        if not self.current_top_leader_code:
+            return
+        c = self.current_top_leader_code
+        n = self.current_top_leader_name
+        self.code_clicked.emit(c, n)
+        self._broadcast_link_stock(c, n)
+
+        # 遍历表格，高亮并滚动到该龙头股票所在行
+        found = False
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 0)
+            if code_item and code_item.text().strip() == c:
+                self.table.selectRow(row)
+                self.table.scrollToItem(code_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                found = True
+                break
+        self.lbl_status.setText(f"🏆 已联动并定位空间龙头: {c} {n} ({time.strftime('%H:%M:%S')})")
+
+    def _populate_table_rows(self, records: List[Dict[str, Any]]):
+        """填充表格行数据并进行样式与颜色渲染"""
+        self._is_populating = True
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(records))
+
+        try:
+            for row_idx, r in enumerate(records):
+                code = str(r.get("code", "")).zfill(6)
+                name = str(r.get("name", code))
+                price = _safe_float(r.get("price", 0.0))
+                pct = _safe_float(r.get("pct", 0.0))
+                consecutive = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 1)))
+                tier_tag = str(r.get("tier_tag", "🔥 首板"))
+                seal_amt_wan = _safe_float(r.get("seal_amount_wan", 0.0))
+                seal_to_circ = _safe_float(r.get("seal_to_circ_ratio", 0.0))
+                seal_to_vol = _safe_float(r.get("seal_to_vol_ratio", 0.0))
+                turnover = _safe_float(r.get("turnover_rate", r.get("turnover", 0.0)))
+                vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
+                amt_yi = _safe_float(r.get("amount_yi", 0.0))
+
+                dff = _safe_float(r.get("dff", 0.0))
+                rank_val = _safe_int(r.get("rank", 999))
+                dff2 = _safe_float(r.get("dff2", 0.0))
+                dff3 = _safe_float(r.get("dff3", 0.0))
+                rs_val = _safe_float(r.get("rs_val", 0.0))
+                resonance = str(r.get("resonance", "同步整理"))
+                category = str(r.get("category", "--"))
+                extra_dict = r.get("extra_cols", {})
+
+                # 颜色设定
+                color_pct = QColor(COLOR_UP) if pct > 0 else (QColor(COLOR_DOWN) if pct < 0 else QColor("#e2e2e5"))
+                color_seal = QColor("#ffd700") if seal_to_circ >= 5.0 else QColor("#ffffff")
+
+                col = 0
+                # 0. 代码
+                it_code = QTableWidgetItem(code)
+                it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_code.setForeground(QBrush(QColor("#00ffcc")))
+                self.table.setItem(row_idx, col, it_code); col += 1
+
+                # 1. 名称
+                it_name = QTableWidgetItem(name)
+                it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if consecutive >= 3:
+                    it_name.setForeground(QBrush(QColor("#ffd700")))
+                    font = it_name.font()
+                    font.setBold(True)
+                    it_name.setFont(font)
+                self.table.setItem(row_idx, col, it_name); col += 1
+
+                # 2. 现价
+                it_price = NumericTableWidgetItem(f"{price:.2f}")
+                it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_price); col += 1
+
+                # 3. 涨幅%
+                it_pct = NumericTableWidgetItem(f"{pct:+.2f}%")
+                it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_pct.setForeground(QBrush(color_pct))
+                font = it_pct.font()
+                font.setBold(True)
+                it_pct.setFont(font)
+                self.table.setItem(row_idx, col, it_pct); col += 1
+
+                # 4. 连板数
+                it_cons = NumericTableWidgetItem(f"{consecutive}板" if consecutive >= 1 else "--")
+                it_cons.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if consecutive >= 3:
+                    it_cons.setForeground(QBrush(QColor("#ff55ff")))
+                elif consecutive == 2:
+                    it_cons.setForeground(QBrush(QColor("#ffd700")))
+                self.table.setItem(row_idx, col, it_cons); col += 1
+
+                # 5. 梯队分类
+                it_tier = QTableWidgetItem(tier_tag)
+                it_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_tier); col += 1
+
+                # 6. 封单额(万)
+                it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if seal_amt_wan > 0 else "--")
+                it_seal_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_seal_amt.setForeground(QBrush(color_seal))
+                self.table.setItem(row_idx, col, it_seal_amt); col += 1
+
+                # 7. 封流比%
+                it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if seal_to_circ > 0 else "--")
+                it_seal_circ.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if seal_to_circ >= 10.0:
+                    it_seal_circ.setForeground(QBrush(QColor("#ffd700")))
+                elif seal_to_circ >= 5.0:
+                    it_seal_circ.setForeground(QBrush(QColor("#ff9900")))
+                self.table.setItem(row_idx, col, it_seal_circ); col += 1
+
+                # 8. 封成比%
+                it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if seal_to_vol > 0 else "--")
+                it_seal_vol.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_seal_vol); col += 1
+
+                # 9. 换手%
+                it_to = NumericTableWidgetItem(f"{turnover:.2f}%")
+                it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_to); col += 1
+
+                # 10. 量比
+                it_vr = NumericTableWidgetItem(f"{vol_ratio:.2f}")
+                it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_vr); col += 1
+
+                # 11. 成交额(亿)
+                it_amt = NumericTableWidgetItem(f"{amt_yi:.2f}" if amt_yi > 0 else "--")
+                it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_amt); col += 1
+
+                # 12. DFF
+                it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
+                it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_dff.setForeground(QBrush(QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))))
+                self.table.setItem(row_idx, col, it_dff); col += 1
+
+                # 13. Rank
+                it_rank = NumericTableWidgetItem(str(rank_val) if rank_val < 999 else "--")
+                it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_rank); col += 1
+
+                # 14. DFF2
+                it_dff2 = NumericTableWidgetItem(f"{dff2:+.1f}")
+                it_dff2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_dff2); col += 1
+
+                # 15. DFF3
+                it_dff3 = NumericTableWidgetItem(f"{dff3:+.1f}")
+                it_dff3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, col, it_dff3); col += 1
+
+                # 16. 大盘偏离
+                it_rs = NumericTableWidgetItem(f"{rs_val:+.2f}%")
+                it_rs.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_rs.setForeground(QBrush(QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)))
+                self.table.setItem(row_idx, col, it_rs); col += 1
+
+                # 17. 共振状态
+                it_res = QTableWidgetItem(resonance)
+                it_res.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if resonance == "逆市抗跌":
+                    it_res.setForeground(QBrush(QColor("#ff55ff")))
+                elif resonance == "大盘共振":
+                    it_res.setForeground(QBrush(QColor("#00ff88")))
+                self.table.setItem(row_idx, col, it_res); col += 1
+
+                # 18. 动态 ats_col 自定义列
+                for ec in self.extra_cols:
+                    raw_val = extra_dict.get(ec, "--")
+                    it_extra = NumericTableWidgetItem(str(raw_val))
+                    it_extra.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row_idx, col, it_extra); col += 1
+
+                # 19. 所属板块
+                it_cat = QTableWidgetItem(category if category else "--")
+                it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_cat); col += 1
+
+                # 20. 形态与质量
+                quality_score = _safe_float(r.get("seal_quality_score", 70.0))
+                desc = f"质量 {quality_score:.0f}分"
+                if r.get("is_broken"):
+                    desc = "⚠️ 炸板破位"
+                it_desc = QTableWidgetItem(desc)
+                it_desc.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, col, it_desc); col += 1
+        finally:
+            self.table.setSortingEnabled(True)
+            self._is_populating = False
+
+    def _on_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
+        """键盘上下键导航与鼠标点击行统一防抖入口"""
+        if self._is_populating or currentRow < 0:
+            return
+        if currentRow == self._pending_linkage_row:
+            return
+        self._pending_linkage_row = currentRow
+        self._linkage_timer.start()
+
+    def _fire_linkage_debounced(self):
+        """防抖定时器到期后执行真实切股联动"""
+        row = self._pending_linkage_row
+        if row < 0 or self._is_populating or row >= self.table.rowCount():
+            return
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if code_item:
+            c = code_item.text().strip()
+            n = name_item.text().strip() if name_item else c
+            if c and c != "N/A" and c != self._last_emitted_code:
+                self._last_emitted_code = c
+                self.code_clicked.emit(c, n)
+                self._broadcast_link_stock(c, n)
+                self.lbl_status.setText(f"🔗 已联动: {c} {n} (第 {row+1}/{self.table.rowCount()} 行)")
+
+    def _broadcast_link_stock(self, code: str, name: str):
+        """向全局主窗口与外部行情终端广播联动"""
+        try:
+            from ats.ui.main_window import ATSMainWindow
+            app = QApplication.instance()
+            if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
+                app.main_window.link_stock(code, name)
+        except Exception:
+            pass
+
+    def keyPressEvent(self, event):
+        """键盘事件处理：回车打开SBC分时图，空格切换关注，Ctrl+C复制"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            row = self.table.currentRow()
+            if row >= 0:
+                self._on_cell_double_clicked(row, 0)
+                return
+        elif event.key() == Qt.Key.Key_Space:
+            row = self.table.currentRow()
+            if row >= 0:
+                code_item = self.table.item(row, 0)
+                if code_item:
+                    c = code_item.text().strip()
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        fav_mgr = GlobalFavoriteManager()
+                        if c in fav_mgr.get_favorite_stocks():
+                            fav_mgr.remove_favorite_stock(c)
+                            self.lbl_status.setText(f"⭐ 已从重点关注移除: {c}")
+                        else:
+                            fav_mgr.add_favorite_stock(c)
+                            self.lbl_status.setText(f"⭐ 已加入重点关注: {c}")
+                    except Exception:
+                        pass
+                    return
+        super().keyPressEvent(event)
+
+    def _apply_filter(self):
+        """根据搜索文本与梯队下拉框过滤表格行"""
+        search_txt = self.search_edit.text().strip().lower()
+        tier_filter = self.combo_tier_filter.currentText()
+
+        for r in range(self.table.rowCount()):
+            code_item = self.table.item(r, 0)
+            name_item = self.table.item(r, 1)
+            tier_item = self.table.item(r, 5)
+            cat_item = self.table.item(r, self.table.columnCount() - 2)
+
+            code = code_item.text().lower() if code_item else ""
+            name = name_item.text().lower() if name_item else ""
+            tier = tier_item.text() if tier_item else ""
+            cat = cat_item.text().lower() if cat_item else ""
+
+            match_search = (search_txt in code or search_txt in name or search_txt in cat) if search_txt else True
+            match_tier = True
+            if tier_filter != "全部梯队":
+                match_tier = tier_filter in tier or tier in tier_filter
+
+            self.table.setRowHidden(r, not (match_search and match_tier))
+
+    def _on_cell_clicked(self, row: int, col: int):
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if code_item and name_item:
+            c = code_item.text().strip()
+            n = name_item.text().strip()
+            self.code_clicked.emit(c, n)
+            # 广播物理切股
+            try:
+                from ats.ui.main_window import ATSMainWindow
+                app = QApplication.instance()
+                if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
+                    app.main_window.link_stock(c, n)
+            except Exception:
+                pass
+
+    def _on_cell_double_clicked(self, row: int, col: int):
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        if code_item and name_item:
+            c = code_item.text().strip()
+            n = name_item.text().strip()
+            self.code_double_clicked.emit(c, n)
+            # 调起 SBC 日内分时图与详情
+            try:
+                from ats.ui.intraday_strategy_dialog import open_sbc_intraday_chart
+                open_sbc_intraday_chart(c, n, parent=self)
+            except Exception as e:
+                logger.debug(f"打开 SBC 分时窗口异常: {e}")
+
+    def auto_fit_columns(self):
+        """一键自适应调整所有可见列宽（考虑单元格与表头最大宽度，加安全内边距并保存）"""
+        col_count = self.table.columnCount()
+        for col in range(col_count):
+            if self.table.isColumnHidden(col):
+                continue
+            self.table.resizeColumnToContents(col)
+            w = self.table.columnWidth(col)
+            # 增加 12px 安全内边距
+            new_w = max(48, w + 12)
+            if col == 0:    # 代码
+                new_w = max(58, min(80, new_w))
+            elif col == 1:  # 名称
+                new_w = max(68, min(105, new_w))
+            elif col == 2:  # 现价
+                new_w = max(56, min(80, new_w))
+            elif col == 3:  # 涨幅%
+                new_w = max(62, min(85, new_w))
+            elif col == 4:  # 连板数
+                new_w = max(52, min(75, new_w))
+            elif col == 5:  # 梯队分类
+                new_w = max(75, min(120, new_w))
+            elif col in (12, 13, 14, 15): # DFF / Rank / DFF2 / DFF3
+                new_w = max(48, min(75, new_w))
+            self.table.setColumnWidth(col, new_w)
+
+        # 触发持久化保存列宽
+        try:
+            widths = [self.table.columnWidth(i) for i in range(col_count)]
+            save_config_node("ats_daily_limit_up_table_header", widths)
+        except Exception:
+            pass
+        self.lbl_status.setText(f"📐 已完成一键自适应列宽 ({time.strftime('%H:%M:%S')})")
+
+    def reset_default_columns(self):
+        """恢复默认紧凑列宽"""
+        default_widths = {
+            0: 62, 1: 72, 2: 60, 3: 65, 4: 56, 5: 85,
+            6: 78, 7: 68, 8: 65, 9: 60, 10: 58, 11: 72,
+            12: 58, 13: 48, 14: 52, 15: 52, 16: 68, 17: 72
+        }
+        for col in range(self.table.columnCount()):
+            w = default_widths.get(col, 65)
+            self.table.setColumnWidth(col, w)
+        try:
+            widths = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
+            save_config_node("ats_daily_limit_up_table_header", widths)
+        except Exception:
+            pass
+        self.lbl_status.setText(f"🔄 已恢复默认紧凑列宽 ({time.strftime('%H:%M:%S')})")
+
+    def toggle_narrow_mode(self, enabled: Optional[bool] = None):
+        """切换极窄紧凑盯盘模式 / 宽屏全景模式"""
+        if enabled is None:
+            self.is_narrow_mode = not self.is_narrow_mode
+        else:
+            self.is_narrow_mode = bool(enabled)
+
+        if hasattr(self, 'btn_narrow_mode'):
+            self.btn_narrow_mode.blockSignals(True)
+            self.btn_narrow_mode.setChecked(self.is_narrow_mode)
+            self.btn_narrow_mode.blockSignals(False)
+
+        self._apply_narrow_mode_layout()
+        self._save_window_states()
+
+    def _apply_narrow_mode_layout(self):
+        """根据当前是否为极窄模式动态调整列显隐、窗口尺寸与 KPI 布局"""
+        col_count = self.table.columnCount()
+
+        if self.is_narrow_mode:
+            # 1. 隐藏非核心次要列
+            for col in range(col_count):
+                if col in self._narrow_cols_to_keep:
+                    self.table.setColumnHidden(col, False)
+                else:
+                    self.table.setColumnHidden(col, True)
+
+            # 2. 调整窗口尺寸收敛为极窄宽度
+            if self.width() > 620:
+                self._last_wide_width = self.width()
+                self.resize(480, self.height())
+            self.setMinimumWidth(320)
+
+            # 3. 精简顶部 KPI 卡片
+            if hasattr(self, 'lbl_kpi_seal'):
+                self.lbl_kpi_seal.setVisible(False)
+            if hasattr(self, 'lbl_top_leader'):
+                self.lbl_top_leader.setVisible(False)
+
+            self.lbl_status.setText(f"📱 已切换为【极窄紧凑模式】 (核心11列, 适合侧边挂靠)")
+        else:
+            # 1. 恢复展示全部列
+            for col in range(col_count):
+                self.table.setColumnHidden(col, False)
+
+            # 2. 恢复宽屏尺寸
+            if self.width() < 700:
+                target_w = max(1120, self._last_wide_width)
+                self.resize(target_w, self.height())
+            self.setMinimumWidth(480)
+
+            # 3. 恢复顶部全量 KPI 卡片
+            if hasattr(self, 'lbl_kpi_seal'):
+                self.lbl_kpi_seal.setVisible(True)
+            if hasattr(self, 'lbl_top_leader'):
+                self.lbl_top_leader.setVisible(True)
+
+            self.lbl_status.setText(f"🖥️ 已切换为【宽屏全量模式】 (全字段+自定义列)")
+
+        # 自适应调整可见列宽
+        self.auto_fit_columns()
+
+    def _show_context_menu(self, pos):
+        """表格区域右键菜单（支持一键自适应列宽、极窄模式切换及个股深度诊断）"""
+        row = self.table.rowAt(pos.y())
+        has_stock = False
+        c, n = "", ""
+        if row >= 0:
+            code_item = self.table.item(row, 0)
+            name_item = self.table.item(row, 1)
+            if code_item:
+                c = code_item.text().strip()
+                n = name_item.text().strip() if name_item else c
+                has_stock = True
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1e1e24; color: #e2e2e5; border: 1px solid #33333f; padding: 4px; }
+            QMenu::item:selected { background-color: #2a3b4c; color: #ffffff; }
+        """)
+
+        # ── 1. 布局与列宽操作项 ──
+        act_autofit = menu.addAction("📐 一键自适应列宽")
+        act_reset_cols = menu.addAction("🔄 恢复默认列宽")
+        act_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
+        act_narrow.setCheckable(True)
+        act_narrow.setChecked(self.is_narrow_mode)
+        menu.addSeparator()
+
+        # ── 2. 个股联动与分析项 ──
+        act_link = None
+        act_sbc = None
+        act_60f = None
+        act_fav = None
+        act_copy = None
+
+        if has_stock:
+            act_link = menu.addAction(f"🔗 联动行情终端 ({c} {n})")
+            act_sbc = menu.addAction(f"📊 打开 SBC 日内分时走势图")
+            act_60f = menu.addAction(f"🎯 60f 通道底部反转测算")
+            menu.addSeparator()
+
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                is_fav = c in fav_mgr.get_favorite_stocks()
+                fav_txt = f"⭐ 取消重点关注 ({c})" if is_fav else f"⭐ 加入重点关注 ({c})"
+                act_fav = menu.addAction(fav_txt)
+            except Exception:
+                pass
+
+            menu.addSeparator()
+            act_copy = menu.addAction("📋 复制股票代码")
+            menu.addSeparator()
+
+        # ── 3. 全局刷新与导出 ──
+        act_refresh = menu.addAction("🔄 刷新当前视图数据")
+        act_export = menu.addAction("📤 导出为 CSV 文件")
+
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if not action:
+            return
+
+        if action == act_autofit:
+            self.auto_fit_columns()
+        elif action == act_reset_cols:
+            self.reset_default_columns()
+        elif action == act_narrow:
+            self.toggle_narrow_mode()
+        elif act_link and action == act_link:
+            self.code_clicked.emit(c, n)
+        elif act_sbc and action == act_sbc:
+            try:
+                from ats.ui.intraday_strategy_dialog import open_sbc_intraday_chart
+                open_sbc_intraday_chart(c, n, parent=self)
+            except Exception:
+                pass
+        elif act_60f and action == act_60f:
+            try:
+                from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+                from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
+                strategy = ChannelBottomReversalStrategy()
+                df_matched = strategy.scan_stocks_tdx([c], count=120)
+                if not df_matched.empty:
+                    df_matched["name"] = n
+                diag = ChannelReversalScanResultDialog(parent=self, df_results=df_matched, total_scanned=1, source_tab_name="每日涨停")
+                diag.show()
+            except Exception as ex:
+                logger.debug(f"测算 60f 通道异常: {ex}")
+        elif act_fav and action == act_fav:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_mgr = GlobalFavoriteManager()
+                if c in fav_mgr.get_favorite_stocks():
+                    fav_mgr.remove_favorite_stock(c)
+                else:
+                    fav_mgr.add_favorite_stock(c)
+            except Exception:
+                pass
+        elif act_copy and action == act_copy:
+            cb = QApplication.clipboard()
+            if cb:
+                cb.setText(c)
+        elif action == act_refresh:
+            self._refresh_data_for_mode()
+        elif action == act_export:
+            self._export_to_csv()
+
+    def _show_header_context_menu(self, pos):
+        """表头右键菜单（支持自适应列宽、极窄模式与各列自定义勾选显隐）"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1e1e24; color: #e2e2e5; border: 1px solid #33333f; padding: 4px; }
+            QMenu::item:selected { background-color: #2a3b4c; color: #ffffff; }
+        """)
+
+        act_autofit = menu.addAction("📐 一键自适应列宽")
+        act_reset_cols = menu.addAction("🔄 恢复默认列宽")
+        act_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
+        act_narrow.setCheckable(True)
+        act_narrow.setChecked(self.is_narrow_mode)
+        menu.addSeparator()
+
+        # 列显隐子菜单
+        col_menu = menu.addMenu("👁️ 显示/隐藏各列...")
+        col_menu.setStyleSheet(menu.styleSheet())
+        col_actions = []
+        for i in range(self.table.columnCount()):
+            hdr_text = self.table.horizontalHeaderItem(i).text() if self.table.horizontalHeaderItem(i) else f"第{i+1}列"
+            act = col_menu.addAction(hdr_text)
+            act.setCheckable(True)
+            act.setChecked(not self.table.isColumnHidden(i))
+            col_actions.append((act, i))
+
+        action = menu.exec(self.table.horizontalHeader().viewport().mapToGlobal(pos))
+        if not action:
+            return
+
+        if action == act_autofit:
+            self.auto_fit_columns()
+        elif action == act_reset_cols:
+            self.reset_default_columns()
+        elif action == act_narrow:
+            self.toggle_narrow_mode()
+        else:
+            for act, col_idx in col_actions:
+                if action == act:
+                    self.table.setColumnHidden(col_idx, not act.isChecked())
+                    break
+
+    def _export_to_csv(self):
+        if not self.current_records:
+            QMessageBox.information(self, "提示", "当前列表无数据可导出！")
+            return
+        fname, _ = QFileDialog.getSaveFileName(self, "导出涨停分析数据", f"ats_limit_up_{self.current_mode}_{time.strftime('%Y%m%d_%H%M%S')}.csv", "CSV Files (*.csv)")
+        if fname:
+            try:
+                df_export = pd.DataFrame(self.current_records)
+                df_export.to_csv(fname, index=False, encoding="utf-8-sig")
+                QMessageBox.information(self, "成功", f"数据已成功导出至:\n{fname}")
+            except Exception as e:
+                QMessageBox.critical(self, "导出失败", f"导出文件异常: {e}")
+
+    def _on_stays_on_top_toggled(self, checked: bool):
+        self.stays_on_top = checked
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
+        self.show()
+        self._save_window_states()
+
+    def start_slide_animation(self, target_geo: QRect, target_opacity: float = 1.0, duration: int = 250, is_snap_feedback: bool = False):
+        if self.anim_group:
+            self.anim_group.stop()
+            
+        self.anim_group = QParallelAnimationGroup(self)
+        self.geom_anim = QPropertyAnimation(self, b"geometry", self)
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_geo)
+        self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            self.opacity_anim.setKeyValueAt(0.5, 0.4)
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        self._in_snap_action = True
+        
+        def on_finished():
+            self._in_snap_action = False
+            if self.is_hidden_state:
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(1.0)
+            self._save_window_states(is_open=True)
+                
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
+    def _detect_and_snap(self):
+        if self.is_hidden_state:
+            return
+            
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.snap_timer.start()
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 35
+        
+        snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
+        
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
+            snapped = True
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
+            snapped = True
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
+            snapped = True
+            
+        self._is_dragging = False
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+
+    def hide_to_edge(self):
+        if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
+            return
+            
+        screen = self.screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        screen_geo = screen.availableGeometry()
+        
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        strip_size = 5
+        
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+            
+        self.is_hidden_state = True
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        if self.is_hidden_state:
+            self.is_hidden_state = False
+            self._is_auto_popping = True
+            QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
+        
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        self._save_window_states(is_open=True)
+
+    def _check_hover(self):
+        if not self.isVisible():
+            return
+            
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+            
+        from PyQt6.QtGui import QCursor
+        mouse_pos = QCursor.pos()
+        in_window = self.frameGeometry().contains(mouse_pos)
+        
+        if in_window:
+            self._has_hovered_since_show = True
+            
+        if self.is_hidden_state:
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+                        
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+
+    def _get_main_app(self):
+        curr = self.parent() if hasattr(self, 'parent') else None
+        from PyQt6.sip import isdeleted
+        try:
+            while curr:
+                if not isdeleted(curr) and curr.__class__.__name__ == 'ATSMainWindow':
+                    return curr
+                curr = curr.parent() if hasattr(curr, 'parent') else None
+        except Exception:
+            pass
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and getattr(app, 'main_window', None) is not None:
+            try:
+                mw = app.main_window
+                if not isdeleted(mw) and mw.__class__.__name__ == 'ATSMainWindow':
+                    return mw
+            except Exception:
+                pass
+        return None
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            self._is_dragging = True
+            self.anchor_edge = None
+            self.snap_timer.start()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange:
+            if self.isActiveWindow() and self.is_hidden_state:
+                self._is_auto_popping = True
+                QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+                self.show_normal_position()
+
+    def closeEvent(self, event):
+        self.hover_timer.stop()
+        self.snap_timer.stop()
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
+        event.accept()
+
+    def hideEvent(self, event):
+        main_app = self._get_main_app()
+        is_app_exiting = False
+        if main_app:
+            if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
+                is_app_exiting = True
+                
+        if is_app_exiting or getattr(self, 'is_hidden_state', False):
+            self._save_window_states(is_open=True)
+        else:
+            self._save_window_states(is_open=False)
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.layout():
+            self.layout().activate()
+        self._save_window_states(is_open=True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.layout():
+            self.layout().setGeometry(self.rect())
+        if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
+            if self.anchor_edge:
+                self.normal_geometry = self.geometry()
+
