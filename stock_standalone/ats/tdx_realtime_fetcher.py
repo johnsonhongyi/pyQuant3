@@ -1322,14 +1322,23 @@ class TDXRealtimeFetcher:
                 reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 冰点黄金潜伏上车点"
                 type_priority = 85
 
-            elif vwap_dev < -1.2 or pct < -2.0:
-                # ⚠️ 破位转弱
-                buy_type = "⚠️ 破位转弱"
-                buy_tag = "WEAK"
-                buy_zone = "--"
-                stop_loss = round(vwap * 0.97, 2)
-                reason = f"跌破分时均线({vwap_dev:.1f}%), 承接动能不足"
-                type_priority = 20
+            elif vwap_dev < -0.8 or pct < -2.0 or (it.get('high', price) > 0 and it.get('last_close', 0) > 0 and (it.get('high', price) - it.get('last_close', price)) / it.get('last_close', price) * 100.0 >= 4.5 and vwap_dev < -0.3):
+                # ⚠️ 破位转弱 / 冲高回落诱多被砸 (防猎避坑保护机制)
+                high_pct = round((it.get('high', price) - it.get('last_close', price)) / max(0.01, it.get('last_close', price)) * 100.0, 1) if it.get('last_close', 0) > 0 else pct
+                if high_pct >= 4.5 and vwap_dev < -0.3:
+                    buy_type = "⚠️ 诱多破位"
+                    buy_tag = "WEAK"
+                    buy_zone = "-- (严禁抄底)"
+                    stop_loss = round(vwap * 0.98, 2)
+                    reason = f"曾冲高(+{high_pct:.1f}%)后回落跌破均线({vwap_dev:+.1f}%), 主力诱多出货, 严禁盲目接飞刀防被猎"
+                    type_priority = 15
+                else:
+                    buy_type = "⚠️ 破位转弱"
+                    buy_tag = "WEAK"
+                    buy_zone = "-- (防守观望)"
+                    stop_loss = round(vwap * 0.97, 2)
+                    reason = f"跌破分时均线({vwap_dev:.1f}%), 承接动能不足, 严格执行止损防守"
+                    type_priority = 20
 
             else:
                 # 📋 蓄势观察 / 趋势蓄力

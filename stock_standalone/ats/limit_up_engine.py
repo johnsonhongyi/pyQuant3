@@ -983,7 +983,6 @@ class LimitUpEngine:
 
         seal_circ_sum = sum(_safe_float(r.get("seal_to_circ_ratio", 0.0)) for r in records if r.get("is_limit_up"))
         avg_seal_circ = round(seal_circ_sum / max(1, zt_count), 2)
-
         tot_seal_amt = sum(_safe_float(r.get("seal_amount_yi", 0.0)) for r in records if r.get("is_limit_up"))
 
         # 最高板空间龙
@@ -991,6 +990,28 @@ class LimitUpEngine:
         top_leader_code = top_leaders[0]["code"] if top_leaders else (records[0]["code"] if records else "")
         top_leader_name = top_leaders[0]["name"] if top_leaders else (records[0]["name"] if records else "")
         top_leader_str = f"{top_leader_name} ({max_boards}板)" if (top_leaders and max_boards >= 2) else (top_leader_name if top_leader_name else "--")
+
+        # ── 💡 市场情绪退潮感知与全局防猎指数 (Market Sentiment & Avalanche Index) ──
+        if total_attempts >= 10 and seal_rate < 45.0:
+            sentiment_phase = "🚨 情绪雪崩退潮"
+            sentiment_score = 15.0
+            defense_status = "🚨 极度退潮雪崩: 大面积炸板杀跌，触发全局防猎熔断，强制禁止开仓，只执行止损！"
+            is_avalanche = True
+        elif seal_rate < 60.0 or (broken_count >= 20 and broken_count >= zt_count * 0.6):
+            sentiment_phase = "⚠️ 退潮分歧期"
+            sentiment_score = 38.0
+            defense_status = "🟠 分歧退潮: 炸板激增，防冲高回落与尾盘跳水，严禁盲目追高"
+            is_avalanche = False
+        elif seal_rate >= 80.0 and zt_count >= 30:
+            sentiment_phase = "🔥 极度亢奋期"
+            sentiment_score = 90.0
+            defense_status = "🟢 进攻顺风: 主力做多情绪高涨，封板强劲，跟随龙头突破"
+            is_avalanche = False
+        else:
+            sentiment_phase = "⚖️ 均衡博弈期"
+            sentiment_score = 65.0
+            defense_status = "🟡 结构分化: 重个股轻大盘，低吸与突破并存"
+            is_avalanche = False
 
         return {
             "date": date_str,
@@ -1004,7 +1025,11 @@ class LimitUpEngine:
             "total_seal_amount_yi": round(tot_seal_amt, 2),
             "top_leader": top_leader_str,
             "top_leader_code": top_leader_code,
-            "top_leader_name": top_leader_name
+            "top_leader_name": top_leader_name,
+            "sentiment_phase": sentiment_phase,
+            "sentiment_score": sentiment_score,
+            "defense_status": defense_status,
+            "is_avalanche": is_avalanche
         }
 
     def get_all_archived_dates(self) -> List[str]:
