@@ -1270,6 +1270,53 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.table.setSortingEnabled(True)
             self._is_populating = False
 
+    def _check_and_notify_slice_highlights(self, records: List[Dict[str, Any]], time_slice: str = ""):
+        """对当前时间片过滤后的精选 Top 3~5 只核心标的进行语音与 Toast 弹窗轮播"""
+        if not getattr(self, "is_voice_alert_enabled", False):
+            return
+        if not records:
+            return
+        try:
+            from ats.alert_notifier import AlertNotifier
+            notifier = AlertNotifier.get_instance()
+            slice_name = time_slice if time_slice else self.combo_time_slice.currentText()
+            # 提取最强 3~5 只核心标的
+            top_highlights = records[:5]
+            for idx, r in enumerate(top_highlights):
+                code = str(r.get("code", "")).strip().zfill(6)
+                name = str(r.get("name", "")).strip()
+                score = _safe_float(r.get("momentum_score", 85.0))
+                tier_t = str(r.get("tier_tag", ""))
+                desc_p = str(r.get("pattern_desc", ""))
+                
+                # 构造精选播报理由
+                reason = f"【{slice_name}精选#{idx+1}】: {tier_t} | {desc_p}"
+                notifier.notify_special_signal(
+                    code=code,
+                    name=name,
+                    reason=reason,
+                    score=score,
+                    parent=self
+                )
+        except Exception as e:
+            logger.debug(f"_check_and_notify_slice_highlights error: {e}")
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = False):
+        """在表格中定位高亮指定股票并居中显示 (支持 Toast 点击一键反向定位)"""
+        if not code:
+            return
+        code_clean = str(code).strip().zfill(6)
+        for row in range(self.table.rowCount()):
+            c_item = self.table.item(row, 0)
+            if c_item and c_item.text().strip() == code_clean:
+                self.table.selectRow(row)
+                self.table.scrollToItem(c_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                n_item = self.table.item(row, 1)
+                name = n_item.text().strip() if n_item else code_clean
+                self._broadcast_link_stock(code_clean, name)
+                self.lbl_status.setText(f"🎯 [通知联动] 已定位选中: {code_clean} {name} (第 {row+1} 行)")
+                break
+
     def _on_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
         """键盘上下键导航与鼠标点击行统一防抖入口"""
         if self._is_populating or currentRow < 0:

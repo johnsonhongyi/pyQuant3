@@ -1088,38 +1088,49 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
                 self._broadcast_link_stock(c, n)
                 break
 
+    def _broadcast_link_stock(self, code: str, name: str):
+        """向全局主窗口与外部行情终端广播联动"""
+        try:
+            self.code_clicked.emit(code, name)
+            main_win = self._get_parent_mw()
+            if main_win and hasattr(main_win, "link_stock"):
+                main_win.link_stock(code, name)
+            from ats.ui.main_window import ATSMainWindow
+            app = QApplication.instance()
+            if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
+                app.main_window.link_stock(code, name)
+        except Exception:
+            pass
+
     def _check_and_notify_sector_highlights(self, filtered_records: List[Dict[str, Any]]):
-        """【板块龙头与特异异动自动挖掘通知】"""
+        """【板块龙头与特异异动自动挖掘通知】精选 Top 3~5 只核心标的进行轮播播报"""
         if not getattr(self, "is_voice_alert_enabled", True):
             return
-
+        if not filtered_records:
+            return
         try:
             from ats.alert_notifier import AlertNotifier
             notifier = AlertNotifier.get_instance()
-        except Exception:
-            return
+            # 筛选得分最高的 3~5 只核心领涨龙头与先锋突破标的
+            candidates = []
+            for r in filtered_records:
+                score = float(r.get("alpha_score", 0.0))
+                tag = r.get("buy_tag", "")
+                if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
+                    candidates.append(r)
+                if len(candidates) >= 5: # 精选 3~5 个
+                    break
 
-        if not filtered_records:
-            return
-
-        # 筛选得分最高的 3~5 只核心领涨龙头与先锋突破标的
-        candidates = []
-        for r in filtered_records:
-            score = float(r.get("alpha_score", 0.0))
-            tag = r.get("buy_tag", "")
-            if score >= 85.0 and tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK"):
-                candidates.append(r)
-            if len(candidates) >= 5: # 精选 3~5 个
-                break
-
-        for idx, top_cand in enumerate(candidates, 1):
-            c = str(top_cand.get("code", "")).zfill(6)
-            n = str(top_cand.get("name", c))
-            score = float(top_cand.get("alpha_score", 88.0))
-            buy_type = str(top_cand.get("buy_type", ""))
-            sec = str(top_cand.get("sector", ""))
-            reason = f"【{sec}精选#{idx}】{buy_type} | {top_cand.get('reason', '')}"
-            notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
+            for idx, top_cand in enumerate(candidates, 1):
+                c = str(top_cand.get("code", "")).zfill(6)
+                n = str(top_cand.get("name", c))
+                score = float(top_cand.get("alpha_score", 88.0))
+                buy_type = str(top_cand.get("buy_type", ""))
+                sec = str(top_cand.get("sector", ""))
+                reason = f"【{sec}精选#{idx}】{buy_type} | {top_cand.get('reason', '')}"
+                notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
+        except Exception as e:
+            logger.debug(f"_check_and_notify_sector_highlights error: {e}")
 
     def _populate_row(self, row_idx: int, r: Dict[str, Any], font_bold: QFont):
         """填充/原位更新单行数据"""

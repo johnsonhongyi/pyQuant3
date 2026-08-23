@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import logging
+from typing import Optional, Tuple, Dict, List, Any
 
 logger = logging.getLogger("ats.alert_notifier")
 
@@ -23,38 +24,32 @@ except ImportError:
 _active_toasts = set()
 
 class InAppToastWidget(QFrame if HAS_PYQT else object):
-    """应用内半透明高分屏自适应 Toast 卡片 (支持点击联动定位股票，100% 优雅显示)"""
+    """应用内半透明高分屏自适应 Toast 卡片 (支持自由拖拽到副屏/任意屏幕、点击联动定位股票，100% 优雅显示)"""
+    _custom_pos: Optional[Tuple[int, int]] = None  # 跨屏幕自定义持久化坐标 (全局记忆)
+
     def __init__(self, title, message, code="", parent=None):
         if not HAS_PYQT:
             return
-        super().__init__(None) # 使用独立 Tool 浮窗，全屏幕右下角弹出，绝不被父容器裁切或遮挡
+        super().__init__(None) # 使用独立 Tool 浮窗，全屏幕弹出，支持自由跨屏拖动
         self.code = str(code).strip()
         self.target_parent = parent
         self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # 拖拽状态
+        self._drag_pos = None
+        self._press_pos = None
+        self._is_dragging = False
+
+        tip_str = "💡 点击即可在列表中高亮定位并联动分析\n🖱️ 按住鼠标左键可自由拖动至副屏/任意屏幕记忆通知位置"
         if self.code:
-            self.setToolTip(f"💡 点击即可在列表中自动高亮定位 [{self.code}] 并联动分析")
+            tip_str = f"💡 点击即可在列表中自动高亮定位 [{self.code}] 并联动分析\n🖱️ 按住鼠标左键可自由拖动至副屏/任意屏幕记忆通知位置"
+        self.setToolTip(tip_str)
         
         # 强引用注册，防止 Python 垃圾回收器 (GC) 提前销毁弹窗
         _active_toasts.add(self)
 
-        # 动态寻找 parent (多周期/ATS主窗口) 所在的物理显示屏 (Screen)
-        screen = None
-        if parent and hasattr(parent, 'screen') and parent.screen():
-            screen = parent.screen()
-        elif parent and hasattr(parent, 'window') and parent.window() and parent.window().screen():
-            screen = parent.window().screen()
-
-        if not screen and HAS_PYQT:
-            try:
-                from PyQt6.QtGui import QCursor
-                screen = QApplication.screenAt(QCursor.pos())
-            except Exception:
-                pass
-        if not screen:
-            screen = QApplication.primaryScreen()
-
-        # 调整为更高、更窄的精致直立黄金比 (高一点 94px、窄一点 260px，更舒展舒服)
+        # 调整为精致直立黄金比
         card_w = 260
         card_h = 94
         title_f_size = 12
@@ -73,7 +68,7 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         layout.addWidget(lbl_t)
         layout.addWidget(lbl_m)
         
-        # 100% 纯不透明实色背景 + 1px 霓虹蓝精致高对比边框 (100% 恢复原始优雅样式)
+        # 100% 纯不透明实色背景 + 1px 霓虹蓝精致高对比边框
         self.setStyleSheet(f"""
             InAppToastWidget {{
                 background-color: #0f172a;
@@ -88,17 +83,50 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         
         self.resize(card_w, card_h)
         
-        # 目标窗口所在屏幕的右下角精致定位 (Target Screen Bottom-Right)，保持原始位置不动
-        if screen:
-            try:
-                s_geom = screen.availableGeometry()
-                pos_x = s_geom.right() - card_w - 15
-                pos_y = s_geom.bottom() - card_h - 15
-                self.move(max(s_geom.left() + 10, pos_x), max(s_geom.top() + 10, pos_y))
-            except Exception:
+        # ── 智能多屏位置决定 ──
+        # 1. 优先使用用户手动拖动过的多屏自定义坐标
+        has_positioned = False
+        if InAppToastWidget._custom_pos is not None:
+            cx, cy = InAppToastWidget._custom_pos
+            from PyQt6.QtCore import QPoint
+            scr = QApplication.screenAt(QPoint(cx, cy))
+            if scr:
+                self.move(cx, cy)
+                has_positioned = True
+
+        # 2. 默认定位在目标窗口所在屏幕或用户通过右键菜单指定的显示器右下角
+        if not has_positioned:
+            screen = None
+            if getattr(InAppToastWidget, '_target_screen_index', None) is not None:
+                screens = QApplication.screens()
+                tgt_idx = InAppToastWidget._target_screen_index
+                if 0 <= tgt_idx < len(screens):
+                    screen = screens[tgt_idx]
+
+            if not screen and parent and hasattr(parent, 'screen') and parent.screen():
+                screen = parent.screen()
+            elif not screen and parent and hasattr(parent, 'window') and parent.window() and parent.window().screen():
+                screen = parent.window().screen()
+
+            if not screen and HAS_PYQT:
+                try:
+                    from PyQt6.QtGui import QCursor
+                    screen = QApplication.screenAt(QCursor.pos())
+                except Exception:
+                    pass
+            if not screen:
+                screen = QApplication.primaryScreen()
+
+            if screen:
+                try:
+                    s_geom = screen.availableGeometry()
+                    pos_x = s_geom.right() - card_w - 15
+                    pos_y = s_geom.bottom() - card_h - 15
+                    self.move(max(s_geom.left() + 10, pos_x), max(s_geom.top() + 10, pos_y))
+                except Exception:
+                    self.move(100, 100)
+            else:
                 self.move(100, 100)
-        else:
-            self.move(100, 100)
 
         self.show()
         self.raise_()
@@ -109,24 +137,53 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         super().closeEvent(event)
 
     def mousePressEvent(self, event):
-        """点击 Toast 弹窗一键自动联动定位股票"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.globalPosition().toPoint()
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._is_dragging = False
         super().mousePressEvent(event)
-        parent = getattr(self, 'target_parent', None) or self.parent()
-        if not self.code or not parent:
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_pos:
+            curr_pos = event.globalPosition().toPoint()
+            if self._press_pos and (curr_pos - self._press_pos).manhattanLength() > 4:
+                self._is_dragging = True
+                self.move(curr_pos - self._drag_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._is_dragging:
+                # 用户完成了跨屏幕拖拽：记录自定义坐标，后续所有通知均在此时拖动的新屏幕位置弹出！
+                InAppToastWidget._custom_pos = (self.x(), self.y())
+                logger.info(f"📍 [TOAST_DRAG] 用户已将通知窗口拖动至新屏幕坐标: {InAppToastWidget._custom_pos}，后续通知将在此屏幕展示")
+                self._is_dragging = False
+                self._drag_pos = None
+                self._press_pos = None
+                return
+            
+            # 纯单击触发股票联动定位
+            self._is_dragging = False
+            self._drag_pos = None
+            self._press_pos = None
+
+            parent = getattr(self, 'target_parent', None) or self.parent()
+            if not self.code or not parent:
+                self.close()
+                return
+
+            logger.info(f"🎯 [TOAST_CLICK] 点击特异 Toast 通知，尝试自动定位联动股票: {self.code}")
+
+            # 1. 尝试使用 MultiPeriodDialog 定位
+            if hasattr(parent, 'locate_stock_in_table'):
+                parent.locate_stock_in_table(self.code, auto_popup=True)
+
+            # 2. 尝试使用 ATS MainWindow 定位
+            if hasattr(parent, 'locate_stock_in_tree'):
+                parent.locate_stock_in_tree(self.code, auto_popup=True)
+
             self.close()
-            return
-
-        logger.info(f"🎯 [TOAST_CLICK] 点击特异 Toast 通知，尝试自动定位联动股票: {self.code}")
-
-        # 1. 尝试使用 MultiPeriodDialog 定位 (传入 auto_popup=True 弹出诊断小窗口)
-        if hasattr(parent, 'locate_stock_in_table'):
-            parent.locate_stock_in_table(self.code, auto_popup=True)
-
-        # 2. 尝试使用 ATS MainWindow 定位 (传入 auto_popup=True 弹出详情小窗口)
-        if hasattr(parent, 'locate_stock_in_tree'):
-            parent.locate_stock_in_tree(self.code, auto_popup=True)
-
-        self.close()
+        super().mouseReleaseEvent(event)
 
 
 class AlertNotifier(QObject if HAS_PYQT else object):
@@ -218,11 +275,142 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 except Exception:
                     pass
 
+            # [🖥️ 任务栏右键菜单] 构建高颜值暗黑风格托盘上下文菜单
+            self._init_tray_context_menu()
+
             # [KEY FIX] 绑定 Windows 系统托盘 Toast 点击事件
             self.tray_icon.messageClicked.connect(self._on_tray_message_clicked)
             self.tray_icon.show()
         except Exception as e:
             logger.warning(f"Failed to initialize QSystemTrayIcon: {e}")
+
+    def _init_tray_context_menu(self):
+        """构建托盘图标右键菜单 (支持多显示器切换、位置复位、测试通知等)"""
+        if not HAS_PYQT or not self.tray_icon:
+            return
+        
+        self.tray_menu = QMenu()
+        self.tray_menu.setStyleSheet("""
+            QMenu {
+                background-color: #13161c;
+                color: #e2e8f0;
+                border: 1px solid #2d3748;
+                border-radius: 6px;
+                padding: 5px;
+                font-family: 'Microsoft YaHei', sans-serif;
+                font-size: 9.5pt;
+            }
+            QMenu::item {
+                padding: 6px 22px 6px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #1e3a8a;
+                color: #00ffaa;
+            }
+            QMenu::item:checked {
+                color: #00ffaa;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2d3748;
+                margin: 4px 6px;
+            }
+        """)
+
+        # 1. 显示器设置子菜单
+        self.menu_displays = self.tray_menu.addMenu("🖥️ 预警通知显示器设置")
+        self.tray_menu.aboutToShow.connect(self._refresh_displays_menu)
+
+        # 2. 重置弹窗位置
+        act_reset_pos = self.tray_menu.addAction("🎯 重置通知位置 (默认右下角)")
+        act_reset_pos.triggered.connect(self._reset_toast_position)
+
+        self.tray_menu.addSeparator()
+
+        # 3. 发送测试预警通知
+        act_test_notify = self.tray_menu.addAction("📢 发送测试特异预警通知")
+        act_test_notify.triggered.connect(self._send_test_notification)
+
+        self.tray_menu.addSeparator()
+
+        # 4. 退出程序
+        act_quit = self.tray_menu.addAction("🚪 退出系统")
+        act_quit.triggered.connect(self._on_tray_quit_clicked)
+
+        self.tray_icon.setContextMenu(self.tray_menu)
+
+    def _refresh_displays_menu(self):
+        """动态枚举当前所有屏幕并更新勾选状态"""
+        if not HAS_PYQT or not hasattr(self, 'menu_displays'):
+            return
+        self.menu_displays.clear()
+        screens = QApplication.screens()
+        target_idx = getattr(InAppToastWidget, '_target_screen_index', None)
+
+        for idx, scr in enumerate(screens):
+            geom = scr.geometry()
+            is_primary = (scr == QApplication.primaryScreen())
+            tag = " (主屏幕)" if is_primary else f" (副屏 {idx})"
+            title = f"显示器 {idx + 1}{tag} [{geom.width()}x{geom.height()}]"
+            
+            act = self.menu_displays.addAction(title)
+            act.setCheckable(True)
+            
+            is_checked = (target_idx == idx) if target_idx is not None else is_primary
+            act.setChecked(is_checked)
+            act.triggered.connect(lambda checked, i=idx: self._select_target_screen(i))
+
+    def _select_target_screen(self, screen_index: int):
+        """用户通过托盘右键菜单选择目标显示器"""
+        screens = QApplication.screens()
+        if 0 <= screen_index < len(screens):
+            InAppToastWidget._target_screen_index = screen_index
+            InAppToastWidget._custom_pos = None # 清除手动坐标，复位到所选屏幕默认右下角
+            scr = screens[screen_index]
+            geom = scr.geometry()
+            logger.info(f"🖥️ [TRAY_MENU] 用户已通过任务栏右键菜单切换预警通知显示器为: 显示器 {screen_index + 1} ({geom.width()}x{geom.height()})")
+            
+            # 立即弹出一个轻量 Toast 确认切换
+            try:
+                InAppToastWidget(
+                    "🖥️ 显示器设置已生效", 
+                    f"预警通知与特异买点将固定在【显示器 {screen_index + 1}】({geom.width()}x{geom.height()}) 弹出展示",
+                    code="",
+                    parent=None
+                )
+            except Exception as e:
+                logger.debug(f"Confirm toast failed: {e}")
+
+    def _reset_toast_position(self):
+        """重置弹窗坐标到当前屏幕默认右下角"""
+        InAppToastWidget._custom_pos = None
+        logger.info("🎯 [TRAY_MENU] 已重置通知弹窗位置为默认右下角")
+        try:
+            InAppToastWidget(
+                "🎯 通知位置已复位", 
+                "已重置为默认右下角位置。\n(后续可随时按住鼠标左键拖拽至任意屏幕)",
+                code="",
+                parent=None
+            )
+        except Exception:
+            pass
+
+    def _send_test_notification(self):
+        """发送测试特异预警通知"""
+        self.notify_special_signal(
+            code="688356", 
+            name="键凯科技", 
+            reason="【实盘演示】空间高度龙，站稳VWAP均线，买盘压强88%，黄金定龙点火", 
+            score=94.0
+        )
+
+    def _on_tray_quit_clicked(self):
+        """托盘菜单退出"""
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def _on_tray_message_clicked(self):
         """点击 Windows 系统托盘 Toast 消息弹窗，自动定位高亮与弹出详情小窗口"""
@@ -251,7 +439,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         reason = str(message).strip()
         return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent)
 
-    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None):
+    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False):
         """推送信信号弹窗与语音
         
         Args:
@@ -261,29 +449,32 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             score: 特异打分
             win_rate: 历史有效胜率
             parent: 主界面句柄 (传入后开启应用内右上角高亮 Toast 提示)
+            is_force: 是否强制弹窗/测试 (跳过限频和去重)
         """
-        # 0. 特异打分门槛过滤：小于 88.0 分的微弱异动静默过滤，避免干扰用户
-        if score < 88.0:
-            return
-
         now = time.time()
         code_str = str(code).strip().zfill(6)
-        is_priority_signal = ("通达信" in str(reason)) or (score >= 95.0)
+        reason_str = str(reason).strip()
+        is_priority_signal = is_force or ("通达信" in reason_str) or ("精选" in reason_str) or ("重点关注" in reason_str) or ("实盘演示" in reason_str) or (score >= 88.0)
 
-        # 0.1 通过共享 SignalLedger 校验是否今天已提示过相同的信号提示，防止 ATS 与多周期重复播报
-        try:
-            from ats.signal_ledger import get_signal_ledger
-            ledger = get_signal_ledger()
-            if ledger.is_notified_today(code_str, reason):
-                logger.info(f"🔇 [ALERT_NOTIFY] 该信号 [{code_str} | {reason}] 今日已播报提醒，自动去重跳过重复提示")
-                return
-        except Exception as e_check:
-            logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
+        # 0. 特异打分门槛过滤：小于 78.0 分且非重点/精选的微弱异动静默过滤
+        if score < 78.0 and not is_priority_signal:
+            return
 
-        # 仅对普通微弱信号进行时间抽样拦截；通达信实盘信号与黄金强特异信号免除全局丢弃，保证 100% 去重后依次弹窗+语音轮播
-        if not is_priority_signal:
+        # 0.1 通过共享 SignalLedger 校验是否今天已提示过相同的信号提示，防止 ATS 与多周期重复播报 (强制模式跳过)
+        if not is_force:
+            try:
+                from ats.signal_ledger import get_signal_ledger
+                ledger = get_signal_ledger()
+                if ledger.is_notified_today(code_str, reason_str):
+                    logger.info(f"🔇 [ALERT_NOTIFY] 该信号 [{code_str} | {reason_str}] 今日已播报提醒，自动去重跳过重复提示")
+                    return
+            except Exception as e_check:
+                logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
+
+        # 仅对普通微弱信号进行时间抽样拦截；重点/精选/实盘信号免除全局丢弃，保证 100% 依次弹窗+语音轮播
+        if not is_priority_signal and not is_force:
             # 1. 普通信号全局限频：15 秒内最多推送 1 条
-            if (now - self._last_global_ts) < 15.0:
+            if (now - self._last_global_ts) < 10.0:
                 return
 
             # 2. 普通信号单股限频：同一股票 15 分钟 (900s) 内不重复推送
