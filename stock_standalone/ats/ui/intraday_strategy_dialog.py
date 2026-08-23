@@ -305,11 +305,18 @@ class SBCChartCanvas(QWidget):
         """
         ⚡ 键盘快捷键响应：
         - 按下 R / r 键：自适应当前视图周期运行策略测算并在图上标记买卖介入点
+        - 按下 F / f 键：触发全系统与通达信外部行情联动
         - 按下 0 键：重置缩放回 100% 全景
         - 按下 Esc 键：关闭 SBC 窗口
         """
         if event.key() == Qt.Key.Key_R:
             self.run_adaptive_strategy_eval()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_F:
+            parent_win = self.window()
+            if parent_win and hasattr(parent_win, '_trigger_linkage'):
+                parent_win._trigger_linkage()
             event.accept()
             return
         elif event.key() == Qt.Key.Key_0:
@@ -2255,9 +2262,13 @@ class SBCIntradayChartDialog(QWidget):
             self.resize(680, 420)
 
     def keyPressEvent(self, event):
-        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算，按下 Esc 键关闭窗口，按下 0 键重置视图"""
+        """⚡ 窗口级快捷键：按下 R 键触发测算，按下 F 键触发联动，按下 0 键重置视图，按下 Esc 键关闭窗口"""
         if event.key() == Qt.Key.Key_R:
             self._on_eval_r_clicked()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_F:
+            self._trigger_linkage()
             event.accept()
             return
         elif event.key() == Qt.Key.Key_0:
@@ -2270,6 +2281,22 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _trigger_linkage(self):
+        """⚡ 按下 F 键触发全系统与通达信/外部行情联动"""
+        code = "".join(filter(str.isdigit, str(self.code))).zfill(6) if self.code else ""
+        name = getattr(self, "name", "") or resolve_stock_name(code)
+        if not code:
+            return
+        try:
+            from ats.ui.main_window import ATSMainWindow
+            app = QApplication.instance()
+            if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
+                app.main_window.link_stock(code, name)
+        except Exception as e:
+            logger.debug(f"SBC link_stock exception: {e}")
+        if hasattr(self, 'lbl_info') and self.lbl_info:
+            self.lbl_info.setText(f"🔗 [F快捷联动] 已触发行情联动: {code} {name}")
 
     def _on_eval_r_clicked(self):
         """⚡ 快捷键 R / 按钮触发当前周期自适应策略测算与图上标记"""
