@@ -1385,7 +1385,7 @@ class RouteConfigDialog(QDialog):
         # 4. 自动化开机/启动设置 (带秒数微调)
         row_autostart = QHBoxLayout()
         self.chk_acer_autostart = QCheckBox(" 开启 Windows 开机自启动 (开机登录后在后台托盘静默运行，全局唯一)")
-        self.chk_acer_autostart.setChecked(core.is_autostart_enabled())
+        self.chk_acer_autostart.setChecked(core.is_autostart_enabled_for_current_app())
         
         row_autostart.addWidget(self.chk_acer_autostart)
         row_autostart.addWidget(QLabel("   ⏳ 启动延迟应用: "))
@@ -1553,13 +1553,14 @@ class RouteConfigDialog(QDialog):
             
             # 1. 设置 Windows 注册表开机自启状态（全局唯一，用户显式确认与更新，严禁启动隐式添加）
             is_autostart_checked = self.chk_acer_autostart.isChecked()
+            is_currently_autostart = core.is_autostart_enabled_for_current_app()
+            has_existing, existing_cmd = core.get_current_autostart_command()
+            expected_cmd = core.get_autostart_command()
+            
             auto_ok = True
             auto_msg = ""
             if is_autostart_checked:
-                has_existing, existing_cmd = core.get_current_autostart_command()
-                expected_cmd = core.get_autostart_command()
-                
-                if has_existing and existing_cmd.strip().lower() != expected_cmd.strip().lower():
+                if has_existing and not is_currently_autostart:
                     reply = QMessageBox.question(
                         self,
                         "更新开机自启动路径确认",
@@ -1575,12 +1576,16 @@ class RouteConfigDialog(QDialog):
                     if reply == QMessageBox.StandardButton.Yes:
                         auto_ok, auto_msg = core.set_autostart_enabled(True)
                     else:
-                        auto_ok, auto_msg = True, f"用户选择保留已有注册表自启路径: {existing_cmd}"
+                        auto_ok, auto_msg = True, f"保留已有注册表自启路径: {existing_cmd}"
                 else:
                     auto_ok, auto_msg = core.set_autostart_enabled(True)
             else:
-                # 用户取消勾选：彻底从注册表中删除开机自启动项
-                auto_ok, auto_msg = core.set_autostart_enabled(False)
+                # 用户未勾选当前程序开机自启：
+                # 只有当注册表里配置的确实是当前程序时，才执行删除；若为外部程序路径则保持原样不触碰
+                if is_currently_autostart:
+                    auto_ok, auto_msg = core.set_autostart_enabled(False)
+                else:
+                    auto_ok, auto_msg = True, "当前程序未开启开机自启 (保持系统设置不变)"
             
             # 2. 在主窗口日志文本框输出结构化通知
             autostart_str = "已开启" if is_autostart_checked else "已关闭/已删除"
@@ -1852,6 +1857,21 @@ class DisplayTopologyPreviewDialog(QDialog):
         top_box.addStretch()
         layout.addLayout(top_box)
 
+        # 若是数据布局重复副本，增加醒目的黄色警示提示条
+        if self.config_info.get("is_duplicate"):
+            dup_of = self.config_info.get("duplicate_of", "其他配置文件")
+            dup_banner = QLabel(f"⚠️ <b>注意：</b> 本文件的显示器物理拓扑数据与 <b>[{dup_of}]</b> 完全一致，属于重复备份副本。")
+            dup_banner.setStyleSheet("""
+                background-color: #451a03; 
+                border: 1px solid #b45309; 
+                border-radius: 4px; 
+                color: #fcd34d; 
+                padding: 6px 10px; 
+                font-size: 12px;
+            """)
+            dup_banner.setWordWrap(True)
+            layout.addWidget(dup_banner)
+
         # 中间：可视化多屏排布几何画布
         layout.addWidget(QLabel("<b>📐 屏幕相对排布空间几何示意图 (自适应比例):</b>"))
         self.canvas = TopologyCanvasWidget(self.monitors, self)
@@ -2029,26 +2049,32 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.log(f"[Route Startup] {self.startup_route_msg}")
             
         # 自动探测与在后台应用 Acer 硬件性能模式配置 (结合 system uptime 开机冷启动与 startup_delay_seconds 秒数延迟)
+        # 🛡️ 严格约束：仅当【当前程序本身】被设置为 Windows 开机自启动，或本次启动带有开机后台静默参数 (-hide) 时才自动调度运行；非自启设置时不用自动运行程序
         try:
             acer_cfg = self.config_manager.get_acer_performance_config()
-            if acer_cfg.get("auto_apply_on_startup", True):
+            is_auto_in_cfg = acer_cfg.get("auto_apply_on_startup", True)
+            is_current_autostart = core.is_autostart_enabled_for_current_app()
+            is_silent_startup = getattr(self, "start_hidden", False) or ("-hide" in sys.argv or "--hide" in sys.argv)
+
+            if is_auto_in_cfg and (is_current_autostart or is_silent_startup):
                 user_delay = int(acer_cfg.get("startup_delay_seconds", 10))
                 uptime = core.get_system_uptime()
                 sys_cold = core.is_system_cold_boot(300)
 
                 if sys_cold:
-                    # 系统开机冷启动 (System Uptime < 300s):
-                    # Windows Acer 系统服务 (PSSvc.exe) 需约 20-30s 完成开机就绪
                     cold_target_delay = 25
                     actual_delay = max(user_delay, cold_target_delay)
-                    self.log(f"⏳ [AutoStart] 检测到系统刚开机 (系统 Uptime: {uptime:.1f}s < 300s 门槛)，自动将 Acer 调度延迟调整为 {actual_delay} 秒，以等待 Windows 硬件驱动与 Acer 服务彻底就绪...")
+                    self.log(f"⏳ [AutoStart] 检测到系统开机 (Uptime: {uptime:.1f}s)，将在 {actual_delay} 秒后自动调度应用 Acer 性能预设...")
                 else:
                     actual_delay = max(0, user_delay)
                     if actual_delay > 0:
-                        self.log(f"⏳ [AutoStart] 启动延迟引擎已就绪 (系统 Uptime: {uptime:.1f}s)，将在 {actual_delay} 秒后自动调度应用 Acer 性能模式...")
+                        self.log(f"⏳ [AutoStart] 启动延迟引擎已就绪 (Uptime: {uptime:.1f}s)，将在 {actual_delay} 秒后自动调度应用 Acer 性能预设...")
 
                 delay_ms = max(0, int(actual_delay * 1000))
                 QtCore.QTimer.singleShot(delay_ms, lambda: self.apply_acer_performance_async(acer_cfg, custom_msg_prefix="开机自动应用 Acer 性能预设"))
+            else:
+                if not is_current_autostart and not is_silent_startup:
+                    self.log("ℹ️ [AutoStart] 当前程序未配置为开机自启动，跳过后台自动调度。")
         except Exception as e:
             logger.error(f"启动自动应用 Acer 性能模式初始化异常: {e}")
 
@@ -2757,15 +2783,23 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.lbl_display_details.setStyleSheet("color: #d1d5db; line-height: 1.4;")
         gb_display_layout.addWidget(self.lbl_display_details)
         
-        # 增加显示器物理布局配置管理与操作栏
-        screen_btn_bar = FlowLayout(hspacing=6, vspacing=6)
+        # 显示器物理布局配置管理与操作栏（紧凑两行自适应排版，开启自动折行，杜绝横向拉伸）
+        topo_manage_box = QVBoxLayout()
+        topo_manage_box.setSpacing(6)
         
-        lbl_topo = QLabel("📂 运行目录拓扑配置:")
+        # 第一行：拓扑配置下拉选择 + 刷新 + 预览
+        row_topo_select = QHBoxLayout()
+        row_topo_select.setSpacing(6)
+        
+        lbl_topo = QLabel("📂 拓扑排布:")
         lbl_topo.setStyleSheet("color: #93c5fd; font-weight: bold;")
-        screen_btn_bar.addWidget(lbl_topo)
+        row_topo_select.addWidget(lbl_topo)
         
         self.cb_topology_configs = QComboBox()
-        self.cb_topology_configs.setMinimumWidth(320)
+        self.cb_topology_configs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.cb_topology_configs.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.cb_topology_configs.setMinimumContentsLength(15)
+        self.cb_topology_configs.view().setWordWrap(True)  # 下拉列表开启自动换行
         self.cb_topology_configs.setStyleSheet("""
             QComboBox {
                 background-color: #1e1e24;
@@ -2788,41 +2822,54 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 color: #ffffff;
                 selection-background-color: #0284c7;
                 selection-color: #ffffff;
+                padding: 4px;
             }
         """)
-        screen_btn_bar.addWidget(self.cb_topology_configs)
+        row_topo_select.addWidget(self.cb_topology_configs, stretch=1)
         
         self.btn_refresh_topo_configs = QPushButton("🔄 刷新")
         self.btn_refresh_topo_configs.setToolTip("重新扫描运行目录下的显示器拓扑配置文件")
         self.btn_refresh_topo_configs.setStyleSheet("background-color: #374151; color: white; padding: 4px 8px;")
         self.btn_refresh_topo_configs.clicked.connect(lambda: self.refresh_topology_configs_combo())
-        screen_btn_bar.addWidget(self.btn_refresh_topo_configs)
+        row_topo_select.addWidget(self.btn_refresh_topo_configs)
         
         self.btn_preview_topo_config = QPushButton("👁️ 预览拓扑")
         self.btn_preview_topo_config.setToolTip("查看当前下拉框选中配置文件的屏幕空间相对排布与详细参数")
         self.btn_preview_topo_config.setStyleSheet("background-color: #0284c7; color: white; padding: 4px 10px; font-weight: bold;")
         self.btn_preview_topo_config.clicked.connect(self.preview_selected_topology)
-        screen_btn_bar.addWidget(self.btn_preview_topo_config)
+        row_topo_select.addWidget(self.btn_preview_topo_config)
+        
+        topo_manage_box.addLayout(row_topo_select)
+
+        # 第二行：拓扑动作按钮工具栏 (FlowLayout 自动折行，保证窄屏不溢出)
+        row_topo_actions = FlowLayout(hspacing=6, vspacing=6)
 
         self.btn_restore_screen_layout = QPushButton("🔄 恢复选中拓扑")
         self.btn_restore_screen_layout.setToolTip("将当前桌面显示器排列智能恢复为下拉框选中的配置（需二次确认）")
         self.btn_restore_screen_layout.setStyleSheet("background-color: #ea580c; color: white; padding: 4px 10px; font-weight: bold;")
         self.btn_restore_screen_layout.clicked.connect(self.restore_physical_screen_layout)
-        screen_btn_bar.addWidget(self.btn_restore_screen_layout)
+        row_topo_actions.addWidget(self.btn_restore_screen_layout)
 
         self.btn_save_screen_layout = QPushButton("💾 保存当前拓扑")
         self.btn_save_screen_layout.setToolTip("将当前系统实际屏幕物理排布保存为新配置文件")
         self.btn_save_screen_layout.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-weight: bold;")
         self.btn_save_screen_layout.clicked.connect(self.save_physical_screen_layout)
-        screen_btn_bar.addWidget(self.btn_save_screen_layout)
+        row_topo_actions.addWidget(self.btn_save_screen_layout)
 
         self.btn_delete_topo_config = QPushButton("🗑️ 删除配置")
         self.btn_delete_topo_config.setToolTip("从磁盘删除下拉框当前选中的拓扑配置文件")
         self.btn_delete_topo_config.setStyleSheet("background-color: #b91c1c; color: white; padding: 4px 8px;")
         self.btn_delete_topo_config.clicked.connect(self.delete_selected_topology)
-        screen_btn_bar.addWidget(self.btn_delete_topo_config)
+        row_topo_actions.addWidget(self.btn_delete_topo_config)
 
-        gb_display_layout.addLayout(screen_btn_bar)
+        self.btn_clean_duplicate_topos = QPushButton("🧹 清理重复拓扑")
+        self.btn_clean_duplicate_topos.setToolTip("自动扫描并清理所有与已有配置数据完全一致的重复备份文件")
+        self.btn_clean_duplicate_topos.setStyleSheet("background-color: #4b5563; color: #f3f4f6; padding: 4px 8px;")
+        self.btn_clean_duplicate_topos.clicked.connect(self.clean_duplicate_topologies)
+        row_topo_actions.addWidget(self.btn_clean_duplicate_topos)
+
+        topo_manage_box.addLayout(row_topo_actions)
+        gb_display_layout.addLayout(topo_manage_box)
 
         main_layout.addWidget(self.gb_display_info)
 
@@ -3007,7 +3054,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         # --- 开机自启复选框 ---
         self.chk_autostart = QCheckBox("开机自启")
         self.chk_autostart.setToolTip("勾选后系统开机时将通过 Windows 注册表以托盘后台隐藏不弹窗模式启动程序 (-hide)")
-        self.chk_autostart.setChecked(core.is_autostart_enabled())
+        self.chk_autostart.setChecked(core.is_autostart_enabled_for_current_app())
         self.chk_autostart.stateChanged.connect(self.on_autostart_changed)
         bottom_bar.addWidget(self.chk_autostart)
 
@@ -3042,14 +3089,43 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def on_autostart_changed(self, state):
         """开机自启复选框勾选状态改变时的响应回调"""
         enable = (state == QtCore.Qt.CheckState.Checked.value or state == 2)
-        success, msg = core.set_autostart_enabled(enable)
+        has_existing, existing_cmd = core.get_current_autostart_command()
+        is_current = core.is_autostart_enabled_for_current_app()
+        expected_cmd = core.get_autostart_command()
+
+        if enable:
+            if has_existing and not is_current:
+                reply = QMessageBox.question(
+                    self,
+                    "更新开机自启动路径确认",
+                    f"检测到 Windows 注册表中已存在其他开机自启动路径：\n【已有路径】: {existing_cmd}\n\n"
+                    f"当前程序运行路径为：\n【当前路径】: {expected_cmd}\n\n"
+                    f"整个系统只允许一个 manage_window_layout 开机自启。\n"
+                    f"是否将开机自启动路径更新为当前程序？\n\n"
+                    f"• 点击【是 (Yes)】：覆盖更新为当前程序路径\n"
+                    f"• 点击【否 (No)】：取消本次操作并保持原有路径",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    self.chk_autostart.blockSignals(True)
+                    self.chk_autostart.setChecked(False)
+                    self.chk_autostart.blockSignals(False)
+                    return
+            success, msg = core.set_autostart_enabled(True)
+        else:
+            if is_current:
+                success, msg = core.set_autostart_enabled(False)
+            else:
+                success, msg = True, "当前程序未开启开机自启"
+
         if success:
             self.log(f"🎯 {msg}")
         else:
             self.log(f"❌ {msg}")
             # 如果操作失败，还原复选框真实状态
             self.chk_autostart.blockSignals(True)
-            self.chk_autostart.setChecked(core.is_autostart_enabled())
+            self.chk_autostart.setChecked(core.is_autostart_enabled_for_current_app())
             self.chk_autostart.blockSignals(False)
             QMessageBox.warning(self, "开机自启注册表设置失败", msg)
 
@@ -3144,6 +3220,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 self.btn_restore_screen_layout.setEnabled(False)
             if hasattr(self, "btn_delete_topo_config"):
                 self.btn_delete_topo_config.setEnabled(False)
+            if hasattr(self, "btn_clean_duplicate_topos"):
+                self.btn_clean_duplicate_topos.setEnabled(False)
             self.cb_topology_configs.blockSignals(False)
             return
 
@@ -3154,6 +3232,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.btn_restore_screen_layout.setEnabled(True)
         if hasattr(self, "btn_delete_topo_config"):
             self.btn_delete_topo_config.setEnabled(True)
+            
+        has_duplicate = any(cfg.get("is_duplicate") for cfg in configs)
+        if hasattr(self, "btn_clean_duplicate_topos"):
+            self.btn_clean_duplicate_topos.setEnabled(has_duplicate)
 
         info = core.get_screen_resolution_summary()
         cur_count = info.get("display_num", 1)
@@ -3164,6 +3246,22 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             tag = " ⭐ [当前匹配]" if is_match else ""
             label = f"{cfg.get('display_name')}{tag}"
             self.cb_topology_configs.addItem(label, cfg)
+            
+            # 为每一项注入多行完整参数 ToolTip
+            tip_lines = [
+                f"【文件名称】: {cfg.get('filename')}",
+                f"【屏幕总数】: {cfg.get('monitor_count')} 块",
+                f"【相对方位】: {cfg.get('orientation_tag', '标准')}",
+                f"【保存时间】: {cfg.get('mtime')}",
+                f"【物理路径】: {cfg.get('filepath')}"
+            ]
+            if cfg.get('is_duplicate'):
+                tip_lines.append(f"⚠️ [数据重复] 与 [{cfg.get('duplicate_of')}] 数据完全一致")
+            self.cb_topology_configs.setItemData(
+                self.cb_topology_configs.count() - 1, 
+                "\n".join(tip_lines), 
+                QtCore.Qt.ItemDataRole.ToolTipRole
+            )
             
             if is_match and matched_index == -1:
                 matched_index = idx
@@ -3211,22 +3309,64 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         reply = QMessageBox.question(
             self,
             "确认删除配置文件",
-            f"是否确认彻底从磁盘删除以下显示器物理拓扑配置文件？\n\n"
+            f"是否确认将以下显示器物理拓扑配置文件移入回收站？\n\n"
             f"【文件名称】: {filename}\n"
             f"【完整路径】: {filepath}\n\n"
-            f"⚠️ 此操作不可撤销！",
+            f"🛡️ 安全说明：文件将移入 Windows 系统回收站并在 BackConfig/deleted_topologies 自动备份，随时可一键撤销还原。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
             success, msg = core.delete_display_configuration(filepath)
             if success:
-                QMessageBox.information(self, "删除成功", msg)
+                QMessageBox.information(self, "移至回收站成功", msg)
                 self.log(f"🗑️ {msg}")
                 self.refresh_topology_configs_combo()
             else:
-                QMessageBox.critical(self, "删除失败", msg)
+                QMessageBox.critical(self, "操作失败", msg)
                 self.log(f"❌ {msg}")
+
+    def clean_duplicate_topologies(self):
+        """扫描并一键清理所有与已有配置数据完全一致的重复拓扑配置文件"""
+        configs = core.list_display_configurations()
+        duplicate_items = [c for c in configs if c.get("is_duplicate")]
+
+        if not duplicate_items:
+            QMessageBox.information(
+                self, 
+                "提示", 
+                "✨ 经检测，当前运行目录下未发现任何数据一致的重复拓扑文件！"
+            )
+            return
+
+        dup_lines = []
+        for d in duplicate_items:
+            fname = d.get("filename", "")
+            dup_of = d.get("duplicate_of", "")
+            dup_lines.append(f"• {fname} (与 [{dup_of}] 拓扑数据完全重复)")
+
+        dup_msg = "\n".join(dup_lines)
+        reply = QMessageBox.question(
+            self,
+            "清理重复拓扑配置文件",
+            f"检测到以下 {len(duplicate_items)} 个与已有配置数据完全一致的冗余备份文件：\n\n"
+            f"{dup_msg}\n\n"
+            f"是否确认将以上重复副本安全移入 Windows 系统回收站？\n"
+            f"（将完整保留对应的原配置文件，并在 BackConfig/deleted_topologies 自动备份，随时可撤销还原）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            del_count, del_files = core.clean_duplicate_display_configurations()
+            self.log(f"🧹 已安全移入回收站 {del_count} 个重复拓扑文件: {', '.join(del_files)}")
+            QMessageBox.information(
+                self, 
+                "清理完成", 
+                f"成功将 {del_count} 个重复拓扑配置文件移入 Windows 回收站！\n（已自动在 BackConfig 建立安全备份）"
+            )
+            self.refresh_topology_configs_combo()
+            self.refresh_topology_configs_combo()
 
     def save_physical_screen_layout(self):
         """保存当前多显示器的物理排布与相对坐标到磁盘"""
@@ -3320,11 +3460,16 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         found_index = -1
         index_counter = 0
+        dup_resolutions = self.config_manager.get_duplicate_resolutions_info()
         
         for cat_name in self.config_manager.get_categories():
             cat_cn = categories.get(cat_name, cat_name)
             for res_name in self.config_manager.get_resolutions_by_category(cat_name):
-                display_text = f"[{cat_cn}] {res_name}"
+                dup_tag = ""
+                if res_name in dup_resolutions:
+                    orig_name, _ = dup_resolutions[res_name]
+                    dup_tag = f" ⚠️[与 {orig_name} 布局一致]"
+                display_text = f"[{cat_cn}] {res_name}{dup_tag}"
                 # 绑定二元组 (category, res_name) 作为 UserData
                 self.cb_resolutions.addItem(display_text, (cat_name, res_name))
                 if select_name and res_name == select_name:
@@ -4935,13 +5080,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 found_any = True
                 for hwnd, actual_title in hwnds:
                     left, top, w, h = core.get_window_rect(hwnd)
-                    is_minimized = (left < -10000 and top < -10000)
+                    is_maximized = core.user32.IsZoomed(hwnd)
+                    is_minimized = (left < -10000 and top < -10000) or core.user32.IsIconic(hwnd)
                     is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
                     
-                    if is_minimized or is_diff:
-                        if is_minimized:
-                            core.user32.ShowWindow(hwnd, core.SW_SHOWNORMAL)
-                            time.sleep(0.1)
+                    if is_maximized or is_minimized or is_diff:
+                        if is_maximized or is_minimized:
+                            core.cancel_window_maximized_or_fullscreen(hwnd)
                         if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
                             self.log(f"✅ 成功对齐窗口: '{actual_title}' -> [{pos_str}]")
                             moved_any = True
@@ -5013,14 +5158,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     found_any = True
                     for hwnd, actual_title in hwnds:
                         left, top, w, h = core.get_window_rect(hwnd)
-                        is_minimized = (left < -10000 and top < -10000)
+                        is_maximized = core.user32.IsZoomed(hwnd)
+                        is_minimized = (left < -10000 and top < -10000) or core.user32.IsIconic(hwnd)
                         is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
                         
-                        if is_minimized or is_diff:
-                            if is_minimized:
-                                core.user32.ShowWindow(hwnd, core.SW_SHOWNORMAL)
-                                import time
-                                time.sleep(0.1)
+                        if is_maximized or is_minimized or is_diff:
+                            if is_maximized or is_minimized:
+                                core.cancel_window_maximized_or_fullscreen(hwnd)
                             if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
                                 self.log(f"✅ 成功设置窗口: '{actual_title}' -> [{pos_str}]")
                                 moved_any = True

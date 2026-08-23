@@ -28,7 +28,10 @@ from .core import (
     get_system_uptime,
     is_system_cold_boot,
     get_screen_topology_signature,
-    get_screen_topology_orientation_tag
+    get_screen_topology_orientation_tag,
+    cancel_window_maximized_or_fullscreen,
+    clean_duplicate_display_configurations,
+    send_file_to_recycle_bin
 )
 
 from .ui import (
@@ -42,6 +45,7 @@ __all__ = [
     'detect_display_config_name',
     'set_window_pos_by_title',
     'set_window_hwnd_pos',
+    'cancel_window_maximized_or_fullscreen',
     'list_visible_windows',
     'find_windows_by_title_safe',
     'get_screen_resolution_summary',
@@ -51,6 +55,8 @@ __all__ = [
     'restore_display_configuration',
     'list_display_configurations',
     'delete_display_configuration',
+    'clean_duplicate_display_configurations',
+    'send_file_to_recycle_bin',
     'get_display_configuration_details',
     'bring_window_to_top_by_title',
     'check_and_add_route',
