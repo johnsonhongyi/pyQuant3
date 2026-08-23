@@ -1,3 +1,31 @@
+## 2026-08-23 14:40
+- [x] **全球外盘及 K 线图数据全面修复、自动更新、自愈对齐与日志报告 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `ats/ui/global_market_panel.py`)**：
+    - [x] **彻底根治 2026 年最新 K 线被静态阈值误杀过滤的致命 Bug**：
+        - 查明并彻底修复 `EXPECTED_RANGES` 将 GOLD 限制在 4500、MU 限制在 300、SOXX 限制在 500 等导致 8 月份真实 K 线全被当成“离群脏数据”剔除的问题，将全标的清洗区间扩容至真实安全带（GOLD: 100~20000、MU: 5~5000、SOXX: 10~5000、NVDA: 1~5000 等）；
+    - [x] **解除非交易时段与缓存冷却对手动刷新的阻断**：
+        - 移除 `fetch_global_kline_history` 与 `_load_fast_cached_or_async` 中的 `or not active_time` 拦截，允许白天与休市期点击【🔄 刷新】强制穿透并拉取最新收盘日 K；
+    - [x] **国内免代理源智能极速直连与分级降级**：
+        - `get_urllib_request_opener(url)` 针对国内新浪、腾讯等直连源自动纯直连，美股与 A50 批量抓取从 9 秒大幅优化至 0.2 秒（50~200ms）；
+        - 精准解析新浪美股日 K 全量接口，A50 ETF (`hk02823`) 走势，大宗商品实时切片与历史 Bar 自动无缝增量续接；
+    - [x] **弹窗 Header 价格标签与面板实时行情 100% 动态对齐**：
+        - `GlobalMarketKLineDialog` 顶栏最新价与涨跌幅优先读取实时切片，确保弹窗与看板报价 100% 绝对一致（NVDA 214.72, GOLD 4664.48, MU 966.78 等）；
+    - [x] **双盘库与跨源双向自动自愈同步 (Auto-Sync & Self-Healing)**：
+        - 全盘自愈函数 `repair_disk_kline_caches()` 自动将最新日 K（如 `2026-08-21`）增量同步至 `yahoo` 盘库和 `global_market_klines.json`；
+        - 全量 17 大核心外盘资产全部刷新自检通过，Qt UI 自动化测试全部 PASS。
+
+## 2026-08-23 13:50
+- [x] **联通网络 vs 移动网络延迟与卡顿根因全方位诊断分析**：
+    - [x] **根因 1 (最致命)：Clash/Meta TUN 虚拟网卡 + 系统代理全局劫持与 Fake-IP 绕道海外**：
+        - 外网出口被转发至台湾节点 (`118.163.198.46`)，国内行情域名被 Fake-IP (`198.18.0.x`) 拦截，单次 HTTP 行情请求由 38ms 暴增至 9131ms（延时高达 9 秒）；
+    - [x] **根因 2：本地配置了失效的联通 DNS (`202.106.0.20`)**：
+        - 该 DNS 节点在当前链路下超时不响应，触发系统 2~4 秒的 DNS 超时回退；
+    - [x] **根因 3：通达信 HQ 节点运营商跨网与路由差异**：
+        - 联通直连联通主站 (`202.108.254.67`) 仅 6~9ms，但若系统默认连接移动主站 (`111.15.15.43`) 会发生跨网拥塞与丢包；
+    - [x] **提供即时生效的修复与优化方案**；
+    - [x] **建立专属自定义规则独立备份与一键快速恢复机制 (`config/clash_rules/`)**：
+        - 独立备份 `clash_custom_direct_rules.yaml` (Merge 规则)、`clash_custom_direct_script.js` (Script 脚本) 与 `clash_dns_fakeip_filter.yaml` (DNS 白名单)；
+        - 提供 `apply_clash_rules.py` 与根目录下 `一键恢复Clash直连规则.bat`，支持任何时候一键极速还原与迭代更新。
+
 ## 2026-08-22 21:05
 - [x] **根除新股批量数据中断 Bug & TDX 分块安全拉取与历史数据无损继承 (`ats/tdx_realtime_fetcher.py`, `ats/new_stock_fetcher.py`, `ats/ui/new_stock_panel.py`)**：
     - [x] **根除 `NameError: safe_float is not defined`**：

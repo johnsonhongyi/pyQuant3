@@ -1,0 +1,21 @@
+# ==============================================================================
+# 量化股票监控与交易系统 — DNS Fake-IP 过滤白名单 (直连解析真实IP)
+# 保存路径: stock_standalone/config/clash_rules/clash_dns_fakeip_filter.yaml
+# ==============================================================================
+
+fake-ip-filter:
+  - '*.sinajs.cn'
+  - '*.sina.com.cn'
+  - '*.gtimg.cn'
+  - '*.eastmoney.com'
+  - '*.dfcfw.com'
+  - '*.10jqka.com.cn'
+  - '*.iwencai.com'
+  - '*.ths.com.cn'
+  - '*.upchina.com'
+  - '*.tdx.com.cn'
+  - '*.sse.com.cn'
+  - '*.szse.com.cn'
+  - '*.bse.com.cn'
+  - '*.bse.cn'
+  - '*.cninfo.com.cn'

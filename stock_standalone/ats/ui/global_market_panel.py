@@ -53,21 +53,30 @@ class GlobalMarketWorker(QThread):
 
             # ⚡ 核心功能强化：如果触发强制实时刷新 (force_refresh=True)，执行全量 16 大外盘核心品种 K 线与新闻批量在线重构更新！
             if self.force_refresh:
-                from JSONData.global_market_data import flush_kline_disk_cache
+                from JSONData.global_market_data import flush_kline_disk_cache, get_proxy_config
                 batch_symbols = ['A50', 'USDCNH', 'OIL', 'BRENT', 'GOLD', 'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ']
-                
+                proxy_on = get_proxy_config().get("enabled", False)
+
                 def _refresh_symbol_kline(sym):
                     try:
-                        fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='yahoo')
+                        # 优先刷新国内极速免代理直连源 sina，确保直连与打包环境 100% 具备最新 K 线
+                        fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='sina')
                     except Exception as ex:
-                        log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} K线异常: {ex}")
+                        log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} [sina] K线异常: {ex}")
+                    if proxy_on:
+                        try:
+                            fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='yahoo')
+                        except Exception as ex:
+                            log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} [yahoo] K线异常: {ex}")
 
                 # 使用线程池并发 6 线程批量全量抓取更新 K 线
                 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
                     executor.map(_refresh_symbol_kline, batch_symbols)
 
-                # ⚡ 16 大标的加载完成后，一次性统一批量落盘保存！(单次物理文件 IO，绝对零多线程踩踏)
-                flush_kline_disk_cache('yahoo', force=True)
+                # ⚡ 16 大标的加载完成后，一次性统一批量落盘保存！
+                flush_kline_disk_cache('sina', force=True)
+                if proxy_on:
+                    flush_kline_disk_cache('yahoo', force=True)
 
 
                 # 预刷新自选热榜新闻

@@ -1,0 +1,63 @@
+# ==============================================================================
+# 量化股票监控与交易系统 — Clash / Mihomo 专属国内直连前置规则 (Merge 格式)
+# 适用客户端: Clash Verge Rev / Clash Nyanpasu / Mihomo Party / Clash for Windows
+# 保存路径: stock_standalone/config/clash_rules/clash_custom_direct_rules.yaml
+# ==============================================================================
+
+prepend-rules:
+  # ----------------------------------------------------------------------------
+  # 1. 核心股票行情与金融数据 API (强制直连，毫秒级响应)
+  # ----------------------------------------------------------------------------
+  - DOMAIN-SUFFIX,sinajs.cn,DIRECT          # 新浪实时五档与分时行情
+  - DOMAIN-SUFFIX,sina.com.cn,DIRECT        # 新浪财经主站与接口
+  - DOMAIN-SUFFIX,gtimg.cn,DIRECT           # 腾讯实时行情 (qt.gtimg.cn)
+  - DOMAIN-SUFFIX,qq.com,DIRECT             # 腾讯财经与接口
+  - DOMAIN-SUFFIX,eastmoney.com,DIRECT      # 东方财富实时五档、新股日历、盘口
+  - DOMAIN-SUFFIX,dfcfw.com,DIRECT          # 东方财富数据接口
+  - DOMAIN-SUFFIX,10jqka.com.cn,DIRECT      # 同花顺核心行情与问财
+  - DOMAIN-SUFFIX,iwencai.com,DIRECT        # 问财选股与量化指标
+  - DOMAIN-SUFFIX,ths.com.cn,DIRECT         # 同花顺开放平台
+  - DOMAIN-SUFFIX,upchina.com,DIRECT        # UP投资/优品股票接口
+  - DOMAIN-SUFFIX,cninfo.com.cn,DIRECT      # 巨潮资讯与官方公告
+  - DOMAIN-SUFFIX,gw.com.cn,DIRECT          # 大智慧行情接口
+  - DOMAIN-SUFFIX,tdx.com.cn,DIRECT         # 通达信官方服务
+  - DOMAIN-SUFFIX,wind.com.cn,DIRECT        # 万得 Wind 金融终端接口
+
+  # ----------------------------------------------------------------------------
+  # 2. 交易所官方网站与直连数据源
+  # ----------------------------------------------------------------------------
+  - DOMAIN-SUFFIX,sse.com.cn,DIRECT         # 上海证券交易所
+  - DOMAIN-SUFFIX,szse.com.cn,DIRECT        # 深圳证券交易所
+  - DOMAIN-SUFFIX,bse.cn,DIRECT             # 北京证券交易所
+  - DOMAIN-SUFFIX,neeq.com.cn,DIRECT        # 全国股转系统
+  - DOMAIN-SUFFIX,csrc.gov.cn,DIRECT        # 中国证监会
+  - DOMAIN-SUFFIX,chinabond.com.cn,DIRECT   # 中国债券信息网
+  - DOMAIN-SUFFIX,chinamoney.com.cn,DIRECT  # 中国外汇交易中心
+
+  # ----------------------------------------------------------------------------
+  # 3. 关键字兜底直连
+  # ----------------------------------------------------------------------------
+  - DOMAIN-KEYWORD,stock,DIRECT
+  - DOMAIN-KEYWORD,tongdaxin,DIRECT
+  - DOMAIN-KEYWORD,eastmoney,DIRECT
+
+  # ----------------------------------------------------------------------------
+  # 4. 通达信与主流券商行情服务器 IP 段 (TCP 7709 / 7711 直连)
+  # ----------------------------------------------------------------------------
+  - IP-CIDR,202.108.254.0/24,DIRECT        # 通达信北京联通主站 (极速 6ms)
+  - IP-CIDR,202.108.253.0/24,DIRECT        # 通达信北京联通主站2
+  - IP-CIDR,111.15.15.0/24,DIRECT          # 通达信移动高带宽主站
+  - IP-CIDR,111.13.75.0/24,DIRECT          # 通达信移动主站2
+  - IP-CIDR,119.147.212.0/24,DIRECT        # 招商证券 / 电信深圳主站
+  - IP-CIDR,218.75.126.0/24,DIRECT         # 国泰君安 / 电信上海主站
+  - IP-CIDR,221.231.141.0/24,DIRECT        # 华泰证券南京主站
+  - IP-CIDR,115.238.56.0/24,DIRECT         # 中信证券北京主站
+  - IP-CIDR,120.199.2.0/24,DIRECT          # 通达信杭州主站
+  - IP-CIDR,117.149.2.0/24,DIRECT          # 通达信华东主站
+  - IP-CIDR,223.112.100.0/24,DIRECT        # 通达信江苏主站
+  - IP-CIDR,60.12.136.0/24,DIRECT          # 通达信河北/官方主站
+
+  # ----------------------------------------------------------------------------
+  # 5. 国内 IP 与局域网直连兜底
+  # ----------------------------------------------------------------------------
+  - GEOIP,CN,DIRECT
