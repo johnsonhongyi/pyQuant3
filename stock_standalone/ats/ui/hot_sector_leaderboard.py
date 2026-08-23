@@ -486,6 +486,15 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
         header_lay.addWidget(self.chk_on_top)
 
+        # 🔔 语音与弹窗预警开关
+        self.is_voice_alert_enabled = self._load_voice_alert_enabled()
+        self.btn_voice_alert = QPushButton("🟢 语音" if self.is_voice_alert_enabled else "⚪ 静音")
+        self.btn_voice_alert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_voice_alert.setToolTip("开启/关闭 板块龙头突击与异动 语音播报与右下角弹窗通知")
+        self._update_voice_btn_style()
+        self.btn_voice_alert.clicked.connect(self._toggle_voice_alert)
+        header_lay.addWidget(self.btn_voice_alert)
+
         # 立即刷新按钮
         self.btn_refresh = QPushButton("🔄 刷新")
         self.btn_refresh.setFixedWidth(65)
@@ -973,14 +982,132 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
                 s_short = s.split('(')[0] if '(' in s else s
                 leader_strs.append(f"{s_short}: {lead_stock['name']}({lead_stock['pct']:+.2f}%)")
 
-        if leader_strs:
-            self.lbl_sector_leaders.setText("👑 领涨: " + " | ".join(leader_strs))
-        else:
-            self.lbl_sector_leaders.setText("👑 领涨: 监控计算中...")
-
         self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
 
         self._is_updating = False
+
+        # 🔔 触发强势板块龙头突击特异标的语音与弹窗通知
+        self._check_and_notify_sector_highlights(filtered)
+
+    def _load_voice_alert_enabled(self) -> bool:
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        return data.get("hot_sector_leaderboard", {}).get("voice_alert_enabled", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_voice_alert_enabled(self, enabled: bool):
+        try:
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    try:
+                        with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                if "hot_sector_leaderboard" not in data:
+                    data["hot_sector_leaderboard"] = {}
+                data["hot_sector_leaderboard"]["voice_alert_enabled"] = enabled
+                with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"Save voice_alert_enabled failed: {e}")
+
+    def _toggle_voice_alert(self):
+        self.is_voice_alert_enabled = not self.is_voice_alert_enabled
+        self._save_voice_alert_enabled(self.is_voice_alert_enabled)
+        self._update_voice_btn_style()
+
+    def _update_voice_btn_style(self):
+        if not hasattr(self, 'btn_voice_alert'):
+            return
+        if self.is_voice_alert_enabled:
+            self.btn_voice_alert.setText("🟢 语音")
+            self.btn_voice_alert.setStyleSheet("""
+                QPushButton {
+                    background-color: #102a1e;
+                    color: #00ff88;
+                    font-weight: bold;
+                    font-size: 8.5pt;
+                    border: 1px solid #00cc66;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                }
+                QPushButton:hover {
+                    background-color: #00cc66;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_voice_alert.setText("⚪ 静音")
+            self.btn_voice_alert.setStyleSheet("""
+                QPushButton {
+                    background-color: #24242e;
+                    color: #8e8e93;
+                    font-weight: bold;
+                    font-size: 8.5pt;
+                    border: 1px solid #444455;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                }
+                QPushButton:hover {
+                    background-color: #333344;
+                    color: #ffffff;
+                }
+            """)
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = False):
+        """【全端联动定位】在板块跟单榜中高亮并居中定位该股"""
+        if not code or not hasattr(self, 'table'):
+            return
+        c = str(code).strip().zfill(6)
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 0)
+            if code_item and code_item.text().strip().zfill(6) == c:
+                self.table.selectRow(row)
+                self.table.scrollToItem(code_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                name_item = self.table.item(row, 1)
+                n = name_item.text().strip() if name_item else c
+                self._broadcast_link_stock(c, n)
+                break
+
+    def _check_and_notify_sector_highlights(self, filtered_records: List[Dict[str, Any]]):
+        """【板块龙头与特异异动自动挖掘通知】"""
+        if not getattr(self, "is_voice_alert_enabled", True):
+            return
+
+        try:
+            from ats.alert_notifier import AlertNotifier
+            notifier = AlertNotifier.get_instance()
+        except Exception:
+            return
+
+        if not filtered_records:
+            return
+
+        # 筛选得分最高的 3~5 只核心领涨龙头与先锋突破标的
+        candidates = []
+        for r in filtered_records:
+            score = float(r.get("alpha_score", 0.0))
+            tag = r.get("buy_tag", "")
+            if score >= 85.0 and tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK"):
+                candidates.append(r)
+            if len(candidates) >= 5: # 精选 3~5 个
+                break
+
+        for idx, top_cand in enumerate(candidates, 1):
+            c = str(top_cand.get("code", "")).zfill(6)
+            n = str(top_cand.get("name", c))
+            score = float(top_cand.get("alpha_score", 88.0))
+            buy_type = str(top_cand.get("buy_type", ""))
+            sec = str(top_cand.get("sector", ""))
+            reason = f"【{sec}精选#{idx}】{buy_type} | {top_cand.get('reason', '')}"
+            notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
 
     def _populate_row(self, row_idx: int, r: Dict[str, Any], font_bold: QFont):
         """填充/原位更新单行数据"""

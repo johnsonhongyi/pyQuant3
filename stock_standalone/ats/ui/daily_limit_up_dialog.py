@@ -408,6 +408,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_top_leader.clicked.connect(self._on_top_leader_clicked)
         self.kpi_layout.addWidget(self.btn_top_leader)
 
+        # 🔔 语音与弹窗预警开关 (圆形绿点指示灯)
+        self.is_voice_alert_enabled = self._load_voice_alert_enabled()
+        self.btn_voice_alert = QPushButton("🟢 语音预警" if self.is_voice_alert_enabled else "⚪ 语音静音")
+        self.btn_voice_alert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_voice_alert.setToolTip("开启/关闭 时间片重点标的挖掘与大盘退潮雪崩 语音播报与右下角弹窗通知")
+        self._update_voice_btn_style()
+        self.btn_voice_alert.clicked.connect(self._toggle_voice_alert)
+        self.kpi_layout.addWidget(self.btn_voice_alert)
+
         main_layout.addWidget(self.kpi_frame)
 
         # ── 2. 控制栏 (周期切换、历史回溯、搜索与操作按钮) ──
@@ -705,8 +714,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif self.current_mode == "HISTORY" and self.selected_history_date:
             self.current_records = self.engine.get_records_by_date(self.selected_history_date)
 
-        # 更新顶部 KPI 卡片
-        summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else today_str)
+        # 更新顶部 KPI 卡片 (传入当前全量策略 df 获取全市场宏观情绪与涨跌广度)
+        summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else today_str, current_df=df)
         self._update_kpi_display(summary)
 
         # 应用时间片与梯队过滤并填充表格
@@ -781,10 +790,148 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
             filtered.append(r)
 
+        # 针对具体时间片，按动能评分降序 > 连板高度 > 封流比 精准排序，确保 Top 3~5 核心标的排在最前
+        if "全天全时段" not in time_slice:
+            filtered.sort(key=lambda x: (
+                _safe_float(x.get("momentum_score", 0.0)),
+                _safe_int(x.get("consecutive_boards", 1)),
+                _safe_float(x.get("seal_to_circ_ratio", 0.0)),
+                _safe_float(x.get("pct", 0.0))
+            ), reverse=True)
+
         self._populate_table_rows(filtered)
-        self.lbl_status.setText(f"数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】共 {len(filtered)} 只标的 (更新: {time.strftime('%H:%M:%S')})")
+        top_focus_cnt = min(5, len(filtered))
+        self.lbl_status.setText(f"数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
+
+        # 🔔 自动触发时间片重点标的与大盘退潮雪崩语音弹窗通知 (精选 3-5 个)
+        self._check_and_notify_slice_highlights(filtered, time_slice)
+
+    def _load_voice_alert_enabled(self) -> bool:
+        try:
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                with _CONFIG_FILE_LOCK:
+                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        return data.get("daily_limit_up_dialog", {}).get("voice_alert_enabled", True)
+        except Exception:
+            pass
+        return True
+
+    def _save_voice_alert_enabled(self, enabled: bool):
+        try:
+            with _CONFIG_FILE_LOCK:
+                data = {}
+                if os.path.exists(WINDOW_CONFIG_FILE):
+                    try:
+                        with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                if "daily_limit_up_dialog" not in data:
+                    data["daily_limit_up_dialog"] = {}
+                data["daily_limit_up_dialog"]["voice_alert_enabled"] = enabled
+                with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"Save voice_alert_enabled failed: {e}")
+
+    def _toggle_voice_alert(self):
+        self.is_voice_alert_enabled = not self.is_voice_alert_enabled
+        self._save_voice_alert_enabled(self.is_voice_alert_enabled)
+        self._update_voice_btn_style()
+        status_text = "开启" if self.is_voice_alert_enabled else "关闭"
+        self.lbl_status.setText(f"🔔 语音与弹窗预警已【{status_text}】 ({time.strftime('%H:%M:%S')})")
+
+    def _update_voice_btn_style(self):
+        if not hasattr(self, 'btn_voice_alert'):
+            return
+        if self.is_voice_alert_enabled:
+            self.btn_voice_alert.setText("🟢 语音预警")
+            self.btn_voice_alert.setStyleSheet("""
+                QPushButton {
+                    background-color: #102a1e;
+                    color: #00ff88;
+                    font-weight: bold;
+                    font-size: 9.5pt;
+                    border: 1px solid #00cc66;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                }
+                QPushButton:hover {
+                    background-color: #00cc66;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_voice_alert.setText("⚪ 语音静音")
+            self.btn_voice_alert.setStyleSheet("""
+                QPushButton {
+                    background-color: #24242e;
+                    color: #8e8e93;
+                    font-weight: bold;
+                    font-size: 9.5pt;
+                    border: 1px solid #444455;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                }
+                QPushButton:hover {
+                    background-color: #333344;
+                    color: #ffffff;
+                }
+            """)
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = False):
+        """【全端联动定位】在表格中高亮并居中滚动到指定股票代码"""
+        if not code or not hasattr(self, 'table'):
+            return
+        c = str(code).strip().zfill(6)
+        for row in range(self.table.rowCount()):
+            code_item = self.table.item(row, 0)
+            if code_item and code_item.text().strip().zfill(6) == c:
+                self.table.selectRow(row)
+                self.table.scrollToItem(code_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                self.lbl_status.setText(f"🎯 已自动定位信号标的: {c} ({time.strftime('%H:%M:%S')})")
+                name_item = self.table.item(row, 1)
+                n = name_item.text().strip() if name_item else c
+                self._broadcast_link_stock(c, n)
+                break
+
+    def _check_and_notify_slice_highlights(self, filtered_records: List[Dict[str, Any]], time_slice: str):
+        """【时间片重点标的与异动自动挖掘通知：每个时间切片精选 3-5 个核心标的】"""
+        if not getattr(self, "is_voice_alert_enabled", True):
+            return
+
+        try:
+            from ats.alert_notifier import AlertNotifier
+            notifier = AlertNotifier.get_instance()
+        except Exception:
+            return
+
+        if not filtered_records:
+            return
+
+        # 筛选当前时间片内评分 >= 85.0 分、未炸板、按综合动能排序精选的前 3~5 个核心标的
+        candidates = []
+        for r in filtered_records:
+            score = _safe_float(r.get("momentum_score", 0.0))
+            if score >= 85.0 and not r.get("is_broken", False):
+                candidates.append(r)
+            if len(candidates) >= 5: # 精选 3~5 个
+                break
+
+        for idx, top_cand in enumerate(candidates, 1):
+            c = str(top_cand.get("code", "")).zfill(6)
+            n = str(top_cand.get("name", c))
+            score = _safe_float(top_cand.get("momentum_score", 88.0))
+            tier = str(top_cand.get("tier_tag", ""))
+            desc = str(top_cand.get("pattern_desc", ""))
+            advice = str(top_cand.get("entry_advice", ""))
+            
+            reason = f"【{time_slice}精选#{idx}】{tier} | {desc} | {advice}"
+            notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
 
     def _update_kpi_display(self, s: Dict[str, Any]):
+        self._last_market_summary = s
         zt_cnt = s.get("zt_count", 0)
         max_b = s.get("max_boards", 0)
         multi_b = s.get("multi_boards_count", 0)
@@ -800,8 +947,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         s_phase = s.get("sentiment_phase", "⚖️ 均衡博弈期")
         s_defense = s.get("defense_status", "")
         is_avalanche = s.get("is_avalanche", False)
+        up_cnt = s.get("up_cnt", 0)
+        down_cnt = s.get("down_cnt", 0)
 
-        self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家")
+        if up_cnt > 0 or down_cnt > 0:
+            self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家 (<b>{up_cnt}</b>涨/<b>{down_cnt}</b>跌)")
+        else:
+            self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家")
+
         self.lbl_kpi_ladder.setText(f"👑 连板: <b>{multi_b}</b> 家 (最高 <b>{max_b}</b> 板)")
         
         # 炸板率恶化时的防猎高亮警示
@@ -822,6 +975,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if is_avalanche:
             self.lbl_status.setStyleSheet("color: #ff3344; font-weight: bold; background-color: #330000; padding: 2px 6px; border-radius: 3px;")
             self.lbl_status.setText(f"🚨 触发全局防猎熔断: {s_defense}")
+            # 触发退潮雪崩全局语音播报
+            if getattr(self, "is_voice_alert_enabled", True):
+                try:
+                    now_ts = time.time()
+                    if now_ts - getattr(self, "_last_avalanche_voice_ts", 0.0) > 300.0:
+                        self._last_avalanche_voice_ts = now_ts
+                        from ats.alert_notifier import AlertNotifier
+                        AlertNotifier.get_instance().notify_special_signal("000001", "全市场退潮", f"全市场退潮雪崩，炸板率{100.0-rate:.0f}%, 严禁开仓执行止损", score=99.0, parent=self)
+                except Exception:
+                    pass
 
     def _on_top_leader_clicked(self):
         """点击顶部空间龙头按钮：立即联动切股并在表格中高亮定位"""

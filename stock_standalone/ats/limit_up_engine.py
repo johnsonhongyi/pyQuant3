@@ -951,13 +951,35 @@ class LimitUpEngine:
 
         return results
 
-    def get_market_limit_up_summary(self, date_str: Optional[str] = None) -> Dict[str, Any]:
+    def get_market_limit_up_summary(self, date_str: Optional[str] = None, current_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
-        生成指定日期或实时的全市场涨停概览核心 KPI (涨停家数、连板家数、炸板家数、封板率、最高板、平均封流比等)
+        生成指定日期或实时的全市场情绪概览核心 KPI (涨跌家数、恐慌杀跌数、封板率、最高板、平均封流比、防猎熔断状态)
         """
         date_str = date_str or time.strftime("%Y-%m-%d")
         with self._cache_lock:
             records = self._current_live_records if (date_str == time.strftime("%Y-%m-%d") and self._current_live_records) else self._history_daily_records.get(date_str, [])
+
+        # 全市场宏观广度数据分析 (从 5500+ 全量个股 DataFrame 中提取)
+        up_cnt = 0
+        down_cnt = 0
+        flat_cnt = 0
+        panic_down_cnt = 0 # 跌幅 <= -5% 的恐慌踩踏个股数
+        limit_down_cnt = 0 # 跌停个股数
+        median_pct = 0.0
+
+        if current_df is not None and not current_df.empty:
+            try:
+                pct_col = 'percent' if 'percent' in current_df.columns else ('pct' if 'pct' in current_df.columns else None)
+                if pct_col:
+                    s_pct = pd.to_numeric(current_df[pct_col], errors='coerce').fillna(0.0)
+                    up_cnt = int((s_pct > 0.0).sum())
+                    down_cnt = int((s_pct < 0.0).sum())
+                    flat_cnt = int((s_pct == 0.0).sum())
+                    panic_down_cnt = int((s_pct <= -5.0).sum())
+                    limit_down_cnt = int((s_pct <= -9.5).sum())
+                    median_pct = round(float(s_pct.median()), 2)
+            except Exception as e:
+                logger.debug(f"宏观情绪广度提取异常: {e}")
 
         if not records:
             return {
@@ -970,7 +992,16 @@ class LimitUpEngine:
                 "multi_boards_count": 0,
                 "avg_seal_circ_ratio": 0.0,
                 "total_seal_amount_yi": 0.0,
-                "top_leader": "--"
+                "top_leader": "--",
+                "up_cnt": up_cnt,
+                "down_cnt": down_cnt,
+                "panic_down_cnt": panic_down_cnt,
+                "limit_down_cnt": limit_down_cnt,
+                "median_pct": median_pct,
+                "sentiment_phase": "⚖️ 均衡博弈期",
+                "sentiment_score": 50.0,
+                "defense_status": "大盘整理中",
+                "is_avalanche": False
             }
 
         zt_count = sum(1 for r in records if r.get("is_limit_up", False))
@@ -991,26 +1022,28 @@ class LimitUpEngine:
         top_leader_name = top_leaders[0]["name"] if top_leaders else (records[0]["name"] if records else "")
         top_leader_str = f"{top_leader_name} ({max_boards}板)" if (top_leaders and max_boards >= 2) else (top_leader_name if top_leader_name else "--")
 
-        # ── 💡 市场情绪退潮感知与全局防猎指数 (Market Sentiment & Avalanche Index) ──
-        if total_attempts >= 10 and seal_rate < 45.0:
+        # ── 💡 深度全市场情绪退潮与防猎感知指数 (Deep Market Sentiment & Avalanche Index) ──
+        # 综合考量：1. 封板率与炸板数; 2. 5500股红绿比; 3. 恐慌踩踏家数(panic_down_cnt); 4. 跌停数
+        is_avalanche = False
+        if (total_attempts >= 10 and seal_rate < 45.0) or (down_cnt >= 3800 and panic_down_cnt >= 150) or limit_down_cnt >= 20:
             sentiment_phase = "🚨 情绪雪崩退潮"
             sentiment_score = 15.0
-            defense_status = "🚨 极度退潮雪崩: 大面积炸板杀跌，触发全局防猎熔断，强制禁止开仓，只执行止损！"
+            defense_status = f"🚨 全市场退潮雪崩 (下跌{down_cnt}家 | 恐慌踩踏{panic_down_cnt}家 | 炸板率{100.0-seal_rate:.0f}%), 触发全局防猎熔断, 强制禁止开仓, 严守止损!"
             is_avalanche = True
-        elif seal_rate < 60.0 or (broken_count >= 20 and broken_count >= zt_count * 0.6):
+        elif seal_rate < 60.0 or (down_cnt >= 3000 and down_cnt > up_cnt * 1.8) or panic_down_cnt >= 80:
             sentiment_phase = "⚠️ 退潮分歧期"
             sentiment_score = 38.0
-            defense_status = "🟠 分歧退潮: 炸板激增，防冲高回落与尾盘跳水，严禁盲目追高"
+            defense_status = f"🟠 市场分歧退潮 (下跌{down_cnt}家 | 炸板率{100.0-seal_rate:.0f}%), 谨防一致性回落与尾盘跳水, 严禁追高"
             is_avalanche = False
-        elif seal_rate >= 80.0 and zt_count >= 30:
+        elif (seal_rate >= 80.0 and zt_count >= 30) or (up_cnt >= 3500 and limit_down_cnt <= 2):
             sentiment_phase = "🔥 极度亢奋期"
             sentiment_score = 90.0
-            defense_status = "🟢 进攻顺风: 主力做多情绪高涨，封板强劲，跟随龙头突破"
+            defense_status = f"🟢 进攻顺风 (上涨{up_cnt}家 | 封板率{seal_rate:.0f}%), 主力做多情绪高涨, 顺势跟随龙头主升"
             is_avalanche = False
         else:
             sentiment_phase = "⚖️ 均衡博弈期"
             sentiment_score = 65.0
-            defense_status = "🟡 结构分化: 重个股轻大盘，低吸与突破并存"
+            defense_status = f"🟡 结构分化 (涨{up_cnt}/跌{down_cnt}), 重个股轻大盘, 严格控制仓位"
             is_avalanche = False
 
         return {
@@ -1026,6 +1059,11 @@ class LimitUpEngine:
             "top_leader": top_leader_str,
             "top_leader_code": top_leader_code,
             "top_leader_name": top_leader_name,
+            "up_cnt": up_cnt,
+            "down_cnt": down_cnt,
+            "panic_down_cnt": panic_down_cnt,
+            "limit_down_cnt": limit_down_cnt,
+            "median_pct": median_pct,
             "sentiment_phase": sentiment_phase,
             "sentiment_score": sentiment_score,
             "defense_status": defense_status,
