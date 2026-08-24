@@ -73,18 +73,36 @@ class IntradayStrategyEngine:
 
             stocks_cache = data.get("stocks", {})
             for c_clean, s_data in stocks_cache.items():
-                state = self._get_stock_state(c_clean, float(s_data.get("open_price", 0.0)))
-                state["open_price"] = float(s_data.get("open_price", state["open_price"]))
-                state["max_price"] = float(s_data.get("max_price", state["max_price"]))
-                state["min_price"] = float(s_data.get("min_price", state["min_price"]))
-                state["high_am"] = float(s_data.get("high_am", state["high_am"]))
+                raw_op = float(s_data.get("open_price", 0.0))
+                state = self._get_stock_state(c_clean, raw_op)
+                state["open_price"] = raw_op if raw_op > 1.0 else state["open_price"]
+                
+                # 清洗非交易时段的伪时间快照 (如 00:00~09:14 或 >15:05 的非盘中脏快照)
+                raw_snaps = s_data.get("time_snapshots", {})
+                clean_snaps = {}
+                if isinstance(raw_snaps, dict):
+                    for t_k, s_v in raw_snaps.items():
+                        t_5 = str(t_k).strip()[:5]
+                        if "09:15" <= t_5 <= "15:05" and isinstance(s_v, dict):
+                            clean_snaps[t_5] = s_v
+                state["time_snapshots"] = clean_snaps
+
+                if clean_snaps:
+                    snap_highs = [float(v.get("high", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("high", v.get("price", 0.0))) > 1.0]
+                    snap_lows = [float(v.get("low", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("low", v.get("price", 0.0))) > 1.0]
+                    state["max_price"] = max(snap_highs) if snap_highs else float(s_data.get("max_price", state["open_price"]))
+                    state["min_price"] = min(snap_lows) if snap_lows else float(s_data.get("min_price", state["open_price"]))
+                else:
+                    state["max_price"] = state["open_price"]
+                    state["min_price"] = state["open_price"]
+
+                state["high_am"] = float(s_data.get("high_am", state["max_price"]))
                 state["remaining_ratio"] = float(s_data.get("remaining_ratio", state["remaining_ratio"]))
                 state["triggered_rules"] = set(s_data.get("triggered_rules", []))
                 state["execution_logs"] = s_data.get("execution_logs", [])
                 state["manual_scores"] = s_data.get("manual_scores", {})
                 state["node_custom_params"] = s_data.get("node_custom_params", {})
                 state["node_locked_params"] = s_data.get("node_locked_params", {})
-                state["time_snapshots"] = s_data.get("time_snapshots", {})
 
                 # 重构 signals 列表
                 sigs_raw = s_data.get("signals", [])
@@ -105,7 +123,7 @@ class IntradayStrategyEngine:
                     except Exception as e_sig:
                         logger.debug(f"还原 SignalPoint 异常: {e_sig}")
 
-            logger.info(f"✅ 成功从磁盘加载 {len(stocks_cache)} 只标的的分时节点持久化缓存 ({today_str})")
+            logger.info(f"✅ 成功从磁盘加载并清洗 {len(stocks_cache)} 只标的的分时节点持久化缓存 ({today_str})")
             return True
         except Exception as e:
             logger.error(f"❌ 加载分时策略持久化缓存异常: {e}")
@@ -465,15 +483,15 @@ class IntradayStrategyEngine:
 
         # 通用新股/未指定发行价标准档位
         if open_price >= 467.0:
-            return ("乐观档", st_id, "trend_hold")
+            return ("乐观档", "strategy_b_new_stock_trend_hold", "trend_hold")
         elif open_price >= 412.0:
-            return ("乐观下沿", st_id, "standard")
+            return ("乐观下沿", "strategy_a_new_stock_batch_sell", "standard")
         elif open_price >= 336.0:
-            return ("中性档", st_id, "standard")
+            return ("中性档", "strategy_a_new_stock_batch_sell", "standard")
         elif open_price >= 280.0:
-            return ("中性下沿", st_id, "decelerated")
+            return ("中性下沿", "strategy_a_new_stock_batch_sell", "decelerated")
         else:
-            return ("保守档", st_id, "hold_rebound")
+            return ("保守档", "strategy_a_new_stock_batch_sell", "hold_rebound")
 
     def get_all_target_codes(self) -> List[str]:
         """获取所有 JSON 策略配置中指定的目标股票代码列表（去除重复与格式化）"""
@@ -507,36 +525,48 @@ class IntradayStrategyEngine:
         return all_codes[0] if all_codes else "688826"
 
     def get_strategy_by_id(self, strategy_id: str) -> Optional[Dict[str, Any]]:
-        """按 strategy_id 获取对应的策略字典"""
+        """按 strategy_id 获取对应的策略字典 (支持向下兼容别名与标的代码)"""
         for st in self.strategies:
             if st.get("id") == strategy_id:
                 return st
+        if strategy_id in ("strategy_a_new_stock_batch_sell", "strategy_a"):
+            for st in self.strategies:
+                if "688826" in st.get("id", "") or "batch" in st.get("id", ""):
+                    return st
+        if strategy_id in ("strategy_b_new_stock_trend_hold", "strategy_b"):
+            for st in self.strategies:
+                if "hold" in st.get("id", "") or "688835" in st.get("id", ""):
+                    return st
         return None
 
     def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
-        """根据股票代码 code 或开盘价与条件自动选择对应策略 (上市首日 T=0 专属策略，上市次日 T+1 及以后自动切通用普通股策略)"""
+        """根据股票代码 code 或开盘价与条件自动选择对应策略 (优先匹配专属标的策略，未指定时路由到通用日常或新股策略)"""
         today_str = datetime.now().strftime("%Y-%m-%d")
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
 
-            # 1. 检查是否有前一个交易日的新股首日定盘记录 (如果存在历史首日记录且 date < today_str，次日自动切通用普通股策略)
-            closing_scorecards = self.load_listing_closing_scorecards()
-            if c_clean in closing_scorecards:
-                rec = closing_scorecards[c_clean]
-                rec_date = str(rec.get("date", rec.get("listing_date", "")))
-                if rec_date and rec_date < today_str:
-                    # 上市次日 T+1 自动切换为【通用日常分时阶梯策略】
-                    for st in self.strategies:
-                        if st.get("id") == "strategy_c_daily_surge_ladder":
-                            return st
-
-            # 2. 上市首日 T=0：匹配专属新股策略 (例如 688826)
+            # 1. 优先匹配专属标的策略 (例如 688826、688835 等)
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
                 if isinstance(target_codes, list) and any(c_clean == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in target_codes if tc and str(tc).strip() not in ("", "000000")):
                     return st
                 if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6) and str(target_code).strip() not in ("", "000000"):
+                    return st
+
+            # 2. 检查是否有历史新股首日定盘记录且已过首日
+            closing_scorecards = self.load_listing_closing_scorecards()
+            if c_clean in closing_scorecards:
+                rec = closing_scorecards[c_clean]
+                rec_date = str(rec.get("date", rec.get("listing_date", "")))
+                if rec_date and rec_date < today_str:
+                    for st in self.strategies:
+                        if st.get("id") == "strategy_c_daily_surge_ladder":
+                            return st
+
+            # 3. 对于普通日常个股，默认自动路由到通用日常分时阶梯策略
+            for st in self.strategies:
+                if st.get("id") == "strategy_c_daily_surge_ladder":
                     return st
 
             # 3. 对于普通日常个股（未在专属新股列表中指定），默认自动路由到通用日常分时阶梯策略
@@ -549,14 +579,12 @@ class IntradayStrategyEngine:
         if strat_id == "strategy_b_new_stock_trend_hold" and not is_b_conditions_met:
             strat_id = "strategy_a_new_stock_batch_sell"
 
+        found = self.get_strategy_by_id(strat_id)
+        if found:
+            return found
+
         for st in self.strategies:
-            if st.get("id") == strat_id:
-                return st
-        for st in self.strategies:
-            if st.get("id") == "strategy_c_daily_surge_ladder":
-                return st
-        for st in self.strategies:
-            if st.get("id") == "strategy_a_new_stock_batch_sell":
+            if "stock_spec" in st:
                 return st
         return self.strategies[0] if self.strategies else {}
 
@@ -689,6 +717,11 @@ class IntradayStrategyEngine:
         node_locked_params = state.setdefault("node_locked_params", {})
         custom_params = state.get("node_custom_params", {})
 
+        # 清除 time_snapshots 中非正常交易时间戳
+        invalid_keys = [k for k in list(time_snapshots.keys()) if str(k).strip()[:5] < "09:15" or str(k).strip()[:5] > "15:05"]
+        for k in invalid_keys:
+            time_snapshots.pop(k, None)
+
         op = open_price if (open_price and open_price > 1.0) else 0.0
         if op <= 1.0 and not df_intraday.empty:
             first_bar_open = float(df_intraday.iloc[0].get("open", 0.0))
@@ -697,9 +730,15 @@ class IntradayStrategyEngine:
         if op <= 1.0:
             op = state.get("open_price", 0.0)
 
-        # 1. 遍历 df_intraday 的所有分钟行
+        # 1. 纯净计算今日分时极值与遍历 df_intraday 的所有分钟行
+        intraday_max = op
+        intraday_min = op if op > 1.0 else 999999.0
+        intraday_high_am = op
+
         for idx_row, (time_idx, row) in enumerate(df_intraday.iterrows()):
             clean_t = self._clean_time_str(str(time_idx))
+            if clean_t < "09:15" or clean_t > "15:05":
+                continue
 
             p = float(row.get("close", row.get("trade", row.get("price", 0.0))))
             if p <= 0:
@@ -725,15 +764,20 @@ class IntradayStrategyEngine:
                 "amount": amt_val
             }
 
+            intraday_max = max(intraday_max, h_val, p)
             if clean_t < "13:00":
-                state["high_am"] = max(state.get("high_am", p), h_val, p)
-            state["max_price"] = max(state.get("max_price", p), h_val, p)
-            if l_val > 1.0:
-                cur_min = state.get("min_price", p)
-                state["min_price"] = min(cur_min, l_val, p) if cur_min > 1.0 else min(l_val, p)
+                intraday_high_am = max(intraday_high_am, h_val, p)
+            if l_val > 1.0 and (p <= 5.0 or l_val >= p * 0.1):
+                intraday_min = min(intraday_min, l_val, p)
 
         if op > 1.0:
             state["open_price"] = op
+            intraday_max = max(intraday_max, op)
+            intraday_min = min(intraday_min, op)
+
+        state["max_price"] = intraday_max
+        state["min_price"] = intraday_min if intraday_min < 999998.0 else op
+        state["high_am"] = intraday_high_am
 
         # 2. 如果 node_locked_params 未填充或存在默认遗留值，利用 time_snapshots 精准复原 09:25 / 09:40 / 10:00 / 11:00 等节点！
         def get_snapshot_at_or_before(target_t: str, field: str, default_val: float) -> float:
@@ -950,12 +994,14 @@ class IntradayStrategyEngine:
         strat_type = current_strat.get("strategy_type", "") if current_strat else ""
         target_newstock_codes = self.get_all_target_codes()
         has_stock_spec = bool(current_strat and ("stock_spec" in current_strat or current_strat.get("schema_version") == "v1.0-unified"))
-        is_daily_strategy = (
-            strat_type in ("daily_surge", "general", "daily")
-            or "daily" in strat_id
-            or "surge" in strat_id
-            or (not has_stock_spec and c_clean not in target_newstock_codes)
-        )
+        
+        # 只要当前策略含有 stock_spec 并且是新股标的，就属于新股上市专属时序评估
+        if has_stock_spec and (c_clean in target_newstock_codes or "new_stock" in strat_id or strat_type == "new_stock" or "laser" in strat_id or "688826" in strat_id):
+            is_daily_strategy = False
+        elif strat_type in ("daily_surge", "general", "daily") or "strategy_c" in strat_id:
+            is_daily_strategy = True
+        else:
+            is_daily_strategy = not has_stock_spec
 
         clean_t = self._clean_time_str(current_time_str)
 
@@ -1296,17 +1342,17 @@ class IntradayStrategyEngine:
                 cur_ch_ratio = (cur_p5 / max_p) if max_p > 0 else 1.0
                 observed_val = f"现价:{cur_p5:.2f}元 (收盘/最高: {cur_ch_ratio*100:.1f}%)"
 
-                if (cur_ch_ratio >= 0.95 or cur_p5 >= max_p * 0.98) and cur_p5 >= vwap_val:
+                if (cur_ch_ratio >= 0.92 or cur_p5 >= max_p * 0.95) and cur_p5 >= vwap_val:
                     judgment = "强"
                     auto_score = 9.5
-                    remarks = "尾盘放量抢筹逼近日内最高价，资金做多坚决"
-                elif cur_ch_ratio >= 0.88 or cur_p5 >= vwap_val:
+                    remarks = "尾盘放量抢筹反弹上穿VWAP均线并逼近日内最高价，做多坚决"
+                elif cur_ch_ratio >= 0.85 or cur_p5 >= vwap_val:
                     judgment = "中"
-                    auto_score = 6.5
-                    remarks = "尾盘平稳维持守住均线，按计划管理持仓"
+                    auto_score = 7.0
+                    remarks = "尾盘平稳维持守住均线，走势良好，按计划管理持仓"
                 else:
                     judgment = "弱"
-                    auto_score = 3.0
+                    auto_score = 3.5
                     remarks = "尾盘放量跳水破位，建议清仓规避隔夜风险"
 
             elif idx == 6: # 15:00 收盘结构与持仓管理 (校准收盘价)
@@ -1320,11 +1366,11 @@ class IntradayStrategyEngine:
                 if (cur_ch_ratio >= 0.90 or cur_p6 >= cur_op) and cur_p6 >= vwap_val:
                     judgment = "强"
                     auto_score = 9.5
-                    remarks = "收盘站稳分时均线之上且形态良好，持仓结构健康"
+                    remarks = "收盘站稳分时均线之上且逼近日高，低点抬升反弹结构健康"
                 elif cur_ch_ratio >= 0.80 or cur_p6 >= vwap_val * 0.98:
                     judgment = "中"
-                    auto_score = 6.5
-                    remarks = "平稳收盘守住核心区间，形态结构正常"
+                    auto_score = 7.0
+                    remarks = "平稳收盘守住核心支撑区间，形态结构正常"
                 else:
                     judgment = "弱"
                     auto_score = 3.5
@@ -1479,10 +1525,10 @@ class IntradayStrategyEngine:
 
             else: # 14:50 ~ 15:00
                 current_status_diagnosis = f"当前处于【收盘持仓决策阶段】。综合加权得分 {total_score_rounded:.2f} 分，形态判定【{pattern}】。"
-                if close_high_ratio >= 0.92 and total_score_rounded >= 7.5:
-                    action_execution_text = f"【操作建议 🌙 强势留仓】全天结构强势，综合评分达 {total_score_rounded:.2f} 分({pattern})！可保留仓位过夜，关注次日开盘竞价！"
+                if (close_high_ratio >= 0.90 or price >= vwap_val) and (total_score_rounded >= 7.0 or price >= open_price):
+                    action_execution_text = f"【操作建议 🌙 强势留仓】全天低点逐步抬升且尾盘放量反弹上穿VWAP均线，收盘稳健 (综合评分 {total_score_rounded:.2f}分 【{pattern}】)！建议保留底仓/过夜持股，关注次日溢价！"
                 else:
-                    action_execution_text = f"【操作建议 🚪 纪律防守】走势平淡或走弱 (评分 {total_score_rounded:.2f}分 < 7.5)，建议按交易纪律在收盘前降低仓位或锁定胜果。"
+                    action_execution_text = f"【操作建议 🚪 纪律防守】走势平淡或走弱 (评分 {total_score_rounded:.2f}分 < 7.0)，建议按交易纪律在收盘前降低仓位或锁定胜果。"
 
         else:
             # === 新股上市首日专属 实操指引体系 ===
@@ -1648,7 +1694,7 @@ class IntradayStrategyEngine:
                 continue
 
             cond_mode = rule.get("condition_mode", "all")
-            if cond_mode != "all" and cond_mode != action_mode:
+            if cond_mode not in ("all", action_mode, "standard", "") and action_mode != "trend_hold":
                 continue
 
             is_triggered = False

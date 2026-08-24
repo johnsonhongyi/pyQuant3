@@ -942,6 +942,35 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(gp_col, 1, gp_style))
             painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
 
+        # 📅 多日分时 (2d / 3d / 5d) 各交易日垂直虚线分割线与日期角标标注
+        if self.period_mode in ["2d", "3d", "5d"] and len(times) > 1:
+            dates_list = []
+            if "date" in df_view.columns:
+                dates_list = list(df_view["date"].astype(str))
+            else:
+                for t in times:
+                    parts = str(t).split()
+                    dates_list.append(parts[0] if len(parts) > 1 else str(t)[:10])
+
+            prev_d = None
+            for idx_t, d_cur in enumerate(dates_list):
+                if prev_d is not None and d_cur != prev_d:
+                    dx = time_to_x(idx_t)
+                    painter.setPen(QPen(QColor("#2d3748"), 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(dx), int(margin_top), int(dx), int(margin_top + chart_h))
+                    
+                    # 日期角标
+                    d_short = d_cur[-5:] if len(d_cur) >= 5 else d_cur
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#8899bb")))
+                    painter.drawText(int(dx + 4), int(margin_top + 14), d_short)
+                elif prev_d is None and d_cur:
+                    d_short = d_cur[-5:] if len(d_cur) >= 5 else d_cur
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#8899bb")))
+                    painter.drawText(int(margin_left + 4), int(margin_top + 14), d_short)
+                prev_d = d_cur
+
         # 绘制 VWAP 均价线 (金黄虚线)
         if len(vwaps) > 1:
             path_vwap = QPainterPath()
@@ -987,11 +1016,12 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
             painter.drawText(margin_left + chart_w + 3, int(y_vwap + 3), f"VWAP:{vwaps[-1]:.2f}")
 
-        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag
+        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应防遮挡 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
             times_raw = list(df_view.index.astype(str))
             times_5 = [t[-5:] if len(t) >= 5 else t for t in times_raw]
 
+            sig_drawn_slots = {}
             for sig in self.signals:
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
                 if sig_p <= 0 or sig_p > max_valid_price:
@@ -1001,9 +1031,10 @@ class SBCChartCanvas(QWidget):
                 action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
                 is_buy = "buy" in action_type or "买" in action_type
                 prefix = "🟢 买" if is_buy else "🔴 卖"
-                border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
-                bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
-                fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
+                border_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
+                bg_color = QColor(10, 32, 18, 185) if is_buy else QColor(36, 12, 16, 185) # 半透明毛玻璃
+                fg_color = QColor("#ffffff") # 高对比度清晰白字
+                dot_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
 
                 y_s = price_to_y(sig_p)
 
@@ -1023,30 +1054,186 @@ class SBCChartCanvas(QWidget):
 
                 if idx_s >= 0:
                     x_s = time_to_x(idx_s)
-                    painter.setPen(QPen(border_color, 1, Qt.PenStyle.DashLine))
-                    painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
-                    painter.setPen(QPen(QColor("#ffffff"), 1.5))
-                    painter.setBrush(QBrush(border_color))
-                    painter.drawEllipse(int(x_s - 4), int(y_s - 4), 8, 8)
-
                     lbl_text = f"{prefix}:{sig_p:.2f}"
-                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
-                    tw_k = fm.horizontalAdvance(lbl_text) + 8
+                    tw_k = fm.horizontalAdvance(lbl_text) + 10
                     th_k = fm.height() + 4
-                    tag_x = int(max(margin_left, min(margin_left + chart_w - tw_k, x_s - tw_k / 2)))
-                    tag_y = int(max(margin_top, min(margin_top + chart_h - th_k, y_s - th_k / 2)))
 
-                    painter.setPen(QPen(border_color, 1))
+                    # 智能自适应放置在价格曲线上方或下方，并支持错层排布避让
+                    slot_cnt = sig_drawn_slots.get(idx_s, 0)
+                    sig_drawn_slots[idx_s] = slot_cnt + 1
+
+                    if is_buy:
+                        target_y = y_s + 10 + slot_cnt * (th_k + 4)
+                        if target_y + th_k > margin_top + chart_h - 4:
+                            target_y = y_s - th_k - 10 - slot_cnt * (th_k + 4)
+                    else:
+                        target_y = y_s - th_k - 10 - slot_cnt * (th_k + 4)
+                        if target_y < margin_top + 4:
+                            target_y = y_s + 10 + slot_cnt * (th_k + 4)
+
+                    tag_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_s - tw_k / 2 + (slot_cnt % 2) * 8)))
+                    tag_y = int(max(margin_top + 2, min(margin_top + chart_h - th_k - 2, target_y)))
+
+                    # 1. 绘制垂直贯穿虚线与引线
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 100), 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
+
+                    # 2. 从标签中心向实际成交价连接精巧微引线
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 180), 1, Qt.PenStyle.SolidLine))
+                    painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_k / 2), int(tag_y + th_k if tag_y < y_s else tag_y))
+
+                    # 3. 实际成交价处的精巧圆点
+                    painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                    painter.setBrush(QBrush(dot_color))
+                    painter.drawEllipse(int(x_s - 3), int(y_s - 3), 6, 6)
+
+                    # 4. 半透明高对比度圆角胶囊
+                    painter.setPen(QPen(border_color, 1.2))
                     painter.setBrush(QBrush(bg_color))
                     painter.drawRoundedRect(tag_x, tag_y, tw_k, th_k, 3, 3)
-                    painter.setPen(QPen(fg_color))
-                    painter.drawText(tag_x + 4, tag_y + th_k - 4, lbl_text)
 
-        # 缩放状态提示
-        if self._is_zoomed():
-            zoom_tip = f"🔍 局部放大: {len(df_view)}/{len(self.df_intraday)} [右键重置]"
-            painter.setFont(QFont("Microsoft YaHei", 8))
+                    # 5. 高对比度白字
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(tag_x + 5, tag_y + th_k - 4, lbl_text)
+
+        # 🌟 快捷键 R 自适应策略测算浮动 HUD (分时图自适应折行)
+        if getattr(self, 'strategy_eval_result', None):
+            res_strat = self.strategy_eval_result
+            is_matched = res_strat.get("is_matched", False)
+            strat_period = str(res_strat.get("period", self.period_mode)).upper()
+            if is_matched:
+                score_v = res_strat.get("score", 0)
+                entry_p = float(res_strat.get("entry_price", 0.0))
+                stop_p = float(res_strat.get("stop_loss", 0.0))
+                tgt_p1 = float(res_strat.get("target_price_1", 0.0))
+                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
+                pat_name = str(res_strat.get("pattern_name", ""))
+                pat_str = f"·{pat_name}" if pat_name else ""
+                hud_text = f"🎯 [R键测算·{strat_period}·{ch_cn}{pat_str}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
+                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, chart_h, hud_text, is_matched=True)
+            else:
+                fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
+                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
+                hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
+                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, chart_h, hud_text, is_matched=False)
+
+    def _draw_adaptive_hud_box(
+        self,
+        painter: QPainter,
+        margin_left: int,
+        margin_top: int,
+        chart_w: int,
+        main_h: int,
+        hud_text: str,
+        is_matched: bool = True
+    ):
+        """
+        绘制自适应折行 HUD 胶囊卡片：
+        根据当前 chart_w 视图宽度智能换行，绝不横向溢出，支持多行排版、半透明毛玻璃与高对比度边框
+        """
+        if not hud_text:
+            return
+
+        font = QFont("Microsoft YaHei", 8, QFont.Weight.Bold if is_matched else QFont.Weight.Normal)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+
+        # 动态计算最大允许宽度 (为左右留出边距，最大不超过 chart_w 的 85% 且不超过 480px)
+        max_box_w = max(180, min(int(chart_w * 0.85), 480))
+        max_text_w = max(140, max_box_w - 20)
+
+        # 智能分行：优先按 ' | ' 与 '] ' 语义断句
+        lines = []
+        if fm.horizontalAdvance(hud_text) <= max_text_w:
+            lines = [hud_text]
+        else:
+            # 语义切分 tokens
+            raw_segments = hud_text.split(" | ")
+            tokens = []
+            for s_idx, seg in enumerate(raw_segments):
+                if s_idx == 0 and "] " in seg:
+                    p1, p2 = seg.split("] ", 1)
+                    tokens.append(p1 + "]")
+                    tokens.append(p2)
+                else:
+                    tokens.append(seg)
+
+            cur_line = ""
+            for tok in tokens:
+                if not cur_line:
+                    if fm.horizontalAdvance(tok) > max_text_w:
+                        # 字符级强制切分
+                        sub_cur = ""
+                        for ch in tok:
+                            if fm.horizontalAdvance(sub_cur + ch) <= max_text_w:
+                                sub_cur += ch
+                            else:
+                                if sub_cur:
+                                    lines.append(sub_cur)
+                                sub_cur = ch
+                        if sub_cur:
+                            cur_line = sub_cur
+                    else:
+                        cur_line = tok
+                else:
+                    sep = " | " if (not cur_line.endswith("]") and not tok.startswith("[")) else " "
+                    cand_line = cur_line + sep + tok
+                    if fm.horizontalAdvance(cand_line) <= max_text_w:
+                        cur_line = cand_line
+                    else:
+                        lines.append(cur_line)
+                        if fm.horizontalAdvance(tok) > max_text_w:
+                            sub_cur = ""
+                            for ch in tok:
+                                if fm.horizontalAdvance(sub_cur + ch) <= max_text_w:
+                                    sub_cur += ch
+                                else:
+                                    if sub_cur:
+                                        lines.append(sub_cur)
+                                    sub_cur = ch
+                            cur_line = sub_cur
+                        else:
+                            cur_line = tok
+            if cur_line:
+                lines.append(cur_line)
+
+        if not lines:
+            lines = [hud_text]
+
+        line_h = fm.height() + 3
+        actual_max_w = max(fm.horizontalAdvance(ln) for ln in lines)
+        box_w = min(max_box_w, actual_max_w + 18)
+        box_h = len(lines) * line_h + 10
+
+        hud_x = int(margin_left + chart_w - box_w - 6)
+        hud_y = int(margin_top + main_h - box_h - 6)
+
+        # 边界越界保护
+        hud_x = max(int(margin_left + 6), hud_x)
+        hud_y = max(int(margin_top + 6), hud_y)
+
+        # 半透明毛玻璃背景
+        if is_matched:
+            border_col = QColor("#38BDF8")
+            bg_col = QColor(14, 42, 58, 225)
+            text_col = QColor("#38BDF8")
+        else:
+            border_col = QColor("#94A3B8")
+            bg_col = QColor(20, 24, 34, 220)
+            text_col = QColor("#CBD5E1")
+
+        painter.setPen(QPen(border_col, 1.2))
+        painter.setBrush(QBrush(bg_col))
+        painter.drawRoundedRect(hud_x, hud_y, box_w, box_h, 4, 4)
+
+        # 逐行绘制
+        painter.setPen(QPen(text_col))
+        for r_idx, ln_str in enumerate(lines):
+            draw_y = hud_y + 6 + (r_idx + 1) * line_h - 4
+            painter.drawText(hud_x + 9, int(draw_y), ln_str)
+
     def _paint_kline(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
         df_view, start_i, end_i = self._get_visible_slice()
         if df_view.empty:
@@ -1612,7 +1799,7 @@ class SBCChartCanvas(QWidget):
                 painter.setPen(QPen(col))
                 painter.drawText(int(margin_left + chart_w + 3), int(adj_y + 3), text)
 
-        # 9. 🌟 绘制 SBC 买卖信号 (精准对齐对应 K 棒 Pin 标与悬浮 Tag，不画右侧多余横线)
+        # 9. 🌟 绘制 SBC 买卖信号 (自适应智能避让 K 线实体 + 半透明毛玻璃 + 高对比度清晰设计)
         if self.signals:
             times_k = [str(t).strip() for t in df_view.index]
             last_k_time = times_k[-1] if times_k else ""
@@ -1641,9 +1828,10 @@ class SBCChartCanvas(QWidget):
                 action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
                 is_buy = "buy" in action_type or "买" in action_type
                 prefix = "🟢 买" if is_buy else "🔴 卖"
-                border_color = QColor("#00ff88") if is_buy else QColor("#ff5555")
-                bg_color = QColor("#122a18") if is_buy else QColor("#2a1215")
-                fg_color = QColor("#66ffaa") if is_buy else QColor("#ff6666")
+                border_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
+                bg_color = QColor(10, 32, 18, 185) if is_buy else QColor(36, 12, 16, 185) # 半透明毛玻璃
+                fg_color = QColor("#ffffff") # 高对比度清晰白字
+                dot_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
 
                 y_s = k_to_y(sig_p)
 
@@ -1662,38 +1850,53 @@ class SBCChartCanvas(QWidget):
 
                 if 0 <= idx_k < n:
                     x_k = k_to_x(idx_k)
-
-                    painter.setPen(QPen(border_color, 1, Qt.PenStyle.DotLine))
-                    painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
-
-                    painter.setPen(QPen(QColor("#ffffff"), 1.5))
-                    painter.setBrush(QBrush(border_color))
-                    painter.drawEllipse(int(x_k - 4), int(y_s - 4), 8, 8)
+                    y_hi_k = k_to_y(highs[idx_k])
+                    y_lo_k = k_to_y(lows[idx_k])
 
                     lbl_text = f"{prefix}:{sig_p:.2f}"
-                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
-                    tw_k = fm.horizontalAdvance(lbl_text) + 8
+                    tw_k = fm.horizontalAdvance(lbl_text) + 10
                     th_k = fm.height() + 4
 
-                    x_offset = 0
-                    if idx_k in sig_drawn_slots:
-                        prev_y, prev_count = sig_drawn_slots[idx_k]
-                        if abs(y_s - prev_y) < (th_k + 4):
-                            x_offset = (tw_k + 6) if (prev_count % 2 == 1) else -(tw_k + 6)
-                        sig_drawn_slots[idx_k] = (y_s, prev_count + 1)
+                    # 智能自适应放置在 K 棒上方或下方，避开蜡烛柱实体与影线
+                    slot_cnt = sig_drawn_slots.get(idx_k, 0)
+                    sig_drawn_slots[idx_k] = slot_cnt + 1
+
+                    if is_buy:
+                        target_y = y_lo_k + 8 + slot_cnt * (th_k + 4)
+                        if target_y + th_k > margin_top + main_h - 4:
+                            target_y = y_hi_k - th_k - 8 - slot_cnt * (th_k + 4)
                     else:
-                        sig_drawn_slots[idx_k] = (y_s, 1)
+                        target_y = y_hi_k - th_k - 8 - slot_cnt * (th_k + 4)
+                        if target_y < margin_top + 4:
+                            target_y = y_lo_k + 8 + slot_cnt * (th_k + 4)
 
-                    tag_kx = int(max(margin_left, min(margin_left + chart_w - tw_k, x_k - tw_k / 2 + x_offset)))
-                    tag_ky = int(max(margin_top, min(margin_top + main_h - th_k, y_s - th_k / 2)))
+                    x_offset = (slot_cnt % 2) * 8
+                    tag_kx = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_k - tw_k / 2 + x_offset)))
+                    tag_ky = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, target_y)))
 
-                    painter.setPen(QPen(border_color, 1))
+                    # 1. 绘制垂直贯穿虚线
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
+
+                    # 2. 从标签框连接到实际成交价的精巧微引线
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 180), 1, Qt.PenStyle.SolidLine))
+                    painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_k / 2), int(tag_ky + th_k if tag_ky < y_s else tag_ky))
+
+                    # 3. 实际成交价处的精巧圆点
+                    painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                    painter.setBrush(QBrush(dot_color))
+                    painter.drawEllipse(int(x_k - 3), int(y_s - 3), 6, 6)
+
+                    # 4. 半透明高对比度圆角胶囊背景
+                    painter.setPen(QPen(border_color, 1.2))
                     painter.setBrush(QBrush(bg_color))
                     painter.drawRoundedRect(tag_kx, tag_ky, tw_k, th_k, 3, 3)
 
+                    # 5. 高对比度白字
                     painter.setPen(QPen(fg_color))
-                    painter.drawText(tag_kx + 4, tag_ky + th_k - 4, lbl_text)
+                    painter.drawText(tag_kx + 5, tag_ky + th_k - 4, lbl_text)
 
         # 10. 顶部通道标题与参数标注 (两行结构化展示)
         painter.setPen(QPen(QColor("#ffd700"), 1))
@@ -1770,41 +1973,21 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#10B981")))
                     painter.drawText(int(margin_left + chart_w - 95), int(y_tgt1 - 3), f"💎目标1:{tgt_p1:.2f}")
 
-                # 11.5 K线主图右下角 HUD 浮动诊断条 (位于K线区右下角，在成交量柱上方，零遮挡)
+                # 11.5 K线主图右下角 HUD 浮动诊断条 (自动根据视图宽度自适应折行)
                 ch_cn = str(res_strat.get("channel_type_cn", "通道"))
                 pat_name = str(res_strat.get("pattern_name", ""))
                 pat_str = f"·{pat_name}" if pat_name else ""
                 hud_text = f"🎯 [R键测算·{strat_period}·{ch_cn}{pat_str}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
-                painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
-                fm_hud = painter.fontMetrics()
-                hud_w = fm_hud.horizontalAdvance(hud_text) + 16
-                hud_h = 22
-                hud_x = int(margin_left + chart_w - hud_w - 6)
-                hud_y = int(margin_top + main_h - hud_h - 6)
-                painter.setPen(QPen(QColor("#38BDF8"), 1))
-                painter.setBrush(QBrush(QColor(14, 42, 56, 225)))
-                painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
-                painter.setPen(QPen(QColor("#38BDF8")))
-                painter.drawText(hud_x + 8, hud_y + 15, hud_text)
+                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, main_h, hud_text, is_matched=True)
             else:
-                # 未命中时的浮动提示条 (K线主图右下角)
+                # 未命中时的浮动提示条 (自动根据视图宽度自适应折行)
                 fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
                 ch_cn = str(res_strat.get("channel_type_cn", "通道"))
                 hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
-                painter.setFont(QFont("Microsoft YaHei", 8))
-                fm_hud = painter.fontMetrics()
-                hud_w = min(int(chart_w * 0.8), fm_hud.horizontalAdvance(hud_text) + 16)
-                hud_h = 22
-                hud_x = int(margin_left + chart_w - hud_w - 6)
-                hud_y = int(margin_top + main_h - hud_h - 6)
-                painter.setPen(QPen(QColor("#94A3B8"), 1))
-                painter.setBrush(QBrush(QColor(20, 20, 30, 215)))
-                painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 3, 3)
-                painter.setPen(QPen(QColor("#CBD5E1")))
-                painter.drawText(hud_x + 8, hud_y + 15, hud_text)
+                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, main_h, hud_text, is_matched=False)
 
 
-VALID_SBC_PERIODS = ["1m", "2d", "3d", "5m", "15m", "30m", "60m", "day", "week", "month"]
+VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "5m", "15m", "30m", "60m", "day", "week", "month"]
 
 
 class SBCIntradayChartDialog(QWidget):
@@ -1847,13 +2030,14 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title = QLabel(f"📊 {self.code} {resolve_stock_name(self.code)}")
         self.lbl_title.setStyleSheet("font-size: 9pt; font-weight: bold; color: #00ff88;")
 
-        # 周期切换按钮组: [1日分时] [2日分时] [3日分时] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
+        # 周期切换按钮组: [1日分时] [2日分时] [3日分时] [5日分时] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
         self._current_period_mode = "1m"
         self.btn_group_period = QButtonGroup(self)
         periods = [
             ("1日分时", "1m"),
             ("2日分时", "2d"),
             ("3日分时", "3d"),
+            ("5日分时", "5d"),
             ("5分K", "5m"),
             ("30分K", "30m"),
             ("60分K", "60m"),
@@ -1969,6 +2153,7 @@ class SBCIntradayChartDialog(QWidget):
         # 4. 底部提示
         self.lbl_info = QLabel("💡 提示: 独立窗口支持【主窗口智能磁吸吸附】与脱离自由全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
+        self.lbl_info.setWordWrap(True)
         layout.addWidget(self.lbl_info)
 
         # 5. 30 分钟定时物理落盘与退出刷盘策略 (交易时段 30 分钟落盘一次，关闭窗口落盘；非交易时段只落盘一次)
@@ -2298,7 +2483,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def rotate_period(self, step: int = 1):
         """环形顺时针/逆时针轮转切换 SBC 周期"""
-        period_list = ["1m", "2d", "3d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "2d", "3d", "5d", "5m", "30m", "60m", "day", "week", "month"]
         curr = getattr(self, "_current_period_mode", "1m").lower()
         if curr not in period_list:
             curr = "1m"
@@ -2311,7 +2496,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
-        period_list = ["1m", "2d", "3d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "2d", "3d", "5d", "5m", "30m", "60m", "day", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
             self.set_period_mode(new_mode)
@@ -2744,8 +2929,8 @@ class SBCIntradayChartDialog(QWidget):
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
 
-        if mode in ["2d", "3d"]:
-            days = 2 if mode == "2d" else 3
+        if mode in ["2d", "3d", "5d"]:
+            days = 2 if mode == "2d" else (3 if mode == "3d" else 5)
             df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
             if not df_multi.empty:
                 if op <= 1.0:
@@ -3650,6 +3835,7 @@ class IntegratedTradingStrategyPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.engine = IntradayStrategyEngine.get_instance()
+        self.tdx_fetcher = TDXRealtimeFetcher.get_instance()
         self.code = "688826"
         self._is_updating = False
         self._init_ui()
@@ -4189,22 +4375,43 @@ class IntegratedTradingStrategyPanel(QWidget):
         issue_p = float(spec.get("issue_price", open_price * 0.5 if open_price > 0 else 100.0))
         float_mv_yi = float(spec.get("float_mv_yi", 14.24))
 
-        max_p = state.get("max_price", price)
-        min_p = state.get("min_price", price)
+        # 获取昨日真实 OHLC (昨开、昨高、昨低、昨收)
+        y_ohlc = self.tdx_fetcher.get_yesterday_ohlc(code) if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher else {}
+        y_open = y_ohlc.get("open", 0.0)
+        y_high = y_ohlc.get("high", 0.0)
+        y_low = y_ohlc.get("low", 0.0)
+        y_close = y_ohlc.get("close", last_close if (last_close and last_close > 0) else 0.0)
+        if y_close <= 0 and last_close and last_close > 0:
+            y_close = last_close
+
+        # 今日真实最高最低校准 (优先使用传入快照与今日分时校验后的极值，杜绝昨日极值残留)
+        cur_snap_h = high_price if (high_price and high_price > 0) else price
+        cur_snap_l = low_price if (low_price and low_price > 0) else price
+        max_p = state.get("max_price", cur_snap_h)
+        min_p = state.get("min_price", cur_snap_l)
+        if cur_snap_h > 0 and (max_p <= 0 or max_p > cur_snap_h * 1.15 or max_p < cur_snap_h * 0.85):
+            max_p = cur_snap_h
+        if cur_snap_l > 0 and (min_p <= 0 or min_p < cur_snap_l * 0.85 or min_p > cur_snap_l * 1.15):
+            min_p = cur_snap_l
 
         red = "#ff5555"
         gold = "#ffd700"
         cyan = "#38bdf8"
         green = "#00ff88"
 
+        # 格式化昨日关键位对比片段
+        y_open_str = f" | 昨开: <font color='{gold}'><b>{y_open:.2f}元</b></font>" if y_open > 0 else ""
+        y_hl_str = f" | 昨高: <font color='{gold}'><b>{y_high:.2f}元</b></font> / 昨低: <font color='{gold}'><b>{y_low:.2f}元</b></font>" if (y_high > 0 and y_low > 0) else ""
+
         if is_daily_strategy:
-            lc_str = f"<font color='{red}'><b>{last_close:.2f} 元</b></font>" if (last_close and last_close > 0) else f"<font color='{red}'><b>{open_price:.2f} 元</b></font>"
-            op_pct_str = f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font> ({((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0) else f"开盘: <font color='{red}'><b>{open_price:.2f} 元</b></font>"
+            lc_val = y_close if y_close > 0 else (last_close if (last_close and last_close > 0) else open_price)
+            lc_str = f"<font color='{red}'><b>{lc_val:.2f} 元</b></font>" if lc_val > 0 else f"<font color='{red}'><b>{open_price:.2f} 元</b></font>"
+            op_pct_str = f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font> ({((open_price-lc_val)/lc_val*100):+.2f}%)" if lc_val > 0 else f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font>"
             sbc_html = (
                 f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
                 f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
-                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str})<br/>"
-                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>)<br/>"
+                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str}{y_open_str})<br/>"
+                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>{y_hl_str})<br/>"
                 f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.2f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
                 f"【冲高卖出目标 (+3%~+5%)】: <font color='{red}'><b>{open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元</b></font> (冲高分批止盈 30%)<br/>"
                 f"【破分时均线止损/减仓】: <font color='{red}'><b>{vwap:.2f} 元</b></font> (跌破分时均价线 VWAP 触发减仓)<br/>"
@@ -4213,11 +4420,12 @@ class IntegratedTradingStrategyPanel(QWidget):
                 f"</div>"
             )
         else:
+            y_ext_str = f" | 昨开: <font color='{gold}'><b>{y_open:.2f}元</b></font> / 昨收: <font color='{gold}'><b>{y_close:.2f}元</b></font>" if (y_open > 0 and y_close > 0) else ""
             sbc_html = (
                 f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
                 f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
-                f"【开盘基准】: <font color='{red}'><b>{open_price:.2f} 元</b></font> (基准参考线已锚定 | 发行价: <font color='{gold}'><b>{issue_p:.2f}元</b></font>)<br/>"
-                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>)<br/>"
+                f"【开盘基准】: <font color='{red}'><b>{open_price:.2f} 元</b></font> (基准参考线已锚定 | 发行价: <font color='{gold}'><b>{issue_p:.2f}元</b></font>{y_ext_str})<br/>"
+                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>{y_hl_str})<br/>"
                 f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.1f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
                 f"【冲高卖出目标 (+10%)】: <font color='{red}'><b>{open_price*1.10:.2f} 元</b></font> (价格笼子限价卖出 50%)<br/>"
                 f"【临停触发目标 (+30%)】: <font color='{red}'><b>{open_price*1.30:.2f} 元</b></font> (复牌前挂单 1.28x=<font color='{red}'><b>{open_price*1.28:.2f}</b></font> 卖出 30%)<br/>"
