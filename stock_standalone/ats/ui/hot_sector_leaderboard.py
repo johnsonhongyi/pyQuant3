@@ -232,7 +232,7 @@ class TDXFetchLogDialog(QDialog):
         self._refresh_logs()
 
 
-class HotSectorLeaderboardDialog(QDialog, WindowMixin):
+class HotSectorLeaderboardDialog(QWidget, WindowMixin):
     """
     Top 3 强势板块龙头突击跟单看板窗口
     完全独立顶层运行，具备独立任务栏图标与原生暗黑纯黑主题
@@ -245,8 +245,9 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False) # 关闭独立子窗口不退出主进程
         self.setWindowTitle("🔥 Top 3 强势板块龙头突击跟单榜 (Hot Alpha Leaderboard)")
-        self.setMinimumWidth(880)
-        self.setMinimumHeight(460)
+        self.resize(1080, 560)
+        self.setMinimumWidth(320)
+        self.setMinimumHeight(150)
         self._is_updating = False
         self._is_restoring_sort = False
 
@@ -270,15 +271,12 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
         self.snap_timer = QTimer(self)
         self.snap_timer.setSingleShot(True)
-        self.snap_timer.setInterval(200)
+        self.snap_timer.setInterval(400)
         self.snap_timer.timeout.connect(self._detect_and_snap)
 
         # 1. 窗口置顶与外观
         self.stays_on_top = self._load_stays_on_top()
-        flags = self.windowFlags()
-        flags &= ~Qt.WindowType.Dialog
-        flags &= ~Qt.WindowType.Tool
-        flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -628,7 +626,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             scale = self._get_dpi_scale_factor()
             geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
             width = max(200, int(geom.width() / scale))
-            height = max(150, int(geom.height() / scale))
+            height = max(100, int(geom.height() / scale))
             x = int(geom.x() / scale)
             y = int(geom.y() / scale)
 
@@ -782,7 +780,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def _on_ui_timer_tick(self, force=False):
         """定时从主窗口提取 Top3 强势板块与 current_df 进行计算与渲染，非交易时段智能休眠"""
-        if self._is_updating:
+        if self._is_updating or getattr(self, '_is_dragging', False):
             return
 
         from ats.tdx_realtime_fetcher import is_trading_time, TDXRealtimeFetcher
@@ -1501,7 +1499,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-            self.snap_timer.start()
+            self.snap_timer.start(300)
             return
 
         screen = self.screen()
@@ -1509,7 +1507,7 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
             screen = QApplication.primaryScreen()
         screen_geo = screen.availableGeometry()
         win_geo = self.geometry()
-        margin = 35
+        margin = 20 # 调优为更自然的 20px 阈值，避免误吸
 
         snapped = False
         edge = None
@@ -1533,10 +1531,11 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
         if snapped:
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
-            self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=200, is_snap_feedback=True)
         else:
             self.anchor_edge = None
             self.normal_geometry = None
+            self._save_window_states(is_open=True)
 
     def hide_to_edge(self):
         if self.stays_on_top or not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
@@ -1591,6 +1590,10 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def _check_hover(self):
         if not self.isVisible() or self.stays_on_top:
+            return
+
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        if not self.anchor_edge and not self.is_hidden_state:
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -1686,8 +1689,6 @@ class HotSectorLeaderboardDialog(QDialog, WindowMixin):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.layout():
-            self.layout().setGeometry(self.rect())
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             if self.anchor_edge:
                 self.normal_geometry = self.geometry()
