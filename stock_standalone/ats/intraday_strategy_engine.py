@@ -233,10 +233,10 @@ class IntradayStrategyEngine:
             logger.error(f"保存新股首日收盘账本异常: {e}")
             return False
 
-    def save_intraday_cache_throttled(self, interval_sec: float = 60.0) -> bool:
+    def save_intraday_cache_throttled(self, interval_sec: float = 300.0) -> bool:
         """
-        【低频安全节流防抖持久化】
-        仅在发生实质变动 (_is_dirty) 且距上次写盘超过 interval_sec (默认60s) 时才写盘。
+        【低频安全节流防抖持久化（5分钟调度）】
+        仅在发生实质变动 (_is_dirty) 且距上次写盘超过 interval_sec (默认300s/5分钟) 时才写盘。
         无变动时 0 磁盘 I/O，有变动时确保盘中数据不会因系统意外崩溃而丢失。
         """
         if not getattr(self, "_is_dirty", False):
@@ -786,40 +786,40 @@ class IntradayStrategyEngine:
         return state
 
     def set_manual_node_score(self, code: str, node_id_or_idx: Any, score: float):
-        """设置某节点的人工打分覆盖并自动保存盘中持久化缓存"""
+        """设置某节点的人工打分覆盖并自动标记变动（由统一调度防抖持久化）"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["manual_scores"][str(node_id_or_idx)] = float(score)
         self.mark_dirty()
-        self.save_intraday_cache()
+        self.save_intraday_cache_throttled(interval_sec=5.0)
 
     def set_node_custom_param(self, code: str, node_id: str, value: float):
-        """设置某节点的校准价格或换手率参数并自动保存盘中持久化缓存"""
+        """设置某节点的校准价格或换手率参数并自动标记变动（由统一调度防抖持久化）"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         if "node_custom_params" not in state:
             state["node_custom_params"] = {}
         state["node_custom_params"][str(node_id)] = float(value)
         self.mark_dirty()
-        self.save_intraday_cache()
+        self.save_intraday_cache_throttled(interval_sec=5.0)
 
     def reset_node_custom_params(self, code: str):
-        """重置所有节点的校准参数、锁死参数与人工打分"""
+        """重置所有节点的校准参数、锁死参数与人工打分并自动标记变动"""
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["node_custom_params"] = {}
         state["node_locked_params"] = {}
         state["manual_scores"] = {}
         self.mark_dirty()
-        self.save_intraday_cache()
+        self.save_intraday_cache_throttled(interval_sec=5.0)
 
     def clear_stock_cache(self, code: str):
-        """【🧹 彻底清理单股缓存】清除该标的内存中的节点锁死状态、手动参数、时间快照与磁盘缓存"""
+        """【🧹 彻底清理单股缓存】清除该标的内存中的节点锁死状态、手动参数、时间快照并同步持久化"""
         c_clean = str(code).zfill(6)
         if c_clean in self.rule_state_map:
             self.rule_state_map.pop(c_clean, None)
         self.mark_dirty()
-        self.save_intraday_cache()
+        self.save_intraday_cache(force=True)
         logger.info(f"🧹 [IntradayStrategyEngine] 已强力清除标的 [{c_clean}] 的盘中状态与磁盘缓存！")
 
     def _clean_time_str(self, time_str: str) -> str:
@@ -1786,11 +1786,11 @@ class IntradayStrategyEngine:
         if clean_t >= "14:55" and open_price > 1.0 and not is_daily_strategy:
             self.save_listing_closing_scorecard(code, eval_result)
 
-        # 🕒 交易收盘后 (>=15:00) 统一持久化；盘中则启用 60 秒防抖低频节流持久化 (仅在 _is_dirty 时执行)
+        # 🕒 交易收盘后 (>=15:00) 统一持久化；盘中则启用 300 秒（5分钟）防抖低频节流持久化 (仅在 _is_dirty 时执行)
         if clean_t >= "15:00":
             self.save_intraday_cache(force=False)
         else:
-            self.save_intraday_cache_throttled(interval_sec=60.0)
+            self.save_intraday_cache_throttled(interval_sec=300.0)
 
         return eval_result
 

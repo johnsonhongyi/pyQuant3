@@ -1070,6 +1070,13 @@
     - [x] **WARN-4+5: 修复 `_db_query_cache` 与 `_platform_breakout_cache` 24×7 挂机内存膨胀**：在 `is_new_stock` 切股时统一 `clear()` 清理 DB 查询缓存、平台计算缓存与 Fibonacci 脏检查标记 `_fib_last_range`，防止长期运行切换数千只股票后字典无限增长。
     - [x] **语法校验与单元测试 100% 通过**：`py_compile` 语法编译通过，`pytest tests/test_signal_ledger.py` 全量 13 项单元测试 **100% PASSED**！
 
+## 2026-08-24 18:22
+- [x] **完善数据持久化统一调度体系：全系统 5 分钟统一节流持久化 + 收盘自动定盘持久化 + 程序退出安全落盘 (`ats/intraday_strategy_engine.py`, `tests/test_disk_io_and_cache_safety.py`)**：
+    - [x] **全局统一调度与 5 分钟节流阈值**：将 `save_intraday_cache_throttled` 默认间隔由 60 秒上调为 300 秒（5分钟），杜绝各股票（code）各自频繁触发物理写盘的存储压力。
+    - [x] **人工操作与单股票修改防抖合并**：重构 `set_manual_node_score`、`set_node_custom_param`、`reset_node_custom_params`，单次修改仅触发内存 `mark_dirty()` 并使用 5 秒防抖合并，多股票批量修改与连续参数调整自动归拢为一次持久化写盘。
+    - [x] **收盘与退出完备链路**：盘中无变动 0 磁盘 I/O；15:00 收盘时刻对变动数据统一持久化；主窗口 `ATSMainWindow.closeEvent`、各子窗口 `closeEvent` 及 `atexit` 注册回调确保系统正常/意外退出时数据绝对不丢失。
+    - [x] **自动化测试 100% 验证**：运行 `pytest tests/test_disk_io_and_cache_safety.py tests/test_favorites_and_styles.py tests/test_intraday_strategy_engine.py`，全量 20 项测试全部 **100% PASSED**！
+
 ## 2026-08-24 18:12
 - [x] **修复 ATS 外部终端物理联动 `link_stock` 中 `is_ths` 变量未定义导致联动报错的缺陷 (`ats/ui/main_window.py`, `tests/test_favorites_and_styles.py`)**：
     - [x] **根因分析**：在 `ATSMainWindow.link_stock` 物理联动派发分支中，判断条件直接引用了 `is_ths`，但之前仅定义了 `is_tdx` 而漏写了 `is_ths` 的提取，导致点击标的或信号广播时触发 `NameError: name 'is_ths' is not defined`。
