@@ -608,138 +608,92 @@ def get_dfcfw_rzrq_SHSZ2_(url=ct.DFCFW_RZYE2):
 
 def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
     data = {}
-    log.info("rzrq:%s"%(ct.DFCFW_RZYE))
-    # rzdata = cct.get_url_data(url)
-    # rzdata = cct.get_url_data_R(url,timeout=10)
+    log.info("rzrq:%s" % (ct.DFCFW_RZYE))
+    try:
+        rzdata = cct.get_url_data(url, timeout=10)
+        if not rzdata or len(rzdata) < 10:
+            log.warning("get_dfcfw_rzrq_SHSZ received empty or short response.")
+            return {'all': 0.0, 'sh': 0.0, 'sz': 0.0, 'dff': 0.0, 'shrz': 0.0, 'szrz': 0.0, 'tdate': '', 'is_partial': False}
 
-    rzdata = cct.get_url_data(url,timeout=10)
+        rz_re = re.search(r"\[.*?\]", rzdata, flags=0)
+        if not rz_re:
+            log.warning("get_dfcfw_rzrq_SHSZ could not find json array in response.")
+            return {'all': 0.0, 'sh': 0.0, 'sz': 0.0, 'dff': 0.0, 'shrz': 0.0, 'szrz': 0.0, 'tdate': '', 'is_partial': False}
 
+        rzdata_dic = json.loads(rz_re.group(0))
+        df = pd.DataFrame(rzdata_dic, columns=ct.dfcfw_rzye_col2022)
 
+        df.rename(columns={'RZYE': 'all'}, inplace=True)
+        df.rename(columns={'H_RZYE': 'sh'}, inplace=True)
+        df.rename(columns={'S_RZYE': 'sz'}, inplace=True)
+        df['DIM_DATE'] = df['DIM_DATE'].apply(lambda x: str(x)[:10] if pd.notnull(x) else '')
+        df = df.set_index('DIM_DATE')
 
+        import numpy as np
+        for co in ['sh', 'sz', 'all']:
+            if co in df.columns:
+                df[co] = pd.to_numeric(df[co], errors='coerce').apply(
+                    lambda x: round(float(x) / 1000 / 1000 / 100, 2) if pd.notnull(x) else np.nan
+                )
 
-    # rz_dic = re.findall('"data":([\D\d]+.}])', rzdata.encode('utf8'))[0]
-    # rz_dic = rz_dic.replace(';', '')
+        if len(df) > 0:
+            data1 = df.iloc[0]
+            data2 = df.iloc[1] if len(df) > 1 else data1
+            tdate = df.index[0]
 
-    # rzdata = rzdata.replace(':"-"',':0.1')
-    # rz_dic = re.findall('{"H_RZYE":[\D\d]+?}', rzdata)
+            # 1. 沪市数据提取与差额
+            sh1 = data1.get('sh', np.nan)
+            sh2 = data2.get('sh', np.nan)
+            if pd.isnull(sh1):
+                valid_sh = df['sh'].dropna()
+                sh1 = valid_sh.iloc[0] if len(valid_sh) > 0 else 0.0
+            if pd.isnull(sh2):
+                valid_sh = df['sh'].dropna()
+                sh2 = valid_sh.iloc[1] if len(valid_sh) > 1 else sh1
 
-    # #rzdata_dic=[eval(x) for x in rz_dic ]
+            shrz = round(float(sh1 - sh2), 2) if (pd.notnull(sh1) and pd.notnull(sh2)) else 0.0
 
-
-    '''
-    import json
-    import time,datetime
-    import os
-    import requests
-    import re
-     
-    session = requests.Session()
-    session.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'}
-    s1=session.get('http://data.eastmoney.com/kzz/')
-    a1=re.search("token=.*?&cmd",s1.text,flags=0)
-    token=a1.group(0).replace("token=","").replace("&cmd","")
-    time.sleep(0.1)
-    h1="http://dcfm.eastmoney.com/em_mutisvcexpandinterface/api/js/get?type=KZZ_LB2.0&token={0}&cmd=&st=STARTDATE&sr=-1&p=1&ps={1}&rt=52898794".format(token,"200")
-    s2=session.get(h1)
-    a2=re.search("\[.*?\]",s2.text,flags=0)
-    ar1=json.loads(a2.group(0))
-    ar2=[]
-    for q in ar1:
-        arr1={"BONDCODE":q["BONDCODE"],"SNAME":q["SNAME"],"STARTDATE":q["STARTDATE"],"CORRESCODE":q["CORRESCODE"],"CORRESNAME":q["CORRESNAME"],"SWAPSCODE":q["SWAPSCODE"],"SECURITYSHORTNAME":q["SECURITYSHORTNAME"],"GDYX_STARTDATE":q["GDYX_STARTDATE"]}
-        ar2.append(arr1)
-    print(len(ar2))
-    '''
-
-
-
-    # ct.DFCFW_RZYE2sh
-    # rzdata_dic=json.loads(rz_dic)
-
-    rz_re = re.search("\[.*?\]",rzdata,flags=0)
-    rzdata_dic= json.loads(rz_re.group(0))
-    
-    df=pd.DataFrame(rzdata_dic,columns=ct.dfcfw_rzye_col2022)
-   
-
-    # rzdata_list=(rzdata_dic['result']['data'])
-    # df=pd.DataFrame(rzdata_list,columns=ct.dfcfw_rzye_col2022)
-
-
-    # rzdata = rzdata.replace(':"-"',':0.1')
-    # rz_dic = re.findall('{"tdate"[\D\d]+?}', rzdata.encode('utf8'))
-    
-    # rzdict=[eval(x) for x in rz_dic ]
-    # df=pd.DataFrame(rzdict,columns=ct.dfcfw_rzye_columns)
-    # df.tdate=df.tdate.apply(lambda x: x[:10])
-    # df = df.set_index('tdate')
-    # df.index = pd.to_datetime(df.index,format='%Y-%m-%d')
-    # df.rename(columns={'rzye_hs': 'all'}, inplace=True)
-    # df.rename(columns={'rzye_h': 'sh'}, inplace=True)
-    # df.rename(columns={'rzye_s': 'sz'}, inplace=True)
-
-    df.rename(columns={'RZYE': 'all'}, inplace=True)
-    df.rename(columns={'H_RZYE': 'sh'}, inplace=True)
-    # df.rename(columns={'H_RQYL': 'sz'}, inplace=True)
-    df.rename(columns={'S_RZYE': 'sz'}, inplace=True)
-    df['DIM_DATE'] = df['DIM_DATE'].apply(lambda x:x[:10])
-    df=df.set_index('DIM_DATE')
-
-    for co in df.columns:
-        df[co] = df[co].apply(lambda x:round((x/1000/1000/100),2))
-    # df['all'] = df['all'].apply(lambda x:round((x/1000/1000/100),2))
-    # df['sh'] = df['sh'].apply(lambda x:round((x/1000/1000/100),2))
-    # df['sz'] = df['sz'].apply(lambda x:round((x/1000/1000/1),2))
-
-    # data=get_tzrq(url,today)
-    # yestoday = cct.last_tddate(1)
-    # log.debug(today)
-    # beforeyesterday =  cct.last_tddate(days=2)
-
-    def get_days_data(days=1,df=None):
-            rzrq_status = 1
-            # data=''
-            da = 0
-            i = 0
-            if len(df) > days:            
-                data2 = df.loc[df.index[days-1]]
+            # 2. 深市数据提取与差额 (针对早盘深市尚未更新时的智能平滑回退)
+            sz1_raw = data1.get('sz', np.nan)
+            is_partial = bool(pd.isnull(sz1_raw))
+            if is_partial:
+                # 深市最新一期尚未披露，平滑回退到上一期已知深市数据，今日深市增减记 0.0
+                valid_sz = df['sz'].dropna()
+                sz1 = valid_sz.iloc[0] if len(valid_sz) > 0 else 0.0
+                szrz = 0.0
             else:
-                data2 = ''
+                sz1 = sz1_raw
+                sz2 = data2.get('sz', np.nan)
+                if pd.isnull(sz2):
+                    valid_sz = df['sz'].dropna()
+                    sz2 = valid_sz.iloc[1] if len(valid_sz) > 1 else sz1
+                szrz = round(float(sz1 - sz2), 2) if (pd.notnull(sz1) and pd.notnull(sz2)) else 0.0
 
-            return data2
+            # 3. 两市合计与总增减
+            all1_raw = data1.get('all', np.nan)
+            if pd.isnull(all1_raw) or all1_raw == 0:
+                all1 = round(float(sh1 + sz1), 2)
+            else:
+                all1 = all1_raw
 
+            dff = round(float(shrz + szrz), 2)
 
+            data['all'] = round(float(all1), 2) if pd.notnull(all1) else 0.0
+            data['sh'] = round(float(sh1), 2) if pd.notnull(sh1) else 0.0
+            data['sz'] = round(float(sz1), 2) if pd.notnull(sz1) else 0.0
+            data['dff'] = dff
+            data['shrz'] = shrz
+            data['szrz'] = szrz
+            data['tdate'] = str(tdate)
+            data['is_partial'] = is_partial
+        else:
+            log.debug("df is None:%s" % (url))
+            data = {'all': 0.0, 'sh': 0.0, 'sz': 0.0, 'dff': 0.0, 'shrz': 0.0, 'szrz': 0.0, 'tdate': '', 'is_partial': False}
 
-    
-    # data = df.loc[yestoday]
-    # data2 = df.loc[beforeyesterday]
-    # log.info("data1:%s,data2:%s", data1, data2)
-    if len(df) > 0:
-        data1 = get_days_data(1,df)
-        data2 = get_days_data(2,df)
-        # print data1
-        
-        data['all'] = round(data1.loc['all'], 2)
-        data['sh'] = round(data1.loc['sh'], 2)
-        data['sz'] = round(data1.loc['sz'], 2)
-        # data['dff'] = round(data1.loc['all'] - data2.loc['all'], 2)
-        shdff = (data1.loc['sh'] - data2.loc['sh'])
-        szdff = (data1.loc['sz'] - data2.loc['sz'])
-        shdff = shdff if not str(shdff) == 'nan' else 0
-        szdff = szdff if not str(szdff) == 'nan' else 0
-        
-        data['dff'] = round(shdff+szdff, 2)
-        data['shrz'] = round(data1.loc['sh'] - data2.loc['sh'], 2)
-        data['szrz'] = round(data1.loc['sz'] - data2.loc['sz'], 2)
-    else:
-        log.debug("df is None:%s"%(url))
-        data['dff'] = 'error'
-        data['all'] = 0
-        data['sh'] = 0
-        data['sz'] = 0
-        data['shrz'] = 0
-        data['szrz'] = 0
-    if len(data) == 0:
-        log.error("Fund_f NO Url:%s" % url)
+    except Exception as e:
+        log.error("get_dfcfw_rzrq_SHSZ Exception: %s" % (e))
+        data = {'all': 0.0, 'sh': 0.0, 'sz': 0.0, 'dff': 0.0, 'shrz': 0.0, 'szrz': 0.0, 'tdate': '', 'is_partial': False}
+
     return data
 
 

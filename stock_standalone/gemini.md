@@ -1,3 +1,18 @@
+## 2026-08-24 03:38
+- [x] **修复 24*7 运行下两融数据 (rzrq) nan 异常、防高频抓取被封 (Ban IP)、隔日自动更新与早盘 nlow 数据误报警缺陷 (`singleAnalyseUtil.py`, `JSONData/fundflowUtil.py`, `JSONData/sina_data.py`)**：
+    - [x] **两融数据 (rzrq) 字段 nan 根治与深市智能平滑回退 (`JSONData/fundflowUtil.py`)**：
+        - 针对东财接口上交所（H_RZYE）常早于深交所（S_RZYE）披露导致的 `S_RZYE` 为 `null` 缺陷，实现智能平滑回退：深市未出时自动提取上一期已知深市有效值，深市差额记 `0.0`，合计按 `sh + sz` 动态汇总；
+        - 返回字典所有浮点数字段保证为有效 float，彻底根除 `nan`，并携带 `is_partial` 状态标记；
+    - [x] **24*7 运行防高频抓取被封 (Rate Limit) 与盘前隔日自适应更新 (`singleAnalyseUtil.py`)**：
+        - 引入 `last_rzrq_fetch_time` 请求冷却计时器（冷却间隔 $\ge 120\sim 300$ 秒），彻底消除因 `nan` 导致的盘中紧凑轮询每秒发起网络请求被东财封禁 IP 的致命 Bug；
+        - 在盘前准备阶段（8:40 ~ 9:15）自动触发最新两融数据更新，并在跨天检测与盘中以低频节流方式自动同步交易所最新披露数据；
+        - 优化两融打印格式化，健全百分比与深市待更新标识（`?*`）；
+    - [x] **早盘 nlow 数据误报警与缓存重构优化 (`JSONData/sina_data.py`, `singleAnalyseUtil.py`)**：
+        - 在 `now_int < 930`（开盘前及竞价初期）合理放宽 `zero_ratio > 0.3` 判定，避免早盘误报警与无效频繁重构缓存；
+        - 优化 `_sanitize_indicators`：移除交易时间硬编码短路，确保全天候及早盘盘前 `nlow` / `nhigh` 遇到 0.0 或 NaN 时依次通过 `low` $\rightarrow$ `open` $\rightarrow$ `close` 进行健康兜底；
+        - 加固 `singleAnalyseUtil.py` 中 `fibonacciCount` 与 `top_Max` 在早盘边界数据不足时的结构防御；
+    - [x] **全量自动化测试验证 100% PASS**。
+
 ## 2026-08-24 00:06
 - [x] **单实例无感唤醒升级：彻底移除实例切换弹窗，检测到已存后台实例时直接自动唤醒拉起并置顶至前台 (`webTools/window_manager/core.py`)**：
     - [x] **彻底消除 QMessageBox 切换确认弹窗**：
