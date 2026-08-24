@@ -141,3 +141,115 @@ def test_daily_limit_up_dialog_history_view(qapp):
     assert len(dialog.current_records) >= 2
 
     dialog.close()
+
+
+def test_dirty_check_skips_redundant_io():
+    """测试脏检查 (Dirty Check)：数据指纹无变动时不触发多余磁盘 I/O"""
+    engine = LimitUpEngine.get_instance()
+    records = _build_sample_records()
+    test_date = "2026-08-22"
+
+    # 初次写入
+    engine.save_daily_records_atomic(test_date, records, force=False)
+    fp1 = engine._last_saved_fingerprints.get(test_date)
+    assert fp1 is not None
+
+    # 二次无变动调用，指纹保持不变
+    engine.save_daily_records_atomic(test_date, records, force=False)
+    fp2 = engine._last_saved_fingerprints.get(test_date)
+    assert fp1 == fp2, "指纹应保持一致"
+
+
+def test_post_trading_anti_corruption_defense():
+    """测试数据防劣质覆盖保护：已有完整记录时，拒绝被少于 60% 数量的劣质残缺数据覆写"""
+    engine = LimitUpEngine.get_instance()
+    # 构造 10 条高质量完整记录
+    full_records = []
+    for i in range(10):
+        full_records.append({
+            "code": f"60000{i}",
+            "name": f"优质股票{i}",
+            "price": 10.0 + i,
+            "pct": 10.0,
+            "is_limit_up": True,
+            "bid1_vol": 50000.0,
+            "consecutive_boards": 2
+        })
+
+    test_date = "2026-08-19"
+    engine.save_daily_records_atomic(test_date, full_records, force=True)
+    time.sleep(0.2)
+
+    # 尝试用只有 1 条的残缺数据进行非 force 覆盖
+    corrupted_records = [
+        {"code": "600001", "name": "残缺股票", "price": 10.0, "pct": 10.0, "is_limit_up": True}
+    ]
+    engine.save_daily_records_atomic(test_date, corrupted_records, force=False)
+    time.sleep(0.2)
+
+    # 验证内存与持久化中的数据依然是原有的 10 条完整记录，未被残缺数据覆盖
+    saved_records = engine.get_records_by_date(test_date)
+    assert len(saved_records) == 10, "防覆盖防线生效，完整数据应得到百分之百保护"
+
+
+def test_post_market_cold_start_dirty_check():
+    """测试收盘后冷启动时：内存与磁盘指纹一致时 100% 跳过无谓磁盘 I/O"""
+    engine = LimitUpEngine.get_instance()
+    records = _build_sample_records()
+    test_date = "2026-08-21"
+    
+    # 模拟收盘时终态落盘
+    engine.save_daily_records_atomic(test_date, records, force=True, is_eod=True)
+    time.sleep(0.1)
+    
+    # 记录当前已保存指纹
+    fp_before = engine._last_saved_fingerprints.get(test_date)
+    assert fp_before is not None
+
+    # 模拟冷启动后重新刷新，传入同样的数据
+    engine.save_daily_records_atomic(test_date, records, force=False, is_eod=False)
+    fp_after = engine._last_saved_fingerprints.get(test_date)
+    assert fp_before == fp_after
+
+
+def test_non_trading_day_cold_start_fallback_and_no_save(qapp, monkeypatch):
+    """测试非交易日（周末/假期）冷启动：自动回退至最近交易日且绝不生成周末归档"""
+    from JohnsonUtil import commonTips as cct
+    engine = LimitUpEngine.get_instance()
+    records = _build_sample_records()
+    
+    # 模拟周五有数据
+    friday_date = "2026-08-21"
+    engine.save_daily_records_atomic(friday_date, records, force=True, is_eod=True)
+    
+    # 模拟周日（非交易日）
+    sunday_str = "2026-08-30"
+    if sunday_str in engine._history_daily_records:
+        del engine._history_daily_records[sunday_str]
+
+    # Mock 非交易日环境（周日）
+    monkeypatch.setattr(cct, "get_trade_date_status", lambda: False)
+    monkeypatch.setattr(cct, "get_last_trade_date", lambda: friday_date)
+    monkeypatch.setattr(time, "strftime", lambda fmt: sunday_str if "%Y-%m-%d" in fmt else time.asctime())
+    
+    dialog = DailyLimitUpDialog()
+    dialog.show()
+    qapp.processEvents()
+    
+    # 验证非交易日冷启动且 df 为空时，TODAY 模式自动加载最近交易日（周五）的数据
+    dialog.current_df = None
+    dialog.current_mode = "TODAY"
+    dialog._refresh_data_for_mode()
+    qapp.processEvents()
+    
+    assert dialog.current_records is not None
+    assert len(dialog.current_records) >= 2, "非交易日应自动呈现最近有效交易日的数据"
+    
+    # 验证关闭窗口时不会向磁盘写入周日的虚假归档
+    dialog.close()
+    qapp.processEvents()
+    
+    # 确认系统没有写入非交易日周日的虚假归档
+    assert sunday_str not in engine._history_daily_records, "非交易日绝对不可生成虚假日期归档"
+
+

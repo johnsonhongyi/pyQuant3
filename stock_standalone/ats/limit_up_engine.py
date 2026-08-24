@@ -284,6 +284,9 @@ class LimitUpEngine:
         self._last_loaded_date: Optional[str] = None
         self._is_loading_history = False
         
+        # 数据变动特征指纹缓存 {date_str: fingerprint_str}，实现数据无变动不落盘 (Dirty Check)
+        self._last_saved_fingerprints: Dict[str, str] = {}
+        
         # 内存中当前实时计算出的涨停标的列表
         self._current_live_records: List[Dict[str, Any]] = []
         self._last_scan_time: float = 0.0
@@ -321,17 +324,62 @@ class LimitUpEngine:
 
     def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False, is_eod: bool = False):
         """
-        【💾 安全原子持久化与交易后压缩打包】将指定日期的涨停分析记录原子落盘并压缩归档
+        【💾 安全原子持久化与交易后压缩打包】
+        1. 脏检查：仅当数据特征指纹发生变动时才执行落盘；
+        2. 质量防御：防空数据覆写，且收盘后/历史数据严禁被记录数严重缩水的残缺劣质数据覆盖；
+        3. 交易后终态保护：15:00 收盘后或显式 is_eod 时强制原子固化并高压 Gzip 压缩打包。
         :param date_str: 格式 YYYY-MM-DD
         :param records: 涨停记录字典列表
         :param force: 是否强制覆写
         :param is_eod: 是否为收盘/交易后终态归档 (End-of-Day)
         """
+        # 1. 防空数据检查
         if not date_str or not records:
+            logger.debug(f"[LimitUpEngine] 持久化请求被忽略: 空日期或空记录集 (date={date_str})")
             return
 
         with self._cache_lock:
-            # 更新内存字典
+            # 2. 交易后/收盘终态数据防残缺劣质覆盖保护
+            existing_records = self._history_daily_records.get(date_str, [])
+            if not existing_records:
+                disk_data = _safe_read_json_or_gz(f"{ARCHIVE_PREFIX}{date_str}.json.gz")
+                if isinstance(disk_data, list):
+                    existing_records = disk_data
+
+            # 若已有 5 条以上完整记录，且传入记录数严重缩水（少于已有记录数的 60%）且非显式 force：拒绝破坏性覆盖
+            if existing_records and len(existing_records) >= 5 and len(records) < len(existing_records) * 0.6 and not force:
+                logger.warning(
+                    f"🛡️ [数据防劣质覆盖保护] 拒绝覆写 {date_str}: "
+                    f"已有完整记录 {len(existing_records)} 条，传入仅 {len(records)} 条 (非 force 模式拒绝覆盖)"
+                )
+                return
+
+            # 3. 数据特征指纹变动脏检查 (Dirty Check)
+            try:
+                summary_tuples = [
+                    (
+                        r.get("code"),
+                        r.get("price"),
+                        r.get("pct"),
+                        r.get("bid1_vol"),
+                        r.get("consecutive_boards"),
+                        r.get("is_broken"),
+                        r.get("tier_tag")
+                    )
+                    for r in records
+                ]
+                current_fingerprint = str(hash(tuple(sorted(summary_tuples, key=lambda x: str(x[0])))))
+            except Exception:
+                current_fingerprint = str(time.time())
+
+            last_fp = self._last_saved_fingerprints.get(date_str)
+            # 若非强制保存、非交易后固化，且数据特征指纹未变动，直接跳过写盘
+            if not force and not is_eod and last_fp == current_fingerprint:
+                logger.debug(f"[LimitUpEngine] {date_str} 涨停天梯数据无变动 (DirtyCheck Passed)，跳过磁盘 I/O")
+                return
+
+            # 更新特征指纹与内存字典
+            self._last_saved_fingerprints[date_str] = current_fingerprint
             self._history_daily_records[date_str] = records
 
             # 异步后台线程执行文件 I/O，杜绝阻塞主线程 UI
@@ -1035,9 +1083,9 @@ class LimitUpEngine:
             strong_score = (
                 zt_count * 20.0 +
                 st["max_consecutive"] * 15.0 +
-                min(25.0, lat["pct"] * 1.5) +
-                min(15.0, lat["seal_to_circ_ratio"] * 2.0) +
-                (10.0 if (lat["dff2"] > 10.0 or lat["dff3"] > 20.0) else 0.0)
+                min(25.0, _safe_float(lat.get("pct", 0.0)) * 1.5) +
+                min(15.0, _safe_float(lat.get("seal_to_circ_ratio", 0.0)) * 2.0) +
+                (10.0 if (_safe_float(lat.get("dff2", 0.0)) > 10.0 or _safe_float(lat.get("dff3", 0.0)) > 20.0) else 0.0)
             )
             strong_score = round(min(100.0, max(20.0, strong_score)), 1)
 
