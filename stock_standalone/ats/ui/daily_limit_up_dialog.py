@@ -1076,7 +1076,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 4. 连板数
                 it_cons = NumericTableWidgetItem(f"{consecutive}板" if (consecutive >= 1 and r.get("is_limit_up")) else "--")
-                it_cons.setData(Qt.ItemDataRole.UserRole, consecutive if (consecutive >= 1 and r.get("is_limit_up")) else -999999999.0)
+                it_cons.setData(Qt.ItemDataRole.UserRole, consecutive if (consecutive >= 1 and r.get("is_limit_up")) else None)
                 it_cons.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if consecutive >= 3 and r.get("is_limit_up"):
                     it_cons.setForeground(QBrush(QColor("#ff55ff")))
@@ -1085,7 +1085,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.table.setItem(row_idx, col, it_cons); col += 1
 
                 # 5. 梯队分类
-                it_tier = QTableWidgetItem(tier_tag)
+                it_tier = NumericTableWidgetItem(tier_tag)
                 it_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if "冰点反身" in tier_tag:
                     it_tier.setForeground(QBrush(QColor("#00ffff"))) # 荧光亮青 (反身性万里挑一)
@@ -1175,14 +1175,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 7. 封单额(万)
                 it_seal_amt = NumericTableWidgetItem(f"{seal_amt_wan:,.0f}" if (seal_amt_wan > 0 and r.get("is_limit_up")) else "--")
-                it_seal_amt.setData(Qt.ItemDataRole.UserRole, seal_amt_wan if (seal_amt_wan > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_amt.setData(Qt.ItemDataRole.UserRole, seal_amt_wan if (seal_amt_wan > 0 and r.get("is_limit_up")) else None)
                 it_seal_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_seal_amt.setForeground(QBrush(color_seal))
                 self.table.setItem(row_idx, col, it_seal_amt); col += 1
 
                 # 8. 封流比%
                 it_seal_circ = NumericTableWidgetItem(f"{seal_to_circ:.2f}%" if (seal_to_circ > 0 and r.get("is_limit_up")) else "--")
-                it_seal_circ.setData(Qt.ItemDataRole.UserRole, seal_to_circ if (seal_to_circ > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_circ.setData(Qt.ItemDataRole.UserRole, seal_to_circ if (seal_to_circ > 0 and r.get("is_limit_up")) else None)
                 it_seal_circ.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if seal_to_circ >= 10.0 and r.get("is_limit_up"):
                     it_seal_circ.setForeground(QBrush(QColor("#ffd700")))
@@ -1192,7 +1192,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 9. 封成比%
                 it_seal_vol = NumericTableWidgetItem(f"{seal_to_vol:.1f}%" if (seal_to_vol > 0 and r.get("is_limit_up")) else "--")
-                it_seal_vol.setData(Qt.ItemDataRole.UserRole, seal_to_vol if (seal_to_vol > 0 and r.get("is_limit_up")) else -999999999.0)
+                it_seal_vol.setData(Qt.ItemDataRole.UserRole, seal_to_vol if (seal_to_vol > 0 and r.get("is_limit_up")) else None)
                 it_seal_vol.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_seal_vol); col += 1
 
@@ -1210,7 +1210,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 12. 成交额(亿)
                 it_amt = NumericTableWidgetItem(f"{amt_yi:.2f}" if amt_yi > 0 else "--")
-                it_amt.setData(Qt.ItemDataRole.UserRole, amt_yi if amt_yi > 0 else -999999999.0)
+                it_amt.setData(Qt.ItemDataRole.UserRole, amt_yi if amt_yi > 0 else None)
                 it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, col, it_amt); col += 1
 
@@ -1223,7 +1223,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 14. Rank
                 it_rank = NumericTableWidgetItem(str(rank_val) if rank_val < 999 else "--")
-                it_rank.setData(Qt.ItemDataRole.UserRole, rank_val if rank_val < 999 else 999999.0)
+                it_rank.setData(Qt.ItemDataRole.UserRole, rank_val if rank_val < 999 else None)
                 it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, col, it_rank); col += 1
 
@@ -1247,7 +1247,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.table.setItem(row_idx, col, it_rs); col += 1
 
                 # 18. 共振状态
-                it_res = QTableWidgetItem(resonance)
+                it_res = NumericTableWidgetItem(resonance)
                 it_res.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if resonance == "逆市抗跌":
                     it_res.setForeground(QBrush(QColor("#ff55ff")))
@@ -1263,7 +1263,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     self.table.setItem(row_idx, col, it_extra); col += 1
 
                 # 20. 所属板块 (严格放置在最右侧最后一列)
-                it_cat = QTableWidgetItem(category if category else "--")
+                it_cat = NumericTableWidgetItem(category if category else "--")
                 it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, col, it_cat); col += 1
         finally:

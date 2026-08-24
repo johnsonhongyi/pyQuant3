@@ -75,7 +75,7 @@ class TestDailyLimitUpDialog(unittest.TestCase):
             }
         ]
         dialog.current_records = mock_records
-        dialog.combo_time_slice.setCurrentIndex(0)
+        dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
         dialog.combo_tier_filter.setCurrentIndex(0)
         dialog.search_edit.clear()
         dialog._apply_filter()
@@ -107,17 +107,36 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog.table.setColumnWidth(0, 77)
         dialog._save_current_column_widths()
 
-        # 测试数值比较与 `--` 占位符排序稳定性
-        from ats.ui.styles import NumericTableWidgetItem
+        # 测试数值比较与 `--` 占位符在升序与降序下的排序稳定性 (有数据永远优先，无数据永远沉底)
+        from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
         from PyQt6.QtCore import Qt
-        it_val = NumericTableWidgetItem("26,740")
-        it_val.setData(Qt.ItemDataRole.UserRole, 26740.0)
-        it_dash = NumericTableWidgetItem("--")
-        it_dash.setData(Qt.ItemDataRole.UserRole, -999999999.0)
+        from PyQt6.QtWidgets import QTableWidget
 
-        # 降序比较断言: 26740 > --，即 not (it_val < it_dash)，it_dash < it_val 为 True
-        self.assertTrue(it_dash < it_val)
-        self.assertFalse(it_val < it_dash)
+        test_table = QTableWidget(4, 1)
+        test_table.setSortingEnabled(True)
+        it1 = NumericTableWidgetItem("126")
+        it1.setData(Qt.ItemDataRole.UserRole, 126.0)
+        it2 = NumericTableWidgetItem("--")
+        it2.setData(Qt.ItemDataRole.UserRole, None)
+        it3 = NumericTableWidgetItem("24,766")
+        it3.setData(Qt.ItemDataRole.UserRole, 24766.0)
+        it4 = NumericTableWidgetItem("--")
+        it4.setData(Qt.ItemDataRole.UserRole, -999999999.0)
+
+        test_table.setItem(0, 0, it1)
+        test_table.setItem(1, 0, it2)
+        test_table.setItem(2, 0, it3)
+        test_table.setItem(3, 0, it4)
+
+        # 1. 升序排序断言 (从小到大，-- 沉底在最后): 126 -> 24766 -> -- -> --
+        test_table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        asc_results = [test_table.item(r, 0).text() for r in range(4)]
+        self.assertEqual(asc_results, ["126", "24,766", "--", "--"])
+
+        # 2. 降序排序断言 (从大到小，-- 沉底在最后): 24766 -> 126 -> -- -> --
+        test_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+        desc_results = [test_table.item(r, 0).text() for r in range(4)]
+        self.assertEqual(desc_results, ["24,766", "126", "--", "--"])
 
         # 测试切换到极窄模式
         dialog.toggle_narrow_mode(True)
@@ -171,6 +190,62 @@ class TestDailyLimitUpDialog(unittest.TestCase):
 
         dialog.close()
 
+    def test_direction_aware_sorting_comprehensive(self):
+        """测试全维度升降序方向感知排序：无论升序还是降序，有数据的排在前面，无数据占位符(--)永远沉底在最下方"""
+        from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QTableWidget
+
+        # 模拟 5 只股票：2 只涨停有封单数据，1 只有小封单，2 只非涨停无封单(--)
+        test_rows = [
+            {"code": "000017", "seal_amt": "24,766", "seal_amt_val": 24766.0, "seal_circ": "7.18%", "seal_circ_val": 7.18},
+            {"code": "688356", "seal_amt": "--", "seal_amt_val": None, "seal_circ": "--", "seal_circ_val": None},
+            {"code": "002172", "seal_amt": "126", "seal_amt_val": 126.0, "seal_circ": "0.02%", "seal_circ_val": 0.02},
+            {"code": "920045", "seal_amt": "--", "seal_amt_val": None, "seal_circ": "--", "seal_circ_val": None},
+            {"code": "002412", "seal_amt": "3,363", "seal_amt_val": 3363.0, "seal_circ": "0.52%", "seal_circ_val": 0.52},
+        ]
+
+        table = QTableWidget(len(test_rows), 2)
+        table.setSortingEnabled(False)
+
+        for r_idx, r_data in enumerate(test_rows):
+            # Col 0: 封单额
+            it_amt = NumericTableWidgetItem(r_data["seal_amt"])
+            it_amt.setData(Qt.ItemDataRole.UserRole, r_data["seal_amt_val"])
+            table.setItem(r_idx, 0, it_amt)
+
+            # Col 1: 封流比
+            it_circ = NumericTableWidgetItem(r_data["seal_circ"])
+            it_circ.setData(Qt.ItemDataRole.UserRole, r_data["seal_circ_val"])
+            table.setItem(r_idx, 1, it_circ)
+
+        table.setSortingEnabled(True)
+
+        # 1. 封单额升序 (低到高 / 排序最低优先，对应用户图 2): 126 -> 3363 -> 24766 -> -- -> --
+        table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        asc_amt = [table.item(r, 0).text() for r in range(len(test_rows))]
+        self.assertEqual(asc_amt[:3], ["126", "3,363", "24,766"])
+        self.assertEqual(asc_amt[3:], ["--", "--"])
+
+        # 2. 封单额降序 (高到低 / 排序最高优先，对应用户图 3): 24766 -> 3363 -> 126 -> -- -> --
+        table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+        desc_amt = [table.item(r, 0).text() for r in range(len(test_rows))]
+        self.assertEqual(desc_amt[:3], ["24,766", "3,363", "126"])
+        self.assertEqual(desc_amt[3:], ["--", "--"])
+
+        # 3. 封流比升序 (低到高): 0.02% -> 0.52% -> 7.18% -> -- -> --
+        table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
+        asc_circ = [table.item(r, 1).text() for r in range(len(test_rows))]
+        self.assertEqual(asc_circ[:3], ["0.02%", "0.52%", "7.18%"])
+        self.assertEqual(asc_circ[3:], ["--", "--"])
+
+        # 4. 封流比降序 (高到低): 7.18% -> 0.52% -> 0.02% -> -- -> --
+        table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+        desc_circ = [table.item(r, 1).text() for r in range(len(test_rows))]
+        self.assertEqual(desc_circ[:3], ["7.18%", "0.52%", "0.02%"])
+        self.assertEqual(desc_circ[3:], ["--", "--"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -20,61 +20,138 @@ import pyqtgraph as pg
 logger = LoggerFactory.getLogger("qt_table_utils")
 
 class NumericTableWidgetItem(QTableWidgetItem):
-    """支持数值排序的表格项"""
-    def __init__(self, value: Any):
+    """
+    增强型支持数值与文本混合排序的表格项：
+    1. 自动感知表头排序方向 (AscendingOrder / DescendingOrder)；
+    2. 无论升序还是降序，有数据的单元格永远优先展示（升序从小到大，降序从大到小），无数据占位符 ('--', '', NaN, None) 永远沉底在表格最下方；
+    3. 支持 UserRole 高精度浮点值、千分位、百分比、正负号、括号后缀等混合文本的鲁棒解析。
+    """
+    def __init__(self, value: Any = None):
         self._raw_value = value
-        if isinstance(value, (int, float)):
+        if value is None:
+            super().__init__("--")
+        elif isinstance(value, (int, float)):
             super().__init__(str(value))
         else:
             super().__init__(str(value))
             try:
-                # 处理 "%", "+" 等干扰字符
-                text = str(value).replace('%', '').replace('+', '').strip()
+                text = str(value).replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
                 if '(' in text:
                     text = text.split('(')[0].strip()
-                self._raw_value = float(text)
+                if text and text not in ("-", "--", "---", "null", "None", "nan", "N/A", "未分类", "暂无"):
+                    self._raw_value = float(text)
             except (ValueError, TypeError):
                 self._raw_value = value
+
+    def _is_empty(self) -> bool:
+        """判定当前单元格是否为无数据/缺失值占位符"""
+        import math
+        u = self.data(Qt.ItemDataRole.UserRole)
+        if u is not None:
+            try:
+                f = float(u)
+                if not (math.isnan(f) or math.isinf(f)):
+                    if abs(f) >= 99999900:  # 兼容历史极值占位符
+                        return True
+                    return False
+            except (ValueError, TypeError):
+                pass
+        if hasattr(self, '_raw_value') and isinstance(self._raw_value, (int, float)):
+            if not (math.isnan(self._raw_value) or math.isinf(self._raw_value)):
+                if abs(self._raw_value) >= 99999900:
+                    return True
+                return False
+        t = self.text().strip()
+        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
+            return True
+        return False
+
+    def _get_numeric_value(self, item=None):
+        """提取单元格的真实数值，若为纯文本或空值则返回 None 或文本"""
+        import math, re
+        target = item if item is not None else self
+        if hasattr(target, '_is_empty') and target._is_empty():
+            return None
+
+        # 1. 优先使用 UserRole
+        u = target.data(Qt.ItemDataRole.UserRole)
+        if u is not None:
+            try:
+                f = float(u)
+                if not (math.isnan(f) or math.isinf(f)):
+                    if abs(f) >= 99999900:
+                        return None
+                    return f
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 检查 _raw_value
+        if hasattr(target, '_raw_value') and isinstance(target._raw_value, (int, float)):
+            if not (math.isnan(target._raw_value) or math.isinf(target._raw_value)):
+                if abs(target._raw_value) >= 99999900:
+                    return None
+                return float(target._raw_value)
+
+        # 3. 解析文本
+        t = target.text().strip()
+        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
+            return None
+
+        clean_t = t.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').replace('板', '').replace('分', '').strip()
+        if '(' in clean_t:
+            clean_t = clean_t.split('(')[0].strip()
+        num_re = r'[-+]?\d*\.?\d+'
+        m = re.search(num_re, clean_t)
+        if m:
+            try:
+                v = float(m.group())
+                if not (math.isnan(v) or math.isinf(v)):
+                    if abs(v) >= 99999900:
+                        return None
+                    return v
+            except Exception:
+                pass
+        return None
 
     def __lt__(self, other):
         if not isinstance(other, QTableWidgetItem):
             return super().__lt__(other)
-        
-        try:
-            val_self = self._get_numeric_value()
-            val_other = self._get_numeric_value(other)
-            
-            import math
-            is_num_self = isinstance(val_self, (int, float)) and not math.isnan(val_self)
-            is_num_other = isinstance(val_other, (int, float)) and not math.isnan(val_other)
 
-            if is_num_self and is_num_other:
-                return val_self < val_other
-            elif is_num_self:
-                return True
-            elif is_num_other:
-                return False
-        except Exception:
-            pass
-            
-        return super().__lt__(other)
+        # 检查所属表格的表头排序方向
+        is_descending = False
+        t = self.tableWidget() or (other.tableWidget() if isinstance(other, QTableWidgetItem) else None)
+        if t is not None:
+            header = t.horizontalHeader()
+            if header is not None and hasattr(header, 'sortIndicatorOrder'):
+                is_descending = (header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
 
-    def _get_numeric_value(self, item=None):
-        target = item if item is not None else self
-        if hasattr(target, '_raw_value') and isinstance(target._raw_value, (int, float)):
-            return target._raw_value
-        
-        text = target.text().replace('%', '').replace('+', '').strip()
-        if '(' in text:
-            text = text.split('(')[0].strip()
-        try:
-            val = float(text)
-            import math
-            if not math.isnan(val):
-                return val
-        except Exception:
-            pass
-        return text
+        empty_self = self._is_empty() if hasattr(self, '_is_empty') else (not self.text().strip() or self.text().strip() in ("-", "--", "---", "null", "None", "N/A"))
+        empty_other = other._is_empty() if hasattr(other, '_is_empty') else (not other.text().strip() or other.text().strip() in ("-", "--", "---", "null", "None", "N/A"))
+
+        # 核心规则：有数据的单元格永远优先于无数据单元格（无数据永远沉底在最下方）
+        if empty_self != empty_other:
+            if is_descending:
+                # 降序模式 (高到低)：有数据项必须大于无数据项 => self < other 返回 False (即 self 在 other 前面)
+                return empty_self
+            else:
+                # 升序模式 (低到高)：有数据项必须小于无数据项 => self < other 返回 True (即 self 在 other 前面)
+                return not empty_self
+
+        # 两者都无数据：保持文本字典序
+        if empty_self and empty_other:
+            return self.text() < other.text()
+
+        # 两者都有数据：优先进行高精度数值比较
+        v1 = self._get_numeric_value()
+        v2 = other._get_numeric_value() if hasattr(other, '_get_numeric_value') else self._get_numeric_value(other)
+
+        if v1 is not None and v2 is not None:
+            if v1 != v2:
+                return v1 < v2
+            return self.text() < other.text()
+
+        # 其中之一或两者为非数值文本：按字符串字典序比较
+        return self.text() < other.text()
 
 class EnhancedTableWidget(QTableWidget):
     """
