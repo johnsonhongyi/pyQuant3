@@ -302,15 +302,13 @@ class IntradayStrategyEngine:
         """
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
         if c_clean:
-            st = self.auto_select_strategy(0.0, code=c_clean)
-            if st and "stock_spec" in st:
-                return st["stock_spec"]
-
-        # 若未直接匹配，从全部策略中检索 target_codes 匹配
-        for st in self.strategies:
-            tc_list = [str(x).zfill(6) for x in st.get("target_codes", []) if str(x).strip()]
-            if c_clean in tc_list and "stock_spec" in st:
-                return st["stock_spec"]
+            for st in self.strategies:
+                target_codes = st.get("target_codes", [])
+                target_code = st.get("target_code", "")
+                tc_list = ["".join(filter(str.isdigit, str(x))).zfill(6) for x in target_codes if x and str(x).strip()]
+                t_single = "".join(filter(str.isdigit, str(target_code))).zfill(6) if target_code else ""
+                if (c_clean in tc_list or (t_single and c_clean == t_single)) and "stock_spec" in st:
+                    return st["stock_spec"]
 
         # 保底标准规格
         issue_p = 100.0
@@ -529,6 +527,11 @@ class IntradayStrategyEngine:
         for st in self.strategies:
             if st.get("id") == strategy_id:
                 return st
+        digits = "".join(filter(str.isdigit, str(strategy_id)))
+        if digits and len(digits) >= 6:
+            for st in self.strategies:
+                if digits in st.get("id", "") or any(digits == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in st.get("target_codes", [])):
+                    return st
         if strategy_id in ("strategy_a_new_stock_batch_sell", "strategy_a"):
             for st in self.strategies:
                 if "688826" in st.get("id", "") or "batch" in st.get("id", ""):
@@ -539,13 +542,66 @@ class IntradayStrategyEngine:
                     return st
         return None
 
-    def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
-        """根据股票代码 code 或开盘价与条件自动选择对应策略 (优先匹配专属标的策略，未指定时路由到通用日常或新股策略)"""
+    def is_stock_first_listing_day(self, code: str) -> bool:
+        """
+        判断某标的今日是否为【上市首日】：
+        1. 检查各策略配置中的 listing_date，若 listing_date < 今日，则必为非首日；
+        2. 检查收盘定盘账本，若已有早于今日的历史收盘记录，则为非首日；
+        3. 检查 TDX 日 K 线或昨日 OHLC，若已有前日真实日 K，则为非首日；
+        4. 只有当 listing_date == 今日 或 没有任何昨日日 K 历史且为新股时，才判定为首日。
+        """
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
+        if not c_clean:
+            return False
+
         today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # 1. 检查各策略配置中的 listing_date
+        spec = self.get_stock_ladder_spec(c_clean)
+        list_date = str(spec.get("listing_date", "")).strip()
+        if list_date and list_date != "-" and len(list_date) >= 10:
+            if list_date < today_str:
+                return False  # 已过上市首日
+            elif list_date == today_str:
+                return True   # 今日正是上市首日
+
+        # 2. 检查历史首日收盘定盘记录
+        closing_scorecards = self.load_listing_closing_scorecards()
+        if c_clean in closing_scorecards:
+            rec = closing_scorecards[c_clean]
+            rec_date = str(rec.get("date", rec.get("listing_date", ""))).strip()
+            if rec_date and rec_date < today_str:
+                return False
+
+        # 3. 检查 TDX 昨日日 K 线数据
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+            y_ohlc = fetcher.get_yesterday_ohlc(c_clean)
+            if y_ohlc and float(y_ohlc.get("open", 0.0)) > 0 and float(y_ohlc.get("high", 0.0)) > 0:
+                return False  # 已有前一交易日日 K 线，非首日
+        except Exception:
+            pass
+
+        # 4. 若为新股且未产生昨日日 K 历史，判定为首日
+        return bool(spec.get("issue_price", 0.0) > 0 and (not list_date or list_date >= today_str))
+
+    def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
+        """
+        根据股票代码 code 或开盘价与条件自动选择对应策略：
+        - 非首日上市的新股与全部常规日常个股：100% 自动匹配通用日常策略 (strategy_c_daily_surge_ladder)
+        - 仅在上市首日当天：自动匹配该标的专属首日阶梯策略或新股 A/B 策略
+        """
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
 
-            # 1. 优先匹配专属标的策略 (例如 688826、688835 等)
+            # 🛡️ 核心业务法则：非首日上市的新股与常规个股，100% 自动匹配日常通用策略！
+            if not self.is_stock_first_listing_day(c_clean):
+                daily_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
+                if daily_strat:
+                    return daily_strat
+
+            # 🆕 仅在上市首日当天：优先匹配专属首日策略
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
@@ -554,27 +610,7 @@ class IntradayStrategyEngine:
                 if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6) and str(target_code).strip() not in ("", "000000"):
                     return st
 
-            # 2. 检查是否有历史新股首日定盘记录且已过首日
-            closing_scorecards = self.load_listing_closing_scorecards()
-            if c_clean in closing_scorecards:
-                rec = closing_scorecards[c_clean]
-                rec_date = str(rec.get("date", rec.get("listing_date", "")))
-                if rec_date and rec_date < today_str:
-                    for st in self.strategies:
-                        if st.get("id") == "strategy_c_daily_surge_ladder":
-                            return st
-
-            # 3. 对于普通日常个股，默认自动路由到通用日常分时阶梯策略
-            for st in self.strategies:
-                if st.get("id") == "strategy_c_daily_surge_ladder":
-                    return st
-
-            # 3. 对于普通日常个股（未在专属新股列表中指定），默认自动路由到通用日常分时阶梯策略
-            for st in self.strategies:
-                if st.get("id") == "strategy_c_daily_surge_ladder":
-                    return st
-
-        # 3. 未传 code 时的开盘价档位判定 (针对新股)
+        # 未传 code 时的开盘价档位判定 (针对新股)
         tier_name, strat_id, mode = self.get_open_price_tier(open_price, code=code)
         if strat_id == "strategy_b_new_stock_trend_hold" and not is_b_conditions_met:
             strat_id = "strategy_a_new_stock_batch_sell"
@@ -583,9 +619,10 @@ class IntradayStrategyEngine:
         if found:
             return found
 
-        for st in self.strategies:
-            if "stock_spec" in st:
-                return st
+        daily_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
+        if daily_strat:
+            return daily_strat
+
         return self.strategies[0] if self.strategies else {}
 
     def get_current_phase(self, time_str: str, strategy: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], int]:
@@ -602,8 +639,18 @@ class IntradayStrategyEngine:
 
         matched_phases = []
         for idx, ph in enumerate(phases):
-            s_time = ph.get("start_time", "00:00")
-            e_time = ph.get("end_time", "23:59")
+            s_time = ph.get("start_time", "")
+            e_time = ph.get("end_time", "")
+            if not s_time or not e_time:
+                tr = ph.get("time_range", "")
+                if tr and ("-" in tr or "~" in tr):
+                    parts = tr.replace("~", "-").split("-")
+                    if len(parts) >= 2:
+                        s_time = parts[0].strip()
+                        e_time = parts[1].strip()
+            s_time = s_time or "00:00"
+            e_time = e_time or "23:59"
+
             if s_time <= clean_t <= e_time:
                 try:
                     sh, sm = map(int, s_time.split(":"))
@@ -881,10 +928,42 @@ class IntradayStrategyEngine:
 
             # 获取当前分钟所在的策略阶段
             curr_phase, _ = self.get_current_phase(t_5, strategy)
+
+            # ⚡ 全局阶梯临停检查 (若触及 +30% 且未触发过临停规则)
+            cb_rules = strategy.get("circuit_breaker_rules", {})
+            if (cb_rules or "stock_spec" in strategy) and "rule_halt_30_global" not in triggered_rule_ids:
+                if cum_high >= open_price * 1.30 and open_price > 0:
+                    triggered_rule_ids.add("rule_halt_30_global")
+                    actual_sell = min(rem_ratio, 0.30)
+                    if actual_sell > 0.001:
+                        rem_ratio -= actual_sell
+                        sugg_p = round(open_price * 1.28, 2)
+                        sig_pt = SignalPoint(
+                            code=code,
+                            timestamp=t_5,
+                            bar_index=idx_row,
+                            price=max(p, open_price * 1.30),
+                            signal_type=SignalType.SELL,
+                            source=SignalSource.STRATEGY_ENGINE,
+                            debug_info={"suggested_price": sugg_p, "sell_ratio": actual_sell},
+                            reason=f"⚡ [临停复牌] 盘中触及较开盘价+30%临停 (挂单:{sugg_p:.2f}元, 卖出{actual_sell*100:.0f}%)"
+                        )
+                        sig_pt.suggested_price = sugg_p
+                        sig_pt.sell_ratio = actual_sell
+                        signals.append(sig_pt)
+                        execution_logs.append(f"{t_5} [临停复牌] +30%达成 | 卖出{actual_sell*100:.0f}% 建议挂单:{sugg_p:.2f}")
+
             if not curr_phase:
                 continue
 
             rules = curr_phase.get("rules", [])
+            if not rules:
+                default_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
+                if default_strat:
+                    d_phase, _ = self.get_current_phase(t_5, default_strat)
+                    if d_phase:
+                        rules = d_phase.get("rules", [])
+
             for r in rules:
                 r_id = r.get("rule_id", "")
                 if r_id in triggered_rule_ids:
@@ -899,16 +978,17 @@ class IntradayStrategyEngine:
                 sugg_price = p
                 reason_msg = ""
 
-                # 1. 冲高达标 (如 +10%)
-                if "open_price * 1.10" in cond_expr or "surge" in r_id or "profit" in r_id:
-                    if h_p >= open_price * 1.10:
+                # 1. 冲高达标 (如 +10% 或日常 +3%)
+                if "open_price * 1.10" in cond_expr or "open_price * 1.03" in cond_expr or "surge" in r_id or "profit" in r_id or "D-1" in r_id:
+                    trigger_target = open_price * 1.03 if "1.03" in cond_expr or "D-1" in r_id else open_price * 1.10
+                    if h_p >= trigger_target:
                         triggered = True
-                        exec_price = max(p, open_price * 1.10)
-                        sugg_price = round(open_price * 1.10 * 1.02, 2)
-                        reason_msg = f"🔴 [冲高止盈] 较开盘+10%触达 (实际成交:{exec_price:.2f}元, 笼子挂单:{sugg_price:.2f}元)"
+                        exec_price = max(p, trigger_target)
+                        sugg_price = round(trigger_target * 1.01, 2)
+                        reason_msg = f"🔴 [冲高止盈] 触达目标价位 {trigger_target:.2f}元 (实际成交:{exec_price:.2f}元, 挂单:{sugg_price:.2f}元)"
 
                 # 2. 临停复牌 (如 +30%)
-                elif "open_price * 1.30" in cond_expr or "halt" in r_id:
+                elif "open_price * 1.30" in cond_expr or "halt" in r_id or "circuit" in r_id:
                     if cum_high >= open_price * 1.30:
                         triggered = True
                         exec_price = max(p, open_price * 1.30)
@@ -1685,7 +1765,39 @@ class IntradayStrategyEngine:
             return []
 
         generated_signals: List[SignalPoint] = []
+
+        # ⚡ 检查全局临停与阶梯规则 (+30% 达成且未触发过临停)
+        cb_rules = strategy.get("circuit_breaker_rules", {})
+        if (cb_rules or "stock_spec" in strategy) and "rule_halt_30_global" not in state["triggered_rules"]:
+            if state["max_price"] >= open_price * 1.30 and open_price > 0:
+                state["triggered_rules"].add("rule_halt_30_global")
+                actual_sell = min(state["remaining_ratio"], 0.30)
+                if actual_sell > 0.001:
+                    state["remaining_ratio"] -= actual_sell
+                    sugg_p = round(open_price * 1.28, 2)
+                    sig_pt = SignalPoint(
+                        code=c_clean,
+                        timestamp=clean_time,
+                        bar_index=bar_index,
+                        price=price,
+                        signal_type=SignalType.SELL,
+                        source=SignalSource.STRATEGY_ENGINE,
+                        debug_info={"suggested_price": sugg_p, "sell_ratio": actual_sell},
+                        reason=f"⚡ [临停复牌] 盘中触及较开盘价+30%临停 (挂单:{sugg_p:.2f}元, 卖出{actual_sell*100:.0f}%)"
+                    )
+                    sig_pt.suggested_price = sugg_p
+                    sig_pt.sell_ratio = actual_sell
+                    generated_signals.append(sig_pt)
+                    state.setdefault("signals", []).append(sig_pt)
+                    state.setdefault("execution_logs", []).append(f"{clean_time} [临停复牌] +30%达成 | 卖出{actual_sell*100:.0f}% 建议挂单:{sugg_p:.2f}")
+
         rules = phase.get("rules", [])
+        if not rules:
+            default_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
+            if default_strat:
+                d_phase, _ = self.get_current_phase(clean_time, default_strat)
+                if d_phase:
+                    rules = d_phase.get("rules", [])
 
         # 3. 逐条评估阶段内规则
         for rule in rules:

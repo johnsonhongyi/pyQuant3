@@ -4399,19 +4399,77 @@ class IntegratedTradingStrategyPanel(QWidget):
         cyan = "#38bdf8"
         green = "#00ff88"
 
-        # 格式化昨日关键位对比片段
-        y_open_str = f" | 昨开: <font color='{gold}'><b>{y_open:.2f}元</b></font>" if y_open > 0 else ""
-        y_hl_str = f" | 昨高: <font color='{gold}'><b>{y_high:.2f}元</b></font> / 昨低: <font color='{gold}'><b>{y_low:.2f}元</b></font>" if (y_high > 0 and y_low > 0) else ""
+        # 🛡️ 识别新股首日保护模式 (若无昨日有效 OHLC 数据)
+        is_first_listing_day = (y_open <= 0.01 and y_high <= 0.01 and y_low <= 0.01)
+
+        if is_first_listing_day:
+            # 🛡️ 【新股首日保护模式】：无昨日数据，以发行价 issue_p 与今日开盘价 open_price 为锚
+            base_ref_p = issue_p if issue_p > 0 else (open_price if open_price > 0 else price)
+
+            # 1. 今开 vs 发行价 (高开溢价为红，破发为绿)
+            col_open = red if (open_price >= base_ref_p) else green
+            op_gain_pct = ((open_price - base_ref_p) / base_ref_p * 100.0) if base_ref_p > 0 else 0.0
+            col_op_pct = red if op_gain_pct >= 0 else green
+
+            # 2. 最高价 vs 今日开盘价 (突破开盘价冲高为红，未超开盘为绿)
+            col_high = red if (max_p > open_price and open_price > 0) else green
+
+            # 3. 最低价 vs 今日开盘价 (日内从未跌破开盘价为红/极强，跌破开盘价为绿/防守)
+            col_low = red if (min_p >= open_price and open_price > 0) else green
+
+            # 4. 现价 vs 今日开盘价 (在开盘价上方为红，在开盘价下方为绿)
+            col_price = red if (price >= open_price and open_price > 0) else green
+
+            op_line_str = f"【开盘基准】: 今开: <font color='{col_open}'><b>{open_price:.2f} 元</b></font> <font color='{col_op_pct}'>({op_gain_pct:+.2f}%)</font> (发行价基准: <font color='{gold}'><b>{issue_p:.2f}元</b></font> | 首日挂牌无昨开)<br/>"
+            hl_line_str = f"【实时成交】: <font color='{col_price}'><b>{price:.2f} 元</b></font>(最高: <font color='{col_high}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{col_low}'><b>{min_p:.2f}元</b></font> | 首日对标开盘价)<br/>"
+        else:
+            # 📈 【常规多日对比模式】：已有昨日真实 OHLC
+            lc_val = y_close if y_close > 0 else (last_close if (last_close and last_close > 0) else open_price)
+
+            # 1. 开盘价：若 >= 昨开 (或昨收) 显示红，低于昨开显示绿
+            if y_open > 0:
+                col_open = red if (open_price >= y_open) else green
+            else:
+                col_open = red if (open_price >= lc_val) else green
+
+            # 2. 最高价：若 >= 昨高 显示红 (突破昨高/强势新高)，低于昨高显示绿
+            if y_high > 0:
+                col_high = red if (max_p >= y_high) else green
+            else:
+                col_high = red if (max_p >= open_price) else green
+
+            # 3. 最低价：若 >= 昨低 显示红 (低点抬升/未破昨低/强势防守)，低于昨低显示绿 (破位创新低)
+            if y_low > 0:
+                col_low = red if (min_p >= y_low) else green
+            else:
+                col_low = red if (min_p >= open_price) else green
+
+            # 4. 现价：若 >= 昨收 显示红，低于昨收显示绿
+            col_price = red if (price >= lc_val) else green
+
+            # 格式化昨日关键位对比片段
+            y_open_str = f" | 昨开: <font color='{gold}'><b>{y_open:.2f}元</b></font>" if y_open > 0 else ""
+
+            lc_str = f"<font color='{gold}'><b>{lc_val:.2f} 元</b></font>" if lc_val > 0 else f"<font color='{gold}'><b>{open_price:.2f} 元</b></font>"
+            op_pct_val = ((open_price - lc_val) / lc_val * 100.0) if lc_val > 0 else 0.0
+            col_op_pct = red if op_pct_val >= 0 else green
+            op_line_str = f"【开盘基准】: 今开: <font color='{col_open}'><b>{open_price:.2f} 元</b></font> <font color='{col_op_pct}'>({op_pct_val:+.2f}%)</font> (昨收基准: {lc_str}{y_open_str})<br/>"
+            
+            if y_high > 0 and y_low > 0:
+                hl_line_str = (
+                    f"【实时成交】: <font color='{col_price}'><b>{price:.2f} 元</b></font>"
+                    f"(最高: <font color='{col_high}'><b>{max_p:.2f}元</b></font> |昨高:<font color='{gold}'><b>{y_high:.2f}元</b></font> /"
+                    f"最低: <font color='{col_low}'><b>{min_p:.2f}元</b></font> |昨低: <font color='{gold}'><b>{y_low:.2f}元</b></font>)<br/>"
+                )
+            else:
+                hl_line_str = f"【实时成交】: <font color='{col_price}'><b>{price:.2f} 元</b></font>(最高: <font color='{col_high}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{col_low}'><b>{min_p:.2f}元</b></font>)<br/>"
 
         if is_daily_strategy:
-            lc_val = y_close if y_close > 0 else (last_close if (last_close and last_close > 0) else open_price)
-            lc_str = f"<font color='{red}'><b>{lc_val:.2f} 元</b></font>" if lc_val > 0 else f"<font color='{red}'><b>{open_price:.2f} 元</b></font>"
-            op_pct_str = f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font> ({((open_price-lc_val)/lc_val*100):+.2f}%)" if lc_val > 0 else f"今开: <font color='{red}'><b>{open_price:.2f} 元</b></font>"
             sbc_html = (
                 f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
                 f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
-                f"【开盘基准】: {op_pct_str} (昨收基准: {lc_str}{y_open_str})<br/>"
-                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>{y_hl_str})<br/>"
+                f"{op_line_str}"
+                f"{hl_line_str}"
                 f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.2f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
                 f"【冲高卖出目标 (+3%~+5%)】: <font color='{red}'><b>{open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元</b></font> (冲高分批止盈 30%)<br/>"
                 f"【破分时均线止损/减仓】: <font color='{red}'><b>{vwap:.2f} 元</b></font> (跌破分时均价线 VWAP 触发减仓)<br/>"
@@ -4420,12 +4478,11 @@ class IntegratedTradingStrategyPanel(QWidget):
                 f"</div>"
             )
         else:
-            y_ext_str = f" | 昨开: <font color='{gold}'><b>{y_open:.2f}元</b></font> / 昨收: <font color='{gold}'><b>{y_close:.2f}元</b></font>" if (y_open > 0 and y_close > 0) else ""
             sbc_html = (
                 f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
                 f"=== 📊 <font color='{cyan}'><b>【{code} {resolve_stock_name(code)}】{strat_name}</b></font> ===<br/>"
-                f"【开盘基准】: <font color='{red}'><b>{open_price:.2f} 元</b></font> (基准参考线已锚定 | 发行价: <font color='{gold}'><b>{issue_p:.2f}元</b></font>{y_ext_str})<br/>"
-                f"【实时成交/估价】: <font color='{red}'><b>{price:.2f} 元</b></font> (最高: <font color='{red}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{green}'><b>{min_p:.2f}元</b></font>{y_hl_str})<br/>"
+                f"{op_line_str}"
+                f"{hl_line_str}"
                 f"【均价线 VWAP】: <font color='{gold}'><b>{vwap:.2f} 元</b></font> | 换手率: <font color='{cyan}'><b>{turnover_rate:.1f}%</b></font> | 成交额: <font color='{gold}'><b>{amount/1e8:.2f} 亿元</b></font> (流通市值:{float_mv_yi:.1f}亿)<br/>"
                 f"【冲高卖出目标 (+10%)】: <font color='{red}'><b>{open_price*1.10:.2f} 元</b></font> (价格笼子限价卖出 50%)<br/>"
                 f"【临停触发目标 (+30%)】: <font color='{red}'><b>{open_price*1.30:.2f} 元</b></font> (复牌前挂单 1.28x=<font color='{red}'><b>{open_price*1.28:.2f}</b></font> 卖出 30%)<br/>"
