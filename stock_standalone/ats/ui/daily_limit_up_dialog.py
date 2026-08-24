@@ -727,8 +727,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def _resolve_active_strategy_df(self) -> Optional[pd.DataFrame]:
         """【统一感知接口】复用 SectorDataAggregator 递归感知探测系统当前运行中的量化策略主 DataFrame"""
-        if self.current_df is not None and not self.current_df.empty:
-            return self.current_df
         try:
             from ats.sector_data_aggregator import SectorDataAggregator
             df, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(self._py_parent or self)
@@ -737,6 +735,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return df
         except Exception:
             pass
+        if self.current_df is not None and not self.current_df.empty:
+            return self.current_df
         return None
 
     def _refresh_data_for_mode(self):
