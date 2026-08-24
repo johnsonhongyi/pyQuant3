@@ -742,13 +742,25 @@ class TDXRealtimeFetcher:
         mkt = get_market_code(c_clean)
         t_start = time.time()
 
-        # 1. 优先使用内存中已缓存的全量 240 条分时 K 线 (0ms 极速响应，避免 UI 线程与后台轮询抢锁)
+        # 1. 优先使用内存中已缓存的全量 240 条分时 K 线 (带时间戳与交易日校验，避免陈旧跨日数据)
         if not hasattr(self, '_intraday_bars_cache'):
             self._intraday_bars_cache = {}
         
-        cached_df = self._intraday_bars_cache.get(c_clean)
-        if cached_df is not None and not cached_df.empty and len(cached_df) >= 30:
-            return cached_df
+        today_date_str = datetime.now().strftime("%Y-%m-%d")
+        cached_entry = self._intraday_bars_cache.get(c_clean)
+        if cached_entry is not None:
+            if isinstance(cached_entry, tuple) and len(cached_entry) >= 2:
+                cached_df, cache_ts, cache_day = cached_entry[0], cached_entry[1], cached_entry[2]
+                # 在交易时段内缓存 2.5 秒，非交易时段且同一交易日内可长效复用
+                is_fresh = (cache_day == today_date_str) and ((time.time() - cache_ts < 2.5) or (len(cached_df) >= 240))
+                if is_fresh and cached_df is not None and not cached_df.empty and len(cached_df) >= 30:
+                    return cached_df
+            elif isinstance(cached_entry, pd.DataFrame) and not cached_entry.empty and len(cached_entry) >= 30:
+                cached_df = cached_entry
+            else:
+                cached_df = None
+        else:
+            cached_df = None
 
         try:
             with self._conn_lock:
@@ -814,13 +826,15 @@ class TDXRealtimeFetcher:
                 if df.empty:
                     return cached_df if cached_df is not None else pd.DataFrame()
 
-                # 过滤只保留今日 K 线
+                # 严格过滤只保留单个交易日的真实 K 线 (优先今日；若非交易日/盘后，严格只取最新单日数据，绝不串联多日)
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if "datetime" in df.columns:
                     df["date_str"] = df["datetime"].astype(str).str[:10]
                     df_today = df[df["date_str"] == today_str]
                     if df_today.empty:
-                        df_today = df # 非交易日回放模式下复用最新一轮 K 线
+                        # 严格只截取最新单日，杜绝多日 240 根混杂累加
+                        latest_day = str(df["date_str"].iloc[-1])
+                        df_today = df[df["date_str"] == latest_day]
                 else:
                     df_today = df
 
@@ -874,7 +888,7 @@ class TDXRealtimeFetcher:
                 df_res = pd.DataFrame(res_rows)
                 if not df_res.empty:
                     df_res.set_index("time", inplace=True)
-                    self._intraday_bars_cache[c_clean] = df_res # 缓存到内存
+                    self._intraday_bars_cache[c_clean] = (df_res, time.time(), today_str) # 缓存到内存
                     cost_ms = (time.time() - t_start) * 1000.0
                     srv_name = self.best_server.get("name", "TDX行情") if hasattr(self, "best_server") and self.best_server else "TDX"
                     op_first = df_res.iloc[0].get("open", 0.0)
@@ -887,7 +901,7 @@ class TDXRealtimeFetcher:
 
     def fetch_multi_day_intraday_bars(self, code: str, days: int = 2) -> pd.DataFrame:
         """
-        拉取最近 N 个交易日的全量分时 K 线数据 (包含 1日, 2日, 3日分时图)，按交易日拼接并计算每日 VWAP 均线与换手率
+        拉取最近 N 个交易日的全量分时 K 线数据 (包含 1日, 2日, 3日, 5日分时图)，按交易日拼接并计算每日 VWAP 均线与换手率
         """
         c_clean = str(code).zfill(6)
         try:
@@ -898,7 +912,12 @@ class TDXRealtimeFetcher:
                     if not self.connect():
                         return pd.DataFrame()
                 try:
-                    bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800)
+                    bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
+                    if days >= 4:
+                        # 5 日分时需要约 1200 根 1 分钟 K 线，分两批获取并拼接
+                        bars_prev = self.api.get_security_bars(8, mkt, c_clean, 800, 800) or []
+                        if bars_prev:
+                            bars = bars_prev + bars
                 except Exception as e_b:
                     logger.debug(f"TDX get_security_bars 8 异常: {e_b}")
                     bars = None
@@ -908,7 +927,11 @@ class TDXRealtimeFetcher:
                     self._is_connected = False
                     if self.connect():
                         try:
-                            bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800)
+                            bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
+                            if days >= 4:
+                                bars_prev = self.api.get_security_bars(8, mkt, c_clean, 800, 800) or []
+                                if bars_prev:
+                                    bars = bars_prev + bars
                         except Exception:
                             bars = None
 
@@ -1071,6 +1094,47 @@ class TDXRealtimeFetcher:
         except Exception as e:
             logger.debug(f"拉取 {c_clean} [{category}] K 线数据异常: {e}")
             return pd.DataFrame()
+
+    def get_yesterday_ohlc(self, code: str) -> Dict[str, float]:
+        """
+        获取标的昨日日 K 线的真实 OHLC (昨开 open, 昨高 high, 昨低 low, 昨收 close)
+        带 10s 内存缓存，毫秒级返回
+        """
+        c_clean = str(code).zfill(6)
+        now_ts = time.time()
+
+        if not hasattr(self, "_yesterday_ohlc_cache"):
+            self._yesterday_ohlc_cache = {}
+
+        cached = self._yesterday_ohlc_cache.get(c_clean)
+        if cached and (now_ts - cached[1] < 10.0):
+            return cached[0]
+
+        res = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
+        try:
+            df_daily = self.fetch_kline_bars(c_clean, category="day", count=5)
+            if df_daily is not None and not df_daily.empty:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                last_row_date = str(df_daily.iloc[-1].get("datetime", df_daily.iloc[-1].get("time", "")))[:10]
+
+                if last_row_date == today_str and len(df_daily) >= 2:
+                    y_row = df_daily.iloc[-2]
+                elif last_row_date != today_str and len(df_daily) >= 1:
+                    y_row = df_daily.iloc[-1]
+                else:
+                    y_row = df_daily.iloc[-1]
+
+                res = {
+                    "open": round(float(y_row.get("open", 0.0)), 2),
+                    "high": round(float(y_row.get("high", 0.0)), 2),
+                    "low": round(float(y_row.get("low", 0.0)), 2),
+                    "close": round(float(y_row.get("close", 0.0)), 2),
+                }
+        except Exception as e:
+            logger.debug(f"get_yesterday_ohlc 异常: {e}")
+
+        self._yesterday_ohlc_cache[c_clean] = (res, now_ts)
+        return res
 
     def fetch_multi_stock_alpha_quotes(
         self,
