@@ -1070,8 +1070,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if user_data is not None:
             if item.data(Qt.ItemDataRole.UserRole) != user_data:
                 item.setData(Qt.ItemDataRole.UserRole, user_data)
-        elif item.data(Qt.ItemDataRole.UserRole) is not None:
-            item.setData(Qt.ItemDataRole.UserRole, None)
+        else:
+            if item.data(Qt.ItemDataRole.UserRole) is not None:
+                item.setData(Qt.ItemDataRole.UserRole, None)
+            if hasattr(item, '_raw_value'):
+                item._raw_value = None
 
         if fg is not None:
             item.setForeground(QBrush(fg))

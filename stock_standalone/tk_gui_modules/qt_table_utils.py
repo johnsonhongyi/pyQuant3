@@ -43,27 +43,35 @@ class NumericTableWidgetItem(QTableWidgetItem):
             except (ValueError, TypeError):
                 self._raw_value = value
 
+    def setText(self, text: str):
+        super().setText(text)
+        self._raw_value = text
+
     def _is_empty(self) -> bool:
         """判定当前单元格是否为无数据/缺失值占位符"""
         import math
+        # 1. 优先基于当前显示的文本进行权威判定 (文本是占位符则 100% 判定为空)
+        t = self.text().strip()
+        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无", "nan", "NaN") or t.lower() in ("nan", "none", "null", "n/a"):
+            return True
+
+        # 2. 检查 UserRole 是否为有效浮点数
         u = self.data(Qt.ItemDataRole.UserRole)
         if u is not None:
             try:
                 f = float(u)
-                if not (math.isnan(f) or math.isinf(f)):
-                    if abs(f) >= 99999900:  # 兼容历史极值占位符
-                        return True
-                    return False
-            except (ValueError, TypeError):
-                pass
-        if hasattr(self, '_raw_value') and isinstance(self._raw_value, (int, float)):
-            if not (math.isnan(self._raw_value) or math.isinf(self._raw_value)):
-                if abs(self._raw_value) >= 99999900:
+                if math.isnan(f) or math.isinf(f) or abs(f) >= 99999900:
                     return True
                 return False
-        t = self.text().strip()
-        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
-            return True
+            except (ValueError, TypeError):
+                pass
+
+        # 3. 检查 _raw_value 是否为有效数值
+        if hasattr(self, '_raw_value') and isinstance(self._raw_value, (int, float)):
+            if math.isnan(self._raw_value) or math.isinf(self._raw_value) or abs(self._raw_value) >= 99999900:
+                return True
+            return False
+
         return False
 
     def _get_numeric_value(self, item=None):
@@ -85,16 +93,9 @@ class NumericTableWidgetItem(QTableWidgetItem):
             except (ValueError, TypeError):
                 pass
 
-        # 2. 检查 _raw_value
-        if hasattr(target, '_raw_value') and isinstance(target._raw_value, (int, float)):
-            if not (math.isnan(target._raw_value) or math.isinf(target._raw_value)):
-                if abs(target._raw_value) >= 99999900:
-                    return None
-                return float(target._raw_value)
-
-        # 3. 解析文本
+        # 2. 权威实时解析当前文本 (杜绝旧 _raw_value 残留)
         t = target.text().strip()
-        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
+        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null", "n/a"):
             return None
 
         clean_t = t.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').replace('板', '').replace('分', '').strip()
