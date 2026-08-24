@@ -222,6 +222,7 @@ def test_circuit_breaker_rule(engine):
 def test_config_save_and_reload(engine):
     """测试自定制策略 JSON 落盘与重新加载"""
     engine.reset_state()
+    engine.load_config()
     original_strategies_count = len(engine.strategies)
     assert original_strategies_count >= 2
 

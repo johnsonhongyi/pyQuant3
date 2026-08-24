@@ -11,7 +11,7 @@ import threading
 from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QMenu, QApplication
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QByteArray
 from PyQt6.QtGui import QColor, QFont, QBrush, QAction
-from ats.ui.styles import NumericTableWidgetItem, auto_fit_columns_once, setup_header_persistence, CONFIG_FILE_LOCK
+from ats.ui.styles import NumericTableWidgetItem, auto_fit_columns_once, setup_header_persistence, CONFIG_FILE_LOCK, ColorPreservingItemDelegate
 from sys_utils import get_app_root, get_conf_path
 
 def send_to_linkage(code, name=None, parent_widget=None):
@@ -121,6 +121,7 @@ class BaseATSTableWidget(QTableWidget):
         self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
         
         # Default styling matching high-end dark theme
+        self.setItemDelegate(ColorPreservingItemDelegate(self))
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)  # ⚡ 开启 Shift 多选与 Ctrl 点选
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)  # 默认单元格禁止编辑
@@ -353,6 +354,9 @@ class BaseATSTableWidget(QTableWidget):
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
             fav_mgr.toggle_favorite_stock(str(code).strip())
+            win = self.window()
+            if win and hasattr(win, '_safe_favorites_changed'):
+                win._safe_favorites_changed()
         except Exception as e:
             print(f"[BaseATSTable] Toggle favorite stock error: {e}")
 

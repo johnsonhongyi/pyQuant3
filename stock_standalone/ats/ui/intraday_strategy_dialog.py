@@ -2604,6 +2604,11 @@ class SBCIntradayChartDialog(QWidget):
                 _remove_sbc_open_record(self.code)
             except Exception:
                 pass
+        try:
+            if hasattr(self, 'ladder_engine') and self.ladder_engine:
+                self.ladder_engine.save_intraday_cache(force=False)
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def resizeEvent(self, event):
@@ -5021,8 +5026,13 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._save_window_layout()
 
     def closeEvent(self, event):
-        """关闭窗口时持久化保存主窗口大小与位置"""
+        """关闭窗口时持久化保存主窗口大小与位置，并安全持久化策略状态变动"""
         self._save_window_layout()
+        try:
+            if hasattr(self, 'engine') and self.engine:
+                self.engine.save_intraday_cache(force=False)
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def _on_live_timer_tick(self):
@@ -5643,6 +5653,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 self.sim_panel.replay_timer.stop()
             if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher:
                 self.tdx_fetcher.disconnect()
+            if hasattr(self, 'engine') and self.engine:
+                self.engine.save_intraday_cache(force=False)
         except Exception as e:
             logger.debug(f"closeEvent cleanup: {e}")
         event.accept()

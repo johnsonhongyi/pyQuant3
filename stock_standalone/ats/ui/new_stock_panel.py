@@ -1225,21 +1225,27 @@ class NewStockPanel(QWidget):
             QMessageBox.critical(self, "错误", f"调起 SBC 实盘窗口异常: {e}")
 
     def _toggle_favorite(self):
-        """右键菜单：切换重点关注"""
+        """右键菜单：切换重点关注 (极速响应与全系统 0ms 联动)"""
         if not self.selected_code:
             return
         try:
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
-            is_fav_now = self.selected_code in fav_mgr.get_favorite_stocks()
             fav_mgr.toggle_favorite_stock(self.selected_code)
-            if not is_fav_now:
-                QMessageBox.information(self, "关注成功", f"⭐ 已将【{self.selected_name} ({self.selected_code})】加入重点关注！")
-            else:
-                QMessageBox.information(self, "取消关注", f"⚪ 已将【{self.selected_name} ({self.selected_code})】移出重点关注。")
             self._render_table()
+            
+            # 主动通知 ATS 主窗口同步刷新重点关注 Tab 与左侧策略股票池
+            if self.main_window and hasattr(self.main_window, '_safe_favorites_changed'):
+                self.main_window._safe_favorites_changed()
         except Exception as e:
             logger.debug(f"Toggle favorite error: {e}")
+
+    def refresh_favorites_display(self):
+        """[0ms 极速刷新] 当全局重点关注变更时即时重绘新股次新股表格"""
+        try:
+            self._render_table()
+        except Exception as e:
+            logger.debug(f"[NewStockPanel] refresh_favorites_display error: {e}")
 
     def _on_add_dragon_clicked(self):
         """右键菜单：加入加速龙头追踪器"""

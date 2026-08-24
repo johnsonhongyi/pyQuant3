@@ -173,6 +173,8 @@ class EnhancedTableWidget(QTableWidget):
 
     def _init_default_style(self):
         """初始化表格默认样式与行为"""
+        from ats.ui.styles import ColorPreservingItemDelegate
+        self.setItemDelegate(ColorPreservingItemDelegate(self))
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -191,8 +193,7 @@ class EnhancedTableWidget(QTableWidget):
                     background-color: #0d121f;
                     color: #ffffff;
                     gridline-color: #2a2d42;
-                    selection-background-color: #3d425c;
-                    selection-color: #00ffcc;
+                    selection-background-color: #1e334d;
                     alternate-background-color: #161b2e;
                 }
                 QHeaderView::section {
@@ -203,7 +204,7 @@ class EnhancedTableWidget(QTableWidget):
                     font-weight: bold;
                 }
                 QTableWidget::item:selected {
-                    background-color: #3d425c;
+                    background-color: #1e334d;
                 }
             """)
         else:

@@ -2648,6 +2648,24 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Linkage] External linkage failed: {e}")
 
+    def _on_top_tab_changed(self, index: int):
+        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染对应 Tab 页面数据"""
+        try:
+            if index == 0:
+                # 切换到 ⭐ 重点关注 (基础重点)
+                if hasattr(self, 'favorite_panel') and hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
+                    self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+            elif index == 1:
+                # 切换到 📉 大级别 MA20d 回调跟踪器
+                if hasattr(self, 'swing_table') and hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
+                    self.swing_table.update_data_list(self._pending_swing_rows)
+            elif index == 2:
+                # 切换到 🆕 新股次新股 (IPO & 阶梯)
+                if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, 'refresh_favorites_display'):
+                    self.new_stock_panel.refresh_favorites_display()
+        except Exception as e:
+            logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
+
     def _get_today_signal_codes(self):
         """归纳今日所有已发现/记录的特异与共振强势股票代码列表 (供弹窗左右导航联动)"""
         codes = []
@@ -5125,6 +5143,13 @@ class ATSMainWindow(QMainWindow):
             AlertNotifier.get_instance().shutdown()
         except Exception as e:
             print(f"[ATSMainWindow] Error shutting down AlertNotifier: {e}")
+
+        # 安全持久化分时策略引擎状态（有实质数据变动才落盘）
+        try:
+            from ats.intraday_strategy_engine import IntradayStrategyEngine
+            IntradayStrategyEngine.get_instance().save_intraday_cache(force=False)
+        except Exception as e:
+            print(f"[ATSMainWindow] Error saving intraday strategy cache on close: {e}")
             
         super().closeEvent(event)
 
@@ -5155,17 +5180,17 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, '_is_closing', False):
             return
         try:
+            from global_favorites import GlobalFavoriteManager
+            import time
+            import pandas as pd
+
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            fav_stocks_clean = {str(c).strip().zfill(6) for c in fav_stocks}
+
             # 🚀 [PERF OPTIMIZE] 沿用既有内存数据，原位刷新所有当前可见视图上的 ⭐ 重点标识
             # 1. 刷新重点关注 Tab 视图 (favorite_panel)
             if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, 'update_favorite_rows'):
-                from global_favorites import GlobalFavoriteManager
-                import time
-                import pandas as pd
-
-                fav_mgr = GlobalFavoriteManager()
-                fav_stocks = fav_mgr.get_favorite_stocks()
-                fav_stocks_clean = {str(c).strip().zfill(6) for c in fav_stocks}
-
                 existing_fav_rows = {}
                 if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
                     for r in self._pending_swing_rows:
@@ -5207,7 +5232,11 @@ class ATSMainWindow(QMainWindow):
                                         row_df = row_df.iloc[0]
                                     for k in (ec, ec.lower(), ec.upper()):
                                         if k in row_df:
-                                            ec_val = cct.format_col_value(ec, row_df[k])
+                                            try:
+                                                from JohnsonUtil import commonTips as cct
+                                                ec_val = cct.format_col_value(ec, row_df[k])
+                                            except Exception:
+                                                ec_val = str(row_df[k])
                                             break
                                 except Exception:
                                     pass
@@ -5222,24 +5251,35 @@ class ATSMainWindow(QMainWindow):
                         )
                         fav_rows.append(fallback_row)
 
+                self._pending_fav_rows = fav_rows
                 self.favorite_panel.update_favorite_rows(fav_rows)
 
             # 2. 原位刷新 SwingStateTable (📉 大级别 MA20d 回调跟踪器) 上的 ⭐ 标识与背景高亮
             if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'refresh_favorites_display'):
                 self.swing_table.refresh_favorites_display()
 
-            # 3. 原位刷新左侧 UniverseTreeWidget 上的 ⭐ 标识与背景高亮
-            if hasattr(self, 'universe_widget'):
+            # 3. 原位刷新 NewStockPanel (🆕 新股次新股 (IPO & 阶梯)) 上的 ⭐ 标识与置顶排序
+            if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, 'refresh_favorites_display'):
+                self.new_stock_panel.refresh_favorites_display()
+
+            # 4. 同步更新左侧策略股票池 (UniverseManager & UniverseTreeWidget)
+            if hasattr(self, 'universe_manager') and hasattr(self, 'universe_widget'):
                 if getattr(self.universe_widget, '_is_mock_active', False):
                     self.universe_widget.load_mock_data()
-                elif hasattr(self.universe_widget, 'refresh_favorites_display'):
-                    self.universe_widget.refresh_favorites_display()
+                else:
+                    try:
+                        self.universe_manager.sync_from_ledger()
+                        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+                        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+                    except Exception as e_um:
+                        if hasattr(self.universe_widget, 'refresh_favorites_display'):
+                            self.universe_widget.refresh_favorites_display()
                 
-            # Refresh heatmap widget
+            # 5. 刷新右侧板块热力图
             if hasattr(self, 'heatmap_widget'):
                 self.heatmap_widget.load_live_sectors()
                 
-            # Refresh active distribution details dialogs if open
+            # 6. 刷新打开的个股分布明细等独立弹窗
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
                 from PyQt6.sip import isdeleted
                 for d in self.dist_chart._active_dialogs:

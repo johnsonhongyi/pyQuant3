@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
 
-from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK
+from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK, ColorPreservingItemDelegate
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
@@ -96,8 +96,7 @@ class ATSSectorDetailDialog(QDialog):
                 alternate-background-color: #1c1c22;
                 color: #e2e2e5;
                 gridline-color: #282830;
-                selection-background-color: #2e3b4e;
-                selection-color: #00ff88;
+                selection-background-color: #1e334d;
                 border: 1px solid #282830;
                 font-family: 'Microsoft YaHei', sans-serif;
             }
@@ -166,6 +165,7 @@ class ATSSectorDetailDialog(QDialog):
         
         # 2. Table of members
         self.table = QTableWidget()
+        self.table.setItemDelegate(ColorPreservingItemDelegate(self.table))
         headers = get_sector_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)

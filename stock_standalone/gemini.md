@@ -1,3 +1,36 @@
+## 2026-08-24 18:05
+- [x] **复查与全面加固分时策略持久化体系：构建内存 Cache + 60s 节流防抖 + 收盘统一持久化 + 窗口退出兜底的四层立体安全防线 (`ats/intraday_strategy_engine.py`, `tests/test_disk_io_and_cache_safety.py`)**：
+    - [x] **内存 Cache 高效运转 (Single Source of Truth)**：
+        - 盘中实时行情、分时 1 分钟快照回灌与 7 节点诊断计算 100% 运行在纯内存字典 `rule_state_map` 中，保证毫秒级无卡顿读写；
+    - [x] **引入 `threading.RLock()` 线程安全锁与深浅拷贝隔离**：
+        - `save_intraday_cache`、`load_intraday_cache` 与多线程并发读写全部纳入递归锁保护，彻底杜绝字典在迭代中被并发修改抛出 `RuntimeError` 的隐患；
+    - [x] **盘中 60 秒节流防抖持久化 (`save_intraday_cache_throttled`)**：
+        - 针对用户长时间开机盯盘场景，每 60 秒检查一次；
+        - 严苛执行 **“仅当 `_is_dirty == True` 且 `now - _last_save_time >= 60s`”** 时才刷盘，数据未变动时 0 磁盘 I/O，有变动时确保异常崩溃最多仅损失 60 秒内数据；
+    - [x] **交易收盘统一持久化 (>= 15:00)**：
+        - 收盘时刻自动触发 `save_intraday_cache(force=False)` 与首日收盘综合评分定盘 `save_listing_closing_scorecard`，永久归档全天状态；
+    - [x] **窗口关闭与进程退出安全兜底**：
+        - `IntradayStrategyDialog.closeEvent`、`ATSMainWindow.closeEvent` 与 `atexit.register` 注册进程正常退出兜底落盘；
+    - [x] **自动化测试用例扩充与全量 100% PASS (`tests/test_disk_io_and_cache_safety.py`)**：
+        - 启动临时文件自愈清理、高频 240 分钟分时推流 0 磁盘 I/O、60s 节流防抖、15:00 收盘持久化、多线程高并发读写 5 个测试用例全部 **100% 通过**。
+
+## 2026-08-24 17:55
+- [x] **分时策略引擎 (IntradayStrategyEngine) 彻底消除高频写临时文件、脏检查短路机制与窗口退出安全持久化 (`ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_disk_io_and_cache_safety.py`)**：
+    - [x] **根除盘中高频计算/诊断过程中的无谓磁盘 I/O 写入**：
+        - 彻底从 `hydrate_from_intraday_df`（分时 K 线高频拉取）、`evaluate_seven_nodes`（每秒高频时序诊断）及普通 tick 推送中剥离无条件 `save_intraday_cache()` 调用；
+        - 行情与快照纯内存维护，消除对磁盘的大量密集写操作，彻底杜绝 I/O 竞争与卡顿；
+    - [x] **内容哈希比对 (MD5 Hash) 与脏检查 (Dirty Check) 短路机制**：
+        - 在 `save_intraday_cache(force=False)` 中引入 `_is_dirty` 状态标记与 `MD5(JSON)` 内容比对；
+        - 若未被标记为 dirty 且 force=False，或序列化内容与上次保存内容 100% 一致，直接短路返回，绝不执行任何物理磁盘写操作；
+    - [x] **确定性持久化落盘时机规范**：
+        - 仅在以下明确变动时执行写盘：① 用户手动校准/修改节点参数 (`set_node_custom_param`, `set_manual_node_score`, `reset_node_custom_params`, `clear_stock_cache`)；② 触发新的买卖交易信号 (`SignalPoint`)；③ 14:55 首日收盘定盘；
+        - **窗口关闭时**：在 `IntradayStrategyDialog`、`PinzhunLadderStandaloneWindow`、`SBCIntradayChartDialog` 的 `closeEvent` 中若 dirty 则保存；
+        - **主窗口关闭/退出时**：在 `ATSMainWindow.closeEvent` 与 `atexit` 进程退出钩子中安全刷盘；
+    - [x] **临时文件安全清理与启动自愈机制**：
+        - 写入临时文件时使用 `try ... finally` 架构，若 `replace` 未完成或发生异常，在 `finally` 块中立即物理删除 `tmp_file`，杜绝遗留；
+        - 引擎初始化时自动扫描并清理 `config/*.tmp*` 历史碎片垃圾文件；
+    - [x] **自动化测试用例 100% PASS (`tests/test_disk_io_and_cache_safety.py`)**。
+
 ## 2026-08-24 13:32
 - [x] **根治天梯与全端表格对象池复用 (`NumericTableWidgetItem`) 旧值残留导致空值 (`--`) 排序插队缺陷 (`tk_gui_modules/qt_table_utils.py`, `ats/ui/daily_limit_up_dialog.py`)**：
     - [x] **空值与脏值判定权威解耦 (`_is_empty` / `_get_numeric_value`)**：
@@ -1036,6 +1069,26 @@
     - [x] **WARN-3: 修复平台突破缓存 key 缺少价格维度导致盘中信号过时**：在 `_platform_breakout_cache` 的 cache_key 中加入 `round(last_close, 2)` 维度，确保实盘最后一根 K 线 close 变化时自动失效重算 `ptop/pbottom/pbreak` 信号。
     - [x] **WARN-4+5: 修复 `_db_query_cache` 与 `_platform_breakout_cache` 24×7 挂机内存膨胀**：在 `is_new_stock` 切股时统一 `clear()` 清理 DB 查询缓存、平台计算缓存与 Fibonacci 脏检查标记 `_fib_last_range`，防止长期运行切换数千只股票后字典无限增长。
     - [x] **语法校验与单元测试 100% 通过**：`py_compile` 语法编译通过，`pytest tests/test_signal_ledger.py` 全量 13 项单元测试 **100% PASSED**！
+
+## 2026-08-24 18:12
+- [x] **修复 ATS 外部终端物理联动 `link_stock` 中 `is_ths` 变量未定义导致联动报错的缺陷 (`ats/ui/main_window.py`, `tests/test_favorites_and_styles.py`)**：
+    - [x] **根因分析**：在 `ATSMainWindow.link_stock` 物理联动派发分支中，判断条件直接引用了 `is_ths`，但之前仅定义了 `is_tdx` 而漏写了 `is_ths` 的提取，导致点击标的或信号广播时触发 `NameError: name 'is_ths' is not defined`。
+    - [x] **实施修复**：在 [main_window.py](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/ats/ui/main_window.py#L2642) 中补齐 `is_ths = self.cb_ths.isChecked() if hasattr(self, 'cb_ths') else True`。
+    - [x] **单元测试验证**：在 `tests/test_favorites_and_styles.py` 中新增 `test_main_window_link_stock_no_name_error`，全量测试 **100% PASSED**！
+
+## 2026-08-24 18:10
+- [x] **实现量化金融终端专属 `ColorPreservingItemDelegate`，彻底根治表格行被选中时红绿色与高亮文字被覆盖变色的缺陷 (`ats/ui/styles.py`, `ats/ui/base_table.py`, `tk_gui_modules/qt_table_utils.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/sector_detail_dialog.py`, `tests/test_favorites_and_styles.py`)**：
+    - [x] **根因解构与机制分析**：在 Qt 默认 `QStyledItemDelegate` 渲染中，当行被点击/选中（`State_Selected`）时，系统样式引擎会无脑以 `QPalette.HighlightedText`（白色/浅灰）覆盖单元格自身设置的前景色，导致选中行的上涨红（`#ff4444`）、下跌绿（`#33cc5a`）、主力金（`#ffd700`）等颜色全部丢失。
+    - [x] **实现 `ColorPreservingItemDelegate` 高保真前景色委托**：重写 `initStyleOption`，从单元格动态获取 `ForegroundRole` 的 `QBrush`，并在处于选中（`Selected`/`Active`/`Inactive`）状态时同步将其画刷注入至 `QPalette.HighlightedText`。
+    - [x] **全系统核心表格组件无缝挂载**：在 `BaseATSTableWidget`（新股次新股、⭐ 重点关注、📉 MA20d 回调跟踪器）、`EnhancedTableWidget`、`DailyLimitUpDialog`（涨停天梯）、`HotSectorLeaderboardDialog`（板块龙头突击）及 `SectorDetailDialog`（板块明细）中全量挂载，使全系统表格点击行时的色彩保真度与左侧策略股票池（`UniverseTreeWidget`）达到 100% 完全一致。
+    - [x] **全量自动化测试验证 100% 通过**：扩展 `tests/test_favorites_and_styles.py` 断言，运行 `pytest tests/test_favorites_and_styles.py tests/test_disk_io_and_cache_safety.py tests/test_new_stock_module.py`，全量 14 项测试 **100% PASSED**！
+
+## 2026-08-24 17:50
+- [x] **根治 ATS 选中行文本变绿配色 Bug，实现新股次新股/重点关注/策略股票池多 Tab 0ms 全系统重点关注即时联动 (`ats/ui/styles.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/sector_detail_dialog.py`, `tk_gui_modules/qt_table_utils.py`, `ats/ui/new_stock_panel.py`, `ats/ui/universe_widget.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_favorites_and_styles.py`)**：
+    - [x] **根治选中行红色/黄色文字被全局刷绿的 QSS Bug**：定位并剥离 `ats/ui/styles.py`、`hot_sector_leaderboard.py`、`sector_detail_dialog.py`、`qt_table_utils.py` 等全局与局部 QSS 中的 `selection-color: #00ff88;`。统一采用金融软件标准暗深蓝高亮背景 `selection-background-color: #1e334d;`，绝不强制覆盖 Item 自带的前景文本色彩，完美恢复上涨红、下跌绿、平盘灰、主力金等真实色彩。
+    - [x] **根治新股次新股 Tab 在添加/取消重点关注后界面不刷新的缺陷**：重构 `NewStockPanel._toggle_favorite` 与 `refresh_favorites_display`，移除阻塞式模态对话框，支持右键切换后立即原位重绘星标 ⭐ 与高亮置顶排序，并主动通知主窗口 `_safe_favorites_changed()`。
+    - [x] **补齐主看板 Tab 切换监听与全系统 0ms 即时同步**：在 `ATSMainWindow` 补齐 `_on_top_tab_changed` 槽函数；重构 `_safe_favorites_changed`，在重点关注变更时同步触发 `favorite_panel`、`swing_table`、`new_stock_panel`、`universe_manager.sync_from_ledger()` 以及 `universe_widget.update_pools()`，彻底消除左侧股票池与各子窗口需要重启才能更新关注列表的顽疾。
+    - [x] **全量单元测试 100% 验证通过**：新建 `tests/test_favorites_and_styles.py`，全量 16 项单元测试 `pytest tests/test_favorites_and_styles.py tests/test_intraday_strategy_engine.py tests/test_tdx_realtime_fetcher.py` **100% PASSED**！
 
 ## 2026-08-15 16:22
 - [x] **修复 Simple 监控窗口点击时联动将同屏幕其他 Simple 窗口自动带到最前显示 (`stock_standalone/instock_MonitorTK.py`)**：

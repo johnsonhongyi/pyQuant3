@@ -37,13 +37,12 @@ QHeaderView::section {
     border: 1px solid #2e2e36;
     font-weight: bold;
 }
-QTableWidget, QTreeView, QTreeWidget {
+QTableWidget, QTreeView, QTreeWidget, QTableView {
     background-color: #18181c;
     alternate-background-color: #1f1f24;
     border: 1px solid #2e2e36;
     gridline-color: #2e2e36;
-    selection-background-color: #2a3a4a;
-    selection-color: #00ff88;
+    selection-background-color: #1e334d;
 }
 QTableCornerButton::section {
     background-color: #1a1a1f;
@@ -128,8 +127,8 @@ QComboBox:hover {
 QComboBox QAbstractItemView {
     background-color: #1c1c22;
     border: 1px solid #3e3e4a;
-    selection-background-color: #2a3a4a;
-    selection-color: #00ff88;
+    selection-background-color: #1e334d;
+    selection-color: #ffffff;
 }
 
 /* CheckBox */
@@ -182,7 +181,30 @@ import threading
 from typing import Any, Optional, Union, List, Dict
 CONFIG_FILE_LOCK = threading.RLock()
 
-from PyQt6.QtWidgets import QTableWidgetItem
+from PyQt6.QtWidgets import QTableWidgetItem, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QApplication
+from PyQt6.QtCore import Qt, QModelIndex
+from PyQt6.QtGui import QColor, QPalette, QBrush
+
+class ColorPreservingItemDelegate(QStyledItemDelegate):
+    """
+    量化金融终端专属 Delegate：
+    当表格行被点击/选中 (Selected) 时，高亮背景正常呈现 (暗深蓝 #1e334d 或指定高亮背景)，
+    但单元格自身的文字前景色 (红/绿/金/白/灰等) 100% 得到保留与保真渲染，绝不被白色/浅蓝覆盖！
+    行为与左侧策略股票池 (QTreeWidget) 保持完全一致！
+    """
+    def initStyleOption(self, option: QStyleOptionViewItem, index: QModelIndex):
+        super().initStyleOption(option, index)
+        fg_data = index.data(Qt.ItemDataRole.ForegroundRole)
+        if fg_data is not None:
+            brush = fg_data if isinstance(fg_data, QBrush) else QBrush(QColor(fg_data))
+            # 无论是否处于 Selected / Focused 状态，文本前景色均锁定为 item 显式指定的颜色
+            option.palette.setBrush(QPalette.ColorGroup.Normal, QPalette.ColorRole.HighlightedText, brush)
+            option.palette.setBrush(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText, brush)
+            option.palette.setBrush(QPalette.ColorGroup.Inactive, QPalette.ColorRole.HighlightedText, brush)
+            option.palette.setBrush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, brush)
+            option.palette.setBrush(QPalette.ColorGroup.Normal, QPalette.ColorRole.Text, brush)
+            option.palette.setBrush(QPalette.ColorGroup.Active, QPalette.ColorRole.Text, brush)
+
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """
