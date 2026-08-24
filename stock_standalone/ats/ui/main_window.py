@@ -28,7 +28,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QE
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
-from ats.ui.styles import DARK_THEME_QSS
+from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch
 from ats.ui.universe_widget import UniverseTreeWidget
 from ats.ui.heatmap_widget import SectorHeatmapWidget
 from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
@@ -535,10 +535,15 @@ class StockDetailDialog(QDialog):
         self.context_info = context_info
         self.batch_codes = batch_codes
 
-        # 0. 明确设置为独立顶层窗口类型，并防止主应用退出
+        # 0. 明确设置为独立顶层窗口类型，并加载置顶配置
+        self.stays_on_top = self._load_stays_on_top()
         flags = self.windowFlags()
         flags &= ~Qt.WindowType.Dialog
         flags |= Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         
@@ -594,6 +599,49 @@ class StockDetailDialog(QDialog):
     def _get_parent_mw(self):
         return getattr(self, '_py_parent', None) or self.parent()
 
+    def _load_stays_on_top(self) -> bool:
+        try:
+            from ats.ui.styles import load_config_node
+            dialog_config = load_config_node("ats_stock_detail_dialog_config", {})
+            if isinstance(dialog_config, dict) and "stays_on_top" in dialog_config:
+                return bool(dialog_config["stays_on_top"])
+        except Exception:
+            pass
+        return False
+
+    def _save_config_state(self):
+        try:
+            from ats.ui.styles import save_config_node
+            save_config_node("ats_stock_detail_dialog_config", {"stays_on_top": getattr(self, "stays_on_top", False)})
+        except Exception:
+            pass
+
+    def _on_stays_on_top_toggled(self, state):
+        self.stays_on_top = self.chk_on_top.isChecked()
+        flags = self.windowFlags()
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+            # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
+            if getattr(self, 'is_hidden_state', False):
+                self.show_normal_position()
+            self.is_hidden_state = False
+            self.anchor_edge = None
+            self.normal_geometry = None
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+            self.hover_ticks = 0
+            self.leave_ticks = 0
+            self.setWindowOpacity(1.0)
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.start()
+        self.setWindowFlags(flags)
+        self.show()
+        self._save_config_state()
+
     def _scan_kernel_trace(self):
         """扫描最新交易内核 Trace 记录"""
         self.kernel_info = {}
@@ -638,6 +686,7 @@ class StockDetailDialog(QDialog):
             from ats.ui.styles import save_config_node
             hex_data = self.saveGeometry().toHex().data().decode('utf-8')
             save_config_node("ats_stock_detail_dialog_geom", hex_data)
+            self._save_config_state()
         except Exception:
             pass
 
@@ -874,6 +923,18 @@ class StockDetailDialog(QDialog):
         self.price_pct_label = QLabel("--  (--)")
         self.price_pct_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #8e8e93;")
         header_layout.addWidget(self.price_pct_label)
+        header_layout.addSpacing(10)
+
+        # 置顶复选框
+        self.chk_on_top = QCheckBox("置顶")
+        self.chk_on_top.setStyleSheet("""
+            QCheckBox { color: #00FFCC; font-size: 9pt; font-weight: bold; }
+            QCheckBox::indicator { width: 12px; height: 12px; }
+        """)
+        self.chk_on_top.setChecked(getattr(self, "stays_on_top", False))
+        self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
+        header_layout.addWidget(self.chk_on_top)
+
         layout.addLayout(header_layout)
         
         # 1.5 Context Info Block (策略特征上下文)
@@ -1464,7 +1525,8 @@ class StockDetailDialog(QDialog):
         self.anim_group.start()
 
     def _detect_and_snap(self):
-        if self.is_hidden_state:
+        # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
+        if getattr(self, "stays_on_top", False) or getattr(self, "is_hidden_state", False):
             return
             
         from PyQt6.QtWidgets import QApplication
@@ -1511,6 +1573,9 @@ class StockDetailDialog(QDialog):
             self.normal_geometry = None
 
     def hide_to_edge(self):
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
+        if getattr(self, "stays_on_top", False):
+            return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
             
@@ -1543,24 +1608,30 @@ class StockDetailDialog(QDialog):
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
     def show_normal_position(self):
-        if not self.is_hidden_state or not self.normal_geometry:
-            return
-            
-        self._is_auto_popping = True
-        QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
-            
-        self.is_hidden_state = False
-        import time
-        self._last_show_time = time.time()
-        self._has_hovered_since_show = False
-        # 启动滑出恢复的平滑过渡动画
-        self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+        if getattr(self, "is_hidden_state", False):
+            self._is_auto_popping = True
+            QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            self.is_hidden_state = False
+            import time
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
         
+        self.show()
         self.raise_()
         self.activateWindow()
 
     def _check_hover(self):
-        if not self.isVisible():
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
+            return
+            
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        if not self.anchor_edge and not self.is_hidden_state:
             return
             
         from PyQt6.QtWidgets import QApplication
@@ -1605,6 +1676,16 @@ class StockDetailDialog(QDialog):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
+        if getattr(self, "stays_on_top", False):
+            if hasattr(self, "snap_timer") and self.snap_timer is not None:
+                try:
+                    self.snap_timer.stop()
+                except Exception:
+                    pass
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
         if not getattr(self, "is_hidden_state", False) and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
@@ -2160,8 +2241,8 @@ class ATSMainWindow(QMainWindow):
             top_corner_layout.addWidget(self.swing_table.btn_refresh)
 
         self.top_tabs.setCornerWidget(top_corner_container, Qt.Corner.TopRightCorner)
-
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
+        enable_tab_direct_switch(self.top_tabs)
         self.center_splitter.addWidget(self.top_tabs)
         
         # 2. Bottom Tabs in center panel (底部从属 Tab: 持仓 + 订单 + 回测 + 轨迹)
@@ -2180,6 +2261,7 @@ class ATSMainWindow(QMainWindow):
         
         self.kernel_trace_panel = KernelTracePanel()
         self.center_tabs.addTab(self.kernel_trace_panel, "🤖 内核轨迹 (Kernel Trace)")
+        enable_tab_direct_switch(self.center_tabs)
         
         self.center_splitter.addWidget(self.center_tabs)
         self.center_splitter.setSizes([450, 450])
@@ -2198,16 +2280,17 @@ class ATSMainWindow(QMainWindow):
         self.heatmap_widget = SectorHeatmapWidget()
         self.right_splitter.addWidget(self.heatmap_widget)
         
-        # Right charts tab
+        # Right charts tab (市场分布 + 资金明细，启用箭头点击直接切换)
         self.right_tabs = QTabWidget()
         self.right_tabs.setMinimumWidth(100)
         self.right_tabs.setMinimumHeight(80)
         
         self.dist_chart = DistributionBarChart()
-        self.right_tabs.addTab(self.dist_chart, "📊 市场分布 (Dist)")
+        self.right_tabs.addTab(self.dist_chart, "📊 市场分布")
         
         self.equity_chart = EquityCurveChart()
-        self.right_tabs.addTab(self.equity_chart, "📈 资金曲线 (Equity)")
+        self.right_tabs.addTab(self.equity_chart, "📈 资金明细")
+        enable_tab_direct_switch(self.right_tabs)
         
         # 资金曲线 / 右侧 Tab 右上角添加【📋 强势黑马详情】(图2) 与【🗔 独立放大窗口】组合入口
         corner_container = QWidget()

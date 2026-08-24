@@ -301,7 +301,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 from gui_utils import clamp_window_to_screens
                 rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
                 self.normal_geometry = QRect(rx, ry, rw, rh)
-                self.anchor_edge = restore_state.get("anchor_edge")
+                if self.stays_on_top or restore_state.get("stays_on_top", False):
+                    self.anchor_edge = None
+                    self.is_hidden_state = False
+                    self.setWindowOpacity(1.0)
+                else:
+                    self.anchor_edge = restore_state.get("anchor_edge")
                 self.setGeometry(rx, ry, rw, rh)
             except Exception as e:
                 logger.warning(f"恢复窗口位置异常: {e}")
@@ -639,8 +644,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 "width": width,
                 "height": height,
                 "stays_on_top": self.stays_on_top,
-                "anchor_edge": self.anchor_edge,
-                "is_hidden_state": self.is_hidden_state,
+                "anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "is_hidden_state": False if self.stays_on_top else self.is_hidden_state,
                 "is_open": bool(is_open)
             }
             from ats.ui.styles import save_config_node

@@ -255,7 +255,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         # End initialization lock protection
         QTimer.singleShot(200, lambda: setattr(self, '_is_updating', False))
         
-        # 3. 磁吸与隐藏状态初始化
+        # 3. 磁吸与隐藏状态初始化 (置顶状态下彻底停用磁吸并还原)
         self.anchor_edge = None
         self.is_hidden_state = False
         self.normal_geometry = None
@@ -268,11 +268,15 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self._has_hovered_since_show = False
         self._is_auto_popping = False
         
-        # 悬停与离开监控定时器
+        if self.stays_on_top:
+            self.setWindowOpacity(1.0)
+        
+        # 悬停与离开监控定时器 (置顶状态下直接不启动，0 开销 0 干扰)
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(100)
         self.hover_timer.timeout.connect(self._check_hover)
-        self.hover_timer.start()
+        if not self.stays_on_top:
+            self.hover_timer.start()
         
         # 拖拽结束防抖定时器
         self.snap_timer = QTimer(self)
@@ -344,8 +348,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 "width": width,
                 "height": height,
                 "stays_on_top": self.stays_on_top,
-                "anchor_edge": self.anchor_edge,
-                "is_hidden_state": self.is_hidden_state,
+                "anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "is_hidden_state": False if self.stays_on_top else self.is_hidden_state,
                 "bucket_idx": self.bucket_idx,
                 "is_open": is_open
             }
@@ -370,10 +374,26 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         flags = self.windowFlags()
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
+            # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
+            if getattr(self, 'is_hidden_state', False):
+                self.show_normal_position()
+            self.is_hidden_state = False
+            self.anchor_edge = None
+            self.normal_geometry = None
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+            self.hover_ticks = 0
+            self.leave_ticks = 0
+            self.setWindowOpacity(1.0)
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.start()
         self.setWindowFlags(flags)
         self.show()
+        self._save_window_states(is_open=True)
 
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
         """
@@ -424,7 +444,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.anim_group.start()
 
     def _detect_and_snap(self):
-        if self.is_hidden_state:
+        # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
+        if getattr(self, "stays_on_top", False) or self.is_hidden_state:
             return
             
         from PyQt6.QtWidgets import QApplication
@@ -469,6 +490,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             self.normal_geometry = None
 
     def hide_to_edge(self):
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
+        if getattr(self, "stays_on_top", False):
+            return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
             
@@ -500,15 +524,18 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
     def show_normal_position(self):
-        if self.is_hidden_state and self.normal_geometry:
+        if getattr(self, "is_hidden_state", False):
             self._is_auto_popping = True
             QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
-            
             self.is_hidden_state = False
             import time
             self._last_show_time = time.time()
             self._has_hovered_since_show = False
-            self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
         
         self.show()
         self.raise_()
@@ -516,7 +543,12 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self._save_window_states(is_open=True)
 
     def _check_hover(self):
-        if not self.isVisible():
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
+            return
+            
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        if not self.anchor_edge and not self.is_hidden_state:
             return
             
         from PyQt6.QtWidgets import QApplication
@@ -561,6 +593,13 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
+        if getattr(self, "stays_on_top", False):
+            if hasattr(self, "snap_timer") and self.snap_timer:
+                self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             # 拖拽时立即重置磁吸边缘，避免拖动过程中鼠标离开导致的强行缩回
@@ -1413,35 +1452,42 @@ class DistributionBarChart(QWidget):
                 
                 # 恢复 normal_geometry
                 dialog.normal_geometry = QRect(rx, ry, rw, rh)
-                dialog.anchor_edge = restore_state.get("anchor_edge")
                 
-                # 恢复隐藏状态
-                is_hidden = restore_state.get("is_hidden_state", False)
-                if is_hidden and dialog.anchor_edge:
-                    dialog.is_hidden_state = True
-                    # 计算收缩隐藏后的临时坐标
-                    strip_size = 5
-                    screen = dialog.screen() or QApplication.primaryScreen()
-                    screen_geo = screen.availableGeometry()
-                    
-                    if dialog.anchor_edge == "left":
-                        hx = screen_geo.left() - rw + strip_size
-                        hy = ry
-                    elif dialog.anchor_edge == "right":
-                        hx = screen_geo.right() - strip_size
-                        hy = ry
-                    elif dialog.anchor_edge == "top":
-                        hx = rx
-                        hy = screen_geo.top() - rh + strip_size
-                    else:
-                        hx, hy = rx, ry
-                        dialog.is_hidden_state = False
-                        
-                    dialog.setGeometry(hx, hy, rw, rh)
-                    dialog.setWindowOpacity(0.35)
-                else:
+                # 【置顶与磁吸严格互斥】：若置顶状态，强制清除任何磁吸锚点与折叠状态，保持自由悬浮置顶
+                if getattr(dialog, 'stays_on_top', False):
+                    dialog.anchor_edge = None
+                    dialog.is_hidden_state = False
                     dialog.setGeometry(rx, ry, rw, rh)
                     dialog.setWindowOpacity(1.0)
+                else:
+                    dialog.anchor_edge = restore_state.get("anchor_edge")
+                    # 恢复隐藏状态
+                    is_hidden = restore_state.get("is_hidden_state", False)
+                    if is_hidden and dialog.anchor_edge:
+                        dialog.is_hidden_state = True
+                        # 计算收缩隐藏后的临时坐标
+                        strip_size = 5
+                        screen = dialog.screen() or QApplication.primaryScreen()
+                        screen_geo = screen.availableGeometry()
+                        
+                        if dialog.anchor_edge == "left":
+                            hx = screen_geo.left() - rw + strip_size
+                            hy = ry
+                        elif dialog.anchor_edge == "right":
+                            hx = screen_geo.right() - strip_size
+                            hy = ry
+                        elif dialog.anchor_edge == "top":
+                            hx = rx
+                            hy = screen_geo.top() - rh + strip_size
+                        else:
+                            hx, hy = rx, ry
+                            dialog.is_hidden_state = False
+                            
+                        dialog.setGeometry(hx, hy, rw, rh)
+                        dialog.setWindowOpacity(0.35)
+                    else:
+                        dialog.setGeometry(rx, ry, rw, rh)
+                        dialog.setWindowOpacity(1.0)
             except Exception as e:
                 print(f"[DistributionBarChart] Error restoring window geometry: {e}")
                 
