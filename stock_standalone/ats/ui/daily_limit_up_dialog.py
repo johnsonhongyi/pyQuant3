@@ -255,8 +255,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     "y": geom.y(),
                     "width": geom.width(),
                     "height": geom.height(),
-                    "anchor_edge": self.anchor_edge,
-                    "is_hidden": self.is_hidden_state,
+                    "anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                    "is_hidden": False if self.stays_on_top else self.is_hidden_state,
                     "stays_on_top": self.stays_on_top,
                     "current_mode": self.current_mode,
                     "is_narrow_mode": self.is_narrow_mode,
@@ -288,8 +288,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.setGeometry(x, y, w, h)
                 self.normal_geometry = QRect(x, y, w, h)
 
-            self.anchor_edge = state.get("anchor_edge")
-            self.is_hidden_state = state.get("is_hidden", False)
+            if self.stays_on_top or state.get("stays_on_top", False):
+                self.anchor_edge = None
+                self.is_hidden_state = False
+                self.setWindowOpacity(1.0)
+            else:
+                self.anchor_edge = state.get("anchor_edge")
+                self.is_hidden_state = state.get("is_hidden", False)
             if state.get("current_mode"):
                 self.current_mode = state["current_mode"]
         except Exception as e:
@@ -634,12 +639,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         """
 
     def _populate_history_dates(self):
+        curr_text = self.combo_history_date.currentText() if hasattr(self, 'combo_history_date') else ""
         self.combo_history_date.blockSignals(True)
         self.combo_history_date.clear()
         self.combo_history_date.addItem("实时今日")
         archived_dates = self.engine.get_all_archived_dates()
-        for d in reversed(archived_dates):
+        target_idx = 0
+        for idx, d in enumerate(reversed(archived_dates), 1):
             self.combo_history_date.addItem(d)
+            if d == curr_text:
+                target_idx = idx
+        if target_idx > 0:
+            self.combo_history_date.setCurrentIndex(target_idx)
         self.combo_history_date.blockSignals(False)
 
     def _switch_mode(self, mode: str):
@@ -736,14 +747,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if self.current_mode == "TODAY":
             if df is not None and not df.empty:
                 self.current_records = self.engine.scan_limit_up_records_from_df(df, fetch_l2_quotes=True, extra_cols=self.extra_cols)
-                # 盘中/盘后自动归档 (增加 30 秒节流 + 后台线程异步落盘，彻底消除主线程磁盘 I/O 阻塞)
+                # 盘中/盘后自动归档 (交易后强制终态落盘，盘中增加 5 分钟 (300秒) 节流 + 后台线程异步落盘)
                 now = time.time()
-                if now - getattr(self, '_last_disk_save_time', 0.0) >= 30.0:
+                is_post_trading = time.strftime("%H:%M") >= "15:00"
+                if is_post_trading or (now - getattr(self, '_last_disk_save_time', 0.0) >= 300.0):
                     self._last_disk_save_time = now
                     recs_copy = list(self.current_records)
                     threading.Thread(
                         target=self.engine.save_daily_records_atomic,
                         args=(today_str, recs_copy),
+                        kwargs={"force": is_post_trading, "is_eod": is_post_trading},
                         daemon=True
                     ).start()
             else:
@@ -778,7 +791,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             return
 
         raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else "⚡ 自动实盘跟随"
-        if "全天全时段" in raw_slice:
+        if getattr(self, "current_mode", "TODAY") == "HISTORY" and "自动实盘跟随" in raw_slice:
+            # 历史回溯模式下，若选择自动实盘跟随，默认展示该历史日的全天完整数据，不应受当前本地时钟截断
+            time_slice = "⏱️ 全天全时段"
+        elif "全天全时段" in raw_slice:
             # 用户明确选择【全天全时段】时，锁定全量展示，绝不自动切换
             time_slice = "⏱️ 全天全时段"
         elif "自动实盘跟随" in raw_slice:
@@ -1315,7 +1331,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 # 19. 动态 ats_col 自定义列
                 for ec in self.extra_cols:
-                    raw_val = extra_dict.get(ec, "--")
+                    raw_val = extra_dict.get(ec, extra_dict.get(ec.lower(), extra_dict.get(ec.upper(), r.get(ec, r.get(ec.lower(), "--")))))
                     self._set_table_item(row_idx, col, str(raw_val), fg=QColor("#e2e2e5"), align=Qt.AlignmentFlag.AlignCenter); col += 1
 
                 # 20. 所属板块
@@ -1704,11 +1720,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.stays_on_top = checked
         if checked:
             self.snap_timer.stop()
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
             self.anchor_edge = None
             self.normal_geometry = None
             if self.is_hidden_state:
                 self.show_normal_position()
             self.setWindowOpacity(1.0)
+        else:
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.start()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
         self.show()
         self._save_window_states()
@@ -1797,6 +1818,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._save_window_states(is_open=True)
 
     def hide_to_edge(self):
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
+        if getattr(self, "stays_on_top", False):
+            return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
             
@@ -1942,6 +1966,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 显式持久化保存最新手动/自动调整的表格列宽
         self._save_current_column_widths()
 
+        # 关闭前确保当日最新涨停分析数据即时原子落盘并完成 Gzip 压缩打包
+        if getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
+            today_str = time.strftime("%Y-%m-%d")
+            recs_copy = list(self.current_records)
+            threading.Thread(
+                target=self.engine.save_daily_records_atomic,
+                args=(today_str, recs_copy),
+                kwargs={"force": True, "is_eod": True},
+                daemon=True
+            ).start()
+
         main_app = self._get_main_app()
         is_app_exiting = False
         if main_app:
@@ -1958,6 +1993,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if hasattr(self, '_header_save_timer'):
             self._header_save_timer.stop()
         self._save_current_column_widths()
+
+        if getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
+            today_str = time.strftime("%Y-%m-%d")
+            recs_copy = list(self.current_records)
+            threading.Thread(
+                target=self.engine.save_daily_records_atomic,
+                args=(today_str, recs_copy),
+                kwargs={"force": True, "is_eod": True},
+                daemon=True
+            ).start()
 
         main_app = self._get_main_app()
         is_app_exiting = False

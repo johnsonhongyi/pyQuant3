@@ -170,34 +170,40 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
                 
                 self.normal_geometry = QRect(rx, ry, rw, rh)
-                self.anchor_edge = restore_state.get("anchor_edge")
                 
-                is_hidden = restore_state.get("is_hidden_state", False)
-                if is_hidden and self.anchor_edge:
-                    self.is_hidden_state = True
-                    strip_size = 5
-                    from PyQt6.QtCore import QPoint
-                    screen = QApplication.screenAt(QPoint(rx, ry)) or self.screen() or QApplication.primaryScreen()
-                    screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-                    
-                    if self.anchor_edge == "left":
-                        hx = screen_geo.left() - rw + strip_size
-                        hy = ry
-                    elif self.anchor_edge == "right":
-                        hx = screen_geo.right() - strip_size
-                        hy = ry
-                    elif self.anchor_edge == "top":
-                        hx = rx
-                        hy = screen_geo.top() - rh + strip_size
-                    else:
-                        hx, hy = rx, ry
-                        self.is_hidden_state = False
-                        
-                    self.setGeometry(hx, hy, rw, rh)
-                    self.setWindowOpacity(0.35)
-                else:
+                if self.stays_on_top or restore_state.get("stays_on_top", False):
+                    self.anchor_edge = None
+                    self.is_hidden_state = False
                     self.setGeometry(rx, ry, rw, rh)
                     self.setWindowOpacity(1.0)
+                else:
+                    self.anchor_edge = restore_state.get("anchor_edge")
+                    is_hidden = restore_state.get("is_hidden_state", False)
+                    if is_hidden and self.anchor_edge:
+                        self.is_hidden_state = True
+                        strip_size = 5
+                        from PyQt6.QtCore import QPoint
+                        screen = QApplication.screenAt(QPoint(rx, ry)) or self.screen() or QApplication.primaryScreen()
+                        screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                        
+                        if self.anchor_edge == "left":
+                            hx = screen_geo.left() - rw + strip_size
+                            hy = ry
+                        elif self.anchor_edge == "right":
+                            hx = screen_geo.right() - strip_size
+                            hy = ry
+                        elif self.anchor_edge == "top":
+                            hx = rx
+                            hy = screen_geo.top() - rh + strip_size
+                        else:
+                            hx, hy = rx, ry
+                            self.is_hidden_state = False
+                            
+                        self.setGeometry(hx, hy, rw, rh)
+                        self.setWindowOpacity(0.35)
+                    else:
+                        self.setGeometry(rx, ry, rw, rh)
+                        self.setWindowOpacity(1.0)
             except Exception as e:
                 logger.warning(f"[DragonLeaderMonitorDialog] Error restoring geometry: {e}")
                 self.load_window_position_qt(self, "dragon_leader_monitor_dialog", default_width=800, default_height=500)
@@ -364,12 +370,10 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
     def _load_stays_on_top(self) -> bool:
         try:
-            if os.path.exists(WINDOW_CONFIG_FILE):
-                with _CONFIG_FILE_LOCK:
-                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        cfg = data.get("dragon_leader_monitor_dialog", {})
-                        return cfg.get("stays_on_top", False)
+            from ats.ui.styles import load_config_node
+            cfg = load_config_node("dragon_leader_monitor_dialog", {})
+            if isinstance(cfg, dict) and "stays_on_top" in cfg:
+                return bool(cfg["stays_on_top"])
         except Exception:
             pass
         return False
@@ -379,10 +383,25 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         flags = self.windowFlags()
         if self.stays_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
+            # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
+            if getattr(self, 'is_hidden_state', False):
+                self.show_normal_position()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+            self.hover_ticks = 0
+            self.leave_ticks = 0
+            self.setWindowOpacity(1.0)
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.start()
         self.setWindowFlags(flags)
         self.show()
+        self._save_window_states()
 
     def _save_window_states(self, is_open=None) -> None:
         try:
@@ -401,8 +420,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 "width": width,
                 "height": height,
                 "stays_on_top": self.stays_on_top,
-                "anchor_edge": self.anchor_edge,
-                "is_hidden_state": self.is_hidden_state,
+                "anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "is_hidden_state": False if self.stays_on_top else self.is_hidden_state,
                 "is_open": bool(is_open)
             }
             from ats.ui.styles import save_config_node
@@ -989,7 +1008,8 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.anim_group.start()
 
     def _detect_and_snap(self):
-        if self.is_hidden_state:
+        # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
+        if getattr(self, "stays_on_top", False) or self.is_hidden_state:
             return
             
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -1031,6 +1051,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             self.normal_geometry = None
 
     def hide_to_edge(self):
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
+        if getattr(self, "stays_on_top", False):
+            return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
             
@@ -1110,7 +1133,12 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self._save_window_states(is_open=True)
 
     def _check_hover(self):
-        if not self.isVisible():
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
+            return
+            
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        if not self.anchor_edge and not self.is_hidden_state:
             return
             
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -1152,6 +1180,13 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
+        if getattr(self, "stays_on_top", False):
+            if hasattr(self, "snap_timer") and self.snap_timer:
+                self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             self.anchor_edge = None

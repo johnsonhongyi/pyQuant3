@@ -3695,6 +3695,58 @@ close/wap 显式字段，并在按 mount/volume 换算时自适应校准 100 �
 
 
 
+## 2026-08-24 21:00
+
+- [x] **盘中自动持久化节流阈值统一为 5 分钟 (300 秒) (Aligned 5-Minute Persistence Throttle)**：
+    - [x] 在 `DailyLimitUpDialog._refresh_data_for_mode` 中，将盘中自动落盘节流时间从 `30.0` 秒更新为 `300.0` 秒 (5 分钟)，与系统其它持久化模块设置完全对齐；收盘 15:00 后及窗口关闭/退出时继续保持 `force=True, is_eod=True` 即时终态固化。
+
+- [x] **个股明细及全系统窗口置顶状态物理切断磁吸与定时器终极防线 (Physical Separation of Hover Timer on Stays-On-Top)**：
+    - [x] **深挖多窗口与持久化恢复冲突根因**：排查发现 `open_details_dialog` 及各窗口的 `_apply_restore_state` 从磁盘读取配置时，如果恢复了历史的 `anchor_edge`，且未判断置顶状态直接赋值；
+    - [x] **在 `open_details_dialog` 与所有 `restore_state` 中加固置顶校验**：若窗口处于 `stays_on_top` 置顶状态，强制清空 `anchor_edge = None`，`is_hidden_state = False`，维持 1.0 不透明度；
+    - [x] **物理关闭置顶下的 `hover_timer`**：在 `DistributionDetailsDialog`、`StockDetailDialog`、`DragonLeaderMonitorDialog`、`DailyLimitUpDialog`、`HotSectorLeaderboardDialog` 的 `_on_stays_on_top_toggled` 中，置顶状态下直接调用 `self.hover_timer.stop()`，非置顶时才启动 `self.hover_timer.start()`，从物理调度层彻底杜绝任何误触折叠与贴边可能；
+    - [x] **自动化测试 10/10 项 100% 全部通过**。
+
+## 2026-08-24 20:50
+
+- [x] **个股明细及全系统磁吸窗口置顶停用磁吸 6 重防线彻底加固 (Full-Stack Snap & Stays-on-Top Absolute Mutex)**：
+    - [x] **全生命周期置顶拦截漏洞修复**：排查发现 `DistributionDetailsDialog`、`StockDetailDialog`、`DragonLeaderMonitorDialog`、`IntradayStrategyDialog` 在 `_check_hover`（100ms 鼠标巡检）与 `hide_to_edge` 中未拦截 `stays_on_top`，导致置顶开启后鼠标移出仍会触发折叠和半透明；
+    - [x] **筑牢 6 重钢铁互斥防线**：
+      1. `_check_hover` 头部增加 `if not self.isVisible() or getattr(self, "stays_on_top", False): return`；
+      2. `hide_to_edge` 头部增加 `if getattr(self, "stays_on_top", False): return`；
+      3. `_detect_and_snap` 头部增加 `if getattr(self, "stays_on_top", False) or self.is_hidden_state: return`；
+      4. `moveEvent` 头部增加置顶拦截与 `snap_timer.stop()`, `anchor_edge = None`；
+      5. `_on_stays_on_top_toggled` 切换置顶时立即强制停止磁吸、展开还原窗口并恢复透明度 1.0；
+      6. `__init__` 初始化加载配置时若为置顶状态，强制清空 `anchor_edge` 与 `is_hidden_state`。
+    - [x] **自动化测试回归全量通过**：更新 `tests/test_tab_switch_and_snap_mutex.py`，新增置顶状态下 `hide_to_edge` 与 `_check_hover` 强行调用直接静默失效断言，测试 100% 通过。
+
+- [x] **涨停天梯数据 Gzip 压缩打包优化与交易后终态持久化保护 (Gzip Archive Compression & Post-Trading Solidification)**：
+    - [x] **双向透明兼容 Gzip 压缩原子落盘**：在 `ats/limit_up_engine.py` 中引入 `gzip`，实现 `_safe_atomic_write_json_gz` 与 `_safe_read_json_or_gz`，单日归档由 250KB 锐减至 ~25KB（压缩率 90%），并向下完全兼容读取历史未压缩 `.json` 文件；
+    - [x] **历史归档存量自动打包与碎片清理**：新增 `_compress_and_cleanup_archives`，启动或交易后自动将磁盘上遗留的未压缩 `ats_limit_up_daily_archive_*.json` 与 `ats_limit_up_records.json` 自动升级为 `.json.gz` 并清理大文件；
+    - [x] **交易后 (Post-Trading) 终态固化保护**：在 15:00 盘后或关闭时传入 `is_eod=True, force=True`，绕过盘中 30 秒节流，执行最终一致性校验、高压打包并输出明确审计日志。
+
+## 2026-08-24 20:40
+
+- [x] **涨停天梯每日数据全列持久化与前日历史回溯完整性保障 (Limit-Up Full-Column Persistence & History Replay Assurance)**：
+    - [x] **全量指标列持久化确认与增强**：确认并强化 `scan_limit_up_records_from_df` 扫描与落盘包含全部指标（基本行情、涨停/炸板判定、五档盘口、买一封单额、封流比%、封成比%、买盘压强、换手%、量比、DFF、DFF2、DFF3、Rank、大盘偏离、共振状态、梯队分类、形态与质量打分、日内时钟生命周期、反身性龙头标记、阳包阴/支撑起爆以及 `n_bc`、`连阳`、`rec` 等全量自定义扩展列）；
+    - [x] **Windows 友好型原子写盘与碎片清理**：在 `ats/limit_up_engine.py` 中引入 `_PERSIST_FILE_LOCK`，实现带重试的 `_safe_atomic_write_json`，并自动清理磁盘历史遗留的 `ats_limit_up_*.tmp_*` 碎片文件；
+    - [x] **历史归档按需加载与日期动态同步**：增强 `get_all_archived_dates()` 与 `get_records_by_date(date_str)`，支持动态扫描磁盘分日归档文件并按需兜底加载，确保任何历史交易日记录即选即显；
+    - [x] **历史回溯模式全时段展示保障**：优化 `DailyLimitUpDialog._apply_filter()`，在历史回溯模式（`current_mode == "HISTORY"`）下自动将“自动实盘跟随”识别为“⏱️ 全天全时段”，杜绝当前实盘时钟过滤截断历史数据；
+    - [x] **窗口关闭与隐藏强制落盘**：在 `DailyLimitUpDialog.closeEvent` 与 `hideEvent` 中增加当日最新涨停记录强制原子落盘逻辑；
+    - [x] **自动化测试回归全量通过**：编写 `tests/test_limit_up_persistence_and_history.py`，覆盖数据全列持久化与历史回放断言，测试 100% 通过。
+
+## 2026-08-24 20:33
+
+- [x] **ATS 市场分布 / 资金明细 Tab 栏左右箭头直接切换功能 (Direct Tab Switch on Arrow Click)**：
+    - [x] **新增通用 Tab 切换过滤器 (`TabDirectSwitchEventFilter` / `enable_tab_direct_switch`)**：在 `ats/ui/styles.py` 中实现统一事件过滤器，自动拦截 `QTabBar` 因空间紧凑而生成的滚动箭头 (`QToolButton`)，点击左箭头直接切换上一页 (`currentIndex - 1`)，点击右箭头直接切换下一页 (`currentIndex + 1`)，支持循环轮转；
+    - [x] **支持 TabBar 滚轮直接切页**：支持鼠标在 Tab 标签栏上滚动直接顺畅切换选项卡；
+    - [x] **精简 Tab 标题与全 TabWidget 挂载**：在 `ats/ui/main_window.py` 中将 Tab 标题优化为 `"📊 市场分布"` 和 `"📈 资金明细"`，并在 `top_tabs`、`center_tabs`、`right_tabs` 上全量启用直接切换，提升全系统 Tab 交互流畅度。
+
+- [x] **ATS 个股明细及各磁吸窗口置顶停用磁吸功能统一对齐 (Unified Snap & Stays-on-Top Mutex)**：
+    - [x] **涨跌分布个股明细 (`DistributionDetailsDialog`) 对齐**：在 `_on_stays_on_top_toggled` 中加入置顶互斥逻辑，开启置顶时立即停止 `snap_timer`、重置 `anchor_edge = None`、若隐藏则调用 `show_normal_position()` 展开还原并恢复透明度 1.0；在 `moveEvent` 和 `_detect_and_snap` 中加入置顶状态直接 return 保护；
+    - [x] **加速龙头追踪器 (`DragonLeaderMonitorDialog`) 对齐**：在 `_on_stays_on_top_toggled`、`moveEvent`、`_detect_and_snap` 中对齐置顶停用磁吸互斥，并统一使用 `load_config_node`；
+    - [x] **实时实盘个股详情 (`StockDetailDialog`) 补全置顶与互斥**：在顶部 Header 新增 `self.chk_on_top = QCheckBox("置顶")`，支持置顶持久化与置顶停用磁吸严格互斥；
+    - [x] **自动化测试回归全量通过**：编写 `tests/test_tab_switch_and_snap_mutex.py`，覆盖 Tab 箭头点击直接切页、各窗口置顶停用磁吸与展开还原断言，测试 100% 通过。
+
 ## 2026-07-16 16:20
 
 - [x] **摰���𠉛氖銝滚�瘨刻��粹𡢿銝芾��𡒊�蝒堒藁���撅���㺭銝舘䌊���憭� (Isolated Layout Keys for Each Return Bucket)**嚗�

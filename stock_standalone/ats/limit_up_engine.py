@@ -27,6 +27,7 @@ ats/limit_up_engine.py — ATS 每日涨停个股数据统计、封单比/量能
 import os
 import sys
 import json
+import gzip
 import time
 import math
 import logging
@@ -41,9 +42,10 @@ from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("LimitUpEngine")
 
-# 本地数据持久化文件路径
+# 本地数据持久化文件路径 (采用 Gzip 压缩打包优化，完全双向兼容纯 JSON)
 DATA_DIR = os.path.join(get_app_root(), "datacsv")
-LIMIT_UP_RECORDS_FILE = os.path.join(DATA_DIR, "ats_limit_up_records.json")
+LIMIT_UP_RECORDS_FILE = os.path.join(DATA_DIR, "ats_limit_up_records.json.gz")
+LIMIT_UP_RECORDS_FILE_LEGACY = os.path.join(DATA_DIR, "ats_limit_up_records.json")
 ARCHIVE_PREFIX = os.path.join(DATA_DIR, "ats_limit_up_daily_archive_")
 
 
@@ -149,6 +151,119 @@ def get_ats_custom_extra_cols() -> List[str]:
     return extra
 
 
+_PERSIST_FILE_LOCK = threading.Lock()
+
+
+def _safe_atomic_write_json_gz(filepath: str, data: Any):
+    """【Windows 友好型高压 Gzip 原子 JSON 写盘】带重试与清理，极大压缩磁盘并杜绝文件占用与 tmp 残留"""
+    gz_target = filepath if filepath.endswith(".gz") else f"{filepath}.gz"
+    tmp_path = f"{gz_target}.tmp_{int(time.time()*1000)}_{os.getpid()}"
+    try:
+        with gzip.open(tmp_path, "wt", encoding="utf-8", compresslevel=6) as f:
+            json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+        
+        # 多次重试替换，应对 Windows 文件短暂占用
+        for retry in range(5):
+            try:
+                if os.path.exists(gz_target):
+                    os.replace(tmp_path, gz_target)
+                else:
+                    os.rename(tmp_path, gz_target)
+                return
+            except Exception:
+                time.sleep(0.05 * (retry + 1))
+        # 最终兜底
+        if os.path.exists(tmp_path):
+            import shutil
+            shutil.move(tmp_path, gz_target)
+    except Exception as e:
+        logger.error(f"原子写入 Gzip JSON 失败 ({gz_target}): {e}")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def _safe_read_json_or_gz(filepath_without_ext: str) -> Optional[Any]:
+    """【双向透明兼容读取】优先解压读取 .json.gz，不存在时回退读取 .json"""
+    # 1. 优先尝试 .json.gz
+    gz_path = filepath_without_ext if filepath_without_ext.endswith(".gz") else f"{filepath_without_ext}.gz"
+    if os.path.exists(gz_path):
+        try:
+            with gzip.open(gz_path, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"读取 Gzip JSON 文件异常 ({gz_path}): {e}")
+
+    # 2. 回退尝试未压缩的 .json
+    raw_path = filepath_without_ext.replace(".json.gz", "").replace(".gz", "")
+    if not raw_path.endswith(".json"):
+        raw_path = f"{raw_path}.json"
+    if os.path.exists(raw_path):
+        try:
+            with open(raw_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"读取未压缩 JSON 文件异常 ({raw_path}): {e}")
+
+    return None
+
+
+def _clean_stale_tmp_files(directory: str):
+    """自动清理磁盘上遗留的历史 .tmp_* 临时碎片文件 (支持 .json.tmp 和 .json.gz.tmp)"""
+    try:
+        if not os.path.exists(directory):
+            return
+        now_ts = time.time()
+        for fname in os.listdir(directory):
+            if ".tmp_" in fname and fname.startswith("ats_limit_up_"):
+                fpath = os.path.join(directory, fname)
+                try:
+                    # 清理超过 10 秒前的残留 tmp 文件
+                    if now_ts - os.path.getmtime(fpath) > 10.0:
+                        os.remove(fpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _compress_and_cleanup_archives(directory: str):
+    """【交易后打包压缩与历史清理】将未压缩的 .json 历史归档自动压缩为 .json.gz 并清理遗留的大文件"""
+    try:
+        if not os.path.exists(directory):
+            return
+        for fname in os.listdir(directory):
+            if fname.startswith("ats_limit_up_daily_archive_") and fname.endswith(".json") and not fname.endswith(".json.gz"):
+                raw_path = os.path.join(directory, fname)
+                gz_path = f"{raw_path}.gz"
+                try:
+                    if not os.path.exists(gz_path):
+                        with open(raw_path, "r", encoding="utf-8") as f_in:
+                            sub_data = json.load(f_in)
+                        _safe_atomic_write_json_gz(gz_path, sub_data)
+                    if os.path.exists(gz_path) and os.path.getsize(gz_path) > 0:
+                        os.remove(raw_path)
+                except Exception as e:
+                    logger.debug(f"压缩历史分日归档异常 ({fname}): {e}")
+            elif fname == "ats_limit_up_records.json":
+                raw_main = os.path.join(directory, fname)
+                gz_main = f"{raw_main}.gz"
+                try:
+                    if not os.path.exists(gz_main):
+                        with open(raw_main, "r", encoding="utf-8") as f_in:
+                            main_data = json.load(f_in)
+                        _safe_atomic_write_json_gz(gz_main, main_data)
+                    if os.path.exists(gz_main) and os.path.getsize(gz_main) > 0:
+                        os.remove(raw_main)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug(f"打包压缩历史归档失败: {e}")
+
+
 class LimitUpEngine:
     """
     ATS 每日涨停与多日强势股聚合分析单例引擎
@@ -176,47 +291,41 @@ class LimitUpEngine:
         # 确保数据目录存在
         os.makedirs(DATA_DIR, exist_ok=True)
 
-        # 启动时加载持久化历史数据
+        # 启动时清理历史残留 tmp 文件、打包压缩遗留纯文本并加载持久化历史数据
+        _clean_stale_tmp_files(DATA_DIR)
+        _compress_and_cleanup_archives(DATA_DIR)
         self._load_persisted_history_records()
 
     def _load_persisted_history_records(self):
-        """【💾 磁盘持久化加载】冷启动瞬间恢复历史涨停与强势股归档记录"""
+        """【💾 磁盘持久化加载】冷启动瞬间恢复历史涨停与强势股归档记录 (支持 .json.gz 与 .json)"""
         with self._cache_lock:
-            # 1. 尝试从全量归档主文件加载
-            if os.path.exists(LIMIT_UP_RECORDS_FILE):
-                try:
-                    with open(LIMIT_UP_RECORDS_FILE, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if isinstance(data, dict):
-                            self._history_daily_records = data
-                            logger.info(f"✅ 成功从主持久化文件加载涨停历史数据: 共 {len(data)} 个交易日记录")
-                except Exception as e:
-                    logger.warning(f"加载主涨停持久化文件异常: {e}")
+            # 1. 尝试从全量归档主文件加载 (优先 .json.gz)
+            main_data = _safe_read_json_or_gz(LIMIT_UP_RECORDS_FILE)
+            if main_data and isinstance(main_data, dict):
+                self._history_daily_records = main_data
+                logger.info(f"✅ 成功从主持久化文件加载涨停历史数据: 共 {len(main_data)} 个交易日记录")
 
-            # 2. 补充扫描分日归档文件 (ats_limit_up_daily_archive_YYYY-MM-DD.json)
+            # 2. 补充扫描分日归档文件 (ats_limit_up_daily_archive_YYYY-MM-DD.json.gz / .json)
             try:
                 if os.path.exists(DATA_DIR):
                     for fname in os.listdir(DATA_DIR):
-                        if fname.startswith("ats_limit_up_daily_archive_") and fname.endswith(".json"):
-                            date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json", "")
+                        if fname.startswith("ats_limit_up_daily_archive_") and (fname.endswith(".json.gz") or fname.endswith(".json")):
+                            date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json.gz", "").replace(".json", "")
                             if date_part not in self._history_daily_records:
                                 fpath = os.path.join(DATA_DIR, fname)
-                                try:
-                                    with open(fpath, "r", encoding="utf-8") as f_sub:
-                                        sub_data = json.load(f_sub)
-                                        if isinstance(sub_data, list):
-                                            self._history_daily_records[date_part] = sub_data
-                                except Exception:
-                                    pass
+                                sub_data = _safe_read_json_or_gz(fpath)
+                                if isinstance(sub_data, list):
+                                    self._history_daily_records[date_part] = sub_data
             except Exception as e:
                 logger.debug(f"扫描分日涨停归档异常: {e}")
 
-    def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False):
+    def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False, is_eod: bool = False):
         """
-        【💾 安全原子持久化】将指定日期的涨停分析记录原子落盘保存
+        【💾 安全原子持久化与交易后压缩打包】将指定日期的涨停分析记录原子落盘并压缩归档
         :param date_str: 格式 YYYY-MM-DD
         :param records: 涨停记录字典列表
         :param force: 是否强制覆写
+        :param is_eod: 是否为收盘/交易后终态归档 (End-of-Day)
         """
         if not date_str or not records:
             return
@@ -228,34 +337,33 @@ class LimitUpEngine:
             # 异步后台线程执行文件 I/O，杜绝阻塞主线程 UI
             history_copy = {d: list(recs) for d, recs in self._history_daily_records.items()}
             single_date_records = list(records)
+            is_post_trading = is_eod or (time.strftime("%H:%M") >= "15:00")
 
             def _persist_worker():
-                try:
-                    # 1. 写入分日独立归档文件
-                    single_file = f"{ARCHIVE_PREFIX}{date_str}.json"
-                    tmp_single = f"{single_file}.tmp_{int(time.time()*1000)}"
-                    with open(tmp_single, "w", encoding="utf-8") as f:
-                        json.dump(single_date_records, f, ensure_ascii=False, indent=2)
-                    if os.path.exists(single_file):
-                        os.remove(single_file)
-                    os.rename(tmp_single, single_file)
+                with _PERSIST_FILE_LOCK:
+                    try:
+                        # 1. 写入分日独立归档文件 (高压 Gzip 压缩，空间锐减 90%)
+                        single_file_gz = f"{ARCHIVE_PREFIX}{date_str}.json.gz"
+                        _safe_atomic_write_json_gz(single_file_gz, single_date_records)
 
-                    # 2. 写入全量主归档文件 (只保留最近 90 个交易日，防止文件过度膨胀)
-                    sorted_dates = sorted(history_copy.keys())
-                    if len(sorted_dates) > 90:
-                        pruned_copy = {d: history_copy[d] for d in sorted_dates[-90:]}
-                    else:
-                        pruned_copy = history_copy
+                        # 2. 写入全量主归档文件 (保留最近 90 个交易日，防止文件过度膨胀)
+                        sorted_dates = sorted(history_copy.keys())
+                        if len(sorted_dates) > 90:
+                            pruned_copy = {d: history_copy[d] for d in sorted_dates[-90:]}
+                        else:
+                            pruned_copy = history_copy
 
-                    tmp_main = f"{LIMIT_UP_RECORDS_FILE}.tmp_{int(time.time()*1000)}"
-                    with open(tmp_main, "w", encoding="utf-8") as f:
-                        json.dump(pruned_copy, f, ensure_ascii=False, indent=2)
-                    if os.path.exists(LIMIT_UP_RECORDS_FILE):
-                        os.remove(LIMIT_UP_RECORDS_FILE)
-                    os.rename(tmp_main, LIMIT_UP_RECORDS_FILE)
-                    logger.debug(f"✅ 涨停历史数据已成功原子持久化落盘: {date_str} (共 {len(single_date_records)} 条记录)")
-                except Exception as e:
-                    logger.error(f"涨停数据原子持久化落盘失败: {e}")
+                        _safe_atomic_write_json_gz(LIMIT_UP_RECORDS_FILE, pruned_copy)
+                        
+                        # 3. 交易后自动执行历史碎片清理与存量文件打包
+                        _clean_stale_tmp_files(DATA_DIR)
+                        if is_post_trading:
+                            _compress_and_cleanup_archives(DATA_DIR)
+                            logger.info(f"✅ [交易后归档] 涨停历史数据已成功固化并完成 Gzip 压缩打包: {date_str} (共 {len(single_date_records)} 条记录)")
+                        else:
+                            logger.debug(f"✅ 涨停历史数据已成功原子持久化落盘: {date_str} (共 {len(single_date_records)} 条记录)")
+                    except Exception as e:
+                        logger.error(f"涨停数据原子持久化落盘失败: {e}")
 
             threading.Thread(target=_persist_worker, daemon=True, name="LimitUpPersistWorker").start()
 
@@ -1086,11 +1194,36 @@ class LimitUpEngine:
         }
 
     def get_all_archived_dates(self) -> List[str]:
-        """获取所有已持久化归档的历史交易日日期列表 (升序排列)"""
+        """获取所有已持久化归档的历史交易日日期列表 (升序排列，带磁盘动态同步)"""
         with self._cache_lock:
+            # 动态补齐磁盘最新归档日期
+            try:
+                if os.path.exists(DATA_DIR):
+                    for fname in os.listdir(DATA_DIR):
+                        if fname.startswith("ats_limit_up_daily_archive_") and (fname.endswith(".json.gz") or fname.endswith(".json")):
+                            date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json.gz", "").replace(".json", "")
+                            if date_part not in self._history_daily_records:
+                                fpath = os.path.join(DATA_DIR, fname)
+                                sub_data = _safe_read_json_or_gz(fpath)
+                                if isinstance(sub_data, list):
+                                    self._history_daily_records[date_part] = sub_data
+            except Exception:
+                pass
             return sorted(self._history_daily_records.keys())
 
     def get_records_by_date(self, date_str: str) -> List[Dict[str, Any]]:
-        """获取指定历史日期的涨停归档记录"""
+        """获取指定历史日期的涨停归档记录 (支持即时按需从 Gzip 或纯 JSON 分日归档文件加载)"""
+        if not date_str:
+            return []
         with self._cache_lock:
-            return list(self._history_daily_records.get(date_str, []))
+            if date_str in self._history_daily_records:
+                return list(self._history_daily_records[date_str])
+
+            # 按需从分日独立文件加载 (自动尝试 .json.gz 与 .json)
+            single_base = f"{ARCHIVE_PREFIX}{date_str}"
+            sub_data = _safe_read_json_or_gz(single_base)
+            if isinstance(sub_data, list):
+                self._history_daily_records[date_str] = sub_data
+                return list(sub_data)
+
+            return []

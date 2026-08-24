@@ -181,8 +181,11 @@ import threading
 from typing import Any, Optional, Union, List, Dict
 CONFIG_FILE_LOCK = threading.RLock()
 
-from PyQt6.QtWidgets import QTableWidgetItem, QStyledItemDelegate, QStyleOptionViewItem, QStyle, QApplication
-from PyQt6.QtCore import Qt, QModelIndex
+from PyQt6.QtWidgets import (
+    QTableWidgetItem, QStyledItemDelegate, QStyleOptionViewItem, QStyle, 
+    QApplication, QTabWidget, QToolButton, QTabBar
+)
+from PyQt6.QtCore import Qt, QModelIndex, QObject, QEvent
 from PyQt6.QtGui import QColor, QPalette, QBrush
 
 class ColorPreservingItemDelegate(QStyledItemDelegate):
@@ -757,4 +760,77 @@ def save_config_nodes(key_val_dict: dict) -> bool:
 def save_config_node(key: str, val) -> bool:
     """线程安全将指定 key 物理原子落盘保存至 window_config.json (基于 safe save_config_nodes)"""
     return save_config_nodes({key: val})
+
+
+class TabDirectSwitchEventFilter(QObject):
+    """
+    当 QTabWidget 的 QTabBar 因空间狭小出现左右滚动箭头 (QToolButton) 或鼠标在 TabBar 上滚动时，
+    直接在 Tab 之间切换页面，而不是仅仅微调滚动像素，极大提升用户体验。
+    """
+    def __init__(self, tab_widget: QTabWidget):
+        super().__init__(tab_widget)
+        self.tab_widget = tab_widget
+        self._installed_buttons = set()
+        tb = self.tab_widget.tabBar()
+        if tb:
+            tb.installEventFilter(self)
+            self._scan_and_install_buttons()
+
+    def _scan_and_install_buttons(self):
+        tb = self.tab_widget.tabBar()
+        if not tb:
+            return
+        from PyQt6.QtWidgets import QToolButton
+        for btn in tb.findChildren(QToolButton):
+            if btn not in self._installed_buttons:
+                btn.installEventFilter(self)
+                self._installed_buttons.add(btn)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtWidgets import QToolButton, QTabBar
+        from PyQt6.QtCore import QEvent, Qt
+        
+        # 1. 动态监听新生成的子按钮或尺寸变化
+        if event.type() in (QEvent.Type.ChildAdded, QEvent.Type.Show, QEvent.Type.Resize):
+            self._scan_and_install_buttons()
+
+        # 2. 滚轮在 TabBar 上直接循环切页
+        if isinstance(obj, QTabBar) and event.type() == QEvent.Type.Wheel:
+            count = self.tab_widget.count()
+            if count > 1:
+                cur = self.tab_widget.currentIndex()
+                if event.angleDelta().y() < 0:
+                    self.tab_widget.setCurrentIndex((cur + 1) % count)
+                else:
+                    self.tab_widget.setCurrentIndex((cur - 1 + count) % count)
+                return True
+
+        # 3. 拦截 QToolButton 点击并直接切页
+        if isinstance(obj, QToolButton) and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                count = self.tab_widget.count()
+                if count > 1:
+                    cur = self.tab_widget.currentIndex()
+                    arrow = obj.arrowType()
+                    if arrow == Qt.ArrowType.LeftArrow:
+                        self.tab_widget.setCurrentIndex((cur - 1 + count) % count)
+                    elif arrow == Qt.ArrowType.RightArrow:
+                        self.tab_widget.setCurrentIndex((cur + 1) % count)
+                    else:
+                        tb = self.tab_widget.tabBar()
+                        btns = sorted([b for b in tb.findChildren(QToolButton) if b.isVisible()], key=lambda x: x.x())
+                        if btns and obj == btns[0]:
+                            self.tab_widget.setCurrentIndex((cur - 1 + count) % count)
+                        else:
+                            self.tab_widget.setCurrentIndex((cur + 1) % count)
+            return True
+            
+        return super().eventFilter(obj, event)
+
+
+def enable_tab_direct_switch(tab_widget: QTabWidget) -> TabDirectSwitchEventFilter:
+    """为指定 QTabWidget 开启箭头点击与滚轮直接切换 Tab 的事件过滤器"""
+    flt = TabDirectSwitchEventFilter(tab_widget)
+    setattr(tab_widget, "_tab_direct_switch_filter", flt)
+    return flt
 

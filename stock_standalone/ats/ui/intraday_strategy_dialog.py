@@ -2776,6 +2776,9 @@ class SBCIntradayChartDialog(QWidget):
 
     def hide_to_edge(self):
         """贴边自动收缩隐藏为 5px 边缘条，半透明 0.35"""
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
+        if getattr(self, "stays_on_top", False):
+            return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
 
@@ -2828,7 +2831,12 @@ class SBCIntradayChartDialog(QWidget):
 
     def _check_hover(self):
         """100ms 鼠标位置巡检：实现边缘悬停极速展开与移出自动收缩隐藏"""
-        if not self.isVisible():
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
+            return
+
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        if not self.anchor_edge and not self.is_hidden_state:
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
