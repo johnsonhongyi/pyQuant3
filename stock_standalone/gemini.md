@@ -1,3 +1,33 @@
+## 2026-08-24 13:15
+- [x] **ATS 每日涨停与强势股天梯 (`DailyLimitUpDialog`) 性能全面排查、高频推流节流、表格原位脏检查复用与磁吸平滑调优 (`ats/ui/daily_limit_up_dialog.py`)**：
+    - [x] **数据刷新 1.5s 智能节流与拖拽保护**：
+        - 引入 `_refresh_throttle_timer` (1500ms) 与 `_pending_payload` 机制，高频推送时自动合并无谓的密集重算与表格重刷；
+        - 在拖拽移动窗口时（`_is_dragging`）自动延后重型计算，保证 Windows 原生窗口拖拽维持 60fps 丝滑流畅、不掉帧不卡手；
+    - [x] **主线程磁盘 I/O 彻底异步化与 30 秒节流**：
+        - 针对原 `_refresh_data_for_mode` 每次轮询都在主线程同步调用 `save_daily_records_atomic` 的严重 I/O 阻塞缺陷，增加 30 秒保存节流并通过后台子线程异步落盘，彻底消除写盘对界面的卡顿；
+    - [x] **表格 In-place 原地复用与脏检查 (Dirty Check)**：
+        - 全面开启 `table.setUpdatesEnabled(False/True)` 与 `blockSignals` 批量原子渲染；
+        - 实现 `_set_table_item` 单元格对象复用机制，仅在文本/数据变化时原地更新，杜绝数千个 C++ 对象的频繁创建与垃圾回收；
+    - [x] **磁吸灵敏度与悬浮轮询优化**：
+        - 吸附判定边缘阈值由过敏的 35px 精确调优为 20px，避免过早误吸；
+        - `snap_timer` 调整为 400ms，强化拖拽松开状态确认，拖拽中绝不启动吸附动画；
+        - `_check_hover` 增加空闲短路，非吸附/非隐藏状态 0 CPU 消耗；
+    - [x] **代码清理与全量测试验证 100% PASS**。
+
+## 2026-08-24 13:00
+- [x] **解除 ATS 龙头股看板 (Hot Alpha Leaderboard) 窗口尺寸硬编码限制并与天梯设计全面对齐 (`ats/ui/hot_sector_leaderboard.py`)**：
+    - [x] **基类与架构对齐 (`QWidget, WindowMixin`)**：
+        - 将 `HotSectorLeaderboardDialog` 基类由 `QDialog` 重构为 `QWidget`，与每日涨停分析及强势股天梯 (`DailyLimitUpDialog`) 架构完全统一，消除系统对话框的隐式尺寸约束；
+        - 统一窗口 Flag 为 `Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint`；
+    - [x] **解除尺寸限制与支持任意高度调节**：
+        - 彻底移除 `setMinimumWidth(880)` 与 `setMinimumHeight(460)` 的硬编码尺寸束缚；
+        - 采用超宽容的尺寸约束 `setMinimumWidth(320)` 与 `setMinimumHeight(150)`，用户可随意将看板高度压缩调小（如 200px~300px）作为紧凑悬浮监控条，同时支持任意大屏高度拉伸；
+        - 优化 `_save_window_states` 与 `restore_state`：解除高度保存的 clamp 限制，允许保存和无损恢复任意高度；
+    - [x] **布局自适应与精简 `resizeEvent`**：
+        - 移除 `resizeEvent` 中冗余的手动布局重算，完全交由 Qt 原生布局引擎管理；
+        - 在极矮高度下，顶部控制栏与底部状态栏紧凑保持，中间表格自适应显示垂直滚动条，交互丝滑不跳屏；
+    - [x] **全量自动化测试验证 100% PASS**。
+
 ## 2026-08-24 03:38
 - [x] **修复 24*7 运行下两融数据 (rzrq) nan 异常、防高频抓取被封 (Ban IP)、隔日自动更新与早盘 nlow 数据误报警缺陷 (`singleAnalyseUtil.py`, `JSONData/fundflowUtil.py`, `JSONData/sina_data.py`)**：
     - [x] **两融数据 (rzrq) 字段 nan 根治与深市智能平滑回退 (`JSONData/fundflowUtil.py`)**：
