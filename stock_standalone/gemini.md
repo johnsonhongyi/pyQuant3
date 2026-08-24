@@ -1,3 +1,14 @@
+## 2026-08-24 13:32
+- [x] **根治天梯与全端表格对象池复用 (`NumericTableWidgetItem`) 旧值残留导致空值 (`--`) 排序插队缺陷 (`tk_gui_modules/qt_table_utils.py`, `ats/ui/daily_limit_up_dialog.py`)**：
+    - [x] **空值与脏值判定权威解耦 (`_is_empty` / `_get_numeric_value`)**：
+        - 针对单元格在 In-place 原地复用时，旧浮点数留在 `self._raw_value` 中导致空值 `"--"` 被误判为非空数值并插在排序中间的严重缺陷；
+        - 重构 `_is_empty()`：优先权威校验当前 `text().strip()`，只要为占位符（`"--"`, `"-"`, `""`, `"null"`, `"None"`, `"nan"`, `"N/A"` 等）100% 判定为缺失值；
+        - 重构 `_get_numeric_value()`：彻底摒弃历史 `_raw_value` 残留，无数据立即返回 `None`，有数据实时解析当前 `text()` 或 `UserRole`；
+        - 重写 `setText(text)` 同步更新 `self._raw_value = text`；
+    - [x] **表格原位设置状态清理 (`_set_table_item`)**：
+        - 当 `user_data` 为 `None` 时，显式清除 `UserRole` 与 `_raw_value`；
+    - [x] **全量集成测试验证 100% PASS**（升序与降序下无数据单元格 100% 沉底，有数据单元格严格保真排列）。
+
 ## 2026-08-24 13:15
 - [x] **ATS 每日涨停与强势股天梯 (`DailyLimitUpDialog`) 性能全面排查、高频推流节流、表格原位脏检查复用与磁吸平滑调优 (`ats/ui/daily_limit_up_dialog.py`)**：
     - [x] **数据刷新 1.5s 智能节流与拖拽保护**：
