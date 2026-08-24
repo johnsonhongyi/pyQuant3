@@ -42,7 +42,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
-    apply_dark_theme
+    apply_dark_theme, ColorPreservingItemDelegate
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
@@ -552,6 +552,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # ── 3. 主数据表格 ──
         headers, self.extra_cols = get_limit_up_table_headers()
         self.table = QTableWidget()
+        self.table.setItemDelegate(ColorPreservingItemDelegate(self.table))
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -568,7 +569,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 color: #e2e2e5;
                 gridline-color: #282830;
                 border: 1px solid #282830;
-                selection-background-color: #2a3b4c;
+                selection-background-color: #1e334d;
             }
             QHeaderView::section {
                 background-color: #18181f;

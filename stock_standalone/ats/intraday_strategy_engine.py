@@ -7,7 +7,11 @@ ats/intraday_strategy_engine.py — 单独分时交易策略与策略路由引�
 
 import os
 import json
+import time
 import shutil
+import atexit
+import hashlib
+import threading
 import logging
 import pandas as pd
 import numpy as np
@@ -50,8 +54,45 @@ class IntradayStrategyEngine:
         self.strategies: List[Dict[str, Any]] = []
         self.active_strategy: Optional[Dict[str, Any]] = None
         self.rule_state_map: Dict[str, Dict[str, Any]] = {} # code -> state
+        self._is_dirty: bool = False
+        self._last_saved_hash: str = ""
+        self._last_save_time: float = 0.0
+        self._lock = threading.RLock()
+        self._cleanup_legacy_tmp_files()
+        try:
+            atexit.register(self._on_process_exit)
+        except Exception:
+            pass
         self.load_config()
         self.load_intraday_cache()
+
+    def _cleanup_legacy_tmp_files(self):
+        """[启动自愈] 自动清理 config 目录下遗留的历史 .tmp 临时碎片文件"""
+        try:
+            cache_dir = os.path.join(get_app_root(), "config")
+            if os.path.exists(cache_dir):
+                for fname in os.listdir(cache_dir):
+                    if ".tmp" in fname:
+                        full_p = os.path.join(cache_dir, fname)
+                        try:
+                            if os.path.isfile(full_p):
+                                os.remove(full_p)
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"清理历史临时文件异常: {e}")
+
+    def _on_process_exit(self):
+        """系统退出安全清理钩子：仅在有数据变动时刷盘"""
+        try:
+            if getattr(self, "_is_dirty", False):
+                self.save_intraday_cache(force=False)
+        except Exception:
+            pass
+
+    def mark_dirty(self):
+        """显式标记引擎数据发生实质变动"""
+        self._is_dirty = True
 
     def _get_cache_filepath(self) -> str:
         cache_dir = os.path.join(get_app_root(), "config")
@@ -63,71 +104,72 @@ class IntradayStrategyEngine:
         cache_file = self._get_cache_filepath()
         if not os.path.exists(cache_file):
             return False
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if data.get("date") != today_str:
-                logger.info(f"🗑️ 清理非今日分时策略缓存 ({data.get('date')} vs {today_str})")
+        with self._lock:
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if data.get("date") != today_str:
+                    logger.info(f"🗑️ 清理非今日分时策略缓存 ({data.get('date')} vs {today_str})")
+                    return False
+
+                stocks_cache = data.get("stocks", {})
+                for c_clean, s_data in stocks_cache.items():
+                    raw_op = float(s_data.get("open_price", 0.0))
+                    state = self._get_stock_state(c_clean, raw_op)
+                    state["open_price"] = raw_op if raw_op > 1.0 else state["open_price"]
+                    
+                    # 清洗非交易时段的伪时间快照 (如 00:00~09:14 或 >15:05 的非盘中脏快照)
+                    raw_snaps = s_data.get("time_snapshots", {})
+                    clean_snaps = {}
+                    if isinstance(raw_snaps, dict):
+                        for t_k, s_v in raw_snaps.items():
+                            t_5 = str(t_k).strip()[:5]
+                            if "09:15" <= t_5 <= "15:05" and isinstance(s_v, dict):
+                                clean_snaps[t_5] = s_v
+                    state["time_snapshots"] = clean_snaps
+
+                    if clean_snaps:
+                        snap_highs = [float(v.get("high", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("high", v.get("price", 0.0))) > 1.0]
+                        snap_lows = [float(v.get("low", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("low", v.get("price", 0.0))) > 1.0]
+                        state["max_price"] = max(snap_highs) if snap_highs else float(s_data.get("max_price", state["open_price"]))
+                        state["min_price"] = min(snap_lows) if snap_lows else float(s_data.get("min_price", state["open_price"]))
+                    else:
+                        state["max_price"] = state["open_price"]
+                        state["min_price"] = state["open_price"]
+
+                    state["high_am"] = float(s_data.get("high_am", state["max_price"]))
+                    state["remaining_ratio"] = float(s_data.get("remaining_ratio", state["remaining_ratio"]))
+                    state["triggered_rules"] = set(s_data.get("triggered_rules", []))
+                    state["execution_logs"] = s_data.get("execution_logs", [])
+                    state["manual_scores"] = s_data.get("manual_scores", {})
+                    state["node_custom_params"] = s_data.get("node_custom_params", {})
+                    state["node_locked_params"] = s_data.get("node_locked_params", {})
+
+                    # 重构 signals 列表
+                    sigs_raw = s_data.get("signals", [])
+                    state["signals"] = []
+                    for sig_dict in sigs_raw:
+                        try:
+                            sp = SignalPoint(
+                                code=sig_dict.get("code", c_clean),
+                                timestamp=sig_dict.get("timestamp", ""),
+                                signal_type=SignalType.SELL if str(sig_dict.get("signal_type")) in ("SELL", SignalType.SELL.value) else SignalType.BUY,
+                                price=float(sig_dict.get("price", 0.0)),
+                                reason=sig_dict.get("reason", ""),
+                                source=SignalSource.STRATEGY_RULE,
+                                suggested_price=float(sig_dict.get("suggested_price", sig_dict.get("price", 0.0))),
+                                sell_ratio=float(sig_dict.get("sell_ratio", 0.0))
+                            )
+                            state["signals"].append(sp)
+                        except Exception as e_sig:
+                            logger.debug(f"还原 SignalPoint 异常: {e_sig}")
+
+                logger.info(f"✅ 成功从磁盘加载并清洗 {len(stocks_cache)} 只标的的分时节点持久化缓存 ({today_str})")
+                return True
+            except Exception as e:
+                logger.error(f"❌ 加载分时策略持久化缓存异常: {e}")
                 return False
-
-            stocks_cache = data.get("stocks", {})
-            for c_clean, s_data in stocks_cache.items():
-                raw_op = float(s_data.get("open_price", 0.0))
-                state = self._get_stock_state(c_clean, raw_op)
-                state["open_price"] = raw_op if raw_op > 1.0 else state["open_price"]
-                
-                # 清洗非交易时段的伪时间快照 (如 00:00~09:14 或 >15:05 的非盘中脏快照)
-                raw_snaps = s_data.get("time_snapshots", {})
-                clean_snaps = {}
-                if isinstance(raw_snaps, dict):
-                    for t_k, s_v in raw_snaps.items():
-                        t_5 = str(t_k).strip()[:5]
-                        if "09:15" <= t_5 <= "15:05" and isinstance(s_v, dict):
-                            clean_snaps[t_5] = s_v
-                state["time_snapshots"] = clean_snaps
-
-                if clean_snaps:
-                    snap_highs = [float(v.get("high", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("high", v.get("price", 0.0))) > 1.0]
-                    snap_lows = [float(v.get("low", v.get("price", 0.0))) for v in clean_snaps.values() if float(v.get("low", v.get("price", 0.0))) > 1.0]
-                    state["max_price"] = max(snap_highs) if snap_highs else float(s_data.get("max_price", state["open_price"]))
-                    state["min_price"] = min(snap_lows) if snap_lows else float(s_data.get("min_price", state["open_price"]))
-                else:
-                    state["max_price"] = state["open_price"]
-                    state["min_price"] = state["open_price"]
-
-                state["high_am"] = float(s_data.get("high_am", state["max_price"]))
-                state["remaining_ratio"] = float(s_data.get("remaining_ratio", state["remaining_ratio"]))
-                state["triggered_rules"] = set(s_data.get("triggered_rules", []))
-                state["execution_logs"] = s_data.get("execution_logs", [])
-                state["manual_scores"] = s_data.get("manual_scores", {})
-                state["node_custom_params"] = s_data.get("node_custom_params", {})
-                state["node_locked_params"] = s_data.get("node_locked_params", {})
-
-                # 重构 signals 列表
-                sigs_raw = s_data.get("signals", [])
-                state["signals"] = []
-                for sig_dict in sigs_raw:
-                    try:
-                        sp = SignalPoint(
-                            code=sig_dict.get("code", c_clean),
-                            timestamp=sig_dict.get("timestamp", ""),
-                            signal_type=SignalType.SELL if str(sig_dict.get("signal_type")) in ("SELL", SignalType.SELL.value) else SignalType.BUY,
-                            price=float(sig_dict.get("price", 0.0)),
-                            reason=sig_dict.get("reason", ""),
-                            source=SignalSource.STRATEGY_RULE,
-                            suggested_price=float(sig_dict.get("suggested_price", sig_dict.get("price", 0.0))),
-                            sell_ratio=float(sig_dict.get("sell_ratio", 0.0))
-                        )
-                        state["signals"].append(sp)
-                    except Exception as e_sig:
-                        logger.debug(f"还原 SignalPoint 异常: {e_sig}")
-
-            logger.info(f"✅ 成功从磁盘加载并清洗 {len(stocks_cache)} 只标的的分时节点持久化缓存 ({today_str})")
-            return True
-        except Exception as e:
-            logger.error(f"❌ 加载分时策略持久化缓存异常: {e}")
-            return False
 
     def _get_closing_eval_filepath(self) -> str:
         """获取新股首日收盘综合评分账本 JSON 路径"""
@@ -171,97 +213,139 @@ class IntradayStrategyEngine:
                 "node_results": eval_result.get("node_results", []),
                 "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-            tmp_fp = fp + f".tmp_{os.getpid()}"
-            with open(tmp_fp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_fp = fp + f".tmp_{os.getpid()}_{threading.get_ident()}"
             try:
+                with open(tmp_fp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
                 if os.path.exists(fp):
                     os.replace(tmp_fp, fp)
                 else:
                     os.rename(tmp_fp, fp)
-            except Exception:
-                shutil.move(tmp_fp, fp)
-            logger.info(f"💾 [收盘定盘] 标的 [{c_clean}] 上市首日收盘综合评分 ({eval_result.get('total_weighted_score')}分, {eval_result.get('pattern')}) 已成功永久持久化！")
-            return True
+                logger.info(f"💾 [收盘定盘] 标的 [{c_clean}] 上市首日收盘综合评分 ({eval_result.get('total_weighted_score')}分, {eval_result.get('pattern')}) 已成功永久持久化！")
+                return True
+            finally:
+                if os.path.exists(tmp_fp):
+                    try:
+                        os.remove(tmp_fp)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"保存新股首日收盘账本异常: {e}")
             return False
 
-    def save_intraday_cache(self) -> bool:
-        """持久化保存当前盘中所有标的的分时节点、锁死状态与买卖点账本至磁盘 (含 TDX 有效行情防污染校验)"""
-        cache_file = self._get_cache_filepath()
-        try:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            stocks_data = {}
-            for c_clean, state in self.rule_state_map.items():
-                op = float(state.get("open_price", 0.0))
-                locked = state.get("node_locked_params", {})
-                snapshots = state.get("time_snapshots", {})
-
-                # 严格校验：若未获取到 TDX 有效行情数据 (op <= 1.0) 且无真实时间线快照，判定为无效/未连线上线的脏数据，禁止持久化落盘污染账本！
-                if op <= 1.0 and not snapshots and not locked:
-                    continue
-
-                # 消除脏数据残留：若 node_1 或 node_2 锁定了旧默认值，但当前已有真实 open_price (> 1.0)，自动修正对齐
-                if op > 1.0:
-                    custom_params = state.get("node_custom_params", {})
-                    if "node_1" in locked and abs(float(locked.get("node_1", 0.0)) - op) > 0.01:
-                        if "node_1" not in custom_params and "node_1_auction" not in custom_params:
-                            locked["node_1"] = op
-                            locked["node_1_auction"] = op
-                    if "node_2" in locked and float(locked.get("node_2", 0.0)) < op * 0.8:
-                        if "node_2" not in custom_params and "node_2_first_wave" not in custom_params:
-                            if snapshots and "09:40" in snapshots:
-                                locked["node_2"] = float(snapshots["09:40"].get("price", op))
-                                locked["node_2_first_wave"] = locked["node_2"]
-                                locked["node_2_first_attack"] = locked["node_2"]
-
-                sigs_serialized = []
-                for sig in state.get("signals", []):
-                    sigs_serialized.append({
-                        "code": getattr(sig, "code", c_clean),
-                        "timestamp": getattr(sig, "timestamp", ""),
-                        "signal_type": getattr(sig, "signal_type", SignalType.SELL).value if hasattr(getattr(sig, "signal_type", None), "value") else str(getattr(sig, "signal_type", "")),
-                        "price": getattr(sig, "price", 0.0),
-                        "reason": getattr(sig, "reason", ""),
-                        "suggested_price": getattr(sig, "suggested_price", getattr(sig, "price", 0.0)),
-                        "sell_ratio": getattr(sig, "sell_ratio", 0.0)
-                    })
-
-                stocks_data[c_clean] = {
-                    "open_price": op,
-                    "max_price": state.get("max_price", 0.0),
-                    "min_price": state.get("min_price", 0.0),
-                    "high_am": state.get("high_am", 0.0),
-                    "remaining_ratio": state.get("remaining_ratio", 1.0),
-                    "triggered_rules": list(state.get("triggered_rules", set())),
-                    "execution_logs": state.get("execution_logs", []),
-                    "manual_scores": state.get("manual_scores", {}),
-                    "node_custom_params": state.get("node_custom_params", {}),
-                    "node_locked_params": locked,
-                    "time_snapshots": snapshots,
-                    "signals": sigs_serialized
-                }
-
-            cache_data = {
-                "date": today_str,
-                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "stocks": stocks_data
-            }
-            tmp_file = cache_file + f".tmp_{os.getpid()}"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            try:
-                if os.path.exists(cache_file):
-                    os.replace(tmp_file, cache_file)
-                else:
-                    os.rename(tmp_file, cache_file)
-            except Exception:
-                shutil.move(tmp_file, cache_file)
+    def save_intraday_cache_throttled(self, interval_sec: float = 60.0) -> bool:
+        """
+        【低频安全节流防抖持久化】
+        仅在发生实质变动 (_is_dirty) 且距上次写盘超过 interval_sec (默认60s) 时才写盘。
+        无变动时 0 磁盘 I/O，有变动时确保盘中数据不会因系统意外崩溃而丢失。
+        """
+        if not getattr(self, "_is_dirty", False):
             return True
-        except Exception as e:
-            logger.error(f"❌ 保存分时策略持久化缓存异常: {e}")
-            return False
+        now_ts = time.time()
+        if now_ts - getattr(self, "_last_save_time", 0.0) < interval_sec:
+            return True
+        return self.save_intraday_cache(force=False)
+
+    def save_intraday_cache(self, force: bool = False) -> bool:
+        """
+        持久化保存当前盘中所有标的的分时节点、锁死状态与买卖点账本至磁盘
+        【严苛写盘约束与 0 冗余 I/O 保护】：
+        1. 若未被标记为 dirty 且 force=False，直接短路跳过，绝不触发物理写盘；
+        2. 内存计算数据 MD5 哈希对比：若数据序列化后与上次写入磁盘的内容完全一致，自动重置 dirty 并短路，绝不触发写盘；
+        3. 仅在窗口关闭、系统退出、定时防抖、或人工干预参数/产生买卖点信号时才触发持久化；
+        4. 写入临时文件时使用 try...finally，确保临时文件绝不残留。
+        """
+        if not force and not getattr(self, "_is_dirty", False):
+            return True
+
+        with self._lock:
+            cache_file = self._get_cache_filepath()
+            try:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                stocks_data = {}
+                for c_clean, state in list(self.rule_state_map.items()):
+                    op = float(state.get("open_price", 0.0))
+                    locked = state.get("node_locked_params", {})
+                    snapshots = state.get("time_snapshots", {})
+
+                    # 严格校验：若未获取到 TDX 有效行情数据 (op <= 1.0) 且无真实时间线快照，判定为无效/未连线上线的脏数据，禁止持久化落盘污染账本！
+                    if op <= 1.0 and not snapshots and not locked:
+                        continue
+
+                    # 消除脏数据残留：若 node_1 或 node_2 锁定了旧默认值，但当前已有真实 open_price (> 1.0)，自动修正对齐
+                    if op > 1.0:
+                        custom_params = state.get("node_custom_params", {})
+                        if "node_1" in locked and abs(float(locked.get("node_1", 0.0)) - op) > 0.01:
+                            if "node_1" not in custom_params and "node_1_auction" not in custom_params:
+                                locked["node_1"] = op
+                                locked["node_1_auction"] = op
+                        if "node_2" in locked and float(locked.get("node_2", 0.0)) < op * 0.8:
+                            if "node_2" not in custom_params and "node_2_first_wave" not in custom_params:
+                                if snapshots and "09:40" in snapshots:
+                                    locked["node_2"] = float(snapshots["09:40"].get("price", op))
+                                    locked["node_2_first_wave"] = locked["node_2"]
+                                    locked["node_2_first_attack"] = locked["node_2"]
+
+                    sigs_serialized = []
+                    for sig in state.get("signals", []):
+                        sigs_serialized.append({
+                            "code": getattr(sig, "code", c_clean),
+                            "timestamp": getattr(sig, "timestamp", ""),
+                            "signal_type": getattr(sig, "signal_type", SignalType.SELL).value if hasattr(getattr(sig, "signal_type", None), "value") else str(getattr(sig, "signal_type", "")),
+                            "price": getattr(sig, "price", 0.0),
+                            "reason": getattr(sig, "reason", ""),
+                            "suggested_price": getattr(sig, "suggested_price", getattr(sig, "price", 0.0)),
+                            "sell_ratio": getattr(sig, "sell_ratio", 0.0)
+                        })
+
+                    stocks_data[c_clean] = {
+                        "open_price": op,
+                        "max_price": state.get("max_price", 0.0),
+                        "min_price": state.get("min_price", 0.0),
+                        "high_am": state.get("high_am", 0.0),
+                        "remaining_ratio": state.get("remaining_ratio", 1.0),
+                        "triggered_rules": list(state.get("triggered_rules", set())),
+                        "execution_logs": state.get("execution_logs", []),
+                        "manual_scores": state.get("manual_scores", {}),
+                        "node_custom_params": state.get("node_custom_params", {}),
+                        "node_locked_params": locked,
+                        "time_snapshots": snapshots,
+                        "signals": sigs_serialized
+                    }
+
+                # 【⚡ 核心优化：内容哈希脏检查，无变动跳过物理写盘】
+                data_str = json.dumps(stocks_data, sort_keys=True)
+                current_hash = hashlib.md5(data_str.encode("utf-8")).hexdigest()
+                if not force and current_hash == getattr(self, "_last_saved_hash", ""):
+                    self._is_dirty = False
+                    return True
+
+                cache_data = {
+                    "date": today_str,
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "stocks": stocks_data
+                }
+                tmp_file = cache_file + f".tmp_{os.getpid()}_{threading.get_ident()}"
+                try:
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                    if os.path.exists(cache_file):
+                        os.replace(tmp_file, cache_file)
+                    else:
+                        os.rename(tmp_file, cache_file)
+                    self._last_saved_hash = current_hash
+                    self._is_dirty = False
+                    self._last_save_time = time.time()
+                    return True
+                finally:
+                    if os.path.exists(tmp_file):
+                        try:
+                            os.remove(tmp_file)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"❌ 保存分时策略持久化缓存异常: {e}")
+                return False
 
     def load_config(self) -> bool:
         """从 JSON 加载策略配置"""
@@ -706,6 +790,7 @@ class IntradayStrategyEngine:
         c_clean = str(code).zfill(6)
         state = self._get_stock_state(c_clean, 0.0)
         state["manual_scores"][str(node_id_or_idx)] = float(score)
+        self.mark_dirty()
         self.save_intraday_cache()
 
     def set_node_custom_param(self, code: str, node_id: str, value: float):
@@ -715,6 +800,7 @@ class IntradayStrategyEngine:
         if "node_custom_params" not in state:
             state["node_custom_params"] = {}
         state["node_custom_params"][str(node_id)] = float(value)
+        self.mark_dirty()
         self.save_intraday_cache()
 
     def reset_node_custom_params(self, code: str):
@@ -724,6 +810,7 @@ class IntradayStrategyEngine:
         state["node_custom_params"] = {}
         state["node_locked_params"] = {}
         state["manual_scores"] = {}
+        self.mark_dirty()
         self.save_intraday_cache()
 
     def clear_stock_cache(self, code: str):
@@ -731,6 +818,7 @@ class IntradayStrategyEngine:
         c_clean = str(code).zfill(6)
         if c_clean in self.rule_state_map:
             self.rule_state_map.pop(c_clean, None)
+        self.mark_dirty()
         self.save_intraday_cache()
         logger.info(f"🧹 [IntradayStrategyEngine] 已强力清除标的 [{c_clean}] 的盘中状态与磁盘缓存！")
 
@@ -874,7 +962,6 @@ class IntradayStrategyEngine:
                 node_locked_params["node_5_afternoon_breakout"] = v_1400
 
         self.scan_and_evaluate_intraday_timeline(code, df_intraday)
-        self.save_intraday_cache()
         return True
 
     def scan_and_evaluate_intraday_timeline(self, code: str, df_intraday: pd.DataFrame) -> List[SignalPoint]:
@@ -1698,7 +1785,13 @@ class IntradayStrategyEngine:
         state["timeline_eval_cache"] = eval_result
         if clean_t >= "14:55" and open_price > 1.0 and not is_daily_strategy:
             self.save_listing_closing_scorecard(code, eval_result)
-        self.save_intraday_cache()
+
+        # 🕒 交易收盘后 (>=15:00) 统一持久化；盘中则启用 60 秒防抖低频节流持久化 (仅在 _is_dirty 时执行)
+        if clean_t >= "15:00":
+            self.save_intraday_cache(force=False)
+        else:
+            self.save_intraday_cache_throttled(interval_sec=60.0)
+
         return eval_result
 
     def evaluate_tick(
@@ -1944,7 +2037,8 @@ class IntradayStrategyEngine:
                 generated_signals.append(sp)
 
         if generated_signals:
-            self.save_intraday_cache()
+            self.mark_dirty()
+            self.save_intraday_cache(force=False)
 
         return generated_signals
 

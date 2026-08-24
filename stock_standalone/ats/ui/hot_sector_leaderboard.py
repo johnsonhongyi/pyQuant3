@@ -32,7 +32,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
-    apply_dark_theme
+    apply_dark_theme, ColorPreservingItemDelegate
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.hot_sector_engine import HotSectorEngine
@@ -346,8 +346,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 alternate-background-color: #1c1c22;
                 color: #e2e2e5;
                 gridline-color: #282830;
-                selection-background-color: #2e3b4e;
-                selection-color: #00ff88;
+                selection-background-color: #1e334d;
                 border: 1px solid #282830;
                 font-family: 'Microsoft YaHei', sans-serif;
             }
@@ -509,6 +508,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # ── 主表格 ──
         self.table = QTableWidget(0, len(self.headers))
+        self.table.setItemDelegate(ColorPreservingItemDelegate(self.table))
         self.table.setHorizontalHeaderLabels(self.headers)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
