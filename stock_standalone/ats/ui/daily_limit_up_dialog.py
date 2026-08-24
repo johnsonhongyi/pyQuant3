@@ -743,24 +743,27 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         """根据当前选定的视图模式计算并刷新数据"""
         df = self._resolve_active_strategy_df()
         today_str = time.strftime("%Y-%m-%d")
+        is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
+        effective_trade_date = today_str if is_trade_day else (cct.get_last_trade_date() if hasattr(cct, "get_last_trade_date") else today_str)
 
         if self.current_mode == "TODAY":
             if df is not None and not df.empty:
                 self.current_records = self.engine.scan_limit_up_records_from_df(df, fetch_l2_quotes=True, extra_cols=self.extra_cols)
-                # 盘中/盘后自动归档 (交易后强制终态落盘，盘中增加 5 分钟 (300秒) 节流 + 后台线程异步落盘)
-                now = time.time()
-                is_post_trading = time.strftime("%H:%M") >= "15:00"
-                if is_post_trading or (now - getattr(self, '_last_disk_save_time', 0.0) >= 300.0):
-                    self._last_disk_save_time = now
-                    recs_copy = list(self.current_records)
-                    threading.Thread(
-                        target=self.engine.save_daily_records_atomic,
-                        args=(today_str, recs_copy),
-                        kwargs={"force": is_post_trading, "is_eod": is_post_trading},
-                        daemon=True
-                    ).start()
+                # 仅在实际交易日进行盘中/盘后自动归档 (非交易日不向磁盘写周六/周日归档)
+                if is_trade_day:
+                    now = time.time()
+                    is_post_trading = time.strftime("%H:%M") >= "15:00"
+                    if is_post_trading or (now - getattr(self, '_last_disk_save_time', 0.0) >= 300.0):
+                        self._last_disk_save_time = now
+                        recs_copy = list(self.current_records)
+                        threading.Thread(
+                            target=self.engine.save_daily_records_atomic,
+                            args=(today_str, recs_copy),
+                            kwargs={"force": is_post_trading, "is_eod": is_post_trading},
+                            daemon=True
+                        ).start()
             else:
-                self.current_records = self.engine.get_records_by_date(today_str)
+                self.current_records = self.engine.get_records_by_date(effective_trade_date)
         elif self.current_mode == "RADAR":
             # 🎯 盘中上车雷达视图
             self.current_records = self.engine.get_intraday_radar_records(current_df=df)
@@ -778,7 +781,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.current_records = self.engine.get_records_by_date(self.selected_history_date)
 
         # 更新顶部 KPI 卡片 (传入当前全量策略 df 获取全市场宏观情绪与涨跌广度)
-        summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else today_str, current_df=df)
+        summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else effective_trade_date, current_df=df)
         self._update_kpi_display(summary)
 
         # 应用时间片与梯队过滤并填充表格
@@ -1966,8 +1969,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 显式持久化保存最新手动/自动调整的表格列宽
         self._save_current_column_widths()
 
-        # 关闭前确保当日最新涨停分析数据即时原子落盘并完成 Gzip 压缩打包
-        if getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
+        # 关闭前确保当日最新涨停分析数据即时原子落盘并完成 Gzip 压缩打包（仅限实际交易日）
+        is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
+        if is_trade_day and getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
             today_str = time.strftime("%Y-%m-%d")
             recs_copy = list(self.current_records)
             threading.Thread(
@@ -1994,7 +1998,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._header_save_timer.stop()
         self._save_current_column_widths()
 
-        if getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
+        is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
+        if is_trade_day and getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
             today_str = time.strftime("%Y-%m-%d")
             recs_copy = list(self.current_records)
             threading.Thread(

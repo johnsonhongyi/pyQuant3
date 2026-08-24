@@ -1,3 +1,16 @@
+## 2026-08-24 21:15
+- [x] **确认与加固系统在“收盘后冷启动”与“非交易日冷启动”下的持久化行为与数据呈现安全规范 (`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_persistence_and_history.py`)**：
+    - [x] **交易日收盘后冷启动 (>= 15:00, is_post_trading)**：
+        - 引擎在启动时仅从 Gzip 归档无损加载历史数据（纯内存读取，0 写盘）；
+        - 若随后行情源推送了全量收盘 DataFrame，引擎执行扫描并计算特征签名；
+        - **脏检查 (Dirty Check)**：由于数据特征指纹与已有磁盘归档指纹 100% 一致，自动拦截并跳过物理写盘，杜绝无谓磁盘 I/O；
+        - **数据防残缺/劣质覆写保护 (Anti-Corruption Defense)**：若收盘后因网络波动或接口异常推送了少于 60% 数量的残缺数据，持久化层自动拒绝覆写，确保已有完整收盘数据不受破坏；
+    - [x] **非交易日冷启动（周末 / 法定节假日）**：
+        - **智能有效交易日对齐**：通过 `cct.get_trade_date_status()` 识别非交易日，`TODAY` 模式自动对齐至最近有效交易日（`cct.get_last_trade_date()`），周末复盘开箱即用直接呈现上个交易日的完整天梯；
+        - **绝对零写盘保护**：在非交易日，无论定时器刷新、窗口隐藏或关闭，全流程拦截物理写盘，绝不在磁盘产生周六/周日等非交易日期的虚假归档文件；
+    - [x] **自动化测试全量 100% 覆盖通过**：
+        - 新增 `test_post_market_cold_start_dirty_check` 与 `test_non_trading_day_cold_start_fallback_and_no_save`，19 项全套测试全量 **100% PASSED**。
+
 ## 2026-08-24 18:05
 - [x] **复查与全面加固分时策略持久化体系：构建内存 Cache + 60s 节流防抖 + 收盘统一持久化 + 窗口退出兜底的四层立体安全防线 (`ats/intraday_strategy_engine.py`, `tests/test_disk_io_and_cache_safety.py`)**：
     - [x] **内存 Cache 高效运转 (Single Source of Truth)**：
@@ -3694,6 +3707,14 @@ close/wap 显式字段，并在按 mount/volume 换算时自适应校准 100 �
     - [x] **�拍�霂剜�蝻𤥁��芣� 100% �𣂼��朞�**嚗帋蝙�� `py_compile` 撖嫣耨�孵��� `ats/ui/main_window.py` 餈𥡝�鈭��霂烐嵗撉䕘��冽㺭蝏輻��牐遙雿閗祗瘜閙�蝻抵��仿�嚗䔶�霂��頧臭辣�𤩺𧒄�臭誑蝔喳��枏��函蔡��
 
 
+
+## 2026-08-24 21:08
+
+- [x] **系统性代码审查 (/review) 与脏检查 / 防劣质覆盖测试全量通过 (Full-Stack Review & Anti-Corruption Guard)**：
+    - [x] **脏检查 (Dirty Check)**：在 `LimitUpEngine` 中实现 `_last_saved_fingerprints`，对涨停记录集的关键特征（代码、价格、涨跌幅、封单量、连板数、梯队分类）生成签名，无变动时 0 磁盘 I/O 写入；
+    - [x] **交易后防劣质覆盖保护 (Anti-Corruption Quality Defense)**：已有完整历史/收盘数据时，若传入记录数严重缩水（<60%）且非显式 `force`，自动拦截并输出 Warning 审计，严防历史数据被空数据或残缺数据破坏；
+    - [x] **字典下标与安全取值防御**：修复 `aggregate_multi_day_strong_stocks` 中缺失 `seal_to_circ_ratio` 等字段时的 KeyError 漏洞，全面统一为 `_safe_float(lat.get(...))`；
+    - [x] **自动化测试回归**：全量 12 项测试全部 **100% PASSED**。
 
 ## 2026-08-24 21:00
 
