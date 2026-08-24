@@ -19,8 +19,7 @@ from JSONData import tdx_data_Day as tdd
 from JSONData import sina_data
 # from JohnsonUtil import emacount as ema
 from JohnsonUtil import LoggerFactory
-# log = LoggerFactory.getLogger("SingleSAU")
-# log.setLevel(LoggerFactory.DEBUG)
+log = LoggerFactory.getLogger("SingleSAU")
 from JSONData import stockFilter as stf
 
 try:
@@ -34,9 +33,12 @@ except ImportError:
 #     today = TODAY.strftime('%Y-%m-%d')
 #     return today
 
-global fibcount, except_count
+global fibcount, except_count, dfcfw_Except_time, last_rzrq_fetch_time, width, height
 fibcount = 0
 except_count = 0
+dfcfw_Except_time = 0
+last_rzrq_fetch_time = 0
+width, height = 108, 15
 
 
 def time_sleep(timemin):
@@ -308,16 +310,19 @@ def fibonacciCount(code, dl=60, start=None, days=0):
                 # df = tdd.get_tdx_append_now_df_api(code,dl=dl)
                 op, ra, st, daysData = pct.get_linear_model_status(
                     code, df=df, filter='y', dl=dl, ptype=ptype, days=days)
-                dd, boll = getab.Get_BBANDS(df, dtype='d')
-            fib = cct.getFibonacci(300, daysData[0])
-            # log.debug('st:%s days:%s fib:%s'%(st,days,fib))
-            # print "%s op:%s ra:%s days:%s fib:%s %s" % (code, op,
-            # ra,days,fib, st)
-            st = cct.parse_date_safe(st)
-            if not daysData[1].ma5d[0]:
-                daysData[1].ma5d[0] = 0
+            if daysData is not None and len(daysData) > 0:
+                d_val = daysData[0]
+                if len(daysData) > 1 and hasattr(daysData[1], 'ma5d') and len(daysData[1].ma5d) > 0:
+                    ma5_val = int(daysData[1].ma5d[0]) if daysData[1].ma5d[0] else 0
+                else:
+                    ma5_val = 0
+            else:
+                d_val = 0
+                ma5_val = 0
+            fib = cct.getFibonacci(300, d_val)
+            st = cct.parse_date_safe(st) if st else ''
             fibl.append(
-                [code, op, ra, [daysData[0], int(daysData[1].ma5d[0])], fib, st])
+                [code, op, ra, [d_val, ma5_val], fib, st])
     return fibl
 
 
@@ -327,7 +332,7 @@ top_Ten_Dropcxg = []
 
 
 def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
-    global fibcount
+    global fibcount, dfcfw_Except_time
     INDEX_LIST_TDX = {'999999': 'sh', '399001': 'sz', '399006': 'cyb'}
     # {v: k for k, v in m.items()}
     # >>> zip(m.values(), m.keys())
@@ -487,9 +492,11 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
         cct.GlobalValues().setkey('top_min', top_min)
 
     else:
-        top_Max = []
+        top_Max = pd.DataFrame()
         top_low = 0
-        top_min = []
+        top_min = pd.DataFrame()
+        cct.GlobalValues().setkey('top_max', top_Max)
+        cct.GlobalValues().setkey('top_min', top_min)
 
     # topTen = str(len(topTen)) +'('+str(len(top_Ten_Dropcxg))+')' +'(H:'+str(len(top_Max))+')'
     topTen = str(topTen_all+topTen_all_st) + '(' + str(len(topTen)) + ')' + \
@@ -545,23 +552,6 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     #         f_print(5, ff['zvol']))),
     bigcount = rd.getconfigBigCount(count=None, write=True)
 
-    # if len(ff) > 0:
-    #     print(("\tSh: %s Vr:%s Sz: %s Vr:%s " % (
-    #         f_print(4, ff['scent']), f_print(5, ff['svol'], 31), f_print(4, ff['zcent']), f_print(5, ff['zvol'], 31))), end=' ')
-    #     print(('B:%s-%s V:%s' %
-    #           (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
-    # else:
-    #     print(("\tSh: \t%s Vr:  \t%s Sz: \t%s Vr: \t%s ") % (0, 0, 0, 0), end=' ')
-    #     print(('B:%s-%s V:%s' %
-    #           (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
-
-    # if len(hgt) > 0:
-    #     print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" %
-    #           (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'] if len(ff) > 0 else 0, 32))))
-    # else:
-    #     print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
-
-
     if ff:
         print(("\tSh: %s Vr:%s Sz: %s Vr:%s " % (
             f_print(4, ff.get('scent', 0)),
@@ -589,19 +579,24 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     else:
         print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
 
+    if len(rzrq) > 0 and isinstance(rzrq, dict):
+        try:
+            sh_val = float(rzrq.get('sh', 0) or 0)
+            sz_val = float(rzrq.get('sz', 0) or 0)
+            all_val = float(rzrq.get('all', 0) or 0)
+            shrz_val = float(rzrq.get('shrz', 0) or 0)
+            szrz_val = float(rzrq.get('szrz', 0) or 0)
+            dff_val = float(rzrq.get('dff', 0) or 0)
+            is_partial = rzrq.get('is_partial', False)
 
-    if len(rzrq) > 0:
-        if 'shrz' not in list(rzrq.keys()) and 'szrz' not in list(rzrq.keys()):
-            rzrq['shrz'] = 0
-            rzrq['szrz'] = 0
-        shpcent = round((rzrq['shrz'] / rzrq['sh'] * 100),
-                        1) if rzrq['sh'] > 0 else '?'
-        szpcent = round((rzrq['szrz'] / rzrq['sz'] * 100),
-                        1) if rzrq['sz'] > 0 else '?'
-        print(("\tSh: %s rz:%s :%s%% sz: %s rz:%s :%s%% All: %s diff: %s亿" % (
-            f_print(5, rzrq['sh']), f_print(4, rzrq['shrz']), shpcent, f_print(
-                5, rzrq['sz']), f_print(4, rzrq['szrz']),
-            szpcent, f_print(4, rzrq['all'], 31), f_print(5, rzrq['dff'], 31))))
+            shpcent = round((shrz_val / sh_val * 100), 1) if sh_val > 0 else '?'
+            szpcent = round((szrz_val / sz_val * 100), 1) if (sz_val > 0 and not is_partial) else ('?*' if is_partial else '?')
+            print(("\tSh: %s rz:%s :%s%% sz: %s rz:%s :%s%% All: %s diff: %s亿" % (
+                f_print(5, sh_val), f_print(4, shrz_val), shpcent,
+                f_print(5, sz_val), f_print(4, szrz_val), szpcent,
+                f_print(4, all_val, 31), f_print(5, dff_val, 31))))
+        except Exception as e_rz:
+            log.warning("print rzrq exception: %s" % e_rz)
     # print "bigcount:",bigcount
 
     cct.set_console(width, height,
@@ -691,6 +686,7 @@ if __name__ == '__main__':
     success = 0
     # rzrq = ffu.get_dfcfw_rzrq_SHSZ2()
     rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+    last_rzrq_fetch_time = time.time()
     rzrq_date = cct.get_today()
     today_str = cct.get_today()
     dl = 60
@@ -724,6 +720,7 @@ if __name__ == '__main__':
                 log.info("Trading day changed from %s to %s. Auto-reinitializing for 24x7 running..." % (today_str, current_today))
                 today_str = current_today
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                last_rzrq_fetch_time = time.time()
                 rzrq_date = today_str
                 fibcount = 0
                 fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
@@ -736,9 +733,10 @@ if __name__ == '__main__':
                 code = ''
                 except_count = 0
                 first_run = True  # 次日跨天后也允许首次运行完整显示一次
-            elif today_str != rzrq_date:
+            elif today_str != rzrq_date and (time.time() - last_rzrq_fetch_time > 180):
                 log.info("rzrq_date changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                last_rzrq_fetch_time = time.time()
                 rzrq_date = today_str
 
             int_time = cct.get_now_time_int()
@@ -753,9 +751,21 @@ if __name__ == '__main__':
                         fibl = fibonacciCount(
                             ['999999', '399001', '399006'], dl=dl)
                         
-                    if (920 < int_time and not cct.isDigit(rzrq['all'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0):
-                        rzrq = ffu.get_dfcfw_rzrq_SHSZ()
-                        rzrq_date = cct.get_today()
+                    # 防 ban 冷却与必要更新检查：严禁每秒请求，最小冷却 300 秒 (5分钟)
+                    need_fetch_rzrq = False
+                    if len(rzrq) == 0 or rzrq.get('all', 0) == 0 or rzrq.get('sh', 0) == 0:
+                        need_fetch_rzrq = True
+                    elif rzrq.get('is_partial', False) and (930 <= int_time <= 1505):
+                        # 深市数据若早盘缺失，盘中每 5 分钟尝试补全一次
+                        need_fetch_rzrq = True
+
+                    if need_fetch_rzrq and (time.time() - last_rzrq_fetch_time > 300):
+                        log.info("Intraday refreshing rzrq data (cooldown passed)...")
+                        new_rz = ffu.get_dfcfw_rzrq_SHSZ()
+                        last_rzrq_fetch_time = time.time()
+                        if new_rz and new_rz.get('all', 0) > 0:
+                            rzrq = new_rz
+                            rzrq_date = today_str
 
                     log.info('start get_hot_count')
                     get_hot_countNew(percentDuration, rzrq, fibl, fibc)
@@ -808,6 +818,16 @@ if __name__ == '__main__':
             # 2. 盘前准备或午间休市 (7:00-9:15, 11:30-13:00)
             elif is_work_duration:
                 log.debug('into work_duration:%s' % (int_time))
+                # 盘前准备阶段 (8:40 ~ 9:15)：若为交易日且深市未全或距上次抓取超 10 分钟，尝试刷新一次
+                if 840 <= int_time < 915 and (time.time() - last_rzrq_fetch_time > 180):
+                    if rzrq.get('is_partial', False) or (time.time() - last_rzrq_fetch_time > 600):
+                        log.info("Pre-market auto-refreshing rzrq data...")
+                        new_rz = ffu.get_dfcfw_rzrq_SHSZ()
+                        last_rzrq_fetch_time = time.time()
+                        if new_rz and new_rz.get('all', 0) > 0:
+                            rzrq = new_rz
+                            rzrq_date = today_str
+
                 while 1:
                     if cct.get_work_duration():
                         print(".", end='', flush=True)
@@ -888,6 +908,7 @@ if __name__ == '__main__':
             elif st.lower() == 'c' or st.lower() == 'C':
                 log.info("Manually re-fetching rzrq data...")
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+                last_rzrq_fetch_time = time.time()
                 rzrq_date = cct.get_today()
             elif st.startswith('w') or st.lower() == 'w':
                 print("Manual trigger write dm to file...")
