@@ -4412,8 +4412,8 @@ class IntegratedTradingStrategyPanel(QWidget):
         cyan = "#38bdf8"
         green = "#00ff88"
 
-        # 🛡️ 识别新股首日保护模式 (若无昨日有效 OHLC 数据)
-        is_first_listing_day = (y_open <= 0.01 and y_high <= 0.01 and y_low <= 0.01)
+        # 🛡️ 识别新股首日保护模式 (引擎权威判定为首日，或无昨日有效 OHLC 数据)
+        is_first_listing_day = bool(self.engine.is_stock_first_listing_day(code) or (y_open <= 0.01 and y_high <= 0.01 and y_low <= 0.01))
 
         if is_first_listing_day:
             # 🛡️ 【新股首日保护模式】：无昨日数据，以发行价 issue_p 与今日开盘价 open_price 为锚

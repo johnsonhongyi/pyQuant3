@@ -1152,19 +1152,27 @@ class TDXRealtimeFetcher:
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 last_row_date = str(df_daily.iloc[-1].get("datetime", df_daily.iloc[-1].get("time", "")))[:10]
 
-                if last_row_date == today_str and len(df_daily) >= 2:
-                    y_row = df_daily.iloc[-2]
-                elif last_row_date != today_str and len(df_daily) >= 1:
+                if last_row_date == today_str:
+                    if len(df_daily) >= 2:
+                        y_row = df_daily.iloc[-2]
+                        res = {
+                            "open": round(float(y_row.get("open", 0.0)), 2),
+                            "high": round(float(y_row.get("high", 0.0)), 2),
+                            "low": round(float(y_row.get("low", 0.0)), 2),
+                            "close": round(float(y_row.get("close", 0.0)), 2),
+                        }
+                    else:
+                        # 上市首日仅有今天 1 根日 K 线，无昨日真实 OHLC
+                        res = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
+                elif len(df_daily) >= 1:
+                    # 最后一根日 K 不是今天，说明今日 K 线尚未收盘落盘，取最后一根作为昨日日 K
                     y_row = df_daily.iloc[-1]
-                else:
-                    y_row = df_daily.iloc[-1]
-
-                res = {
-                    "open": round(float(y_row.get("open", 0.0)), 2),
-                    "high": round(float(y_row.get("high", 0.0)), 2),
-                    "low": round(float(y_row.get("low", 0.0)), 2),
-                    "close": round(float(y_row.get("close", 0.0)), 2),
-                }
+                    res = {
+                        "open": round(float(y_row.get("open", 0.0)), 2),
+                        "high": round(float(y_row.get("high", 0.0)), 2),
+                        "low": round(float(y_row.get("low", 0.0)), 2),
+                        "close": round(float(y_row.get("close", 0.0)), 2),
+                    }
         except Exception as e:
             logger.debug(f"get_yesterday_ohlc 异常: {e}")
 

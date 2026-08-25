@@ -241,37 +241,91 @@ class NewStockStrategyGenerator:
                     "phase_id": 1,
                     "name": "开盘集合竞价 (09:15-09:25)",
                     "time_range": "09:15-09:25",
-                    "action_guidance": "观察开盘涨幅是否进入 +100%~+200% 强势阶梯；若开盘超预期高开且竞价换手>5%，准备首笔减仓或按兵不动。"
+                    "action_guidance": "观察开盘涨幅是否进入 +100%~+200% 强势阶梯；若开盘超预期高开且竞价换手>5%，准备首笔减仓或按兵不动。",
+                    "rules": []
                 },
                 {
                     "phase_id": 2,
                     "name": "开盘初期博弈 (09:30-09:40)",
                     "time_range": "09:30-09:40",
-                    "action_guidance": "密切跟踪分时线与 VWAP 均价线关系。若快速冲高 >+30% 触发临停，临停期间严禁盲目挂追单。"
+                    "action_guidance": "密切跟踪分时线与 VWAP 均价线关系。若快速冲高 >+30% 触发临停，临停期间严禁盲目挂追单。",
+                    "rules": [
+                        {
+                            "rule_id": "rule_surge_10",
+                            "name": "规则N-1: 较开盘涨10%卖出40%",
+                            "condition_mode": "all",
+                            "trigger_expr": "price >= open_price * 1.10",
+                            "sell_ratio": 0.4,
+                            "order_type": "limit",
+                            "description": "开盘初段冲高较开盘涨10%以上限价卖出首批40%"
+                        },
+                        {
+                            "rule_id": "rule_halt_30",
+                            "name": "规则N-2: +30%临停复牌卖出30%",
+                            "condition_mode": "all",
+                            "trigger_expr": "max_price >= open_price * 1.30",
+                            "sell_ratio": 0.3,
+                            "order_type": "limit",
+                            "description": "触发+30%临停，复牌前挂Open*1.28卖出30%"
+                        }
+                    ]
                 },
                 {
                     "phase_id": 3,
                     "name": "早盘第一波分歧 (09:40-10:30)",
                     "time_range": "09:40-10:30",
-                    "action_guidance": "首次回踩 VWAP 均价线时观察承接。若破均价且3分钟内无法收回，执行阶梯分批减仓策略。"
+                    "action_guidance": "首次回踩 VWAP 均价线时观察承接。若破均价且3分钟内无法收回，执行阶梯分批减仓策略。",
+                    "rules": [
+                        {
+                            "rule_id": "rule_timeout_1000",
+                            "name": "规则N-3: 10:00超时未冲高卖30%",
+                            "condition_mode": "all",
+                            "trigger_expr": "current_time >= '10:00'",
+                            "sell_ratio": 0.3,
+                            "order_type": "market_price",
+                            "description": "10:00前未走出冲高行情，按市价减仓30%"
+                        },
+                        {
+                            "rule_id": "rule_vwap_break",
+                            "name": "规则N-4: 跌破均线VWAP防守减仓",
+                            "condition_mode": "all",
+                            "trigger_expr": "price < vwap * 0.98",
+                            "sell_ratio": 0.3,
+                            "order_type": "market_price",
+                            "description": "跌破分时均线VWAP且承接不足，执行防守减仓"
+                        }
+                    ]
                 },
                 {
                     "phase_id": 4,
                     "name": "盘中横盘承接 (10:30-11:30)",
                     "time_range": "10:30-11:30",
-                    "action_guidance": "横盘缩量区间，若换手率稳步突破 50% 且价格运行于均价线上方，维持持仓观察。"
+                    "action_guidance": "横盘缩量区间，若换手率稳步突破 50% 且价格运行于均价线上方，维持持仓观察。",
+                    "rules": []
                 },
                 {
                     "phase_id": 5,
                     "name": "午后主浪博弈 (13:00-14:30)",
                     "time_range": "13:00-14:30",
-                    "action_guidance": "关注午后是否放量创日内新高。若出现滞涨背离，坚决在阶梯高位执行利润锁定。"
+                    "action_guidance": "关注午后是否放量创日内新高。若出现滞涨背离，坚决在阶梯高位执行利润锁定。",
+                    "rules": []
                 },
                 {
                     "phase_id": 6,
                     "name": "尾盘定盘决策 (14:30-15:00)",
                     "time_range": "14:30-15:00",
-                    "action_guidance": "评估全天总换手与收盘价/日内最高价比值。若综合得分 ≥7.0 且处于强势阶梯，可保留底仓博弈次日溢价；否则清仓兑现。"
+                    "action_guidance": "评估全天总换手与收盘价/日内最高价比值。若综合得分 ≥7.0 且处于强势阶梯，可保留底仓博弈次日溢价；否则清仓兑现。",
+                    "rules": [
+                        {
+                            "rule_id": "rule_close_clear",
+                            "name": "规则N-5: 尾盘未达标清仓",
+                            "condition_mode": "all",
+                            "trigger_expr": "current_time >= '14:50' and composite_score < 7.0",
+                            "sell_ratio": 1.0,
+                            "order_type": "market_price",
+                            "description": "14:50后综合评分<7分清仓剩余全部不留隔夜"
+                        }
+                    ]
                 }
             ]
         }
