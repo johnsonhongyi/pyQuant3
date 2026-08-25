@@ -1,3 +1,28 @@
+## 2026-08-25 09:55
+- [x] **通道策略批量测算结果窗口自动持久化最后写入/选中的 TDX 板块位置 (`ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_result_linkage_and_tdx_blk.py`)**：
+    - [x] **持久化最后写入/选中的板块代码**：
+        - 引入全局统一的 `save_config_node` 与 `load_config_node`（基于 `window_config.json` 与线程安全文件锁）；
+        - 当用户在底部下拉框中切换板块，或点击【➕ 追加板块】/【📝 覆写板块】写入成功后，自动将最新板块代码（如 `"066"`、`"068"`）原子保存；
+    - [x] **启动/打开窗口时自适应恢复历史板块位置**：
+        - 窗口构造与 `_populate_tdx_blocks` 时，优先读取历史持久化板块代码并自动恢复为当前选中项；
+    - [x] **单元测试与全量回归验证 100% 通过**：
+        - 扩充测试用例覆盖持久化保存与恢复流程，20 项测试全部 **100% PASSED**。
+
+## 2026-08-25 09:45
+- [x] **通道策略批量测算结果窗口键盘上下键联动与自适应 TDX 板块一键写入功能落地 (`ats/ui/channel_scan_result_dialog.py`, `JohnsonUtil/commonTips.py`, `tests/test_channel_scan_result_linkage_and_tdx_blk.py`)**：
+    - [x] **键盘上下键流畅联动与 30ms 防抖**：
+        - 监听 `table.currentCellChanged` 信号，结合 30ms 防抖定时器 (`_linkage_timer`)，彻底解决键盘 Up/Down 方向键、PageUp/Down 及 Home/End 切换行时无联动的问题；
+        - 确保快速连按时平滑合并、单击鼠标时零延迟发送 `stock_linkage_requested` 与 `main_window.link_stock(code, name)` 联动信号；
+    - [x] **自适应 TDX 板块解析与加载**：
+        - 智能从 `cct.get_tdx_dir_blocknew()` 及 `global.ini` 探测通达信 `T0002/blocknew` 路径；
+        - 准确按 120 字节二进制协议解析 `blocknew.cfg`（GBK 解码板块名称与代码），并与目录下所有 `*.blk` 自选板块文件双向对齐，自适应生成板块列表（如 `[066] 形态066`、`[061] 061-3D`、`[064] 064多头排列`、`[098] 远端次新`、`[zxg] 自选股` 等）；
+    - [x] **底部工具栏一键写入 (追加/覆写)**：
+        - 底部工具栏新增板块下拉选择框、`➕ 追加板块` 按钮、`📝 覆写板块` 按钮与实时状态反馈标签；
+        - 写入机制支持选区优先（Shift/Ctrl 多选选中的个股）与全量命中个股兜底；
+        - 加固 `commonTips.py` 的 `write_to_blocknew` 与 `writeBlocknew`，使用安全 `with open(...)` 架构，根除文件不存在时报错与句柄泄漏隐患；
+    - [x] **单元测试与集成测试验证 100% 通过**：
+        - 新增 5 项专用测试 (`tests/test_channel_scan_result_linkage_and_tdx_blk.py`)，全套 19 项通道策略与 UI 测试 **100% PASSED**。
+
 ## 2026-08-24 21:15
 - [x] **确认与加固系统在“收盘后冷启动”与“非交易日冷启动”下的持久化行为与数据呈现安全规范 (`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_persistence_and_history.py`)**：
     - [x] **交易日收盘后冷启动 (>= 15:00, is_post_trading)**：

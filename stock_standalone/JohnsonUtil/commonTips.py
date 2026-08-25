@@ -2977,14 +2977,12 @@ def get_tdx_dir_blocknew():
     return blocknew_path
 
 def get_tdx_dir_blocknew_dxzq(block_path):
-
     blocknew_path = get_tdx_dir_blocknew()
-    if block_path.find(blocknew_path) > -1:
-        blkname = block_path.split('\\')[-1]
+    if block_path and blocknew_path and block_path.find(blocknew_path) > -1:
+        blkname = os.path.basename(block_path)
         blocknew_path = win10dxzq + r'/T0002/blocknew/'.replace('/', path_sep).replace('\\', path_sep) + blkname
-    else:
-        log.error("not find blkname{block_path}")
-    return blocknew_path
+        return blocknew_path
+    return ""
 
 
 
@@ -5858,11 +5856,13 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=Non
     write_to_blocknew_2025(p_name, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)
     if not isMac():
         blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
-        write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
+        if blocknew_path and os.path.exists(os.path.dirname(blocknew_path)):
+            write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
     else:
         # blocknew_path=p_name.replace('new_tdx','new_tdx2')
         blocknew_path=p_name.replace('new_tdx2','new_tdx')
-        write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
+        if blocknew_path and os.path.exists(os.path.dirname(blocknew_path)):
+            write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
 
 def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     if keep_last is None:
@@ -5879,13 +5879,11 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
     def writeBlocknew(p_name, data, append=True,keep_last=keep_last,reappend=True):
         flist=[]
         if append:
-            fout = open(p_name, 'rb+')
-            # fout = open(p_name)
-            flist_t = fout.readlines()
-            # flist_t = file(p_name, mode='rb+', buffering=None)
-            # flist = []
-            # errstatus=False
-            
+            if os.path.exists(p_name):
+                with open(p_name, 'rb') as fout:
+                    flist_t = fout.readlines()
+            else:
+                flist_t = []
 
             for code in flist_t:
                 if isinstance(code,bytes):
@@ -5904,24 +5902,13 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                 inx = (co) + '\r\n'
                 if inx not in flist:
                     flist.insert(index_list.index(co), inx)
-            # if errstatus:
-            # fout.close()
-            # fout = open(p_name, 'wb+')
-            # for code in flist:
-            #     fout.write(code)
-
-            # if not str(flist[-1]).endswith('\r\n'):
-                # print "File:%s end not %s"%(p_name[-7:],str(flist[-1]))
-            # print "flist", flist
         else:
-            if int(keep_last) > 0:
-                fout = open(p_name, 'rb+')
-                flist_t = fout.readlines()
+            if int(keep_last) > 0 and os.path.exists(p_name):
+                with open(p_name, 'rb') as fout:
+                    flist_t = fout.readlines()
             else:
                 flist_t = []
-            # flist_t = file(p_name, mode='rb+', buffering=None)
             if len(flist_t) > 4:
-                # errstatus=False
                 for code in flist_t:
                     if isinstance(code,bytes):
                         code = code.decode()
@@ -5933,14 +5920,6 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                             # errstatus = True
                             code = code + '\r\n'
                     flist.append(code)
-                # if errstatus:
-                if int(keep_last) > 0:
-                    fout.close()
-                # if p_name.find('066.blk') > 0:
-                #     writecount = ct.writeblockbakNum
-                # else:
-                #     writecount = 9
-
                 writecount = keep_last
                 flist = flist[:writecount]
 
@@ -5948,13 +5927,7 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                     inx = (co) + '\r\n'
                     if inx not in flist:
                         flist.insert(index_list.index(co), inx)
-                # print flist
-                # fout = open(p_name, 'wb+')
-                # for code in flist:
-                #     fout.write(code)
             else:
-                # fout = open(p_name, 'wb+')
-                # index_list.reverse()
                 for i in index_list:
                     raw = (i) + '\r\n'
                     flist.append(raw)
