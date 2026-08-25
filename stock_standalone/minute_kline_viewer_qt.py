@@ -1282,6 +1282,45 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 if df is None:
                     raise last_err
 
+                # 🛡️ 自适应兼容：如果从 pickle 中直接读出了紧凑字典，自动重构为 DataFrame
+                if isinstance(df, dict):
+                    if df.get('__version__') == 2 and 'data' in df:
+                        codes_list = []
+                        arrays_list = []
+                        for code, arr in df['data'].items():
+                            if len(arr) > 0:
+                                codes_list.append(np.full(len(arr), code, dtype='object'))
+                                arrays_list.append(arr)
+                        if arrays_list:
+                            all_c = np.concatenate(codes_list)
+                            all_d = np.concatenate(arrays_list)
+                            df = pd.DataFrame({
+                                'code': all_c, 'time': all_d['time'], 'open': all_d['open'],
+                                'high': all_d['high'], 'low': all_d['low'], 'close': all_d['close'],
+                                'volume': all_d['volume'], 'cum_vol_start': all_d['cum_vol_start']
+                            })
+                        else:
+                            df = pd.DataFrame()
+                    elif any(isinstance(v, list) for v in df.values()):
+                        from realtime_data_service import KLineSeries
+                        codes_list = []
+                        arrays_list = []
+                        for code, items in df.items():
+                            series = KLineSeries.from_list(items)
+                            if len(series) > 0:
+                                codes_list.append(np.full(len(series), code, dtype='object'))
+                                arrays_list.append(series.raw_array)
+                        if arrays_list:
+                            all_c = np.concatenate(codes_list)
+                            all_d = np.concatenate(arrays_list)
+                            df = pd.DataFrame({
+                                'code': all_c, 'time': all_d['time'], 'open': all_d['open'],
+                                'high': all_d['high'], 'low': all_d['low'], 'close': all_d['close'],
+                                'volume': all_d['volume'], 'cum_vol_start': all_d['cum_vol_start']
+                            })
+                        else:
+                            df = pd.DataFrame()
+
             elif ext == ".csv":
                 try:
                     # 🛡️ 智能表头与多周期数据处理
