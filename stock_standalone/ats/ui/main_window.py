@@ -1768,6 +1768,8 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] 初始化 TdxSignalWatcher 异常: {e}")
 
+        self.ladder_watcher = None
+
         # 自动加载昨日快照，恢复跨日 WATCH/TRADE 精选标的以实现跨日持续跟进
         try:
             prev_signals = self.session_snapshot.load_previous_day_signals()
@@ -1998,8 +2000,9 @@ class ATSMainWindow(QMainWindow):
         self.addToolBar(toolbar)
         toolbar.setMovable(False)
         
-        self.btn_toggle_rotation = QPushButton("▶ 启动 24x7 自动旋转")
-        self.btn_toggle_rotation.setStyleSheet("background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88;")
+        self.btn_toggle_rotation = QPushButton("▶ 24x7")
+        self.btn_toggle_rotation.setToolTip("启动/停止 24x7 自动过滤、信号评估与大级别历史回测轮转引擎")
+        self.btn_toggle_rotation.setStyleSheet("QPushButton { background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #00ff88; color: #000; }")
         self.btn_toggle_rotation.clicked.connect(self.toggle_rotation)
         toolbar.addWidget(self.btn_toggle_rotation)
         
@@ -2090,6 +2093,13 @@ class ATSMainWindow(QMainWindow):
         self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
         self.cb_vis.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_vis)
+        
+        self.cb_ladder = QCheckBox("天梯")
+        self.cb_ladder.setToolTip("开启【连板天梯 / 涨停采集工具】上下键/选行与通达信无缝联动 (0% CPU 后台守护)")
+        self.cb_ladder.setChecked(True)
+        self.cb_ladder.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; margin-left: 4px; }")
+        self.cb_ladder.toggled.connect(self._on_ladder_link_toggled)
+        toolbar.addWidget(self.cb_ladder)
         
         toolbar.addSeparator()
         
@@ -2662,15 +2672,15 @@ class ATSMainWindow(QMainWindow):
             self.lbl_data_time_status.setStyleSheet("color: #8e8e93; font-weight: bold; font-size: 9pt; padding-right: 8px;")
 
     def toggle_rotation(self):
-        if self.btn_toggle_rotation.text().startswith("▶"):
-            self.btn_toggle_rotation.setText("■ 停止 24x7 自动旋转")
-            self.btn_toggle_rotation.setStyleSheet("background-color: #3d0000; color: #ff6060; font-weight: bold; border: 1px solid #ff4444;")
+        if "▶" in self.btn_toggle_rotation.text():
+            self.btn_toggle_rotation.setText("■ 24x7")
+            self.btn_toggle_rotation.setStyleSheet("QPushButton { background-color: #3d0000; color: #ff6060; font-weight: bold; border: 1px solid #ff4444; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ff4444; color: #000; }")
             self.lbl_rotator_status.setText("旋转引擎: 🟢 运行中")
             self.lbl_rotator_status.setStyleSheet("color: #00ff88;")
             self.status_bar.showMessage("24x7 自动过滤、信号评估、及大级别历史回测轮转已启动。")
         else:
-            self.btn_toggle_rotation.setText("▶ 启动 24x7 自动旋转")
-            self.btn_toggle_rotation.setStyleSheet("background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88;")
+            self.btn_toggle_rotation.setText("▶ 24x7")
+            self.btn_toggle_rotation.setStyleSheet("QPushButton { background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #00ff88; color: #000; }")
             self.lbl_rotator_status.setText("旋转引擎: ⏸️ 已暂停")
             self.lbl_rotator_status.setStyleSheet("color: #ff9900;")
             self.status_bar.showMessage("自动轮转引擎已暂停。")
@@ -4803,6 +4813,12 @@ class ATSMainWindow(QMainWindow):
                 vis_link = data.get("ats_link_vis")
                 if vis_link is not None:
                     self.cb_vis.setChecked(bool(vis_link))
+            if hasattr(self, 'cb_ladder'):
+                ladder_link = data.get("ats_link_ladder")
+                if ladder_link is not None:
+                    self.cb_ladder.setChecked(bool(ladder_link))
+                else:
+                    self._on_ladder_link_toggled(self.cb_ladder.isChecked())
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
 
@@ -4841,10 +4857,36 @@ class ATSMainWindow(QMainWindow):
                 updates["ats_link_ths"] = self.cb_ths.isChecked()
             if hasattr(self, 'cb_vis'):
                 updates["ats_link_vis"] = self.cb_vis.isChecked()
+            if hasattr(self, 'cb_ladder'):
+                updates["ats_link_ladder"] = self.cb_ladder.isChecked()
             
             save_config_nodes(updates)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving layout state: {e}")
+
+    def _on_ladder_link_toggled(self, checked: bool):
+        """开启/关闭连板天梯上下键联动守护线程"""
+        if checked:
+            if self.ladder_watcher is None or not self.ladder_watcher.isRunning():
+                try:
+                    from ats.ladder_linkage_watcher import LadderLinkageWatcher
+                    self.ladder_watcher = LadderLinkageWatcher(parent=self)
+                    self.ladder_watcher.code_linked.connect(self._on_ladder_code_linked)
+                    self.ladder_watcher.start()
+                except Exception as e:
+                    print(f"[ATSMainWindow] 启动 LadderLinkageWatcher 异常: {e}")
+        else:
+            if self.ladder_watcher is not None and self.ladder_watcher.isRunning():
+                try:
+                    self.ladder_watcher.stop()
+                except Exception as e:
+                    print(f"[ATSMainWindow] 停止 LadderLinkageWatcher 异常: {e}")
+        self._save_layout_state()
+
+    def _on_ladder_code_linked(self, code: str, row: int, source: str):
+        """连板天梯跨进程联动触发通知 (状态栏提示)"""
+        if hasattr(self, 'statusBar') and self.statusBar():
+            self.statusBar().showMessage(f"🪜 连板天梯联动 -> 第 {row} 行 [{code}] ({source})", 3000)
 
     def _on_top_tab_changed(self, index: int):
         """自动持久化记忆当前打开的是【重点关注】还是【大级别回调跟踪器】Tab 选项卡"""
@@ -5210,6 +5252,13 @@ class ATSMainWindow(QMainWindow):
                 self.tdx_watcher.wait(1000)
             except Exception as ex:
                 print(f"[ATSMainWindow] Error stopping TDX signal watcher: {ex}")
+
+        if hasattr(self, 'ladder_watcher') and self.ladder_watcher is not None:
+            try:
+                self.ladder_watcher.stop()
+                self.ladder_watcher.wait(1000)
+            except Exception as ex:
+                print(f"[ATSMainWindow] Error stopping LadderLinkageWatcher: {ex}")
 
         # 2. 🚀【广播主窗口退出信号】：通知所有悬浮独立窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close()
         try:
