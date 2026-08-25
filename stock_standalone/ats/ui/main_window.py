@@ -4817,8 +4817,8 @@ class ATSMainWindow(QMainWindow):
                 ladder_link = data.get("ats_link_ladder")
                 if ladder_link is not None:
                     self.cb_ladder.setChecked(bool(ladder_link))
-                else:
-                    self._on_ladder_link_toggled(self.cb_ladder.isChecked())
+                # 无论是否已有持久化，启动恢复时显式触发一次状态同步，确保守护线程100%可靠拉起
+                self._on_ladder_link_toggled(self.cb_ladder.isChecked())
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
 
@@ -4865,14 +4865,17 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Error saving layout state: {e}")
 
     def _on_ladder_link_toggled(self, checked: bool):
-        """开启/关闭连板天梯上下键联动守护线程"""
+        """开启/关闭连板天梯上下键联动与右键注入守护线程"""
         if checked:
             if self.ladder_watcher is None or not self.ladder_watcher.isRunning():
                 try:
                     from ats.ladder_linkage_watcher import LadderLinkageWatcher
-                    self.ladder_watcher = LadderLinkageWatcher(parent=self)
-                    self.ladder_watcher.code_linked.connect(self._on_ladder_code_linked)
-                    self.ladder_watcher.start()
+                    if self.ladder_watcher is None:
+                        self.ladder_watcher = LadderLinkageWatcher(parent=self)
+                        self.ladder_watcher.code_linked.connect(self._on_ladder_code_linked)
+                        self.ladder_watcher.right_click_requested.connect(self._show_ladder_context_menu)
+                    if not self.ladder_watcher.isRunning():
+                        self.ladder_watcher.start()
                 except Exception as e:
                     print(f"[ATSMainWindow] 启动 LadderLinkageWatcher 异常: {e}")
         else:
@@ -4881,12 +4884,114 @@ class ATSMainWindow(QMainWindow):
                     self.ladder_watcher.stop()
                 except Exception as e:
                     print(f"[ATSMainWindow] 停止 LadderLinkageWatcher 异常: {e}")
-        self._save_layout_state()
+        if not getattr(self, '_is_restoring_sizes', False):
+            self._save_layout_state()
 
     def _on_ladder_code_linked(self, code: str, row: int, source: str):
         """连板天梯跨进程联动触发通知 (状态栏提示)"""
         if hasattr(self, 'statusBar') and self.statusBar():
             self.statusBar().showMessage(f"🪜 连板天梯联动 -> 第 {row} 行 [{code}] ({source})", 3000)
+
+    def _show_ladder_context_menu(self, code: str, name: str, x: int, y: int):
+        """
+        [RIGHT-CLICK INJECTION] 在连板天梯窗口鼠标右键点击处，弹出 ATS 核心右键菜单
+        """
+        code_clean = "".join(c for c in str(code) if c.isalnum()).zfill(6) if any(c.isdigit() for c in str(code)) else str(code).strip()
+        if not code_clean:
+            return
+
+        stock_name = str(name).strip() if name and name != "未知" else self.get_stock_name(code_clean)
+        
+        from PyQt6.QtWidgets import QMenu, QApplication
+        from PyQt6.QtGui import QAction, QCursor
+        from PyQt6.QtCore import QPoint
+        from global_favorites import GlobalFavoriteManager
+
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = code_clean in fav_mgr.get_favorite_stocks()
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #16161c;
+                border: 1px solid #333344;
+                color: #e2e2e5;
+                padding: 5px;
+                font-size: 9.5pt;
+            }
+            QMenu::item {
+                padding: 6px 22px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #262c3d;
+                color: #00ff88;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2e2e3a;
+                margin: 4px 8px;
+            }
+        """)
+
+        # 1. 标的标题项
+        title_action = QAction(f"📌 标的: 【{stock_name}】 ({code_clean})", self)
+        title_action.setEnabled(False)
+        menu.addAction(title_action)
+
+        menu.addSeparator()
+
+        # 2. 复制功能
+        copy_code_act = QAction(f"📋 复制代码 ({code_clean})", self)
+        copy_code_act.triggered.connect(lambda: QApplication.clipboard().setText(code_clean))
+        menu.addAction(copy_code_act)
+
+        copy_all_act = QAction(f"📝 复制名称与代码 ({stock_name} {code_clean})", self)
+        copy_all_act.triggered.connect(lambda: QApplication.clipboard().setText(f"{code_clean} {stock_name}"))
+        menu.addAction(copy_all_act)
+
+        menu.addSeparator()
+
+        # 3. SBC 独立分时走势图
+        sbc_act = QAction(f"📈 调出 SBC 独立分时走势图", self)
+        def _open_sbc():
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code_clean)
+        sbc_act.triggered.connect(_open_sbc)
+        menu.addAction(sbc_act)
+
+        # 4. 重点关注 (自选)
+        if is_fav:
+            fav_act = QAction(f"❌ 取消重点关注 (移出自选)", self)
+        else:
+            fav_act = QAction(f"⭐ 设为重点关注 (加入自选)", self)
+        def _toggle_fav():
+            fav_mgr.toggle_favorite_stock(code_clean)
+            if hasattr(self, '_safe_favorites_changed'):
+                self._safe_favorites_changed()
+        fav_act.triggered.connect(_toggle_fav)
+        menu.addAction(fav_act)
+
+        menu.addSeparator()
+
+        # 6. 涨停天梯聚合分析
+        limit_act = QAction(f"🔥 打开每日涨停天梯看板", self)
+        limit_act.triggered.connect(self.open_daily_limit_up_analyzer)
+        menu.addAction(limit_act)
+
+        # 7. 物理联动 (通达信 + 同花顺 + 东财)
+        link_all_act = QAction(f"📡 立即联动终端 (TDX / THS / DC)", self)
+        link_all_act.triggered.connect(lambda: self.link_stock(code_clean, stock_name))
+        menu.addAction(link_all_act)
+
+        # 8. 发送到异动联动
+        from ats.ui.base_table import send_to_linkage
+        linkage_act = QAction(f"⚡ 发送到异动联动", self)
+        linkage_act.triggered.connect(lambda: send_to_linkage(code_clean, stock_name, self))
+        menu.addAction(linkage_act)
+
+        # 弹出菜单在鼠标屏幕位置 (使用 QCursor.pos() 自动精准适配 High-DPI 缩放与多显示器拓展桌面)
+        menu.exec(QCursor.pos())
 
     def _on_top_tab_changed(self, index: int):
         """自动持久化记忆当前打开的是【重点关注】还是【大级别回调跟踪器】Tab 选项卡"""
