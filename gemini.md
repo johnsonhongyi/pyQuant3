@@ -1,3 +1,10 @@
+## 2026-08-25 18:50
+- [x] **彻底修复 K线趋势实时监控 (KLineMonitor) 启动与非交易时间数据不同步及 NoneType 过滤报错 (`stock_standalone/kline_monitor.py`, `stock_standalone/instock_MonitorTK.py`)**：
+    - [x] **非交易时间与初次加载自愈刷新**：移除 `if not is_work: continue` 导致无数据时死锁跳过的逻辑，数据未加载时自动快速轮询重试；
+    - [x] **根除 `NoneType has no len()` 弹窗报错**：重构 `apply_filters()` 与 `search_code_status()`，空数据时主动拉取数据底座，失败安全回退为空 DataFrame，绝不返回 `None`；
+    - [x] **增加 `trigger_refresh(force=True)` 机制**：在窗口重新打开或主程序数据刷新时立刻触发主动更新；
+    - [x] **自动化测试用例 `test_kline_monitor_fix.py` 100% 验证通过**。
+
 ## 2026-08-25 18:18
 - [x] **实现持久化数据文件、极速恢复与运行时滚动裁切全面适配新架构 (`stock_standalone/realtime_data_service.py`)**：
     - [x] **新架构持久化引擎 (`save_cache`)**：基于紧凑连续 NumPy 结构化数组的二进制原子存盘，写入耗时仅需 **2.8 ms**，文件体积缩减 85%（158KB / 50只股票），彻底消除历史碎片。

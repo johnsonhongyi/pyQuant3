@@ -21104,6 +21104,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._register_hwnd_to_mru(self.kline_monitor.winfo_id())
                 # self.kline_monitor.focus_force()
                 self._schedule_after(500, self.kline_monitor.focus_force)
+                if hasattr(self.kline_monitor, 'trigger_refresh'):
+                    self.kline_monitor.trigger_refresh(force=True)
         logger.info("启动K线监控OK...")
         # 在这里可以启动你的实时监控逻辑，例如:
         # 1. 调用获取数据的线程

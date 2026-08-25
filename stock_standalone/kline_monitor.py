@@ -14,8 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import pyperclip
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
-from gui_utils import askstring_at_parent_single
-from stock_logic_utils import detect_signals, get_row_tags, ensure_parentheses_balanced
+from stock_logic_utils import get_row_tags, ensure_parentheses_balanced
 from history_manager import toast_message
 from tk_gui_modules.treeview_mixin import TreeviewMixin
 
@@ -341,7 +340,8 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
 
         try:
             df_filtered = self.apply_filters()
-            toast_message(self, f"共找到 {len(df_filtered)} 条结果")
+            count = len(df_filtered) if df_filtered is not None else 0
+            toast_message(self, f"共找到 {count} 条结果")
             try:
                 self.lift()
                 self.focus_force()
@@ -499,6 +499,21 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
         except Exception as e:
             logger.info(f"[Monitor] 排序错误:{e}")
     
+    def trigger_refresh(self, force: bool = False) -> None:
+        """主动从主程序拉取最新数据并刷新视图"""
+        try:
+            df = self.get_df_func()
+            if df is not None and not df.empty:
+                self.df_cache = df.copy()
+                try:
+                    close_val = df['close'].iloc[-1] if 'close' in df.columns else (df['trade'].iloc[-1] if 'trade' in df.columns else df.iloc[-1, 0])
+                    self._last_key = (df.index[-1], close_val, len(df))
+                except Exception:
+                    self._last_key = (len(df), time.time())
+                self._safe_apply_filters()
+        except Exception as e:
+            logger.debug(f"[KLineMonitor] trigger_refresh error: {e}")
+
     def _safe_apply_filters(self):
         try:
             self.apply_filters()
@@ -514,12 +529,15 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
             if df is not None and not df.empty:
                 self.df_cache = df.copy()
 
-                # 初始化变化检测key
-                self._last_key = (df.index[-1], df['close'].iloc[-1])
+                try:
+                    close_val = df['close'].iloc[-1] if 'close' in df.columns else (df['trade'].iloc[-1] if 'trade' in df.columns else df.iloc[-1, 0])
+                    self._last_key = (df.index[-1], close_val, len(df))
+                except Exception:
+                    self._last_key = (len(df), time.time())
 
                 if not self._ui_update_pending:
                     self._ui_update_pending = True
-                    self.after(200, self._safe_apply_filters)
+                    self.after(100, self._safe_apply_filters)
 
         except Exception as e:
             logger.error(f"[Monitor] 初次更新错误: {e}")
@@ -527,38 +545,29 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
         # ---------- 主循环 ----------
         while not self.stop_event.is_set():
             try:
-                # ---- 状态判断（只调用一次，避免时间边界问题）----
                 is_work = cct.get_work_time()
-                sleep_time = cct.duration_sleep_time if is_work else 10
+                sleep_time = cct.duration_sleep_time if is_work else (2 if (self.df_cache is None or self.df_cache.empty) else 5)
 
                 # ---- 可中断等待 ----
                 if self.stop_event.wait(sleep_time):
                     break
 
-                # ---- 非交易时间直接跳过 ----
-                if not is_work:
-                    continue
-
                 # ---------- 获取数据 ----------
                 df = self.get_df_func()
-
                 if df is None or df.empty:
                     continue
 
                 # ---------- 核心优化1：数据变化检测 ----------
                 try:
-                    key = (df.index[-1], df['close'].iloc[-1])
+                    close_val = df['close'].iloc[-1] if 'close' in df.columns else (df['trade'].iloc[-1] if 'trade' in df.columns else df.iloc[-1, 0])
+                    key = (df.index[-1], close_val, len(df))
                 except Exception:
-                    # 防止索引异常
-                    continue
+                    key = (len(df), time.time())
 
-                if key == getattr(self, "_last_key", None):
+                if key == getattr(self, "_last_key", None) and self.df_cache is not None and not self.df_cache.empty:
                     continue
 
                 self._last_key = key
-
-                # ---------- 计算 ----------
-                df = detect_signals(df)
                 self.df_cache = df.copy()
 
                 # ---------- 核心优化2：UI节流 ----------
@@ -567,18 +576,16 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
                         if not self.winfo_exists():
                             break
                         self._ui_update_pending = True
-                        self.after(100, self._safe_apply_filters)
+                        self.after(50, self._safe_apply_filters)
                     except (tk.TclError, RuntimeError, AttributeError):
                         break
 
             except (RuntimeError, tk.TclError):
-                # UI 已销毁
                 break
 
             except Exception as e:
                 logger.error(f"[Monitor] 更新错误: {e}")
-                # 错误短等待（避免死循环打满CPU）
-                if self.stop_event.wait(5):
+                if self.stop_event.wait(3):
                     break
 
     def get_row_tags_kline(self, r: pd.Series, idx: Optional[Any] = None) -> List[str]:
@@ -780,8 +787,21 @@ class KLineMonitor(tk.Toplevel, TreeviewMixin):
             self.update_table(self.df_cache)
 
     def apply_filters(self):
-        if not self.search_filter_by_signal or self.df_cache is None or self.df_cache.empty:
-            return None
+        if self.df_cache is None or self.df_cache.empty:
+            try:
+                df = self.get_df_func()
+                if df is not None and not df.empty:
+                    df = detect_signals(df)
+                    self.df_cache = df.copy()
+            except Exception:
+                pass
+
+        if self.df_cache is None or self.df_cache.empty:
+            return pd.DataFrame()
+
+        if not self.search_filter_by_signal:
+            self.update_table(self.df_cache)
+            return self.df_cache
 
         df = self.df_cache.copy()
         for f in getattr(self, "filter_stack", []):
