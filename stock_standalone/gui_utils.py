@@ -485,7 +485,8 @@ def askstring_at_parent_single(parent: Any, title: str, prompt: str, initialvalu
     def on_ok():
         if window_name:
             save_window_position_simple(dlg, window_name)
-        result["value"] = text.get("1.0", "end-1c").replace("\n", " ")
+        # 🌟 [保留样式] 完整保留用户编辑的多行换行与结构排版，不强行压缩成单行
+        result["value"] = text.get("1.0", "end-1c")
         dlg.destroy()
 
     def on_cancel():
@@ -495,14 +496,16 @@ def askstring_at_parent_single(parent: Any, title: str, prompt: str, initialvalu
 
     frame_btn = tk.Frame(dlg)
     frame_btn.pack(pady=5)
-    tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-    tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+    tk.Button(frame_btn, text="确定 (Ctrl+Enter)", width=16, command=on_ok).pack(side="left", padx=5)
+    tk.Button(frame_btn, text="取消 (Esc)", width=10, command=on_cancel).pack(side="left", padx=5)
 
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
     dlg.bind("<Escape>", lambda e: on_cancel())
-    text.bind("<Return>",lambda e: on_ok())       # 回车确认
-    text.bind("<Shift-Return>", lambda e: text.insert("insert", "\n"))  # Shift+回车换行
+    dlg.bind("<Control-Return>", lambda e: on_ok())      # Ctrl+回车确认
+    dlg.bind("<Control-s>", lambda e: on_ok())           # Ctrl+S 保存确认
+    text.bind("<Control-Return>", lambda e: on_ok())     # Ctrl+回车确认
+    text.bind("<Control-s>", lambda e: on_ok())          # Ctrl+S 保存确认
 
     dlg.grab_set()
     parent.wait_window(dlg)

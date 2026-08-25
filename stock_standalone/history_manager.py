@@ -669,14 +669,13 @@ class QueryHistoryManager:
         self.refresh_tree()
 
     def edit_query(self, iid):
-        values = self.tree.item(iid, "values")
-        if not values:
+        try:
+            idx = int(iid) - 1
+            if not (0 <= idx < len(self.current_history)):
+                return
+            record = self.current_history[idx]
+        except Exception:
             return
-        current_query = values[0]
-        idx = next((i for i, r in enumerate(self.current_history) if r.get("query") == current_query), None)
-        if idx is None:
-            return
-        record = self.current_history[idx]
         new_query = askstring_at_parent_single(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""), window_name="QueryHistoryManager_EditQuery")
         if new_query and new_query.strip():
             new_query = new_query.strip()
@@ -840,14 +839,12 @@ class QueryHistoryManager:
         col = self.tree.identify_column(event.x)
         row_id = self.tree.identify_row(event.y)
         if not row_id: return
-        values = self.tree.item(row_id, 'values')
-        if not values: return
-        query_text = values[0]
-        idx = next((i for i, r in enumerate(self.current_history) if r.get("query") == query_text), None)
-        if idx is None:
-            try: idx = int(row_id) - 1
-            except: return
-        record = self.current_history[idx]
+        try:
+            idx = int(row_id) - 1
+            if not (0 <= idx < len(self.current_history)): return
+            record = self.current_history[idx]
+        except Exception:
+            return
         if col == "#3":
             new_note = askstring_at_parent_single(self.root, "修改备注", "请输入新的备注：", initialvalue=record.get("note", ""), window_name="QueryHistoryManager_EditNote")
             if new_note is not None:
@@ -1336,12 +1333,12 @@ class QueryHistoryManager:
         toast_message(self.root, f"已恢复：{record.get('query')}", 1500)
 
     def up_to_entry(self, iid):
-        values = self.tree.item(iid, "values")
-        if not values: return
-        current_query = values[0]
-        idx = next((i for i, r in enumerate(self.current_history) if r.get("query") == current_query), None)
-        if idx is None: return
-        record = self.current_history[idx]
+        try:
+            idx = int(iid) - 1
+            if not (0 <= idx < len(self.current_history)): return
+            record = self.current_history[idx]
+        except Exception:
+            return
         self.entry_query.delete(0, tk.END)
         self.entry_query.insert(0, record["query"])
 
@@ -1363,7 +1360,16 @@ class QueryHistoryManager:
             elif hit is True: hit_text, tag = "✅", "hit"
             elif hit is False: hit_text, tag = "❌", "miss"
             else: hit_text, tag = "", "normal"
-            self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, record.get("note", ""), hit_text), tags=(tag,))
+            
+            # 🌟 [优化多行显示] 将多行文本平滑转换为整洁单行显示摘要，彻底杜绝 Treeview 固定行高中文字重叠挤压
+            raw_q = record.get("query", "")
+            if "\n" in raw_q:
+                lines = [l.strip() for l in raw_q.splitlines() if l.strip()]
+                disp_q = " ".join(lines)
+            else:
+                disp_q = raw_q.strip()
+
+            self.tree.insert("", "end", iid=str(idx), values=(disp_q, star_text, record.get("note", ""), hit_text), tags=(tag,))
 
     def clear_hits(self):
         for record in self.current_history: record.pop("hit", None)

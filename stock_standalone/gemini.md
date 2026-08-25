@@ -1,3 +1,19 @@
+## 2026-08-25 21:18
+- [x] **QueryHistoryManager 树形表格多行显示优化与平滑单行摘要 (`history_manager.py`)**：
+    - [x] **消除 Treeview 表格行高内多行挤压重叠**：在 `refresh_tree` 中将多行策略公式平滑转换为紧凑清晰的单行摘要呈现，彻底杜绝 Tkinter Treeview 固定行高下文字重叠错位的显示缺陷；
+    - [x] **索引与多行原始内容解耦**：重构 `edit_query`、`up_to_entry`、`on_double_click`，通过节点 `iid` 严格读取完整的原始多行策略脚本，在列表整洁展示的同时保证编辑、执行 100% 保留多行注释与格式。
+
+## 2026-08-25 21:10
+- [x] **Query 引擎全场景自适应脱敏与编辑保留多行样式升级 (`gui_utils.py`, `query_engine_util.py`)**：
+    - [x] **对话框编辑 100% 保留多行样式与换行排版**：修改 `gui_utils.py` 的 `askstring_at_parent_single`，剥离强制 `replace("\n", " ")` 压缩逻辑，完整保留用户多行注释与结构缩进；支持 `Enter` 换行与 `Ctrl+Enter`/`Ctrl+S` 保存；
+    - [x] **Query 引擎多注释与单行压扁自适应脱敏**：在 `query_engine_util.py` 的 `_preprocess_query` 中增强正则智能剥离，无论用户粘贴多行还是单行混杂 `#` 注释，均可自适应安全清洗，彻底杜绝 `Parentheses are not balanced` 与注释吞噬代码问题。
+
+## 2026-08-25 20:20
+- [x] **通道与多级支撑反转强力策略体系全面分析与工程落地规划 (`query_engine_util.py`, `ats/channel_bottom_reversal_strategy.py`, `stock_selector.py`, `tdx_data_Day.py`)**：
+    - [x] **5 大实盘经典形态解构**：深度分析特发信息、思瑞浦、彩客科技、建设机械、中南文化等“突破脱离下降通道+在支撑线上方稳健多头运行”的技术面共振特征；
+    - [x] **多级量化公式因子映射**：全面解构 `SWL > SWS`、`ma20d > ma60d`、`lastp{1-3}d > ma20{1-3}d`、`{OR: abs(per{1-9}d) > 5.0}`、`close > lastp1d`、`close > nclose*0.99` 的实战价值；
+    - [x] **强力策略组合与工程实操推荐**：输出基础筛选、极速启动、强力主升三大梯队查询公式与系统集成配置。
+
 ## 2026-08-25 10:25
 - [x] **通道策略批量测算结果窗口支持 Esc 键极速关闭 (`ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_result_linkage_and_tdx_blk.py`)**：
     - [x] **QShortcut + keyPressEvent 双重拦截与秒关**：

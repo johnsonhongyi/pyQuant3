@@ -521,14 +521,16 @@ class PandasQueryEngine:
         if '{' in raw_input and '}' in raw_input:
             raw_input = self._expand_special_syntax(raw_input)
 
-        # Step 1: 逐行扫描与智能脱敏
+        # Step 1: 逐行扫描与智能脱敏 (增强支持多行变单行时混入的 # 注释)
         processed_lines = []
         for line in raw_input.splitlines():
             # 1. 物理移除行首赋值: var = (注意排除双等号 ==)
             line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=(?!=)\s*', '', line)
             
-            # 2. 剥离行内注释
-            code = line_no_assign.split('#')[0].rstrip()
+            # 2. 剥离行内注释：如果包含多个 # 或者单行内有注释紧跟关键字，智能剔除
+            # 先处理单行内包含 # 后面跟随中文与常见标点的情况
+            clean_line = re.sub(r'#\s*[\d\.\s\u4e00-\u9fa5A-Za-z0-9_：:、()（）\-\+——]+?(?=\s+(?:and|or|close|open|high|low|vol|SWL|SWS|ma\d|percent|last|amount|support)\b|\s*$)', ' ', line_no_assign)
+            code = clean_line.split('#')[0].rstrip()
             if not code.strip(): continue
             
             # 3. [KEY FIX] 精准识别 Implicit Concatenation 特征
