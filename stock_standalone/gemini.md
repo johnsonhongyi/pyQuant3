@@ -1,3 +1,10 @@
+## 2026-08-25 10:25
+- [x] **通道策略批量测算结果窗口支持 Esc 键极速关闭 (`ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_result_linkage_and_tdx_blk.py`)**：
+    - [x] **QShortcut + keyPressEvent 双重拦截与秒关**：
+        - 注册 `QShortcut(QKeySequence(Qt.Key.Key_Escape), self)` 与重写 `keyPressEvent`；
+        - 无论当前键盘焦点位于结果表格行、TDX 板块下拉框、操作按钮还是空白区域，按下 `Esc` 键均可秒级安全关闭独立窗口；
+    - [x] **单元测试与回归验证 100% 通过** (26 项测试全绿)。
+
 ## 2026-08-25 10:18
 - [x] **ATS 通道测算精准支持 60f、120f、日线、周线、月线周期体系与快捷交互 (`ats/tdx_realtime_fetcher.py`, `ats/ui/main_window.py`, `ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_period_selection_and_persistence.py`)**：
     - [x] **直接点击默认执行 & 按住 Alt 点击/右键弹出菜单**：
