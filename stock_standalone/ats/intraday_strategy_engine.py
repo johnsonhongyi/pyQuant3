@@ -628,53 +628,112 @@ class IntradayStrategyEngine:
 
     def is_stock_first_listing_day(self, code: str) -> bool:
         """
-        判断某标的今日是否为【上市首日】：
-        1. 检查各策略配置中的 listing_date，若 listing_date < 今日，则必为非首日；
-        2. 检查收盘定盘账本，若已有早于今日的历史收盘记录，则为非首日；
-        3. 检查 TDX 日 K 线或昨日 OHLC，若已有前日真实日 K，则为非首日；
-        4. 只有当 listing_date == 今日 或 没有任何昨日日 K 历史且为新股时，才判定为首日。
+        【100% 数据与每日自动更新新股上市表驱动】客观精准判定标的今日是否为【上市首日】：
+        1. 权威新股上市表 (NewStockFetcher / new_stock_ipo_calendar.json)：
+           - 严格从每日自动更新的新股上市表中获取官方 listing_date 与 status ('首日(N)', '前5日(C)', '次新', '已上市', '待上市')；
+           - 若 status == '首日(N)' 或 listing_date == 今日 (today_str)：100% 判定为上市首日 (True)；
+           - 若 status in ('前5日(C)', '次新', '已上市') 或 listing_date < 今日：100% 判定为非首日 (False)；
+        2. TDX 真实日 K 线历史数据硬核核验：
+           - 若日 K 线已产生 >= 2 根：已有多个历史交易日，100% 判定为非首日 (False)；
+           - 若日 K 线仅有 1 根且日期为今日：今日首次产生日 K，100% 判定为上市首日 (True)；
+           - 若日 K 最后一根日期早于今日：已有历史日 K，100% 判定为非首日 (False)；
+        3. 昨日真实 OHLC 检验：
+           - 若昨日有真实开盘/最高成交记录，100% 判定为非首日 (False)；
+        4. 彻底摒弃任何基于股票名称字符串猜测（如 startswith('N')）的不可靠逻辑。
         """
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
         if not c_clean:
             return False
 
+        if not hasattr(self, "_first_listing_day_cache"):
+            self._first_listing_day_cache = {}
+
+        now_ts = time.time()
+        cached = self._first_listing_day_cache.get(c_clean)
+        if cached and (now_ts - cached[1] < 30.0):
+            return cached[0]
+
         today_str = datetime.now().strftime("%Y-%m-%d")
+        res_first_day = None
 
-        # 1. 检查各策略配置中的 listing_date
-        spec = self.get_stock_ladder_spec(c_clean)
-        list_date = str(spec.get("listing_date", "")).strip()
-        if list_date and list_date != "-" and len(list_date) >= 10:
-            if list_date < today_str:
-                return False  # 已过上市首日
-            elif list_date == today_str:
-                return True   # 今日正是上市首日
-
-        # 2. 检查历史首日收盘定盘记录
-        closing_scorecards = self.load_listing_closing_scorecards()
-        if c_clean in closing_scorecards:
-            rec = closing_scorecards[c_clean]
-            rec_date = str(rec.get("date", rec.get("listing_date", ""))).strip()
-            if rec_date and rec_date < today_str:
-                return False
-
-        # 3. 检查 TDX 昨日日 K 线数据
+        # 1. 【最高权威·每日自动更新的新股上市表】：直接从 NewStockFetcher 权威日历与状态判定
         try:
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-            fetcher = TDXRealtimeFetcher.get_instance()
-            y_ohlc = fetcher.get_yesterday_ohlc(c_clean)
-            if y_ohlc and float(y_ohlc.get("open", 0.0)) > 0 and float(y_ohlc.get("high", 0.0)) > 0:
-                return False  # 已有前一交易日日 K 线，非首日
-        except Exception:
-            pass
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_fetcher = NewStockFetcher.get_instance()
+            ipo_dict = getattr(ipo_fetcher, '_cached_ipo_dict', {})
+            if c_clean in ipo_dict:
+                ipo_info = ipo_dict[c_clean]
+                ipo_list_date = str(ipo_info.get("listing_date", "")).strip()[:10]
+                ipo_status = str(ipo_info.get("status", "")).strip()
 
-        # 4. 若为新股且未产生昨日日 K 历史，判定为首日
-        return bool(spec.get("issue_price", 0.0) > 0 and (not list_date or list_date >= today_str))
+                if ipo_status == "首日(N)" or (ipo_list_date and ipo_list_date == today_str):
+                    res_first_day = True
+                elif ipo_status in ("前5日(C)", "次新", "已上市") or (ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date < today_str):
+                    res_first_day = False
+        except Exception as e_ipo:
+            logger.debug(f"新股上市表校验异常: {e_ipo}")
+
+        # 2. 【核心客观证据·TDX 真实日 K 线历史数量与日期检验】
+        if res_first_day is None:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=5)
+                if df_daily is not None and not df_daily.empty:
+                    last_row_date = str(df_daily.iloc[-1].get("datetime", df_daily.iloc[-1].get("time", "")))[:10]
+                    if len(df_daily) >= 2:
+                        res_first_day = False  # 已有 2 根及以上日 K 线，必非首日
+                    elif len(df_daily) == 1:
+                        if last_row_date == today_str:
+                            res_first_day = True   # 仅有今天 1 根日 K 线且为今日，为首日
+                        elif last_row_date < today_str:
+                            res_first_day = False  # 日 K 属于历史过去交易日，必非首日
+            except Exception:
+                pass
+
+        # 3. 【策略规格中的上市日期校验】
+        if res_first_day is None:
+            spec = self.get_stock_ladder_spec(c_clean)
+            list_date = str(spec.get("listing_date", "")).strip()[:10]
+            if list_date and len(list_date) == 10 and list_date != "-":
+                if list_date == today_str:
+                    res_first_day = True
+                elif list_date < today_str:
+                    res_first_day = False
+
+        # 4. 【昨日真实走势校验】：若已有昨日 OHLC，必为非首日
+        if res_first_day is None:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                y_ohlc = TDXRealtimeFetcher.get_instance().get_yesterday_ohlc(c_clean)
+                if y_ohlc and (float(y_ohlc.get("open", 0.0)) > 0 or float(y_ohlc.get("high", 0.0)) > 0):
+                    res_first_day = False
+            except Exception:
+                pass
+
+        # 5. 【历史收盘定盘记录校验】
+        if res_first_day is None:
+            closing_scorecards = self.load_listing_closing_scorecards()
+            if c_clean in closing_scorecards:
+                rec = closing_scorecards[c_clean]
+                rec_date = str(rec.get("date", rec.get("listing_date", ""))).strip()[:10]
+                if rec_date and rec_date < today_str:
+                    res_first_day = False
+
+        # 6. 【最终安全兜底】：若未在上市表中收录但发行价存在且无历史日 K
+        if res_first_day is None:
+            spec = self.get_stock_ladder_spec(c_clean)
+            list_date = str(spec.get("listing_date", "")).strip()[:10]
+            res_first_day = bool(spec.get("issue_price", 0.0) > 0 and (not list_date or list_date >= today_str))
+
+        self._first_listing_day_cache[c_clean] = (res_first_day, now_ts)
+        return res_first_day
 
     def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
         """
         根据股票代码 code 或开盘价与条件自动选择对应策略：
         - 非首日上市的新股与全部常规日常个股：100% 自动匹配通用日常策略 (strategy_c_daily_surge_ladder)
-        - 仅在上市首日当天：自动匹配该标的专属首日阶梯策略或新股 A/B 策略
+        - 仅在上市首日当天：自动匹配该标的专属首日阶梯策略（若无专属策略则自动生成或回退新股通用首日策略）
         """
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
@@ -689,10 +748,39 @@ class IntradayStrategyEngine:
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
+                st_id = st.get("id", "")
                 if isinstance(target_codes, list) and any(c_clean == "".join(filter(str.isdigit, str(tc))).zfill(6) for tc in target_codes if tc and str(tc).strip() not in ("", "000000")):
                     return st
                 if target_code and c_clean == "".join(filter(str.isdigit, str(target_code))).zfill(6) and str(target_code).strip() not in ("", "000000"):
                     return st
+                if c_clean in st_id and st_id != "strategy_c_daily_surge_ladder":
+                    return st
+
+            # 🚀 首日新股若尚无专属策略，尝试自动生成专属策略并热重载
+            try:
+                from ats.new_stock_strategy_generator import NewStockStrategyGenerator
+                generator = NewStockStrategyGenerator.get_instance()
+                stock_name = resolve_stock_name(c_clean)
+                gen_strat = generator.generate_strategy({
+                    "code": c_clean,
+                    "name": stock_name,
+                    "price": open_price,
+                    "listing_date": datetime.now().strftime("%Y-%m-%d")
+                })
+                if gen_strat:
+                    generator.save_or_update_strategy(gen_strat)
+                    self.load_config()
+                    return gen_strat
+            except Exception as e_gen:
+                logger.debug(f"自动生成新股 {c_clean} 首日策略异常: {e_gen}")
+
+            # 首日降级回退至新股通用 A/B 策略
+            tier_name, strat_id, mode = self.get_open_price_tier(open_price, code=c_clean)
+            if strat_id == "strategy_b_new_stock_trend_hold" and not is_b_conditions_met:
+                strat_id = "strategy_a_new_stock_batch_sell"
+            found = self.get_strategy_by_id(strat_id)
+            if found:
+                return found
 
         # 未传 code 时的开盘价档位判定 (针对新股)
         tier_name, strat_id, mode = self.get_open_price_tier(open_price, code=code)
@@ -818,6 +906,8 @@ class IntradayStrategyEngine:
         c_clean = str(code).zfill(6)
         if c_clean in self.rule_state_map:
             self.rule_state_map.pop(c_clean, None)
+        if hasattr(self, "_first_listing_day_cache"):
+            self._first_listing_day_cache.pop(c_clean, None)
         self.mark_dirty()
         self.save_intraday_cache(force=True)
         logger.info(f"🧹 [IntradayStrategyEngine] 已强力清除标的 [{c_clean}] 的盘中状态与磁盘缓存！")
