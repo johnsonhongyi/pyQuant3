@@ -6459,42 +6459,86 @@ def add_to_code_query(stock_code):
         search_by_code()
 
 def show_context_menu(event):
-    """显示右键菜单"""
+    """显示右键菜单（支持多选批量操作）"""
     parent_win = event.widget.winfo_toplevel()
     try:
         item = tree.identify_row(event.y)
         if not item:
             return
 
-        tree.selection_set(item)
-        values = tree.item(item, "values")  # ✅ 修正这里
-        if not values:
+        # 🚀 [多选支持] 若点击项不在当前选区中则选中单项；若在选区中则保留用户的多选选区
+        current_selection = tree.selection()
+        if item not in current_selection:
+            tree.selection_set(item)
+            current_selection = (item,)
+
+        # 收集选中项的数据
+        selected_stocks = []
+        for iid in current_selection:
+            vals = tree.item(iid, "values")
+            if vals and len(vals) > 2:
+                c = str(vals[1]).strip().zfill(6)
+                n = str(vals[2]).strip()
+                try: p = float(vals[5]) if len(vals) > 5 else 0.0
+                except Exception: p = 0.0
+                try: pct = float(vals[4]) if len(vals) > 4 else 0.0
+                except Exception: pct = 0.0
+                try: vol = float(vals[6]) if len(vals) > 6 else 0.0
+                except Exception: vol = 0.0
+                selected_stocks.append({"code": c, "name": n, "price": p, "percent": pct, "vol": vol, "info": vals[1:]})
+
+        if not selected_stocks:
             return
 
-        stock_code, stock_name = values[1], values[2]  # 代码、名称
-        stock_info = values[1:]
+        sel_count = len(selected_stocks)
+        first_stock = selected_stocks[0]
+        stock_code = first_stock["code"]
+        stock_name = first_stock["name"]
+        stock_info = first_stock["info"]
 
-        code_6 = str(stock_code).strip().zfill(6)
-        is_focused = code_6 in custom_focus_stocks
-        focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
+        # 批量为选中的股票生成报警规则
+        def batch_add_rules_for_selection():
+            added_cnt = 0
+            for s in selected_stocks:
+                c = s["code"]
+                try:
+                    ensure_alert_rules(c, s["price"], s["percent"], s["vol"], alerts_rules, alerts_history, default_deltas, new=False)
+                    added_cnt += 1
+                except Exception as e:
+                    logger.error(f"为选中股票添加规则失败 {c}: {e}")
+            save_alerts()
+            toast_message(root, f"✅ 已为选中的 {added_cnt} 只股票生成报警规则")
+            if 'alert_window' in globals() and alert_window and alert_window.winfo_exists():
+                refresh_alert_center()
+
+        # 批量切换专属关注
+        def batch_toggle_custom_focus():
+            for s in selected_stocks:
+                toggle_custom_focus_stock(s["code"], s["name"])
 
         context_menu = tk.Menu(root, tearoff=0)
-        context_menu.add_command(label=focus_label, command=lambda c=code_6, n=stock_name: toggle_custom_focus_stock(c, n))
+
+        # 专属关注
+        if sel_count == 1:
+            is_focused = stock_code in custom_focus_stocks
+            focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
+        else:
+            focus_label = f"⭐ 批量设置专属关注 ({sel_count}只)"
+        context_menu.add_command(label=focus_label, command=batch_toggle_custom_focus)
         context_menu.add_separator()
+
+        # 🚀 [严格基于所选] 批量生成报警规则
+        batch_rule_label = f"⚡ 批量为选中股票生成规则 ({sel_count}只)" if sel_count > 1 else "⚡ 为选中股票添加报警规则"
+        context_menu.add_command(label=batch_rule_label, command=batch_add_rules_for_selection)
+
         context_menu.add_command(label="添加到代码查询", command=lambda: add_to_code_query(stock_code))
         context_menu.add_command(label="添加到监控", command=add_selected_stock)
         context_menu.add_command(label="打开报警中心", command=open_alert_center)
-        context_menu.add_command(label="添加报警规则",
-            command=lambda: open_alert_editor(stock_code,new=True, stock_info=stock_info,parent_win=parent_win,
+        context_menu.add_command(label="编辑报警规则",
+            command=lambda: open_alert_editor(stock_code, new=False, stock_info=stock_info, parent_win=parent_win,
                 x_root=event.x_root,
                 y_root=event.y_root))
-        context_menu.add_command( label="编辑报警规则",
-            command=lambda: open_alert_editor(stock_code,new=False, stock_info=stock_info,parent_win=parent_win,
-                x_root=event.x_root,
-                y_root=event.y_root))
-        context_menu.add_command(label="⚡ 批量生成异动报警规则", command=batch_sync_alert_rules_from_market)
         context_menu.add_command(label="添加异常Code", command=add_code_to_file_tree)
-
 
         context_menu.post(event.x_root, event.y_root)
     except Exception as e:
@@ -8298,33 +8342,69 @@ def toggle_custom_focus_stock(stock_code, stock_name=""):
         refresh_alert_center()
 
 
-def batch_sync_alert_rules_from_market():
-    """从当前异动/行情列表中一键批量生成并同步所有股票的报警规则"""
-    global alerts_rules, default_deltas, alerts_history, realdatadf
-    df = _get_stock_changes()
-    if df is None or df.empty:
-        df = realdatadf
-    if df is None or df.empty:
-        toast_message(root, "当前暂无异动数据可同步")
+def delete_selected_rules(tree_widget):
+    """批量删除 Treeview 中选中的所有规则"""
+    global alerts_rules, custom_focus_stocks
+    selected = tree_widget.selection()
+    if not selected:
+        toast_message(root, "未选中任何规则")
         return
 
-    added_count = 0
-    for _, row in df.iterrows():
-        code = str(row.get('代码', '')).strip().zfill(6)
-        if not code or code == '000000':
+    codes_to_del = []
+    for item in selected:
+        vals = tree_widget.item(item, "values")
+        if not vals:
             continue
-        if code not in alerts_rules:
-            try:
-                price = float(row.get('价格', 0.0))
-                pct = float(row.get('涨幅', 0.0))
-                vol = float(row.get('量', 0.0))
-                ensure_alert_rules(code, price, pct, vol, alerts_rules, alerts_history, default_deltas, new=False)
-                added_count += 1
-            except Exception:
-                pass
+        # 兼容 rules_tree (第1列为code) 与 alert_tree (第2列为code)
+        c = ""
+        if len(vals) > 1 and str(vals[1]).isdigit() and len(str(vals[1])) <= 6:
+            c = str(vals[1]).zfill(6)
+        elif str(vals[0]).isdigit() and len(str(vals[0])) <= 6:
+            c = str(vals[0]).zfill(6)
+        if c:
+            codes_to_del.append(c)
+
+    if not codes_to_del:
+        return
+
+    for c in codes_to_del:
+        if c in alerts_rules:
+            del alerts_rules[c]
+        if c in custom_focus_stocks:
+            custom_focus_stocks.remove(c)
 
     save_alerts()
-    toast_message(root, f"✅ 已批量生成/同步 {len(alerts_rules)} 只股票报警规则 (新增 {added_count} 只)")
+    save_custom_focus_stocks()
+    toast_message(root, f"🗑️ 已批量删除 {len(codes_to_del)} 只股票规则")
+
+    # 刷新相关窗口
+    if 'rules_tree' in globals() and rules_tree and rules_tree.winfo_exists():
+        for item in selected:
+            try: rules_tree.delete(item)
+            except Exception: pass
+    if 'alert_window' in globals() and alert_window and alert_window.winfo_exists():
+        refresh_alert_center()
+
+
+def clear_all_rules(parent_win=None):
+    """清空所有报警规则（带二次防误触确认）"""
+    global alerts_rules, custom_focus_stocks
+    if not alerts_rules:
+        toast_message(root, "当前规则列表已为空")
+        return
+
+    rule_count = len(alerts_rules)
+    if not messagebox.askyesno("确认清空", f"确定要彻底清空当前所有的 {rule_count} 条报警规则吗？\n(此操作不可撤销)", parent=parent_win or root):
+        return
+
+    alerts_rules.clear()
+    custom_focus_stocks.clear()
+    save_alerts()
+    save_custom_focus_stocks()
+    toast_message(root, "🗑️ 所有报警规则已全部清空")
+
+    if 'rules_tree' in globals() and rules_tree and rules_tree.winfo_exists():
+        rules_tree.delete(*rules_tree.get_children())
     if 'alert_window' in globals() and alert_window and alert_window.winfo_exists():
         refresh_alert_center()
 # ------------------------
@@ -8896,10 +8976,25 @@ def open_rules_overview(parent_win=None):
     aw_rules.withdraw()  # 先隐藏，避免闪到默认(50,50)
 
 
+    # 顶部快捷操作栏
+    toolbar = ttk.Frame(aw_rules)
+    toolbar.pack(side="top", fill="x", padx=8, pady=4)
+
+    btn_batch_del = tk.Button(toolbar, text="🗑️ 批量删除 (Delete)", command=lambda: delete_selected_rules(tree),
+                              bg="#ffebee", fg="#b71c1c", font=("Microsoft YaHei", 9, "bold"), relief="groove", padx=6, pady=2)
+    btn_batch_del.pack(side="left", padx=4)
+
+    btn_clear_all = tk.Button(toolbar, text="❌ 清空所有规则", command=lambda: clear_all_rules(aw_rules),
+                              bg="#f5f5f5", fg="#555555", font=("Microsoft YaHei", 9), relief="groove", padx=6, pady=2)
+    btn_clear_all.pack(side="left", padx=4)
+
+    lbl_tips = ttk.Label(toolbar, text="💡 提示: 支持按住 Ctrl/Shift 鼠标多选，按 Delete 键批量删除", font=("Microsoft YaHei", 8))
+    lbl_tips.pack(side="right", padx=6)
+
     frame = ttk.Frame(aw_rules)
     frame.pack(expand=True, fill="both")
 
-    win_width, win_height = 700, 400
+    win_width, win_height = 760, 430
     x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
     aw_rules.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
@@ -8908,24 +9003,13 @@ def open_rules_overview(parent_win=None):
 
     # 关键点：设置模态和焦点
     aw_rules.transient(parent_win)   # 父窗口关系
-    # aw_rules.grab_set()              # 模态，阻止父窗口操作
-    # aw_rules.focus_force()           # 强制获得焦点
     aw_rules.lift()                  # 提升到顶层
 
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
 
-    # cols = ("代码", "名称", "规则名", "条件", "启用状态")
-    # tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
-    # scrollbar.config(command=tree.yview)
-
-    # for c in cols:
-    #     tree.heading(c, text=c)
-    #     tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
-    # tree.pack(expand=True, fill="both")
-
     cols = ("代码", "名称", "规则名", "条件", "启用状态", "创建时间", "更新时间")
-    tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+    tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended", yscrollcommand=scrollbar.set)
     scrollbar.config(command=tree.yview)
 
     global rules_tree
@@ -9053,16 +9137,27 @@ def open_rules_overview(parent_win=None):
 
     # 右键菜单
     def show_menu(event):
-        sel = tree.selection()
-        if not sel:
+        item = tree.identify_row(event.y)
+        if not item:
             return
-        vals = tree.item(sel[0], "values")
+
+        # 若右键点击项不在选区中，则单独选中；否则保留多选选区
+        cur_sel = tree.selection()
+        if item not in cur_sel:
+            tree.selection_set(item)
+            cur_sel = (item,)
+
+        sel_count = len(cur_sel)
+        vals = tree.item(cur_sel[0], "values")
         code = vals[0]
+
         menu = tk.Menu(aw_rules, tearoff=0)
         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_rules))
         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_rules))
-        # menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code))
-        menu.add_command(label="删除规则",command=lambda: delete_alert_rule(tree, code))
+        menu.add_separator()
+        del_label = f"🗑️ 批量删除选中规则 ({sel_count}只) (Delete)" if sel_count > 1 else "🗑️ 删除选中规则 (Delete)"
+        menu.add_command(label=del_label, command=lambda: delete_selected_rules(tree))
+        menu.add_command(label="❌ 清空所有规则", command=lambda: clear_all_rules(aw_rules))
         menu.post(event.x_root, event.y_root)
 
     def on_double_click_edit(event):
@@ -9076,43 +9171,27 @@ def open_rules_overview(parent_win=None):
     def on_tree_select(event):
         """处理表格行选择事件"""
         tree = event.widget
-        # logger.info(f"事件来源: {tree}")
         selected_item = tree.selection()
-        # logger.info(f'selected_item : {selected_item}')
         if selected_item:
-            stock_info = tree.item(selected_item, 'values')
+            stock_info = tree.item(selected_item[0], 'values')
             stock_code = stock_info[0]
             stock_code = stock_code.zfill(6)
             _updated_time = stock_info[-1]
-            send_to_tdx(stock_code,_updated_time)
-
-            # 1. 推送代码到输入框
-            # code_entry.delete(0, tk.END)
-            # code_entry.insert(0, stock_code)
-            
-            # 2. 更新其他数据（示例）
+            send_to_tdx(stock_code, _updated_time)
             logger.info(f"选中股票代码: {stock_code}")
-            time.sleep(0.1)
     
     def on_single_click(event):
-        global code_entry
-        # tree = event.widget
         tree = event.widget
-
         row_id = tree.identify_row(event.y)
         if not row_id:
             return
         vals = tree.item(row_id, "values")
         code = vals[0]
-        name = vals[1]
-        # logger.info(f'on_single_click sel : {row_id} vals : {vals}')
         _updated_time = vals[-1]
-        send_to_tdx(code,_updated_time)
-        # code_entry.delete(0, tk.END)
-        # code_entry.insert(0, code)
+        send_to_tdx(code, _updated_time)
 
-    # 绑定 Delete 按键
-    tree.bind("<Delete>", lambda event: on_delete_key(tree))
+    # 绑定 Delete 按键直接批量删除
+    tree.bind("<Delete>", lambda event: delete_selected_rules(tree))
     tree.bind("<Button-3>", show_menu)
     tree.bind("<Double-1>", on_double_click_edit)
     tree.bind("<<TreeviewSelect>>", on_tree_select)
@@ -9338,13 +9417,30 @@ def open_alert_center(is_auto=True):
     btn_all.pack(side="left", padx=2)
     aw_win.btn_filter_all = btn_all
 
+    # 右侧快捷批量操作
+    btn_clear_all = tk.Button(
+        btn_bar, text="❌ 清空", font=('Microsoft YaHei', 9),
+        bg="#f5f5f5", fg="#555555", activebackground="#e0e0e0",
+        relief="groove", bd=1, padx=6, pady=1, cursor="hand2",
+        command=lambda: clear_all_rules(aw_win)
+    )
+    btn_clear_all.pack(side="right", padx=2)
+
+    btn_batch_del = tk.Button(
+        btn_bar, text="🗑️ 批量删除", font=('Microsoft YaHei', 9, 'bold'),
+        bg="#ffebee", fg="#b71c1c", activebackground="#ffcdd2", activeforeground="#b71c1c",
+        relief="groove", bd=1, padx=6, pady=1, cursor="hand2",
+        command=lambda: delete_selected_rules(alert_tree)
+    )
+    btn_batch_del.pack(side="right", padx=2)
+
     # 报警列表
     frame = ttk.Frame(aw_win)
     frame.pack(expand=True, fill="both")
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
     cols = ("时间", "代码", "名称", "次数", "规则(阈值)", "触发值", "dff", "dff2", "Rank", "状态")
-    alert_tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+    alert_tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended", yscrollcommand=scrollbar.set)
     scrollbar.config(command=alert_tree.yview)
     for c in cols:
         alert_tree.heading(c, text=c, command=lambda col=c: alert_treeview_sort_column(col, False))
@@ -9473,27 +9569,48 @@ def open_alert_center(is_auto=True):
             highlight_window(win)
 
 
-    # 右键菜单 → 专属关注 / 编辑 / 新增 / 删除规则
+    # 右键菜单 → 专属关注 / 编辑 / 新增 / 批量删除规则
     def show_menu(event):
-        sel = alert_tree.selection()
-        if not sel: return
-        vals = alert_tree.item(sel[0], "values")
+        item = alert_tree.identify_row(event.y)
+        if not item: return
+
+        # 若右键点击项不在选区中，则单独选中；否则保留多选选区
+        cur_sel = alert_tree.selection()
+        if item not in cur_sel:
+            alert_tree.selection_set(item)
+            cur_sel = (item,)
+
+        sel_count = len(cur_sel)
+        vals = alert_tree.item(cur_sel[0], "values")
         code = str(vals[1]).strip().zfill(6)
         name_val = str(vals[2]).replace("⭐ ", "").strip() if len(vals) > 2 else ""
 
-        is_focused = code in custom_focus_stocks
-        focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
-
         menu = tk.Menu(aw_win, tearoff=0)
-        menu.add_command(label=focus_label, command=lambda c=code, n=name_val: toggle_custom_focus_stock(c, n))
+        if sel_count == 1:
+            is_focused = code in custom_focus_stocks
+            focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
+            menu.add_command(label=focus_label, command=lambda c=code, n=name_val: toggle_custom_focus_stock(c, n))
+        else:
+            def batch_toggle_alert_focus():
+                for iid in cur_sel:
+                    v = alert_tree.item(iid, "values")
+                    if v and len(v) > 2:
+                        c_item = str(v[1]).strip().zfill(6)
+                        n_item = str(v[2]).replace("⭐ ", "").strip()
+                        toggle_custom_focus_stock(c_item, n_item)
+            menu.add_command(label=f"⭐ 批量设置专属关注 ({sel_count}只)", command=batch_toggle_alert_focus)
+
         menu.add_separator()
         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
-        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(alert_tree, code))
+        menu.add_separator()
+        del_label = f"🗑️ 批量删除选中规则 ({sel_count}只) (Delete)" if sel_count > 1 else "🗑️ 删除选中规则 (Delete)"
+        menu.add_command(label=del_label, command=lambda: delete_selected_rules(alert_tree))
+        menu.add_command(label="❌ 清空所有规则", command=lambda: clear_all_rules(aw_win))
         menu.post(event.x_root, event.y_root)
 
-    # 绑定 Delete 按键
-    alert_tree.bind("<Delete>", lambda event: on_delete_key(alert_tree))
+    # 绑定 Delete 按键直接批量删除
+    alert_tree.bind("<Delete>", lambda event: delete_selected_rules(alert_tree))
     alert_tree.bind("<<TreeviewSelect>>", on_tree_select)
     alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
