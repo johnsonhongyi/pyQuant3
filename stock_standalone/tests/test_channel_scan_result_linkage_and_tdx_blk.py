@@ -11,6 +11,7 @@ import tempfile
 import pandas as pd
 from unittest.mock import patch
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
 # Ensure stock_standalone is in sys.path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -239,6 +240,32 @@ class TestChannelScanResultLinkageAndTDXBlk(unittest.TestCase):
             self.assertEqual(current_blk, "069")
         finally:
             new_dialog.close()
+
+    def test_esc_key_closes_dialog(self):
+        """测试按 Esc 键或触发快捷键能安全关闭独立结果窗口"""
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtCore import QEvent
+
+        test_dialog = ChannelReversalScanResultDialog(
+            parent=None,
+            df_results=self.sample_df,
+            total_scanned=10,
+            source_tab_name="Esc测试"
+        )
+        test_dialog.show()
+        self.assertTrue(test_dialog.isVisible())
+
+        # 1. 模拟按 Esc 键的按键事件
+        esc_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        test_dialog.keyPressEvent(esc_event)
+        self.assertFalse(test_dialog.isVisible())
+
+        # 2. 模拟 Esc 快捷键激活
+        test_dialog.show()
+        self.assertTrue(test_dialog.isVisible())
+        test_dialog.esc_shortcut.activated.emit()
+        self.assertFalse(test_dialog.isVisible())
+        test_dialog.close()
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QComboBox, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QFont, QCursor
+from PyQt6.QtGui import QColor, QFont, QCursor, QKeySequence, QShortcut
 
 from ats.ui.styles import (
     setup_header_persistence, NumericTableWidgetItem, 
@@ -33,7 +33,7 @@ class ChannelReversalScanResultDialog(QWidget):
     - ⚡ 联动能力: 单击/双击/上下键表格行触发主工作台/外部终端联动 (绝不发送到异动模块);
     - 📁 TDX 板块写入: 底部自适应读取可写板块，支持一键追加或覆写;
     - 📈 右键菜单: 调出 SBC 实盘走势、调出分时阶梯盯盘、加入关注、复制代码;
-    - 🪟 100% 独立顶层窗口: 不阻塞主界面，支持多屏拖拽、自由缩放。
+    - 🪟 100% 独立顶层窗口: 不阻塞主界面，支持多屏拖拽、自由缩放，支持按 Esc 快速关闭。
     """
     stock_linkage_requested = pyqtSignal(str, str)  # code, name
 
@@ -54,6 +54,10 @@ class ChannelReversalScanResultDialog(QWidget):
         self._last_emitted_code = ""
         self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
 
+        # Esc 快捷键极速关闭独立窗口 (全局与各子控件焦点均生效)
+        self.esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.esc_shortcut.activated.connect(self.close)
+
         self.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.WindowMinMaxButtonsHint
@@ -69,6 +73,14 @@ class ChannelReversalScanResultDialog(QWidget):
 
         self._init_ui()
         self._populate_table()
+
+    def keyPressEvent(self, event):
+        """按 Esc 键安全关闭独立结果窗口"""
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def update_results(self, df_results: pd.DataFrame, total_scanned: int = 0, source_tab_name: str = "", period: str = ""):
         """动态刷新测算结果与统计面板"""
