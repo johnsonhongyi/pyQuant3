@@ -37,13 +37,14 @@ class ChannelReversalScanResultDialog(QWidget):
     """
     stock_linkage_requested = pyqtSignal(str, str)  # code, name
 
-    def __init__(self, parent=None, df_results: Optional[pd.DataFrame] = None, total_scanned: int = 0, source_tab_name: str = ""):
+    def __init__(self, parent=None, df_results: Optional[pd.DataFrame] = None, total_scanned: int = 0, source_tab_name: str = "", period: str = "60f"):
         # 向 QWidget 构造传 None，使其成为真正的顶层非模态独立桌面窗口，绝不阻塞或锁定主界面
         super().__init__(None)
         self.main_window = parent.window() if parent else None
         self.df_results = df_results if df_results is not None else pd.DataFrame()
         self.total_scanned = total_scanned if total_scanned > 0 else len(self.df_results)
         self.source_tab_name = source_tab_name or "当前看板"
+        self.period = period or "60f"
 
         # 防抖与键盘上下键联动状态
         self._linkage_timer = QTimer(self)
@@ -58,7 +59,7 @@ class ChannelReversalScanResultDialog(QWidget):
             | Qt.WindowType.WindowMinMaxButtonsHint
             | Qt.WindowType.WindowCloseButtonHint
         )
-        self.setWindowTitle(f"🎯 60f 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
+        self.setWindowTitle(f"🎯 {self.period} 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
         self.resize(1060, 640)
         self.setMinimumSize(800, 480)
         self.setStyleSheet("""
@@ -69,13 +70,15 @@ class ChannelReversalScanResultDialog(QWidget):
         self._init_ui()
         self._populate_table()
 
-    def update_results(self, df_results: pd.DataFrame, total_scanned: int = 0, source_tab_name: str = ""):
+    def update_results(self, df_results: pd.DataFrame, total_scanned: int = 0, source_tab_name: str = "", period: str = ""):
         """动态刷新测算结果与统计面板"""
         self.df_results = df_results if df_results is not None else pd.DataFrame()
         self.total_scanned = total_scanned if total_scanned > 0 else len(self.df_results)
+        if period:
+            self.period = period
         if source_tab_name:
             self.source_tab_name = source_tab_name
-            self.setWindowTitle(f"🎯 60f 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
+        self.setWindowTitle(f"🎯 {self.period} 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
 
         hit_cnt = len(self.df_results)
         hit_rate = (hit_cnt / max(1, self.total_scanned)) * 100.0
@@ -447,14 +450,27 @@ class ChannelReversalScanResultDialog(QWidget):
             self._open_sbc_window(code, name)
 
     def _open_sbc_window(self, code: str, name: str):
-        """调出 SBC 实盘走势"""
+        """调出 SBC 实盘走势 (自动与当前通道测算周期对齐)"""
+        sbc_period = "60m"
+        p_str = getattr(self, "period", "60f").lower()
+        if "120" in p_str:
+            sbc_period = "120m"
+        elif "月" in p_str or "month" in p_str:
+            sbc_period = "month"
+        elif "周" in p_str or "week" in p_str or p_str == "w":
+            sbc_period = "week"
+        elif "日" in p_str or "day" in p_str or p_str == "d":
+            sbc_period = "day"
+        elif "60" in p_str:
+            sbc_period = "60m"
+
         try:
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(code, self.main_window, initial_period_mode="60m")
+            open_sbc_chart_dialog(code, self.main_window, initial_period_mode=sbc_period)
         except Exception as e:
             try:
                 from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
-                dlg = SBCIntradayChartDialog(self.main_window, code=code, initial_period_mode="60m")
+                dlg = SBCIntradayChartDialog(self.main_window, code=code, initial_period_mode=sbc_period)
                 dlg.show()
             except Exception:
                 pass
@@ -480,7 +496,8 @@ class ChannelReversalScanResultDialog(QWidget):
             QMenu::item:selected { background-color: #1e293b; color: #38bdf8; }
         """)
 
-        act_sbc = menu.addAction(f"📈 调出 【{name} ({code})】 SBC 实盘走势 (60f通道)")
+        cur_period = getattr(self, "period", "60f")
+        act_sbc = menu.addAction(f"📈 调出 【{name} ({code})】 SBC 实盘走势 ({cur_period}通道)")
         act_sbc.triggered.connect(lambda: self._open_sbc_window(code, name))
 
         act_ladder = menu.addAction(f"🚀 调出 【{name} ({code})】 分时阶梯独立盯盘")

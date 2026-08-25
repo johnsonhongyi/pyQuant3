@@ -9,6 +9,7 @@ import os
 import time
 import json
 import logging
+from typing import Optional, List, Dict, Any, Tuple
 
 # 兼容开发模式单独运行子脚本（防重复挂载，打包运行下 if 为 False 不会污染 sys.path）
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,9 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QE
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
-from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch
+from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node
+
+PERSIST_KEY_CHANNEL_SCAN_PERIOD = "channel_scan_selected_period"
 from ats.ui.universe_widget import UniverseTreeWidget
 from ats.ui.heatmap_widget import SectorHeatmapWidget
 from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
@@ -1830,6 +1833,10 @@ class ATSMainWindow(QMainWindow):
         settings = QSettings("pyQuant", "ATSMainWindow")
         self.is_auto_refresh_enabled = settings.value("auto_refresh_enabled", False, type=bool)
 
+        # 读取通道测算最后使用的周期 (默认 60f)
+        saved_period = load_config_node(PERSIST_KEY_CHANNEL_SCAN_PERIOD, "60f")
+        self.channel_scan_period = str(saved_period).strip() if saved_period else "60f"
+
         self._init_toolbar()
         self._init_ui()
         self._restore_layout_state()
@@ -2197,9 +2204,13 @@ class ATSMainWindow(QMainWindow):
         self.btn_top_limit_up.clicked.connect(self.open_daily_limit_up_analyzer)
         top_corner_layout.addWidget(self.btn_top_limit_up)
 
-        self.btn_top_scan_60f = QPushButton("🎯 60f通道测算")
-        self.btn_top_scan_60f.setToolTip("对当前 Tab (重点关注 / MA20d回调 / 新股次新股) 中选中的股票或全量列表直连 TDX 进行 60f 通道底部反转策略批量测算")
-        self.btn_top_scan_60f.setStyleSheet("""
+        self.channel_scan_period = getattr(self, "channel_scan_period", "60f")
+        self.btn_top_scan_channel = QPushButton(f"🎯 {self.channel_scan_period}通道测算 ▾")
+        self.btn_top_scan_channel.setToolTip(
+            f"【直接点击】按当前周期 [{self.channel_scan_period}] 立即执行通道测算\n"
+            f"【按住 Alt 点击 或 右键】弹出周期选择菜单 (60f / 120f / 日线 / 周线 / 月线)"
+        )
+        self.btn_top_scan_channel.setStyleSheet("""
             QPushButton {
                 background-color: #0e2a38;
                 color: #38bdf8;
@@ -2214,8 +2225,11 @@ class ATSMainWindow(QMainWindow):
                 color: #ffffff;
             }
         """)
-        self.btn_top_scan_60f.clicked.connect(self._on_top_tab_scan_60f_clicked)
-        top_corner_layout.addWidget(self.btn_top_scan_60f)
+        self.btn_top_scan_channel.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_top_scan_channel.customContextMenuRequested.connect(self._show_channel_scan_period_menu)
+        self.btn_top_scan_channel.clicked.connect(self._on_channel_scan_button_clicked)
+        top_corner_layout.addWidget(self.btn_top_scan_channel)
+        self.btn_top_scan_60f = self.btn_top_scan_channel  # 保持向后兼容别名
 
         self.btn_rearrange_sbc = QPushButton("🪟 SBC 重排")
         self.btn_rearrange_sbc.setToolTip("自动将所有已打开的 SBC 分时走势独立窗口在当前屏幕网格平铺重排对齐")
@@ -4837,10 +4851,99 @@ class ATSMainWindow(QMainWindow):
         if not getattr(self, '_is_restoring_sizes', False):
             self._save_layout_state()
 
+    def _on_channel_scan_button_clicked(self):
+        """
+        通道测算按钮点击响应：
+        - 若按住 Alt 键：弹出周期选择菜单；
+        - 默认直接点击：立即以当前选中的周期执行通道测算。
+        """
+        from PyQt6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            self._show_channel_scan_period_menu()
+        else:
+            self._execute_channel_scan(period=getattr(self, "channel_scan_period", "60f"))
+
+    def _show_channel_scan_period_menu(self):
+        """
+        【Tab 顶部通道测算入口】弹出周期列表菜单供用户选择，支持 60f、120f、日线、周线、月线，
+        选择后自动更新按钮文字、自动持久化所选周期，并立即触发对应周期的通道策略批量测算。
+        """
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { 
+                background-color: #0f172a; 
+                color: #f8fafc; 
+                border: 1px solid #334155; 
+                padding: 4px; 
+                font-size: 9pt; 
+            }
+            QMenu::item { 
+                padding: 6px 20px 6px 24px; 
+                border-radius: 3px; 
+            }
+            QMenu::item:selected { 
+                background-color: #1e293b; 
+                color: #38bdf8; 
+            }
+            QMenu::separator { 
+                height: 1px; 
+                background-color: #334155; 
+                margin: 4px 8px; 
+            }
+        """)
+
+        cur_period = getattr(self, "channel_scan_period", "60f")
+        
+        # 周期定义: (period_key, display_label)
+        period_options = [
+            ("60f", "🎯 60f (60分钟通道 - 默认首选)"),
+            ("120f", "⏱️ 120f (120分钟/2小时通道)"),
+            ("日线", "📅 日线 (日K通道)"),
+            ("周线", "📆 周线 (周K大级别通道)"),
+            ("月线", "🌕 月线 (月K超大级别通道)")
+        ]
+
+        for p_key, label in period_options:
+            is_active = (p_key == cur_period)
+            prefix = "✓ " if is_active else "   "
+            act = menu.addAction(f"{prefix}{label}")
+            act.triggered.connect(lambda checked=False, p=p_key: self._on_channel_period_selected(p))
+
+        # 在按钮正下方弹出菜单
+        if hasattr(self, "btn_top_scan_channel"):
+            pos = self.btn_top_scan_channel.mapToGlobal(self.btn_top_scan_channel.rect().bottomLeft())
+            menu.exec(pos)
+        else:
+            menu.exec(QCursor.pos())
+
+    def _on_channel_period_selected(self, period: str):
+        """当用户在菜单中选择测算周期时的处理"""
+        self.channel_scan_period = period
+        if hasattr(self, "btn_top_scan_channel"):
+            self.btn_top_scan_channel.setText(f"🎯 {period}通道测算 ▾")
+            self.btn_top_scan_channel.setToolTip(
+                f"【直接点击】按当前周期 [{period}] 立即执行通道测算\n"
+                f"【按住 Alt 点击 或 右键】弹出周期选择菜单 (60f / 120f / 日线 / 周线 / 月线)"
+            )
+        # 自动持久化最后使用的周期
+        try:
+            save_config_node(PERSIST_KEY_CHANNEL_SCAN_PERIOD, period)
+        except Exception as e:
+            logger.debug(f"持久化通道测算周期失败: {e}")
+        # 立即执行测算
+        self._execute_channel_scan(period=period)
+
     def _on_top_tab_scan_60f_clicked(self):
+        """兼容原有 60f 测算槽函数入口 (默认直接执行)"""
+        self._on_channel_scan_button_clicked()
+
+    def _execute_channel_scan(self, period: Optional[str] = None):
         """
-        【Tab 顶部公共入口】60f 通道底部反转策略批量测算 (支持重点关注、MA20d回调、新股次新股等多选与全量)
+        【Tab 顶部公共入口】走势通道策略批量测算 (支持 60f/120f/日线/周线/月线 等多周期，支持重点关注、MA20d回调、新股次新股等多选与全量)
         """
+        target_period = period or getattr(self, "channel_scan_period", "60f")
         cur_idx = self.top_tabs.currentIndex()
         cur_widget = self.top_tabs.currentWidget()
         tab_title = self.top_tabs.tabText(cur_idx)
@@ -4882,43 +4985,60 @@ class ATSMainWindow(QMainWindow):
 
         if not stock_pairs:
             from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "提示", f"【{tab_title}】当前列表中无可用股票进行 60f 通道策略测算！")
+            QMessageBox.warning(self, "提示", f"【{tab_title}】当前列表中无可用股票进行 {target_period} 通道策略测算！")
             return
 
         code_list = [c for c, _ in stock_pairs if c]
         code_to_name = {c: n for c, n in stock_pairs if c}
         
+        # 周期映射为 TDX category
+        cat_map = {
+            "60f": "60m", "120f": "120m", "日线": "day", "周线": "week", "月线": "month"
+        }
+        category = cat_map.get(target_period, target_period)
+
         # 2. 状态栏提示
-        self.statusBar().showMessage(f"📡 正在直连 TDX API 批量拉取 【{tab_title}】 {len(code_list)} 只标的 60m K线进行通道策略扫描...", 8000)
+        self.statusBar().showMessage(f"📡 正在直连 TDX API 批量拉取 【{tab_title}】 {len(code_list)} 只标的 {target_period} K线进行通道策略扫描...", 8000)
         QApplication.processEvents()
 
         # 3. 极速纯 NumPy 批量高并发测算
         try:
             from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
             strategy = ChannelBottomReversalStrategy()
-            df_matched = strategy.scan_stocks_tdx(code_list, count=120)
+            df_matched = strategy.scan_stocks_tdx(code_list, category=category, count=120)
             
             # 回填名称
             if not df_matched.empty:
                 df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c, self.get_stock_name(c)))
 
-            self.statusBar().showMessage(f"🟢 【{tab_title}】 60f 通道策略测算完成: 扫描 {len(code_list)} 只, 命中 {len(df_matched)} 只", 10000)
+            self.statusBar().showMessage(f"🟢 【{tab_title}】 {target_period} 通道策略测算完成: 扫描 {len(code_list)} 只, 命中 {len(df_matched)} 只", 10000)
 
             # 4. 弹出专业统计结果独立窗口 (非阻塞、自由层级、多屏支持)
             from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
-            if not hasattr(self, '_channel_scan_dialog') or self._channel_scan_dialog is None:
+            dialog_valid = False
+            if hasattr(self, '_channel_scan_dialog') and self._channel_scan_dialog is not None:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(self._channel_scan_dialog):
+                        dialog_valid = True
+                except Exception:
+                    dialog_valid = True
+
+            if not dialog_valid:
                 self._channel_scan_dialog = ChannelReversalScanResultDialog(
                     parent=self, 
                     df_results=df_matched, 
                     total_scanned=len(code_list), 
-                    source_tab_name=tab_title
+                    source_tab_name=tab_title,
+                    period=target_period
                 )
                 self._channel_scan_dialog.stock_linkage_requested.connect(self.link_stock)
             else:
                 self._channel_scan_dialog.update_results(
                     df_results=df_matched,
                     total_scanned=len(code_list),
-                    source_tab_name=tab_title
+                    source_tab_name=tab_title,
+                    period=target_period
                 )
             self._channel_scan_dialog.show()
             self._channel_scan_dialog.raise_()
@@ -4926,7 +5046,7 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"批量通道策略测算异常: {e}")
             from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "测算异常", f"执行批量 60f 通道策略测算时发生异常: {e}")
+            QMessageBox.critical(self, "测算异常", f"执行批量 {target_period} 通道策略测算时发生异常: {e}")
 
     def _on_tdx_signal_detected(self, sig_dict):
         """当后台 TdxSignalWatcher 捕获到通达信 / OrderMon 信号时的全逻辑联动处理"""

@@ -1013,16 +1013,24 @@ class TDXRealtimeFetcher:
         拉取不同周期的 K 线数据 (5m, 30m, 60m, day)，并计算 MA5, MA20, MA60, Bollinger 通道 (GG 通道) 与 Volume
         """
         c_clean = str(code).zfill(6)
-        cat_map = {
-            "5m": 0,
-            "15m": 1,
-            "30m": 2,
-            "60m": 3,
-            "day": 4,
-            "week": 5,
-            "month": 6
-        }
-        cat_code = cat_map.get(category, 0)
+        cat_str = str(category).lower().strip()
+        is_120m = cat_str in ("120m", "120f", "120min", "2h", "120")
+        if is_120m:
+            cat_code = 3  # 从 60m 拉取两倍数量后聚合
+            fetch_count = min(800, max(count * 2, 60))
+        else:
+            fetch_count = count
+            cat_map = {
+                "5m": 0, "5f": 0, "5min": 0,
+                "15m": 1, "15f": 1, "15min": 1,
+                "30m": 2, "30f": 2, "30min": 2,
+                "60m": 3, "60f": 3, "60min": 3, "1h": 3,
+                "day": 4, "d": 4, "日线": 4, "日k": 4, "日": 4,
+                "week": 5, "w": 5, "周线": 5, "周k": 5, "周": 5,
+                "month": 6, "m": 6, "月线": 6, "月k": 6, "月": 6,
+                "1m": 8, "1f": 8, "1min": 8
+            }
+            cat_code = cat_map.get(cat_str, 3 if "60" in cat_str else 0)
 
         try:
             mkt = get_market_code(c_clean)
@@ -1032,7 +1040,7 @@ class TDXRealtimeFetcher:
                     if not self.connect():
                         return pd.DataFrame()
                 try:
-                    bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, count)
+                    bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
                 except Exception as e_k:
                     logger.debug(f"TDX get_security_bars {cat_code} 异常: {e_k}")
                     bars = None
@@ -1042,7 +1050,7 @@ class TDXRealtimeFetcher:
                     self._is_connected = False
                     if self.connect():
                         try:
-                            bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, count)
+                            bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
                         except Exception:
                             bars = None
 
@@ -1052,6 +1060,33 @@ class TDXRealtimeFetcher:
             df = pd.DataFrame(bars)
             if df.empty:
                 return pd.DataFrame()
+
+            # 若为 120m 周期，将每相邻两根 60m K 线精确聚合为一根标准 120m K 线
+            if is_120m and len(df) >= 2:
+                rows_120 = []
+                offset = len(df) % 2
+                for i in range(offset, len(df), 2):
+                    b1 = df.iloc[i]
+                    b2 = df.iloc[i + 1]
+                    t_val = str(b2.get("datetime", b2.get("time", "")))
+                    op_v = float(b1.get("open", 0.0))
+                    hp_v = max(float(b1.get("high", 0.0)), float(b2.get("high", 0.0)))
+                    lp_v = min(float(b1.get("low", 0.0)), float(b2.get("low", 0.0)))
+                    cl_v = float(b2.get("close", 0.0))
+                    vol_v = float(b1.get("vol", 0.0)) + float(b2.get("vol", 0.0))
+                    amt_v = float(b1.get("amount", 0.0)) + float(b2.get("amount", 0.0))
+                    rows_120.append({
+                        "datetime": t_val,
+                        "time": t_val,
+                        "open": op_v,
+                        "high": hp_v,
+                        "low": lp_v,
+                        "close": cl_v,
+                        "vol": vol_v,
+                        "amount": amt_v
+                    })
+                if rows_120:
+                    df = pd.DataFrame(rows_120)
 
             if "datetime" in df.columns:
                 df["time"] = df["datetime"].astype(str)

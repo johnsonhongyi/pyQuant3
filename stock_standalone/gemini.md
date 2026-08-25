@@ -1,3 +1,30 @@
+## 2026-08-25 10:18
+- [x] **ATS 通道测算精准支持 60f、120f、日线、周线、月线周期体系与快捷交互 (`ats/tdx_realtime_fetcher.py`, `ats/ui/main_window.py`, `ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_period_selection_and_persistence.py`)**：
+    - [x] **直接点击默认执行 & 按住 Alt 点击/右键弹出菜单**：
+        - 默认普通单击直接以当前选中的周期执行测算，极致高效；
+        - 按住 `Alt` 键单击或右键点击按钮，弹出暗黑风格周期选择菜单；
+    - [x] **5 大核心量化周期体系**：
+        - 精准支持 `60f` (默认首选)、`120f`、`日线`、`周线`、`月线`；
+        - 在 `TDXRealtimeFetcher` 中实现 120m 由 60m 数据精确两两聚合生成，与月线/周线/日线原生直连；
+    - [x] **结果窗口与 SBC 走势全周期对齐与持久化**；
+    - [x] **单元测试与全量回归验证 100% 通过** (25 项测试全绿)。
+
+## 2026-08-25 10:10
+- [x] **ATS 菜单通道测算多周期选择与自适应持久化升级 (`ats/ui/main_window.py`, `ats/ui/channel_scan_result_dialog.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_channel_scan_period_selection_and_persistence.py`)**：
+    - [x] **周期列表菜单交互与动态按钮文案**：
+        - 顶部 Corner 区域按钮升级为 `🎯 {当前周期}通道测算 ▾`（首次启动默认为 `🎯 60f通道测算 ▾`）；
+        - 点击按钮自动弹出暗黑风格周期选择列表（支持 `60f`、`30f`、`15f`、`5f`、`日线`、`周线`，当前周期标记 `✓`）；
+        - 点击任一周期后，按钮文案实时更新并立即以选中的周期启动批量测算；
+    - [x] **周期映射与多周期测算支持**：
+        - `TDXRealtimeFetcher.fetch_kline_bars` 与 `ChannelBottomReversalStrategy` 深度扩展，支持对各级周期别名（`60f/60m`, `30f/30m`, `15f/15m`, `5f/5m`, `日线/day`, `周线/week` 等）的精准映射与极速拉取；
+        - 测算统计独立结果窗口 `ChannelReversalScanResultDialog` 标题动态对齐（如 `🎯 30f 通道策略批量测算结果 - 来自【新股次新股】`）；
+        - 双击表格行调出 SBC 实盘走势时，自动透传当前测算的周期无缝对齐走势图；
+    - [x] **测算运行自动持久化与冷启动恢复**：
+        - 使用 `save_config_node` 将用户最后选择/运行的周期原子落盘至 `window_config.json`；
+        - 系统冷启动时通过 `load_config_node` 自动恢复最后使用的周期（无历史记录时默认平滑回退至 `60f`）；
+    - [x] **单元测试与集成测试验证 100% 通过**：
+        - 新增 4 项多周期选择与持久化专项测试，全套 24 项通道策略与 UI 关联测试 **100% PASSED**。
+
 ## 2026-08-25 09:55
 - [x] **通道策略批量测算结果窗口自动持久化最后写入/选中的 TDX 板块位置 (`ats/ui/channel_scan_result_dialog.py`, `tests/test_channel_scan_result_linkage_and_tdx_blk.py`)**：
     - [x] **持久化最后写入/选中的板块代码**：
