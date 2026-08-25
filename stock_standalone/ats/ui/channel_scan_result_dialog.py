@@ -5,17 +5,24 @@ ats/ui/channel_scan_result_dialog.py — 60f 通道策略批量测算统计与�
 【100% 独立非模态窗口】：不阻塞主窗口与看盘窗口，自由层级覆盖、可拖拽多屏浏览。
 """
 
-from typing import Dict, List, Any, Optional
+import os
+import re
+from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu, QApplication, 
-    QFrame, QGridLayout
+    QFrame, QGridLayout, QComboBox, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QCursor
 
-from ats.ui.styles import setup_header_persistence, NumericTableWidgetItem
+from ats.ui.styles import (
+    setup_header_persistence, NumericTableWidgetItem, 
+    save_config_node, load_config_node
+)
+
+PERSIST_KEY_LAST_TDX_BLK = "channel_scan_last_selected_tdx_blk"
 
 
 class ChannelReversalScanResultDialog(QWidget):
@@ -23,7 +30,8 @@ class ChannelReversalScanResultDialog(QWidget):
     【60f 通道底部反转/上涨顺势策略批量测算统计独立窗口】
     - 📊 顶部统计面板: 扫描总数、命中总数、命中率、平均分、最高分;
     - 📋 结果明细表格: 代码、名称、通道类型、形态名称、得分、介入价、止损位、第一目标、第二目标、通道斜率、缩量比、逻辑解析;
-    - ⚡ 联动能力: 单击/双击表格行触发主工作台/外部终端联动 (绝不发送到异动模块);
+    - ⚡ 联动能力: 单击/双击/上下键表格行触发主工作台/外部终端联动 (绝不发送到异动模块);
+    - 📁 TDX 板块写入: 底部自适应读取可写板块，支持一键追加或覆写;
     - 📈 右键菜单: 调出 SBC 实盘走势、调出分时阶梯盯盘、加入关注、复制代码;
     - 🪟 100% 独立顶层窗口: 不阻塞主界面，支持多屏拖拽、自由缩放。
     """
@@ -36,6 +44,14 @@ class ChannelReversalScanResultDialog(QWidget):
         self.df_results = df_results if df_results is not None else pd.DataFrame()
         self.total_scanned = total_scanned if total_scanned > 0 else len(self.df_results)
         self.source_tab_name = source_tab_name or "当前看板"
+
+        # 防抖与键盘上下键联动状态
+        self._linkage_timer = QTimer(self)
+        self._linkage_timer.setSingleShot(True)
+        self._linkage_timer.setInterval(30)  # 30ms 防抖，过滤键盘长按连续触发
+        self._pending_linkage_row = -1
+        self._last_emitted_code = ""
+        self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
 
         self.setWindowFlags(
             Qt.WindowType.Window
@@ -144,7 +160,7 @@ class ChannelReversalScanResultDialog(QWidget):
         """)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.verticalHeader().setVisible(False)
 
@@ -160,13 +176,92 @@ class ChannelReversalScanResultDialog(QWidget):
 
         self.table.itemClicked.connect(self._on_item_clicked)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
 
         main_layout.addWidget(self.table, 1)
 
-        # 3. 底部按钮栏
+        # 3. 底部按钮与 TDX 板块写入栏
         btn_bar = QHBoxLayout()
+        btn_bar.setSpacing(8)
+
+        lbl_blk = QLabel("📁 写入TDX板块:")
+        lbl_blk.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 9pt;")
+        btn_bar.addWidget(lbl_blk)
+
+        self.combo_tdx_blk = QComboBox()
+        self.combo_tdx_blk.setStyleSheet("""
+            QComboBox {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-weight: bold;
+                min-width: 140px;
+            }
+            QComboBox:hover {
+                border-color: #38bdf8;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0f172a;
+                color: #f8fafc;
+                selection-background-color: #1e3a8a;
+                selection-color: #38bdf8;
+                border: 1px solid #334155;
+                padding: 4px;
+            }
+        """)
+        self._populate_tdx_blocks()
+        btn_bar.addWidget(self.combo_tdx_blk)
+
+        self.btn_append_blk = QPushButton("➕ 追加板块")
+        self.btn_append_blk.setToolTip("将测算命中股票‘追加’到选中的 TDX 自定义板块 (保留原板块已有股票)")
+        self.btn_append_blk.setStyleSheet("""
+            QPushButton {
+                background-color: #132e22;
+                color: #00ff88;
+                border: 1px solid #00ff88;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00ff88;
+                color: #0b0f19;
+            }
+        """)
+        self.btn_append_blk.clicked.connect(lambda: self._on_write_block_clicked(append=True))
+        btn_bar.addWidget(self.btn_append_blk)
+
+        self.btn_rewrite_blk = QPushButton("📝 覆写板块")
+        self.btn_rewrite_blk.setToolTip("将选中的 TDX 自定义板块‘覆写’为当前测算命中的股票")
+        self.btn_rewrite_blk.setStyleSheet("""
+            QPushButton {
+                background-color: #331d24;
+                color: #fb7185;
+                border: 1px solid #fb7185;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #fb7185;
+                color: #0b0f19;
+            }
+        """)
+        self.btn_rewrite_blk.clicked.connect(lambda: self._on_write_block_clicked(append=False))
+        btn_bar.addWidget(self.btn_rewrite_blk)
+
+        self.lbl_blk_status = QLabel("")
+        self.lbl_blk_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold;")
+        btn_bar.addWidget(self.lbl_blk_status)
+
         btn_bar.addStretch()
 
         self.btn_export = QPushButton("📋 复制全部选中代码")
@@ -314,10 +409,33 @@ class ChannelReversalScanResultDialog(QWidget):
         name = it_n.text().strip() if it_n else ""
         return code, name
 
+    def _on_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
+        """键盘上下键或焦点单元格切换时触发防抖联动"""
+        if currentRow < 0 or currentRow == self._pending_linkage_row:
+            return
+        self._pending_linkage_row = currentRow
+        self._linkage_timer.start()
+
+    def _fire_linkage_debounced(self):
+        """防抖定时器超时后触发真实联动"""
+        row = self._pending_linkage_row
+        if row < 0 or row >= self.table.rowCount():
+            return
+        it_c = self.table.item(row, 0)
+        it_n = self.table.item(row, 1)
+        code = it_c.text().strip() if it_c else ""
+        name = it_n.text().strip() if it_n else ""
+        if code and code != self._last_emitted_code:
+            self._last_emitted_code = code
+            self.stock_linkage_requested.emit(code, name)
+            if self.main_window and hasattr(self.main_window, "link_stock"):
+                self.main_window.link_stock(code, name)
+
     def _on_item_clicked(self, item):
         """单击表格行触发常规联动 (绝不发送到异动监测)"""
         code, name = self._get_current_code_name()
-        if code:
+        if code and code != self._last_emitted_code:
+            self._last_emitted_code = code
             self.stock_linkage_requested.emit(code, name)
             if self.main_window and hasattr(self.main_window, "link_stock"):
                 self.main_window.link_stock(code, name)
@@ -376,10 +494,221 @@ class ChannelReversalScanResultDialog(QWidget):
 
     def _on_export_clicked(self):
         """复制全部命中代码到剪贴板"""
-        if self.df_results.empty or 'code' not in self.df_results.columns:
+        codes = self._get_target_codes_for_export()
+        if not codes:
+            QMessageBox.information(self, "提示", "当前没有可复制的股票代码！")
             return
-        codes = [str(c).zfill(6) for c in self.df_results['code']]
         clip_str = "\n".join(codes)
         QApplication.clipboard().setText(clip_str)
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.information(self, "复制成功", f"已成功复制 {len(codes)} 只命中股票代码至系统剪贴板！")
+        QMessageBox.information(self, "复制成功", f"已成功复制 {len(codes)} 只股票代码至系统剪贴板！")
+
+    # ── TDX 自定义板块读取与写入支持 ──────────────────────────────────
+    def _get_tdx_blocknew_dir(self) -> str:
+        """自适应获取通达信 T0002/blocknew/ 物理目录路径"""
+        try:
+            from JohnsonUtil import commonTips as cct
+            blk_dir = cct.get_tdx_dir_blocknew()
+            if blk_dir and os.path.exists(blk_dir):
+                return blk_dir
+        except Exception:
+            pass
+
+        try:
+            from JohnsonUtil import commonTips as cct
+            tdx_dir = cct.get_tdx_dir()
+            if tdx_dir and os.path.exists(tdx_dir):
+                blk_dir = os.path.join(tdx_dir, "T0002", "blocknew")
+                if os.path.exists(blk_dir):
+                    return blk_dir
+        except Exception:
+            pass
+
+        # 尝试从 global.ini 或常用路径探测
+        candidate_paths = [
+            r"D:\MacTools\WinTools\new_tdx2\T0002\blocknew",
+            r"D:\Quant\new_tdx2\T0002\blocknew",
+            r"C:\zd_zszq\T0002\blocknew",
+            r"D:\MacTools\WinTools\zd_dxzq\T0002\blocknew",
+            r"C:\new_tdx\T0002\blocknew",
+            r"D:\new_tdx\T0002\blocknew",
+        ]
+        for cp in candidate_paths:
+            if os.path.exists(cp):
+                return cp
+        return ""
+
+    def _load_available_tdx_blocks(self) -> List[Tuple[str, str]]:
+        """
+        自适应读取通达信可写自定义板块列表
+        返回: [(blk_code, display_text), ...]，例如 [('066', '[066] 形态066'), ...]
+        """
+        blk_dir = self._get_tdx_blocknew_dir()
+        cfg_map: Dict[str, str] = {}
+        if blk_dir and os.path.exists(blk_dir):
+            cfg_path = os.path.join(blk_dir, "blocknew.cfg")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "rb") as f:
+                        buf = f.read()
+                    rec_len = 120
+                    for i in range(0, len(buf), rec_len):
+                        chunk = buf[i:i + rec_len]
+                        if len(chunk) < rec_len:
+                            break
+                        raw_name = chunk[:50].split(b"\x00")[0]
+                        raw_code = chunk[50:100].split(b"\x00")[0]
+                        name = raw_name.decode("gbk", errors="ignore").strip()
+                        code = raw_code.decode("gbk", errors="ignore").strip()
+                        if code:
+                            cfg_map[code] = name or code
+                except Exception:
+                    pass
+
+        blocks: List[Tuple[str, str]] = []
+        seen_codes = set()
+
+        # 1. 扫描存在的 *.blk 文件
+        if blk_dir and os.path.exists(blk_dir):
+            try:
+                for fname in sorted(os.listdir(blk_dir)):
+                    if fname.lower().endswith(".blk"):
+                        bcode = fname[:-4]
+                        seen_codes.add(bcode)
+                        bname = cfg_map.get(bcode, "")
+                        if bname and bname != bcode:
+                            display = f"[{bcode}] {bname}"
+                        else:
+                            display = f"[{bcode}] {bcode}"
+                        blocks.append((bcode, display))
+            except Exception:
+                pass
+
+        # 2. 补充在 cfg 中已声明但 blk 文件暂未创建的板块
+        for bcode, bname in cfg_map.items():
+            if bcode not in seen_codes:
+                seen_codes.add(bcode)
+                display = f"[{bcode}] {bname}" if bname and bname != bcode else f"[{bcode}] {bcode}"
+                blocks.append((bcode, display))
+
+        # 3. 若未检测到任何板块，兜底提供默认列表
+        if not blocks:
+            default_candidates = [
+                ("063", "[063] 063 (默认板块)"),
+                ("066", "[066] 形态066"),
+                ("061", "[061] 061-3D"),
+                ("064", "[064] 064多头排列"),
+                ("068", "[068] 068"),
+                ("069", "[069] 069"),
+                ("098", "[098] 远端次新"),
+                ("zxg", "[zxg] 自选股"),
+            ]
+            blocks.extend(default_candidates)
+
+        return blocks
+
+    def _populate_tdx_blocks(self):
+        """填充 TDX 板块下拉选择框并自动恢复上次持久化记忆的板块项"""
+        self.combo_tdx_blk.blockSignals(True)
+        self.combo_tdx_blk.clear()
+        blocks = self._load_available_tdx_blocks()
+        for idx, (bcode, display) in enumerate(blocks):
+            self.combo_tdx_blk.addItem(display, bcode)
+
+        # 1. 优先读取上次持久化保存的最后写入/选中板块代号
+        saved_blk = load_config_node(PERSIST_KEY_LAST_TDX_BLK)
+        default_index = -1
+        if saved_blk:
+            for i in range(self.combo_tdx_blk.count()):
+                if self.combo_tdx_blk.itemData(i) == str(saved_blk).strip():
+                    default_index = i
+                    break
+
+        # 2. 若无历史记录，按系统推荐首选板块规则选取
+        if default_index < 0:
+            preferred_blks = ["063", "066", "098", "061", "064", "zxg"]
+            for pref in preferred_blks:
+                found = False
+                for i in range(self.combo_tdx_blk.count()):
+                    if self.combo_tdx_blk.itemData(i) == pref:
+                        default_index = i
+                        found = True
+                        break
+                if found:
+                    break
+
+        if default_index < 0:
+            default_index = 0
+
+        self.combo_tdx_blk.setCurrentIndex(default_index)
+        self.combo_tdx_blk.blockSignals(False)
+
+        # 连接切换信号，用户手动切换或写入时自动记忆
+        try:
+            self.combo_tdx_blk.currentIndexChanged.disconnect()
+        except TypeError:
+            pass
+        self.combo_tdx_blk.currentIndexChanged.connect(self._on_tdx_block_combo_changed)
+
+    def _on_tdx_block_combo_changed(self, index: int):
+        """板块下拉框切换时自动持久化最新选中的板块代号"""
+        if index < 0 or index >= self.combo_tdx_blk.count():
+            return
+        blk_code = self.combo_tdx_blk.itemData(index)
+        if blk_code:
+            save_config_node(PERSIST_KEY_LAST_TDX_BLK, blk_code)
+
+    def _get_target_codes_for_export(self) -> List[str]:
+        """提取待导出的股票代码（优先选区，兜底全量）"""
+        selected_indexes = self.table.selectedIndexes()
+        if selected_indexes:
+            rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+            codes = []
+            for r in rows:
+                it = self.table.item(r, 0)
+                if it:
+                    c = re.sub(r"[^\d]", "", it.text())
+                    if c:
+                        codes.append(c.zfill(6))
+            if codes:
+                return codes
+
+        if not self.df_results.empty and "code" in self.df_results.columns:
+            return [str(c).zfill(6) for c in self.df_results["code"] if str(c).strip()]
+        return []
+
+    def _on_write_block_clicked(self, append: bool = True):
+        """一键写入/追加到通达信自定义板块并持久化记忆当前板块"""
+        codes = self._get_target_codes_for_export()
+        if not codes:
+            QMessageBox.warning(self, "提示", "当前没有可写入的股票代码！")
+            return
+
+        blk_code = self.combo_tdx_blk.currentData()
+        if not blk_code:
+            current_text = self.combo_tdx_blk.currentText()
+            m = re.search(r"\[(.*?)\]", current_text)
+            blk_code = m.group(1) if m else current_text.strip()
+
+        blk_dir = self._get_tdx_blocknew_dir()
+        if not blk_dir or not os.path.exists(blk_dir):
+            QMessageBox.warning(self, "错误", f"未找到通达信 blocknew 目录，请检查配置！\n路径: {blk_dir}")
+            return
+
+        blk_path = os.path.join(blk_dir, f"{blk_code}.blk")
+        try:
+            from JohnsonUtil import commonTips as cct
+            cct.write_to_blocknew(
+                blk_path, codes, append=append, doubleFile=False, keep_last=0, dfcf=False, reappend=True
+            )
+            # 写入成功后自动持久化当前板块位置
+            save_config_node(PERSIST_KEY_LAST_TDX_BLK, blk_code)
+
+            action_name = "追加" if append else "覆写"
+            msg = f"成功{action_name} {len(codes)} 只标的至板块 [{blk_code}]"
+            self.lbl_blk_status.setText(f"✅ {msg}")
+            QMessageBox.information(self, "写入成功", f"已成功{action_name} {len(codes)} 只股票至通达信板块：\n{blk_path}")
+        except Exception as e:
+            err_msg = f"写入通达信板块失败: {e}"
+            self.lbl_blk_status.setText(f"❌ {err_msg}")
+            QMessageBox.critical(self, "写入失败", err_msg)
+
