@@ -638,7 +638,7 @@ class MinuteKlineCache:
             self._is_restored = True
             logger.info(f"♻️ MinuteKlineCache Restored from dict: {len(self._shared_cache)} stocks.")
 
-    def save_cache(self, filepath: Optional[str] = None) -> bool:
+    def save_cache(self, filepath: Optional[str] = None, compression: str = 'zstd') -> bool:
         """
         [NEW ARCHITECTURE PERSISTENCE] 新架构极致压缩持久化：
         直接将所有股票的连续结构化 NumPy 数组写入 pickle 文件，
@@ -667,12 +667,29 @@ class MinuteKlineCache:
             
             # 使用临时文件原子替换，防止断电或并发读写产生半写入坏文件
             tmp_path = filepath + ".tmp"
-            with open(tmp_path, "wb") as f:
-                pickle.dump(compact_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
+            if compression == 'zstd':
+                try:
+                    import zstandard as zstd
+                    cctx = zstd.ZstdCompressor(level=3)
+                    with open(tmp_path, "wb") as f:
+                        with cctx.stream_writer(f) as compressor:
+                            pickle.dump(compact_dump, compressor, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    with open(tmp_path, "wb") as f:
+                        pickle.dump(compact_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
+            else:
+                with open(tmp_path, "wb") as f:
+                    pickle.dump(compact_dump, f, protocol=pickle.HIGHEST_PROTOCOL)
             
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            os.rename(tmp_path, filepath)
+            try:
+                os.replace(tmp_path, filepath)
+            except Exception:
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception:
+                        pass
+                os.rename(tmp_path, filepath)
             
             if self.verbose:
                 logger.info(f"💾 [MinuteKlineCache] 新架构数据持久化完成: {filepath} ({len(compact_dump['data'])} 只股票)")
@@ -684,6 +701,7 @@ class MinuteKlineCache:
     def load_cache(self, filepath: Optional[str] = None) -> bool:
         """
         [SMART MULTI-FORMAT RESTORATION] 智能多格式自动识别与极速恢复：
+        - 自动解压探测 (zstd / gzip / bz2 / raw pickle)
         - 识别新架构 v2 紧凑二进制格式：0.01 秒直读恢复；
         - 识别旧版本 DataFrame pickle：自动向量化转换；
         - 识别旧版本 list[OldKLineItem] pickle：自动转换为连续结构化数组；
@@ -701,9 +719,18 @@ class MinuteKlineCache:
             return False
 
         try:
-            import pickle
-            with open(filepath, "rb") as f:
-                obj = pickle.load(f)
+            obj = None
+            for comp in ['zstd', 'gzip', 'bz2', 'infer', None]:
+                try:
+                    obj = pd.read_pickle(filepath, compression=comp)
+                    break
+                except Exception:
+                    continue
+
+            if obj is None:
+                import pickle
+                with open(filepath, "rb") as f:
+                    obj = pickle.load(f)
 
             if isinstance(obj, dict):
                 # 1. 新架构 v2 格式
