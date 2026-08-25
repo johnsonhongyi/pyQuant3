@@ -5,33 +5,25 @@ import os
 import sys
 import time
 import types
+import gc
+import ctypes
 
 import pandas as pd
 import tushare as ts
-# print sys.path
+
 from JSONData import fundflowUtil as ffu
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from JSONData import realdatajson as rd
-from JSONData import powerCompute as pct
-from JSONData import get_macd_kdj_rsi as getab
 from JSONData import tdx_data_Day as tdd
 from JSONData import sina_data
-# from JohnsonUtil import emacount as ema
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.getLogger("SingleSAU")
-from JSONData import stockFilter as stf
 
 try:
     from urllib.request import urlopen, Request
 except ImportError:
     from urllib.request import urlopen, Request
-
-
-# def get_today():
-#     TODAY = datetime.date.today()
-#     today = TODAY.strftime('%Y-%m-%d')
-#     return today
 
 global fibcount, except_count, dfcfw_Except_time, last_rzrq_fetch_time, width, height
 fibcount = 0
@@ -39,6 +31,56 @@ except_count = 0
 dfcfw_Except_time = 0
 last_rzrq_fetch_time = 0
 width, height = 108, 15
+
+# =========================================================================
+# 内存与资源极限优化单例及缓存区 (Memory & Resource Optimization Cache)
+# =========================================================================
+_GLOBAL_SINA = None
+_GLOBAL_LASTP_CACHE = None
+_GLOBAL_LASTP_DATE = None
+_LOOP_TRIM_COUNTER = 0
+
+
+def trim_memory():
+    """极限物理内存压缩与垃圾回收 (Windows EmptyWorkingSet / GC)"""
+    gc.collect()
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.psapi.EmptyWorkingSet(ctypes.windll.kernel32.GetCurrentProcess())
+        except Exception:
+            pass
+
+
+def get_sina_instance(force_new=False):
+    """Sina 行情单例复用，杜绝高频循环中重复创建与解析 JSON"""
+    global _GLOBAL_SINA
+    if _GLOBAL_SINA is None or force_new:
+        _GLOBAL_SINA = sina_data.Sina(readonly=True)
+        _ = _GLOBAL_SINA.all
+    return _GLOBAL_SINA
+
+
+def get_cached_lastp_df(codelist=None):
+    """日线历史基准指标日内内存级缓存 (Daily TTL Cache)，精简宽表为核心列"""
+    global _GLOBAL_LASTP_CACHE, _GLOBAL_LASTP_DATE
+    cur_today = cct.get_today()
+    if _GLOBAL_LASTP_CACHE is None or _GLOBAL_LASTP_DATE != cur_today:
+        try:
+            from JSONData import tdx_hdf5_api as h5a
+            h5_fname = 'tdx_last_df'
+            h5_table = 'low_d_' + str(ct.PowerCountdl) + '_y_all'
+            h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=codelist, timelimit=False)
+            if h5 is not None and not h5.empty:
+                keep_cols = [c for c in ['hmax', 'lmin', 'max5', 'min5', 'llow'] if c in h5.columns]
+                _GLOBAL_LASTP_CACHE = h5[keep_cols] if keep_cols else h5
+                _GLOBAL_LASTP_DATE = cur_today
+            else:
+                _GLOBAL_LASTP_CACHE = None
+        except Exception as e:
+            log.warning("load lastp hdf warning: %s" % e)
+            _GLOBAL_LASTP_CACHE = None
+    return _GLOBAL_LASTP_CACHE
+
 
 
 def time_sleep(timemin):
@@ -294,6 +336,10 @@ def f_print(lens, datastr, color=None):
 
 
 def fibonacciCount(code, dl=60, start=None, days=0):
+    # 延迟导入重型指标计算模块，避免顶层空间污染
+    from JSONData import powerCompute as pct
+    from JSONData import get_macd_kdj_rsi as getab
+
     fibl = []
     if not isinstance(code, list):
         codes = [code]
@@ -307,7 +353,6 @@ def fibonacciCount(code, dl=60, start=None, days=0):
                     code, df=df, filter='y', dl=dl, ptype=ptype, days=days)
                 dd, boll = getab.Get_BBANDS(df, days=days)
             else:
-                # df = tdd.get_tdx_append_now_df_api(code,dl=dl)
                 op, ra, st, daysData = pct.get_linear_model_status(
                     code, df=df, filter='y', dl=dl, ptype=ptype, days=days)
             if daysData is not None and len(daysData) > 0:
@@ -326,40 +371,31 @@ def fibonacciCount(code, dl=60, start=None, days=0):
     return fibl
 
 
-# global cumin_index
-# cumin_index = {}
 top_Ten_Dropcxg = []
 
 
 def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
-    global fibcount, dfcfw_Except_time
+    global fibcount, dfcfw_Except_time, _LOOP_TRIM_COUNTER
     INDEX_LIST_TDX = {'999999': 'sh', '399001': 'sz', '399006': 'cyb'}
-    # {v: k for k, v in m.items()}
-    # >>> zip(m.values(), m.keys())
-    # mi = dict(zip(m.values(), m.keys()))
+
     if fibcount == 0 or fibcount >= fibc:
         if fibcount >= fibc:
             fibcount = 1
         else:
             fibcount += 1
         if fibl is not None:
-            int = 0
-            
+            int_cnt = 0
             for f in fibl:
-                code, op, ra, daysData, fib, st = f[
-                    0], f[1], f[2], f[3], f[4], f[5]
-                # cumin_index[INDEX_LIST_TDX[code]]=cumin
-                int += 1
-                if int % 2 != 0:
+                code, op, ra, daysData, fib, st = f[0], f[1], f[2], f[3], f[4], f[5]
+                int_cnt += 1
+                if int_cnt % 2 != 0:
                     print("%s op:%s ra:%s d:%s fib:%s m5:%s  %s" % (code, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1]), st), end=' ')
                 else:
                     print("%s op:%s ra:%s d:%s fib:%s m5:%s " % (st, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1])))
-
     else:
         fibcount += 1
-    allTop = pd.DataFrame()
+
     indexKeys = ['sh', 'sz', 'cyb']
-    # ffindex = ffu.get_dfcfw_fund_flow('all')
     ffindex = ffu.get_dfcfw_fund_flow2020('all')
 
     ffall = {}
@@ -369,14 +405,16 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     crashTen_all_st = 0
     ffall['zlr'] = 0
     ffall['zzb'] = 0
-    sina = sina_data.Sina(readonly=True)
-    sina.all
+
+    # 复用进程级 Sina 单例
+    sina = get_sina_instance()
+
+    dfs_list = []
+
     for market in indexKeys:
-        # market = ct.SINA_Market_KEY()
-        #        df = rd.get_sina_Market_json(market, False)
         df = sina.market(market)
-        # count=len(df.index)
-        # log.info("market:%s" % df[:1])
+        if df is None or df.empty:
+            continue
         df = df.dropna(how='all')
         df = df[df.close > 0]
         if 'percent' not in df.columns:
@@ -384,13 +422,6 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 (x - y) / y * 100, 1), df.close.values, df.llastp.values))
 
         if 'percent' in df.columns.values:
-            # and len(df[:20][df[:20]['percent']>0])>3:
-            # if 'code' in df.columns:
-            #     top = df[df['percent'] > changepercent]
-            #     topTen = df[df['percent'] > 9.9]
-            #     crashTen = df[df['percent'] < -9.8]
-            #     crash = df[df['percent'] < -changepercent]
-            # else:
             cyb = df[df.index.str.startswith('30')]
             kcb = df[df.index.str.startswith('68')]
             top = df[df['percent'] > changepercent]
@@ -398,12 +429,9 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
             # 按市场规则独立计算涨跌停：创业板(30)/科创板(68) ±20%，主板/ST ±10%
             if market == 'cyb':
-                # 创业板整体 ±20%（含300/301开头），科创板(68开头)同规则
-                # cyb数据源包含创业板全体，科创板在sz市场内，此处仅创业板市场
                 topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')
                 crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -19')
             else:
-                # sh/sz 主板：区分科创板(68开头)用20%，普通主板用10%
                 kcb_mask = df.index.str.startswith('68')
                 normal_mask = ~kcb_mask
                 # 科创板涨停
@@ -417,13 +445,11 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 crashTen_normal = df[normal_mask].query('b1_v < a1_v and a1_v > 0 and percent < -9') if normal_mask.any() else df.iloc[0:0]
                 crashTen = pd.concat([crashTen_kcb, crashTen_normal])
 
-            # ST股新规：涨跌停改为±10%（与主板一致），废弃旧无量法
+            # ST股新规：涨跌停改为±10%（与主板一致）
             if market == 'cyb':
-                # cyb市场ST股仍为±10%（非创业板±20%），需单独用percent±9%抓取
                 topTen_st = st.query('b1_v > a1_v and b1_v > 0 and percent > 9') if len(st) > 0 else df.iloc[0:0]
                 crashTen_st = st.query('b1_v < a1_v and a1_v > 0 and percent < -9') if len(st) > 0 else df.iloc[0:0]
             else:
-                # sh/sz市场：ST股±10%已被normal_mask的 percent>9/<-9 规则捕获，置空避免重复计数
                 topTen_st = df.iloc[0:0]
                 crashTen_st = df.iloc[0:0]
             crash = df[df['percent'] < -changepercent]
@@ -435,76 +461,72 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             crashTen = '0'
             crash = '0'
             crashTen_st = '0'
+
         topTen_all += len(topTen)
         topTen_all_st += len(topTen_st)
         crashTen_all += len(crashTen)
         crashTen_all_st += len(crashTen_st)
-        # top=df[ df['changepercent'] <6]
-        # print("\033[1;31;40m您输入的帐号或密码错误！\033[0m")
+
         print((
             "%s topT: %s top>%s: %s" % (
                 f_print(4, market), f_print(3, len(topTen)+len(topTen_st)), changepercent, f_print(4, len(top)))), end=' ')
         print(("crashT:%s crash<-%s:%s" %
               (f_print(4, len(crashTen)+len(crashTen_st)), changepercent, f_print(4, len(crash)))), end=' ')
-        # print(u"-5:%s" %
-        #       (f_print(4, len(crash[crash < -5])))),
-        ff = ffindex[market]
-        if len(ff) > 0:
-            zlr = float(ff['zlr'])
-            zzb = float(ff['zzb'])
-            ffall['zlr'] = ffall['zlr'] + zlr
-            ffall['zzb'] = ffall['zzb'] + zzb
-            # zt=str(ff['time'])
-            # modfprint=lambda x:f_print(4,x) if x>0 else "-%s"%(f_print(4,str(x).replace('-','')))
-            # print modfprint(zlr)
-            # print (u"流入: %s亿 比: %s%%" % (modfprint(zlr), modfprint(zzb))),
-            print(("流入: %s亿 比: %s%% " %
-                  (f_print(6, zlr, 32), f_print(4, zzb, 32))), end=' ')
-            if 'close' in list(ff.keys()):
-                if ff['close'] == 0:
-                    _percent = 0
+
+        if ffindex and market in ffindex:
+            ff = ffindex[market]
+            if len(ff) > 0:
+                zlr = float(ff.get('zlr', 0))
+                zzb = float(ff.get('zzb', 0))
+                ffall['zlr'] = ffall['zlr'] + zlr
+                ffall['zzb'] = ffall['zzb'] + zzb
+                print(("流入: %s亿 比: %s%% " %
+                      (f_print(6, zlr, 32), f_print(4, zzb, 32))), end=' ')
+                if 'close' in list(ff.keys()):
+                    if ff['close'] == 0:
+                        _percent = 0
+                    else:
+                        _percent = round(
+                            (ff['close'] - ff['lastp']) * 100 / ff['close'], 2)
                 else:
-                    _percent = round(
-                        (ff['close'] - ff['lastp']) * 100 / ff['close'], 2)
-            else:
-                _percent = 0
-                ff['close'] = 0.0
-                ff['open'] = 0.0
-                ff['lastp'] = 0.0
-            # print (u" %s"%(f_print(2,cumin_index[market],31))),
-            print(("%s %s%% %s%s" % (f_print(7, ff['close']), f_print(4, _percent, 31), f_print(1, '!' if ff['open'] > ff[
-                'lastp'] else '?'), f_print(2, '!!' if ff['close'] > ff['lastp'] else '??', 32))))
-        allTop = pd.concat([allTop,df.reset_index()], ignore_index=True)
-        allTop = allTop.drop_duplicates()
-    df = allTop
-    df = tdd.get_single_df_lastp_to_df(
-        df.set_index('code'), resample='d')
+                    _percent = 0
+                    ff['close'] = 0.0
+                    ff['open'] = 0.0
+                    ff['lastp'] = 0.0
+                print(("%s %s%% %s%s" % (f_print(7, ff['close']), f_print(4, _percent, 31), f_print(1, '!' if ff['open'] > ff[
+                    'lastp'] else '?'), f_print(2, '!!' if ff['close'] > ff['lastp'] else '??', 32))))
+
+        dfs_list.append(df)
+
+    # 汇总全市场 DataFrame（使用 index 保持 code，单次拼接去除重复，避免 reset_index/set_index 冗余对象）
+    if dfs_list:
+        allTop = pd.concat(dfs_list)
+        allTop = allTop[~allTop.index.duplicated(keep='first')]
+    else:
+        allTop = pd.DataFrame()
+
+    # 读取日内缓存的历史指标基准，避免每秒从 HDF5 重复反序列化大表
+    cached_lastp = get_cached_lastp_df(codelist=allTop.index.tolist() if not allTop.empty else None)
+    df = tdd.get_single_df_lastp_to_df(allTop, lastpTDX_DF=cached_lastp, resample='d')
+
     count = len(df.index)
     top = df[df['percent'] > changepercent]
-
     topTen = df[df['percent'] >= 9.9]
+
     if 'max5' in df.columns:
         top_Max = (df[(df.close >= df.hmax) & (df.close >= df.max5)])
-
-        # top_low = len(df[df.low < df.min5])
         top_min = (df[(df.close <= df.lmin) & (df.close <= df.min5)])
         cct.GlobalValues().setkey('top_max', top_Max)
         cct.GlobalValues().setkey('top_min', top_min)
-
     else:
         top_Max = pd.DataFrame()
-        top_low = 0
         top_min = pd.DataFrame()
         cct.GlobalValues().setkey('top_max', top_Max)
         cct.GlobalValues().setkey('top_min', top_min)
 
-    # topTen = str(len(topTen)) +'('+str(len(top_Ten_Dropcxg))+')' +'(H:'+str(len(top_Max))+')'
-    topTen = str(topTen_all+topTen_all_st) + '(' + str(len(topTen)) + ')' + \
+    topTen = str(topTen_all + topTen_all_st) + '(' + str(len(topTen)) + ')' + \
         '(H:' + str(len(top_Max)) + ')'
-    # print "top_Ten_Dropcxg:%s",top_Ten_Dropcxg
-    # crashTen = df[df['percent'] < -9.8]
-    crashTen = str(crashTen_all+crashTen_all_st) + '(L:' + str(len(top_min)) + ')'
-
+    crashTen = str(crashTen_all + crashTen_all_st) + '(L:' + str(len(top_min)) + ')'
     crash = df[df['percent'] < -changepercent]
 
     print((
@@ -514,42 +536,56 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
           (f_print(3, (crashTen), 32), changepercent, f_print(4, len(crash), 31))), end=' ')
     print(("-5:%s" %
           (f_print(4, len(crash[crash.percent < -5]), 32))), end=' ')
-    # ff = ffu.get_dfcfw_fund_flow(ct.DFCFW_FUND_FLOW_ALL)
-    ffall['time'] = ff['time']
+
+    ffall['time'] = ff.get('time', '') if len(ffindex) > 0 and len(ff) > 0 else ''
     ff = ffall
     zzb = 0
     if len(ff) > 0:
         zlr = round(float(ff['zlr']), 1)
         zzb = round(float(ff['zzb']) / 3, 1)
-        zt = str(ff['time'])
+        zt = str(ff.get('time', ''))
         print(("流入: %s亿 占比: %s%% %s" %
               (f_print(4, zlr, 31), f_print(4, zzb, 31), f_print(4, zt))))
-    ff = {}
-    hgt = {}
-    szt = {}
+
+    global last_dfcfw_shsz_time, cached_ff_shsz, cached_hgt, cached_szt
+    if 'last_dfcfw_shsz_time' not in globals():
+        last_dfcfw_shsz_time = 0
+        cached_ff_shsz = {}
+        cached_hgt = {}
+        cached_szt = {}
+
     dfcfw_Except = cct.GlobalValues().getkey('dfcfw_Except')
-    global dfcfw_Except_time
+    now_ts = time.time()
+
     if not dfcfw_Except and dfcfw_Except_time == 0:
-        try:
-            ff = ffu.get_dfcfw_fund_SHSZ()
-            hgt = ffu.get_dfcfw_fund_HGSZ2021('bei')
-            szt = ffu.get_dfcfw_fund_HGSZ2021('nan')
-        except Exception as e:
-            print(f'get_dfcfw_fund_SHSZ Exception: {e}')
-            cct.GlobalValues().setkey('dfcfw_Except', True)
-            dfcfw_Except_time = time.time()
-            # raise e
+        if now_ts - last_dfcfw_shsz_time > 10 or not cached_ff_shsz:
+            try:
+                ff = ffu.get_dfcfw_fund_SHSZ()
+                hgt = ffu.get_dfcfw_fund_HGSZ2021('bei')
+                szt = ffu.get_dfcfw_fund_HGSZ2021('nan')
+                if ff:
+                    cached_ff_shsz = ff
+                    cached_hgt = hgt
+                    cached_szt = szt
+                    last_dfcfw_shsz_time = now_ts
+            except Exception as e:
+                print(f'get_dfcfw_fund_SHSZ Exception: {e}')
+                cct.GlobalValues().setkey('dfcfw_Except', True)
+                dfcfw_Except_time = now_ts
+        else:
+            ff = cached_ff_shsz
+            hgt = cached_hgt
+            szt = cached_szt
     else:
-        duration_dfcfw_Except_time = time.time() - dfcfw_Except_time
+        duration_dfcfw_Except_time = now_ts - dfcfw_Except_time
         if duration_dfcfw_Except_time > 60:
             dfcfw_Except_time = 0
             cct.GlobalValues().setkey('dfcfw_Except', False)
+        ff = cached_ff_shsz
+        hgt = cached_hgt
+        szt = cached_szt
+
     log.debug("shzs:%s hgt:%s" % (ff, hgt))
-    # if len(ff) > 0:
-    #     print ("\tSH: %s u:%s vo: %s sz: %s u:%s vo: %s" % (
-    #         f_print(4, ff['scent']), f_print(4, ff['sup']), f_print(5, ff['svol']), f_print(4, ff['zcent']),
-    #         f_print(4, ff['zup']),
-    #         f_print(5, ff['zvol']))),
     bigcount = rd.getconfigBigCount(count=None, write=True)
 
     if ff:
@@ -597,16 +633,20 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 f_print(4, all_val, 31), f_print(5, dff_val, 31))))
         except Exception as e_rz:
             log.warning("print rzrq exception: %s" % e_rz)
-    # print "bigcount:",bigcount
 
     cct.set_console(width, height,
                     title=['B:%s-%s V:%s' % (bigcount[0], bigcount[2], bigcount[1]), 'ZL: %s' % (zlr if len(ff) > 0 else 0),
                            'To:%s' % len(topTen), 'D:%s' % len(
-                        crash), 'Sh: %s ' % ff['scent'] if len(ff) > 0 else '?', 'Vr:%s%% ' % ff['svol'] if len(ff) > 0 else '?',
+                        crash), 'Sh: %s ' % ff.get('scent', '?') if len(ff) > 0 else '?', 'Vr:%s%% ' % ff.get('svol', '?') if len(ff) > 0 else '?',
                         'MR: %s' % zzb, 'ZL: %s' % (zlr if len(ff) > 0 else '?')], closeTerminal=True)
 
     log.debug("set_console:bigcount[0]%s  bigcount[2]:%s" % (
         bigcount[0], bigcount[2]))
+
+    # 每 10 轮主动触发一次物理工作集收缩，保持常驻物理内存超低
+    _LOOP_TRIM_COUNTER += 1
+    if _LOOP_TRIM_COUNTER % 10 == 0:
+        trim_memory()
 
     return allTop
 
@@ -712,6 +752,9 @@ if __name__ == '__main__':
     # 首次启动必须完整走完并显示一次市场资金强弱流程
     first_run = True
 
+    # 启动初次内存整理
+    trim_memory()
+
     while 1:
         try:
             current_today = cct.get_today()
@@ -725,14 +768,19 @@ if __name__ == '__main__':
                 fibcount = 0
                 fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
                 cct.GlobalValues().setkey('top_max', None)
+                cct.GlobalValues().setkey('top_min', None)
                 cct.GlobalValues().setkey('dfcfw_Except', False)
                 dfcfw_Except_time = 0
+                _GLOBAL_LASTP_CACHE = None
+                _GLOBAL_LASTP_DATE = None
+                get_sina_instance(force_new=True)
                 status = False
                 num_input = ''
                 ave = None
                 code = ''
                 except_count = 0
                 first_run = True  # 次日跨天后也允许首次运行完整显示一次
+                trim_memory()
             elif today_str != rzrq_date and (time.time() - last_rzrq_fetch_time > 180):
                 log.info("rzrq_date changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
@@ -790,6 +838,7 @@ if __name__ == '__main__':
                 # 首次运行走完后打印状态并切换标记
                 if first_run:
                     first_run = False
+                    trim_memory()
                     if not is_work_time and not is_work_duration:
                         if write_all_day_date == today_str:
                             print("\n[INIT] 检测到今日 (%s) 盘后收盘数据已处理完毕并持久化记忆 (write_all_day_date=%s)。" % (today_str, write_all_day_date))
@@ -818,6 +867,7 @@ if __name__ == '__main__':
             # 2. 盘前准备或午间休市 (7:00-9:15, 11:30-13:00)
             elif is_work_duration:
                 log.debug('into work_duration:%s' % (int_time))
+                trim_memory()
                 # 盘前准备阶段 (8:40 ~ 9:15)：若为交易日且深市未全或距上次抓取超 10 分钟，尝试刷新一次
                 if 840 <= int_time < 915 and (time.time() - last_rzrq_fetch_time > 180):
                     if rzrq.get('is_partial', False) or (time.time() - last_rzrq_fetch_time > 600):
@@ -857,6 +907,7 @@ if __name__ == '__main__':
                         print("\nwrite dm to file")
                         tdd.Write_market_all_day_mp('all')
                         top_temp = cct.GlobalValues().getkey('top_max')
+                        from JSONData import stockFilter as stf
                         codew = stf.WriteCountFilter(top_temp, writecount='all')
                         
                         # 执行 RamDisk 备份
@@ -885,9 +936,11 @@ if __name__ == '__main__':
                         except Exception as e_cfg:
                             log.error("Save write_all_day_date error: %s" % (e_cfg))
                         print("All is ok. EOD task finished for %s. Entering auto-waiting state..." % today_str)
+                        trim_memory()
                 else:
                     # 当天收盘已做完或处于非交易等待状态：5分钟输出一次呼吸打点，绝不频繁刷屏
                     print(".", end='', flush=True)
+                    trim_memory()
                     # 休眠 300 秒 (5分钟)，每 15 秒检查一次是否跨天或到达开盘/盘前时段
                     for _ in range(20):
                         time.sleep(15)
@@ -910,10 +963,14 @@ if __name__ == '__main__':
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 last_rzrq_fetch_time = time.time()
                 rzrq_date = cct.get_today()
+                get_sina_instance(force_new=True)
+                _GLOBAL_LASTP_CACHE = None
+                trim_memory()
             elif st.startswith('w') or st.lower() == 'w':
                 print("Manual trigger write dm to file...")
                 tdd.Write_market_all_day_mp('all')
                 top_temp = cct.GlobalValues().getkey('top_max')
+                from JSONData import stockFilter as stf
                 codew = stf.WriteCountFilter(top_temp, writecount='all')
                 if cct.isMac():
                     ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
@@ -937,6 +994,7 @@ if __name__ == '__main__':
                         CFG.set_and_save("general", "write_all_day_date", today_str)
                 except Exception as e_cfg:
                     log.error("Save write_all_day_date error: %s" % (e_cfg))
+                trim_memory()
             elif len(st) == 6 and st.isdigit():
                 status = True
                 num_input = st
