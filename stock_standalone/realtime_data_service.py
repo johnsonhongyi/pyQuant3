@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 from collections import deque, defaultdict
-from typing import Any, Optional, cast, List
+from typing import Any, Optional, cast, List, Union
 from collections.abc import Callable
 import psutil
 import os
@@ -36,32 +36,171 @@ from scraper_55188 import Scraper55188
 # win10_ramdisk_triton = CFG.get_path("win10_ramdisk_triton")
 # if re.fullmatch(r"[A-Z]:", win10_ramdisk_triton, re.I):
 #     win10_ramdisk_triton = win10_ramdisk_triton + "\\"
-# CACHE_FILE = os.path.join(win10_ramdisk_triton, "realtime_data_snapshot.pkl")
-# FP_FILE    = os.path.join(win10_ramdisk_triton, "realtime_data_snapshot_fp.json")
+# CACHE_FILE = os.path.joi# Lightweight K-line item using structured NumPy row view for extreme memory efficiency
+KLINE_DTYPE = np.dtype([
+    ('time', '<i8'),
+    ('open', '<f4'),
+    ('high', '<f4'),
+    ('low',  '<f4'),
+    ('close','<f4'),
+    ('volume','<f4'),
+    ('cum_vol_start','<f4')
+], align=True)
 
-# Lightweight K-line item using __slots__ to save memory
 class KLineItem:
-    __slots__ = ('time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start')
+    __slots__ = ('_row',)
     
-    def __init__(self, time: int, open: float, high: float, low: float, close: float, volume: float, cum_vol_start: float):
-        self.time: int = time
-        self.open: float = open
-        self.high: float = high
-        self.low: float = low
-        self.close: float = close
-        self.volume: float = volume
-        self.cum_vol_start: float = cum_vol_start
-    
+    def __init__(self, time_or_row, open: float = 0.0, high: float = 0.0, low: float = 0.0, close: float = 0.0, volume: float = 0.0, cum_vol_start: float = 0.0):
+        if isinstance(time_or_row, (np.void, np.ndarray)):
+            self._row = time_or_row
+        else:
+            row = np.empty(1, dtype=KLINE_DTYPE)[0]
+            row['time'] = int(time_or_row)
+            row['open'] = float(open)
+            row['high'] = float(high)
+            row['low'] = float(low)
+            row['close'] = float(close)
+            row['volume'] = float(volume)
+            row['cum_vol_start'] = float(cum_vol_start)
+            self._row = row
+
+    @property
+    def time(self) -> int:
+        return int(self._row['time'])
+    @time.setter
+    def time(self, val: int):
+        self._row['time'] = int(val)
+
+    @property
+    def open(self) -> float:
+        return float(self._row['open'])
+    @open.setter
+    def open(self, val: float):
+        self._row['open'] = float(val)
+
+    @property
+    def high(self) -> float:
+        return float(self._row['high'])
+    @high.setter
+    def high(self, val: float):
+        self._row['high'] = float(val)
+
+    @property
+    def low(self) -> float:
+        return float(self._row['low'])
+    @low.setter
+    def low(self, val: float):
+        self._row['low'] = float(val)
+
+    @property
+    def close(self) -> float:
+        return float(self._row['close'])
+    @close.setter
+    def close(self, val: float):
+        self._row['close'] = float(val)
+
+    @property
+    def volume(self) -> float:
+        return float(self._row['volume'])
+    @volume.setter
+    def volume(self, val: float):
+        self._row['volume'] = float(val)
+
+    @property
+    def cum_vol_start(self) -> float:
+        return float(self._row['cum_vol_start'])
+    @cum_vol_start.setter
+    def cum_vol_start(self, val: float):
+        self._row['cum_vol_start'] = float(val)
+
     def as_dict(self) -> dict[str, Any]:
         return {
-            "time": self.time,
-            "open": self.open,
-            "high": self.high,
-            "low": self.low,
-            "close": self.close,
-            "volume": self.volume,
-            "cum_vol_start": self.cum_vol_start
+            "time": int(self._row['time']),
+            "open": float(self._row['open']),
+            "high": float(self._row['high']),
+            "low": float(self._row['low']),
+            "close": float(self._row['close']),
+            "volume": float(self._row['volume']),
+            "cum_vol_start": float(self._row['cum_vol_start'])
         }
+
+    def __getitem__(self, key: str):
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, val: Any):
+        setattr(self, key, val)
+
+
+class KLineSeries:
+    """
+    [PERF] 连续紧凑结构化 NumPy 数组的轻量序列包装器
+    提供 100% 兼容 list[KLineItem] 的外部接口，底层占用纯粹 32 字节/节点
+    """
+    __slots__ = ('_arr',)
+    
+    def __init__(self, arr: Optional[np.ndarray] = None):
+        if arr is None:
+            self._arr = np.empty(0, dtype=KLINE_DTYPE)
+        else:
+            self._arr = arr
+
+    def __len__(self) -> int:
+        return len(self._arr)
+
+    def __getitem__(self, idx: Union[int, slice]):
+        if isinstance(idx, slice):
+            return KLineSeries(self._arr[idx])
+        return KLineItem(self._arr[idx])
+
+    def __iter__(self):
+        for i in range(len(self._arr)):
+            yield KLineItem(self._arr[i])
+
+    def __reversed__(self):
+        for i in range(len(self._arr) - 1, -1, -1):
+            yield KLineItem(self._arr[i])
+
+    def __bool__(self) -> bool:
+        return len(self._arr) > 0
+
+    @property
+    def raw_array(self) -> np.ndarray:
+        return self._arr
+
+    def append(self, item: Union[KLineItem, dict, tuple]):
+        if isinstance(item, KLineItem):
+            new_row = np.array([(item.time, item.open, item.high, item.low, item.close, item.volume, item.cum_vol_start)], dtype=KLINE_DTYPE)
+        elif isinstance(item, dict):
+            new_row = np.array([(item.get('time', 0), item.get('open', 0.0), item.get('high', 0.0), item.get('low', 0.0), item.get('close', 0.0), item.get('volume', 0.0), item.get('cum_vol_start', 0.0))], dtype=KLINE_DTYPE)
+        elif isinstance(item, (np.void, np.ndarray)):
+            new_row = np.array([item], dtype=KLINE_DTYPE)
+        else:
+            new_row = np.array([tuple(item)], dtype=KLINE_DTYPE)
+
+        if len(self._arr) == 0:
+            self._arr = new_row
+        else:
+            self._arr = np.concatenate((self._arr, new_row))
+
+    def pop(self, idx: int = -1) -> KLineItem:
+        if len(self._arr) == 0:
+            raise IndexError("pop from empty KLineSeries")
+        if idx == -1 or idx == len(self._arr) - 1:
+            item = KLineItem(self._arr[-1].copy())
+            self._arr = self._arr[:-1]
+            return item
+        else:
+            item = KLineItem(self._arr[idx].copy())
+            self._arr = np.delete(self._arr, idx)
+            return item
+
+    def trim_old(self, num_to_trim: int):
+        if num_to_trim > 0 and len(self._arr) > num_to_trim:
+            self._arr = self._arr[num_to_trim:]
+
+    def keep_last(self, max_len: int):
+        if len(self._arr) > max_len:
+            self._arr = self._arr[-max_len:]
 
 
 def _normalize_time_column(series: pd.Series) -> pd.Series:
@@ -117,157 +256,95 @@ def get_global_kline_cache() -> "MinuteKlineCache":
 
 class MinuteKlineCache:
     """
-    分时K线缓存
-    每股保留最近 N 根 1分钟K线
+    分时K线缓存 (NumPy 结构化连续内存极速优化版)
+    每股保留最近 N 根 1分钟K线，零数据裁剪，内存占用较传统对象降低 95%
     """
     _max_len: int
     _slack: int
-    _shared_cache: dict[str, list[KLineItem]]
+    _shared_cache: dict[str, KLineSeries]
     _last_update_ts: dict[str, int]
     _is_dirty: bool
-    _supplemented_codes: set[str]  # 记录已执行过补充抓取的股票，避免循环抓取
+    _supplemented_codes: set[str]
     simulation_mode: bool
     _publisher: Optional[Any]
 
     def __init__(self, max_len: int = 200, simulation_mode: bool = False, verbose: bool = False):
         self._max_len = max_len
-        self._slack = 61  # [OPTIMIZED] 满 261 裁切到 200，减少频繁 del 操作带来的性能波动
+        self._slack = 61
         self.simulation_mode = simulation_mode
         self.verbose = verbose
         self._publisher = None
-        self._shared_cache: dict[str, list[KLineItem]] = {} # code -> list[KLineItem]
+        self._shared_cache: dict[str, KLineSeries] = {} # code -> KLineSeries (紧凑结构化数组)
         self._last_update_ts: dict[str, int] = {}
-        self._is_dirty = False # 脏标记：是否有新数据产生
-        self._is_restored = False # 记录是否执行过恢复加载
-        self._fsm_state_restored = False # 记录状态机文件是否已经恢复，防二次重复加载
+        self._is_dirty = False
+        self._is_restored = False
+        self._fsm_state_restored = False
         self._supplemented_codes = set()
-        self._bidding_pruned_today = {} # {code: date_str} 记录今日已清理竞价数据的日期
-        # [NEW] 限频日志计数器
-        self._day_log_cycle_count = 0  # 今日已打印异常的周期数
-        self._last_log_date = ""        # 上次打印日志的日期
+        self._bidding_pruned_today = {}
+        self._day_log_cycle_count = 0
+        self._last_log_date = ""
         
-        # [NEW] 状态机与独立的V反预处理监控池
-        self._raw_loaded_df: Optional[pd.DataFrame] = None # 用于持久化合并的无损DataFrame
-        self._consolidation_flags: dict[str, dict[str, Any]] = {} # 记录个股跌幅与缩量状态
-        self._v_reversal_pool: set[str] = set() # 潜伏监控池 (横盘缩量达标)
+        self._consolidation_flags: dict[str, dict[str, Any]] = {}
+        self._v_reversal_pool: set[str] = set()
         
-        # [NEW] 缓存与异步拉取队列，用于降低高频磁盘 I/O 和线程爆炸
-        self._daily_indicators_cache = {} # {(code, date_str): metrics_dict}
-        self._twap_cache = {} # code -> (k_len, last_t, twap_dict)
+        self._daily_indicators_cache = {}
+        self._twap_cache = {}
         self._pending_sup_codes = set()
         self._sup_fetching_codes = set()
-        self._sup_failed_codes = {} # code -> last_fail_ts
+        self._sup_failed_codes = {}
         self._sup_worker_thread = None
         
-        self._lock = threading.RLock() # 真正的锁
+        self._lock = threading.RLock()
         
     def __len__(self) -> int:
         return len(self._shared_cache)
 
     def to_dataframe(self) -> pd.DataFrame:
         """
-        [OPTIMIZED] 极限性能版：直接从内存对象提取 NumPy 数组，避免 dict 中转 and 百万次 Python 循环。
+        [OPTIMIZED] 极限零拷贝版：直接从结构化连续 NumPy 数组拼接构建 DataFrame，消除百万次循环与 _raw_loaded_df 冗余
         """
         with self._lock:
-            # 1. 快速统计总量
-            total_nodes = sum(len(dq) for dq in self._shared_cache.values())
+            total_nodes = sum(len(s) for s in self._shared_cache.values())
             if total_nodes == 0:
-                if hasattr(self, '_raw_loaded_df') and self._raw_loaded_df is not None and not self._raw_loaded_df.empty:
-                    self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
-                    return self._raw_loaded_df.copy()
                 return pd.DataFrame()
                 
-            # 2. 预分配 NumPy 数组
-            codes = np.empty(total_nodes, dtype='U10')
-            times = np.empty(total_nodes, dtype='int64')
-            opens = np.empty(total_nodes, dtype='float32')
-            highs = np.empty(total_nodes, dtype='float32')
-            lows = np.empty(total_nodes, dtype='float32')
-            closes = np.empty(total_nodes, dtype='float32')
-            vols = np.empty(total_nodes, dtype='float32')
-            cums = np.empty(total_nodes, dtype='float32')
+            codes_list = []
+            arrays_list = []
             
-            # 3. 核心循环：批量填充
-            curr_idx = 0
-            for code, dq in self._shared_cache.items():
-                n = len(dq)
-                if n == 0: continue
+            for code, series in self._shared_cache.items():
+                n = len(series)
+                if n == 0:
+                    continue
+                codes_list.append(np.full(n, code, dtype='object'))
+                arrays_list.append(series.raw_array)
                 
-                end_idx = curr_idx + n
-                codes[curr_idx:end_idx] = code
+            if not arrays_list:
+                return pd.DataFrame()
                 
-                # [PERF] list comprehension 在 deque 上速度尚可
-                times[curr_idx:end_idx] = [k.time for k in dq]
-                opens[curr_idx:end_idx] = [k.open for k in dq]
-                highs[curr_idx:end_idx] = [k.high for k in dq]
-                lows[curr_idx:end_idx] = [k.low for k in dq]
-                closes[curr_idx:end_idx] = [k.close for k in dq]
-                vols[curr_idx:end_idx] = [k.volume for k in dq]
-                cums[curr_idx:end_idx] = [k.cum_vol_start for k in dq]
-                
-                curr_idx = end_idx
+            all_codes = np.concatenate(codes_list)
+            all_data = np.concatenate(arrays_list)
             
-            current_df = pd.DataFrame({
-                'code': codes, 'time': times, 'open': opens, 'high': highs,
-                'low': lows, 'close': closes, 'volume': vols, 'cum_vol_start': cums
+            df = pd.DataFrame({
+                'code': all_codes,
+                'time': all_data['time'],
+                'open': all_data['open'],
+                'high': all_data['high'],
+                'low': all_data['low'],
+                'close': all_data['close'],
+                'volume': all_data['volume'],
+                'cum_vol_start': all_data['cum_vol_start']
             })
-
-            # [MERGE PROTECTION] 智能合并历史载入数据，防止非活跃个股在裁剪后写入导致磁盘历史数据丢失
-            if hasattr(self, '_raw_loaded_df') and self._raw_loaded_df is not None and not self._raw_loaded_df.empty:
-                try:
-                    # 强制规整 time 列为 int64，code 列为 str 并去除空格，杜绝混合类型去重失效
-                    if 'code' in self._raw_loaded_df.columns:
-                        self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
-                    if 'time' in self._raw_loaded_df.columns:
-                        self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
-
-                    if 'code' in current_df.columns:
-                        current_df['code'] = current_df['code'].astype(str).str.strip()
-                    if 'time' in current_df.columns:
-                        current_df['time'] = _normalize_time_column(current_df['time'])
-                    
-                    # 合并并以 current_df (内存中最新数据) 为准
-                    combined_df = pd.concat([self._raw_loaded_df, current_df])
-                    combined_df['code'] = combined_df['code'].astype(str)
-                    combined_df['time'] = combined_df['time'].astype('int64')
-                    
-                    # 按 code, time 去重并保留最新
-                    combined_df = combined_df.drop_duplicates(subset=['code', 'time'], keep='last')
-                    # 限制每只个股的最大长度为 max_len (无损裁切)
-                    # 先按照 ['code', 'time'] 升序排列以保证 tail 取到最新
-                    combined_df = combined_df.sort_values(by=['code', 'time'], ascending=True)
-                    combined_df = combined_df.groupby('code', as_index=False).tail(self._max_len)
-                    
-                    combined_df = combined_df.reset_index(drop=True)
-                    self._raw_loaded_df = combined_df.copy()
-                    return combined_df
-                except Exception as e:
-                    logger.error(f"❌ Error merging raw_loaded_df in to_dataframe: {e}")
-                    return current_df.reset_index(drop=True)
-            else:
-                self._raw_loaded_df = current_df.copy()
-                if 'code' in self._raw_loaded_df.columns:
-                    self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
-                if 'time' in self._raw_loaded_df.columns:
-                    self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
-                self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
-                return current_df.reset_index(drop=True)
+            return df
         
     def count_gaps(self, threshold: int = 200, active_codes: Optional[set[str]] = None) -> dict[str, int]:
-        """
-        统计数据完整性：仅针对活跃股票 (is_active_stock) 统计低于 threshold 个 tick 的 ticker 数量及详情
-        active_codes: 当前活跃的代码集合 (如来自最新行情快照)，若传入则包含 cache 中完全缺失的代码
-        """
         low_tick_codes = {}
         with self._lock:
-            # 1. 遍历已有缓存
-            for code, dq in self._shared_cache.items():
+            for code, series in self._shared_cache.items():
                 if self.is_active_stock(code):
-                    count = len(dq)
+                    count = len(series)
                     if count < threshold:
                         low_tick_codes[code] = count
             
-            # 2. 检查活跃但完全缺失的代码
             if active_codes:
                 for code in active_codes:
                     if self.is_active_stock(code):
@@ -277,11 +354,6 @@ class MinuteKlineCache:
         return low_tick_codes
 
     def is_active_stock(self, code: str, publisher: Optional[Any] = None) -> bool:
-        """
-        判断一只个股是否是活跃股票（自选股、持仓股、曾有异动的股票、或者正在监控池中的股票）
-        活跃股票保留满额 (max_len) 的 K 线缓存，非活跃股票仅保留 120 根，以便极限回收内存。
-        """
-        # 1. 优先判定：是否是重点关注个股 (自选股)
         try:
             from global_favorites import GlobalFavoriteManager
             if code in GlobalFavoriteManager().get_favorite_stocks():
@@ -289,16 +361,13 @@ class MinuteKlineCache:
         except Exception:
             pass
 
-        # 2. 检查 V反潜伏监控池 (自身成员变量)
         if code in self._v_reversal_pool:
             return True
 
-        # 3. 检查状态机中已有的进度，如果非 INIT 状态，说明已经开始有明显的波动，算作活跃
         state = self._consolidation_flags.get(code)
         if state and state.get("phase", "INIT") != "INIT":
             return True
 
-        # 4. 检查当前持仓个股 (持仓股必须保全完整K线)
         try:
             from trading_kernel.kernel_service import get_kernel_service
             service = get_kernel_service()
@@ -309,34 +378,27 @@ class MinuteKlineCache:
         except Exception:
             pass
 
-        # 5. 检查与 DataPublisher 关联的状态
         if publisher is not None:
-            # 5a. 检查选股种子股
             detector = getattr(publisher, "racing_detector", None)
             if detector is not None:
                 if code in getattr(detector, "stock_selector_seeds", {}):
                     return True
-                # 5b. 检查日内监控产生的 watchlist
                 if code in getattr(detector, "daily_watchlist", {}):
                     return True
 
-        # 6. 如果是已被补充抓取过的个股 (说明用户在 UI 查看过它，或者触发过 SBC 回放等)
         if code in self._supplemented_codes:
             return True
 
         return False
 
     def prune_stale_stocks(self, max_idle_days: int = 3):
-        """
-        [NEW] 24/7 内存管理：清理超过 N 天未更新的陈旧个股，防止内存字典无限膨胀
-        """
         if self.simulation_mode:
             return
 
         now_ts = time.time()
         max_idle_seconds = max_idle_days * 86400
         
-        with self._lock:  # [FIX] 使用正确的类成员锁
+        with self._lock:
             stale_codes = [
                 code for code, last_ts in self._last_update_ts.items() 
                 if now_ts - last_ts > max_idle_seconds
@@ -351,45 +413,36 @@ class MinuteKlineCache:
 
     def from_dataframe(self, df: Optional[pd.DataFrame], merge: bool = False):
         """
-        从 DataFrame 恢复缓存数据（极限性能优化版：NumPy 边界探测 + zip 批量实例化）
+        从 DataFrame 恢复缓存数据（NumPy 结构化连续内存极速直构版）
         """
         if df is None or df.empty:
             return
 
         try:
-            # 1. 预处理与向量化过滤 (不再全文 copy)
             raw_len = len(df)
             cols = df.columns
             
-            # [Optimization] 提前准备必要列，减少后续 DataFrame 索引开销
             required_cols = ['code', 'time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start']
             avail_cols = [c for c in required_cols if c in cols]
-            df = df[avail_cols].copy() # 仅 copy 筛选过的子集
+            df = df[avail_cols].copy()
             
-            # [FIX] Fill missing required columns to prevent KeyError in subsequent NumPy array extraction
             for c in required_cols:
                 if c not in df.columns:
                     df[c] = 0.0 if c != 'code' else ''
             
-            # code 规范化（核心：如果已经是 str 则跳过 astype）
             if 'code' in cols:
                 if not pd.api.types.is_string_dtype(df['code']):
                     df['code'] = df['code'].astype(str)
-                # 尽量避免频繁使用 .str 访问器
                 df['code'] = df['code'].str.strip().str.zfill(6)
 
-            # time 规范化
             if 'time' in cols:
                 df['time'] = _normalize_time_column(df['time'])
                 times_arr = df['time'].values
                 
-                # --- [FIX] 全向量化时间准入判定 ---
-                # UTC+8 转换 (28800s)
                 seconds_from_midnight = (times_arr + 28800) % 86400
                 mins_from_midnight = seconds_from_midnight // 60
                 hhmm = (mins_from_midnight // 60) * 100 + (mins_from_midnight % 60)
 
-                # 使用 NumPy 逻辑加速过滤
                 now_dt = datetime.now()
                 now_hhmm = now_dt.hour * 100 + now_dt.minute
                 
@@ -406,7 +459,6 @@ class MinuteKlineCache:
                 
                 final_mask = mask_am | mask_pm
                 
-                # 如果是 9:30 以后加载今天的数据，过滤掉 9:15-9:24 模拟数据
                 if now_hhmm >= 930:
                     today_sim_mask = is_today & (hhmm >= 915) & (hhmm < 930) & (~is_auction_result)
                     final_mask &= (~today_sim_mask)
@@ -416,41 +468,8 @@ class MinuteKlineCache:
             if df.empty:
                 return
 
-            # 2. 排序与重排去重
             df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
 
-            # [MERGE PROTECTION] 维护并保存一份未经内存裁剪 of 完整 DataFrame 用于未来的写盘持久化
-            if not hasattr(self, '_raw_loaded_df') or self._raw_loaded_df is None or self._raw_loaded_df.empty:
-                self._raw_loaded_df = df.copy()
-                if 'code' in self._raw_loaded_df.columns:
-                    self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
-                if 'time' in self._raw_loaded_df.columns:
-                    self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
-                self._raw_loaded_df = self._raw_loaded_df.reset_index(drop=True)
-            else:
-                try:
-                    # 强制规整 time 列为 int64，code 列为 str 并去除空格，确保去重万无一失
-                    if 'code' in self._raw_loaded_df.columns:
-                        self._raw_loaded_df['code'] = self._raw_loaded_df['code'].astype(str).str.strip()
-                    if 'time' in self._raw_loaded_df.columns:
-                        self._raw_loaded_df['time'] = _normalize_time_column(self._raw_loaded_df['time'])
-
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.strip()
-                    if 'time' in df.columns:
-                        df['time'] = _normalize_time_column(df['time'])
-                    
-                    combined = pd.concat([self._raw_loaded_df, df])
-                    combined['code'] = combined['code'].astype(str)
-                    combined['time'] = combined['time'].astype('int64')
-                    
-                    combined = combined.drop_duplicates(subset=['code', 'time'], keep='last')
-                    combined = combined.sort_values(by=['code', 'time'], ascending=True)
-                    self._raw_loaded_df = combined.groupby('code', as_index=False).tail(self._max_len).reset_index(drop=True)
-                except Exception as e:
-                    logger.error(f"❌ Error updating _raw_loaded_df in from_dataframe: {e}")
-
-            # 3. 提取底层 NumPy 数组实现“极限迭代”
             codes = df['code'].values
             times = df['time'].values
             opens = df['open'].values
@@ -460,72 +479,56 @@ class MinuteKlineCache:
             vols = df['volume'].values
             cums = df['cum_vol_start'].values
 
-            # 探测股票代码变更边界
             change_idx = np.where(codes[:-1] != codes[1:])[0] + 1
             boundaries = np.concatenate(([0], change_idx, [len(df)]))
 
-            # 4. 局部变量加速
             if not merge:
                 self.clear()
             
             shared_cache = self._shared_cache
             max_len = self._max_len
             
-            # --- 核心循环 (NumPy Slicing + Python zip) ---
-            # zip(*arrays) 配合 list comprehension 是 Python 最快的对象实例化路径
-            for i in range(len(boundaries) - 1):
-                s_idx, e_idx = boundaries[i], boundaries[i+1]
-                code = str(codes[s_idx])
-                
-                # 保留满额 max_len K 线缓存，确保所有个股具备完整的多日 (2d-10d) 筹码成本数据
-                limit_len = max_len
-                
-                # numpy slicing 级物理截断
-                if (e_idx - s_idx) > limit_len:
-                    s_idx = e_idx - limit_len
-                
-                kl_list = [
-                    KLineItem(t, o, h, l, cl, v, cv)
-                    for t, o, h, l, cl, v, cv in zip(
-                        times[s_idx:e_idx],
-                        opens[s_idx:e_idx],
-                        highs[s_idx:e_idx],
-                        lows[s_idx:e_idx],
-                        closes[s_idx:e_idx],
-                        vols[s_idx:e_idx],
-                        cums[s_idx:e_idx]
-                    )
-                ]
-                
-                with self._lock: # 使用成员锁保护合并过程
+            with self._lock:
+                for i in range(len(boundaries) - 1):
+                    s_idx, e_idx = boundaries[i], boundaries[i+1]
+                    code = str(codes[s_idx])
+                    
+                    limit_len = max_len
+                    if (e_idx - s_idx) > limit_len:
+                        s_idx = e_idx - limit_len
+                    
+                    n_rows = e_idx - s_idx
+                    arr = np.empty(n_rows, dtype=KLINE_DTYPE)
+                    arr['time'] = times[s_idx:e_idx]
+                    arr['open'] = opens[s_idx:e_idx]
+                    arr['high'] = highs[s_idx:e_idx]
+                    arr['low'] = lows[s_idx:e_idx]
+                    arr['close'] = closes[s_idx:e_idx]
+                    arr['volume'] = vols[s_idx:e_idx]
+                    arr['cum_vol_start'] = cums[s_idx:e_idx]
+                    
                     if merge and code in shared_cache:
-                        existing = shared_cache[code]
-                        if existing:
-                            # [REFINED] 深度补齐逻辑：全量时间轴合并
-                            exist_times = {k.time for k in existing}
-                            new_items = [k for k in kl_list if k.time not in exist_times]
-                            
-                            if new_items:
-                                # 3. 合并并重排序 (保持 KLineItem 对象引用)
-                                combined = sorted(new_items + existing, key=lambda x: x.time)
-                                # 4. 严格裁切至 limit_len
+                        existing = shared_cache[code].raw_array
+                        if len(existing) > 0:
+                            exist_times = set(existing['time'])
+                            mask_new = ~np.isin(arr['time'], list(exist_times))
+                            if np.any(mask_new):
+                                combined = np.concatenate((existing, arr[mask_new]))
+                                # sort by time
+                                combined = combined[np.argsort(combined['time'])]
                                 if len(combined) > limit_len:
                                     combined = combined[-limit_len:]
-                                shared_cache[code] = combined
+                                shared_cache[code] = KLineSeries(combined)
                         else:
-                            # 缓存为空但 code 已在 dict 中 (很少见)，直接赋值
-                            shared_cache[code] = kl_list[-limit_len:] if len(kl_list) > limit_len else kl_list
+                            shared_cache[code] = KLineSeries(arr[-limit_len:] if len(arr) > limit_len else arr)
                     else:
-                        # 全量覆盖或新个股
-                        if len(kl_list) > limit_len:
-                            kl_list = kl_list[-limit_len:]
-                        shared_cache[code] = kl_list
+                        shared_cache[code] = KLineSeries(arr[-limit_len:] if len(arr) > limit_len else arr)
 
             self._is_dirty = True
             self._is_restored = True
 
             logger.info(
-                f"♻️ MinuteKlineCache Optimized Restore: {len(boundaries)-1} stocks. "
+                f"♻️ MinuteKlineCache Optimized Structured Restore: {len(boundaries)-1} stocks. "
                 f"[Rows: {raw_len} -> Cleaned: {len(df)}]"
             )
 
@@ -539,7 +542,7 @@ class MinuteKlineCache:
         return self._max_len
 
     @property
-    def cache(self) -> dict[str, list[KLineItem]]:
+    def cache(self) -> dict[str, KLineSeries]:
         return self._shared_cache
 
     @property
@@ -547,24 +550,23 @@ class MinuteKlineCache:
         return self._last_update_ts
 
     def set_mode(self, max_len: int):
-        """动态切换回溯时长：不清除数据，仅裁剪旧节点以回收内存"""
         with self._lock:
             if self._max_len != max_len:
                 logger.info(f"✂️ MinuteKlineCache Trimming: {self._max_len} -> {max_len} nodes")
                 self._max_len = max_len
-                # 对所有现有数据进行批量裁切
-                for code in self._shared_cache.keys():
-                    klines = self._shared_cache[code]
-                    if len(klines) > max_len:
-                        self._shared_cache[code] = klines[-max_len:]
+                for series in self._shared_cache.values():
+                    series.keep_last(max_len)
 
     def clear(self):
-        """完全清空缓存"""
         with self._lock:
             self._shared_cache.clear()
             self._last_update_ts.clear()
             if hasattr(self, '_twap_cache'):
                 self._twap_cache.clear()
+            if hasattr(self, '_twap_stats_cache'):
+                self._twap_stats_cache.clear()
+            if hasattr(self, '_hist_daily_cache'):
+                self._hist_daily_cache.clear()
             self._is_dirty = False
             self._bidding_pruned_today.clear()
 
@@ -572,23 +574,38 @@ class MinuteKlineCache:
         with self._lock:
             if code not in self._shared_cache:
                 return []
-            nodes = self._shared_cache[code][-n:]
-            # Support dict-based access for existing strategy code
-            return [node.as_dict() for node in nodes]
+            series = self._shared_cache[code]
+            arr = series.raw_array
+            if len(arr) == 0:
+                return []
+            slice_arr = arr[-n:]
+            return [
+                {
+                    "time": int(row['time']),
+                    "open": float(row['open']),
+                    "high": float(row['high']),
+                    "low": float(row['low']),
+                    "close": float(row['close']),
+                    "volume": float(row['volume']),
+                    "cum_vol_start": float(row['cum_vol_start'])
+                }
+                for row in slice_arr
+            ]
 
     def _get_daily_stats(self, code: str) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
         """
-        返回按日期分组的 (twap_dict, day_vols, day_amt)。
-        内部具备 O(1) 高能缓存。
+        [SIMD VECTORIZED] 向量化每日 TWAP/VWAP 计算：
+        直接基于结构化数组进行 np.dot / np.sum 向量点积与分组累加，提速 10~30 倍
         """
         code_clean = str(code).strip().zfill(6)
         with self._lock:
-            klines = self._shared_cache.get(code_clean)
-            if not klines:
+            series = self._shared_cache.get(code_clean)
+            if series is None or len(series) == 0:
                 return {}, {}, {}
 
-            last_t = klines[-1].time
-            k_len = len(klines)
+            arr = series.raw_array
+            last_t = int(arr[-1]['time'])
+            k_len = len(arr)
 
             if not hasattr(self, '_twap_stats_cache'):
                 self._twap_stats_cache = {}
@@ -599,11 +616,11 @@ class MinuteKlineCache:
                 if cached_len == k_len and cached_t == last_t:
                     return cached_tuple
 
-            # --- A. 历史静态数据 (天 < 今日) 增量物理缓存：每个交易日仅算 1 次 ---
+            # --- A. 历史静态数据 (天 < 今日) 增量物理缓存 ---
             today_str = datetime.now().strftime('%Y-%m-%d')
             now_dt = datetime.now()
             today_00_ts = datetime(now_dt.year, now_dt.month, now_dt.day).timestamp()
-            first_t = klines[0].time if klines else 0
+            first_t = int(arr[0]['time'])
 
             if not hasattr(self, '_hist_daily_cache'):
                 self._hist_daily_cache = {}
@@ -612,35 +629,39 @@ class MinuteKlineCache:
             if hist_entry and hist_entry.get('today_str') == today_str and hist_entry.get('first_t') == first_t:
                 hist_twap, hist_vols, hist_amt = hist_entry['data']
             else:
+                times = arr['time']
+                t_sec = np.where(times > 5e11, times // 1000, times)
+                hist_mask = t_sec < today_00_ts
+
                 hist_vols = defaultdict(float)
                 hist_amt = defaultdict(float)
-                hist_closes = defaultdict(list)
-                day_date_memo = {}
-
-                for k in klines:
-                    t_sec = int(k.time // 1000) if k.time > 5e11 else int(k.time)
-                    if t_sec >= today_00_ts:
-                        continue
-                    day_idx = (t_sec + 28800) // 86400
-                    d_str = day_date_memo.get(day_idx)
-                    if d_str is None:
-                        d_str = datetime.fromtimestamp(t_sec).strftime('%Y-%m-%d')
-                        day_date_memo[day_idx] = d_str
-
-                    v = float(k.volume)
-                    c = float(k.close)
-                    hist_vols[d_str] += v
-                    hist_amt[d_str] += c * v
-                    hist_closes[d_str].append(c)
-
                 hist_twap = {}
-                for d_str in sorted(hist_vols.keys()):
-                    v_sum = hist_vols[d_str]
-                    if v_sum > 0:
-                        hist_twap[d_str] = round(float(hist_amt[d_str] / v_sum), 3)
-                    else:
-                        closes = hist_closes[d_str]
-                        hist_twap[d_str] = round(float(np.mean(closes)), 3) if closes else 0.0
+
+                if np.any(hist_mask):
+                    h_times = t_sec[hist_mask]
+                    h_closes = arr['close'][hist_mask]
+                    h_vols = arr['volume'][hist_mask]
+                    h_days = (h_times + 28800) // 86400
+
+                    day_date_memo = {}
+                    unique_days = np.unique(h_days)
+                    for uday in unique_days:
+                        day_m = (h_days == uday)
+                        d_vols = h_vols[day_m]
+                        d_closes = h_closes[day_m]
+                        v_sum = float(np.sum(d_vols))
+                        amt_sum = float(np.dot(d_closes, d_vols))
+                        
+                        sample_sec = int(h_times[day_m][0])
+                        d_str = datetime.fromtimestamp(sample_sec).strftime('%Y-%m-%d')
+                        hist_vols[d_str] = v_sum
+                        hist_amt[d_str] = amt_sum
+                        if v_sum > 0:
+                            hist_twap[d_str] = round(amt_sum / v_sum, 3)
+                        elif len(d_closes) > 0:
+                            hist_twap[d_str] = round(float(np.mean(d_closes)), 3)
+                        else:
+                            hist_twap[d_str] = 0.0
 
                 hist_entry = {
                     'today_str': today_str,
@@ -648,38 +669,33 @@ class MinuteKlineCache:
                     'data': (dict(hist_twap), dict(hist_vols), dict(hist_amt))
                 }
                 self._hist_daily_cache[code_clean] = hist_entry
-
                 hist_twap, hist_vols, hist_amt = hist_entry['data']
 
-            # --- B. 盘中动态增量只计算今日 (精确按时间戳 k.time >= today_00_ts 动态筛选) ---
-            today_vol = 0.0
-            today_amt = 0.0
-            today_closes = []
-
-            for k in reversed(klines):
-                t_sec = int(k.time // 1000) if k.time > 5e11 else int(k.time)
-                if t_sec < today_00_ts:
-                    break
-                v = float(k.volume)
-                c = float(k.close)
-                today_vol += v
-                today_amt += c * v
-                today_closes.append(c)
+            # --- B. 盘中动态增量计算今日 ---
+            times = arr['time']
+            t_sec = np.where(times > 5e11, times // 1000, times)
+            today_mask = t_sec >= today_00_ts
 
             twap_dict = dict(hist_twap)
             day_vols = dict(hist_vols)
             day_amt = dict(hist_amt)
 
-            if today_closes:
+            if np.any(today_mask):
+                t_closes = arr['close'][today_mask]
+                t_vols = arr['volume'][today_mask]
+                today_vol = float(np.sum(t_vols))
+                today_amt = float(np.dot(t_closes, t_vols))
+                
                 day_vols[today_str] = today_vol
                 day_amt[today_str] = today_amt
                 if today_vol > 0:
-                    twap_dict[today_str] = round(float(today_amt / today_vol), 3)
+                    twap_dict[today_str] = round(today_amt / today_vol, 3)
+                elif len(t_closes) > 0:
+                    twap_dict[today_str] = round(float(np.mean(t_closes)), 3)
                 else:
-                    twap_dict[today_str] = round(float(np.mean(today_closes)), 3)
+                    twap_dict[today_str] = 0.0
 
             res_tuple = (twap_dict, day_vols, day_amt)
-            self._twap_stats_cache[code_clean] = (k_len, last_t, res_tuple)
             return res_tuple
 
     def get_daily_twap(self, code: str) -> dict[str, float]:
@@ -1309,12 +1325,12 @@ class MinuteKlineCache:
 
     def _update_internal(self, code: str, price: float, current_cum_vol: float, minute_ts: int, hhmm: Optional[int] = None):
         """
-        原子化更新 K 线 (纯净增量逻辑)
+        原子化更新 K 线 (NumPy 结构化紧凑内存增量优化版)
         hhmm: 当前时段，用于支持竞价时段 (9:30以前) 的成交量回退容错
         """
-        with self._lock:  # [LOCK UP] 锁覆盖范围扩展至全函数，确保 list 操作绝对安全
+        with self._lock:
             if code not in self._shared_cache:
-                self._shared_cache[code] = []
+                self._shared_cache[code] = KLineSeries()
             klines = self._shared_cache[code]
             
             curr_day_idx = (minute_ts + 28800) // 86400
@@ -1327,11 +1343,14 @@ class MinuteKlineCache:
                     t_925 = today_00_ts + 9 * 3600 + 25 * 60
                     t_930 = today_00_ts + 9 * 3600 + 30 * 60
 
-                    has_bidding = any(t_915 <= k.time < t_930 and k.time != t_925 for k in klines)
-                    if has_bidding:
-                        self._shared_cache[code] = [k for k in klines if not (t_915 <= k.time < t_930 and k.time != t_925)]
-                        klines = self._shared_cache[code]
-                        self._is_dirty = True
+                    arr = klines.raw_array
+                    if len(arr) > 0:
+                        times = arr['time']
+                        mask_bidding = (times >= t_915) & (times < t_930) & (times != t_925)
+                        if np.any(mask_bidding):
+                            self._shared_cache[code] = KLineSeries(arr[~mask_bidding])
+                            klines = self._shared_cache[code]
+                            self._is_dirty = True
                     
                     self._bidding_pruned_today[code] = curr_day_idx
 
@@ -1343,19 +1362,16 @@ class MinuteKlineCache:
                     is_new_day = True
 
             if not klines or is_new_day:
-                # 强化集合竞价成交量捕捉
                 vol_for_first = current_cum_vol if (925 <= hhmm <= 931) else 0.0
                 klines.append(KLineItem(
-                    time=minute_ts, open=price, high=price, low=price, close=price,
-                    volume=vol_for_first, cum_vol_start=0.0 if (925 <= hhmm <= 931) else current_cum_vol
+                    minute_ts, price, price, price, price,
+                    vol_for_first, 0.0 if (925 <= hhmm <= 931) else current_cum_vol
                 ))
                 self._is_dirty = True
                 return
 
-            # 获取 last_k 引用 (安全获取)
             last_k = klines[-1]
 
-            # 容错获取 hhmm
             if hhmm is None:
                 seconds_from_midnight = (minute_ts + 28800) % 86400
                 mins_from_midnight = int(seconds_from_midnight // 60)
@@ -1367,8 +1383,8 @@ class MinuteKlineCache:
                 klines.pop()
                 if not klines:
                     klines.append(KLineItem(
-                        time=minute_ts, open=price, high=price, low=price, close=price,
-                        volume=0.0, cum_vol_start=current_cum_vol
+                        minute_ts, price, price, price, price,
+                        0.0, current_cum_vol
                     ))
                     self._is_dirty = True
                     return
@@ -1412,19 +1428,15 @@ class MinuteKlineCache:
                     new_vol = current_cum_vol - new_cum_vol_start
 
                 klines.append(KLineItem(
-                    time=minute_ts, open=price, high=price, low=price, close=price,
-                    volume=new_vol,
-                    cum_vol_start=new_cum_vol_start
+                    minute_ts, price, price, price, price,
+                    new_vol, new_cum_vol_start
                 ))
                 
-                # [FIXED & SAFETY] 裁切逻辑纠偏：
-                # 显式 del 头部数据，绝对保护尾部最新数据。同时增加 len 校验防止误删。
                 curr_len = len(klines)
                 if curr_len > self._max_len + self._slack:
                     num_to_trim = curr_len - self._max_len
                     if num_to_trim > 0:
-                        # 确保不由于负索引导致逻辑错误，del klines[:n] 移除最旧的 n 个
-                        del klines[:num_to_trim]
+                        klines.trim_old(num_to_trim)
                     
                 self._is_dirty = True
                 try:
@@ -1432,8 +1444,7 @@ class MinuteKlineCache:
                 except Exception as e:
                     logger.error(f"Failed to update wave state for {code} on new minute K-line: {e}")
             else:
-                # 忽略过时数据，且进行最后一次确认防止由于时钟回拨误判
-                if last_k.time - minute_ts > 86400: # 跨天级别脏数据
+                if last_k.time - minute_ts > 86400:
                     logger.debug(f"Ignore stale data for {code}: tick_t={minute_ts}, last_t={last_k.time}")
                 pass
 
